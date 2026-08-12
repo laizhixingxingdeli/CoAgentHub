@@ -67,7 +67,7 @@ export default function ExecutorsPage() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   const handleSubmit = async () => {
     setMessage(null);
