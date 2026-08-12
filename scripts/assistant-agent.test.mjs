@@ -9,7 +9,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 // 共享临时状态目录:必须在导入被测模块【之前】设置。assistant-agent.mjs 在
 // 模块顶层就调用 loadState(),且绑定命令成功时会 saveState();若不设 STATE_FILE,
@@ -367,9 +375,7 @@ describe("会话记忆:持久化", () => {
     ]);
     await agent.processGroup({ id: "gA" });
     agent.saveState();
-    const onDisk = JSON.parse(
-      readFileSync(process.env.STATE_FILE, "utf8"),
-    );
+    const onDisk = JSON.parse(readFileSync(process.env.STATE_FILE, "utf8"));
     expect(onDisk.sessions.gA.recent).toHaveLength(1);
 
     // 模拟重启:从磁盘重新加载
