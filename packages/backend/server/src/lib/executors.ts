@@ -260,8 +260,7 @@ export async function registerExecutorAgent(
   await db.insert(agentTable).values({
     name: ex.agentName,
     type: ex.type,
-    device:
-      device ?? (ex.kind === "a2a" ? "remote" : "mac"),
+    device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
     tokenHash: hashAgentToken(token),
     capabilities: [],
   });

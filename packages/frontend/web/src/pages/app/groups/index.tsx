@@ -921,9 +921,7 @@ export default function GroupsPage() {
                     size="sm"
                     variant="outline"
                     onClick={() =>
-                      document
-                        .getElementById("group-title-input")
-                        ?.focus()
+                      document.getElementById("group-title-input")?.focus()
                     }
                   >
                     <Plus />

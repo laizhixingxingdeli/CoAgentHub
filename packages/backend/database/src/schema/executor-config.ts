@@ -27,10 +27,7 @@ export const executorConfig = pgTable("executor_config", {
   kind: text("kind").notNull().default("cli"), // cli | a2a
   bin: text("bin").notNull(),
   url: text("url"),
-  args: jsonb("args")
-    .$type<string[]>()
-    .notNull()
-    .default(sql`'[]'::jsonb`),
+  args: jsonb("args").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   label: text("label").notNull(),
   ...timeColumns("both"),
 });

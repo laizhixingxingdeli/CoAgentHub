@@ -117,7 +117,9 @@ describe("接入 Agent 页", () => {
     await waitFor(() => {
       expect(screen.getByText("My Cli Agent")).toBeInTheDocument();
     });
-    expect(screen.getByText(/已接入 Agent「My Cli Agent」/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/已接入 Agent「My Cli Agent」/),
+    ).toBeInTheDocument();
 
     // POST 载荷:cli → bin + 参数模板分词,不含任何 token 字段
     const postCall = fetchMock.mock.calls.find(
@@ -177,7 +179,10 @@ describe("接入 Agent 页", () => {
 
   it("内置执行器不可删除,DB 配置可删除(DELETE /api/executors/:key)", async () => {
     // 弹窗确认 + 先塞一条非内置配置
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true),
+    );
     const list = [
       ...BUILTIN,
       {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { Bot, Loader2, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,7 +26,13 @@ type ExecutorItem = {
   builtin: boolean;
 };
 
-const AGENT_TYPES = ["hermes", "atomcode", "openclaw", "human", "custom"] as const;
+const AGENT_TYPES = [
+  "hermes",
+  "atomcode",
+  "openclaw",
+  "human",
+  "custom",
+] as const;
 
 export default function ExecutorsPage() {
   const [items, setItems] = useState<ExecutorItem[]>([]);
@@ -156,7 +162,8 @@ export default function ExecutorsPage() {
       <div className="mb-6">
         <h2 className="text-xl font-semibold">接入 Agent</h2>
         <p className="text-muted-foreground text-sm">
-          新增一个可被定向消息调度的执行器;提交后自动注册对应 agent,凭据由后端管理
+          新增一个可被定向消息调度的执行器;提交后自动注册对应
+          agent,凭据由后端管理
         </p>
       </div>
 
@@ -248,7 +255,7 @@ export default function ExecutorsPage() {
                 id="ex-args"
                 value={args}
                 onChange={(e) => setArgs(e.target.value)}
-                placeholder='如 -y -p {ticket}'
+                placeholder="如 -y -p {ticket}"
               />
             </div>
           )}
@@ -305,9 +312,7 @@ export default function ExecutorsPage() {
                     {item.label !== item.agentName ? ` · ${item.label}` : ""}
                     {item.kind === "a2a" && item.url ? ` · ${item.url}` : ""}
                     {!item.builtin && ` · ${item.bin}`}
-                    {item.args.length > 0
-                      ? ` · ${item.args.join(" ")}`
-                      : ""}
+                    {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
                   </div>
                 </div>
                 {!item.builtin && (

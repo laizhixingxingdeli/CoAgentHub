@@ -1,4 +1,10 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -177,7 +183,10 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
     };
 
     const agentsRes = await app.request("/api/agents");
-    const agents = (await agentsRes.json()) as Array<{ id: string; name: string }>;
+    const agents = (await agentsRes.json()) as Array<{
+      id: string;
+      name: string;
+    }>;
     const target = agents.find((a) => a.name === "clitest");
     expect(target).toBeTruthy();
 
@@ -218,18 +227,20 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
 
     // 轮询 task 直到终态(与 executor-trigger 同模式)。
     const deadline = Date.now() + 10_000;
-    let task: {
-      messageId: string;
-      status: string;
-      executorAgentId: string;
-      executorKey: string | null;
-      diffSummary: unknown;
-    } | undefined;
+    let task:
+      | {
+          messageId: string;
+          status: string;
+          executorAgentId: string;
+          executorKey: string | null;
+          diffSummary: unknown;
+        }
+      | undefined;
     for (;;) {
       const tasksRes = await app.request(`/api/groups/${group.id}/tasks`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const tasks = (await tasksRes.json()) as typeof task[];
+      const tasks = (await tasksRes.json()) as (typeof task)[];
       task = tasks.find((t) => t?.messageId === msg.id);
       if (task && ["done", "failed", "cancelled"].includes(task.status)) break;
       if (Date.now() > deadline) throw new Error("task 未在 10s 内达到终态");

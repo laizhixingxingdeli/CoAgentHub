@@ -49,10 +49,9 @@ const CreateExecutorSchema = z
     /** 设备(可选):注册 agent 时写入 agent.device。 */
     device: z.string().max(100).optional(),
   })
-  .refine(
-    (v) => (v.kind === "a2a" ? !!v.url : !!v.bin),
-    { message: "kind=a2a 需要 url,kind=cli 需要 bin" },
-  );
+  .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
+    message: "kind=a2a 需要 url,kind=cli 需要 bin",
+  });
 
 const app2 = app
   .post(

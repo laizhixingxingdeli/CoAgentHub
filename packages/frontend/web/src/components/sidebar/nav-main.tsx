@@ -37,11 +37,7 @@ export function NavMain({
           const active = itemIsActive(item.url, location);
           return (
             <SidebarMenuItem key={item.title}>
-              <SidebarMenuButton
-                asChild
-                tooltip={item.title}
-                isActive={active}
-              >
+              <SidebarMenuButton asChild tooltip={item.title} isActive={active}>
                 <a href={item.url}>
                   <item.icon />
                   <span>{item.title}</span>
