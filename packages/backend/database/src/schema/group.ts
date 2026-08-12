@@ -54,6 +54,8 @@ export const groupMember = pgTable(
       .notNull()
       .references(() => agent.id),
     roles: text("roles").array().notNull(),
+    // 群内分工说明(角色解绑):描述该 agent 在本群的分工,定向调度时拼进任务书。
+    prompt: text("prompt"),
     joinedAt: timestamp("joined_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

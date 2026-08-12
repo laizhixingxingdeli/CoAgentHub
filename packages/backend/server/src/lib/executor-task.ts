@@ -28,6 +28,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   agent as agentTable,
+  groupMember as groupMemberTable,
   TASK_STATUSES,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -67,6 +68,12 @@ export interface DispatchExecutorInput {
   body: string;
 }
 
+/** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */
+export interface GroupPromptInfo {
+  roles: string[];
+  prompt: string;
+}
+
 /** 队列条目:一次待执行/执行中的运行。 */
 interface QueuedRun {
   db: DataBase;
@@ -77,6 +84,8 @@ interface QueuedRun {
   ex: ExecutorConfig;
   body: string;
   summary: string;
+  /** 群内分工(角色解绑后);成员在本群无 prompt 时为 null,任务书不含该段。 */
+  groupPrompt: GroupPromptInfo | null;
   /** 运行中句柄的 kill(停止指令用);spawn 前为 null。 */
   kill: (() => void) | null;
   /** 停止指令已终止本任务(完成回调不再回传 ❌,改置 cancelled)。 */
@@ -247,7 +256,24 @@ export async function maybeDispatchExecutorTask(
     return;
   }
 
-  await dispatchTask(db, { groupId, messageId, agentId: agent.id, ex, body });
+  // 角色解绑后:查目标成员在本群的分工(roles + prompt);prompt 非空才拼进任务书。
+  const membership = await db.query.groupMember.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.groupId, groupId), eqFn(t.agentId, agent.id)),
+  });
+  const groupPrompt: GroupPromptInfo | null =
+    membership && membership.prompt
+      ? { roles: membership.roles, prompt: membership.prompt }
+      : null;
+
+  await dispatchTask(db, {
+    groupId,
+    messageId,
+    agentId: agent.id,
+    ex,
+    body,
+    groupPrompt,
+  });
 }
 
 /** 幂等建 task(复用 POST /tasks 的 message_id 唯一逻辑)后入队。 */
@@ -259,9 +285,10 @@ async function dispatchTask(
     agentId: string;
     ex: ExecutorConfig;
     body: string;
+    groupPrompt: GroupPromptInfo | null;
   },
 ): Promise<void> {
-  const { groupId, messageId, agentId, ex, body } = opts;
+  const { groupId, messageId, agentId, ex, body, groupPrompt } = opts;
 
   const [created] = await db
     .insert(taskTable)
@@ -319,6 +346,7 @@ async function dispatchTask(
     ex,
     body,
     summary,
+    groupPrompt,
     kill: null,
     stopped: false,
   });
@@ -331,7 +359,7 @@ async function pumpQueue(): Promise<void> {
   const run = runQueue.shift();
   if (!run) return;
   runningRun = run;
-  const { db, groupId, taskId, agentId, ex, body, summary } = run;
+  const { db, groupId, taskId, agentId, ex, body, summary, groupPrompt } = run;
 
   try {
     // 停止指令可能在 spawn 前到达(kill 句柄尚未就绪):标记 stopped 后
@@ -385,7 +413,10 @@ async function pumpQueue(): Promise<void> {
     } else {
       const ticketPath = `/tmp/coagenthub-ticket-${Date.now()}.md`;
       try {
-        writeFileSync(ticketPath, buildTicket(body, ex.label, repoRoot));
+        writeFileSync(
+          ticketPath,
+          buildTicket(body, ex.label, repoRoot, groupPrompt),
+        );
       } catch (e) {
         await failTask(db, taskId, `任务书写入失败: ${e}`);
         await postStatus(
@@ -562,15 +593,30 @@ export async function postStatus(
 }
 
 /** 与桥 buildTicket 一致的执行器任务书格式。 */
-function buildTicket(body: string, label: string, repoRoot: string): string {
-  return [
+function buildTicket(
+  body: string,
+  label: string,
+  repoRoot: string,
+  groupPrompt: GroupPromptInfo | null = null,
+): string {
+  const lines = [
     `# CoAgentHub 任务(网页 @executor 发布)`,
     ``,
     `你是 ${label}。任务:${body}`,
+  ];
+  // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
+  // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
+  if (groupPrompt && groupPrompt.prompt.trim().length > 0) {
+    lines.push(
+      `本群分工:角色=[${groupPrompt.roles.join(",")}];提示词=${groupPrompt.prompt}`,
+    );
+  }
+  lines.push(
     `仓库:${repoRoot}(分支 main)`,
     `默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。`,
     `汇报:中文,做了什么/测试结果/commit hash。`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function summaryOf(body: string): string {

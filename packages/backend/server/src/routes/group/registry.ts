@@ -172,12 +172,14 @@ app
         agentId: z.string().uuid(),
         // Roles must come from the preset catalog; empty defaults to observer.
         roles: z.array(z.enum(GROUP_ROLES)).default(["observer"]),
+        // 群内分工说明(角色解绑):描述该 agent 在本群的分工,可空。
+        prompt: z.string().max(1000).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const { id } = c.req.valid("param");
-      const { agentId, roles } = c.req.valid("json");
+      const { agentId, roles, prompt } = c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -196,10 +198,19 @@ app
         roles.length > 0 ? [...new Set(roles)] : ["observer"];
       const [member] = await db
         .insert(groupMemberTable)
-        .values({ groupId: id, agentId, roles: dedupedRoles })
+        .values({
+          groupId: id,
+          agentId,
+          roles: dedupedRoles,
+          ...(prompt !== undefined ? { prompt } : {}),
+        })
         .onConflictDoUpdate({
           target: [groupMemberTable.groupId, groupMemberTable.agentId],
-          set: { roles: dedupedRoles },
+          set: {
+            roles: dedupedRoles,
+            // prompt 未提供时保持既有值,避免幂等 upsert 清掉已有分工说明。
+            ...(prompt !== undefined ? { prompt } : {}),
+          },
         })
         .returning();
 
@@ -240,6 +251,7 @@ app
           type: agentTable.type,
           device: agentTable.device,
           roles: groupMemberTable.roles,
+          prompt: groupMemberTable.prompt,
           joinedAt: groupMemberTable.joinedAt,
         })
         .from(groupMemberTable)
@@ -317,14 +329,20 @@ app
     ),
     zValidator(
       "json",
-      z.object({
-        roles: z.array(z.enum(GROUP_ROLES)).min(1),
-      }),
+      z
+        .object({
+          roles: z.array(z.enum(GROUP_ROLES)).min(1).optional(),
+          // 群内分工说明(角色解绑):可单独更新 prompt,也可与 roles 一起。
+          prompt: z.string().max(1000).optional(),
+        })
+        .refine((v) => v.roles !== undefined || v.prompt !== undefined, {
+          message: "至少提供 roles 或 prompt 之一",
+        }),
     ),
     async (c) => {
       const db = c.get("db");
       const { id, agentId } = c.req.valid("param");
-      const { roles } = c.req.valid("json");
+      const { roles, prompt } = c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -341,10 +359,14 @@ app
       }
 
       // 与 POST /members 相同的去重规则:角色集去重后写入,min(1) 已保证非空。
-      const dedupedRoles = [...new Set(roles)];
+      const dedupedRoles =
+        roles !== undefined ? [...new Set(roles)] : undefined;
       const [updated] = await db
         .update(groupMemberTable)
-        .set({ roles: dedupedRoles })
+        .set({
+          ...(dedupedRoles !== undefined ? { roles: dedupedRoles } : {}),
+          ...(prompt !== undefined ? { prompt } : {}),
+        })
         .where(
           and(
             eq(groupMemberTable.groupId, id),

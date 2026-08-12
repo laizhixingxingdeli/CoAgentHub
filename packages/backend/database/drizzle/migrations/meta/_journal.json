@@ -15,6 +15,13 @@
       "when": 1786550927419,
       "tag": "0001_dizzy_jimmy_woo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786564170221,
+      "tag": "0002_great_thing",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "group_members" ADD COLUMN "prompt" text;

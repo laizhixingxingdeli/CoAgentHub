@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -29,6 +35,8 @@ writeFileSync(
   fakeBin,
   [
     "#!/bin/sh",
+    // 捕获任务书内容供断言($3 = {ticket} 路径);TICKET_CAPTURE 未设时不动作。
+    'if [ -n "$TICKET_CAPTURE" ]; then cp "$3" "$TICKET_CAPTURE"; fi',
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:建文件完成"',
     "exit 0",
@@ -278,6 +286,75 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       (m) => m.contentType === "task_status" && m.body.startsWith("✅"),
     ).length;
     expect(doneMsgsAfter).toBe(doneMsgsBefore); // 未重复执行
+  });
+
+  it("带 prompt 的成员定向调度 → 任务书含「本群分工」段", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    // 角色解绑后:给执行器成员配群内分工提示词(POST upsert 带上 prompt)。
+    const addRes = await app.request(`/api/groups/${group.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${coordinator.token}`,
+      },
+      body: JSON.stringify({
+        agentId: codebuddy.id,
+        roles: ["executor"],
+        prompt: "负责代码执行与测试跑通",
+      }),
+    });
+    expect(addRes.status).toBe(200);
+
+    const capture = path.join(fakeDir, "ticket-with-prompt.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "建一个文件 hello.txt",
+        audience: "agent",
+        audienceRef: codebuddy.id,
+      });
+      const task = await waitForTask(coordinator.token, group.id, msg.id);
+      expect(task.status).toBe("done");
+      // 任务书写入发生在 spawn 前,fake bin 已把全文拷到 capture。
+      const ticket = readFileSync(capture, "utf8");
+      expect(ticket).toContain(
+        "本群分工:角色=[executor];提示词=负责代码执行与测试跑通",
+      );
+      expect(ticket).toContain("你是 codebuddy。任务:建一个文件 hello.txt");
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  });
+
+  it("不带 prompt 的成员定向调度 → 任务书与解绑前完全一致(零回归)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+
+    const capture = path.join(fakeDir, "ticket-no-prompt.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "建一个文件 hello.txt",
+        audience: "agent",
+        audienceRef: codebuddy.id,
+      });
+      const task = await waitForTask(coordinator.token, group.id, msg.id);
+      expect(task.status).toBe("done");
+      const ticket = readFileSync(capture, "utf8");
+      // 无「本群分工」段,且整份任务书与既有格式逐字一致(仓库行用本测试的 repoDir)。
+      expect(ticket).not.toContain("本群分工");
+      expect(ticket).toBe(
+        [
+          "# CoAgentHub 任务(网页 @executor 发布)",
+          "",
+          "你是 codebuddy。任务:建一个文件 hello.txt",
+          `仓库:${repoDir}(分支 main)`,
+          "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
+          "汇报:中文,做了什么/测试结果/commit hash。",
+        ].join("\n"),
+      );
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
   });
 
   it("a2a 执行器(win-hermes):定向消息 → task → gateway 调用 → 完成回传", async () => {

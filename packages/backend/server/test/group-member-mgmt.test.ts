@@ -289,4 +289,227 @@ describe("群组成员管理 API (ticket 20)", () => {
       expect((await res.json()).code).toBe("MEMBER_NOT_FOUND");
     });
   });
+
+  describe("成员 prompt(角色解绑,群内分工说明)", () => {
+    it("POST 带 prompt 成功,GET members 返回 prompt", async () => {
+      const { token } = await registerAgent({
+        name: "coord-prompt",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "prompt-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "分工提示词");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          agentId: memberId,
+          roles: ["executor"],
+          prompt: "负责代码执行与测试跑通",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const created = (await res.json()) as {
+        agentId: string;
+        prompt: string | null;
+      };
+      expect(created.agentId).toBe(memberId);
+      expect(created.prompt).toBe("负责代码执行与测试跑通");
+
+      const members = (await (
+        await app.request(`/api/groups/${group.id}/members`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      ).json()) as Array<{ agentId: string; prompt: string | null }>;
+      const member = members.find((m) => m.agentId === memberId);
+      expect(member?.prompt).toBe("负责代码执行与测试跑通");
+    });
+
+    it("POST 不带 prompt 不破坏旧行为(prompt 为 null)", async () => {
+      const { token } = await registerAgent({
+        name: "coord-noprompt",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "plain-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "无提示词成员");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ agentId: memberId, roles: ["observer"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(
+        ((await res.json()) as { prompt: string | null }).prompt,
+      ).toBeNull();
+    });
+
+    it("幂等 upsert 不带 prompt 保持既有分工提示词", async () => {
+      const { token } = await registerAgent({
+        name: "coord-upsert",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "upsert-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "upsert 提示词");
+
+      const first = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          agentId: memberId,
+          roles: ["executor"],
+          prompt: "初始分工",
+        }),
+      });
+      expect(first.status).toBe(200);
+
+      // 再次 POST 不带 prompt:roles 照常 upsert,prompt 保留原值。
+      const second = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ agentId: memberId, roles: ["reviewer"] }),
+      });
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as { prompt: string | null }).prompt).toBe(
+        "初始分工",
+      );
+    });
+
+    it("PATCH 只改 prompt:roles 不变", async () => {
+      const { token } = await registerAgent({
+        name: "coord-patch-prompt",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "patch-prompt-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "只改提示词");
+      await addMember(token, group.id, memberId, ["reviewer"]);
+
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/members/${memberId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ prompt: "只负责 review" }),
+        },
+      );
+      expect(patchRes.status).toBe(200);
+      const updated = (await patchRes.json()) as {
+        roles: string[];
+        prompt: string | null;
+      };
+      expect(updated.roles).toEqual(["reviewer"]); // roles 未动
+      expect(updated.prompt).toBe("只负责 review");
+    });
+
+    it("PATCH roles + prompt 同时更新", async () => {
+      const { token } = await registerAgent({
+        name: "coord-both",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "both-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "同时更新");
+      await addMember(token, group.id, memberId, ["observer"]);
+
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/members/${memberId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ roles: ["executor"], prompt: "执行 + 汇报" }),
+        },
+      );
+      expect(patchRes.status).toBe(200);
+      const updated = (await patchRes.json()) as {
+        roles: string[];
+        prompt: string | null;
+      };
+      expect(updated.roles).toEqual(["executor"]);
+      expect(updated.prompt).toBe("执行 + 汇报");
+    });
+
+    it("PATCH 空 body(roles 与 prompt 都不给)返回 400", async () => {
+      const { token } = await registerAgent({
+        name: "coord-empty",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "empty-patch",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "空 PATCH 校验");
+      await addMember(token, group.id, memberId, ["observer"]);
+
+      const res = await app.request(
+        `/api/groups/${group.id}/members/${memberId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({}),
+        },
+      );
+      expect(res.status).toBe(400);
+    });
+
+    it("prompt 超过 1000 字返回 400", async () => {
+      const { token } = await registerAgent({
+        name: "coord-long",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerAgent({
+        name: "long-prompt-agent",
+        type: "atomcode",
+      });
+      const group = await createGroup(token, "超长提示词校验");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          agentId: memberId,
+          roles: ["executor"],
+          prompt: "a".repeat(1001),
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
 });
