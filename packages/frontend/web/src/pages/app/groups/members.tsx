@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { agentAuthHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
+import { ROLE_LABELS } from "./messages/types";
 
 /**
  * Preset role catalog (mirrors the server-side GROUP_ROLES in
@@ -20,15 +21,6 @@ const GROUP_ROLES = [
   "specialist",
 ] as const;
 type GroupRole = (typeof GROUP_ROLES)[number];
-
-const ROLE_LABELS: Record<GroupRole, string> = {
-  human: "人类",
-  coordinator: "协调者",
-  reviewer: "检视者",
-  executor: "执行者",
-  observer: "观察者",
-  specialist: "领域专家",
-};
 
 type Member = {
   agentId: string;

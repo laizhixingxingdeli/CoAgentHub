@@ -72,8 +72,41 @@ function messagesFetchMock(
   messages: unknown[] = MESSAGES,
   members: unknown[] = MEMBERS,
   groupStatus: "active" | "archived" = "active",
+  options: { projectPath?: string | null; patchError?: number } = {},
 ) {
+  // Ticket 33: 项目绑定状态 — PATCH 更新它,GET 详情返回它。
+  let boundProjectPath: string | null = options.projectPath ?? null;
   return createFetchMock([
+    {
+      // Ticket 33: PATCH /api/groups/:id — 绑定/解绑项目路径。必须排在下方
+      // GET 详情匹配之前(createFetchMock 首个匹配生效)。
+      match: (url, init) =>
+        init?.method === "PATCH" &&
+        /\/api\/groups\/[^/]+$/.test(String(url)) &&
+        !String(url).includes("?"),
+      respond: (_url, init) => {
+        if (options.patchError) {
+          return jsonResponse(
+            {
+              code: "INVALID_REQUEST",
+              message:
+                "projectPath 必须是存在的绝对目录路径:/definitely/nope",
+            },
+            options.patchError,
+          );
+        }
+        const { projectPath } = JSON.parse(String(init?.body)) as {
+          projectPath: string | null;
+        };
+        boundProjectPath = projectPath;
+        return jsonResponse({
+          id: "group-1",
+          title: "评审任务",
+          status: groupStatus,
+          projectPath,
+        });
+      },
+    },
     {
       // Single-group detail (ticket 16): drives the read-only banner when the
       // group is archived. `/api/groups/<id>` — not the /messages or /members
@@ -81,7 +114,12 @@ function messagesFetchMock(
       match: (url) =>
         /\/api\/groups\/[^/]+$/.test(String(url)) && !String(url).includes("?"),
       respond: () =>
-        jsonResponse({ id: "group-1", title: "评审任务", status: groupStatus }),
+        jsonResponse({
+          id: "group-1",
+          title: "评审任务",
+          status: groupStatus,
+          projectPath: boundProjectPath,
+        }),
     },
     {
       match: (url) =>
@@ -2039,5 +2077,138 @@ describe("ticket 23 接线:进入消息页 markRead", () => {
       expect(probe.result.current.unread.get("group-1")).toBeUndefined(),
     );
     probe.unmount();
+  });
+});
+
+describe("Ticket 33: 项目绑定与分工总览", () => {
+  /** 展开「项目与分工」面板(默认收起)。 */
+  const openProjectPanel = async () => {
+    fireEvent.click(screen.getByRole("button", { name: /展开/ }));
+    await screen.findByText("项目绑定");
+  };
+
+  it("未绑定时头部显示「未绑定项目」,展开后有输入框与保存按钮", async () => {
+    stubFetch(messagesFetchMock());
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
+    expect(screen.queryByText("项目绑定")).toBeNull();
+
+    await openProjectPanel();
+    expect(screen.getByLabelText("项目绝对路径")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  });
+
+  it("输入路径保存 → PATCH 成功后头部与区块显示已绑定路径", async () => {
+    const fetchMock = stubFetch(messagesFetchMock());
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await openProjectPanel();
+    fireEvent.change(screen.getByLabelText("项目绝对路径"), {
+      target: { value: "/Users/me/proj" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText("已绑定项目:/Users/me/proj");
+    // 头部(未展开时也可见)与区块 code 都显示路径 → 至少两处
+    expect(screen.getAllByText("/Users/me/proj").length).toBeGreaterThan(0);
+    // PATCH 请求体正确
+    const patch = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        init?.method === "PATCH" && String(url) === "/api/groups/group-1",
+    );
+    expect(patch).toBeDefined();
+    expect(JSON.parse(String(patch![1]?.body))).toEqual({
+      projectPath: "/Users/me/proj",
+    });
+  });
+
+  it("已绑定群显示解绑按钮,点击解绑 → 恢复未绑定", async () => {
+    stubFetch(messagesFetchMock([], [], "active", {
+      projectPath: "/Users/me/proj",
+    }));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("/Users/me/proj");
+    await openProjectPanel();
+    fireEvent.click(screen.getByRole("button", { name: "解绑" }));
+
+    await screen.findByText("已解绑项目");
+    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
+  });
+
+  it("400(路径非法)错误提示可见", async () => {
+    stubFetch(
+      messagesFetchMock([], [], "active", { patchError: 400 }),
+    );
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await openProjectPanel();
+    fireEvent.change(screen.getByLabelText("项目绝对路径"), {
+      target: { value: "/definitely/nope" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText(/绑定失败: HTTP 400: projectPath 必须是存在的绝对目录路径/);
+    // 头部仍保持未绑定
+    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
+  });
+
+  it("404(群不存在)错误提示可见", async () => {
+    stubFetch(
+      messagesFetchMock([], [], "active", { patchError: 404 }),
+    );
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await openProjectPanel();
+    fireEvent.change(screen.getByLabelText("项目绝对路径"), {
+      target: { value: "/Users/me/proj" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText(/绑定失败: HTTP 404/);
+  });
+
+  it("分工总览显示成员名字、角色徽章与提示词摘要(长文截断)", async () => {
+    const longPrompt =
+      "负责统筹协调与最终验收,检查所有产出物并汇总汇报给人类主管,确保进度可控且质量达标,及时同步风险";
+    const DIVISION_MEMBERS = [
+      {
+        agentId: "agent-1",
+        name: "hermes-mac",
+        type: "hermes",
+        device: "mac-mini",
+        roles: ["coordinator"],
+        prompt: longPrompt,
+        joinedAt: "2026-08-01T00:00:00.000Z",
+      },
+      {
+        agentId: "agent-2",
+        name: "win-hermes",
+        type: "hermes",
+        device: "win-pc",
+        roles: ["reviewer", "executor"],
+        prompt: null,
+        joinedAt: "2026-08-01T00:01:00.000Z",
+      },
+    ];
+    stubFetch(messagesFetchMock([], DIVISION_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await openProjectPanel();
+    // 成员名
+    expect(screen.getByText("hermes-mac")).toBeInTheDocument();
+    expect(screen.getByText("win-hermes")).toBeInTheDocument();
+    // 角色徽章(中文标签)
+    expect(screen.getByText("协调者")).toBeInTheDocument();
+    expect(screen.getByText("检视者")).toBeInTheDocument();
+    expect(screen.getByText("执行者")).toBeInTheDocument();
+    // 长提示词截断到 40 字 + …
+    expect(
+      screen.getByText(`${longPrompt.slice(0, 40)}…`),
+    ).toBeInTheDocument();
+    // 无提示词的成员不渲染提示词文本(完整原文不出现)
+    expect(screen.queryByText(longPrompt)).toBeNull();
   });
 });

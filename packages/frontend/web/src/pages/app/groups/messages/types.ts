@@ -15,6 +15,18 @@ export type Member = {
   type: string;
   device: string | null;
   roles: string[];
+  /** 群内分工说明(角色解绑):可空,来自 GET /groups/:id/members。 */
+  prompt?: string | null;
+};
+
+/** 角色中文标签(ticket 33 分工总览用;与 members.tsx 的 ROLE_LABELS 同源)。 */
+export const ROLE_LABELS: Record<string, string> = {
+  human: "人类",
+  coordinator: "协调者",
+  reviewer: "检视者",
+  executor: "执行者",
+  observer: "观察者",
+  specialist: "领域专家",
 };
 
 export type FileRef = {
