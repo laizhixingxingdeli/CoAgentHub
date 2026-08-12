@@ -232,8 +232,15 @@ export function createCheckpoint(
   if (tree.status !== 0) {
     throw new Error(`git write-tree 失败: ${(tree.stderr ?? "").trim()}`);
   }
+  // commit-tree 需要作者身份;CI 全新 runner 无 git user.name/email 配置会报
+  // "Author identity unknown"。用 -c 显式提供兜底身份,只影响该次命令,
+  // 不污染机器全局配置;本机已有全局身份时行为一致(同样用兜底身份)。
   const commit = gitSync(
     [
+      "-c",
+      "user.name=CoAgentHub",
+      "-c",
+      "user.email=coagenthub@localhost",
       "commit-tree",
       tree.stdout.trim(),
       "-p",
