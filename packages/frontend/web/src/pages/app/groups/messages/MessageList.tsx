@@ -256,8 +256,11 @@ export function MessageList(props: MessageListProps) {
                   <li
                     data-message-id={msg.id}
                     data-own={own ? "true" : "false"}
+                    // Ticket 35: avatar hugs the bubble top (items-start), not
+                    // the bottom edge; own rows keep flex-row-reverse so the
+                    // avatar lands top-right, others top-left.
                     className={cn(
-                      "group relative flex items-end gap-2 px-3 py-1.5",
+                      "group relative flex items-start gap-2 px-3 py-1.5",
                       own && !isStatus && "flex-row-reverse",
                       isStatus && "justify-center",
                     )}

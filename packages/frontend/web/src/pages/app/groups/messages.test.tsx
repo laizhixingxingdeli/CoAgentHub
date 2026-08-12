@@ -562,6 +562,16 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
     expect(other?.className).not.toContain("flex-row-reverse");
     // 他人气泡不显示「我」徽章
     expect(screen.queryByText(/win-hermes.*我/)).toBeNull();
+
+    // Ticket 35: 头像贴气泡顶部(items-start),own 保留 flex-row-reverse →
+    // 头像在右上、他人在左上;紧凑合并规则下每组首条才渲染头像(行内首子元素)
+    expect(own?.className).toContain("items-start");
+    expect(other?.className).toContain("items-start");
+    const ownAvatar = screen.getByTitle("hermes-mac mac-mini");
+    const otherAvatar = screen.getByTitle("win-hermes win-pc");
+    // 行内 DOM 顺序:头像在气泡列之前(own 靠 flex-row-reverse 翻转到右侧)
+    expect(own?.firstElementChild).toBe(ownAvatar);
+    expect(other?.firstElementChild).toBe(otherAvatar);
   });
 
   it("未绑定 agentId 时所有消息默认靠左、不显示「我」徽章", async () => {
