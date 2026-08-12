@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 
@@ -568,6 +571,153 @@ describe("群组与成员 API", () => {
       expect(membersRes.status).toBe(200);
       const members = (await membersRes.json()) as Array<{ agentId: string }>;
       expect(members.some((m) => m.agentId === agentId)).toBe(true);
+    });
+  });
+
+  describe("PATCH /api/groups/:id 绑定项目路径 (projectPath)", () => {
+    it("迁移已应用:新建群 GET /:id 返回 projectPath 且初始为 null", async () => {
+      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const group = await createGroup(token, "绑定前");
+
+      const res = await app.request(`/api/groups/${group.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      const detail = (await res.json()) as { projectPath: string | null };
+      expect(detail.projectPath).toBeNull();
+    });
+
+    it("绑定存在的绝对目录成功,GET /:id 返回该 projectPath", async () => {
+      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const group = await createGroup(token, "绑定成功");
+      const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
+
+      const patchRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ projectPath: dir }),
+      });
+      expect(patchRes.status).toBe(200);
+      expect(
+        ((await patchRes.json()) as { projectPath: string }).projectPath,
+      ).toBe(dir);
+
+      const getRes = await app.request(`/api/groups/${group.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(getRes.status).toBe(200);
+      expect(
+        ((await getRes.json()) as { projectPath: string }).projectPath,
+      ).toBe(dir);
+
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("null 与空串均清空绑定", async () => {
+      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const group = await createGroup(token, "清空绑定");
+      const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
+
+      const bindRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ projectPath: dir }),
+      });
+      expect(bindRes.status).toBe(200);
+
+      // null 清空
+      const clearRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ projectPath: null }),
+      });
+      expect(clearRes.status).toBe(200);
+      expect(
+        ((await clearRes.json()) as { projectPath: string | null }).projectPath,
+      ).toBeNull();
+
+      // 空串清空
+      const bindAgainRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ projectPath: dir }),
+      });
+      expect(bindAgainRes.status).toBe(200);
+      const emptyRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ projectPath: "" }),
+      });
+      expect(emptyRes.status).toBe(200);
+      expect(
+        ((await emptyRes.json()) as { projectPath: string | null }).projectPath,
+      ).toBeNull();
+
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("相对路径 / 不存在路径 / 非目录路径均返回 400", async () => {
+      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const group = await createGroup(token, "非法路径");
+      const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
+      const filePath = join(dir, "not-a-dir");
+      writeFileSync(filePath, "x");
+
+      const cases = [
+        "relative/path", // 相对路径
+        join(dir, "no-such-dir"), // 不存在
+        filePath, // 存在但是文件
+      ];
+      for (const projectPath of cases) {
+        const res = await app.request(`/api/groups/${group.id}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ projectPath }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).code).toBe("INVALID_REQUEST");
+      }
+
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
+      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
+
+      const res = await app.request(
+        "/api/groups/00000000-0000-0000-0000-00000000dead",
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ projectPath: dir }),
+        },
+      );
+      expect(res.status).toBe(404);
+      expect((await res.json()).code).toBe("GROUP_NOT_FOUND");
+
+      rmSync(dir, { recursive: true, force: true });
     });
   });
 });

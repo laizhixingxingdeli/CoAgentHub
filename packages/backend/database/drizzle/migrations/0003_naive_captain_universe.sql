@@ -1,0 +1,1 @@
+ALTER TABLE "groups" ADD COLUMN "project_path" text;

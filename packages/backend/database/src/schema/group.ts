@@ -40,6 +40,9 @@ export const groups = pgTable("groups", {
   createdBy: uuid("created_by")
     .notNull()
     .references(() => agent.id),
+  // 群绑定项目路径(可空):由「绑定项目」指令/PATCH /groups/:id 写入服务器,
+  // 助手以它为项目记忆来源(优先于本地 session.projectPath)。
+  projectPath: text("project_path"),
   ...timeColumns("both"),
 });
 

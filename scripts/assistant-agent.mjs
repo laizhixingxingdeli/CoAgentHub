@@ -93,6 +93,26 @@ const getAllowedProjectRoots = () => {
   }
   return roots;
 };
+
+/** 路径是否在 PROJECT_DOCS_ALLOWED_ROOTS 白名单内(未配置时放行全部)。 */
+function isAllowedProjectRoot(path) {
+  const allowedRoots = getAllowedProjectRoots();
+  if (!allowedRoots) return true;
+  return allowedRoots.some(
+    (root) => path === root || path.startsWith(`${root}${sep}`),
+  );
+}
+
+// 群详情 projectPath 的短时缓存:服务器是单一状态源,但每轮应答都 GET
+// /groups/:id 成本偏高(尤其从没绑定的群);绑定变更(如 T4 web 入口)最长
+// 一个 TTL 后生效。绑定命令成功时主动失效,保证绑定后立刻读到服务器值。
+const GROUP_DETAIL_TTL_MS = 60_000;
+const groupDetailCache = new Map(); // groupId -> { at, projectPath }
+
+/** 清空群详情缓存(重启语义/测试隔离)。 */
+export function clearGroupDetailCache() {
+  groupDetailCache.clear();
+}
 const getMemoryMode = () => process.env.MEMORY ?? "per-group";
 const getStateFile = () =>
   process.env.STATE_FILE ?? resolve(SCRIPT_DIR, ".assistant-state.json");
@@ -321,12 +341,32 @@ function fitRecentToTokens(recent, tokenCap) {
 /** 组装应答 prompt:系统提示 + 「项目文档」+「群摘要」+「最近消息」+ 当前问题。
  *  预算分配集中一处:文档 40% / 摘要 20% / 窗口 40%(文档未用满的部分让给窗口);
  *  未绑定群无文档段,摘要+窗口原样带入;MEMORY=none(session 为 null)时只返回问题。 */
+/**
+ * 生成「本群分工」文本(分工记忆):把群成员的 roles + prompt 汇总成
+ * `role=name(提示词)` 的描述,供 buildPrompt 以【本群分工】段并入;
+ * 没有分工信息的成员跳过,全部为空时返回 ""(buildPrompt 不输出空段)。
+ */
+export function buildDivisionOfLabor(members) {
+  const lines = [];
+  for (const m of members ?? []) {
+    const roles = Array.isArray(m.roles) ? m.roles : [];
+    const prompt = typeof m.prompt === "string" ? m.prompt.trim() : "";
+    if (roles.length === 0 && !prompt) continue;
+    const roleLabel = roles.length > 0 ? roles.join(",") : "member";
+    const name = m.name ?? m.agentId ?? "?";
+    lines.push(prompt ? `${roleLabel}=${name}(${prompt})` : `${roleLabel}=${name}`);
+  }
+  return lines.join(";");
+}
+
 export function buildPrompt(session, question, docsText) {
   if (!session) return question;
   const summary = session.summary?.trim() || "(暂无)";
   const recent = session.recent ?? [];
+  const division = session.divisionOfLabor?.trim() ?? "";
   const base = () =>
     [
+      ...(division ? [`【本群分工】\n${division}`] : []),
       `【群摘要】\n${summary}`,
       `【最近消息】\n${recentToText(recent)}`,
       `【当前问题】\n${question}`,
@@ -342,6 +382,7 @@ export function buildPrompt(session, question, docsText) {
   const windowCap = total - summaryCap - docsUsed; // 文档未用满 40% 的部分让给窗口
   return [
     `【项目文档】\n${docsShown}`,
+    ...(division ? [`【本群分工】\n${division}`] : []),
     `【群摘要】\n${truncateToTokens(summary, summaryCap)}`,
     `【最近消息】\n${fitRecentToTokens(recent, windowCap)}`,
     `【当前问题】\n${question}`,
@@ -492,18 +533,22 @@ async function handleBindProject(group, message, session, token) {
     }
     if (!real) {
       reply = `绑定失败:${resolved} 不存在或不是目录。请使用存在的目录绝对路径。`;
+    } else if (!isAllowedProjectRoot(real)) {
+      reply = `绑定失败:${real} 不在允许的项目根白名单(PROJECT_DOCS_ALLOWED_ROOTS)内。`;
     } else {
-      const allowedRoots = getAllowedProjectRoots();
-      if (
-        allowedRoots &&
-        !allowedRoots.some(
-          (root) => real === root || real.startsWith(`${root}${sep}`),
-        )
-      ) {
-        reply = `绑定失败:${real} 不在允许的项目根白名单(PROJECT_DOCS_ALLOWED_ROOTS)内。`;
-      } else {
+      // 服务器为单一状态源:绑定写入群属性 project_path,本地 session 仅作回退。
+      try {
+        await api("PATCH", `/groups/${group.id}`, token, {
+          projectPath: real,
+        });
+      } catch (err) {
+        reply = `绑定失败:服务器未接受该路径(${err.message.slice(0, 120)})。`;
+      }
+      if (!reply) {
         session.projectPath = real;
         saveState();
+        // 绑定已写入服务器:失效群详情缓存,下一轮应答立刻读到服务器值。
+        groupDetailCache.delete(group.id);
         reply = `已绑定项目:${real}。本群之后回答将引用该项目文档(CONTEXT.md/AGENTS.md/docs/adr/README 等)。`;
       }
     }
@@ -550,6 +595,9 @@ export async function processGroup(group) {
     }
   }
   if (session) {
+    // 分工记忆:每次处理时用本群成员 roles+prompt 刷新(MEMORY=none 时 session
+    // 为 null,不生成);buildPrompt 以【本群分工】段置于群摘要之前。
+    session.divisionOfLabor = buildDivisionOfLabor(members);
     await trimAndCompress(group.id, session);
   }
   // 绑定项目命令:只处理绑定并回复结果,不入 normal 应答。
@@ -564,21 +612,58 @@ export async function processGroup(group) {
   }
   // 仅在有真实应答需求(有待答问题且配了 API key)时才现读项目文档(不缓存),
   // 避免每轮空轮询都重复扫描/读取;MEMORY=none 时 session 为 null,连文档也不读。
-  // 读取失败(如绑定目录被删/不可读)时降级为不带文档,保证本轮问题仍能应答。
+  // 项目路径以服务器群属性 project_path 为来源(优先);读取失败(如绑定目录被删/
+  // 不可读)时降级为不带文档,保证本轮问题仍能应答。
   let docs = null;
-  if (
-    questions.length > 0 &&
-    getDeepseekKey() &&
-    typeof session?.projectPath === "string"
-  ) {
-    try {
-      docs = readProjectDocs(session.projectPath, getProjectDocsTokens());
-    } catch (err) {
-      console.warn(
-        `[assistant] ${group.id} 读取项目文档失败,本轮不带文档:`,
-        err.message,
-      );
-      docs = null;
+  if (questions.length > 0 && getDeepseekKey() && session) {
+    // 群详情短时缓存:TTL 内不再重复 GET;服务器是单一状态源,绑定变更
+    // (web 入口等)最长一个 TTL 后生效。
+    let serverPath = null;
+    let serverHasField = false; // 群详情成功返回且含 projectPath 字段
+    const cached = groupDetailCache.get(group.id);
+    if (cached && Date.now() - cached.at < GROUP_DETAIL_TTL_MS) {
+      serverPath = cached.projectPath;
+      serverHasField = true;
+    } else {
+      try {
+        const detail = await api("GET", `/groups/${group.id}`, token);
+        if (detail) {
+          serverHasField = "projectPath" in detail;
+          if (typeof detail.projectPath === "string" && detail.projectPath) {
+            serverPath = detail.projectPath;
+          }
+          groupDetailCache.set(group.id, {
+            at: Date.now(),
+            projectPath: serverPath,
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[assistant] ${group.id} 读取群项目路径失败,回退本地绑定:`,
+          err.message,
+        );
+      }
+    }
+    // 服务器是单一状态源:绑定以服务器 project_path 为准。仅当查询失败或旧版
+    // 服务器无该字段时才回退本地 session.projectPath;服务器明确返回 null
+    // (已解绑)时不复活本地旧绑定。
+    let projectPath;
+    if (serverPath) projectPath = serverPath;
+    else if (serverHasField) projectPath = null;
+    else projectPath = session.projectPath ?? null;
+    // 白名单兜底(与绑定指令同规则):服务器路径可被其它客户端 PATCH 写入,
+    // 读取前再校验 PROJECT_DOCS_ALLOWED_ROOTS,防止绕过白名单限制。
+    if (projectPath && !isAllowedProjectRoot(projectPath)) projectPath = null;
+    if (projectPath) {
+      try {
+        docs = readProjectDocs(projectPath, getProjectDocsTokens());
+      } catch (err) {
+        console.warn(
+          `[assistant] ${group.id} 读取项目文档失败,本轮不带文档:`,
+          err.message,
+        );
+        docs = null;
+      }
     }
   }
   for (const m of questions) {

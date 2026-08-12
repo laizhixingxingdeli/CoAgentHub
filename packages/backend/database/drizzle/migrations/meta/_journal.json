@@ -22,6 +22,13 @@
       "when": 1786564170221,
       "tag": "0002_great_thing",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786564987842,
+      "tag": "0003_naive_captain_universe",
+      "breakpoints": true
     }
   ]
 }

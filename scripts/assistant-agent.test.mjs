@@ -72,8 +72,14 @@ function msg(
 /** 内存版 API server + DeepSeek 的 fetch mock,记录回复与 DeepSeek 调用。 */
 function makeServer() {
   const messagesByGroup = new Map();
+  // 服务器侧群属性:projectPath 由 PATCH 写入、GET 读出(模拟真实 server 状态)。
+  const groups = new Map();
+  // 群成员:默认空分工;用例可按群设置 roles+prompt。
+  const membersByGroup = new Map();
   const posted = [];
   const deepseekCalls = [];
+  // PATCH /groups/:id 的模拟响应状态:默认 200;用例设 ≥400 模拟服务器拒绝绑定。
+  let patchGroupStatus = 200;
   const fetchMock = vi.fn(async (url, init = {}) => {
     const u = String(url);
     const method = init.method ?? "GET";
@@ -103,12 +109,55 @@ function makeServer() {
       posted.push({ groupId: messagesMatch[1], ...body });
       return jsonResponse({ id: `msg-${posted.length}`, ...body });
     }
-    if (urlObj.pathname.endsWith("/members")) {
-      return jsonResponse([{ agentId: ME.id, roles: [] }]);
+    const membersMatch = urlObj.pathname.match(
+      /^\/api\/groups\/([^/]+)\/members$/,
+    );
+    if (membersMatch) {
+      // 默认只有助手自己且无分工信息;用例可按群设置成员(roles+prompt)。
+      return jsonResponse(
+        membersByGroup.get(membersMatch[1]) ?? [{ agentId: ME.id, roles: [] }],
+      );
+    }
+    // 群详情:GET 读服务器侧 projectPath,PATCH 写入(绑定指令落库的位置)。
+    const groupMatch = urlObj.pathname.match(/^\/api\/groups\/([^/]+)$/);
+    if (method === "GET" && groupMatch) {
+      const gid = groupMatch[1];
+      return jsonResponse(groups.get(gid) ?? { id: gid, projectPath: null });
+    }
+    if (method === "PATCH" && groupMatch) {
+      if (patchGroupStatus >= 400) {
+        return {
+          ok: false,
+          status: patchGroupStatus,
+          json: async () => ({
+            code: "INVALID_REQUEST",
+            message: "projectPath 非法",
+          }),
+          text: async () => "INVALID_REQUEST",
+        };
+      }
+      const gid = groupMatch[1];
+      const body = JSON.parse(init.body);
+      const group = { id: gid, projectPath: body.projectPath };
+      groups.set(gid, group);
+      return jsonResponse(group);
     }
     throw new Error(`unexpected call: ${method} ${u}`);
   });
-  return { messagesByGroup, posted, deepseekCalls, fetchMock };
+  return {
+    messagesByGroup,
+    groups,
+    membersByGroup,
+    posted,
+    deepseekCalls,
+    fetchMock,
+    get patchGroupStatus() {
+      return patchGroupStatus;
+    },
+    set patchGroupStatus(v) {
+      patchGroupStatus = v;
+    },
+  };
 }
 
 const savedEnv = {};
@@ -935,5 +984,189 @@ describe("项目文档记忆:持久化", () => {
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toContain("【项目文档】");
     expect(content).toContain("架构与约定");
+  });
+});
+
+describe("buildDivisionOfLabor", () => {
+  it("成员带 roles+prompt 生成 role=name(提示词);无 prompt 只有 role=name", () => {
+    expect(
+      agent.buildDivisionOfLabor([
+        {
+          agentId: "a1",
+          name: "coord",
+          roles: ["coordinator"],
+          prompt: "负责调度与裁决",
+        },
+        { agentId: "a2", name: "exec", roles: ["executor"] },
+      ]),
+    ).toBe(
+      "coordinator=coord(负责调度与裁决);executor=exec",
+    );
+  });
+
+  it("多角色逗号连接;无 roles 但有 prompt 用 member 占位", () => {
+    expect(
+      agent.buildDivisionOfLabor([
+        {
+          agentId: "a1",
+          name: "multi",
+          roles: ["reviewer", "specialist"],
+          prompt: "审阅+领域专家",
+        },
+        { agentId: "a2", name: "only-prompt", roles: [], prompt: "纯分工说明" },
+      ]),
+    ).toBe("reviewer,specialist=multi(审阅+领域专家);member=only-prompt(纯分工说明)");
+  });
+
+  it("无任何分工信息时返回空串", () => {
+    expect(agent.buildDivisionOfLabor([{ agentId: "a1", roles: [] }])).toBe("");
+    expect(agent.buildDivisionOfLabor([])).toBe("");
+    expect(agent.buildDivisionOfLabor(undefined)).toBe("");
+  });
+});
+
+describe("分工记忆:本群分工并入 prompt", () => {
+  it("成员带 roles+prompt 时,【本群分工】段出现在群摘要之前且内容正确", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.membersByGroup.set("gA", [
+      { agentId: ME.id, name: "assistant", roles: ["executor"], prompt: "执行任务并回复结果" },
+      {
+        agentId: "u-0001",
+        name: "coord",
+        roles: ["coordinator"],
+        prompt: "负责调度与分工",
+      },
+    ]);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "u-0001",
+        body: "本群怎么分工的?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    // 分工文本存入会话状态(每次处理刷新)
+    expect(agent.getState().sessions.gA.divisionOfLabor).toBe(
+      "executor=assistant(执行任务并回复结果);coordinator=coord(负责调度与分工)",
+    );
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toContain("【本群分工】");
+    expect(content).toContain("coordinator=coord(负责调度与分工)");
+    // 置于群摘要之前
+    expect(content.indexOf("【本群分工】")).toBeLessThan(
+      content.indexOf("【群摘要】"),
+    );
+  });
+
+  it("MEMORY=none 时不生成分工记忆,prompt 只有问题本身", async () => {
+    process.env.MEMORY = "none";
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.membersByGroup.set("gA", [
+      { agentId: ME.id, name: "assistant", roles: ["executor"], prompt: "执行任务" },
+    ]);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "u-0001",
+        body: "分工是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions).toEqual({});
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toBe("分工是什么?");
+    expect(content).not.toContain("【本群分工】");
+  });
+});
+
+describe("服务器绑定:拒绝与解绑语义", () => {
+  it("服务器拒绝绑定(PATCH 400)→ 回复失败且不回写本地 projectPath", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "C" });
+    const server = makeServer();
+    server.patchGroupStatus = 400;
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const s = agent.getState().sessions.gA;
+    // 服务器拒绝:本地不回写、不出现成功确认
+    expect(s.projectPath).toBeUndefined();
+    expect(server.posted).toHaveLength(1);
+    expect(server.posted[0].body).toContain("绑定失败");
+    expect(server.posted[0].body).toContain("服务器未接受该路径");
+    expect(server.posted[0].body).not.toContain("已绑定项目");
+    expect(server.deepseekCalls).toHaveLength(0);
+  });
+
+  it("服务器解绑(projectPath 为 null)后不回退本地旧绑定,文档不再并入", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "C" });
+    const server = makeServer();
+    stubFetch(server);
+    // 第一轮:绑定成功(服务器 + 本地都有)
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeTruthy();
+
+    // 服务器侧解绑:projectPath 清为 null(模拟 PATCH { projectPath: null })
+    server.groups.set("gA", { id: "gA", projectPath: null });
+
+    // 第二轮提问:服务器明确 null,不能复活本地旧绑定
+    server.messagesByGroup.set("gA", [
+      ...server.messagesByGroup.get("gA"),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "还有问题",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const call = replyCalls(server).at(-1);
+    expect(call.messages.at(-1).content).toContain("还有问题");
+    expect(call.messages.at(-1).content).not.toContain("【项目文档】");
+  });
+
+  it("服务器 projectPath 不在白名单内 → 读取前拦截,文档不并入", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const inside = makeTempProject({});
+    const outside = makeTempProject({ "CONTEXT.md": "外部项目秘密" });
+    process.env.PROJECT_DOCS_ALLOWED_ROOTS = inside;
+    const server = makeServer();
+    stubFetch(server);
+    // 服务器已绑定到白名单外的路径(模拟其它客户端 PATCH 写入)
+    server.groups.set("gA", { id: "gA", projectPath: outside });
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "项目里写了什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const call = replyCalls(server).at(-1);
+    expect(call.messages.at(-1).content).not.toContain("外部项目秘密");
+    expect(call.messages.at(-1).content).not.toContain("【项目文档】");
   });
 });

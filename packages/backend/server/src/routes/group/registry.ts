@@ -24,6 +24,8 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
@@ -152,6 +154,60 @@ app
       }
 
       return c.json(group);
+    },
+  )
+  .patch(
+    "/:id",
+    describeRoute({
+      description:
+        "Bind or clear the group's project path (projectPath). Empty string or null clears the binding; a non-empty value must be an existing absolute directory path (400 otherwise).",
+      responses: {
+        200: {
+          description: "Group updated",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    zValidator("param", z.object({ id: z.string().uuid() })),
+    zValidator(
+      "json",
+      z.object({
+        projectPath: z.string().nullable(),
+      }),
+    ),
+    async (c) => {
+      const db = c.get("db");
+      const { id } = c.req.valid("param");
+      const { projectPath } = c.req.valid("json");
+
+      const group = await db.query.groups.findFirst({
+        where: (t, { eq }) => eq(t.id, id),
+      });
+      if (!group) {
+        throw new BizError(BizCodeEnum.GroupNotFound);
+      }
+
+      // 空串视作清空绑定(null);非空值必须是存在的绝对目录路径。
+      const path = projectPath === "" ? null : projectPath;
+      if (path !== null) {
+        const valid =
+          isAbsolute(path) &&
+          existsSync(path) &&
+          statSync(path).isDirectory();
+        if (!valid) {
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            `projectPath 必须是存在的绝对目录路径:${path}`,
+          );
+        }
+      }
+
+      const [updated] = await db
+        .update(groupsTable)
+        .set({ projectPath: path })
+        .where(eq(groupsTable.id, id))
+        .returning();
+      return c.json(updated);
     },
   )
   .post(
