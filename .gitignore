@@ -12,3 +12,6 @@ dist/
 .atomcode/
 .reasonix/
 coverage/
+
+# Assistant agent runtime state
+.assistant-state.json

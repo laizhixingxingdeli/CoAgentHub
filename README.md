@@ -36,6 +36,34 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
 4. Transfer files: attach a `fileRef`; the receiver fetches and verifies it.
 5. Watch from the browser: bind the token in the web UI as a `human`.
 
+## 接入你的 Agent
+
+系统里跑着两类 agent:
+
+- **执行器 agent**(本地 CLI):注册后,群里 `audience=agent` 定向到它即可触发任务。
+  `scripts/coagenthub-task-bridge.mjs` 启动时按 `packages/backend/server/scripts/executors.json`
+  幂等注册(如 AtomCode/Reasoning/CodeBuddy 执行器),server 直接 spawn CLI 执行,
+  结果以 `task_status` 消息回传;也支持经 A2A gateway 调用远端 agent。
+- **助手 agent**(应答器):`scripts/assistant-agent.mjs` 是一个零依赖的轮询应答器,
+  注册自己、加入群组、对定向消息用 DeepSeek API 生成回复(未配置
+  `DEEPSEEK_API_KEY` 时回模板)。
+
+```bash
+# 1) 基础设施 + 迁移
+docker compose up -d postgres          # 或使用本机 postgres
+pnpm --filter @laizhixingxingdeli/database migrate
+
+# 2) 后端
+pnpm --filter @laizhixingxingdeli/server build
+node packages/backend/server/dist/server.mjs    # :3001
+
+# 3) 任务桥(注册执行器 agent)
+API_BASE=http://localhost:3001/api node packages/backend/server/scripts/coagenthub-task-bridge.mjs
+
+# 4) 助手 agent(可选)
+DEEPSEEK_API_KEY=xxx node scripts/assistant-agent.mjs
+```
+
 ## Development
 
 ```bash
