@@ -43,7 +43,7 @@
  *   PROJECT_DOCS_TOKENS  绑定项目后读取项目文档的 token 预算(字符数/4),默认 4000
  *   PROJECT_DOCS_ALLOWED_ROOTS  允许绑定的项目根白名单(路径分隔符分开,可选);未设置则允许任意绝对目录
  *   MEMORY            默认 "per-group"(按群记忆);设 "none" 回到无记忆
- *   ASSISTANT_STATE_FILE  状态文件路径覆盖(测试/多实例用),默认 scripts/.assistant-state.json
+ *   STATE_FILE  状态文件路径覆盖(测试/多实例用),默认 scripts/.assistant-state.json
  *   --once            处理一轮即退出(便于测试/接入其他调度)。
  *
  * 用法:
@@ -95,8 +95,7 @@ const getAllowedProjectRoots = () => {
 };
 const getMemoryMode = () => process.env.MEMORY ?? "per-group";
 const getStateFile = () =>
-  process.env.ASSISTANT_STATE_FILE ??
-  resolve(SCRIPT_DIR, ".assistant-state.json");
+  process.env.STATE_FILE ?? resolve(SCRIPT_DIR, ".assistant-state.json");
 
 function freshState() {
   return { agent: null, cursors: {}, sessions: {} };

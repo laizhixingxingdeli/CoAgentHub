@@ -9,8 +9,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as agent from "./assistant-agent.mjs";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// 共享临时状态目录:必须在导入被测模块【之前】设置。assistant-agent.mjs 在
+// 模块顶层就调用 loadState(),且绑定命令成功时会 saveState();若不设 STATE_FILE,
+// 这些读写都会落到真实的 scripts/.assistant-state.json,覆盖运行时助手身份。
+// 指向临时文件后所有读写都在临时目录,跑完由 afterAll 统一清理,不污染真实文件。
+const STATE_DIR = mkdtempSync(join(tmpdir(), "coagent-test-state-"));
+process.env.STATE_FILE = join(STATE_DIR, "state.json");
+const agent = await import("./assistant-agent.mjs");
 
 const ME = { id: "me-0001", token: "tok" };
 const ENV_KEYS = [
@@ -20,7 +27,7 @@ const ENV_KEYS = [
   "PROJECT_DOCS_TOKENS",
   "PROJECT_DOCS_ALLOWED_ROOTS",
   "DEEPSEEK_API_KEY",
-  "ASSISTANT_STATE_FILE",
+  "STATE_FILE",
 ];
 
 function jsonResponse(data) {
@@ -121,7 +128,9 @@ beforeEach(() => {
   // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
   delete process.env.PROJECT_DOCS_TOKENS;
   delete process.env.PROJECT_DOCS_ALLOWED_ROOTS;
-  delete process.env.ASSISTANT_STATE_FILE;
+  // 注意:STATE_FILE 不在此处删除——它必须始终指向临时状态文件,否则
+  // 绑定命令触发的 saveState() 会写回真实 scripts/.assistant-state.json。
+  // 各用例结束后由 afterEach 从 savedEnv 还原到顶层共享的临时路径。
   const s = agent.getState();
   s.agent = { ...ME };
   s.cursors = {};
@@ -141,6 +150,10 @@ afterEach(() => {
     rmSync(d, { recursive: true, force: true });
   }
   vi.unstubAllGlobals();
+});
+
+afterAll(() => {
+  rmSync(STATE_DIR, { recursive: true, force: true });
 });
 
 function stubFetch(server) {
@@ -337,7 +350,7 @@ describe("会话记忆:环境变量容错", () => {
 describe("会话记忆:持久化", () => {
   it("saveState + reloadState(模拟重启)后记忆仍在,且能继续引用", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "coagent-state-"));
-    process.env.ASSISTANT_STATE_FILE = join(tempDir, "state.json");
+    process.env.STATE_FILE = join(tempDir, "state.json");
     process.env.DEEPSEEK_API_KEY = "test-key";
     const server = makeServer();
     stubFetch(server);
@@ -352,7 +365,7 @@ describe("会话记忆:持久化", () => {
     await agent.processGroup({ id: "gA" });
     agent.saveState();
     const onDisk = JSON.parse(
-      readFileSync(process.env.ASSISTANT_STATE_FILE, "utf8"),
+      readFileSync(process.env.STATE_FILE, "utf8"),
     );
     expect(onDisk.sessions.gA.recent).toHaveLength(1);
 
@@ -873,7 +886,7 @@ describe("项目文档记忆:文档并入 prompt", () => {
 describe("项目文档记忆:持久化", () => {
   it("saveState + reloadState(模拟重启)后 projectPath 仍在,文档继续并入 prompt", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "coagent-state-"));
-    process.env.ASSISTANT_STATE_FILE = join(tempDir, "state.json");
+    process.env.STATE_FILE = join(tempDir, "state.json");
     process.env.DEEPSEEK_API_KEY = "test-key";
     const project = makeTempProject({ "CONTEXT.md": "CONTEXT:架构与约定" });
     const server = makeServer();
@@ -890,7 +903,7 @@ describe("项目文档记忆:持久化", () => {
     agent.saveState();
     const onDisk = JSON.parse(
       // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
-      readFileSync(process.env.ASSISTANT_STATE_FILE, "utf8"),
+      readFileSync(process.env.STATE_FILE, "utf8"),
     );
     expect(onDisk.sessions.gA.projectPath).toBe(realpathSync(project));
 
