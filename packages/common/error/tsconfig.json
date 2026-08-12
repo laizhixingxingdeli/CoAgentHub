@@ -1,0 +1,9 @@
+{
+  "extends": "@laizhixingxingdeli/tsconfig/node-library.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src"]
+}

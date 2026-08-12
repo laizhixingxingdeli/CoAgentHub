@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.next/
+.turbo/
+*.log
+*.log.*
+.env
+.env.*
+!.env.example
+.DS_Store
+.scratch/
+.atomcode/
+.reasonix/
+coverage/

@@ -1,0 +1,9 @@
+{
+  "extends": "@laizhixingxingdeli/tsconfig/node-library.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["vite.config.ts"]
+}

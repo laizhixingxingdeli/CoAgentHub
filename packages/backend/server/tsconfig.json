@@ -1,0 +1,22 @@
+{
+  "extends": "@laizhixingxingdeli/tsconfig/node-library.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@server/*": ["./src/*"]
+    },
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "types": ["node"]
+  },
+  "references": [
+    {
+      "path": "../database"
+    },
+    {
+      "path": "../../common/error"
+    }
+  ],
+  "include": ["src", "test", "esbuild.config.ts"]
+}

@@ -1,0 +1,44 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Build and Test
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    env:
+      # database/error export dist/, so the build step must run first; the
+      # asset step only requires DATABASE_URL to be *set* (tests use PGlite).
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build core packages
+        run: >-
+          pnpm exec turbo run build
+          --filter @laizhixingxingdeli/database
+          --filter @laizhixingxingdeli/error
+          --filter @laizhixingxingdeli/server
+          --filter @laizhixingxingdeli/web
+
+      - name: Test
+        run: pnpm test
+
+      - name: Lint
+        run: pnpm exec biome check .

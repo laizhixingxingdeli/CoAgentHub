@@ -1,0 +1,6 @@
+# 运行时生成:含 agent token,不提交
+.bridge-state.json
+# 桥自身日志
+bridge.log
+# 运行时配置(桥管理端点会写回;默认配置模板见 executors.example.json)
+executors.json

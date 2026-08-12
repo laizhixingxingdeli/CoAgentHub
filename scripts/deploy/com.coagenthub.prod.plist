@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.coagenthub.prod — CoAgentHub 生产全家桶开机自启 (ticket 27)
+
+  安装(手动,本模板不代 load):
+    mkdir -p ~/Library/LaunchAgents
+    cp scripts/deploy/com.coagenthub.prod.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.coagenthub.prod.plist
+    launchctl start com.coagenthub.prod   # 立即触发一次
+
+  卸载:
+    launchctl unload ~/Library/LaunchAgents/com.coagenthub.prod.plist
+    rm ~/Library/LaunchAgents/com.coagenthub.prod.plist
+
+  说明:
+    - RunAtLoad=true: 登录时执行 coagenthub-prod.sh start(幂等,已占用端口跳过)。
+    - KeepAlive 不设(默认 false): 崩溃不自动拉起;server/桥的 crash 重启
+      由 launchd 之外的手段负责(本票保持简单,仅保证开机自启)。
+    - PATH 含 node/pnpm 所在目录(/opt/homebrew、~/.local/bin),launchd 环境
+      默认 PATH 只有 /usr/bin:/bin,脚本内部也做了兜底。
+    - 服务本身由 coagenthub-prod.sh 用 nohup 脱离 launchd 进程组,PPID 归 1,
+      日志在 /tmp/coagenthub-prod-*.log;launchd 自身输出在 /tmp/coagenthub-prod-launchd.log。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.coagenthub.prod</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/apple/Desktop/Projects/CoAgentHub/scripts/coagenthub-prod.sh</string>
+    <string>start</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/Users/apple/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/apple/Desktop/Projects/CoAgentHub</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/coagenthub-prod-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/coagenthub-prod-launchd.log</string>
+</dict>
+</plist>

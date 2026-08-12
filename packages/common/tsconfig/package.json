@@ -1,0 +1,13 @@
+{
+  "name": "@laizhixingxingdeli/tsconfig",
+  "private": true,
+  "scripts": {
+    "clean": "rimraf node_modules"
+  },
+  "files": [
+    "base.json",
+    "node-library.json",
+    "react-library.json",
+    "nextjs.json"
+  ]
+}

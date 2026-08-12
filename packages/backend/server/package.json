@@ -1,0 +1,56 @@
+{
+  "name": "@laizhixingxingdeli/server",
+  "version": "4.0.0",
+  "type": "module",
+  "exports": {
+    "./hc": "./src/hc.ts"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsx esbuild.config.ts",
+    "start": "node dist/server.mjs",
+    "clean": "rimraf dist",
+    "test": "vitest run",
+    "pretest": "pnpm --filter @laizhixingxingdeli/database build && pnpm --filter @laizhixingxingdeli/error build"
+  },
+  "dependencies": {
+    "@laizhixingxingdeli/database": "workspace:^",
+    "@laizhixingxingdeli/error": "workspace:^",
+    "@hono/node-server": "^1.13.7",
+    "@hono/sentry": "^1.2.0",
+    "@hono/zod-validator": "^0.4.1",
+    "@scalar/hono-api-reference": "^0.9.10",
+    "@sentry/esbuild-plugin": "^3.1.2",
+    "@sentry/node": "^9.22.0",
+    "@sentry/profiling-node": "^9.22.0",
+    "@types/ws": "^8.18.1",
+    "dotenv": "*",
+    "drizzle-orm": "*",
+    "drizzle-zod": "*",
+    "hono": "*",
+    "hono-openapi": "^0.4.8",
+    "pg": "*",
+    "uuid": "*",
+    "winston": "^3.14.2",
+    "winston-loki": "^6.1.2",
+    "winston-transport": "^4.9.0",
+    "ws": "^8.21.3",
+    "zod": "~3.25.74",
+    "zod-openapi": "^4.1.0"
+  },
+  "devDependencies": {
+    "@laizhixingxingdeli/tsconfig": "workspace:*",
+    "@electric-sql/pglite": "0.3.4",
+    "@types/node": "*",
+    "@types/pg": "*",
+    "@types/uuid": "*",
+    "drizzle-kit": "*",
+    "esbuild": "*",
+    "tsx": "*",
+    "typescript": "*",
+    "vitest": "*"
+  }
+}

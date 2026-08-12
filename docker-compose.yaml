@@ -1,0 +1,22 @@
+name: coagenthub
+
+services:
+  postgres:
+    container_name: coagenthub-postgres
+    image: timescale/timescaledb-ha:pg${POSTGRES_VERSION:-17}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    expose:
+      - 5432
+    volumes:
+      - postgres-data:/home/postgres/pgdata/data
+    restart: always
+
+
+
+
+
+volumes:
+  postgres-data:

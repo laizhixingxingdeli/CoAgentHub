@@ -1,0 +1,8 @@
+{
+  "extends": "./base.json",
+  "references": [
+    { "path": "./node-library.json" },
+    { "path": "./react-library.json" },
+    { "path": "./nextjs.json" }
+  ]
+}

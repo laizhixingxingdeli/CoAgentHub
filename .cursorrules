@@ -1,0 +1,11 @@
+For Drizzle ORM, follow:
+1. Import schema tables with a `Table` suffix alias, e.g.
+   `import { user as userTable } from "@laizhixingxingdeli/database/schema";`
+2. Use the Drizzle callback query syntax, e.g.
+   `await db.query.user.findFirst({ where: (t, { eq }) => eq(t.role, "admin") });`
+
+For the backend, follow:
+1. Define API routes and schemas with Hono OpenAPI (describeRoute).
+2. Validate request bodies with Hono Zod Validator.
+3. Report errors through BizError/BizCodeEnum from @laizhixingxingdeli/error.
+4. Route handlers stay thin; shared write paths live in lib/.

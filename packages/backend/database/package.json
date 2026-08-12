@@ -1,0 +1,39 @@
+{
+  "name": "@laizhixingxingdeli/database",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./schema": "./dist/schema.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "ts-map": "tsc --rootDir ./src --emitDeclarationOnly",
+    "dev": "bunchee -w --success \"npm run ts-map\"",
+    "build": "bunchee && npm run ts-map",
+    "push": "dotenv -- drizzle-kit push",
+    "migrate": "tsx migrate.ts",
+    "generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "drizzle-orm": "*",
+    "drizzle-zod": "*",
+    "uuid": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@laizhixingxingdeli/tsconfig": "workspace:*",
+    "@types/node": "*",
+    "@types/pg": "*",
+    "@types/uuid": "*",
+    "dotenv": "^16.4.7",
+    "drizzle-kit": "*",
+    "esbuild": "*",
+    "pg": "*",
+    "tsx": "*",
+    "typescript": "*",
+    "dotenv-cli": "^8.0.0"
+  }
+}

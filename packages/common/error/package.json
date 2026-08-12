@@ -1,0 +1,16 @@
+{
+  "name": "@laizhixingxingdeli/error",
+  "version": "4.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./biz": "./dist/src/biz.js"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@laizhixingxingdeli/tsconfig": "workspace:*"
+  }
+}

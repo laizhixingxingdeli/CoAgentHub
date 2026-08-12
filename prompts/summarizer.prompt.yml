@@ -1,0 +1,8 @@
+role: summarizer
+task: Produce a concise, faithful summary of a conversation transcript.
+rules:
+  - Keep only statements that are supported by the transcript.
+  - Preserve the original language of the content.
+  - Use bullet points; each point is one complete sentence.
+  - If decisions or action items appear, list them under their own heading.
+output: markdown

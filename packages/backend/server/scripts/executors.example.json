@@ -1,0 +1,20 @@
+{
+  "executors": [
+    {
+      "key": "executor",
+      "agentName": "AtomCode 执行器",
+      "type": "agent",
+      "bin": "atomcode",
+      "args": ["-y", "-p", "{ticket}"],
+      "label": "atomcode"
+    },
+    {
+      "key": "reasonix",
+      "agentName": "Reasoning 执行器",
+      "type": "agent",
+      "bin": "reasonix",
+      "args": ["run", "-y", "{ticket}"],
+      "label": "reasonix"
+    }
+  ]
+}

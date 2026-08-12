@@ -1,0 +1,27 @@
+packages:
+  - 'docs'
+  - 'packages/**/*'
+
+overrides:
+  react: 19.1.0
+  react-dom: 19.1.0
+  '@types/react': 19.1.2
+  '@types/react-dom': 19.1.2
+  typescript: 5.8.3
+  hono: 4.7.6
+  zod: 3.25.76
+  drizzle-orm: 0.44.2
+
+patchedDependencies:
+  hono@4.7.6: patches/hono.patch
+
+allowBuilds:
+  '@biomejs/biome': true
+  '@sentry-internal/node-cpu-profiler': true
+  '@sentry/cli': true
+  '@swc/core': true
+  cpu-features: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  ssh2: true
