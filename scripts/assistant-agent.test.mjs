@@ -121,8 +121,11 @@ function makeTempProject(files) {
 
 beforeEach(() => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-  // 固定记忆相关配置,避免宿主环境(如 DEEPSEEK_API_KEY)影响用例确定性
+  // 固定记忆相关配置与 DEEPSEEK_API_KEY,避免宿主环境影响用例确定性。
+  // 默认固定 test-key,保证 deepseek 调用被记录;需要测「无 key 模板回复」
+  // 的用例在内部显式 delete process.env.DEEPSEEK_API_KEY。
   process.env.MEMORY = "per-group";
+  process.env.DEEPSEEK_API_KEY = "test-key";
   delete process.env.WINDOW_MESSAGES;
   delete process.env.MAX_CONTEXT_TOKENS;
   // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
