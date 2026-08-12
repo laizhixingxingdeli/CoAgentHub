@@ -9,7 +9,7 @@ import { groups } from "./group";
  * Task — first-class execution entity (bridge demoted to a pure executor
  * client). Single source of truth for task lifecycle: the bridge creates a
  * row before spawning its CLI and patches status/diffSummary when the run
- * finishes, so .bridge-state.json no longer carries task state.
+ * finishes; the server is the single scheduler.
  *
  * Idempotency: message_id is UNIQUE — the same group message can only ever
  * create one task row, so duplicated webhook/pull delivery cannot double-run.
@@ -33,8 +33,7 @@ export const task = pgTable("task", {
   executorAgentId: uuid("executor_agent_id")
     .notNull()
     .references(() => agent.id),
-  // 哪个执行器配置(executors.json 的 key)在跑这个任务:双跑期用于区分
-  // 桥跑的(executor_key 为空)与 server 直接跑的(executor_key=codebuddy 等)。
+  // 哪个执行器(key)在跑这个任务;桥退役后一律由 server 写入,用于审计与重放。
   executorKey: text("executor_key"),
   status: text("status", { enum: TASK_STATUSES }).notNull().default("running"),
   // 执行前 git 快照 ref(refs/coagenthub-cp/<taskId>);可空 = 尚未打快照。

@@ -3,7 +3,6 @@
 #
 # 备份内容:
 #   1. PostgreSQL 全库 pg_dump → coagenthub-backup-<日期>.sql
-#   2. 任务桥状态 .bridge-state.json(agent id+token)→ coagenthub-bridge-state-<日期>.json
 #   3. (可选 --with-dist)前端 dist 打包 → coagenthub-dist-<日期>.tar.gz
 #
 # 默认输出目录 $HOME/coagenthub-backups(可用 COAGENTHUB_BACKUP_DIR 覆盖);
@@ -21,7 +20,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_DIR="$REPO_ROOT/packages/backend/server"
-BRIDGE_STATE="$SERVER_DIR/scripts/.bridge-state.json"
 FRONTEND_DIST="$REPO_ROOT/packages/frontend/web/dist"
 
 BACKUP_DIR="${COAGENTHUB_BACKUP_DIR:-$HOME/coagenthub-backups}"
@@ -50,11 +48,10 @@ fi
 mkdir -p "$BACKUP_DIR"
 
 SQL="$BACKUP_DIR/coagenthub-backup-$STAMP.sql"
-STATE_BAK="$BACKUP_DIR/coagenthub-bridge-state-$STAMP.json"
 
 echo "== 备份到 $BACKUP_DIR (保留最近 $KEEP 份) =="
 
-echo "1/3 pg_dump → $(basename "$SQL")"
+echo "1/2 pg_dump → $(basename "$SQL")"
 "$PG_BIN" "$DATABASE_URL" > "$SQL" 2> "$SQL.err"
 if [ $? -ne 0 ] || [ ! -s "$SQL" ]; then
   echo "FAIL: pg_dump 失败,见 $SQL.err" >&2
@@ -66,22 +63,20 @@ rm -f "$SQL.err"
 echo "    OK  $(wc -l < "$SQL" | tr -d ' ') 行"
 
 echo "2/3 桥状态 → $(basename "$STATE_BAK")"
-if [ -f "$BRIDGE_STATE" ]; then
-  cp "$BRIDGE_STATE" "$STATE_BAK" && echo "    OK"
 else
   echo "    SKIP 无 $BRIDGE_STATE"
 fi
 
 if [ "${1:-}" = "--with-dist" ]; then
   DIST_TGZ="$BACKUP_DIR/coagenthub-dist-$STAMP.tar.gz"
-  echo "3/3 前端 dist → $(basename "$DIST_TGZ")"
+  echo "2/2 前端 dist → $(basename "$DIST_TGZ")"
   if [ -d "$FRONTEND_DIST" ]; then
     tar -C "$(dirname "$FRONTEND_DIST")" -czf "$DIST_TGZ" "$(basename "$FRONTEND_DIST")" && echo "    OK"
   else
     echo "    SKIP 无 $FRONTEND_DIST"
   fi
 else
-  echo "3/3 前端 dist: 跳过(加 --with-dist 打包)"
+  echo "2/2 前端 dist: 跳过(加 --with-dist 打包)"
 fi
 
 # 保留最近 KEEP 份,删除更旧的
@@ -93,7 +88,6 @@ prune() {
   done
 }
 prune "coagenthub-backup-*.sql"
-prune "coagenthub-bridge-state-*.json"
 prune "coagenthub-dist-*.tar.gz"
 
 echo

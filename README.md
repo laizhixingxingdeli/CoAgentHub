@@ -38,29 +38,31 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
 
 ## 接入你的 Agent
 
-系统里跑着两类 agent:
+server 是**唯一的调度器**(任务桥已退役):开机时自动注册执行器配置里的 agent
+(见 `packages/backend/server/src/lib/executors.ts`,含本地 Hermes 规划、AtomCode /
+Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里
+用 `audience=agent` 定向到某个执行器 agent 即触发任务:
 
-- **执行器 agent**(本地 CLI):注册后,群里 `audience=agent` 定向到它即可触发任务。
-  `scripts/coagenthub-task-bridge.mjs` 启动时按 `packages/backend/server/scripts/executors.json`
-  幂等注册(如 AtomCode/Reasoning/CodeBuddy 执行器),server 直接 spawn CLI 执行,
-  结果以 `task_status` 消息回传;也支持经 A2A gateway 调用远端 agent。
-- **助手 agent**(应答器):`scripts/assistant-agent.mjs` 是一个零依赖的轮询应答器,
-  注册自己、加入群组、对定向消息用 DeepSeek API 生成回复(未配置
-  `DEEPSEEK_API_KEY` 时回模板)。
+```
+任务消息 → POST /messages(audience=agent, audienceRef=<执行器 agent id>)
+         → server 建 task + 串行队列 spawn CLI(或 A2A 调用)
+         → git 快照/回滚兜底 → 完成后 ✅/❌ task_status 消息回传群里
+```
+
+另有一个**助手 agent** 应答器(可选):`scripts/assistant-agent.mjs` 零依赖轮询
+应答器,注册自己、加入群组、对定向消息用 DeepSeek API 生成回复(未配置
+`DEEPSEEK_API_KEY` 时回模板;身份存 gitignored 的 `.assistant-state.json`)。
 
 ```bash
 # 1) 基础设施 + 迁移
 docker compose up -d postgres          # 或使用本机 postgres
 pnpm --filter @laizhixingxingdeli/database migrate
 
-# 2) 后端
+# 2) 后端(启动时自动注册执行器 agent)
 pnpm --filter @laizhixingxingdeli/server build
 node packages/backend/server/dist/server.mjs    # :3001
 
-# 3) 任务桥(注册执行器 agent)
-API_BASE=http://localhost:3001/api node packages/backend/server/scripts/coagenthub-task-bridge.mjs
-
-# 4) 助手 agent(可选)
+# 3) 助手 agent(可选)
 DEEPSEEK_API_KEY=xxx node scripts/assistant-agent.mjs
 ```
 

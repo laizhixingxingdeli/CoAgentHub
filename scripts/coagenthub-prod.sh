@@ -11,9 +11,8 @@
 # 端口(可用环境变量覆盖,便于隔离验证):
 #   COAGENTHUB_SERVER_PORT 默认 3001  node dist/server.mjs          (生产后端, PORT env)
 #   COAGENTHUB_WEB_PORT     默认 3000  node serve.mjs [端口] [后端]  (前端 dist + /api 反代 + WS upgrade)
-#   COAGENTHUB_BRIDGE_PORT  默认 9199  node coagenthub-task-bridge.mjs   (任务桥, HOOK_PORT/API_BASE 跟随)
 #
-# 日志: /tmp/coagenthub-prod-{server,web,bridge}.log (端口覆盖时带端口后缀)
+# 日志: /tmp/coagenthub-prod-{server,web}.log (端口覆盖时带端口后缀)
 # 启动要点: 子进程 nohup + 子 shell `(cd dir && cmd &)` 完全脱离当前 shell,
 #           PPID 归 1(launchd);PID 记录 /tmp/coagenthub-prod-<port>.pid, stop 按 PID 文件杀。
 set -u
@@ -22,23 +21,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_DIR="$REPO_ROOT/packages/backend/server"
 DATABASE_DIR="$REPO_ROOT/packages/backend/database"
-BRIDGE_DIR="$SERVER_DIR/scripts"
 
 SERVER_PORT="${COAGENTHUB_SERVER_PORT:-3001}"
 WEB_PORT="${COAGENTHUB_WEB_PORT:-3000}"
-BRIDGE_PORT="${COAGENTHUB_BRIDGE_PORT:-9199}"
 
 # launchd 环境 PATH 很精简,这里兜底补全 node/pnpm 所在路径
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:$PATH"
 
 log_suffix() { # 端口被覆盖时日志/PID 加后缀,避免隔离测试污染正式文件
-  if [ "${COAGENTHUB_SERVER_PORT:-}" ] || [ "${COAGENTHUB_WEB_PORT:-}" ] || [ "${COAGENTHUB_BRIDGE_PORT:-}" ]; then
+  if [ "${COAGENTHUB_SERVER_PORT:-}" ] || [ "${COAGENTHUB_WEB_PORT:-}" ]; then
     echo "-$1"
   fi
 }
 SLOG="/tmp/coagenthub-prod-server$(log_suffix "$SERVER_PORT").log"
 WLOG="/tmp/coagenthub-prod-web$(log_suffix "$WEB_PORT").log"
-BLOG="/tmp/coagenthub-prod-bridge$(log_suffix "$BRIDGE_PORT").log"
 PIDFILE="/tmp/coagenthub-prod-$SERVER_PORT.pid"
 
 # ---------- 工具 ----------
@@ -99,27 +95,6 @@ start_web() {
     || { echo "FAIL  web     : 启动超时,见 $WLOG" >&2; return 1; }
 }
 
-start_bridge() {
-  if is_up "$BRIDGE_PORT"; then
-    echo "SKIP  bridge  :$BRIDGE_PORT 已被占用 (pid $(port_pid "$BRIDGE_PORT")),跳过"
-    return 0
-  fi
-  if [ ! -f "$BRIDGE_DIR/coagenthub-task-bridge.mjs" ]; then
-    echo "FAIL  bridge  : 桥脚本缺失" >&2
-    return 1
-  fi
-  echo "START bridge  :$BRIDGE_PORT (node coagenthub-task-bridge.mjs, API_BASE=http://localhost:$SERVER_PORT/api)"
-  (
-    cd "$BRIDGE_DIR" || exit 1
-    API_BASE="http://localhost:$SERVER_PORT/api" \
-    HOOK_PORT="$BRIDGE_PORT" \
-    nohup node coagenthub-task-bridge.mjs </dev/null >>"$BLOG" 2>&1 &
-    echo $! > "/tmp/coagenthub-prod-bridge-$BRIDGE_PORT.pid"
-  )
-  wait_up "$BRIDGE_PORT" && echo "OK    bridge  :$BRIDGE_PORT 就绪 (pid $(port_pid "$BRIDGE_PORT"))" \
-    || { echo "FAIL  bridge  : 启动超时,见 $BLOG" >&2; return 1; }
-}
-
 # ---------- 主命令 ----------
 
 cmd_start() {
@@ -145,7 +120,6 @@ cmd_start() {
   echo "== 启动三服务 =="
   start_server || exit 1
   start_web || exit 1
-  start_bridge || exit 1
 
   echo
   echo "== 状态 =="
@@ -158,7 +132,7 @@ cmd_start() {
 cmd_stop() {
   # 按 PID 文件杀本脚本启动的进程;杀完等端口释放
   local killed=0
-  for p in "$PIDFILE" "/tmp/coagenthub-prod-web-$WEB_PORT.pid" "/tmp/coagenthub-prod-bridge-$BRIDGE_PORT.pid"; do
+  for p in "$PIDFILE" "/tmp/coagenthub-prod-web-$WEB_PORT.pid"; do
     if [ -f "$p" ]; then
       local pid
       pid="$(cat "$p" 2>/dev/null)"
@@ -180,7 +154,7 @@ cmd_stop() {
 
 cmd_status() {
   local port pid
-  for port in "$SERVER_PORT" "$WEB_PORT" "$BRIDGE_PORT"; do
+  for port in "$SERVER_PORT" "$WEB_PORT"; do
     pid="$(port_pid "$port")"
     if [ -n "$pid" ]; then
       printf '%-8s :%-5s RUNNING pid=%-7s %s\n' "$(port_name "$port")" "$port" "$pid" "$(ps -p "$pid" -o command= 2>/dev/null | cut -c1-60)"
@@ -194,7 +168,6 @@ port_name() {
   case "$1" in
     "$SERVER_PORT") echo "server" ;;
     "$WEB_PORT")    echo "web" ;;
-    "$BRIDGE_PORT") echo "bridge" ;;
   esac
 }
 

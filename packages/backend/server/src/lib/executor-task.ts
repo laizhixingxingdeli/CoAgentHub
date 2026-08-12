@@ -24,7 +24,7 @@
  * contentTypeFor 一致。
  */
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   agent as agentTable,
@@ -420,7 +420,14 @@ async function pumpQueue(): Promise<void> {
         return;
       }
 
-      const args = ex.args.map((a) => a.replaceAll("{ticket}", ticketPath));
+      // hermes 之类的 agent 需要提示词文本而不是文件路径:{ticketContent}
+      // 把刚写好的任务书全文内联进参数。
+      const ticketContent = readFileSync(ticketPath, "utf8");
+      const args = ex.args.map((a) =>
+        a
+          .replaceAll("{ticket}", ticketPath)
+          .replaceAll("{ticketContent}", ticketContent),
+      );
       console.log(
         `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, task=${taskId})`,
       );
@@ -560,7 +567,7 @@ function buildTicket(body: string, label: string, repoRoot: string): string {
     `# CoAgentHub 任务(网页 @executor 发布)`,
     ``,
     `你是 ${label}。任务:${body}`,
-    `仓库:${repoRoot}(分支 canary)`,
+    `仓库:${repoRoot}(分支 main)`,
     `默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。`,
     `汇报:中文,做了什么/测试结果/commit hash。`,
   ].join("\n");

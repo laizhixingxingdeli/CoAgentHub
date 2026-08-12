@@ -21,6 +21,7 @@ import { v7 as uuidv7 } from "uuid";
 import type { Logger } from "winston";
 import type { DataBase } from "./lib/database";
 import db from "./lib/database";
+import { ensureExecutorAgents } from "./lib/executors";
 import { recoverInterruptedTasks } from "./lib/executor-task";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
@@ -119,6 +120,14 @@ async function run() {
     await recoverInterruptedTasks(db);
   } catch (err) {
     console.warn("[executor] task recovery failed, continuing startup:", err);
+  }
+
+  // 桥已退役:server 是唯一调度器——开机时把执行器配置(含 hermes)对应的
+  // agent 幂等注册进 agent 表。
+  try {
+    await ensureExecutorAgents(db);
+  } catch (err) {
+    console.warn("[executor] agent auto-registration failed, continuing:", err);
   }
 
   const server = serve({ fetch: app.fetch, port }, ({ address, port: p }) => {

@@ -38,7 +38,7 @@ CoAgentHub/
 │   │   │       ├── lib/agent-token.ts        # agent token 生成 / SHA-256 哈希
 │   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws)
 │   │   │       └── lib/executor-*.ts         # 执行器调度(串行队列/快照回滚/A2A)
-│   │   │   └── scripts/              #    演示/验收脚本、coagenthub-task-bridge.mjs
+│   │   │   └── scripts/              #    演示/验收脚本、assistant-agent 应答器
 │   │   └── database/                  # drizzle schema + migrations(表定义见 §3)
 │   ├── common/                        # 共享包(错误码 BizCodeEnum、tsconfig 预设)
 │   └── frontend/

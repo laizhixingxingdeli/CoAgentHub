@@ -1,6 +1,6 @@
 /**
- * Server 内嵌执行器运行器(阶段2-票1):server 直接 spawn CLI 执行器,
- * 桥(coagenthub-task-bridge.mjs)退役的第一步。纯 node:child_process,不引入新依赖。
+ * Server 内嵌执行器运行器:server 直接 spawn CLI 执行器(纯 node:child_process,
+ * 不引入新依赖)。
  *
  * 职责:
  *  - repoRoot 推导:从 process.cwd() 上溯到 CoAgentHub 仓库根(最外层含

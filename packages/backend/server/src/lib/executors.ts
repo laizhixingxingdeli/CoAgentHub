@@ -1,10 +1,14 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
+import type { DataBase } from "./database";
+import { generateAgentToken, hashAgentToken } from "./agent-token";
+
 /**
- * 执行器配置(阶段2-票1):由 scripts/executors.json 搬入 server 的硬编码常量,
- * scripts/ 下的 json 不再作为运行时源(票3 会删除)。每一条对应「一个 AI 工具
- * = 一个 agent 身份」:bridge 时代桥按 agentName 注册 agent 并 @ 到哪个 agent
- * 就调对应 CLI;现在 server 直接在 POST /groups/:id/messages 检测 audience=agent
- * 且 audienceRef 命中本配置(按 agent.name === agentName 匹配)时创建 task 并
- * spawn 执行器。
+ * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 agent 身份」。
+ * server 在 POST /groups/:id/messages 检测 audience=agent 且 audienceRef 命中
+ * 本配置(按 agent.name === agentName 匹配)时创建 task 并 spawn 执行器;
+ * 开机时由 ensureExecutorAgents 幂等注册对应 agent。
  *
  * bin 可用环境变量覆盖(测试/本机路径差异):EXECUTOR_BIN_<KEY 大写> 优先,
  * 回退到配置默认值。
@@ -59,6 +63,14 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     args: ["-y", "-p", "{ticket}"],
   },
   {
+    key: "hermes",
+    agentName: "Hermes 规划",
+    type: "hermes",
+    bin: "hermes",
+    label: "hermes",
+    args: ["-z", "{ticketContent}"],
+  },
+  {
     // 远端设备上的 hermes(Windows 192.168.31.180):A2A gateway 调用,
     // 不用本地 bin(spawn 路径按 kind=a2a 分流,bin 仅作占位标识)。
     key: "win-hermes",
@@ -106,4 +118,48 @@ export function findExecutorByAgentName(
 /** 按 key 取执行器配置。 */
 export function findExecutorByKey(key: string): ExecutorConfig | undefined {
   return EXECUTORS.find((ex) => ex.key === key);
+}
+
+
+/**
+ * 开机自注册:把执行器配置(含 hermes)对应的 agent 补进 agent 表(幂等,
+ * 按 name 判重)。桥已退役,注册职责由 server 承担——token 明文只写一次到
+ * scripts/.executor-agents.json(已 gitignore),DB 里只存 SHA-256。
+ */
+export async function ensureExecutorAgents(
+  db: DataBase,
+  stateFile = resolve(process.cwd(), "scripts/.executor-agents.json"),
+): Promise<void> {
+  const rows = await db.select({ name: agentTable.name }).from(agentTable);
+  const existing = new Set(rows.map((r) => r.name));
+
+  let state: Record<string, string> = {};
+  try {
+    state = JSON.parse(readFileSync(stateFile, "utf8"));
+  } catch {
+    // first run — no state yet
+  }
+  let dirty = false;
+
+  for (const ex of effectiveExecutors()) {
+    if (existing.has(ex.agentName) || state[ex.agentName]) {
+      continue;
+    }
+    const token = generateAgentToken();
+    await db.insert(agentTable).values({
+      name: ex.agentName,
+      type: ex.type,
+      device: ex.kind === "a2a" ? "remote" : "mac",
+      tokenHash: hashAgentToken(token),
+      capabilities: [],
+    });
+    state[ex.agentName] = token;
+    dirty = true;
+    console.log(`[executors] 已注册 agent: ${ex.agentName}`);
+  }
+
+  if (dirty) {
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  }
 }
