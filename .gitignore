@@ -19,3 +19,6 @@ coverage/
 
 # Executor agent runtime tokens
 .executor-agents.json
+
+# Runtime LAN file store
+packages/backend/server/data/
