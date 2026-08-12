@@ -6,4 +6,5 @@ import { defineWorkspace } from "vitest/config";
 export default defineWorkspace([
   "packages/backend/server/vitest.config.ts",
   "packages/frontend/web/vitest.config.ts",
+  "scripts/vitest.config.ts",
 ]);
