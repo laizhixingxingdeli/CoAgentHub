@@ -183,7 +183,9 @@ describe("a. 握手认证(?token=)", () => {
   it("无 token(?token= 空或缺参)→ 以本地用户身份连接(101)", async () => {
     const ws = await connectWs(wsUrl(""));
     ws.close();
-    await expect(connectWs(`ws://127.0.0.1:${port}/api/ws`)).resolves.toBeDefined();
+    await expect(
+      connectWs(`ws://127.0.0.1:${port}/api/ws`),
+    ).resolves.toBeDefined();
   });
 
   it("错误 token → 非 101 拒绝", async () => {

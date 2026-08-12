@@ -2,8 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
 import { generateAgentToken, hashAgentToken } from "./agent-token";
-import { resolveLocalUser } from "./local-agent";
 import type { DataBase } from "./database";
+import { resolveLocalUser } from "./local-agent";
 
 /**
  * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 agent 身份」。

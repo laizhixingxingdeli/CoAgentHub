@@ -1,8 +1,8 @@
 import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import { hashAgentToken } from "@server/lib/agent-token";
-import { resolveLocalUser } from "@server/lib/local-agent";
 import type { DataBase } from "@server/lib/database";
+import { resolveLocalUser } from "@server/lib/local-agent";
 import { eq } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 

@@ -5,9 +5,9 @@ import {
   groupMember as groupMemberTable,
 } from "@laizhixingxingdeli/database/schema";
 import { hashAgentToken } from "@server/lib/agent-token";
-import { resolveLocalUser } from "@server/lib/local-agent";
 import db from "@server/lib/database";
 import { visibleMemberIds } from "@server/lib/group-visibility";
+import { resolveLocalUser } from "@server/lib/local-agent";
 import type { GroupMessageFull } from "@server/lib/webhook-notify";
 import { eq } from "drizzle-orm";
 import { WebSocket, WebSocketServer } from "ws";

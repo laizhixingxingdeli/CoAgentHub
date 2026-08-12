@@ -1,5 +1,5 @@
-import { eq } from "drizzle-orm";
 import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { generateAgentToken, hashAgentToken } from "./agent-token";
 import type { DataBase } from "./database";
 

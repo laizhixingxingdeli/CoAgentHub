@@ -1,7 +1,7 @@
 import {
   groupMessageClosure as closureTable,
-  groupMessage as groupMessageTable,
   groupMember as groupMemberTable,
+  groupMessage as groupMessageTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
