@@ -16,3 +16,6 @@ coverage/
 # Assistant agent runtime state
 .assistant-state.json
 .dispatch-state.json
+
+# Executor agent runtime tokens
+.executor-agents.json
