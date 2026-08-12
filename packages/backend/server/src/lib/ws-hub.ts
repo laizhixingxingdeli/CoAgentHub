@@ -5,6 +5,7 @@ import {
   groupMember as groupMemberTable,
 } from "@laizhixingxingdeli/database/schema";
 import { hashAgentToken } from "@server/lib/agent-token";
+import { resolveLocalUser } from "@server/lib/local-agent";
 import db from "@server/lib/database";
 import { visibleMemberIds } from "@server/lib/group-visibility";
 import type { GroupMessageFull } from "@server/lib/webhook-notify";
@@ -73,13 +74,12 @@ export class WsHub {
         return;
       }
       const token = url.searchParams.get("token");
-      if (!token) {
-        rejectUpgrade(socket, 401);
-        return;
-      }
-      // Same lookup as middleware/agent-auth.ts (hash → agents table); the
-      // handshake completes only after the identity resolves.
-      resolveAgentId(token)
+      // LAN trust model: no token → the default Local User (matches
+      // middleware/agent-auth.ts); a present-but-invalid token → 401.
+      const identity = token
+        ? resolveAgentId(token)
+        : resolveLocalUser(db).catch(() => null);
+      identity
         .then((agentId) => {
           if (!agentId) {
             rejectUpgrade(socket, 401);
@@ -162,13 +162,17 @@ export class WsHub {
         .from(groupMemberTable)
         .where(eq(groupMemberTable.groupId, message.groupId));
       const visible = visibleMemberIds(message, members);
-      if (visible.size === 0) return;
+      const localUserId = await resolveLocalUser(db);
+      // LAN trust model: the default Local User is a human observer — it
+      // receives every message even without a membership row. When it IS a
+      // member it is already in `visible`, so only deliver the extra copy
+      // then — otherwise the same event goes to the same socket twice.
+      if (visible.size === 0 && !this.conns.has(localUserId)) return;
 
       const event = buildEvent(message);
-
-      for (const agentId of visible) {
+      const deliver = (agentId: string) => {
         const sockets = this.conns.get(agentId);
-        if (!sockets) continue;
+        if (!sockets) return;
         for (const ws of sockets) {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(event, (err) => {
@@ -181,6 +185,13 @@ export class WsHub {
             });
           }
         }
+      };
+
+      for (const agentId of visible) {
+        deliver(agentId);
+      }
+      if (!visible.has(localUserId)) {
+        deliver(localUserId);
       }
     } catch (err) {
       console.warn("[ws] fanOut failed:", err);

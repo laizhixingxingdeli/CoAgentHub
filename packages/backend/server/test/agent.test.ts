@@ -122,7 +122,7 @@ describe("agent 注册与身份 API", () => {
     expect(await meRes.json()).toEqual({ agentId: id });
   });
 
-  it("中间件:非法/缺失 token 拒绝(401)", async () => {
+  it("中间件:非法 token 拒绝(401);缺失 token 回落本地用户", async () => {
     const protectedApp = createProtectedApp();
 
     const badRes = await protectedApp.request("/me", {
@@ -130,8 +130,11 @@ describe("agent 注册与身份 API", () => {
     });
     expect(badRes.status).toBe(401);
 
+    // LAN trust model: no token → the default Local User (human).
     const missingRes = await protectedApp.request("/me");
-    expect(missingRes.status).toBe(401);
+    expect(missingRes.status).toBe(200);
+    const body = (await missingRes.json()) as { agentId: string };
+    expect(body.agentId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("校验:缺 name/type 或非法 webhookUrl 返回 400", async () => {

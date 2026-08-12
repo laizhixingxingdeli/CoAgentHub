@@ -18,6 +18,7 @@ import type { DataBase } from "@server/lib/database";
 import { maybeDispatchExecutorTask } from "@server/lib/executor-task";
 import { insertGroupMessage } from "@server/lib/group-message";
 import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
+import { resolveLocalUser } from "@server/lib/local-agent";
 import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
@@ -810,9 +811,16 @@ app
         where: (t, { and, eq }) =>
           and(eq(t.groupId, id), eq(t.agentId, requesterId)),
       });
-      if (!membership) {
-        throw new BizError(BizCodeEnum.Forbidden);
-      }
+      // LAN trust model: reading a group does not require membership. The
+      // default Local User counts as human (sees everything) — even when it
+      // holds a membership row (e.g. it created the group tokenless and was
+      // auto-inserted as coordinator); union keeps that human bypass, so pull
+      // matches the WS fan-out. Any other non-member sees broadcast + own.
+      const localUserId = await resolveLocalUser(db);
+      const requesterRoles =
+        requesterId === localUserId
+          ? [...(membership?.roles ?? []), "human"]
+          : (membership?.roles ?? []);
 
       // Visibility is pushed into SQL (same rule as the webhook/WS fan-out,
       // see group-visibility.ts) so the ?after= cursor and LIMIT paginate over
@@ -822,7 +830,7 @@ app
       // member; human members bypass the audience rule and see everything.
       const conditions = [
         eq(groupMessageTable.groupId, id),
-        messageVisibleToMemberSql(requesterId, membership.roles),
+        messageVisibleToMemberSql(requesterId, requesterRoles),
       ];
       if (after) {
         // Incremental pull: uuidv7 ids are time-ordered, so id > after yields

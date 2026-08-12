@@ -1,6 +1,7 @@
 import {
   groupMessageClosure as closureTable,
   groupMessage as groupMessageTable,
+  groupMember as groupMemberTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -140,19 +141,21 @@ describe("群组消息树与受众路由", () => {
       expect(msg.createdAt).toBeTruthy();
     });
 
-    it("未认证(无 token)返回 401,非成员发送返回 403", async () => {
+    it("无 token 回落本地用户,非成员发送返回 403", async () => {
       const { group } = await setupGroup();
       const outsider = await registerAgent({
         name: "stranger",
         type: "openclaw",
       });
 
+      // LAN trust model: no token → Local User, who is not a group member.
       const noToken = await app.request(`/api/groups/${group.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body: "x" }),
       });
-      expect(noToken.status).toBe(401);
+      expect(noToken.status).toBe(403);
+      expect((await noToken.json()).code).toBe("FORBIDDEN");
 
       const forbidden = await sendMessage(outsider.token, group.id, {
         body: "我不在群里",
@@ -369,7 +372,7 @@ describe("群组消息树与受众路由", () => {
   });
 
   describe("GET /api/groups/:id/messages 可见性与增量拉取", () => {
-    it("广播消息所有群组成员可见,非成员 403", async () => {
+    it("广播消息所有群组成员可见;非成员只读得到广播(不再 403)", async () => {
       const { group, coordinator, reviewer, executor } = await setupGroup();
       await sendMessage(coordinator.token, group.id, { body: "广播消息" });
 
@@ -378,6 +381,7 @@ describe("群组消息树与受众路由", () => {
         expect(list.map((m) => m.body)).toContain("广播消息");
       }
 
+      // LAN trust model:GET 不要求成员资格,非成员可见自己的消息+广播。
       const outsider = await registerAgent({
         name: "stranger",
         type: "openclaw",
@@ -385,7 +389,70 @@ describe("群组消息树与受众路由", () => {
       const res = await app.request(`/api/groups/${group.id}/messages`, {
         headers: { Authorization: `Bearer ${outsider.token}` },
       });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as MessageItem[];
+      expect(list.map((m) => m.body)).toContain("广播消息");
+    });
+
+    it("无 token 回落本地用户:全可见,含定向消息", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.token, group.id, { body: "广播消息" });
+      await sendMessage(coordinator.token, group.id, {
+        body: "仅给协调员",
+        audience: "agent",
+        audienceRef: coordinator.id,
+      });
+
+      // 不带 Authorization → Local User(human 角色),可读全部消息。
+      const res = await app.request(`/api/groups/${group.id}/messages`);
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as MessageItem[];
+      const bodies = list.map((m) => m.body);
+      expect(bodies).toContain("广播消息");
+      expect(bodies).toContain("仅给协调员");
+    });
+
+    it("本地用户已是成员(非 human 角色)仍全可见:含定向消息", async () => {
+      // 无 token 建群 → Local User 自动成为 coordinator 成员(成员身份存在)。
+      const created = await app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "本地用户建的群" }),
+      });
+      expect(created.status).toBe(200);
+      const localGroup = (await created.json()) as {
+        id: string;
+        createdBy: string;
+      };
+
+      // 另两个 agent 入群(成员表直插,避免依赖加成员接口的调用方守卫)。
+      const member = await registerAgent({ name: "member-a", type: "hermes" });
+      const target = await registerAgent({ name: "target-b", type: "hermes" });
+      await testDb.insert(groupMemberTable).values({
+        groupId: localGroup.id,
+        agentId: member.id,
+        roles: ["executor"],
+      });
+      await testDb.insert(groupMemberTable).values({
+        groupId: localGroup.id,
+        agentId: target.id,
+        roles: ["reviewer"],
+      });
+      await sendMessage(member.token, localGroup.id, { body: "广播消息" });
+      await sendMessage(member.token, localGroup.id, {
+        body: "定向给 target",
+        audience: "agent",
+        audienceRef: target.id,
+      });
+
+      // 无 token 读:Local User 虽是成员(coordinator),human 角色必须保留,
+      // 定向消息同样可见 —— 否则与 WS fan-out 的"无条件投递给 Local User"分叉。
+      const res = await app.request(`/api/groups/${localGroup.id}/messages`);
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as MessageItem[];
+      const bodies = list.map((m) => m.body);
+      expect(bodies).toContain("广播消息");
+      expect(bodies).toContain("定向给 target");
     });
 
     it("role 受众仅持该角色的成员可见", async () => {

@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
 import { generateAgentToken, hashAgentToken } from "./agent-token";
+import { resolveLocalUser } from "./local-agent";
 import type { DataBase } from "./database";
 
 /**
@@ -129,6 +130,8 @@ export async function ensureExecutorAgents(
   db: DataBase,
   stateFile = resolve(process.cwd(), "scripts/.executor-agents.json"),
 ): Promise<void> {
+  // Pre-create the default LAN observer so anonymous access has a stable id.
+  await resolveLocalUser(db);
   const rows = await db.select({ name: agentTable.name }).from(agentTable);
   const existing = new Set(rows.map((r) => r.name));
 

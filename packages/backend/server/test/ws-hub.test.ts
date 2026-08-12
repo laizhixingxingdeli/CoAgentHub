@@ -180,11 +180,10 @@ afterAll(async () => {
 });
 
 describe("a. 握手认证(?token=)", () => {
-  it("无 token → 非 101 拒绝", async () => {
-    await expect(connectWs(wsUrl(""))).rejects.toThrow(/401/);
-    await expect(connectWs(`ws://127.0.0.1:${port}/api/ws`)).rejects.toThrow(
-      /401/,
-    );
+  it("无 token(?token= 空或缺参)→ 以本地用户身份连接(101)", async () => {
+    const ws = await connectWs(wsUrl(""));
+    ws.close();
+    await expect(connectWs(`ws://127.0.0.1:${port}/api/ws`)).resolves.toBeDefined();
   });
 
   it("错误 token → 非 101 拒绝", async () => {
@@ -201,6 +200,37 @@ describe("a. 握手认证(?token=)", () => {
       connectWs(`ws://127.0.0.1:${port}/api/nope?token=${agent.token}`),
     ).rejects.toThrow();
     expect(wsHub.connectionCount()).toBe(0);
+  });
+});
+
+describe("a2. Local User 已是群成员:广播不重复投递", () => {
+  it("无 token 建群后 Local User 是成员,广播仍只投递一次", async () => {
+    // 无 token 建群 → Local User 自动成为 coordinator 成员。
+    const created = await app.request("/api/groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "本地用户建的群" }),
+    });
+    expect(created.status).toBe(200);
+    const group = (await created.json()) as { id: string };
+
+    const member = await registerAgent({ name: "member-one", type: "hermes" });
+    await addMember(member.token, group.id, member.id, ["executor"]);
+
+    // 无 token 连接 → Local User socket(该身份已是群成员)。
+    const localWs = await connectWs(`ws://127.0.0.1:${port}/api/ws`);
+    let received = 0;
+    localWs.on("message", () => {
+      received += 1;
+    });
+
+    const res = await sendMessage(member.token, group.id, { body: "单次广播" });
+    expect(res.status).toBe(200);
+
+    await waitFor(() => received >= 1);
+    // 若 fanOut 把 Local User 当成员投一次、又额外投一次,会收到 2 条。
+    await sleep(150);
+    expect(received).toBe(1);
   });
 });
 

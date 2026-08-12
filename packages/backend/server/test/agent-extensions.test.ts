@@ -140,14 +140,15 @@ describe("T17 agent 自更新与扩展字段", () => {
       expect(row.name).toBe("agent-a");
     });
 
-    it("无 token 返回 401", async () => {
+    it("无 token 回落本地用户:改他人资料返回 403", async () => {
       const { id } = await registerAgent({ name: "agent-c", type: "hermes" });
       const res = await app.request(`/api/agents/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "x" }),
       });
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(403);
+      expect((await res.json()).code).toBe("FORBIDDEN");
     });
 
     it("webhookUrl 置空(null)后响应与库中均为 null", async () => {
@@ -238,7 +239,8 @@ describe("T17 agent 自更新与扩展字段", () => {
       const unauthorized = await app.request(`/api/agents/${a.id}/heartbeat`, {
         method: "PUT",
       });
-      expect(unauthorized.status).toBe(401);
+      // LAN trust model: no token → Local User, not the token holder → 403.
+      expect(unauthorized.status).toBe(403);
     });
   });
 

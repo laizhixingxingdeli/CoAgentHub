@@ -68,14 +68,15 @@ describe("群组与成员 API", () => {
       expect(members[0].roles).toEqual(["coordinator"]);
     });
 
-    it("未认证(无 token)返回 401", async () => {
+    it("无 token 以本地用户身份建群(200,createdBy=Local User)", async () => {
       const res = await app.request("/api/groups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "x" }),
       });
-      expect(res.status).toBe(401);
-      expect((await res.json()).code).toBe("UNAUTHORIZED");
+      expect(res.status).toBe(200);
+      const group = (await res.json()) as { createdBy: string };
+      expect(group.createdBy).toMatch(/^[0-9a-f-]{36}$/);
     });
 
     it("缺 title 返回 400", async () => {
