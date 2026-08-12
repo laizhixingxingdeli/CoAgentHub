@@ -1,7 +1,8 @@
-import { ArrowLeft, UserCog, UserMinus, UserPlus, Users } from "lucide-react";
+import { ArrowLeft, PenLine, UserCog, UserMinus, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useRoute } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { agentAuthHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +36,8 @@ type Member = {
   type: string;
   device: string | null;
   roles: string[];
+  /** 群内分工说明(角色解绑):可空,由「编辑分工」维护。 */
+  prompt: string | null;
   joinedAt: string;
 };
 
@@ -68,6 +71,13 @@ export default function GroupMembersPage() {
   const [editRoles, setEditRoles] = useState<GroupRole[]>([]);
   const [savingRoles, setSavingRoles] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  // Ticket 21: 群内分工提示词 — 加成员表单与行内编辑的输入状态。
+  const [newPrompt, setNewPrompt] = useState("");
+  const [editingPromptAgentId, setEditingPromptAgentId] = useState<
+    string | null
+  >(null);
+  const [editPromptValue, setEditPromptValue] = useState("");
+  const [savingPrompt, setSavingPrompt] = useState(false);
 
   const loadMembers = useCallback(async () => {
     if (!groupId) {
@@ -147,6 +157,8 @@ export default function GroupMembersPage() {
         body: JSON.stringify({
           agentId: selectedAgentId,
           roles: selectedRoles,
+          // 空则不带 prompt 字段,保持幂等 upsert 语义。
+          prompt: newPrompt.trim() || undefined,
         }),
       });
       if (!res.ok) {
@@ -158,6 +170,7 @@ export default function GroupMembersPage() {
       setMessage("成员添加成功");
       setSelectedAgentId("");
       setSelectedRoles(["observer"]);
+      setNewPrompt("");
       await loadMembers();
     } catch (e) {
       setError(`添加成员失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -171,6 +184,7 @@ export default function GroupMembersPage() {
 
   // Ticket 20: 行内编辑角色 — 打开编辑表单并预填该成员现有角色。
   const startEditRoles = (member: Member) => {
+    setEditingPromptAgentId(null);
     setEditRoles(
       member.roles.filter((r): r is GroupRole =>
         (GROUP_ROLES as readonly string[]).includes(r),
@@ -221,6 +235,49 @@ export default function GroupMembersPage() {
       setError(`更新角色失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSavingRoles(false);
+    }
+  };
+
+  // Ticket 21: 行内编辑分工提示词 — 打开编辑表单并预填该成员现有 prompt。
+  const startEditPrompt = (member: Member) => {
+    setEditingAgentId(null);
+    setEditPromptValue(member.prompt ?? "");
+    setEditingPromptAgentId(member.agentId);
+  };
+
+  const handleSavePrompt = async () => {
+    if (!groupId || !editingPromptAgentId) {
+      return;
+    }
+    setSavingPrompt(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/groups/${groupId}/members/${editingPromptAgentId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...agentAuthHeaders(),
+          },
+          // 空字符串表示清空分工说明(PATCH 可单独更新 prompt)。
+          body: JSON.stringify({ prompt: editPromptValue.trim() }),
+        },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(
+          `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
+        );
+      }
+      setMessage("分工已更新");
+      setEditingPromptAgentId(null);
+      await loadMembers();
+    } catch (e) {
+      setError(`更新分工失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSavingPrompt(false);
     }
   };
 
@@ -333,6 +390,22 @@ export default function GroupMembersPage() {
               </label>
             ))}
           </div>
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="member-prompt"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              本群分工提示词(可选)
+            </label>
+            <Textarea
+              id="member-prompt"
+              rows={2}
+              maxLength={1000}
+              placeholder="在本组你负责 code review,重点关注测试覆盖与可读性"
+              value={newPrompt}
+              onChange={(e) => setNewPrompt(e.target.value)}
+            />
+          </div>
           <div>
             <Button
               onClick={handleAddMember}
@@ -381,6 +454,17 @@ export default function GroupMembersPage() {
                   ) : (
                     <RoleBadges roles={member.roles} />
                   )}
+                  {editingPromptAgentId === member.agentId ? (
+                    <PromptEditor
+                      value={editPromptValue}
+                      onChange={setEditPromptValue}
+                      onSave={handleSavePrompt}
+                      onCancel={() => setEditingPromptAgentId(null)}
+                      busy={savingPrompt}
+                    />
+                  ) : (
+                    <PromptLine prompt={member.prompt} />
+                  )}
                   <div className="mt-1 flex gap-2">
                     <Button
                       variant="outline"
@@ -390,6 +474,15 @@ export default function GroupMembersPage() {
                     >
                       <UserCog />
                       编辑角色
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => startEditPrompt(member)}
+                    >
+                      <PenLine />
+                      编辑分工
                     </Button>
                     <Button
                       variant="outline"
@@ -421,6 +514,7 @@ export default function GroupMembersPage() {
                   <th className="px-4 py-3 font-medium">类型</th>
                   <th className="px-4 py-3 font-medium">设备</th>
                   <th className="px-4 py-3 font-medium">角色</th>
+                  <th className="px-4 py-3 font-medium">分工</th>
                   <th className="px-4 py-3 text-right font-medium">操作</th>
                 </tr>
               </thead>
@@ -448,6 +542,19 @@ export default function GroupMembersPage() {
                       )}
                     </td>
                     <td className="px-4 py-3">
+                      {editingPromptAgentId === member.agentId ? (
+                        <PromptEditor
+                          value={editPromptValue}
+                          onChange={setEditPromptValue}
+                          onSave={handleSavePrompt}
+                          onCancel={() => setEditingPromptAgentId(null)}
+                          busy={savingPrompt}
+                        />
+                      ) : (
+                        <PromptLine prompt={member.prompt} />
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
                       <div className="flex justify-end gap-1">
                         <Button
                           variant="ghost"
@@ -456,6 +563,14 @@ export default function GroupMembersPage() {
                         >
                           <UserCog />
                           编辑角色
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => startEditPrompt(member)}
+                        >
+                          <PenLine />
+                          编辑分工
                         </Button>
                         <Button
                           variant="ghost"
@@ -544,6 +659,75 @@ function RoleEditor({
           </label>
         ))}
       </div>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onSave} disabled={busy}>
+          {busy ? "保存中…" : "保存"}
+        </Button>
+        <Button size="sm" variant="outline" onClick={onCancel} disabled={busy}>
+          取消
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Ticket 21: 分工提示词展示 — 有则截断/展开,无则显示「未设置」灰字。
+ * 超过 40 字时收成一行,点击「展开」查看全文。
+ */
+function PromptLine({ prompt }: { prompt: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = prompt?.trim();
+  if (!text) {
+    return (
+      <span className="text-xs text-muted-foreground/70">未设置</span>
+    );
+  }
+  const clamped = text.length > 40;
+  return (
+    <div className="text-xs leading-relaxed text-muted-foreground">
+      <span className={clamped && !expanded ? "line-clamp-1" : undefined}>
+        {text}
+      </span>
+      {clamped && (
+        <button
+          type="button"
+          className="ml-1 align-baseline font-medium text-primary hover:underline"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "收起" : "展开"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ticket 21: 行内编辑分工提示词 — textarea + 保存/取消,调用
+ * PATCH /api/groups/:id/members/:agentId 单独更新 prompt。
+ */
+function PromptEditor({
+  value,
+  onChange,
+  onSave,
+  onCancel,
+  busy,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <Textarea
+        aria-label="编辑分工提示词"
+        rows={2}
+        maxLength={1000}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
       <div className="flex gap-2">
         <Button size="sm" onClick={onSave} disabled={busy}>
           {busy ? "保存中…" : "保存"}
