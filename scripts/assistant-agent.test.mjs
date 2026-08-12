@@ -1,6 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "./assistant-agent.mjs";
 
@@ -9,6 +17,8 @@ const ENV_KEYS = [
   "MEMORY",
   "WINDOW_MESSAGES",
   "MAX_CONTEXT_TOKENS",
+  "PROJECT_DOCS_TOKENS",
+  "PROJECT_DOCS_ALLOWED_ROOTS",
   "DEEPSEEK_API_KEY",
   "ASSISTANT_STATE_FILE",
 ];
@@ -88,6 +98,19 @@ function makeServer() {
 
 const savedEnv = {};
 let tempDir = null;
+const tempDirs = [];
+
+/** 在临时目录里造一个项目目录(支持子目录),登记进 afterEach 统一清理。 */
+function makeTempProject(files) {
+  const dir = mkdtempSync(join(tmpdir(), "coagent-proj-"));
+  tempDirs.push(dir);
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(dir, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  }
+  return dir;
+}
 
 beforeEach(() => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
@@ -95,6 +118,9 @@ beforeEach(() => {
   process.env.MEMORY = "per-group";
   delete process.env.WINDOW_MESSAGES;
   delete process.env.MAX_CONTEXT_TOKENS;
+  // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
+  delete process.env.PROJECT_DOCS_TOKENS;
+  delete process.env.PROJECT_DOCS_ALLOWED_ROOTS;
   delete process.env.ASSISTANT_STATE_FILE;
   const s = agent.getState();
   s.agent = { ...ME };
@@ -110,6 +136,9 @@ afterEach(() => {
   if (tempDir) {
     rmSync(tempDir, { recursive: true, force: true });
     tempDir = null;
+  }
+  for (const d of tempDirs.splice(0)) {
+    rmSync(d, { recursive: true, force: true });
   }
   vi.unstubAllGlobals();
 });
@@ -403,5 +432,486 @@ describe("会话记忆:开关与降级", () => {
     expect(s.summary).toContain("消息1");
     expect(s.summary.length).toBeGreaterThan(0);
     expect(s.recent).toHaveLength(1);
+  });
+});
+
+describe("parseBindCommand", () => {
+  it("识别绑定命令并提取路径;非命令/非绝对路径返回 null", () => {
+    expect(agent.parseBindCommand("绑定项目")).toEqual({ path: "" });
+    expect(agent.parseBindCommand("绑定项目 /a/b")).toEqual({ path: "/a/b" });
+    expect(agent.parseBindCommand("  绑定项目 /a/b  ")).toEqual({
+      path: "/a/b",
+    });
+    expect(agent.parseBindCommand("绑定项目是什么?")).toBeNull();
+    expect(agent.parseBindCommand("绑定项目 怎么样?")).toBeNull();
+    expect(agent.parseBindCommand("绑定项目 ./x")).toBeNull();
+    expect(agent.parseBindCommand("普通消息")).toBeNull();
+    expect(agent.parseBindCommand("")).toBeNull();
+  });
+});
+
+describe("项目文档记忆:绑定项目", () => {
+  it("「绑定项目 <绝对路径>」:校验目录、写入会话状态并确认,不调 deepseek", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "项目架构:前后端分离" });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const s = agent.getState().sessions.gA;
+    expect(s.projectPath).toBe(realpathSync(project));
+    expect(server.posted).toHaveLength(1);
+    expect(server.posted[0].body).toContain("已绑定项目");
+    // 绑定命令只处理绑定并回复结果,不入 normal 应答
+    expect(server.deepseekCalls).toHaveLength(0);
+  });
+
+  it("绑定不存在的路径 → 明确报错且不改变群状态", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "绑定项目 /no/such/dir-xyz-1786558476797",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const s = agent.getState().sessions.gA;
+    expect(s.projectPath).toBeUndefined();
+    expect(server.posted).toHaveLength(1);
+    expect(server.posted[0].body).toContain("绑定失败");
+    expect(server.posted[0].body).toContain("不存在或不是目录");
+    expect(server.deepseekCalls).toHaveLength(0);
+  });
+
+  it("绑定普通文件路径(不是目录)→ 报错", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({});
+    const file = join(project, "a.txt");
+    writeFileSync(file, "x");
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${file}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    expect(server.posted[0].body).toContain("绑定失败");
+  });
+
+  it("仅「绑定项目」缺少路径 → 提示需要绝对路径", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "绑定项目",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    expect(server.posted[0].body).toContain("绝对路径");
+    expect(server.deepseekCalls).toHaveLength(0);
+  });
+
+  it("「绑定项目 <相对路径>」按普通问题处理,不劫持为绑定命令", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "绑定项目 ./some-dir",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    expect(replyCalls(server)).toHaveLength(1);
+  });
+
+  it("「绑定项目 怎么样?」这类自然问句不被劫持,按普通问题应答", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "绑定项目 怎么样?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    expect(replyCalls(server)).toHaveLength(1);
+  });
+
+  it("PROJECT_DOCS_ALLOWED_ROOTS 白名单:白名单外被拒,白名单内成功", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const inside = makeTempProject({});
+    const outside = makeTempProject({});
+    process.env.PROJECT_DOCS_ALLOWED_ROOTS = inside;
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${outside}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${inside}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const s = agent.getState().sessions.gA;
+    // 白名单外被拒:回复明确报错且未绑定
+    expect(server.posted[0].body).toContain("白名单");
+    expect(server.posted[0].body).not.toContain("已绑定项目");
+    // 白名单内成功
+    expect(server.posted[1].body).toContain("已绑定项目");
+    expect(s.projectPath).toBe(realpathSync(inside));
+  });
+
+  it("绑定命令不入 recent 记忆(避免绝对路径被持久化并反复外发)", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "C" });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "问题A",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const recent = agent.getState().sessions.gA.recent;
+    expect(recent.map((m) => m.body)).toEqual(["问题A"]);
+  });
+
+  it("「绑定项目是什么」按普通问题处理,不劫持为绑定命令", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "绑定项目是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    expect(replyCalls(server)).toHaveLength(1);
+  });
+
+  it("MEMORY=none 时绑定命令明确回复无法绑定,不读文档", async () => {
+    process.env.MEMORY = "none";
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "内容" });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(server.posted[0].body).toContain("记忆已关闭");
+    expect(agent.getState().sessions).toEqual({});
+    expect(server.deepseekCalls).toHaveLength(0);
+  });
+});
+
+describe("项目文档记忆:文档并入 prompt", () => {
+  it("未绑定群 prompt 不含【项目文档】段,只有摘要+窗口+问题", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "普通问题",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).not.toContain("【项目文档】");
+    expect(content).toContain("【群摘要】");
+    expect(content).toContain("【最近消息】");
+    expect(content).toContain("普通问题");
+  });
+
+  it("绑定后提问,【项目文档】段包含 CONTEXT.md 内容,回复成功", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({
+      "CONTEXT.md": "CONTEXT 内容:本项目是前后端分离的 CoAgentHub。",
+    });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "这个项目的架构/约定是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const call = replyCalls(server).at(-1);
+    const content = call.messages.at(-1).content;
+    expect(content).toContain("【项目文档】");
+    expect(content).toContain("CONTEXT 内容");
+    // 文档作为不可信输入:system prompt 明确其仅为参考资料
+    expect(call.messages[0].content).toContain("参考资料");
+    expect(server.posted).toHaveLength(2);
+  });
+
+  it("按优先级读取;预算不足时不读更低优先级文件", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    process.env.PROJECT_DOCS_TOKENS = "8"; // 3 份文档共 6+7+5 token,只够 CONTEXT 全文 + AGENTS 开头
+    const project = makeTempProject({
+      "CONTEXT.md": "CONTEXT-AAAA-BBBB-CCCC", // 21 字符 → 6 token
+      "AGENTS.md": "AGENTS-BBBB-CCCC-DDDD-EEEE", // 26 字符 → 7 token
+      "README.md": "README-XXXX-YYYY-ZZZZ", // 20 字符 → 5 token
+    });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "项目的约定是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toContain("CONTEXT-AAAA-BBBB-CCCC");
+    expect(content).toContain("AGENTS-B"); // 预算内截断部分
+    expect(content).not.toContain("CCCC-DDDD-EEEE"); // 预算外尾部
+    expect(content).not.toContain("README");
+  });
+
+  it("超预算文档只读入预算内部分,回复成功", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    process.env.PROJECT_DOCS_TOKENS = "8"; // 2 token → 8 字符
+    const longContent = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 36 字符 → 9 token
+    const project = makeTempProject({ "CONTEXT.md": longContent });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "项目的约定是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toContain("01234567"); // 预算内前 8 字符
+    expect(content).not.toContain("WXYZ"); // 预算外尾部
+    expect(server.posted).toHaveLength(2);
+  });
+
+  it("docs/adr/*.md 按序读入:在 CLAUDE.md 之后、README.md 之前", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    process.env.PROJECT_DOCS_TOKENS = "100";
+    const project = makeTempProject({
+      "CONTEXT.md": "C",
+      "AGENTS.md": "A",
+      "CLAUDE.md": "L",
+      "docs/adr/0002-b.md": "B2",
+      "docs/adr/0001-a.md": "B1",
+      "README.md": "R",
+    });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "架构约定?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    const at = (t) => content.indexOf(t);
+    expect(at("L")).toBeGreaterThan(at("A"));
+    expect(at("B1")).toBeGreaterThan(at("L"));
+    expect(at("B2")).toBeGreaterThan(at("B1"));
+    expect(at("R")).toBeGreaterThan(at("B2"));
+  });
+
+  it("符号链接指向项目根外 → 跳过该文件,仍读根内文档", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const outside = join(tmpdir(), `coagent-outside-${Date.now()}.md`);
+    tempDirs.push(outside);
+    writeFileSync(outside, "外部秘密内容:绝密");
+    const project = makeTempProject({ "CONTEXT.md": "根内内容" });
+    symlinkSync(outside, join(project, "CONTEXT-MAP.md"));
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "项目文档里写了什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toContain("根内内容");
+    expect(content).not.toContain("外部秘密内容");
+  });
+
+  it("绑定目录被删除后再提问 → 仍能应答,文档段降级为空", async () => {
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "C" });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    expect(agent.getState().sessions.gA.projectPath).toBeTruthy();
+    // 绑定后项目目录被删除,再提问
+    rmSync(project, { recursive: true, force: true });
+    server.messagesByGroup.set("gA", [
+      ...server.messagesByGroup.get("gA"),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "还有问题",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const call = replyCalls(server).at(-1);
+    expect(call.messages.at(-1).content).toContain("还有问题");
+    expect(call.messages.at(-1).content).not.toContain("【项目文档】");
+    expect(server.posted).toHaveLength(2);
+  });
+});
+
+describe("项目文档记忆:持久化", () => {
+  it("saveState + reloadState(模拟重启)后 projectPath 仍在,文档继续并入 prompt", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "coagent-state-"));
+    process.env.ASSISTANT_STATE_FILE = join(tempDir, "state.json");
+    process.env.DEEPSEEK_API_KEY = "test-key";
+    const project = makeTempProject({ "CONTEXT.md": "CONTEXT:架构与约定" });
+    const server = makeServer();
+    stubFetch(server);
+    server.messagesByGroup.set("gA", [
+      msg("m001", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: `绑定项目 ${project}`,
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    agent.saveState();
+    const onDisk = JSON.parse(
+      // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
+      readFileSync(process.env.ASSISTANT_STATE_FILE, "utf8"),
+    );
+    expect(onDisk.sessions.gA.projectPath).toBe(realpathSync(project));
+
+    // 模拟重启:从磁盘重新加载
+    agent.reloadState();
+    expect(agent.getState().sessions.gA.projectPath).toBe(
+      realpathSync(project),
+    );
+
+    server.messagesByGroup.set("gA", [
+      ...server.messagesByGroup.get("gA"),
+      msg("m002", {
+        audience: "agent",
+        audienceRef: ME.id,
+        senderId: "user-1",
+        body: "这个项目的约定是什么?",
+      }),
+    ]);
+    await agent.processGroup({ id: "gA" });
+    const content = replyCalls(server).at(-1).messages.at(-1).content;
+    expect(content).toContain("【项目文档】");
+    expect(content).toContain("架构与约定");
   });
 });
