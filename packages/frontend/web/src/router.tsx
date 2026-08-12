@@ -1,5 +1,6 @@
 import { Redirect, Route, Switch } from "wouter";
 import AppSidebar from "./components/sidebar";
+import AgentsPage from "./pages/app/agents";
 import FilesPage from "./pages/app/files";
 import GroupsPage from "./pages/app/groups";
 import GroupMembersPage from "./pages/app/groups/members";
@@ -25,6 +26,9 @@ const App = () => (
         */}
         <Switch>
           <Route path="/files" component={FilesPage} />
+          {/* /agents 与 /groups 一样平铺声明:避免 wouter v3 nest 的 base
+              前缀导致页面内绝对路径失配(见下方 /groups 注释)。 */}
+          <Route path="/agents" component={AgentsPage} />
           {/* /groups routes are declared flat (no `nest`): wouter v3 nested
               Routes wrap children in a Router with base="/groups", which
               base-strips the location — any full-path useRoute("/groups/:id")

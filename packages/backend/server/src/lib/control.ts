@@ -27,8 +27,8 @@ import {
   stopRunningTask,
 } from "@server/lib/executor-task";
 import {
-  EXECUTORS,
   type ExecutorConfig,
+  effectiveExecutors,
   findExecutorByAgentName,
 } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
@@ -77,7 +77,7 @@ export async function maybeHandleControlCommand(
   const sender = await db.query.agent.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
   });
-  if (sender && findExecutorByAgentName(sender.name)) {
+  if (sender && (await findExecutorByAgentName(db, sender.name))) {
     console.log(`[control] 跳过:发送者是执行器 agent(防回环)`);
     return;
   }
@@ -88,7 +88,7 @@ export async function maybeHandleControlCommand(
     const target = await db.query.agent.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef!),
     });
-    if (target && findExecutorByAgentName(target.name)) {
+    if (target && (await findExecutorByAgentName(db, target.name))) {
       console.log(`[control] 跳过:定向到执行器 agent(视为任务)`);
       return;
     }
@@ -219,7 +219,7 @@ async function handleRollback(
 async function firstExecutorAgent(
   db: DataBase,
 ): Promise<{ agentId: string; ex: ExecutorConfig } | null> {
-  for (const ex of EXECUTORS) {
+  for (const ex of await effectiveExecutors(db)) {
     const agent = await db.query.agent.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.name, ex.agentName),
     });

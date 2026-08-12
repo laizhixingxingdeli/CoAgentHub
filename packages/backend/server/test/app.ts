@@ -2,6 +2,7 @@ import BizError from "@laizhixingxingdeli/error/biz";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import agentRouter from "../src/routes/agent";
+import executorRouter from "../src/routes/executor";
 import fileRouter from "../src/routes/file";
 import groupRouter from "../src/routes/group";
 import systemRouter from "../src/routes/system";
@@ -30,5 +31,6 @@ export function createTestApp() {
     .route("/system", systemRouter)
     .route("/file", fileRouter)
     .route("/agents", agentRouter)
+    .route("/executors", executorRouter)
     .route("/groups", groupRouter);
 }

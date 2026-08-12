@@ -27,6 +27,7 @@ import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
 import { loggerMiddleware } from "./middleware/logger";
 import agentRouter from "./routes/agent";
+import executorRouter from "./routes/executor";
 import fileRouter from "./routes/file";
 import groupRouter from "./routes/group";
 import systemRouter from "./routes/system";
@@ -85,6 +86,7 @@ export const routes = new Hono()
   .route("/system", systemRouter)
   .route("/file", fileRouter)
   .route("/agents", agentRouter)
+  .route("/executors", executorRouter)
   .route("/groups", groupRouter);
 
 app.route("/", routes);

@@ -1,5 +1,5 @@
 import { Separator } from "@radix-ui/react-separator";
-import { Command, FolderOpen, LifeBuoy, Send, Users } from "lucide-react";
+import { Bot, Command, FolderOpen, LifeBuoy, Send, Users } from "lucide-react";
 import type * as React from "react";
 import {
   Sidebar,
@@ -33,6 +33,11 @@ const data = {
       url: "/groups",
       icon: Users,
       isActive: true,
+    },
+    {
+      title: "接入 Agent",
+      url: "/agents",
+      icon: Bot,
     },
     {
       title: "文件传输",

@@ -241,7 +241,7 @@ export async function maybeDispatchExecutorTask(
     console.log(`[executor] 跳过:audienceRef ${audienceRef} 无对应 agent`);
     return;
   }
-  const ex = findExecutorByAgentName(agent.name);
+  const ex = await findExecutorByAgentName(db, agent.name);
   if (!ex) {
     console.log(`[executor] 跳过:agent ${agent.name} 不在执行器配置中`);
     return;

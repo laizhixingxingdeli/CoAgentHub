@@ -572,7 +572,9 @@ app
           senderRoles: membership.roles,
           audienceRef,
           body: body ?? "",
-        });
+        }).catch((err) =>
+          console.warn("[executor] 后台调度失败(忽略):", err),
+        );
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;
       // fire-and-forget,命中与否/权限/防回环在 control.ts 内处理。定向到
@@ -584,7 +586,9 @@ app
         audience: aud,
         audienceRef: aud === "agent" ? (audienceRef ?? null) : null,
         body: body ?? "",
-      });
+      }).catch((err) =>
+        console.warn("[control] 后台指令处理失败(忽略):", err),
+      );
 
       return c.json(full);
     },

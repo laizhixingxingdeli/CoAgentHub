@@ -9,6 +9,7 @@ export const BizCodeEnum = {
   GroupNotFound: "GROUP_NOT_FOUND",
   MemberNotFound: "MEMBER_NOT_FOUND",
   TaskNotFound: "TASK_NOT_FOUND",
+  ExecutorNotFound: "EXECUTOR_NOT_FOUND",
 } as const;
 
 export type BizCode = (typeof BizCodeEnum)[keyof typeof BizCodeEnum];
@@ -24,6 +25,7 @@ const STATUS_AND_MESSAGE: Record<BizCode, [status: number, fallback: string]> =
     [BizCodeEnum.GroupNotFound]: [404, "Group not found"],
     [BizCodeEnum.MemberNotFound]: [404, "Member not found"],
     [BizCodeEnum.TaskNotFound]: [404, "Task not found"],
+    [BizCodeEnum.ExecutorNotFound]: [404, "Executor config not found"],
   };
 
 /** An API error carrying a stable machine-readable code plus an HTTP status. */
