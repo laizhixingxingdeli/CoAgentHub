@@ -1,3 +1,5 @@
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import {
   agent as agentTable,
@@ -24,8 +26,6 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
-import { existsSync, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
@@ -191,9 +191,7 @@ app
       const path = projectPath === "" ? null : projectPath;
       if (path !== null) {
         const valid =
-          isAbsolute(path) &&
-          existsSync(path) &&
-          statSync(path).isDirectory();
+          isAbsolute(path) && existsSync(path) && statSync(path).isDirectory();
         if (!valid) {
           throw new BizError(
             BizCodeEnum.InvalidRequest,

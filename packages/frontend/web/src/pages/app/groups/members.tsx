@@ -1,4 +1,11 @@
-import { ArrowLeft, PenLine, UserCog, UserMinus, UserPlus, Users } from "lucide-react";
+import {
+  ArrowLeft,
+  PenLine,
+  UserCog,
+  UserMinus,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useRoute } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -671,9 +678,7 @@ function PromptLine({ prompt }: { prompt: string | null }) {
   const [expanded, setExpanded] = useState(false);
   const text = prompt?.trim();
   if (!text) {
-    return (
-      <span className="text-xs text-muted-foreground/70">未设置</span>
-    );
+    return <span className="text-xs text-muted-foreground/70">未设置</span>;
   }
   const clamped = text.length > 40;
   return (

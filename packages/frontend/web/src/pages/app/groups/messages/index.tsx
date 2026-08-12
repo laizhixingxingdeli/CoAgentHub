@@ -31,9 +31,9 @@ import { MessageList } from "./MessageList";
 import {
   DELETED_MESSAGE_BODY,
   GROUP_ROLES,
-  ROLE_LABELS,
   type Member,
   type MessageItem,
+  ROLE_LABELS,
 } from "./types";
 
 /**
@@ -388,7 +388,9 @@ export default function GroupMessagesPage() {
       setProjectPathInput("");
       setProjectMessage(`已绑定项目:${updated.projectPath}`);
     } catch (e) {
-      setProjectError(`绑定失败: ${e instanceof Error ? e.message : String(e)}`);
+      setProjectError(
+        `绑定失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
     } finally {
       setSavingProjectPath(false);
     }
@@ -421,7 +423,9 @@ export default function GroupMessagesPage() {
       setProjectPath(null);
       setProjectMessage("已解绑项目");
     } catch (e) {
-      setProjectError(`解绑失败: ${e instanceof Error ? e.message : String(e)}`);
+      setProjectError(
+        `解绑失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
     } finally {
       setSavingProjectPath(false);
     }
@@ -800,9 +804,7 @@ export default function GroupMessagesPage() {
         >
           <span className="inline-flex min-w-0 items-center gap-2">
             <Folder className="size-4 shrink-0" />
-            <span className="truncate">
-              {projectPath ?? "未绑定项目"}
-            </span>
+            <span className="truncate">{projectPath ?? "未绑定项目"}</span>
           </span>
           <span className="shrink-0 text-xs text-muted-foreground">
             {projectPanelOpen ? "收起" : "展开"}

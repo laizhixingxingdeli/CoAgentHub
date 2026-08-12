@@ -78,10 +78,7 @@ function membersFetchMock(
         init?.method === "PATCH" && String(url).includes("/members/"),
       respond: (url, init) => {
         const agentId = String(url).split("/").pop();
-        const patch = JSON.parse(String(init?.body)) as Record<
-          string,
-          unknown
-        >;
+        const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
         current = current.map((m) =>
           m.agentId === agentId ? { ...m, ...patch } : m,
         );
@@ -119,10 +116,9 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
     fireEvent.change(screen.getByLabelText("选择成员 agent"), {
       target: { value: "agent-9" },
     });
-    fireEvent.change(
-      screen.getByLabelText("本群分工提示词(可选)"),
-      { target: { value: "在本组你负责 code review,重点关注测试覆盖与可读性" } },
-    );
+    fireEvent.change(screen.getByLabelText("本群分工提示词(可选)"), {
+      target: { value: "在本组你负责 code review,重点关注测试覆盖与可读性" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "添加成员" }));
 
     await waitFor(() => {
@@ -210,9 +206,7 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
         ([, init]) => init?.method === "PATCH",
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe(
-        "/api/groups/group-1/members/agent-2",
-      );
+      expect(String(call![0])).toBe("/api/groups/group-1/members/agent-2");
       const body = JSON.parse(String(call![1]?.body)) as Record<string, string>;
       expect(body).toEqual({ prompt: "负责跑通全部测试,输出失败用例清单" });
     });
@@ -278,6 +272,8 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
 
     fireEvent.click(within(row).getByRole("button", { name: "编辑角色" }));
     expect(within(row).queryByLabelText("编辑分工提示词")).toBeNull();
-    expect(within(row).getByRole("button", { name: "取消" })).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", { name: "取消" }),
+    ).toBeInTheDocument();
   });
 });

@@ -354,7 +354,9 @@ export function buildDivisionOfLabor(members) {
     if (roles.length === 0 && !prompt) continue;
     const roleLabel = roles.length > 0 ? roles.join(",") : "member";
     const name = m.name ?? m.agentId ?? "?";
-    lines.push(prompt ? `${roleLabel}=${name}(${prompt})` : `${roleLabel}=${name}`);
+    lines.push(
+      prompt ? `${roleLabel}=${name}(${prompt})` : `${roleLabel}=${name}`,
+    );
   }
   return lines.join(";");
 }

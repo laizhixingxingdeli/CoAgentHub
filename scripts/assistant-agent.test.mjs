@@ -999,9 +999,7 @@ describe("buildDivisionOfLabor", () => {
         },
         { agentId: "a2", name: "exec", roles: ["executor"] },
       ]),
-    ).toBe(
-      "coordinator=coord(负责调度与裁决);executor=exec",
-    );
+    ).toBe("coordinator=coord(负责调度与裁决);executor=exec");
   });
 
   it("多角色逗号连接;无 roles 但有 prompt 用 member 占位", () => {
@@ -1015,7 +1013,9 @@ describe("buildDivisionOfLabor", () => {
         },
         { agentId: "a2", name: "only-prompt", roles: [], prompt: "纯分工说明" },
       ]),
-    ).toBe("reviewer,specialist=multi(审阅+领域专家);member=only-prompt(纯分工说明)");
+    ).toBe(
+      "reviewer,specialist=multi(审阅+领域专家);member=only-prompt(纯分工说明)",
+    );
   });
 
   it("无任何分工信息时返回空串", () => {
@@ -1031,7 +1031,12 @@ describe("分工记忆:本群分工并入 prompt", () => {
     const server = makeServer();
     stubFetch(server);
     server.membersByGroup.set("gA", [
-      { agentId: ME.id, name: "assistant", roles: ["executor"], prompt: "执行任务并回复结果" },
+      {
+        agentId: ME.id,
+        name: "assistant",
+        roles: ["executor"],
+        prompt: "执行任务并回复结果",
+      },
       {
         agentId: "u-0001",
         name: "coord",
@@ -1067,7 +1072,12 @@ describe("分工记忆:本群分工并入 prompt", () => {
     const server = makeServer();
     stubFetch(server);
     server.membersByGroup.set("gA", [
-      { agentId: ME.id, name: "assistant", roles: ["executor"], prompt: "执行任务" },
+      {
+        agentId: ME.id,
+        name: "assistant",
+        roles: ["executor"],
+        prompt: "执行任务",
+      },
     ]);
     server.messagesByGroup.set("gA", [
       msg("m001", {

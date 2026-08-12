@@ -89,8 +89,7 @@ function messagesFetchMock(
           return jsonResponse(
             {
               code: "INVALID_REQUEST",
-              message:
-                "projectPath 必须是存在的绝对目录路径:/definitely/nope",
+              message: "projectPath 必须是存在的绝对目录路径:/definitely/nope",
             },
             options.patchError,
           );
@@ -2125,9 +2124,11 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
   });
 
   it("已绑定群显示解绑按钮,点击解绑 → 恢复未绑定", async () => {
-    stubFetch(messagesFetchMock([], [], "active", {
-      projectPath: "/Users/me/proj",
-    }));
+    stubFetch(
+      messagesFetchMock([], [], "active", {
+        projectPath: "/Users/me/proj",
+      }),
+    );
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await screen.findByText("/Users/me/proj");
@@ -2139,9 +2140,7 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
   });
 
   it("400(路径非法)错误提示可见", async () => {
-    stubFetch(
-      messagesFetchMock([], [], "active", { patchError: 400 }),
-    );
+    stubFetch(messagesFetchMock([], [], "active", { patchError: 400 }));
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await openProjectPanel();
@@ -2150,15 +2149,15 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await screen.findByText(/绑定失败: HTTP 400: projectPath 必须是存在的绝对目录路径/);
+    await screen.findByText(
+      /绑定失败: HTTP 400: projectPath 必须是存在的绝对目录路径/,
+    );
     // 头部仍保持未绑定
     expect(screen.getByText("未绑定项目")).toBeInTheDocument();
   });
 
   it("404(群不存在)错误提示可见", async () => {
-    stubFetch(
-      messagesFetchMock([], [], "active", { patchError: 404 }),
-    );
+    stubFetch(messagesFetchMock([], [], "active", { patchError: 404 }));
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await openProjectPanel();
@@ -2205,9 +2204,7 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
     expect(screen.getByText("检视者")).toBeInTheDocument();
     expect(screen.getByText("执行者")).toBeInTheDocument();
     // 长提示词截断到 40 字 + …
-    expect(
-      screen.getByText(`${longPrompt.slice(0, 40)}…`),
-    ).toBeInTheDocument();
+    expect(screen.getByText(`${longPrompt.slice(0, 40)}…`)).toBeInTheDocument();
     // 无提示词的成员不渲染提示词文本(完整原文不出现)
     expect(screen.queryByText(longPrompt)).toBeNull();
   });
