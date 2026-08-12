@@ -14,9 +14,9 @@ import { z } from "zod";
 // drizzle-zod 0.8.2 的 refine 类型基于 zod/v4;运行时仍是 v3 的 schema 对象,
 // 仅作类型适配转换。
 import type { z as zodV4 } from "zod/v4";
-import { timeColumns } from "../utils/columns";
-import { agent } from "./agent";
-import { groups } from "./group";
+import { timeColumns } from "../utils/columns.js";
+import { agent } from "./agent.js";
+import { groups } from "./group.js";
 
 /**
  * Group messages — the routed bus inside a group (agent-groups spec:

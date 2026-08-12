@@ -1,9 +1,9 @@
 import { jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
-import { timeColumns } from "../utils/columns";
-import { agent } from "./agent";
-import { groups } from "./group";
+import { timeColumns } from "../utils/columns.js";
+import { agent } from "./agent.js";
+import { groups } from "./group.js";
 
 /**
  * Task — first-class execution entity (bridge demoted to a pure executor

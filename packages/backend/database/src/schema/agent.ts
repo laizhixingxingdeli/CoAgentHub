@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
-import { timeColumns } from "../utils/columns";
+import { timeColumns } from "../utils/columns.js";
 
 /**
  * Agent registry — the identity foundation for multi-agent collaboration
