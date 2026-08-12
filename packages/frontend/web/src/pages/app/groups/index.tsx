@@ -1,6 +1,7 @@
 import {
   Archive,
   KeyRound,
+  MessageSquare,
   Plus,
   RotateCcw,
   Settings,
@@ -12,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useUnread } from "@/hooks/use-unread";
 import {
   AGENT_ID_KEY,
   AGENT_TOKEN_KEY,
@@ -72,6 +74,17 @@ export default function GroupsPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Ticket: 最近一条消息预览 — 复用全局 unread store(WS 帧 + 消息页历史
+  // 加载都会写入),不新增任何 API 调用。
+  const { lastMessageByGroup } = useUnread();
+  /** 群组最近消息预览:无消息返回 null(显示占位),长文截断到 30 字。 */
+  const previewFor = (group: GroupItem) => {
+    const body = lastMessageByGroup.get(group.id)?.body;
+    if (!body) {
+      return null;
+    }
+    return body.length > 30 ? `${body.slice(0, 30)}…` : body;
+  };
   const [boundToken, setBoundToken] = useState(() =>
     typeof localStorage !== "undefined"
       ? (localStorage.getItem(AGENT_TOKEN_KEY) ?? "")
@@ -831,6 +844,7 @@ export default function GroupsPage() {
       {/* Create group */}
       <div className="mb-6 flex flex-col gap-2 sm:flex-row">
         <Input
+          id="group-title-input"
           placeholder="输入任务名,创建群组…"
           value={newTitle}
           onChange={(e) => setNewTitle(e.target.value)}
@@ -889,7 +903,7 @@ export default function GroupsPage() {
 
       <div className="rounded-lg border bg-card shadow-sm">
         {groups.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 p-10 text-center text-sm text-muted-foreground">
+          <div className="flex flex-col items-center gap-3 p-10 text-center text-sm text-muted-foreground">
             {loading ? (
               "加载中…"
             ) : (
@@ -902,6 +916,20 @@ export default function GroupsPage() {
                       ? "暂无进行中的群组"
                       : "暂无群组,输入任务名点击「创建群组」开始"}
                 </p>
+                {statusFilter === "all" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      document
+                        .getElementById("group-title-input")
+                        ?.focus()
+                    }
+                  >
+                    <Plus />
+                    去创建群组
+                  </Button>
+                )}
               </>
             )}
           </div>
@@ -929,6 +957,12 @@ export default function GroupsPage() {
                       <Users className="size-3.5" />
                       {group.memberCount} 名成员
                     </span>
+                    {previewFor(group) && (
+                      <span className="inline-flex min-w-0 items-center gap-1">
+                        <MessageSquare className="size-3.5 shrink-0" />
+                        <span className="truncate">{previewFor(group)}</span>
+                      </span>
+                    )}
                   </div>
                   <div className="mt-1 flex flex-wrap gap-2">
                     <Button
@@ -980,6 +1014,7 @@ export default function GroupsPage() {
                   <th className="px-4 py-3 font-medium">群组名称</th>
                   <th className="px-4 py-3 font-medium">状态</th>
                   <th className="px-4 py-3 font-medium">成员数</th>
+                  <th className="px-4 py-3 font-medium">最近消息</th>
                   <th className="px-4 py-3 text-right font-medium">操作</th>
                 </tr>
               </thead>
@@ -1000,6 +1035,11 @@ export default function GroupsPage() {
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
                       {group.memberCount}
+                    </td>
+                    <td className="max-w-56 px-4 py-3 text-muted-foreground">
+                      <span className="block truncate">
+                        {previewFor(group) ?? "暂无消息"}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1">

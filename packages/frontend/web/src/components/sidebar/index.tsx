@@ -1,6 +1,7 @@
 import { Separator } from "@radix-ui/react-separator";
 import { Bot, Command, FolderOpen, LifeBuoy, Send, Users } from "lucide-react";
 import type * as React from "react";
+import { useLocation } from "wouter";
 import {
   Sidebar,
   SidebarContent,
@@ -32,7 +33,6 @@ const data = {
       title: "群组",
       url: "/groups",
       icon: Users,
-      isActive: true,
     },
     {
       title: "接入 Agent",
@@ -63,6 +63,16 @@ export default function AppSidebar({
   children,
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
+  const [location] = useLocation();
+  // 面包屑当前页:按路由映射,群组及其子页统一显示「群组」。
+  const pageLabel = location.startsWith("/groups")
+    ? "群组"
+    : location.startsWith("/agents")
+      ? "接入 Agent"
+      : location.startsWith("/files")
+        ? "文件传输"
+        : "首页";
+
   return (
     <SidebarProvider>
       <Sidebar variant="inset" {...props}>
@@ -114,7 +124,7 @@ export default function AppSidebar({
                 </BreadcrumbItem>
                 <BreadcrumbSeparator className="hidden md:block" />
                 <BreadcrumbItem>
-                  <BreadcrumbPage>首页</BreadcrumbPage>
+                  <BreadcrumbPage>{pageLabel}</BreadcrumbPage>
                 </BreadcrumbItem>
               </BreadcrumbList>
             </Breadcrumb>
