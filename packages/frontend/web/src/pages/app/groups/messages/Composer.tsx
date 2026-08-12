@@ -1,0 +1,145 @@
+import { X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import type { MentionCandidate } from "./lib";
+
+interface ComposerProps {
+  replyTo: { id: string; senderName: string; preview: string } | null;
+  setReplyTo: (
+    reply: { id: string; senderName: string; preview: string } | null,
+  ) => void;
+  mention: { start: number; query: string } | null;
+  mentionCandidates: MentionCandidate[];
+  highlightIndex: number;
+  setHighlightIndex: (index: number) => void;
+  insertMention: (candidate: MentionCandidate) => void;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  body: string;
+  handleBodyChange: (value: string, selectionStart: number) => void;
+  handleComposerKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  isReadOnly: boolean;
+  audiencePreview: string | null;
+  handleSend: () => Promise<void>;
+  sending: boolean;
+}
+
+/**
+ * Zone 3: the bottom composer — reply quote bar, "@ mention" candidate
+ * popover, the textarea, an audience preview, and the send button.
+ */
+export function Composer(props: ComposerProps) {
+  const {
+    replyTo,
+    setReplyTo,
+    mention,
+    mentionCandidates,
+    highlightIndex,
+    setHighlightIndex,
+    insertMention,
+    textareaRef,
+    body,
+    handleBodyChange,
+    handleComposerKeyDown,
+    isReadOnly,
+    audiencePreview,
+    handleSend,
+    sending,
+  } = props;
+
+  return (
+    <div className="shrink-0 border-t bg-card px-4 py-3">
+      {replyTo && (
+        <div
+          data-testid="reply-quote-bar"
+          className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-primary bg-muted/60 px-3 py-2"
+        >
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-medium text-foreground">
+              回复 {replyTo.senderName}
+            </p>
+            {replyTo.preview && (
+              <p className="truncate text-xs text-muted-foreground">
+                {replyTo.preview}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            aria-label="取消回复"
+            onClick={() => setReplyTo(null)}
+            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
+      <div className="relative">
+        {mention && mentionCandidates.length > 0 && (
+          <ul
+            role="listbox"
+            aria-label="提及候选"
+            data-testid="mention-list"
+            className="absolute bottom-full left-0 right-0 mb-2 max-h-56 overflow-y-auto rounded-lg border bg-popover p-1 shadow-md"
+          >
+            {mentionCandidates.map((candidate, idx) => (
+              <li key={`${candidate.kind}:${candidate.token}`}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={idx === highlightIndex}
+                  onMouseEnter={() => setHighlightIndex(idx)}
+                  onClick={() => insertMention(candidate)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm",
+                    idx === highlightIndex && "bg-muted",
+                  )}
+                >
+                  <span className="font-medium">@{candidate.token}</span>
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                    {candidate.kind === "role" ? "角色" : "成员"}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <textarea
+          ref={textareaRef}
+          aria-label="消息内容"
+          value={body}
+          onChange={(e) =>
+            handleBodyChange(
+              e.target.value,
+              e.target.selectionStart ?? e.target.value.length,
+            )
+          }
+          onKeyDown={handleComposerKeyDown}
+          placeholder={
+            isReadOnly
+              ? "已归档,无法发送消息"
+              : "输入消息内容,@ 提及角色或成员…"
+          }
+          rows={2}
+          disabled={isReadOnly}
+          className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <div
+          data-testid="audience-preview"
+          className="min-w-0 truncate text-xs text-muted-foreground"
+        >
+          {audiencePreview ? `将发送给 ${audiencePreview}` : ""}
+        </div>
+        <Button
+          onClick={handleSend}
+          disabled={isReadOnly || sending || !body.trim()}
+          size="sm"
+          className="shrink-0"
+        >
+          {sending ? "发送中…" : "发送"}
+        </Button>
+      </div>
+    </div>
+  );
+}

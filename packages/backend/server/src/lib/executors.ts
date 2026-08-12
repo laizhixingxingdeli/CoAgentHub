@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
-import type { DataBase } from "./database";
 import { generateAgentToken, hashAgentToken } from "./agent-token";
+import type { DataBase } from "./database";
 
 /**
  * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 agent 身份」。
@@ -119,7 +119,6 @@ export function findExecutorByAgentName(
 export function findExecutorByKey(key: string): ExecutorConfig | undefined {
   return EXECUTORS.find((ex) => ex.key === key);
 }
-
 
 /**
  * 开机自注册:把执行器配置(含 hermes)对应的 agent 补进 agent 表(幂等,

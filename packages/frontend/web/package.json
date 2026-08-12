@@ -49,7 +49,7 @@
     "tw-animate-css": "^1.3.0",
     "typescript": "*",
     "vite": "^6.3.5",
-    "vitest": "^4.1.10",
+    "vitest": "^3.2.7",
     "@laizhixingxingdeli/tsconfig": "workspace:*"
   }
 }
