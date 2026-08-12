@@ -5,7 +5,9 @@
     "lib": ["ES2020", "ES2022", "DOM", "DOM.Iterable"],
     "noEmit": true,
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] },
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
@@ -13,11 +15,16 @@
     "noUncheckedSideEffectImports": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    "types": ["@testing-library/jest-dom", "vitest/globals", "vite/client"]
   },
   "references": [
-    { "path": "../../backend/server/tsconfig.json" },
-    { "path": "../../backend/database/tsconfig.json" }
+    {
+      "path": "../../backend/server/tsconfig.json"
+    },
+    {
+      "path": "../../backend/database/tsconfig.json"
+    }
   ],
   "include": ["src"]
 }

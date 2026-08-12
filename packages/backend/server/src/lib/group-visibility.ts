@@ -1,9 +1,12 @@
 /**
  * Visibility routing — the single source of truth for who may see a group
- * message (agent-groups spec: "Visibility rule"), shared by the GET messages
- * endpoint (per requester) and the webhook notifier (per member list).
- * Keeping the rule in one pure function here prevents the two call sites from
- * drifting apart.
+ * message. Two representations of the same rule live here:
+ *
+ *  - `isMessageVisibleToMember` (JS) — used where messages are already in
+ *    memory (webhook/WS fan-out, per-member filtering).
+ *  - `messageVisibleToMemberSql` (SQL) — used to push the filter into the
+ *    database for list queries, so pagination happens over the *visible*
+ *    stream instead of fetching everything and filtering in JS.
  *
  * A message is visible to a member iff:
  *   - the member is the sender (always sees own messages), or
@@ -11,7 +14,12 @@
  *   - audience = broadcast, or
  *   - audience = role and audienceRef ∈ member's roles in this group, or
  *   - audience = agent and audienceRef = member's id.
+ *
+ * `visibility-sql.test.ts` asserts both representations agree on the same data.
  */
+
+import { groupMessage as groupMessageTable } from "@laizhixingxingdeli/database/schema";
+import { and, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 
 export interface GroupMessageView {
   senderId: string;
@@ -43,6 +51,32 @@ export function isMessageVisibleToMember(
     default:
       return false;
   }
+}
+
+/**
+ * SQL predicate equivalent to `isMessageVisibleToMember` for one requester.
+ * `roles` are the requester's roles inside the group (already loaded by the
+ * route); when the requester is `human` the predicate is simply true.
+ */
+export function messageVisibleToMemberSql(
+  agentId: string,
+  roles: string[],
+): SQL | undefined {
+  if (roles.includes("human")) {
+    return sql`true`;
+  }
+  return or(
+    eq(groupMessageTable.senderId, agentId),
+    eq(groupMessageTable.audience, "broadcast"),
+    and(
+      eq(groupMessageTable.audience, "role"),
+      inArray(groupMessageTable.audienceRef, roles),
+    ),
+    and(
+      eq(groupMessageTable.audience, "agent"),
+      eq(groupMessageTable.audienceRef, agentId),
+    ),
+  );
 }
 
 /** The set of member ids to whom `message` is visible, per the rule above. */

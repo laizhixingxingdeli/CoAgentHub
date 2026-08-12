@@ -15,7 +15,8 @@
     "build": "bunchee && npm run ts-map",
     "push": "dotenv -- drizzle-kit push",
     "migrate": "tsx migrate.ts",
-    "generate": "drizzle-kit generate"
+    "generate": "drizzle-kit generate",
+    "check-types": "tsc -b"
   },
   "dependencies": {
     "drizzle-orm": "*",

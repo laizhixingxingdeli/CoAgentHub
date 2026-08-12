@@ -17,10 +17,7 @@ import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import { maybeDispatchExecutorTask } from "@server/lib/executor-task";
 import { insertGroupMessage } from "@server/lib/group-message";
-import {
-  type GroupMemberView,
-  isMessageVisibleToMember,
-} from "@server/lib/group-visibility";
+import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
 import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
@@ -32,6 +29,9 @@ const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
 
 /** Soft-delete placeholder (ticket 22): the row is kept (closure/reply tree stays intact), the body becomes this string. */
 const DELETED_MESSAGE_PLACEHOLDER = "[消息已删除]";
+
+/** Max messages returned by one GET /:id/messages page; continue with ?after=. */
+const MESSAGE_PAGE_LIMIT = 200;
 
 app
   .post(
@@ -814,14 +814,16 @@ app
         throw new BizError(BizCodeEnum.Forbidden);
       }
 
-      // Scope the query to the group (+ optional incremental cursor) and let
-      // group-visibility.ts decide per-message visibility — the same rule the
-      // webhook notifier uses, so the two call sites cannot drift apart. The
-      // rule: the sender always sees own messages; broadcast reaches every
-      // member; role reaches members holding that role; agent reaches only the
-      // named member; human members bypass the audience rule and see
-      // everything (the user watches the whole collaboration process).
-      const conditions = [eq(groupMessageTable.groupId, id)];
+      // Visibility is pushed into SQL (same rule as the webhook/WS fan-out,
+      // see group-visibility.ts) so the ?after= cursor and LIMIT paginate over
+      // the *visible* stream instead of fetching everything into JS. The rule:
+      // sender always sees own messages; broadcast reaches every member; role
+      // reaches members holding that role; agent reaches only the named
+      // member; human members bypass the audience rule and see everything.
+      const conditions = [
+        eq(groupMessageTable.groupId, id),
+        messageVisibleToMemberSql(requesterId, membership.roles),
+      ];
       if (after) {
         // Incremental pull: uuidv7 ids are time-ordered, so id > after yields
         // everything the caller has not seen yet. The stream is ordered by the
@@ -852,15 +854,11 @@ app
         .where(and(...conditions))
         // uuidv7 ids embed the server receive time, so id order IS receive
         // order — ordering by id keeps the stream consistent with ?after=.
-        .orderBy(asc(groupMessageTable.id));
+        // Page the visible stream; clients continue with ?after=<lastId>.
+        .orderBy(asc(groupMessageTable.id))
+        .limit(MESSAGE_PAGE_LIMIT);
 
-      const requester: GroupMemberView = {
-        agentId: requesterId,
-        roles: membership.roles,
-      };
-      return c.json(
-        messages.filter((m) => isMessageVisibleToMember(m, requester)),
-      );
+      return c.json(messages);
     },
   )
   /* ---------------- 任务(ticket 35):server 为单一状态源,桥是纯执行器客户端 ---------------- */

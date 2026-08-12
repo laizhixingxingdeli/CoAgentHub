@@ -8,7 +8,8 @@
     "./biz": "./dist/src/biz.js"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "check-types": "tsc -b"
   },
   "devDependencies": {
     "@laizhixingxingdeli/tsconfig": "workspace:*"

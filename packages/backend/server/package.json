@@ -14,7 +14,8 @@
     "start": "node dist/server.mjs",
     "clean": "rimraf dist",
     "test": "vitest run",
-    "pretest": "pnpm --filter @laizhixingxingdeli/database build && pnpm --filter @laizhixingxingdeli/error build"
+    "pretest": "pnpm --filter @laizhixingxingdeli/database build && pnpm --filter @laizhixingxingdeli/error build",
+    "check-types": "tsc -b"
   },
   "dependencies": {
     "@laizhixingxingdeli/database": "workspace:^",

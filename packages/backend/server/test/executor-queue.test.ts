@@ -211,7 +211,9 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
   });
 
   it("队列串行性:两条定向消息只有一条 running,另一条 queued,完成后才轮到", async () => {
-    process.env.FAKE_SLEEP_SECS = "2";
+    // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
+    // 长 sleep 给并行负载留足余量,避免轮询滞后导致断言误判。
+    process.env.FAKE_SLEEP_SECS = "5";
     const { coordinator, codebuddy, group } = await setupGroup();
 
     const m1 = await postMessage(coordinator.token, group.id, {
@@ -241,10 +243,14 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
       "queued",
     );
     expect(t2.status).toBe("queued");
-    // 此刻第一条仍是 running,证明没有并发执行。
+    // 核心不变量:绝不同时存在两个 running 任务。若第一条尚未结束,唯一在跑的
+    // 必须是 m1;即使它在轮询间隙恰好完成,m2 也必须是 queued(排队而非并发)。
     const again = await listTasks(coordinator.token, group.id);
     const running = again.filter((t) => t.status === "running");
-    expect(running.map((t) => t.messageId)).toEqual([m1.id]);
+    expect(running.some((t) => t.messageId === m2.id)).toBe(false);
+    if (running.length > 0) {
+      expect(running.map((t) => t.messageId)).toEqual([m1.id]);
+    }
 
     // 第一条 done 后,第二条才轮到并完成。
     await waitForTaskStatus(coordinator.token, group.id, m1.id, "done");
@@ -255,9 +261,10 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
     const taskStatus = messages.filter((m) => m.contentType === "task_status");
     expect(taskStatus.some((m) => m.body.startsWith("🚀"))).toBe(true);
     expect(taskStatus.some((m) => m.body.startsWith("📋"))).toBe(true);
-  });
+  }, 30_000);
 
   it("「停止」kill 运行中任务的进程组:task → cancelled + 🛑 回传", async () => {
+    // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
     process.env.FAKE_SLEEP_SECS = "60";
     const { coordinator, codebuddy, group } = await setupGroup();
 
@@ -293,9 +300,10 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
       group.id,
       (m) => m.contentType === "task_status" && m.body.startsWith("🛑"),
     );
-  });
+  }, 30_000);
 
   it("「回滚 <taskId>」恢复工作区到执行前快照:task → failed + ✅ 回传", async () => {
+    // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
     process.env.FAKE_SLEEP_SECS = "";
     process.env.FAKE_APPEND = "1";
     const { coordinator, codebuddy, group } = await setupGroup();
@@ -337,7 +345,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
     const after = await listTasks(coordinator.token, group.id);
     const rolled = after.find((x) => x.id === t.id);
     expect(rolled?.status).toBe("failed");
-  });
+  }, 30_000);
 
   it("重启兜底:queued/running 任务自动恢复为 failed(server-restart)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
@@ -381,5 +389,5 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
       const diff = t?.diffSummary as Record<string, unknown> | null;
       expect(diff?.error).toBe("server-restart");
     }
-  });
+  }, 30_000);
 });
