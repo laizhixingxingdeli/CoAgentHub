@@ -798,6 +798,17 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
     // 行内 DOM 顺序:头像在气泡列之前(own 靠 flex-row-reverse 翻转到右侧)
     expect(own?.firstElementChild).toBe(ownAvatar);
     expect(other?.firstElementChild).toBe(otherAvatar);
+
+    // Ticket 44: 操作条贴气泡角——own 镜像(bottom-0 right-full,右缘=气泡
+    // 左缘),他人 left-full(左缘=气泡右缘),底边都与气泡底边齐平。
+    const ownBar = within(own!).getByTestId("message-actions-hover");
+    expect(ownBar.className).toContain("bottom-0");
+    expect(ownBar.className).toContain("right-full");
+    expect(ownBar.className).toContain("mr-1");
+    const otherBar = within(other!).getByTestId("message-actions-hover");
+    expect(otherBar.className).toContain("bottom-0");
+    expect(otherBar.className).toContain("left-full");
+    expect(otherBar.className).toContain("ml-1");
   });
 
   it("未绑定 agentId 时所有消息默认靠左、不显示「我」徽章", async () => {
@@ -1387,17 +1398,18 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
     expect(hoverBars.length).toBeGreaterThan(0);
     expect(hoverBars[0].className).toContain("hidden");
     expect(hoverBars[0].className).toContain("md:flex");
-    // Ticket 44: hover 操作条紧贴气泡右下角(absolute 于气泡容器内
-    // -bottom-2 right-0),不再整行垂直居中。
-    expect(hoverBars[0].className).toContain("-bottom-2");
-    expect(hoverBars[0].className).toContain("right-0");
-    // 点击气泡弹出移动操作条(md:hidden),位置与 hover 条一致(贴气泡右下),
+    // Ticket 44: hover 操作条贴气泡角——bottom-0 底边=气泡底边;未绑定
+    // agentId → 全是他人消息,left-full ml-1(左缘=气泡右缘)。
+    expect(hoverBars[0].className).toContain("bottom-0");
+    expect(hoverBars[0].className).toContain("left-full");
+    expect(hoverBars[0].className).toContain("ml-1");
+    // 点击气泡弹出移动操作条(md:hidden),位置与 hover 条一致(贴角),
     // 点击外部关闭。
     fireEvent.click(screen.getByRole("button", { name: "任务草稿 操作" }));
     const mobileBar = screen.getByTestId("message-actions-mobile");
     expect(mobileBar.className).toContain("md:hidden");
-    expect(mobileBar.className).toContain("-bottom-2");
-    expect(mobileBar.className).toContain("right-0");
+    expect(mobileBar.className).toContain("bottom-0");
+    expect(mobileBar.className).toContain("left-full");
     fireEvent.click(document.body);
     expect(
       screen.queryByTestId("message-actions-mobile"),

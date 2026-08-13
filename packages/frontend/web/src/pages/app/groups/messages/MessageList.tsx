@@ -390,14 +390,13 @@ export function MessageList(props: MessageListProps) {
                               )}
                             </div>
                           )}
-                          {/* 气泡容器 relative + max-w:让 hover/移动操作条 absolute
-                        定位于气泡右下角(-bottom-2 right-0)。宽度上限(max-w-75% /
-                        sm:max-w-60%)上移到容器,百分比相对「消息列」解析(与改造前
-                        气泡一致),内部气泡 w-full 撑满——短消息不会按自身宽度的
-                        75% 收缩换行;own 经 flex-row-reverse 翻转在右、他人靠左,
-                        两者同规则,无需按 own 分支改 left/right 数学。Ticket 22:
-                        编辑中换为 save/cancel 文本域,已删除消息渲染灰色占位。 */}
-                          <div className="relative max-w-[75%] sm:max-w-[60%]">
+                          {/* 气泡容器 relative + w-fit + max-w:宽度贴合内容(短消息
+                        与内容同宽、不撑满;长消息在 max-w-75%/sm:max-w-60% 处换行,
+                        百分比相对「消息列」解析),内部气泡 w-full 即内容宽;操作条
+                        absolute 贴角(bottom-0 贴底、left-full/right-full 贴对应
+                        侧边,own 镜像)。Ticket 22:编辑中换为 save/cancel 文本域,
+                        已删除消息渲染灰色占位。 */}
+                          <div className="relative w-fit max-w-[75%] sm:max-w-[60%]">
                             {editingId === msg.id ? (
                               <div
                                 data-testid="message-edit-form"
@@ -555,14 +554,18 @@ export function MessageList(props: MessageListProps) {
                               </div>
                             )}
                             {/* Ticket 44: hover 操作条(md+)与移动端 tap 弹层共用
-                          relative 气泡容器,absolute -bottom-2 right-0 紧贴气泡
-                          右下角(他人/自己同规则);`invisible` 保证 hover/focus
-                          前不占 tab 顺序/a11y 树(opacity 单独用会留下不可见但
-                          可聚焦的按钮)。 */}
+                          relative 气泡容器,absolute 贴角:bottom-0 底边=气泡底边,
+                          他人 left-full ml-1(按钮左缘=气泡右缘)、自己 right-full
+                          mr-1(按钮右缘=气泡左缘,flex-row-reverse 下镜像同规则);
+                          `invisible` 保证 hover/focus 前不占 tab 顺序/a11y 树
+                          (opacity 单独用会留下不可见但可聚焦的按钮)。 */}
                             {actions && (
                               <div
                                 data-testid="message-actions-hover"
-                                className="absolute -bottom-2 right-0 z-10 hidden items-center gap-0.5 rounded-lg border bg-popover p-0.5 opacity-0 shadow-sm transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 invisible group-hover:visible group-focus-within:visible md:flex"
+                                className={cn(
+                                  "absolute bottom-0 z-10 hidden items-center gap-0.5 rounded-lg border bg-popover p-0.5 opacity-0 shadow-sm transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 invisible group-hover:visible group-focus-within:visible md:flex",
+                                  own ? "right-full mr-1" : "left-full ml-1",
+                                )}
                               >
                                 {actions}
                               </div>
@@ -570,7 +573,10 @@ export function MessageList(props: MessageListProps) {
                             {actions && openActionsId === msg.id && (
                               <div
                                 data-testid="message-actions-mobile"
-                                className="absolute -bottom-2 right-0 z-10 flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-md md:hidden"
+                                className={cn(
+                                  "absolute bottom-0 z-10 flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-md md:hidden",
+                                  own ? "right-full mr-1" : "left-full ml-1",
+                                )}
                               >
                                 {actions}
                               </div>
