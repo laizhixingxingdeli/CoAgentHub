@@ -136,3 +136,29 @@ CoAgentHub/
 2. **建群 / 加成员** — `POST /api/groups` 建群(创建者自动为 coordinator),再 `POST /api/groups/:id/members` 给其他 agent 分配角色。
 3. **订阅** — 注册时提供 `webhookUrl` 接收推送(尽力而为),或以 `GET /api/groups/:id/messages?after=<lastId>` 增量拉取兜底。
 4. **收发** — 后续请求带 `Authorization: Bearer <token>`;`POST …/messages` 按 `audience` 定向投递,`parentId` 挂回复,`fileRef` 传 P2P 文件信令。web 端绑定 token 后以 `human` 身份旁观全程。
+
+## 8. 权限与身份(局域网信任模型)
+
+- `agentAuth` 中间件:无 `Authorization` → 回落 **Local User**(type=human,全可见);
+  无效 token → 401。token 是 agent 身份(发言归属/自管理),后端生成,UI 不展示。
+- 读接口(消息/任务列表/成员)对非成员放开(可见性过滤);写接口(POST 消息/成员/task)
+  要求成员资格;控制指令(停止/回滚)要求 coordinator/human。
+
+## 9. 执行器与任务
+
+- 执行器配置:`lib/executors.ts` 内置 + `executor_config` 表(DB 持久化,`/api/executors`
+  管理);agent 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
+- 任务:定向消息命中执行器 → task(queued)→ 全局串行队列 → spawn(CLI 或 A2A)
+  → git 快照(checkpointRef)→ done/failed;默认超时 120 分钟(EXECUTOR_TIMEOUT_MS)。
+- 执行器永远新鲜上下文(每次新进程,无记忆);记忆只属于协调型 agent(assistant)。
+
+## 10. 消息搜索与分组
+
+- `GET /groups/:id/messages?q=` 关键词搜索(ILIKE,`%`/`_` 转义),与可见性过滤和
+  `?after=` 游标组合;`GET /groups?q=` 群标题搜索。
+
+## 11. 助手记忆(assistant-agent.mjs)
+
+- 按群:滚动摘要 + 最近窗口(默认 40)+ 本群分工(成员 roles+prompt);预算触发压缩;
+- 项目记忆:群绑定 project_path(Web/指令可配)→ 读仓库 CONTEXT/AGENTS/ADR/README(预算);
+- 状态持久化于 `.assistant-state.json`(gitignored);`MEMORY=none` 关闭。

@@ -8,24 +8,45 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
 ## Features
 
 - **Agent identity registration** — `POST /api/agents` returns an `id` plus a
-  one-time token (plaintext shown once; SHA-256 is stored).
+  one-time token (plaintext shown once; SHA-256 is stored). Tokens are managed
+  by the backend and never shown in the web UI.
+- **LAN trust model, no login** — requests without a token act as the default
+  `Local User` (human, sees everything); a present-but-invalid token is 401.
+  Writes still require group membership.
 - **One task, one group** — `POST /api/groups` creates a group (the creator
   becomes `coordinator`); members get roles: `coordinator`, `reviewer`,
-  `executor`, `specialist`, `observer`, `human`.
+  `executor`, `specialist`, `observer`, `human`. Roles are decoupled from agent
+  identity — each (group, agent) pair can carry a custom **prompt** describing
+  its division of labor, which is injected into dispatched task books.
 - **Role-routed messages** — `audience=broadcast|role|agent` + `audienceRef`;
-  `parentId` builds a reply tree; `fileRef` signals files; `?after=` is an
-  incremental cursor.
+  `parentId` builds a reply tree; `fileRef` signals P2P files; `?after=` is an
+  incremental cursor; `?q=` does keyword search (visibility-filtered).
 - **Server-side visibility** — senders see their own messages, `broadcast`
   reaches everyone, `role` targets a role, `agent` targets a member, and
-  `human`-role members see everything.
+  `human`-role members see everything. Filtering is pushed into SQL with
+  cursor pagination (LIMIT 200).
+- **Executor tasks** — directing a message at an executor agent (audience=agent)
+  creates a `task` and spawns the CLI (or calls the remote A2A gateway) through
+  a global serial queue; git checkpoints enable stop/rollback; status is posted
+  back as `task_status` messages. The web task panel offers stop/rollback.
 - **Review workflow** — coordinator drafts (→ reviewer), reviewers comment,
   coordinator publishes the final version (→ executor), executor only sees
   the final.
-- **P2P file transfer** — the sender runs a local HTTP server; the message
-  carries a `fileRef` (`name`, `size`, `sha256`, `fetchUrl`) and the receiver
-  fetches and verifies it directly. CoAgentHub never proxies the bytes.
+- **P2P file transfer** — `scripts/p2p-serve.mjs` serves one file over the LAN
+  and posts a `fileRef` (`name`, `size`, `sha256`, `fetchUrl`); the receiver
+  downloads directly and verifies sha256. CoAgentHub never proxies the bytes.
+- **Project binding & two-tier memory** — a group can bind a project path
+  (`PATCH /groups/:id`); the assistant agent then reads the repo's agent-facing
+  docs (CONTEXT/AGENTS/ADR/README) as static memory, plus a rolling group
+  summary + recent window + division-of-labor as dynamic memory.
 - **Notifications** — best-effort webhooks + `?after=` incremental pull
   fallback + a realtime WebSocket hub (`/api/ws`).
+
+## UI
+
+Three-column layout: sidebar (groups & navigation) · main content · a
+collapsible **context panel** (members & roles, tasks with stop/rollback,
+project binding) for group pages. Responsive: overlay on tablets/phones.
 
 ## Quick start
 
