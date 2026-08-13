@@ -43,12 +43,6 @@ export function TasksTab({ groupId }: { groupId: string }) {
     }
   }, [groupId]);
 
-  useEffect(() => {
-    void loadTasks();
-    void loadMessages();
-    void loadMembers();
-  }, [loadTasks, loadMessages, loadMembers]);
-
   const loadMessages = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages`, {
@@ -74,6 +68,12 @@ export function TasksTab({ groupId }: { groupId: string }) {
       // 执行者名缺失时 TaskPanel 回退到 executorKey。
     }
   }, [groupId]);
+
+  useEffect(() => {
+    void loadTasks();
+    void loadMessages();
+    void loadMembers();
+  }, [loadTasks, loadMessages, loadMembers]);
 
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
    * 识别);发送后刷新任务列表。403 → 无权限提示。 */
