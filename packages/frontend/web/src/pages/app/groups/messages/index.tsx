@@ -1,4 +1,12 @@
-import { Archive, ArrowLeft, Folder, Search, Users, X } from "lucide-react";
+import {
+  Archive,
+  ArrowLeft,
+  Folder,
+  ListChecks,
+  Search,
+  Users,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRoute } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -35,6 +43,7 @@ import {
   type MessageItem,
   ROLE_LABELS,
 } from "./types";
+import TaskPanel, { type TaskItem } from "./TaskPanel";
 
 /**
  * Group message page (ticket 18): WeChat/QQ-style chat UI — three zones
@@ -60,6 +69,14 @@ export default function GroupMessagesPage() {
   const [projectPanelOpen, setProjectPanelOpen] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectMessage, setProjectMessage] = useState<string | null>(null);
+  // 任务面板(enhancement):标题栏「任务」按钮展开;数据来自 GET /groups/:id/tasks,
+  // 打开面板时拉取一次(不轮询);停止/回滚经广播命令消息触发。
+  const [openTasks, setOpenTasks] = useState(false);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  /** 正在发送命令的任务 id(null = 空闲);命令失败提示走 commandError。 */
+  const [commandSending, setCommandSending] = useState<string | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
   const [body, setBody] = useState("");
   // Collapsed thread roots (ticket 15). Keyed by root message id and kept in
   // its own state so a WS merge (which replaces the message list) never resets
@@ -507,6 +524,85 @@ export default function GroupMessagesPage() {
     }
   };
 
+  // ── 任务面板(enhancement)──────────────────────────────────────────────
+  const loadTasks = useCallback(async () => {
+    if (!groupId) {
+      return;
+    }
+    setTasksLoading(true);
+    setCommandError(null);
+    try {
+      const res = await fetch(`/api/groups/${groupId}/tasks`, {
+        headers: agentAuthHeaders(),
+      });
+      if (!res.ok) {
+        // 403 = 非成员无权读任务列表 → 与命令 403 同一无权限提示。
+        setCommandError(
+          res.status === 403
+            ? "无权限,请以 coordinator/human 身份绑定 token"
+            : `加载任务失败: HTTP ${res.status}`,
+        );
+        return;
+      }
+      setTasks((await res.json()) as TaskItem[]);
+    } catch (e) {
+      setCommandError(
+        `加载任务失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [groupId]);
+
+  const toggleTasks = () => {
+    const next = !openTasks;
+    setOpenTasks(next);
+    if (next) {
+      // 打开时刷新一次,不自动轮询。
+      void loadTasks();
+    }
+  };
+
+  /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
+   * 识别);发送后刷新任务列表。403 → 无权限提示。 */
+  const sendCommand = async (task: TaskItem, commandBody: string) => {
+    if (!groupId || commandSending) {
+      return;
+    }
+    setCommandSending(task.id);
+    setCommandError(null);
+    try {
+      const res = await fetch(`/api/groups/${groupId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...agentAuthHeaders() },
+        body: JSON.stringify({ body: commandBody, audience: "broadcast" }),
+      });
+      if (!res.ok) {
+        setCommandError(
+          res.status === 403
+            ? "无权限,请以 coordinator/human 身份绑定 token"
+            : `命令发送失败: HTTP ${res.status}`,
+        );
+        return;
+      }
+      await loadTasks();
+    } catch (e) {
+      setCommandError(
+        `命令发送失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setCommandSending(null);
+    }
+  };
+
+  const handleStopTask = (task: TaskItem) => {
+    void sendCommand(task, `停止 ${task.id}`);
+  };
+
+  const handleRollbackTask = (task: TaskItem) => {
+    void sendCommand(task, `回滚 ${task.id}`);
+  };
+
   const handleSend = async () => {
     const trimmed = body.trim();
     if (!groupId || !trimmed) {
@@ -890,6 +986,18 @@ export default function GroupMessagesPage() {
             <Search className="size-4" />
           </Button>
         )}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="任务"
+          aria-expanded={openTasks}
+          title="任务"
+          onClick={toggleTasks}
+          className="shrink-0 gap-1"
+        >
+          <ListChecks className="size-4" />
+          任务
+        </Button>
         <a
           href={`/groups/${groupId}/members`}
           className="inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -1044,6 +1152,19 @@ export default function GroupMessagesPage() {
           </div>
         )}
       </div>
+
+      {openTasks && (
+        <TaskPanel
+          tasks={tasks}
+          loading={tasksLoading}
+          error={commandError}
+          commandSending={commandSending}
+          messages={messages}
+          members={members}
+          onStop={handleStopTask}
+          onRollback={handleRollbackTask}
+        />
+      )}
 
       <MessageList
         loading={loading}

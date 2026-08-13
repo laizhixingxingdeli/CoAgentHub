@@ -72,10 +72,21 @@ function messagesFetchMock(
   messages: unknown[] = MESSAGES,
   members: unknown[] = MEMBERS,
   groupStatus: "active" | "archived" = "active",
-  options: { projectPath?: string | null; patchError?: number } = {},
+  options: {
+    projectPath?: string | null;
+    patchError?: number;
+    /** 任务面板 GET /tasks 返回;缺省空列表。 */
+    tasks?: unknown[];
+    /** 第 2 次 GET /tasks 起返回(模拟命令后服务端状态变化)。 */
+    tasksAfterCommand?: unknown[];
+    /** 命令 POST /messages 的失败状态码(403 = 无权限)。 */
+    commandError?: number;
+  } = {},
 ) {
   // Ticket 33: 项目绑定状态 — PATCH 更新它,GET 详情返回它。
   let boundProjectPath: string | null = options.projectPath ?? null;
+  // 任务面板:统计 GET /tasks 次数,便于断言「命令后刷新」。
+  let tasksGets = 0;
   return createFetchMock([
     {
       // Ticket 33: PATCH /api/groups/:id — 绑定/解绑项目路径。必须排在下方
@@ -126,9 +137,25 @@ function messagesFetchMock(
         String(url).endsWith("/messages"),
       respond: (_url, init) => {
         if ((init?.method ?? "GET") === "POST") {
+          if (options.commandError) {
+            return jsonResponse({ message: "forbidden" }, options.commandError);
+          }
           return jsonResponse({ id: "msg-9", body: "已发送" });
         }
         return jsonResponse(messages);
+      },
+    },
+    {
+      // 任务面板:GET /groups/:id/tasks — 命令发送成功后再拉一次(状态刷新)。
+      match: (url) =>
+        String(url).includes("/api/groups/") && String(url).endsWith("/tasks"),
+      respond: () => {
+        tasksGets += 1;
+        const tasks =
+          tasksGets > 1 && options.tasksAfterCommand
+            ? options.tasksAfterCommand
+            : options.tasks ?? [];
+        return jsonResponse(tasks);
       },
     },
     {
@@ -172,6 +199,134 @@ function messagesFetchMock(
     },
   ]);
 }
+
+/* ---------------- 任务面板(任务控制 UI enhancement) ---------------- */
+
+const TASKS = [
+  {
+    id: "task-1",
+    groupId: "group-1",
+    messageId: "msg-1",
+    executorAgentId: "agent-1",
+    executorKey: "codebuddy",
+    status: "running",
+    checkpointRef: null,
+    diffSummary: null,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: null,
+  },
+  {
+    id: "task-2",
+    groupId: "group-1",
+    messageId: "msg-2",
+    executorAgentId: "agent-2",
+    executorKey: "codebuddy2",
+    status: "done",
+    checkpointRef: "refs/coagenthub-cp/task-2",
+    diffSummary: { hash: "abc123def4567890", summary: "1 file changed" },
+    createdAt: "2026-08-01T00:01:00.000Z",
+    updatedAt: "2026-08-01T00:02:00.000Z",
+  },
+];
+
+describe("任务面板(任务控制 UI)", () => {
+  it("打开面板:状态徽章/执行器/正文预览/时间 + 停止/回滚按钮", async () => {
+    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+
+    fireEvent.click(screen.getByLabelText("任务"));
+    await screen.findByTestId("task-panel");
+
+    // running → 停止;done + checkpointRef → 回滚
+    const row1 = within(screen.getByTestId("task-row-task-1"));
+    expect(row1.getByText("执行中")).toBeInTheDocument();
+    expect(row1.getByText("hermes-mac")).toBeInTheDocument();
+    expect(row1.getByText("任务草稿")).toBeInTheDocument();
+    expect(row1.getByTestId("task-time-task-1")).toBeInTheDocument();
+    expect(row1.getByTestId("task-stop-task-1")).toBeInTheDocument();
+    expect(row1.queryByTestId("task-rollback-task-1")).toBeNull();
+
+    const row2 = within(screen.getByTestId("task-row-task-2"));
+    expect(row2.getByText("已完成")).toBeInTheDocument();
+    expect(row2.getByText("win-hermes")).toBeInTheDocument();
+    expect(row2.getByText(/hash abc123/)).toBeInTheDocument();
+    expect(row2.getByTestId("task-rollback-task-2")).toBeInTheDocument();
+    expect(row2.queryByTestId("task-stop-task-2")).toBeNull();
+  });
+
+  it("空态显示「暂无任务」", async () => {
+    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+    fireEvent.click(screen.getByLabelText("任务"));
+    await screen.findByText("暂无任务");
+  });
+
+  it("点「停止」发出「停止 <taskId>」广播消息,刷新后状态变 cancelled", async () => {
+    const cancelledTasks = [
+      { ...TASKS[0], status: "cancelled" },
+      TASKS[1],
+    ];
+    const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
+      tasks: TASKS,
+      tasksAfterCommand: cancelledTasks,
+    });
+    stubFetch(mock);
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+    fireEvent.click(screen.getByLabelText("任务"));
+    await screen.findByTestId("task-stop-task-1");
+
+    fireEvent.click(screen.getByTestId("task-stop-task-1"));
+
+    await waitFor(() => {
+      expect(lastPostPayload(mock)).toEqual({
+        body: "停止 task-1",
+        audience: "broadcast",
+      });
+    });
+    // 命令后刷新任务列表 → cancelled 可见
+    await screen.findByText("已取消");
+  });
+
+  it("点「回滚」发出「回滚 <taskId>」广播消息", async () => {
+    const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
+      tasks: TASKS,
+    });
+    stubFetch(mock);
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+    fireEvent.click(screen.getByLabelText("任务"));
+    await screen.findByTestId("task-rollback-task-2");
+
+    fireEvent.click(screen.getByTestId("task-rollback-task-2"));
+
+    await waitFor(() => {
+      expect(lastPostPayload(mock)).toEqual({
+        body: "回滚 task-2",
+        audience: "broadcast",
+      });
+    });
+  });
+
+  it("命令 403 时给出无权限提示(按钮仍可见)", async () => {
+    stubFetch(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", {
+        tasks: TASKS,
+        commandError: 403,
+      }),
+    );
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+    fireEvent.click(screen.getByLabelText("任务"));
+    await screen.findByTestId("task-stop-task-1");
+
+    fireEvent.click(screen.getByTestId("task-stop-task-1"));
+
+    await screen.findByText("无权限,请以 coordinator/human 身份绑定 token");
+  });
+});
 
 function stubFetch(mock: ReturnType<typeof createFetchMock>) {
   vi.stubGlobal("fetch", mock);
