@@ -66,9 +66,12 @@ export function ConversationList() {
         if (!res.ok) {
           return; // silent: token missing/invalid or server error
         }
-        const data = (await res.json()) as ConversationItem[];
+        const data = (await res.json()) as {
+          items: ConversationItem[];
+          total: number;
+        };
         if (!cancelled) {
-          setGroups(data);
+          setGroups(data.items);
         }
       } catch {
         // silent

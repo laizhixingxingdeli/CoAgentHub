@@ -43,6 +43,9 @@ type AgentInfo = {
 /** Status filter tabs; "all" fetches without a ?status= param. */
 type StatusFilter = "all" | "active" | "archived";
 
+/** 群列表分页:首屏/重置每次取一页,「加载更多」按此步长追加。 */
+const PAGE_SIZE = 20;
+
 /**
  * Turn a non-OK response into a human-readable error. A 401 means the
  * agentAuth middleware rejected the request: if no `Authorization` header was
@@ -71,6 +74,10 @@ export default function GroupsPage() {
   const [, navigate] = useLocation();
   const [groups, setGroups] = useState<GroupItem[]>([]);
   const [loading, setLoading] = useState(false);
+  // 分页:total 为满足当前过滤条件的总数(由后端返回),用于判断是否还有更多;
+  // loadingMore 表示「加载更多」请求进行中(按钮禁用防重复点击)。
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -147,14 +154,17 @@ export default function GroupsPage() {
       if (q) {
         params.set("q", q);
       }
-      const query = params.size > 0 ? `?${params.toString()}` : "";
-      const res = await fetch(`/api/groups${query}`, { headers });
+      // 分页:首次加载/过滤重置总是从第一页(limit=20,offset=0)开始。
+      params.set("limit", String(PAGE_SIZE));
+      params.set("offset", "0");
+      const res = await fetch(`/api/groups?${params.toString()}`, { headers });
       if (!res.ok) {
         throwForStatus(res, Boolean(headers.Authorization));
       }
-      const data = (await res.json()) as GroupItem[];
+      const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
-        setGroups(data);
+        setGroups(data.items);
+        setTotal(data.total);
       }
     } catch (e) {
       if (filter === statusFilter && q === debouncedQuery) {
@@ -166,6 +176,47 @@ export default function GroupsPage() {
       }
     }
   }, [statusFilter, debouncedQuery]);
+
+  // 「加载更多」:按当前已加载数量作为 offset 追加下一页;仅当前过滤条件
+  // 未变化时提交结果,避免与新的搜索/过滤请求交错。
+  const loadMore = useCallback(async () => {
+    if (loadingMore) {
+      return;
+    }
+    const filter = statusFilter;
+    const q = debouncedQuery;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const headers = agentAuthHeaders();
+      const params = new URLSearchParams();
+      if (filter !== "all") {
+        params.set("status", filter);
+      }
+      if (q) {
+        params.set("q", q);
+      }
+      params.set("limit", String(PAGE_SIZE));
+      params.set("offset", String(groups.length));
+      const res = await fetch(`/api/groups?${params.toString()}`, { headers });
+      if (!res.ok) {
+        throwForStatus(res, Boolean(headers.Authorization));
+      }
+      const data = (await res.json()) as { items: GroupItem[]; total: number };
+      if (filter === statusFilter && q === debouncedQuery) {
+        setGroups((prev) => [...prev, ...data.items]);
+        setTotal(data.total);
+      }
+    } catch (e) {
+      if (filter === statusFilter && q === debouncedQuery) {
+        setError(`加载更多群组失败: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } finally {
+      if (filter === statusFilter && q === debouncedQuery) {
+        setLoadingMore(false);
+      }
+    }
+  }, [statusFilter, debouncedQuery, groups.length, loadingMore]);
 
   useEffect(() => {
     loadGroups();
@@ -1135,6 +1186,19 @@ export default function GroupsPage() {
                 ))}
               </tbody>
             </table>
+            {/* 分页:还有更多时才显示「加载更多」,加载中禁用防重复点击 */}
+            {groups.length > 0 && groups.length < total && (
+              <div className="flex justify-center border-t p-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? "加载中…" : "加载更多"}
+                </Button>
+              </div>
+            )}
           </>
         )}
       </div>

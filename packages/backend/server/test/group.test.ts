@@ -105,12 +105,14 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(200);
-      const list = (await res.json()) as Array<{
-        id: string;
-        title: string;
-        status: string;
-        memberCount: number;
-      }>;
+      const list = ((await res.json()) as {
+        items: Array<{
+          id: string;
+          title: string;
+          status: string;
+          memberCount: number;
+        }>;
+      }).items;
       const item = list.find((g) => g.id === group.id);
       expect(item).toBeTruthy();
       expect(item?.status).toBe("active");
@@ -129,14 +131,14 @@ describe("群组与成员 API", () => {
       const archivedRes = await app.request("/api/groups?status=archived", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const archivedList = (await archivedRes.json()) as Array<{ id: string }>;
+      const archivedList = ((await archivedRes.json()) as { items: Array<{ id: string }> }).items;
       expect(archivedList.some((g) => g.id === archived.id)).toBe(true);
       expect(archivedList.some((g) => g.id === active.id)).toBe(false);
 
       const activeRes = await app.request("/api/groups?status=active", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const activeList = (await activeRes.json()) as Array<{ id: string }>;
+      const activeList = ((await activeRes.json()) as { items: Array<{ id: string }> }).items;
       expect(activeList.some((g) => g.id === active.id)).toBe(true);
       expect(activeList.some((g) => g.id === archived.id)).toBe(false);
     });
@@ -159,7 +161,9 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(res.status).toBe(200);
-      const list = (await res.json()) as Array<{ id: string; title: string }>;
+      const list = ((await res.json()) as {
+        items: Array<{ id: string; title: string }>;
+      }).items;
       expect(list.some((g) => g.id === match.id)).toBe(true);
       expect(list.every((g) => g.title.includes("训练"))).toBe(true);
     });
@@ -176,7 +180,7 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(percentRes.status).toBe(200);
-      const percentList = (await percentRes.json()) as Array<{ id: string }>;
+      const percentList = ((await percentRes.json()) as { items: Array<{ id: string }> }).items;
       expect(percentList.some((g) => g.id === withPercent.id)).toBe(true);
 
       // _ 按字面匹配,不会当单字符通配符(否则 "任务甲" 也会命中)。
@@ -185,9 +189,9 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(underscoreRes.status).toBe(200);
-      const underscoreList = (await underscoreRes.json()) as Array<{
-        id: string;
-      }>;
+      const underscoreList = ((await underscoreRes.json()) as {
+        items: Array<{ id: string }>;
+      }).items;
       expect(underscoreList.some((g) => g.id === withUnderscore.id)).toBe(true);
       expect(underscoreList.some((g) => g.id === noUnderscore.id)).toBe(false);
     });
@@ -206,7 +210,7 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(res.status).toBe(200);
-      const list = (await res.json()) as Array<{ id: string }>;
+      const list = ((await res.json()) as { items: Array<{ id: string }> }).items;
       expect(list.some((g) => g.id === archived.id)).toBe(true);
       expect(list.some((g) => g.id === active.id)).toBe(false);
     });
@@ -219,7 +223,7 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(200);
-      const list = (await res.json()) as Array<{ id: string }>;
+      const list = ((await res.json()) as { items: Array<{ id: string }> }).items;
       expect(list.some((g) => g.id === group.id)).toBe(true);
     });
 
@@ -229,6 +233,141 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(400);
+    });
+
+    it("?limit= 分页:返回指定条数并带 total", async () => {
+      const { token } = await registerAgent({ name: "c9", type: "hermes" });
+      // 同文件用例共享 DB,先取基线 total 再做相对断言,避免被既有群污染。
+      const baseline = (await (
+        await app.request("/api/groups", {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      ).json()) as { total: number };
+
+      const ids: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const g = await createGroup(token, `分页任务 ${i}`);
+        ids.push(g.id);
+      }
+
+      const res = await app.request("/api/groups?limit=5", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string }>;
+        total: number;
+      };
+      expect(body.items).toHaveLength(5);
+      expect(body.total).toBe(baseline.total + 7);
+    });
+
+    it("?limit=&offset= 翻页:两页互补、不重叠且 total 不变", async () => {
+      const { token } = await registerAgent({ name: "c10", type: "hermes" });
+      const ids: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const g = await createGroup(token, `翻页任务 ${i}`);
+        ids.push(g.id);
+      }
+
+      const page1Res = await app.request("/api/groups?limit=5", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const page1 = (await page1Res.json()) as {
+        items: Array<{ id: string }>;
+        total: number;
+      };
+      expect(page1.items).toHaveLength(5);
+
+      const page2Res = await app.request("/api/groups?limit=5&offset=5", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const page2 = (await page2Res.json()) as {
+        items: Array<{ id: string }>;
+        total: number;
+      };
+      expect(page2.total).toBe(page1.total);
+      // 本用例新建的 7 个群是最新的(createdAt 降序),两页共 10 条应全部覆盖,
+      // 且两页互不重叠。
+      const seen = new Set([...page1.items, ...page2.items].map((g) => g.id));
+      expect(seen.size).toBe(page1.items.length + page2.items.length);
+      expect(ids.every((id) => seen.has(id))).toBe(true);
+    });
+
+    it("不带分页参数时 items 为全量且 total 一致", async () => {
+      const { token } = await registerAgent({ name: "c11", type: "hermes" });
+      const baseline = (await (
+        await app.request("/api/groups", {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      ).json()) as { items: Array<{ id: string }>; total: number };
+
+      const created = [] as string[];
+      for (const title of ["全量一", "全量二", "全量三"]) {
+        created.push((await createGroup(token, title)).id);
+      }
+
+      const res = await app.request("/api/groups", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string }>;
+        total: number;
+      };
+      expect(body.total).toBe(baseline.total + 3);
+      expect(body.items).toHaveLength(body.total);
+      // 新建群都在全量列表中。
+      expect(created.every((id) => body.items.some((g) => g.id === id))).toBe(
+        true,
+      );
+    });
+
+    it("?limit= 与 ?q= 组合:total 按过滤条件计,items 只取一页", async () => {
+      const { token } = await registerAgent({ name: "c12", type: "hermes" });
+      const match = await createGroup(token, "组合匹配甲");
+      const match2 = await createGroup(token, "组合匹配乙");
+      const other = await createGroup(token, "无关任务");
+
+      const res = await app.request(
+        `/api/groups?q=${encodeURIComponent("组合匹配")}&limit=1`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string }>;
+        total: number;
+      };
+      expect(body.items).toHaveLength(1);
+      expect(body.total).toBe(2); // 命中 2 个,但只取 1 条
+      expect([match.id, match2.id]).toContain(body.items[0].id);
+      expect(body.items[0].id).not.toBe(other.id);
+    });
+
+    it("非法 limit/offset 回退默认值(仍返回 200)", async () => {
+      const { token } = await registerAgent({ name: "c13", type: "hermes" });
+      await createGroup(token, "回退一");
+      await createGroup(token, "回退二");
+
+      // 用 q 把列表隔离到本用例的 2 个群,再验证非法分页参数的回退行为。
+      for (const qs of [
+        "?q=回退&limit=abc",
+        "?q=回退&limit=0",
+        "?q=回退&limit=999",
+        "?q=回退&offset=-1",
+        "?q=回退&offset=abc",
+      ]) {
+        const res = await app.request(`/api/groups${qs}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          items: Array<{ id: string }>;
+          total: number;
+        };
+        expect(body.items).toHaveLength(2);
+        expect(body.total).toBe(2);
+      }
     });
   });
 
@@ -586,7 +725,7 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(allRes.status).toBe(200);
-      const all = (await allRes.json()) as Array<{ id: string }>;
+      const all = ((await allRes.json()) as { items: Array<{ id: string }> }).items;
       expect(all.some((g) => g.id === doomed.id)).toBe(false);
       expect(all.some((g) => g.id === active.id)).toBe(true);
       expect(all.some((g) => g.id === archived.id)).toBe(true);
@@ -595,14 +734,14 @@ describe("群组与成员 API", () => {
       const activeRes = await app.request("/api/groups?status=active", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const activeList = (await activeRes.json()) as Array<{ id: string }>;
+      const activeList = ((await activeRes.json()) as { items: Array<{ id: string }> }).items;
       expect(activeList.some((g) => g.id === doomed.id)).toBe(false);
       expect(activeList.some((g) => g.id === active.id)).toBe(true);
 
       const archivedRes = await app.request("/api/groups?status=archived", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const archivedList = (await archivedRes.json()) as Array<{ id: string }>;
+      const archivedList = ((await archivedRes.json()) as { items: Array<{ id: string }> }).items;
       expect(archivedList.some((g) => g.id === archived.id)).toBe(true);
 
       // Deleting an already-deleted group is a no-match -> 404.

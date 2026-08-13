@@ -49,7 +49,9 @@ function conversationFetchMock(groups: unknown[] = GROUPS) {
   return createFetchMock([
     {
       match: (url) => String(url).includes("/api/groups"),
-      respond: () => jsonResponse(groups),
+      // GET /groups 已改为 {items,total} 形状(ticket: 群列表分页)。
+      respond: () =>
+        jsonResponse({ items: groups, total: groups.length }),
     },
   ]);
 }

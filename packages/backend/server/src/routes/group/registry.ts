@@ -81,7 +81,7 @@ app
     "/",
     describeRoute({
       description:
-        "List all groups with member counts (soft-deleted groups are always excluded)",
+        "List groups with member counts (soft-deleted groups are always excluded); supports ?limit=&offset= pagination and returns { items, total }",
       responses: {
         200: {
           description: "Successful response",
@@ -96,11 +96,15 @@ app
         // 群列表搜索(enhancement):标题关键词,LIKE 通配符(%、_)按字面转义;
         // 空串视为无搜索。上限 100 字符防止超长模式串。
         q: z.string().max(100).optional(),
+        // 分页:limit 缺省时不截断(返回全量);提供时上限 100、非法值回退默认 20。
+        // offset 缺省为 0,非法值回退 0。total 为满足 status/q 过滤条件的总数。
+        limit: z.coerce.number().int().min(1).max(100).catch(20).optional(),
+        offset: z.coerce.number().int().min(0).catch(0).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
-      const { status, q } = c.req.valid("query");
+      const { status, q, limit, offset } = c.req.valid("query");
 
       const conditions = [
         // Soft-deleted groups are hidden from every list: an explicit
@@ -120,7 +124,14 @@ app
         conditions.push(ilike(groupsTable.title, `%${escaped}%`));
       }
 
-      const groups = await db
+      // total 只受 status/q 过滤影响,与分页无关:独立计数(不带 join,
+      // 否则成员 join 会让带多成员的群被重复计数)。
+      const [{ total }] = await db
+        .select({ total: count() })
+        .from(groupsTable)
+        .where(and(...conditions));
+
+      const query = db
         .select({
           id: groupsTable.id,
           title: groupsTable.title,
@@ -138,8 +149,10 @@ app
         .where(and(...conditions))
         .groupBy(groupsTable.id)
         .orderBy(desc(groupsTable.createdAt));
-
-      return c.json(groups);
+      // 不带 limit 参数时行为与旧版一致:返回全量(不截断)。
+      const groups =
+        limit !== undefined ? await query.limit(limit).offset(offset ?? 0) : await query;
+      return c.json({ items: groups, total });
     },
   )
   .get(

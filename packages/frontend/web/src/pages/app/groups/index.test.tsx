@@ -98,9 +98,10 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
       },
     },
     {
-      // The list URL may carry ?status=active|archived (tab filter) and/or
-      // ?q= (title search); strip the query before matching so bare,
-      // filtered, and searched fetches all hit this handler.
+      // The list URL carries ?status=active|archived (tab filter), ?q=
+      // (title search), and ?limit=&offset= (pagination); strip the query
+      // before matching so bare, filtered, searched, and paginated fetches
+      // all hit this handler. Response shape is { items, total }.
       match: (url) => String(url).split("?")[0].endsWith("/api/groups"),
       respond: (url, init) => {
         if ((init?.method ?? "GET") === "POST") {
@@ -120,7 +121,13 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
         if (q) {
           filtered = filtered.filter((g) => String(g.title).includes(q));
         }
-        return jsonResponse(filtered);
+        // 分页:limit 缺省视为全量,offset 缺省为 0,响应 {items,total}。
+        const limit = Number(params.get("limit") ?? filtered.length);
+        const offset = Number(params.get("offset") ?? 0);
+        return jsonResponse({
+          items: filtered.slice(offset, offset + limit),
+          total: filtered.length,
+        });
       },
     },
     {
@@ -353,13 +360,13 @@ describe("GroupsPage 状态 tab 与恢复 (ticket 16)", () => {
 
     await screen.findAllByText("模型训练任务");
     expect(
-      fetchMock.mock.calls.some(([url]) => String(url) === "/api/groups"),
+      fetchMock.mock.calls.some(([url]) => String(url) === "/api/groups?limit=20&offset=0"),
     ).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "已归档" }));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
-        ([url]) => String(url) === "/api/groups?status=archived",
+        ([url]) => String(url) === "/api/groups?status=archived&limit=20&offset=0",
       );
       expect(call).toBeDefined();
     });
@@ -379,7 +386,7 @@ describe("GroupsPage 状态 tab 与恢复 (ticket 16)", () => {
     fireEvent.click(screen.getByRole("button", { name: "进行中" }));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
-        ([url]) => String(url) === "/api/groups?status=active",
+        ([url]) => String(url) === "/api/groups?status=active&limit=20&offset=0",
       );
       expect(call).toBeDefined();
     });
@@ -433,7 +440,7 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
     // 防抖 300ms:输入后不应立即发起请求,停顿后才发。
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
-        ([url]) => String(url) === "/api/groups?q=%E6%A8%A1%E5%9E%8B",
+        ([url]) => String(url) === "/api/groups?q=%E6%A8%A1%E5%9E%8B&limit=20&offset=0",
       );
       expect(call).toBeDefined();
     });
@@ -464,7 +471,7 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
     // 清空后重新拉全量(无 ?q=):初始加载 + 清空后的裸请求,至少两次。
     await waitFor(() => {
       const bareCalls = fetchMock.mock.calls.filter(
-        ([url]) => String(url) === "/api/groups",
+        ([url]) => String(url) === "/api/groups?limit=20&offset=0",
       );
       expect(bareCalls.length).toBeGreaterThanOrEqual(2);
     });
@@ -495,7 +502,7 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(
-          ([url]) => String(url) === "/api/groups?status=archived",
+          ([url]) => String(url) === "/api/groups?status=archived&limit=20&offset=0",
         ),
       ).toBe(true);
     });
@@ -507,7 +514,7 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         ([url]) =>
-          String(url) === "/api/groups?status=archived&q=%E8%AF%84%E5%AE%A1",
+          String(url) === "/api/groups?status=archived&q=%E8%AF%84%E5%AE%A1&limit=20&offset=0",
       );
       expect(call).toBeDefined();
     });
@@ -515,6 +522,105 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
       0,
     );
     expect(screen.queryAllByText("模型训练任务")).toHaveLength(0);
+  });
+});
+
+describe("GroupsPage 群列表分页", () => {
+  // 25 个群:超过一页(20),用于断言分页行为。
+  const PAGED_GROUPS = Array.from({ length: 25 }, (_, i) => ({
+    id: `group-${i + 1}`,
+    title: `分页群组 ${i + 1}`,
+    status: "active",
+    memberCount: 1,
+    createdAt: `2026-08-0${(i % 9) + 1}T00:00:00.000Z`,
+  }));
+
+  it("初始加载取 20 条(?limit=20&offset=0),有更多时显示「加载更多」", async () => {
+    const fetchMock = stubFetch(groupsFetchMock(PAGED_GROUPS));
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    // 第一页 20 条可见(移动卡片 + 桌面表格各渲染一次),第 21 条不可见。
+    expect(await screen.findAllByText("分页群组 1")).not.toHaveLength(0);
+    expect(screen.queryByText("分页群组 21")).toBeNull();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === "/api/groups?limit=20&offset=0",
+      ),
+    ).toBe(true);
+    // 25 > 20 → 还有更多,显示按钮。
+    expect(screen.getByRole("button", { name: "加载更多" })).toBeInTheDocument();
+  });
+
+  it("点击「加载更多」按 offset+=limit 追加,无更多后按钮消失", async () => {
+    const fetchMock = stubFetch(groupsFetchMock(PAGED_GROUPS));
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("分页群组 1");
+    expect(screen.queryByText("分页群组 21")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+
+    // 追加请求携带 offset=20,第 21-25 条出现。
+    await screen.findAllByText("分页群组 25");
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === "/api/groups?limit=20&offset=20",
+      ),
+    ).toBe(true);
+    // 25 == total,没有更多 → 按钮消失。
+    expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
+  });
+
+  it("全部数据不足一页时不显示「加载更多」", async () => {
+    stubFetch(groupsFetchMock(GROUPS)); // 仅 2 个群
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+    expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
+  });
+
+  it("切换状态 tab 重置到第一页(offset 归零)", async () => {
+    const fetchMock = stubFetch(groupsFetchMock(PAGED_GROUPS));
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("分页群组 1");
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    await screen.findAllByText("分页群组 25");
+
+    // 切到「已归档」(该 mock 无已归档群 → 空态),重新发起 offset=0 的请求。
+    fireEvent.click(screen.getByRole("button", { name: "已归档" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) =>
+            String(url) === "/api/groups?status=archived&limit=20&offset=0",
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByText("暂无已归档群组")).toBeInTheDocument();
+  });
+
+  it("搜索变化重置到第一页(带 ?q= 且 offset=0)", async () => {
+    const fetchMock = stubFetch(groupsFetchMock(PAGED_GROUPS));
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("分页群组 1");
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    await screen.findAllByText("分页群组 25");
+
+    fireEvent.change(screen.getByLabelText("搜索群组"), {
+      target: { value: "分页群组 1" },
+    });
+    // 防抖后重新拉取:?q= 携带且 offset 归零(重置第一页)。
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => {
+        const u = String(url);
+        return (
+          u.includes("?q=") && u.includes("limit=20") && u.includes("offset=0")
+        );
+      });
+      expect(call).toBeDefined();
+    });
   });
 });
 
