@@ -40,5 +40,8 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Typecheck
+        run: pnpm exec turbo run check-types
+
       - name: Lint
         run: pnpm exec biome check .
