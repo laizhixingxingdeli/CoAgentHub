@@ -104,6 +104,7 @@ app
           device: agentTable.device,
           webhookUrl: agentTable.webhookUrl,
           capabilities: agentTable.capabilities,
+          lastSeen: agentTable.lastSeen,
           createdAt: agentTable.createdAt,
         })
         .from(agentTable)
@@ -136,12 +137,15 @@ app
           device: z.string().nullable().optional(),
           // null 表示清空 webhookUrl。
           webhookUrl: z.string().url().nullable().optional(),
+          // 自由能力标签 (ticket 17): 与注册同语义,逗号输入前端转数组后提交。
+          capabilities: z.array(z.string()).max(64).optional(),
         })
         .refine(
           (v) =>
             v.name !== undefined ||
             v.device !== undefined ||
-            v.webhookUrl !== undefined,
+            v.webhookUrl !== undefined ||
+            v.capabilities !== undefined,
           { message: "at least one field to update is required" },
         ),
     ),
@@ -160,10 +164,14 @@ app
         name?: string;
         device?: string | null;
         webhookUrl?: string | null;
+        capabilities?: string[];
       } = {};
       if (input.name !== undefined) patch.name = input.name;
       if (input.device !== undefined) patch.device = input.device ?? null;
       if (input.webhookUrl !== undefined) patch.webhookUrl = input.webhookUrl;
+      if (input.capabilities !== undefined) {
+        patch.capabilities = input.capabilities;
+      }
 
       const [updated] = await db
         .update(agentTable)

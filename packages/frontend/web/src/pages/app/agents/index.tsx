@@ -1,8 +1,24 @@
-import { Bot, Loader2, Trash2 } from "lucide-react";
+import {
+  Bot,
+  HeartPulse,
+  Loader2,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { AGENT_ID_KEY, agentAuthHeaders } from "@/lib/api-client";
 
 /**
  * 接入 Agent(ticket: 网页 @executor 发布):管理执行器配置。
@@ -12,6 +28,10 @@ import { Label } from "@/components/ui/label";
  * agent(token 后端生成,界面绝不出现任何 token/token_hash 字段)。
  *
  * 列表 = 内置执行器 + DB 配置(GET /api/executors 合并返回),内置项不可删除。
+ *
+ * Agent 自管理(ticket: 补全 /agents 页):列表行同时带出 agent 注册信息
+ * (GET /api/agents,按 name 匹配),展示 device / capabilities / webhookUrl /
+ * 在线状态;绑定后自己的 agent 可编辑(PATCH)与上报在线(heartbeat)。
  */
 
 type ExecutorItem = {
@@ -24,7 +44,23 @@ type ExecutorItem = {
   args: string[];
   label: string;
   builtin: boolean;
+  /** 加载时按 name 匹配到的 agent id;渲染按 id 取 agent(改名后仍能对应)。 */
+  agentId?: string;
 };
+
+/** Agent 注册信息(GET /api/agents):自管理字段 + 在线状态。 */
+type AgentInfo = {
+  id: string;
+  name: string;
+  type: string;
+  device: string | null;
+  webhookUrl: string | null;
+  capabilities: string[];
+  lastSeen: string | null;
+};
+
+/** 在线判定(与后端 T13 约定一致):lastSeen 距今 < 60s 视为在线。 */
+const ONLINE_WINDOW_MS = 60_000;
 
 const AGENT_TYPES = [
   "hermes",
@@ -51,13 +87,38 @@ export default function ExecutorsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
+  // Agent 自管理:编辑对话框 + 心跳
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [editingAgent, setEditingAgent] = useState<AgentInfo | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDevice, setEditDevice] = useState("");
+  const [editWebhookUrl, setEditWebhookUrl] = useState("");
+  const [editCapabilities, setEditCapabilities] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [heartbeatingId, setHeartbeatingId] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/executors");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setItems((await res.json()) as ExecutorItem[]);
+      const [execRes, agentRes] = await Promise.all([
+        fetch("/api/executors"),
+        fetch("/api/agents"),
+      ]);
+      if (!execRes.ok) throw new Error(`HTTP ${execRes.status}`);
+      const executorItems = (await execRes.json()) as ExecutorItem[];
+      // agent 列表加载失败不阻断执行器列表(自管理字段缺省不展示)。
+      const agentList = agentRes.ok
+        ? ((await agentRes.json()) as AgentInfo[])
+        : [];
+      setAgents(agentList);
+      // 加载时按 name 关联 agent id(executor 注册时 name 即 agentName)。
+      setItems(
+        executorItems.map((ex) => ({
+          ...ex,
+          agentId: agentList.find((a) => a.name === ex.agentName)?.id,
+        })),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载失败");
     } finally {
@@ -68,6 +129,31 @@ export default function ExecutorsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 按 agentId 取该执行器对应的 agent 注册信息;无 agentId 时返回 undefined。 */
+  const agentById = useCallback(
+    (agentId?: string) =>
+      agentId ? agents.find((a) => a.id === agentId) : undefined,
+    [agents],
+  );
+
+  /** 编辑/心跳前置检查:未绑定 token 或非自己的 agent 时给出提示(与任务面板
+   *  无权限提示一致),返回 true 表示已拦截。 */
+  const requireOwnAgent = (agent: AgentInfo): boolean => {
+    if (Object.keys(agentAuthHeaders()).length === 0) {
+      setError("无权限,请先绑定 Agent Token 再操作");
+      return true;
+    }
+    const boundId =
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem(AGENT_ID_KEY)
+        : null;
+    if (!boundId || boundId !== agent.id) {
+      setError("无权限,只能管理自己的 Agent 信息");
+      return true;
+    }
+    return false;
+  };
 
   const handleSubmit = async () => {
     setMessage(null);
@@ -154,6 +240,99 @@ export default function ExecutorsPage() {
     }
   };
 
+  /** 打开编辑对话框(仅自己的 agent):预填 name/device/webhookUrl/capabilities。 */
+  const startEdit = (agent: AgentInfo) => {
+    if (requireOwnAgent(agent)) return;
+    setEditName(agent.name);
+    setEditDevice(agent.device ?? "");
+    setEditWebhookUrl(agent.webhookUrl ?? "");
+    // capabilities 逗号分隔展示,提交时再转数组。
+    setEditCapabilities(agent.capabilities.join(", "));
+    setEditingAgent(agent);
+  };
+
+  /** PATCH /api/agents/:id 保存;401/403 → 无权限提示;成功后按 id 即时刷新该行。 */
+  const handleSaveEdit = async () => {
+    if (!editingAgent) return;
+    setSavingEdit(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const capabilities = editCapabilities
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const res = await fetch(`/api/agents/${editingAgent.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...agentAuthHeaders(),
+        },
+        body: JSON.stringify({
+          name: editName.trim() || undefined,
+          device: editDevice.trim() ? editDevice.trim() : null,
+          webhookUrl: editWebhookUrl.trim() ? editWebhookUrl.trim() : null,
+          capabilities,
+        }),
+      });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          setError("无权限,只能管理自己的 Agent 信息");
+          setEditingAgent(null);
+          return;
+        }
+        const body = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(body?.message ?? `HTTP ${res.status}`);
+      }
+      const updated = (await res.json()) as AgentInfo;
+      setMessage(`已更新 Agent「${updated.name}」`);
+      setEditingAgent(null);
+      // 按 id 更新本地 agents,行内立即刷新(改名也不影响匹配)。
+      setAgents((prev) =>
+        prev.map((a) => (a.id === updated.id ? updated : a)),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  /** PUT /api/agents/:id/heartbeat 上报在线;成功后该行立即变在线。 */
+  const handleHeartbeat = async (agent: AgentInfo) => {
+    if (requireOwnAgent(agent)) return;
+    setHeartbeatingId(agent.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/heartbeat`, {
+        method: "PUT",
+        headers: agentAuthHeaders(),
+      });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          setError("无权限,只能上报自己的 Agent 在线状态");
+          return;
+        }
+        const body = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(body?.message ?? `HTTP ${res.status}`);
+      }
+      const { lastSeen } = (await res.json()) as { lastSeen: string };
+      setAgents((prev) =>
+        prev.map((a) => (a.id === agent.id ? { ...a, lastSeen } : a)),
+      );
+      setMessage(`已上报「${agent.name}」在线`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "上报在线失败");
+    } finally {
+      setHeartbeatingId(null);
+    }
+  };
+
   const inputCls =
     "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]";
 
@@ -163,7 +342,8 @@ export default function ExecutorsPage() {
         <h2 className="text-xl font-semibold">接入 Agent</h2>
         <p className="text-muted-foreground text-sm">
           新增一个可被定向消息调度的执行器;提交后自动注册对应
-          agent,凭据由后端管理
+          agent,凭据由后端管理。绑定身份后可编辑自己的
+          Agent 信息并上报在线
         </p>
       </div>
 
@@ -277,7 +457,7 @@ export default function ExecutorsPage() {
         </div>
       </div>
 
-      {/* 执行器列表(内置 + DB 配置) */}
+      {/* 执行器列表(内置 + DB 配置),行内带 agent 自管理字段 */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between border-b px-4 py-3">
           <span className="text-sm font-medium">执行器列表</span>
@@ -291,47 +471,187 @@ export default function ExecutorsPage() {
           </p>
         ) : (
           <ul className="divide-y">
-            {items.map((item) => (
-              <li
-                key={item.key}
-                className="flex items-center justify-between gap-2 px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">
-                      {item.agentName}
-                    </span>
-                    {item.builtin && (
-                      <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        内置
+            {items.map((item) => {
+              const agent = agentById(item.agentId);
+              const lastSeen = agent?.lastSeen ?? null;
+              const online =
+                lastSeen != null &&
+                Date.now() - Date.parse(lastSeen) < ONLINE_WINDOW_MS;
+              return (
+                <li
+                  key={item.key}
+                  className="flex items-start justify-between gap-2 px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium">
+                        {item.agentName}
                       </span>
+                      {item.builtin && (
+                        <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                          内置
+                        </span>
+                      )}
+                      {/* 在线状态徽标:绿点在线 / 灰点离线 / 从未在线 */}
+                      {agent && (
+                        <span
+                          className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ${
+                            online
+                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+                              : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          <span
+                            className={`size-1.5 rounded-full ${
+                              online
+                                ? "bg-emerald-500"
+                                : "bg-muted-foreground/60"
+                            }`}
+                          />
+                          {lastSeen == null
+                            ? "从未在线"
+                            : online
+                              ? "在线"
+                              : "离线"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {item.type} · {item.kind}
+                      {agent?.device ? ` · ${agent.device}` : ""}
+                      {item.label !== item.agentName ? ` · ${item.label}` : ""}
+                      {item.kind === "a2a" && item.url ? ` · ${item.url}` : ""}
+                      {!item.builtin && ` · ${item.bin}`}
+                      {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
+                    </div>
+                    {/* capabilities 标签 chips + webhookUrl(有则显示,截断) */}
+                    {agent && (
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {agent.capabilities.map((cap) => (
+                          <Badge key={cap} variant="secondary">
+                            {cap}
+                          </Badge>
+                        ))}
+                        {agent.webhookUrl && (
+                          <span
+                            className="max-w-52 truncate text-xs text-muted-foreground"
+                            title={agent.webhookUrl}
+                          >
+                            {agent.webhookUrl}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
-                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {item.type} · {item.kind}
-                    {item.label !== item.agentName ? ` · ${item.label}` : ""}
-                    {item.kind === "a2a" && item.url ? ` · ${item.url}` : ""}
-                    {!item.builtin && ` · ${item.bin}`}
-                    {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
+                  <div className="flex shrink-0 items-center gap-2">
+                    {agent && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => startEdit(agent)}
+                        >
+                          <Pencil className="size-4" />
+                          编辑
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleHeartbeat(agent)}
+                          disabled={heartbeatingId === agent.id}
+                        >
+                          <HeartPulse className="size-4" />
+                          {heartbeatingId === agent.id ? "上报中…" : "上报在线"}
+                        </Button>
+                      </>
+                    )}
+                    {!item.builtin && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDelete(item)}
+                        disabled={deletingKey === item.key}
+                        className="shrink-0"
+                      >
+                        <Trash2 className="size-4" />
+                        删除
+                      </Button>
+                    )}
                   </div>
-                </div>
-                {!item.builtin && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleDelete(item)}
-                    disabled={deletingKey === item.key}
-                    className="shrink-0"
-                  >
-                    <Trash2 className="size-4" />
-                    删除
-                  </Button>
-                )}
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
+
+      {/* 编辑对话框(仅自己的 agent) */}
+      <Dialog
+        open={editingAgent !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditingAgent(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑 Agent</DialogTitle>
+            <DialogDescription>
+              更新自己的注册信息:名字 / 设备 / Webhook URL / 能力标签
+              (逗号分隔)。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-name">Agent 名字</Label>
+              <Input
+                id="edit-name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-device">设备</Label>
+              <Input
+                id="edit-device"
+                value={editDevice}
+                onChange={(e) => setEditDevice(e.target.value)}
+                placeholder="如 mac-mini"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-webhook">Webhook URL</Label>
+              <Input
+                id="edit-webhook"
+                value={editWebhookUrl}
+                onChange={(e) => setEditWebhookUrl(e.target.value)}
+                placeholder="如 https://example.com/hook"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-caps">能力标签(逗号分隔)</Label>
+              <Input
+                id="edit-caps"
+                value={editCapabilities}
+                onChange={(e) => setEditCapabilities(e.target.value)}
+                placeholder="如 text-generation, code-review"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditingAgent(null)}
+              disabled={savingEdit}
+            >
+              取消
+            </Button>
+            <Button onClick={handleSaveEdit} disabled={savingEdit}>
+              {savingEdit && <Loader2 className="size-4 animate-spin" />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

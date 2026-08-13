@@ -5,6 +5,7 @@ import {
   jsonResponse,
   renderWithProviders,
 } from "@/test/utils";
+import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
 import ExecutorsPage from "./index";
 
 /**
@@ -12,7 +13,10 @@ import ExecutorsPage from "./index";
  *  - 表单字段齐全(名字/类型/调用方式/命令或地址/参数模板/设备);
  *  - 提交调 POST /api/executors,成功后列表出现新 agent;
  *  - 内置执行器只展示不可删除,DB 配置可删除;
- *  - 界面不出现任何 token/token_hash 字段。
+ *  - 界面不出现任何 token/token_hash 字段;
+ *  - Agent 自管理(ticket: 补全 /agents 页):行内展示 device/capabilities/
+ *    webhookUrl/在线状态;编辑对话框 PATCH /api/agents/:id;心跳 PUT
+ *    /api/agents/:id/heartbeat;未绑定 token 时编辑/心跳有无权限提示。
  */
 
 const BUILTIN = [
@@ -75,6 +79,7 @@ function executorsFetchMock() {
 describe("接入 Agent 页", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    localStorage.clear();
   });
 
   it("表单字段齐全,提交 POST /api/executors 后列表出现新 agent,且无 token 展示", async () => {
@@ -236,5 +241,243 @@ describe("接入 Agent 页", () => {
       ([, init]) => init?.method === "DELETE",
     );
     expect(String(delCall![0])).toContain("/api/executors/extra-agent");
+  });
+
+  // ── Agent 自管理(ticket: 补全 /agents 页)──────────────────────────────
+  const AGENTS = [
+    {
+      id: "agent-online",
+      name: "Online Bot",
+      type: "custom",
+      device: "mac-mini",
+      webhookUrl: "https://example.com/hook",
+      capabilities: ["text-generation", "code-review"],
+      lastSeen: new Date(Date.now() - 5_000).toISOString(),
+    },
+    {
+      id: "agent-offline",
+      name: "Offline Bot",
+      type: "hermes",
+      device: "win-pc",
+      webhookUrl: null,
+      capabilities: [],
+      lastSeen: new Date(Date.now() - 3_600_000).toISOString(),
+    },
+    {
+      id: "agent-never",
+      name: "Never Bot",
+      type: "atomcode",
+      device: null,
+      webhookUrl: null,
+      capabilities: ["code-review"],
+      lastSeen: null,
+    },
+  ];
+
+  const EXECUTORS = [
+    ...BUILTIN,
+    {
+      key: "online-bot",
+      agentName: "Online Bot",
+      type: "custom",
+      kind: "cli",
+      bin: "ob",
+      url: null,
+      args: [],
+      label: "online-bot",
+      builtin: false,
+    },
+    {
+      key: "offline-bot",
+      agentName: "Offline Bot",
+      type: "hermes",
+      kind: "cli",
+      bin: "off",
+      url: null,
+      args: [],
+      label: "offline-bot",
+      builtin: false,
+    },
+    {
+      key: "never-bot",
+      agentName: "Never Bot",
+      type: "atomcode",
+      kind: "cli",
+      bin: "nb",
+      url: null,
+      args: [],
+      label: "never-bot",
+      builtin: false,
+    },
+  ];
+
+  /** 状态化 mock:GET /api/agents 返回可变列表,PATCH 更新,PUT heartbeat 写 lastSeen。 */
+  function agentsFetchMock() {
+    const agents: Array<Record<string, unknown>> = AGENTS.map((a) => ({
+      ...a,
+    }));
+    return createFetchMock([
+      {
+        match: (url, init) =>
+          init?.method === "PATCH" && String(url).includes("/api/agents/"),
+        respond: (url, init) => {
+          const id = String(url).split("/").at(-1);
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          const idx = agents.findIndex((a) => a.id === id);
+          const updated = { ...agents[idx], ...body };
+          if (idx >= 0) agents[idx] = updated;
+          return jsonResponse(updated);
+        },
+      },
+      {
+        match: (url, init) =>
+          init?.method === "PUT" && String(url).includes("/heartbeat"),
+        respond: (url) => {
+          const id = String(url).match(/\/api\/agents\/([^/]+)\/heartbeat/)?.[1];
+          const lastSeen = new Date().toISOString();
+          const idx = agents.findIndex((a) => a.id === id);
+          if (idx >= 0) agents[idx] = { ...agents[idx], lastSeen };
+          return jsonResponse({ lastSeen });
+        },
+      },
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/agents"),
+        respond: () => jsonResponse(agents),
+      },
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/executors"),
+        respond: () => jsonResponse(EXECUTORS),
+      },
+    ]);
+  }
+
+  it("列表行显示 device/capabilities/webhookUrl 与在线/离线/从未在线徽标", async () => {
+    const fetchMock = agentsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/agents");
+
+    await screen.findByText("Online Bot");
+    // device 出现在元信息行(custom · cli · mac-mini …)
+    expect(screen.getByText(/mac-mini/)).toBeInTheDocument();
+    // capabilities 标签 chips
+    expect(screen.getByText("text-generation")).toBeInTheDocument();
+    expect(screen.getAllByText("code-review").length).toBeGreaterThanOrEqual(
+      2,
+    );
+    // webhookUrl 展示
+    expect(screen.getByText("https://example.com/hook")).toBeInTheDocument();
+    // 在线/离线/从未在线徽标(在线 Bot 5s 前心跳,离线 Bot 1h 前,从未 Bot 无)
+    expect(screen.getByText("在线")).toBeInTheDocument();
+    expect(screen.getByText("离线")).toBeInTheDocument();
+    expect(screen.getByText("从未在线")).toBeInTheDocument();
+  });
+
+  it("编辑对话框可改 name/device/webhookUrl/capabilities,PATCH 保存并即时刷新", async () => {
+    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(AGENT_ID_KEY, "agent-online");
+    const fetchMock = agentsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/agents");
+
+    await screen.findByText("Online Bot");
+    const row = screen.getByText("Online Bot").closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+
+    // 对话框预填现有注册信息
+    const nameInput = screen.getByLabelText("Agent 名字") as HTMLInputElement;
+    expect(nameInput.value).toBe("Online Bot");
+    expect(
+      (screen.getByLabelText("设备") as HTMLInputElement).value,
+    ).toBe("mac-mini");
+    expect(
+      (screen.getByLabelText("Webhook URL") as HTMLInputElement).value,
+    ).toBe("https://example.com/hook");
+    expect(
+      (screen.getByLabelText("能力标签(逗号分隔)") as HTMLInputElement).value,
+    ).toBe("text-generation, code-review");
+
+    fireEvent.change(nameInput, { target: { value: "Online Bot v2" } });
+    fireEvent.change(screen.getByLabelText("设备"), {
+      target: { value: "mac-pro" },
+    });
+    fireEvent.change(screen.getByLabelText("Webhook URL"), {
+      target: { value: "https://new.example.com/hook" },
+    });
+    fireEvent.change(screen.getByLabelText("能力标签(逗号分隔)"), {
+      target: { value: "text-generation, testing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    // 保存成功后对话框关闭,列表行内刷新
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Agent 名字")).not.toBeInTheDocument();
+    });
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH",
+    );
+    expect(patchCall).toBeTruthy();
+    expect(String(patchCall![0])).toContain("/api/agents/agent-online");
+    const payload = JSON.parse(String(patchCall![1]?.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(payload.name).toBe("Online Bot v2");
+    expect(payload.device).toBe("mac-pro");
+    expect(payload.webhookUrl).toBe("https://new.example.com/hook");
+    // 逗号分隔输入 → 数组
+    expect(payload.capabilities).toEqual(["text-generation", "testing"]);
+    // 行内刷新出新 capability chip
+    expect(screen.getByText("testing")).toBeInTheDocument();
+  });
+
+  it("心跳按钮调用 PUT heartbeat 并即时刷新在线状态", async () => {
+    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(AGENT_ID_KEY, "agent-never");
+    const fetchMock = agentsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/agents");
+
+    await screen.findByText("Never Bot");
+    const row = screen.getByText("Never Bot").closest("li")!;
+    expect(within(row).getByText("从未在线")).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
+
+    // 成功后该行立即变在线
+    await waitFor(() => {
+      expect(within(row).getByText("在线")).toBeInTheDocument();
+    });
+    const beatCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PUT",
+    );
+    expect(String(beatCall![0])).toContain(
+      "/api/agents/agent-never/heartbeat",
+    );
+    expect(screen.getByText(/已上报「Never Bot」在线/)).toBeInTheDocument();
+  });
+
+  it("未绑定 token 时编辑/心跳给出无权限提示", async () => {
+    const fetchMock = agentsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/agents");
+
+    await screen.findByText("Online Bot");
+    const row = screen.getByText("Online Bot").closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+    await screen.findByText("无权限,请先绑定 Agent Token 再操作");
+
+    fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
+    expect(
+      screen.getByText("无权限,请先绑定 Agent Token 再操作"),
+    ).toBeInTheDocument();
+    // 编辑对话框未被打开
+    expect(screen.queryByLabelText("Agent 名字")).not.toBeInTheDocument();
   });
 });
