@@ -1,15 +1,20 @@
 import {
   act,
   fireEvent,
+  render,
   renderHook,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
+import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Router } from "wouter";
+import { memoryLocation } from "wouter/memory-location";
 import GroupLayout from "@/components/layout/group-layout";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
 import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { __resetNotificationState } from "@/lib/notifications";
 import { groupMessageFrame } from "@/test/frames";
 import {
   createFetchMock,
@@ -2434,5 +2439,171 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
     expect(screen.getByText(`${longPrompt.slice(0, 40)}…`)).toBeInTheDocument();
     // 无提示词的成员不渲染提示词文本(完整原文不出现)
     expect(screen.queryByText(longPrompt)).toBeNull();
+  });
+});
+
+describe("浏览器桌面通知 (WS group_message → Notification)", () => {
+  /** jsdom 无 Notification — 手动 mock 记录实例与权限状态。 */
+  class MockNotification {
+    static permission: NotificationPermission = "granted";
+    static requestPermission = vi.fn(
+      async () => "granted" as NotificationPermission,
+    );
+    static instances: MockNotification[] = [];
+
+    title: string;
+    options: NotificationOptions | undefined;
+    onclick: (() => void) | null = null;
+    close = vi.fn();
+
+    constructor(title: string, options?: NotificationOptions) {
+      this.title = title;
+      this.options = options;
+      MockNotification.instances.push(this);
+    }
+  }
+
+  let focusSpy: ReturnType<typeof vi.spyOn>;
+
+  /** 推一条他人(agent-2)的 group_message 帧,等价于服务器 WS hub 推送。 */
+  const pushFrame = (ws: MockWebSocket, body: string, id: string) =>
+    act(() =>
+      ws.receive(
+        JSON.stringify({
+          type: "group_message",
+          groupId: "group-1",
+          message: {
+            id,
+            groupId: "group-1",
+            senderId: "agent-2",
+            parentId: null,
+            audience: "broadcast",
+            audienceRef: null,
+            body,
+            depth: 0,
+            createdAt: "2026-08-10T00:00:00.000Z",
+          },
+        }),
+      ),
+    );
+
+  beforeEach(() => {
+    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    __resetNotificationState();
+    MockNotification.instances = [];
+    MockNotification.permission = "granted";
+    MockNotification.requestPermission = vi.fn(
+      async () => "granted" as NotificationPermission,
+    );
+    vi.stubGlobal("Notification", MockNotification);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    focusSpy = vi.spyOn(window, "focus").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    // 只还原 focus spy —— vi.restoreAllMocks() 会连带清掉 setup.ts 里
+    // matchMedia 的 mock 实现,导致后续用例挂载时 mql 为 undefined。
+    focusSpy?.mockRestore();
+    // 还原页面可见性,避免污染后续用例
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => false,
+    });
+  });
+
+  it("页面隐藏 + 他人新消息 → 创建系统通知(标题=群标题,正文=发送者: 摘要)", async () => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    stubFetch(messagesFetchMock());
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    pushFrame(MockWebSocket.instances[0], "改好了,请合并", "notify-1");
+
+    expect(MockNotification.instances).toHaveLength(1);
+    const n = MockNotification.instances[0];
+    // 群标题来自 GET /api/groups/group-1 的 title;发送者名来自成员列表
+    expect(n.title).toBe("评审任务");
+    expect(n.options?.body).toBe("win-hermes: 改好了,请合并");
+  });
+
+  it("页面可见时收消息 → 不发通知", async () => {
+    stubFetch(messagesFetchMock());
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    pushFrame(MockWebSocket.instances[0], "页面可见的消息", "notify-2");
+
+    expect(MockNotification.instances).toHaveLength(0);
+  });
+
+  it("自己发的消息(WS 回显)→ 不发通知", async () => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    stubFetch(messagesFetchMock());
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    // senderId == 当前绑定 agent-1:即使隐藏也不打扰
+    act(() =>
+      MockWebSocket.instances[0].receive(
+        JSON.stringify({
+          type: "group_message",
+          groupId: "group-1",
+          message: {
+            id: "notify-3",
+            groupId: "group-1",
+            senderId: "agent-1",
+            parentId: null,
+            audience: "broadcast",
+            audienceRef: null,
+            body: "自己的回显",
+            depth: 0,
+            createdAt: "2026-08-10T00:00:00.000Z",
+          },
+        }),
+      ),
+    );
+
+    expect(MockNotification.instances).toHaveLength(0);
+  });
+
+  it("点击通知 → 聚焦窗口并跳转到该群消息页 /groups/group-1", async () => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    // 记录式内存路由:点击通知后断言 navigate 落点
+    const loc = memoryLocation({ path: "/groups/group-1", record: true });
+    stubFetch(messagesFetchMock());
+    render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          shouldRetryOnError: false,
+          revalidateOnFocus: false,
+          revalidateOnReconnect: false,
+        }}
+      >
+        <Router hook={loc.hook}>
+          <GroupMessagesPage />
+        </Router>
+      </SWRConfig>,
+    );
+
+    await screen.findByText("任务草稿");
+    pushFrame(MockWebSocket.instances[0], "点我跳转", "notify-4");
+    const n = MockNotification.instances[0];
+
+    act(() => n.onclick?.());
+
+    expect(window.focus).toHaveBeenCalled();
+    expect(loc.history).toEqual(["/groups/group-1", "/groups/group-1"]);
+    expect(n.close).toHaveBeenCalled();
   });
 });

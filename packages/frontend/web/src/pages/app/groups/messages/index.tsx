@@ -1,6 +1,6 @@
 import { Archive, ArrowLeft, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRoute } from "wouter";
+import { useLocation, useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +16,7 @@ import {
 } from "@/hooks/use-unread";
 import { AGENT_ID_KEY, agentAuthHeaders } from "@/lib/api-client";
 import { AGENT_COLORS, colorForId as agentColor } from "@/lib/avatar-color";
+import { maybeNotifyGroupMessage } from "@/lib/notifications";
 
 // Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
 // `agentColor`/`AGENT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
@@ -43,6 +44,9 @@ import {
 export default function GroupMessagesPage() {
   const [, params] = useRoute("/groups/:id");
   const groupId = params?.id;
+  // wouter navigate — used by the desktop notification click handler to jump
+  // to this group's message page (/groups/:id) from a background tab.
+  const [, navigate] = useLocation();
 
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -150,6 +154,17 @@ export default function GroupMessagesPage() {
         : null,
     [],
   );
+
+  // Latest group title / members / own id for the stable WS callback (same
+  // sync-during-render pattern as searchActiveRef above): the notification
+  // fired from the socket callback must read the live values, not the ones
+  // captured at mount.
+  const groupTitleRef = useRef<string | null>(null);
+  groupTitleRef.current = groupTitle;
+  const membersRef = useRef<Member[]>([]);
+  membersRef.current = members;
+  const myAgentIdRef = useRef<string | null>(null);
+  myAgentIdRef.current = myAgentId;
 
   // Archived AND soft-deleted groups are read-only (the backend rejects any
   // non-active group with 400): fetch the single-group status so the page can
@@ -313,9 +328,29 @@ export default function GroupMessagesPage() {
         // Belt-and-suspenders: never merge a frame that does not belong to the
         // group this page is showing (useGroupWs filters by frame.groupId, but
         // the message itself also carries a groupId — trust both).
+        if (!groupId) {
+          return;
+        }
         if (event.message?.groupId && event.message.groupId !== groupId) {
           return;
         }
+        // Browser desktop notification: page hidden + other's message → system
+        // notification (title = group title, body = "sender: summary"); click
+        // jumps to this group. Permission is requested lazily on first need;
+        // denied → silent, never re-asks. All Notification calls are
+        // try/catch-wrapped inside the helper (zero noise on unsupported
+        // browsers).
+        const sender = membersRef.current.find(
+          (m) => m.agentId === event.message.senderId,
+        );
+        maybeNotifyGroupMessage({
+          groupId,
+          groupTitle: groupTitleRef.current,
+          senderName: sender?.name ?? event.message.senderId.slice(0, 8),
+          message: event.message,
+          myAgentId: myAgentIdRef.current,
+          navigate,
+        });
         // Search mode shows the q= snapshot only: new frames may not match the
         // keyword, so they are NOT appended while search is active. Updated and
         // deleted frames below still apply (they patch the shown rows in place);
@@ -345,7 +380,7 @@ export default function GroupMessagesPage() {
         ),
       );
     },
-    [groupId],
+    [groupId, navigate],
   );
 
   useGroupWs(groupId, handleWsEvent);
