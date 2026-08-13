@@ -7,8 +7,6 @@ import {
   GROUP_ROLES,
   GroupMessageAudience,
   groupMember as groupMemberTable,
-  groupMessageClosure as groupMessageClosureTable,
-  groupMessage as groupMessageTable,
   groups as groupsTable,
   TASK_STATUSES,
   task as taskTable,
@@ -18,23 +16,24 @@ import { capabilityHint } from "@server/lib/agent-capabilities";
 import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import { maybeDispatchExecutorTask } from "@server/lib/executor-task";
-import { insertGroupMessage } from "@server/lib/group-message";
-import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-agent";
+import {
+  DELETED_MESSAGE_PLACEHOLDER,
+  insertGroupMessage,
+  listVisibleMessages,
+  softDeleteMessage,
+  updateMessageBody,
+} from "@server/lib/services/message-service";
 import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, asc, count, desc, eq, gt, ilike, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
 const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
 
-/** Soft-delete placeholder (ticket 22): the row is kept (closure/reply tree stays intact), the body becomes this string. */
-const DELETED_MESSAGE_PLACEHOLDER = "[消息已删除]";
-
-/** Max messages returned by one GET /:id/messages page; continue with ?after=. */
-const MESSAGE_PAGE_LIMIT = 200;
+// 消息域的占位串/分页等常量已随逻辑迁入 @server/lib/services/message-service。
 
 app
   .post(
@@ -740,32 +739,10 @@ app
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
-      const [message] = await db
-        .select({
-          id: groupMessageTable.id,
-          groupId: groupMessageTable.groupId,
-          senderId: groupMessageTable.senderId,
-          parentId: groupMessageTable.parentId,
-          audience: groupMessageTable.audience,
-          audienceRef: groupMessageTable.audienceRef,
-          body: groupMessageTable.body,
-          contentType: groupMessageTable.contentType,
-          fileRef: groupMessageTable.fileRef,
-          createdAt: groupMessageTable.createdAt,
-          updatedAt: groupMessageTable.updatedAt,
-          depth: sql<number>`(
-            select max(${groupMessageClosureTable.depth})
-            from ${groupMessageClosureTable}
-            where ${groupMessageClosureTable.descendantId} = ${groupMessageTable.id}
-          )`,
-        })
-        .from(groupMessageTable)
-        .where(
-          and(
-            eq(groupMessageTable.id, messageId),
-            eq(groupMessageTable.groupId, id),
-          ),
-        );
+      const message = await db.query.groupMessage.findFirst({
+        where: (t, { and, eq }) =>
+          and(eq(t.id, messageId), eq(t.groupId, id)),
+      });
       if (!message) {
         throw new BizError(BizCodeEnum.MessageNotFound);
       }
@@ -779,17 +756,9 @@ app
         throw new BizError(BizCodeEnum.InvalidRequest);
       }
 
-      const now = new Date();
-      await db
-        .update(groupMessageTable)
-        .set({ body, updatedAt: now })
-        .where(
-          and(
-            eq(groupMessageTable.id, messageId),
-            eq(groupMessageTable.groupId, id),
-          ),
-        );
-      const updated = { ...message, body, updatedAt: now };
+      // 编辑写入在 message-service 内完成(仅 UPDATE + 返回全量行);
+      // 发送者/群状态/占位串等校验已在上方完成,错误码与响应结构不变。
+      const updated = await updateMessageBody(db, id, messageId, body);
       // Realtime push (ticket 22): same fire-and-forget semantics as POST.
       void wsHub.broadcastGroupMessageUpdated(updated);
       return c.json(updated);
@@ -844,31 +813,22 @@ app
       if (message.senderId !== agentId) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
-      // 幂等:已是占位 body 说明已软删除,直接成功,不再重复广播。
-      if (message.body === DELETED_MESSAGE_PLACEHOLDER) {
-        return c.json({ success: true });
-      }
 
-      const now = new Date();
-      await db
-        .update(groupMessageTable)
-        .set({ body: DELETED_MESSAGE_PLACEHOLDER, updatedAt: now })
-        .where(
-          and(
-            eq(groupMessageTable.id, messageId),
-            eq(groupMessageTable.groupId, id),
-          ),
-        );
-      // Realtime push (ticket 22): the event carries only the id; visibility
-      // reuses the message's own audience, so the same members that saw the
-      // original get the delete.
-      void wsHub.broadcastGroupMessageDeleted({
-        id: message.id,
-        groupId: message.groupId,
-        senderId: message.senderId,
-        audience: message.audience,
-        audienceRef: message.audienceRef,
-      });
+      // 软删除(占位符 + 保持闭包)在 message-service 内完成,返回是否真的
+      // 执行了删除:幂等场景(已删过)不再重复广播,响应结构均为 success。
+      const deleted = await softDeleteMessage(db, id, messageId);
+      if (deleted) {
+        // Realtime push (ticket 22): the event carries only the id; visibility
+        // reuses the message's own audience, so the same members that saw the
+        // original get the delete.
+        void wsHub.broadcastGroupMessageDeleted({
+          id: message.id,
+          groupId: message.groupId,
+          senderId: message.senderId,
+          audience: message.audience,
+          audienceRef: message.audienceRef,
+        });
+      }
       return c.json({ success: true });
     },
   )
@@ -921,58 +881,13 @@ app
           ? [...(membership?.roles ?? []), "human"]
           : (membership?.roles ?? []);
 
-      // Visibility is pushed into SQL (same rule as the webhook/WS fan-out,
-      // see group-visibility.ts) so the ?after= cursor and LIMIT paginate over
-      // the *visible* stream instead of fetching everything into JS. The rule:
-      // sender always sees own messages; broadcast reaches every member; role
-      // reaches members holding that role; agent reaches only the named
-      // member; human members bypass the audience rule and see everything.
-      const conditions = [
-        eq(groupMessageTable.groupId, id),
-        messageVisibleToMemberSql(requesterId, requesterRoles),
-      ];
-      if (after) {
-        // Incremental pull: uuidv7 ids are time-ordered, so id > after yields
-        // everything the caller has not seen yet. The stream is ordered by the
-        // same key the cursor filters on, so cursor and order cannot diverge.
-        conditions.push(gt(groupMessageTable.id, after));
-      }
-      if (q) {
-        // Keyword search: body ILIKE %q% on top of the visibility filter. LIKE
-        // wildcards (%, _) are backslash-escaped so `100%` matches literally;
-        // the escape is applied to the pattern only, never to user input at the
-        // SQL level (drizzle binds the pattern as a parameter). Empty string is
-        // treated as "no search" — behavior identical to the pre-search route.
-        const escaped = q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-        conditions.push(ilike(groupMessageTable.body, `%${escaped}%`));
-      }
-
-      const messages = await db
-        .select({
-          id: groupMessageTable.id,
-          groupId: groupMessageTable.groupId,
-          senderId: groupMessageTable.senderId,
-          parentId: groupMessageTable.parentId,
-          audience: groupMessageTable.audience,
-          audienceRef: groupMessageTable.audienceRef,
-          body: groupMessageTable.body,
-          contentType: groupMessageTable.contentType,
-          fileRef: groupMessageTable.fileRef,
-          createdAt: groupMessageTable.createdAt,
-          updatedAt: groupMessageTable.updatedAt,
-          depth: sql<number>`(
-            select max(${groupMessageClosureTable.depth})
-            from ${groupMessageClosureTable}
-            where ${groupMessageClosureTable.descendantId} = ${groupMessageTable.id}
-          )`,
-        })
-        .from(groupMessageTable)
-        .where(and(...conditions))
-        // uuidv7 ids embed the server receive time, so id order IS receive
-        // order — ordering by id keeps the stream consistent with ?after=.
-        // Page the visible stream; clients continue with ?after=<lastId>.
-        .orderBy(asc(groupMessageTable.id))
-        .limit(MESSAGE_PAGE_LIMIT);
+      // 可见性 SQL(与 webhook/WS 扇出同一套规则)+ ?after= 增量游标 +
+      // q 关键词 + LIMIT 整体在 message-service 内完成,翻页发生在
+      // *可见* 流上;路由只做响应编排。
+      const messages = await listVisibleMessages(db, id, requesterId, requesterRoles, {
+        after,
+        q,
+      });
 
       return c.json(messages);
     },
