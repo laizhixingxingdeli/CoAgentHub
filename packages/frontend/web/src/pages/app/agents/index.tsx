@@ -332,6 +332,10 @@ export default function ExecutorsPage() {
           新增一个可被定向消息调度的执行器;提交后自动注册对应
           agent,凭据由后端管理。绑定身份后可编辑自己的 Agent 信息并上报在线
         </p>
+        <p className="text-muted-foreground mt-1 text-xs">
+          术语澄清:这里的 Agent = 参与者身份(人 / 工具 / Bot 统一注册),不是「AI
+          智能体」; 平台不内置 AI,思考发生在各 Agent 自己的客户端。
+        </p>
       </div>
 
       {message && (

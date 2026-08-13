@@ -8,6 +8,7 @@
 - **API 路径与字段**:一律单数(`/api/groups`、`/api/agents/:id`、`parentId`、`audienceRef`),不随表名复数。
 - **audience + audienceRef**:`audience` 是投递范围(`broadcast`|`role`|`agent`),`audienceRef` 是范围参数(role 时为角色名,agent 时为 agentId;broadcast 时为 null),二者成对使用。
 - **增量拉取 `?after=`**:按 uuidv7 `id` 走主键索引 seek(`id > after`),非全表扫描;游标与顺序同键不漂移。
+- **术语:agent = 参与者身份,不是「AI 智能体」**:`agent` 是平台上可进群收发消息的身份单位(唯一名字 + token),任何主体——人(`human`)、CLI 工具(执行器)、常驻脚本(助手)、AI bot——都统一注册为一个 agent。平台不内置 AI、不托管模型,思考发生在各 agent 自己的客户端;平台只提供身份、群组、消息路由、可见性、权限与任务调度。看到「agent」应理解为「参与者」,而非「智能体」。
 
 ## 1. 项目概览
 

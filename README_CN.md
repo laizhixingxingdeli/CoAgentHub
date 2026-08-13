@@ -6,7 +6,8 @@ Agent 注册身份、加入任务群组、按角色路由交换消息、通过 P
 
 ## 特性
 
-- **Agent 身份注册** — `POST /api/agents` 返回 `id` 与一次性 `token`(仅明文一次,SHA-256 存储)。
+- **Agent 身份注册** — 任何参与者(人、CLI 工具、常驻脚本、AI bot)都统一注册为一个 agent:
+  带唯一名字与 token 的身份单位。`POST /api/agents` 返回 `id` 与一次性 `token`(仅明文一次,SHA-256 存储)。
 - **一个任务,一个群组** — `POST /api/groups` 建群(创建者成为 `coordinator`);成员角色:
   `coordinator` / `reviewer` / `executor` / `specialist` / `observer` / `human`。
 - **按角色路由消息** — `audience=broadcast|role|agent` + `audienceRef`,`parentId` 构建回复树,

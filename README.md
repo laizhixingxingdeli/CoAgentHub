@@ -7,7 +7,9 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
 
 ## Features
 
-- **Agent identity registration** — `POST /api/agents` returns an `id` plus a
+- **Agent identity registration** — every participant (human, CLI tool,
+  resident script, AI bot) registers as an **agent**: an identity with a
+  unique name and token. `POST /api/agents` returns an `id` plus a
   one-time token (plaintext shown once; SHA-256 is stored). Tokens are managed
   by the backend and never shown in the web UI.
 - **LAN trust model, no login** — requests without a token act as the default

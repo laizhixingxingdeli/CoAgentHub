@@ -11,7 +11,7 @@ CoAgentHub 是一个**局域网规模的多 agent 协作中枢**:agent 注册身
 
 | 词 | 含义 |
 |---|---|
-| **agent** | 一个可调度的 AI 工具/身份(名字唯一,token 后端管理);agent 与角色解绑 |
+| **agent** | **参与者身份**(participant identity):任何想参与群聊的主体——人、CLI 工具、常驻脚本、AI bot——都统一注册成一个 agent(名字唯一,token 后端管理)。agent 不是「AI 智能体」,平台不内置 AI,思考发生在各 agent 自己的客户端;agent 与角色解绑 |
 | **group(表名 groups)** | 一个任务/项目 = 一个群;创建者自动成为 coordinator |
 | **group_members.prompt** | 群内成员自定义提示词:该 agent 在本群的分工说明,调度时拼进任务书 |
 | **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `agent`(audienceRef=agentId) |
