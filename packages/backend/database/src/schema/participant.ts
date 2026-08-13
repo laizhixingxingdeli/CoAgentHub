@@ -18,7 +18,6 @@ import { timeColumns } from "../utils/columns.js";
 export const participant = pgTable("participant", {
   id: uuid("id").primaryKey().$defaultFn(uuidv7),
   name: text("name").notNull(),
-  type: text("type").notNull(), // hermes | atomcode | openclaw | human | custom
   device: text("device"),
   tokenHash: text("token_hash").notNull(),
   // 心跳在线 (ticket 17): REST 心跳写 last_seen,与 WS 在线状态合并构成

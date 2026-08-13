@@ -90,8 +90,6 @@ export function MessageList(props: MessageListProps) {
     const member = members.find((m) => m.participantId === senderId);
     return member ? member.name : senderId.slice(0, 8);
   };
-  const senderType = (senderId: string) =>
-    members.find((m) => m.participantId === senderId)?.type ?? null;
   const senderDevice = (senderId: string) =>
     members.find((m) => m.participantId === senderId)?.device ?? null;
   const senderRoles = (senderId: string): string[] =>
@@ -358,13 +356,8 @@ export function MessageList(props: MessageListProps) {
                                   {formatMessageTime(msg.createdAt)}
                                 </span>
                               </span>
-                              {/* Ticket 32 info line 2: 类型 / 角色 / 受众徽章(小字) */}
+                              {/* Ticket 32 info line 2: 角色 / 受众徽章(小字) */}
                               <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                                {senderType(msg.senderId) && (
-                                  <span className="rounded-full bg-muted px-1.5 py-0.5">
-                                    {senderType(msg.senderId)}
-                                  </span>
-                                )}
                                 {senderRoles(msg.senderId).length > 0 && (
                                   <span className="rounded-full bg-muted px-1.5 py-0.5">
                                     {senderRoles(msg.senderId).join("/")}

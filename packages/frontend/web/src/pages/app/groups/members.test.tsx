@@ -16,7 +16,6 @@ const MEMBERS = [
   {
     participantId: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
     roles: ["coordinator"],
     prompt: "负责整体协调与任务拆解,把控进度",
@@ -25,7 +24,6 @@ const MEMBERS = [
   {
     participantId: "participant-2",
     name: "win-hermes",
-    type: "hermes",
     device: "win-pc",
     roles: ["reviewer", "executor"],
     prompt: null,
@@ -37,10 +35,9 @@ const PARTICIPANTS = [
   {
     id: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
   },
-  { id: "participant-9", name: "atomcode-cli", type: "atomcode", device: null },
+  { id: "participant-9", name: "atomcode-cli", device: null },
 ];
 
 function membersFetchMock(
@@ -162,7 +159,6 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
         {
           participantId: "participant-1",
           name: "hermes-mac",
-          type: "hermes",
           device: "mac-mini",
           roles: ["coordinator"],
           prompt:

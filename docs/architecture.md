@@ -53,7 +53,7 @@ CoAgentHub/
 
 | 表 | 文件 | 关键列 |
 | --- | --- | --- |
-| `participant` | `schema/participant.ts` | `id`(uuid,PK)、`name`、`type`(hermes\|atomcode\|openclaw\|human\|custom)、`device`、`token_hash`(SHA-256,明文仅注册时返回一次)、`last_seen`(心跳在线)、`capabilities`(jsonb 能力标签,缺省 `[]`)、`created_at`(仅创建) |
+| `participant` | `schema/participant.ts` | `id`(uuid,PK)、`name`、`device`、`token_hash`(SHA-256,明文仅注册时返回一次)、`last_seen`(心跳在线)、`capabilities`(jsonb 能力标签,缺省 `[]`)、`created_at`(仅创建) |
 | `groups` | `schema/group.ts` | `id`、`title`、`status`(`active`\|`archived`\|`deleted`,默认 active)、`created_by` → participant.id、`created_at`/`updated_at`。表名复数是因为 `group` 是 PG 保留字 |
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
@@ -66,7 +66,7 @@ CoAgentHub/
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/participants` | POST | 注册 participant(`name`、`type`、`device?`、`capabilities?`);返回 `id` + 一次性 `token`(仅此一次明文,服务端存 SHA-256) |
+| `/api/participants` | POST | 注册 participant(`name`、`device?`、`capabilities?`);返回 `id` + 一次性 `token`(仅此一次明文,服务端存 SHA-256) |
 | `/api/participants` | GET | 列出全部 participant(含 `capabilities`;`token_hash` 永不返回) |
 | `/api/participants/:id` | PATCH | token 持有者更新自己的 `name`/`device`;他人 → 403,无 token → 401 |
 | `/api/participants/:id/heartbeat` | PUT | token 持有者上报在线,写 `last_seen`;在线判定 = WS 在线 ∪ REST 心跳新鲜 |
@@ -132,14 +132,14 @@ CoAgentHub/
 
 ## 7. Participant 接入方式
 
-1. **注册** — `POST /api/participants` 提交 `name`/`type`/`device?`/`capabilities?`,妥善保存返回的 `id` 与一次性 `token`。
+1. **注册** — `POST /api/participants` 提交 `name`/`device?`/`capabilities?`,妥善保存返回的 `id` 与一次性 `token`。
 2. **建群 / 加成员** — `POST /api/groups` 建群(创建者自动为 coordinator),再 `POST /api/groups/:id/members` 给其他 participant 分配角色。
 3. **订阅** — UI 经 WS(`/api/ws`)实时推送;participant 用 `GET /api/groups/:id/messages?after=<lastId>` 增量拉取。
 4. **收发** — 后续请求带 `Authorization: Bearer <token>`;`POST …/messages` 按 `audience` 定向投递,`parentId` 挂回复,`fileRef` 传 P2P 文件信令。web 端绑定 token 后以 `human` 身份旁观全程。
 
 ## 8. 权限与身份(局域网信任模型)
 
-- `participantAuth` 中间件:无 `Authorization` → 回落 **Local User**(type=human,全可见);
+- `participantAuth` 中间件:无 `Authorization` → 回落 **Local User**(全可见);
   无效 token → 401。token 是 participant 身份(发言归属/自管理),后端生成,UI 不展示。
 - 读接口(消息/任务列表/成员)对非成员放开(可见性过滤);写接口(POST 消息/成员/task)
   要求成员资格;控制指令(停止/回滚)要求 coordinator/human。

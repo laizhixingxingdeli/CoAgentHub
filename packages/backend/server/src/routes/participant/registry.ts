@@ -45,7 +45,6 @@ app
       "json",
       z.object({
         name: z.string().min(1),
-        type: z.string().min(1), // hermes | atomcode | openclaw | human | custom
         device: z.string().optional(),
         // 自由能力标签 (ticket 17): 缺省空数组;仅存储,轻量校验放在加成员处。
         capabilities: z.array(z.string()).max(64).optional(),
@@ -63,7 +62,6 @@ app
         .insert(participantTable)
         .values({
           name: input.name,
-          type: input.type,
           device: input.device ?? null,
           tokenHash: hashParticipantToken(token),
           capabilities: input.capabilities ?? [],
@@ -73,7 +71,6 @@ app
       return c.json({
         id: participant.id,
         name: participant.name,
-        type: participant.type,
         device: participant.device,
         capabilities: participant.capabilities,
         createdAt: participant.createdAt,
@@ -100,7 +97,6 @@ app
         .select({
           id: participantTable.id,
           name: participantTable.name,
-          type: participantTable.type,
           device: participantTable.device,
           capabilities: participantTable.capabilities,
           lastSeen: participantTable.lastSeen,
@@ -174,7 +170,6 @@ app
         .returning({
           id: participantTable.id,
           name: participantTable.name,
-          type: participantTable.type,
           device: participantTable.device,
           capabilities: participantTable.capabilities,
           lastSeen: participantTable.lastSeen,

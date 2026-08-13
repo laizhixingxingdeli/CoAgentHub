@@ -184,11 +184,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "coord-exec",
-      type: "hermes",
     });
     const codebuddy = await registerParticipant({
       name: "CodeBuddy 执行器", // executors.ts 的 agentName,触发匹配靠它
-      type: "participant",
     });
     const group = await createGroup(coordinator.token, "执行器触发测试");
     await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
@@ -230,11 +228,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   it("定向到非执行器 participant 的消息不建 task", async () => {
     const coordinator = await registerParticipant({
       name: "coord-plain",
-      type: "hermes",
     });
     const ordinary = await registerParticipant({
       name: "ordinary-participant",
-      type: "custom",
     });
     const group = await createGroup(coordinator.token, "非执行器触发");
     await addMember(coordinator.token, group.id, ordinary.id, ["observer"]);
@@ -390,11 +386,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     try {
       const coordinator = await registerParticipant({
         name: "coord-a2a",
-        type: "hermes",
       });
       const winHermes = await registerParticipant({
         name: "Win Hermes", // executors.ts 的 agentName
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "a2a 触发测试");
       await addMember(coordinator.token, group.id, winHermes.id, ["executor"]);

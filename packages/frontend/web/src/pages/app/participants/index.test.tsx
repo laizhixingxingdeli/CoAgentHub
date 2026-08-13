@@ -10,7 +10,7 @@ import ExecutorsPage from "./index";
 
 /**
  * 接入 Participant 页(ticket: 网页 @executor 发布):
- *  - 表单字段齐全(名字/类型/调用方式/命令或地址/参数模板/设备);
+ *  - 表单字段齐全(名字/调用方式/命令或地址/参数模板/设备);
  *  - 提交调 POST /api/executors,成功后列表出现新 participant;
  *  - 内置执行器只展示不可删除,DB 配置可删除;
  *  - 界面不出现任何 token/token_hash 字段;
@@ -45,7 +45,7 @@ function executorsFetchMock() {
         const created = {
           key: String(body.agentName).toLowerCase().replace(/\s+/g, "-"),
           agentName: body.agentName,
-          type: body.type,
+          type: "custom",
           kind: body.kind,
           bin: body.bin ?? null,
           url: body.url ?? null,
@@ -88,9 +88,8 @@ describe("接入 Participant 页", () => {
 
     renderWithProviders(<ExecutorsPage />, "/participants");
 
-    // 表单字段:名字/类型/调用方式/命令/参数模板/设备
+    // 表单字段:名字/调用方式/命令/参数模板/设备
     expect(screen.getByLabelText("名字")).toBeInTheDocument();
-    expect(screen.getByLabelText("类型")).toBeInTheDocument();
     expect(screen.getByText("调用方式")).toBeInTheDocument();
     expect(screen.getByLabelText("cli(本地命令)")).toBeInTheDocument();
     expect(screen.getByLabelText("a2a(远程 gateway)")).toBeInTheDocument();
@@ -142,6 +141,8 @@ describe("接入 Participant 页", () => {
     expect(payload.device).toBe("mac-mini");
     expect(payload).not.toHaveProperty("token");
     expect(payload).not.toHaveProperty("tokenHash");
+    // participant.type 已移除:载荷不含 type。
+    expect(payload).not.toHaveProperty("type");
 
     // 界面无 token 展示
     expect(document.body.textContent).not.toMatch(/token/i);
@@ -248,7 +249,6 @@ describe("接入 Participant 页", () => {
     {
       id: "participant-online",
       name: "Online Bot",
-      type: "custom",
       device: "mac-mini",
       capabilities: ["text-generation", "code-review"],
       lastSeen: new Date(Date.now() - 5_000).toISOString(),
@@ -256,7 +256,6 @@ describe("接入 Participant 页", () => {
     {
       id: "participant-offline",
       name: "Offline Bot",
-      type: "hermes",
       device: "win-pc",
       capabilities: [],
       lastSeen: new Date(Date.now() - 3_600_000).toISOString(),
@@ -264,7 +263,6 @@ describe("接入 Participant 页", () => {
     {
       id: "participant-never",
       name: "Never Bot",
-      type: "atomcode",
       device: null,
       capabilities: ["code-review"],
       lastSeen: null,

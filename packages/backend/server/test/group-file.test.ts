@@ -89,12 +89,10 @@ describe("群组文件信令 (P2P)", () => {
   async function setupGroup() {
     const sender = await registerParticipant({
       name: "hermes-mac",
-      type: "hermes",
       device: "mac-mini",
     });
     const receiver = await registerParticipant({
       name: "win-hermes",
-      type: "hermes",
       device: "win-pc",
     });
     const group = await createGroup(sender.token, "模型训练任务");

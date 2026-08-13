@@ -14,7 +14,6 @@ const MEMBERS = [
   {
     participantId: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
     roles: ["coordinator"],
     prompt: "负责统筹协调与最终验收",
@@ -23,7 +22,6 @@ const MEMBERS = [
   {
     participantId: "participant-2",
     name: "win-hermes",
-    type: "hermes",
     device: "win-pc",
     roles: ["reviewer"],
     prompt: null,

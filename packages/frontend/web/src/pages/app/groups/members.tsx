@@ -33,7 +33,6 @@ type GroupRole = (typeof GROUP_ROLES)[number];
 type Member = {
   participantId: string;
   name: string;
-  type: string;
   device: string | null;
   roles: string[];
   /** 群内分工说明(角色解绑):可空,由「编辑分工」维护。 */
@@ -44,7 +43,6 @@ type Member = {
 type ParticipantOption = {
   id: string;
   name: string;
-  type: string;
   device: string | null;
 };
 
@@ -374,7 +372,6 @@ export default function GroupMembersPage() {
             {candidates.map((participant) => (
               <option key={participant.id} value={participant.id}>
                 {participant.name}
-                {participant.type ? ` (${participant.type})` : ""}
                 {participant.device ? ` · ${participant.device}` : ""}
               </option>
             ))}
@@ -450,7 +447,6 @@ export default function GroupMembersPage() {
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                    <span>{member.type}</span>
                     {member.device && <span>{member.device}</span>}
                   </div>
                   {editingParticipantId === member.participantId ? (
@@ -521,7 +517,6 @@ export default function GroupMembersPage() {
               <thead>
                 <tr className="border-b text-left text-muted-foreground">
                   <th className="px-4 py-3 font-medium">名称</th>
-                  <th className="px-4 py-3 font-medium">类型</th>
                   <th className="px-4 py-3 font-medium">设备</th>
                   <th className="px-4 py-3 font-medium">角色</th>
                   <th className="px-4 py-3 font-medium">分工</th>
@@ -535,9 +530,6 @@ export default function GroupMembersPage() {
                     className="border-b last:border-0"
                   >
                     <td className="px-4 py-3 font-medium">{member.name}</td>
-                    <td className="px-4 py-3 text-muted-foreground">
-                      {member.type}
-                    </td>
                     <td className="px-4 py-3 text-muted-foreground">
                       {member.device ?? "-"}
                     </td>

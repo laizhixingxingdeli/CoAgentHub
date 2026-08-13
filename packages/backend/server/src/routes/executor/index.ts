@@ -34,8 +34,8 @@ const CreateExecutorSchema = z
   .object({
     /** participant 展示名(唯一;同时是注册进 participant 表的 name)。 */
     agentName: z.string().min(1).max(100),
-    /** 类型:hermes | atomcode | openclaw | human | custom */
-    type: z.string().min(1),
+    /** 类型:executor_config 展示元数据;缺省 "custom"(participant.type 已移除)。 */
+    type: z.string().min(1).optional(),
     /** 调用方式:cli=本地 spawn / a2a=经 A2A gateway 远程调用。 */
     kind: z.enum(["cli", "a2a"]),
     /** cli 的执行命令(a2a 时可为空,仅占位标识)。 */
@@ -70,7 +70,9 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const input = c.req.valid("json");
-      const { agentName, type, kind, bin, url, args, label, device } = input;
+      const { agentName, kind, bin, url, args, label, device } = input;
+      // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
+      const type = input.type ?? "custom";
 
       // 名字唯一:内置 + DB 里已有同名 participant 都算重复(按 agentName 判重)。
       const all = await effectiveExecutors(db);

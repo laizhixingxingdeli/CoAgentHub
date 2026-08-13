@@ -330,7 +330,6 @@ app
         .select({
           participantId: participantTable.id,
           name: participantTable.name,
-          type: participantTable.type,
           device: participantTable.device,
           roles: groupMemberTable.roles,
           prompt: groupMemberTable.prompt,

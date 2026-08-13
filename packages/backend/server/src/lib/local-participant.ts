@@ -37,7 +37,6 @@ export async function resolveLocalUser(db: DataBase): Promise<string> {
     .insert(participantTable)
     .values({
       name: DEFAULT_LOCAL_USER_NAME,
-      type: "human",
       tokenHash: hashParticipantToken(generateParticipantToken()),
     })
     .onConflictDoNothing();

@@ -75,11 +75,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("移除普通成员成功,移除后 GET members 不含该人", async () => {
       const { id: ownerId, token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "win-hermes",
-        type: "hermes",
       });
       const group = await createGroup(token, "移除任务");
       await addMember(token, group.id, memberId, ["reviewer"]);
@@ -104,11 +102,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("移除不存在的成员返回 404 MEMBER_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: outsiderId } = await registerParticipant({
         name: "outsider",
-        type: "atomcode",
       });
       const group = await createGroup(token, "不存在成员");
 
@@ -126,7 +122,6 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/members/00000000-0000-0000-0000-00000000beef",
@@ -142,7 +137,6 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("移除群主返回 400,且群主仍保留在成员列表", async () => {
       const { id: ownerId, token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "群主保护");
 
@@ -163,11 +157,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("改角色成功,更新后 GET 反映新 roles", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "win-hermes",
-        type: "hermes",
       });
       const group = await createGroup(token, "改角色任务");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -205,11 +197,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("重复角色去重(与 POST /members 同规则)", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "dedupe",
-        type: "atomcode",
       });
       const group = await createGroup(token, "去重任务");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -235,11 +225,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("roles 空数组返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "empty",
-        type: "hermes",
       });
       const group = await createGroup(token, "空角色校验");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -261,11 +249,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("roles 含非预设角色返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "bogus",
-        type: "hermes",
       });
       const group = await createGroup(token, "非法角色校验");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -287,11 +273,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("成员不存在返回 404 MEMBER_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: outsiderId } = await registerParticipant({
         name: "outsider",
-        type: "atomcode",
       });
       const group = await createGroup(token, "不存在成员改角色");
 
@@ -315,11 +299,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("POST 带 prompt 成功,GET members 返回 prompt", async () => {
       const { token } = await registerParticipant({
         name: "coord-prompt",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "prompt-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "分工提示词");
 
@@ -355,11 +337,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("POST 不带 prompt 不破坏旧行为(prompt 为 null)", async () => {
       const { token } = await registerParticipant({
         name: "coord-noprompt",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "plain-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "无提示词成员");
 
@@ -380,11 +360,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("幂等 upsert 不带 prompt 保持既有分工提示词", async () => {
       const { token } = await registerParticipant({
         name: "coord-upsert",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "upsert-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "upsert 提示词");
 
@@ -420,11 +398,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("PATCH 只改 prompt:roles 不变", async () => {
       const { token } = await registerParticipant({
         name: "coord-patch-prompt",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "patch-prompt-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "只改提示词");
       await addMember(token, group.id, memberId, ["reviewer"]);
@@ -452,11 +428,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("PATCH roles + prompt 同时更新", async () => {
       const { token } = await registerParticipant({
         name: "coord-both",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "both-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "同时更新");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -484,11 +458,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("PATCH 空 body(roles 与 prompt 都不给)返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord-empty",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "empty-patch",
-        type: "atomcode",
       });
       const group = await createGroup(token, "空 PATCH 校验");
       await addMember(token, group.id, memberId, ["observer"]);
@@ -510,11 +482,9 @@ describe("群组成员管理 API (ticket 20)", () => {
     it("prompt 超过 1000 字返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord-long",
-        type: "hermes",
       });
       const { id: memberId } = await registerParticipant({
         name: "long-prompt-participant",
-        type: "atomcode",
       });
       const group = await createGroup(token, "超长提示词校验");
 

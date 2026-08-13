@@ -46,7 +46,6 @@ describe("群组与成员 API", () => {
     it("创建成功,创建者自动成为 coordinator 成员", async () => {
       const { id: participantId, token } = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
         device: "mac-mini",
       });
 
@@ -85,7 +84,6 @@ describe("群组与成员 API", () => {
     it("缺 title 返回 400", async () => {
       const { token } = await registerParticipant({
         name: "a",
-        type: "atomcode",
       });
       const res = await app.request("/api/groups", {
         method: "POST",
@@ -103,7 +101,6 @@ describe("群组与成员 API", () => {
     it("返回全部群组并带 status 与成员数", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "任务一");
 
@@ -130,7 +127,6 @@ describe("群组与成员 API", () => {
     it("?status=archived 只返回已归档群组", async () => {
       const { token } = await registerParticipant({
         name: "c2",
-        type: "hermes",
       });
       const active = await createGroup(token, "保留");
       const archived = await createGroup(token, "归档");
@@ -161,7 +157,6 @@ describe("群组与成员 API", () => {
     it("非法 status 过滤值返回 400", async () => {
       const { token } = await registerParticipant({
         name: "c3",
-        type: "hermes",
       });
       const res = await app.request("/api/groups?status=bogus", {
         headers: { Authorization: `Bearer ${token}` },
@@ -172,7 +167,6 @@ describe("群组与成员 API", () => {
     it("?q= 按标题关键词过滤(子串匹配)", async () => {
       const { token } = await registerParticipant({
         name: "c4",
-        type: "hermes",
       });
       const match = await createGroup(token, "模型训练任务");
       await createGroup(token, "部署上线");
@@ -194,7 +188,6 @@ describe("群组与成员 API", () => {
     it("?q= 对 LIKE 通配符(%、_)按字面转义", async () => {
       const { token } = await registerParticipant({
         name: "c5",
-        type: "hermes",
       });
       const withPercent = await createGroup(token, "进度 100% 达成");
       const withUnderscore = await createGroup(token, "任务_甲");
@@ -229,7 +222,6 @@ describe("群组与成员 API", () => {
     it("?q= 与 ?status= 可组合过滤", async () => {
       const { token } = await registerParticipant({
         name: "c6",
-        type: "hermes",
       });
       const active = await createGroup(token, "模型评测 A");
       const archived = await createGroup(token, "模型评测 B");
@@ -252,7 +244,6 @@ describe("群组与成员 API", () => {
     it("?q= 空串等价于无搜索(返回全量)", async () => {
       const { token } = await registerParticipant({
         name: "c7",
-        type: "hermes",
       });
       const group = await createGroup(token, "任意标题");
 
@@ -268,7 +259,6 @@ describe("群组与成员 API", () => {
     it("?q= 超过 100 字符返回 400", async () => {
       const { token } = await registerParticipant({
         name: "c8",
-        type: "hermes",
       });
       const res = await app.request(`/api/groups?q=${"x".repeat(101)}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -279,7 +269,6 @@ describe("群组与成员 API", () => {
     it("?limit= 分页:返回指定条数并带 total", async () => {
       const { token } = await registerParticipant({
         name: "c9",
-        type: "hermes",
       });
       // 同文件用例共享 DB,先取基线 total 再做相对断言,避免被既有群污染。
       const baseline = (await (
@@ -309,7 +298,6 @@ describe("群组与成员 API", () => {
     it("?limit=&offset= 翻页:两页互补、不重叠且 total 不变", async () => {
       const { token } = await registerParticipant({
         name: "c10",
-        type: "hermes",
       });
       const ids: string[] = [];
       for (let i = 0; i < 7; i++) {
@@ -344,7 +332,6 @@ describe("群组与成员 API", () => {
     it("不带分页参数时 items 为全量且 total 一致", async () => {
       const { token } = await registerParticipant({
         name: "c11",
-        type: "hermes",
       });
       const baseline = (await (
         await app.request("/api/groups", {
@@ -376,7 +363,6 @@ describe("群组与成员 API", () => {
     it("?limit= 与 ?q= 组合:total 按过滤条件计,items 只取一页", async () => {
       const { token } = await registerParticipant({
         name: "c12",
-        type: "hermes",
       });
       const match = await createGroup(token, "组合匹配甲");
       const match2 = await createGroup(token, "组合匹配乙");
@@ -400,7 +386,6 @@ describe("群组与成员 API", () => {
     it("非法 limit/offset 回退默认值(仍返回 200)", async () => {
       const { token } = await registerParticipant({
         name: "c13",
-        type: "hermes",
       });
       await createGroup(token, "回退一");
       await createGroup(token, "回退二");
@@ -431,11 +416,9 @@ describe("群组与成员 API", () => {
     it("添加成员并分配角色,重复添加幂等更新角色", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: reviewerId } = await registerParticipant({
         name: "win-hermes",
-        type: "hermes",
         device: "win-pc",
       });
       const group = await createGroup(token, "评审任务");
@@ -482,7 +465,6 @@ describe("群组与成员 API", () => {
       expect(members).toHaveLength(2);
       const reviewer = members.find((m) => m.participantId === reviewerId);
       expect(reviewer?.name).toBe("win-hermes");
-      expect(reviewer?.type).toBe("hermes");
       expect(reviewer?.device).toBe("win-pc");
       expect(reviewer?.roles).toEqual(["reviewer", "executor"]);
     });
@@ -490,11 +472,9 @@ describe("群组与成员 API", () => {
     it("roles 缺省或为空时默认 ['observer']", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: watcherId } = await registerParticipant({
         name: "watcher",
-        type: "atomcode",
       });
       const group = await createGroup(token, "观察任务");
 
@@ -531,11 +511,9 @@ describe("群组与成员 API", () => {
     it("roles 不在预设目录中返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: participantId } = await registerParticipant({
         name: "x",
-        type: "openclaw",
       });
       const group = await createGroup(token, "校验任务");
 
@@ -553,11 +531,9 @@ describe("群组与成员 API", () => {
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const { id: participantId } = await registerParticipant({
         name: "y",
-        type: "hermes",
       });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/members",
@@ -577,7 +553,6 @@ describe("群组与成员 API", () => {
     it("participant 不存在返回 404 PARTICIPANT_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "校验 participant");
       const res = await app.request(`/api/groups/${group.id}/members`, {
@@ -598,7 +573,6 @@ describe("群组与成员 API", () => {
     it("非 UUID groupId/participantId 返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const badGroup = await app.request("/api/groups/not-a-uuid/members", {
         method: "POST",
@@ -616,7 +590,6 @@ describe("群组与成员 API", () => {
     it("群组不存在返回 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/members",
@@ -631,7 +604,6 @@ describe("群组与成员 API", () => {
     it("active -> archived,再次归档返回 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "完成后归档");
 
@@ -655,7 +627,6 @@ describe("群组与成员 API", () => {
     it("不存在的群组返回 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/archive",
@@ -673,7 +644,6 @@ describe("群组与成员 API", () => {
     it("POST /:id/unarchive:archived -> active,再次 unarchive 返回 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "可恢复的归档");
 
@@ -722,7 +692,6 @@ describe("群组与成员 API", () => {
     it("归档群组禁发消息返回 400,读取(messages/members/:id)仍 200", async () => {
       const { id: participantId, token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "只读归档");
       await app.request(`/api/groups/${group.id}/archive`, {
@@ -768,7 +737,6 @@ describe("群组与成员 API", () => {
     it("GET /:id 返回群组详情含 status,不存在的群组 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "详情查询");
 
@@ -798,7 +766,6 @@ describe("群组与成员 API", () => {
     it("软删除:DELETE /:id 后列表不再返回,active/archived 不受影响,重复删除 404", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const doomed = await createGroup(token, "将被删除");
       const active = await createGroup(token, "保留的进行中");
@@ -858,7 +825,6 @@ describe("群组与成员 API", () => {
     it("软删除保留数据:历史消息仍可查,成员关系仍在", async () => {
       const { id: participantId, token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "删除后仍有历史");
 
@@ -903,7 +869,6 @@ describe("群组与成员 API", () => {
     it("迁移已应用:新建群 GET /:id 返回 projectPath 且初始为 null", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "绑定前");
 
@@ -918,7 +883,6 @@ describe("群组与成员 API", () => {
     it("绑定存在的绝对目录成功,GET /:id 返回该 projectPath", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "绑定成功");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
@@ -950,7 +914,6 @@ describe("群组与成员 API", () => {
     it("null 与空串均清空绑定", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "清空绑定");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
@@ -1008,7 +971,6 @@ describe("群组与成员 API", () => {
     it("相对路径 / 不存在路径 / 非目录路径均返回 400", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const group = await createGroup(token, "非法路径");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
@@ -1039,7 +1001,6 @@ describe("群组与成员 API", () => {
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
       const { token } = await registerParticipant({
         name: "coord",
-        type: "hermes",
       });
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
 

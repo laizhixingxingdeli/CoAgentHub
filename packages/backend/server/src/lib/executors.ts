@@ -270,7 +270,6 @@ export async function registerExecutorParticipant(
   const token = generateParticipantToken();
   await db.insert(participantTable).values({
     name: ex.agentName,
-    type: ex.type,
     device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
     tokenHash: hashParticipantToken(token),
     capabilities: [],

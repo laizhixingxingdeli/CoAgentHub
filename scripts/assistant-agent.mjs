@@ -183,7 +183,6 @@ async function ensureParticipant() {
   }
   const created = await api("POST", "/participants", null, {
     name: getParticipantName(),
-    type: "custom",
     device: "mac",
   });
   state.participant = { id: created.id, token: created.token };

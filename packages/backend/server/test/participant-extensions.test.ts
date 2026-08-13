@@ -83,7 +83,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("本人部分更新成功,未更新字段保留,响应不含 token_hash", async () => {
       const { id, token } = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
         device: "mac-mini",
       });
 
@@ -99,7 +98,6 @@ describe("T17 participant 自更新与扩展字段", () => {
       const updated = (await res.json()) as Record<string, unknown>;
       expect(updated.name).toBe("hermes-mac-2");
       expect(updated.device).toBe("new-laptop");
-      expect(updated.type).toBe("hermes"); // 未更新的字段保留
       expect(updated).not.toHaveProperty("tokenHash");
       expect(updated).not.toHaveProperty("token");
       expect(updated.capabilities).toEqual([]);
@@ -122,11 +120,9 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("他人 token 更新返回 403 且目标 participant 不变", async () => {
       const a = await registerParticipant({
         name: "participant-a",
-        type: "hermes",
       });
       const b = await registerParticipant({
         name: "participant-b",
-        type: "atomcode",
       });
 
       const res = await app.request(`/api/participants/${a.id}`, {
@@ -149,7 +145,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("无 token 回落本地用户:改他人资料返回 403", async () => {
       const { id } = await registerParticipant({
         name: "participant-c",
-        type: "hermes",
       });
       const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
@@ -163,7 +158,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("空 body(无任何更新字段)返回 400", async () => {
       const { id, token } = await registerParticipant({
         name: "noop",
-        type: "hermes",
       });
       const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
@@ -181,7 +175,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("本人心跳写 last_seen 并返回 lastSeen(时间戳随心跳前进)", async () => {
       const { id, token } = await registerParticipant({
         name: "beat",
-        type: "hermes",
       });
 
       const first = await app.request(`/api/participants/${id}/heartbeat`, {
@@ -210,8 +203,8 @@ describe("T17 participant 自更新与扩展字段", () => {
     });
 
     it("他人心跳 403、无 token 401", async () => {
-      const a = await registerParticipant({ name: "beat-a", type: "hermes" });
-      const b = await registerParticipant({ name: "beat-b", type: "hermes" });
+      const a = await registerParticipant({ name: "beat-a" });
+      const b = await registerParticipant({ name: "beat-b" });
 
       const forbidden = await app.request(
         `/api/participants/${a.id}/heartbeat`,
@@ -237,7 +230,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     async function setup() {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "内容类型任务");
       return { coordinator, group };
@@ -275,7 +267,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("注册时声明 capabilities,注册响应与 GET 列表携带,缺省为空数组", async () => {
       const declared = await registerParticipant({
         name: "reviewer-bot",
-        type: "atomcode",
         capabilities: ["text-generation", "code-review"],
       });
       expect(declared.body.capabilities).toEqual([
@@ -285,7 +276,6 @@ describe("T17 participant 自更新与扩展字段", () => {
 
       const plain = await registerParticipant({
         name: "plain-participant",
-        type: "hermes",
       });
       expect(plain.body.capabilities).toEqual([]);
 
@@ -302,7 +292,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("PATCH 可更新 capabilities,响应与 GET 列表携带新值", async () => {
       const { id, token } = await registerParticipant({
         name: "caps-patch",
-        type: "atomcode",
         capabilities: ["old-cap"],
       });
 
@@ -332,7 +321,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("仅 PATCH capabilities 也算有效更新(不触发 at least one field 400)", async () => {
       const { id, token } = await registerParticipant({
         name: "caps-only",
-        type: "atomcode",
       });
       const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
@@ -351,12 +339,10 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("加成员时轻量能力提示:已知能力与角色不匹配时给建议,绝不拒绝", async () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "能力匹配任务");
       const executor = await registerParticipant({
         name: "executor-bot",
-        type: "atomcode",
         capabilities: ["text-generation"],
       });
 
@@ -387,17 +373,14 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("加成员时未知能力标签给提示,未声明能力时提示为 null", async () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "未知能力任务");
       const weird = await registerParticipant({
         name: "weird-bot",
-        type: "custom",
         capabilities: ["quantum-alchemy"],
       });
       const quiet = await registerParticipant({
         name: "quiet-bot",
-        type: "custom",
       });
 
       const weirdRes = await addMember(coordinator.token, group.id, weird.id, [
@@ -432,7 +415,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("客户端未传 expiresAt → 服务端默认 now + 7 天", async () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "文件有效期任务");
 
@@ -463,7 +445,6 @@ describe("T17 participant 自更新与扩展字段", () => {
     it("客户端显式传 expiresAt → 原样保留", async () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
-        type: "hermes",
       });
       const group = await createGroup(coordinator.token, "显式有效期任务");
       const explicit = new Date(Date.now() + 3600_000).toISOString();

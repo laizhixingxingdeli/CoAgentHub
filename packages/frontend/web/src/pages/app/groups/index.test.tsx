@@ -30,7 +30,6 @@ const MEMBERS = [
   {
     participantId: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
     roles: ["coordinator"],
     joinedAt: "2026-08-01T00:00:00.000Z",
@@ -38,7 +37,6 @@ const MEMBERS = [
   {
     participantId: "participant-2",
     name: "win-hermes",
-    type: "hermes",
     device: "win-pc",
     roles: ["reviewer", "executor"],
     joinedAt: "2026-08-01T00:01:00.000Z",
@@ -49,10 +47,9 @@ const PARTICIPANTS = [
   {
     id: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
   },
-  { id: "participant-9", name: "atomcode-cli", type: "atomcode", device: null },
+  { id: "participant-9", name: "atomcode-cli", device: null },
 ];
 
 function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
@@ -75,7 +72,6 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
         const created = {
           id: "participant-new",
           name: body.name,
-          type: body.type,
           device: body.device ?? null,
           webhookUrl: null,
           capabilities: [],
@@ -685,9 +681,9 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     expect(await screen.findByText("已有 Participant")).toBeInTheDocument();
-    // 名册两行:hermes-mac(hermes mac-mini)、atomcode-cli(atomcode)。
+    // 名册两行:hermes-mac(mac-mini)、atomcode-cli(无设备)。
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
-    expect(screen.getByText("hermes mac-mini")).toBeInTheDocument();
+    expect(screen.getByText("mac-mini")).toBeInTheDocument();
     expect(screen.getByText("atomcode-cli")).toBeInTheDocument();
     expect(screen.getByText("共 2 个")).toBeInTheDocument();
     // 未绑定时两行都有「绑定」按钮,无「使用中」标记。
@@ -726,9 +722,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     expect(
       await screen.findByText("已切换为 atomcode-cli"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("使用中: atomcode-cli(atomcode)"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("使用中: atomcode-cli")).toBeInTheDocument();
     // 列表刷新后 hermes-mac 仍是「绑定」,atomcode-cli 变「使用中」。
     await waitFor(() => {
       expect(screen.getByText("使用中")).toBeInTheDocument();
@@ -749,7 +743,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     await screen.findByText("已有 Participant");
     // 当前身份突出显示 + 该行「使用中」。
     expect(
-      screen.getByText("使用中: hermes-mac(hermes·mac-mini)"),
+      screen.getByText("使用中: hermes-mac(mac-mini)"),
     ).toBeInTheDocument();
     const rows = screen.getAllByRole("listitem");
     const boundRow = rows.find((r) => r.textContent?.includes("hermes-mac"))!;
@@ -768,7 +762,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    await screen.findByText("使用中: hermes-mac(hermes·mac-mini)");
+    await screen.findByText("使用中: hermes-mac(mac-mini)");
     fireEvent.click(screen.getByRole("button", { name: "清除" }));
 
     await waitFor(() => {
@@ -807,7 +801,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-1");
     });
     expect(
-      await screen.findByText("使用中: hermes-mac(hermes·mac-mini)"),
+      await screen.findByText("使用中: hermes-mac(mac-mini)"),
     ).toBeInTheDocument();
   });
 });
@@ -819,32 +813,25 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     );
   };
 
-  it("展开注册区显示表单,类型默认 human,提交按钮存在", async () => {
+  it("展开注册区显示表单,提交按钮存在", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
     expect(screen.getByLabelText("注册 Participant 名称")).toBeInTheDocument();
     expect(screen.getByLabelText("注册 Participant 设备")).toBeInTheDocument();
-    const typeSelect = screen.getByLabelText(
-      "注册 Participant 类型",
-    ) as HTMLSelectElement;
-    expect(typeSelect.value).toBe("human");
     expect(
       screen.getByRole("button", { name: "注册并绑定" }),
     ).toBeInTheDocument();
   });
 
-  it("填写表单提交调用 POST /api/participants 且携带 name/type/device", async () => {
+  it("填写表单提交调用 POST /api/participants 且携带 name/device", async () => {
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
     fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "我的 Mac" },
-    });
-    fireEvent.change(screen.getByLabelText("注册 Participant 类型"), {
-      target: { value: "hermes" },
     });
     fireEvent.change(screen.getByLabelText("注册 Participant 设备"), {
       target: { value: "mac" },
@@ -859,7 +846,6 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         name: "我的 Mac",
-        type: "hermes",
         device: "mac",
       });
     });
@@ -884,7 +870,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-new");
     });
     // 身份面板显示当前身份(注册即切换)+ 一次性 token 展示。
-    expect(await screen.findByText("使用中: alice(human)")).toBeInTheDocument();
+    expect(await screen.findByText("使用中: alice")).toBeInTheDocument();
     expect(screen.getByText("✅ 已注册并绑定 alice")).toBeInTheDocument();
     expect(screen.getByLabelText("注册返回的 Participant Token")).toHaveValue(
       "tok-registered",
@@ -949,19 +935,13 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     ).toBe(false);
   });
 
-  it("类型选「自定义」时提交自定义类型值,device 为空则省略", async () => {
+  it("device 为空则省略(载荷不含 type)", async () => {
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
     fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "cli-participant" },
-    });
-    fireEvent.change(screen.getByLabelText("注册 Participant 类型"), {
-      target: { value: "custom" },
-    });
-    fireEvent.change(await screen.findByLabelText("自定义 Participant 类型"), {
-      target: { value: "openclaw" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
@@ -973,7 +953,6 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         name: "cli-participant",
-        type: "openclaw",
       });
     });
   });
@@ -1081,12 +1060,12 @@ describe("GroupsPage Participant 设置 (ticket 20)", () => {
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    // 设置区在绑定 + 拉取到自己信息后出现;type 只读展示。
+    // 设置区在绑定 + 拉取到自己信息后出现;展示 name/device(只读)。
     const settingsButton = await screen.findByRole("button", {
       name: /Participant 设置/,
     });
     fireEvent.click(settingsButton);
-    expect(screen.getByText(/类型:hermes\(只读\)/)).toBeInTheDocument();
+    expect(screen.getByText(/名称:hermes-mac/)).toBeInTheDocument();
 
     // 修改名称并保存;device 沿用当前值。
     const nameInput = screen.getByLabelText(

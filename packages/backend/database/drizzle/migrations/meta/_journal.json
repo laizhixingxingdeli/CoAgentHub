@@ -43,6 +43,13 @@
       "when": 1786640400000,
       "tag": "0005_rename_agent_to_participant",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786618092680,
+      "tag": "0006_drop_participant_type",
+      "breakpoints": true
     }
   ]
 }

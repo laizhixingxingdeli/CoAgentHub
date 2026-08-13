@@ -83,17 +83,14 @@ export async function maybeHandleControlCommand(
   }
 
   // 定向到执行器 participant 的消息是任务,不是控制指令(与桥 !ex 路由一致);
-  // 定向到 hermes(规划 participant)的消息是讨论,同样不识别(与桥 !hermes 一致)。
+  // 定向到其他非执行器 participant 的消息按普通指令识别(与现状对 non-hermes
+  // 非执行器一致)。
   if (audience === "participant" && audienceRef) {
     const target = await db.query.participant.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef!),
     });
     if (target && (await findExecutorByParticipantName(db, target.name))) {
       console.log(`[control] 跳过:定向到执行器 participant(视为任务)`);
-      return;
-    }
-    if (target && target.type === "hermes") {
-      console.log(`[control] 跳过:定向到 hermes 规划 participant(视为讨论)`);
       return;
     }
   }

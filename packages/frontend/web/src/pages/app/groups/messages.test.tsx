@@ -59,7 +59,6 @@ const MEMBERS = [
   {
     participantId: "participant-1",
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
     roles: ["coordinator"],
     joinedAt: "2026-08-01T00:00:00.000Z",
@@ -67,7 +66,6 @@ const MEMBERS = [
   {
     participantId: "participant-2",
     name: "win-hermes",
-    type: "hermes",
     device: "win-pc",
     roles: ["reviewer"],
     joinedAt: "2026-08-01T00:01:00.000Z",
@@ -429,7 +427,6 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
       {
         participantId: "participant-9",
         name: "CodeBuddy 执行器",
-        type: "hermes",
         device: "mac",
         roles: ["executor"],
       },
@@ -451,7 +448,6 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
       {
         participantId: "participant-9",
         name: "CodeBuddy 执行器",
-        type: "hermes",
         device: "mac",
         roles: ["executor"],
       },
@@ -468,7 +464,6 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
       {
         participantId: "participant-9",
         name: "CodeBuddy 执行器",
-        type: "hermes",
         device: "mac",
         roles: ["executor"],
       },
@@ -578,7 +573,7 @@ describe("formatMessageTime 时间格式 (ticket 32)", () => {
 });
 
 describe("GroupMessagesPage 可读性 (ticket 32)", () => {
-  it("头像分色 + 时间新格式 + 类型徽章 + 设备进 title", async () => {
+  it("头像分色 + 时间新格式 + 设备进 title", async () => {
     const now = new Date();
     const todayAt = (hour: number, minute: number) =>
       new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute);
@@ -633,9 +628,8 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     const expectedOld = formatMessageTime(oldMsg.createdAt);
     expect(screen.getByText(expectedOld)).toBeInTheDocument();
 
-    // ③ 信息行:昵称 + 类型徽章;角色徽章保留
+    // ③ 信息行:昵称 + 角色徽章
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
-    expect(screen.getAllByText("hermes").length).toBeGreaterThan(0);
     expect(screen.getByText("coordinator")).toBeInTheDocument();
     expect(screen.getByText("reviewer")).toBeInTheDocument();
   });
@@ -720,16 +714,15 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
 });
 
 describe("GroupMessagesPage 消息流与气泡布局", () => {
-  it("渲染消息列表与发送者标识(名/类型/设备)与时间", async () => {
+  it("渲染消息列表与发送者标识(名/设备)与时间", async () => {
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
     expect(screen.getByText("修正意见")).toBeInTheDocument();
-    // Ticket 32: 信息行只显示昵称,类型/角色/受众为独立徽章,设备移入头像 title
+    // Ticket 32: 信息行只显示昵称,角色/受众为独立徽章,设备移入头像 title
     expect(screen.getAllByText("hermes-mac").length).toBeGreaterThan(0);
     expect(screen.getAllByText("win-hermes").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("hermes").length).toBeGreaterThan(0);
     expect(screen.getByTitle("hermes-mac mac-mini")).toBeInTheDocument();
     expect(screen.getByTitle("win-hermes win-pc")).toBeInTheDocument();
     // Role-targeted audience badge (ticket 26: `→ @<角色名>` format)
@@ -2425,7 +2418,6 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
       {
         participantId: "participant-1",
         name: "hermes-mac",
-        type: "hermes",
         device: "mac-mini",
         roles: ["coordinator"],
         prompt: longPrompt,
@@ -2434,7 +2426,6 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
       {
         participantId: "participant-2",
         name: "win-hermes",
-        type: "hermes",
         device: "win-pc",
         roles: ["reviewer", "executor"],
         prompt: null,

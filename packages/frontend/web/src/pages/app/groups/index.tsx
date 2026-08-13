@@ -36,7 +36,6 @@ type GroupItem = {
 type ParticipantInfo = {
   id: string;
   name: string;
-  type: string;
   device: string | null;
 };
 
@@ -118,8 +117,6 @@ export default function GroupsPage() {
   // (token 覆盖写入,语义:注册即切换身份,不强制清除旧绑定)。
   const [registerOpen, setRegisterOpen] = useState(false);
   const [regName, setRegName] = useState("");
-  const [regType, setRegType] = useState("human");
-  const [regTypeCustom, setRegTypeCustom] = useState("");
   const [regDevice, setRegDevice] = useState("");
   const [registering, setRegistering] = useState(false);
   // 注册响应里的一次性 token:仅显示一次,供用户复制留档。
@@ -336,13 +333,6 @@ export default function GroupsPage() {
       setError("Participant 名称不能为空");
       return;
     }
-    // 后端 type 是自由文本(z.string().min(1),无枚举校验);select 提供常用
-    // 值,「自定义」走自由输入。
-    const type = regType === "custom" ? regTypeCustom.trim() : regType;
-    if (!type) {
-      setError("Participant 类型不能为空");
-      return;
-    }
     setRegistering(true);
     setMessage(null);
     setError(null);
@@ -352,7 +342,6 @@ export default function GroupsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          type,
           device: regDevice.trim() || undefined,
         }),
       });
@@ -370,8 +359,6 @@ export default function GroupsPage() {
       // 注册即切换身份:token/id 覆盖写入,不强制清除旧绑定。
       commitToken(participant.token, participant.id);
       setRegName("");
-      setRegType("human");
-      setRegTypeCustom("");
       setRegDevice("");
       setCopied(false);
       setRegisteredToken(participant.token);
@@ -650,11 +637,11 @@ export default function GroupsPage() {
                 <span className="truncate">
                   使用中:{" "}
                   {currentParticipant
-                    ? `${currentParticipant.name}(${currentParticipant.type}${
+                    ? `${currentParticipant.name}${
                         currentParticipant.device
-                          ? `·${currentParticipant.device}`
+                          ? `(${currentParticipant.device})`
                           : ""
-                      })`
+                      }`
                     : "已绑定"}
                 </span>
               </span>
@@ -703,10 +690,11 @@ export default function GroupsPage() {
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm">{participant.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {participant.type}
-                        {participant.device ? ` ${participant.device}` : ""}
-                      </div>
+                      {participant.device && (
+                        <div className="truncate text-xs text-muted-foreground">
+                          {participant.device}
+                        </div>
+                      )}
                     </div>
                     {isBound ? (
                       <span className="inline-flex shrink-0 items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
@@ -818,19 +806,6 @@ export default function GroupsPage() {
                   aria-label="注册 Participant 名称"
                   className="sm:max-w-xs"
                 />
-                <select
-                  aria-label="注册 Participant 类型"
-                  value={regType}
-                  onChange={(e) => setRegType(e.target.value)}
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm sm:w-36"
-                >
-                  <option value="human">human</option>
-                  <option value="hermes">hermes</option>
-                  <option value="atomcode">atomcode</option>
-                  <option value="openclaw">openclaw</option>
-                  <option value="participant">participant</option>
-                  <option value="custom">自定义…</option>
-                </select>
                 <Input
                   type="text"
                   placeholder="设备(可选,如 mac / iphone / cli)"
@@ -853,16 +828,6 @@ export default function GroupsPage() {
                   {registering ? "注册中…" : "注册并绑定"}
                 </Button>
               </div>
-              {regType === "custom" && (
-                <Input
-                  type="text"
-                  placeholder="自定义类型(如 cli)"
-                  value={regTypeCustom}
-                  onChange={(e) => setRegTypeCustom(e.target.value)}
-                  aria-label="自定义 Participant 类型"
-                  className="sm:max-w-xs"
-                />
-              )}
               <p className="text-xs text-muted-foreground">
                 注册成功后将自动写入 participant token 并完成绑定,无需终端 curl
               </p>
@@ -915,7 +880,6 @@ export default function GroupsPage() {
             <div className="mt-3 flex flex-col gap-3">
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                 <span>名称:{participantInfo.name}</span>
-                <span>类型:{participantInfo.type}(只读)</span>
                 <span>设备:{participantInfo.device ?? "-"}</span>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">

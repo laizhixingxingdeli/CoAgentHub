@@ -74,15 +74,12 @@ describe("任务实体(server 单一状态源)", () => {
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "coord-mac",
-      type: "hermes",
     });
     const execA = await registerParticipant({
       name: "executor-a",
-      type: "atomcode",
     });
     const execB = await registerParticipant({
       name: "executor-b",
-      type: "atomcode",
     });
     const group = await createGroup(coordinator.token, "任务实体测试");
     return { coordinator, execA, execB, group };
@@ -301,7 +298,6 @@ describe("任务实体(server 单一状态源)", () => {
     const { coordinator, execA, group } = await setupGroup();
     const outsider = await registerParticipant({
       name: "outsider",
-      type: "custom",
     });
 
     // 非成员 POST /tasks → 403(写操作权限不变)。

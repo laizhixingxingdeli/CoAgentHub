@@ -128,27 +128,22 @@ async function sendMessage(
 async function setupGroup() {
   const coordinator = await registerParticipant({
     name: "hermes-mac",
-    type: "hermes",
     device: "mac-mini",
   });
   const reviewer = await registerParticipant({
     name: "win-hermes",
-    type: "hermes",
     device: "win-pc",
   });
   const executor = await registerParticipant({
     name: "atomcode-cli",
-    type: "atomcode",
     device: "cli",
   });
   const human = await registerParticipant({
     name: "alice",
-    type: "human",
     device: "macbook",
   });
   const outsider = await registerParticipant({
     name: "outsider",
-    type: "openclaw",
     device: "other-box",
   });
   const group = await createGroup(coordinator.token, "WS 推送测试");
@@ -195,7 +190,6 @@ describe("a. 握手认证(?token=)", () => {
   it("非 /api/ws 路径的 upgrade 被忽略(不建立连接)", async () => {
     const participant = await registerParticipant({
       name: "probe",
-      type: "human",
       device: "p",
     });
     await expect(
@@ -218,7 +212,6 @@ describe("a2. Local User 已是群成员:广播不重复投递", () => {
 
     const member = await registerParticipant({
       name: "member-one",
-      type: "hermes",
     });
     await addMember(member.token, group.id, member.id, ["executor"]);
 
@@ -373,7 +366,6 @@ describe("d. 连接生命周期", () => {
 
     const participant = await registerParticipant({
       name: "zombie",
-      type: "human",
       device: "z",
     });
 

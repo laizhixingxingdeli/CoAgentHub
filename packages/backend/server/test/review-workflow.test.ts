@@ -103,19 +103,16 @@ describe("检视流程协议(ticket 04)", () => {
     // 演员表:coordinator(hermes/mac)、reviewer(hermes/win)、executor(atomcode)、human 观察者
     const coordinator = await registerParticipant({
       name: "hermes",
-      type: "hermes",
       device: "mac",
     });
     const reviewer = await registerParticipant({
       name: "hermes",
-      type: "hermes",
       device: "win",
     });
     const executor = await registerParticipant({
       name: "atomcode",
-      type: "atomcode",
     });
-    const human = await registerParticipant({ name: "alice", type: "human" });
+    const human = await registerParticipant({ name: "alice" });
 
     // 建群:coordinator 自动成为 coordinator 成员;再添加 reviewer/executor/human
     const group = await createGroup(coordinator.token, "模型训练任务");

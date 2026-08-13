@@ -12,7 +12,6 @@ export type Audience = "broadcast" | "role" | "participant";
 export type Member = {
   participantId: string;
   name: string;
-  type: string;
   device: string | null;
   roles: string[];
   /** 群内分工说明(角色解绑):可空,来自 GET /groups/:id/members。 */

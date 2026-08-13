@@ -63,7 +63,6 @@ describe("participant 注册与身份 API", () => {
   it("POST /api/participants 注册成功,返回 token(仅此一次)且库中只存哈希", async () => {
     const res = await register({
       name: "hermes-mac",
-      type: "hermes",
       device: "mac-mini",
     });
     expect(res.status).toBe(200);
@@ -85,7 +84,7 @@ describe("participant 注册与身份 API", () => {
   });
 
   it("GET /api/participants 列表返回全部 participant 且不泄露 tokenHash/token", async () => {
-    const created = await register({ name: "atomcode-cli", type: "atomcode" });
+    const created = await register({ name: "atomcode-cli" });
     const { id, token } = (await created.json()) as {
       id: string;
       token: string;
@@ -103,7 +102,7 @@ describe("participant 注册与身份 API", () => {
   });
 
   it("GET /api/agents 历史别名与 /api/participants 同 handler,同样可用", async () => {
-    const created = await register({ name: "alias-check", type: "atomcode" });
+    const created = await register({ name: "alias-check" });
     const { id } = (await created.json()) as { id: string };
 
     // 术语改名前的旧路径(agent 为 participant 的旧名):挂同一 handler,
@@ -119,19 +118,22 @@ describe("participant 注册与身份 API", () => {
     expect(await current.text()).toBe(legacyText);
   });
 
-  it("支持注册 human 类型", async () => {
+  it("注册带 type 被忽略(participant.type 已移除);不带 type 也能注册", async () => {
+    // 外部旧客户端可能仍带 type:zod 默认 strip,接受但忽略,响应不含 type。
     const res = await register({ name: "Alice", type: "human" });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { type: string };
-    expect(body.type).toBe("human");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("type");
 
-    const listRes = await app.request("/api/participants");
-    const list = (await listRes.json()) as Array<{ type: string }>;
-    expect(list.some((a) => a.type === "human")).toBe(true);
+    // 新客户端不带 type 也成功。
+    const plain = await register({ name: "Bob" });
+    expect(plain.status).toBe(200);
+    const plainBody = (await plain.json()) as Record<string, unknown>;
+    expect(plainBody).not.toHaveProperty("type");
   });
 
   it("中间件:合法 Bearer token 识别出 participant 身份", async () => {
-    const res = await register({ name: "openclaw", type: "openclaw" });
+    const res = await register({ name: "openclaw" });
     const { id, token } = (await res.json()) as { id: string; token: string };
 
     const meRes = await createProtectedApp().request("/me", {
@@ -156,16 +158,16 @@ describe("participant 注册与身份 API", () => {
     expect(body.participantId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("校验:缺 name/type 返回 400", async () => {
-    const noName = await register({ type: "hermes" });
+  it("校验:缺 name 返回 400;仅 name 即可注册(不再要求 type)", async () => {
+    const noName = await register({});
     expect(noName.status).toBe(400);
 
-    const noType = await register({ name: "x" });
-    expect(noType.status).toBe(400);
+    const nameOnly = await register({ name: "x" });
+    expect(nameOnly.status).toBe(200);
   });
 
   it("POST /:id/reset-token 重置成功:返回新明文、库中存新哈希、旧 token 失效(ticket 29)", async () => {
-    const created = await register({ name: "hermes-mac", type: "hermes" });
+    const created = await register({ name: "hermes-mac" });
     const { id, token: oldToken } = (await created.json()) as {
       id: string;
       token: string;
@@ -217,7 +219,7 @@ describe("participant 注册与身份 API", () => {
   });
 
   it("POST /:id/reset-token 无鉴权可访问(与注册一致,局域网信任模型)", async () => {
-    const created = await register({ name: "openclaw", type: "openclaw" });
+    const created = await register({ name: "openclaw" });
     const { id } = (await created.json()) as { id: string };
 
     // 不携带任何 Authorization header,应能直接取回 token。
@@ -231,11 +233,10 @@ describe("participant 注册与身份 API", () => {
 
   it("DELETE /:id 删除 participant,并清理其群成员关系与消息(ticket 清理旧身份)", async () => {
     // 建群者与被删者分离:旧 bridge 身份不建群,只作为成员/发言者存在。
-    const owner = await register({ name: "owner", type: "hermes" });
+    const owner = await register({ name: "owner" });
     const { token } = (await owner.json()) as { token: string };
     const created = await register({
       name: "executor-bridge",
-      type: "atomcode",
     });
     const { id, token: participantToken } = (await created.json()) as {
       id: string;
@@ -303,7 +304,7 @@ describe("participant 注册与身份 API", () => {
   });
 
   it("DELETE /:id 建过群的 participant 返回 409 且不删除(ticket 清理旧身份)", async () => {
-    const owner = await register({ name: "owner2", type: "hermes" });
+    const owner = await register({ name: "owner2" });
     const { token, id: participantId } = (await owner.json()) as {
       token: string;
       id: string;
@@ -342,7 +343,7 @@ describe("participant 注册与身份 API", () => {
   });
 
   it("DELETE /:id 无鉴权可访问(与注册一致,局域网信任模型)", async () => {
-    const created = await register({ name: "stale-bridge", type: "atomcode" });
+    const created = await register({ name: "stale-bridge" });
     const { id } = (await created.json()) as { id: string };
 
     // 不携带任何 Authorization header,应能直接删除。

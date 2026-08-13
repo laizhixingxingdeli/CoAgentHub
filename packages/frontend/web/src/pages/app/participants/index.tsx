@@ -17,7 +17,7 @@ import { PARTICIPANT_ID_KEY, participantAuthHeaders } from "@/lib/api-client";
 /**
  * 接入 Participant(ticket: 网页 @executor 发布):管理执行器配置。
  *
- * 表单字段 = 名字 / 类型 / 调用方式(cli|a2a)/ 命令或 gateway 地址 / 参数模板
+ * 表单字段 = 名字 / 调用方式(cli|a2a)/ 命令或 gateway 地址 / 参数模板
  * (cli,可空)/ 设备(可选)。提交调 POST /api/executors,server 自动注册对应
  * participant(token 后端生成,界面绝不出现任何 token/token_hash 字段)。
  *
@@ -46,7 +46,6 @@ type ExecutorItem = {
 type ParticipantInfo = {
   id: string;
   name: string;
-  type: string;
   device: string | null;
   capabilities: string[];
   lastSeen: string | null;
@@ -54,14 +53,6 @@ type ParticipantInfo = {
 
 /** 在线判定(与后端 T13 约定一致):lastSeen 距今 < 60s 视为在线。 */
 const ONLINE_WINDOW_MS = 60_000;
-
-const PARTICIPANT_TYPES = [
-  "hermes",
-  "atomcode",
-  "openclaw",
-  "human",
-  "custom",
-] as const;
 
 export default function ExecutorsPage() {
   const [items, setItems] = useState<ExecutorItem[]>([]);
@@ -71,7 +62,6 @@ export default function ExecutorsPage() {
 
   // 表单状态
   const [name, setName] = useState("");
-  const [type, setType] = useState<string>("atomcode");
   const [kind, setKind] = useState<"cli" | "a2a">("cli");
   const [bin, setBin] = useState("");
   const [url, setUrl] = useState("");
@@ -162,7 +152,6 @@ export default function ExecutorsPage() {
     try {
       const payload: Record<string, unknown> = {
         agentName: name.trim(),
-        type,
         kind,
         device: device.trim() || undefined,
       };
@@ -329,9 +318,6 @@ export default function ExecutorsPage() {
     }
   };
 
-  const inputCls =
-    "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]";
-
   return (
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
       <div className="mb-6">
@@ -374,21 +360,6 @@ export default function ExecutorsPage() {
               onChange={(e) => setName(e.target.value)}
               placeholder="如 My CLI Participant"
             />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="ex-type">类型</Label>
-            <select
-              id="ex-type"
-              value={type}
-              onChange={(e) => setType(e.target.value)}
-              className={inputCls}
-            >
-              {PARTICIPANT_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
           </div>
           <div className="grid gap-1.5">
             <Label>调用方式</Label>

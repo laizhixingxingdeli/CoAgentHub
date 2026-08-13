@@ -74,7 +74,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
     for (const id of participantIds) {
       await testDb
         .insert(participantTable)
-        .values({ id, name: id, type: "custom", tokenHash: "unused" })
+        .values({ id, name: id, tokenHash: "unused" })
         .onConflictDoNothing();
     }
     // group_message.group_id references groups(id).

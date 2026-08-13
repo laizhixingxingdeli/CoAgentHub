@@ -194,11 +194,9 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "coord-queue",
-      type: "hermes",
     });
     const codebuddy = await registerParticipant({
       name: "CodeBuddy 执行器",
-      type: "participant",
     });
     const group = await createGroup(coordinator.token, "队列控制测试");
     await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
@@ -300,6 +298,37 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
       group.id,
       (m) => m.contentType === "task_status" && m.body.startsWith("🛑"),
     );
+  }, 30_000);
+
+  it("定向给非执行器 participant 的「停止」仍识别(hermes 特判已移除)", async () => {
+    // participant.type 移除后不再有 hermes 特判:定向给非执行器 participant
+    // 的消息若匹配停止/回滚指令仍触发(与现状对 non-hermes 非执行器一致)。
+    process.env.FAKE_SLEEP_SECS = "";
+    const { coordinator, codebuddy, group } = await setupGroup();
+
+    // 定向给 coordinator(非执行器 participant),消息体匹配「停止」。
+    await postMessage(coordinator.token, group.id, {
+      body: "停止",
+      audience: "participant",
+      audienceRef: coordinator.id,
+    });
+
+    // 无运行中任务 → 以执行器身份回传 ⛔(证明指令被识别而非按讨论跳过;
+    // ⛔ 不在 STATUS_EMOJI_RE 内,回传为 text/plain,故只按 body 前缀匹配)。
+    await waitForMessage(coordinator.token, group.id, (m) =>
+      m.body.startsWith("⛔"),
+    );
+    // 定向给执行器 participant 的任务消息不触发控制指令(防误伤):消息体匹配
+    // 「停止」但受众是执行器 → 走任务而非控制指令,不回传 ⛔。等任务跑完
+    // (FAKE_SLEEP_SECS="" 立即结束)再断言,避免遗留进程污染后续测试。
+    const msg2 = await postMessage(coordinator.token, group.id, {
+      body: "停止",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    await waitForTaskStatus(coordinator.token, group.id, msg2.id, "done");
+    const after = await listMessages(coordinator.token, group.id);
+    expect(after.filter((m) => m.body.startsWith("⛔"))).toHaveLength(1);
   }, 30_000);
 
   it("「回滚 <taskId>」恢复工作区到执行前快照:task → failed + ✅ 回传", async () => {

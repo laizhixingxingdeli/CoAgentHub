@@ -136,27 +136,22 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     //        /executor(atomcode)/trainer(specialist)
     const user = await registerParticipant({
       name: "alice",
-      type: "human",
       device: "macbook",
     });
     const coordinator = await registerParticipant({
       name: "hermes-mac",
-      type: "hermes",
       device: "mac-mini",
     });
     const reviewer = await registerParticipant({
       name: "hermes-win",
-      type: "hermes",
       device: "win-pc",
     });
     const executor = await registerParticipant({
       name: "atomcode",
-      type: "atomcode",
       // 纯增量拉取的 CLI participant(短生命周期,无需常驻监听)
     });
     const trainer = await registerParticipant({
       name: "ml-trainer",
-      type: "specialist",
       device: "win-gpu",
     });
 

@@ -111,21 +111,17 @@ describe("群组消息树与受众路由", () => {
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "hermes-mac",
-      type: "hermes",
       device: "mac-mini",
     });
     const reviewer = await registerParticipant({
       name: "win-hermes",
-      type: "hermes",
       device: "win-pc",
     });
     const executor = await registerParticipant({
       name: "atomcode-cli",
-      type: "atomcode",
     });
     const human = await registerParticipant({
       name: "alice",
-      type: "human",
       device: "macbook",
     });
     const group = await createGroup(coordinator.token, "模型训练任务");
@@ -158,7 +154,6 @@ describe("群组消息树与受众路由", () => {
       const { group } = await setupGroup();
       const outsider = await registerParticipant({
         name: "stranger",
-        type: "openclaw",
       });
 
       // LAN trust model: no token → Local User, who is not a group member.
@@ -269,7 +264,6 @@ describe("群组消息树与受众路由", () => {
       const { group, reviewer, executor } = await setupGroup();
       const outsider = await registerParticipant({
         name: "stranger",
-        type: "atomcode",
       });
       const notMember = await sendMessage(reviewer.token, group.id, {
         body: "给你",
@@ -282,7 +276,6 @@ describe("群组消息树与受众路由", () => {
       // 其他群组里的成员也不算本群成员
       const otherGroup = await registerParticipant({
         name: "other-exec",
-        type: "atomcode",
         device: "vm",
       });
       const crossGroup = await sendMessage(reviewer.token, group.id, {
@@ -459,7 +452,6 @@ describe("群组消息树与受众路由", () => {
       // LAN trust model:GET 不要求成员资格,非成员可见自己的消息+广播。
       const outsider = await registerParticipant({
         name: "stranger",
-        type: "openclaw",
       });
       const res = await app.request(`/api/groups/${group.id}/messages`, {
         headers: { Authorization: `Bearer ${outsider.token}` },
@@ -503,11 +495,9 @@ describe("群组消息树与受众路由", () => {
       // 另两个 participant 入群(成员表直插,避免依赖加成员接口的调用方守卫)。
       const member = await registerParticipant({
         name: "member-a",
-        type: "hermes",
       });
       const target = await registerParticipant({
         name: "target-b",
-        type: "hermes",
       });
       await testDb.insert(groupMemberTable).values({
         groupId: localGroup.id,

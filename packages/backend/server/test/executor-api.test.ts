@@ -64,7 +64,6 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   it("POST /api/executors 创建配置并注册 participant,响应不含 token", async () => {
     const res = await createExecutor({
       agentName: "CLI Tester",
-      type: "custom",
       kind: "cli",
       bin: fakeBin,
       args: ["-y", "-p", "{ticket}"],
@@ -96,7 +95,6 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     // 与内置执行器重名
     const dup = await createExecutor({
       agentName: "AtomCode 执行器",
-      type: "custom",
       kind: "cli",
       bin: fakeBin,
     });
@@ -105,7 +103,6 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     // 与刚新增的 DB 配置重名
     const dup2 = await createExecutor({
       agentName: "CLI Tester",
-      type: "custom",
       kind: "cli",
       bin: fakeBin,
     });
@@ -164,7 +161,6 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     // 通过 API 新增一个 cli 执行器,key 由 agentName slug 生成。
     const res = await createExecutor({
       agentName: "clitest",
-      type: "custom",
       kind: "cli",
       bin: fakeBin,
       args: [],
@@ -175,7 +171,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const reg = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "coord-exec-api", type: "hermes" }),
+      body: JSON.stringify({ name: "coord-exec-api" }),
     });
     const { id: coordinatorId, token } = (await reg.json()) as {
       id: string;
