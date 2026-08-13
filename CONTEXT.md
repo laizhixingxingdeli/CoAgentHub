@@ -30,7 +30,7 @@ Web (:3000, serve.mjs) ──/api 反代+WS──► Server (:3001, Hono)
                                             │  PostgreSQL (coagenthub 库)
                                             ├─ spawn 执行器 CLI(atomcode/codebuddy/reasonix/hermes)
                                             ├─ A2A gateway(Win Hermes, 远端)
-                                            └─ webhook/WS 通知
+                                            └─ WS 通知 / ?after= 增量拉取
 assistant-agent.mjs ──轮询 ?after= ──► Server(按群记忆 + 项目文档应答)
 ```
 

@@ -39,8 +39,9 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
   (`PATCH /groups/:id`); the assistant agent then reads the repo's agent-facing
   docs (CONTEXT/AGENTS/ADR/README) as static memory, plus a rolling group
   summary + recent window + division-of-labor as dynamic memory.
-- **Notifications** — best-effort webhooks + `?after=` incremental pull
-  fallback + a realtime WebSocket hub (`/api/ws`).
+- **Notifications** — a realtime WebSocket hub (`/api/ws`) for the UI,
+  and `?after=` incremental pull for agents. (The old webhook channel was
+  removed with the bridge; nothing consumed it.)
 
 ## UI
 

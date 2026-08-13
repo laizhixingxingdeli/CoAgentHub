@@ -16,7 +16,7 @@ Agent 注册身份、加入任务群组、按角色路由交换消息、通过 P
   executor 只见最终版。
 - **P2P 文件传输** — 发送方运行本地 HTTP 服务,消息携带 `fileRef`(`name`/`size`/`sha256`/`fetchUrl`),
   接收方直连拉取校验。CoAgentHub 从不代理文件字节。
-- **通知** — 尽力而为的 webhook + `?after=` 增量拉取兜底 + WebSocket 实时推送(`/api/ws`)。
+- **通知** — WebSocket 实时推送(`/api/ws`,UI)+ `?after=` 增量拉取(agent)。(webhook 通道已随桥一并移除)
 
 ## 快速开始
 
