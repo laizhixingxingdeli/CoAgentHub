@@ -85,9 +85,22 @@ describe("群组消息树与受众路由", () => {
     createdAt: string;
   };
 
-  async function fetchMessages(token: string, groupId: string, after?: string) {
+  async function fetchMessages(
+    token: string,
+    groupId: string,
+    after?: string,
+    q?: string,
+  ) {
+    const params = new URLSearchParams();
+    if (after) {
+      params.set("after", after);
+    }
+    if (q !== undefined) {
+      params.set("q", q);
+    }
+    const qs = params.toString();
     const res = await app.request(
-      `/api/groups/${groupId}/messages${after ? `?after=${after}` : ""}`,
+      `/api/groups/${groupId}/messages${qs ? `?${qs}` : ""}`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     expect(res.status).toBe(200);
@@ -570,6 +583,123 @@ describe("群组消息树与受众路由", () => {
       // 创建时间升序
       const times = inc.map((m) => new Date(m.createdAt).getTime());
       expect(times[1]).toBeGreaterThanOrEqual(times[0]);
+    });
+
+    it("?q= 搜索:按正文关键词过滤,保留可见性过滤", async () => {
+      const { group, coordinator, reviewer, executor } = await setupGroup();
+      await sendMessage(coordinator.token, group.id, { body: "任务开始执行" });
+      await sendMessage(coordinator.token, group.id, { body: "今天的日报" });
+      // 定向给 executor 的消息也含关键词 —— 非目标(reviewer)不可见。
+      await sendMessage(coordinator.token, group.id, {
+        body: "只给执行者",
+        audience: "agent",
+        audienceRef: executor.id,
+      });
+
+      // reviewer 搜 "执行":只匹配到广播消息,定向消息被可见性过滤掉。
+      const reviewerList = await fetchMessages(
+        reviewer.token,
+        group.id,
+        undefined,
+        "执行",
+      );
+      expect(reviewerList.map((m) => m.body)).toEqual(["任务开始执行"]);
+      // 行形状不变:仍带 depth 字段。
+      expect(reviewerList[0]?.depth).toBe(0);
+
+      // executor(目标)搜 "执行":广播 + 自己的定向消息都可见。
+      const executorList = await fetchMessages(
+        executor.token,
+        group.id,
+        undefined,
+        "执行",
+      );
+      expect(executorList.map((m) => m.body).sort()).toEqual([
+        "任务开始执行",
+        "只给执行者",
+      ]);
+
+      // 无匹配关键词 → 空结果。
+      const none = await fetchMessages(
+        reviewer.token,
+        group.id,
+        undefined,
+        "不存在",
+      );
+      expect(none).toEqual([]);
+    });
+
+    it("?q= 转义 % 与 _:搜 100% 不匹配任意串", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.token, group.id, {
+        body: "达标率 100% 完成",
+      });
+      await sendMessage(coordinator.token, group.id, { body: "数值 1000 天" });
+      await sendMessage(coordinator.token, group.id, { body: "文件 abc_def" });
+      await sendMessage(coordinator.token, group.id, { body: "文件 abcxdef" });
+
+      // 未转义时 %100%% 会匹配 "数值 1000 天";转义后只匹配字面 "100%"。
+      const pct = await fetchMessages(
+        coordinator.token,
+        group.id,
+        undefined,
+        "100%",
+      );
+      expect(pct.map((m) => m.body)).toEqual(["达标率 100% 完成"]);
+
+      // 未转义时 abc_def 的 _ 是通配,会匹配 abcxdef;转义后只匹配字面下划线。
+      const us = await fetchMessages(
+        coordinator.token,
+        group.id,
+        undefined,
+        "abc_def",
+      );
+      expect(us.map((m) => m.body)).toEqual(["文件 abc_def"]);
+    });
+
+    it("?q= 与 ?after= 组合:先按游标再按关键词", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.token, group.id, { body: "苹果" });
+      const second = (await (
+        await sendMessage(coordinator.token, group.id, { body: "香蕉" })
+      ).json()) as MessageItem;
+      await sendMessage(coordinator.token, group.id, { body: "苹果派" });
+
+      // q=苹果 本应命中两条,after=second 把更早的 "苹果" 排除,只剩 "苹果派"。
+      const list = await fetchMessages(
+        coordinator.token,
+        group.id,
+        second.id,
+        "苹果",
+      );
+      expect(list.map((m) => m.body)).toEqual(["苹果派"]);
+      // 仍按 id 升序。
+      expect(list.map((m) => m.id)).toEqual([expect.anything()]);
+    });
+
+    it("?q= 空串等价现状:返回全部可见消息", async () => {
+      const { group, coordinator, reviewer } = await setupGroup();
+      await sendMessage(coordinator.token, group.id, { body: "第一条" });
+      await sendMessage(reviewer.token, group.id, { body: "第二条" });
+
+      const withEmpty = await fetchMessages(
+        coordinator.token,
+        group.id,
+        undefined,
+        "",
+      );
+      const without = await fetchMessages(coordinator.token, group.id);
+      expect(withEmpty.map((m) => m.body)).toEqual(without.map((m) => m.body));
+      expect(withEmpty.map((m) => m.body)).toEqual(["第一条", "第二条"]);
+    });
+
+    it("?q= 超过 200 字符返回 400", async () => {
+      const { group, coordinator } = await setupGroup();
+      const res = await app.request(
+        `/api/groups/${group.id}/messages?q=${"a".repeat(201)}`,
+        { headers: { Authorization: `Bearer ${coordinator.token}` } },
+      );
+      expect(res.status).toBe(400);
     });
 
     it("树关系:响应带 parentId 与 depth", async () => {

@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, Folder, Users } from "lucide-react";
+import { Archive, ArrowLeft, Folder, Search, Users, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRoute } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -115,6 +115,26 @@ export default function GroupMessagesPage() {
       }
       return next;
     });
+  // Message search (enhancement): the title-bar search box. `searchQuery` is the
+  // input text; `searchActiveQuery` is the keyword whose results are currently
+  // shown (null = normal live stream). Search mode pauses WS appends — new
+  // frames may not match the keyword, so the stream shows only the q= snapshot
+  // until the user clears the search (then the normal flow reloads).
+  const [searchBoxOpen, setSearchBoxOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchActiveQuery, setSearchActiveQuery] = useState<string | null>(
+    null,
+  );
+  const searchActive = searchActiveQuery !== null;
+  // Latest searchActive for the WS callback (same sync-during-render pattern as
+  // stickToBottomRef below) so the stable socket callback reads the live value.
+  const searchActiveRef = useRef(false);
+  searchActiveRef.current = searchActive;
+  // Monotonic request sequence for loadMessages: every load bumps it, and a
+  // response whose sequence is no longer current is dropped — an older q=
+  // fetch resolving after a newer search/clear/group-switch must never
+  // clobber the list with stale data.
+  const loadSeqRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -171,43 +191,92 @@ export default function GroupMessagesPage() {
     }
   }, [groupId]);
 
-  const loadMessages = useCallback(async () => {
-    if (!groupId) {
+  const loadMessages = useCallback(
+    async (q?: string) => {
+      if (!groupId) {
+        return;
+      }
+      const seq = ++loadSeqRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const url = q
+          ? `/api/groups/${groupId}/messages?q=${encodeURIComponent(q)}`
+          : `/api/groups/${groupId}/messages`;
+        const res = await fetch(url, {
+          headers: agentAuthHeaders(),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const fetched = (await res.json()) as MessageItem[];
+        if (seq !== loadSeqRef.current) {
+          // A newer search/clear/group-switch superseded this request — the
+          // stale response must not clobber the list.
+          return;
+        }
+        if (q) {
+          // Search mode shows ONLY the q= results — a merge would pollute the
+          // snapshot with the previously loaded full history. Leaving search
+          // (clear) goes back through the merge path below.
+          setMessages(fetched);
+          return;
+        }
+        // A full (non-search) reload means the screen is back on the unfiltered
+        // stream: reset the search state so the banner, the WS pause and the
+        // data source stay consistent (group switch, post-send reload and the
+        // one-click clear all land here).
+        setSearchActiveQuery(null);
+        setSearchQuery("");
+        // Merge into current state instead of replacing it wholesale: a message
+        // pushed by WS while this GET was in flight must survive a stale snapshot.
+        // Isolate by group: when switching groups without remount (wouter reuses
+        // the page component), prev may still hold the previous group's messages —
+        // filter them out so two groups' histories never mix.
+        setMessages((prev) =>
+          mergeGroupMessages(
+            fetched,
+            prev.filter((m) => m.groupId === groupId),
+          ),
+        );
+        // Ticket 23: seed the sidebar preview with the fetched history's newest
+        // message (server rows are id-sorted, so the last element is the latest).
+        const last = fetched[fetched.length - 1];
+        if (last) {
+          updateLastMessage(groupId, last.body);
+        }
+      } catch (e) {
+        if (seq !== loadSeqRef.current) {
+          return;
+        }
+        setError(`加载消息失败: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        if (seq === loadSeqRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [groupId],
+  );
+
+  // Search actions (enhancement): Enter in the search box runs q=; an empty
+  // query or the one-click clear restores the normal full stream.
+  const handleSearch = useCallback(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchActiveQuery(null);
+      loadMessages();
       return;
     }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/groups/${groupId}/messages`, {
-        headers: agentAuthHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const fetched = (await res.json()) as MessageItem[];
-      // Merge into current state instead of replacing it wholesale: a message
-      // pushed by WS while this GET was in flight must survive a stale snapshot.
-      // Isolate by group: when switching groups without remount (wouter reuses
-      // the page component), prev may still hold the previous group's messages —
-      // filter them out so two groups' histories never mix.
-      setMessages((prev) =>
-        mergeGroupMessages(
-          fetched,
-          prev.filter((m) => m.groupId === groupId),
-        ),
-      );
-      // Ticket 23: seed the sidebar preview with the fetched history's newest
-      // message (server rows are id-sorted, so the last element is the latest).
-      const last = fetched[fetched.length - 1];
-      if (last) {
-        updateLastMessage(groupId, last.body);
-      }
-    } catch (e) {
-      setError(`加载消息失败: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [groupId]);
+    setSearchActiveQuery(q);
+    loadMessages(q);
+  }, [loadMessages, searchQuery]);
+
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery("");
+    setSearchActiveQuery(null);
+    loadMessages();
+  }, [loadMessages]);
 
   const loadMembers = useCallback(async () => {
     if (!groupId) {
@@ -256,6 +325,13 @@ export default function GroupMessagesPage() {
         // group this page is showing (useGroupWs filters by frame.groupId, but
         // the message itself also carries a groupId — trust both).
         if (event.message?.groupId && event.message.groupId !== groupId) {
+          return;
+        }
+        // Search mode shows the q= snapshot only: new frames may not match the
+        // keyword, so they are NOT appended while search is active. Updated and
+        // deleted frames below still apply (they patch the shown rows in place);
+        // clearing the search reloads the full stream and live appends resume.
+        if (searchActiveRef.current) {
           return;
         }
         setMessages((prev) => mergeGroupMessages(prev, [event.message]));
@@ -770,6 +846,50 @@ export default function GroupMessagesPage() {
         <h2 className="min-w-0 flex-1 truncate text-base font-semibold">
           {groupTitle ?? "群组消息"}
         </h2>
+        {searchBoxOpen ? (
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Input
+              type="text"
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleSearch();
+                } else if (e.key === "Escape") {
+                  setSearchBoxOpen(false);
+                }
+              }}
+              placeholder="搜索消息…"
+              aria-label="搜索消息"
+              className="w-44 sm:w-64"
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="清除搜索"
+              title="清除搜索"
+              onClick={() => {
+                handleClearSearch();
+                setSearchBoxOpen(false);
+              }}
+              className="shrink-0"
+            >
+              <X className="size-4" />
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="搜索消息"
+            title="搜索消息"
+            onClick={() => setSearchBoxOpen(true)}
+            className="shrink-0"
+          >
+            <Search className="size-4" />
+          </Button>
+        )}
         <a
           href={`/groups/${groupId}/members`}
           className="inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -778,6 +898,25 @@ export default function GroupMessagesPage() {
           成员
         </a>
       </div>
+
+      {searchActive && (
+        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm text-muted-foreground">
+          <span className="min-w-0 truncate">
+            搜索:{" "}
+            <span className="font-medium text-foreground">
+              {searchActiveQuery}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={handleClearSearch}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <X className="size-3.5" />
+            清除
+          </button>
+        </div>
+      )}
 
       {isReadOnly && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">

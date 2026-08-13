@@ -23,7 +23,7 @@ import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-agent";
 import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -875,13 +875,16 @@ app
       "query",
       z.object({
         after: z.string().uuid().optional(),
+        // 消息搜索(enhancement):正文关键词,LIKE 通配符(%、_)按字面转义;
+        // 空串视为无搜索。上限 200 字符防止超长模式串。
+        q: z.string().max(200).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const requesterId = c.get("agentId");
       const { id } = c.req.valid("param");
-      const { after } = c.req.valid("query");
+      const { after, q } = c.req.valid("query");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -919,6 +922,15 @@ app
         // everything the caller has not seen yet. The stream is ordered by the
         // same key the cursor filters on, so cursor and order cannot diverge.
         conditions.push(gt(groupMessageTable.id, after));
+      }
+      if (q) {
+        // Keyword search: body ILIKE %q% on top of the visibility filter. LIKE
+        // wildcards (%, _) are backslash-escaped so `100%` matches literally;
+        // the escape is applied to the pattern only, never to user input at the
+        // SQL level (drizzle binds the pattern as a parameter). Empty string is
+        // treated as "no search" — behavior identical to the pre-search route.
+        const escaped = q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+        conditions.push(ilike(groupMessageTable.body, `%${escaped}%`));
       }
 
       const messages = await db
