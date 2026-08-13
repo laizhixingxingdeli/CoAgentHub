@@ -137,19 +137,12 @@ describe("agent 注册与身份 API", () => {
     expect(body.agentId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("校验:缺 name/type 或非法 webhookUrl 返回 400", async () => {
+  it("校验:缺 name/type 返回 400", async () => {
     const noName = await register({ type: "hermes" });
     expect(noName.status).toBe(400);
 
     const noType = await register({ name: "x" });
     expect(noType.status).toBe(400);
-
-    const badUrl = await register({
-      name: "x",
-      type: "hermes",
-      webhookUrl: "not-a-url",
-    });
-    expect(badUrl.status).toBe(400);
   });
 
   it("POST /:id/reset-token 重置成功:返回新明文、库中存新哈希、旧 token 失效(ticket 29)", async () => {

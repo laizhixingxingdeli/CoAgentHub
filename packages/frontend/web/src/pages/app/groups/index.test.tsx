@@ -964,7 +964,7 @@ describe("GroupsPage Agent 设置 (ticket 20)", () => {
     fireEvent.click(settingsButton);
     expect(screen.getByText(/类型:hermes\(只读\)/)).toBeInTheDocument();
 
-    // 修改名称并保存;device 沿用当前值,webhookUrl 为空发送 null 清空。
+    // 修改名称并保存;device 沿用当前值。
     const nameInput = screen.getByLabelText("Agent 名称") as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: "hermes-mac-2" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -979,7 +979,6 @@ describe("GroupsPage Agent 设置 (ticket 20)", () => {
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         name: "hermes-mac-2",
         device: "mac-mini",
-        webhookUrl: null,
       });
     });
   });

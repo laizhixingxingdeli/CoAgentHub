@@ -38,7 +38,6 @@ type AgentInfo = {
   name: string;
   type: string;
   device: string | null;
-  webhookUrl: string | null;
 };
 
 /** Status filter tabs; "all" fetches without a ?status= param. */
@@ -106,7 +105,6 @@ export default function GroupsPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [deviceInput, setDeviceInput] = useState("");
-  const [webhookUrlInput, setWebhookUrlInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   // Ticket 28: 注册新 Agent — 替代终端 curl 注册;注册成功即自动绑定
   // (token 覆盖写入,语义:注册即切换身份,不强制清除旧绑定)。
@@ -361,7 +359,6 @@ export default function GroupsPage() {
       if (mine) {
         setNameInput(mine.name);
         setDeviceInput(mine.device ?? "");
-        setWebhookUrlInput(mine.webhookUrl ?? "");
       }
     } catch {
       // 静默失败:设置区保持原样。
@@ -397,14 +394,13 @@ export default function GroupsPage() {
         "Content-Type": "application/json",
         ...agentAuthHeaders(),
       };
-      // device/webhookUrl 为空时发送 null 表示清空(与后端 PATCH 语义一致)。
+      // device 为空时发送 null 表示清空(与后端 PATCH 语义一致)。
       const res = await fetch(`/api/agents/${agentId}`, {
         method: "PATCH",
         headers,
         body: JSON.stringify({
           name: nameInput.trim() || undefined,
           device: deviceInput.trim() ? deviceInput.trim() : null,
-          webhookUrl: webhookUrlInput.trim() ? webhookUrlInput.trim() : null,
         }),
       });
       if (!res.ok) {
@@ -857,7 +853,6 @@ export default function GroupsPage() {
                 <span>名称:{agentInfo.name}</span>
                 <span>类型:{agentInfo.type}(只读)</span>
                 <span>设备:{agentInfo.device ?? "-"}</span>
-                <span>Webhook:{agentInfo.webhookUrl ?? "-"}</span>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
@@ -874,14 +869,6 @@ export default function GroupsPage() {
                   value={deviceInput}
                   onChange={(e) => setDeviceInput(e.target.value)}
                   aria-label="Agent 设备"
-                  className="sm:max-w-xs"
-                />
-                <Input
-                  type="text"
-                  placeholder="Webhook URL(可空)"
-                  value={webhookUrlInput}
-                  onChange={(e) => setWebhookUrlInput(e.target.value)}
-                  aria-label="Webhook URL"
                   className="sm:max-w-xs"
                 />
                 <Button

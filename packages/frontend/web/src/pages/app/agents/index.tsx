@@ -24,8 +24,8 @@ import { AGENT_ID_KEY, agentAuthHeaders } from "@/lib/api-client";
  * 列表 = 内置执行器 + DB 配置(GET /api/executors 合并返回),内置项不可删除。
  *
  * Agent 自管理(ticket: 补全 /agents 页):列表行同时带出 agent 注册信息
- * (GET /api/agents,按 name 匹配),展示 device / capabilities / webhookUrl /
- * 在线状态;绑定后自己的 agent 可编辑(PATCH)与上报在线(heartbeat)。
+ * (GET /api/agents,按 name 匹配),展示 device / capabilities / 在线状态;
+ * 绑定后自己的 agent 可编辑(PATCH)与上报在线(heartbeat)。
  */
 
 type ExecutorItem = {
@@ -48,7 +48,6 @@ type AgentInfo = {
   name: string;
   type: string;
   device: string | null;
-  webhookUrl: string | null;
   capabilities: string[];
   lastSeen: string | null;
 };
@@ -86,7 +85,6 @@ export default function ExecutorsPage() {
   const [editingAgent, setEditingAgent] = useState<AgentInfo | null>(null);
   const [editName, setEditName] = useState("");
   const [editDevice, setEditDevice] = useState("");
-  const [editWebhookUrl, setEditWebhookUrl] = useState("");
   const [editCapabilities, setEditCapabilities] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [heartbeatingId, setHeartbeatingId] = useState<string | null>(null);
@@ -234,12 +232,11 @@ export default function ExecutorsPage() {
     }
   };
 
-  /** 打开编辑对话框(仅自己的 agent):预填 name/device/webhookUrl/capabilities。 */
+  /** 打开编辑对话框(仅自己的 agent):预填 name/device/capabilities。 */
   const startEdit = (agent: AgentInfo) => {
     if (requireOwnAgent(agent)) return;
     setEditName(agent.name);
     setEditDevice(agent.device ?? "");
-    setEditWebhookUrl(agent.webhookUrl ?? "");
     // capabilities 逗号分隔展示,提交时再转数组。
     setEditCapabilities(agent.capabilities.join(", "));
     setEditingAgent(agent);
@@ -265,7 +262,6 @@ export default function ExecutorsPage() {
         body: JSON.stringify({
           name: editName.trim() || undefined,
           device: editDevice.trim() ? editDevice.trim() : null,
-          webhookUrl: editWebhookUrl.trim() ? editWebhookUrl.trim() : null,
           capabilities,
         }),
       });
@@ -515,7 +511,7 @@ export default function ExecutorsPage() {
                       {!item.builtin && ` · ${item.bin}`}
                       {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
                     </div>
-                    {/* capabilities 标签 chips + webhookUrl(有则显示,截断) */}
+                    {/* capabilities 标签 chips */}
                     {agent && (
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         {agent.capabilities.map((cap) => (
@@ -523,14 +519,6 @@ export default function ExecutorsPage() {
                             {cap}
                           </Badge>
                         ))}
-                        {agent.webhookUrl && (
-                          <span
-                            className="max-w-52 truncate text-xs text-muted-foreground"
-                            title={agent.webhookUrl}
-                          >
-                            {agent.webhookUrl}
-                          </span>
-                        )}
                       </div>
                     )}
                   </div>
@@ -587,8 +575,7 @@ export default function ExecutorsPage() {
           <DialogHeader>
             <DialogTitle>编辑 Agent</DialogTitle>
             <DialogDescription>
-              更新自己的注册信息:名字 / 设备 / Webhook URL / 能力标签
-              (逗号分隔)。
+              更新自己的注册信息:名字 / 设备 / 能力标签(逗号分隔)。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
@@ -607,15 +594,6 @@ export default function ExecutorsPage() {
                 value={editDevice}
                 onChange={(e) => setEditDevice(e.target.value)}
                 placeholder="如 mac-mini"
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="edit-webhook">Webhook URL</Label>
-              <Input
-                id="edit-webhook"
-                value={editWebhookUrl}
-                onChange={(e) => setEditWebhookUrl(e.target.value)}
-                placeholder="如 https://example.com/hook"
               />
             </div>
             <div className="grid gap-1.5">

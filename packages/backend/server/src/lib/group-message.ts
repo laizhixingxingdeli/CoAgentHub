@@ -5,6 +5,7 @@
  */
 
 export {
+  type GroupMessageFull,
   type InsertGroupMessageInput,
   insertGroupMessage,
   MAX_REPLY_DEPTH,

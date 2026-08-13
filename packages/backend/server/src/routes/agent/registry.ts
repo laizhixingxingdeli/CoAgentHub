@@ -44,7 +44,6 @@ app
         name: z.string().min(1),
         type: z.string().min(1), // hermes | atomcode | openclaw | human | custom
         device: z.string().optional(),
-        webhookUrl: z.string().url().optional(),
         // 自由能力标签 (ticket 17): 缺省空数组;仅存储,轻量校验放在加成员处。
         capabilities: z.array(z.string()).max(64).optional(),
       }),
@@ -64,7 +63,6 @@ app
           type: input.type,
           device: input.device ?? null,
           tokenHash: hashAgentToken(token),
-          webhookUrl: input.webhookUrl ?? null,
           capabilities: input.capabilities ?? [],
         })
         .returning();
@@ -74,7 +72,6 @@ app
         name: agent.name,
         type: agent.type,
         device: agent.device,
-        webhookUrl: agent.webhookUrl,
         capabilities: agent.capabilities,
         createdAt: agent.createdAt,
         token,
@@ -102,7 +99,6 @@ app
           name: agentTable.name,
           type: agentTable.type,
           device: agentTable.device,
-          webhookUrl: agentTable.webhookUrl,
           capabilities: agentTable.capabilities,
           lastSeen: agentTable.lastSeen,
           createdAt: agentTable.createdAt,
@@ -117,7 +113,7 @@ app
     agentAuth,
     describeRoute({
       description:
-        "Update the caller's own registration (name/device/webhookUrl); the token holder may only patch their own agent",
+        "Update the caller's own registration (name/device); the token holder may only patch their own agent",
       responses: {
         200: {
           description: "Updated agent (tokenHash never exposed)",
@@ -133,10 +129,8 @@ app
       z
         .object({
           name: z.string().min(1).optional(),
-          // null 与 webhookUrl 一样表示清空(与注册时 device 缺省归一为 null 一致)。
+          // null 表示清空(与注册时 device 缺省归一为 null 一致)。
           device: z.string().nullable().optional(),
-          // null 表示清空 webhookUrl。
-          webhookUrl: z.string().url().nullable().optional(),
           // 自由能力标签 (ticket 17): 与注册同语义,逗号输入前端转数组后提交。
           capabilities: z.array(z.string()).max(64).optional(),
         })
@@ -144,7 +138,6 @@ app
           (v) =>
             v.name !== undefined ||
             v.device !== undefined ||
-            v.webhookUrl !== undefined ||
             v.capabilities !== undefined,
           { message: "at least one field to update is required" },
         ),
@@ -163,12 +156,10 @@ app
       const patch: {
         name?: string;
         device?: string | null;
-        webhookUrl?: string | null;
         capabilities?: string[];
       } = {};
       if (input.name !== undefined) patch.name = input.name;
       if (input.device !== undefined) patch.device = input.device ?? null;
-      if (input.webhookUrl !== undefined) patch.webhookUrl = input.webhookUrl;
       if (input.capabilities !== undefined) {
         patch.capabilities = input.capabilities;
       }
@@ -182,7 +173,6 @@ app
           name: agentTable.name,
           type: agentTable.type,
           device: agentTable.device,
-          webhookUrl: agentTable.webhookUrl,
           capabilities: agentTable.capabilities,
           lastSeen: agentTable.lastSeen,
           createdAt: agentTable.createdAt,

@@ -24,7 +24,6 @@ import {
   softDeleteMessage,
   updateMessageBody,
 } from "@server/lib/services/message-service";
-import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -648,18 +647,14 @@ app
         fileRef: fileRef ?? null,
       });
 
-      // Best-effort webhook fan-out, fire-and-forget: never awaited — a slow
-      // or dead webhook target must not delay the write path or the response.
-      // dispatchGroupMessageWebhooks never rejects (failures are logged), and
-      // the ?after= incremental pull remains the guaranteed fallback.
-      void dispatchGroupMessageWebhooks(db, full, id);
-      // Realtime push (ticket 13): same fire-and-forget semantics — the WS hub
-      // catches its own failures, so neither fan-out can block the response.
+      // Realtime push (ticket 13): fire-and-forget — the WS hub catches its
+      // own failures, so the fan-out cannot block the response; the ?after=
+      // incremental pull remains the guaranteed fallback.
       void wsHub.broadcastGroupMessage(full);
 
       // 阶段2-票1:定向到执行器 agent 的消息 → server 直接建 task + spawn
-      // (fire-and-forget,与 webhook 扇出同语义;命中与否/幂等/双跑防重都在
-      // executor-task 内处理,失败只记日志,绝不阻塞消息响应)。
+      // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,
+      // 失败只记日志,绝不阻塞消息响应)。
       if (aud === "agent" && audienceRef) {
         void maybeDispatchExecutorTask(db, {
           groupId: id,

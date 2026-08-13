@@ -15,7 +15,7 @@ import ExecutorsPage from "./index";
  *  - 内置执行器只展示不可删除,DB 配置可删除;
  *  - 界面不出现任何 token/token_hash 字段;
  *  - Agent 自管理(ticket: 补全 /agents 页):行内展示 device/capabilities/
- *    webhookUrl/在线状态;编辑对话框 PATCH /api/agents/:id;心跳 PUT
+ *    device/capabilities/在线状态;编辑对话框 PATCH /api/agents/:id;心跳 PUT
  *    /api/agents/:id/heartbeat;未绑定 token 时编辑/心跳有无权限提示。
  */
 
@@ -250,7 +250,6 @@ describe("接入 Agent 页", () => {
       name: "Online Bot",
       type: "custom",
       device: "mac-mini",
-      webhookUrl: "https://example.com/hook",
       capabilities: ["text-generation", "code-review"],
       lastSeen: new Date(Date.now() - 5_000).toISOString(),
     },
@@ -259,7 +258,6 @@ describe("接入 Agent 页", () => {
       name: "Offline Bot",
       type: "hermes",
       device: "win-pc",
-      webhookUrl: null,
       capabilities: [],
       lastSeen: new Date(Date.now() - 3_600_000).toISOString(),
     },
@@ -268,7 +266,6 @@ describe("接入 Agent 页", () => {
       name: "Never Bot",
       type: "atomcode",
       device: null,
-      webhookUrl: null,
       capabilities: ["code-review"],
       lastSeen: null,
     },
@@ -360,7 +357,7 @@ describe("接入 Agent 页", () => {
     ]);
   }
 
-  it("列表行显示 device/capabilities/webhookUrl 与在线/离线/从未在线徽标", async () => {
+  it("列表行显示 device/capabilities 与在线/离线/从未在线徽标", async () => {
     const fetchMock = agentsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/agents");
@@ -371,15 +368,13 @@ describe("接入 Agent 页", () => {
     // capabilities 标签 chips
     expect(screen.getByText("text-generation")).toBeInTheDocument();
     expect(screen.getAllByText("code-review").length).toBeGreaterThanOrEqual(2);
-    // webhookUrl 展示
-    expect(screen.getByText("https://example.com/hook")).toBeInTheDocument();
     // 在线/离线/从未在线徽标(在线 Bot 5s 前心跳,离线 Bot 1h 前,从未 Bot 无)
     expect(screen.getByText("在线")).toBeInTheDocument();
     expect(screen.getByText("离线")).toBeInTheDocument();
     expect(screen.getByText("从未在线")).toBeInTheDocument();
   });
 
-  it("编辑对话框可改 name/device/webhookUrl/capabilities,PATCH 保存并即时刷新", async () => {
+  it("编辑对话框可改 name/device/capabilities,PATCH 保存并即时刷新", async () => {
     localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
     localStorage.setItem(AGENT_ID_KEY, "agent-online");
     const fetchMock = agentsFetchMock();
@@ -397,18 +392,12 @@ describe("接入 Agent 页", () => {
       "mac-mini",
     );
     expect(
-      (screen.getByLabelText("Webhook URL") as HTMLInputElement).value,
-    ).toBe("https://example.com/hook");
-    expect(
       (screen.getByLabelText("能力标签(逗号分隔)") as HTMLInputElement).value,
     ).toBe("text-generation, code-review");
 
     fireEvent.change(nameInput, { target: { value: "Online Bot v2" } });
     fireEvent.change(screen.getByLabelText("设备"), {
       target: { value: "mac-pro" },
-    });
-    fireEvent.change(screen.getByLabelText("Webhook URL"), {
-      target: { value: "https://new.example.com/hook" },
     });
     fireEvent.change(screen.getByLabelText("能力标签(逗号分隔)"), {
       target: { value: "text-generation, testing" },
@@ -430,7 +419,6 @@ describe("接入 Agent 页", () => {
     >;
     expect(payload.name).toBe("Online Bot v2");
     expect(payload.device).toBe("mac-pro");
-    expect(payload.webhookUrl).toBe("https://new.example.com/hook");
     // 逗号分隔输入 → 数组
     expect(payload.capabilities).toEqual(["text-generation", "testing"]);
     // 行内刷新出新 capability chip

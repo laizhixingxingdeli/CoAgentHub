@@ -46,7 +46,6 @@ import {
   findExecutorByAgentName,
 } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/group-message";
-import { dispatchGroupMessageWebhooks } from "@server/lib/webhook-notify";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
@@ -584,8 +583,7 @@ export async function postStatus(
       contentType: STATUS_EMOJI_RE.test(body) ? "task_status" : "text/plain",
       fileRef: null,
     });
-    // 与 POST /messages 一致的火力外扇出:webhook + WS,让群里实时可见。
-    void dispatchGroupMessageWebhooks(db, full, groupId);
+    // 与 POST /messages 一致的火力外扇出:WS,让群里实时可见。
     void wsHub.broadcastGroupMessage(full);
   } catch (e) {
     console.warn(`[executor] 状态回传失败(${ex.label}):`, e);

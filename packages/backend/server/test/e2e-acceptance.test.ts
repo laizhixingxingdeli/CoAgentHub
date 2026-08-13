@@ -10,15 +10,14 @@ import { createTestApp } from "./app";
  *   user(human) 发命令 → coordinator(hermes/mac) 整理成草稿 → reviewer(hermes/win)
  *   检视并附意见 → coordinator 采纳后发最终版 → executor(atomcode) 执行并回传结果 →
  *   trainer(specialist) 发文件信令 → executor 经 fetchUrl 直连 trainer 设备 P2P 拉取,
- *   校验 SHA256 → human 全程可见 → webhook 通知 → 归档后历史只读。
+ *   校验 SHA256 → human 全程可见 → 归档后历史只读。
  *
  * 与 issue 08 验收标准一一对应:
  *   1. executor 从未见过草稿与检视意见,任务消息只见最终版及之后(含增量游标);
  *      用户命令是 broadcast,按可见性规则全员可见,executor 同样会看到
  *   2. human 全程可见全部消息(命令/草稿/检视/最终版/结果/文件信令),一条不落
  *   3. 文件经 fetchUrl 直连拉取(P2P,不经 CoAgentHub),字节与 SHA256 一致
- *   4. 广播消息后 webhook 通知到达(至少一次)
- *   5. 归档成功且历史仍可读
+ *   4. 归档成功且历史仍可读
  */
 describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => {
   const app = createTestApp();
@@ -42,75 +41,6 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     } | null;
   };
 
-  type WebhookEvent = {
-    type: string;
-    groupId: string;
-    message: {
-      id: string;
-      groupId: string;
-      senderId: string;
-      parentId: string | null;
-      audience: string;
-      audienceRef: string | null;
-      body: string;
-      contentType: string;
-      fileRef: unknown;
-      createdAt: string;
-      updatedAt: string;
-      depth: number;
-    };
-  };
-
-  type Receiver = {
-    url: string;
-    received: WebhookEvent[];
-    close: () => Promise<void>;
-    waitFor: (count: number, timeoutMs?: number) => Promise<WebhookEvent[]>;
-  };
-
-  /** 本地临时 http server 收集 webhook POST,127.0.0.1 随机端口。 */
-  function startWebhookReceiver(): Promise<Receiver> {
-    return new Promise((resolve) => {
-      const received: WebhookEvent[] = [];
-      const server: Server = createServer((req, res) => {
-        let raw = "";
-        req.on("data", (chunk) => (raw += chunk));
-        req.on("end", () => {
-          try {
-            received.push(JSON.parse(raw) as WebhookEvent);
-          } catch {
-            // 忽略畸形负载,不影响主流程断言
-          }
-          res.statusCode = 200;
-          res.end("ok");
-        });
-      });
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        if (!address || typeof address === "string") {
-          throw new Error("unexpected server address");
-        }
-        resolve({
-          url: `http://127.0.0.1:${address.port}/webhook`,
-          received,
-          close: () =>
-            new Promise((r) => {
-              server.closeAllConnections?.();
-              server.close(() => r());
-            }),
-          waitFor: async (count, timeoutMs = 1000) => {
-            const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-              if (received.length >= count) return [...received];
-              await new Promise((r) => setTimeout(r, 25));
-            }
-            return [...received];
-          },
-        });
-      });
-    });
-  }
-
   /** 临时本地 http server 模拟 trainer(win 端)设备上的 LAN 文件端点。 */
   function startSenderServer(
     bytes: Buffer,
@@ -131,25 +61,6 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         });
       });
     });
-  }
-
-  const receivers: Receiver[] = [];
-  afterEach(async () => {
-    await Promise.all(receivers.splice(0).map((r) => r.close()));
-  });
-
-  /** 轮询等待某个 body 的 webhook 事件到达(不依赖多事件到达顺序)。 */
-  async function waitForBody(
-    rx: Receiver,
-    body: string,
-    timeoutMs = 1000,
-  ): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (rx.received.some((e) => e.message.body === body)) return true;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    return false;
   }
 
   async function registerAgent(body: Record<string, unknown>) {
@@ -220,45 +131,33 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     return (await res.json()) as MessageItem[];
   }
 
-  it("完整用户故事:命令→草稿→检视→最终版→执行→P2P 文件→webhook→归档", async () => {
+  it("完整用户故事:命令→草稿→检视→最终版→执行→P2P 文件→归档", async () => {
     // ── 1. 注册 5 个 agent:user(human)/coordinator(hermes mac)/reviewer(hermes win)
-    //        /executor(atomcode,无 webhook)/trainer(specialist)
-    const [userRx, coordinatorRx, reviewerRx, trainerRx] = await Promise.all([
-      startWebhookReceiver(),
-      startWebhookReceiver(),
-      startWebhookReceiver(),
-      startWebhookReceiver(),
-    ]);
-    receivers.push(userRx, coordinatorRx, reviewerRx, trainerRx);
-
+    //        /executor(atomcode)/trainer(specialist)
     const user = await registerAgent({
       name: "alice",
       type: "human",
       device: "macbook",
-      webhookUrl: userRx.url,
     });
     const coordinator = await registerAgent({
       name: "hermes-mac",
       type: "hermes",
       device: "mac-mini",
-      webhookUrl: coordinatorRx.url,
     });
     const reviewer = await registerAgent({
       name: "hermes-win",
       type: "hermes",
       device: "win-pc",
-      webhookUrl: reviewerRx.url,
     });
     const executor = await registerAgent({
       name: "atomcode",
       type: "atomcode",
-      // 无 webhookUrl:纯增量拉取的 CLI agent(短生命周期,无需常驻监听)
+      // 纯增量拉取的 CLI agent(短生命周期,无需常驻监听)
     });
     const trainer = await registerAgent({
       name: "ml-trainer",
       type: "specialist",
       device: "win-gpu",
-      webhookUrl: trainerRx.url,
     });
 
     // ── 2. 建群「训练 win 端 LLM 模型」;加成员并分配角色
@@ -275,12 +174,6 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       audience: "broadcast",
     });
     expect(command.audience).toBe("broadcast");
-
-    // ── 11a. webhook 断言:广播命令后,带 webhook 的成员(coordinator)收到通知
-    const coordEvents = await coordinatorRx.waitFor(1);
-    expect(coordEvents[0].type).toBe("group_message");
-    expect(coordEvents[0].message.body).toBe(command.body);
-    expect(coordEvents[0].groupId).toBe(group.id);
 
     // ── 4. coordinator 拉取(应可见用户命令)→ 发草稿任务给 reviewer
     const coordFirstPull = await fetchMessages(coordinator.token, group.id);
@@ -334,8 +227,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
 
     // ── 8. trainer(specialist)发文件信令消息。audience 选 broadcast 并说明:
     //        文件交付是团队可见事件(human 全程观察、coordinator 需要跟进),
-    //        而 executor 作为群成员同样收广播,visibility 两种选法均满足;
-    //        broadcast 同时覆盖最大的 webhook 扇出面,故取之。
+    //        而 executor 作为群成员同样收广播,visibility 两种选法均满足。
     //        fileRef 的 fetchUrl 指向 trainer 设备本地临时 http server(真 P2P)。
     const fileBytes = Buffer.from(
       "win-model-weights-" + "w".repeat(4096),
@@ -409,10 +301,6 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         result.body,
         signal.body,
       ]);
-
-      // ── 11b. webhook 追加断言:执行结果 broadcast 后,coordinator 再次收到通知
-      //        (轮询等待目标事件,不依赖多事件到达顺序)
-      expect(await waitForBody(coordinatorRx, result.body)).toBe(true);
 
       // ── 12. 归档群组(audit 语义):archive → 200;归档后历史仍可拉取(只读)
       const archiveRes = await app.request(`/api/groups/${group.id}/archive`, {

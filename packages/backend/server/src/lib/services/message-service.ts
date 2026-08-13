@@ -9,6 +9,7 @@
 
 import {
   type FileRefInput,
+  type GroupMessage,
   type GroupMessageAudience,
   groupMessageClosure as groupMessageClosureTable,
   groupMessage as groupMessageTable,
@@ -16,7 +17,6 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
-import type { GroupMessageFull } from "@server/lib/webhook-notify";
 import { and, asc, eq, gt, ilike, ne, sql } from "drizzle-orm";
 
 /** Soft-delete placeholder (ticket 22): the row is kept (closure/reply tree stays intact), the body becomes this string. */
@@ -50,6 +50,26 @@ const messageFullColumns = {
     where ${groupMessageClosureTable.descendantId} = ${groupMessageTable.id}
   )`,
 };
+
+/**
+ * Full group message row as delivered in WS / REST payloads — the same shape
+ * `GET /:id/messages` returns (incl. `depth`), so a receiver can append it to
+ * its view without a follow-up ?after= pull.
+ */
+export interface GroupMessageFull {
+  id: string;
+  groupId: string;
+  senderId: string;
+  parentId: string | null;
+  audience: GroupMessage["audience"];
+  audienceRef: string | null;
+  body: string;
+  contentType: string;
+  fileRef: GroupMessage["fileRef"];
+  createdAt: Date;
+  updatedAt: Date | null;
+  depth: number;
+}
 
 export interface InsertGroupMessageInput {
   groupId: string;

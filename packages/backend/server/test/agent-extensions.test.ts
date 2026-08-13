@@ -104,7 +104,7 @@ describe("T17 agent 自更新与扩展字段", () => {
       expect(updated).not.toHaveProperty("token");
       expect(updated.capabilities).toEqual([]);
 
-      // device 与 webhookUrl 一样可用 null 清空。
+      // device 可用 null 清空。
       const clearDevice = await app.request(`/api/agents/${id}`, {
         method: "PATCH",
         headers: {
@@ -149,32 +149,6 @@ describe("T17 agent 自更新与扩展字段", () => {
       });
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("FORBIDDEN");
-    });
-
-    it("webhookUrl 置空(null)后响应与库中均为 null", async () => {
-      const { id, token } = await registerAgent({
-        name: "webhook-agent",
-        type: "hermes",
-        webhookUrl: "https://example.com/hook",
-      });
-
-      const res = await app.request(`/api/agents/${id}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ webhookUrl: null }),
-      });
-      expect(res.status).toBe(200);
-      const updated = (await res.json()) as Record<string, unknown>;
-      expect(updated.webhookUrl).toBeNull();
-
-      const [row] = await testDb
-        .select({ webhookUrl: agentTable.webhookUrl })
-        .from(agentTable)
-        .where(eq(agentTable.id, id));
-      expect(row.webhookUrl).toBeNull();
     });
 
     it("空 body(无任何更新字段)返回 400", async () => {
