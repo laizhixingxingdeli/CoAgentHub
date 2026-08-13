@@ -285,6 +285,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
       tasks: TASKS,
       tasksAfterCommand: cancelledTasks,
     });
+    // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
+    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -304,6 +306,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
       tasks: TASKS,
     });
+    // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
+    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -317,18 +321,30 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     });
   });
 
-  it("命令 403 时给出无权限提示(按钮仍可见)", async () => {
-    renderGroupPage(
-      messagesFetchMock(MESSAGES, MEMBERS, "active", {
-        tasks: TASKS,
-        commandError: 403,
-      }),
+  it("无权限(Local User 未绑定 token):停止/回滚按钮禁用并提示需要 coordinator/human 身份", async () => {
+    // 不绑定 token 的 Local User:列表只读,控制按钮禁用(不再点击后 403)。
+    const mock = stubFetch(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
     );
+    renderGroupPage(mock);
     await openTasksTab();
 
-    fireEvent.click(screen.getByTestId("task-stop-task-1"));
+    const stop = screen.getByTestId("task-stop-task-1");
+    expect(stop).toBeDisabled();
+    // 禁用按钮包裹 span 带身份提示(禁用按钮自身不触发 title 悬浮)。
+    expect(stop.closest("span[title]")).toHaveAttribute(
+      "title",
+      "需要 coordinator/human 身份",
+    );
 
-    await screen.findByText("无权限,请以 coordinator/human 身份绑定 token");
+    // 按钮禁用 → 不发送任何命令消息。
+    fireEvent.click(stop);
+    expect(
+      mock.mock.calls.some(
+        ([url, init]) =>
+          init?.method === "POST" && String(url).endsWith("/messages"),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -720,9 +736,16 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
     ).toBeInTheDocument();
   });
 
-  it("顶部标题栏显示群名、返回与成员入口", async () => {
+  it("顶部标题栏显示群名、返回与面板开关(可开合右栏)", async () => {
     stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    // GroupLayout 提供右栏 Provider 并渲染 ContextPanel,标题栏「面板」开关
+    // 与之共享开合状态。
+    renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMessagesPage />
+      </GroupLayout>,
+      "/groups/group-1",
+    );
 
     // 群名来自 GET /api/groups/:id 的 title
     expect(await screen.findByText("评审任务")).toBeInTheDocument();
@@ -730,10 +753,17 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
       "href",
       "/groups",
     );
-    expect(screen.getByRole("link", { name: "成员" })).toHaveAttribute(
-      "href",
-      "/groups/group-1/members",
-    );
+    // 成员入口已从标题栏移除(改入右栏 Tab 的「完整管理」链接);标题栏现为
+    // 「面板」开关。lg+ 默认展开右栏 → 开关显示「收起面板」。
+    const toggle = screen.getByRole("button", { name: "收起面板" });
+    expect(screen.getByTestId("context-panel")).toBeInTheDocument();
+    // 点击收起 → 右栏整体隐藏
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("context-panel")).toBeNull();
+    // 开关切为「打开面板」,点击再展开右栏
+    const reopen = screen.getByRole("button", { name: "打开面板" });
+    fireEvent.click(reopen);
+    expect(await screen.findByTestId("context-panel")).toBeInTheDocument();
   });
 });
 

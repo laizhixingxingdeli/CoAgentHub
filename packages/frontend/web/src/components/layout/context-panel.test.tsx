@@ -201,9 +201,9 @@ describe("ContextPanel 右栏上下文面板", () => {
     setViewport(900);
     renderPanel();
 
-    // 无常驻 aside,按钮可见
+    // 无常驻 aside,按钮可见(新交互:标题栏「面板」开关,非桌面唤起 overlay)
     expect(screen.queryByTestId("context-panel")).toBeNull();
-    const trigger = screen.getByRole("button", { name: "上下文" });
+    const trigger = screen.getByRole("button", { name: "打开面板" });
     expect(trigger).toBeInTheDocument();
 
     fireEvent.click(trigger);
@@ -222,7 +222,7 @@ describe("ContextPanel 右栏上下文面板", () => {
     renderPanel();
 
     expect(screen.queryByTestId("context-panel")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "上下文" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开面板" }));
 
     expect(
       await screen.findByTestId("context-panel-sheet"),
