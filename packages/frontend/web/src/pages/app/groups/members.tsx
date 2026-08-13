@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useRoute } from "wouter";
+import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { agentAuthHeaders } from "@/lib/api-client";
@@ -325,7 +326,10 @@ export default function GroupMembersPage() {
           <ArrowLeft className="size-4" />
           返回消息流
         </a>
-        <h2 className="text-xl font-semibold">群组成员</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-xl font-semibold">群组成员</h2>
+          <ContextPanelTrigger />
+        </div>
         <p className="text-muted-foreground text-sm">
           成员在群组内分配角色(同一 agent 可在不同群组持有不同角色)
         </p>

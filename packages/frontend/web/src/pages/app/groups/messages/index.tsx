@@ -1,14 +1,13 @@
 import {
   Archive,
   ArrowLeft,
-  Folder,
-  ListChecks,
   Search,
   Users,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRoute } from "wouter";
+import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -36,13 +35,11 @@ import { Composer } from "./Composer";
 import { detectMention, type MentionCandidate, resolveAudience } from "./lib";
 
 import { MessageList } from "./MessageList";
-import TaskPanel, { type TaskItem } from "./TaskPanel";
 import {
   DELETED_MESSAGE_BODY,
   GROUP_ROLES,
   type Member,
   type MessageItem,
-  ROLE_LABELS,
 } from "./types";
 
 /**
@@ -62,21 +59,6 @@ export default function GroupMessagesPage() {
     "active" | "archived" | "deleted" | null
   >(null);
   const [groupTitle, setGroupTitle] = useState<string | null>(null);
-  // Ticket 33: 群绑定项目路径 — GET /groups/:id 返回,可在本页直接绑定/解绑。
-  const [projectPath, setProjectPath] = useState<string | null>(null);
-  const [projectPathInput, setProjectPathInput] = useState("");
-  const [savingProjectPath, setSavingProjectPath] = useState(false);
-  const [projectPanelOpen, setProjectPanelOpen] = useState(false);
-  const [projectError, setProjectError] = useState<string | null>(null);
-  const [projectMessage, setProjectMessage] = useState<string | null>(null);
-  // 任务面板(enhancement):标题栏「任务」按钮展开;数据来自 GET /groups/:id/tasks,
-  // 打开面板时拉取一次(不轮询);停止/回滚经广播命令消息触发。
-  const [openTasks, setOpenTasks] = useState(false);
-  const [tasks, setTasks] = useState<TaskItem[]>([]);
-  const [tasksLoading, setTasksLoading] = useState(false);
-  /** 正在发送命令的任务 id(null = 空闲);命令失败提示走 commandError。 */
-  const [commandSending, setCommandSending] = useState<string | null>(null);
-  const [commandError, setCommandError] = useState<string | null>(null);
   const [body, setBody] = useState("");
   // Collapsed thread roots (ticket 15). Keyed by root message id and kept in
   // its own state so a WS merge (which replaces the message list) never resets
@@ -193,14 +175,10 @@ export default function GroupMessagesPage() {
       const group = (await res.json()) as {
         status: "active" | "archived" | "deleted";
         title?: string;
-        projectPath?: string | null;
       };
       setGroupStatus(group.status);
       if (group.title) {
         setGroupTitle(group.title);
-      }
-      if (typeof group.projectPath !== "undefined") {
-        setProjectPath(group.projectPath);
       }
     } catch {
       // Status is only needed for the read-only banner; a failure just leaves
@@ -448,160 +426,6 @@ export default function GroupMessagesPage() {
   // the send affordance at all. `null` (status not yet loaded) stays unlocked.
   const isReadOnly = groupStatus !== null && groupStatus !== "active";
   const isDeleted = groupStatus === "deleted";
-
-  // Ticket 33: 绑定项目路径 — PATCH /groups/:id { projectPath }。非空必须是
-  // 存在的绝对目录(400 路径非法);成功后写入本地状态并清空输入框。
-  const handleSaveProjectPath = async () => {
-    const path = projectPathInput.trim();
-    if (!groupId || !path || savingProjectPath) {
-      return;
-    }
-    setSavingProjectPath(true);
-    setProjectError(null);
-    setProjectMessage(null);
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...agentAuthHeaders(),
-      };
-      const res = await fetch(`/api/groups/${groupId}`, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({ projectPath: path }),
-      });
-      if (!res.ok) {
-        // 400(路径非法)/404(群不存在):带出后端 message 便于排查。
-        const body = await res.json().catch(() => null);
-        throw new Error(
-          `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
-        );
-      }
-      const updated = (await res.json()) as { projectPath: string | null };
-      setProjectPath(updated.projectPath);
-      setProjectPathInput("");
-      setProjectMessage(`已绑定项目:${updated.projectPath}`);
-    } catch (e) {
-      setProjectError(
-        `绑定失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setSavingProjectPath(false);
-    }
-  };
-
-  // Ticket 33: 解绑 — PATCH { projectPath: null },后端置空绑定。
-  const handleUnbindProjectPath = async () => {
-    if (!groupId || savingProjectPath) {
-      return;
-    }
-    setSavingProjectPath(true);
-    setProjectError(null);
-    setProjectMessage(null);
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...agentAuthHeaders(),
-      };
-      const res = await fetch(`/api/groups/${groupId}`, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({ projectPath: null }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(
-          `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
-        );
-      }
-      setProjectPath(null);
-      setProjectMessage("已解绑项目");
-    } catch (e) {
-      setProjectError(
-        `解绑失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setSavingProjectPath(false);
-    }
-  };
-
-  // ── 任务面板(enhancement)──────────────────────────────────────────────
-  const loadTasks = useCallback(async () => {
-    if (!groupId) {
-      return;
-    }
-    setTasksLoading(true);
-    setCommandError(null);
-    try {
-      const res = await fetch(`/api/groups/${groupId}/tasks`, {
-        headers: agentAuthHeaders(),
-      });
-      if (!res.ok) {
-        // 403 = 非成员无权读任务列表 → 与命令 403 同一无权限提示。
-        setCommandError(
-          res.status === 403
-            ? "无权限,请以 coordinator/human 身份绑定 token"
-            : `加载任务失败: HTTP ${res.status}`,
-        );
-        return;
-      }
-      setTasks((await res.json()) as TaskItem[]);
-    } catch (e) {
-      setCommandError(
-        `加载任务失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setTasksLoading(false);
-    }
-  }, [groupId]);
-
-  const toggleTasks = () => {
-    const next = !openTasks;
-    setOpenTasks(next);
-    if (next) {
-      // 打开时刷新一次,不自动轮询。
-      void loadTasks();
-    }
-  };
-
-  /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
-   * 识别);发送后刷新任务列表。403 → 无权限提示。 */
-  const sendCommand = async (task: TaskItem, commandBody: string) => {
-    if (!groupId || commandSending) {
-      return;
-    }
-    setCommandSending(task.id);
-    setCommandError(null);
-    try {
-      const res = await fetch(`/api/groups/${groupId}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...agentAuthHeaders() },
-        body: JSON.stringify({ body: commandBody, audience: "broadcast" }),
-      });
-      if (!res.ok) {
-        setCommandError(
-          res.status === 403
-            ? "无权限,请以 coordinator/human 身份绑定 token"
-            : `命令发送失败: HTTP ${res.status}`,
-        );
-        return;
-      }
-      await loadTasks();
-    } catch (e) {
-      setCommandError(
-        `命令发送失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setCommandSending(null);
-    }
-  };
-
-  const handleStopTask = (task: TaskItem) => {
-    void sendCommand(task, `停止 ${task.id}`);
-  };
-
-  const handleRollbackTask = (task: TaskItem) => {
-    void sendCommand(task, `回滚 ${task.id}`);
-  };
 
   const handleSend = async () => {
     const trimmed = body.trim();
@@ -986,18 +810,7 @@ export default function GroupMessagesPage() {
             <Search className="size-4" />
           </Button>
         )}
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label="任务"
-          aria-expanded={openTasks}
-          title="任务"
-          onClick={toggleTasks}
-          className="shrink-0 gap-1"
-        >
-          <ListChecks className="size-4" />
-          任务
-        </Button>
+        <ContextPanelTrigger />
         <a
           href={`/groups/${groupId}/members`}
           className="inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -1039,131 +852,6 @@ export default function GroupMessagesPage() {
         <div className="mx-4 mt-3 shrink-0 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:bg-red-950/40 dark:text-red-200">
           {error}
         </div>
-      )}
-
-      {/* 项目与分工(ticket 33):项目绑定(PATCH /groups/:id)+ 本群成员分工总览 */}
-      <div className="shrink-0 border-b px-4 py-2.5">
-        <button
-          type="button"
-          onClick={() => setProjectPanelOpen((v) => !v)}
-          className="flex w-full items-center justify-between gap-2 text-sm font-medium"
-          aria-expanded={projectPanelOpen}
-        >
-          <span className="inline-flex min-w-0 items-center gap-2">
-            <Folder className="size-4 shrink-0" />
-            <span className="truncate">{projectPath ?? "未绑定项目"}</span>
-          </span>
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {projectPanelOpen ? "收起" : "展开"}
-          </span>
-        </button>
-        {projectPanelOpen && (
-          <div className="mt-3 flex flex-col gap-4">
-            {/* 项目绑定:显示当前路径,输入绝对路径保存,解绑置空 */}
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-medium text-muted-foreground">
-                项目绑定
-              </span>
-              {projectPath && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
-                    {projectPath}
-                  </code>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleUnbindProjectPath}
-                    disabled={savingProjectPath}
-                    className="shrink-0"
-                  >
-                    {savingProjectPath ? "处理中…" : "解绑"}
-                  </Button>
-                </div>
-              )}
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="text"
-                  placeholder="输入项目绝对路径,如 /Users/me/proj…"
-                  value={projectPathInput}
-                  onChange={(e) => setProjectPathInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleSaveProjectPath();
-                    }
-                  }}
-                  aria-label="项目绝对路径"
-                  className="sm:max-w-xs"
-                />
-                <Button
-                  size="sm"
-                  onClick={handleSaveProjectPath}
-                  disabled={savingProjectPath || !projectPathInput.trim()}
-                  className="shrink-0"
-                >
-                  {savingProjectPath ? "保存中…" : "保存"}
-                </Button>
-              </div>
-              {projectError && (
-                <p className="text-xs text-red-600">{projectError}</p>
-              )}
-              {projectMessage && (
-                <p className="text-xs text-emerald-600">{projectMessage}</p>
-              )}
-            </div>
-
-            {/* 分工总览:成员名字 + 角色徽章 + 提示词摘要(截断) */}
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-medium text-muted-foreground">
-                分工总览({members.length} 名成员)
-              </span>
-              {members.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无成员</p>
-              ) : (
-                <ul className="flex flex-col gap-1.5">
-                  {members.map((member) => (
-                    <li
-                      key={member.agentId}
-                      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm"
-                    >
-                      <span className="font-medium">{member.name}</span>
-                      {member.roles.map((role) => (
-                        <span
-                          key={role}
-                          className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
-                        >
-                          {ROLE_LABELS[role] ?? role}
-                        </span>
-                      ))}
-                      {member.prompt && (
-                        <span
-                          className="min-w-0 truncate text-xs text-muted-foreground"
-                          title={member.prompt}
-                        >
-                          {member.prompt.length > 40
-                            ? `${member.prompt.slice(0, 40)}…`
-                            : member.prompt}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {openTasks && (
-        <TaskPanel
-          tasks={tasks}
-          loading={tasksLoading}
-          error={commandError}
-          commandSending={commandSending}
-          messages={messages}
-          members={members}
-          onStop={handleStopTask}
-          onRollback={handleRollbackTask}
-        />
       )}
 
       <MessageList

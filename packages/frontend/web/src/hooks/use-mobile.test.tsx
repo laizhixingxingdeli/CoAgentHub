@@ -1,10 +1,17 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useIsMobile } from "./use-mobile";
+import { useIsDesktop, useIsMobile } from "./use-mobile";
 
 function Probe() {
   const isMobile = useIsMobile();
   return <div data-testid="probe">{isMobile ? "mobile" : "desktop"}</div>;
+}
+
+function DesktopProbe() {
+  const isDesktop = useIsDesktop();
+  return (
+    <div data-testid="desktop-probe">{isDesktop ? "desktop" : "not-desktop"}</div>
+  );
 }
 
 /** Controllable matchMedia mock that captures the change listener. */
@@ -78,5 +85,41 @@ describe("useIsMobile 双端断点", () => {
     act(() => mql.setMatches(false));
 
     expect(screen.getByTestId("probe")).toHaveTextContent("desktop");
+  });
+});
+
+describe("useIsDesktop lg 断点(≥1024px)", () => {
+  it("桌面视口(≥1024px)判定为 desktop", async () => {
+    mockMatchMedia(true);
+    setViewport(1280);
+    render(<DesktopProbe />);
+    expect(await screen.findByTestId("desktop-probe")).toHaveTextContent(
+      "desktop",
+    );
+  });
+
+  it("平板视口(<1024px)判定为 not-desktop", async () => {
+    mockMatchMedia(false);
+    setViewport(900);
+    render(<DesktopProbe />);
+    expect(await screen.findByTestId("desktop-probe")).toHaveTextContent(
+      "not-desktop",
+    );
+  });
+
+  it("matchMedia change 事件触发后重新判定", () => {
+    const mql = mockMatchMedia(false);
+    setViewport(900);
+    render(<DesktopProbe />);
+    expect(screen.getByTestId("desktop-probe")).toHaveTextContent(
+      "not-desktop",
+    );
+
+    // Viewport crosses the lg breakpoint: width grows and the media query
+    // flips, which fires the registered change listener.
+    setViewport(1280);
+    act(() => mql.setMatches(true));
+
+    expect(screen.getByTestId("desktop-probe")).toHaveTextContent("desktop");
   });
 });

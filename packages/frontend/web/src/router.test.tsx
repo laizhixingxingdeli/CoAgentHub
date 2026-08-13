@@ -68,6 +68,8 @@ describe("路由", () => {
     expect(await screen.findAllByText("文件传输")).not.toHaveLength(0);
     // The upload control is a <label> (Button asChild), not a real button.
     expect(await screen.findByText("上传文件")).toBeInTheDocument();
+    // 非群页面保持两栏(无右栏上下文面板)
+    expect(screen.queryByTestId("context-panel")).toBeNull();
   });
 
   it("/groups 渲染群组列表页", async () => {
@@ -90,6 +92,17 @@ describe("路由", () => {
     expect(
       await screen.findByText("暂无消息,发送第一条吧"),
     ).toBeInTheDocument();
+  });
+
+  it("/groups/:id 群相关路由带右栏上下文面板(三栏)", async () => {
+    vi.stubGlobal("fetch", routerFetchMock());
+    renderWithProviders(<App />, "/groups/group-1");
+
+    expect(await screen.findByTestId("context-panel")).toBeInTheDocument();
+    // 右栏三个 Tab 均存在
+    expect(screen.getByTestId("context-tab-members")).toBeInTheDocument();
+    expect(screen.getByTestId("context-tab-tasks")).toBeInTheDocument();
+    expect(screen.getByTestId("context-tab-project")).toBeInTheDocument();
   });
 
   it("/groups/:id/members 渲染群组成员管理页", async () => {

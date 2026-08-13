@@ -1,4 +1,5 @@
 import { Redirect, Route, Switch } from "wouter";
+import GroupLayout from "./components/layout/group-layout";
 import AppSidebar from "./components/sidebar";
 import AgentsPage from "./pages/app/agents";
 import FilesPage from "./pages/app/files";
@@ -36,10 +37,23 @@ const App = () => (
               produce /groups/groups/<id>. Flat routes keep base="" so the
               pages' absolute paths work as written. */}
           <Route path="/groups" component={GroupsPage} />
-          <Route path="/groups/:id" component={() => <GroupMessagesPage />} />
+          {/* 群相关路由(消息/成员)包上带右栏的布局(三栏);其它路由保持两栏。
+              wouter v3 的 component 会收到 { params },据此取 groupId 传给右栏。 */}
+          <Route
+            path="/groups/:id"
+            component={({ params }: { params: { id: string } }) => (
+              <GroupLayout groupId={params.id}>
+                <GroupMessagesPage />
+              </GroupLayout>
+            )}
+          />
           <Route
             path="/groups/:id/members"
-            component={() => <GroupMembersPage />}
+            component={({ params }: { params: { id: string } }) => (
+              <GroupLayout groupId={params.id}>
+                <GroupMembersPage />
+              </GroupLayout>
+            )}
           />
           <Route path="/:rest*">404:页面不存在</Route>
         </Switch>

@@ -1,12 +1,6 @@
-import {
-  act,
-  fireEvent,
-  renderHook,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, fireEvent, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import GroupLayout from "@/components/layout/group-layout";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
 import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
 import { groupMessageFrame } from "@/test/frames";
@@ -229,14 +223,27 @@ const TASKS = [
   },
 ];
 
-describe("任务面板(任务控制 UI)", () => {
-  it("打开面板:状态徽章/执行器/正文预览/时间 + 停止/回滚按钮", async () => {
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
+describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
+  /** 三栏布局渲染(右栏 lg+ 常驻),切到「任务」Tab 打开任务面板。 */
+  const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
+    stubFetch(mock);
+    renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMessagesPage />
+      </GroupLayout>,
+      "/groups/group-1",
+    );
+  };
 
-    fireEvent.click(screen.getByLabelText("任务"));
+  const openTasksTab = async () => {
+    await screen.findByText("任务草稿");
+    fireEvent.click(screen.getByTestId("context-tab-tasks"));
     await screen.findByTestId("task-panel");
+  };
+
+  it("打开面板:状态徽章/执行器/正文预览/时间 + 停止/回滚按钮", async () => {
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }));
+    await openTasksTab();
 
     // running → 停止;done + checkpointRef → 回滚
     const row1 = within(screen.getByTestId("task-row-task-1"));
@@ -256,10 +263,8 @@ describe("任务面板(任务控制 UI)", () => {
   });
 
   it("空态显示「暂无任务」", async () => {
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-    fireEvent.click(screen.getByLabelText("任务"));
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }));
+    await openTasksTab();
     await screen.findByText("暂无任务");
   });
 
@@ -269,11 +274,8 @@ describe("任务面板(任务控制 UI)", () => {
       tasks: TASKS,
       tasksAfterCommand: cancelledTasks,
     });
-    stubFetch(mock);
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-    fireEvent.click(screen.getByLabelText("任务"));
-    await screen.findByTestId("task-stop-task-1");
+    renderGroupPage(mock);
+    await openTasksTab();
 
     fireEvent.click(screen.getByTestId("task-stop-task-1"));
 
@@ -291,11 +293,8 @@ describe("任务面板(任务控制 UI)", () => {
     const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
       tasks: TASKS,
     });
-    stubFetch(mock);
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-    fireEvent.click(screen.getByLabelText("任务"));
-    await screen.findByTestId("task-rollback-task-2");
+    renderGroupPage(mock);
+    await openTasksTab();
 
     fireEvent.click(screen.getByTestId("task-rollback-task-2"));
 
@@ -308,16 +307,13 @@ describe("任务面板(任务控制 UI)", () => {
   });
 
   it("命令 403 时给出无权限提示(按钮仍可见)", async () => {
-    stubFetch(
+    renderGroupPage(
       messagesFetchMock(MESSAGES, MEMBERS, "active", {
         tasks: TASKS,
         commandError: 403,
       }),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-    fireEvent.click(screen.getByLabelText("任务"));
-    await screen.findByTestId("task-stop-task-1");
+    await openTasksTab();
 
     fireEvent.click(screen.getByTestId("task-stop-task-1"));
 
@@ -2231,38 +2227,46 @@ describe("ticket 23 接线:进入消息页 markRead", () => {
   });
 });
 
-describe("Ticket 33: 项目绑定与分工总览", () => {
-  /** 展开「项目与分工」面板(默认收起)。 */
-  const openProjectPanel = async () => {
-    fireEvent.click(screen.getByRole("button", { name: /展开/ }));
-    await screen.findByText("项目绑定");
+describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () => {
+  /** 三栏布局渲染,切到指定右栏 Tab。 */
+  const openTab = async (tabTestId: string) => {
+    fireEvent.click(screen.getByTestId(tabTestId));
+    await screen.findByTestId(
+      tabTestId === "context-tab-project" ? "project-tab" : "members-tab",
+    );
   };
 
-  it("未绑定时头部显示「未绑定项目」,展开后有输入框与保存按钮", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
+    stubFetch(mock);
+    renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMessagesPage />
+      </GroupLayout>,
+      "/groups/group-1",
+    );
+    return mock;
+  };
 
+  it("未绑定时项目 Tab 显示输入框与保存按钮", async () => {
+    renderGroupPage(messagesFetchMock());
     await screen.findByText("任务草稿");
-    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
-    expect(screen.queryByText("项目绑定")).toBeNull();
+    await openTab("context-tab-project");
 
-    await openProjectPanel();
     expect(screen.getByLabelText("项目绝对路径")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   });
 
-  it("输入路径保存 → PATCH 成功后头部与区块显示已绑定路径", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  it("输入路径保存 → PATCH 成功后显示已绑定路径", async () => {
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await screen.findByText("任务草稿");
+    await openTab("context-tab-project");
 
-    await openProjectPanel();
     fireEvent.change(screen.getByLabelText("项目绝对路径"), {
       target: { value: "/Users/me/proj" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await screen.findByText("已绑定项目:/Users/me/proj");
-    // 头部(未展开时也可见)与区块 code 都显示路径 → 至少两处
     expect(screen.getAllByText("/Users/me/proj").length).toBeGreaterThan(0);
     // PATCH 请求体正确
     const patch = fetchMock.mock.calls.find(
@@ -2276,26 +2280,25 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
   });
 
   it("已绑定群显示解绑按钮,点击解绑 → 恢复未绑定", async () => {
-    stubFetch(
+    renderGroupPage(
       messagesFetchMock([], [], "active", {
         projectPath: "/Users/me/proj",
       }),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await openTab("context-tab-project");
+    await screen.findByTestId("project-path");
 
-    await screen.findByText("/Users/me/proj");
-    await openProjectPanel();
     fireEvent.click(screen.getByRole("button", { name: "解绑" }));
 
     await screen.findByText("已解绑项目");
-    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-path")).toBeNull();
   });
 
   it("400(路径非法)错误提示可见", async () => {
-    stubFetch(messagesFetchMock([], [], "active", { patchError: 400 }));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock([], [], "active", { patchError: 400 }));
+    await openTab("context-tab-project");
+    await screen.findByLabelText("项目绝对路径");
 
-    await openProjectPanel();
     fireEvent.change(screen.getByLabelText("项目绝对路径"), {
       target: { value: "/definitely/nope" },
     });
@@ -2304,15 +2307,13 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
     await screen.findByText(
       /绑定失败: HTTP 400: projectPath 必须是存在的绝对目录路径/,
     );
-    // 头部仍保持未绑定
-    expect(screen.getByText("未绑定项目")).toBeInTheDocument();
   });
 
   it("404(群不存在)错误提示可见", async () => {
-    stubFetch(messagesFetchMock([], [], "active", { patchError: 404 }));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock([], [], "active", { patchError: 404 }));
+    await openTab("context-tab-project");
+    await screen.findByLabelText("项目绝对路径");
 
-    await openProjectPanel();
     fireEvent.change(screen.getByLabelText("项目绝对路径"), {
       target: { value: "/Users/me/proj" },
     });
@@ -2321,7 +2322,7 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
     await screen.findByText(/绑定失败: HTTP 404/);
   });
 
-  it("分工总览显示成员名字、角色徽章与提示词摘要(长文截断)", async () => {
+  it("成员 Tab 显示成员名字、角色徽章与提示词摘要(长文截断)", async () => {
     const longPrompt =
       "负责统筹协调与最终验收,检查所有产出物并汇总汇报给人类主管,确保进度可控且质量达标,及时同步风险";
     const DIVISION_MEMBERS = [
@@ -2344,10 +2345,11 @@ describe("Ticket 33: 项目绑定与分工总览", () => {
         joinedAt: "2026-08-01T00:01:00.000Z",
       },
     ];
-    stubFetch(messagesFetchMock([], DIVISION_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock([], DIVISION_MEMBERS));
+    // 成员 Tab 是默认激活的右栏 Tab,直接等待成员列表加载。
+    await screen.findByTestId("members-tab");
+    await screen.findByText("hermes-mac");
 
-    await openProjectPanel();
     // 成员名
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
     expect(screen.getByText("win-hermes")).toBeInTheDocument();
