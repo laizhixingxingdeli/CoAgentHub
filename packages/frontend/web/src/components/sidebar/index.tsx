@@ -85,9 +85,7 @@ export default function AppSidebar({
                     <Command className="size-4" />
                   </div>
                   <div className="grid flex-1 text-left text-sm leading-tight">
-                    <span className="truncate font-medium">
-                      CoAgentHub
-                    </span>
+                    <span className="truncate font-medium">CoAgentHub</span>
                     <span className="truncate text-xs">局域网 AI 助手</span>
                   </div>
                 </a>
@@ -122,9 +120,7 @@ export default function AppSidebar({
             <Breadcrumb>
               <BreadcrumbList>
                 <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/groups">
-                    CoAgentHub
-                  </BreadcrumbLink>
+                  <BreadcrumbLink href="/groups">CoAgentHub</BreadcrumbLink>
                 </BreadcrumbItem>
                 <BreadcrumbSeparator className="hidden md:block" />
                 <BreadcrumbItem>

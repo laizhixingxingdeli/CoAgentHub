@@ -115,7 +115,9 @@ function makeServer() {
     if (membersMatch) {
       // 默认只有助手自己且无分工信息;用例可按群设置成员(roles+prompt)。
       return jsonResponse(
-        membersByGroup.get(membersMatch[1]) ?? [{ participantId: ME.id, roles: [] }],
+        membersByGroup.get(membersMatch[1]) ?? [
+          { participantId: ME.id, roles: [] },
+        ],
       );
     }
     // 群详情:GET 读服务器侧 projectPath,PATCH 写入(绑定指令落库的位置)。
@@ -283,9 +285,9 @@ describe("会话记忆:同一群连续问答", () => {
       }),
     ]);
     await participant.processGroup({ id: "gA" });
-    expect(participant.getState().sessions.gA.recent.map((m) => m.body)).toEqual([
-      "第一问:我们的项目代号是什么?",
-    ]);
+    expect(
+      participant.getState().sessions.gA.recent.map((m) => m.body),
+    ).toEqual(["第一问:我们的项目代号是什么?"]);
 
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
@@ -509,7 +511,9 @@ describe("会话记忆:开关与降级", () => {
 describe("parseBindCommand", () => {
   it("识别绑定命令并提取路径;非命令/非绝对路径返回 null", () => {
     expect(participant.parseBindCommand("绑定项目")).toEqual({ path: "" });
-    expect(participant.parseBindCommand("绑定项目 /a/b")).toEqual({ path: "/a/b" });
+    expect(participant.parseBindCommand("绑定项目 /a/b")).toEqual({
+      path: "/a/b",
+    });
     expect(participant.parseBindCommand("  绑定项目 /a/b  ")).toEqual({
       path: "/a/b",
     });
@@ -1011,7 +1015,12 @@ describe("buildDivisionOfLabor", () => {
           roles: ["reviewer", "specialist"],
           prompt: "审阅+领域专家",
         },
-        { participantId: "a2", name: "only-prompt", roles: [], prompt: "纯分工说明" },
+        {
+          participantId: "a2",
+          name: "only-prompt",
+          roles: [],
+          prompt: "纯分工说明",
+        },
       ]),
     ).toBe(
       "reviewer,specialist=multi(审阅+领域专家);member=only-prompt(纯分工说明)",
@@ -1019,7 +1028,9 @@ describe("buildDivisionOfLabor", () => {
   });
 
   it("无任何分工信息时返回空串", () => {
-    expect(participant.buildDivisionOfLabor([{ participantId: "a1", roles: [] }])).toBe("");
+    expect(
+      participant.buildDivisionOfLabor([{ participantId: "a1", roles: [] }]),
+    ).toBe("");
     expect(participant.buildDivisionOfLabor([])).toBe("");
     expect(participant.buildDivisionOfLabor(undefined)).toBe("");
   });

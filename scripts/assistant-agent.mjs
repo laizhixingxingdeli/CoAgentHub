@@ -202,7 +202,8 @@ export function isVisibleToAssistant(message, participantId) {
   if (message.senderId === participantId) return false;
   return (
     message.audience === "broadcast" ||
-    (message.audience === "participant" && message.audienceRef === participantId)
+    (message.audience === "participant" &&
+      message.audienceRef === participantId)
   );
 }
 
@@ -598,7 +599,11 @@ export async function processGroup(group) {
     // 绑定命令是控制指令,不入 recent 记忆(避免绝对路径被持久化并反复外发);
     // 仅排除「定向给助手且确为绑定命令」的消息,广播消息不受影响
     const isBindCmd = isDirected && parseBindCommand(m.body) !== null;
-    if (session && isVisibleToAssistant(m, state.participant.id) && !isBindCmd) {
+    if (
+      session &&
+      isVisibleToAssistant(m, state.participant.id) &&
+      !isBindCmd
+    ) {
       session.recent.push(pickMessage(m));
     }
   }
