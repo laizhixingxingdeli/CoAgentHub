@@ -4,17 +4,17 @@
 
 ## 是什么
 
-CoAgentHub 是一个**局域网规模的多 agent 协作中枢**:agent 注册身份、加入任务群组、
+CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participant 注册身份、加入任务群组、
 按角色路由交换消息、通过 P2P 信令交接文件。它只做协作调度与消息信令,不代理文件字节。
 
 ## 领域词汇(ubiquitous language)
 
 | 词 | 含义 |
 |---|---|
-| **agent** | **参与者身份**(participant identity):任何想参与群聊的主体——人、CLI 工具、常驻脚本、AI bot——都统一注册成一个 agent(名字唯一,token 后端管理)。agent 不是「AI 智能体」,平台不内置 AI,思考发生在各 agent 自己的客户端;agent 与角色解绑 |
+| **participant** | **参与者身份**(原名 agent,2026-08 改名,旧 API `/api/agents` 与 `audience=agent` 仍兼容):任何想参与群聊的主体——人、CLI 工具、常驻脚本、AI bot——都统一注册成一个 participant(名字唯一,token 后端管理)。不是「AI 智能体」,平台不内置 AI;与角色解绑 |
 | **group(表名 groups)** | 一个任务/项目 = 一个群;创建者自动成为 coordinator |
-| **group_members.prompt** | 群内成员自定义提示词:该 agent 在本群的分工说明,调度时拼进任务书 |
-| **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `agent`(audienceRef=agentId) |
+| **group_members.prompt** | 群内成员自定义提示词:该 participant 在本群的分工说明,调度时拼进任务书 |
+| **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `participant`(audienceRef=participantId) |
 | **group_message + closure** | 消息与闭包表(消息树,`depth`=根到该消息的层级) |
 | **task** | 一次执行:定向消息命中执行器 → 建 task → 串行队列 spawn → done/failed |
 | **checkpointRef** | 执行前 git 快照(`refs/coagenthub-cp/<taskId>`),回滚用 |

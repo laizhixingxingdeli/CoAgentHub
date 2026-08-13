@@ -3,13 +3,13 @@
 **状态**:已接受(2026-08)
 
 ## 背景
-一个项目一个群;协调型 agent(assistant)需要在群内有连贯上下文,且能引用项目文档。
+一个项目一个群;协调型 participant(assistant)需要在群内有连贯上下文,且能引用项目文档。
 
 ## 决策
 - **群记忆**(assistant-agent 按群):滚动摘要(压缩旧消息)+ 最近窗口(默认 40 条)
   + 本群分工(由成员 roles+prompt 生成);预算触发压缩。
 - **项目记忆**:群可绑定 `project_path`(服务器属性,Web 可操作);应答时按预算读取
-  仓库 agent 向文档(CONTEXT-MAP → CONTEXT → AGENTS → CLAUDE → docs/adr → README)。
+  仓库 participant 向文档(CONTEXT-MAP → CONTEXT → AGENTS → CLAUDE → docs/adr → README)。
 - prompt = 系统 +【项目文档】+【群摘要】+【本群分工】+【最近窗口】+ 问题;预算 40/20/40。
 - 执行器不参与记忆(ADR-0003)。
 
