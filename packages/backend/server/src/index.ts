@@ -22,14 +22,14 @@ import type { Logger } from "winston";
 import type { DataBase } from "./lib/database";
 import db from "./lib/database";
 import { recoverInterruptedTasks } from "./lib/executor-task";
-import { ensureExecutorAgents } from "./lib/executors";
+import { ensureExecutorParticipants } from "./lib/executors";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
 import { loggerMiddleware } from "./middleware/logger";
-import agentRouter from "./routes/agent";
 import executorRouter from "./routes/executor";
 import fileRouter from "./routes/file";
 import groupRouter from "./routes/group";
+import participantRouter from "./routes/participant";
 import systemRouter from "./routes/system";
 
 declare module "hono" {
@@ -37,7 +37,7 @@ declare module "hono" {
     db: DataBase;
     logger: Logger;
     connInfo: import("hono/conninfo").ConnInfo & { ip: string };
-    agentId: string;
+    participantId: string;
   }
 }
 
@@ -85,7 +85,10 @@ app.use(loggerMiddleware);
 export const routes = new Hono()
   .route("/system", systemRouter)
   .route("/file", fileRouter)
-  .route("/agents", agentRouter)
+  // /participants 为主路径;/agents 是历史别名(同一 handler,过渡期兼容
+  // 旧客户端/旧执行器,agent 为 participant 的旧名),不 404。
+  .route("/participants", participantRouter)
+  .route("/agents", participantRouter)
   .route("/executors", executorRouter)
   .route("/groups", groupRouter);
 
@@ -125,11 +128,14 @@ async function run() {
   }
 
   // 桥已退役:server 是唯一调度器——开机时把执行器配置(含 hermes)对应的
-  // agent 幂等注册进 agent 表。
+  // participant 幂等注册进 participant 表。
   try {
-    await ensureExecutorAgents(db);
+    await ensureExecutorParticipants(db);
   } catch (err) {
-    console.warn("[executor] agent auto-registration failed, continuing:", err);
+    console.warn(
+      "[executor] participant auto-registration failed, continuing:",
+      err,
+    );
   }
 
   const server = serve({ fetch: app.fetch, port }, ({ address, port: p }) => {

@@ -1,13 +1,13 @@
 /**
  * A2A(Agent-to-Agent)执行器运行器:通过远端 A2A gateway 调用其他设备上的
- * agent(如 Windows 192.168.31.180 上的 hermes / win-hermes),server 侧
+ * participant(如 Windows 192.168.31.180 上的 hermes / win-hermes),server 侧
  * 不 spawn 任何本地进程。纯全局 fetch(Node 18+),不引入新依赖。
  *
  * 协议:JSON-RPC 1.0(该 gateway 实测),method=message/send,同步返回最终
  * 状态(一次调用即 TASK_STATE_COMPLETED + 回复文本,无需轮询)。
  *
  * 与 executor-runner.ts 的 runExecutor 保持相同的 ExecutorRunResult 形状,
- * executor-task.ts 的回传逻辑可原样复用:agent 最终回复文本 → stdout(exit 0);
+ * executor-task.ts 的回传逻辑可原样复用:participant 最终回复文本 → stdout(exit 0);
  * 错误/超时 → stderr + 非零 code(timedOut 标记与 spawn 超时一致)。
  */
 
@@ -19,7 +19,7 @@ export interface A2ARunOptions {
   url: string;
   /** Bearer token(Authorization 头),从 env 读(COAGENTHUB_WIN_A2A_TOKEN),不硬编码。 */
   token: string;
-  /** 发给远端 agent 的提示词(直接作为 message 的 text part)。 */
+  /** 发给远端 participant 的提示词(直接作为 message 的 text part)。 */
   prompt: string;
   /** 超时(毫秒);默认 30 分钟。 */
   timeoutMs?: number;
@@ -140,7 +140,7 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
   }
 }
 
-/** 取 agent 最终回复文本:兼容 result.message、result.status.message 与 result
+/** 取 participant 最终回复文本:兼容 result.message、result.status.message 与 result
  *  直接是 message 三种形状(A2A 规范 Task 的回复在 status.message)。 */
 function extractReplyText(result: unknown): string {
   if (!result || typeof result !== "object") return "";

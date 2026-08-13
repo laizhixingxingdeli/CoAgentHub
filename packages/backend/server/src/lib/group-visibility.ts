@@ -13,7 +13,7 @@
  *   - the member holds the `human` role (the user watches everything), or
  *   - audience = broadcast, or
  *   - audience = role and audienceRef ∈ member's roles in this group, or
- *   - audience = agent and audienceRef = member's id.
+ *   - audience = participant and audienceRef = member's id.
  *
  * `visibility-sql.test.ts` asserts both representations agree on the same data.
  */
@@ -23,12 +23,12 @@ import { and, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 
 export interface GroupMessageView {
   senderId: string;
-  audience: "broadcast" | "role" | "agent";
+  audience: "broadcast" | "role" | "participant";
   audienceRef: string | null;
 }
 
 export interface GroupMemberView {
-  agentId: string;
+  participantId: string;
   roles: string[];
 }
 
@@ -36,7 +36,7 @@ export function isMessageVisibleToMember(
   message: GroupMessageView,
   member: GroupMemberView,
 ): boolean {
-  if (member.agentId === message.senderId) return true;
+  if (member.participantId === message.senderId) return true;
   if (member.roles.includes("human")) return true;
   switch (message.audience) {
     case "broadcast":
@@ -46,8 +46,8 @@ export function isMessageVisibleToMember(
         message.audienceRef !== null &&
         member.roles.includes(message.audienceRef)
       );
-    case "agent":
-      return message.audienceRef === member.agentId;
+    case "participant":
+      return message.audienceRef === member.participantId;
     default:
       return false;
   }
@@ -59,22 +59,22 @@ export function isMessageVisibleToMember(
  * route); when the requester is `human` the predicate is simply true.
  */
 export function messageVisibleToMemberSql(
-  agentId: string,
+  participantId: string,
   roles: string[],
 ): SQL | undefined {
   if (roles.includes("human")) {
     return sql`true`;
   }
   return or(
-    eq(groupMessageTable.senderId, agentId),
+    eq(groupMessageTable.senderId, participantId),
     eq(groupMessageTable.audience, "broadcast"),
     and(
       eq(groupMessageTable.audience, "role"),
       inArray(groupMessageTable.audienceRef, roles),
     ),
     and(
-      eq(groupMessageTable.audience, "agent"),
-      eq(groupMessageTable.audienceRef, agentId),
+      eq(groupMessageTable.audience, "participant"),
+      eq(groupMessageTable.audienceRef, participantId),
     ),
   );
 }
@@ -87,7 +87,7 @@ export function visibleMemberIds(
   const ids = new Set<string>();
   for (const member of members) {
     if (isMessageVisibleToMember(message, member)) {
-      ids.add(member.agentId);
+      ids.add(member.participantId);
     }
   }
   return ids;

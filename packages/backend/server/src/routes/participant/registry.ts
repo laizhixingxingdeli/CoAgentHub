@@ -1,23 +1,26 @@
 import { zValidator } from "@hono/zod-validator";
 import {
-  agent as agentTable,
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
   groups as groupsTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
-import { generateAgentToken, hashAgentToken } from "@server/lib/agent-token";
 import db, { type DataBase } from "@server/lib/database";
-import { agentAuth } from "@server/middleware/agent-auth";
+import {
+  generateParticipantToken,
+  hashParticipantToken,
+} from "@server/lib/participant-token";
+import { participantAuth } from "@server/middleware/participant-auth";
 import { desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
-// 注册(公开)与自管理(agentAuth)并存:POST / 不挂鉴权 —— 首次注册必须先于
-// token 存在;PATCH / 与 PUT /heartbeat 单独挂 agentAuth,并校验持有者即 :id
+// 注册(公开)与自管理(participantAuth)并存:POST / 不挂鉴权 —— 首次注册必须先于
+// token 存在;PATCH / 与 PUT /heartbeat 单独挂 participantAuth,并校验持有者即 :id
 // 本人(token 只能管理自己的注册信息)。
-const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
+const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
 app.use(async (c, next) => {
   c.set("db", db);
@@ -28,10 +31,10 @@ app
   .post(
     "/",
     describeRoute({
-      description: "Register a new agent",
+      description: "Register a new participant",
       responses: {
         200: {
-          description: "Agent created; token shown exactly once",
+          description: "Participant created; token shown exactly once",
           content: {
             "application/json": {},
           },
@@ -55,25 +58,25 @@ app
       // The token is generated server-side and returned in plaintext exactly
       // once; only its SHA-256 hash is persisted. The response is built
       // field-by-field so tokenHash can never leak into it.
-      const token = generateAgentToken();
-      const [agent] = await db
-        .insert(agentTable)
+      const token = generateParticipantToken();
+      const [participant] = await db
+        .insert(participantTable)
         .values({
           name: input.name,
           type: input.type,
           device: input.device ?? null,
-          tokenHash: hashAgentToken(token),
+          tokenHash: hashParticipantToken(token),
           capabilities: input.capabilities ?? [],
         })
         .returning();
 
       return c.json({
-        id: agent.id,
-        name: agent.name,
-        type: agent.type,
-        device: agent.device,
-        capabilities: agent.capabilities,
-        createdAt: agent.createdAt,
+        id: participant.id,
+        name: participant.name,
+        type: participant.type,
+        device: participant.device,
+        capabilities: participant.capabilities,
+        createdAt: participant.createdAt,
         token,
       });
     },
@@ -81,7 +84,7 @@ app
   .get(
     "/",
     describeRoute({
-      description: "List all agents (tokenHash never exposed)",
+      description: "List all participants (tokenHash never exposed)",
       responses: {
         200: {
           description: "Successful response",
@@ -93,30 +96,30 @@ app
     }),
     async (c) => {
       const db = c.get("db");
-      const agents = await db
+      const participants = await db
         .select({
-          id: agentTable.id,
-          name: agentTable.name,
-          type: agentTable.type,
-          device: agentTable.device,
-          capabilities: agentTable.capabilities,
-          lastSeen: agentTable.lastSeen,
-          createdAt: agentTable.createdAt,
+          id: participantTable.id,
+          name: participantTable.name,
+          type: participantTable.type,
+          device: participantTable.device,
+          capabilities: participantTable.capabilities,
+          lastSeen: participantTable.lastSeen,
+          createdAt: participantTable.createdAt,
         })
-        .from(agentTable)
-        .orderBy(desc(agentTable.createdAt));
-      return c.json(agents);
+        .from(participantTable)
+        .orderBy(desc(participantTable.createdAt));
+      return c.json(participants);
     },
   )
   .patch(
     "/:id",
-    agentAuth,
+    participantAuth,
     describeRoute({
       description:
-        "Update the caller's own registration (name/device); the token holder may only patch their own agent",
+        "Update the caller's own registration (name/device); the token holder may only patch their own participant",
       responses: {
         200: {
-          description: "Updated agent (tokenHash never exposed)",
+          description: "Updated participant (tokenHash never exposed)",
           content: {
             "application/json": {},
           },
@@ -144,12 +147,12 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { id } = c.req.valid("param");
       const input = c.req.valid("json");
 
       // The token holder may only manage their own registration.
-      if (agentId !== id) {
+      if (participantId !== id) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
 
@@ -165,20 +168,20 @@ app
       }
 
       const [updated] = await db
-        .update(agentTable)
+        .update(participantTable)
         .set(patch)
-        .where(eq(agentTable.id, id))
+        .where(eq(participantTable.id, id))
         .returning({
-          id: agentTable.id,
-          name: agentTable.name,
-          type: agentTable.type,
-          device: agentTable.device,
-          capabilities: agentTable.capabilities,
-          lastSeen: agentTable.lastSeen,
-          createdAt: agentTable.createdAt,
+          id: participantTable.id,
+          name: participantTable.name,
+          type: participantTable.type,
+          device: participantTable.device,
+          capabilities: participantTable.capabilities,
+          lastSeen: participantTable.lastSeen,
+          createdAt: participantTable.createdAt,
         });
       if (!updated) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       return c.json(updated);
@@ -186,7 +189,7 @@ app
   )
   .put(
     "/:id/heartbeat",
-    agentAuth,
+    participantAuth,
     describeRoute({
       description:
         "Report presence: the token holder marks itself online (writes last_seen)",
@@ -202,27 +205,27 @@ app
     zValidator("param", z.object({ id: z.string().uuid() })),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { id } = c.req.valid("param");
 
       // Only the token holder may report its own presence.
-      if (agentId !== id) {
+      if (participantId !== id) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
 
       const [updated] = await db
-        .update(agentTable)
+        .update(participantTable)
         .set({ lastSeen: new Date() })
-        .where(eq(agentTable.id, id))
-        .returning({ lastSeen: agentTable.lastSeen });
+        .where(eq(participantTable.id, id))
+        .returning({ lastSeen: participantTable.lastSeen });
       if (!updated) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       return c.json({ lastSeen: updated.lastSeen });
     },
   )
-  // 重置 token(公开,无 agentAuth):与 POST / 注册一致 —— 首次绑定前用户
+  // 重置 token(公开,无 participantAuth):与 POST / 注册一致 —— 首次绑定前用户
   // 尚无任何 token,必须能无鉴权取回(ticket 29 局域网信任模型)。库中只存
   // SHA-256 哈希,无法还原明文,故采用「重置」而非「查」:生成新 token →
   // 覆盖存储哈希,明文仅此一次返回;旧 token 立即失效。
@@ -230,7 +233,7 @@ app
     "/:id/reset-token",
     describeRoute({
       description:
-        "Reset an agent's token: generate a new token, store its hash, and return the plaintext exactly once (old token invalidated)",
+        "Reset an participant's token: generate a new token, store its hash, and return the plaintext exactly once (old token invalidated)",
       responses: {
         200: {
           description: "New token shown exactly once",
@@ -245,34 +248,34 @@ app
       const db = c.get("db");
       const { id } = c.req.valid("param");
 
-      const token = generateAgentToken();
+      const token = generateParticipantToken();
       const [updated] = await db
-        .update(agentTable)
-        .set({ tokenHash: hashAgentToken(token) })
-        .where(eq(agentTable.id, id))
-        .returning({ id: agentTable.id, name: agentTable.name });
+        .update(participantTable)
+        .set({ tokenHash: hashParticipantToken(token) })
+        .where(eq(participantTable.id, id))
+        .returning({ id: participantTable.id, name: participantTable.name });
       if (!updated) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       return c.json({ id: updated.id, name: updated.name, token });
     },
   )
-  // 删除 agent(公开,局域网信任模型,与 POST / 注册一致):用于清掉旧身份 —
-  // 重启桥后旧 agent 名(executor-bridge 等)仍在库里,需用此接口删除。agent
+  // 删除 participant(公开,局域网信任模型,与 POST / 注册一致):用于清掉旧身份 —
+  // 重启桥后旧 participant 名(executor-bridge 等)仍在库里,需用此接口删除。participant
   // 是群成员关系(group_members)与消息(group_message)的外键父表,故在同一
-  // 事务里先清其成员关系与消息(closure 行随消息级联删除),再删 agent 行。
+  // 事务里先清其成员关系与消息(closure 行随消息级联删除),再删 participant 行。
   // 两类引用无法清理、会在删除时触发外键约束报错,先预检并返回明确的 409:
-  //   - 该 agent 建过群(groups.created_by → agent.id);
-  //   - 其他 agent 的消息以该 agent 的消息为父(parent_id 引用其消息)。
+  //   - 该 participant 建过群(groups.created_by → participant.id);
+  //   - 其他 participant 的消息以该 participant 的消息为父(parent_id 引用其消息)。
   .delete(
     "/:id",
     describeRoute({
       description:
-        "Delete an agent by id (public, LAN trust model). Memberships and messages sent by the agent are removed in the same transaction so the foreign-key references do not block the deletion. Returns 409 if the agent created a group or its messages are referenced as parents by other messages",
+        "Delete an participant by id (public, LAN trust model). Memberships and messages sent by the participant are removed in the same transaction so the foreign-key references do not block the deletion. Returns 409 if the participant created a group or its messages are referenced as parents by other messages",
       responses: {
         200: {
-          description: "Agent deleted",
+          description: "Participant deleted",
           content: {
             "application/json": {},
           },
@@ -285,7 +288,7 @@ app
       const { id } = c.req.valid("param");
 
       const deleted = await db.transaction(async (tx) => {
-        // 建过群的 agent 不能删:groups.created_by 无 onDelete 动作,且群是
+        // 建过群的 participant 不能删:groups.created_by 无 onDelete 动作,且群是
         // 被保留的数据,不会随身份删除。给出明确错误而不是裸 500。
         const [createdGroup] = await tx
           .select({ id: groupsTable.id })
@@ -295,10 +298,10 @@ app
         if (createdGroup) {
           throw new BizError(
             BizCodeEnum.Conflict,
-            `agent 建过群(${createdGroup.id}),无法删除;请先移除/移交该群`,
+            `participant 建过群(${createdGroup.id}),无法删除;请先移除/移交该群`,
           );
         }
-        // 其他 agent 的消息以该 agent 的消息为父:删消息会违反 parent_id
+        // 其他 participant 的消息以该 participant 的消息为父:删消息会违反 parent_id
         // 外键(无 onDelete 动作),预检并报 409。
         const [parentedChild] = await tx
           .select({ id: groupMessageTable.id })
@@ -313,7 +316,7 @@ app
         if (parentedChild) {
           throw new BizError(
             BizCodeEnum.Conflict,
-            "该 agent 的消息被其他消息引用为父消息,无法删除",
+            "该 participant 的消息被其他消息引用为父消息,无法删除",
           );
         }
         await tx
@@ -321,15 +324,15 @@ app
           .where(eq(groupMessageTable.senderId, id));
         await tx
           .delete(groupMemberTable)
-          .where(eq(groupMemberTable.agentId, id));
+          .where(eq(groupMemberTable.participantId, id));
         const [removed] = await tx
-          .delete(agentTable)
-          .where(eq(agentTable.id, id))
-          .returning({ id: agentTable.id, name: agentTable.name });
+          .delete(participantTable)
+          .where(eq(participantTable.id, id))
+          .returning({ id: participantTable.id, name: participantTable.name });
         return removed;
       });
       if (!deleted) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       return c.json({ success: true, id: deleted.id, name: deleted.name });

@@ -12,8 +12,8 @@ import { createTestApp } from "./app";
 describe("群组文件信令 (P2P)", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -39,7 +39,7 @@ describe("群组文件信令 (P2P)", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -48,7 +48,7 @@ describe("群组文件信令 (P2P)", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -87,12 +87,12 @@ describe("群组文件信令 (P2P)", () => {
   }
 
   async function setupGroup() {
-    const sender = await registerAgent({
+    const sender = await registerParticipant({
       name: "hermes-mac",
       type: "hermes",
       device: "mac-mini",
     });
-    const receiver = await registerAgent({
+    const receiver = await registerParticipant({
       name: "win-hermes",
       type: "hermes",
       device: "win-pc",

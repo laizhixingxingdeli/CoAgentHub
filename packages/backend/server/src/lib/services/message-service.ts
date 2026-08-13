@@ -76,7 +76,7 @@ export interface InsertGroupMessageInput {
   senderId: string;
   parentId?: string | null;
   audience: GroupMessageAudience;
-  /** role 值时=角色名;agent 值时=agentId;broadcast 时传 null。 */
+  /** role 值时=角色名;participant 值时=participantId;broadcast 时传 null。 */
   audienceRef: string | null;
   body: string;
   contentType: string;
@@ -133,7 +133,9 @@ export async function insertGroupMessage(
         parentId: parentId ?? null,
         audience,
         audienceRef:
-          audience === "role" || audience === "agent" ? audienceRef : null,
+          audience === "role" || audience === "participant"
+            ? audienceRef
+            : null,
         body,
         contentType,
         fileRef,

@@ -1,7 +1,7 @@
 import {
-  agent as agentTable,
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import BizError from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
@@ -9,32 +9,32 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { describe, expect, it } from "vitest";
-import { hashAgentToken } from "../src/lib/agent-token";
-import { agentAuth } from "../src/middleware/agent-auth";
+import { hashParticipantToken } from "../src/lib/participant-token";
+import { participantAuth } from "../src/middleware/participant-auth";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
 /**
- * Agent registry (ticket 01): registration returns a one-time plaintext
+ * Participant registry (ticket 01): registration returns a one-time plaintext
  * token (only the SHA-256 hash is stored), the list never exposes token
  * hashes, human type is supported, and the bearer-token middleware resolves
- * agent identity for valid tokens and rejects invalid ones.
+ * participant identity for valid tokens and rejects invalid ones.
  */
-describe("agent 注册与身份 API", () => {
+describe("participant 注册与身份 API", () => {
   const app = createTestApp();
 
   async function register(body: Record<string, unknown>) {
-    return app.request("/api/agents", {
+    return app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
   }
 
-  /** Minimal app exercising agentAuth: db injected, one protected route. */
+  /** Minimal app exercising participantAuth: db injected, one protected route. */
   function createProtectedApp() {
     const protectedApp = new Hono<{
-      Variables: { db: DataBase; agentId: string };
+      Variables: { db: DataBase; participantId: string };
     }>();
     protectedApp.use(async (c, next) => {
       // PGlite and node-postgres drizzle instances have incompatible driver
@@ -42,8 +42,8 @@ describe("agent 注册与身份 API", () => {
       c.set("db", testDb as unknown as DataBase);
       await next();
     });
-    protectedApp.use(agentAuth);
-    // Mirror the real app's error handling so BizError (401 from agentAuth)
+    protectedApp.use(participantAuth);
+    // Mirror the real app's error handling so BizError (401 from participantAuth)
     // maps to its status code instead of Hono's default 500.
     protectedApp.onError((err, c) => {
       if (err instanceof BizError) {
@@ -54,11 +54,13 @@ describe("agent 注册与身份 API", () => {
       }
       return c.json({ message: "Internal Server Error" }, 500);
     });
-    protectedApp.get("/me", (c) => c.json({ agentId: c.get("agentId") }));
+    protectedApp.get("/me", (c) =>
+      c.json({ participantId: c.get("participantId") }),
+    );
     return protectedApp;
   }
 
-  it("POST /api/agents 注册成功,返回 token(仅此一次)且库中只存哈希", async () => {
+  it("POST /api/participants 注册成功,返回 token(仅此一次)且库中只存哈希", async () => {
     const res = await register({
       name: "hermes-mac",
       type: "hermes",
@@ -75,21 +77,21 @@ describe("agent 注册与身份 API", () => {
     // The plaintext hash must never be echoed back.
     expect(body.tokenHash).toBeUndefined();
 
-    const [row] = await testDb.select().from(agentTable);
+    const [row] = await testDb.select().from(participantTable);
     expect(row.id).toBe(body.id);
-    expect(row.tokenHash).toBe(hashAgentToken(body.token));
+    expect(row.tokenHash).toBe(hashParticipantToken(body.token));
     expect(row.tokenHash).not.toBe(body.token);
     expect(row.device).toBe("mac-mini");
   });
 
-  it("GET /api/agents 列表返回全部 agent 且不泄露 tokenHash/token", async () => {
+  it("GET /api/participants 列表返回全部 participant 且不泄露 tokenHash/token", async () => {
     const created = await register({ name: "atomcode-cli", type: "atomcode" });
     const { id, token } = (await created.json()) as {
       id: string;
       token: string;
     };
 
-    const res = await app.request("/api/agents");
+    const res = await app.request("/api/participants");
     expect(res.status).toBe(200);
     const list = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(list)).toBe(true);
@@ -100,18 +102,35 @@ describe("agent 注册与身份 API", () => {
     expect(JSON.stringify(list)).not.toContain(token);
   });
 
+  it("GET /api/agents 历史别名与 /api/participants 同 handler,同样可用", async () => {
+    const created = await register({ name: "alias-check", type: "atomcode" });
+    const { id } = (await created.json()) as { id: string };
+
+    // 术语改名前的旧路径(agent 为 participant 的旧名):挂同一 handler,
+    // 过渡期兼容旧客户端/旧执行器,不 404。
+    const legacy = await app.request("/api/agents");
+    expect(legacy.status).toBe(200);
+    const legacyText = await legacy.text();
+    const legacyList = JSON.parse(legacyText) as Array<{ id: string }>;
+    expect(legacyList.some((a) => a.id === id)).toBe(true);
+
+    const current = await app.request("/api/participants");
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(legacyText);
+  });
+
   it("支持注册 human 类型", async () => {
     const res = await register({ name: "Alice", type: "human" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { type: string };
     expect(body.type).toBe("human");
 
-    const listRes = await app.request("/api/agents");
+    const listRes = await app.request("/api/participants");
     const list = (await listRes.json()) as Array<{ type: string }>;
     expect(list.some((a) => a.type === "human")).toBe(true);
   });
 
-  it("中间件:合法 Bearer token 识别出 agent 身份", async () => {
+  it("中间件:合法 Bearer token 识别出 participant 身份", async () => {
     const res = await register({ name: "openclaw", type: "openclaw" });
     const { id, token } = (await res.json()) as { id: string; token: string };
 
@@ -119,7 +138,7 @@ describe("agent 注册与身份 API", () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(meRes.status).toBe(200);
-    expect(await meRes.json()).toEqual({ agentId: id });
+    expect(await meRes.json()).toEqual({ participantId: id });
   });
 
   it("中间件:非法 token 拒绝(401);缺失 token 回落本地用户", async () => {
@@ -133,8 +152,8 @@ describe("agent 注册与身份 API", () => {
     // LAN trust model: no token → the default Local User (human).
     const missingRes = await protectedApp.request("/me");
     expect(missingRes.status).toBe(200);
-    const body = (await missingRes.json()) as { agentId: string };
-    expect(body.agentId).toMatch(/^[0-9a-f-]{36}$/);
+    const body = (await missingRes.json()) as { participantId: string };
+    expect(body.participantId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("校验:缺 name/type 返回 400", async () => {
@@ -152,7 +171,7 @@ describe("agent 注册与身份 API", () => {
       token: string;
     };
 
-    const res = await app.request(`/api/agents/${id}/reset-token`, {
+    const res = await app.request(`/api/participants/${id}/reset-token`, {
       method: "POST",
     });
     expect(res.status).toBe(200);
@@ -169,10 +188,10 @@ describe("agent 注册与身份 API", () => {
     expect(body.tokenHash).toBeUndefined();
     const [row] = await testDb
       .select()
-      .from(agentTable)
-      .where(eq(agentTable.id, id));
-    expect(row.tokenHash).toBe(hashAgentToken(body.token));
-    expect(row.tokenHash).not.toBe(hashAgentToken(oldToken));
+      .from(participantTable)
+      .where(eq(participantTable.id, id));
+    expect(row.tokenHash).toBe(hashParticipantToken(body.token));
+    expect(row.tokenHash).not.toBe(hashParticipantToken(oldToken));
 
     // 旧 token 立即失效(401),新 token 可识别身份。
     const protectedApp = createProtectedApp();
@@ -184,17 +203,17 @@ describe("agent 注册与身份 API", () => {
       headers: { Authorization: `Bearer ${body.token}` },
     });
     expect(newRes.status).toBe(200);
-    expect(await newRes.json()).toEqual({ agentId: id });
+    expect(await newRes.json()).toEqual({ participantId: id });
   });
 
-  it("POST /:id/reset-token 不存在的 agent 返回 404", async () => {
+  it("POST /:id/reset-token 不存在的 participant 返回 404", async () => {
     const res = await app.request(
-      "/api/agents/00000000-0000-0000-0000-000000000000/reset-token",
+      "/api/participants/00000000-0000-0000-0000-000000000000/reset-token",
       { method: "POST" },
     );
     expect(res.status).toBe(404);
     const body = (await res.json()) as { code: string };
-    expect(body.code).toBe("AGENT_NOT_FOUND");
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
   });
 
   it("POST /:id/reset-token 无鉴权可访问(与注册一致,局域网信任模型)", async () => {
@@ -202,7 +221,7 @@ describe("agent 注册与身份 API", () => {
     const { id } = (await created.json()) as { id: string };
 
     // 不携带任何 Authorization header,应能直接取回 token。
-    const res = await app.request(`/api/agents/${id}/reset-token`, {
+    const res = await app.request(`/api/participants/${id}/reset-token`, {
       method: "POST",
     });
     expect(res.status).toBe(200);
@@ -210,7 +229,7 @@ describe("agent 注册与身份 API", () => {
     expect(body.token).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("DELETE /:id 删除 agent,并清理其群成员关系与消息(ticket 清理旧身份)", async () => {
+  it("DELETE /:id 删除 participant,并清理其群成员关系与消息(ticket 清理旧身份)", async () => {
     // 建群者与被删者分离:旧 bridge 身份不建群,只作为成员/发言者存在。
     const owner = await register({ name: "owner", type: "hermes" });
     const { token } = (await owner.json()) as { token: string };
@@ -218,7 +237,7 @@ describe("agent 注册与身份 API", () => {
       name: "executor-bridge",
       type: "atomcode",
     });
-    const { id, token: agentToken } = (await created.json()) as {
+    const { id, token: participantToken } = (await created.json()) as {
       id: string;
       token: string;
     };
@@ -240,22 +259,22 @@ describe("agent 注册与身份 API", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId: id, roles: ["executor"] }),
+      body: JSON.stringify({ participantId: id, roles: ["executor"] }),
     });
-    // 用被删者自己的 token 发言:senderId 必须是该 agent,才能覆盖
+    // 用被删者自己的 token 发言:senderId 必须是该 participant,才能覆盖
     // DELETE 中「清理其消息」的分支。
     const msgRes = await app.request(`/api/groups/${groupId}/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${agentToken}`,
+        Authorization: `Bearer ${participantToken}`,
       },
       body: JSON.stringify({ body: "旧身份的一条消息" }),
     });
     expect(msgRes.status).toBe(200);
     const { id: messageId } = (await msgRes.json()) as { id: string };
 
-    const delRes = await app.request(`/api/agents/${id}`, {
+    const delRes = await app.request(`/api/participants/${id}`, {
       method: "DELETE",
     });
     expect(delRes.status).toBe(200);
@@ -265,8 +284,8 @@ describe("agent 注册与身份 API", () => {
       name: "executor-bridge",
     });
 
-    // agent 行已不存在;列表也不再包含它。
-    const listRes = await app.request("/api/agents");
+    // participant 行已不存在;列表也不再包含它。
+    const listRes = await app.request("/api/participants");
     const list = (await listRes.json()) as Array<{ id: string }>;
     expect(list.some((a) => a.id === id)).toBe(false);
 
@@ -274,7 +293,7 @@ describe("agent 注册与身份 API", () => {
     const [memberRow] = await testDb
       .select()
       .from(groupMemberTable)
-      .where(eq(groupMemberTable.agentId, id));
+      .where(eq(groupMemberTable.participantId, id));
     expect(memberRow).toBeUndefined();
     const [msgRow] = await testDb
       .select()
@@ -283,9 +302,9 @@ describe("agent 注册与身份 API", () => {
     expect(msgRow).toBeUndefined();
   });
 
-  it("DELETE /:id 建过群的 agent 返回 409 且不删除(ticket 清理旧身份)", async () => {
+  it("DELETE /:id 建过群的 participant 返回 409 且不删除(ticket 清理旧身份)", async () => {
     const owner = await register({ name: "owner2", type: "hermes" });
-    const { token, id: agentId } = (await owner.json()) as {
+    const { token, id: participantId } = (await owner.json()) as {
       token: string;
       id: string;
     };
@@ -299,27 +318,27 @@ describe("agent 注册与身份 API", () => {
     });
     expect(groupRes.status).toBe(200);
 
-    const res = await app.request(`/api/agents/${agentId}`, {
+    const res = await app.request(`/api/participants/${participantId}`, {
       method: "DELETE",
     });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("CONFLICT");
 
-    // 该 agent 与群都仍然存在。
-    const listRes = await app.request("/api/agents");
+    // 该 participant 与群都仍然存在。
+    const listRes = await app.request("/api/participants");
     const list = (await listRes.json()) as Array<{ id: string }>;
-    expect(list.some((a) => a.id === agentId)).toBe(true);
+    expect(list.some((a) => a.id === participantId)).toBe(true);
   });
 
-  it("DELETE /:id 不存在的 agent 返回 404", async () => {
+  it("DELETE /:id 不存在的 participant 返回 404", async () => {
     const res = await app.request(
-      "/api/agents/00000000-0000-0000-0000-000000000000",
+      "/api/participants/00000000-0000-0000-0000-000000000000",
       { method: "DELETE" },
     );
     expect(res.status).toBe(404);
     const body = (await res.json()) as { code: string };
-    expect(body.code).toBe("AGENT_NOT_FOUND");
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
   });
 
   it("DELETE /:id 无鉴权可访问(与注册一致,局域网信任模型)", async () => {
@@ -327,7 +346,9 @@ describe("agent 注册与身份 API", () => {
     const { id } = (await created.json()) as { id: string };
 
     // 不携带任何 Authorization header,应能直接删除。
-    const res = await app.request(`/api/agents/${id}`, { method: "DELETE" });
+    const res = await app.request(`/api/participants/${id}`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
   });
 });

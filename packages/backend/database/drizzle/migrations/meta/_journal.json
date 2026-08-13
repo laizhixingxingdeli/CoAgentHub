@@ -36,6 +36,13 @@
       "when": 1786618020704,
       "tag": "0004_reflective_spectrum",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786640400000,
+      "tag": "0005_rename_agent_to_participant",
+      "breakpoints": true
     }
   ]
 }

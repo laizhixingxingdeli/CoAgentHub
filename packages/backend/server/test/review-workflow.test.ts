@@ -19,8 +19,8 @@ import { createTestApp } from "./app";
 describe("检视流程协议(ticket 04)", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -46,7 +46,7 @@ describe("检视流程协议(ticket 04)", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -55,7 +55,7 @@ describe("检视流程协议(ticket 04)", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -82,7 +82,7 @@ describe("检视流程协议(ticket 04)", () => {
     groupId: string;
     senderId: string;
     parentId: string | null;
-    audience: "broadcast" | "role" | "agent";
+    audience: "broadcast" | "role" | "participant";
     audienceRef: string | null;
     body: string;
     depth: number;
@@ -101,21 +101,21 @@ describe("检视流程协议(ticket 04)", () => {
 
   it("完整流程:草稿→检视意见→最终版→执行结果,executor 只见最终版,human 全可见", async () => {
     // 演员表:coordinator(hermes/mac)、reviewer(hermes/win)、executor(atomcode)、human 观察者
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "hermes",
       type: "hermes",
       device: "mac",
     });
-    const reviewer = await registerAgent({
+    const reviewer = await registerParticipant({
       name: "hermes",
       type: "hermes",
       device: "win",
     });
-    const executor = await registerAgent({
+    const executor = await registerParticipant({
       name: "atomcode",
       type: "atomcode",
     });
-    const human = await registerAgent({ name: "alice", type: "human" });
+    const human = await registerParticipant({ name: "alice", type: "human" });
 
     // 建群:coordinator 自动成为 coordinator 成员;再添加 reviewer/executor/human
     const group = await createGroup(coordinator.token, "模型训练任务");

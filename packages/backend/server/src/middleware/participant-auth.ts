@@ -1,22 +1,25 @@
-import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
-import { hashAgentToken } from "@server/lib/agent-token";
 import type { DataBase } from "@server/lib/database";
-import { resolveLocalUser } from "@server/lib/local-agent";
+import { resolveLocalUser } from "@server/lib/local-participant";
+import { hashParticipantToken } from "@server/lib/participant-token";
 import { eq } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 
 /**
- * Agent identity resolution (LAN trust model):
- * - `Authorization: Bearer <token>` with a valid token → that agent;
+ * Participant identity resolution (LAN trust model):
+ * - `Authorization: Bearer <token>` with a valid token → that participant;
  * - no token → the default Local User (human role, sees everything), so the
  *   web UI works without binding a token;
  * - a present-but-invalid token → 401 (a supplied identity must be real).
+ *
+ * 中间件原名为 agent-auth(agent 为 participant 的旧名);Authorization header
+ * 格式与 token 语义不变,旧 token 直接兼容。
  */
-export const agentAuth: MiddlewareHandler<{
+export const participantAuth: MiddlewareHandler<{
   Variables: {
     db: DataBase;
-    agentId: string;
+    participantId: string;
   };
 }> = async (c, next) => {
   const db = c.get("db");
@@ -24,20 +27,20 @@ export const agentAuth: MiddlewareHandler<{
   const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
 
   if (!token) {
-    c.set("agentId", await resolveLocalUser(db));
+    c.set("participantId", await resolveLocalUser(db));
     await next();
     return;
   }
 
   const matches = await db
-    .select({ id: agentTable.id })
-    .from(agentTable)
-    .where(eq(agentTable.tokenHash, hashAgentToken(token)))
+    .select({ id: participantTable.id })
+    .from(participantTable)
+    .where(eq(participantTable.tokenHash, hashParticipantToken(token)))
     .limit(1);
   if (!matches[0]) {
     throw new BizError(BizCodeEnum.Unauthorized);
   }
 
-  c.set("agentId", matches[0].id);
+  c.set("participantId", matches[0].id);
   await next();
 };

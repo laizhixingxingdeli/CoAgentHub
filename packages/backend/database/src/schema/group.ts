@@ -8,12 +8,12 @@ import {
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
-import { agent } from "./agent.js";
+import { participant } from "./participant.js";
 
 /**
  * Preset role catalog assigned per group membership (agent-groups spec:
- * "Identity & roles"). One agent may hold multiple roles, and the same agent
- * can hold different roles in different groups.
+ * "Identity & roles"). One participant may hold multiple roles, and the same
+ * participant can hold different roles in different groups.
  */
 export const GROUP_ROLES = [
   "human", // the user; sees everything, can publish commands
@@ -39,31 +39,32 @@ export const groups = pgTable("groups", {
   status: text("status").notNull().default("active"),
   createdBy: uuid("created_by")
     .notNull()
-    .references(() => agent.id),
+    .references(() => participant.id),
   // 群绑定项目路径(可空):由「绑定项目」指令/PATCH /groups/:id 写入服务器,
   // 助手以它为项目记忆来源(优先于本地 session.projectPath)。
   projectPath: text("project_path"),
   ...timeColumns("both"),
 });
 
-/** Group membership: per-group role assignment, one row per (group, agent). */
+/** Group membership: per-group role assignment, one row per (group, participant). */
 export const groupMember = pgTable(
   "group_members",
   {
     groupId: uuid("group_id")
       .notNull()
       .references(() => groups.id),
-    agentId: uuid("agent_id")
+    participantId: uuid("participant_id")
       .notNull()
-      .references(() => agent.id),
+      .references(() => participant.id),
     roles: text("roles").array().notNull(),
-    // 群内分工说明(角色解绑):描述该 agent 在本群的分工,定向调度时拼进任务书。
+    // 群内分工说明(角色解绑):描述该 participant 在本群的分工,定向调度时
+    // 拼进任务书。
     prompt: text("prompt"),
     joinedAt: timestamp("joined_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.groupId, t.agentId] })],
+  (t) => [primaryKey({ columns: [t.groupId, t.participantId] })],
 );
 
 export const Group = createSelectSchema(groups);

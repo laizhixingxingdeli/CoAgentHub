@@ -10,15 +10,15 @@ import { testDb } from "./db";
 
 /**
  * Group message tree & audience routing (ticket 03): POST/GET messages with
- * sender + parentId + audience (broadcast|role|agent), visibility filtering
+ * sender + parentId + audience (broadcast|role|participant), visibility filtering
  * (human sees everything), incremental pull via ?after=, and closure-table
  * tree materialization.
  */
 describe("群组消息树与受众路由", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -44,7 +44,7 @@ describe("群组消息树与受众路由", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -53,7 +53,7 @@ describe("群组消息树与受众路由", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -78,7 +78,7 @@ describe("群组消息树与受众路由", () => {
     groupId: string;
     senderId: string;
     parentId: string | null;
-    audience: "broadcast" | "role" | "agent";
+    audience: "broadcast" | "role" | "participant";
     audienceRef: string | null;
     body: string;
     depth: number;
@@ -109,21 +109,21 @@ describe("群组消息树与受众路由", () => {
 
   /** A ready-made cast: coordinator + reviewer + executor + human members. */
   async function setupGroup() {
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "hermes-mac",
       type: "hermes",
       device: "mac-mini",
     });
-    const reviewer = await registerAgent({
+    const reviewer = await registerParticipant({
       name: "win-hermes",
       type: "hermes",
       device: "win-pc",
     });
-    const executor = await registerAgent({
+    const executor = await registerParticipant({
       name: "atomcode-cli",
       type: "atomcode",
     });
-    const human = await registerAgent({
+    const human = await registerParticipant({
       name: "alice",
       type: "human",
       device: "macbook",
@@ -156,7 +156,7 @@ describe("群组消息树与受众路由", () => {
 
     it("无 token 回落本地用户,非成员发送返回 403", async () => {
       const { group } = await setupGroup();
-      const outsider = await registerAgent({
+      const outsider = await registerParticipant({
         name: "stranger",
         type: "openclaw",
       });
@@ -265,29 +265,29 @@ describe("群组消息树与受众路由", () => {
       expect(badRole.status).toBe(400);
     });
 
-    it("audience=agent 校验:目标必须是本群成员,否则 400", async () => {
+    it("audience=participant 校验:目标必须是本群成员,否则 400", async () => {
       const { group, reviewer, executor } = await setupGroup();
-      const outsider = await registerAgent({
+      const outsider = await registerParticipant({
         name: "stranger",
         type: "atomcode",
       });
       const notMember = await sendMessage(reviewer.token, group.id, {
         body: "给你",
-        audience: "agent",
+        audience: "participant",
         audienceRef: outsider.id,
       });
       expect(notMember.status).toBe(400);
       expect((await notMember.json()).code).toBe("INVALID_REQUEST");
 
       // 其他群组里的成员也不算本群成员
-      const otherGroup = await registerAgent({
+      const otherGroup = await registerParticipant({
         name: "other-exec",
         type: "atomcode",
         device: "vm",
       });
       const crossGroup = await sendMessage(reviewer.token, group.id, {
         body: "给别的组的执行者",
-        audience: "agent",
+        audience: "participant",
         audienceRef: otherGroup.id,
       });
       expect(crossGroup.status).toBe(400);
@@ -295,10 +295,37 @@ describe("群组消息树与受众路由", () => {
       // 本群成员则成功
       const ok = await sendMessage(reviewer.token, group.id, {
         body: "给本组执行者",
-        audience: "agent",
+        audience: "participant",
         audienceRef: executor.id,
       });
       expect(ok.status).toBe(200);
+    });
+
+    it('兼容旧值:audience="agent" 定向消息 200,落库归一为 participant', async () => {
+      const { group, coordinator, executor } = await setupGroup();
+
+      // 术语改名前的外部执行器 CLI 可能仍发 audience:"agent"(agent 为
+      // participant 的旧名):服务端接受并归一为 participant 存储,接收方可见。
+      const res = await sendMessage(coordinator.token, group.id, {
+        body: "给执行者的旧格式定向消息",
+        audience: "agent",
+        audienceRef: executor.id,
+      });
+      expect(res.status).toBe(200);
+      const msg = (await res.json()) as MessageItem;
+      expect(msg.audience).toBe("participant");
+      expect(msg.audienceRef).toBe(executor.id);
+
+      // 落库值也是 participant(库中永远只存新值)。
+      const [row] = await testDb
+        .select({ audience: groupMessageTable.audience })
+        .from(groupMessageTable)
+        .where(eq(groupMessageTable.id, msg.id));
+      expect(row.audience).toBe("participant");
+
+      // 接收方(executor 视角)可见这条消息。
+      const visible = await fetchMessages(executor.token, group.id);
+      expect(visible.some((m) => m.id === msg.id)).toBe(true);
     });
 
     it("audience=broadcast 携带 audienceRef 返回 400", async () => {
@@ -430,7 +457,7 @@ describe("群组消息树与受众路由", () => {
       }
 
       // LAN trust model:GET 不要求成员资格,非成员可见自己的消息+广播。
-      const outsider = await registerAgent({
+      const outsider = await registerParticipant({
         name: "stranger",
         type: "openclaw",
       });
@@ -447,7 +474,7 @@ describe("群组消息树与受众路由", () => {
       await sendMessage(coordinator.token, group.id, { body: "广播消息" });
       await sendMessage(coordinator.token, group.id, {
         body: "仅给协调员",
-        audience: "agent",
+        audience: "participant",
         audienceRef: coordinator.id,
       });
 
@@ -473,23 +500,29 @@ describe("群组消息树与受众路由", () => {
         createdBy: string;
       };
 
-      // 另两个 agent 入群(成员表直插,避免依赖加成员接口的调用方守卫)。
-      const member = await registerAgent({ name: "member-a", type: "hermes" });
-      const target = await registerAgent({ name: "target-b", type: "hermes" });
+      // 另两个 participant 入群(成员表直插,避免依赖加成员接口的调用方守卫)。
+      const member = await registerParticipant({
+        name: "member-a",
+        type: "hermes",
+      });
+      const target = await registerParticipant({
+        name: "target-b",
+        type: "hermes",
+      });
       await testDb.insert(groupMemberTable).values({
         groupId: localGroup.id,
-        agentId: member.id,
+        participantId: member.id,
         roles: ["executor"],
       });
       await testDb.insert(groupMemberTable).values({
         groupId: localGroup.id,
-        agentId: target.id,
+        participantId: target.id,
         roles: ["reviewer"],
       });
       await sendMessage(member.token, localGroup.id, { body: "广播消息" });
       await sendMessage(member.token, localGroup.id, {
         body: "定向给 target",
-        audience: "agent",
+        audience: "participant",
         audienceRef: target.id,
       });
 
@@ -518,11 +551,11 @@ describe("群组消息树与受众路由", () => {
       expect(executorList.map((m) => m.body)).not.toContain("草稿,请评审");
     });
 
-    it("agent 受众仅目标成员可见", async () => {
+    it("participant 受众仅目标成员可见", async () => {
       const { group, coordinator, reviewer, executor } = await setupGroup();
       await sendMessage(coordinator.token, group.id, {
         body: "执行最终版",
-        audience: "agent",
+        audience: "participant",
         audienceRef: executor.id,
       });
 
@@ -533,7 +566,7 @@ describe("群组消息树与受众路由", () => {
       expect(reviewerList.map((m) => m.body)).not.toContain("执行最终版");
     });
 
-    it("human 成员全可见(能看到 role/agent 定向消息)", async () => {
+    it("human 成员全可见(能看到 role/participant 定向消息)", async () => {
       const { group, coordinator, reviewer, executor, human } =
         await setupGroup();
       await sendMessage(coordinator.token, group.id, {
@@ -543,7 +576,7 @@ describe("群组消息树与受众路由", () => {
       });
       await sendMessage(coordinator.token, group.id, {
         body: "请执行",
-        audience: "agent",
+        audience: "participant",
         audienceRef: executor.id,
       });
 
@@ -557,7 +590,7 @@ describe("群组消息树与受众路由", () => {
       const { group, coordinator, reviewer, executor } = await setupGroup();
       await sendMessage(coordinator.token, group.id, {
         body: "只给执行者",
-        audience: "agent",
+        audience: "participant",
         audienceRef: executor.id,
       });
       // 发送者(coordinator)可见自己的定向消息;非目标(reviewer)不可见
@@ -592,7 +625,7 @@ describe("群组消息树与受众路由", () => {
       // 定向给 executor 的消息也含关键词 —— 非目标(reviewer)不可见。
       await sendMessage(coordinator.token, group.id, {
         body: "只给执行者",
-        audience: "agent",
+        audience: "participant",
         audienceRef: executor.id,
       });
 

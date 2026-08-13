@@ -1,23 +1,23 @@
 import type { Server as HttpServer } from "node:http";
 import type { Duplex } from "node:stream";
 import {
-  agent as agentTable,
   groupMember as groupMemberTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
-import { hashAgentToken } from "@server/lib/agent-token";
 import db from "@server/lib/database";
 import type { GroupMessageFull } from "@server/lib/group-message";
 import { visibleMemberIds } from "@server/lib/group-visibility";
-import { resolveLocalUser } from "@server/lib/local-agent";
+import { resolveLocalUser } from "@server/lib/local-participant";
+import { hashParticipantToken } from "@server/lib/participant-token";
 import { eq } from "drizzle-orm";
 import { WebSocket, WebSocketServer } from "ws";
 
 /**
- * WebSocket realtime push hub (agent-groups-live T13). Exposes `/api/ws` on
+ * WebSocket realtime push hub (participant-groups-live T13). Exposes `/api/ws` on
  * the existing http.Server via the `upgrade` event; a connection authenticates
- * with `?token=<agentToken>` (the same SHA-256 agents-table lookup the
- * agentAuth middleware uses — a WS handshake cannot carry an Authorization
- * header). Connections are grouped by agentId (one agent may hold several),
+ * with `?token=<participantToken>` (the same SHA-256 participant-table lookup the
+ * participantAuth middleware uses — a WS handshake cannot carry an Authorization
+ * header). Connections are grouped by participantId (one participant may hold several),
  * and new group messages are fan-out to exactly the members the
  * group-visibility rule marks as seeing the message — including the sender,
  * so the web UI can echo without a pull.
@@ -34,8 +34,11 @@ export interface WsHubOptions {
   heartbeatIntervalMs?: number;
 }
 
-/** A socket bound to its authenticated agent after the upgrade handshake. */
-type AuthedWebSocket = WebSocket & { agentId?: string; isAlive?: boolean };
+/** A socket bound to its authenticated participant after the upgrade handshake. */
+type AuthedWebSocket = WebSocket & {
+  participantId?: string;
+  isAlive?: boolean;
+};
 
 const WS_PATH = "/api/ws";
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -75,18 +78,18 @@ export class WsHub {
       }
       const token = url.searchParams.get("token");
       // LAN trust model: no token → the default Local User (matches
-      // middleware/agent-auth.ts); a present-but-invalid token → 401.
+      // middleware/participant-auth.ts); a present-but-invalid token → 401.
       const identity = token
-        ? resolveAgentId(token)
+        ? resolveParticipantId(token)
         : resolveLocalUser(db).catch(() => null);
       identity
-        .then((agentId) => {
-          if (!agentId) {
+        .then((participantId) => {
+          if (!participantId) {
             rejectUpgrade(socket, 401);
             return;
           }
           wss.handleUpgrade(req, socket, head, (ws) =>
-            this.register(ws, agentId),
+            this.register(ws, participantId),
           );
         })
         .catch((err) => {
@@ -156,7 +159,7 @@ export class WsHub {
     try {
       const members = await db
         .select({
-          agentId: groupMemberTable.agentId,
+          participantId: groupMemberTable.participantId,
           roles: groupMemberTable.roles,
         })
         .from(groupMemberTable)
@@ -170,15 +173,15 @@ export class WsHub {
       if (visible.size === 0 && !this.conns.has(localUserId)) return;
 
       const event = buildEvent(message);
-      const deliver = (agentId: string) => {
-        const sockets = this.conns.get(agentId);
+      const deliver = (participantId: string) => {
+        const sockets = this.conns.get(participantId);
         if (!sockets) return;
         for (const ws of sockets) {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(event, (err) => {
               if (err) {
                 console.warn(
-                  `[ws] send to agent ${agentId} failed:`,
+                  `[ws] send to participant ${participantId} failed:`,
                   err.message,
                 );
               }
@@ -187,8 +190,8 @@ export class WsHub {
         }
       };
 
-      for (const agentId of visible) {
-        deliver(agentId);
+      for (const participantId of visible) {
+        deliver(participantId);
       }
       if (!visible.has(localUserId)) {
         deliver(localUserId);
@@ -198,9 +201,9 @@ export class WsHub {
     }
   }
 
-  /** Number of live connections, optionally scoped to one agent (tests/ops). */
-  connectionCount(agentId?: string): number {
-    if (agentId) return this.conns.get(agentId)?.size ?? 0;
+  /** Number of live connections, optionally scoped to one participant (tests/ops). */
+  connectionCount(participantId?: string): number {
+    if (participantId) return this.conns.get(participantId)?.size ?? 0;
     let total = 0;
     for (const sockets of this.conns.values()) total += sockets.size;
     return total;
@@ -233,13 +236,13 @@ export class WsHub {
     this.heartbeatTimer.unref?.();
   }
 
-  private register(ws: AuthedWebSocket, agentId: string): void {
-    ws.agentId = agentId;
+  private register(ws: AuthedWebSocket, participantId: string): void {
+    ws.participantId = participantId;
     ws.isAlive = true;
-    let sockets = this.conns.get(agentId);
+    let sockets = this.conns.get(participantId);
     if (!sockets) {
       sockets = new Set();
-      this.conns.set(agentId, sockets);
+      this.conns.set(participantId, sockets);
     }
     sockets.add(ws);
     ws.on("pong", () => {
@@ -247,17 +250,20 @@ export class WsHub {
     });
     ws.on("close", () => this.unregister(ws));
     ws.on("error", (err) => {
-      console.warn(`[ws] connection error for agent ${agentId}:`, err.message);
+      console.warn(
+        `[ws] connection error for participant ${participantId}:`,
+        err.message,
+      );
     });
   }
 
   private unregister(ws: AuthedWebSocket): void {
-    const agentId = ws.agentId;
-    if (!agentId) return;
-    const sockets = this.conns.get(agentId);
+    const participantId = ws.participantId;
+    if (!participantId) return;
+    const sockets = this.conns.get(participantId);
     if (!sockets) return;
     sockets.delete(ws);
-    if (sockets.size === 0) this.conns.delete(agentId);
+    if (sockets.size === 0) this.conns.delete(participantId);
   }
 
   private sweepDeadConnections(): void {
@@ -282,11 +288,11 @@ export class WsHub {
   }
 }
 
-async function resolveAgentId(token: string): Promise<string | null> {
+async function resolveParticipantId(token: string): Promise<string | null> {
   const matches = await db
-    .select({ id: agentTable.id })
-    .from(agentTable)
-    .where(eq(agentTable.tokenHash, hashAgentToken(token)))
+    .select({ id: participantTable.id })
+    .from(participantTable)
+    .where(eq(participantTable.tokenHash, hashParticipantToken(token)))
     .limit(1);
   return matches[0]?.id ?? null;
 }

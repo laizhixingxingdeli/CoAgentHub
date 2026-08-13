@@ -2,8 +2,8 @@ import { jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
-import { agent } from "./agent.js";
 import { groups } from "./group.js";
+import { participant } from "./participant.js";
 
 /**
  * Task — first-class execution entity (bridge demoted to a pure executor
@@ -30,9 +30,9 @@ export const task = pgTable("task", {
     .references(() => groups.id),
   // 唯一约束 → 幂等:同一消息只建一次任务(重复 POST 返回既有行)。
   messageId: uuid("message_id").notNull().unique(),
-  executorAgentId: uuid("executor_agent_id")
+  executorParticipantId: uuid("executor_participant_id")
     .notNull()
-    .references(() => agent.id),
+    .references(() => participant.id),
   // 哪个执行器(key)在跑这个任务;桥退役后一律由 server 写入,用于审计与重放。
   executorKey: text("executor_key"),
   status: text("status", { enum: TASK_STATUSES }).notNull().default("running"),

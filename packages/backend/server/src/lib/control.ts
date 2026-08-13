@@ -4,7 +4,7 @@
  * task.checkpoint_ref 由执行前快照写入)。指令识别放 server(executor-task
  * 之外独立成文件);双跑期桥的同类指令仍会响应,票3 退役桥后只剩 server。
  *
- * 门槛与桥一致:发送者须持 coordinator / human 角色;执行器 agent 自身发
+ * 门槛与桥一致:发送者须持 coordinator / human 角色;执行器 participant 自身发
  * 的回传不触发(防回环,发送者命中执行器配置即跳过)。停止携带 taskId
  * (「停止 <taskId>」)时仅终止该任务(当其 running);回滚 taskId 缺省时
  * 回滚该群最近一次带快照的任务。
@@ -29,7 +29,7 @@ import {
 import {
   type ExecutorConfig,
   effectiveExecutors,
-  findExecutorByAgentName,
+  findExecutorByParticipantName,
 } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 
@@ -45,8 +45,8 @@ export interface ControlCommandInput {
   groupId: string;
   senderId: string;
   senderRoles: string[];
-  /** 消息 audience(与路由同值);定向到执行器 agent 的消息是任务,跳过。 */
-  audience: "broadcast" | "role" | "agent";
+  /** 消息 audience(与路由同值);定向到执行器 participant 的消息是任务,跳过。 */
+  audience: "broadcast" | "role" | "participant";
   audienceRef: string | null;
   body: string;
 }
@@ -73,27 +73,27 @@ export async function maybeHandleControlCommand(
     return;
   }
 
-  // 防回环:执行器 agent 自己发的回传不触发(其名字命中执行器配置)。
-  const sender = await db.query.agent.findFirst({
+  // 防回环:执行器 participant 自己发的回传不触发(其名字命中执行器配置)。
+  const sender = await db.query.participant.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
   });
-  if (sender && (await findExecutorByAgentName(db, sender.name))) {
-    console.log(`[control] 跳过:发送者是执行器 agent(防回环)`);
+  if (sender && (await findExecutorByParticipantName(db, sender.name))) {
+    console.log(`[control] 跳过:发送者是执行器 participant(防回环)`);
     return;
   }
 
-  // 定向到执行器 agent 的消息是任务,不是控制指令(与桥 !ex 路由一致);
-  // 定向到 hermes(规划 agent)的消息是讨论,同样不识别(与桥 !hermes 一致)。
-  if (audience === "agent" && audienceRef) {
-    const target = await db.query.agent.findFirst({
+  // 定向到执行器 participant 的消息是任务,不是控制指令(与桥 !ex 路由一致);
+  // 定向到 hermes(规划 participant)的消息是讨论,同样不识别(与桥 !hermes 一致)。
+  if (audience === "participant" && audienceRef) {
+    const target = await db.query.participant.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef!),
     });
-    if (target && (await findExecutorByAgentName(db, target.name))) {
-      console.log(`[control] 跳过:定向到执行器 agent(视为任务)`);
+    if (target && (await findExecutorByParticipantName(db, target.name))) {
+      console.log(`[control] 跳过:定向到执行器 participant(视为任务)`);
       return;
     }
     if (target && target.type === "hermes") {
-      console.log(`[control] 跳过:定向到 hermes 规划 agent(视为讨论)`);
+      console.log(`[control] 跳过:定向到 hermes 规划 participant(视为讨论)`);
       return;
     }
   }
@@ -127,18 +127,18 @@ async function handleStop(
     await postStatus(
       db,
       groupId,
-      first.agentId,
+      first.participantId,
       first.ex,
       `🛑 已停止 ${label}`,
     );
     return;
   }
-  const fallback = await firstExecutorAgent(db);
+  const fallback = await firstExecutorParticipant(db);
   if (!fallback) return;
   await postStatus(
     db,
     groupId,
-    fallback.agentId,
+    fallback.participantId,
     fallback.ex,
     taskId
       ? `⛔ 任务 ${taskId} 未在运行/排队(无法停止)`
@@ -154,15 +154,15 @@ async function handleRollback(
   groupId: string,
   taskId: string | null,
 ): Promise<void> {
-  const fallback = await firstExecutorAgent(db);
+  const fallback = await firstExecutorParticipant(db);
   const reply = async (body: string) => {
     if (!fallback) {
       console.warn(
-        `[control] 回传失败:无可用执行器 agent(${body.slice(0, 40)})`,
+        `[control] 回传失败:无可用执行器 participant(${body.slice(0, 40)})`,
       );
       return;
     }
-    await postStatus(db, groupId, fallback.agentId, fallback.ex, body);
+    await postStatus(db, groupId, fallback.participantId, fallback.ex, body);
   };
 
   // reset --hard 会破坏进行中的写入:有任务执行/排队时禁止回滚(与桥一致)。
@@ -215,15 +215,15 @@ async function handleRollback(
 
 /* ---------------- 工具 ---------------- */
 
-/** 取第一个在执行器配置中且有 agent 行的执行器(控制指令回传身份)。 */
-async function firstExecutorAgent(
+/** 取第一个在执行器配置中且有 participant 行的执行器(控制指令回传身份)。 */
+async function firstExecutorParticipant(
   db: DataBase,
-): Promise<{ agentId: string; ex: ExecutorConfig } | null> {
+): Promise<{ participantId: string; ex: ExecutorConfig } | null> {
   for (const ex of await effectiveExecutors(db)) {
-    const agent = await db.query.agent.findFirst({
+    const participant = await db.query.participant.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.name, ex.agentName),
     });
-    if (agent) return { agentId: agent.id, ex };
+    if (participant) return { participantId: participant.id, ex };
   }
   return null;
 }

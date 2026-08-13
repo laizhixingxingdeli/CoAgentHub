@@ -1,7 +1,7 @@
 /**
  * Server 内嵌执行器触发链路(阶段2-票1/票2):POST /groups/:id/messages 出现
- * audience=agent 且 audienceRef 命中执行器配置(agent.name === agentName)时,
- * server 直接建 task + spawn CLI 执行器,桥不再需要代为调度。
+ * audience=participant 且 audienceRef 命中执行器配置(participant.name ===
+ * agentName)时,server 直接建 task + spawn CLI 执行器,桥不再需要代为调度。
  *
  * 票2 全局串行队列:模块级 FIFO,同一时刻只允许一个执行器任务在跑,其余排队。
  * 触发链路:消息命中执行器 → 建 task(status=queued)→ 入队;worker 空闲时取
@@ -27,8 +27,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  agent as agentTable,
   groupMember as groupMemberTable,
+  participant as participantTable,
   TASK_STATUSES,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -43,7 +43,7 @@ import {
 } from "@server/lib/executor-runner";
 import {
   type ExecutorConfig,
-  findExecutorByAgentName,
+  findExecutorByParticipantName,
 } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/group-message";
 import { wsHub } from "@server/lib/ws-hub";
@@ -62,7 +62,7 @@ export interface DispatchExecutorInput {
   groupId: string;
   messageId: string;
   senderRoles: string[];
-  /** audienceRef = 被 @ 的 agent id(即执行器 agent 身份)。 */
+  /** audienceRef = 被 @ 的 participant id(即执行器 participant 身份)。 */
   audienceRef: string;
   body: string;
 }
@@ -79,7 +79,7 @@ interface QueuedRun {
   groupId: string;
   messageId: string;
   taskId: string;
-  agentId: string;
+  participantId: string;
   ex: ExecutorConfig;
   body: string;
   summary: string;
@@ -147,14 +147,14 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
 /** 当前运行中的任务(停止指令用);无则 null。 */
 export function currentRunningTask(): {
   taskId: string;
-  agentId: string;
+  participantId: string;
   ex: ExecutorConfig;
   kill: () => void;
 } | null {
   return runningRun && runningRun.kill
     ? {
         taskId: runningRun.taskId,
-        agentId: runningRun.agentId,
+        participantId: runningRun.participantId,
         ex: runningRun.ex,
         kill: runningRun.kill,
       }
@@ -171,12 +171,12 @@ export function currentRunningTask(): {
  */
 export function stopRunningTask(taskId?: string): Array<{
   taskId: string;
-  agentId: string;
+  participantId: string;
   ex: ExecutorConfig;
 }> {
   const stopped: Array<{
     taskId: string;
-    agentId: string;
+    participantId: string;
     ex: ExecutorConfig;
   }> = [];
 
@@ -188,7 +188,11 @@ export function stopRunningTask(taskId?: string): Array<{
       remaining.push(q);
       continue;
     }
-    stopped.push({ taskId: q.taskId, agentId: q.agentId, ex: q.ex });
+    stopped.push({
+      taskId: q.taskId,
+      participantId: q.participantId,
+      ex: q.ex,
+    });
     void markTaskCancelled(q.db, q.taskId, q.groupId);
   }
   runQueue.length = 0;
@@ -200,7 +204,7 @@ export function stopRunningTask(taskId?: string): Array<{
     runningRun.kill?.();
     stopped.push({
       taskId: runningRun.taskId,
-      agentId: runningRun.agentId,
+      participantId: runningRun.participantId,
       ex: runningRun.ex,
     });
   }
@@ -241,24 +245,28 @@ export async function maybeDispatchExecutorTask(
     return;
   }
 
-  // audienceRef → agent → executor 配置(按 name 匹配,与桥注册的 agent 名一致)。
-  const agent = await db.query.agent.findFirst({
+  // audienceRef → participant → executor 配置(按 name 匹配,与桥注册的 participant 名一致)。
+  const participant = await db.query.participant.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef),
   });
-  if (!agent) {
-    console.log(`[executor] 跳过:audienceRef ${audienceRef} 无对应 agent`);
+  if (!participant) {
+    console.log(
+      `[executor] 跳过:audienceRef ${audienceRef} 无对应 participant`,
+    );
     return;
   }
-  const ex = await findExecutorByAgentName(db, agent.name);
+  const ex = await findExecutorByParticipantName(db, participant.name);
   if (!ex) {
-    console.log(`[executor] 跳过:agent ${agent.name} 不在执行器配置中`);
+    console.log(
+      `[executor] 跳过:participant ${participant.name} 不在执行器配置中`,
+    );
     return;
   }
 
   // 角色解绑后:查目标成员在本群的分工(roles + prompt);prompt 非空才拼进任务书。
   const membership = await db.query.groupMember.findFirst({
     where: (t, { and: andFn, eq: eqFn }) =>
-      andFn(eqFn(t.groupId, groupId), eqFn(t.agentId, agent.id)),
+      andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, participant.id)),
   });
   const groupPrompt: GroupPromptInfo | null =
     membership && membership.prompt
@@ -268,7 +276,7 @@ export async function maybeDispatchExecutorTask(
   await dispatchTask(db, {
     groupId,
     messageId,
-    agentId: agent.id,
+    participantId: participant.id,
     ex,
     body,
     groupPrompt,
@@ -281,20 +289,20 @@ async function dispatchTask(
   opts: {
     groupId: string;
     messageId: string;
-    agentId: string;
+    participantId: string;
     ex: ExecutorConfig;
     body: string;
     groupPrompt: GroupPromptInfo | null;
   },
 ): Promise<void> {
-  const { groupId, messageId, agentId, ex, body, groupPrompt } = opts;
+  const { groupId, messageId, participantId, ex, body, groupPrompt } = opts;
 
   const [created] = await db
     .insert(taskTable)
     .values({
       groupId,
       messageId,
-      executorAgentId: agentId,
+      executorParticipantId: participantId,
       executorKey: ex.key,
       status: "queued",
     })
@@ -330,7 +338,7 @@ async function dispatchTask(
     await postStatus(
       db,
       groupId,
-      agentId,
+      participantId,
       ex,
       `📋 [${ex.label}] 任务已排队(前面还有 ${ahead} 个): ${summary}`,
     );
@@ -341,7 +349,7 @@ async function dispatchTask(
     groupId,
     messageId,
     taskId: task.id,
-    agentId,
+    participantId,
     ex,
     body,
     summary,
@@ -358,7 +366,8 @@ async function pumpQueue(): Promise<void> {
   const run = runQueue.shift();
   if (!run) return;
   runningRun = run;
-  const { db, groupId, taskId, agentId, ex, body, summary, groupPrompt } = run;
+  const { db, groupId, taskId, participantId, ex, body, summary, groupPrompt } =
+    run;
 
   try {
     // 停止指令可能在 spawn 前到达(kill 句柄尚未就绪):标记 stopped 后
@@ -383,7 +392,7 @@ async function pumpQueue(): Promise<void> {
     await postStatus(
       db,
       groupId,
-      agentId,
+      participantId,
       ex,
       `🚀 [${ex.label}] 开始执行:${summary}`,
     );
@@ -397,7 +406,7 @@ async function pumpQueue(): Promise<void> {
     if (isA2a) {
       const a2aUrl = ex.a2a?.url ?? "";
       console.log(
-        `[executor] a2a 调用: ${a2aUrl} (agent=${ex.agentName}, task=${taskId})`,
+        `[executor] a2a 调用: ${a2aUrl} (participant=${ex.agentName}, task=${taskId})`,
       );
       handle = {
         promise: runA2AExecutor({
@@ -421,7 +430,7 @@ async function pumpQueue(): Promise<void> {
         await postStatus(
           db,
           groupId,
-          agentId,
+          participantId,
           ex,
           `❌ [${ex.label}] 任务失败: 任务书写入失败 (${e})`,
         );
@@ -443,14 +452,14 @@ async function pumpQueue(): Promise<void> {
         await postStatus(
           db,
           groupId,
-          agentId,
+          participantId,
           ex,
           `❌ [${ex.label}] 任务失败: 执行前快照失败 (${msg})`,
         );
         return;
       }
 
-      // hermes 之类的 agent 需要提示词文本而不是文件路径:{ticketContent}
+      // hermes 之类的 participant 需要提示词文本而不是文件路径:{ticketContent}
       // 把刚写好的任务书全文内联进参数。
       const ticketContent = readFileSync(ticketPath, "utf8");
       const args = ex.args.map((a) =>
@@ -491,7 +500,7 @@ async function pumpQueue(): Promise<void> {
         await postStatus(
           db,
           groupId,
-          agentId,
+          participantId,
           ex,
           `❌ [${ex.label}] 任务失败 (超时)`,
         );
@@ -500,7 +509,7 @@ async function pumpQueue(): Promise<void> {
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (result.code === 0) {
         const hash = findCommitHash(output);
-        // a2a 执行器(远端 agent)的回复就是最终交付内容,直接作为 summary,
+        // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不过 extractSummary 的关键词截取(汇报/做了什么/commit 段)。
         const summaryText = isA2a
           ? (result.stdout ?? "").trim()
@@ -515,7 +524,7 @@ async function pumpQueue(): Promise<void> {
           `[executor] 任务完成: ${taskId}${hash ? ` hash=${hash}` : ""}`,
         );
         const body = `✅ [${ex.label}] 任务完成${hash ? ` (commit ${hash})` : ""}\n${summaryText}`;
-        await postStatus(db, groupId, agentId, ex, body.slice(0, 2000));
+        await postStatus(db, groupId, participantId, ex, body.slice(0, 2000));
       } else {
         const tail = lastLinesOf(output, 20).slice(0, 1500);
         console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
@@ -523,7 +532,7 @@ async function pumpQueue(): Promise<void> {
         await postStatus(
           db,
           groupId,
-          agentId,
+          participantId,
           ex,
           `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
         );
@@ -535,7 +544,7 @@ async function pumpQueue(): Promise<void> {
       await postStatus(
         db,
         groupId,
-        agentId,
+        participantId,
         ex,
         `❌ [${ex.label}] 任务失败: 无法启动 ${ex.bin} (${msg})`,
       );
@@ -564,7 +573,7 @@ async function failTask(
     .where(eq(taskTable.id, taskId));
 }
 
-/** 以执行器 agent 身份回传群消息(broadcast + 前缀判定 contentType)。 */
+/** 以执行器 participant 身份回传群消息(broadcast + 前缀判定 contentType)。 */
 export async function postStatus(
   db: DataBase,
   groupId: string,

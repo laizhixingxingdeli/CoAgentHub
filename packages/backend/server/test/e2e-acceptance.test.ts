@@ -27,7 +27,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     groupId: string;
     senderId: string;
     parentId: string | null;
-    audience: "broadcast" | "role" | "agent";
+    audience: "broadcast" | "role" | "participant";
     audienceRef: string | null;
     body: string;
     depth: number;
@@ -63,8 +63,8 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     });
   }
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -90,7 +90,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -99,7 +99,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -132,29 +132,29 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
   }
 
   it("完整用户故事:命令→草稿→检视→最终版→执行→P2P 文件→归档", async () => {
-    // ── 1. 注册 5 个 agent:user(human)/coordinator(hermes mac)/reviewer(hermes win)
+    // ── 1. 注册 5 个 participant:user(human)/coordinator(hermes mac)/reviewer(hermes win)
     //        /executor(atomcode)/trainer(specialist)
-    const user = await registerAgent({
+    const user = await registerParticipant({
       name: "alice",
       type: "human",
       device: "macbook",
     });
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "hermes-mac",
       type: "hermes",
       device: "mac-mini",
     });
-    const reviewer = await registerAgent({
+    const reviewer = await registerParticipant({
       name: "hermes-win",
       type: "hermes",
       device: "win-pc",
     });
-    const executor = await registerAgent({
+    const executor = await registerParticipant({
       name: "atomcode",
       type: "atomcode",
-      // 纯增量拉取的 CLI agent(短生命周期,无需常驻监听)
+      // 纯增量拉取的 CLI participant(短生命周期,无需常驻监听)
     });
-    const trainer = await registerAgent({
+    const trainer = await registerParticipant({
       name: "ml-trainer",
       type: "specialist",
       device: "win-gpu",

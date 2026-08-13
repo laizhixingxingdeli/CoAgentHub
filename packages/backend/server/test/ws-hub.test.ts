@@ -10,7 +10,7 @@ import { createTestApp } from "./app";
  * WS realtime push tests (ticket 13). `app.request()` cannot exercise a WS
  * handshake, so these start a real http.Server on a random port, attach the
  * hub to its upgrade event, and connect with real `ws` clients. The REST
- * setup calls (agents/groups/messages) run through app.request() against the
+ * setup calls (participants/groups/messages) run through app.request() against the
  * same in-memory PGlite, so identities and messages are shared.
  */
 const app = createTestApp();
@@ -69,8 +69,8 @@ function waitForMessage(
   });
 }
 
-async function registerAgent(body: Record<string, unknown>) {
-  const res = await app.request("/api/agents", {
+async function registerParticipant(body: Record<string, unknown>) {
+  const res = await app.request("/api/participants", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -95,7 +95,7 @@ async function createGroup(token: string, title: string) {
 async function addMember(
   token: string,
   groupId: string,
-  agentId: string,
+  participantId: string,
   roles: string[],
 ) {
   const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -104,7 +104,7 @@ async function addMember(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ agentId, roles }),
+    body: JSON.stringify({ participantId, roles }),
   });
   expect(res.status).toBe(200);
 }
@@ -126,27 +126,27 @@ async function sendMessage(
 
 /** coordinator + reviewer + executor + human 成员 + 一个非成员 outsider。 */
 async function setupGroup() {
-  const coordinator = await registerAgent({
+  const coordinator = await registerParticipant({
     name: "hermes-mac",
     type: "hermes",
     device: "mac-mini",
   });
-  const reviewer = await registerAgent({
+  const reviewer = await registerParticipant({
     name: "win-hermes",
     type: "hermes",
     device: "win-pc",
   });
-  const executor = await registerAgent({
+  const executor = await registerParticipant({
     name: "atomcode-cli",
     type: "atomcode",
     device: "cli",
   });
-  const human = await registerAgent({
+  const human = await registerParticipant({
     name: "alice",
     type: "human",
     device: "macbook",
   });
-  const outsider = await registerAgent({
+  const outsider = await registerParticipant({
     name: "outsider",
     type: "openclaw",
     device: "other-box",
@@ -193,13 +193,13 @@ describe("a. 握手认证(?token=)", () => {
   });
 
   it("非 /api/ws 路径的 upgrade 被忽略(不建立连接)", async () => {
-    const agent = await registerAgent({
+    const participant = await registerParticipant({
       name: "probe",
       type: "human",
       device: "p",
     });
     await expect(
-      connectWs(`ws://127.0.0.1:${port}/api/nope?token=${agent.token}`),
+      connectWs(`ws://127.0.0.1:${port}/api/nope?token=${participant.token}`),
     ).rejects.toThrow();
     expect(wsHub.connectionCount()).toBe(0);
   });
@@ -216,7 +216,10 @@ describe("a2. Local User 已是群成员:广播不重复投递", () => {
     expect(created.status).toBe(200);
     const group = (await created.json()) as { id: string };
 
-    const member = await registerAgent({ name: "member-one", type: "hermes" });
+    const member = await registerParticipant({
+      name: "member-one",
+      type: "hermes",
+    });
     await addMember(member.token, group.id, member.id, ["executor"]);
 
     // 无 token 连接 → Local User socket(该身份已是群成员)。
@@ -311,7 +314,7 @@ describe("c. 可见性:只推可见成员", () => {
     expect(outsiderWs.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("audience=agent 只推目标成员;其他成员(含 human 外)不收", async () => {
+  it("audience=participant 只推目标成员;其他成员(含 human 外)不收", async () => {
     const { group, coordinator, reviewer, executor, human } =
       await setupGroup();
     const reviewerWs = await connectWs(wsUrl(reviewer.token));
@@ -322,7 +325,7 @@ describe("c. 可见性:只推可见成员", () => {
     const humanMsg = waitForMessage(humanWs);
     const res = await sendMessage(coordinator.token, group.id, {
       body: "专属指令",
-      audience: "agent",
+      audience: "participant",
       audienceRef: reviewer.id,
     });
     expect(res.status).toBe(200);
@@ -368,7 +371,7 @@ describe("d. 连接生命周期", () => {
     await new Promise<void>((r) => hs.listen(0, "127.0.0.1", r));
     const hsPort = (hs.address() as AddressInfo).port;
 
-    const agent = await registerAgent({
+    const participant = await registerParticipant({
       name: "zombie",
       type: "human",
       device: "z",
@@ -379,7 +382,7 @@ describe("d. 连接生命周期", () => {
     await new Promise<void>((r) => raw.on("connect", r));
     const key = Buffer.from("0123456789abcdef").toString("base64");
     raw.write(
-      `GET /api/ws?token=${agent.token} HTTP/1.1\r\n` +
+      `GET /api/ws?token=${participant.token} HTTP/1.1\r\n` +
         `Host: 127.0.0.1:${hsPort}\r\n` +
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
         `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,

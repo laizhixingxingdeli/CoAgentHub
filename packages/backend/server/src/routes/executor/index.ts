@@ -5,7 +5,7 @@ import {
   addExecutorConfig,
   effectiveExecutors,
   isBuiltinExecutorKey,
-  registerExecutorAgent,
+  registerExecutorParticipant,
   removeExecutorConfig,
 } from "@server/lib/executors";
 import { Hono } from "hono";
@@ -13,10 +13,10 @@ import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
 /**
- * 执行器配置管理(接入 Agent 界面):GET/POST/DELETE /api/executors。
+ * 执行器配置管理(接入 Participant 界面):GET/POST/DELETE /api/executors。
  *
- * 无鉴权(局域网信任模型,与 agent 注册/reset-token 一致):LAN 内任何客户端
- * 都能读取/新增/删除执行器配置。新增时自动注册对应 agent(名字=agentName,
+ * 无鉴权(局域网信任模型,与 participant 注册/reset-token 一致):LAN 内任何客户端
+ * 都能读取/新增/删除执行器配置。新增时自动注册对应 participant(名字=agentName,
  * token 后端生成写 scripts/.executor-agents.json,绝不返回前端)。
  *
  * 内置执行器(DEFAULT_EXECUTORS)不落 DB:GET 合并展示,DELETE 对内置 key
@@ -29,10 +29,10 @@ app.use(async (c, next) => {
   await next();
 });
 
-/** POST 入参:与前端「接入 Agent」表单一致,前端不感知 token。 */
+/** POST 入参:与前端「接入 Participant」表单一致,前端不感知 token。 */
 const CreateExecutorSchema = z
   .object({
-    /** agent 展示名(唯一;同时是注册进 agent 表的 name)。 */
+    /** participant 展示名(唯一;同时是注册进 participant 表的 name)。 */
     agentName: z.string().min(1).max(100),
     /** 类型:hermes | atomcode | openclaw | human | custom */
     type: z.string().min(1),
@@ -46,7 +46,7 @@ const CreateExecutorSchema = z
     args: z.array(z.string()).max(64).optional(),
     /** 展示标签,缺省用 agentName。 */
     label: z.string().max(100).optional(),
-    /** 设备(可选):注册 agent 时写入 agent.device。 */
+    /** 设备(可选):注册 participant 时写入 participant.device。 */
     device: z.string().max(100).optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
@@ -58,7 +58,7 @@ const app2 = app
     "/",
     describeRoute({
       description:
-        "Create an executor config and auto-register its agent (no token in response; the token is written once to scripts/.executor-agents.json)",
+        "Create an executor config and auto-register its participant (no token in response; the token is written once to scripts/.executor-agents.json)",
       responses: {
         200: {
           description: "Executor config created (token never exposed)",
@@ -72,12 +72,12 @@ const app2 = app
       const input = c.req.valid("json");
       const { agentName, type, kind, bin, url, args, label, device } = input;
 
-      // 名字唯一:内置 + DB 里已有同名 agent 都算重复(按 agentName 判重)。
+      // 名字唯一:内置 + DB 里已有同名 participant 都算重复(按 agentName 判重)。
       const all = await effectiveExecutors(db);
       if (all.some((ex) => ex.agentName === agentName)) {
         throw new BizError(
           BizCodeEnum.Conflict,
-          `agent 名字已存在: ${agentName}`,
+          `participant 名字已存在: ${agentName}`,
         );
       }
 
@@ -106,8 +106,8 @@ const app2 = app
 
       await addExecutorConfig(db, config);
 
-      // 自动注册对应 agent(token 后端生成写 state 文件,不返回前端)。
-      await registerExecutorAgent(
+      // 自动注册对应 participant(token 后端生成写 state 文件,不返回前端)。
+      await registerExecutorParticipant(
         db,
         {
           key,

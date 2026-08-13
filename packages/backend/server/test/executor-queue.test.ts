@@ -58,8 +58,8 @@ const { createTestApp } = await import("./app");
 describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -85,7 +85,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -94,7 +94,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -192,13 +192,13 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
 
   /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
   async function setupGroup() {
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "coord-queue",
       type: "hermes",
     });
-    const codebuddy = await registerAgent({
+    const codebuddy = await registerParticipant({
       name: "CodeBuddy 执行器",
-      type: "agent",
+      type: "participant",
     });
     const group = await createGroup(coordinator.token, "队列控制测试");
     await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
@@ -218,7 +218,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
 
     const m1 = await postMessage(coordinator.token, group.id, {
       body: "任务一(慢)",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
     // 等第一条真正进入 running(保证第二条一定排到它后面)。
@@ -232,7 +232,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
 
     const m2 = await postMessage(coordinator.token, group.id, {
       body: "任务二",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
     // 第一条还在跑(2s),第二条应稳定停留在 queued。
@@ -270,7 +270,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
 
     const msg = await postMessage(coordinator.token, group.id, {
       body: "长跑任务",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
     const t = await waitForTaskStatus(
@@ -310,7 +310,7 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
 
     const msg = await postMessage(coordinator.token, group.id, {
       body: "修改 hello.txt",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
     const t = await waitForTaskStatus(
@@ -364,14 +364,14 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
       {
         groupId: group.id,
         messageId: mQueued,
-        executorAgentId: codebuddy.id,
+        executorParticipantId: codebuddy.id,
         executorKey: "codebuddy",
         status: "queued",
       },
       {
         groupId: group.id,
         messageId: mRunning,
-        executorAgentId: codebuddy.id,
+        executorParticipantId: codebuddy.id,
         executorKey: "codebuddy",
         status: "running",
       },

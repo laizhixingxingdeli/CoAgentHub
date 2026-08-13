@@ -7,14 +7,14 @@ import { createTestApp } from "./app";
  * CLI and patches status/diffSummary when the run finishes.
  *
  * Covered here: idempotent creation (the same message_id only ever yields one
- * task), PATCH permission (only the owning executor agent may update; anyone
+ * task), PATCH permission (only the owning executor participant may update; anyone
  * else is 403), and the running -> done / failed / cancelled transitions.
  */
 describe("任务实体(server 单一状态源)", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -41,7 +41,7 @@ describe("任务实体(server 单一状态源)", () => {
     id: string;
     groupId: string;
     messageId: string;
-    executorAgentId: string;
+    executorParticipantId: string;
     status: "running" | "done" | "failed" | "cancelled";
     checkpointRef: string | null;
     diffSummary: unknown;
@@ -53,7 +53,7 @@ describe("任务实体(server 单一状态源)", () => {
     token: string,
     groupId: string,
     messageId: string,
-    executorAgentId: string,
+    executorParticipantId: string,
     checkpointRef?: string,
   ) {
     return app.request(`/api/groups/${groupId}/tasks`, {
@@ -64,20 +64,26 @@ describe("任务实体(server 单一状态源)", () => {
       },
       body: JSON.stringify({
         messageId,
-        executorAgentId,
+        executorParticipantId,
         ...(checkpointRef !== undefined ? { checkpointRef } : {}),
       }),
     });
   }
 
-  /** A group with coordinator + two executor agents. */
+  /** A group with coordinator + two executor participants. */
   async function setupGroup() {
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "coord-mac",
       type: "hermes",
     });
-    const execA = await registerAgent({ name: "executor-a", type: "atomcode" });
-    const execB = await registerAgent({ name: "executor-b", type: "atomcode" });
+    const execA = await registerParticipant({
+      name: "executor-a",
+      type: "atomcode",
+    });
+    const execB = await registerParticipant({
+      name: "executor-b",
+      type: "atomcode",
+    });
     const group = await createGroup(coordinator.token, "任务实体测试");
     return { coordinator, execA, execB, group };
   }
@@ -95,7 +101,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(res1.status).toBe(200);
     const t1 = (await res1.json()) as Task;
     expect(t1.status).toBe("running");
-    expect(t1.executorAgentId).toBe(execA.id);
+    expect(t1.executorParticipantId).toBe(execA.id);
     expect(t1.checkpointRef).toBeNull();
 
     const res2 = await createTask(
@@ -139,13 +145,13 @@ describe("任务实体(server 单一状态源)", () => {
     );
     expect(noGroup.status).toBe(404);
 
-    const noAgent = await createTask(
+    const noParticipant = await createTask(
       coordinator.token,
       group.id,
       messageId,
       "00000000-0000-7000-8000-0000000000ee",
     );
-    expect(noAgent.status).toBe(404);
+    expect(noParticipant.status).toBe(404);
   });
 
   it("PATCH 权限:非所属 executor 更新 403,所属 executor 可流转状态", async () => {
@@ -160,7 +166,7 @@ describe("任务实体(server 单一状态源)", () => {
     );
     const task = (await created.json()) as Task;
 
-    // 其他 agent(execB)无权更新 → 403。
+    // 其他 participant(execB)无权更新 → 403。
     const forbidden = await app.request(
       `/api/groups/${group.id}/tasks/${task.id}`,
       {
@@ -293,7 +299,10 @@ describe("任务实体(server 单一状态源)", () => {
 
   it("非成员访问任务端点:POST 403、GET 只读放开 200(LAN trust,与 GET /messages 一致)", async () => {
     const { coordinator, execA, group } = await setupGroup();
-    const outsider = await registerAgent({ name: "outsider", type: "custom" });
+    const outsider = await registerParticipant({
+      name: "outsider",
+      type: "custom",
+    });
 
     // 非成员 POST /tasks → 403(写操作权限不变)。
     const post = await createTask(

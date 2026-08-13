@@ -5,13 +5,17 @@ import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
 
 /**
- * Agent registry — the identity foundation for multi-agent collaboration
+ * Participant registry — the identity foundation for multi-agent collaboration
  * (agent-groups). Independent of the auth user/organization tables: any
- * device/CLI process can register itself as an agent and authenticate with
- * its per-agent token (SHA-256 hashed at rest; the plaintext token is shown
- * exactly once at registration).
+ * device/CLI process can register itself as a participant and authenticate
+ * with its per-participant token (SHA-256 hashed at rest; the plaintext token
+ * is shown exactly once at registration).
+ *
+ * 术语说明:本表原名为 `agent`(历史名,见 git 提交),术语澄清后改名
+ * participant(参与者)——「agent」易与「AI 智能体」混淆。旧表名/旧列名仅
+ * 存在于历史迁移与 git 历史中。
  */
-export const agent = pgTable("agent", {
+export const participant = pgTable("participant", {
   id: uuid("id").primaryKey().$defaultFn(uuidv7),
   name: text("name").notNull(),
   type: text("type").notNull(), // hermes | atomcode | openclaw | human | custom
@@ -28,7 +32,7 @@ export const agent = pgTable("agent", {
     .default(sql`'[]'::jsonb`),
   ...timeColumns("create-only"),
 });
-export const Agent = createSelectSchema(agent);
-export type Agent = typeof agent.$inferSelect;
-export const NewAgent = createInsertSchema(agent);
-export type NewAgent = typeof agent.$inferInsert;
+export const Participant = createSelectSchema(participant);
+export type Participant = typeof participant.$inferSelect;
+export const NewParticipant = createInsertSchema(participant);
+export type NewParticipant = typeof participant.$inferInsert;

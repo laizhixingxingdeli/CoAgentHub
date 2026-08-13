@@ -2,21 +2,21 @@ import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import {
-  agent as agentTable,
   FileRefInput,
   GROUP_ROLES,
-  GroupMessageAudience,
+  GroupMessageAudienceInput,
   groupMember as groupMemberTable,
   groups as groupsTable,
+  participant as participantTable,
   TASK_STATUSES,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
-import { capabilityHint } from "@server/lib/agent-capabilities";
 import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import { maybeDispatchExecutorTask } from "@server/lib/executor-task";
-import { resolveLocalUser } from "@server/lib/local-agent";
+import { resolveLocalUser } from "@server/lib/local-participant";
+import { capabilityHint } from "@server/lib/participant-capabilities";
 import {
   DELETED_MESSAGE_PLACEHOLDER,
   insertGroupMessage,
@@ -30,7 +30,7 @@ import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
-const app = new Hono<{ Variables: { db: DataBase; agentId: string } }>();
+const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
 // 消息域的占位串/分页等常量已随逻辑迁入 @server/lib/services/message-service。
 
@@ -54,21 +54,21 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { title } = c.req.valid("json");
 
       // db.transaction resolves to the callback's return value.
       const group = await db.transaction(async (tx) => {
         const [created] = await tx
           .insert(groupsTable)
-          .values({ title, createdBy: agentId })
+          .values({ title, createdBy: participantId })
           .returning();
         // The creator is automatically a member with the coordinator role —
         // inserted in the same transaction so a group can never exist
         // without its coordinator membership.
         await tx.insert(groupMemberTable).values({
           groupId: created.id,
-          agentId,
+          participantId,
           roles: ["coordinator"],
         });
         return created;
@@ -139,7 +139,7 @@ app
           createdBy: groupsTable.createdBy,
           createdAt: groupsTable.createdAt,
           updatedAt: groupsTable.updatedAt,
-          memberCount: count(groupMemberTable.agentId),
+          memberCount: count(groupMemberTable.participantId),
         })
         .from(groupsTable)
         .leftJoin(
@@ -250,17 +250,17 @@ app
     zValidator(
       "json",
       z.object({
-        agentId: z.string().uuid(),
+        participantId: z.string().uuid(),
         // Roles must come from the preset catalog; empty defaults to observer.
         roles: z.array(z.enum(GROUP_ROLES)).default(["observer"]),
-        // 群内分工说明(角色解绑):描述该 agent 在本群的分工,可空。
+        // 群内分工说明(角色解绑):描述该 participant 在本群的分工,可空。
         prompt: z.string().max(1000).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const { id } = c.req.valid("param");
-      const { agentId, roles, prompt } = c.req.valid("json");
+      const { participantId, roles, prompt } = c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -268,11 +268,11 @@ app
       if (!group) {
         throw new BizError(BizCodeEnum.GroupNotFound);
       }
-      const agent = await db.query.agent.findFirst({
-        where: (t, { eq }) => eq(t.id, agentId),
+      const participant = await db.query.participant.findFirst({
+        where: (t, { eq }) => eq(t.id, participantId),
       });
-      if (!agent) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+      if (!participant) {
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       const dedupedRoles =
@@ -281,12 +281,12 @@ app
         .insert(groupMemberTable)
         .values({
           groupId: id,
-          agentId,
+          participantId,
           roles: dedupedRoles,
           ...(prompt !== undefined ? { prompt } : {}),
         })
         .onConflictDoUpdate({
-          target: [groupMemberTable.groupId, groupMemberTable.agentId],
+          target: [groupMemberTable.groupId, groupMemberTable.participantId],
           set: {
             roles: dedupedRoles,
             // prompt 未提供时保持既有值,避免幂等 upsert 清掉已有分工说明。
@@ -297,7 +297,7 @@ app
 
       // 轻量能力提示 (ticket 17): 已知能力与角色匹配提示,绝不硬性拒绝 —
       // 无提示时为 null,响应形状始终带 capabilityHint 字段。
-      const hint = capabilityHint(agent.capabilities, dedupedRoles);
+      const hint = capabilityHint(participant.capabilities, dedupedRoles);
 
       return c.json({ ...member, capabilityHint: hint });
     },
@@ -305,7 +305,8 @@ app
   .get(
     "/:id/members",
     describeRoute({
-      description: "List group members with agent info and in-group roles",
+      description:
+        "List group members with participant info and in-group roles",
       responses: {
         200: {
           description: "Successful response",
@@ -327,16 +328,19 @@ app
 
       const members = await db
         .select({
-          agentId: agentTable.id,
-          name: agentTable.name,
-          type: agentTable.type,
-          device: agentTable.device,
+          participantId: participantTable.id,
+          name: participantTable.name,
+          type: participantTable.type,
+          device: participantTable.device,
           roles: groupMemberTable.roles,
           prompt: groupMemberTable.prompt,
           joinedAt: groupMemberTable.joinedAt,
         })
         .from(groupMemberTable)
-        .innerJoin(agentTable, eq(agentTable.id, groupMemberTable.agentId))
+        .innerJoin(
+          participantTable,
+          eq(participantTable.id, groupMemberTable.participantId),
+        )
         .where(eq(groupMemberTable.groupId, id))
         .orderBy(asc(groupMemberTable.joinedAt));
 
@@ -344,7 +348,7 @@ app
     },
   )
   .delete(
-    "/:id/members/:agentId",
+    "/:id/members/:participantId",
     describeRoute({
       description:
         "Remove a member from the group (ticket 20). The creator (群主) can never be removed; a missing group or missing membership is a 404.",
@@ -357,11 +361,11 @@ app
     }),
     zValidator(
       "param",
-      z.object({ id: z.string().uuid(), agentId: z.string().uuid() }),
+      z.object({ id: z.string().uuid(), participantId: z.string().uuid() }),
     ),
     async (c) => {
       const db = c.get("db");
-      const { id, agentId } = c.req.valid("param");
+      const { id, participantId } = c.req.valid("param");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -370,12 +374,12 @@ app
         throw new BizError(BizCodeEnum.GroupNotFound);
       }
       // 群主不可被移除:创建者是这个群组的 owner,成员移除不能破坏它。
-      if (agentId === group.createdBy) {
+      if (participantId === group.createdBy) {
         throw new BizError(BizCodeEnum.InvalidRequest, "不能移除群主");
       }
       const member = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, agentId)),
+          and(eq(t.groupId, id), eq(t.participantId, participantId)),
       });
       if (!member) {
         throw new BizError(BizCodeEnum.MemberNotFound);
@@ -386,14 +390,14 @@ app
         .where(
           and(
             eq(groupMemberTable.groupId, id),
-            eq(groupMemberTable.agentId, agentId),
+            eq(groupMemberTable.participantId, participantId),
           ),
         );
       return c.json({ success: true });
     },
   )
   .patch(
-    "/:id/members/:agentId",
+    "/:id/members/:participantId",
     describeRoute({
       description:
         "Update a member's roles in the group (ticket 20); same dedupe rule as POST /members",
@@ -406,7 +410,7 @@ app
     }),
     zValidator(
       "param",
-      z.object({ id: z.string().uuid(), agentId: z.string().uuid() }),
+      z.object({ id: z.string().uuid(), participantId: z.string().uuid() }),
     ),
     zValidator(
       "json",
@@ -422,7 +426,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const { id, agentId } = c.req.valid("param");
+      const { id, participantId } = c.req.valid("param");
       const { roles, prompt } = c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
@@ -433,7 +437,7 @@ app
       }
       const member = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, agentId)),
+          and(eq(t.groupId, id), eq(t.participantId, participantId)),
       });
       if (!member) {
         throw new BizError(BizCodeEnum.MemberNotFound);
@@ -451,7 +455,7 @@ app
         .where(
           and(
             eq(groupMemberTable.groupId, id),
-            eq(groupMemberTable.agentId, agentId),
+            eq(groupMemberTable.participantId, participantId),
           ),
         )
         .returning();
@@ -553,7 +557,7 @@ app
     "/:id/messages",
     describeRoute({
       description:
-        "Post a message to a group; sender must be a member. Messages carry a target audience (broadcast | role | agent) and an optional parentId for the thread tree",
+        "Post a message to a group; sender must be a member. Messages carry a target audience (broadcast | role | participant) and an optional parentId for the thread tree",
       responses: {
         200: {
           description: "Message created with tree depth",
@@ -571,7 +575,9 @@ app
           // 请求打爆内存(编辑接口为 4000,见 PATCH /:id/messages/:messageId)。
           body: z.string().max(8000).optional(),
           parentId: z.string().uuid().optional(),
-          audience: GroupMessageAudience.optional(),
+          // 兼容旧值:接受历史 audience "agent"(术语改名前的旧值,外部执行器
+          // CLI 可能仍发送),归一为 "participant" 后存储与校验。
+          audience: GroupMessageAudienceInput.optional(),
           audienceRef: z.string().optional(),
           // 内容类型 (ticket 17): 仅存储不校验 —— 不白名单、不解析;仅拒绝
           // 空串以免绕过 text/plain 默认值。
@@ -589,7 +595,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const senderId = c.get("agentId");
+      const senderId = c.get("participantId");
       const { id } = c.req.valid("param");
       const { body, parentId, audience, audienceRef, contentType, fileRef } =
         c.req.valid("json");
@@ -609,7 +615,7 @@ app
       // The sender must be a group member (any role) to post.
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, senderId)),
+          and(eq(t.groupId, id), eq(t.participantId, senderId)),
       });
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
@@ -625,14 +631,14 @@ app
         ) {
           throw new BizError(BizCodeEnum.InvalidRequest);
         }
-      } else if (aud === "agent") {
+      } else if (aud === "participant") {
         // audienceRef must name a member of THIS group.
         if (!audienceRef) {
           throw new BizError(BizCodeEnum.InvalidRequest);
         }
         const target = await db.query.groupMember.findFirst({
           where: (t, { and, eq }) =>
-            and(eq(t.groupId, id), eq(t.agentId, audienceRef)),
+            and(eq(t.groupId, id), eq(t.participantId, audienceRef)),
         });
         if (!target) {
           throw new BizError(BizCodeEnum.InvalidRequest);
@@ -654,7 +660,9 @@ app
         parentId: parentId ?? null,
         audience: aud,
         audienceRef:
-          aud === "role" || aud === "agent" ? (audienceRef ?? null) : null,
+          aud === "role" || aud === "participant"
+            ? (audienceRef ?? null)
+            : null,
         body: body ?? "",
         contentType: contentType ?? "text/plain",
         // 服务端必填 (ticket 17): 客户端未传 expiresAt 时默认 now + 7d;
@@ -667,10 +675,10 @@ app
       // incremental pull remains the guaranteed fallback.
       void wsHub.broadcastGroupMessage(full);
 
-      // 阶段2-票1:定向到执行器 agent 的消息 → server 直接建 task + spawn
+      // 阶段2-票1:定向到执行器 participant 的消息 → server 直接建 task + spawn
       // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,
       // 失败只记日志,绝不阻塞消息响应)。
-      if (aud === "agent" && audienceRef) {
+      if (aud === "participant" && audienceRef) {
         void maybeDispatchExecutorTask(db, {
           groupId: id,
           messageId: full.id,
@@ -681,13 +689,13 @@ app
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;
       // fire-and-forget,命中与否/权限/防回环在 control.ts 内处理。定向到
-      // 执行器 agent 的消息是任务,控制入口内部会跳过,不重复动作。
+      // 执行器 participant 的消息是任务,控制入口内部会跳过,不重复动作。
       void maybeHandleControlCommand(db, {
         groupId: id,
         senderId,
         senderRoles: membership.roles,
         audience: aud,
-        audienceRef: aud === "agent" ? (audienceRef ?? null) : null,
+        audienceRef: aud === "participant" ? (audienceRef ?? null) : null,
         body: body ?? "",
       }).catch((err) => console.warn("[control] 后台指令处理失败(忽略):", err));
 
@@ -727,7 +735,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { id, messageId } = c.req.valid("param");
       const { body } = c.req.valid("json");
 
@@ -744,7 +752,7 @@ app
       // 发送者必须是当前群成员(与 POST 同款守卫):被移出后不能再编辑旧消息。
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, agentId)),
+          and(eq(t.groupId, id), eq(t.participantId, participantId)),
       });
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
@@ -756,7 +764,7 @@ app
         throw new BizError(BizCodeEnum.MessageNotFound);
       }
       // 仅发送者本人可编辑自己的消息。
-      if (message.senderId !== agentId) {
+      if (message.senderId !== participantId) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
       // 已软删除的消息不可再编辑:占位 body 是删除标记,改回正文等于复活,
@@ -791,7 +799,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { id, messageId } = c.req.valid("param");
 
       const group = await db.query.groups.findFirst({
@@ -807,7 +815,7 @@ app
       // 发送者必须是当前群成员(与 POST 同款守卫):被移出后不能再删除旧消息。
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, agentId)),
+          and(eq(t.groupId, id), eq(t.participantId, participantId)),
       });
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
@@ -819,7 +827,7 @@ app
         throw new BizError(BizCodeEnum.MessageNotFound);
       }
       // 仅发送者本人可删除自己的消息。
-      if (message.senderId !== agentId) {
+      if (message.senderId !== participantId) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
 
@@ -865,7 +873,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const requesterId = c.get("agentId");
+      const requesterId = c.get("participantId");
       const { id } = c.req.valid("param");
       const { after, q } = c.req.valid("query");
 
@@ -877,7 +885,7 @@ app
       }
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, requesterId)),
+          and(eq(t.groupId, id), eq(t.participantId, requesterId)),
       });
       // LAN trust model: reading a group does not require membership. The
       // default Local User counts as human (sees everything) — even when it
@@ -926,15 +934,16 @@ app
       "json",
       z.object({
         messageId: z.string().uuid(),
-        executorAgentId: z.string().uuid(),
+        executorParticipantId: z.string().uuid(),
         checkpointRef: z.string().optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
-      const callerId = c.get("agentId");
+      const callerId = c.get("participantId");
       const { id } = c.req.valid("param");
-      const { messageId, executorAgentId, checkpointRef } = c.req.valid("json");
+      const { messageId, executorParticipantId, checkpointRef } =
+        c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -942,20 +951,20 @@ app
       if (!group) {
         throw new BizError(BizCodeEnum.GroupNotFound);
       }
-      // 与其它群路由一致的边界:调用者必须是群成员(agent 注册是公开的,
+      // 与其它群路由一致的边界:调用者必须是群成员(participant 注册是公开的,
       // 不校验会泄漏任意群的任务数据)。
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, callerId)),
+          and(eq(t.groupId, id), eq(t.participantId, callerId)),
       });
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
-      const executor = await db.query.agent.findFirst({
-        where: (t, { eq }) => eq(t.id, executorAgentId),
+      const executor = await db.query.participant.findFirst({
+        where: (t, { eq }) => eq(t.id, executorParticipantId),
       });
       if (!executor) {
-        throw new BizError(BizCodeEnum.AgentNotFound);
+        throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
       // Idempotent create: message_id is UNIQUE, so a repeated POST with the
@@ -967,7 +976,7 @@ app
         .values({
           groupId: id,
           messageId,
-          executorAgentId,
+          executorParticipantId,
           checkpointRef: checkpointRef ?? null,
         })
         .onConflictDoNothing({ target: taskTable.messageId })
@@ -1016,7 +1025,7 @@ app
     "/:id/tasks/:taskId",
     describeRoute({
       description:
-        "Update a task (status/diffSummary). Only the task's executor agent identity (token) may update it",
+        "Update a task (status/diffSummary). Only the task's executor participant identity (token) may update it",
       responses: {
         200: {
           description: "Task updated",
@@ -1046,7 +1055,7 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const agentId = c.get("agentId");
+      const participantId = c.get("participantId");
       const { id, taskId } = c.req.valid("param");
       const { status, diffSummary, checkpointRef } = c.req.valid("json");
 
@@ -1062,8 +1071,8 @@ app
       if (!task) {
         throw new BizError(BizCodeEnum.TaskNotFound);
       }
-      // Only the owning executor agent can advance the lifecycle.
-      if (task.executorAgentId !== agentId) {
+      // Only the owning executor participant can advance the lifecycle.
+      if (task.executorParticipantId !== participantId) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
       const [updated] = await db

@@ -12,9 +12,9 @@ import { createTestApp } from "./app";
 describe("群组与成员 API", () => {
   const app = createTestApp();
 
-  /** Register an agent and return { id, token }. */
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  /** Register an participant and return { id, token }. */
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -44,7 +44,7 @@ describe("群组与成员 API", () => {
 
   describe("POST /api/groups 建群", () => {
     it("创建成功,创建者自动成为 coordinator 成员", async () => {
-      const { id: agentId, token } = await registerAgent({
+      const { id: participantId, token } = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
         device: "mac-mini",
@@ -54,19 +54,19 @@ describe("群组与成员 API", () => {
       expect(group.id).toBeTruthy();
       expect(group.title).toBe("模型训练任务");
       expect(group.status).toBe("active");
-      expect(group.createdBy).toBe(agentId);
+      expect(group.createdBy).toBe(participantId);
 
       const membersRes = await app.request(`/api/groups/${group.id}/members`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(membersRes.status).toBe(200);
       const members = (await membersRes.json()) as Array<{
-        agentId: string;
+        participantId: string;
         name: string;
         roles: string[];
       }>;
       expect(members).toHaveLength(1);
-      expect(members[0].agentId).toBe(agentId);
+      expect(members[0].participantId).toBe(participantId);
       expect(members[0].name).toBe("hermes-mac");
       expect(members[0].roles).toEqual(["coordinator"]);
     });
@@ -83,7 +83,10 @@ describe("群组与成员 API", () => {
     });
 
     it("缺 title 返回 400", async () => {
-      const { token } = await registerAgent({ name: "a", type: "atomcode" });
+      const { token } = await registerParticipant({
+        name: "a",
+        type: "atomcode",
+      });
       const res = await app.request("/api/groups", {
         method: "POST",
         headers: {
@@ -98,7 +101,10 @@ describe("群组与成员 API", () => {
 
   describe("GET /api/groups 列表与过滤", () => {
     it("返回全部群组并带 status 与成员数", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "任务一");
 
       const res = await app.request("/api/groups", {
@@ -122,7 +128,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?status=archived 只返回已归档群组", async () => {
-      const { token } = await registerAgent({ name: "c2", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c2",
+        type: "hermes",
+      });
       const active = await createGroup(token, "保留");
       const archived = await createGroup(token, "归档");
       await app.request(`/api/groups/${archived.id}/archive`, {
@@ -150,7 +159,10 @@ describe("群组与成员 API", () => {
     });
 
     it("非法 status 过滤值返回 400", async () => {
-      const { token } = await registerAgent({ name: "c3", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c3",
+        type: "hermes",
+      });
       const res = await app.request("/api/groups?status=bogus", {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -158,7 +170,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?q= 按标题关键词过滤(子串匹配)", async () => {
-      const { token } = await registerAgent({ name: "c4", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c4",
+        type: "hermes",
+      });
       const match = await createGroup(token, "模型训练任务");
       await createGroup(token, "部署上线");
 
@@ -177,7 +192,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?q= 对 LIKE 通配符(%、_)按字面转义", async () => {
-      const { token } = await registerAgent({ name: "c5", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c5",
+        type: "hermes",
+      });
       const withPercent = await createGroup(token, "进度 100% 达成");
       const withUnderscore = await createGroup(token, "任务_甲");
       const noUnderscore = await createGroup(token, "任务甲");
@@ -209,7 +227,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?q= 与 ?status= 可组合过滤", async () => {
-      const { token } = await registerAgent({ name: "c6", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c6",
+        type: "hermes",
+      });
       const active = await createGroup(token, "模型评测 A");
       const archived = await createGroup(token, "模型评测 B");
       await app.request(`/api/groups/${archived.id}/archive`, {
@@ -229,7 +250,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?q= 空串等价于无搜索(返回全量)", async () => {
-      const { token } = await registerAgent({ name: "c7", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c7",
+        type: "hermes",
+      });
       const group = await createGroup(token, "任意标题");
 
       const res = await app.request("/api/groups?q=", {
@@ -242,7 +266,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?q= 超过 100 字符返回 400", async () => {
-      const { token } = await registerAgent({ name: "c8", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c8",
+        type: "hermes",
+      });
       const res = await app.request(`/api/groups?q=${"x".repeat(101)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -250,7 +277,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?limit= 分页:返回指定条数并带 total", async () => {
-      const { token } = await registerAgent({ name: "c9", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c9",
+        type: "hermes",
+      });
       // 同文件用例共享 DB,先取基线 total 再做相对断言,避免被既有群污染。
       const baseline = (await (
         await app.request("/api/groups", {
@@ -277,7 +307,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?limit=&offset= 翻页:两页互补、不重叠且 total 不变", async () => {
-      const { token } = await registerAgent({ name: "c10", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c10",
+        type: "hermes",
+      });
       const ids: string[] = [];
       for (let i = 0; i < 7; i++) {
         const g = await createGroup(token, `翻页任务 ${i}`);
@@ -309,7 +342,10 @@ describe("群组与成员 API", () => {
     });
 
     it("不带分页参数时 items 为全量且 total 一致", async () => {
-      const { token } = await registerAgent({ name: "c11", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c11",
+        type: "hermes",
+      });
       const baseline = (await (
         await app.request("/api/groups", {
           headers: { Authorization: `Bearer ${token}` },
@@ -338,7 +374,10 @@ describe("群组与成员 API", () => {
     });
 
     it("?limit= 与 ?q= 组合:total 按过滤条件计,items 只取一页", async () => {
-      const { token } = await registerAgent({ name: "c12", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c12",
+        type: "hermes",
+      });
       const match = await createGroup(token, "组合匹配甲");
       const match2 = await createGroup(token, "组合匹配乙");
       const other = await createGroup(token, "无关任务");
@@ -359,7 +398,10 @@ describe("群组与成员 API", () => {
     });
 
     it("非法 limit/offset 回退默认值(仍返回 200)", async () => {
-      const { token } = await registerAgent({ name: "c13", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "c13",
+        type: "hermes",
+      });
       await createGroup(token, "回退一");
       await createGroup(token, "回退二");
 
@@ -387,8 +429,11 @@ describe("群组与成员 API", () => {
 
   describe("POST /api/groups/:id/members 加成员", () => {
     it("添加成员并分配角色,重复添加幂等更新角色", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: reviewerId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: reviewerId } = await registerParticipant({
         name: "win-hermes",
         type: "hermes",
         device: "win-pc",
@@ -401,7 +446,10 @@ describe("群组与成员 API", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: reviewerId, roles: ["reviewer"] }),
+        body: JSON.stringify({
+          participantId: reviewerId,
+          roles: ["reviewer"],
+        }),
       });
       expect(addRes.status).toBe(200);
 
@@ -413,7 +461,7 @@ describe("群组与成员 API", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          agentId: reviewerId,
+          participantId: reviewerId,
           roles: ["reviewer", "executor"],
         }),
       });
@@ -425,14 +473,14 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       const members = (await membersRes.json()) as Array<{
-        agentId: string;
+        participantId: string;
         name: string;
         type: string;
         device: string | null;
         roles: string[];
       }>;
       expect(members).toHaveLength(2);
-      const reviewer = members.find((m) => m.agentId === reviewerId);
+      const reviewer = members.find((m) => m.participantId === reviewerId);
       expect(reviewer?.name).toBe("win-hermes");
       expect(reviewer?.type).toBe("hermes");
       expect(reviewer?.device).toBe("win-pc");
@@ -440,8 +488,11 @@ describe("群组与成员 API", () => {
     });
 
     it("roles 缺省或为空时默认 ['observer']", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: watcherId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: watcherId } = await registerParticipant({
         name: "watcher",
         type: "atomcode",
       });
@@ -454,7 +505,7 @@ describe("群组与成员 API", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: watcherId }),
+        body: JSON.stringify({ participantId: watcherId }),
       });
       expect(res.status).toBe(200);
       expect(((await res.json()) as { roles: string[] }).roles).toEqual([
@@ -469,7 +520,7 @@ describe("群组与成员 API", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: watcherId, roles: [] }),
+        body: JSON.stringify({ participantId: watcherId, roles: [] }),
       });
       expect(emptyRes.status).toBe(200);
       expect(((await emptyRes.json()) as { roles: string[] }).roles).toEqual([
@@ -478,8 +529,11 @@ describe("群组与成员 API", () => {
     });
 
     it("roles 不在预设目录中返回 400", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: agentId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: participantId } = await registerParticipant({
         name: "x",
         type: "openclaw",
       });
@@ -491,14 +545,17 @@ describe("群组与成员 API", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId, roles: ["superadmin"] }),
+        body: JSON.stringify({ participantId, roles: ["superadmin"] }),
       });
       expect(res.status).toBe(400);
     });
 
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: agentId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: participantId } = await registerParticipant({
         name: "y",
         type: "hermes",
       });
@@ -510,16 +567,19 @@ describe("群组与成员 API", () => {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ agentId, roles: ["observer"] }),
+          body: JSON.stringify({ participantId, roles: ["observer"] }),
         },
       );
       expect(res.status).toBe(404);
       expect((await res.json()).code).toBe("GROUP_NOT_FOUND");
     });
 
-    it("agent 不存在返回 404 AGENT_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const group = await createGroup(token, "校验 agent");
+    it("participant 不存在返回 404 PARTICIPANT_NOT_FOUND", async () => {
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const group = await createGroup(token, "校验 participant");
       const res = await app.request(`/api/groups/${group.id}/members`, {
         method: "POST",
         headers: {
@@ -527,23 +587,26 @@ describe("群组与成员 API", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          agentId: "00000000-0000-0000-0000-00000000beef",
+          participantId: "00000000-0000-0000-0000-00000000beef",
           roles: ["observer"],
         }),
       });
       expect(res.status).toBe(404);
-      expect((await res.json()).code).toBe("AGENT_NOT_FOUND");
+      expect((await res.json()).code).toBe("PARTICIPANT_NOT_FOUND");
     });
 
-    it("非 UUID groupId/agentId 返回 400", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+    it("非 UUID groupId/participantId 返回 400", async () => {
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const badGroup = await app.request("/api/groups/not-a-uuid/members", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: "also-not-uuid" }),
+        body: JSON.stringify({ participantId: "also-not-uuid" }),
       });
       expect(badGroup.status).toBe(400);
     });
@@ -551,7 +614,10 @@ describe("群组与成员 API", () => {
 
   describe("GET /api/groups/:id/members 成员列表", () => {
     it("群组不存在返回 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/members",
         { headers: { Authorization: `Bearer ${token}` } },
@@ -563,7 +629,10 @@ describe("群组与成员 API", () => {
 
   describe("POST /api/groups/:id/archive 归档", () => {
     it("active -> archived,再次归档返回 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "完成后归档");
 
       const archiveRes = await app.request(`/api/groups/${group.id}/archive`, {
@@ -584,7 +653,10 @@ describe("群组与成员 API", () => {
     });
 
     it("不存在的群组返回 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/archive",
         {
@@ -599,7 +671,10 @@ describe("群组与成员 API", () => {
 
   describe("归档生命周期闭环 (ticket 16): unarchive / 只读 / GET :id / 软删除", () => {
     it("POST /:id/unarchive:archived -> active,再次 unarchive 返回 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "可恢复的归档");
 
       const archiveRes = await app.request(`/api/groups/${group.id}/archive`, {
@@ -645,7 +720,7 @@ describe("群组与成员 API", () => {
     });
 
     it("归档群组禁发消息返回 400,读取(messages/members/:id)仍 200", async () => {
-      const { id: agentId, token } = await registerAgent({
+      const { id: participantId, token } = await registerParticipant({
         name: "coord",
         type: "hermes",
       });
@@ -675,9 +750,11 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(membersRes.status).toBe(200);
-      const members = (await membersRes.json()) as Array<{ agentId: string }>;
+      const members = (await membersRes.json()) as Array<{
+        participantId: string;
+      }>;
       expect(members).toHaveLength(1);
-      expect(members[0].agentId).toBe(agentId);
+      expect(members[0].participantId).toBe(participantId);
 
       const detailRes = await app.request(`/api/groups/${group.id}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -689,7 +766,10 @@ describe("群组与成员 API", () => {
     });
 
     it("GET /:id 返回群组详情含 status,不存在的群组 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "详情查询");
 
       const res = await app.request(`/api/groups/${group.id}`, {
@@ -716,7 +796,10 @@ describe("群组与成员 API", () => {
     });
 
     it("软删除:DELETE /:id 后列表不再返回,active/archived 不受影响,重复删除 404", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const doomed = await createGroup(token, "将被删除");
       const active = await createGroup(token, "保留的进行中");
       const archived = await createGroup(token, "保留的已归档");
@@ -773,7 +856,7 @@ describe("群组与成员 API", () => {
     });
 
     it("软删除保留数据:历史消息仍可查,成员关系仍在", async () => {
-      const { id: agentId, token } = await registerAgent({
+      const { id: participantId, token } = await registerParticipant({
         name: "coord",
         type: "hermes",
       });
@@ -809,14 +892,19 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(membersRes.status).toBe(200);
-      const members = (await membersRes.json()) as Array<{ agentId: string }>;
-      expect(members.some((m) => m.agentId === agentId)).toBe(true);
+      const members = (await membersRes.json()) as Array<{
+        participantId: string;
+      }>;
+      expect(members.some((m) => m.participantId === participantId)).toBe(true);
     });
   });
 
   describe("PATCH /api/groups/:id 绑定项目路径 (projectPath)", () => {
     it("迁移已应用:新建群 GET /:id 返回 projectPath 且初始为 null", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "绑定前");
 
       const res = await app.request(`/api/groups/${group.id}`, {
@@ -828,7 +916,10 @@ describe("群组与成员 API", () => {
     });
 
     it("绑定存在的绝对目录成功,GET /:id 返回该 projectPath", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "绑定成功");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
 
@@ -857,7 +948,10 @@ describe("群组与成员 API", () => {
     });
 
     it("null 与空串均清空绑定", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "清空绑定");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
 
@@ -912,7 +1006,10 @@ describe("群组与成员 API", () => {
     });
 
     it("相对路径 / 不存在路径 / 非目录路径均返回 400", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const group = await createGroup(token, "非法路径");
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
       const filePath = join(dir, "not-a-dir");
@@ -940,7 +1037,10 @@ describe("群组与成员 API", () => {
     });
 
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const dir = mkdtempSync(join(tmpdir(), "coagent-group-proj-"));
 
       const res = await app.request(

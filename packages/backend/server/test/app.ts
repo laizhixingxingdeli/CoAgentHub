@@ -1,10 +1,10 @@
 import BizError from "@laizhixingxingdeli/error/biz";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import agentRouter from "../src/routes/agent";
 import executorRouter from "../src/routes/executor";
 import fileRouter from "../src/routes/file";
 import groupRouter from "../src/routes/group";
+import participantRouter from "../src/routes/participant";
 import systemRouter from "../src/routes/system";
 
 /**
@@ -27,10 +27,15 @@ export function createTestApp() {
     return c.json({ message: "Internal Server Error" }, 500);
   });
 
-  return app
-    .route("/system", systemRouter)
-    .route("/file", fileRouter)
-    .route("/agents", agentRouter)
-    .route("/executors", executorRouter)
-    .route("/groups", groupRouter);
+  return (
+    app
+      .route("/system", systemRouter)
+      .route("/file", fileRouter)
+      // /participants 为主路径;/agents 是历史别名(agent 为 participant 的旧名),
+      // 与 index.ts 挂载保持一致,过渡期兼容旧客户端。
+      .route("/participants", participantRouter)
+      .route("/agents", participantRouter)
+      .route("/executors", executorRouter)
+      .route("/groups", groupRouter)
+  );
 }

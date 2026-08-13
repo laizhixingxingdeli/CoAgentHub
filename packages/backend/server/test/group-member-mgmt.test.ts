@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 
 /**
- * Group member management (ticket 20): DELETE /:id/members/:agentId removes a
- * non-creator member; PATCH /:id/members/:agentId updates a member's roles
+ * Group member management (ticket 20): DELETE /:id/members/:participantId removes a
+ * non-creator member; PATCH /:id/members/:participantId updates a member's roles
  * with the same dedupe rule as POST /members. The creator (群主) can never be
  * removed.
  */
 describe("群组成员管理 API (ticket 20)", () => {
   const app = createTestApp();
 
-  /** Register an agent and return { id, token }. */
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  /** Register an participant and return { id, token }. */
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -44,7 +44,7 @@ describe("群组成员管理 API (ticket 20)", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -53,10 +53,10 @@ describe("群组成员管理 API (ticket 20)", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
-    return (await res.json()) as { agentId: string; roles: string[] };
+    return (await res.json()) as { participantId: string; roles: string[] };
   }
 
   async function listMemberIds(
@@ -67,17 +67,17 @@ describe("群组成员管理 API (ticket 20)", () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(200);
-    const members = (await res.json()) as Array<{ agentId: string }>;
-    return members.map((m) => m.agentId);
+    const members = (await res.json()) as Array<{ participantId: string }>;
+    return members.map((m) => m.participantId);
   }
 
-  describe("DELETE /api/groups/:id/members/:agentId 移除成员", () => {
+  describe("DELETE /api/groups/:id/members/:participantId 移除成员", () => {
     it("移除普通成员成功,移除后 GET members 不含该人", async () => {
-      const { id: ownerId, token } = await registerAgent({
+      const { id: ownerId, token } = await registerParticipant({
         name: "coord",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
+      const { id: memberId } = await registerParticipant({
         name: "win-hermes",
         type: "hermes",
       });
@@ -102,8 +102,11 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("移除不存在的成员返回 404 MEMBER_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: outsiderId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: outsiderId } = await registerParticipant({
         name: "outsider",
         type: "atomcode",
       });
@@ -121,7 +124,10 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("群组不存在返回 404 GROUP_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
       const res = await app.request(
         "/api/groups/00000000-0000-0000-0000-00000000dead/members/00000000-0000-0000-0000-00000000beef",
         {
@@ -134,7 +140,7 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("移除群主返回 400,且群主仍保留在成员列表", async () => {
-      const { id: ownerId, token } = await registerAgent({
+      const { id: ownerId, token } = await registerParticipant({
         name: "coord",
         type: "hermes",
       });
@@ -153,10 +159,13 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
   });
 
-  describe("PATCH /api/groups/:id/members/:agentId 改角色", () => {
+  describe("PATCH /api/groups/:id/members/:participantId 改角色", () => {
     it("改角色成功,更新后 GET 反映新 roles", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: memberId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerParticipant({
         name: "win-hermes",
         type: "hermes",
       });
@@ -176,26 +185,29 @@ describe("群组成员管理 API (ticket 20)", () => {
       );
       expect(patchRes.status).toBe(200);
       const updated = (await patchRes.json()) as {
-        agentId: string;
+        participantId: string;
         roles: string[];
       };
-      expect(updated.agentId).toBe(memberId);
+      expect(updated.participantId).toBe(memberId);
       expect(updated.roles).toEqual(["reviewer", "executor"]);
 
       const membersRes = await app.request(`/api/groups/${group.id}/members`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const members = (await membersRes.json()) as Array<{
-        agentId: string;
+        participantId: string;
         roles: string[];
       }>;
-      const member = members.find((m) => m.agentId === memberId);
+      const member = members.find((m) => m.participantId === memberId);
       expect(member?.roles).toEqual(["reviewer", "executor"]);
     });
 
     it("重复角色去重(与 POST /members 同规则)", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: memberId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerParticipant({
         name: "dedupe",
         type: "atomcode",
       });
@@ -221,8 +233,11 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("roles 空数组返回 400", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: memberId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerParticipant({
         name: "empty",
         type: "hermes",
       });
@@ -244,8 +259,11 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("roles 含非预设角色返回 400", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: memberId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: memberId } = await registerParticipant({
         name: "bogus",
         type: "hermes",
       });
@@ -267,8 +285,11 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("成员不存在返回 404 MEMBER_NOT_FOUND", async () => {
-      const { token } = await registerAgent({ name: "coord", type: "hermes" });
-      const { id: outsiderId } = await registerAgent({
+      const { token } = await registerParticipant({
+        name: "coord",
+        type: "hermes",
+      });
+      const { id: outsiderId } = await registerParticipant({
         name: "outsider",
         type: "atomcode",
       });
@@ -292,12 +313,12 @@ describe("群组成员管理 API (ticket 20)", () => {
 
   describe("成员 prompt(角色解绑,群内分工说明)", () => {
     it("POST 带 prompt 成功,GET members 返回 prompt", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-prompt",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "prompt-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "prompt-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "分工提示词");
@@ -309,35 +330,35 @@ describe("群组成员管理 API (ticket 20)", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          agentId: memberId,
+          participantId: memberId,
           roles: ["executor"],
           prompt: "负责代码执行与测试跑通",
         }),
       });
       expect(res.status).toBe(200);
       const created = (await res.json()) as {
-        agentId: string;
+        participantId: string;
         prompt: string | null;
       };
-      expect(created.agentId).toBe(memberId);
+      expect(created.participantId).toBe(memberId);
       expect(created.prompt).toBe("负责代码执行与测试跑通");
 
       const members = (await (
         await app.request(`/api/groups/${group.id}/members`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-      ).json()) as Array<{ agentId: string; prompt: string | null }>;
-      const member = members.find((m) => m.agentId === memberId);
+      ).json()) as Array<{ participantId: string; prompt: string | null }>;
+      const member = members.find((m) => m.participantId === memberId);
       expect(member?.prompt).toBe("负责代码执行与测试跑通");
     });
 
     it("POST 不带 prompt 不破坏旧行为(prompt 为 null)", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-noprompt",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "plain-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "plain-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "无提示词成员");
@@ -348,7 +369,7 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: memberId, roles: ["observer"] }),
+        body: JSON.stringify({ participantId: memberId, roles: ["observer"] }),
       });
       expect(res.status).toBe(200);
       expect(
@@ -357,12 +378,12 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("幂等 upsert 不带 prompt 保持既有分工提示词", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-upsert",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "upsert-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "upsert-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "upsert 提示词");
@@ -374,7 +395,7 @@ describe("群组成员管理 API (ticket 20)", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          agentId: memberId,
+          participantId: memberId,
           roles: ["executor"],
           prompt: "初始分工",
         }),
@@ -388,7 +409,7 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ agentId: memberId, roles: ["reviewer"] }),
+        body: JSON.stringify({ participantId: memberId, roles: ["reviewer"] }),
       });
       expect(second.status).toBe(200);
       expect(((await second.json()) as { prompt: string | null }).prompt).toBe(
@@ -397,12 +418,12 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("PATCH 只改 prompt:roles 不变", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-patch-prompt",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "patch-prompt-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "patch-prompt-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "只改提示词");
@@ -429,12 +450,12 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("PATCH roles + prompt 同时更新", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-both",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "both-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "both-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "同时更新");
@@ -461,11 +482,11 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("PATCH 空 body(roles 与 prompt 都不给)返回 400", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-empty",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
+      const { id: memberId } = await registerParticipant({
         name: "empty-patch",
         type: "atomcode",
       });
@@ -487,12 +508,12 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
 
     it("prompt 超过 1000 字返回 400", async () => {
-      const { token } = await registerAgent({
+      const { token } = await registerParticipant({
         name: "coord-long",
         type: "hermes",
       });
-      const { id: memberId } = await registerAgent({
-        name: "long-prompt-agent",
+      const { id: memberId } = await registerParticipant({
+        name: "long-prompt-participant",
         type: "atomcode",
       });
       const group = await createGroup(token, "超长提示词校验");
@@ -504,7 +525,7 @@ describe("群组成员管理 API (ticket 20)", () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          agentId: memberId,
+          participantId: memberId,
           roles: ["executor"],
           prompt: "a".repeat(1001),
         }),

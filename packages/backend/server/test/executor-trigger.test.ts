@@ -15,7 +15,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
  *
  * 用 fake bin 做集成测试(票面允许):把 EXECUTOR_BIN_CODEBUDDY 指到一个
  * 临时 shell 脚本(打印「汇报」+ commit hash 后 exit 0),再向 CodeBuddy
- * 执行器 agent 发定向消息 → 断言 server 自动建 task(executor_key=codebuddy)、
+ * 执行器 participant 发定向消息 → 断言 server 自动建 task(executor_key=codebuddy)、
  * spawn 完成后 status=done + diffSummary,且群里出现 🚀/✅ 状态回传。
  *
  * 票2 起 server 在 spawn 前打 git 快照(refs/coagenthub-cp/<taskId>),必须把
@@ -70,8 +70,8 @@ const { createTestApp } = await import("./app");
 describe("server 内嵌执行器触发链路(票1)", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -97,7 +97,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
@@ -106,7 +106,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
     expect(res.status).toBe(200);
   }
@@ -140,7 +140,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     return (await res.json()) as Array<{
       id: string;
       messageId: string;
-      executorAgentId: string;
+      executorParticipantId: string;
       executorKey: string | null;
       status: string;
       diffSummary: unknown;
@@ -182,13 +182,13 @@ describe("server 内嵌执行器触发链路(票1)", () => {
 
   /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
   async function setupGroup() {
-    const coordinator = await registerAgent({
+    const coordinator = await registerParticipant({
       name: "coord-exec",
       type: "hermes",
     });
-    const codebuddy = await registerAgent({
+    const codebuddy = await registerParticipant({
       name: "CodeBuddy 执行器", // executors.ts 的 agentName,触发匹配靠它
-      type: "agent",
+      type: "participant",
     });
     const group = await createGroup(coordinator.token, "执行器触发测试");
     await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
@@ -205,13 +205,13 @@ describe("server 内嵌执行器触发链路(票1)", () => {
 
     const msg = await postMessage(coordinator.token, group.id, {
       body: "建一个文件 hello.txt",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
 
     // server 侧异步 spawn;轮询等 done。
     const task = await waitForTask(coordinator.token, group.id, msg.id);
-    expect(task.executorAgentId).toBe(codebuddy.id);
+    expect(task.executorParticipantId).toBe(codebuddy.id);
     expect(task.executorKey).toBe("codebuddy");
     expect(task.status).toBe("done");
     const diff = task.diffSummary as Record<string, unknown> | null;
@@ -227,21 +227,21 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     expect(statusMsgs.every((m) => m.senderId === codebuddy.id)).toBe(true);
   });
 
-  it("定向到非执行器 agent 的消息不建 task", async () => {
-    const coordinator = await registerAgent({
+  it("定向到非执行器 participant 的消息不建 task", async () => {
+    const coordinator = await registerParticipant({
       name: "coord-plain",
       type: "hermes",
     });
-    const ordinary = await registerAgent({
-      name: "ordinary-agent",
+    const ordinary = await registerParticipant({
+      name: "ordinary-participant",
       type: "custom",
     });
     const group = await createGroup(coordinator.token, "非执行器触发");
     await addMember(coordinator.token, group.id, ordinary.id, ["observer"]);
 
     await postMessage(coordinator.token, group.id, {
-      body: "给普通 agent 的消息",
-      audience: "agent",
+      body: "给普通 participant 的消息",
+      audience: "participant",
       audienceRef: ordinary.id,
     });
     // 等一小段,确认没有 task 被创建(spawn 是异步的,给足时间)。
@@ -254,7 +254,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const msg = await postMessage(coordinator.token, group.id, {
       body: "重复触发测试",
-      audience: "agent",
+      audience: "participant",
       audienceRef: codebuddy.id,
     });
     await waitForTask(coordinator.token, group.id, msg.id);
@@ -298,7 +298,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         Authorization: `Bearer ${coordinator.token}`,
       },
       body: JSON.stringify({
-        agentId: codebuddy.id,
+        participantId: codebuddy.id,
         roles: ["executor"],
         prompt: "负责代码执行与测试跑通",
       }),
@@ -310,7 +310,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     try {
       const msg = await postMessage(coordinator.token, group.id, {
         body: "建一个文件 hello.txt",
-        audience: "agent",
+        audience: "participant",
         audienceRef: codebuddy.id,
       });
       const task = await waitForTask(coordinator.token, group.id, msg.id);
@@ -334,7 +334,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     try {
       const msg = await postMessage(coordinator.token, group.id, {
         body: "建一个文件 hello.txt",
-        audience: "agent",
+        audience: "participant",
         audienceRef: codebuddy.id,
       });
       const task = await waitForTask(coordinator.token, group.id, msg.id);
@@ -377,7 +377,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
           id: "1",
           result: {
             message: {
-              role: "agent",
+              role: "participant",
               parts: [{ kind: "text", text: "ACAT-WIN-OK" }],
             },
             state: { state: "completed" },
@@ -388,11 +388,11 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "coord-a2a",
         type: "hermes",
       });
-      const winHermes = await registerAgent({
+      const winHermes = await registerParticipant({
         name: "Win Hermes", // executors.ts 的 agentName
         type: "hermes",
       });
@@ -401,12 +401,12 @@ describe("server 内嵌执行器触发链路(票1)", () => {
 
       const msg = await postMessage(coordinator.token, group.id, {
         body: "回复 ACAT-WIN-OK",
-        audience: "agent",
+        audience: "participant",
         audienceRef: winHermes.id,
       });
 
       const task = await waitForTask(coordinator.token, group.id, msg.id);
-      expect(task.executorAgentId).toBe(winHermes.id);
+      expect(task.executorParticipantId).toBe(winHermes.id);
       expect(task.executorKey).toBe("win-hermes");
       expect(task.status).toBe("done");
 

@@ -1,19 +1,19 @@
-import { agent as agentTable } from "@laizhixingxingdeli/database/schema";
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
 /**
- * T17 agent 自更新与扩展字段 (ticket 17): PATCH /api/agents/:id 自更新、
- * PUT /api/agents/:id/heartbeat 心跳在线、group_message.content_type、
- * agent.capabilities、file_ref.expiresAt 服务端必填(缺省 now + 7d)。
+ * T17 participant 自更新与扩展字段 (ticket 17): PATCH /api/participants/:id 自更新、
+ * PUT /api/participants/:id/heartbeat 心跳在线、group_message.content_type、
+ * participant.capabilities、file_ref.expiresAt 服务端必填(缺省 now + 7d)。
  */
-describe("T17 agent 自更新与扩展字段", () => {
+describe("T17 participant 自更新与扩展字段", () => {
   const app = createTestApp();
 
-  async function registerAgent(body: Record<string, unknown>) {
-    const res = await app.request("/api/agents", {
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -43,7 +43,7 @@ describe("T17 agent 自更新与扩展字段", () => {
   async function addMember(
     token: string,
     groupId: string,
-    agentId: string,
+    participantId: string,
     roles: string[],
   ) {
     return app.request(`/api/groups/${groupId}/members`, {
@@ -52,7 +52,7 @@ describe("T17 agent 自更新与扩展字段", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId, roles }),
+      body: JSON.stringify({ participantId, roles }),
     });
   }
 
@@ -79,15 +79,15 @@ describe("T17 agent 自更新与扩展字段", () => {
     return (await res.json()) as Array<Record<string, unknown>>;
   }
 
-  describe("PATCH /api/agents/:id 自更新", () => {
+  describe("PATCH /api/participants/:id 自更新", () => {
     it("本人部分更新成功,未更新字段保留,响应不含 token_hash", async () => {
-      const { id, token } = await registerAgent({
+      const { id, token } = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
         device: "mac-mini",
       });
 
-      const res = await app.request(`/api/agents/${id}`, {
+      const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -105,7 +105,7 @@ describe("T17 agent 自更新与扩展字段", () => {
       expect(updated.capabilities).toEqual([]);
 
       // device 可用 null 清空。
-      const clearDevice = await app.request(`/api/agents/${id}`, {
+      const clearDevice = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -119,11 +119,17 @@ describe("T17 agent 自更新与扩展字段", () => {
       ).toBeNull();
     });
 
-    it("他人 token 更新返回 403 且目标 agent 不变", async () => {
-      const a = await registerAgent({ name: "agent-a", type: "hermes" });
-      const b = await registerAgent({ name: "agent-b", type: "atomcode" });
+    it("他人 token 更新返回 403 且目标 participant 不变", async () => {
+      const a = await registerParticipant({
+        name: "participant-a",
+        type: "hermes",
+      });
+      const b = await registerParticipant({
+        name: "participant-b",
+        type: "atomcode",
+      });
 
-      const res = await app.request(`/api/agents/${a.id}`, {
+      const res = await app.request(`/api/participants/${a.id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -134,15 +140,18 @@ describe("T17 agent 自更新与扩展字段", () => {
       expect(res.status).toBe(403);
 
       const [row] = await testDb
-        .select({ name: agentTable.name })
-        .from(agentTable)
-        .where(eq(agentTable.id, a.id));
-      expect(row.name).toBe("agent-a");
+        .select({ name: participantTable.name })
+        .from(participantTable)
+        .where(eq(participantTable.id, a.id));
+      expect(row.name).toBe("participant-a");
     });
 
     it("无 token 回落本地用户:改他人资料返回 403", async () => {
-      const { id } = await registerAgent({ name: "agent-c", type: "hermes" });
-      const res = await app.request(`/api/agents/${id}`, {
+      const { id } = await registerParticipant({
+        name: "participant-c",
+        type: "hermes",
+      });
+      const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "x" }),
@@ -152,11 +161,11 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("空 body(无任何更新字段)返回 400", async () => {
-      const { id, token } = await registerAgent({
+      const { id, token } = await registerParticipant({
         name: "noop",
         type: "hermes",
       });
-      const res = await app.request(`/api/agents/${id}`, {
+      const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -168,14 +177,14 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
   });
 
-  describe("PUT /api/agents/:id/heartbeat 心跳在线", () => {
+  describe("PUT /api/participants/:id/heartbeat 心跳在线", () => {
     it("本人心跳写 last_seen 并返回 lastSeen(时间戳随心跳前进)", async () => {
-      const { id, token } = await registerAgent({
+      const { id, token } = await registerParticipant({
         name: "beat",
         type: "hermes",
       });
 
-      const first = await app.request(`/api/agents/${id}/heartbeat`, {
+      const first = await app.request(`/api/participants/${id}/heartbeat`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -184,13 +193,13 @@ describe("T17 agent 自更新与扩展字段", () => {
       expect(typeof firstBody.lastSeen).toBe("string");
 
       const [row] = await testDb
-        .select({ lastSeen: agentTable.lastSeen })
-        .from(agentTable)
-        .where(eq(agentTable.id, id));
+        .select({ lastSeen: participantTable.lastSeen })
+        .from(participantTable)
+        .where(eq(participantTable.id, id));
       expect(row.lastSeen).toBeInstanceOf(Date);
 
       // 第二次心跳把 last_seen 往前推(>= 第一次,严格大于在毫秒级不可靠)。
-      const second = await app.request(`/api/agents/${id}/heartbeat`, {
+      const second = await app.request(`/api/participants/${id}/heartbeat`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -201,18 +210,24 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("他人心跳 403、无 token 401", async () => {
-      const a = await registerAgent({ name: "beat-a", type: "hermes" });
-      const b = await registerAgent({ name: "beat-b", type: "hermes" });
+      const a = await registerParticipant({ name: "beat-a", type: "hermes" });
+      const b = await registerParticipant({ name: "beat-b", type: "hermes" });
 
-      const forbidden = await app.request(`/api/agents/${a.id}/heartbeat`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${b.token}` },
-      });
+      const forbidden = await app.request(
+        `/api/participants/${a.id}/heartbeat`,
+        {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${b.token}` },
+        },
+      );
       expect(forbidden.status).toBe(403);
 
-      const unauthorized = await app.request(`/api/agents/${a.id}/heartbeat`, {
-        method: "PUT",
-      });
+      const unauthorized = await app.request(
+        `/api/participants/${a.id}/heartbeat`,
+        {
+          method: "PUT",
+        },
+      );
       // LAN trust model: no token → Local User, not the token holder → 403.
       expect(unauthorized.status).toBe(403);
     });
@@ -220,7 +235,7 @@ describe("T17 agent 自更新与扩展字段", () => {
 
   describe("group_message.content_type", () => {
     async function setup() {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
       });
@@ -256,9 +271,9 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
   });
 
-  describe("agent.capabilities", () => {
+  describe("participant.capabilities", () => {
     it("注册时声明 capabilities,注册响应与 GET 列表携带,缺省为空数组", async () => {
-      const declared = await registerAgent({
+      const declared = await registerParticipant({
         name: "reviewer-bot",
         type: "atomcode",
         capabilities: ["text-generation", "code-review"],
@@ -268,13 +283,13 @@ describe("T17 agent 自更新与扩展字段", () => {
         "code-review",
       ]);
 
-      const plain = await registerAgent({
-        name: "plain-agent",
+      const plain = await registerParticipant({
+        name: "plain-participant",
         type: "hermes",
       });
       expect(plain.body.capabilities).toEqual([]);
 
-      const listRes = await app.request("/api/agents");
+      const listRes = await app.request("/api/participants");
       expect(listRes.status).toBe(200);
       const list = (await listRes.json()) as Array<Record<string, unknown>>;
       expect(list.find((a) => a.id === declared.id)?.capabilities).toEqual([
@@ -285,13 +300,13 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("PATCH 可更新 capabilities,响应与 GET 列表携带新值", async () => {
-      const { id, token } = await registerAgent({
+      const { id, token } = await registerParticipant({
         name: "caps-patch",
         type: "atomcode",
         capabilities: ["old-cap"],
       });
 
-      const res = await app.request(`/api/agents/${id}`, {
+      const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -305,9 +320,9 @@ describe("T17 agent 自更新与扩展字段", () => {
       const updated = (await res.json()) as { capabilities: string[] };
       expect(updated.capabilities).toEqual(["text-generation", "code-review"]);
 
-      const list = (await (await app.request("/api/agents")).json()) as Array<
-        Record<string, unknown>
-      >;
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as Array<Record<string, unknown>>;
       expect(list.find((a) => a.id === id)?.capabilities).toEqual([
         "text-generation",
         "code-review",
@@ -315,11 +330,11 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("仅 PATCH capabilities 也算有效更新(不触发 at least one field 400)", async () => {
-      const { id, token } = await registerAgent({
+      const { id, token } = await registerParticipant({
         name: "caps-only",
         type: "atomcode",
       });
-      const res = await app.request(`/api/agents/${id}`, {
+      const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -334,12 +349,12 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("加成员时轻量能力提示:已知能力与角色不匹配时给建议,绝不拒绝", async () => {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
       });
       const group = await createGroup(coordinator.token, "能力匹配任务");
-      const executor = await registerAgent({
+      const executor = await registerParticipant({
         name: "executor-bot",
         type: "atomcode",
         capabilities: ["text-generation"],
@@ -370,17 +385,20 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("加成员时未知能力标签给提示,未声明能力时提示为 null", async () => {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
       });
       const group = await createGroup(coordinator.token, "未知能力任务");
-      const weird = await registerAgent({
+      const weird = await registerParticipant({
         name: "weird-bot",
         type: "custom",
         capabilities: ["quantum-alchemy"],
       });
-      const quiet = await registerAgent({ name: "quiet-bot", type: "custom" });
+      const quiet = await registerParticipant({
+        name: "quiet-bot",
+        type: "custom",
+      });
 
       const weirdRes = await addMember(coordinator.token, group.id, weird.id, [
         "executor",
@@ -412,7 +430,7 @@ describe("T17 agent 自更新与扩展字段", () => {
     };
 
     it("客户端未传 expiresAt → 服务端默认 now + 7 天", async () => {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
       });
@@ -443,7 +461,7 @@ describe("T17 agent 自更新与扩展字段", () => {
     });
 
     it("客户端显式传 expiresAt → 原样保留", async () => {
-      const coordinator = await registerAgent({
+      const coordinator = await registerParticipant({
         name: "hermes-mac",
         type: "hermes",
       });

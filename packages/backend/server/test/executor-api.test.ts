@@ -12,19 +12,19 @@ import { createTestApp } from "./app";
 
 /**
  * 执行器配置管理 API(ticket: 网页 @executor 发布):
- *  - POST /api/executors 新增配置 + 自动注册 agent(名字唯一,重复 → 409;
+ *  - POST /api/executors 新增配置 + 自动注册 participant(名字唯一,重复 → 409;
  *    token 后端生成写 EXECUTOR_STATE_FILE 指向的文件,响应绝不含 token);
  *  - GET /api/executors 返回内置 + DB 全部(不含 token);
  *  - DELETE /api/executors/:key 删除 DB 配置(内置 key → 409);
  *  - 定向消息调度新增执行器:建 task + spawn(与内置执行器同链路)。
  *
  * 状态文件用 EXECUTOR_STATE_FILE 指向临时目录,避免污染仓库内
- * scripts/.executor-agents.json。ENV 在 import 前设置(executors.ts 的
+ * scripts/.executor-participants.json。ENV 在 import 前设置(executors.ts 的
  * env 覆盖在调用时求值,顶层设置即可)。
  */
 
 const stateDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-state-"));
-const stateFile = path.join(stateDir, "executor-agents.json");
+const stateFile = path.join(stateDir, "executor-participants.json");
 process.env.EXECUTOR_STATE_FILE = stateFile;
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-bin-"));
@@ -55,13 +55,13 @@ async function createExecutor(body: Record<string, unknown>) {
   return res;
 }
 
-describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
+describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   afterAll(() => {
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(fakeDir, { recursive: true, force: true });
   });
 
-  it("POST /api/executors 创建配置并注册 agent,响应不含 token", async () => {
+  it("POST /api/executors 创建配置并注册 participant,响应不含 token", async () => {
     const res = await createExecutor({
       agentName: "CLI Tester",
       type: "custom",
@@ -79,17 +79,17 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
     expect(body).not.toHaveProperty("tokenHash");
     expect(JSON.stringify(body)).not.toContain("tokenHash");
 
-    // agent 已注册进 agent 表(token 明文只落 state 文件)。
+    // participant 已注册进 participant 表(token 明文只落 state 文件)。
     const state = JSON.parse(readFileSync(stateFile, "utf8")) as Record<
       string,
       string
     >;
     expect(state["CLI Tester"]).toMatch(/^[0-9a-f]{64}$/);
-    const [agent] = await testDb.query.agent.findMany({
+    const [participant] = await testDb.query.participant.findMany({
       where: (t, { eq }) => eq(t.name, "CLI Tester"),
     });
-    expect(agent).toBeDefined();
-    expect(agent.device).toBe("mac-mini");
+    expect(participant).toBeDefined();
+    expect(participant.device).toBe("mac-mini");
   });
 
   it("POST 重复 agentName → 409(内置与 DB 同名都算重复)", async () => {
@@ -171,8 +171,8 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
     });
     expect(res.status).toBe(200);
 
-    // 注册 coordinator + 取新增执行器 agent 的 id。
-    const reg = await app.request("/api/agents", {
+    // 注册 coordinator + 取新增执行器 participant 的 id。
+    const reg = await app.request("/api/participants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "coord-exec-api", type: "hermes" }),
@@ -182,12 +182,12 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
       token: string;
     };
 
-    const agentsRes = await app.request("/api/agents");
-    const agents = (await agentsRes.json()) as Array<{
+    const participantsRes = await app.request("/api/participants");
+    const participants = (await participantsRes.json()) as Array<{
       id: string;
       name: string;
     }>;
-    const target = agents.find((a) => a.name === "clitest");
+    const target = participants.find((a) => a.name === "clitest");
     expect(target).toBeTruthy();
 
     const groupRes = await app.request("/api/groups", {
@@ -206,7 +206,7 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ agentId: target!.id, roles: ["executor"] }),
+      body: JSON.stringify({ participantId: target!.id, roles: ["executor"] }),
     });
     expect(memberRes.status).toBe(200);
 
@@ -218,7 +218,7 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
       },
       body: JSON.stringify({
         body: "建一个文件 hello.txt",
-        audience: "agent",
+        audience: "participant",
         audienceRef: target!.id,
       }),
     });
@@ -231,7 +231,7 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
       | {
           messageId: string;
           status: string;
-          executorAgentId: string;
+          executorParticipantId: string;
           executorKey: string | null;
           diffSummary: unknown;
         }
@@ -246,7 +246,7 @@ describe("执行器配置管理 API(ticket: 接入 Agent)", () => {
       if (Date.now() > deadline) throw new Error("task 未在 10s 内达到终态");
       await new Promise((r) => setTimeout(r, 100));
     }
-    expect(task!.executorAgentId).toBe(target!.id);
+    expect(task!.executorParticipantId).toBe(target!.id);
     expect(task!.executorKey).toBe("clitest");
     expect(task!.status).toBe("done");
     const diff = task!.diffSummary as Record<string, unknown> | null;

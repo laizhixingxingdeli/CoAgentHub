@@ -15,18 +15,18 @@ import { z } from "zod";
 // 仅作类型适配转换。
 import type { z as zodV4 } from "zod/v4";
 import { timeColumns } from "../utils/columns.js";
-import { agent } from "./agent.js";
 import { groups } from "./group.js";
+import { participant } from "./participant.js";
 
 /**
  * Group messages — the routed bus inside a group (agent-groups spec:
  * "Groups & messages"). Each message carries a sender, an optional parentId
- * (thread tree), and a target audience so an agent only receives the
+ * (thread tree), and a target audience so a participant only receives the
  * messages relevant to it:
  *
- *   broadcast — every group member
- *   role      — members holding audienceRef's role in this group
- *   agent     — only the member identified by audienceRef
+ *   broadcast   — every group member
+ *   role        — members holding audienceRef's role in this group
+ *   participant — only the member identified by audienceRef
  *
  * `human` members bypass the audience rule and see everything (the user
  * watches the whole collaboration process). createdAt is the server receive
@@ -40,14 +40,15 @@ export const groupMessage = pgTable("group_message", {
     .references(() => groups.id),
   senderId: uuid("sender_id")
     .notNull()
-    .references(() => agent.id),
+    .references(() => participant.id),
   parentId: uuid("parent_id").references((): AnyPgColumn => groupMessage.id),
   audience: text("audience", {
-    enum: ["broadcast", "role", "agent"],
+    enum: ["broadcast", "role", "participant"],
   })
     .notNull()
     .default("broadcast"),
-  // role 值时=角色名;agent 值时=agentId;broadcast 时为空。
+  // role 值时=角色名;participant 值时=participantId;broadcast 时为空。
+  // (audience 旧值 "agent" 已由迁移归一为 "participant",服务端也接受旧值。)
   audienceRef: text("audience_ref"),
   body: text("body").notNull(),
   // 内容类型 (ticket 17): 默认 text/plain,可传 application/json 等 — 仅存储
@@ -88,8 +89,25 @@ export const groupMessageClosure = pgTable(
   ],
 );
 
-export const GroupMessageAudience = z.enum(["broadcast", "role", "agent"]);
+export const GroupMessageAudience = z.enum([
+  "broadcast",
+  "role",
+  "participant",
+]);
 export type GroupMessageAudience = z.infer<typeof GroupMessageAudience>;
+
+/**
+ * 服务端接受的历史 audience 值:术语改名前的 `"agent"`(外部执行器 CLI 可能
+ * 仍发旧值)。接受后归一为 "participant" 存储,库中永远只存新值。
+ */
+export const GroupMessageAudienceInput = z
+  .union([
+    z.literal("agent"),
+    z.literal("broadcast"),
+    z.literal("role"),
+    z.literal("participant"),
+  ])
+  .transform((v) => (v === "agent" ? "participant" : v));
 
 /**
  * P2P 文件信令 (ticket 05): 文件元数据 + 发送方设备上的局域网拉取地址。

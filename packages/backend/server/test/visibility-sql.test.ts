@@ -1,7 +1,7 @@
 import {
-  agent as agentTable,
   groupMessage as groupMessageTable,
   groups as groupsTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import {
   type GroupMessageView,
@@ -39,12 +39,12 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
     },
     {
       senderId: "10000000-0000-7000-8000-00000000000d",
-      audience: "agent",
+      audience: "participant",
       audienceRef: "10000000-0000-7000-8000-00000000000a",
     },
     {
       senderId: "10000000-0000-7000-8000-00000000000a",
-      audience: "agent",
+      audience: "participant",
       audienceRef: "10000000-0000-7000-8000-00000000000f",
     },
     {
@@ -62,8 +62,8 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
   ];
 
   async function seed() {
-    // group_message.sender_id references agent(id) — create the sample agents.
-    const agentIds = [
+    // group_message.sender_id references participant(id) — create the sample participants.
+    const participantIds = [
       ...new Set([
         ...SAMPLE_MESSAGES.map((m) => m.senderId),
         "10000000-0000-7000-8000-00000000000f",
@@ -71,9 +71,9 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
         "10000000-0000-7000-8000-0000000000bb",
       ]),
     ];
-    for (const id of agentIds) {
+    for (const id of participantIds) {
       await testDb
-        .insert(agentTable)
+        .insert(participantTable)
         .values({ id, name: id, type: "custom", tokenHash: "unused" })
         .onConflictDoNothing();
     }
@@ -102,7 +102,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
     }
   }
 
-  async function sqlVisibleIds(agentId: string, roles: string[]) {
+  async function sqlVisibleIds(participantId: string, roles: string[]) {
     const rows = await testDb
       .select({
         id: groupMessageTable.id,
@@ -112,7 +112,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
       .where(
         and(
           eq(groupMessageTable.groupId, GROUP_ID),
-          messageVisibleToMemberSql(agentId, roles),
+          messageVisibleToMemberSql(participantId, roles),
         ),
       )
       .orderBy(asc(groupMessageTable.id));
@@ -125,7 +125,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
       const sqlRows = await sqlVisibleIds(member.id, member.roles);
       const expected = SAMPLE_MESSAGES.filter((m) =>
         isMessageVisibleToMember(m, {
-          agentId: member.id,
+          participantId: member.id,
           roles: member.roles,
         }),
       ).length;
@@ -141,7 +141,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
     const rows = await sqlVisibleIds(outsider.id, outsider.roles);
     const expected = SAMPLE_MESSAGES.filter((m) =>
       isMessageVisibleToMember(m, {
-        agentId: outsider.id,
+        participantId: outsider.id,
         roles: outsider.roles,
       }),
     );

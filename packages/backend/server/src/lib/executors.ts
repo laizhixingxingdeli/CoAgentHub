@@ -1,22 +1,25 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  agent as agentTable,
   executorConfig as executorConfigTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import { asc, eq } from "drizzle-orm";
-import { generateAgentToken, hashAgentToken } from "./agent-token";
 import type { DataBase } from "./database";
-import { resolveLocalUser } from "./local-agent";
+import { resolveLocalUser } from "./local-participant";
+import {
+  generateParticipantToken,
+  hashParticipantToken,
+} from "./participant-token";
 
 /**
- * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 agent 身份」。
- * server 在 POST /groups/:id/messages 检测 audience=agent 且 audienceRef 命中
- * 本配置(按 agent.name === agentName 匹配)时创建 task 并 spawn 执行器;
- * 开机时由 ensureExecutorAgents 幂等注册对应 agent。
+ * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 participant
+ * 身份」。server 在 POST /groups/:id/messages 检测 audience=participant 且
+ * audienceRef 命中本配置(按 participant.name === agentName 匹配)时创建 task
+ * 并 spawn 执行器;开机时由 ensureExecutorParticipants 幂等注册对应 participant。
  *
  * 完整集合 = 内置默认(DEFAULT_EXECUTORS)+ DB 持久化配置(executor_config 表,
- * 经「接入 Agent」界面写入),见 effectiveExecutors(db)。
+ * 经「接入 Participant」界面写入),见 effectiveExecutors(db)。
  *
  * bin 可用环境变量覆盖(测试/本机路径差异):EXECUTOR_BIN_<KEY 大写> 优先,
  * 回退到配置默认值。
@@ -25,7 +28,11 @@ import { resolveLocalUser } from "./local-agent";
 export interface ExecutorConfig {
   /** 唯一 key,写入 task.executor_key,标记任务由哪个执行器跑。 */
   key: string;
-  /** agent 展示名;与 agent 表 name 匹配用(桥注册的 agent 名)。 */
+  /**
+   * participant 展示名;与 participant 表 name 匹配用(注册的 participant 名)。
+   * 字段名 agentName 保留旧名(兼容既有 executors.json/DB 行,agent 为
+   * participant 的旧名)。
+   */
   agentName: string;
   type: string;
   bin: string;
@@ -33,7 +40,7 @@ export interface ExecutorConfig {
   args: string[];
   /**
    * 运行方式:cli=本地 spawn(默认,现有三条);a2a=经 A2A gateway 远程调用
-   * 其他设备上的 agent(如 Windows 上的 hermes),server 不 spawn 本地进程。
+   * 其他设备上的 participant(如 Windows 上的 hermes),server 不 spawn 本地进程。
    */
   kind?: "cli" | "a2a";
   /** a2a 的 gateway 基地址(DB 配置存 url 列,与 a2a.url 并存;runner 读 a2a.url)。 */
@@ -51,7 +58,9 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   {
     key: "executor",
     agentName: "AtomCode 执行器",
-    type: "agent",
+    // type 旧值为 "agent"(participant 旧名);只影响新注册行的展示值,
+    // 不与任何路由/权限逻辑耦合,改名后统一为 "participant"。
+    type: "participant",
     bin: "atomcode",
     label: "atomcode",
     args: ["-y", "-p", "{ticket}"],
@@ -59,7 +68,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   {
     key: "reasonix",
     agentName: "Reasoning 执行器",
-    type: "agent",
+    type: "participant",
     bin: "reasonix",
     label: "reasonix",
     args: ["run", "-y", "{ticket}"],
@@ -67,7 +76,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   {
     key: "codebuddy",
     agentName: "CodeBuddy 执行器",
-    type: "agent",
+    type: "participant",
     bin: "codebuddy",
     label: "codebuddy",
     args: ["-y", "-p", "{ticket}"],
@@ -125,7 +134,7 @@ function applyEnvOverrides(ex: ExecutorConfig): ExecutorConfig {
   return override ? { ...ex, bin: override } : ex;
 }
 
-/* ---------------- DB 持久化配置(接入 Agent 界面) ---------------- */
+/* ---------------- DB 持久化配置(接入 Participant 界面) ---------------- */
 
 /** DB 执行器配置行的运行时类型(select 结果元素)。 */
 type ExecutorConfigRow = Awaited<
@@ -140,7 +149,8 @@ export async function listExecutorConfigs(db: DataBase) {
     .orderBy(asc(executorConfigTable.createdAt));
 }
 
-/** 新增一条 DB 执行器配置的入参(key/agent_name 唯一,冲突抛错由路由转 409)。 */
+/** 新增一条 DB 执行器配置的入参(key/agent_name 唯一——列名保留旧名,agent 为
+ *  participant 的旧名,冲突抛错由路由转 409)。 */
 export interface AddExecutorConfigInput {
   key: string;
   agentName: string;
@@ -211,13 +221,13 @@ export async function effectiveExecutors(
   return [...defaultExecutors(), ...rows.map(rowToConfig)];
 }
 
-/** 按 agent 表 name 匹配执行器配置(audienceRef → agent.name → executor)。 */
-export async function findExecutorByAgentName(
+/** 按 participant 表 name 匹配执行器配置(audienceRef → participant.name → executor)。 */
+export async function findExecutorByParticipantName(
   db: DataBase,
-  agentName: string,
+  participantName: string,
 ): Promise<ExecutorConfig | undefined> {
   const all = await effectiveExecutors(db);
-  return all.find((ex) => ex.agentName === agentName);
+  return all.find((ex) => ex.agentName === participantName);
 }
 
 /** 按 key 取执行器配置。 */
@@ -239,29 +249,30 @@ function resolveStateFile(): string {
 }
 
 /**
- * 注册单个执行器配置对应的 agent(幂等,按 name 判重,以 agent 表为唯一
- * 事实源):新建时生成 token 并写 state 文件(明文只落一次,DB 存 SHA-256)。
- * 返回是否真的新建了 agent。供 ensureExecutorAgents 与 POST /api/executors 复用。
+ * 注册单个执行器配置对应的 participant(幂等,按 name 判重,以 participant
+ * 表为唯一事实源):新建时生成 token 并写 state 文件(明文只落一次,DB 存
+ * SHA-256)。返回是否真的新建了 participant。供 ensureExecutorParticipants 与
+ * POST /api/executors 复用。
  */
-export async function registerExecutorAgent(
+export async function registerExecutorParticipant(
   db: DataBase,
   ex: ExecutorConfig,
   stateFile = resolveStateFile(),
   device?: string,
 ): Promise<boolean> {
   const [existing] = await db
-    .select({ name: agentTable.name })
-    .from(agentTable)
-    .where(eq(agentTable.name, ex.agentName))
+    .select({ name: participantTable.name })
+    .from(participantTable)
+    .where(eq(participantTable.name, ex.agentName))
     .limit(1);
   if (existing) return false;
 
-  const token = generateAgentToken();
-  await db.insert(agentTable).values({
+  const token = generateParticipantToken();
+  await db.insert(participantTable).values({
     name: ex.agentName,
     type: ex.type,
     device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
-    tokenHash: hashAgentToken(token),
+    tokenHash: hashParticipantToken(token),
     capabilities: [],
   });
   let state: Record<string, string> = {};
@@ -273,16 +284,17 @@ export async function registerExecutorAgent(
   state[ex.agentName] = token;
   mkdirSync(dirname(stateFile), { recursive: true });
   writeFileSync(stateFile, JSON.stringify(state, null, 2));
-  console.log(`[executors] 已注册 agent: ${ex.agentName}`);
+  console.log(`[executors] 已注册 participant: ${ex.agentName}`);
   return true;
 }
 
 /**
- * 开机自注册:把执行器配置(内置 + DB 配置)对应的 agent 补进 agent 表(幂等,
- * 按 name 判重)。桥已退役,注册职责由 server 承担——token 明文只写一次到
- * scripts/.executor-agents.json(已 gitignore),DB 里只存 SHA-256。
+ * 开机自注册:把执行器配置(内置 + DB 配置)对应的 participant 补进
+ * participant 表(幂等,按 name 判重)。桥已退役,注册职责由 server 承担——
+ * token 明文只写一次到 scripts/.executor-agents.json(已 gitignore),DB 里只
+ * 存 SHA-256。
  */
-export async function ensureExecutorAgents(
+export async function ensureExecutorParticipants(
   db: DataBase,
   stateFile = resolveStateFile(),
 ): Promise<void> {
@@ -290,6 +302,6 @@ export async function ensureExecutorAgents(
   await resolveLocalUser(db);
 
   for (const ex of await effectiveExecutors(db)) {
-    await registerExecutorAgent(db, ex, stateFile);
+    await registerExecutorParticipant(db, ex, stateFile);
   }
 }
