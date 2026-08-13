@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
-import { AGENT_TOKEN_KEY } from "@/lib/api-client";
-import { connectAgentWs } from "./use-group-ws";
+import { PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { connectParticipantWs } from "./use-group-ws";
 
 /**
  * Global unread store for the sidebar conversation list (ticket 23).
@@ -8,7 +8,7 @@ import { connectAgentWs } from "./use-group-ws";
  * One module-level singleton (no provider nesting) shared by the sidebar and
  * the message pages: `useUnread()` subscribes components, `markRead` /
  * `setActiveGroupId` are callable directly. The store owns a single resident
- * WS connection (`connectAgentWs`, same backoff as the per-group message hook)
+ * WS connection (`connectParticipantWs`, same backoff as the per-group message hook)
  * and counts `group_message` frames per group — the server hub already pushes
  * every group the token can see, so the badge is pure frontend with zero
  * backend changes.
@@ -58,7 +58,7 @@ let storageListener: (() => void) | null = null;
 
 function readToken(): string {
   return typeof localStorage !== "undefined"
-    ? (localStorage.getItem(AGENT_TOKEN_KEY) ?? "")
+    ? (localStorage.getItem(PARTICIPANT_TOKEN_KEY) ?? "")
     : "";
 }
 
@@ -119,7 +119,7 @@ export function syncUnreadConnection(): void {
     teardownWs = null;
   }
   socketToken = token;
-  teardownWs = connectAgentWs({
+  teardownWs = connectParticipantWs({
     onFrame: handleFrame,
   });
 }

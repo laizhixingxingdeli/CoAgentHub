@@ -15,7 +15,7 @@ export function groupMessageFrame(
     message: {
       id: `msg-${groupId}-${body}`,
       groupId,
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,

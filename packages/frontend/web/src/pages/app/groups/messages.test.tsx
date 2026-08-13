@@ -13,7 +13,7 @@ import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import GroupLayout from "@/components/layout/group-layout";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
-import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
 import { __resetNotificationState } from "@/lib/notifications";
 import { groupMessageFrame } from "@/test/frames";
 import {
@@ -23,10 +23,10 @@ import {
 } from "@/test/utils";
 import { MockWebSocket } from "@/test/ws-mock";
 import GroupMessagesPage, {
-  AGENT_COLORS,
-  agentColor,
   detectMention,
   formatMessageTime,
+  PARTICIPANT_COLORS,
+  participantColor,
   resolveAudience,
 } from "./messages";
 
@@ -34,7 +34,7 @@ const MESSAGES = [
   {
     id: "msg-1",
     groupId: "group-1",
-    senderId: "agent-1",
+    senderId: "participant-1",
     parentId: null,
     audience: "broadcast",
     audienceRef: null,
@@ -45,7 +45,7 @@ const MESSAGES = [
   {
     id: "msg-2",
     groupId: "group-1",
-    senderId: "agent-2",
+    senderId: "participant-2",
     parentId: "msg-1",
     audience: "role",
     audienceRef: "reviewer",
@@ -57,7 +57,7 @@ const MESSAGES = [
 
 const MEMBERS = [
   {
-    agentId: "agent-1",
+    participantId: "participant-1",
     name: "hermes-mac",
     type: "hermes",
     device: "mac-mini",
@@ -65,7 +65,7 @@ const MEMBERS = [
     joinedAt: "2026-08-01T00:00:00.000Z",
   },
   {
-    agentId: "agent-2",
+    participantId: "participant-2",
     name: "win-hermes",
     type: "hermes",
     device: "win-pc",
@@ -184,7 +184,7 @@ function messagesFetchMock(
           ...(existing ?? {
             id: messageId,
             groupId: "group-1",
-            senderId: "agent-1",
+            senderId: "participant-1",
             parentId: null,
             audience: "broadcast",
             audienceRef: null,
@@ -213,7 +213,7 @@ const TASKS = [
     id: "task-1",
     groupId: "group-1",
     messageId: "msg-1",
-    executorAgentId: "agent-1",
+    executorParticipantId: "participant-1",
     executorKey: "codebuddy",
     status: "running",
     checkpointRef: null,
@@ -225,7 +225,7 @@ const TASKS = [
     id: "task-2",
     groupId: "group-1",
     messageId: "msg-2",
-    executorAgentId: "agent-2",
+    executorParticipantId: "participant-2",
     executorKey: "codebuddy2",
     status: "done",
     checkpointRef: "refs/coagenthub-cp/task-2",
@@ -291,7 +291,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
       tasksAfterCommand: cancelledTasks,
     });
     // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -312,7 +312,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
       tasks: TASKS,
     });
     // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -397,10 +397,10 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
     });
   });
 
-  it("@<成员 name> → agent + audienceRef=agentId", () => {
+  it("@<成员 name> → participant + audienceRef=participantId", () => {
     expect(resolveAudience("请 @win-hermes 看一下", MEMBERS)).toEqual({
-      audience: "agent",
-      audienceRef: "agent-2",
+      audience: "participant",
+      audienceRef: "participant-2",
     });
   });
 
@@ -423,11 +423,11 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
     });
   });
 
-  it("@<含空格成员名> → agent + audienceRef=agentId", () => {
+  it("@<含空格成员名> → participant + audienceRef=participantId", () => {
     const withSpace = [
       ...MEMBERS,
       {
-        agentId: "agent-9",
+        participantId: "participant-9",
         name: "CodeBuddy 执行器",
         type: "hermes",
         device: "mac",
@@ -435,13 +435,13 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
       },
     ];
     expect(resolveAudience("@CodeBuddy 执行器 你好", withSpace)).toEqual({
-      audience: "agent",
-      audienceRef: "agent-9",
+      audience: "participant",
+      audienceRef: "participant-9",
     });
     // 成员名嵌在正文中间也能命中
     expect(resolveAudience("请 @CodeBuddy 执行器 处理下", withSpace)).toEqual({
-      audience: "agent",
-      audienceRef: "agent-9",
+      audience: "participant",
+      audienceRef: "participant-9",
     });
   });
 
@@ -449,7 +449,7 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
     const withSpace = [
       ...MEMBERS,
       {
-        agentId: "agent-9",
+        participantId: "participant-9",
         name: "CodeBuddy 执行器",
         type: "hermes",
         device: "mac",
@@ -457,8 +457,8 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
       },
     ];
     expect(resolveAudience("@codebuddy 执行器 你好", withSpace)).toEqual({
-      audience: "agent",
-      audienceRef: "agent-9",
+      audience: "participant",
+      audienceRef: "participant-9",
     });
   });
 
@@ -466,7 +466,7 @@ describe("resolveAudience @ 解析 (ticket 18)", () => {
     const withSpace = [
       ...MEMBERS,
       {
-        agentId: "agent-9",
+        participantId: "participant-9",
         name: "CodeBuddy 执行器",
         type: "hermes",
         device: "mac",
@@ -500,22 +500,36 @@ describe("detectMention 光标处 @ 检测 (ticket 18)", () => {
   });
 });
 
-describe("agentColor 头像分色 (ticket 32)", () => {
-  it("同一 agentId 稳定返回同一颜色", () => {
-    expect(agentColor("agent-1")).toBe(agentColor("agent-1"));
-    expect(agentColor("agent-2")).toBe(agentColor("agent-2"));
-    expect(agentColor("unknown-xyz")).toBe(agentColor("unknown-xyz"));
+describe("participantColor 头像分色 (ticket 32)", () => {
+  it("同一 participantId 稳定返回同一颜色", () => {
+    expect(participantColor("participant-1")).toBe(
+      participantColor("participant-1"),
+    );
+    expect(participantColor("participant-2")).toBe(
+      participantColor("participant-2"),
+    );
+    expect(participantColor("unknown-xyz")).toBe(
+      participantColor("unknown-xyz"),
+    );
   });
 
   it("返回值在预置色板内", () => {
-    expect(AGENT_COLORS).toHaveLength(10);
-    for (const id of ["agent-1", "agent-2", "a", "", "unknown-xyz"]) {
-      expect(AGENT_COLORS).toContain(agentColor(id));
+    expect(PARTICIPANT_COLORS).toHaveLength(10);
+    for (const id of [
+      "participant-1",
+      "participant-2",
+      "a",
+      "",
+      "unknown-xyz",
+    ]) {
+      expect(PARTICIPANT_COLORS).toContain(participantColor(id));
     }
   });
 
-  it("不同 agentId 通常得到不同颜色", () => {
-    expect(agentColor("agent-1")).not.toBe(agentColor("agent-2"));
+  it("不同 participantId 通常得到不同颜色", () => {
+    expect(participantColor("participant-1")).not.toBe(
+      participantColor("participant-2"),
+    );
   });
 });
 
@@ -571,7 +585,7 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     const todayMsg = {
       id: "r-1",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast" as const,
       audienceRef: null,
@@ -582,7 +596,7 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     const oldMsg = {
       id: "r-2",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: null,
       audience: "broadcast" as const,
       audienceRef: null,
@@ -602,11 +616,15 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     await screen.findByText("今天的气泡");
     expect(screen.getByText("早些的气泡")).toBeInTheDocument();
 
-    // ① 头像:agent-1/agent-2 各自稳定的分色类,设备只在 title(tooltip)
+    // ① 头像:participant-1/participant-2 各自稳定的分色类,设备只在 title(tooltip)
     const avatar1 = screen.getByTitle("hermes-mac mac-mini");
     const avatar2 = screen.getByTitle("win-hermes win-pc");
-    expect(avatar1.className).toContain(agentColor("agent-1").split(" ")[0]);
-    expect(avatar2.className).toContain(agentColor("agent-2").split(" ")[0]);
+    expect(avatar1.className).toContain(
+      participantColor("participant-1").split(" ")[0],
+    );
+    expect(avatar2.className).toContain(
+      participantColor("participant-2").split(" ")[0],
+    );
     // 设备不再作为可见文本出现
     expect(screen.queryByText(/mac-mini|win-pc/)).toBeNull();
 
@@ -628,7 +646,7 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
     {
       id: "msg-file-1",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -675,7 +693,7 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
         {
           id: "msg-file-kb",
           groupId: "group-1",
-          senderId: "agent-1",
+          senderId: "participant-1",
           parentId: null,
           audience: "broadcast",
           audienceRef: null,
@@ -773,21 +791,21 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
 });
 
 describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
-  it("绑定 agentId 后自己的消息靠右(蓝气泡 + 我 徽章),他人靠左", async () => {
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+  it("绑定 participantId 后自己的消息靠右(蓝气泡 + 我 徽章),他人靠左", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await screen.findByText("任务草稿");
 
-    // msg-1 是 agent-1 发送的 → own
+    // msg-1 是 participant-1 发送的 → own
     const own = screen.getByText("任务草稿").closest("li");
     expect(own).toHaveAttribute("data-own", "true");
     expect(own?.className).toContain("flex-row-reverse");
     // 蓝气泡类:bg-primary(own 专属)
     expect(own?.textContent).toContain("我");
 
-    // msg-2 是 agent-2 发送的 → 他人,靠左
+    // msg-2 是 participant-2 发送的 → 他人,靠左
     const other = screen.getByText("修正意见").closest("li");
     expect(other).toHaveAttribute("data-own", "false");
     expect(other?.className).not.toContain("flex-row-reverse");
@@ -816,7 +834,7 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
     expect(otherBar.className).toContain("ml-1");
   });
 
-  it("未绑定 agentId 时所有消息默认靠左、不显示「我」徽章", async () => {
+  it("未绑定 participantId 时所有消息默认靠左、不显示「我」徽章", async () => {
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
@@ -895,7 +913,7 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
     expect(screen.queryByRole("listbox", { name: "提及候选" })).toBeNull();
   });
 
-  it("发送前显示解析结果预览(role / agent / broadcast)", async () => {
+  it("发送前显示解析结果预览(role / participant / broadcast)", async () => {
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
     await screen.findByText("任务草稿");
@@ -906,7 +924,7 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
     expect(preview()).toContain("将发送给 role:reviewer");
 
     typeMessage("@win-hermes 私聊");
-    expect(preview()).toContain("将发送给 agent:win-hermes");
+    expect(preview()).toContain("将发送给 participant:win-hermes");
 
     typeMessage("普通广播");
     expect(preview()).toContain("将发送给 全体成员");
@@ -934,7 +952,7 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
     });
   });
 
-  it("@<成员 name> → audience=agent + audienceRef=agentId", async () => {
+  it("@<成员 name> → audience=participant + audienceRef=participantId", async () => {
     const fetchMock = stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
     await screen.findByText("任务草稿");
@@ -945,8 +963,8 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
     await waitFor(() => {
       expect(lastPostPayload(fetchMock)).toEqual({
         body: "@win-hermes 只给你",
-        audience: "agent",
-        audienceRef: "agent-2",
+        audience: "participant",
+        audienceRef: "participant-2",
       });
     });
   });
@@ -1064,7 +1082,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
           message: {
             id,
             groupId: "group-1",
-            senderId: "agent-1",
+            senderId: "participant-1",
             parentId: null,
             audience: "broadcast",
             audienceRef: null,
@@ -1077,7 +1095,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
     );
 
   it("WS 推送的 group_message 实时追加到消息流(无需刷新)", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1089,13 +1107,13 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   });
 
   it("WS 回显与发送后 reload 不重复(按 id 去重)", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     let reloads = 0;
     const SENT_MSG = {
       id: "msg-9",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast" as const,
       audienceRef: null,
@@ -1151,7 +1169,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   });
 
   it("其它群组的 group_message 帧不追加", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1166,7 +1184,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
           message: {
             id: "msg-other-1",
             groupId: "group-other",
-            senderId: "agent-2",
+            senderId: "participant-2",
             parentId: null,
             audience: "broadcast",
             audienceRef: null,
@@ -1187,7 +1205,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-root",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -1198,7 +1216,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-child-1",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: "t-root",
       audience: "broadcast",
       audienceRef: null,
@@ -1209,7 +1227,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-child-2",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: "t-root",
       audience: "broadcast",
       audienceRef: null,
@@ -1220,7 +1238,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-grand",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: "t-child-1",
       audience: "broadcast",
       audienceRef: null,
@@ -1231,7 +1249,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-orphan",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: "t-not-loaded",
       audience: "broadcast",
       audienceRef: null,
@@ -1242,7 +1260,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
     {
       id: "t-solo",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -1313,7 +1331,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   });
 
   it("WS 追加后折叠状态保持,计数 badge 即使折叠中也更新", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock(THREAD));
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1331,7 +1349,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
           message: {
             id: "t-ws-1",
             groupId: "group-1",
-            senderId: "agent-2",
+            senderId: "participant-2",
             parentId: "t-root",
             audience: "broadcast",
             audienceRef: null,
@@ -1404,7 +1422,7 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
     expect(hoverBars[0].className).toContain("hidden");
     expect(hoverBars[0].className).toContain("md:flex");
     // Ticket 44: hover 操作条贴气泡角——bottom-0 底边=气泡底边;未绑定
-    // agentId → 全是他人消息,left-full ml-1(左缘=气泡右缘)。
+    // participantId → 全是他人消息,left-full ml-1(左缘=气泡右缘)。
     expect(hoverBars[0].className).toContain("bottom-0");
     expect(hoverBars[0].className).toContain("left-full");
     expect(hoverBars[0].className).toContain("ml-1");
@@ -1434,7 +1452,7 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
       {
         id: "deep-1",
         groupId: "group-1",
-        senderId: "agent-1",
+        senderId: "participant-1",
         parentId: "msg-1",
         audience: "broadcast",
         audienceRef: null,
@@ -1459,7 +1477,7 @@ describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
     await screen.findByText("任务草稿");
 
-    // 回复 msg-1(agent-1 的「任务草稿」)
+    // 回复 msg-1(participant-1 的「任务草稿」)
     fireEvent.click(
       within(rowOf("任务草稿")!).getByRole("button", { name: "回复" }),
     );
@@ -1581,7 +1599,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
       message: {
         id,
         groupId: "group-1",
-        senderId: "agent-2",
+        senderId: "participant-2",
         parentId: null,
         audience: "broadcast",
         audienceRef: null,
@@ -1592,7 +1610,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
     });
 
   it("WS 收到新消息且不在底部 → 底部 pill 出现;点击后滚到底部并消失", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1620,7 +1638,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
   });
 
   it("用户滚回底部时积压清零,pill 消失", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1683,17 +1701,17 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
     const t0 = noon(0);
     stubFetch(
       messagesFetchMock([
-        msg("g-1", "agent-1", "第一条", t0),
+        msg("g-1", "participant-1", "第一条", t0),
         msg(
           "g-2",
-          "agent-1",
+          "participant-1",
           "第二条",
           new Date(Date.parse(t0) + 60_000).toISOString(),
         ),
         // 距上一条 6 分钟(12:00 → 12:01 → 12:07):跨 5 分钟窗口,重新出头
         msg(
           "g-3",
-          "agent-1",
+          "participant-1",
           "第三条",
           new Date(Date.parse(t0) + 7 * 60_000).toISOString(),
         ),
@@ -1755,10 +1773,10 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
     );
     stubFetch(
       messagesFetchMock([
-        msg("d-1", "agent-1", "三天前消息", d3.toISOString()),
-        msg("d-2", "agent-2", "两天前消息", d2.toISOString()),
-        msg("d-3", "agent-1", "昨天消息", d1.toISOString()),
-        msg("d-4", "agent-2", "今天消息", d0.toISOString()),
+        msg("d-1", "participant-1", "三天前消息", d3.toISOString()),
+        msg("d-2", "participant-2", "两天前消息", d2.toISOString()),
+        msg("d-3", "participant-1", "昨天消息", d1.toISOString()),
+        msg("d-4", "participant-2", "今天消息", d0.toISOString()),
       ]),
     );
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1791,8 +1809,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
     );
 
   beforeEach(() => {
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
   });
 
   it("编辑:点编辑 → 输入框出现;保存 → PATCH 调用 + 本地更新 + 退出编辑态", async () => {
@@ -1897,7 +1915,7 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
     await screen.findByText("任务草稿");
 
-    // msg-2 是 agent-2 发送的 → 无编辑/删除
+    // msg-2 是 participant-2 发送的 → 无编辑/删除
     const otherRow = rowOf("修正意见");
     expect(
       within(otherRow!).queryByRole("button", { name: "编辑" }),
@@ -1916,7 +1934,7 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
       {
         ...MESSAGES[1],
         id: "msg-3",
-        senderId: "agent-1",
+        senderId: "participant-1",
         body: "第二条自己的",
       },
     ];
@@ -2001,7 +2019,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     {
       id: "st-1",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -2013,7 +2031,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     {
       id: "st-2",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -2025,7 +2043,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     {
       id: "st-3",
       groupId: "group-1",
-      senderId: "agent-2",
+      senderId: "participant-2",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -2075,7 +2093,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         {
           id: "ds-1",
           groupId: "group-1",
-          senderId: "agent-2",
+          senderId: "participant-2",
           parentId: null,
           audience: "broadcast",
           audienceRef: null,
@@ -2104,7 +2122,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         {
           id: "long-1",
           groupId: "group-1",
-          senderId: "agent-1",
+          senderId: "participant-1",
           parentId: null,
           audience: "broadcast",
           audienceRef: null,
@@ -2146,7 +2164,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         {
           id: "st-long",
           groupId: "group-1",
-          senderId: "agent-2",
+          senderId: "participant-2",
           parentId: null,
           audience: "broadcast",
           audienceRef: null,
@@ -2179,7 +2197,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         {
           id: "st-del",
           groupId: "group-1",
-          senderId: "agent-2",
+          senderId: "participant-2",
           parentId: null,
           audience: "broadcast",
           audienceRef: null,
@@ -2197,15 +2215,15 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     expect(screen.queryByTestId("task-status")).toBeNull();
   });
 
-  it("受众标签:agent → @成员名 / 未知 ref → 前 8 位;role → @角色名;broadcast 无标签", async () => {
+  it("受众标签:participant → @成员名 / 未知 ref → 前 8 位;role → @角色名;broadcast 无标签", async () => {
     const TARGETED = [
       {
         id: "ag-1",
         groupId: "group-1",
-        senderId: "agent-1",
+        senderId: "participant-1",
         parentId: null,
-        audience: "agent",
-        audienceRef: "agent-2",
+        audience: "participant",
+        audienceRef: "participant-2",
         body: "只给 win-hermes",
         depth: 0,
         createdAt: "2026-08-02T00:00:00.000Z",
@@ -2213,9 +2231,9 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
       {
         id: "ag-2",
         groupId: "group-1",
-        senderId: "agent-1",
+        senderId: "participant-1",
         parentId: null,
-        audience: "agent",
+        audience: "participant",
         audienceRef: "abc12345-unknown-member",
         body: "未知成员",
         depth: 0,
@@ -2224,7 +2242,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
       {
         id: "ag-3",
         groupId: "group-1",
-        senderId: "agent-1",
+        senderId: "participant-1",
         parentId: null,
         audience: "role",
         audienceRef: "reviewer",
@@ -2235,7 +2253,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
       {
         id: "ag-4",
         groupId: "group-1",
-        senderId: "agent-1",
+        senderId: "participant-1",
         parentId: null,
         audience: "broadcast",
         audienceRef: null,
@@ -2248,7 +2266,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await screen.findByText("只给 win-hermes");
-    // agent 命中成员 → @成员名;未知 ref → @ref 前 8 位;role → @角色名
+    // participant 命中成员 → @成员名;未知 ref → @ref 前 8 位;role → @角色名
     expect(screen.getByText("→ @win-hermes")).toBeInTheDocument();
     expect(screen.getByText("→ @abc12345")).toBeInTheDocument();
     expect(screen.getByText("→ @reviewer")).toBeInTheDocument();
@@ -2282,7 +2300,7 @@ describe("ticket 23 接线:进入消息页 markRead", () => {
   });
 
   it("打开消息页后该群的全局未读清零", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
 
@@ -2405,7 +2423,7 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
       "负责统筹协调与最终验收,检查所有产出物并汇总汇报给人类主管,确保进度可控且质量达标,及时同步风险";
     const DIVISION_MEMBERS = [
       {
-        agentId: "agent-1",
+        participantId: "participant-1",
         name: "hermes-mac",
         type: "hermes",
         device: "mac-mini",
@@ -2414,7 +2432,7 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
         joinedAt: "2026-08-01T00:00:00.000Z",
       },
       {
-        agentId: "agent-2",
+        participantId: "participant-2",
         name: "win-hermes",
         type: "hermes",
         device: "win-pc",
@@ -2465,7 +2483,7 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
 
   let focusSpy: ReturnType<typeof vi.spyOn>;
 
-  /** 推一条他人(agent-2)的 group_message 帧,等价于服务器 WS hub 推送。 */
+  /** 推一条他人(participant-2)的 group_message 帧,等价于服务器 WS hub 推送。 */
   const pushFrame = (ws: MockWebSocket, body: string, id: string) =>
     act(() =>
       ws.receive(
@@ -2475,7 +2493,7 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
           message: {
             id,
             groupId: "group-1",
-            senderId: "agent-2",
+            senderId: "participant-2",
             parentId: null,
             audience: "broadcast",
             audienceRef: null,
@@ -2488,8 +2506,8 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
     );
 
   beforeEach(() => {
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     __resetNotificationState();
     MockNotification.instances = [];
     MockNotification.permission = "granted";
@@ -2549,7 +2567,7 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await screen.findByText("任务草稿");
-    // senderId == 当前绑定 agent-1:即使隐藏也不打扰
+    // senderId == 当前绑定 participant-1:即使隐藏也不打扰
     act(() =>
       MockWebSocket.instances[0].receive(
         JSON.stringify({
@@ -2558,7 +2576,7 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
           message: {
             id: "notify-3",
             groupId: "group-1",
-            senderId: "agent-1",
+            senderId: "participant-1",
             parentId: null,
             audience: "broadcast",
             audienceRef: null,

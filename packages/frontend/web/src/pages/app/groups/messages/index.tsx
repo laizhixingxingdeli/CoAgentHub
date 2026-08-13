@@ -14,12 +14,15 @@ import {
   setActiveGroupId,
   updateLastMessage,
 } from "@/hooks/use-unread";
-import { AGENT_ID_KEY, agentAuthHeaders } from "@/lib/api-client";
-import { AGENT_COLORS, colorForId as agentColor } from "@/lib/avatar-color";
+import { PARTICIPANT_ID_KEY, participantAuthHeaders } from "@/lib/api-client";
+import {
+  PARTICIPANT_COLORS,
+  colorForId as participantColor,
+} from "@/lib/avatar-color";
 import { maybeNotifyGroupMessage } from "@/lib/notifications";
 
 // Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
-// `agentColor`/`AGENT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
+// `participantColor`/`PARTICIPANT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
 
 /**
  * Preset role catalog (mirrors the server-side GROUP_ROLES). Drives the
@@ -144,13 +147,13 @@ export default function GroupMessagesPage() {
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusRafRef = useRef<number | null>(null);
 
-  // The bound agent id (saved with the token on the groups page). Absent ⇒
+  // The bound participant id (saved with the token on the groups page). Absent ⇒
   // no "own" messages: everything renders left-aligned without the 我 badge
   // (never guess — the server can't be asked for it via token).
-  const myAgentId = useMemo(
+  const myParticipantId = useMemo(
     () =>
       typeof localStorage !== "undefined"
-        ? localStorage.getItem(AGENT_ID_KEY)
+        ? localStorage.getItem(PARTICIPANT_ID_KEY)
         : null,
     [],
   );
@@ -163,8 +166,8 @@ export default function GroupMessagesPage() {
   groupTitleRef.current = groupTitle;
   const membersRef = useRef<Member[]>([]);
   membersRef.current = members;
-  const myAgentIdRef = useRef<string | null>(null);
-  myAgentIdRef.current = myAgentId;
+  const myParticipantIdRef = useRef<string | null>(null);
+  myParticipantIdRef.current = myParticipantId;
 
   // Archived AND soft-deleted groups are read-only (the backend rejects any
   // non-active group with 400): fetch the single-group status so the page can
@@ -176,7 +179,7 @@ export default function GroupMessagesPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         return;
@@ -208,7 +211,7 @@ export default function GroupMessagesPage() {
           ? `/api/groups/${groupId}/messages?q=${encodeURIComponent(q)}`
           : `/api/groups/${groupId}/messages`;
         const res = await fetch(url, {
-          headers: agentAuthHeaders(),
+          headers: participantAuthHeaders(),
         });
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
@@ -288,7 +291,7 @@ export default function GroupMessagesPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         return;
@@ -341,14 +344,14 @@ export default function GroupMessagesPage() {
         // try/catch-wrapped inside the helper (zero noise on unsupported
         // browsers).
         const sender = membersRef.current.find(
-          (m) => m.agentId === event.message.senderId,
+          (m) => m.participantId === event.message.senderId,
         );
         maybeNotifyGroupMessage({
           groupId,
           groupTitle: groupTitleRef.current,
           senderName: sender?.name ?? event.message.senderId.slice(0, 8),
           message: event.message,
-          myAgentId: myAgentIdRef.current,
+          myParticipantId: myParticipantIdRef.current,
           navigate,
         });
         // Search mode shows the q= snapshot only: new frames may not match the
@@ -481,7 +484,10 @@ export default function GroupMessagesPage() {
       }
       const res = await fetch(`/api/groups/${groupId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...agentAuthHeaders() },
+        headers: {
+          "Content-Type": "application/json",
+          ...participantAuthHeaders(),
+        },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
@@ -518,7 +524,7 @@ export default function GroupMessagesPage() {
         continue;
       }
       if (!q || m.name.toLowerCase().startsWith(q)) {
-        list.push({ token: m.name, kind: "agent" });
+        list.push({ token: m.name, kind: "participant" });
       }
     }
     return list;
@@ -594,9 +600,11 @@ export default function GroupMessagesPage() {
     if (resolved.audience === "role") {
       return `role:${resolved.audienceRef}`;
     }
-    if (resolved.audience === "agent") {
-      const target = members.find((m) => m.agentId === resolved.audienceRef);
-      return `agent:${target ? target.name : resolved.audienceRef}`;
+    if (resolved.audience === "participant") {
+      const target = members.find(
+        (m) => m.participantId === resolved.audienceRef,
+      );
+      return `participant:${target ? target.name : resolved.audienceRef}`;
     }
     return "全体成员";
   }, [body, members]);
@@ -643,7 +651,7 @@ export default function GroupMessagesPage() {
   // the sender name + the first 30 chars of the body, and focus the textarea.
   const handleReply = (msg: MessageItem) => {
     const senderName =
-      members.find((m) => m.agentId === msg.senderId)?.name ??
+      members.find((m) => m.participantId === msg.senderId)?.name ??
       msg.senderId.slice(0, 8);
     const text = msg.body || msg.fileRef?.name || "";
     const preview = text.length > 30 ? `${text.slice(0, 30)}…` : text;
@@ -710,7 +718,7 @@ export default function GroupMessagesPage() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...agentAuthHeaders(),
+          ...participantAuthHeaders(),
         },
         body: JSON.stringify({ body: trimmed }),
       });
@@ -743,7 +751,7 @@ export default function GroupMessagesPage() {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages/${msg.id}`, {
         method: "DELETE",
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -880,7 +888,7 @@ export default function GroupMessagesPage() {
         loading={loading}
         messages={messages}
         members={members}
-        myAgentId={myAgentId}
+        myParticipantId={myParticipantId}
         expandedIds={expandedIds}
         collapsedRootIds={collapsedRootIds}
         threadTree={threadTree}
@@ -927,4 +935,4 @@ export default function GroupMessagesPage() {
 
 export { detectMention, formatMessageTime, resolveAudience } from "./lib";
 // Re-exports kept for the test suite (pre-split module surface).
-export { AGENT_COLORS, agentColor };
+export { PARTICIPANT_COLORS, participantColor };

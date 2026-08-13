@@ -112,8 +112,8 @@ export function dayLabel(iso: string): string {
 
 /**
  * Resolve the audience a composed body will be delivered to (ticket 18):
- * - `@<成员 name>` (a group member; names may contain spaces) → `agent` +
- *   `audienceRef=<agentId>`
+ * - `@<成员 name>` (a group member; names may contain spaces) → `participant` +
+ *   `audienceRef=<participantId>`
  * - `@<角色名>` (GROUP_ROLES) → `role` + `audienceRef=<角色名>`
  * - no mention → `broadcast`
  * - mentions that match no candidate (`@xxx`) are left in the body as plain
@@ -151,7 +151,7 @@ export function resolveAudience(
       // char ("@win-hermes2" is not "@win-hermes").
       const after = body[i + 1 + name.length];
       if (after === undefined || !/\w/.test(after)) {
-        return { audience: "agent", audienceRef: m.agentId };
+        return { audience: "participant", audienceRef: m.participantId };
       }
     }
     // 2) single-word role token (roles never contain spaces)
@@ -193,5 +193,5 @@ export function detectMention(
 
 export type MentionCandidate = {
   token: string;
-  kind: "role" | "agent";
+  kind: "role" | "participant";
 };

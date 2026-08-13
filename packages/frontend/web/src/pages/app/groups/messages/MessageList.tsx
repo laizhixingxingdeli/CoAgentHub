@@ -1,7 +1,7 @@
 import { ArrowDown, Download, FileText, MessageCircle } from "lucide-react";
 import { Fragment } from "react";
 import { Button } from "@/components/ui/button";
-import { colorForId as agentColor } from "@/lib/avatar-color";
+import { colorForId as participantColor } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
 import {
   dayKey,
@@ -23,7 +23,7 @@ interface MessageListProps {
   loading: boolean;
   messages: MessageItem[];
   members: Member[];
-  myAgentId: string | null;
+  myParticipantId: string | null;
   expandedIds: ReadonlySet<string>;
   collapsedRootIds: ReadonlySet<string>;
   threadTree: {
@@ -61,7 +61,7 @@ export function MessageList(props: MessageListProps) {
     loading,
     messages,
     members,
-    myAgentId,
+    myParticipantId,
     expandedIds,
     collapsedRootIds,
     threadTree,
@@ -87,24 +87,24 @@ export function MessageList(props: MessageListProps) {
   } = props;
 
   const senderName = (senderId: string) => {
-    const member = members.find((m) => m.agentId === senderId);
+    const member = members.find((m) => m.participantId === senderId);
     return member ? member.name : senderId.slice(0, 8);
   };
   const senderType = (senderId: string) =>
-    members.find((m) => m.agentId === senderId)?.type ?? null;
+    members.find((m) => m.participantId === senderId)?.type ?? null;
   const senderDevice = (senderId: string) =>
-    members.find((m) => m.agentId === senderId)?.device ?? null;
+    members.find((m) => m.participantId === senderId)?.device ?? null;
   const senderRoles = (senderId: string): string[] =>
-    members.find((m) => m.agentId === senderId)?.roles ?? [];
+    members.find((m) => m.participantId === senderId)?.roles ?? [];
 
-  // Ticket 26 audience tag: `→ @<成员名>` for agent-targeted, `→ @<角色名>`
+  // Ticket 26 audience tag: `→ @<成员名>` for participant-targeted, `→ @<角色名>`
   // for role-targeted, nothing for broadcast.
   const audienceLabel = (msg: MessageItem) => {
     if (msg.audience === "role" && msg.audienceRef) {
       return `→ @${msg.audienceRef}`;
     }
-    if (msg.audience === "agent" && msg.audienceRef) {
-      const target = members.find((m) => m.agentId === msg.audienceRef);
+    if (msg.audience === "participant" && msg.audienceRef) {
+      const target = members.find((m) => m.participantId === msg.audienceRef);
       return `→ @${target ? target.name : msg.audienceRef.slice(0, 8)}`;
     }
     return null;
@@ -160,7 +160,8 @@ export function MessageList(props: MessageListProps) {
           <ul className="flex flex-col py-3">
             {visibleMessages.map((msg, i) => {
               const prev = i > 0 ? visibleMessages[i - 1] : undefined;
-              const own = myAgentId !== null && msg.senderId === myAgentId;
+              const own =
+                myParticipantId !== null && msg.senderId === myParticipantId;
               const contentType = msg.contentType ?? "text/plain";
               const isStatus = contentType === "task_status";
               // Ticket 26 long-message fold: bodies over FOLD_THRESHOLD chars
@@ -324,7 +325,7 @@ export function MessageList(props: MessageListProps) {
                               .join(" ")}
                             className={cn(
                               "flex size-9 shrink-0 select-none items-center justify-center rounded-full text-sm font-semibold",
-                              agentColor(msg.senderId),
+                              participantColor(msg.senderId),
                             )}
                           >
                             {senderName(msg.senderId).slice(0, 1).toUpperCase()}

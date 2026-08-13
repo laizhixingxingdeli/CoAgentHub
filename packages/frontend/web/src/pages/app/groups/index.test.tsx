@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -28,7 +28,7 @@ const GROUPS = [
 
 const MEMBERS = [
   {
-    agentId: "agent-1",
+    participantId: "participant-1",
     name: "hermes-mac",
     type: "hermes",
     device: "mac-mini",
@@ -36,7 +36,7 @@ const MEMBERS = [
     joinedAt: "2026-08-01T00:00:00.000Z",
   },
   {
-    agentId: "agent-2",
+    participantId: "participant-2",
     name: "win-hermes",
     type: "hermes",
     device: "win-pc",
@@ -45,30 +45,35 @@ const MEMBERS = [
   },
 ];
 
-const AGENTS = [
-  { id: "agent-1", name: "hermes-mac", type: "hermes", device: "mac-mini" },
-  { id: "agent-9", name: "atomcode-cli", type: "atomcode", device: null },
+const PARTICIPANTS = [
+  {
+    id: "participant-1",
+    name: "hermes-mac",
+    type: "hermes",
+    device: "mac-mini",
+  },
+  { id: "participant-9", name: "atomcode-cli", type: "atomcode", device: null },
 ];
 
 function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
   // Stateful list: a successful POST create appends, archive flips status.
   // The list handler also honors ?status= so tab filtering can be asserted.
   let current = [...groups] as Array<Record<string, unknown>>;
-  // Ticket 29: 状态化 agent 名册 — 注册会追加,供身份面板「使用中」标记断言。
-  const roster: Array<Record<string, unknown>> = [...AGENTS];
+  // Ticket 29: 状态化 participant 名册 — 注册会追加,供身份面板「使用中」标记断言。
+  const roster: Array<Record<string, unknown>> = [...PARTICIPANTS];
   return createFetchMock([
     {
-      // Ticket 28: agent 注册(POST /api/agents,公开端点)返回一次性 token。
-      // 必须排在下面的通用 /api/agents 匹配之前(createFetchMock 首个匹配生效)。
+      // Ticket 28: participant 注册(POST /api/participants,公开端点)返回一次性 token。
+      // 必须排在下面的通用 /api/participants 匹配之前(createFetchMock 首个匹配生效)。
       match: (url, init) =>
-        init?.method === "POST" && String(url).endsWith("/api/agents"),
+        init?.method === "POST" && String(url).endsWith("/api/participants"),
       respond: (_url, init) => {
         if (registerError) {
           return jsonResponse({ message: "名称已存在" }, registerError);
         }
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         const created = {
-          id: "agent-new",
+          id: "participant-new",
           name: body.name,
           type: body.type,
           device: body.device ?? null,
@@ -163,18 +168,18 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
       },
     },
     {
-      // Agent roster (ticket 20 settings + ticket 29 identity panel):
-      // 状态化名册,注册会追加新 agent。
-      match: (url) => url.endsWith("/api/agents"),
+      // Participant roster (ticket 20 settings + ticket 29 identity panel):
+      // 状态化名册,注册会追加新 participant。
+      match: (url) => url.endsWith("/api/participants"),
       respond: () => jsonResponse(roster),
     },
     {
       match: (url, init) =>
-        init?.method === "PATCH" && String(url).includes("/api/agents/"),
+        init?.method === "PATCH" && String(url).includes("/api/participants/"),
       respond: (url, init) => {
         const id = String(url).split("/").pop();
         const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        const base = AGENTS.find((a) => a.id === id) ?? AGENTS[0];
+        const base = PARTICIPANTS.find((a) => a.id === id) ?? PARTICIPANTS[0];
         return jsonResponse({ ...base, ...patch });
       },
     },
@@ -183,7 +188,7 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
 
 function membersFetchMock(
   members: unknown[] = MEMBERS,
-  agents: unknown[] = AGENTS,
+  participants: unknown[] = PARTICIPANTS,
 ) {
   // Stateful roster: DELETE removes a member, PATCH updates roles, so the
   // list refresh after each action can be asserted against the DOM.
@@ -197,19 +202,19 @@ function membersFetchMock(
           id: "group-1",
           title: "模型训练任务",
           status: "active",
-          createdBy: "agent-1",
+          createdBy: "participant-1",
         }),
     },
     {
-      match: (url) => url.endsWith("/api/agents"),
-      respond: () => jsonResponse(agents),
+      match: (url) => url.endsWith("/api/participants"),
+      respond: () => jsonResponse(participants),
     },
     {
       match: (url) => url.includes("/api/groups/") && url.endsWith("/members"),
       respond: (_url, init) => {
         if ((init?.method ?? "GET") === "POST") {
           return jsonResponse({
-            agentId: "agent-9",
+            participantId: "participant-9",
             roles: ["observer"],
           });
         }
@@ -220,20 +225,20 @@ function membersFetchMock(
       match: (url, init) =>
         init?.method === "PATCH" && String(url).includes("/members/"),
       respond: (url, init) => {
-        const agentId = String(url).split("/").pop();
+        const participantId = String(url).split("/").pop();
         const { roles } = JSON.parse(String(init?.body)) as { roles: string[] };
         current = current.map((m) =>
-          m.agentId === agentId ? { ...m, roles } : m,
+          m.participantId === participantId ? { ...m, roles } : m,
         );
-        return jsonResponse({ agentId, roles });
+        return jsonResponse({ participantId, roles });
       },
     },
     {
       match: (url, init) =>
         init?.method === "DELETE" && String(url).includes("/members/"),
       respond: (url) => {
-        const agentId = String(url).split("/").pop();
-        current = current.filter((m) => m.agentId !== agentId);
+        const participantId = String(url).split("/").pop();
+        current = current.filter((m) => m.participantId !== participantId);
         return jsonResponse({ success: true });
       },
     },
@@ -633,53 +638,53 @@ describe("GroupsPage 群列表分页", () => {
   });
 });
 
-describe("GroupsPage agent 绑定 (ticket 18)", () => {
+describe("GroupsPage participant 绑定 (ticket 18)", () => {
   const openAdvanced = async () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /高级:手动输入 token/ }),
     );
   };
 
-  it("保存 token 时把 agentId 一并写入 localStorage(coagenthub.agentId)", async () => {
+  it("保存 token 时把 participantId 一并写入 localStorage(coagenthub.participantId)", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     // 手动绑定收进「高级:手动输入 token」折叠区(ticket 29),先展开。
     await openAdvanced();
-    const tokenInput = await screen.findByLabelText("Agent Token");
+    const tokenInput = await screen.findByLabelText("Participant Token");
     fireEvent.change(tokenInput, { target: { value: "tok-18" } });
-    fireEvent.change(screen.getByLabelText("Agent ID"), {
-      target: { value: "agent-1" },
+    fireEvent.change(screen.getByLabelText("Participant ID"), {
+      target: { value: "participant-1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBe("tok-18");
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBe("agent-1");
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-18");
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-1");
     });
   });
 
-  it("清除 token 时同步清除 coagenthub.agentId", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-18");
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+  it("清除 token 时同步清除 coagenthub.participantId", async () => {
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-18");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     fireEvent.click(await screen.findByRole("button", { name: "清除" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBeNull();
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBeNull();
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     });
   });
 });
 
 describe("GroupsPage 身份面板 (ticket 29)", () => {
-  it("渲染已有 Agent 列表:名字 + 类型/设备小字 + 总数", async () => {
+  it("渲染已有 Participant 列表:名字 + 类型/设备小字 + 总数", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    expect(await screen.findByText("已有 Agent")).toBeInTheDocument();
+    expect(await screen.findByText("已有 Participant")).toBeInTheDocument();
     // 名册两行:hermes-mac(hermes mac-mini)、atomcode-cli(atomcode)。
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
     expect(screen.getByText("hermes mac-mini")).toBeInTheDocument();
@@ -691,8 +696,8 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 
   it("点「绑定」调 POST /:id/reset-token 并自动绑定,提示已切换", async () => {
-    localStorage.removeItem(AGENT_TOKEN_KEY);
-    localStorage.removeItem(AGENT_ID_KEY);
+    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+    localStorage.removeItem(PARTICIPANT_ID_KEY);
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
@@ -709,12 +714,14 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
           init?.method === "POST" && String(url).includes("/reset-token"),
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/agents/agent-9/reset-token");
+      expect(String(call![0])).toBe(
+        "/api/participants/participant-9/reset-token",
+      );
     });
     // commitToken 写入 localStorage + 提示已切换 + 该行变「使用中」。
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBe("tok-reset");
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBe("agent-9");
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-reset");
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-9");
     });
     expect(
       await screen.findByText("已切换为 atomcode-cli"),
@@ -733,13 +740,13 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     });
   });
 
-  it("已绑定的 agent 显示「使用中」标记,绑定按钮不可用", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-29");
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+  it("已绑定的 participant 显示「使用中」标记,绑定按钮不可用", async () => {
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-29");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    await screen.findByText("已有 Agent");
+    await screen.findByText("已有 Participant");
     // 当前身份突出显示 + 该行「使用中」。
     expect(
       screen.getByText("使用中: hermes-mac(hermes·mac-mini)"),
@@ -756,8 +763,8 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 
   it("清除后回到未绑定提示,列表刷新全部恢复「绑定」", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-29");
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-29");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
@@ -765,11 +772,11 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     fireEvent.click(screen.getByRole("button", { name: "清除" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBeNull();
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBeNull();
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     });
     expect(
-      await screen.findByText(/未绑定 agent,从下方列表一键绑定/),
+      await screen.findByText(/未绑定 participant,从下方列表一键绑定/),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("使用中")).toBeNull();
@@ -778,26 +785,26 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 
   it("手动绑定入口保留:高级折叠区展开后可输入 token 保存", async () => {
-    localStorage.removeItem(AGENT_TOKEN_KEY);
-    localStorage.removeItem(AGENT_ID_KEY);
+    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+    localStorage.removeItem(PARTICIPANT_ID_KEY);
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     // 默认折叠,只有展开后才有输入框。
-    expect(screen.queryByLabelText("Agent Token")).toBeNull();
+    expect(screen.queryByLabelText("Participant Token")).toBeNull();
     fireEvent.click(
       await screen.findByRole("button", { name: /高级:手动输入 token/ }),
     );
-    const tokenInput = await screen.findByLabelText("Agent Token");
+    const tokenInput = await screen.findByLabelText("Participant Token");
     fireEvent.change(tokenInput, { target: { value: "tok-manual" } });
-    fireEvent.change(screen.getByLabelText("Agent ID"), {
-      target: { value: "agent-1" },
+    fireEvent.change(screen.getByLabelText("Participant ID"), {
+      target: { value: "participant-1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBe("tok-manual");
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBe("agent-1");
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-manual");
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-1");
     });
     expect(
       await screen.findByText("使用中: hermes-mac(hermes·mac-mini)"),
@@ -805,10 +812,10 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 });
 
-describe("GroupsPage 注册新 Agent (ticket 28)", () => {
+describe("GroupsPage 注册新 Participant (ticket 28)", () => {
   const openRegister = async () => {
     fireEvent.click(
-      await screen.findByRole("button", { name: /注册新 Agent/ }),
+      await screen.findByRole("button", { name: /注册新 Participant/ }),
     );
   };
 
@@ -817,10 +824,10 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    expect(screen.getByLabelText("注册 Agent 名称")).toBeInTheDocument();
-    expect(screen.getByLabelText("注册 Agent 设备")).toBeInTheDocument();
+    expect(screen.getByLabelText("注册 Participant 名称")).toBeInTheDocument();
+    expect(screen.getByLabelText("注册 Participant 设备")).toBeInTheDocument();
     const typeSelect = screen.getByLabelText(
-      "注册 Agent 类型",
+      "注册 Participant 类型",
     ) as HTMLSelectElement;
     expect(typeSelect.value).toBe("human");
     expect(
@@ -828,18 +835,18 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     ).toBeInTheDocument();
   });
 
-  it("填写表单提交调用 POST /api/agents 且携带 name/type/device", async () => {
+  it("填写表单提交调用 POST /api/participants 且携带 name/type/device", async () => {
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Agent 名称"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "我的 Mac" },
     });
-    fireEvent.change(screen.getByLabelText("注册 Agent 类型"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 类型"), {
       target: { value: "hermes" },
     });
-    fireEvent.change(screen.getByLabelText("注册 Agent 设备"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 设备"), {
       target: { value: "mac" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -847,7 +854,7 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         ([url, init]) =>
-          init?.method === "POST" && String(url).endsWith("/api/agents"),
+          init?.method === "POST" && String(url).endsWith("/api/participants"),
       );
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
@@ -859,43 +866,45 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
   });
 
   it("注册成功:写入 localStorage、绑定横幅出现、一次性 token 展示", async () => {
-    localStorage.removeItem(AGENT_TOKEN_KEY);
-    localStorage.removeItem(AGENT_ID_KEY);
+    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+    localStorage.removeItem(PARTICIPANT_ID_KEY);
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Agent 名称"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "alice" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBe("tok-registered");
-      expect(localStorage.getItem(AGENT_ID_KEY)).toBe("agent-new");
+      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe(
+        "tok-registered",
+      );
+      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-new");
     });
     // 身份面板显示当前身份(注册即切换)+ 一次性 token 展示。
     expect(await screen.findByText("使用中: alice(human)")).toBeInTheDocument();
     expect(screen.getByText("✅ 已注册并绑定 alice")).toBeInTheDocument();
-    expect(screen.getByLabelText("注册返回的 Agent Token")).toHaveValue(
+    expect(screen.getByLabelText("注册返回的 Participant Token")).toHaveValue(
       "tok-registered",
     );
   });
 
   it("注册失败显示错误信息且不写入 localStorage", async () => {
-    localStorage.removeItem(AGENT_TOKEN_KEY);
+    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
     stubFetch(groupsFetchMock([], 400));
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Agent 名称"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "alice" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
     expect(await screen.findByText(/注册失败:/)).toBeInTheDocument();
     expect(screen.getByText(/名称已存在/)).toBeInTheDocument();
-    expect(localStorage.getItem(AGENT_TOKEN_KEY)).toBeNull();
+    expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
     expect(screen.queryByText(/使用中:/)).toBeNull();
   });
 
@@ -909,11 +918,11 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Agent 名称"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
       target: { value: "alice" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
-    await screen.findByLabelText("注册返回的 Agent Token");
+    await screen.findByLabelText("注册返回的 Participant Token");
 
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
     await waitFor(() => {
@@ -931,11 +940,11 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     await openRegister();
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
-    expect(screen.getByText("Agent 名称不能为空")).toBeInTheDocument();
+    expect(screen.getByText("Participant 名称不能为空")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
         ([url, init]) =>
-          init?.method === "POST" && String(url).endsWith("/api/agents"),
+          init?.method === "POST" && String(url).endsWith("/api/participants"),
       ),
     ).toBe(false);
   });
@@ -945,13 +954,13 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Agent 名称"), {
-      target: { value: "cli-agent" },
+    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
+      target: { value: "cli-participant" },
     });
-    fireEvent.change(screen.getByLabelText("注册 Agent 类型"), {
+    fireEvent.change(screen.getByLabelText("注册 Participant 类型"), {
       target: { value: "custom" },
     });
-    fireEvent.change(await screen.findByLabelText("自定义 Agent 类型"), {
+    fireEvent.change(await screen.findByLabelText("自定义 Participant 类型"), {
       target: { value: "openclaw" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -959,11 +968,11 @@ describe("GroupsPage 注册新 Agent (ticket 28)", () => {
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         ([url, init]) =>
-          init?.method === "POST" && String(url).endsWith("/api/agents"),
+          init?.method === "POST" && String(url).endsWith("/api/participants"),
       );
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
-        name: "cli-agent",
+        name: "cli-participant",
         type: "openclaw",
       });
     });
@@ -1065,32 +1074,35 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
   });
 });
 
-describe("GroupsPage Agent 设置 (ticket 20)", () => {
-  it("绑定后显示设置区,保存调用 PATCH /api/agents/:id", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-20");
-    localStorage.setItem(AGENT_ID_KEY, "agent-1");
+describe("GroupsPage Participant 设置 (ticket 20)", () => {
+  it("绑定后显示设置区,保存调用 PATCH /api/participants/:id", async () => {
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-20");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
     // 设置区在绑定 + 拉取到自己信息后出现;type 只读展示。
     const settingsButton = await screen.findByRole("button", {
-      name: /Agent 设置/,
+      name: /Participant 设置/,
     });
     fireEvent.click(settingsButton);
     expect(screen.getByText(/类型:hermes\(只读\)/)).toBeInTheDocument();
 
     // 修改名称并保存;device 沿用当前值。
-    const nameInput = screen.getByLabelText("Agent 名称") as HTMLInputElement;
+    const nameInput = screen.getByLabelText(
+      "Participant 名称",
+    ) as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: "hermes-mac-2" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         ([url, init]) =>
-          init?.method === "PATCH" && String(url).includes("/api/agents/"),
+          init?.method === "PATCH" &&
+          String(url).includes("/api/participants/"),
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/agents/agent-1");
+      expect(String(call![0])).toBe("/api/participants/participant-1");
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         name: "hermes-mac-2",
         device: "mac-mini",
@@ -1123,24 +1135,24 @@ describe("GroupMembersPage 成员管理", () => {
     renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
 
     expect(
-      await screen.findByText("暂无成员,从上方添加 agent 进入群组"),
+      await screen.findByText("暂无成员,从上方添加 participant 进入群组"),
     ).toBeInTheDocument();
   });
 
-  it("选择 agent 与角色后调用 POST /:id/members", async () => {
+  it("选择 participant 与角色后调用 POST /:id/members", async () => {
     const fetchMock = stubFetch(membersFetchMock());
     renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
 
     // Wait for the roster to load and the select to populate.
     const select = (await screen.findByLabelText(
-      "选择成员 agent",
+      "选择成员 participant",
     )) as HTMLSelectElement;
     expect(select).toBeInTheDocument();
     await waitFor(() => {
       expect(select.options.length).toBeGreaterThan(1);
     });
 
-    fireEvent.change(select, { target: { value: "agent-9" } });
+    fireEvent.change(select, { target: { value: "participant-9" } });
     // Default observer is pre-checked; also pick reviewer (click the checkbox
     // inside its label — the label text also appears in role badges).
     const reviewerCheckbox = screen
@@ -1156,18 +1168,18 @@ describe("GroupMembersPage 成员管理", () => {
       );
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
-        agentId: "agent-9",
+        participantId: "participant-9",
         roles: ["observer", "reviewer"],
       });
     });
   });
 
-  it("已是成员的 agent 不出现在候选下拉中", async () => {
+  it("已是成员的 participant 不出现在候选下拉中", async () => {
     stubFetch(membersFetchMock());
     renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
 
     const select = (await screen.findByLabelText(
-      "选择成员 agent",
+      "选择成员 participant",
     )) as HTMLSelectElement;
     await waitFor(() => {
       expect(select.options.length).toBeGreaterThan(1);
@@ -1177,7 +1189,7 @@ describe("GroupMembersPage 成员管理", () => {
     expect(optionTexts.some((t) => t?.includes("atomcode-cli"))).toBe(true);
   });
 
-  it("编辑角色:行内表单保存调用 PATCH /:id/members/:agentId 并刷新 (ticket 20)", async () => {
+  it("编辑角色:行内表单保存调用 PATCH /:id/members/:participantId 并刷新 (ticket 20)", async () => {
     const fetchMock = stubFetch(membersFetchMock());
     renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
 
@@ -1196,7 +1208,9 @@ describe("GroupMembersPage 成员管理", () => {
         ([, init]) => init?.method === "PATCH",
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/groups/group-1/members/agent-2");
+      expect(String(call![0])).toBe(
+        "/api/groups/group-1/members/participant-2",
+      );
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         roles: ["executor"],
       });
@@ -1207,7 +1221,7 @@ describe("GroupMembersPage 成员管理", () => {
     });
   });
 
-  it("移除成员:confirm 后调用 DELETE /:id/members/:agentId 并刷新列表 (ticket 20)", async () => {
+  it("移除成员:confirm 后调用 DELETE /:id/members/:participantId 并刷新列表 (ticket 20)", async () => {
     const confirmMock = vi.fn(() => true);
     vi.stubGlobal("confirm", confirmMock);
     const fetchMock = stubFetch(membersFetchMock());
@@ -1227,7 +1241,9 @@ describe("GroupMembersPage 成员管理", () => {
         ([, init]) => init?.method === "DELETE",
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/groups/group-1/members/agent-2");
+      expect(String(call![0])).toBe(
+        "/api/groups/group-1/members/participant-2",
+      );
     });
     // 列表刷新后该成员消失。
     await waitFor(() => {

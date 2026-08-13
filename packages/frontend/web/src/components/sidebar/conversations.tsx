@@ -9,7 +9,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { syncUnreadConnection, useUnread } from "@/hooks/use-unread";
-import { agentAuthHeaders } from "@/lib/api-client";
+import { participantAuthHeaders } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
 
@@ -34,7 +34,7 @@ function truncatePreview(body: string): string {
  * The list itself is fetched on mount and re-fetched on every navigation —
  * previews intentionally update on reload/navigation only (no per-frame
  * refetch); the unread badge is driven in real time by the global store's WS
- * connection. Fetch failures are silent: a missing/invalid agent token must
+ * connection. Fetch failures are silent: a missing/invalid participant token must
  * never block the rest of the sidebar.
  *
  * The always-mounted section also owns `activeGroupId` in the unread store
@@ -61,7 +61,7 @@ export function ConversationList() {
     (async () => {
       try {
         const res = await fetch("/api/groups?status=active", {
-          headers: agentAuthHeaders(),
+          headers: participantAuthHeaders(),
         });
         if (!res.ok) {
           return; // silent: token missing/invalid or server error

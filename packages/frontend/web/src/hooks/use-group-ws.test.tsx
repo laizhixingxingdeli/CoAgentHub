@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
 import { MockWebSocket } from "@/test/ws-mock";
 import { mergeGroupMessages, useGroupWs } from "./use-group-ws";
 
@@ -20,7 +20,7 @@ beforeEach(() => {
 
 describe("useGroupWs (ticket 14)", () => {
   it("connects to ws://<host>/api/ws?token= with the token from localStorage", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
 
     renderHook(() => useGroupWs("group-1", vi.fn()));
@@ -34,7 +34,7 @@ describe("useGroupWs (ticket 14)", () => {
   });
 
   it("URL-encodes the token in the query string", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "a/b?c d");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "a/b?c d");
     stubWebSocket();
 
     renderHook(() => useGroupWs("group-1", vi.fn()));
@@ -45,7 +45,7 @@ describe("useGroupWs (ticket 14)", () => {
   });
 
   it("forwards group_message frames for the subscribed group and reports connected", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
     const onEvent = vi.fn();
 
@@ -58,7 +58,7 @@ describe("useGroupWs (ticket 14)", () => {
     const message = {
       id: "msg-ws-1",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -81,7 +81,7 @@ describe("useGroupWs (ticket 14)", () => {
   });
 
   it("forwards group_message_updated with the full updated row (ticket 22)", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
     const onEvent = vi.fn();
 
@@ -92,7 +92,7 @@ describe("useGroupWs (ticket 14)", () => {
     const message = {
       id: "msg-ws-1",
       groupId: "group-1",
-      senderId: "agent-1",
+      senderId: "participant-1",
       parentId: null,
       audience: "broadcast",
       audienceRef: null,
@@ -120,7 +120,7 @@ describe("useGroupWs (ticket 14)", () => {
   });
 
   it("forwards group_message_deleted with only the id (ticket 22)", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
     const onEvent = vi.fn();
 
@@ -147,7 +147,7 @@ describe("useGroupWs (ticket 14)", () => {
   });
 
   it("ignores frames for other groups, other types and malformed payloads", () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
     const onEvent = vi.fn();
 
@@ -175,7 +175,7 @@ describe("useGroupWs (ticket 14)", () => {
 
   it("reconnects with exponential backoff 1s→2s→4s… capped at 30s", () => {
     vi.useFakeTimers();
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
 
     renderHook(() => useGroupWs("group-1", vi.fn()));
@@ -202,19 +202,19 @@ describe("useGroupWs (ticket 14)", () => {
 
   it("re-reads the token from localStorage on every reconnect", () => {
     vi.useFakeTimers();
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     stubWebSocket();
 
     renderHook(() => useGroupWs("group-1", vi.fn()));
 
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-2");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-2");
     act(() => MockWebSocket.instances[0].fail());
     act(() => vi.advanceTimersByTime(1000));
     expect(MockWebSocket.instances[1].url).toBe(
       `ws://${window.location.host}/api/ws?token=tok-2`,
     );
 
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-3");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-3");
     act(() => MockWebSocket.instances[1].fail());
     act(() => vi.advanceTimersByTime(2000));
     expect(MockWebSocket.instances[2].url).toBe(
@@ -224,7 +224,7 @@ describe("useGroupWs (ticket 14)", () => {
 
   it("closes the socket on unmount and never reconnects", () => {
     vi.useFakeTimers();
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
     stubWebSocket();
 
     const { unmount } = renderHook(() => useGroupWs("group-1", vi.fn()));

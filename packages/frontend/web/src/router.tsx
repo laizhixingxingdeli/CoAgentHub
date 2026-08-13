@@ -8,7 +8,7 @@ import { Skeleton } from "./components/ui/skeleton";
 
 // 路由级 code-split:页面组件按需加载,首屏只取当前路由的 chunk。
 // 布局(sidebar/layout)保持静态 import,首屏必需。
-const AgentsPage = lazy(() => import("./pages/app/agents"));
+const ParticipantsPage = lazy(() => import("./pages/app/participants"));
 const FilesPage = lazy(() => import("./pages/app/files"));
 const GroupsPage = lazy(() => import("./pages/app/groups"));
 const GroupMembersPage = lazy(() => import("./pages/app/groups/members"));
@@ -55,9 +55,14 @@ const App = () => (
           <Suspense fallback={pageFallback}>
             <Switch>
               <Route path="/files" component={FilesPage} />
-              {/* /agents 与 /groups 一样平铺声明:避免 wouter v3 nest 的 base
+              {/* /participants 与 /groups 一样平铺声明:避免 wouter v3 nest 的 base
                 前缀导致页面内绝对路径失配(见下方 /groups 注释)。 */}
-              <Route path="/agents" component={AgentsPage} />
+              {/* /agents 是术语改名前的旧路由(agent 为 participant 的旧名):
+                  重定向到 /participants,收藏夹里的旧链接不 404。 */}
+              <Route path="/agents">
+                <Redirect to="/participants" />
+              </Route>
+              <Route path="/participants" component={ParticipantsPage} />
               {/* /groups routes are declared flat (no `nest`): wouter v3 nested
                 Routes wrap children in a Router with base="/groups", which
                 base-strips the location — any full-path useRoute("/groups/:id")

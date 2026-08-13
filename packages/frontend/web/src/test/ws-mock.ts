@@ -2,7 +2,7 @@
  * Minimal controllable WebSocket for tests — jsdom has no WebSocket
  * implementation. Tests drive connection state via `open()` / `receive()` /
  * `fail()` / `close()` and inspect the URLs passed to the constructor
- * (e.g. asserting the agent token is embedded in `?token=`).
+ * (e.g. asserting the participant token is embedded in `?token=`).
  */
 export class MockWebSocket {
   static instances: MockWebSocket[] = [];

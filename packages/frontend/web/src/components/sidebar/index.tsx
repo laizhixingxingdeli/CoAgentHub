@@ -35,8 +35,8 @@ const data = {
       icon: Users,
     },
     {
-      title: "接入 Agent",
-      url: "/agents",
+      title: "接入 Participant(参与者)",
+      url: "/participants",
       icon: Bot,
     },
     {
@@ -67,8 +67,8 @@ export default function AppSidebar({
   // 面包屑当前页:按路由映射,群组及其子页统一显示「群组」。
   const pageLabel = location.startsWith("/groups")
     ? "群组"
-    : location.startsWith("/agents")
-      ? "接入 Agent"
+    : location.startsWith("/participants")
+      ? "接入 Participant(参与者)"
       : location.startsWith("/files")
         ? "文件传输"
         : "首页";
@@ -85,7 +85,9 @@ export default function AppSidebar({
                     <Command className="size-4" />
                   </div>
                   <div className="grid flex-1 text-left text-sm leading-tight">
-                    <span className="truncate font-medium">CoAgentHub</span>
+                    <span className="truncate font-medium">
+                      CoParticipantHub
+                    </span>
                     <span className="truncate text-xs">局域网 AI 助手</span>
                   </div>
                 </a>
@@ -120,7 +122,9 @@ export default function AppSidebar({
             <Breadcrumb>
               <BreadcrumbList>
                 <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/groups">CoAgentHub</BreadcrumbLink>
+                  <BreadcrumbLink href="/groups">
+                    CoParticipantHub
+                  </BreadcrumbLink>
                 </BreadcrumbItem>
                 <BreadcrumbSeparator className="hidden md:block" />
                 <BreadcrumbItem>

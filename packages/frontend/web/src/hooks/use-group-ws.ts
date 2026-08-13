@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
 
 /** First reconnect delay; doubles per failed attempt until the cap below. */
 const INITIAL_RECONNECT_DELAY = 1000;
@@ -15,7 +15,7 @@ export type WsGroupMessage = {
   groupId: string;
   senderId: string;
   parentId: string | null;
-  audience: "broadcast" | "role" | "agent";
+  audience: "broadcast" | "role" | "participant";
   audienceRef: string | null;
   body: string;
   contentType?: string | null;
@@ -108,10 +108,10 @@ export function mergeGroupMessages<T extends { id: string }>(
 }
 
 /**
- * Low-level agent-WS connection shared by the per-group message hook and the
+ * Low-level participant-WS connection shared by the per-group message hook and the
  * global unread store (ticket 23).
  *
- * Opens `ws://<host>/api/ws?token=<agentToken>` — `<host>` is the current page
+ * Opens `ws://<host>/api/ws?token=<participantToken>` — `<host>` is the current page
  * host, so dev goes through the vite proxy on :5173 and prod through serve.mjs
  * on :3000. The token is re-read from localStorage on every (re)connect. Every
  * parsed frame (any type, any group) is delivered to `onFrame`; connection
@@ -120,7 +120,7 @@ export function mergeGroupMessages<T extends { id: string }>(
  * the handlers and cancels any pending retry — the caller's own close must not
  * schedule a new attempt.
  */
-export function connectAgentWs(opts: {
+export function connectParticipantWs(opts: {
   onFrame: (frame: unknown) => void;
   onStatusChange?: (connected: boolean) => void;
 }): () => void {
@@ -142,7 +142,7 @@ export function connectAgentWs(opts: {
     if (disposed) {
       return;
     }
-    const token = localStorage.getItem(AGENT_TOKEN_KEY) ?? "";
+    const token = localStorage.getItem(PARTICIPANT_TOKEN_KEY) ?? "";
     const url = `ws://${window.location.host}/api/ws?token=${encodeURIComponent(token)}`;
     socket = new WebSocket(url);
 
@@ -206,7 +206,7 @@ export function connectAgentWs(opts: {
 /**
  * Live message updates over the server WS hub (ticket 14).
  *
- * Opens a connection through `connectAgentWs` and forwards the frames for the
+ * Opens a connection through `connectParticipantWs` and forwards the frames for the
  * subscribed group to `onEvent` (ticket 22): `group_message` /
  * `group_message_updated` carry the full message, `group_message_deleted`
  * carries only the id (the receiver marks the placeholder locally). Frames for
@@ -261,7 +261,7 @@ export function useGroupWs(
       }
     };
 
-    return connectAgentWs({
+    return connectParticipantWs({
       onFrame: handleFrame,
       onStatusChange: setConnected,
     });

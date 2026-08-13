@@ -11,7 +11,7 @@ import { useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { agentAuthHeaders } from "@/lib/api-client";
+import { participantAuthHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { ROLE_LABELS } from "./messages/types";
 
@@ -31,7 +31,7 @@ const GROUP_ROLES = [
 type GroupRole = (typeof GROUP_ROLES)[number];
 
 type Member = {
-  agentId: string;
+  participantId: string;
   name: string;
   type: string;
   device: string | null;
@@ -41,7 +41,7 @@ type Member = {
   joinedAt: string;
 };
 
-type AgentOption = {
+type ParticipantOption = {
   id: string;
   name: string;
   type: string;
@@ -58,22 +58,24 @@ export default function GroupMembersPage() {
   const groupId = params?.id;
 
   const [members, setMembers] = useState<Member[]>([]);
-  const [agents, setAgents] = useState<AgentOption[]>([]);
+  const [participants, setParticipants] = useState<ParticipantOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const [selectedParticipantId, setSelectedParticipantId] = useState("");
   const [selectedRoles, setSelectedRoles] = useState<GroupRole[]>(["observer"]);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   // Ticket 20: 群主(createdBy)不可被移除;成员行内编辑角色的表单状态。
   const [createdBy, setCreatedBy] = useState<string | null>(null);
-  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const [editingParticipantId, setEditingParticipantId] = useState<
+    string | null
+  >(null);
   const [editRoles, setEditRoles] = useState<GroupRole[]>([]);
   const [savingRoles, setSavingRoles] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   // Ticket 21: 群内分工提示词 — 加成员表单与行内编辑的输入状态。
   const [newPrompt, setNewPrompt] = useState("");
-  const [editingPromptAgentId, setEditingPromptAgentId] = useState<
+  const [editingPromptParticipantId, setEditingPromptParticipantId] = useState<
     string | null
   >(null);
   const [editPromptValue, setEditPromptValue] = useState("");
@@ -87,7 +89,7 @@ export default function GroupMembersPage() {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -100,13 +102,15 @@ export default function GroupMembersPage() {
     }
   }, [groupId]);
 
-  const loadAgents = useCallback(async () => {
+  const loadParticipants = useCallback(async () => {
     try {
-      const res = await fetch("/api/agents", { headers: agentAuthHeaders() });
+      const res = await fetch("/api/participants", {
+        headers: participantAuthHeaders(),
+      });
       if (!res.ok) {
         return;
       }
-      setAgents(await res.json());
+      setParticipants(await res.json());
     } catch {
       // The add-member select just stays empty if the roster cannot load.
     }
@@ -119,7 +123,7 @@ export default function GroupMembersPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         return;
@@ -133,9 +137,9 @@ export default function GroupMembersPage() {
 
   useEffect(() => {
     loadMembers();
-    loadAgents();
+    loadParticipants();
     loadGroup();
-  }, [loadMembers, loadAgents, loadGroup]);
+  }, [loadMembers, loadParticipants, loadGroup]);
 
   const toggleRole = (role: GroupRole) => {
     setSelectedRoles((prev) =>
@@ -144,7 +148,7 @@ export default function GroupMembersPage() {
   };
 
   const handleAddMember = async () => {
-    if (!groupId || !selectedAgentId) {
+    if (!groupId || !selectedParticipantId) {
       return;
     }
     setAdding(true);
@@ -153,9 +157,12 @@ export default function GroupMembersPage() {
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...agentAuthHeaders() },
+        headers: {
+          "Content-Type": "application/json",
+          ...participantAuthHeaders(),
+        },
         body: JSON.stringify({
-          agentId: selectedAgentId,
+          participantId: selectedParticipantId,
           roles: selectedRoles,
           // 空则不带 prompt 字段,保持幂等 upsert 语义。
           prompt: newPrompt.trim() || undefined,
@@ -168,7 +175,7 @@ export default function GroupMembersPage() {
         );
       }
       setMessage("成员添加成功");
-      setSelectedAgentId("");
+      setSelectedParticipantId("");
       setSelectedRoles(["observer"]);
       setNewPrompt("");
       await loadMembers();
@@ -179,18 +186,18 @@ export default function GroupMembersPage() {
     }
   };
 
-  const alreadyMembers = new Set(members.map((m) => m.agentId));
-  const candidates = agents.filter((a) => !alreadyMembers.has(a.id));
+  const alreadyMembers = new Set(members.map((m) => m.participantId));
+  const candidates = participants.filter((a) => !alreadyMembers.has(a.id));
 
   // Ticket 20: 行内编辑角色 — 打开编辑表单并预填该成员现有角色。
   const startEditRoles = (member: Member) => {
-    setEditingPromptAgentId(null);
+    setEditingPromptParticipantId(null);
     setEditRoles(
       member.roles.filter((r): r is GroupRole =>
         (GROUP_ROLES as readonly string[]).includes(r),
       ),
     );
-    setEditingAgentId(member.agentId);
+    setEditingParticipantId(member.participantId);
   };
 
   const toggleEditRole = (role: GroupRole) => {
@@ -200,7 +207,7 @@ export default function GroupMembersPage() {
   };
 
   const handleSaveRoles = async () => {
-    if (!groupId || !editingAgentId) {
+    if (!groupId || !editingParticipantId) {
       return;
     }
     if (editRoles.length === 0) {
@@ -212,12 +219,12 @@ export default function GroupMembersPage() {
     setError(null);
     try {
       const res = await fetch(
-        `/api/groups/${groupId}/members/${editingAgentId}`,
+        `/api/groups/${groupId}/members/${editingParticipantId}`,
         {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...agentAuthHeaders(),
+            ...participantAuthHeaders(),
           },
           body: JSON.stringify({ roles: editRoles }),
         },
@@ -229,7 +236,7 @@ export default function GroupMembersPage() {
         );
       }
       setMessage("角色已更新");
-      setEditingAgentId(null);
+      setEditingParticipantId(null);
       await loadMembers();
     } catch (e) {
       setError(`更新角色失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -240,13 +247,13 @@ export default function GroupMembersPage() {
 
   // Ticket 21: 行内编辑分工提示词 — 打开编辑表单并预填该成员现有 prompt。
   const startEditPrompt = (member: Member) => {
-    setEditingAgentId(null);
+    setEditingParticipantId(null);
     setEditPromptValue(member.prompt ?? "");
-    setEditingPromptAgentId(member.agentId);
+    setEditingPromptParticipantId(member.participantId);
   };
 
   const handleSavePrompt = async () => {
-    if (!groupId || !editingPromptAgentId) {
+    if (!groupId || !editingPromptParticipantId) {
       return;
     }
     setSavingPrompt(true);
@@ -254,12 +261,12 @@ export default function GroupMembersPage() {
     setError(null);
     try {
       const res = await fetch(
-        `/api/groups/${groupId}/members/${editingPromptAgentId}`,
+        `/api/groups/${groupId}/members/${editingPromptParticipantId}`,
         {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...agentAuthHeaders(),
+            ...participantAuthHeaders(),
           },
           // 空字符串表示清空分工说明(PATCH 可单独更新 prompt)。
           body: JSON.stringify({ prompt: editPromptValue.trim() }),
@@ -272,7 +279,7 @@ export default function GroupMembersPage() {
         );
       }
       setMessage("分工已更新");
-      setEditingPromptAgentId(null);
+      setEditingPromptParticipantId(null);
       await loadMembers();
     } catch (e) {
       setError(`更新分工失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -283,22 +290,22 @@ export default function GroupMembersPage() {
 
   // Ticket 20: 移除成员 — 群主不可移除(按钮已禁用,这里兜底提示)。
   const handleRemoveMember = async (member: Member) => {
-    if (member.agentId === createdBy) {
+    if (member.participantId === createdBy) {
       setMessage("不能移除群主");
       return;
     }
     if (!window.confirm(`确定将成员「${member.name}」移出群组吗?`)) {
       return;
     }
-    setRemovingId(member.agentId);
+    setRemovingId(member.participantId);
     setMessage(null);
     setError(null);
     try {
       const res = await fetch(
-        `/api/groups/${groupId}/members/${member.agentId}`,
+        `/api/groups/${groupId}/members/${member.participantId}`,
         {
           method: "DELETE",
-          headers: agentAuthHeaders(),
+          headers: participantAuthHeaders(),
         },
       );
       if (!res.ok) {
@@ -331,7 +338,7 @@ export default function GroupMembersPage() {
           <ContextPanelTrigger />
         </div>
         <p className="text-muted-foreground text-sm">
-          成员在群组内分配角色(同一 agent 可在不同群组持有不同角色)
+          成员在群组内分配角色(同一 participant 可在不同群组持有不同角色)
         </p>
       </div>
 
@@ -354,21 +361,21 @@ export default function GroupMembersPage() {
         </div>
         <div className="flex flex-col gap-3">
           <select
-            aria-label="选择成员 agent"
-            value={selectedAgentId}
-            onChange={(e) => setSelectedAgentId(e.target.value)}
+            aria-label="选择成员 participant"
+            value={selectedParticipantId}
+            onChange={(e) => setSelectedParticipantId(e.target.value)}
             className="w-full rounded-md border bg-background px-3 py-2 text-sm sm:w-64"
           >
             <option value="">
               {candidates.length === 0
-                ? "没有可添加的 agent"
-                : "选择要添加的 agent…"}
+                ? "没有可添加的 participant"
+                : "选择要添加的 participant…"}
             </option>
-            {candidates.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-                {agent.type ? ` (${agent.type})` : ""}
-                {agent.device ? ` · ${agent.device}` : ""}
+            {candidates.map((participant) => (
+              <option key={participant.id} value={participant.id}>
+                {participant.name}
+                {participant.type ? ` (${participant.type})` : ""}
+                {participant.device ? ` · ${participant.device}` : ""}
               </option>
             ))}
           </select>
@@ -412,7 +419,7 @@ export default function GroupMembersPage() {
           <div>
             <Button
               onClick={handleAddMember}
-              disabled={adding || !selectedAgentId}
+              disabled={adding || !selectedParticipantId}
               size="sm"
             >
               {adding ? "添加中…" : "添加成员"}
@@ -425,7 +432,7 @@ export default function GroupMembersPage() {
       <div className="rounded-lg border bg-card shadow-sm">
         {members.length === 0 ? (
           <div className="p-10 text-center text-sm text-muted-foreground">
-            {loading ? "加载中…" : "暂无成员,从上方添加 agent 进入群组"}
+            {loading ? "加载中…" : "暂无成员,从上方添加 participant 进入群组"}
           </div>
         ) : (
           <>
@@ -433,7 +440,7 @@ export default function GroupMembersPage() {
             <div className="flex flex-col gap-3 p-3 md:hidden">
               {members.map((member) => (
                 <div
-                  key={member.agentId}
+                  key={member.participantId}
                   className="flex flex-col gap-2 rounded-lg border bg-card p-4"
                 >
                   <div className="flex items-center gap-2">
@@ -446,23 +453,23 @@ export default function GroupMembersPage() {
                     <span>{member.type}</span>
                     {member.device && <span>{member.device}</span>}
                   </div>
-                  {editingAgentId === member.agentId ? (
+                  {editingParticipantId === member.participantId ? (
                     <RoleEditor
                       selected={editRoles}
                       onToggle={toggleEditRole}
                       onSave={handleSaveRoles}
-                      onCancel={() => setEditingAgentId(null)}
+                      onCancel={() => setEditingParticipantId(null)}
                       busy={savingRoles}
                     />
                   ) : (
                     <RoleBadges roles={member.roles} />
                   )}
-                  {editingPromptAgentId === member.agentId ? (
+                  {editingPromptParticipantId === member.participantId ? (
                     <PromptEditor
                       value={editPromptValue}
                       onChange={setEditPromptValue}
                       onSave={handleSavePrompt}
-                      onCancel={() => setEditingPromptAgentId(null)}
+                      onCancel={() => setEditingPromptParticipantId(null)}
                       busy={savingPrompt}
                     />
                   ) : (
@@ -492,18 +499,18 @@ export default function GroupMembersPage() {
                       size="sm"
                       className="flex-1 text-red-600 hover:text-red-700"
                       disabled={
-                        member.agentId === createdBy ||
-                        removingId === member.agentId
+                        member.participantId === createdBy ||
+                        removingId === member.participantId
                       }
                       title={
-                        member.agentId === createdBy
+                        member.participantId === createdBy
                           ? "不能移除群主"
                           : undefined
                       }
                       onClick={() => handleRemoveMember(member)}
                     >
                       <UserMinus />
-                      {removingId === member.agentId ? "移除中…" : "移除"}
+                      {removingId === member.participantId ? "移除中…" : "移除"}
                     </Button>
                   </div>
                 </div>
@@ -523,7 +530,10 @@ export default function GroupMembersPage() {
               </thead>
               <tbody>
                 {members.map((member) => (
-                  <tr key={member.agentId} className="border-b last:border-0">
+                  <tr
+                    key={member.participantId}
+                    className="border-b last:border-0"
+                  >
                     <td className="px-4 py-3 font-medium">{member.name}</td>
                     <td className="px-4 py-3 text-muted-foreground">
                       {member.type}
@@ -532,12 +542,12 @@ export default function GroupMembersPage() {
                       {member.device ?? "-"}
                     </td>
                     <td className="px-4 py-3">
-                      {editingAgentId === member.agentId ? (
+                      {editingParticipantId === member.participantId ? (
                         <RoleEditor
                           selected={editRoles}
                           onToggle={toggleEditRole}
                           onSave={handleSaveRoles}
-                          onCancel={() => setEditingAgentId(null)}
+                          onCancel={() => setEditingParticipantId(null)}
                           busy={savingRoles}
                         />
                       ) : (
@@ -545,12 +555,12 @@ export default function GroupMembersPage() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {editingPromptAgentId === member.agentId ? (
+                      {editingPromptParticipantId === member.participantId ? (
                         <PromptEditor
                           value={editPromptValue}
                           onChange={setEditPromptValue}
                           onSave={handleSavePrompt}
-                          onCancel={() => setEditingPromptAgentId(null)}
+                          onCancel={() => setEditingPromptParticipantId(null)}
                           busy={savingPrompt}
                         />
                       ) : (
@@ -580,18 +590,20 @@ export default function GroupMembersPage() {
                           size="sm"
                           className="text-red-600 hover:text-red-700"
                           disabled={
-                            member.agentId === createdBy ||
-                            removingId === member.agentId
+                            member.participantId === createdBy ||
+                            removingId === member.participantId
                           }
                           title={
-                            member.agentId === createdBy
+                            member.participantId === createdBy
                               ? "不能移除群主"
                               : undefined
                           }
                           onClick={() => handleRemoveMember(member)}
                         >
                           <UserMinus />
-                          {removingId === member.agentId ? "移除中…" : "移除"}
+                          {removingId === member.participantId
+                            ? "移除中…"
+                            : "移除"}
                         </Button>
                       </div>
                     </td>
@@ -623,7 +635,7 @@ function RoleBadges({ roles }: { roles: string[] }) {
 
 /**
  * Ticket 20: 行内角色编辑表单 — 与添加成员表单同款复选框,保存调用
- * PATCH /api/groups/:id/members/:agentId。
+ * PATCH /api/groups/:id/members/:participantId。
  */
 function RoleEditor({
   selected,
@@ -705,7 +717,7 @@ function PromptLine({ prompt }: { prompt: string | null }) {
 
 /**
  * Ticket 21: 行内编辑分工提示词 — textarea + 保存/取消,调用
- * PATCH /api/groups/:id/members/:agentId 单独更新 prompt。
+ * PATCH /api/groups/:id/members/:participantId 单独更新 prompt。
  */
 function PromptEditor({
   value,

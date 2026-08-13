@@ -33,7 +33,7 @@ function routerFetchMock() {
       respond: () => jsonResponse([]),
     },
     {
-      match: (url) => url.endsWith("/api/agents"),
+      match: (url) => url.endsWith("/api/participants"),
       respond: () => jsonResponse([]),
     },
     {

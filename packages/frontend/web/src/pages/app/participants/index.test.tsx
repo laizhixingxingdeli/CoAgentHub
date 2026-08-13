@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -9,21 +9,21 @@ import {
 import ExecutorsPage from "./index";
 
 /**
- * 接入 Agent 页(ticket: 网页 @executor 发布):
+ * 接入 Participant 页(ticket: 网页 @executor 发布):
  *  - 表单字段齐全(名字/类型/调用方式/命令或地址/参数模板/设备);
- *  - 提交调 POST /api/executors,成功后列表出现新 agent;
+ *  - 提交调 POST /api/executors,成功后列表出现新 participant;
  *  - 内置执行器只展示不可删除,DB 配置可删除;
  *  - 界面不出现任何 token/token_hash 字段;
- *  - Agent 自管理(ticket: 补全 /agents 页):行内展示 device/capabilities/
- *    device/capabilities/在线状态;编辑对话框 PATCH /api/agents/:id;心跳 PUT
- *    /api/agents/:id/heartbeat;未绑定 token 时编辑/心跳有无权限提示。
+ *  - Participant 自管理(ticket: 补全 /participants 页):行内展示 device/capabilities/
+ *    device/capabilities/在线状态;编辑对话框 PATCH /api/participants/:id;心跳 PUT
+ *    /api/participants/:id/heartbeat;未绑定 token 时编辑/心跳有无权限提示。
  */
 
 const BUILTIN = [
   {
     key: "executor",
     agentName: "AtomCode 执行器",
-    type: "agent",
+    type: "participant",
     kind: "cli",
     bin: "atomcode",
     url: null,
@@ -76,17 +76,17 @@ function executorsFetchMock() {
   ]);
 }
 
-describe("接入 Agent 页", () => {
+describe("接入 Participant 页", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     localStorage.clear();
   });
 
-  it("表单字段齐全,提交 POST /api/executors 后列表出现新 agent,且无 token 展示", async () => {
+  it("表单字段齐全,提交 POST /api/executors 后列表出现新 participant,且无 token 展示", async () => {
     const fetchMock = executorsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     // 表单字段:名字/类型/调用方式/命令/参数模板/设备
     expect(screen.getByLabelText("名字")).toBeInTheDocument();
@@ -106,7 +106,7 @@ describe("接入 Agent 页", () => {
 
     // 填表提交
     fireEvent.change(screen.getByLabelText("名字"), {
-      target: { value: "My Cli Agent" },
+      target: { value: "My Cli Participant" },
     });
     fireEvent.change(screen.getByLabelText("命令"), {
       target: { value: "my-cli" },
@@ -120,10 +120,10 @@ describe("接入 Agent 页", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
     await waitFor(() => {
-      expect(screen.getByText("My Cli Agent")).toBeInTheDocument();
+      expect(screen.getByText("My Cli Participant")).toBeInTheDocument();
     });
     expect(
-      screen.getByText(/已接入 Agent「My Cli Agent」/),
+      screen.getByText(/已接入 Participant「My Cli Participant」/),
     ).toBeInTheDocument();
 
     // POST 载荷:cli → bin + 参数模板分词,不含任何 token 字段
@@ -135,7 +135,7 @@ describe("接入 Agent 页", () => {
       string,
       unknown
     >;
-    expect(payload.agentName).toBe("My Cli Agent");
+    expect(payload.agentName).toBe("My Cli Participant");
     expect(payload.kind).toBe("cli");
     expect(payload.bin).toBe("my-cli");
     expect(payload.args).toEqual(["-y", "-p", "{ticket}"]);
@@ -151,7 +151,7 @@ describe("接入 Agent 页", () => {
     const fetchMock = executorsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     fireEvent.click(screen.getByLabelText("a2a(远程 gateway)"));
     await waitFor(() => {
@@ -160,7 +160,7 @@ describe("接入 Agent 页", () => {
     expect(screen.queryByLabelText("命令")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("名字"), {
-      target: { value: "Win Agent" },
+      target: { value: "Win Participant" },
     });
     fireEvent.change(screen.getByLabelText("Gateway 地址"), {
       target: { value: "http://192.168.1.10:9900/" },
@@ -168,7 +168,7 @@ describe("接入 Agent 页", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Win Agent")).toBeInTheDocument();
+      expect(screen.getByText("Win Participant")).toBeInTheDocument();
     });
     const postCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "POST",
@@ -191,14 +191,14 @@ describe("接入 Agent 页", () => {
     const list = [
       ...BUILTIN,
       {
-        key: "extra-agent",
-        agentName: "Extra Agent",
+        key: "extra-participant",
+        agentName: "Extra Participant",
         type: "custom",
         kind: "cli",
         bin: "extra",
         url: null,
         args: [],
-        label: "extra-agent",
+        label: "extra-participant",
         builtin: false,
       },
     ];
@@ -220,10 +220,10 @@ describe("接入 Agent 页", () => {
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     await waitFor(() => {
-      expect(screen.getByText("Extra Agent")).toBeInTheDocument();
+      expect(screen.getByText("Extra Participant")).toBeInTheDocument();
     });
 
     // 内置项没有删除按钮
@@ -231,22 +231,22 @@ describe("接入 Agent 页", () => {
     expect(within(builtinRow).queryByRole("button")).not.toBeInTheDocument();
 
     // 非内置项可删除
-    const extraRow = screen.getByText("Extra Agent").closest("li")!;
+    const extraRow = screen.getByText("Extra Participant").closest("li")!;
     fireEvent.click(within(extraRow).getByRole("button", { name: "删除" }));
 
     await waitFor(() => {
-      expect(screen.queryByText("Extra Agent")).not.toBeInTheDocument();
+      expect(screen.queryByText("Extra Participant")).not.toBeInTheDocument();
     });
     const delCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "DELETE",
     );
-    expect(String(delCall![0])).toContain("/api/executors/extra-agent");
+    expect(String(delCall![0])).toContain("/api/executors/extra-participant");
   });
 
-  // ── Agent 自管理(ticket: 补全 /agents 页)──────────────────────────────
-  const AGENTS = [
+  // ── Participant 自管理(ticket: 补全 /participants 页)──────────────────────────────
+  const PARTICIPANTS = [
     {
-      id: "agent-online",
+      id: "participant-online",
       name: "Online Bot",
       type: "custom",
       device: "mac-mini",
@@ -254,7 +254,7 @@ describe("接入 Agent 页", () => {
       lastSeen: new Date(Date.now() - 5_000).toISOString(),
     },
     {
-      id: "agent-offline",
+      id: "participant-offline",
       name: "Offline Bot",
       type: "hermes",
       device: "win-pc",
@@ -262,7 +262,7 @@ describe("接入 Agent 页", () => {
       lastSeen: new Date(Date.now() - 3_600_000).toISOString(),
     },
     {
-      id: "agent-never",
+      id: "participant-never",
       name: "Never Bot",
       type: "atomcode",
       device: null,
@@ -308,24 +308,27 @@ describe("接入 Agent 页", () => {
     },
   ];
 
-  /** 状态化 mock:GET /api/agents 返回可变列表,PATCH 更新,PUT heartbeat 写 lastSeen。 */
-  function agentsFetchMock() {
-    const agents: Array<Record<string, unknown>> = AGENTS.map((a) => ({
-      ...a,
-    }));
+  /** 状态化 mock:GET /api/participants 返回可变列表,PATCH 更新,PUT heartbeat 写 lastSeen。 */
+  function participantsFetchMock() {
+    const participants: Array<Record<string, unknown>> = PARTICIPANTS.map(
+      (a) => ({
+        ...a,
+      }),
+    );
     return createFetchMock([
       {
         match: (url, init) =>
-          init?.method === "PATCH" && String(url).includes("/api/agents/"),
+          init?.method === "PATCH" &&
+          String(url).includes("/api/participants/"),
         respond: (url, init) => {
           const id = String(url).split("/").at(-1);
           const body = JSON.parse(String(init?.body)) as Record<
             string,
             unknown
           >;
-          const idx = agents.findIndex((a) => a.id === id);
-          const updated = { ...agents[idx], ...body };
-          if (idx >= 0) agents[idx] = updated;
+          const idx = participants.findIndex((a) => a.id === id);
+          const updated = { ...participants[idx], ...body };
+          if (idx >= 0) participants[idx] = updated;
           return jsonResponse(updated);
         },
       },
@@ -334,19 +337,19 @@ describe("接入 Agent 页", () => {
           init?.method === "PUT" && String(url).includes("/heartbeat"),
         respond: (url) => {
           const id = String(url).match(
-            /\/api\/agents\/([^/]+)\/heartbeat/,
+            /\/api\/participants\/([^/]+)\/heartbeat/,
           )?.[1];
           const lastSeen = new Date().toISOString();
-          const idx = agents.findIndex((a) => a.id === id);
-          if (idx >= 0) agents[idx] = { ...agents[idx], lastSeen };
+          const idx = participants.findIndex((a) => a.id === id);
+          if (idx >= 0) participants[idx] = { ...participants[idx], lastSeen };
           return jsonResponse({ lastSeen });
         },
       },
       {
         match: (url, init) =>
           (!init?.method || init.method === "GET") &&
-          String(url).endsWith("/api/agents"),
-        respond: () => jsonResponse(agents),
+          String(url).endsWith("/api/participants"),
+        respond: () => jsonResponse(participants),
       },
       {
         match: (url, init) =>
@@ -358,9 +361,9 @@ describe("接入 Agent 页", () => {
   }
 
   it("列表行显示 device/capabilities 与在线/离线/从未在线徽标", async () => {
-    const fetchMock = agentsFetchMock();
+    const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Online Bot");
     // device 出现在元信息行(custom · cli · mac-mini …)
@@ -375,18 +378,20 @@ describe("接入 Agent 页", () => {
   });
 
   it("编辑对话框可改 name/device/capabilities,PATCH 保存并即时刷新", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
-    localStorage.setItem(AGENT_ID_KEY, "agent-online");
-    const fetchMock = agentsFetchMock();
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
+    const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Online Bot");
     const row = screen.getByText("Online Bot").closest("li")!;
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
 
     // 对话框预填现有注册信息
-    const nameInput = screen.getByLabelText("Agent 名字") as HTMLInputElement;
+    const nameInput = screen.getByLabelText(
+      "Participant 名字",
+    ) as HTMLInputElement;
     expect(nameInput.value).toBe("Online Bot");
     expect((screen.getByLabelText("设备") as HTMLInputElement).value).toBe(
       "mac-mini",
@@ -406,13 +411,17 @@ describe("接入 Agent 页", () => {
 
     // 保存成功后对话框关闭,列表行内刷新
     await waitFor(() => {
-      expect(screen.queryByLabelText("Agent 名字")).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("Participant 名字"),
+      ).not.toBeInTheDocument();
     });
     const patchCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PATCH",
     );
     expect(patchCall).toBeTruthy();
-    expect(String(patchCall![0])).toContain("/api/agents/agent-online");
+    expect(String(patchCall![0])).toContain(
+      "/api/participants/participant-online",
+    );
     const payload = JSON.parse(String(patchCall![1]?.body)) as Record<
       string,
       unknown
@@ -426,11 +435,11 @@ describe("接入 Agent 页", () => {
   });
 
   it("心跳按钮调用 PUT heartbeat 并即时刷新在线状态", async () => {
-    localStorage.setItem(AGENT_TOKEN_KEY, "tok-1");
-    localStorage.setItem(AGENT_ID_KEY, "agent-never");
-    const fetchMock = agentsFetchMock();
+    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-never");
+    const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Never Bot");
     const row = screen.getByText("Never Bot").closest("li")!;
@@ -445,25 +454,27 @@ describe("接入 Agent 页", () => {
     const beatCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PUT",
     );
-    expect(String(beatCall![0])).toContain("/api/agents/agent-never/heartbeat");
+    expect(String(beatCall![0])).toContain(
+      "/api/participants/participant-never/heartbeat",
+    );
     expect(screen.getByText(/已上报「Never Bot」在线/)).toBeInTheDocument();
   });
 
   it("未绑定 token 时编辑/心跳给出无权限提示", async () => {
-    const fetchMock = agentsFetchMock();
+    const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
-    renderWithProviders(<ExecutorsPage />, "/agents");
+    renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Online Bot");
     const row = screen.getByText("Online Bot").closest("li")!;
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
-    await screen.findByText("无权限,请先绑定 Agent Token 再操作");
+    await screen.findByText("无权限,请先绑定 Participant Token 再操作");
 
     fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
     expect(
-      screen.getByText("无权限,请先绑定 Agent Token 再操作"),
+      screen.getByText("无权限,请先绑定 Participant Token 再操作"),
     ).toBeInTheDocument();
     // 编辑对话框未被打开
-    expect(screen.queryByLabelText("Agent 名字")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Participant 名字")).not.toBeInTheDocument();
   });
 });

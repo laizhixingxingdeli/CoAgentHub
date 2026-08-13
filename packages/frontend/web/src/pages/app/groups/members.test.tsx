@@ -14,7 +14,7 @@ import GroupMembersPage from "./members";
 
 const MEMBERS = [
   {
-    agentId: "agent-1",
+    participantId: "participant-1",
     name: "hermes-mac",
     type: "hermes",
     device: "mac-mini",
@@ -23,7 +23,7 @@ const MEMBERS = [
     joinedAt: "2026-08-01T00:00:00.000Z",
   },
   {
-    agentId: "agent-2",
+    participantId: "participant-2",
     name: "win-hermes",
     type: "hermes",
     device: "win-pc",
@@ -33,14 +33,19 @@ const MEMBERS = [
   },
 ];
 
-const AGENTS = [
-  { id: "agent-1", name: "hermes-mac", type: "hermes", device: "mac-mini" },
-  { id: "agent-9", name: "atomcode-cli", type: "atomcode", device: null },
+const PARTICIPANTS = [
+  {
+    id: "participant-1",
+    name: "hermes-mac",
+    type: "hermes",
+    device: "mac-mini",
+  },
+  { id: "participant-9", name: "atomcode-cli", type: "atomcode", device: null },
 ];
 
 function membersFetchMock(
   members: unknown[] = MEMBERS,
-  agents: unknown[] = AGENTS,
+  participants: unknown[] = PARTICIPANTS,
 ) {
   // Stateful roster: POST appends, PATCH updates roles/prompt, so the list
   // refresh after each action can be asserted against the DOM.
@@ -54,21 +59,21 @@ function membersFetchMock(
           id: "group-1",
           title: "模型训练任务",
           status: "active",
-          createdBy: "agent-1",
+          createdBy: "participant-1",
         }),
     },
     {
-      match: (url) => url.endsWith("/api/agents"),
-      respond: () => jsonResponse(agents),
+      match: (url) => url.endsWith("/api/participants"),
+      respond: () => jsonResponse(participants),
     },
     {
       match: (url) => url.includes("/api/groups/") && url.endsWith("/members"),
       respond: (_url, init) => {
         if ((init?.method ?? "GET") === "POST") {
-          const { agentId, roles, prompt } = JSON.parse(
+          const { participantId, roles, prompt } = JSON.parse(
             String(init?.body),
           ) as Record<string, unknown>;
-          return jsonResponse({ agentId, roles, prompt });
+          return jsonResponse({ participantId, roles, prompt });
         }
         return jsonResponse(current);
       },
@@ -77,20 +82,20 @@ function membersFetchMock(
       match: (url, init) =>
         init?.method === "PATCH" && String(url).includes("/members/"),
       respond: (url, init) => {
-        const agentId = String(url).split("/").pop();
+        const participantId = String(url).split("/").pop();
         const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
         current = current.map((m) =>
-          m.agentId === agentId ? { ...m, ...patch } : m,
+          m.participantId === participantId ? { ...m, ...patch } : m,
         );
-        return jsonResponse({ agentId, ...patch });
+        return jsonResponse({ participantId, ...patch });
       },
     },
     {
       match: (url, init) =>
         init?.method === "DELETE" && String(url).includes("/members/"),
       respond: (url) => {
-        const agentId = String(url).split("/").pop();
-        current = current.filter((m) => m.agentId !== agentId);
+        const participantId = String(url).split("/").pop();
+        current = current.filter((m) => m.participantId !== participantId);
         return jsonResponse({ success: true });
       },
     },
@@ -113,8 +118,8 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
 
     await screen.findAllByText("hermes-mac");
 
-    fireEvent.change(screen.getByLabelText("选择成员 agent"), {
-      target: { value: "agent-9" },
+    fireEvent.change(screen.getByLabelText("选择成员 participant"), {
+      target: { value: "participant-9" },
     });
     fireEvent.change(screen.getByLabelText("本群分工提示词(可选)"), {
       target: { value: "在本组你负责 code review,重点关注测试覆盖与可读性" },
@@ -127,7 +132,7 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
       );
       expect(call).toBeDefined();
       const body = JSON.parse(String(call![1]?.body)) as Record<string, string>;
-      expect(body.agentId).toBe("agent-9");
+      expect(body.participantId).toBe("participant-9");
       expect(body.prompt).toBe(
         "在本组你负责 code review,重点关注测试覆盖与可读性",
       );
@@ -155,7 +160,7 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
     stubFetch(
       membersFetchMock([
         {
-          agentId: "agent-1",
+          participantId: "participant-1",
           name: "hermes-mac",
           type: "hermes",
           device: "mac-mini",
@@ -206,7 +211,9 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
         ([, init]) => init?.method === "PATCH",
       );
       expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/groups/group-1/members/agent-2");
+      expect(String(call![0])).toBe(
+        "/api/groups/group-1/members/participant-2",
+      );
       const body = JSON.parse(String(call![1]?.body)) as Record<string, string>;
       expect(body).toEqual({ prompt: "负责跑通全部测试,输出失败用例清单" });
     });

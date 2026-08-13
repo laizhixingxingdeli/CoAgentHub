@@ -41,7 +41,7 @@ class MockNotification {
 }
 
 const MESSAGE = {
-  senderId: "agent-2",
+  senderId: "participant-2",
   body: "任务完成了,请评审",
   fileRef: null,
 };
@@ -51,7 +51,7 @@ const BASE_OPTS = {
   groupTitle: "评审任务",
   senderName: "win-hermes",
   message: MESSAGE,
-  myAgentId: "agent-1",
+  myParticipantId: "participant-1",
   navigate: vi.fn(),
 };
 
@@ -131,17 +131,17 @@ describe("maybeNotifyGroupMessage 桌面通知", () => {
     setHidden(true);
     maybeNotifyGroupMessage({
       ...BASE_OPTS,
-      message: { ...MESSAGE, senderId: "agent-1" },
+      message: { ...MESSAGE, senderId: "participant-1" },
     });
     expect(MockNotification.instances).toHaveLength(0);
   });
 
-  it("myAgentId 为 null(未绑定)时不跳过任何消息", () => {
+  it("myParticipantId 为 null(未绑定)时不跳过任何消息", () => {
     setHidden(true);
     maybeNotifyGroupMessage({
       ...BASE_OPTS,
-      myAgentId: null,
-      message: { ...MESSAGE, senderId: "agent-1" },
+      myParticipantId: null,
+      message: { ...MESSAGE, senderId: "participant-1" },
     });
     expect(MockNotification.instances).toHaveLength(1);
   });

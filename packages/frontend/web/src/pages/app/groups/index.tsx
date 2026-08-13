@@ -18,9 +18,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useUnread } from "@/hooks/use-unread";
 import {
-  AGENT_ID_KEY,
-  AGENT_TOKEN_KEY,
-  agentAuthHeaders,
+  PARTICIPANT_ID_KEY,
+  PARTICIPANT_TOKEN_KEY,
+  participantAuthHeaders,
 } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -32,8 +32,8 @@ type GroupItem = {
   createdAt: string;
 };
 
-/** The bound agent's own registration (GET /api/agents, filtered by id). */
-type AgentInfo = {
+/** The bound participant's own registration (GET /api/participants, filtered by id). */
+type ParticipantInfo = {
   id: string;
   name: string;
   type: string;
@@ -48,7 +48,7 @@ const PAGE_SIZE = 20;
 
 /**
  * Turn a non-OK response into a human-readable error. A 401 means the
- * agentAuth middleware rejected the request: if no `Authorization` header was
+ * participantAuth middleware rejected the request: if no `Authorization` header was
  * sent the token is simply not bound yet, otherwise the bound token was
  * rejected/revoked and needs to be cleared and re-bound.
  */
@@ -56,8 +56,8 @@ function throwForStatus(res: Response, sentAuthHeader: boolean): never {
   if (res.status === 401) {
     throw new Error(
       sentAuthHeader
-        ? "Agent Token 无效或已失效,请在上方清除后重新绑定"
-        : "未绑定 Agent Token,请在上方输入并保存",
+        ? "Participant Token 无效或已失效,请在上方清除后重新绑定"
+        : "未绑定 Participant Token,请在上方输入并保存",
     );
   }
   throw new Error(`HTTP ${res.status}`);
@@ -66,9 +66,9 @@ function throwForStatus(res: Response, sentAuthHeader: boolean): never {
 /**
  * Group list page (ticket 02): shows all groups with status and member
  * counts, lets the operator create a new group and archive finished ones.
- * The web viewer acts as a human agent: an agent token can be bound at the
+ * The web viewer acts as a human participant: an participant token can be bound at the
  * top of the page, and every request carries it as `Authorization: Bearer`
- * so the agentAuth-protected group APIs accept the browser session.
+ * so the participantAuth-protected group APIs accept the browser session.
  */
 export default function GroupsPage() {
   const [, navigate] = useLocation();
@@ -99,21 +99,22 @@ export default function GroupsPage() {
   };
   const [boundToken, setBoundToken] = useState(() =>
     typeof localStorage !== "undefined"
-      ? (localStorage.getItem(AGENT_TOKEN_KEY) ?? "")
+      ? (localStorage.getItem(PARTICIPANT_TOKEN_KEY) ?? "")
       : "",
   );
   const [tokenInput, setTokenInput] = useState("");
-  // Ticket 18: the viewer's own agent id, bound alongside the token so the
+  // Ticket 18: the viewer's own participant id, bound alongside the token so the
   // messages page can right-align "my" bubbles. The server never exposes
   // token_hash, so it must be entered explicitly (not looked up).
-  const [agentIdInput, setAgentIdInput] = useState("");
-  // Ticket 20: Agent 设置展开区 — 绑定成功后可见,展示并编辑自己的注册信息。
-  const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
+  const [participantIdInput, setParticipantIdInput] = useState("");
+  // Ticket 20: Participant 设置展开区 — 绑定成功后可见,展示并编辑自己的注册信息。
+  const [participantInfo, setParticipantInfo] =
+    useState<ParticipantInfo | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [deviceInput, setDeviceInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
-  // Ticket 28: 注册新 Agent — 替代终端 curl 注册;注册成功即自动绑定
+  // Ticket 28: 注册新 Participant — 替代终端 curl 注册;注册成功即自动绑定
   // (token 覆盖写入,语义:注册即切换身份,不强制清除旧绑定)。
   const [registerOpen, setRegisterOpen] = useState(false);
   const [regName, setRegName] = useState("");
@@ -124,11 +125,13 @@ export default function GroupsPage() {
   // 注册响应里的一次性 token:仅显示一次,供用户复制留档。
   const [registeredToken, setRegisteredToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  // Ticket 29: 身份面板 — 已有 Agent 名册(公开 GET /api/agents,无需鉴权)。
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [agentsLoading, setAgentsLoading] = useState(false);
-  const [agentsError, setAgentsError] = useState<string | null>(null);
-  // 正在一键绑定的 agent id(按钮转圈防连点)。
+  // Ticket 29: 身份面板 — 已有 Participant 名册(公开 GET /api/participants,无需鉴权)。
+  const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
+  const [participantsLoading, setParticipantsLoading] = useState(false);
+  const [participantsError, setParticipantsError] = useState<string | null>(
+    null,
+  );
+  // 正在一键绑定的 participant id(按钮转圈防连点)。
   const [bindingId, setBindingId] = useState<string | null>(null);
   // 「高级:手动输入 token」折叠区(兼容特殊场景,默认收起)。
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -143,7 +146,7 @@ export default function GroupsPage() {
     const filter = statusFilter;
     const q = debouncedQuery;
     try {
-      const headers = agentAuthHeaders();
+      const headers = participantAuthHeaders();
       // "all" carries no ?status= (server returns active + archived and hides
       // soft-deleted rows); the tabs pass the exact enum the server filters on.
       // A non-empty search appends ?q= (title ILIKE) and combines with the tab.
@@ -188,7 +191,7 @@ export default function GroupsPage() {
     setLoadingMore(true);
     setError(null);
     try {
-      const headers = agentAuthHeaders();
+      const headers = participantAuthHeaders();
       const params = new URLSearchParams();
       if (filter !== "all") {
         params.set("status", filter);
@@ -231,50 +234,50 @@ export default function GroupsPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Ticket 29: 拉取已有 Agent 名册(公开端点,无需鉴权)。绑定/清除/注册后
+  // Ticket 29: 拉取已有 Participant 名册(公开端点,无需鉴权)。绑定/清除/注册后
   // 由 commitToken 触发刷新;加载失败只影响面板内的列表区,不阻塞页面。
-  const loadAgents = useCallback(async () => {
-    setAgentsLoading(true);
-    setAgentsError(null);
+  const loadParticipants = useCallback(async () => {
+    setParticipantsLoading(true);
+    setParticipantsError(null);
     try {
-      const res = await fetch("/api/agents");
+      const res = await fetch("/api/participants");
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      const data = (await res.json()) as AgentInfo[];
-      setAgents(data);
+      const data = (await res.json()) as ParticipantInfo[];
+      setParticipants(data);
     } catch (e) {
-      setAgentsError(
-        `Agent 列表加载失败: ${e instanceof Error ? e.message : String(e)}`,
+      setParticipantsError(
+        `Participant 列表加载失败: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
-      setAgentsLoading(false);
+      setParticipantsLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadAgents();
-  }, [loadAgents]);
+    loadParticipants();
+  }, [loadParticipants]);
 
-  const commitToken = (next: string | null, agentId: string | null) => {
+  const commitToken = (next: string | null, participantId: string | null) => {
     const trimmed = next?.trim() ?? null;
-    const trimmedAgentId = agentId?.trim() ?? null;
+    const trimmedParticipantId = participantId?.trim() ?? null;
     if (trimmed) {
-      localStorage.setItem(AGENT_TOKEN_KEY, trimmed);
+      localStorage.setItem(PARTICIPANT_TOKEN_KEY, trimmed);
     } else {
-      localStorage.removeItem(AGENT_TOKEN_KEY);
+      localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
     }
-    // Ticket 18: the agent id rides along with the token so the messages page
+    // Ticket 18: the participant id rides along with the token so the messages page
     // can right-align the viewer's own bubbles. Clearing the token clears it
     // too (a stale id would misalign messages after re-binding).
-    if (trimmedAgentId) {
-      localStorage.setItem(AGENT_ID_KEY, trimmedAgentId);
+    if (trimmedParticipantId) {
+      localStorage.setItem(PARTICIPANT_ID_KEY, trimmedParticipantId);
     } else {
-      localStorage.removeItem(AGENT_ID_KEY);
+      localStorage.removeItem(PARTICIPANT_ID_KEY);
     }
     setBoundToken(trimmed ?? "");
     loadGroups();
-    loadAgents();
+    loadParticipants();
   };
 
   const handleSaveToken = () => {
@@ -282,9 +285,9 @@ export default function GroupsPage() {
     if (!token) {
       return;
     }
-    commitToken(token, agentIdInput);
+    commitToken(token, participantIdInput);
     setTokenInput("");
-    setAgentIdInput("");
+    setParticipantIdInput("");
   };
 
   const handleClearToken = () => {
@@ -295,14 +298,17 @@ export default function GroupsPage() {
   // (局域网信任模型:注册与查/重置 token 均无需鉴权),自动写入并切换身份。
   // 因库中只存 SHA-256 哈希无法还原,后端采用「重置」而非「查」:生成新
   // token 覆盖存储(旧 token 立即失效)并仅此一次返回明文。
-  const handleBind = async (agent: AgentInfo) => {
-    setBindingId(agent.id);
+  const handleBind = async (participant: ParticipantInfo) => {
+    setBindingId(participant.id);
     setMessage(null);
     setError(null);
     try {
-      const res = await fetch(`/api/agents/${agent.id}/reset-token`, {
-        method: "POST",
-      });
+      const res = await fetch(
+        `/api/participants/${participant.id}/reset-token`,
+        {
+          method: "POST",
+        },
+      );
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(
@@ -314,7 +320,7 @@ export default function GroupsPage() {
         token: string;
       };
       commitToken(token, id);
-      setMessage(`已切换为 ${agent.name}`);
+      setMessage(`已切换为 ${participant.name}`);
     } catch (e) {
       setError(`绑定失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -322,26 +328,26 @@ export default function GroupsPage() {
     }
   };
 
-  // Ticket 28: 前端注册 agent(POST /api/agents,公开端点)。成功后用返回的
+  // Ticket 28: 前端注册 participant(POST /api/participants,公开端点)。成功后用返回的
   // id + token 自动完成绑定(commitToken 覆盖写入 localStorage 并刷新列表)。
   const handleRegister = async () => {
     const name = regName.trim();
     if (!name) {
-      setError("Agent 名称不能为空");
+      setError("Participant 名称不能为空");
       return;
     }
     // 后端 type 是自由文本(z.string().min(1),无枚举校验);select 提供常用
     // 值,「自定义」走自由输入。
     const type = regType === "custom" ? regTypeCustom.trim() : regType;
     if (!type) {
-      setError("Agent 类型不能为空");
+      setError("Participant 类型不能为空");
       return;
     }
     setRegistering(true);
     setMessage(null);
     setError(null);
     try {
-      const res = await fetch("/api/agents", {
+      const res = await fetch("/api/participants", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -356,20 +362,20 @@ export default function GroupsPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      const agent = (await res.json()) as {
+      const participant = (await res.json()) as {
         id: string;
         name: string;
         token: string;
       };
       // 注册即切换身份:token/id 覆盖写入,不强制清除旧绑定。
-      commitToken(agent.token, agent.id);
+      commitToken(participant.token, participant.id);
       setRegName("");
       setRegType("human");
       setRegTypeCustom("");
       setRegDevice("");
       setCopied(false);
-      setRegisteredToken(agent.token);
-      setMessage(`✅ 已注册并绑定 ${agent.name}`);
+      setRegisteredToken(participant.token);
+      setMessage(`✅ 已注册并绑定 ${participant.name}`);
     } catch (e) {
       setError(`注册失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -389,26 +395,26 @@ export default function GroupsPage() {
     }
   };
 
-  // Ticket 20: 拉取自己(coagenthub.agentId)的注册信息并预填设置表单。加载失败
+  // Ticket 20: 拉取自己(coagenthub.participantId)的注册信息并预填设置表单。加载失败
   // 不影响列表页,设置区静默留空。
-  const loadAgentInfo = useCallback(async () => {
-    const agentId =
+  const loadParticipantInfo = useCallback(async () => {
+    const participantId =
       typeof localStorage !== "undefined"
-        ? localStorage.getItem(AGENT_ID_KEY)
+        ? localStorage.getItem(PARTICIPANT_ID_KEY)
         : null;
-    if (!agentId) {
-      setAgentInfo(null);
+    if (!participantId) {
+      setParticipantInfo(null);
       return;
     }
     try {
-      const headers = agentAuthHeaders();
-      const res = await fetch("/api/agents", { headers });
+      const headers = participantAuthHeaders();
+      const res = await fetch("/api/participants", { headers });
       if (!res.ok) {
         return;
       }
-      const agents = (await res.json()) as AgentInfo[];
-      const mine = agents.find((a) => a.id === agentId) ?? null;
-      setAgentInfo(mine);
+      const participants = (await res.json()) as ParticipantInfo[];
+      const mine = participants.find((a) => a.id === participantId) ?? null;
+      setParticipantInfo(mine);
       if (mine) {
         setNameInput(mine.name);
         setDeviceInput(mine.device ?? "");
@@ -418,20 +424,20 @@ export default function GroupsPage() {
     }
   }, []);
 
-  // Ticket 20: 绑定 agent 后加载其注册信息(GET /api/agents 找到自己的 id)。
+  // Ticket 20: 绑定 participant 后加载其注册信息(GET /api/participants 找到自己的 id)。
   useEffect(() => {
     if (boundToken) {
-      loadAgentInfo();
+      loadParticipantInfo();
     }
-  }, [boundToken, loadAgentInfo]);
+  }, [boundToken, loadParticipantInfo]);
 
   const handleSaveSettings = async () => {
-    const agentId =
+    const participantId =
       typeof localStorage !== "undefined"
-        ? localStorage.getItem(AGENT_ID_KEY)
+        ? localStorage.getItem(PARTICIPANT_ID_KEY)
         : null;
-    if (!agentId) {
-      setError("未绑定 agentId,无法保存 Agent 设置");
+    if (!participantId) {
+      setError("未绑定 participantId,无法保存 Participant 设置");
       return;
     }
     // 名称必填:空名称会被 PATCH 静默丢弃(undefined),提示而不是假装成功。
@@ -445,10 +451,10 @@ export default function GroupsPage() {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...agentAuthHeaders(),
+        ...participantAuthHeaders(),
       };
       // device 为空时发送 null 表示清空(与后端 PATCH 语义一致)。
-      const res = await fetch(`/api/agents/${agentId}`, {
+      const res = await fetch(`/api/participants/${participantId}`, {
         method: "PATCH",
         headers,
         body: JSON.stringify({
@@ -462,11 +468,11 @@ export default function GroupsPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage("Agent 设置已保存");
-      await loadAgentInfo();
+      setMessage("Participant 设置已保存");
+      await loadParticipantInfo();
     } catch (e) {
       setError(
-        `保存 Agent 设置失败: ${e instanceof Error ? e.message : String(e)}`,
+        `保存 Participant 设置失败: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
       setSavingSettings(false);
@@ -484,7 +490,7 @@ export default function GroupsPage() {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...agentAuthHeaders(),
+        ...participantAuthHeaders(),
       };
       const res = await fetch("/api/groups", {
         method: "POST",
@@ -513,7 +519,7 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = agentAuthHeaders();
+      const headers = participantAuthHeaders();
       const res = await fetch(`/api/groups/${group.id}/archive`, {
         method: "POST",
         headers,
@@ -532,7 +538,7 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = agentAuthHeaders();
+      const headers = participantAuthHeaders();
       const res = await fetch(`/api/groups/${group.id}/unarchive`, {
         method: "POST",
         headers,
@@ -563,7 +569,7 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = agentAuthHeaders();
+      const headers = participantAuthHeaders();
       const res = await fetch(`/api/groups/${group.id}`, {
         method: "DELETE",
         headers,
@@ -578,15 +584,17 @@ export default function GroupsPage() {
     }
   };
 
-  // Ticket 29: 当前绑定身份 — 从名册里找,找不到则回退 agentInfo(设置区已
+  // Ticket 29: 当前绑定身份 — 从名册里找,找不到则回退 participantInfo(设置区已
   // 加载的自己的注册信息)。localStorage 在 commitToken 里同步写入,渲染时
   // 读取即为最新绑定。
-  const boundAgentId =
+  const boundParticipantId =
     typeof localStorage !== "undefined"
-      ? localStorage.getItem(AGENT_ID_KEY)
+      ? localStorage.getItem(PARTICIPANT_ID_KEY)
       : null;
-  const currentAgent =
-    agents.find((a) => a.id === boundAgentId) ?? agentInfo ?? null;
+  const currentParticipant =
+    participants.find((a) => a.id === boundParticipantId) ??
+    participantInfo ??
+    null;
 
   return (
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
@@ -631,7 +639,7 @@ export default function GroupsPage() {
         </p>
       </div>
 
-      {/* 身份面板(ticket 29):当前身份 + 已有 Agent 一键绑定 + 手动绑定 + 注册 */}
+      {/* 身份面板(ticket 29):当前身份 + 已有 Participant 一键绑定 + 手动绑定 + 注册 */}
       <div className="mb-6 rounded-lg border bg-card">
         {/* ① 当前身份:已绑定显示「使用中: name(typedevice)」,未绑定提示 */}
         <div className="border-b px-4 py-3">
@@ -641,16 +649,19 @@ export default function GroupsPage() {
                 <KeyRound className="size-4 shrink-0" />
                 <span className="truncate">
                   使用中:{" "}
-                  {currentAgent
-                    ? `${currentAgent.name}(${currentAgent.type}${
-                        currentAgent.device ? `·${currentAgent.device}` : ""
+                  {currentParticipant
+                    ? `${currentParticipant.name}(${currentParticipant.type}${
+                        currentParticipant.device
+                          ? `·${currentParticipant.device}`
+                          : ""
                       })`
                     : "已绑定"}
                 </span>
               </span>
             ) : (
               <span className="text-sm text-muted-foreground">
-                未绑定 agent,从下方列表一键绑定,或展开「高级:手动输入 token」
+                未绑定 participant,从下方列表一键绑定,或展开「高级:手动输入
+                token」
               </span>
             )}
             {boundToken && (
@@ -666,35 +677,35 @@ export default function GroupsPage() {
           </div>
         </div>
 
-        {/* ② 已有 Agent 列表:一键绑定(公开 POST /:id/reset-token 取回 token) */}
+        {/* ② 已有 Participant 列表:一键绑定(公开 POST /:id/reset-token 取回 token) */}
         <div className="border-b px-4 py-3">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">已有 Agent</span>
+            <span className="text-sm font-medium">已有 Participant</span>
             <span className="text-xs text-muted-foreground">
-              {agentsLoading ? "加载中…" : `共 ${agents.length} 个`}
+              {participantsLoading ? "加载中…" : `共 ${participants.length} 个`}
             </span>
           </div>
-          {agentsError && (
-            <p className="mb-2 text-xs text-red-600">{agentsError}</p>
+          {participantsError && (
+            <p className="mb-2 text-xs text-red-600">{participantsError}</p>
           )}
-          {agents.length === 0 && !agentsLoading ? (
+          {participants.length === 0 && !participantsLoading ? (
             <p className="text-sm text-muted-foreground">
-              暂无已注册 Agent,展开下方「注册新 Agent」创建
+              暂无已注册 Participant,展开下方「注册新 Participant」创建
             </p>
           ) : (
             <ul className="max-h-48 space-y-1 overflow-y-auto pr-1">
-              {agents.map((agent) => {
-                const isBound = agent.id === boundAgentId;
+              {participants.map((participant) => {
+                const isBound = participant.id === boundParticipantId;
                 return (
                   <li
-                    key={agent.id}
+                    key={participant.id}
                     className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-sm">{agent.name}</div>
+                      <div className="truncate text-sm">{participant.name}</div>
                       <div className="truncate text-xs text-muted-foreground">
-                        {agent.type}
-                        {agent.device ? ` ${agent.device}` : ""}
+                        {participant.type}
+                        {participant.device ? ` ${participant.device}` : ""}
                       </div>
                     </div>
                     {isBound ? (
@@ -705,11 +716,11 @@ export default function GroupsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleBind(agent)}
-                        disabled={bindingId === agent.id}
+                        onClick={() => handleBind(participant)}
+                        disabled={bindingId === participant.id}
                         className="shrink-0"
                       >
-                        {bindingId === agent.id ? "绑定中…" : "绑定"}
+                        {bindingId === participant.id ? "绑定中…" : "绑定"}
                       </Button>
                     )}
                   </li>
@@ -739,7 +750,7 @@ export default function GroupsPage() {
             <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
               <Input
                 type="password"
-                placeholder="输入 agent token…"
+                placeholder="输入 participant token…"
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -747,20 +758,20 @@ export default function GroupsPage() {
                     handleSaveToken();
                   }
                 }}
-                aria-label="Agent Token"
+                aria-label="Participant Token"
                 className="sm:max-w-xs"
               />
               <Input
                 type="text"
-                placeholder="输入你的 agentId(可选,用于气泡靠右)…"
-                value={agentIdInput}
-                onChange={(e) => setAgentIdInput(e.target.value)}
+                placeholder="输入你的 participantId(可选,用于气泡靠右)…"
+                value={participantIdInput}
+                onChange={(e) => setParticipantIdInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     handleSaveToken();
                   }
                 }}
-                aria-label="Agent ID"
+                aria-label="Participant ID"
                 className="sm:max-w-xs"
               />
               <Button
@@ -775,7 +786,7 @@ export default function GroupsPage() {
           )}
         </div>
 
-        {/* ④ 注册新 Agent(ticket 28):替代终端 curl 注册;成功即自动绑定并切换身份 */}
+        {/* ④ 注册新 Participant(ticket 28):替代终端 curl 注册;成功即自动绑定并切换身份 */}
         <div className="border-t px-4 py-3">
           <button
             type="button"
@@ -785,7 +796,7 @@ export default function GroupsPage() {
           >
             <span className="inline-flex items-center gap-2">
               <UserPlus className="size-4" />
-              注册新 Agent
+              注册新 Participant
             </span>
             <span className="text-xs text-muted-foreground">
               {registerOpen ? "收起" : "展开"}
@@ -796,7 +807,7 @@ export default function GroupsPage() {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
                   type="text"
-                  placeholder="Agent 名称(必填,如「我的 Mac」)"
+                  placeholder="Participant 名称(必填,如「我的 Mac」)"
                   value={regName}
                   onChange={(e) => setRegName(e.target.value)}
                   onKeyDown={(e) => {
@@ -804,11 +815,11 @@ export default function GroupsPage() {
                       handleRegister();
                     }
                   }}
-                  aria-label="注册 Agent 名称"
+                  aria-label="注册 Participant 名称"
                   className="sm:max-w-xs"
                 />
                 <select
-                  aria-label="注册 Agent 类型"
+                  aria-label="注册 Participant 类型"
                   value={regType}
                   onChange={(e) => setRegType(e.target.value)}
                   className="w-full rounded-md border bg-background px-3 py-2 text-sm sm:w-36"
@@ -817,7 +828,7 @@ export default function GroupsPage() {
                   <option value="hermes">hermes</option>
                   <option value="atomcode">atomcode</option>
                   <option value="openclaw">openclaw</option>
-                  <option value="agent">agent</option>
+                  <option value="participant">participant</option>
                   <option value="custom">自定义…</option>
                 </select>
                 <Input
@@ -830,7 +841,7 @@ export default function GroupsPage() {
                       handleRegister();
                     }
                   }}
-                  aria-label="注册 Agent 设备"
+                  aria-label="注册 Participant 设备"
                   className="sm:max-w-xs"
                 />
                 <Button
@@ -848,18 +859,18 @@ export default function GroupsPage() {
                   placeholder="自定义类型(如 cli)"
                   value={regTypeCustom}
                   onChange={(e) => setRegTypeCustom(e.target.value)}
-                  aria-label="自定义 Agent 类型"
+                  aria-label="自定义 Participant 类型"
                   className="sm:max-w-xs"
                 />
               )}
               <p className="text-xs text-muted-foreground">
-                注册成功后将自动写入 agent token 并完成绑定,无需终端 curl
+                注册成功后将自动写入 participant token 并完成绑定,无需终端 curl
               </p>
               {registeredToken && (
                 <div className="flex flex-col gap-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 dark:border-emerald-800 dark:bg-emerald-950/40">
                   <div className="flex items-center justify-between gap-2 text-sm text-emerald-800 dark:text-emerald-200">
                     <span className="truncate">
-                      Agent Token(仅显示一次,请复制留档)
+                      Participant Token(仅显示一次,请复制留档)
                     </span>
                     <Button
                       variant="outline"
@@ -873,7 +884,7 @@ export default function GroupsPage() {
                   <Input
                     readOnly
                     value={registeredToken}
-                    aria-label="注册返回的 Agent Token"
+                    aria-label="注册返回的 Participant Token"
                     className="bg-background font-mono text-xs"
                   />
                 </div>
@@ -883,8 +894,8 @@ export default function GroupsPage() {
         </div>
       </div>
 
-      {/* Agent 设置(ticket 20):绑定后可见,展示并编辑自己的注册信息 */}
-      {boundToken && agentInfo && (
+      {/* Participant 设置(ticket 20):绑定后可见,展示并编辑自己的注册信息 */}
+      {boundToken && participantInfo && (
         <div className="mb-6 rounded-lg border bg-card p-4">
           <button
             type="button"
@@ -894,7 +905,7 @@ export default function GroupsPage() {
           >
             <span className="inline-flex items-center gap-2">
               <Settings className="size-4" />
-              Agent 设置
+              Participant 设置
             </span>
             <span className="text-xs text-muted-foreground">
               {settingsOpen ? "收起" : "展开"}
@@ -903,9 +914,9 @@ export default function GroupsPage() {
           {settingsOpen && (
             <div className="mt-3 flex flex-col gap-3">
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>名称:{agentInfo.name}</span>
-                <span>类型:{agentInfo.type}(只读)</span>
-                <span>设备:{agentInfo.device ?? "-"}</span>
+                <span>名称:{participantInfo.name}</span>
+                <span>类型:{participantInfo.type}(只读)</span>
+                <span>设备:{participantInfo.device ?? "-"}</span>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
@@ -913,7 +924,7 @@ export default function GroupsPage() {
                   placeholder="名称"
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
-                  aria-label="Agent 名称"
+                  aria-label="Participant 名称"
                   className="sm:max-w-xs"
                 />
                 <Input
@@ -921,7 +932,7 @@ export default function GroupsPage() {
                   placeholder="设备"
                   value={deviceInput}
                   onChange={(e) => setDeviceInput(e.target.value)}
-                  aria-label="Agent 设备"
+                  aria-label="Participant 设备"
                   className="sm:max-w-xs"
                 />
                 <Button

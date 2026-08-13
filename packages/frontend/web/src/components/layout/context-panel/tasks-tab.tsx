@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { AGENT_TOKEN_KEY, agentAuthHeaders } from "@/lib/api-client";
+import {
+  PARTICIPANT_TOKEN_KEY,
+  participantAuthHeaders,
+} from "@/lib/api-client";
 import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
@@ -29,7 +32,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/tasks`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         // 只读放开后 403 不再是预期状态(仅群不存在 404);统一按失败处理,
@@ -48,7 +51,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const loadMessages = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (res.ok) {
         setMessages(await res.json());
@@ -61,7 +64,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const loadMembers = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (res.ok) {
         setMembers(await res.json());
@@ -81,7 +84,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
   // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
   const canControl =
     typeof localStorage !== "undefined" &&
-    Boolean(localStorage.getItem(AGENT_TOKEN_KEY));
+    Boolean(localStorage.getItem(PARTICIPANT_TOKEN_KEY));
 
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
    * 识别);发送后刷新任务列表。403 → 无权限提示。 */
@@ -94,7 +97,10 @@ export function TasksTab({ groupId }: { groupId: string }) {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...agentAuthHeaders() },
+        headers: {
+          "Content-Type": "application/json",
+          ...participantAuthHeaders(),
+        },
         body: JSON.stringify({ body: commandBody, audience: "broadcast" }),
       });
       if (!res.ok) {

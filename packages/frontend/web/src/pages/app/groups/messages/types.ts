@@ -7,10 +7,10 @@ export const GROUP_ROLES = [
   "specialist",
 ] as const;
 
-export type Audience = "broadcast" | "role" | "agent";
+export type Audience = "broadcast" | "role" | "participant";
 
 export type Member = {
-  agentId: string;
+  participantId: string;
   name: string;
   type: string;
   device: string | null;
@@ -42,7 +42,7 @@ export type MessageItem = {
   groupId: string;
   senderId: string;
   parentId: string | null;
-  audience: "broadcast" | "role" | "agent";
+  audience: "broadcast" | "role" | "participant";
   audienceRef: string | null;
   body: string;
   /** T26: 后端行形状自带,旧消息可能为 null/undefined → 按 text/plain 处理。 */

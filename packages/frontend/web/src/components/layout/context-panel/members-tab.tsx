@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { agentAuthHeaders } from "@/lib/api-client";
+import { participantAuthHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   GROUP_ROLES,
@@ -22,7 +22,7 @@ type GroupRole = (typeof GROUP_ROLES)[number];
 /**
  * 右栏「成员与分工」Tab(轻量版):成员列表(角色徽章 + 提示词截断),
  * 点击成员行弹窗编辑角色/提示词(复用成员页交互,只读 + 编辑弹窗)。
- * 数据来自 GET /groups/:id/members,编辑经 PATCH /members/:agentId。
+ * 数据来自 GET /groups/:id/members,编辑经 PATCH /members/:participantId。
  */
 export function MembersTab({ groupId }: { groupId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -40,7 +40,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -86,12 +86,12 @@ export function MembersTab({ groupId }: { groupId: string }) {
     setSaveError(null);
     try {
       const res = await fetch(
-        `/api/groups/${groupId}/members/${editing.agentId}`,
+        `/api/groups/${groupId}/members/${editing.participantId}`,
         {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...agentAuthHeaders(),
+            ...participantAuthHeaders(),
           },
           body: JSON.stringify({ roles: editRoles, prompt: editPrompt.trim() }),
         },
@@ -124,10 +124,10 @@ export function MembersTab({ groupId }: { groupId: string }) {
       ) : (
         <ul className="flex flex-col gap-1.5">
           {members.map((member) => (
-            <li key={member.agentId}>
+            <li key={member.participantId}>
               <button
                 type="button"
-                data-testid={`member-row-${member.agentId}`}
+                data-testid={`member-row-${member.participantId}`}
                 onClick={() => startEdit(member)}
                 className="flex w-full flex-col gap-1 rounded-md border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-muted/60"
               >

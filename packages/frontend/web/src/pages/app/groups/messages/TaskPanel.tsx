@@ -17,7 +17,7 @@ export type TaskItem = {
   id: string;
   groupId: string;
   messageId: string;
-  executorAgentId: string;
+  executorParticipantId: string;
   executorKey: string | null;
   status: TaskStatus;
   checkpointRef: string | null;
@@ -132,7 +132,9 @@ export default function TaskPanel({
           <ul className="flex flex-col gap-2">
             {tasks.map((task) => {
               const executor =
-                members.find((m) => m.agentId === task.executorAgentId)?.name ??
+                members.find(
+                  (m) => m.participantId === task.executorParticipantId,
+                )?.name ??
                 task.executorKey ??
                 "—";
               const preview = taskMessagePreview(task, messages);

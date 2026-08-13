@@ -2,7 +2,7 @@ import { Folder } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { agentAuthHeaders } from "@/lib/api-client";
+import { participantAuthHeaders } from "@/lib/api-client";
 
 /**
  * 右栏「项目」Tab:现有项目绑定区块(路径显示/绑定/解绑)移入。
@@ -18,7 +18,7 @@ export function ProjectTab({ groupId }: { groupId: string }) {
   const loadProject = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}`, {
-        headers: agentAuthHeaders(),
+        headers: participantAuthHeaders(),
       });
       if (!res.ok) {
         return;
@@ -47,7 +47,7 @@ export function ProjectTab({ groupId }: { groupId: string }) {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...agentAuthHeaders(),
+          ...participantAuthHeaders(),
         },
         body: JSON.stringify({ projectPath: path }),
       });
@@ -80,7 +80,7 @@ export function ProjectTab({ groupId }: { groupId: string }) {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...agentAuthHeaders(),
+          ...participantAuthHeaders(),
         },
         body: JSON.stringify({ projectPath: null }),
       });

@@ -3,12 +3,12 @@
  *
  * When the WS hub delivers a new `group_message` while the tab is hidden, show
  * a system Notification so the user notices incoming messages without staring
- * at the page (LAN multi-agent collaboration scenario).
+ * at the page (LAN multi-participant collaboration scenario).
  *
  * Policies:
  * - Only fire while `document.hidden` is true — a visible page already appends
  *   the message in-stream, no extra popups.
- * - Never notify the user's own messages (senderId === bound agent id).
+ * - Never notify the user's own messages (senderId === bound participant id).
  * - Permission is requested lazily on the first notifiable message, never at
  *   app load; a denied permission degrades silently (no re-requesting).
  * - Clicking the notification focuses the window and jumps to the group's
@@ -63,8 +63,8 @@ export type NotifyGroupMessageOptions = {
   /** Resolved sender display name (member name, else id prefix). */
   senderName: string;
   message: NotifyMessage;
-  /** Bound agent id; null means no identity — never treat as own. */
-  myAgentId: string | null;
+  /** Bound participant id; null means no identity — never treat as own. */
+  myParticipantId: string | null;
   /** Navigate to the group page (wouter). */
   navigate: (to: string) => void;
 };
@@ -75,15 +75,21 @@ export type NotifyGroupMessageOptions = {
  * (unsupported browser, revoked permission) degrades to a silent no-op.
  */
 export function maybeNotifyGroupMessage(opts: NotifyGroupMessageOptions): void {
-  const { groupId, groupTitle, senderName, message, myAgentId, navigate } =
-    opts;
+  const {
+    groupId,
+    groupTitle,
+    senderName,
+    message,
+    myParticipantId,
+    navigate,
+  } = opts;
   try {
     // Visible tab: the message already appears in-stream — no popup.
     if (!document.hidden) {
       return;
     }
     // Own message (including the sender's own WS echo): never notify.
-    if (myAgentId && message.senderId === myAgentId) {
+    if (myParticipantId && message.senderId === myParticipantId) {
       return;
     }
     // Unsupported browser or permission already declined: zero noise.

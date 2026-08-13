@@ -12,7 +12,7 @@ import {
 
 const MEMBERS = [
   {
-    agentId: "agent-1",
+    participantId: "participant-1",
     name: "hermes-mac",
     type: "hermes",
     device: "mac-mini",
@@ -21,7 +21,7 @@ const MEMBERS = [
     joinedAt: "2026-08-01T00:00:00.000Z",
   },
   {
-    agentId: "agent-2",
+    participantId: "participant-2",
     name: "win-hermes",
     type: "hermes",
     device: "win-pc",
@@ -36,7 +36,7 @@ const TASKS = [
     id: "task-1",
     groupId: "group-1",
     messageId: "msg-1",
-    executorAgentId: "agent-1",
+    executorParticipantId: "participant-1",
     executorKey: "codebuddy",
     status: "running",
     checkpointRef: null,
@@ -65,7 +65,7 @@ function panelFetchMock(options: { patchError?: number } = {}) {
           prompt: string;
         };
         return jsonResponse({
-          agentId: "agent-1",
+          participantId: "participant-1",
           roles: body.roles,
           prompt: body.prompt,
         });
@@ -148,7 +148,7 @@ describe("ContextPanel 右栏上下文面板", () => {
     renderPanel();
 
     await screen.findByText("hermes-mac");
-    fireEvent.click(screen.getByTestId("member-row-agent-1"));
+    fireEvent.click(screen.getByTestId("member-row-participant-1"));
 
     // 弹窗:角色勾选 + 提示词输入
     const dialog = await screen.findByRole("dialog");
@@ -166,7 +166,7 @@ describe("ContextPanel 右栏上下文面板", () => {
       const patch = mock.mock.calls.find(
         ([url, init]) =>
           init?.method === "PATCH" &&
-          String(url) === "/api/groups/group-1/members/agent-1",
+          String(url) === "/api/groups/group-1/members/participant-1",
       );
       expect(patch).toBeDefined();
       expect(JSON.parse(String(patch![1]?.body))).toEqual({
@@ -186,7 +186,7 @@ describe("ContextPanel 右栏上下文面板", () => {
     renderPanel();
 
     await screen.findByText("hermes-mac");
-    fireEvent.click(screen.getByTestId("member-row-agent-1"));
+    fireEvent.click(screen.getByTestId("member-row-participant-1"));
     await screen.findByRole("dialog");
 
     // 取消默认勾选的协调者 → 空角色保存被拦截
