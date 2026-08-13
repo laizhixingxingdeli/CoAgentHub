@@ -148,6 +148,88 @@ describe("群组与成员 API", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    it("?q= 按标题关键词过滤(子串匹配)", async () => {
+      const { token } = await registerAgent({ name: "c4", type: "hermes" });
+      const match = await createGroup(token, "模型训练任务");
+      await createGroup(token, "部署上线");
+
+      const res = await app.request(
+        `/api/groups?q=${encodeURIComponent("训练")}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<{ id: string; title: string }>;
+      expect(list.some((g) => g.id === match.id)).toBe(true);
+      expect(list.every((g) => g.title.includes("训练"))).toBe(true);
+    });
+
+    it("?q= 对 LIKE 通配符(%、_)按字面转义", async () => {
+      const { token } = await registerAgent({ name: "c5", type: "hermes" });
+      const withPercent = await createGroup(token, "进度 100% 达成");
+      const withUnderscore = await createGroup(token, "任务_甲");
+      const noUnderscore = await createGroup(token, "任务甲");
+
+      // % 按字面匹配,不会当任意长度的通配符。
+      const percentRes = await app.request(
+        `/api/groups?q=${encodeURIComponent("100%")}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      expect(percentRes.status).toBe(200);
+      const percentList = (await percentRes.json()) as Array<{ id: string }>;
+      expect(percentList.some((g) => g.id === withPercent.id)).toBe(true);
+
+      // _ 按字面匹配,不会当单字符通配符(否则 "任务甲" 也会命中)。
+      const underscoreRes = await app.request(
+        `/api/groups?q=${encodeURIComponent("任务_甲")}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      expect(underscoreRes.status).toBe(200);
+      const underscoreList = (await underscoreRes.json()) as Array<{
+        id: string;
+      }>;
+      expect(underscoreList.some((g) => g.id === withUnderscore.id)).toBe(true);
+      expect(underscoreList.some((g) => g.id === noUnderscore.id)).toBe(false);
+    });
+
+    it("?q= 与 ?status= 可组合过滤", async () => {
+      const { token } = await registerAgent({ name: "c6", type: "hermes" });
+      const active = await createGroup(token, "模型评测 A");
+      const archived = await createGroup(token, "模型评测 B");
+      await app.request(`/api/groups/${archived.id}/archive`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const res = await app.request(
+        `/api/groups?q=${encodeURIComponent("模型")}&status=archived`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<{ id: string }>;
+      expect(list.some((g) => g.id === archived.id)).toBe(true);
+      expect(list.some((g) => g.id === active.id)).toBe(false);
+    });
+
+    it("?q= 空串等价于无搜索(返回全量)", async () => {
+      const { token } = await registerAgent({ name: "c7", type: "hermes" });
+      const group = await createGroup(token, "任意标题");
+
+      const res = await app.request("/api/groups?q=", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<{ id: string }>;
+      expect(list.some((g) => g.id === group.id)).toBe(true);
+    });
+
+    it("?q= 超过 100 字符返回 400", async () => {
+      const { token } = await registerAgent({ name: "c8", type: "hermes" });
+      const res = await app.request(`/api/groups?q=${"x".repeat(101)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(400);
+    });
   });
 
   describe("POST /api/groups/:id/members 加成员", () => {

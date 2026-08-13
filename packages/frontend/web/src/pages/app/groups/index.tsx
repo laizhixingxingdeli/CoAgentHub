@@ -4,10 +4,13 @@ import {
   MessageSquare,
   Plus,
   RotateCcw,
+  Search,
+  SearchX,
   Settings,
   Trash2,
   UserPlus,
   Users,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "wouter";
@@ -74,6 +77,9 @@ export default function GroupsPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // 群列表搜索(enhancement):输入即时更新,防抖 300ms 后才触发重新拉取。
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   // Ticket: 最近一条消息预览 — 复用全局 unread store(WS 帧 + 消息页历史
   // 加载都会写入),不新增任何 API 调用。
   const { lastMessageByGroup } = useUnread();
@@ -125,37 +131,54 @@ export default function GroupsPage() {
   const loadGroups = useCallback(async () => {
     setLoading(true);
     setError(null);
-    // Snapshot the filter this request was made for; a stale response (a
-    // slower fetch from a previously active tab resolving after the user
-    // switched tabs) must not clobber the list with the wrong filter's data.
+    // Snapshot the filter and query this request was made for; a stale
+    // response (a slower fetch from a previously active tab resolving after
+    // the user switched tabs or kept typing) must not clobber the list with
+    // the wrong filter/search's data.
     const filter = statusFilter;
+    const q = debouncedQuery;
     try {
       const headers = agentAuthHeaders();
       // "all" carries no ?status= (server returns active + archived and hides
       // soft-deleted rows); the tabs pass the exact enum the server filters on.
-      const query = filter === "all" ? "" : `?status=${filter}`;
+      // A non-empty search appends ?q= (title ILIKE) and combines with the tab.
+      const params = new URLSearchParams();
+      if (filter !== "all") {
+        params.set("status", filter);
+      }
+      if (q) {
+        params.set("q", q);
+      }
+      const query = params.size > 0 ? `?${params.toString()}` : "";
       const res = await fetch(`/api/groups${query}`, { headers });
       if (!res.ok) {
         throwForStatus(res, Boolean(headers.Authorization));
       }
       const data = (await res.json()) as GroupItem[];
-      if (filter === statusFilter) {
+      if (filter === statusFilter && q === debouncedQuery) {
         setGroups(data);
       }
     } catch (e) {
-      if (filter === statusFilter) {
+      if (filter === statusFilter && q === debouncedQuery) {
         setError(`加载群组失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     } finally {
-      if (filter === statusFilter) {
+      if (filter === statusFilter && q === debouncedQuery) {
         setLoading(false);
       }
     }
-  }, [statusFilter]);
+  }, [statusFilter, debouncedQuery]);
 
   useEffect(() => {
     loadGroups();
   }, [loadGroups]);
+
+  // 群列表搜索防抖:输入停顿 300ms 后才更新 debouncedQuery 触发重新拉取;
+  // 清空输入同样防抖后恢复全量列表。
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Ticket 29: 拉取已有 Agent 名册(公开端点,无需鉴权)。绑定/清除/注册后
   // 由 commitToken 触发刷新;加载失败只影响面板内的列表区,不阻塞页面。
@@ -518,10 +541,44 @@ export default function GroupsPage() {
 
   return (
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
-      <div className="mb-6">
-        <h2 className="text-xl font-semibold">群组</h2>
-        <p className="text-muted-foreground text-sm">
-          一个群组对应一个任务上下文;成员在群组内分配角色
+      <div className="mb-6 flex flex-col gap-3">
+        <div>
+          <h2 className="text-xl font-semibold">群组</h2>
+          <p className="text-muted-foreground text-sm">
+            一个群组对应一个任务上下文;成员在群组内分配角色
+          </p>
+        </div>
+        {/* 群列表搜索(enhancement):按标题关键词过滤,输入防抖 300ms 后拉取;
+            带清除按钮,清空恢复全量;下方显示当前结果数。 */}
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="搜索群组名称…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            aria-label="搜索群组"
+            className="pl-9 pr-9"
+          />
+          {searchQuery && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setSearchQuery("")}
+              aria-label="清除搜索"
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-1"
+            >
+              <X className="size-4" />
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground" aria-live="polite">
+          {loading
+            ? "加载中…"
+            : debouncedQuery
+              ? `找到 ${groups.length} 个匹配「${debouncedQuery}」的群组`
+              : `共 ${groups.length} 个群组`}
         </p>
       </div>
 
@@ -906,6 +963,12 @@ export default function GroupsPage() {
           <div className="flex flex-col items-center gap-3 p-10 text-center text-sm text-muted-foreground">
             {loading ? (
               "加载中…"
+            ) : debouncedQuery ? (
+              // 搜索无结果:与「暂无群组」区分开的空态文案。
+              <>
+                <SearchX className="size-8" />
+                <p>未找到匹配的群组</p>
+              </>
             ) : (
               <>
                 <Users className="size-8" />

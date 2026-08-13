@@ -98,8 +98,9 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
       },
     },
     {
-      // The list URL may carry ?status=active|archived (tab filter); strip
-      // the query before matching so both bare and filtered fetches hit this.
+      // The list URL may carry ?status=active|archived (tab filter) and/or
+      // ?q= (title search); strip the query before matching so bare,
+      // filtered, and searched fetches all hit this handler.
       match: (url) => String(url).split("?")[0].endsWith("/api/groups"),
       respond: (url, init) => {
         if ((init?.method ?? "GET") === "POST") {
@@ -110,11 +111,15 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
             memberCount: 1,
           });
         }
-        const query = String(url).split("?")[1];
-        const status = query?.startsWith("status=") ? query.slice(7) : null;
-        const filtered = status
+        const params = new URLSearchParams(String(url).split("?")[1] ?? "");
+        const status = params.get("status");
+        const q = params.get("q");
+        let filtered = status
           ? current.filter((g) => g.status === status)
           : current;
+        if (q) {
+          filtered = filtered.filter((g) => String(g.title).includes(q));
+        }
         return jsonResponse(filtered);
       },
     },
@@ -412,6 +417,103 @@ describe("GroupsPage 状态 tab 与恢复 (ticket 16)", () => {
       b.closest("tr, div")?.textContent?.includes("已完成的评审"),
     );
     expect(archivedRow.length).toBe(0);
+  });
+});
+
+describe("GroupsPage 群列表搜索 (enhancement)", () => {
+  it("输入关键词防抖 300ms 后发起 ?q= 拉取,仅显示匹配结果", async () => {
+    const fetchMock = stubFetch(groupsFetchMock());
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+
+    const searchInput = screen.getByLabelText("搜索群组");
+    fireEvent.change(searchInput, { target: { value: "模型" } });
+
+    // 防抖 300ms:输入后不应立即发起请求,停顿后才发。
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url]) => String(url) === "/api/groups?q=%E6%A8%A1%E5%9E%8B",
+      );
+      expect(call).toBeDefined();
+    });
+
+    // 列表只显示标题含关键词的群,另一条被过滤。
+    expect((await screen.findAllByText("模型训练任务")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryAllByText("已完成的评审")).toHaveLength(0);
+    // 结果数提示。
+    expect(
+      await screen.findByText("找到 1 个匹配「模型」的群组"),
+    ).toBeInTheDocument();
+  });
+
+  it("清除按钮清空输入并恢复全量列表", async () => {
+    const fetchMock = stubFetch(groupsFetchMock());
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+    fireEvent.change(screen.getByLabelText("搜索群组"), {
+      target: { value: "模型" },
+    });
+    await screen.findByText("找到 1 个匹配「模型」的群组");
+
+    fireEvent.click(screen.getByLabelText("清除搜索"));
+
+    // 清空后重新拉全量(无 ?q=):初始加载 + 清空后的裸请求,至少两次。
+    await waitFor(() => {
+      const bareCalls = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/api/groups",
+      );
+      expect(bareCalls.length).toBeGreaterThanOrEqual(2);
+    });
+    expect((await screen.findAllByText("已完成的评审")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryByText(/找到 \d+ 个匹配/)).toBeNull();
+  });
+
+  it("搜索无结果显示「未找到匹配的群组」", async () => {
+    stubFetch(groupsFetchMock());
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+    fireEvent.change(screen.getByLabelText("搜索群组"), {
+      target: { value: "不存在的群组" },
+    });
+
+    expect(await screen.findByText("未找到匹配的群组")).toBeInTheDocument();
+  });
+
+  it("搜索与状态 tab 可组合(?status= 与 ?q= 同时携带)", async () => {
+    const fetchMock = stubFetch(groupsFetchMock());
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+    fireEvent.click(screen.getByRole("button", { name: "已归档" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) => String(url) === "/api/groups?status=archived",
+        ),
+      ).toBe(true);
+    });
+
+    fireEvent.change(screen.getByLabelText("搜索群组"), {
+      target: { value: "评审" },
+    });
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url]) => String(url) === "/api/groups?status=archived&q=%E8%AF%84%E5%AE%A1",
+      );
+      expect(call).toBeDefined();
+    });
+    expect((await screen.findAllByText("已完成的评审")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryAllByText("模型训练任务")).toHaveLength(0);
   });
 });
 

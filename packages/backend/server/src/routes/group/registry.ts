@@ -95,11 +95,32 @@ app
       "query",
       z.object({
         status: z.enum(["active", "archived"]).optional(),
+        // 群列表搜索(enhancement):标题关键词,LIKE 通配符(%、_)按字面转义;
+        // 空串视为无搜索。上限 100 字符防止超长模式串。
+        q: z.string().max(100).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
-      const { status } = c.req.valid("query");
+      const { status, q } = c.req.valid("query");
+
+      const conditions = [
+        // Soft-deleted groups are hidden from every list: an explicit
+        // ?status= filter can only name active/archived, and the unfiltered
+        // list excludes deleted rows outright (rows are kept, not purged).
+        status
+          ? eq(groupsTable.status, status)
+          : sql`${groupsTable.status} <> 'deleted'`,
+      ];
+      if (q) {
+        // Keyword search: title ILIKE %q% on top of the status filter. LIKE
+        // wildcards (%, _) are backslash-escaped so `100%` matches literally;
+        // the escape is applied to the pattern only, never to user input at the
+        // SQL level (drizzle binds the pattern as a parameter). Empty string is
+        // treated as "no search" — behavior identical to the pre-search route.
+        const escaped = q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+        conditions.push(ilike(groupsTable.title, `%${escaped}%`));
+      }
 
       const groups = await db
         .select({
@@ -116,14 +137,7 @@ app
           groupMemberTable,
           eq(groupMemberTable.groupId, groupsTable.id),
         )
-        .where(
-          // Soft-deleted groups are hidden from every list: an explicit
-          // ?status= filter can only name active/archived, and the unfiltered
-          // list excludes deleted rows outright (rows are kept, not purged).
-          status
-            ? eq(groupsTable.status, status)
-            : sql`${groupsTable.status} <> 'deleted'`,
-        )
+        .where(and(...conditions))
         .groupBy(groupsTable.id)
         .orderBy(desc(groupsTable.createdAt));
 
