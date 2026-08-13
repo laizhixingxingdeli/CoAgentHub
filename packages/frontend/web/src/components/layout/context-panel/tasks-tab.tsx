@@ -47,8 +47,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadTasks();
     void loadMessages();
     void loadMembers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadTasks, groupId]);
+  }, [loadTasks, loadMessages, loadMembers]);
 
   const loadMessages = useCallback(async () => {
     try {
