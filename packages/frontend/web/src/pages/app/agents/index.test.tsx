@@ -1,11 +1,11 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
   renderWithProviders,
 } from "@/test/utils";
-import { AGENT_ID_KEY, AGENT_TOKEN_KEY } from "@/lib/api-client";
 import ExecutorsPage from "./index";
 
 /**
@@ -336,7 +336,9 @@ describe("接入 Agent 页", () => {
         match: (url, init) =>
           init?.method === "PUT" && String(url).includes("/heartbeat"),
         respond: (url) => {
-          const id = String(url).match(/\/api\/agents\/([^/]+)\/heartbeat/)?.[1];
+          const id = String(url).match(
+            /\/api\/agents\/([^/]+)\/heartbeat/,
+          )?.[1];
           const lastSeen = new Date().toISOString();
           const idx = agents.findIndex((a) => a.id === id);
           if (idx >= 0) agents[idx] = { ...agents[idx], lastSeen };
@@ -368,9 +370,7 @@ describe("接入 Agent 页", () => {
     expect(screen.getByText(/mac-mini/)).toBeInTheDocument();
     // capabilities 标签 chips
     expect(screen.getByText("text-generation")).toBeInTheDocument();
-    expect(screen.getAllByText("code-review").length).toBeGreaterThanOrEqual(
-      2,
-    );
+    expect(screen.getAllByText("code-review").length).toBeGreaterThanOrEqual(2);
     // webhookUrl 展示
     expect(screen.getByText("https://example.com/hook")).toBeInTheDocument();
     // 在线/离线/从未在线徽标(在线 Bot 5s 前心跳,离线 Bot 1h 前,从未 Bot 无)
@@ -393,9 +393,9 @@ describe("接入 Agent 页", () => {
     // 对话框预填现有注册信息
     const nameInput = screen.getByLabelText("Agent 名字") as HTMLInputElement;
     expect(nameInput.value).toBe("Online Bot");
-    expect(
-      (screen.getByLabelText("设备") as HTMLInputElement).value,
-    ).toBe("mac-mini");
+    expect((screen.getByLabelText("设备") as HTMLInputElement).value).toBe(
+      "mac-mini",
+    );
     expect(
       (screen.getByLabelText("Webhook URL") as HTMLInputElement).value,
     ).toBe("https://example.com/hook");
@@ -457,9 +457,7 @@ describe("接入 Agent 页", () => {
     const beatCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PUT",
     );
-    expect(String(beatCall![0])).toContain(
-      "/api/agents/agent-never/heartbeat",
-    );
+    expect(String(beatCall![0])).toContain("/api/agents/agent-never/heartbeat");
     expect(screen.getByText(/已上报「Never Bot」在线/)).toBeInTheDocument();
   });
 

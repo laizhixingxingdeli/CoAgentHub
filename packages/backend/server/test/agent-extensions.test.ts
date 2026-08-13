@@ -331,9 +331,9 @@ describe("T17 agent 自更新与扩展字段", () => {
       const updated = (await res.json()) as { capabilities: string[] };
       expect(updated.capabilities).toEqual(["text-generation", "code-review"]);
 
-      const list = (await (
-        await app.request("/api/agents")
-      ).json()) as Array<Record<string, unknown>>;
+      const list = (await (await app.request("/api/agents")).json()) as Array<
+        Record<string, unknown>
+      >;
       expect(list.find((a) => a.id === id)?.capabilities).toEqual([
         "text-generation",
         "code-review",
@@ -354,8 +354,9 @@ describe("T17 agent 自更新与扩展字段", () => {
         body: JSON.stringify({ capabilities: ["code-review"] }),
       });
       expect(res.status).toBe(200);
-      expect(((await res.json()) as { capabilities: string[] }).capabilities)
-        .toEqual(["code-review"]);
+      expect(
+        ((await res.json()) as { capabilities: string[] }).capabilities,
+      ).toEqual(["code-review"]);
     });
 
     it("加成员时轻量能力提示:已知能力与角色不匹配时给建议,绝不拒绝", async () => {

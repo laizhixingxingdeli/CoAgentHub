@@ -740,8 +740,7 @@ app
         throw new BizError(BizCodeEnum.Forbidden);
       }
       const message = await db.query.groupMessage.findFirst({
-        where: (t, { and, eq }) =>
-          and(eq(t.id, messageId), eq(t.groupId, id)),
+        where: (t, { and, eq }) => and(eq(t.id, messageId), eq(t.groupId, id)),
       });
       if (!message) {
         throw new BizError(BizCodeEnum.MessageNotFound);
@@ -884,10 +883,16 @@ app
       // 可见性 SQL(与 webhook/WS 扇出同一套规则)+ ?after= 增量游标 +
       // q 关键词 + LIMIT 整体在 message-service 内完成,翻页发生在
       // *可见* 流上;路由只做响应编排。
-      const messages = await listVisibleMessages(db, id, requesterId, requesterRoles, {
-        after,
-        q,
-      });
+      const messages = await listVisibleMessages(
+        db,
+        id,
+        requesterId,
+        requesterRoles,
+        {
+          after,
+          q,
+        },
+      );
 
       return c.json(messages);
     },

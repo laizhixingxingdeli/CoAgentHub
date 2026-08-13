@@ -5,7 +5,7 @@
  */
 
 export {
+  type InsertGroupMessageInput,
   insertGroupMessage,
   MAX_REPLY_DEPTH,
-  type InsertGroupMessageInput,
 } from "./services/message-service";

@@ -209,15 +209,17 @@ export async function listVisibleMessages(
     conditions.push(ilike(groupMessageTable.body, `%${escaped}%`));
   }
 
-  return db
-    .select(messageFullColumns)
-    .from(groupMessageTable)
-    .where(and(...conditions))
-    // uuidv7 ids embed the server receive time, so id order IS receive
-    // order — ordering by id keeps the stream consistent with ?after=.
-    // Page the visible stream; clients continue with ?after=<lastId>.
-    .orderBy(asc(groupMessageTable.id))
-    .limit(limit);
+  return (
+    db
+      .select(messageFullColumns)
+      .from(groupMessageTable)
+      .where(and(...conditions))
+      // uuidv7 ids embed the server receive time, so id order IS receive
+      // order — ordering by id keeps the stream consistent with ?after=.
+      // Page the visible stream; clients continue with ?after=<lastId>.
+      .orderBy(asc(groupMessageTable.id))
+      .limit(limit)
+  );
 }
 
 /**

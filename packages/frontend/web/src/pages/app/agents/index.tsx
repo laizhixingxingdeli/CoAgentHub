@@ -1,10 +1,4 @@
-import {
-  Bot,
-  HeartPulse,
-  Loader2,
-  Pencil,
-  Trash2,
-} from "lucide-react";
+import { Bot, HeartPulse, Loader2, Pencil, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -290,9 +284,7 @@ export default function ExecutorsPage() {
       setMessage(`已更新 Agent「${updated.name}」`);
       setEditingAgent(null);
       // 按 id 更新本地 agents,行内立即刷新(改名也不影响匹配)。
-      setAgents((prev) =>
-        prev.map((a) => (a.id === updated.id ? updated : a)),
-      );
+      setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败");
     } finally {
@@ -342,8 +334,7 @@ export default function ExecutorsPage() {
         <h2 className="text-xl font-semibold">接入 Agent</h2>
         <p className="text-muted-foreground text-sm">
           新增一个可被定向消息调度的执行器;提交后自动注册对应
-          agent,凭据由后端管理。绑定身份后可编辑自己的
-          Agent 信息并上报在线
+          agent,凭据由后端管理。绑定身份后可编辑自己的 Agent 信息并上报在线
         </p>
       </div>
 

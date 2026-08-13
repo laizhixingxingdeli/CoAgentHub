@@ -506,7 +506,8 @@ describe("GroupsPage 群列表搜索 (enhancement)", () => {
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
-        ([url]) => String(url) === "/api/groups?status=archived&q=%E8%AF%84%E5%AE%A1",
+        ([url]) =>
+          String(url) === "/api/groups?status=archived&q=%E8%AF%84%E5%AE%A1",
       );
       expect(call).toBeDefined();
     });
