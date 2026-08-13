@@ -1,5 +1,5 @@
-import { lazy, Suspense } from "react";
 import * as Sentry from "@sentry/react";
+import { lazy, Suspense } from "react";
 import { Redirect, Route, Switch } from "wouter";
 import GroupLayout from "./components/layout/group-layout";
 import AppSidebar from "./components/sidebar";
@@ -53,39 +53,39 @@ const App = () => (
           )}
         >
           <Suspense fallback={pageFallback}>
-          <Switch>
-            <Route path="/files" component={FilesPage} />
-            {/* /agents 与 /groups 一样平铺声明:避免 wouter v3 nest 的 base
+            <Switch>
+              <Route path="/files" component={FilesPage} />
+              {/* /agents 与 /groups 一样平铺声明:避免 wouter v3 nest 的 base
                 前缀导致页面内绝对路径失配(见下方 /groups 注释)。 */}
-            <Route path="/agents" component={AgentsPage} />
-            {/* /groups routes are declared flat (no `nest`): wouter v3 nested
+              <Route path="/agents" component={AgentsPage} />
+              {/* /groups routes are declared flat (no `nest`): wouter v3 nested
                 Routes wrap children in a Router with base="/groups", which
                 base-strips the location — any full-path useRoute("/groups/:id")
                 or navigate("/groups/...") inside would then fail to match or
                 produce /groups/groups/<id>. Flat routes keep base="" so the
                 pages' absolute paths work as written. */}
-            <Route path="/groups" component={GroupsPage} />
-            {/* 群相关路由(消息/成员)包上带右栏的布局(三栏);其它路由保持两栏。
+              <Route path="/groups" component={GroupsPage} />
+              {/* 群相关路由(消息/成员)包上带右栏的布局(三栏);其它路由保持两栏。
                 wouter v3 的 component 会收到 { params },据此取 groupId 传给右栏。 */}
-            <Route
-              path="/groups/:id"
-              component={({ params }: { params: { id: string } }) => (
-                <GroupLayout groupId={params.id}>
-                  <GroupMessagesPage />
-                </GroupLayout>
-              )}
-            />
-            <Route
-              path="/groups/:id/members"
-              component={({ params }: { params: { id: string } }) => (
-                <GroupLayout groupId={params.id}>
-                  <GroupMembersPage />
-                </GroupLayout>
-              )}
-            />
-            <Route path="/:rest*">404:页面不存在</Route>
-          </Switch>
-        </Suspense>
+              <Route
+                path="/groups/:id"
+                component={({ params }: { params: { id: string } }) => (
+                  <GroupLayout groupId={params.id}>
+                    <GroupMessagesPage />
+                  </GroupLayout>
+                )}
+              />
+              <Route
+                path="/groups/:id/members"
+                component={({ params }: { params: { id: string } }) => (
+                  <GroupLayout groupId={params.id}>
+                    <GroupMembersPage />
+                  </GroupLayout>
+                )}
+              />
+              <Route path="/:rest*">404:页面不存在</Route>
+            </Switch>
+          </Suspense>
         </Sentry.ErrorBoundary>
       </AppSidebar>
     </Switch>

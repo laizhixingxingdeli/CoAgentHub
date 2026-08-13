@@ -105,14 +105,16 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(200);
-      const list = ((await res.json()) as {
-        items: Array<{
-          id: string;
-          title: string;
-          status: string;
-          memberCount: number;
-        }>;
-      }).items;
+      const list = (
+        (await res.json()) as {
+          items: Array<{
+            id: string;
+            title: string;
+            status: string;
+            memberCount: number;
+          }>;
+        }
+      ).items;
       const item = list.find((g) => g.id === group.id);
       expect(item).toBeTruthy();
       expect(item?.status).toBe("active");
@@ -131,14 +133,18 @@ describe("群组与成员 API", () => {
       const archivedRes = await app.request("/api/groups?status=archived", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const archivedList = ((await archivedRes.json()) as { items: Array<{ id: string }> }).items;
+      const archivedList = (
+        (await archivedRes.json()) as { items: Array<{ id: string }> }
+      ).items;
       expect(archivedList.some((g) => g.id === archived.id)).toBe(true);
       expect(archivedList.some((g) => g.id === active.id)).toBe(false);
 
       const activeRes = await app.request("/api/groups?status=active", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const activeList = ((await activeRes.json()) as { items: Array<{ id: string }> }).items;
+      const activeList = (
+        (await activeRes.json()) as { items: Array<{ id: string }> }
+      ).items;
       expect(activeList.some((g) => g.id === active.id)).toBe(true);
       expect(activeList.some((g) => g.id === archived.id)).toBe(false);
     });
@@ -161,9 +167,11 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(res.status).toBe(200);
-      const list = ((await res.json()) as {
-        items: Array<{ id: string; title: string }>;
-      }).items;
+      const list = (
+        (await res.json()) as {
+          items: Array<{ id: string; title: string }>;
+        }
+      ).items;
       expect(list.some((g) => g.id === match.id)).toBe(true);
       expect(list.every((g) => g.title.includes("训练"))).toBe(true);
     });
@@ -180,7 +188,9 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(percentRes.status).toBe(200);
-      const percentList = ((await percentRes.json()) as { items: Array<{ id: string }> }).items;
+      const percentList = (
+        (await percentRes.json()) as { items: Array<{ id: string }> }
+      ).items;
       expect(percentList.some((g) => g.id === withPercent.id)).toBe(true);
 
       // _ 按字面匹配,不会当单字符通配符(否则 "任务甲" 也会命中)。
@@ -189,9 +199,11 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(underscoreRes.status).toBe(200);
-      const underscoreList = ((await underscoreRes.json()) as {
-        items: Array<{ id: string }>;
-      }).items;
+      const underscoreList = (
+        (await underscoreRes.json()) as {
+          items: Array<{ id: string }>;
+        }
+      ).items;
       expect(underscoreList.some((g) => g.id === withUnderscore.id)).toBe(true);
       expect(underscoreList.some((g) => g.id === noUnderscore.id)).toBe(false);
     });
@@ -210,7 +222,8 @@ describe("群组与成员 API", () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       expect(res.status).toBe(200);
-      const list = ((await res.json()) as { items: Array<{ id: string }> }).items;
+      const list = ((await res.json()) as { items: Array<{ id: string }> })
+        .items;
       expect(list.some((g) => g.id === archived.id)).toBe(true);
       expect(list.some((g) => g.id === active.id)).toBe(false);
     });
@@ -223,7 +236,8 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(200);
-      const list = ((await res.json()) as { items: Array<{ id: string }> }).items;
+      const list = ((await res.json()) as { items: Array<{ id: string }> })
+        .items;
       expect(list.some((g) => g.id === group.id)).toBe(true);
     });
 
@@ -725,7 +739,8 @@ describe("群组与成员 API", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(allRes.status).toBe(200);
-      const all = ((await allRes.json()) as { items: Array<{ id: string }> }).items;
+      const all = ((await allRes.json()) as { items: Array<{ id: string }> })
+        .items;
       expect(all.some((g) => g.id === doomed.id)).toBe(false);
       expect(all.some((g) => g.id === active.id)).toBe(true);
       expect(all.some((g) => g.id === archived.id)).toBe(true);
@@ -734,14 +749,18 @@ describe("群组与成员 API", () => {
       const activeRes = await app.request("/api/groups?status=active", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const activeList = ((await activeRes.json()) as { items: Array<{ id: string }> }).items;
+      const activeList = (
+        (await activeRes.json()) as { items: Array<{ id: string }> }
+      ).items;
       expect(activeList.some((g) => g.id === doomed.id)).toBe(false);
       expect(activeList.some((g) => g.id === active.id)).toBe(true);
 
       const archivedRes = await app.request("/api/groups?status=archived", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const archivedList = ((await archivedRes.json()) as { items: Array<{ id: string }> }).items;
+      const archivedList = (
+        (await archivedRes.json()) as { items: Array<{ id: string }> }
+      ).items;
       expect(archivedList.some((g) => g.id === archived.id)).toBe(true);
 
       // Deleting an already-deleted group is a no-match -> 404.

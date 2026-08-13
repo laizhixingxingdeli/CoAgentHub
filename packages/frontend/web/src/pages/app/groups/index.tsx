@@ -209,7 +209,9 @@ export default function GroupsPage() {
       }
     } catch (e) {
       if (filter === statusFilter && q === debouncedQuery) {
-        setError(`加载更多群组失败: ${e instanceof Error ? e.message : String(e)}`);
+        setError(
+          `加载更多群组失败: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     } finally {
       if (filter === statusFilter && q === debouncedQuery) {

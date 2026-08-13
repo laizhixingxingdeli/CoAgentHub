@@ -151,7 +151,9 @@ app
         .orderBy(desc(groupsTable.createdAt));
       // 不带 limit 参数时行为与旧版一致:返回全量(不截断)。
       const groups =
-        limit !== undefined ? await query.limit(limit).offset(offset ?? 0) : await query;
+        limit !== undefined
+          ? await query.limit(limit).offset(offset ?? 0)
+          : await query;
       return c.json({ items: groups, total });
     },
   )
