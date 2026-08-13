@@ -1,4 +1,4 @@
-import { PenLine, Users } from "lucide-react";
+import { ArrowRight, PenLine, Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -160,6 +160,14 @@ export function MembersTab({ groupId }: { groupId: string }) {
           ))}
         </ul>
       )}
+
+      <a
+        href={`/groups/${groupId}/members`}
+        className="inline-flex shrink-0 items-center gap-1 self-start rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        完整管理
+        <ArrowRight className="size-3.5" />
+      </a>
 
       <Dialog
         open={editing !== null}

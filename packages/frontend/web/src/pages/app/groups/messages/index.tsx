@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, Search, Users, X } from "lucide-react";
+import { Archive, ArrowLeft, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
@@ -805,13 +805,6 @@ export default function GroupMessagesPage() {
           </Button>
         )}
         <ContextPanelTrigger />
-        <a
-          href={`/groups/${groupId}/members`}
-          className="inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <Users className="size-4" />
-          成员
-        </a>
       </div>
 
       {searchActive && (

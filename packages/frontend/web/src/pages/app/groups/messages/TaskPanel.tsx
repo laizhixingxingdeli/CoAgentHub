@@ -5,6 +5,7 @@
  * 触发服务端 control.ts,与手动输入等效,不新建 API。
  */
 
+import type { ComponentProps, ReactElement } from "react";
 import { Button } from "@/components/ui/button";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
 import type { Member, MessageItem } from "./types";
@@ -50,11 +51,32 @@ type TaskPanelProps = {
   error: string | null;
   /** 正在发送命令的任务 id(null = 空闲),驱动按钮的「发送中…」。 */
   commandSending: string | null;
+  /** 是否有 coordinator/human 权限(已绑定 token):false 时停止/回滚禁用。
+   * 只读放开(无 token 的 Local User 也能看列表),但控制命令需要身份。 */
+  canControl: boolean;
   messages: MessageItem[];
   members: Member[];
   onStop: (task: TaskItem) => void;
   onRollback: (task: TaskItem) => void;
 };
+
+/** 停止/回滚控制按钮:无权限时禁用并给出「需要 coordinator/human 身份」提示。
+ * title 挂在包裹 span 上 —— disabled 按钮自身不触发 title 悬浮提示。 */
+function ControlButton({
+  canControl,
+  disabled,
+  ...props
+}: ComponentProps<typeof Button> & { canControl: boolean }): ReactElement {
+  const btn = <Button {...props} disabled={disabled || !canControl} />;
+  if (canControl) {
+    return btn;
+  }
+  return (
+    <span title="需要 coordinator/human 身份" className="inline-flex">
+      {btn}
+    </span>
+  );
+}
 
 /** 任务消息正文预览(前 40 字);消息不在当前列表时返回 null。 */
 function taskMessagePreview(
@@ -89,6 +111,7 @@ export default function TaskPanel({
   loading,
   error,
   commandSending,
+  canControl,
   messages,
   members,
   onStop,
@@ -143,26 +166,28 @@ export default function TaskPanel({
                     </span>
                     <span className="flex shrink-0 gap-1.5">
                       {canStop && (
-                        <Button
+                        <ControlButton
                           size="sm"
                           variant="outline"
                           data-testid={`task-stop-${task.id}`}
                           disabled={busy}
+                          canControl={canControl}
                           onClick={() => onStop(task)}
                         >
                           {busy ? "发送中…" : "停止"}
-                        </Button>
+                        </ControlButton>
                       )}
                       {canRollback && (
-                        <Button
+                        <ControlButton
                           size="sm"
                           variant="outline"
                           data-testid={`task-rollback-${task.id}`}
                           disabled={busy}
+                          canControl={canControl}
                           onClick={() => onRollback(task)}
                         >
                           {busy ? "发送中…" : "回滚"}
-                        </Button>
+                        </ControlButton>
                       )}
                     </span>
                   </div>

@@ -1,5 +1,17 @@
-import { Folder, ListChecks, Users } from "lucide-react";
-import { createContext, type ReactNode, useContext, useState } from "react";
+import {
+  ChevronRight,
+  Folder,
+  ListChecks,
+  PanelRight,
+  Users,
+} from "lucide-react";
+import {
+  createContext,
+  useCallback,
+  type ReactNode,
+  useContext,
+  useState,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useIsDesktop } from "@/hooks/use-mobile";
@@ -9,17 +21,25 @@ import { ProjectTab } from "./context-panel/project-tab";
 import { TasksTab } from "./context-panel/tasks-tab";
 
 /**
- * 右栏上下文面板(整体布局重构 enhancement):成员与分工 / 任务 / 项目三个
- * Tab 聚合群相关操作,减少页面跳转。响应式:
- *   - lg+(≥1024px):常驻 300px 右栏(三栏布局);
- *   - md(768-1023px):默认折叠,主区页头「上下文」按钮唤起为 overlay 抽屉;
+ * 右栏上下文面板(布局重构 enhancement + 右栏可用性 enhancement):成员与
+ * 分工 / 任务 / 项目三个 Tab 聚合群相关操作,减少页面跳转。响应式:
+ *   - lg+(≥1024px):常驻 300px 右栏,可收起(头部折叠按钮 / 标题栏「面板」
+ *     开关),开合状态存 localStorage(coagenthub.contextPanelOpen);
+ *   - md(768-1023px):默认折叠,主区页头「面板」按钮唤起为 overlay 抽屉;
  *   - <md(<768px):全屏 overlay(侧边栏行为不变)。
  * 开合状态由 GroupContextPanelProvider 提供,页面标题栏按钮与面板共享。
  */
 
+/** lg+ 右栏开合的持久化键(收起后刷新保持)。 */
+export const CONTEXT_PANEL_OPEN_KEY = "coagenthub.contextPanelOpen";
+
 type ContextPanelState = {
+  /** lg+ 右栏是否展开(持久化);<lg 时仅反映偏好,驱动标题栏图标。 */
   open: boolean;
   setOpen: (open: boolean) => void;
+  /** <lg overlay 抽屉是否打开(临时,不持久化)。 */
+  overlayOpen: boolean;
+  setOverlayOpen: (open: boolean) => void;
 };
 
 const GroupContextPanelContext = createContext<ContextPanelState | null>(null);
@@ -27,7 +47,12 @@ const GroupContextPanelContext = createContext<ContextPanelState | null>(null);
 /** 右栏开合状态。无 Provider(如页面单独渲染)时返回安全 no-op。 */
 export function useGroupContextPanel(): ContextPanelState {
   const ctx = useContext(GroupContextPanelContext);
-  return ctx ?? { open: false, setOpen: () => {} };
+  return ctx ?? {
+    open: false,
+    setOpen: () => {},
+    overlayOpen: false,
+    setOverlayOpen: () => {},
+  };
 }
 
 /** 提供右栏开合状态,由布局壳(GroupLayout)包住页面与右栏。 */
@@ -36,28 +61,50 @@ export function GroupContextPanelProvider({
 }: {
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState<boolean>(() => {
+    if (typeof localStorage === "undefined") {
+      return true;
+    }
+    // 默认展开(lg+ 常驻);用户收起后持久化,刷新后保持。
+    return localStorage.getItem(CONTEXT_PANEL_OPEN_KEY) !== "false";
+  });
+  const [overlayOpen, setOverlayOpen] = useState(false);
+  const setOpen = useCallback((next: boolean) => {
+    setOpenState(next);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(CONTEXT_PANEL_OPEN_KEY, String(next));
+    }
+  }, []);
   return (
-    <GroupContextPanelContext.Provider value={{ open, setOpen }}>
+    <GroupContextPanelContext.Provider
+      value={{ open, setOpen, overlayOpen, setOverlayOpen }}
+    >
       {children}
     </GroupContextPanelContext.Provider>
   );
 }
 
-/** 主区页头的「上下文」按钮(lg+ 常驻右栏,按钮隐藏)。 */
+/** 主区页头的「面板」开关:lg+ 开合右栏;<lg 唤起 overlay 抽屉。
+ * 面板展开时显示收起图标(ChevronRight),收起时显示 PanelRight。 */
 export function ContextPanelTrigger() {
-  const { setOpen } = useGroupContextPanel();
+  const { open, setOpen, setOverlayOpen } = useGroupContextPanel();
+  const isDesktop = useIsDesktop();
+  const expanded = isDesktop && open;
   return (
     <Button
       variant="ghost"
       size="sm"
-      aria-label="上下文"
-      title="上下文"
-      onClick={() => setOpen(true)}
-      className="shrink-0 gap-1 lg:hidden"
+      aria-label={expanded ? "收起面板" : "打开面板"}
+      title={expanded ? "收起面板" : "打开面板"}
+      onClick={() => (isDesktop ? setOpen(!open) : setOverlayOpen(true))}
+      className="shrink-0 gap-1"
     >
-      <ListChecks className="size-4" />
-      <span className="hidden sm:inline">上下文</span>
+      {expanded ? (
+        <ChevronRight className="size-4" />
+      ) : (
+        <PanelRight className="size-4" />
+      )}
+      <span className="hidden sm:inline">面板</span>
     </Button>
   );
 }
@@ -114,24 +161,41 @@ function PanelTabs({ groupId }: { groupId: string }) {
 
 export default function ContextPanel({ groupId }: { groupId: string }) {
   const isDesktop = useIsDesktop();
-  const { open, setOpen } = useGroupContextPanel();
+  const { open, setOpen, overlayOpen, setOverlayOpen } =
+    useGroupContextPanel();
   const tabs = <PanelTabs groupId={groupId} />;
 
   if (isDesktop) {
-    // lg+ 常驻右栏:三栏布局的一部分,不随开合状态变化。
+    // lg+ 常驻右栏:open=false(收起)时整体隐藏、主区占满;重新打开经标题栏
+    // 「面板」开关或头部折叠按钮的对侧动作。
+    if (!open) {
+      return null;
+    }
     return (
       <aside
         data-testid="context-panel"
-        className="hidden h-full w-[300px] shrink-0 border-l bg-background lg:flex"
+        className="hidden h-full w-[300px] shrink-0 flex-col border-l bg-background lg:flex"
       >
-        {tabs}
+        {/* 头部折叠按钮:收起右栏(展开经标题栏「面板」开关)。 */}
+        <div className="flex shrink-0 items-center justify-end border-b px-1.5 py-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="收起右栏"
+            title="收起右栏"
+            onClick={() => setOpen(false)}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+        <div className="min-h-0 flex-1">{tabs}</div>
       </aside>
     );
   }
 
   // md/<md:Sheet overlay —— <768 全屏,md 起 300px 抽屉。
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
+    <Sheet open={overlayOpen} onOpenChange={setOverlayOpen}>
       <SheetContent
         side="right"
         className="w-full p-0 md:w-[300px]"

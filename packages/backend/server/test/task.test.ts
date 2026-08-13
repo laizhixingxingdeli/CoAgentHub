@@ -291,11 +291,11 @@ describe("任务实体(server 单一状态源)", () => {
     expect(cross.status).toBe(404);
   });
 
-  it("非成员访问任务端点 → 403(agent 注册是公开的,须防任意群任务泄漏)", async () => {
+  it("非成员访问任务端点:POST 403、GET 只读放开 200(LAN trust,与 GET /messages 一致)", async () => {
     const { coordinator, execA, group } = await setupGroup();
     const outsider = await registerAgent({ name: "outsider", type: "custom" });
 
-    // 非成员 POST /tasks → 403。
+    // 非成员 POST /tasks → 403(写操作权限不变)。
     const post = await createTask(
       outsider.token,
       group.id,
@@ -304,10 +304,19 @@ describe("任务实体(server 单一状态源)", () => {
     );
     expect(post.status).toBe(403);
 
-    // 非成员 GET /tasks → 403。
+    // 非成员 GET /tasks → 200:读任务列表不再要求成员身份(只读放开)。
     const get = await app.request(`/api/groups/${group.id}/tasks`, {
       headers: { Authorization: `Bearer ${outsider.token}` },
     });
-    expect(get.status).toBe(403);
+    expect(get.status).toBe(200);
+
+    // 群不存在 → 404(与 GET /messages 相同的边界)。
+    const missing = await app.request(
+      `/api/groups/00000000-0000-7000-8000-0000000000ff/tasks`,
+      {
+        headers: { Authorization: `Bearer ${outsider.token}` },
+      },
+    );
+    expect(missing.status).toBe(404);
   });
 });

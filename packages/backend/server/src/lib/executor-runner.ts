@@ -15,8 +15,8 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-/** 默认执行超时:30 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+/** 默认执行超时:120 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
+const DEFAULT_TIMEOUT_MS = 120 * 60 * 1000;
 
 /**
  * 推导 CoAgentHub 仓库根:从 process.cwd() 开始逐级上溯,取「最外层」含

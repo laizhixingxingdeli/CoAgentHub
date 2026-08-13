@@ -985,7 +985,6 @@ app
     zValidator("param", z.object({ id: z.string().uuid() })),
     async (c) => {
       const db = c.get("db");
-      const callerId = c.get("agentId");
       const { id } = c.req.valid("param");
 
       const group = await db.query.groups.findFirst({
@@ -994,15 +993,8 @@ app
       if (!group) {
         throw new BizError(BizCodeEnum.GroupNotFound);
       }
-      // 与 POST /tasks 相同的边界:非成员不可读任务列表(防任意群任务泄漏)。
-      const membership = await db.query.groupMember.findFirst({
-        where: (t, { and, eq }) =>
-          and(eq(t.groupId, id), eq(t.agentId, callerId)),
-      });
-      if (!membership) {
-        throw new BizError(BizCodeEnum.Forbidden);
-      }
-
+      // LAN trust model(与 GET /messages 一致):读任务列表不需要成员身份,
+      // 仅要求群存在;写操作(POST/PATCH)仍走各自权限边界。
       const tasks = await db.query.task.findMany({
         where: (t, { eq }) => eq(t.groupId, id),
         orderBy: (t, { desc }) => desc(t.createdAt),

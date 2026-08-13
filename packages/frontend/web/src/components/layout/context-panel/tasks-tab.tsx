@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { agentAuthHeaders } from "@/lib/api-client";
+import { AGENT_TOKEN_KEY, agentAuthHeaders } from "@/lib/api-client";
 import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
@@ -10,6 +10,10 @@ import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
  * GET /groups/:id/tasks(不轮询);「停止」/「回滚」通过发一条 broadcast
  * 命令消息触发服务端 control.ts,发送后刷新列表。停止/回滚按钮与 TaskPanel
  * 展示完全不变。
+ *
+ * 权限(只读放开 enhancement):GET /tasks 不再要求成员身份(Local User 未
+ * 绑定 token 也能看列表);「停止/回滚」需要 coordinator/human 身份 —— 以
+ * 是否已绑定 token 判断,未绑定时按钮禁用并提示。
  */
 export function TasksTab({ groupId }: { groupId: string }) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
@@ -28,11 +32,9 @@ export function TasksTab({ groupId }: { groupId: string }) {
         headers: agentAuthHeaders(),
       });
       if (!res.ok) {
-        setError(
-          res.status === 403
-            ? "无权限,请以 coordinator/human 身份绑定 token"
-            : `加载任务失败: HTTP ${res.status}`,
-        );
+        // 只读放开后 403 不再是预期状态(仅群不存在 404);统一按失败处理,
+        // 不再把 403 当整面板「无权限」错误态。
+        setError(`加载任务失败: HTTP ${res.status}`);
         return;
       }
       setTasks((await res.json()) as TaskItem[]);
@@ -75,6 +77,12 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadMembers();
   }, [loadTasks, loadMessages, loadMembers]);
 
+  // 停止/回滚需要 coordinator/human 身份:已绑定 token 即视为有控制权限;
+  // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
+  const canControl =
+    typeof localStorage !== "undefined" &&
+    Boolean(localStorage.getItem(AGENT_TOKEN_KEY));
+
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
    * 识别);发送后刷新任务列表。403 → 无权限提示。 */
   const sendCommand = async (task: TaskItem, commandBody: string) => {
@@ -112,6 +120,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
         loading={loading}
         error={error}
         commandSending={commandSending}
+        canControl={canControl}
         messages={messages}
         members={members}
         onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
