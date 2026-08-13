@@ -1387,10 +1387,17 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
     expect(hoverBars.length).toBeGreaterThan(0);
     expect(hoverBars[0].className).toContain("hidden");
     expect(hoverBars[0].className).toContain("md:flex");
-    // 点击气泡弹出移动操作条(md:hidden),点击外部关闭。
+    // Ticket 44: hover 操作条紧贴气泡右下角(absolute 于气泡容器内
+    // -bottom-2 right-0),不再整行垂直居中。
+    expect(hoverBars[0].className).toContain("-bottom-2");
+    expect(hoverBars[0].className).toContain("right-0");
+    // 点击气泡弹出移动操作条(md:hidden),位置与 hover 条一致(贴气泡右下),
+    // 点击外部关闭。
     fireEvent.click(screen.getByRole("button", { name: "任务草稿 操作" }));
     const mobileBar = screen.getByTestId("message-actions-mobile");
     expect(mobileBar.className).toContain("md:hidden");
+    expect(mobileBar.className).toContain("-bottom-2");
+    expect(mobileBar.className).toContain("right-0");
     fireEvent.click(document.body);
     expect(
       screen.queryByTestId("message-actions-mobile"),
@@ -1680,6 +1687,19 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
 
     // 1 分钟间隔的合并成一组,6 分钟间隔的重新出头 → 昵称只出现 2 次
     expect(screen.getAllByText(SENDER)).toHaveLength(2);
+
+    // Ticket 44: compact 行不渲染头像内容,但渲染等宽不可见占位(size-9
+    // shrink-0 invisible),与首行带头像的水平位置保持一致;不可聚焦且
+    // 不进 a11y 树。
+    const compactRow = screen.getByText("第二条").closest("li");
+    const placeholder = compactRow?.firstElementChild;
+    expect(placeholder?.className).toContain("size-9");
+    expect(placeholder?.className).toContain("shrink-0");
+    expect(placeholder?.className).toContain("invisible");
+    expect(placeholder).toHaveAttribute("aria-hidden", "true");
+    // 与首行头像同为行内首个子元素(等宽占位),宽度占位一致
+    const headerRow = screen.getByText("第一条").closest("li");
+    expect(headerRow?.firstElementChild?.className).toContain("size-9");
   });
 
   it("跨天插入日期分隔线:今天 / 昨天 / 更早日期", async () => {

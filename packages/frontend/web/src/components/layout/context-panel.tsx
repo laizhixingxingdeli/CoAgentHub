@@ -23,8 +23,8 @@ import { TasksTab } from "./context-panel/tasks-tab";
 /**
  * 右栏上下文面板(布局重构 enhancement + 右栏可用性 enhancement):成员与
  * 分工 / 任务 / 项目三个 Tab 聚合群相关操作,减少页面跳转。响应式:
- *   - lg+(≥1024px):常驻 300px 右栏,可收起(头部折叠按钮 / 标题栏「面板」
- *     开关),开合状态存 localStorage(coagenthub.contextPanelOpen);
+ *   - lg+(≥1024px):常驻 300px 右栏,可收起(标题栏「面板」开关),
+ *     开合状态存 localStorage(coagenthub.contextPanelOpen);
  *   - md(768-1023px):默认折叠,主区页头「面板」按钮唤起为 overlay 抽屉;
  *   - <md(<768px):全屏 overlay(侧边栏行为不变)。
  * 开合状态由 GroupContextPanelProvider 提供,页面标题栏按钮与面板共享。
@@ -163,12 +163,12 @@ function PanelTabs({ groupId }: { groupId: string }) {
 
 export default function ContextPanel({ groupId }: { groupId: string }) {
   const isDesktop = useIsDesktop();
-  const { open, setOpen, overlayOpen, setOverlayOpen } = useGroupContextPanel();
+  const { open, overlayOpen, setOverlayOpen } = useGroupContextPanel();
   const tabs = <PanelTabs groupId={groupId} />;
 
   if (isDesktop) {
-    // lg+ 常驻右栏:open=false(收起)时整体隐藏、主区占满;重新打开经标题栏
-    // 「面板」开关或头部折叠按钮的对侧动作。
+    // lg+ 常驻右栏:open=false(收起)时整体隐藏、主区占满;开合统一经标题栏
+    // 「面板」开关(Ticket 44:移除原头部折叠按钮,入口只保留一个)。
     if (!open) {
       return null;
     }
@@ -177,18 +177,6 @@ export default function ContextPanel({ groupId }: { groupId: string }) {
         data-testid="context-panel"
         className="hidden h-full w-[300px] shrink-0 flex-col border-l bg-background lg:flex"
       >
-        {/* 头部折叠按钮:收起右栏(展开经标题栏「面板」开关)。 */}
-        <div className="flex shrink-0 items-center justify-end border-b px-1.5 py-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="收起右栏"
-            title="收起右栏"
-            onClick={() => setOpen(false)}
-          >
-            <ChevronRight className="size-4" />
-          </Button>
-        </div>
         <div className="min-h-0 flex-1">{tabs}</div>
       </aside>
     );

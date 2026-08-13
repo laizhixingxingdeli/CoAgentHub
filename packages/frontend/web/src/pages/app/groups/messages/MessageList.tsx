@@ -306,7 +306,15 @@ export function MessageList(props: MessageListProps) {
                       )
                     ) : (
                       <>
-                        {!compact && (
+                        {compact ? (
+                          /* Ticket 44: compact(同发送者合并)行渲染等宽不可见
+                             头像占位,保持与首行(带头像)水平对齐;不可聚焦且
+                             aria-hidden,不占 tab 顺序/a11y 树。 */
+                          <div
+                            aria-hidden="true"
+                            className="size-9 shrink-0 invisible"
+                          />
+                        ) : (
                           <div
                             title={[
                               senderName(msg.senderId),
@@ -382,198 +390,193 @@ export function MessageList(props: MessageListProps) {
                               )}
                             </div>
                           )}
-                          {/* Bubble: own = primary/right, others = muted/left. Tap
-                        toggles the mobile action bar (ticket 21); the desktop
-                        hover bar sits outside the bubble. role/tabIndex make
-                        the tap action keyboard-reachable too. Ticket 22: an
-                        in-progress edit swaps the bubble for a save/cancel
-                        textarea; a deleted message renders a gray placeholder. */}
-                          {editingId === msg.id ? (
-                            <div
-                              data-testid="message-edit-form"
-                              className="max-w-[75%] rounded-2xl border bg-background px-3.5 py-2.5 text-sm shadow-sm sm:max-w-[60%]"
-                            >
-                              <textarea
-                                autoFocus
-                                aria-label="编辑消息"
-                                value={editBody}
-                                onChange={(e) => setEditBody(e.target.value)}
-                                rows={2}
-                                className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              />
-                              {msg.fileRef && (
-                                <div className="mt-1.5 flex items-center gap-3 rounded-md border bg-muted/40 px-3 py-2">
-                                  <FileText className="size-5 shrink-0 text-muted-foreground" />
-                                  <div className="min-w-0 flex-1">
-                                    <p
-                                      className="truncate text-sm font-medium"
-                                      title={msg.fileRef.name}
-                                    >
-                                      {msg.fileRef.name}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                      {formatSize(msg.fileRef.size)}
-                                    </p>
+                          {/* 气泡容器 relative + max-w:让 hover/移动操作条 absolute
+                        定位于气泡右下角(-bottom-2 right-0)。宽度上限(max-w-75% /
+                        sm:max-w-60%)上移到容器,百分比相对「消息列」解析(与改造前
+                        气泡一致),内部气泡 w-full 撑满——短消息不会按自身宽度的
+                        75% 收缩换行;own 经 flex-row-reverse 翻转在右、他人靠左,
+                        两者同规则,无需按 own 分支改 left/right 数学。Ticket 22:
+                        编辑中换为 save/cancel 文本域,已删除消息渲染灰色占位。 */}
+                          <div className="relative max-w-[75%] sm:max-w-[60%]">
+                            {editingId === msg.id ? (
+                              <div
+                                data-testid="message-edit-form"
+                                className="w-full rounded-2xl border bg-background px-3.5 py-2.5 text-sm shadow-sm"
+                              >
+                                <textarea
+                                  autoFocus
+                                  aria-label="编辑消息"
+                                  value={editBody}
+                                  onChange={(e) => setEditBody(e.target.value)}
+                                  rows={2}
+                                  className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                />
+                                {msg.fileRef && (
+                                  <div className="mt-1.5 flex items-center gap-3 rounded-md border bg-muted/40 px-3 py-2">
+                                    <FileText className="size-5 shrink-0 text-muted-foreground" />
+                                    <div className="min-w-0 flex-1">
+                                      <p
+                                        className="truncate text-sm font-medium"
+                                        title={msg.fileRef.name}
+                                      >
+                                        {msg.fileRef.name}
+                                      </p>
+                                      <p className="text-xs text-muted-foreground">
+                                        {formatSize(msg.fileRef.size)}
+                                      </p>
+                                    </div>
                                   </div>
+                                )}
+                                <div className="mt-2 flex items-center justify-end gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={handleEditCancel}
+                                  >
+                                    取消
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => void handleEditSave(msg)}
+                                    disabled={savingEdit || !editBody.trim()}
+                                  >
+                                    {savingEdit ? "保存中…" : "保存"}
+                                  </Button>
                                 </div>
-                              )}
-                              <div className="mt-2 flex items-center justify-end gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={handleEditCancel}
-                                >
-                                  取消
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  onClick={() => void handleEditSave(msg)}
-                                  disabled={savingEdit || !editBody.trim()}
-                                >
-                                  {savingEdit ? "保存中…" : "保存"}
-                                </Button>
                               </div>
-                            </div>
-                          ) : deleted ? (
-                            <div
-                              className={cn(
-                                "max-w-[75%] rounded-2xl px-3.5 py-2 text-sm sm:max-w-[60%]",
-                                own
-                                  ? "rounded-br-md bg-muted/40"
-                                  : "rounded-bl-md bg-muted/40",
-                              )}
-                            >
-                              <p className="whitespace-pre-wrap break-words text-xs italic text-muted-foreground">
-                                消息已删除
-                              </p>
-                            </div>
-                          ) : (
-                            <div
-                              role="button"
-                              tabIndex={0}
-                              aria-expanded={openActionsId === msg.id}
-                              aria-label={`${msg.body ? msg.body.slice(0, 20) : "消息"} 操作`}
-                              onClick={() =>
-                                setOpenActionsId((prev) =>
-                                  prev === msg.id ? null : msg.id,
-                                )
-                              }
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
+                            ) : deleted ? (
+                              <div
+                                className={cn(
+                                  "w-full rounded-2xl px-3.5 py-2 text-sm",
+                                  own
+                                    ? "rounded-br-md bg-muted/40"
+                                    : "rounded-bl-md bg-muted/40",
+                                )}
+                              >
+                                <p className="whitespace-pre-wrap break-words text-xs italic text-muted-foreground">
+                                  消息已删除
+                                </p>
+                              </div>
+                            ) : (
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openActionsId === msg.id}
+                                aria-label={`${msg.body ? msg.body.slice(0, 20) : "消息"} 操作`}
+                                onClick={() =>
                                   setOpenActionsId((prev) =>
                                     prev === msg.id ? null : msg.id,
-                                  );
+                                  )
                                 }
-                              }}
-                              className={cn(
-                                "relative max-w-[75%] rounded-2xl px-3.5 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[60%]",
-                                own
-                                  ? "rounded-br-md bg-primary text-primary-foreground"
-                                  : "rounded-bl-md bg-muted",
-                              )}
-                            >
-                              {/* Ticket 22 WeChat-style bubble tail: a small triangle at
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    setOpenActionsId((prev) =>
+                                      prev === msg.id ? null : msg.id,
+                                    );
+                                  }
+                                }}
+                                className={cn(
+                                  "relative w-full rounded-2xl px-3.5 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                  own
+                                    ? "rounded-br-md bg-primary text-primary-foreground"
+                                    : "rounded-bl-md bg-muted",
+                                )}
+                              >
+                                {/* Ticket 22 WeChat-style bubble tail: a small triangle at
                           the bottom edge (own right, others left), matched to
                           the bubble fill via the same color token. */}
-                              <span
-                                aria-hidden="true"
-                                className={cn(
-                                  "absolute -bottom-[7px] h-0 w-0 border-l-[8px] border-r-[8px] border-t-[7px] border-l-transparent border-r-transparent",
-                                  own
-                                    ? "right-3 border-t-primary"
-                                    : "left-3 border-t-muted",
-                                )}
-                              />
-                              {contentType === "discussion" && (
-                                /* Ticket 26: hermes 讨论回复 → 气泡左上角 💬 小标记。 */
                                 <span
                                   aria-hidden="true"
-                                  data-testid="discussion-mark"
-                                  className="absolute -top-2 left-2 rounded-full border bg-popover px-1.5 py-0.5 text-xs shadow-sm"
-                                >
-                                  💬
-                                </span>
-                              )}
-                              {msg.body && (
-                                <>
-                                  <p className="whitespace-pre-wrap break-words">
-                                    {displayBody}
-                                  </p>
-                                  {bodyLong && (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        toggleFold(msg.id);
-                                      }}
-                                      className="mt-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-muted"
-                                    >
-                                      {folded ? "展开全文" : "收起"}
-                                    </button>
+                                  className={cn(
+                                    "absolute -bottom-[7px] h-0 w-0 border-l-[8px] border-r-[8px] border-t-[7px] border-l-transparent border-r-transparent",
+                                    own
+                                      ? "right-3 border-t-primary"
+                                      : "left-3 border-t-muted",
                                   )}
-                                </>
-                              )}
-                              {msg.fileRef && (
-                                <div className="mt-1.5 flex items-center gap-3 rounded-md border bg-background/50 px-3 py-2">
-                                  <FileText className="size-5 shrink-0 text-muted-foreground" />
-                                  <div className="min-w-0 flex-1">
-                                    <p
-                                      className="truncate text-sm font-medium"
-                                      title={msg.fileRef.name}
-                                    >
-                                      {msg.fileRef.name}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                      {formatSize(msg.fileRef.size)}
-                                      {msg.fileRef.expiresAt
-                                        ? ` · 有效期至 ${new Date(msg.fileRef.expiresAt).toLocaleString("zh-CN", { hour12: false })}`
-                                        : ""}
-                                    </p>
-                                  </div>
-                                  <a
-                                    href={msg.fileRef.fetchUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
+                                />
+                                {contentType === "discussion" && (
+                                  /* Ticket 26: hermes 讨论回复 → 气泡左上角 💬 小标记。 */
+                                  <span
+                                    aria-hidden="true"
+                                    data-testid="discussion-mark"
+                                    className="absolute -top-2 left-2 rounded-full border bg-popover px-1.5 py-0.5 text-xs shadow-sm"
                                   >
-                                    <Download className="size-3.5" />
-                                    下载
-                                  </a>
-                                </div>
-                              )}
-                            </div>
-                          )}
+                                    💬
+                                  </span>
+                                )}
+                                {msg.body && (
+                                  <>
+                                    <p className="whitespace-pre-wrap break-words">
+                                      {displayBody}
+                                    </p>
+                                    {bodyLong && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          toggleFold(msg.id);
+                                        }}
+                                        className="mt-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-muted"
+                                      >
+                                        {folded ? "展开全文" : "收起"}
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                                {msg.fileRef && (
+                                  <div className="mt-1.5 flex items-center gap-3 rounded-md border bg-background/50 px-3 py-2">
+                                    <FileText className="size-5 shrink-0 text-muted-foreground" />
+                                    <div className="min-w-0 flex-1">
+                                      <p
+                                        className="truncate text-sm font-medium"
+                                        title={msg.fileRef.name}
+                                      >
+                                        {msg.fileRef.name}
+                                      </p>
+                                      <p className="text-xs text-muted-foreground">
+                                        {formatSize(msg.fileRef.size)}
+                                        {msg.fileRef.expiresAt
+                                          ? ` · 有效期至 ${new Date(msg.fileRef.expiresAt).toLocaleString("zh-CN", { hour12: false })}`
+                                          : ""}
+                                      </p>
+                                    </div>
+                                    <a
+                                      href={msg.fileRef.fetchUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
+                                    >
+                                      <Download className="size-3.5" />
+                                      下载
+                                    </a>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {/* Ticket 44: hover 操作条(md+)与移动端 tap 弹层共用
+                          relative 气泡容器,absolute -bottom-2 right-0 紧贴气泡
+                          右下角(他人/自己同规则);`invisible` 保证 hover/focus
+                          前不占 tab 顺序/a11y 树(opacity 单独用会留下不可见但
+                          可聚焦的按钮)。 */}
+                            {actions && (
+                              <div
+                                data-testid="message-actions-hover"
+                                className="absolute -bottom-2 right-0 z-10 hidden items-center gap-0.5 rounded-lg border bg-popover p-0.5 opacity-0 shadow-sm transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 invisible group-hover:visible group-focus-within:visible md:flex"
+                              >
+                                {actions}
+                              </div>
+                            )}
+                            {actions && openActionsId === msg.id && (
+                              <div
+                                data-testid="message-actions-mobile"
+                                className="absolute -bottom-2 right-0 z-10 flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-md md:hidden"
+                              >
+                                {actions}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        {/* Ticket 21 actions: hover bar on md+, tap-to-open bar on
-                      mobile (toggled by the bubble onClick, closed by tapping
-                      outside). Positioned on the outside edge of the row —
-                      left for own messages (bubble cluster hugs the right),
-                      right for received ones. `invisible` keeps the buttons
-                      out of the tab order / a11y tree until hover or focus
-                      (opacity alone would leave invisible focusable buttons). */}
-                        {actions && (
-                          <div
-                            data-testid="message-actions-hover"
-                            className={cn(
-                              "absolute top-1/2 z-10 hidden -translate-y-1/2 items-center gap-0.5 rounded-lg border bg-popover p-0.5 opacity-0 shadow-sm transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 invisible group-hover:visible group-focus-within:visible md:flex",
-                              own ? "left-2" : "right-2",
-                            )}
-                          >
-                            {actions}
-                          </div>
-                        )}
-                        {actions && openActionsId === msg.id && (
-                          <div
-                            data-testid="message-actions-mobile"
-                            className={cn(
-                              "absolute top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-md md:hidden",
-                              own ? "left-2" : "right-2",
-                            )}
-                          >
-                            {actions}
-                          </div>
-                        )}
                       </>
                     )}
                   </li>
