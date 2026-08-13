@@ -10,7 +10,9 @@ function Probe() {
 function DesktopProbe() {
   const isDesktop = useIsDesktop();
   return (
-    <div data-testid="desktop-probe">{isDesktop ? "desktop" : "not-desktop"}</div>
+    <div data-testid="desktop-probe">
+      {isDesktop ? "desktop" : "not-desktop"}
+    </div>
   );
 }
 

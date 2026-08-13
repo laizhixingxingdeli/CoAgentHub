@@ -1,10 +1,4 @@
-import {
-  Archive,
-  ArrowLeft,
-  Search,
-  Users,
-  X,
-} from "lucide-react";
+import { Archive, ArrowLeft, Search, Users, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";

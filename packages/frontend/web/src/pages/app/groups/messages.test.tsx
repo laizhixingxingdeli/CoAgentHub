@@ -1,4 +1,11 @@
-import { act, fireEvent, renderHook, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import GroupLayout from "@/components/layout/group-layout";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
@@ -242,7 +249,9 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
   };
 
   it("打开面板:状态徽章/执行器/正文预览/时间 + 停止/回滚按钮", async () => {
-    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }));
+    renderGroupPage(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
+    );
     await openTasksTab();
 
     // running → 停止;done + checkpointRef → 回滚
@@ -263,7 +272,9 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
   });
 
   it("空态显示「暂无任务」", async () => {
-    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }));
+    renderGroupPage(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }),
+    );
     await openTasksTab();
     await screen.findByText("暂无任务");
   });

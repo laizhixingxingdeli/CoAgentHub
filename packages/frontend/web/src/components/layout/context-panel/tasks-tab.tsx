@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  type Member,
-  type MessageItem,
-} from "@/pages/app/groups/messages/types";
-import TaskPanel, { type TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import { agentAuthHeaders } from "@/lib/api-client";
+import TaskPanel, {
+  type TaskItem,
+} from "@/pages/app/groups/messages/TaskPanel";
+import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 
 /**
  * 右栏「任务」Tab:现有任务面板(TaskPanel)逻辑整体移入 — 挂载时拉取一次
@@ -38,9 +37,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
       }
       setTasks((await res.json()) as TaskItem[]);
     } catch (e) {
-      setError(
-        `加载任务失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setError(`加载任务失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -103,9 +100,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
       }
       await loadTasks();
     } catch (e) {
-      setError(
-        `命令发送失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setError(`命令发送失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setCommandSending(null);
     }

@@ -13,8 +13,8 @@ import { agentAuthHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   GROUP_ROLES,
-  ROLE_LABELS,
   type Member,
+  ROLE_LABELS,
 } from "@/pages/app/groups/messages/types";
 
 type GroupRole = (typeof GROUP_ROLES)[number];
@@ -105,9 +105,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
       setEditing(null);
       await loadMembers();
     } catch (e) {
-      setSaveError(
-        `保存失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setSaveError(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
     }

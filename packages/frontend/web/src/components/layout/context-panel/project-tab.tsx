@@ -62,9 +62,7 @@ export function ProjectTab({ groupId }: { groupId: string }) {
       setProjectPathInput("");
       setMessage(`已绑定项目:${updated.projectPath}`);
     } catch (e) {
-      setError(
-        `绑定失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setError(`绑定失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -95,9 +93,7 @@ export function ProjectTab({ groupId }: { groupId: string }) {
       setProjectPath(null);
       setMessage("已解绑项目");
     } catch (e) {
-      setError(
-        `解绑失败: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setError(`解绑失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
     }

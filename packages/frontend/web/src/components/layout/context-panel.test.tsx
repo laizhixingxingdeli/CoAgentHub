@@ -58,10 +58,7 @@ function panelFetchMock(options: { patchError?: number } = {}) {
         String(url).includes("/members/"),
       respond: (_url, init) => {
         if (options.patchError) {
-          return jsonResponse(
-            { message: "更新失败" },
-            options.patchError,
-          );
+          return jsonResponse({ message: "更新失败" }, options.patchError);
         }
         const body = JSON.parse(String(init?.body)) as {
           roles: string[];
@@ -211,7 +208,9 @@ describe("ContextPanel 右栏上下文面板", () => {
 
     fireEvent.click(trigger);
     // overlay 抽屉出现,内部 Tab 可用
-    expect(await screen.findByTestId("context-panel-sheet")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("context-panel-sheet"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("context-tab-members")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("context-tab-project"));
     expect(await screen.findByTestId("project-tab")).toBeInTheDocument();
@@ -225,7 +224,9 @@ describe("ContextPanel 右栏上下文面板", () => {
     expect(screen.queryByTestId("context-panel")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "上下文" }));
 
-    expect(await screen.findByTestId("context-panel-sheet")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("context-panel-sheet"),
+    ).toBeInTheDocument();
     expect(await screen.findByTestId("members-tab")).toBeInTheDocument();
   });
 });
