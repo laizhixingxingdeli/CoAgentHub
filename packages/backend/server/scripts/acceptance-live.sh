@@ -16,21 +16,21 @@ ck() { # $1=名称 $2=test 表达式(单引号包裹,如 '[ "$(x)" = 64 ]')
 
 source "$TOK" 2>/dev/null
 if [ -z "$alice_TOKEN" ]; then
-  R=$(curl -s -X POST $API/agents -H "Content-Type: application/json" -d '{"name":"alice","type":"human","device":"mac"}')
+  R=$(curl -s -X POST $API/participants -H "Content-Type: application/json" -d '{"name":"alice","type":"human","device":"mac"}')
   alice_TOKEN=$(echo "$R" | jsq 'j.token')
   echo "alice_TOKEN=$alice_TOKEN" >> "$TOK"
   echo "alice=$R" >> "$TOK"
 fi
 A=$alice_TOKEN
 
-echo "== 1. agent 注册与列表 =="
-R=$(curl -s -X POST $API/agents -H "Content-Type: application/json" -d "{\"name\":\"verify-agent-$(date +%s)\",\"type\":\"hermes\",\"device\":\"mac\",\"webhookUrl\":\"http://127.0.0.1:9199/hook\"}")
+echo "== 1. participant 注册与列表 =="
+R=$(curl -s -X POST $API/participants -H "Content-Type: application/json" -d "{\"name\":\"verify-participant-$(date +%s)\",\"type\":\"hermes\",\"device\":\"mac\",\"webhookUrl\":\"http://127.0.0.1:9199/hook\"}")
 VTOKEN=$(echo "$R" | jsq 'j.token')
 VID=$(echo "$R" | jsq 'j.id')
-ck "注册 agent 返回 64 位 token" '[ "${#VTOKEN}" = 64 ]'
-ck "agent 列表含新注册 agent" '[ "$(curl -s $API/agents -H "Authorization: Bearer $A" | grep -c verify-agent)" -ge 1 ]'
-ck "无 token GET /api/agents 放行(AUTH_DISABLED)" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/agents)" = 200 ]'
-ck "无 token GET 群组列表 → 401(agentAuth)" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/groups)" = 401 ]'
+ck "注册 participant 返回 64 位 token" '[ "${#VTOKEN}" = 64 ]'
+ck "participant 列表含新注册 participant" '[ "$(curl -s $API/participants -H "Authorization: Bearer $A" | grep -c verify-participant)" -ge 1 ]'
+ck "无 token GET /api/participants 放行(AUTH_DISABLED)" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/participants)" = 200 ]'
+ck "无 token GET 群组列表 → 401(participantAuth)" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/groups)" = 401 ]'
 
 echo "== 2. 群组 =="
 R=$(curl -s -X POST $API/groups -H "Authorization: Bearer $A" -H "Content-Type: application/json" -d "{\"title\":\"全功能验收群-$(date +%s)\"}")
@@ -40,7 +40,7 @@ ck "群组列表含新群" '[ "$(curl -s $API/groups -H "Authorization: Bearer $
 ck "创建者自动为成员" '[ "$(curl -s $API/groups/$GID/members -H "Authorization: Bearer $A" | grep -c alice)" -ge 1 ]'
 
 echo "== 3. 成员与角色 =="
-R=$(curl -s -X POST $API/groups/$GID/members -H "Authorization: Bearer $A" -H "Content-Type: application/json" -d "{\"agentId\":\"$VID\",\"roles\":[\"reviewer\",\"executor\"]}")
+R=$(curl -s -X POST $API/groups/$GID/members -H "Authorization: Bearer $A" -H "Content-Type: application/json" -d "{\"participantId\":\"$VID\",\"roles\":[\"reviewer\",\"executor\"]}")
 ck "加成员带双角色" '[ "$(echo "$R" | grep -c reviewer)" -ge 1 ]'
 ck "成员列表 2 人" '[ "$(curl -s $API/groups/$GID/members -H "Authorization: Bearer $A" | jsq "j.length")" = 2 ]'
 
@@ -116,7 +116,7 @@ server.listen(9199, "127.0.0.1", () => {
   req.end();
 });
 NODEEOF
-ck "verify-agent webhook 收到通知(8 字段负载)" '[ "$(grep -c "webhook 触发消息" /tmp/hook-out.txt)" -ge 1 ]'
+ck "verify-participant webhook 收到通知(8 字段负载)" '[ "$(grep -c "webhook 触发消息" /tmp/hook-out.txt)" -ge 1 ]'
 ck "webhook 负载含 8 字段(type/groupId/messageId/...)" '[ "$(grep -c "audienceRef" /tmp/hook-out.txt)" -ge 1 ]'
 
 echo "== 9. 归档 =="

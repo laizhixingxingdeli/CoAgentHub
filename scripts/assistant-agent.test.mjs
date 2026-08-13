@@ -25,7 +25,7 @@ import {
 // 指向临时文件后所有读写都在临时目录,跑完由 afterAll 统一清理,不污染真实文件。
 const STATE_DIR = mkdtempSync(join(tmpdir(), "coagent-test-state-"));
 process.env.STATE_FILE = join(STATE_DIR, "state.json");
-const agent = await import("./assistant-agent.mjs");
+const participant = await import("./assistant-agent.mjs");
 
 const ME = { id: "me-0001", token: "tok" };
 const ENV_KEYS = [
@@ -115,7 +115,7 @@ function makeServer() {
     if (membersMatch) {
       // 默认只有助手自己且无分工信息;用例可按群设置成员(roles+prompt)。
       return jsonResponse(
-        membersByGroup.get(membersMatch[1]) ?? [{ agentId: ME.id, roles: [] }],
+        membersByGroup.get(membersMatch[1]) ?? [{ participantId: ME.id, roles: [] }],
       );
     }
     // 群详情:GET 读服务器侧 projectPath,PATCH 写入(绑定指令落库的位置)。
@@ -191,8 +191,8 @@ beforeEach(() => {
   // 注意:STATE_FILE 不在此处删除——它必须始终指向临时状态文件,否则
   // 绑定命令触发的 saveState() 会写回真实 scripts/.assistant-state.json。
   // 各用例结束后由 afterEach 从 savedEnv 还原到顶层共享的临时路径。
-  const s = agent.getState();
-  s.agent = { ...ME };
+  const s = participant.getState();
+  s.participant = { ...ME };
   s.cursors = {};
   s.sessions = {};
 });
@@ -227,9 +227,9 @@ const replyCalls = (server) =>
 
 describe("estimateTokens", () => {
   it("按字符数/4 近似估算", () => {
-    expect(agent.estimateTokens("")).toBe(0);
-    expect(agent.estimateTokens("abcd")).toBe(1);
-    expect(agent.estimateTokens("abcdefghij")).toBe(3);
+    expect(participant.estimateTokens("")).toBe(0);
+    expect(participant.estimateTokens("abcd")).toBe(1);
+    expect(participant.estimateTokens("abcdefghij")).toBe(3);
   });
 });
 
@@ -240,14 +240,14 @@ describe("会话记忆:只记相关消息", () => {
     server.messagesByGroup.set("gA", [
       msg("m001", { audience: "broadcast", senderId: "user-1" }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "直接问我",
       }),
       msg("m003", {
-        audience: "agent",
-        audienceRef: "other-agent",
+        audience: "participant",
+        audienceRef: "other-participant",
         senderId: "user-1",
         body: "问别人",
       }),
@@ -263,10 +263,10 @@ describe("会话记忆:只记相关消息", () => {
         body: "我自己发的",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const recent = agent.getState().sessions.gA.recent;
+    await participant.processGroup({ id: "gA" });
+    const recent = participant.getState().sessions.gA.recent;
     expect(recent.map((m) => m.id)).toEqual(["m001", "m002"]);
-    expect(agent.getState().cursors.gA).toBe("m005");
+    expect(participant.getState().cursors.gA).toBe("m005");
   });
 });
 
@@ -276,27 +276,27 @@ describe("会话记忆:同一群连续问答", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "第一问:我们的项目代号是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.recent.map((m) => m.body)).toEqual([
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.recent.map((m) => m.body)).toEqual([
       "第一问:我们的项目代号是什么?",
     ]);
 
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "第二问:刚才那个代号还在用吗?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const last = replyCalls(server).at(-1);
     expect(last.messages.at(-1).content).toContain(
       "第一问:我们的项目代号是什么?",
@@ -318,9 +318,9 @@ describe("会话记忆:按群隔离", () => {
     server.messagesByGroup.set("gB", [
       msg("m001", { senderId: "user-2", body: "B 群的事" }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    await agent.processGroup({ id: "gB" });
-    const sessions = agent.getState().sessions;
+    await participant.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gB" });
+    const sessions = participant.getState().sessions;
     expect(Object.keys(sessions).sort()).toEqual(["gA", "gB"]);
     expect(sessions.gA.recent.map((m) => m.body)).toEqual(["A 群的事"]);
     expect(sessions.gB.recent.map((m) => m.body)).toEqual(["B 群的事"]);
@@ -344,8 +344,8 @@ describe("会话记忆:窗口上限触发压缩", () => {
       );
     }
     server.messagesByGroup.set("gA", list);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     // 12 → 压缩两次(去最老一半) → 剩最近 3 条
     expect(s.recent.map((m) => m.id)).toEqual(["m010", "m011", "m012"]);
     expect(s.summary.length).toBeGreaterThan(0);
@@ -379,8 +379,8 @@ describe("会话记忆:预算触发压缩", () => {
       );
     }
     server.messagesByGroup.set("gA", list);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     // 6 → 3 → 1(预算仍超但窗口只剩 1 条,停止)
     expect(s.recent).toHaveLength(1);
     expect(s.summary.length).toBeGreaterThan(0);
@@ -399,8 +399,8 @@ describe("会话记忆:环境变量容错", () => {
       list.push(msg(`m${String(i).padStart(3, "0")}`, { body: `消息 ${i}` }));
     }
     server.messagesByGroup.set("gA", list);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     // 回退默认窗口 40:45 条 → 压缩一次(去最老一半)→ 剩 22 条
     expect(s.recent.length).toBeLessThanOrEqual(40);
     expect(s.summary.length).toBeGreaterThan(0);
@@ -416,21 +416,21 @@ describe("会话记忆:持久化", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "记住:仓库代号是 wave",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    agent.saveState();
+    await participant.processGroup({ id: "gA" });
+    participant.saveState();
     const onDisk = JSON.parse(readFileSync(process.env.STATE_FILE, "utf8"));
     expect(onDisk.sessions.gA.recent).toHaveLength(1);
 
     // 模拟重启:从磁盘重新加载
-    agent.reloadState();
-    const s = agent.getState();
-    expect(s.agent.id).toBe(ME.id);
+    participant.reloadState();
+    const s = participant.getState();
+    expect(s.participant.id).toBe(ME.id);
     expect(s.sessions.gA.recent.map((m) => m.body)).toEqual([
       "记住:仓库代号是 wave",
     ]);
@@ -439,13 +439,13 @@ describe("会话记忆:持久化", () => {
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "代号是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const last = replyCalls(server).at(-1);
     expect(last.messages.at(-1).content).toContain("记住:仓库代号是 wave");
   });
@@ -459,14 +459,14 @@ describe("会话记忆:开关与降级", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "一个问题",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions).toEqual({});
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions).toEqual({});
     expect(server.posted).toHaveLength(1);
     expect(server.deepseekCalls[0].messages.at(-1).content).toBe("一个问题");
   });
@@ -477,15 +477,15 @@ describe("会话记忆:开关与降级", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "你好",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     expect(server.posted[0].body).toContain("(模板回复)");
-    expect(agent.getState().sessions.gA.recent).toHaveLength(1);
+    expect(participant.getState().sessions.gA.recent).toHaveLength(1);
   });
 
   it("无 API key 时压缩退化为文本拼接,摘要仍非空", async () => {
@@ -498,8 +498,8 @@ describe("会话记忆:开关与降级", () => {
       msg("m002", { body: "消息2" }),
       msg("m003", { body: "消息3" }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     expect(s.summary).toContain("消息1");
     expect(s.summary.length).toBeGreaterThan(0);
     expect(s.recent).toHaveLength(1);
@@ -508,16 +508,16 @@ describe("会话记忆:开关与降级", () => {
 
 describe("parseBindCommand", () => {
   it("识别绑定命令并提取路径;非命令/非绝对路径返回 null", () => {
-    expect(agent.parseBindCommand("绑定项目")).toEqual({ path: "" });
-    expect(agent.parseBindCommand("绑定项目 /a/b")).toEqual({ path: "/a/b" });
-    expect(agent.parseBindCommand("  绑定项目 /a/b  ")).toEqual({
+    expect(participant.parseBindCommand("绑定项目")).toEqual({ path: "" });
+    expect(participant.parseBindCommand("绑定项目 /a/b")).toEqual({ path: "/a/b" });
+    expect(participant.parseBindCommand("  绑定项目 /a/b  ")).toEqual({
       path: "/a/b",
     });
-    expect(agent.parseBindCommand("绑定项目是什么?")).toBeNull();
-    expect(agent.parseBindCommand("绑定项目 怎么样?")).toBeNull();
-    expect(agent.parseBindCommand("绑定项目 ./x")).toBeNull();
-    expect(agent.parseBindCommand("普通消息")).toBeNull();
-    expect(agent.parseBindCommand("")).toBeNull();
+    expect(participant.parseBindCommand("绑定项目是什么?")).toBeNull();
+    expect(participant.parseBindCommand("绑定项目 怎么样?")).toBeNull();
+    expect(participant.parseBindCommand("绑定项目 ./x")).toBeNull();
+    expect(participant.parseBindCommand("普通消息")).toBeNull();
+    expect(participant.parseBindCommand("")).toBeNull();
   });
 });
 
@@ -529,14 +529,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     expect(s.projectPath).toBe(realpathSync(project));
     expect(server.posted).toHaveLength(1);
     expect(server.posted[0].body).toContain("已绑定项目");
@@ -550,14 +550,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "绑定项目 /no/such/dir-xyz-1786558476797",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     expect(s.projectPath).toBeUndefined();
     expect(server.posted).toHaveLength(1);
     expect(server.posted[0].body).toContain("绑定失败");
@@ -574,14 +574,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${file}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeUndefined();
     expect(server.posted[0].body).toContain("绑定失败");
   });
 
@@ -591,14 +591,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "绑定项目",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeUndefined();
     expect(server.posted[0].body).toContain("绝对路径");
     expect(server.deepseekCalls).toHaveLength(0);
   });
@@ -609,14 +609,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "绑定项目 ./some-dir",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeUndefined();
     expect(replyCalls(server)).toHaveLength(1);
   });
 
@@ -626,14 +626,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "绑定项目 怎么样?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeUndefined();
     expect(replyCalls(server)).toHaveLength(1);
   });
 
@@ -646,20 +646,20 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${outside}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${inside}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     // 白名单外被拒:回复明确报错且未绑定
     expect(server.posted[0].body).toContain("白名单");
     expect(server.posted[0].body).not.toContain("已绑定项目");
@@ -675,20 +675,20 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "问题A",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const recent = agent.getState().sessions.gA.recent;
+    await participant.processGroup({ id: "gA" });
+    const recent = participant.getState().sessions.gA.recent;
     expect(recent.map((m) => m.body)).toEqual(["问题A"]);
   });
 
@@ -698,14 +698,14 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "绑定项目是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeUndefined();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeUndefined();
     expect(replyCalls(server)).toHaveLength(1);
   });
 
@@ -717,15 +717,15 @@ describe("项目文档记忆:绑定项目", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     expect(server.posted[0].body).toContain("记忆已关闭");
-    expect(agent.getState().sessions).toEqual({});
+    expect(participant.getState().sessions).toEqual({});
     expect(server.deepseekCalls).toHaveLength(0);
   });
 });
@@ -737,13 +737,13 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "普通问题",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).not.toContain("【项目文档】");
     expect(content).toContain("【群摘要】");
@@ -760,19 +760,19 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "这个项目的架构/约定是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const call = replyCalls(server).at(-1);
     const content = call.messages.at(-1).content;
     expect(content).toContain("【项目文档】");
@@ -794,19 +794,19 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "项目的约定是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toContain("CONTEXT-AAAA-BBBB-CCCC");
     expect(content).toContain("AGENTS-B"); // 预算内截断部分
@@ -823,19 +823,19 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "项目的约定是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toContain("01234567"); // 预算内前 8 字符
     expect(content).not.toContain("WXYZ"); // 预算外尾部
@@ -857,19 +857,19 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "架构约定?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     const at = (t) => content.indexOf(t);
     expect(at("L")).toBeGreaterThan(at("A"));
@@ -889,19 +889,19 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "项目文档里写了什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toContain("根内内容");
     expect(content).not.toContain("外部秘密内容");
@@ -914,26 +914,26 @@ describe("项目文档记忆:文档并入 prompt", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeTruthy();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeTruthy();
     // 绑定后项目目录被删除,再提问
     rmSync(project, { recursive: true, force: true });
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "还有问题",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const call = replyCalls(server).at(-1);
     expect(call.messages.at(-1).content).toContain("还有问题");
     expect(call.messages.at(-1).content).not.toContain("【项目文档】");
@@ -951,14 +951,14 @@ describe("项目文档记忆:持久化", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    agent.saveState();
+    await participant.processGroup({ id: "gA" });
+    participant.saveState();
     const onDisk = JSON.parse(
       // biome-ignore lint/suspicious/noUndeclaredEnvVars: 测试按用例切换环境变量,不参与 turbo 缓存任务
       readFileSync(process.env.STATE_FILE, "utf8"),
@@ -966,21 +966,21 @@ describe("项目文档记忆:持久化", () => {
     expect(onDisk.sessions.gA.projectPath).toBe(realpathSync(project));
 
     // 模拟重启:从磁盘重新加载
-    agent.reloadState();
-    expect(agent.getState().sessions.gA.projectPath).toBe(
+    participant.reloadState();
+    expect(participant.getState().sessions.gA.projectPath).toBe(
       realpathSync(project),
     );
 
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "这个项目的约定是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toContain("【项目文档】");
     expect(content).toContain("架构与约定");
@@ -990,28 +990,28 @@ describe("项目文档记忆:持久化", () => {
 describe("buildDivisionOfLabor", () => {
   it("成员带 roles+prompt 生成 role=name(提示词);无 prompt 只有 role=name", () => {
     expect(
-      agent.buildDivisionOfLabor([
+      participant.buildDivisionOfLabor([
         {
-          agentId: "a1",
+          participantId: "a1",
           name: "coord",
           roles: ["coordinator"],
           prompt: "负责调度与裁决",
         },
-        { agentId: "a2", name: "exec", roles: ["executor"] },
+        { participantId: "a2", name: "exec", roles: ["executor"] },
       ]),
     ).toBe("coordinator=coord(负责调度与裁决);executor=exec");
   });
 
   it("多角色逗号连接;无 roles 但有 prompt 用 member 占位", () => {
     expect(
-      agent.buildDivisionOfLabor([
+      participant.buildDivisionOfLabor([
         {
-          agentId: "a1",
+          participantId: "a1",
           name: "multi",
           roles: ["reviewer", "specialist"],
           prompt: "审阅+领域专家",
         },
-        { agentId: "a2", name: "only-prompt", roles: [], prompt: "纯分工说明" },
+        { participantId: "a2", name: "only-prompt", roles: [], prompt: "纯分工说明" },
       ]),
     ).toBe(
       "reviewer,specialist=multi(审阅+领域专家);member=only-prompt(纯分工说明)",
@@ -1019,9 +1019,9 @@ describe("buildDivisionOfLabor", () => {
   });
 
   it("无任何分工信息时返回空串", () => {
-    expect(agent.buildDivisionOfLabor([{ agentId: "a1", roles: [] }])).toBe("");
-    expect(agent.buildDivisionOfLabor([])).toBe("");
-    expect(agent.buildDivisionOfLabor(undefined)).toBe("");
+    expect(participant.buildDivisionOfLabor([{ participantId: "a1", roles: [] }])).toBe("");
+    expect(participant.buildDivisionOfLabor([])).toBe("");
+    expect(participant.buildDivisionOfLabor(undefined)).toBe("");
   });
 });
 
@@ -1032,13 +1032,13 @@ describe("分工记忆:本群分工并入 prompt", () => {
     stubFetch(server);
     server.membersByGroup.set("gA", [
       {
-        agentId: ME.id,
+        participantId: ME.id,
         name: "assistant",
         roles: ["executor"],
         prompt: "执行任务并回复结果",
       },
       {
-        agentId: "u-0001",
+        participantId: "u-0001",
         name: "coord",
         roles: ["coordinator"],
         prompt: "负责调度与分工",
@@ -1046,15 +1046,15 @@ describe("分工记忆:本群分工并入 prompt", () => {
     ]);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "u-0001",
         body: "本群怎么分工的?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     // 分工文本存入会话状态(每次处理刷新)
-    expect(agent.getState().sessions.gA.divisionOfLabor).toBe(
+    expect(participant.getState().sessions.gA.divisionOfLabor).toBe(
       "executor=assistant(执行任务并回复结果);coordinator=coord(负责调度与分工)",
     );
     const content = replyCalls(server).at(-1).messages.at(-1).content;
@@ -1073,7 +1073,7 @@ describe("分工记忆:本群分工并入 prompt", () => {
     stubFetch(server);
     server.membersByGroup.set("gA", [
       {
-        agentId: ME.id,
+        participantId: ME.id,
         name: "assistant",
         roles: ["executor"],
         prompt: "执行任务",
@@ -1081,14 +1081,14 @@ describe("分工记忆:本群分工并入 prompt", () => {
     ]);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "u-0001",
         body: "分工是什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions).toEqual({});
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions).toEqual({});
     const content = replyCalls(server).at(-1).messages.at(-1).content;
     expect(content).toBe("分工是什么?");
     expect(content).not.toContain("【本群分工】");
@@ -1104,14 +1104,14 @@ describe("服务器绑定:拒绝与解绑语义", () => {
     stubFetch(server);
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    const s = agent.getState().sessions.gA;
+    await participant.processGroup({ id: "gA" });
+    const s = participant.getState().sessions.gA;
     // 服务器拒绝:本地不回写、不出现成功确认
     expect(s.projectPath).toBeUndefined();
     expect(server.posted).toHaveLength(1);
@@ -1129,14 +1129,14 @@ describe("服务器绑定:拒绝与解绑语义", () => {
     // 第一轮:绑定成功(服务器 + 本地都有)
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: `绑定项目 ${project}`,
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
-    expect(agent.getState().sessions.gA.projectPath).toBeTruthy();
+    await participant.processGroup({ id: "gA" });
+    expect(participant.getState().sessions.gA.projectPath).toBeTruthy();
 
     // 服务器侧解绑:projectPath 清为 null(模拟 PATCH { projectPath: null })
     server.groups.set("gA", { id: "gA", projectPath: null });
@@ -1145,13 +1145,13 @@ describe("服务器绑定:拒绝与解绑语义", () => {
     server.messagesByGroup.set("gA", [
       ...server.messagesByGroup.get("gA"),
       msg("m002", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "还有问题",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const call = replyCalls(server).at(-1);
     expect(call.messages.at(-1).content).toContain("还有问题");
     expect(call.messages.at(-1).content).not.toContain("【项目文档】");
@@ -1168,13 +1168,13 @@ describe("服务器绑定:拒绝与解绑语义", () => {
     server.groups.set("gA", { id: "gA", projectPath: outside });
     server.messagesByGroup.set("gA", [
       msg("m001", {
-        audience: "agent",
+        audience: "participant",
         audienceRef: ME.id,
         senderId: "user-1",
         body: "项目里写了什么?",
       }),
     ]);
-    await agent.processGroup({ id: "gA" });
+    await participant.processGroup({ id: "gA" });
     const call = replyCalls(server).at(-1);
     expect(call.messages.at(-1).content).not.toContain("外部项目秘密");
     expect(call.messages.at(-1).content).not.toContain("【项目文档】");

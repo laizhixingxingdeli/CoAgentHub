@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hermes 真实接入闭环(可重跑):注册 agent → 建群 → 训练信令 → P2P 拉取校验(零 python,纯 Node)
+# Hermes 真实接入闭环(可重跑):注册 participant → 建群 → 训练信令 → P2P 拉取校验(零 python,纯 Node)
 # 前置:server :3001 + web :5173 运行、/tmp/coagenthub-tokens.env 存在(alice 等 token)
 # 用法:bash scripts/hermes-closed-loop.sh
 set -e
@@ -12,10 +12,10 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 jsq() { node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log('"$1"')'; }
 
 echo "== 1. 注册 hermes-win(训练端)+ hermes-mac(拉取端)=="
-WIN=$(curl -s -X POST $API/agents -H "Content-Type: application/json" -d '{"name":"hermes-win","type":"hermes","device":"win","webhookUrl":"http://127.0.0.1:9199/hook"}')
+WIN=$(curl -s -X POST $API/participants -H "Content-Type: application/json" -d '{"name":"hermes-win","type":"hermes","device":"win","webhookUrl":"http://127.0.0.1:9199/hook"}')
 WIN_ID=$(echo "$WIN" | jsq 'j.id')
 WIN_TOKEN=$(echo "$WIN" | jsq 'j.token')
-MAC=$(curl -s -X POST $API/agents -H "Content-Type: application/json" -d '{"name":"hermes-mac","type":"hermes","device":"mac","webhookUrl":"http://127.0.0.1:9199/hook"}')
+MAC=$(curl -s -X POST $API/participants -H "Content-Type: application/json" -d '{"name":"hermes-mac","type":"hermes","device":"mac","webhookUrl":"http://127.0.0.1:9199/hook"}')
 MAC_ID=$(echo "$MAC" | jsq 'j.id')
 MAC_TOKEN=$(echo "$MAC" | jsq 'j.token')
 echo "  hermes-win=$WIN_ID / hermes-mac=$MAC_ID"
@@ -26,8 +26,8 @@ GID=$(echo "$G" | jsq 'j.id')
 echo "  GID=$GID"
 
 echo "== 3. hermes-win 入群(specialist)=="
-curl -s -X POST $API/groups/$GID/members -H "Content-Type: application/json" -H "Authorization: Bearer $alice_TOKEN" -d "{\"agentId\":\"$WIN_ID\",\"roles\":[\"specialist\"]}" >/dev/null
-curl -s -X POST $API/groups/$GID/members -H "Content-Type: application/json" -H "Authorization: Bearer $alice_TOKEN" -d "{\"agentId\":\"$MAC_ID\",\"roles\":[\"human\"]}" >/dev/null
+curl -s -X POST $API/groups/$GID/members -H "Content-Type: application/json" -H "Authorization: Bearer $alice_TOKEN" -d "{\"participantId\":\"$WIN_ID\",\"roles\":[\"specialist\"]}" >/dev/null
+curl -s -X POST $API/groups/$GID/members -H "Content-Type: application/json" -H "Authorization: Bearer $alice_TOKEN" -d "{\"participantId\":\"$MAC_ID\",\"roles\":[\"human\"]}" >/dev/null
 echo "  hermes-win(specialist)+ hermes-mac(human)已加入"
 
 echo "== 4. alice 广播训练命令 =="

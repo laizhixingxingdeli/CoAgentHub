@@ -11,7 +11,8 @@
  *
  * 环境变量:
  *   API_BASE                默认 http://localhost:3001/api
- *   COAGENTHUB_AGENT_TOKEN  必填,发送方 agent 身份(Authorization: Bearer)
+ *   COAGENTHUB_PARTICIPANT_TOKEN  必填,发送方 participant 身份
+ *                            (旧名 COAGENTHUB_AGENT_TOKEN 兼容读取)
  *
  * 依赖:仅 node 内置模块(http/crypto/os/fs/path/url),可复制到 Windows 端
  * 独立运行,无需安装任何东西。
@@ -29,7 +30,9 @@ const API_BASE = (process.env.API_BASE ?? "http://localhost:3001/api").replace(
   "",
 );
 // biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与 assistant-agent.mjs 同款)
-const TOKEN = process.env.COAGENTHUB_AGENT_TOKEN;
+const TOKEN =
+  process.env.COAGENTHUB_PARTICIPANT_TOKEN ??
+  process.env.COAGENTHUB_AGENT_TOKEN; // 旧名兼容(agent 为 participant 的旧名)
 
 const USAGE = `用法: node scripts/p2p-serve.mjs --file <path> [--port 9901] [--group <groupId>] [--once]
   --file <path>   要共享的文件(必填)
@@ -134,7 +137,10 @@ async function main() {
 
   if (!opts.file) fail("缺少必填参数 --file");
   if (!opts.group) fail("缺少必填参数 --group");
-  if (!TOKEN) fail("缺少环境变量 COAGENTHUB_AGENT_TOKEN(发送方 agent 身份)");
+  if (!TOKEN)
+    fail(
+      "缺少环境变量 COAGENTHUB_PARTICIPANT_TOKEN(发送方 participant 身份;旧名 COAGENTHUB_AGENT_TOKEN 仍兼容)",
+    );
   if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) {
     fail(`无效端口: ${opts.port}(应为 1-65535 的整数)`);
   }
