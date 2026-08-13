@@ -7,8 +7,8 @@ import {
 } from "lucide-react";
 import {
   createContext,
-  useCallback,
   type ReactNode,
+  useCallback,
   useContext,
   useState,
 } from "react";
@@ -47,12 +47,14 @@ const GroupContextPanelContext = createContext<ContextPanelState | null>(null);
 /** 右栏开合状态。无 Provider(如页面单独渲染)时返回安全 no-op。 */
 export function useGroupContextPanel(): ContextPanelState {
   const ctx = useContext(GroupContextPanelContext);
-  return ctx ?? {
-    open: false,
-    setOpen: () => {},
-    overlayOpen: false,
-    setOverlayOpen: () => {},
-  };
+  return (
+    ctx ?? {
+      open: false,
+      setOpen: () => {},
+      overlayOpen: false,
+      setOverlayOpen: () => {},
+    }
+  );
 }
 
 /** 提供右栏开合状态,由布局壳(GroupLayout)包住页面与右栏。 */
@@ -161,8 +163,7 @@ function PanelTabs({ groupId }: { groupId: string }) {
 
 export default function ContextPanel({ groupId }: { groupId: string }) {
   const isDesktop = useIsDesktop();
-  const { open, setOpen, overlayOpen, setOverlayOpen } =
-    useGroupContextPanel();
+  const { open, setOpen, overlayOpen, setOverlayOpen } = useGroupContextPanel();
   const tabs = <PanelTabs groupId={groupId} />;
 
   if (isDesktop) {
