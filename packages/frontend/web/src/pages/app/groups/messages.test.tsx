@@ -154,7 +154,7 @@ function messagesFetchMock(
         const tasks =
           tasksGets > 1 && options.tasksAfterCommand
             ? options.tasksAfterCommand
-            : options.tasks ?? [];
+            : (options.tasks ?? []);
         return jsonResponse(tasks);
       },
     },
@@ -264,10 +264,7 @@ describe("任务面板(任务控制 UI)", () => {
   });
 
   it("点「停止」发出「停止 <taskId>」广播消息,刷新后状态变 cancelled", async () => {
-    const cancelledTasks = [
-      { ...TASKS[0], status: "cancelled" },
-      TASKS[1],
-    ];
+    const cancelledTasks = [{ ...TASKS[0], status: "cancelled" }, TASKS[1]];
     const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
       tasks: TASKS,
       tasksAfterCommand: cancelledTasks,

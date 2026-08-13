@@ -36,6 +36,7 @@ import { Composer } from "./Composer";
 import { detectMention, type MentionCandidate, resolveAudience } from "./lib";
 
 import { MessageList } from "./MessageList";
+import TaskPanel, { type TaskItem } from "./TaskPanel";
 import {
   DELETED_MESSAGE_BODY,
   GROUP_ROLES,
@@ -43,7 +44,6 @@ import {
   type MessageItem,
   ROLE_LABELS,
 } from "./types";
-import TaskPanel, { type TaskItem } from "./TaskPanel";
 
 /**
  * Group message page (ticket 18): WeChat/QQ-style chat UI — three zones
