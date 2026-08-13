@@ -540,7 +540,9 @@ app
       z
         .object({
           // body 可空:纯文件信令消息允许 body 为空但携带 fileRef。
-          body: z.string().optional(),
+          // 输入上限(P0):发送 body 最多 8000 字符,防止局域网内一条超大
+          // 请求打爆内存(编辑接口为 4000,见 PATCH /:id/messages/:messageId)。
+          body: z.string().max(8000).optional(),
           parentId: z.string().uuid().optional(),
           audience: GroupMessageAudience.optional(),
           audienceRef: z.string().optional(),
@@ -548,7 +550,11 @@ app
           // 空串以免绕过 text/plain 默认值。
           contentType: z.string().min(1).optional(),
           // fileRef.expiresAt 可选由客户端传入;服务端缺省补 now + 7d (ticket 17)。
-          fileRef: FileRefInput.optional(),
+          // 输入上限(P0):name ≤255、fetchUrl ≤2048,超限校验返回 400。
+          fileRef: FileRefInput.extend({
+            name: z.string().min(1).max(255),
+            fetchUrl: z.string().url().max(2048),
+          }).optional(),
         })
         .refine((v) => (v.body?.trim()?.length ?? 0) > 0 || !!v.fileRef, {
           message: "body or fileRef must be provided",

@@ -21,6 +21,30 @@ import { describeRoute } from "hono-openapi";
 
 const FILE_DIR = path.resolve(process.env.FILE_DIR ?? "data/files");
 
+/**
+ * 单文件上传上限(P0 输入上限):env `MAX_FILE_UPLOAD_BYTES` 可覆盖,
+ * 默认 200MB,防止局域网内一条超大请求直接打爆磁盘/内存。
+ * env 值非法(非正数)时回落默认值并告警,避免误配置悄悄禁用上限。
+ */
+const MAX_FILE_UPLOAD_BYTES = (() => {
+  const parsed = Number(process.env.MAX_FILE_UPLOAD_BYTES);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  if (process.env.MAX_FILE_UPLOAD_BYTES !== undefined) {
+    console.warn(
+      `[file] MAX_FILE_UPLOAD_BYTES 非法(${process.env.MAX_FILE_UPLOAD_BYTES}),回落默认 200MB`,
+    );
+  }
+  return 200 * 1024 * 1024;
+})();
+
+/**
+ * multipart 请求体比文件本身多出 framing(边界行 + part 头,通常 <1KB),
+ * Content-Length 预检须留出余量,否则恰好等于上限的文件会被误拒。
+ */
+const MULTIPART_FRAMING_ALLOWANCE = 1024 * 1024;
+
 /** Reject empty names, `.`/`..`, and anything containing path separators or NUL. */
 function sanitizeFileName(name: string): string | null {
   const trimmed = name.trim();
@@ -77,6 +101,16 @@ const app = new Hono()
       },
     }),
     async (c) => {
+      // Content-Length 预检:声明长度已超上限的请求在解析 multipart 前直接
+      // 拒绝,避免超大请求被整体读进内存打爆进程(framing 余量防误拒恰好
+      // 等于上限的文件;逐文件精确校验在下方 file.size)。
+      const contentLength = Number(c.req.header("content-length"));
+      if (
+        Number.isFinite(contentLength) &&
+        contentLength > MAX_FILE_UPLOAD_BYTES + MULTIPART_FRAMING_ALLOWANCE
+      ) {
+        return c.json({ message: "文件过大" }, 400);
+      }
       const formData = await c.req.formData();
       const file = formData.get("file");
       if (!(file instanceof File)) {
@@ -85,6 +119,10 @@ const app = new Hono()
       const name = sanitizeFileName(file.name);
       if (!name) {
         return c.json({ message: "非法文件名" }, 400);
+      }
+      // 拿到 file.size 后立刻判断,超限直接 400,不落盘(不等读完再拒)。
+      if (file.size > MAX_FILE_UPLOAD_BYTES) {
+        return c.json({ message: "文件过大" }, 400);
       }
       await mkdir(FILE_DIR, { recursive: true });
       await writeFile(

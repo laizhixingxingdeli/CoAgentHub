@@ -201,6 +201,41 @@ describe("群组消息树与受众路由", () => {
       expect(missing.status).toBe(400);
     });
 
+    it("body 超 8000 字符返回 400,恰好 8000 照常通过", async () => {
+      const { group, coordinator } = await setupGroup();
+      const tooLong = await sendMessage(coordinator.token, group.id, {
+        body: "x".repeat(8001),
+      });
+      expect(tooLong.status).toBe(400);
+
+      const boundary = await sendMessage(coordinator.token, group.id, {
+        body: "x".repeat(8000),
+      });
+      expect(boundary.status).toBe(200);
+    });
+
+    it("fileRef.name 超 255 / fetchUrl 超 2048 返回 400", async () => {
+      const { group, coordinator } = await setupGroup();
+      const validFileRef = {
+        size: 2048,
+        sha256: "a".repeat(64),
+        fetchUrl: "http://192.168.1.10:8080/f/trained-model.bin",
+      };
+      const longName = await sendMessage(coordinator.token, group.id, {
+        fileRef: { ...validFileRef, name: "x".repeat(256) },
+      });
+      expect(longName.status).toBe(400);
+
+      const longUrl = await sendMessage(coordinator.token, group.id, {
+        fileRef: {
+          ...validFileRef,
+          name: "trained-model.bin",
+          fetchUrl: `http://192.168.1.10:8080/f/${"x".repeat(2048)}`,
+        },
+      });
+      expect(longUrl.status).toBe(400);
+    });
+
     it("audience=role 校验:缺 audienceRef 或非法角色名返回 400", async () => {
       const { group, reviewer } = await setupGroup();
       const missingRef = await sendMessage(reviewer.token, group.id, {

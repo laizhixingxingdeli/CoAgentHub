@@ -29,6 +29,10 @@ vi.mock("@server/lib/database", async () => {
 const testFileDir = mkdtempSync(path.join(tmpdir(), "coagenthub-test-files-"));
 process.env.FILE_DIR = testFileDir;
 
+// 模拟文件上传上限为 1KB(P0 输入上限):file.ts 在模块加载时读
+// MAX_FILE_UPLOAD_BYTES,同样必须在导入路由模块之前设置。
+process.env.MAX_FILE_UPLOAD_BYTES = "1024";
+
 // Throwaway git repo for executor checkpoint/rollback tests (ticket 2).
 const testRepoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-test-repo-"));
 const gitInit = spawnSync("git", ["init", "-q"], { cwd: testRepoDir });
