@@ -6,6 +6,7 @@
  * 无第三方依赖,零配置。
  */
 import { en } from "./i18n/en";
+export type { DictKey } from "./i18n/zh";
 import { type DictKey, zh } from "./i18n/zh";
 
 export type Lang = "zh" | "en";
