@@ -73,10 +73,6 @@ Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes
          → git 快照/回滚兜底 → 完成后 ✅/❌ task_status 消息回传群里
 ```
 
-另有一个**助手 participant** 应答器(可选):`scripts/assistant-agent.mjs` 零依赖轮询
-应答器,注册自己、加入群组、对定向消息用 DeepSeek API 生成回复(未配置
-`DEEPSEEK_API_KEY` 时回模板;身份存 gitignored 的 `.assistant-state.json`)。
-
 ```bash
 # 1) 基础设施 + 迁移
 docker compose up -d postgres          # 或使用本机 postgres
@@ -86,8 +82,6 @@ pnpm --filter @laizhixingxingdeli/database migrate
 pnpm --filter @laizhixingxingdeli/server build
 node packages/backend/server/dist/server.mjs    # :3001
 
-# 3) 助手 participant(可选)
-DEEPSEEK_API_KEY=xxx node scripts/assistant-agent.mjs
 ```
 
 ## Development

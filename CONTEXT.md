@@ -20,7 +20,6 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **checkpointRef** | 执行前 git 快照(`refs/coagenthub-cp/<taskId>`),回滚用 |
 | **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
 | **Local User** | 无 token 请求的默认身份(human,全可见);局域网信任模型 |
-| **群记忆** | 按群的滚动摘要 + 最近窗口 + 本群分工(assistant-agent) |
 | **项目记忆** | 群绑定 `project_path` → 读取仓库文档(静态记忆) |
 
 ## 运行拓扑
@@ -31,7 +30,6 @@ Web (:3000, serve.mjs) ──/api 反代+WS──► Server (:3001, Hono)
                                             ├─ spawn 执行器 CLI(atomcode/codebuddy/reasonix/hermes)
                                             ├─ A2A gateway(Win Hermes, 远端)
                                             └─ WS 通知 / ?after= 增量拉取
-assistant-agent.mjs ──轮询 ?after= ──► Server(按群记忆 + 项目文档应答)
 ```
 
 ## 关键决策

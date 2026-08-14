@@ -24,12 +24,12 @@ import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import { basename, extname } from "node:path";
 
-// biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与 assistant-agent.mjs 同款)
+// biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与桥同款)
 const API_BASE = (process.env.API_BASE ?? "http://localhost:3001/api").replace(
   /\/+$/,
   "",
 );
-// biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与 assistant-agent.mjs 同款)
+// biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与桥同款)
 const TOKEN =
   process.env.COAGENTHUB_PARTICIPANT_TOKEN ??
   process.env.COAGENTHUB_AGENT_TOKEN; // 旧名兼容(agent 为 participant 的旧名)

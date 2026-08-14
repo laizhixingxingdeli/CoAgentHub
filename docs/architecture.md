@@ -38,7 +38,7 @@ CoAgentHub/
 │   │   │       ├── lib/participant-token.ts        # participant token 生成 / SHA-256 哈希
 │   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws)
 │   │   │       └── lib/executor-*.ts         # 执行器调度(串行队列/快照回滚/A2A)
-│   │   │   └── scripts/              #    演示/验收脚本、assistant-agent 应答器
+│   │   │   └── scripts/              #    演示/验收脚本
 │   │   └── database/                  # drizzle schema + migrations(表定义见 §3)
 │   ├── common/                        # 共享包(错误码 BizCodeEnum、tsconfig 预设)
 │   └── frontend/
@@ -157,8 +157,3 @@ CoAgentHub/
 - `GET /groups/:id/messages?q=` 关键词搜索(ILIKE,`%`/`_` 转义),与可见性过滤和
   `?after=` 游标组合;`GET /groups?q=` 群标题搜索。
 
-## 11. 助手记忆(assistant-agent.mjs)
-
-- 按群:滚动摘要 + 最近窗口(默认 40)+ 本群分工(成员 roles+prompt);预算触发压缩;
-- 项目记忆:群绑定 project_path(Web/指令可配)→ 读仓库 CONTEXT/AGENTS/ADR/README(预算);
-- 状态持久化于 `.assistant-state.json`(gitignored);`MEMORY=none` 关闭。
