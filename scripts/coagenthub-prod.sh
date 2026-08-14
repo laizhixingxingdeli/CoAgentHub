@@ -4,15 +4,19 @@
 # 用法:
 #   scripts/coagenthub-prod.sh start [--build]   # 一键启动(幂等:已占用端口跳过;--build 才构建)
 #   scripts/coagenthub-prod.sh stop              # 停止本脚本启动的三服务
+#   scripts/coagenthub-prod.sh restart [--build] # stop + start(健康看门狗用)
 #   scripts/coagenthub-prod.sh status            # 检查三端口监听 + PID
 #   scripts/coagenthub-prod.sh plist-install     # 复制 LaunchAgent 模板到 ~/Library/LaunchAgents(不 load)
 #   scripts/coagenthub-prod.sh plist-uninstall   # launchctl unload + 删文件
+#   scripts/coagenthub-prod.sh cron-install      # 安装每日 02:30 备份 + 每 5 分钟 watchdog(幂等)
+#   scripts/coagenthub-prod.sh cron-uninstall    # 移除本脚本安装的 cron 条目(幂等)
 #
 # 端口(可用环境变量覆盖,便于隔离验证):
 #   COAGENTHUB_SERVER_PORT 默认 3001  node dist/server.mjs          (生产后端, PORT env)
 #   COAGENTHUB_WEB_PORT     默认 3000  node serve.mjs [端口] [后端]  (前端 dist + /api 反代 + WS upgrade)
 #
-# 日志: /tmp/coagenthub-prod-{server,web}.log (端口覆盖时带端口后缀)
+# 日志: /tmp/coagenthub-prod-{server,web}-<YYYYMMDD>.log,按天轮转;
+#       启动时自动清理超过 14 天的旧日志(端口覆盖时带端口后缀)
 # 启动要点: 子进程 nohup + 子 shell `(cd dir && cmd &)` 完全脱离当前 shell,
 #           PPID 归 1(launchd);PID 记录 /tmp/coagenthub-prod-<port>.pid, stop 按 PID 文件杀。
 set -u
@@ -33,8 +37,9 @@ log_suffix() { # 端口被覆盖时日志/PID 加后缀,避免隔离测试污染
     echo "-$1"
   fi
 }
-SLOG="/tmp/coagenthub-prod-server$(log_suffix "$SERVER_PORT").log"
-WLOG="/tmp/coagenthub-prod-web$(log_suffix "$WEB_PORT").log"
+# 日志按天轮转:每天一个新文件 <YYYYMMDD>(端口覆盖时再带端口后缀,隔离测试)。
+SLOG="/tmp/coagenthub-prod-server-$(date +%Y%m%d)$(log_suffix "$SERVER_PORT").log"
+WLOG="/tmp/coagenthub-prod-web-$(date +%Y%m%d)$(log_suffix "$WEB_PORT").log"
 PIDFILE="/tmp/coagenthub-prod-$SERVER_PORT.pid"
 
 # ---------- 工具 ----------
@@ -49,6 +54,14 @@ wait_up() {
     sleep 0.5
   done
   return 1
+}
+
+# 启动时清理超过 14 天的按天日志(零依赖:find -mtime +14 -delete)
+cleanup_old_logs() {
+  local n
+  n="$(find /tmp -maxdepth 1 \( -name 'coagenthub-prod-server-*.log' -o -name 'coagenthub-prod-web-*.log' \) -mtime +14 2>/dev/null | wc -l | tr -d ' ')"
+  find /tmp -maxdepth 1 \( -name 'coagenthub-prod-server-*.log' -o -name 'coagenthub-prod-web-*.log' \) -mtime +14 -delete 2>/dev/null
+  [ "${n:-0}" -gt 0 ] && echo "清理 $n 个超过 14 天的旧日志"
 }
 
 lan_ips() {
@@ -101,6 +114,8 @@ cmd_start() {
   local BUILD=0
   for a in "$@"; do [ "$a" = "--build" ] && BUILD=1; done
 
+  cleanup_old_logs
+
   if [ "$BUILD" = 1 ]; then
     echo "== 构建 (--build) =="
     (cd "$REPO_ROOT" && pnpm build:frontend) || { echo "FAIL 前端构建" >&2; exit 1; }
@@ -152,6 +167,11 @@ cmd_stop() {
   cmd_status
 }
 
+cmd_restart() {
+  cmd_stop
+  cmd_start "$@"
+}
+
 cmd_status() {
   local port pid
   for port in "$SERVER_PORT" "$WEB_PORT"; do
@@ -190,11 +210,50 @@ cmd_plist_uninstall() {
   echo "已卸载 $PLIST_DST"
 }
 
+# ---------- cron 定时任务(每日备份 + 每 5 分钟 watchdog) ----------
+# 幂等实现:每条目带 CRON_MARKER 注释,安装先剔除旧条目再追加,卸载按标记剔除。
+
+CRON_MARKER="coagenthub-cron"
+
+current_crontab() {
+  crontab -l 2>/dev/null || true
+}
+
+cmd_cron_install() {
+  local backup_cmd watchdog_cmd
+  backup_cmd="30 2 * * * $SCRIPT_DIR/coagenthub-backup.sh >> \"\$HOME/coagenthub-backups/backup-cron.log\" 2>&1  # $CRON_MARKER"
+  watchdog_cmd="*/5 * * * * $SCRIPT_DIR/coagenthub-watchdog.sh --once >/dev/null 2>&1  # $CRON_MARKER"
+  if [ ! -x "$SCRIPT_DIR/coagenthub-backup.sh" ]; then
+    echo "FAIL 缺少 $SCRIPT_DIR/coagenthub-backup.sh" >&2; exit 1
+  fi
+  if [ ! -x "$SCRIPT_DIR/coagenthub-watchdog.sh" ]; then
+    echo "FAIL 缺少 $SCRIPT_DIR/coagenthub-watchdog.sh" >&2; exit 1
+  fi
+  { current_crontab | grep -v "$CRON_MARKER"; echo "$backup_cmd"; echo "$watchdog_cmd"; } | crontab -
+  echo "已安装 cron:每日 02:30 备份(pg_dump,保留 7 份)+ 每 5 分钟 watchdog 健康检查"
+  echo "已安装条目:"
+  crontab -l 2>/dev/null | grep "$CRON_MARKER" || true
+}
+
+cmd_cron_uninstall() {
+  local n
+  n="$(current_crontab | grep -c "$CRON_MARKER" || true)"
+  if [ "${n:-0}" -gt 0 ]; then
+    current_crontab | grep -v "$CRON_MARKER" | crontab -
+    echo "已移除 $n 条 coagenthub 定时任务(cron-install 安装的条目)"
+  else
+    echo "没有 coagenthub 定时任务(无需卸载)"
+  fi
+}
+
 case "${1:-}" in
   start) shift; cmd_start "$@" ;;
   stop) cmd_stop ;;
+  restart) shift; cmd_restart "$@" ;;
   status) cmd_status ;;
   plist-install) cmd_plist_install ;;
   plist-uninstall) cmd_plist_uninstall ;;
-  *) echo "用法: $0 {start [--build]|stop|status|plist-install|plist-uninstall}"; exit 1 ;;
+  cron-install) cmd_cron_install ;;
+  cron-uninstall) cmd_cron_uninstall ;;
+  *) echo "用法: $0 {start [--build]|stop|restart|status|plist-install|plist-uninstall|cron-install|cron-uninstall}"; exit 1 ;;
 esac

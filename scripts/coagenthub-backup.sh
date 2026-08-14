@@ -62,11 +62,6 @@ fi
 rm -f "$SQL.err"
 echo "    OK  $(wc -l < "$SQL" | tr -d ' ') 行"
 
-echo "2/3 桥状态 → $(basename "$STATE_BAK")"
-else
-  echo "    SKIP 无 $BRIDGE_STATE"
-fi
-
 if [ "${1:-}" = "--with-dist" ]; then
   DIST_TGZ="$BACKUP_DIR/coagenthub-dist-$STAMP.tar.gz"
   echo "2/2 前端 dist → $(basename "$DIST_TGZ")"
