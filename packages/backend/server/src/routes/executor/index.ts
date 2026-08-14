@@ -1,26 +1,30 @@
 import { zValidator } from "@hono/zod-validator";
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
 import {
   addExecutorConfig,
   effectiveExecutors,
+  findExecutorByKey,
   isBuiltinExecutorKey,
   registerExecutorParticipant,
   removeExecutorConfig,
+  updateExecutorConfig,
 } from "@server/lib/executors";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
 /**
- * 执行器配置管理(接入 Participant 界面):GET/POST/DELETE /api/executors。
+ * 执行器配置管理(接入 Participant 界面):GET/POST/DELETE/PATCH /api/executors。
  *
  * 无鉴权(局域网信任模型,与 participant 注册一致):LAN 内任何客户端
- * 都能读取/新增/删除执行器配置。新增时自动注册对应 participant(名字=agentName;
+ * 都能读取/新增/删除/编辑执行器配置。新增时自动注册对应 participant(名字=agentName;
  * token 认证已移除,不再生成 token)。
  *
- * 内置执行器(DEFAULT_EXECUTORS)不落 DB:GET 合并展示,DELETE 对内置 key
- * 直接拒绝(409),避免误删默认执行器。
+ * 内置执行器(DEFAULT_EXECUTORS)不落 DB:GET 合并展示,DELETE/PATCH 对内置 key
+ * 直接拒绝(409/403),避免误删/误改默认执行器。
  */
 const app = new Hono<{ Variables: { db: DataBase } }>();
 
@@ -48,6 +52,8 @@ const CreateExecutorSchema = z
     label: z.string().max(100).optional(),
     /** 设备(可选):注册 participant 时写入 participant.device。 */
     device: z.string().max(100).optional(),
+    /** 执行器默认模型(args 模板 {model} 占位);可空。 */
+    model: z.string().max(200).nullable().optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
     message: "kind=a2a 需要 url,kind=cli 需要 bin",
@@ -70,7 +76,7 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const input = c.req.valid("json");
-      const { agentName, kind, bin, url, args, label, device } = input;
+      const { agentName, kind, bin, url, args, label, device, model } = input;
       // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
       const type = input.type ?? "custom";
 
@@ -104,6 +110,7 @@ const app2 = app
         args: args ?? [],
         label: label ?? agentName,
         device,
+        model,
       };
 
       await addExecutorConfig(db, config);
@@ -134,6 +141,7 @@ const app2 = app
         args: config.args,
         label: config.label,
         device: device ?? null,
+        model: model ?? null,
       });
     },
   )
@@ -162,6 +170,7 @@ const app2 = app
           url: ex.url ?? ex.a2a?.url ?? null,
           args: ex.args,
           label: ex.label,
+          model: ex.model ?? null,
           builtin: isBuiltinExecutorKey(ex.key),
         })),
       );
@@ -194,6 +203,114 @@ const app2 = app
         throw new BizError(BizCodeEnum.ExecutorNotFound);
       }
       return c.json({ success: true, key });
+    },
+  )
+  .patch(
+    "/:key",
+    describeRoute({
+      description:
+        "Partially update an executor config by key (bin/args/model/device/agentName); built-in executors are refused (403); key is immutable (400); unknown key 404. device changes sync to the registered participant (name changes do NOT rename the participant — recorded only)",
+      responses: {
+        200: {
+          description: "Config updated",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    zValidator("param", z.object({ key: z.string().min(1) })),
+    zValidator(
+      "json",
+      z
+        .object({
+          // key 不可改:请求体出现 key 即拒绝(由处理器抛 400)。
+          key: z.string().optional(),
+          agentName: z.string().min(1).max(100).optional(),
+          bin: z.string().min(1).optional(),
+          args: z.array(z.string()).max(64).optional(),
+          label: z.string().max(100).optional(),
+          // null = 清空(与 POST 缺省归一为 null 一致)。
+          model: z.string().max(200).nullable().optional(),
+          device: z.string().max(100).nullable().optional(),
+        })
+        .refine(
+          (v) =>
+            v.agentName !== undefined ||
+            v.bin !== undefined ||
+            v.args !== undefined ||
+            v.label !== undefined ||
+            v.model !== undefined ||
+            v.device !== undefined,
+          { message: "at least one field to update is required" },
+        ),
+    ),
+    async (c) => {
+      const db = c.get("db");
+      const { key } = c.req.valid("param");
+      const input = c.req.valid("json");
+
+      // key 不可改:请求体带 key 字段直接拒绝(避免"换 key"语义)。
+      if (input.key !== undefined) {
+        throw new BizError(BizCodeEnum.InvalidRequest, "执行器 key 不可修改");
+      }
+
+      // 内置执行器不落 DB,不可编辑(与 DELETE 的 409 不同,编辑用 403)。
+      if (isBuiltinExecutorKey(key)) {
+        throw new BizError(BizCodeEnum.Forbidden, `内置执行器不可编辑: ${key}`);
+      }
+
+      const existing = await findExecutorByKey(db, key);
+      if (!existing) {
+        throw new BizError(BizCodeEnum.ExecutorNotFound);
+      }
+
+      // 改名唯一性:内置 + DB 已有同名 participant 都算重复(与 POST 同判重)。
+      if (
+        input.agentName !== undefined &&
+        input.agentName !== existing.agentName
+      ) {
+        const all = await effectiveExecutors(db);
+        if (
+          all.some((ex) => ex.key !== key && ex.agentName === input.agentName)
+        ) {
+          throw new BizError(
+            BizCodeEnum.Conflict,
+            `participant 名字已存在: ${input.agentName}`,
+          );
+        }
+      }
+
+      const updated = await updateExecutorConfig(db, key, {
+        agentName: input.agentName,
+        bin: input.bin,
+        args: input.args,
+        label: input.label,
+        model: input.model,
+      });
+      if (!updated) {
+        throw new BizError(BizCodeEnum.ExecutorNotFound);
+      }
+
+      // device 同步到已注册 participant(按配置的 agentName 匹配——简化:改名不
+      // 自动改 participant 名,仅记录,避免误伤;device 仍落到原 participant)。
+      if (input.device !== undefined) {
+        await db
+          .update(participantTable)
+          .set({ device: input.device })
+          .where(eq(participantTable.name, existing.agentName));
+      }
+
+      return c.json({
+        key: updated.key,
+        agentName: updated.agentName,
+        type: updated.type,
+        kind: updated.kind,
+        bin: updated.bin,
+        url: updated.url ?? null,
+        args: updated.args,
+        label: updated.label,
+        model: updated.model ?? null,
+        builtin: false,
+      });
     },
   );
 

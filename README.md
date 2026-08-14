@@ -72,7 +72,9 @@ project binding) for group pages. Responsive: overlay on tablets/phones.
 server 是**唯一的调度器**(任务桥已退役):开机时自动注册执行器配置里的 participant
 (见 `packages/backend/server/src/lib/executors.ts`,含本地 Hermes 规划、AtomCode /
 Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里
-用 `audience=participant` 定向到某个执行器 participant 即触发任务:
+用 `audience=participant` 定向到某个执行器 participant 即触发任务。接入/编辑执行器
+配置走 `GET/POST/PATCH/DELETE /api/executors`(网页「接入 Participant」页;PATCH 支持
+改 bin/args/model/device/agentName,内置执行器不可编辑,改名不会自动改 participant 名):
 
 ```
 任务消息 → POST /messages(audience=participant, audienceRef=<执行器 participant id>)

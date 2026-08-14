@@ -140,6 +140,9 @@ export const zh = {
   "participants.form.argsPlaceholder": "如 -y -p {ticket}",
   "participants.form.device": "设备(可选)",
   "participants.form.devicePlaceholder": "如 mac-mini",
+  "participants.form.model": "模型(可选)",
+  "participants.form.modelPlaceholder":
+    "如 deepseek-v4-flash(支持 {model} 占位)",
   "participants.list.title": "执行器列表",
   "participants.list.empty": "暂无执行器,请先在上方新增",
   "participants.list.count": "共 {count} 个",
@@ -169,6 +172,12 @@ export const zh = {
   "participants.edit.capsPlaceholder": "如 text-generation, code-review",
   "participants.heartbeat": "上报在线",
   "participants.reporting": "上报中…",
+  "participants.editExecutor.action": "编辑执行器",
+  "participants.editExecutor.builtinDisabled": "内置执行器不可编辑",
+  "participants.editExecutor.title": "编辑执行器",
+  "participants.editExecutor.desc":
+    "修改执行器配置:名字 / 命令 / 参数模板 / 模型 / 设备。名字变更不会自动改 Participant 名(仅记录)。",
+  "participants.executorUpdated": "已更新执行器「{name}」",
 
   // ── 文件传输页 ───────────────────────────────────────────────────────────
   "files.title": "文件传输",

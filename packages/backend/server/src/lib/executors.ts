@@ -228,6 +228,8 @@ export interface AddExecutorConfigInput {
   url?: string;
   args?: string[];
   label?: string;
+  /** 执行器默认模型(args 模板 {model} 占位);可选,null 表示清空。 */
+  model?: string | null;
 }
 
 /** 插入一条 DB 执行器配置并返回整行。 */
@@ -246,6 +248,7 @@ export async function addExecutorConfig(
       url: input.url ?? null,
       args: input.args ?? [],
       label: input.label ?? input.agentName,
+      model: input.model ?? null,
     })
     .returning();
   return row;
@@ -275,10 +278,40 @@ function rowToConfig(row: ExecutorConfigRow): ExecutorConfig {
     kind: row.kind === "a2a" ? "a2a" : "cli",
     url: row.url ?? undefined,
   };
+  if (row.model != null) base.model = row.model;
   if (base.kind === "a2a") {
     base.a2a = { url: row.url ?? "", token: "" };
   }
   return applyEnvOverrides(base);
+}
+
+/**
+ * 部分更新一条 DB 执行器配置(PATCH /api/executors/:key):只更新传入的字段。
+ * key 不可改(由路由层校验);返回更新后的整行,key 不存在返回 undefined。
+ */
+export async function updateExecutorConfig(
+  db: DataBase,
+  key: string,
+  patch: Partial<
+    Pick<
+      AddExecutorConfigInput,
+      "agentName" | "bin" | "args" | "label" | "model"
+    >
+  >,
+): Promise<ExecutorConfigRow | undefined> {
+  const values: Record<string, unknown> = {};
+  if (patch.agentName !== undefined) values.agentName = patch.agentName;
+  if (patch.bin !== undefined) values.bin = patch.bin;
+  if (patch.args !== undefined) values.args = patch.args;
+  if (patch.label !== undefined) values.label = patch.label;
+  if (patch.model !== undefined) values.model = patch.model ?? null;
+
+  const [row] = await db
+    .update(executorConfigTable)
+    .set(values)
+    .where(eq(executorConfigTable.key, key))
+    .returning();
+  return row;
 }
 
 /** 完整执行器集合 = 内置默认 + DB 配置(合并,DB 行追加在默认之后)。 */

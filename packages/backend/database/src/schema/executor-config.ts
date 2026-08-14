@@ -31,6 +31,8 @@ export const executorConfig = pgTable("executor_config", {
   url: text("url"),
   args: jsonb("args").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   label: text("label").notNull(),
+  // 执行器默认模型(args 模板可用 {model} 占位;无 model 时该参数项被移除)。
+  model: text("model"),
   ...timeColumns("both"),
 });
 

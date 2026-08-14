@@ -1,4 +1,11 @@
-import { Bot, HeartPulse, Loader2, Pencil, Trash2 } from "lucide-react";
+import {
+  Bot,
+  HeartPulse,
+  Loader2,
+  Pencil,
+  Settings2,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +45,8 @@ type ExecutorItem = {
   url: string | null;
   args: string[];
   label: string;
+  /** 执行器默认模型(args 模板 {model} 占位);未配置为 null。 */
+  model: string | null;
   builtin: boolean;
   /** 加载时按 name 匹配到的 participant id;渲染按 id 取 participant(改名后仍能对应)。 */
   participantId?: string;
@@ -67,9 +76,21 @@ export default function ExecutorsPage() {
   const [bin, setBin] = useState("");
   const [url, setUrl] = useState("");
   const [args, setArgs] = useState("");
+  const [model, setModel] = useState("");
   const [device, setDevice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+
+  // 执行器编辑:对话框(bin/args/model/device/agentName)+ PATCH 保存
+  const [editingExecutor, setEditingExecutor] = useState<ExecutorItem | null>(
+    null,
+  );
+  const [editAgentName, setEditAgentName] = useState("");
+  const [editBin, setEditBin] = useState("");
+  const [editArgs, setEditArgs] = useState("");
+  const [editModel, setEditModel] = useState("");
+  const [editExecutorDevice, setEditExecutorDevice] = useState("");
+  const [savingExecutorEdit, setSavingExecutorEdit] = useState(false);
 
   // Participant 自管理:编辑对话框 + 心跳
   const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
@@ -149,6 +170,7 @@ export default function ExecutorsPage() {
         agentName: name.trim(),
         kind,
         device: device.trim() || undefined,
+        model: model.trim() || undefined,
       };
       if (kind === "a2a") {
         if (!url.trim()) {
@@ -186,6 +208,7 @@ export default function ExecutorsPage() {
       setBin("");
       setUrl("");
       setArgs("");
+      setModel("");
       setDevice("");
       await load();
     } catch (e) {
@@ -317,6 +340,65 @@ export default function ExecutorsPage() {
     }
   };
 
+  /** 打开「编辑执行器」对话框(bin/args/model/device/agentName);内置项入口禁用。 */
+  const startEditExecutor = (item: ExecutorItem) => {
+    setEditingExecutor(item);
+    setEditAgentName(item.agentName);
+    setEditBin(item.bin);
+    setEditArgs(item.args.join(" "));
+    setEditModel(item.model ?? "");
+    // device 属于 participant 注册信息,编辑时按 name 匹配预填。
+    setEditExecutorDevice(participantById(item.participantId)?.device ?? "");
+  };
+
+  /** PATCH /api/executors/:key 保存;成功后重新加载列表即时刷新。 */
+  const handleSaveExecutorEdit = async () => {
+    if (!editingExecutor) return;
+    setSavingExecutorEdit(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        agentName: editAgentName.trim() || undefined,
+        bin: editBin.trim() || undefined,
+        model: editModel.trim() || null,
+        device: editExecutorDevice.trim() || null,
+      };
+      // 参数模板:空白分词(与新增表单一致)。
+      const argList = editArgs
+        .trim()
+        .split(/\s+/)
+        .filter((a) => a.length > 0);
+      if (argList.length > 0) payload.args = argList;
+      else payload.args = [];
+
+      const res = await fetch(`/api/executors/${editingExecutor.key}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(body?.message ?? `HTTP ${res.status}`);
+      }
+      setMessage(
+        t("participants.executorUpdated", {
+          name: editAgentName.trim() || editingExecutor.agentName,
+        }),
+      );
+      setEditingExecutor(null);
+      await load();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : t("participants.error.saveFailed"),
+      );
+    } finally {
+      setSavingExecutorEdit(false);
+    }
+  };
+
   return (
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
       <div className="mb-6">
@@ -417,6 +499,15 @@ export default function ExecutorsPage() {
               placeholder={t("participants.form.devicePlaceholder")}
             />
           </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="ex-model">{t("participants.form.model")}</Label>
+            <Input
+              id="ex-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={t("participants.form.modelPlaceholder")}
+            />
+          </div>
         </div>
         <div className="mt-4 flex justify-end">
           <Button onClick={handleSubmit} disabled={submitting}>
@@ -496,6 +587,7 @@ export default function ExecutorsPage() {
                       {item.kind === "a2a" && item.url ? ` · ${item.url}` : ""}
                       {!item.builtin && ` · ${item.bin}`}
                       {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
+                      {item.model ? ` · ${item.model}` : ""}
                     </div>
                     {/* capabilities 标签 chips */}
                     {participant && (
@@ -509,6 +601,21 @@ export default function ExecutorsPage() {
                     )}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => startEditExecutor(item)}
+                      disabled={item.builtin}
+                      title={
+                        item.builtin
+                          ? t("participants.editExecutor.builtinDisabled")
+                          : undefined
+                      }
+                      className="shrink-0"
+                    >
+                      <Settings2 className="size-4" />
+                      {t("participants.editExecutor.action")}
+                    </Button>
                     {participant && (
                       <>
                         <Button
@@ -604,6 +711,97 @@ export default function ExecutorsPage() {
             </Button>
             <Button onClick={handleSaveEdit} disabled={savingEdit}>
               {savingEdit && <Loader2 className="size-4 animate-spin" />}
+              {t("common.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 编辑执行器对话框(DB 配置;bin/args/model/device/agentName 可改) */}
+      <Dialog
+        open={editingExecutor !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditingExecutor(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("participants.editExecutor.title")}</DialogTitle>
+            <DialogDescription>
+              {t("participants.editExecutor.desc")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-name">
+                {t("participants.form.name")}
+              </Label>
+              <Input
+                id="edit-ex-name"
+                value={editAgentName}
+                onChange={(e) => setEditAgentName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-bin">
+                {t("participants.form.command")}
+              </Label>
+              <Input
+                id="edit-ex-bin"
+                value={editBin}
+                onChange={(e) => setEditBin(e.target.value)}
+                placeholder={t("participants.form.commandPlaceholder")}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-args">
+                {t("participants.form.args")}
+              </Label>
+              <Input
+                id="edit-ex-args"
+                value={editArgs}
+                onChange={(e) => setEditArgs(e.target.value)}
+                placeholder={t("participants.form.argsPlaceholder")}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-model">
+                {t("participants.form.model")}
+              </Label>
+              <Input
+                id="edit-ex-model"
+                value={editModel}
+                onChange={(e) => setEditModel(e.target.value)}
+                placeholder={t("participants.form.modelPlaceholder")}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-device">
+                {t("participants.form.device")}
+              </Label>
+              <Input
+                id="edit-ex-device"
+                value={editExecutorDevice}
+                onChange={(e) => setEditExecutorDevice(e.target.value)}
+                placeholder={t("participants.form.devicePlaceholder")}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditingExecutor(null)}
+              disabled={savingExecutorEdit}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={handleSaveExecutorEdit}
+              disabled={savingExecutorEdit}
+            >
+              {savingExecutorEdit && (
+                <Loader2 className="size-4 animate-spin" />
+              )}
               {t("common.save")}
             </Button>
           </DialogFooter>

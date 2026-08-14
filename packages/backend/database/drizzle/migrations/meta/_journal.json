@@ -71,6 +71,13 @@
       "when": 1786690000000,
       "tag": "0009_add_task_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786770000000,
+      "tag": "0010_add_executor_model",
+      "breakpoints": true
     }
   ]
 }

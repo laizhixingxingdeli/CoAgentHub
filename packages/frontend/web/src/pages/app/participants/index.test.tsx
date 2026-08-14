@@ -69,6 +69,21 @@ function executorsFetchMock() {
     },
     {
       match: (url, init) =>
+        init?.method === "PATCH" && String(url).includes("/api/executors/"),
+      respond: (url, init) => {
+        const key = String(url).split("/").at(-1);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const idx = current.findIndex((x) => x.key === key);
+        if (idx >= 0) current[idx] = { ...current[idx], ...body };
+        return jsonResponse({
+          ...(idx >= 0 ? current[idx] : {}),
+          ...body,
+          builtin: false,
+        });
+      },
+    },
+    {
+      match: (url, init) =>
         (!init?.method || init.method === "GET") &&
         String(url).endsWith("/api/executors"),
       respond: () => jsonResponse(current),
@@ -88,7 +103,7 @@ describe("接入 Participant 页", () => {
 
     renderWithProviders(<ExecutorsPage />, "/participants");
 
-    // 表单字段:名字/调用方式/命令/参数模板/设备
+    // 表单字段:名字/调用方式/命令/参数模板/设备/模型
     expect(screen.getByLabelText("名字")).toBeInTheDocument();
     expect(screen.getByText("调用方式")).toBeInTheDocument();
     expect(screen.getByLabelText("cli(本地命令)")).toBeInTheDocument();
@@ -96,6 +111,7 @@ describe("接入 Participant 页", () => {
     expect(screen.getByLabelText("命令")).toBeInTheDocument();
     expect(screen.getByLabelText("参数模板(可选)")).toBeInTheDocument();
     expect(screen.getByLabelText("设备(可选)")).toBeInTheDocument();
+    expect(screen.getByLabelText("模型(可选)")).toBeInTheDocument();
 
     // 内置执行器已展示(加载完成后)
     await waitFor(() => {
@@ -116,6 +132,9 @@ describe("接入 Participant 页", () => {
     fireEvent.change(screen.getByLabelText("设备(可选)"), {
       target: { value: "mac-mini" },
     });
+    fireEvent.change(screen.getByLabelText("模型(可选)"), {
+      target: { value: "deepseek-v4-flash" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
     await waitFor(() => {
@@ -125,7 +144,7 @@ describe("接入 Participant 页", () => {
       screen.getByText(/已接入 Participant「My Cli Participant」/),
     ).toBeInTheDocument();
 
-    // POST 载荷:cli → bin + 参数模板分词,不含任何 token 字段
+    // POST 载荷:cli → bin + 参数模板分词 + 模型,不含任何 token 字段
     const postCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "POST",
     );
@@ -139,6 +158,7 @@ describe("接入 Participant 页", () => {
     expect(payload.bin).toBe("my-cli");
     expect(payload.args).toEqual(["-y", "-p", "{ticket}"]);
     expect(payload.device).toBe("mac-mini");
+    expect(payload.model).toBe("deepseek-v4-flash");
     expect(payload).not.toHaveProperty("token");
     expect(payload).not.toHaveProperty("tokenHash");
     // participant.type 已移除:载荷不含 type。
@@ -227,9 +247,15 @@ describe("接入 Participant 页", () => {
       expect(screen.getByText("Extra Participant")).toBeInTheDocument();
     });
 
-    // 内置项没有删除按钮
+    // 内置项:编辑按钮禁用(提示内置不可编辑),没有删除按钮
     const builtinRow = screen.getByText("AtomCode 执行器").closest("li")!;
-    expect(within(builtinRow).queryByRole("button")).not.toBeInTheDocument();
+    const builtinEditBtn = within(builtinRow).getByRole("button", {
+      name: "编辑执行器",
+    });
+    expect(builtinEditBtn).toBeDisabled();
+    expect(
+      within(builtinRow).queryByRole("button", { name: "删除" }),
+    ).not.toBeInTheDocument();
 
     // 非内置项可删除
     const extraRow = screen.getByText("Extra Participant").closest("li")!;
@@ -242,6 +268,106 @@ describe("接入 Participant 页", () => {
       ([, init]) => init?.method === "DELETE",
     );
     expect(String(delCall![0])).toContain("/api/executors/extra-participant");
+  });
+
+  it("编辑执行器:弹窗打开预填,保存调 PATCH 并即时刷新", async () => {
+    const list = [
+      ...BUILTIN,
+      {
+        key: "edit-target",
+        agentName: "Edit Target",
+        type: "custom",
+        kind: "cli",
+        bin: "edit-bin",
+        url: null,
+        args: ["-y", "-p", "{ticket}"],
+        label: "edit-target",
+        model: "deepseek-v4-flash",
+        builtin: false,
+      },
+    ];
+    const fetchMock = createFetchMock([
+      {
+        match: (url, init) =>
+          init?.method === "PATCH" && String(url).includes("/api/executors/"),
+        respond: (url, init) => {
+          const key = String(url).split("/").at(-1);
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          const idx = list.findIndex((x) => x.key === key);
+          if (idx >= 0) list[idx] = { ...list[idx], ...body };
+          return jsonResponse({
+            ...(idx >= 0 ? list[idx] : {}),
+            ...body,
+            builtin: false,
+          });
+        },
+      },
+      {
+        match: () => true,
+        respond: () => jsonResponse(list),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await waitFor(() => {
+      expect(screen.getByText("Edit Target")).toBeInTheDocument();
+    });
+    const row = screen.getByText("Edit Target").closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: "编辑执行器" }));
+
+    // 弹窗预填现有配置(bin/args/model/device/agentName);查询限定在弹窗内
+    // (新增表单也有同名的 名字/命令/模型 等 label)。
+    const dialog = screen.getByRole("dialog");
+    const nameInput = within(dialog).getByLabelText("名字") as HTMLInputElement;
+    expect(nameInput.value).toBe("Edit Target");
+    expect(
+      (within(dialog).getByLabelText("命令") as HTMLInputElement).value,
+    ).toBe("edit-bin");
+    expect(
+      (within(dialog).getByLabelText("参数模板(可选)") as HTMLInputElement)
+        .value,
+    ).toBe("-y -p {ticket}");
+    expect(
+      (within(dialog).getByLabelText("模型(可选)") as HTMLInputElement).value,
+    ).toBe("deepseek-v4-flash");
+
+    // 改 bin/args/model 并保存
+    fireEvent.change(within(dialog).getByLabelText("命令"), {
+      target: { value: "new-bin" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("模型(可选)"), {
+      target: { value: "gpt-4o" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    // PATCH 调用 + 载荷正确
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find(
+        ([, init]) => init?.method === "PATCH",
+      );
+      expect(patchCall).toBeTruthy();
+    });
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH",
+    )!;
+    expect(String(patchCall[0])).toContain("/api/executors/edit-target");
+    const payload = JSON.parse(String(patchCall[1]?.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(payload.bin).toBe("new-bin");
+    expect(payload.model).toBe("gpt-4o");
+    expect(payload.agentName).toBe("Edit Target");
+    // 弹窗关闭,列表即时刷新出新值
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/gpt-4o/)).toBeInTheDocument();
   });
 
   // ── Participant 自管理(ticket: 补全 /participants 页)──────────────────────────────

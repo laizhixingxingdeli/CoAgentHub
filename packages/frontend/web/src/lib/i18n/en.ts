@@ -147,6 +147,9 @@ export const en: Record<DictKey, string> = {
   "participants.form.argsPlaceholder": "e.g. -y -p {ticket}",
   "participants.form.device": "Device (optional)",
   "participants.form.devicePlaceholder": "e.g. mac-mini",
+  "participants.form.model": "Model (optional)",
+  "participants.form.modelPlaceholder":
+    "e.g. deepseek-v4-flash (supports {model})",
   "participants.list.title": "Executors",
   "participants.list.empty": "No executors yet — add one above",
   "participants.list.count": "{count} total",
@@ -177,6 +180,13 @@ export const en: Record<DictKey, string> = {
   "participants.edit.capsPlaceholder": "e.g. text-generation, code-review",
   "participants.heartbeat": "Report online",
   "participants.reporting": "Reporting…",
+  "participants.editExecutor.action": "Edit executor",
+  "participants.editExecutor.builtinDisabled":
+    "Built-in executors cannot be edited",
+  "participants.editExecutor.title": "Edit executor",
+  "participants.editExecutor.desc":
+    "Update executor config: name / command / argument template / model / device. Renaming does NOT rename the Participant (recorded only).",
+  "participants.executorUpdated": "Updated executor “{name}”",
 
   // ── Files page ───────────────────────────────────────────────────────────
   "files.title": "File transfer",

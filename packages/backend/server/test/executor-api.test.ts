@@ -229,4 +229,118 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(diff!.hash).toBe("0123456789ab");
     expect(coordinatorId).toBeTruthy();
   });
+
+  // ── PATCH /api/executors/:key(编辑配置, 执行器管理增强)──────────────────
+  it("POST 携带 model 持久化,GET 返回 model", async () => {
+    const res = await createExecutor({
+      agentName: "Model Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["run", "-y", "--model", "{model}", "{ticket}"],
+      model: "deepseek-v4-flash",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.model).toBe("deepseek-v4-flash");
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "model-executor");
+    expect(item!.model).toBe("deepseek-v4-flash");
+  });
+
+  it("PATCH /api/executors/:key 部分更新 bin/args/model/device 生效(GET 验证)", async () => {
+    const created = await createExecutor({
+      agentName: "Patch Target",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["-y", "{ticket}"],
+      device: "mac-mini",
+    });
+    expect(created.status).toBe(200);
+
+    const patchRes = await app.request("/api/executors/patch-target", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bin: fakeBin,
+        args: ["run", "-y", "--model", "{model}", "{ticket}"],
+        model: "deepseek-v4-flash",
+        device: "mac-pro",
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const updated = (await patchRes.json()) as Record<string, unknown>;
+    expect(updated.key).toBe("patch-target"); // key 不变
+    expect(updated.model).toBe("deepseek-v4-flash");
+
+    // GET 验证改动已生效
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "patch-target");
+    expect(item!.bin).toBe(fakeBin);
+    expect(item!.args).toEqual(["run", "-y", "--model", "{model}", "{ticket}"]);
+    expect(item!.model).toBe("deepseek-v4-flash");
+
+    // device 变更同步到已注册 participant(按 agentName 匹配)
+    const participantsRes = await app.request("/api/participants");
+    const participants = (await participantsRes.json()) as Array<{
+      name: string;
+      device: string | null;
+    }>;
+    const participant = participants.find((p) => p.name === "Patch Target");
+    expect(participant!.device).toBe("mac-pro");
+  });
+
+  it("PATCH 内置执行器 → 403", async () => {
+    const res = await app.request("/api/executors/executor", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bin: "evil" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("PATCH 未知 key → 404", async () => {
+    const res = await app.request("/api/executors/no-such-executor", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bin: "x" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("PATCH 请求体带 key 字段 → 400(key 不可改)", async () => {
+    const res = await app.request("/api/executors/patch-target", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "other-key", bin: fakeBin }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH 部分更新:只改 model,bin/args 保持原值", async () => {
+    const res = await app.request("/api/executors/patch-target", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-4o" }),
+    });
+    expect(res.status).toBe(200);
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "patch-target");
+    expect(item!.model).toBe("gpt-4o");
+    expect(item!.bin).toBe(fakeBin);
+    expect(item!.args).toEqual(["run", "-y", "--model", "{model}", "{ticket}"]);
+  });
+
+  it("PATCH 改名为已存在名字 → 409", async () => {
+    const res = await app.request("/api/executors/patch-target", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentName: "Model Executor" }),
+    });
+    expect(res.status).toBe(409);
+  });
 });
