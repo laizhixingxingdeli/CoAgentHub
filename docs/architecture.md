@@ -162,6 +162,13 @@ CoAgentHub/
   - API 侧 `memory` 仅对 `kind=a2a` 生效(POST/PATCH 对 cli 拒绝);升级前已在 DB 注册
     的 a2a 执行器默认无记忆(行为变更:不再延续上下文),如需延续请显式 PATCH
     `memory="per-group"`。
+- **无进展提醒(stall alert)**:`stallAlertMinutes`(默认 15,`dispatch-policy.json`)内
+  无输出的 running 任务 → 发 ⚠️ 提醒消息给协调者 + 任务面板警示行(不失败);继续静默到
+  `stallTimeoutMinutes`(默认 30)才标 failed。
+- **弱验收钩子**:done 前校验工作树干净 + HEAD 有变化(仅本地 CLI);失败原因含「未提交」。
+- **human 全可见**:参与者 `type=human`(含 Local User)对任何群的消息无条件可见
+  (含定向消息,不要求群成员);audience 仍是 agent 间的路由机制。前端对定向消息显示
+  「📨 定向给 <执行器名>」标签。
 
 ## 10. 消息搜索与分组
 

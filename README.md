@@ -41,6 +41,8 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
   coordinator publishes the final version (→ executor), executor only sees
   the final.
 - **P2P file transfer** — `scripts/p2p-serve.mjs` serves one file over the LAN
+  (API-level feature; the web file page was removed — agents still exchange
+  files via the API, the UI is for humans only)
   and posts a `fileRef` (`name`, `size`, `sha256`, `fetchUrl`); the receiver
   downloads directly and verifies sha256. CoAgentHub never proxies the bytes.
 - **Project binding & two-tier memory** — a group can bind a project path
