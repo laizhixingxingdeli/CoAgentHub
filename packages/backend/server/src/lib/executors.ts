@@ -239,6 +239,44 @@ export async function findExecutorByKey(
   return all.find((ex) => ex.key === key);
 }
 
+/* ---------------- 调度并行策略(dispatch-policy.json) ---------------- */
+
+/** 调度并行策略:不同 project_path 的组可同时执行的上限。 */
+export interface DispatchPolicy {
+  /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
+  maxParallelGroups: number;
+}
+
+/** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
+const DEFAULT_MAX_PARALLEL_GROUPS = 2;
+
+/** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
+function resolveDispatchPolicyFile(): string {
+  return (
+    process.env.COAGENTHUB_DISPATCH_POLICY_FILE ??
+    resolve(process.cwd(), "scripts/dispatch-policy.json")
+  );
+}
+
+/**
+ * 读取调度并行策略(server 启动时调用):scripts/dispatch-policy.json 随代码
+ * 版本化,缺失/损坏/数值非法时回退默认值(不因配置问题阻塞启动)。
+ */
+export function readDispatchPolicy(): DispatchPolicy {
+  try {
+    const raw = JSON.parse(
+      readFileSync(resolveDispatchPolicyFile(), "utf8"),
+    ) as { maxParallelGroups?: unknown };
+    const n = Number(raw.maxParallelGroups);
+    if (Number.isInteger(n) && n >= 1) {
+      return { maxParallelGroups: n };
+    }
+  } catch {
+    // 文件缺失/不可读/非 JSON → 默认。
+  }
+  return { maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS };
+}
+
 /** 状态文件路径:env EXECUTOR_STATE_FILE 可覆盖(测试写临时目录,避免污染
  *  仓库内 scripts/.executor-agents.json)。 */
 function resolveStateFile(): string {

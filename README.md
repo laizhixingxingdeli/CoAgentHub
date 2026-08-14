@@ -29,8 +29,11 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
   cursor pagination (LIMIT 200).
 - **Executor tasks** — directing a message at an executor (audience=participant)
   creates a `task` and spawns the CLI (or calls the remote A2A gateway) through
-  a global serial queue; git checkpoints enable stop/rollback; status is posted
-  back as `task_status` messages. The web task panel offers stop/rollback.
+  a per-project queue: tasks of the same project path (`project_path`) run
+  serially, different projects run in parallel (up to `maxParallelGroups`,
+  configured in `scripts/dispatch-policy.json`, default 2); git checkpoints
+  enable stop/rollback; status is posted back as `task_status` messages. The
+  web task panel offers stop/rollback.
 - **Review workflow** — coordinator drafts (→ reviewer), reviewers comment,
   coordinator publishes the final version (→ executor), executor only sees
   the final.
@@ -69,7 +72,7 @@ Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes
 
 ```
 任务消息 → POST /messages(audience=participant, audienceRef=<执行器 participant id>)
-         → server 建 task + 串行队列 spawn CLI(或 A2A 调用)
+         → server 建 task + 按项目分组的并行队列 spawn CLI(或 A2A 调用)
          → git 快照/回滚兜底 → 完成后 ✅/❌ task_status 消息回传群里
 ```
 

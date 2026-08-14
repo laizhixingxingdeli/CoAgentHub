@@ -3,9 +3,12 @@
  * audience=participant 且 audienceRef 命中执行器配置(participant.name ===
  * agentName)时,server 直接建 task + spawn CLI 执行器,桥不再需要代为调度。
  *
- * 票2 全局串行队列:模块级 FIFO,同一时刻只允许一个执行器任务在跑,其余排队。
- * 触发链路:消息命中执行器 → 建 task(status=queued)→ 入队;worker 空闲时取
- * 队首 → PATCH task running → spawn → 完成 PATCH done/failed → 泵下一个。
+ * 调度并行化(票4):队列按 project_path 分组——同一 project_path 的任务组内
+ * 串行(一条组内队列),不同 project_path 的组并行执行,并行组数受
+ * maxParallelGroups(scripts/dispatch-policy.json,默认 2)限制;project_path
+ * 为空的群任务归入默认组(独立组,组内串行、可与有项目的组并行)。
+ * 触发链路:消息命中执行器 → 建 task(status=queued)→ 入该组的队;组槽位空闲
+ * 时取组内队首 → PATCH task running → spawn → 完成 PATCH done/failed → 泵下一个。
  *
  * 双跑期(桥保持现状并行运行)防重复:
  *  - 建 task 用 message_id 唯一约束幂等(与 POST /tasks 同一逻辑,ON CONFLICT
@@ -24,14 +27,8 @@
  * contentTypeFor 一致。
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import {
-  groupMember as groupMemberTable,
-  participant as participantTable,
-  TASK_STATUSES,
-  task as taskTable,
-} from "@laizhixingxingdeli/database/schema";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
 import type { DataBase } from "@server/lib/database";
 import {
@@ -44,6 +41,7 @@ import {
 import {
   type ExecutorConfig,
   findExecutorByParticipantName,
+  readDispatchPolicy,
 } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/group-message";
 import { wsHub } from "@server/lib/ws-hub";
@@ -85,35 +83,72 @@ interface QueuedRun {
   summary: string;
   /** 群内分工(角色解绑后);成员在本群无 prompt 时为 null,任务书不含该段。 */
   groupPrompt: GroupPromptInfo | null;
+  /** 组键:群 project_path(空 → DEFAULT_GROUP_KEY),分组串行/并行用。 */
+  groupKey: string;
+  /** 群绑定的项目路径(spawn cwd/快照仓库用);未绑定为 null。 */
+  projectPath: string | null;
   /** 运行中句柄的 kill(停止指令用);spawn 前为 null。 */
   kill: (() => void) | null;
   /** 停止指令已终止本任务(完成回调不再回传 ❌,改置 cancelled)。 */
   stopped: boolean;
 }
 
-/**
- * 全局串行队列(模块级,票2):同一时刻至多一个执行器任务在跑,其余 FIFO
- * 排队。runningRun 非空时 pumpQueue 直接返回,完成后泵下一个。
- */
-const runQueue: QueuedRun[] = [];
-let runningRun: QueuedRun | null = null;
+/** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
+const DEFAULT_GROUP_KEY = "__default__";
 
-/** 排队中(未开始)任务数;回滚指令前置校验用。 */
-export function queuedExecutorTaskCount(): number {
-  return runQueue.length;
+/** 单个 project_path 的组队列:组内串行 FIFO,不同组并行(受组槽位数限制)。 */
+interface GroupQueue {
+  key: string;
+  queue: QueuedRun[];
+  running: QueuedRun | null;
 }
 
 /**
- * 测试专用:终止运行中任务并清空队列(模块级状态跨测试文件/用例共享,
- * 避免前一个用例残留的 running/queued 影响后续断言)。仅测试调用。
+ * 按 project_path 分组的执行队列(模块级,票4):同一组键(project_path)的任务
+ * 组内串行;不同组并行执行,并行组数上限 maxParallelGroups(dispatch-policy.json,
+ * 默认 2;=1 时退化为全局串行)。组槽位空闲时 pumpQueue 取组内队首运行。
+ */
+const groupQueues = new Map<string, GroupQueue>();
+
+/** 最大并行组数:server 启动时从 scripts/dispatch-policy.json 读取。 */
+let maxParallelGroups = readDispatchPolicy().maxParallelGroups;
+
+/** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
+let pumping = false;
+
+/** 排队中(未开始)任务数;回滚指令前置校验用。 */
+export function queuedExecutorTaskCount(): number {
+  let n = 0;
+  for (const g of groupQueues.values()) n += g.queue.length;
+  return n;
+}
+
+/**
+ * 测试专用:终止全部运行中任务并清空所有组队列(模块级状态跨测试文件/用例
+ * 共享,避免前一个用例残留的 running/queued 影响后续断言)。仅测试调用。
  */
 export function __resetExecutorQueueForTests(): void {
-  if (runningRun) {
-    runningRun.stopped = true;
-    runningRun.kill?.();
+  for (const g of groupQueues.values()) {
+    if (g.running) {
+      g.running.stopped = true;
+      g.running.kill?.();
+    }
+    g.queue.length = 0;
   }
-  runningRun = null;
-  runQueue.length = 0;
+  groupQueues.clear();
+  maxParallelGroups = readDispatchPolicy().maxParallelGroups;
+}
+
+/** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
+export function __setMaxParallelGroupsForTests(n: number): void {
+  maxParallelGroups = Math.max(1, Math.floor(n));
+}
+
+/** 当前运行中的组数(组槽位占用数)。 */
+function runningGroupCount(): number {
+  let n = 0;
+  for (const g of groupQueues.values()) if (g.running) n += 1;
+  return n;
 }
 
 /**
@@ -144,27 +179,31 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
   return rows.length;
 }
 
-/** 当前运行中的任务(停止指令用);无则 null。 */
+/** 当前运行中的任务(停止指令用);并行时可能有多个,返回第一个;无则 null。 */
 export function currentRunningTask(): {
   taskId: string;
   participantId: string;
   ex: ExecutorConfig;
   kill: () => void;
 } | null {
-  return runningRun && runningRun.kill
-    ? {
-        taskId: runningRun.taskId,
-        participantId: runningRun.participantId,
-        ex: runningRun.ex,
-        kill: runningRun.kill,
-      }
-    : null;
+  for (const g of groupQueues.values()) {
+    const r = g.running;
+    if (r?.kill) {
+      return {
+        taskId: r.taskId,
+        participantId: r.participantId,
+        ex: r.ex,
+        kill: r.kill,
+      };
+    }
+  }
+  return null;
 }
 
 /**
- * 停止指定任务:taskId 缺省时取消全部排队 + 终止当前运行任务;携带 taskId
- * 时仅终止该任务(排队中则移出队列置 cancelled,运行中则 kill 进程组)。
- * 返回所有被停止的任务信息(未命中 → 空数组)。
+ * 停止指定任务:taskId 缺省时取消全部排队 + 终止全部运行中任务(跨所有组);
+ * 携带 taskId 时仅终止该任务(排队中则移出队列置 cancelled,运行中则 kill
+ * 进程组)。返回所有被停止的任务信息(未命中 → 空数组)。
  *
  * 运行中任务即使 kill 句柄尚未就绪(spawn 前窗口)也会标记 stopped,
  * pumpQueue 会在 spawn 前中止,不会出现「停止指令已执行但任务照跑」。
@@ -181,32 +220,37 @@ export function stopRunningTask(taskId?: string): Array<{
   }> = [];
 
   // 排队中的任务:taskId 缺省 → 全部取消(与桥 handleCancel 一致);指定 →
-  // 仅取消匹配项。排队任务未 spawn,直接移出队列 + 置 cancelled。
-  const remaining: QueuedRun[] = [];
-  for (const q of runQueue) {
-    if (taskId && q.taskId !== taskId) {
-      remaining.push(q);
-      continue;
+  // 仅取消匹配项(跨组查找)。排队任务未 spawn,直接移出队列 + 置 cancelled。
+  for (const g of groupQueues.values()) {
+    const remaining: QueuedRun[] = [];
+    for (const q of g.queue) {
+      if (taskId && q.taskId !== taskId) {
+        remaining.push(q);
+        continue;
+      }
+      stopped.push({
+        taskId: q.taskId,
+        participantId: q.participantId,
+        ex: q.ex,
+      });
+      void markTaskCancelled(q.db, q.taskId, q.groupId);
     }
-    stopped.push({
-      taskId: q.taskId,
-      participantId: q.participantId,
-      ex: q.ex,
-    });
-    void markTaskCancelled(q.db, q.taskId, q.groupId);
+    g.queue.length = 0;
+    g.queue.push(...remaining);
   }
-  runQueue.length = 0;
-  runQueue.push(...remaining);
 
-  // 运行中任务:taskId 缺省 → 当前运行;指定 → 仅当其 running 才终止。
-  if (runningRun && (!taskId || runningRun.taskId === taskId)) {
-    runningRun.stopped = true;
-    runningRun.kill?.();
-    stopped.push({
-      taskId: runningRun.taskId,
-      participantId: runningRun.participantId,
-      ex: runningRun.ex,
-    });
+  // 运行中任务:taskId 缺省 → 全部终止;指定 → 仅当其 running 才终止(跨组)。
+  for (const g of groupQueues.values()) {
+    const r = g.running;
+    if (r && (!taskId || r.taskId === taskId)) {
+      r.stopped = true;
+      r.kill?.();
+      stopped.push({
+        taskId: r.taskId,
+        participantId: r.participantId,
+        ex: r.ex,
+      });
+    }
   }
   return stopped;
 }
@@ -332,7 +376,24 @@ async function dispatchTask(
   }
 
   const summary = summaryOf(body);
-  const ahead = (runningRun ? 1 : 0) + runQueue.length;
+
+  // 任务 → 组:查群 project_path 作为组键;project_path 为空(null)的群任务归
+  // 默认组(独立组,组内串行、可与有项目的组并行)。
+  const groupRow = await db.query.groups.findFirst({
+    where: (t, { eq: eqFn }) => eqFn(t.id, groupId),
+  });
+  const projectPath = groupRow?.projectPath?.trim() || null;
+  const groupKey = projectPath ?? DEFAULT_GROUP_KEY;
+  const group = ensureGroupQueue(groupKey);
+
+  // 排队位置:同组 running(1)+ 同组排队数;组未运行但槽位已被其他组占满时,
+  // 还要等当前运行中的组先释放槽位。
+  const running = runningGroupCount();
+  const freeSlots = maxParallelGroups - running;
+  const ahead =
+    (group.running ? 1 : 0) +
+    group.queue.length +
+    (group.running || freeSlots > 0 ? 0 : running);
   if (ahead > 0) {
     // 只有真正排队才回传 📋(与桥一致)。
     await postStatus(
@@ -344,7 +405,7 @@ async function dispatchTask(
     );
   }
 
-  runQueue.push({
+  group.queue.push({
     db,
     groupId,
     messageId,
@@ -354,18 +415,52 @@ async function dispatchTask(
     body,
     summary,
     groupPrompt,
+    groupKey,
+    projectPath,
     kill: null,
     stopped: false,
   });
   void pumpQueue();
 }
 
-/** 取队首运行:queued → running → spawn → done/failed → 泵下一个。 */
+/** 取(或建)指定组键的组队列;组键插入顺序即组触达顺序(公平轮转)。 */
+function ensureGroupQueue(key: string): GroupQueue {
+  let g = groupQueues.get(key);
+  if (!g) {
+    g = { key, queue: [], running: null };
+    groupQueues.set(key, g);
+  }
+  return g;
+}
+
+/**
+ * 泵调度:组槽位有空闲时,按组触达顺序取「有排队且未运行」的组,运行其队首
+ * (组内串行:同组只有一条 running)。并行组数 ≤ maxParallelGroups,=1 时
+ * 退化为全局串行(原行为)。完成回调在 finally 里再泵,无需在此 await。
+ */
 async function pumpQueue(): Promise<void> {
-  if (runningRun) return;
-  const run = runQueue.shift();
-  if (!run) return;
-  runningRun = run;
+  if (pumping) return;
+  pumping = true;
+  try {
+    for (;;) {
+      if (runningGroupCount() >= maxParallelGroups) break;
+      const group = [...groupQueues.values()].find(
+        (g) => !g.running && g.queue.length > 0,
+      );
+      if (!group) break;
+      const run = group.queue.shift();
+      // find 谓词保证 queue 非空,此处不可能为 undefined(防御性判空)。
+      if (!run) break;
+      group.running = run;
+      void runOne(run, group);
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
+/** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
+async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
   const { db, groupId, taskId, participantId, ex, body, summary, groupPrompt } =
     run;
 
@@ -397,7 +492,12 @@ async function pumpQueue(): Promise<void> {
       `🚀 [${ex.label}] 开始执行:${summary}`,
     );
 
-    const repoRoot = findRepoRoot();
+    // spawn cwd = 群绑定的 project_path(并行时不同项目操作各自仓库,互不干扰);
+    // 未绑定则回退 findRepoRoot()(兼容既有测试/无项目群)。
+    const repoRoot =
+      run.projectPath && existsSync(run.projectPath)
+        ? run.projectPath
+        : findRepoRoot();
     // 按 kind 分流:cli 写 ticket + 打本地 git 快照后 spawn;a2a 不发 ticket、
     // 不打快照(远端设备执行,本地快照无意义),body 直接当 prompt 发 gateway。
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
@@ -406,7 +506,7 @@ async function pumpQueue(): Promise<void> {
     if (isA2a) {
       const a2aUrl = ex.a2a?.url ?? "";
       console.log(
-        `[executor] a2a 调用: ${a2aUrl} (participant=${ex.agentName}, task=${taskId})`,
+        `[executor] a2a 调用: ${a2aUrl} (participant=${ex.agentName}, group=${run.groupKey}, task=${taskId})`,
       );
       handle = {
         promise: runA2AExecutor({
@@ -419,7 +519,8 @@ async function pumpQueue(): Promise<void> {
         kill: () => {},
       };
     } else {
-      const ticketPath = `/tmp/coagenthub-ticket-${Date.now()}.md`;
+      // 并行任务可能同毫秒触发,ticket 路径用 taskId 保证唯一(避免互相覆盖)。
+      const ticketPath = `/tmp/coagenthub-ticket-${taskId}.md`;
       try {
         writeFileSync(
           ticketPath,
@@ -468,7 +569,7 @@ async function pumpQueue(): Promise<void> {
           .replaceAll("{ticketContent}", ticketContent),
       );
       console.log(
-        `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, task=${taskId})`,
+        `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, group=${run.groupKey}, task=${taskId})`,
       );
       handle = runExecutor({
         bin: ex.bin,
@@ -550,7 +651,7 @@ async function pumpQueue(): Promise<void> {
       );
     }
   } finally {
-    runningRun = null;
+    group.running = null;
     void pumpQueue();
   }
 }

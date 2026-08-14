@@ -11,15 +11,19 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 /**
- * 阶段2-票2:server 全局串行队列 + 停止/回滚控制指令 + 重启兜底。
+ * 阶段2-票2 + 调度并行化(票4):server 按 project_path 分组的执行队列(同组
+ * 串行、跨组并行,并行组数 ≤ maxParallelGroups)+ 停止/回滚控制指令 + 重启兜底。
  *
  * 用 fake bin 做集成测试(票面允许):把 EXECUTOR_BIN_CODEBUDDY 指到一个
  * 可配置的临时 shell 脚本(FAKE_SLEEP_SECS 控制时长、FAKE_APPEND 控制是否
  * 修改工作区文件),COAGENTHUB_REPO_ROOT 指到临时 git 仓库(执行前快照/回滚需要)。
  *
- * 覆盖:并发两条定向消息只有一条 running、另一条 queued 且完成后才轮到;
- * 「停止」kill 进程组(task → cancelled + 🛑 回传);「回滚 <taskId>」恢复
- * 工作区(task → failed + ✅ 回传);重启兜底 queued/running → failed。
+ * 覆盖:同组(默认组)两条定向消息只有一条 running、另一条 queued 且完成后
+ * 才轮到;不同 project_path 的两个任务可同时 running;同一 project_path 的
+ * 两个群任务严格串行;maxParallelGroups=1 时退化为全局串行;默认组(无
+ * project_path)任务可与项目组并行;「停止」kill 进程组(task → cancelled +
+ * 🛑 回传);「回滚 <taskId>」恢复工作区(task → failed + ✅ 回传);重启兜底
+ * queued/running → failed。
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queue-bin-"));
@@ -55,7 +59,7 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
 
-describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
+describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
 
   async function registerParticipant(body: Record<string, unknown>) {
@@ -203,12 +207,41 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
     return { coordinator, codebuddy, group };
   }
 
+  /** 建临时 git 仓库(project_path 绑定用;快照/回滚需要真实仓库)。 */
+  function makeGitRepo(prefix: string): string {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@coagenthub.local"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "coagenthub-test"], {
+      cwd: dir,
+    });
+    writeFileSync(path.join(dir, "hello.txt"), "original\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "seed"], { cwd: dir });
+    return dir;
+  }
+
+  /** PATCH /groups/:id 绑定 project_path(必须是存在的绝对目录)。 */
+  async function bindProject(token: string, groupId: string, dir: string) {
+    const res = await app.request(`/api/groups/${groupId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ projectPath: dir }),
+    });
+    expect(res.status).toBe(200);
+  }
+
   afterAll(() => {
     rmSync(fakeDir, { recursive: true, force: true });
     rmSync(repoDir, { recursive: true, force: true });
   });
 
-  it("队列串行性:两条定向消息只有一条 running,另一条 queued,完成后才轮到", async () => {
+  it("组内串行(默认组):同群两条任务只有一条 running,另一条 queued,完成后才轮到", async () => {
     // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
     // 长 sleep 给并行负载留足余量,避免轮询滞后导致断言误判。
     process.env.FAKE_SLEEP_SECS = "5";
@@ -259,6 +292,211 @@ describe("票2 串行队列 + 停止/回滚控制指令 + 重启兜底", () => {
     const taskStatus = messages.filter((m) => m.contentType === "task_status");
     expect(taskStatus.some((m) => m.body.startsWith("🚀"))).toBe(true);
     expect(taskStatus.some((m) => m.body.startsWith("📋"))).toBe(true);
+  }, 30_000);
+
+  it("并行:两个不同 project_path 的任务可同时 running", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { coordinator, codebuddy } = await setupGroup();
+    // 两个不同项目的群,分别绑定各自的临时 git 仓库。
+    const projA = makeGitRepo("coagenthub-par-a-");
+    const projB = makeGitRepo("coagenthub-par-b-");
+    const groupA = await createGroup(coordinator.token, "并行群 A");
+    await addMember(coordinator.token, groupA.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.token, groupA.id, projA);
+    const groupB = await createGroup(coordinator.token, "并行群 B");
+    await addMember(coordinator.token, groupB.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.token, groupB.id, projB);
+
+    const m1 = await postMessage(coordinator.token, groupA.id, {
+      body: "任务一(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t1 = await waitForTaskStatus(
+      coordinator.token,
+      groupA.id,
+      m1.id,
+      "running",
+    );
+    expect(t1.status).toBe("running");
+
+    const m2 = await postMessage(coordinator.token, groupB.id, {
+      body: "任务二(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    // 不同 project_path → 不同组 → 不排队,直接 running(与第一条并行)。
+    const t2 = await waitForTaskStatus(
+      coordinator.token,
+      groupB.id,
+      m2.id,
+      "running",
+    );
+    expect(t2.status).toBe("running");
+
+    // 核心不变量:两条任务同时 running(轮询间隙第一条未结束)。
+    const againA = await listTasks(coordinator.token, groupA.id);
+    const againB = await listTasks(coordinator.token, groupB.id);
+    expect(againA.find((x) => x.id === t1.id)?.status).toBe("running");
+    expect(againB.find((x) => x.id === t2.id)?.status).toBe("running");
+
+    await waitForTaskStatus(coordinator.token, groupA.id, m1.id, "done");
+    await waitForTaskStatus(coordinator.token, groupB.id, m2.id, "done");
+  }, 30_000);
+
+  it("串行:同一 project_path 的两个群任务只有一条 running", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { coordinator, codebuddy } = await setupGroup();
+    // 两个群绑定同一个 project_path → 归入同一组,组内串行。
+    const proj = makeGitRepo("coagenthub-sameproj-");
+    const groupA = await createGroup(coordinator.token, "同项目群 A");
+    await addMember(coordinator.token, groupA.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.token, groupA.id, proj);
+    const groupB = await createGroup(coordinator.token, "同项目群 B");
+    await addMember(coordinator.token, groupB.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.token, groupB.id, proj);
+
+    const m1 = await postMessage(coordinator.token, groupA.id, {
+      body: "任务一(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t1 = await waitForTaskStatus(
+      coordinator.token,
+      groupA.id,
+      m1.id,
+      "running",
+    );
+    expect(t1.status).toBe("running");
+
+    // 同一 project_path → 同组,第二条必须排队,不能并行。
+    const m2 = await postMessage(coordinator.token, groupB.id, {
+      body: "任务二",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t2 = await waitForTaskStatus(
+      coordinator.token,
+      groupB.id,
+      m2.id,
+      "queued",
+    );
+    expect(t2.status).toBe("queued");
+    const againB = await listTasks(coordinator.token, groupB.id);
+    expect(
+      againB
+        .filter((x) => x.status === "running")
+        .some((x) => x.messageId === m2.id),
+    ).toBe(false);
+
+    await waitForTaskStatus(coordinator.token, groupA.id, m1.id, "done");
+    await waitForTaskStatus(coordinator.token, groupB.id, m2.id, "done");
+  }, 30_000);
+
+  it("退化:maxParallelGroups=1 时不同 project_path 也严格串行(全局串行)", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { __setMaxParallelGroupsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxParallelGroupsForTests(1);
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const projA = makeGitRepo("coagenthub-deg-a-");
+      const projB = makeGitRepo("coagenthub-deg-b-");
+      const groupA = await createGroup(coordinator.token, "退化群 A");
+      await addMember(coordinator.token, groupA.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, groupA.id, projA);
+      const groupB = await createGroup(coordinator.token, "退化群 B");
+      await addMember(coordinator.token, groupB.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, groupB.id, projB);
+
+      const m1 = await postMessage(coordinator.token, groupA.id, {
+        body: "任务一(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.token,
+        groupA.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      // 组槽位只剩 0:不同项目也必须排队,退化为全局串行。
+      const m2 = await postMessage(coordinator.token, groupB.id, {
+        body: "任务二",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.token,
+        groupB.id,
+        m2.id,
+        "queued",
+      );
+      expect(t2.status).toBe("queued");
+
+      await waitForTaskStatus(coordinator.token, groupA.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.token, groupB.id, m2.id, "done");
+    } finally {
+      // 恢复默认并行组数,避免影响后续用例。
+      const { __setMaxParallelGroupsForTests: restore } = await import(
+        "@server/lib/executor-task"
+      );
+      restore(2);
+    }
+  }, 30_000);
+
+  it("默认组:无 project_path 的群任务与项目组任务可并行执行", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { coordinator, codebuddy } = await setupGroup();
+    // 群 A 不绑项目(默认组),群 B 绑定项目。
+    const groupDefault = await createGroup(coordinator.token, "默认组群");
+    await addMember(coordinator.token, groupDefault.id, codebuddy.id, [
+      "executor",
+    ]);
+    const proj = makeGitRepo("coagenthub-default-par-");
+    const groupProj = await createGroup(coordinator.token, "项目组群");
+    await addMember(coordinator.token, groupProj.id, codebuddy.id, [
+      "executor",
+    ]);
+    await bindProject(coordinator.token, groupProj.id, proj);
+
+    const m1 = await postMessage(coordinator.token, groupDefault.id, {
+      body: "默认组任务(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t1 = await waitForTaskStatus(
+      coordinator.token,
+      groupDefault.id,
+      m1.id,
+      "running",
+    );
+    expect(t1.status).toBe("running");
+
+    // 默认组是独立组:项目组任务不受默认组阻塞,直接 running。
+    const m2 = await postMessage(coordinator.token, groupProj.id, {
+      body: "项目组任务(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t2 = await waitForTaskStatus(
+      coordinator.token,
+      groupProj.id,
+      m2.id,
+      "running",
+    );
+    expect(t2.status).toBe("running");
+
+    const again = await listTasks(coordinator.token, groupDefault.id);
+    const againProj = await listTasks(coordinator.token, groupProj.id);
+    expect(again.find((x) => x.id === t1.id)?.status).toBe("running");
+    expect(againProj.find((x) => x.id === t2.id)?.status).toBe("running");
+
+    await waitForTaskStatus(coordinator.token, groupDefault.id, m1.id, "done");
+    await waitForTaskStatus(coordinator.token, groupProj.id, m2.id, "done");
   }, 30_000);
 
   it("「停止」kill 运行中任务的进程组:task → cancelled + 🛑 回传", async () => {
