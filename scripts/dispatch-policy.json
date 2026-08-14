@@ -6,5 +6,10 @@
     "maxRetries": 1,
     "resetWorkspace": true,
     "switchExecutor": false
+  },
+  "rateLimit": {
+    "detectPatterns": ["rate limit", "quota", "429", "额度", "次数限制"],
+    "cooldownMinutes": 300,
+    "fallbackExecutor": null
   }
 }

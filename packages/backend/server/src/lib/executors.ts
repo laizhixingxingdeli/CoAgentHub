@@ -251,7 +251,17 @@ export interface RetryPolicy {
   switchExecutor: boolean;
 }
 
-/** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)+ 失败重试。 */
+/** 额度/速率限制策略(票7):失败关键词命中 → 执行器进入冷却,冷却期不派任务。 */
+export interface RateLimitPolicy {
+  /** 失败原因文本命中任一关键词即归类「额度失败」(大小写不敏感)。 */
+  detectPatterns: string[];
+  /** 额度失败后执行器冷却时长(分钟);冷却期内不向该执行器派发新任务。 */
+  cooldownMinutes: number;
+  /** 冷却期备用执行器 key;当前只读配置,不实现换执行器(留接口,后续可做)。 */
+  fallbackExecutor: string | null;
+}
+
+/** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)+ 失败重试 + 额度冷却。 */
 export interface DispatchPolicy {
   /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
   maxParallelGroups: number;
@@ -261,6 +271,8 @@ export interface DispatchPolicy {
   claimTimeoutMinutes: number;
   /** 失败自动重试策略。 */
   retry: RetryPolicy;
+  /** 额度/速率限制失败后的冷却调度策略。 */
+  rateLimit: RateLimitPolicy;
 }
 
 /** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
@@ -277,6 +289,21 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxRetries: 1,
   resetWorkspace: true,
   switchExecutor: false,
+};
+
+/** 默认额度策略:关键词覆盖中英文常见额度/限流文案,冷却 5 小时。 */
+export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
+  detectPatterns: [
+    "rate limit",
+    "quota",
+    "429",
+    "额度",
+    "次数限制",
+    "limit reached",
+    "too many requests",
+  ],
+  cooldownMinutes: 300,
+  fallbackExecutor: null,
 };
 
 /** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
@@ -316,7 +343,19 @@ export function readDispatchPolicy(): DispatchPolicy {
         resetWorkspace?: unknown;
         switchExecutor?: unknown;
       };
+      rateLimit?: {
+        detectPatterns?: unknown;
+        cooldownMinutes?: unknown;
+        fallbackExecutor?: unknown;
+      };
     };
+    // 额度关键词:只取非空字符串;显式空数组 = 关闭额度检测(不兜底默认值)。
+    const rawPatterns = Array.isArray(raw.rateLimit?.detectPatterns)
+      ? raw.rateLimit.detectPatterns.filter(
+          (p): p is string => typeof p === "string" && p.trim().length > 0,
+        )
+      : DEFAULT_RATE_LIMIT_POLICY.detectPatterns;
+    const rawFallback = raw.rateLimit?.fallbackExecutor;
     return {
       maxParallelGroups: positiveInt(
         raw.maxParallelGroups,
@@ -344,6 +383,17 @@ export function readDispatchPolicy(): DispatchPolicy {
             ? raw.retry.switchExecutor
             : DEFAULT_RETRY_POLICY.switchExecutor,
       },
+      rateLimit: {
+        detectPatterns: rawPatterns,
+        cooldownMinutes: positiveInt(
+          raw.rateLimit?.cooldownMinutes,
+          DEFAULT_RATE_LIMIT_POLICY.cooldownMinutes,
+        ),
+        fallbackExecutor:
+          typeof rawFallback === "string" && rawFallback.trim().length > 0
+            ? rawFallback
+            : null,
+      },
     };
   } catch {
     // 文件缺失/不可读/非 JSON → 默认。
@@ -353,6 +403,7 @@ export function readDispatchPolicy(): DispatchPolicy {
     stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
     retry: DEFAULT_RETRY_POLICY,
+    rateLimit: DEFAULT_RATE_LIMIT_POLICY,
   };
 }
 

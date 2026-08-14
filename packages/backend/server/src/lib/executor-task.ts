@@ -167,6 +167,20 @@ let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
 /** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
 let retryPolicy = readDispatchPolicy().retry;
 
+/** 额度/速率限制配置(票7):失败关键词 + 冷却时长;启动时读配置。 */
+let rateLimitPatterns = readDispatchPolicy().rateLimit.detectPatterns;
+let rateLimitCooldownMs =
+  readDispatchPolicy().rateLimit.cooldownMinutes * 60_000;
+
+/**
+ * 执行器额度冷却(票7,内存态):executorKey → 冷却结束时间(epoch ms)。重启
+ * 丢失可接受(重启后冷却失效,任务按普通状态恢复)。
+ */
+const executorCooldowns = new Map<string, number>();
+
+/** 冷却结束定时器(executorKey → timer):到期清冷却并泵一次,让排队任务自动派发。 */
+const cooldownTimers = new Map<string, NodeJS.Timeout>();
+
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 let pumping = false;
 
@@ -189,6 +203,58 @@ function clearRunTimers(run: QueuedRun): void {
   }
 }
 
+/* ---------------- 额度感知调度(票7) ---------------- */
+
+/** 冷却结束时间(epoch ms);无冷却记录返回 0。 */
+function cooldownEndMs(ex: ExecutorConfig): number {
+  return executorCooldowns.get(ex.key) ?? 0;
+}
+
+/** 执行器是否处于额度冷却期。 */
+function isInCooldown(ex: ExecutorConfig): boolean {
+  return cooldownEndMs(ex) > Date.now();
+}
+
+/** 失败文本是否命中额度关键词(rate limit/quota/429/额度 等,大小写不敏感)。 */
+function isQuotaFailure(texts: string[]): boolean {
+  const haystack = texts.join("\n").toLowerCase();
+  return rateLimitPatterns.some((p) => haystack.includes(p.toLowerCase()));
+}
+
+/** 格式化冷却结束时间(zh-CN 本地时间,与认领超时回传一致)。 */
+function formatEta(endMs: number): string {
+  return new Date(endMs).toLocaleString("zh-CN");
+}
+
+/**
+ * 执行器进入额度冷却:记录冷却结束时间并调度到期泵送(冷却结束后 pumpQueue
+ * 自动把等待中的任务派发出去,无需人工干预)。重复进入只重置结束时间与定时器
+ * (定时器防堆积)。返回冷却结束时间(epoch ms)。
+ */
+function enterCooldown(ex: ExecutorConfig, durationMs: number): number {
+  const end = Date.now() + Math.max(1, durationMs);
+  executorCooldowns.set(ex.key, end);
+  const prev = cooldownTimers.get(ex.key);
+  if (prev) clearTimeout(prev);
+  const timer = setTimeout(
+    () => {
+      // 竞态保护:冷却可能已被更新的 enterCooldown 重置/延长;只有本定时器仍是
+      // 当前登记项时才清理,避免陈旧回调误删新冷却条目(提前解除冷却)。
+      if (cooldownTimers.get(ex.key) !== timer) return;
+      cooldownTimers.delete(ex.key);
+      executorCooldowns.delete(ex.key);
+      console.log(`[executor] 执行器 ${ex.key} 额度冷却结束,恢复派发`);
+      void pumpQueue();
+    },
+    Math.max(1, end - Date.now()),
+  );
+  cooldownTimers.set(ex.key, timer);
+  console.log(
+    `[executor] 执行器 ${ex.key} 触发额度冷却,预计 ${formatEta(end)} 恢复`,
+  );
+  return end;
+}
+
 /**
  * 测试专用:终止全部运行中任务并清空所有组队列(模块级状态跨测试文件/用例
  * 共享,避免前一个用例残留的 running/queued 影响后续断言)。仅测试调用。
@@ -204,11 +270,16 @@ export function __resetExecutorQueueForTests(): void {
     g.queue.length = 0;
   }
   groupQueues.clear();
+  for (const t of cooldownTimers.values()) clearTimeout(t);
+  cooldownTimers.clear();
+  executorCooldowns.clear();
   const policy = readDispatchPolicy();
   maxParallelGroups = policy.maxParallelGroups;
   stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
   retryPolicy = policy.retry;
+  rateLimitPatterns = policy.rateLimit.detectPatterns;
+  rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
 }
 
 /** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
@@ -226,6 +297,18 @@ export function __setReliabilityTimeoutsForTests(
 ): void {
   stallTimeoutMs = Math.max(1, Math.floor(stallMs));
   claimTimeoutMs = Math.max(1, Math.floor(claimMs));
+}
+
+/**
+ * 测试专用:覆盖额度配置(关键词 + 冷却时长,单位 ms——与配置的分钟单位解耦,
+ * 测试用 100ms~1s 级小阈值验证冷却拦截与自动恢复,避免拖慢测试)。
+ */
+export function __setRateLimitForTests(
+  cooldownMs: number,
+  patterns: string[],
+): void {
+  rateLimitCooldownMs = Math.max(1, Math.floor(cooldownMs));
+  rateLimitPatterns = [...patterns];
 }
 
 /** 当前运行中的组数(组槽位占用数)。 */
@@ -519,6 +602,27 @@ async function dispatchTask(
   };
   group.queue.push(run);
 
+  // 额度冷却中入队的任务(票7):标记「等待执行器额度恢复」+ ⏳ 回传,不 spawn
+  // (泵送跳过冷却执行器,冷却结束定时器会自动派发,任务保持 queued 等待)。
+  if (isInCooldown(ex)) {
+    const eta = formatEta(cooldownEndMs(ex));
+    try {
+      await db
+        .update(taskTable)
+        .set({ diffSummary: { waiting: `等待执行器额度恢复(预计 ${eta})` } })
+        .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)));
+    } catch (e) {
+      console.warn(`[executor] 写等待恢复标记失败(${task.id}): ${e}`);
+    }
+    await postStatus(
+      db,
+      groupId,
+      participantId,
+      ex,
+      `⏳ [${ex.label}] 任务等待执行器额度恢复(预计 ${eta}): ${summary}`,
+    );
+  }
+
   // 认领超时定时器:超过 claimTimeoutMs 仍未进入 running → 标 failed。
   // 进入 running 时(runOne)取消;任务出队/停止时同步清理。
   run.claimTimer = setTimeout(() => handleClaimTimeout(run), claimTimeoutMs);
@@ -546,8 +650,10 @@ async function pumpQueue(): Promise<void> {
   try {
     for (;;) {
       if (runningGroupCount() >= maxParallelGroups) break;
+      // 额度冷却中的执行器不派发:组队首任务的执行器在冷却 → 跳过该组(任务
+      // 保持 queued,冷却结束后 enterCooldown 的定时器会再次泵送自动派发)。
       const group = [...groupQueues.values()].find(
-        (g) => !g.running && g.queue.length > 0,
+        (g) => !g.running && g.queue.length > 0 && !isInCooldown(g.queue[0].ex),
       );
       if (!group) break;
       const run = group.queue.shift();
@@ -728,10 +834,24 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       }
       if (result.timedOut) {
         console.error(`[executor] 任务超时: ${taskId}`);
-        await handleFailure(run, "执行超时", {
-          retryable: true,
-          message: `❌ [${ex.label}] 任务失败 (超时)`,
-        });
+        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词 → 额度失败。
+        const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+        if (isQuotaFailure(["执行超时", lastLinesOf(out, 20)])) {
+          const eta = formatEta(enterCooldown(ex, rateLimitCooldownMs));
+          await handleFailure(
+            run,
+            `执行超时(执行器额度限制,预计 ${eta} 恢复)`,
+            {
+              retryable: false,
+              message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
+            },
+          );
+        } else {
+          await handleFailure(run, "执行超时", {
+            retryable: true,
+            message: `❌ [${ex.label}] 任务失败 (超时)`,
+          });
+        }
         return;
       }
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
@@ -751,33 +871,56 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             return;
           }
         }
-        const hash = findCommitHash(output);
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
-        // 不过 extractSummary 的关键词截取(汇报/做了什么/commit 段)。
-        const summaryText = isA2a
-          ? (result.stdout ?? "").trim()
-          : extractSummary(output);
-        const diffSummary: Record<string, unknown> = { summary: summaryText };
-        if (hash) diffSummary.hash = hash;
+        // 不做段落解析;hash 仍从输出提取。CLI 路径走结构化段落解析(票7)。
+        const a2aHash = findCommitHash(output);
+        const report: TaskReport = isA2a
+          ? {
+              summary: (result.stdout ?? "").trim(),
+              ...(a2aHash ? { hash: a2aHash } : {}),
+            }
+          : parseTaskReport(output);
+        const diffSummary: Record<string, unknown> = { ...report };
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
         await db
           .update(taskTable)
           .set({ status: "done", diffSummary })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
         console.log(
-          `[executor] 任务完成: ${taskId}${hash ? ` hash=${hash}` : ""}${
-            run.retryCount > 0 ? `(重试 ${run.retryCount} 次)` : ""
-          }`,
+          `[executor] 任务完成: ${taskId}${
+            report.hash ? ` hash=${report.hash}` : ""
+          }${run.retryCount > 0 ? `(重试 ${run.retryCount} 次)` : ""}`,
         );
-        const body = `✅ [${ex.label}] 任务完成${hash ? ` (commit ${hash})` : ""}\n${summaryText}`;
-        await postStatus(db, groupId, participantId, ex, body.slice(0, 2000));
+        await postStatus(
+          db,
+          groupId,
+          participantId,
+          ex,
+          renderTaskCard(ex.label, report),
+        );
       } else {
         const tail = lastLinesOf(output, 20).slice(0, 1500);
         console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
-        await handleFailure(run, `exit ${result.code}`, {
-          retryable: true,
-          message: `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
-        });
+        // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
+        // → 归类「额度失败」,冷却该执行器、不自动重试、❌ 注明预计恢复时间;
+        // 其余失败保持原重试行为。限定尾部避免全量输出里的无关 "429/quota"
+        // 字样造成误判(误判会停派该执行器整段冷却期)。
+        if (isQuotaFailure([`exit ${result.code}`, tail])) {
+          const eta = formatEta(enterCooldown(ex, rateLimitCooldownMs));
+          await handleFailure(
+            run,
+            `exit ${result.code}(执行器额度限制,预计 ${eta} 恢复)`,
+            {
+              retryable: false,
+              message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
+            },
+          );
+        } else {
+          await handleFailure(run, `exit ${result.code}`, {
+            retryable: true,
+            message: `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
+          });
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -829,6 +972,9 @@ function handleStall(run: QueuedRun): void {
  */
 function handleClaimTimeout(run: QueuedRun): void {
   if (run.stopped) return;
+  // 执行器额度冷却中:不按认领超时处理(任务应保持 queued,等冷却结束由
+  // enterCooldown 的定时器泵送自动派发,而非被误标「未认领」)。
+  if (isInCooldown(run.ex)) return;
   const g = groupQueues.get(run.groupKey);
   if (g) {
     const idx = g.queue.indexOf(run);
@@ -1021,7 +1167,13 @@ export async function postStatus(
   }
 }
 
-/** 与桥 buildTicket 一致的执行器任务书格式。 */
+/**
+ * 执行器任务书固定模板(票7):标题 + 执行器/项目/发布时间 + 任务内容 + 汇报
+ * 格式要求(执行器 stdout 按「提交/测试/汇报/遗留」四段输出,server 按段落
+ * 解析成结构化 diffSummary)。模板只影响任务书文本,不改任务触发逻辑。
+ * 角色解绑后的「本群分工」段与「默认约束」作为尾部附加说明保留(前序票的
+ * 既有行为,删除会回归)。
+ */
 function buildTicket(
   body: string,
   label: string,
@@ -1029,9 +1181,17 @@ function buildTicket(
   groupPrompt: GroupPromptInfo | null = null,
 ): string {
   const lines = [
-    `# CoAgentHub 任务(网页 @executor 发布)`,
-    ``,
-    `你是 ${label}。任务:${body}`,
+    `# CoAgentHub 任务`,
+    `执行器: ${label}`,
+    `项目: ${repoRoot}`,
+    `发布时间: ${new Date().toISOString()}`,
+    `## 任务内容`,
+    body,
+    `## 汇报格式要求(stdout 请按此输出)`,
+    `提交: <commit hash>`,
+    `测试: <测试结果摘要>`,
+    `汇报: <做了什么,3-5 句>`,
+    `遗留: <未完成事项,无则写"无">`,
   ];
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
   // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
@@ -1041,9 +1201,7 @@ function buildTicket(
     );
   }
   lines.push(
-    `仓库:${repoRoot}(分支 main)`,
     `默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。`,
-    `汇报:中文,做了什么/测试结果/commit hash。`,
   );
   return lines.join("\n");
 }
@@ -1067,9 +1225,104 @@ function findCommitHash(text: string): string | null {
   return short ? short[1] : null;
 }
 
-/** 与桥 extractSummary 一致:取「汇报/做了什么/测试结果/commit」段或末尾 15 行。 */
-function extractSummary(text: string): string {
+/** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
+export interface TaskReport {
+  /** 做了什么(汇报段);老格式自由文本时为旧关键词摘要。 */
+  summary?: string;
+  /** commit hash(提交段);缺段时省略(不误报"无提交")。 */
+  hash?: string;
+  /** 测试结果摘要(测试段)。 */
+  tests?: string;
+  /** 遗留事项(遗留段)。 */
+  todo?: string;
+}
+
+/** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。 */
+const REPORT_SECTION_RE: ReadonlyArray<{
+  key: keyof TaskReport;
+  re: RegExp;
+}> = [
+  { key: "hash", re: /^\s*(?:提交|commit|hash)\s*[:：]/i },
+  { key: "tests", re: /^\s*(?:测试|test|tests)\s*[:：]/i },
+  { key: "summary", re: /^\s*(?:汇报|report|summary)\s*[:：]/i },
+  { key: "todo", re: /^\s*(?:遗留|todo|remaining)\s*[:：]/i },
+];
+
+/**
+ * 汇报段落解析(票7):从 stdout 提取「提交:」「测试:」「汇报:」「遗留:」四段
+ * (支持大小写变体),返回结构化字段;缺段时对应字段省略。stdout 不含任何段落
+ * (老格式自由文本)→ 保持旧行为:摘要取「汇报/做了什么/测试结果/commit」关键词
+ * 段或末尾 15 行,hash 用 findCommitHash。
+ */
+export function parseTaskReport(text: string): TaskReport {
   const clean = (text ?? "").replace(ANSI_RE, "");
+  const lines = clean.split("\n");
+
+  // 段落头定位:每段从段头行取内容,直到下一个段头(或输出末尾)。
+  const found: Array<{ key: keyof TaskReport; start: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    for (const { key, re } of REPORT_SECTION_RE) {
+      if (re.test(lines[i])) {
+        found.push({ key, start: i });
+        break;
+      }
+    }
+  }
+  if (found.length > 0) {
+    const report: TaskReport = {};
+    for (let f = 0; f < found.length; f++) {
+      const { key, start } = found[f];
+      const end = f + 1 < found.length ? found[f + 1].start : lines.length;
+      const value = lines
+        .slice(start, end)
+        .join("\n")
+        .replace(/^[^:：]*[:：]\s*/, "")
+        .trim();
+      if (value.length === 0) continue;
+      if (key === "hash") {
+        // 提交段只取首个 token:形如 7~40 位 hex 才算 hash,否则省略(避免把
+        // 描述性文字当 hash 落库)。
+        const token = value.split("\n")[0].trim().split(/\s+/)[0];
+        if (/^[0-9a-f]{7,40}$/i.test(token)) {
+          report.hash = token.length === 40 ? token.slice(0, 12) : token;
+        }
+      } else {
+        report[key] = value;
+      }
+    }
+    // 提交段缺失/无 hex 时回退全量输出提取(兼容「commit <hex>」裸行 + 段落
+    // 混排的旧输出,hash 不因缺段丢失)。
+    if (!report.hash) {
+      const h = findCommitHash(clean);
+      if (h) report.hash = h;
+    }
+    return report;
+  }
+
+  // 老格式自由文本:保持旧行为(关键词段或末尾 15 行 + findCommitHash)。
+  const summary = legacyExtractSummary(clean);
+  const hash = findCommitHash(clean);
+  return hash ? { summary, hash } : { summary };
+}
+
+/** 群消息成功卡片(票7):固定四行渲染,独立可测;超过 8000 截断。 */
+const TASK_CARD_MAX_LENGTH = 8000;
+export function renderTaskCard(label: string, report: TaskReport): string {
+  const card = [
+    `✅ 任务完成 ${label}`,
+    `────────────────`,
+    `提交  ${report.hash ?? "无"}`,
+    `测试  ${report.tests ?? "-"}`,
+    `汇报  ${report.summary ?? "-"}`,
+    `遗留  ${report.todo ?? "-"}`,
+  ].join("\n");
+  return card.length > TASK_CARD_MAX_LENGTH
+    ? card.slice(0, TASK_CARD_MAX_LENGTH)
+    : card;
+}
+
+/** 与桥 extractSummary 一致:取「汇报/做了什么/测试结果/commit」段或末尾 15 行。 */
+function legacyExtractSummary(clean: string): string {
   const lines = clean.split("\n");
   let start = -1;
   for (let i = lines.length - 1; i >= 0; i--) {

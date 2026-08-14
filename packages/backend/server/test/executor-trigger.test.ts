@@ -218,7 +218,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const diff = task.diffSummary as Record<string, unknown> | null;
     expect(diff).not.toBeNull();
     expect(diff!.hash).toBe("0123456789ab"); // fake bin 打印的 commit hash
-    expect(String(diff!.summary)).toContain("汇报");
+    // 结构化段落解析(票7):「汇报:」段只取段值,不再带关键词前缀。
+    expect(String(diff!.summary)).toContain("建文件完成");
 
     // 状态回传:🚀 开始执行 + ✅ 完成,以执行器身份、contentType=task_status。
     const messages = await listMessages(coordinator.token, group.id);
@@ -319,7 +320,10 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain(
         "本群分工:角色=[executor];提示词=负责代码执行与测试跑通",
       );
-      expect(ticket).toContain("你是 codebuddy。任务:建一个文件 hello.txt");
+      // 固定模板(票7):执行器/任务内容段携带标签与 body 原文。
+      expect(ticket).toContain("执行器: codebuddy");
+      expect(ticket).toContain("## 任务内容");
+      expect(ticket).toContain("建一个文件 hello.txt");
     } finally {
       delete process.env.TICKET_CAPTURE;
     }
@@ -339,17 +343,22 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       const task = await waitForTask(coordinator.token, group.id, msg.id);
       expect(task.status).toBe("done");
       const ticket = readFileSync(capture, "utf8");
-      // 无「本群分工」段,且整份任务书与既有格式逐字一致(仓库行用本测试的 repoDir)。
+      // 无「本群分工」段;任务书为固定模板(票7):发布时间是动态 ISO,逐行断言
+      // 各固定段,不整份等值比较。
       expect(ticket).not.toContain("本群分工");
-      expect(ticket).toBe(
-        [
-          "# CoAgentHub 任务(网页 @executor 发布)",
-          "",
-          "你是 codebuddy。任务:建一个文件 hello.txt",
-          `仓库:${repoDir}(分支 main)`,
-          "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
-          "汇报:中文,做了什么/测试结果/commit hash。",
-        ].join("\n"),
+      expect(ticket).toContain("# CoAgentHub 任务");
+      expect(ticket).toContain("执行器: codebuddy");
+      expect(ticket).toContain(`项目: ${repoDir}`);
+      expect(ticket).toMatch(/发布时间: \d{4}-\d{2}-\d{2}T/);
+      expect(ticket).toContain("## 任务内容");
+      expect(ticket).toContain("建一个文件 hello.txt");
+      expect(ticket).toContain("## 汇报格式要求(stdout 请按此输出)");
+      expect(ticket).toContain("提交: <commit hash>");
+      expect(ticket).toContain("测试: <测试结果摘要>");
+      expect(ticket).toContain("汇报: <做了什么,3-5 句>");
+      expect(ticket).toContain('遗留: <未完成事项,无则写"无">');
+      expect(ticket).toContain(
+        "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
       );
     } finally {
       delete process.env.TICKET_CAPTURE;
