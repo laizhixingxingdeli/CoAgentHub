@@ -519,6 +519,8 @@ async function dispatchTask(
       executorParticipantId: participantId,
       executorKey: ex.key,
       status: "queued",
+      // 任务书快照:触发消息 body 的完整复制,消息后续编辑/删除不影响已触发任务。
+      brief: body,
     })
     .onConflictDoNothing({ target: taskTable.messageId })
     .returning();

@@ -43,19 +43,21 @@ const PARTICIPANTS = [
 function membersFetchMock(
   members: unknown[] = MEMBERS,
   participants: unknown[] = PARTICIPANTS,
+  groupStatus: "active" | "archived" = "active",
 ) {
   // Stateful roster: POST appends, PATCH updates roles/prompt, so the list
   // refresh after each action can be asserted against the DOM.
   let current = [...members] as Array<Record<string, unknown>>;
   return createFetchMock([
     {
-      // Group detail: the creator (createdBy) drives the remove-button guard.
+      // Group detail: the creator (createdBy) drives the remove-button guard;
+      // status drives the archived read-only state.
       match: (url) => String(url) === "/api/groups/group-1",
       respond: () =>
         jsonResponse({
           id: "group-1",
           title: "模型训练任务",
-          status: "active",
+          status: groupStatus,
           createdBy: "participant-1",
         }),
     },
@@ -278,5 +280,37 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
     expect(
       within(row).getByRole("button", { name: "取消" }),
     ).toBeInTheDocument();
+  });
+
+  it("归档群组:添加/编辑/移除成员按钮全部禁用并提示「群已归档,只读」", async () => {
+    stubFetch(membersFetchMock(MEMBERS, PARTICIPANTS, "archived"));
+    renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
+
+    // 只读横幅提示。
+    expect(
+      await screen.findByText(/群已归档,成员管理只读/),
+    ).toBeInTheDocument();
+
+    await screen.findAllByText("hermes-mac");
+
+    // 添加成员表单:select / 角色勾选 / 提示词 / 提交按钮全部禁用。
+    expect(screen.getByLabelText("选择成员 participant")).toBeDisabled();
+    const addButton = screen.getByRole("button", { name: "添加成员" });
+    expect(addButton).toBeDisabled();
+    expect(addButton.getAttribute("title")).toBe("群已归档,只读");
+
+    // 成员行:编辑角色 / 编辑分工 / 移除全部禁用。
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("hermes-mac"))!;
+    const editRoles = within(row).getByRole("button", { name: "编辑角色" });
+    expect(editRoles).toBeDisabled();
+    expect(editRoles.getAttribute("title")).toBe("群已归档,只读");
+    const editPrompt = within(row).getByRole("button", { name: "编辑分工" });
+    expect(editPrompt).toBeDisabled();
+    expect(editPrompt.getAttribute("title")).toBe("群已归档,只读");
+    const remove = within(row).getByRole("button", { name: "移除" });
+    expect(remove).toBeDisabled();
+    expect(remove.getAttribute("title")).toBe("群已归档,只读");
   });
 });

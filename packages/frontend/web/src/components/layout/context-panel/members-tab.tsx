@@ -28,12 +28,34 @@ export function MembersTab({ groupId }: { groupId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 归档/软删群只读:群状态非 active 时,成员行点击编辑禁用并提示。
+  const [groupStatus, setGroupStatus] = useState<
+    "active" | "archived" | "deleted" | null
+  >(null);
   // 编辑弹窗状态:目标成员 + 角色勾选 + 提示词输入。
   const [editing, setEditing] = useState<Member | null>(null);
   const [editRoles, setEditRoles] = useState<GroupRole[]>([]);
   const [editPrompt, setEditPrompt] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  const loadGroupStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/groups/${groupId}`, {
+        headers: participantIdentityHeaders(),
+      });
+      if (res.ok) {
+        const group = (await res.json()) as { status: string };
+        setGroupStatus(
+          group.status === "active" || group.status === "archived"
+            ? group.status
+            : "deleted",
+        );
+      }
+    } catch {
+      // 群状态加载失败按 active 处理,不误伤成员列表只读展示。
+    }
+  }, [groupId]);
 
   const loadMembers = useCallback(async () => {
     setLoading(true);
@@ -55,7 +77,12 @@ export function MembersTab({ groupId }: { groupId: string }) {
 
   useEffect(() => {
     void loadMembers();
-  }, [loadMembers]);
+    void loadGroupStatus();
+  }, [loadMembers, loadGroupStatus]);
+
+  // 归档/软删群只读:非 active 群成员行点击编辑禁用并提示。
+  const readOnly = groupStatus !== null && groupStatus !== "active";
+  const readOnlyHint = readOnly ? "群已归档,只读" : undefined;
 
   const startEdit = (member: Member) => {
     setSaveError(null);
@@ -128,8 +155,10 @@ export function MembersTab({ groupId }: { groupId: string }) {
               <button
                 type="button"
                 data-testid={`member-row-${member.participantId}`}
+                disabled={readOnly}
+                title={readOnlyHint}
                 onClick={() => startEdit(member)}
-                className="flex w-full flex-col gap-1 rounded-md border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-muted/60"
+                className="flex w-full flex-col gap-1 rounded-md border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <Users className="size-3.5 shrink-0 text-muted-foreground" />

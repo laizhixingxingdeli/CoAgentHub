@@ -23,9 +23,31 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [commandSending, setCommandSending] = useState<string | null>(null);
+  // 归档/软删群只读:群状态决定停止/回滚是否可用(即使有控制身份)。
+  const [groupStatus, setGroupStatus] = useState<
+    "active" | "archived" | "deleted" | null
+  >(null);
   // 任务行内正文预览(前 40 字)与执行者名需要消息流与成员数据。
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+
+  const loadGroupStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/groups/${groupId}`, {
+        headers: participantIdentityHeaders(),
+      });
+      if (res.ok) {
+        const group = (await res.json()) as { status: string };
+        setGroupStatus(
+          group.status === "active" || group.status === "archived"
+            ? group.status
+            : "deleted",
+        );
+      }
+    } catch {
+      // 群状态加载失败按 active 处理,不误伤任务列表只读展示。
+    }
+  }, [groupId]);
 
   const loadTasks = useCallback(async () => {
     setLoading(true);
@@ -78,13 +100,16 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadTasks();
     void loadMessages();
     void loadMembers();
-  }, [loadTasks, loadMessages, loadMembers]);
+    void loadGroupStatus();
+  }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
 
   // 停止/回滚需要 coordinator/human 身份:已绑定身份即视为有控制权限;
   // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
   const canControl =
     typeof localStorage !== "undefined" &&
     Boolean(localStorage.getItem(PARTICIPANT_ID_KEY));
+  // 归档/软删群只读:群状态非 active 时,即使有身份,停止/回滚也禁用。
+  const readOnly = groupStatus !== null && groupStatus !== "active";
 
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
    * 识别);发送后刷新任务列表。403 → 无权限提示。 */
@@ -127,6 +152,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
         error={error}
         commandSending={commandSending}
         canControl={canControl}
+        readOnly={readOnly}
         messages={messages}
         members={members}
         onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}

@@ -32,6 +32,29 @@ import { z } from "zod";
 
 const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
+/**
+ * 归档/软删群只读守卫:非 active 群的一切写操作返回 403 + 原因(历史仍可读,
+ * GET 端点不做此检查)。返回群行供调用方复用,避免二次查询。
+ */
+async function assertGroupWritable(
+  db: DataBase,
+  groupId: string,
+): Promise<typeof groupsTable.$inferSelect> {
+  const group = await db.query.groups.findFirst({
+    where: (t, { eq }) => eq(t.id, groupId),
+  });
+  if (!group) {
+    throw new BizError(BizCodeEnum.GroupNotFound);
+  }
+  if (group.status !== "active") {
+    throw new BizError(
+      BizCodeEnum.Forbidden,
+      group.status === "archived" ? "群已归档,只读" : "群已删除,只读",
+    );
+  }
+  return group;
+}
+
 // 消息域的占位串/分页等常量已随逻辑迁入 @server/lib/services/message-service。
 
 app
@@ -262,12 +285,8 @@ app
       const { id } = c.req.valid("param");
       const { participantId, roles, prompt } = c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
+      // 归档/软删群组只读:成员管理随群只读(与消息同款守卫)。
+      await assertGroupWritable(db, id);
       const participant = await db.query.participant.findFirst({
         where: (t, { eq }) => eq(t.id, participantId),
       });
@@ -366,12 +385,8 @@ app
       const db = c.get("db");
       const { id, participantId } = c.req.valid("param");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
+      // 归档/软删群组只读:成员管理随群只读(与消息同款守卫)。
+      const group = await assertGroupWritable(db, id);
       // 群主不可被移除:创建者是这个群组的 owner,成员移除不能破坏它。
       if (participantId === group.createdBy) {
         throw new BizError(BizCodeEnum.InvalidRequest, "不能移除群主");
@@ -428,12 +443,8 @@ app
       const { id, participantId } = c.req.valid("param");
       const { roles, prompt } = c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
+      // 归档/软删群组只读:成员管理随群只读(与消息同款守卫)。
+      await assertGroupWritable(db, id);
       const member = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
           and(eq(t.groupId, id), eq(t.participantId, participantId)),
@@ -599,18 +610,10 @@ app
       const { body, parentId, audience, audienceRef, contentType, fileRef } =
         c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
       // Archive = read-only: an archived (or soft-deleted) group rejects new
-      // messages with 400; reading (GET messages / GET members / GET :id)
-      // stays open so history remains browsable.
-      if (group.status !== "active") {
-        throw new BizError(BizCodeEnum.InvalidRequest);
-      }
+      // messages with 403 + reason; reading (GET messages / GET members /
+      // GET :id) stays open so history remains browsable.
+      await assertGroupWritable(db, id);
       // The sender must be a group member (any role) to post.
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
@@ -738,16 +741,8 @@ app
       const { id, messageId } = c.req.valid("param");
       const { body } = c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
       // 归档/软删群组只读(与 POST 同款守卫):历史可读,但不可再修改。
-      if (group.status !== "active") {
-        throw new BizError(BizCodeEnum.InvalidRequest);
-      }
+      await assertGroupWritable(db, id);
       // 发送者必须是当前群成员(与 POST 同款守卫):被移出后不能再编辑旧消息。
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
@@ -801,16 +796,8 @@ app
       const participantId = c.get("participantId");
       const { id, messageId } = c.req.valid("param");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
       // 归档/软删群组只读(与 POST 同款守卫):历史可读,但不可再修改。
-      if (group.status !== "active") {
-        throw new BizError(BizCodeEnum.InvalidRequest);
-      }
+      await assertGroupWritable(db, id);
       // 发送者必须是当前群成员(与 POST 同款守卫):被移出后不能再删除旧消息。
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
@@ -944,12 +931,8 @@ app
       const { messageId, executorParticipantId, checkpointRef } =
         c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
+      // 归档/软删群组只读:不能发新任务(与消息/成员同款守卫)。
+      await assertGroupWritable(db, id);
       // 与其它群路由一致的边界:调用者必须是群成员(participant 注册是公开的,
       // 不校验会泄漏任意群的任务数据)。
       const membership = await db.query.groupMember.findFirst({
@@ -966,6 +949,12 @@ app
         throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
 
+      // 任务书快照:从触发消息取 body 原文写入 brief(消息后续编辑/软删除
+      // 不影响已触发任务语义);消息不存在时留空(可空列)。
+      const triggerMessage = await db.query.groupMessage.findFirst({
+        where: (t, { eq }) => eq(t.id, messageId),
+      });
+
       // Idempotent create: message_id is UNIQUE, so a repeated POST with the
       // same message id returns the existing task instead of a duplicate.
       // ON CONFLICT DO NOTHING keeps the check race-free (concurrent duplicate
@@ -977,6 +966,7 @@ app
           messageId,
           executorParticipantId,
           checkpointRef: checkpointRef ?? null,
+          brief: triggerMessage?.body ?? null,
         })
         .onConflictDoNothing({ target: taskTable.messageId })
         .returning();
@@ -1044,6 +1034,16 @@ app
           diffSummary: z.unknown().optional(),
           checkpointRef: z.string().optional(),
         })
+        .passthrough()
+        .superRefine((v, ctx) => {
+          // brief 是任务书快照(只读字段):PATCH 一律拒绝,防止任务语义被改写。
+          if ("brief" in v) {
+            ctx.addIssue({
+              code: "custom",
+              message: "brief 为只读字段,不可通过 PATCH 修改",
+            });
+          }
+        })
         .refine(
           (v) =>
             v.status !== undefined ||
@@ -1058,12 +1058,8 @@ app
       const { id, taskId } = c.req.valid("param");
       const { status, diffSummary, checkpointRef } = c.req.valid("json");
 
-      const group = await db.query.groups.findFirst({
-        where: (t, { eq }) => eq(t.id, id),
-      });
-      if (!group) {
-        throw new BizError(BizCodeEnum.GroupNotFound);
-      }
+      // 归档/软删群组只读:不能改任务状态(与 POST /tasks 同款守卫)。
+      await assertGroupWritable(db, id);
       const task = await db.query.task.findFirst({
         where: (t, { and, eq }) => and(eq(t.id, taskId), eq(t.groupId, id)),
       });

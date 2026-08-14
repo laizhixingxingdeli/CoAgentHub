@@ -24,6 +24,8 @@ interface MessageListProps {
   messages: MessageItem[];
   members: Member[];
   myParticipantId: string | null;
+  /** 归档/软删群只读:编辑/回复/删除按钮禁用并提示(发送已由 Composer 层禁用)。 */
+  readOnly: boolean;
   expandedIds: ReadonlySet<string>;
   collapsedRootIds: ReadonlySet<string>;
   threadTree: {
@@ -62,6 +64,7 @@ export function MessageList(props: MessageListProps) {
     messages,
     members,
     myParticipantId,
+    readOnly,
     expandedIds,
     collapsedRootIds,
     threadTree,
@@ -193,28 +196,36 @@ export function MessageList(props: MessageListProps) {
               const deleted =
                 msg.deleted === true || msg.body === DELETED_MESSAGE_BODY;
               // Ticket 22: 编辑/删除 are sender-only (own messages); a deleted
-              // placeholder shows no action bar at all.
+              // placeholder shows no action bar at all. Archived/deleted groups
+              // are read-only — write actions (edit/reply/delete) are disabled
+              // with a hint; copy stays available.
+              const writeDisabled = readOnly;
+              const writeHint = writeDisabled ? "群已归档,只读" : undefined;
               const actions = deleted ? null : (
                 <>
                   {own && (
                     <button
                       type="button"
+                      disabled={writeDisabled}
+                      title={writeHint}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleEditStart(msg);
                       }}
-                      className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       编辑
                     </button>
                   )}
                   <button
                     type="button"
+                    disabled={writeDisabled}
+                    title={writeHint}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleReply(msg);
                     }}
-                    className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     回复
                   </button>
@@ -231,11 +242,13 @@ export function MessageList(props: MessageListProps) {
                   {own && (
                     <button
                       type="button"
+                      disabled={writeDisabled}
+                      title={writeHint}
                       onClick={(e) => {
                         e.stopPropagation();
                         void handleDelete(msg);
                       }}
-                      className="rounded-md px-2 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10"
+                      className="rounded-md px-2 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       删除
                     </button>

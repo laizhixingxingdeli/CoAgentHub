@@ -65,6 +65,10 @@ export default function GroupMembersPage() {
   const [message, setMessage] = useState<string | null>(null);
   // Ticket 20: 群主(createdBy)不可被移除;成员行内编辑角色的表单状态。
   const [createdBy, setCreatedBy] = useState<string | null>(null);
+  // 归档/软删群只读:群状态非 active 时,添加/编辑/移除成员按钮禁用并提示。
+  const [groupStatus, setGroupStatus] = useState<
+    "active" | "archived" | "deleted" | null
+  >(null);
   const [editingParticipantId, setEditingParticipantId] = useState<
     string | null
   >(null);
@@ -126,8 +130,16 @@ export default function GroupMembersPage() {
       if (!res.ok) {
         return;
       }
-      const group = (await res.json()) as { createdBy: string };
+      const group = (await res.json()) as {
+        createdBy: string;
+        status: string;
+      };
       setCreatedBy(group.createdBy);
+      setGroupStatus(
+        group.status === "active" || group.status === "archived"
+          ? group.status
+          : "deleted",
+      );
     } catch {
       // 加载失败不影响成员列表,移除按钮不做群主禁用保护。
     }
@@ -138,6 +150,10 @@ export default function GroupMembersPage() {
     loadParticipants();
     loadGroup();
   }, [loadMembers, loadParticipants, loadGroup]);
+
+  // 归档/软删群只读:非 active 群禁止成员写操作(添加/编辑/移除)。
+  const readOnly = groupStatus !== null && groupStatus !== "active";
+  const readOnlyHint = readOnly ? "群已归档,只读" : undefined;
 
   const toggleRole = (role: GroupRole) => {
     setSelectedRoles((prev) =>
@@ -357,12 +373,18 @@ export default function GroupMembersPage() {
           <UserPlus className="size-4" />
           添加成员
         </div>
+        {readOnly && (
+          <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            群已归档,成员管理只读,无法添加/编辑/移除成员。
+          </div>
+        )}
         <div className="flex flex-col gap-3">
           <select
             aria-label="选择成员 participant"
             value={selectedParticipantId}
             onChange={(e) => setSelectedParticipantId(e.target.value)}
-            className="w-full rounded-md border bg-background px-3 py-2 text-sm sm:w-64"
+            disabled={readOnly}
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60 sm:w-64"
           >
             <option value="">
               {candidates.length === 0
@@ -385,6 +407,7 @@ export default function GroupMembersPage() {
                   selectedRoles.includes(role)
                     ? "border-primary bg-primary/10 text-primary"
                     : "text-muted-foreground hover:border-primary/50",
+                  readOnly && "cursor-not-allowed opacity-60",
                 )}
               >
                 <input
@@ -392,6 +415,7 @@ export default function GroupMembersPage() {
                   className="hidden"
                   checked={selectedRoles.includes(role)}
                   onChange={() => toggleRole(role)}
+                  disabled={readOnly}
                 />
                 {ROLE_LABELS[role]}
               </label>
@@ -411,12 +435,14 @@ export default function GroupMembersPage() {
               placeholder="在本组你负责 code review,重点关注测试覆盖与可读性"
               value={newPrompt}
               onChange={(e) => setNewPrompt(e.target.value)}
+              disabled={readOnly}
             />
           </div>
           <div>
             <Button
               onClick={handleAddMember}
-              disabled={adding || !selectedParticipantId}
+              disabled={adding || !selectedParticipantId || readOnly}
+              title={readOnlyHint}
               size="sm"
             >
               {adding ? "添加中…" : "添加成员"}
@@ -476,6 +502,8 @@ export default function GroupMembersPage() {
                       variant="outline"
                       size="sm"
                       className="flex-1"
+                      disabled={readOnly}
+                      title={readOnlyHint}
                       onClick={() => startEditRoles(member)}
                     >
                       <UserCog />
@@ -485,6 +513,8 @@ export default function GroupMembersPage() {
                       variant="outline"
                       size="sm"
                       className="flex-1"
+                      disabled={readOnly}
+                      title={readOnlyHint}
                       onClick={() => startEditPrompt(member)}
                     >
                       <PenLine />
@@ -495,13 +525,16 @@ export default function GroupMembersPage() {
                       size="sm"
                       className="flex-1 text-red-600 hover:text-red-700"
                       disabled={
+                        readOnly ||
                         member.participantId === createdBy ||
                         removingId === member.participantId
                       }
                       title={
-                        member.participantId === createdBy
-                          ? "不能移除群主"
-                          : undefined
+                        readOnly
+                          ? readOnlyHint
+                          : member.participantId === createdBy
+                            ? "不能移除群主"
+                            : undefined
                       }
                       onClick={() => handleRemoveMember(member)}
                     >
@@ -564,6 +597,8 @@ export default function GroupMembersPage() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          disabled={readOnly}
+                          title={readOnlyHint}
                           onClick={() => startEditRoles(member)}
                         >
                           <UserCog />
@@ -572,6 +607,8 @@ export default function GroupMembersPage() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          disabled={readOnly}
+                          title={readOnlyHint}
                           onClick={() => startEditPrompt(member)}
                         >
                           <PenLine />
@@ -582,13 +619,16 @@ export default function GroupMembersPage() {
                           size="sm"
                           className="text-red-600 hover:text-red-700"
                           disabled={
+                            readOnly ||
                             member.participantId === createdBy ||
                             removingId === member.participantId
                           }
                           title={
-                            member.participantId === createdBy
-                              ? "不能移除群主"
-                              : undefined
+                            readOnly
+                              ? readOnlyHint
+                              : member.participantId === createdBy
+                                ? "不能移除群主"
+                                : undefined
                           }
                           onClick={() => handleRemoveMember(member)}
                         >

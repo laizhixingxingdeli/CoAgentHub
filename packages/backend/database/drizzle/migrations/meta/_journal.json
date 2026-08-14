@@ -57,6 +57,13 @@
       "when": 1786669528012,
       "tag": "0007_add_task_retry_count",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786677972000,
+      "tag": "0008_add_task_brief",
+      "breakpoints": true
     }
   ]
 }

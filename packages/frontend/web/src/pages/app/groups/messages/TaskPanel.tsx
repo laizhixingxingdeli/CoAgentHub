@@ -54,25 +54,34 @@ type TaskPanelProps = {
   /** 是否有 coordinator/human 权限(已绑定 token):false 时停止/回滚禁用。
    * 只读放开(无 token 的 Local User 也能看列表),但控制命令需要身份。 */
   canControl: boolean;
+  /** 归档/软删群只读:即使有控制权限,停止/回滚也禁用并提示。 */
+  readOnly: boolean;
   messages: MessageItem[];
   members: Member[];
   onStop: (task: TaskItem) => void;
   onRollback: (task: TaskItem) => void;
 };
 
-/** 停止/回滚控制按钮:无权限时禁用并给出「需要 coordinator/human 身份」提示。
+/** 停止/回滚控制按钮:无权限或归档只读时禁用并给出提示。
  * title 挂在包裹 span 上 —— disabled 按钮自身不触发 title 悬浮提示。 */
 function ControlButton({
   canControl,
+  readOnly,
   disabled,
   ...props
-}: ComponentProps<typeof Button> & { canControl: boolean }): ReactElement {
-  const btn = <Button {...props} disabled={disabled || !canControl} />;
-  if (canControl) {
+}: ComponentProps<typeof Button> & {
+  canControl: boolean;
+  readOnly: boolean;
+}): ReactElement {
+  const btn = (
+    <Button {...props} disabled={disabled || !canControl || readOnly} />
+  );
+  if (canControl && !readOnly) {
     return btn;
   }
+  const hint = readOnly ? "群已归档,只读" : "需要 coordinator/human 身份";
   return (
-    <span title="需要 coordinator/human 身份" className="inline-flex">
+    <span title={hint} className="inline-flex">
       {btn}
     </span>
   );
@@ -112,6 +121,7 @@ export default function TaskPanel({
   error,
   commandSending,
   canControl,
+  readOnly,
   messages,
   members,
   onStop,
@@ -174,6 +184,7 @@ export default function TaskPanel({
                           data-testid={`task-stop-${task.id}`}
                           disabled={busy}
                           canControl={canControl}
+                          readOnly={readOnly}
                           onClick={() => onStop(task)}
                         >
                           {busy ? "发送中…" : "停止"}
@@ -186,6 +197,7 @@ export default function TaskPanel({
                           data-testid={`task-rollback-${task.id}`}
                           disabled={busy}
                           canControl={canControl}
+                          readOnly={readOnly}
                           onClick={() => onRollback(task)}
                         >
                           {busy ? "发送中…" : "回滚"}

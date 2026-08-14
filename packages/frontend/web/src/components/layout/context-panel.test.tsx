@@ -44,7 +44,10 @@ const TASKS = [
   },
 ];
 
-function panelFetchMock(options: { patchError?: number } = {}) {
+function panelFetchMock(
+  options: { patchError?: number; groupStatus?: "active" | "archived" } = {},
+) {
+  const { groupStatus = "active" } = options;
   return createFetchMock([
     {
       match: (url) => url.endsWith("/api/groups/group-1/members"),
@@ -82,7 +85,11 @@ function panelFetchMock(options: { patchError?: number } = {}) {
         /\/api\/groups\/group-1$/.test(String(url)) &&
         !String(url).includes("?"),
       respond: () =>
-        jsonResponse({ id: "group-1", title: "评审任务", status: "active" }),
+        jsonResponse({
+          id: "group-1",
+          title: "评审任务",
+          status: groupStatus,
+        }),
     },
   ]);
 }
@@ -226,5 +233,33 @@ describe("ContextPanel 右栏上下文面板", () => {
       await screen.findByTestId("context-panel-sheet"),
     ).toBeInTheDocument();
     expect(await screen.findByTestId("members-tab")).toBeInTheDocument();
+  });
+
+  it("归档群组:任务 Tab 停止/回滚按钮禁用并提示「群已归档,只读」", async () => {
+    vi.stubGlobal("fetch", panelFetchMock({ groupStatus: "archived" }));
+    setViewport(1280);
+    renderPanel();
+
+    await screen.findByText("hermes-mac");
+    fireEvent.click(screen.getByTestId("context-tab-tasks"));
+    await screen.findByTestId("tasks-tab");
+
+    // TASKS[0] 是 running → 有停止按钮;归档只读下禁用 + 提示。
+    const stop = await screen.findByTestId("task-stop-task-1");
+    expect(stop).toBeDisabled();
+    expect(stop.closest("span")?.getAttribute("title")).toBe("群已归档,只读");
+  });
+
+  it("归档群组:成员 Tab 行点击编辑禁用并提示「群已归档,只读」", async () => {
+    vi.stubGlobal("fetch", panelFetchMock({ groupStatus: "archived" }));
+    setViewport(1280);
+    renderPanel();
+
+    const row = await screen.findByTestId("member-row-participant-1");
+    expect(row).toBeDisabled();
+    expect(row.getAttribute("title")).toBe("群已归档,只读");
+    // 点击被禁用的行不会打开编辑弹窗。
+    fireEvent.click(row);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

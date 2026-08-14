@@ -35,6 +35,9 @@ export const task = pgTable("task", {
     .references(() => participant.id),
   // 哪个执行器(key)在跑这个任务;桥退役后一律由 server 写入,用于审计与重放。
   executorKey: text("executor_key"),
+  // 任务书快照:任务触发时消息 body 的完整复制(可空 = 无原文可快照,如桥直发)。
+  // 消息后续被编辑/软删除不影响已触发任务语义 —— 任务面板显示这份原文。
+  brief: text("brief"),
   status: text("status", { enum: TASK_STATUSES }).notNull().default("running"),
   // 执行前 git 快照 ref(refs/coagenthub-cp/<taskId>);可空 = 尚未打快照。
   checkpointRef: text("checkpoint_ref"),

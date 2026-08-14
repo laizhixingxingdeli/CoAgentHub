@@ -891,6 +891,7 @@ export default function GroupMessagesPage() {
         messages={messages}
         members={members}
         myParticipantId={myParticipantId}
+        readOnly={isReadOnly}
         expandedIds={expandedIds}
         collapsedRootIds={collapsedRootIds}
         threadTree={threadTree}

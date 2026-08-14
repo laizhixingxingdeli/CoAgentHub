@@ -1049,6 +1049,32 @@ describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
     ).toBe("已归档,无法发送消息");
   });
 
+  it("已归档群组:消息编辑/回复/删除按钮禁用并提示「群已归档,只读」", async () => {
+    // 绑定自己的身份(消息发送者),让编辑/删除按钮出现 —— 归档只读下应禁用。
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
+    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    expect(await screen.findByText("任务草稿")).toBeInTheDocument();
+
+    // 自己发送的 msg-1 行:编辑/回复/删除按钮全部禁用并提示。
+    const ownRow = screen.getByText("任务草稿").closest("li");
+    expect(ownRow).not.toBeNull();
+    const edit = within(ownRow!).getByRole("button", { name: "编辑" });
+    expect(edit).toBeDisabled();
+    expect(edit.getAttribute("title")).toBe("群已归档,只读");
+    const reply = within(ownRow!).getByRole("button", { name: "回复" });
+    expect(reply).toBeDisabled();
+    expect(reply.getAttribute("title")).toBe("群已归档,只读");
+    const del = within(ownRow!).getByRole("button", { name: "删除" });
+    expect(del).toBeDisabled();
+    expect(del.getAttribute("title")).toBe("群已归档,只读");
+    // 复制是只读操作,保持可用。
+    expect(
+      within(ownRow!).getByRole("button", { name: "复制" }),
+    ).not.toBeDisabled();
+  });
+
   it("进行中群组不显示只读横幅,输入可用", async () => {
     stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active"));
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");

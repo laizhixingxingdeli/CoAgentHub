@@ -44,6 +44,7 @@ describe("任务实体(server 单一状态源)", () => {
     executorParticipantId: string;
     status: "running" | "done" | "failed" | "cancelled";
     checkpointRef: string | null;
+    brief: string | null;
     diffSummary: unknown;
     createdAt: string;
     updatedAt: string | null;
@@ -323,5 +324,122 @@ describe("任务实体(server 单一状态源)", () => {
       },
     );
     expect(missing.status).toBe(404);
+  });
+
+  /** 发一条真实消息,返回消息 id(供任务书快照测试使用)。 */
+  async function postMessage(
+    participantId: string,
+    groupId: string,
+    body: string,
+  ) {
+    const res = await app.request(`/api/groups/${groupId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify({ body }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  it("任务书快照:POST /tasks 时 brief=触发消息 body,GET 返回 brief", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const msg = await postMessage(coordinator.id, group.id, "原始任务书正文");
+
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      execA.id,
+    );
+    expect(created.status).toBe(200);
+    const task = (await created.json()) as Task;
+    expect(task.brief).toBe("原始任务书正文");
+
+    // GET /tasks 列表同样带 brief。
+    const list = await app.request(`/api/groups/${group.id}/tasks`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    expect(list.status).toBe(200);
+    const tasks = (await list.json()) as Task[];
+    const found = tasks.find((t) => t.id === task.id);
+    expect(found?.brief).toBe("原始任务书正文");
+  });
+
+  it("任务书快照:消息编辑/软删除后,已建 task 的 brief 保持触发时原文", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const msg = await postMessage(coordinator.id, group.id, "快照原文 A");
+
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+    expect(task.brief).toBe("快照原文 A");
+
+    // 编辑消息正文 → brief 不变。
+    const editRes = await app.request(
+      `/api/groups/${group.id}/messages/${msg.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({ body: "编辑后的新正文" }),
+      },
+    );
+    expect(editRes.status).toBe(200);
+
+    // 软删除消息 → brief 不变。
+    const delRes = await app.request(
+      `/api/groups/${group.id}/messages/${msg.id}`,
+      {
+        method: "DELETE",
+        headers: { "X-Participant-Id": coordinator.id },
+      },
+    );
+    expect(delRes.status).toBe(200);
+
+    const list = await app.request(`/api/groups/${group.id}/tasks`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    const tasks = (await list.json()) as Task[];
+    const found = tasks.find((t) => t.id === task.id);
+    expect(found?.brief).toBe("快照原文 A");
+  });
+
+  it("PATCH 任务不接受改 brief(只读字段)→ 400", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000061",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    const res = await app.request(`/api/groups/${group.id}/tasks/${task.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": execA.id,
+      },
+      body: JSON.stringify({ status: "done", brief: "篡改任务书" }),
+    });
+    expect(res.status).toBe(400);
+
+    // brief 未被写入。
+    const list = await app.request(`/api/groups/${group.id}/tasks`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    const tasks = (await list.json()) as Task[];
+    const found = tasks.find((t) => t.id === task.id);
+    expect(found?.brief).toBeNull();
+    expect(found?.status).toBe("running");
   });
 });

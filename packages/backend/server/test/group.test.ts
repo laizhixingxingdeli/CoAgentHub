@@ -689,7 +689,7 @@ describe("群组与成员 API", () => {
       expect(reArchiveRes.status).toBe(200);
     });
 
-    it("归档群组禁发消息返回 400,读取(messages/members/:id)仍 200", async () => {
+    it("归档群组禁发消息返回 403+原因,读取(messages/members/:id)仍 200", async () => {
       const { id: participantId } = await registerParticipant({
         name: "coord",
       });
@@ -707,7 +707,8 @@ describe("群组与成员 API", () => {
         },
         body: JSON.stringify({ body: "归档后不应写入" }),
       });
-      expect(postRes.status).toBe(400);
+      expect(postRes.status).toBe(403);
+      expect((await postRes.json()).code).toBe("FORBIDDEN");
 
       const readRes = await app.request(`/api/groups/${group.id}/messages`, {
         headers: { "X-Participant-Id": participantId },
@@ -732,6 +733,138 @@ describe("群组与成员 API", () => {
       expect(((await detailRes.json()) as { status: string }).status).toBe(
         "archived",
       );
+    });
+
+    it("归档群组成员管理只读:POST/PATCH/DELETE 成员 → 403+原因,GET 仍 200", async () => {
+      const { id: coordinatorId } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: memberId } = await registerParticipant({
+        name: "member-x",
+      });
+      const group = await createGroup(coordinatorId, "成员只读归档");
+      await app.request(`/api/groups/${group.id}/archive`, {
+        method: "POST",
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+
+      // POST 成员 → 403 + FORBIDDEN
+      const addRes = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinatorId,
+        },
+        body: JSON.stringify({ participantId: memberId, roles: ["observer"] }),
+      });
+      expect(addRes.status).toBe(403);
+      expect((await addRes.json()).code).toBe("FORBIDDEN");
+
+      // PATCH 成员 → 403(成员不存在也会先被只读守卫拦截,仍是 403 而非 404)
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/members/${coordinatorId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": coordinatorId,
+          },
+          body: JSON.stringify({ roles: ["observer"] }),
+        },
+      );
+      expect(patchRes.status).toBe(403);
+
+      // DELETE 成员 → 403
+      const delRes = await app.request(
+        `/api/groups/${group.id}/members/${memberId}`,
+        {
+          method: "DELETE",
+          headers: { "X-Participant-Id": coordinatorId },
+        },
+      );
+      expect(delRes.status).toBe(403);
+
+      // GET 成员仍 200,成员列表未因写操作被改动
+      const membersRes = await app.request(`/api/groups/${group.id}/members`, {
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+      expect(membersRes.status).toBe(200);
+      const members = (await membersRes.json()) as Array<{
+        participantId: string;
+      }>;
+      expect(members).toHaveLength(1);
+      expect(members[0].participantId).toBe(coordinatorId);
+    });
+
+    it("归档群组任务只读:POST/PATCH 任务 → 403+原因,GET 任务列表仍 200", async () => {
+      const { id: coordinatorId } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: execId } = await registerParticipant({
+        name: "executor-y",
+      });
+      const group = await createGroup(coordinatorId, "任务只读归档");
+      await app.request(`/api/groups/${group.id}/archive`, {
+        method: "POST",
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+
+      // POST 任务 → 403(发新任务被归档只读拦截)
+      const postRes = await app.request(`/api/groups/${group.id}/tasks`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinatorId,
+        },
+        body: JSON.stringify({
+          messageId: "00000000-0000-7000-8000-0000000000aa",
+          executorParticipantId: execId,
+        }),
+      });
+      expect(postRes.status).toBe(403);
+      expect((await postRes.json()).code).toBe("FORBIDDEN");
+
+      // PATCH 任务 → 403(任务不存在也会先被只读守卫拦截,仍是 403 而非 404)
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/tasks/00000000-0000-7000-8000-0000000000bb`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": coordinatorId,
+          },
+          body: JSON.stringify({ status: "done" }),
+        },
+      );
+      expect(patchRes.status).toBe(403);
+
+      // GET 任务列表仍 200(只读放开)
+      const listRes = await app.request(`/api/groups/${group.id}/tasks`, {
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+      expect(listRes.status).toBe(200);
+      expect(await listRes.json()).toEqual([]);
+
+      // unarchive 恢复后可写:POST 任务 → 200
+      await app.request(`/api/groups/${group.id}/unarchive`, {
+        method: "POST",
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+      const afterUnarchive = await app.request(
+        `/api/groups/${group.id}/tasks`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": coordinatorId,
+          },
+          body: JSON.stringify({
+            messageId: "00000000-0000-7000-8000-0000000000cc",
+            executorParticipantId: execId,
+          }),
+        },
+      );
+      expect(afterUnarchive.status).toBe(200);
     });
 
     it("GET /:id 返回群组详情含 status,不存在的群组 404", async () => {
