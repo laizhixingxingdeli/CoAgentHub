@@ -12,10 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  PARTICIPANT_ID_KEY,
-  participantIdentityHeaders,
-} from "@/lib/api-client";
+import { participantIdentityHeaders } from "@/lib/api-client";
 
 /**
  * 接入 Participant(ticket: 网页 @executor 发布):管理执行器配置。

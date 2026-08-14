@@ -676,7 +676,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     // 绑定 = 本地声明,不应发起任何 HTTP 请求。
     await waitFor(() => {
       expect(
-        fetchMock.mock.calls.some(([url, init]) => init?.method === "POST"),
+        fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
       ).toBe(false);
     });
     // commitIdentity 写入 localStorage + 提示已切换 + 该行变「使用中」。
