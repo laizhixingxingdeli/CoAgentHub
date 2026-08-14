@@ -103,6 +103,27 @@ pnpm test           # vitest workspace (server on PGlite, web on jsdom)
 pnpm exec biome check .
 ```
 
+## E2E tests (Playwright)
+
+Browser end-to-end tests against the real stack — real PostgreSQL, real server
+(`dist`), real web SPA — covering the core user paths (register participant,
+create group, send message, reply tree, archive read-only, task panel).
+
+```bash
+pnpm build          # webServer uses existing dist artifacts — build first if stale
+pnpm test:e2e       # playwright test
+```
+
+- Runs isolated on its own ports (web `:3010`, server `:3011`), never touching
+  the resident `:3000`/`:3001` dev servers.
+- Uses a dedicated `coagenthub_e2e` database (created + migrated in
+  `globalSetup`, dropped in `globalTeardown`) — the real `coagenthub` database
+  is never touched.
+- CI runs it in the `e2e` job of `.github/workflows/test-suite.yml` (postgres
+  service + build + `playwright install --with-deps chromium`).
+- Task cases inject `queued` tasks via the API instead of spawning real
+  executors, so the suite needs no external agent runtime.
+
 ## Layout
 
 ```

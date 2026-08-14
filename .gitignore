@@ -13,6 +13,11 @@ dist/
 .reasonix/
 coverage/
 
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+
 # Assistant agent runtime state
 .dispatch-state.json
 

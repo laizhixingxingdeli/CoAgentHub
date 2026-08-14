@@ -45,3 +45,63 @@ jobs:
 
       - name: Lint
         run: pnpm exec biome check .
+
+  e2e:
+    name: E2E (Playwright)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    services:
+      # 真 E2E 需要真实 PostgreSQL:admin 连接(postgres 库)用于 globalSetup
+      # 创建/迁移 coagenthub_e2e、globalTeardown drop。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # globalSetup/Teardown 用该连接串创建/删除隔离库 coagenthub_e2e
+      # (playwright.config.ts 的默认值,显式声明便于排查)。
+      E2E_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # webServer 直接跑 dist 产物,必须先构建(与 test job 同一批核心包)。
+      - name: Build core packages
+        run: >-
+          pnpm exec turbo run build
+          --filter @laizhixingxingdeli/database
+          --filter @laizhixingxingdeli/error
+          --filter @laizhixingxingdeli/server
+          --filter @laizhixingxingdeli/web
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
