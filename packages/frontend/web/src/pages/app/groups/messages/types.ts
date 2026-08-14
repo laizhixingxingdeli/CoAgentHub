@@ -22,7 +22,8 @@ export type Member = {
 
 /** 角色显示标签(ticket 33 分工总览用;由词典渲染,支持 en)。 */
 export function roleLabel(role: string): string {
-  return t(`roles.${role}`);
+  // role 来自 GROUP_ROLES 枚举,模板 key 均为词典合法键;断言绕过模板字面量类型。
+  return t(`roles.${role}` as import("@/lib/i18n").DictKey);
 }
 
 export type FileRef = {
