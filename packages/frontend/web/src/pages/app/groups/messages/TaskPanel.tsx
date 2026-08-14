@@ -79,6 +79,10 @@ type TaskPanelProps = {
   members: Member[];
   /** 展开的任务行 id(null = 全部收起);展开显示实时输出区 + attempt 时间线。 */
   expandedTaskId: string | null;
+  /** 默认展开(运行中/已完成)但被用户手动折叠的任务行 id 集合。 */
+  foldedTaskIds: ReadonlySet<string>;
+  /** 收到无进展提醒(WS task_stall_alert)的任务行 id 集合(黄色警示样式)。 */
+  stallAlertedIds: ReadonlySet<string>;
   /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接;includeOutput 兜底)。 */
   liveOutputs: Record<string, string>;
   /** 回滚状态(taskId → rolling=回滚中… | done=已恢复)。 */
@@ -224,6 +228,8 @@ export default function TaskPanel({
   messages,
   members,
   expandedTaskId,
+  foldedTaskIds,
+  stallAlertedIds,
   liveOutputs,
   rollbackStates,
   onToggleExpand,
@@ -253,7 +259,23 @@ export default function TaskPanel({
               const preview = taskMessagePreview(task, messages);
               const detail = diffSummaryDetail(task.diffSummary);
               const busy = commandSending === task.id;
-              const expanded = expandedTaskId === task.id;
+              // 网页体验:running 任务的实时输出区默认展开可见(无需点击);
+              // done/failed 显示完成回填 tail(可折叠);两者都可被用户手动折叠
+              // (foldedTaskIds)。queued/cancelled 仍只显式展开时可见。
+              const explicitlyExpanded = expandedTaskId === task.id;
+              const defaultVisible =
+                task.status === "running" ||
+                task.status === "done" ||
+                task.status === "failed";
+              const expanded =
+                explicitlyExpanded ||
+                (defaultVisible && !foldedTaskIds.has(task.id));
+              // 无进展提醒(黄色警示,非失败):WS task_stall_alert 实时标记 +
+              // diffSummary.stallAlerted 落库兜底(刷新后仍显示)。
+              const alerted =
+                stallAlertedIds.has(task.id) ||
+                (task.diffSummary as Record<string, unknown> | null)
+                  ?.stallAlerted === true;
               const rollbackState = rollbackStates[task.id];
               const rolling = rollbackState === "rolling";
               const rollbackDone = rollbackState === "done";
@@ -268,7 +290,12 @@ export default function TaskPanel({
                 <li
                   key={task.id}
                   data-testid={`task-row-${task.id}`}
-                  className="rounded-md border bg-muted/30 px-3 py-2"
+                  data-alerted={alerted || undefined}
+                  className={`rounded-md border px-3 py-2 ${
+                    alerted
+                      ? "border-amber-400/70 bg-amber-500/10"
+                      : "bg-muted/30"
+                  }`}
                 >
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <button
@@ -288,6 +315,15 @@ export default function TaskPanel({
                     >
                       {taskStatusLabel(task.status)}
                     </span>
+                    {alerted && (
+                      <span
+                        data-testid={`task-stall-alert-${task.id}`}
+                        title={t("tasks.stallAlerted")}
+                        className="inline-flex items-center gap-0.5 rounded-full border border-amber-400/70 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400"
+                      >
+                        ⚠️ {t("tasks.stallAlerted")}
+                      </span>
+                    )}
                     <span className="text-xs font-medium">{executor}</span>
                     <span
                       data-testid={`task-time-${task.id}`}

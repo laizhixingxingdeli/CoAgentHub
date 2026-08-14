@@ -2105,6 +2105,106 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     expect(failed?.textContent).toContain("❌ 任务失败");
   });
 
+  it("✅/❌ 执行结果渲染为精简结果卡片(状态头 + 提交 + 测试/汇报/遗留摘要,不再整段贴 summary)", async () => {
+    stubFetch(
+      messagesFetchMock([
+        {
+          id: "st-4",
+          groupId: "group-1",
+          senderId: "participant-2",
+          parentId: null,
+          audience: "broadcast",
+          audienceRef: null,
+          body: [
+            "✅ 任务完成",
+            "──────────",
+            "提交: 0123456789abcdef0123456789abcdef01234567",
+            "测试: 全部 42 个测试通过,无回归",
+            "汇报: 完成了特性 X,顺带修复了 Y 与 Z,测试覆盖从 80% 提升到 92%",
+            "遗留: 无",
+          ].join("\n"),
+          contentType: "task_status",
+          depth: 0,
+          createdAt: statusTime(3),
+        },
+      ]),
+    );
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    const card = await screen.findByTestId("task-result-card");
+    // 状态头第一行 + 提交 hash 徽标。
+    expect(
+      within(card).getByTestId("task-result-header").textContent,
+    ).toContain("✅ 任务完成");
+    expect(card.textContent).toContain("提交 0123456789ab");
+    // 测试/汇报/遗留 每项一行摘要。
+    expect(
+      within(card).getByTestId("task-result-row-测试").textContent,
+    ).toContain("全部 42 个测试通过");
+    expect(
+      within(card).getByTestId("task-result-row-汇报").textContent,
+    ).toContain("完成了特性 X");
+    expect(within(card).getByTestId("task-result-row-遗留").textContent).toBe(
+      "无",
+    );
+    // 状态条壳仍在(居中 + 绿色),但内容已是精简卡片。
+    const shell = screen.getByTestId("task-status");
+    expect(shell.getAttribute("data-status")).toBe("done");
+    expect(shell.className).toContain("bg-emerald-500/10");
+  });
+
+  it("任务书正文(含 Category/Summary 标记行)渲染为结构化卡片;不识别时保持普通文本", async () => {
+    const briefBody = [
+      "# CoAgentHub 任务",
+      "**Category:** feature",
+      "**Summary:** 实现消息头显示「发给谁」",
+      "**Acceptance criteria:**",
+      "- [ ] 消息头显示 → 接收者",
+      "- [ ] 测试全绿",
+    ].join("\n");
+    stubFetch(
+      messagesFetchMock([
+        {
+          id: "br-1",
+          groupId: "group-1",
+          senderId: "participant-1",
+          parentId: null,
+          audience: "broadcast",
+          audienceRef: null,
+          body: briefBody,
+          contentType: "text/plain",
+          depth: 0,
+          createdAt: "2026-08-02T00:06:00.000Z",
+        },
+        {
+          id: "pl-1",
+          groupId: "group-1",
+          senderId: "participant-1",
+          parentId: null,
+          audience: "broadcast",
+          audienceRef: null,
+          body: "普通聊天内容,没有任务书标记",
+          contentType: "text/plain",
+          depth: 0,
+          createdAt: "2026-08-02T00:07:00.000Z",
+        },
+      ]),
+    );
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    // 任务书 → 结构化卡片:Category/Summary 高亮 + 验收标准列表。
+    const card = await screen.findByTestId("task-brief-card");
+    expect(card.textContent).toContain("feature");
+    expect(card.textContent).toContain("实现消息头显示「发给谁」");
+    expect(card.textContent).toContain("消息头显示 → 接收者");
+    // 「展开全文」按钮可看原文(原始 markdown 全文)。
+    expect(card.textContent).toContain("实现消息头显示「发给谁」");
+    fireEvent.click(screen.getByTestId("task-brief-toggle"));
+    expect(within(card).getByText(/# CoAgentHub 任务/)).toBeInTheDocument();
+    // 普通文本消息不渲染卡片。
+    expect(screen.getByText("普通聊天内容,没有任务书标记")).toBeInTheDocument();
+  });
+
   it("discussion 消息渲染普通气泡 + 💬 标记", async () => {
     stubFetch(
       messagesFetchMock([

@@ -101,6 +101,10 @@ export default function ExecutorsPage() {
   const [editCapabilities, setEditCapabilities] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [heartbeatingId, setHeartbeatingId] = useState<string | null>(null);
+  // 参与者行内改名(网页体验批次):renamingKey = 正在改名的执行器 key。
+  const [renamingKey, setRenamingKey] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [savingRename, setSavingRename] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -340,6 +344,64 @@ export default function ExecutorsPage() {
     }
   };
 
+  /** 行内改名(网页体验批次):PATCH /api/participants/:id { name }。内置执行器
+   *  名由 executor 配置驱动,不改(点击时提示「执行器名由配置管理」)。 */
+  const startRename = (item: ExecutorItem) => {
+    if (requireBoundIdentity()) return;
+    if (item.builtin) {
+      setError(t("participants.renameBuiltinHint"));
+      return;
+    }
+    const participant = participantById(item.participantId);
+    if (!participant) {
+      setError(t("participants.error.saveFailed"));
+      return;
+    }
+    setRenamingKey(item.key);
+    setRenameName(participant.name);
+  };
+
+  const handleSaveRename = async () => {
+    const item = items.find((x) => x.key === renamingKey);
+    const participant = item ? participantById(item.participantId) : undefined;
+    const name = renameName.trim();
+    if (!item || !participant || !name || savingRename) {
+      return;
+    }
+    setSavingRename(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await fetch(`/api/participants/${participant.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...participantIdentityHeaders(),
+        },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(body?.message ?? `HTTP ${res.status}`);
+      }
+      const updated = (await res.json()) as ParticipantInfo;
+      setMessage(t("participants.renamed", { name: updated.name }));
+      setRenamingKey(null);
+      // 按 id 更新本地 participants,行内立即刷新。
+      setParticipants((prev) =>
+        prev.map((a) => (a.id === updated.id ? updated : a)),
+      );
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : t("participants.error.saveFailed"),
+      );
+    } finally {
+      setSavingRename(false);
+    }
+  };
+
   /** 打开「编辑执行器」对话框(bin/args/model/device/agentName);内置项入口禁用。 */
   const startEditExecutor = (item: ExecutorItem) => {
     setEditingExecutor(item);
@@ -548,36 +610,83 @@ export default function ExecutorsPage() {
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium">
-                        {item.agentName}
-                      </span>
-                      {item.builtin && (
-                        <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                          {t("common.builtin")}
-                        </span>
-                      )}
-                      {/* 在线状态徽标:绿点在线 / 灰点离线 / 从未在线 */}
-                      {participant && (
-                        <span
-                          className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ${
-                            online
-                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
-                              : "bg-muted text-muted-foreground"
-                          }`}
-                        >
-                          <span
-                            className={`size-1.5 rounded-full ${
-                              online
-                                ? "bg-emerald-500"
-                                : "bg-muted-foreground/60"
-                            }`}
+                      {renamingKey === item.key ? (
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <Input
+                            autoFocus
+                            value={renameName}
+                            onChange={(e) => setRenameName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                void handleSaveRename();
+                              } else if (e.key === "Escape") {
+                                setRenamingKey(null);
+                              }
+                            }}
+                            aria-label={t("participants.renameInputAria")}
+                            className="h-8 flex-1"
                           />
-                          {lastSeen == null
-                            ? t("common.neverOnline")
-                            : online
-                              ? t("common.online")
-                              : t("common.offline")}
-                        </span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={savingRename || !renameName.trim()}
+                            onClick={() => void handleSaveRename()}
+                          >
+                            {savingRename
+                              ? t("common.saving")
+                              : t("participants.renameSave")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setRenamingKey(null)}
+                          >
+                            {t("participants.renameCancel")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <>
+                          <span
+                            className="truncate text-sm font-medium"
+                            data-testid={`participant-name-${item.key}`}
+                          >
+                            {participant?.name ?? item.agentName}
+                          </span>
+                          <Pencil
+                            data-testid={`rename-participant-${item.key}`}
+                            className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                            aria-label={t("participants.renameAria")}
+                            onClick={() => startRename(item)}
+                          />
+                          {item.builtin && (
+                            <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                              {t("common.builtin")}
+                            </span>
+                          )}
+                          {/* 在线状态徽标:绿点在线 / 灰点离线 / 从未在线 */}
+                          {participant && (
+                            <span
+                              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ${
+                                online
+                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+                                  : "bg-muted text-muted-foreground"
+                              }`}
+                            >
+                              <span
+                                className={`size-1.5 rounded-full ${
+                                  online
+                                    ? "bg-emerald-500"
+                                    : "bg-muted-foreground/60"
+                                }`}
+                              />
+                              {lastSeen == null
+                                ? t("common.neverOnline")
+                                : online
+                                  ? t("common.online")
+                                  : t("common.offline")}
+                            </span>
+                          )}
+                        </>
                       )}
                     </div>
                     <div className="mt-0.5 truncate text-xs text-muted-foreground">

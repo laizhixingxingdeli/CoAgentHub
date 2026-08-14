@@ -176,6 +176,32 @@ export class WsHub {
   }
 
   /**
+   * Fan-out a no-progress alert (feature: 无进展提醒): a running task has been
+   * silent past stallAlertMinutes — the task panel marks that row with a
+   * warning style (yellow, not a failure). Broadcast visibility like task_output.
+   */
+  async broadcastTaskStallAlert(
+    groupId: string,
+    taskId: string,
+  ): Promise<void> {
+    await this.fanOut(
+      {
+        id: taskId,
+        groupId,
+        senderId: "",
+        audience: "broadcast" as const,
+        audienceRef: null,
+      },
+      () =>
+        JSON.stringify({
+          type: "task_stall_alert",
+          groupId,
+          taskId,
+        }),
+    );
+  }
+
+  /**
    * Shared fan-out: query the group's members, keep the visibility-filtered
    * set, and deliver `buildEvent(message)` to every connected socket in it.
    * Fire-and-forget: never rejects — the member query and per-socket failures

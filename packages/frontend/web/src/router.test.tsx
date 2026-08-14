@@ -60,16 +60,14 @@ describe("路由", () => {
     ).toBeInTheDocument();
   });
 
-  it("/files 渲染文件页", async () => {
+  it("/files 已移除:重定向到 /groups(文件信令保留在 API 层,UI 不再提供)", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/files");
 
-    // The page heading and the sidebar nav item both contain "文件传输".
-    expect(await screen.findAllByText("文件传输")).not.toHaveLength(0);
-    // The upload control is a <label> (Button asChild), not a real button.
-    expect(await screen.findByText("上传文件")).toBeInTheDocument();
-    // 非群页面保持两栏(无右栏上下文面板)
-    expect(screen.queryByTestId("context-panel")).toBeNull();
+    // 文件页已从导航与路由移除:重定向到群列表。
+    expect(
+      await screen.findByRole("button", { name: "创建群组" }),
+    ).toBeInTheDocument();
   });
 
   it("/groups 渲染群组列表页", async () => {

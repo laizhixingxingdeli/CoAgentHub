@@ -215,7 +215,7 @@ app
     "/:id",
     describeRoute({
       description:
-        "Bind or clear the group's project path (projectPath). Empty string or null clears the binding; a non-empty value must be an existing absolute directory path (400 otherwise).",
+        "Update a group: bind/clear the project path (projectPath; empty/null clears, non-empty must be an existing absolute directory) and/or rename it (title)",
       responses: {
         200: {
           description: "Group updated",
@@ -226,14 +226,19 @@ app
     zValidator("param", z.object({ id: z.string().uuid() })),
     zValidator(
       "json",
-      z.object({
-        projectPath: z.string().nullable(),
-      }),
+      z
+        .object({
+          title: z.string().min(1).max(200).optional(),
+          projectPath: z.string().nullable().optional(),
+        })
+        .refine((v) => v.title !== undefined || v.projectPath !== undefined, {
+          message: "at least one field to update is required",
+        }),
     ),
     async (c) => {
       const db = c.get("db");
       const { id } = c.req.valid("param");
-      const { projectPath } = c.req.valid("json");
+      const { title, projectPath } = c.req.valid("json");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -242,22 +247,29 @@ app
         throw new BizError(BizCodeEnum.GroupNotFound);
       }
 
-      // 空串视作清空绑定(null);非空值必须是存在的绝对目录路径。
-      const path = projectPath === "" ? null : projectPath;
-      if (path !== null) {
-        const valid =
-          isAbsolute(path) && existsSync(path) && statSync(path).isDirectory();
-        if (!valid) {
-          throw new BizError(
-            BizCodeEnum.InvalidRequest,
-            `projectPath 必须是存在的绝对目录路径:${path}`,
-          );
+      const patch: { title?: string; projectPath?: string | null } = {};
+      if (title !== undefined) patch.title = title;
+      if (projectPath !== undefined) {
+        // 空串视作清空绑定(null);非空值必须是存在的绝对目录路径。
+        const path = projectPath === "" ? null : projectPath;
+        if (path !== null) {
+          const valid =
+            isAbsolute(path) &&
+            existsSync(path) &&
+            statSync(path).isDirectory();
+          if (!valid) {
+            throw new BizError(
+              BizCodeEnum.InvalidRequest,
+              `projectPath 必须是存在的绝对目录路径:${path}`,
+            );
+          }
         }
+        patch.projectPath = path;
       }
 
       const [updated] = await db
         .update(groupsTable)
-        .set({ projectPath: path })
+        .set(patch)
         .where(eq(groupsTable.id, id))
         .returning();
       return c.json(updated);

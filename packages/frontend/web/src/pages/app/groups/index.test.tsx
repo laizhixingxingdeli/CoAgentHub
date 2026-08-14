@@ -148,6 +148,21 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
       },
     },
     {
+      // 群名行内改名(网页体验批次):PATCH /api/groups/:id { title }。
+      match: (url, init) =>
+        init?.method === "PATCH" && /^\/api\/groups\/[^/]+$/.test(String(url)),
+      respond: (url, init) => {
+        const id = String(url).split("/").pop();
+        const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        current = current.map((g) => (g.id === id ? { ...g, ...patch } : g));
+        const updated = current.find((g) => g.id === id) ?? {
+          ...GROUPS[0],
+          ...patch,
+        };
+        return jsonResponse(updated);
+      },
+    },
+    {
       // Participant roster (ticket 20 settings + ticket 29 identity panel):
       // 状态化名册,注册会追加新 participant。
       match: (url) => url.endsWith("/api/participants"),
@@ -292,6 +307,37 @@ describe("GroupsPage 群组列表", () => {
       b.closest("tr, div")?.textContent?.includes("已完成的评审"),
     );
     expect(archivedRow.length).toBe(0);
+  });
+
+  it("群名行内改名:铅笔图标 → 输入新名 → PATCH /api/groups/:id {title} → 列表刷新", async () => {
+    const fetchMock = stubFetch(groupsFetchMock());
+    renderWithProviders(<GroupsPage />, "/groups");
+
+    await screen.findAllByText("模型训练任务");
+    // 铅笔图标在移动卡片与桌面表格各一个(jsdom 不做媒体查询,两者都在 DOM)。
+    const pencil = screen.getAllByTestId("rename-title-group-1")[0];
+    fireEvent.click(pencil);
+
+    const inputs = await screen.findAllByLabelText("新群组名称");
+    expect(inputs.length).toBeGreaterThan(0);
+    fireEvent.change(inputs[0], { target: { value: "改名后的群" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存名称" })[0]);
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          init?.method === "PATCH" && String(url) === "/api/groups/group-1",
+      );
+      expect(patch).toBeDefined();
+      expect(JSON.parse(String(patch![1]?.body))).toEqual({
+        title: "改名后的群",
+      });
+    });
+    // 刷新后新名字出现(移动卡片 + 桌面表格各一处),编辑态关闭。
+    expect((await screen.findAllByText("改名后的群")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryByLabelText("新群组名称")).toBeNull();
   });
 });
 

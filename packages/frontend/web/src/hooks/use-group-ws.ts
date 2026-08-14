@@ -57,12 +57,20 @@ export type WsTaskOutputEvent = {
   chunk: string;
 };
 
+/** 无进展提醒(server 静默超 alert 阈值后推送):任务面板该任务行加黄色警示。 */
+export type WsTaskStallAlertEvent = {
+  type: "task_stall_alert";
+  groupId: string;
+  taskId: string;
+};
+
 /** Any frame the server WS hub pushes for a group (tickets 13/22, 实时进度). */
 export type WsGroupEvent =
   | GroupMessageEvent
   | GroupMessageUpdatedEvent
   | GroupMessageDeletedEvent
-  | WsTaskOutputEvent;
+  | WsTaskOutputEvent
+  | WsTaskStallAlertEvent;
 
 /**
  * Loose shape of a raw WS frame, validated before forwarding as a typed
@@ -86,6 +94,11 @@ type WsGroupFrame =
       groupId?: string;
       taskId?: string;
       chunk?: string;
+    }
+  | {
+      type: "task_stall_alert";
+      groupId?: string;
+      taskId?: string;
     };
 
 type MessageEventLike = { data: unknown };
@@ -255,7 +268,8 @@ export function useGroupWs(
         frame.groupId !== groupId ||
         typeof frame.type !== "string" ||
         (!frame.type.startsWith("group_message") &&
-          frame.type !== "task_output")
+          frame.type !== "task_output" &&
+          frame.type !== "task_stall_alert")
       ) {
         return;
       }
@@ -266,6 +280,16 @@ export function useGroupWs(
             groupId,
             taskId: frame.taskId,
             chunk: frame.chunk,
+          });
+        }
+        return;
+      }
+      if (frame.type === "task_stall_alert") {
+        if (frame.taskId) {
+          onEventRef.current({
+            type: "task_stall_alert",
+            groupId,
+            taskId: frame.taskId,
           });
         }
         return;

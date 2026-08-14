@@ -85,7 +85,7 @@ import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
 
 /** 与桥 contentTypeFor 一致:状态类 emoji 前缀 → task_status。 */
-const STATUS_EMOJI_RE = /^[📋🚀✅❌🛑]/u;
+const STATUS_EMOJI_RE = /^(?:📋|🚀|✅|❌|🛑|⚠️)/u;
 
 const ANSI_RE =
   /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -135,8 +135,13 @@ interface QueuedRun {
   claimTimer: NodeJS.Timeout | null;
   /** 静默超时定时器(spawn 时调度,每次输出重排);a2a 无本地进程不调度。 */
   stallTimer: NodeJS.Timeout | null;
+  /** 无进展提醒定时器(spawn 时调度,每次输出重排);先于 stallTimer 触发,
+   *  只发提醒消息 + 警示标记,不失败。 */
+  stallAlertTimer: NodeJS.Timeout | null;
   /** 静默超时已触发(完成回调不再重复回传 ❌)。 */
   stalled: boolean;
+  /** 无进展提醒已发送(避免重复提醒)。 */
+  stallAlerted: boolean;
   /** 已自动重试次数(失败重试用;重试前回滚 checkpoint、重新入队重跑)。 */
   retryCount: number;
   /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
@@ -167,6 +172,10 @@ let maxParallelGroups = readDispatchPolicy().maxParallelGroups;
 
 /** 静默超时阈值(ms):running 连续无输出超过即失败;启动时读配置,缺省 30min。 */
 let stallTimeoutMs = readDispatchPolicy().stallTimeoutMinutes * 60_000;
+
+/** 无进展提醒阈值(ms):running 连续无输出超过即提醒协调者(不失败);
+ *  启动时读配置,缺省 15min。 */
+let stallAlertMs = readDispatchPolicy().stallAlertMinutes * 60_000;
 
 /** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
 let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
@@ -243,6 +252,10 @@ function clearRunTimers(run: QueuedRun): void {
   if (run.stallTimer) {
     clearTimeout(run.stallTimer);
     run.stallTimer = null;
+  }
+  if (run.stallAlertTimer) {
+    clearTimeout(run.stallAlertTimer);
+    run.stallAlertTimer = null;
   }
 }
 
@@ -323,6 +336,7 @@ export function __resetExecutorQueueForTests(): void {
   const policy = readDispatchPolicy();
   maxParallelGroups = policy.maxParallelGroups;
   stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
+  stallAlertMs = policy.stallAlertMinutes * 60_000;
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
   retryPolicy = policy.retry;
   rateLimitPatterns = policy.rateLimit.detectPatterns;
@@ -341,9 +355,16 @@ export function __setMaxParallelGroupsForTests(n: number): void {
 export function __setReliabilityTimeoutsForTests(
   stallMs: number,
   claimMs: number,
+  stallAlertMsOverride?: number,
 ): void {
   stallTimeoutMs = Math.max(1, Math.floor(stallMs));
   claimTimeoutMs = Math.max(1, Math.floor(claimMs));
+  // 默认提醒阈值取 stall 的 2 倍:不改变既有测试行为(静默在 stall 即失败,
+  // 提醒不会先触发);需要验证提醒的测试显式传小阈值。
+  stallAlertMs =
+    stallAlertMsOverride !== undefined
+      ? Math.max(1, Math.floor(stallAlertMsOverride))
+      : Math.max(1, Math.floor(stallMs)) * 2;
 }
 
 /**
@@ -645,7 +666,9 @@ async function dispatchTask(
     lastOutputAt: 0,
     claimTimer: null,
     stallTimer: null,
+    stallAlertTimer: null,
     stalled: false,
+    stallAlerted: false,
     retryCount: 0,
     checkpointRef: null,
     // 执行历史:沿用 DB 既有 attempts(重新执行的任务保留旧尝试,新 attempt 续接)。
@@ -893,12 +916,26 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             clearTimeout(run.stallTimer);
             run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
           }
+          // 无进展提醒同界重排:有输出说明没静默,提醒计时顺延。
+          if (run.stallAlertTimer) {
+            clearTimeout(run.stallAlertTimer);
+            run.stallAlertTimer = setTimeout(
+              () => handleStallAlert(run),
+              stallAlertMs,
+            );
+          }
         },
       });
       // 静默超时起点:进程刚 spawn(输出可观察);之后每次输出重排定时器。
       // a2a 无本地进程/增量输出,不设静默检测(完成路径由任务级超时兜底)。
       run.lastOutputAt = Date.now();
       run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
+      // 无进展提醒起点与静默检测一致:先于静默阈值触发提醒,静默继续到
+      // stallTimeoutMs 才标 failed。
+      run.stallAlertTimer = setTimeout(
+        () => handleStallAlert(run),
+        stallAlertMs,
+      );
     }
     run.kill = handle.kill;
 
@@ -1079,6 +1116,47 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
   return db.query.task.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.messageId, messageId),
   });
+}
+
+/**
+ * 无进展提醒处理(网页体验批次):running 任务连续无输出超过 stallAlertMs
+ * (默认 15min,先于 stallTimeoutMs)→ 发一条群消息提醒协调者 + 任务面板行
+ * 警示标记(黄色,非失败);静默继续到 stallTimeoutMs 才由 handleStall 标
+ * failed。停止指令优先:run.stopped 的任务直接跳过。仅 CLI 路径调度(与静默
+ * 检测同界,a2a 无本地进程输出可观察)。
+ */
+function handleStallAlert(run: QueuedRun): void {
+  if (run.stopped || run.stalled || run.stallAlerted) return;
+  run.stallAlerted = true;
+  if (run.stallAlertTimer) {
+    clearTimeout(run.stallAlertTimer);
+    run.stallAlertTimer = null;
+  }
+  const minutes = Math.max(1, Math.round(stallAlertMs / 60_000));
+  console.warn(
+    `[executor] 无进展提醒: ${run.taskId} 已 ${minutes} 分钟无输出,执行器:${run.ex.label}`,
+  );
+  void (async () => {
+    await postStatus(
+      run.db,
+      run.groupId,
+      run.participantId,
+      run.ex,
+      `⚠️ 任务 ${run.taskId} 已 ${minutes} 分钟无进展,执行器:${run.ex.label},请介入`,
+    );
+    // 警示标记落库(diffSummary.stallAlerted),任务面板行加黄色警示样式。
+    try {
+      await run.db
+        .update(taskTable)
+        .set({ diffSummary: { stallAlerted: true } })
+        .where(
+          and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+        );
+    } catch (e) {
+      console.warn(`[executor] 写无进展警示标记失败(${run.taskId}): ${e}`);
+    }
+    void wsHub.broadcastTaskStallAlert(run.groupId, run.taskId);
+  })();
 }
 
 /**

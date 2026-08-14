@@ -381,6 +381,9 @@ export interface RateLimitPolicy {
 export interface DispatchPolicy {
   /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
   maxParallelGroups: number;
+  /** 无进展提醒(分钟):running 任务连续无输出超过该值 → 提醒协调者(发群消息
+   *  + 任务行警示标记,不失败);静默继续到 stallTimeoutMinutes 才标 failed。 */
+  stallAlertMinutes: number;
   /** 静默超时(分钟):running 任务连续无输出超过该值 → 视为失联,标 failed。 */
   stallTimeoutMinutes: number;
   /** 认领超时(分钟):queued 任务超过该值仍未进入 running → 标 failed。 */
@@ -393,6 +396,9 @@ export interface DispatchPolicy {
 
 /** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
 const DEFAULT_MAX_PARALLEL_GROUPS = 2;
+
+/** 默认无进展提醒(分钟);缺失/非法时兜底。 */
+export const DEFAULT_STALL_ALERT_MINUTES = 15;
 
 /** 默认静默超时(分钟);缺失/非法时兜底。 */
 export const DEFAULT_STALL_TIMEOUT_MINUTES = 30;
@@ -452,6 +458,7 @@ export function readDispatchPolicy(): DispatchPolicy {
       readFileSync(resolveDispatchPolicyFile(), "utf8"),
     ) as {
       maxParallelGroups?: unknown;
+      stallAlertMinutes?: unknown;
       stallTimeoutMinutes?: unknown;
       claimTimeoutMinutes?: unknown;
       retry?: {
@@ -476,6 +483,10 @@ export function readDispatchPolicy(): DispatchPolicy {
       maxParallelGroups: positiveInt(
         raw.maxParallelGroups,
         DEFAULT_MAX_PARALLEL_GROUPS,
+      ),
+      stallAlertMinutes: positiveInt(
+        raw.stallAlertMinutes,
+        DEFAULT_STALL_ALERT_MINUTES,
       ),
       stallTimeoutMinutes: positiveInt(
         raw.stallTimeoutMinutes,
@@ -516,6 +527,7 @@ export function readDispatchPolicy(): DispatchPolicy {
   }
   return {
     maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS,
+    stallAlertMinutes: DEFAULT_STALL_ALERT_MINUTES,
     stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
     retry: DEFAULT_RETRY_POLICY,

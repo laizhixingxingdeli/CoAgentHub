@@ -1044,6 +1044,46 @@ describe("群组与成员 API", () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
+    it("PATCH title 重命名群组;projectPath 不受影响", async () => {
+      const { id } = await registerParticipant({
+        name: "coord",
+      });
+      const group = await createGroup(id, "旧名字");
+
+      const res = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ title: "新名字" }),
+      });
+      expect(res.status).toBe(200);
+      const updated = (await res.json()) as {
+        title: string;
+        projectPath: string | null;
+      };
+      expect(updated.title).toBe("新名字");
+
+      // GET 详情确认已落库。
+      const getRes = await app.request(`/api/groups/${group.id}`, {
+        headers: { "X-Participant-Id": id },
+      });
+      expect(getRes.status).toBe(200);
+      expect(((await getRes.json()) as { title: string }).title).toBe("新名字");
+
+      // 空 title 拒绝;仅 title 的 PATCH 不影响 projectPath。
+      const emptyRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ title: "" }),
+      });
+      expect(emptyRes.status).toBe(400);
+    });
+
     it("null 与空串均清空绑定", async () => {
       const { id } = await registerParticipant({
         name: "coord",

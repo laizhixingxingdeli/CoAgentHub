@@ -237,6 +237,29 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     }
   }
 
+  /** 轮询直到任务 diffSummary 满足谓词(警示标记等);超时抛错。 */
+  async function waitForTaskDiff(
+    participantId: string,
+    groupId: string,
+    messageId: string,
+    predicate: (diff: Record<string, unknown> | null) => boolean,
+    timeoutMs = 15_000,
+  ) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const tasks = await listTasks(participantId, groupId);
+      const t = tasks.find((x) => x.messageId === messageId);
+      const diff = t ? (t.diffSummary as Record<string, unknown> | null) : null;
+      if (t && predicate(diff)) return diff;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `task(message=${messageId}) 的 diffSummary 未在 ${timeoutMs}ms 内满足谓词`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
   /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
   async function setupGroup() {
     const coordinator = await registerParticipant({
@@ -727,6 +750,58 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
         (m) =>
           m.contentType === "task_status" && m.body.includes("执行器静默超时"),
       );
+    } finally {
+      process.env.FAKE_SLEEP_SECS = "";
+    }
+  }, 30_000);
+
+  it("无进展提醒:静默超 alert 阈值 → ⚠️ 提醒消息 + diffSummary.stallAlerted 警示标记;继续静默到 stall 才 failed", async () => {
+    // alert 阈值 100ms < stall 阈值 5s:先触发提醒(不失败),再静默超时失败。
+    process.env.FAKE_SLEEP_SECS = "60";
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setReliabilityTimeoutsForTests(5_000, 60_000, 100);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "静默提醒任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      // 1) ⚠️ 提醒消息出现(含「无进展」+ 执行器 label + 请介入)。
+      const alertMsg = await waitForMessage(
+        coordinator.id,
+        group.id,
+        (m) => m.contentType === "task_status" && m.body.includes("无进展"),
+      );
+      expect(alertMsg.body).toContain("codebuddy");
+      expect(alertMsg.body).toContain("请介入");
+      // 提醒消息里带的是任务 id(与消息 id 不同,单独取)。
+      const tasks0 = await listTasks(coordinator.id, group.id);
+      const t0 = tasks0.find((x) => x.messageId === msg.id);
+      expect(t0).toBeDefined();
+      expect(alertMsg.body).toContain(String(t0?.id));
+      // 2) 警示标记落库(diffSummary.stallAlerted),任务仍未失败(非失败警示)。
+      const alerted = await waitForTaskDiff(
+        coordinator.id,
+        group.id,
+        msg.id,
+        (diff) => diff?.stallAlerted === true,
+      );
+      expect(alerted).toBeDefined();
+      const before = await listTasks(coordinator.id, group.id);
+      const b = before.find((x) => x.messageId === msg.id);
+      expect(b?.status).toBe("running");
+      // 3) 静默继续到 stall 阈值 → failed(现有行为不被提醒打断)。
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("静默");
     } finally {
       process.env.FAKE_SLEEP_SECS = "";
     }

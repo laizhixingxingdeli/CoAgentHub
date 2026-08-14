@@ -601,4 +601,51 @@ describe("接入 Participant 页", () => {
     // 编辑对话框未被打开
     expect(screen.queryByLabelText("Participant 名字")).not.toBeInTheDocument();
   });
+
+  it("参与者行内改名:铅笔 → 输入 → PATCH /api/participants/:id {name} → 行内刷新", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
+    const fetchMock = participantsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("Online Bot");
+    const pencil = screen.getByTestId("rename-participant-online-bot");
+    fireEvent.click(pencil);
+
+    const input = await screen.findByLabelText("新参与者名称");
+    expect((input as HTMLInputElement).value).toBe("Online Bot");
+    fireEvent.change(input, { target: { value: "Online Bot 新名" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          init?.method === "PATCH" &&
+          String(url).endsWith("/api/participants/participant-online"),
+      );
+      expect(patch).toBeDefined();
+      expect(JSON.parse(String(patch![1]?.body))).toEqual({
+        name: "Online Bot 新名",
+      });
+    });
+    // 行内刷新出新名字,编辑态关闭。
+    expect(await screen.findByText("Online Bot 新名")).toBeInTheDocument();
+    expect(screen.queryByLabelText("新参与者名称")).toBeNull();
+  });
+
+  it("内置执行器行内改名给出「执行器名由配置管理」提示,不进入编辑", async () => {
+    // 内置执行器无对应 participant 注册(executors 列表里只有内置项时),
+    // 点击铅笔直接提示「执行器名由配置管理」,不进入编辑态。
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-any");
+    vi.stubGlobal("fetch", executorsFetchMock());
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("AtomCode 执行器");
+    const pencil = screen.getByTestId("rename-participant-executor");
+    fireEvent.click(pencil);
+    // 提示出现,不进入编辑态。
+    expect(await screen.findByText("执行器名由配置管理")).toBeInTheDocument();
+    expect(screen.queryByLabelText("新参与者名称")).toBeNull();
+  });
 });

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { colorForId as participantColor } from "@/lib/avatar-color";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import { parseTaskBrief, TaskBriefCard, TaskResultCard } from "./cards";
 import {
   dayKey,
   dayLabel,
@@ -210,6 +211,11 @@ export function MessageList(props: MessageListProps) {
               const label = audienceLabel(msg);
               const deleted =
                 msg.deleted === true || msg.body === DELETED_MESSAGE_BODY;
+              // 任务书卡片(网页体验批次):正文为 matt 格式任务书(含
+              // **Category:**/**Summary:** 等标记行)且非状态消息时,渲染为
+              // 结构化卡片;parseTaskBrief 返回 null 时回退普通文本。
+              const brief = parseTaskBrief(msg.body);
+              const briefCard = !isStatus && !deleted && brief !== null;
               // Ticket 22: 编辑/删除 are sender-only (own messages); a deleted
               // placeholder shows no action bar at all. Archived/deleted groups
               // are read-only — write actions (edit/reply/delete) are disabled
@@ -307,8 +313,26 @@ export function MessageList(props: MessageListProps) {
                         <div className="max-w-[85%] rounded-lg border bg-muted/40 px-3 py-1.5 text-xs italic text-muted-foreground">
                           {t("messages.item.deleted")}
                         </div>
+                      ) : taskStatusKind(msg.body) === "done" ||
+                        taskStatusKind(msg.body) === "failed" ? (
+                        /* 执行结果卡片(✅/❌):第一行状态+执行器+提交(有则),
+                           「测试/汇报/遗留」每项一行摘要(超长截断+展开),不再
+                           整段贴 summary;仍居中紧凑、带状态配色与时间。 */
+                        <div
+                          data-testid="task-status"
+                          data-status={taskStatusKind(msg.body)}
+                          className={cn(
+                            "max-w-[85%] rounded-lg border px-3 py-1.5 shadow-sm",
+                            TASK_STATUS_CLASSES[taskStatusKind(msg.body)],
+                          )}
+                        >
+                          <TaskResultCard body={msg.body} />
+                          <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-muted-foreground/80">
+                            <span>{formatMessageTime(msg.createdAt)}</span>
+                          </div>
+                        </div>
                       ) : (
-                        /* Ticket 26: 桥回传状态消息 → 微信系统消息风格的居中紧凑
+                        /* Ticket 26: 桥回传状态消息(📋/🚀/🛑)→ 微信系统消息风格的居中紧凑
                        状态条(不占大气泡、不分左右);颜色按状态区分。 */
                         <div
                           data-testid="task-status"
@@ -546,22 +570,31 @@ export function MessageList(props: MessageListProps) {
                                 )}
                                 {msg.body && (
                                   <>
-                                    <p className="whitespace-pre-wrap break-words">
-                                      {displayBody}
-                                    </p>
-                                    {bodyLong && (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          toggleFold(msg.id);
-                                        }}
-                                        className="mt-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-muted"
-                                      >
-                                        {folded
-                                          ? t("messages.item.expandFull")
-                                          : t("messages.item.fold")}
-                                      </button>
+                                    {briefCard ? (
+                                      /* 任务书结构化卡片(网页体验批次):识别
+                                         Category/Summary 等标记行,分栏显示 +
+                                         验收标准列表;「展开全文」看原文。 */
+                                      <TaskBriefCard body={msg.body} />
+                                    ) : (
+                                      <>
+                                        <p className="whitespace-pre-wrap break-words">
+                                          {displayBody}
+                                        </p>
+                                        {bodyLong && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              toggleFold(msg.id);
+                                            }}
+                                            className="mt-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-muted"
+                                          >
+                                            {folded
+                                              ? t("messages.item.expandFull")
+                                              : t("messages.item.fold")}
+                                          </button>
+                                        )}
+                                      </>
                                     )}
                                   </>
                                 )}

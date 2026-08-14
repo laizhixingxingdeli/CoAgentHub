@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, Search, X } from "lucide-react";
+import { Archive, ArrowLeft, Pencil, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
@@ -64,6 +64,10 @@ export default function GroupMessagesPage() {
     "active" | "archived" | "deleted" | null
   >(null);
   const [groupTitle, setGroupTitle] = useState<string | null>(null);
+  // 群名行内改名(网页体验批次):标题栏铅笔图标 → 输入 → PATCH /groups/:id {title}。
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [body, setBody] = useState("");
   // Collapsed thread roots (ticket 15). Keyed by root message id and kept in
   // its own state so a WS merge (which replaces the message list) never resets
@@ -200,6 +204,40 @@ export default function GroupMessagesPage() {
       // the composer unlocked (the server still enforces the 400 on writes).
     }
   }, [groupId]);
+
+  /** 群名行内改名(网页体验批次):标题栏铅笔图标 → 输入 → PATCH /groups/:id
+   *  {title};仅 active 群可改名(归档/软删只读)。 */
+  const handleRenameTitle = async () => {
+    const title = titleDraft.trim();
+    if (!groupId || !title || savingTitle || isReadOnly) {
+      return;
+    }
+    setSavingTitle(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/groups/${groupId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...participantIdentityHeaders(),
+        },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      setGroupTitle(title);
+      setEditingTitle(false);
+    } catch (e) {
+      setError(
+        t("groups.error.renameFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    } finally {
+      setSavingTitle(false);
+    }
+  };
 
   const loadMessages = useCallback(
     async (q?: string) => {
@@ -382,7 +420,7 @@ export default function GroupMessagesPage() {
         return;
       }
       // task_output(实时进度)由任务面板 TasksTab 自己订阅处理,消息流忽略。
-      if (event.type === "task_output") {
+      if (event.type === "task_output" || event.type === "task_stall_alert") {
         return;
       }
       // group_message_deleted carries only the id — mark the placeholder locally.
@@ -823,9 +861,61 @@ export default function GroupMessagesPage() {
           <ArrowLeft className="size-4" />
           <span className="hidden sm:inline">{t("messages.back.label")}</span>
         </a>
-        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">
-          {groupTitle ?? t("messages.titleFallback")}
-        </h2>
+        {editingTitle ? (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <Input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  void handleRenameTitle();
+                } else if (e.key === "Escape") {
+                  setEditingTitle(false);
+                }
+              }}
+              aria-label={t("groups.renameInputAria")}
+              className="h-8 min-w-0 flex-1"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={savingTitle || !titleDraft.trim()}
+              onClick={() => void handleRenameTitle()}
+              className="shrink-0"
+            >
+              {savingTitle ? t("common.saving") : t("groups.renameSave")}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setEditingTitle(false)}
+              className="shrink-0"
+            >
+              {t("groups.renameCancel")}
+            </Button>
+          </div>
+        ) : (
+          <h2
+            data-testid="group-title-bar"
+            className="flex min-w-0 flex-1 items-center gap-1 truncate text-base font-semibold"
+          >
+            <span className="truncate">
+              {groupTitle ?? t("messages.titleFallback")}
+            </span>
+            {!isReadOnly && (
+              <Pencil
+                data-testid="rename-group-title"
+                className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                aria-label={t("groups.renameAria")}
+                onClick={() => {
+                  setTitleDraft(groupTitle ?? "");
+                  setEditingTitle(true);
+                }}
+              />
+            )}
+          </h2>
+        )}
         {searchBoxOpen ? (
           <div className="flex shrink-0 items-center gap-1.5">
             <Input

@@ -1,5 +1,6 @@
 {
   "maxParallelGroups": 2,
+  "stallAlertMinutes": 15,
   "stallTimeoutMinutes": 30,
   "claimTimeoutMinutes": 30,
   "retry": {

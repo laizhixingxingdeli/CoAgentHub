@@ -65,10 +65,16 @@ export const en: Record<DictKey, string> = {
   "groups.error.loadFailed": "Failed to load groups: {detail}",
   "groups.error.loadMoreFailed": "Failed to load more groups: {detail}",
   "groups.error.createFailed": "Create failed: {detail}",
+  "groups.error.renameFailed": "Rename failed: {detail}",
   "groups.error.archiveFailed": "Archive failed: {detail}",
   "groups.error.restoreFailed": "Restore failed: {detail}",
   "groups.error.deleteFailed": "Delete failed: {detail}",
   "groups.created": "Group “{title}” created",
+  "groups.renamed": "Group renamed to “{title}”",
+  "groups.renameAria": "Rename group",
+  "groups.renameInputAria": "New group name",
+  "groups.renameSave": "Save name",
+  "groups.renameCancel": "Cancel rename",
   "groups.archived": "Group “{title}” archived",
   "groups.restored": "Group “{title}” restored to active",
   "groups.deleted": "Group “{title}” deleted",
@@ -180,6 +186,12 @@ export const en: Record<DictKey, string> = {
   "participants.edit.capsPlaceholder": "e.g. text-generation, code-review",
   "participants.heartbeat": "Report online",
   "participants.reporting": "Reporting…",
+  "participants.renamed": "Renamed to “{name}”",
+  "participants.renameAria": "Rename participant",
+  "participants.renameInputAria": "New participant name",
+  "participants.renameSave": "Save name",
+  "participants.renameCancel": "Cancel rename",
+  "participants.renameBuiltinHint": "Executor name is managed by configuration",
   "participants.editExecutor.action": "Edit executor",
   "participants.editExecutor.builtinDisabled":
     "Built-in executors cannot be edited",
@@ -273,6 +285,7 @@ export const en: Record<DictKey, string> = {
   "tasks.status.cancelled": "Cancelled",
   "tasks.hint.readOnly": "Group archived, read-only",
   "tasks.hint.noPermission": "coordinator/human identity required",
+  "tasks.stallAlerted": "No progress — please intervene",
   "tasks.expand": "Show details",
   "tasks.collapse": "Collapse",
   "tasks.output.title": "Live output",
@@ -380,4 +393,34 @@ export const en: Record<DictKey, string> = {
   "sidebar.theme.light": "Light mode",
   "sidebar.sheet.title": "Sidebar",
   "sidebar.sheet.desc": "Mobile sidebar navigation.",
+
+  "feedback.card.body":
+    "Feedback goes straight to the project's GitHub Issues for tracking.",
+  "feedback.card.title": "Project GitHub Issues",
+  "feedback.open": "Open Issues",
+  "feedback.subtitle":
+    "Report issues, suggestions, or bugs to the project tracker.",
+  "feedback.title": "Feedback",
+  "help.features.body":
+    "Participants register → groups bound to projects → role/audience messages → directed executor tasks → task panel with live progress & history.",
+  "help.features.title": "Platform features",
+  "help.step.create.body":
+    "Enter a task name to create the group; the creator becomes coordinator.",
+  "help.step.create.title": "1. Create a group",
+  "help.step.message.body":
+    "Broadcast to all, or direct to a participant (e.g. an executor).",
+  "help.step.message.title": "2. Send messages",
+  "help.step.project.body":
+    "A group can bind a project path where executors work.",
+  "help.step.project.title": "5. Bind a project",
+  "help.step.task.body":
+    "Send a task brief directed at an executor (e.g. AtomCode) to create and run a task.",
+  "help.step.task.title": "3. Dispatch tasks",
+  "help.step.watch.body":
+    "Task panel shows status, live output, and history; stop/rollback available.",
+  "help.step.watch.title": "4. Watch tasks",
+  "help.steps.title": "Quick start",
+  "help.subtitle":
+    "CoAgentHub quick guide: one task per group, agents collaborate.",
+  "help.title": "Help",
 };

@@ -2,6 +2,7 @@ import {
   Archive,
   KeyRound,
   MessageSquare,
+  Pencil,
   Plus,
   RotateCcw,
   Search,
@@ -80,6 +81,10 @@ export default function GroupsPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
+  // 群名行内改名(网页体验批次):editingTitleId = 正在改名的群 id,titleDraft 为输入值。
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -455,6 +460,45 @@ export default function GroupsPage() {
       );
     } finally {
       setCreating(false);
+    }
+  };
+
+  /** 群名行内改名(网页体验批次):PATCH /groups/:id { title } 后刷新列表。
+   * 只允许 active 群改名(归档/软删只读,与其它写操作一致)。 */
+  const startRenameTitle = (group: GroupItem) => {
+    setEditingTitleId(group.id);
+    setTitleDraft(group.title);
+  };
+
+  const handleRenameTitle = async () => {
+    const title = titleDraft.trim();
+    if (!editingTitleId || !title || savingTitle) {
+      return;
+    }
+    setError(null);
+    setMessage(null);
+    setSavingTitle(true);
+    try {
+      const headers = participantIdentityHeaders();
+      const res = await fetch(`/api/groups/${editingTitleId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) {
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+      }
+      setMessage(t("groups.renamed", { title }));
+      setEditingTitleId(null);
+      await loadGroups();
+    } catch (e) {
+      setError(
+        t("groups.error.renameFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    } finally {
+      setSavingTitle(false);
     }
   };
 
@@ -947,13 +991,58 @@ export default function GroupsPage() {
                   className="flex flex-col gap-2 rounded-lg border bg-card p-4"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 truncate text-left text-sm font-medium hover:underline"
-                      onClick={() => navigate(`/groups/${group.id}`)}
-                    >
-                      {group.title}
-                    </button>
+                    {editingTitleId === group.id ? (
+                      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <Input
+                          autoFocus
+                          value={titleDraft}
+                          onChange={(e) => setTitleDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              void handleRenameTitle();
+                            } else if (e.key === "Escape") {
+                              setEditingTitleId(null);
+                            }
+                          }}
+                          aria-label={t("groups.renameInputAria")}
+                          className="h-8 flex-1"
+                        />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={savingTitle || !titleDraft.trim()}
+                          onClick={() => void handleRenameTitle()}
+                        >
+                          {savingTitle
+                            ? t("common.saving")
+                            : t("groups.renameSave")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setEditingTitleId(null)}
+                        >
+                          {t("groups.renameCancel")}
+                        </Button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-1 truncate text-left text-sm font-medium hover:underline"
+                        onClick={() => navigate(`/groups/${group.id}`)}
+                      >
+                        <span className="truncate">{group.title}</span>
+                        <Pencil
+                          data-testid={`rename-title-${group.id}`}
+                          className="size-3.5 shrink-0 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startRenameTitle(group);
+                          }}
+                          aria-label={t("groups.renameAria")}
+                        />
+                      </button>
+                    )}
                     <StatusBadge status={group.status} />
                   </div>
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
@@ -1036,13 +1125,57 @@ export default function GroupsPage() {
                 {groups.map((group) => (
                   <tr key={group.id} className="border-b last:border-0">
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        className="font-medium hover:underline"
-                        onClick={() => navigate(`/groups/${group.id}`)}
-                      >
-                        {group.title}
-                      </button>
+                      {editingTitleId === group.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            autoFocus
+                            value={titleDraft}
+                            onChange={(e) => setTitleDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                void handleRenameTitle();
+                              } else if (e.key === "Escape") {
+                                setEditingTitleId(null);
+                              }
+                            }}
+                            aria-label={t("groups.renameInputAria")}
+                            className="h-8 w-56"
+                          />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={savingTitle || !titleDraft.trim()}
+                            onClick={() => void handleRenameTitle()}
+                          >
+                            {savingTitle
+                              ? t("common.saving")
+                              : t("groups.renameSave")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setEditingTitleId(null)}
+                          >
+                            {t("groups.renameCancel")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="font-medium hover:underline"
+                            onClick={() => navigate(`/groups/${group.id}`)}
+                          >
+                            {group.title}
+                          </button>
+                          <Pencil
+                            data-testid={`rename-title-${group.id}`}
+                            className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                            onClick={() => startRenameTitle(group)}
+                            aria-label={t("groups.renameAria")}
+                          />
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={group.status} />

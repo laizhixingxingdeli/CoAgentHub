@@ -1,5 +1,5 @@
 import { Separator } from "@radix-ui/react-separator";
-import { Bot, Command, FolderOpen, LifeBuoy, Send, Users } from "lucide-react";
+import { Bot, Command, LifeBuoy, Send, Users } from "lucide-react";
 import type * as React from "react";
 import { useLocation } from "wouter";
 import {
@@ -39,11 +39,6 @@ const data = {
       url: "/participants",
       icon: Bot,
     },
-    {
-      title: "文件传输",
-      url: "/files",
-      icon: FolderOpen,
-    },
   ],
   navSecondary: [
     {
@@ -69,9 +64,7 @@ export default function AppSidebar({
     ? "群组"
     : location.startsWith("/participants")
       ? "接入 Participant(参与者)"
-      : location.startsWith("/files")
-        ? "文件传输"
-        : "首页";
+      : "首页";
 
   return (
     <SidebarProvider>

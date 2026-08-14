@@ -331,7 +331,7 @@ describe("ContextPanel 右栏上下文面板", () => {
     ]);
   }
 
-  it("任务 Tab:展开任务行 → includeOutput 拉取实时输出并显示", async () => {
+  it("任务 Tab:running 任务实时输出默认展开可见(无需点击);点击折叠,再点展开 → includeOutput 兜底", async () => {
     vi.stubGlobal("fetch", outputFetchMock());
     setViewport(1280);
     renderPanel();
@@ -341,18 +341,22 @@ describe("ContextPanel 右栏上下文面板", () => {
     await screen.findByTestId("tasks-tab");
     expect(await screen.findByText("执行中")).toBeInTheDocument();
 
-    // 未展开:无实时输出区。
-    expect(screen.queryByTestId("task-live-output")).toBeNull();
-    fireEvent.click(screen.getByTestId("task-expand-task-1"));
-
-    // 展开:attempt 时间线 + 实时输出区(includeOutput 兜底内容)。
+    // running 任务默认展开:实时输出区无需点击即可见。
     expect(await screen.findByTestId("task-live-output")).toBeInTheDocument();
     expect(screen.getByText("执行历史:")).toBeInTheDocument();
     expect(screen.getByText(/第 1 次 执行中/)).toBeInTheDocument();
+
+    // 点击折叠按钮 → 输出区收起。
+    fireEvent.click(screen.getByTestId("task-expand-task-1"));
+    expect(screen.queryByTestId("task-live-output")).toBeNull();
+
+    // 再点展开 → includeOutput 兜底拉取实时输出。
+    fireEvent.click(screen.getByTestId("task-expand-task-1"));
+    expect(await screen.findByTestId("task-live-output")).toBeInTheDocument();
     expect(screen.getByTestId("task-live-output")).toHaveTextContent("line-2");
   });
 
-  it("任务 Tab:WS task_output 事件追加到展开行的实时输出", async () => {
+  it("任务 Tab:WS task_output 事件追加到默认展开行的实时输出", async () => {
     vi.stubGlobal("fetch", outputFetchMock());
     setViewport(1280);
     renderPanel();
@@ -360,10 +364,9 @@ describe("ContextPanel 右栏上下文面板", () => {
     await screen.findByText("hermes-mac");
     fireEvent.click(screen.getByTestId("context-tab-tasks"));
     await screen.findByTestId("tasks-tab");
-    fireEvent.click(screen.getByTestId("task-expand-task-1"));
+    // running 默认展开,无需点击即可接收 WS 追加。
     await screen.findByTestId("task-live-output");
 
-    // 展开时缓冲已在(includeOutput 返回过)→ 不再重复拉取,WS 块直接追加。
     const ws = MockWebSocket.instances.find((w) => w.url.includes("/api/ws"));
     expect(ws).toBeDefined();
     ws!.open();
@@ -381,6 +384,42 @@ describe("ContextPanel 右栏上下文面板", () => {
         "line-4-live",
       );
     });
+  });
+
+  it("任务 Tab:WS task_stall_alert 事件 → 任务行黄色警示样式 + ⚠️ 徽标(非失败)", async () => {
+    vi.stubGlobal("fetch", outputFetchMock());
+    setViewport(1280);
+    renderPanel();
+
+    await screen.findByText("hermes-mac");
+    fireEvent.click(screen.getByTestId("context-tab-tasks"));
+    await screen.findByTestId("tasks-tab");
+    // 初始无警示。
+    expect(screen.queryByTestId("task-stall-alert-task-1")).toBeNull();
+    expect(
+      screen.getByTestId("task-row-task-1").getAttribute("data-alerted"),
+    ).toBeNull();
+
+    const ws = MockWebSocket.instances.find((w) => w.url.includes("/api/ws"));
+    expect(ws).toBeDefined();
+    ws!.open();
+    ws!.receive(
+      JSON.stringify({
+        type: "task_stall_alert",
+        groupId: "group-1",
+        taskId: "task-1",
+      }),
+    );
+
+    // ⚠️ 徽标出现 + 行级警示标记(状态仍 running,非失败)。
+    await waitFor(() => {
+      expect(screen.getByTestId("task-stall-alert-task-1")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("task-row-task-1").getAttribute("data-alerted"),
+    ).toBe("true");
+    expect(screen.getByText("执行中")).toBeInTheDocument();
+    expect(screen.getByText(/无进展,请介入/)).toBeInTheDocument();
   });
 
   it("任务 Tab:回滚按钮点击 → 「回滚中…」→ 轮询确认后「已恢复」", async () => {

@@ -32,6 +32,14 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const [commandSending, setCommandSending] = useState<string | null>(null);
   // 展开的任务行(实时输出区 + attempt 时间线展示)。
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  // 默认展开(运行中/已完成)但被用户手动折叠的任务行 id 集合。
+  const [foldedTaskIds, setFoldedTaskIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  // 无进展提醒(WS task_stall_alert)的任务行 id 集合(黄色警示样式)。
+  const [stallAlertedIds, setStallAlertedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // 实时输出缓冲:taskId → 已接收的 WS chunk 拼接;展开时优先用实时缓冲。
   const [liveOutputs, setLiveOutputs] = useState<Record<string, string>>({});
   // 回滚状态:taskId → "rolling"(已发送,等待恢复完成)| "done"(已恢复)。
@@ -118,21 +126,74 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadGroupStatus();
   }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
 
-  // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(展开行流式显示)。
+  // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(展开行流式显示);
+  // 无进展提醒:task_stall_alert 事件 → 该任务行标记黄色警示(非失败)。
   useGroupWs(groupId, (event) => {
-    if (event.type !== "task_output") {
+    if (event.type === "task_output") {
+      setLiveOutputs((prev) => ({
+        ...prev,
+        [event.taskId]: (prev[event.taskId] ?? "") + event.chunk,
+      }));
       return;
     }
-    setLiveOutputs((prev) => ({
-      ...prev,
-      [event.taskId]: (prev[event.taskId] ?? "") + event.chunk,
-    }));
+    if (event.type === "task_stall_alert") {
+      setStallAlertedIds((prev) => {
+        if (prev.has(event.taskId)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.add(event.taskId);
+        return next;
+      });
+    }
   });
 
-  /** 展开任务行:实时缓冲为空(刷新/断线后)时用 includeOutput=1 拉当前缓冲。 */
+  /** 展开/折叠任务行:running/done/failed 默认展开(可折叠),点击切换折叠态;
+   *  queued/cancelled 仅显式展开时可见。展开时实时缓冲为空(刷新/断线后)
+   *  用 includeOutput=1 拉当前缓冲兜底。 */
   const toggleExpand = useCallback(
-    async (taskId: string) => {
-      const next = expandedTaskId === taskId ? null : taskId;
+    async (task: TaskItem) => {
+      if (
+        task.status === "running" ||
+        task.status === "done" ||
+        task.status === "failed"
+      ) {
+        // 默认展开行:点击只切换折叠态;从折叠恢复展开且缓冲为空 → includeOutput 兜底。
+        const wasFolded = foldedTaskIds.has(task.id);
+        setFoldedTaskIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(task.id)) {
+            next.delete(task.id);
+          } else {
+            next.add(task.id);
+          }
+          return next;
+        });
+        if (wasFolded && liveOutputs[task.id] === undefined) {
+          try {
+            const res = await fetch(
+              `/api/groups/${groupId}/tasks?includeOutput=1`,
+              { headers: participantIdentityHeaders() },
+            );
+            if (!res.ok) {
+              return;
+            }
+            const rows = (await res.json()) as TaskItem[];
+            const seeded = rows.find((r) => r.id === task.id)?.outputTail;
+            if (seeded) {
+              setLiveOutputs((prev) =>
+                prev[task.id] !== undefined
+                  ? prev
+                  : { ...prev, [task.id]: seeded },
+              );
+            }
+          } catch {
+            // 拉取失败不阻塞展开(WS 恢复后仍会流式追加)。
+          }
+        }
+        return;
+      }
+      const next = expandedTaskId === task.id ? null : task.id;
       setExpandedTaskId(next);
       if (next === null) {
         return;
@@ -159,7 +220,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
         // 拉取失败不阻塞展开(WS 恢复后仍会流式追加)。
       }
     },
-    [expandedTaskId, groupId, liveOutputs],
+    [expandedTaskId, foldedTaskIds, groupId, liveOutputs],
   );
 
   // 停止/回滚需要 coordinator/human 身份:已绑定身份即视为有控制权限;
@@ -267,9 +328,11 @@ export function TasksTab({ groupId }: { groupId: string }) {
         messages={messages}
         members={members}
         expandedTaskId={expandedTaskId}
+        foldedTaskIds={foldedTaskIds}
+        stallAlertedIds={stallAlertedIds}
         liveOutputs={liveOutputs}
         rollbackStates={rollbackStates}
-        onToggleExpand={(task) => void toggleExpand(task.id)}
+        onToggleExpand={(task) => void toggleExpand(task)}
         onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
         onRollback={(task) => void handleRollback(task)}
       />
