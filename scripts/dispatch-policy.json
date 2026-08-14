@@ -8,7 +8,15 @@
     "switchExecutor": false
   },
   "rateLimit": {
-    "detectPatterns": ["rate limit", "quota", "429", "额度", "次数限制"],
+    "detectPatterns": [
+      "rate limit",
+      "rate-lim",
+      "quota",
+      "429",
+      "额度",
+      "次数限制",
+      "window exhausted"
+    ],
     "cooldownMinutes": 300,
     "fallbackExecutor": null
   }
