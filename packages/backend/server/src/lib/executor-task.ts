@@ -35,6 +35,20 @@
  *    跳过,完成路径 stopped → cancelled)。
  * 阈值并入 scripts/dispatch-policy.json,server 启动时读取(缺省兜底 30)。
  *
+ * 调度可靠性(票6):失败自动重试 + 弱验收钩子,配置并入 dispatch-policy.json。
+ *  - 失败自动重试:任务因 exit≠0 / 超时 / 静默失败且 retryCount < maxRetries
+ *    (默认 1)时,首次失败照常回传 ❌ 后补发「↻ [label] 自动重试 (第 N 次)」,
+ *    重试前 resetWorkspace=true 时回滚 checkpoint(refs/coagenthub-cp/<taskId>)
+ *    恢复工作树到任务前快照(回滚失败则终止重试,按最终失败处理);随后把 run
+ *    重新入队,同一执行器重跑,retry_count 落库。认领超时 / 手动停止 / 验收
+ *    失败不重试(停止是用户意图,认领失败重试无意义,验收失败需人工处理)。
+ *  - 弱验收钩子:执行器报 done(code=0)时,server 在 repoRoot 跑
+ *    git status --porcelain + 对比 HEAD 与执行前 commit(checkpoint ref 的
+ *    父提交):工作树干净且 HEAD 有变化(新提交)→ 正常 done;工作树不干净或
+ *    HEAD 无变化 → 标 failed(「执行器未提交改动」)+ ❌ 回传,不自动重试。
+ *    git 命令失败 → 跳过验收(视为通过,记录 warning,避免误杀);a2a 远端
+ *    执行无本地工作区,不验收。
+ *
  * 状态回传保持桥现有 emoji 状态条格式:📋 排队 / 🚀 开始执行 / ✅ 完成 /
  * ❌ 失败 / 🛑 停止,contentType=task_status 由前缀判定,与桥的
  * contentTypeFor 一致。
@@ -48,7 +62,9 @@ import {
   createCheckpoint,
   type ExecutorRunResult,
   findRepoRoot,
+  gitSync,
   readTimeoutMs,
+  resetToCheckpoint,
   runExecutor,
 } from "@server/lib/executor-runner";
 import {
@@ -116,6 +132,10 @@ interface QueuedRun {
   stallTimer: NodeJS.Timeout | null;
   /** 静默超时已触发(完成回调不再重复回传 ❌)。 */
   stalled: boolean;
+  /** 已自动重试次数(失败重试用;重试前回滚 checkpoint、重新入队重跑)。 */
+  retryCount: number;
+  /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
+  checkpointRef: string | null;
 }
 
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
@@ -143,6 +163,9 @@ let stallTimeoutMs = readDispatchPolicy().stallTimeoutMinutes * 60_000;
 
 /** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
 let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
+
+/** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
+let retryPolicy = readDispatchPolicy().retry;
 
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 let pumping = false;
@@ -185,6 +208,7 @@ export function __resetExecutorQueueForTests(): void {
   maxParallelGroups = policy.maxParallelGroups;
   stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
+  retryPolicy = policy.retry;
 }
 
 /** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
@@ -490,6 +514,8 @@ async function dispatchTask(
     claimTimer: null,
     stallTimer: null,
     stalled: false,
+    retryCount: 0,
+    checkpointRef: null,
   };
   group.queue.push(run);
 
@@ -626,6 +652,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 任务,不做无回滚保护的执行。快照 ref 写回 task.checkpoint_ref。
       try {
         const cp = createCheckpoint(taskId, repoRoot);
+        run.checkpointRef = cp.ref;
         await db
           .update(taskTable)
           .set({ checkpointRef: cp.ref })
@@ -689,26 +716,41 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
         return;
       }
-      // 静默超时已在 handleStall 里置 failed + 回传 ❌(并 kill 进程组):
-      // 进程被终止后的 promise 完成路径不再重复回传/覆写终态。
+      // 静默超时已由 handleStall 置 stalled + kill 进程组;失败落库 / ❌ 回传 /
+      // 重试判定统一在完成路径处理,避免定时器回调与完成路径并发写状态。
       if (run.stalled) {
         console.log(`[executor] 任务已因静默超时失败: ${taskId}`);
+        await handleFailure(run, "执行器静默超时", {
+          retryable: true,
+          message: `❌ [${ex.label}] 任务失败 (执行器静默超时)`,
+        });
         return;
       }
       if (result.timedOut) {
         console.error(`[executor] 任务超时: ${taskId}`);
-        await failTask(db, taskId, "执行超时");
-        await postStatus(
-          db,
-          groupId,
-          participantId,
-          ex,
-          `❌ [${ex.label}] 任务失败 (超时)`,
-        );
+        await handleFailure(run, "执行超时", {
+          retryable: true,
+          message: `❌ [${ex.label}] 任务失败 (超时)`,
+        });
         return;
       }
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (result.code === 0) {
+        // 弱验收钩子:done 判定前校验执行器是否真正提交了改动(仅本地 CLI,
+        // a2a 远端执行无本地工作区不验收;git 命令失败跳过验收视为通过)。
+        if (!isA2a && run.checkpointRef) {
+          const verify = verifyTaskCommitted(repoRoot, run.checkpointRef);
+          if (!verify.ok) {
+            const reason = verify.reason ?? "执行器未提交改动";
+            console.error(`[executor] 验收未通过: ${reason} (${taskId})`);
+            // 验收失败不重试(需人工处理)。
+            await handleFailure(run, reason, {
+              retryable: false,
+              message: `❌ [${ex.label}] 任务失败: ${reason}`,
+            });
+            return;
+          }
+        }
         const hash = findCommitHash(output);
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不过 extractSummary 的关键词截取(汇报/做了什么/commit 段)。
@@ -717,26 +759,25 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           : extractSummary(output);
         const diffSummary: Record<string, unknown> = { summary: summaryText };
         if (hash) diffSummary.hash = hash;
+        if (run.retryCount > 0) diffSummary.retries = run.retryCount;
         await db
           .update(taskTable)
           .set({ status: "done", diffSummary })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
         console.log(
-          `[executor] 任务完成: ${taskId}${hash ? ` hash=${hash}` : ""}`,
+          `[executor] 任务完成: ${taskId}${hash ? ` hash=${hash}` : ""}${
+            run.retryCount > 0 ? `(重试 ${run.retryCount} 次)` : ""
+          }`,
         );
         const body = `✅ [${ex.label}] 任务完成${hash ? ` (commit ${hash})` : ""}\n${summaryText}`;
         await postStatus(db, groupId, participantId, ex, body.slice(0, 2000));
       } else {
         const tail = lastLinesOf(output, 20).slice(0, 1500);
         console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
-        await failTask(db, taskId, `exit ${result.code}`);
-        await postStatus(
-          db,
-          groupId,
-          participantId,
-          ex,
-          `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
-        );
+        await handleFailure(run, `exit ${result.code}`, {
+          retryable: true,
+          message: `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
+        });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -765,8 +806,8 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
 
 /**
  * 静默超时处理:running 任务连续无输出超过 stallTimeoutMs → kill 进程组 +
- * 置 failed(「执行器静默超时」)+ ❌ 回传。同步置 stalled 后再 kill,保证进程
- * 被终止后的 promise 完成路径能看到 stalled 并跳过(不重复回传)。
+ * 置 stalled。失败落库 / ❌ 回传 / 重试判定由 promise 完成路径(runOne 看到
+ * run.stalled)统一处理,避免定时器回调与完成路径并发写状态。
  * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径)。
  */
 function handleStall(run: QueuedRun): void {
@@ -778,16 +819,6 @@ function handleStall(run: QueuedRun): void {
   }
   run.kill?.();
   console.error(`[executor] 执行器静默超时: ${run.taskId}`);
-  void (async () => {
-    await failTask(run.db, run.taskId, "执行器静默超时");
-    await postStatus(
-      run.db,
-      run.groupId,
-      run.participantId,
-      run.ex,
-      `❌ [${run.ex.label}] 任务失败 (执行器静默超时)`,
-    );
-  })();
 }
 
 /**
@@ -819,16 +850,149 @@ function handleClaimTimeout(run: QueuedRun): void {
   })();
 }
 
-/** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。 */
+/** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。
+ *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用)。 */
 async function failTask(
   db: DataBase,
   taskId: string,
   reason: string,
+  retries = 0,
 ): Promise<void> {
+  const diffSummary: Record<string, unknown> = { error: reason };
+  if (retries > 0) diffSummary.retries = retries;
   await db
     .update(taskTable)
-    .set({ status: "failed", diffSummary: { error: reason } })
+    .set({ status: "failed", diffSummary })
     .where(eq(taskTable.id, taskId));
+}
+
+/**
+ * 失败统一出口(重试判定):任务失败(exit≠0 / 超时 / 静默)且 retryCount <
+ * maxRetries 且可重试时 → 回滚 checkpoint(resetWorkspace)→ retry_count+1 →
+ * 回传 ❌(首次失败)+ ↻ 重试提示 → 重新入队重跑;否则按最终失败处理(标
+ * failed + ❌ 回传)。认领超时 / 手动停止 / 验收失败不重试(调用方传
+ * retryable=false 或直接走各自分支)。
+ */
+async function handleFailure(
+  run: QueuedRun,
+  reason: string,
+  opts: { retryable: boolean; message: string },
+): Promise<void> {
+  const { db, taskId } = run;
+  const canRetry =
+    opts.retryable && !run.stopped && run.retryCount < retryPolicy.maxRetries;
+
+  if (!canRetry) {
+    await failTask(db, taskId, reason, run.retryCount);
+    await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
+    return;
+  }
+
+  // 重试前回滚 checkpoint(resetWorkspace=true 且存在快照):恢复工作树到任务前
+  // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。
+  if (retryPolicy.resetWorkspace && run.checkpointRef) {
+    const repoRoot =
+      run.projectPath && existsSync(run.projectPath)
+        ? run.projectPath
+        : findRepoRoot();
+    const res = resetToCheckpoint(run.checkpointRef, repoRoot);
+    if (!res.ok) {
+      // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
+      const msg = `${reason};回滚失败,终止重试: ${res.message}`;
+      console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
+      await failTask(db, taskId, msg, run.retryCount);
+      await postStatus(
+        db,
+        run.groupId,
+        run.participantId,
+        run.ex,
+        `❌ [${run.ex.label}] 任务失败: ${msg}`,
+      );
+      return;
+    }
+    console.log(
+      `[executor] 重试前已回滚工作区到 ${run.checkpointRef}(${taskId})`,
+    );
+  }
+
+  // retry_count+1 并持久化(最终结果仍由重试后的完成路径回传)。
+  run.retryCount += 1;
+  try {
+    await db
+      .update(taskTable)
+      .set({ retryCount: run.retryCount })
+      .where(eq(taskTable.id, taskId));
+  } catch (e) {
+    console.warn(`[executor] 写 retry_count 失败(${taskId}): ${e}`);
+  }
+
+  // 首次失败 ❌ + 补发 ↻ 重试提示;最终 ✅/❌ 由重试的完成路径照常回传。
+  await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
+  await postStatus(
+    db,
+    run.groupId,
+    run.participantId,
+    run.ex,
+    `↻ [${run.ex.label}] 自动重试 (第 ${run.retryCount} 次)`,
+  );
+
+  // 重置运行态并重新入队(同组串行,槽位由 runOne 的 finally 释放后 pump 取走;
+  // 任务已被认领过,不再设认领超时)。
+  run.stalled = false;
+  run.runningAt = null;
+  run.lastOutputAt = 0;
+  run.kill = null;
+  const group = groupQueues.get(run.groupKey);
+  if (!group) {
+    // 组已被清空(测试重置等异常)→ 无法重试,按最终失败处理。
+    await failTask(db, taskId, reason, run.retryCount);
+    await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
+    return;
+  }
+  group.queue.push(run);
+}
+
+/**
+ * 弱验收钩子:done 判定前校验执行器是否真正提交了改动。在 repoRoot 跑
+ * git status --porcelain(工作树是否干净)+ 对比 HEAD 与执行前 commit
+ * (checkpoint ref 的父提交):工作树干净且 HEAD 有变化(新提交)→ 通过;
+ * 工作树不干净或 HEAD 无变化 → 不通过(原因含「执行器未提交改动」)。
+ * 任一 git 命令失败(仓库不可用)→ 跳过验收(视为通过,记录 warning,避免
+ * 误杀)。a2a 远端执行无本地工作区,由调用方跳过。
+ */
+export function verifyTaskCommitted(
+  repoRoot: string,
+  checkpointRef: string,
+): { ok: boolean; reason?: string } {
+  const status = gitSync(["status", "--porcelain"], repoRoot);
+  if (status.status !== 0) {
+    console.warn(
+      `[executor] 验收跳过:git status 失败(${repoRoot}): ${(status.stderr ?? "").trim()}`,
+    );
+    return { ok: true };
+  }
+  const dirty = (status.stdout ?? "").trim().length > 0;
+  const pre = gitSync(["rev-parse", `${checkpointRef}^`], repoRoot);
+  if (pre.status !== 0) {
+    console.warn(
+      `[executor] 验收跳过:无法解析执行前 commit(${checkpointRef}): ${(pre.stderr ?? "").trim()}`,
+    );
+    return { ok: true };
+  }
+  const head = gitSync(["rev-parse", "HEAD"], repoRoot);
+  if (head.status !== 0) {
+    console.warn(
+      `[executor] 验收跳过:无法解析 HEAD(${repoRoot}): ${(head.stderr ?? "").trim()}`,
+    );
+    return { ok: true };
+  }
+  if (dirty) {
+    return { ok: false, reason: "执行器未提交改动(工作树不干净)" };
+  }
+  if ((pre.stdout ?? "").trim() === (head.stdout ?? "").trim()) {
+    return { ok: false, reason: "执行器未提交改动(HEAD 无变化)" };
+  }
+  return { ok: true };
 }
 
 /** 以执行器 participant 身份回传群消息(broadcast + 前缀判定 contentType)。 */

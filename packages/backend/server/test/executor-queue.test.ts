@@ -48,7 +48,34 @@ writeFileSync(
     "    i=$((i + 1))",
     "  done",
     "fi",
-    'if [ -n "$FAKE_APPEND" ]; then echo "task-modified" >> "$COAGENTHUB_REPO_ROOT/hello.txt"; fi',
+    // 尝试计数(重试测试用):FAKE_COUNTER_FILE 累计尝试次数,先写后读。
+    'if [ -n "$FAKE_COUNTER_FILE" ]; then',
+    "  n=0",
+    '  if [ -f "$FAKE_COUNTER_FILE" ]; then n=$(cat "$FAKE_COUNTER_FILE"); fi',
+    "  n=$((n + 1))",
+    '  echo "$n" > "$FAKE_COUNTER_FILE"',
+    "fi",
+    // 工作区改动(重试测试:首次失败也带改动,验证重试前回滚把首次改动还原)。
+    // 相对 cwd 追加:绑定 project_path 的群 spawn cwd 就是项目仓库。
+    'if [ -n "$FAKE_APPEND" ]; then',
+    '  if [ -n "$FAKE_COUNTER_FILE" ]; then',
+    '    echo "attempt-$n-dirty" >> hello.txt',
+    "  else",
+    '    echo "task-modified" >> hello.txt',
+    "  fi",
+    "fi",
+    // 失败模式:FAKE_ALWAYS_FAIL 每次都 exit 1;FAKE_FAIL_UNTIL 前 N 次 exit 1
+    // (第 N+1 次起正常完成,重试测试用)。
+    'if [ -n "$FAKE_ALWAYS_FAIL" ]; then echo "always-fail (attempt $n)"; exit 1; fi',
+    'if [ -n "$FAKE_FAIL_UNTIL" ] && [ "$n" -le "$FAKE_FAIL_UNTIL" ]; then',
+    '  echo "attempt $n: intended failure"',
+    "  exit 1",
+    "fi",
+    // 弱验收要求工作树干净 + HEAD 有新提交:默认真正提交一次(显式身份,CI 无
+    // 全局 git config 也能跑);FAKE_NO_COMMIT 跳过提交(验收失败测试用)。
+    'if [ -z "$FAKE_NO_COMMIT" ]; then',
+    '  git add -A && git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m "fake bin change"',
+    "fi",
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:修改完成"',
     "exit 0",
@@ -149,6 +176,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       messageId: string;
       status: string;
       checkpointRef: string | null;
+      retryCount: number;
       diffSummary: unknown;
     }>;
   }
@@ -770,6 +798,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       );
       const diff = t2.diffSummary as Record<string, unknown> | null;
       expect(diff?.error).toContain("未认领");
+      expect(t2.retryCount).toBe(0); // 认领超时不重试
       await waitForMessage(
         coordinator.token,
         group.id,
@@ -847,8 +876,245 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       expect(stopped.id).toBe(t.id);
       const after = await listTasks(coordinator.token, group.id);
       expect(after.find((x) => x.id === t.id)?.status).toBe("cancelled");
+      // 手动停止不重试:群里无 ↻ 回传。
+      const msgs = await listMessages(coordinator.token, group.id);
+      expect(msgs.some((m) => m.body.startsWith("↻"))).toBe(false);
     } finally {
       process.env.FAKE_SLEEP_SECS = "";
+    }
+  }, 30_000);
+
+  it("失败自动重试:第一次 exit 1,重试后成功 → done + retry_count=1 + ↻ 回传", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    // 尝试计数文件:第 1 次 exit 1,第 2 次起正常(提交 → done)。
+    const counterDir = mkdtempSync(
+      path.join(tmpdir(), "coagenthub-retry-cnt-"),
+    );
+    const counterFile = path.join(counterDir, "n.txt");
+    process.env.FAKE_COUNTER_FILE = counterFile;
+    process.env.FAKE_FAIL_UNTIL = "1";
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "重试任务(首次失败)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.retryCount).toBe(1);
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.retries).toBe(1);
+      // 首次失败 ❌ 后补发 ↻ 自动重试提示。
+      await waitForMessage(
+        coordinator.token,
+        group.id,
+        (m) => m.body.startsWith("↻") && m.body.includes("自动重试 (第 1 次)"),
+      );
+    } finally {
+      process.env.FAKE_COUNTER_FILE = "";
+      process.env.FAKE_FAIL_UNTIL = "";
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("重试前回滚 checkpoint:首次改文件后失败,重试时工作区已还原", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    const counterDir = mkdtempSync(
+      path.join(tmpdir(), "coagenthub-rollback-cnt-"),
+    );
+    const counterFile = path.join(counterDir, "n.txt");
+    process.env.FAKE_COUNTER_FILE = counterFile;
+    process.env.FAKE_FAIL_UNTIL = "1";
+    process.env.FAKE_APPEND = "1";
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      // 独立仓库:首次失败在 hello.txt 留下 attempt-1-dirty,回滚后应还原。
+      const proj = makeGitRepo("coagenthub-retry-rollback-");
+      const group = await createGroup(coordinator.token, "重试回滚群");
+      await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, group.id, proj);
+
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "回滚重试任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.retryCount).toBe(1);
+      const content = readFileSync(path.join(proj, "hello.txt"), "utf8");
+      // 第二次尝试的改动在;首次尝试的改动被重试前回滚还原。
+      expect(content).toContain("attempt-2-dirty");
+      expect(content).not.toContain("attempt-1-dirty");
+    } finally {
+      process.env.FAKE_COUNTER_FILE = "";
+      process.env.FAKE_FAIL_UNTIL = "";
+      process.env.FAKE_APPEND = "";
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("重试后仍失败 → 最终 failed + error 记录(含重试次数)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    const counterDir = mkdtempSync(
+      path.join(tmpdir(), "coagenthub-alwaysfail-cnt-"),
+    );
+    const counterFile = path.join(counterDir, "n.txt");
+    process.env.FAKE_COUNTER_FILE = counterFile;
+    process.env.FAKE_ALWAYS_FAIL = "1";
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "必败任务(重试也失败)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      // 重试了一次(attempt 2 仍失败 → 最终 failed)。
+      expect(t.retryCount).toBe(1);
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("exit 1");
+      expect(diff?.retries).toBe(1);
+      // ❌ + ↻ 都已回传(首次失败 ❌,补发 ↻,最终 ❌)。
+      await waitForMessage(
+        coordinator.token,
+        group.id,
+        (m) => m.body.startsWith("↻") && m.body.includes("自动重试 (第 1 次)"),
+      );
+    } finally {
+      process.env.FAKE_COUNTER_FILE = "";
+      process.env.FAKE_ALWAYS_FAIL = "";
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("弱验收:执行器提交后退出 → done(工作树干净 + HEAD 有新提交)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_APPEND = "1";
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-accept-ok-");
+      const group = await createGroup(coordinator.token, "验收通过群");
+      await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, group.id, proj);
+
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "提交后退出",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.retryCount).toBe(0);
+      // 改动已提交进仓库。
+      expect(readFileSync(path.join(proj, "hello.txt"), "utf8")).toContain(
+        "task-modified",
+      );
+    } finally {
+      process.env.FAKE_APPEND = "";
+    }
+  }, 30_000);
+
+  it("弱验收:改文件不提交 → failed(原因含「未提交」)+ ❌ 回传,不重试", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_APPEND = "1";
+    process.env.FAKE_NO_COMMIT = "1";
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-accept-dirty-");
+      const group = await createGroup(coordinator.token, "验收失败群(脏树)");
+      await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, group.id, proj);
+
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "改文件不提交",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("未提交");
+      expect(t.retryCount).toBe(0); // 验收失败不重试
+      await waitForMessage(
+        coordinator.token,
+        group.id,
+        (m) => m.body.includes("任务失败") && m.body.includes("未提交"),
+      );
+      const messages = await listMessages(coordinator.token, group.id);
+      expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);
+    } finally {
+      process.env.FAKE_APPEND = "";
+      process.env.FAKE_NO_COMMIT = "";
+    }
+  }, 30_000);
+
+  it("弱验收:无改动退出 → failed(HEAD 无变化),不重试", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_NO_COMMIT = "1";
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-accept-noop-");
+      const group = await createGroup(coordinator.token, "验收失败群(无改动)");
+      await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.token, group.id, proj);
+
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "无改动退出",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("未提交");
+      expect(t.retryCount).toBe(0);
+      const messages = await listMessages(coordinator.token, group.id);
+      expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);
+    } finally {
+      process.env.FAKE_NO_COMMIT = "";
+    }
+  }, 30_000);
+
+  it("弱验收:git 命令失败 → 跳过验收(视为通过,不误杀)", async () => {
+    // 非 git 目录:git status 失败 → verifyTaskCommitted 应跳过返回 ok。
+    const nonGitDir = mkdtempSync(path.join(tmpdir(), "coagenthub-nongit-"));
+    try {
+      const { verifyTaskCommitted } = await import("@server/lib/executor-task");
+      const res = verifyTaskCommitted(
+        nonGitDir,
+        "refs/coagenthub-cp/nonexistent-task",
+      );
+      expect(res.ok).toBe(true);
+      expect(res.reason).toBeUndefined();
+    } finally {
+      rmSync(nonGitDir, { recursive: true, force: true });
     }
   }, 30_000);
 });

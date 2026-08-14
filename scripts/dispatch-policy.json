@@ -1,5 +1,10 @@
 {
   "maxParallelGroups": 2,
   "stallTimeoutMinutes": 30,
-  "claimTimeoutMinutes": 30
+  "claimTimeoutMinutes": 30,
+  "retry": {
+    "maxRetries": 1,
+    "resetWorkspace": true,
+    "switchExecutor": false
+  }
 }

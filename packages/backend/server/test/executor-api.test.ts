@@ -33,6 +33,9 @@ writeFileSync(
   fakeBin,
   [
     "#!/bin/sh",
+    // 弱验收要求工作树干净 + HEAD 有新提交:真正提交一次(显式身份,CI 无全局
+    // git config 也能跑)。
+    'git add -A && git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m "fake bin change"',
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:建文件完成"',
     "exit 0",

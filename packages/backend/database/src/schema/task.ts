@@ -1,4 +1,4 @@
-import { jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
@@ -38,6 +38,8 @@ export const task = pgTable("task", {
   status: text("status", { enum: TASK_STATUSES }).notNull().default("running"),
   // 执行前 git 快照 ref(refs/coagenthub-cp/<taskId>);可空 = 尚未打快照。
   checkpointRef: text("checkpoint_ref"),
+  // 失败自动重试计数:任务因 exit≠0/超时/静默失败后按 dispatch-policy 重试的次数。
+  retryCount: integer("retry_count").notNull().default(0),
   // 完成后回传的 diff 摘要(改动文件数/行数等,由执行器侧计算)。
   diffSummary: jsonb("diff_summary"),
   ...timeColumns("both"),

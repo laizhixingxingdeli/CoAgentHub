@@ -50,6 +50,13 @@
       "when": 1786618092680,
       "tag": "0006_drop_participant_type",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786669528012,
+      "tag": "0007_add_task_retry_count",
+      "breakpoints": true
     }
   ]
 }

@@ -241,7 +241,17 @@ export async function findExecutorByKey(
 
 /* ---------------- 调度策略(dispatch-policy.json) ---------------- */
 
-/** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)。 */
+/** 失败自动重试策略(触发条件:exit≠0 / 超时 / 静默)。 */
+export interface RetryPolicy {
+  /** 最大重试次数(0 = 不重试);认领超时 / 手动停止 / 验收失败不重试。 */
+  maxRetries: number;
+  /** 重试前是否回滚 checkpoint 恢复工作树到任务前快照。 */
+  resetWorkspace: boolean;
+  /** 重试时是否换执行器;当前仅实现同一执行器重跑(false)。 */
+  switchExecutor: boolean;
+}
+
+/** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)+ 失败重试。 */
 export interface DispatchPolicy {
   /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
   maxParallelGroups: number;
@@ -249,6 +259,8 @@ export interface DispatchPolicy {
   stallTimeoutMinutes: number;
   /** 认领超时(分钟):queued 任务超过该值仍未进入 running → 标 failed。 */
   claimTimeoutMinutes: number;
+  /** 失败自动重试策略。 */
+  retry: RetryPolicy;
 }
 
 /** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
@@ -259,6 +271,13 @@ export const DEFAULT_STALL_TIMEOUT_MINUTES = 30;
 
 /** 默认认领超时(分钟);缺失/非法时兜底。 */
 export const DEFAULT_CLAIM_TIMEOUT_MINUTES = 30;
+
+/** 默认重试策略:重试 1 次、重试前回滚工作区、同一执行器重跑。 */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxRetries: 1,
+  resetWorkspace: true,
+  switchExecutor: false,
+};
 
 /** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
 function resolveDispatchPolicyFile(): string {
@@ -274,6 +293,12 @@ function positiveInt(value: unknown, fallback: number): number {
   return Number.isInteger(n) && n >= 1 ? n : fallback;
 }
 
+/** 非负整数解析(重试次数可配 0 = 不重试)。 */
+function nonNegativeInt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 /**
  * 读取调度策略(server 启动时调用):scripts/dispatch-policy.json 随代码
  * 版本化,缺失/损坏/数值非法时回退默认值(不因配置问题阻塞启动)。
@@ -286,6 +311,11 @@ export function readDispatchPolicy(): DispatchPolicy {
       maxParallelGroups?: unknown;
       stallTimeoutMinutes?: unknown;
       claimTimeoutMinutes?: unknown;
+      retry?: {
+        maxRetries?: unknown;
+        resetWorkspace?: unknown;
+        switchExecutor?: unknown;
+      };
     };
     return {
       maxParallelGroups: positiveInt(
@@ -300,6 +330,20 @@ export function readDispatchPolicy(): DispatchPolicy {
         raw.claimTimeoutMinutes,
         DEFAULT_CLAIM_TIMEOUT_MINUTES,
       ),
+      retry: {
+        maxRetries: nonNegativeInt(
+          raw.retry?.maxRetries,
+          DEFAULT_RETRY_POLICY.maxRetries,
+        ),
+        resetWorkspace:
+          typeof raw.retry?.resetWorkspace === "boolean"
+            ? raw.retry.resetWorkspace
+            : DEFAULT_RETRY_POLICY.resetWorkspace,
+        switchExecutor:
+          typeof raw.retry?.switchExecutor === "boolean"
+            ? raw.retry.switchExecutor
+            : DEFAULT_RETRY_POLICY.switchExecutor,
+      },
     };
   } catch {
     // 文件缺失/不可读/非 JSON → 默认。
@@ -308,6 +352,7 @@ export function readDispatchPolicy(): DispatchPolicy {
     maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS,
     stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
+    retry: DEFAULT_RETRY_POLICY,
   };
 }
 
