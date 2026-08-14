@@ -12,8 +12,9 @@ import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { participantIdentityHeaders } from "@/lib/api-client";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { ROLE_LABELS } from "./messages/types";
+import { roleLabel } from "./messages/types";
 
 /**
  * Preset role catalog (mirrors the server-side GROUP_ROLES in
@@ -98,7 +99,11 @@ export default function GroupMembersPage() {
       }
       setMembers(await res.json());
     } catch (e) {
-      setError(`加载成员失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("members.error.loadFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setLoading(false);
     }
@@ -153,7 +158,7 @@ export default function GroupMembersPage() {
 
   // 归档/软删群只读:非 active 群禁止成员写操作(添加/编辑/移除)。
   const readOnly = groupStatus !== null && groupStatus !== "active";
-  const readOnlyHint = readOnly ? "群已归档,只读" : undefined;
+  const readOnlyHint = readOnly ? t("members.readOnly") : undefined;
 
   const toggleRole = (role: GroupRole) => {
     setSelectedRoles((prev) =>
@@ -188,13 +193,17 @@ export default function GroupMembersPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage("成员添加成功");
+      setMessage(t("members.added"));
       setSelectedParticipantId("");
       setSelectedRoles(["observer"]);
       setNewPrompt("");
       await loadMembers();
     } catch (e) {
-      setError(`添加成员失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("members.error.addFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setAdding(false);
     }
@@ -225,7 +234,7 @@ export default function GroupMembersPage() {
       return;
     }
     if (editRoles.length === 0) {
-      setError("至少选择一个角色");
+      setError(t("members.error.roleRequired"));
       return;
     }
     setSavingRoles(true);
@@ -249,11 +258,15 @@ export default function GroupMembersPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage("角色已更新");
+      setMessage(t("members.rolesUpdated"));
       setEditingParticipantId(null);
       await loadMembers();
     } catch (e) {
-      setError(`更新角色失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("members.error.rolesUpdateFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setSavingRoles(false);
     }
@@ -292,11 +305,15 @@ export default function GroupMembersPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage("分工已更新");
+      setMessage(t("members.promptUpdated"));
       setEditingPromptParticipantId(null);
       await loadMembers();
     } catch (e) {
-      setError(`更新分工失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("members.error.promptUpdateFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setSavingPrompt(false);
     }
@@ -305,10 +322,10 @@ export default function GroupMembersPage() {
   // Ticket 20: 移除成员 — 群主不可移除(按钮已禁用,这里兜底提示)。
   const handleRemoveMember = async (member: Member) => {
     if (member.participantId === createdBy) {
-      setMessage("不能移除群主");
+      setMessage(t("members.cannotRemoveOwner"));
       return;
     }
-    if (!window.confirm(`确定将成员「${member.name}」移出群组吗?`)) {
+    if (!window.confirm(t("members.confirm.remove", { name: member.name }))) {
       return;
     }
     setRemovingId(member.participantId);
@@ -328,10 +345,14 @@ export default function GroupMembersPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage(`成员「${member.name}」已移出群组`);
+      setMessage(t("members.removed", { name: member.name }));
       await loadMembers();
     } catch (e) {
-      setError(`移除成员失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("members.error.removeFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setRemovingId(null);
     }
@@ -345,15 +366,13 @@ export default function GroupMembersPage() {
           className="mb-2 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="size-4" />
-          返回消息流
+          {t("members.back")}
         </a>
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-xl font-semibold">群组成员</h2>
+          <h2 className="text-xl font-semibold">{t("members.pageTitle")}</h2>
           <ContextPanelTrigger />
         </div>
-        <p className="text-muted-foreground text-sm">
-          成员在群组内分配角色(同一 participant 可在不同群组持有不同角色)
-        </p>
+        <p className="text-muted-foreground text-sm">{t("members.subtitle")}</p>
       </div>
 
       {message && (
@@ -371,16 +390,16 @@ export default function GroupMembersPage() {
       <div className="mb-6 rounded-lg border bg-card p-4">
         <div className="mb-3 flex items-center gap-2 text-sm font-medium">
           <UserPlus className="size-4" />
-          添加成员
+          {t("members.addMember")}
         </div>
         {readOnly && (
           <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-            群已归档,成员管理只读,无法添加/编辑/移除成员。
+            {t("members.readOnlyHint")}
           </div>
         )}
         <div className="flex flex-col gap-3">
           <select
-            aria-label="选择成员 participant"
+            aria-label={t("members.selectAria")}
             value={selectedParticipantId}
             onChange={(e) => setSelectedParticipantId(e.target.value)}
             disabled={readOnly}
@@ -388,8 +407,8 @@ export default function GroupMembersPage() {
           >
             <option value="">
               {candidates.length === 0
-                ? "没有可添加的 participant"
-                : "选择要添加的 participant…"}
+                ? t("members.noCandidates")
+                : t("members.selectPlaceholder")}
             </option>
             {candidates.map((participant) => (
               <option key={participant.id} value={participant.id}>
@@ -417,7 +436,7 @@ export default function GroupMembersPage() {
                   onChange={() => toggleRole(role)}
                   disabled={readOnly}
                 />
-                {ROLE_LABELS[role]}
+                {roleLabel(role)}
               </label>
             ))}
           </div>
@@ -426,13 +445,13 @@ export default function GroupMembersPage() {
               htmlFor="member-prompt"
               className="text-xs font-medium text-muted-foreground"
             >
-              本群分工提示词(可选)
+              {t("members.promptLabel")}
             </label>
             <Textarea
               id="member-prompt"
               rows={2}
               maxLength={1000}
-              placeholder="在本组你负责 code review,重点关注测试覆盖与可读性"
+              placeholder={t("members.promptPlaceholder")}
               value={newPrompt}
               onChange={(e) => setNewPrompt(e.target.value)}
               disabled={readOnly}
@@ -445,7 +464,7 @@ export default function GroupMembersPage() {
               title={readOnlyHint}
               size="sm"
             >
-              {adding ? "添加中…" : "添加成员"}
+              {adding ? t("members.adding") : t("members.addMember")}
             </Button>
           </div>
         </div>
@@ -455,7 +474,7 @@ export default function GroupMembersPage() {
       <div className="rounded-lg border bg-card shadow-sm">
         {members.length === 0 ? (
           <div className="p-10 text-center text-sm text-muted-foreground">
-            {loading ? "加载中…" : "暂无成员,从上方添加 participant 进入群组"}
+            {loading ? t("common.loading") : t("members.emptyHint")}
           </div>
         ) : (
           <>
@@ -507,7 +526,7 @@ export default function GroupMembersPage() {
                       onClick={() => startEditRoles(member)}
                     >
                       <UserCog />
-                      编辑角色
+                      {t("members.editRoles")}
                     </Button>
                     <Button
                       variant="outline"
@@ -518,7 +537,7 @@ export default function GroupMembersPage() {
                       onClick={() => startEditPrompt(member)}
                     >
                       <PenLine />
-                      编辑分工
+                      {t("members.editPrompt")}
                     </Button>
                     <Button
                       variant="outline"
@@ -533,13 +552,15 @@ export default function GroupMembersPage() {
                         readOnly
                           ? readOnlyHint
                           : member.participantId === createdBy
-                            ? "不能移除群主"
+                            ? t("members.cannotRemoveOwner")
                             : undefined
                       }
                       onClick={() => handleRemoveMember(member)}
                     >
                       <UserMinus />
-                      {removingId === member.participantId ? "移除中…" : "移除"}
+                      {removingId === member.participantId
+                        ? t("members.removing")
+                        : t("members.remove")}
                     </Button>
                   </div>
                 </div>
@@ -549,11 +570,21 @@ export default function GroupMembersPage() {
             <table className="hidden w-full text-sm md:table">
               <thead>
                 <tr className="border-b text-left text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">名称</th>
-                  <th className="px-4 py-3 font-medium">设备</th>
-                  <th className="px-4 py-3 font-medium">角色</th>
-                  <th className="px-4 py-3 font-medium">分工</th>
-                  <th className="px-4 py-3 text-right font-medium">操作</th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("members.table.name")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("members.table.device")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("members.table.role")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("members.table.prompt")}
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium">
+                    {t("members.table.actions")}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -602,7 +633,7 @@ export default function GroupMembersPage() {
                           onClick={() => startEditRoles(member)}
                         >
                           <UserCog />
-                          编辑角色
+                          {t("members.editRoles")}
                         </Button>
                         <Button
                           variant="ghost"
@@ -612,7 +643,7 @@ export default function GroupMembersPage() {
                           onClick={() => startEditPrompt(member)}
                         >
                           <PenLine />
-                          编辑分工
+                          {t("members.editPrompt")}
                         </Button>
                         <Button
                           variant="ghost"
@@ -627,15 +658,15 @@ export default function GroupMembersPage() {
                             readOnly
                               ? readOnlyHint
                               : member.participantId === createdBy
-                                ? "不能移除群主"
+                                ? t("members.cannotRemoveOwner")
                                 : undefined
                           }
                           onClick={() => handleRemoveMember(member)}
                         >
                           <UserMinus />
                           {removingId === member.participantId
-                            ? "移除中…"
-                            : "移除"}
+                            ? t("members.removing")
+                            : t("members.remove")}
                         </Button>
                       </div>
                     </td>
@@ -658,7 +689,7 @@ function RoleBadges({ roles }: { roles: string[] }) {
           key={role}
           className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
         >
-          {ROLE_LABELS[role as GroupRole] ?? role}
+          {roleLabel(role as GroupRole) ?? role}
         </span>
       ))}
     </div>
@@ -698,20 +729,22 @@ function RoleEditor({
             <input
               type="checkbox"
               className="hidden"
-              aria-label={`编辑角色 ${ROLE_LABELS[role]}`}
+              aria-label={t("members.editRoleAria", {
+                role: roleLabel(role),
+              })}
               checked={selected.includes(role)}
               onChange={() => onToggle(role)}
             />
-            {ROLE_LABELS[role]}
+            {roleLabel(role)}
           </label>
         ))}
       </div>
       <div className="flex gap-2">
         <Button size="sm" onClick={onSave} disabled={busy}>
-          {busy ? "保存中…" : "保存"}
+          {busy ? t("common.saving") : t("common.save")}
         </Button>
         <Button size="sm" variant="outline" onClick={onCancel} disabled={busy}>
-          取消
+          {t("common.cancel")}
         </Button>
       </div>
     </div>
@@ -726,7 +759,11 @@ function PromptLine({ prompt }: { prompt: string | null }) {
   const [expanded, setExpanded] = useState(false);
   const text = prompt?.trim();
   if (!text) {
-    return <span className="text-xs text-muted-foreground/70">未设置</span>;
+    return (
+      <span className="text-xs text-muted-foreground/70">
+        {t("members.notSet")}
+      </span>
+    );
   }
   const clamped = text.length > 40;
   return (
@@ -740,7 +777,7 @@ function PromptLine({ prompt }: { prompt: string | null }) {
           className="ml-1 align-baseline font-medium text-primary hover:underline"
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded ? "收起" : "展开"}
+          {expanded ? t("common.collapse") : t("common.expand")}
         </button>
       )}
     </div>
@@ -767,7 +804,7 @@ function PromptEditor({
   return (
     <div className="flex flex-col gap-2">
       <Textarea
-        aria-label="编辑分工提示词"
+        aria-label={t("members.promptEditAria")}
         rows={2}
         maxLength={1000}
         value={value}
@@ -775,10 +812,10 @@ function PromptEditor({
       />
       <div className="flex gap-2">
         <Button size="sm" onClick={onSave} disabled={busy}>
-          {busy ? "保存中…" : "保存"}
+          {busy ? t("common.saving") : t("common.save")}
         </Button>
         <Button size="sm" variant="outline" onClick={onCancel} disabled={busy}>
-          取消
+          {t("common.cancel")}
         </Button>
       </div>
     </div>

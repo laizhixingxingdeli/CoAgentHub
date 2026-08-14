@@ -22,6 +22,7 @@ import {
   PARTICIPANT_COLORS,
   colorForId as participantColor,
 } from "@/lib/avatar-color";
+import { t } from "@/lib/i18n";
 import { maybeNotifyGroupMessage } from "@/lib/notifications";
 
 // Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
@@ -258,7 +259,11 @@ export default function GroupMessagesPage() {
         if (seq !== loadSeqRef.current) {
           return;
         }
-        setError(`加载消息失败: ${e instanceof Error ? e.message : String(e)}`);
+        setError(
+          t("messages.error.loadFailed", {
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        );
       } finally {
         if (seq === loadSeqRef.current) {
           setLoading(false);
@@ -501,7 +506,11 @@ export default function GroupMessagesPage() {
       setReplyTo(null);
       await loadMessages();
     } catch (e) {
-      setError(`发送失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("messages.error.sendFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setSending(false);
     }
@@ -608,7 +617,7 @@ export default function GroupMessagesPage() {
       );
       return `participant:${target ? target.name : resolved.audienceRef}`;
     }
-    return "全体成员";
+    return t("messages.audience.all");
   }, [body, members]);
 
   // Auto-scroll: follow new messages while at the bottom; never yank the view
@@ -733,7 +742,11 @@ export default function GroupMessagesPage() {
       );
       handleEditCancel();
     } catch (e) {
-      setError(`编辑失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("messages.error.editFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setSavingEdit(false);
     }
@@ -746,7 +759,7 @@ export default function GroupMessagesPage() {
     if (!groupId) {
       return;
     }
-    if (!window.confirm("确定删除这条消息吗?删除后不可恢复。")) {
+    if (!window.confirm(t("messages.delete.confirm"))) {
       return;
     }
     setError(null);
@@ -770,7 +783,11 @@ export default function GroupMessagesPage() {
         handleEditCancel();
       }
     } catch (e) {
-      setError(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("messages.error.deleteFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   };
 
@@ -796,14 +813,14 @@ export default function GroupMessagesPage() {
       <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
         <a
           href="/groups"
-          aria-label="返回群组列表"
+          aria-label={t("messages.back.aria")}
           className="inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="size-4" />
-          <span className="hidden sm:inline">返回</span>
+          <span className="hidden sm:inline">{t("messages.back.label")}</span>
         </a>
         <h2 className="min-w-0 flex-1 truncate text-base font-semibold">
-          {groupTitle ?? "群组消息"}
+          {groupTitle ?? t("messages.titleFallback")}
         </h2>
         {searchBoxOpen ? (
           <div className="flex shrink-0 items-center gap-1.5">
@@ -819,15 +836,15 @@ export default function GroupMessagesPage() {
                   setSearchBoxOpen(false);
                 }
               }}
-              placeholder="搜索消息…"
-              aria-label="搜索消息"
+              placeholder={t("messages.search.placeholder")}
+              aria-label={t("messages.search.aria")}
               className="w-44 sm:w-64"
             />
             <Button
               variant="ghost"
               size="icon"
-              aria-label="清除搜索"
-              title="清除搜索"
+              aria-label={t("messages.search.clearAria")}
+              title={t("messages.search.clearAria")}
               onClick={() => {
                 handleClearSearch();
                 setSearchBoxOpen(false);
@@ -841,8 +858,8 @@ export default function GroupMessagesPage() {
           <Button
             variant="ghost"
             size="icon"
-            aria-label="搜索消息"
-            title="搜索消息"
+            aria-label={t("messages.search.aria")}
+            title={t("messages.search.aria")}
             onClick={() => setSearchBoxOpen(true)}
             className="shrink-0"
           >
@@ -855,7 +872,7 @@ export default function GroupMessagesPage() {
       {searchActive && (
         <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm text-muted-foreground">
           <span className="min-w-0 truncate">
-            搜索:{" "}
+            {t("messages.search.label")}{" "}
             <span className="font-medium text-foreground">
               {searchActiveQuery}
             </span>
@@ -866,7 +883,7 @@ export default function GroupMessagesPage() {
             className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <X className="size-3.5" />
-            清除
+            {t("common.clear")}
           </button>
         </div>
       )}
@@ -875,8 +892,8 @@ export default function GroupMessagesPage() {
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <Archive className="size-4 shrink-0" />
           {isDeleted
-            ? "该群组已删除,历史消息仍可查看,发送已禁用。"
-            : "该群组已归档,处于只读状态;历史消息可继续查看,发送已禁用。"}
+            ? t("messages.readOnly.deleted")
+            : t("messages.readOnly.archived")}
         </div>
       )}
 

@@ -1,6 +1,7 @@
 import { Download, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
 
 type FileItem = {
   name: string;
@@ -41,7 +42,9 @@ export default function FilesPage() {
       setFiles(await res.json());
     } catch (e) {
       setError(
-        `加载文件列表失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("files.error.loadFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setLoading(false);
@@ -71,10 +74,14 @@ export default function FilesPage() {
         const body = await res.text();
         throw new Error(`HTTP ${res.status}${body ? `: ${body}` : ""}`);
       }
-      setMessage(`文件 "${file.name}" 上传成功`);
+      setMessage(t("files.uploaded", { name: file.name }));
       await loadFiles();
     } catch (e) {
-      setError(`上传失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("files.error.uploadFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setUploading(false);
       event.target.value = "";
@@ -82,7 +89,7 @@ export default function FilesPage() {
   };
 
   const handleDelete = async (name: string) => {
-    if (!window.confirm(`确定要删除文件 "${name}" 吗?`)) {
+    if (!window.confirm(t("files.confirm.delete", { name }))) {
       return;
     }
     setError(null);
@@ -93,10 +100,14 @@ export default function FilesPage() {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      setMessage(`文件 "${name}" 已删除`);
+      setMessage(t("files.deleted", { name }));
       await loadFiles();
     } catch (e) {
-      setError(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("files.error.deleteFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   };
 
@@ -104,10 +115,8 @@ export default function FilesPage() {
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold">文件传输</h2>
-          <p className="text-muted-foreground text-sm">
-            局域网文件共享,存储在服务器本地磁盘,不依赖数据库
-          </p>
+          <h2 className="text-xl font-semibold">{t("files.title")}</h2>
+          <p className="text-muted-foreground text-sm">{t("files.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -117,12 +126,12 @@ export default function FilesPage() {
             disabled={loading}
           >
             <RefreshCw className={loading ? "animate-spin" : ""} />
-            刷新
+            {t("common.refresh")}
           </Button>
           <Button variant="default" size="sm" asChild>
             <label className="cursor-pointer">
               <Upload />
-              {uploading ? "上传中…" : "上传文件"}
+              {uploading ? t("common.uploading") : t("files.upload")}
               <input
                 type="file"
                 className="hidden"
@@ -148,7 +157,7 @@ export default function FilesPage() {
       <div className="rounded-lg border bg-card shadow-sm">
         {files.length === 0 ? (
           <div className="p-10 text-center text-sm text-muted-foreground">
-            {loading ? "加载中…" : "暂无文件,点击右上角「上传文件」开始"}
+            {loading ? t("common.loading") : t("files.empty")}
           </div>
         ) : (
           <>
@@ -175,7 +184,7 @@ export default function FilesPage() {
                     >
                       <a href={file.url} download>
                         <Download />
-                        下载
+                        {t("common.download")}
                       </a>
                     </Button>
                     <Button
@@ -185,7 +194,7 @@ export default function FilesPage() {
                       onClick={() => handleDelete(file.name)}
                     >
                       <Trash2 />
-                      删除
+                      {t("common.delete")}
                     </Button>
                   </div>
                 </div>
@@ -195,10 +204,18 @@ export default function FilesPage() {
             <table className="hidden w-full text-sm md:table">
               <thead>
                 <tr className="border-b text-left text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">文件名</th>
-                  <th className="px-4 py-3 font-medium">大小</th>
-                  <th className="px-4 py-3 font-medium">修改时间</th>
-                  <th className="px-4 py-3 text-right font-medium">操作</th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("files.table.name")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("files.table.size")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("files.table.mtime")}
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium">
+                    {t("files.table.actions")}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -216,7 +233,7 @@ export default function FilesPage() {
                         <Button variant="ghost" size="sm" asChild>
                           <a href={file.url} download>
                             <Download />
-                            下载
+                            {t("common.download")}
                           </a>
                         </Button>
                         <Button
@@ -226,7 +243,7 @@ export default function FilesPage() {
                           onClick={() => handleDelete(file.name)}
                         >
                           <Trash2 />
-                          删除
+                          {t("common.delete")}
                         </Button>
                       </div>
                     </td>

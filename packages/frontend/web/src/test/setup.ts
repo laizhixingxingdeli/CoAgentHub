@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 
 // jsdom does not implement matchMedia — provide a controllable mock so
 // useIsMobile / the shadcn sidebar can evaluate breakpoints in tests.
@@ -51,4 +51,15 @@ if (typeof globalThis.cancelAnimationFrame !== "function") {
 // Unmount rendered trees after each test.
 afterEach(() => {
   cleanup();
+});
+
+// i18n: 测试默认断言中文文案,固定语言为 zh(jsdom navigator.language 是 en-US)。
+// 使用 Object.defineProperty 而非 localStorage.setItem:测试文件可能清理
+// localStorage,且部分用例会显式测语言切换(设置 coagenthub.lang)。
+beforeEach(() => {
+  try {
+    localStorage.setItem("coagenthub.lang", "zh");
+  } catch {
+    // localStorage 不可用时忽略(jsdom 一般可用)
+  }
 });

@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import {
   GROUP_ROLES,
   type Member,
-  ROLE_LABELS,
+  roleLabel,
 } from "@/pages/app/groups/messages/types";
 
 type GroupRole = (typeof GROUP_ROLES)[number];
@@ -170,7 +170,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
                       key={role}
                       className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
                     >
-                      {ROLE_LABELS[role] ?? role}
+                      {roleLabel(role)}
                     </span>
                   ))}
                 </span>
@@ -233,11 +233,11 @@ export function MembersTab({ groupId }: { groupId: string }) {
                       <input
                         type="checkbox"
                         className="hidden"
-                        aria-label={`编辑角色 ${ROLE_LABELS[role]}`}
+                        aria-label={`编辑角色 ${roleLabel(role)}`}
                         checked={editRoles.includes(role)}
                         onChange={() => toggleRole(role)}
                       />
-                      {ROLE_LABELS[role]}
+                      {roleLabel(role)}
                     </label>
                   ))}
                 </div>

@@ -1,3 +1,5 @@
+import { t } from "@/lib/i18n";
+
 export const GROUP_ROLES = [
   "human",
   "coordinator",
@@ -18,15 +20,10 @@ export type Member = {
   prompt?: string | null;
 };
 
-/** 角色中文标签(ticket 33 分工总览用;与 members.tsx 的 ROLE_LABELS 同源)。 */
-export const ROLE_LABELS: Record<string, string> = {
-  human: "人类",
-  coordinator: "协调者",
-  reviewer: "检视者",
-  executor: "执行者",
-  observer: "观察者",
-  specialist: "领域专家",
-};
+/** 角色显示标签(ticket 33 分工总览用;由词典渲染,支持 en)。 */
+export function roleLabel(role: string): string {
+  return t(`roles.${role}`);
+}
 
 export type FileRef = {
   name: string;

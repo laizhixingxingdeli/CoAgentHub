@@ -21,6 +21,7 @@ import {
   PARTICIPANT_ID_KEY,
   participantIdentityHeaders,
 } from "@/lib/api-client";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type GroupItem = {
@@ -53,8 +54,8 @@ function throwForStatus(res: Response, sentIdentity: boolean): never {
   if (res.status === 401 || res.status === 403) {
     throw new Error(
       sentIdentity
-        ? "请求被拒绝,请检查上方绑定的 Participant 身份是否有效"
-        : "请求被拒绝:未绑定 Participant 身份,请在身份面板选择或输入",
+        ? t("groups.error.identityRejected")
+        : t("groups.error.identityMissing"),
     );
   }
   throw new Error(`HTTP ${res.status}`);
@@ -158,7 +159,11 @@ export default function GroupsPage() {
       }
     } catch (e) {
       if (filter === statusFilter && q === debouncedQuery) {
-        setError(`加载群组失败: ${e instanceof Error ? e.message : String(e)}`);
+        setError(
+          t("groups.error.loadFailed", {
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        );
       }
     } finally {
       if (filter === statusFilter && q === debouncedQuery) {
@@ -200,7 +205,9 @@ export default function GroupsPage() {
     } catch (e) {
       if (filter === statusFilter && q === debouncedQuery) {
         setError(
-          `加载更多群组失败: ${e instanceof Error ? e.message : String(e)}`,
+          t("groups.error.loadMoreFailed", {
+            detail: e instanceof Error ? e.message : String(e),
+          }),
         );
       }
     } finally {
@@ -235,7 +242,9 @@ export default function GroupsPage() {
       setParticipants(data);
     } catch (e) {
       setParticipantsError(
-        `Participant 列表加载失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("groups.identity.listFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setParticipantsLoading(false);
@@ -276,7 +285,7 @@ export default function GroupsPage() {
     setMessage(null);
     setError(null);
     commitIdentity(participant.id);
-    setMessage(`已切换为 ${participant.name}`);
+    setMessage(t("groups.identity.switched", { name: participant.name }));
   };
 
   // Ticket 28: 前端注册 participant(POST /api/participants,公开端点)。成功后用返回的
@@ -284,7 +293,7 @@ export default function GroupsPage() {
   const handleRegister = async () => {
     const name = regName.trim();
     if (!name) {
-      setError("Participant 名称不能为空");
+      setError(t("groups.identity.nameRequired"));
       return;
     }
     setRegistering(true);
@@ -313,9 +322,15 @@ export default function GroupsPage() {
       commitIdentity(participant.id);
       setRegName("");
       setRegDevice("");
-      setMessage(`✅ 已注册并绑定 ${participant.name}`);
+      setMessage(
+        t("groups.identity.registeredAndBound", { name: participant.name }),
+      );
     } catch (e) {
-      setError(`注册失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("groups.identity.registerFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setRegistering(false);
     }
@@ -363,12 +378,12 @@ export default function GroupsPage() {
         ? localStorage.getItem(PARTICIPANT_ID_KEY)
         : null;
     if (!participantId) {
-      setError("未绑定 participantId,无法保存 Participant 设置");
+      setError(t("groups.settings.noParticipant"));
       return;
     }
     // 名称必填:空名称会被 PATCH 静默丢弃(undefined),提示而不是假装成功。
     if (!nameInput.trim()) {
-      setError("名称不能为空");
+      setError(t("groups.settings.nameEmpty"));
       return;
     }
     setSavingSettings(true);
@@ -394,11 +409,13 @@ export default function GroupsPage() {
           `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
         );
       }
-      setMessage("Participant 设置已保存");
+      setMessage(t("groups.settings.saved"));
       await loadParticipantInfo();
     } catch (e) {
       setError(
-        `保存 Participant 设置失败: ${e instanceof Error ? e.message : String(e)}`,
+        t("groups.settings.saveFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
       );
     } finally {
       setSavingSettings(false);
@@ -427,19 +444,21 @@ export default function GroupsPage() {
         throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       setNewTitle("");
-      setMessage(`群组「${title}」创建成功`);
+      setMessage(t("groups.created", { title }));
       await loadGroups();
     } catch (e) {
-      setError(`创建失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("groups.error.createFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setCreating(false);
     }
   };
 
   const handleArchive = async (group: GroupItem) => {
-    if (
-      !window.confirm(`确定归档群组「${group.title}」吗?归档后可随时恢复。`)
-    ) {
+    if (!window.confirm(t("groups.confirm.archive", { title: group.title }))) {
       return;
     }
     setError(null);
@@ -453,10 +472,14 @@ export default function GroupsPage() {
       if (!res.ok) {
         throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
-      setMessage(`群组「${group.title}」已归档`);
+      setMessage(t("groups.archived", { title: group.title }));
       await loadGroups();
     } catch (e) {
-      setError(`归档失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("groups.error.archiveFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   };
 
@@ -472,10 +495,14 @@ export default function GroupsPage() {
       if (!res.ok) {
         throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
-      setMessage(`群组「${group.title}」已恢复为进行中`);
+      setMessage(t("groups.restored", { title: group.title }));
       await loadGroups();
     } catch (e) {
-      setError(`恢复失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("groups.error.restoreFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   };
 
@@ -486,8 +513,8 @@ export default function GroupsPage() {
     if (
       !window.confirm(
         group.status === "active"
-          ? `确定删除进行中的群组「${group.title}」吗?删除后不可恢复(数据保留,仅从列表移除),群内消息与成员关系都将被移除。建议先归档。`
-          : `确定删除群组「${group.title}」吗?删除后不可恢复(数据保留,仅从列表移除)。`,
+          ? t("groups.confirm.deleteActive", { title: group.title })
+          : t("groups.confirm.deleteArchived", { title: group.title }),
       )
     ) {
       return;
@@ -503,10 +530,14 @@ export default function GroupsPage() {
       if (!res.ok) {
         throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
-      setMessage(`群组「${group.title}」已删除`);
+      setMessage(t("groups.deleted", { title: group.title }));
       await loadGroups();
     } catch (e) {
-      setError(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        t("groups.error.deleteFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   };
 
@@ -522,9 +553,9 @@ export default function GroupsPage() {
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
       <div className="mb-6 flex flex-col gap-3">
         <div>
-          <h2 className="text-xl font-semibold">群组</h2>
+          <h2 className="text-xl font-semibold">{t("groups.title")}</h2>
           <p className="text-muted-foreground text-sm">
-            一个群组对应一个任务上下文;成员在群组内分配角色
+            {t("groups.subtitle")}
           </p>
         </div>
         {/* 群列表搜索(enhancement):按标题关键词过滤,输入防抖 300ms 后拉取;
@@ -533,10 +564,10 @@ export default function GroupsPage() {
           <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="text"
-            placeholder="搜索群组名称…"
+            placeholder={t("groups.search.placeholder")}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            aria-label="搜索群组"
+            aria-label={t("groups.search.aria")}
             className="pl-9 pr-9"
           />
           {searchQuery && (
@@ -545,7 +576,7 @@ export default function GroupsPage() {
               variant="ghost"
               size="sm"
               onClick={() => setSearchQuery("")}
-              aria-label="清除搜索"
+              aria-label={t("groups.search.clearAria")}
               className="absolute right-1 top-1/2 -translate-y-1/2 p-1"
             >
               <X className="size-4" />
@@ -554,10 +585,13 @@ export default function GroupsPage() {
         </div>
         <p className="text-xs text-muted-foreground" aria-live="polite">
           {loading
-            ? "加载中…"
+            ? t("common.loading")
             : debouncedQuery
-              ? `找到 ${groups.length} 个匹配「${debouncedQuery}」的群组`
-              : `共 ${groups.length} 个群组`}
+              ? t("groups.count.matched", {
+                  count: groups.length,
+                  query: debouncedQuery,
+                })
+              : t("groups.count.total", { count: groups.length })}
         </p>
       </div>
 
@@ -570,19 +604,19 @@ export default function GroupsPage() {
               <span className="inline-flex min-w-0 items-center gap-2 text-sm font-medium">
                 <KeyRound className="size-4 shrink-0" />
                 <span className="truncate">
-                  使用中:{" "}
+                  {t("groups.identity.inUse")}{" "}
                   {currentParticipant
                     ? `${currentParticipant.name}${
                         currentParticipant.device
                           ? `(${currentParticipant.device})`
                           : ""
                       }`
-                    : "已绑定"}
+                    : t("groups.identity.bound")}
                 </span>
               </span>
             ) : (
               <span className="text-sm text-muted-foreground">
-                未绑定 participant,从下方列表选择,或手动输入 participant id
+                {t("groups.identity.unbound")}
               </span>
             )}
             {boundParticipantId && (
@@ -592,7 +626,7 @@ export default function GroupsPage() {
                 onClick={handleClearIdentity}
                 className="shrink-0"
               >
-                清除
+                {t("common.clear")}
               </Button>
             )}
           </div>
@@ -601,9 +635,13 @@ export default function GroupsPage() {
         {/* ② 已有 Participant 列表:选择身份(全信模型,声明即绑定,无服务端调用) */}
         <div className="border-b px-4 py-3">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">已有 Participant</span>
+            <span className="text-sm font-medium">
+              {t("groups.identity.existing")}
+            </span>
             <span className="text-xs text-muted-foreground">
-              {participantsLoading ? "加载中…" : `共 ${participants.length} 个`}
+              {participantsLoading
+                ? t("common.loading")
+                : t("groups.identity.count", { count: participants.length })}
             </span>
           </div>
           {participantsError && (
@@ -611,7 +649,7 @@ export default function GroupsPage() {
           )}
           {participants.length === 0 && !participantsLoading ? (
             <p className="text-sm text-muted-foreground">
-              暂无已注册 Participant,展开下方「注册新 Participant」创建
+              {t("groups.identity.empty")}
             </p>
           ) : (
             <ul className="max-h-48 space-y-1 overflow-y-auto pr-1">
@@ -632,7 +670,7 @@ export default function GroupsPage() {
                     </div>
                     {isBound ? (
                       <span className="inline-flex shrink-0 items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
-                        使用中
+                        {t("common.inUse")}
                       </span>
                     ) : (
                       <Button
@@ -641,7 +679,7 @@ export default function GroupsPage() {
                         onClick={() => handleBind(participant)}
                         className="shrink-0"
                       >
-                        使用
+                        {t("common.use")}
                       </Button>
                     )}
                   </li>
@@ -656,7 +694,7 @@ export default function GroupsPage() {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <Input
               type="text"
-              placeholder="输入 participant id(可选,用于以该身份发言)…"
+              placeholder={t("groups.identity.inputPlaceholder")}
               value={identityInput}
               onChange={(e) => setIdentityInput(e.target.value)}
               onKeyDown={(e) => {
@@ -664,7 +702,7 @@ export default function GroupsPage() {
                   handleSaveIdentity();
                 }
               }}
-              aria-label="Participant ID"
+              aria-label={t("groups.identity.inputAria")}
               className="sm:max-w-xs"
             />
             <Button
@@ -673,7 +711,7 @@ export default function GroupsPage() {
               disabled={!identityInput.trim()}
               className="shrink-0"
             >
-              绑定
+              {t("groups.identity.bind")}
             </Button>
           </div>
         </div>
@@ -688,10 +726,10 @@ export default function GroupsPage() {
           >
             <span className="inline-flex items-center gap-2">
               <UserPlus className="size-4" />
-              注册新 Participant
+              {t("groups.identity.register")}
             </span>
             <span className="text-xs text-muted-foreground">
-              {registerOpen ? "收起" : "展开"}
+              {registerOpen ? t("common.collapse") : t("common.expand")}
             </span>
           </button>
           {registerOpen && (
@@ -699,7 +737,7 @@ export default function GroupsPage() {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
                   type="text"
-                  placeholder="Participant 名称(必填,如「我的 Mac」)"
+                  placeholder={t("groups.identity.regNamePlaceholder")}
                   value={regName}
                   onChange={(e) => setRegName(e.target.value)}
                   onKeyDown={(e) => {
@@ -707,12 +745,12 @@ export default function GroupsPage() {
                       handleRegister();
                     }
                   }}
-                  aria-label="注册 Participant 名称"
+                  aria-label={t("groups.identity.regNameAria")}
                   className="sm:max-w-xs"
                 />
                 <Input
                   type="text"
-                  placeholder="设备(可选,如 mac / iphone / cli)"
+                  placeholder={t("groups.identity.regDevicePlaceholder")}
                   value={regDevice}
                   onChange={(e) => setRegDevice(e.target.value)}
                   onKeyDown={(e) => {
@@ -720,7 +758,7 @@ export default function GroupsPage() {
                       handleRegister();
                     }
                   }}
-                  aria-label="注册 Participant 设备"
+                  aria-label={t("groups.identity.regDeviceAria")}
                   className="sm:max-w-xs"
                 />
                 <Button
@@ -729,11 +767,13 @@ export default function GroupsPage() {
                   disabled={registering}
                   className="shrink-0"
                 >
-                  {registering ? "注册中…" : "注册并绑定"}
+                  {registering
+                    ? t("groups.identity.registering")
+                    : t("groups.identity.registerButton")}
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                注册成功后将自动切换为该身份,无需终端 curl
+                {t("groups.identity.registerHint")}
               </p>
             </div>
           )}
@@ -751,33 +791,39 @@ export default function GroupsPage() {
           >
             <span className="inline-flex items-center gap-2">
               <Settings className="size-4" />
-              Participant 设置
+              {t("groups.settings.title")}
             </span>
             <span className="text-xs text-muted-foreground">
-              {settingsOpen ? "收起" : "展开"}
+              {settingsOpen ? t("common.collapse") : t("common.expand")}
             </span>
           </button>
           {settingsOpen && (
             <div className="mt-3 flex flex-col gap-3">
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>名称:{participantInfo.name}</span>
-                <span>设备:{participantInfo.device ?? "-"}</span>
+                <span>
+                  {t("groups.settings.name")}
+                  {participantInfo.name}
+                </span>
+                <span>
+                  {t("groups.settings.device")}
+                  {participantInfo.device ?? "-"}
+                </span>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
                   type="text"
-                  placeholder="名称"
+                  placeholder={t("groups.settings.namePlaceholder")}
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
-                  aria-label="Participant 名称"
+                  aria-label={t("groups.settings.nameAria")}
                   className="sm:max-w-xs"
                 />
                 <Input
                   type="text"
-                  placeholder="设备"
+                  placeholder={t("groups.settings.devicePlaceholder")}
                   value={deviceInput}
                   onChange={(e) => setDeviceInput(e.target.value)}
-                  aria-label="Participant 设备"
+                  aria-label={t("groups.settings.deviceAria")}
                   className="sm:max-w-xs"
                 />
                 <Button
@@ -786,7 +832,7 @@ export default function GroupsPage() {
                   disabled={savingSettings}
                   className="shrink-0"
                 >
-                  {savingSettings ? "保存中…" : "保存"}
+                  {savingSettings ? t("common.saving") : t("common.save")}
                 </Button>
               </div>
             </div>
@@ -798,7 +844,7 @@ export default function GroupsPage() {
       <div className="mb-6 flex flex-col gap-2 sm:flex-row">
         <Input
           id="group-title-input"
-          placeholder="输入任务名,创建群组…"
+          placeholder={t("groups.create.placeholder")}
           value={newTitle}
           onChange={(e) => setNewTitle(e.target.value)}
           onKeyDown={(e) => {
@@ -806,7 +852,7 @@ export default function GroupsPage() {
               handleCreate();
             }
           }}
-          aria-label="群组名称"
+          aria-label={t("groups.create.aria")}
         />
         <Button
           onClick={handleCreate}
@@ -814,7 +860,7 @@ export default function GroupsPage() {
           className="shrink-0"
         >
           <Plus />
-          {creating ? "创建中…" : "创建群组"}
+          {creating ? t("common.creating") : t("groups.create.button")}
         </Button>
       </div>
 
@@ -833,9 +879,9 @@ export default function GroupsPage() {
       <div className="mb-4 flex gap-1 rounded-lg border bg-card p-1">
         {(
           [
-            ["all", "全部"],
-            ["active", "进行中"],
-            ["archived", "已归档"],
+            ["all", t("groups.filter.all")],
+            ["active", t("groups.filter.active")],
+            ["archived", t("groups.filter.archived")],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -858,22 +904,22 @@ export default function GroupsPage() {
         {groups.length === 0 ? (
           <div className="flex flex-col items-center gap-3 p-10 text-center text-sm text-muted-foreground">
             {loading ? (
-              "加载中…"
+              t("common.loading")
             ) : debouncedQuery ? (
               // 搜索无结果:与「暂无群组」区分开的空态文案。
               <>
                 <SearchX className="size-8" />
-                <p>未找到匹配的群组</p>
+                <p>{t("groups.empty.notFound")}</p>
               </>
             ) : (
               <>
                 <Users className="size-8" />
                 <p>
                   {statusFilter === "archived"
-                    ? "暂无已归档群组"
+                    ? t("groups.empty.archived")
                     : statusFilter === "active"
-                      ? "暂无进行中的群组"
-                      : "暂无群组,输入任务名点击「创建群组」开始"}
+                      ? t("groups.empty.active")
+                      : t("groups.empty.all")}
                 </p>
                 {statusFilter === "all" && (
                   <Button
@@ -884,7 +930,7 @@ export default function GroupsPage() {
                     }
                   >
                     <Plus />
-                    去创建群组
+                    {t("groups.empty.createCta")}
                   </Button>
                 )}
               </>
@@ -912,7 +958,7 @@ export default function GroupsPage() {
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <span className="inline-flex items-center gap-1">
                       <Users className="size-3.5" />
-                      {group.memberCount} 名成员
+                      {t("groups.memberCount", { count: group.memberCount })}
                     </span>
                     {previewFor(group) && (
                       <span className="inline-flex min-w-0 items-center gap-1">
@@ -928,7 +974,7 @@ export default function GroupsPage() {
                       className="flex-1"
                       onClick={() => navigate(`/groups/${group.id}/members`)}
                     >
-                      成员管理
+                      {t("groups.members.manage")}
                     </Button>
                     {group.status === "active" ? (
                       <Button
@@ -938,7 +984,7 @@ export default function GroupsPage() {
                         onClick={() => handleArchive(group)}
                       >
                         <Archive />
-                        归档
+                        {t("groups.archive")}
                       </Button>
                     ) : (
                       <Button
@@ -948,7 +994,7 @@ export default function GroupsPage() {
                         onClick={() => handleRestore(group)}
                       >
                         <RotateCcw />
-                        恢复
+                        {t("groups.restore")}
                       </Button>
                     )}
                     <Button
@@ -958,7 +1004,7 @@ export default function GroupsPage() {
                       onClick={() => handleDelete(group)}
                     >
                       <Trash2 />
-                      删除
+                      {t("common.delete")}
                     </Button>
                   </div>
                 </div>
@@ -968,11 +1014,21 @@ export default function GroupsPage() {
             <table className="hidden w-full text-sm md:table">
               <thead>
                 <tr className="border-b text-left text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">群组名称</th>
-                  <th className="px-4 py-3 font-medium">状态</th>
-                  <th className="px-4 py-3 font-medium">成员数</th>
-                  <th className="px-4 py-3 font-medium">最近消息</th>
-                  <th className="px-4 py-3 text-right font-medium">操作</th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("groups.table.name")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("groups.table.status")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("groups.table.members")}
+                  </th>
+                  <th className="px-4 py-3 font-medium">
+                    {t("groups.table.lastMessage")}
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium">
+                    {t("groups.table.actions")}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -995,7 +1051,7 @@ export default function GroupsPage() {
                     </td>
                     <td className="max-w-56 px-4 py-3 text-muted-foreground">
                       <span className="block truncate">
-                        {previewFor(group) ?? "暂无消息"}
+                        {previewFor(group) ?? t("common.noMessages")}
                       </span>
                     </td>
                     <td className="px-4 py-3">
@@ -1008,7 +1064,7 @@ export default function GroupsPage() {
                           }
                         >
                           <Users />
-                          成员管理
+                          {t("groups.members.manage")}
                         </Button>
                         {group.status === "active" ? (
                           <Button
@@ -1017,7 +1073,7 @@ export default function GroupsPage() {
                             onClick={() => handleArchive(group)}
                           >
                             <Archive />
-                            归档
+                            {t("groups.archive")}
                           </Button>
                         ) : (
                           <Button
@@ -1026,7 +1082,7 @@ export default function GroupsPage() {
                             onClick={() => handleRestore(group)}
                           >
                             <RotateCcw />
-                            恢复
+                            {t("groups.restore")}
                           </Button>
                         )}
                         <Button
@@ -1036,7 +1092,7 @@ export default function GroupsPage() {
                           onClick={() => handleDelete(group)}
                         >
                           <Trash2 />
-                          删除
+                          {t("common.delete")}
                         </Button>
                       </div>
                     </td>
@@ -1053,7 +1109,7 @@ export default function GroupsPage() {
                   onClick={loadMore}
                   disabled={loadingMore}
                 >
-                  {loadingMore ? "加载中…" : "加载更多"}
+                  {loadingMore ? t("common.loading") : t("groups.loadMore")}
                 </Button>
               </div>
             )}
@@ -1074,7 +1130,9 @@ function StatusBadge({ status }: { status: "active" | "archived" }) {
           : "bg-muted text-muted-foreground",
       )}
     >
-      {status === "active" ? "进行中" : "已归档"}
+      {status === "active"
+        ? t("groups.status.active")
+        : t("groups.status.archived")}
     </span>
   );
 }

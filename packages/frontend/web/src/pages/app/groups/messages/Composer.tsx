@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { MentionCandidate } from "./lib";
 
@@ -55,7 +56,7 @@ export function Composer(props: ComposerProps) {
         >
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-medium text-foreground">
-              回复 {replyTo.senderName}
+              {t("messages.reply.to", { name: replyTo.senderName })}
             </p>
             {replyTo.preview && (
               <p className="truncate text-xs text-muted-foreground">
@@ -65,7 +66,7 @@ export function Composer(props: ComposerProps) {
           </div>
           <button
             type="button"
-            aria-label="取消回复"
+            aria-label={t("messages.reply.cancelAria")}
             onClick={() => setReplyTo(null)}
             className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
@@ -77,7 +78,7 @@ export function Composer(props: ComposerProps) {
         {mention && mentionCandidates.length > 0 && (
           <ul
             role="listbox"
-            aria-label="提及候选"
+            aria-label={t("messages.mention.aria")}
             data-testid="mention-list"
             className="absolute bottom-full left-0 right-0 mb-2 max-h-56 overflow-y-auto rounded-lg border bg-popover p-1 shadow-md"
           >
@@ -96,7 +97,9 @@ export function Composer(props: ComposerProps) {
                 >
                   <span className="font-medium">@{candidate.token}</span>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                    {candidate.kind === "role" ? "角色" : "成员"}
+                    {candidate.kind === "role"
+                      ? t("messages.mention.role")
+                      : t("messages.mention.member")}
                   </span>
                 </button>
               </li>
@@ -105,7 +108,7 @@ export function Composer(props: ComposerProps) {
         )}
         <textarea
           ref={textareaRef}
-          aria-label="消息内容"
+          aria-label={t("messages.send.aria")}
           value={body}
           onChange={(e) =>
             handleBodyChange(
@@ -116,8 +119,8 @@ export function Composer(props: ComposerProps) {
           onKeyDown={handleComposerKeyDown}
           placeholder={
             isReadOnly
-              ? "已归档,无法发送消息"
-              : "输入消息内容,@ 提及角色或成员…"
+              ? t("messages.send.archivedPlaceholder")
+              : t("messages.send.placeholder")
           }
           rows={2}
           disabled={isReadOnly}
@@ -129,7 +132,9 @@ export function Composer(props: ComposerProps) {
           data-testid="audience-preview"
           className="min-w-0 truncate text-xs text-muted-foreground"
         >
-          {audiencePreview ? `将发送给 ${audiencePreview}` : ""}
+          {audiencePreview
+            ? t("messages.send.audience", { audience: audiencePreview })
+            : ""}
         </div>
         <Button
           onClick={handleSend}
@@ -137,7 +142,7 @@ export function Composer(props: ComposerProps) {
           size="sm"
           className="shrink-0"
         >
-          {sending ? "发送中…" : "发送"}
+          {sending ? t("common.sending") : t("messages.send.button")}
         </Button>
       </div>
     </div>

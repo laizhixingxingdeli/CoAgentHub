@@ -2,6 +2,7 @@ import { ArrowDown, Download, FileText, MessageCircle } from "lucide-react";
 import { Fragment } from "react";
 import { Button } from "@/components/ui/button";
 import { colorForId as participantColor } from "@/lib/avatar-color";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import {
   dayKey,
@@ -148,12 +149,12 @@ export function MessageList(props: MessageListProps) {
         {visibleMessages.length === 0 ? (
           <div className="flex flex-col items-center gap-2 p-10 text-center text-sm text-muted-foreground">
             {loading ? (
-              "加载中…"
+              t("common.loading")
             ) : (
               <>
                 <MessageCircle className="size-8" />
-                <p>暂无消息,发送第一条吧</p>
-                <p className="text-xs">@ 角色或成员可以让消息直达目标</p>
+                <p>{t("messages.list.empty")}</p>
+                <p className="text-xs">{t("messages.list.emptyHint")}</p>
               </>
             )}
           </div>
@@ -200,7 +201,9 @@ export function MessageList(props: MessageListProps) {
               // are read-only — write actions (edit/reply/delete) are disabled
               // with a hint; copy stays available.
               const writeDisabled = readOnly;
-              const writeHint = writeDisabled ? "群已归档,只读" : undefined;
+              const writeHint = writeDisabled
+                ? t("messages.list.readOnly")
+                : undefined;
               const actions = deleted ? null : (
                 <>
                   {own && (
@@ -214,7 +217,7 @@ export function MessageList(props: MessageListProps) {
                       }}
                       className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      编辑
+                      {t("common.edit")}
                     </button>
                   )}
                   <button
@@ -227,7 +230,7 @@ export function MessageList(props: MessageListProps) {
                     }}
                     className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    回复
+                    {t("messages.item.reply")}
                   </button>
                   <button
                     type="button"
@@ -237,7 +240,9 @@ export function MessageList(props: MessageListProps) {
                     }}
                     className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   >
-                    {copiedId === msg.id ? "已复制" : "复制"}
+                    {copiedId === msg.id
+                      ? t("messages.item.copied")
+                      : t("messages.item.copy")}
                   </button>
                   {own && (
                     <button
@@ -250,7 +255,7 @@ export function MessageList(props: MessageListProps) {
                       }}
                       className="rounded-md px-2 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      删除
+                      {t("common.delete")}
                     </button>
                   )}
                 </>
@@ -286,7 +291,7 @@ export function MessageList(props: MessageListProps) {
                       deleted ? (
                         /* 已删除的状态消息同样显示灰色占位,不伪装成进行中的状态条。 */
                         <div className="max-w-[85%] rounded-lg border bg-muted/40 px-3 py-1.5 text-xs italic text-muted-foreground">
-                          消息已删除
+                          {t("messages.item.deleted")}
                         </div>
                       ) : (
                         /* Ticket 26: 桥回传状态消息 → 微信系统消息风格的居中紧凑
@@ -308,7 +313,9 @@ export function MessageList(props: MessageListProps) {
                               onClick={() => toggleFold(msg.id)}
                               className="mt-1 inline-flex items-center rounded px-1 text-xs underline underline-offset-2 transition-opacity hover:opacity-80"
                             >
-                              {folded ? "展开全文" : "收起"}
+                              {folded
+                                ? t("messages.item.expandFull")
+                                : t("messages.item.fold")}
                             </button>
                           )}
                           <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-muted-foreground/80">
@@ -362,7 +369,7 @@ export function MessageList(props: MessageListProps) {
                                 </span>
                                 {own && (
                                   <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
-                                    我
+                                    {t("messages.item.me")}
                                   </span>
                                 )}
                                 <span className="shrink-0 text-[10px] text-muted-foreground">
@@ -385,14 +392,20 @@ export function MessageList(props: MessageListProps) {
                               {isRootWithReplies && (
                                 <button
                                   type="button"
-                                  aria-label={collapsed ? "展开" : "折叠"}
+                                  aria-label={
+                                    collapsed
+                                      ? t("messages.item.expand")
+                                      : t("messages.item.collapse")
+                                  }
                                   onClick={() => toggleCollapsed(msg.id)}
                                   className="inline-flex items-center gap-1 rounded-md border bg-muted/40 px-1.5 py-0.5 font-medium text-foreground transition-colors hover:bg-muted"
                                 >
                                   <span aria-hidden="true">
                                     {collapsed ? "▸" : "▾"}
                                   </span>
-                                  {replyCount} 条回复
+                                  {t("messages.item.replyCount", {
+                                    count: replyCount,
+                                  })}
                                 </button>
                               )}
                             </div>
@@ -411,7 +424,7 @@ export function MessageList(props: MessageListProps) {
                               >
                                 <textarea
                                   autoFocus
-                                  aria-label="编辑消息"
+                                  aria-label={t("messages.item.editAria")}
                                   value={editBody}
                                   onChange={(e) => setEditBody(e.target.value)}
                                   rows={2}
@@ -439,14 +452,16 @@ export function MessageList(props: MessageListProps) {
                                     variant="ghost"
                                     onClick={handleEditCancel}
                                   >
-                                    取消
+                                    {t("messages.edit.cancel")}
                                   </Button>
                                   <Button
                                     size="sm"
                                     onClick={() => void handleEditSave(msg)}
                                     disabled={savingEdit || !editBody.trim()}
                                   >
-                                    {savingEdit ? "保存中…" : "保存"}
+                                    {savingEdit
+                                      ? t("messages.edit.saving")
+                                      : t("messages.edit.save")}
                                   </Button>
                                 </div>
                               </div>
@@ -460,7 +475,7 @@ export function MessageList(props: MessageListProps) {
                                 )}
                               >
                                 <p className="whitespace-pre-wrap break-words text-xs italic text-muted-foreground">
-                                  消息已删除
+                                  {t("messages.item.deleted")}
                                 </p>
                               </div>
                             ) : (
@@ -468,7 +483,11 @@ export function MessageList(props: MessageListProps) {
                                 role="button"
                                 tabIndex={0}
                                 aria-expanded={openActionsId === msg.id}
-                                aria-label={`${msg.body ? msg.body.slice(0, 20) : "消息"} 操作`}
+                                aria-label={t("messages.item.actionsAria", {
+                                  preview: msg.body
+                                    ? msg.body.slice(0, 20)
+                                    : t("messages.item.messageWord"),
+                                })}
                                 onClick={() =>
                                   setOpenActionsId((prev) =>
                                     prev === msg.id ? null : msg.id,
@@ -525,7 +544,9 @@ export function MessageList(props: MessageListProps) {
                                         }}
                                         className="mt-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-muted"
                                       >
-                                        {folded ? "展开全文" : "收起"}
+                                        {folded
+                                          ? t("messages.item.expandFull")
+                                          : t("messages.item.fold")}
                                       </button>
                                     )}
                                   </>
@@ -543,7 +564,13 @@ export function MessageList(props: MessageListProps) {
                                       <p className="text-xs text-muted-foreground">
                                         {formatSize(msg.fileRef.size)}
                                         {msg.fileRef.expiresAt
-                                          ? ` · 有效期至 ${new Date(msg.fileRef.expiresAt).toLocaleString("zh-CN", { hour12: false })}`
+                                          ? t("messages.item.validUntil", {
+                                              time: new Date(
+                                                msg.fileRef.expiresAt,
+                                              ).toLocaleString("zh-CN", {
+                                                hour12: false,
+                                              }),
+                                            })
                                           : ""}
                                       </p>
                                     </div>
@@ -554,7 +581,7 @@ export function MessageList(props: MessageListProps) {
                                       className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
                                     >
                                       <Download className="size-3.5" />
-                                      下载
+                                      {t("common.download")}
                                     </a>
                                   </div>
                                 )}
@@ -607,7 +634,7 @@ export function MessageList(props: MessageListProps) {
           className="absolute bottom-5 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border bg-background px-3 py-1 text-xs shadow-sm transition-colors hover:bg-muted"
         >
           <ArrowDown className="size-3.5" />
-          {pendingCount} 条新消息
+          {t("messages.newCount", { count: pendingCount })}
         </button>
       )}
     </div>

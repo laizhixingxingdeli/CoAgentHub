@@ -7,6 +7,7 @@
 
 import type { ComponentProps, ReactElement } from "react";
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
 import type { Member, MessageItem } from "./types";
 
@@ -26,13 +27,9 @@ export type TaskItem = {
   updatedAt: string | null;
 };
 
-export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
-  queued: "排队中",
-  running: "执行中",
-  done: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
+export function taskStatusLabel(status: TaskStatus): string {
+  return t(`tasks.status.${status}`);
+}
 
 /** queued 在消息状态条(T26)里没有对应色,补中性灰;其余沿用任务状态条配色。 */
 export const TASK_PANEL_STATUS_CLASSES: Record<TaskStatus, string> = {
@@ -79,7 +76,9 @@ function ControlButton({
   if (canControl && !readOnly) {
     return btn;
   }
-  const hint = readOnly ? "群已归档,只读" : "需要 coordinator/human 身份";
+  const hint = readOnly
+    ? t("tasks.hint.readOnly")
+    : t("tasks.hint.noPermission");
   return (
     <span title={hint} className="inline-flex">
       {btn}
@@ -130,14 +129,14 @@ export default function TaskPanel({
   return (
     <div data-testid="task-panel" className="shrink-0 border-b px-4 py-3">
       <span className="text-xs font-medium text-muted-foreground">
-        任务列表({tasks.length})
+        {t("tasks.title", { count: tasks.length })}
       </span>
       <div className="mt-2">
         {error && <p className="mb-2 text-xs text-red-600">{error}</p>}
         {loading ? (
-          <p className="text-sm text-muted-foreground">加载中…</p>
+          <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
         ) : tasks.length === 0 ? (
-          <p className="text-sm text-muted-foreground">暂无任务</p>
+          <p className="text-sm text-muted-foreground">{t("tasks.empty")}</p>
         ) : (
           <ul className="flex flex-col gap-2">
             {tasks.map((task) => {
@@ -167,7 +166,7 @@ export default function TaskPanel({
                       data-status={task.status}
                       className={`rounded-full px-2 py-0.5 text-xs font-medium ${TASK_PANEL_STATUS_CLASSES[task.status]}`}
                     >
-                      {TASK_STATUS_LABELS[task.status]}
+                      {taskStatusLabel(task.status)}
                     </span>
                     <span className="text-xs font-medium">{executor}</span>
                     <span
@@ -187,7 +186,7 @@ export default function TaskPanel({
                           readOnly={readOnly}
                           onClick={() => onStop(task)}
                         >
-                          {busy ? "发送中…" : "停止"}
+                          {busy ? t("common.sending") : t("tasks.stop")}
                         </ControlButton>
                       )}
                       {canRollback && (
@@ -200,7 +199,7 @@ export default function TaskPanel({
                           readOnly={readOnly}
                           onClick={() => onRollback(task)}
                         >
-                          {busy ? "发送中…" : "回滚"}
+                          {busy ? t("common.sending") : t("tasks.rollback")}
                         </ControlButton>
                       )}
                     </span>

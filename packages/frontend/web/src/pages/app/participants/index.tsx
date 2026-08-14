@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { participantIdentityHeaders } from "@/lib/api-client";
+import { t } from "@/lib/i18n";
 
 /**
  * 接入 Participant(ticket: 网页 @executor 发布):管理执行器配置。
@@ -104,7 +105,9 @@ export default function ExecutorsPage() {
         })),
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "加载失败");
+      setError(
+        e instanceof Error ? e.message : t("participants.error.loadFailed"),
+      );
     } finally {
       setLoading(false);
     }
@@ -127,7 +130,7 @@ export default function ExecutorsPage() {
    *  participant),返回 true 表示已拦截。 */
   const requireBoundIdentity = (): boolean => {
     if (Object.keys(participantIdentityHeaders()).length === 0) {
-      setError("未绑定身份,请先在群组页身份面板选择或输入 participant id");
+      setError(t("participants.error.identityRequired"));
       return true;
     }
     return false;
@@ -137,7 +140,7 @@ export default function ExecutorsPage() {
     setMessage(null);
     setError(null);
     if (!name.trim()) {
-      setError("请填写 Participant 名字");
+      setError(t("participants.error.nameRequired"));
       return;
     }
     setSubmitting(true);
@@ -149,14 +152,14 @@ export default function ExecutorsPage() {
       };
       if (kind === "a2a") {
         if (!url.trim()) {
-          setError("a2a 调用方式需要 gateway 地址");
+          setError(t("participants.error.gatewayRequired"));
           return;
         }
         payload.url = url.trim();
         payload.bin = name.trim();
       } else {
         if (!bin.trim()) {
-          setError("cli 调用方式需要命令");
+          setError(t("participants.error.commandRequired"));
           return;
         }
         payload.bin = bin.trim();
@@ -178,9 +181,7 @@ export default function ExecutorsPage() {
         } | null;
         throw new Error(body?.message ?? `HTTP ${res.status}`);
       }
-      setMessage(
-        `已接入 Participant「${name.trim()}」,可在群组里定向到它发布任务`,
-      );
+      setMessage(t("participants.connected", { name: name.trim() }));
       setName("");
       setBin("");
       setUrl("");
@@ -188,7 +189,9 @@ export default function ExecutorsPage() {
       setDevice("");
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "提交失败");
+      setError(
+        e instanceof Error ? e.message : t("participants.error.submitFailed"),
+      );
     } finally {
       setSubmitting(false);
     }
@@ -196,7 +199,12 @@ export default function ExecutorsPage() {
 
   const handleDelete = async (item: ExecutorItem) => {
     if (item.builtin) return;
-    if (!window.confirm(`删除执行器「${item.agentName}」?`)) return;
+    if (
+      !window.confirm(
+        t("participants.confirm.delete", { name: item.agentName }),
+      )
+    )
+      return;
     setDeletingKey(item.key);
     setError(null);
     setMessage(null);
@@ -210,10 +218,12 @@ export default function ExecutorsPage() {
         } | null;
         throw new Error(body?.message ?? `HTTP ${res.status}`);
       }
-      setMessage(`已删除「${item.agentName}」`);
+      setMessage(t("participants.deleted", { name: item.agentName }));
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "删除失败");
+      setError(
+        e instanceof Error ? e.message : t("participants.error.deleteFailed"),
+      );
     } finally {
       setDeletingKey(null);
     }
@@ -259,14 +269,16 @@ export default function ExecutorsPage() {
         throw new Error(body?.message ?? `HTTP ${res.status}`);
       }
       const updated = (await res.json()) as ParticipantInfo;
-      setMessage(`已更新 Participant「${updated.name}」`);
+      setMessage(t("participants.updated", { name: updated.name }));
       setEditingParticipant(null);
       // 按 id 更新本地 participants,行内立即刷新(改名也不影响匹配)。
       setParticipants((prev) =>
         prev.map((a) => (a.id === updated.id ? updated : a)),
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "保存失败");
+      setError(
+        e instanceof Error ? e.message : t("participants.error.saveFailed"),
+      );
     } finally {
       setSavingEdit(false);
     }
@@ -293,9 +305,13 @@ export default function ExecutorsPage() {
       setParticipants((prev) =>
         prev.map((a) => (a.id === participant.id ? { ...a, lastSeen } : a)),
       );
-      setMessage(`已上报「${participant.name}」在线`);
+      setMessage(t("participants.heartbeatSent", { name: participant.name }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "上报在线失败");
+      setError(
+        e instanceof Error
+          ? e.message
+          : t("participants.error.heartbeatFailed"),
+      );
     } finally {
       setHeartbeatingId(null);
     }
@@ -304,16 +320,12 @@ export default function ExecutorsPage() {
   return (
     <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
       <div className="mb-6">
-        <h2 className="text-xl font-semibold">接入 Participant(参与者)</h2>
+        <h2 className="text-xl font-semibold">{t("participants.title")}</h2>
         <p className="text-muted-foreground text-sm">
-          新增一个可被定向消息调度的执行器;提交后自动注册对应
-          participant,凭据由后端管理。绑定身份后可编辑自己的 Participant
-          信息并上报在线
+          {t("participants.subtitle")}
         </p>
         <p className="text-muted-foreground mt-1 text-xs">
-          术语澄清:这里的 Participant = 参与者身份(人 / 工具 / Bot
-          统一注册),不是「AI 智能体」; 平台不内置 AI,思考发生在各 Participant
-          自己的客户端。
+          {t("participants.terminology")}
         </p>
       </div>
 
@@ -332,20 +344,20 @@ export default function ExecutorsPage() {
       <div className="mb-8 rounded-lg border bg-card p-4 sm:p-5">
         <div className="mb-4 flex items-center gap-2 text-sm font-medium">
           <Bot className="size-4" />
-          新增执行器
+          {t("participants.form.title")}
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="grid gap-1.5">
-            <Label htmlFor="ex-name">名字</Label>
+            <Label htmlFor="ex-name">{t("participants.form.name")}</Label>
             <Input
               id="ex-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="如 My CLI Participant"
+              placeholder={t("participants.form.namePlaceholder")}
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>调用方式</Label>
+            <Label>{t("participants.form.invoke")}</Label>
             <div className="flex items-center gap-4 pt-1.5">
               {(["cli", "a2a"] as const).map((k) => (
                 <label key={k} className="flex items-center gap-1.5 text-sm">
@@ -355,7 +367,9 @@ export default function ExecutorsPage() {
                     checked={kind === k}
                     onChange={() => setKind(k)}
                   />
-                  {k === "cli" ? "cli(本地命令)" : "a2a(远程 gateway)"}
+                  {k === "cli"
+                    ? t("participants.form.invokeCli")
+                    : t("participants.form.invokeA2a")}
                 </label>
               ))}
             </div>
@@ -363,51 +377,51 @@ export default function ExecutorsPage() {
           <div className="grid gap-1.5">
             {kind === "cli" ? (
               <>
-                <Label htmlFor="ex-bin">命令</Label>
+                <Label htmlFor="ex-bin">{t("participants.form.command")}</Label>
                 <Input
                   id="ex-bin"
                   value={bin}
                   onChange={(e) => setBin(e.target.value)}
-                  placeholder="如 atomcode"
+                  placeholder={t("participants.form.commandPlaceholder")}
                 />
               </>
             ) : (
               <>
-                <Label htmlFor="ex-url">Gateway 地址</Label>
+                <Label htmlFor="ex-url">{t("participants.form.gateway")}</Label>
                 <Input
                   id="ex-url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  placeholder="如 http://192.168.1.10:9900/"
+                  placeholder={t("participants.form.gatewayPlaceholder")}
                 />
               </>
             )}
           </div>
           {kind === "cli" && (
             <div className="grid gap-1.5">
-              <Label htmlFor="ex-args">参数模板(可选)</Label>
+              <Label htmlFor="ex-args">{t("participants.form.args")}</Label>
               <Input
                 id="ex-args"
                 value={args}
                 onChange={(e) => setArgs(e.target.value)}
-                placeholder="如 -y -p {ticket}"
+                placeholder={t("participants.form.argsPlaceholder")}
               />
             </div>
           )}
           <div className="grid gap-1.5">
-            <Label htmlFor="ex-device">设备(可选)</Label>
+            <Label htmlFor="ex-device">{t("participants.form.device")}</Label>
             <Input
               id="ex-device"
               value={device}
               onChange={(e) => setDevice(e.target.value)}
-              placeholder="如 mac-mini"
+              placeholder={t("participants.form.devicePlaceholder")}
             />
           </div>
         </div>
         <div className="mt-4 flex justify-end">
           <Button onClick={handleSubmit} disabled={submitting}>
             {submitting && <Loader2 className="size-4 animate-spin" />}
-            提交
+            {t("common.submit")}
           </Button>
         </div>
       </div>
@@ -415,14 +429,18 @@ export default function ExecutorsPage() {
       {/* 执行器列表(内置 + DB 配置),行内带 participant 自管理字段 */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between border-b px-4 py-3">
-          <span className="text-sm font-medium">执行器列表</span>
+          <span className="text-sm font-medium">
+            {t("participants.list.title")}
+          </span>
           <span className="text-xs text-muted-foreground">
-            {loading ? "加载中…" : `共 ${items.length} 个`}
+            {loading
+              ? t("common.loading")
+              : t("participants.list.count", { count: items.length })}
           </span>
         </div>
         {items.length === 0 && !loading ? (
           <p className="px-4 py-6 text-sm text-muted-foreground">
-            暂无执行器,请先在上方新增
+            {t("participants.list.empty")}
           </p>
         ) : (
           <ul className="divide-y">
@@ -444,7 +462,7 @@ export default function ExecutorsPage() {
                       </span>
                       {item.builtin && (
                         <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                          内置
+                          {t("common.builtin")}
                         </span>
                       )}
                       {/* 在线状态徽标:绿点在线 / 灰点离线 / 从未在线 */}
@@ -464,10 +482,10 @@ export default function ExecutorsPage() {
                             }`}
                           />
                           {lastSeen == null
-                            ? "从未在线"
+                            ? t("common.neverOnline")
                             : online
-                              ? "在线"
-                              : "离线"}
+                              ? t("common.online")
+                              : t("common.offline")}
                         </span>
                       )}
                     </div>
@@ -499,7 +517,7 @@ export default function ExecutorsPage() {
                           onClick={() => startEdit(participant)}
                         >
                           <Pencil className="size-4" />
-                          编辑
+                          {t("common.edit")}
                         </Button>
                         <Button
                           variant="outline"
@@ -509,8 +527,8 @@ export default function ExecutorsPage() {
                         >
                           <HeartPulse className="size-4" />
                           {heartbeatingId === participant.id
-                            ? "上报中…"
-                            : "上报在线"}
+                            ? t("participants.reporting")
+                            : t("participants.heartbeat")}
                         </Button>
                       </>
                     )}
@@ -523,7 +541,7 @@ export default function ExecutorsPage() {
                         className="shrink-0"
                       >
                         <Trash2 className="size-4" />
-                        删除
+                        {t("common.delete")}
                       </Button>
                     )}
                   </div>
@@ -543,14 +561,12 @@ export default function ExecutorsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>编辑 Participant</DialogTitle>
-            <DialogDescription>
-              更新自己的注册信息:名字 / 设备 / 能力标签(逗号分隔)。
-            </DialogDescription>
+            <DialogTitle>{t("participants.edit.title")}</DialogTitle>
+            <DialogDescription>{t("participants.edit.desc")}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-1.5">
-              <Label htmlFor="edit-name">Participant 名字</Label>
+              <Label htmlFor="edit-name">{t("participants.edit.name")}</Label>
               <Input
                 id="edit-name"
                 value={editName}
@@ -558,21 +574,23 @@ export default function ExecutorsPage() {
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="edit-device">设备</Label>
+              <Label htmlFor="edit-device">
+                {t("participants.edit.device")}
+              </Label>
               <Input
                 id="edit-device"
                 value={editDevice}
                 onChange={(e) => setEditDevice(e.target.value)}
-                placeholder="如 mac-mini"
+                placeholder={t("participants.edit.devicePlaceholder")}
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="edit-caps">能力标签(逗号分隔)</Label>
+              <Label htmlFor="edit-caps">{t("participants.edit.caps")}</Label>
               <Input
                 id="edit-caps"
                 value={editCapabilities}
                 onChange={(e) => setEditCapabilities(e.target.value)}
-                placeholder="如 text-generation, code-review"
+                placeholder={t("participants.edit.capsPlaceholder")}
               />
             </div>
           </div>
@@ -582,11 +600,11 @@ export default function ExecutorsPage() {
               onClick={() => setEditingParticipant(null)}
               disabled={savingEdit}
             >
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={handleSaveEdit} disabled={savingEdit}>
               {savingEdit && <Loader2 className="size-4 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
