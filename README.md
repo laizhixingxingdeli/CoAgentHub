@@ -27,8 +27,9 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
   incremental cursor; `?q=` does keyword search (visibility-filtered).
 - **Server-side visibility** — senders see their own messages, `broadcast`
   reaches everyone, `role` targets a role, `participant` targets a member, and
-  `human`-role members see everything. Filtering is pushed into SQL with
-  cursor pagination (LIMIT 200).
+  `human`-type participants (incl. the Local User) see everything, even without
+  a membership row. Filtering is pushed into SQL with cursor pagination
+  (LIMIT 200).
 - **Executor tasks** — directing a message at an executor (audience=participant)
   creates a `task` and spawns the CLI (or calls the remote A2A gateway) through
   a per-project queue: tasks of the same project path (`project_path`) run

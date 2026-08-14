@@ -18,6 +18,7 @@ import {
   maybeDispatchExecutorTask,
   taskOutputTail,
 } from "@server/lib/executor-task";
+import type { ParticipantType } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import { capabilityHint } from "@server/lib/participant-capabilities";
 import {
@@ -880,13 +881,12 @@ app
       // LAN trust model: reading a group does not require membership. The
       // default Local User counts as human (sees everything) — even when it
       // holds a membership row (e.g. it created the group tokenless and was
-      // auto-inserted as coordinator); union keeps that human bypass, so pull
-      // matches the WS fan-out. Any other non-member sees broadcast + own.
+      // auto-inserted as coordinator); participantType keeps that human bypass,
+      // so pull matches the WS fan-out. Any other non-member sees broadcast + own.
       const localUserId = await resolveLocalUser(db);
-      const requesterRoles =
-        requesterId === localUserId
-          ? [...(membership?.roles ?? []), "human"]
-          : (membership?.roles ?? []);
+      const participantType: ParticipantType | undefined =
+        requesterId === localUserId ? "human" : undefined;
+      const requesterRoles = membership?.roles ?? [];
 
       // 可见性 SQL(与 webhook/WS 扇出同一套规则)+ ?after= 增量游标 +
       // q 关键词 + LIMIT 整体在 message-service 内完成,翻页发生在
@@ -899,6 +899,7 @@ app
         {
           after,
           q,
+          participantType,
         },
       );
 

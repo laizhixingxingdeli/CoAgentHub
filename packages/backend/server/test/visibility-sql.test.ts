@@ -102,7 +102,11 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
     }
   }
 
-  async function sqlVisibleIds(participantId: string, roles: string[]) {
+  async function sqlVisibleIds(
+    participantId: string,
+    roles: string[],
+    participantType?: Parameters<typeof messageVisibleToMemberSql>[2],
+  ) {
     const rows = await testDb
       .select({
         id: groupMessageTable.id,
@@ -112,7 +116,7 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
       .where(
         and(
           eq(groupMessageTable.groupId, GROUP_ID),
-          messageVisibleToMemberSql(participantId, roles),
+          messageVisibleToMemberSql(participantId, roles, participantType),
         ),
       )
       .orderBy(asc(groupMessageTable.id));
@@ -146,5 +150,46 @@ describe("可见性规则:JS 与 SQL 两种表示一致", () => {
       }),
     );
     expect(rows.length).toBe(expected.length);
+  });
+
+  it("非成员 human(type=human)对全部消息可见,不受 audience 限制", async () => {
+    const human = {
+      id: "10000000-0000-7000-8000-0000000000cc",
+      roles: [] as string[],
+    };
+    // 与 MEMBERS 中的 human 角色成员不同:这是"类型为 human"的非成员
+    // (如 Local User 未入群),JS 与 SQL 都应无条件返回全部消息。
+    const rows = await sqlVisibleIds(human.id, human.roles, "human");
+    const expected = SAMPLE_MESSAGES.filter((m) =>
+      isMessageVisibleToMember(
+        m,
+        { participantId: human.id, roles: human.roles },
+        "human",
+      ),
+    );
+    expect(rows.length).toBe(SAMPLE_MESSAGES.length);
+    expect(rows.length).toBe(expected.length);
+  });
+
+  it("human 类型参与者的可见性先于成员/audience 判定,且不影响非 human 参与者", async () => {
+    // human 非成员对定向消息(broadcast/role/participant 全样本)一条不落。
+    const human = {
+      id: "10000000-0000-7000-8000-0000000000cc",
+      roles: [] as string[],
+    };
+    const humanRows = await sqlVisibleIds(human.id, human.roles, "human");
+    expect(humanRows.length).toBe(SAMPLE_MESSAGES.length);
+
+    // 同一 id 不标 human 时,退回非成员可见性(自己+广播+点名自己),证明
+    // human 全可见来自 participantType 判定而非数据本身。
+    const plainRows = await sqlVisibleIds(human.id, human.roles);
+    const plainExpected = SAMPLE_MESSAGES.filter((m) =>
+      isMessageVisibleToMember(m, {
+        participantId: human.id,
+        roles: human.roles,
+      }),
+    );
+    expect(plainRows.length).toBe(plainExpected.length);
+    expect(plainRows.length).toBeLessThan(SAMPLE_MESSAGES.length);
   });
 });

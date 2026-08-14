@@ -6,7 +6,10 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import db from "@server/lib/database";
 import type { GroupMessageFull } from "@server/lib/group-message";
-import { visibleMemberIds } from "@server/lib/group-visibility";
+import {
+  type ParticipantType,
+  visibleMemberIds,
+} from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import { eq } from "drizzle-orm";
 import { WebSocket, WebSocketServer } from "ws";
@@ -196,12 +199,17 @@ export class WsHub {
         })
         .from(groupMemberTable)
         .where(eq(groupMemberTable.groupId, message.groupId));
-      const visible = visibleMemberIds(message, members);
       const localUserId = await resolveLocalUser(db);
-      // LAN trust model: the default Local User is a human observer — it
-      // receives every message even without a membership row. When it IS a
-      // member it is already in `visible`, so only deliver the extra copy
-      // then — otherwise the same event goes to the same socket twice.
+      // LAN trust model: the default Local User is a human observer — type
+      // =human bypasses the audience rule, so it receives every message even
+      // without a membership row. Mark it in the participant-type map so the
+      // visibility rule (single source, group-visibility.ts) includes it;
+      // when it IS a member it is already in `visible`, so only deliver the
+      // extra copy then — otherwise the same event goes to the same socket twice.
+      const participantTypeById = new Map<string, ParticipantType>([
+        [localUserId, "human"],
+      ]);
+      const visible = visibleMemberIds(message, members, participantTypeById);
       if (visible.size === 0 && !this.conns.has(localUserId)) return;
 
       const event = buildEvent(message);

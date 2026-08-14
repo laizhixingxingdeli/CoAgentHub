@@ -229,6 +229,7 @@ export const zh = {
   "messages.item.deleteAria": "删除消息",
   "messages.item.messageWord": "消息",
   "messages.item.validUntil": " · 有效期至 {time}",
+  "messages.item.directedTo": "📨 定向给 {name}",
   "messages.newCount": "{count} 条新消息",
   "messages.send.placeholder": "输入消息内容,@ 提及角色或成员…",
   "messages.send.archivedPlaceholder": "已归档,无法发送消息",

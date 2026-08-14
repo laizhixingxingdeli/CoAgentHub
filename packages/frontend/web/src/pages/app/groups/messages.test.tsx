@@ -2284,14 +2284,50 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
 
     await screen.findByText("只给 win-hermes");
-    // participant 命中成员 → @成员名;未知 ref → @ref 前 8 位;role → @角色名
-    expect(screen.getByText("→ @win-hermes")).toBeInTheDocument();
-    expect(screen.getByText("→ @abc12345")).toBeInTheDocument();
+    // 未绑定身份 = Local User(human 视角,全可见):定向消息显示 📨 定向给
+    // <执行器名>;未知 ref → ref 前 8 位;role 仍显示 → @角色名。
+    expect(screen.getByText("📨 定向给 win-hermes")).toBeInTheDocument();
+    expect(screen.getByText("📨 定向给 abc12345")).toBeInTheDocument();
     expect(screen.getByText("→ @reviewer")).toBeInTheDocument();
-    expect(screen.getAllByText(/^→ @/)).toHaveLength(3);
     // broadcast 不加标签
     const broadcastRow = screen.getByText("广播消息").closest("li");
     expect(broadcastRow?.textContent).not.toContain("→ @");
+    expect(broadcastRow?.textContent).not.toContain("📨");
+  });
+
+  it("非 human 视角(绑定非 human 成员):定向消息不显示 📨 标签,仍显示 → @成员名", async () => {
+    const TARGETED = [
+      {
+        id: "nh-1",
+        groupId: "group-1",
+        senderId: "participant-1",
+        parentId: null,
+        audience: "participant",
+        audienceRef: "participant-2",
+        body: "只给 win-hermes",
+        depth: 0,
+        createdAt: "2026-08-02T00:00:00.000Z",
+      },
+      {
+        id: "nh-2",
+        groupId: "group-1",
+        senderId: "participant-1",
+        parentId: null,
+        audience: "role",
+        audienceRef: "reviewer",
+        body: "给评审角色",
+        depth: 0,
+        createdAt: "2026-08-02T00:12:00.000Z",
+      },
+    ];
+    stubFetch(messagesFetchMock(TARGETED));
+    // 绑定一个非 human 成员(coordinator):不显示 📨 标签。
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("只给 win-hermes");
+    expect(screen.getByText("→ @win-hermes")).toBeInTheDocument();
+    expect(screen.queryByText(/📨/)).toBeNull();
   });
 
   it("旧消息 contentType 为 null/undefined → 按普通气泡渲染", async () => {

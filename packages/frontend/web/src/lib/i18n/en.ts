@@ -240,6 +240,7 @@ export const en: Record<DictKey, string> = {
   "messages.item.deleteAria": "Delete message",
   "messages.item.messageWord": "Message",
   "messages.item.validUntil": " · valid until {time}",
+  "messages.item.directedTo": "📨 Directed to {name}",
   "messages.newCount": "{count} new messages",
   "messages.send.placeholder": "Type a message, @ mention a role or member…",
   "messages.send.archivedPlaceholder": "Archived — cannot send messages",

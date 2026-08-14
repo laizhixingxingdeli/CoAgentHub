@@ -99,15 +99,29 @@ export function MessageList(props: MessageListProps) {
   const senderRoles = (senderId: string): string[] =>
     members.find((m) => m.participantId === senderId)?.roles ?? [];
 
+  // 当前身份是否 human(全可见):未绑定 = Local User(human);已绑定则看
+  // 该 participant 在本群是否持 human 角色。与服务端 participantType 判定一致。
+  const isHuman =
+    myParticipantId === null ||
+    members.some(
+      (m) => m.participantId === myParticipantId && m.roles.includes("human"),
+    );
+
   // Ticket 26 audience tag: `→ @<成员名>` for participant-targeted, `→ @<角色名>`
   // for role-targeted, nothing for broadcast.
+  // human 视角(全可见)的定向消息额外以「📨 定向给 <执行器名>」标注目标,
+  // 非 human 不显示该标签(仅保留通用 → @ 受众徽章)。
   const audienceLabel = (msg: MessageItem) => {
     if (msg.audience === "role" && msg.audienceRef) {
       return `→ @${msg.audienceRef}`;
     }
     if (msg.audience === "participant" && msg.audienceRef) {
       const target = members.find((m) => m.participantId === msg.audienceRef);
-      return `→ @${target ? target.name : msg.audienceRef.slice(0, 8)}`;
+      const name = target ? target.name : msg.audienceRef.slice(0, 8);
+      if (isHuman) {
+        return t("messages.item.directedTo", { name });
+      }
+      return `→ @${name}`;
     }
     return null;
   };

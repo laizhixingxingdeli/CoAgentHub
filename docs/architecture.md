@@ -102,6 +102,7 @@ CoAgentHub/
 
 ```
 消息对成员可见,当且仅当:
+  参与者 type = human           → 全可见(人类观察者,不要求是群成员;Local User 即属此类)
   成员 = 发送者                → 永远可见(自己发的必见)
   成员持有 human 角色          → 全可见(用户旁观整个协作过程)
   audience = broadcast        → 全体成员可见
@@ -109,6 +110,9 @@ CoAgentHub/
   audience = participant            → audienceRef = 成员自己的 participantId
 ```
 
+- `participantType` 由调用处(路由 / ws-hub)判定后传入:Local User 解析为
+  `human`,其余参与者按成员角色走原规则;两种表示(JS 谓词与 SQL 谓词)共用
+  同一参数,`visibility-sql.test.ts` 断言二者一致。
 - GET `/api/groups/:id/messages`:先按群组(+ 可选游标)查出消息,再用上述规则对请求者逐条过滤。
 - WS 推送:先按规则算出 `visibleMemberIds`,剔除发送者——各调用路径永不漂移。
 

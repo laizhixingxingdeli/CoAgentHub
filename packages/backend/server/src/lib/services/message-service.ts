@@ -16,7 +16,10 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
-import { messageVisibleToMemberSql } from "@server/lib/group-visibility";
+import {
+  messageVisibleToMemberSql,
+  type ParticipantType,
+} from "@server/lib/group-visibility";
 import { and, asc, eq, gt, ilike, ne, sql } from "drizzle-orm";
 
 /** Soft-delete placeholder (ticket 22): the row is kept (closure/reply tree stays intact), the body becomes this string. */
@@ -195,6 +198,11 @@ export interface ListVisibleMessagesOptions {
   q?: string;
   /** 分页大小,缺省 LIMIT 200(与原路由 MESSAGE_PAGE_LIMIT 一致)。 */
   limit?: number;
+  /**
+   * 请求方参与者类型:human = 无条件全可见(先于成员/audience 判定,不要求
+   * 是群成员);缺省按成员角色判定。调用处(路由)判定后传入。
+   */
+  participantType?: ParticipantType;
 }
 
 /**
@@ -209,11 +217,11 @@ export async function listVisibleMessages(
   roles: string[],
   options: ListVisibleMessagesOptions = {},
 ): Promise<GroupMessageFull[]> {
-  const { after, q, limit = MESSAGE_PAGE_LIMIT } = options;
+  const { after, q, limit = MESSAGE_PAGE_LIMIT, participantType } = options;
 
   const conditions = [
     eq(groupMessageTable.groupId, groupId),
-    messageVisibleToMemberSql(requesterId, roles),
+    messageVisibleToMemberSql(requesterId, roles, participantType),
   ];
   if (after) {
     // Incremental pull: uuidv7 ids are time-ordered, so id > after yields
