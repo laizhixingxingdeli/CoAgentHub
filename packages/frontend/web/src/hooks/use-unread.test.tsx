@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { groupMessageFrame } from "@/test/frames";
 import { MockWebSocket } from "@/test/ws-mock";
 import {
@@ -29,7 +29,7 @@ beforeEach(() => {
 
 describe("useUnread (ticket 23)", () => {
   it("counts group_message frames per group while nothing is open", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -45,7 +45,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("does not count messages for the currently open group", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
     act(() => setActiveGroupId("group-1"));
 
@@ -61,7 +61,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("markRead clears a group's badge", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -76,7 +76,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("entering a group clears its badge (setActiveGroupId)", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -91,7 +91,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("ignores updated/deleted frames, other frame types and malformed payloads", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -120,7 +120,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("feeds the last-message preview cache from group_message frames", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -134,7 +134,7 @@ describe("useUnread (ticket 23)", () => {
   });
 
   it("updateLastMessage seeds the preview from a non-WS source (messages page)", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     const { result } = renderHook(() => useUnread());
@@ -147,46 +147,46 @@ describe("useUnread (ticket 23)", () => {
     expect(result.current.unread.size).toBe(0);
   });
 
-  it("does not connect without a token (silent)", () => {
+  it("does not connect without a bound identity (silent)", () => {
     stubWebSocket();
     const { result } = renderHook(() => useUnread());
     expect(MockWebSocket.instances).toHaveLength(0);
     expect(result.current.unread.size).toBe(0);
   });
 
-  it("starts the socket after a token is bound (navigation pulse)", () => {
+  it("starts the socket after an identity is bound (navigation pulse)", () => {
     stubWebSocket();
     renderHook(() => useUnread());
     expect(MockWebSocket.instances).toHaveLength(0);
 
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     act(() => syncUnreadConnection());
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(MockWebSocket.instances[0].url).toBe(
-      `ws://${window.location.host}/api/ws?token=tok-abc`,
+      `ws://${window.location.host}/api/ws?participantId=tok-abc`,
     );
   });
 
-  it("reconnects when the token is re-bound to a different value", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+  it("reconnects when the identity is re-bound to a different value", () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     stubWebSocket();
 
     renderHook(() => useUnread());
     expect(MockWebSocket.instances).toHaveLength(1);
 
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-2");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-2");
     act(() => syncUnreadConnection());
 
     expect(MockWebSocket.instances).toHaveLength(2);
     expect(MockWebSocket.instances[1].url).toBe(
-      `ws://${window.location.host}/api/ws?token=tok-2`,
+      `ws://${window.location.host}/api/ws?participantId=tok-2`,
     );
     // The old socket was torn down, not left connected.
     expect(MockWebSocket.instances[0].closed).toBe(true);
   });
 
-  it("keeps the same socket when the token is unchanged (no restart)", () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+  it("keeps the same socket when the identity is unchanged (no restart)", () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     stubWebSocket();
 
     renderHook(() => useUnread());
@@ -199,7 +199,7 @@ describe("useUnread (ticket 23)", () => {
 
   it("reconnects with exponential backoff 1s→2s→4s… capped at 30s", () => {
     vi.useFakeTimers();
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-abc");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     stubWebSocket();
 
     renderHook(() => useUnread());

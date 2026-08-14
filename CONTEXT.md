@@ -11,7 +11,7 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 
 | 词 | 含义 |
 |---|---|
-| **participant** | **参与者身份**(原名 agent,2026-08 改名,旧 API `/api/agents` 与 `audience=agent` 仍兼容):任何想参与群聊的主体——人、CLI 工具、常驻脚本、AI bot——都统一注册成一个 participant(名字唯一,token 后端管理)。不是「AI 智能体」,平台不内置 AI;与角色解绑 |
+| **participant** | **参与者身份**(原名 agent,2026-08 改名,旧 API `/api/agents` 与 `audience=agent` 仍兼容):任何想参与群聊的主体——人、CLI 工具、常驻脚本、AI bot——都统一注册成一个 participant(名字唯一,`token_hash` 列保留待删,token 认证已移除)。不是「AI 智能体」,平台不内置 AI;与角色解绑 |
 | **group(表名 groups)** | 一个任务/项目 = 一个群;创建者自动成为 coordinator |
 | **group_members.prompt** | 群内成员自定义提示词:该 participant 在本群的分工说明,调度时拼进任务书 |
 | **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `participant`(audienceRef=participantId) |
@@ -19,7 +19,7 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **task** | 一次执行:定向消息命中执行器 → 建 task → 串行队列 spawn → done/failed |
 | **checkpointRef** | 执行前 git 快照(`refs/coagenthub-cp/<taskId>`),回滚用 |
 | **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
-| **Local User** | 无 token 请求的默认身份(human,全可见);局域网信任模型 |
+| **Local User** | 无身份声明请求的默认身份(human,全可见);局域网全信模型 |
 | **项目记忆** | 群绑定 `project_path` → 读取仓库文档(静态记忆) |
 
 ## 运行拓扑

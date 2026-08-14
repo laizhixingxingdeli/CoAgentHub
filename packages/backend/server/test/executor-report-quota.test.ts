@@ -101,16 +101,16 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id, token } = (await res.json()) as { id: string; token: string };
-    return { id, token };
+    const { id } = (await res.json()) as { id: string };
+    return { id };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -119,24 +119,24 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
   }
 
   async function addMember(
-    token: string,
-    groupId: string,
     participantId: string,
+    groupId: string,
+    memberParticipantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
-      body: JSON.stringify({ participantId, roles }),
+      body: JSON.stringify({ participantId: memberParticipantId, roles }),
     });
     expect(res.status).toBe(200);
   }
 
   async function postMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     body: Record<string, unknown>,
   ) {
@@ -144,7 +144,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(body),
     });
@@ -152,9 +152,9 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
     return (await res.json()) as { id: string };
   }
 
-  async function listTasks(token: string, groupId: string) {
+  async function listTasks(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/tasks`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<{
@@ -166,9 +166,9 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
     }>;
   }
 
-  async function listMessages(token: string, groupId: string) {
+  async function listMessages(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/messages`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<{
@@ -180,7 +180,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
 
   /** 轮询直到 task 达到指定状态;超时抛错。 */
   async function waitForTaskStatus(
-    token: string,
+    participantId: string,
     groupId: string,
     messageId: string,
     status: string,
@@ -188,7 +188,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
   ) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const tasks = await listTasks(token, groupId);
+      const tasks = await listTasks(participantId, groupId);
       const t = tasks.find((x) => x.messageId === messageId);
       if (t && t.status === status) return t;
       if (Date.now() > deadline) {
@@ -204,14 +204,14 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
 
   /** 轮询直到群里出现满足谓词的消息;超时抛错。 */
   async function waitForMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     predicate: (m: { body: string; contentType: string }) => boolean,
     timeoutMs = 15_000,
   ) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const messages = await listMessages(token, groupId);
+      const messages = await listMessages(participantId, groupId);
       const hit = messages.find(predicate);
       if (hit) return hit;
       if (Date.now() > deadline) {
@@ -225,8 +225,8 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-report" });
     const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
-    const group = await createGroup(coordinator.token, "汇报与额度测试");
-    await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+    const group = await createGroup(coordinator.id, "汇报与额度测试");
+    await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };
   }
 
@@ -241,12 +241,12 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       process.env.FAKE_TICKET_COPY = capture;
       try {
         const { coordinator, codebuddy, group } = await setupGroup();
-        const msg = await postMessage(coordinator.token, group.id, {
+        const msg = await postMessage(coordinator.id, group.id, {
           body: "建一个文件 hello.txt",
           audience: "participant",
           audienceRef: codebuddy.id,
         });
-        await waitForTaskStatus(coordinator.token, group.id, msg.id, "done");
+        await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
         const ticket = readFileSync(capture, "utf8");
         expect(ticket).toContain("# CoAgentHub 任务");
         expect(ticket).toContain("执行器: codebuddy");
@@ -270,13 +270,13 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       process.env.FAKE_STRUCTURED = "1";
       try {
         const { coordinator, codebuddy, group } = await setupGroup();
-        const msg = await postMessage(coordinator.token, group.id, {
+        const msg = await postMessage(coordinator.id, group.id, {
           body: "结构化任务",
           audience: "participant",
           audienceRef: codebuddy.id,
         });
         const t = await waitForTaskStatus(
-          coordinator.token,
+          coordinator.id,
           group.id,
           msg.id,
           "done",
@@ -289,7 +289,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         });
         // 成功回传为卡片:✅ 标题 + 分隔线 + 四行。
         const done = await waitForMessage(
-          coordinator.token,
+          coordinator.id,
           group.id,
           (m) => m.contentType === "task_status" && m.body.startsWith("✅"),
         );
@@ -311,13 +311,13 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
     it("老格式自由文本(无段落)→ 旧行为:关键词摘要 + hash,无 tests/todo", async () => {
       // 默认 fake bin 输出「commit <hex>」裸行 + 「汇报:修改完成」,无段落头。
       const { coordinator, codebuddy, group } = await setupGroup();
-      const msg = await postMessage(coordinator.token, group.id, {
+      const msg = await postMessage(coordinator.id, group.id, {
         body: "自由文本任务",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
       const t = await waitForTaskStatus(
-        coordinator.token,
+        coordinator.id,
         group.id,
         msg.id,
         "done",
@@ -385,13 +385,13 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         );
         __setRateLimitForTests(60_000, ["rate limit", "429"]);
         const { coordinator, codebuddy, group } = await setupGroup();
-        const msg = await postMessage(coordinator.token, group.id, {
+        const msg = await postMessage(coordinator.id, group.id, {
           body: "额度受限任务",
           audience: "participant",
           audienceRef: codebuddy.id,
         });
         const t = await waitForTaskStatus(
-          coordinator.token,
+          coordinator.id,
           group.id,
           msg.id,
           "failed",
@@ -401,11 +401,11 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         expect(t.retryCount).toBe(0);
         // 额度失败不自动重试:只 spawn 一次(计数文件 = 1),群里无 ↻ 提示。
         expect(readFileSync(counterFile, "utf8").trim()).toBe("1");
-        const messages = await listMessages(coordinator.token, group.id);
+        const messages = await listMessages(coordinator.id, group.id);
         expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);
         // ❌ 注明「执行器额度限制,预计 <时间> 恢复」。
         await waitForMessage(
-          coordinator.token,
+          coordinator.id,
           group.id,
           (m) =>
             m.body.includes("执行器额度限制") &&
@@ -436,23 +436,23 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         // 任务1:rate limit 失败 → 执行器进入冷却。
         process.env.FAKE_RATE_LIMIT = "1";
         process.env.FAKE_COUNTER_FILE = counterFile;
-        const m1 = await postMessage(coordinator.token, group.id, {
+        const m1 = await postMessage(coordinator.id, group.id, {
           body: "触发额度冷却",
           audience: "participant",
           audienceRef: codebuddy.id,
         });
-        await waitForTaskStatus(coordinator.token, group.id, m1.id, "failed");
+        await waitForTaskStatus(coordinator.id, group.id, m1.id, "failed");
         expect(readFileSync(counterFile, "utf8").trim()).toBe("1");
 
         // 任务2:冷却期内入队 → 保持 queued,不 spawn(计数仍为 1)。
         delete process.env.FAKE_RATE_LIMIT;
-        const m2 = await postMessage(coordinator.token, group.id, {
+        const m2 = await postMessage(coordinator.id, group.id, {
           body: "冷却中排队任务",
           audience: "participant",
           audienceRef: codebuddy.id,
         });
         const t2 = await waitForTaskStatus(
-          coordinator.token,
+          coordinator.id,
           group.id,
           m2.id,
           "queued",
@@ -462,7 +462,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           ?.waiting;
         expect(String(waiting)).toContain("等待执行器额度恢复");
         await waitForMessage(
-          coordinator.token,
+          coordinator.id,
           group.id,
           (m) =>
             m.body.startsWith("⏳") && m.body.includes("等待执行器额度恢复"),
@@ -470,7 +470,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
 
         // 冷却结束(800ms)→ 泵送自动派发 → spawn(计数 2)→ done。
         const done = await waitForTaskStatus(
-          coordinator.token,
+          coordinator.id,
           group.id,
           m2.id,
           "done",

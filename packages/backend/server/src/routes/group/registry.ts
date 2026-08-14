@@ -1024,7 +1024,7 @@ app
     "/:id/tasks/:taskId",
     describeRoute({
       description:
-        "Update a task (status/diffSummary). Only the task's executor participant identity (token) may update it",
+        "Update a task (status/diffSummary). Only the task's executor participant identity may update it",
       responses: {
         200: {
           description: "Task updated",

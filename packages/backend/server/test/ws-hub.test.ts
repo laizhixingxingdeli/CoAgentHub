@@ -19,7 +19,8 @@ let server: Server;
 let port: number;
 const openClients = new Set<WebSocket>();
 
-const wsUrl = (token: string) => `ws://127.0.0.1:${port}/api/ws?token=${token}`;
+const wsUrl = (participantId: string) =>
+  `ws://127.0.0.1:${port}/api/ws?participantId=${participantId}`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,15 +77,15 @@ async function registerParticipant(body: Record<string, unknown>) {
     body: JSON.stringify(body),
   });
   expect(res.status).toBe(200);
-  return (await res.json()) as { id: string; token: string };
+  return (await res.json()) as { id: string };
 }
 
-async function createGroup(token: string, title: string) {
+async function createGroup(participantId: string, title: string) {
   const res = await app.request("/api/groups", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      "X-Participant-Id": participantId,
     },
     body: JSON.stringify({ title }),
   });
@@ -93,24 +94,24 @@ async function createGroup(token: string, title: string) {
 }
 
 async function addMember(
-  token: string,
-  groupId: string,
   participantId: string,
+  groupId: string,
+  memberParticipantId: string,
   roles: string[],
 ) {
   const res = await app.request(`/api/groups/${groupId}/members`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      "X-Participant-Id": participantId,
     },
-    body: JSON.stringify({ participantId, roles }),
+    body: JSON.stringify({ participantId: memberParticipantId, roles }),
   });
   expect(res.status).toBe(200);
 }
 
 async function sendMessage(
-  token: string,
+  participantId: string,
   groupId: string,
   body: Record<string, unknown>,
 ) {
@@ -118,7 +119,7 @@ async function sendMessage(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      "X-Participant-Id": participantId,
     },
     body: JSON.stringify(body),
   });
@@ -146,10 +147,10 @@ async function setupGroup() {
     name: "outsider",
     device: "other-box",
   });
-  const group = await createGroup(coordinator.token, "WS 推送测试");
-  await addMember(coordinator.token, group.id, reviewer.id, ["reviewer"]);
-  await addMember(coordinator.token, group.id, executor.id, ["executor"]);
-  await addMember(coordinator.token, group.id, human.id, ["human"]);
+  const group = await createGroup(coordinator.id, "WS 推送测试");
+  await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+  await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+  await addMember(coordinator.id, group.id, human.id, ["human"]);
   return { group, coordinator, reviewer, executor, human, outsider };
 }
 
@@ -174,8 +175,8 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-describe("a. 握手认证(?token=)", () => {
-  it("无 token(?token= 空或缺参)→ 以本地用户身份连接(101)", async () => {
+describe("a. 握手身份声明(?participantId=)", () => {
+  it("无 participantId(?participantId= 空或缺参)→ 以本地用户身份连接(101)", async () => {
     const ws = await connectWs(wsUrl(""));
     ws.close();
     await expect(
@@ -183,8 +184,9 @@ describe("a. 握手认证(?token=)", () => {
     ).resolves.toBeDefined();
   });
 
-  it("错误 token → 非 101 拒绝", async () => {
-    await expect(connectWs(wsUrl("deadbeef"))).rejects.toThrow(/401/);
+  it("未知 participantId → 回落本地用户(全信模型,不拒绝)", async () => {
+    const ws = await connectWs(wsUrl("00000000-0000-4000-8000-0000000000ff"));
+    ws.close();
   });
 
   it("非 /api/ws 路径的 upgrade 被忽略(不建立连接)", async () => {
@@ -193,7 +195,9 @@ describe("a. 握手认证(?token=)", () => {
       device: "p",
     });
     await expect(
-      connectWs(`ws://127.0.0.1:${port}/api/nope?token=${participant.token}`),
+      connectWs(
+        `ws://127.0.0.1:${port}/api/nope?participantId=${participant.id}`,
+      ),
     ).rejects.toThrow();
     expect(wsHub.connectionCount()).toBe(0);
   });
@@ -213,7 +217,7 @@ describe("a2. Local User 已是群成员:广播不重复投递", () => {
     const member = await registerParticipant({
       name: "member-one",
     });
-    await addMember(member.token, group.id, member.id, ["executor"]);
+    await addMember(member.id, group.id, member.id, ["executor"]);
 
     // 无 token 连接 → Local User socket(该身份已是群成员)。
     const localWs = await connectWs(`ws://127.0.0.1:${port}/api/ws`);
@@ -222,7 +226,7 @@ describe("a2. Local User 已是群成员:广播不重复投递", () => {
       received += 1;
     });
 
-    const res = await sendMessage(member.token, group.id, { body: "单次广播" });
+    const res = await sendMessage(member.id, group.id, { body: "单次广播" });
     expect(res.status).toBe(200);
 
     await waitFor(() => received >= 1);
@@ -235,15 +239,15 @@ describe("a2. Local User 已是群成员:广播不重复投递", () => {
 describe("b. 广播:发送者回显 + 成员收到完整消息", () => {
   it("broadcast 消息推给在线成员与发送者本人,消息字段完整", async () => {
     const { group, coordinator, reviewer } = await setupGroup();
-    const senderWs = await connectWs(wsUrl(coordinator.token));
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
+    const senderWs = await connectWs(wsUrl(coordinator.id));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
     expect(wsHub.connectionCount()).toBe(2);
 
     // 先挂监听器再发消息:广播是 fire-and-forget,可能在 POST 返回前就已推送,
     // 事后才 waitForMessage 会错过事件。
     const senderMsg = waitForMessage(senderWs);
     const reviewerMsg = waitForMessage(reviewerWs);
-    const res = await sendMessage(coordinator.token, group.id, {
+    const res = await sendMessage(coordinator.id, group.id, {
       body: "WS 广播实测",
     });
     expect(res.status).toBe(200);
@@ -277,14 +281,14 @@ describe("c. 可见性:只推可见成员", () => {
   it("role:reviewer 消息只推给 reviewer;executor(成员但非该角色)与非成员不收;human 收", async () => {
     const { group, coordinator, reviewer, executor, human, outsider } =
       await setupGroup();
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
-    const executorWs = await connectWs(wsUrl(executor.token));
-    const humanWs = await connectWs(wsUrl(human.token));
-    const outsiderWs = await connectWs(wsUrl(outsider.token));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
+    const executorWs = await connectWs(wsUrl(executor.id));
+    const humanWs = await connectWs(wsUrl(human.id));
+    const outsiderWs = await connectWs(wsUrl(outsider.id));
 
     const reviewerMsg = waitForMessage(reviewerWs);
     const humanMsg = waitForMessage(humanWs);
-    const res = await sendMessage(coordinator.token, group.id, {
+    const res = await sendMessage(coordinator.id, group.id, {
       body: "请审查草稿",
       audience: "role",
       audienceRef: "reviewer",
@@ -310,13 +314,13 @@ describe("c. 可见性:只推可见成员", () => {
   it("audience=participant 只推目标成员;其他成员(含 human 外)不收", async () => {
     const { group, coordinator, reviewer, executor, human } =
       await setupGroup();
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
-    const executorWs = await connectWs(wsUrl(executor.token));
-    const humanWs = await connectWs(wsUrl(human.token));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
+    const executorWs = await connectWs(wsUrl(executor.id));
+    const humanWs = await connectWs(wsUrl(human.id));
 
     const reviewerMsg = waitForMessage(reviewerWs);
     const humanMsg = waitForMessage(humanWs);
-    const res = await sendMessage(coordinator.token, group.id, {
+    const res = await sendMessage(coordinator.id, group.id, {
       body: "专属指令",
       audience: "participant",
       audienceRef: reviewer.id,
@@ -341,14 +345,14 @@ describe("c. 可见性:只推可见成员", () => {
 describe("d. 连接生命周期", () => {
   it("客户端关闭后从 Hub 清理,发布不再推给死连接", async () => {
     const { group, coordinator } = await setupGroup();
-    const ws = await connectWs(wsUrl(coordinator.token));
+    const ws = await connectWs(wsUrl(coordinator.id));
     expect(wsHub.connectionCount()).toBe(1);
 
     ws.close();
     await waitFor(() => wsHub.connectionCount() === 0);
 
     // 发布仍成功,注册表保持空,无异常
-    const res = await sendMessage(coordinator.token, group.id, {
+    const res = await sendMessage(coordinator.id, group.id, {
       body: "关闭后的消息",
     });
     expect(res.status).toBe(200);
@@ -374,7 +378,7 @@ describe("d. 连接生命周期", () => {
     await new Promise<void>((r) => raw.on("connect", r));
     const key = Buffer.from("0123456789abcdef").toString("base64");
     raw.write(
-      `GET /api/ws?token=${participant.token} HTTP/1.1\r\n` +
+      `GET /api/ws?participantId=${participant.id} HTTP/1.1\r\n` +
         `Host: 127.0.0.1:${hsPort}\r\n` +
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
         `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
@@ -410,7 +414,7 @@ describe("d. 连接生命周期", () => {
 
 describe("e. 编辑/删除广播 (ticket 22)", () => {
   async function patchMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     messageId: string,
     body: Record<string, unknown>,
@@ -419,35 +423,35 @@ describe("e. 编辑/删除广播 (ticket 22)", () => {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(body),
     });
   }
 
   async function deleteMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     messageId: string,
   ) {
     return app.request(`/api/groups/${groupId}/messages/${messageId}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
   }
 
   it("PATCH 后广播 group_message_updated:成员与发送者本人收到完整更新行", async () => {
     const { group, coordinator, reviewer } = await setupGroup();
     const posted = (await (
-      await sendMessage(coordinator.token, group.id, { body: "改前" })
+      await sendMessage(coordinator.id, group.id, { body: "改前" })
     ).json()) as { id: string };
-    const senderWs = await connectWs(wsUrl(coordinator.token));
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
+    const senderWs = await connectWs(wsUrl(coordinator.id));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
 
     // 先挂监听再 PATCH:广播是 fire-and-forget
     const senderEvent = waitForMessage(senderWs);
     const reviewerEvent = waitForMessage(reviewerWs);
-    const res = await patchMessage(coordinator.token, group.id, posted.id, {
+    const res = await patchMessage(coordinator.id, group.id, posted.id, {
       body: "改后",
     });
     expect(res.status).toBe(200);
@@ -467,14 +471,14 @@ describe("e. 编辑/删除广播 (ticket 22)", () => {
   it("DELETE 后广播 group_message_deleted:仅带 groupId + messageId", async () => {
     const { group, coordinator, reviewer } = await setupGroup();
     const posted = (await (
-      await sendMessage(coordinator.token, group.id, { body: "待删除" })
+      await sendMessage(coordinator.id, group.id, { body: "待删除" })
     ).json()) as { id: string };
-    const senderWs = await connectWs(wsUrl(coordinator.token));
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
+    const senderWs = await connectWs(wsUrl(coordinator.id));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
 
     const senderEvent = waitForMessage(senderWs);
     const reviewerEvent = waitForMessage(reviewerWs);
-    const res = await deleteMessage(coordinator.token, group.id, posted.id);
+    const res = await deleteMessage(coordinator.id, group.id, posted.id);
     expect(res.status).toBe(200);
 
     for (const event of [await senderEvent, await reviewerEvent]) {
@@ -488,22 +492,22 @@ describe("e. 编辑/删除广播 (ticket 22)", () => {
     const { group, coordinator, reviewer, executor, human } =
       await setupGroup();
     const posted = (await (
-      await sendMessage(coordinator.token, group.id, {
+      await sendMessage(coordinator.id, group.id, {
         body: "评审稿",
         audience: "role",
         audienceRef: "reviewer",
       })
     ).json()) as { id: string };
-    const reviewerWs = await connectWs(wsUrl(reviewer.token));
-    const humanWs = await connectWs(wsUrl(human.token));
-    const executorWs = await connectWs(wsUrl(executor.token));
+    const reviewerWs = await connectWs(wsUrl(reviewer.id));
+    const humanWs = await connectWs(wsUrl(human.id));
+    const executorWs = await connectWs(wsUrl(executor.id));
     // 非目标成员收到的所有帧:断言其中没有任何编辑/删除事件
     const executorFrames: string[] = [];
     executorWs.on("message", (data) => executorFrames.push(String(data)));
 
     const reviewerEvent = waitForMessage(reviewerWs);
     const humanEvent = waitForMessage(humanWs);
-    const res = await patchMessage(coordinator.token, group.id, posted.id, {
+    const res = await patchMessage(coordinator.id, group.id, posted.id, {
       body: "评审稿 v2",
     });
     expect(res.status).toBe(200);

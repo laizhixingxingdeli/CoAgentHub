@@ -9,16 +9,16 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { describe, expect, it } from "vitest";
-import { hashParticipantToken } from "../src/lib/participant-token";
-import { participantAuth } from "../src/middleware/participant-auth";
+import { participantIdentity } from "../src/middleware/participant-identity";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
 /**
- * Participant registry (ticket 01): registration returns a one-time plaintext
- * token (only the SHA-256 hash is stored), the list never exposes token
- * hashes, human type is supported, and the bearer-token middleware resolves
- * participant identity for valid tokens and rejects invalid ones.
+ * Participant registry (ticket 01): registration returns an id (no token —
+ * token auth removed in the LAN full-trust model), the list never exposes
+ * token hashes, and the identity middleware resolves `X-Participant-Id`
+ * claims: an existing id is used as-is, a missing/unknown id falls back to
+ * the default Local User (no 401/403).
  */
 describe("participant 注册与身份 API", () => {
   const app = createTestApp();
@@ -31,7 +31,7 @@ describe("participant 注册与身份 API", () => {
     });
   }
 
-  /** Minimal app exercising participantAuth: db injected, one protected route. */
+  /** Minimal app exercising participantIdentity: db injected, one protected route. */
   function createProtectedApp() {
     const protectedApp = new Hono<{
       Variables: { db: DataBase; participantId: string };
@@ -42,9 +42,9 @@ describe("participant 注册与身份 API", () => {
       c.set("db", testDb as unknown as DataBase);
       await next();
     });
-    protectedApp.use(participantAuth);
-    // Mirror the real app's error handling so BizError (401 from participantAuth)
-    // maps to its status code instead of Hono's default 500.
+    protectedApp.use(participantIdentity);
+    // Mirror the real app's error handling so BizError maps to its status
+    // code instead of Hono's default 500.
     protectedApp.onError((err, c) => {
       if (err instanceof BizError) {
         return c.json(
@@ -60,7 +60,7 @@ describe("participant 注册与身份 API", () => {
     return protectedApp;
   }
 
-  it("POST /api/participants 注册成功,返回 token(仅此一次)且库中只存哈希", async () => {
+  it("POST /api/participants 注册成功:返回 id,不含 token,库中 token_hash 为占位值", async () => {
     const res = await register({
       name: "hermes-mac",
       device: "mac-mini",
@@ -68,27 +68,24 @@ describe("participant 注册与身份 API", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       id: string;
-      token: string;
+      token?: string;
       tokenHash?: string;
     };
     expect(body.id).toBeTruthy();
-    expect(body.token).toMatch(/^[0-9a-f]{64}$/);
-    // The plaintext hash must never be echoed back.
+    // 全信模型:不再生成 token。
+    expect(body.token).toBeUndefined();
     expect(body.tokenHash).toBeUndefined();
 
     const [row] = await testDb.select().from(participantTable);
     expect(row.id).toBe(body.id);
-    expect(row.tokenHash).toBe(hashParticipantToken(body.token));
-    expect(row.tokenHash).not.toBe(body.token);
+    // token_hash 列保留(方案 B 再删),插入占位空串满足 NOT NULL。
+    expect(row.tokenHash).toBe("");
     expect(row.device).toBe("mac-mini");
   });
 
   it("GET /api/participants 列表返回全部 participant 且不泄露 tokenHash/token", async () => {
     const created = await register({ name: "atomcode-cli" });
-    const { id, token } = (await created.json()) as {
-      id: string;
-      token: string;
-    };
+    const { id } = (await created.json()) as { id: string };
 
     const res = await app.request("/api/participants");
     expect(res.status).toBe(200);
@@ -98,7 +95,7 @@ describe("participant 注册与身份 API", () => {
     expect(item).toBeTruthy();
     expect(item).not.toHaveProperty("tokenHash");
     expect(item).not.toHaveProperty("token");
-    expect(JSON.stringify(list)).not.toContain(token);
+    expect(JSON.stringify(list)).not.toContain("token_hash");
   });
 
   it("GET /api/agents 历史别名与 /api/participants 同 handler,同样可用", async () => {
@@ -132,30 +129,86 @@ describe("participant 注册与身份 API", () => {
     expect(plainBody).not.toHaveProperty("type");
   });
 
-  it("中间件:合法 Bearer token 识别出 participant 身份", async () => {
+  it("身份中间件:X-Participant-Id 声称存在 id → 以该身份", async () => {
     const res = await register({ name: "openclaw" });
-    const { id, token } = (await res.json()) as { id: string; token: string };
+    const { id } = (await res.json()) as { id: string };
 
     const meRes = await createProtectedApp().request("/me", {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": id },
     });
     expect(meRes.status).toBe(200);
     expect(await meRes.json()).toEqual({ participantId: id });
   });
 
-  it("中间件:非法 token 拒绝(401);缺失 token 回落本地用户", async () => {
+  it("身份中间件:声称不存在的 id → 回落本地用户(不报错);缺失 header → 本地用户", async () => {
     const protectedApp = createProtectedApp();
 
-    const badRes = await protectedApp.request("/me", {
-      headers: { Authorization: "Bearer deadbeef" },
+    // 全信模型:未知 id 不 401,回落 Local User。
+    const unknownRes = await protectedApp.request("/me", {
+      headers: {
+        "X-Participant-Id": "00000000-0000-4000-8000-0000000000ff",
+      },
     });
-    expect(badRes.status).toBe(401);
+    expect(unknownRes.status).toBe(200);
+    const unknownBody = (await unknownRes.json()) as { participantId: string };
+    expect(unknownBody.participantId).toMatch(/^[0-9a-f-]{36}$/);
 
-    // LAN trust model: no token → the default Local User (human).
+    // 格式不合法(非 uuid)也不能 500:查库前校验,回落 Local User。
+    const malformedRes = await protectedApp.request("/me", {
+      headers: { "X-Participant-Id": "not-a-uuid" },
+    });
+    expect(malformedRes.status).toBe(200);
+    const malformedBody = (await malformedRes.json()) as {
+      participantId: string;
+    };
+    expect(malformedBody.participantId).toMatch(/^[0-9a-f-]{36}$/);
+
+    // LAN trust model: no header → the default Local User (human).
     const missingRes = await protectedApp.request("/me");
     expect(missingRes.status).toBe(200);
     const body = (await missingRes.json()) as { participantId: string };
     expect(body.participantId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("全信模型:声称任意存在 id → 以该身份发言(消息 senderId 正确)", async () => {
+    const creator = await register({ name: "identity-creator" });
+    const { id: creatorId } = (await creator.json()) as { id: string };
+    const speaker = await register({ name: "identity-speaker" });
+    const { id: speakerId } = (await speaker.json()) as { id: string };
+
+    const groupRes = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": creatorId,
+      },
+      body: JSON.stringify({ title: "身份声明测试群" }),
+    });
+    expect(groupRes.status).toBe(200);
+    const { id: groupId } = (await groupRes.json()) as { id: string };
+
+    // 把 speaker 加进群,再以 speaker 身份发消息。
+    const memberRes = await app.request(`/api/groups/${groupId}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": creatorId,
+      },
+      body: JSON.stringify({ participantId: speakerId, roles: ["executor"] }),
+    });
+    expect(memberRes.status).toBe(200);
+
+    const msgRes = await app.request(`/api/groups/${groupId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": speakerId,
+      },
+      body: JSON.stringify({ body: "以声称身份发言" }),
+    });
+    expect(msgRes.status).toBe(200);
+    const msg = (await msgRes.json()) as { senderId: string };
+    expect(msg.senderId).toBe(speakerId);
   });
 
   it("校验:缺 name 返回 400;仅 name 即可注册(不再要求 type)", async () => {
@@ -166,89 +219,21 @@ describe("participant 注册与身份 API", () => {
     expect(nameOnly.status).toBe(200);
   });
 
-  it("POST /:id/reset-token 重置成功:返回新明文、库中存新哈希、旧 token 失效(ticket 29)", async () => {
-    const created = await register({ name: "hermes-mac" });
-    const { id, token: oldToken } = (await created.json()) as {
-      id: string;
-      token: string;
-    };
-
-    const res = await app.request(`/api/participants/${id}/reset-token`, {
-      method: "POST",
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      id: string;
-      name: string;
-      token: string;
-      tokenHash?: string;
-    };
-    expect(body.id).toBe(id);
-    expect(body.name).toBe("hermes-mac");
-    expect(body.token).toMatch(/^[0-9a-f]{64}$/);
-    // 明文 hash 永不回显;库中只存新 token 的 SHA-256。
-    expect(body.tokenHash).toBeUndefined();
-    const [row] = await testDb
-      .select()
-      .from(participantTable)
-      .where(eq(participantTable.id, id));
-    expect(row.tokenHash).toBe(hashParticipantToken(body.token));
-    expect(row.tokenHash).not.toBe(hashParticipantToken(oldToken));
-
-    // 旧 token 立即失效(401),新 token 可识别身份。
-    const protectedApp = createProtectedApp();
-    const oldRes = await protectedApp.request("/me", {
-      headers: { Authorization: `Bearer ${oldToken}` },
-    });
-    expect(oldRes.status).toBe(401);
-    const newRes = await protectedApp.request("/me", {
-      headers: { Authorization: `Bearer ${body.token}` },
-    });
-    expect(newRes.status).toBe(200);
-    expect(await newRes.json()).toEqual({ participantId: id });
-  });
-
-  it("POST /:id/reset-token 不存在的 participant 返回 404", async () => {
-    const res = await app.request(
-      "/api/participants/00000000-0000-0000-0000-000000000000/reset-token",
-      { method: "POST" },
-    );
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { code: string };
-    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
-  });
-
-  it("POST /:id/reset-token 无鉴权可访问(与注册一致,局域网信任模型)", async () => {
-    const created = await register({ name: "openclaw" });
-    const { id } = (await created.json()) as { id: string };
-
-    // 不携带任何 Authorization header,应能直接取回 token。
-    const res = await app.request(`/api/participants/${id}/reset-token`, {
-      method: "POST",
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { token: string };
-    expect(body.token).toMatch(/^[0-9a-f]{64}$/);
-  });
-
   it("DELETE /:id 删除 participant,并清理其群成员关系与消息(ticket 清理旧身份)", async () => {
     // 建群者与被删者分离:旧 bridge 身份不建群,只作为成员/发言者存在。
     const owner = await register({ name: "owner" });
-    const { token } = (await owner.json()) as { token: string };
+    const { id: ownerId } = (await owner.json()) as { id: string };
     const created = await register({
       name: "executor-bridge",
     });
-    const { id, token: participantToken } = (await created.json()) as {
-      id: string;
-      token: string;
-    };
+    const { id } = (await created.json()) as { id: string };
 
     // 建群(owner 自动成为 coordinator 成员)并让旧身份发言,制造外键依赖。
     const groupRes = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": ownerId,
       },
       body: JSON.stringify({ title: "清理测试群" }),
     });
@@ -258,17 +243,17 @@ describe("participant 注册与身份 API", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": ownerId,
       },
       body: JSON.stringify({ participantId: id, roles: ["executor"] }),
     });
-    // 用被删者自己的 token 发言:senderId 必须是该 participant,才能覆盖
+    // 用被删者自己的身份发言:senderId 必须是该 participant,才能覆盖
     // DELETE 中「清理其消息」的分支。
     const msgRes = await app.request(`/api/groups/${groupId}/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${participantToken}`,
+        "X-Participant-Id": id,
       },
       body: JSON.stringify({ body: "旧身份的一条消息" }),
     });
@@ -305,15 +290,12 @@ describe("participant 注册与身份 API", () => {
 
   it("DELETE /:id 建过群的 participant 返回 409 且不删除(ticket 清理旧身份)", async () => {
     const owner = await register({ name: "owner2" });
-    const { token, id: participantId } = (await owner.json()) as {
-      token: string;
-      id: string;
-    };
+    const { id: participantId } = (await owner.json()) as { id: string };
     const groupRes = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title: "待保留群" }),
     });
@@ -346,7 +328,7 @@ describe("participant 注册与身份 API", () => {
     const created = await register({ name: "stale-bridge" });
     const { id } = (await created.json()) as { id: string };
 
-    // 不携带任何 Authorization header,应能直接删除。
+    // 不携带任何身份 header,应能直接删除。
     const res = await app.request(`/api/participants/${id}`, {
       method: "DELETE",
     });

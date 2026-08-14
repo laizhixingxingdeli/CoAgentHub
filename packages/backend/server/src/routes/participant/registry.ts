@@ -7,19 +7,15 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
-import {
-  generateParticipantToken,
-  hashParticipantToken,
-} from "@server/lib/participant-token";
-import { participantAuth } from "@server/middleware/participant-auth";
+import { participantIdentity } from "@server/middleware/participant-identity";
 import { desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 
-// 注册(公开)与自管理(participantAuth)并存:POST / 不挂鉴权 —— 首次注册必须先于
-// token 存在;PATCH / 与 PUT /heartbeat 单独挂 participantAuth,并校验持有者即 :id
-// 本人(token 只能管理自己的注册信息)。
+// 注册(公开)与自管理(participantIdentity)并存:POST / 不挂中间件 —— 首次注册
+// 必须先于任何身份存在;PATCH / 与 PUT /heartbeat 挂身份声明中间件(全信模型,
+// 不再校验持有者 —— 任何声称的身份都可管理任意注册信息)。
 const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
 app.use(async (c, next) => {
@@ -34,7 +30,7 @@ app
       description: "Register a new participant",
       responses: {
         200: {
-          description: "Participant created; token shown exactly once",
+          description: "Participant created",
           content: {
             "application/json": {},
           },
@@ -54,16 +50,14 @@ app
       const db = c.get("db");
       const input = c.req.valid("json");
 
-      // The token is generated server-side and returned in plaintext exactly
-      // once; only its SHA-256 hash is persisted. The response is built
-      // field-by-field so tokenHash can never leak into it.
-      const token = generateParticipantToken();
+      // token 认证已移除(全信模型):不再生成 token。token_hash 列保留(方案 B
+      // 再删),插入占位值以满足 NOT NULL;响应不含任何 token 字段。
       const [participant] = await db
         .insert(participantTable)
         .values({
           name: input.name,
           device: input.device ?? null,
-          tokenHash: hashParticipantToken(token),
+          tokenHash: "",
           capabilities: input.capabilities ?? [],
         })
         .returning();
@@ -74,7 +68,6 @@ app
         device: participant.device,
         capabilities: participant.capabilities,
         createdAt: participant.createdAt,
-        token,
       });
     },
   )
@@ -109,10 +102,10 @@ app
   )
   .patch(
     "/:id",
-    participantAuth,
+    participantIdentity,
     describeRoute({
       description:
-        "Update the caller's own registration (name/device); the token holder may only patch their own participant",
+        "Update a participant's registration (name/device); full-trust model — any claimed identity may patch any participant",
       responses: {
         200: {
           description: "Updated participant (tokenHash never exposed)",
@@ -143,14 +136,11 @@ app
     ),
     async (c) => {
       const db = c.get("db");
-      const participantId = c.get("participantId");
       const { id } = c.req.valid("param");
       const input = c.req.valid("json");
 
-      // The token holder may only manage their own registration.
-      if (participantId !== id) {
-        throw new BizError(BizCodeEnum.Forbidden);
-      }
+      // 全信模型:不再校验「持有者即本人」——任何声称的身份都可管理任意
+      // participant 的注册信息。
 
       const patch: {
         name?: string;
@@ -184,10 +174,10 @@ app
   )
   .put(
     "/:id/heartbeat",
-    participantAuth,
+    participantIdentity,
     describeRoute({
       description:
-        "Report presence: the token holder marks itself online (writes last_seen)",
+        "Report presence: mark a participant online (writes last_seen)",
       responses: {
         200: {
           description: "lastSeen updated",
@@ -200,13 +190,9 @@ app
     zValidator("param", z.object({ id: z.string().uuid() })),
     async (c) => {
       const db = c.get("db");
-      const participantId = c.get("participantId");
       const { id } = c.req.valid("param");
 
-      // Only the token holder may report its own presence.
-      if (participantId !== id) {
-        throw new BizError(BizCodeEnum.Forbidden);
-      }
+      // 全信模型:不再校验「持有者即本人」,任何声称的身份都可上报心跳。
 
       const [updated] = await db
         .update(participantTable)
@@ -218,42 +204,6 @@ app
       }
 
       return c.json({ lastSeen: updated.lastSeen });
-    },
-  )
-  // 重置 token(公开,无 participantAuth):与 POST / 注册一致 —— 首次绑定前用户
-  // 尚无任何 token,必须能无鉴权取回(ticket 29 局域网信任模型)。库中只存
-  // SHA-256 哈希,无法还原明文,故采用「重置」而非「查」:生成新 token →
-  // 覆盖存储哈希,明文仅此一次返回;旧 token 立即失效。
-  .post(
-    "/:id/reset-token",
-    describeRoute({
-      description:
-        "Reset an participant's token: generate a new token, store its hash, and return the plaintext exactly once (old token invalidated)",
-      responses: {
-        200: {
-          description: "New token shown exactly once",
-          content: {
-            "application/json": {},
-          },
-        },
-      },
-    }),
-    zValidator("param", z.object({ id: z.string().uuid() })),
-    async (c) => {
-      const db = c.get("db");
-      const { id } = c.req.valid("param");
-
-      const token = generateParticipantToken();
-      const [updated] = await db
-        .update(participantTable)
-        .set({ tokenHash: hashParticipantToken(token) })
-        .where(eq(participantTable.id, id))
-        .returning({ id: participantTable.id, name: participantTable.name });
-      if (!updated) {
-        throw new BizError(BizCodeEnum.ParticipantNotFound);
-      }
-
-      return c.json({ id: updated.id, name: updated.name, token });
     },
   )
   // 删除 participant(公开,局域网信任模型,与 POST / 注册一致):用于清掉旧身份 —

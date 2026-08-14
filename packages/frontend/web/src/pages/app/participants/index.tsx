@@ -12,14 +12,17 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { PARTICIPANT_ID_KEY, participantAuthHeaders } from "@/lib/api-client";
+import {
+  PARTICIPANT_ID_KEY,
+  participantIdentityHeaders,
+} from "@/lib/api-client";
 
 /**
  * 接入 Participant(ticket: 网页 @executor 发布):管理执行器配置。
  *
  * 表单字段 = 名字 / 调用方式(cli|a2a)/ 命令或 gateway 地址 / 参数模板
  * (cli,可空)/ 设备(可选)。提交调 POST /api/executors,server 自动注册对应
- * participant(token 后端生成,界面绝不出现任何 token/token_hash 字段)。
+ * participant(token 认证已移除,界面绝不出现任何 token/token_hash 字段)。
  *
  * 列表 = 内置执行器 + DB 配置(GET /api/executors 合并返回),内置项不可删除。
  *
@@ -123,19 +126,11 @@ export default function ExecutorsPage() {
     [participants],
   );
 
-  /** 编辑/心跳前置检查:未绑定 token 或非自己的 participant 时给出提示(与任务面板
-   *  无权限提示一致),返回 true 表示已拦截。 */
-  const requireOwnParticipant = (participant: ParticipantInfo): boolean => {
-    if (Object.keys(participantAuthHeaders()).length === 0) {
-      setError("无权限,请先绑定 Participant Token 再操作");
-      return true;
-    }
-    const boundId =
-      typeof localStorage !== "undefined"
-        ? localStorage.getItem(PARTICIPANT_ID_KEY)
-        : null;
-    if (!boundId || boundId !== participant.id) {
-      setError("无权限,只能管理自己的 Participant 信息");
+  /** 编辑/心跳前置检查:未绑定身份时给出提示(全信模型下任意身份都可管理任意
+   *  participant),返回 true 表示已拦截。 */
+  const requireBoundIdentity = (): boolean => {
+    if (Object.keys(participantIdentityHeaders()).length === 0) {
+      setError("未绑定身份,请先在群组页身份面板选择或输入 participant id");
       return true;
     }
     return false;
@@ -227,9 +222,9 @@ export default function ExecutorsPage() {
     }
   };
 
-  /** 打开编辑对话框(仅自己的 participant):预填 name/device/capabilities。 */
+  /** 打开编辑对话框(全信模型:任意身份都可管理任意 participant)。 */
   const startEdit = (participant: ParticipantInfo) => {
-    if (requireOwnParticipant(participant)) return;
+    if (requireBoundIdentity()) return;
     setEditName(participant.name);
     setEditDevice(participant.device ?? "");
     // capabilities 逗号分隔展示,提交时再转数组。
@@ -237,7 +232,7 @@ export default function ExecutorsPage() {
     setEditingParticipant(participant);
   };
 
-  /** PATCH /api/participants/:id 保存;401/403 → 无权限提示;成功后按 id 即时刷新该行。 */
+  /** PATCH /api/participants/:id 保存;成功后按 id 即时刷新该行。 */
   const handleSaveEdit = async () => {
     if (!editingParticipant) return;
     setSavingEdit(true);
@@ -252,7 +247,7 @@ export default function ExecutorsPage() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantAuthHeaders(),
+          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({
           name: editName.trim() || undefined,
@@ -261,11 +256,6 @@ export default function ExecutorsPage() {
         }),
       });
       if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          setError("无权限,只能管理自己的 Participant 信息");
-          setEditingParticipant(null);
-          return;
-        }
         const body = (await res.json().catch(() => null)) as {
           message?: string;
         } | null;
@@ -287,20 +277,16 @@ export default function ExecutorsPage() {
 
   /** PUT /api/participants/:id/heartbeat 上报在线;成功后该行立即变在线。 */
   const handleHeartbeat = async (participant: ParticipantInfo) => {
-    if (requireOwnParticipant(participant)) return;
+    if (requireBoundIdentity()) return;
     setHeartbeatingId(participant.id);
     setMessage(null);
     setError(null);
     try {
       const res = await fetch(`/api/participants/${participant.id}/heartbeat`, {
         method: "PUT",
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          setError("无权限,只能上报自己的 Participant 在线状态");
-          return;
-        }
         const body = (await res.json().catch(() => null)) as {
           message?: string;
         } | null;

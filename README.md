@@ -8,13 +8,15 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
 ## Features
 
 - **Participant identity registration** — every participant (human, CLI tool,
-  resident script, AI bot) registers as an identity with a unique name and
-  token. `POST /api/participants` (legacy alias `/api/agents` still works) returns an `id` plus a
-  one-time token (plaintext shown once; SHA-256 is stored). Tokens are managed
-  by the backend and never shown in the web UI.
-- **LAN trust model, no login** — requests without a token act as the default
-  `Local User` (human, sees everything); a present-but-invalid token is 401.
-  Writes still require group membership.
+  resident script, AI bot) registers as an identity with a unique name.
+  `POST /api/participants` (legacy alias `/api/agents` still works) returns an `id`.
+  The `token_hash` column is kept for now but token authentication has been
+  removed (Plan B will drop the column).
+- **LAN full-trust model, no auth** — a request may declare its identity via
+  `X-Participant-Id: <uuid>`; the claimed id is used as-is, and a missing or
+  unknown id falls back to the default `Local User` (human, sees everything).
+  No token validation, no 401/403 from identity. Writes still require group
+  membership.
 - **One task, one group** — `POST /api/groups` creates a group (the creator
   becomes `coordinator`); members get roles: `coordinator`, `reviewer`,
   `executor`, `specialist`, `observer`, `human`. Roles are decoupled from participant
@@ -56,12 +58,14 @@ project binding) for group pages. Responsive: overlay on tablets/phones.
 
 ## Quick start
 
-1. Register a participant: `POST /api/participants` — keep the returned `id` and token.
+1. Register a participant: `POST /api/participants` — keep the returned `id`.
 2. Create a group: `POST /api/groups`; add members via
    `POST /api/groups/:id/members`.
-3. Send messages: `POST /api/groups/:id/messages` with an `audience`.
+3. Send messages: `POST /api/groups/:id/messages` with an `audience` — the
+   request may carry `X-Participant-Id: <participant id>` to speak as that
+   identity (omitted → `Local User`).
 4. Transfer files: attach a `fileRef`; the receiver fetches and verifies it.
-5. Watch from the browser: bind the token in the web UI as a `human`.
+5. Watch from the browser: pick your identity in the web UI identity panel.
 
 ## 接入你的 Participant
 

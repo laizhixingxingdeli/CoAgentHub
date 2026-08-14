@@ -15,9 +15,9 @@ import { z } from "zod";
 /**
  * 执行器配置管理(接入 Participant 界面):GET/POST/DELETE /api/executors。
  *
- * 无鉴权(局域网信任模型,与 participant 注册/reset-token 一致):LAN 内任何客户端
- * 都能读取/新增/删除执行器配置。新增时自动注册对应 participant(名字=agentName,
- * token 后端生成写 scripts/.executor-agents.json,绝不返回前端)。
+ * 无鉴权(局域网信任模型,与 participant 注册一致):LAN 内任何客户端
+ * 都能读取/新增/删除执行器配置。新增时自动注册对应 participant(名字=agentName;
+ * token 认证已移除,不再生成 token)。
  *
  * 内置执行器(DEFAULT_EXECUTORS)不落 DB:GET 合并展示,DELETE 对内置 key
  * 直接拒绝(409),避免误删默认执行器。
@@ -29,7 +29,7 @@ app.use(async (c, next) => {
   await next();
 });
 
-/** POST 入参:与前端「接入 Participant」表单一致,前端不感知 token。 */
+/** POST 入参:与前端「接入 Participant」表单一致。 */
 const CreateExecutorSchema = z
   .object({
     /** participant 展示名(唯一;同时是注册进 participant 表的 name)。 */
@@ -58,7 +58,7 @@ const app2 = app
     "/",
     describeRoute({
       description:
-        "Create an executor config and auto-register its participant (no token in response; the token is written once to scripts/.executor-agents.json)",
+        "Create an executor config and auto-register its participant (no token involved; identity is claimed via X-Participant-Id)",
       responses: {
         200: {
           description: "Executor config created (token never exposed)",
@@ -108,7 +108,7 @@ const app2 = app
 
       await addExecutorConfig(db, config);
 
-      // 自动注册对应 participant(token 后端生成写 state 文件,不返回前端)。
+      // 自动注册对应 participant(token 认证已移除,不再生成/写 state 文件)。
       await registerExecutorParticipant(
         db,
         {
@@ -121,7 +121,6 @@ const app2 = app
           args: config.args,
           label: config.label,
         },
-        undefined,
         device,
       );
 

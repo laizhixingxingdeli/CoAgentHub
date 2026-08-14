@@ -11,7 +11,7 @@ import { useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { participantAuthHeaders } from "@/lib/api-client";
+import { participantIdentityHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { ROLE_LABELS } from "./messages/types";
 
@@ -87,7 +87,7 @@ export default function GroupMembersPage() {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -103,7 +103,7 @@ export default function GroupMembersPage() {
   const loadParticipants = useCallback(async () => {
     try {
       const res = await fetch("/api/participants", {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         return;
@@ -121,7 +121,7 @@ export default function GroupMembersPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         return;
@@ -157,7 +157,7 @@ export default function GroupMembersPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...participantAuthHeaders(),
+          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({
           participantId: selectedParticipantId,
@@ -222,7 +222,7 @@ export default function GroupMembersPage() {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...participantAuthHeaders(),
+            ...participantIdentityHeaders(),
           },
           body: JSON.stringify({ roles: editRoles }),
         },
@@ -264,7 +264,7 @@ export default function GroupMembersPage() {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...participantAuthHeaders(),
+            ...participantIdentityHeaders(),
           },
           // 空字符串表示清空分工说明(PATCH 可单独更新 prompt)。
           body: JSON.stringify({ prompt: editPromptValue.trim() }),
@@ -303,7 +303,7 @@ export default function GroupMembersPage() {
         `/api/groups/${groupId}/members/${member.participantId}`,
         {
           method: "DELETE",
-          headers: participantAuthHeaders(),
+          headers: participantIdentityHeaders(),
         },
       );
       if (!res.ok) {

@@ -80,16 +80,16 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id, token } = (await res.json()) as { id: string; token: string };
-    return { id, token };
+    const { id } = (await res.json()) as { id: string };
+    return { id };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -98,24 +98,24 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   }
 
   async function addMember(
-    token: string,
-    groupId: string,
     participantId: string,
+    groupId: string,
+    memberParticipantId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
-      body: JSON.stringify({ participantId, roles }),
+      body: JSON.stringify({ participantId: memberParticipantId, roles }),
     });
     expect(res.status).toBe(200);
   }
 
   async function postMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     body: Record<string, unknown>,
   ) {
@@ -123,7 +123,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(body),
     });
@@ -135,9 +135,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     };
   }
 
-  async function listTasks(token: string, groupId: string) {
+  async function listTasks(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/tasks`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<{
@@ -150,9 +150,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }>;
   }
 
-  async function listMessages(token: string, groupId: string) {
+  async function listMessages(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/messages`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<{
@@ -166,14 +166,14 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   /** 轮询任务直到终态(异步 spawn 完成),超时抛错。票2 起任务会先经过
    *  queued 状态,所以等终态(done/failed/cancelled),不等「非 running」。 */
   async function waitForTask(
-    token: string,
+    participantId: string,
     groupId: string,
     messageId: string,
     timeoutMs = 10_000,
   ) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const tasks = await listTasks(token, groupId);
+      const tasks = await listTasks(participantId, groupId);
       const t = tasks.find((x) => x.messageId === messageId);
       if (t && ["done", "failed", "cancelled"].includes(t.status)) return t;
       if (Date.now() > deadline) {
@@ -191,8 +191,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const codebuddy = await registerParticipant({
       name: "CodeBuddy 执行器", // executors.ts 的 agentName,触发匹配靠它
     });
-    const group = await createGroup(coordinator.token, "执行器触发测试");
-    await addMember(coordinator.token, group.id, codebuddy.id, ["executor"]);
+    const group = await createGroup(coordinator.id, "执行器触发测试");
+    await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };
   }
 
@@ -204,14 +204,14 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   it("定向消息命中执行器 → 自动建 task(executor_key=codebuddy)+ spawn 完成 done", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
 
-    const msg = await postMessage(coordinator.token, group.id, {
+    const msg = await postMessage(coordinator.id, group.id, {
       body: "建一个文件 hello.txt",
       audience: "participant",
       audienceRef: codebuddy.id,
     });
 
     // server 侧异步 spawn;轮询等 done。
-    const task = await waitForTask(coordinator.token, group.id, msg.id);
+    const task = await waitForTask(coordinator.id, group.id, msg.id);
     expect(task.executorParticipantId).toBe(codebuddy.id);
     expect(task.executorKey).toBe("codebuddy");
     expect(task.status).toBe("done");
@@ -222,7 +222,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     expect(String(diff!.summary)).toContain("建文件完成");
 
     // 状态回传:🚀 开始执行 + ✅ 完成,以执行器身份、contentType=task_status。
-    const messages = await listMessages(coordinator.token, group.id);
+    const messages = await listMessages(coordinator.id, group.id);
     const statusMsgs = messages.filter((m) => m.contentType === "task_status");
     expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(true);
     expect(statusMsgs.some((m) => m.body.startsWith("✅"))).toBe(true);
@@ -236,30 +236,30 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const ordinary = await registerParticipant({
       name: "ordinary-participant",
     });
-    const group = await createGroup(coordinator.token, "非执行器触发");
-    await addMember(coordinator.token, group.id, ordinary.id, ["observer"]);
+    const group = await createGroup(coordinator.id, "非执行器触发");
+    await addMember(coordinator.id, group.id, ordinary.id, ["observer"]);
 
-    await postMessage(coordinator.token, group.id, {
+    await postMessage(coordinator.id, group.id, {
       body: "给普通 participant 的消息",
       audience: "participant",
       audienceRef: ordinary.id,
     });
     // 等一小段,确认没有 task 被创建(spawn 是异步的,给足时间)。
     await new Promise((r) => setTimeout(r, 300));
-    const tasks = await listTasks(coordinator.token, group.id);
+    const tasks = await listTasks(coordinator.id, group.id);
     expect(tasks).toHaveLength(0);
   });
 
   it("同一消息重复触发不重复 spawn(已 done 则跳过)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
-    const msg = await postMessage(coordinator.token, group.id, {
+    const msg = await postMessage(coordinator.id, group.id, {
       body: "重复触发测试",
       audience: "participant",
       audienceRef: codebuddy.id,
     });
-    await waitForTask(coordinator.token, group.id, msg.id);
+    await waitForTask(coordinator.id, group.id, msg.id);
 
-    const before = await listMessages(coordinator.token, group.id);
+    const before = await listMessages(coordinator.id, group.id);
     const doneMsgsBefore = before.filter(
       (m) => m.contentType === "task_status" && m.body.startsWith("✅"),
     ).length;
@@ -281,7 +281,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     );
     await new Promise((r) => setTimeout(r, 300));
 
-    const after = await listMessages(coordinator.token, group.id);
+    const after = await listMessages(coordinator.id, group.id);
     const doneMsgsAfter = after.filter(
       (m) => m.contentType === "task_status" && m.body.startsWith("✅"),
     ).length;
@@ -295,7 +295,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${coordinator.token}`,
+        "X-Participant-Id": coordinator.id,
       },
       body: JSON.stringify({
         participantId: codebuddy.id,
@@ -308,12 +308,12 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const capture = path.join(fakeDir, "ticket-with-prompt.md");
     process.env.TICKET_CAPTURE = capture;
     try {
-      const msg = await postMessage(coordinator.token, group.id, {
+      const msg = await postMessage(coordinator.id, group.id, {
         body: "建一个文件 hello.txt",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      const task = await waitForTask(coordinator.token, group.id, msg.id);
+      const task = await waitForTask(coordinator.id, group.id, msg.id);
       expect(task.status).toBe("done");
       // 任务书写入发生在 spawn 前,fake bin 已把全文拷到 capture。
       const ticket = readFileSync(capture, "utf8");
@@ -335,12 +335,12 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const capture = path.join(fakeDir, "ticket-no-prompt.md");
     process.env.TICKET_CAPTURE = capture;
     try {
-      const msg = await postMessage(coordinator.token, group.id, {
+      const msg = await postMessage(coordinator.id, group.id, {
         body: "建一个文件 hello.txt",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      const task = await waitForTask(coordinator.token, group.id, msg.id);
+      const task = await waitForTask(coordinator.id, group.id, msg.id);
       expect(task.status).toBe("done");
       const ticket = readFileSync(capture, "utf8");
       // 无「本群分工」段;任务书为固定模板(票7):发布时间是动态 ISO,逐行断言
@@ -402,16 +402,16 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       const winHermes = await registerParticipant({
         name: "Win Hermes", // executors.ts 的 agentName
       });
-      const group = await createGroup(coordinator.token, "a2a 触发测试");
-      await addMember(coordinator.token, group.id, winHermes.id, ["executor"]);
+      const group = await createGroup(coordinator.id, "a2a 触发测试");
+      await addMember(coordinator.id, group.id, winHermes.id, ["executor"]);
 
-      const msg = await postMessage(coordinator.token, group.id, {
+      const msg = await postMessage(coordinator.id, group.id, {
         body: "回复 ACAT-WIN-OK",
         audience: "participant",
         audienceRef: winHermes.id,
       });
 
-      const task = await waitForTask(coordinator.token, group.id, msg.id);
+      const task = await waitForTask(coordinator.id, group.id, msg.id);
       expect(task.executorParticipantId).toBe(winHermes.id);
       expect(task.executorKey).toBe("win-hermes");
       expect(task.status).toBe("done");
@@ -428,7 +428,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       );
 
       // 完成回传:🚀 + ✅(含远端回复文本),以 win-hermes 身份。
-      const messages = await listMessages(coordinator.token, group.id);
+      const messages = await listMessages(coordinator.id, group.id);
       const statusMsgs = messages.filter(
         (m) => m.contentType === "task_status",
       );

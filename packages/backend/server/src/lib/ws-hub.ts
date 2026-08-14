@@ -8,18 +8,18 @@ import db from "@server/lib/database";
 import type { GroupMessageFull } from "@server/lib/group-message";
 import { visibleMemberIds } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
-import { hashParticipantToken } from "@server/lib/participant-token";
 import { eq } from "drizzle-orm";
 import { WebSocket, WebSocketServer } from "ws";
 
 /**
  * WebSocket realtime push hub (participant-groups-live T13). Exposes `/api/ws` on
- * the existing http.Server via the `upgrade` event; a connection authenticates
- * with `?token=<participantToken>` (the same SHA-256 participant-table lookup the
- * participantAuth middleware uses — a WS handshake cannot carry an Authorization
- * header). Connections are grouped by participantId (one participant may hold several),
- * and new group messages are fan-out to exactly the members the
- * group-visibility rule marks as seeing the message — including the sender,
+ * the existing http.Server via the `upgrade` event; a connection declares its
+ * identity with `?participantId=<uuid>` (the same identity resolution the
+ * participantIdentity middleware uses — a WS handshake cannot carry headers).
+ * Missing/unknown id → the default Local User; no token validation (LAN
+ * full-trust model). Connections are grouped by participantId (one participant
+ * may hold several), and new group messages are fan-out to exactly the members
+ * the group-visibility rule marks as seeing the message — including the sender,
  * so the web UI can echo without a pull.
  *
  * A heartbeat sweeps zombies: every interval the hub pings; a connection that
@@ -34,8 +34,8 @@ export interface WsHubOptions {
   heartbeatIntervalMs?: number;
 }
 
-/** A socket bound to its authenticated participant after the upgrade handshake. */
-type AuthedWebSocket = WebSocket & {
+/** A socket bound to its declared participant after the upgrade handshake. */
+type IdentifiedWebSocket = WebSocket & {
   participantId?: string;
   isAlive?: boolean;
 };
@@ -44,7 +44,7 @@ const WS_PATH = "/api/ws";
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
 export class WsHub {
-  private readonly conns = new Map<string, Set<AuthedWebSocket>>();
+  private readonly conns = new Map<string, Set<IdentifiedWebSocket>>();
   private readonly attached = new Set<HttpServer>();
   private wss: WebSocketServer | null = null;
   private readonly heartbeatIntervalMs: number;
@@ -76,13 +76,16 @@ export class WsHub {
         socket.destroy();
         return;
       }
-      const token = url.searchParams.get("token");
-      // LAN trust model: no token → the default Local User (matches
-      // middleware/participant-auth.ts); a present-but-invalid token → 401.
-      const identity = token
-        ? resolveParticipantId(token)
-        : resolveLocalUser(db).catch(() => null);
-      identity
+      const claimedId = url.searchParams.get("participantId");
+      // LAN full-trust model: a claimed identity is used when it exists;
+      // missing/unknown id → the default Local User (matches
+      // middleware/participant-identity.ts). No token validation, no 401.
+      const resolveIdentity = claimedId
+        ? resolveClaimedParticipant(claimedId).then(
+            (id) => id ?? resolveLocalUser(db),
+          )
+        : resolveLocalUser(db);
+      resolveIdentity
         .then((participantId) => {
           if (!participantId) {
             rejectUpgrade(socket, 401);
@@ -93,7 +96,7 @@ export class WsHub {
           );
         })
         .catch((err) => {
-          console.warn("[ws] auth lookup failed:", err);
+          console.warn("[ws] identity lookup failed:", err);
           rejectUpgrade(socket, 401);
         });
     });
@@ -236,7 +239,7 @@ export class WsHub {
     this.heartbeatTimer.unref?.();
   }
 
-  private register(ws: AuthedWebSocket, participantId: string): void {
+  private register(ws: IdentifiedWebSocket, participantId: string): void {
     ws.participantId = participantId;
     ws.isAlive = true;
     let sockets = this.conns.get(participantId);
@@ -257,7 +260,7 @@ export class WsHub {
     });
   }
 
-  private unregister(ws: AuthedWebSocket): void {
+  private unregister(ws: IdentifiedWebSocket): void {
     const participantId = ws.participantId;
     if (!participantId) return;
     const sockets = this.conns.get(participantId);
@@ -288,11 +291,13 @@ export class WsHub {
   }
 }
 
-async function resolveParticipantId(token: string): Promise<string | null> {
+async function resolveClaimedParticipant(
+  claimedId: string,
+): Promise<string | null> {
   const matches = await db
     .select({ id: participantTable.id })
     .from(participantTable)
-    .where(eq(participantTable.tokenHash, hashParticipantToken(token)))
+    .where(eq(participantTable.id, claimedId))
     .limit(1);
   return matches[0]?.id ?? null;
 }

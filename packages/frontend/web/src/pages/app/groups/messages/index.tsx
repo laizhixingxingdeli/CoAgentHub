@@ -14,7 +14,10 @@ import {
   setActiveGroupId,
   updateLastMessage,
 } from "@/hooks/use-unread";
-import { PARTICIPANT_ID_KEY, participantAuthHeaders } from "@/lib/api-client";
+import {
+  PARTICIPANT_ID_KEY,
+  participantIdentityHeaders,
+} from "@/lib/api-client";
 import {
   PARTICIPANT_COLORS,
   colorForId as participantColor,
@@ -147,9 +150,8 @@ export default function GroupMessagesPage() {
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusRafRef = useRef<number | null>(null);
 
-  // The bound participant id (saved with the token on the groups page). Absent ⇒
-  // no "own" messages: everything renders left-aligned without the 我 badge
-  // (never guess — the server can't be asked for it via token).
+  // The bound participant id (saved on the groups page identity panel). Absent ⇒
+  // no "own" messages: everything renders left-aligned without the 我 badge.
   const myParticipantId = useMemo(
     () =>
       typeof localStorage !== "undefined"
@@ -179,7 +181,7 @@ export default function GroupMessagesPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         return;
@@ -211,7 +213,7 @@ export default function GroupMessagesPage() {
           ? `/api/groups/${groupId}/messages?q=${encodeURIComponent(q)}`
           : `/api/groups/${groupId}/messages`;
         const res = await fetch(url, {
-          headers: participantAuthHeaders(),
+          headers: participantIdentityHeaders(),
         });
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
@@ -291,7 +293,7 @@ export default function GroupMessagesPage() {
     }
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         return;
@@ -486,7 +488,7 @@ export default function GroupMessagesPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...participantAuthHeaders(),
+          ...participantIdentityHeaders(),
         },
         body: JSON.stringify(payload),
       });
@@ -718,7 +720,7 @@ export default function GroupMessagesPage() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantAuthHeaders(),
+          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ body: trimmed }),
       });
@@ -751,7 +753,7 @@ export default function GroupMessagesPage() {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages/${msg.id}`, {
         method: "DELETE",
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);

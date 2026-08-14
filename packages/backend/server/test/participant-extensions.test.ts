@@ -8,6 +8,7 @@ import { testDb } from "./db";
  * T17 participant 自更新与扩展字段 (ticket 17): PATCH /api/participants/:id 自更新、
  * PUT /api/participants/:id/heartbeat 心跳在线、group_message.content_type、
  * participant.capabilities、file_ref.expiresAt 服务端必填(缺省 now + 7d)。
+ * token 认证已移除(全信模型):任何声称的身份都可管理任意 participant,无 401/403。
  */
 describe("T17 participant 自更新与扩展字段", () => {
   const app = createTestApp();
@@ -21,18 +22,17 @@ describe("T17 participant 自更新与扩展字段", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as {
       id: string;
-      token: string;
       [key: string]: unknown;
     };
-    return { id: json.id, token: json.token, body: json };
+    return { id: json.id, body: json };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -41,23 +41,23 @@ describe("T17 participant 自更新与扩展字段", () => {
   }
 
   async function addMember(
-    token: string,
-    groupId: string,
     participantId: string,
+    groupId: string,
+    memberParticipantId: string,
     roles: string[],
   ) {
     return app.request(`/api/groups/${groupId}/members`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
-      body: JSON.stringify({ participantId, roles }),
+      body: JSON.stringify({ participantId: memberParticipantId, roles }),
     });
   }
 
   async function sendMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     payload: Record<string, unknown>,
   ) {
@@ -65,23 +65,23 @@ describe("T17 participant 自更新与扩展字段", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(payload),
     });
   }
 
-  async function fetchMessages(token: string, groupId: string) {
+  async function fetchMessages(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/messages`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<Record<string, unknown>>;
   }
 
   describe("PATCH /api/participants/:id 自更新", () => {
-    it("本人部分更新成功,未更新字段保留,响应不含 token_hash", async () => {
-      const { id, token } = await registerParticipant({
+    it("部分更新成功,未更新字段保留,响应不含 token_hash", async () => {
+      const { id } = await registerParticipant({
         name: "hermes-mac",
         device: "mac-mini",
       });
@@ -90,7 +90,7 @@ describe("T17 participant 自更新与扩展字段", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          "X-Participant-Id": id,
         },
         body: JSON.stringify({ name: "hermes-mac-2", device: "new-laptop" }),
       });
@@ -107,7 +107,7 @@ describe("T17 participant 自更新与扩展字段", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          "X-Participant-Id": id,
         },
         body: JSON.stringify({ device: null }),
       });
@@ -117,7 +117,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       ).toBeNull();
     });
 
-    it("他人 token 更新返回 403 且目标 participant 不变", async () => {
+    it("全信模型:他人身份也能更新(放行,无 403)", async () => {
       const a = await registerParticipant({
         name: "participant-a",
       });
@@ -129,20 +129,20 @@ describe("T17 participant 自更新与扩展字段", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${b.token}`,
+          "X-Participant-Id": b.id,
         },
-        body: JSON.stringify({ name: "hacked" }),
+        body: JSON.stringify({ name: "updated-by-b" }),
       });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
 
       const [row] = await testDb
         .select({ name: participantTable.name })
         .from(participantTable)
         .where(eq(participantTable.id, a.id));
-      expect(row.name).toBe("participant-a");
+      expect(row.name).toBe("updated-by-b");
     });
 
-    it("无 token 回落本地用户:改他人资料返回 403", async () => {
+    it("无身份声明也放行(回落本地用户,仍可更新)", async () => {
       const { id } = await registerParticipant({
         name: "participant-c",
       });
@@ -151,19 +151,18 @@ describe("T17 participant 自更新与扩展字段", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "x" }),
       });
-      expect(res.status).toBe(403);
-      expect((await res.json()).code).toBe("FORBIDDEN");
+      expect(res.status).toBe(200);
     });
 
     it("空 body(无任何更新字段)返回 400", async () => {
-      const { id, token } = await registerParticipant({
+      const { id } = await registerParticipant({
         name: "noop",
       });
       const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          "X-Participant-Id": id,
         },
         body: JSON.stringify({}),
       });
@@ -173,13 +172,13 @@ describe("T17 participant 自更新与扩展字段", () => {
 
   describe("PUT /api/participants/:id/heartbeat 心跳在线", () => {
     it("本人心跳写 last_seen 并返回 lastSeen(时间戳随心跳前进)", async () => {
-      const { id, token } = await registerParticipant({
+      const { id } = await registerParticipant({
         name: "beat",
       });
 
       const first = await app.request(`/api/participants/${id}/heartbeat`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { "X-Participant-Id": id },
       });
       expect(first.status).toBe(200);
       const firstBody = (await first.json()) as { lastSeen: string };
@@ -194,7 +193,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       // 第二次心跳把 last_seen 往前推(>= 第一次,严格大于在毫秒级不可靠)。
       const second = await app.request(`/api/participants/${id}/heartbeat`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { "X-Participant-Id": id },
       });
       const secondBody = (await second.json()) as { lastSeen: string };
       expect(new Date(secondBody.lastSeen).getTime()).toBeGreaterThanOrEqual(
@@ -202,7 +201,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       );
     });
 
-    it("他人心跳 403、无 token 401", async () => {
+    it("全信模型:他人身份/无身份也放行(无 403/401)", async () => {
       const a = await registerParticipant({ name: "beat-a" });
       const b = await registerParticipant({ name: "beat-b" });
 
@@ -210,19 +209,19 @@ describe("T17 participant 自更新与扩展字段", () => {
         `/api/participants/${a.id}/heartbeat`,
         {
           method: "PUT",
-          headers: { Authorization: `Bearer ${b.token}` },
+          headers: { "X-Participant-Id": b.id },
         },
       );
-      expect(forbidden.status).toBe(403);
+      expect(forbidden.status).toBe(200);
 
-      const unauthorized = await app.request(
+      const anonymous = await app.request(
         `/api/participants/${a.id}/heartbeat`,
         {
           method: "PUT",
         },
       );
-      // LAN trust model: no token → Local User, not the token holder → 403.
-      expect(unauthorized.status).toBe(403);
+      // 全信模型:无身份声明回落 Local User,心跳仍放行。
+      expect(anonymous.status).toBe(200);
     });
   });
 
@@ -231,21 +230,21 @@ describe("T17 participant 自更新与扩展字段", () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
       });
-      const group = await createGroup(coordinator.token, "内容类型任务");
+      const group = await createGroup(coordinator.id, "内容类型任务");
       return { coordinator, group };
     }
 
     it("未传时默认 text/plain,自定义值原样存储,GET round-trip", async () => {
       const { coordinator, group } = await setup();
 
-      const defaultRes = await sendMessage(coordinator.token, group.id, {
+      const defaultRes = await sendMessage(coordinator.id, group.id, {
         body: "默认内容类型",
       });
       expect(defaultRes.status).toBe(200);
       const defaultMsg = (await defaultRes.json()) as Record<string, unknown>;
       expect(defaultMsg.contentType).toBe("text/plain");
 
-      const customRes = await sendMessage(coordinator.token, group.id, {
+      const customRes = await sendMessage(coordinator.id, group.id, {
         body: '{"k":1}',
         contentType: "application/json",
       });
@@ -253,7 +252,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       const customMsg = (await customRes.json()) as Record<string, unknown>;
       expect(customMsg.contentType).toBe("application/json");
 
-      const list = await fetchMessages(coordinator.token, group.id);
+      const list = await fetchMessages(coordinator.id, group.id);
       expect(list.find((m) => m.id === defaultMsg.id)?.contentType).toBe(
         "text/plain",
       );
@@ -290,7 +289,7 @@ describe("T17 participant 自更新与扩展字段", () => {
     });
 
     it("PATCH 可更新 capabilities,响应与 GET 列表携带新值", async () => {
-      const { id, token } = await registerParticipant({
+      const { id } = await registerParticipant({
         name: "caps-patch",
         capabilities: ["old-cap"],
       });
@@ -299,7 +298,7 @@ describe("T17 participant 自更新与扩展字段", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          "X-Participant-Id": id,
         },
         body: JSON.stringify({
           capabilities: ["text-generation", "code-review"],
@@ -319,14 +318,14 @@ describe("T17 participant 自更新与扩展字段", () => {
     });
 
     it("仅 PATCH capabilities 也算有效更新(不触发 at least one field 400)", async () => {
-      const { id, token } = await registerParticipant({
+      const { id } = await registerParticipant({
         name: "caps-only",
       });
       const res = await app.request(`/api/participants/${id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          "X-Participant-Id": id,
         },
         body: JSON.stringify({ capabilities: ["code-review"] }),
       });
@@ -340,7 +339,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
       });
-      const group = await createGroup(coordinator.token, "能力匹配任务");
+      const group = await createGroup(coordinator.id, "能力匹配任务");
       const executor = await registerParticipant({
         name: "executor-bot",
         capabilities: ["text-generation"],
@@ -348,7 +347,7 @@ describe("T17 participant 自更新与扩展字段", () => {
 
       // 分配 observer —— 与 text-generation 建议角色(executor/specialist)
       // 无交集 → 响应带「建议角色」提示,但仍 200。
-      const res = await addMember(coordinator.token, group.id, executor.id, [
+      const res = await addMember(coordinator.id, group.id, executor.id, [
         "observer",
       ]);
       expect(res.status).toBe(200);
@@ -357,12 +356,9 @@ describe("T17 participant 自更新与扩展字段", () => {
       expect(member.capabilityHint).toContain("executor");
 
       // 分配 executor —— 与建议角色有交集 → 无匹配提示(null)。
-      const matchRes = await addMember(
-        coordinator.token,
-        group.id,
-        executor.id,
-        ["executor"],
-      );
+      const matchRes = await addMember(coordinator.id, group.id, executor.id, [
+        "executor",
+      ]);
       expect(matchRes.status).toBe(200);
       const match = (await matchRes.json()) as {
         capabilityHint: string | null;
@@ -374,7 +370,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
       });
-      const group = await createGroup(coordinator.token, "未知能力任务");
+      const group = await createGroup(coordinator.id, "未知能力任务");
       const weird = await registerParticipant({
         name: "weird-bot",
         capabilities: ["quantum-alchemy"],
@@ -383,7 +379,7 @@ describe("T17 participant 自更新与扩展字段", () => {
         name: "quiet-bot",
       });
 
-      const weirdRes = await addMember(coordinator.token, group.id, weird.id, [
+      const weirdRes = await addMember(coordinator.id, group.id, weird.id, [
         "executor",
       ]);
       expect(weirdRes.status).toBe(200);
@@ -393,7 +389,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       expect(weirdMember.capabilityHint).toContain("未知能力标签");
       expect(weirdMember.capabilityHint).toContain("quantum-alchemy");
 
-      const quietRes = await addMember(coordinator.token, group.id, quiet.id, [
+      const quietRes = await addMember(coordinator.id, group.id, quiet.id, [
         "observer",
       ]);
       expect(quietRes.status).toBe(200);
@@ -416,9 +412,9 @@ describe("T17 participant 自更新与扩展字段", () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
       });
-      const group = await createGroup(coordinator.token, "文件有效期任务");
+      const group = await createGroup(coordinator.id, "文件有效期任务");
 
-      const res = await sendMessage(coordinator.token, group.id, {
+      const res = await sendMessage(coordinator.id, group.id, {
         body: "文件就绪",
         fileRef: fileRefBase,
       });
@@ -436,7 +432,7 @@ describe("T17 participant 自更新与扩展字段", () => {
       expect(expires - Date.now()).toBeLessThan(sevenDaysMs + 60_000);
 
       // GET round-trip 仍带同一 expiresAt。
-      const [listed] = await fetchMessages(coordinator.token, group.id);
+      const [listed] = await fetchMessages(coordinator.id, group.id);
       expect((listed.fileRef as { expiresAt: string } | null)?.expiresAt).toBe(
         msg.fileRef!.expiresAt,
       );
@@ -446,10 +442,10 @@ describe("T17 participant 自更新与扩展字段", () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
       });
-      const group = await createGroup(coordinator.token, "显式有效期任务");
+      const group = await createGroup(coordinator.id, "显式有效期任务");
       const explicit = new Date(Date.now() + 3600_000).toISOString();
 
-      const res = await sendMessage(coordinator.token, group.id, {
+      const res = await sendMessage(coordinator.id, group.id, {
         body: "文件就绪(显式)",
         fileRef: { ...fileRefBase, expiresAt: explicit },
       });

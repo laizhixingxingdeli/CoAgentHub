@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   executorConfig as executorConfigTable,
   participant as participantTable,
@@ -7,10 +7,6 @@ import {
 import { asc, eq } from "drizzle-orm";
 import type { DataBase } from "./database";
 import { resolveLocalUser } from "./local-participant";
-import {
-  generateParticipantToken,
-  hashParticipantToken,
-} from "./participant-token";
 
 /**
  * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 participant
@@ -407,25 +403,14 @@ export function readDispatchPolicy(): DispatchPolicy {
   };
 }
 
-/** 状态文件路径:env EXECUTOR_STATE_FILE 可覆盖(测试写临时目录,避免污染
- *  仓库内 scripts/.executor-agents.json)。 */
-function resolveStateFile(): string {
-  return (
-    process.env.EXECUTOR_STATE_FILE ??
-    resolve(process.cwd(), "scripts/.executor-agents.json")
-  );
-}
-
 /**
  * 注册单个执行器配置对应的 participant(幂等,按 name 判重,以 participant
- * 表为唯一事实源):新建时生成 token 并写 state 文件(明文只落一次,DB 存
- * SHA-256)。返回是否真的新建了 participant。供 ensureExecutorParticipants 与
- * POST /api/executors 复用。
+ * 表为唯一事实源)。token 认证已移除:不再生成/持久化 token。返回是否真的
+ * 新建了 participant。供 ensureExecutorParticipants 与 POST /api/executors 复用。
  */
 export async function registerExecutorParticipant(
   db: DataBase,
   ex: ExecutorConfig,
-  stateFile = resolveStateFile(),
   device?: string,
 ): Promise<boolean> {
   const [existing] = await db
@@ -435,40 +420,25 @@ export async function registerExecutorParticipant(
     .limit(1);
   if (existing) return false;
 
-  const token = generateParticipantToken();
   await db.insert(participantTable).values({
     name: ex.agentName,
     device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
-    tokenHash: hashParticipantToken(token),
+    tokenHash: "",
     capabilities: [],
   });
-  let state: Record<string, string> = {};
-  try {
-    state = JSON.parse(readFileSync(stateFile, "utf8"));
-  } catch {
-    // first run — no state yet
-  }
-  state[ex.agentName] = token;
-  mkdirSync(dirname(stateFile), { recursive: true });
-  writeFileSync(stateFile, JSON.stringify(state, null, 2));
   console.log(`[executors] 已注册 participant: ${ex.agentName}`);
   return true;
 }
 
 /**
  * 开机自注册:把执行器配置(内置 + DB 配置)对应的 participant 补进
- * participant 表(幂等,按 name 判重)。桥已退役,注册职责由 server 承担——
- * token 明文只写一次到 scripts/.executor-agents.json(已 gitignore),DB 里只
- * 存 SHA-256。
+ * participant 表(幂等,按 name 判重)。桥已退役,注册职责由 server 承担。
  */
-export async function ensureExecutorParticipants(
-  db: DataBase,
-  stateFile = resolveStateFile(),
-): Promise<void> {
+export async function ensureExecutorParticipants(db: DataBase): Promise<void> {
   // Pre-create the default LAN observer so anonymous access has a stable id.
   await resolveLocalUser(db);
 
   for (const ex of await effectiveExecutors(db)) {
-    await registerExecutorParticipant(db, ex, stateFile);
+    await registerExecutorParticipant(db, ex);
   }
 }

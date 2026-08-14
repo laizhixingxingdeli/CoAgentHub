@@ -13,7 +13,7 @@ import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import GroupLayout from "@/components/layout/group-layout";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
-import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { __resetNotificationState } from "@/lib/notifications";
 import { groupMessageFrame } from "@/test/frames";
 import {
@@ -288,8 +288,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
       tasks: TASKS,
       tasksAfterCommand: cancelledTasks,
     });
-    // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    // 有权身份(coordinator/human):已绑定身份 → 停止/回滚按钮可用。
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -309,8 +309,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
       tasks: TASKS,
     });
-    // 有权身份(coordinator/human):已绑定 token → 停止/回滚按钮可用。
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    // 有权身份(coordinator/human):已绑定身份 → 停止/回滚按钮可用。
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
 
@@ -324,8 +324,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     });
   });
 
-  it("无权限(Local User 未绑定 token):停止/回滚按钮禁用并提示需要 coordinator/human 身份", async () => {
-    // 不绑定 token 的 Local User:列表只读,控制按钮禁用(不再点击后 403)。
+  it("无权限(Local User 未绑定身份):停止/回滚按钮禁用并提示需要 coordinator/human 身份", async () => {
+    // 不绑定身份的 Local User:列表只读,控制按钮禁用。
     const mock = stubFetch(
       messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
     );
@@ -1088,7 +1088,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
     );
 
   it("WS 推送的 group_message 实时追加到消息流(无需刷新)", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1100,7 +1100,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   });
 
   it("WS 回显与发送后 reload 不重复(按 id 去重)", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     let reloads = 0;
     const SENT_MSG = {
@@ -1162,7 +1162,7 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   });
 
   it("其它群组的 group_message 帧不追加", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1324,7 +1324,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   });
 
   it("WS 追加后折叠状态保持,计数 badge 即使折叠中也更新", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock(THREAD));
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1603,7 +1603,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
     });
 
   it("WS 收到新消息且不在底部 → 底部 pill 出现;点击后滚到底部并消失", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1631,7 +1631,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
   });
 
   it("用户滚回底部时积压清零,pill 消失", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
     renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
@@ -1803,7 +1803,6 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
 
   beforeEach(() => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
   });
 
   it("编辑:点编辑 → 输入框出现;保存 → PATCH 调用 + 本地更新 + 退出编辑态", async () => {
@@ -2293,7 +2292,7 @@ describe("ticket 23 接线:进入消息页 markRead", () => {
   });
 
   it("打开消息页后该群的全局未读清零", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch(messagesFetchMock());
 
@@ -2498,7 +2497,6 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
 
   beforeEach(() => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
     __resetNotificationState();
     MockNotification.instances = [];
     MockNotification.permission = "granted";

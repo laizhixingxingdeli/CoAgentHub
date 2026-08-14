@@ -7,9 +7,10 @@ import { timeColumns } from "../utils/columns.js";
 /**
  * Participant registry — the identity foundation for multi-agent collaboration
  * (agent-groups). Independent of the auth user/organization tables: any
- * device/CLI process can register itself as a participant and authenticate
- * with its per-participant token (SHA-256 hashed at rest; the plaintext token
- * is shown exactly once at registration).
+ * device/CLI process can register itself as a participant and declare its
+ * identity via `X-Participant-Id` (LAN full-trust model). The `token_hash`
+ * column is kept for now (Plan B drops it) — token authentication has been
+ * removed, new rows insert a placeholder empty string.
  *
  * 术语说明:本表原名为 `agent`(历史名,见 git 提交),术语澄清后改名
  * participant(参与者)——「agent」易与「AI 智能体」混淆。旧表名/旧列名仅

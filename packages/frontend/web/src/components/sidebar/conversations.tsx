@@ -9,7 +9,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { syncUnreadConnection, useUnread } from "@/hooks/use-unread";
-import { participantAuthHeaders } from "@/lib/api-client";
+import { participantIdentityHeaders } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
 
@@ -34,12 +34,12 @@ function truncatePreview(body: string): string {
  * The list itself is fetched on mount and re-fetched on every navigation —
  * previews intentionally update on reload/navigation only (no per-frame
  * refetch); the unread badge is driven in real time by the global store's WS
- * connection. Fetch failures are silent: a missing/invalid participant token must
- * never block the rest of the sidebar.
+ * connection. Fetch failures are silent: a missing/invalid participant identity
+ * must never block the rest of the sidebar.
  *
  * The always-mounted section also owns `activeGroupId` in the unread store
  * (it reads the current route), so entering/leaving a group clears its badge
- * and the resident WS picks up a token bound on the groups page.
+ * and the resident WS picks up an identity bound on the groups page.
  */
 export function ConversationList() {
   const [location, navigate] = useLocation();
@@ -55,16 +55,16 @@ export function ConversationList() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: navigation pulse — refetch the list when the route changes (location deliberately watched)
   useEffect(() => {
     let cancelled = false;
-    // Navigation pulse: a token bound on the groups page (same-tab localStorage
+    // Navigation pulse: an identity bound on the groups page (same-tab localStorage
     // writes fire no event) starts the unread store's resident socket here.
     syncUnreadConnection();
     (async () => {
       try {
         const res = await fetch("/api/groups?status=active", {
-          headers: participantAuthHeaders(),
+          headers: participantIdentityHeaders(),
         });
         if (!res.ok) {
-          return; // silent: token missing/invalid or server error
+          return; // silent: identity missing/invalid or server error
         }
         const data = (await res.json()) as {
           items: ConversationItem[];

@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -376,7 +376,7 @@ describe("接入 Participant 页", () => {
   });
 
   it("编辑对话框可改 name/device/capabilities,PATCH 保存并即时刷新", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
@@ -433,7 +433,7 @@ describe("接入 Participant 页", () => {
   });
 
   it("心跳按钮调用 PUT heartbeat 并即时刷新在线状态", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-never");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
@@ -458,7 +458,7 @@ describe("接入 Participant 页", () => {
     expect(screen.getByText(/已上报「Never Bot」在线/)).toBeInTheDocument();
   });
 
-  it("未绑定 token 时编辑/心跳给出无权限提示", async () => {
+  it("未绑定身份时编辑/心跳给出提示(全信模型:绑定后任意身份都可管理)", async () => {
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/participants");
@@ -466,11 +466,11 @@ describe("接入 Participant 页", () => {
     await screen.findByText("Online Bot");
     const row = screen.getByText("Online Bot").closest("li")!;
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
-    await screen.findByText("无权限,请先绑定 Participant Token 再操作");
+    await screen.findByText(/未绑定身份,请先在群组页身份面板/);
 
     fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
     expect(
-      screen.getByText("无权限,请先绑定 Participant Token 再操作"),
+      screen.getByText(/未绑定身份,请先在群组页身份面板/),
     ).toBeInTheDocument();
     // 编辑对话框未被打开
     expect(screen.queryByLabelText("Participant 名字")).not.toBeInTheDocument();

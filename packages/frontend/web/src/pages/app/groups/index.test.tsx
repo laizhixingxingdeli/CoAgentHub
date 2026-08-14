@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PARTICIPANT_ID_KEY, PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -60,7 +60,8 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
   const roster: Array<Record<string, unknown>> = [...PARTICIPANTS];
   return createFetchMock([
     {
-      // Ticket 28: participant 注册(POST /api/participants,公开端点)返回一次性 token。
+      // Ticket 28: participant 注册(POST /api/participants,公开端点)返回 id,
+      // 不含 token(全信模型,注册即切换身份)。
       // 必须排在下面的通用 /api/participants 匹配之前(createFetchMock 首个匹配生效)。
       match: (url, init) =>
         init?.method === "POST" && String(url).endsWith("/api/participants"),
@@ -78,24 +79,7 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
           createdAt: "2026-08-11T00:00:00.000Z",
         };
         roster.push(created);
-        return jsonResponse({
-          ...created,
-          token: "tok-registered",
-        });
-      },
-    },
-    {
-      // Ticket 29: 一键绑定 — 公开 POST /:id/reset-token 返回明文 token。
-      match: (url, init) =>
-        init?.method === "POST" && String(url).includes("/reset-token"),
-      respond: (url) => {
-        const id = String(url).split("/").at(-2);
-        const found = roster.find((a) => a.id === id);
-        return jsonResponse({
-          id,
-          name: found?.name ?? id,
-          token: "tok-reset",
-        });
+        return jsonResponse(created);
       },
     },
     {
@@ -635,33 +619,20 @@ describe("GroupsPage 群列表分页", () => {
 });
 
 describe("GroupsPage participant 绑定 (ticket 18)", () => {
-  const openAdvanced = async () => {
-    fireEvent.click(
-      await screen.findByRole("button", { name: /高级:手动输入 token/ }),
-    );
-  };
-
-  it("保存 token 时把 participantId 一并写入 localStorage(coagenthub.participantId)", async () => {
+  it("手动输入 participant id 即绑定:写入 localStorage", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    // 手动绑定收进「高级:手动输入 token」折叠区(ticket 29),先展开。
-    await openAdvanced();
-    const tokenInput = await screen.findByLabelText("Participant Token");
-    fireEvent.change(tokenInput, { target: { value: "tok-18" } });
-    fireEvent.change(screen.getByLabelText("Participant ID"), {
-      target: { value: "participant-1" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    const idInput = await screen.findByLabelText("Participant ID");
+    fireEvent.change(idInput, { target: { value: "participant-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "绑定" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-18");
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-1");
     });
   });
 
-  it("清除 token 时同步清除 coagenthub.participantId", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-18");
+  it("清除身份时同步清除 coagenthub.participantId", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
@@ -669,7 +640,6 @@ describe("GroupsPage participant 绑定 (ticket 18)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "清除" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     });
   });
@@ -686,47 +656,41 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     expect(screen.getByText("mac-mini")).toBeInTheDocument();
     expect(screen.getByText("atomcode-cli")).toBeInTheDocument();
     expect(screen.getByText("共 2 个")).toBeInTheDocument();
-    // 未绑定时两行都有「绑定」按钮,无「使用中」标记。
-    expect(screen.getAllByRole("button", { name: "绑定" }).length).toBe(2);
+    // 未绑定时两行都有「使用」按钮,无「使用中」标记。
+    expect(screen.getAllByRole("button", { name: "使用" }).length).toBe(2);
     expect(screen.queryByText("使用中")).toBeNull();
   });
 
-  it("点「绑定」调 POST /:id/reset-token 并自动绑定,提示已切换", async () => {
-    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+  it("点「使用」即绑定该 participant(声明身份,无服务端调用),提示已切换", async () => {
     localStorage.removeItem(PARTICIPANT_ID_KEY);
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    // 点第二行(atomcode-cli)的绑定。
-    const bindButtons = await screen.findAllByRole("button", { name: "绑定" });
+    // 点第二行(atomcode-cli)的使用。
+    const bindButtons = await screen.findAllByRole("button", { name: "使用" });
     const atomcodeRow = bindButtons.find((b) =>
       b.closest("li")?.textContent?.includes("atomcode-cli"),
     )!;
     fireEvent.click(atomcodeRow);
 
+    // 绑定 = 本地声明,不应发起任何 HTTP 请求。
     await waitFor(() => {
-      const call = fetchMock.mock.calls.find(
-        ([url, init]) =>
-          init?.method === "POST" && String(url).includes("/reset-token"),
-      );
-      expect(call).toBeDefined();
-      expect(String(call![0])).toBe(
-        "/api/participants/participant-9/reset-token",
-      );
+      expect(
+        fetchMock.mock.calls.some(([url, init]) => init?.method === "POST"),
+      ).toBe(false);
     });
-    // commitToken 写入 localStorage + 提示已切换 + 该行变「使用中」。
+    // commitIdentity 写入 localStorage + 提示已切换 + 该行变「使用中」。
     await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-reset");
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-9");
     });
     expect(
       await screen.findByText("已切换为 atomcode-cli"),
     ).toBeInTheDocument();
     expect(screen.getByText("使用中: atomcode-cli")).toBeInTheDocument();
-    // 列表刷新后 hermes-mac 仍是「绑定」,atomcode-cli 变「使用中」。
+    // 列表刷新后 hermes-mac 仍是「使用」,atomcode-cli 变「使用中」。
     await waitFor(() => {
       expect(screen.getByText("使用中")).toBeInTheDocument();
-      const remainingBind = screen.getAllByRole("button", { name: "绑定" });
+      const remainingBind = screen.getAllByRole("button", { name: "使用" });
       expect(remainingBind.length).toBe(1);
       expect(remainingBind[0].closest("li")?.textContent).toContain(
         "hermes-mac",
@@ -735,7 +699,6 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 
   it("已绑定的 participant 显示「使用中」标记,绑定按钮不可用", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-29");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
@@ -748,16 +711,15 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     const rows = screen.getAllByRole("listitem");
     const boundRow = rows.find((r) => r.textContent?.includes("hermes-mac"))!;
     expect(within(boundRow).getByText("使用中")).toBeInTheDocument();
-    expect(within(boundRow).queryByRole("button", { name: "绑定" })).toBeNull();
-    // 其余行仍是「绑定」。
+    expect(within(boundRow).queryByRole("button", { name: "使用" })).toBeNull();
+    // 其余行仍是「使用」。
     const otherRow = rows.find((r) => r.textContent?.includes("atomcode-cli"))!;
     expect(
-      within(otherRow).getByRole("button", { name: "绑定" }),
+      within(otherRow).getByRole("button", { name: "使用" }),
     ).toBeInTheDocument();
   });
 
-  it("清除后回到未绑定提示,列表刷新全部恢复「绑定」", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-29");
+  it("清除后回到未绑定提示,列表刷新全部恢复「使用」", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
@@ -766,43 +728,15 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     fireEvent.click(screen.getByRole("button", { name: "清除" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     });
     expect(
-      await screen.findByText(/未绑定 participant,从下方列表一键绑定/),
+      await screen.findByText(/未绑定 participant,从下方列表选择/),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("使用中")).toBeNull();
-      expect(screen.getAllByRole("button", { name: "绑定" }).length).toBe(2);
+      expect(screen.getAllByRole("button", { name: "使用" }).length).toBe(2);
     });
-  });
-
-  it("手动绑定入口保留:高级折叠区展开后可输入 token 保存", async () => {
-    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
-    localStorage.removeItem(PARTICIPANT_ID_KEY);
-    stubFetch(groupsFetchMock());
-    renderWithProviders(<GroupsPage />, "/groups");
-
-    // 默认折叠,只有展开后才有输入框。
-    expect(screen.queryByLabelText("Participant Token")).toBeNull();
-    fireEvent.click(
-      await screen.findByRole("button", { name: /高级:手动输入 token/ }),
-    );
-    const tokenInput = await screen.findByLabelText("Participant Token");
-    fireEvent.change(tokenInput, { target: { value: "tok-manual" } });
-    fireEvent.change(screen.getByLabelText("Participant ID"), {
-      target: { value: "participant-1" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe("tok-manual");
-      expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-1");
-    });
-    expect(
-      await screen.findByText("使用中: hermes-mac(mac-mini)"),
-    ).toBeInTheDocument();
   });
 });
 
@@ -851,8 +785,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     });
   });
 
-  it("注册成功:写入 localStorage、绑定横幅出现、一次性 token 展示", async () => {
-    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+  it("注册成功:写入 localStorage、绑定横幅出现、当前身份更新", async () => {
     localStorage.removeItem(PARTICIPANT_ID_KEY);
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
@@ -864,21 +797,16 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
     await waitFor(() => {
-      expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBe(
-        "tok-registered",
-      );
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBe("participant-new");
     });
-    // 身份面板显示当前身份(注册即切换)+ 一次性 token 展示。
+    // 身份面板显示当前身份(注册即切换),无一次性 token 展示。
     expect(await screen.findByText("使用中: alice")).toBeInTheDocument();
     expect(screen.getByText("✅ 已注册并绑定 alice")).toBeInTheDocument();
-    expect(screen.getByLabelText("注册返回的 Participant Token")).toHaveValue(
-      "tok-registered",
-    );
+    expect(screen.queryByLabelText("注册返回的 Participant Token")).toBeNull();
   });
 
   it("注册失败显示错误信息且不写入 localStorage", async () => {
-    localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
+    localStorage.removeItem(PARTICIPANT_ID_KEY);
     stubFetch(groupsFetchMock([], 400));
     renderWithProviders(<GroupsPage />, "/groups");
 
@@ -890,33 +818,8 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
 
     expect(await screen.findByText(/注册失败:/)).toBeInTheDocument();
     expect(screen.getByText(/名称已存在/)).toBeInTheDocument();
-    expect(localStorage.getItem(PARTICIPANT_TOKEN_KEY)).toBeNull();
+    expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     expect(screen.queryByText(/使用中:/)).toBeNull();
-  });
-
-  it("token 展示可复制:点击复制写入剪贴板", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText },
-      configurable: true,
-    });
-    stubFetch(groupsFetchMock());
-    renderWithProviders(<GroupsPage />, "/groups");
-
-    await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
-      target: { value: "alice" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
-    await screen.findByLabelText("注册返回的 Participant Token");
-
-    fireEvent.click(screen.getByRole("button", { name: "复制" }));
-    await waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith("tok-registered");
-    });
-    expect(
-      await screen.findByRole("button", { name: "已复制" }),
-    ).toBeInTheDocument();
   });
 
   it("名称为空时提示且不发起注册请求", async () => {
@@ -1055,7 +958,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
 
 describe("GroupsPage Participant 设置 (ticket 20)", () => {
   it("绑定后显示设置区,保存调用 PATCH /api/participants/:id", async () => {
-    localStorage.setItem(PARTICIPANT_TOKEN_KEY, "tok-20");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-20");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     const fetchMock = stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");

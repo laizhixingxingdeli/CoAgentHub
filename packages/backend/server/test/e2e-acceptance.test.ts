@@ -70,16 +70,16 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id, token } = (await res.json()) as { id: string; token: string };
-    return { id, token };
+    const { id } = (await res.json()) as { id: string };
+    return { id };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -88,24 +88,24 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
   }
 
   async function addMember(
-    token: string,
-    groupId: string,
     participantId: string,
+    groupId: string,
+    memberId: string,
     roles: string[],
   ) {
     const res = await app.request(`/api/groups/${groupId}/members`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
-      body: JSON.stringify({ participantId, roles }),
+      body: JSON.stringify({ participantId: memberId, roles }),
     });
     expect(res.status).toBe(200);
   }
 
   async function sendMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     body: Record<string, unknown>,
   ) {
@@ -113,7 +113,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(body),
     });
@@ -122,10 +122,14 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
   }
 
   /** 增量拉取:无游标返回调用方全部可见历史;after=<messageId> 只取更新的。 */
-  async function fetchMessages(token: string, groupId: string, after?: string) {
+  async function fetchMessages(
+    participantId: string,
+    groupId: string,
+    after?: string,
+  ) {
     const res = await app.request(
       `/api/groups/${groupId}/messages${after ? `?after=${after}` : ""}`,
-      { headers: { Authorization: `Bearer ${token}` } },
+      { headers: { "X-Participant-Id": participantId } },
     );
     expect(res.status).toBe(200);
     return (await res.json()) as MessageItem[];
@@ -157,24 +161,24 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
 
     // ── 2. 建群「训练 win 端 LLM 模型」;加成员并分配角色
     //        (coordinator 为创建者,自动成为 coordinator 成员)
-    const group = await createGroup(coordinator.token, "训练 win 端 LLM 模型");
-    await addMember(coordinator.token, group.id, reviewer.id, ["reviewer"]);
-    await addMember(coordinator.token, group.id, executor.id, ["executor"]);
-    await addMember(coordinator.token, group.id, trainer.id, ["specialist"]);
-    await addMember(coordinator.token, group.id, user.id, ["human"]);
+    const group = await createGroup(coordinator.id, "训练 win 端 LLM 模型");
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    await addMember(coordinator.id, group.id, trainer.id, ["specialist"]);
+    await addMember(coordinator.id, group.id, user.id, ["human"]);
 
     // ── 3. 用户发命令(user → broadcast):「训练 win 端模型,并交付到 mac」
-    const command = await sendMessage(user.token, group.id, {
+    const command = await sendMessage(user.id, group.id, {
       body: "训练 win 端模型,并交付到 mac",
       audience: "broadcast",
     });
     expect(command.audience).toBe("broadcast");
 
     // ── 4. coordinator 拉取(应可见用户命令)→ 发草稿任务给 reviewer
-    const coordFirstPull = await fetchMessages(coordinator.token, group.id);
+    const coordFirstPull = await fetchMessages(coordinator.id, group.id);
     expect(coordFirstPull.map((m) => m.body)).toContain(command.body);
 
-    const draft = await sendMessage(coordinator.token, group.id, {
+    const draft = await sendMessage(coordinator.id, group.id, {
       body: "草稿:在 win 端训练 7B 模型,请评审",
       audience: "role",
       audienceRef: "reviewer",
@@ -185,10 +189,10 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
 
     // ── 5. reviewer 收到(拉取)→ 发检视意见(子消息,parentId=草稿)
     // 用户命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到
-    const reviewerSeen = await fetchMessages(reviewer.token, group.id);
+    const reviewerSeen = await fetchMessages(reviewer.id, group.id);
     expect(reviewerSeen.map((m) => m.body)).toEqual([command.body, draft.body]);
 
-    const review = await sendMessage(reviewer.token, group.id, {
+    const review = await sendMessage(reviewer.id, group.id, {
       body: "检视意见:补充数据清洗步骤,否则收敛不稳",
       parentId: draft.id,
       audience: "role",
@@ -198,14 +202,14 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     expect(review.depth).toBe(1);
 
     // ── 6. coordinator 采纳 → 发最终版给 executor
-    const coordSeen = await fetchMessages(coordinator.token, group.id);
+    const coordSeen = await fetchMessages(coordinator.id, group.id);
     expect(coordSeen.map((m) => m.body)).toEqual([
       command.body,
       draft.body,
       review.body,
     ]);
 
-    const final = await sendMessage(coordinator.token, group.id, {
+    const final = await sendMessage(coordinator.id, group.id, {
       body: "最终版:在 win 端训练 7B 模型(含数据清洗),交付到 mac",
       audience: "role",
       audienceRef: "executor",
@@ -214,7 +218,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     expect(final.audienceRef).toBe("executor");
 
     // ── 7. executor 执行,发结果 broadcast
-    const result = await sendMessage(executor.token, group.id, {
+    const result = await sendMessage(executor.id, group.id, {
       body: "训练完成,模型在 win 端",
       audience: "broadcast",
     });
@@ -238,7 +242,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         fetchUrl,
         expiresAt: new Date(Date.now() + 3600_000).toISOString(),
       };
-      const signal = await sendMessage(trainer.token, group.id, {
+      const signal = await sendMessage(trainer.id, group.id, {
         body: "模型文件已就绪,请直连拉取",
         audience: "broadcast",
         fileRef,
@@ -246,7 +250,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       expect(signal.fileRef).toEqual(fileRef);
 
       // ── 9. executor 增量拉取:从未见过草稿与检视意见;见过最终版、结果、文件信令
-      const executorFull = await fetchMessages(executor.token, group.id);
+      const executorFull = await fetchMessages(executor.id, group.id);
       const executorBodies = executorFull.map((m) => m.body);
       // 验收核心:草稿与检视意见不在 executor 的可见集合中
       expect(executorBodies).not.toContain(draft.body);
@@ -261,7 +265,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       ]);
       // 增量游标语义:以最终版为游标,只取结果与文件信令
       const executorIncremental = await fetchMessages(
-        executor.token,
+        executor.id,
         group.id,
         final.id,
       );
@@ -285,7 +289,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       );
 
       // ── 10. user(human)增量拉取:全程可见,一条不落
-      const humanSeen = await fetchMessages(user.token, group.id);
+      const humanSeen = await fetchMessages(user.id, group.id);
       const humanBodies = humanSeen.map((m) => m.body);
       expect(humanBodies).toHaveLength(6);
       expect(humanBodies).toEqual([
@@ -300,13 +304,13 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       // ── 12. 归档群组(audit 语义):archive → 200;归档后历史仍可拉取(只读)
       const archiveRes = await app.request(`/api/groups/${group.id}/archive`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${coordinator.token}` },
+        headers: { "X-Participant-Id": coordinator.id },
       });
       expect(archiveRes.status).toBe(200);
       const archived = (await archiveRes.json()) as { status: string };
       expect(archived.status).toBe("archived");
 
-      const historyAfterArchive = await fetchMessages(user.token, group.id);
+      const historyAfterArchive = await fetchMessages(user.id, group.id);
       expect(historyAfterArchive.map((m) => m.body)).toEqual(humanBodies);
     } finally {
       server.close();

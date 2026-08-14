@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { PARTICIPANT_TOKEN_KEY } from "@/lib/api-client";
+import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { connectParticipantWs } from "./use-group-ws";
 
 /**
@@ -10,7 +10,7 @@ import { connectParticipantWs } from "./use-group-ws";
  * `setActiveGroupId` are callable directly. The store owns a single resident
  * WS connection (`connectParticipantWs`, same backoff as the per-group message hook)
  * and counts `group_message` frames per group — the server hub already pushes
- * every group the token can see, so the badge is pure frontend with zero
+ * every group the identity can see, so the badge is pure frontend with zero
  * backend changes.
  *
  * The badge is in-memory only, deliberately: a refresh zeroes it. The message
@@ -48,17 +48,17 @@ let state: StoreState = {
 
 const listeners = new Set<() => void>();
 
-// Resident connection state: the token the current socket was opened with and
-// its teardown. `socketToken` stays set while the socket is mid-backoff, so a
-// no-op re-check never restarts the retry sequence.
-let socketToken: string | null = null;
+// Resident connection state: the participant id the current socket was opened
+// with and its teardown. `socketId` stays set while the socket is mid-backoff,
+// so a no-op re-check never restarts the retry sequence.
+let socketId: string | null = null;
 let teardownWs: (() => void) | null = null;
 let started = false;
 let storageListener: (() => void) | null = null;
 
-function readToken(): string {
+function readParticipantId(): string {
   return typeof localStorage !== "undefined"
-    ? (localStorage.getItem(PARTICIPANT_TOKEN_KEY) ?? "")
+    ? (localStorage.getItem(PARTICIPANT_ID_KEY) ?? "")
     : "";
 }
 
@@ -95,30 +95,30 @@ function startIfNeeded() {
 }
 
 /**
- * (Re)connect the resident socket to match the current token — the navigation
- * pulse the sidebar conversation list calls on mount and every navigation. No
- * token ⇒ stay silent (the sidebar renders without badges, nothing is
- * fetched). Same token ⇒ keep the existing socket or its in-flight backoff
- * untouched.
+ * (Re)connect the resident socket to match the current identity — the
+ * navigation pulse the sidebar conversation list calls on mount and every
+ * navigation. No identity ⇒ stay silent (the sidebar renders without badges,
+ * nothing is fetched). Same id ⇒ keep the existing socket or its in-flight
+ * backoff untouched.
  */
 export function syncUnreadConnection(): void {
-  const token = readToken();
-  if (!token) {
+  const participantId = readParticipantId();
+  if (!participantId) {
     if (teardownWs) {
       teardownWs();
       teardownWs = null;
     }
-    socketToken = null;
+    socketId = null;
     return;
   }
-  if (socketToken === token) {
+  if (socketId === participantId) {
     return;
   }
   if (teardownWs) {
     teardownWs();
     teardownWs = null;
   }
-  socketToken = token;
+  socketId = participantId;
   teardownWs = connectParticipantWs({
     onFrame: handleFrame,
   });
@@ -228,7 +228,7 @@ export function __resetUnreadStore(): void {
     window.removeEventListener("storage", storageListener);
     storageListener = null;
   }
-  socketToken = null;
+  socketId = null;
   started = false;
   state = {
     unread: new Map(),

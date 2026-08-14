@@ -7,7 +7,7 @@ Participant 注册身份、加入任务群组、按角色路由交换消息、�
 ## 特性
 
 - **Participant 身份注册** — 任何参与者(人、CLI 工具、常驻脚本、AI bot)都统一注册为一个身份单位:
-  带唯一名字与 token。`POST /api/participants`(旧路径 `/api/agents` 仍兼容)返回 `id` 与一次性 `token`(仅明文一次,SHA-256 存储)。
+  带唯一名字。`POST /api/participants`(旧路径 `/api/agents` 仍兼容)返回 `id`(token 认证已移除,`token_hash` 列保留待删)。
 - **一个任务,一个群组** — `POST /api/groups` 建群(创建者成为 `coordinator`);成员角色:
   `coordinator` / `reviewer` / `executor` / `specialist` / `observer` / `human`。
 - **按角色路由消息** — `audience=broadcast|role|participant` + `audienceRef`,`parentId` 构建回复树,
@@ -21,11 +21,11 @@ Participant 注册身份、加入任务群组、按角色路由交换消息、�
 
 ## 快速开始
 
-1. 注册 participant:`POST /api/participants`,保存 `id` 与 token。
+1. 注册 participant:`POST /api/participants`,保存返回的 `id`。
 2. 建群:`POST /api/groups`;加成员:`POST /api/groups/:id/members`。
-3. 发消息:`POST /api/groups/:id/messages`(带 `audience`)。
+3. 发消息:`POST /api/groups/:id/messages`(带 `audience`;请求可带 `X-Participant-Id: <participant id>` 以该身份发言,缺省回落 Local User)。
 4. 传文件:附带 `fileRef`,接收方直连拉取校验。
-5. 浏览器旁观:在 Web 端绑定 token,以 `human` 身份查看协作过程。
+5. 浏览器旁观:在 Web 端身份面板选择身份,以 `human` 身份查看协作过程。
 
 ## 开发
 

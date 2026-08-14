@@ -1,10 +1,4 @@
-import {
-  chmodSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -13,19 +7,11 @@ import { createTestApp } from "./app";
 /**
  * 执行器配置管理 API(ticket: 网页 @executor 发布):
  *  - POST /api/executors 新增配置 + 自动注册 participant(名字唯一,重复 → 409;
- *    token 后端生成写 EXECUTOR_STATE_FILE 指向的文件,响应绝不含 token);
+ *    token 认证已移除,响应绝不含 token);
  *  - GET /api/executors 返回内置 + DB 全部(不含 token);
  *  - DELETE /api/executors/:key 删除 DB 配置(内置 key → 409);
  *  - 定向消息调度新增执行器:建 task + spawn(与内置执行器同链路)。
- *
- * 状态文件用 EXECUTOR_STATE_FILE 指向临时目录,避免污染仓库内
- * scripts/.executor-participants.json。ENV 在 import 前设置(executors.ts 的
- * env 覆盖在调用时求值,顶层设置即可)。
  */
-
-const stateDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-state-"));
-const stateFile = path.join(stateDir, "executor-participants.json");
-process.env.EXECUTOR_STATE_FILE = stateFile;
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-bin-"));
 const fakeBin = path.join(fakeDir, "fake-clitest.sh");
@@ -60,7 +46,6 @@ async function createExecutor(body: Record<string, unknown>) {
 
 describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   afterAll(() => {
-    rmSync(stateDir, { recursive: true, force: true });
     rmSync(fakeDir, { recursive: true, force: true });
   });
 
@@ -81,12 +66,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(body).not.toHaveProperty("tokenHash");
     expect(JSON.stringify(body)).not.toContain("tokenHash");
 
-    // participant 已注册进 participant 表(token 明文只落 state 文件)。
-    const state = JSON.parse(readFileSync(stateFile, "utf8")) as Record<
-      string,
-      string
-    >;
-    expect(state["CLI Tester"]).toMatch(/^[0-9a-f]{64}$/);
+    // participant 已注册进 participant 表(token 认证已移除,无 state 文件)。
     const [participant] = await testDb.query.participant.findMany({
       where: (t, { eq }) => eq(t.name, "CLI Tester"),
     });
@@ -176,10 +156,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "coord-exec-api" }),
     });
-    const { id: coordinatorId, token } = (await reg.json()) as {
-      id: string;
-      token: string;
-    };
+    const { id: coordinatorId } = (await reg.json()) as { id: string };
 
     const participantsRes = await app.request("/api/participants");
     const participants = (await participantsRes.json()) as Array<{
@@ -193,7 +170,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": coordinatorId,
       },
       body: JSON.stringify({ title: "新增执行器调度测试" }),
     });
@@ -203,7 +180,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": coordinatorId,
       },
       body: JSON.stringify({ participantId: target!.id, roles: ["executor"] }),
     });
@@ -213,7 +190,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": coordinatorId,
       },
       body: JSON.stringify({
         body: "建一个文件 hello.txt",
@@ -237,7 +214,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       | undefined;
     for (;;) {
       const tasksRes = await app.request(`/api/groups/${group.id}/tasks`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { "X-Participant-Id": coordinatorId },
       });
       const tasks = (await tasksRes.json()) as (typeof task)[];
       task = tasks.find((t) => t?.messageId === msg.id);

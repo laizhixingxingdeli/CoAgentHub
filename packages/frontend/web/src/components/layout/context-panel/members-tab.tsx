@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { participantAuthHeaders } from "@/lib/api-client";
+import { participantIdentityHeaders } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   GROUP_ROLES,
@@ -40,7 +40,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -91,7 +91,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...participantAuthHeaders(),
+            ...participantIdentityHeaders(),
           },
           body: JSON.stringify({ roles: editRoles, prompt: editPrompt.trim() }),
         },

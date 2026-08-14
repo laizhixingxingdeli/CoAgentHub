@@ -11,8 +11,10 @@
  *
  * 环境变量:
  *   API_BASE                默认 http://localhost:3001/api
- *   COAGENTHUB_PARTICIPANT_TOKEN  必填,发送方 participant 身份
- *                            (旧名 COAGENTHUB_AGENT_TOKEN 兼容读取)
+ *   COAGENTHUB_PARTICIPANT_ID  发送方 participant 身份(声明式,全信模型,
+ *                            不校验);旧名 COAGENTHUB_PARTICIPANT_TOKEN /
+ *                            COAGENTHUB_AGENT_TOKEN 兼容读取但只发 warning,
+ *                            其值不再用于认证
  *
  * 依赖:仅 node 内置模块(http/crypto/os/fs/path/url),可复制到 Windows 端
  * 独立运行,无需安装任何东西。
@@ -30,9 +32,17 @@ const API_BASE = (process.env.API_BASE ?? "http://localhost:3001/api").replace(
   "",
 );
 // biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与桥同款)
-const TOKEN =
-  process.env.COAGENTHUB_PARTICIPANT_TOKEN ??
-  process.env.COAGENTHUB_AGENT_TOKEN; // 旧名兼容(agent 为 participant 的旧名)
+const PARTICIPANT_ID = process.env.COAGENTHUB_PARTICIPANT_ID ?? "";
+// 旧 env 兼容:token 认证已移除,只提示不再使用,不参与请求头。
+// biome-ignore lint/suspicious/noUndeclaredEnvVars: 独立脚本,不参与 turbo 缓存任务(与桥同款)
+if (
+  process.env.COAGENTHUB_PARTICIPANT_TOKEN ||
+  process.env.COAGENTHUB_AGENT_TOKEN
+) {
+  console.warn(
+    "[p2p-serve] 检测到旧环境变量 COAGENTHUB_PARTICIPANT_TOKEN/COAGENTHUB_AGENT_TOKEN:token 认证已移除,请改用 COAGENTHUB_PARTICIPANT_ID",
+  );
+}
 
 const USAGE = `用法: node scripts/p2p-serve.mjs --file <path> [--port 9901] [--group <groupId>] [--once]
   --file <path>   要共享的文件(必填)
@@ -121,7 +131,7 @@ async function postFileMessage(groupId, body, fileRef) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
+      ...(PARTICIPANT_ID ? { "X-Participant-Id": PARTICIPANT_ID } : {}),
     },
     body: JSON.stringify({ body, fileRef }),
   });
@@ -137,9 +147,9 @@ async function main() {
 
   if (!opts.file) fail("缺少必填参数 --file");
   if (!opts.group) fail("缺少必填参数 --group");
-  if (!TOKEN)
+  if (!PARTICIPANT_ID)
     fail(
-      "缺少环境变量 COAGENTHUB_PARTICIPANT_TOKEN(发送方 participant 身份;旧名 COAGENTHUB_AGENT_TOKEN 仍兼容)",
+      "缺少环境变量 COAGENTHUB_PARTICIPANT_ID(发送方 participant 身份;旧名 COAGENTHUB_PARTICIPANT_TOKEN/COAGENTHUB_AGENT_TOKEN 已弃用)",
     );
   if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) {
     fail(`无效端口: ${opts.port}(应为 1-65535 的整数)`);

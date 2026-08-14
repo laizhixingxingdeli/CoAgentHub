@@ -20,16 +20,16 @@ describe("任务实体(server 单一状态源)", () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id, token } = (await res.json()) as { id: string; token: string };
-    return { id, token };
+    const { id } = (await res.json()) as { id: string };
+    return { id };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -50,7 +50,7 @@ describe("任务实体(server 单一状态源)", () => {
   };
 
   async function createTask(
-    token: string,
+    participantId: string,
     groupId: string,
     messageId: string,
     executorParticipantId: string,
@@ -60,7 +60,7 @@ describe("任务实体(server 单一状态源)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({
         messageId,
@@ -81,7 +81,7 @@ describe("任务实体(server 单一状态源)", () => {
     const execB = await registerParticipant({
       name: "executor-b",
     });
-    const group = await createGroup(coordinator.token, "任务实体测试");
+    const group = await createGroup(coordinator.id, "任务实体测试");
     return { coordinator, execA, execB, group };
   }
 
@@ -90,7 +90,7 @@ describe("任务实体(server 单一状态源)", () => {
     const messageId = "00000000-0000-7000-8000-000000000001";
 
     const res1 = await createTask(
-      coordinator.token,
+      coordinator.id,
       group.id,
       messageId,
       execA.id,
@@ -102,7 +102,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(t1.checkpointRef).toBeNull();
 
     const res2 = await createTask(
-      coordinator.token,
+      coordinator.id,
       group.id,
       messageId,
       execA.id,
@@ -118,11 +118,11 @@ describe("任务实体(server 单一状态源)", () => {
 
     const m1 = "00000000-0000-7000-8000-000000000011";
     const m2 = "00000000-0000-7000-8000-000000000012";
-    await createTask(coordinator.token, group.id, m1, execA.id);
-    await createTask(coordinator.token, group.id, m2, execA.id);
+    await createTask(coordinator.id, group.id, m1, execA.id);
+    await createTask(coordinator.id, group.id, m2, execA.id);
 
     const res = await app.request(`/api/groups/${group.id}/tasks`, {
-      headers: { Authorization: `Bearer ${coordinator.token}` },
+      headers: { "X-Participant-Id": coordinator.id },
     });
     expect(res.status).toBe(200);
     const tasks = (await res.json()) as Task[];
@@ -135,7 +135,7 @@ describe("任务实体(server 单一状态源)", () => {
     const messageId = "00000000-0000-7000-8000-000000000021";
 
     const noGroup = await createTask(
-      coordinator.token,
+      coordinator.id,
       "00000000-0000-7000-8000-0000000000ff",
       messageId,
       execA.id,
@@ -143,7 +143,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(noGroup.status).toBe(404);
 
     const noParticipant = await createTask(
-      coordinator.token,
+      coordinator.id,
       group.id,
       messageId,
       "00000000-0000-7000-8000-0000000000ee",
@@ -156,7 +156,7 @@ describe("任务实体(server 单一状态源)", () => {
     const messageId = "00000000-0000-7000-8000-000000000031";
 
     const created = await createTask(
-      coordinator.token,
+      coordinator.id,
       group.id,
       messageId,
       execA.id,
@@ -170,7 +170,7 @@ describe("任务实体(server 单一状态源)", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${execB.token}`,
+          "X-Participant-Id": execB.id,
         },
         body: JSON.stringify({ status: "done" }),
       },
@@ -182,7 +182,7 @@ describe("任务实体(server 单一状态源)", () => {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${execA.token}`,
+        "X-Participant-Id": execA.id,
       },
       body: JSON.stringify({ status: "done" }),
     });
@@ -197,13 +197,13 @@ describe("任务实体(server 单一状态源)", () => {
     // failed
     const m1 = "00000000-0000-7000-8000-000000000041";
     const t1 = (await (
-      await createTask(coordinator.token, group.id, m1, execA.id)
+      await createTask(coordinator.id, group.id, m1, execA.id)
     ).json()) as Task;
     const fail = await app.request(`/api/groups/${group.id}/tasks/${t1.id}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${execA.token}`,
+        "X-Participant-Id": execA.id,
       },
       body: JSON.stringify({ status: "failed" }),
     });
@@ -213,13 +213,13 @@ describe("任务实体(server 单一状态源)", () => {
     // cancelled + checkpointRef + diffSummary 一起写
     const m2 = "00000000-0000-7000-8000-000000000042";
     const t2 = (await (
-      await createTask(coordinator.token, group.id, m2, execA.id)
+      await createTask(coordinator.id, group.id, m2, execA.id)
     ).json()) as Task;
     const patch = await app.request(`/api/groups/${group.id}/tasks/${t2.id}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${execA.token}`,
+        "X-Participant-Id": execA.id,
       },
       body: JSON.stringify({
         status: "cancelled",
@@ -241,7 +241,7 @@ describe("任务实体(server 单一状态源)", () => {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${execA.token}`,
+        "X-Participant-Id": execA.id,
       },
       body: JSON.stringify({}),
     });
@@ -254,7 +254,7 @@ describe("任务实体(server 单一状态源)", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${execA.token}`,
+          "X-Participant-Id": execA.id,
         },
         body: JSON.stringify({ status: "exploded" }),
       },
@@ -271,7 +271,7 @@ describe("任务实体(server 单一状态源)", () => {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${execA.token}`,
+          "X-Participant-Id": execA.id,
         },
         body: JSON.stringify({ status: "done" }),
       },
@@ -279,14 +279,14 @@ describe("任务实体(server 单一状态源)", () => {
     expect(missing.status).toBe(404);
 
     // 另一个群的 id 查不到本群任务。
-    const other = await createGroup(coordinator.token, "另一个群");
+    const other = await createGroup(coordinator.id, "另一个群");
     const cross = await app.request(
       `/api/groups/${other.id}/tasks/00000000-0000-7000-8000-0000000000dd`,
       {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${execA.token}`,
+          "X-Participant-Id": execA.id,
         },
         body: JSON.stringify({ status: "done" }),
       },
@@ -302,7 +302,7 @@ describe("任务实体(server 单一状态源)", () => {
 
     // 非成员 POST /tasks → 403(写操作权限不变)。
     const post = await createTask(
-      outsider.token,
+      outsider.id,
       group.id,
       "00000000-0000-7000-8000-000000000051",
       execA.id,
@@ -311,7 +311,7 @@ describe("任务实体(server 单一状态源)", () => {
 
     // 非成员 GET /tasks → 200:读任务列表不再要求成员身份(只读放开)。
     const get = await app.request(`/api/groups/${group.id}/tasks`, {
-      headers: { Authorization: `Bearer ${outsider.token}` },
+      headers: { "X-Participant-Id": outsider.id },
     });
     expect(get.status).toBe(200);
 
@@ -319,7 +319,7 @@ describe("任务实体(server 单一状态源)", () => {
     const missing = await app.request(
       `/api/groups/00000000-0000-7000-8000-0000000000ff/tasks`,
       {
-        headers: { Authorization: `Bearer ${outsider.token}` },
+        headers: { "X-Participant-Id": outsider.id },
       },
     );
     expect(missing.status).toBe(404);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  PARTICIPANT_TOKEN_KEY,
-  participantAuthHeaders,
+  PARTICIPANT_ID_KEY,
+  participantIdentityHeaders,
 } from "@/lib/api-client";
 import TaskPanel, {
   type TaskItem,
@@ -15,8 +15,8 @@ import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
  * 展示完全不变。
  *
  * 权限(只读放开 enhancement):GET /tasks 不再要求成员身份(Local User 未
- * 绑定 token 也能看列表);「停止/回滚」需要 coordinator/human 身份 —— 以
- * 是否已绑定 token 判断,未绑定时按钮禁用并提示。
+ * 绑定身份也能看列表);「停止/回滚」需要 coordinator/human 身份 —— 以
+ * 是否已绑定身份判断,未绑定时按钮禁用并提示。
  */
 export function TasksTab({ groupId }: { groupId: string }) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
@@ -32,7 +32,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
     setError(null);
     try {
       const res = await fetch(`/api/groups/${groupId}/tasks`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         // 只读放开后 403 不再是预期状态(仅群不存在 404);统一按失败处理,
@@ -51,7 +51,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const loadMessages = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (res.ok) {
         setMessages(await res.json());
@@ -64,7 +64,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const loadMembers = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantAuthHeaders(),
+        headers: participantIdentityHeaders(),
       });
       if (res.ok) {
         setMembers(await res.json());
@@ -80,11 +80,11 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadMembers();
   }, [loadTasks, loadMessages, loadMembers]);
 
-  // 停止/回滚需要 coordinator/human 身份:已绑定 token 即视为有控制权限;
+  // 停止/回滚需要 coordinator/human 身份:已绑定身份即视为有控制权限;
   // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
   const canControl =
     typeof localStorage !== "undefined" &&
-    Boolean(localStorage.getItem(PARTICIPANT_TOKEN_KEY));
+    Boolean(localStorage.getItem(PARTICIPANT_ID_KEY));
 
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
    * 识别);发送后刷新任务列表。403 → 无权限提示。 */
@@ -99,14 +99,14 @@ export function TasksTab({ groupId }: { groupId: string }) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...participantAuthHeaders(),
+          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ body: commandBody, audience: "broadcast" }),
       });
       if (!res.ok) {
         setError(
           res.status === 403
-            ? "无权限,请以 coordinator/human 身份绑定 token"
+            ? "无权限,请以 coordinator/human 身份绑定 participant"
             : `命令发送失败: HTTP ${res.status}`,
         );
         return;

@@ -63,6 +63,7 @@ app.use(
     allowHeaders: [
       "Content-Type",
       "Authorization",
+      "X-Participant-Id",
       "Upgrade-Insecure-Requests",
     ],
     allowMethods: ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"],
@@ -144,7 +145,7 @@ async function run() {
   });
 
   // Realtime push: attach the WS hub to the same HTTP server so /api/ws
-  // upgrade requests (auth via ?token=) are handled alongside HTTP.
+  // upgrade requests (identity via ?participantId=) are handled alongside HTTP.
   wsHub.handleUpgrade(server as HttpServer);
 }
 

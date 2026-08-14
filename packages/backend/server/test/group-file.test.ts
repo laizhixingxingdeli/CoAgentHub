@@ -19,16 +19,16 @@ describe("群组文件信令 (P2P)", () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id, token } = (await res.json()) as { id: string; token: string };
-    return { id, token };
+    const { id } = (await res.json()) as { id: string };
+    return { id };
   }
 
-  async function createGroup(token: string, title: string) {
+  async function createGroup(participantId: string, title: string) {
     const res = await app.request("/api/groups", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify({ title }),
     });
@@ -37,7 +37,7 @@ describe("群组文件信令 (P2P)", () => {
   }
 
   async function addMember(
-    token: string,
+    actorId: string,
     groupId: string,
     participantId: string,
     roles: string[],
@@ -46,7 +46,7 @@ describe("群组文件信令 (P2P)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": actorId,
       },
       body: JSON.stringify({ participantId, roles }),
     });
@@ -54,7 +54,7 @@ describe("群组文件信令 (P2P)", () => {
   }
 
   async function sendMessage(
-    token: string,
+    participantId: string,
     groupId: string,
     body: Record<string, unknown>,
   ) {
@@ -62,15 +62,15 @@ describe("群组文件信令 (P2P)", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        "X-Participant-Id": participantId,
       },
       body: JSON.stringify(body),
     });
   }
 
-  async function fetchMessages(token: string, groupId: string) {
+  async function fetchMessages(participantId: string, groupId: string) {
     const res = await app.request(`/api/groups/${groupId}/messages`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { "X-Participant-Id": participantId },
     });
     expect(res.status).toBe(200);
     return (await res.json()) as Array<{
@@ -95,8 +95,8 @@ describe("群组文件信令 (P2P)", () => {
       name: "win-hermes",
       device: "win-pc",
     });
-    const group = await createGroup(sender.token, "模型训练任务");
-    await addMember(sender.token, group.id, receiver.id, ["executor"]);
+    const group = await createGroup(sender.id, "模型训练任务");
+    await addMember(sender.id, group.id, receiver.id, ["executor"]);
     return { group, sender, receiver };
   }
 
@@ -132,7 +132,7 @@ describe("群组文件信令 (P2P)", () => {
         fetchUrl: "http://192.168.1.10:8080/f/trained-model.bin",
       };
 
-      const res = await sendMessage(sender.token, group.id, { fileRef });
+      const res = await sendMessage(sender.id, group.id, { fileRef });
       expect(res.status).toBe(200);
       const msg = (await res.json()) as {
         body: string;
@@ -146,7 +146,7 @@ describe("群组文件信令 (P2P)", () => {
       );
 
       // 落库持久化,GET 同样透出
-      const messages = await fetchMessages(sender.token, group.id);
+      const messages = await fetchMessages(sender.id, group.id);
       expect(messages).toHaveLength(1);
       expect(messages[0].fileRef).toMatchObject(fileRef);
     });
@@ -154,7 +154,7 @@ describe("群组文件信令 (P2P)", () => {
     it("fileRef 缺字段 / 类型错误 → 400", async () => {
       const { group, sender } = await setupGroup();
 
-      const missingName = await sendMessage(sender.token, group.id, {
+      const missingName = await sendMessage(sender.id, group.id, {
         fileRef: {
           size: 1,
           sha256: "a".repeat(64),
@@ -163,7 +163,7 @@ describe("群组文件信令 (P2P)", () => {
       });
       expect(missingName.status).toBe(400);
 
-      const wrongSizeType = await sendMessage(sender.token, group.id, {
+      const wrongSizeType = await sendMessage(sender.id, group.id, {
         fileRef: {
           name: "x.bin",
           size: "1024", // 字符串不是 number
@@ -173,7 +173,7 @@ describe("群组文件信令 (P2P)", () => {
       });
       expect(wrongSizeType.status).toBe(400);
 
-      const badSha256 = await sendMessage(sender.token, group.id, {
+      const badSha256 = await sendMessage(sender.id, group.id, {
         fileRef: {
           name: "x.bin",
           size: 1,
@@ -183,7 +183,7 @@ describe("群组文件信令 (P2P)", () => {
       });
       expect(badSha256.status).toBe(400);
 
-      const badFetchUrl = await sendMessage(sender.token, group.id, {
+      const badFetchUrl = await sendMessage(sender.id, group.id, {
         fileRef: {
           name: "x.bin",
           size: 1,
@@ -194,7 +194,7 @@ describe("群组文件信令 (P2P)", () => {
       expect(badFetchUrl.status).toBe(400);
 
       // 非法 fileRef 不应落库
-      const messages = await fetchMessages(sender.token, group.id);
+      const messages = await fetchMessages(sender.id, group.id);
       expect(messages).toHaveLength(0);
     });
 
@@ -208,14 +208,14 @@ describe("群组文件信令 (P2P)", () => {
       };
 
       // 只带 fileRef(纯文件信令)
-      const signalingOnly = await sendMessage(sender.token, group.id, {
+      const signalingOnly = await sendMessage(sender.id, group.id, {
         fileRef,
       });
       expect(signalingOnly.status).toBe(200);
       expect(((await signalingOnly.json()) as { body: string }).body).toBe("");
 
       // 只带 body(普通消息)
-      const bodyOnly = await sendMessage(sender.token, group.id, {
+      const bodyOnly = await sendMessage(sender.id, group.id, {
         body: "模型训练完成",
       });
       expect(bodyOnly.status).toBe(200);
@@ -224,7 +224,7 @@ describe("群组文件信令 (P2P)", () => {
       ).toBeNull();
 
       // body 与 fileRef 同时携带
-      const both = await sendMessage(sender.token, group.id, {
+      const both = await sendMessage(sender.id, group.id, {
         body: "训练完成,文件如下",
         fileRef,
       });
@@ -238,7 +238,7 @@ describe("群组文件信令 (P2P)", () => {
       expect(bothMsg.fileRef.expiresAt).toBeTruthy();
 
       // 两者皆空 → 400
-      const neither = await sendMessage(sender.token, group.id, {});
+      const neither = await sendMessage(sender.id, group.id, {});
       expect(neither.status).toBe(400);
     });
   });
@@ -266,11 +266,11 @@ describe("群组文件信令 (P2P)", () => {
         };
 
         // 发送方广播文件就绪信令
-        const post = await sendMessage(sender.token, group.id, { fileRef });
+        const post = await sendMessage(sender.id, group.id, { fileRef });
         expect(post.status).toBe(200);
 
         // 接收方通过 CoAgentHub API 增量拉到信令消息(含 fetchUrl)
-        const messages = await fetchMessages(receiver.token, group.id);
+        const messages = await fetchMessages(receiver.id, group.id);
         const signal = messages.find(
           (m) => m.fileRef?.name === "trained-model.bin",
         );

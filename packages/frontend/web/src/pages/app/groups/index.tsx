@@ -19,8 +19,7 @@ import { Input } from "@/components/ui/input";
 import { useUnread } from "@/hooks/use-unread";
 import {
   PARTICIPANT_ID_KEY,
-  PARTICIPANT_TOKEN_KEY,
-  participantAuthHeaders,
+  participantIdentityHeaders,
 } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -46,17 +45,16 @@ type StatusFilter = "all" | "active" | "archived";
 const PAGE_SIZE = 20;
 
 /**
- * Turn a non-OK response into a human-readable error. A 401 means the
- * participantAuth middleware rejected the request: if no `Authorization` header was
- * sent the token is simply not bound yet, otherwise the bound token was
- * rejected/revoked and needs to be cleared and re-bound.
+ * Turn a non-OK response into a human-readable error. The identity middleware
+ * never returns 401/403 (LAN full-trust model), so a 4xx here is a plain
+ * request error — the message just describes which identity was declared.
  */
-function throwForStatus(res: Response, sentAuthHeader: boolean): never {
-  if (res.status === 401) {
+function throwForStatus(res: Response, sentIdentity: boolean): never {
+  if (res.status === 401 || res.status === 403) {
     throw new Error(
-      sentAuthHeader
-        ? "Participant Token 无效或已失效,请在上方清除后重新绑定"
-        : "未绑定 Participant Token,请在上方输入并保存",
+      sentIdentity
+        ? "请求被拒绝,请检查上方绑定的 Participant 身份是否有效"
+        : "请求被拒绝:未绑定 Participant 身份,请在身份面板选择或输入",
     );
   }
   throw new Error(`HTTP ${res.status}`);
@@ -65,9 +63,10 @@ function throwForStatus(res: Response, sentAuthHeader: boolean): never {
 /**
  * Group list page (ticket 02): shows all groups with status and member
  * counts, lets the operator create a new group and archive finished ones.
- * The web viewer acts as a human participant: an participant token can be bound at the
- * top of the page, and every request carries it as `Authorization: Bearer`
- * so the participantAuth-protected group APIs accept the browser session.
+ * The web viewer acts as a human participant: an identity (participant id) can
+ * be selected at the top of the page, and every request carries it as
+ * `X-Participant-Id` so the identity middleware treats the browser session as
+ * that participant.
  */
 export default function GroupsPage() {
   const [, navigate] = useLocation();
@@ -96,16 +95,14 @@ export default function GroupsPage() {
     }
     return body.length > 30 ? `${body.slice(0, 30)}…` : body;
   };
-  const [boundToken, setBoundToken] = useState(() =>
+  const [boundParticipantId, setBoundParticipantId] = useState(() =>
     typeof localStorage !== "undefined"
-      ? (localStorage.getItem(PARTICIPANT_TOKEN_KEY) ?? "")
+      ? (localStorage.getItem(PARTICIPANT_ID_KEY) ?? "")
       : "",
   );
-  const [tokenInput, setTokenInput] = useState("");
-  // Ticket 18: the viewer's own participant id, bound alongside the token so the
-  // messages page can right-align "my" bubbles. The server never exposes
-  // token_hash, so it must be entered explicitly (not looked up).
-  const [participantIdInput, setParticipantIdInput] = useState("");
+  // 手动输入 participant id(全信模型:任意声称的 id 都被接受,不存在的回落
+  // Local User)。下拉选择在身份面板的「已有 Participant」列表里完成。
+  const [identityInput, setIdentityInput] = useState("");
   // Ticket 20: Participant 设置展开区 — 绑定成功后可见,展示并编辑自己的注册信息。
   const [participantInfo, setParticipantInfo] =
     useState<ParticipantInfo | null>(null);
@@ -114,24 +111,17 @@ export default function GroupsPage() {
   const [deviceInput, setDeviceInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   // Ticket 28: 注册新 Participant — 替代终端 curl 注册;注册成功即自动绑定
-  // (token 覆盖写入,语义:注册即切换身份,不强制清除旧绑定)。
+  // (id 覆盖写入,语义:注册即切换身份,不强制清除旧绑定)。
   const [registerOpen, setRegisterOpen] = useState(false);
   const [regName, setRegName] = useState("");
   const [regDevice, setRegDevice] = useState("");
   const [registering, setRegistering] = useState(false);
-  // 注册响应里的一次性 token:仅显示一次,供用户复制留档。
-  const [registeredToken, setRegisteredToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   // Ticket 29: 身份面板 — 已有 Participant 名册(公开 GET /api/participants,无需鉴权)。
   const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
   const [participantsLoading, setParticipantsLoading] = useState(false);
   const [participantsError, setParticipantsError] = useState<string | null>(
     null,
   );
-  // 正在一键绑定的 participant id(按钮转圈防连点)。
-  const [bindingId, setBindingId] = useState<string | null>(null);
-  // 「高级:手动输入 token」折叠区(兼容特殊场景,默认收起)。
-  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const loadGroups = useCallback(async () => {
     setLoading(true);
@@ -143,7 +133,7 @@ export default function GroupsPage() {
     const filter = statusFilter;
     const q = debouncedQuery;
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       // "all" carries no ?status= (server returns active + archived and hides
       // soft-deleted rows); the tabs pass the exact enum the server filters on.
       // A non-empty search appends ?q= (title ILIKE) and combines with the tab.
@@ -159,7 +149,7 @@ export default function GroupsPage() {
       params.set("offset", "0");
       const res = await fetch(`/api/groups?${params.toString()}`, { headers });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
@@ -188,7 +178,7 @@ export default function GroupsPage() {
     setLoadingMore(true);
     setError(null);
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       const params = new URLSearchParams();
       if (filter !== "all") {
         params.set("status", filter);
@@ -200,7 +190,7 @@ export default function GroupsPage() {
       params.set("offset", String(groups.length));
       const res = await fetch(`/api/groups?${params.toString()}`, { headers });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
@@ -256,77 +246,41 @@ export default function GroupsPage() {
     loadParticipants();
   }, [loadParticipants]);
 
-  const commitToken = (next: string | null, participantId: string | null) => {
-    const trimmed = next?.trim() ?? null;
-    const trimmedParticipantId = participantId?.trim() ?? null;
+  const commitIdentity = (participantId: string | null) => {
+    const trimmed = participantId?.trim() ?? null;
     if (trimmed) {
-      localStorage.setItem(PARTICIPANT_TOKEN_KEY, trimmed);
-    } else {
-      localStorage.removeItem(PARTICIPANT_TOKEN_KEY);
-    }
-    // Ticket 18: the participant id rides along with the token so the messages page
-    // can right-align the viewer's own bubbles. Clearing the token clears it
-    // too (a stale id would misalign messages after re-binding).
-    if (trimmedParticipantId) {
-      localStorage.setItem(PARTICIPANT_ID_KEY, trimmedParticipantId);
+      localStorage.setItem(PARTICIPANT_ID_KEY, trimmed);
     } else {
       localStorage.removeItem(PARTICIPANT_ID_KEY);
     }
-    setBoundToken(trimmed ?? "");
+    setBoundParticipantId(trimmed ?? "");
     loadGroups();
     loadParticipants();
   };
 
-  const handleSaveToken = () => {
-    const token = tokenInput.trim();
-    if (!token) {
+  const handleSaveIdentity = () => {
+    const id = identityInput.trim();
+    if (!id) {
       return;
     }
-    commitToken(token, participantIdInput);
-    setTokenInput("");
-    setParticipantIdInput("");
+    commitIdentity(id);
+    setIdentityInput("");
   };
 
-  const handleClearToken = () => {
-    commitToken(null, null);
+  const handleClearIdentity = () => {
+    commitIdentity(null);
   };
 
-  // Ticket 29: 一键绑定 — 调公开端点 POST /:id/reset-token 取回明文 token
-  // (局域网信任模型:注册与查/重置 token 均无需鉴权),自动写入并切换身份。
-  // 因库中只存 SHA-256 哈希无法还原,后端采用「重置」而非「查」:生成新
-  // token 覆盖存储(旧 token 立即失效)并仅此一次返回明文。
-  const handleBind = async (participant: ParticipantInfo) => {
-    setBindingId(participant.id);
+  // 全信模型:选择身份 = 声明身份,无需任何服务端调用(reset-token 端点已删除)。
+  const handleBind = (participant: ParticipantInfo) => {
     setMessage(null);
     setError(null);
-    try {
-      const res = await fetch(
-        `/api/participants/${participant.id}/reset-token`,
-        {
-          method: "POST",
-        },
-      );
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(
-          `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}`,
-        );
-      }
-      const { id, token } = (await res.json()) as {
-        id: string;
-        token: string;
-      };
-      commitToken(token, id);
-      setMessage(`已切换为 ${participant.name}`);
-    } catch (e) {
-      setError(`绑定失败: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBindingId(null);
-    }
+    commitIdentity(participant.id);
+    setMessage(`已切换为 ${participant.name}`);
   };
 
   // Ticket 28: 前端注册 participant(POST /api/participants,公开端点)。成功后用返回的
-  // id + token 自动完成绑定(commitToken 覆盖写入 localStorage 并刷新列表)。
+  // id 自动完成绑定(commitIdentity 覆盖写入 localStorage 并刷新列表)。
   const handleRegister = async () => {
     const name = regName.trim();
     if (!name) {
@@ -354,31 +308,16 @@ export default function GroupsPage() {
       const participant = (await res.json()) as {
         id: string;
         name: string;
-        token: string;
       };
-      // 注册即切换身份:token/id 覆盖写入,不强制清除旧绑定。
-      commitToken(participant.token, participant.id);
+      // 注册即切换身份:id 覆盖写入,不强制清除旧绑定。
+      commitIdentity(participant.id);
       setRegName("");
       setRegDevice("");
-      setCopied(false);
-      setRegisteredToken(participant.token);
       setMessage(`✅ 已注册并绑定 ${participant.name}`);
     } catch (e) {
       setError(`注册失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRegistering(false);
-    }
-  };
-
-  const handleCopyToken = async () => {
-    if (!registeredToken) {
-      return;
-    }
-    try {
-      await navigator.clipboard?.writeText(registeredToken);
-      setCopied(true);
-    } catch {
-      // 剪贴板不可用时静默失败(readonly 输入框仍可手动复制)。
     }
   };
 
@@ -394,7 +333,7 @@ export default function GroupsPage() {
       return;
     }
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       const res = await fetch("/api/participants", { headers });
       if (!res.ok) {
         return;
@@ -413,10 +352,10 @@ export default function GroupsPage() {
 
   // Ticket 20: 绑定 participant 后加载其注册信息(GET /api/participants 找到自己的 id)。
   useEffect(() => {
-    if (boundToken) {
+    if (boundParticipantId) {
       loadParticipantInfo();
     }
-  }, [boundToken, loadParticipantInfo]);
+  }, [boundParticipantId, loadParticipantInfo]);
 
   const handleSaveSettings = async () => {
     const participantId =
@@ -438,7 +377,7 @@ export default function GroupsPage() {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...participantAuthHeaders(),
+        ...participantIdentityHeaders(),
       };
       // device 为空时发送 null 表示清空(与后端 PATCH 语义一致)。
       const res = await fetch(`/api/participants/${participantId}`, {
@@ -477,7 +416,7 @@ export default function GroupsPage() {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...participantAuthHeaders(),
+        ...participantIdentityHeaders(),
       };
       const res = await fetch("/api/groups", {
         method: "POST",
@@ -485,7 +424,7 @@ export default function GroupsPage() {
         body: JSON.stringify({ title }),
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       setNewTitle("");
       setMessage(`群组「${title}」创建成功`);
@@ -506,13 +445,13 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}/archive`, {
         method: "POST",
         headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       setMessage(`群组「${group.title}」已归档`);
       await loadGroups();
@@ -525,13 +464,13 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}/unarchive`, {
         method: "POST",
         headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       setMessage(`群组「${group.title}」已恢复为进行中`);
       await loadGroups();
@@ -556,13 +495,13 @@ export default function GroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantAuthHeaders();
+      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}`, {
         method: "DELETE",
         headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers.Authorization));
+        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
       }
       setMessage(`群组「${group.title}」已删除`);
       await loadGroups();
@@ -572,12 +511,8 @@ export default function GroupsPage() {
   };
 
   // Ticket 29: 当前绑定身份 — 从名册里找,找不到则回退 participantInfo(设置区已
-  // 加载的自己的注册信息)。localStorage 在 commitToken 里同步写入,渲染时
+  // 加载的自己的注册信息)。localStorage 在 commitIdentity 里同步写入,渲染时
   // 读取即为最新绑定。
-  const boundParticipantId =
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem(PARTICIPANT_ID_KEY)
-      : null;
   const currentParticipant =
     participants.find((a) => a.id === boundParticipantId) ??
     participantInfo ??
@@ -626,12 +561,12 @@ export default function GroupsPage() {
         </p>
       </div>
 
-      {/* 身份面板(ticket 29):当前身份 + 已有 Participant 一键绑定 + 手动绑定 + 注册 */}
+      {/* 身份面板(ticket 29):当前身份 + 已有 Participant 选择 + 手动输入 id + 注册 */}
       <div className="mb-6 rounded-lg border bg-card">
         {/* ① 当前身份:已绑定显示「使用中: name(typedevice)」,未绑定提示 */}
         <div className="border-b px-4 py-3">
           <div className="flex items-center justify-between gap-2">
-            {boundToken ? (
+            {boundParticipantId ? (
               <span className="inline-flex min-w-0 items-center gap-2 text-sm font-medium">
                 <KeyRound className="size-4 shrink-0" />
                 <span className="truncate">
@@ -647,15 +582,14 @@ export default function GroupsPage() {
               </span>
             ) : (
               <span className="text-sm text-muted-foreground">
-                未绑定 participant,从下方列表一键绑定,或展开「高级:手动输入
-                token」
+                未绑定 participant,从下方列表选择,或手动输入 participant id
               </span>
             )}
-            {boundToken && (
+            {boundParticipantId && (
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleClearToken}
+                onClick={handleClearIdentity}
                 className="shrink-0"
               >
                 清除
@@ -664,7 +598,7 @@ export default function GroupsPage() {
           </div>
         </div>
 
-        {/* ② 已有 Participant 列表:一键绑定(公开 POST /:id/reset-token 取回 token) */}
+        {/* ② 已有 Participant 列表:选择身份(全信模型,声明即绑定,无服务端调用) */}
         <div className="border-b px-4 py-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-medium">已有 Participant</span>
@@ -705,10 +639,9 @@ export default function GroupsPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleBind(participant)}
-                        disabled={bindingId === participant.id}
                         className="shrink-0"
                       >
-                        {bindingId === participant.id ? "绑定中…" : "绑定"}
+                        使用
                       </Button>
                     )}
                   </li>
@@ -718,60 +651,31 @@ export default function GroupsPage() {
           )}
         </div>
 
-        {/* ③ 高级:手动输入 token(兼容特殊场景,默认收起) */}
+        {/* ③ 手动输入 participant id(全信模型:任意声称的 id 都被接受) */}
         <div className="border-b px-4 py-3">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="flex w-full items-center justify-between text-sm font-medium"
-            aria-expanded={advancedOpen}
-          >
-            <span className="inline-flex items-center gap-2">
-              <KeyRound className="size-4" />
-              高级:手动输入 token
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {advancedOpen ? "收起" : "展开"}
-            </span>
-          </button>
-          {advancedOpen && (
-            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-              <Input
-                type="password"
-                placeholder="输入 participant token…"
-                value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    handleSaveToken();
-                  }
-                }}
-                aria-label="Participant Token"
-                className="sm:max-w-xs"
-              />
-              <Input
-                type="text"
-                placeholder="输入你的 participantId(可选,用于气泡靠右)…"
-                value={participantIdInput}
-                onChange={(e) => setParticipantIdInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    handleSaveToken();
-                  }
-                }}
-                aria-label="Participant ID"
-                className="sm:max-w-xs"
-              />
-              <Button
-                size="sm"
-                onClick={handleSaveToken}
-                disabled={!tokenInput.trim()}
-                className="shrink-0"
-              >
-                保存
-              </Button>
-            </div>
-          )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Input
+              type="text"
+              placeholder="输入 participant id(可选,用于以该身份发言)…"
+              value={identityInput}
+              onChange={(e) => setIdentityInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleSaveIdentity();
+                }
+              }}
+              aria-label="Participant ID"
+              className="sm:max-w-xs"
+            />
+            <Button
+              size="sm"
+              onClick={handleSaveIdentity}
+              disabled={!identityInput.trim()}
+              className="shrink-0"
+            >
+              绑定
+            </Button>
+          </div>
         </div>
 
         {/* ④ 注册新 Participant(ticket 28):替代终端 curl 注册;成功即自动绑定并切换身份 */}
@@ -829,38 +733,15 @@ export default function GroupsPage() {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                注册成功后将自动写入 participant token 并完成绑定,无需终端 curl
+                注册成功后将自动切换为该身份,无需终端 curl
               </p>
-              {registeredToken && (
-                <div className="flex flex-col gap-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 dark:border-emerald-800 dark:bg-emerald-950/40">
-                  <div className="flex items-center justify-between gap-2 text-sm text-emerald-800 dark:text-emerald-200">
-                    <span className="truncate">
-                      Participant Token(仅显示一次,请复制留档)
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleCopyToken}
-                      className="shrink-0"
-                    >
-                      {copied ? "已复制" : "复制"}
-                    </Button>
-                  </div>
-                  <Input
-                    readOnly
-                    value={registeredToken}
-                    aria-label="注册返回的 Participant Token"
-                    className="bg-background font-mono text-xs"
-                  />
-                </div>
-              )}
             </div>
           )}
         </div>
       </div>
 
       {/* Participant 设置(ticket 20):绑定后可见,展示并编辑自己的注册信息 */}
-      {boundToken && participantInfo && (
+      {boundParticipantId && participantInfo && (
         <div className="mb-6 rounded-lg border bg-card p-4">
           <button
             type="button"

@@ -18,8 +18,8 @@ import { timeColumns } from "../utils/columns.js";
  *  - bin: cli 的执行命令(或 a2a 时的占位标识);
  *  - url: a2a 时的 gateway 基地址;
  *  - args: cli 的参数模板(如 ["-y","-p","{ticket}"])。
- * token 不落库、不返回前端:注册 participant 的 token 由 server 后端生成并写入
- * scripts/.executor-agents.json(见 ensureExecutorParticipants)。
+ * token 认证已移除(局域网全信模型):不再生成/持久化 token,注册 participant
+ * 仅按名字幂等落库。
  */
 export const executorConfig = pgTable("executor_config", {
   id: uuid("id").primaryKey().$defaultFn(uuidv7),
