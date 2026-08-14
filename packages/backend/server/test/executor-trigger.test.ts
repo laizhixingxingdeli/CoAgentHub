@@ -147,6 +147,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       executorKey: string | null;
       status: string;
       diffSummary: unknown;
+      a2aContextId: string | null;
     }>;
   }
 
@@ -437,6 +438,69 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(doneMsg).toBeDefined();
       expect(doneMsg!.body).toContain("ACAT-WIN-OK");
       expect(statusMsgs.every((m) => m.senderId === winHermes.id)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a2a 上下文延续:首次任务返回 contextId 落库,第二次任务调用携带", async () => {
+    // 假 gateway:第一次调用返回 contextId=ctx-1;第二次调用断言 params 携带
+    // ctx-1(上一任务返回的),再返回新 contextId=ctx-2。
+    const calls: Array<{ params: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn(async (_input: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        params: Record<string, unknown>;
+      };
+      calls.push(body);
+      const isSecond = calls.length === 2;
+      const result: Record<string, unknown> = {
+        message: {
+          role: "participant",
+          parts: [{ kind: "text", text: "ACAT-WIN-OK" }],
+        },
+        state: { state: "completed" },
+        contextId: isSecond ? "ctx-2" : "ctx-1",
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "1.0", id: "1", result }),
+        text: async () => "",
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const coordinator = await registerParticipant({
+        name: "coord-a2a-ctx",
+      });
+      const winHermes = await registerParticipant({
+        name: "Win Hermes", // executors.ts 的 agentName
+      });
+      const group = await createGroup(coordinator.id, "a2a 上下文延续");
+      await addMember(coordinator.id, group.id, winHermes.id, ["executor"]);
+
+      // 第一次任务:不带 contextId(无历史),gateway 返回 ctx-1 → 落库。
+      const msg1 = await postMessage(coordinator.id, group.id, {
+        body: "任务一:记住上下文",
+        audience: "participant",
+        audienceRef: winHermes.id,
+      });
+      const task1 = await waitForTask(coordinator.id, group.id, msg1.id);
+      expect(task1.status).toBe("done");
+      expect(task1.a2aContextId).toBe("ctx-1");
+      expect(calls[0]?.params.contextId).toBeUndefined();
+
+      // 第二次任务:调用携带上一任务的 ctx-1;gateway 返回 ctx-2 → 落库。
+      const msg2 = await postMessage(coordinator.id, group.id, {
+        body: "任务二:继续上下文",
+        audience: "participant",
+        audienceRef: winHermes.id,
+      });
+      const task2 = await waitForTask(coordinator.id, group.id, msg2.id);
+      expect(task2.status).toBe("done");
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.params.contextId).toBe("ctx-1");
+      expect(task2.a2aContextId).toBe("ctx-2");
     } finally {
       vi.unstubAllGlobals();
     }

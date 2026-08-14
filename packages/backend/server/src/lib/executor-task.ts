@@ -79,7 +79,7 @@ import {
 } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/group-message";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 
 /** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发布任务。 */
 const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
@@ -778,11 +778,36 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.log(
         `[executor] a2a 调用: ${a2aUrl} (participant=${ex.agentName}, group=${run.groupKey}, task=${taskId})`,
       );
+      // A2A 上下文延续:取该执行器最近一个非 cancelled 任务返回的
+      // a2a_context_id(按 updated_at desc),作为本次入参;无则不携带。
+      // 仅 a2a 执行器(win-hermes)查;CLI 执行器不走此分支。上下文按执行器
+      // 共享(不做按群隔离——票面范围即"按执行器即可"),同一执行器的连续
+      // 任务跨群延续上下文,远端 participant 视为全局记忆。
+      let prevContextId: string | undefined;
+      try {
+        const prevTask = await db.query.task.findFirst({
+          where: and(
+            eq(taskTable.executorKey, ex.key),
+            ne(taskTable.status, "cancelled"),
+            isNotNull(taskTable.a2aContextId),
+          ),
+          orderBy: (t, { desc }) => [desc(t.updatedAt)],
+          columns: { a2aContextId: true },
+        });
+        prevContextId = prevTask?.a2aContextId ?? undefined;
+      } catch (e) {
+        // 上下文查询失败只影响延续,不影响本次执行:告警后不带 contextId 继续
+        // (与下方回写同样容错,避免 DB 抖动把任务永久置 failed)。
+        console.warn(
+          `[executor] 查 a2a_context_id 失败(${taskId}),本次不带上下文: ${e}`,
+        );
+      }
       handle = {
         promise: runA2AExecutor({
           url: a2aUrl,
           token: ex.a2a?.token ?? "",
           prompt: body,
+          ...(prevContextId ? { contextId: prevContextId } : {}),
           timeoutMs: readTimeoutMs(),
         }),
         // 远端调用无本地进程可杀:停止指令靠完成后 run.stopped 检查置 cancelled。
@@ -884,6 +909,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           .set({ status: "cancelled", diffSummary: { error: "stopped" } })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
         return;
+      }
+      // A2A 上下文延续:gateway 返回的新 contextId 落库(done/failed 都写;
+      // 超时/网络错误无 contextId 自然不写),供该执行器的下一任务携带。
+      if (isA2a && result.contextId) {
+        try {
+          await db
+            .update(taskTable)
+            .set({ a2aContextId: result.contextId })
+            .where(
+              and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            );
+        } catch (e) {
+          console.warn(`[executor] 写 a2a_context_id 失败(${taskId}): ${e}`);
+        }
       }
       // 静默超时已由 handleStall 置 stalled + kill 进程组;失败落库 / ❌ 回传 /
       // 重试判定统一在完成路径处理,避免定时器回调与完成路径并发写状态。

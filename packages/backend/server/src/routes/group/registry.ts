@@ -165,6 +165,7 @@ app
           createdBy: groupsTable.createdBy,
           createdAt: groupsTable.createdAt,
           updatedAt: groupsTable.updatedAt,
+          projectPath: groupsTable.projectPath,
           memberCount: count(groupMemberTable.participantId),
         })
         .from(groupsTable)

@@ -53,6 +53,8 @@ export interface ExecutorRunResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** A2A 执行器返回的新 contextId(跨任务延续上下文);CLI 执行器恒缺省。 */
+  contextId?: string;
 }
 
 export interface ExecutorRunHandle {

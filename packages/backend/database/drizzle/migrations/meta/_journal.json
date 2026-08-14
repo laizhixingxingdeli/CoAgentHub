@@ -78,6 +78,13 @@
       "when": 1786770000000,
       "tag": "0010_add_executor_model",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786720972097,
+      "tag": "0011_add_task_a2a_context_id",
+      "breakpoints": true
     }
   ]
 }

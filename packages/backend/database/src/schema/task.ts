@@ -71,6 +71,9 @@ export const task = pgTable("task", {
     .default(sql`'[]'::jsonb`),
   // 完成后回传的 diff 摘要(改动文件数/行数等,由执行器侧计算)。
   diffSummary: jsonb("diff_summary"),
+  // A2A 上下文延续:本次 A2A 调用返回的 contextId(下一任务携带,远端执行器
+  // 借此跨任务保持上下文)。仅 a2a 执行器(如 win-hermes)写入;CLI 执行为空。
+  a2aContextId: text("a2a_context_id"),
   ...timeColumns("both"),
 });
 

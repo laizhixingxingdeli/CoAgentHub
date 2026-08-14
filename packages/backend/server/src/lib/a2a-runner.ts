@@ -21,6 +21,8 @@ export interface A2ARunOptions {
   token: string;
   /** 发给远端 participant 的提示词(直接作为 message 的 text part)。 */
   prompt: string;
+  /** 上次任务返回的上下文 id(跨任务延续远端执行器上下文);无则不携带。 */
+  contextId?: string;
   /** 超时(毫秒);默认 30 分钟。 */
   timeoutMs?: number;
 }
@@ -35,9 +37,22 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** gateway 返回的新 contextId(下一任务携带);无则缺省。 */
+  contextId?: string;
 }> {
   const { url, token, prompt } = opts;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const params: Record<string, unknown> = {
+    message: {
+      role: "user",
+      parts: [{ kind: "text", text: prompt }],
+    },
+  };
+  // contextId 按 A2A message/send 规范放 params(仅存在时携带;gateway 实测
+  // 返回的 result.contextId 即此字段,跨任务续传上下文)。
+  if (opts.contextId) {
+    params.contextId = opts.contextId;
+  }
 
   // 超时用 AbortController 中止在途请求,与 runExecutor 的 SIGKILL 语义一致。
   const controller = new AbortController();
@@ -57,12 +72,7 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
           jsonrpc: "1.0",
           id: `coagenthub-${Date.now()}`,
           method: "message/send",
-          params: {
-            message: {
-              role: "user",
-              parts: [{ kind: "text", text: prompt }],
-            },
-          },
+          params,
         }),
         signal: controller.signal,
       });
@@ -107,11 +117,13 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
         typeof err?.message === "string"
           ? err.message
           : JSON.stringify(payload.error);
+      const errCtx = resultContextId(payload.result);
       return {
         code: 1,
         stdout: "",
         stderr: `A2A JSON-RPC 错误: ${msg}`,
         timedOut: false,
+        ...(errCtx ? { contextId: errCtx } : {}),
       };
     }
 
@@ -126,18 +138,35 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
       state === "completed" ||
       state === "task_state_completed" ||
       state.endsWith("_completed");
+    // 失败也携带 contextId:gateway 在非完成状态同样会返回新 contextId,
+    // 供下一任务延续(executor-task 在 failed 路径同样落库)。
+    const ctx = resultContextId(payload.result);
     if (!completed) {
       return {
         code: 1,
         stdout: "",
         stderr: reply || `A2A 任务状态: ${state}`,
         timedOut: false,
+        ...(ctx ? { contextId: ctx } : {}),
       };
     }
-    return { code: 0, stdout: reply, stderr: "", timedOut: false };
+    return {
+      code: 0,
+      stdout: reply,
+      stderr: "",
+      timedOut: false,
+      ...(ctx ? { contextId: ctx } : {}),
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** 取响应 result 里的 contextId(A2A 规范 Task/Message 可携带;无则返回空串)。 */
+function resultContextId(result: unknown): string {
+  if (!result || typeof result !== "object") return "";
+  const r = result as Record<string, unknown>;
+  return typeof r.contextId === "string" ? r.contextId : "";
 }
 
 /** 取 participant 最终回复文本:兼容 result.message、result.status.message 与 result
