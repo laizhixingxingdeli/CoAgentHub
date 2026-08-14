@@ -191,8 +191,8 @@ const cooldownTimers = new Map<string, NodeJS.Timeout>();
 /* ---------------- 实时输出缓冲(实时进度 feature) ---------------- */
 
 /** running 任务最近输出的环形缓冲上限:200 行 / 64KB,超限保留尾部。 */
-const OUTPUT_TAIL_MAX_LINES = 200;
-const OUTPUT_TAIL_MAX_BYTES = 64 * 1024;
+const OUTPUT_TAIL_MAX_LINES = 1000;
+const OUTPUT_TAIL_MAX_BYTES = 256 * 1024;
 
 /** running 任务的输出缓冲(taskId → 最近输出全文,任务结束释放)。 */
 const runningOutputs = new Map<string, string>();
@@ -951,8 +951,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           : parseTaskReport(output);
         const diffSummary: Record<string, unknown> = { ...report };
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
-        // 完成回填:最近 50 行输出写进 diffSummary.outputTail(之后不依赖内存)。
-        const doneTail = lastLinesOf(taskOutputTail(taskId) ?? "", 50);
+        // 完成回填:最近 500 行输出写进 diffSummary.outputTail(之后不依赖内存)。
+        const doneTail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
         if (doneTail) diffSummary.outputTail = doneTail;
         await endAttempt(run, {
           status: "done",
@@ -1095,7 +1095,7 @@ async function failTask(
 ): Promise<void> {
   const diffSummary: Record<string, unknown> = { error: reason };
   if (retries > 0) diffSummary.retries = retries;
-  const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 50);
+  const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
   if (tail) diffSummary.outputTail = tail;
   await db
     .update(taskTable)
@@ -1467,6 +1467,6 @@ function legacyExtractSummary(clean: string): string {
   }
   const slice = start >= 0 ? lines.slice(start) : lines.slice(-15);
   let out = slice.join("\n").trim();
-  if (out.length > 2000) out = out.slice(0, 2000) + "\n…(截断)";
+  if (out.length > 20000) out = out.slice(0, 20000) + "\n…(截断)";
   return out;
 }

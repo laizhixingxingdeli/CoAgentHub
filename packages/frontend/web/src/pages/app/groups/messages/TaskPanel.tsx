@@ -176,7 +176,7 @@ function LiveOutput({ text }: { text: string }): ReactElement {
     <pre
       ref={ref}
       data-testid="task-live-output"
-      className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 px-2 py-1.5 font-mono text-xs leading-relaxed text-slate-100"
+      className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 px-2 py-1.5 font-mono text-xs leading-relaxed text-slate-100"
     >
       {text || (
         <span className="text-slate-500">{t("tasks.output.empty")}</span>
