@@ -505,4 +505,157 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("a2a 上下文按群隔离:同执行器不同群互不串", async () => {
+    // win-hermes(memory=per-group)同时加入两个群;群 A 返回 ctx-a,群 B 的
+    // 首次任务不应携带 ctx-a(按群隔离),群 A 的下一次任务仍携带 ctx-a。
+    const calls: Array<{ params: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn(async (_input: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        params: {
+          message: { parts: Array<{ kind: string; text: string }> };
+        };
+      };
+      calls.push(body);
+      const result: Record<string, unknown> = {
+        message: {
+          role: "participant",
+          parts: [{ kind: "text", text: "ACAT-WIN-OK" }],
+        },
+        state: { state: "completed" },
+        contextId: body.params.message.parts[0].text.includes("群B")
+          ? "ctx-b"
+          : "ctx-a",
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "1.0", id: "1", result }),
+        text: async () => "",
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const coordinator = await registerParticipant({
+        name: "coord-a2a-iso",
+      });
+      const winHermes = await registerParticipant({
+        name: "Win Hermes",
+      });
+      const groupA = await createGroup(coordinator.id, "a2a 群A");
+      const groupB = await createGroup(coordinator.id, "a2a 群B");
+      await addMember(coordinator.id, groupA.id, winHermes.id, ["executor"]);
+      await addMember(coordinator.id, groupB.id, winHermes.id, ["executor"]);
+
+      // 群 A 任务一:无历史 → 不带 contextId,返回 ctx-a → 落库。
+      const a1 = await postMessage(coordinator.id, groupA.id, {
+        body: "群A任务一",
+        audience: "participant",
+        audienceRef: winHermes.id,
+      });
+      const taskA1 = await waitForTask(coordinator.id, groupA.id, a1.id);
+      expect(taskA1.status).toBe("done");
+      expect(taskA1.a2aContextId).toBe("ctx-a");
+      expect(calls[0]?.params.contextId).toBeUndefined();
+
+      // 群 B 任务一:虽同执行器,但群 A 的 ctx-a 不应串过来 → 无 contextId。
+      const b1 = await postMessage(coordinator.id, groupB.id, {
+        body: "群B任务一",
+        audience: "participant",
+        audienceRef: winHermes.id,
+      });
+      const taskB1 = await waitForTask(coordinator.id, groupB.id, b1.id);
+      expect(taskB1.status).toBe("done");
+      expect(taskB1.a2aContextId).toBe("ctx-b");
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.params.contextId).toBeUndefined();
+
+      // 群 A 任务二:本群延续,携带 ctx-a。
+      const a2 = await postMessage(coordinator.id, groupA.id, {
+        body: "群A任务二",
+        audience: "participant",
+        audienceRef: winHermes.id,
+      });
+      const taskA2 = await waitForTask(coordinator.id, groupA.id, a2.id);
+      expect(taskA2.status).toBe("done");
+      expect(calls).toHaveLength(3);
+      expect(calls[2]?.params.contextId).toBe("ctx-a");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a2a 无 memory 标记的执行器:从不携带/回写 contextId", async () => {
+    // 通过 API 新增一个 kind=a2a、不带 memory 的普通执行器,连续两次任务
+    // 都不应携带 contextId,返回的 contextId 也不落库(任务书自包含)。
+    const createRes = await app.request("/api/executors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentName: "Plain A2A",
+        kind: "a2a",
+        url: "http://127.0.0.1:9911/",
+        bin: "plain-a2a",
+      }),
+    });
+    expect(createRes.status).toBe(200);
+
+    const calls: Array<{ params: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn(async (_input: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        params: Record<string, unknown>;
+      };
+      calls.push(body);
+      const result: Record<string, unknown> = {
+        message: {
+          role: "participant",
+          parts: [{ kind: "text", text: "ACAT-WIN-OK" }],
+        },
+        state: { state: "completed" },
+        contextId: "ctx-plain",
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "1.0", id: "1", result }),
+        text: async () => "",
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const coordinator = await registerParticipant({
+        name: "coord-a2a-plain",
+      });
+      const plain = await registerParticipant({
+        name: "Plain A2A",
+      });
+      const group = await createGroup(coordinator.id, "a2a 普通执行器");
+      await addMember(coordinator.id, group.id, plain.id, ["executor"]);
+
+      const m1 = await postMessage(coordinator.id, group.id, {
+        body: "任务一",
+        audience: "participant",
+        audienceRef: plain.id,
+      });
+      const task1 = await waitForTask(coordinator.id, group.id, m1.id);
+      expect(task1.status).toBe("done");
+      expect(task1.a2aContextId).toBeNull(); // gateway 返回了 ctx,但无 memory 不回写
+      expect(calls[0]?.params.contextId).toBeUndefined();
+
+      // 第二次任务:上一任务已有 a2aContextId?没有 —— 但即使 gateway 返回过,
+      // 未落库,所以查不到;且无 memory 标记不查。断言第二次也不带。
+      const m2 = await postMessage(coordinator.id, group.id, {
+        body: "任务二",
+        audience: "participant",
+        audienceRef: plain.id,
+      });
+      const task2 = await waitForTask(coordinator.id, group.id, m2.id);
+      expect(task2.status).toBe("done");
+      expect(task2.a2aContextId).toBeNull();
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.params.contextId).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -54,9 +54,14 @@ const CreateExecutorSchema = z
     device: z.string().max(100).optional(),
     /** 执行器默认模型(args 模板 {model} 占位);可空。 */
     model: z.string().max(200).nullable().optional(),
+    /** 记忆模式:仅 "per-group" 启用按群 contextId 延续;缺省无记忆。 */
+    memory: z.enum(["per-group"]).nullable().optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
     message: "kind=a2a 需要 url,kind=cli 需要 bin",
+  })
+  .refine((v) => v.memory === undefined || v.kind === "a2a", {
+    message: "memory 仅对 kind=a2a 执行器生效",
   });
 
 const app2 = app
@@ -76,7 +81,8 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const input = c.req.valid("json");
-      const { agentName, kind, bin, url, args, label, device, model } = input;
+      const { agentName, kind, bin, url, args, label, device, model, memory } =
+        input;
       // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
       const type = input.type ?? "custom";
 
@@ -111,6 +117,7 @@ const app2 = app
         label: label ?? agentName,
         device,
         model,
+        memory,
       };
 
       await addExecutorConfig(db, config);
@@ -142,6 +149,7 @@ const app2 = app
         label: config.label,
         device: device ?? null,
         model: model ?? null,
+        memory: memory ?? null,
       });
     },
   )
@@ -171,6 +179,7 @@ const app2 = app
           args: ex.args,
           label: ex.label,
           model: ex.model ?? null,
+          memory: ex.memory ?? null,
           builtin: isBuiltinExecutorKey(ex.key),
         })),
       );
@@ -230,6 +239,7 @@ const app2 = app
           label: z.string().max(100).optional(),
           // null = 清空(与 POST 缺省归一为 null 一致)。
           model: z.string().max(200).nullable().optional(),
+          memory: z.enum(["per-group"]).nullable().optional(),
           device: z.string().max(100).nullable().optional(),
         })
         .refine(
@@ -239,6 +249,7 @@ const app2 = app
             v.args !== undefined ||
             v.label !== undefined ||
             v.model !== undefined ||
+            v.memory !== undefined ||
             v.device !== undefined,
           { message: "at least one field to update is required" },
         ),
@@ -263,6 +274,15 @@ const app2 = app
         throw new BizError(BizCodeEnum.ExecutorNotFound);
       }
 
+      // memory 仅对 kind=a2a 执行器生效(cli 无 contextId 延续,设了也是静默
+      // 无效,直接拒绝避免误导)。
+      if (input.memory !== undefined && existing.kind !== "a2a") {
+        throw new BizError(
+          BizCodeEnum.InvalidRequest,
+          "memory 仅对 kind=a2a 执行器生效",
+        );
+      }
+
       // 改名唯一性:内置 + DB 已有同名 participant 都算重复(与 POST 同判重)。
       if (
         input.agentName !== undefined &&
@@ -285,6 +305,7 @@ const app2 = app
         args: input.args,
         label: input.label,
         model: input.model,
+        memory: input.memory,
       });
       if (!updated) {
         throw new BizError(BizCodeEnum.ExecutorNotFound);
@@ -309,6 +330,7 @@ const app2 = app
         args: updated.args,
         label: updated.label,
         model: updated.model ?? null,
+        memory: updated.memory ?? null,
         builtin: false,
       });
     },

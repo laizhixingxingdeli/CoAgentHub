@@ -103,6 +103,12 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(builtin).toBeTruthy();
     expect(builtin!.builtin).toBe(true);
 
+    // win-hermes 默认 memory="per-group"(协调器按群记忆);其他执行器无记忆。
+    const winHermes = list.find((x) => x.key === "win-hermes");
+    expect(winHermes?.memory).toBe("per-group");
+    expect(builtin!.memory).toBe(null);
+    expect(builtin).not.toHaveProperty("token");
+
     const added = list.find((x) => x.key === "cli-tester");
     expect(added).toBeTruthy();
     expect(added!.builtin).toBe(false);
@@ -249,6 +255,53 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(item!.model).toBe("deepseek-v4-flash");
   });
 
+  it("POST 携带 memory=per-group 持久化,GET 返回 memory", async () => {
+    const res = await createExecutor({
+      agentName: "Memory Executor",
+      kind: "a2a",
+      url: "http://gw.test/",
+      bin: "memory-executor",
+      args: [],
+      memory: "per-group",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.memory).toBe("per-group");
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "memory-executor");
+    expect(item!.memory).toBe("per-group");
+  });
+
+  it("POST kind=cli 携带 memory → 400(memory 仅对 a2a 生效)", async () => {
+    const res = await createExecutor({
+      agentName: "Cli Memory Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+      memory: "per-group",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST 不带 memory → 响应与 GET 均为 null(默认无记忆)", async () => {
+    const res = await createExecutor({
+      agentName: "No Memory Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.memory).toBe(null);
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "no-memory-executor");
+    expect(item!.memory).toBe(null);
+  });
+
   it("PATCH /api/executors/:key 部分更新 bin/args/model/device 生效(GET 验证)", async () => {
     const created = await createExecutor({
       agentName: "Patch Target",
@@ -342,5 +395,54 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       body: JSON.stringify({ agentName: "Model Executor" }),
     });
     expect(res.status).toBe(409);
+  });
+
+  it("PATCH memory 设置/清空生效(GET 验证;仅 a2a 执行器)", async () => {
+    // memory 仅对 a2a 生效:先建一个 a2a 执行器再 PATCH。
+    const created = await createExecutor({
+      agentName: "Patch A2A",
+      kind: "a2a",
+      url: "http://gw.test/",
+      bin: "patch-a2a",
+      args: [],
+    });
+    expect(created.status).toBe(200);
+
+    // 先设 memory=per-group
+    const setRes = await app.request("/api/executors/patch-a2a", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memory: "per-group" }),
+    });
+    expect(setRes.status).toBe(200);
+    const setBody = (await setRes.json()) as Record<string, unknown>;
+    expect(setBody.memory).toBe("per-group");
+
+    let listRes = await app.request("/api/executors");
+    let list = (await listRes.json()) as Array<Record<string, unknown>>;
+    expect(list.find((x) => x.key === "patch-a2a")!.memory).toBe("per-group");
+
+    // 再清空(null = 无记忆)
+    const clearRes = await app.request("/api/executors/patch-a2a", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memory: null }),
+    });
+    expect(clearRes.status).toBe(200);
+    const clearBody = (await clearRes.json()) as Record<string, unknown>;
+    expect(clearBody.memory).toBe(null);
+
+    listRes = await app.request("/api/executors");
+    list = (await listRes.json()) as Array<Record<string, unknown>>;
+    expect(list.find((x) => x.key === "patch-a2a")!.memory).toBe(null);
+  });
+
+  it("PATCH kind=cli 执行器设 memory → 400(memory 仅对 a2a 生效)", async () => {
+    const res = await app.request("/api/executors/patch-target", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memory: "per-group" }),
+    });
+    expect(res.status).toBe(400);
   });
 });

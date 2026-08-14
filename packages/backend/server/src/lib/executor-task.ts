@@ -772,35 +772,41 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 不打快照(远端设备执行,本地快照无意义),body 直接当 prompt 发 gateway。
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
     const isA2a = ex.kind === "a2a";
+    // 记忆开关:仅 memory="per-group" 的协调器启用 contextId 延续(查/回写);
+    // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
+    // 声明在分支外:完成路径(回写)同样需要判断,不能只在 a2a 分支内定义。
+    const memoryPerGroup = isA2a && ex.memory === "per-group";
     let handle: { promise: Promise<ExecutorRunResult>; kill: () => void };
     if (isA2a) {
       const a2aUrl = ex.a2a?.url ?? "";
       console.log(
         `[executor] a2a 调用: ${a2aUrl} (participant=${ex.agentName}, group=${run.groupKey}, task=${taskId})`,
       );
-      // A2A 上下文延续:取该执行器最近一个非 cancelled 任务返回的
-      // a2a_context_id(按 updated_at desc),作为本次入参;无则不携带。
-      // 仅 a2a 执行器(win-hermes)查;CLI 执行器不走此分支。上下文按执行器
-      // 共享(不做按群隔离——票面范围即"按执行器即可"),同一执行器的连续
-      // 任务跨群延续上下文,远端 participant 视为全局记忆。
+      // A2A 上下文延续:按 (executorKey, groupId) 查——该执行器在**本群**
+      // 最近一个非 cancelled 任务返回的 a2a_context_id(按 updated_at desc),
+      // 作为本次入参;无则不携带。按群隔离:同一执行器在不同群各自延续,
+      // 跨群不串。记忆只是加速器,验收不依赖记忆(任务书自包含)。
       let prevContextId: string | undefined;
-      try {
-        const prevTask = await db.query.task.findFirst({
-          where: and(
-            eq(taskTable.executorKey, ex.key),
-            ne(taskTable.status, "cancelled"),
-            isNotNull(taskTable.a2aContextId),
-          ),
-          orderBy: (t, { desc }) => [desc(t.updatedAt)],
-          columns: { a2aContextId: true },
-        });
-        prevContextId = prevTask?.a2aContextId ?? undefined;
-      } catch (e) {
-        // 上下文查询失败只影响延续,不影响本次执行:告警后不带 contextId 继续
-        // (与下方回写同样容错,避免 DB 抖动把任务永久置 failed)。
-        console.warn(
-          `[executor] 查 a2a_context_id 失败(${taskId}),本次不带上下文: ${e}`,
-        );
+      if (memoryPerGroup) {
+        try {
+          const prevTask = await db.query.task.findFirst({
+            where: and(
+              eq(taskTable.executorKey, ex.key),
+              eq(taskTable.groupId, groupId),
+              ne(taskTable.status, "cancelled"),
+              isNotNull(taskTable.a2aContextId),
+            ),
+            orderBy: (t, { desc }) => [desc(t.updatedAt)],
+            columns: { a2aContextId: true },
+          });
+          prevContextId = prevTask?.a2aContextId ?? undefined;
+        } catch (e) {
+          // 上下文查询失败只影响延续,不影响本次执行:告警后不带 contextId 继续
+          // (与下方回写同样容错,避免 DB 抖动把任务永久置 failed)。
+          console.warn(
+            `[executor] 查 a2a_context_id 失败(${taskId}),本次不带上下文: ${e}`,
+          );
+        }
       }
       handle = {
         promise: runA2AExecutor({
@@ -911,8 +917,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         return;
       }
       // A2A 上下文延续:gateway 返回的新 contextId 落库(done/failed 都写;
-      // 超时/网络错误无 contextId 自然不写),供该执行器的下一任务携带。
-      if (isA2a && result.contextId) {
+      // 超时/网络错误无 contextId 自然不写),供该执行器**本群**的下一任务
+      // 携带。仅 memory="per-group" 的协调器回写;纯粹执行器不回写(任务书
+      // 自包含,无记忆)。
+      if (memoryPerGroup && result.contextId) {
         try {
           await db
             .update(taskTable)

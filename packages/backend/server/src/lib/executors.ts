@@ -44,6 +44,13 @@ export interface ExecutorConfig {
    * 其他设备上的 participant(如 Windows 上的 hermes),server 不 spawn 本地进程。
    */
   kind?: "cli" | "a2a";
+  /**
+   * 记忆模式(可选):仅 "per-group" 启用跨任务上下文延续 —— a2a 调用前查
+   * 该 (执行器, 群) 最近非 cancelled 任务的 a2a_context_id,调用后回写新
+   * contextId;按群隔离,跨群不串。缺省 = 无记忆:任务书自包含,每次任务
+   * 独立执行,从不携带/回写 contextId。记忆只是加速器,验收不依赖记忆。
+   */
+  memory?: "per-group";
   /** a2a 的 gateway 基地址(DB 配置存 url 列,与 a2a.url 并存;runner 读 a2a.url)。 */
   url?: string;
   /** kind="a2a" 时的 gateway 信息;token 从 env 读(COAGENTHUB_WIN_A2A_TOKEN),不硬编码。 */
@@ -103,6 +110,9 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     label: "win-hermes",
     args: [],
     kind: "a2a",
+    // 协调器:开启按群记忆(a2a 跨任务按群延续 contextId)。纯粹执行器保持
+    // 无记忆(任务书自包含,每次任务独立执行)。
+    memory: "per-group",
     a2a: {
       url: "http://192.168.31.180:9900/",
       token: "",
@@ -230,6 +240,8 @@ export interface AddExecutorConfigInput {
   label?: string;
   /** 执行器默认模型(args 模板 {model} 占位);可选,null 表示清空。 */
   model?: string | null;
+  /** 记忆模式:仅 "per-group" 启用按群 contextId 延续;null 表示无记忆。 */
+  memory?: "per-group" | null;
 }
 
 /** 插入一条 DB 执行器配置并返回整行。 */
@@ -249,6 +261,7 @@ export async function addExecutorConfig(
       args: input.args ?? [],
       label: input.label ?? input.agentName,
       model: input.model ?? null,
+      memory: input.memory ?? null,
     })
     .returning();
   return row;
@@ -279,6 +292,7 @@ function rowToConfig(row: ExecutorConfigRow): ExecutorConfig {
     url: row.url ?? undefined,
   };
   if (row.model != null) base.model = row.model;
+  if (row.memory === "per-group") base.memory = row.memory;
   if (base.kind === "a2a") {
     base.a2a = { url: row.url ?? "", token: "" };
   }
@@ -295,7 +309,7 @@ export async function updateExecutorConfig(
   patch: Partial<
     Pick<
       AddExecutorConfigInput,
-      "agentName" | "bin" | "args" | "label" | "model"
+      "agentName" | "bin" | "args" | "label" | "model" | "memory"
     >
   >,
 ): Promise<ExecutorConfigRow | undefined> {
@@ -305,6 +319,7 @@ export async function updateExecutorConfig(
   if (patch.args !== undefined) values.args = patch.args;
   if (patch.label !== undefined) values.label = patch.label;
   if (patch.model !== undefined) values.model = patch.model ?? null;
+  if (patch.memory !== undefined) values.memory = patch.memory ?? null;
 
   const [row] = await db
     .update(executorConfigTable)

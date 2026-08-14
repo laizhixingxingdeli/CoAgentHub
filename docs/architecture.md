@@ -153,7 +153,15 @@ CoAgentHub/
   管理);participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
 - 任务:定向消息命中执行器 → task(queued)→ 全局串行队列 → spawn(CLI 或 A2A)
   → git 快照(checkpointRef)→ done/failed;默认超时 120 分钟(EXECUTOR_TIMEOUT_MS)。
-- 执行器永远新鲜上下文(每次新进程,无记忆);记忆只属于协调型 participant(assistant)。
+- **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收
+  不依赖记忆。纯粹执行器(无 `memory` 标记)保持新鲜上下文,每次任务独立执行。
+- **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用
+  a2a 跨任务 contextId 延续——调用前按 (executorKey, groupId) 取本群最近非 cancelled
+  任务的 `a2a_context_id`,调用后回写;按群隔离,跨群不串。记忆只是加速器,缺失/失败
+  只影响延续,不影响任务执行本身。
+  - API 侧 `memory` 仅对 `kind=a2a` 生效(POST/PATCH 对 cli 拒绝);升级前已在 DB 注册
+    的 a2a 执行器默认无记忆(行为变更:不再延续上下文),如需延续请显式 PATCH
+    `memory="per-group"`。
 
 ## 10. 消息搜索与分组
 

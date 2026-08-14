@@ -33,6 +33,9 @@ export const executorConfig = pgTable("executor_config", {
   label: text("label").notNull(),
   // 执行器默认模型(args 模板可用 {model} 占位;无 model 时该参数项被移除)。
   model: text("model"),
+  // 记忆模式:null=无记忆(任务书自包含,纯执行);"per-group"=按群记忆
+  // (a2a 执行器跨任务按群延续 contextId,记忆只是加速器,验收不依赖记忆)。
+  memory: text("memory"),
   ...timeColumns("both"),
 });
 
