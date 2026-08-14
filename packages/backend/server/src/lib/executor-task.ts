@@ -22,6 +22,19 @@
  * queued/running 的任务自动恢复为 failed(附原因 server-restart),不自动重跑
  * (保持简单,队列是内存态,持久化只做失败兜底)。
  *
+ * 可靠性保障(票5):两道超时兜底,全部 server 内实现(执行器是外部 CLI 不改)。
+ *  - 认领超时:任务入队后超过 claimTimeoutMinutes(默认 30)仍未进入 running
+ *    → 标 failed(「任务未被认领」)+ ❌ 回传(注明发布时间)。认领起点用入队
+ *    时刻(内存记录),不依赖 DB created_at(重新执行的任务以本次入队为准)。
+ *  - 静默超时:running 任务连续无 stdout/stderr 输出超过 stallTimeoutMinutes
+ *    (默认 30)→ 标 failed(「执行器静默超时」)+ ❌ 回传。onOutput 每次输出
+ *    刷新时间戳并重排定时器;仅 CLI 路径(本地进程才有输出可观察),a2a 不设。
+ *  - 进程层:执行器进程死亡由 runExecutor 的 promise 完成路径统一处理(进程
+ *    退出 → close 事件 → promise resolve → 非零 code 走 failed),无需额外逻辑。
+ *  - 停止指令优先:run.stopped 的任务不受静默/认领超时影响(超时处理函数直接
+ *    跳过,完成路径 stopped → cancelled)。
+ * 阈值并入 scripts/dispatch-policy.json,server 启动时读取(缺省兜底 30)。
+ *
  * 状态回传保持桥现有 emoji 状态条格式:📋 排队 / 🚀 开始执行 / ✅ 完成 /
  * ❌ 失败 / 🛑 停止,contentType=task_status 由前缀判定,与桥的
  * contentTypeFor 一致。
@@ -91,6 +104,18 @@ interface QueuedRun {
   kill: (() => void) | null;
   /** 停止指令已终止本任务(完成回调不再回传 ❌,改置 cancelled)。 */
   stopped: boolean;
+  /** 入队时间(ms,认领超时起点;重新执行的任务以本次入队时间为准)。 */
+  createdAt: number;
+  /** 进入 running 的时间(ms);尚未开始为 null。 */
+  runningAt: number | null;
+  /** 最近一次 stdout/stderr 输出的时间(ms);静默检测用。 */
+  lastOutputAt: number;
+  /** 认领超时定时器(入队时调度,进入 running 时取消)。 */
+  claimTimer: NodeJS.Timeout | null;
+  /** 静默超时定时器(spawn 时调度,每次输出重排);a2a 无本地进程不调度。 */
+  stallTimer: NodeJS.Timeout | null;
+  /** 静默超时已触发(完成回调不再重复回传 ❌)。 */
+  stalled: boolean;
 }
 
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
@@ -113,6 +138,12 @@ const groupQueues = new Map<string, GroupQueue>();
 /** 最大并行组数:server 启动时从 scripts/dispatch-policy.json 读取。 */
 let maxParallelGroups = readDispatchPolicy().maxParallelGroups;
 
+/** 静默超时阈值(ms):running 连续无输出超过即失败;启动时读配置,缺省 30min。 */
+let stallTimeoutMs = readDispatchPolicy().stallTimeoutMinutes * 60_000;
+
+/** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
+let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
+
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 let pumping = false;
 
@@ -121,6 +152,18 @@ export function queuedExecutorTaskCount(): number {
   let n = 0;
   for (const g of groupQueues.values()) n += g.queue.length;
   return n;
+}
+
+/** 取消单个 run 的认领/静默定时器(幂等;停止/完成/重置时调用)。 */
+function clearRunTimers(run: QueuedRun): void {
+  if (run.claimTimer) {
+    clearTimeout(run.claimTimer);
+    run.claimTimer = null;
+  }
+  if (run.stallTimer) {
+    clearTimeout(run.stallTimer);
+    run.stallTimer = null;
+  }
 }
 
 /**
@@ -132,16 +175,33 @@ export function __resetExecutorQueueForTests(): void {
     if (g.running) {
       g.running.stopped = true;
       g.running.kill?.();
+      clearRunTimers(g.running);
     }
+    for (const q of g.queue) clearRunTimers(q);
     g.queue.length = 0;
   }
   groupQueues.clear();
-  maxParallelGroups = readDispatchPolicy().maxParallelGroups;
+  const policy = readDispatchPolicy();
+  maxParallelGroups = policy.maxParallelGroups;
+  stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
+  claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
 }
 
 /** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
 export function __setMaxParallelGroupsForTests(n: number): void {
   maxParallelGroups = Math.max(1, Math.floor(n));
+}
+
+/**
+ * 测试专用:覆盖静默/认领超时阈值(默认读 scripts/dispatch-policy.json,
+ * 单位 ms)。测试用 100ms 级小阈值避免拖慢测试,与配置单位(分钟)无关。
+ */
+export function __setReliabilityTimeoutsForTests(
+  stallMs: number,
+  claimMs: number,
+): void {
+  stallTimeoutMs = Math.max(1, Math.floor(stallMs));
+  claimTimeoutMs = Math.max(1, Math.floor(claimMs));
 }
 
 /** 当前运行中的组数(组槽位占用数)。 */
@@ -233,6 +293,7 @@ export function stopRunningTask(taskId?: string): Array<{
         participantId: q.participantId,
         ex: q.ex,
       });
+      clearRunTimers(q);
       void markTaskCancelled(q.db, q.taskId, q.groupId);
     }
     g.queue.length = 0;
@@ -240,11 +301,13 @@ export function stopRunningTask(taskId?: string): Array<{
   }
 
   // 运行中任务:taskId 缺省 → 全部终止;指定 → 仅当其 running 才终止(跨组)。
+  // 停止优先于超时:清理定时器后,静默/认领超时不会再对已停止任务生效。
   for (const g of groupQueues.values()) {
     const r = g.running;
     if (r && (!taskId || r.taskId === taskId)) {
       r.stopped = true;
       r.kill?.();
+      clearRunTimers(r);
       stopped.push({
         taskId: r.taskId,
         participantId: r.participantId,
@@ -405,7 +468,7 @@ async function dispatchTask(
     );
   }
 
-  group.queue.push({
+  const run: QueuedRun = {
     db,
     groupId,
     messageId,
@@ -419,7 +482,20 @@ async function dispatchTask(
     projectPath,
     kill: null,
     stopped: false,
-  });
+    // 认领超时起点:入队时刻(重新执行的任务也以本次入队为准,与 DB
+    // created_at 解耦——DB 时间是首次发布,重试场景会误判超时)。
+    createdAt: Date.now(),
+    runningAt: null,
+    lastOutputAt: 0,
+    claimTimer: null,
+    stallTimer: null,
+    stalled: false,
+  };
+  group.queue.push(run);
+
+  // 认领超时定时器:超过 claimTimeoutMs 仍未进入 running → 标 failed。
+  // 进入 running 时(runOne)取消;任务出队/停止时同步清理。
+  run.claimTimer = setTimeout(() => handleClaimTimeout(run), claimTimeoutMs);
   void pumpQueue();
 }
 
@@ -469,9 +545,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 在此中止,不再 spawn,直接置 cancelled。
     if (run.stopped) {
       console.log(`[executor] 任务已在 spawn 前被停止: ${taskId}`);
+      clearRunTimers(run);
       await markTaskCancelled(db, taskId, groupId);
       return;
     }
+
+    // 进入 running = 任务被认领:取消认领超时定时器,记录认领时刻。
+    if (run.claimTimer) {
+      clearTimeout(run.claimTimer);
+      run.claimTimer = null;
+    }
+    run.runningAt = Date.now();
 
     // queued → running(尽力而为;失败不阻塞执行,终态仍会回写)。
     try {
@@ -578,8 +662,18 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         onOutput: (chunk) => {
           // 流式日志:便于后续回传群(本轮先落 server 日志)。
           process.stdout.write(chunk);
+          // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
+          run.lastOutputAt = Date.now();
+          if (run.stallTimer) {
+            clearTimeout(run.stallTimer);
+            run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
+          }
         },
       });
+      // 静默超时起点:进程刚 spawn(输出可观察);之后每次输出重排定时器。
+      // a2a 无本地进程/增量输出,不设静默检测(完成路径由任务级超时兜底)。
+      run.lastOutputAt = Date.now();
+      run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
     }
     run.kill = handle.kill;
 
@@ -593,6 +687,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           .update(taskTable)
           .set({ status: "cancelled", diffSummary: { error: "stopped" } })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
+        return;
+      }
+      // 静默超时已在 handleStall 里置 failed + 回传 ❌(并 kill 进程组):
+      // 进程被终止后的 promise 完成路径不再重复回传/覆写终态。
+      if (run.stalled) {
+        console.log(`[executor] 任务已因静默超时失败: ${taskId}`);
         return;
       }
       if (result.timedOut) {
@@ -651,6 +751,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       );
     }
   } finally {
+    clearRunTimers(run);
     group.running = null;
     void pumpQueue();
   }
@@ -660,6 +761,62 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
   return db.query.task.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.messageId, messageId),
   });
+}
+
+/**
+ * 静默超时处理:running 任务连续无输出超过 stallTimeoutMs → kill 进程组 +
+ * 置 failed(「执行器静默超时」)+ ❌ 回传。同步置 stalled 后再 kill,保证进程
+ * 被终止后的 promise 完成路径能看到 stalled 并跳过(不重复回传)。
+ * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径)。
+ */
+function handleStall(run: QueuedRun): void {
+  if (run.stopped || run.stalled) return;
+  run.stalled = true;
+  if (run.stallTimer) {
+    clearTimeout(run.stallTimer);
+    run.stallTimer = null;
+  }
+  run.kill?.();
+  console.error(`[executor] 执行器静默超时: ${run.taskId}`);
+  void (async () => {
+    await failTask(run.db, run.taskId, "执行器静默超时");
+    await postStatus(
+      run.db,
+      run.groupId,
+      run.participantId,
+      run.ex,
+      `❌ [${run.ex.label}] 任务失败 (执行器静默超时)`,
+    );
+  })();
+}
+
+/**
+ * 认领超时处理:queued 任务超过 claimTimeoutMs 仍未进入 running → 移出队列 +
+ * 置 failed(「任务未被认领」)+ ❌ 回传(注明发布时间)。若任务已被 pump 取走
+ * 开始运行(认领完成),从队列找不到即放弃(定时器取消前已入队的回调兜底)。
+ * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径)。
+ */
+function handleClaimTimeout(run: QueuedRun): void {
+  if (run.stopped) return;
+  const g = groupQueues.get(run.groupKey);
+  if (g) {
+    const idx = g.queue.indexOf(run);
+    if (idx < 0) return; // 已被取走开始运行 → 认领完成,放弃。
+    g.queue.splice(idx, 1);
+  }
+  clearRunTimers(run);
+  const publishedAt = new Date(run.createdAt).toLocaleString("zh-CN");
+  console.error(`[executor] 任务未认领: ${run.taskId}`);
+  void (async () => {
+    await failTask(run.db, run.taskId, "任务未认领");
+    await postStatus(
+      run.db,
+      run.groupId,
+      run.participantId,
+      run.ex,
+      `❌ [${run.ex.label}] 任务失败 (未认领,发布于 ${publishedAt})`,
+    );
+  })();
 }
 
 /** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。 */

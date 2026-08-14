@@ -1,3 +1,5 @@
 {
-  "maxParallelGroups": 2
+  "maxParallelGroups": 2,
+  "stallTimeoutMinutes": 30,
+  "claimTimeoutMinutes": 30
 }

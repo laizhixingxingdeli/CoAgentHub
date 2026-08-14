@@ -239,16 +239,26 @@ export async function findExecutorByKey(
   return all.find((ex) => ex.key === key);
 }
 
-/* ---------------- 调度并行策略(dispatch-policy.json) ---------------- */
+/* ---------------- 调度策略(dispatch-policy.json) ---------------- */
 
-/** 调度并行策略:不同 project_path 的组可同时执行的上限。 */
+/** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)。 */
 export interface DispatchPolicy {
   /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
   maxParallelGroups: number;
+  /** 静默超时(分钟):running 任务连续无输出超过该值 → 视为失联,标 failed。 */
+  stallTimeoutMinutes: number;
+  /** 认领超时(分钟):queued 任务超过该值仍未进入 running → 标 failed。 */
+  claimTimeoutMinutes: number;
 }
 
 /** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
 const DEFAULT_MAX_PARALLEL_GROUPS = 2;
+
+/** 默认静默超时(分钟);缺失/非法时兜底。 */
+export const DEFAULT_STALL_TIMEOUT_MINUTES = 30;
+
+/** 默认认领超时(分钟);缺失/非法时兜底。 */
+export const DEFAULT_CLAIM_TIMEOUT_MINUTES = 30;
 
 /** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
 function resolveDispatchPolicyFile(): string {
@@ -258,23 +268,47 @@ function resolveDispatchPolicyFile(): string {
   );
 }
 
+/** 数值字段解析:正整数才生效,否则用给定默认值。 */
+function positiveInt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 ? n : fallback;
+}
+
 /**
- * 读取调度并行策略(server 启动时调用):scripts/dispatch-policy.json 随代码
+ * 读取调度策略(server 启动时调用):scripts/dispatch-policy.json 随代码
  * 版本化,缺失/损坏/数值非法时回退默认值(不因配置问题阻塞启动)。
  */
 export function readDispatchPolicy(): DispatchPolicy {
   try {
     const raw = JSON.parse(
       readFileSync(resolveDispatchPolicyFile(), "utf8"),
-    ) as { maxParallelGroups?: unknown };
-    const n = Number(raw.maxParallelGroups);
-    if (Number.isInteger(n) && n >= 1) {
-      return { maxParallelGroups: n };
-    }
+    ) as {
+      maxParallelGroups?: unknown;
+      stallTimeoutMinutes?: unknown;
+      claimTimeoutMinutes?: unknown;
+    };
+    return {
+      maxParallelGroups: positiveInt(
+        raw.maxParallelGroups,
+        DEFAULT_MAX_PARALLEL_GROUPS,
+      ),
+      stallTimeoutMinutes: positiveInt(
+        raw.stallTimeoutMinutes,
+        DEFAULT_STALL_TIMEOUT_MINUTES,
+      ),
+      claimTimeoutMinutes: positiveInt(
+        raw.claimTimeoutMinutes,
+        DEFAULT_CLAIM_TIMEOUT_MINUTES,
+      ),
+    };
   } catch {
     // 文件缺失/不可读/非 JSON → 默认。
   }
-  return { maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS };
+  return {
+    maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS,
+    stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
+    claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
+  };
 }
 
 /** 状态文件路径:env EXECUTOR_STATE_FILE 可覆盖(测试写临时目录,避免污染

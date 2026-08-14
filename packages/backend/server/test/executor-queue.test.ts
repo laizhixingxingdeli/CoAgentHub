@@ -24,6 +24,11 @@ import { afterAll, describe, expect, it } from "vitest";
  * project_path)任务可与项目组并行;「停止」kill 进程组(task → cancelled +
  * 🛑 回传);「回滚 <taskId>」恢复工作区(task → failed + ✅ 回传);重启兜底
  * queued/running → failed。
+ *
+ * 可靠性保障(票5):静默超时(无输出假 bin → failed + ❌ 含「静默」;持续输出
+ * 不误杀)、认领超时(占满槽位后排队任务 → failed + ❌ 含「未认领」;已 running
+ * 不受认领阈值影响)、停止任务不被超时误伤。阈值经 __setReliabilityTimeoutsForTests
+ * 调小到 100ms 级,避免拖慢测试。
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queue-bin-"));
@@ -33,6 +38,16 @@ writeFileSync(
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_SLEEP_SECS" ]; then sleep "$FAKE_SLEEP_SECS"; fi',
+    // 持续输出模式(静默检测测试用):每 FAKE_OUTPUT_INTERVAL_MS 秒输出一行,
+    // 共 FAKE_OUTPUT_LOOPS 行;总时长超过 stall 阈值但输出间隔小于阈值 → 不误杀。
+    'if [ -n "$FAKE_OUTPUT_LOOPS" ]; then',
+    "  i=0",
+    '  while [ "$i" -lt "$FAKE_OUTPUT_LOOPS" ]; do',
+    '    echo "tick $i"',
+    '    sleep "$FAKE_OUTPUT_INTERVAL_MS"',
+    "    i=$((i + 1))",
+    "  done",
+    "fi",
     'if [ -n "$FAKE_APPEND" ]; then echo "task-modified" >> "$COAGENTHUB_REPO_ROOT/hello.txt"; fi',
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:修改完成"',
@@ -655,6 +670,185 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       expect(t?.status).toBe("failed");
       const diff = t?.diffSummary as Record<string, unknown> | null;
       expect(diff?.error).toBe("server-restart");
+    }
+  }, 30_000);
+
+  it("静默超时:无输出的假 bin 超过 stall 阈值 → failed + ❌ 回传(原因含「静默」)", async () => {
+    // 阈值调小(100ms)避免拖慢测试;假 bin 长睡 60s 零输出 → 静默超时杀进程。
+    process.env.FAKE_SLEEP_SECS = "60";
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setReliabilityTimeoutsForTests(100, 100);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "静默任务(无输出)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("静默");
+      // 群里出现 ❌ 静默超时回传(失败原因写进消息)。
+      await waitForMessage(
+        coordinator.token,
+        group.id,
+        (m) =>
+          m.contentType === "task_status" && m.body.includes("执行器静默超时"),
+      );
+    } finally {
+      process.env.FAKE_SLEEP_SECS = "";
+    }
+  }, 30_000);
+
+  it("持续输出的假 bin 总时长超过阈值但不误杀(输出间隔 < stall 阈值)→ done", async () => {
+    // 每 50ms 一行、共 40 行(总 ~2s > 200ms 阈值),任意相邻输出间隔远小于阈值。
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_OUTPUT_LOOPS = "40";
+    process.env.FAKE_OUTPUT_INTERVAL_MS = "0.05";
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setReliabilityTimeoutsForTests(200, 200);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "持续输出任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.status).toBe("done");
+      // 未被误标失败:diffSummary 无 error 字段。
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toBeUndefined();
+    } finally {
+      process.env.FAKE_OUTPUT_LOOPS = "";
+      process.env.FAKE_OUTPUT_INTERVAL_MS = "";
+    }
+  }, 30_000);
+
+  it("认领超时:queued 任务超过 claim 阈值未被 running → failed + ❌ 回传(含「未认领」)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    // 占位任务持续输出 ~2s,占住唯一组槽位;排队任务超阈值仍未被认领。
+    process.env.FAKE_OUTPUT_LOOPS = "40";
+    process.env.FAKE_OUTPUT_INTERVAL_MS = "0.05";
+    const { __setMaxParallelGroupsForTests, __setReliabilityTimeoutsForTests } =
+      await import("@server/lib/executor-task");
+    __setMaxParallelGroupsForTests(1); // 只剩一个槽位 → 第二个任务必须排队
+    __setReliabilityTimeoutsForTests(60_000, 100); // stall 放宽,claim 调小
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const m1 = await postMessage(coordinator.token, group.id, {
+        body: "占位任务(持续输出)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.token, group.id, m1.id, "running");
+
+      const m2 = await postMessage(coordinator.token, group.id, {
+        body: "排队任务(无人认领)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        m2.id,
+        "failed",
+      );
+      const diff = t2.diffSummary as Record<string, unknown> | null;
+      expect(diff?.error).toContain("未认领");
+      await waitForMessage(
+        coordinator.token,
+        group.id,
+        (m) => m.contentType === "task_status" && m.body.includes("未认领"),
+      );
+      // 占位任务已 running,不受认领阈值影响,正常完成。
+      await waitForTaskStatus(coordinator.token, group.id, m1.id, "done");
+    } finally {
+      process.env.FAKE_OUTPUT_LOOPS = "";
+      process.env.FAKE_OUTPUT_INTERVAL_MS = "";
+      // 恢复默认并行组数,避免影响后续用例。
+      __setMaxParallelGroupsForTests(2);
+    }
+  }, 30_000);
+
+  it("已 running 的任务不受认领阈值影响(认领成功后取消认领计时)", async () => {
+    process.env.FAKE_SLEEP_SECS = "1"; // 跑 ~1s,远超 100ms 的 claim 阈值
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setReliabilityTimeoutsForTests(60_000, 100); // claim 调小;stall 放宽避免误伤
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "认领后长跑任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "running",
+      );
+      // 等超过 claim 阈值(100ms):任务仍应 running,不被「未被认领」误杀。
+      await new Promise((r) => setTimeout(r, 300));
+      const after = await listTasks(coordinator.token, group.id);
+      expect(after.find((x) => x.id === t.id)?.status).toBe("running");
+      await waitForTaskStatus(coordinator.token, group.id, msg.id, "done");
+    } finally {
+      process.env.FAKE_SLEEP_SECS = "";
+    }
+  }, 30_000);
+
+  it("停止的任务不被静默/认领超时误伤(停止 → cancelled,而非 failed)", async () => {
+    process.env.FAKE_SLEEP_SECS = "60";
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    // 阈值放宽到 5s:停止指令在超时前生效,验证停止优先于超时。
+    __setReliabilityTimeoutsForTests(5_000, 5_000);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.token, group.id, {
+        body: "待停止任务(长睡)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "running",
+      );
+      await postMessage(coordinator.token, group.id, {
+        body: "停止",
+        audience: "broadcast",
+      });
+      const stopped = await waitForTaskStatus(
+        coordinator.token,
+        group.id,
+        msg.id,
+        "cancelled",
+      );
+      expect(stopped.id).toBe(t.id);
+      const after = await listTasks(coordinator.token, group.id);
+      expect(after.find((x) => x.id === t.id)?.status).toBe("cancelled");
+    } finally {
+      process.env.FAKE_SLEEP_SECS = "";
     }
   }, 30_000);
 });
