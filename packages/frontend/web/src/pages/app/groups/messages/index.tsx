@@ -381,6 +381,10 @@ export default function GroupMessagesPage() {
         );
         return;
       }
+      // task_output(实时进度)由任务面板 TasksTab 自己订阅处理,消息流忽略。
+      if (event.type === "task_output") {
+        return;
+      }
       // group_message_deleted carries only the id — mark the placeholder locally.
       setMessages((prev) =>
         prev.map((m) =>

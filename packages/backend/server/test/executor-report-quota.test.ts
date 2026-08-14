@@ -281,12 +281,17 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           msg.id,
           "done",
         );
-        expect(t.diffSummary).toEqual({
+        // 完成回填(实时进度 feature):diffSummary 还会带最近输出 outputTail,
+        // 断言核心四段用 toMatchObject,回填字段单独验证。
+        expect(t.diffSummary).toMatchObject({
           summary: "完成了模板化与结构化改造",
           hash: "0123456789ab",
           tests: "全部通过 (42 tests)",
           todo: "无",
         });
+        expect(
+          typeof (t.diffSummary as Record<string, unknown> | null)?.outputTail,
+        ).toBe("string");
         // 成功回传为卡片:✅ 标题 + 分隔线 + 四行。
         const done = await waitForMessage(
           coordinator.id,

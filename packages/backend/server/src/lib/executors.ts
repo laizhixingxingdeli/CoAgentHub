@@ -35,6 +35,11 @@ export interface ExecutorConfig {
   label: string;
   args: string[];
   /**
+   * 执行器默认模型(args 模板可用 {model} 占位引用;无 model 时该参数项被移除,
+   * 避免 CLI 收到空参数)。可选:不配置则 args 里不渲染 model。
+   */
+  model?: string;
+  /**
    * 运行方式:cli=本地 spawn(默认,现有三条);a2a=经 A2A gateway 远程调用
    * 其他设备上的 participant(如 Windows 上的 hermes),server 不 spawn 本地进程。
    */
@@ -67,7 +72,10 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     type: "participant",
     bin: "reasonix",
     label: "reasonix",
-    args: ["run", "-y", "{ticket}"],
+    // 支持 --model:args 模板用 {model} 占位(有 model 替换,无 model 时该参数
+    // 项连同前置 --model flag 一并移除,避免 CLI 收到空参数)。
+    args: ["run", "-y", "--model", "{model}", "{ticket}"],
+    model: "deepseek-v4-flash",
   },
   {
     key: "codebuddy",
@@ -110,6 +118,70 @@ function defaultExecutors(): ExecutorConfig[] {
 /** 判断 key 是否为内置默认执行器(内置配置不可删除/跳过删除)。 */
 export function isBuiltinExecutorKey(key: string): boolean {
   return DEFAULT_EXECUTORS.some((ex) => ex.key === key);
+}
+
+/**
+ * 从失败输出解析执行器额度恢复时间(冷却动态化,票8):
+ *  - "resets around 13:33"(大小写不敏感)→ 今天该时刻;若该时刻已过,视为
+ *    now(立即恢复,保守不再延长)。
+ *  - "try again in 5 seconds"(大小写不敏感)→ now + N 秒。
+ * 解析成功返回冷却到期时刻(epoch ms);无匹配返回 null(调用方回退固定冷却)。
+ * now 参数便于测试注入固定基准时间。
+ */
+export function parseRateLimitRecoveryMs(
+  text: string,
+  now: number = Date.now(),
+): number | null {
+  const clean = (text ?? "").replace(ANSI_RE, "");
+  const around = clean.match(/resets?\s*around\s+(\d{1,2}):(\d{2})/i);
+  if (around) {
+    const target = new Date(now);
+    target.setHours(Number(around[1]), Number(around[2]), 0, 0);
+    return target.getTime() > now ? target.getTime() : now;
+  }
+  const retryIn = clean.match(/try again in\s+(\d+)\s*seconds?/i);
+  if (retryIn) {
+    return now + Number(retryIn[1]) * 1000;
+  }
+  return null;
+}
+
+/** 与 executor-task 相同的 ANSI 清理(解析前剥掉颜色码)。 */
+const ANSI_RE =
+  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+
+/**
+ * 渲染 spawn args 模板(票8):替换 {model} 占位。有 model → 替换;无 model →
+ * 从 args 中移除该参数项,并连同其前一个独立 flag(如 "--model")一并移除,
+ * 避免 CLI 收到悬空 flag(「--model {model}」整组消失)。
+ * {ticket}/{ticketContent} 等其他占位由调用方先替换。
+ */
+export function renderExecutorArgs(
+  args: string[],
+  model: string | undefined,
+): string[] {
+  const rendered = args.map((a) =>
+    model === undefined ? a : a.replaceAll("{model}", model),
+  );
+  if (model !== undefined) return rendered;
+  const out: string[] = [];
+  for (let i = 0; i < rendered.length; i++) {
+    const arg = rendered[i];
+    if (arg.includes("{model}")) {
+      // 无 model:该参数项移除;若前一项是独立 flag(以 - 开头且非 --flag=value
+      // 形式),一并移除(如 "--model {model}" 整组消失)。
+      if (
+        out.length > 0 &&
+        /^-\S+$/.test(out[out.length - 1]) &&
+        !out[out.length - 1].includes("=")
+      ) {
+        out.pop();
+      }
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
 }
 
 /** env 覆盖:cli 的 bin 用 EXECUTOR_BIN_<KEY 大写>(如 EXECUTOR_BIN_CODEBUDDY);

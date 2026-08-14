@@ -64,6 +64,13 @@
       "when": 1786677972000,
       "tag": "0008_add_task_brief",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786690000000,
+      "tag": "0009_add_task_attempts",
+      "breakpoints": true
     }
   ]
 }

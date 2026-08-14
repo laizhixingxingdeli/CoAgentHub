@@ -14,7 +14,10 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
-import { maybeDispatchExecutorTask } from "@server/lib/executor-task";
+import {
+  maybeDispatchExecutorTask,
+  taskOutputTail,
+} from "@server/lib/executor-task";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import { capabilityHint } from "@server/lib/participant-capabilities";
 import {
@@ -991,9 +994,18 @@ app
       },
     }),
     zValidator("param", z.object({ id: z.string().uuid() })),
+    zValidator(
+      "query",
+      z.object({
+        // 实时输出:仅 includeOutput=1 时返回 outputTail(控制响应大小)。
+        includeOutput: z.enum(["1", "0", "true", "false"]).optional(),
+      }),
+    ),
     async (c) => {
       const db = c.get("db");
       const { id } = c.req.valid("param");
+      const { includeOutput } = c.req.valid("query");
+      const wantOutput = includeOutput === "1" || includeOutput === "true";
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -1007,7 +1019,25 @@ app
         where: (t, { eq }) => eq(t.groupId, id),
         orderBy: (t, { desc }) => desc(t.createdAt),
       });
-      return c.json(tasks);
+      // 实时进度:includeOutput=1 时给每个任务附 outputTail(running 任务 =
+      // 内存缓冲;已完成任务 = diffSummary.outputTail 回填或留空)。
+      if (!wantOutput) {
+        return c.json(tasks);
+      }
+      const withOutput = tasks.map((task) => {
+        const buffered = taskOutputTail(task.id);
+        const summary =
+          typeof task.diffSummary === "object" && task.diffSummary !== null
+            ? (task.diffSummary as Record<string, unknown>)
+            : undefined;
+        const backfilled =
+          summary && typeof summary.outputTail === "string"
+            ? summary.outputTail
+            : undefined;
+        const outputTail = buffered ?? backfilled ?? undefined;
+        return outputTail === undefined ? task : { ...task, outputTail };
+      });
+      return c.json(withOutput);
     },
   )
   .patch(

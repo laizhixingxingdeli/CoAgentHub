@@ -3,9 +3,16 @@
  * 面板。数据来自 GET /groups/:id/tasks(打开时拉取一次,不轮询);「停止」/
  * 「回滚」通过发一条 broadcast 命令消息(「停止 <taskId>」/「回滚 <taskId>」)
  * 触发服务端 control.ts,与手动输入等效,不新建 API。
+ *
+ * 实时进度(批次增强):任务行可展开 — 展开显示「实时输出」区(等宽字体、
+ * 深色底、自动滚到底部;running 时由父组件经 WS task_output 事件流式追加,
+ * 刷新/断线后通过 includeOutput=1 拉取当前缓冲)+ attempt 时间线(执行历史)。
+ * 回滚按钮:点击后进入「回滚中…」禁用态,server 恢复完成(轮询确认)后提示
+ * 「已恢复」。
  */
 
 import type { ComponentProps, ReactElement } from "react";
+import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { t } from "@/lib/i18n";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
@@ -13,6 +20,17 @@ import type { Member, MessageItem } from "./types";
 
 /** 与 GET /groups/:id/tasks 返回行对齐(server task 表行形状)。 */
 export type TaskStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+/** 单次执行尝试(attempt 时间线,执行历史)。 */
+export type TaskAttempt = {
+  n: number;
+  startedAt: string;
+  endedAt?: string;
+  status: TaskStatus;
+  error?: string;
+  summary?: string;
+  hash?: string;
+};
 
 export type TaskItem = {
   id: string;
@@ -25,6 +43,10 @@ export type TaskItem = {
   diffSummary: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string | null;
+  /** 执行历史(重试 = 多条;旧任务为 [])。 */
+  attempts?: TaskAttempt[];
+  /** includeOutput=1 时返回的实时输出缓冲(running 任务/完成回填)。 */
+  outputTail?: string;
 };
 
 export function taskStatusLabel(status: TaskStatus): string {
@@ -55,6 +77,13 @@ type TaskPanelProps = {
   readOnly: boolean;
   messages: MessageItem[];
   members: Member[];
+  /** 展开的任务行 id(null = 全部收起);展开显示实时输出区 + attempt 时间线。 */
+  expandedTaskId: string | null;
+  /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接;includeOutput 兜底)。 */
+  liveOutputs: Record<string, string>;
+  /** 回滚状态(taskId → rolling=回滚中… | done=已恢复)。 */
+  rollbackStates: Record<string, "rolling" | "done">;
+  onToggleExpand: (task: TaskItem) => void;
   onStop: (task: TaskItem) => void;
   onRollback: (task: TaskItem) => void;
 };
@@ -114,6 +143,77 @@ function diffSummaryDetail(
   return null;
 }
 
+/** attempt 状态小标签:running/done/failed/cancelled 配色。 */
+const ATTEMPT_STATUS_CLASSES: Record<TaskStatus, string> = {
+  queued: "text-slate-500",
+  running: "text-sky-600 dark:text-sky-400",
+  done: "text-emerald-700 dark:text-emerald-400",
+  failed: "text-red-600 dark:text-red-400",
+  cancelled: "text-amber-600 dark:text-amber-400",
+};
+
+/** attempt 状态文案(词典 tasks.attempts.*)。 */
+function attemptStatusLabel(status: TaskStatus): string {
+  return t(`tasks.attempts.${status}`);
+}
+
+/** 实时输出区:等宽字体 + 深色底;内容变化时自动滚到底部。 */
+function LiveOutput({ text }: { text: string }): ReactElement {
+  const ref = useRef<HTMLPreElement>(null);
+  // 与 useAutoScroll 同款:内容变化(高度变化)时滚动到底;不用 text 作依赖
+  // (text 变化不触发重渲染,hook 依赖 lint 会报多余依赖)。
+  const lastContentHeight = useRef(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const height = el.scrollHeight;
+    if (height !== lastContentHeight.current) {
+      lastContentHeight.current = height;
+      el.scrollTop = el.scrollHeight;
+    }
+  });
+  return (
+    <pre
+      ref={ref}
+      data-testid="task-live-output"
+      className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 px-2 py-1.5 font-mono text-xs leading-relaxed text-slate-100"
+    >
+      {text || (
+        <span className="text-slate-500">{t("tasks.output.empty")}</span>
+      )}
+    </pre>
+  );
+}
+
+/** attempt 时间线(执行历史):「第 1 次 失败 exit 1 → 第 2 次 成功 abc1234」。 */
+function AttemptTimeline({
+  attempts,
+}: {
+  attempts: TaskAttempt[];
+}): ReactElement | null {
+  if (attempts.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+      <span className="font-medium text-muted-foreground">
+        {t("tasks.attempts.title")}:
+      </span>
+      {attempts.map((a, i) => (
+        <span key={a.n} className="flex items-center gap-x-1.5">
+          {i > 0 && <span className="text-muted-foreground">→</span>}
+          <span className={ATTEMPT_STATUS_CLASSES[a.status]}>
+            {t("tasks.attempts.count", { n: a.n })}{" "}
+            {attemptStatusLabel(a.status)}
+            {a.status === "failed" && a.error ? ` ${a.error}` : ""}
+            {a.status === "done" && a.hash ? ` ${a.hash}` : ""}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function TaskPanel({
   tasks,
   loading,
@@ -123,6 +223,10 @@ export default function TaskPanel({
   readOnly,
   messages,
   members,
+  expandedTaskId,
+  liveOutputs,
+  rollbackStates,
+  onToggleExpand,
   onStop,
   onRollback,
 }: TaskPanelProps) {
@@ -149,11 +253,17 @@ export default function TaskPanel({
               const preview = taskMessagePreview(task, messages);
               const detail = diffSummaryDetail(task.diffSummary);
               const busy = commandSending === task.id;
+              const expanded = expandedTaskId === task.id;
+              const rollbackState = rollbackStates[task.id];
+              const rolling = rollbackState === "rolling";
+              const rollbackDone = rollbackState === "done";
               const canStop =
                 task.status === "queued" || task.status === "running";
               const canRollback =
                 (task.status === "done" || task.status === "failed") &&
                 Boolean(task.checkpointRef);
+              // 实时输出:WS 缓冲优先,includeOutput 兜底(未展开任务无缓冲)。
+              const outputText = liveOutputs[task.id] ?? task.outputTail ?? "";
               return (
                 <li
                   key={task.id}
@@ -161,6 +271,16 @@ export default function TaskPanel({
                   className="rounded-md border bg-muted/30 px-3 py-2"
                 >
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <button
+                      type="button"
+                      data-testid={`task-expand-${task.id}`}
+                      aria-expanded={expanded}
+                      onClick={() => onToggleExpand(task)}
+                      className="inline-flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      title={expanded ? t("tasks.collapse") : t("tasks.expand")}
+                    >
+                      {expanded ? "▾" : "▸"}
+                    </button>
                     <span
                       data-testid={`task-status-${task.id}`}
                       data-status={task.status}
@@ -194,12 +314,16 @@ export default function TaskPanel({
                           size="sm"
                           variant="outline"
                           data-testid={`task-rollback-${task.id}`}
-                          disabled={busy}
+                          disabled={busy || rolling || rollbackDone}
                           canControl={canControl}
                           readOnly={readOnly}
                           onClick={() => onRollback(task)}
                         >
-                          {busy ? t("common.sending") : t("tasks.rollback")}
+                          {rolling
+                            ? t("tasks.rollbacking")
+                            : rollbackDone
+                              ? t("tasks.rollbackDone")
+                              : t("tasks.rollback")}
                         </ControlButton>
                       )}
                     </span>
@@ -213,6 +337,17 @@ export default function TaskPanel({
                     <p className="mt-0.5 font-mono text-xs text-muted-foreground">
                       {detail}
                     </p>
+                  )}
+                  {expanded && (
+                    <div className="mt-2 space-y-2">
+                      <AttemptTimeline attempts={task.attempts ?? []} />
+                      <div>
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">
+                          {t("tasks.output.title")}
+                        </p>
+                        <LiveOutput text={outputText} />
+                      </div>
+                    </div>
                   )}
                 </li>
               );

@@ -49,11 +49,20 @@ type GroupMessageDeletedEvent = {
   messageId: string;
 };
 
-/** Any frame the server WS hub pushes for a group (tickets 13/22). */
+/** 执行器实时输出块(server ws-hub 的 task_output 事件,任务面板流式追加)。 */
+export type WsTaskOutputEvent = {
+  type: "task_output";
+  groupId: string;
+  taskId: string;
+  chunk: string;
+};
+
+/** Any frame the server WS hub pushes for a group (tickets 13/22, 实时进度). */
 export type WsGroupEvent =
   | GroupMessageEvent
   | GroupMessageUpdatedEvent
-  | GroupMessageDeletedEvent;
+  | GroupMessageDeletedEvent
+  | WsTaskOutputEvent;
 
 /**
  * Loose shape of a raw WS frame, validated before forwarding as a typed
@@ -71,6 +80,12 @@ type WsGroupFrame =
       type: "group_message_deleted";
       groupId?: string;
       messageId?: string;
+    }
+  | {
+      type: "task_output";
+      groupId?: string;
+      taskId?: string;
+      chunk?: string;
     };
 
 type MessageEventLike = { data: unknown };
@@ -235,11 +250,24 @@ export function useGroupWs(
       // Forward every group message frame for this group (ticket 22): new /
       // updated events carry a full message, deleted carries only the id —
       // groupId still filters, so one socket per group page stays isolated.
+      // task_output(实时进度)同组过滤后转发给任务面板流式追加。
       if (
         frame.groupId !== groupId ||
         typeof frame.type !== "string" ||
-        !frame.type.startsWith("group_message")
+        (!frame.type.startsWith("group_message") &&
+          frame.type !== "task_output")
       ) {
+        return;
+      }
+      if (frame.type === "task_output") {
+        if (frame.taskId && typeof frame.chunk === "string") {
+          onEventRef.current({
+            type: "task_output",
+            groupId,
+            taskId: frame.taskId,
+            chunk: frame.chunk,
+          });
+        }
         return;
       }
       if (frame.type === "group_message_deleted") {

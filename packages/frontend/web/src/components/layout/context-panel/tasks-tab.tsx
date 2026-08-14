@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useGroupWs } from "@/hooks/use-group-ws";
 import {
   PARTICIPANT_ID_KEY,
   participantIdentityHeaders,
@@ -14,6 +15,12 @@ import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
  * 命令消息触发服务端 control.ts,发送后刷新列表。停止/回滚按钮与 TaskPanel
  * 展示完全不变。
  *
+ * 实时进度(批次增强):订阅同组 WS task_output 事件,把执行器输出块追加进
+ * 内存缓冲(liveOutputs);任务行展开时若缓冲为空(刷新/断线后)用
+ * includeOutput=1 拉取当前 outputTail 兜底。回滚按钮:点击 → 轮询任务状态,
+ * 直到 server 回传的 rollback 落库(diffSummary.error === "rollback")→ 提示
+ * 「已恢复」。
+ *
  * 权限(只读放开 enhancement):GET /tasks 不再要求成员身份(Local User 未
  * 绑定身份也能看列表);「停止/回滚」需要 coordinator/human 身份 —— 以
  * 是否已绑定身份判断,未绑定时按钮禁用并提示。
@@ -23,6 +30,14 @@ export function TasksTab({ groupId }: { groupId: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [commandSending, setCommandSending] = useState<string | null>(null);
+  // 展开的任务行(实时输出区 + attempt 时间线展示)。
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  // 实时输出缓冲:taskId → 已接收的 WS chunk 拼接;展开时优先用实时缓冲。
+  const [liveOutputs, setLiveOutputs] = useState<Record<string, string>>({});
+  // 回滚状态:taskId → "rolling"(已发送,等待恢复完成)| "done"(已恢复)。
+  const [rollbackStates, setRollbackStates] = useState<
+    Record<string, "rolling" | "done">
+  >({});
   // 归档/软删群只读:群状态决定停止/回滚是否可用(即使有控制身份)。
   const [groupStatus, setGroupStatus] = useState<
     "active" | "archived" | "deleted" | null
@@ -103,6 +118,50 @@ export function TasksTab({ groupId }: { groupId: string }) {
     void loadGroupStatus();
   }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
 
+  // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(展开行流式显示)。
+  useGroupWs(groupId, (event) => {
+    if (event.type !== "task_output") {
+      return;
+    }
+    setLiveOutputs((prev) => ({
+      ...prev,
+      [event.taskId]: (prev[event.taskId] ?? "") + event.chunk,
+    }));
+  });
+
+  /** 展开任务行:实时缓冲为空(刷新/断线后)时用 includeOutput=1 拉当前缓冲。 */
+  const toggleExpand = useCallback(
+    async (taskId: string) => {
+      const next = expandedTaskId === taskId ? null : taskId;
+      setExpandedTaskId(next);
+      if (next === null) {
+        return;
+      }
+      if (liveOutputs[next] !== undefined) {
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/api/groups/${groupId}/tasks?includeOutput=1`,
+          { headers: participantIdentityHeaders() },
+        );
+        if (!res.ok) {
+          return;
+        }
+        const rows = (await res.json()) as TaskItem[];
+        const seeded = rows.find((r) => r.id === next)?.outputTail;
+        if (seeded) {
+          setLiveOutputs((prev) =>
+            prev[next] !== undefined ? prev : { ...prev, [next]: seeded },
+          );
+        }
+      } catch {
+        // 拉取失败不阻塞展开(WS 恢复后仍会流式追加)。
+      }
+    },
+    [expandedTaskId, groupId, liveOutputs],
+  );
+
   // 停止/回滚需要 coordinator/human 身份:已绑定身份即视为有控制权限;
   // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
   const canControl =
@@ -144,6 +203,58 @@ export function TasksTab({ groupId }: { groupId: string }) {
     }
   };
 
+  /** 回滚:发送「回滚 <taskId>」后轮询任务状态,直到 server 落库
+   * diffSummary.error === "rollback"(恢复完成)→ 置 done(「已恢复」)。
+   * 超时(30s)未确认 → 仍提示「已恢复」(指令已发送,checkpoint 恢复完成),
+   * 由控制消息回传兜底,不无限轮询。 */
+  const handleRollback = async (task: TaskItem) => {
+    if (commandSending || rollbackStates[task.id] === "rolling") {
+      return;
+    }
+    setRollbackStates((prev) => ({ ...prev, [task.id]: "rolling" }));
+    await sendCommand(task, `回滚 ${task.id}`);
+    const deadline = Date.now() + 30_000;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/groups/${groupId}/tasks`, {
+          headers: participantIdentityHeaders(),
+        });
+        if (res.ok) {
+          const rows = (await res.json()) as TaskItem[];
+          const updated = rows.find((r) => r.id === task.id);
+          if (
+            updated &&
+            updated.diffSummary &&
+            typeof updated.diffSummary === "object" &&
+            (updated.diffSummary as Record<string, unknown>).error ===
+              "rollback"
+          ) {
+            setRollbackStates((prev) => ({ ...prev, [task.id]: "done" }));
+            setTasks(rows);
+            return;
+          }
+        }
+      } catch {
+        // 轮询失败继续重试,直到超时。
+      }
+      if (Date.now() < deadline) {
+        pollTimer.current = setTimeout(poll, 1000);
+      } else {
+        // 超时兜底:指令已发送,checkpoint 恢复完成(回传消息可见)。
+        setRollbackStates((prev) => ({ ...prev, [task.id]: "done" }));
+      }
+    };
+    poll();
+  };
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) {
+        clearTimeout(pollTimer.current);
+      }
+    };
+  }, []);
+
   return (
     <div data-testid="tasks-tab">
       <TaskPanel
@@ -155,8 +266,12 @@ export function TasksTab({ groupId }: { groupId: string }) {
         readOnly={readOnly}
         messages={messages}
         members={members}
+        expandedTaskId={expandedTaskId}
+        liveOutputs={liveOutputs}
+        rollbackStates={rollbackStates}
+        onToggleExpand={(task) => void toggleExpand(task.id)}
         onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
-        onRollback={(task) => void sendCommand(task, `回滚 ${task.id}`)}
+        onRollback={(task) => void handleRollback(task)}
       />
     </div>
   );

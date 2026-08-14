@@ -55,7 +55,10 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  type TaskAttempt,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
 import type { DataBase } from "@server/lib/database";
 import {
@@ -70,7 +73,9 @@ import {
 import {
   type ExecutorConfig,
   findExecutorByParticipantName,
+  parseRateLimitRecoveryMs,
   readDispatchPolicy,
+  renderExecutorArgs,
 } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/group-message";
 import { wsHub } from "@server/lib/ws-hub";
@@ -136,6 +141,8 @@ interface QueuedRun {
   retryCount: number;
   /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
   checkpointRef: string | null;
+  /** 执行历史(attempt 时间线):spawn 前 append running,结束时补 endedAt/status。 */
+  attempts: TaskAttempt[];
 }
 
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
@@ -180,6 +187,42 @@ const executorCooldowns = new Map<string, number>();
 
 /** 冷却结束定时器(executorKey → timer):到期清冷却并泵一次,让排队任务自动派发。 */
 const cooldownTimers = new Map<string, NodeJS.Timeout>();
+
+/* ---------------- 实时输出缓冲(实时进度 feature) ---------------- */
+
+/** running 任务最近输出的环形缓冲上限:200 行 / 64KB,超限保留尾部。 */
+const OUTPUT_TAIL_MAX_LINES = 200;
+const OUTPUT_TAIL_MAX_BYTES = 64 * 1024;
+
+/** running 任务的输出缓冲(taskId → 最近输出全文,任务结束释放)。 */
+const runningOutputs = new Map<string, string>();
+
+/**
+ * 追加输出块到任务缓冲:按行数/字节数双上限截断,超限只留尾部(环形)。
+ * 任务结束(releaseTaskOutput)时从 Map 移除,避免内存泄漏。
+ */
+function appendTaskOutput(taskId: string, chunk: string): void {
+  const prev = runningOutputs.get(taskId) ?? "";
+  let next = prev + chunk;
+  if (next.length > OUTPUT_TAIL_MAX_BYTES) {
+    next = next.slice(-OUTPUT_TAIL_MAX_BYTES);
+  }
+  const lines = next.split("\n");
+  if (lines.length > OUTPUT_TAIL_MAX_LINES) {
+    next = lines.slice(-OUTPUT_TAIL_MAX_LINES).join("\n");
+  }
+  runningOutputs.set(taskId, next);
+}
+
+/** 取任务缓冲全文(running 任务有缓冲;无/已释放返回 null)。 */
+export function taskOutputTail(taskId: string): string | null {
+  return runningOutputs.get(taskId) ?? null;
+}
+
+/** 释放任务缓冲(任务进入终态 done/failed/cancelled 时调用)。 */
+function releaseTaskOutput(taskId: string): void {
+  runningOutputs.delete(taskId);
+}
 
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 let pumping = false;
@@ -230,9 +273,12 @@ function formatEta(endMs: number): string {
  * 执行器进入额度冷却:记录冷却结束时间并调度到期泵送(冷却结束后 pumpQueue
  * 自动把等待中的任务派发出去,无需人工干预)。重复进入只重置结束时间与定时器
  * (定时器防堆积)。返回冷却结束时间(epoch ms)。
+ *
+ * endMs 为绝对到期时刻(冷却动态化):调用方先尝试从失败输出解析恢复时间
+ * (parseRateLimitRecoveryMs),解析失败才回退 now + 固定冷却时长。
  */
-function enterCooldown(ex: ExecutorConfig, durationMs: number): number {
-  const end = Date.now() + Math.max(1, durationMs);
+function enterCooldown(ex: ExecutorConfig, endMs: number): number {
+  const end = Math.max(Date.now() + 1, endMs);
   executorCooldowns.set(ex.key, end);
   const prev = cooldownTimers.get(ex.key);
   if (prev) clearTimeout(prev);
@@ -270,6 +316,7 @@ export function __resetExecutorQueueForTests(): void {
     g.queue.length = 0;
   }
   groupQueues.clear();
+  runningOutputs.clear();
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
   executorCooldowns.clear();
@@ -601,6 +648,8 @@ async function dispatchTask(
     stalled: false,
     retryCount: 0,
     checkpointRef: null,
+    // 执行历史:沿用 DB 既有 attempts(重新执行的任务保留旧尝试,新 attempt 续接)。
+    attempts: Array.isArray(task.attempts) ? task.attempts : [],
   };
   group.queue.push(run);
 
@@ -710,6 +759,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       `🚀 [${ex.label}] 开始执行:${summary}`,
     );
 
+    // 执行历史:每次 spawn 前 append 一条 running attempt(重试 = 多条)。
+    await beginAttempt(run);
+
     // spawn cwd = 群绑定的 project_path(并行时不同项目操作各自仓库,互不干扰);
     // 未绑定则回退 findRepoRoot()(兼容既有测试/无项目群)。
     const repoRoot =
@@ -780,12 +832,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       }
 
       // hermes 之类的 participant 需要提示词文本而不是文件路径:{ticketContent}
-      // 把刚写好的任务书全文内联进参数。
+      // 把刚写好的任务书全文内联进参数;{model} 占位由 renderExecutorArgs 处理
+      // (无 model 时移除该参数项,避免 CLI 收到空参数)。
       const ticketContent = readFileSync(ticketPath, "utf8");
-      const args = ex.args.map((a) =>
-        a
-          .replaceAll("{ticket}", ticketPath)
-          .replaceAll("{ticketContent}", ticketContent),
+      const args = renderExecutorArgs(
+        ex.args.map((a) =>
+          a
+            .replaceAll("{ticket}", ticketPath)
+            .replaceAll("{ticketContent}", ticketContent),
+        ),
+        ex.model,
       );
       console.log(
         `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, group=${run.groupKey}, task=${taskId})`,
@@ -795,8 +851,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         args,
         cwd: repoRoot,
         onOutput: (chunk) => {
-          // 流式日志:便于后续回传群(本轮先落 server 日志)。
+          // 流式日志 + 实时进度:除 server 日志外,入环形缓冲(includeOutput
+          // 拉取/断线重连用)并 WS 推给前端任务面板(task_output 事件)。
           process.stdout.write(chunk);
+          appendTaskOutput(taskId, chunk);
+          void wsHub.broadcastTaskOutput(groupId, taskId, chunk);
           // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
           run.lastOutputAt = Date.now();
           if (run.stallTimer) {
@@ -818,6 +877,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 指令自己已回传 🛑)。
       if (run.stopped) {
         console.log(`[executor] 任务已停止: ${taskId}`);
+        await endAttempt(run, { status: "cancelled" });
+        releaseTaskOutput(taskId);
         await db
           .update(taskTable)
           .set({ status: "cancelled", diffSummary: { error: "stopped" } })
@@ -839,7 +900,13 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词 → 额度失败。
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
         if (isQuotaFailure(["执行超时", lastLinesOf(out, 20)])) {
-          const eta = formatEta(enterCooldown(ex, rateLimitCooldownMs));
+          // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
+          const eta = formatEta(
+            enterCooldown(
+              ex,
+              parseRateLimitRecoveryMs(out) ?? Date.now() + rateLimitCooldownMs,
+            ),
+          );
           await handleFailure(
             run,
             `执行超时(执行器额度限制,预计 ${eta} 恢复)`,
@@ -884,6 +951,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           : parseTaskReport(output);
         const diffSummary: Record<string, unknown> = { ...report };
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
+        // 完成回填:最近 50 行输出写进 diffSummary.outputTail(之后不依赖内存)。
+        const doneTail = lastLinesOf(taskOutputTail(taskId) ?? "", 50);
+        if (doneTail) diffSummary.outputTail = doneTail;
+        await endAttempt(run, {
+          status: "done",
+          summary: report.summary,
+          hash: report.hash,
+        });
+        releaseTaskOutput(taskId);
         await db
           .update(taskTable)
           .set({ status: "done", diffSummary })
@@ -908,7 +984,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 其余失败保持原重试行为。限定尾部避免全量输出里的无关 "429/quota"
         // 字样造成误判(误判会停派该执行器整段冷却期)。
         if (isQuotaFailure([`exit ${result.code}`, tail])) {
-          const eta = formatEta(enterCooldown(ex, rateLimitCooldownMs));
+          // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
+          const eta = formatEta(
+            enterCooldown(
+              ex,
+              parseRateLimitRecoveryMs(tail) ??
+                Date.now() + rateLimitCooldownMs,
+            ),
+          );
           await handleFailure(
             run,
             `exit ${result.code}(执行器额度限制,预计 ${eta} 恢复)`,
@@ -927,6 +1010,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[executor] 执行器启动失败: ${msg}`);
+      await endAttempt(run, { status: "failed", error: msg });
+      releaseTaskOutput(taskId);
       await failTask(db, taskId, msg);
       await postStatus(
         db,
@@ -999,7 +1084,9 @@ function handleClaimTimeout(run: QueuedRun): void {
 }
 
 /** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。
- *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用)。 */
+ *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用)。running 任务
+ *  存在输出缓冲时,把最近 50 行写进 diffSummary.outputTail(完成回填,之后
+ *  不依赖内存也能看;无缓冲(未 spawn 的失败)则不加)。 */
 async function failTask(
   db: DataBase,
   taskId: string,
@@ -1008,10 +1095,51 @@ async function failTask(
 ): Promise<void> {
   const diffSummary: Record<string, unknown> = { error: reason };
   if (retries > 0) diffSummary.retries = retries;
+  const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 50);
+  if (tail) diffSummary.outputTail = tail;
   await db
     .update(taskTable)
     .set({ status: "failed", diffSummary })
     .where(eq(taskTable.id, taskId));
+}
+
+/* ---------------- 执行历史(attempt 时间线) ---------------- */
+
+/** spawn 执行器前 append 一条 running attempt 并落库(重试 = 多条;不重试也
+ *  有一条)。attempts 数组同时保留在 run 上,后续 endAttempt 就地更新。 */
+async function beginAttempt(run: QueuedRun): Promise<void> {
+  const attempt: TaskAttempt = {
+    n: run.attempts.length + 1,
+    startedAt: new Date().toISOString(),
+    status: "running",
+  };
+  run.attempts.push(attempt);
+  try {
+    await run.db
+      .update(taskTable)
+      .set({ attempts: run.attempts })
+      .where(eq(taskTable.id, run.taskId));
+  } catch (e) {
+    console.warn(`[executor] 写 attempts 失败(${run.taskId}): ${e}`);
+  }
+}
+
+/** 任务终态时更新最后一条 attempt(endedAt/status/error/summary/hash)并落库。 */
+async function endAttempt(
+  run: QueuedRun,
+  patch: Partial<Pick<TaskAttempt, "status" | "error" | "summary" | "hash">>,
+): Promise<void> {
+  const last = run.attempts[run.attempts.length - 1];
+  if (!last) return;
+  Object.assign(last, patch, { endedAt: new Date().toISOString() });
+  try {
+    await run.db
+      .update(taskTable)
+      .set({ attempts: run.attempts })
+      .where(eq(taskTable.id, run.taskId));
+  } catch (e) {
+    console.warn(`[executor] 写 attempts 失败(${run.taskId}): ${e}`);
+  }
 }
 
 /**
@@ -1027,10 +1155,13 @@ async function handleFailure(
   opts: { retryable: boolean; message: string },
 ): Promise<void> {
   const { db, taskId } = run;
+  // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
+  await endAttempt(run, { status: "failed", error: reason });
   const canRetry =
     opts.retryable && !run.stopped && run.retryCount < retryPolicy.maxRetries;
 
   if (!canRetry) {
+    releaseTaskOutput(taskId);
     await failTask(db, taskId, reason, run.retryCount);
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;

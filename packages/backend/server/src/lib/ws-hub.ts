@@ -144,6 +144,35 @@ export class WsHub {
   }
 
   /**
+   * Fan-out a live task output chunk (feature: 实时进度): the running executor's
+   * stdout/stderr chunk is pushed to the group so the task panel can stream it
+   * without polling. Treated like a broadcast message for visibility — every
+   * member that sees the group gets the chunk.
+   */
+  async broadcastTaskOutput(
+    groupId: string,
+    taskId: string,
+    chunk: string,
+  ): Promise<void> {
+    await this.fanOut(
+      {
+        id: taskId,
+        groupId,
+        senderId: "",
+        audience: "broadcast" as const,
+        audienceRef: null,
+      },
+      () =>
+        JSON.stringify({
+          type: "task_output",
+          groupId,
+          taskId,
+          chunk,
+        }),
+    );
+  }
+
+  /**
    * Shared fan-out: query the group's members, keep the visibility-filtered
    * set, and deliver `buildEvent(message)` to every connected socket in it.
    * Fire-and-forget: never rejects — the member query and per-socket failures
