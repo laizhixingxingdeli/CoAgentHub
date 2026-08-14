@@ -1161,8 +1161,9 @@ async function handleFailure(
     opts.retryable && !run.stopped && run.retryCount < retryPolicy.maxRetries;
 
   if (!canRetry) {
-    releaseTaskOutput(taskId);
+    // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
     await failTask(db, taskId, reason, run.retryCount);
+    releaseTaskOutput(taskId);
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;
   }
