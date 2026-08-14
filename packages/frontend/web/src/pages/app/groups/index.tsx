@@ -22,6 +22,7 @@ import {
   participantIdentityHeaders,
 } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
+import { useIdentityStore } from "@/lib/stores/identity";
 import { cn } from "@/lib/utils";
 
 type GroupItem = {
@@ -258,9 +259,9 @@ export default function GroupsPage() {
   const commitIdentity = (participantId: string | null) => {
     const trimmed = participantId?.trim() ?? null;
     if (trimmed) {
-      localStorage.setItem(PARTICIPANT_ID_KEY, trimmed);
+      useIdentityStore.getState().setIdentity(trimmed);
     } else {
-      localStorage.removeItem(PARTICIPANT_ID_KEY);
+      useIdentityStore.getState().clearIdentity();
     }
     setBoundParticipantId(trimmed ?? "");
     loadGroups();

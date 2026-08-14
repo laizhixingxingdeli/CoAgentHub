@@ -37,6 +37,7 @@
     "wouter": "^3.7.0"
   },
   "devDependencies": {
+    "@laizhixingxingdeli/tsconfig": "workspace:*",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
@@ -50,6 +51,6 @@
     "typescript": "*",
     "vite": "^6.3.5",
     "vitest": "^3.2.7",
-    "@laizhixingxingdeli/tsconfig": "workspace:*"
+    "zustand": "^5.0.15"
   }
 }

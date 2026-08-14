@@ -5,16 +5,15 @@ import {
   PanelRight,
   Users,
 } from "lucide-react";
-import {
-  createContext,
-  type ReactNode,
-  useCallback,
-  useContext,
-  useState,
-} from "react";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useIsDesktop } from "@/hooks/use-mobile";
+import {
+  readStoredPanelOpen,
+  useContextPanelStore,
+} from "@/lib/stores/context-panel";
 import { cn } from "@/lib/utils";
 import { MembersTab } from "./context-panel/members-tab";
 import { ProjectTab } from "./context-panel/project-tab";
@@ -27,11 +26,12 @@ import { TasksTab } from "./context-panel/tasks-tab";
  *     开合状态存 localStorage(coagenthub.contextPanelOpen);
  *   - md(768-1023px):默认折叠,主区页头「面板」按钮唤起为 overlay 抽屉;
  *   - <md(<768px):全屏 overlay(侧边栏行为不变)。
- * 开合状态由 GroupContextPanelProvider 提供,页面标题栏按钮与面板共享。
+ * 开合状态由 useContextPanelStore 提供,页面标题栏按钮与面板共享
+ * (迁移自原 GroupContextPanelProvider 的 context,行为不变)。
  */
 
 /** lg+ 右栏开合的持久化键(收起后刷新保持)。 */
-export const CONTEXT_PANEL_OPEN_KEY = "coagenthub.contextPanelOpen";
+export { CONTEXT_PANEL_OPEN_KEY } from "@/lib/stores/context-panel";
 
 type ContextPanelState = {
   /** lg+ 右栏是否展开(持久化);<lg 时仅反映偏好,驱动标题栏图标。 */
@@ -42,48 +42,30 @@ type ContextPanelState = {
   setOverlayOpen: (open: boolean) => void;
 };
 
-const GroupContextPanelContext = createContext<ContextPanelState | null>(null);
-
-/** 右栏开合状态。无 Provider(如页面单独渲染)时返回安全 no-op。 */
+/** 右栏开合状态,直接来自全局 store(单例,无需 Provider)。 */
 export function useGroupContextPanel(): ContextPanelState {
-  const ctx = useContext(GroupContextPanelContext);
-  return (
-    ctx ?? {
-      open: false,
-      setOpen: () => {},
-      overlayOpen: false,
-      setOverlayOpen: () => {},
-    }
-  );
+  const open = useContextPanelStore((s) => s.open);
+  const setOpen = useContextPanelStore((s) => s.setOpen);
+  const overlayOpen = useContextPanelStore((s) => s.overlayOpen);
+  const setOverlayOpen = useContextPanelStore((s) => s.setOverlayOpen);
+  return { open, setOpen, overlayOpen, setOverlayOpen };
 }
 
-/** 提供右栏开合状态,由布局壳(GroupLayout)包住页面与右栏。 */
+/** 兼容壳:开合状态已移入全局 store。挂载时按 localStorage 重新初始化
+ * (等价于原 context 实现每次挂载独立 useState 初始化 —— 同文件多次渲染/
+ * 测试间状态互不泄漏),之后由全局 store 驱动。 */
 export function GroupContextPanelProvider({
   children,
 }: {
   children: ReactNode;
 }) {
-  const [open, setOpenState] = useState<boolean>(() => {
-    if (typeof localStorage === "undefined") {
-      return true;
-    }
-    // 默认展开(lg+ 常驻);用户收起后持久化,刷新后保持。
-    return localStorage.getItem(CONTEXT_PANEL_OPEN_KEY) !== "false";
-  });
-  const [overlayOpen, setOverlayOpen] = useState(false);
-  const setOpen = useCallback((next: boolean) => {
-    setOpenState(next);
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(CONTEXT_PANEL_OPEN_KEY, String(next));
-    }
+  useEffect(() => {
+    useContextPanelStore.setState({
+      open: readStoredPanelOpen(),
+      overlayOpen: false,
+    });
   }, []);
-  return (
-    <GroupContextPanelContext.Provider
-      value={{ open, setOpen, overlayOpen, setOverlayOpen }}
-    >
-      {children}
-    </GroupContextPanelContext.Provider>
-  );
+  return <>{children}</>;
 }
 
 /** 主区页头的「面板」开关:lg+ 开合右栏;<lg 唤起 overlay 抽屉。
