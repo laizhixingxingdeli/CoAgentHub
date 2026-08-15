@@ -42,13 +42,29 @@ describe("任务实体(server 单一状态源)", () => {
     groupId: string;
     messageId: string;
     executorParticipantId: string;
-    status: "running" | "done" | "failed" | "cancelled";
+    status: "queued" | "running" | "done" | "failed" | "cancelled";
     checkpointRef: string | null;
     brief: string | null;
     diffSummary: unknown;
     createdAt: string;
     updatedAt: string | null;
   };
+
+  async function patchTask(
+    participantId: string,
+    groupId: string,
+    taskId: string,
+    body: Record<string, unknown>,
+  ) {
+    return app.request(`/api/groups/${groupId}/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify(body),
+    });
+  }
 
   async function createTask(
     participantId: string,
@@ -441,6 +457,165 @@ describe("任务实体(server 单一状态源)", () => {
     const found = tasks.find((t) => t.id === task.id);
     expect(found?.brief).toBeNull();
     expect(found?.status).toBe("running");
+  });
+
+  it("协调者修改 queued 任务 brief 成功,列表/详情返回新 brief", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000062",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    // 先把任务置为 queued(HTTP 建任务默认 running,执行器可流转状态)。
+    const toQueued = await patchTask(execA.id, group.id, task.id, {
+      status: "queued",
+    });
+    expect(toQueued.status).toBe(200);
+
+    // 协调者(群主)修改 brief → 200,返回最新行且状态未变。
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      brief: "更正后的任务书",
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as Task;
+    expect(updated.brief).toBe("更正后的任务书");
+    expect(updated.status).toBe("queued");
+
+    // 列表读到新 brief。
+    const list = await app.request(`/api/groups/${group.id}/tasks`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    const tasks = (await list.json()) as Task[];
+    expect(tasks.find((t) => t.id === task.id)?.brief).toBe("更正后的任务书");
+
+    // 详情读到新 brief。
+    const detail = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as Task).brief).toBe("更正后的任务书");
+
+    // 执行器原有 PATCH 行为不回归:协调者改完 brief 后执行器仍可流转状态。
+    const done = await patchTask(execA.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(done.status).toBe(200);
+    expect(((await done.json()) as Task).status).toBe("done");
+  });
+
+  it("协调者修改 running/done/failed 任务 brief → 409", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+
+    // running(HTTP 建任务默认状态)。
+    const tRunning = (await (
+      await createTask(
+        coordinator.id,
+        group.id,
+        "00000000-0000-7000-8000-000000000063",
+        execA.id,
+      )
+    ).json()) as Task;
+    const r1 = await patchTask(coordinator.id, group.id, tRunning.id, {
+      brief: "x",
+    });
+    expect(r1.status).toBe(409);
+    expect(((await r1.json()) as { message: string }).message).toBe(
+      "仅排队中的任务可修改任务书",
+    );
+
+    // done。
+    const tDone = (await (
+      await createTask(
+        coordinator.id,
+        group.id,
+        "00000000-0000-7000-8000-000000000064",
+        execA.id,
+      )
+    ).json()) as Task;
+    await patchTask(execA.id, group.id, tDone.id, { status: "done" });
+    const r2 = await patchTask(coordinator.id, group.id, tDone.id, {
+      brief: "x",
+    });
+    expect(r2.status).toBe(409);
+
+    // failed。
+    const tFailed = (await (
+      await createTask(
+        coordinator.id,
+        group.id,
+        "00000000-0000-7000-8000-000000000065",
+        execA.id,
+      )
+    ).json()) as Task;
+    await patchTask(execA.id, group.id, tFailed.id, { status: "failed" });
+    const r3 = await patchTask(coordinator.id, group.id, tFailed.id, {
+      brief: "x",
+    });
+    expect(r3.status).toBe(409);
+  });
+
+  it("非协调者/非执行器(observer 成员)修改 brief → 403 且不落库", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const observer = await registerParticipant({ name: "observer-1" });
+    const addMember = await app.request(`/api/groups/${group.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({ participantId: observer.id, roles: ["observer"] }),
+    });
+    expect(addMember.status).toBe(200);
+
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000066",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+    await patchTask(execA.id, group.id, task.id, { status: "queued" });
+
+    // observer 成员既非协调者也非执行器 → 403。
+    const res = await patchTask(observer.id, group.id, task.id, {
+      brief: "越权改写",
+    });
+    expect(res.status).toBe(403);
+
+    // brief 未被写入。
+    const detail = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(((await detail.json()) as Task).brief).toBeNull();
+  });
+
+  it("执行器本人修改 brief 仍被拒绝(只读保留)→ 400 且不落库", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000067",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    // 执行器单独改 brief → 400(旧 superRefine 行为保留)。
+    const res = await patchTask(execA.id, group.id, task.id, {
+      brief: "执行器改写",
+    });
+    expect(res.status).toBe(400);
+
+    // brief 未被写入。
+    const list = await app.request(`/api/groups/${group.id}/tasks`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    const tasks = (await list.json()) as Task[];
+    expect(tasks.find((t) => t.id === task.id)?.brief).toBeNull();
   });
 
   it("GET 单任务:返回任务完整详情(含 brief/checkpointRef/retryCount/diffSummary)", async () => {

@@ -1138,7 +1138,7 @@ app
     "/:id/tasks/:taskId",
     describeRoute({
       description:
-        "Update a task (status/diffSummary). Only the task's executor participant identity may update it",
+        "Update a task (status/diffSummary by the owning executor; brief by the group's coordinator/human while the task is queued)",
       responses: {
         200: {
           description: "Task updated",
@@ -1157,30 +1157,25 @@ app
           status: z.enum(TASK_STATUSES).optional(),
           diffSummary: z.unknown().optional(),
           checkpointRef: z.string().optional(),
+          // 任务书快照:仅群 coordinator/human 可在任务 queued 时修改
+          // (角色/状态判断在 handler,此处只做格式约束;执行器本人保持只读)。
+          brief: z.string().min(1).max(4000).optional(),
         })
         .passthrough()
-        .superRefine((v, ctx) => {
-          // brief 是任务书快照(只读字段):PATCH 一律拒绝,防止任务语义被改写。
-          if ("brief" in v) {
-            ctx.addIssue({
-              code: "custom",
-              message: "brief 为只读字段,不可通过 PATCH 修改",
-            });
-          }
-        })
         .refine(
           (v) =>
             v.status !== undefined ||
             v.diffSummary !== undefined ||
-            v.checkpointRef !== undefined,
-          { message: "至少提供 status / diffSummary / checkpointRef 之一" },
+            v.checkpointRef !== undefined ||
+            v.brief !== undefined,
+          { message: "至少提供 status / diffSummary / checkpointRef / brief 之一" },
         ),
     ),
     async (c) => {
       const db = c.get("db");
       const participantId = c.get("participantId");
       const { id, taskId } = c.req.valid("param");
-      const { status, diffSummary, checkpointRef } = c.req.valid("json");
+      const { status, diffSummary, checkpointRef, brief } = c.req.valid("json");
 
       // 归档/软删群组只读:不能改任务状态(与 POST /tasks 同款守卫)。
       await assertGroupWritable(db, id);
@@ -1190,8 +1185,36 @@ app
       if (!task) {
         throw new BizError(BizCodeEnum.TaskNotFound);
       }
-      // Only the owning executor participant can advance the lifecycle.
-      if (task.executorParticipantId !== participantId) {
+      const isExecutor = task.executorParticipantId === participantId;
+      const wantsBrief = brief !== undefined;
+      const wantsLifecycle =
+        status !== undefined ||
+        diffSummary !== undefined ||
+        checkpointRef !== undefined;
+
+      if (wantsBrief) {
+        // 任务书快照对执行器本人保持只读(与旧 superRefine 行为一致)。
+        if (isExecutor) {
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            "brief 为只读字段,不可通过 PATCH 修改",
+          );
+        }
+        // 仅群 coordinator/human 可在任务排队中修改任务书。
+        const membership = await db.query.groupMember.findFirst({
+          where: (t, { and, eq }) =>
+            and(eq(t.groupId, id), eq(t.participantId, participantId)),
+        });
+        const roles = membership?.roles ?? [];
+        if (!roles.includes("coordinator") && !roles.includes("human")) {
+          throw new BizError(BizCodeEnum.Forbidden);
+        }
+        if (task.status !== "queued") {
+          throw new BizError(BizCodeEnum.Conflict, "仅排队中的任务可修改任务书");
+        }
+      }
+      // 生命周期字段(status/diffSummary/checkpointRef)仍仅执行器本人可改。
+      if (wantsLifecycle && !isExecutor) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
       const [updated] = await db
@@ -1200,6 +1223,7 @@ app
           ...(status !== undefined ? { status } : {}),
           ...(diffSummary !== undefined ? { diffSummary } : {}),
           ...(checkpointRef !== undefined ? { checkpointRef } : {}),
+          ...(brief !== undefined ? { brief } : {}),
         })
         .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, id)))
         .returning();
