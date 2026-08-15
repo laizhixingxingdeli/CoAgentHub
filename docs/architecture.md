@@ -81,6 +81,10 @@ CoAgentHub/
 | `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS |
 | `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标 |
 | `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整) |
+| `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`) |
+| `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序) |
+| `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空) |
+| `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
 | `/api/docs`、`/api/openapi` | GET | Scalar API 文档与 OpenAPI 规范 |
@@ -175,6 +179,25 @@ CoAgentHub/
 - **无进展提醒(stall alert)**:`stallAlertMinutes`(默认 15,`dispatch-policy.json`)内
   无输出的 running 任务 → 发 ⚠️ 提醒消息给协调者 + 任务面板警示行(不失败);继续静默到
   `stallTimeoutMinutes`(默认 30)才标 failed。
+- **任务状态实时推送(`task_status_changed`)**:任务 `queued / running / done /
+  failed / cancelled` 任一状态变化落库后,经 WS 中枢推给**任务所属群的订阅者**
+  (与 task_output 同界,broadcast 可见性);帧为 `{type:"task_status_changed",
+  groupId, taskId, status, task?}`——`task` 可选,为最新任务行快照(日期 ISO 化,
+  与任务面板行同形状)。fire-and-forget:推送失败仅告警,不影响任务主流程;依赖方
+  (插件/前端)仍以 HTTP 拉取兜底(`GET /groups/:id/tasks/:taskId`)。路由层 PATCH
+  推进状态(仅 status 实际变更时)复用同一出口。
+- **A2A 协议可靠性**(经 A2A gateway 调用的远端执行器,如 win-hermes):
+  - **进度/心跳**:A2A 任务 `running` 期间,执行器 participant 在群内发送的消息
+    视为进展信号,刷新 `lastActivityAt` 并顺延无进展超时;连续无进展超过
+    `a2aSilenceTimeoutMinutes`(默认 30,`dispatch-policy.json`)→ 无进展失败。
+  - **结果未确认**:gateway「agent did not reply in time」/ A2A 请求超时
+    (EXECUTOR_TIMEOUT_MS)但有进展 / 网络错误 / HTTP 5xx 时,不直接按失败处理——
+    `diffSummary` 增加 `{ error: "执行器未按协议回复，结果未确认", unconfirmed: true }`,
+    群内回传 `⚠️ 任务结果未确认`(不回传 ❌、不自动重试);HTTP 4xx 不标记 unconfirmed。
+  - **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感);
+    A2A 发送完成即视为「已派发」,任务保持 `running`,由执行器恢复后
+    `PATCH /groups/:id/tasks/:taskId` 回写终态(队列槽位照常释放);超过
+    `detachedTimeoutMinutes`(默认 1440)未回写 → 按「结果未确认」处理。
 - **弱验收钩子**:done 前校验工作树干净 + HEAD 有变化(仅本地 CLI);失败原因含「未提交」。
 - **human 全可见**:参与者 `type=human`(含 Local User)对任何群的消息无条件可见
   (含定向消息,不要求群成员);audience 仍是 agent 间的路由机制。前端对定向消息显示
