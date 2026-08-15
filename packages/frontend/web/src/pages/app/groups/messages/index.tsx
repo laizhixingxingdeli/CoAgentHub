@@ -60,6 +60,10 @@ export default function GroupMessagesPage() {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 测试执行器(纯辅助,不改消息 schema):"auto"(默认,按分工提示词自动选择)/
+  // "same"(同一执行器)/ participantId(显式指定成员)。显式选择在发送时往 body
+  // 追加一行「**测试执行器:<名>**」,由 buildTicket 原样保留进任务书。
+  const [testExecutor, setTestExecutor] = useState<string>("auto");
   const [groupStatus, setGroupStatus] = useState<
     "active" | "archived" | "deleted" | null
   >(null);
@@ -516,11 +520,23 @@ export default function GroupMessagesPage() {
     setSending(true);
     setError(null);
     try {
+      // 测试执行器(纯辅助,不改消息 schema):显式选择 → body 追加一行
+      // 「**测试执行器:<名>**」,由 buildTicket 原样保留进任务书;"auto"/"same"
+      // 不加行(自动规则由 buildTicket 应用)。
+      let sendBody = trimmed;
+      if (testExecutor === "same") {
+        sendBody = `${trimmed}\n\n**测试执行器:${t("messages.send.testExecutor.same")}**`;
+      } else if (testExecutor !== "auto") {
+        const picked = members.find((m) => m.participantId === testExecutor);
+        if (picked) {
+          sendBody = `${trimmed}\n\n**测试执行器:${picked.name}**`;
+        }
+      }
       // Ticket 18: the audience comes from the @ mentions in the body, never
       // from a picker. Unmatched @xxx stays plain text → broadcast.
-      const resolved = resolveAudience(trimmed, members);
+      const resolved = resolveAudience(sendBody, members);
       const payload: Record<string, unknown> = {
-        body: trimmed,
+        body: sendBody,
         audience: resolved.audience,
       };
       if (resolved.audienceRef) {
@@ -557,6 +573,15 @@ export default function GroupMessagesPage() {
       setSending(false);
     }
   };
+
+  // 测试执行器候选(纯辅助下拉):群内 executor/specialist 角色成员。
+  const executorMembers = useMemo<Member[]>(
+    () =>
+      members.filter(
+        (m) => m.roles.includes("executor") || m.roles.includes("specialist"),
+      ),
+    [members],
+  );
 
   // ── "@ mention" composer (ticket 18) ──────────────────────────────────────
   const mentionCandidates = useMemo<MentionCandidate[]>(() => {
@@ -1042,6 +1067,9 @@ export default function GroupMessagesPage() {
         handleComposerKeyDown={handleComposerKeyDown}
         handleSend={handleSend}
         insertMention={insertMention}
+        testExecutor={testExecutor}
+        setTestExecutor={setTestExecutor}
+        executorMembers={executorMembers}
       />
     </div>
   );

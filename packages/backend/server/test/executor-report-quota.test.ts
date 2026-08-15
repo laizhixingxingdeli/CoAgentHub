@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { testDb } from "./db";
 
 /**
  * 调度改造批次收尾(票7):任务书模板化 + 汇报结构化 + 额度感知调度。
@@ -83,8 +84,16 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
-const { __resetExecutorQueueForTests, parseTaskReport, renderTaskCard } =
-  await import("@server/lib/executor-task");
+const {
+  __resetExecutorQueueForTests,
+  parseTaskReport,
+  renderTaskCard,
+  resolveTestExecutor,
+} = await import("@server/lib/executor-task");
+
+// PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与 executor-trigger /
+// executor-queue 同款 cast);resolveTestExecutor 只走共享的 query API。
+const teDb = testDb as unknown as Parameters<typeof resolveTestExecutor>[0];
 
 describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
   const app = createTestApp();
@@ -101,8 +110,8 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
-    const { id } = (await res.json()) as { id: string };
-    return { id };
+    const { id, name } = (await res.json()) as { id: string; name: string };
+    return { id, name };
   }
 
   async function createGroup(participantId: string, title: string) {
@@ -487,6 +496,200 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         delete process.env.FAKE_RATE_LIMIT;
         delete process.env.FAKE_COUNTER_FILE;
         rmSync(counterDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+  });
+
+  describe("测试执行器选择 + 任务书「执行与测试要求」段(分工固化)", () => {
+    async function setMemberPrompt(
+      participantId: string,
+      groupId: string,
+      memberParticipantId: string,
+      prompt: string,
+    ) {
+      const res = await app.request(
+        `/api/groups/${groupId}/members/${memberParticipantId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": participantId,
+          },
+          body: JSON.stringify({ prompt }),
+        },
+      );
+      expect(res.status).toBe(200);
+    }
+
+    it("resolveTestExecutor:匹配分工提示词 → 返回该执行器;目标执行器本身不入选", async () => {
+      const coordinator = await registerParticipant({ name: "coord-te-1" });
+      const implementer = await registerParticipant({ name: "Impl 执行器" });
+      const tester = await registerParticipant({ name: "Tester 执行器" });
+      const group = await createGroup(coordinator.id, "选择测试1");
+      await addMember(coordinator.id, group.id, implementer.id, ["executor"]);
+      await addMember(coordinator.id, group.id, tester.id, ["executor"]);
+      // 实现执行器自身也有测试关键词,但作为目标被排除;Tester 入选。
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        implementer.id,
+        "负责实现与测试",
+      );
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        tester.id,
+        "负责测试与验证改动",
+      );
+      expect(await resolveTestExecutor(teDb, group.id, implementer.name)).toBe(
+        tester.name,
+      );
+    });
+
+    it("resolveTestExecutor:多个匹配 → 取测试关键词出现次数最多的;并列稳定选一", async () => {
+      const coordinator = await registerParticipant({ name: "coord-te-2" });
+      const implementer = await registerParticipant({ name: "Impl 执行器2" });
+      const testerA = await registerParticipant({ name: "ATester 执行器" });
+      const testerB = await registerParticipant({ name: "BTester 执行器" });
+      const group = await createGroup(coordinator.id, "选择测试2");
+      await addMember(coordinator.id, group.id, implementer.id, ["executor"]);
+      await addMember(coordinator.id, group.id, testerA.id, ["executor"]);
+      await addMember(coordinator.id, group.id, testerB.id, ["executor"]);
+      // A:1 次关键词; B:3 次 → 取 B。
+      await setMemberPrompt(coordinator.id, group.id, testerA.id, "负责测试");
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        testerB.id,
+        "负责测试与验证与检验",
+      );
+      expect(await resolveTestExecutor(teDb, group.id, implementer.name)).toBe(
+        testerB.name,
+      );
+
+      // 并列(各 1 次)→ 稳定选一(名字字典序,ATester 在前)。
+      await setMemberPrompt(coordinator.id, group.id, testerB.id, "负责测试");
+      expect(await resolveTestExecutor(teDb, group.id, implementer.name)).toBe(
+        testerA.name,
+      );
+    });
+
+    it("resolveTestExecutor:大小写不敏感(Test/Verify 大写也匹配)", async () => {
+      const coordinator = await registerParticipant({ name: "coord-te-3" });
+      const implementer = await registerParticipant({ name: "Impl 执行器3" });
+      const tester = await registerParticipant({ name: "Tester 执行器3" });
+      const group = await createGroup(coordinator.id, "选择测试3");
+      await addMember(coordinator.id, group.id, implementer.id, ["executor"]);
+      await addMember(coordinator.id, group.id, tester.id, ["executor"]);
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        tester.id,
+        "responsible for TEST and Verify",
+      );
+      expect(await resolveTestExecutor(teDb, group.id, implementer.name)).toBe(
+        tester.name,
+      );
+    });
+
+    it("resolveTestExecutor:无匹配(无提示词/角色不符)→ null", async () => {
+      const coordinator = await registerParticipant({ name: "coord-te-4" });
+      const implementer = await registerParticipant({ name: "Impl 执行器4" });
+      const plain = await registerParticipant({ name: "普通执行器" });
+      const group = await createGroup(coordinator.id, "选择测试4");
+      await addMember(coordinator.id, group.id, implementer.id, ["executor"]);
+      await addMember(coordinator.id, group.id, plain.id, ["executor"]);
+      // 有 executor 角色但提示词不含测试职责 → 无匹配。
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        plain.id,
+        "负责前端开发与接口联调",
+      );
+      expect(
+        await resolveTestExecutor(teDb, group.id, implementer.name),
+      ).toBeNull();
+      // 提示词含测试职责但角色不含 executor/specialist → 无匹配。
+      const reviewer = await registerParticipant({ name: "评审员" });
+      await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+      await setMemberPrompt(
+        coordinator.id,
+        group.id,
+        reviewer.id,
+        "负责测试与评审",
+      );
+      expect(
+        await resolveTestExecutor(teDb, group.id, implementer.name),
+      ).toBeNull();
+    });
+
+    it("buildTicket:无匹配成员 → 任务书默认由实现执行器完成测试", async () => {
+      const capture = path.join(fakeDir, "ticket-default-te.md");
+      process.env.FAKE_TICKET_COPY = capture;
+      try {
+        const { coordinator, codebuddy, group } = await setupGroup();
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "建文件默认测试",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+        const ticket = readFileSync(capture, "utf8");
+        expect(ticket).toContain("## 执行与测试要求");
+        expect(ticket).toContain("- 实现执行器:codebuddy(必选,由发布者定向)");
+        expect(ticket).toContain("- 测试执行器:默认由实现执行器完成测试");
+        expect(ticket).toContain(
+          "- 完成后必须运行测试并验证改动(新增/相关用例),汇报需包含测试结果。",
+        );
+      } finally {
+        delete process.env.FAKE_TICKET_COPY;
+      }
+    }, 30_000);
+
+    it("buildTicket:群内有匹配成员 → 测试执行器 = 解析结果", async () => {
+      const capture = path.join(fakeDir, "ticket-matched-te.md");
+      process.env.FAKE_TICKET_COPY = capture;
+      try {
+        const { coordinator, codebuddy, group } = await setupGroup();
+        const tester = await registerParticipant({ name: "Tester 执行器5" });
+        await addMember(coordinator.id, group.id, tester.id, ["executor"]);
+        await setMemberPrompt(
+          coordinator.id,
+          group.id,
+          tester.id,
+          "负责测试与验证改动",
+        );
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "建文件匹配测试",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+        const ticket = readFileSync(capture, "utf8");
+        expect(ticket).toContain("- 测试执行器:Tester 执行器5");
+      } finally {
+        delete process.env.FAKE_TICKET_COPY;
+      }
+    }, 30_000);
+
+    it("buildTicket:body 显式「**测试执行器:**」行原样保留", async () => {
+      const capture = path.join(fakeDir, "ticket-explicit-te.md");
+      process.env.FAKE_TICKET_COPY = capture;
+      try {
+        const { coordinator, codebuddy, group } = await setupGroup();
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "建文件显式测试\n\n**测试执行器:手工指定执行器**",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+        const ticket = readFileSync(capture, "utf8");
+        // 显式行原样保留在任务内容中(执行器读任务书即可)。
+        expect(ticket).toContain("**测试执行器:手工指定执行器**");
+        // 无匹配成员时,自动段仍写默认(显式行不覆盖自动规则,二者并存)。
+        expect(ticket).toContain("- 测试执行器:默认由实现执行器完成测试");
+      } finally {
+        delete process.env.FAKE_TICKET_COPY;
       }
     }, 30_000);
   });

@@ -151,6 +151,16 @@ CoAgentHub/
 
 - 执行器配置:`lib/executors.ts` 内置 + `executor_config` 表(DB 持久化,`/api/executors`
   管理);participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
+- **执行器分工选择**:定向消息(`audience=participant`)指定的执行器 = **实现执行器**;
+  **测试执行器**按群成员分工提示词自动选择(`resolveTestExecutor`,纯函数可单测):
+  群成员中 roles 含 executor/specialist 且 prompt 文本匹配测试职责(关键词:测试/验证/
+  检验/test/verify/review,大小写不敏感)的执行器;匹配多个 → 取测试关键词出现次数
+  最多的(并列按名字字典序,稳定);无匹配 → null。任务书「执行与测试要求」段固定输出
+  实现执行器与测试执行器(解析结果或「默认由实现执行器完成测试」),并强制「完成后必须
+  运行测试并验证改动,汇报需包含测试结果」。前端发送器提供「测试执行器」下拉(纯辅助,
+  不改消息 schema):默认「自动(按分工提示词)」不追加;选「同一执行器」或显式成员时在
+  消息 body 追加一行 `**测试执行器:<名>**`,由 buildTicket 原样保留进任务书(「同一
+  执行器」= 测试由实现执行器自己完成,与自动解析的固定段并存,执行器以显式行为准)。
 - 任务:定向消息命中执行器 → task(queued)→ 全局串行队列 → spawn(CLI 或 A2A)
   → git 快照(checkpointRef)→ done/failed;默认超时 120 分钟(EXECUTOR_TIMEOUT_MS)。
 - **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收

@@ -17,9 +17,9 @@ import {
   DELETED_MESSAGE_BODY,
   FOLD_PREVIEW_LENGTH,
   FOLD_THRESHOLD,
-  roleLabel,
   type Member,
   type MessageItem,
+  roleLabel,
 } from "./types";
 
 interface MessageListProps {

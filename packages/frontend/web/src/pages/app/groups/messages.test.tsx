@@ -1025,6 +1025,95 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   }
 });
 
+describe("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () => {
+  /** 含 executor 角色成员,供「测试执行器」下拉显式选择。 */
+  const EXEC_MEMBERS = [
+    {
+      participantId: "participant-1",
+      name: "hermes-mac",
+      device: "mac-mini",
+      roles: ["coordinator"],
+      joinedAt: "2026-08-01T00:00:00.000Z",
+    },
+    {
+      participantId: "participant-2",
+      name: "win-hermes",
+      device: "win-pc",
+      roles: ["executor"],
+      joinedAt: "2026-08-01T00:01:00.000Z",
+    },
+  ];
+
+  const selectTestExecutor = (value: string) =>
+    fireEvent.change(screen.getByLabelText("测试执行器"), {
+      target: { value },
+    });
+
+  it("默认「自动」→ body 不附加测试执行器行", async () => {
+    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+
+    typeMessage("默认自动任务");
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(lastPostPayload(fetchMock)).toEqual({
+        body: "默认自动任务",
+        audience: "broadcast",
+      });
+      expect(String(lastPostPayload(fetchMock).body)).not.toContain(
+        "测试执行器",
+      );
+    });
+  });
+
+  it("选「同一执行器」→ body 附加 **测试执行器:同一执行器** 行", async () => {
+    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+
+    selectTestExecutor("same");
+    typeMessage("同一执行器任务");
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      const payload = lastPostPayload(fetchMock);
+      expect(payload.audience).toBe("broadcast");
+      expect(String(payload.body)).toContain("**测试执行器:同一执行器**");
+    });
+  });
+
+  it("显式选成员 → body 附加 **测试执行器:<成员名>** 行", async () => {
+    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+
+    selectTestExecutor("participant-2");
+    typeMessage("显式测试任务");
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      const payload = lastPostPayload(fetchMock);
+      expect(String(payload.body)).toContain("**测试执行器:win-hermes**");
+    });
+  });
+
+  it("下拉候选 = 群内 executor/specialist 角色成员", async () => {
+    stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    await screen.findByText("任务草稿");
+
+    const options = Array.from(
+      screen.getByLabelText("测试执行器").querySelectorAll("option"),
+    ).map((o) => o.textContent);
+    expect(options).toContain("自动(按分工提示词)");
+    expect(options).toContain("同一执行器");
+    expect(options).toContain("win-hermes"); // executor 角色成员
+    expect(options).not.toContain("hermes-mac"); // coordinator 不入候选
+  });
+});
+
 describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
   it("已归档群组渲染只读横幅并禁用发送输入(历史仍可查看)", async () => {
     stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
@@ -2598,10 +2687,10 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
     // 成员 Tab 是默认激活的右栏 Tab,直接等待成员列表加载。
     await screen.findByTestId("members-tab");
     await screen.findByText("hermes-mac");
-
-    // 成员名
-    expect(screen.getByText("hermes-mac")).toBeInTheDocument();
-    expect(screen.getByText("win-hermes")).toBeInTheDocument();
+    // 成员名(限定成员 Tab 作用域:新 Composer 测试执行器下拉也含成员名,避免歧义)
+    const membersTab = within(screen.getByTestId("members-tab"));
+    expect(membersTab.getByText("hermes-mac")).toBeInTheDocument();
+    expect(membersTab.getByText("win-hermes")).toBeInTheDocument();
     // 角色徽章(中文标签)
     expect(screen.getByText("协调者")).toBeInTheDocument();
     expect(screen.getByText("检视者")).toBeInTheDocument();

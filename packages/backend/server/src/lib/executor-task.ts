@@ -845,10 +845,21 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     } else {
       // 并行任务可能同毫秒触发,ticket 路径用 taskId 保证唯一(避免互相覆盖)。
       const ticketPath = `/tmp/coagenthub-ticket-${taskId}.md`;
+      // 测试执行器按群分工提示词自动选择(无匹配 → null → 任务书默认由实现执行器
+      // 完成测试);body 里显式「**测试执行器:**」行由 buildTicket 原样保留。
+      // 解析失败不影响任务执行:容错为 null(按默认处理)。
+      let testExecutor: string | null = null;
+      try {
+        testExecutor = await resolveTestExecutor(db, groupId, ex.agentName);
+      } catch (e) {
+        console.warn(
+          `[executor] 测试执行器解析失败(${taskId}),按默认处理: ${e}`,
+        );
+      }
       try {
         writeFileSync(
           ticketPath,
-          buildTicket(body, ex.label, repoRoot, groupPrompt),
+          buildTicket(body, ex.label, repoRoot, groupPrompt, testExecutor),
         );
       } catch (e) {
         await failTask(db, taskId, `任务书写入失败: ${e}`);
@@ -1426,18 +1437,90 @@ export async function postStatus(
   }
 }
 
+/** 测试职责关键词(分工提示词匹配用,大小写不敏感)。 */
+const TEST_KEYWORDS = [
+  "测试",
+  "验证",
+  "检验",
+  "test",
+  "verify",
+  "review",
+] as const;
+
+/** 统计 needle 在 haystack 中的出现次数(调用方保证同为小写)。 */
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    count += 1;
+    idx = haystack.indexOf(needle, idx + needle.length);
+  }
+  return count;
+}
+
+/**
+ * 测试执行器选择(任务书「执行与测试要求」段):群成员中 roles 含
+ * executor/specialist 且分工提示词(prompt)匹配测试职责(关键词:测试/验证/
+ * 检验/test/verify/review,大小写不敏感)的执行器。
+ * - 匹配多个 → 取 prompt 中测试关键词出现次数最多的(并列按名字字典序,稳定);
+ * - 无匹配 → null(任务书写「默认由实现执行器完成测试」)。
+ * targetExecutorName = 实现执行器的 participant 名,候选排除其本身(避免自测
+ * 自验);与 buildTicket 解耦、独立可单测。
+ */
+export async function resolveTestExecutor(
+  db: DataBase,
+  groupId: string,
+  targetExecutorName: string,
+): Promise<string | null> {
+  const members = await db.query.groupMember.findMany({
+    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
+  });
+  const executorMembers = members.filter((m) =>
+    m.roles.some((r) => r === "executor" || r === "specialist"),
+  );
+  if (executorMembers.length === 0) return null;
+  const participants = await db.query.participant.findMany({
+    where: (t, { inArray: inFn }) =>
+      inFn(
+        t.id,
+        executorMembers.map((m) => m.participantId),
+      ),
+    columns: { id: true, name: true },
+  });
+  const nameById = new Map(participants.map((p) => [p.id, p.name]));
+  const target = targetExecutorName.trim().toLowerCase();
+  const scored: Array<{ name: string; score: number }> = [];
+  for (const m of executorMembers) {
+    const name = nameById.get(m.participantId);
+    if (!name || !m.prompt) continue;
+    if (name.trim().toLowerCase() === target) continue; // 排除实现执行器本身
+    const lower = m.prompt.toLowerCase();
+    const score = TEST_KEYWORDS.reduce(
+      (acc, kw) => acc + countOccurrences(lower, kw),
+      0,
+    );
+    if (score > 0) scored.push({ name, score });
+  }
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return scored[0].name;
+}
+
 /**
  * 执行器任务书固定模板(票7):标题 + 执行器/项目/发布时间 + 任务内容 + 汇报
  * 格式要求(执行器 stdout 按「提交/测试/汇报/遗留」四段输出,server 按段落
  * 解析成结构化 diffSummary)。模板只影响任务书文本,不改任务触发逻辑。
  * 角色解绑后的「本群分工」段与「默认约束」作为尾部附加说明保留(前序票的
- * 既有行为,删除会回归)。
+ * 既有行为,删除会回归)。「执行与测试要求」段(任务书模板固化):实现执行器 =
+ * 定向目标 label;测试执行器 = resolveTestExecutor 解析结果或默认由实现执行器
+ * 完成测试;body 中的显式「**测试执行器:**」行原样保留(执行器读任务书即可)。
  */
 function buildTicket(
   body: string,
   label: string,
   repoRoot: string,
   groupPrompt: GroupPromptInfo | null = null,
+  testExecutor: string | null = null,
 ): string {
   const lines = [
     `# CoAgentHub 任务`,
@@ -1459,6 +1542,14 @@ function buildTicket(
       `本群分工:角色=[${groupPrompt.roles.join(",")}];提示词=${groupPrompt.prompt}`,
     );
   }
+  // 执行与测试要求段(任务书模板固化):实现执行器 = 定向目标 label;测试执行器 =
+  // resolveTestExecutor 解析结果,无匹配 → 默认由实现执行器完成测试。
+  lines.push(
+    "## 执行与测试要求",
+    `- 实现执行器:${label}(必选,由发布者定向)`,
+    `- 测试执行器:${testExecutor ?? "默认由实现执行器完成测试"}`,
+    "- 完成后必须运行测试并验证改动(新增/相关用例),汇报需包含测试结果。",
+  );
   lines.push(
     `默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。`,
   );

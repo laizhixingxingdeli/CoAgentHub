@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { MentionCandidate } from "./lib";
+import type { Member } from "./types";
 
 interface ComposerProps {
   replyTo: { id: string; senderName: string; preview: string } | null;
@@ -22,6 +23,11 @@ interface ComposerProps {
   audiencePreview: string | null;
   handleSend: () => Promise<void>;
   sending: boolean;
+  /** 测试执行器选择(纯辅助,不改消息 schema):"auto" | "same" | participantId。 */
+  testExecutor: string;
+  setTestExecutor: (value: string) => void;
+  /** 群内 executor/specialist 角色成员,供「测试执行器」下拉显式选择。 */
+  executorMembers: Member[];
 }
 
 /**
@@ -45,6 +51,9 @@ export function Composer(props: ComposerProps) {
     audiencePreview,
     handleSend,
     sending,
+    testExecutor,
+    setTestExecutor,
+    executorMembers,
   } = props;
 
   return (
@@ -128,13 +137,30 @@ export function Composer(props: ComposerProps) {
         />
       </div>
       <div className="mt-2 flex items-center justify-between gap-2">
-        <div
-          data-testid="audience-preview"
-          className="min-w-0 truncate text-xs text-muted-foreground"
-        >
-          {audiencePreview
-            ? t("messages.send.audience", { audience: audiencePreview })
-            : ""}
+        <div className="flex min-w-0 items-center gap-2">
+          <select
+            aria-label={t("messages.send.testExecutor")}
+            value={testExecutor}
+            onChange={(e) => setTestExecutor(e.target.value)}
+            disabled={isReadOnly}
+            className="shrink-0 rounded-md border bg-background px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value="auto">{t("messages.send.testExecutor.auto")}</option>
+            <option value="same">{t("messages.send.testExecutor.same")}</option>
+            {executorMembers.map((m) => (
+              <option key={m.participantId} value={m.participantId}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+          <div
+            data-testid="audience-preview"
+            className="min-w-0 truncate text-xs text-muted-foreground"
+          >
+            {audiencePreview
+              ? t("messages.send.audience", { audience: audiencePreview })
+              : ""}
+          </div>
         </div>
         <Button
           onClick={handleSend}
