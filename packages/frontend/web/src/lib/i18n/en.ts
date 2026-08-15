@@ -425,4 +425,8 @@ export const en: Record<DictKey, string> = {
   "help.title": "Help",
 
   "cards.acceptanceCriteria": "Acceptance criteria",
-};
+
+  "common.toggleSidebar": "Toggle sidebar",
+  "common.breadcrumb": "Breadcrumb",
+  "common.scrollToBottom": "Scroll to bottom",
+  "common.avatar": "Avatar",};

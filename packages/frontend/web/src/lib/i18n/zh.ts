@@ -405,6 +405,10 @@ export const zh = {
   "help.title": "帮助",
 
   "cards.acceptanceCriteria": "验收标准",
-} as const;
+
+  "common.toggleSidebar": "切换侧边栏",
+  "common.breadcrumb": "面包屑",
+  "common.scrollToBottom": "滚动到底部",
+  "common.avatar": "头像",} as const;
 
 export type DictKey = keyof typeof zh;

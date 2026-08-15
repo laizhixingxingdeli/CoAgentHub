@@ -9,6 +9,8 @@ import { Skeleton } from "./components/ui/skeleton";
 // 路由级 code-split:页面组件按需加载,首屏只取当前路由的 chunk。
 // 布局(sidebar/layout)保持静态 import,首屏必需。
 const ParticipantsPage = lazy(() => import("./pages/app/participants"));
+const HelpPage = lazy(() => import("./pages/app/help"));
+const FeedbackPage = lazy(() => import("./pages/app/feedback"));
 const GroupsPage = lazy(() => import("./pages/app/groups"));
 const GroupMembersPage = lazy(() => import("./pages/app/groups/members"));
 const GroupMessagesPage = lazy(() => import("./pages/app/groups/messages"));
@@ -65,6 +67,8 @@ const App = () => (
                 <Redirect to="/groups" />
               </Route>
               <Route path="/participants" component={ParticipantsPage} />
+              <Route path="/help" component={HelpPage} />
+              <Route path="/feedback" component={FeedbackPage} />
               {/* /groups routes are declared flat (no `nest`): wouter v3 nested
                 Routes wrap children in a Router with base="/groups", which
                 base-strips the location — any full-path useRoute("/groups/:id")

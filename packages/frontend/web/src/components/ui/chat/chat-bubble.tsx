@@ -4,6 +4,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 import { Button } from "../button";
 import MessageLoading from "./message-loading";
+import { t } from "@/lib/i18n";
 
 // ChatBubble
 const chatBubbleVariant = cva(
@@ -66,7 +67,7 @@ const ChatBubbleAvatar: React.FC<ChatBubbleAvatarProps> = ({
   className,
 }) => (
   <Avatar className={className}>
-    <AvatarImage src={src} alt="Avatar" />
+    <AvatarImage src={src} alt={t("common.avatar")} />
     <AvatarFallback>{fallback}</AvatarFallback>
   </Avatar>
 );
