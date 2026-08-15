@@ -359,7 +359,7 @@ export default function GroupMembersPage() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
+    <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
       <div className="mb-6">
         <a
           href={groupId ? `/groups/${groupId}` : "/groups"}

@@ -46,7 +46,7 @@ const STEPS: Array<{
 
 export default function HelpPage() {
   return (
-    <div className="mx-auto w-full max-w-3xl p-4 sm:p-6">
+    <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
       <div className="mb-6">
         <h2 className="text-xl font-semibold">{t("help.title")}</h2>
         <p className="text-muted-foreground mt-1 text-sm">

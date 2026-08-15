@@ -595,7 +595,7 @@ export default function GroupsPage() {
     null;
 
   return (
-    <div className="w-full p-4 sm:p-6">
+    <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
       <div className="mb-6 flex flex-col gap-3">
         <div>
           <h2 className="text-xl font-semibold">{t("groups.title")}</h2>
