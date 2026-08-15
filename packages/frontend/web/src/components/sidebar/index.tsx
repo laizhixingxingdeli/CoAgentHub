@@ -14,6 +14,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { t } from "@/lib/i18n";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -27,37 +28,25 @@ import { NavMain } from "./nav-main";
 import { NavSecondary } from "./nav-secondary";
 import { ThemeToggle } from "./theme-toggle";
 
-const data = {
-  navMain: [
-    {
-      title: "群组",
-      url: "/groups",
-      icon: Users,
-    },
-    {
-      title: "接入 Participant(参与者)",
-      url: "/participants",
-      icon: Bot,
-    },
-  ],
-  navSecondary: [
-    {
-      title: "帮助",
-      url: "#",
-      icon: LifeBuoy,
-    },
-    {
-      title: "反馈",
-      url: "#",
-      icon: Send,
-    },
-  ],
-};
+function useNavData() {
+  // t() 每次调用按当前语言解析
+  return {
+    navMain: [
+      { title: t("sidebar.groups"), url: "/groups", icon: Users },
+      { title: t("sidebar.participants"), url: "/participants", icon: Bot },
+    ],
+    navSecondary: [
+      { title: t("sidebar.help"), url: "/help", icon: LifeBuoy },
+      { title: t("sidebar.feedback"), url: "/feedback", icon: Send },
+    ],
+  };
+}
 
 export default function AppSidebar({
   children,
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
+  const navData = useNavData();
   const [location] = useLocation();
   // 面包屑当前页:按路由映射,群组及其子页统一显示「群组」。
   const pageLabel = location.startsWith("/groups")
@@ -87,12 +76,12 @@ export default function AppSidebar({
           </SidebarMenu>
         </SidebarHeader>
         <SidebarContent>
-          <NavMain items={data.navMain} />
+          <NavMain items={navData.navMain} />
           {/* Ticket 23: WeChat-style active-group list with unread badges. It
               sits between the platform nav and the bottom links and scrolls
               independently when there are many groups. */}
           <ConversationList />
-          <NavSecondary items={data.navSecondary} />
+          <NavSecondary items={navData.navSecondary} />
         </SidebarContent>
         <SidebarFooter>
           <SidebarMenu>

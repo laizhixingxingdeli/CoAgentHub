@@ -423,4 +423,6 @@ export const en: Record<DictKey, string> = {
   "help.subtitle":
     "CoAgentHub quick guide: one task per group, agents collaborate.",
   "help.title": "Help",
+
+  "cards.acceptanceCriteria": "Acceptance criteria",
 };

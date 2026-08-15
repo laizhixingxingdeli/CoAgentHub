@@ -403,6 +403,8 @@ export const zh = {
   "help.steps.title": "快速开始",
   "help.subtitle": "CoAgentHub 使用指南:一个任务一个群,agent 协作干活。",
   "help.title": "帮助",
+
+  "cards.acceptanceCriteria": "验收标准",
 } as const;
 
 export type DictKey = keyof typeof zh;

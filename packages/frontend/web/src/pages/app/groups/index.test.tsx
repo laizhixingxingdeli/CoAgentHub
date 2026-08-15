@@ -1216,8 +1216,8 @@ describe("GroupsPage 窄屏适配 (ticket 34)", () => {
     expect(table?.className).toContain("md:table");
     // 卡片内操作行 flex-wrap:窄屏下三个按钮可换行而不横向挤压。
     expect(cardList?.querySelector(".flex-wrap")).not.toBeNull();
-    // 页面根容器窄屏收紧留白(p-4),sm 起恢复 p-6。
-    const root = document.querySelector(".max-w-4xl");
+    // 页面根容器铺满宽度(w-full),窄屏收紧留白(p-4),sm 起恢复 p-6。
+    const root = document.querySelector(".w-full");
     expect(root?.className).toContain("p-4");
     expect(root?.className).toContain("sm:p-6");
   });

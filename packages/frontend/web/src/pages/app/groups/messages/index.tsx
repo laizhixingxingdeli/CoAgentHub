@@ -850,7 +850,7 @@ export default function GroupMessagesPage() {
   }, [openActionsId]);
 
   return (
-    <div className="mx-auto flex h-[calc(100dvh-4rem)] w-full max-w-4xl flex-col">
+    <div className="flex h-[calc(100dvh-4rem)] w-full flex-col">
       {/* ── Zone 1: title bar ─────────────────────────────────────────── */}
       <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
         <a

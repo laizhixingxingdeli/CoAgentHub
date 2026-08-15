@@ -462,7 +462,7 @@ export default function ExecutorsPage() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-4xl p-4 sm:p-6">
+    <div className="w-full p-4 sm:p-6">
       <div className="mb-6">
         <h2 className="text-xl font-semibold">{t("participants.title")}</h2>
         <p className="text-muted-foreground text-sm">

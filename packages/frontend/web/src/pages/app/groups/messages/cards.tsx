@@ -113,7 +113,7 @@ export function TaskBriefCard({ body }: { body: string }) {
         {criteria.length > 0 && (
           <div className="mt-1 flex flex-col gap-1">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-primary">
-              Acceptance criteria
+              {t("cards.acceptanceCriteria")}
             </span>
             <ul className="list-disc space-y-0.5 pl-4 text-sm">
               {criteria.map((item) => (
