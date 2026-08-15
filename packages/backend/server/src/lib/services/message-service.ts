@@ -239,6 +239,39 @@ export async function listVisibleMessages(
     conditions.push(ilike(groupMessageTable.body, `%${escaped}%`));
   }
 
+    // 优化:一次性按群聚合 closure 的 max(depth),再 JOIN 回消息表,避免
+    // 旧实现里每行消息都跑一次相关子查询(大群/翻页场景的 O(N) 次子查询)。
+    const depthAgg = db
+      .select({
+        descendantId: groupMessageClosureTable.descendantId,
+        depth: sql<number>`max(${groupMessageClosureTable.depth})`.as("depth"),
+      })
+      .from(groupMessageClosureTable)
+      .where(eq(groupMessageClosureTable.groupId, groupId))
+      .groupBy(groupMessageClosureTable.descendantId)
+      .as("depth_agg");
+    return db
+      .select({
+        id: groupMessageTable.id,
+        groupId: groupMessageTable.groupId,
+        senderId: groupMessageTable.senderId,
+        parentId: groupMessageTable.parentId,
+        audience: groupMessageTable.audience,
+        audienceRef: groupMessageTable.audienceRef,
+        body: groupMessageTable.body,
+        contentType: groupMessageTable.contentType,
+        fileRef: groupMessageTable.fileRef,
+        createdAt: groupMessageTable.createdAt,
+        updatedAt: groupMessageTable.updatedAt,
+        depth: sql<number>`coalesce(${depthAgg.depth}, 0)`,
+      })
+      .from(groupMessageTable)
+      .leftJoin(depthAgg, eq(depthAgg.descendantId, groupMessageTable.id))
+      .where(and(...conditions))
+      .orderBy(asc(groupMessageTable.id))
+      .limit(limit);
+    /*
+
   return (
     db
       .select(messageFullColumns)
@@ -250,6 +283,7 @@ export async function listVisibleMessages(
       .orderBy(asc(groupMessageTable.id))
       .limit(limit)
   );
+    */
 }
 
 /**

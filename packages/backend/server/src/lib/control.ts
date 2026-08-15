@@ -13,6 +13,7 @@
 import {
   type Task,
   task as taskTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import {
@@ -31,7 +32,7 @@ import {
   effectiveExecutors,
   findExecutorByParticipantName,
 } from "@server/lib/executors";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 /** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发控制指令。 */
 const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
@@ -195,7 +196,7 @@ async function handleRollback(
     return;
   }
 
-  const res = resetToCheckpoint(ref, findRepoRoot());
+  const res = await resetToCheckpoint(ref, findRepoRoot());
   if (!res.ok) {
     await reply(`❌ 回滚失败: ${res.message}`);
     return;
@@ -216,10 +217,19 @@ async function handleRollback(
 async function firstExecutorParticipant(
   db: DataBase,
 ): Promise<{ participantId: string; ex: ExecutorConfig } | null> {
-  for (const ex of await effectiveExecutors(db)) {
+  const executors = await effectiveExecutors(db);
+  const participants = await db
+    .select({ id: participantTable.id, name: participantTable.name })
+    .from(participantTable)
+    .where(inArray(participantTable.name, executors.map((ex) => ex.agentName)));
+  const byName = new Map(participants.map((p) => [p.name, p]));
+  for (const ex of executors) {
+    const participant = byName.get(ex.agentName);
+    /*
     const participant = await db.query.participant.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.name, ex.agentName),
     });
+    */
     if (participant) return { participantId: participant.id, ex };
   }
   return null;

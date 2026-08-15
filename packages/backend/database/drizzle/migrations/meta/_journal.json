@@ -93,5 +93,20 @@
       "tag": "0012_add_executor_memory",
       "breakpoints": true
     }
+      ,
+      {
+        "idx": 13,
+        "version": "7",
+        "when": 1786810000000,
+        "tag": "0013_add_participant_name_unique",
+        "breakpoints": true
+      },
+      {
+        "idx": 14,
+        "version": "7",
+        "when": 1786810000001,
+        "tag": "0014_task_status_default_queued",
+        "breakpoints": true
+      }
   ]
 }

@@ -57,7 +57,7 @@ export const task = pgTable("task", {
   // 任务书快照:任务触发时消息 body 的完整复制(可空 = 无原文可快照,如桥直发)。
   // 消息后续被编辑/软删除不影响已触发任务语义 —— 任务面板显示这份原文。
   brief: text("brief"),
-  status: text("status", { enum: TASK_STATUSES }).notNull().default("running"),
+  status: text("status", { enum: TASK_STATUSES }).notNull().default("queued"),
   // 执行前 git 快照 ref(refs/coagenthub-cp/<taskId>);可空 = 尚未打快照。
   checkpointRef: text("checkpoint_ref"),
   // 失败自动重试计数:任务因 exit≠0/超时/静默失败后按 dispatch-policy 重试的次数。

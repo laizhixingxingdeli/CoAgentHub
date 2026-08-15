@@ -66,6 +66,13 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
 export class WsHub {
   private readonly conns = new Map<string, Set<IdentifiedWebSocket>>();
+  /** 群成员短缓存:fanOut 高频调用(tail 输出/状态推送)时避免每条消息都查库。
+   *  TTL 到期自动失效;成员增删改通过 invalidateGroupMembers 主动失效。 */
+  private readonly memberCache = new Map<
+    string,
+    { expiresAt: number; members: { participantId: string; roles: string[] }[] }
+  >();
+  private readonly MEMBER_CACHE_TTL_MS = 30_000;
   private readonly attached = new Set<HttpServer>();
   private wss: WebSocketServer | null = null;
   private readonly heartbeatIntervalMs: number;
@@ -250,6 +257,34 @@ export class WsHub {
         }),
     );
   }
+  /** 取群成员(短缓存):fanOut 高频调用时避免每条消息都查 group_members。 */
+  private async getGroupMembers(
+    groupId: string,
+  ): Promise<{ participantId: string; roles: string[] }[]> {
+    const cached = this.memberCache.get(groupId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.members;
+    }
+    const members = await db
+      .select({
+        participantId: groupMemberTable.participantId,
+        roles: groupMemberTable.roles,
+      })
+      .from(groupMemberTable)
+      .where(eq(groupMemberTable.groupId, groupId));
+    this.memberCache.set(groupId, {
+      expiresAt: Date.now() + this.MEMBER_CACHE_TTL_MS,
+      members,
+    });
+    return members;
+  }
+
+  /** 成员增删改后主动失效该群成员缓存(路由层调用),避免 TTL 内推送错人。 */
+  invalidateGroupMembers(groupId: string): void {
+    this.memberCache.delete(groupId);
+  }
+
+
 
   /**
    * Shared fan-out: query the group's members, keep the visibility-filtered
@@ -268,13 +303,15 @@ export class WsHub {
     // entirely; it could never deliver anything.
     if (this.conns.size === 0) return;
     try {
-      const members = await db
+      const members = await this.getGroupMembers(message.groupId);
+        /*
         .select({
           participantId: groupMemberTable.participantId,
           roles: groupMemberTable.roles,
         })
         .from(groupMemberTable)
         .where(eq(groupMemberTable.groupId, message.groupId));
+        */
       const localUserId = await resolveLocalUser(db);
       // LAN trust model: the default Local User is a human observer — type
       // =human bypasses the audience rule, so it receives every message even

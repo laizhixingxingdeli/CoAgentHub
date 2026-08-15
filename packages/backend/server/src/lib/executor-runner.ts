@@ -219,28 +219,89 @@ export function gitSync(
   };
 }
 
+/** 异步跑 git(推荐):基于 spawn,不阻塞事件循环;超时 SIGKILL 并报失败。
+ *  createCheckpoint / resetToCheckpoint 已改用此实现;gitSync 保留为同步兼容口
+ *  (仅限测试/低频一次性调用),避免在请求路径上阻塞 server。 */
+export function gitExec(
+  args: string[],
+  cwd?: string,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("git", args, {
+        cwd: cwd ?? findRepoRoot(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      const err = e as Error;
+      resolve({ status: 1, stdout: "", stderr: err.message });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // 已退出,忽略。
+      }
+    }, GIT_SYNC_TIMEOUT_MS);
+
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status: 1, stdout, stderr: stderr || e.message });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        status: timedOut ? 1 : code,
+        stdout,
+        stderr: timedOut
+          ? `git ${args.join(" ")} 超时(${GIT_SYNC_TIMEOUT_MS}ms)`
+          : stderr,
+      });
+    });
+  });
+}
+
+
 /**
  * 任务执行前打快照:git add -A → write-tree → commit-tree -p HEAD,把工作区
  * 树挂到隐藏 ref refs/coagenthub-cp/<taskId> 下,不动 HEAD/工作区(仅暂存 index)。
  * 失败抛错(调用方中止任务)。与桥 createCheckpoint 一致。
  */
-export function createCheckpoint(
+export async function createCheckpoint(
   taskId: string,
   repoRoot: string,
-): { ref: string; sha: string } {
+): Promise<{ ref: string; sha: string }> {
   const ref = checkpointRef(taskId);
-  const add = gitSync(["add", "-A"], repoRoot);
+  const add = await gitExec(["add", "-A"], repoRoot);
   if (add.status !== 0) {
     throw new Error(`git add -A 失败: ${(add.stderr ?? "").trim()}`);
   }
-  const tree = gitSync(["write-tree"], repoRoot);
+  const tree = await gitExec(["write-tree"], repoRoot);
   if (tree.status !== 0) {
     throw new Error(`git write-tree 失败: ${(tree.stderr ?? "").trim()}`);
   }
   // commit-tree 需要作者身份;CI 全新 runner 无 git user.name/email 配置会报
   // "Author identity unknown"。用 -c 显式提供兜底身份,只影响该次命令,
   // 不污染机器全局配置;本机已有全局身份时行为一致(同样用兜底身份)。
-  const commit = gitSync(
+  const commit = await gitExec(
     [
       "-c",
       "user.name=CoAgentHub",
@@ -259,7 +320,7 @@ export function createCheckpoint(
     throw new Error(`git commit-tree 失败: ${(commit.stderr ?? "").trim()}`);
   }
   const sha = commit.stdout.trim();
-  const upd = gitSync(["update-ref", ref, sha], repoRoot);
+  const upd = await gitExec(["update-ref", ref, sha], repoRoot);
   if (upd.status !== 0) {
     throw new Error(`git update-ref ${ref} 失败: ${(upd.stderr ?? "").trim()}`);
   }
@@ -273,16 +334,16 @@ export function createCheckpoint(
  * 与桥行为一致:reset --hard 只恢复已跟踪文件,任务新创建的未跟踪文件
  * 会残留(不跑 git clean,避免误删用户工作区里与任务无关的未跟踪文件)。
  */
-export function resetToCheckpoint(
+export async function resetToCheckpoint(
   ref: string,
   repoRoot: string,
-): { ok: boolean; message: string } {
-  const verify = gitSync(["rev-parse", "--verify", ref], repoRoot);
+): Promise<{ ok: boolean; message: string }> {
+  const verify = await gitExec(["rev-parse", "--verify", ref], repoRoot);
   if (verify.status !== 0) {
     return { ok: false, message: `快照不存在: ${ref}(任务 id 可能不对)` };
   }
   const sha = (verify.stdout ?? "").trim().slice(0, 12);
-  const reset = gitSync(["reset", "--hard", ref], repoRoot);
+  const reset = await gitExec(["reset", "--hard", ref], repoRoot);
   if (reset.status !== 0) {
     return {
       ok: false,

@@ -218,6 +218,16 @@ function applyEnvOverrides(ex: ExecutorConfig): ExecutorConfig {
 type ExecutorConfigRow = Awaited<
   ReturnType<typeof listExecutorConfigs>
 >[number];
+/** effectiveExecutors 短缓存:消息调度热路径避免每次现查 executor_config。
+ *  TTL 到期自动失效;增删改函数主动失效,保证 CRUD 后立刻生效。 */
+let cachedEffectiveExecutors: ExecutorConfig[] | null = null;
+let cachedEffectiveExecutorsAt = 0;
+const EXECUTORS_CACHE_TTL_MS = 5_000;
+
+function invalidateExecutorsCache(): void {
+  cachedEffectiveExecutors = null;
+  cachedEffectiveExecutorsAt = 0;
+}
 
 /** 读取全部 DB 执行器配置(created_at 升序,顺序稳定)。 */
 export async function listExecutorConfigs(db: DataBase) {
@@ -264,6 +274,7 @@ export async function addExecutorConfig(
       memory: input.memory ?? null,
     })
     .returning();
+  invalidateExecutorsCache();
   return row;
 }
 
@@ -276,6 +287,7 @@ export async function removeExecutorConfig(
     .delete(executorConfigTable)
     .where(eq(executorConfigTable.key, key))
     .returning({ id: executorConfigTable.id });
+  invalidateExecutorsCache();
   return deleted.length > 0;
 }
 
@@ -326,6 +338,7 @@ export async function updateExecutorConfig(
     .set(values)
     .where(eq(executorConfigTable.key, key))
     .returning();
+  invalidateExecutorsCache();
   return row;
 }
 
@@ -333,8 +346,16 @@ export async function updateExecutorConfig(
 export async function effectiveExecutors(
   db: DataBase,
 ): Promise<ExecutorConfig[]> {
+  if (
+    cachedEffectiveExecutors &&
+    Date.now() - cachedEffectiveExecutorsAt < EXECUTORS_CACHE_TTL_MS
+  ) {
+    return cachedEffectiveExecutors;
+  }
   const rows = await listExecutorConfigs(db);
-  return [...defaultExecutors(), ...rows.map(rowToConfig)];
+  cachedEffectiveExecutors = [...defaultExecutors(), ...rows.map(rowToConfig)];
+    cachedEffectiveExecutorsAt = Date.now();
+    return cachedEffectiveExecutors;
 }
 
 /** 按 participant 表 name 匹配执行器配置(audienceRef → participant.name → executor)。 */

@@ -19,6 +19,14 @@ describe("T17 participant 自更新与扩展字段", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
+    if (res.status === 409) {
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as { id: string; name: string; [key: string]: unknown }[];
+      const existing = list.find((p) => p.name === body.name);
+      if (existing) return { id: existing.id, body: existing };
+    }
     expect(res.status).toBe(200);
     const json = (await res.json()) as {
       id: string;

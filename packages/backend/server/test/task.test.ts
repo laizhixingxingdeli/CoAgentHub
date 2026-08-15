@@ -19,6 +19,14 @@ describe("任务实体(server 单一状态源)", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
+    if (res.status === 409) {
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as { id: string; name: string }[];
+      const existing = list.find((p) => p.name === body.name);
+      if (existing) return { id: existing.id };
+    }
     expect(res.status).toBe(200);
     const { id } = (await res.json()) as { id: string };
     return { id };
@@ -114,7 +122,7 @@ describe("任务实体(server 单一状态源)", () => {
     );
     expect(res1.status).toBe(200);
     const t1 = (await res1.json()) as Task;
-    expect(t1.status).toBe("running");
+    expect(t1.status).toBe("queued");
     expect(t1.executorParticipantId).toBe(execA.id);
     expect(t1.checkpointRef).toBeNull();
 
@@ -456,7 +464,7 @@ describe("任务实体(server 单一状态源)", () => {
     const tasks = (await list.json()) as Task[];
     const found = tasks.find((t) => t.id === task.id);
     expect(found?.brief).toBeNull();
-    expect(found?.status).toBe("running");
+    expect(found?.status).toBe("queued");
   });
 
   it("协调者修改 queued 任务 brief 成功,列表/详情返回新 brief", async () => {
@@ -469,7 +477,7 @@ describe("任务实体(server 单一状态源)", () => {
     );
     const task = (await created.json()) as Task;
 
-    // 先把任务置为 queued(HTTP 建任务默认 running,执行器可流转状态)。
+    // 任务创建即为 queued;此处再 PATCH queued 验证执行器可流转状态(幂等)。
     const toQueued = await patchTask(execA.id, group.id, task.id, {
       status: "queued",
     });
@@ -510,7 +518,7 @@ describe("任务实体(server 单一状态源)", () => {
   it("协调者修改 running/done/failed 任务 brief → 409", async () => {
     const { coordinator, execA, group } = await setupGroup();
 
-    // running(HTTP 建任务默认状态)。
+    // running:建任务后由执行器 PATCH 置为 running。
     const tRunning = (await (
       await createTask(
         coordinator.id,
@@ -519,6 +527,7 @@ describe("任务实体(server 单一状态源)", () => {
         execA.id,
       )
     ).json()) as Task;
+      await patchTask(execA.id, group.id, tRunning.id, { status: "running" });
     const r1 = await patchTask(coordinator.id, group.id, tRunning.id, {
       brief: "x",
     });
@@ -640,7 +649,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(detail.executorParticipantId).toBe(execA.id);
     expect(detail.executorKey).toBeNull(); // POST /tasks 未写 executorKey
     expect(detail.brief).toBe("单查任务书");
-    expect(detail.status).toBe("running");
+    expect(detail.status).toBe("queued");
     expect(detail.checkpointRef).toBeNull();
     expect(detail.retryCount).toBe(0);
     expect(detail.diffSummary).toBeNull();

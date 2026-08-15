@@ -338,6 +338,7 @@ app
       // 轻量能力提示 (ticket 17): 已知能力与角色匹配提示,绝不硬性拒绝 —
       // 无提示时为 null,响应形状始终带 capabilityHint 字段。
       const hint = capabilityHint(participant.capabilities, dedupedRoles);
+        wsHub.invalidateGroupMembers(id);
 
       return c.json({ ...member, capabilityHint: hint });
     },
@@ -428,6 +429,7 @@ app
             eq(groupMemberTable.participantId, participantId),
           ),
         );
+        wsHub.invalidateGroupMembers(id);
       return c.json({ success: true });
     },
   )
@@ -490,6 +492,7 @@ app
           ),
         )
         .returning();
+        wsHub.invalidateGroupMembers(id);
       return c.json(updated);
     },
   )
@@ -1013,6 +1016,8 @@ app
           executorParticipantId,
           checkpointRef: checkpointRef ?? null,
           brief: triggerMessage?.body ?? null,
+            // 显式置 queued:不依赖 DB 默认值(旧库默认值可能仍是 running)。
+            status: "queued",
         })
         .onConflictDoNothing({ target: taskTable.messageId })
         .returning();
@@ -1048,6 +1053,14 @@ app
       const db = c.get("db");
       const { id } = c.req.valid("param");
       const { includeOutput } = c.req.valid("query");
+        const rawLimit = c.req.query("limit");
+        const rawOffset = c.req.query("offset");
+        const limit =
+          rawLimit === undefined
+            ? 50
+            : Math.min(Math.max(Number(rawLimit) || 50, 1), 100);
+        const offset =
+          rawOffset === undefined ? 0 : Math.max(Number(rawOffset) || 0, 0);
       const wantOutput = includeOutput === "1" || includeOutput === "true";
 
       const group = await db.query.groups.findFirst({
@@ -1060,6 +1073,25 @@ app
       // 仅要求群存在;写操作(POST/PATCH)仍走各自权限边界。
       const tasks = await db.query.task.findMany({
         where: (t, { eq }) => eq(t.groupId, id),
+        columns: {
+          id: true,
+          groupId: true,
+          messageId: true,
+          executorParticipantId: true,
+          executorKey: true,
+          brief: true,
+          status: true,
+          checkpointRef: true,
+          retryCount: true,
+          diffSummary: true,
+          attempts: true,
+          // A2A 上下文延续依赖读取上一任务的 contextId,列表必须返回该列。
+          a2aContextId: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        limit: limit ?? 50,
+        offset: offset ?? 0,
         orderBy: (t, { desc }) => desc(t.createdAt),
       });
       // 实时进度:includeOutput=1 时给每个任务附 outputTail(running 任务 =

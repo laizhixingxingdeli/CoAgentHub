@@ -18,7 +18,9 @@ import { timeColumns } from "../utils/columns.js";
  */
 export const participant = pgTable("participant", {
   id: uuid("id").primaryKey().$defaultFn(uuidv7),
-  name: text("name").notNull(),
+  // 名字是 participant 的运行时唯一键(执行器注册/身份名册均按名字判重);
+  // UNIQUE 约束让「按名字幂等」在数据库层也成立(见 migration 0013)。
+  name: text("name").notNull().unique(),
   device: text("device"),
   tokenHash: text("token_hash").notNull(),
   // 心跳在线 (ticket 17): REST 心跳写 last_seen,与 WS 在线状态合并构成

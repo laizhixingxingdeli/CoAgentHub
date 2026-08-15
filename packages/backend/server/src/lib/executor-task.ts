@@ -67,7 +67,7 @@ import {
   createCheckpoint,
   type ExecutorRunResult,
   findRepoRoot,
-  gitSync,
+  gitExec,
   readTimeoutMs,
   resetToCheckpoint,
   runExecutor,
@@ -185,35 +185,36 @@ interface GroupQueue {
  */
 const groupQueues = new Map<string, GroupQueue>();
 
+/** 调度策略:启动时读取一次,所有阈值从同一快照取值,避免重复读盘与不一致。 */
+const dispatchPolicy = readDispatchPolicy();
+
 /** 最大并行组数:server 启动时从 scripts/dispatch-policy.json 读取。 */
-let maxParallelGroups = readDispatchPolicy().maxParallelGroups;
+let maxParallelGroups = dispatchPolicy.maxParallelGroups;
 
 /** 静默超时阈值(ms):running 连续无输出超过即失败;启动时读配置,缺省 30min。 */
-let stallTimeoutMs = readDispatchPolicy().stallTimeoutMinutes * 60_000;
+let stallTimeoutMs = dispatchPolicy.stallTimeoutMinutes * 60_000;
 
 /** 无进展提醒阈值(ms):running 连续无输出超过即提醒协调者(不失败);
  *  启动时读配置,缺省 15min。 */
-let stallAlertMs = readDispatchPolicy().stallAlertMinutes * 60_000;
+let stallAlertMs = dispatchPolicy.stallAlertMinutes * 60_000;
 
 /** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
-let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
+let claimTimeoutMs = dispatchPolicy.claimTimeoutMinutes * 60_000;
 
 /** A2A 无进展超时阈值(ms):running 的 A2A 任务连续无进展信号即失败;启动时
  *  读配置,缺省 30min。detached 任务不适用(等待执行器事后 PATCH)。 */
-let a2aSilenceTimeoutMs =
-  readDispatchPolicy().a2aSilenceTimeoutMinutes * 60_000;
+let a2aSilenceTimeoutMs = dispatchPolicy.a2aSilenceTimeoutMinutes * 60_000;
 
 /** detached 超时阈值(ms):detached 任务发送后执行器超过该时长未 PATCH 回写
  *  终态 → 按「结果未确认」处理;启动时读配置,缺省 24h。 */
-let detachedTimeoutMs = readDispatchPolicy().detachedTimeoutMinutes * 60_000;
+let detachedTimeoutMs = dispatchPolicy.detachedTimeoutMinutes * 60_000;
 
 /** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
-let retryPolicy = readDispatchPolicy().retry;
+let retryPolicy = dispatchPolicy.retry;
 
 /** 额度/速率限制配置(票7):失败关键词 + 冷却时长;启动时读配置。 */
-let rateLimitPatterns = readDispatchPolicy().rateLimit.detectPatterns;
-let rateLimitCooldownMs =
-  readDispatchPolicy().rateLimit.cooldownMinutes * 60_000;
+let rateLimitPatterns = dispatchPolicy.rateLimit.detectPatterns;
+let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;
 
 /**
  * 执行器额度冷却(票7,内存态):executorKey → 冷却结束时间(epoch ms)。重启
@@ -995,7 +996,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 执行前 git 快照(回滚指令用;与桥 createCheckpoint 一致):失败则中止
       // 任务,不做无回滚保护的执行。快照 ref 写回 task.checkpoint_ref。
       try {
-        const cp = createCheckpoint(taskId, repoRoot);
+        const cp = await createCheckpoint(taskId, repoRoot);
         run.checkpointRef = cp.ref;
         await db
           .update(taskTable)
@@ -1196,7 +1197,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 弱验收钩子:done 判定前校验执行器是否真正提交了改动(仅本地 CLI,
         // a2a 远端执行无本地工作区不验收;git 命令失败跳过验收视为通过)。
         if (!isA2a && run.checkpointRef) {
-          const verify = verifyTaskCommitted(repoRoot, run.checkpointRef);
+          const verify = await verifyTaskCommitted(repoRoot, run.checkpointRef);
           if (!verify.ok) {
             const reason = verify.reason ?? "执行器未提交改动";
             console.error(`[executor] 验收未通过: ${reason} (${taskId})`);
@@ -1616,7 +1617,7 @@ async function handleFailure(
       run.projectPath && existsSync(run.projectPath)
         ? run.projectPath
         : findRepoRoot();
-    const res = resetToCheckpoint(run.checkpointRef, repoRoot);
+    const res = await resetToCheckpoint(run.checkpointRef, repoRoot);
     if (!res.ok) {
       // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
       const msg = `${reason};回滚失败,终止重试: ${res.message}`;
@@ -1681,11 +1682,11 @@ async function handleFailure(
  * 任一 git 命令失败(仓库不可用)→ 跳过验收(视为通过,记录 warning,避免
  * 误杀)。a2a 远端执行无本地工作区,由调用方跳过。
  */
-export function verifyTaskCommitted(
+export async function verifyTaskCommitted(
   repoRoot: string,
   checkpointRef: string,
-): { ok: boolean; reason?: string } {
-  const status = gitSync(["status", "--porcelain"], repoRoot);
+): Promise<{ ok: boolean; reason?: string }> {
+  const status = await gitExec(["status", "--porcelain"], repoRoot);
   if (status.status !== 0) {
     console.warn(
       `[executor] 验收跳过:git status 失败(${repoRoot}): ${(status.stderr ?? "").trim()}`,
@@ -1693,14 +1694,14 @@ export function verifyTaskCommitted(
     return { ok: true };
   }
   const dirty = (status.stdout ?? "").trim().length > 0;
-  const pre = gitSync(["rev-parse", `${checkpointRef}^`], repoRoot);
+  const pre = await gitExec(["rev-parse", `${checkpointRef}^`], repoRoot);
   if (pre.status !== 0) {
     console.warn(
       `[executor] 验收跳过:无法解析执行前 commit(${checkpointRef}): ${(pre.stderr ?? "").trim()}`,
     );
     return { ok: true };
   }
-  const head = gitSync(["rev-parse", "HEAD"], repoRoot);
+  const head = await gitExec(["rev-parse", "HEAD"], repoRoot);
   if (head.status !== 0) {
     console.warn(
       `[executor] 验收跳过:无法解析 HEAD(${repoRoot}): ${(head.stderr ?? "").trim()}`,

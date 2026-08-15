@@ -109,6 +109,14 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
+    if (res.status === 409) {
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as { id: string; name: string }[];
+      const existing = list.find((p) => p.name === body.name);
+      if (existing) return { id: existing.id, name: existing.name };
+    }
     expect(res.status).toBe(200);
     const { id, name } = (await res.json()) as { id: string; name: string };
     return { id, name };
@@ -472,15 +480,20 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           "queued",
         );
         expect(readFileSync(counterFile, "utf8").trim()).toBe("1"); // 未 spawn
-        const waiting = (t2.diffSummary as Record<string, unknown> | null)
-          ?.waiting;
-        expect(String(waiting)).toContain("等待执行器额度恢复");
+        // diffSummary.waiting 与 ⏳ 回传在同一 cooldown 分支写入,标记先落库、
+        // 消息后发出:先等 ⏳ 消息到达,再读任务即可保证 waiting 标记已写入。
         await waitForMessage(
           coordinator.id,
           group.id,
           (m) =>
             m.body.startsWith("⏳") && m.body.includes("等待执行器额度恢复"),
         );
+        const t2After = (await listTasks(coordinator.id, group.id)).find(
+          (x) => x.messageId === m2.id,
+        );
+        const waiting = (t2After?.diffSummary as Record<string, unknown> | null)
+          ?.waiting;
+        expect(String(waiting)).toContain("等待执行器额度恢复");
 
         // 冷却结束(800ms)→ 泵送自动派发 → spawn(计数 2)→ done。
         const done = await waitForTaskStatus(

@@ -6,6 +6,8 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   server: {
+    // 局域网可访问(与生产模式 serve.mjs 一致);dev 时其他设备走 :5173
+    host: "0.0.0.0",
     proxy: {
       "/api": {
         target: "http://localhost:3001",
