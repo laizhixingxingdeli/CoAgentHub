@@ -17,6 +17,7 @@ import type { DataBase } from "@server/lib/database";
 import {
   maybeDispatchExecutorTask,
   notifyTaskStatusChanged,
+  refreshA2AActivity,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import type { ParticipantType } from "@server/lib/group-visibility";
@@ -694,6 +695,11 @@ app
       // own failures, so the fan-out cannot block the response; the ?after=
       // incremental pull remains the guaranteed fallback.
       void wsHub.broadcastGroupMessage(full);
+
+      // 第1层(A2A 进度信号):执行器 participant 在本群发的消息 → 刷新同群 running
+      // 的 A2A 任务最近活跃时间,顺延无进展超时(纯内存同步操作,不阻塞响应;
+      // 消息可以是普通广播消息,无需新协议)。
+      refreshA2AActivity(id, senderId);
 
       // 阶段2-票1:定向到执行器 participant 的消息 → server 直接建 task + spawn
       // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,

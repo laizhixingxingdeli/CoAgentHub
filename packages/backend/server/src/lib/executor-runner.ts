@@ -55,6 +55,9 @@ export interface ExecutorRunResult {
   timedOut: boolean;
   /** A2A 执行器返回的新 contextId(跨任务延续上下文);CLI 执行器恒缺省。 */
   contextId?: string;
+  /** 结果未确认(第2层):执行器可能已完成但结果无法确认(gateway 未回复 / 网络
+   *  错误 / HTTP 5xx);仅 A2A 执行器可能携带,CLI 执行器恒缺省。 */
+  unconfirmed?: boolean;
 }
 
 export interface ExecutorRunHandle {

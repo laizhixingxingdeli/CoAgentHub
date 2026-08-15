@@ -273,6 +273,7 @@ export const zh = {
   "tasks.hint.readOnly": "群已归档,只读",
   "tasks.hint.noPermission": "需要协调者/人类身份",
   "tasks.stallAlerted": "无进展,请介入",
+  "tasks.unconfirmed": "结果未确认",
   "tasks.expand": "展开详情",
   "tasks.collapse": "收起",
   "tasks.output.title": "实时输出",

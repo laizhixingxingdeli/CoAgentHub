@@ -133,6 +133,9 @@ interface QueuedRun {
   runningAt: number | null;
   /** 最近一次 stdout/stderr 输出的时间(ms);静默检测用。 */
   lastOutputAt: number;
+  /** A2A 最近进展时间(ms):任务 running 起点置位,执行器 participant 在群里
+   *  发的消息(进度信号)刷新;A2A 无进展超时 / 请求超时判定用。 */
+  lastActivityAt: number;
   /** 认领超时定时器(入队时调度,进入 running 时取消)。 */
   claimTimer: NodeJS.Timeout | null;
   /** 静默超时定时器(spawn 时调度,每次输出重排);a2a 无本地进程不调度。 */
@@ -140,10 +143,23 @@ interface QueuedRun {
   /** 无进展提醒定时器(spawn 时调度,每次输出重排);先于 stallTimer 触发,
    *  只发提醒消息 + 警示标记,不失败。 */
   stallAlertTimer: NodeJS.Timeout | null;
+  /** A2A 无进展超时定时器(running 时调度,进度消息重排);触发 → a2aSilenced
+   *  + 中止在途请求,失败由完成路径统一处理。detached 任务不调度。 */
+  a2aSilenceTimer: NodeJS.Timeout | null;
+  /** detached 超时定时器(detached 任务发送完成后调度,等待执行器 PATCH 回写
+   *  终态);触发 → 按「结果未确认」处理。独立于 clearRunTimers,跨队列存活。 */
+  detachedTimer: NodeJS.Timeout | null;
   /** 静默超时已触发(完成回调不再重复回传 ❌)。 */
   stalled: boolean;
   /** 无进展提醒已发送(避免重复提醒)。 */
   stallAlerted: boolean;
+  /** A2A 无进展超时已触发(完成回调按「无进展失败」处理,不再回传 ❌)。 */
+  a2aSilenced: boolean;
+  /** 任务书标记了 ReplyMode: detached(A2A 发送后保持 running,等执行器
+   *  PATCH 回写终态;不设静默/无进展超时)。 */
+  detached: boolean;
+  /** detached 超时已触发(避免重复按结果未确认处理)。 */
+  detachedTimedOut: boolean;
   /** 已自动重试次数(失败重试用;重试前回滚 checkpoint、重新入队重跑)。 */
   retryCount: number;
   /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
@@ -181,6 +197,15 @@ let stallAlertMs = readDispatchPolicy().stallAlertMinutes * 60_000;
 
 /** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
 let claimTimeoutMs = readDispatchPolicy().claimTimeoutMinutes * 60_000;
+
+/** A2A 无进展超时阈值(ms):running 的 A2A 任务连续无进展信号即失败;启动时
+ *  读配置,缺省 30min。detached 任务不适用(等待执行器事后 PATCH)。 */
+let a2aSilenceTimeoutMs =
+  readDispatchPolicy().a2aSilenceTimeoutMinutes * 60_000;
+
+/** detached 超时阈值(ms):detached 任务发送后执行器超过该时长未 PATCH 回写
+ *  终态 → 按「结果未确认」处理;启动时读配置,缺省 24h。 */
+let detachedTimeoutMs = readDispatchPolicy().detachedTimeoutMinutes * 60_000;
 
 /** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
 let retryPolicy = readDispatchPolicy().retry;
@@ -287,7 +312,9 @@ export function queuedExecutorTaskCount(): number {
   return n;
 }
 
-/** 取消单个 run 的认领/静默定时器(幂等;停止/完成/重置时调用)。 */
+/** 取消单个 run 的认领/静默定时器(幂等;停止/完成/重置时调用)。
+ *  detachedTimer 不在清理范围:detached 任务发送完成后 run 已离开队列,超时
+ *  定时器需跨队列存活(等待执行器 PATCH,超时按结果未确认处理)。 */
 function clearRunTimers(run: QueuedRun): void {
   if (run.claimTimer) {
     clearTimeout(run.claimTimer);
@@ -300,6 +327,10 @@ function clearRunTimers(run: QueuedRun): void {
   if (run.stallAlertTimer) {
     clearTimeout(run.stallAlertTimer);
     run.stallAlertTimer = null;
+  }
+  if (run.a2aSilenceTimer) {
+    clearTimeout(run.a2aSilenceTimer);
+    run.a2aSilenceTimer = null;
   }
 }
 
@@ -382,6 +413,8 @@ export function __resetExecutorQueueForTests(): void {
   stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
   stallAlertMs = policy.stallAlertMinutes * 60_000;
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
+  a2aSilenceTimeoutMs = policy.a2aSilenceTimeoutMinutes * 60_000;
+  detachedTimeoutMs = policy.detachedTimeoutMinutes * 60_000;
   retryPolicy = policy.retry;
   rateLimitPatterns = policy.rateLimit.detectPatterns;
   rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
@@ -393,13 +426,17 @@ export function __setMaxParallelGroupsForTests(n: number): void {
 }
 
 /**
- * 测试专用:覆盖静默/认领超时阈值(默认读 scripts/dispatch-policy.json,
- * 单位 ms)。测试用 100ms 级小阈值避免拖慢测试,与配置单位(分钟)无关。
+ * 测试专用:覆盖静默/认领/A2A 无进展/detached 超时阈值(默认读
+ * scripts/dispatch-policy.json,单位 ms)。测试用 100ms 级小阈值避免拖慢测试,
+ * 与配置单位(分钟)无关。a2aSilence/detached 未显式传值时给 60s 兜底,避免
+ * 既有测试(未关注新阈值)被意外触发。
  */
 export function __setReliabilityTimeoutsForTests(
   stallMs: number,
   claimMs: number,
   stallAlertMsOverride?: number,
+  a2aSilenceMsOverride?: number,
+  detachedMsOverride?: number,
 ): void {
   stallTimeoutMs = Math.max(1, Math.floor(stallMs));
   claimTimeoutMs = Math.max(1, Math.floor(claimMs));
@@ -409,6 +446,14 @@ export function __setReliabilityTimeoutsForTests(
     stallAlertMsOverride !== undefined
       ? Math.max(1, Math.floor(stallAlertMsOverride))
       : Math.max(1, Math.floor(stallMs)) * 2;
+  a2aSilenceTimeoutMs =
+    a2aSilenceMsOverride !== undefined
+      ? Math.max(1, Math.floor(a2aSilenceMsOverride))
+      : Math.max(60_000, Math.floor(stallMs));
+  detachedTimeoutMs =
+    detachedMsOverride !== undefined
+      ? Math.max(1, Math.floor(detachedMsOverride))
+      : Math.max(60_000, Math.floor(stallMs));
 }
 
 /**
@@ -719,11 +764,17 @@ async function dispatchTask(
     createdAt: Date.now(),
     runningAt: null,
     lastOutputAt: 0,
+    lastActivityAt: 0,
     claimTimer: null,
     stallTimer: null,
     stallAlertTimer: null,
+    a2aSilenceTimer: null,
+    detachedTimer: null,
     stalled: false,
     stallAlerted: false,
+    a2aSilenced: false,
+    detached: false,
+    detachedTimedOut: false,
     retryCount: 0,
     checkpointRef: null,
     // 执行历史:沿用 DB 既有 attempts(重新执行的任务保留旧尝试,新 attempt 续接)。
@@ -854,6 +905,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 不打快照(远端设备执行,本地快照无意义),body 直接当 prompt 发 gateway。
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
     const isA2a = ex.kind === "a2a";
+    // 第3层:任务书标记「## ReplyMode: detached」(大小写不敏感、允许前后空白)
+    // → A2A 发送后保持 running,由执行器恢复后 PATCH 回写终态(适用于重启自身
+    // 所在 dsh web 之类的断线型 ops 任务)。仅 a2a 任务支持。
+    const detached =
+      isA2a && /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(body);
+    run.detached = detached;
     // 记忆开关:仅 memory="per-group" 的协调器启用 contextId 延续(查/回写);
     // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
     // 声明在分支外:完成路径(回写)同样需要判断,不能只在 a2a 分支内定义。
@@ -890,6 +947,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           );
         }
       }
+      // 超时/中止共用同一 AbortController:kill 中止在途请求(停止指令、A2A
+      // 无进展超时共用),与 CLI 的进程组 SIGKILL 语义一致。
+      const a2aController = new AbortController();
       handle = {
         promise: runA2AExecutor({
           url: a2aUrl,
@@ -897,9 +957,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           prompt: body,
           ...(prevContextId ? { contextId: prevContextId } : {}),
           timeoutMs: readTimeoutMs(),
+          signal: a2aController.signal,
         }),
-        // 远端调用无本地进程可杀:停止指令靠完成后 run.stopped 检查置 cancelled。
-        kill: () => {},
+        kill: () => a2aController.abort(),
       };
     } else {
       // 并行任务可能同毫秒触发,ticket 路径用 taskId 保证唯一(避免互相覆盖)。
@@ -1008,6 +1068,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       );
     }
     run.kill = handle.kill;
+    // 第1层:A2A 无进展超时起点——running 起点即置最近活跃时间(进度消息只会
+    // 刷新它),随后连续无进展信号超过 a2aSilenceTimeoutMs → 无进展失败。有进度
+    // 消息时由 refreshA2AActivity 顺延。detached 任务不设:发送后静默等待执行器
+    // 事后 PATCH 是正常态,超时由 detachedTimeoutMinutes 兜底。
+    if (isA2a && !detached) {
+      run.lastActivityAt = run.runningAt ?? Date.now();
+      run.a2aSilenceTimer = setTimeout(
+        () => handleA2ASilence(run),
+        a2aSilenceTimeoutMs,
+      );
+    }
 
     try {
       const result = await handle.promise;
@@ -1049,6 +1120,22 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           console.warn(`[executor] 写 a2a_context_id 失败(${taskId}): ${e}`);
         }
       }
+      // 第3层(detached 可脱离执行):A2A 发送完成即算「已派发」,不按最终回复
+      // 定终态——任务保持 running,等执行器恢复后 PATCH /groups/:id/tasks/:taskId
+      // 主动回写 done/failed;超过 detachedTimeoutMinutes 仍未回写 → 结果未确认
+      // (handleDetachedTimeout)。队列槽位照常释放(24h 等待不该占住组队列)。
+      if (run.detached) {
+        console.log(
+          `[executor] detached 任务已发送,等待执行器回写终态: ${taskId}`,
+        );
+        if (!run.detachedTimer && !run.detachedTimedOut && !run.stopped) {
+          run.detachedTimer = setTimeout(
+            () => handleDetachedTimeout(run),
+            detachedTimeoutMs,
+          );
+        }
+        return;
+      }
       // 静默超时已由 handleStall 置 stalled + kill 进程组;失败落库 / ❌ 回传 /
       // 重试判定统一在完成路径处理,避免定时器回调与完成路径并发写状态。
       if (run.stalled) {
@@ -1059,8 +1146,25 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         });
         return;
       }
+      // A2A 无进展超时已由 handleA2ASilence 置 a2aSilenced + 中止请求:按「无进展
+      // 失败」处理(不重试——执行器已失联,重试无意义;不设无进展提醒,与静默
+      // 检测同界,仅 a2a 无本地进程输出可观察,不走 stallAlert 提醒)。
+      if (run.a2aSilenced) {
+        console.log(`[executor] 任务已因 A2A 无进展超时失败: ${taskId}`);
+        await handleFailure(run, "执行器无进展", {
+          retryable: false,
+          message: `❌ [${ex.label}] 任务失败 (执行器无进展)`,
+        });
+        return;
+      }
       if (result.timedOut) {
         console.error(`[executor] 任务超时: ${taskId}`);
+        // 第2层:A2A 请求超时但最近有进展信号 → 执行器可能仍在执行/已完成,
+        // 结果无法确认 → 按「结果未确认」处理(不重试,避免重复执行)。
+        if (isA2a && hasRecentA2AProgress(run)) {
+          await handleUnconfirmed(run);
+          return;
+        }
         // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词 → 额度失败。
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
         if (isQuotaFailure(["执行超时", lastLinesOf(out, 20)])) {
@@ -1145,6 +1249,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           renderTaskCard(ex.label, report),
         );
       } else {
+        // 第2层:无法确认执行结果(gateway「did not reply in time」/ 网络错误 /
+        // HTTP 5xx)→ 执行器可能已实际执行,按「结果未确认」处理(不重试、不
+        // 回传 ❌)。其余失败保持原重试行为。
+        if (result.unconfirmed) {
+          console.error(`[executor] 任务结果未确认: ${taskId}`);
+          await handleUnconfirmed(run);
+          return;
+        }
         const tail = lastLinesOf(output, 20).slice(0, 1500);
         console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
         // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
@@ -1261,6 +1373,120 @@ function handleStall(run: QueuedRun): void {
 }
 
 /**
+ * A2A 无进展超时处理(第1层):running 的 A2A 任务连续无任何进展信号(执行器
+ * participant 在群里的消息,refreshA2AActivity 顺延)超过 a2aSilenceTimeoutMs
+ * → 置 a2aSilenced + 中止在途请求,失败落库 / ❌ 回传由完成路径统一处理
+ * (与静默超时同一模式,避免定时器回调与完成路径并发写状态)。
+ * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径);
+ * detached 任务不设此定时器(发送后静默等待执行器 PATCH 是正常态)。
+ */
+function handleA2ASilence(run: QueuedRun): void {
+  if (run.stopped || run.a2aSilenced || run.detached) return;
+  run.a2aSilenced = true;
+  if (run.a2aSilenceTimer) {
+    clearTimeout(run.a2aSilenceTimer);
+    run.a2aSilenceTimer = null;
+  }
+  run.kill?.();
+  console.error(`[executor] A2A 无进展超时: ${run.taskId}`);
+}
+
+/**
+ * A2A 进度信号(第1层):执行器 participant 在群里发的消息 → 刷新该执行器在本群
+ * running 的 A2A 任务最近活跃时间(lastActivityAt),顺延无进展超时定时器。
+ * 由 POST /groups/:id/messages 成功写入消息后调用(fire-and-forget,纯内存
+ * 同步操作)。消息可以是普通广播消息,无需新协议。不命中(非 A2A / 非 running /
+ * 非本执行器消息 / 已停止或已触发无进展)返回 false,不影响消息响应。
+ */
+export function refreshA2AActivity(
+  groupId: string,
+  participantId: string,
+): boolean {
+  for (const g of groupQueues.values()) {
+    const run = g.running;
+    if (!run || run.stopped || run.a2aSilenced) continue;
+    if (run.groupId !== groupId || run.participantId !== participantId) continue;
+    if (run.ex.kind !== "a2a") continue;
+    run.lastActivityAt = Date.now();
+    if (run.a2aSilenceTimer) {
+      clearTimeout(run.a2aSilenceTimer);
+      run.a2aSilenceTimer = setTimeout(
+        () => handleA2ASilence(run),
+        a2aSilenceTimeoutMs,
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A2A 请求超时时的「最近有进展」判定(第2层):running 起点后有进展信号
+ * (lastActivityAt 被进度消息刷新过,即 > runningAt)且距上次进展未超过无进展
+ * 窗口 → 视为执行器可能仍在执行/已完成,结果未确认。无进展起点(lastActivityAt
+ * === runningAt)或静默已超窗口(此时 a2aSilenceTimer 已先触发)不算。
+ */
+function hasRecentA2AProgress(run: QueuedRun): boolean {
+  if (!run.runningAt) return false;
+  if (run.lastActivityAt <= run.runningAt) return false;
+  return Date.now() - run.lastActivityAt < a2aSilenceTimeoutMs;
+}
+
+/**
+ * 结果未确认统一出口(第2层):执行器可能已完成但结果无法确认(gateway「did not
+ * reply in time」/ 请求超时但有进展 / 网络错误 / HTTP 5xx / detached 超时未回写)。
+ * 落库保持 status=failed(不新增状态,避免迁移/兼容问题),diffSummary 加
+ * unconfirmed: true + 协议文案;群消息回传 ⚠️ 而非 ❌。不重试(重试有重复执行
+ * 风险)。detached 超时触发前会复查 DB 状态(已回写终态则跳过),见 handleDetachedTimeout。
+ */
+async function handleUnconfirmed(run: QueuedRun): Promise<void> {
+  const { db, taskId } = run;
+  await endAttempt(run, { status: "failed", error: "执行器未按协议回复，结果未确认" });
+  releaseTaskOutput(taskId);
+  await failTask(db, taskId, "执行器未按协议回复，结果未确认", run.retryCount, {
+    unconfirmed: true,
+  });
+  await postStatus(
+    db,
+    run.groupId,
+    run.participantId,
+    run.ex,
+    "⚠️ 任务结果未确认：执行器可能已完成，请人工核实",
+  );
+}
+
+/**
+ * detached 超时处理(第3层):任务发送后超过 detachedTimeoutMs 执行器仍未 PATCH
+ * 回写终态 → 按「结果未确认」处理(第2层)。触发前复查 DB:状态已非 running
+ * (执行器已回写 done/failed 或已被停止置 cancelled)→ 跳过,避免覆盖终态。
+ */
+function handleDetachedTimeout(run: QueuedRun): void {
+  if (run.stopped || run.detachedTimedOut) return;
+  run.detachedTimedOut = true;
+  if (run.detachedTimer) {
+    clearTimeout(run.detachedTimer);
+    run.detachedTimer = null;
+  }
+  console.error(`[executor] detached 任务超时未回写终态: ${run.taskId}`);
+  void (async () => {
+    try {
+      const cur = await run.db.query.task.findFirst({
+        where: (t, { and: andFn, eq: eqFn }) =>
+          andFn(eqFn(t.id, run.taskId), eqFn(t.groupId, run.groupId)),
+        columns: { status: true },
+      });
+      if (!cur || cur.status !== "running") {
+        // 执行器已 PATCH 回写终态(或已停止):结果已确认/已取消,不再覆盖。
+        return;
+      }
+      await handleUnconfirmed(run);
+    } catch (e) {
+      console.warn(`[executor] detached 超时处理失败(${run.taskId}): ${e}`);
+    }
+  })();
+}
+
+/**
  * 认领超时处理:queued 任务超过 claimTimeoutMs 仍未进入 running → 移出队列 +
  * 置 failed(「任务未被认领」)+ ❌ 回传(注明发布时间)。若任务已被 pump 取走
  * 开始运行(认领完成),从队列找不到即放弃(定时器取消前已入队的回调兜底)。
@@ -1293,7 +1519,8 @@ function handleClaimTimeout(run: QueuedRun): void {
 }
 
 /** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。
- *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用)。running 任务
+ *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用);extra 合并进
+ *  diffSummary(结果未确认等附加标记,如 { unconfirmed: true })。running 任务
  *  存在输出缓冲时,把最近 50 行写进 diffSummary.outputTail(完成回填,之后
  *  不依赖内存也能看;无缓冲(未 spawn 的失败)则不加)。 */
 async function failTask(
@@ -1301,8 +1528,9 @@ async function failTask(
   taskId: string,
   reason: string,
   retries = 0,
+  extra?: Record<string, unknown>,
 ): Promise<void> {
-  const diffSummary: Record<string, unknown> = { error: reason };
+  const diffSummary: Record<string, unknown> = { error: reason, ...extra };
   if (retries > 0) diffSummary.retries = retries;
   const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
   if (tail) diffSummary.outputTail = tail;

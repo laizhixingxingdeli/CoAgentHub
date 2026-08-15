@@ -119,3 +119,140 @@ describe("runA2AExecutor contextId", () => {
     expect(result.contextId).toBe("ctx-failed");
   });
 });
+
+describe("runA2AExecutor 结果未确认(第2层)", () => {
+  /** 构造 HTTP 响应(默认 200 + JSON-RPC result/error)。 */
+  function httpResponse(opts: {
+    status?: number;
+    payload?: Record<string, unknown> | null;
+  }): Response {
+    const { status = 200, payload } = opts;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => payload,
+      text: async () => "",
+    } as unknown as Response;
+  }
+
+  it("JSON-RPC error「agent did not reply in time」→ unconfirmed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        httpResponse({
+          payload: {
+            jsonrpc: "1.0",
+            id: "1",
+            error: { code: -32000, message: "agent did not reply in time" },
+          },
+        }),
+      ),
+    );
+    const result = await runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+    });
+    expect(result.code).toBe(1);
+    expect(result.unconfirmed).toBe(true);
+  });
+
+  it("FAILED 状态但回复是「agent did not reply in time」→ unconfirmed", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({ state: "failed" }),
+    );
+    // okResponse 的回复是 "ACAT-WIN-OK";构造一个回复含未回复文案的响应。
+    const didNotReply = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        jsonrpc: "1.0",
+        id: "1",
+        result: {
+          message: {
+            role: "participant",
+            parts: [{ kind: "text", text: "[agent did not reply in time]" }],
+          },
+          state: { state: "failed" },
+        },
+      }),
+      text: async () => "",
+    };
+    fetchMock.mockResolvedValueOnce(didNotReply);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+    });
+    expect(result.code).toBe(1);
+    expect(result.unconfirmed).toBe(true);
+  });
+
+  it("HTTP 5xx → unconfirmed;HTTP 4xx 不标记", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => httpResponse({ status: 500, payload: null })),
+    );
+    const five = await runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+    });
+    expect(five.code).toBe(500);
+    expect(five.unconfirmed).toBe(true);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => httpResponse({ status: 400, payload: null })),
+    );
+    const four = await runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+    });
+    expect(four.code).toBe(400);
+    expect(four.unconfirmed).toBeUndefined();
+  });
+
+  it("网络错误(fetch 抛非 abort 异常)→ unconfirmed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED 192.168.31.180:9900");
+      }),
+    );
+    const result = await runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+    });
+    expect(result.code).toBe(1);
+    expect(result.unconfirmed).toBe(true);
+  });
+
+  it("外部 signal 中止 → timedOut(与内部超时取并集)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          }),
+      ),
+    );
+    const controller = new AbortController();
+    const promise = runA2AExecutor({
+      url: "http://gw/",
+      token: "t",
+      prompt: "hello",
+      signal: controller.signal,
+    });
+    controller.abort();
+    const result = await promise;
+    expect(result.timedOut).toBe(true);
+  });
+});

@@ -25,18 +25,27 @@ export interface A2ARunOptions {
   contextId?: string;
   /** 超时(毫秒);默认 30 分钟。 */
   timeoutMs?: number;
+  /** 外部中止信号(停止指令 / A2A 无进展超时共用):触发即中止在途请求,
+   *  与内部超时控制器取并集(任一触发都中止)。 */
+  signal?: AbortSignal;
 }
 
 /**
  * 发起一次 A2A message/send 调用并等同步终态。
  * 不抛异常:任何失败(网络/HTTP/JSON-RPC error/非完成状态)都折叠成
  * ExecutorRunResult{ code≠0, stderr },由调用方按普通失败回传。
+ *
+ * 结果未确认标记(第2层):「执行器可能已完成但结果无法确认」的网络错误 /
+ * HTTP 5xx / gateway「did not reply in time」→ unconfirmed: true,调用方据此
+ * 走「结果未确认」而非普通失败(不重试、不回传 ❌)。
  */
 export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** 结果未确认(gateway 未回复 / 网络错误 / HTTP 5xx):执行器可能已完成。 */
+  unconfirmed?: boolean;
   /** gateway 返回的新 contextId(下一任务携带);无则缺省。 */
   contextId?: string;
 }> {
@@ -54,9 +63,12 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
     params.contextId = opts.contextId;
   }
 
-  // 超时用 AbortController 中止在途请求,与 runExecutor 的 SIGKILL 语义一致。
+  // 超时用 AbortController 中止在途请求,与 runExecutor 的 SIGKILL 语义一致;
+  // 外部 signal(停止/无进展超时)同样中止,二者取并集。
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  opts.signal?.addEventListener("abort", onExternalAbort, { once: true });
   try {
     let res: Response;
     try {
@@ -81,21 +93,27 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
       if (controller.signal.aborted) {
         return { code: null, stdout: "", stderr: "执行超时", timedOut: true };
       }
+      // 网络层失败(连接拒绝/超时/DNS 等):任务可能已被 gateway 接收并开始执行,
+      // 结果无法确认 → 标记 unconfirmed(调用方按「结果未确认」处理,不重试)。
       return {
         code: 1,
         stdout: "",
         stderr: `A2A 调用失败: ${err.message}`,
         timedOut: false,
+        unconfirmed: true,
       };
     }
 
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
+      // HTTP 5xx:gateway 服务端故障,无法确认执行器是否已接收/执行 → 结果未确认。
+      // 4xx 是请求本身被拒(执行器肯定没拿到),按普通失败处理。
       return {
         code: res.status,
         stdout: "",
         stderr: `A2A gateway HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ""}`,
         timedOut: false,
+        ...(res.status >= 500 ? { unconfirmed: true } : {}),
       };
     }
 
@@ -123,6 +141,9 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
         stdout: "",
         stderr: `A2A JSON-RPC 错误: ${msg}`,
         timedOut: false,
+        // gateway 明确返回「未收到执行器回复」(如重启后断线)→ 执行器可能已在
+        // 执行,结果未确认。
+        ...(isDidNotReply(msg) ? { unconfirmed: true } : {}),
         ...(errCtx ? { contextId: errCtx } : {}),
       };
     }
@@ -142,11 +163,15 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
     // 供下一任务延续(executor-task 在 failed 路径同样落库)。
     const ctx = resultContextId(payload.result);
     if (!completed) {
+      const msg = reply || `A2A 任务状态: ${state}`;
       return {
         code: 1,
         stdout: "",
-        stderr: reply || `A2A 任务状态: ${state}`,
+        stderr: msg,
         timedOut: false,
+        // FAILED 状态但回复是「agent did not reply in time」:gateway 因执行器
+        // 未在时限内回复而判失败,执行器可能实际已执行 → 结果未确认。
+        ...(isDidNotReply(msg) ? { unconfirmed: true } : {}),
         ...(ctx ? { contextId: ctx } : {}),
       };
     }
@@ -159,7 +184,19 @@ export async function runA2AExecutor(opts: A2ARunOptions): Promise<{
     };
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener("abort", onExternalAbort);
   }
+}
+
+/** gateway「未收到执行器回复」文案判定(大小写不敏感;覆盖中英文变体)。 */
+function isDidNotReply(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("did not reply") ||
+    lower.includes("no reply") ||
+    lower.includes("未回复") ||
+    lower.includes("未收到回复")
+  );
 }
 
 /** 取响应 result 里的 contextId(A2A 规范 Task/Message 可携带;无则返回空串)。 */

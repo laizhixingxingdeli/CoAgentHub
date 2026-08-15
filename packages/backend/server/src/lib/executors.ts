@@ -388,6 +388,12 @@ export interface DispatchPolicy {
   stallTimeoutMinutes: number;
   /** 认领超时(分钟):queued 任务超过该值仍未进入 running → 标 failed。 */
   claimTimeoutMinutes: number;
+  /** A2A 无进展超时(分钟):running 的 A2A 任务连续无任何进展信号(执行器 participant
+   *  在群里的消息)超过该值 → 判「无进展失败」;有进展信号则顺延。 */
+  a2aSilenceTimeoutMinutes: number;
+  /** detached 超时(分钟):ReplyMode: detached 任务发送后执行器超过该时长仍未
+   *  PATCH 回写终态 → 按「结果未确认」处理。 */
+  detachedTimeoutMinutes: number;
   /** 失败自动重试策略。 */
   retry: RetryPolicy;
   /** 额度/速率限制失败后的冷却调度策略。 */
@@ -405,6 +411,12 @@ export const DEFAULT_STALL_TIMEOUT_MINUTES = 30;
 
 /** 默认认领超时(分钟);缺失/非法时兜底。 */
 export const DEFAULT_CLAIM_TIMEOUT_MINUTES = 30;
+
+/** 默认 A2A 无进展超时(分钟);缺失/非法时兜底。 */
+export const DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES = 30;
+
+/** 默认 detached 超时(分钟,24 小时);缺失/非法时兜底。 */
+export const DEFAULT_DETACHED_TIMEOUT_MINUTES = 1440;
 
 /** 默认重试策略:重试 1 次、重试前回滚工作区、同一执行器重跑。 */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
@@ -461,6 +473,8 @@ export function readDispatchPolicy(): DispatchPolicy {
       stallAlertMinutes?: unknown;
       stallTimeoutMinutes?: unknown;
       claimTimeoutMinutes?: unknown;
+      a2aSilenceTimeoutMinutes?: unknown;
+      detachedTimeoutMinutes?: unknown;
       retry?: {
         maxRetries?: unknown;
         resetWorkspace?: unknown;
@@ -496,6 +510,14 @@ export function readDispatchPolicy(): DispatchPolicy {
         raw.claimTimeoutMinutes,
         DEFAULT_CLAIM_TIMEOUT_MINUTES,
       ),
+      a2aSilenceTimeoutMinutes: positiveInt(
+        raw.a2aSilenceTimeoutMinutes,
+        DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES,
+      ),
+      detachedTimeoutMinutes: positiveInt(
+        raw.detachedTimeoutMinutes,
+        DEFAULT_DETACHED_TIMEOUT_MINUTES,
+      ),
       retry: {
         maxRetries: nonNegativeInt(
           raw.retry?.maxRetries,
@@ -530,6 +552,8 @@ export function readDispatchPolicy(): DispatchPolicy {
     stallAlertMinutes: DEFAULT_STALL_ALERT_MINUTES,
     stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
+    a2aSilenceTimeoutMinutes: DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES,
+    detachedTimeoutMinutes: DEFAULT_DETACHED_TIMEOUT_MINUTES,
     retry: DEFAULT_RETRY_POLICY,
     rateLimit: DEFAULT_RATE_LIMIT_POLICY,
   };

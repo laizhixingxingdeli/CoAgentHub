@@ -3,6 +3,8 @@
   "stallAlertMinutes": 15,
   "stallTimeoutMinutes": 30,
   "claimTimeoutMinutes": 30,
+  "a2aSilenceTimeoutMinutes": 30,
+  "detachedTimeoutMinutes": 1440,
   "retry": {
     "maxRetries": 1,
     "resetWorkspace": true,

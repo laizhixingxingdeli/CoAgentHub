@@ -274,6 +274,36 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     expect(row2.queryByTestId("task-stop-task-2")).toBeNull();
   });
 
+  it("结果未确认(diffSummary.unconfirmed)→ 黄色警示样式,不按红色失败显示", async () => {
+    // status 仍为 failed,但 diffSummary.unconfirmed=true(执行器可能已完成)。
+    const unconfirmedTasks = [
+      {
+        ...TASKS[0],
+        status: "failed",
+        diffSummary: {
+          error: "执行器未按协议回复，结果未确认",
+          unconfirmed: true,
+        },
+      },
+      TASKS[1],
+    ];
+    renderGroupPage(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", {
+        tasks: unconfirmedTasks,
+      }),
+    );
+    await openTasksTab();
+
+    const row = within(screen.getByTestId("task-row-task-1"));
+    const badge = row.getByTestId("task-status-task-1");
+    // 展示「结果未确认」而非「失败」;黄色警示样式而非红色失败样式。
+    expect(badge.getAttribute("data-status")).toBe("failed");
+    expect(badge.getAttribute("data-unconfirmed")).toBe("true");
+    expect(badge.textContent).toBe("结果未确认");
+    expect(badge.className).toContain("bg-amber-500/10");
+    expect(badge.className).not.toContain("bg-red-500/10");
+  });
+
   it("空态显示「暂无任务」", async () => {
     renderGroupPage(
       messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: [] }),

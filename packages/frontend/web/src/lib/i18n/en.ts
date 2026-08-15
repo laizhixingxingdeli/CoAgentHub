@@ -289,6 +289,7 @@ export const en: Record<DictKey, string> = {
   "tasks.hint.readOnly": "Group archived, read-only",
   "tasks.hint.noPermission": "coordinator/human identity required",
   "tasks.stallAlerted": "No progress — please intervene",
+  "tasks.unconfirmed": "Result unconfirmed",
   "tasks.expand": "Show details",
   "tasks.collapse": "Collapse",
   "tasks.output.title": "Live output",

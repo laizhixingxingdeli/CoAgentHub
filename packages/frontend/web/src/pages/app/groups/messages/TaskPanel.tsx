@@ -63,6 +63,11 @@ export const TASK_PANEL_STATUS_CLASSES: Record<TaskStatus, string> = {
   cancelled: TASK_STATUS_CLASSES.cancelled,
 };
 
+/** 结果未确认(第2层):status 仍是 failed,但 diffSummary.unconfirmed === true
+ *  → 用黄色警示样式展示「结果未确认」,不按红色失败显示。 */
+export const TASK_UNCONFIRMED_CLASSES =
+  "border-amber-300/60 bg-amber-500/10 text-amber-800 dark:border-amber-700/60 dark:bg-amber-500/15 dark:text-amber-300";
+
 type TaskPanelProps = {
   tasks: TaskItem[];
   loading: boolean;
@@ -276,6 +281,12 @@ export default function TaskPanel({
                 stallAlertedIds.has(task.id) ||
                 (task.diffSummary as Record<string, unknown> | null)
                   ?.stallAlerted === true;
+              // 结果未确认(第2层):status 仍为 failed,但 diffSummary.unconfirmed
+              // === true(执行器可能已完成但结果无法确认)→ 黄色警示样式展示,
+              // 不按红色失败显示。
+              const unconfirmed =
+                (task.diffSummary as Record<string, unknown> | null)
+                  ?.unconfirmed === true;
               const rollbackState = rollbackStates[task.id];
               const rolling = rollbackState === "rolling";
               const rollbackDone = rollbackState === "done";
@@ -311,9 +322,16 @@ export default function TaskPanel({
                     <span
                       data-testid={`task-status-${task.id}`}
                       data-status={task.status}
-                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${TASK_PANEL_STATUS_CLASSES[task.status]}`}
+                      data-unconfirmed={unconfirmed || undefined}
+                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                        unconfirmed
+                          ? TASK_UNCONFIRMED_CLASSES
+                          : TASK_PANEL_STATUS_CLASSES[task.status]
+                      }`}
                     >
-                      {taskStatusLabel(task.status)}
+                      {unconfirmed
+                        ? t("tasks.unconfirmed")
+                        : taskStatusLabel(task.status)}
                     </span>
                     {alerted && (
                       <span
