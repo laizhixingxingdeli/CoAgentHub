@@ -669,7 +669,7 @@ describe("GroupsPage participant 绑定 (ticket 18)", () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    const idInput = await screen.findByLabelText("Participant ID");
+    const idInput = await screen.findByLabelText("参与方 ID");
     fireEvent.change(idInput, { target: { value: "participant-1" } });
     fireEvent.click(screen.getByRole("button", { name: "绑定" }));
 
@@ -692,11 +692,11 @@ describe("GroupsPage participant 绑定 (ticket 18)", () => {
 });
 
 describe("GroupsPage 身份面板 (ticket 29)", () => {
-  it("渲染已有 Participant 列表:名字 + 类型/设备小字 + 总数", async () => {
+  it("渲染已有参与方列表:名字 + 类型/设备小字 + 总数", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    expect(await screen.findByText("已有 Participant")).toBeInTheDocument();
+    expect(await screen.findByText("已有参与方")).toBeInTheDocument();
     // 名册两行:hermes-mac(mac-mini)、atomcode-cli(无设备)。
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
     expect(screen.getByText("mac-mini")).toBeInTheDocument();
@@ -749,7 +749,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    await screen.findByText("已有 Participant");
+    await screen.findByText("已有参与方");
     // 当前身份突出显示 + 该行「使用中」。
     expect(
       screen.getByText("使用中: hermes-mac(mac-mini)"),
@@ -777,7 +777,7 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
       expect(localStorage.getItem(PARTICIPANT_ID_KEY)).toBeNull();
     });
     expect(
-      await screen.findByText(/未绑定 participant,从下方列表选择/),
+      await screen.findByText(/未绑定参与方,从下方列表选择/),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("使用中")).toBeNull();
@@ -786,10 +786,10 @@ describe("GroupsPage 身份面板 (ticket 29)", () => {
   });
 });
 
-describe("GroupsPage 注册新 Participant (ticket 28)", () => {
+describe("GroupsPage 注册新参与方 (ticket 28)", () => {
   const openRegister = async () => {
     fireEvent.click(
-      await screen.findByRole("button", { name: /注册新 Participant/ }),
+      await screen.findByRole("button", { name: /注册新参与方/ }),
     );
   };
 
@@ -798,8 +798,8 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    expect(screen.getByLabelText("注册 Participant 名称")).toBeInTheDocument();
-    expect(screen.getByLabelText("注册 Participant 设备")).toBeInTheDocument();
+    expect(screen.getByLabelText("注册参与方名称")).toBeInTheDocument();
+    expect(screen.getByLabelText("注册参与方设备")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "注册并绑定" }),
     ).toBeInTheDocument();
@@ -810,10 +810,10 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
+    fireEvent.change(screen.getByLabelText("注册参与方名称"), {
       target: { value: "我的 Mac" },
     });
-    fireEvent.change(screen.getByLabelText("注册 Participant 设备"), {
+    fireEvent.change(screen.getByLabelText("注册参与方设备"), {
       target: { value: "mac" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -837,7 +837,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
+    fireEvent.change(screen.getByLabelText("注册参与方名称"), {
       target: { value: "alice" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -857,7 +857,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
+    fireEvent.change(screen.getByLabelText("注册参与方名称"), {
       target: { value: "alice" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -875,7 +875,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     await openRegister();
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
 
-    expect(screen.getByText("Participant 名称不能为空")).toBeInTheDocument();
+    expect(screen.getByText("参与方名称不能为空")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
         ([url, init]) =>
@@ -889,7 +889,7 @@ describe("GroupsPage 注册新 Participant (ticket 28)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await openRegister();
-    fireEvent.change(screen.getByLabelText("注册 Participant 名称"), {
+    fireEvent.change(screen.getByLabelText("注册参与方名称"), {
       target: { value: "cli-participant" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并绑定" }));
@@ -1002,7 +1002,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
   });
 });
 
-describe("GroupsPage Participant 设置 (ticket 20)", () => {
+describe("GroupsPage 参与方设置 (ticket 20)", () => {
   it("绑定后显示设置区,保存调用 PATCH /api/participants/:id", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-20");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
@@ -1011,15 +1011,13 @@ describe("GroupsPage Participant 设置 (ticket 20)", () => {
 
     // 设置区在绑定 + 拉取到自己信息后出现;展示 name/device(只读)。
     const settingsButton = await screen.findByRole("button", {
-      name: /Participant 设置/,
+      name: /参与方设置/,
     });
     fireEvent.click(settingsButton);
     expect(screen.getByText(/名称:hermes-mac/)).toBeInTheDocument();
 
     // 修改名称并保存;device 沿用当前值。
-    const nameInput = screen.getByLabelText(
-      "Participant 名称",
-    ) as HTMLInputElement;
+    const nameInput = screen.getByLabelText("参与方名称") as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: "hermes-mac-2" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 

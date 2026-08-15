@@ -52,7 +52,7 @@ export default function AppSidebar({
   const pageLabel = location.startsWith("/groups")
     ? "群组"
     : location.startsWith("/participants")
-      ? "接入 Participant(参与者)"
+      ? "接入参与方"
       : "首页";
 
   return (

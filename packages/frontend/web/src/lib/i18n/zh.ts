@@ -81,60 +81,56 @@ export const zh = {
   "groups.confirm.deleteArchived":
     "确定删除群组「{title}」吗?删除后不可恢复(数据保留,仅从列表移除)。",
   "groups.error.identityRejected":
-    "请求被拒绝,请检查上方绑定的 Participant 身份是否有效",
+    "请求被拒绝,请检查上方绑定的参与方身份是否有效",
   "groups.error.identityMissing":
-    "请求被拒绝:未绑定 Participant 身份,请在身份面板选择或输入",
+    "请求被拒绝:未绑定参与方身份,请在身份面板选择或输入",
 
   // ── 群组列表页:身份面板 ──────────────────────────────────────────────────
   "groups.identity.inUse": "使用中:",
   "groups.identity.bound": "已绑定",
-  "groups.identity.unbound":
-    "未绑定 participant,从下方列表选择,或手动输入 participant id",
-  "groups.identity.existing": "已有 Participant",
-  "groups.identity.empty":
-    "暂无已注册 Participant,展开下方「注册新 Participant」创建",
-  "groups.identity.inputPlaceholder":
-    "输入 participant id(可选,用于以该身份发言)…",
-  "groups.identity.inputAria": "Participant ID",
+  "groups.identity.unbound": "未绑定参与方,从下方列表选择,或手动输入参与方 id",
+  "groups.identity.existing": "已有参与方",
+  "groups.identity.empty": "暂无已注册参与方,展开下方「注册新参与方」创建",
+  "groups.identity.inputPlaceholder": "输入参与方 id(可选,用于以该身份发言)…",
+  "groups.identity.inputAria": "参与方 ID",
   "groups.identity.bind": "绑定",
-  "groups.identity.register": "注册新 Participant",
-  "groups.identity.regNamePlaceholder": "Participant 名称(必填,如「我的 Mac」)",
-  "groups.identity.regNameAria": "注册 Participant 名称",
+  "groups.identity.register": "注册新参与方",
+  "groups.identity.regNamePlaceholder": "参与方名称(必填,如「我的 Mac」)",
+  "groups.identity.regNameAria": "注册参与方名称",
   "groups.identity.regDevicePlaceholder": "设备(可选,如 mac / iphone / cli)",
-  "groups.identity.regDeviceAria": "注册 Participant 设备",
+  "groups.identity.regDeviceAria": "注册参与方设备",
   "groups.identity.registering": "注册中…",
   "groups.identity.registerButton": "注册并绑定",
   "groups.identity.registerHint": "注册成功后将自动切换为该身份,无需终端 curl",
   "groups.identity.switched": "已切换为 {name}",
   "groups.identity.registeredAndBound": "✅ 已注册并绑定 {name}",
-  "groups.identity.nameRequired": "Participant 名称不能为空",
+  "groups.identity.nameRequired": "参与方名称不能为空",
   "groups.identity.registerFailed": "注册失败: {detail}",
-  "groups.identity.listFailed": "Participant 列表加载失败: {detail}",
+  "groups.identity.listFailed": "参与方列表加载失败: {detail}",
   "groups.identity.count": "共 {count} 个",
 
-  // ── 群组列表页:Participant 设置 ──────────────────────────────────────────
-  "groups.settings.title": "Participant 设置",
+  // ── 群组列表页:参与方设置 ────────────────────────────────────────────────
+  "groups.settings.title": "参与方设置",
   "groups.settings.name": "名称:",
   "groups.settings.device": "设备:",
   "groups.settings.namePlaceholder": "名称",
-  "groups.settings.nameAria": "Participant 名称",
+  "groups.settings.nameAria": "参与方名称",
   "groups.settings.devicePlaceholder": "设备",
-  "groups.settings.deviceAria": "Participant 设备",
-  "groups.settings.saved": "Participant 设置已保存",
-  "groups.settings.saveFailed": "保存 Participant 设置失败: {detail}",
-  "groups.settings.noParticipant":
-    "未绑定 participantId,无法保存 Participant 设置",
+  "groups.settings.deviceAria": "参与方设备",
+  "groups.settings.saved": "参与方设置已保存",
+  "groups.settings.saveFailed": "保存参与方设置失败: {detail}",
+  "groups.settings.noParticipant": "未绑定参与方 id,无法保存参与方设置",
   "groups.settings.nameEmpty": "名称不能为空",
 
-  // ── 接入 Participant 页 ──────────────────────────────────────────────────
-  "participants.title": "接入 Participant(参与者)",
+  // ── 接入参与方页 ─────────────────────────────────────────────────────────
+  "participants.title": "接入参与方",
   "participants.subtitle":
-    "新增一个可被定向消息调度的执行器;提交后自动注册对应 participant,凭据由后端管理。绑定身份后可编辑自己的 Participant 信息并上报在线",
+    "新增一个可被定向消息调度的执行器;提交后自动注册对应参与方,凭据由后端管理。绑定身份后可编辑自己的参与方信息并上报在线",
   "participants.terminology":
-    "术语澄清:这里的 Participant = 参与者身份(人 / 工具 / Bot 统一注册),不是「AI 智能体」;平台不内置 AI,思考发生在各 Participant 自己的客户端。",
+    "术语澄清:这里的参与方 = 身份单位(人 / 工具 / Bot 统一注册),不是「AI 智能体」;平台不内置 AI,思考发生在各参与方自己的客户端。",
   "participants.form.title": "新增执行器",
   "participants.form.name": "名字",
-  "participants.form.namePlaceholder": "如 My CLI Participant",
+  "participants.form.namePlaceholder": "如「我的命令行参与方」",
   "participants.form.invoke": "调用方式",
   "participants.form.invokeCli": "cli(本地命令)",
   "participants.form.invokeA2a": "a2a(远程 gateway)",
@@ -152,10 +148,9 @@ export const zh = {
   "participants.list.title": "执行器列表",
   "participants.list.empty": "暂无执行器,请先在上方新增",
   "participants.list.count": "共 {count} 个",
-  "participants.connected":
-    "已接入 Participant「{name}」,可在群组里定向到它发布任务",
+  "participants.connected": "已接入参与方「{name}」,可在群组里定向到它发布任务",
   "participants.deleted": "已删除「{name}」",
-  "participants.updated": "已更新 Participant「{name}」",
+  "participants.updated": "已更新参与方「{name}」",
   "participants.heartbeatSent": "已上报「{name}」在线",
   "participants.error.loadFailed": "加载失败",
   "participants.error.submitFailed": "提交失败",
@@ -163,15 +158,15 @@ export const zh = {
   "participants.error.saveFailed": "保存失败",
   "participants.error.heartbeatFailed": "上报在线失败",
   "participants.error.identityRequired":
-    "未绑定身份,请先在群组页身份面板选择或输入 participant id",
-  "participants.error.nameRequired": "请填写 Participant 名字",
+    "未绑定身份,请先在群组页身份面板选择或输入参与方 id",
+  "participants.error.nameRequired": "请填写参与方名字",
   "participants.error.gatewayRequired": "a2a 调用方式需要 gateway 地址",
   "participants.error.commandRequired": "cli 调用方式需要命令",
   "participants.confirm.delete": "删除执行器「{name}」?",
-  "participants.edit.title": "编辑 Participant",
+  "participants.edit.title": "编辑参与方",
   "participants.edit.desc":
     "更新自己的注册信息:名字 / 设备 / 能力标签(逗号分隔)。",
-  "participants.edit.name": "Participant 名字",
+  "participants.edit.name": "参与方名字",
   "participants.edit.device": "设备",
   "participants.edit.devicePlaceholder": "如 mac-mini",
   "participants.edit.caps": "能力标签(逗号分隔)",
@@ -188,7 +183,7 @@ export const zh = {
   "participants.editExecutor.builtinDisabled": "内置执行器不可编辑",
   "participants.editExecutor.title": "编辑执行器",
   "participants.editExecutor.desc":
-    "修改执行器配置:名字 / 命令 / 参数模板 / 模型 / 设备。名字变更不会自动改 Participant 名(仅记录)。",
+    "修改执行器配置:名字 / 命令 / 参数模板 / 模型 / 设备。名字变更不会自动改参与方名(仅记录)。",
   "participants.executorUpdated": "已更新执行器「{name}」",
 
   // ── 文件传输页 ───────────────────────────────────────────────────────────
@@ -367,7 +362,7 @@ export const zh = {
   "sidebar.platform": "平台",
   "sidebar.conversations": "会话",
   "sidebar.groups": "群组",
-  "sidebar.participants": "接入 Participant(参与者)",
+  "sidebar.participants": "接入参与方",
   "sidebar.files": "文件传输",
   "sidebar.help": "帮助",
   "sidebar.feedback": "反馈",

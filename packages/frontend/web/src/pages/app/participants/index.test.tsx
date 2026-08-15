@@ -91,7 +91,7 @@ function executorsFetchMock() {
   ]);
 }
 
-describe("接入 Participant 页", () => {
+describe("接入参与方页", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     localStorage.clear();
@@ -141,7 +141,7 @@ describe("接入 Participant 页", () => {
       expect(screen.getByText("My Cli Participant")).toBeInTheDocument();
     });
     expect(
-      screen.getByText(/已接入 Participant「My Cli Participant」/),
+      screen.getByText(/已接入参与方「My Cli Participant」/),
     ).toBeInTheDocument();
 
     // POST 载荷:cli → bin + 参数模板分词 + 模型,不含任何 token 字段
@@ -513,9 +513,7 @@ describe("接入 Participant 页", () => {
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
 
     // 对话框预填现有注册信息
-    const nameInput = screen.getByLabelText(
-      "Participant 名字",
-    ) as HTMLInputElement;
+    const nameInput = screen.getByLabelText("参与方名字") as HTMLInputElement;
     expect(nameInput.value).toBe("Online Bot");
     expect((screen.getByLabelText("设备") as HTMLInputElement).value).toBe(
       "mac-mini",
@@ -535,9 +533,7 @@ describe("接入 Participant 页", () => {
 
     // 保存成功后对话框关闭,列表行内刷新
     await waitFor(() => {
-      expect(
-        screen.queryByLabelText("Participant 名字"),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("参与方名字")).not.toBeInTheDocument();
     });
     const patchCall = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PATCH",
@@ -599,7 +595,7 @@ describe("接入 Participant 页", () => {
       screen.getByText(/未绑定身份,请先在群组页身份面板/),
     ).toBeInTheDocument();
     // 编辑对话框未被打开
-    expect(screen.queryByLabelText("Participant 名字")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("参与方名字")).not.toBeInTheDocument();
   });
 
   it("参与者行内改名:铅笔 → 输入 → PATCH /api/participants/:id {name} → 行内刷新", async () => {
