@@ -84,7 +84,7 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 
 /** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发布任务。 */
-const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
+export const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
 
 /** 与桥 contentTypeFor 一致:状态类 emoji 前缀 → task_status。 */
 const STATUS_EMOJI_RE = /^(?:📋|🚀|✅|❌|🛑|⚠️)/u;

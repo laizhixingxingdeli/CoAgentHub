@@ -15,11 +15,13 @@ import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import {
+  EXEC_ALLOWED_ROLES,
   maybeDispatchExecutorTask,
   notifyTaskStatusChanged,
   refreshA2AActivity,
   taskOutputTail,
 } from "@server/lib/executor-task";
+import { findExecutorByParticipantName } from "@server/lib/executors";
 import type { ParticipantType } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import { capabilityHint } from "@server/lib/participant-capabilities";
@@ -663,6 +665,26 @@ app
         });
         if (!target) {
           throw new BizError(BizCodeEnum.InvalidRequest);
+        }
+        // 任务发布门槛:定向到执行器 participant 的消息会触发任务创建,与
+        // executor-task/桥同款角色校验 —— 非 coordinator/human 直接 403,
+        // 避免"消息已写入但任务被静默跳过"造成插件误以为任务已下发。
+        const targetParticipant = await db.query.participant.findFirst({
+          where: (t, { eq: eqFn }) => eqFn(t.id, target.participantId),
+        });
+        const isExecutorTarget =
+          targetParticipant !== undefined &&
+          (await findExecutorByParticipantName(db, targetParticipant.name));
+        if (
+          isExecutorTarget &&
+          !membership.roles.some((r) =>
+            (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+          )
+        ) {
+          throw new BizError(
+            BizCodeEnum.Forbidden,
+            "无权限发布任务，请以 coordinator/human 身份绑定参与方",
+          );
         }
       } else if (audienceRef) {
         // broadcast has no reference; a stray one is a client bug.

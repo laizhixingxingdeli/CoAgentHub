@@ -251,6 +251,67 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     expect(tasks).toHaveLength(0);
   });
 
+  it("非协调者定向消息给执行器 → 403,且不产生群消息和任务", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    const observer = await registerParticipant({ name: "exec-observer" });
+    await addMember(coordinator.id, group.id, observer.id, ["observer"]);
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": observer.id,
+      },
+      body: JSON.stringify({
+        body: "非协调者发任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      }),
+    });
+    // 写入前校验(票:403 替代静默成功):状态码 + 明确错误信息。
+    expect(res.status).toBe(403);
+    const err = (await res.json()) as { code: string; message: string };
+    expect(err.message).toContain("无权限发布任务");
+
+    // 消息未被写入,任务未创建(spawn 是异步的,给足时间确认)。
+    const messages = await listMessages(observer.id, group.id);
+    expect(messages.some((m) => m.body === "非协调者发任务")).toBe(false);
+    await new Promise((r) => setTimeout(r, 300));
+    const tasks = await listTasks(observer.id, group.id);
+    expect(tasks).toHaveLength(0);
+  });
+
+  it("非协调者定向消息给普通 participant → 仍成功(不触发 403)", async () => {
+    const { coordinator, group } = await setupGroup();
+    const ordinary = await registerParticipant({ name: "ordinary-member" });
+    await addMember(coordinator.id, group.id, ordinary.id, ["observer"]);
+    const observer = await registerParticipant({ name: "plain-observer" });
+    await addMember(coordinator.id, group.id, observer.id, ["observer"]);
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": observer.id,
+      },
+      body: JSON.stringify({
+        body: "普通定向消息",
+        audience: "participant",
+        audienceRef: ordinary.id,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const msg = (await res.json()) as { id: string };
+    const messages = await listMessages(observer.id, group.id);
+    expect(
+      messages.some((m) => m.id === msg.id && m.body === "普通定向消息"),
+    ).toBe(true);
+    // 目标非执行器,不建任务(普通定向行为不变)。
+    await new Promise((r) => setTimeout(r, 300));
+    const tasks = await listTasks(observer.id, group.id);
+    expect(tasks).toHaveLength(0);
+  });
+
   it("同一消息重复触发不重复 spawn(已 done 则跳过)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const msg = await postMessage(coordinator.id, group.id, {
