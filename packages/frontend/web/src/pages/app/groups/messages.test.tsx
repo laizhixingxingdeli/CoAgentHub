@@ -1404,12 +1404,13 @@ describe("GroupMessagesPage 窄屏渲染 (ticket 18)", () => {
     // 贴底输入区:输入框 + 发送按钮都在
     expect(screen.getByLabelText("消息内容")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
-    // 气泡有响应式 max-width(sm 断点从 75% 收窄到 60%)
+    // 气泡有响应式 max-width(sm 断点从 85% 收窄到 75%)且宽度贴合内容
     const bubble = screen
       .getByText("任务草稿")
       .closest("li")
-      ?.querySelector(".max-w-\\[75\\%\\]");
-    expect(bubble?.className).toContain("sm:max-w-[60%]");
+      ?.querySelector(".max-w-\\[85\\%\\]");
+    expect(bubble?.className).toContain("w-fit");
+    expect(bubble?.className).toContain("sm:max-w-[75%]");
   });
 });
 

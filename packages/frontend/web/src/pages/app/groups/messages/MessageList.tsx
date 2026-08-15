@@ -452,12 +452,12 @@ export function MessageList(props: MessageListProps) {
                             </div>
                           )}
                           {/* 气泡容器 relative + w-fit + max-w:宽度贴合内容(短消息
-                        与内容同宽、不撑满;长消息在 max-w-75%/sm:max-w-60% 处换行,
+                        与内容同宽、不撑满;长消息在 max-w-85%/sm:max-w-75% 处换行,
                         百分比相对「消息列」解析),内部气泡 w-full 即内容宽;操作条
                         absolute 贴角(bottom-0 贴底、left-full/right-full 贴对应
                         侧边,own 镜像)。Ticket 22:编辑中换为 save/cancel 文本域,
                         已删除消息渲染灰色占位。 */}
-                          <div className="relative w-fit max-w-[75%] sm:max-w-[60%]">
+                          <div className="relative w-fit max-w-[85%] sm:max-w-[75%]">
                             {editingId === msg.id ? (
                               <div
                                 data-testid="message-edit-form"
