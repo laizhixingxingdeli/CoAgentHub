@@ -16,6 +16,7 @@ import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import {
   maybeDispatchExecutorTask,
+  notifyTaskStatusChanged,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import type { ParticipantType } from "@server/lib/group-visibility";
@@ -1054,6 +1055,79 @@ app
       return c.json(withOutput);
     },
   )
+  .get(
+    "/:id/tasks/:taskId",
+    describeRoute({
+      description:
+        "Get a single task's full details (optionally with outputTail via ?includeOutput=1)",
+      responses: {
+        200: {
+          description: "Task details",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    zValidator(
+      "param",
+      z.object({ id: z.string().uuid(), taskId: z.string().uuid() }),
+    ),
+    zValidator(
+      "query",
+      z.object({
+        // 实时输出:仅 includeOutput=1 时返回 outputTail(控制响应大小)。
+        includeOutput: z.enum(["1", "0", "true", "false"]).optional(),
+      }),
+    ),
+    async (c) => {
+      const db = c.get("db");
+      const { id, taskId } = c.req.valid("param");
+      const { includeOutput } = c.req.valid("query");
+      const wantOutput = includeOutput === "1" || includeOutput === "true";
+
+      const group = await db.query.groups.findFirst({
+        where: (t, { eq }) => eq(t.id, id),
+      });
+      if (!group) {
+        throw new BizError(BizCodeEnum.GroupNotFound);
+      }
+      const task = await db.query.task.findFirst({
+        where: (t, { and, eq }) => and(eq(t.id, taskId), eq(t.groupId, id)),
+      });
+      if (!task) {
+        throw new BizError(BizCodeEnum.TaskNotFound);
+      }
+      // 只返回任务详情约定字段(不泄露 attempts/a2aContextId 等内部列)。
+      const detail: Record<string, unknown> = {
+        id: task.id,
+        groupId: task.groupId,
+        messageId: task.messageId,
+        executorParticipantId: task.executorParticipantId,
+        executorKey: task.executorKey,
+        brief: task.brief,
+        status: task.status,
+        checkpointRef: task.checkpointRef,
+        retryCount: task.retryCount,
+        diffSummary: task.diffSummary,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      };
+      // 实时进度:includeOutput=1 时附 outputTail(running 任务 = 内存缓冲;
+      // 已完成任务 = diffSummary.outputTail 回填或留空)。
+      if (wantOutput) {
+        const buffered = taskOutputTail(task.id);
+        const summary =
+          typeof task.diffSummary === "object" && task.diffSummary !== null
+            ? (task.diffSummary as Record<string, unknown>)
+            : undefined;
+        const backfilled =
+          summary && typeof summary.outputTail === "string"
+            ? summary.outputTail
+            : undefined;
+        detail.outputTail = buffered ?? backfilled ?? null;
+      }
+      return c.json(detail);
+    },
+  )
   .patch(
     "/:id/tasks/:taskId",
     describeRoute({
@@ -1123,6 +1197,17 @@ app
         })
         .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, id)))
         .returning();
+      // 外部执行器客户端通过 PATCH 推进状态 → 同样推送 task_status_changed
+      // (仅当 status 实际变更时;否则订阅者会收到无变化的重复事件)。
+      if (updated && status !== undefined && updated.status !== task.status) {
+        await notifyTaskStatusChanged(
+          db,
+          updated.id,
+          updated.groupId,
+          status,
+          updated,
+        );
+      }
       return c.json(updated);
     },
   );

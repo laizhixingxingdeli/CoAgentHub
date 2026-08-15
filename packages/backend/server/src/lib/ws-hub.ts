@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import {
   groupMember as groupMemberTable,
   participant as participantTable,
+  type TaskStatus,
 } from "@laizhixingxingdeli/database/schema";
 import db from "@server/lib/database";
 import type { GroupMessageFull } from "@server/lib/group-message";
@@ -42,6 +43,23 @@ type IdentifiedWebSocket = WebSocket & {
   participantId?: string;
   isAlive?: boolean;
 };
+
+/**
+ * task_status_changed 事件可选 task 字段的载荷形状(与任务面板行同形状,
+ * 日期已序列化为 ISO 字符串;updatedAt 可空 — 新行未更新前为 null;
+ * diffSummary 为 jsonb 对象或 null)。
+ */
+export interface TaskStatusChangedTask {
+  id: string;
+  status: string;
+  executorParticipantId: string;
+  executorKey: string | null;
+  brief: string | null;
+  diffSummary: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string | null;
+  retryCount: number;
+}
 
 const WS_PATH = "/api/ws";
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -197,6 +215,38 @@ export class WsHub {
           type: "task_stall_alert",
           groupId,
           taskId,
+        }),
+    );
+  }
+
+  /**
+   * Fan-out a task status transition (feature: 任务状态实时推送): queued /
+   * running / done / failed / cancelled 变化时推给该任务所属群的订阅者,让
+   * 插件/前端免轮询感知任务生命周期。与 task_output 同界(broadcast 可见性),
+   * 只推给该群的成员。task 字段可选:传入时为完整任务详情快照(与任务面板行
+   * 同形状,日期已序列化为 ISO 字符串),不传则仅带 groupId/taskId/status。
+   */
+  async broadcastTaskStatusChanged(
+    groupId: string,
+    taskId: string,
+    status: TaskStatus,
+    task?: TaskStatusChangedTask,
+  ): Promise<void> {
+    await this.fanOut(
+      {
+        id: taskId,
+        groupId,
+        senderId: "",
+        audience: "broadcast" as const,
+        audienceRef: null,
+      },
+      () =>
+        JSON.stringify({
+          type: "task_status_changed",
+          groupId,
+          taskId,
+          status,
+          ...(task ? { task } : {}),
         }),
     );
   }

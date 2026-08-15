@@ -442,4 +442,110 @@ describe("任务实体(server 单一状态源)", () => {
     expect(found?.brief).toBeNull();
     expect(found?.status).toBe("running");
   });
+
+  it("GET 单任务:返回任务完整详情(含 brief/checkpointRef/retryCount/diffSummary)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const msg = await postMessage(coordinator.id, group.id, "单查任务书");
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    const res = await app.request(`/api/groups/${group.id}/tasks/${task.id}`, {
+      headers: { "X-Participant-Id": coordinator.id },
+    });
+    expect(res.status).toBe(200);
+    const detail = (await res.json()) as Record<string, unknown>;
+    expect(detail.id).toBe(task.id);
+    expect(detail.groupId).toBe(group.id);
+    expect(detail.messageId).toBe(msg.id);
+    expect(detail.executorParticipantId).toBe(execA.id);
+    expect(detail.executorKey).toBeNull(); // POST /tasks 未写 executorKey
+    expect(detail.brief).toBe("单查任务书");
+    expect(detail.status).toBe("running");
+    expect(detail.checkpointRef).toBeNull();
+    expect(detail.retryCount).toBe(0);
+    expect(detail.diffSummary).toBeNull();
+    expect(typeof detail.createdAt).toBe("string");
+    expect(typeof detail.updatedAt).toBe("string");
+    // 未请求 includeOutput 时不带 outputTail 字段。
+    expect("outputTail" in detail).toBe(false);
+  });
+
+  it("GET 单任务 includeOutput=1:running 任务附内存 outputTail(有缓冲时)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000071",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    // 无缓冲(未 spawn)→ outputTail 为 null 而非缺失。
+    const res = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}?includeOutput=1`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(res.status).toBe(200);
+    const detail = (await res.json()) as Record<string, unknown>;
+    expect(detail.outputTail).toBeNull();
+
+    // 通过 PATCH 写入 diffSummary.outputTail → includeOutput=1 回填返回。
+    const patched = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": execA.id,
+        },
+        body: JSON.stringify({
+          diffSummary: { outputTail: "tail line 1\ntail line 2" },
+        }),
+      },
+    );
+    expect(patched.status).toBe(200);
+
+    const res2 = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}?includeOutput=1`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const detail2 = (await res2.json()) as Record<string, unknown>;
+    expect(detail2.outputTail).toBe("tail line 1\ntail line 2");
+  });
+
+  it("GET 单任务:群不存在 404、任务不存在/属其他群 404", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000081",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    const noGroup = await app.request(
+      `/api/groups/00000000-0000-7000-8000-0000000000ff/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(noGroup.status).toBe(404);
+
+    const noTask = await app.request(
+      `/api/groups/${group.id}/tasks/00000000-0000-7000-8000-0000000000dd`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(noTask.status).toBe(404);
+
+    // 其他群查本群任务 → 404。
+    const other = await createGroup(coordinator.id, "另一个群(单查)");
+    const cross = await app.request(
+      `/api/groups/${other.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(cross.status).toBe(404);
+  });
 });

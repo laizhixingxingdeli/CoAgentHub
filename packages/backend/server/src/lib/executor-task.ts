@@ -56,7 +56,9 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  type Task,
   type TaskAttempt,
+  type TaskStatus,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
@@ -233,6 +235,48 @@ function releaseTaskOutput(taskId: string): void {
   runningOutputs.delete(taskId);
 }
 
+/**
+ * 任务状态落库后推 task_status_changed(任务状态实时推送):任务
+ * queued/running/done/failed/cancelled 变化时,通过 WS hub 推给该任务所属群
+ * 的订阅者(与 task_output 同界,broadcast 可见性),插件/前端免轮询感知任务
+ * 生命周期。task 载荷为最新任务行快照(日期转 ISO);失败只告警,不影响任务
+ * 主流程(fire-and-forget,与 wsHub 其它广播一致)。路由层(PATCH /tasks)
+ * 推进外部执行器客户端的状态时也复用此出口。
+ */
+export async function notifyTaskStatusChanged(
+  db: DataBase,
+  taskId: string,
+  groupId: string,
+  status: TaskStatus,
+  row?: Task,
+): Promise<void> {
+  try {
+    const task =
+      row ??
+      (await db.query.task.findFirst({
+        where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+      }));
+    if (!task) return;
+    const iso = (d: Date | string): string =>
+      d instanceof Date ? d.toISOString() : d;
+    const isoOrNull = (d: Date | string | null): string | null =>
+      d == null ? null : iso(d);
+    await wsHub.broadcastTaskStatusChanged(groupId, taskId, status, {
+      id: task.id,
+      status: task.status,
+      executorParticipantId: task.executorParticipantId,
+      executorKey: task.executorKey ?? null,
+      brief: task.brief ?? null,
+      diffSummary: (task.diffSummary as Record<string, unknown> | null) ?? null,
+      createdAt: iso(task.createdAt),
+      updatedAt: isoOrNull(task.updatedAt),
+      retryCount: task.retryCount,
+    });
+  } catch (e) {
+    console.warn(`[executor] 推送 task_status_changed 失败(${taskId}): ${e}`);
+  }
+}
+
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 let pumping = false;
 
@@ -405,11 +449,14 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
         isNotNull(taskTable.executorKey),
       ),
     )
-    .returning({ id: taskTable.id });
+    .returning();
   if (rows.length > 0) {
     console.log(
       `[executor] 重启兜底:${rows.length} 个 queued/running 任务置为 failed (server-restart)`,
     );
+    for (const row of rows) {
+      await notifyTaskStatusChanged(db, row.id, row.groupId, "failed", row);
+    }
   }
   return rows.length;
 }
@@ -494,15 +541,20 @@ export function stopRunningTask(taskId?: string): Array<{
 }
 
 /** 直接落库置 cancelled(停止指令取消排队/已运行任务用)。 */
-function markTaskCancelled(
+async function markTaskCancelled(
   db: DataBase,
   taskId: string,
   groupId: string,
 ): Promise<unknown> {
-  return db
+  const [updated] = await db
     .update(taskTable)
     .set({ status: "cancelled", diffSummary: { error: "stopped" } })
-    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
+    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+    .returning();
+  if (updated) {
+    await notifyTaskStatusChanged(db, taskId, groupId, "cancelled", updated);
+  }
+  return updated;
 }
 
 /**
@@ -613,6 +665,9 @@ async function dispatchTask(
       return;
     }
     console.log(`[executor] 既有 task ${task.id} 状态 ${task.status},重新执行`);
+  } else {
+    // 任务创建(queued)→ WS 推送:插件/前端免轮询感知任务入队。
+    await notifyTaskStatusChanged(db, task.id, groupId, "queued", created);
   }
 
   const summary = summaryOf(body);
@@ -765,10 +820,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
 
     // queued → running(尽力而为;失败不阻塞执行,终态仍会回写)。
     try {
-      await db
+      const [updated] = await db
         .update(taskTable)
         .set({ status: "running" })
-        .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
+        .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+        .returning();
+      if (updated) {
+        await notifyTaskStatusChanged(db, taskId, groupId, "running", updated);
+      }
     } catch (e) {
       console.warn(`[executor] 置 running 失败(${taskId}): ${e}`);
     }
@@ -958,10 +1017,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         console.log(`[executor] 任务已停止: ${taskId}`);
         await endAttempt(run, { status: "cancelled" });
         releaseTaskOutput(taskId);
-        await db
+        const [cancelled] = await db
           .update(taskTable)
           .set({ status: "cancelled", diffSummary: { error: "stopped" } })
-          .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
+          .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+          .returning();
+        if (cancelled) {
+          await notifyTaskStatusChanged(
+            db,
+            taskId,
+            groupId,
+            "cancelled",
+            cancelled,
+          );
+        }
         return;
       }
       // A2A 上下文延续:gateway 返回的新 contextId 落库(done/failed 都写;
@@ -1055,10 +1124,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           hash: report.hash,
         });
         releaseTaskOutput(taskId);
-        await db
+        const [done] = await db
           .update(taskTable)
           .set({ status: "done", diffSummary })
-          .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
+          .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+          .returning();
+        if (done) {
+          await notifyTaskStatusChanged(db, taskId, groupId, "done", done);
+        }
         console.log(
           `[executor] 任务完成: ${taskId}${
             report.hash ? ` hash=${report.hash}` : ""
@@ -1233,10 +1306,14 @@ async function failTask(
   if (retries > 0) diffSummary.retries = retries;
   const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
   if (tail) diffSummary.outputTail = tail;
-  await db
+  const [failed] = await db
     .update(taskTable)
     .set({ status: "failed", diffSummary })
-    .where(eq(taskTable.id, taskId));
+    .where(eq(taskTable.id, taskId))
+    .returning();
+  if (failed) {
+    await notifyTaskStatusChanged(db, taskId, failed.groupId, "failed", failed);
+  }
 }
 
 /* ---------------- 执行历史(attempt 时间线) ---------------- */
