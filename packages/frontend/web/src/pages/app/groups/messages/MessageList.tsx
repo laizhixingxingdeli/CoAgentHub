@@ -17,6 +17,7 @@ import {
   DELETED_MESSAGE_BODY,
   FOLD_PREVIEW_LENGTH,
   FOLD_THRESHOLD,
+  roleLabel,
   type Member,
   type MessageItem,
 } from "./types";
@@ -418,7 +419,9 @@ export function MessageList(props: MessageListProps) {
                               <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
                                 {senderRoles(msg.senderId).length > 0 && (
                                   <span className="rounded-full bg-muted px-1.5 py-0.5">
-                                    {senderRoles(msg.senderId).join("/")}
+                                    {senderRoles(msg.senderId)
+                                      .map(roleLabel)
+                                      .join("/")}
                                   </span>
                                 )}
                                 {label && (

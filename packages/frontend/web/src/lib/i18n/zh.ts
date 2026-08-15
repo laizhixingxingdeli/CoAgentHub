@@ -268,7 +268,7 @@ export const zh = {
   "tasks.status.failed": "失败",
   "tasks.status.cancelled": "已取消",
   "tasks.hint.readOnly": "群已归档,只读",
-  "tasks.hint.noPermission": "需要 coordinator/human 身份",
+  "tasks.hint.noPermission": "需要协调者/人类身份",
   "tasks.stallAlerted": "无进展,请介入",
   "tasks.expand": "展开详情",
   "tasks.collapse": "收起",

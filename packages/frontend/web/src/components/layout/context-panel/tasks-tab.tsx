@@ -251,7 +251,7 @@ export function TasksTab({ groupId }: { groupId: string }) {
       if (!res.ok) {
         setError(
           res.status === 403
-            ? "无权限,请以 coordinator/human 身份绑定 participant"
+            ? "无权限,请以协调者/人类身份绑定参与方"
             : `命令发送失败: HTTP ${res.status}`,
         );
         return;

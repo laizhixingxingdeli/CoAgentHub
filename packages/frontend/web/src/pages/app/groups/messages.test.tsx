@@ -324,7 +324,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     });
   });
 
-  it("无权限(Local User 未绑定身份):停止/回滚按钮禁用并提示需要 coordinator/human 身份", async () => {
+  it("无权限(Local User 未绑定身份):停止/回滚按钮禁用并提示需要协调者/人类身份", async () => {
     // 不绑定身份的 Local User:列表只读,控制按钮禁用。
     const mock = stubFetch(
       messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
@@ -337,7 +337,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     // 禁用按钮包裹 span 带身份提示(禁用按钮自身不触发 title 悬浮)。
     expect(stop.closest("span[title]")).toHaveAttribute(
       "title",
-      "需要 coordinator/human 身份",
+      "需要协调者/人类身份",
     );
 
     // 按钮禁用 → 不发送任何命令消息。
@@ -628,10 +628,10 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     const expectedOld = formatMessageTime(oldMsg.createdAt);
     expect(screen.getByText(expectedOld)).toBeInTheDocument();
 
-    // ③ 信息行:昵称 + 角色徽章
+    // ③ 信息行:昵称 + 角色徽章(词典渲染:协调者/检视者)
     expect(screen.getByText("hermes-mac")).toBeInTheDocument();
-    expect(screen.getByText("coordinator")).toBeInTheDocument();
-    expect(screen.getByText("reviewer")).toBeInTheDocument();
+    expect(screen.getByText("协调者")).toBeInTheDocument();
+    expect(screen.getByText("检视者")).toBeInTheDocument();
   });
 });
 
