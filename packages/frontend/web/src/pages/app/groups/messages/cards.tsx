@@ -12,6 +12,22 @@ import { t } from "@/lib/i18n";
 
 /** 任务书标记行(识别用):Category / Summary / Acceptance criteria 等,支持
  *  `**Label:**` 与 `**Label**` 两种变体(大小写不敏感)。 */
+
+/** 字段标签 i18n:识别出的英文标记 → 词典 key(zh 显示中文,en 保持英文)。 */
+function briefFieldLabel(raw: string): string {
+  const key = raw.toLowerCase().replace(/[^a-z]+/g, "");
+  const map: Record<string, string> = {
+    category: "cards.field.category",
+    summary: "cards.field.summary",
+    currentbehavior: "cards.field.currentBehavior",
+    desiredbehavior: "cards.field.desiredBehavior",
+    keyinterfaces: "cards.field.keyInterfaces",
+    outofscope: "cards.field.outOfScope",
+    acceptancecriteria: "cards.field.acceptanceCriteria",
+  };
+  const k = map[key];
+  return k ? t(k as import("@/lib/i18n").DictKey) : raw;
+}
 const BRIEF_MARKER_RE =
   /^\*\*\s*(category|summary|acceptance\s*criteria|desired\s*behavior|验收标准|类别|概要)\s*\*{0,2}\s*[:：]/i;
 
@@ -104,8 +120,8 @@ export function TaskBriefCard({ body }: { body: string }) {
       <div className="flex flex-col gap-1.5">
         {fields.map((f) => (
           <div key={f.label} className="flex flex-col gap-0.5">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-primary">
-              {f.label}
+            <span className="text-[11px] font-semibold tracking-wide text-primary">
+              {briefFieldLabel(f.label)}
             </span>
             <p className="whitespace-pre-wrap break-words text-sm">{f.value}</p>
           </div>
@@ -198,6 +214,18 @@ export function parseResultCard(body: string): ParsedResultCard {
   return { header, commit, rows, rest: restLines.join("\n") };
 }
 
+/** 结果行标签 i18n:「提交/测试/汇报/遗留」→ 词典 key(en 显示 Commit/Tests/Report/Remaining)。 */
+function resultRowLabel(raw: string): string {
+  const map: Record<string, string> = {
+    提交: "cards.result.commit",
+    测试: "cards.result.tests",
+    汇报: "cards.result.report",
+    遗留: "cards.result.remaining",
+  };
+  const k = map[raw];
+  return k ? t(k as import("@/lib/i18n").DictKey) : raw;
+}
+
 /** 单行截断:超过 RESULT_ROW_TRUNCATE 字显示省略号,点击展开/收起。 */
 function TruncatedRow({ text, testId }: { text: string; testId: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -244,7 +272,7 @@ export function TaskResultCard({ body }: { body: string }) {
         {parsed.header}
         {parsed.commit && (
           <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px]">
-            提交 {parsed.commit}
+            {t("cards.result.commit")} {parsed.commit}
           </span>
         )}
       </p>
@@ -252,8 +280,8 @@ export function TaskResultCard({ body }: { body: string }) {
         <div className="flex flex-col gap-1">
           {parsed.rows.map((row) => (
             <div key={row.label} className="flex flex-col gap-0.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                {row.label}
+              <span className="text-[10px] font-semibold tracking-wide text-muted-foreground">
+                {resultRowLabel(row.label)}
               </span>
               <TruncatedRow
                 text={row.value}

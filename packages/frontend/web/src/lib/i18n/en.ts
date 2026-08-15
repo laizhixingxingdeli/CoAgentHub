@@ -429,4 +429,16 @@ export const en: Record<DictKey, string> = {
   "common.toggleSidebar": "Toggle sidebar",
   "common.breadcrumb": "Breadcrumb",
   "common.scrollToBottom": "Scroll to bottom",
-  "common.avatar": "Avatar",};
+  "common.avatar": "Avatar",
+  "cards.field.category": "Category",
+  "cards.field.summary": "Summary",
+  "cards.field.currentBehavior": "Current behavior",
+  "cards.field.desiredBehavior": "Desired behavior",
+  "cards.field.keyInterfaces": "Key interfaces",
+  "cards.field.outOfScope": "Out of scope",
+  "cards.field.acceptanceCriteria": "Acceptance criteria",
+  "cards.result.commit": "Commit",
+  "cards.result.tests": "Tests",
+  "cards.result.report": "Report",
+  "cards.result.remaining": "Remaining",
+};

@@ -409,6 +409,18 @@ export const zh = {
   "common.toggleSidebar": "切换侧边栏",
   "common.breadcrumb": "面包屑",
   "common.scrollToBottom": "滚动到底部",
-  "common.avatar": "头像",} as const;
+  "common.avatar": "头像",
+  "cards.field.category": "类别",
+  "cards.field.summary": "摘要",
+  "cards.field.currentBehavior": "当前行为",
+  "cards.field.desiredBehavior": "期望行为",
+  "cards.field.keyInterfaces": "关键接口",
+  "cards.field.outOfScope": "范围外",
+  "cards.field.acceptanceCriteria": "验收标准",
+  "cards.result.commit": "提交",
+  "cards.result.tests": "测试",
+  "cards.result.report": "汇报",
+  "cards.result.remaining": "遗留",
+} as const;
 
 export type DictKey = keyof typeof zh;

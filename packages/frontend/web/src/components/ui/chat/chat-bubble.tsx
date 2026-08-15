@@ -1,10 +1,10 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import * as React from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Button } from "../button";
 import MessageLoading from "./message-loading";
-import { t } from "@/lib/i18n";
 
 // ChatBubble
 const chatBubbleVariant = cva(
