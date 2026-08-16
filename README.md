@@ -1,5 +1,7 @@
 # CoAgentHub
 
+**English** | [中文](./README_CN.md)
+
 An open-source, self-hosted, local-first AI platform for enterprises and teams:
 a **LAN-scale multi-participant coordination hub**. Participants register identities, join
 task groups, exchange role-routed messages, and hand off files via P2P
@@ -85,98 +87,62 @@ project binding) for group pages. Responsive: overlay on tablets/phones.
 4. Transfer files: attach a `fileRef`; the receiver fetches and verifies it.
 5. Watch from the browser: pick your identity in the web UI identity panel.
 
-## 接入你的 Participant
+## Integrating your participant
 
-server 是**唯一的调度器**(任务桥已退役):开机时自动注册执行器配置里的 participant
-(见 `packages/backend/server/src/lib/executors.ts`,含本地 Hermes 规划、AtomCode /
-Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里
-用 `audience=participant` 定向到某个执行器 participant 即触发任务。接入/编辑执行器
-配置走 `GET/POST/PATCH/DELETE /api/executors`(网页「接入 Participant」页;PATCH 支持
-改 bin/args/model/device/agentName,内置执行器不可编辑,改名不会自动改 participant 名):
+The server is the **single dispatcher** (the legacy task bridge is retired): on
+startup it auto-registers the participants declared in the executor config (see
+`packages/backend/server/src/lib/executors.ts` — local Hermes planning, the
+AtomCode / Reasoning / CodeBuddy executors, and remote Win Hermes invoked through
+the A2A gateway). Addressing a message to an executor participant with
+`audience=participant` triggers a task:
 
 ```
-任务消息 → POST /messages(audience=participant, audienceRef=<执行器 participant id>)
-         → server 建 task + 按项目分组的并行队列 spawn CLI(或 A2A 调用)
-         → git 快照/回滚兜底 → 完成后 ✅/❌ task_status 消息回传群里
+task message → POST /messages (audience=participant, audienceRef=<executor participant id>)
+             → server creates a task + spawns the CLI (or A2A call) via a per-project parallel queue
+             → git snapshot/rollback fallback → ✅/❌ task_status message posted back to the group
 ```
 
-**执行器分工选择**:定向消息指定的执行器 = 实现执行器;测试执行器按群成员分工提示词
-自动匹配(roles 含 executor/specialist 且 prompt 含测试/验证/检验/test/verify/review
-关键词,大小写不敏感;多个匹配取关键词出现最多者,稳定选一;无匹配则默认由实现执行器
-完成测试),写入任务书「执行与测试要求」段。网页发送器可选「测试执行器」(默认
-「自动」;选「同一执行器」或显式成员时,消息里追加 `**测试执行器:<名>**` 行,任务书
-原样保留——「同一执行器」= 测试由实现执行器自己完成,显式成员按名字生效)。
+Executor configuration is managed through `GET/POST/PATCH/DELETE /api/executors`
+(the web "Connect participant" page; PATCH can change
+`bin`/`args`/`model`/`device`/`agentName`, built-in executors cannot be edited,
+and renaming one does not rename the participant).
 
-**任务状态实时推送(`task_status_changed`)**:任务状态在 `queued / running /
-done / failed / cancelled` 任一变化时,server 经 `/api/ws` 向**任务所属群的
-订阅者**推送(与 `task_output` 同界,broadcast 可见性;fire-and-forget——推送
-失败只告警不重试,依赖方仍应以 HTTP 拉取兜底)。事件帧:
+**Implementer / tester selection** — the executor addressed by the message is the
+implementer; the tester is auto-matched from the group members' division-of-labor
+prompts (roles containing `executor`/`specialist` whose prompt contains
+test/verify/review keywords, case-insensitive; ties go to the member with the
+most keyword hits; no match falls back to the implementer) and is written into
+the task book's `## 执行与测试要求` (execution & test requirements) section. The
+web composer can also pick a tester explicitly (default "auto"; choosing "same
+executor" or a named member appends a `**测试执行器:<name>**` line to the message,
+kept verbatim in the task book).
 
-```ts
-{
-  type: "task_status_changed",
-  groupId: string,
-  taskId: string,
-  status: "queued" | "running" | "done" | "failed" | "cancelled",
-  task?: {  // 可选:最新任务行快照(与任务面板行同形状,日期为 ISO 字符串)
-    id: string
-    status: string
-    executorParticipantId: string
-    executorKey: string | null
-    brief: string | null
-    diffSummary: Record<string, unknown> | null
-    createdAt: string
-    updatedAt: string | null
-    retryCount: number
-  }
-}
-```
-
-**单任务查询**:`GET /api/groups/:id/tasks/:taskId` 返回任务详情(只暴露约定
-字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 时附加实时
-输出尾部 `outputTail`(running 任务 = 内存缓冲;已完成任务 = diffSummary 回填
-或留空):
-
-```ts
-{
-  id: string
-  groupId: string
-  messageId: string
-  executorParticipantId: string
-  executorKey: string | null
-  brief: string | null
-  status: string
-  checkpointRef: string | null
-  retryCount: number
-  diffSummary: Record<string, unknown> | null
-  createdAt: string
-  updatedAt: string | null
-  outputTail?: string | null   // 仅 includeOutput=1 时出现
-}
-```
-
-**A2A 协议可靠性**(经 A2A gateway 调用的远端执行器,如 Win Hermes):
-- **进度/心跳**:A2A 任务 `running` 期间,执行器 participant 在群内发送的消息
-  视为进展信号,刷新 `lastActivityAt` 并顺延无进展超时;连续无进展超过
-  `a2aSilenceTimeoutMinutes`(默认 30,`scripts/dispatch-policy.json`)→ 无进展失败。
-- **结果未确认**:gateway「agent did not reply in time」/ 请求超时但有进展 /
-  网络错误 / HTTP 5xx 时不直接按失败处理——`diffSummary` 增加
-  `{ error: "执行器未按协议回复，结果未确认", unconfirmed: true }`,群内回传
-  `⚠️ 任务结果未确认`(不回传 ❌、不自动重试)。
-- **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感);
-  A2A 发送完成即视为「已派发」,任务保持 `running`,由执行器恢复后
-  `PATCH /api/groups/:id/tasks/:taskId` 回写终态;超过
-  `detachedTimeoutMinutes`(默认 1440)仍未回写 → 按「结果未确认」处理。
+**A2A protocol reliability** (remote executors via the A2A gateway, e.g. Win
+Hermes):
+- **Progress / heartbeat** — while an A2A task is `running`, messages the
+  executor participant posts in the group count as progress signals, refreshing
+  `lastActivityAt` and extending the silence timeout; no progress for longer
+  than `a2aSilenceTimeoutMinutes` (default 30, `scripts/dispatch-policy.json`)
+  fails the task as "no progress".
+- **Unconfirmed results** — "agent did not reply in time" / request timeout with
+  progress / network errors / HTTP 5xx do not fail the task outright: the
+  `diffSummary` gains `{ error: "executor did not reply as agreed, result
+  unconfirmed", unconfirmed: true }` and the group gets a ⚠️ unconfirmed-result
+  notice (no ❌, no auto-retry).
+- **Detached execution** — task books may carry `## ReplyMode: detached`
+  (case-insensitive); the A2A send counts as "dispatched", the task stays
+  `running`, and the executor writes back the terminal state via
+  `PATCH /api/groups/:id/tasks/:taskId`; without a write-back past
+  `detachedTimeoutMinutes` (default 1440) the result is treated as unconfirmed.
 
 ```bash
-# 1) 基础设施 + 迁移
-docker compose up -d postgres          # 或使用本机 postgres
+# 1) Infrastructure + migration
+docker compose up -d postgres          # or use a local postgres
 pnpm --filter @laizhixingxingdeli/database migrate
 
-# 2) 后端(启动时自动注册执行器 participant)
+# 2) Backend (auto-registers executor participants on startup)
 pnpm --filter @laizhixingxingdeli/server build
 node packages/backend/server/dist/server.mjs    # :3001
-
 ```
 
 ## Development
@@ -217,10 +183,10 @@ pnpm test:e2e       # playwright test
 ```
 packages/
 ├── backend/server/     # Hono API (:3001, /api) — participant-groups routes, WS hub, executors
-│                       #   routes/group/ → groups/members/messages/tasks 子路由 + helpers
+│                       #   routes/group/ → groups/members/messages/tasks sub-routes + helpers
 │                       #   lib/executor-task/ → types/state/output-buffer/notify/report/queue
-│                       #   lib/config.ts 统一配置读取
-├── backend/database/   # Drizzle schema + migrations (PostgreSQL; 0015 = group_id 索引)
+│                       #   lib/config.ts centralized config reading
+├── backend/database/   # Drizzle schema + migrations (PostgreSQL; 0015 = group_id index)
 ├── frontend/web/       # React 19 + Vite + wouter SPA
 └── common/             # error codes + shared tsconfig presets
 docs/                   # Nextra documentation site

@@ -1,5 +1,7 @@
 # CoAgentHub
 
+**中文** | [English](./README.md)
+
 面向企业与团队的开源、自托管、本地优先 AI 平台:**局域网规模的多 participant 协作中枢**。
 Participant 注册身份、加入任务群组、按角色路由交换消息、通过 P2P 信令交接文件——CoAgentHub
 只做协作调度,不代理文件字节。
