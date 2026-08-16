@@ -1198,4 +1198,91 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       rmSync(nonGitDir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("弱验收:任务书含 ## Acceptance: skip-verify → 改文件不提交也通过(done)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_APPEND = "1"; // 改文件但 FAKE_NO_COMMIT 不提交(脏树)
+    process.env.FAKE_NO_COMMIT = "1";
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-accept-skip-verify-");
+      const group = await createGroup(
+        coordinator.id,
+        "验收跳过群(skip-verify)",
+      );
+      await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, group.id, proj);
+
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "只读排查任务,无代码提交\n## Acceptance: skip-verify\n完成后仅汇报结论",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.retryCount).toBe(0);
+      // 任务按 done 回传,未因脏树误判失败。
+      const messages = await listMessages(coordinator.id, group.id);
+      expect(messages.some((m) => m.body.includes("任务失败"))).toBe(false);
+    } finally {
+      process.env.FAKE_APPEND = "";
+      process.env.FAKE_NO_COMMIT = "";
+    }
+  }, 30_000);
+
+  it("弱验收:任务书含 ## CommitMode: none → 无改动退出也通过(done)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    process.env.FAKE_NO_COMMIT = "1"; // 无提交 → HEAD 无变化
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-accept-commitmode-none-");
+      const group = await createGroup(
+        coordinator.id,
+        "验收跳过群(commitmode none)",
+      );
+      await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, group.id, proj);
+
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "纯 API 操作,无本地提交\n## CommitMode: none",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.retryCount).toBe(0);
+      // 任务按 done 回传,未因 HEAD 无变化误判失败。
+      const messages = await listMessages(coordinator.id, group.id);
+      expect(messages.some((m) => m.body.includes("任务失败"))).toBe(false);
+    } finally {
+      process.env.FAKE_NO_COMMIT = "";
+    }
+  }, 30_000);
+
+  it("弱验收:hasSkipCommitMarker 按行识别标记(大小写/前后空白不敏感)", async () => {
+    const { hasSkipCommitMarker } = await import("@server/lib/executor-task");
+    // 两个标记都命中。
+    expect(hasSkipCommitMarker("## Acceptance: skip-verify")).toBe(true);
+    expect(hasSkipCommitMarker("## CommitMode: none")).toBe(true);
+    // 大小写、前后空白、混在正文里都不影响命中。
+    expect(
+      hasSkipCommitMarker("任务书正文\n  ## acceptance: skip-verify  \n结尾"),
+    ).toBe(true);
+    expect(hasSkipCommitMarker("## COMMITMODE: NONE")).toBe(true);
+    // 不带标记 / 近似标记不命中(保持原行为)。
+    expect(hasSkipCommitMarker("无标记的普通任务书")).toBe(false);
+    expect(hasSkipCommitMarker("## Acceptance: skip-verify-extra")).toBe(false);
+    expect(hasSkipCommitMarker("## CommitMode: commit")).toBe(false);
+    expect(hasSkipCommitMarker("正文提到 skip-verify 但非行首标记")).toBe(
+      false,
+    );
+  });
 });

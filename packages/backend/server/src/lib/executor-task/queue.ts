@@ -830,7 +830,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       if (result.code === 0) {
         // 弱验收钩子:done 判定前校验执行器是否真正提交了改动(仅本地 CLI,
         // a2a 远端执行无本地工作区不验收;git 命令失败跳过验收视为通过)。
-        if (!isA2a && run.checkpointRef) {
+        // 只读/纯 API 任务(任务书含「## Acceptance: skip-verify」或
+        // 「## CommitMode: none」)无代码提交 → 跳过「必须提交」检查,
+        // HEAD 无变化/工作树不干净不作为失败原因。
+        if (!isA2a && run.checkpointRef && !hasSkipCommitMarker(run.body)) {
           const verify = await verifyTaskCommitted(repoRoot, run.checkpointRef);
           if (!verify.ok) {
             const reason = verify.reason ?? "执行器未提交改动";
@@ -1314,6 +1317,21 @@ async function handleFailure(
     return;
   }
   group.queue.push(run);
+}
+
+/**
+ * 弱验收跳过标记:任务书 brief 含「## Acceptance: skip-verify」或
+ * 「## CommitMode: none」时,跳过「必须提交」检查——只读任务 / 纯 API 操作
+ * (push、改 GitHub 可见性、只读排查等)无代码提交,HEAD 无变化 / 工作树不干净
+ * 不作为失败原因。两个标记优先级一样;不带标记的任务行为完全不变。
+ * 行级匹配(大小写不敏感、允许前后空白),与「## ReplyMode: detached」同约定,
+ * 避免正文偶然命中。
+ */
+export function hasSkipCommitMarker(brief: string): boolean {
+  return (
+    /^\s*##\s*acceptance\s*:\s*skip-verify\s*$/im.test(brief) ||
+    /^\s*##\s*commitmode\s*:\s*none\s*$/im.test(brief)
+  );
 }
 
 /**

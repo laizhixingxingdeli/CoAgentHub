@@ -20,6 +20,7 @@ export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
   currentRunningTask,
+  hasSkipCommitMarker,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
   recoverInterruptedTasks,
