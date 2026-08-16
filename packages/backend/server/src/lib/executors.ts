@@ -354,8 +354,8 @@ export async function effectiveExecutors(
   }
   const rows = await listExecutorConfigs(db);
   cachedEffectiveExecutors = [...defaultExecutors(), ...rows.map(rowToConfig)];
-    cachedEffectiveExecutorsAt = Date.now();
-    return cachedEffectiveExecutors;
+  cachedEffectiveExecutorsAt = Date.now();
+  return cachedEffectiveExecutors;
 }
 
 /** 按 participant 表 name 匹配执行器配置(audienceRef → participant.name → executor)。 */

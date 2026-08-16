@@ -158,9 +158,7 @@ describe("runA2AExecutor 结果未确认(第2层)", () => {
   });
 
   it("FAILED 状态但回复是「agent did not reply in time」→ unconfirmed", async () => {
-    const fetchMock = vi.fn(async () =>
-      okResponse({ state: "failed" }),
-    );
+    const fetchMock = vi.fn(async () => okResponse({ state: "failed" }));
     // okResponse 的回复是 "ACAT-WIN-OK";构造一个回复含未回复文案的响应。
     const didNotReply = {
       ok: true,

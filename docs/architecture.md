@@ -30,19 +30,34 @@ CoAgentHub/
 │   │   ├── server/                    # Hono API 服务(:3001,基路径 /api)
 │   │   │   ├── src/
 │   │   │       ├── routes/participant/      #    participant 注册/列表/自管理(registry.ts)
-│   │   │       ├── routes/group/      #    群组/成员/归档/消息(registry.ts)
+│   │   │       ├── routes/group/      #    群组路由(架构审视拆分,API 路径/响应不变)
+│   │   │       │   ├── registry.ts   #      挂载入口(仅 route 汇总)
+│   │   │       │   ├── groups.ts     #      群本体:建/列(分页+搜索)/详情/改名/归档/软删
+│   │   │       │   ├── members.ts    #      成员:添加/列表/移除/角色与分工更新
+│   │   │       │   ├── messages.ts   #      消息:发送/编辑/软删/列表(?after= 增量 + q 搜索)
+│   │   │       │   ├── tasks.ts      #      任务:幂等创建/列表/详情/状态回写(PATCH)
+│   │   │       │   └── helpers.ts    #      共享守卫(assertGroupWritable)
 │   │   │       ├── routes/system/     #    health
-│   │   │       ├── routes/file.ts     #    LAN 文件上传下载,纯磁盘无鉴权
+│   │   │       ├── routes/file.ts     #    LAN 文件上传下载,纯磁盘无鉴权,流式读写
 │   │   │       ├── middleware/participant-identity.ts  # X-Participant-Id 身份声明(无鉴权/校验)
+│   │   │       ├── lib/config.ts             # 统一配置读取(CORS/FILE_DIR/上传上限/PORT)
 │   │   │       ├── lib/group-visibility.ts   # 消息可见性规则(单一来源)
-│   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws)
-│   │   │       └── lib/executor-*.ts         # 执行器调度(串行队列/快照回滚/A2A)
+│   │   │       ├── lib/services/message-service.ts  # 消息域纯 db 逻辑(列表/编辑/软删/写入)
+│   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws,成员短缓存)
+│   │   │       └── lib/executor-task/        # 执行器调度(拆分 barrel,导出面兼容)
+│   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
+│   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
+│   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail)
+│   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
+│   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard)
+│   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/停止/超时/重试)
 │   │   │   └── scripts/              #    演示/验收脚本
 │   │   └── database/                  # drizzle schema + migrations(表定义见 §3)
 │   ├── common/                        # 共享包(错误码 BizCodeEnum、tsconfig 预设)
 │   └── frontend/
 │       └── web/                       # React + Vite + wouter 前端
 │           └── src/pages/app/groups/  #    群组列表 / 消息(气泡聊天)/ 成员页
+│           └── src/hooks/             #    use-groups-page / use-messages-page / use-group-ws
 └── packages/backend/server/test/      # 验收测试(review-workflow 等)
 ```
 
@@ -55,9 +70,9 @@ CoAgentHub/
 | `participant` | `schema/participant.ts` | `id`(uuid,PK)、`name`、`device`、`token_hash`(列保留待删,token 认证已移除,插占位空串)、`last_seen`(心跳在线)、`capabilities`(jsonb 能力标签,缺省 `[]`)、`created_at`(仅创建) |
 | `groups` | `schema/group.ts` | `id`、`title`、`status`(`active`\|`archived`\|`deleted`,默认 active)、`created_by` → participant.id、`created_at`/`updated_at`。表名复数是因为 `group` 是 PG 保留字 |
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
-| `group_message` | `schema/group-message.ts` | `id`、`group_id`、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
-| `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
-| `task` | `schema/task.ts` | `id`、`group_id`、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、时间列 |
+| `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
+| `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
+| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、时间列 |
 
 ## 4. API 全貌
 
@@ -71,7 +86,7 @@ CoAgentHub/
 | `/api/participants/:id/heartbeat` | PUT | 上报在线,写 `last_seen`;在线判定 = WS 在线 ∪ REST 心跳新鲜 |
 | `/api/participants/:id` | DELETE | 删除 participant(成员关系与消息同事务清理;建过群或消息被引用为父消息 → 409) |
 | `/api/groups` | POST | 建群(`title`);创建者同一事务内自动加入并持 `coordinator` 角色 |
-| `/api/groups` | GET | 列群组,带 `memberCount`;`?status=active\|archived` 过滤 |
+| `/api/groups` | GET | 列群组,带 `memberCount`;`?status=active\|archived` 过滤、`?q=` 标题搜索、`?limit=&offset=` 分页(limit 上限 100,缺省不截断),返回 `{ items, total }` |
 | `/api/groups/:id` | GET | 群组详情(含 status) |
 | `/api/groups/:id/members` | POST | 添加成员并分配角色(幂等 upsert,缺省 `["observer"]`) |
 | `/api/groups/:id/members` | GET | 列成员(participant 信息 + 群内角色,按加入时间升序) |
@@ -82,7 +97,7 @@ CoAgentHub/
 | `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标 |
 | `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整) |
 | `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`) |
-| `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序) |
+| `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
 | `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空) |
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
@@ -93,6 +108,14 @@ CoAgentHub/
 
 - 群组全部端点经 `middleware/participant-identity.ts`:`X-Participant-Id: <uuid>` → 该 id 存在则 `c.set("participantId")` 为声称身份;缺失或 id 不存在 → 回落 **Local User**。**不做任何 token 校验,无 401/403**(局域网全信模型,冒名无害)。WS(`/api/ws`)握手用 `?participantId=` 声明身份,同规则。
 - 消息可见性由 `lib/group-visibility.ts` 的 `isMessageVisibleToMember` / `visibleMemberIds` 作为单一来源,GET 列表与 WS 推送共用,见 §5。
+
+### 错误处理与配置(架构审视)
+
+- **统一错误出口**(`server/src/index.ts` 的 `onError`):BizError → 业务码 + status;其余 → 500。一律经 winston logger 记录(含 `requestId`),响应体附 `requestId`(与 `hono/request-id` 中间件同源),便于客户端定位问题。
+- **CORS 可配**:`CORS_ORIGIN` env(逗号分隔多个来源),缺省 `http://localhost:3000`(见 `lib/config.ts`)。
+- **统一配置读取**收敛在 `lib/config.ts`(CORS / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);调度策略与执行器配置仍在各自领域模块读取。
+- **文件流式读写**:`/api/file/upload` 从 File 流式写盘(不再构造整块 Buffer 二次拷贝),`GET /api/file/:name` 流式下载(createReadStream),`serve.mjs` 静态文件同样流式返回且路径穿越校验使用 `path.sep` 组件边界。
+- **DB 索引**:迁移 0015 为 `group_message.group_id` 与 `task.group_id` 补索引(列表查询按群过滤 + 排序分页,此前无索引会全表扫描);`group_message_closure` 的 group_id/ancestor_id/descendant_id 索引与 `group_members` 联合主键已在库中。
 
 ## 5. 消息树与可见性
 

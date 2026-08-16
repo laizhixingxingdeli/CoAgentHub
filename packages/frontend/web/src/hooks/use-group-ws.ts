@@ -139,7 +139,8 @@ export function mergeGroupMessages<T extends { id: string }>(
  * Low-level participant-WS connection shared by the per-group message hook and the
  * global unread store (ticket 23).
  *
- * Opens `ws://<host>/api/ws?participantId=<id>` — `<host>` is the current page
+ * Opens `ws(s)://<host>/api/ws?participantId=<id>` — the scheme follows the
+ * page protocol (https → wss, otherwise ws); `<host>` is the current page
  * host, so dev goes through the vite proxy on :5173 and prod through serve.mjs
  * on :3000. The id is re-read from localStorage on every (re)connect. Every
  * parsed frame (any type, any group) is delivered to `onFrame`; connection
@@ -171,7 +172,10 @@ export function connectParticipantWs(opts: {
       return;
     }
     const participantId = localStorage.getItem(PARTICIPANT_ID_KEY) ?? "";
-    const url = `ws://${window.location.host}/api/ws?participantId=${encodeURIComponent(participantId)}`;
+    // 按页面协议选择 WS 协议:https → wss,否则 ws(dev 经 vite 代理、prod 经
+    // serve.mjs 均保持 /api/ws 路径与 participantId 查询参数不变)。
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${wsProtocol}//${window.location.host}/api/ws?participantId=${encodeURIComponent(participantId)}`;
     socket = new WebSocket(url);
 
     socket.onopen = () => {

@@ -21,9 +21,10 @@ describe("任务实体(server 单一状态源)", () => {
     });
     // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
     if (res.status === 409) {
-      const list = (await (
-        await app.request("/api/participants")
-      ).json()) as { id: string; name: string }[];
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
       const existing = list.find((p) => p.name === body.name);
       if (existing) return { id: existing.id };
     }
@@ -527,7 +528,7 @@ describe("任务实体(server 单一状态源)", () => {
         execA.id,
       )
     ).json()) as Task;
-      await patchTask(execA.id, group.id, tRunning.id, { status: "running" });
+    await patchTask(execA.id, group.id, tRunning.id, { status: "running" });
     const r1 = await patchTask(coordinator.id, group.id, tRunning.id, {
       brief: "x",
     });

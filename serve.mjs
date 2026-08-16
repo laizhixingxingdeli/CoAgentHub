@@ -8,11 +8,12 @@
  * 用法: node serve.mjs [端口] [后端地址]
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { networkInterfaces } from "node:os";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -52,30 +53,37 @@ async function serveStatic(req, res) {
   }
   let filePath = normalize(join(DIST_DIR, urlPath));
 
-  // 防止路径穿越
-  if (!filePath.startsWith(DIST_DIR)) {
+  // 防止路径穿越:用 path.sep 做组件边界判定,避免 DIST_DIR 前缀字符串误判
+  // (如 /dist-other 这类目录)。恰好等于 DIST_DIR 本身(URL 为 "/")合法。
+  if (filePath !== DIST_DIR && !filePath.startsWith(DIST_DIR + sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
   }
 
   try {
-    const info = await stat(filePath);
+    let info = await stat(filePath);
     if (info.isDirectory()) {
       filePath = join(filePath, "index.html");
+      info = await stat(filePath); // 目录缺 index.html → 走 SPA fallback
     }
-    const data = await readFile(filePath);
+    // 流式返回:大文件(如打包产物 .js/.map)不整块读入内存。
     res.writeHead(200, {
       "Content-Type": MIME[extname(filePath)] ?? "application/octet-stream",
       "Cache-Control": "no-cache",
+      "Content-Length": info.size,
     });
-    res.end(data);
+    createReadStream(filePath).pipe(res);
   } catch {
-    // SPA fallback: 非文件请求回退到 index.html
+    // SPA fallback: 非文件请求回退到 index.html(同样流式)。
     try {
-      const index = await readFile(join(DIST_DIR, "index.html"));
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(index);
+      const index = join(DIST_DIR, "index.html");
+      const info = await stat(index);
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": info.size,
+      });
+      createReadStream(index).pipe(res);
     } catch {
       res.writeHead(500);
       res.end("前端产物缺失，请先运行 pnpm build:frontend");

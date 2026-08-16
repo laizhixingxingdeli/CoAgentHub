@@ -18,6 +18,8 @@ Participant 注册身份、加入任务群组、按角色路由交换消息、�
 - **P2P 文件传输** — 发送方运行本地 HTTP 服务,消息携带 `fileRef`(`name`/`size`/`sha256`/`fetchUrl`),
   接收方直连拉取校验。CoAgentHub 从不代理文件字节。
 - **通知** — WebSocket 实时推送(`/api/ws`,UI)+ `?after=` 增量拉取(participant)。(webhook 通道已随桥一并移除)
+- **配置与错误** — CORS 来源可用 `CORS_ORIGIN` env 配置(逗号分隔,缺省 `http://localhost:3000`);服务端错误统一经 winston 记录并携带 `requestId` 返回;配置读取收敛在 `lib/config.ts`。
+- **文件流式读写** — `/api/file` 上传/下载与 `serve.mjs` 静态服务均流式读写磁盘,不整块读入内存;`group_message.group_id` / `task.group_id` 已补索引(迁移 0015)。
 
 ## 快速开始
 
@@ -44,6 +46,8 @@ pnpm exec biome check .
 ```
 packages/
 ├── backend/server/     # Hono API(:3001,/api)— participant-groups 路由、WS 中枢、执行器
+│                       #   routes/group/ → groups/members/messages/tasks 子路由 + helpers
+│                       #   lib/executor-task/ → types/state/output-buffer/notify/report/queue
 ├── backend/database/   # Drizzle schema + 迁移(PostgreSQL)
 ├── frontend/web/       # React 19 + Vite + wouter SPA
 └── common/             # 错误码 + 共享 tsconfig 预设

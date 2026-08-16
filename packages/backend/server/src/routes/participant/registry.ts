@@ -50,16 +50,16 @@ app
       const db = c.get("db");
       const input = c.req.valid("json");
 
-        // 名字唯一(participant_name_unique):先查再插,重复名返回 409 而非 500。
-        const nameTaken = await db.query.participant.findFirst({
-          where: (t, { eq }) => eq(t.name, input.name),
-        });
-        if (nameTaken) {
-          throw new BizError(
-            BizCodeEnum.Conflict,
-            `participant 名字已存在: ${input.name}`,
-          );
-        }
+      // 名字唯一(participant_name_unique):先查再插,重复名返回 409 而非 500。
+      const nameTaken = await db.query.participant.findFirst({
+        where: (t, { eq }) => eq(t.name, input.name),
+      });
+      if (nameTaken) {
+        throw new BizError(
+          BizCodeEnum.Conflict,
+          `participant 名字已存在: ${input.name}`,
+        );
+      }
 
       // token 认证已移除(全信模型):不再生成 token。token_hash 列保留(方案 B
       // 再删),插入占位值以满足 NOT NULL;响应不含任何 token 字段。

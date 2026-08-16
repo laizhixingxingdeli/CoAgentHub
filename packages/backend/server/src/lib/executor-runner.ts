@@ -11,7 +11,7 @@
  *    与桥的行为一致,子进程及孙进程一并终止)。
  */
 
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -197,31 +197,11 @@ export function checkpointRef(taskId: string): string {
 /** 同步 git 调用超时:挂起的 git 不能冻结 server 事件循环。 */
 const GIT_SYNC_TIMEOUT_MS = 30_000;
 
-/** 同步跑 git(回滚指令/快照用;与桥 gitSync 一致,纯 node:child_process)。 */
-export function gitSync(
-  args: string[],
-  cwd?: string,
-): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync("git", args, {
-    cwd: cwd ?? findRepoRoot(),
-    encoding: "utf8",
-    // 超时兜底:git 挂起(锁/网络盘)时 kill 并报失败,绝不无限阻塞事件循环。
-    timeout: GIT_SYNC_TIMEOUT_MS,
-  });
-  const timedOut =
-    (result.error as NodeJS.ErrnoException | null)?.code === "ETIMEDOUT";
-  return {
-    status: timedOut ? 1 : result.status,
-    stdout: result.stdout ?? "",
-    stderr: timedOut
-      ? `git ${args.join(" ")} 超时(${GIT_SYNC_TIMEOUT_MS}ms)`
-      : (result.stderr ?? ""),
-  };
-}
+/** 同步跑 git 的兼容入口已移除(不再被源码/测试使用;gitExec 为唯一实现,
+ *  基于 spawn,不阻塞事件循环)。 */
 
 /** 异步跑 git(推荐):基于 spawn,不阻塞事件循环;超时 SIGKILL 并报失败。
- *  createCheckpoint / resetToCheckpoint 已改用此实现;gitSync 保留为同步兼容口
- *  (仅限测试/低频一次性调用),避免在请求路径上阻塞 server。 */
+ *  createCheckpoint / resetToCheckpoint 均使用此实现。 */
 export function gitExec(
   args: string[],
   cwd?: string,
@@ -278,7 +258,6 @@ export function gitExec(
     });
   });
 }
-
 
 /**
  * 任务执行前打快照:git add -A → write-tree → commit-tree -p HEAD,把工作区

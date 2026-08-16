@@ -1,12 +1,9 @@
-import {
-  mkdir,
-  readdir,
-  readFile,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { fileDir, maxFileUploadBytes } from "@server/lib/config";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 
@@ -19,25 +16,14 @@ import { describeRoute } from "hono-openapi";
  * path traversal.
  */
 
-const FILE_DIR = path.resolve(process.env.FILE_DIR ?? "data/files");
+const FILE_DIR = fileDir();
 
 /**
  * 单文件上传上限(P0 输入上限):env `MAX_FILE_UPLOAD_BYTES` 可覆盖,
- * 默认 200MB,防止局域网内一条超大请求直接打爆磁盘/内存。
- * env 值非法(非正数)时回落默认值并告警,避免误配置悄悄禁用上限。
+ * 默认 200MB(非法值兜底见 lib/config.ts)。防止局域网内一条超大请求直接
+ * 打爆磁盘/内存。
  */
-const MAX_FILE_UPLOAD_BYTES = (() => {
-  const parsed = Number(process.env.MAX_FILE_UPLOAD_BYTES);
-  if (Number.isFinite(parsed) && parsed > 0) {
-    return parsed;
-  }
-  if (process.env.MAX_FILE_UPLOAD_BYTES !== undefined) {
-    console.warn(
-      `[file] MAX_FILE_UPLOAD_BYTES 非法(${process.env.MAX_FILE_UPLOAD_BYTES}),回落默认 200MB`,
-    );
-  }
-  return 200 * 1024 * 1024;
-})();
+const MAX_FILE_UPLOAD_BYTES = maxFileUploadBytes();
 
 /**
  * multipart 请求体比文件本身多出 framing(边界行 + part 头,通常 <1KB),
@@ -69,6 +55,21 @@ function resolveFilePath(name: string): string | null {
     return null;
   }
   return full;
+}
+
+/**
+ * 把 File 对象流式写入目标路径(带背压),避免 `Buffer.from(arrayBuffer())`
+ * 在 formData() 缓冲之上再产生一份整块内存拷贝。
+ */
+async function streamFileToDisk(file: File, dest: string): Promise<void> {
+  // File#stream() 是 web ReadableStream;经 Node 流管道写入磁盘,
+  // pipeline 自动处理背压与错误传播。
+  await pipeline(
+    Readable.fromWeb(
+      file.stream() as unknown as import("node:stream/web").ReadableStream,
+    ),
+    createWriteStream(dest),
+  );
 }
 
 const downloadUrl = (name: string) => `/api/file/${encodeURIComponent(name)}`;
@@ -125,10 +126,14 @@ const app = new Hono()
         return c.json({ message: "文件过大" }, 400);
       }
       await mkdir(FILE_DIR, { recursive: true });
-      await writeFile(
-        path.join(FILE_DIR, name),
-        Buffer.from(await file.arrayBuffer()),
-      );
+      try {
+        // 流式写盘:File → 磁盘,不构造整块 Buffer(仍受 file.size 上限约束)。
+        await streamFileToDisk(file, path.join(FILE_DIR, name));
+      } catch {
+        // 写入失败(磁盘满/中断):清理半成品后按 500 返回。
+        await unlink(path.join(FILE_DIR, name)).catch(() => {});
+        return c.json({ message: "文件写入失败" }, 500);
+      }
       return c.json({ name, size: file.size, url: downloadUrl(name) });
     },
   )
@@ -202,14 +207,19 @@ const app = new Hono()
         return c.json({ message: "非法文件名" }, 400);
       }
       try {
-        const data = await readFile(fullPath);
+        const info = await stat(fullPath);
         c.header(
           "Content-Disposition",
           `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
         );
         c.header("Content-Type", "application/octet-stream");
-        c.header("Content-Length", String(data.byteLength));
-        return c.body(data);
+        c.header("Content-Length", String(info.size));
+        // 流式下载:createReadStream → web ReadableStream,不整块读入内存。
+        return c.body(
+          Readable.toWeb(
+            createReadStream(fullPath),
+          ) as unknown as ReadableStream,
+        );
       } catch {
         return c.json({ message: "文件不存在" }, 404);
       }

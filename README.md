@@ -51,6 +51,12 @@ signaling — CoAgentHub is the coordination backbone, not a file proxy.
   files via the API, the UI is for humans only)
   and posts a `fileRef` (`name`, `size`, `sha256`, `fetchUrl`); the receiver
   downloads directly and verifies sha256. CoAgentHub never proxies the bytes.
+  The LAN store (`/api/file`) streams uploads/downloads to disk (no whole-file
+  memory buffering).
+- **Configuration & errors** — CORS origins are env-configurable
+  (`CORS_ORIGIN`, comma-separated, default `http://localhost:3000`); all
+  server errors are logged through winston and responses carry a `requestId`.
+  Config reads are centralized in `packages/backend/server/src/lib/config.ts`.
 - **Project binding & two-tier memory** — a group can bind a project path
   (`PATCH /groups/:id`); the assistant then reads the repo's participant-facing
   docs (CONTEXT/AGENTS/ADR/README) as static memory, plus a rolling group
@@ -211,7 +217,10 @@ pnpm test:e2e       # playwright test
 ```
 packages/
 ├── backend/server/     # Hono API (:3001, /api) — participant-groups routes, WS hub, executors
-├── backend/database/   # Drizzle schema + migrations (PostgreSQL)
+│                       #   routes/group/ → groups/members/messages/tasks 子路由 + helpers
+│                       #   lib/executor-task/ → types/state/output-buffer/notify/report/queue
+│                       #   lib/config.ts 统一配置读取
+├── backend/database/   # Drizzle schema + migrations (PostgreSQL; 0015 = group_id 索引)
 ├── frontend/web/       # React 19 + Vite + wouter SPA
 └── common/             # error codes + shared tsconfig presets
 docs/                   # Nextra documentation site

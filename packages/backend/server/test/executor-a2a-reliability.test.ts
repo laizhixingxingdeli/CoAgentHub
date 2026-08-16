@@ -23,10 +23,8 @@ process.env.COAGENTHUB_WIN_A2A_URL = "http://127.0.0.1:9911/";
 process.env.COAGENTHUB_WIN_A2A_TOKEN = "test-a2a-token";
 
 const { createTestApp } = await import("./app");
-const {
-  __resetExecutorQueueForTests,
-  __setReliabilityTimeoutsForTests,
-} = await import("@server/lib/executor-task");
+const { __resetExecutorQueueForTests, __setReliabilityTimeoutsForTests } =
+  await import("@server/lib/executor-task");
 
 describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
   const app = createTestApp();
@@ -39,9 +37,10 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
     });
     // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
     if (res.status === 409) {
-      const list = (await (
-        await app.request("/api/participants")
-      ).json()) as { id: string; name: string }[];
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
       const existing = list.find((p) => p.name === body.name);
       if (existing) return { id: existing.id };
     }
@@ -264,9 +263,7 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
     const messages = await listMessages(coordinator.id, group.id);
     const warn = messages.find((m) => m.body.startsWith("⚠️ 任务结果未确认"));
     expect(warn).toBeDefined();
-    expect(
-      messages.some((m) => m.body.startsWith("❌ 任务失败")),
-    ).toBe(false);
+    expect(messages.some((m) => m.body.startsWith("❌ 任务失败"))).toBe(false);
   });
 
   it("A2A 请求超时但最近有进展 → 结果未确认", async () => {
@@ -297,9 +294,9 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
       error: "执行器未按协议回复，结果未确认",
     });
     const messages = await listMessages(coordinator.id, group.id);
-    expect(
-      messages.some((m) => m.body.startsWith("⚠️ 任务结果未确认")),
-    ).toBe(true);
+    expect(messages.some((m) => m.body.startsWith("⚠️ 任务结果未确认"))).toBe(
+      true,
+    );
     expect(messages.some((m) => m.body.startsWith("❌ 任务失败"))).toBe(false);
   });
 
@@ -335,14 +332,15 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
     expect(task.diffSummary?.error).toBe("执行器无进展");
     expect(task.diffSummary?.unconfirmed).not.toBe(true);
     const messages = await listMessages(coordinator.id, group.id);
-    expect(
-      messages.some((m) => m.body.includes("执行器无进展")),
-    ).toBe(true);
+    expect(messages.some((m) => m.body.includes("执行器无进展"))).toBe(true);
   });
 
   it("detached:A2A 返回后任务保持 running;执行器 PATCH 回写 done → 正确终态", async () => {
     __setReliabilityTimeoutsForTests(500, 500, undefined, 5_000, 60_000);
-    vi.stubGlobal("fetch", vi.fn(async () => okResponse("ACAT-WIN-OK")));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => okResponse("ACAT-WIN-OK")),
+    );
     const { coordinator, winHermes, group } = await setupGroup();
 
     const msg = await postA2ATask(
@@ -367,20 +365,17 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
     );
 
     // 执行器恢复后 PATCH 回写终态(该端点已存在,仅执行器 participant 可改)。
-    const patch = await app.request(
-      `/api/groups/${group.id}/tasks/${t!.id}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Participant-Id": winHermes.id,
-        },
-        body: JSON.stringify({
-          status: "done",
-          diffSummary: { summary: "dsh web 已重启" },
-        }),
+    const patch = await app.request(`/api/groups/${group.id}/tasks/${t!.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": winHermes.id,
       },
-    );
+      body: JSON.stringify({
+        status: "done",
+        diffSummary: { summary: "dsh web 已重启" },
+      }),
+    });
     expect(patch.status).toBe(200);
 
     tasks = await listTasks(coordinator.id, group.id);
@@ -389,7 +384,10 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
 
   it("detached 超时未回写终态 → 结果未确认", async () => {
     __setReliabilityTimeoutsForTests(500, 500, undefined, 5_000, 300);
-    vi.stubGlobal("fetch", vi.fn(async () => okResponse("ACAT-WIN-OK")));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => okResponse("ACAT-WIN-OK")),
+    );
     const { coordinator, winHermes, group } = await setupGroup();
 
     const msg = await postA2ATask(
@@ -407,8 +405,8 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
       error: "执行器未按协议回复，结果未确认",
     });
     const messages = await listMessages(coordinator.id, group.id);
-    expect(
-      messages.some((m) => m.body.startsWith("⚠️ 任务结果未确认")),
-    ).toBe(true);
+    expect(messages.some((m) => m.body.startsWith("⚠️ 任务结果未确认"))).toBe(
+      true,
+    );
   });
 });

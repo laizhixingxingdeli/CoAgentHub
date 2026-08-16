@@ -19,9 +19,10 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
     // 名字唯一(0013):同名已注册时服务端返回 409,复用现有 participant(测试内多次 setupGroup)。
     if (res.status === 409) {
-      const list = (await (
-        await app.request("/api/participants")
-      ).json()) as { id: string; name: string }[];
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
       const existing = list.find((p) => p.name === body.name);
       if (existing) return { id: existing.id };
     }

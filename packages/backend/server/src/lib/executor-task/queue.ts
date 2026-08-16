@@ -1,64 +1,14 @@
 /**
- * Server 内嵌执行器触发链路(阶段2-票1/票2):POST /groups/:id/messages 出现
- * audience=participant 且 audienceRef 命中执行器配置(participant.name ===
- * agentName)时,server 直接建 task + spawn CLI 执行器,桥不再需要代为调度。
- *
- * 调度并行化(票4):队列按 project_path 分组——同一 project_path 的任务组内
- * 串行(一条组内队列),不同 project_path 的组并行执行,并行组数受
- * maxParallelGroups(scripts/dispatch-policy.json,默认 2)限制;project_path
- * 为空的群任务归入默认组(独立组,组内串行、可与有项目的组并行)。
- * 触发链路:消息命中执行器 → 建 task(status=queued)→ 入该组的队;组槽位空闲
- * 时取组内队首 → PATCH task running → spawn → 完成 PATCH done/failed → 泵下一个。
- *
- * 双跑期(桥保持现状并行运行)防重复:
- *  - 建 task 用 message_id 唯一约束幂等(与 POST /tasks 同一逻辑,ON CONFLICT
- *    DO NOTHING + 重读既有行)——桥与 server 谁先建谁拿到 created,另一个
- *    读到既有行。
- *  - 既有 task 且状态 running/done 时跳过 spawn:桥已登记并正在执行/已执行完,
- *    不重复跑。queued 也跳过:是本 server 自己入过队的(桥只会建 running)。
- *    failed/cancelled 视为可重新执行。
- *
- * 重启兜底:server 启动时调用 recoverInterruptedTasks,把 DB 里 status 为
- * queued/running 的任务自动恢复为 failed(附原因 server-restart),不自动重跑
- * (保持简单,队列是内存态,持久化只做失败兜底)。
- *
- * 可靠性保障(票5):两道超时兜底,全部 server 内实现(执行器是外部 CLI 不改)。
- *  - 认领超时:任务入队后超过 claimTimeoutMinutes(默认 30)仍未进入 running
- *    → 标 failed(「任务未被认领」)+ ❌ 回传(注明发布时间)。认领起点用入队
- *    时刻(内存记录),不依赖 DB created_at(重新执行的任务以本次入队为准)。
- *  - 静默超时:running 任务连续无 stdout/stderr 输出超过 stallTimeoutMinutes
- *    (默认 30)→ 标 failed(「执行器静默超时」)+ ❌ 回传。onOutput 每次输出
- *    刷新时间戳并重排定时器;仅 CLI 路径(本地进程才有输出可观察),a2a 不设。
- *  - 进程层:执行器进程死亡由 runExecutor 的 promise 完成路径统一处理(进程
- *    退出 → close 事件 → promise resolve → 非零 code 走 failed),无需额外逻辑。
- *  - 停止指令优先:run.stopped 的任务不受静默/认领超时影响(超时处理函数直接
- *    跳过,完成路径 stopped → cancelled)。
- * 阈值并入 scripts/dispatch-policy.json,server 启动时读取(缺省兜底 30)。
- *
- * 调度可靠性(票6):失败自动重试 + 弱验收钩子,配置并入 dispatch-policy.json。
- *  - 失败自动重试:任务因 exit≠0 / 超时 / 静默失败且 retryCount < maxRetries
- *    (默认 1)时,首次失败照常回传 ❌ 后补发「↻ [label] 自动重试 (第 N 次)」,
- *    重试前 resetWorkspace=true 时回滚 checkpoint(refs/coagenthub-cp/<taskId>)
- *    恢复工作树到任务前快照(回滚失败则终止重试,按最终失败处理);随后把 run
- *    重新入队,同一执行器重跑,retry_count 落库。认领超时 / 手动停止 / 验收
- *    失败不重试(停止是用户意图,认领失败重试无意义,验收失败需人工处理)。
- *  - 弱验收钩子:执行器报 done(code=0)时,server 在 repoRoot 跑
- *    git status --porcelain + 对比 HEAD 与执行前 commit(checkpoint ref 的
- *    父提交):工作树干净且 HEAD 有变化(新提交)→ 正常 done;工作树不干净或
- *    HEAD 无变化 → 标 failed(「执行器未提交改动」)+ ❌ 回传,不自动重试。
- *    git 命令失败 → 跳过验收(视为通过,记录 warning,避免误杀);a2a 远端
- *    执行无本地工作区,不验收。
- *
- * 状态回传保持桥现有 emoji 状态条格式:📋 排队 / 🚀 开始执行 / ✅ 完成 /
- * ❌ 失败 / 🛑 停止,contentType=task_status 由前缀判定,与桥的
- * contentTypeFor 一致。
+ * 执行器触发链路的队列核心(executor-task 拆分):入队 / 组调度(pump)/
+ * 运行(runOne)/ 停止 / 超时处理(认领/静默/无进展/detached)/ 失败重试 /
+ * 弱验收 / 执行历史。导出接口与拆分前 @server/lib/executor-task 完全兼容
+ * (barrel index.ts 汇总)。
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   type Task,
   type TaskAttempt,
-  type TaskStatus,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
@@ -76,287 +26,58 @@ import {
   type ExecutorConfig,
   findExecutorByParticipantName,
   parseRateLimitRecoveryMs,
-  readDispatchPolicy,
   renderExecutorArgs,
 } from "@server/lib/executors";
-import { insertGroupMessage } from "@server/lib/group-message";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
-
-/** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发布任务。 */
-export const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
-
-/** 与桥 contentTypeFor 一致:状态类 emoji 前缀 → task_status。 */
-const STATUS_EMOJI_RE = /^(?:📋|🚀|✅|❌|🛑|⚠️)/u;
-
-const ANSI_RE =
-  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
-
-export interface DispatchExecutorInput {
-  groupId: string;
-  messageId: string;
-  senderRoles: string[];
-  /** audienceRef = 被 @ 的 participant id(即执行器 participant 身份)。 */
-  audienceRef: string;
-  body: string;
-}
-
-/** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */
-export interface GroupPromptInfo {
-  roles: string[];
-  prompt: string;
-}
-
-/** 队列条目:一次待执行/执行中的运行。 */
-interface QueuedRun {
-  db: DataBase;
-  groupId: string;
-  messageId: string;
-  taskId: string;
-  participantId: string;
-  ex: ExecutorConfig;
-  body: string;
-  summary: string;
-  /** 群内分工(角色解绑后);成员在本群无 prompt 时为 null,任务书不含该段。 */
-  groupPrompt: GroupPromptInfo | null;
-  /** 组键:群 project_path(空 → DEFAULT_GROUP_KEY),分组串行/并行用。 */
-  groupKey: string;
-  /** 群绑定的项目路径(spawn cwd/快照仓库用);未绑定为 null。 */
-  projectPath: string | null;
-  /** 运行中句柄的 kill(停止指令用);spawn 前为 null。 */
-  kill: (() => void) | null;
-  /** 停止指令已终止本任务(完成回调不再回传 ❌,改置 cancelled)。 */
-  stopped: boolean;
-  /** 入队时间(ms,认领超时起点;重新执行的任务以本次入队时间为准)。 */
-  createdAt: number;
-  /** 进入 running 的时间(ms);尚未开始为 null。 */
-  runningAt: number | null;
-  /** 最近一次 stdout/stderr 输出的时间(ms);静默检测用。 */
-  lastOutputAt: number;
-  /** A2A 最近进展时间(ms):任务 running 起点置位,执行器 participant 在群里
-   *  发的消息(进度信号)刷新;A2A 无进展超时 / 请求超时判定用。 */
-  lastActivityAt: number;
-  /** 认领超时定时器(入队时调度,进入 running 时取消)。 */
-  claimTimer: NodeJS.Timeout | null;
-  /** 静默超时定时器(spawn 时调度,每次输出重排);a2a 无本地进程不调度。 */
-  stallTimer: NodeJS.Timeout | null;
-  /** 无进展提醒定时器(spawn 时调度,每次输出重排);先于 stallTimer 触发,
-   *  只发提醒消息 + 警示标记,不失败。 */
-  stallAlertTimer: NodeJS.Timeout | null;
-  /** A2A 无进展超时定时器(running 时调度,进度消息重排);触发 → a2aSilenced
-   *  + 中止在途请求,失败由完成路径统一处理。detached 任务不调度。 */
-  a2aSilenceTimer: NodeJS.Timeout | null;
-  /** detached 超时定时器(detached 任务发送完成后调度,等待执行器 PATCH 回写
-   *  终态);触发 → 按「结果未确认」处理。独立于 clearRunTimers,跨队列存活。 */
-  detachedTimer: NodeJS.Timeout | null;
-  /** 静默超时已触发(完成回调不再重复回传 ❌)。 */
-  stalled: boolean;
-  /** 无进展提醒已发送(避免重复提醒)。 */
-  stallAlerted: boolean;
-  /** A2A 无进展超时已触发(完成回调按「无进展失败」处理,不再回传 ❌)。 */
-  a2aSilenced: boolean;
-  /** 任务书标记了 ReplyMode: detached(A2A 发送后保持 running,等执行器
-   *  PATCH 回写终态;不设静默/无进展超时)。 */
-  detached: boolean;
-  /** detached 超时已触发(避免重复按结果未确认处理)。 */
-  detachedTimedOut: boolean;
-  /** 已自动重试次数(失败重试用;重试前回滚 checkpoint、重新入队重跑)。 */
-  retryCount: number;
-  /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
-  checkpointRef: string | null;
-  /** 执行历史(attempt 时间线):spawn 前 append running,结束时补 endedAt/status。 */
-  attempts: TaskAttempt[];
-}
-
-/** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
-const DEFAULT_GROUP_KEY = "__default__";
-
-/** 单个 project_path 的组队列:组内串行 FIFO,不同组并行(受组槽位数限制)。 */
-interface GroupQueue {
-  key: string;
-  queue: QueuedRun[];
-  running: QueuedRun | null;
-}
-
-/**
- * 按 project_path 分组的执行队列(模块级,票4):同一组键(project_path)的任务
- * 组内串行;不同组并行执行,并行组数上限 maxParallelGroups(dispatch-policy.json,
- * 默认 2;=1 时退化为全局串行)。组槽位空闲时 pumpQueue 取组内队首运行。
- */
-const groupQueues = new Map<string, GroupQueue>();
-
-/** 调度策略:启动时读取一次,所有阈值从同一快照取值,避免重复读盘与不一致。 */
-const dispatchPolicy = readDispatchPolicy();
-
-/** 最大并行组数:server 启动时从 scripts/dispatch-policy.json 读取。 */
-let maxParallelGroups = dispatchPolicy.maxParallelGroups;
-
-/** 静默超时阈值(ms):running 连续无输出超过即失败;启动时读配置,缺省 30min。 */
-let stallTimeoutMs = dispatchPolicy.stallTimeoutMinutes * 60_000;
-
-/** 无进展提醒阈值(ms):running 连续无输出超过即提醒协调者(不失败);
- *  启动时读配置,缺省 15min。 */
-let stallAlertMs = dispatchPolicy.stallAlertMinutes * 60_000;
-
-/** 认领超时阈值(ms):queued 超过即失败;启动时读配置,缺省 30min。 */
-let claimTimeoutMs = dispatchPolicy.claimTimeoutMinutes * 60_000;
-
-/** A2A 无进展超时阈值(ms):running 的 A2A 任务连续无进展信号即失败;启动时
- *  读配置,缺省 30min。detached 任务不适用(等待执行器事后 PATCH)。 */
-let a2aSilenceTimeoutMs = dispatchPolicy.a2aSilenceTimeoutMinutes * 60_000;
-
-/** detached 超时阈值(ms):detached 任务发送后执行器超过该时长未 PATCH 回写
- *  终态 → 按「结果未确认」处理;启动时读配置,缺省 24h。 */
-let detachedTimeoutMs = dispatchPolicy.detachedTimeoutMinutes * 60_000;
-
-/** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
-let retryPolicy = dispatchPolicy.retry;
-
-/** 额度/速率限制配置(票7):失败关键词 + 冷却时长;启动时读配置。 */
-let rateLimitPatterns = dispatchPolicy.rateLimit.detectPatterns;
-let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;
-
-/**
- * 执行器额度冷却(票7,内存态):executorKey → 冷却结束时间(epoch ms)。重启
- * 丢失可接受(重启后冷却失效,任务按普通状态恢复)。
- */
-const executorCooldowns = new Map<string, number>();
-
-/** 冷却结束定时器(executorKey → timer):到期清冷却并泵一次,让排队任务自动派发。 */
-const cooldownTimers = new Map<string, NodeJS.Timeout>();
-
-/* ---------------- 实时输出缓冲(实时进度 feature) ---------------- */
-
-/** running 任务最近输出的环形缓冲上限:200 行 / 64KB,超限保留尾部。 */
-const OUTPUT_TAIL_MAX_LINES = 1000;
-const OUTPUT_TAIL_MAX_BYTES = 256 * 1024;
-
-/** running 任务的输出缓冲(taskId → 最近输出全文,任务结束释放)。 */
-const runningOutputs = new Map<string, string>();
-
-/**
- * 追加输出块到任务缓冲:按行数/字节数双上限截断,超限只留尾部(环形)。
- * 任务结束(releaseTaskOutput)时从 Map 移除,避免内存泄漏。
- */
-function appendTaskOutput(taskId: string, chunk: string): void {
-  const prev = runningOutputs.get(taskId) ?? "";
-  let next = prev + chunk;
-  if (next.length > OUTPUT_TAIL_MAX_BYTES) {
-    next = next.slice(-OUTPUT_TAIL_MAX_BYTES);
-  }
-  const lines = next.split("\n");
-  if (lines.length > OUTPUT_TAIL_MAX_LINES) {
-    next = lines.slice(-OUTPUT_TAIL_MAX_LINES).join("\n");
-  }
-  runningOutputs.set(taskId, next);
-}
-
-/** 取任务缓冲全文(running 任务有缓冲;无/已释放返回 null)。 */
-export function taskOutputTail(taskId: string): string | null {
-  return runningOutputs.get(taskId) ?? null;
-}
-
-/** 释放任务缓冲(任务进入终态 done/failed/cancelled 时调用)。 */
-function releaseTaskOutput(taskId: string): void {
-  runningOutputs.delete(taskId);
-}
-
-/**
- * 任务状态落库后推 task_status_changed(任务状态实时推送):任务
- * queued/running/done/failed/cancelled 变化时,通过 WS hub 推给该任务所属群
- * 的订阅者(与 task_output 同界,broadcast 可见性),插件/前端免轮询感知任务
- * 生命周期。task 载荷为最新任务行快照(日期转 ISO);失败只告警,不影响任务
- * 主流程(fire-and-forget,与 wsHub 其它广播一致)。路由层(PATCH /tasks)
- * 推进外部执行器客户端的状态时也复用此出口。
- */
-export async function notifyTaskStatusChanged(
-  db: DataBase,
-  taskId: string,
-  groupId: string,
-  status: TaskStatus,
-  row?: Task,
-): Promise<void> {
-  try {
-    const task =
-      row ??
-      (await db.query.task.findFirst({
-        where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
-      }));
-    if (!task) return;
-    const iso = (d: Date | string): string =>
-      d instanceof Date ? d.toISOString() : d;
-    const isoOrNull = (d: Date | string | null): string | null =>
-      d == null ? null : iso(d);
-    await wsHub.broadcastTaskStatusChanged(groupId, taskId, status, {
-      id: task.id,
-      status: task.status,
-      executorParticipantId: task.executorParticipantId,
-      executorKey: task.executorKey ?? null,
-      brief: task.brief ?? null,
-      diffSummary: (task.diffSummary as Record<string, unknown> | null) ?? null,
-      createdAt: iso(task.createdAt),
-      updatedAt: isoOrNull(task.updatedAt),
-      retryCount: task.retryCount,
-    });
-  } catch (e) {
-    console.warn(`[executor] 推送 task_status_changed 失败(${taskId}): ${e}`);
-  }
-}
-
-/** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
-let pumping = false;
-
-/** 排队中(未开始)任务数;回滚指令前置校验用。 */
-export function queuedExecutorTaskCount(): number {
-  let n = 0;
-  for (const g of groupQueues.values()) n += g.queue.length;
-  return n;
-}
-
-/** 取消单个 run 的认领/静默定时器(幂等;停止/完成/重置时调用)。
- *  detachedTimer 不在清理范围:detached 任务发送完成后 run 已离开队列,超时
- *  定时器需跨队列存活(等待执行器 PATCH,超时按结果未确认处理)。 */
-function clearRunTimers(run: QueuedRun): void {
-  if (run.claimTimer) {
-    clearTimeout(run.claimTimer);
-    run.claimTimer = null;
-  }
-  if (run.stallTimer) {
-    clearTimeout(run.stallTimer);
-    run.stallTimer = null;
-  }
-  if (run.stallAlertTimer) {
-    clearTimeout(run.stallAlertTimer);
-    run.stallAlertTimer = null;
-  }
-  if (run.a2aSilenceTimer) {
-    clearTimeout(run.a2aSilenceTimer);
-    run.a2aSilenceTimer = null;
-  }
-}
+import {
+  markTaskCancelled,
+  notifyTaskStatusChanged,
+  postStatus,
+} from "./notify";
+import {
+  appendTaskOutput,
+  releaseTaskOutput,
+  taskOutputTail,
+} from "./output-buffer";
+import {
+  findCommitHash,
+  lastLinesOf,
+  parseTaskReport,
+  renderTaskCard,
+  type TaskReport,
+} from "./report";
+import {
+  clearRunTimers,
+  cooldownEndMs,
+  cooldownTimers,
+  executorCooldowns,
+  formatEta,
+  getA2ASilenceTimeoutMs,
+  getClaimTimeoutMs,
+  getDetachedTimeoutMs,
+  getMaxParallelGroups,
+  getRateLimitCooldownMs,
+  getRetryPolicy,
+  getStallAlertMs,
+  getStallTimeoutMs,
+  groupQueues,
+  isInCooldown,
+  isQuotaFailure,
+  pumping,
+  runningGroupCount,
+  setPumping,
+} from "./state";
+import {
+  DEFAULT_GROUP_KEY,
+  type DispatchExecutorInput,
+  EXEC_ALLOWED_ROLES,
+  type GroupPromptInfo,
+  type GroupQueue,
+  type QueuedRun,
+} from "./types";
 
 /* ---------------- 额度感知调度(票7) ---------------- */
-
-/** 冷却结束时间(epoch ms);无冷却记录返回 0。 */
-function cooldownEndMs(ex: ExecutorConfig): number {
-  return executorCooldowns.get(ex.key) ?? 0;
-}
-
-/** 执行器是否处于额度冷却期。 */
-function isInCooldown(ex: ExecutorConfig): boolean {
-  return cooldownEndMs(ex) > Date.now();
-}
-
-/** 失败文本是否命中额度关键词(rate limit/quota/429/额度 等,大小写不敏感)。 */
-function isQuotaFailure(texts: string[]): boolean {
-  const haystack = texts.join("\n").toLowerCase();
-  return rateLimitPatterns.some((p) => haystack.includes(p.toLowerCase()));
-}
-
-/** 格式化冷却结束时间(zh-CN 本地时间,与认领超时回传一致)。 */
-function formatEta(endMs: number): string {
-  return new Date(endMs).toLocaleString("zh-CN");
-}
 
 /**
  * 执行器进入额度冷却:记录冷却结束时间并调度到期泵送(冷却结束后 pumpQueue
@@ -390,89 +111,12 @@ function enterCooldown(ex: ExecutorConfig, endMs: number): number {
   return end;
 }
 
-/**
- * 测试专用:终止全部运行中任务并清空所有组队列(模块级状态跨测试文件/用例
- * 共享,避免前一个用例残留的 running/queued 影响后续断言)。仅测试调用。
- */
-export function __resetExecutorQueueForTests(): void {
-  for (const g of groupQueues.values()) {
-    if (g.running) {
-      g.running.stopped = true;
-      g.running.kill?.();
-      clearRunTimers(g.running);
-    }
-    for (const q of g.queue) clearRunTimers(q);
-    g.queue.length = 0;
-  }
-  groupQueues.clear();
-  runningOutputs.clear();
-  for (const t of cooldownTimers.values()) clearTimeout(t);
-  cooldownTimers.clear();
-  executorCooldowns.clear();
-  const policy = readDispatchPolicy();
-  maxParallelGroups = policy.maxParallelGroups;
-  stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
-  stallAlertMs = policy.stallAlertMinutes * 60_000;
-  claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
-  a2aSilenceTimeoutMs = policy.a2aSilenceTimeoutMinutes * 60_000;
-  detachedTimeoutMs = policy.detachedTimeoutMinutes * 60_000;
-  retryPolicy = policy.retry;
-  rateLimitPatterns = policy.rateLimit.detectPatterns;
-  rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
-}
+/* ---------------- 队列 / 调度 ---------------- */
 
-/** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
-export function __setMaxParallelGroupsForTests(n: number): void {
-  maxParallelGroups = Math.max(1, Math.floor(n));
-}
-
-/**
- * 测试专用:覆盖静默/认领/A2A 无进展/detached 超时阈值(默认读
- * scripts/dispatch-policy.json,单位 ms)。测试用 100ms 级小阈值避免拖慢测试,
- * 与配置单位(分钟)无关。a2aSilence/detached 未显式传值时给 60s 兜底,避免
- * 既有测试(未关注新阈值)被意外触发。
- */
-export function __setReliabilityTimeoutsForTests(
-  stallMs: number,
-  claimMs: number,
-  stallAlertMsOverride?: number,
-  a2aSilenceMsOverride?: number,
-  detachedMsOverride?: number,
-): void {
-  stallTimeoutMs = Math.max(1, Math.floor(stallMs));
-  claimTimeoutMs = Math.max(1, Math.floor(claimMs));
-  // 默认提醒阈值取 stall 的 2 倍:不改变既有测试行为(静默在 stall 即失败,
-  // 提醒不会先触发);需要验证提醒的测试显式传小阈值。
-  stallAlertMs =
-    stallAlertMsOverride !== undefined
-      ? Math.max(1, Math.floor(stallAlertMsOverride))
-      : Math.max(1, Math.floor(stallMs)) * 2;
-  a2aSilenceTimeoutMs =
-    a2aSilenceMsOverride !== undefined
-      ? Math.max(1, Math.floor(a2aSilenceMsOverride))
-      : Math.max(60_000, Math.floor(stallMs));
-  detachedTimeoutMs =
-    detachedMsOverride !== undefined
-      ? Math.max(1, Math.floor(detachedMsOverride))
-      : Math.max(60_000, Math.floor(stallMs));
-}
-
-/**
- * 测试专用:覆盖额度配置(关键词 + 冷却时长,单位 ms——与配置的分钟单位解耦,
- * 测试用 100ms~1s 级小阈值验证冷却拦截与自动恢复,避免拖慢测试)。
- */
-export function __setRateLimitForTests(
-  cooldownMs: number,
-  patterns: string[],
-): void {
-  rateLimitCooldownMs = Math.max(1, Math.floor(cooldownMs));
-  rateLimitPatterns = [...patterns];
-}
-
-/** 当前运行中的组数(组槽位占用数)。 */
-function runningGroupCount(): number {
+/** 排队中(未开始)任务数;回滚指令前置校验用。 */
+export function queuedExecutorTaskCount(): number {
   let n = 0;
-  for (const g of groupQueues.values()) if (g.running) n += 1;
+  for (const g of groupQueues.values()) n += g.queue.length;
   return n;
 }
 
@@ -584,23 +228,6 @@ export function stopRunningTask(taskId?: string): Array<{
     }
   }
   return stopped;
-}
-
-/** 直接落库置 cancelled(停止指令取消排队/已运行任务用)。 */
-async function markTaskCancelled(
-  db: DataBase,
-  taskId: string,
-  groupId: string,
-): Promise<unknown> {
-  const [updated] = await db
-    .update(taskTable)
-    .set({ status: "cancelled", diffSummary: { error: "stopped" } })
-    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-    .returning();
-  if (updated) {
-    await notifyTaskStatusChanged(db, taskId, groupId, "cancelled", updated);
-  }
-  return updated;
 }
 
 /**
@@ -730,7 +357,7 @@ async function dispatchTask(
   // 排队位置:同组 running(1)+ 同组排队数;组未运行但槽位已被其他组占满时,
   // 还要等当前运行中的组先释放槽位。
   const running = runningGroupCount();
-  const freeSlots = maxParallelGroups - running;
+  const freeSlots = getMaxParallelGroups() - running;
   const ahead =
     (group.running ? 1 : 0) +
     group.queue.length +
@@ -806,7 +433,10 @@ async function dispatchTask(
 
   // 认领超时定时器:超过 claimTimeoutMs 仍未进入 running → 标 failed。
   // 进入 running 时(runOne)取消;任务出队/停止时同步清理。
-  run.claimTimer = setTimeout(() => handleClaimTimeout(run), claimTimeoutMs);
+  run.claimTimer = setTimeout(
+    () => handleClaimTimeout(run),
+    getClaimTimeoutMs(),
+  );
   void pumpQueue();
 }
 
@@ -827,10 +457,10 @@ function ensureGroupQueue(key: string): GroupQueue {
  */
 async function pumpQueue(): Promise<void> {
   if (pumping) return;
-  pumping = true;
+  setPumping(true);
   try {
     for (;;) {
-      if (runningGroupCount() >= maxParallelGroups) break;
+      if (runningGroupCount() >= getMaxParallelGroups()) break;
       // 额度冷却中的执行器不派发:组队首任务的执行器在冷却 → 跳过该组(任务
       // 保持 queued,冷却结束后 enterCooldown 的定时器会再次泵送自动派发)。
       const group = [...groupQueues.values()].find(
@@ -844,7 +474,7 @@ async function pumpQueue(): Promise<void> {
       void runOne(run, group);
     }
   } finally {
-    pumping = false;
+    setPumping(false);
   }
 }
 
@@ -1045,14 +675,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           run.lastOutputAt = Date.now();
           if (run.stallTimer) {
             clearTimeout(run.stallTimer);
-            run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
+            run.stallTimer = setTimeout(
+              () => handleStall(run),
+              getStallTimeoutMs(),
+            );
           }
           // 无进展提醒同界重排:有输出说明没静默,提醒计时顺延。
           if (run.stallAlertTimer) {
             clearTimeout(run.stallAlertTimer);
             run.stallAlertTimer = setTimeout(
               () => handleStallAlert(run),
-              stallAlertMs,
+              getStallAlertMs(),
             );
           }
         },
@@ -1060,12 +693,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 静默超时起点:进程刚 spawn(输出可观察);之后每次输出重排定时器。
       // a2a 无本地进程/增量输出,不设静默检测(完成路径由任务级超时兜底)。
       run.lastOutputAt = Date.now();
-      run.stallTimer = setTimeout(() => handleStall(run), stallTimeoutMs);
+      run.stallTimer = setTimeout(() => handleStall(run), getStallTimeoutMs());
       // 无进展提醒起点与静默检测一致:先于静默阈值触发提醒,静默继续到
       // stallTimeoutMs 才标 failed。
       run.stallAlertTimer = setTimeout(
         () => handleStallAlert(run),
-        stallAlertMs,
+        getStallAlertMs(),
       );
     }
     run.kill = handle.kill;
@@ -1077,7 +710,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       run.lastActivityAt = run.runningAt ?? Date.now();
       run.a2aSilenceTimer = setTimeout(
         () => handleA2ASilence(run),
-        a2aSilenceTimeoutMs,
+        getA2ASilenceTimeoutMs(),
       );
     }
 
@@ -1132,7 +765,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         if (!run.detachedTimer && !run.detachedTimedOut && !run.stopped) {
           run.detachedTimer = setTimeout(
             () => handleDetachedTimeout(run),
-            detachedTimeoutMs,
+            getDetachedTimeoutMs(),
           );
         }
         return;
@@ -1173,7 +806,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           const eta = formatEta(
             enterCooldown(
               ex,
-              parseRateLimitRecoveryMs(out) ?? Date.now() + rateLimitCooldownMs,
+              parseRateLimitRecoveryMs(out) ??
+                Date.now() + getRateLimitCooldownMs(),
             ),
           );
           await handleFailure(
@@ -1270,7 +904,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             enterCooldown(
               ex,
               parseRateLimitRecoveryMs(tail) ??
-                Date.now() + rateLimitCooldownMs,
+                Date.now() + getRateLimitCooldownMs(),
             ),
           );
           await handleFailure(
@@ -1315,6 +949,8 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
   });
 }
 
+/* ---------------- 超时 / 进度处理 ---------------- */
+
 /**
  * 无进展提醒处理(网页体验批次):running 任务连续无输出超过 stallAlertMs
  * (默认 15min,先于 stallTimeoutMs)→ 发一条群消息提醒协调者 + 任务面板行
@@ -1329,7 +965,7 @@ function handleStallAlert(run: QueuedRun): void {
     clearTimeout(run.stallAlertTimer);
     run.stallAlertTimer = null;
   }
-  const minutes = Math.max(1, Math.round(stallAlertMs / 60_000));
+  const minutes = Math.max(1, Math.round(getStallAlertMs() / 60_000));
   console.warn(
     `[executor] 无进展提醒: ${run.taskId} 已 ${minutes} 分钟无输出,执行器:${run.ex.label}`,
   );
@@ -1406,14 +1042,15 @@ export function refreshA2AActivity(
   for (const g of groupQueues.values()) {
     const run = g.running;
     if (!run || run.stopped || run.a2aSilenced) continue;
-    if (run.groupId !== groupId || run.participantId !== participantId) continue;
+    if (run.groupId !== groupId || run.participantId !== participantId)
+      continue;
     if (run.ex.kind !== "a2a") continue;
     run.lastActivityAt = Date.now();
     if (run.a2aSilenceTimer) {
       clearTimeout(run.a2aSilenceTimer);
       run.a2aSilenceTimer = setTimeout(
         () => handleA2ASilence(run),
-        a2aSilenceTimeoutMs,
+        getA2ASilenceTimeoutMs(),
       );
     }
     return true;
@@ -1430,7 +1067,7 @@ export function refreshA2AActivity(
 function hasRecentA2AProgress(run: QueuedRun): boolean {
   if (!run.runningAt) return false;
   if (run.lastActivityAt <= run.runningAt) return false;
-  return Date.now() - run.lastActivityAt < a2aSilenceTimeoutMs;
+  return Date.now() - run.lastActivityAt < getA2ASilenceTimeoutMs();
 }
 
 /**
@@ -1442,7 +1079,10 @@ function hasRecentA2AProgress(run: QueuedRun): boolean {
  */
 async function handleUnconfirmed(run: QueuedRun): Promise<void> {
   const { db, taskId } = run;
-  await endAttempt(run, { status: "failed", error: "执行器未按协议回复，结果未确认" });
+  await endAttempt(run, {
+    status: "failed",
+    error: "执行器未按协议回复，结果未确认",
+  });
   releaseTaskOutput(taskId);
   await failTask(db, taskId, "执行器未按协议回复，结果未确认", run.retryCount, {
     unconfirmed: true,
@@ -1600,7 +1240,9 @@ async function handleFailure(
   // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
   await endAttempt(run, { status: "failed", error: reason });
   const canRetry =
-    opts.retryable && !run.stopped && run.retryCount < retryPolicy.maxRetries;
+    opts.retryable &&
+    !run.stopped &&
+    run.retryCount < getRetryPolicy().maxRetries;
 
   if (!canRetry) {
     // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
@@ -1612,7 +1254,7 @@ async function handleFailure(
 
   // 重试前回滚 checkpoint(resetWorkspace=true 且存在快照):恢复工作树到任务前
   // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。
-  if (retryPolicy.resetWorkspace && run.checkpointRef) {
+  if (getRetryPolicy().resetWorkspace && run.checkpointRef) {
     const repoRoot =
       run.projectPath && existsSync(run.projectPath)
         ? run.projectPath
@@ -1717,31 +1359,7 @@ export async function verifyTaskCommitted(
   return { ok: true };
 }
 
-/** 以执行器 participant 身份回传群消息(broadcast + 前缀判定 contentType)。 */
-export async function postStatus(
-  db: DataBase,
-  groupId: string,
-  senderId: string,
-  ex: ExecutorConfig,
-  body: string,
-): Promise<void> {
-  try {
-    const full = await insertGroupMessage(db, {
-      groupId,
-      senderId,
-      parentId: null,
-      audience: "broadcast",
-      audienceRef: null,
-      body,
-      contentType: STATUS_EMOJI_RE.test(body) ? "task_status" : "text/plain",
-      fileRef: null,
-    });
-    // 与 POST /messages 一致的火力外扇出:WS,让群里实时可见。
-    void wsHub.broadcastGroupMessage(full);
-  } catch (e) {
-    console.warn(`[executor] 状态回传失败(${ex.label}):`, e);
-  }
-}
+/* ---------------- 测试执行器选择 / 任务书模板 ---------------- */
 
 /** 测试职责关键词(分工提示词匹配用,大小写不敏感)。 */
 const TEST_KEYWORDS = [
@@ -1864,131 +1482,4 @@ function buildTicket(
 
 function summaryOf(body: string): string {
   return body.replace(/\s+/g, " ").slice(0, 40);
-}
-
-function lastLinesOf(text: string, lines: number): string {
-  const clean = (text ?? "").replace(ANSI_RE, "").trim();
-  const arr = clean.split("\n").filter((l) => l.trim());
-  return arr.slice(-lines).join("\n");
-}
-
-/** 从输出取 commit hash(40 位 hex 或 "commit/hash: xxx" 短格式)。 */
-function findCommitHash(text: string): string | null {
-  const clean = (text ?? "").replace(ANSI_RE, "");
-  const full = clean.match(/[0-9a-f]{40}/);
-  if (full) return full[0].slice(0, 12);
-  const short = clean.match(/(?:commit|hash)\s*[:：]?\s*([0-9a-f]{7,12})/i);
-  return short ? short[1] : null;
-}
-
-/** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
-export interface TaskReport {
-  /** 做了什么(汇报段);老格式自由文本时为旧关键词摘要。 */
-  summary?: string;
-  /** commit hash(提交段);缺段时省略(不误报"无提交")。 */
-  hash?: string;
-  /** 测试结果摘要(测试段)。 */
-  tests?: string;
-  /** 遗留事项(遗留段)。 */
-  todo?: string;
-}
-
-/** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。 */
-const REPORT_SECTION_RE: ReadonlyArray<{
-  key: keyof TaskReport;
-  re: RegExp;
-}> = [
-  { key: "hash", re: /^\s*(?:提交|commit|hash)\s*[:：]/i },
-  { key: "tests", re: /^\s*(?:测试|test|tests)\s*[:：]/i },
-  { key: "summary", re: /^\s*(?:汇报|report|summary)\s*[:：]/i },
-  { key: "todo", re: /^\s*(?:遗留|todo|remaining)\s*[:：]/i },
-];
-
-/**
- * 汇报段落解析(票7):从 stdout 提取「提交:」「测试:」「汇报:」「遗留:」四段
- * (支持大小写变体),返回结构化字段;缺段时对应字段省略。stdout 不含任何段落
- * (老格式自由文本)→ 保持旧行为:摘要取「汇报/做了什么/测试结果/commit」关键词
- * 段或末尾 15 行,hash 用 findCommitHash。
- */
-export function parseTaskReport(text: string): TaskReport {
-  const clean = (text ?? "").replace(ANSI_RE, "");
-  const lines = clean.split("\n");
-
-  // 段落头定位:每段从段头行取内容,直到下一个段头(或输出末尾)。
-  const found: Array<{ key: keyof TaskReport; start: number }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    for (const { key, re } of REPORT_SECTION_RE) {
-      if (re.test(lines[i])) {
-        found.push({ key, start: i });
-        break;
-      }
-    }
-  }
-  if (found.length > 0) {
-    const report: TaskReport = {};
-    for (let f = 0; f < found.length; f++) {
-      const { key, start } = found[f];
-      const end = f + 1 < found.length ? found[f + 1].start : lines.length;
-      const value = lines
-        .slice(start, end)
-        .join("\n")
-        .replace(/^[^:：]*[:：]\s*/, "")
-        .trim();
-      if (value.length === 0) continue;
-      if (key === "hash") {
-        // 提交段只取首个 token:形如 7~40 位 hex 才算 hash,否则省略(避免把
-        // 描述性文字当 hash 落库)。
-        const token = value.split("\n")[0].trim().split(/\s+/)[0];
-        if (/^[0-9a-f]{7,40}$/i.test(token)) {
-          report.hash = token.length === 40 ? token.slice(0, 12) : token;
-        }
-      } else {
-        report[key] = value;
-      }
-    }
-    // 提交段缺失/无 hex 时回退全量输出提取(兼容「commit <hex>」裸行 + 段落
-    // 混排的旧输出,hash 不因缺段丢失)。
-    if (!report.hash) {
-      const h = findCommitHash(clean);
-      if (h) report.hash = h;
-    }
-    return report;
-  }
-
-  // 老格式自由文本:保持旧行为(关键词段或末尾 15 行 + findCommitHash)。
-  const summary = legacyExtractSummary(clean);
-  const hash = findCommitHash(clean);
-  return hash ? { summary, hash } : { summary };
-}
-
-/** 群消息成功卡片(票7):固定四行渲染,独立可测;超过 8000 截断。 */
-const TASK_CARD_MAX_LENGTH = 8000;
-export function renderTaskCard(label: string, report: TaskReport): string {
-  const card = [
-    `✅ 任务完成 ${label}`,
-    `────────────────`,
-    `提交  ${report.hash ?? "无"}`,
-    `测试  ${report.tests ?? "-"}`,
-    `汇报  ${report.summary ?? "-"}`,
-    `遗留  ${report.todo ?? "-"}`,
-  ].join("\n");
-  return card.length > TASK_CARD_MAX_LENGTH
-    ? card.slice(0, TASK_CARD_MAX_LENGTH)
-    : card;
-}
-
-/** 与桥 extractSummary 一致:取「汇报/做了什么/测试结果/commit」段或末尾 15 行。 */
-function legacyExtractSummary(clean: string): string {
-  const lines = clean.split("\n");
-  let start = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/汇报|做了什么|测试结果|commit/.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
-  const slice = start >= 0 ? lines.slice(start) : lines.slice(-15);
-  let out = slice.join("\n").trim();
-  if (out.length > 20000) out = out.slice(0, 20000) + "\n…(截断)";
-  return out;
 }

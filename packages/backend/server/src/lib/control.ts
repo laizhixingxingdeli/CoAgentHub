@@ -11,9 +11,9 @@
  */
 
 import {
+  participant as participantTable,
   type Task,
   task as taskTable,
-  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import {
@@ -221,15 +221,15 @@ async function firstExecutorParticipant(
   const participants = await db
     .select({ id: participantTable.id, name: participantTable.name })
     .from(participantTable)
-    .where(inArray(participantTable.name, executors.map((ex) => ex.agentName)));
+    .where(
+      inArray(
+        participantTable.name,
+        executors.map((ex) => ex.agentName),
+      ),
+    );
   const byName = new Map(participants.map((p) => [p.name, p]));
   for (const ex of executors) {
     const participant = byName.get(ex.agentName);
-    /*
-    const participant = await db.query.participant.findFirst({
-      where: (t, { eq: eqFn }) => eqFn(t.name, ex.agentName),
-    });
-    */
     if (participant) return { participantId: participant.id, ex };
   }
   return null;

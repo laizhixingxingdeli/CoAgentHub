@@ -33,32 +33,38 @@ import { participant } from "./participant.js";
  * time, the ordering source for incremental pulls (multi-device clock skew
  * must not scramble the thread).
  */
-export const groupMessage = pgTable("group_message", {
-  id: uuid("id").primaryKey().$defaultFn(uuidv7),
-  groupId: uuid("group_id")
-    .notNull()
-    .references(() => groups.id),
-  senderId: uuid("sender_id")
-    .notNull()
-    .references(() => participant.id),
-  parentId: uuid("parent_id").references((): AnyPgColumn => groupMessage.id),
-  audience: text("audience", {
-    enum: ["broadcast", "role", "participant"],
-  })
-    .notNull()
-    .default("broadcast"),
-  // role 值时=角色名;participant 值时=participantId;broadcast 时为空。
-  // (audience 旧值 "agent" 已由迁移归一为 "participant",服务端也接受旧值。)
-  audienceRef: text("audience_ref"),
-  body: text("body").notNull(),
-  // 内容类型 (ticket 17): 默认 text/plain,可传 application/json 等 — 仅存储
-  // 不校验(值不白名单、不解析),GET/WS/webhook 行形状原样带上。
-  contentType: text("content_type").notNull().default("text/plain"),
-  // P2P 文件信令 (ticket 05): fileRef 只携带文件元数据与发送方设备上的
-  // 局域网拉取地址,CoAgentHub 服务器绝不读写/代理文件字节本身。
-  fileRef: jsonb("file_ref"),
-  ...timeColumns("both"),
-});
+export const groupMessage = pgTable(
+  "group_message",
+  {
+    id: uuid("id").primaryKey().$defaultFn(uuidv7),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id),
+    senderId: uuid("sender_id")
+      .notNull()
+      .references(() => participant.id),
+    parentId: uuid("parent_id").references((): AnyPgColumn => groupMessage.id),
+    audience: text("audience", {
+      enum: ["broadcast", "role", "participant"],
+    })
+      .notNull()
+      .default("broadcast"),
+    // role 值时=角色名;participant 值时=participantId;broadcast 时为空。
+    // (audience 旧值 "agent" 已由迁移归一为 "participant",服务端也接受旧值。)
+    audienceRef: text("audience_ref"),
+    body: text("body").notNull(),
+    // 内容类型 (ticket 17): 默认 text/plain,可传 application/json 等 — 仅存储
+    // 不校验(值不白名单、不解析),GET/WS/webhook 行形状原样带上。
+    contentType: text("content_type").notNull().default("text/plain"),
+    // P2P 文件信令 (ticket 05): fileRef 只携带文件元数据与发送方设备上的
+    // 局域网拉取地址,CoAgentHub 服务器绝不读写/代理文件字节本身。
+    fileRef: jsonb("file_ref"),
+    ...timeColumns("both"),
+  },
+  // group_id 索引:GET /:id/messages(listVisibleMessages)按 group_id 过滤 +
+  // id 排序分页,无索引时每次全表扫描。
+  (t) => [index().on(t.groupId)],
+);
 
 /**
  * Group message closure — adjacency list materializing the thread tree,

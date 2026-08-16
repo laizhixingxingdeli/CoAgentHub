@@ -1,6 +1,7 @@
 /**
  * 消息域服务(架构债清理):消息的列表查询 / 编辑 / 软删 / 写入编排的纯 db
- * 逻辑,从 routes/group/registry.ts 与 lib/group-message.ts 平移至此。
+ * 逻辑,从 routes/group/registry.ts 平移至此(旧的 lib/group-message.ts
+ * 兼容壳已删除,导入方统一指向本模块)。
  *
  * 全部函数都是纯 db 函数(参数显式,不依赖 Hono 上下文);zod 校验、权限
  * 门槛与响应编排仍留在路由层。返回形状与 GET /:id/messages 完全一致
@@ -239,51 +240,37 @@ export async function listVisibleMessages(
     conditions.push(ilike(groupMessageTable.body, `%${escaped}%`));
   }
 
-    // 优化:一次性按群聚合 closure 的 max(depth),再 JOIN 回消息表,避免
-    // 旧实现里每行消息都跑一次相关子查询(大群/翻页场景的 O(N) 次子查询)。
-    const depthAgg = db
-      .select({
-        descendantId: groupMessageClosureTable.descendantId,
-        depth: sql<number>`max(${groupMessageClosureTable.depth})`.as("depth"),
-      })
-      .from(groupMessageClosureTable)
-      .where(eq(groupMessageClosureTable.groupId, groupId))
-      .groupBy(groupMessageClosureTable.descendantId)
-      .as("depth_agg");
-    return db
-      .select({
-        id: groupMessageTable.id,
-        groupId: groupMessageTable.groupId,
-        senderId: groupMessageTable.senderId,
-        parentId: groupMessageTable.parentId,
-        audience: groupMessageTable.audience,
-        audienceRef: groupMessageTable.audienceRef,
-        body: groupMessageTable.body,
-        contentType: groupMessageTable.contentType,
-        fileRef: groupMessageTable.fileRef,
-        createdAt: groupMessageTable.createdAt,
-        updatedAt: groupMessageTable.updatedAt,
-        depth: sql<number>`coalesce(${depthAgg.depth}, 0)`,
-      })
-      .from(groupMessageTable)
-      .leftJoin(depthAgg, eq(depthAgg.descendantId, groupMessageTable.id))
-      .where(and(...conditions))
-      .orderBy(asc(groupMessageTable.id))
-      .limit(limit);
-    /*
-
-  return (
-    db
-      .select(messageFullColumns)
-      .from(groupMessageTable)
-      .where(and(...conditions))
-      // uuidv7 ids embed the server receive time, so id order IS receive
-      // order — ordering by id keeps the stream consistent with ?after=.
-      // Page the visible stream; clients continue with ?after=<lastId>.
-      .orderBy(asc(groupMessageTable.id))
-      .limit(limit)
-  );
-    */
+  // 优化:一次性按群聚合 closure 的 max(depth),再 JOIN 回消息表,避免
+  // 旧实现里每行消息都跑一次相关子查询(大群/翻页场景的 O(N) 次子查询)。
+  const depthAgg = db
+    .select({
+      descendantId: groupMessageClosureTable.descendantId,
+      depth: sql<number>`max(${groupMessageClosureTable.depth})`.as("depth"),
+    })
+    .from(groupMessageClosureTable)
+    .where(eq(groupMessageClosureTable.groupId, groupId))
+    .groupBy(groupMessageClosureTable.descendantId)
+    .as("depth_agg");
+  return db
+    .select({
+      id: groupMessageTable.id,
+      groupId: groupMessageTable.groupId,
+      senderId: groupMessageTable.senderId,
+      parentId: groupMessageTable.parentId,
+      audience: groupMessageTable.audience,
+      audienceRef: groupMessageTable.audienceRef,
+      body: groupMessageTable.body,
+      contentType: groupMessageTable.contentType,
+      fileRef: groupMessageTable.fileRef,
+      createdAt: groupMessageTable.createdAt,
+      updatedAt: groupMessageTable.updatedAt,
+      depth: sql<number>`coalesce(${depthAgg.depth}, 0)`,
+    })
+    .from(groupMessageTable)
+    .leftJoin(depthAgg, eq(depthAgg.descendantId, groupMessageTable.id))
+    .where(and(...conditions))
+    .orderBy(asc(groupMessageTable.id))
+    .limit(limit);
 }
 
 /**

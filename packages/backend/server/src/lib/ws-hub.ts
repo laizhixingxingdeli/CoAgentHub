@@ -6,12 +6,12 @@ import {
   type TaskStatus,
 } from "@laizhixingxingdeli/database/schema";
 import db from "@server/lib/database";
-import type { GroupMessageFull } from "@server/lib/group-message";
 import {
   type ParticipantType,
   visibleMemberIds,
 } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
+import type { GroupMessageFull } from "@server/lib/services/message-service";
 import { eq } from "drizzle-orm";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -284,8 +284,6 @@ export class WsHub {
     this.memberCache.delete(groupId);
   }
 
-
-
   /**
    * Shared fan-out: query the group's members, keep the visibility-filtered
    * set, and deliver `buildEvent(message)` to every connected socket in it.
@@ -304,14 +302,6 @@ export class WsHub {
     if (this.conns.size === 0) return;
     try {
       const members = await this.getGroupMembers(message.groupId);
-        /*
-        .select({
-          participantId: groupMemberTable.participantId,
-          roles: groupMemberTable.roles,
-        })
-        .from(groupMemberTable)
-        .where(eq(groupMemberTable.groupId, message.groupId));
-        */
       const localUserId = await resolveLocalUser(db);
       // LAN trust model: the default Local User is a human observer — type
       // =human bypasses the audience rule, so it receives every message even
