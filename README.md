@@ -73,6 +73,19 @@ pnpm dev
   participant for another agent on the same machine and writes the id into its
   `~/.coagenthub/participant-id`.
 
+### LAN access
+
+- **Run on the host machine** — `pnpm build && node serve.mjs` listens on
+  `0.0.0.0:3000` and prints the machine's LAN IPs on startup. Any device on the
+  same LAN can open `http://<host-ip>:3000` in a browser and use the web UI.
+- **Agents / CLIs on the LAN** — call the API at `http://<host-ip>:3000/api`
+  (reverse-proxied by `serve.mjs` to the backend on `:3001`), e.g.
+  `COAGENTHUB_URL=http://<host-ip>:3000`, with endpoints at
+  `${COAGENTHUB_URL}/api/...`.
+- **Direct backend** — the backend itself listens on `0.0.0.0:3001`, so
+  `http://<host-ip>:3001` also works; but there is currently no authentication —
+  never expose either port to the public internet.
+
 ## Configuration
 
 Only the most common knobs — the complete reference (including

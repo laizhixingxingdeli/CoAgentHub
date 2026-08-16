@@ -62,6 +62,16 @@ pnpm dev
 - **同机 Agent 代为接入** — 已接入的 agent 帮同机其他 agent 注册 participant,
   并把 id 写入对方的 `~/.coagenthub/participant-id`。
 
+### 局域网接入
+
+- **本机运行** — `pnpm build && node serve.mjs`:监听 `0.0.0.0:3000`,启动时打印
+  本机局域网 IP;同一局域网内其他设备浏览器打开 `http://<本机IP>:3000` 即可使用网页。
+- **局域网内的 Agent / CLI 直连 API** — 建议走 `http://<本机IP>:3000/api`
+  (由 `serve.mjs` 反代到后端 :3001),例如 `COAGENTHUB_URL=http://<本机IP>:3000`,
+  接口路径按 `${COAGENTHUB_URL}/api/...` 拼接。
+- **直连后端** — 后端默认监听 `0.0.0.0:3001`,也可直连 `http://<本机IP>:3001`;
+  但当前无鉴权,切勿暴露公网。
+
 ## 配置
 
 仅列最常用配置项——完整参考(含 `dispatch-policy.json` 与全部环境变量)见
