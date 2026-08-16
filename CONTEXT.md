@@ -16,7 +16,7 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **group_members.prompt** | 群内成员自定义提示词:该 participant 在本群的分工说明,调度时拼进任务书 |
 | **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `participant`(audienceRef=participantId) |
 | **group_message + closure** | 消息与闭包表(消息树,`depth`=根到该消息的层级) |
-| **task** | 一次执行:定向消息(`audience=participant`)命中执行器 → server 直接建 task → 按 project_path 分组队列 spawn(同项目串行、跨项目并行)→ done/failed |
+| **task** | 一次执行:定向消息(`audience=participant`)命中执行器 → server 直接建 task → 按 project_path 分组队列 spawn(同项目串行、跨项目并行)+ 按执行器并发能力排队(可选 `maxConcurrency` 上限 / `403 atomgit_session_concurrency_conflict` 反应式排队)→ done/failed |
 | **checkpointRef** | 执行前 git 快照(`refs/coagenthub-cp/<taskId>`),回滚用 |
 | **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
 | **Local User** | 无身份声明请求的默认身份(human,全可见);局域网全信模型 |

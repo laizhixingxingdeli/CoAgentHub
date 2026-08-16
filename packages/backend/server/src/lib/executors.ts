@@ -60,6 +60,16 @@ export interface ExecutorConfig {
     /** Authorization: Bearer 用的 token。 */
     token: string;
   };
+  /**
+   * 同一执行器最大并发 running 任务数(可选,声明式并发上限):缺省 = 不限制
+   * (可并发执行器允许多个任务同时 running,不做无谓串行)。配置为 1 时该执行器
+   * 任务严格串行——如 AtomCode(atomgit session 并发会触发
+   * `403 atomgit_session_concurrency_conflict`)。pump 调度时,目标执行器当前
+   * running 数 >= maxConcurrency → 新任务保持 queued,等既有任务终态后自动出队。
+   * 无配置的执行器走反应式排队:先按 running 尝试下发,收到 403 再转 queued。
+   * 注:DB 持久化配置(executor_config 表)暂无可持久化列,按缺省(不限制)处理。
+   */
+  maxConcurrency?: number;
 }
 
 const DEFAULT_EXECUTORS: ExecutorConfig[] = [
@@ -72,6 +82,9 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     bin: "atomcode",
     label: "atomcode",
     args: ["-y", "-p", "{ticket}"],
+    // 声明式并发上限:AtomCode 的 atomgit session 同一时间只能执行一个任务,
+    // 并发会触发 403 atomgit_session_concurrency_conflict → 服务端按 1 排队。
+    maxConcurrency: 1,
   },
   {
     key: "reasonix",

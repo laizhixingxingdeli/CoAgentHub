@@ -52,6 +52,9 @@ export async function notifyTaskStatusChanged(
       executorKey: task.executorKey ?? null,
       brief: task.brief ?? null,
       diffSummary: (task.diffSummary as Record<string, unknown> | null) ?? null,
+      // 任务下发者信息(Part A):事件透传给插件(定向通知用);老任务为 null。
+      dispatcherParticipantId: task.dispatcherParticipantId ?? null,
+      dispatcherSessionId: task.dispatcherSessionId ?? null,
       createdAt: iso(task.createdAt),
       updatedAt: isoOrNull(task.updatedAt),
       retryCount: task.retryCount,

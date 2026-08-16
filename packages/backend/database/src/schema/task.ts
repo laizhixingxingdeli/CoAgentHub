@@ -83,6 +83,14 @@ export const task = pgTable(
     // A2A 上下文延续:本次 A2A 调用返回的 contextId(下一任务携带,远端执行器
     // 借此跨任务保持上下文)。仅 a2a 执行器(如 win-hermes)写入;CLI 执行为空。
     a2aContextId: text("a2a_context_id"),
+    // 任务下发者信息(Part A):记录下发该任务的消息发送者 participant 与会话 id,
+    // 任务完成/失败事件据此定向通知下发者所在会话(插件 TaskWatcher 用)。
+    // 可空:老任务 / 桥直发任务无此信息;dispatcher_participant_id 仅由服务端
+    // 识别的 sender 写入(请求体不可伪造)。
+    dispatcherParticipantId: text("dispatcher_participant_id"),
+    // dispatcher_session_id 只接受 coordinator/human 且非执行器发送者的
+    // metadata.dispatcherSessionId(≤200 字符);其余场景为 null。
+    dispatcherSessionId: text("dispatcher_session_id"),
     ...timeColumns("both"),
   },
   // group_id 索引:GET /:id/tasks 按 group_id 过滤 + created_at 排序分页,

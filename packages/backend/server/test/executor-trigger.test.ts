@@ -348,6 +348,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         senderRoles: ["coordinator"],
         audienceRef: codebuddy.id,
         body: "重复触发测试",
+        // Part A:直接调内部入口时下发者字段按测试语义提供(与消息路由一致)。
+        dispatcherParticipantId: coordinator.id,
+        dispatcherSessionId: null,
       },
     );
     await new Promise((r) => setTimeout(r, 300));

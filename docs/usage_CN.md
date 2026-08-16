@@ -9,7 +9,10 @@ server 是**唯一的调度器**。开机时自动注册执行器配置里声明
 `packages/backend/server/src/lib/executors.ts` —— 本地 Hermes 规划、AtomCode /
 Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里用
 `audience=participant` 定向到某个执行器 participant 即触发任务;server 经按项目分组的
-并行队列派发(同一 `project_path` 串行、不同项目并行,上限 `maxParallelGroups`),
+并行队列派发(同一 `project_path` 串行、不同项目并行,上限 `maxParallelGroups`;
+另按执行器并发能力排队 —— 执行器可配 `maxConcurrency` 声明式上限,如 AtomCode = 1;
+未配置的执行器先尝试下发,收到 `403 atomgit_session_concurrency_conflict` 时自动转
+排队、等既有任务终态后重试),
 在 git 快照(checkpoint)上支撑停止/回滚,经 WebSocket 流式推送实时输出,最终以
 `task_status` 消息把结果回传群里。
 

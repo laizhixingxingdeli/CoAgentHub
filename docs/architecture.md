@@ -196,6 +196,14 @@ CoAgentHub/
   `scripts/dispatch-policy.json` 配置,缺省 2;未绑定 project_path 的群任务归默认组)
   → spawn(CLI 或 A2A)→ git 快照(checkpointRef)→ done/failed;默认超时 120 分钟
   (EXECUTOR_TIMEOUT_MS)。
+- **按执行器并发能力排队(设计修正)**:执行器可配 `maxConcurrency`(可选,声明式并发
+  上限;如 AtomCode = 1 —— atomgit session 同一时间只能跑一个任务,并发会触发
+  `403 atomgit_session_concurrency_conflict`)。目标执行器当前 running 数 ≥
+  `maxConcurrency` 时,新任务保持 queued,等既有任务终态后自动出队;未配置的执行器
+  默认不限并发(可并发执行器允许多个任务同时 running,不做无谓串行),先按 running
+  尝试下发,若执行器返回 `403 atomgit_session_concurrency_conflict` 则**不判失败**,
+  转 queued,并在既有 running 任务终态后自动重试(反应式排队;无既有任务时按 3s 退避
+  防空转,如外部会话占用)。
 - **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收
   不依赖记忆。纯粹执行器(无 `memory` 标记)保持新鲜上下文,每次任务独立执行。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用

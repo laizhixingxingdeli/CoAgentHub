@@ -159,6 +159,9 @@ app
           attempts: true,
           // A2A 上下文延续依赖读取上一任务的 contextId,列表必须返回该列。
           a2aContextId: true,
+          // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
+          dispatcherParticipantId: true,
+          dispatcherSessionId: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -240,6 +243,9 @@ app
         checkpointRef: task.checkpointRef,
         retryCount: task.retryCount,
         diffSummary: task.diffSummary,
+        // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
+        dispatcherParticipantId: task.dispatcherParticipantId ?? null,
+        dispatcherSessionId: task.dispatcherSessionId ?? null,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       };

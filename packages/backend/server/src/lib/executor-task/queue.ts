@@ -8,7 +8,6 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
-  type Task,
   type TaskAttempt,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -66,6 +65,7 @@ import {
   isInCooldown,
   isQuotaFailure,
   pumping,
+  runningExecutorCount,
   runningGroupCount,
   setPumping,
 } from "./state";
@@ -110,6 +110,42 @@ function enterCooldown(ex: ExecutorConfig, endMs: number): number {
     `[executor] 执行器 ${ex.key} 触发额度冷却,预计 ${formatEta(end)} 恢复`,
   );
   return end;
+}
+
+/* ---------------- 执行器级并发(设计修正:按执行器实际并发能力排队) ---------------- */
+
+/** 403 后重试最小退避(ms):无既有 running 任务(外部会话占用)时防空转热循环。 */
+const CONCURRENCY_RETRY_BACKOFF_MS = 3_000;
+
+/**
+ * 执行器是否返回并发冲突(`403 atomgit_session_concurrency_conflict`):AtomCode
+ * 等执行器同一时间只能跑一个会话,并发时 CLI 以该错误退出。命中 → 不判任务
+ * 失败,转为 queued,等既有 running 任务终态后自动重试(反应式排队)。
+ * 大小写不敏感;匹配带 403 前缀或独立 token 两种写法。
+ */
+export function isConcurrencyConflict(text: string): boolean {
+  return /403\s*atomgit_session_concurrency_conflict|atomgit_session_concurrency_conflict/i.test(
+    text ?? "",
+  );
+}
+
+/**
+ * 组队首任务当前是否可派发(泵送选组谓词):
+ *  - 执行器额度冷却中 → 否(票7,冷却结束定时器会再泵送);
+ *  - 目标执行器 running 数 >= maxConcurrency(声明式上限)→ 否(保持 queued,
+ *    等既有任务终态后由完成路径的泵送自动出队);
+ *  - 403 后重新排队(反应式排队)→ 既有同执行器 running 任务未清空 → 否;
+ *    退避窗口未过(外部会话占用)→ 否。
+ */
+function isRunDispatchable(run: QueuedRun): boolean {
+  if (isInCooldown(run.ex)) return false;
+  const cap = run.ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
+  if (runningExecutorCount(run.ex.key) >= cap) return false;
+  if (run.concurrencyBlocked) {
+    if (runningExecutorCount(run.ex.key) > 0) return false;
+    if (Date.now() < run.concurrencyRetryAt) return false;
+  }
+  return true;
 }
 
 /* ---------------- 队列 / 调度 ---------------- */
@@ -239,7 +275,15 @@ export async function maybeDispatchExecutorTask(
   db: DataBase,
   input: DispatchExecutorInput,
 ): Promise<void> {
-  const { groupId, messageId, senderRoles, audienceRef, body } = input;
+  const {
+    groupId,
+    messageId,
+    senderRoles,
+    audienceRef,
+    body,
+    dispatcherParticipantId,
+    dispatcherSessionId,
+  } = input;
 
   // 与桥相同的角色门槛:非 coordinator/human 不执行(桥侧也会拒绝)。
   if (
@@ -288,6 +332,8 @@ export async function maybeDispatchExecutorTask(
     ex,
     body,
     groupPrompt,
+    dispatcherParticipantId,
+    dispatcherSessionId,
   });
 }
 
@@ -301,9 +347,22 @@ async function dispatchTask(
     ex: ExecutorConfig;
     body: string;
     groupPrompt: GroupPromptInfo | null;
+    /** 任务下发者(Part A):见 DispatchExecutorInput。 */
+    dispatcherParticipantId: string;
+    /** 任务下发会话(Part A):见 DispatchExecutorInput。 */
+    dispatcherSessionId: string | null;
   },
 ): Promise<void> {
-  const { groupId, messageId, participantId, ex, body, groupPrompt } = opts;
+  const {
+    groupId,
+    messageId,
+    participantId,
+    ex,
+    body,
+    groupPrompt,
+    dispatcherParticipantId,
+    dispatcherSessionId,
+  } = opts;
 
   const [created] = await db
     .insert(taskTable)
@@ -315,6 +374,10 @@ async function dispatchTask(
       status: "queued",
       // 任务书快照:触发消息 body 的完整复制,消息后续编辑/删除不影响已触发任务。
       brief: body,
+      // 任务下发者信息(Part A):sender + 会话 id(仅 coordinator/human 非执行器
+      // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
+      dispatcherParticipantId,
+      dispatcherSessionId,
     })
     .onConflictDoNothing({ target: taskTable.messageId })
     .returning();
@@ -356,13 +419,21 @@ async function dispatchTask(
   const group = ensureGroupQueue(groupKey);
 
   // 排队位置:同组 running(1)+ 同组排队数;组未运行但槽位已被其他组占满时,
-  // 还要等当前运行中的组先释放槽位。
+  // 还要等当前运行中的组先释放槽位。执行器级并发上限(设计修正):目标执行器
+  // running 数已达 maxConcurrency 时,本任务即使组槽位空闲也会排队 → 📋 排队
+  // 提示照常回传(「前面还有」计入执行器级先行任务数,避免插件/前端误以为已下发)。
   const running = runningGroupCount();
   const freeSlots = getMaxParallelGroups() - running;
+  const exCap = ex.maxConcurrency;
+  const exAhead =
+    exCap !== undefined && runningExecutorCount(ex.key) >= exCap
+      ? runningExecutorCount(ex.key)
+      : 0;
   const ahead =
     (group.running ? 1 : 0) +
     group.queue.length +
-    (group.running || freeSlots > 0 ? 0 : running);
+    (group.running || freeSlots > 0 ? 0 : running) +
+    exAhead;
   if (ahead > 0) {
     // 只有真正排队才回传 📋(与桥一致)。
     await postStatus(
@@ -406,6 +477,10 @@ async function dispatchTask(
     detachedTimedOut: false,
     retryCount: 0,
     checkpointRef: null,
+    // 403 反应式排队标记:默认未阻塞(显式 maxConcurrency 由 pump 直接排队,
+    // 不会置位本标记;收到执行器 403 并发冲突后才置位)。
+    concurrencyBlocked: false,
+    concurrencyRetryAt: 0,
     // 执行历史:沿用 DB 既有 attempts(重新执行的任务保留旧尝试,新 attempt 续接)。
     attempts: Array.isArray(task.attempts) ? task.attempts : [],
   };
@@ -453,8 +528,10 @@ function ensureGroupQueue(key: string): GroupQueue {
 
 /**
  * 泵调度:组槽位有空闲时,按组触达顺序取「有排队且未运行」的组,运行其队首
- * (组内串行:同组只有一条 running)。并行组数 ≤ maxParallelGroups,=1 时
- * 退化为全局串行(原行为)。完成回调在 finally 里再泵,无需在此 await。
+ * (组内串行:同组只有一条 running;执行器级并发上限与 403 反应式排队由
+ * isRunDispatchable 在选组时统一判定,不满足条件的组队首保持 queued)。
+ * 并行组数 ≤ maxParallelGroups,=1 时退化为全局串行(原行为)。完成回调在
+ * finally 里再泵,无需在此 await。
  */
 async function pumpQueue(): Promise<void> {
   if (pumping) return;
@@ -462,10 +539,12 @@ async function pumpQueue(): Promise<void> {
   try {
     for (;;) {
       if (runningGroupCount() >= getMaxParallelGroups()) break;
-      // 额度冷却中的执行器不派发:组队首任务的执行器在冷却 → 跳过该组(任务
-      // 保持 queued,冷却结束后 enterCooldown 的定时器会再次泵送自动派发)。
+      // 额度冷却 / 执行器并发上限 / 403 反应式排队中的执行器不派发:组队首
+      // 任务不满足派发条件 → 跳过该组(任务保持 queued;既有 running 任务终态
+      // 或退避定时器会再次泵送自动派发)。
       const group = [...groupQueues.values()].find(
-        (g) => !g.running && g.queue.length > 0 && !isInCooldown(g.queue[0].ex),
+        (g) =>
+          !g.running && g.queue.length > 0 && isRunDispatchable(g.queue[0]),
       );
       if (!group) break;
       const run = group.queue.shift();
@@ -499,6 +578,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       clearTimeout(run.claimTimer);
       run.claimTimer = null;
     }
+    // 新一轮执行:清除 403 反应式排队标记(pump 在退避/既有任务终态后重新派发
+    // 了本任务,本次若再次收到 403 会由 handleConcurrencyConflict 重新置位)。
+    run.concurrencyBlocked = false;
+    run.concurrencyRetryAt = 0;
     run.runningAt = Date.now();
 
     // queued → running(尽力而为;失败不阻塞执行,终态仍会回写)。
@@ -900,6 +983,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         }
         const tail = lastLinesOf(output, 20).slice(0, 1500);
         console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
+        // 执行器并发冲突(设计修正,反应式排队):CLI 返回 `403
+        // atomgit_session_concurrency_conflict`(如 AtomCode 的 atomgit session
+        // 被其他会话占用)→ 不判失败:任务保持 queued 并重新入队,等既有
+        // running 任务终态后自动重试(不消耗重试次数、不回滚工作区)。
+        if (!isA2a && isConcurrencyConflict(output)) {
+          console.warn(
+            `[executor] 执行器并发冲突(403),任务重新排队等待空闲: ${taskId}`,
+          );
+          await handleConcurrencyConflict(run);
+          return;
+        }
         // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
         // → 归类「额度失败」,冷却该执行器、不自动重试、❌ 注明预计恢复时间;
         // 其余失败保持原重试行为。限定尾部避免全量输出里的无关 "429/quota"
@@ -1320,6 +1414,67 @@ async function handleFailure(
     return;
   }
   group.queue.push(run);
+}
+
+/**
+ * 反应式排队(403 后排队,设计修正):执行器返回 `403
+ * atomgit_session_concurrency_conflict` → 不判任务失败:
+ *  - 本次 attempt 结束(原因记 concurrency-conflict,不计入 retry_count,
+ *    不触发失败重试的回滚/❌/↻ 流程);
+ *  - DB 状态回写 queued(运行中曾置 running)+ WS 推送;
+ *  - 重置运行态并重新入队(队尾,FIFO 不变),置 concurrencyBlocked:泵送在
+ *    既有同执行器 running 任务终态前不再派发本任务;
+ *  - 无既有 running 任务(外部会话占用)→ 退避窗口(concurrencyRetryAt)后由
+ *    定时器泵送重试,防空转热循环。
+ * 可并发执行器(无 maxConcurrency)首次尝试即可能触发本路径;显式 maxConcurrency
+ * 的执行器由 isRunDispatchable 直接排队,正常情况下不会收到 403。
+ */
+async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
+  const { db, groupId, taskId, ex } = run;
+  // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
+  await endAttempt(run, { status: "failed", error: "concurrency-conflict" });
+
+  // 保持 queued:回写 DB 状态(运行中曾置 running),并 WS 推送状态变化。
+  try {
+    const [updated] = await db
+      .update(taskTable)
+      .set({ status: "queued" })
+      .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+      .returning();
+    if (updated) {
+      await notifyTaskStatusChanged(db, taskId, groupId, "queued", updated);
+    }
+  } catch (e) {
+    console.warn(`[executor] 403 后回写 queued 失败(${taskId}): ${e}`);
+  }
+
+  // 重置运行态并重新入队(队尾);不释放输出缓冲(保留冲突现场供排查)。
+  run.concurrencyBlocked = true;
+  run.concurrencyRetryAt = Date.now() + CONCURRENCY_RETRY_BACKOFF_MS;
+  run.stalled = false;
+  run.a2aSilenced = false;
+  run.runningAt = null;
+  run.lastOutputAt = 0;
+  run.lastActivityAt = 0;
+  run.kill = null;
+  clearRunTimers(run);
+  const group = groupQueues.get(run.groupKey);
+  if (!group) {
+    // 组已被清空(测试重置等异常)→ 无法重排,按最终失败处理(尽力而为)。
+    await failTask(db, taskId, "执行器并发冲突(403),且组队列已不可用");
+    return;
+  }
+  group.queue.push(run);
+  await postStatus(
+    db,
+    groupId,
+    run.participantId,
+    ex,
+    `📋 [${ex.label}] 执行器忙(403 并发冲突),任务保持排队,空闲后自动重试: ${run.summary}`,
+  );
+  // 退避定时器:无既有 running 任务(外部会话占用)时,退避到期主动泵送重试;
+  // 有既有任务时由它们的完成路径(finally → pumpQueue)触发,本定时器仅兜底。
+  setTimeout(() => void pumpQueue(), CONCURRENCY_RETRY_BACKOFF_MS);
 }
 
 /**

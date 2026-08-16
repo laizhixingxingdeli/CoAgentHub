@@ -88,6 +88,20 @@ export function runningGroupCount(): number {
   return n;
 }
 
+/**
+ * 指定执行器当前 running 的任务数(跨所有组):执行器级并发上限(声明式
+ * maxConcurrency)与反应式排队(403 后等待既有任务终态)的调度判定用。
+ * 组内串行不变,但同一执行器在不同组可能各有 running —— 本函数按
+ * executor key 聚合,供 pumpQueue 决定是否还能向该执行器派发。
+ */
+export function runningExecutorCount(exKey: string): number {
+  let n = 0;
+  for (const g of groupQueues.values()) {
+    if (g.running && g.running.ex.key === exKey) n += 1;
+  }
+  return n;
+}
+
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 export let pumping = false;
 

@@ -21,6 +21,7 @@ export { taskOutputTail } from "./output-buffer";
 export {
   currentRunningTask,
   hasSkipCommitMarker,
+  isConcurrencyConflict,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
   recoverInterruptedTasks,

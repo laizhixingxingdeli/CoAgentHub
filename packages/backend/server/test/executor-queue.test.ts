@@ -71,6 +71,13 @@ writeFileSync(
     '  echo "attempt $n: intended failure"',
     "  exit 1",
     "fi",
+    // 403 并发冲突模式(反应式排队测试用):FAKE_CONFLICT_FILE 指向的标记文件
+    // 存在 → 模拟执行器返回 403 atomgit_session_concurrency_conflict 并退出
+    // (不提交改动);文件不存在 → 正常执行。
+    'if [ -n "$FAKE_CONFLICT_FILE" ] && [ -f "$FAKE_CONFLICT_FILE" ]; then',
+    '  echo "403 atomgit_session_concurrency_conflict: 另一个会话正在使用执行器"',
+    "  exit 1",
+    "fi",
     // 弱验收要求工作树干净 + HEAD 有新提交:默认真正提交一次(显式身份,CI 无
     // 全局 git config 也能跑);FAKE_NO_COMMIT 跳过提交(验收失败测试用)。
     'if [ -z "$FAKE_NO_COMMIT" ]; then',
@@ -83,6 +90,9 @@ writeFileSync(
 );
 chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
+// AtomCode 执行器(内置 maxConcurrency=1)的 bin 同样指向 fake bin:声明式并发
+// 上限测试用同一脚本驱动(该脚本忽略 args,仅按 FAKE_* 环境变量行为)。
+process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
 // 执行前快照/回滚需要真实 git 仓库;CoAgentHub_REPO_ROOT 覆盖 findRepoRoot。
 const repoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queue-repo-"));
@@ -1284,5 +1294,221 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(hasSkipCommitMarker("正文提到 skip-verify 但非行首标记")).toBe(
       false,
     );
+  });
+
+  describe("按执行器并发能力排队(设计修正:maxConcurrency + 403 反应式排队)", () => {
+    it("声明式上限:maxConcurrency=1 的执行器(AtomCode)跨群任务只有一条 running,另一条 queued,完成后才轮到", async () => {
+      // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
+      process.env.FAKE_SLEEP_SECS = "3";
+      const { coordinator } = await setupGroup();
+      // AtomCode 执行器(内置 maxConcurrency=1):与 codebuddy 共用同一 fake bin。
+      const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+      const projA = makeGitRepo("coagenthub-mc-a-");
+      const projB = makeGitRepo("coagenthub-mc-b-");
+      const groupA = await createGroup(coordinator.id, "并发上限群 A");
+      await addMember(coordinator.id, groupA.id, atomcode.id, ["executor"]);
+      await bindProject(coordinator.id, groupA.id, projA);
+      const groupB = await createGroup(coordinator.id, "并发上限群 B");
+      await addMember(coordinator.id, groupB.id, atomcode.id, ["executor"]);
+      await bindProject(coordinator.id, groupB.id, projB);
+
+      const m1 = await postMessage(coordinator.id, groupA.id, {
+        body: "AtomCode 任务一(慢)",
+        audience: "participant",
+        audienceRef: atomcode.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.id,
+        groupA.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      // 不同 project_path → 组槽位空闲;但 AtomCode maxConcurrency=1:第二条
+      // 必须排队(执行器级串行),不能与第一条并行 running。
+      const m2 = await postMessage(coordinator.id, groupB.id, {
+        body: "AtomCode 任务二",
+        audience: "participant",
+        audienceRef: atomcode.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        groupB.id,
+        m2.id,
+        "queued",
+      );
+      expect(t2.status).toBe("queued");
+      const again = await listTasks(coordinator.id, groupB.id);
+      expect(
+        again
+          .filter((x) => x.status === "running")
+          .some((x) => x.messageId === m2.id),
+      ).toBe(false);
+
+      // 第一条 done 后,第二条才轮到并完成。
+      await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
+    }, 30_000);
+
+    it("可并发执行器(无 maxConcurrency)允许同一执行器多个任务同时 running", async () => {
+      process.env.FAKE_SLEEP_SECS = "3";
+      const { coordinator, codebuddy } = await setupGroup();
+      const projA = makeGitRepo("coagenthub-conc-a-");
+      const projB = makeGitRepo("coagenthub-conc-b-");
+      const groupA = await createGroup(coordinator.id, "可并发群 A");
+      await addMember(coordinator.id, groupA.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, groupA.id, projA);
+      const groupB = await createGroup(coordinator.id, "可并发群 B");
+      await addMember(coordinator.id, groupB.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, groupB.id, projB);
+
+      const m1 = await postMessage(coordinator.id, groupA.id, {
+        body: "并发任务一(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.id,
+        groupA.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      const m2 = await postMessage(coordinator.id, groupB.id, {
+        body: "并发任务二(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      // 无 maxConcurrency 的可并发执行器:第二条不被无谓串行,直接 running。
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        groupB.id,
+        m2.id,
+        "running",
+      );
+      expect(t2.status).toBe("running");
+
+      // 核心不变量:同一执行器两条任务同时 running。
+      const againA = await listTasks(coordinator.id, groupA.id);
+      const againB = await listTasks(coordinator.id, groupB.id);
+      expect(againA.find((x) => x.id === t1.id)?.status).toBe("running");
+      expect(againB.find((x) => x.id === t2.id)?.status).toBe("running");
+
+      await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
+    }, 30_000);
+
+    it("反应式排队:执行器返回 403 atomgit_session_concurrency_conflict → 不判失败,转 queued,既有 running 终态后自动重试", async () => {
+      process.env.FAKE_SLEEP_SECS = "3";
+      // 冲突标记文件:存在 → fake bin 输出 403 并发冲突并退出;不存在 → 正常执行。
+      const conflictDir = mkdtempSync(
+        path.join(tmpdir(), "coagenthub-conflict-"),
+      );
+      const conflictFile = path.join(conflictDir, "conflict.txt");
+      process.env.FAKE_CONFLICT_FILE = conflictFile;
+      try {
+        const { coordinator, codebuddy } = await setupGroup();
+        const projA = makeGitRepo("coagenthub-403-a-");
+        const projB = makeGitRepo("coagenthub-403-b-");
+        const groupA = await createGroup(coordinator.id, "403 群 A");
+        await addMember(coordinator.id, groupA.id, codebuddy.id, ["executor"]);
+        await bindProject(coordinator.id, groupA.id, projA);
+        const groupB = await createGroup(coordinator.id, "403 群 B");
+        await addMember(coordinator.id, groupB.id, codebuddy.id, ["executor"]);
+        await bindProject(coordinator.id, groupB.id, projB);
+
+        // 占位任务 A 先 running(此时冲突文件不存在 → 正常执行)。
+        const m1 = await postMessage(coordinator.id, groupA.id, {
+          body: "占位任务(慢)",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        const t1 = await waitForTaskStatus(
+          coordinator.id,
+          groupA.id,
+          m1.id,
+          "running",
+        );
+        expect(t1.status).toBe("running");
+
+        // 放置冲突标记 → 任务 B 首次 spawn 返回 403,转 queued 而非 failed。
+        writeFileSync(conflictFile, "conflict\n");
+        const m2 = await postMessage(coordinator.id, groupB.id, {
+          body: "被 403 的任务",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        // B 先尝试下发(running)→ 403 → 回写 queued(不判失败)。
+        const t2 = await waitForTaskStatus(
+          coordinator.id,
+          groupB.id,
+          m2.id,
+          "queued",
+        );
+        expect(t2.status).toBe("queued");
+        const t2row = (await listTasks(coordinator.id, groupB.id)).find(
+          (x) => x.messageId === m2.id,
+        );
+        const diff2 = t2row?.diffSummary as Record<string, unknown> | null;
+        expect(diff2?.error).toBeUndefined();
+        expect(t2row?.retryCount).toBe(0);
+        // 群里出现 403 排队提示(非 ❌ 失败回传)。
+        await waitForMessage(
+          coordinator.id,
+          groupB.id,
+          (m) =>
+            m.contentType === "task_status" && m.body.includes("403 并发冲突"),
+        );
+
+        // A 仍在 running 期间,B 保持 queued(不空转重试)。
+        const during = await listTasks(coordinator.id, groupB.id);
+        expect(during.find((x) => x.messageId === m2.id)?.status).toBe(
+          "queued",
+        );
+
+        // 移除冲突标记(执行器恢复)→ A done 后 B 自动重试并完成。
+        rmSync(conflictFile, { force: true });
+        await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
+        const t2final = await waitForTaskStatus(
+          coordinator.id,
+          groupB.id,
+          m2.id,
+          "done",
+        );
+        expect(t2final.retryCount).toBe(0); // 403 不算失败重试
+        const diffFinal = t2final.diffSummary as Record<string, unknown> | null;
+        expect(diffFinal?.error).toBeUndefined();
+      } finally {
+        process.env.FAKE_SLEEP_SECS = "";
+        process.env.FAKE_CONFLICT_FILE = "";
+        rmSync(conflictDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it("isConcurrencyConflict 识别 403 atomgit_session_concurrency_conflict 标记", async () => {
+      const { isConcurrencyConflict } = await import(
+        "@server/lib/executor-task"
+      );
+      // 带 403 前缀 / 独立 token / 大小写不敏感均命中。
+      expect(
+        isConcurrencyConflict("403 atomgit_session_concurrency_conflict"),
+      ).toBe(true);
+      expect(
+        isConcurrencyConflict(
+          "error: 403 atomgit_session_concurrency_conflict: session busy",
+        ),
+      ).toBe(true);
+      expect(
+        isConcurrencyConflict("atomgit_session_concurrency_conflict"),
+      ).toBe(true);
+      expect(
+        isConcurrencyConflict("403 ATOMGIT_SESSION_CONCURRENCY_CONFLICT"),
+      ).toBe(true);
+      // 普通失败 / 空串不命中。
+      expect(isConcurrencyConflict("普通失败输出 exit 1")).toBe(false);
+      expect(isConcurrencyConflict("")).toBe(false);
+    });
   });
 });

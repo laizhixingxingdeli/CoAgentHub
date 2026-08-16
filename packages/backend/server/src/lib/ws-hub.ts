@@ -56,6 +56,9 @@ export interface TaskStatusChangedTask {
   executorKey: string | null;
   brief: string | null;
   diffSummary: Record<string, unknown> | null;
+  // 任务下发者信息(Part A):事件透传给插件(定向通知用);老任务为 null。
+  dispatcherParticipantId: string | null;
+  dispatcherSessionId: string | null;
   createdAt: string;
   updatedAt: string | null;
   retryCount: number;

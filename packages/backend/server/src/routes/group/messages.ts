@@ -66,6 +66,14 @@ app
           // 内容类型 (ticket 17): 仅存储不校验 —— 不白名单、不解析;仅拒绝
           // 空串以免绕过 text/plain 默认值。
           contentType: z.string().min(1).optional(),
+          // 任务下发者信息(Part A):只读取 metadata.dispatcherSessionId(≤200),
+          // 其他 metadata 字段忽略,不影响任务创建;超长拒绝(400)。是否写入
+          // 任务行由 handler 按发送者角色/身份判定(见下),此处只做格式约束。
+          metadata: z
+            .object({
+              dispatcherSessionId: z.string().max(200).optional(),
+            })
+            .optional(),
           // fileRef.expiresAt 可选由客户端传入;服务端缺省补 now + 7d (ticket 17)。
           // 输入上限(P0):name ≤255、fetchUrl ≤2048,超限校验返回 400。
           fileRef: FileRefInput.extend({
@@ -81,8 +89,15 @@ app
       const db = c.get("db");
       const senderId = c.get("participantId");
       const { id } = c.req.valid("param");
-      const { body, parentId, audience, audienceRef, contentType, fileRef } =
-        c.req.valid("json");
+      const {
+        body,
+        parentId,
+        audience,
+        audienceRef,
+        contentType,
+        fileRef,
+        metadata,
+      } = c.req.valid("json");
 
       // Archive = read-only: an archived (or soft-deleted) group rejects new
       // messages with 403 + reason; reading (GET messages / GET members /
@@ -180,12 +195,33 @@ app
       // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,
       // 失败只记日志,绝不阻塞消息响应)。
       if (aud === "participant" && audienceRef) {
+        // 任务下发者信息(Part A):dispatcher_participant_id = 服务端识别的 sender
+        // (请求体不可伪造);dispatcher_session_id 仅 coordinator/human 且**非执行器
+        // participant** 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
+        // 绝不从 body 文本解析 sessionId;任务书 body 保持干净。
+        const rawSessionId = metadata?.dispatcherSessionId;
+        let dispatcherSessionId: string | null = null;
+        if (rawSessionId) {
+          const senderParticipant = await db.query.participant.findFirst({
+            where: (t, { eq }) => eq(t.id, senderId),
+          });
+          const senderIsExecutor =
+            senderParticipant !== undefined &&
+            (await findExecutorByParticipantName(db, senderParticipant.name));
+          const canCarry =
+            membership.roles.some((r) =>
+              (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+            ) && !senderIsExecutor;
+          if (canCarry) dispatcherSessionId = rawSessionId;
+        }
         void maybeDispatchExecutorTask(db, {
           groupId: id,
           messageId: full.id,
           senderRoles: membership.roles,
           audienceRef,
           body: body ?? "",
+          dispatcherParticipantId: senderId,
+          dispatcherSessionId,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;
