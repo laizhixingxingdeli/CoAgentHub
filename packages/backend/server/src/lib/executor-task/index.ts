@@ -25,6 +25,7 @@ export {
   queuedExecutorTaskCount,
   recoverInterruptedTasks,
   refreshA2AActivity,
+  resolveTaskRepo,
   resolveTestExecutor,
   stopRunningTask,
   verifyTaskCommitted,

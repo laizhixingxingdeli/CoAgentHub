@@ -5,7 +5,8 @@
  * (barrel index.ts 汇总)。
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import {
   type Task,
   type TaskAttempt,
@@ -526,12 +527,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 执行历史:每次 spawn 前 append 一条 running attempt(重试 = 多条)。
     await beginAttempt(run);
 
-    // spawn cwd = 群绑定的 project_path(并行时不同项目操作各自仓库,互不干扰);
-    // 未绑定则回退 findRepoRoot()(兼容既有测试/无项目群)。
+    // spawn cwd = 任务书声明的仓库(行内 `仓库:`/`仓库路径:`/`Repository:`/
+    // `Repo:` 显式声明时优先,使执行前快照/弱验收落在正确的仓库上);未声明则
+    // 回退群绑定 project_path(仍不存在再回退 findRepoRoot(),兼容既有测试/无
+    // 项目群)。repoRoot 同时传给 buildTicket 的「项目:」行,保证任务书展示与
+    // 实际执行一致。
+    const declaredRoot = resolveTaskRepo(body, run.projectPath);
     const repoRoot =
-      run.projectPath && existsSync(run.projectPath)
-        ? run.projectPath
-        : findRepoRoot();
+      declaredRoot && existsSync(declaredRoot) ? declaredRoot : findRepoRoot();
     // 按 kind 分流:cli 写 ticket + 打本地 git 快照后 spawn;a2a 不发 ticket、
     // 不打快照(远端设备执行,本地快照无意义),body 直接当 prompt 发 gateway。
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
@@ -1256,12 +1259,12 @@ async function handleFailure(
   }
 
   // 重试前回滚 checkpoint(resetWorkspace=true 且存在快照):恢复工作树到任务前
-  // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。
+  // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。回滚
+  // 必须在执行前快照所用的仓库(任务书声明的仓库)上进行,与原执行一致。
   if (getRetryPolicy().resetWorkspace && run.checkpointRef) {
+    const declaredRoot = resolveTaskRepo(run.body, run.projectPath);
     const repoRoot =
-      run.projectPath && existsSync(run.projectPath)
-        ? run.projectPath
-        : findRepoRoot();
+      declaredRoot && existsSync(declaredRoot) ? declaredRoot : findRepoRoot();
     const res = await resetToCheckpoint(run.checkpointRef, repoRoot);
     if (!res.ok) {
       // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
@@ -1332,6 +1335,48 @@ export function hasSkipCommitMarker(brief: string): boolean {
     /^\s*##\s*acceptance\s*:\s*skip-verify\s*$/im.test(brief) ||
     /^\s*##\s*commitmode\s*:\s*none\s*$/im.test(brief)
   );
+}
+
+/**
+ * 任务书声明仓库解析:任务书 body 显式声明目标仓库路径时(行级
+ * `仓库:` / `仓库路径:` / `Repository:` / `Repo:` 大小写不敏感、允许前后空白),
+ * 返回该行第一个路径 token(绝对路径且 existsSync 为目录才采用);否则回退群绑定
+ * projectPath(保持现行为,允许为空 → 后续由 findRepoRoot() 兜底)。用于 spawn cwd
+ * / 执行前快照 / 弱验收统一落在任务书声明的仓库上,避免群绑定仓库 HEAD 无变化
+ * 导致弱验收误判 failed。
+ */
+export function resolveTaskRepo(
+  body: string,
+  groupProjectPath: string | null,
+): string | null {
+  const declared = parseRepoPathFromBody(body);
+  if (
+    declared &&
+    isAbsolute(declared) &&
+    existsSync(declared) &&
+    statSync(declared).isDirectory()
+  ) {
+    return declared;
+  }
+  return groupProjectPath ?? null;
+}
+
+/**
+ * 从任务书 body 解析显式声明的仓库路径:命中 `仓库:` / `仓库路径:` /
+ * `Repository:` / `Repo:` 行(大小写不敏感、允许前后空白,行首即关键字)取行内
+ * 第一个路径 token;无声明 → null。关键字严格从行首(仅允许前导空白)开始,避免
+ * 正文偶然出现「仓库:」字样误命中。
+ */
+function parseRepoPathFromBody(body: string): string | null {
+  const re = /^\s*(?:仓库路径|仓库|repository|repo)\s*[:：]\s*(.+?)\s*$/i;
+  for (const raw of body.split("\n")) {
+    const m = re.exec(raw);
+    if (m) {
+      const token = m[1].trim().split(/\s+/)[0];
+      if (token) return token;
+    }
+  }
+  return null;
 }
 
 /**
