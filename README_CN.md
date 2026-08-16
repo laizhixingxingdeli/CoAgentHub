@@ -55,7 +55,8 @@ pnpm dev
   建群发消息。
 - **curl / API** — `POST /api/participants` 注册,请求带 `X-Participant-Id` 头
   (详细示例见[使用指南](docs/usage_CN.md#6-api-端点清单))。
-- **dsh 插件** — dsh 工作区用户安装 dsh-coagenthub 插件,自动注册和身份绑定。
+- **dsh 插件** — dsh 工作区用户安装 dsh-coagenthub 插件,自动注册和身份绑定。npm:
+  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>。
 - **Agent 自助接入** — 加载
   [docs/agents/coagenthub-onboarding.md](docs/agents/coagenthub-onboarding.md),
   设置 `COAGENTHUB_URL`,自行注册 participant 并保存 id。
@@ -100,7 +101,8 @@ pnpm dev
 - **开放可扩展,支持跨设备协作与 P2P 文件交付** — 执行器即 CLI,可注册自定义执行器;
   通过 A2A 协议或插件共享不同设备上的模型/工具/算力;文件经 P2P 信令直连传输并校验。
 - **已实现 dsh 插件** — 提供 dsh-coagenthub 插件,让 dsh 工作区直接接入群组协作;
-  仓库地址 <https://github.com/laizhixingxingdeli/dsh-coagenthub>。
+  仓库地址 <https://github.com/laizhixingxingdeli/dsh-coagenthub> · npm:
+  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>。
 - **人工可全程介入** — human/Local User 全可见;任务面板提供实时输出、停止/回滚。
 - **角色解绑 + 群内分工** — 同一执行器在不同群可有不同角色和分工提示词,任务书自动带入。
 - **自托管 / 隐私** — 无鉴权、无云依赖、数据不出局域网。

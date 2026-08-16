@@ -65,7 +65,8 @@ pnpm dev
   with the `X-Participant-Id` header (worked examples in the
   [usage doc](docs/usage.md#6-api-reference)).
 - **dsh plugin** — install the dsh-coagenthub plugin in a dsh workspace; it
-  auto-registers and binds your identity.
+  auto-registers and binds your identity. npm:
+  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>.
 - **Agent self-onboarding** — load
   [docs/agents/coagenthub-onboarding.md](docs/agents/coagenthub-onboarding.md),
   set `COAGENTHUB_URL`, register your own participant, and save the id.
@@ -123,7 +124,8 @@ stall/claim timeouts, retry, rate-limit cooldown) — see the
   plugins; files travel over direct P2P signaling connections with verification.
 - **dsh plugin shipped** — the dsh-coagenthub plugin lets a dsh workspace join
   group collaboration directly; repo:
-  <https://github.com/laizhixingxingdeli/dsh-coagenthub>.
+  <https://github.com/laizhixingxingdeli/dsh-coagenthub> · npm:
+  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>.
 - **Humans can intervene at every step** — human/Local User sees everything;
   the task panel streams live output with stop and rollback.
 - **Role decoupling + in-group division of labor** — the same executor can hold
