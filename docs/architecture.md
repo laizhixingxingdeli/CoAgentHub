@@ -176,6 +176,9 @@ CoAgentHub/
 
 ## 9. 执行器与任务
 
+- **server 是唯一调度器**(旧任务桥已退役,webhook 通道已移除):`POST /messages` 定向到
+  执行器 participant(`audience=participant` + `audienceRef`)时,由 server 直接建 task
+  (fire-and-forget,幂等靠 `message_id` 唯一约束),不再有独立的调度进程。
 - 执行器配置:`lib/executors.ts` 内置 + `executor_config` 表(DB 持久化,`/api/executors`
   管理);participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
 - **执行器分工选择**:定向消息(`audience=participant`)指定的执行器 = **实现执行器**;
@@ -188,8 +191,11 @@ CoAgentHub/
   不改消息 schema):默认「自动(按分工提示词)」不追加;选「同一执行器」或显式成员时在
   消息 body 追加一行 `**测试执行器:<名>**`,由 buildTicket 原样保留进任务书(「同一
   执行器」= 测试由实现执行器自己完成,与自动解析的固定段并存,执行器以显式行为准)。
-- 任务:定向消息命中执行器 → task(queued)→ 全局串行队列 → spawn(CLI 或 A2A)
-  → git 快照(checkpointRef)→ done/failed;默认超时 120 分钟(EXECUTOR_TIMEOUT_MS)。
+- 任务:定向消息命中执行器 → server 建 task(queued)→ **按 project_path 分组的并行队列**
+  (同一 `project_path` 组内串行、不同项目并行,并行组数 ≤ `maxParallelGroups`,
+  `scripts/dispatch-policy.json` 配置,缺省 2;未绑定 project_path 的群任务归默认组)
+  → spawn(CLI 或 A2A)→ git 快照(checkpointRef)→ done/failed;默认超时 120 分钟
+  (EXECUTOR_TIMEOUT_MS)。
 - **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收
   不依赖记忆。纯粹执行器(无 `memory` 标记)保持新鲜上下文,每次任务独立执行。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用
