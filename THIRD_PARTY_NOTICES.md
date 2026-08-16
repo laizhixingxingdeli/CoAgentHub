@@ -19,7 +19,6 @@ licenses are reproduced or linked below.
 |---|---|
 | [Hono](https://hono.dev) | MIT |
 | [Drizzle ORM](https://orm.drizzle.team) | Apache-2.0 |
-| [Nextra](https://nextra.site) | MIT |
 | [Tailwind CSS](https://tailwindcss.com) | MIT |
 
 Each package retains its own copyright and license terms as distributed in

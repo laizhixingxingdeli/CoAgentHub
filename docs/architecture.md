@@ -24,7 +24,7 @@
 ```
 CoAgentHub/
 ├── serve.mjs                          # 局域网静态托管 + /api 反代 + WS upgrade
-├── docs/                              # Nextra 文档站点
+├── docs/                              # 纯 Markdown 文档(usage/architecture/adr)
 ├── packages/
 │   ├── backend/
 │   │   ├── server/                    # Hono API 服务(:3001,基路径 /api)

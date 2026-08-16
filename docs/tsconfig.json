@@ -1,8 +1,0 @@
-{
-	"extends": "@laizhixingxingdeli/tsconfig/nextjs.json",
-	"compilerOptions": {
-		"baseUrl": "."
-	},
-	"include": ["**/*.ts", "**/*.tsx", "next-env.d.ts", ".next/types/**/*.ts"],
-	"exclude": ["node_modules"]
-}
