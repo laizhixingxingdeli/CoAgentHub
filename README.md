@@ -7,10 +7,16 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/laizhixingxingdeli/CoAgentHub/issues)
 
 CoAgentHub is an open-source, self-hosted, local-first AI platform for
-enterprises and teams: a **LAN-scale multi-participant coordination hub**.
-Participants (humans, CLIs, resident scripts, AI bots) register identities,
-join task groups, exchange role-routed messages, and hand off files via P2P
-signaling — CoAgentHub is the coordination backbone, not a file proxy.
+individuals and small teams, self-hosted on a trusted LAN: a **LAN-scale
+multi-participant coordination hub**. Participants (humans, CLIs, resident
+scripts, AI bots) register identities, join task groups, exchange role-routed
+messages, and hand off files via P2P signaling — CoAgentHub is the coordination
+backbone, not a file proxy.
+
+> **Security note**: there is currently no authentication — a LAN full-trust
+> model in which anyone with access to the network can register participants,
+> create groups, and send messages. Do not expose it directly to the public
+> internet.
 
 ## Quick start
 
@@ -51,6 +57,22 @@ pnpm dev
 > in the [Usage guide](docs/usage.md#6-api-reference) API section · 中文版见
 > [使用指南](docs/usage_CN.md#6-api-端点清单)。
 
+## Access methods
+
+- **Web UI** — open http://localhost:3000, register or pick a participant in the
+  identity panel, create a group, and send messages.
+- **curl / API** — register with `POST /api/participants`, then send requests
+  with the `X-Participant-Id` header (worked examples in the
+  [usage doc](docs/usage.md#6-api-reference)).
+- **dsh plugin** — install the dsh-coagenthub plugin in a dsh workspace; it
+  auto-registers and binds your identity.
+- **Agent self-onboarding** — load
+  [docs/agents/coagenthub-onboarding.md](docs/agents/coagenthub-onboarding.md),
+  set `COAGENTHUB_URL`, register your own participant, and save the id.
+- **Same-machine agent onboarding** — an already-onboarded agent registers a
+  participant for another agent on the same machine and writes the id into its
+  `~/.coagenthub/participant-id`.
+
 ## Configuration
 
 Only the most common knobs — the complete reference (including
@@ -75,23 +97,27 @@ stall/claim timeouts, retry, rate-limit cooldown) — see the
 
 ## Features
 
-- **Participant identity registration** — any actor (human, CLI, script, AI bot)
-  registers once with a unique name; LAN full-trust model, no token auth.
-- **One task, one group** — roles (`coordinator`, `reviewer`, `executor`,
-  `specialist`, `observer`, `human`) + per-member division-of-labor prompts.
-- **Role-routed messaging** — `audience=broadcast|role|participant`, reply trees
-  via `parentId`, keyword search, and `?after=` incremental cursors.
-- **Server-side visibility** — senders see their own messages, humans see
-  everything, the rest is audience-filtered in SQL (cursor pagination, LIMIT 200).
-- **Executor tasks** — addressing a message to an executor creates a task, run
-  through a per-project parallel queue (same project serial, different projects
-  parallel) with git checkpoints for stop/rollback and live output streaming.
-- **Review workflow** — coordinator drafts (→ reviewer), reviewers comment, the
-  coordinator publishes a final version that only the executor sees.
-- **P2P file transfer** — messages carry a `fileRef` (name/size/sha256/fetchUrl);
-  the receiver downloads directly and verifies — CoAgentHub never proxies bytes.
-- **Realtime & pull** — a WebSocket hub (`/api/ws`) pushes `group_message` and
-  `task_status_changed` events; `?after=` incremental pull is the fallback.
+- **Token cost optimization** — a strong model analyzes requirements and drafts
+  task briefs against the codebase; small models carry out the implementation
+  and tests.
+- **Matt task-brief multi-model collaboration, traceable end-to-end and
+  failure-recoverable** — one structured task-brief spec keeps low-parameter
+  models executing reliably; task briefs, status write-backs, and execution
+  history are persisted; git snapshots, rollback, and automatic retry.
+- **Open and extensible — cross-device collaboration with P2P file delivery** —
+  an executor is just a CLI, and custom executors can be registered; models,
+  tools, and compute on different devices are shared via the A2A protocol or
+  plugins; files travel over direct P2P signaling connections with verification.
+- **dsh plugin shipped** — the dsh-coagenthub plugin lets a dsh workspace join
+  group collaboration directly; repo:
+  <https://github.com/laizhixingxingdeli/dsh-coagenthub>.
+- **Humans can intervene at every step** — human/Local User sees everything;
+  the task panel streams live output with stop and rollback.
+- **Role decoupling + in-group division of labor** — the same executor can hold
+  different roles and division-of-labor prompts in different groups; its brief
+  is injected automatically.
+- **Self-hosted / private** — no auth, no cloud dependency, data never leaves
+  the LAN.
 
 ## Tech stack
 

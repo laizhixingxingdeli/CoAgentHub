@@ -6,10 +6,13 @@
 [![Version](https://img.shields.io/badge/version-4.0.0-2ea44f.svg)](https://github.com/laizhixingxingdeli/CoAgentHub)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/laizhixingxingdeli/CoAgentHub/issues)
 
-CoAgentHub 是面向企业与团队的开源、自托管、本地优先 AI 平台:**局域网规模的多
-participant 协作中枢**。Participant(人类、CLI 工具、常驻脚本、AI bot)注册身份、
-加入任务群组、按角色路由交换消息、通过 P2P 信令交接文件——CoAgentHub 只做协作调度,
-不代理文件字节。
+CoAgentHub 是面向个人与小团队的开源、自托管、本地优先 AI 平台:在受信任局域网内
+自托管使用,构成**局域网规模的多 participant 协作中枢**。Participant(人类、
+CLI 工具、常驻脚本、AI bot)注册身份、加入任务群组、按角色路由交换消息、通过
+P2P 信令交接文件——CoAgentHub 只做协作调度,不代理文件字节。
+
+> **安全提示**:当前无鉴权——局域网全信(LAN full-trust)模型,任何能访问局域网
+> 的人都能注册 participant、建群、发消息。请勿直接暴露公网。
 
 ## 快速开始
 
@@ -46,6 +49,19 @@ pnpm dev
 > [使用指南](docs/usage_CN.md#6-api-端点清单) 的 API 部分 · 英文版见
 > [Usage guide](docs/usage.md#6-api-reference)。
 
+## 接入方式
+
+- **网页 UI** — 打开 http://localhost:3000,在身份面板注册/选择 participant,
+  建群发消息。
+- **curl / API** — `POST /api/participants` 注册,请求带 `X-Participant-Id` 头
+  (详细示例见[使用指南](docs/usage_CN.md#6-api-端点清单))。
+- **dsh 插件** — dsh 工作区用户安装 dsh-coagenthub 插件,自动注册和身份绑定。
+- **Agent 自助接入** — 加载
+  [docs/agents/coagenthub-onboarding.md](docs/agents/coagenthub-onboarding.md),
+  设置 `COAGENTHUB_URL`,自行注册 participant 并保存 id。
+- **同机 Agent 代为接入** — 已接入的 agent 帮同机其他 agent 注册 participant,
+  并把 id 写入对方的 `~/.coagenthub/participant-id`。
+
 ## 配置
 
 仅列最常用配置项——完整参考(含 `dispatch-policy.json` 与全部环境变量)见
@@ -68,22 +84,16 @@ pnpm dev
 
 ## 主要特性
 
-- **Participant 身份注册** — 任何主体(人类、CLI 工具、常驻脚本、AI bot)以唯一名字
-  注册一次,可加入任意群组;局域网全信模型,无 token 鉴权。
-- **一个任务,一个群组** — 群组承载角色(`coordinator` / `reviewer` / `executor` /
-  `specialist` / `observer` / `human`)与每个成员的分工提示词,注入下发的任务书。
-- **按角色路由消息** — `audience=broadcast|role|participant`,`parentId` 挂回复树,
-  关键词搜索,`?after=` 增量游标。
-- **服务端可见性** — 发送者必见、human 全可见,其余按 audience 在 SQL 中过滤,
-  游标分页(LIMIT 200)。
-- **执行器任务** — 定向到执行器的消息创建 task,经按项目分组的并行队列派发
-  (同项目串行、不同项目并行),git 快照支撑停止/回滚,实时输出流式推送。
-- **检视流程** — coordinator 起草(→ reviewer),reviewer 评论,coordinator 发布
-  最终版,executor 只见最终版。
-- **P2P 文件传输** — 消息携带 `fileRef`(name/size/sha256/fetchUrl),接收方直连
-  拉取并校验——CoAgentHub 从不代理文件字节。
-- **实时推送 + 增量拉取** — WebSocket 中枢(`/api/ws`)推送 `group_message` 与
-  `task_status_changed` 事件;`?after=` 增量拉取兜底。
+- **Token 成本优化** — 主力模型分析需求、结合代码生成任务书,小模型负责具体实现和测试。
+- **基于 Matt 任务书规范的多模型协作,全程可追溯、失败可恢复** — 统一结构化任务书让
+  低参数模型稳定执行;任务书/状态回传/执行历史持久化;git 快照、回滚、自动重试。
+- **开放可扩展,支持跨设备协作与 P2P 文件交付** — 执行器即 CLI,可注册自定义执行器;
+  通过 A2A 协议或插件共享不同设备上的模型/工具/算力;文件经 P2P 信令直连传输并校验。
+- **已实现 dsh 插件** — 提供 dsh-coagenthub 插件,让 dsh 工作区直接接入群组协作;
+  仓库地址 <https://github.com/laizhixingxingdeli/dsh-coagenthub>。
+- **人工可全程介入** — human/Local User 全可见;任务面板提供实时输出、停止/回滚。
+- **角色解绑 + 群内分工** — 同一执行器在不同群可有不同角色和分工提示词,任务书自动带入。
+- **自托管 / 隐私** — 无鉴权、无云依赖、数据不出局域网。
 
 ## 技术栈
 
