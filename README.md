@@ -12,43 +12,44 @@ Participants (humans, CLIs, resident scripts, AI bots) register identities,
 join task groups, exchange role-routed messages, and hand off files via P2P
 signaling — CoAgentHub is the coordination backbone, not a file proxy.
 
-## Installation
+## Quick start
 
-**Prerequisites:** Node.js 22+, PostgreSQL (or Docker), and pnpm.
+Everything from identity registration to sending messages happens in the
+browser — the only terminal commands are for starting the stack.
+
+**1) Start the stack** — install dependencies, bring up Postgres, migrate, and
+run the dev servers (web on :3000, API server on :3001):
 
 ```bash
 pnpm install
-docker compose up -d postgres          # or use your own PostgreSQL
+docker compose up -d postgres          # or point DATABASE_URL at your own PostgreSQL
 pnpm --filter @laizhixingxingdeli/database migrate
+pnpm dev
 ```
 
-## Quick start
+> Production-style static serving instead: `pnpm build && node serve.mjs`
+> (serves the built frontend on :3000 and reverse-proxies `/api` to :3001).
 
-```bash
-# 1) Start the backend on :3001 — executor participants auto-register on startup
-pnpm --filter @laizhixingxingdeli/server build
-node packages/backend/server/dist/server.mjs
+**2) Open http://localhost:3000** in your browser, then:
 
-# In a second terminal: register → create a group → send a message
-BASE=http://localhost:3001/api
+1. **Register / pick an identity** — in the identity panel at the top of the
+   group list, expand **Register new participant** to register yourself (it
+   binds automatically), or click **Use** next to an existing participant.
+2. **Create a group** — type a title in the **Create group** box and submit;
+   the creator automatically becomes the coordinator.
+3. **Send a message** — open the group from the list and type into the
+   composer. Address a message to an executor participant and the server
+   creates and runs a task for you.
 
-# 2) Register a participant — keep the returned id
-curl -s -X POST $BASE/participants -H 'Content-Type: application/json' \
-  -d '{"name":"alice"}'
+![Group list and identity panel](docs/assets/quickstart-groups.jpg)
 
-# 3) Create a group — the creator becomes the coordinator
-curl -s -X POST $BASE/groups -H 'Content-Type: application/json' \
-  -H 'X-Participant-Id: <participant-id>' -d '{"title":"demo"}'
+![Group chat with status bubbles and the member/task context panel](docs/assets/quickstart-chat.jpg)
 
-# 4) Send a message (speak as a participant via X-Participant-Id)
-curl -s -X POST $BASE/groups/<group-id>/messages \
-  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
-  -d '{"body":"hello","audience":"broadcast"}'
-```
+![Task panel with a finished task](docs/assets/quickstart-tasks.jpg)
 
-Then open **http://localhost:3000** in a browser, pick your identity in the
-identity panel, and watch the collaboration live. A full walkthrough is in the
-[Usage guide](docs/usage.md) · [使用指南](docs/usage_CN.md).
+> Scripted or headless callers use the REST API instead — curl examples live
+> in the [Usage guide](docs/usage.md#6-api-reference) API section · 中文版见
+> [使用指南](docs/usage_CN.md#6-api-端点清单)。
 
 ## Configuration
 

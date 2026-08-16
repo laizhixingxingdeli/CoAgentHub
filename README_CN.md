@@ -11,45 +11,40 @@ participant 协作中枢**。Participant(人类、CLI 工具、常驻脚本、AI
 加入任务群组、按角色路由交换消息、通过 P2P 信令交接文件——CoAgentHub 只做协作调度,
 不代理文件字节。
 
-## 安装
+## 快速开始
 
-**前置依赖:** Node.js 22+、PostgreSQL(或 Docker)、pnpm。
+从注册身份到发消息,全部在浏览器里完成——终端只用来启动服务。
+
+**1) 启动服务** —— 安装依赖、启动 Postgres、跑迁移,再启动开发服务
+(Web 在 :3000,API 服务在 :3001):
 
 ```bash
 pnpm install
-docker compose up -d postgres          # 或使用本机 PostgreSQL
+docker compose up -d postgres          # 或让 DATABASE_URL 指向你自己的 PostgreSQL
 pnpm --filter @laizhixingxingdeli/database migrate
+pnpm dev
 ```
 
-## 快速开始
+> 想用生产式静态服务:`pnpm build && node serve.mjs`(托管前端构建产物于
+> :3000,并把 `/api` 反代到 :3001)。
 
-```bash
-# 1) 启动后端(:3001)——开机时自动注册执行器 participant
-pnpm --filter @laizhixingxingdeli/server build
-node packages/backend/server/dist/server.mjs
-```
+**2) 浏览器打开 http://localhost:3000**,然后:
 
-另开一个终端,依次完成注册 participant → 建群 → 发消息:
+1. **注册 / 选择身份** —— 在群列表页顶部的身份面板,展开「注册新参与方」注册
+   自己(注册即自动绑定),或在已有 Participant 旁点「使用」。
+2. **建群** —— 在「创建群组」输入标题并提交;创建者自动成为 coordinator。
+3. **发消息** —— 从列表进入群,在输入框输入内容发送;定向给执行器
+   participant 的消息会自动创建并派发任务。
 
-```bash
-BASE=http://localhost:3001/api
+![群列表与身份面板](docs/assets/quickstart-groups.jpg)
 
-# 2) 注册 participant —— 保存返回的 id
-curl -s -X POST $BASE/participants -H 'Content-Type: application/json' \
-  -d '{"name":"alice"}'
+![群消息页:消息气泡与右侧成员/任务面板](docs/assets/quickstart-chat.jpg)
 
-# 3) 建群 —— 创建者自动成为 coordinator
-curl -s -X POST $BASE/groups -H 'Content-Type: application/json' \
-  -H 'X-Participant-Id: <participant-id>' -d '{"title":"demo"}'
+![任务面板:已完成任务](docs/assets/quickstart-tasks.jpg)
 
-# 4) 给群里发消息(经 X-Participant-Id 以该身份发言)
-curl -s -X POST $BASE/groups/<group-id>/messages \
-  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
-  -d '{"body":"hello","audience":"broadcast"}'
-```
-
-然后在浏览器打开 **http://localhost:3000**,在身份面板选择你的身份,实时观看协作过程。
-完整走查见 [使用指南](docs/usage_CN.md) · [Usage guide](docs/usage.md)。
+> 脚本 / 无头调用走 REST API——curl 示例见
+> [使用指南](docs/usage_CN.md#6-api-端点清单) 的 API 部分 · 英文版见
+> [Usage guide](docs/usage.md#6-api-reference)。
 
 ## 配置
 

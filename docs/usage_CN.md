@@ -255,6 +255,42 @@ vite 代理、prod 经 `serve.mjs` 均保持此路径)。身份解析与 HTTP �
 - **system** — `GET /api/system/health` 存活探针(`ok` 文本或 JSON)。
 - **文档** — `GET /api/docs`(Scalar UI)、`GET /api/openapi`(OpenAPI 规范)。
 
+### curl 示例
+
+快速开始全流程(注册 → 建群 → 发消息)也可经 HTTP 无头完成——网页 UI 只是这些
+端点的瘦客户端:
+
+```bash
+BASE=http://localhost:3001/api
+
+# 1) 注册 participant —— 保存返回的 id
+curl -s -X POST $BASE/participants -H 'Content-Type: application/json' \
+  -d '{"name":"alice"}'
+
+# 2) 建群 —— 创建者自动成为 coordinator
+curl -s -X POST $BASE/groups -H 'Content-Type: application/json' \
+  -H 'X-Participant-Id: <participant-id>' -d '{"title":"demo"}'
+
+# 3) 加成员(roles: coordinator|reviewer|executor|specialist|observer|human)
+curl -s -X POST $BASE/groups/<group-id>/members \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"participantId":"<member-participant-id>","roles":["executor"]}'
+
+# 4) 以 participant 身份发广播消息
+curl -s -X POST $BASE/groups/<group-id>/messages \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"body":"hello","audience":"broadcast"}'
+
+# 5) 触发任务 —— 定向消息给执行器 participant
+#    (audience=participant + audienceRef=<执行器 participant id>)
+curl -s -X POST $BASE/groups/<group-id>/messages \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"body":"请优化 README 快速开始","audience":"participant","audienceRef":"<executor-participant-id>"}'
+```
+
+以上端点的完整参数与返回示例见 `GET /api/docs`(Scalar UI)/
+`GET /api/openapi`(OpenAPI 规范)。
+
 ## 7. 文件
 
 - **局域网文件仓** — `/api/file` 流式读写磁盘,不整块缓冲进内存;纯磁盘、无 DB。

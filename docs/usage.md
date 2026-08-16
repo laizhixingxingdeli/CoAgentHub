@@ -303,6 +303,42 @@ at `GET /api/docs` (Scalar UI) and `GET /api/openapi`.
 - **system** — `GET /api/system/health` liveness probe (`ok` text or JSON).
 - **docs** — `GET /api/docs` (Scalar UI), `GET /api/openapi` (OpenAPI spec).
 
+### curl examples
+
+The quick-start flow (register → group → message) works headlessly over HTTP —
+the web UI is a thin client over exactly these endpoints:
+
+```bash
+BASE=http://localhost:3001/api
+
+# 1) Register a participant — keep the returned id
+curl -s -X POST $BASE/participants -H 'Content-Type: application/json' \
+  -d '{"name":"alice"}'
+
+# 2) Create a group — the creator becomes the coordinator
+curl -s -X POST $BASE/groups -H 'Content-Type: application/json' \
+  -H 'X-Participant-Id: <participant-id>' -d '{"title":"demo"}'
+
+# 3) Add a member (roles: coordinator|reviewer|executor|specialist|observer|human)
+curl -s -X POST $BASE/groups/<group-id>/members \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"participantId":"<member-participant-id>","roles":["executor"]}'
+
+# 4) Send a broadcast message as a participant
+curl -s -X POST $BASE/groups/<group-id>/messages \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"body":"hello","audience":"broadcast"}'
+
+# 5) Trigger a task — address a message to an executor participant
+#    (audience=participant + audienceRef=<executor participant id>)
+curl -s -X POST $BASE/groups/<group-id>/messages \
+  -H 'Content-Type: application/json' -H 'X-Participant-Id: <participant-id>' \
+  -d '{"body":"请优化 README 快速开始","audience":"participant","audienceRef":"<executor-participant-id>"}'
+```
+
+Every endpoint above is documented in full (parameters + response examples) in
+the OpenAPI spec served at `GET /api/docs` (Scalar UI) / `GET /api/openapi`.
+
 ## 7. Files
 
 - **LAN file store** — `/api/file` streams uploads/downloads to disk (no
