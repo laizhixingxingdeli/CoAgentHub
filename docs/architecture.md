@@ -231,3 +231,20 @@ CoAgentHub/
 - `GET /groups/:id/messages?q=` 关键词搜索(ILIKE,`%`/`_` 转义),与可见性过滤和
   `?after=` 游标组合;`GET /groups?q=` 群标题搜索。
 
+## 11. 架构审视验证记录
+
+> 验证日期:2026-08-16(架构审视提交 adb55fc 之后,main 全量验证)
+
+| 验证命令 | 结果 |
+| --- | --- |
+| `pnpm --filter @laizhixingxingdeli/server test` | ✅ 264/264 通过 |
+| `pnpm --filter @laizhixingxingdeli/web test` | ✅ 254/254 通过 |
+| `pnpm --filter @laizhixingxingdeli/server check-types` | ✅ 通过(`tsc -b`) |
+| `pnpm --filter @laizhixingxingdeli/web check-types` | ✅ 通过(`tsc -b`) |
+| `pnpm build`(turbo run build,`--force` 冷构建) | ✅ 5/5 任务成功 |
+
+结论:架构审视提交 adb55fc 之后的 main 全量测试、类型检查、构建全绿,未发现需要修复的
+测试/类型/构建问题,未改动产品代码;`pnpm build` 产物已由 `--force` 冷构建确认,
+git 工作树干净。备注:web 构建中 sentry-vite-plugin 因未配置 `SENTRY_AUTH_TOKEN`
+打印非致命告警(不阻断产物生成),与本架构审视无关。
+
