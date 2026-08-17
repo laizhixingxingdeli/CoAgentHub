@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  com.coagenthub.prod — CoAgentHub 生产全家桶开机自启 (ticket 27)
+  已取代(2026-08-17):开机自启与自愈改由 scripts/deploy/com.coagenthub.watchdog.plist
+  (launchd,跑白名单内 ~/.hermes/node/bin/node,AbandonProcessGroup)负责,本 plist 不再安装。
+  旧实现 com.coagenthub.prod — CoAgentHub 生产全家桶开机自启 (ticket 27)
 
   安装(手动,本模板不代 load):
     mkdir -p ~/Library/LaunchAgents

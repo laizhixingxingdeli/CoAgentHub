@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/apple/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.coagenthub.watchdog</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/apple/.hermes/node/bin/node</string>
+		<string>/Users/apple/Desktop/Projects/CoAgentHub/scripts/mac-watchdog-once.cjs</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/tmp/coagenthub-watchdog.log</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/coagenthub-watchdog.log</string>
+	<key>StartInterval</key>
+	<integer>300</integer>
+</dict>
+</plist>

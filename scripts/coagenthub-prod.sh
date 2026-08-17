@@ -5,7 +5,7 @@
 #   scripts/coagenthub-prod.sh start [--build]   # 一键启动(幂等:已占用端口跳过;--build 才构建)
 #   scripts/coagenthub-prod.sh stop              # 停止本脚本启动的三服务
 #   scripts/coagenthub-prod.sh restart [--build] # stop + start(健康看门狗用)
-#   scripts/coagenthub-prod.sh status            # 检查三端口监听 + PID
+#   scripts/coagenthub-prod.sh status            # 检查三端口监听 + PID(自愈:launchd com.coagenthub.watchdog 每 5 分钟)
 #   scripts/coagenthub-prod.sh plist-install     # 复制 LaunchAgent 模板到 ~/Library/LaunchAgents(不 load)
 #   scripts/coagenthub-prod.sh plist-uninstall   # launchctl unload + 删文件
 #   scripts/coagenthub-prod.sh cron-install      # 安装每日 02:30 备份 + 每 5 分钟 watchdog(幂等)
@@ -31,6 +31,20 @@ WEB_PORT="${COAGENTHUB_WEB_PORT:-3000}"
 
 # launchd 环境 PATH 很精简,这里兜底补全 node/pnpm 所在路径
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:$PATH"
+
+# 常驻服务用 TCC 白名单内的 node 二进制启动(macOS 26,仓库在 ~/Desktop 受 TCC 保护):
+# 用普通 node 启动的服务在被 launchd/cron 拉起且脱离父进程后,Desktop 读权限取决于其
+# 自身二进制路径(默认不在白名单),会出现 "Operation not permitted"。
+# ~/.hermes/node/bin/node 已被授予 Desktop 访问(见 系统设置→隐私与安全性),随行
+# ~/.local/bin/node 只是它的软链;这里显式选中它,保证服务无论从哪拉起都有读权限。
+NODE_BIN="${COAGENTHUB_NODE_BIN:-}"
+if [ -z "$NODE_BIN" ] && [ -x /Users/apple/.hermes/node/bin/node ]; then
+  NODE_BIN=/Users/apple/.hermes/node/bin/node
+fi
+if [ -z "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+fi
+[ -z "$NODE_BIN" ] && NODE_BIN=node
 
 log_suffix() { # 端口被覆盖时日志/PID 加后缀,避免隔离测试污染正式文件
   if [ "${COAGENTHUB_SERVER_PORT:-}" ] || [ "${COAGENTHUB_WEB_PORT:-}" ]; then
@@ -82,7 +96,7 @@ start_server() {
   echo "START server  :$SERVER_PORT (node dist/server.mjs)"
   (
     cd "$SERVER_DIR" || exit 1
-    nohup node dist/server.mjs </dev/null >>"$SLOG" 2>&1 &
+    nohup "$NODE_BIN" dist/server.mjs </dev/null >>"$SLOG" 2>&1 &
     echo $! > "$PIDFILE"
   )
   wait_up "$SERVER_PORT" && echo "OK    server  :$SERVER_PORT 就绪 (pid $(port_pid "$SERVER_PORT"))" \
@@ -101,7 +115,7 @@ start_web() {
   echo "START web     :$WEB_PORT (node serve.mjs $WEB_PORT http://localhost:$SERVER_PORT)"
   (
     cd "$REPO_ROOT" || exit 1
-    nohup node serve.mjs "$WEB_PORT" "http://localhost:$SERVER_PORT" </dev/null >>"$WLOG" 2>&1 &
+    nohup "$NODE_BIN" serve.mjs "$WEB_PORT" "http://localhost:$SERVER_PORT" </dev/null >>"$WLOG" 2>&1 &
     echo $! > "/tmp/coagenthub-prod-web-$WEB_PORT.pid"
   )
   wait_up "$WEB_PORT" && echo "OK    web     :$WEB_PORT 就绪 (pid $(port_pid "$WEB_PORT"))" \

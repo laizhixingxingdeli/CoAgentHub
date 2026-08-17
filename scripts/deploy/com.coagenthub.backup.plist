@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/apple/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.coagenthub.backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/apple/.hermes/node/bin/node</string>
+		<string>/Users/apple/Desktop/Projects/CoAgentHub/scripts/mac-backup-once.cjs</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/tmp/coagenthub-backup.log</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/coagenthub-backup.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>2</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+</dict>
+</plist>
