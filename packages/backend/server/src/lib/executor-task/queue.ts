@@ -1738,6 +1738,25 @@ function buildTicket(
       `本群分工:角色=[${groupPrompt.roles.join(",")}];提示词=${groupPrompt.prompt}`,
     );
   }
+  // Code Review 自检段(任务书模板固化):完成代码后、提交前必须自检。
+  // Standards 与 Spec Compliance 均始终输出——无 specRef 时执行器自然跳过
+  // Spec Compliance 部分(汇报中标注无关联规范即可)。
+  lines.push(
+    "## Code Review 自检（完成前必做）",
+    "完成代码后、提交前，必须进行自检：",
+    "### Standards",
+    "- [ ] 命名清晰：所有新增函数/变量/类型命名表意明确",
+    "- [ ] 无重复代码：同一逻辑不在 diff 中出现两次",
+    "- [ ] 无范围蔓延：只改了任务/Spec 要求的内容，没有顺手改无关代码",
+    "- [ ] 遵循规范：代码风格符合 .cursorrules / biome.json / AGENTS.md",
+    "- [ ] 无死代码：无未使用的 import、注释掉的代码、不可达分支",
+    "- [ ] 错误处理：与 codebase 其他部分一致",
+    "- [ ] 无密钥泄露：无硬编码 token/password/API key",
+    "### Spec Compliance（有关联规范时必做）",
+    "- [ ] 逐项检查 Spec 的验收标准，每条确认已满足",
+    "- [ ] 如有未满足项，在汇报中标注原因",
+    "汇报中必须包含「Code Review 自检」段，列出检查结果。",
+  );
   // 执行与测试要求段(任务书模板固化):实现执行器 = 定向目标 label;测试执行器 =
   // resolveTestExecutor 解析结果,无匹配 → 默认由实现执行器完成测试。
   lines.push(
