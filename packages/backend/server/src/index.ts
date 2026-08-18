@@ -32,6 +32,7 @@ import executorRouter from "./routes/executor";
 import fileRouter from "./routes/file";
 import groupRouter from "./routes/group";
 import participantRouter from "./routes/participant";
+import skillsRouter from "./routes/skills";
 import systemRouter from "./routes/system";
 
 declare module "hono" {
@@ -115,7 +116,8 @@ export const routes = new Hono()
   .route("/participants", participantRouter)
   .route("/agents", participantRouter)
   .route("/executors", executorRouter)
-  .route("/groups", groupRouter);
+  .route("/groups", groupRouter)
+  .route("/skills", skillsRouter);
 
 app.route("/", routes);
 

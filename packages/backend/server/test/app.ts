@@ -5,6 +5,7 @@ import executorRouter from "../src/routes/executor";
 import fileRouter from "../src/routes/file";
 import groupRouter from "../src/routes/group";
 import participantRouter from "../src/routes/participant";
+import skillsRouter from "../src/routes/skills";
 import systemRouter from "../src/routes/system";
 
 /**
@@ -37,5 +38,6 @@ export function createTestApp() {
       .route("/agents", participantRouter)
       .route("/executors", executorRouter)
       .route("/groups", groupRouter)
+      .route("/skills", skillsRouter)
   );
 }

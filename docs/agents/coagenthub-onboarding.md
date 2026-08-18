@@ -29,12 +29,12 @@
    完成标准:拿到 participant id(查重命中则复用已有 id,新建则取响应中的 `id`)。
 3. **持久化身份** — 把 participant id 写入 `~/.coagenthub/participant-id`。
    完成标准:文件存在且内容为该 id。
-4. **加载 CoAgentHub Skills** — 根据角色从 `skills/` 目录加载对应 skill 到
-   agent 的 skills 目录(如 `~/.hermes/skills/`、`~/.claude/skills/`、`~/.codebuddy/skills/` 等):
-   - **协调者** → `skills/coordinator/SKILL.md`(Grill → Spec → Dispatch → Verify)
-   - **执行器** → `skills/executor/SKILL.md`(Read Spec → Implement → Test → Code Review 自检 → Report)
-   - **修 Bug** → `skills/bugfix/SKILL.md`(Triage → Diagnose → Fix-Spec → Dispatch → Verify)
-   完成标准:skill 文件已复制/软链到 agent 的 skills 目录,agent 能识别 skill 名称。
+4. **安装 CoAgentHub Skills** — 调用 `GET ${COAGENTHUB_URL}/api/skills` 查看可用 skills，
+   然后 `GET ${COAGENTHUB_URL}/api/skills/:name` 获取内容，写入自己的 skills 目录：
+   - 协调者 → `GET /api/skills/coordinator` → 写入 `~/.hermes/skills/coagenthub-coordinator/SKILL.md`
+   - 执行器 → `GET /api/skills/executor` → 写入 `~/.hermes/skills/coagenthub-executor/SKILL.md`
+   - 修 Bug → `GET /api/skills/bugfix` → 写入 `~/.hermes/skills/coagenthub-bugfix/SKILL.md`
+   完成标准:skill 文件已写入 agent 的 skills 目录,agent 能识别 skill 名称。
 5. **带上身份请求** — 后续所有请求带 `X-Participant-Id: <id>` 头。
 
 > 重复执行不会产生重复 participant:查重命中即复用;注册返回 409(名字已存在)时
