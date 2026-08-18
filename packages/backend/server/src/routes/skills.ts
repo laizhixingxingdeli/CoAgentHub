@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { findRepoRoot } from "@server/lib/executor-runner";
 import { Hono } from "hono";
 
-const SKILLS_DIR = resolve(process.cwd(), "skills");
+const SKILLS_DIR = resolve(findRepoRoot(), "skills");
 const SKILL_NAMES = ["coordinator", "executor", "bugfix"] as const;
 
 function readSkillDescription(name: string): string {
