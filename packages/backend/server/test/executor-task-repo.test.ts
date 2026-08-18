@@ -280,6 +280,37 @@ describe("任务书声明仓库 → spawn cwd/快照/弱验收落到声明仓库
       rmSync(altRepo, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("任务书精简:含「执行方式」段,不含「执行流程(必读)」/「Code Review 自检」", async () => {
+    const capture = path.join(fakeDir, "ticket-slim.md");
+    process.env.FAKE_TICKET_COPY = capture;
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "修复 bug",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const task = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(task.status).toBe("done");
+      const ticket = readFileSync(capture, "utf8");
+      // Skill 触发替代完整流程:必须含「执行方式」且引用 coagenthub-executor skill。
+      expect(ticket).toContain("## 执行方式");
+      expect(ticket).toContain("coagenthub-executor");
+      // 过度固化的流程/自检段已回退,不得再出现。
+      expect(ticket).not.toContain("## 执行流程（必读）");
+      expect(ticket).not.toContain("## Code Review 自检（完成前必做）");
+      // 保留:汇报格式 / 默认约束 段仍存在。
+      expect(ticket).toContain("## 汇报格式要求");
+    } finally {
+      delete process.env.FAKE_TICKET_COPY;
+    }
+  }, 30_000);
 });
 
 afterAll(() => {

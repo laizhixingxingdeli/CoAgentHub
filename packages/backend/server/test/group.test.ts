@@ -1203,4 +1203,59 @@ describe("群组与成员 API", () => {
       rmSync(dir, { recursive: true, force: true });
     });
   });
+
+  describe("首次任务初始化检查 (project init warning)", () => {
+    it("群绑定 projectPath 且脚手架缺失时,下发任务返回 X-Project-Init-Warning", async () => {
+      const { id: ownerId } = await registerParticipant({
+        name: "coord-init",
+      });
+      const { id: memberId } = await registerParticipant({
+        name: "init-member",
+      });
+      const group = await createGroup(ownerId, "初始化检查");
+      // 造一个无脚手架文档的暂存目录作为项目路径。
+      const dir = mkdtempSync(join(tmpdir(), "coagent-init-check-"));
+      // 添加一个 reviewer 成员作为定向消息接收者。
+      const addRes = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": ownerId,
+        },
+        body: JSON.stringify({ participantId: memberId, roles: ["reviewer"] }),
+      });
+      expect(addRes.status).toBe(200);
+      // 绑定 projectPath。
+      const patchRes = await app.request(`/api/groups/${group.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": ownerId,
+        },
+        body: JSON.stringify({ projectPath: dir }),
+      });
+      expect(patchRes.status).toBe(200);
+      // 下发定向到成员的消息(触发任务路径 → 触发初始化检查)。
+      const msgRes = await app.request(`/api/groups/${group.id}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": ownerId,
+        },
+        body: JSON.stringify({
+          body: "开始干活",
+          audience: "participant",
+          audienceRef: memberId,
+        }),
+      });
+      expect(msgRes.status).toBe(200);
+      // 缺失脚手架文档 → header 返回 PROJECT_NOT_INITIALIZED 及缺失项。
+      const warning = msgRes.headers.get("X-Project-Init-Warning");
+      expect(warning).toContain("PROJECT_NOT_INITIALIZED:");
+      expect(warning).toContain("AGENTS.md");
+      expect(warning).toContain("CONTEXT.md");
+
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
 });

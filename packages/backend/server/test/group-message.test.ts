@@ -2,6 +2,7 @@ import {
   groupMessageClosure as closureTable,
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
+  participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -444,7 +445,8 @@ describe("群组消息树与受众路由", () => {
         .select({ id: groupMessageTable.id })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      expect(msgRows).toHaveLength(65);
+      // 1 根消息 + 64 层回复 + 1 条 executor 成员的 skill 安装引导(加群自动发)。
+      expect(msgRows).toHaveLength(66);
     });
   });
 
@@ -896,12 +898,13 @@ describe("群组消息树与受众路由", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ success: true });
 
-      // 行保留:body 变占位,闭包树(children 的 depth)不变
+      // 行保留:body 变占位,闭包树(children 的 depth)不变。
+      // 行数 = 根 + 回复 + 1 条 executor 成员的 skill 安装引导(加群自动发)。
       const rows = await testDb
         .select({ id: groupMessageTable.id, body: groupMessageTable.body })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(3);
       const rootRow = rows.find((r) => r.id === root.id);
       expect(rootRow?.body).toBe("[消息已删除]");
       const childRow = rows.find((r) => r.id === child.id);
@@ -964,6 +967,89 @@ describe("群组消息树与受众路由", () => {
       );
       expect(res.status).toBe(404);
       expect((await res.json()).code).toBe("MESSAGE_NOT_FOUND");
+    });
+  });
+
+  describe("skill 安装确认 → 更新 capabilities (skill 加载强化)", () => {
+    async function participantCapabilities(
+      participantId: string,
+    ): Promise<string[]> {
+      const rows = await testDb
+        .select({ capabilities: participantTable.capabilities })
+        .from(participantTable)
+        .where(eq(participantTable.id, participantId));
+      return rows[0]?.capabilities ?? [];
+    }
+
+    async function waitForCapability(
+      participantId: string,
+      target: string,
+      timeoutMs = 2000,
+    ) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const caps = await participantCapabilities(participantId);
+        if (caps.includes(target)) return caps;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `participant(${participantId}) 未在 ${timeoutMs}ms 内获得 capability ${target}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    }
+
+    it('发送 "✅ skill 已安装" 后 capabilities 追加 coagenthub-executor', async () => {
+      const { group, coordinator, executor } = await setupGroup();
+      const res = await sendMessage(executor.id, group.id, {
+        body: "✅ skill 已安装",
+        audience: "broadcast",
+      });
+      expect(res.status).toBe(200);
+      await waitForCapability(executor.id, "coagenthub-executor");
+    });
+
+    it('发送 "✅ skill 已安装: executor" 后更新,重复发送幂等', async () => {
+      const { group, coordinator, executor } = await setupGroup();
+      await sendMessage(executor.id, group.id, {
+        body: "✅ skill 已安装: executor",
+        audience: "broadcast",
+      });
+      await waitForCapability(executor.id, "coagenthub-executor");
+      const caps = await participantCapabilities(executor.id);
+      // 幂等:重复追加不重复(capabilities 中该值只出现一次)。
+      expect(
+        caps.filter((c) => c === "coagenthub-executor").length,
+      ).toBe(1);
+    });
+
+    it('发送 "✅ skill 已安装: coordinator" 更新 coordinator capability', async () => {
+      const { group, coordinator, executor } = await setupGroup();
+      await sendMessage(executor.id, group.id, {
+        body: "✅ skill 已安装: coordinator",
+        audience: "broadcast",
+      });
+      await waitForCapability(executor.id, "coagenthub-coordinator");
+    });
+
+    it("普通消息不更新 capabilities", async () => {
+      // 用新 participant,避免复用已带 coagenthub-executor 能力的 setupGroup executor。
+      const { id: freshId } = await registerParticipant({
+        name: "no-skill-agent",
+      });
+      const { id: ownerId } = await registerParticipant({
+        name: "no-skill-coord",
+      });
+      const group = await createGroup(ownerId, "普通消息不更新");
+      await addMember(ownerId, group.id, freshId, ["executor"]);
+
+      await sendMessage(freshId, group.id, {
+        body: "普通消息,不安装 skill",
+        audience: "broadcast",
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const caps = await participantCapabilities(freshId);
+      expect(caps).not.toContain("coagenthub-executor");
     });
   });
 });

@@ -6,7 +6,9 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
+import { resolveLocalUser } from "@server/lib/local-participant";
 import { capabilityHint } from "@server/lib/participant-capabilities";
+import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -81,6 +83,43 @@ app
       // 轻量能力提示 (ticket 17): 已知能力与角色匹配提示,绝不硬性拒绝 —
       // 无提示时为 null,响应形状始终带 capabilityHint 字段。
       const hint = capabilityHint(participant.capabilities, dedupedRoles);
+
+      // 加群自动发 skill 安装引导:roles 含 executor → 发 coagenthub-executor
+      // 安装引导;含 coordinator → 发 coagenthub-coordinator 安装引导;其他角色
+      // 不发。fire-and-forget,发送失败只记日志,绝不阻塞成员添加响应。发送者
+      // 用 Local User(系统身份),避免需要额外权限。
+      const skillMessages: Record<string, string> = {
+        executor: `请先安装 coagenthub-executor skill：
+1. GET /api/skills/executor 获取内容
+2. 写入你的 skills 目录（如 ~/.hermes/skills/coagenthub-executor/SKILL.md）
+3. 安装完成后回复「✅ skill 已安装」
+未安装前不要领取任务。`,
+        coordinator: `请先安装 coagenthub-coordinator skill：
+1. GET /api/skills/coordinator 获取内容
+2. 写入你的 skills 目录（如 ~/.hermes/skills/coagenthub-coordinator/SKILL.md）
+3. 安装完成后回复「✅ skill 已安装」
+未初始化前不要下发任务。`,
+      };
+      void (async () => {
+        try {
+          const senderId = await resolveLocalUser(db);
+          for (const role of dedupedRoles) {
+            if (skillMessages[role]) {
+              await insertGroupMessage(db, {
+                groupId: id,
+                senderId,
+                audience: "participant",
+                audienceRef: participantId,
+                body: skillMessages[role],
+                contentType: "text/plain",
+              });
+            }
+          }
+        } catch (err) {
+          console.warn("[members] skill 安装引导发送失败(忽略):", err);
+        }
+      })();
+
       wsHub.invalidateGroupMembers(id);
 
       return c.json({ ...member, capabilityHint: hint });

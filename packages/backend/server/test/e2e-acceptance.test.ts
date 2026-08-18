@@ -265,8 +265,16 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       expect(executorBodies).not.toContain(draft.body);
       expect(executorBodies).not.toContain(review.body);
       // 任务工作流消息:executor 只见最终版及之后(结果、文件信令);
-      // 用户命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中
-      expect(executorBodies).toEqual([
+      // 用户命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中;
+      // 另含加群自动发的 skill 安装引导(coagenthub-executor)。
+      const executorSkillMsg = executorFull.find((m) =>
+        m.body.startsWith("请先安装 coagenthub-executor skill"),
+      );
+      expect(executorSkillMsg).toBeTruthy();
+      const nonSkillExecutorBodies = executorBodies.filter(
+        (b) => !b.startsWith("请先安装"),
+      );
+      expect(nonSkillExecutorBodies).toEqual([
         command.body,
         final.body,
         result.body,
@@ -297,11 +305,12 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         fileSha256,
       );
 
-      // ── 10. user(human)增量拉取:全程可见,一条不落
+      // ── 10. user(human)增量拉取:全程可见,一条不落(含发往 executor 的 skill 安装引导)
       const humanSeen = await fetchMessages(user.id, group.id);
       const humanBodies = humanSeen.map((m) => m.body);
-      expect(humanBodies).toHaveLength(6);
+      expect(humanBodies).toHaveLength(7);
       expect(humanBodies).toEqual([
+        expect.stringContaining("请先安装 coagenthub-executor skill"),
         command.body,
         draft.body,
         review.body,

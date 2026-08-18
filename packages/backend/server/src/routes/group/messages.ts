@@ -16,6 +16,10 @@ import { findExecutorByParticipantName } from "@server/lib/executors";
 import type { ParticipantType } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import {
+  findMissingProjectDocs,
+  handleSkillInstallConfirmation,
+} from "@server/lib/participant-capabilities";
+import {
   DELETED_MESSAGE_PLACEHOLDER,
   insertGroupMessage,
   listVisibleMessages,
@@ -193,6 +197,12 @@ app
       // incremental pull remains the guaranteed fallback.
       void wsHub.broadcastGroupMessage(full);
 
+      // skill 安装确认(skill 加载强化):识别 "✅ skill 已安装" 等确认消息,幂等
+      // 更新发送者 capabilities。fire-and-forget,不匹配即静默返回,不阻塞消息。
+      void handleSkillInstallConfirmation(db, senderId, body ?? "").catch((err) =>
+        console.warn("[messages] skill 安装确认处理失败(忽略):", err),
+      );
+
       // 第1层(A2A 进度信号):执行器 participant 在本群发的消息 → 刷新同群 running
       // 的 A2A 任务最近活跃时间,顺延无进展超时(纯内存同步操作,不阻塞响应;
       // 消息可以是普通广播消息,无需新协议)。
@@ -220,6 +230,19 @@ app
               (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
             ) && !senderIsExecutor;
           if (canCarry) dispatcherSessionId = rawSessionId;
+        }
+        // 首次任务初始化检查(项目脚手架):当消息触发任务(即即将调用
+        // maybeDispatchExecutorTask)且群绑定了 projectPath 时,检查 Matt 文档
+        // 脚手架;缺失则响应 header 返回 warning(不阻塞消息发送/任务下发)。
+        const group = await assertGroupWritable(db, id);
+        if (group.projectPath) {
+          const missing = await findMissingProjectDocs(group.projectPath);
+          if (missing.length > 0) {
+            c.header(
+              "X-Project-Init-Warning",
+              `PROJECT_NOT_INITIALIZED:${missing.join(",")}`,
+            );
+          }
         }
         void maybeDispatchExecutorTask(db, {
           groupId: id,

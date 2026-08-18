@@ -1725,14 +1725,10 @@ function buildTicket(
   lines.push(
     `## 任务内容`,
     body,
-    `## 执行流程（必读）`,
-    `请严格按以下顺序执行：`,
-    `1. **读规范**：如任务书含「📜 关联规范」段，先读取该 Spec 文档，理解验收标准后再动手。`,
-    `2. **写代码**：按 Spec 和任务内容实现。遵循项目代码规范（.cursorrules / biome.json / AGENTS.md）。`,
-    `3. **跑测试**：运行项目测试套件（pnpm test / check-types / build），确保全部通过。`,
-    `4. **自检**：完成下方「Code Review 自检」段，逐项检查后再提交。`,
-    `5. **提交**：测试全绿 + 自检通过后，git add + commit，commit message 按功能写。`,
-    `6. **汇报**：按「汇报格式要求」输出结果，包含 Code Review 自检结果。`,
+    `## 执行方式`,
+    `本任务按 \`coagenthub-executor\` skill 执行。`,
+    `- 已安装：直接按 skill 流程执行（读规范→写代码→测试→Code Review 自检→汇报）。`,
+    `- 未安装：先 GET /api/skills/executor 获取 skill 内容，安装到 skills 目录后执行。`,
     `## 汇报格式要求(stdout 请按此输出)`,
     `提交: <commit hash>`,
     `测试: <测试结果摘要>`,
@@ -1746,25 +1742,6 @@ function buildTicket(
       `本群分工:角色=[${groupPrompt.roles.join(",")}];提示词=${groupPrompt.prompt}`,
     );
   }
-  // Code Review 自检段(任务书模板固化):完成代码后、提交前必须自检。
-  // Standards 与 Spec Compliance 均始终输出——无 specRef 时执行器自然跳过
-  // Spec Compliance 部分(汇报中标注无关联规范即可)。
-  lines.push(
-    "## Code Review 自检（完成前必做）",
-    "完成代码后、提交前，必须进行自检：",
-    "### Standards",
-    "- [ ] 命名清晰：所有新增函数/变量/类型命名表意明确",
-    "- [ ] 无重复代码：同一逻辑不在 diff 中出现两次",
-    "- [ ] 无范围蔓延：只改了任务/Spec 要求的内容，没有顺手改无关代码",
-    "- [ ] 遵循规范：代码风格符合 .cursorrules / biome.json / AGENTS.md",
-    "- [ ] 无死代码：无未使用的 import、注释掉的代码、不可达分支",
-    "- [ ] 错误处理：与 codebase 其他部分一致",
-    "- [ ] 无密钥泄露：无硬编码 token/password/API key",
-    "### Spec Compliance（有关联规范时必做）",
-    "- [ ] 逐项检查 Spec 的验收标准，每条确认已满足",
-    "- [ ] 如有未满足项，在汇报中标注原因",
-    "汇报中必须包含「Code Review 自检」段，列出检查结果。",
-  );
   // 执行与测试要求段(任务书模板固化):实现执行器 = 定向目标 label;测试执行器 =
   // resolveTestExecutor 解析结果,无匹配 → 默认由实现执行器完成测试。
   lines.push(

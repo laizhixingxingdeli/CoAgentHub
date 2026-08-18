@@ -1,4 +1,9 @@
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import type { GroupRole } from "@laizhixingxingdeli/database/schema";
+import type { DataBase } from "@server/lib/database";
+import { eq } from "drizzle-orm";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 /**
  * 能力标签的轻量提示校验 (ticket 17): 已知能力目录 + 能力→建议角色映射。
@@ -55,4 +60,70 @@ export function capabilityHint(
   }
 
   return hints.length > 0 ? hints.join("; ") : null;
+}
+
+/**
+ * skill 类型 → capability 标签映射。agent 安装 skill 后,按其 skill 类型把
+ * 对应 capability 幂等追加到 participant.capabilities,供后续调度/加群提示参考。
+ */
+export const COAGENTHUB_SKILL_CAPABILITIES = {
+  executor: "coagenthub-executor",
+  coordinator: "coagenthub-coordinator",
+  bugfix: "coagenthub-bugfix",
+} as const;
+
+/**
+ * 识别 agent 的 skill 安装确认消息(如 "✅ skill 已安装" 或 "✅ skill 已安装: executor"),
+ * 并幂等追加对应 capability 到发送者 participant.capabilities。
+ * 不匹配或未知 skill 类型时静默返回(不抛错、不阻塞消息发送)。fire-and-forget 调用。
+ */
+export async function handleSkillInstallConfirmation(
+  db: DataBase,
+  senderId: string,
+  body: string,
+): Promise<void> {
+  // 匹配 "✅ skill 已安装" 或 "✅ skill 已安装: executor" 等。
+  const match = body.match(/^✅\s*(?:skill|技能)?\s*已安装(?:\s*[:：]\s*(\w+))?/i);
+  if (!match) return;
+
+  // 推断 skill 类型:显式指定或用默认 executor。
+  const skillKey = (match[1]?.toLowerCase() ?? "executor") as
+    | keyof typeof COAGENTHUB_SKILL_CAPABILITIES
+    | string;
+  const capability =
+    skillKey in COAGENTHUB_SKILL_CAPABILITIES
+      ? COAGENTHUB_SKILL_CAPABILITIES[
+          skillKey as keyof typeof COAGENTHUB_SKILL_CAPABILITIES
+        ]
+      : undefined;
+  if (!capability) return;
+
+  // 更新 participant capabilities(幂等追加)。
+  const participant = await db.query.participant.findFirst({
+    where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
+  });
+  if (!participant) return;
+
+  const current = participant.capabilities ?? [];
+  if (!current.includes(capability)) {
+    await db
+      .update(participantTable)
+      .set({ capabilities: [...current, capability] })
+      .where(eq(participantTable.id, senderId));
+  }
+}
+
+/**
+ * 检查项目是否已初始化 Matt 文档脚手架。返回缺失的相对路径列表(空数组 = 已初始化)。
+ * 检查项:AGENTS.md / CONTEXT.md / docs/adr/ / specs/ / .cursorrules(或等效)。
+ */
+export function findMissingProjectDocs(projectPath: string): string[] {
+  const required = [
+    "AGENTS.md",
+    "CONTEXT.md",
+    "docs/adr/",
+    "specs/",
+    ".cursorrules",
+  ];
+  return required.filter((p) => !existsSync(resolve(projectPath, p)));
 }

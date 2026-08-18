@@ -170,13 +170,20 @@ describe("检视流程协议(ticket 04)", () => {
     expect(final.audience).toBe("role");
     expect(final.audienceRef).toBe("executor");
 
-    // d. executor 增量拉取(无游标=拉取全部可见历史):从未见过草稿与检视意见,只见最终版
+    // d. executor 增量拉取(无游标=拉取全部可见历史):从未见过草稿与检视意见,只见最终版。
+    //    加群自动发的 skill 安装引导(coagenthub-executor)也定向投递给 executor。
     const executorSeen = await fetchMessages(executor.id, group.id);
-    const executorBodies = executorSeen.map((m) => m.body);
+    const executorSkillMsg = executorSeen.find((m) =>
+      m.body.startsWith("请先安装 coagenthub-executor skill"),
+    );
     // 验收核心:草稿与检视意见不在 executor 的可见消息集合中
+    const executorBodies = executorSeen.map((m) => m.body);
     expect(executorBodies).not.toContain(draft.body);
     expect(executorBodies).not.toContain(review.body);
-    expect(executorBodies).toEqual([final.body]);
+    // 可见消息 = skill 安装引导 + 最终版(排除 skill 引导后即最终版)
+    expect(executorSkillMsg).toBeTruthy();
+    expect(executorBodies).toContain(final.body);
+    expect(executorBodies).toHaveLength(2);
     // 增量语义:以最终版为游标继续拉,没有新消息
     const afterFinal = await fetchMessages(executor.id, group.id, final.id);
     expect(afterFinal).toEqual([]);
@@ -189,15 +196,15 @@ describe("检视流程协议(ticket 04)", () => {
     expect(result.audience).toBe("broadcast");
     expect(result.parentId).toBeNull();
 
-    // f. human 拉取:可见全部 4 条(草稿/检视意见/最终版/执行结果)——用户要看全过程
+    // f. human 拉取:可见全部(草稿/检视意见/最终版/执行结果 + skill 安装引导)。
+    //    用户要看全过程 → 含发送给 executor 的 skill 安装引导。
     const humanSeen = await fetchMessages(human.id, group.id);
     const humanBodies = humanSeen.map((m) => m.body);
-    expect(humanBodies).toHaveLength(4);
-    expect(humanBodies).toEqual([
-      draft.body,
-      review.body,
-      final.body,
-      result.body,
-    ]);
+    expect(humanBodies).toHaveLength(5);
+    expect(humanBodies).toContain(draft.body);
+    expect(humanBodies).toContain(review.body);
+    expect(humanBodies).toContain(final.body);
+    expect(humanBodies).toContain(result.body);
+    expect(humanBodies.some((b) => b.startsWith("请先安装"))).toBe(true);
   });
 });

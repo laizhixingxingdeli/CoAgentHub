@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { groupMessage as groupMessageTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { createTestApp } from "./app";
+import { testDb } from "./db";
 
 /**
  * Group member management (ticket 20): DELETE /:id/members/:participantId removes a
@@ -513,6 +516,61 @@ describe("群组成员管理 API (ticket 20)", () => {
         }),
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("加群自动发 skill 安装指令 (skill 加载强化)", () => {
+    async function groupSkillMessages(groupId: string): Promise<string[]> {
+      const rows = await testDb
+        .select({ body: groupMessageTable.body })
+        .from(groupMessageTable)
+        .where(eq(groupMessageTable.groupId, groupId));
+      return rows.map((r) => r.body ?? "");
+    }
+
+    it("添加 executor 成员后自动发 coagenthub-executor 安装引导", async () => {
+      const { id } = await registerParticipant({ name: "coord-skill" });
+      const { id: executorId } = await registerParticipant({
+        name: "skill-executor",
+      });
+      const group = await createGroup(id, "skill 引导群");
+      await addMember(id, group.id, executorId, ["executor"]);
+
+      await new Promise((r) => setTimeout(r, 50));
+      const bodies = await groupSkillMessages(group.id);
+      expect(bodies.some((b) => b.includes("coagenthub-executor"))).toBe(true);
+      // 不匹配 coordinator 的内容。
+      expect(bodies.some((b) => b.includes("coagenthub-coordinator"))).toBe(
+        false,
+      );
+    });
+
+    it("添加 coordinator 成员后自动发 coagenthub-coordinator 安装引导", async () => {
+      const { id } = await registerParticipant({ name: "coord-skill2" });
+      const { id: coordinatorId } = await registerParticipant({
+        name: "skill-coordinator",
+      });
+      const group = await createGroup(id, "coordinator 引导群");
+      await addMember(id, group.id, coordinatorId, ["coordinator"]);
+
+      await new Promise((r) => setTimeout(r, 50));
+      const bodies = await groupSkillMessages(group.id);
+      expect(bodies.some((b) => b.includes("coagenthub-coordinator"))).toBe(
+        true,
+      );
+    });
+
+    it("添加 observer 成员不发 skill 引导消息", async () => {
+      const { id } = await registerParticipant({ name: "coord-skill3" });
+      const { id: observerId } = await registerParticipant({
+        name: "skill-observer",
+      });
+      const group = await createGroup(id, "observer 无引导");
+      await addMember(id, group.id, observerId, ["observer"]);
+
+      await new Promise((r) => setTimeout(r, 50));
+      const bodies = await groupSkillMessages(group.id);
+      expect(bodies.some((b) => b.includes("请先安装"))).toBe(false);
     });
   });
 });
