@@ -62,11 +62,11 @@ specRef: input.specRef,
 specHash: input.specHash,
 ```
 
-#### 2.4.3 `buildTicket` — 任务书模板增加 Spec 引用段
+#### 2.4.3 `buildTicket` — 任务书模板增加 Spec 引用段 + Code Review 自检段
 
 函数签名新增 `specRef: string | null` 参数。
 
-在任务书模板中，当 `specRef` 非空时插入：
+**新增段 A — Spec 引用**（当 specRef 非空时，在"## 任务内容"之前插入）：
 ```markdown
 ## 📜 关联规范 (Spec Reference)
 - **文档路径**: {{specRef}}
@@ -74,7 +74,23 @@ specHash: input.specHash,
 - **指令**: 请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。
 ```
 
-插入位置：在 `## 任务内容` 之前（Spec 优先于任务内容）。
+**新增段 B — Code Review 自检**（在"## 汇报格式要求"段中追加）：
+```markdown
+## Code Review 自检（完成前必做）
+完成代码后、提交前，必须进行自检：
+### Standards
+- [ ] 命名清晰：所有新增函数/变量/类型命名表意明确
+- [ ] 无重复代码：同一逻辑不在 diff 中出现两次
+- [ ] 无范围蔓延：只改了任务/Spec 要求的内容，没有顺手改无关代码
+- [ ] 遵循规范：代码风格符合 .cursorrules / biome.json / AGENTS.md
+- [ ] 无死代码：无未使用的 import、注释掉的代码、不可达分支
+- [ ] 错误处理：与 codebase 其他部分一致
+- [ ] 无密钥泄露：无硬编码 token/password/API key
+### Spec Compliance（有关联规范时必做）
+- [ ] 逐项检查 Spec 的验收标准，每条确认已满足
+- [ ] 如有未满足项，在汇报中标注原因
+汇报中必须包含「Code Review 自检」段，列出检查结果。
+```
 
 ### 2.5 消息路由修改
 

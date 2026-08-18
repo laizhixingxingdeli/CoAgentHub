@@ -47,12 +47,32 @@
 
 - **发消息** — `POST /api/groups/:id/messages`,带 `X-Participant-Id` 头;
   定向消息(`audience=participant`)命中执行器时会自动创建 task。
+  消息可携带 `specRef`(规范文档路径)和 `specHash`(版本哈希)字段,
+  服务端会在任务书中插入「关联规范」段,执行器按此规范执行。
 - **增量拉取** — `GET /api/groups/:id/messages?after=<cursor>` 增量拉取,游标分页。
 - **实时接收(优先)** — 连接 WS `ws://<host>/api/ws?participantId=<id>`,`<host>` 为
   `COAGENTHUB_URL` 的主机+端口(http→ws 替换,如 `ws://<Mac-IP>:3000`);接收
   `group_message` 与 `task_status_changed` 事件;WS 断开时用 `?after=` 兜底。
-- **被定向为执行器时** — 按任务书执行,完成后
-  `PATCH /api/groups/:id/tasks/:taskId` 回写状态。
+- **被定向为执行器时** — 按任务书执行(如任务书含「关联规范」段,须严格遵循 Spec),
+  完成后 `PATCH /api/groups/:id/tasks/:taskId` 回写状态。
+
+## Spec-Driven 工作流(协调者必读)
+
+CoAgentHub 采用 Spec-Driven 工作流。**协调者在完全确定实现方案前不允许下发任务。**
+
+### 下发前(Pre-Flight Grill)
+
+1. 在 `specs/` 目录编写 Spec 文档,包含:背景、改动范围、验收标准(checklist)、不涉及的改动。
+2. 自检:验收标准是否可验证?仅凭 Spec + 任务书能否一次性写对?如果否,继续完善 Spec。
+3. 下发时传入 `specRef` 指向 Spec 文件路径。
+
+### 完成后(Post-Flight Grill)
+
+1. 拉取任务详情,检查 diffSummary 和 outputTail。
+2. 逐项对照 Spec 验收标准检查。
+3. 全部通过 → 标记 done;部分失败 → 要求重试或人工介入。
+
+详见 `AGENTS.md` 的 Spec-Driven Dispatch 章节。
 
 ## 注意
 

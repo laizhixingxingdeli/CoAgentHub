@@ -58,3 +58,38 @@ tracker:
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use
 the corresponding label string from this table.
+
+## Spec-Driven Dispatch (规范驱动任务下发)
+
+CoAgentHub 采用 Spec-Driven 工作流：协调者在完全确定实现方案前不允许下发任务。
+
+### 下发前检查清单（Pre-Flight Grill）
+
+在调用 `coagenthub_dispatch_task` 之前，协调者必须：
+
+1. **编写或更新 Spec 文档**：在 `specs/` 目录下创建或修改 `.md` 文件，
+   包含以下章节：
+   - `## 背景`：为什么需要这个改动
+   - `## 改动范围`：涉及哪些文件/模块，不涉及什么
+   - `## 验收标准`：可验证的完成条件（checklist 格式）
+   - `## 不涉及的改动`：明确排除项
+
+2. **自检**：问自己三个问题：
+   - 我是否已经明确了所有的输入输出？
+   - 验收标准是否可验证（不是"优化性能"而是"响应时间 < 200ms"）？
+   - 如果我是执行器，仅凭这份 Spec + 任务书我能一次性写对吗？
+   **如果任何一个答案是"否"，不要下发任务，继续完善 Spec。**
+
+3. **传入 specRef**：调用 `coagenthub_dispatch_task` 时传入 `specRef` 参数，
+   指向刚才编写的 Spec 文件路径。
+
+### 完成后验收（Post-Flight Grill）
+
+当执行器回传结果后，协调者必须：
+
+1. **拉取任务详情**：`coagenthub_get_task`，检查 `diffSummary` 和 `outputTail`
+2. **对照 Spec 验收**：逐项检查 Spec 中的验收标准是否全部满足
+3. **文档同步检查**：代码改动是否需要同步更新文档（ADR、architecture.md 等）
+4. **裁决**：
+   - 全部通过：在群内发 `✅ 验收通过` 并标记任务 done
+   - 部分失败：在群内发 `❌ 验收未通过：<原因>` 并要求重试或人工介入
