@@ -116,6 +116,22 @@ Call `coagenthub_dispatch_task` with:
 
 </dispatch-rules>
 
+### 3.5 Ensure Executor Skills (确保执行器已加载 skill)
+
+Before dispatching to an executor, verify the executor has the `coagenthub-executor` skill loaded.
+This ensures the executor performs Code Review self-check even if the task ticket template is not yet updated.
+
+<skill-loading-rules>
+
+- If you have filesystem access to the executor's machine, check its skills directory
+  (e.g. `~/.hermes/skills/`, `~/.claude/skills/`, `~/.codebuddy/skills/`).
+- If the `coagenthub-executor` skill is missing, copy `skills/executor/SKILL.md` to the executor's skills directory.
+- If you cannot access the executor's machine, include a note in the task body:
+  `请先加载 coagenthub-executor skill（skills/executor/SKILL.md），然后按 skill 流程执行。`
+- The task ticket template will soon include Code Review checklist automatically, but the skill provides the full methodology.
+
+</skill-loading-rules>
+
 ### 4. Grill Results (Post-Flight)
 
 When the executor reports completion:

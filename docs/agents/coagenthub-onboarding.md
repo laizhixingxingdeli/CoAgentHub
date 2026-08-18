@@ -29,7 +29,13 @@
    完成标准:拿到 participant id(查重命中则复用已有 id,新建则取响应中的 `id`)。
 3. **持久化身份** — 把 participant id 写入 `~/.coagenthub/participant-id`。
    完成标准:文件存在且内容为该 id。
-4. **带上身份请求** — 后续所有请求带 `X-Participant-Id: <id>` 头。
+4. **加载 CoAgentHub Skills** — 根据角色从 `skills/` 目录加载对应 skill 到
+   agent 的 skills 目录(如 `~/.hermes/skills/`、`~/.claude/skills/`、`~/.codebuddy/skills/` 等):
+   - **协调者** → `skills/coordinator/SKILL.md`(Grill → Spec → Dispatch → Verify)
+   - **执行器** → `skills/executor/SKILL.md`(Read Spec → Implement → Test → Code Review 自检 → Report)
+   - **修 Bug** → `skills/bugfix/SKILL.md`(Triage → Diagnose → Fix-Spec → Dispatch → Verify)
+   完成标准:skill 文件已复制/软链到 agent 的 skills 目录,agent 能识别 skill 名称。
+5. **带上身份请求** — 后续所有请求带 `X-Participant-Id: <id>` 头。
 
 > 重复执行不会产生重复 participant:查重命中即复用;注册返回 409(名字已存在)时
 > 回退到查重结果继续。
@@ -39,7 +45,10 @@
 1. **收集对方信息** — 输入对方的 `name` / `device` / `capabilities`。
 2. **查重 / 注册** — 同自己接入:查重命中复用,否则注册。
 3. **写入对方身份文件** — 把 participant id 写入对方的 `~/.coagenthub/participant-id`。
-4. **回报对方** — 返回该 id,并说明:后续如何带 `X-Participant-Id` 头收发消息。
+4. **加载对方所需 Skills** — 根据对方角色(协调者/执行器/修 Bug)把
+   `skills/` 下对应的 SKILL.md 复制/软链到对方的 skills 目录。
+5. **回报对方** — 返回该 id,并说明:后续如何带 `X-Participant-Id` 头收发消息,
+   以及已加载了哪些 CoAgentHub skills。
 
 ## 接入后如何工作
 
