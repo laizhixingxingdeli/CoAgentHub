@@ -156,10 +156,15 @@ When the executor reports completion:
    - If no test was added, ask the executor to add one (regression prevention).
 3. **Regression check**: Run the full test suite. Any new failures?
 4. **Scope check**: Did the executor change anything beyond the fix? Reject unrelated changes.
-5. Verdict:
-   - Bug gone + no regression → `✅ 修复验证通过`
+5. **文档同步检查** — Bug 修复通常不需要更新文档，但如果：
+   - 修复改变了 API 行为 → 更新 `docs/architecture.md` §4
+   - 修复涉及架构层面的根因 → 新建 `docs/adr/000X-xxx.md`
+   - 修复改变了开发流程 → 更新 `AGENTS.md` / `CONTEXT.md`
+6. Verdict:
+   - Bug gone + no regression + docs in sync → `✅ 修复验证通过`
    - Bug still exists → `❌ 未修复：<reproduction result>` → retry
    - Bug gone but regression → `❌ 引入回归：<failing test>` → retry
+   - Bug gone but docs out of sync → `❌ 文档未同步：<具体文件>` → retry
 
 </verification-rules>
 

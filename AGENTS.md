@@ -63,6 +63,18 @@ the corresponding label string from this table.
 
 CoAgentHub 采用 Spec-Driven 工作流：协调者在完全确定实现方案前不允许下发任务。
 
+### 项目初始化 (Project Bootstrap)
+
+首次在项目中工作时，检查以下文档是否存在。如果缺失，**先创建再干活**：
+
+| 文件 | 作用 | 如果缺失 |
+|------|------|---------|
+| `AGENTS.md` | Agent 工作规范 | 创建，写领域词汇 + issue tracker 约定 + triage labels |
+| `CONTEXT.md` | 项目上下文 | 创建，写"是什么" + 领域词汇表 + 运行拓扑 |
+| `docs/adr/` | 架构决策记录 | 创建目录，写 `0001-项目初始化.md` |
+| `specs/` | Spec 文档目录 | 创建空目录（加 `.gitkeep`） |
+| `.cursorrules` 或等效 | 代码风格约定 | 创建，写技术栈约定 |
+
 ### 下发前检查清单（Pre-Flight Grill）
 
 在调用 `coagenthub_dispatch_task` 之前，协调者必须：
@@ -89,7 +101,18 @@ CoAgentHub 采用 Spec-Driven 工作流：协调者在完全确定实现方案�
 
 1. **拉取任务详情**：`coagenthub_get_task`，检查 `diffSummary` 和 `outputTail`
 2. **对照 Spec 验收**：逐项检查 Spec 中的验收标准是否全部满足
-3. **文档同步检查**：代码改动是否需要同步更新文档（ADR、architecture.md 等）
+3. **文档同步检查** — 根据改动类型检查文档是否需要更新：
+
+   | 改动类型 | 需要更新的文档 |
+   |---------|---------------|
+   | 数据库 Schema 变更 | `docs/architecture.md` 数据模型表 + 迁移 SQL |
+   | API 端点变更 | `docs/architecture.md` API 全貌表 |
+   | 架构决策变更 | `docs/adr/` 新建 ADR |
+   | 开发流程变更 | `AGENTS.md` + `CONTEXT.md` |
+   | 领域概念变更 | `CONTEXT.md` 领域词汇表 |
+   | 代码风格约定变更 | `.cursorrules` 或 `biome.json` |
+
 4. **裁决**：
-   - 全部通过：在群内发 `✅ 验收通过` 并标记任务 done
-   - 部分失败：在群内发 `❌ 验收未通过：<原因>` 并要求重试或人工介入
+   - 全部通过 + 文档同步：在群内发 `✅ 验收通过` 并标记任务 done
+   - 验收失败：在群内发 `❌ 验收未通过：<原因>` 并要求重试或人工介入
+   - 代码通过但文档未同步：在群内发 `❌ 文档未同步：<具体文件>` 并要求执行器补文档
