@@ -283,6 +283,8 @@ export async function maybeDispatchExecutorTask(
     body,
     dispatcherParticipantId,
     dispatcherSessionId,
+    specRef,
+    specHash,
   } = input;
 
   // 与桥相同的角色门槛:非 coordinator/human 不执行(桥侧也会拒绝)。
@@ -334,6 +336,8 @@ export async function maybeDispatchExecutorTask(
     groupPrompt,
     dispatcherParticipantId,
     dispatcherSessionId,
+    specRef,
+    specHash,
   });
 }
 
@@ -351,6 +355,10 @@ async function dispatchTask(
     dispatcherParticipantId: string;
     /** 任务下发会话(Part A):见 DispatchExecutorInput。 */
     dispatcherSessionId: string | null;
+    /** 规范驱动下发:规范文档路径(任务书「关联规范」段用);null = 指令驱动。 */
+    specRef: string | null;
+    /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
+    specHash: string | null;
   },
 ): Promise<void> {
   const {
@@ -362,6 +370,8 @@ async function dispatchTask(
     groupPrompt,
     dispatcherParticipantId,
     dispatcherSessionId,
+    specRef,
+    specHash,
   } = opts;
 
   const [created] = await db
@@ -374,6 +384,10 @@ async function dispatchTask(
       status: "queued",
       // 任务书快照:触发消息 body 的完整复制,消息后续编辑/删除不影响已触发任务。
       brief: body,
+      // 规范驱动下发:task 行落库 specRef/specHash(任务书「关联规范」段 +
+      // 详情/WS 事件透传的数据源;null = 指令驱动任务)。
+      specRef,
+      specHash,
       // 任务下发者信息(Part A):sender + 会话 id(仅 coordinator/human 非执行器
       // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
       dispatcherParticipantId,
@@ -477,6 +491,9 @@ async function dispatchTask(
     detachedTimedOut: false,
     retryCount: 0,
     checkpointRef: null,
+    // 规范驱动下发:随任务书「关联规范」段写入 ticket;null = 指令驱动任务。
+    specRef,
+    specHash,
     // 403 反应式排队标记:默认未阻塞(显式 maxConcurrency 由 pump 直接排队,
     // 不会置位本标记;收到执行器 403 并发冲突后才置位)。
     concurrencyBlocked: false,
@@ -667,11 +684,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 超时/中止共用同一 AbortController:kill 中止在途请求(停止指令、A2A
       // 无进展超时共用),与 CLI 的进程组 SIGKILL 语义一致。
       const a2aController = new AbortController();
+      // 规范驱动下发:a2a 不发 ticket,specRef 非空时把「关联规范」段前置进
+      // prompt(与 CLI ticket 同一模板,避免两路漂移——执行器严格按 Spec
+      // 实现,冲突以 Spec 为准);无 specRef 时 prompt 与旧版完全一致。
+      const prompt = run.specRef
+        ? `${buildSpecSection(run.specRef, run.specHash).join("\n")}\n\n${body}`
+        : body;
       handle = {
         promise: runA2AExecutor({
           url: a2aUrl,
           token: ex.a2a?.token ?? "",
-          prompt: body,
+          prompt,
           ...(prevContextId ? { contextId: prevContextId } : {}),
           timeoutMs: readTimeoutMs(),
           signal: a2aController.signal,
@@ -695,7 +718,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       try {
         writeFileSync(
           ticketPath,
-          buildTicket(body, ex.label, repoRoot, groupPrompt, testExecutor),
+          buildTicket(
+            body,
+            ex.label,
+            repoRoot,
+            groupPrompt,
+            testExecutor,
+            run.specRef,
+            run.specHash,
+          ),
         );
       } catch (e) {
         await failTask(db, taskId, `任务书写入失败: ${e}`);
@@ -1657,18 +1688,41 @@ export async function resolveTestExecutor(
  * 定向目标 label;测试执行器 = resolveTestExecutor 解析结果或默认由实现执行器
  * 完成测试;body 中的显式「**测试执行器:**」行原样保留(执行器读任务书即可)。
  */
+/** 规范驱动下发:「关联规范」段模板行(CLI ticket 与 a2a prompt 共用,
+ *  避免两路漂移)。specRef 为空时应由调用方自行跳过,本函数不做判断。 */
+function buildSpecSection(
+  specRef: string,
+  specHash: string | null,
+): string[] {
+  return [
+    `## 📜 关联规范 (Spec Reference)`,
+    `- **文档路径**: ${specRef}`,
+    ...(specHash ? [`- **版本哈希**: ${specHash}`] : []),
+    `- **指令**: 请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。`,
+  ];
+}
+
 function buildTicket(
   body: string,
   label: string,
   repoRoot: string,
   groupPrompt: GroupPromptInfo | null = null,
   testExecutor: string | null = null,
+  specRef: string | null = null,
+  specHash: string | null = null,
 ): string {
   const lines = [
     `# CoAgentHub 任务`,
     `执行器: ${label}`,
     `项目: ${repoRoot}`,
     `发布时间: ${new Date().toISOString()}`,
+  ];
+  // 规范驱动下发:specRef 非空时,在「任务内容」之前插入「关联规范」段
+  // (Spec 优先于任务内容——执行器严格按 Spec 实现,冲突以 Spec 为准)。
+  if (specRef) {
+    lines.push(...buildSpecSection(specRef, specHash));
+  }
+  lines.push(
     `## 任务内容`,
     body,
     `## 汇报格式要求(stdout 请按此输出)`,
@@ -1676,7 +1730,7 @@ function buildTicket(
     `测试: <测试结果摘要>`,
     `汇报: <做了什么,3-5 句>`,
     `遗留: <未完成事项,无则写"无">`,
-  ];
+  );
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
   // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
   if (groupPrompt && groupPrompt.prompt.trim().length > 0) {

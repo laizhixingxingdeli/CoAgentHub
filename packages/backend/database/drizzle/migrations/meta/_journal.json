@@ -120,6 +120,13 @@
       "when": 1786810000003,
       "tag": "0016_add_task_dispatcher_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786810000004,
+      "tag": "0017_add_task_spec_fields",
+      "breakpoints": true
     }
   ]
 }

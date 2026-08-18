@@ -66,6 +66,11 @@ app
           // 内容类型 (ticket 17): 仅存储不校验 —— 不白名单、不解析;仅拒绝
           // 空串以免绕过 text/plain 默认值。
           contentType: z.string().min(1).optional(),
+          // 规范驱动下发 (Spec-Driven Task Dispatch):可选字段,定向到执行器的
+          // 消息可携带规范文档路径与版本哈希(≤500/≤64),任务行写入并拼进任务书
+          // 「关联规范」段;不传 = 指令驱动任务,行为与旧版完全一致。
+          specRef: z.string().max(500).optional(),
+          specHash: z.string().max(64).optional(),
           // 任务下发者信息(Part A):只读取 metadata.dispatcherSessionId(≤200),
           // 其他 metadata 字段忽略,不影响任务创建;超长拒绝(400)。是否写入
           // 任务行由 handler 按发送者角色/身份判定(见下),此处只做格式约束。
@@ -97,6 +102,8 @@ app
         contentType,
         fileRef,
         metadata,
+        specRef,
+        specHash,
       } = c.req.valid("json");
 
       // Archive = read-only: an archived (or soft-deleted) group rejects new
@@ -222,6 +229,8 @@ app
           body: body ?? "",
           dispatcherParticipantId: senderId,
           dispatcherSessionId,
+          specRef: specRef ?? null,
+          specHash: specHash ?? null,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;

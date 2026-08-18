@@ -83,6 +83,12 @@ export const task = pgTable(
     // A2A 上下文延续:本次 A2A 调用返回的 contextId(下一任务携带,远端执行器
     // 借此跨任务保持上下文)。仅 a2a 执行器(如 win-hermes)写入;CLI 执行为空。
     a2aContextId: text("a2a_context_id"),
+    // 规范驱动下发(Spec-Driven Task Dispatch):任务携带的规范文档路径与
+    // 版本哈希(可空 = 指令驱动任务,行为与旧版完全一致)。spec_ref 如
+    // `specs/login-v2.md`;spec_hash 为规范文档的 Git Hash(版本快照,审计用)。
+    // 任务书模板据此插入「关联规范」段,执行器严格按 Spec 实现。
+    specRef: text("spec_ref"),
+    specHash: text("spec_hash"),
     // 任务下发者信息(Part A):记录下发该任务的消息发送者 participant 与会话 id,
     // 任务完成/失败事件据此定向通知下发者所在会话(插件 TaskWatcher 用)。
     // 可空:老任务 / 桥直发任务无此信息;dispatcher_participant_id 仅由服务端

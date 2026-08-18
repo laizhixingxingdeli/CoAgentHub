@@ -22,6 +22,11 @@ export interface DispatchExecutorInput {
   /** 任务下发会话(Part A):仅 coordinator/human 且非执行器发送者携带的
    *  metadata.dispatcherSessionId;否则为 null。绝不从 body 解析。 */
   dispatcherSessionId: string | null;
+  /** 规范驱动下发:任务携带的规范文档路径(如 `specs/login-v2.md`),任务书
+   *  模板据此插入「关联规范」段;null = 指令驱动任务,行为与旧版一致。 */
+  specRef: string | null;
+  /** 规范文档的 Git Hash(版本快照,审计用);无版本哈希时为 null。 */
+  specHash: string | null;
 }
 
 /** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */
@@ -87,6 +92,10 @@ export interface QueuedRun {
   retryCount: number;
   /** 执行前 git 快照 ref(重试回滚/弱验收对比用);a2a 无快照为 null。 */
   checkpointRef: string | null;
+  /** 规范驱动下发:规范文档路径(任务书「关联规范」段用);null = 指令驱动。 */
+  specRef: string | null;
+  /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
+  specHash: string | null;
   /**
    * 反应式排队标记(403 后排队):执行器返回 `403 atomgit_session_concurrency_conflict`
    * 后由 handleConcurrencyConflict 置位并重新入队 —— pump 在该执行器仍有其他

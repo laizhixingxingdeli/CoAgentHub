@@ -41,3 +41,9 @@ report/queue 六个子模块(barrel 导出面不变,`@server/lib/executor-task` 
 ## 关键决策
 
 见 `docs/adr/`:闭包表消息树、局域网信任模型、单调度器执行器、两级记忆、角色解绑。
+
+## Spec-Driven Task Dispatch (规范驱动任务下发, 2026-08-18)
+
+协调者在完全确定实现方案前不允许下发任务。任务可携带 `specRef`（规范文档路径）
+和 `specHash`（版本哈希）字段,任务书模板自动插入"关联规范"段,执行器严格按 Spec 实现。
+Spec 文档位于 `specs/` 目录。详见 `specs/spec-driven-task-dispatch.md`。

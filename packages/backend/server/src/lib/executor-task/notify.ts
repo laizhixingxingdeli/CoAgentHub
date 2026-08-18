@@ -52,6 +52,9 @@ export async function notifyTaskStatusChanged(
       executorKey: task.executorKey ?? null,
       brief: task.brief ?? null,
       diffSummary: (task.diffSummary as Record<string, unknown> | null) ?? null,
+      // 规范驱动下发:事件透传 specRef/specHash(任务详情同源);老任务为 null。
+      specRef: task.specRef ?? null,
+      specHash: task.specHash ?? null,
       // 任务下发者信息(Part A):事件透传给插件(定向通知用);老任务为 null。
       dispatcherParticipantId: task.dispatcherParticipantId ?? null,
       dispatcherSessionId: task.dispatcherSessionId ?? null,

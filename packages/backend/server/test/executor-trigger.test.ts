@@ -351,6 +351,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         // Part A:直接调内部入口时下发者字段按测试语义提供(与消息路由一致)。
         dispatcherParticipantId: coordinator.id,
         dispatcherSessionId: null,
+        // 规范驱动下发:直调入口按测试语义补可选字段(与消息路由一致,均为 null)。
+        specRef: null,
+        specHash: null,
       },
     );
     await new Promise((r) => setTimeout(r, 300));
@@ -434,6 +437,50 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain(
         "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
       );
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  });
+
+  it("带 specRef/specHash 的定向消息 → task 行落库 + 任务书含「关联规范」段 + 详情透传", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+
+    const capture = path.join(fakeDir, "ticket-with-spec.md");
+    process.env.TICKET_CAPTURE = capture;
+    const specRef = "specs/login-v2.md";
+    const specHash = "abcdef012345";
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "登录改造",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+        specRef,
+        specHash,
+      });
+      const task = await waitForTask(coordinator.id, group.id, msg.id);
+      expect(task.status).toBe("done");
+      // 验收:task 行写入 specRef/specHash(详情/WS 事件透传的数据源)。
+      const detail = (
+        await (
+          await app.request(`/api/groups/${group.id}/tasks/${task.id}`, {
+            headers: { "X-Participant-Id": coordinator.id },
+          })
+        ).json()
+      ) as Record<string, unknown>;
+      expect(detail.specRef).toBe(specRef);
+      expect(detail.specHash).toBe(specHash);
+
+      // 验收:任务书在「任务内容」之前含「关联规范」段(含文档路径 + 版本哈希
+      // + 严格遵循指令)。
+      const ticket = readFileSync(capture, "utf8");
+      const specIdx = ticket.indexOf("## 📜 关联规范 (Spec Reference)");
+      const contentIdx = ticket.indexOf("## 任务内容");
+      expect(specIdx).toBeGreaterThan(-1);
+      expect(contentIdx).toBeGreaterThan(-1);
+      expect(specIdx).toBeLessThan(contentIdx); // Spec 优先于任务内容
+      expect(ticket).toContain(`- **文档路径**: ${specRef}`);
+      expect(ticket).toContain(`- **版本哈希**: ${specHash}`);
+      expect(ticket).toContain("请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。");
     } finally {
       delete process.env.TICKET_CAPTURE;
     }

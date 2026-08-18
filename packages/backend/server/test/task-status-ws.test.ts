@@ -168,6 +168,7 @@ async function postDirectedTaskMessage(
   participantId: string,
   groupId: string,
   executorParticipantId: string,
+  spec?: { specRef: string; specHash: string },
 ) {
   const res = await app.request(`/api/groups/${groupId}/messages`, {
     method: "POST",
@@ -179,6 +180,7 @@ async function postDirectedTaskMessage(
       body: "WS 状态推送集成测试",
       audience: "participant",
       audienceRef: executorParticipantId,
+      ...spec,
     }),
   });
   expect(res.status).toBe(200);
@@ -269,6 +271,40 @@ describe("task_status_changed(任务状态实时推送)", () => {
     expect(new Date(task?.createdAt as string).getTime()).not.toBeNaN();
     expect(typeof task?.updatedAt).toBe("string");
     expect(typeof task?.retryCount).toBe("number");
+  }, 15_000);
+
+  it("带 specRef/specHash 的任务:task_status_changed 事件载荷透传两字段", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("Spec 推送群");
+    const coordinatorWs = await connectWs(wsUrl(coordinator.id));
+    const frames = attachCollector(coordinatorWs);
+    const spec = { specRef: "specs/login-v2.md", specHash: "abc123def456" };
+
+    await postDirectedTaskMessage(
+      coordinator.id,
+      group.id,
+      codebuddy.id,
+      spec,
+    );
+
+    await waitFor(() =>
+      frames.some(
+        (f) =>
+          f.type === "task_status_changed" &&
+          f.groupId === group.id &&
+          f.status === "done",
+      ),
+    );
+
+    // 事件 task 载荷含 specRef/specHash(验收标准:WS task_status_changed 透传)。
+    const doneEvent = frames.find(
+      (f) =>
+        f.type === "task_status_changed" &&
+        f.groupId === group.id &&
+        f.status === "done",
+    );
+    const task = doneEvent?.task as Record<string, unknown> | undefined;
+    expect(task?.specRef).toBe(spec.specRef);
+    expect(task?.specHash).toBe(spec.specHash);
   }, 15_000);
 
   it("任务失败:群订阅者收到 failed 事件", async () => {

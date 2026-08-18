@@ -43,13 +43,17 @@ app
         messageId: z.string().uuid(),
         executorParticipantId: z.string().uuid(),
         checkpointRef: z.string().optional(),
+        // 规范驱动下发 (Spec-Driven Task Dispatch):可选字段,任务行写入
+        // specRef/specHash(详情/WS 事件透传);不传 = 指令驱动任务。
+        specRef: z.string().max(500).optional(),
+        specHash: z.string().max(64).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const callerId = c.get("participantId");
       const { id } = c.req.valid("param");
-      const { messageId, executorParticipantId, checkpointRef } =
+      const { messageId, executorParticipantId, checkpointRef, specRef, specHash } =
         c.req.valid("json");
 
       // 归档/软删群组只读:不能发新任务(与消息/成员同款守卫)。
@@ -87,6 +91,9 @@ app
           messageId,
           executorParticipantId,
           checkpointRef: checkpointRef ?? null,
+          // 规范驱动下发:task 行写入 specRef/specHash(null = 指令驱动任务)。
+          specRef: specRef ?? null,
+          specHash: specHash ?? null,
           brief: triggerMessage?.body ?? null,
           // 显式置 queued:不依赖 DB 默认值(旧库默认值可能仍是 running)。
           status: "queued",
@@ -243,6 +250,9 @@ app
         checkpointRef: task.checkpointRef,
         retryCount: task.retryCount,
         diffSummary: task.diffSummary,
+        // 规范驱动下发:详情透出 specRef/specHash(老任务为 null)。
+        specRef: task.specRef ?? null,
+        specHash: task.specHash ?? null,
         // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
         dispatcherParticipantId: task.dispatcherParticipantId ?? null,
         dispatcherSessionId: task.dispatcherSessionId ?? null,
