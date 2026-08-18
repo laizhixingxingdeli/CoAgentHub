@@ -24,6 +24,8 @@
 ```
 CoAgentHub/
 ├── serve.mjs                          # 局域网静态托管 + /api 反代 + WS upgrade
+├── specs/                             # Spec 文档(Spec-Driven 工作流)
+├── skills/                            # Agent Skills(coordinator/bugfix/executor)
 ├── docs/                              # 纯 Markdown 文档(usage/architecture/adr)
 ├── packages/
 │   ├── backend/
@@ -206,6 +208,9 @@ CoAgentHub/
   防空转,如外部会话占用)。
 - **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收
   不依赖记忆。纯粹执行器(无 `memory` 标记)保持新鲜上下文,每次任务独立执行。
+  任务书模板包含「Code Review 自检」段(Standards + Spec Compliance checklist),
+  执行器完成前必须自检并在汇报中包含自检结果。Spec-Driven 模式下(specRef 非空),
+  任务书额外插入「关联规范」段,执行器严格按 Spec 实现。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用
   a2a 跨任务 contextId 延续——调用前按 (executorKey, groupId) 取本群最近非 cancelled
   任务的 `a2a_context_id`,调用后回写;按群隔离,跨群不串。记忆只是加速器,缺失/失败

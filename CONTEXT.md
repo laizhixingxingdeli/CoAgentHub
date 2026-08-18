@@ -46,4 +46,6 @@ report/queue 六个子模块(barrel 导出面不变,`@server/lib/executor-task` 
 
 协调者在完全确定实现方案前不允许下发任务。任务可携带 `specRef`（规范文档路径）
 和 `specHash`（版本哈希）字段,任务书模板自动插入"关联规范"段,执行器严格按 Spec 实现。
-Spec 文档位于 `specs/` 目录。详见 `specs/spec-driven-task-dispatch.md`。
+任务书模板包含"Code Review 自检"段,执行器完成前必须按 checklist 自检(Standards + Spec Compliance)。
+Spec 文档位于 `specs/` 目录。Skills 位于 `skills/` 目录(coordinator/bugfix/executor)。
+详见 `specs/spec-driven-task-dispatch.md` 和 `specs/plugin-skill-adaptation.md`。
