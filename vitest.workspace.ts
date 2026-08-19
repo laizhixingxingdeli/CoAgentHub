@@ -5,6 +5,7 @@ import { defineWorkspace } from "vitest/config";
 // 收集期失败。这里只引用有测试的包;新增测试包时在此追加。
 export default defineWorkspace([
   "packages/backend/server/vitest.config.ts",
+  "packages/callback-agent/vitest.config.ts",
   "packages/frontend/web/vitest.config.ts",
   "scripts/vitest.config.ts",
 ]);

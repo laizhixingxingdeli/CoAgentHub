@@ -28,6 +28,10 @@ CoAgentHub/
 ├── skills/                            # Agent Skills(coordinator/bugfix/executor)
 ├── docs/                              # 纯 Markdown 文档(usage/architecture/adr)
 ├── packages/
+│   ├── callback-agent/                # 通用回调 Agent:消费 completion inbox 并恢复 CLI Agent 原 session
+│   │   ├── src/                       #   api/dedupe/envelope/command-driver/callback-agent/cli
+│   │   ├── test/                       #   fake API 集成测试 + 单测
+│   │   └── examples/                   #   示例配置(Codex 等)
 │   ├── backend/
 │   │   ├── server/                    # Hono API 服务(:3001,基路径 /api)
 │   │   │   ├── src/
@@ -271,4 +275,22 @@ CoAgentHub/
 测试/类型/构建问题,未改动产品代码;`pnpm build` 产物已由 `--force` 冷构建确认,
 git 工作树干净。备注:web 构建中 sentry-vite-plugin 因未配置 `SENTRY_AUTH_TOKEN`
 打印非致命告警(不阻断产物生成),与本架构审视无关。
+
+## 12. Callback Agent (独立 package)
+
+`packages/callback-agent` 是独立于 CoAgentHub core 的通用回调 Agent,消费 participant 的
+completion-event inbox 并恢复 CLI Agent 原 session。**不在 callback agent 中执行 Webhook、
+不从 event 读取命令/URL/凭据**——endpoint 配置是本地静态 JSON,仅允许绝对路径 executable
++ 静态参数或完整占位符(`{sessionRef}`/`{message}`/`{eventFile}`),`spawn(executable, args, { shell: false })`。
+
+| 关注点 | 实现 |
+| --- | --- |
+| 轮询 | `GET /api/participants/:id/task-completion-events`(`?after=` 游标增量) |
+| 认领 | `POST .../:eventId/claim`(`consumerId` + `leaseMs`)→ `leaseToken` |
+| 执行 | 按 `callbackRef.endpointRef` 选本地 endpoint 配置 → 占位符解析 → `shell:false` spawn |
+| 去重 | 成功投递后先原子写本地 dedupe store → 再 ack;进程在写后 ack 前退出 → 重启只补 ack |
+| 失败 | command 非零退出 / timeout / spawn error → `POST .../:eventId/fail`(按 core 重试策略) |
+| CLI 模式 | 一次性 `run` + 持续 `daemon`(`SIGINT`/`SIGTERM` 优雅退出) |
+
+详见 `packages/callback-agent/README.md` 与 `specs/callback-agent-command-driver.md`。
 

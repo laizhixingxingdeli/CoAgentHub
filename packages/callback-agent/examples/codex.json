@@ -1,0 +1,18 @@
+{
+  "apiBase": "http://localhost:3001",
+  "participantId": "REPLACE_WITH_VALID_UUID",
+  "consumerId": "codex-callback-consumer",
+  "pollIntervalMs": 5000,
+  "leaseMs": 30000,
+  "defaultTimeoutMs": 60000,
+  "endpoints": {
+    "developer-mac": {
+      "driver": {
+        "driver": "command",
+        "executable": "/Users/REPLACE/.codex/bin/codex",
+        "args": ["exec", "resume", "--json", "{sessionRef}", "{message}"],
+        "timeoutMs": 120000
+      }
+    }
+  }
+}
