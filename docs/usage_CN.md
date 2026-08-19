@@ -7,7 +7,7 @@
 
 server 是**唯一的调度器**。开机时自动注册执行器配置里声明的 participant(见
 `packages/backend/server/src/lib/executors.ts` —— 本地 Hermes 规划、AtomCode /
-Reasoning / CodeBuddy 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里用
+Reasoning / CodeBuddy / Codex 执行器,以及经 A2A gateway 调用的远端 Win Hermes)。在群里用
 `audience=participant` 定向到某个执行器 participant 即触发任务;server 经按项目分组的
 并行队列派发(同一 `project_path` 串行、不同项目并行,上限 `maxParallelGroups`;
 另按执行器并发能力排队 —— 执行器可配 `maxConcurrency` 声明式上限,如 AtomCode = 1;
@@ -37,12 +37,15 @@ participant 名)。
 | `executor` | AtomCode 执行器 | 本地 CLI(`atomcode -y -p {ticket}`) |
 | `reasonix` | Reasoning 执行器 | 本地 CLI(`reasonix run -y --model {model} {ticket}`,缺省模型 `deepseek-v4-flash`) |
 | `codebuddy` | CodeBuddy 执行器 | 本地 CLI(`codebuddy -y -p {ticket}`) |
+| `codex` | Codex 执行器 | 本地 CLI(`codex exec --sandbox workspace-write --ask-for-approval never --ephemeral {ticket}`),单并发 |
 | `hermes` | Hermes 规划 | 本地 CLI(`hermes -z {ticketContent}`,任务书全文内联) |
 | `win-hermes` | Win Hermes | A2A(kind=`a2a`,经 gateway `http://192.168.31.180:9900/` 调用远端设备;`memory=per-group` 按群延续 contextId) |
 
 覆盖方式:
 
 - CLI 命令路径:env `EXECUTOR_BIN_<KEY 大写>`(如 `EXECUTOR_BIN_CODEBUDDY`)。
+- Codex 首次使用前,在 **server 运行的同一操作系统用户** 下执行 `codex login`。
+  若 server 的 PATH 找不到 Codex,用 `EXECUTOR_BIN_CODEX=/绝对路径/codex` 覆盖。
 - A2A gateway 地址 / Bearer 令牌:`COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`。
 - 自定义执行器:`POST /api/executors` 写入 DB(`kind=cli` 需 `bin`,`kind=a2a` 需
   `url`;`memory=per-group` 仅对 a2a 生效),新增时自动注册对应 participant。

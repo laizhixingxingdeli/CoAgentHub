@@ -97,7 +97,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(res.status).toBe(200);
     const list = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(list)).toBe(true);
-    expect(list.length).toBeGreaterThanOrEqual(6); // 5 内置 + 1 新增
+    expect(list.length).toBeGreaterThanOrEqual(7); // 6 内置 + 1 新增
 
     const builtin = list.find((x) => x.key === "executor");
     expect(builtin).toBeTruthy();
@@ -108,6 +108,24 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(winHermes?.memory).toBe("per-group");
     expect(builtin!.memory).toBe(null);
     expect(builtin).not.toHaveProperty("token");
+
+    const codex = list.find((x) => x.key === "codex");
+    expect(codex).toMatchObject({
+      agentName: "Codex 执行器",
+      kind: "cli",
+      bin: "codex",
+      builtin: true,
+      maxConcurrency: 1,
+      args: [
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "--ephemeral",
+        "{ticket}",
+      ],
+    });
 
     const added = list.find((x) => x.key === "cli-tester");
     expect(added).toBeTruthy();

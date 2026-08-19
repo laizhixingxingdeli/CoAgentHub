@@ -10,7 +10,7 @@
 The server is the **single dispatcher**. On startup it auto-registers the
 participants declared in the executor config (see
 `packages/backend/server/src/lib/executors.ts` — local Hermes planning, the
-AtomCode / Reasoning / CodeBuddy executors, and remote Win Hermes invoked through
+AtomCode / Reasoning / CodeBuddy / Codex executors, and remote Win Hermes invoked through
 the A2A gateway). Addressing a message to an executor participant with
 `audience=participant` creates a task; the server dispatches it through a
 per-project parallel queue (same `project_path` serial, different projects
@@ -40,12 +40,15 @@ The default set (`key` → `agentName` → invocation):
 | `executor` | AtomCode 执行器 | local CLI (`atomcode -y -p {ticket}`) |
 | `reasonix` | Reasoning 执行器 | local CLI (`reasonix run -y --model {model} {ticket}`, default model `deepseek-v4-flash`) |
 | `codebuddy` | CodeBuddy 执行器 | local CLI (`codebuddy -y -p {ticket}`) |
+| `codex` | Codex 执行器 | local CLI (`codex exec --sandbox workspace-write --ask-for-approval never --ephemeral {ticket}`), single concurrency |
 | `hermes` | Hermes 规划 | local CLI (`hermes -z {ticketContent}`, full task book inlined) |
 | `win-hermes` | Win Hermes | A2A (`kind=a2a`, via gateway `http://192.168.31.180:9900/`; `memory=per-group` keeps a per-group contextId) |
 
 Overrides:
 
 - CLI binary paths: env `EXECUTOR_BIN_<KEY_UPPER>` (e.g. `EXECUTOR_BIN_CODEBUDDY`).
+- Before using Codex, run `codex login` as the same OS user that runs the server. If
+  the server cannot find it on `PATH`, set `EXECUTOR_BIN_CODEX` to the absolute path.
 - A2A gateway URL / bearer token: `COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`.
 - Custom executors: `POST /api/executors` writes a DB row (`kind=cli` needs `bin`,
   `kind=a2a` needs `url`; `memory=per-group` only applies to `a2a`) and

@@ -180,6 +180,7 @@ const app2 = app
           label: ex.label,
           model: ex.model ?? null,
           memory: ex.memory ?? null,
+          maxConcurrency: ex.maxConcurrency ?? null,
           builtin: isBuiltinExecutorKey(ex.key),
         })),
       );

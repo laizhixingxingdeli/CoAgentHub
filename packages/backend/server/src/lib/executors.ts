@@ -106,6 +106,25 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     args: ["-y", "-p", "{ticket}"],
   },
   {
+    key: "codex",
+    agentName: "Codex 执行器",
+    type: "participant",
+    bin: "codex",
+    label: "codex",
+    // Headless Codex task:允许改工作区,不等待审批,每个 task 使用新上下文。
+    args: [
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "--ask-for-approval",
+      "never",
+      "--ephemeral",
+      "{ticket}",
+    ],
+    // 当前 runner 以共享工作区执行,避免同一 Codex participant 并发改文件。
+    maxConcurrency: 1,
+  },
+  {
     key: "hermes",
     agentName: "Hermes 规划",
     type: "hermes",
