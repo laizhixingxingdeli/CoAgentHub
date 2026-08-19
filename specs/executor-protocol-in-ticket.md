@@ -1,6 +1,13 @@
 # Spec: 服务端固化执行器流程协议 (Executor Protocol in Task Ticket)
 
-> **状态**: Ready for Implementation
+> **状态**: Superseded by skill-enforcement-and-ticket-slim
+>
+> **废弃原因**: 本 spec 要求把 executor skill 的完整执行流程固化进任务书；
+> `skill-enforcement-and-ticket-slim` 明确回退过度固化，方法改由
+> `coagenthub-executor` skill 承载、任务书仅触发 skill。二者对 buildTicket
+> 输出相反要求（本 spec 要求「含」「执行流程（必读）」段，另一 spec 要求
+> 「不含」），无法并存。当前实现按后者落地，故正式标记本 spec 为 superseded。
+>
 > **版本**: 1.0
 > **日期**: 2026-08-18
 > **依赖**: buildTicket Code Review 自检段已存在（commit 28c4757）
