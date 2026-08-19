@@ -106,6 +106,7 @@ Output your report in the format specified by the task ticket. At minimum:
 ```
 提交: <commit hash>
 测试: <test results summary>
+Token: <token count consumed by this run>
 汇报: <what you did, 3-5 sentences>
 遗留: <unfinished items, or "无">
 

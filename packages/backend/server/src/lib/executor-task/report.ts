@@ -18,6 +18,8 @@ export interface TaskReport {
   tests?: string;
   /** 遗留事项(遗留段)。 */
   todo?: string;
+  /** 本执行消耗的 token 数(纯数字字符串;token 段,缺段/非法值省略)。 */
+  tokenUsage?: string;
 }
 
 /** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。 */
@@ -29,7 +31,17 @@ const REPORT_SECTION_RE: ReadonlyArray<{
   { key: "tests", re: /^\s*(?:测试|test|tests)\s*[:：]/i },
   { key: "summary", re: /^\s*(?:汇报|report|summary)\s*[:：]/i },
   { key: "todo", re: /^\s*(?:遗留|todo|remaining)\s*[:：]/i },
+  { key: "tokenUsage", re: /^\s*(?:token|tokens|消耗)\s*[:：]/i },
 ];
+
+/** 清洗 token 段值:去空格与千分位逗号,取首个数字组(去 token/tokens 等后缀词)。 */
+function cleanTokenValue(raw: string): string | undefined {
+  const compact = raw.replace(/\s+/g, "");
+  const match = compact.match(/\d[\d,]*/);
+  if (!match) return undefined;
+  const cleaned = match[0].replace(/,/g, "");
+  return cleaned.length > 0 ? cleaned : undefined;
+}
 
 /** 从输出取 commit hash(40 位 hex 或 "commit/hash: xxx" 短格式)。 */
 export function findCommitHash(text: string): string | null {
@@ -85,6 +97,10 @@ export function parseTaskReport(text: string): TaskReport {
         if (/^[0-9a-f]{7,40}$/i.test(token)) {
           report.hash = token.length === 40 ? token.slice(0, 12) : token;
         }
+      } else if (key === "tokenUsage") {
+        // token 段只取清洗后的纯数字,非法/空值省略(不影响既有四段)。
+        const cleaned = cleanTokenValue(value);
+        if (cleaned) report.tokenUsage = cleaned;
       } else {
         report[key] = value;
       }

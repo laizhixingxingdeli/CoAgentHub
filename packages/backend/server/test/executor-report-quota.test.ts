@@ -55,6 +55,7 @@ writeFileSync(
     'if [ -n "$FAKE_STRUCTURED" ]; then',
     '  echo "提交: 0123456789abcdef0123456789abcdef01234567"',
     '  echo "测试: 全部通过 (42 tests)"',
+    '  echo "Token: 12,345 tokens"',
     '  echo "汇报: 完成了模板化与结构化改造"',
     '  echo "遗留: 无"',
     "  exit 0",
@@ -275,6 +276,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         expect(ticket).toContain("## 汇报格式要求(stdout 请按此输出)");
         expect(ticket).toContain("提交: <commit hash>");
         expect(ticket).toContain("测试: <测试结果摘要>");
+        expect(ticket).toContain("Token: <本执行消耗的 token 数量>");
         expect(ticket).toContain("汇报: <做了什么,3-5 句>");
         expect(ticket).toContain('遗留: <未完成事项,无则写"无">');
       } finally {
@@ -306,6 +308,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           hash: "0123456789ab",
           tests: "全部通过 (42 tests)",
           todo: "无",
+          tokenUsage: "12345",
         });
         expect(
           typeof (t.diffSummary as Record<string, unknown> | null)?.outputTail,
@@ -376,6 +379,37 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       });
     });
 
+    it("parseTaskReport:token 段变体识别与清洗", () => {
+      // 英文大小写变体 + 千分位逗号 + tokens 后缀 → 纯数字。
+      expect(
+        parseTaskReport(
+          "COMMIT: 0123456789abcdef0123456789abcdef01234567\nTEST: pass\nTOKEN: 12,345 tokens\nReport: done\nTODO: none",
+        ),
+      ).toEqual({
+        hash: "0123456789ab",
+        tests: "pass",
+        summary: "done",
+        todo: "none",
+        tokenUsage: "12345",
+      });
+      // 消耗: 中文变体。
+      expect(
+        parseTaskReport(
+          "提交: 0123456789abcdef0123456789abcdef01234567\n消耗: 420 tokens\n汇报: 好",
+        ),
+      ).toEqual({ hash: "0123456789ab", summary: "好", tokenUsage: "420" });
+      // 缺 token 段 → tokenUsage 省略,不影响既有四段(向后兼容)。
+      expect(
+        parseTaskReport(
+          "提交: 0123456789abcdef0123456789abcdef01234567\n测试: ok",
+        ),
+      ).toEqual({ hash: "0123456789ab", tests: "ok" });
+      // 非法/空值 → 省略。
+      expect(
+        parseTaskReport("token: n/a\n提交: 0123456789abcdef0123456789abcdef01234567"),
+      ).toEqual({ hash: "0123456789ab" });
+    });
+
     it("renderTaskCard:缺段占位(hash→无,其余→-)与超长截断", () => {
       expect(renderTaskCard("codebuddy", {})).toBe(
         [
@@ -391,6 +425,25 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         summary: "x".repeat(9000),
       });
       expect(long.length).toBe(8000);
+      // 成功卡片不因新字段 tokenUsage 增加卡片行(保持四行,避免破坏既有 UI)。
+      expect(
+        renderTaskCard("codebuddy", {
+          hash: "0123456789ab",
+          tests: "ok",
+          summary: "好",
+          todo: "无",
+          tokenUsage: "12345",
+        }),
+      ).toBe(
+        [
+          "✅ 任务完成 codebuddy",
+          "────────────────",
+          "提交  0123456789ab",
+          "测试  ok",
+          "汇报  好",
+          "遗留  无",
+        ].join("\n"),
+      );
     });
   });
 
