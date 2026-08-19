@@ -169,6 +169,9 @@ app
           // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
           dispatcherParticipantId: true,
           dispatcherSessionId: true,
+          // callback 路由信息(Part B):透传 opaque 路由 { platform?,
+          // endpointRef?, sessionRef? };老任务为 null。
+          callbackRef: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -256,6 +259,9 @@ app
         // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
         dispatcherParticipantId: task.dispatcherParticipantId ?? null,
         dispatcherSessionId: task.dispatcherSessionId ?? null,
+        // callback 路由信息(Part B):透传 opaque 路由 { platform?,
+        // endpointRef?, sessionRef? };老任务为 null。
+        callbackRef: task.callbackRef ?? null,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       };

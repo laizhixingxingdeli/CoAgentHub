@@ -6,7 +6,7 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 import { participantIdentity } from "@server/middleware/participant-identity";
-import { and, asc, eq, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -98,15 +98,20 @@ app
       const now = new Date();
       const conditions = [
         eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
+        // 只列可认领事件:pending 且重试时间已到(nextAttemptAt 为 null = 从未
+        // fail;≤ now = 重试窗口已到),或 lease 已过期(leased 但 leaseExpiresAt
+        // ≤ now)。delivered/dead 不列出。
         or(
-          eq(taskCompletionEventTable.state, "pending"),
+          and(
+            eq(taskCompletionEventTable.state, "pending"),
+            or(
+              isNull(taskCompletionEventTable.nextAttemptAt),
+              lte(taskCompletionEventTable.nextAttemptAt, now),
+            ),
+          ),
           and(
             eq(taskCompletionEventTable.state, "leased"),
             lte(taskCompletionEventTable.leaseExpiresAt, now),
-          ),
-          and(
-            eq(taskCompletionEventTable.state, "dead"),
-            sql`false`,
           ),
         ),
       ];
@@ -121,7 +126,16 @@ app
         .orderBy(asc(taskCompletionEventTable.id))
         .limit(limit ?? MAX_LIMIT);
 
-      const events = await Promise.all(rows.map((e) => buildEnvelope(db, e)));
+      // 每条返回标准信封 + 交付状态(delivery state 属于 event row,inbox 消费
+      // 方需要知道可认领性;信封本体保持 schemaVersion=1 标准形状)。
+      const events = await Promise.all(
+        rows.map(async (e) => ({
+          ...(await buildEnvelope(db, e)),
+          state: e.state,
+          attempts: e.attempts,
+          nextAttemptAt: e.nextAttemptAt,
+        })),
+      );
       return c.json({ events });
     },
   )
@@ -162,7 +176,9 @@ app
       const leaseExpiresAt = new Date(Date.now() + leaseMs);
       const now = new Date();
 
-      // Atomic claim: only succeeds if the event is pending, or leased but expired.
+      // Atomic claim: only succeeds if the event is pending with its retry
+      // window open (nextAttemptAt null or already passed), or leased but
+      // expired — one statement, no read-then-write race.
       const [claimed] = await db
         .update(taskCompletionEventTable)
         .set({
@@ -176,7 +192,13 @@ app
             eq(taskCompletionEventTable.id, eventId),
             eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
             or(
-              eq(taskCompletionEventTable.state, "pending"),
+              and(
+                eq(taskCompletionEventTable.state, "pending"),
+                or(
+                  isNull(taskCompletionEventTable.nextAttemptAt),
+                  lte(taskCompletionEventTable.nextAttemptAt, now),
+                ),
+              ),
               and(
                 eq(taskCompletionEventTable.state, "leased"),
                 lte(taskCompletionEventTable.leaseExpiresAt, now),
@@ -317,7 +339,9 @@ app
         .update(taskCompletionEventTable)
         .set({
           state: isDead ? "dead" : "pending",
-          attempts: newAttempts,
+          // 原子自增:并发 fail(如 lease 过期后另一方重领)不丢计数;
+          // returning 的 attempts 即真实新值。
+          attempts: sql`${taskCompletionEventTable.attempts} + 1`,
           nextAttemptAt,
           lastError: truncatedError,
           leaseToken: null,

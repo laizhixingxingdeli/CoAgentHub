@@ -827,14 +827,17 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
   }, 30_000);
 
   it("持续输出的假 bin 总时长超过阈值但不误杀(输出间隔 < stall 阈值)→ done", async () => {
-    // 每 50ms 一行、共 40 行(总 ~2s > 200ms 阈值),任意相邻输出间隔远小于阈值。
+    // 每 50ms 一行、共 40 行(总 ~2s > 阈值),任意相邻输出间隔远小于阈值。
+    // stall 阈值用 500ms(而非 200ms):macOS `sleep 0.05` 的实际间隔在
+    // 0.01~0.2s 之间抖动,200ms 窗口在慢速/高负载机器上会偶发误杀,
+    // 500ms 保留「总时长远超阈值 + 输出间隔远小于阈值 → 不误杀」的断言意图。
     process.env.FAKE_SLEEP_SECS = "";
     process.env.FAKE_OUTPUT_LOOPS = "40";
     process.env.FAKE_OUTPUT_INTERVAL_MS = "0.05";
     const { __setReliabilityTimeoutsForTests } = await import(
       "@server/lib/executor-task"
     );
-    __setReliabilityTimeoutsForTests(200, 200);
+    __setReliabilityTimeoutsForTests(500, 200);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {
