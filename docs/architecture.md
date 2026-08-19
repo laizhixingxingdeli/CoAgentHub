@@ -35,7 +35,8 @@ CoAgentHub/
 │   ├── backend/
 │   │   ├── server/                    # Hono API 服务(:3001,基路径 /api)
 │   │   │   ├── src/
-│   │   │       ├── routes/participant/      #    participant 注册/列表/自管理(registry.ts)
+│   │   │       ├── routes/participant/      #    participant 注册/列表/自管理(registry.ts)+ task-completion-events.ts(completion inbox/claim/ack/fail)
+│   │   │       ├── routes/executor/   #    执行器配置管理(GET/POST/PATCH/DELETE /api/executors)
 │   │   │       ├── routes/group/      #    群组路由(架构审视拆分,API 路径/响应不变)
 │   │   │       │   ├── registry.ts   #      挂载入口(仅 route 汇总)
 │   │   │       │   ├── groups.ts     #      群本体:建/列(分页+搜索)/详情/改名/归档/软删
@@ -45,6 +46,7 @@ CoAgentHub/
 │   │   │       │   └── helpers.ts    #      共享守卫(assertGroupWritable)
 │   │   │       ├── routes/system/     #    health
 │   │   │       ├── routes/file.ts     #    LAN 文件上传下载,纯磁盘无鉴权,流式读写
+│   │   │       ├── routes/skills.ts   #    暴露 skills/{coordinator|executor|bugfix}/SKILL.md(GET /api/skills[:/:name])
 │   │   │       ├── middleware/participant-identity.ts  # X-Participant-Id 身份声明(无鉴权/校验)
 │   │   │       ├── lib/config.ts             # 统一配置读取(CORS/FILE_DIR/上传上限/PORT)
 │   │   │       ├── lib/group-visibility.ts   # 消息可见性规则(单一来源)
@@ -55,7 +57,7 @@ CoAgentHub/
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
 │   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail)
 │   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
-│   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard)
+│   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard;含 Token 消耗提取)
 │   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/停止/超时/重试)
 │   │   │   └── scripts/              #    演示/验收脚本
 │   │   └── database/                  # drizzle schema + migrations(表定义见 §3)
@@ -113,6 +115,10 @@ CoAgentHub/
 | `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending;超过 10 次进入 dead |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
+| `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`) |
+| `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效) |
+| `/api/skills` | GET | 列出 `skills/` 下 skills(name + description + SKILL.md path) |
+| `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容(coordinator/executor/bugfix;未知 404) |
 | `/api/docs`、`/api/openapi` | GET | Scalar API 文档与 OpenAPI 规范 |
 
 ### 身份声明与可见性
@@ -217,9 +223,17 @@ CoAgentHub/
   防空转,如外部会话占用)。
 - **任务书自包含原则**:每次任务由任务书(含 body 与本群分工 prompt)独立驱动,验收
   不依赖记忆。纯粹执行器(无 `memory` 标记)保持新鲜上下文,每次任务独立执行。
-  任务书模板包含「Code Review 自检」段(Standards + Spec Compliance checklist),
-  执行器完成前必须自检并在汇报中包含自检结果。Spec-Driven 模式下(specRef 非空),
-  任务书额外插入「关联规范」段,执行器严格按 Spec 实现。
+  任务书模板以精简的「**执行方式**」段触发 `coagenthub-executor` skill(读规范→写
+  代码→测试→Code Review 自检→汇报;未安装 skill 时任务书提示 `GET /api/skills/executor`
+  获取内容)。执行器自检(Code Review 自检,Standards + Spec Compliance 双轴)改由
+  **skill 承载**,不再固化进任务书正文。
+- **汇报格式要求(任务书模板固定五行)**:`提交: <commit hash>` / `测试: <测试结果摘要>` /
+  `Token: <消耗 token 数量>` / `汇报: <做了什么,3-5 句>` / `遗留: <未完成事项>`。stdout
+  四段解析由 `lib/executor-task/report.ts` 的 `parseTaskReport` 完成,其中 `Token:` 段
+  被清洗为纯数字(tokenUsage:去空格与千分位逗号、非法/空值省略),不会把描述性文字当
+  token 落库。
+- **Spec-Driven 模式**:specRef 非空时,任务书在「任务内容」前额外插入「关联规范」段
+  (文档路径 + 版本哈希 + 指令「以 Spec 为准」),执行器严格按 Spec 实现,冲突以 Spec 为准。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用
   a2a 跨任务 contextId 延续——调用前按 (executorKey, groupId) 取本群最近非 cancelled
   任务的 `a2a_context_id`,调用后回写;按群隔离,跨群不串。记忆只是加速器,缺失/失败

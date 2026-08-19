@@ -141,6 +141,9 @@ ws · winston (Sentry/Loki transports) · Vitest · Playwright
 
 ## API overview
 
+Server exposes a REST API under `/api`, plus a WebSocket hub at `/api/ws` for
+realtime push.
+
 | Category | Endpoints |
 | --- | --- |
 | Participants | `POST/GET /api/participants` · `PATCH/DELETE /api/participants/:id` |
@@ -148,7 +151,8 @@ ws · winston (Sentry/Loki transports) · Vitest · Playwright
 | Members | `POST/GET /api/groups/:id/members` · `PATCH/DELETE …/members/:participantId` |
 | Messages | `POST/GET /api/groups/:id/messages` · `PATCH/DELETE …/messages/:messageId` |
 | Tasks | `POST/GET /api/groups/:id/tasks` · `GET/PATCH …/tasks/:taskId` |
-| Executors | `GET/POST/PATCH/DELETE /api/executors` |
+| Executors | `GET/POST/PATCH/DELETE /api/executors` · `PATCH/DELETE …/executors/:key` |
+| Skills | `GET /api/skills` · `GET /api/skills/:name` |
 | Files | `POST /api/file/upload` · `GET /api/file/list` · `GET/DELETE /api/file/:name` |
 | System | `GET /api/system/health` |
 
