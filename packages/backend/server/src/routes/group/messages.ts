@@ -83,6 +83,17 @@ app
               dispatcherSessionId: z.string().max(200).optional(),
             })
             .optional(),
+          // callback 路由信息(Part B):可选,仅允许 { platform?, endpointRef?,
+          // sessionRef? } 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。
+          // 仅 coordinator/human 非执行器发送者可携带(与 dispatcherSessionId
+          // 同规则)。三个字段都缺省 = 无 callback,归一为 null。
+          callback: z
+            .object({
+              platform: z.string().max(200).optional(),
+              endpointRef: z.string().max(200).optional(),
+              sessionRef: z.string().max(200).optional(),
+            })
+            .optional(),
           // fileRef.expiresAt 可选由客户端传入;服务端缺省补 now + 7d (ticket 17)。
           // 输入上限(P0):name ≤255、fetchUrl ≤2048,超限校验返回 400。
           fileRef: FileRefInput.extend({
@@ -108,6 +119,7 @@ app
         metadata,
         specRef,
         specHash,
+        callback,
       } = c.req.valid("json");
 
       // Archive = read-only: an archived (or soft-deleted) group rejects new
@@ -215,22 +227,74 @@ app
         // 任务下发者信息(Part A):dispatcher_participant_id = 服务端识别的 sender
         // (请求体不可伪造);dispatcher_session_id 仅 coordinator/human 且**非执行器
         // participant** 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
-        // 绝不从 body 文本解析 sessionId;任务书 body 保持干净。
         const rawSessionId = metadata?.dispatcherSessionId;
         let dispatcherSessionId: string | null = null;
-        if (rawSessionId) {
-          const senderParticipant = await db.query.participant.findFirst({
-            where: (t, { eq }) => eq(t.id, senderId),
-          });
-          const senderIsExecutor =
-            senderParticipant !== undefined &&
-            (await findExecutorByParticipantName(db, senderParticipant.name));
-          const canCarry =
-            membership.roles.some((r) =>
-              (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
-            ) && !senderIsExecutor;
-          if (canCarry) dispatcherSessionId = rawSessionId;
+        const senderParticipantForDispatcher = await db.query.participant.findFirst({
+          where: (t, { eq }) => eq(t.id, senderId),
+        });
+        const senderIsExecutorForDispatcher =
+          senderParticipantForDispatcher !== undefined &&
+          (await findExecutorByParticipantName(db, senderParticipantForDispatcher.name));
+        const canCarryDispatcher =
+          membership.roles.some((r) =>
+            (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+          ) && !senderIsExecutorForDispatcher;
+        if (rawSessionId && canCarryDispatcher) dispatcherSessionId = rawSessionId;
+        // callback 路由信息(Part B):三个字段均为可选、不超过 200 字符的非空字符串;
+        // 仅 coordinator/human 且非执行器发送者可携带(与 dispatcherSessionId 同规则);
+        // 未知字段、URL、命令、凭据或嵌套对象拒绝(400)。只提供 callback.sessionRef
+        // 时同步写入兼容字段 dispatcherSessionId;同时提供两者且不等 → 400。
+        const rawCallback = callback;
+        let callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null = null;
+        let callbackSessionId: string | null = null;
+        if (rawCallback) {
+          // 拒绝嵌套对象 / 非 string 字段:此处 zod 已约束为 string | undefined,
+          // 只需过滤空串 + 拒绝非法内容。
+          const strip = (s?: string) => (s && s.trim().length > 0 ? s.trim() : undefined);
+          const platform = strip(rawCallback.platform);
+          const endpointRef = strip(rawCallback.endpointRef);
+          const sessionRef = strip(rawCallback.sessionRef);
+          // 拒绝 URL、命令、凭据等非法内容(简单 heuristic: 不能含空白或换行,
+          // 不能以 http:// / https:// / ssh:// 等协议开头, 不能含 $() 等 shell 注入)。
+          const FORBIDDEN_RE = /^https?:\/\/|^ssh:\/\/|^ftp:\/\/|\s|\$\(|`|&&|\|\|/;
+          for (const [k, v] of Object.entries({ platform, endpointRef, sessionRef })) {
+            if (!v) continue;
+            if (FORBIDDEN_RE.test(v)) {
+              throw new BizError(
+                BizCodeEnum.InvalidRequest,
+                `callback.${k} 含非法内容:不允许 URL、命令、凭据或空白`,
+              );
+            }
+          }
+          if (platform || endpointRef || sessionRef) {
+            callbackRef = { platform, endpointRef, sessionRef };
+            callbackSessionId = sessionRef ?? null;
+          }
         }
+        // 权限:与 dispatcherSessionId 一致 —— 仅 coordinator/human 非执行器发送者可写入。
+        const senderParticipantForCallback = await db.query.participant.findFirst({
+          where: (t, { eq }) => eq(t.id, senderId),
+        });
+        const senderIsExecutorForCallback =
+          senderParticipantForCallback !== undefined &&
+          (await findExecutorByParticipantName(db, senderParticipantForCallback.name));
+        const canCarryCallback =
+          membership.roles.some((r) =>
+            (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+          ) && !senderIsExecutorForCallback;
+        const finalCallbackRef = canCarryCallback ? callbackRef : null;
+        // 兼容字段:只提供 callback.sessionRef 时同步写入 dispatcherSessionId;
+        // 同时提供两者且不等 → 400。
+        if (callbackSessionId !== null && rawSessionId && callbackSessionId !== rawSessionId) {
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            "callback.sessionRef 与 dispatcherSessionId 冲突:两者必须相等",
+          );
+        }
+        const finalDispatcherSessionId =
+          finalCallbackRef !== null && callbackSessionId !== null
+            ? callbackSessionId
+            : dispatcherSessionId;
         // 首次任务初始化检查(项目脚手架):当消息触发任务(即即将调用
         // maybeDispatchExecutorTask)且群绑定了 projectPath 时,检查 Matt 文档
         // 脚手架;缺失则响应 header 返回 warning(不阻塞消息发送/任务下发)。
@@ -251,9 +315,10 @@ app
           audienceRef,
           body: body ?? "",
           dispatcherParticipantId: senderId,
-          dispatcherSessionId,
+          dispatcherSessionId: finalDispatcherSessionId,
           specRef: specRef ?? null,
           specHash: specHash ?? null,
+          callbackRef: finalCallbackRef,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;

@@ -62,6 +62,21 @@ export async function notifyTaskStatusChanged(
       updatedAt: isoOrNull(task.updatedAt),
       retryCount: task.retryCount,
     });
+    // Durable Task Completion Events:首次进入终态且有 dispatcher 时,
+    // DB trigger 已持久化 completion event,此处发轻量 WS 提示(仅低延迟提示,
+    // 可靠性来源始终是数据库 inbox)。fire-and-forget,失败不影响主流程。
+    if (
+      status === "done" ||
+      status === "failed" ||
+      status === "cancelled"
+    ) {
+      await wsHub.broadcastTaskCompletionAvailable(
+        groupId,
+        taskId,
+        status,
+        task.dispatcherParticipantId ?? null,
+      );
+    }
   } catch (e) {
     console.warn(`[executor] 推送 task_status_changed 失败(${taskId}): ${e}`);
   }

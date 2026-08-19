@@ -97,6 +97,10 @@ export const task = pgTable(
     // dispatcher_session_id 只接受 coordinator/human 且非执行器发送者的
     // metadata.dispatcherSessionId(≤200 字符);其余场景为 null。
     dispatcherSessionId: text("dispatcher_session_id"),
+    // callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
+    // 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。只读 —— 由
+    // POST /messages 校验后写入,任务生命周期内不改。null = 无 callback。
+    callbackRef: jsonb("callback_ref"),
     ...timeColumns("both"),
   },
   // group_id 索引:GET /:id/tasks 按 group_id 过滤 + created_at 排序分页,

@@ -263,6 +263,40 @@ export class WsHub {
         }),
     );
   }
+  /**
+   * Fan-out a lightweight task-completion-available hint (Durable Task
+   * Completion Events, specs/durable-task-completion-events.md). Only a
+   * low-latency nudge — the reliable source is always the database inbox
+   * (GET /participants/:id/task-completion-events). Fired when a task first
+   * enters a terminal state (done/failed/cancelled) AND has a dispatcher
+   * (completion event persisted by the DB trigger). Fire-and-forget: WS
+   * delivery failure does not affect the event's durability.
+   */
+  async broadcastTaskCompletionAvailable(
+    groupId: string,
+    taskId: string,
+    status: TaskStatus,
+    dispatcherParticipantId: string | null,
+  ): Promise<void> {
+    if (!dispatcherParticipantId) return;
+    await this.fanOut(
+      {
+        id: taskId,
+        groupId,
+        senderId: "",
+        audience: "broadcast" as const,
+        audienceRef: null,
+      },
+      () =>
+        JSON.stringify({
+          type: "task_completion_available",
+          groupId,
+          taskId,
+          status,
+          dispatcherParticipantId,
+        }),
+    );
+  }
   /** 取群成员(短缓存):fanOut 高频调用时避免每条消息都查 group_members。 */
   private async getGroupMembers(
     groupId: string,

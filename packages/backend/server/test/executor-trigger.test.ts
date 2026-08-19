@@ -354,6 +354,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         // 规范驱动下发:直调入口按测试语义补可选字段(与消息路由一致,均为 null)。
         specRef: null,
         specHash: null,
+        // callback 路由信息(Part B):直调入口按测试语义补可选字段(null = 无 callback)。
+        callbackRef: null,
       },
     );
     await new Promise((r) => setTimeout(r, 300));

@@ -74,7 +74,8 @@ CoAgentHub/
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
 | `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
-| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、时间列 |
+| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
+| `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`(UNIQUE → 同一 task 最多一个终态 event)、`group_id`、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建(task_id 唯一约束保证幂等) |
 
 ## 4. API 全貌
 
@@ -102,6 +103,10 @@ CoAgentHub/
 | `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
 | `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空) |
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
+| `/api/participants/:id/task-completion-events` | GET | 列出 participant 的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
+| `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
+| `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered;相同 token 重复 ack 幂等 |
+| `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending;超过 10 次进入 dead |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
 | `/api/docs`、`/api/openapi` | GET | Scalar API 文档与 OpenAPI 规范 |

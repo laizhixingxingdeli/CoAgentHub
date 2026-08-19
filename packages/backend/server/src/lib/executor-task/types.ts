@@ -27,6 +27,9 @@ export interface DispatchExecutorInput {
   specRef: string | null;
   /** 规范文档的 Git Hash(版本快照,审计用);无版本哈希时为 null。 */
   specHash: string | null;
+  /** callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
+   *  三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。 */
+  callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null;
 }
 
 /** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */

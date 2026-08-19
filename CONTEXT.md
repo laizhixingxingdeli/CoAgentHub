@@ -16,8 +16,11 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **group_members.prompt** | 群内成员自定义提示词:该 participant 在本群的分工说明,调度时拼进任务书 |
 | **audience** | 消息投递范围:`broadcast` / `role`(audienceRef=角色名) / `participant`(audienceRef=participantId) |
 | **group_message + closure** | 消息与闭包表(消息树,`depth`=根到该消息的层级) |
-| **task** | 一次执行:定向消息(`audience=participant`)命中执行器 → server 直接建 task → 按 project_path 分组队列 spawn(同项目串行、跨项目并行)+ 按执行器并发能力排队(可选 `maxConcurrency` 上限 / `403 atomgit_session_concurrency_conflict` 反应式排队)→ done/failed |
+| **task** | 一次执行:定向消息(`audience=participant`)命中执行器 → server 直接建 task → 按 project_path 分组队列 spawn(同项目串行、跨项目并行)+ 按执行器并发能力排队(可选 `maxConcurrency` 上限 / `403 atomgit_session_concurrency_conflict` 反应式排队)→ done/failed。可选 callback 路由(`callbackRef` = `{ platform?, endpointRef?, sessionRef? }` 三个短字符串,不存 URL/token/命令/secret)随任务持久化 |
 | **checkpointRef** | 执行前 git 快照(`refs/coagenthub-cp/<taskId>`),回滚用 |
+| **callbackRef** | 可选 opaque 路由信息,只允许 `{ platform?, endpointRef?, sessionRef? }` 三个短字符串(≤200 字符),不存 URL/token/命令/secret。task 首次进入终态时由 DB trigger 据此创建 completion event,宿主按 callbackRef 恢复会话 |
+| **completion event** | Durable Task Completion Event:task 首次从非终态进入 done/failed/cancelled 时,若存在 dispatcherParticipantId,由 DB trigger 在 task 同事务内持久化到 `task_completion_event` 表(task_id 唯一约束保证幂等)。状态机 `pending → leased → delivered → dead`,participant-scoped inbox + claim/lease/ack/fail API 交付 |
+| **inbox** | participant-scoped completion event 视图:`GET /api/participants/:id/task-completion-events` 查询 pending/可重试/lease 已过期的事件(可靠性来源始终是数据库 inbox,WS 仅低延迟提示) |
 | **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
 | **Local User** | 无身份声明请求的默认身份(human,全可见);局域网全信模型 |
 | **项目记忆** | 群绑定 `project_path` → 读取仓库文档(静态记忆) |

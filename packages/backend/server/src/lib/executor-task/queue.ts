@@ -285,6 +285,7 @@ export async function maybeDispatchExecutorTask(
     dispatcherSessionId,
     specRef,
     specHash,
+    callbackRef,
   } = input;
 
   // 与桥相同的角色门槛:非 coordinator/human 不执行(桥侧也会拒绝)。
@@ -338,6 +339,7 @@ export async function maybeDispatchExecutorTask(
     dispatcherSessionId,
     specRef,
     specHash,
+    callbackRef,
   });
 }
 
@@ -359,6 +361,8 @@ async function dispatchTask(
     specRef: string | null;
     /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
     specHash: string | null;
+    /** callback 路由信息(Part B):见 DispatchExecutorInput。 */
+    callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null;
   },
 ): Promise<void> {
   const {
@@ -372,6 +376,7 @@ async function dispatchTask(
     dispatcherSessionId,
     specRef,
     specHash,
+    callbackRef,
   } = opts;
 
   const [created] = await db
@@ -392,6 +397,9 @@ async function dispatchTask(
       // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
       dispatcherParticipantId,
       dispatcherSessionId,
+      // callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
+      // 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。
+      callbackRef,
     })
     .onConflictDoNothing({ target: taskTable.messageId })
     .returning();

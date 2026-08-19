@@ -127,6 +127,13 @@
       "when": 1786810000004,
       "tag": "0017_add_task_spec_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786820000000,
+      "tag": "0018_task_completion_events",
+      "breakpoints": true
     }
   ]
 }
