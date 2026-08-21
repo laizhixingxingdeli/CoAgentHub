@@ -32,6 +32,7 @@ chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CLITEST = fakeBin;
 
 import { testDb } from "./db";
+import type { DataBase } from "../src/lib/database";
 
 const app = createTestApp();
 
@@ -97,11 +98,19 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(res.status).toBe(200);
     const list = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(list)).toBe(true);
-    expect(list.length).toBeGreaterThanOrEqual(7); // 6 内置 + 1 新增
+    expect(list.length).toBeGreaterThanOrEqual(8); // 7 内置 + 1 新增
 
     const builtin = list.find((x) => x.key === "executor");
     expect(builtin).toBeTruthy();
     expect(builtin!.builtin).toBe(true);
+
+    // 内置 reviewer 执行器(§3.12 接线):builtin=true,串行,无 commitMode 字段。
+    const reviewer = list.find((x) => x.key === "reviewer");
+    expect(reviewer).toBeTruthy();
+    expect(reviewer!.builtin).toBe(true);
+    expect(reviewer!.kind).toBe("cli");
+    expect(reviewer!.maxConcurrency).toBe(1);
+    expect(reviewer).not.toHaveProperty("commitMode");
 
     // win-hermes 默认 memory="per-group"(协调器按群记忆);其他执行器无记忆。
     const winHermes = list.find((x) => x.key === "win-hermes");
@@ -139,6 +148,18 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       expect(item).not.toHaveProperty("tokenHash");
     }
     expect(JSON.stringify(list)).not.toContain("token_hash");
+  });
+
+  it("内置 reviewer 执行器:effectiveExecutors 派生 canDispatch=true(DISPATCH_CAPABLE_KEYS)", async () => {
+    // GET /api/executors 不透出 canDispatch 字段;直接走 effectiveExecutors
+    // 验证 DISPATCH_CAPABLE_KEYS(["reviewer"]) 在合并时派生 canDispatch: true。
+    const { effectiveExecutors } = await import("../src/lib/executors");
+    const all = await effectiveExecutors(testDb as unknown as DataBase);
+    const reviewer = all.find((x) => x.key === "reviewer");
+    expect(reviewer).toBeDefined();
+    expect(reviewer!.agentName).toBe("Reviewer 检视器");
+    expect(reviewer!.canDispatch).toBe(true);
+    expect(reviewer).not.toHaveProperty("commitMode");
   });
 
   it("DELETE /api/executors/:key 删除 DB 配置;内置 key → 409", async () => {

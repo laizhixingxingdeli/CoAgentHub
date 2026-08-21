@@ -93,9 +93,10 @@ app
       const hint = capabilityHint(participant.capabilities, dedupedRoles);
 
       // 加群自动发 skill 安装引导:roles 含 executor → 发 coagenthub-executor
-      // 安装引导;含 coordinator → 发 coagenthub-coordinator 安装引导;其他角色
-      // 不发。fire-and-forget,发送失败只记日志,绝不阻塞成员添加响应。发送者
-      // 用 Local User(系统身份),避免需要额外权限。
+      // 安装引导;含 coordinator → 发 coagenthub-coordinator;含 reviewer → 发
+      // coagenthub-reviewer 安装引导;其他角色不发。fire-and-forget,发送失败只
+      // 记日志,绝不阻塞成员添加响应。发送者用 Local User(系统身份),避免需要
+      // 额外权限。
       const skillMessages: Record<string, string> = {
         executor: `请先安装 coagenthub-executor skill：
 1. GET /api/skills/executor 获取内容
@@ -107,6 +108,11 @@ app
 2. 写入你的 skills 目录（如 ~/.hermes/skills/coagenthub-coordinator/SKILL.md）
 3. 安装完成后回复「✅ skill 已安装」
 未初始化前不要下发任务。`,
+        reviewer: `请先安装 coagenthub-reviewer skill：
+1. GET /api/skills/reviewer 获取内容
+2. 写入你的 skills 目录（如 ~/.hermes/skills/coagenthub-reviewer/SKILL.md）
+3. 安装完成后回复「✅ skill 已安装」
+未安装前不要接收检视任务。`,
       };
       void (async () => {
         try {

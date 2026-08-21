@@ -581,8 +581,34 @@ describe("群组成员管理 API (ticket 20)", () => {
       );
     });
 
-    it("添加 observer 成员不发 skill 引导消息", async () => {
+    it("添加 reviewer 成员后自动发 coagenthub-reviewer 安装引导(定向给该成员)", async () => {
       const { id } = await registerParticipant({ name: "coord-skill3" });
+      const { id: reviewerId } = await registerParticipant({
+        name: "skill-reviewer",
+      });
+      const group = await createGroup(id, "reviewer 引导群");
+      await addMember(id, group.id, reviewerId, ["reviewer"]);
+
+      await new Promise((r) => setTimeout(r, 50));
+      const rows = await testDb
+        .select({
+          body: groupMessageTable.body,
+          audience: groupMessageTable.audience,
+          audienceRef: groupMessageTable.audienceRef,
+        })
+        .from(groupMessageTable)
+        .where(eq(groupMessageTable.groupId, group.id));
+      const guide = rows.find((r) =>
+        (r.body ?? "").includes("coagenthub-reviewer"),
+      );
+      expect(guide).toBeTruthy();
+      // 定向投递给该 reviewer 成员(audience=participant,audienceRef=成员 id)。
+      expect(guide!.audience).toBe("participant");
+      expect(guide!.audienceRef).toBe(reviewerId);
+    });
+
+    it("添加 observer 成员不发 skill 引导消息", async () => {
+      const { id } = await registerParticipant({ name: "coord-skill4" });
       const { id: observerId } = await registerParticipant({
         name: "skill-observer",
       });

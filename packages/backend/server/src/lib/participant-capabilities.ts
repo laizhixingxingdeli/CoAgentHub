@@ -70,6 +70,7 @@ export const COAGENTHUB_SKILL_CAPABILITIES = {
   executor: "coagenthub-executor",
   coordinator: "coagenthub-coordinator",
   bugfix: "coagenthub-bugfix",
+  reviewer: "coagenthub-reviewer",
 } as const;
 
 /**

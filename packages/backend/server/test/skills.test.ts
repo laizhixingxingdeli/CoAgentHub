@@ -4,18 +4,20 @@ import { createTestApp } from "./app";
 describe("GET /api/skills", () => {
   const app = createTestApp();
 
-  it("返回 3 个 skill,每个含 name/description/path", async () => {
+  it("返回 4 个 skill,每个含 name/description/path,reviewer 带非空描述", async () => {
     const res = await app.request("/api/skills");
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.items).toHaveLength(3);
+    expect(body.items).toHaveLength(4);
     const names = body.items.map((i: any) => i.name).sort();
-    expect(names).toEqual(["bugfix", "coordinator", "executor"]);
+    expect(names).toEqual(["bugfix", "coordinator", "executor", "reviewer"]);
     for (const item of body.items) {
       expect(typeof item.name).toBe("string");
       expect(typeof item.description).toBe("string");
       expect(item.path).toMatch(/^skills\/[^/]+\/SKILL\.md$/);
     }
+    const reviewer = body.items.find((i: any) => i.name === "reviewer");
+    expect(reviewer.description.length).toBeGreaterThan(0);
   });
 });
 
@@ -29,6 +31,15 @@ describe("GET /api/skills/:name", () => {
     expect(body.name).toBe("executor");
     expect(typeof body.content).toBe("string");
     expect(body.content).toContain("CoAgentHub Executor");
+  });
+
+  it("获取 reviewer skill 返回 200 且 content 非空", async () => {
+    const res = await app.request("/api/skills/reviewer");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe("reviewer");
+    expect(typeof body.content).toBe("string");
+    expect(body.content.length).toBeGreaterThan(0);
   });
 
   it("不存在的 name 返回 404", async () => {

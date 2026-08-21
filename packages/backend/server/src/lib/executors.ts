@@ -133,6 +133,22 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     maxConcurrency: 1,
   },
   {
+    // 检视者 runtime:注册为执行器以被下发 L3 检视任务唤醒。canDispatch 不在此
+    // 手写 —— 由 DISPATCH_CAPABLE_KEYS(["reviewer"])在 effectiveExecutors 合并时
+    // 派生为 true(检视者既是执行器又是下发方,见 ExecutorConfig.canDispatch)。
+    key: "reviewer",
+    agentName: "Reviewer 检视器",
+    type: "participant",
+    kind: "cli",
+    // 占位标识,业务方部署时用 EXECUTOR_BIN_REVIEWER 覆盖为实际 CLI 命令
+    // (applyEnvOverrides 按 EXECUTOR_BIN_<KEY 大写> 自动覆盖,无需改动)。
+    bin: "reviewer",
+    args: ["-y", "-p", "{ticket}"],
+    label: "reviewer",
+    // 检视任务串行即可:同一检视者 runtime 同时只处理一个 L3 检视任务。
+    maxConcurrency: 1,
+  },
+  {
     key: "hermes",
     agentName: "Hermes 规划",
     type: "hermes",

@@ -248,22 +248,11 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
   }, 15_000);
 
   it("canDispatch: true 的执行器(检视者 runtime)可携带 dispatcher/callback(§3.2 判据)", async () => {
-    // 通过 API 新增 key=reviewer 的执行器配置(agentName slug 生成 key=reviewer,
-    // 命中 DISPATCH_CAPABLE_KEYS → effectiveExecutors 派生 canDispatch: true,
-    // 纯代码派生不落 DB 列)——检视者既要被下发任务唤醒(注册为执行器),又能
-    // 自己下发任务携带 callbackRef,不再被当"纯执行器"丢弃。
-    const createRes = await app.request("/api/executors", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agentName: "Reviewer 执行器",
-        kind: "cli",
-        bin: "/bin/echo",
-        args: [],
-      }),
-    });
-    expect(createRes.status).toBe(200);
-    const reviewer = await registerParticipant({ name: "Reviewer 执行器" });
+    // 内置 reviewer 执行器(key=reviewer,agentName="Reviewer 检视器")命中
+    // DISPATCH_CAPABLE_KEYS → effectiveExecutors 派生 canDispatch: true(纯代码
+    // 派生,不落 DB 列)——检视者既要被下发任务唤醒(注册为执行器),又能自己
+    // 下发任务携带 callbackRef,不再被当"纯执行器"丢弃。
+    const reviewer = await registerParticipant({ name: "Reviewer 检视器" });
     const { coordinator, codebuddy, group } = await setupGroup("下发者 R");
     await addMember(coordinator.id, group.id, reviewer.id, ["coordinator"]);
     const { res, json } = await postMessage(reviewer.id, group.id, {

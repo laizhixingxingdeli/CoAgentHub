@@ -11,7 +11,7 @@ import { Hono } from "hono";
 // (第一个 ../ 连同文件名一起被 URL 解析消耗,故 5 个 ../ 即到仓库根)。
 const REPO_ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const SKILLS_DIR = resolve(REPO_ROOT, "skills");
-const SKILL_NAMES = ["coordinator", "executor", "bugfix"] as const;
+const SKILL_NAMES = ["coordinator", "executor", "bugfix", "reviewer"] as const;
 
 function readSkillDescription(name: string): string {
   const content = readFileSync(resolve(SKILLS_DIR, name, "SKILL.md"), "utf8");

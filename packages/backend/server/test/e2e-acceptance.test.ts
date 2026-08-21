@@ -197,9 +197,14 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     expect(draft.parentId).toBeNull();
 
     // ── 5. reviewer 收到(拉取)→ 发检视意见(子消息,parentId=草稿)
-    // 用户命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到
+    // 用户命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到;
+    // 加群自动发的 coagenthub-reviewer 安装引导也定向投递给 reviewer。
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
-    expect(reviewerSeen.map((m) => m.body)).toEqual([command.body, draft.body]);
+    expect(reviewerSeen.map((m) => m.body)).toEqual([
+      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
+      command.body,
+      draft.body,
+    ]);
 
     const review = await sendMessage(reviewer.id, group.id, {
       body: "检视意见:补充数据清洗步骤,否则收敛不稳",
@@ -305,11 +310,12 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         fileSha256,
       );
 
-      // ── 10. user(human)增量拉取:全程可见,一条不落(含发往 executor 的 skill 安装引导)
+      // ── 10. user(human)增量拉取:全程可见,一条不落(含发往 reviewer/executor 的 skill 安装引导)
       const humanSeen = await fetchMessages(user.id, group.id);
       const humanBodies = humanSeen.map((m) => m.body);
-      expect(humanBodies).toHaveLength(7);
+      expect(humanBodies).toHaveLength(8);
       expect(humanBodies).toEqual([
+        expect.stringContaining("请先安装 coagenthub-reviewer skill"),
         expect.stringContaining("请先安装 coagenthub-executor skill"),
         command.body,
         draft.body,

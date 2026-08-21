@@ -144,9 +144,13 @@ describe("检视流程协议(ticket 04)", () => {
     expect(draft.parentId).toBeNull();
     expect(draft.depth).toBe(0);
 
-    // b. reviewer 拉取:只见草稿;以草稿为父发检视意见,回给 coordinator
+    // b. reviewer 拉取:只见草稿 + 加群自动发的 coagenthub-reviewer 安装引导;
+    //    以草稿为父发检视意见,回给 coordinator
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
-    expect(reviewerSeen.map((m) => m.body)).toEqual([draft.body]);
+    expect(reviewerSeen.map((m) => m.body)).toEqual([
+      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
+      draft.body,
+    ]);
 
     const review = await sendMessage(reviewer.id, group.id, {
       body: "检视意见:数据增强部分需要补充清洗步骤",
@@ -158,9 +162,16 @@ describe("检视流程协议(ticket 04)", () => {
     expect(review.parentId).toBe(draft.id);
     expect(review.depth).toBe(1);
 
-    // c. coordinator 拉取:可见草稿+检视意见;采纳后发最终版,audience=role:executor
+    // c. coordinator 拉取:可见草稿+检视意见(+ 加群自动发的 reviewer 安装引导
+    //     —— 本测试 coordinator 与 reviewer 同名 "hermes",注册时 409 复用同一
+    //     participant,故定向给 reviewer 的引导对 coordinator 同样可见);
+    //    采纳后发最终版,audience=role:executor
     const coordSeen = await fetchMessages(coordinator.id, group.id);
-    expect(coordSeen.map((m) => m.body)).toEqual([draft.body, review.body]);
+    expect(coordSeen.map((m) => m.body)).toEqual([
+      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
+      draft.body,
+      review.body,
+    ]);
 
     const final = await sendMessage(coordinator.id, group.id, {
       body: "最终版:训练 7B 模型(含数据清洗)",
@@ -196,11 +207,11 @@ describe("检视流程协议(ticket 04)", () => {
     expect(result.audience).toBe("broadcast");
     expect(result.parentId).toBeNull();
 
-    // f. human 拉取:可见全部(草稿/检视意见/最终版/执行结果 + skill 安装引导)。
-    //    用户要看全过程 → 含发送给 executor 的 skill 安装引导。
+    // f. human 拉取:可见全部(草稿/检视意见/最终版/执行结果 + 两条 skill 安装引导)。
+    //    用户要看全过程 → 含发送给 reviewer/executor 的 skill 安装引导。
     const humanSeen = await fetchMessages(human.id, group.id);
     const humanBodies = humanSeen.map((m) => m.body);
-    expect(humanBodies).toHaveLength(5);
+    expect(humanBodies).toHaveLength(6);
     expect(humanBodies).toContain(draft.body);
     expect(humanBodies).toContain(review.body);
     expect(humanBodies).toContain(final.body);

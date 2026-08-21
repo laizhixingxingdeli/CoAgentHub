@@ -445,8 +445,8 @@ describe("群组消息树与受众路由", () => {
         .select({ id: groupMessageTable.id })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      // 1 根消息 + 64 层回复 + 1 条 executor 成员的 skill 安装引导(加群自动发)。
-      expect(msgRows).toHaveLength(66);
+      // 1 根消息 + 64 层回复 + 2 条 skill 安装引导(reviewer + executor 成员加群自动发)。
+      expect(msgRows).toHaveLength(67);
     });
   });
 
@@ -899,12 +899,12 @@ describe("群组消息树与受众路由", () => {
       expect(await res.json()).toEqual({ success: true });
 
       // 行保留:body 变占位,闭包树(children 的 depth)不变。
-      // 行数 = 根 + 回复 + 1 条 executor 成员的 skill 安装引导(加群自动发)。
+      // 行数 = 根 + 回复 + 2 条 skill 安装引导(reviewer + executor 成员加群自动发)。
       const rows = await testDb
         .select({ id: groupMessageTable.id, body: groupMessageTable.body })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(4);
       const rootRow = rows.find((r) => r.id === root.id);
       expect(rootRow?.body).toBe("[消息已删除]");
       const childRow = rows.find((r) => r.id === child.id);
@@ -1030,6 +1030,20 @@ describe("群组消息树与受众路由", () => {
         audience: "broadcast",
       });
       await waitForCapability(executor.id, "coagenthub-coordinator");
+    });
+
+    it('发送 "✅ skill 已安装: reviewer" 更新 reviewer capability,重复发送幂等', async () => {
+      const { group, coordinator, executor } = await setupGroup();
+      await sendMessage(executor.id, group.id, {
+        body: "✅ skill 已安装: reviewer",
+        audience: "broadcast",
+      });
+      await waitForCapability(executor.id, "coagenthub-reviewer");
+      const caps = await participantCapabilities(executor.id);
+      // 幂等:重复追加不重复(capabilities 中该值只出现一次)。
+      expect(
+        caps.filter((c) => c === "coagenthub-reviewer").length,
+      ).toBe(1);
     });
 
     it("普通消息不更新 capabilities", async () => {
