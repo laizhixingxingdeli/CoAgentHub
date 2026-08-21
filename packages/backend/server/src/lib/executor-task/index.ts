@@ -19,8 +19,8 @@
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
+  cancelQueuedTasks,
   currentRunningTask,
-  hasSkipCommitMarker,
   isConcurrencyConflict,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
@@ -28,8 +28,6 @@ export {
   refreshA2AActivity,
   resolveTaskRepo,
   resolveTestExecutor,
-  stopRunningTask,
-  verifyTaskCommitted,
 } from "./queue";
 export { parseTaskReport, renderTaskCard, type TaskReport } from "./report";
 export {
@@ -40,6 +38,6 @@ export {
 } from "./state";
 export {
   type DispatchExecutorInput,
-  EXEC_ALLOWED_ROLES,
+  DISPATCH_ALLOWED_ROLES,
   type GroupPromptInfo,
 } from "./types";

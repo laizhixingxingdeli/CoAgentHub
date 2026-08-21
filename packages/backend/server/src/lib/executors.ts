@@ -70,6 +70,14 @@ export interface ExecutorConfig {
    * 注:DB 持久化配置(executor_config 表)暂无可持久化列,按缺省(不限制)处理。
    */
   maxConcurrency?: number;
+  /**
+   * 该执行器同时也是下发方(协调者/检视者 runtime):其发出的消息可携带
+   * dispatcher/callback 路由信息。默认 false(纯执行器)——messages.ts /
+   * control.ts 据此区分「纯执行器(丢弃其携带的路由信息/防回环)」与
+   * 「可下发的下发者(允许携带)」。Phase 1 无内置执行器设 true(reviewer
+   * 接线批再加),纯代码派生字段,不落 DB 列。
+   */
+  canDispatch?: boolean;
 }
 
 const DEFAULT_EXECUTORS: ExecutorConfig[] = [
@@ -246,6 +254,15 @@ function applyEnvOverrides(ex: ExecutorConfig): ExecutorConfig {
 
 /* ---------------- DB 持久化配置(接入 Participant 界面) ---------------- */
 
+/**
+ * 可下发执行器 key 集合(§3.2):key 在此集合中的执行器同时也是下发方(协调者/
+ * 检视者 runtime),合并时派生 canDispatch: true —— 其发出的消息可携带
+ * dispatcher/callback 路由信息,不再被当作"纯执行器"丢弃。当前仅 reviewer
+ * (内置 reviewer 配置批次2 接线),既有内置执行器不在此集合 → 行为完全不变,
+ * 判据从「黑名单式(是否在执行器配置表)」改为「看标记(canDispatch)」。
+ */
+const DISPATCH_CAPABLE_KEYS = new Set(["reviewer"]);
+
 /** DB 执行器配置行的运行时类型(select 结果元素)。 */
 type ExecutorConfigRow = Awaited<
   ReturnType<typeof listExecutorConfigs>
@@ -385,7 +402,9 @@ export async function effectiveExecutors(
     return cachedEffectiveExecutors;
   }
   const rows = await listExecutorConfigs(db);
-  cachedEffectiveExecutors = [...defaultExecutors(), ...rows.map(rowToConfig)];
+  cachedEffectiveExecutors = [...defaultExecutors(), ...rows.map(rowToConfig)].map(
+    (ex) => (DISPATCH_CAPABLE_KEYS.has(ex.key) ? { ...ex, canDispatch: true } : ex),
+  );
   cachedEffectiveExecutorsAt = Date.now();
   return cachedEffectiveExecutors;
 }

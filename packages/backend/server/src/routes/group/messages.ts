@@ -8,7 +8,7 @@ import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import {
-  EXEC_ALLOWED_ROLES,
+  DISPATCH_ALLOWED_ROLES,
   maybeDispatchExecutorTask,
   refreshA2AActivity,
 } from "@server/lib/executor-task";
@@ -172,7 +172,7 @@ app
         if (
           isExecutorTarget &&
           !membership.roles.some((r) =>
-            (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+            (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
           )
         ) {
           throw new BizError(
@@ -233,15 +233,24 @@ app
         const senderParticipantForDispatcher = await db.query.participant.findFirst({
           where: (t, { eq }) => eq(t.id, senderId),
         });
-        const senderIsExecutorForDispatcher =
-          senderParticipantForDispatcher !== undefined &&
-          (await findExecutorByParticipantName(db, senderParticipantForDispatcher.name));
+        // §3.2 判据:发送者命中执行器配置且该配置 canDispatch !== true = 纯执行器,
+        // 其携带的 dispatcher/callback 路由信息一律丢弃;canDispatch: true 的执行器
+        // (协调者/检视者 runtime)允许携带——不再按"是否在执行器配置表中"一刀切。
+        const senderExecutor =
+          senderParticipantForDispatcher !== undefined
+            ? await findExecutorByParticipantName(
+                db,
+                senderParticipantForDispatcher.name,
+              )
+            : undefined;
+        const senderIsPureExecutor =
+          senderExecutor !== undefined && !senderExecutor.canDispatch;
         const canCarryDispatcher =
           membership.roles.some((r) =>
-            (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
-          ) && !senderIsExecutorForDispatcher;
-        // Part A:dispatcher_session_id 仅 coordinator/human 且非执行器发送者
-        // 可携带(执行器伪造 metadata 一律忽略),否则为 null。
+            (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
+          ) && !senderIsPureExecutor;
+        // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 且非纯执行器
+        // 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
         const rawSessionId = metadata?.dispatcherSessionId;
         const dispatcherSessionId =
           rawSessionId && canCarryDispatcher ? rawSessionId : null;

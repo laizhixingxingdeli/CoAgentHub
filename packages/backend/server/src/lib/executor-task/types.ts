@@ -7,8 +7,10 @@ import type { ExecutorConfig } from "@server/lib/executors";
  * 分工信息 / 汇报结构。与拆分前 lib/executor-task.ts 中的定义逐字一致。
  */
 
-/** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发布任务。 */
-export const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
+/** 下发门角色门槛(与桥 EXEC_ALLOWED_ROLES 同语义):coordinator / human /
+ *  reviewer 能发布任务(human 禁言后需求下发由 reviewer 代发)。与 control.ts
+ *  的 CONTROL_ALLOWED_ROLES 分开维护——语义不同:前者管下发,后者管停止/回滚。 */
+export const DISPATCH_ALLOWED_ROLES = ["coordinator", "human", "reviewer"] as const;
 
 export interface DispatchExecutorInput {
   groupId: string;

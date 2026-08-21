@@ -43,7 +43,7 @@ chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
 const { createTestApp } = await import("./app");
-const { __resetExecutorQueueForTests, currentRunningTask } = await import(
+const { __resetExecutorQueueForTests } = await import(
   "../src/lib/executor-task"
 );
 
@@ -282,26 +282,6 @@ describe("Durable Task Completion Events", () => {
         );
       }
       await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-
-  /**
-   * 轮询直到任务已进入 in-memory 运行态且进程句柄可 kill。
-   * DB 状态置 running 早于 spawn 完成(中间含 git checkpoint),此刻发停止指令
-   * 时 kill 句柄尚未就绪 → 指令落空;等 currentRunningTask() 返回可 kill 的该任务
-   * 再发,保证停止指令真正命中 running 进程。
-   */
-  async function waitForTaskKillable(taskId: string, timeoutMs = 15_000) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const rt = currentRunningTask();
-      if (rt && rt.taskId === taskId) return;
-      if (Date.now() > deadline) {
-        throw new Error(
-          `task ${taskId} 未在 ${timeoutMs}ms 内变为可终止的运行态`,
-        );
-      }
-      await sleep(50);
     }
   }
 
@@ -864,12 +844,40 @@ describe("Durable Task Completion Events", () => {
       expect(events.filter((e) => e.task?.taskId === taskId).length).toBe(1);
     }, 30_000);
 
-    it("取消(停止指令 → cancelled):一个 event", async () => {
+    it("取消(停止指令取消排队任务 → cancelled):一个 event", async () => {
       const { coordinator, codebuddy, group } = await setupGroup("path-cancel");
-      // 长跑:让任务停留在 running,便于停止指令命中。
-      process.env.FAKE_SLEEP_SECS = "20";
+      // 第一条长睡任务占住组槽位(running),第二条同组排队。
+      process.env.FAKE_SLEEP_SECS = "5";
+      const { res: blockerRes, json: blockerMsg } = await postMessage(
+        coordinator.id,
+        group.id,
+        {
+          body: "占位任务(慢)",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        },
+      );
+      expect(blockerRes.status).toBe(200);
+      await waitForTask(group.id, blockerMsg.id as string);
+      // 等占位任务进入 running(保证第二条稳定排队,不被立即 pump 取走)。
+      const blockerRunningDeadline = Date.now() + 10_000;
+      for (;;) {
+        const tasks = await listTasks(group.id);
+        if (
+          tasks.some(
+            (x) => x.messageId === blockerMsg.id && x.status === "running",
+          )
+        ) {
+          break;
+        }
+        if (Date.now() > blockerRunningDeadline) {
+          throw new Error("占位任务未在 10s 内进入 running");
+        }
+        await sleep(50);
+      }
+
       const { res, json: msg } = await postMessage(coordinator.id, group.id, {
-        body: "取消路径",
+        body: "取消路径(排队)",
         audience: "participant",
         audienceRef: codebuddy.id,
         callback: { sessionRef: "path-cancel-session" },
@@ -877,12 +885,9 @@ describe("Durable Task Completion Events", () => {
       expect(res.status).toBe(200);
       const task = await waitForTask(group.id, msg.id as string);
       const taskId = task.id as string;
-      // DB 置 running 早于 spawn 完成:等 in-memory 运行句柄可 kill 后再发停止,
-      // 避免停止指令落在 run.kill 未就绪的竞态窗口。
-      await waitForTaskKillable(taskId);
-      // 协调者发「停止」控制指令 → 运行中任务被置 cancelled。
+      // 协调者发「停止 <排队任务>」→ 排队任务被取消(运行中任务不再可中断)。
       const stop = await postMessage(coordinator.id, group.id, {
-        body: "停止",
+        body: `停止 ${taskId}`,
         audience: "broadcast",
       });
       expect(stop.res.status).toBe(200);

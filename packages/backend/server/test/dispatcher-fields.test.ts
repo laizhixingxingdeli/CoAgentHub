@@ -43,14 +43,33 @@ const { __resetExecutorQueueForTests } = await import(
 const app = createTestApp();
 
 afterAll(async () => {
-  // 任务创建即返回,spawn/完成在后台异步进行:等待队列清空(所有后台任务已
-  // 落定、完成路径的 DB 写已结束),避免文件结束时残留任务写已关闭的 PGlite
-  // 产生未处理拒绝(setup.ts 的 afterAll 在文件级 afterAll 之后才关闭连接)。
+  // 任务创建即返回,spawn/完成在后台异步进行:等待队列清空 + DB 无 queued/
+  // running 任务(「已出队未 spawn」窗口的任务 currentRunningTask 捕获不到,
+  // 只查内存队列会漏),避免文件结束时残留任务写已关闭的 PGlite / 已删除的
+  // 仓库产生未处理拒绝(setup.ts 的 afterAll 在文件级 afterAll 之后才关闭)。
   const { currentRunningTask, queuedExecutorTaskCount } = await import(
     "../src/lib/executor-task"
   );
+  const { testDb } = await import("./db");
+  const { task: taskTable } = await import(
+    "@laizhixingxingdeli/database/schema"
+  );
+  const { inArray } = await import("drizzle-orm");
   const deadline = Date.now() + 20_000;
-  while (currentRunningTask() !== null || queuedExecutorTaskCount() > 0) {
+  for (;;) {
+    const inMemBusy =
+      currentRunningTask() !== null || queuedExecutorTaskCount() > 0;
+    let dbBusy = 0;
+    try {
+      const rows = await testDb
+        .select({ id: taskTable.id })
+        .from(taskTable)
+        .where(inArray(taskTable.status, ["queued", "running"]));
+      dbBusy = rows.length;
+    } catch {
+      dbBusy = 0; // DB 已关闭(极端竞态):按无残留处理,避免死等。
+    }
+    if (!inMemBusy && dbBusy === 0) break;
     if (Date.now() > deadline) break;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -228,6 +247,43 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
     // sender(执行器自己),不会被请求体伪造。
     expect(task.dispatcherSessionId).toBeNull();
     expect(task.dispatcherParticipantId).toBe(codebuddy.id);
+  }, 15_000);
+
+  it("canDispatch: true 的执行器(检视者 runtime)可携带 dispatcher/callback(§3.2 判据)", async () => {
+    // 通过 API 新增 key=reviewer 的执行器配置(agentName slug 生成 key=reviewer,
+    // 命中 DISPATCH_CAPABLE_KEYS → effectiveExecutors 派生 canDispatch: true,
+    // 纯代码派生不落 DB 列)——检视者既要被下发任务唤醒(注册为执行器),又能
+    // 自己下发任务携带 callbackRef,不再被当"纯执行器"丢弃。
+    const createRes = await app.request("/api/executors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentName: "Reviewer 执行器",
+        kind: "cli",
+        bin: "/bin/echo",
+        args: [],
+      }),
+    });
+    expect(createRes.status).toBe(200);
+    const reviewer = await registerParticipant({ name: "Reviewer 执行器" });
+    const { coordinator, codebuddy, group } = await setupGroup("下发者 R");
+    await addMember(coordinator.id, group.id, reviewer.id, ["coordinator"]);
+    const { res, json } = await postMessage(reviewer.id, group.id, {
+      body: "检视者下发任务",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+      metadata: { dispatcherSessionId: "reviewer-session" },
+      callback: { platform: "codex", sessionRef: "reviewer-session" },
+    });
+    expect(res.status).toBe(200);
+    const task = await waitForTask(group.id, json.id as string);
+    // canDispatch: true → 不是纯执行器 → dispatcher/callback 正常写入。
+    expect(task.dispatcherSessionId).toBe("reviewer-session");
+    expect(task.callbackRef).toEqual({
+      platform: "codex",
+      sessionRef: "reviewer-session",
+    });
+    expect(task.dispatcherParticipantId).toBe(reviewer.id);
   }, 15_000);
 
   it("coordinator/human 之外的发送者带 metadata:忽略(消息正常,不暴露)", async () => {

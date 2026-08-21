@@ -21,14 +21,14 @@ import { afterAll, describe, expect, it } from "vitest";
  * 覆盖:同组(默认组)两条定向消息只有一条 running、另一条 queued 且完成后
  * 才轮到;不同 project_path 的两个任务可同时 running;同一 project_path 的
  * 两个群任务严格串行;maxParallelGroups=1 时退化为全局串行;默认组(无
- * project_path)任务可与项目组并行;「停止」kill 进程组(task → cancelled +
- * 🛑 回传);「回滚 <taskId>」恢复工作区(task → failed + ✅ 回传);重启兜底
- * queued/running → failed。
+ * project_path)任务可与项目组并行;「停止」只取消排队中任务(运行中任务不可
+ * 中断,回传「不支持中断」提示;按群隔离——A 群停止不影响 B 群);「回滚
+ * <taskId>」恢复工作区(task → failed + ✅ 回传);重启兜底 queued/running → failed。
  *
  * 可靠性保障(票5):静默超时(无输出假 bin → failed + ❌ 含「静默」;持续输出
  * 不误杀)、认领超时(占满槽位后排队任务 → failed + ❌ 含「未认领」;已 running
- * 不受认领阈值影响)、停止任务不被超时误伤。阈值经 __setReliabilityTimeoutsForTests
- * 调小到 100ms 级,避免拖慢测试。
+ * 不受认领阈值影响)、排队任务被停止取消(不被超时误伤)。阈值经
+ * __setReliabilityTimeoutsForTests 调小到 100ms 级,避免拖慢测试。
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queue-bin-"));
@@ -586,9 +586,9 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     await waitForTaskStatus(coordinator.id, groupProj.id, m2.id, "done");
   }, 30_000);
 
-  it("「停止」kill 运行中任务的进程组:task → cancelled + 🛑 回传", async () => {
+  it("「停止 <taskId>」不中断运行中任务:回传「不支持中断」提示,任务继续跑到 done", async () => {
     // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
-    process.env.FAKE_SLEEP_SECS = "60";
+    process.env.FAKE_SLEEP_SECS = "3";
     const { coordinator, codebuddy, group } = await setupGroup();
 
     const msg = await postMessage(coordinator.id, group.id, {
@@ -603,26 +603,21 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       "running",
     );
 
-    // 广播「停止」→ server 终止运行中任务的进程组。
+    // 定向「停止 <taskId>」→ 运行中任务不可中断(新语义:只取消排队中任务)。
     await postMessage(coordinator.id, group.id, {
-      body: "停止",
+      body: `停止 ${t.id}`,
       audience: "broadcast",
     });
 
-    // 任务被 kill → 完成回调置 cancelled(不再 ❌)。
-    const stopped = await waitForTaskStatus(
-      coordinator.id,
-      group.id,
-      msg.id,
-      "cancelled",
-    );
-    expect(stopped.id).toBe(t.id);
-    // 群里出现 🛑 回传(以执行器身份)。
+    // 群里出现 ⛔「不支持中断」回传(以执行器身份;⛔ 不在 STATUS_EMOJI_RE 内,
+    // 回传为 text/plain,故只按 body 内容匹配)。
     await waitForMessage(
       coordinator.id,
       group.id,
-      (m) => m.contentType === "task_status" && m.body.startsWith("🛑"),
+      (m) => m.body.includes("不支持中断"),
     );
+    // 任务不受影响,继续跑到 done(未被 kill 成 cancelled)。
+    await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
   }, 30_000);
 
   it("定向给非执行器 participant 的「停止」仍识别(hermes 特判已移除)", async () => {
@@ -654,6 +649,185 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     await waitForTaskStatus(coordinator.id, group.id, msg2.id, "done");
     const after = await listMessages(coordinator.id, group.id);
     expect(after.filter((m) => m.body.startsWith("⛔"))).toHaveLength(1);
+  }, 30_000);
+
+  it("停止按群隔离:A 群的停止指令不影响 B 群的排队/运行中任务", async () => {
+    process.env.FAKE_SLEEP_SECS = "4";
+    const { coordinator, codebuddy } = await setupGroup();
+    // 两个群绑定同一 project_path → 同一组键,组内串行:A 群任务占槽,B 群排队。
+    const proj = makeGitRepo("coagenthub-stop-iso-");
+    const groupA = await createGroup(coordinator.id, "停止隔离群 A");
+    await addMember(coordinator.id, groupA.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.id, groupA.id, proj);
+    const groupB = await createGroup(coordinator.id, "停止隔离群 B");
+    await addMember(coordinator.id, groupB.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.id, groupB.id, proj);
+
+    // A 群任务先跑(running),B 群任务同组排队(组内串行)。
+    const mA = await postMessage(coordinator.id, groupA.id, {
+      body: "A 群任务(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const tA = await waitForTaskStatus(
+      coordinator.id,
+      groupA.id,
+      mA.id,
+      "running",
+    );
+    expect(tA.status).toBe("running");
+    const mB = await postMessage(coordinator.id, groupB.id, {
+      body: "B 群任务",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const tB = await waitForTaskStatus(
+      coordinator.id,
+      groupB.id,
+      mB.id,
+      "queued",
+    );
+    expect(tB.status).toBe("queued");
+
+    // A 群广播「停止」:只取消 A 群的排队任务(A 群无排队)→ B 群排队任务不受影响。
+    await postMessage(coordinator.id, groupA.id, {
+      body: "停止",
+      audience: "broadcast",
+    });
+    const bAfterAStop = await listTasks(coordinator.id, groupB.id);
+    expect(bAfterAStop.find((x) => x.id === tB.id)?.status).toBe("queued");
+    const aAfterAStop = await listTasks(coordinator.id, groupA.id);
+    expect(aAfterAStop.find((x) => x.id === tA.id)?.status).toBe("running");
+
+    // B 群自己的「停止 <B 任务>」才取消 B 群排队任务。
+    await postMessage(coordinator.id, groupB.id, {
+      body: `停止 ${tB.id}`,
+      audience: "broadcast",
+    });
+    const stoppedB = await waitForTaskStatus(
+      coordinator.id,
+      groupB.id,
+      mB.id,
+      "cancelled",
+    );
+    expect(stoppedB.id).toBe(tB.id);
+
+    // A 群运行中任务不受 B 群停止指令影响,继续跑到 done。
+    const aDuringBStop = await listTasks(coordinator.id, groupA.id);
+    expect(aDuringBStop.find((x) => x.id === tA.id)?.status).toBe("running");
+    await waitForTaskStatus(coordinator.id, groupA.id, mA.id, "done");
+  }, 30_000);
+
+  it("A 群停止指定 B 群运行中任务:不受影响,回传「不支持中断」(跨群 taskId 不误伤)", async () => {
+    process.env.FAKE_SLEEP_SECS = "3";
+    const { coordinator, codebuddy } = await setupGroup();
+    const proj = makeGitRepo("coagenthub-stop-iso2-");
+    const groupA = await createGroup(coordinator.id, "停止隔离群 A2");
+    await addMember(coordinator.id, groupA.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.id, groupA.id, proj);
+    const groupB = await createGroup(coordinator.id, "停止隔离群 B2");
+    await addMember(coordinator.id, groupB.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.id, groupB.id, proj);
+
+    // B 群任务先跑(running),A 群任务同组排队。
+    const mB = await postMessage(coordinator.id, groupB.id, {
+      body: "B 群任务(慢)",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const tB = await waitForTaskStatus(
+      coordinator.id,
+      groupB.id,
+      mB.id,
+      "running",
+    );
+    expect(tB.status).toBe("running");
+
+    // A 群发「停止 <B 群运行中任务>」:A 群排队为空 → 不命中;B 群运行中任务也
+    // 不因跨群 taskId 被误伤(回传 ⛔「当前没有排队中的任务」,非「不支持中断」)。
+    await postMessage(coordinator.id, groupA.id, {
+      body: `停止 ${tB.id}`,
+      audience: "broadcast",
+    });
+    const bAfter = await listTasks(coordinator.id, groupB.id);
+    expect(bAfter.find((x) => x.id === tB.id)?.status).toBe("running");
+    await waitForMessage(
+      coordinator.id,
+      groupA.id,
+      (m) => m.body.startsWith("⛔"),
+    );
+    await waitForTaskStatus(coordinator.id, groupB.id, mB.id, "done");
+  }, 30_000);
+
+  it("CLI 执行器 ## ReplyMode: detached:spawn 后槽位立即释放、任务保持 running、不解析 stdout,PATCH 回写 done", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    const { coordinator, codebuddy, group } = await setupGroup();
+    const msg = await postMessage(coordinator.id, group.id, {
+      body: "CLI detached 任务\n## ReplyMode: detached",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const t = await waitForTaskStatus(
+      coordinator.id,
+      group.id,
+      msg.id,
+      "running",
+    );
+    // fake bin 秒退(stdout 有「提交/汇报」段落),但 detached 不解析 stdout、
+    // 不按进程退出判定终态 → 任务保持 running。
+    await new Promise((r) => setTimeout(r, 800));
+    const after = await listTasks(coordinator.id, group.id);
+    expect(after.find((x) => x.id === t.id)?.status).toBe("running");
+    // 队列槽位已释放:同组下一任务立即被 pump 执行(不排队等 detached 任务)——
+    // detached 任务永不结束,若槽位未释放,msg2 将永远 queued、done 永不达。
+    const msg2 = await postMessage(coordinator.id, group.id, {
+      body: "槽位释放验证",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    await waitForTaskStatus(coordinator.id, group.id, msg2.id, "done");
+    // 收件方 PATCH 回写终态 → done(§3.5 会话延续:结案先 PATCH 再继续)。
+    const patch = await app.request(`/api/groups/${group.id}/tasks/${t.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": codebuddy.id,
+      },
+      body: JSON.stringify({
+        status: "done",
+        diffSummary: { summary: "PATCH 回写完成" },
+      }),
+    });
+    expect(patch.status).toBe(200);
+    await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+  }, 30_000);
+
+  it("CLI detached 超时未回写 → 结果未确认(failed + unconfirmed)", async () => {
+    process.env.FAKE_SLEEP_SECS = "";
+    const { __setReliabilityTimeoutsForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    // detached 超时调小到 300ms:执行器未 PATCH 回写 → 按「结果未确认」处理。
+    __setReliabilityTimeoutsForTests(60_000, 60_000, undefined, undefined, 300);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "CLI detached 超时\n## ReplyMode: detached",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.id, group.id, msg.id, "running");
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.unconfirmed).toBe(true);
+    } finally {
+      process.env.FAKE_SLEEP_SECS = "";
+    }
   }, 30_000);
 
   it("「回滚 <taskId>」恢复工作区到执行前快照:task → failed + ✅ 回传", async () => {
@@ -937,42 +1111,61 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     }
   }, 30_000);
 
-  it("停止的任务不被静默/认领超时误伤(停止 → cancelled,而非 failed)", async () => {
-    process.env.FAKE_SLEEP_SECS = "60";
+  it("排队任务被停止指令取消:queued → cancelled + 🛑 回传,运行中任务不受影响", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
     const { __setReliabilityTimeoutsForTests } = await import(
       "@server/lib/executor-task"
     );
-    // 阈值放宽到 5s:停止指令在超时前生效,验证停止优先于超时。
-    __setReliabilityTimeoutsForTests(5_000, 5_000);
+    // 认领阈值放宽到 5s:取消指令在超时前生效;stall 放宽避免占位任务(5s 无
+    // 输出 sleep)在断言期间被静默超时误杀。
+    __setReliabilityTimeoutsForTests(60_000, 5_000);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
-      const msg = await postMessage(coordinator.id, group.id, {
-        body: "待停止任务(长睡)",
+      // 第一条长睡任务占住组槽位(running)。
+      const m1 = await postMessage(coordinator.id, group.id, {
+        body: "占位任务(长睡)",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      const t = await waitForTaskStatus(
+      const t1 = await waitForTaskStatus(
         coordinator.id,
         group.id,
-        msg.id,
+        m1.id,
         "running",
       );
+      // 第二条同组排队(组内串行)。
+      const m2 = await postMessage(coordinator.id, group.id, {
+        body: "待停止任务(排队)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m2.id,
+        "queued",
+      );
+      // 定向「停止 <排队任务>」→ 排队任务被取消。
       await postMessage(coordinator.id, group.id, {
-        body: "停止",
+        body: `停止 ${t2.id}`,
         audience: "broadcast",
       });
       const stopped = await waitForTaskStatus(
         coordinator.id,
         group.id,
-        msg.id,
+        m2.id,
         "cancelled",
       );
-      expect(stopped.id).toBe(t.id);
+      expect(stopped.id).toBe(t2.id);
       const after = await listTasks(coordinator.id, group.id);
-      expect(after.find((x) => x.id === t.id)?.status).toBe("cancelled");
+      expect(after.find((x) => x.id === t2.id)?.status).toBe("cancelled");
+      // 运行中的占位任务不受停止指令影响(仍 running,随后自然 done)。
+      expect(after.find((x) => x.id === t1.id)?.status).toBe("running");
       // 手动停止不重试:群里无 ↻ 回传。
       const msgs = await listMessages(coordinator.id, group.id);
       expect(msgs.some((m) => m.body.startsWith("↻"))).toBe(false);
+      // 占位任务跑完,不遗留运行中进程。
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
     } finally {
       process.env.FAKE_SLEEP_SECS = "";
     }
@@ -1127,51 +1320,46 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     }
   }, 30_000);
 
-  it("弱验收:改文件不提交 → failed(原因含「未提交」)+ ❌ 回传,不重试", async () => {
+  it("done 判定不再依赖 git 工作区状态:改文件不提交(脏树)也判 done,不重试", async () => {
     process.env.FAKE_SLEEP_SECS = "";
-    process.env.FAKE_APPEND = "1";
+    process.env.FAKE_APPEND = "1"; // 改文件但 FAKE_NO_COMMIT 不提交(脏树)
     process.env.FAKE_NO_COMMIT = "1";
     try {
       const { coordinator, codebuddy } = await setupGroup();
-      const proj = makeGitRepo("coagenthub-accept-dirty-");
-      const group = await createGroup(coordinator.id, "验收失败群(脏树)");
+      const proj = makeGitRepo("coagenthub-accept-nocommit-");
+      const group = await createGroup(coordinator.id, "验收群(无提交)");
       await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
       await bindProject(coordinator.id, group.id, proj);
 
       const msg = await postMessage(coordinator.id, group.id, {
-        body: "改文件不提交",
+        body: "只读排查任务,不产生提交",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
+      // 弱验收钩子已整体移除:exit 0 → 解析汇报 → 落库 done,不再因脏树/HEAD
+      // 无变化误判 failed。
       const t = await waitForTaskStatus(
         coordinator.id,
         group.id,
         msg.id,
-        "failed",
+        "done",
       );
-      const diff = t.diffSummary as Record<string, unknown> | null;
-      expect(diff?.error).toContain("未提交");
-      expect(t.retryCount).toBe(0); // 验收失败不重试
-      await waitForMessage(
-        coordinator.id,
-        group.id,
-        (m) => m.body.includes("任务失败") && m.body.includes("未提交"),
-      );
+      expect(t.retryCount).toBe(0);
       const messages = await listMessages(coordinator.id, group.id);
-      expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);
+      expect(messages.some((m) => m.body.includes("任务失败"))).toBe(false);
     } finally {
       process.env.FAKE_APPEND = "";
       process.env.FAKE_NO_COMMIT = "";
     }
   }, 30_000);
 
-  it("弱验收:无改动退出 → failed(HEAD 无变化),不重试", async () => {
+  it("done 判定不再依赖 git 工作区状态:无改动退出也判 done,不重试", async () => {
     process.env.FAKE_SLEEP_SECS = "";
-    process.env.FAKE_NO_COMMIT = "1";
+    process.env.FAKE_NO_COMMIT = "1"; // 不提交 → HEAD 无变化
     try {
       const { coordinator, codebuddy } = await setupGroup();
       const proj = makeGitRepo("coagenthub-accept-noop-");
-      const group = await createGroup(coordinator.id, "验收失败群(无改动)");
+      const group = await createGroup(coordinator.id, "验收群(无改动)");
       await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
       await bindProject(coordinator.id, group.id, proj);
 
@@ -1184,120 +1372,15 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
         coordinator.id,
         group.id,
         msg.id,
-        "failed",
-      );
-      const diff = t.diffSummary as Record<string, unknown> | null;
-      expect(diff?.error).toContain("未提交");
-      expect(t.retryCount).toBe(0);
-      const messages = await listMessages(coordinator.id, group.id);
-      expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);
-    } finally {
-      process.env.FAKE_NO_COMMIT = "";
-    }
-  }, 30_000);
-
-  it("弱验收:git 命令失败 → 跳过验收(视为通过,不误杀)", async () => {
-    // 非 git 目录:git status 失败 → verifyTaskCommitted 应跳过返回 ok。
-    const nonGitDir = mkdtempSync(path.join(tmpdir(), "coagenthub-nongit-"));
-    try {
-      const { verifyTaskCommitted } = await import("@server/lib/executor-task");
-      const res = await verifyTaskCommitted(
-        nonGitDir,
-        "refs/coagenthub-cp/nonexistent-task",
-      );
-      expect(res.ok).toBe(true);
-      expect(res.reason).toBeUndefined();
-    } finally {
-      rmSync(nonGitDir, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  it("弱验收:任务书含 ## Acceptance: skip-verify → 改文件不提交也通过(done)", async () => {
-    process.env.FAKE_SLEEP_SECS = "";
-    process.env.FAKE_APPEND = "1"; // 改文件但 FAKE_NO_COMMIT 不提交(脏树)
-    process.env.FAKE_NO_COMMIT = "1";
-    try {
-      const { coordinator, codebuddy } = await setupGroup();
-      const proj = makeGitRepo("coagenthub-accept-skip-verify-");
-      const group = await createGroup(
-        coordinator.id,
-        "验收跳过群(skip-verify)",
-      );
-      await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
-      await bindProject(coordinator.id, group.id, proj);
-
-      const msg = await postMessage(coordinator.id, group.id, {
-        body: "只读排查任务,无代码提交\n## Acceptance: skip-verify\n完成后仅汇报结论",
-        audience: "participant",
-        audienceRef: codebuddy.id,
-      });
-      const t = await waitForTaskStatus(
-        coordinator.id,
-        group.id,
-        msg.id,
         "done",
       );
       expect(t.retryCount).toBe(0);
-      // 任务按 done 回传,未因脏树误判失败。
-      const messages = await listMessages(coordinator.id, group.id);
-      expect(messages.some((m) => m.body.includes("任务失败"))).toBe(false);
-    } finally {
-      process.env.FAKE_APPEND = "";
-      process.env.FAKE_NO_COMMIT = "";
-    }
-  }, 30_000);
-
-  it("弱验收:任务书含 ## CommitMode: none → 无改动退出也通过(done)", async () => {
-    process.env.FAKE_SLEEP_SECS = "";
-    process.env.FAKE_NO_COMMIT = "1"; // 无提交 → HEAD 无变化
-    try {
-      const { coordinator, codebuddy } = await setupGroup();
-      const proj = makeGitRepo("coagenthub-accept-commitmode-none-");
-      const group = await createGroup(
-        coordinator.id,
-        "验收跳过群(commitmode none)",
-      );
-      await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
-      await bindProject(coordinator.id, group.id, proj);
-
-      const msg = await postMessage(coordinator.id, group.id, {
-        body: "纯 API 操作,无本地提交\n## CommitMode: none",
-        audience: "participant",
-        audienceRef: codebuddy.id,
-      });
-      const t = await waitForTaskStatus(
-        coordinator.id,
-        group.id,
-        msg.id,
-        "done",
-      );
-      expect(t.retryCount).toBe(0);
-      // 任务按 done 回传,未因 HEAD 无变化误判失败。
       const messages = await listMessages(coordinator.id, group.id);
       expect(messages.some((m) => m.body.includes("任务失败"))).toBe(false);
     } finally {
       process.env.FAKE_NO_COMMIT = "";
     }
   }, 30_000);
-
-  it("弱验收:hasSkipCommitMarker 按行识别标记(大小写/前后空白不敏感)", async () => {
-    const { hasSkipCommitMarker } = await import("@server/lib/executor-task");
-    // 两个标记都命中。
-    expect(hasSkipCommitMarker("## Acceptance: skip-verify")).toBe(true);
-    expect(hasSkipCommitMarker("## CommitMode: none")).toBe(true);
-    // 大小写、前后空白、混在正文里都不影响命中。
-    expect(
-      hasSkipCommitMarker("任务书正文\n  ## acceptance: skip-verify  \n结尾"),
-    ).toBe(true);
-    expect(hasSkipCommitMarker("## COMMITMODE: NONE")).toBe(true);
-    // 不带标记 / 近似标记不命中(保持原行为)。
-    expect(hasSkipCommitMarker("无标记的普通任务书")).toBe(false);
-    expect(hasSkipCommitMarker("## Acceptance: skip-verify-extra")).toBe(false);
-    expect(hasSkipCommitMarker("## CommitMode: commit")).toBe(false);
-    expect(hasSkipCommitMarker("正文提到 skip-verify 但非行首标记")).toBe(
-      false,
-    );
-  });
 
   describe("按执行器并发能力排队(设计修正:maxConcurrency + 403 反应式排队)", () => {
     it("声明式上限:maxConcurrency=1 的执行器(AtomCode)跨群任务只有一条 running,另一条 queued,完成后才轮到", async () => {

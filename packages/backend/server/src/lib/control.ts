@@ -22,10 +22,10 @@ import {
   resetToCheckpoint,
 } from "@server/lib/executor-runner";
 import {
+  cancelQueuedTasks,
   currentRunningTask,
   postStatus,
   queuedExecutorTaskCount,
-  stopRunningTask,
 } from "@server/lib/executor-task";
 import {
   type ExecutorConfig,
@@ -34,8 +34,10 @@ import {
 } from "@server/lib/executors";
 import { and, eq, inArray } from "drizzle-orm";
 
-/** 与桥 EXEC_ALLOWED_ROLES 一致:只有 coordinator / human 能发控制指令。 */
-const EXEC_ALLOWED_ROLES = ["coordinator", "human"] as const;
+/** 控制门角色门槛(与下发门 DISPATCH_ALLOWED_ROLES 同值但语义分开):
+ *  coordinator / human / reviewer 能发停止/回滚指令——human 禁言后,紧急
+ *  停止只能由 reviewer 代发,因此两表相同却独立维护。 */
+const CONTROL_ALLOWED_ROLES = ["coordinator", "human", "reviewer"] as const;
 
 /** 「停止 [taskId]」/「stop [taskId]」;taskId 可缺省(终止当前运行任务)。 */
 const STOP_RE = /^(?:停止|取消|停一下|stop)(?:\s+(\S+))?/i;
@@ -62,10 +64,10 @@ export async function maybeHandleControlCommand(
 ): Promise<void> {
   const { groupId, senderId, senderRoles, audience, audienceRef, body } = input;
 
-  // 与发布任务同角色门槛:非 coordinator/human 不执行。
+  // 控制门角色门槛:非 coordinator/human/reviewer 不执行。
   if (
     !senderRoles.some((r) =>
-      (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+      (CONTROL_ALLOWED_ROLES as readonly string[]).includes(r),
     )
   ) {
     console.log(
@@ -74,13 +76,18 @@ export async function maybeHandleControlCommand(
     return;
   }
 
-  // 防回环:执行器 participant 自己发的回传不触发(其名字命中执行器配置)。
+  // 防回环:纯执行器 participant 自己发的回传不触发(命中执行器配置且
+  // canDispatch !== true);canDispatch: true 的执行器(协调者/检视者 runtime)
+  // 保留发控制指令的权限——与 §3.2 messages.ts 的 dispatcher 判据同款。
   const sender = await db.query.participant.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
   });
-  if (sender && (await findExecutorByParticipantName(db, sender.name))) {
-    console.log(`[control] 跳过:发送者是执行器 participant(防回环)`);
-    return;
+  if (sender) {
+    const senderExecutor = await findExecutorByParticipantName(db, sender.name);
+    if (senderExecutor && !senderExecutor.canDispatch) {
+      console.log(`[control] 跳过:发送者是纯执行器 participant(防回环)`);
+      return;
+    }
   }
 
   // 定向到执行器 participant 的消息是任务,不是控制指令(与桥 !ex 路由一致);
@@ -109,13 +116,17 @@ export async function maybeHandleControlCommand(
 
 /* ---------------- 停止 ---------------- */
 
-/** 「停止 [taskId]」:kill 运行中任务的进程组 + 取消排队任务,回传 🛑。 */
+/**
+ * 「停止 [taskId]」:只取消本群排队中的任务(taskId 缺省 = 本群全部排队任务),
+ * 回传 🛑。运行中任务不可中断——命中的话回传「已在执行,不支持中断」提示,
+ * 等其进入终态后由协调者下发修正任务(fix-forward)。
+ */
 async function handleStop(
   db: DataBase,
   groupId: string,
   taskId: string | undefined,
 ): Promise<void> {
-  const stopped = stopRunningTask(taskId);
+  const stopped = cancelQueuedTasks(groupId, taskId);
   if (stopped.length > 0) {
     const first = stopped[0];
     const label =
@@ -127,20 +138,51 @@ async function handleStop(
       groupId,
       first.participantId,
       first.ex,
-      `🛑 已停止 ${label}`,
+      `🛑 已取消 ${label}`,
     );
     return;
   }
   const fallback = await firstExecutorParticipant(db);
   if (!fallback) return;
+  const running = currentRunningTask(groupId);
+  if (taskId) {
+    if (running?.taskId === taskId) {
+      await postStatus(
+        db,
+        groupId,
+        fallback.participantId,
+        fallback.ex,
+        `⛔ 任务 ${taskId} 已在执行,不支持中断;请等待完成后下发修正任务`,
+      );
+      return;
+    }
+    await postStatus(
+      db,
+      groupId,
+      fallback.participantId,
+      fallback.ex,
+      `⛔ 当前没有排队中的任务 ${taskId}`,
+    );
+    return;
+  }
+  if (running) {
+    // 无 taskId 但本群确有运行中任务:明确回传「不支持中断」,而非误导性的
+    // 「没有排队中的任务」(运行中任务不可由用户指令中断,等终态后下发修正)。
+    await postStatus(
+      db,
+      groupId,
+      fallback.participantId,
+      fallback.ex,
+      `⛔ 任务 ${running.taskId} 正在执行,不支持中断;请等待完成后下发修正任务`,
+    );
+    return;
+  }
   await postStatus(
     db,
     groupId,
     fallback.participantId,
     fallback.ex,
-    taskId
-      ? `⛔ 任务 ${taskId} 未在运行/排队(无法停止)`
-      : "⛔ 当前没有执行中或排队的任务",
+    "⛔ 当前没有排队中的任务",
   );
 }
 
@@ -163,9 +205,10 @@ async function handleRollback(
     await postStatus(db, groupId, fallback.participantId, fallback.ex, body);
   };
 
-  // reset --hard 会破坏进行中的写入:有任务执行/排队时禁止回滚(与桥一致)。
-  if (currentRunningTask() || queuedExecutorTaskCount() > 0) {
-    await reply("⛔ 有任务执行中或排队中,请先「停止」再回滚");
+  // reset --hard 会破坏进行中的写入:本群有任务执行/排队时禁止回滚(与桥一致,
+  // 按群隔离——A 群执行中不影响 B 群回滚)。
+  if (currentRunningTask(groupId) || queuedExecutorTaskCount(groupId) > 0) {
+    await reply("⛔ 有任务执行中或排队中,请等待完成后再回滚(本群判定)");
     return;
   }
 

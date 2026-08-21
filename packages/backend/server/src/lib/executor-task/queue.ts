@@ -1,7 +1,7 @@
 /**
  * 执行器触发链路的队列核心(executor-task 拆分):入队 / 组调度(pump)/
  * 运行(runOne)/ 停止 / 超时处理(认领/静默/无进展/detached)/ 失败重试 /
- * 弱验收 / 执行历史。导出接口与拆分前 @server/lib/executor-task 完全兼容
+ * 执行历史。导出接口与拆分前 @server/lib/executor-task 完全兼容
  * (barrel index.ts 汇总)。
  */
 
@@ -17,7 +17,6 @@ import {
   createCheckpoint,
   type ExecutorRunResult,
   findRepoRoot,
-  gitExec,
   readTimeoutMs,
   resetToCheckpoint,
   runExecutor,
@@ -72,7 +71,7 @@ import {
 import {
   DEFAULT_GROUP_KEY,
   type DispatchExecutorInput,
-  EXEC_ALLOWED_ROLES,
+  DISPATCH_ALLOWED_ROLES,
   type GroupPromptInfo,
   type GroupQueue,
   type QueuedRun,
@@ -150,10 +149,15 @@ function isRunDispatchable(run: QueuedRun): boolean {
 
 /* ---------------- 队列 / 调度 ---------------- */
 
-/** 排队中(未开始)任务数;回滚指令前置校验用。 */
-export function queuedExecutorTaskCount(): number {
+/** 排队中(未开始)任务数;回滚指令前置校验用。groupId 缺省 = 跨全部组。 */
+export function queuedExecutorTaskCount(groupId?: string): number {
   let n = 0;
-  for (const g of groupQueues.values()) n += g.queue.length;
+  for (const g of groupQueues.values()) {
+    for (const q of g.queue) {
+      if (groupId && q.groupId !== groupId) continue;
+      n += 1;
+    }
+  }
   return n;
 }
 
@@ -188,8 +192,9 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
   return rows.length;
 }
 
-/** 当前运行中的任务(停止指令用);并行时可能有多个,返回第一个;无则 null。 */
-export function currentRunningTask(): {
+/** 当前运行中的任务(停止指令回传用);并行时可能有多个,返回第一个;无则 null。
+ *  groupId 缺省 = 跨全部组;指定 = 只看该群。 */
+export function currentRunningTask(groupId?: string): {
   taskId: string;
   participantId: string;
   ex: ExecutorConfig;
@@ -197,7 +202,7 @@ export function currentRunningTask(): {
 } | null {
   for (const g of groupQueues.values()) {
     const r = g.running;
-    if (r?.kill) {
+    if (r?.kill && (!groupId || r.groupId === groupId)) {
       return {
         taskId: r.taskId,
         participantId: r.participantId,
@@ -210,14 +215,17 @@ export function currentRunningTask(): {
 }
 
 /**
- * 停止指定任务:taskId 缺省时取消全部排队 + 终止全部运行中任务(跨所有组);
- * 携带 taskId 时仅终止该任务(排队中则移出队列置 cancelled,运行中则 kill
- * 进程组)。返回所有被停止的任务信息(未命中 → 空数组)。
- *
- * 运行中任务即使 kill 句柄尚未就绪(spawn 前窗口)也会标记 stopped,
- * pumpQueue 会在 spawn 前中止,不会出现「停止指令已执行但任务照跑」。
+ * 取消排队中的任务(停止指令专用):taskId 缺省 → 取消本群全部排队任务;指定 →
+ * 仅取消本群匹配项。只处理排队中的任务(未 spawn,直接移出队列 + 置 cancelled)
+ * 以及「已出队未 spawn」的过渡窗口任务(kill 句柄尚未就绪,置 stopped 后由
+ * runOne 的 spawn 前 guard 取消);已真正运行的进程不受影响——进程组 kill 机制
+ * (spawn detached + process.kill(-pid))保留给服务端自身的静默超时 / 执行超时
+ * 兜底,不再由用户指令触发。返回所有被取消的任务信息(未命中 → 空数组)。
  */
-export function stopRunningTask(taskId?: string): Array<{
+export function cancelQueuedTasks(
+  groupId: string,
+  taskId?: string,
+): Array<{
   taskId: string;
   participantId: string;
   ex: ExecutorConfig;
@@ -228,11 +236,13 @@ export function stopRunningTask(taskId?: string): Array<{
     ex: ExecutorConfig;
   }> = [];
 
-  // 排队中的任务:taskId 缺省 → 全部取消(与桥 handleCancel 一致);指定 →
-  // 仅取消匹配项(跨组查找)。排队任务未 spawn,直接移出队列 + 置 cancelled。
   for (const g of groupQueues.values()) {
     const remaining: QueuedRun[] = [];
     for (const q of g.queue) {
+      if (q.groupId !== groupId) {
+        remaining.push(q);
+        continue;
+      }
       if (taskId && q.taskId !== taskId) {
         remaining.push(q);
         continue;
@@ -247,15 +257,18 @@ export function stopRunningTask(taskId?: string): Array<{
     }
     g.queue.length = 0;
     g.queue.push(...remaining);
-  }
 
-  // 运行中任务:taskId 缺省 → 全部终止;指定 → 仅当其 running 才终止(跨组)。
-  // 停止优先于超时:清理定时器后,静默/认领超时不会再对已停止任务生效。
-  for (const g of groupQueues.values()) {
+    // 已出队未 spawn 的过渡窗口(pump 已置 group.running、kill 句柄未就绪):
+    // 置 stopped 标记,runOne 的 spawn 前 guard 会在真正启动前取消该任务——
+    // 保证「停止指令已执行但任务照跑」不会发生在 spawn 前窗口。
     const r = g.running;
-    if (r && (!taskId || r.taskId === taskId)) {
+    if (
+      r &&
+      !r.kill &&
+      r.groupId === groupId &&
+      (!taskId || r.taskId === taskId)
+    ) {
       r.stopped = true;
-      r.kill?.();
       clearRunTimers(r);
       stopped.push({
         taskId: r.taskId,
@@ -288,10 +301,10 @@ export async function maybeDispatchExecutorTask(
     callbackRef,
   } = input;
 
-  // 与桥相同的角色门槛:非 coordinator/human 不执行(桥侧也会拒绝)。
+  // 与桥相同的角色门槛(下发门):非 coordinator/human/reviewer 不执行(桥侧也会拒绝)。
   if (
     !senderRoles.some((r) =>
-      (EXEC_ALLOWED_ROLES as readonly string[]).includes(r),
+      (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
     )
   ) {
     console.log(
@@ -636,7 +649,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     await beginAttempt(run);
 
     // spawn cwd = 任务书声明的仓库(行内 `仓库:`/`仓库路径:`/`Repository:`/
-    // `Repo:` 显式声明时优先,使执行前快照/弱验收落在正确的仓库上);未声明则
+    // `Repo:` 显式声明时优先,使执行前快照/重试前回滚落在正确的仓库上);未声明则
     // 回退群绑定 project_path(仍不存在再回退 findRepoRoot(),兼容既有测试/无
     // 项目群)。repoRoot 同时传给 buildTicket 的「项目:」行,保证任务书展示与
     // 实际执行一致。
@@ -648,10 +661,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
     const isA2a = ex.kind === "a2a";
     // 第3层:任务书标记「## ReplyMode: detached」(大小写不敏感、允许前后空白)
-    // → A2A 发送后保持 running,由执行器恢复后 PATCH 回写终态(适用于重启自身
-    // 所在 dsh web 之类的断线型 ops 任务)。仅 a2a 任务支持。
-    const detached =
-      isA2a && /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(body);
+    // → 发送(spawn / a2a 调用)后保持 running,由执行器恢复后 PATCH 回写终态
+    // (适用于重启自身所在 dsh web 之类的断线型 ops 任务)。cli 与 a2a 均支持。
+    const detached = /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(body);
     run.detached = detached;
     // 记忆开关:仅 memory="per-group" 的协调器启用 contextId 延续(查/回写);
     // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
@@ -817,14 +829,21 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       });
       // 静默超时起点:进程刚 spawn(输出可观察);之后每次输出重排定时器。
       // a2a 无本地进程/增量输出,不设静默检测(完成路径由任务级超时兜底)。
-      run.lastOutputAt = Date.now();
-      run.stallTimer = setTimeout(() => handleStall(run), getStallTimeoutMs());
-      // 无进展提醒起点与静默检测一致:先于静默阈值触发提醒,静默继续到
-      // stallTimeoutMs 才标 failed。
-      run.stallAlertTimer = setTimeout(
-        () => handleStallAlert(run),
-        getStallAlertMs(),
-      );
+      // detached 任务不设静默/无进展提醒:发送后静默等待 PATCH 是正常态,
+      // 超时由 detachedTimeoutMinutes 兜底(handleDetachedTimeout)。
+      if (!run.detached) {
+        run.lastOutputAt = Date.now();
+        run.stallTimer = setTimeout(
+          () => handleStall(run),
+          getStallTimeoutMs(),
+        );
+        // 无进展提醒起点与静默检测一致:先于静默阈值触发提醒,静默继续到
+        // stallTimeoutMs 才标 failed。
+        run.stallAlertTimer = setTimeout(
+          () => handleStallAlert(run),
+          getStallAlertMs(),
+        );
+      }
     }
     run.kill = handle.kill;
     // 第1层:A2A 无进展超时起点——running 起点即置最近活跃时间(进度消息只会
@@ -837,6 +856,56 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         () => handleA2ASilence(run),
         getA2ASilenceTimeoutMs(),
       );
+    }
+
+    // 第3层(detached, CLI):spawn 后立即视为「已派发」——不等待进程退出决定
+    // 终态,任务保持 running,由执行器(协调者/检视者 runtime)恢复后 PATCH
+    // 回写终态。不解析 stdout 汇报;队列槽位由 finally 照常释放
+    // (group.running = null);超时兜底复用 detachedTimer / handleDetachedTimeout
+    // (超时按「结果未确认」处理)。spawn 的进程继续在后台跑,其退出不再决定
+    // 终态,承诺结果由收件方显式回写。
+    if (!isA2a && run.detached) {
+      console.log(
+        `[executor] detached 任务已派发(cli),等待执行器回写终态: ${taskId}`,
+      );
+      if (!run.detachedTimer && !run.detachedTimedOut && !run.stopped) {
+        run.detachedTimer = setTimeout(
+          () => handleDetachedTimeout(run),
+          getDetachedTimeoutMs(),
+        );
+      }
+      // 进程句柄保留在 run 上(handleDetachedTimeout 复查 DB 状态用)。悬挂的
+      // 进程 promise:正常退出 resolve(不决定终态,忽略);reject 只在 spawn
+      // 失败(bin 不存在等)或进程 error 事件时发生——启动失败不能让任务静默
+      // 挂 running 直到 detached 超时,立即失败并 ❌ 回传。
+      handle.promise.catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[executor] detached 任务启动失败(${taskId}): ${msg}`);
+        void (async () => {
+          try {
+            const cur = await db.query.task.findFirst({
+              where: (t, { and: andFn, eq: eqFn }) =>
+                andFn(eqFn(t.id, taskId), eqFn(t.groupId, groupId)),
+              columns: { status: true },
+            });
+            // 已回写终态(如 detached 超时先行)→ 不覆盖。
+            if (!cur || cur.status !== "running") return;
+            await failTask(db, taskId, `执行器启动失败: ${msg}`);
+            await postStatus(
+              db,
+              groupId,
+              participantId,
+              ex,
+              `❌ [${ex.label}] 任务失败: 无法启动 ${ex.bin} (${msg})`,
+            );
+          } catch (err) {
+            console.warn(
+              `[executor] detached 启动失败处理异常(${taskId}): ${err}`,
+            );
+          }
+        })();
+      });
+      return;
     }
 
     try {
@@ -953,24 +1022,6 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       }
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (result.code === 0) {
-        // 弱验收钩子:done 判定前校验执行器是否真正提交了改动(仅本地 CLI,
-        // a2a 远端执行无本地工作区不验收;git 命令失败跳过验收视为通过)。
-        // 只读/纯 API 任务(任务书含「## Acceptance: skip-verify」或
-        // 「## CommitMode: none」)无代码提交 → 跳过「必须提交」检查,
-        // HEAD 无变化/工作树不干净不作为失败原因。
-        if (!isA2a && run.checkpointRef && !hasSkipCommitMarker(run.body)) {
-          const verify = await verifyTaskCommitted(repoRoot, run.checkpointRef);
-          if (!verify.ok) {
-            const reason = verify.reason ?? "执行器未提交改动";
-            console.error(`[executor] 验收未通过: ${reason} (${taskId})`);
-            // 验收失败不重试(需人工处理)。
-            await handleFailure(run, reason, {
-              retryable: false,
-              message: `❌ [${ex.label}] 任务失败: ${reason}`,
-            });
-            return;
-          }
-        }
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不做段落解析;hash 仍从输出提取。CLI 路径走结构化段落解析(票7)。
         const a2aHash = findCommitHash(output);
@@ -1517,27 +1568,11 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
 }
 
 /**
- * 弱验收跳过标记:任务书 brief 含「## Acceptance: skip-verify」或
- * 「## CommitMode: none」时,跳过「必须提交」检查——只读任务 / 纯 API 操作
- * (push、改 GitHub 可见性、只读排查等)无代码提交,HEAD 无变化 / 工作树不干净
- * 不作为失败原因。两个标记优先级一样;不带标记的任务行为完全不变。
- * 行级匹配(大小写不敏感、允许前后空白),与「## ReplyMode: detached」同约定,
- * 避免正文偶然命中。
- */
-export function hasSkipCommitMarker(brief: string): boolean {
-  return (
-    /^\s*##\s*acceptance\s*:\s*skip-verify\s*$/im.test(brief) ||
-    /^\s*##\s*commitmode\s*:\s*none\s*$/im.test(brief)
-  );
-}
-
-/**
  * 任务书声明仓库解析:任务书 body 显式声明目标仓库路径时(行级
  * `仓库:` / `仓库路径:` / `Repository:` / `Repo:` 大小写不敏感、允许前后空白),
  * 返回该行第一个路径 token(绝对路径且 existsSync 为目录才采用);否则回退群绑定
  * projectPath(保持现行为,允许为空 → 后续由 findRepoRoot() 兜底)。用于 spawn cwd
- * / 执行前快照 / 弱验收统一落在任务书声明的仓库上,避免群绑定仓库 HEAD 无变化
- * 导致弱验收误判 failed。
+ * / 执行前快照 / 重试前回滚统一落在任务书声明的仓库上。
  */
 export function resolveTaskRepo(
   body: string,
@@ -1571,49 +1606,6 @@ function parseRepoPathFromBody(body: string): string | null {
     }
   }
   return null;
-}
-
-/**
- * 弱验收钩子:done 判定前校验执行器是否真正提交了改动。在 repoRoot 跑
- * git status --porcelain(工作树是否干净)+ 对比 HEAD 与执行前 commit
- * (checkpoint ref 的父提交):工作树干净且 HEAD 有变化(新提交)→ 通过;
- * 工作树不干净或 HEAD 无变化 → 不通过(原因含「执行器未提交改动」)。
- * 任一 git 命令失败(仓库不可用)→ 跳过验收(视为通过,记录 warning,避免
- * 误杀)。a2a 远端执行无本地工作区,由调用方跳过。
- */
-export async function verifyTaskCommitted(
-  repoRoot: string,
-  checkpointRef: string,
-): Promise<{ ok: boolean; reason?: string }> {
-  const status = await gitExec(["status", "--porcelain"], repoRoot);
-  if (status.status !== 0) {
-    console.warn(
-      `[executor] 验收跳过:git status 失败(${repoRoot}): ${(status.stderr ?? "").trim()}`,
-    );
-    return { ok: true };
-  }
-  const dirty = (status.stdout ?? "").trim().length > 0;
-  const pre = await gitExec(["rev-parse", `${checkpointRef}^`], repoRoot);
-  if (pre.status !== 0) {
-    console.warn(
-      `[executor] 验收跳过:无法解析执行前 commit(${checkpointRef}): ${(pre.stderr ?? "").trim()}`,
-    );
-    return { ok: true };
-  }
-  const head = await gitExec(["rev-parse", "HEAD"], repoRoot);
-  if (head.status !== 0) {
-    console.warn(
-      `[executor] 验收跳过:无法解析 HEAD(${repoRoot}): ${(head.stderr ?? "").trim()}`,
-    );
-    return { ok: true };
-  }
-  if (dirty) {
-    return { ok: false, reason: "执行器未提交改动(工作树不干净)" };
-  }
-  if ((pre.stdout ?? "").trim() === (head.stdout ?? "").trim()) {
-    return { ok: false, reason: "执行器未提交改动(HEAD 无变化)" };
-  }
-  return { ok: true };
 }
 
 /* ---------------- 测试执行器选择 / 任务书模板 ---------------- */
