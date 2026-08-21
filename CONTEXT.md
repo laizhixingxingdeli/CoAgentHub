@@ -24,6 +24,9 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
 | **Local User** | 无身份声明请求的默认身份(human,全可见);局域网全信模型 |
 | **项目记忆** | 群绑定 `project_path` → 读取仓库文档(静态记忆) |
+| **决策票(decision ticket)** | 大特性拆票的单元是「以决策为解的问句」，不是实现切片；实现切片才是下发执行器的 task |
+| **throwaway 分支** | 探索留档分支：`research/<name>`(调研结论)与 `prototype/<name>`(原型产物)，用完不删，主分支只保留被验证过的决策 |
+| **context pointer** | 票/任务上的一行指针：分支名 + 结论一句话，指向 throwaway 分支上的留档 |
 
 ## 运行拓扑
 

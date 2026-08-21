@@ -40,25 +40,54 @@ Before dispatching any task, you MUST complete a grilling session with the user.
 
 <grilling-rules>
 
-Interview the user relentlessly until you reach a shared understanding of what needs to be built. Work in rounds:
+Interview the user relentlessly until you reach a shared understanding of what needs to be built. Work in **compressed rounds (~3 total)**:
 
-1. Identify the **frontier** — questions you can ask now without guessing at answers you haven't heard.
-2. Ask the whole frontier in one round. For each question, give your recommended answer.
-3. Wait for the user's answers. Settled decisions push the frontier outward.
-4. Repeat until the frontier is empty.
+1. **Goal: ~3 rounds.** Compress the whole grill to about three rounds instead of asking one question at a time and waiting. Each round packages the entire current frontier.
+2. Identify the **frontier** — questions you can ask now without guessing at answers you haven't heard.
+3. Ask the whole frontier in one round. For each question, give your recommended answer.
+4. **Separate Fact vs Decision explicitly** with a lead-in word on each question:
+   - **Fact(事实)** — the answer is findable in the codebase/docs/logs. You find it yourself — do NOT put it in a grill round.
+   - **Decision(决策)** — only the user can decide (scope, trade-off, priority). These are what enter the grill rounds.
+5. Wait for the user's answers. Settled decisions push the frontier outward.
+6. Repeat until the frontier is empty.
+7. **防自拷问**: never advance the design by asking-and-answering your own questions when there is no user input. No self-grilling.
 
 Finding facts is YOUR job, never the user's. When a question needs a fact from the codebase, explore it yourself — don't ask the user.
 
 Format each question:
 ```
-❓ **Q1** — **<question title>**: <question body>
+❓ **Q1 — Decision** — **<question title>**: <question body>
 
 ➡️ <your recommended answer>
 ```
 
 </grilling-rules>
 
-The session is done when every branch of the design tree is visited. Do NOT dispatch a task until the user confirms shared understanding.
+The session is done when every branch of the design tree is visited. Do NOT dispatch a task until the user confirms shared understanding (the **confirmation gate** stays).
+
+### 1.1 wait-what 纠偏 (upstream #751)
+
+When the user signals confusion ("等等,什么?"/"没听懂"/"I don't follow"):
+
+<wait-what-rules>
+
+- Fix only the **current message**: restate it briefly, nothing more.
+- Use minimal context + **simplified technical English** (short sentences, active voice, one concept per sentence) + `CONTEXT.md` domain vocabulary.
+- Do NOT re-litigate the whole chat history, do NOT introduce new terms, do NOT change settled decisions.
+
+</wait-what-rules>
+
+### 1.2 问卷决策 (to-questionnaire, upstream #593)
+
+When a Decision's answer lives outside the session (the decider is not the current user):
+
+<questionnaire-rules>
+
+1. Don't block and wait — generate a Markdown questionnaire and hand it to the decider (async fill or review in a meeting).
+2. The questionnaire dolls out **"发给谁 (who) + 要回什么 (what do we want back)"**, then aims each question at the gap between the two. It does NOT grill the subject itself — that's exactly what can't be answered in the session.
+3. Once the questionnaire comes back, resume the frontier with the answers.
+
+</questionnaire-rules>
 
 ### 2. To-Spec
 
@@ -169,11 +198,15 @@ When the executor reports completion:
 
 ### 5. To-Tickets (for large features)
 
-If the work is too large for one task, break it into tracer-bullet tickets:
+If the work is too large for one task, break it into **decision tickets**. The unit of a ticket is a question answered by a decision, not an implementation slice — implementation slices are the tasks downstream to executors.
 
 <ticket-rules>
 
-- Each ticket is a vertical slice (schema → API → tests), not a horizontal layer.
+- **决策票(decision ticket)**: each ticket is *"以决策为解的问句"* (a question whose resolution is a decision), not a horizontal layer and not a raw implementation chunk.
+- **research 票并行烧掉**: research-type decision tickets don't hang waiting — the coordinator digests them in parallel with a subagent (or dispatches them to an executor as an AFK research task). The conclusion lands on a `research/<name>` throwaway branch, with a **context pointer** on the ticket (one line: branch name + one-sentence conclusion). Research tickets are the **only** exception to "one ticket = one session".
+- **prototype 留档**: prototype/exploration artifacts are NOT deleted after use — archive them on a `prototype/<name>` throwaway branch + context pointer; persist the verdict (verdict + question) into the spec/ADR/commit. The main branch keeps only the decisions that were actually validated.
+- **本地票据一票一文件**: when not using a GitHub tracker, write tickets as `.scratch/<feature>/issues/<NN>-<slug>.md` — never merge them into a single `tickets.md`.
+- **大特性路由**: for an idea that plausibly won't fit in one session, build a **decision-ticket map first**, converge it into To-Spec, then converge. The map converges into the spec — do NOT dispatch implementation directly from the map.
 - Each ticket is sized to fit in one executor context window.
 - Declare blocking edges: which tickets must complete before this one can start.
 - Dispatch tickets in dependency order. Work the frontier: any ticket whose blockers are all done.
@@ -198,5 +231,6 @@ If the work is too large for one task, break it into tracer-bullet tickets:
 - **No dispatch without spec**: The specRef field is mandatory in your workflow.
 - **No vague acceptance**: "works correctly" is not a criterion. "API returns 200 with {status: ok}" is.
 - **One slice per task**: Don't bundle unrelated changes into one dispatch.
-- **Verify before closing**: Never mark a task done without checking the spec criteria.
-- **Docs stay in sync**: If code changes, check if ADR/architecture docs need updating.
+- Verify before closing: Never mark a task done without checking the spec criteria.
+- Docs stay in sync: If code changes, check if ADR/architecture docs need updating.
+- **harness-neutral**: instructions issued to dispatched executors/subagents must not hard-code a specific harness's tool names or agent-type names, so they stay executable across harnesses. The `coagenthub_*` tool names are the platform contract and are exempt.

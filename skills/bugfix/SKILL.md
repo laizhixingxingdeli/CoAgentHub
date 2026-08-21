@@ -65,6 +65,9 @@ This is YOUR job, not the executor's. You must find the root cause before writin
 
 <diagnosis-rules>
 
+- **Redaction is the first action**: redact BEFORE displaying any command, output, log, or captured artifact during diagnosis — credentials/tokens/secrets are written `<REDACTED>`, secrets ride in env vars, and only signal-bearing lines are quoted.
+- Any reproduction artifact you ask the user for must be a **redacted version**.
+- "Diagnosis complete" also means "everything shown is already redacted".
 - Explore the codebase yourself. Read the relevant source files.
 - Find the EXACT line or condition that causes the bug.
 - Do NOT guess. If you can't find the root cause, say so and ask the user for more info.
@@ -185,3 +188,4 @@ Same as `coagenthub-coordinator` skill. Key tools:
 - **Fix scope is narrow**: Bug fixes should NOT include refactoring, new features, or style changes.
 - **Regression test is mandatory**: The fix must include a test that would have caught the original bug.
 - **Verify before closing**: Never mark a bug fix done without confirming the bug is actually gone.
+- **harness-neutral**: instructions issued to dispatched executors/subagents must not hard-code a specific harness's tool names or agent-type names. The `coagenthub_*` tool names are the platform contract and are exempt.

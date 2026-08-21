@@ -43,7 +43,7 @@ chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
 const { createTestApp } = await import("./app");
-const { __resetExecutorQueueForTests } = await import(
+const { __resetExecutorQueueForTests, currentRunningTask } = await import(
   "../src/lib/executor-task"
 );
 
@@ -285,23 +285,23 @@ describe("Durable Task Completion Events", () => {
     }
   }
 
-  /** 轮询直到 taskId 对应的任务进入指定状态。 */
-  async function waitForTaskStatus(
-    groupId: string,
-    taskId: string,
-    status: string,
-    timeoutMs = 15_000,
-  ) {
+  /**
+   * 轮询直到任务已进入 in-memory 运行态且进程句柄可 kill。
+   * DB 状态置 running 早于 spawn 完成(中间含 git checkpoint),此刻发停止指令
+   * 时 kill 句柄尚未就绪 → 指令落空;等 currentRunningTask() 返回可 kill 的该任务
+   * 再发,保证停止指令真正命中 running 进程。
+   */
+  async function waitForTaskKillable(taskId: string, timeoutMs = 15_000) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const detail = await getTaskDetail(groupId, taskId);
-      if (detail.status === status) return detail;
+      const rt = currentRunningTask();
+      if (rt && rt.taskId === taskId) return;
       if (Date.now() > deadline) {
         throw new Error(
-          `task ${taskId} 未在 ${timeoutMs}ms 内进入 ${status}(当前: ${detail.status})`,
+          `task ${taskId} 未在 ${timeoutMs}ms 内变为可终止的运行态`,
         );
       }
-      await new Promise((r) => setTimeout(r, 200));
+      await sleep(50);
     }
   }
 
@@ -877,7 +877,9 @@ describe("Durable Task Completion Events", () => {
       expect(res.status).toBe(200);
       const task = await waitForTask(group.id, msg.id as string);
       const taskId = task.id as string;
-      await waitForTaskStatus(group.id, taskId, "running");
+      // DB 置 running 早于 spawn 完成:等 in-memory 运行句柄可 kill 后再发停止,
+      // 避免停止指令落在 run.kill 未就绪的竞态窗口。
+      await waitForTaskKillable(taskId);
       // 协调者发「停止」控制指令 → 运行中任务被置 cancelled。
       const stop = await postMessage(coordinator.id, group.id, {
         body: "停止",

@@ -226,7 +226,8 @@ CoAgentHub/
   任务书模板以精简的「**执行方式**」段触发 `coagenthub-executor` skill(读规范→写
   代码→测试→Code Review 自检→汇报;未安装 skill 时任务书提示 `GET /api/skills/executor`
   获取内容)。执行器自检(Code Review 自检,Standards + Spec Compliance 双轴)改由
-  **skill 承载**,不再固化进任务书正文。
+  **skill 承载**,不再固化进任务书正文。三个 skills(coordinator/bugfix/executor)对齐
+  **Matt 协议 v1.2.3**,只改 SKILL.md 即时生效(GET /api/skills/:name 从磁盘实时读取)。
 - **汇报格式要求(任务书模板固定五行)**:`提交: <commit hash>` / `测试: <测试结果摘要>` /
   `Token: <消耗 token 数量>` / `汇报: <做了什么,3-5 句>` / `遗留: <未完成事项>`。stdout
   四段解析由 `lib/executor-task/report.ts` 的 `parseTaskReport` 完成,其中 `Token:` 段

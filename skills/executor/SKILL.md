@@ -43,22 +43,42 @@ Write the code. Follow the repo's coding standards:
 
 ### 3. Test
 
-Run the project's test suite:
-
-```bash
-pnpm test          # unit tests
-pnpm check-types   # type checking
-pnpm build         # build verification
-```
+Testing is **reference-only discipline** — a reference for how to write code, not a mandated step sequence. The loop is just **red → green**:
 
 <test-rules>
 
+- **red → green**: write a failing test first, then write the minimal implementation to make it pass. That's the whole loop.
+- **refactor is OUT of the loop**: do NOT refactor during implementation — refactoring belongs to §4 Code Review. If you notice a refactor, note it for review instead of doing it inline.
+- **Rhythm**: run type checks often, run single-file tests often, and run the full suite once at the end.
+- **Vertical slice**: one verifiable slice at a time; don't cut across layers horizontally.
 - All tests must pass. No exceptions.
 - If you add new functionality, add tests for it.
 - If you fix a bug, add a regression test that would have caught the original bug.
 - If a test fails and it's NOT your change's fault, report it — don't silently fix unrelated tests.
 
 </test-rules>
+
+Essential commands:
+```bash
+pnpm test          # unit tests
+pnpm check-types   # type checking
+pnpm build         # build verification
+```
+
+### 3.5 人工墙 → wizard (Human Wall to Wizard)
+
+When execution hits a step **only a human can perform**, don't stack numbered instructions in stdout or the report — generate a staged interactive bash script for the human to run.
+
+<wizard-rules>
+
+- **Triggers (four cases)**: provisioning infrastructure / configuring credentials or CI secrets / navigating an unfamiliar third-party dashboard / a one-off migration or cutover.
+- **Non-trigger (stated explicitly)**: anything the agent can run itself is expressly NOT packaged as a wizard — "agent-doable steps are for the agent; the wizard is left for the clicks, approvals and back-office actions that won't be handed to the agent."
+- **Script essentials**: stages with a confirmation gate at each stage, sensitive input hidden from echo, idempotent writes to `.env`, and a skip-items summary at the end.
+- **Progress counts by stage** — never estimate time.
+- **Self-check** the generated script with `bash -n` (syntax) and `shellcheck` (if available).
+- **Inlined form**: the CoAgentHub skill is shipped as a single file (GET /api/skills/executor) and does not bundle the upstream template.sh library — the essentials above are inlined as "what the generated script must contain".
+
+</wizard-rules>
 
 ### 4. Code Review (Self-Review) — MANDATORY
 
@@ -81,6 +101,7 @@ Review checklist:
 - [ ] **No dead code**: no unused imports, commented-out code, or unreachable branches?
 - [ ] **Error handling**: are errors handled the same way as the rest of the codebase?
 - [ ] **No secrets**: no hardcoded tokens, passwords, or API keys?
+- [ ] **Bad smells**: self-check against Fowler's refactoring bad-smell vocabulary — mysterious name / duplicated code / feature envy / data clumps / primitive obsession / repeated switches / divergent change / speculative generality / message chains / middleman. The model carries priors on these; hit any → fix it. (The words themselves trigger the prior; the full vocabulary is listed here.)
 
 #### Axis B: Spec Compliance
 
@@ -125,6 +146,11 @@ Token: <token count consumed by this run>
 
 <report-rules>
 
+- **Redaction is the first action**: whenever you display or report commands, output, or captured artifacts, redact first —
+  - credentials/tokens/secrets are always written `<REDACTED>`;
+  - where an env var can carry a secret, don't write the credential into the script or output;
+  - when quoting artifacts, cite only the signal-bearing lines — don't paste whole blocks.
+- This constrains display/reporting only; it does NOT change the five-part report structure (提交/测试/Token/汇报/遗留) that the server parses.
 - The Code Review 自检 section is MANDATORY in your output.
 - Be honest. If something failed review, say so. The coordinator will verify anyway.
 - Keep it concise. Don't paste full diffs — the coordinator can `git diff` themselves.
@@ -146,3 +172,4 @@ Do NOT mark the task as done yourself via `PATCH /tasks/:id` unless the task tic
 - **Self-review is mandatory**: never report done without completing the code review checklist.
 - **Be honest**: if you can't do something, say so. Don't fake success.
 - **Test everything**: if you wrote code, write tests. If you fixed a bug, write a regression test.
+- **harness-neutral**: instructions you issue (and tool references in report prose) must not hard-code a specific harness's tool names or agent-type names. The `coagenthub_*` tool names and `coagenthub-*` skill names are the platform contract and are exempt.
