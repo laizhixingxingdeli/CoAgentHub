@@ -1,8 +1,8 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.2（在 3.1 基础上：Dispatch 纪律——任务书按单一关注点拆细，
-> §7 建议批次从4大批拆为12小票，源码/测试/提交打包为一次下发-验收循环）
+> **版本**: 3.3（在 3.2 基础上：新增执行器限额处理纪律——命中限额等重置后
+> 重发同一张票，不换执行器、不放弃）
 > **日期**: 2026-08-21
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
@@ -42,6 +42,13 @@
    实测发现打包多个小节/多个文件的大任务书，执行器中途中断（额度/环境问题）后
    留下的半成品状态难以诊断；改为一票一个内聚关注点，源码+配套测试+提交在同一
    张票里一次完成，不分阶段。§7 的建议批次从4大批拆为12张更细的票。
+9. **执行器限额处理纪律**（本次讨论追加，见 §3.11）：执行器命中使用量限额
+   （429 / rate limit / quota）时，协调者应**等待限额重置时间过后重新下发同一
+   张票**，而不是换执行器或放弃该票。平台侧已有对应机制
+   （`scripts/dispatch-policy.json` 的 `rateLimit.detectPatterns` 探测 +
+   `cooldownMinutes` 冷却 + `parseRateLimitRecoveryMs` 从失败输出解析恢复时间），
+   skill 侧的纪律与之对齐；`rateLimit.fallbackExecutor` 保持 `null`
+   （不自动切换执行器）。
 
 ## 1. 背景与目标
 
@@ -113,7 +120,8 @@
 - `packages/backend/server/src/lib/participant-capabilities.ts` —
   `COAGENTHUB_SKILL_CAPABILITIES` 增加 `reviewer: "coagenthub-reviewer"`
 - `skills/reviewer/SKILL.md` — **新增**
-- `skills/coordinator/SKILL.md` — 移除 Grill/To-Spec，新增取 spec + 三层编排
+- `skills/coordinator/SKILL.md` — 移除 Grill/To-Spec，新增取 spec + Dispatch
+  纪律 + 限额处理 + 三层编排
 - `skills/executor/SKILL.md` — L1 自检闭环约束
 - `skills/bugfix/SKILL.md` — 诊断/分流迁给检视者，方案与下发/验收并入协调者三层编排
 - `packages/frontend/web` — Composer 按身份（human）禁用
@@ -445,7 +453,21 @@ GET / WS 订阅不受影响，`isMessageVisibleToMember` 的"human 全可见"规
    下发-验收，也不要一张票扛太多。任务书越大，执行器执行到一半被打断（额度/
    超时/环境问题）时留下的半成品状态越难收拾，也越难做 L2/L3 检视——检视是
    逐条对照验收标准，任务书关注点越单一，检视越准。
-5. 验收段升级为三层编排：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务
+5. **新增「限额处理」子段**（本次讨论追加）：执行器返回限额错误
+   （429 / `rate limit` / `quota` /「使用量已超出频率限制」等，探测模式见
+   `scripts/dispatch-policy.json` 的 `rateLimit.detectPatterns`）时：
+   - **不判该票失败、不换执行器、不缩减范围**——限额是外部资源约束，与任务
+     内容无关，换执行器等于用一个未经验证的执行者去接一张已经写好的票，
+     反而引入新的不确定性；
+   - 从失败输出解析限额重置时间（平台的 `parseRateLimitRecoveryMs` 已实现该
+     解析；解析不出则退回 `cooldownMinutes` 固定冷却，缺省 300 分钟）；
+   - 等待到重置时间之后，**重新下发同一张票**——任务书内容、`specRef`、
+     `specHash` 全部不变；
+   - 等待期间在群内说明正在等限额，不要静默停滞（否则旁观者无法区分
+     「在等限额」与「链路挂死」）。
+   - `rateLimit.fallbackExecutor` 缺省为 `null`（不自动切换到备用执行器）；
+     若未来要启用自动切换，需先确认备用执行器与原执行器在该项目上的能力等价。
+6. 验收段升级为三层编排：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务
    （detached + review_request 载荷）→ 读 `review_result`
    裁决 → 结案（`PATCH` 自己那个来自检视者的 detached 任务为 done，见 §3.5）。
 
