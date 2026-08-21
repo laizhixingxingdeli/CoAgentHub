@@ -1,8 +1,8 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.3（在 3.2 基础上：新增执行器限额处理纪律——命中限额等重置后
-> 重发同一张票，不换执行器、不放弃）
+> **版本**: 3.4（在 3.3 基础上：新增协作模式——三层 / 两层，模式由群成员构成
+> 推导，平台零改动；两层下协调者兼任写 spec 职责并跳过 L3）
 > **日期**: 2026-08-21
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
@@ -49,6 +49,13 @@
    `cooldownMinutes` 冷却 + `parseRateLimitRecoveryMs` 从失败输出解析恢复时间），
    skill 侧的纪律与之对齐；`rateLimit.fallbackExecutor` 保持 `null`
    （不自动切换执行器）。
+10. **协作模式：三层 / 两层，由成员构成推导**（v3.4 追加，见 §3.14）：并非所有
+    工作都值得走满三层。群内**有** `reviewer` 角色成员 = 三层；**无** = 两层
+    （协调者兼任检视者的写 spec 职责，跳过 L3）。**不新增 `groups.mode` 列或
+    任何平台配置项**——平台不需要知道模式（两模式的唯一差异是协调者要不要
+    再下发一个 L3 检视任务，而检视任务在平台眼里只是普通 task），且冗余标记
+    会与成员表漂移。两层模式下协调者**按需加载 reviewer skill** 承担其职责 A，
+    严禁把 Grill/To-Spec 复制回 coordinator skill。
 
 ## 1. 背景与目标
 
@@ -121,7 +128,8 @@
   `COAGENTHUB_SKILL_CAPABILITIES` 增加 `reviewer: "coagenthub-reviewer"`
 - `skills/reviewer/SKILL.md` — **新增**
 - `skills/coordinator/SKILL.md` — 移除 Grill/To-Spec，新增取 spec + Dispatch
-  纪律 + 限额处理 + 三层编排
+  纪律 + 限额处理 + 三层编排 + **协作模式分支（v3.4：两层时按需加载 reviewer
+  skill 自行写 spec、跳过 L3）**
 - `skills/executor/SKILL.md` — L1 自检闭环约束
 - `skills/bugfix/SKILL.md` — 诊断/分流迁给检视者，方案与下发/验收并入协调者三层编排
 - `packages/frontend/web` — Composer 按身份（human）禁用
@@ -500,6 +508,118 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
   a2a。
 - README/README_CN（如含角色/流程描述）同步。
 
+### 3.14 协作模式：三层 / 两层（由成员构成推导，平台零改动）
+
+> **v3.4 新增。** 本节是对 §1「三角色三层检视」的补充——并非所有工作都值得走满
+> 三层。本节定义**两层模式**（协调者兼任检视者职责，只有协调者 + 执行者），
+> 以及模式如何被识别。
+
+#### 3.14.1 决策：模式由成员构成推导，不落平台字段
+
+**模式 = 群成员里有没有 `reviewer` 角色成员。**
+
+| 群内有 `reviewer` 角色成员 | 模式 | 检视层 |
+|---|---|---|
+| 有 | **三层** | L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视 |
+| 无 | **两层** | L1 执行者自检 + L2 协调者功能检视（协调者兼任写 spec 职责，不做 L3） |
+
+**不新增 `groups.mode` 列、不新增任何平台配置项、不新增 API 字段。**
+
+理由（三条，按重要性排）：
+
+1. **平台不需要知道模式。**两种模式唯一的行为差异是「协调者 L2 通过后要不要再
+   下发一个 L3 检视任务」。而「检视任务」在平台眼里就是一条普通的定向消息 →
+   task，body 里带一段 JSON 载荷而已——平台不解析它、不编排它、不因它改变任何
+   调度行为。让平台读懂 `mode` 等于开始建编排引擎，与 §5「不建平台编排引擎」
+   和 `CONTEXT.md` 的既有取向直接冲突。
+2. **存了会漂移。**若同时存在 `mode` 字段与成员表，两者可能不一致（标记为三层
+   但群内无 reviewer 成员 → 协调者下发 L3 必然找不到目标而失败）。此时以哪个
+   为准？**成员表才是决定「L3 能不能真的下发成功」的唯一事实**，冗余标记只是
+   多制造一处可能说谎的地方。
+3. **切换模式天然一致。**加/踢一个 reviewer 成员即完成模式切换，不存在「改了
+   标记忘了改成员」或反之的窗口。
+
+**前端与展示**：需要展示模式时按上述规则**实时推导**（成员列表已含 `roles`，
+`GET /api/groups/:id/members` 一次请求即可判定），不要缓存成状态字段。
+
+#### 3.14.2 两层模式：协调者必须取回写 spec 的能力
+
+**问题**：§3.11（票 11）已从 `skills/coordinator/SKILL.md` 移除 Grill 与 To-Spec
+段，并明写「You do NOT write specs」「`specRef` 或 `specHash` 任缺其一：不得
+下发」。两层模式下群内无检视者、无人公布 `spec_published`，协调者将**永远拿不到
+`specRef`+`specHash`，永远无法下发**——硬卡死。
+
+**解法：按需加载 reviewer skill，不复制内容。**
+
+`skills/coordinator/SKILL.md` 的「取 spec」段增加模式分支：
+
+- **Dispatch 前先判定模式**：读群成员（`GET /api/groups/:id/members`），检查是否
+  存在 `roles` 含 `reviewer` 的成员。
+- **三层模式（有 reviewer）**：现行流程**完全不变**——向检视者取冻结 spec，
+  识别 `spec_published` / `spec_amended` 载荷，缺 `specRef`/`specHash` 不得下发。
+- **两层模式（无 reviewer）**：协调者**自行承担检视者的职责 A**——
+  `GET /api/skills/reviewer` 取回该 skill，按其「职责 A」执行：与用户对齐需求
+  （grill）→ 检视代码架构 → 写 `specs/<feature>.md` → commit 冻结 → 群内公布
+  `spec_published`。**冻结与 `specHash` 不可省略**：验收钉子在两层模式下同样是
+  L2 检视的对照基准。
+
+**明确禁止把 Grill/To-Spec 段落复制回 coordinator skill**——两份同样的纪律会
+各自演化并逐渐不一致，而这正是三角色拆分最初要消除的问题。coordinator skill 里
+只写一句指向（「无 reviewer 成员时，按 reviewer skill 的职责 A 自行完成需求对齐
+与 spec 冻结」），reviewer skill 是这套纪律的唯一事实来源。
+
+#### 3.14.3 两层模式的验收编排
+
+`### 4. 验收编排` 段增加模式分支：
+
+- **三层**：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务（detached +
+  `review_request` 载荷）→ 读 `review_result` 裁决 → 结案。**完全不变。**
+- **两层**：L2 功能检视 → ❌ 重下发 / ✅ **直接结案**，跳过 L3。结案时若存在
+  上游 detached 任务（如由人类或外部触发链路），仍须 `PATCH` 回写终态——该硬
+  约束与模式无关。
+
+#### 3.14.4 取舍说明（写进 skill，供协调者与用户判断）
+
+两层模式换来更少的 agent 跳转（省 token、省延迟）与更少的失败环节，代价必须
+写明，否则选择是盲目的：
+
+- **L3 变成自审**：协调者刚做完 L2 功能检视，紧接着用同一上下文做架构检视——它
+  对「这个实现方案好不好」是有立场的（方案某种程度上由它下发）。L3 单独成角色的
+  核心价值是**新鲜的眼睛**，合并后该价值基本归零。
+- **写 spec 与验收 spec 变成同一方**：三层设计中「检视者出 spec、协调者按 spec
+  验收」构成天然交叉校验；合并后，spec 写得模糊时验收也会照模糊标准放行，无人
+  能发现。
+
+**选择建议**（写进 coordinator skill）：小改动、bug 修复、边界明确的小需求走
+**两层**；涉及架构决策、新模块、会写进 ADR 的工作走**三层**。这与 §3.6 检视者的
+需求分流规则同构——只是把「要不要写 spec」的分流，提升为「要不要开三层」的分流。
+
+#### 3.14.5 部署差异（顺带解决 L3 开箱失败）
+
+内置 reviewer 执行器（§3.12）的 `bin` 是占位标识 `"reviewer"`，**未设
+`EXECUTOR_BIN_REVIEWER` 时下发 L3 检视任务会以 `spawn reviewer ENOENT` 失败**
+（实测确认）。同理，协调者若要使用 §3.5 的 detached 会话延续，需自行
+`POST /api/executors` 注册为可被唤醒的执行器（内置列表不含协调者条目）。
+
+因此：
+
+- **两层模式开箱即用**——不下发 L3，不依赖 `EXECUTOR_BIN_REVIEWER`。
+- **三层模式需要额外部署配置**——必须设置 `EXECUTOR_BIN_REVIEWER` 指向检视者
+  runtime 的实际 CLI 命令。
+
+该前置条件此前在 `CONTEXT.md` / `docs/architecture.md` / `docs/usage.md` 中**均无
+记载**，属文档缺口，随本节一并补齐（见 §3.15）。
+
+### 3.15 文档补充（v3.4 增量）
+
+- `CONTEXT.md`：新增「协作模式（三层 / 两层）」词条——模式由成员构成推导、
+  两层下协调者兼任写 spec、两层跳过 L3 及其取舍。
+- `docs/architecture.md`：§9 补协作模式说明与推导规则；补
+  **`EXECUTOR_BIN_REVIEWER` 是三层模式的部署前置条件**（未设置则 L3 任务
+  `spawn reviewer ENOENT`）；补协调者若要用 detached 会话延续需自行注册执行器。
+- `docs/usage.md` / `docs/usage_CN.md`：环境变量表补 `EXECUTOR_BIN_REVIEWER`
+  （及 `EXECUTOR_BIN_<KEY>` 通用覆盖规则的说明，若尚未记载）。
+
 ## 4. 验收标准
 
 - [ ] `DISPATCH_ALLOWED_ROLES`（executor-task/types.ts）与 `CONTROL_ALLOWED_ROLES`
@@ -537,6 +657,20 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 - [ ] `messages.ts`：human 角色 POST/PATCH/DELETE 群消息返回 403；agent 角色不
       受影响（单测覆盖）
 - [ ] 前端：human 身份下群消息页无发言入口；其他身份不受影响
+- [ ] **（v3.4）协作模式**：`skills/coordinator/SKILL.md` 的「取 spec」段含模式
+      判定（读群成员，有无 `reviewer` 角色）；三层分支行为完全不变；两层分支
+      指向 `GET /api/skills/reviewer` 的职责 A 自行 grill + 写 spec + 冻结公布，
+      **未复制 Grill/To-Spec 段落内容**
+- [ ] **（v3.4）** 「验收编排」段含模式分支：三层走 L2→L3→裁决→结案；两层 L2
+      通过即结案、跳过 L3；结案 PATCH 上游 detached 任务的硬约束与模式无关
+- [ ] **（v3.4）** coordinator skill 写明两层模式的取舍（L3 变自审、写 spec 与
+      验收 spec 同一方）与选择建议（小改动/bug 走两层，架构决策走三层）
+- [ ] **（v3.4）** 平台零改动：无 `groups.mode` 列、无新增 API 字段/配置项
+- [ ] **（v3.4）文档**：`CONTEXT.md` 含「协作模式」词条；`docs/architecture.md`
+      §9 含模式推导规则 + **`EXECUTOR_BIN_REVIEWER` 是三层模式部署前置条件**
+      （未设置则 L3 任务 `spawn reviewer ENOENT`）+ 协调者用 detached 需自行
+      注册执行器；`docs/usage.md` 与 `usage_CN.md` 环境变量表含
+      `EXECUTOR_BIN_REVIEWER`
 - [ ] pnpm test 全绿、check-types 通过、build 通过（backend + frontend）
 - [ ] `CONTEXT.md` 与 `docs/architecture.md` 反映三角色 + 三层检视 + 会话延续 +
       停止/回滚新语义
@@ -555,11 +689,22 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 - **不建用户↔检视者的平台私聊会话 API**——对话走检视者 runtime 原生会话
 - **不改任务书模板**（buildTicket）与汇报五段契约——检视任务书复用同一模板
 - **不改 `GROUP_ROLES`**（reviewer 已存在）
-- **不强制全任务走满三层**——检视深度是策略，写在协调者 skill
+- **不强制全任务走满三层**——检视深度是策略，写在协调者 skill；v3.4 已将该策略
+  具体化为「三层 / 两层」两种协作模式（见 §3.14）
+- **（v3.4）不新增 `groups.mode` 列或任何模式配置项**——模式由群成员构成实时
+  推导（有无 `reviewer` 角色成员），平台不感知模式、不因模式改变任何行为
 - 不新增 npm 依赖，不新增数据库迁移（`canDispatch` 为代码派生配置，不落 DB 列）
 
 ## 6. 兼容性
 
+- **（v3.4）协作模式为纯增量，非 BREAKING**：现有群若已有 `reviewer` 成员，
+  推导为三层模式，行为与 v3.3 完全一致；无 reviewer 成员的群此前本就无法
+  完成「取 spec」（协调者会被卡在等待 `specRef`+`specHash`），v3.4 的两层分支
+  恰好修复了这一死锁，属能力补齐而非行为变更。无需迁移、无需数据改动。
+- **（v3.4）三层模式的部署前置条件被显式化**：内置 reviewer 执行器的 `bin` 是
+  占位标识，未设 `EXECUTOR_BIN_REVIEWER` 时 L3 检视任务会以
+  `spawn reviewer ENOENT` 失败（实测确认）。该前置条件此前无文档记载，
+  §3.15 补齐；两层模式不受影响（不下发 L3）。
 - **BREAKING：human 角色群内禁言**（POST/PATCH/DELETE 群消息 403）——存量用户
   若依赖群内发消息触发任务的流程将中断；迁移路径：与检视者 runtime 会话对话，
   由检视者→协调者链路下发。前端 Composer 同步按身份隐藏
@@ -625,3 +770,11 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 **skill 文案与文档（原批次4，风险最低，可合并为2票）**
 11. §3.11 coordinator/executor/bugfix 三个 SKILL.md 改造（纯 Markdown）
 12. §3.13 文档同步：`CONTEXT.md`、`docs/architecture.md`、README
+
+**协作模式（v3.4 新增，2票；依赖票 11 已完成的 coordinator skill 结构）**
+13. §3.14 coordinator skill 增加模式分支：「取 spec」段的模式判定 + 两层分支
+    （按需加载 reviewer skill）、「验收编排」段的模式分支（两层跳过 L3）、
+    取舍说明与选择建议。纯 Markdown，平台零改动
+14. §3.15 文档补充：`CONTEXT.md` 协作模式词条、`docs/architecture.md` §9 模式
+    推导规则与 `EXECUTOR_BIN_REVIEWER` 部署前置条件、`docs/usage.md` 与
+    `usage_CN.md` 环境变量表。纯 Markdown
