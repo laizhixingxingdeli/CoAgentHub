@@ -1,8 +1,8 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.1（在 3.0 基础上：移除弱验收钩子 verifyTaskCommitted/hasSkipCommitMarker，
-> done 判定仅依据 exit code + 汇报解析，不再对工作区做旁路 git 检查）
+> **版本**: 3.2（在 3.1 基础上：Dispatch 纪律——任务书按单一关注点拆细，
+> §7 建议批次从4大批拆为12小票，源码/测试/提交打包为一次下发-验收循环）
 > **日期**: 2026-08-21
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
@@ -38,6 +38,10 @@
 7. **移除弱验收钩子**（本次讨论追加，见 §3.4）：done 判定不再对工作区做
    `verifyTaskCommitted` 之类的旁路 git 检查，只看执行器进程 exit code + 结构化
    汇报解析结果；早期草案里配套的 `commitMode` 配置项因此作废，不再需要。
+8. **Dispatch 纪律：任务书按单一关注点拆细**（本次讨论追加，见 §3.11、§7）：
+   实测发现打包多个小节/多个文件的大任务书，执行器中途中断（额度/环境问题）后
+   留下的半成品状态难以诊断；改为一票一个内聚关注点，源码+配套测试+提交在同一
+   张票里一次完成，不分阶段。§7 的建议批次从4大批拆为12张更细的票。
 
 ## 1. 背景与目标
 
@@ -433,7 +437,14 @@ GET / WS 订阅不受影响，`isMessageVisibleToMember` 的"human 全可见"规
 1. 移除 Grill 段（归检视者）。
 2. 移除 To-Spec 段（不再自写 spec）。
 3. 新增「取 spec」段——必须有 `specRef`+`specHash` 才能 Dispatch。
-4. Dispatch 保留；`task.specHash` 是验收钉子。
+4. Dispatch 保留；`task.specHash` 是验收钉子。**新增「Dispatch 纪律」子段**（本次
+   讨论追加，源于实测教训——见下）：单张任务书只对应 spec 里的**一个内聚关注点**
+   （通常是一个小节或一组紧密相关的文件），不把 spec 的多个小节/多组不相关文件
+   一次性塞进同一张任务书，即使 spec 自己的阶段划分（如某个"批次"）把它们归在
+   一起，Dispatch 前也要按文件集合/关注点再拆分成多张任务书，宁可多几轮
+   下发-验收，也不要一张票扛太多。任务书越大，执行器执行到一半被打断（额度/
+   超时/环境问题）时留下的半成品状态越难收拾，也越难做 L2/L3 检视——检视是
+   逐条对照验收标准，任务书关注点越单一，检视越准。
 5. 验收段升级为三层编排：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务
    （detached + review_request 载荷）→ 读 `review_result`
    裁决 → 结案（`PATCH` 自己那个来自检视者的 detached 任务为 done，见 §3.5）。
@@ -554,14 +565,41 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 
 ## 7. 建议的实现批次（供执行者/协调者参考，非强制顺序）
 
-为降低单次改动风险，建议按以下批次落地，每批可独立跑测试验证：
+**粒度原则**（本次讨论追加，取代早期"四大批"划分——见下方教训）：**一张任务书只
+对应一个内聚关注点**，源码改动与它配套的测试改动、提交，在同一张任务书里一次
+完成，不要"这一票先把源码全改完，测试留到下一票"——执行器的会话/额度/环境
+随时可能中断，改动范围切得越小，中断后留下的半成品状态越容易诊断和丢弃重来，
+每一票也更容易做 L2/L3 检视（逐条对照验收标准时，关注点单一的票更准）。
 
-1. **通信修正批**：§3.1（角色门拆分）+ §3.2（dispatcher 判据）+ §3.3（停止/
-   回滚重设计）+ §3.4（移除弱验收钩子）+ §3.5（detached 放开到 CLI）。此批不依赖
-   reviewer 是否存在，是后续一切的地基。
-2. **reviewer 接线批**：§3.6（新增 skill）+ §3.7（单角色）+ §3.12（服务端
-   skills/capabilities/加群引导接线）+ 内置 reviewer 执行器配置。
-3. **human 禁言批**：§3.8 + §3.9 + 相关测试重写（`e2e-acceptance.test.ts`、
-   `review-workflow.test.ts` 等）。
-4. **skill 文案批**：§3.11（coordinator/executor/bugfix 改造）+ §3.13（文档
-   同步）。纯 Markdown，改完即时生效，风险最低，放最后。
+> **教训**：本 spec 最早的"批次1"把 §3.1–§3.5（5 个小节、7 个文件）打包成一张
+> 任务书下发，执行器两次尝试都在中途被打断——第一次只改完 1 个文件就撞见热
+> 重载崩溃留下语法错误；第二次把全部源码改完、类型检查通过，但"测试留到最后
+> 补"的阶段被打断，源码和测试各自处于不同完成度，验收时才发现。拆细之后不会
+> 出现这种"进度分散在多个维度、任何一个维度中断都说不清整体状态"的情况。
+
+按以下更细的票拆分（每票源码+测试+提交打包为一次下发-验收循环）：
+
+**通信修正（原批次1，拆为5票，§3.1 是其余各票的前提）**
+1. §3.1 角色门拆分：`types.ts` + `control.ts` 常量、消费点、配套测试
+2. §3.2 dispatcher 判据：`executors.ts` 的 `canDispatch` 字段 + `messages.ts` +
+   `control.ts` 防回环、配套测试
+3. §3.3 停止/回滚重设计：`queue.ts` 的 `cancelQueuedTasks`/`groupId` 过滤 +
+   `control.ts` + barrel 导出面、配套测试（含跨群隔离用例）
+4. §3.4 移除弱验收钩子：`queue.ts` 删除 `verifyTaskCommitted`/
+   `hasSkipCommitMarker` 及调用点、删除/改写相关旧测试
+5. §3.5 detached 放开到 CLI：`queue.ts` 的 CLI detached 分支、配套测试
+
+**reviewer 接线（原批次2，拆为3票）**
+6. §3.6 新增 `skills/reviewer/SKILL.md`（纯文档）
+7. §3.7 单角色校验：`members.ts` + `schema/group.ts` 注释、配套测试
+8. §3.12 服务端接线：`routes/skills.ts` + `participant-capabilities.ts` +
+   `members.ts` 加群引导 + `executors.ts` 内置 reviewer 配置、配套测试
+
+**human 禁言（原批次3，拆为2票，均为 Breaking，需先确认迁移路径已就绪）**
+9. §3.8 human 群内只读：`messages.ts` POST/PATCH/DELETE 403、相关测试重写
+   （`e2e-acceptance.test.ts`、`review-workflow.test.ts` 等）
+10. §3.9 前端 Composer 按身份禁用
+
+**skill 文案与文档（原批次4，风险最低，可合并为2票）**
+11. §3.11 coordinator/executor/bugfix 三个 SKILL.md 改造（纯 Markdown）
+12. §3.13 文档同步：`CONTEXT.md`、`docs/architecture.md`、README
