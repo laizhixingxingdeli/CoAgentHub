@@ -1,8 +1,8 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.5（在 3.4 基础上：限额处理改为「优先交给空闲执行器，全忙才等重置」，
-> 修正 v3.3 的「不换执行器」条款）
+> **版本**: 3.6（在 3.5 基础上：执行器选择优先级由 `group_members.prompt` 推导，
+> 不写死在代码里，复用 resolveTestExecutor 的关键词匹配机制）
 > **日期**: 2026-08-21
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
@@ -47,6 +47,11 @@
    把同一张票交给它；全部忙碌或同样限额，才等重置后重发**。两种情况下都不缩减
    范围、不放弃该票。v3.3 原写的「不换执行器、`fallbackExecutor` 保持 null」
    已作废：等待本身从来不是目的，不丢工作才是。
+10. **执行器优先级由分工提示词推导，不写死**（v3.6 追加，见 §3.16）：在多个执行器
+    都空闲时选谁，依据是 `group_members.prompt`——群内成员的自定义分工提示词。
+    代码里已有同款先例（`resolveTestExecutor` 按 `TEST_KEYWORDS` 对 prompt 计分挑
+    测试执行器），本条复用同一机制，只是换一组关键词。**不新增字段、不新增配置项、
+    不在代码里硬编码任何执行器名字。**
 10. **协作模式：三层 / 两层，由成员构成推导**（v3.4 追加，见 §3.14）：并非所有
     工作都值得走满三层。群内**有** `reviewer` 角色成员 = 三层；**无** = 两层
     （协调者兼任检视者的写 spec 职责，跳过 L3）。**不新增 `groups.mode` 列或
@@ -609,6 +614,35 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 该前置条件此前在 `CONTEXT.md` / `docs/architecture.md` / `docs/usage.md` 中**均无
 记载**，属文档缺口，随本节一并补齐（见 §3.15）。
 
+### 3.16 执行器优先级：由分工提示词推导（v3.6）
+
+**问题**：多个执行器同时空闲时，协调者选谁？写死一个偏好顺序（如「优先 atomcode」）
+会把部署差异固化进代码——换台机器、换套执行器，代码就得改。
+
+**解法：优先级是群内分工的一部分，写在 `group_members.prompt` 里。**
+
+该字段是既有概念（见 `CONTEXT.md`「group_members.prompt = 群内成员自定义提示词：
+该 participant 在本群的分工说明，调度时拼进任务书」），且**代码里已有同款用法**：
+`resolveTestExecutor`（`executor-task/queue.ts`）按 `TEST_KEYWORDS`（测试/验证/
+检验/test/verify/review）对每个执行器成员的 prompt 计分，取分最高者，并列时按名字
+字典序保证稳定。本条复用这套机制，只是换一组表达"主次"的关键词。
+
+**规则**：
+- 候选集 = 群内 roles 含 `executor`/`specialist`、且当前**空闲**（不在 running、
+  不在限额冷却）的成员；
+- 在候选集中按 prompt 的优先级关键词计分，取分最高者；
+- 并列 → 按 participant 名字字典序（与 `resolveTestExecutor` 同款，保证可复现）；
+- 全部候选 prompt 都不含优先级关键词 → 视为等价，同样按字典序取第一个；
+- **候选集为空**（全忙或全限额）→ 走 §3.11 的等待重置路径。
+
+**关键词集合**由实现时确定并写进代码注释，须与 `TEST_KEYWORDS` 同一风格（中英兼收、
+大小写不敏感、行内出现即计分）。示例语义：「主要」「首选」「primary」「preferred」
+计正分；「备用」「兜底」「fallback」「backup」计负分。现网数据里 AtomCode 执行器的
+prompt 正是 `主要执行者`，无需改动任何现有数据即可生效。
+
+**明确不做**：不新增 `ExecutorConfig` 字段、不新增 `dispatch-policy.json` 配置项、
+不在代码里出现任何具体执行器名字。改部署时改 prompt，不改代码。
+
 ### 3.15 文档补充（v3.4 增量）
 
 - `CONTEXT.md`：新增「协作模式（三层 / 两层）」词条——模式由成员构成推导、
@@ -777,3 +811,8 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 14. §3.15 文档补充：`CONTEXT.md` 协作模式词条、`docs/architecture.md` §9 模式
     推导规则与 `EXECUTOR_BIN_REVIEWER` 部署前置条件、`docs/usage.md` 与
     `usage_CN.md` 环境变量表。纯 Markdown
+
+**执行器优先级（v3.6 新增，1票）**
+15. §3.16 执行器优先级：按 `group_members.prompt` 关键词计分挑空闲执行器，
+    复用 `resolveTestExecutor` 同款机制 + 配套测试；coordinator skill 的
+    「限额处理」子段同步补上「多个空闲时怎么选」
