@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGroupWs } from "@/hooks/use-group-ws";
 import {
   PARTICIPANT_ID_KEY,
@@ -8,6 +8,11 @@ import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
+import {
+  groupTasksBySpec,
+  type Requirement,
+} from "./group-tasks-by-spec";
+import RequirementList from "./RequirementList";
 
 /**
  * 右栏「任务」Tab:现有任务面板(TaskPanel)逻辑整体移入 — 挂载时拉取一次
@@ -53,6 +58,28 @@ export function TasksTab({ groupId }: { groupId: string }) {
   // 任务行内正文预览(前 40 字)与执行者名需要消息流与成员数据。
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+
+  // UI-04a:把扁平任务列表按 specRef 聚合成需求(Requirement)。分组结果随
+  // tasks 变化重算;顺序由分组函数保证(最新需求在数组最后)。
+  const requirements = useMemo<Requirement[]>(
+    () => groupTasksBySpec(tasks),
+    [tasks],
+  );
+  // 当前选中的需求 id:默认选中数组最后一个(最新需求);任务刷新导致当前选中项
+  // 失效时回落到最新,仍保持「默认选中最新」的约定。
+  const [selectedRequirementId, setSelectedRequirementId] = useState<
+    string | null
+  >(null);
+  useEffect(() => {
+    setSelectedRequirementId((prev) => {
+      if (prev !== null && requirements.some((r) => r.id === prev)) {
+        return prev;
+      }
+      return requirements.length > 0
+        ? requirements[requirements.length - 1].id
+        : null;
+    });
+  }, [requirements]);
 
   const loadGroupStatus = useCallback(async () => {
     try {
@@ -317,7 +344,14 @@ export function TasksTab({ groupId }: { groupId: string }) {
   }, []);
 
   return (
-    <div data-testid="tasks-tab">
+    <div data-testid="tasks-tab" className="flex flex-col">
+      {requirements.length > 0 && (
+        <RequirementList
+          requirements={requirements}
+          selectedId={selectedRequirementId}
+          onSelect={setSelectedRequirementId}
+        />
+      )}
       <TaskPanel
         tasks={tasks}
         loading={loading}
