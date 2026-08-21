@@ -25,7 +25,7 @@
 CoAgentHub/
 ├── serve.mjs                          # 局域网静态托管 + /api 反代 + WS upgrade
 ├── specs/                             # Spec 文档(Spec-Driven 工作流)
-├── skills/                            # Agent Skills(coordinator/bugfix/executor)
+├── skills/                            # Agent Skills(coordinator/bugfix/executor/reviewer;bugfix 为索引)
 ├── docs/                              # 纯 Markdown 文档(usage/architecture/adr)
 ├── packages/
 │   ├── callback-agent/                # 通用回调 Agent:消费 completion inbox 并恢复 CLI Agent 原 session
@@ -46,7 +46,7 @@ CoAgentHub/
 │   │   │       │   └── helpers.ts    #      共享守卫(assertGroupWritable)
 │   │   │       ├── routes/system/     #    health
 │   │   │       ├── routes/file.ts     #    LAN 文件上传下载,纯磁盘无鉴权,流式读写
-│   │   │       ├── routes/skills.ts   #    暴露 skills/{coordinator|executor|bugfix}/SKILL.md(GET /api/skills[:/:name])
+│   │   │       ├── routes/skills.ts   #    暴露 skills/{coordinator|executor|bugfix|reviewer}/SKILL.md(GET /api/skills[:/:name])
 │   │   │       ├── middleware/participant-identity.ts  # X-Participant-Id 身份声明(无鉴权/校验)
 │   │   │       ├── lib/config.ts             # 统一配置读取(CORS/FILE_DIR/上传上限/PORT)
 │   │   │       ├── lib/group-visibility.ts   # 消息可见性规则(单一来源)
@@ -58,7 +58,7 @@ CoAgentHub/
 │   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail)
 │   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
 │   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard;含 Token 消耗提取)
-│   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/停止/超时/重试)
+│   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/取消排队/超时/重试)
 │   │   │   └── scripts/              #    演示/验收脚本
 │   │   └── database/                  # drizzle schema + migrations(表定义见 §3)
 │   ├── common/                        # 共享包(错误码 BizCodeEnum、tsconfig 预设)
@@ -97,14 +97,14 @@ CoAgentHub/
 | `/api/groups` | POST | 建群(`title`);创建者同一事务内自动加入并持 `coordinator` 角色 |
 | `/api/groups` | GET | 列群组,带 `memberCount`;`?status=active\|archived` 过滤、`?q=` 标题搜索、`?limit=&offset=` 分页(limit 上限 100,缺省不截断),返回 `{ items, total }` |
 | `/api/groups/:id` | GET | 群组详情(含 status) |
-| `/api/groups/:id/members` | POST | 添加成员并分配角色(幂等 upsert,缺省 `["observer"]`) |
+| `/api/groups/:id/members` | POST | 添加成员并分配角色(幂等 upsert,缺省 `["observer"]`);单角色校验:去重后 `roles.length > 1` → 400 |
 | `/api/groups/:id/members` | GET | 列成员(participant 信息 + 群内角色,按加入时间升序) |
-| `/api/groups/:id/members/:participantId` | DELETE/PATCH | 移除成员(群主不可移除)/更新角色 |
+| `/api/groups/:id/members/:participantId` | DELETE/PATCH | 移除成员(群主不可移除)/更新角色(同单角色校验,`roles.length > 1` → 400) |
 | `/api/groups/:id/archive`、`/unarchive` | POST | 归档/恢复(active ↔ archived) |
 | `/api/groups/:id` | DELETE | 软删除(active\|archived → deleted;行保留,列表隐藏) |
-| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS |
+| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS。**human 角色成员 403**(群是 agent 协作空间) |
 | `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标 |
-| `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整) |
+| `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整);human 角色成员 403(同写接口只读约束) |
 | `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`) |
 | `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
 | `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空) |
@@ -118,7 +118,7 @@ CoAgentHub/
 | `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`) |
 | `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效) |
 | `/api/skills` | GET | 列出 `skills/` 下 skills(name + description + SKILL.md path) |
-| `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容(coordinator/executor/bugfix;未知 404) |
+| `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容(coordinator/executor/bugfix/reviewer;未知 404) |
 | `/api/docs`、`/api/openapi` | GET | Scalar API 文档与 OpenAPI 规范 |
 
 ### 身份声明与可见性
@@ -159,6 +159,9 @@ CoAgentHub/
   同一参数,`visibility-sql.test.ts` 断言二者一致。
 - GET `/api/groups/:id/messages`:先按群组(+ 可选游标)查出消息,再用上述规则对请求者逐条过滤。
 - WS 推送:先按规则算出 `visibleMemberIds`,剔除发送者——各调用路径永不漂移。
+- **human 只读仅约束写接口**:上面的「human 全可见」规则未变——human 角色成员(含
+  Local User)仍可旁观全部消息;403 只发生在消息写接口(POST/PATCH/DELETE),不影响
+  GET 列表与 WS 订阅。
 
 ## 6. 关键流程(检视流程时序)
 
@@ -189,15 +192,29 @@ CoAgentHub/
   缺失或未知 id → 回落 **Local User**(全可见)。**token 认证已移除**:不再生成/校验
   token,无 401/403,`token_hash` 列保留待删。
 - 读接口(消息/任务列表/成员)对非成员放开(可见性过滤);写接口(POST 消息/成员/task)
-  要求成员资格;控制指令(停止/回滚)要求 coordinator/human。
+  要求成员资格;控制指令(停止/回滚)要求 coordinator/human/reviewer
+  (`CONTROL_ALLOWED_ROLES`;human 禁言后,紧急停止只能由检视者代发)。
+- **human 群内只读**:human 角色成员对消息写接口(POST/PATCH/DELETE)返回 403
+  (共享守卫 `assertMemberNotHuman`,措辞「群是 agent 协作空间,请与检视者 agent 直接
+  对话」);GET 列表与 WS 订阅不受影响——用户仍可在网页旁观全部消息,只是不能发言/
+  编辑/删除。Local User(非群成员)不受影响,其 POST 本就过不了成员资格检查。
 
 ## 9. 执行器与任务
+
+**三角色职责分离 + 三层检视闭环**:检视者(reviewer)与用户直接对话、生成并冻结 spec;协调者(coordinator)据冻结 spec 下发任务;执行者(executor)按任务书实现。三层检视:L1 执行者会话内自检(Standards + Spec 双轴)/ L2 协调者功能检视(对照 spec 验收标准,✅ 放行 / ❌ 重下发)/ L3 检视者架构检视(是否最佳实现、ADR 合规、领域词汇;发现项 → 修订 spec)。检视编排由三个 skill 的纪律承载,平台不建编排引擎;检视请求/结论复用**任务通道**(L3 = 检视任务,载荷用结构化 JSON,字段对齐未来 `review_requests` 表)。
 
 - **server 是唯一调度器**(旧任务桥已退役,webhook 通道已移除):`POST /messages` 定向到
   执行器 participant(`audience=participant` + `audienceRef`)时,由 server 直接建 task
   (fire-and-forget,幂等靠 `message_id` 唯一约束),不再有独立的调度进程。
 - 执行器配置:`lib/executors.ts` 内置 + `executor_config` 表(DB 持久化,`/api/executors`
   管理);participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
+  `DEFAULT_EXECUTORS` 内置含 reviewer 检视器(key=`reviewer`、agentName=`Reviewer 检视器`、
+  kind=cli、`maxConcurrency: 1`;`canDispatch` 由 `DISPATCH_CAPABLE_KEYS` 派生为 true)。
+- **下发门与控制门**:`DISPATCH_ALLOWED_ROLES`(`lib/executor-task/types.ts`,管**下发**)与
+  `CONTROL_ALLOWED_ROLES`(`lib/control.ts`,管**停止/回滚**)是两个独立常量,均含
+  coordinator/human/reviewer。dispatcher/callback 路由判据用 `ExecutorConfig.canDispatch`
+  (显式标记,缺省 false=纯执行器),而非「发送者是否在执行器配置表」:命中执行器配置**且**
+  `canDispatch !== true` 才算纯执行器,其消息不携带 dispatcher/callback 路由信息。
 - **执行器分工选择**:定向消息(`audience=participant`)指定的执行器 = **实现执行器**;
   **测试执行器**按群成员分工提示词自动选择(`resolveTestExecutor`,纯函数可单测):
   群成员中 roles 含 executor/specialist 且 prompt 文本匹配测试职责(关键词:测试/验证/
@@ -213,6 +230,12 @@ CoAgentHub/
   `scripts/dispatch-policy.json` 配置,缺省 2;未绑定 project_path 的群任务归默认组)
   → spawn(CLI 或 A2A)→ git 快照(checkpointRef)→ done/failed;默认超时 120 分钟
   (EXECUTOR_TIMEOUT_MS)。
+- **停止/取消语义(2026-08 收窄)**:只能取消**排队中**的任务(`cancelQueuedTasks(groupId,
+  taskId?)`,taskId 缺省 = 本群全部排队任务);**运行中任务不可中断**,只能等其终态后由
+  协调者下发修正任务(fix-forward)。kill 运行中任务进程组的能力保留,但仅由服务端自身的
+  静默超时(`stallTimeoutMinutes`)/执行超时(`EXECUTOR_TIMEOUT_MS`)触发,不再接受用户指令。
+  `currentRunningTask`/`queuedExecutorTaskCount`/回滚前置检查均按 `groupId` 过滤(原先跨
+  群全局,属既有缺陷,一并修复为按群隔离)。
 - **按执行器并发能力排队(设计修正)**:执行器可配 `maxConcurrency`(可选,声明式并发
   上限;如 AtomCode = 1 —— atomgit session 同一时间只能跑一个任务,并发会触发
   `403 atomgit_session_concurrency_conflict`)。目标执行器当前 running 数 ≥
@@ -226,7 +249,8 @@ CoAgentHub/
   任务书模板以精简的「**执行方式**」段触发 `coagenthub-executor` skill(读规范→写
   代码→测试→Code Review 自检→汇报;未安装 skill 时任务书提示 `GET /api/skills/executor`
   获取内容)。执行器自检(Code Review 自检,Standards + Spec Compliance 双轴)改由
-  **skill 承载**,不再固化进任务书正文。三个 skills(coordinator/bugfix/executor)对齐
+  **skill 承载**,不再固化进任务书正文。四个 skills(coordinator/bugfix/executor/reviewer,
+  bugfix 为索引——诊断/分流归检视者、方案与下发/验收归协调者)对齐
   **Matt 协议 v1.2.3**,只改 SKILL.md 即时生效(GET /api/skills/:name 从磁盘实时读取)。
 - **汇报格式要求(任务书模板固定五行)**:`提交: <commit hash>` / `测试: <测试结果摘要>` /
   `Token: <消耗 token 数量>` / `汇报: <做了什么,3-5 句>` / `遗留: <未完成事项>`。stdout
@@ -260,11 +284,14 @@ CoAgentHub/
     (EXECUTOR_TIMEOUT_MS)但有进展 / 网络错误 / HTTP 5xx 时,不直接按失败处理——
     `diffSummary` 增加 `{ error: "执行器未按协议回复，结果未确认", unconfirmed: true }`,
     群内回传 `⚠️ 任务结果未确认`(不回传 ❌、不自动重试);HTTP 4xx 不标记 unconfirmed。
-  - **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感);
-    A2A 发送完成即视为「已派发」,任务保持 `running`,由执行器恢复后
-    `PATCH /groups/:id/tasks/:taskId` 回写终态(队列槽位照常释放);超过
-    `detachedTimeoutMinutes`(默认 1440)未回写 → 按「结果未确认」处理。
-- **弱验收钩子**:done 前校验工作树干净 + HEAD 有变化(仅本地 CLI);失败原因含「未提交」。
+  - **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感),
+    **CLI 与 A2A 均生效**——发送完成即视为「已派发」,任务保持 `running`,队列槽位照常
+    释放(不解析 stdout 汇报);收件方(协调者/检视者)结案时显式
+    `PATCH /groups/:id/tasks/:taskId` 回写终态;下发方在 `callback.sessionRef` 填当前
+    会话 id,回传经 completion event → callback-agent `resume <sessionRef>` 回到下发时
+    的同一会话;超过 `detachedTimeoutMinutes`(默认 1440)未回写 → 按「结果未确认」处理。
+- **done 判定**:仅依据执行器进程 exit code + `parseTaskReport` 汇报解析(提交/测试/
+  Token/汇报/遗留五段),不再对工作区做旁路 git 检查。
 - **human 全可见**:参与者 `type=human`(含 Local User)对任何群的消息无条件可见
   (含定向消息,不要求群成员);audience 仍是 agent 间的路由机制。前端对定向消息显示
   「📨 定向给 <执行器名>」标签。

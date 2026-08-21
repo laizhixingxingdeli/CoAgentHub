@@ -68,10 +68,10 @@ test/verify/review 关键词,大小写不敏感;多个匹配取关键词出现�
   HTTP 5xx 时不直接按失败处理——`diffSummary` 增加
   `{ error: "执行器未按协议回复，结果未确认", unconfirmed: true }`,群内回传
   `⚠️ 任务结果未确认`(不回传 ❌、不自动重试)。
-- **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感);
-  A2A 发送完成即视为「已派发」,任务保持 `running`,由执行器恢复后
-  `PATCH /api/groups/:id/tasks/:taskId` 回写终态;超过
-  `detachedTimeoutMinutes`(默认 1440)仍未回写 → 按「结果未确认」处理。
+- **可脱离执行(detached)**:任务书支持 `## ReplyMode: detached`(大小写不敏感),
+  **CLI 与 A2A 均生效**——发送完成即视为「已派发」,任务保持 `running`,队列槽位照常
+  释放,由收件方(协调者/检视者)结案时 `PATCH /api/groups/:id/tasks/:taskId` 回写
+  终态;超过 `detachedTimeoutMinutes`(默认 1440)仍未回写 → 按「结果未确认」处理。
 
 ### 按群记忆
 
@@ -90,15 +90,20 @@ test/verify/review 关键词,大小写不敏感;多个匹配取关键词出现�
 `✅` 完成(附任务卡:提交/测试/汇报/遗留)、`❌` 失败(附原因与输出尾部)、`🛑` 已停止、
 `⚠️` 无进展提醒 / 结果未确认、`⏳` 等待执行器额度恢复。
 
-**停止(`停止 [taskId]`)**:仅 `coordinator` / `human` 可发;也可用 `stop` / `取消` /
-`停一下`。携带 taskId 时终止该任务(排队中 → 移出队列置 `cancelled`;运行中 →
-SIGTERM 整个进程组);缺省 taskId 时终止全部运行中/排队任务。执行器 participant 自己发的
-回传不触发(防回环);定向到执行器 participant 的消息视为任务,不是指令。回传 `🛑 已停止`。
+**停止(`停止 [taskId]`)**:仅 `coordinator` / `human` / `reviewer` 可发
+(`CONTROL_ALLOWED_ROLES`);也可用 `stop` / `取消` / `停一下`。**只取消排队中任务**
+(`cancelQueuedTasks(groupId, taskId?)`:排队中 → 移出队列置 `cancelled`);
+**运行中任务不可中断**——只能等其终态后由协调者下发修正任务(fix-forward)。kill
+运行中任务进程组的能力保留,但仅由服务端自身的静默超时(`stallTimeoutMinutes`)与执行
+超时(`EXECUTOR_TIMEOUT_MS`)触发。停止/回滚按群隔离(`groupId` 过滤)。执行器
+participant 自己发的回传不触发(防回环);定向到执行器 participant 的消息视为任务,
+不是指令。回传 `🛑 已停止`。
 
-**回滚(`回滚 [taskId]`)**:仅 `coordinator` / `human` 可发;`git reset --hard` 到执行前
-快照(`refs/coagenthub-cp/<taskId>`,即 `task.checkpoint_ref`),把工作区恢复到任务前状态,
-随后把该任务置 `failed`(`diffSummary.error: "rollback"`)。有任务执行/排队时禁止回滚
-(会破坏进行中的写入,须先停止);taskId 缺省时回滚该群最近一次带快照的任务;
+**回滚(`回滚 [taskId]`)**:仅 `coordinator` / `human` / `reviewer` 可发;`git reset
+--hard` 到执行前快照(`refs/coagenthub-cp/<taskId>`,即 `task.checkpoint_ref`),把工作区
+恢复到任务前状态,随后把该任务置 `failed`(`diffSummary.error: "rollback"`)。本群有
+任务执行/排队时禁止回滚(按群判定;会破坏进行中的写入——先取消排队任务,运行中任务
+则等其终态);taskId 缺省时回滚该群最近一次带快照的任务;
 `reset --hard` 只恢复已跟踪文件,任务新建的未跟踪文件会残留(不跑 `git clean`)。
 成功回传 `✅ 已回滚到快照 <ref>(<sha>)`,无可回滚快照时回传 `⛔`。
 
@@ -120,11 +125,11 @@ SIGTERM 整个进程组);缺省 taskId 时终止全部运行中/排队任务。�
 | `stallAlertMinutes` | 15 | running 任务连续无输出 → 群消息提醒协调者 + 任务行警示标记(`diffSummary.stallAlerted`),不失败 |
 | `stallTimeoutMinutes` | 30 | 静默继续超过该值 → kill 进程组,标 `failed`(「执行器静默超时」) |
 | `claimTimeoutMinutes` | 30 | `queued` 任务超过该值仍未进入 `running` → 标 `failed`(「任务未认领」) |
-| `retry.maxRetries` | 1 | 失败自动重试(exit≠0 / 超时 / 静默失败且可重试):回滚 checkpoint(`resetWorkspace`)→ `retry_count+1` → 重新入队重跑;认领超时 / 手动停止 / 验收失败不重试 |
+| `retry.maxRetries` | 1 | 失败自动重试(exit≠0 / 超时 / 静默失败且可重试):回滚 checkpoint(`resetWorkspace`)→ `retry_count+1` → 重新入队重跑;认领超时 / 手动停止(取消排队) / 额度失败不重试 |
 | 额度冷却 | `cooldownMinutes` 300 | 失败输出尾部命中额度关键词(`rate limit`/`quota`/`429`/`额度`/`次数限制` 等)→ 该执行器进入冷却(`cooldownMinutes` 缺省 300,优先从输出解析恢复时刻),冷却期不派发,到期自动恢复 |
 
-**弱验收**:done 判定前校验执行器是否真正提交了改动(工作树干净且 HEAD 有变化);
-git 不可用时跳过。
+**done 判定**:仅依据执行器进程 exit code + `parseTaskReport` 汇报解析结果,
+不再对工作区做旁路 git 检查。
 
 ## 4. WebSocket 实时事件
 

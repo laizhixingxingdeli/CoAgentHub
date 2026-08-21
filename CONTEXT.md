@@ -27,6 +27,11 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **决策票(decision ticket)** | 大特性拆票的单元是「以决策为解的问句」，不是实现切片；实现切片才是下发执行器的 task |
 | **throwaway 分支** | 探索留档分支：`research/<name>`(调研结论)与 `prototype/<name>`(原型产物)，用完不删，主分支只保留被验证过的决策 |
 | **context pointer** | 票/任务上的一行指针：分支名 + 结论一句话，指向 throwaway 分支上的留档 |
+| **reviewer(检视者)** | **用户侧唯一入口**：与用户直接对话（对话发生在检视者 runtime 的原生会话，不经平台群）；需求分流（大需求写 spec / 小 bug 不改 spec / 仅当影响 spec 描述才修订）；生成并冻结 spec（公布 `specRef`+`specHash`）；执行 L3 架构检视；发现实现与预期有出入时修订 spec。**协调者不再自写 spec** |
+| **三层检视** | L1 执行者会话内自检（Standards + Spec 双轴）/ L2 协调者功能检视（对照 spec 验收标准，✅ 放行 / ❌ 重下发）/ L3 检视者架构检视（最佳实现、ADR 合规、领域词汇；发现项 → 修订 spec） |
+| **验收钉子(specHash)** | 在途任务按下发时刻的 specHash 口径验收，不受后续 spec 修订影响 |
+| **会话延续(detached)** | `## ReplyMode: detached` 对 CLI 与 a2a 均生效；下发方带 `callback.sessionRef`，收件方结案时 `PATCH` 回写终态，回传经 completion event → callback-agent `resume <sessionRef>` 回到下发时的同一会话 |
+| **单角色约束** | 一个 participant 在一个群内只能持有一种角色（`roles.length ≤ 1`，违反 400）；跨群可不同 |
 
 ## 运行拓扑
 
@@ -55,5 +60,5 @@ report/queue 六个子模块(barrel 导出面不变,`@server/lib/executor-task` 
 任务书以精简的"执行方式"段触发 `coagenthub-executor` skill,执行器自检(Code Review
 自检,Standards + Spec Compliance)由 skill 承载;汇报格式要求固定五行(提交/测试/Token/
 汇报/遗留),`Token:` 段由 server 端清洗为纯数字。
-Spec 文档位于 `specs/` 目录。Skills 位于 `skills/` 目录(coordinator/bugfix/executor)。
+Spec 文档位于 `specs/` 目录。Skills 位于 `skills/` 目录(coordinator/executor/bugfix/reviewer,其中 bugfix 现为索引——诊断/分流归检视者、方案与下发/验收归协调者)。
 详见 `specs/spec-driven-task-dispatch.md` 和 `specs/plugin-skill-adaptation.md`。

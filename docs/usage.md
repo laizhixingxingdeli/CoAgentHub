@@ -81,8 +81,9 @@ Remote executors reached through the A2A gateway (e.g. Win Hermes):
   unconfirmed", unconfirmed: true }` and the group gets a ⚠️ unconfirmed-result
   notice (no ❌, no auto-retry).
 - **Detached execution** — task books may carry `## ReplyMode: detached`
-  (case-insensitive); the A2A send counts as "dispatched", the task stays
-  `running`, and the executor writes back the terminal state via
+  (case-insensitive); it works for **both CLI and A2A** executors: the send counts
+  as "dispatched", the task stays `running`, the queue slot is released, and the
+  recipient (coordinator / reviewer) writes back the terminal state via
   `PATCH /api/groups/:id/tasks/:taskId`; without a write-back past
   `detachedTimeoutMinutes` (default 1440) the result is treated as unconfirmed.
 
@@ -110,22 +111,27 @@ failed (with reason and output tail), `🛑` stopped, `⚠️` no-progress remin
 result unconfirmed, `⏳` waiting for the executor's rate-limit cooldown to
 recover.
 
-**Stop (`停止 [taskId]`)** — only `coordinator` / `human` may send it (aliases:
-`stop` / `取消` / `停一下`). With a taskId it terminates that task (queued →
-removed and marked `cancelled`; running → SIGTERM the whole process group);
-without a taskId it stops all running/queued tasks. The executor participant's
-own status callbacks never trigger it (loop guard); messages addressed *to* an
-executor are tasks, not commands. A `🛑 已停止` callback is posted back.
+**Stop (`停止 [taskId]`)** — only `coordinator` / `human` / `reviewer` may send it
+(`CONTROL_ALLOWED_ROLES`; aliases: `stop` / `取消` / `停一下`). It **only cancels
+queued tasks** (`cancelQueuedTasks(groupId, taskId?)`; queued → removed and marked
+`cancelled`); **running tasks cannot be interrupted** — wait for the terminal state,
+then the coordinator dispatches a fix-forward task. The kill-process-group mechanism
+is retained but only triggered by the server's own silent (`stallTimeoutMinutes`) or
+execution (`EXECUTOR_TIMEOUT_MS`) timeouts. Stop/rollback are isolated per group
+(`groupId` filter). The executor participant's own status callbacks never trigger it
+(loop guard); messages addressed *to* an executor are tasks, not commands. A
+`🛑 已停止` callback is posted back.
 
-**Rollback (`回滚 [taskId]`)** — only `coordinator` / `human` may send it; runs
-`git reset --hard` to the pre-task snapshot (`refs/coagenthub-cp/<taskId>`, i.e.
-`task.checkpoint_ref`) to restore the workspace, then marks the task `failed`
-(`diffSummary.error: "rollback"`). Rollback is rejected while a task is
-executing/queued (it would break in-flight writes — stop first). Without a
-taskId it rolls back the group's most recent snapshot-bearing task. `reset
---hard` only restores tracked files; untracked files created by the task remain
-(`git clean` is not run). On success a `✅ 已回滚到快照 <ref>(<sha>)` callback is
-posted; `⛔` when there is nothing to roll back to.
+**Rollback (`回滚 [taskId]`)** — only `coordinator` / `human` / `reviewer` may send
+it; runs `git reset --hard` to the pre-task snapshot (`refs/coagenthub-cp/<taskId>`,
+i.e. `task.checkpoint_ref`) to restore the workspace, then marks the task `failed`
+(`diffSummary.error: "rollback"`). Rollback is rejected while the group has a
+running or queued task (per-group check; it would break in-flight writes — cancel
+queued tasks first, or wait for a running task's terminal state). Without a taskId
+it rolls back the group's most recent snapshot-bearing task. `reset --hard` only
+restores tracked files; untracked files created by the task remain (`git clean` is
+not run). On success a `✅ 已回滚到快照 <ref>(<sha>)` callback is posted; `⛔` when
+there is nothing to roll back to.
 
 **Task panel (web context panel "Tasks" tab)** — fetches
 `GET /groups/:id/tasks` once on mount (no polling); the "Stop" / "Rollback"
@@ -149,12 +155,12 @@ are backfilled into `diffSummary.outputTail` (no memory dependency afterwards).
 | `stallAlertMinutes` | 15 | running task with no output → group reminder to the coordinator + yellow row flag (`diffSummary.stallAlerted`), not a failure |
 | `stallTimeoutMinutes` | 30 | silence beyond this → kill the process group, mark `failed` ("executor silent timeout") |
 | `claimTimeoutMinutes` | 30 | `queued` task not entering `running` within this → `failed` ("task not claimed") |
-| `retry.maxRetries` | 1 | auto-retry on exit≠0 / timeout / silent failure: roll back the checkpoint (`resetWorkspace`) → `retry_count+1` → re-enqueue; claim timeout / manual stop / acceptance failure are not retried |
+| `retry.maxRetries` | 1 | auto-retry on exit≠0 / timeout / silent failure: roll back the checkpoint (`resetWorkspace`) → `retry_count+1` → re-enqueue; claim timeout / manual stop (cancel queued) / quota failure are not retried |
 | rate-limit cooldown | `cooldownMinutes` 300 | failed output tail matching quota keywords (`rate limit`/`quota`/`429`/`额度`/`次数限制` etc.) → executor enters cooldown, no dispatch during cooldown, auto-recovery on expiry (recovery time parsed from output first) |
 
-**Weak acceptance** — before marking `done`, the server verifies the executor
-actually committed changes (working tree clean and HEAD changed); skipped when
-git is unavailable.
+**done determination** — `done` is decided solely by the executor process exit
+code plus the parsed task report (`parseTaskReport`); there is no extra git
+workspace check before marking `done`.
 
 ## 4. WebSocket realtime events
 
