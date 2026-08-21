@@ -40,6 +40,10 @@ export type TaskItem = {
   executorKey: string | null;
   status: TaskStatus;
   checkpointRef: string | null;
+  /** 规范驱动下发:同 specRef 的任务在 UI 合并为「需求」(UI-04)。老任务为 null。 */
+  specRef: string | null;
+  /** specRef 指向规范的哈希,用于变更检测。老任务为 null。 */
+  specHash: string | null;
   diffSummary: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string | null;

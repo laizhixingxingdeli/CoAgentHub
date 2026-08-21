@@ -460,9 +460,13 @@ async function dispatchTask(
   const running = runningGroupCount();
   const freeSlots = getMaxParallelGroups() - running;
   const exCap = ex.maxConcurrency;
+  // exAhead 只统计目标执行器「在其他组」里正在跑的任务:runningExecutorCount
+  // 会累加所有组,但本组正在跑的任务(group.running)已被上面的 +1 计入,需在此
+  // 排除,否则同项目+同执行器场景下该任务被重复计数(算出 2 而非 1)。
+  const exSelfRunning = group.running?.ex.key === ex.key ? 1 : 0;
   const exAhead =
     exCap !== undefined && runningExecutorCount(ex.key) >= exCap
-      ? runningExecutorCount(ex.key)
+      ? Math.max(0, runningExecutorCount(ex.key) - exSelfRunning)
       : 0;
   const ahead =
     (group.running ? 1 : 0) +

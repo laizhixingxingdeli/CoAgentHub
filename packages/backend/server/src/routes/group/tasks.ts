@@ -172,6 +172,10 @@ app
           // callback 路由信息(Part B):透传 opaque 路由 { platform?,
           // endpointRef?, sessionRef? };老任务为 null。
           callbackRef: true,
+          // 规范驱动下发:列表透出 specRef/specHash,UI 按 specRef 分组任务需要该
+          // 字段(老任务为 null)。
+          specRef: true,
+          specHash: true,
           createdAt: true,
           updatedAt: true,
         },

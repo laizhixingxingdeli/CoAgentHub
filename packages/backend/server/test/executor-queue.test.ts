@@ -1573,6 +1573,70 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       }
     }, 30_000);
 
+    it("排队位置不重复计数:同项目+同执行器(maxConcurrency=1)1 个 running + 1 个新排队 → 提示「前面还有 1 个」", async () => {
+      // 修复缺陷 2:同项目+同执行器场景下,本组 running 任务(group.running)与
+      // exAhead(runningExecutorCount)指向同一个任务,曾被计两次 → ahead=2;修复后
+      // exAhead 排除本组这一个 → ahead=1。
+      process.env.FAKE_SLEEP_SECS = "5";
+      // claim 超时放宽:本文件模块级状态跨用例不重置,前一条用例可能把 claim
+      // 调到 5s 甚至更小,与本用例 5 秒睡眠几乎撞车,导致排队中的第二个任务
+      // 在等待期间被误判「未认领」。放宽到 60s,任务真实等待时间不会接近它。
+      const { __setReliabilityTimeoutsForTests } = await import(
+        "@server/lib/executor-task"
+      );
+      __setReliabilityTimeoutsForTests(60_000, 60_000);
+      const { coordinator } = await setupGroup();
+      const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+      const proj = makeGitRepo("coagenthub-qpos-");
+      const group = await createGroup(coordinator.id, "排队位置验证群");
+      await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);
+      await bindProject(coordinator.id, group.id, proj);
+
+      const m1 = await postMessage(coordinator.id, group.id, {
+        body: "AtomCode 任务一(慢)",
+        audience: "participant",
+        audienceRef: atomcode.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      // 同一群(同 project_path + 同 AtomCode maxConcurrency=1)的第二条任务入队:
+      // group.running 已是 AtomCode 的 1 个任务,exAhead 不得再重复计入。
+      const m2 = await postMessage(coordinator.id, group.id, {
+        body: "AtomCode 任务二",
+        audience: "participant",
+        audienceRef: atomcode.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m2.id,
+        "queued",
+      );
+      expect(t2.status).toBe("queued");
+
+      // 关键断言:📋 排队提示数字为 1(修复前算成 2——group.running 与 exAhead
+      // 重复计数了同一个 AtomCode running 任务)。
+      const queuedMsg = await waitForMessage(
+        coordinator.id,
+        group.id,
+        (m) =>
+          m.contentType === "task_status" &&
+          m.body.startsWith("📋") &&
+          m.body.includes("前面还有 1 个"),
+      );
+      expect(queuedMsg).toBeDefined();
+
+      // 收尾:第一条 done 后第二条轮到,避免遗留运行进程污染后续用例。
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, group.id, m2.id, "done");
+    }, 30_000);
+
     it("isConcurrencyConflict 识别 403 atomgit_session_concurrency_conflict 标记", async () => {
       const { isConcurrencyConflict } = await import(
         "@server/lib/executor-task"
