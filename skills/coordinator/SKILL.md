@@ -97,11 +97,11 @@ Call `coagenthub_dispatch_task` with:
 
 执行器返回限额错误（429 / `rate limit` / `quota` /「使用量已超出频率限制」等，探测模式见 `scripts/dispatch-policy.json` 的 `rateLimit.detectPatterns`）时：
 
-- **不判该票失败、不换执行器、不缩减范围**——限额是外部资源约束，与任务内容无关；换执行器等于用一个未经验证的执行者去接一张已经写好的票，反而引入新的不确定性。
-- 从失败输出解析限额重置时间（平台的 `parseRateLimitRecoveryMs` 已实现该解析）；解析不出则退回 `rateLimit.cooldownMinutes` 固定冷却（缺省 300 分钟）。
-- 等到重置时间之后，**重新下发同一张票**——任务书内容、`specRef`、`specHash` 全部不变。
-- 等待期间在群内说明正在等限额（`coagenthub_post_message`），**不要静默停滞**——否则旁观者无法区分「在等限额」与「链路挂死」。
-- `rateLimit.fallbackExecutor` 缺省为 `null`：不自动切换执行器。若未来要启用自动切换，需先确认备用执行器与原执行器在该项目上的能力等价。
+- **不判该票失败、不缩减范围**——限额是外部资源约束，与任务内容无关。
+- **先找空闲执行器**：查群内其余执行器谁没在 running、谁不在限额冷却中（`coagenthub_list_tasks`）。**有空闲的就把同一张票原样交给它**——任务书内容、`specRef`、`specHash` 全不变，只换执行目标。
+- **全忙或全限额时才等**：从失败输出解析重置时间（平台的 `parseRateLimitRecoveryMs` 已实现；解析不出退回 `rateLimit.cooldownMinutes`，缺省 300 分钟），到点后重新下发同一张票。
+- 无论走哪条，都在群内说明当前处置——换给了谁，或正在等到几点（`coagenthub_post_message`）。**不要静默停滞**，否则旁观者无法区分「在等限额」与「链路挂死」。
+- 结案汇报中注明每张票实际由哪个执行器完成。
 
 </rate-limit-rules>
 
