@@ -233,7 +233,7 @@ const TASKS = [
   },
 ];
 
-describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
+describe("任务面板(任务控制 UI,右栏任务 Tab) — 主从两栏 (UI-04b-2)", () => {
   /** 三栏布局渲染(右栏 lg+ 常驻),切到「任务」Tab 打开任务面板。 */
   const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
     stubFetch(mock);
@@ -248,34 +248,40 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
   const openTasksTab = async () => {
     await screen.findByText("任务草稿");
     fireEvent.click(screen.getByTestId("context-tab-tasks"));
-    await screen.findByTestId("task-panel");
+    await screen.findByTestId("tasks-tab");
   };
 
-  it("打开面板:状态徽章/执行器/正文预览/时间 + 停止/回滚按钮", async () => {
+  /** 选中左侧某条需求(无 specRef 时需求 id = 任务 id)。 */
+  const selectRequirement = async (id: string) => {
+    fireEvent.click(await screen.findByTestId(`requirement-row-${id}`));
+  };
+
+  it("打开面板:左列表(各需求)+ 右详情 + 控制条;选中需求显示对应任务的停止/回滚", async () => {
     renderGroupPage(
       messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
     );
     await openTasksTab();
 
-    // running → 停止;done + checkpointRef → 回滚
-    const row1 = within(screen.getByTestId("task-row-task-1"));
-    expect(row1.getByText("执行中")).toBeInTheDocument();
-    expect(row1.getByText("hermes-mac")).toBeInTheDocument();
-    expect(row1.getByText("任务草稿")).toBeInTheDocument();
-    expect(row1.getByTestId("task-time-task-1")).toBeInTheDocument();
-    expect(row1.getByTestId("task-stop-task-1")).toBeInTheDocument();
-    expect(row1.queryByTestId("task-rollback-task-1")).toBeNull();
+    // 左:每个任务(无 specRef)各自成一条需求。
+    expect(
+      await screen.findByTestId("requirement-row-task-1"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("requirement-row-task-2")).toBeInTheDocument();
+    // 右:详情面板(阶梯 + 时间线)+ 控制条。
+    expect(screen.getByTestId("requirement-detail-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
 
-    const row2 = within(screen.getByTestId("task-row-task-2"));
-    expect(row2.getByText("已完成")).toBeInTheDocument();
-    expect(row2.getByText("win-hermes")).toBeInTheDocument();
-    expect(row2.getByText(/hash abc123/)).toBeInTheDocument();
-    expect(row2.getByTestId("task-rollback-task-2")).toBeInTheDocument();
-    expect(row2.queryByTestId("task-stop-task-2")).toBeNull();
+    // 默认选中最新需求(task-2,done + checkpointRef)→ 控制条显示回滚。
+    expect(screen.getByTestId("task-rollback-task-2")).toBeInTheDocument();
+    // 选中 task-1(running)→ 控制条显示停止。
+    await selectRequirement("task-1");
+    expect(screen.getByTestId("task-stop-task-1")).toBeInTheDocument();
   });
 
-  it("结果未确认(diffSummary.unconfirmed)→ 黄色警示样式,不按红色失败显示", async () => {
-    // status 仍为 failed,但 diffSummary.unconfirmed=true(执行器可能已完成)。
+  it("结果未确认(failed + unconfirmed)需求详情仍可渲染,不崩溃", async () => {
+    // status 仍为 failed,但 diffSummary.unconfirmed=true(执行器可能已完成);
+    // 旧 TaskPanel 的「结果未确认」黄色徽标由新的阶梯/时间线占位取代,此处仅
+    // 验证选中该需求后详情(含时间线)正常渲染。
     const unconfirmedTasks = [
       {
         ...TASKS[0],
@@ -293,15 +299,12 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
       }),
     );
     await openTasksTab();
+    await selectRequirement("task-1");
 
-    const row = within(screen.getByTestId("task-row-task-1"));
-    const badge = row.getByTestId("task-status-task-1");
-    // 展示「结果未确认」而非「失败」;黄色警示样式而非红色失败样式。
-    expect(badge.getAttribute("data-status")).toBe("failed");
-    expect(badge.getAttribute("data-unconfirmed")).toBe("true");
-    expect(badge.textContent).toBe("结果未确认");
-    expect(badge.className).toContain("bg-status-unconfirmed/10");
-    expect(badge.className).not.toContain("bg-status-failed/10");
+    expect(screen.getByTestId("requirement-detail-panel")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-timeline-item-task-1"),
+    ).toBeInTheDocument();
   });
 
   it("空态显示「暂无任务」", async () => {
@@ -312,7 +315,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     await screen.findByText("暂无任务");
   });
 
-  it("点「停止」发出「停止 <taskId>」广播消息,刷新后状态变 cancelled", async () => {
+  it("点「停止」发出「停止 <taskId>」广播消息,刷新后该任务不再可停止", async () => {
     const cancelledTasks = [{ ...TASKS[0], status: "cancelled" }, TASKS[1]];
     const mock = messagesFetchMock(MESSAGES, MEMBERS, "active", {
       tasks: TASKS,
@@ -322,6 +325,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
+    await selectRequirement("task-1");
 
     fireEvent.click(screen.getByTestId("task-stop-task-1"));
 
@@ -331,8 +335,10 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
         audience: "broadcast",
       });
     });
-    // 命令后刷新任务列表 → cancelled 可见
-    await screen.findByText("已取消");
+    // 命令后刷新任务列表 → task-1 变 cancelled,控制条不再显示停止按钮。
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-stop-task-1")).toBeNull();
+    });
   });
 
   it("点「回滚」发出「回滚 <taskId>」广播消息", async () => {
@@ -343,6 +349,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     renderGroupPage(mock);
     await openTasksTab();
+    await selectRequirement("task-2");
 
     fireEvent.click(screen.getByTestId("task-rollback-task-2"));
 
@@ -361,6 +368,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     );
     renderGroupPage(mock);
     await openTasksTab();
+    await selectRequirement("task-1");
 
     const stop = screen.getByTestId("task-stop-task-1");
     expect(stop).toBeDisabled();
@@ -1236,7 +1244,9 @@ describe("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
     // 引导文案可见,语义与后端 403 措辞(群是 agent 协作空间,请与检视者
     // agent 直接对话)对齐。
     expect(
-      screen.getByText("群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。"),
+      screen.getByText(
+        "群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。",
+      ),
     ).toBeInTheDocument();
   });
 

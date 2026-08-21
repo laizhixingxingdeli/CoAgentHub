@@ -8,11 +8,10 @@ import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
-import {
-  groupTasksBySpec,
-  type Requirement,
-} from "./group-tasks-by-spec";
+import { groupTasksBySpec, type Requirement } from "./group-tasks-by-spec";
+import RequirementDetailPanel from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
+import { RequirementControlBar } from "./requirement-control-bar";
 
 /**
  * 右栏「任务」Tab:现有任务面板(TaskPanel)逻辑整体移入 — 挂载时拉取一次
@@ -343,33 +342,62 @@ export function TasksTab({ groupId }: { groupId: string }) {
     };
   }, []);
 
+  // 当前选中的需求(用于右栏详情 + 控制条);选中项失效时回落到 null → 详情空态。
+  const selectedRequirement =
+    requirements.find((r) => r.id === selectedRequirementId) ?? null;
+
   return (
-    <div data-testid="tasks-tab" className="flex flex-col">
-      {requirements.length > 0 && (
-        <RequirementList
-          requirements={requirements}
-          selectedId={selectedRequirementId}
-          onSelect={setSelectedRequirementId}
+    <div data-testid="tasks-tab" className="flex h-full min-h-0 flex-col">
+      {requirements.length === 0 ? (
+        // 没有任何按 specRef 分组的需求:回退到原始任务列表(TaskPanel),
+        // 保留完整能力(停止/回滚/实时输出/执行历史 + 无进展提醒)。
+        <TaskPanel
+          tasks={tasks}
+          loading={loading}
+          error={error}
+          commandSending={commandSending}
+          canControl={canControl}
+          readOnly={readOnly}
+          messages={messages}
+          members={members}
+          expandedTaskId={expandedTaskId}
+          foldedTaskIds={foldedTaskIds}
+          stallAlertedIds={stallAlertedIds}
+          liveOutputs={liveOutputs}
+          rollbackStates={rollbackStates}
+          onToggleExpand={(task) => void toggleExpand(task)}
+          onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+          onRollback={(task) => void handleRollback(task)}
         />
+      ) : (
+        // UI-04b-2 主从两栏:左列表(master) + 右详情(detail,含控制条)。
+        // context panel 实际可用宽度很小(≈300px),故左栏取窄列、右栏自适应。
+        <div className="flex min-h-0 flex-1 gap-2">
+          {/* 左栏:需求列表。多需求时可独立滚动。 */}
+          <div className="w-28 shrink-0 overflow-y-auto border-r">
+            <RequirementList
+              requirements={requirements}
+              selectedId={selectedRequirementId}
+              onSelect={setSelectedRequirementId}
+            />
+          </div>
+          {/* 右栏:控制条(停止/回滚)+ 需求详情(阶梯 + 时间线)。 */}
+          <div className="flex min-w-0 flex-1 flex-col">
+            <RequirementControlBar
+              requirement={selectedRequirement}
+              canControl={canControl}
+              readOnly={readOnly}
+              commandSending={commandSending}
+              rollbackStates={rollbackStates}
+              onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+              onRollback={(task) => void handleRollback(task)}
+            />
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <RequirementDetailPanel requirement={selectedRequirement} />
+            </div>
+          </div>
+        </div>
       )}
-      <TaskPanel
-        tasks={tasks}
-        loading={loading}
-        error={error}
-        commandSending={commandSending}
-        canControl={canControl}
-        readOnly={readOnly}
-        messages={messages}
-        members={members}
-        expandedTaskId={expandedTaskId}
-        foldedTaskIds={foldedTaskIds}
-        stallAlertedIds={stallAlertedIds}
-        liveOutputs={liveOutputs}
-        rollbackStates={rollbackStates}
-        onToggleExpand={(task) => void toggleExpand(task)}
-        onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
-        onRollback={(task) => void handleRollback(task)}
-      />
     </div>
   );
 }

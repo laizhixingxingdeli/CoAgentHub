@@ -11,10 +11,10 @@
  * 「已恢复」。
  */
 
-import type { ComponentProps, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useEffect, useRef } from "react";
-import { Button } from "@/components/ui/button";
 import { t } from "@/lib/i18n";
+import { ControlButton } from "./control-button";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
 import type { Member, MessageItem } from "./types";
 
@@ -101,33 +101,6 @@ type TaskPanelProps = {
   onStop: (task: TaskItem) => void;
   onRollback: (task: TaskItem) => void;
 };
-
-/** 停止/回滚控制按钮:无权限或归档只读时禁用并给出提示。
- * title 挂在包裹 span 上 —— disabled 按钮自身不触发 title 悬浮提示。 */
-function ControlButton({
-  canControl,
-  readOnly,
-  disabled,
-  ...props
-}: ComponentProps<typeof Button> & {
-  canControl: boolean;
-  readOnly: boolean;
-}): ReactElement {
-  const btn = (
-    <Button {...props} disabled={disabled || !canControl || readOnly} />
-  );
-  if (canControl && !readOnly) {
-    return btn;
-  }
-  const hint = readOnly
-    ? t("tasks.hint.readOnly")
-    : t("tasks.hint.noPermission");
-  return (
-    <span title={hint} className="inline-flex">
-      {btn}
-    </span>
-  );
-}
 
 /** 任务消息正文预览(前 40 字);消息不在当前列表时返回 null。 */
 function taskMessagePreview(

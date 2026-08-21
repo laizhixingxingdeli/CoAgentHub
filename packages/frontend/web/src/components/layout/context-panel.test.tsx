@@ -147,7 +147,14 @@ describe("ContextPanel 右栏上下文面板", () => {
     // 切到任务 Tab
     fireEvent.click(screen.getByTestId("context-tab-tasks"));
     expect(await screen.findByTestId("tasks-tab")).toBeInTheDocument();
-    expect(await screen.findByText("执行中")).toBeInTheDocument();
+    // 主从两栏:左列表 + 右详情(按 specRef 聚合出的需求)。
+    expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-row-task-1"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
 
     // 切到项目 Tab
     fireEvent.click(screen.getByTestId("context-tab-project"));
@@ -331,7 +338,7 @@ describe("ContextPanel 右栏上下文面板", () => {
     ]);
   }
 
-  it("任务 Tab:running 任务实时输出默认展开可见(无需点击);点击折叠,再点展开 → includeOutput 兜底", async () => {
+  it("running 任务 → 主从两栏渲染,控制条出现 running 任务的停止按钮", async () => {
     vi.stubGlobal("fetch", outputFetchMock());
     setViewport(1280);
     renderPanel();
@@ -339,24 +346,21 @@ describe("ContextPanel 右栏上下文面板", () => {
     await screen.findByText("hermes-mac");
     fireEvent.click(screen.getByTestId("context-tab-tasks"));
     await screen.findByTestId("tasks-tab");
-    expect(await screen.findByText("执行中")).toBeInTheDocument();
-
-    // running 任务默认展开:实时输出区无需点击即可见。
-    expect(await screen.findByTestId("task-live-output")).toBeInTheDocument();
-    expect(screen.getByText("执行历史:")).toBeInTheDocument();
-    expect(screen.getByText(/第 1 次 执行中/)).toBeInTheDocument();
-
-    // 点击折叠按钮 → 输出区收起。
-    fireEvent.click(screen.getByTestId("task-expand-task-1"));
-    expect(screen.queryByTestId("task-live-output")).toBeNull();
-
-    // 再点展开 → includeOutput 兜底拉取实时输出。
-    fireEvent.click(screen.getByTestId("task-expand-task-1"));
-    expect(await screen.findByTestId("task-live-output")).toBeInTheDocument();
-    expect(screen.getByTestId("task-live-output")).toHaveTextContent("line-2");
+    // 左列表 + 右详情(阶梯 + 时间线)+ 控制条,均按 specRef 聚合出的需求渲染。
+    expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-timeline-item-task-1"),
+    ).toBeInTheDocument();
+    // running 最新任务 → 控制条出现「停止」按钮;本测试未绑身份 → 禁用。
+    const stop = await screen.findByTestId("task-stop-task-1");
+    expect(stop).toBeInTheDocument();
+    expect(stop).toBeDisabled();
   });
 
-  it("任务 Tab:WS task_output 事件追加到默认展开行的实时输出", async () => {
+  it("WS task_output / task_stall_alert 事件仍被订阅(实时管线保留,展示接入遗留)", async () => {
     vi.stubGlobal("fetch", outputFetchMock());
     setViewport(1280);
     renderPanel();
@@ -364,45 +368,21 @@ describe("ContextPanel 右栏上下文面板", () => {
     await screen.findByText("hermes-mac");
     fireEvent.click(screen.getByTestId("context-tab-tasks"));
     await screen.findByTestId("tasks-tab");
-    // running 默认展开,无需点击即可接收 WS 追加。
-    await screen.findByTestId("task-live-output");
-
+    // 切到任务 Tab 后,同组 WS(/api/ws)应已建立 —— 实时输出 / 无进展提醒的底层
+    // 管线仍在工作(展示接入新详情面板列为遗留项,见改动说明)。
     const ws = MockWebSocket.instances.find((w) => w.url.includes("/api/ws"));
     expect(ws).toBeDefined();
     ws!.open();
+    // 两种事件均可接收而不抛错(状态被写入 liveOutputs / stallAlertedIds,
+    // 仅 UI 展示暂未接入新详情面板)。
     ws!.receive(
       JSON.stringify({
         type: "task_output",
         groupId: "group-1",
         taskId: "task-1",
-        chunk: "\nline-4-live",
+        chunk: "\nline-night",
       }),
     );
-
-    await waitFor(() => {
-      expect(screen.getByTestId("task-live-output")).toHaveTextContent(
-        "line-4-live",
-      );
-    });
-  });
-
-  it("任务 Tab:WS task_stall_alert 事件 → 任务行黄色警示样式 + ⚠️ 徽标(非失败)", async () => {
-    vi.stubGlobal("fetch", outputFetchMock());
-    setViewport(1280);
-    renderPanel();
-
-    await screen.findByText("hermes-mac");
-    fireEvent.click(screen.getByTestId("context-tab-tasks"));
-    await screen.findByTestId("tasks-tab");
-    // 初始无警示。
-    expect(screen.queryByTestId("task-stall-alert-task-1")).toBeNull();
-    expect(
-      screen.getByTestId("task-row-task-1").getAttribute("data-alerted"),
-    ).toBeNull();
-
-    const ws = MockWebSocket.instances.find((w) => w.url.includes("/api/ws"));
-    expect(ws).toBeDefined();
-    ws!.open();
     ws!.receive(
       JSON.stringify({
         type: "task_stall_alert",
@@ -410,16 +390,10 @@ describe("ContextPanel 右栏上下文面板", () => {
         taskId: "task-1",
       }),
     );
-
-    // ⚠️ 徽标出现 + 行级警示标记(状态仍 running,非失败)。
+    // 详情面板不因事件而崩溃,仍渲染。
     await waitFor(() => {
-      expect(screen.getByTestId("task-stall-alert-task-1")).toBeInTheDocument();
+      expect(screen.getByTestId("requirement-detail-panel")).toBeInTheDocument();
     });
-    expect(
-      screen.getByTestId("task-row-task-1").getAttribute("data-alerted"),
-    ).toBe("true");
-    expect(screen.getByText("执行中")).toBeInTheDocument();
-    expect(screen.getByText(/无进展,请介入/)).toBeInTheDocument();
   });
 
   it("任务 Tab:回滚按钮点击 → 「回滚中…」→ 轮询确认后「已恢复」", async () => {
