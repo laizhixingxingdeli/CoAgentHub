@@ -44,6 +44,10 @@ If the project already has these files, skip to Step 1. Do NOT overwrite existin
 
 ### 1. 取 spec (Fetch the Frozen Spec)
 
+**先判定协作模式（由群成员构成推导，不落平台字段）**：`GET /api/groups/:id/members` 读取群成员，检查是否存在 `roles` 含 `reviewer` 的成员。**有 reviewer 成员 = 三层模式；无 = 两层模式。** 这是唯一的判定依据——不存在 `mode` 字段、也不要去找配置项（模式由成员构成实时推导，平台不感知模式，理由见 spec §3.14.1）。然后分两支：
+
+#### 1.1 三层模式（有 reviewer 成员）— 现行流程不变
+
 You do NOT write specs — the **reviewer** generates and freezes them. Before you can dispatch anything, you MUST hold the reviewer's **frozen** spec, identified by **`specRef` + `specHash` — 缺一不可**.
 
 <fetch-spec-rules>
@@ -61,6 +65,12 @@ You do NOT write specs — the **reviewer** generates and freezes them. Before y
 - 小 bug 分流：检视者判断小 bug 不新增 spec 时，会直接请你下发修正任务，并**可引用一个相关既有 `specRef` 作为上下文**——此时该 `specRef`（连同其冻结 hash）就是本任务的规范依据，specRef 要求不变。
 
 </fetch-spec-rules>
+
+#### 1.2 两层模式（无 reviewer 成员）— 协调者自行承担检视者职责 A
+
+群内没有 `reviewer` 成员时，无人会公布 `spec_published`，协调者将永远拿不到 `specRef`+`specHash` 而卡死。此时协调者**自行承担检视者的职责 A**：`GET /api/skills/reviewer` 取回该 skill，按其「职责 A」执行——与用户对齐需求（grill）→ 检视代码架构 → 写 `specs/<feature>.md` → commit 冻结 → 群内公布 `spec_published`。**冻结与 `specHash` 不可省略**：验收钉子在两层模式下同样是 L2 检视的对照基准，不得因无人交叉校验而放宽。
+
+> ⚠️ **严禁把 Grill / To-Spec 段落内容复制回本 skill。** 本段只写这一句指向——reviewer skill 是这套纪律的唯一事实来源。无 reviewer 成员时，按 `GET /api/skills/reviewer` 的职责 A 自行完成需求对齐与 spec 冻结。两份同样的纪律会各自演化并逐渐不一致，正是三角色拆分最初要消除的问题（理由见 spec §3.14.2）。
 
 ### 2. Dispatch
 
@@ -125,7 +135,11 @@ This ensures the executor performs Code Review self-check even if the task ticke
 
 ### 4. 验收编排 (Three-Layer Review Orchestration)
 
-When you receive a completion event (durable inbox / WS hint) for a task, run the three-layer loop:
+When you receive a completion event (durable inbox / WS hint) for a task, run the review loop:
+
+**先判定协作模式**（与 §1 同一判据：群成员里有无 `reviewer` 角色成员）：
+- **三层模式（有 reviewer）**：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务 → 读 `review_result` 裁决 → 结案。走 §4.1–§4.4 全文。
+- **两层模式（无 reviewer）**：L2 功能检视 → ❌ 重下发 / ✅ **直接结案，跳过 L3**（§4.2 与 §4.3 不适用）。
 
 <verification-rules>
 
@@ -154,10 +168,14 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
 - **或协调者自己补**：如果文档更新很简单（如 architecture.md 加一行），协调者可以直接改。
 
 4. L2 verdict:
-   - ✅ 全部通过 + 文档同步 → 进入 §4.2，下发 L3 检视任务。
-   - ❌ 有未通过项 → **直接重下发修正任务**（任务书引用发现项），**不进入 L3**。发消息 `❌ 验收未通过：<reason>` 后重下发。
+   - ✅ 全部通过 + 文档同步 →
+     - **三层模式**：进入 §4.2，下发 L3 检视任务。
+     - **两层模式**：直接结案（见 §4.4），**跳过 L3**。
+   - ❌ 有未通过项 → **直接重下发修正任务**（任务书引用发现项），**不进入 L3**。发消息 `❌ 验收未通过：<reason>` 后重下发。两种模式行为相同。
 
-#### 4.2 下发 L3 检视任务 (Dispatch L3 Review)
+#### 4.2 下发 L3 检视任务 (Dispatch L3 Review) — 仅三层模式
+
+> 本步**仅三层模式适用**。两层模式下 L2 通过即结案，跳过本步（见 §4.1 的 L2 分支）。
 
 L2 通过后，向检视者下发 L3 检视任务：
 
@@ -172,7 +190,9 @@ L2 通过后，向检视者下发 L3 检视任务：
 - `callback` 带 `sessionRef` = 你当前会话 id，检视者的完成回调才能 `resume` 回同一个会话。
 - 下发前确认检视者已加载 `coagenthub-reviewer` skill（见 §3.5）。
 
-#### 4.3 读 review_result 裁决 (Adjudicate)
+> ⚠️ **部署前置（三层模式专属）**：内置 reviewer 执行器的 `bin` 是占位标识 `"reviewer"`，**未设 `EXECUTOR_BIN_REVIEWER` 时下发 L3 检视任务会以 `spawn reviewer ENOENT` 失败**（实测确认）。三层模式必须设置 `EXECUTOR_BIN_REVIEWER` 指向检视者 runtime 的实际 CLI 命令；两层模式不受此影响（不下发 L3，开箱即用）。详见 spec §3.14.5。
+
+#### 4.3 读 review_result 裁决 (Adjudicate) — 仅三层模式
 
 收到检视任务的完成事件后，读其汇报段中的 `review_result` 载荷（格式见 spec §3.10，字段名照抄）：
 
@@ -184,7 +204,7 @@ L2 通过后，向检视者下发 L3 检视任务：
 - `verdict: findings` → **裁决采纳哪些**：采纳 → 重下发修正任务（引用发现项）；不采纳 → 记录理由并结案。
 - 若检视者公布了 `spec_amended` → 后续**新任务**按新 `specHash` 下发（在途任务仍按旧 hash 验收）。
 
-#### 4.4 结案 (Close) — 先 PATCH 再继续，硬约束
+#### 4.4 结案 (Close) — 先 PATCH 再继续，硬约束（与模式无关，两种模式都适用）
 
 > ⚠️ **硬约束（Hard Constraint）**：结案时必须先
 > `PATCH /api/groups/:id/tasks/:taskId` 把**检视者下发给自己的那个 detached 任务**
@@ -192,6 +212,8 @@ L2 通过后，向检视者下发 L3 检视任务：
 > **忘记回写，检视者会一直等不到回传，直到 24 小时（`detachedTimeoutMinutes` 缺省
 > 1440 分钟）兜底判「结果未确认」**。先 PATCH，再继续——这是新增的人为失误面，
 > 不要跳过。
+
+> 本硬约束**与协作模式无关**：无论三层还是两层，只要存在上游 detached 任务（例如由人类或外部触发链路下发的 detached 任务），结案时都必须先 `PATCH` 回写终态，再继续。两层模式（跳过 L3）同样适用本约束。
 
 </verification-rules>
 
@@ -211,6 +233,24 @@ If the work is too large for one task, break it into **decision tickets**. The u
 - Dispatch tickets in dependency order. Work the frontier: any ticket whose blockers are all done.
 
 </ticket-rules>
+
+### 6. 协作模式取舍与选择建议 (Mode Trade-offs & Guidance)
+
+协作模式（§1 / §4）由群成员有无 `reviewer` 角色推导。两种模式各有取舍，供你与用户判断该走哪条（理由见 spec §3.14.4）。
+
+**两层模式换来：**
+- 更少的 agent 跳转——省 token、省延迟；
+- 更少的失败环节——不下发 L3，少一个异步任务通道与一次 detached 回写。
+
+**两层模式的代价（必须写明，否则选择是盲目的）：**
+- **① L3 变成自审**：你刚做完 L2 功能检视，紧接着用同一上下文做架构检视——你对「这个实现方案好不好」是有立场的（方案某种程度上由你下发）。L3 单独成角色的核心价值是**新鲜的眼睛**，合并后该价值基本归零。
+- **② 写 spec 与验收 spec 变成同一方**：三层设计中「检视者出 spec、协调者按 spec 验收」构成天然交叉校验；合并后，spec 写得模糊时验收也会照模糊标准放行，无人能发现。
+
+**选择建议：**
+- 走**两层**：小改动、bug 修复、边界明确的小需求。
+- 走**三层**：涉及架构决策、新模块、会写进 ADR 的工作。
+
+这与 §3.6 检视者的需求分流规则同构——只是把「要不要写 spec」的分流，提升为「要不要开三层」的分流。
 
 ## API Reference
 
