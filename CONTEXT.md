@@ -29,6 +29,7 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **context pointer** | 票/任务上的一行指针：分支名 + 结论一句话，指向 throwaway 分支上的留档 |
 | **reviewer(检视者)** | **用户侧唯一入口**：与用户直接对话（对话发生在检视者 runtime 的原生会话，不经平台群）；需求分流（大需求写 spec / 小 bug 不改 spec / 仅当影响 spec 描述才修订）；生成并冻结 spec（公布 `specRef`+`specHash`）；执行 L3 架构检视；发现实现与预期有出入时修订 spec。**协调者不再自写 spec** |
 | **三层检视** | L1 执行者会话内自检（Standards + Spec 双轴）/ L2 协调者功能检视（对照 spec 验收标准，✅ 放行 / ❌ 重下发）/ L3 检视者架构检视（最佳实现、ADR 合规、领域词汇；发现项 → 修订 spec） |
+| **协作模式（三层 / 两层）** | 模式由**群成员构成推导**——群内有 `reviewer` 角色成员 = **三层**（L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视），无 `reviewer` = **两层**（仅 L1 + L2）。**不是配置项、不落 `groups.mode` 字段**：两种模式唯一差异是协调者 L2 通过后是否再下发一个 L3 检视任务，而该任务在平台眼里只是普通 task，平台不感知模式。两层下协调者**兼任检视者的写 spec 职责**——读 `skills/reviewer/SKILL.md` 的「职责 A」自行 grill + 写 spec + 冻结公布（严禁把内容复制回 coordinator skill）；两层**跳过 L3** 架构检视。取舍：更少 agent 跳转（省 token / 延迟）vs L3 变自审（同一上下文既下发又检视）、写 spec 与验收 spec 同一方（交叉校验消失）；建议小改动 / bug / 边界明确小需求走两层，架构决策 / 新模块 / 写进 ADR 的工作走三层 |
 | **验收钉子(specHash)** | 在途任务按下发时刻的 specHash 口径验收，不受后续 spec 修订影响 |
 | **会话延续(detached)** | `## ReplyMode: detached` 对 CLI 与 a2a 均生效；下发方带 `callback.sessionRef`，收件方结案时 `PATCH` 回写终态，回传经 completion event → callback-agent `resume <sessionRef>` 回到下发时的同一会话 |
 | **单角色约束** | 一个 participant 在一个群内只能持有一种角色（`roles.length ≤ 1`，违反 400）；跨群可不同 |

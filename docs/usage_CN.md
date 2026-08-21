@@ -44,6 +44,7 @@ participant 名)。
 覆盖方式:
 
 - CLI 命令路径:env `EXECUTOR_BIN_<KEY 大写>`(如 `EXECUTOR_BIN_CODEBUDDY`)。
+- 三层模式下(群内有 `reviewer` 成员)运行 L3 架构检视任务时,内置 reviewer 执行器的 `bin` 是占位标识 `"reviewer"`,需设置 `EXECUTOR_BIN_REVIEWER` 指向检视者 runtime 的实际 CLI,否则下发 L3 检视任务会以 `spawn reviewer ENOENT` 失败(实测确认)。两层模式(无 `reviewer` 成员)不下发 L3,无需此项。
 - Codex 首次使用前,在 **server 运行的同一操作系统用户** 下执行 `codex login`。
   若 server 的 PATH 找不到 Codex,用 `EXECUTOR_BIN_CODEX=/绝对路径/codex` 覆盖。
 - A2A gateway 地址 / Bearer 令牌:`COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`。
@@ -218,6 +219,8 @@ vite 代理、prod 经 `serve.mjs` 均保持此路径)。身份解析与 HTTP �
 | `COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN` | 配置内嵌 | 覆盖 A2A gateway 地址 / Bearer 令牌(测试指向 mock) |
 | `COAGENTHUB_DISPATCH_POLICY_FILE` | `scripts/dispatch-policy.json` | 调度策略文件路径覆盖 |
 | `EXECUTOR_BIN_<KEY>` | 配置内嵌 | 覆盖 CLI 执行器命令路径(如 `EXECUTOR_BIN_CODEBUDDY`) |
+
+> `EXECUTOR_BIN_REVIEWER` 是**三层模式的部署前置条件**:它把内置 reviewer 执行器(占位 `bin` = `"reviewer"`)指向实际 CLI,未设置则 L3 检视任务以 `spawn reviewer ENOENT` 失败(实测确认)。两层模式(无 `reviewer` 成员)不下发 L3,无需此项。
 
 `scripts/dispatch-policy.json`(随代码版本化;缺失/损坏/数值非法时回退默认值,不阻塞启动):
 

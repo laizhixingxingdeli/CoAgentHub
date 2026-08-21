@@ -47,6 +47,12 @@ The default set (`key` → `agentName` → invocation):
 Overrides:
 
 - CLI binary paths: env `EXECUTOR_BIN_<KEY_UPPER>` (e.g. `EXECUTOR_BIN_CODEBUDDY`).
+- To run **L3 architecture-review tasks in three-layer mode** (group has a
+  `reviewer` member), the built-in reviewer executor's `bin` is a placeholder
+  (`"reviewer"`) — you must set `EXECUTOR_BIN_REVIEWER` to the actual CLI path,
+  otherwise dispatching an L3 review task fails with `spawn reviewer ENOENT`
+  (confirmed). Two-layer mode (no `reviewer` member) does not dispatch L3 and
+  needs no such setting.
 - Before using Codex, run `codex login` as the same OS user that runs the server. If
   the server cannot find it on `PATH`, set `EXECUTOR_BIN_CODEX` to the absolute path.
 - A2A gateway URL / bearer token: `COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`.
@@ -257,6 +263,11 @@ Environment variables (read centrally in
 | `COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN` | embedded config | override the A2A gateway URL / bearer token (tests point at a mock) |
 | `COAGENTHUB_DISPATCH_POLICY_FILE` | `scripts/dispatch-policy.json` | dispatch-policy file path override |
 | `EXECUTOR_BIN_<KEY>` | embedded config | override a CLI executor binary (e.g. `EXECUTOR_BIN_CODEBUDDY`) |
+
+> `EXECUTOR_BIN_REVIEWER` is the **three-layer-mode prerequisite**: it points the
+> built-in reviewer executor (placeholder `bin` = `"reviewer"`) at the actual CLI,
+> without which L3 review tasks fail with `spawn reviewer ENOENT` (confirmed).
+> Two-layer mode (no `reviewer` member) dispatches no L3 and needs no such setting.
 
 `scripts/dispatch-policy.json` (versioned with the code; missing/corrupt/invalid
 values fall back to defaults and never block startup):
