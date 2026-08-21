@@ -300,8 +300,8 @@ describe("任务面板(任务控制 UI,右栏任务 Tab)", () => {
     expect(badge.getAttribute("data-status")).toBe("failed");
     expect(badge.getAttribute("data-unconfirmed")).toBe("true");
     expect(badge.textContent).toBe("结果未确认");
-    expect(badge.className).toContain("bg-amber-500/10");
-    expect(badge.className).not.toContain("bg-red-500/10");
+    expect(badge.className).toContain("bg-status-unconfirmed/10");
+    expect(badge.className).not.toContain("bg-status-failed/10");
   });
 
   it("空态显示「暂无任务」", async () => {
@@ -2255,16 +2255,16 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
 
     // 🚀 进行中 → 蓝;✅ 完成 → 绿;❌ 失败 → 红(等宽小字 + 时间)
     const running = barOf("running");
-    expect(running?.className).toContain("bg-sky-500/10");
+    expect(running?.className).toContain("bg-status-running/10");
     expect(running?.querySelector("p.font-mono")).toBeTruthy();
     expect(running?.textContent).toMatch(/\d{2}:\d{2}/); // 状态条带时间(ticket 32: HH:MM)
 
     const done = barOf("done");
-    expect(done?.className).toContain("bg-emerald-500/10");
+    expect(done?.className).toContain("bg-status-done/10");
     expect(done?.textContent).toContain("✅ 任务完成");
 
     const failed = barOf("failed");
-    expect(failed?.className).toContain("bg-red-500/10");
+    expect(failed?.className).toContain("bg-status-failed/10");
     expect(failed?.textContent).toContain("❌ 任务失败");
   });
 
@@ -2313,7 +2313,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
     // 状态条壳仍在(居中 + 绿色),但内容已是精简卡片。
     const shell = screen.getByTestId("task-status");
     expect(shell.getAttribute("data-status")).toBe("done");
-    expect(shell.className).toContain("bg-emerald-500/10");
+    expect(shell.className).toContain("bg-status-done/10");
   });
 
   it("任务书正文(含 Category/Summary 标记行)渲染为结构化卡片;不识别时保持普通文本", async () => {

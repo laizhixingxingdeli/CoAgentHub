@@ -53,10 +53,10 @@ export function taskStatusLabel(status: TaskStatus): string {
   return t(`tasks.status.${status}`);
 }
 
-/** queued 在消息状态条(T26)里没有对应色,补中性灰;其余沿用任务状态条配色。 */
+/** queued 现已有 --status-queued token,直接用,不再借用 slate 中性灰;
+ * 其余沿用任务状态条配色(TASK_STATUS_CLASSES 已接 token)。 */
 export const TASK_PANEL_STATUS_CLASSES: Record<TaskStatus, string> = {
-  queued:
-    "border-slate-300/60 bg-slate-500/10 text-slate-700 dark:border-slate-700/60 dark:bg-slate-500/15 dark:text-slate-300",
+  queued: "border-status-queued/60 bg-status-queued/10 text-status-queued",
   done: TASK_STATUS_CLASSES.done,
   failed: TASK_STATUS_CLASSES.failed,
   running: TASK_STATUS_CLASSES.running,
@@ -64,9 +64,10 @@ export const TASK_PANEL_STATUS_CLASSES: Record<TaskStatus, string> = {
 };
 
 /** 结果未确认(第2层):status 仍是 failed,但 diffSummary.unconfirmed === true
- *  → 用黄色警示样式展示「结果未确认」,不按红色失败显示。 */
+ *  → 用「结果未确认」琥珀色展示(--status-unconfirmed),不按红色失败显示。
+ *  注意:与 cancelled(--status-cancelled,灰褐)色相不同,可明确区分。 */
 export const TASK_UNCONFIRMED_CLASSES =
-  "border-amber-300/60 bg-amber-500/10 text-amber-800 dark:border-amber-700/60 dark:bg-amber-500/15 dark:text-amber-300";
+  "border-status-unconfirmed/60 bg-status-unconfirmed/10 text-status-unconfirmed";
 
 type TaskPanelProps = {
   tasks: TaskItem[];
@@ -152,13 +153,13 @@ function diffSummaryDetail(
   return null;
 }
 
-/** attempt 状态小标签:running/done/failed/cancelled 配色。 */
+/** attempt 状态小标签:running/done/failed/cancelled 配色(接 --status-* token)。 */
 const ATTEMPT_STATUS_CLASSES: Record<TaskStatus, string> = {
-  queued: "text-slate-500",
-  running: "text-sky-600 dark:text-sky-400",
-  done: "text-emerald-700 dark:text-emerald-400",
-  failed: "text-red-600 dark:text-red-400",
-  cancelled: "text-amber-600 dark:text-amber-400",
+  queued: "text-status-queued",
+  running: "text-status-running",
+  done: "text-status-done",
+  failed: "text-status-failed",
+  cancelled: "text-status-cancelled",
 };
 
 /** attempt 状态文案(词典 tasks.attempts.*)。 */

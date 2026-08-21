@@ -12,14 +12,17 @@ export function taskStatusKind(body: string): TaskStatusKind {
   return "running";
 }
 
+// 状态色接 index.css 的 --color-status-* token(票 2)。Tailwind v4 对
+// @theme 注册的自定义 color 支持 /opacity 修饰符(color-mix),且 .dark 块已
+// 配对深色值,故组件层不再写 dark: 前缀。
 export const TASK_STATUS_CLASSES: Record<TaskStatusKind, string> = {
-  done: "border-emerald-300/60 bg-emerald-500/10 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-500/15 dark:text-emerald-300",
+  done: "border-status-done/60 bg-status-done/10 text-status-done",
   failed:
-    "border-red-300/60 bg-red-500/10 text-red-800 dark:border-red-700/60 dark:bg-red-500/15 dark:text-red-300",
+    "border-status-failed/60 bg-status-failed/10 text-status-failed",
   running:
-    "border-sky-300/60 bg-sky-500/10 text-sky-800 dark:border-sky-700/60 dark:bg-sky-500/15 dark:text-sky-300",
+    "border-status-running/60 bg-status-running/10 text-status-running",
   cancelled:
-    "border-amber-300/60 bg-amber-500/10 text-amber-800 dark:border-amber-700/60 dark:bg-amber-500/15 dark:text-amber-300",
+    "border-status-cancelled/60 bg-status-cancelled/10 text-status-cancelled",
 };
 
 type AudienceResolution = {
