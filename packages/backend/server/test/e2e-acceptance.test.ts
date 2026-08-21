@@ -7,14 +7,15 @@ import { createTestApp } from "./app";
  * Ticket 08 — 端到端验收脚本:一条命令(一个用例)走完整个产品故事。
  *
  * 用户故事(win 端 hermes 训练好模型 → 群组通知 → mac 端拉取交付):
- *   user(human) 发命令 → coordinator(hermes/mac) 整理成草稿 → reviewer(hermes/win)
- *   检视并附意见 → coordinator 采纳后发最终版 → executor(atomcode) 执行并回传结果 →
- *   trainer(specialist) 发文件信令 → executor 经 fetchUrl 直连 trainer 设备 P2P 拉取,
- *   校验 SHA256 → human 全程可见 → 归档后历史只读。
+ *   reviewer(hermes/win,检视者)起头发布需求 → coordinator(hermes/mac) 整理成草稿 →
+ *   reviewer 检视并附意见 → coordinator 采纳后发最终版 → executor(atomcode) 执行并
+ *   回传结果 → trainer(specialist) 发文件信令 → executor 经 fetchUrl 直连 trainer
+ *   设备 P2P 拉取,校验 SHA256 → human 全程旁观可见(群内只读,不发言) →
+ *   归档后历史只读。
  *
  * 与 issue 08 验收标准一一对应:
  *   1. executor 从未见过草稿与检视意见,任务消息只见最终版及之后(含增量游标);
- *      用户命令是 broadcast,按可见性规则全员可见,executor 同样会看到
+ *      需求命令是 broadcast,按可见性规则全员可见,executor 同样会看到
  *   2. human 全程可见全部消息(命令/草稿/检视/最终版/结果/文件信令),一条不落
  *   3. 文件经 fetchUrl 直连拉取(P2P,不经 CoAgentHub),字节与 SHA256 一致
  *   4. 归档成功且历史仍可读
@@ -145,8 +146,8 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
   }
 
   it("完整用户故事:命令→草稿→检视→最终版→执行→P2P 文件→归档", async () => {
-    // ── 1. 注册 5 个 participant:user(human)/coordinator(hermes mac)/reviewer(hermes win)
-    //        /executor(atomcode)/trainer(specialist)
+    // ── 1. 注册 5 个 participant:user(human,只读旁观)/coordinator(hermes mac)
+    //        /reviewer(hermes win)/executor(atomcode)/trainer(specialist)
     const user = await registerParticipant({
       name: "alice",
       device: "macbook",
@@ -176,14 +177,16 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     await addMember(coordinator.id, group.id, trainer.id, ["specialist"]);
     await addMember(coordinator.id, group.id, user.id, ["human"]);
 
-    // ── 3. 用户发命令(user → broadcast):「训练 win 端模型,并交付到 mac」
-    const command = await sendMessage(user.id, group.id, {
+    // ── 3. 检视者起头发布需求(reviewer → broadcast):「训练 win 端模型,并交付到 mac」。
+    //        新模型(§3.8)下用户不进群发言,需求由检视者(reviewer 角色成员)以自身
+    //        participant 身份代用户发出,再进入「草稿→检视→最终版→执行」协作流程。
+    const command = await sendMessage(reviewer.id, group.id, {
       body: "训练 win 端模型,并交付到 mac",
       audience: "broadcast",
     });
     expect(command.audience).toBe("broadcast");
 
-    // ── 4. coordinator 拉取(应可见用户命令)→ 发草稿任务给 reviewer
+    // ── 4. coordinator 拉取(应可见检视者发布的需求)→ 发草稿任务给 reviewer
     const coordFirstPull = await fetchMessages(coordinator.id, group.id);
     expect(coordFirstPull.map((m) => m.body)).toContain(command.body);
 
@@ -197,7 +200,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     expect(draft.parentId).toBeNull();
 
     // ── 5. reviewer 收到(拉取)→ 发检视意见(子消息,parentId=草稿)
-    // 用户命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到;
+    // 需求命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到;
     // 加群自动发的 coagenthub-reviewer 安装引导也定向投递给 reviewer。
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
     expect(reviewerSeen.map((m) => m.body)).toEqual([
@@ -270,7 +273,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       expect(executorBodies).not.toContain(draft.body);
       expect(executorBodies).not.toContain(review.body);
       // 任务工作流消息:executor 只见最终版及之后(结果、文件信令);
-      // 用户命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中;
+      // 需求命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中;
       // 另含加群自动发的 skill 安装引导(coagenthub-executor)。
       const executorSkillMsg = executorFull.find((m) =>
         m.body.startsWith("请先安装 coagenthub-executor skill"),

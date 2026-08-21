@@ -30,7 +30,7 @@ import { wsHub } from "@server/lib/ws-hub";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
-import { assertGroupWritable } from "./helpers";
+import { assertGroupWritable, assertMemberNotHuman } from "./helpers";
 
 /**
  * 群消息子路由:发送 / 编辑 / 软删 / 列表(可见性过滤 + ?after= 增量拉取 +
@@ -137,6 +137,8 @@ app
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
+      // human 角色只读(§3.8):群是 agent 协作空间,human 成员可旁观不可发言。
+      assertMemberNotHuman(membership);
 
       const aud = audience ?? "broadcast";
       if (aud === "role") {
@@ -386,6 +388,8 @@ app
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
+      // human 角色只读(§3.8):与 POST 同款守卫,human 成员不可编辑消息。
+      assertMemberNotHuman(membership);
       const message = await db.query.groupMessage.findFirst({
         where: (t, { and, eq }) => and(eq(t.id, messageId), eq(t.groupId, id)),
       });
@@ -441,6 +445,8 @@ app
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
+      // human 角色只读(§3.8):与 POST 同款守卫,human 成员不可删除消息。
+      assertMemberNotHuman(membership);
       const message = await db.query.groupMessage.findFirst({
         where: (t, { and, eq }) => and(eq(t.id, messageId), eq(t.groupId, id)),
       });

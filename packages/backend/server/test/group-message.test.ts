@@ -182,6 +182,34 @@ describe("群组消息树与受众路由", () => {
       expect((await forbidden.json()).code).toBe("FORBIDDEN");
     });
 
+    it("human 角色成员发消息返回 403(§3.8 群内只读)", async () => {
+      const { group, human } = await setupGroup();
+      const res = await sendMessage(human.id, group.id, {
+        body: "我想在群里发言",
+      });
+      expect(res.status).toBe(403);
+      const err = (await res.json()) as { code: string; message: string };
+      expect(err.code).toBe("FORBIDDEN");
+      // 专属措辞:群是 agent 协作空间,请与检视者 agent 直接对话
+      expect(err.message).toContain("检视者 agent");
+    });
+
+    it("非 human 角色成员发消息不受影响(agent 角色均 200)", async () => {
+      const { group, coordinator, reviewer, executor } = await setupGroup();
+      const broadcast = await sendMessage(coordinator.id, group.id, {
+        body: "协调者广播",
+      });
+      expect(broadcast.status).toBe(200);
+      const reviewMsg = await sendMessage(reviewer.id, group.id, {
+        body: "检视者消息",
+      });
+      expect(reviewMsg.status).toBe(200);
+      const execMsg = await sendMessage(executor.id, group.id, {
+        body: "执行者消息",
+      });
+      expect(execMsg.status).toBe(200);
+    });
+
     it("不存在的群组返回 404", async () => {
       const { coordinator } = await setupGroup();
       const res = await sendMessage(
@@ -587,6 +615,45 @@ describe("群组消息树与受众路由", () => {
       expect(bodies).toContain("请执行");
     });
 
+    it("human 只读不影响 GET:human 成员拉取仍全可见(含定向消息)", async () => {
+      const { group, coordinator, reviewer, executor, human } =
+        await setupGroup();
+      // 先验证 human 写被拒(§3.8):POST 403,且未产生任何消息
+      const rejected = await sendMessage(human.id, group.id, {
+        body: "human 试图发言",
+      });
+      expect(rejected.status).toBe(403);
+      const preWriteCount = (await (
+        await app.request(`/api/groups/${group.id}/messages`, {
+          headers: { "X-Participant-Id": human.id },
+        })
+      ).json() as MessageItem[]).length;
+
+      // agent 角色照常协作:广播 + role 定向 + participant 定向
+      await sendMessage(coordinator.id, group.id, {
+        body: "广播消息",
+      });
+      await sendMessage(coordinator.id, group.id, {
+        body: "给评审员的定向消息",
+        audience: "role",
+        audienceRef: "reviewer",
+      });
+      await sendMessage(coordinator.id, group.id, {
+        body: "给执行器的定向消息",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+
+      // human GET 不受影响:全部可见(含定向消息),且被拒的 POST 未留下消息
+      const humanList = await fetchMessages(human.id, group.id);
+      const bodies = humanList.map((m) => m.body);
+      expect(bodies).not.toContain("human 试图发言");
+      expect(bodies).toContain("广播消息");
+      expect(bodies).toContain("给评审员的定向消息");
+      expect(bodies).toContain("给执行器的定向消息");
+      expect(humanList.length).toBe(preWriteCount + 3);
+    });
+
     it("发送者始终能看到自己发的定向消息", async () => {
       const { group, coordinator, reviewer, executor } = await setupGroup();
       await sendMessage(coordinator.id, group.id, {
@@ -816,6 +883,22 @@ describe("群组消息树与受众路由", () => {
       expect((await res.json()).code).toBe("FORBIDDEN");
     });
 
+    it("human 角色成员编辑消息返回 403(§3.8 群内只读)", async () => {
+      const { group, coordinator, human } = await setupGroup();
+      const msg = (await (
+        await sendMessage(coordinator.id, group.id, { body: "协调者的消息" })
+      ).json()) as MessageItem;
+
+      const res = await patchMessage(human.id, group.id, msg.id, {
+        body: "human 试图编辑",
+      });
+      expect(res.status).toBe(403);
+      const err = (await res.json()) as { code: string; message: string };
+      expect(err.code).toBe("FORBIDDEN");
+      // 专属措辞:群是 agent 协作空间,请与检视者 agent 直接对话
+      expect(err.message).toContain("检视者 agent");
+    });
+
     it("消息不存在(或不属于该群)返回 404,群不存在返回 404", async () => {
       const { group, coordinator, reviewer } = await setupGroup();
       const missing = await patchMessage(
@@ -937,6 +1020,20 @@ describe("群组消息树与受众路由", () => {
       const res = await deleteMessage(reviewer.id, group.id, msg.id);
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("FORBIDDEN");
+    });
+
+    it("human 角色成员删除消息返回 403(§3.8 群内只读)", async () => {
+      const { group, coordinator, human } = await setupGroup();
+      const msg = (await (
+        await sendMessage(coordinator.id, group.id, { body: "协调者的消息" })
+      ).json()) as MessageItem;
+
+      const res = await deleteMessage(human.id, group.id, msg.id);
+      expect(res.status).toBe(403);
+      const err = (await res.json()) as { code: string; message: string };
+      expect(err.code).toBe("FORBIDDEN");
+      // 专属措辞:群是 agent 协作空间,请与检视者 agent 直接对话
+      expect(err.message).toContain("检视者 agent");
     });
 
     it("幂等:重复删除仍 200,body 保持占位", async () => {

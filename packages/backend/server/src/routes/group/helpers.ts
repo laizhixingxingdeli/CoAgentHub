@@ -1,4 +1,7 @@
-import type { groups as groupsTable } from "@laizhixingxingdeli/database/schema";
+import type {
+  GroupMember,
+  groups as groupsTable,
+} from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 
@@ -27,4 +30,18 @@ export async function assertGroupWritable(
     );
   }
   return group;
+}
+
+/**
+ * human 角色只读守卫(§3.8):群是 agent 协作空间,human 成员只能旁观
+ * (GET / WS 订阅不受影响,isMessageVisibleToMember 的 human 全可见规则不变),
+ * 不能发言/编辑/删除。非 human 角色成员不受影响。在成员资格校验通过后调用。
+ */
+export function assertMemberNotHuman(membership: GroupMember): void {
+  if (membership.roles.includes("human")) {
+    throw new BizError(
+      BizCodeEnum.Forbidden,
+      "群是 agent 协作空间，请与检视者 agent 直接对话",
+    );
+  }
 }
