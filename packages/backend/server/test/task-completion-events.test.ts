@@ -436,12 +436,10 @@ describe("Durable Task Completion Events", () => {
 
     it("越权伪造:执行器 participant 发送 callback 一律丢弃(与 dispatcherSessionId 同规则)", async () => {
       const { coordinator, codebuddy, group } = await setupGroup("cb-forgedByExecutor");
-      // 给执行器 participant 加 coordinator 角色:角色门槛放行,但「执行器发送的
+      // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
+      // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,「执行器发送的
       // callback 即使携带也忽略」仍必须拦截(与 dispatcherSessionId 伪造同规则)。
-      await addMember(coordinator.id, group.id, codebuddy.id, [
-        "coordinator",
-        "executor",
-      ]);
+      await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
       const { res, json: msg } = await postMessage(codebuddy.id, group.id, {
         body: "执行器伪造 callback",
         audience: "participant",

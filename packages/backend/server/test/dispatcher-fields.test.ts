@@ -229,12 +229,10 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
 
   it("执行器伪造 metadata:不写入(即便执行器持有 coordinator 角色)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup("下发者 C");
-    // 给执行器 participant 加 coordinator 角色:角色门槛放行,但「执行器发送的
-    // 消息即使带 metadata 也忽略」仍必须拦截。
-    await addMember(coordinator.id, group.id, codebuddy.id, [
-      "coordinator",
-      "executor",
-    ]);
+    // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
+    // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,「执行器发送的消息
+    // 即使带 metadata 也忽略」仍必须拦截。
+    await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
     const { res, json } = await postMessage(codebuddy.id, group.id, {
       body: "执行器伪造 metadata",
       audience: "participant",

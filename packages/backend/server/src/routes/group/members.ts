@@ -62,6 +62,14 @@ app
 
       const dedupedRoles =
         roles.length > 0 ? [...new Set(roles)] : ["observer"];
+      // 单角色约束(§3.7):一个参与者在一个群内只能持有一种角色。校验放在去重
+      // 之后:重复角色(如 ["executor","executor"])去重后长度为 1,仍放行。
+      if (dedupedRoles.length > 1) {
+        throw new BizError(
+          BizCodeEnum.InvalidRequest,
+          "一个群内只能持有一种角色",
+        );
+      }
       const [member] = await db
         .insert(groupMemberTable)
         .values({
@@ -261,6 +269,13 @@ app
       // 与 POST /members 相同的去重规则:角色集去重后写入,min(1) 已保证非空。
       const dedupedRoles =
         roles !== undefined ? [...new Set(roles)] : undefined;
+      // 单角色约束(§3.7):与 POST /members 同规则,去重后长度仍 > 1 才拒绝。
+      if (dedupedRoles !== undefined && dedupedRoles.length > 1) {
+        throw new BizError(
+          BizCodeEnum.InvalidRequest,
+          "一个群内只能持有一种角色",
+        );
+      }
       const [updated] = await db
         .update(groupMemberTable)
         .set({

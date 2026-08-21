@@ -12,8 +12,8 @@ import { participant } from "./participant.js";
 
 /**
  * Preset role catalog assigned per group membership (agent-groups spec:
- * "Identity & roles"). One participant may hold multiple roles, and the same
- * participant can hold different roles in different groups.
+ * "Identity & roles"). A participant holds exactly one role per group, while
+ * the same participant can hold different roles in different groups.
  */
 export const GROUP_ROLES = [
   "human", // the user; sees everything, can publish commands

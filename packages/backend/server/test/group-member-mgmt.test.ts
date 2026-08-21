@@ -169,7 +169,7 @@ describe("群组成员管理 API (ticket 20)", () => {
   });
 
   describe("PATCH /api/groups/:id/members/:participantId 改角色", () => {
-    it("改角色成功,更新后 GET 反映新 roles", async () => {
+    it("多角色更新返回 400,原角色保持不变", async () => {
       const { id } = await registerParticipant({
         name: "coord",
       });
@@ -190,13 +190,8 @@ describe("群组成员管理 API (ticket 20)", () => {
           body: JSON.stringify({ roles: ["reviewer", "executor"] }),
         },
       );
-      expect(patchRes.status).toBe(200);
-      const updated = (await patchRes.json()) as {
-        participantId: string;
-        roles: string[];
-      };
-      expect(updated.participantId).toBe(memberId);
-      expect(updated.roles).toEqual(["reviewer", "executor"]);
+      expect(patchRes.status).toBe(400);
+      expect((await patchRes.json()).message).toBe("一个群内只能持有一种角色");
 
       const membersRes = await app.request(`/api/groups/${group.id}/members`, {
         headers: { "X-Participant-Id": id },
@@ -206,10 +201,10 @@ describe("群组成员管理 API (ticket 20)", () => {
         roles: string[];
       }>;
       const member = members.find((m) => m.participantId === memberId);
-      expect(member?.roles).toEqual(["reviewer", "executor"]);
+      expect(member?.roles).toEqual(["observer"]);
     });
 
-    it("重复角色去重(与 POST /members 同规则)", async () => {
+    it("重复角色去重后长度为 1 放行(与 POST /members 同规则)", async () => {
       const { id } = await registerParticipant({
         name: "coord",
       });
@@ -227,14 +222,40 @@ describe("群组成员管理 API (ticket 20)", () => {
             "Content-Type": "application/json",
             "X-Participant-Id": id,
           },
-          body: JSON.stringify({ roles: ["executor", "executor", "reviewer"] }),
+          body: JSON.stringify({ roles: ["executor", "executor"] }),
         },
       );
       expect(patchRes.status).toBe(200);
       expect(((await patchRes.json()) as { roles: string[] }).roles).toEqual([
         "executor",
-        "reviewer",
       ]);
+    });
+
+    it("去重后仍多于一种角色返回 400(单角色约束)", async () => {
+      const { id } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: memberId } = await registerParticipant({
+        name: "dedupe-reject",
+      });
+      const group = await createGroup(id, "去重拒绝");
+      await addMember(id, group.id, memberId, ["observer"]);
+
+      const res = await app.request(
+        `/api/groups/${group.id}/members/${memberId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": id,
+          },
+          body: JSON.stringify({
+            roles: ["executor", "executor", "reviewer"],
+          }),
+        },
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).message).toBe("一个群内只能持有一种角色");
     });
 
     it("roles 空数组返回 400", async () => {

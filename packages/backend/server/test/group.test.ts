@@ -422,7 +422,7 @@ describe("群组与成员 API", () => {
   });
 
   describe("POST /api/groups/:id/members 加成员", () => {
-    it("添加成员并分配角色,重复添加幂等更新角色", async () => {
+    it("添加成员并分配角色;重复添加多角色返回 400,原角色不变", async () => {
       const { id } = await registerParticipant({
         name: "coord",
       });
@@ -445,7 +445,7 @@ describe("群组与成员 API", () => {
       });
       expect(addRes.status).toBe(200);
 
-      // Idempotent re-add updates roles.
+      // 单角色约束(§3.7):重复添加时传多角色被拒(400),原角色保持不变。
       const updateRes = await app.request(`/api/groups/${group.id}/members`, {
         method: "POST",
         headers: {
@@ -457,9 +457,8 @@ describe("群组与成员 API", () => {
           roles: ["reviewer", "executor"],
         }),
       });
-      expect(updateRes.status).toBe(200);
-      const updated = (await updateRes.json()) as { roles: string[] };
-      expect(updated.roles).toEqual(["reviewer", "executor"]);
+      expect(updateRes.status).toBe(400);
+      expect((await updateRes.json()).message).toBe("一个群内只能持有一种角色");
 
       const membersRes = await app.request(`/api/groups/${group.id}/members`, {
         headers: { "X-Participant-Id": id },
@@ -475,7 +474,7 @@ describe("群组与成员 API", () => {
       const reviewer = members.find((m) => m.participantId === reviewerId);
       expect(reviewer?.name).toBe("win-hermes");
       expect(reviewer?.device).toBe("win-pc");
-      expect(reviewer?.roles).toEqual(["reviewer", "executor"]);
+      expect(reviewer?.roles).toEqual(["reviewer"]);
     });
 
     it("roles 缺省或为空时默认 ['observer']", async () => {
@@ -514,6 +513,79 @@ describe("群组与成员 API", () => {
       expect(emptyRes.status).toBe(200);
       expect(((await emptyRes.json()) as { roles: string[] }).roles).toEqual([
         "observer",
+      ]);
+    });
+
+    it("roles.length > 1 返回 400(单角色约束)", async () => {
+      const { id } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: participantId } = await registerParticipant({
+        name: "multi-role",
+      });
+      const group = await createGroup(id, "单角色校验");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({
+          participantId,
+          roles: ["executor", "reviewer"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).message).toBe("一个群内只能持有一种角色");
+    });
+
+    it("单角色添加正常通过", async () => {
+      const { id } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: participantId } = await registerParticipant({
+        name: "solo-role",
+      });
+      const group = await createGroup(id, "单角色放行");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId, roles: ["executor"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { roles: string[] }).roles).toEqual([
+        "executor",
+      ]);
+    });
+
+    it("重复角色去重后长度为 1 放行,不误判为多角色", async () => {
+      const { id } = await registerParticipant({
+        name: "coord",
+      });
+      const { id: participantId } = await registerParticipant({
+        name: "dedupe-pass",
+      });
+      const group = await createGroup(id, "去重放行");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({
+          participantId,
+          roles: ["executor", "executor"],
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { roles: string[] }).roles).toEqual([
+        "executor",
       ]);
     });
 
