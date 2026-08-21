@@ -22,6 +22,7 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-accent-faint: var(--accent-faint);
   --color-destructive: var(--destructive);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -39,33 +40,51 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-status-queued: var(--status-queued);
+  --color-status-running: var(--status-running);
+  --color-status-done: var(--status-done);
+  --color-status-failed: var(--status-failed);
+  --color-status-cancelled: var(--status-cancelled);
+  --color-status-unconfirmed: var(--status-unconfirmed);
+  --color-role-coordinator: var(--role-coordinator);
+  --color-role-reviewer: var(--role-reviewer);
+  --color-role-executor: var(--role-executor);
+  --color-role-human: var(--role-human);
+  --color-role-human-foreground: var(--role-human-foreground);
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --radius: 0.75rem;
+
+  --background: oklch(0.991 0.001 106.423);
+  --foreground: oklch(0.257 0.017 248.477);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.257 0.017 248.477);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.257 0.017 248.477);
+
+  --primary: oklch(0.596 0.1 208.085);
+  --primary-foreground: oklch(0.983 0.007 197.036);
+  --secondary: oklch(0.972 0.002 197.122);
+  --secondary-foreground: oklch(0.257 0.017 248.477);
+  --muted: oklch(0.972 0.002 197.122);
+  --muted-foreground: oklch(0.577 0.027 250.248);
+
+  --accent: oklch(0.596 0.1 208.085);
+  --accent-foreground: oklch(0.983 0.007 197.036);
+  --accent-faint: oklch(0.96 0.015 202.053);
+
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  --border: oklch(0.929 0.005 228.822);
+  --input: oklch(0.929 0.005 228.822);
   --ring: oklch(0.708 0 0);
+
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
+
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -74,32 +93,55 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  --status-queued: oklch(0.659 0.029 246.525);
+  --status-running: oklch(0.596 0.1 208.085);
+  --status-done: oklch(0.579 0.101 159.037);
+  --status-failed: oklch(0.602 0.168 31.205);
+  --status-cancelled: oklch(0.654 0.009 84.583);
+  --status-unconfirmed: oklch(0.651 0.137 64.456);
+
+  --role-coordinator: oklch(0.491 0.128 258.661);
+  --role-reviewer: oklch(0.513 0.134 305.845);
+  --role-executor: oklch(0.411 0.025 250.694);
+  --role-human: oklch(0.953 0.003 197.103);
+  --role-human-foreground: oklch(0.577 0.027 250.248);
+
+  --elev-1: 0 1px 2px rgb(29 36 43 / 0.06);
+  --elev-2: 0 2px 6px rgb(29 36 43 / 0.08), 0 1px 2px rgb(29 36 43 / 0.05);
+  --elev-3: 0 8px 24px rgb(29 36 43 / 0.12), 0 2px 6px rgb(29 36 43 / 0.06);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.201 0.011 242.328);
+  --foreground: oklch(0.956 0.005 228.819);
+  --card: oklch(0.235 0.013 243.456);
+  --card-foreground: oklch(0.956 0.005 228.819);
+  --popover: oklch(0.235 0.013 243.456);
+  --popover-foreground: oklch(0.956 0.005 228.819);
+
+  --primary: oklch(0.75 0.112 205.427);
+  --primary-foreground: oklch(0.208 0.016 210.057);
+  --secondary: oklch(0.264 0.015 244.246);
+  --secondary-foreground: oklch(0.956 0.005 228.819);
+  --muted: oklch(0.264 0.015 244.246);
+  --muted-foreground: oklch(0.667 0.023 248.166);
+
+  --accent: oklch(0.75 0.112 205.427);
+  --accent-foreground: oklch(0.208 0.016 210.057);
+  --accent-faint: oklch(0.266 0.034 207.899);
+
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
+  --border: oklch(0.309 0.02 248.49);
+  --input: oklch(0.309 0.02 248.49);
   --ring: oklch(0.556 0 0);
+
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
+
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -108,6 +150,23 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+
+  --status-queued: oklch(0.667 0.023 248.166);
+  --status-running: oklch(0.75 0.112 205.427);
+  --status-done: oklch(0.704 0.113 158.311);
+  --status-failed: oklch(0.683 0.153 31.1);
+  --status-cancelled: oklch(0.674 0.011 81.789);
+  --status-unconfirmed: oklch(0.75 0.131 73.684);
+
+  --role-coordinator: oklch(0.631 0.119 258.408);
+  --role-reviewer: oklch(0.65 0.12 305.732);
+  --role-executor: oklch(0.631 0.026 250.209);
+  --role-human: oklch(0.275 0.016 259.783);
+  --role-human-foreground: oklch(0.667 0.023 248.166);
+
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --elev-2: 0 2px 6px rgb(0 0 0 / 0.5), 0 1px 2px rgb(0 0 0 / 0.4);
+  --elev-3: 0 8px 24px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.45);
 }
 
 @layer base {
