@@ -1,8 +1,8 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.0（在 2.1 基础上：平台只做通信原语，去掉 A2A 依赖，重新设计"停止"语义为
-> 仅取消排队、下发者会话延续机制、单角色与 human 禁言维持不变）
+> **版本**: 3.1（在 3.0 基础上：移除弱验收钩子 verifyTaskCommitted/hasSkipCommitMarker，
+> done 判定仅依据 exit code + 汇报解析，不再对工作区做旁路 git 检查）
 > **日期**: 2026-08-21
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
@@ -35,6 +35,9 @@
    - 协调者下发任务与收到执行者回调，必须落在同一个会话里。
    - 执行者每次执行与其 L1 code review 自检落在同一个会话里（现状已满足，
      零改动）。
+7. **移除弱验收钩子**（本次讨论追加，见 §3.4）：done 判定不再对工作区做
+   `verifyTaskCommitted` 之类的旁路 git 检查，只看执行器进程 exit code + 结构化
+   汇报解析结果；早期草案里配套的 `commitMode` 配置项因此作废，不再需要。
 
 ## 1. 背景与目标
 
@@ -94,9 +97,9 @@
 - `packages/backend/server/src/lib/control.ts` — 控制门槛常量、防回环判据、
   停止/回滚语义重写（按群隔离 + 只取消排队）
 - `packages/backend/server/src/lib/executor-task/queue.ts` — dispatcher 判据、
-  停止只作用排队任务、detached 模式放开到 cli、弱验收跳过判据加 `commitMode`
-- `packages/backend/server/src/lib/executors.ts` — `canDispatch` / `commitMode`
-  配置字段、内置 reviewer 执行器
+  停止只作用排队任务、detached 模式放开到 cli、移除弱验收钩子
+- `packages/backend/server/src/lib/executors.ts` — `canDispatch` 配置字段、
+  内置 reviewer 执行器
 - `packages/backend/server/src/routes/group/messages.ts` — 下发门槛改用
   `DISPATCH_ALLOWED_ROLES`、dispatcher 判据改用 `canDispatch`、human 角色 403
 - `packages/backend/server/src/routes/group/members.ts` — 单角色校验、reviewer
@@ -268,28 +271,33 @@ if (senderExecutor && !senderExecutor.canDispatch) {
 否则协调者/检视者一旦注册为执行器（§3.5 要求），会连自己发控制指令的权限也被
 防回环逻辑挡掉。
 
-### 3.4 检视任务的弱验收豁免
+### 3.4 移除弱验收钩子（本次决策，取代 v2.1/早期草稿的 commitMode 方案）
 
-L3 检视任务、协调者的编排任务都不产生代码提交，但 `verifyTaskCommitted` 会因
-"HEAD 无变化"判 failed。现有 `hasSkipCommitMarker`（任务书带 `## Acceptance:
-skip-verify` 或 `## CommitMode: none`）要求协调者每次手写，容易漏。改为配置驱动：
+**决策**：`verifyTaskCommitted`（done 判定前额外校验 git HEAD 是否变化/工作树是否
+干净）与 `hasSkipCommitMarker`（`## Acceptance: skip-verify` / `## CommitMode:
+none` 两个任务书标记）**整段移除**，不再用配置项（`commitMode` 等）豁免，直接
+删掉这层检查。
 
-```ts
-// lib/executors.ts
-export interface ExecutorConfig {
-  // ...
-  /** "none" = 该执行器的任务不做"必须提交"弱验收检查（用于纯编排/检视角色）。 */
-  commitMode?: "none";
-}
-```
+**理由**：
+- 这层检查原本是为了防止执行器"什么都没做就回报成功"，但它把 done 判定绑在了
+  工作区的 git 状态上——检视任务、协调者的编排任务、纯只读排查任务都不产生
+  提交，天然会被误判 failed，需要靠标记/配置反复豁免，治标不治本。
+- 它假设"进程退出 = 可以立刻检查 git 状态"，但在自举场景（用 CoAgentHub 调度
+  任务去修改 CoAgentHub 自身代码）下，这个假设本身就脆弱：执行器写完文件、
+  server 端热重载/并发访问 git 状态之间没有隔离保证。
+- **验收的真正依据应该是执行器自己的结构化汇报**（`parseTaskReport` 解析的
+  "提交/测试/汇报/遗留"四段 + 进程 exit code），不是平台自己再对工作区做一次
+  旁路检查。exit code 非 0 本来就会走失败分支（详见 `runOne` 的 `result.code
+  === 0` 判断），已经是唯一的"完成"信号来源。
 
-弱验收判定处：
+**实现**：删除 `queue.ts` 中 `if (result.code === 0)` 分支里调用
+`verifyTaskCommitted` 的整段代码（含 `hasSkipCommitMarker` 判断），以及
+`hasSkipCommitMarker`/`verifyTaskCommitted` 两个导出函数本身（确认无其他调用点后
+一并删除，不留死代码）。`done` 判定简化为：`exit code === 0` → 解析汇报 → 落库
+`done`；`exit code !== 0` → 原有失败/重试/额度冷却分支不变。
 
-```ts
-const skipVerify = hasSkipCommitMarker(brief) || ex.commitMode === "none";
-```
-
-reviewer 内置配置设 `commitMode: "none"`。
+**连带影响**：`ExecutorConfig` 不再需要 `commitMode` 字段（§3.4 早期草案的
+方案作废）；reviewer 执行器配置里也不需要设它。
 
 ### 3.5 会话延续（detached 模式放开到 CLI）
 
@@ -320,8 +328,7 @@ CLI detached 任务的行为调整（与现有 a2a detached 分支对齐，复�
 - 进程 spawn 后立即视为"已派发"，不等待进程退出决定终态，task 保持 `running`
 - **不解析 stdout 汇报**（因为不是终态判定依据）
 - 队列槽位照常释放（`group.running = null`，避免占住组队列）
-- 弱验收（`verifyTaskCommitted`）不适用（该任务尚未"完成"，验收发生在收件方
-  PATCH 终态时，由收件方自己的流程负责，不是本次 spawn 的验收范围）
+- 弱验收钩子已整体移除（§3.4），本条不再适用
 - 终态由收件方（协调者/检视者的下一个会话）通过
   `PATCH /api/groups/:id/tasks/:taskId` 回写；超过 `detachedTimeoutMinutes`
   （默认 1440 分钟）未回写 → 按"结果未确认"处理
@@ -329,7 +336,7 @@ CLI detached 任务的行为调整（与现有 a2a detached 分支对齐，复�
 **落地方式**：
 
 - 协调者要被检视者唤醒（收 L3 结论前的等待），需注册为 `kind=cli` 的执行器
-  配置（`canDispatch: true`、`commitMode: "none"`），任务书套 detached；具体
+  配置（`canDispatch: true`），任务书套 detached；具体
   bin/args 指向协调者所用 CLI 的 resume 能力（与 reviewer 同构，业务方部署时
   配置，不在本 spec 固化具体命令）。
 - 检视者→协调者的"请求下发/交 spec"任务、协调者→检视者的"L3 检视任务"，
@@ -428,7 +435,7 @@ GET / WS 订阅不受影响，`isMessageVisibleToMember` 的"human 全可见"规
 3. 新增「取 spec」段——必须有 `specRef`+`specHash` 才能 Dispatch。
 4. Dispatch 保留；`task.specHash` 是验收钉子。
 5. 验收段升级为三层编排：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务
-   （detached + commitMode:none + review_request 载荷）→ 读 `review_result`
+   （detached + review_request 载荷）→ 读 `review_result`
    裁决 → 结案（`PATCH` 自己那个来自检视者的 detached 任务为 done，见 §3.5）。
 
 **`skills/executor/SKILL.md`**：
@@ -464,8 +471,8 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 
 - [ ] `DISPATCH_ALLOWED_ROLES`（executor-task/types.ts）与 `CONTROL_ALLOWED_ROLES`
       （control.ts）拆分为独立常量，均含 `coordinator/human/reviewer`
-- [ ] `ExecutorConfig` 新增 `canDispatch?: boolean` 与 `commitMode?: "none"`；
-      `messages.ts` 的 dispatcher/callback 判据改用 `!canDispatch`（而非"是否命中
+- [ ] `ExecutorConfig` 新增 `canDispatch?: boolean`；`messages.ts` 的
+      dispatcher/callback 判据改用 `!canDispatch`（而非"是否命中
       执行器配置"）；既有「执行器伪造 metadata」测试不改断言仍通过
 - [ ] `control.ts` 防回环判据同样改用 `!canDispatch`
 - [ ] 停止指令只取消排队中任务，不再 kill 运行中任务（单测覆盖：排队任务被取消；
@@ -473,11 +480,12 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 - [ ] `cancelQueuedTasks` / `currentRunningTask` / `queuedExecutorTaskCount` /
       回滚前置检查均按 `groupId` 过滤（单测覆盖：A 群停止指令不影响 B 群排队/
       运行中任务）
-- [ ] `commitMode: "none"` 的执行器任务跳过"必须提交"弱验收检查
+- [ ] `verifyTaskCommitted`/`hasSkipCommitMarker` 及其调用点已整体移除；
+      `done` 判定仅依据 exit code + `parseTaskReport` 解析结果
 - [ ] `## ReplyMode: detached` 对 `kind=cli` 执行器同样生效（不再要求 `isA2a`）；
       CLI detached 任务：spawn 后立即释放队列槽位、task 保持 running、不解析
       stdout 汇报、超时兜底复用现有 `detachedTimer`/`handleDetachedTimeout`
-- [ ] 内置 `reviewer` 执行器配置：`canDispatch: true`、`commitMode: "none"`
+- [ ] 内置 `reviewer` 执行器配置：`canDispatch: true`
 - [ ] `skills/reviewer/SKILL.md` 已创建：职责 A + 职责 B + 架构治理入口 + 内置
       "不实现代码/不做功能验收/不直连执行者"约束
 - [ ] `skills/coordinator/SKILL.md` 已移除 Grill/To-Spec；含"取冻结 spec"
@@ -515,8 +523,7 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 - **不改任务书模板**（buildTicket）与汇报五段契约——检视任务书复用同一模板
 - **不改 `GROUP_ROLES`**（reviewer 已存在）
 - **不强制全任务走满三层**——检视深度是策略，写在协调者 skill
-- 不新增 npm 依赖，不新增数据库迁移（`canDispatch`/`commitMode` 为代码派生配置，
-  不落 DB 列）
+- 不新增 npm 依赖，不新增数据库迁移（`canDispatch` 为代码派生配置，不落 DB 列）
 
 ## 6. 兼容性
 
@@ -550,7 +557,7 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 为降低单次改动风险，建议按以下批次落地，每批可独立跑测试验证：
 
 1. **通信修正批**：§3.1（角色门拆分）+ §3.2（dispatcher 判据）+ §3.3（停止/
-   回滚重设计）+ §3.4（commitMode）+ §3.5（detached 放开到 CLI）。此批不依赖
+   回滚重设计）+ §3.4（移除弱验收钩子）+ §3.5（detached 放开到 CLI）。此批不依赖
    reviewer 是否存在，是后续一切的地基。
 2. **reviewer 接线批**：§3.6（新增 skill）+ §3.7（单角色）+ §3.12（服务端
    skills/capabilities/加群引导接线）+ 内置 reviewer 执行器配置。
