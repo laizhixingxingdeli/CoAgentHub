@@ -176,7 +176,8 @@ Field names are fixed — copy them verbatim, never use free-text markers（防�
 
 | Action | Tool | Key Parameters |
 |--------|------|----------------|
-| Dispatch to coordinator | `coagenthub_dispatch_task` | `executorName`, `specRef`, `body`, `planOnly: true` |
+| Dispatch to coordinator | `coagenthub_dispatch_task` | `executorName`, `specRef`, `body` |
+| Preview task ticket | `coagenthub_dispatch_task` | `planOnly: true` |
 | Post conclusion to group | `coagenthub_post_message` | `body`, `audience` |
 | Check review task | `coagenthub_get_task` | `taskId` |
 | List tasks | `coagenthub_list_tasks` | — |

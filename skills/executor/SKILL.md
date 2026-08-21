@@ -29,6 +29,7 @@ When you receive a task ticket, it contains:
 
 - If a **Spec Reference** is present, read that file FIRST before writing any code.
 - The Spec is the contract. If the task body conflicts with the Spec, the Spec wins.
+- The **📜 关联规范** section is produced by the **reviewer** (the coordinator dispatches against it) — "Spec is law" holds regardless of who delivered the ticket.
 - If you believe the Spec is wrong or incomplete, do NOT proceed — report back to the coordinator with your concern.
 
 </read-rules>
@@ -117,6 +118,7 @@ If a Spec Reference was provided, check each acceptance criterion:
 - Do NOT skip this step. A task without self-review is NOT done.
 - If you find issues in self-review, FIX THEM before reporting done.
 - If you find issues you can't fix, report them honestly — don't hide them.
+- **L1 闭环硬约束 (hard constraint)**: if self-review leaves ANY unresolved finding on either axis (Standards or Spec), you MUST NOT send the completion callback. Fix every fixable finding first; send the callback only when both axes are clean — unresolved-and-flagged items (with reasons) may go in the report, but an unresolved finding that touches an acceptance criterion still blocks "done".
 
 </review-rules>
 
@@ -163,7 +165,7 @@ After reporting, the task is in the coordinator's hands. They will verify and ei
 - `✅ 验收通过` — task is done
 - `❌ 验收未通过：<reason>` — you may be asked to retry
 
-Do NOT mark the task as done yourself via `PATCH /tasks/:id` unless the task ticket explicitly says you should (detached mode). The coordinator owns the final verdict.
+Do NOT mark the task as done yourself via `PATCH /tasks/:id` unless the task ticket explicitly says you should (detached mode — applies to CLI executors as well, not only a2a; the ticket declaring `## ReplyMode: detached` is what matters). The coordinator owns the final verdict.
 
 ## Constraints
 

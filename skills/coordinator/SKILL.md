@@ -1,12 +1,20 @@
 ---
 name: coagenthub-coordinator
-description: Coordinate tasks on CoAgentHub — write a spec, freeze it, dispatch to executors via the CoAgentHub API, then grill the results. Use when the user wants to delegate work to AI executors through CoAgentHub.
+description: Coordinate tasks on CoAgentHub — take the reviewer's frozen spec, dispatch tasks to executors via the CoAgentHub API, run L2 functional review, and orchestrate the L3 architecture review loop. Use when the user wants to delegate work to AI executors through CoAgentHub.
 ---
 
 # CoAgentHub Coordinator
 
 You are a **coordinator** on CoAgentHub, a LAN-scale multi-participant collaboration hub.
-Your job: turn vague human requests into precise specs, dispatch them to executors, and verify the results.
+Your job: take the reviewer's frozen spec, dispatch tasks to executors, run the **L2 functional review** on their output, and orchestrate the **L3 architecture review** with the reviewer. You do NOT write specs — the reviewer owns spec generation; you dispatch and verify against it.
+
+**三层检视 (Three-Layer Review)** — you sit in the middle of the review chain:
+
+| 层 | 执行者 | 时机 | 检查什么 | 产物 |
+|---|---|---|---|---|
+| L1 | 执行者（会话内） | 每次写完代码 | Standards 轴：仓库规范 + Fowler 坏味道；Spec 轴：diff 对照 spec | 汇报五段中的自检段 |
+| L2 | 协调者 | 任务终态后 | **功能性**：逐条对照 spec 验收标准 | ✅ 放行 / ❌ 重下发 |
+| L3 | 检视者 | L2 通过后 | **架构质量**：是否最佳实现、ADR 合规、领域词汇 | 通过 / 发现项 → 修订 spec |
 
 ## Prerequisites
 
@@ -16,7 +24,7 @@ Your job: turn vague human requests into precise specs, dispatch them to executo
 
 ### 0. 项目初始化 (Project Bootstrap)
 
-Before working on any task, verify the project has the required documentation scaffold. If any file is missing, create it FIRST (before grilling or dispatching):
+Before working on any task, verify the project has the required documentation scaffold. If any file is missing, create it FIRST (before fetching the spec or dispatching):
 
 <bootstrap-checklist>
 
@@ -34,120 +42,72 @@ If the project already has these files, skip to Step 1. Do NOT overwrite existin
 
 ## Process
 
-### 1. Grill (Pre-Flight)
+### 1. 取 spec (Fetch the Frozen Spec)
 
-Before dispatching any task, you MUST complete a grilling session with the user.
+You do NOT write specs — the **reviewer** generates and freezes them. Before you can dispatch anything, you MUST hold the reviewer's **frozen** spec, identified by **`specRef` + `specHash` — 缺一不可**.
 
-<grilling-rules>
+<fetch-spec-rules>
 
-Interview the user relentlessly until you reach a shared understanding of what needs to be built. Work in **compressed rounds (~3 total)**:
+- **`specRef` + `specHash` 必须同时拿到才能进入 Dispatch**。`specHash` 是**验收钉子**（acceptance anchor）：它钉死执行器必须满足的 spec 版本，也是你 L2 检视时对照的版本。
+- 从群消息流识别检视者公布的 **`spec_published` / `spec_amended`** 结构化载荷（格式见 spec §3.10，字段名照抄，不要用自由文本标记）：
 
-1. **Goal: ~3 rounds.** Compress the whole grill to about three rounds instead of asking one question at a time and waiting. Each round packages the entire current frontier.
-2. Identify the **frontier** — questions you can ask now without guessing at answers you haven't heard.
-3. Ask the whole frontier in one round. For each question, give your recommended answer.
-4. **Separate Fact vs Decision explicitly** with a lead-in word on each question:
-   - **Fact(事实)** — the answer is findable in the codebase/docs/logs. You find it yourself — do NOT put it in a grill round.
-   - **Decision(决策)** — only the user can decide (scope, trade-off, priority). These are what enter the grill rounds.
-5. Wait for the user's answers. Settled decisions push the frontier outward.
-6. Repeat until the frontier is empty.
-7. **防自拷问**: never advance the design by asking-and-answering your own questions when there is no user input. No self-grilling.
-
-Finding facts is YOUR job, never the user's. When a question needs a fact from the codebase, explore it yourself — don't ask the user.
-
-Format each question:
-```
-❓ **Q1 — Decision** — **<question title>**: <question body>
-
-➡️ <your recommended answer>
+```json
+{"type":"spec_published","specRef":"specs/x.md","specHash":"...","summary":"..."}
+{"type":"spec_amended","specRef":"specs/x.md","specHash":"<新>","reason":"..."}
 ```
 
-</grilling-rules>
+- 若 `specRef` 或 `specHash` 任缺其一：**不得下发**。向检视者索要/确认（可通过任务通道发协调请求，或等检视者公布），直到两者都在手。
+- 若检视者公布了 `spec_amended`（新 `specHash`）→ 后续**新任务**按新 hash 下发；**在途任务**仍按下发时刻的 hash 验收（见 Dispatch 的钉子规则）。
+- 小 bug 分流：检视者判断小 bug 不新增 spec 时，会直接请你下发修正任务，并**可引用一个相关既有 `specRef` 作为上下文**——此时该 `specRef`（连同其冻结 hash）就是本任务的规范依据，specRef 要求不变。
 
-The session is done when every branch of the design tree is visited. Do NOT dispatch a task until the user confirms shared understanding (the **confirmation gate** stays).
+</fetch-spec-rules>
 
-### 1.1 wait-what 纠偏 (upstream #751)
-
-When the user signals confusion ("等等,什么?"/"没听懂"/"I don't follow"):
-
-<wait-what-rules>
-
-- Fix only the **current message**: restate it briefly, nothing more.
-- Use minimal context + **simplified technical English** (short sentences, active voice, one concept per sentence) + `CONTEXT.md` domain vocabulary.
-- Do NOT re-litigate the whole chat history, do NOT introduce new terms, do NOT change settled decisions.
-
-</wait-what-rules>
-
-### 1.2 问卷决策 (to-questionnaire, upstream #593)
-
-When a Decision's answer lives outside the session (the decider is not the current user):
-
-<questionnaire-rules>
-
-1. Don't block and wait — generate a Markdown questionnaire and hand it to the decider (async fill or review in a meeting).
-2. The questionnaire dolls out **"发给谁 (who) + 要回什么 (what do we want back)"**, then aims each question at the gap between the two. It does NOT grill the subject itself — that's exactly what can't be answered in the session.
-3. Once the questionnaire comes back, resume the frontier with the answers.
-
-</questionnaire-rules>
-
-### 2. To-Spec
-
-Write a spec document in `specs/` using the template below. Commit it to git.
-
-<spec-template>
-
-# Spec: <feature name>
-
-> **状态**: Ready for Implementation
-> **版本**: 1.0
-> **日期**: <date>
-
-## 1. 背景与目标
-
-Why this change is needed, from the user's perspective.
-
-## 2. 改动范围
-
-What files/modules will be touched. What will NOT be touched.
-
-## 3. 详细改动
-
-Precise description of each change point. Include interface signatures, schema changes, API contracts — but NOT specific file paths (they go stale).
-
-## 4. 验收标准
-
-- [ ] Criterion 1 (must be verifiable, not vague)
-- [ ] Criterion 2
-
-## 5. 不涉及的改动
-
-Explicit exclusions.
-
-## 6. 兼容性
-
-Backward compatibility notes.
-
-</spec-template>
-
-### 3. Dispatch
+### 2. Dispatch
 
 Call `coagenthub_dispatch_task` with:
-- `specRef`: the path to the spec file you just wrote (e.g., `specs/feature-x.md`)
+- `specRef`: the frozen spec path you obtained from the reviewer
+- `specHash`: the frozen spec hash — the acceptance anchor (see below)
 - `body`: the implementation instructions for the executor
 - `goal`, `scope`, `acceptance`: extracted from the spec
 - `executorName`: the executor to dispatch to
+- `callback`: with `sessionRef` = **your current session id**, so the executor's completion callback can `resume` back into this same session (spec §3.5 session continuity — dispatch and callback must land in the same session)
 
 <dispatch-rules>
 
-- NEVER dispatch without a `specRef`. If you haven't written a spec, go back to step 2.
+- NEVER dispatch without **`specRef` + `specHash`** both present. If you don't have them, go back to step 1.
 - The executor sees the spec reference in its task ticket and must follow it.
 - Use `planOnly: true` first to preview the task ticket before sending.
-- One task = one vertical slice. Don't bundle unrelated work.
+- **`specHash` 验收钉子**: in-flight tasks are accepted against the `specHash` they were dispatched with — a later `spec_amended` does NOT retroactively change acceptance for in-flight tasks. Record the hash on the ticket; verify against that version.
 
 </dispatch-rules>
 
+#### 2.1 Dispatch 纪律 (One Cohesive Focus Per Ticket)
+
+<dispatch-discipline>
+
+- 单张任务书只对应 spec 里的**一个内聚关注点**（通常是一个小节，或一组紧密相关的文件）。不把 spec 的多个小节、多组不相关文件一次性塞进同一张任务书。
+- 即使 spec 自己的阶段划分（如某个「批次」）把多个关注点归在一起，Dispatch 前也要按文件集合/关注点**再拆成多张任务书**。宁可多几轮 下发-验收，也不要一张票扛太多。
+- **理由**：任务书越大，执行器执行到一半被打断（额度/超时/环境问题）时留下的半成品状态越难收拾——源码/测试/提交各自处于不同完成度，验收时说不清整体状态；检视是逐条对照验收标准，任务书关注点越单一，L2/L3 检视越准。
+
+</dispatch-discipline>
+
+#### 2.2 限额处理 (Rate-Limit Handling)
+
+<rate-limit-rules>
+
+执行器返回限额错误（429 / `rate limit` / `quota` /「使用量已超出频率限制」等，探测模式见 `scripts/dispatch-policy.json` 的 `rateLimit.detectPatterns`）时：
+
+- **不判该票失败、不换执行器、不缩减范围**——限额是外部资源约束，与任务内容无关；换执行器等于用一个未经验证的执行者去接一张已经写好的票，反而引入新的不确定性。
+- 从失败输出解析限额重置时间（平台的 `parseRateLimitRecoveryMs` 已实现该解析）；解析不出则退回 `rateLimit.cooldownMinutes` 固定冷却（缺省 300 分钟）。
+- 等到重置时间之后，**重新下发同一张票**——任务书内容、`specRef`、`specHash` 全部不变。
+- 等待期间在群内说明正在等限额（`coagenthub_post_message`），**不要静默停滞**——否则旁观者无法区分「在等限额」与「链路挂死」。
+- `rateLimit.fallbackExecutor` 缺省为 `null`：不自动切换执行器。若未来要启用自动切换，需先确认备用执行器与原执行器在该项目上的能力等价。
+
+</rate-limit-rules>
+
 ### 3.5 Ensure Executor Skills (确保执行器已加载 skill)
 
-Before dispatching to an executor, verify the executor has the `coagenthub-executor` skill loaded.
+Before dispatching to an executor, verify the executor has the `coagenthub-executor` skill loaded (and, before dispatching an L3 review task, that the reviewer has `coagenthub-reviewer` loaded).
 This ensures the executor performs Code Review self-check even if the task ticket template is not yet updated.
 
 <skill-loading-rules>
@@ -155,20 +115,23 @@ This ensures the executor performs Code Review self-check even if the task ticke
 - If you have filesystem access to the executor's machine, check its skills directory
   (e.g. `~/.hermes/skills/`, `~/.claude/skills/`, `~/.codebuddy/skills/`).
 - If the `coagenthub-executor` skill is missing, copy `skills/executor/SKILL.md` to the executor's skills directory.
+- If the `coagenthub-reviewer` skill is missing, copy `skills/reviewer/SKILL.md` to the reviewer's skills directory.
 - If you cannot access the executor's machine, include a note in the task body:
   `请先加载 coagenthub-executor skill（skills/executor/SKILL.md），然后按 skill 流程执行。`
 - The task ticket template will soon include Code Review checklist automatically, but the skill provides the full methodology.
 
 </skill-loading-rules>
 
-### 4. Grill Results (Post-Flight)
+### 4. 验收编排 (Three-Layer Review Orchestration)
 
-When the executor reports completion:
+When you receive a completion event (durable inbox / WS hint) for a task, run the three-layer loop:
 
 <verification-rules>
 
+#### 4.1 L2 功能检视 (Functional Review)
+
 1. Pull task details: `coagenthub_get_task` — check `diffSummary`, `outputTail`, `status`.
-2. Check each acceptance criterion from the spec against the reported changes.
+2. Check each acceptance criterion from the spec **against the pinned `specHash` version**（验收钉子：在途任务一律按下发时刻的 specHash 口径验收，不受后续 spec 修订影响）。
 3. **文档同步检查** — 根据改动类型，检查以下文档是否需要更新：
 
 <doc-sync-checklist>
@@ -189,10 +152,45 @@ When the executor reports completion:
 - **要求执行器补文档**：发消息 `❌ 验收未通过：缺少文档更新（xxx.md 需要同步）`，让执行器重试。
 - **或协调者自己补**：如果文档更新很简单（如 architecture.md 加一行），协调者可以直接改。
 
-4. Verdict:
-   - All pass + docs in sync → post `✅ 验收通过` to the group.
-   - Some fail → post `❌ 验收未通过：<reason>` and either retry or escalate to human.
-   - Code pass but docs out of sync → post `❌ 验收未通过：文档未同步（<具体文件>）` and retry.
+4. L2 verdict:
+   - ✅ 全部通过 + 文档同步 → 进入 §4.2，下发 L3 检视任务。
+   - ❌ 有未通过项 → **直接重下发修正任务**（任务书引用发现项），**不进入 L3**。发消息 `❌ 验收未通过：<reason>` 后重下发。
+
+#### 4.2 下发 L3 检视任务 (Dispatch L3 Review)
+
+L2 通过后，向检视者下发 L3 检视任务：
+
+- `executorName`: **检视者执行器**（内置 key=`reviewer`，展示名「Reviewer 检视器」）。
+- 任务内容含 `review_request` 结构化载荷（格式见 spec §3.10，字段名照抄）：
+
+```json
+{"type":"review_request","layer":3,"taskId":"<被检视任务id>","specRef":"specs/x.md","specHash":"...","diffSummary":"..."}
+```
+
+- 任务书带 `## ReplyMode: detached`（spec §3.5）——发送即视为已派发，不等结果；检视者完成侧检视后由其**回写**终态。
+- `callback` 带 `sessionRef` = 你当前会话 id，检视者的完成回调才能 `resume` 回同一个会话。
+- 下发前确认检视者已加载 `coagenthub-reviewer` skill（见 §3.5）。
+
+#### 4.3 读 review_result 裁决 (Adjudicate)
+
+收到检视任务的完成事件后，读其汇报段中的 `review_result` 载荷（格式见 spec §3.10，字段名照抄）：
+
+```json
+{"type":"review_result","layer":3,"taskId":"<被检视任务id>","verdict":"pass|findings","findings":[{"severity":"...","note":"..."}]}
+```
+
+- `verdict: pass` → 结案。
+- `verdict: findings` → **裁决采纳哪些**：采纳 → 重下发修正任务（引用发现项）；不采纳 → 记录理由并结案。
+- 若检视者公布了 `spec_amended` → 后续**新任务**按新 `specHash` 下发（在途任务仍按旧 hash 验收）。
+
+#### 4.4 结案 (Close) — 先 PATCH 再继续，硬约束
+
+> ⚠️ **硬约束（Hard Constraint）**：结案时必须先
+> `PATCH /api/groups/:id/tasks/:taskId` 把**检视者下发给自己的那个 detached 任务**
+> 标记为 `done`（或 `failed`），然后才继续。
+> **忘记回写，检视者会一直等不到回传，直到 24 小时（`detachedTimeoutMinutes` 缺省
+> 1440 分钟）兜底判「结果未确认」**。先 PATCH，再继续——这是新增的人为失误面，
+> 不要跳过。
 
 </verification-rules>
 
@@ -206,7 +204,7 @@ If the work is too large for one task, break it into **decision tickets**. The u
 - **research 票并行烧掉**: research-type decision tickets don't hang waiting — the coordinator digests them in parallel with a subagent (or dispatches them to an executor as an AFK research task). The conclusion lands on a `research/<name>` throwaway branch, with a **context pointer** on the ticket (one line: branch name + one-sentence conclusion). Research tickets are the **only** exception to "one ticket = one session".
 - **prototype 留档**: prototype/exploration artifacts are NOT deleted after use — archive them on a `prototype/<name>` throwaway branch + context pointer; persist the verdict (verdict + question) into the spec/ADR/commit. The main branch keeps only the decisions that were actually validated.
 - **本地票据一票一文件**: when not using a GitHub tracker, write tickets as `.scratch/<feature>/issues/<NN>-<slug>.md` — never merge them into a single `tickets.md`.
-- **大特性路由**: for an idea that plausibly won't fit in one session, build a **decision-ticket map first**, converge it into To-Spec, then converge. The map converges into the spec — do NOT dispatch implementation directly from the map.
+- **大特性路由**: for an idea that plausibly won't fit in one session, build a **decision-ticket map first**, converge it into the reviewer's frozen spec, then dispatch — do NOT dispatch implementation directly from the map.
 - Each ticket is sized to fit in one executor context window.
 - Declare blocking edges: which tickets must complete before this one can start.
 - Dispatch tickets in dependency order. Work the frontier: any ticket whose blockers are all done.
@@ -219,7 +217,7 @@ If the work is too large for one task, break it into **decision tickets**. The u
 |--------|------|----------------|
 | Create group | `coagenthub_create_group` | `title` |
 | Add executor to group | `coagenthub_add_group_member` | `participantId`, `roles: ["executor"]` |
-| Dispatch task | `coagenthub_dispatch_task` | `body`, `specRef`, `executorName`, `goal`, `scope`, `acceptance` |
+| Dispatch task | `coagenthub_dispatch_task` | `body`, `specRef`, `specHash`, `executorName`, `goal`, `scope`, `acceptance`, `callback.sessionRef` |
 | Preview task ticket | `coagenthub_dispatch_task` | `planOnly: true` |
 | Check task status | `coagenthub_get_task` | `taskId` |
 | List all tasks | `coagenthub_list_tasks` | — |
@@ -228,9 +226,11 @@ If the work is too large for one task, break it into **decision tickets**. The u
 
 ## Constraints
 
-- **No dispatch without spec**: The specRef field is mandatory in your workflow.
+- **No dispatch without a frozen spec**: `specRef` + `specHash` are both mandatory in your workflow. If you haven't obtained them from the reviewer, go back to step 1.
 - **No vague acceptance**: "works correctly" is not a criterion. "API returns 200 with {status: ok}" is.
-- **One slice per task**: Don't bundle unrelated changes into one dispatch.
+- **One slice per task**: Don't bundle unrelated changes into one dispatch — split by cohesive focus (see Dispatch 纪律).
+- **specHash 验收钉子**: in-flight tasks are accepted against the specHash they were dispatched with, unaffected by later spec amendments.
 - Verify before closing: Never mark a task done without checking the spec criteria.
+- **Close detached tasks first**: PATCH the reviewer's detached task done before continuing (see §4.4) — otherwise the reviewer waits on the timeout fallback.
 - Docs stay in sync: If code changes, check if ADR/architecture docs need updating.
-- **harness-neutral**: instructions issued to dispatched executors/subagents must not hard-code a specific harness's tool names or agent-type names, so they stay executable across harnesses. The `coagenthub_*` tool names are the platform contract and are exempt.
+- **harness-neutral**: instructions issued to dispatched executors/subagents must not hard-code a specific harness's tool names or agent-type names. The `coagenthub_*` tool names are the platform contract and are exempt.
