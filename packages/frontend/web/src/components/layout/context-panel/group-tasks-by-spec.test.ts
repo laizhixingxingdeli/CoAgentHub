@@ -148,7 +148,17 @@ describe("groupTasksBySpec", () => {
       makeTask({ id: "c", specRef: "specs/r.md", status: "failed", createdAt: "2026-08-01T02:00:00.000Z" }),
     ];
     const reqs = groupTasksBySpec(tasks);
-    expect(reqs[0].steps).toEqual(["done", "pending", "failed"]);
+    expect(reqs[0].steps).toEqual(["done", "running", "failed"]);
+  });
+
+  it("running 任务映射到 running 步骤(不再笼统归进 pending)", () => {
+    const tasks = [
+      makeTask({ id: "q", specRef: "specs/r.md", status: "queued", createdAt: "2026-08-01T00:00:00.000Z" }),
+      makeTask({ id: "r", specRef: "specs/r.md", status: "running", createdAt: "2026-08-01T01:00:00.000Z" }),
+      makeTask({ id: "c", specRef: "specs/r.md", status: "cancelled", createdAt: "2026-08-01T02:00:00.000Z" }),
+    ];
+    const reqs = groupTasksBySpec(tasks);
+    expect(reqs[0].steps).toEqual(["pending", "running", "pending"]);
   });
 
   it("空输入返回空数组", () => {
@@ -160,9 +170,10 @@ describe("stepStatusFromTask (占位算法)", () => {
   it("done → done", () => expect(stepStatusFromTask("done")).toBe("done"));
   it("failed → failed", () =>
     expect(stepStatusFromTask("failed")).toBe("failed"));
-  it("queued/running/cancelled → pending", () => {
+  it("running → running(UI-04b-1:呼吸青环单独成一档)", () =>
+    expect(stepStatusFromTask("running")).toBe("running"));
+  it("queued/cancelled → pending", () => {
     expect(stepStatusFromTask("queued")).toBe("pending");
-    expect(stepStatusFromTask("running")).toBe("pending");
     expect(stepStatusFromTask("cancelled")).toBe("pending");
   });
 });

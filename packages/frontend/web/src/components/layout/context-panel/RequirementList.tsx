@@ -11,10 +11,11 @@ import { Fragment } from "react";
 import type { Requirement, StepStatus } from "./group-tasks-by-spec";
 import { formatMessageTime } from "@/pages/app/groups/messages/lib";
 
-/** 阶梯每步圆点的配色:done 实心 / failed 实心 / pending 空心(边框)。 */
+/** 阶梯每步圆点的配色:done/failed/running 实心 / pending 空心(边框)。 */
 const STEP_DOT_CLASS: Record<StepStatus, string> = {
   done: "bg-status-done",
   failed: "bg-status-failed",
+  running: "bg-status-running",
   pending: "border border-muted-foreground/40",
 };
 

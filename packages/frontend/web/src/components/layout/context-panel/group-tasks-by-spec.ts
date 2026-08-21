@@ -17,8 +17,11 @@ import type { TaskItem, TaskStatus } from "@/pages/app/groups/messages/TaskPanel
 /**
  * 阶梯每步的状态(占位类型)。UI-04b 会做精细的「检视 / 协调 / 执行」三层
  * 语义判定;本票只留这个承载字段,具体算法见 stepStatusFromTask 的占位实现。
+ *
+ * UI-04b-1 补充 "running":精细阶梯要把「正在跑」画成呼吸青环,与「还没开始」
+ * 的空心灰圈区分,笼统归进 pending 会丢掉这个视觉信息。
  */
-export type StepStatus = "done" | "failed" | "pending";
+export type StepStatus = "done" | "failed" | "running" | "pending";
 
 /** 一条「需求」:同 specRef 任务的聚合结果。 */
 export type Requirement = {
@@ -53,17 +56,23 @@ function isDone(status: TaskStatus): boolean {
 function isFailed(status: TaskStatus): boolean {
   return status === "failed";
 }
+/** 是否应当显示为「进行中」:running 视为进行中(UI-04b-1 起单独成一档)。 */
+function isRunning(status: TaskStatus): boolean {
+  return status === "running";
+}
 
 /**
  * ⚠️ 占位算法(非最终实现):把单个任务的状态映射到阶梯的一步。
  * - done 任务 → "done"
  * - failed 任务 → "failed"
- * - 其余(queued/running/cancelled) → "pending"
+ * - running 任务 → "running"(UI-04b-1:呼吸青环,与未开始区分)
+ * - 其余(queued/cancelled) → "pending"
  * 后续票会基于检视/协调/执行的语义替换为精确层级判定。
  */
 export function stepStatusFromTask(status: TaskStatus): StepStatus {
   if (isDone(status)) return "done";
   if (isFailed(status)) return "failed";
+  if (isRunning(status)) return "running";
   return "pending";
 }
 
