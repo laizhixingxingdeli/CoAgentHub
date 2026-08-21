@@ -1,5 +1,5 @@
 import { Separator } from "@radix-ui/react-separator";
-import { Bot, Command, LifeBuoy, Send, Users } from "lucide-react";
+import { Bot, LifeBuoy, Send, Users } from "lucide-react";
 import type * as React from "react";
 import { useLocation } from "wouter";
 import {
@@ -63,8 +63,25 @@ export default function AppSidebar({
             <SidebarMenuItem>
               <SidebarMenuButton size="lg" asChild>
                 <a href="/groups">
-                  <div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
-                    <Command className="size-4" />
+                  <div className="bg-primary text-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
+                    <svg
+                      className="size-5"
+                      viewBox="0 0 64 64"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="32"
+                        cy="32"
+                        r="21"
+                        stroke="currentColor"
+                        strokeWidth="6"
+                        strokeLinecap="round"
+                        strokeDasharray="99 33"
+                        transform="rotate(-58 32 32)"
+                      />
+                      <circle cx="32" cy="11" r="7" fill="#16B0BF" />
+                    </svg>
                   </div>
                   <div className="grid flex-1 text-left text-sm leading-tight">
                     <span className="truncate font-medium">CoAgentHub</span>
