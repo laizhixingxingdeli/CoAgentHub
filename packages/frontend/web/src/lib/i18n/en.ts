@@ -233,6 +233,8 @@ export const en: Record<DictKey, string> = {
     "This group was deleted; history is still viewable, sending is disabled.",
   "messages.readOnly.archived":
     "This group is archived and read-only; history remains viewable, sending is disabled.",
+  "messages.readOnly.human":
+    "This group is an agent collaboration space — to send messages, talk directly to the reviewer agent.",
   "messages.audience.all": "everyone",
   "messages.list.empty": "No messages yet — send the first one",
   "messages.list.emptyHint": "@ a role or member to route the message directly",

@@ -1209,6 +1209,49 @@ describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
   });
 });
 
+describe("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
+  /** 当前绑定的身份(human-1)在本群持 human 角色 —— 与 MEMBERS 里已有的
+   *  coordinator/reviewer 成员并存,验证只按「当前身份的角色」判定。 */
+  const HUMAN_MEMBERS = [
+    {
+      participantId: "human-1",
+      name: "本地用户",
+      device: null,
+      roles: ["human"],
+      joinedAt: "2026-08-01T00:00:00.000Z",
+    },
+    ...MEMBERS,
+  ];
+
+  it("当前身份在本群持 human 角色:Composer 输入入口不渲染,引导文案可见", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "human-1");
+    stubFetch(messagesFetchMock(MESSAGES, HUMAN_MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    // 无任何发言入口:textarea / 发送按钮 / 测试执行器下拉都不渲染。
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+    expect(screen.queryByLabelText("测试执行器")).toBeNull();
+    // 引导文案可见,语义与后端 403 措辞(群是 agent 协作空间,请与检视者
+    // agent 直接对话)对齐。
+    expect(
+      screen.getByText("群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。"),
+    ).toBeInTheDocument();
+  });
+
+  it("当前身份持非 human 角色(coordinator):Composer 正常可用,无引导文案", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
+    stubFetch(messagesFetchMock(MESSAGES, MEMBERS));
+    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+
+    await screen.findByText("任务草稿");
+    expect(screen.getByLabelText("消息内容")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    expect(screen.queryByText(/群是 agent 协作空间/)).toBeNull();
+  });
+});
+
 describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   // jsdom has no WebSocket — the manual mock drives the page's live channel.
   const pushMessage = (ws: MockWebSocket, body: string, id: string) =>

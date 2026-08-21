@@ -89,6 +89,15 @@ export default function GroupMessagesPage() {
     audiencePreview,
   } = useMessagesPage(groupId);
 
+  // Reviewer spec §3.9(票 10):当前绑定的身份在本群持 `human` 角色 → 消息页
+  // 无发言入口,以引导文案替代 Composer(与后端 403 语义对齐)。其他身份(含
+  // coordinator/executor/reviewer 等 agent 身份)保留输入能力,非全局只读。
+  // 身份未绑定或不在成员列表时视为可输入(后端会按成员资格自行拦截)。
+  const isHumanMuted =
+    members.find((m) => m.participantId === myParticipantId)?.roles.includes(
+      "human",
+    ) ?? false;
+
   return (
     <div className="mx-auto flex h-[calc(100dvh-4rem)] w-full max-w-[1440px] flex-col px-4 sm:px-6">
       {/* ── Zone 1: title bar ─────────────────────────────────────────── */}
@@ -266,26 +275,35 @@ export default function GroupMessagesPage() {
         toggleCollapsed={toggleCollapsed}
         toggleFold={toggleFold}
       />
-      <Composer
-        body={body}
-        mention={mention}
-        mentionCandidates={mentionCandidates}
-        highlightIndex={highlightIndex}
-        setHighlightIndex={setHighlightIndex}
-        replyTo={replyTo}
-        setReplyTo={setReplyTo}
-        sending={sending}
-        isReadOnly={isReadOnly}
-        audiencePreview={audiencePreview}
-        textareaRef={textareaRef}
-        handleBodyChange={handleBodyChange}
-        handleComposerKeyDown={handleComposerKeyDown}
-        handleSend={handleSend}
-        insertMention={insertMention}
-        testExecutor={testExecutor}
-        setTestExecutor={setTestExecutor}
-        executorMembers={executorMembers}
-      />
+      {isHumanMuted ? (
+        <div
+          data-testid="composer-readonly-guide"
+          className="shrink-0 border-t bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
+        >
+          {t("messages.readOnly.human")}
+        </div>
+      ) : (
+        <Composer
+          body={body}
+          mention={mention}
+          mentionCandidates={mentionCandidates}
+          highlightIndex={highlightIndex}
+          setHighlightIndex={setHighlightIndex}
+          replyTo={replyTo}
+          setReplyTo={setReplyTo}
+          sending={sending}
+          isReadOnly={isReadOnly}
+          audiencePreview={audiencePreview}
+          textareaRef={textareaRef}
+          handleBodyChange={handleBodyChange}
+          handleComposerKeyDown={handleComposerKeyDown}
+          handleSend={handleSend}
+          insertMention={insertMention}
+          testExecutor={testExecutor}
+          setTestExecutor={setTestExecutor}
+          executorMembers={executorMembers}
+        />
+      )}
     </div>
   );
 }

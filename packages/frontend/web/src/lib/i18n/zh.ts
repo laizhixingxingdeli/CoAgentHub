@@ -217,6 +217,8 @@ export const zh = {
   "messages.readOnly.deleted": "该群组已删除,历史消息仍可查看,发送已禁用。",
   "messages.readOnly.archived":
     "该群组已归档,处于只读状态;历史消息可继续查看,发送已禁用。",
+  "messages.readOnly.human":
+    "群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。",
   "messages.audience.all": "全体成员",
   "messages.list.empty": "暂无消息,发送第一条吧",
   "messages.list.emptyHint": "@ 角色或成员可以让消息直达目标",
