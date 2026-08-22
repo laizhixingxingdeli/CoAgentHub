@@ -1,7 +1,6 @@
-import { existsSync, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import {
+  GROUP_ROLES,
   groupMember as groupMemberTable,
   groups as groupsTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -11,6 +10,7 @@ import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
+import { resolveProjectPath } from "./helpers";
 
 /**
  * 群本体子路由:创建 / 列表(分页+搜索)/ 详情 / 改名与绑定项目 / 归档 /
@@ -24,7 +24,8 @@ app
   .post(
     "/",
     describeRoute({
-      description: "Create a group; the creator auto-joins as coordinator",
+      description:
+        "Create a group; the creator auto-joins with a role (default coordinator; pass creatorRole to override) and an optional bound projectPath",
       responses: {
         200: {
           description: "Group created",
@@ -36,26 +37,37 @@ app
       "json",
       z.object({
         title: z.string().min(1),
+        // 建群一步绑定项目路径(可选):校验复用 PATCH 的 resolveProjectPath,
+        // 空串/null 视作不绑定(null);不传时行为与现状一致。
+        projectPath: z.string().nullable().optional(),
+        // 建群者角色(可选):默认 coordinator(向后兼容);检视者等角色建群时
+        // 传入自身角色,避免被写死成 coordinator 导致模式推导错误(见 spec)。
+        creatorRole: z.enum(GROUP_ROLES).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const participantId = c.get("participantId");
-      const { title } = c.req.valid("json");
+      const { title, projectPath, creatorRole } = c.req.valid("json");
 
       // db.transaction resolves to the callback's return value.
       const group = await db.transaction(async (tx) => {
         const [created] = await tx
           .insert(groupsTable)
-          .values({ title, createdBy: participantId })
+          .values({
+            title,
+            createdBy: participantId,
+            projectPath: resolveProjectPath(projectPath),
+          })
           .returning();
         // The creator is automatically a member with the coordinator role —
         // inserted in the same transaction so a group can never exist
-        // without its coordinator membership.
+        // without its coordinator membership. creatorRole overrides the
+        // default so a reviewer (etc.) creating a group isn't mis-derived.
         await tx.insert(groupMemberTable).values({
           groupId: created.id,
           participantId,
-          roles: ["coordinator"],
+          roles: [creatorRole ?? "coordinator"],
         });
         return created;
       });
@@ -210,20 +222,8 @@ app
       if (title !== undefined) patch.title = title;
       if (projectPath !== undefined) {
         // 空串视作清空绑定(null);非空值必须是存在的绝对目录路径。
-        const path = projectPath === "" ? null : projectPath;
-        if (path !== null) {
-          const valid =
-            isAbsolute(path) &&
-            existsSync(path) &&
-            statSync(path).isDirectory();
-          if (!valid) {
-            throw new BizError(
-              BizCodeEnum.InvalidRequest,
-              `projectPath 必须是存在的绝对目录路径:${path}`,
-            );
-          }
-        }
-        patch.projectPath = path;
+        // 校验与 POST /groups 共用 helpers.resolveProjectPath,不写第二份。
+        patch.projectPath = resolveProjectPath(projectPath);
       }
 
       const [updated] = await db

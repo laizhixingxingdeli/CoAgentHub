@@ -104,6 +104,108 @@ describe("群组与成员 API", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    it("传合法 projectPath 建群成功:返回体与库里都是传入值", async () => {
+      const { id } = await registerParticipant({
+        name: "coord-pp-create",
+      });
+      const dir = mkdtempSync(join(tmpdir(), "coagent-create-proj-"));
+
+      try {
+        const res = await app.request("/api/groups", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": id,
+          },
+          body: JSON.stringify({ title: "绑定创建", projectPath: dir }),
+        });
+        expect(res.status).toBe(200);
+        const group = (await res.json()) as {
+          id: string;
+          projectPath: string;
+        };
+        expect(group.projectPath).toBe(dir);
+
+        const getRes = await app.request(`/api/groups/${group.id}`, {
+          headers: { "X-Participant-Id": id },
+        });
+        expect(getRes.status).toBe(200);
+        expect(
+          ((await getRes.json()) as { projectPath: string }).projectPath,
+        ).toBe(dir);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("传非法 projectPath(相对/不存在目录)建群报 400 INVALID_REQUEST", async () => {
+      const { id } = await registerParticipant({
+        name: "coord-pp-invalid",
+      });
+      const baseDir = mkdtempSync(join(tmpdir(), "coagent-create-proj-"));
+      const cases = [
+        "relative/path",
+        join(baseDir, "no-such-dir"), // 不存在
+      ];
+      try {
+        for (const projectPath of cases) {
+          const res = await app.request("/api/groups", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Participant-Id": id,
+            },
+            body: JSON.stringify({ title: "非法路径", projectPath }),
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).code).toBe("INVALID_REQUEST");
+        }
+      } finally {
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("传 creatorRole=reviewer 建群,创建者以 reviewer 入群(检视者建群正确推导)", async () => {
+      const { id } = await registerParticipant({
+        name: "reviewer-creator",
+      });
+      const res = await app.request("/api/groups", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ title: "检视者建群", creatorRole: "reviewer" }),
+      });
+      expect(res.status).toBe(200);
+      const group = (await res.json()) as { id: string };
+
+      const membersRes = await app.request(`/api/groups/${group.id}/members`, {
+        headers: { "X-Participant-Id": id },
+      });
+      expect(membersRes.status).toBe(200);
+      const members = (await membersRes.json()) as Array<{
+        roles: string[];
+      }>;
+      expect(members).toHaveLength(1);
+      expect(members[0].roles).toEqual(["reviewer"]);
+    });
+
+    it("creatorRole 非法值返回 400", async () => {
+      const { id } = await registerParticipant({
+        name: "coord-bad-role",
+      });
+      const res = await app.request("/api/groups", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ title: "非法角色", creatorRole: "boss" }),
+      });
+      expect(res.status).toBe(400);
+    });
   });
 
   describe("GET /api/groups 列表与过滤", () => {

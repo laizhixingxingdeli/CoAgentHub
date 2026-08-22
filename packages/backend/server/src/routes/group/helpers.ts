@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type {
   GroupMember,
   groups as groupsTable,
@@ -8,6 +10,35 @@ import type { DataBase } from "@server/lib/database";
 /**
  * 群路由共享守卫与工具:被 groups/members/messages/tasks 四个子路由复用。
  */
+
+/**
+ * projectPath 校验与归一化(POST /groups 与 PATCH /groups/:id 共用一份,
+ * 不写第二份):空串视作清空绑定(null);非空值必须是存在的绝对目录路径,
+ * 否则抛 InvalidRequest。
+ */
+export function resolveProjectPath(
+  projectPath: string | null | undefined,
+): string | null {
+  const path = projectPath === "" ? null : projectPath ?? null;
+  if (path !== null) {
+    // 单个 statSync 调用判断「存在的绝对目录」:不做 existsSync+statSync 两次
+    // 系统调用(两次之间目录被删会让 statSync 抛裸 ENOENT 变 500);任何 stat
+    // 失败(不存在/非目录/权限)一律映射为 400 InvalidRequest。
+    let valid = false;
+    try {
+      valid = isAbsolute(path) && statSync(path).isDirectory();
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `projectPath 必须是存在的绝对目录路径:${path}`,
+      );
+    }
+  }
+  return path;
+}
 
 /**
  * 归档/软删群只读守卫:非 active 群的一切写操作返回 403 + 原因(历史仍可读,
