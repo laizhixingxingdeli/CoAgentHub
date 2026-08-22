@@ -1,6 +1,6 @@
 # Spec: 删除右栏,群设置并入一页
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.1
 > **日期**: 2026-08-23
 > **协作模式**: 三层
@@ -130,3 +130,12 @@
 - 前端可实测:`http://localhost:5173/groups/01a029c4-b67f-...`(有真实任务数据)
 - 沙箱执行器注意:需监听本地端口的测试会报 `listen EPERM`,那是环境限制不是回归;
   **全量由协调者代跑**
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**，commit `a0e9ef5`。逐条核实过唯一的高风险点：`useMessagesPage` 原来只被已删除的 `ContextPanel` 调用（改动前 `git show` 确认 messages/index.tsx 从未直接调用它），现改为 `GroupLayout` 顶层调用——是干净的单一搬迁，不是重复订阅。侧栏两处高亮匹配器（`nav-main.tsx`/`conversations.tsx`）用的本就是前缀匹配，路由改名后自动适配，本次只需同步注释。`/groups/:id/members` 用 `<Redirect>` 正确跳转到 `/groups/:id/settings`。
+
+非阻塞小问题：`messages/index.tsx` 里保留了一处注释仍写着「右栏 ContextPanel 顶层」，但该组件本次已被删除——注释与代码不同步了，下次touch这个文件时顺手改掉即可，不必为此单独立票。

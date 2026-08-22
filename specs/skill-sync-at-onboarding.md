@@ -1,6 +1,6 @@
 # Spec: skill 同步移到接入参与方时,一次装全套
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **协作模式**: 三层
@@ -143,3 +143,10 @@ agent 写盘后需要能把「我装好了哪些」告诉平台。现有机制�
   改完后端代码需手动 build + restart 才生效,跑测试不受影响
 - 沙箱执行器注意:全量测试里有需监听本地端口的用例会报 `listen EPERM`,
   那是环境限制不是回归——**全量由协调者代跑**,你只需跑定向测试与类型检查
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**，commit `0a8c160`。加群不再发群消息（`members.ts` 里原来的 fire-and-forget 发送块已整段删除，改为 `capabilityHint` 同出口提示），接入响应复用 `routes/skills.ts` 读盘逻辑未重复实现，capabilities 上报走 PATCH 幂等追加。

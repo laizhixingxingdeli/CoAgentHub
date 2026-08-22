@@ -1,6 +1,6 @@
 # Spec: 建群接口的两个缺口
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **协作模式**: 三层
@@ -137,3 +137,10 @@ roles 含 coordinator」判定任务是否走 detached 生命周期。若本票�
   **改完后端代码需手动 build + restart 才生效**，但跑测试不受影响
 - 沙箱执行器注意：全量测试里有需要监听本地端口的用例会报 `listen EPERM`，
   那是环境限制不是回归 —— **全量由协调者代跑**，你只需跑定向测试与类型检查
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**，commit `f83e06a`。projectPath 校验复用抽到 `helpers.resolveProjectPath` 单点实现，顺带把 `existsSync+statSync` 的 TOCTOU 竞态改成单次 `statSync` try/catch（不在要求范围内，但落在被改的同一段代码上，属于合理的顺手修复，不算范围蔓延）。`creatorRole` 默认 coordinator、可传 reviewer，测试覆盖合法/非法路径、不传、reviewer 建群、非法 creatorRole。
