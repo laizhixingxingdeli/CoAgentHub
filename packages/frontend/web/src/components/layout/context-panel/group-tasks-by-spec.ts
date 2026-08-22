@@ -12,7 +12,10 @@
  * 这是给上层 UI 用的顺序约定:UI-04b 会按此顺序渲染,并把最新的放视觉底部。
  */
 
-import type { TaskItem, TaskStatus } from "@/pages/app/groups/messages/TaskPanel";
+import type {
+  TaskItem,
+  TaskStatus,
+} from "@/pages/app/groups/messages/TaskPanel";
 
 /**
  * 阶梯每步的状态(占位类型)。UI-04b 会做精细的「检视 / 协调 / 执行」三层
@@ -83,9 +86,34 @@ export function stepStatusFromTask(status: TaskStatus): StepStatus {
  * - specRef 为 null(旧任务)→ 用最早那条任务的 id 兜底(TaskItem 没有 brief
  *   字段;UI 后续可接消息流把正文摘要补进 label)。
  */
+export function deriveBriefTitle(
+  brief: string | null | undefined,
+): string | null {
+  const briefLine = brief
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (briefLine && !briefLine.startsWith("##")) {
+    const title = briefLine
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/^(?:任务|task)\s*[:：]\s*/i, "")
+      .trim();
+    if (title && title.length <= 160 && !title.startsWith("```")) {
+      return title.length > 64 ? `${title.slice(0, 64)}…` : title;
+    }
+  }
+  return null;
+}
+
 export function deriveLabel(tasks: TaskItem[]): string {
   const first = tasks[0];
   if (!first) return "";
+  const briefTitle = tasks
+    .map((task) => deriveBriefTitle(task.brief))
+    .find((title): title is string => title !== null);
+  if (briefTitle) {
+    return briefTitle;
+  }
   if (first.specRef) {
     const base = first.specRef.split("/").pop() ?? first.specRef;
     const withoutExt = base.replace(/\.[^./\\]+$/, "");

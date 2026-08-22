@@ -13,8 +13,7 @@
  *  - pending 空心灰圈(--border 描边,背景透明)
  *
  * 颜色全部走 index.css 注册的 --status-* token,不硬编码色值。
- * 本组件只消费 UI-04a 的占位数据结构,不做「检视/协调/执行」层级语义判定 ——
- * 因此标签用通用文案「步骤 N」(props 只有 steps,拿不到执行者信息)。
+ * 状态仍由上层计算;本组件只负责把执行者与任务标题绘制成紧凑标签。
  */
 
 import { Fragment } from "react";
@@ -99,11 +98,16 @@ function StepIcon({ status }: { status: StepStatus }) {
 }
 
 type RequirementStepperProps = {
-  /** UI-04a 的占位阶梯数据(每步一个状态),直接消费,不在这里重算。 */
+  /** 每步状态,直接消费,不在这里重算。 */
   steps: StepStatus[];
+  /** 面向人的「执行者 · 任务名」标签;缺省保持旧调用方兼容。 */
+  labels?: string[];
 };
 
-export default function RequirementStepper({ steps }: RequirementStepperProps) {
+export default function RequirementStepper({
+  steps,
+  labels = [],
+}: RequirementStepperProps) {
   if (steps.length === 0) {
     return null;
   }
@@ -139,8 +143,11 @@ export default function RequirementStepper({ steps }: RequirementStepperProps) {
                 <StepIcon status={step} />
               </span>
             </span>
-            <span className="text-[11px] leading-none text-muted-foreground">
-              步骤 {i + 1}
+            <span
+              className="max-w-40 truncate text-[11px] leading-none text-muted-foreground"
+              title={labels[i] ?? `步骤 ${i + 1}`}
+            >
+              {labels[i] ?? `步骤 ${i + 1}`}
             </span>
           </li>
         </Fragment>

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import {
   deriveLabel,
   groupTasksBySpec,
   stepStatusFromTask,
 } from "./group-tasks-by-spec";
-import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 
 /** 构造最小可用的 TaskItem,只填分组/排序/展示所需的字段。 */
 function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
@@ -51,8 +51,16 @@ describe("groupTasksBySpec", () => {
 
   it("不同 specRef 各自独立成一条", () => {
     const tasks = [
-      makeTask({ id: "a", specRef: "specs/a.md", createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "b", specRef: "specs/b.md", createdAt: "2026-08-01T01:00:00.000Z" }),
+      makeTask({
+        id: "a",
+        specRef: "specs/a.md",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "b",
+        specRef: "specs/b.md",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs).toHaveLength(2);
@@ -61,8 +69,16 @@ describe("groupTasksBySpec", () => {
 
   it("specRef 为 null 的任务各自独立成一条(不强行归并)", () => {
     const tasks = [
-      makeTask({ id: "x", specRef: null, createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "y", specRef: null, createdAt: "2026-08-01T01:00:00.000Z" }),
+      makeTask({
+        id: "x",
+        specRef: null,
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "y",
+        specRef: null,
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs).toHaveLength(2);
@@ -72,10 +88,26 @@ describe("groupTasksBySpec", () => {
 
   it("混合:有 specRef 的归并、null 的各自独立", () => {
     const tasks = [
-      makeTask({ id: "s1", specRef: "specs/shared.md", createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "s2", specRef: "specs/shared.md", createdAt: "2026-08-01T03:00:00.000Z" }),
-      makeTask({ id: "n1", specRef: null, createdAt: "2026-08-01T01:00:00.000Z" }),
-      makeTask({ id: "n2", specRef: null, createdAt: "2026-08-01T02:00:00.000Z" }),
+      makeTask({
+        id: "s1",
+        specRef: "specs/shared.md",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "s2",
+        specRef: "specs/shared.md",
+        createdAt: "2026-08-01T03:00:00.000Z",
+      }),
+      makeTask({
+        id: "n1",
+        specRef: null,
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+      makeTask({
+        id: "n2",
+        specRef: null,
+        createdAt: "2026-08-01T02:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs).toHaveLength(3);
@@ -129,9 +161,21 @@ describe("groupTasksBySpec", () => {
 
   it("分组结果按最新任务 createdAt 正序排列(最新的在数组最后)", () => {
     const tasks = [
-      makeTask({ id: "early", specRef: "specs/early.md", createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "late", specRef: "specs/late.md", createdAt: "2026-08-05T00:00:00.000Z" }),
-      makeTask({ id: "mid", specRef: "specs/mid.md", createdAt: "2026-08-03T00:00:00.000Z" }),
+      makeTask({
+        id: "early",
+        specRef: "specs/early.md",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "late",
+        specRef: "specs/late.md",
+        createdAt: "2026-08-05T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "mid",
+        specRef: "specs/mid.md",
+        createdAt: "2026-08-03T00:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs.map((r) => r.id)).toEqual([
@@ -143,9 +187,24 @@ describe("groupTasksBySpec", () => {
 
   it("steps 占位:步数 = 任务数,每步状态套用对应任务状态", () => {
     const tasks = [
-      makeTask({ id: "a", specRef: "specs/r.md", status: "done", createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "b", specRef: "specs/r.md", status: "running", createdAt: "2026-08-01T01:00:00.000Z" }),
-      makeTask({ id: "c", specRef: "specs/r.md", status: "failed", createdAt: "2026-08-01T02:00:00.000Z" }),
+      makeTask({
+        id: "a",
+        specRef: "specs/r.md",
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "b",
+        specRef: "specs/r.md",
+        status: "running",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+      makeTask({
+        id: "c",
+        specRef: "specs/r.md",
+        status: "failed",
+        createdAt: "2026-08-01T02:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs[0].steps).toEqual(["done", "running", "failed"]);
@@ -153,9 +212,24 @@ describe("groupTasksBySpec", () => {
 
   it("running 任务映射到 running 步骤(不再笼统归进 pending)", () => {
     const tasks = [
-      makeTask({ id: "q", specRef: "specs/r.md", status: "queued", createdAt: "2026-08-01T00:00:00.000Z" }),
-      makeTask({ id: "r", specRef: "specs/r.md", status: "running", createdAt: "2026-08-01T01:00:00.000Z" }),
-      makeTask({ id: "c", specRef: "specs/r.md", status: "cancelled", createdAt: "2026-08-01T02:00:00.000Z" }),
+      makeTask({
+        id: "q",
+        specRef: "specs/r.md",
+        status: "queued",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "r",
+        specRef: "specs/r.md",
+        status: "running",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+      makeTask({
+        id: "c",
+        specRef: "specs/r.md",
+        status: "cancelled",
+        createdAt: "2026-08-01T02:00:00.000Z",
+      }),
     ];
     const reqs = groupTasksBySpec(tasks);
     expect(reqs[0].steps).toEqual(["pending", "running", "pending"]);
@@ -181,21 +255,40 @@ describe("stepStatusFromTask (占位算法)", () => {
 describe("deriveLabel", () => {
   it("有 specRef:从路径提取文件名去掉扩展名", () => {
     expect(
-      deriveLabel([
-        makeTask({ id: "t", specRef: "specs/auth/login.md" }),
-      ]),
+      deriveLabel([makeTask({ id: "t", specRef: "specs/auth/login.md" })]),
     ).toBe("login");
     expect(
       deriveLabel([makeTask({ id: "t", specRef: "specs/auth/login" })]),
     ).toBe("login");
-    expect(
-      deriveLabel([makeTask({ id: "t", specRef: "login.MD" })]),
-    ).toBe("login");
+    expect(deriveLabel([makeTask({ id: "t", specRef: "login.MD" })])).toBe(
+      "login",
+    );
   });
 
   it("specRef 为 null:用最早任务的 id 兜底", () => {
+    expect(deriveLabel([makeTask({ id: "solo-task", specRef: null })])).toBe(
+      "solo-task",
+    );
+  });
+
+  it("优先使用任务书第一行的人类可读标题,并回落 specRef", () => {
     expect(
-      deriveLabel([makeTask({ id: "solo-task", specRef: null })]),
-    ).toBe("solo-task");
+      deriveLabel([
+        makeTask({
+          id: "titled",
+          specRef: "specs/internal-key.md",
+          brief: "# 修复时间线可读性\n\n## 关联规范",
+        }),
+      ]),
+    ).toBe("修复时间线可读性");
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "fallback",
+          specRef: "specs/internal-key.md",
+          brief: "## 关联规范\n正文",
+        }),
+      ]),
+    ).toBe("internal-key");
   });
 });

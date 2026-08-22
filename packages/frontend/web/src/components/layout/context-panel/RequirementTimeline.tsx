@@ -22,7 +22,10 @@
 import { useMemo, useState } from "react";
 import { LiveOutput } from "@/components/live-output";
 import { lastNonEmptyLine } from "@/lib/output-buffer";
-import { formatMessageTime, TASK_STATUS_CLASSES } from "@/pages/app/groups/messages/lib";
+import {
+  formatMessageTime,
+  TASK_STATUS_CLASSES,
+} from "@/pages/app/groups/messages/lib";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import { TASK_UNCONFIRMED_CLASSES } from "@/pages/app/groups/messages/TaskPanel";
 import {
@@ -129,8 +132,10 @@ export default function RequirementTimeline({
     return null;
   }
 
-  const renderMessage = (event: Extract<TimelineEvent, { kind: "message" }>) => {
-    const { message, sender, target, softDeleted } = event;
+  const renderMessage = (
+    event: Extract<TimelineEvent, { kind: "message" }>,
+  ) => {
+    const { message, sender, target, softDeleted, taskStatus } = event;
     const role = roleFromMemberRoles(sender?.roles) ?? "executor";
     const longBody = message.body.length > MESSAGE_FOLD_THRESHOLD;
     const preview = longBody
@@ -183,6 +188,15 @@ export default function RequirementTimeline({
               {preview}
             </p>
           )}
+          {taskStatus && (
+            <span
+              data-testid={`requirement-timeline-task-status-${message.id}`}
+              className="mt-1 inline-flex rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+            >
+              任务 {taskStatus.status}
+              {taskStatus.retries > 0 ? ` · 重试 ${taskStatus.retries} 次` : ""}
+            </span>
+          )}
           {!softDeleted && longBody && (
             <button
               type="button"
@@ -223,8 +237,17 @@ export default function RequirementTimeline({
     const hash = readText(task.diffSummary, "hash");
     const tests = readText(task.diffSummary, "tests");
     const todo = readText(task.diffSummary, "todo");
-    const outputTail = readText(task.diffSummary, "outputTail");
+    const outputTail =
+      readText(task.diffSummary, "outputTail") ?? task.outputTail ?? null;
     const errorText = readText(task.diffSummary, "error");
+    const retries =
+      typeof task.diffSummary?.retries === "number"
+        ? task.diffSummary.retries
+        : 0;
+    const summaryLong = summary !== null && summary.length > FOLD_THRESHOLD;
+    const summaryPreview = summaryLong
+      ? `${summary?.slice(0, FOLD_THRESHOLD)}…`
+      : summary;
     // 实时输出:WS 缓冲优先,includeOutput/diffSummary.outputTail 兜底(与
     // TaskPanel.tsx:277 同一优先级);展开态复用共享 LiveOutput 终端块。
     const outputText = liveOutputs[task.id] ?? outputTail ?? "";
@@ -235,7 +258,8 @@ export default function RequirementTimeline({
       task.status === "running" ? lastNonEmptyLine(outputText) : null;
     const testsLong = tests !== null && tests.length > FOLD_THRESHOLD;
     const todoLong = todo !== null && todo.length > FOLD_THRESHOLD;
-    const foldable = testsLong || todoLong || outputText.length > 0;
+    const foldable =
+      summaryLong || testsLong || todoLong || outputText.length > 0;
     const expanded = expandedIds.has(task.id);
     // 失败任务:失败条(醒目但不喧宾夺主,颜色走 --status-* token);结果未确认
     // (failed + diffSummary.unconfirmed)用琥珀色,与任务面板的语义一致。
@@ -259,7 +283,7 @@ export default function RequirementTimeline({
         <div className="min-w-0 flex-1 rounded-xl border bg-card px-3 py-2">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-xs font-medium">
-              {task.executorKey ?? "—"}
+              {executorMember?.name ?? task.executorKey ?? "执行者"}
             </span>
             <span
               data-testid={`requirement-timeline-time-${task.id}`}
@@ -272,7 +296,9 @@ export default function RequirementTimeline({
             <p
               data-testid={`requirement-timeline-failed-${task.id}`}
               className={`mt-1.5 rounded-md border px-2 py-1 text-xs ${
-                unconfirmed ? TASK_UNCONFIRMED_CLASSES : TASK_STATUS_CLASSES.failed
+                unconfirmed
+                  ? TASK_UNCONFIRMED_CLASSES
+                  : TASK_STATUS_CLASSES.failed
               }`}
             >
               {unconfirmed ? "结果未确认" : "任务失败"}
@@ -280,7 +306,7 @@ export default function RequirementTimeline({
             </p>
           )}
           <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-            {summary ?? (
+            {summaryPreview ?? (
               <span className="text-muted-foreground">暂无汇报内容</span>
             )}
           </p>
@@ -294,13 +320,18 @@ export default function RequirementTimeline({
               data-testid={`requirement-timeline-tests-${task.id}`}
               className="mt-1 text-xs text-muted-foreground"
             >
-              测试{" "}
-              {testsLong ? `${tests.slice(0, FOLD_THRESHOLD)}…` : tests}
+              测试 {testsLong ? `${tests.slice(0, FOLD_THRESHOLD)}…` : tests}
             </p>
           )}
           {todo && !todoLong && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              遗留 {todo}
+            <p className="mt-1 text-xs text-muted-foreground">遗留 {todo}</p>
+          )}
+          {retries > 0 && (
+            <p
+              data-testid={`requirement-timeline-retries-${task.id}`}
+              className="mt-1 text-xs text-status-unconfirmed"
+            >
+              重试 {retries} 次
             </p>
           )}
           {/* 折叠态实时输出预览:最后一非空行,单行省略;无输出不占位。 */}
@@ -329,13 +360,18 @@ export default function RequirementTimeline({
               data-testid={`requirement-timeline-detail-${task.id}`}
               className="mt-1.5 space-y-1.5 border-t pt-1.5"
             >
+              {summaryLong && summary && (
+                <p className="whitespace-pre-wrap break-words text-sm text-foreground/75">
+                  {summary}
+                </p>
+              )}
               {testsLong && tests && (
-                <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                <p className="whitespace-pre-wrap break-words text-xs text-foreground/70">
                   测试 {tests}
                 </p>
               )}
               {todoLong && todo && (
-                <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                <p className="whitespace-pre-wrap break-words text-xs text-foreground/70">
                   遗留 {todo}
                 </p>
               )}

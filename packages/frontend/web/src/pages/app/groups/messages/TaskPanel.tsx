@@ -12,8 +12,8 @@
  */
 
 import type { ReactElement } from "react";
-import { t } from "@/lib/i18n";
 import { LiveOutput } from "@/components/live-output";
+import { t } from "@/lib/i18n";
 import { ControlButton } from "./control-button";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
 import type { Member, MessageItem } from "./types";
@@ -36,6 +36,8 @@ export type TaskItem = {
   id: string;
   groupId: string;
   messageId: string;
+  /** 任务书原文;第一行是面向人的任务名。 */
+  brief?: string | null;
   executorParticipantId: string;
   executorKey: string | null;
   status: TaskStatus;

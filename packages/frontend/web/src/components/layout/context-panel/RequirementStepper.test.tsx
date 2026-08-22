@@ -29,6 +29,18 @@ describe("RequirementStepper 精细阶梯状态条 (UI-04b-1)", () => {
     }
   });
 
+  it("使用执行者与任务名标签,不暴露步骤编号", () => {
+    render(
+      <RequirementStepper
+        steps={["done", "running"]}
+        labels={["atomcode · 修复时间线", "协调者 · L2 验收"]}
+      />,
+    );
+    expect(screen.getByText("atomcode · 修复时间线")).toBeInTheDocument();
+    expect(screen.getByText("协调者 · L2 验收")).toBeInTheDocument();
+    expect(screen.queryByText("步骤 1")).not.toBeInTheDocument();
+  });
+
   it("完成态:实心圆(--status-done)+ 白色对勾 stroke path(圆头加粗)", () => {
     render(<RequirementStepper steps={["done"]} />);
     const svg = iconSvg(0);

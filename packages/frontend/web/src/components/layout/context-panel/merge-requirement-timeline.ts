@@ -20,7 +20,10 @@
  *  不满足以上两档的消息不显示(宁缺毋滥,不把无关对话混进需求时间线)。
  */
 
-import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
+import type {
+  TaskItem,
+  TaskStatus,
+} from "@/pages/app/groups/messages/TaskPanel";
 import {
   DELETED_MESSAGE_BODY,
   type Member,
@@ -43,6 +46,8 @@ export type TimelineEvent =
       sender: Member | null;
       target: TimelineTarget | null;
       softDeleted: boolean;
+      /** 纯 task_status 隐藏后挂回触发消息的状态标记。 */
+      taskStatus: { status: TaskStatus; retries: number } | null;
       /** 消息发生时间。 */
       timestamp: string;
     }
@@ -52,6 +57,20 @@ export type TimelineEvent =
       /** 汇报落库时刻(updatedAt),缺失回退 createdAt —— 与现有卡片一致。 */
       timestamp: string;
     };
+
+function isSkillSystemMessage(message: MessageItem): boolean {
+  return (
+    /skill/i.test(message.body) &&
+    /(请先.*安装|先安装|已安装|install)/i.test(message.body)
+  );
+}
+
+function isPureTaskStatus(message: MessageItem): boolean {
+  return (
+    message.contentType === "task_status" &&
+    /^(?:🚀|📋|↻|🛑|⚠️)/u.test(message.body.trim())
+  );
+}
 
 /** 解析消息的定向对象(broadcast / 无 audienceRef → null)。 */
 function resolveTarget(
@@ -88,17 +107,19 @@ export function mergeRequirementTimeline(
 
   const memberById = new Map(members.map((m) => [m.participantId, m]));
   const messageById = new Map(messages.map((m) => [m.id, m]));
+  const taskByMessageId = new Map(tasks.map((task) => [task.messageId, task]));
 
   // 第一档:本需求任务的触发消息 id 集合(任务书/指令消息)。
   const triggerIds = new Set(
-    tasks
-      .map((t) => t.messageId)
-      .filter((id): id is string => Boolean(id)),
+    tasks.map((t) => t.messageId).filter((id): id is string => Boolean(id)),
   );
   // 回复子树扩散:parentId 链最终可达某条触发消息 → 属于同一会话。
   // 逐条向上走 parentId(带 visited 防环),命中触发消息即归属。
   const linkedIds = new Set<string>();
   for (const message of messages) {
+    if (isSkillSystemMessage(message) || isPureTaskStatus(message)) {
+      continue;
+    }
     let cursor: string | null = message.parentId;
     const visited = new Set<string>();
     while (cursor && !visited.has(cursor)) {
@@ -128,8 +149,10 @@ export function mergeRequirementTimeline(
     });
   }
   for (const message of messages) {
-    const linked =
-      linkedIds.has(message.id) || triggerIds.has(message.id);
+    if (isSkillSystemMessage(message) || isPureTaskStatus(message)) {
+      continue;
+    }
+    const linked = linkedIds.has(message.id) || triggerIds.has(message.id);
     const inWindow =
       !linked &&
       Date.parse(message.createdAt) >= windowStart &&
@@ -144,13 +167,20 @@ export function mergeRequirementTimeline(
       target: resolveTarget(message, memberById),
       softDeleted:
         message.deleted === true || message.body === DELETED_MESSAGE_BODY,
+      taskStatus: (() => {
+        const task = taskByMessageId.get(message.id);
+        if (!task) return null;
+        const retries =
+          typeof task.diffSummary?.retries === "number"
+            ? task.diffSummary.retries
+            : 0;
+        return { status: task.status, retries };
+      })(),
       timestamp: message.createdAt,
     });
   }
 
   // 按时间正序;同一时刻的稳定排序(保持上面的插入顺序:任务先于消息)。
-  events.sort(
-    (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
-  );
+  events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   return events;
 }

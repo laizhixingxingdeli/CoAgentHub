@@ -248,9 +248,78 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
   });
 });
 
+describe("时间线可读性与系统状态过滤", () => {
+  const makeMessage = (
+    id: string,
+    body: string,
+    overrides: Partial<MessageItem> = {},
+  ): MessageItem => ({
+    id,
+    groupId: "group-1",
+    senderId: "participant-1",
+    parentId: null,
+    audience: "broadcast",
+    audienceRef: null,
+    body,
+    contentType: "text/plain",
+    fileRef: null,
+    depth: 0,
+    createdAt: "2026-08-01T09:30:00.000Z",
+    ...overrides,
+  });
+
+  it("隐藏 skill 安装提示与纯状态 task_status,并把状态挂回触发消息", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-status",
+            status: "running",
+            messageId: "trigger",
+            diffSummary: { retries: 2 },
+          }),
+        ]}
+        messages={[
+          makeMessage("trigger", "任务书"),
+          makeMessage("skill", "请先安装 coagenthub-executor skill"),
+          makeMessage("pure-status", "🚀 开始执行:任务书", {
+            contentType: "task_status",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByTestId("requirement-timeline-item-skill")).toBeNull();
+    expect(
+      screen.queryByTestId("requirement-timeline-item-pure-status"),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("requirement-timeline-task-status-trigger"),
+    ).toHaveTextContent("重试 2 次");
+  });
+
+  it("带汇报内容的 task_status 仍保留", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-report", messageId: "trigger" })]}
+        messages={[
+          makeMessage("trigger", "任务书"),
+          makeMessage("report", "✅ 任务完成: 已通过测试", {
+            contentType: "task_status",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-item-report"),
+    ).toBeInTheDocument();
+  });
+});
+
 /** 构造最小可用的 MessageItem(消息卡片渲染用)。默认 createdAt 落在
  * makeTask 默认窗口 [09:00, 10:00] 内,避免被归属过滤。 */
-function makeMessage(overrides: Partial<MessageItem> & { id: string }): MessageItem {
+function makeMessage(
+  overrides: Partial<MessageItem> & { id: string },
+): MessageItem {
   return {
     groupId: "group-1",
     senderId: "participant-coord",
@@ -333,7 +402,9 @@ describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
     expect(
       screen.getByTestId("requirement-timeline-item-m-to-role"),
     ).toHaveTextContent("协调者");
-    expect(screen.getByText("spec 已冻结。这批只做服务端接线。")).toBeInTheDocument();
+    expect(
+      screen.getByText("spec 已冻结。这批只做服务端接线。"),
+    ).toBeInTheDocument();
   });
 
   it("消息卡片:发送者角色色读 Member.roles(检视者 → bg-role-reviewer)", () => {
@@ -361,14 +432,18 @@ describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
         tasks={[makeTask({ id: "t-1" })]}
         members={MOCK_MEMBERS}
         messages={[
-          makeMessage({ id: "m-unknown", senderId: "participant-xyz", body: "你好" }),
+          makeMessage({
+            id: "m-unknown",
+            senderId: "participant-xyz",
+            body: "你好",
+          }),
         ]}
       />,
     );
     expect(screen.getByText("particip")).toBeInTheDocument();
-    expect(screen.getByTestId("requirement-timeline-avatar-m-unknown")).toHaveClass(
-      "bg-role-executor",
-    );
+    expect(
+      screen.getByTestId("requirement-timeline-avatar-m-unknown"),
+    ).toHaveClass("bg-role-executor");
   });
 
   it("软删除消息渲染为占位,不当作正常消息展示正文", () => {
@@ -496,7 +571,10 @@ describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
           makeTask({
             id: "t-fail",
             status: "failed",
-            diffSummary: { summary: "执行失败", error: "spawn reviewer ENOENT" },
+            diffSummary: {
+              summary: "执行失败",
+              error: "spawn reviewer ENOENT",
+            },
           }),
         ]}
       />,
