@@ -2,6 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
+import { resolveBin } from "@server/lib/exec-bin";
 import {
   addExecutorConfig,
   effectiveExecutors,
@@ -189,6 +190,35 @@ const app2 = app
           builtin: isBuiltinExecutorKey(ex.key),
         })),
       );
+    },
+  )
+  .get(
+    "/check-bin",
+    describeRoute({
+      description:
+        "Probe whether a command name (resolved via the server's PATH) or an absolute path points at an executable file on the server; read-only, never executes the input",
+      responses: {
+        200: {
+          description: "Probe result { found, resolvedPath }",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    // 只读探测:GET + query 参数,不落库、不执行任何命令。
+    zValidator(
+      "query",
+      z.object({
+        bin: z
+          .string()
+          .min(1, "bin 不能为空")
+          .max(200, "bin 长度不能超过 200")
+          .refine((v) => !v.includes("\0"), "bin 不能包含 null 字节"),
+      }),
+    ),
+    async (c) => {
+      const { bin } = c.req.valid("query");
+      const resolvedPath = resolveBin(bin);
+      return c.json({ found: resolvedPath !== null, resolvedPath });
     },
   )
   .delete(

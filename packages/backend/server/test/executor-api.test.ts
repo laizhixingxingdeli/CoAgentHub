@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 
 /**
@@ -571,5 +571,127 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const listRes = await app.request("/api/executors");
     const list = (await listRes.json()) as Array<Record<string, unknown>>;
     expect(list.find((x) => x.key === "patch-prompt")!.prompt).toBe("");
+  });
+});
+
+describe("GET /api/executors/check-bin(接入表单 bin 即时校验)", () => {
+  // 独立 fixture:文件顶部的 fakeDir 已由上一个 describe 的 afterAll 清理,
+  // 这里自建自清;同时把 probeDir 临时并入 PATH,确定性覆盖「命令名命中」。
+  const probeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-checkbin-"));
+  const probeCmd = path.join(probeDir, "probe-cmd");
+  const originalPath = process.env.PATH;
+
+  beforeAll(() => {
+    writeFileSync(probeCmd, "#!/bin/sh\nexit 0\n");
+    chmodSync(probeCmd, 0o755);
+    // 存在但无执行位的普通文件:探测应报 found=false(锁定 isFile+X_OK 语义)。
+    writeFileSync(path.join(probeDir, "probe-noexec"), "not executable\n");
+    chmodSync(path.join(probeDir, "probe-noexec"), 0o644);
+    process.env.PATH = `${probeDir}${path.delimiter}${originalPath ?? ""}`;
+  });
+
+  afterAll(() => {
+    process.env.PATH = originalPath;
+    rmSync(probeDir, { recursive: true, force: true });
+  });
+
+  it("PATH 里的命令名 → found=true 且 resolvedPath 为绝对路径", async () => {
+    const res = await app.request("/api/executors/check-bin?bin=probe-cmd");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(true);
+    expect(body.resolvedPath).toBe(probeCmd);
+  });
+
+  it("不存在的命令名 → found=false, resolvedPath=null", async () => {
+    const res = await app.request(
+      "/api/executors/check-bin?bin=no-such-cmd-9f3a",
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(false);
+    expect(body.resolvedPath).toBeNull();
+  });
+
+  it("存在的绝对路径 → found=true", async () => {
+    const res = await app.request(
+      `/api/executors/check-bin?bin=${encodeURIComponent(probeCmd)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(true);
+    expect(body.resolvedPath).toBe(probeCmd);
+  });
+
+  it("不存在的绝对路径 → found=false, resolvedPath=null", async () => {
+    const res = await app.request(
+      "/api/executors/check-bin?bin=%2Fno%2Fsuch%2Fpath%2Fxyz-9f3a",
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(false);
+    expect(body.resolvedPath).toBeNull();
+  });
+
+  it("存在的普通文件但无执行位 → found=false", async () => {
+    const res = await app.request(
+      `/api/executors/check-bin?bin=${encodeURIComponent(
+        path.join(probeDir, "probe-noexec"),
+      )}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(false);
+    expect(body.resolvedPath).toBeNull();
+  });
+
+  it("绝对路径指向目录 → found=false", async () => {
+    const res = await app.request(
+      `/api/executors/check-bin?bin=${encodeURIComponent(probeDir)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      found: boolean;
+      resolvedPath: string | null;
+    };
+    expect(body.found).toBe(false);
+    expect(body.resolvedPath).toBeNull();
+  });
+
+  it("bin 为空字符串 → 400", async () => {
+    const res = await app.request("/api/executors/check-bin?bin=");
+    expect(res.status).toBe(400);
+  });
+
+  it("缺 bin 参数 → 400", async () => {
+    const res = await app.request("/api/executors/check-bin");
+    expect(res.status).toBe(400);
+  });
+
+  it("bin 超过 200 字符 → 400", async () => {
+    const res = await app.request(
+      `/api/executors/check-bin?bin=${"a".repeat(201)}`,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("bin 含 null 字节(%00)→ 400", async () => {
+    const res = await app.request("/api/executors/check-bin?bin=a%00b");
+    expect(res.status).toBe(400);
   });
 });
