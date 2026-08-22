@@ -123,15 +123,11 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     bin: "codex",
     label: "codex",
     // Headless Codex task:允许改工作区,不等待审批,每个 task 使用新上下文。
-    args: [
-      "exec",
-      "--sandbox",
-      "workspace-write",
-      "--ask-for-approval",
-      "never",
-      "--ephemeral",
-      "{ticket}",
-    ],
+    // --approve-for-me 自带 workspace-write 沙箱,**不能再叠 --sandbox**
+    // (叠了报 "cannot be used with")。旧写法 `--sandbox workspace-write
+    // --ask-for-approval never` 在 codex-cli 0.149.0 已失效:--ask-for-approval
+    // 这个参数不存在了,spawn 直接报 unexpected argument。实测于 0.149.0。
+    args: ["exec", "--approve-for-me", "--ephemeral", "{ticket}"],
     // 当前 runner 以共享工作区执行,避免同一 Codex participant 并发改文件。
     maxConcurrency: 1,
   },

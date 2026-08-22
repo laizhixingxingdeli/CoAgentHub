@@ -125,15 +125,9 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       bin: "codex",
       builtin: true,
       maxConcurrency: 1,
-      args: [
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "never",
-        "--ephemeral",
-        "{ticket}",
-      ],
+      // --approve-for-me 自带 workspace-write 沙箱,不能再叠 --sandbox;
+      // 旧写法的 --ask-for-approval 在 codex-cli 0.149.0 已不存在。
+      args: ["exec", "--approve-for-me", "--ephemeral", "{ticket}"],
     });
 
     const added = list.find((x) => x.key === "cli-tester");
