@@ -79,7 +79,7 @@ app
     "/",
     describeRoute({
       description:
-        "List groups with member counts (soft-deleted groups are always excluded); supports ?limit=&offset= pagination and returns { items, total }",
+        "List groups with member counts (soft-deleted groups are always excluded); supports ?participantId= membership filtering, ?limit=&offset= pagination, and returns { items, total }",
       responses: {
         200: {
           description: "Successful response",
@@ -91,18 +91,20 @@ app
       "query",
       z.object({
         status: z.enum(["active", "archived"]).optional(),
+        // 可选的参与方范围过滤:只返回 group_members 中属于该参与方的群组。
+        participantId: z.string().uuid().optional(),
         // 群列表搜索(enhancement):标题关键词,LIKE 通配符(%、_)按字面转义;
         // 空串视为无搜索。上限 100 字符防止超长模式串。
         q: z.string().max(100).optional(),
         // 分页:limit 缺省时不截断(返回全量);提供时上限 100、非法值回退默认 20。
-        // offset 缺省为 0,非法值回退 0。total 为满足 status/q 过滤条件的总数。
+        // offset 缺省为 0,非法值回退 0。total 为满足所有过滤条件的总数。
         limit: z.coerce.number().int().min(1).max(100).catch(20).optional(),
         offset: z.coerce.number().int().min(0).catch(0).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
-      const { status, q, limit, offset } = c.req.valid("query");
+      const { status, participantId, q, limit, offset } = c.req.valid("query");
 
       const conditions = [
         // Soft-deleted groups are hidden from every list: an explicit
@@ -121,9 +123,21 @@ app
         const escaped = q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
         conditions.push(ilike(groupsTable.title, `%${escaped}%`));
       }
+      if (participantId) {
+        // Keep this separate from the member-count LEFT JOIN below. Filtering
+        // that join would make memberCount report only the requested member.
+        conditions.push(
+          sql`exists (
+            select 1
+            from ${groupMemberTable}
+            where ${groupMemberTable.groupId} = ${groupsTable.id}
+              and ${groupMemberTable.participantId} = ${participantId}
+          )`,
+        );
+      }
 
-      // total 只受 status/q 过滤影响,与分页无关:独立计数(不带 join,
-      // 否则成员 join 会让带多成员的群被重复计数)。
+      // total 只受 status/q/participantId 过滤影响,与分页无关:独立计数
+      // (不带 join,否则成员 join 会让带多成员的群被重复计数)。
       const [{ total }] = await db
         .select({ total: count() })
         .from(groupsTable)

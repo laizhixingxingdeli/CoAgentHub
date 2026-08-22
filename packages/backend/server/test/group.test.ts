@@ -235,6 +235,98 @@ describe("群组与成员 API", () => {
       expect(item?.memberCount).toBe(1); // creator only
     });
 
+    it("?participantId 只返回该参与方所属的群组并保留完整成员数", async () => {
+      const { id: memberId } = await registerParticipant({
+        name: "group-list-member",
+      });
+      const { id: otherId } = await registerParticipant({
+        name: "group-list-other",
+      });
+      const memberGroup = await createGroup(otherId, "成员所在群");
+      const otherGroup = await createGroup(otherId, "仅其他参与方所在群");
+
+      const addMemberRes = await app.request(
+        `/api/groups/${memberGroup.id}/members`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": otherId,
+          },
+          body: JSON.stringify({
+            participantId: memberId,
+            roles: ["executor"],
+          }),
+        },
+      );
+      expect(addMemberRes.status).toBe(200);
+
+      const res = await app.request(`/api/groups?participantId=${memberId}`, {
+        headers: { "X-Participant-Id": memberId },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string; memberCount: number }>;
+        total: number;
+      };
+      expect(body.items.map((group) => group.id)).toContain(memberGroup.id);
+      expect(body.items.map((group) => group.id)).not.toContain(otherGroup.id);
+      expect(
+        body.items.find((group) => group.id === memberGroup.id)?.memberCount,
+      ).toBe(2);
+      expect(body.total).toBe(1);
+    });
+
+    it("不传 participantId 时仍返回不属于请求参与方的群组", async () => {
+      const { id: ownerId } = await registerParticipant({
+        name: "group-list-unfiltered-owner",
+      });
+      const { id: outsiderId } = await registerParticipant({
+        name: "group-list-unfiltered-outsider",
+      });
+      const group = await createGroup(ownerId, "无参与方过滤群");
+
+      const res = await app.request("/api/groups", {
+        headers: { "X-Participant-Id": outsiderId },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string }>;
+      };
+      expect(body.items.map((item) => item.id)).toContain(group.id);
+    });
+
+    it("participantId 可与 status、q、limit、offset 组合", async () => {
+      const { id: memberId } = await registerParticipant({
+        name: "group-list-combination-member",
+      });
+      const { id: otherId } = await registerParticipant({
+        name: "group-list-combination-other",
+      });
+      const first = await createGroup(memberId, "参与方筛选 alpha 一");
+      const second = await createGroup(memberId, "参与方筛选 alpha 二");
+      const archived = await createGroup(memberId, "参与方筛选 alpha 归档");
+      await createGroup(otherId, "参与方筛选 alpha 其他");
+      await app.request(`/api/groups/${archived.id}/archive`, {
+        method: "POST",
+        headers: { "X-Participant-Id": memberId },
+      });
+
+      const res = await app.request(
+        `/api/groups?participantId=${memberId}&status=active&q=${encodeURIComponent("参与方筛选 alpha")}&limit=1&offset=1`,
+        { headers: { "X-Participant-Id": memberId } },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<{ id: string; memberCount: number }>;
+        total: number;
+      };
+      expect(body.total).toBe(2);
+      expect(body.items).toHaveLength(1);
+      expect([first.id, second.id]).toContain(body.items[0]?.id);
+      expect(body.items[0]?.memberCount).toBe(1);
+    });
+
     it("?status=archived 只返回已归档群组", async () => {
       const { id } = await registerParticipant({
         name: "c2",
