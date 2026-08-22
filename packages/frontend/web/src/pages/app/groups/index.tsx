@@ -423,7 +423,7 @@ export default function GroupsPage() {
                       size="icon"
                       aria-label={t("groups.members.manage")}
                       title={t("groups.members.manage")}
-                      onClick={() => navigate(`/groups/${group.id}/members`)}
+                      onClick={() => navigate(`/groups/${group.id}/settings`)}
                     >
                       <Users />
                     </Button>

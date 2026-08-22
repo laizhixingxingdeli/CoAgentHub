@@ -43,8 +43,8 @@ function truncatePreview(body: string): string {
  */
 export function ConversationList() {
   const [location, navigate] = useLocation();
-  // Match /groups/:id and its subroutes (/groups/:id/members) so the highlight
-  // and activeGroupId stay on the group while its members page is open.
+  // Match /groups/:id and its subroutes (/groups/:id/settings) so the highlight
+  // and activeGroupId stay on the group while settings are open.
   const routeGroupId = location.match(/^\/groups\/([^/]+)/)?.[1] ?? null;
   const { unread, lastMessageByGroup, markRead, setActiveGroupId } =
     useUnread();

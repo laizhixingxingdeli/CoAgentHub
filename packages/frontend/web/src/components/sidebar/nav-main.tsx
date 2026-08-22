@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/sidebar";
 
 /** Whether the nav item covers the current route. /groups 及其子路由
- *  (/groups/:id、/groups/:id/members)统一高亮「群组」,其余项精确匹配。 */
+ *  (/groups/:id、/groups/:id/settings)统一高亮「群组」,其余项精确匹配。 */
 function itemIsActive(url: string, location: string): boolean {
   return location === url || location.startsWith(`${url}/`);
 }

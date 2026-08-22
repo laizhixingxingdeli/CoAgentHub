@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFetchMock,
@@ -87,7 +87,7 @@ describe("路由", () => {
     ).toBeInTheDocument();
   });
 
-  it("/groups/:id 渲染群组页:主区需求工作区,消息流水在右栏「消息」Tab", async () => {
+  it("/groups/:id 渲染群组页:主区需求工作区且有设置入口", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
@@ -95,31 +95,33 @@ describe("路由", () => {
     expect(await screen.findByText("群组消息流")).toBeInTheDocument();
     // 主区:需求工作区(无任务 → TaskPanel 空态)。
     expect(await screen.findByTestId("requirement-workspace")).toBeInTheDocument();
-    // 消息流水已搬进右栏「消息」Tab:打开后可见空态(无输入入口)。
-    fireEvent.click(screen.getByTestId("context-tab-messages"));
-    expect(
-      await screen.findByText("暂无消息,发送第一条吧"),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "群设置" })).toHaveAttribute(
+      "href",
+      "/groups/group-1/settings",
+    );
   });
 
-  it("/groups/:id 群相关路由带右栏上下文面板(三栏)", async () => {
+  it("/groups/:id 不再渲染右栏上下文面板", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
-    expect(await screen.findByTestId("context-panel")).toBeInTheDocument();
-    // 右栏 Tab:成员与分工 / 任务 / 消息 / 项目
-    expect(screen.getByTestId("context-tab-members")).toBeInTheDocument();
-    expect(screen.getByTestId("context-tab-tasks")).toBeInTheDocument();
-    expect(screen.getByTestId("context-tab-messages")).toBeInTheDocument();
-    expect(screen.getByTestId("context-tab-project")).toBeInTheDocument();
+    expect(await screen.findByTestId("requirement-workspace")).toBeInTheDocument();
+    expect(screen.queryByTestId("context-panel")).toBeNull();
   });
 
-  it("/groups/:id/members 渲染群组成员管理页", async () => {
+  it("/groups/:id/settings 渲染群组设置与成员管理页", async () => {
+    vi.stubGlobal("fetch", routerFetchMock());
+    renderWithProviders(<App />, "/groups/group-1/settings");
+
+    expect(await screen.findByText("群设置")).toBeInTheDocument();
+    expect(await screen.findByText("返回消息流")).toBeInTheDocument();
+  });
+
+  it("/groups/:id/members 重定向到设置页", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1/members");
 
-    expect(await screen.findByText("群组成员")).toBeInTheDocument();
-    expect(await screen.findByText("返回消息流")).toBeInTheDocument();
+    expect(await screen.findByText("群设置")).toBeInTheDocument();
   });
 
   it("未知路径渲染 404 fallback", async () => {

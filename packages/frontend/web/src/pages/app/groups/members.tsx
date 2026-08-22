@@ -1,6 +1,8 @@
 import {
+  Archive,
   ArrowLeft,
   PenLine,
+  RotateCcw,
   UserCog,
   UserMinus,
   UserPlus,
@@ -8,8 +10,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useRoute } from "wouter";
-import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
@@ -53,8 +55,9 @@ type ParticipantOption = {
  * with roles picked from the preset catalog. Initial version — plain fetch.
  */
 export default function GroupMembersPage() {
-  const [, params] = useRoute("/groups/:id/members");
-  const groupId = params?.id;
+  const [, settingsParams] = useRoute("/groups/:id/settings");
+  const [, membersParams] = useRoute("/groups/:id/members");
+  const groupId = settingsParams?.id ?? membersParams?.id;
 
   const [members, setMembers] = useState<Member[]>([]);
   const [participants, setParticipants] = useState<ParticipantOption[]>([]);
@@ -70,6 +73,10 @@ export default function GroupMembersPage() {
   const [groupStatus, setGroupStatus] = useState<
     "active" | "archived" | "deleted" | null
   >(null);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [projectPathInput, setProjectPathInput] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
   const [editingParticipantId, setEditingParticipantId] = useState<
     string | null
   >(null);
@@ -138,8 +145,12 @@ export default function GroupMembersPage() {
       const group = (await res.json()) as {
         createdBy: string;
         status: string;
+        title?: string;
+        projectPath?: string | null;
       };
       setCreatedBy(group.createdBy);
+      setTitleDraft(group.title ?? "");
+      setProjectPath(group.projectPath ?? null);
       setGroupStatus(
         group.status === "active" || group.status === "archived"
           ? group.status
@@ -159,6 +170,97 @@ export default function GroupMembersPage() {
   // 归档/软删群只读:非 active 群禁止成员写操作(添加/编辑/移除)。
   const readOnly = groupStatus !== null && groupStatus !== "active";
   const readOnlyHint = readOnly ? t("members.readOnly") : undefined;
+
+  const patchGroup = async (body: Record<string, unknown>) => {
+    if (!groupId || savingSettings) {
+      return;
+    }
+    setSavingSettings(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/groups/${groupId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...participantIdentityHeaders(),
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const bodyJson = await res.json().catch(() => null);
+        throw new Error(
+          `HTTP ${res.status}${bodyJson?.message ? `: ${bodyJson.message}` : ""}`,
+        );
+      }
+      await loadGroup();
+      return await res.json();
+    } catch (e) {
+      setError(`设置保存失败: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleSaveTitle = async () => {
+    const title = titleDraft.trim();
+    if (!title) {
+      return;
+    }
+    const updated = await patchGroup({ title });
+    if (updated) {
+      setMessage("群名称已保存");
+    }
+  };
+
+  const handleSaveProjectPath = async () => {
+    const path = projectPathInput.trim();
+    if (!path) {
+      return;
+    }
+    const updated = (await patchGroup({ projectPath: path })) as
+      | { projectPath?: string | null }
+      | null;
+    if (updated) {
+      setProjectPath(updated.projectPath ?? path);
+      setProjectPathInput("");
+      setMessage(`已绑定项目: ${updated.projectPath ?? path}`);
+    }
+  };
+
+  const handleUnbindProject = async () => {
+    const updated = await patchGroup({ projectPath: null });
+    if (updated) {
+      setProjectPath(null);
+      setMessage("已解绑项目");
+    }
+  };
+
+  const handleToggleArchive = async () => {
+    if (!groupId || savingSettings || groupStatus === "deleted") {
+      return;
+    }
+    setSavingSettings(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const action = groupStatus === "archived" ? "unarchive" : "archive";
+      const res = await fetch(`/api/groups/${groupId}/${action}`, {
+        method: "POST",
+        headers: participantIdentityHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      await loadGroup();
+      setMessage(action === "archive" ? "群组已归档" : "群组已恢复");
+    } catch (e) {
+      setError(`状态更新失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
 
   const toggleRole = (role: GroupRole) => {
     setSelectedRoles((prev) =>
@@ -369,8 +471,7 @@ export default function GroupMembersPage() {
           {t("members.back")}
         </a>
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-xl font-semibold">{t("members.pageTitle")}</h2>
-          <ContextPanelTrigger />
+          <h2 className="text-xl font-semibold">群设置</h2>
         </div>
         <p className="text-muted-foreground text-sm">{t("members.subtitle")}</p>
       </div>
@@ -385,6 +486,101 @@ export default function GroupMembersPage() {
           {error}
         </div>
       )}
+
+      <div className="mb-6 grid gap-4 lg:grid-cols-2">
+        <section
+          data-testid="group-settings-basic"
+          className="rounded-lg border bg-card p-4"
+        >
+          <h3 className="mb-3 flex items-center gap-2 text-sm font-medium">
+            <PenLine className="size-4" />
+            基本信息
+          </h3>
+          <div className="flex flex-col gap-3">
+            <div className="flex gap-2">
+              <Input
+                aria-label="群名称"
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void handleSaveTitle();
+                  }
+                }}
+              />
+              <Button
+                size="sm"
+                onClick={() => void handleSaveTitle()}
+                disabled={savingSettings || !titleDraft.trim()}
+              >
+                保存
+              </Button>
+            </div>
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="text-muted-foreground">
+                状态: {groupStatus ?? "加载中"}
+              </span>
+              {groupStatus !== "deleted" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleToggleArchive()}
+                  disabled={savingSettings}
+                >
+                  {groupStatus === "archived" ? (
+                    <RotateCcw className="size-4" />
+                  ) : (
+                    <Archive className="size-4" />
+                  )}
+                  {groupStatus === "archived" ? "恢复" : "归档"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section
+          data-testid="group-settings-project"
+          className="rounded-lg border bg-card p-4"
+        >
+          <h3 className="mb-3 text-sm font-medium">项目绑定</h3>
+          {projectPath && (
+            <div className="mb-3 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
+                {projectPath}
+              </code>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleUnbindProject()}
+                disabled={savingSettings}
+              >
+                解绑
+              </Button>
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Input
+              aria-label="项目绝对路径"
+              placeholder="输入项目绝对路径"
+              value={projectPathInput}
+              onChange={(e) => setProjectPathInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  void handleSaveProjectPath();
+                }
+              }}
+            />
+            <Button
+              size="sm"
+              onClick={() => void handleSaveProjectPath()}
+              disabled={savingSettings || !projectPathInput.trim()}
+            >
+              保存
+            </Button>
+          </div>
+        </section>
+      </div>
 
       {/* Add member */}
       <div className="mb-6 rounded-lg border bg-card p-4">

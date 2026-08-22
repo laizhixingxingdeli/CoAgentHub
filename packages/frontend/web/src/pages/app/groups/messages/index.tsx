@@ -1,7 +1,6 @@
-import { Archive, ArrowLeft, Pencil } from "lucide-react";
+import { Archive, ArrowLeft, Pencil, Settings } from "lucide-react";
 import { useEffect } from "react";
 import { useRoute } from "wouter";
-import { ContextPanelTrigger } from "@/components/layout/context-panel";
 import { RequirementWorkspace } from "@/components/layout/context-panel/requirement-workspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,9 +17,7 @@ import { t } from "@/lib/i18n";
 
 /**
  * 群内页(需求主区改版):主区从「聊天流 + 输入框」改为「需求列表 | 需求详情」
- * 两栏(RequirementWorkspace,与右栏任务 Tab 共享同一组件)。聊天流降级为右栏
- * 上下文面板「消息」Tab 的只读流水,消息搜索随流
- * 一并搬入该 Tab;页面标题栏仅保留返回 / 群名改名 / 面板开关。群状态(归档/
+ * 两栏(RequirementWorkspace)。群状态(归档/
  * 软删)由 useGroupHeader 提供,驱动只读横幅。
  */
 export default function GroupMessagesPage() {
@@ -117,7 +114,16 @@ export default function GroupMessagesPage() {
             )}
           </h2>
         )}
-        <ContextPanelTrigger />
+        {groupId && (
+          <a
+            href={`/groups/${groupId}/settings`}
+            aria-label="群设置"
+            title="群设置"
+            className="inline-flex shrink-0 items-center justify-center rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <Settings className="size-4" />
+          </a>
+        )}
       </div>
 
       {isReadOnly && (

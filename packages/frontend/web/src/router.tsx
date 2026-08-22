@@ -12,7 +12,7 @@ const ParticipantsPage = lazy(() => import("./pages/app/participants"));
 const HelpPage = lazy(() => import("./pages/app/help"));
 const FeedbackPage = lazy(() => import("./pages/app/feedback"));
 const GroupsPage = lazy(() => import("./pages/app/groups"));
-const GroupMembersPage = lazy(() => import("./pages/app/groups/members"));
+const GroupSettingsPage = lazy(() => import("./pages/app/groups/members"));
 const GroupMessagesPage = lazy(() => import("./pages/app/groups/messages"));
 
 // Suspense fallback:轻量骨架占位,复用项目已有 Skeleton,不引入新依赖。
@@ -76,8 +76,7 @@ const App = () => (
                 produce /groups/groups/<id>. Flat routes keep base="" so the
                 pages' absolute paths work as written. */}
               <Route path="/groups" component={GroupsPage} />
-              {/* 群相关路由(消息/成员)包上带右栏的布局(三栏);其它路由保持两栏。
-                wouter v3 的 component 会收到 { params },据此取 groupId 传给右栏。 */}
+              {/* 群相关路由统一包上群布局；消息订阅由布局常驻。 */}
               <Route
                 path="/groups/:id"
                 component={({ params }: { params: { id: string } }) => (
@@ -87,11 +86,17 @@ const App = () => (
                 )}
               />
               <Route
-                path="/groups/:id/members"
+                path="/groups/:id/settings"
                 component={({ params }: { params: { id: string } }) => (
                   <GroupLayout groupId={params.id}>
-                    <GroupMembersPage />
+                    <GroupSettingsPage />
                   </GroupLayout>
+                )}
+              />
+              <Route
+                path="/groups/:id/members"
+                component={({ params }: { params: { id: string } }) => (
+                  <Redirect to={`/groups/${params.id}/settings`} />
                 )}
               />
               <Route path="/:rest*">404:页面不存在</Route>
