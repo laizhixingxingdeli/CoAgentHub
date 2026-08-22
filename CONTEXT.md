@@ -50,6 +50,19 @@ report/queue 六个子模块(barrel 导出面不变,`@server/lib/executor-task` 
 `lib/config.ts`(CORS_ORIGIN / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);`participant.token_hash` 列为
 已知历史遗留(token 认证已移除),**不删除**,标记 deprecated 待删。
 
+## 平台下发的运维前提(2026-08-22 实测)
+
+用平台下发任务(而非直调 CLI)时,有四条前提。**详见 `docs/architecture.md` §9.9**,
+这里只列结论:
+
+1. **后端进程要能拿到代理变量** —— 执行器完整继承后端环境;后端没代理,
+   执行器就直连超时,每票白等约 2 分钟。
+2. **会改后端代码的任务,后端要用非 watch 模式**(`pnpm --filter server start`)
+   —— 否则 `tsx watch` 重启会杀掉自己 spawn 的执行器子进程。
+3. **codex 执行器带沙箱**:禁网络、禁监听回环、禁写 `.git/`。
+   全量测试由协调者代跑;执行器提交需申请非沙箱操作。
+4. **执行器会把暂存区里的无关文件带进提交** —— 提交前确认暂存区干净。
+
 ## 关键决策
 
 见 `docs/adr/`:闭包表消息树、局域网信任模型、单调度器执行器、两级记忆、角色解绑。

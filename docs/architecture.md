@@ -301,6 +301,70 @@ CoAgentHub/
   (含定向消息,不要求群成员);audience 仍是 agent 间的路由机制。前端对定向消息显示
   「📨 定向给 <执行器名>」标签。
 
+## 9.9 平台下发的运维约束(2026-08-22 实测)
+
+以下四条**只有真正走平台下发才会暴露**,直调 CLI 时碰不到。每条都有实测依据。
+
+### 9.9.1 后端必须能拿到代理环境变量
+
+`executor-runner.ts` 的 `spawn(bin, args, {...})` **不传 `env`**,Node 因此让子进程
+**完整继承后端进程的环境**。这是正确行为,无需改代码——但意味着:
+
+> **后端进程没有 `HTTP_PROXY`/`HTTPS_PROXY`,执行器就也没有。**
+
+实测数据(需代理才能出网的环境):
+
+| | 结果 | 耗时 |
+|---|---|---|
+| 无代理直连 `api.openai.com` | `000` | 8s 超时 |
+| 经代理 | `401`(正常响应) | 0.54s |
+
+后果:执行器先尝试直连 → 必然超时 → 重试 5 轮 → 降级传输方式才连上,
+**每票确定性浪费约 2 分钟**。注入代理变量后重连次数降为 0。
+
+启动后端时务必带上代理变量(若你的网络需要代理)。
+
+### 9.9.2 跑「会改后端代码」的任务时,后端必须用非 watch 模式
+
+`pnpm --filter server dev` 是 `tsx watch`。执行器修改
+`packages/backend/server/src/**` 会触发后端重启,**连带杀死它自己 spawn 的执行器子进程**,
+任务被标记 `failed`,`diffSummary.error = "server-restart"`。
+
+这是自伤循环:监管任务的进程,被它监管的任务改代码触发了自杀。
+
+| 场景 | 启动方式 |
+|---|---|
+| 本地迭代后端(人写代码) | `pnpm --filter server dev` |
+| **平台下发会改后端代码的任务** | **`pnpm --filter server start`**(跑 `dist/`,无 watch) |
+
+切 start 前先 `pnpm --filter server build`。
+
+> `node dist/server.mjs` 直接跑会报 `DATABASE_URL is not set` —— dotenv 按 cwd 找 `.env`,
+> 必须用 `pnpm --filter server start`(在包目录内执行)。
+
+### 9.9.3 codex 执行器带沙箱:禁网络、禁写 `.git/`
+
+平台用 `exec --approve-for-me --ephemeral` 调用 codex,该模式带 workspace-write 沙箱。
+实测(`codex sandbox -- ...` 直接验证):
+
+- 沙箱内**完全禁网**:直连 `000`、经代理 `000`、DNS `FAIL`
+- 沙箱内**禁止监听 127.0.0.1**:需起本地服务的测试报 `listen EPERM`
+- 沙箱内**禁止写 `.git/`**:执行器无法自行 `git commit`
+
+试过 `-c network_access=true` 与 `-c sandbox_workspace_write.network_access=true`,
+**均未解除**(仍 `000`)。
+
+因此约定:
+
+- **全量测试由协调者代跑**,票面应写明;执行器只跑定向测试与类型检查。
+  这与「L2 独立复核、不信执行器自报」的既有纪律一致,不额外放宽沙箱。
+- 执行器需提交时会申请非沙箱操作,属正常流程。
+
+### 9.9.4 执行器会把工作区既有的暂存文件带进提交
+
+即使执行器声明「不会触碰」,`git commit` 不带 `--only` 仍会把**已在暂存区**的
+无关文件一并提交。协调者应在执行器提交前确认暂存区干净。
+
 ## 10. 消息搜索与分组
 
 - `GET /groups/:id/messages?q=` 关键词搜索(ILIKE,`%`/`_` 转义),与可见性过滤和
