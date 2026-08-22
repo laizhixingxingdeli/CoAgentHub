@@ -56,6 +56,8 @@ const CreateExecutorSchema = z
     model: z.string().max(200).nullable().optional(),
     /** 记忆模式:仅 "per-group" 启用按群 contextId 延续;缺省无记忆。 */
     memory: z.enum(["per-group"]).nullable().optional(),
+    /** 默认分工说明(接入时填一次):可空,最长 1000(与 group_members.prompt 一致)。 */
+    prompt: z.string().max(1000).optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
     message: "kind=a2a 需要 url,kind=cli 需要 bin",
@@ -81,7 +83,7 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const input = c.req.valid("json");
-      const { agentName, kind, bin, url, args, label, device, model, memory } =
+      const { agentName, kind, bin, url, args, label, device, model, memory, prompt } =
         input;
       // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
       const type = input.type ?? "custom";
@@ -118,6 +120,7 @@ const app2 = app
         device,
         model,
         memory,
+        prompt,
       };
 
       await addExecutorConfig(db, config);
@@ -150,6 +153,7 @@ const app2 = app
         device: device ?? null,
         model: model ?? null,
         memory: memory ?? null,
+        prompt: prompt ?? null,
       });
     },
   )
@@ -180,6 +184,7 @@ const app2 = app
           label: ex.label,
           model: ex.model ?? null,
           memory: ex.memory ?? null,
+          prompt: ex.prompt ?? null,
           maxConcurrency: ex.maxConcurrency ?? null,
           builtin: isBuiltinExecutorKey(ex.key),
         })),
@@ -242,6 +247,8 @@ const app2 = app
           model: z.string().max(200).nullable().optional(),
           memory: z.enum(["per-group"]).nullable().optional(),
           device: z.string().max(100).nullable().optional(),
+          // 默认分工说明:空字符串表示清空(与 members.ts 的 PATCH 语义一致)。
+          prompt: z.string().max(1000).optional(),
         })
         .refine(
           (v) =>
@@ -251,7 +258,8 @@ const app2 = app
             v.label !== undefined ||
             v.model !== undefined ||
             v.memory !== undefined ||
-            v.device !== undefined,
+            v.device !== undefined ||
+            v.prompt !== undefined,
           { message: "at least one field to update is required" },
         ),
     ),
@@ -307,6 +315,7 @@ const app2 = app
         label: input.label,
         model: input.model,
         memory: input.memory,
+        prompt: input.prompt,
       });
       if (!updated) {
         throw new BizError(BizCodeEnum.ExecutorNotFound);
@@ -332,6 +341,7 @@ const app2 = app
         label: updated.label,
         model: updated.model ?? null,
         memory: updated.memory ?? null,
+        prompt: updated.prompt ?? null,
         builtin: false,
       });
     },

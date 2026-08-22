@@ -484,4 +484,92 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  // ── prompt(默认分工说明)读写(本票范围)──────────────────
+  it("POST 携带 prompt 持久化,GET 返回 prompt", async () => {
+    const res = await createExecutor({
+      agentName: "Prompt Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["-y", "-p", "{ticket}"],
+      prompt: "只负责数据库迁移与 schema 评审",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.prompt).toBe("只负责数据库迁移与 schema 评审");
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "prompt-executor");
+    expect(item!.prompt).toBe("只负责数据库迁移与 schema 评审");
+  });
+
+  it("POST 不带 prompt → 响应与 GET 均为 null", async () => {
+    const res = await createExecutor({
+      agentName: "No Prompt Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.prompt).toBe(null);
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "no-prompt-executor");
+    expect(item!.prompt).toBe(null);
+  });
+
+  it("PATCH prompt 单独更新生效(GET 验证)", async () => {
+    const created = await createExecutor({
+      agentName: "Patch Prompt",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["-y", "{ticket}"],
+    });
+    expect(created.status).toBe(200);
+
+    const patchRes = await app.request("/api/executors/patch-prompt", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "新分工说明" }),
+    });
+    expect(patchRes.status).toBe(200);
+    const updated = (await patchRes.json()) as Record<string, unknown>;
+    expect(updated.prompt).toBe("新分工说明");
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    expect(list.find((x) => x.key === "patch-prompt")!.prompt).toBe(
+      "新分工说明",
+    );
+  });
+
+  it("PATCH 空字符串清空 prompt(与 members.ts 语义一致)", async () => {
+    // 先设一个 prompt
+    const setRes = await app.request("/api/executors/patch-prompt", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "待清空" }),
+    });
+    expect(setRes.status).toBe(200);
+    expect((await setRes.json() as Record<string, unknown>).prompt).toBe(
+      "待清空",
+    );
+
+    // 再清空:空字符串表示清空(与 routes/group/members.ts 的 PATCH 处理一致)。
+    const clearRes = await app.request("/api/executors/patch-prompt", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "" }),
+    });
+    expect(clearRes.status).toBe(200);
+    const cleared = (await clearRes.json()) as Record<string, unknown>;
+    expect(cleared.prompt).toBe("");
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    expect(list.find((x) => x.key === "patch-prompt")!.prompt).toBe("");
+  });
 });

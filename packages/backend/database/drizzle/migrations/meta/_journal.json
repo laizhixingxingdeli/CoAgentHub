@@ -134,6 +134,13 @@
       "when": 1786820000000,
       "tag": "0018_task_completion_events",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787363826368,
+      "tag": "0019_add_executor_prompt",
+      "breakpoints": true
     }
   ]
 }

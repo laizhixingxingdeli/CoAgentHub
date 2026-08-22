@@ -53,6 +53,9 @@ export interface ExecutorConfig {
   memory?: "per-group";
   /** a2a 的 gateway 基地址(DB 配置存 url 列,与 a2a.url 并存;runner 读 a2a.url)。 */
   url?: string;
+  /** 默认分工说明(接入时填一次):加入群组时作为 group_members.prompt 的默认值;
+   * 进群后可针对该群单独修改。协调者据此判断该派哪个执行器执行。内置执行器不硬编码。 */
+  prompt?: string | null;
   /** kind="a2a" 时的 gateway 信息;token 从 env 读(COAGENTHUB_WIN_A2A_TOKEN),不硬编码。 */
   a2a?: {
     /** gateway 基地址;env COAGENTHUB_WIN_A2A_URL 可覆盖(测试指向 mock)。 */
@@ -317,6 +320,8 @@ export interface AddExecutorConfigInput {
   model?: string | null;
   /** 记忆模式:仅 "per-group" 启用按群 contextId 延续;null 表示无记忆。 */
   memory?: "per-group" | null;
+  /** 默认分工说明(可空);加入群组时作为 group_members.prompt 的默认值。 */
+  prompt?: string | null;
 }
 
 /** 插入一条 DB 执行器配置并返回整行。 */
@@ -337,6 +342,7 @@ export async function addExecutorConfig(
       label: input.label ?? input.agentName,
       model: input.model ?? null,
       memory: input.memory ?? null,
+      prompt: input.prompt ?? null,
     })
     .returning();
   invalidateExecutorsCache();
@@ -370,6 +376,7 @@ function rowToConfig(row: ExecutorConfigRow): ExecutorConfig {
   };
   if (row.model != null) base.model = row.model;
   if (row.memory === "per-group") base.memory = row.memory;
+  if (row.prompt != null) base.prompt = row.prompt;
   if (base.kind === "a2a") {
     base.a2a = { url: row.url ?? "", token: "" };
   }
@@ -386,7 +393,7 @@ export async function updateExecutorConfig(
   patch: Partial<
     Pick<
       AddExecutorConfigInput,
-      "agentName" | "bin" | "args" | "label" | "model" | "memory"
+      "agentName" | "bin" | "args" | "label" | "model" | "memory" | "prompt"
     >
   >,
 ): Promise<ExecutorConfigRow | undefined> {
@@ -397,6 +404,8 @@ export async function updateExecutorConfig(
   if (patch.label !== undefined) values.label = patch.label;
   if (patch.model !== undefined) values.model = patch.model ?? null;
   if (patch.memory !== undefined) values.memory = patch.memory ?? null;
+  // prompt:"" 表示清空(与 members.ts 的 PATCH 语义一致:空串落库即清空)。
+  if (patch.prompt !== undefined) values.prompt = patch.prompt ?? null;
 
   const [row] = await db
     .update(executorConfigTable)

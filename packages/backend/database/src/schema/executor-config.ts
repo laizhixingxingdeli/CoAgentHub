@@ -36,6 +36,10 @@ export const executorConfig = pgTable("executor_config", {
   // 记忆模式:null=无记忆(任务书自包含,纯执行);"per-group"=按群记忆
   // (a2a 执行器跨任务按群延续 contextId,记忆只是加速器,验收不依赖记忆)。
   memory: text("memory"),
+  // 默认分工说明:执行器接入时填写,加入群组时作为 group_members.prompt 的
+  // 默认值(见 routes/group/members.ts);进群后可针对该群单独修改。
+  // 协调者据此判断该派哪个执行器执行(spec v3.7 §3.16)。
+  prompt: text("prompt"),
   ...timeColumns("both"),
 });
 
