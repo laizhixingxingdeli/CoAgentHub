@@ -29,6 +29,7 @@ import {
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
+import { createAnsiStripper } from "./ansi";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -832,16 +833,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.log(
         `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, group=${run.groupKey}, task=${taskId})`,
       );
+      // ANSI 剥离器:每次执行一个(跨 chunk 转义序列扣尾拼接),输出路径共用。
+      const stripAnsiChunk = createAnsiStripper();
       handle = runExecutor({
         bin: ex.bin,
         args,
         cwd: repoRoot,
         onOutput: (chunk) => {
-          // 流式日志 + 实时进度:除 server 日志外,入环形缓冲(includeOutput
-          // 拉取/断线重连用)并 WS 推给前端任务面板(task_output 事件)。
+          // 流式日志 + 实时进度:server 控制台保留原样(带色便于排查);入环形
+          // 缓冲(includeOutput 拉取/断线重连用)与 WS 广播(task_output 事件)
+          // 走剥离后的文本——剥在唯一源头,前端/插件/兜底拉取一次性受益。
           process.stdout.write(chunk);
-          appendTaskOutput(taskId, chunk);
-          void wsHub.broadcastTaskOutput(groupId, taskId, chunk);
+          const clean = stripAnsiChunk(chunk);
+          appendTaskOutput(taskId, clean);
+          void wsHub.broadcastTaskOutput(groupId, taskId, clean);
           // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
           run.lastOutputAt = Date.now();
           if (run.stallTimer) {

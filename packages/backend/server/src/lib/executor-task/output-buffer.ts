@@ -4,7 +4,7 @@
  * 断线重连用。
  */
 
-/** running 任务最近输出的环形缓冲上限:200 行 / 64KB,超限保留尾部。 */
+/** running 任务最近输出的环形缓冲上限:1000 行 / 256KB,超限保留尾部。 */
 const OUTPUT_TAIL_MAX_LINES = 1000;
 const OUTPUT_TAIL_MAX_BYTES = 256 * 1024;
 

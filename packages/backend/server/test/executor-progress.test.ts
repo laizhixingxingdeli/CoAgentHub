@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * 任务面板增强批次(实时进度 + 执行历史 + 冷却动态化 + model 字段 + 回滚体验):
@@ -42,6 +42,12 @@ writeFileSync(
     '    echo "$line"',
     "    sleep 0.1",
     "  done",
+    "fi",
+    // ANSI 输出模式(源头剥离测试用):FAKE_ANSI 输出带色行,验证缓冲/广播
+    // 收到的是剥离文本(stdout 控制台保留原样)。
+    'if [ -n "$FAKE_ANSI" ]; then',
+    "  printf '\\033[32mgreen-line\\033[0m\\n'",
+    "  printf '\\033[31mred-line\\033[0m\\n'",
     "fi",
     // 失败模式:FAKE_ALWAYS_FAIL 每次都 exit 1;FAKE_FAIL_UNTIL 前 N 次失败;
     // FAKE_QUOTA_FAIL 输出额度关键词后 exit 1(归类额度失败,不重试)。
@@ -85,6 +91,7 @@ const { __resetExecutorQueueForTests, taskOutputTail } = await import(
 const { parseRateLimitRecoveryMs, renderExecutorArgs } = await import(
   "@server/lib/executors"
 );
+const { wsHub } = await import("../src/lib/ws-hub");
 
 describe("任务面板增强批次 server 侧测试", () => {
   const app = createTestApp();
@@ -94,6 +101,7 @@ describe("任务面板增强批次 server 侧测试", () => {
     // 清理 fake bin 开关(跨用例共享 process.env,避免上一个用例的模式残留)。
     for (const key of [
       "FAKE_LINES",
+      "FAKE_ANSI",
       "FAKE_ALWAYS_FAIL",
       "FAKE_QUOTA_FAIL",
       "FAKE_FAIL_UNTIL",
@@ -383,6 +391,51 @@ describe("任务面板增强批次 server 侧测试", () => {
       const t = after.find((x) => x.messageId === msg.id);
       expect(t?.outputTail ?? t?.diffSummary?.outputTail).toContain("z");
     });
+
+    it("ANSI 在源头剥离:缓冲与广播收到干净文本,stdout 保留原样", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      process.env.FAKE_ANSI = "1";
+      // 广播路径 spy:验证 WS 广播收到的 chunk 已剥离。
+      const broadcastSpy = vi
+        .spyOn(wsHub, "broadcastTaskOutput")
+        .mockResolvedValue();
+      // stdout 路径 spy:验证 server 控制台仍收到原始(带色)chunk。
+      const stdoutSpy = vi.spyOn(process.stdout, "write");
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "ANSI 剥离",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+      const after = await listTasks(
+        coordinator.id,
+        group.id,
+        "?includeOutput=1",
+      );
+      const t = after.find((x) => x.messageId === msg.id);
+      // 环形缓冲(appendTaskOutput 路径)收到的是剥离文本:内容在、转义无残留。
+      const tail = (t?.outputTail ??
+        t?.diffSummary?.outputTail ??
+        "") as string;
+      expect(tail).toContain("green-line");
+      expect(tail).toContain("red-line");
+      expect(tail).not.toMatch(/\u001b\[/);
+      // WS 广播(broadcastTaskOutput 路径)收到的 chunk 同样无转义残留。
+      const broadcastChunks = broadcastSpy.mock.calls.map((c) => c[2]);
+      expect(broadcastChunks.length).toBeGreaterThan(0);
+      for (const chunk of broadcastChunks) {
+        expect(chunk).not.toMatch(/\u001b\[/);
+      }
+      // stdout 保留原样:至少一个写出的 chunk 仍带 ANSI 转义(控制台留色)。
+      const stdoutChunks = stdoutSpy.mock.calls.map((c) => String(c[0]));
+      expect(stdoutChunks.some((c) => /\u001b\[/.test(c))).toBe(true);
+    });
+  });
+
+  // spy 还原(集成用例安装了 wsHub / stdout 单例 mock;断言失败或超时提前
+  // 退出时也必须还原,避免后续用例拿到被替换的广播实现)。
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   /* ---------------- 执行历史:attempts 时间线 ---------------- */

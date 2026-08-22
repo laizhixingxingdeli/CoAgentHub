@@ -4,9 +4,7 @@
  * 渲染(renderTaskCard)。纯函数,独立可单测。
  */
 
-/** ANSI 颜色码清理(解析前剥掉控制序列)。 */
-const ANSI_RE =
-  /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+import { ANSI_RE } from "./ansi";
 
 /** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
 export interface TaskReport {

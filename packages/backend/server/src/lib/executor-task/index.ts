@@ -6,6 +6,7 @@
  * 等成员,继续可用)。
  *
  * 职责划分:
+ *  - ansi.ts        ANSI 转义序列剥离(流式跨 chunk 扣尾;report 与输出路径共用)
  *  - types.ts        共享类型(队列条目 / 组队列 / 输入 / 分工 / 汇报结构)
  *  - state.ts        模块级可变状态(组队列 / 超时阈值 / 重试与额度配置 /
  *                    冷却登记)+ 测试重置入口
@@ -16,6 +17,7 @@
  *                    弱验收 / 执行历史 / 测试执行器选择)
  */
 
+export { createAnsiStripper, stripAnsi } from "./ansi";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
