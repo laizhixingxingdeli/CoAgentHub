@@ -70,12 +70,42 @@ import {
 } from "./state";
 import {
   DEFAULT_GROUP_KEY,
-  type DispatchExecutorInput,
   DISPATCH_ALLOWED_ROLES,
+  type DispatchExecutorInput,
   type GroupPromptInfo,
   type GroupQueue,
   type QueuedRun,
 } from "./types";
+
+/** 为执行器启动失败补充能直接指向排查方向的提示。 */
+function executorStartupFailureHint(bin: string, msg: string): string {
+  const lowerMsg = msg.toLowerCase();
+
+  if (
+    lowerMsg.includes("unexpected argument") ||
+    lowerMsg.includes("unrecognized") ||
+    lowerMsg.includes("cannot be used with") ||
+    lowerMsg.includes("invalid value")
+  ) {
+    return "；执行器参数配置可能与当前 CLI 版本不匹配，请核对 executors.ts 中的 args 配置";
+  } else if (
+    lowerMsg.includes("enoent") ||
+    lowerMsg.includes("command not found")
+  ) {
+    return `；${bin} 可能未安装或不在 PATH，请用 which ${bin} 确认或填写绝对路径`;
+  } else if (
+    lowerMsg.includes("eacces") ||
+    lowerMsg.includes("permission denied")
+  ) {
+    return `；${bin} 没有可执行权限，请检查文件的可执行位`;
+  }
+
+  return "";
+}
+
+export function formatExecutorStartupFailure(bin: string, msg: string): string {
+  return `无法启动 ${bin} (${msg})${executorStartupFailureHint(bin, msg)}`;
+}
 
 /* ---------------- 额度感知调度(票7) ---------------- */
 
@@ -894,13 +924,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             });
             // 已回写终态(如 detached 超时先行)→ 不覆盖。
             if (!cur || cur.status !== "running") return;
-            await failTask(db, taskId, `执行器启动失败: ${msg}`);
+            const hint = executorStartupFailureHint(ex.bin, msg);
+            await failTask(db, taskId, `执行器启动失败: ${msg}${hint}`);
             await postStatus(
               db,
               groupId,
               participantId,
               ex,
-              `❌ [${ex.label}] 任务失败: 无法启动 ${ex.bin} (${msg})`,
+              `❌ [${ex.label}] 任务失败: ${formatExecutorStartupFailure(
+                ex.bin,
+                msg,
+              )}`,
             );
           } catch (err) {
             console.warn(
@@ -1121,13 +1155,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.error(`[executor] 执行器启动失败: ${msg}`);
       await endAttempt(run, { status: "failed", error: msg });
       releaseTaskOutput(taskId);
-      await failTask(db, taskId, msg);
+      const hint = executorStartupFailureHint(ex.bin, msg);
+      await failTask(db, taskId, `${msg}${hint}`);
       await postStatus(
         db,
         groupId,
         participantId,
         ex,
-        `❌ [${ex.label}] 任务失败: 无法启动 ${ex.bin} (${msg})`,
+        `❌ [${ex.label}] 任务失败: ${formatExecutorStartupFailure(
+          ex.bin,
+          msg,
+        )}`,
       );
     }
   } finally {

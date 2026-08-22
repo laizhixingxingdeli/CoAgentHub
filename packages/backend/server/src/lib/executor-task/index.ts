@@ -21,6 +21,7 @@ export { taskOutputTail } from "./output-buffer";
 export {
   cancelQueuedTasks,
   currentRunningTask,
+  formatExecutorStartupFailure,
   isConcurrencyConflict,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
@@ -37,7 +38,7 @@ export {
   __setReliabilityTimeoutsForTests,
 } from "./state";
 export {
-  type DispatchExecutorInput,
   DISPATCH_ALLOWED_ROLES,
+  type DispatchExecutorInput,
   type GroupPromptInfo,
 } from "./types";
