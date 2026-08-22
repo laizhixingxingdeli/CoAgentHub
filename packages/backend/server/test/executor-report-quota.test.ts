@@ -379,6 +379,71 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       });
     });
 
+    it("parseTaskReport:跳过任务书回显占位符并取真实汇报", () => {
+      const stdout = [
+        "# CoAgentHub 任务",
+        "## 汇报格式要求(stdout 请按此输出)",
+        "提交: <commit hash,如无则写无>",
+        "测试: <测试结果摘要>",
+        "汇报: <做了什么,3-5 句>",
+        '遗留: <未完成事项,无则写"无">',
+        "本群分工:角色=[executor];提示词=主要执行器",
+        "## 执行与测试要求",
+        "完成后必须运行测试并验证改动(新增/相关用例),汇报需包含测试结果。",
+        "提交: 0123456789abcdef0123456789abcdef01234567",
+        "测试: 定向 Vitest 18/18 通过",
+        "汇报: 补充了任务书回显占位符的回归测试。",
+        "真实汇报正文没有混入任务书内容。",
+        "遗留: 无",
+      ].join("\n");
+
+      expect(parseTaskReport(stdout)).toMatchObject({
+        hash: "0123456789ab",
+        tests: "定向 Vitest 18/18 通过",
+        summary: "补充了任务书回显占位符的回归测试。\n真实汇报正文没有混入任务书内容。",
+        todo: "无",
+      });
+      expect(parseTaskReport(stdout).todo).not.toContain("本群分工");
+      expect(parseTaskReport(stdout).todo).not.toContain("执行与测试要求");
+    });
+
+    it("parseTaskReport:只有任务书回显时不把占位符当汇报", () => {
+      const stdout = [
+        "## 汇报格式要求(stdout 请按此输出)",
+        "提交: <commit hash,如无则写无>",
+        "测试: <测试结果摘要>",
+        "汇报: <做了什么,3-5 句>",
+        '遗留: <未完成事项,无则写"无">',
+        "本群分工:角色=[executor];提示词=主要执行器",
+        "## 执行与测试要求",
+        "完成后必须运行测试并验证改动(新增/相关用例),汇报需包含测试结果。",
+      ].join("\n");
+
+      const report = parseTaskReport(stdout);
+      expect(report.summary).not.toBe("<做了什么,3-5 句>");
+      expect(report.tests).not.toBe("<测试结果摘要>");
+      expect(report.todo).not.toBe('<未完成事项,无则写"无">');
+      expect(report).toEqual({});
+    });
+
+    it("parseTaskReport:真实汇报以尖括号开头时按已知局限跳过", () => {
+      // 已知局限：占位符识别会把真实的「<T> 泛型参数处理有误」也视为模板。
+      expect(
+        parseTaskReport(
+          [
+            "提交: 0123456789abcdef0123456789abcdef01234567",
+            "测试: pass",
+            "汇报: <T> 泛型参数处理有误",
+            "遗留: 无",
+          ].join("\n"),
+        ),
+      ).toEqual({
+        hash: "0123456789ab",
+        tests: "pass",
+        todo: "无",
+      });
+    });
+
     it("parseTaskReport:token 段变体识别与清洗", () => {
       // 英文大小写变体 + 千分位逗号 + tokens 后缀 → 纯数字。
       expect(
