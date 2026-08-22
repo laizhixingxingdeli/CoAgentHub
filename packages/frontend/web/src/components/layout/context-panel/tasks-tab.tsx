@@ -393,7 +393,11 @@ export function TasksTab({ groupId }: { groupId: string }) {
               onRollback={(task) => void handleRollback(task)}
             />
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <RequirementDetailPanel requirement={selectedRequirement} />
+              <RequirementDetailPanel
+                requirement={selectedRequirement}
+                messages={messages}
+                members={members}
+              />
             </div>
           </div>
         </div>

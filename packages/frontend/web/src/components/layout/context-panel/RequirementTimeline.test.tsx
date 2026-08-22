@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { formatMessageTime } from "@/pages/app/groups/messages/lib";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
+import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import RequirementTimeline, {
   roleFromExecutorKey,
 } from "./RequirementTimeline";
@@ -244,5 +245,265 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     expect(
       screen.getByTestId("requirement-timeline-time-no-updated"),
     ).toHaveTextContent(formatMessageTime(createdAt));
+  });
+});
+
+/** 构造最小可用的 MessageItem(消息卡片渲染用)。默认 createdAt 落在
+ * makeTask 默认窗口 [09:00, 10:00] 内,避免被归属过滤。 */
+function makeMessage(overrides: Partial<MessageItem> & { id: string }): MessageItem {
+  return {
+    groupId: "group-1",
+    senderId: "participant-coord",
+    parentId: null,
+    audience: "broadcast",
+    audienceRef: null,
+    body: "正文",
+    fileRef: null,
+    depth: 0,
+    createdAt: "2026-08-01T09:30:00.000Z",
+    ...overrides,
+  };
+}
+
+const MOCK_MEMBERS: Member[] = [
+  {
+    participantId: "participant-coord",
+    name: "协调者",
+    device: null,
+    roles: ["coordinator"],
+  },
+  {
+    participantId: "participant-review",
+    name: "检视者",
+    device: null,
+    roles: ["reviewer"],
+  },
+];
+
+describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
+  it("消息卡片:发送者名 + 定向对象(participant → 对方名 / role → 角色名 / broadcast 无箭头)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-1",
+            messageId: "trigger-1",
+            createdAt: "2026-08-01T09:00:00.000Z",
+          }),
+        ]}
+        members={MOCK_MEMBERS}
+        messages={[
+          makeMessage({
+            id: "m-to-participant",
+            senderId: "participant-review",
+            audience: "participant",
+            audienceRef: "participant-coord",
+            body: "spec 已冻结。这批只做服务端接线。",
+          }),
+          makeMessage({
+            id: "m-to-role",
+            senderId: "participant-coord",
+            audience: "role",
+            audienceRef: "reviewer",
+            body: "请检视一下验收标准。",
+          }),
+          makeMessage({
+            id: "m-broadcast",
+            body: "广播给所有人",
+          }),
+        ]}
+      />,
+    );
+    // participant 定向:→ 对方名(协调者)
+    expect(
+      screen.getByTestId("requirement-timeline-target-m-to-participant"),
+    ).toHaveTextContent("→ 协调者");
+    // role 定向:→ 角色名(reviewer)
+    expect(
+      screen.getByTestId("requirement-timeline-target-m-to-role"),
+    ).toHaveTextContent("→ reviewer");
+    // broadcast:无定向对象元素
+    expect(
+      screen.queryByTestId("requirement-timeline-target-m-broadcast"),
+    ).not.toBeInTheDocument();
+    // 发送者名:检视者(参与定向)/协调者(角色定向),各自卡片内出现。
+    expect(
+      screen.getByTestId("requirement-timeline-item-m-to-participant"),
+    ).toHaveTextContent("检视者");
+    expect(
+      screen.getByTestId("requirement-timeline-item-m-to-role"),
+    ).toHaveTextContent("协调者");
+    expect(screen.getByText("spec 已冻结。这批只做服务端接线。")).toBeInTheDocument();
+  });
+
+  it("消息卡片:发送者角色色读 Member.roles(检视者 → bg-role-reviewer)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1" })]}
+        members={MOCK_MEMBERS}
+        messages={[
+          makeMessage({
+            id: "m-review",
+            senderId: "participant-review",
+            body: "检视者的消息",
+          }),
+        ]}
+      />,
+    );
+    const avatar = screen.getByTestId("requirement-timeline-avatar-m-review");
+    expect(avatar).toHaveClass("bg-role-reviewer");
+    expect(avatar).toHaveAttribute("data-role", "reviewer");
+  });
+
+  it("消息卡片:发送者不在成员表时回落 senderId 前缀,角色回落执行者", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1" })]}
+        members={MOCK_MEMBERS}
+        messages={[
+          makeMessage({ id: "m-unknown", senderId: "participant-xyz", body: "你好" }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("particip")).toBeInTheDocument();
+    expect(screen.getByTestId("requirement-timeline-avatar-m-unknown")).toHaveClass(
+      "bg-role-executor",
+    );
+  });
+
+  it("软删除消息渲染为占位,不当作正常消息展示正文", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1" })]}
+        members={MOCK_MEMBERS}
+        messages={[
+          makeMessage({
+            id: "m-deleted-flag",
+            body: "被删除的正文不该出现",
+            deleted: true,
+          }),
+          makeMessage({
+            id: "m-deleted-body",
+            body: "[消息已删除]",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-deleted-m-deleted-flag"),
+    ).toHaveTextContent("消息已删除");
+    expect(
+      screen.getByTestId("requirement-timeline-deleted-m-deleted-body"),
+    ).toHaveTextContent("消息已删除");
+    expect(screen.queryByText("被删除的正文不该出现")).not.toBeInTheDocument();
+  });
+
+  it("消息卡片:长正文(超过 200 字)折叠,展开后显示全文", () => {
+    const longBody = `${"长".repeat(210)}END`;
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1" })]}
+        members={MOCK_MEMBERS}
+        messages={[makeMessage({ id: "m-long", body: longBody })]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-item-m-long").textContent,
+    ).toContain("…");
+    expect(
+      screen.getByTestId("requirement-timeline-item-m-long").textContent,
+    ).not.toContain("END");
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-m-long"));
+    expect(
+      screen.getByTestId("requirement-timeline-detail-m-long").textContent,
+    ).toContain("END");
+  });
+
+  it("任务卡片:executorParticipantId 命中成员时角色读 Member.roles,不再看 executorKey 字符串", () => {
+    // executorKey 不含任何角色词,但成员真实角色是 coordinator → 协调者色。
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-1",
+            executorKey: "codebuddy",
+            executorParticipantId: "participant-coord",
+          }),
+        ]}
+        members={MOCK_MEMBERS}
+      />,
+    );
+    const avatar = screen.getByTestId("requirement-timeline-avatar-t-1");
+    expect(avatar).toHaveClass("bg-role-coordinator");
+    expect(avatar).toHaveAttribute("data-role", "coordinator");
+  });
+
+  it("任务卡片:executorParticipantId 未命中成员时回落 executorKey 字符串猜测", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1", executorKey: "code-reviewer" })]}
+        members={MOCK_MEMBERS}
+      />,
+    );
+    expect(screen.getByTestId("requirement-timeline-avatar-t-1")).toHaveClass(
+      "bg-role-reviewer",
+    );
+  });
+
+  it("合并流按时间正序渲染:触发消息(09:00)→ 窗口内消息(11:00)→ 任务汇报(12:00)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-1",
+            messageId: "trigger-1",
+            createdAt: "2026-08-01T09:00:00.000Z",
+            updatedAt: "2026-08-01T12:00:00.000Z",
+            diffSummary: { summary: "四处接线完成" },
+          }),
+        ]}
+        members={MOCK_MEMBERS}
+        messages={[
+          // 触发消息(强关联,任务书)
+          makeMessage({
+            id: "trigger-1",
+            createdAt: "2026-08-01T09:00:00.000Z",
+            body: "任务书:四处接线",
+          }),
+          // 窗口内的旁路消息(时间窗口启发式归属)
+          makeMessage({
+            id: "m-window",
+            createdAt: "2026-08-01T11:00:00.000Z",
+            body: "检视者:窗口内的讨论",
+          }),
+        ]}
+      />,
+    );
+    const items = Array.from(
+      screen.getByTestId("requirement-timeline").querySelectorAll("li"),
+    ).map((li) => li.getAttribute("data-testid"));
+    expect(items).toEqual([
+      "requirement-timeline-item-trigger-1",
+      "requirement-timeline-item-m-window",
+      "requirement-timeline-item-t-1",
+    ]);
+  });
+
+  it("失败任务渲染失败条(--status-failed token,不喧宾夺主),带 error 文案", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-fail",
+            status: "failed",
+            diffSummary: { summary: "执行失败", error: "spawn reviewer ENOENT" },
+          }),
+        ]}
+      />,
+    );
+    const failedBar = screen.getByTestId("requirement-timeline-failed-t-fail");
+    expect(failedBar).toHaveTextContent("任务失败");
+    expect(failedBar).toHaveTextContent("spawn reviewer ENOENT");
+    expect(failedBar).toHaveClass("text-status-failed");
   });
 });

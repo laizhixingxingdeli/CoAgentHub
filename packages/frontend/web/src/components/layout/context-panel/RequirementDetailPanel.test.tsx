@@ -23,7 +23,13 @@ function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
 
 describe("RequirementDetailPanel 需求详情面板 (UI-04b-1)", () => {
   it("requirement 为 null:显示空态提示,不渲染阶梯/时间线", () => {
-    render(<RequirementDetailPanel requirement={null} />);
+    render(
+      <RequirementDetailPanel
+        requirement={null}
+        messages={[]}
+        members={[]}
+      />,
+    );
     expect(screen.getByTestId("requirement-detail-empty")).toHaveTextContent(
       "选择左侧一个需求查看详情",
     );
@@ -48,7 +54,13 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1)", () => {
         diffSummary: null,
       }),
     ]);
-    render(<RequirementDetailPanel requirement={requirement} />);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[]}
+      />,
+    );
     expect(screen.getByTestId("requirement-detail-panel")).toBeInTheDocument();
     // 标题取 Requirement.label(specRef 文件名去扩展名)。
     expect(screen.getByText("ui-04b")).toBeInTheDocument();
