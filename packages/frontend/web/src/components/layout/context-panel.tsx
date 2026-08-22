@@ -2,6 +2,7 @@ import {
   ChevronRight,
   Folder,
   ListChecks,
+  MessageCircle,
   PanelRight,
   Users,
 } from "lucide-react";
@@ -10,12 +11,14 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useIsDesktop } from "@/hooks/use-mobile";
+import { useMessagesPage } from "@/hooks/use-messages-page";
 import {
   readStoredPanelOpen,
   useContextPanelStore,
 } from "@/lib/stores/context-panel";
 import { cn } from "@/lib/utils";
 import { MembersTab } from "./context-panel/members-tab";
+import { MessagesTab } from "./context-panel/messages-tab";
 import { ProjectTab } from "./context-panel/project-tab";
 import { TasksTab } from "./context-panel/tasks-tab";
 
@@ -96,12 +99,20 @@ export function ContextPanelTrigger() {
 const TABS = [
   { id: "members", label: "成员与分工", icon: Users },
   { id: "tasks", label: "任务", icon: ListChecks },
+  { id: "messages", label: "消息", icon: MessageCircle },
   { id: "project", label: "项目", icon: Folder },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
 
-function PanelTabs({ groupId }: { groupId: string }) {
+function PanelTabs({
+  groupId,
+  stream,
+}: {
+  groupId: string;
+  /** 消息流 hook 实例(ContextPanel 顶层持有,见下)。 */
+  stream: ReturnType<typeof useMessagesPage>;
+}) {
   const [tab, setTab] = useState<TabId>("members");
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -137,6 +148,7 @@ function PanelTabs({ groupId }: { groupId: string }) {
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {tab === "members" && <MembersTab groupId={groupId} />}
         {tab === "tasks" && <TasksTab groupId={groupId} />}
+        {tab === "messages" && <MessagesTab stream={stream} />}
         {tab === "project" && <ProjectTab groupId={groupId} />}
       </div>
     </div>
@@ -146,7 +158,12 @@ function PanelTabs({ groupId }: { groupId: string }) {
 export default function ContextPanel({ groupId }: { groupId: string }) {
   const isDesktop = useIsDesktop();
   const { open, overlayOpen, setOverlayOpen } = useGroupContextPanel();
-  const tabs = <PanelTabs groupId={groupId} />;
+  // 消息流 hook 在 ContextPanel 顶层持有(组件本身始终挂载,不随 open/overlay
+  // 状态卸载):WS 实时订阅 / 桌面通知随群内页常驻 —— 即使面板收起(lg+ 返回
+  // null)或抽屉关闭,这些副作用也不丢失;消息 Tab 只是其 UI 之一。未读清零
+  // (markRead)不在此 —— 属消息页 GroupMessagesPage,进入成员页不应误清零。
+  const stream = useMessagesPage(groupId);
+  const tabs = <PanelTabs groupId={groupId} stream={stream} />;
 
   if (isDesktop) {
     // lg+ 常驻右栏:open=false(收起)时整体隐藏、主区占满;开合统一经标题栏

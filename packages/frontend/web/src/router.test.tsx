@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFetchMock,
@@ -38,6 +38,11 @@ function routerFetchMock() {
     },
     {
       match: (url) => url.includes("/api/groups/") && url.endsWith("/members"),
+      respond: () => jsonResponse([]),
+    },
+    {
+      // 主区需求工作区:GET /tasks(无任务 → 空态)。
+      match: (url) => url.includes("/api/groups/") && url.endsWith("/tasks"),
       respond: () => jsonResponse([]),
     },
   ]);
@@ -82,11 +87,16 @@ describe("路由", () => {
     ).toBeInTheDocument();
   });
 
-  it("/groups/:id 渲染群组消息流页", async () => {
+  it("/groups/:id 渲染群组页:主区需求工作区,消息流水在右栏「消息」Tab", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
+    // 群标题(来自 GET /api/groups/:id)。
     expect(await screen.findByText("群组消息流")).toBeInTheDocument();
+    // 主区:需求工作区(无任务 → TaskPanel 空态)。
+    expect(await screen.findByTestId("requirement-workspace")).toBeInTheDocument();
+    // 消息流水已搬进右栏「消息」Tab:打开后可见空态(无输入入口)。
+    fireEvent.click(screen.getByTestId("context-tab-messages"));
     expect(
       await screen.findByText("暂无消息,发送第一条吧"),
     ).toBeInTheDocument();
@@ -97,9 +107,10 @@ describe("路由", () => {
     renderWithProviders(<App />, "/groups/group-1");
 
     expect(await screen.findByTestId("context-panel")).toBeInTheDocument();
-    // 右栏三个 Tab 均存在
+    // 右栏 Tab:成员与分工 / 任务 / 消息 / 项目
     expect(screen.getByTestId("context-tab-members")).toBeInTheDocument();
     expect(screen.getByTestId("context-tab-tasks")).toBeInTheDocument();
+    expect(screen.getByTestId("context-tab-messages")).toBeInTheDocument();
     expect(screen.getByTestId("context-tab-project")).toBeInTheDocument();
   });
 

@@ -1,9 +1,12 @@
-import { Archive, ArrowLeft, Pencil, Search, X } from "lucide-react";
+import { Archive, ArrowLeft, Pencil } from "lucide-react";
+import { useEffect } from "react";
 import { useRoute } from "wouter";
 import { ContextPanelTrigger } from "@/components/layout/context-panel";
+import { RequirementWorkspace } from "@/components/layout/context-panel/requirement-workspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useMessagesPage } from "@/hooks/use-messages-page";
+import { useGroupHeader } from "@/hooks/use-group-header";
+import { markRead, setActiveGroupId } from "@/hooks/use-unread";
 import {
   PARTICIPANT_COLORS,
   colorForId as participantColor,
@@ -13,90 +16,39 @@ import { t } from "@/lib/i18n";
 // Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
 // `participantColor`/`PARTICIPANT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
 
-import { Composer } from "./Composer";
-import { MessageList } from "./MessageList";
-
 /**
- * Group message page (ticket 18): WeChat/QQ-style chat UI — three zones
- * (title bar / scrolling bubble stream / bottom composer). All state, effects
- * and handlers live in useMessagesPage — this component only parses the route,
- * calls the hook and wires MessageList / Composer.
+ * 群内页(需求主区改版):主区从「聊天流 + 输入框」改为「需求列表 | 需求详情」
+ * 两栏(RequirementWorkspace,与右栏任务 Tab 共享同一组件)。聊天流降级为右栏
+ * 上下文面板「消息」Tab 的只读流水(MessageList 无 Composer),消息搜索随流
+ * 一并搬入该 Tab;页面标题栏仅保留返回 / 群名改名 / 面板开关。群状态(归档/
+ * 软删)由 useGroupHeader 提供,驱动只读横幅。
  */
 export default function GroupMessagesPage() {
   const [, params] = useRoute("/groups/:id");
   const groupId = params?.id;
+
+  // Ticket 23: 进入消息页即清零该群侧栏未读徽标。常驻消息流 hook(右栏
+  // ContextPanel 顶层)不负责此项 —— 成员页也共享该面板,进入成员页不应误清零。
+  useEffect(() => {
+    if (!groupId) {
+      return;
+    }
+    setActiveGroupId(groupId);
+    markRead(groupId);
+  }, [groupId]);
+
   const {
-    messages,
-    members,
-    loading,
-    sending,
-    error,
-    testExecutor,
-    setTestExecutor,
     groupTitle,
     editingTitle,
     setEditingTitle,
     titleDraft,
     setTitleDraft,
     savingTitle,
-    body,
-    collapsedRootIds,
-    mention,
-    highlightIndex,
-    setHighlightIndex,
-    pendingCount,
-    replyTo,
-    setReplyTo,
-    openActionsId,
-    setOpenActionsId,
-    copiedId,
-    editingId,
-    savingEdit,
-    editBody,
-    setEditBody,
-    expandedIds,
-    toggleFold,
-    searchBoxOpen,
-    setSearchBoxOpen,
-    searchQuery,
-    setSearchQuery,
-    searchActive,
-    searchActiveQuery,
-    scrollRef,
-    textareaRef,
-    myParticipantId,
-    threadTree,
-    toggleCollapsed,
+    handleRenameTitle,
     isReadOnly,
     isDeleted,
-    handleRenameTitle,
-    handleSearch,
-    handleClearSearch,
-    handleStreamScroll,
-    handleJumpToBottom,
-    handleReply,
-    handleCopy,
-    handleEditStart,
-    handleEditSave,
-    handleEditCancel,
-    handleDelete,
-    handleSend,
-    executorMembers,
-    mentionCandidates,
-    insertMention,
-    handleBodyChange,
-    handleComposerKeyDown,
-    audiencePreview,
-  } = useMessagesPage(groupId);
-
-  // Reviewer spec §3.9(票 10):当前绑定的身份在本群持 `human` 角色 → 消息页
-  // 无发言入口,以引导文案替代 Composer(与后端 403 语义对齐)。其他身份(含
-  // coordinator/executor/reviewer 等 agent 身份)保留输入能力,非全局只读。
-  // 身份未绑定或不在成员列表时视为可输入(后端会按成员资格自行拦截)。
-  const isHumanMuted =
-    members.find((m) => m.participantId === myParticipantId)?.roles.includes(
-      "human",
-    ) ?? false;
+    error,
+  } = useGroupHeader(groupId);
 
   return (
     <div className="mx-auto flex h-[calc(100dvh-4rem)] w-full max-w-[1440px] flex-col px-4 sm:px-6">
@@ -165,71 +117,8 @@ export default function GroupMessagesPage() {
             )}
           </h2>
         )}
-        {searchBoxOpen ? (
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Input
-              type="text"
-              autoFocus
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleSearch();
-                } else if (e.key === "Escape") {
-                  setSearchBoxOpen(false);
-                }
-              }}
-              placeholder={t("messages.search.placeholder")}
-              aria-label={t("messages.search.aria")}
-              className="w-44 sm:w-64"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t("messages.search.clearAria")}
-              title={t("messages.search.clearAria")}
-              onClick={() => {
-                handleClearSearch();
-                setSearchBoxOpen(false);
-              }}
-              className="shrink-0"
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
-        ) : (
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={t("messages.search.aria")}
-            title={t("messages.search.aria")}
-            onClick={() => setSearchBoxOpen(true)}
-            className="shrink-0"
-          >
-            <Search className="size-4" />
-          </Button>
-        )}
         <ContextPanelTrigger />
       </div>
-
-      {searchActive && (
-        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm text-muted-foreground">
-          <span className="min-w-0 truncate">
-            {t("messages.search.label")}{" "}
-            <span className="font-medium text-foreground">
-              {searchActiveQuery}
-            </span>
-          </span>
-          <button
-            type="button"
-            onClick={handleClearSearch}
-            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <X className="size-3.5" />
-            {t("common.clear")}
-          </button>
-        </div>
-      )}
 
       {isReadOnly && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
@@ -246,62 +135,11 @@ export default function GroupMessagesPage() {
         </div>
       )}
 
-      <MessageList
-        loading={loading}
-        messages={messages}
-        members={members}
-        myParticipantId={myParticipantId}
-        readOnly={isReadOnly}
-        expandedIds={expandedIds}
-        collapsedRootIds={collapsedRootIds}
-        threadTree={threadTree}
-        openActionsId={openActionsId}
-        setOpenActionsId={setOpenActionsId}
-        copiedId={copiedId}
-        editingId={editingId}
-        savingEdit={savingEdit}
-        editBody={editBody}
-        setEditBody={setEditBody}
-        scrollRef={scrollRef}
-        handleStreamScroll={handleStreamScroll}
-        pendingCount={pendingCount}
-        handleJumpToBottom={handleJumpToBottom}
-        handleReply={handleReply}
-        handleCopy={handleCopy}
-        handleEditStart={handleEditStart}
-        handleEditSave={handleEditSave}
-        handleEditCancel={handleEditCancel}
-        handleDelete={handleDelete}
-        toggleCollapsed={toggleCollapsed}
-        toggleFold={toggleFold}
-      />
-      {isHumanMuted ? (
-        <div
-          data-testid="composer-readonly-guide"
-          className="shrink-0 border-t bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
-        >
-          {t("messages.readOnly.human")}
-        </div>
-      ) : (
-        <Composer
-          body={body}
-          mention={mention}
-          mentionCandidates={mentionCandidates}
-          highlightIndex={highlightIndex}
-          setHighlightIndex={setHighlightIndex}
-          replyTo={replyTo}
-          setReplyTo={setReplyTo}
-          sending={sending}
-          isReadOnly={isReadOnly}
-          audiencePreview={audiencePreview}
-          textareaRef={textareaRef}
-          handleBodyChange={handleBodyChange}
-          handleComposerKeyDown={handleComposerKeyDown}
-          handleSend={handleSend}
-          insertMention={insertMention}
-          testExecutor={testExecutor}
-          setTestExecutor={setTestExecutor}
-          executorMembers={executorMembers}
+      {/* ── Zone 2: 需求主区(需求列表 | 需求详情两栏,含停止/回滚控制条)── */}
+      {groupId && (
+        <RequirementWorkspace
+          groupId={groupId}
+          listClassName="min-w-48 w-96 shrink"
         />
       )}
     </div>

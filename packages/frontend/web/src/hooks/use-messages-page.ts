@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
+import { useGroupHeader } from "@/hooks/use-group-header";
 import {
   mergeGroupMessages,
   useGroupWs,
   type WsGroupEvent,
 } from "@/hooks/use-group-ws";
 import {
-  markRead,
-  setActiveGroupId,
   updateLastMessage,
 } from "@/hooks/use-unread";
 import {
@@ -49,14 +48,10 @@ export function useMessagesPage(groupId: string | undefined) {
   // "same"(同一执行器)/ participantId(显式指定成员)。显式选择在发送时往 body
   // 追加一行「**测试执行器:<名>**」,由 buildTicket 原样保留进任务书。
   const [testExecutor, setTestExecutor] = useState<string>("auto");
-  const [groupStatus, setGroupStatus] = useState<
-    "active" | "archived" | "deleted" | null
-  >(null);
-  const [groupTitle, setGroupTitle] = useState<string | null>(null);
-  // 群名行内改名(网页体验批次):标题栏铅笔图标 → 输入 → PATCH /groups/:id {title}。
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
-  const [savingTitle, setSavingTitle] = useState(false);
+  // 群标题 / 群状态 / 行内改名与页面头部共享同一实现(useGroupHeader):消息
+  // 流已搬进右栏消息 Tab,不再渲染页面头部,但桌面通知(群标题)与只读判定
+  // (归档/软删)仍需要这两份数据。
+  const header = useGroupHeader(groupId);
   const [body, setBody] = useState("");
   // Collapsed thread roots (ticket 15). Keyed by root message id and kept in
   // its own state so a WS merge (which replaces the message list) never resets
@@ -159,7 +154,7 @@ export function useMessagesPage(groupId: string | undefined) {
   // fired from the socket callback must read the live values, not the ones
   // captured at mount.
   const groupTitleRef = useRef<string | null>(null);
-  groupTitleRef.current = groupTitle;
+  groupTitleRef.current = header.groupTitle;
   const membersRef = useRef<Member[]>([]);
   membersRef.current = members;
   const myParticipantIdRef = useRef<string | null>(null);
@@ -169,65 +164,7 @@ export function useMessagesPage(groupId: string | undefined) {
   // non-active group with 400): fetch the single-group status so the page can
   // render a banner and lock the composer (history stays browsable). The same
   // response carries the title for the chat header.
-  const loadGroup = useCallback(async () => {
-    if (!groupId) {
-      return;
-    }
-    try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantIdentityHeaders(),
-      });
-      if (!res.ok) {
-        return;
-      }
-      const group = (await res.json()) as {
-        status: "active" | "archived" | "deleted";
-        title?: string;
-      };
-      setGroupStatus(group.status);
-      if (group.title) {
-        setGroupTitle(group.title);
-      }
-    } catch {
-      // Status is only needed for the read-only banner; a failure just leaves
-      // the composer unlocked (the server still enforces the 400 on writes).
-    }
-  }, [groupId]);
-
-  /** 群名行内改名(网页体验批次):标题栏铅笔图标 → 输入 → PATCH /groups/:id
-   *  {title};仅 active 群可改名(归档/软删只读)。 */
-  const handleRenameTitle = async () => {
-    const title = titleDraft.trim();
-    if (!groupId || !title || savingTitle || isReadOnly) {
-      return;
-    }
-    setSavingTitle(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
-        },
-        body: JSON.stringify({ title }),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      setGroupTitle(title);
-      setEditingTitle(false);
-    } catch (e) {
-      setError(
-        t("groups.error.renameFailed", {
-          detail: e instanceof Error ? e.message : String(e),
-        }),
-      );
-    } finally {
-      setSavingTitle(false);
-    }
-  };
-
+  // (已随头部数据一并移入 useGroupHeader,此处仅保留消息流自身的加载。)
   const loadMessages = useCallback(
     async (q?: string) => {
       if (!groupId) {
@@ -336,21 +273,12 @@ export function useMessagesPage(groupId: string | undefined) {
     }
   }, [groupId]);
   useEffect(() => {
-    loadGroup();
     loadMessages();
     loadMembers();
-  }, [loadGroup, loadMessages, loadMembers]);
+  }, [loadMessages, loadMembers]);
 
-  // Ticket 23: opening a group marks its sidebar badge read. The unread store
-  // clears the badge when the group becomes active; the explicit markRead also
-  // wipes any frame that slipped in between navigation and this effect.
-  useEffect(() => {
-    if (!groupId) {
-      return;
-    }
-    setActiveGroupId(groupId);
-    markRead(groupId);
-  }, [groupId]);
+  // Ticket 23 的 markRead / setActiveGroupId 已随消息 hook 常驻化移出:进入
+  // 消息页(GroupMessagesPage)时清零未读,成员页(仅共享右栏面板)不再误清零。
 
   // Live updates (ticket 14): the WS hub pushes every group message frame for
   // this group (including the sender's own echo). Merge new messages by id so
@@ -494,8 +422,8 @@ export function useMessagesPage(groupId: string | undefined) {
   // Lock the composer for every non-active status (archived or soft-deleted):
   // the backend rejects writes to either with 400, so the UI must not offer
   // the send affordance at all. `null` (status not yet loaded) stays unlocked.
-  const isReadOnly = groupStatus !== null && groupStatus !== "active";
-  const isDeleted = groupStatus === "deleted";
+  // (只读判定与页面头部共享:统一来自 useGroupHeader,MessageList 经返回的
+  // isReadOnly/isDeleted 读取。)
 
   const handleSend = async () => {
     const trimmed = body.trim();
@@ -867,13 +795,13 @@ export function useMessagesPage(groupId: string | undefined) {
     error,
     testExecutor,
     setTestExecutor,
-    groupStatus,
-    groupTitle,
-    editingTitle,
-    setEditingTitle,
-    titleDraft,
-    setTitleDraft,
-    savingTitle,
+    groupStatus: header.groupStatus,
+    groupTitle: header.groupTitle,
+    editingTitle: header.editingTitle,
+    setEditingTitle: header.setEditingTitle,
+    titleDraft: header.titleDraft,
+    setTitleDraft: header.setTitleDraft,
+    savingTitle: header.savingTitle,
     body,
     collapsedRootIds,
     mention,
@@ -902,9 +830,9 @@ export function useMessagesPage(groupId: string | undefined) {
     myParticipantId,
     threadTree,
     toggleCollapsed,
-    isReadOnly,
-    isDeleted,
-    handleRenameTitle,
+    isReadOnly: header.isReadOnly,
+    isDeleted: header.isDeleted,
+    handleRenameTitle: header.handleRenameTitle,
     handleSearch,
     handleClearSearch,
     handleStreamScroll,

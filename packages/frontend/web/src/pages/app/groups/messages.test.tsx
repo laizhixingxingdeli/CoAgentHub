@@ -11,7 +11,9 @@ import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
+import { CONTEXT_PANEL_OPEN_KEY } from "@/components/layout/context-panel";
 import GroupLayout from "@/components/layout/group-layout";
+import GroupMembersPage from "@/pages/app/groups/members";
 import { __resetUnreadStore, useUnread } from "@/hooks/use-unread";
 import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { __resetNotificationState } from "@/lib/notifications";
@@ -201,6 +203,11 @@ function messagesFetchMock(
         String(url).endsWith("/members"),
       respond: () => jsonResponse(members),
     },
+    {
+      // 成员页(GroupMembersPage)的加成员表单候选。
+      match: (url) => String(url).endsWith("/api/participants"),
+      respond: () => jsonResponse([]),
+    },
   ]);
 }
 
@@ -233,22 +240,10 @@ const TASKS = [
   },
 ];
 
-describe("任务面板(任务控制 UI,右栏任务 Tab) — 主从两栏 (UI-04b-2)", () => {
-  /** 三栏布局渲染(右栏 lg+ 常驻),切到「任务」Tab 打开任务面板。 */
-  const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
-    stubFetch(mock);
-    renderWithProviders(
-      <GroupLayout groupId="group-1">
-        <GroupMessagesPage />
-      </GroupLayout>,
-      "/groups/group-1",
-    );
-  };
-
+describe("需求工作区(群内页主区两栏,UI-04b-2) — 主从两栏", () => {
+  /** 等待主区需求工作区渲染(共享组件根;任务数据异步加载由后续 findBy 等待)。 */
   const openTasksTab = async () => {
-    await screen.findByText("任务草稿");
-    fireEvent.click(screen.getByTestId("context-tab-tasks"));
-    await screen.findByTestId("tasks-tab");
+    await screen.findByTestId("requirement-workspace");
   };
 
   /** 选中左侧某条需求(无 specRef 时需求 id = 任务 id)。 */
@@ -256,7 +251,7 @@ describe("任务面板(任务控制 UI,右栏任务 Tab) — 主从两栏 (UI-04
     fireEvent.click(await screen.findByTestId(`requirement-row-${id}`));
   };
 
-  it("打开面板:左列表(各需求)+ 右详情 + 控制条;选中需求显示对应任务的停止/回滚", async () => {
+  it("主区两栏:左列表(各需求)+ 右详情 + 控制条;选中需求显示对应任务的停止/回滚", async () => {
     renderGroupPage(
       messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
     );
@@ -267,9 +262,14 @@ describe("任务面板(任务控制 UI,右栏任务 Tab) — 主从两栏 (UI-04
       await screen.findByTestId("requirement-row-task-1"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("requirement-row-task-2")).toBeInTheDocument();
-    // 右:详情面板(阶梯 + 时间线)+ 控制条。
-    expect(screen.getByTestId("requirement-detail-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
+    // 右:详情面板(阶梯 + 时间线)+ 控制条。默认选中最新需求,选中态经 effect
+    // 生效,故详情/控制条用 findBy 等待。
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-control-bar"),
+    ).toBeInTheDocument();
 
     // 默认选中最新需求(task-2,done + checkpointRef)→ 控制条显示回滚。
     expect(screen.getByTestId("task-rollback-task-2")).toBeInTheDocument();
@@ -415,6 +415,124 @@ function lastPostPayload(fetchMock: ReturnType<typeof createFetchMock>) {
   expect(call).toBeDefined();
   return JSON.parse(String(call![1]?.body)) as Record<string, unknown>;
 }
+
+/**
+ * 渲染完整三栏群内页(GroupLayout 提供右栏 ContextPanel)。聊天流已从主区搬进
+ * 右栏「消息」Tab —— 断言消息流/气泡的用例统一经此渲染 + openMessagesTab。
+ */
+const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
+  stubFetch(mock);
+  renderWithProviders(
+    <GroupLayout groupId="group-1">
+      <GroupMessagesPage />
+    </GroupLayout>,
+    "/groups/group-1",
+  );
+  return mock;
+};
+
+/** 打开右栏「消息」Tab(只读消息流水),等待流容器渲染。 */
+const openMessagesTab = async () => {
+  fireEvent.click(screen.getByTestId("context-tab-messages"));
+  await screen.findByTestId("message-stream");
+};
+
+/**
+ * 消息流 hook 的 WS 连接 = 最后一个实例:useMessagesPage 在 ContextPanel 顶层
+ * 常驻(面板挂载即建连,与消息 Tab 是否打开无关),晚于主区需求工作区的连接
+ * 创建;本套件无其它组件在渲染后追加 WS 连接,故 at(-1) 即消息流连接。
+ * frame 推到工作区连接会被忽略(它只收 task_output/task_stall_alert)。
+ * (依赖创建顺序,新增会开 WS 的组件时需复查。)
+ */
+const messagesWs = () => MockWebSocket.instances.at(-1)!;
+
+/** 消息 Tab 内的流作用域:主区/成员 Tab 会渲染同名成员名与角色徽章,断言
+ * 昵称/角色需限定在流内避免 getByText 多匹配。 */
+const stream = () => within(screen.getByTestId("message-stream"));
+
+/* ---------------- 群内页主区改版(消息主区 → 需求两栏) ---------------- */
+
+describe("群内页主区改版:需求两栏 + 只读消息 Tab", () => {
+  it("主区渲染「需求列表 | 需求详情」两栏与控制条;不再渲染消息流/输入框", async () => {
+    renderGroupPage(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
+    );
+
+    // 主区两栏直接渲染(无需切换任何 Tab)。
+    expect(
+      await screen.findByTestId("requirement-workspace"),
+    ).toBeInTheDocument();
+    expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
+    // 详情/控制条依赖默认选中态(effect 生效),用 findBy 等待。
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
+    // 停止/回滚控制条完整保留(UI-04b-2 那票保住的,搬家后不能丢)。
+    expect(
+      await screen.findByTestId("requirement-control-bar"),
+    ).toBeInTheDocument();
+    // 主区不再是聊天流:消息流只在右栏「消息」Tab(未激活不渲染),无输入框/发送按钮。
+    expect(screen.queryByTestId("message-stream")).toBeNull();
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+  });
+
+  it("主区控制条仍可用:选中 running 需求可停止,done+checkpoint 需求可回滚", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
+    const mock = renderGroupPage(
+      messagesFetchMock(MESSAGES, MEMBERS, "active", { tasks: TASKS }),
+    );
+    await screen.findByTestId("requirement-workspace");
+
+    // 默认选中最新需求(task-2,done + checkpointRef)→ 回滚可用。
+    fireEvent.click(await screen.findByTestId("requirement-row-task-2"));
+    fireEvent.click(screen.getByTestId("task-rollback-task-2"));
+    await waitFor(() => {
+      const call = mock.mock.calls.find(
+        ([url, init]) =>
+          init?.method === "POST" && String(url).endsWith("/messages"),
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse(String(call![1]?.body)).body).toBe("回滚 task-2");
+    });
+
+    // 选中 running 的 task-1 → 停止可用,点击发出「停止 task-1」。
+    fireEvent.click(screen.getByTestId("requirement-row-task-1"));
+    fireEvent.click(screen.getByTestId("task-stop-task-1"));
+    await waitFor(() => {
+      const stops = mock.mock.calls.filter(
+        ([url, init]) =>
+          init?.method === "POST" && String(url).endsWith("/messages"),
+      );
+      expect(stops.length).toBe(2);
+      expect(JSON.parse(String(stops[1][1]?.body)).body).toBe("停止 task-1");
+    });
+  });
+
+  it("消息 Tab:只读消息流水可见,无 Composer 输入框", async () => {
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
+
+    await screen.findByText("任务草稿");
+    // 流水(气泡/发送者)可见,但没有任何消息输入入口(只读)。
+    expect(screen.getByText("修正意见")).toBeInTheDocument();
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+  });
+
+  it("面板收起(lg+ 隐藏右栏)时消息流订阅仍在:重新展开后流水已就绪", async () => {
+    // 持久化收起状态:lg+ 右栏整体隐藏,但 ContextPanel 组件本身常驻挂载,
+    // 其顶层持有的消息流 hook(WS/通知/未读清零)不随面板收起而卸载。
+    localStorage.setItem(CONTEXT_PANEL_OPEN_KEY, "false");
+    renderGroupPage(messagesFetchMock());
+
+    expect(screen.queryByTestId("context-panel")).toBeNull();
+    // 重新展开面板 → 打开消息 Tab → 流水已就绪(收起期间数据链路未断)。
+    fireEvent.click(screen.getByRole("button", { name: "打开面板" }));
+    fireEvent.click(screen.getByTestId("context-tab-messages"));
+    expect(await screen.findByText("任务草稿")).toBeInTheDocument();
+  });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -643,8 +761,8 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
         30,
       ).toISOString(),
     };
-    stubFetch(messagesFetchMock([todayMsg, oldMsg]));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock([todayMsg, oldMsg]));
+    await openMessagesTab();
 
     await screen.findByText("今天的气泡");
     expect(screen.getByText("早些的气泡")).toBeInTheDocument();
@@ -666,10 +784,11 @@ describe("GroupMessagesPage 可读性 (ticket 32)", () => {
     const expectedOld = formatMessageTime(oldMsg.createdAt);
     expect(screen.getByText(expectedOld)).toBeInTheDocument();
 
-    // ③ 信息行:昵称 + 角色徽章(词典渲染:协调者/检视者)
-    expect(screen.getByText("hermes-mac")).toBeInTheDocument();
-    expect(screen.getByText("协调者")).toBeInTheDocument();
-    expect(screen.getByText("检视者")).toBeInTheDocument();
+    // ③ 信息行:昵称 + 角色徽章(词典渲染:协调者/检视者)。成员 Tab(默认右栏)
+    // 也渲染同名昵称与角色徽章,故限定在消息流作用域内断言。
+    expect(stream().getByText("hermes-mac")).toBeInTheDocument();
+    expect(stream().getByText("协调者")).toBeInTheDocument();
+    expect(stream().getByText("检视者")).toBeInTheDocument();
   });
 });
 
@@ -695,8 +814,8 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
   ];
 
   it("带 fileRef 的消息渲染文件卡片:名称/大小/下载链接(新标签页)", async () => {
-    stubFetch(messagesFetchMock(FILE_MESSAGES));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(FILE_MESSAGES));
+    await openMessagesTab();
 
     expect(await screen.findByText("trained-model.bin")).toBeInTheDocument();
     // 5 MiB -> 5.0 MB(1 KB = 1024 B)
@@ -710,8 +829,8 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
   });
 
   it("消息体为空时只显示文件卡片,不渲染空消息体", async () => {
-    stubFetch(messagesFetchMock(FILE_MESSAGES));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(FILE_MESSAGES));
+    await openMessagesTab();
 
     await screen.findByText("trained-model.bin");
     // body 为空:文件卡片在,但气泡里没有单独的文本段
@@ -720,7 +839,7 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
   });
 
   it("文件大小人性化格式化:KB 与 B", async () => {
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "msg-file-kb",
@@ -741,7 +860,8 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     expect(await screen.findByText("note.txt")).toBeInTheDocument();
     // 2048 B -> 2.0 KB
@@ -753,8 +873,8 @@ describe("GroupMessagesPage 文件信令卡片 (ticket 05)", () => {
 
 describe("GroupMessagesPage 消息流与气泡布局", () => {
   it("渲染消息列表与发送者标识(名/设备)与时间", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
     expect(screen.getByText("修正意见")).toBeInTheDocument();
@@ -768,8 +888,8 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
   });
 
   it("子消息在父气泡下方以回复串缩进展示", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("修正意见");
     const root = screen.getByText("任务草稿").closest("li");
@@ -779,8 +899,8 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
   });
 
   it("无消息时显示空态(图标 + 引导文案)", async () => {
-    stubFetch(messagesFetchMock([]));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock([]));
+    await openMessagesTab();
 
     const empty = await screen.findByText("暂无消息,发送第一条吧");
     // 居中图标 + @ 角色/成员引导副文案。
@@ -824,8 +944,8 @@ describe("GroupMessagesPage 消息流与气泡布局", () => {
 describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
   it("绑定 participantId 后自己的消息靠右(蓝气泡 + 我 徽章),他人靠左", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
 
@@ -866,8 +986,8 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
   });
 
   it("未绑定 participantId 时所有消息默认靠左、不显示「我」徽章", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     const own = screen.getByText("任务草稿").closest("li");
@@ -877,10 +997,14 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
   });
 });
 
-describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
+// Composer 已从群内页移除(聊天流降级为右栏「消息」Tab 的只读流水,无输入
+// 入口),@ 提及输入、发送 payload、测试执行器下拉等 Composer 交互能力随之
+// 下线。这些用例保留为能力记录(describe.skip 不删除),待下一票决定这些
+// 能力的去留。
+describe.skip("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   it("输入 @ 弹出候选列表:角色名 + 群成员 name", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("@");
@@ -897,8 +1021,8 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   });
 
   it("按前缀过滤候选,点击选项插入 @名字", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("@herm");
@@ -915,8 +1039,8 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   });
 
   it("键盘选择:方向键移动高亮,回车插入", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const textarea = typeMessage("@");
@@ -934,8 +1058,8 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   });
 
   it("Escape 关闭候选列表", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const textarea = typeMessage("@");
@@ -945,8 +1069,8 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   });
 
   it("发送前显示解析结果预览(role / participant / broadcast)", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const preview = () => screen.getByTestId("audience-preview").textContent;
@@ -965,10 +1089,10 @@ describe("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
   });
 });
 
-describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
+describe.skip("GroupMessagesPage 发送 payload (ticket 18)", () => {
   it("@<角色名> → audience=role + audienceRef=角色名", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("@reviewer 请评审");
@@ -984,8 +1108,8 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   });
 
   it("@<成员 name> → audience=participant + audienceRef=participantId", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("@win-hermes 只给你");
@@ -1001,8 +1125,8 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   });
 
   it("无 @ → 默认广播 audience=broadcast", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("执行最终版");
@@ -1017,8 +1141,8 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   });
 
   it("未命中候选的 @xxx 按普通文本 → audience=broadcast(正文保留)", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     typeMessage("@nobody 大家好");
@@ -1033,8 +1157,8 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   });
 
   it("Enter 发送 / Shift+Enter 换行保留", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const textarea = screen.getByLabelText("消息内容");
@@ -1063,7 +1187,7 @@ describe("GroupMessagesPage 发送 payload (ticket 18)", () => {
   }
 });
 
-describe("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () => {
+describe.skip("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () => {
   /** 含 executor 角色成员,供「测试执行器」下拉显式选择。 */
   const EXEC_MEMBERS = [
     {
@@ -1138,8 +1262,8 @@ describe("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () =>
   });
 
   it("下拉候选 = 群内 executor/specialist 角色成员", async () => {
-    stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const options = Array.from(
@@ -1153,34 +1277,29 @@ describe("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () =>
 });
 
 describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
-  it("已归档群组渲染只读横幅并禁用发送输入(历史仍可查看)", async () => {
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  it("已归档群组渲染只读横幅;历史仍可查看;全页无消息输入框", async () => {
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
+    await openMessagesTab();
 
     // Banner appears (the single-group status fetch drives it).
     expect(
       await screen.findByText(/该群组已归档,处于只读状态/),
     ).toBeInTheDocument();
 
-    // History is still browsable — messages render normally.
+    // History is still browsable — messages render in the messages tab.
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
     expect(screen.getByText("修正意见")).toBeInTheDocument();
 
-    // Composer is locked: textarea + send button disabled(@ 输入随之禁用).
-    expect(screen.getByLabelText("消息内容")).toBeDisabled();
-    const sendButton = screen.getByRole("button", { name: "发送" });
-    expect(sendButton).toBeDisabled();
-    // The archived placeholder hints at the read-only state.
-    expect(
-      screen.getByLabelText<HTMLTextAreaElement>("消息内容").placeholder,
-    ).toBe("已归档,无法发送消息");
+    // Composer 已从群内页移除:全页无消息输入框/发送按钮(不只归档群)。
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
   });
 
   it("已归档群组:消息编辑/回复/删除按钮禁用并提示「群已归档,只读」", async () => {
     // 绑定自己的身份(消息发送者),让编辑/删除按钮出现 —— 归档只读下应禁用。
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
+    await openMessagesTab();
 
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
 
@@ -1202,22 +1321,21 @@ describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
     ).not.toBeDisabled();
   });
 
-  it("进行中群组不显示只读横幅,输入可用", async () => {
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS, "active"));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  it("进行中群组不显示只读横幅,无消息输入框", async () => {
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "active"));
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     expect(screen.queryByText(/该群组已归档,处于只读状态/)).toBeNull();
-    expect(screen.getByLabelText("消息内容")).not.toBeDisabled();
-    // The send button enables once a message is typed (unlike the archived
-    // page, where it stays disabled even with content).
-    const textarea = screen.getByLabelText("消息内容");
-    fireEvent.change(textarea, { target: { value: "恢复后可继续" } });
-    expect(screen.getByRole("button", { name: "发送" })).not.toBeDisabled();
+    // Composer 已移除:即使 active 群也没有消息输入框。
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
   });
 });
 
-describe("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
+// Composer 已从群内页移除:身份禁言(人身份无发言入口 + 引导文案)这一
+// Composer 层能力随之失效(群内页现在本就没有任何消息输入入口)。用例保留
+// 为能力记录,待下一票决定其去留。
+describe.skip("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
   /** 当前绑定的身份(human-1)在本群持 human 角色 —— 与 MEMBERS 里已有的
    *  coordinator/reviewer 成员并存,验证只按「当前身份的角色」判定。 */
   const HUMAN_MEMBERS = [
@@ -1233,8 +1351,8 @@ describe("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
 
   it("当前身份在本群持 human 角色:Composer 输入入口不渲染,引导文案可见", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "human-1");
-    stubFetch(messagesFetchMock(MESSAGES, HUMAN_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(MESSAGES, HUMAN_MEMBERS));
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     // 无任何发言入口:textarea / 发送按钮 / 测试执行器下拉都不渲染。
@@ -1252,8 +1370,8 @@ describe("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
 
   it("当前身份持非 human 角色(coordinator):Composer 正常可用,无引导文案", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    stubFetch(messagesFetchMock(MESSAGES, MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS));
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     expect(screen.getByLabelText("消息内容")).toBeInTheDocument();
@@ -1288,16 +1406,18 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   it("WS 推送的 group_message 实时追加到消息流(无需刷新)", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     // Mount-time full load renders first, then the live push lands on top.
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
-    pushMessage(MockWebSocket.instances[0], "实时新消息", "msg-ws-1");
+    pushMessage(messagesWs(), "实时新消息", "msg-ws-1");
     expect(await screen.findByText("实时新消息")).toBeInTheDocument();
   });
 
-  it("WS 回显与发送后 reload 不重复(按 id 去重)", async () => {
+  // Composer 已从群内页移除(消息 Tab 只读):发送后 reload 与 WS 回显去重
+  // 依赖发送链路,随之下线。保留为能力记录,待下一票决定这些能力的去留。
+  it.skip("WS 回显与发送后 reload 不重复(按 id 去重)", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     let reloads = 0;
@@ -1355,18 +1475,18 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
     });
 
     // The WS echo of the same message arrives afterwards — still one row.
-    pushMessage(MockWebSocket.instances[0], "已发送", "msg-9");
+    pushMessage(messagesWs(), "已发送", "msg-9");
     expect(screen.getAllByText("已发送")).toHaveLength(1);
   });
 
   it("其它群组的 group_message 帧不追加", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     expect(await screen.findByText("任务草稿")).toBeInTheDocument();
-    const ws = MockWebSocket.instances[0];
+    const ws = messagesWs();
     act(() =>
       ws.receive(
         JSON.stringify({
@@ -1462,8 +1582,8 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   ];
 
   it("渲染树:根显示折叠按钮与后代计数 badge,默认展开;子消息不渲染自身折叠按钮", async () => {
-    stubFetch(messagesFetchMock(THREAD));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(THREAD));
+    await openMessagesTab();
 
     // 默认展开:整棵子树立即可见,无需任何交互
     expect(await screen.findByText("根消息")).toBeInTheDocument();
@@ -1492,8 +1612,8 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   });
 
   it("折叠隐藏整棵子树(含嵌套孙消息),再次点击恢复展开", async () => {
-    stubFetch(messagesFetchMock(THREAD));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(THREAD));
+    await openMessagesTab();
     await screen.findByText("孙消息");
 
     fireEvent.click(screen.getByRole("button", { name: "折叠" }));
@@ -1513,8 +1633,8 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   });
 
   it("parentId 不在加载列表的消息按 depth 扁平渲染,不丢弃", async () => {
-    stubFetch(messagesFetchMock(THREAD));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(THREAD));
+    await openMessagesTab();
 
     expect(await screen.findByText("孤儿消息")).toBeInTheDocument();
     const orphan = screen.getByText("孤儿消息").closest("li");
@@ -1524,8 +1644,8 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
   it("WS 追加后折叠状态保持,计数 badge 即使折叠中也更新", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock(THREAD));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(THREAD));
+    await openMessagesTab();
 
     await screen.findByText("孙消息");
     fireEvent.click(screen.getByRole("button", { name: "折叠" }));
@@ -1533,7 +1653,7 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
 
     // WS 推入一条 t-root 下的新回复:折叠不被打断,badge 3 -> 4
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         JSON.stringify({
           type: "group_message",
           groupId: "group-1",
@@ -1561,9 +1681,9 @@ describe("GroupMessagesPage 树形折叠/展开 (ticket 15)", () => {
 });
 
 describe("GroupMessagesPage 窄屏渲染 (ticket 18)", () => {
-  it("窄视口下三区布局可用:标题栏 / 滚动消息区 / 贴底输入区", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  it("窄视口下布局可用:标题栏 / 消息 Tab 内的滚动消息区;无消息输入框", async () => {
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     // 标题栏
     expect(await screen.findByText("评审任务")).toBeInTheDocument();
@@ -1573,9 +1693,9 @@ describe("GroupMessagesPage 窄屏渲染 (ticket 18)", () => {
       screen.getByText("任务草稿").closest("li")?.querySelector("p")
         ?.textContent,
     ).toBe("任务草稿");
-    // 贴底输入区:输入框 + 发送按钮都在
-    expect(screen.getByLabelText("消息内容")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    // Composer 已从主区移除:全页无输入框/发送按钮。
+    expect(screen.queryByLabelText("消息内容")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
     // 气泡有响应式 max-width(sm 断点从 85% 收窄到 75%)且宽度贴合内容
     const bubble = screen
       .getByText("任务草稿")
@@ -1587,9 +1707,11 @@ describe("GroupMessagesPage 窄屏渲染 (ticket 18)", () => {
 });
 
 describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
-  it("输入区布局:textarea 全宽、受众预览可截断、发送按钮固定不挤压", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  // Composer 已从群内页移除(消息 Tab 只读,无输入区):输入区布局断言失去
+  // 意义。保留为能力记录,待下一票决定 Composer 相关能力的去留。
+  it.skip("输入区布局:textarea 全宽、受众预览可截断、发送按钮固定不挤压", async () => {
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     expect(screen.getByLabelText("消息内容").className).toContain("w-full");
@@ -1605,8 +1727,8 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
   });
 
   it("操作条双形态:桌面 hover 条 md:flex,移动点击条 md:hidden", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const hoverBars = screen.getAllByTestId("message-actions-hover");
@@ -1633,11 +1755,21 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
 
   it("回复缩进钳制:浅回复按层级缩进,深回复(≥4 层)不再外推", async () => {
     // 默认 fixture:msg-2 是 depth 1 的回复 → 16px 缩进。
+    // 本用例需在同一测试内渲染两棵页面树,第一棵断言后必须卸载,否则 DOM 中
+    // 同时存在两套右栏面板(openMessagesTab 的 getByTestId 会多匹配)。
+    // stubFetch 必须在 render 之前(挂载即发起消息拉取)。
     stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const first = renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMessagesPage />
+      </GroupLayout>,
+      "/groups/group-1",
+    );
+    await openMessagesTab();
     await screen.findByText("任务草稿");
     const shallow = document.querySelector('[data-message-id="msg-2"]');
     expect((shallow as HTMLElement).style.paddingLeft).toBe("16px");
+    first.unmount();
 
     // 深回复 depth 6 → 钳制在 64px(而非 96px),窄屏下保留气泡空间。
     const deep = [
@@ -1653,8 +1785,8 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
         createdAt: "2026-08-01T00:10:00.000Z",
       },
     ];
-    stubFetch(messagesFetchMock(deep));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(deep));
+    await openMessagesTab();
     await screen.findByText("深回复");
     const deepRow = document.querySelector('[data-message-id="deep-1"]');
     expect((deepRow as HTMLElement).style.paddingLeft).toBe("64px");
@@ -1664,9 +1796,11 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
 describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
   const rowOf = (body: string) => screen.getByText(body).closest("li");
 
-  it("点回复 → 引用条出现(发送者名 + 正文前 30 字),发送带 parentId,成功后引用条清除", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  // Composer 已从群内页移除(消息 Tab 只读):回复引用条(Composer 层 UI)与
+  // 其 parentId 发送链路下线。保留为能力记录,待下一票决定这些能力的去留。
+  it.skip("点回复 → 引用条出现(发送者名 + 正文前 30 字),发送带 parentId,成功后引用条清除", async () => {
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     // 回复 msg-1(participant-1 的「任务草稿」)
@@ -1699,9 +1833,11 @@ describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
     });
   });
 
-  it("取消回复关闭引用条,后续发送不带 parentId", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+  // Composer 已从群内页移除(消息 Tab 只读):「取消回复」关闭引用条同样依赖
+  // Composer 层。保留为能力记录,待下一票决定这些能力的去留。
+  it.skip("取消回复关闭引用条,后续发送不带 parentId", async () => {
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(
@@ -1724,8 +1860,8 @@ describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
   it("点复制 → navigator.clipboard.writeText 被调用并短暂显示「已复制」", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(
@@ -1740,8 +1876,8 @@ describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
   });
 
   it("移动端:点击气泡弹出操作条,点击外部关闭", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     // 初始只有桌面悬停条,无移动端操作条
@@ -1804,8 +1940,8 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
   it("WS 收到新消息且不在底部 → 底部 pill 出现;点击后滚到底部并消失", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     // 用户上滚后:无 pill
@@ -1815,7 +1951,7 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
 
     // WS 推一条新消息 → pill 出现,积压 N=1
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         wsMessageFrame("msg-pill-1", "pill 消息"),
       ),
     );
@@ -1832,14 +1968,14 @@ describe("GroupMessagesPage 新消息提示 (ticket 21)", () => {
   it("用户滚回底部时积压清零,pill 消失", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     const stream = screen.getByTestId("message-stream");
     scrolledUp(stream);
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         wsMessageFrame("msg-pill-2", "第二条 pill"),
       ),
     );
@@ -1891,7 +2027,7 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
 
   it("同发送者 5 分钟内连续消息合并(单个昵称头),跨 5 分钟重新显示头", async () => {
     const t0 = noon(0);
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         msg("g-1", "participant-1", "第一条", t0),
         msg(
@@ -1909,11 +2045,13 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
         ),
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
     await screen.findByText("第一条");
 
     // 1 分钟间隔的合并成一组,6 分钟间隔的重新出头 → 昵称只出现 2 次
-    expect(screen.getAllByText(SENDER)).toHaveLength(2);
+    // (限定消息流作用域:成员 Tab 也渲染成员名 hermes-mac)。
+    expect(stream().getAllByText(SENDER)).toHaveLength(2);
 
     // Ticket 44: compact 行不渲染头像内容,但渲染等宽不可见占位(size-9
     // shrink-0 invisible),与首行带头像的水平位置保持一致;不可聚焦且
@@ -1963,7 +2101,7 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
       0,
       0,
     );
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         msg("d-1", "participant-1", "三天前消息", d3.toISOString()),
         msg("d-2", "participant-2", "两天前消息", d2.toISOString()),
@@ -1971,7 +2109,8 @@ describe("GroupMessagesPage 时间分组 (ticket 21)", () => {
         msg("d-4", "participant-2", "今天消息", d0.toISOString()),
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
     await screen.findByText("三天前消息");
 
     const separators = screen.getAllByTestId("day-separator");
@@ -2005,8 +2144,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
   });
 
   it("编辑:点编辑 → 输入框出现;保存 → PATCH 调用 + 本地更新 + 退出编辑态", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(editButton("任务草稿"));
@@ -2037,8 +2176,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
   });
 
   it("取消:退出编辑态,不调 PATCH,原文保留", async () => {
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(editButton("任务草稿"));
@@ -2057,8 +2196,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
 
   it("删除:confirm → DELETE 调用 → 本地占位显示,操作条消失", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(deleteButton("任务草稿"));
@@ -2088,8 +2227,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
 
   it("confirm 取消(返回 false)不调 DELETE,原文保留", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const fetchMock = stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    const fetchMock = renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(deleteButton("任务草稿"));
@@ -2102,8 +2241,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
   });
 
   it("仅自己的消息显示编辑/删除;他人消息无操作条", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     // msg-2 是 participant-2 发送的 → 无编辑/删除
@@ -2129,8 +2268,8 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
         body: "第二条自己的",
       },
     ];
-    stubFetch(messagesFetchMock(TWO_OWN));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(TWO_OWN));
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     fireEvent.click(editButton("任务草稿"));
@@ -2147,12 +2286,12 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
 
   it("WS group_message_updated:原位替换正文,顺序保留", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         JSON.stringify({
           type: "group_message_updated",
           groupId: "group-1",
@@ -2173,12 +2312,12 @@ describe("GroupMessagesPage 消息编辑/删除 (ticket 22)", () => {
 
   it("WS group_message_deleted:本地标记占位,原文消失,无操作条", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         JSON.stringify({
           type: "group_message_deleted",
           groupId: "group-1",
@@ -2250,8 +2389,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
       .find((el) => el.getAttribute("data-status") === status);
 
   it("task_status 渲染为居中紧凑状态条(等宽小字+时间),✅❌ 颜色类区分", async () => {
-    stubFetch(messagesFetchMock(STATUS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(STATUS));
+    await openMessagesTab();
 
     expect(
       await screen.findByText("🚀 开始执行:整理发布清单"),
@@ -2279,7 +2418,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
   });
 
   it("✅/❌ 执行结果渲染为精简结果卡片(状态头 + 提交 + 测试/汇报/遗留摘要,不再整段贴 summary)", async () => {
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "st-4",
@@ -2302,7 +2441,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     const card = await screen.findByTestId("task-result-card");
     // 状态头第一行 + 提交 hash 徽标。
@@ -2335,7 +2475,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
       "- [ ] 消息头显示 → 接收者",
       "- [ ] 测试全绿",
     ].join("\n");
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "br-1",
@@ -2363,7 +2503,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     // 任务书 → 结构化卡片:Category/Summary 高亮 + 验收标准列表。
     const card = await screen.findByTestId("task-brief-card");
@@ -2379,7 +2520,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
   });
 
   it("discussion 消息渲染普通气泡 + 💬 标记", async () => {
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "ds-1",
@@ -2395,7 +2536,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     expect(await screen.findByText("💬 建议用两层抽象")).toBeInTheDocument();
     const mark = screen.getByTestId("discussion-mark");
@@ -2408,7 +2550,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
 
   it("长消息(>200 字)默认折叠为前 100 字 + 展开全文;点击展开/收起;短消息不折叠", async () => {
     const longBody = "任务说明:" + "这是一段很长的任务描述内容。".repeat(20); // 285 字 > 200
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "long-1",
@@ -2424,7 +2566,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         ...MESSAGES,
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     const preview = longBody.slice(0, 100) + "…";
@@ -2450,7 +2593,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
 
   it("超长 task_status 同样折叠(状态条内展开全文/收起)", async () => {
     const longStatus = "🚀 开始执行:" + "很长很长的任务摘要内容。".repeat(30); // 367 字 > 200
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "st-long",
@@ -2466,7 +2609,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     const bar = await screen.findByTestId("task-status");
     // 折叠预览按码点截取(🚀 是代理对,slice 按 UTF-16 单元会切碎)
@@ -2483,7 +2627,7 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
   });
 
   it("已删除的 task_status 显示灰色占位,不渲染状态条", async () => {
-    stubFetch(
+    const mock = stubFetch(
       messagesFetchMock([
         {
           id: "st-del",
@@ -2500,7 +2644,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         },
       ]),
     );
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     expect(await screen.findByText("消息已删除")).toBeInTheDocument();
     expect(screen.queryByTestId("task-status")).toBeNull();
@@ -2553,8 +2698,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         createdAt: "2026-08-02T00:18:00.000Z",
       },
     ];
-    stubFetch(messagesFetchMock(TARGETED));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock(TARGETED));
+    await openMessagesTab();
 
     await screen.findByText("只给 win-hermes");
     // 未绑定身份 = Local User(human 视角,全可见):定向消息显示 📨 定向给
@@ -2593,10 +2738,11 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
         createdAt: "2026-08-02T00:12:00.000Z",
       },
     ];
-    stubFetch(messagesFetchMock(TARGETED));
+    const mock = stubFetch(messagesFetchMock(TARGETED));
     // 绑定一个非 human 成员(coordinator):不显示 📨 标签。
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(mock);
+    await openMessagesTab();
 
     await screen.findByText("只给 win-hermes");
     expect(screen.getByText("→ @win-hermes")).toBeInTheDocument();
@@ -2604,8 +2750,8 @@ describe("GroupMessagesPage 消息类型气泡 (ticket 26)", () => {
   });
 
   it("旧消息 contentType 为 null/undefined → 按普通气泡渲染", async () => {
-    stubFetch(messagesFetchMock()); // 默认 MESSAGES 无 contentType 字段
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock()); // 默认 MESSAGES 无 contentType 字段
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     expect(screen.queryByTestId("task-status")).toBeNull();
@@ -2640,12 +2786,39 @@ describe("ticket 23 接线:进入消息页 markRead", () => {
     );
     expect(probe.result.current.unread.get("group-1")).toBe(1);
 
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    // markRead 属消息页(GroupMessagesPage 挂载即清零);打开 Tab 仅需查看流水。
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
     await waitFor(() =>
       expect(probe.result.current.unread.get("group-1")).toBeUndefined(),
     );
+    probe.unmount();
+  });
+
+  it("成员页(共享右栏面板)不触发 markRead:未读徽标保留", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const probe = renderHook(() => useUnread());
+    const storeWs = MockWebSocket.instances[0];
+    act(() =>
+      storeWs.receive(groupMessageFrame("group-1", "成员页到达的未读")),
+    );
+    expect(probe.result.current.unread.get("group-1")).toBe(1);
+
+    // 成员页同样由 GroupLayout 包裹(ContextPanel 常驻、消息流 hook 随面板
+    // 挂载),但 markRead 只属于消息页 —— 进入成员页不清零未读。
+    stubFetch(messagesFetchMock());
+    renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMembersPage />
+      </GroupLayout>,
+      "/groups/group-1/members",
+    );
+    await screen.findByTestId("members-tab");
+
+    expect(probe.result.current.unread.get("group-1")).toBe(1);
     probe.unmount();
   });
 });
@@ -2659,20 +2832,10 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
     );
   };
 
-  const renderGroupPage = (mock: ReturnType<typeof messagesFetchMock>) => {
-    stubFetch(mock);
-    renderWithProviders(
-      <GroupLayout groupId="group-1">
-        <GroupMessagesPage />
-      </GroupLayout>,
-      "/groups/group-1",
-    );
-    return mock;
-  };
-
   it("未绑定时项目 Tab 显示输入框与保存按钮", async () => {
     renderGroupPage(messagesFetchMock());
-    await screen.findByText("任务草稿");
+    // 主区已无消息流(需求工作区):以工作区渲染作为页面加载完成的等待条件。
+    await screen.findByTestId("requirement-workspace");
     await openTab("context-tab-project");
 
     expect(screen.getByLabelText("项目绝对路径")).toBeInTheDocument();
@@ -2681,7 +2844,8 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
 
   it("输入路径保存 → PATCH 成功后显示已绑定路径", async () => {
     const fetchMock = renderGroupPage(messagesFetchMock());
-    await screen.findByText("任务草稿");
+    // 主区已无消息流(需求工作区):以工作区渲染作为页面加载完成的等待条件。
+    await screen.findByTestId("requirement-workspace");
     await openTab("context-tab-project");
 
     fireEvent.change(screen.getByLabelText("项目绝对路径"), {
@@ -2859,11 +3023,11 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
       configurable: true,
       get: () => true,
     });
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
-    pushFrame(MockWebSocket.instances[0], "改好了,请合并", "notify-1");
+    pushFrame(messagesWs(), "改好了,请合并", "notify-1");
 
     expect(MockNotification.instances).toHaveLength(1);
     const n = MockNotification.instances[0];
@@ -2873,11 +3037,11 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
   });
 
   it("页面可见时收消息 → 不发通知", async () => {
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
-    pushFrame(MockWebSocket.instances[0], "页面可见的消息", "notify-2");
+    pushFrame(messagesWs(), "页面可见的消息", "notify-2");
 
     expect(MockNotification.instances).toHaveLength(0);
   });
@@ -2887,13 +3051,13 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
       configurable: true,
       get: () => true,
     });
-    stubFetch(messagesFetchMock());
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderGroupPage(messagesFetchMock());
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
     // senderId == 当前绑定 participant-1:即使隐藏也不打扰
     act(() =>
-      MockWebSocket.instances[0].receive(
+      messagesWs().receive(
         JSON.stringify({
           type: "group_message",
           groupId: "group-1",
@@ -2933,13 +3097,17 @@ describe("浏览器桌面通知 (WS group_message → Notification)", () => {
         }}
       >
         <Router hook={loc.hook}>
-          <GroupMessagesPage />
+          <GroupLayout groupId="group-1">
+            <GroupMessagesPage />
+          </GroupLayout>
         </Router>
       </SWRConfig>,
     );
+    // 消息流 hook 在消息 Tab 内:打开 Tab 才会订阅 WS 并触发通知。
+    await openMessagesTab();
 
     await screen.findByText("任务草稿");
-    pushFrame(MockWebSocket.instances[0], "点我跳转", "notify-4");
+    pushFrame(messagesWs(), "点我跳转", "notify-4");
     const n = MockNotification.instances[0];
 
     act(() => n.onclick?.());
