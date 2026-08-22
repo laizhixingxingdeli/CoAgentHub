@@ -1,7 +1,6 @@
 import {
   Archive,
   KeyRound,
-  MessageSquare,
   Pencil,
   Plus,
   RotateCcw,
@@ -18,7 +17,6 @@ import { Input } from "@/components/ui/input";
 import { useGroupsPage } from "@/hooks/use-groups-page";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { StatusBadge } from "./status-badge";
 
 /**
  * Group list page (ticket 02): shows all groups with status and member
@@ -29,6 +27,39 @@ import { StatusBadge } from "./status-badge";
  * that participant. All state and data fetching live in useGroupsPage — this
  * component only orchestrates the hook and renders the sections.
  */
+
+/**
+ * 相对时间(清单行右侧):把群创建时间格式化为「刚刚 / x 分钟前 / x 小时前 /
+ * x 天前 / x 个月前 / x 年前」。跟随运行环境的默认 locale(与浏览器语言一致),
+ * 不引入 dayjs 之类的新依赖。
+ */
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) {
+    return "";
+  }
+  const diffMs = then - Date.now();
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const diffMin = Math.round(diffMs / 60_000);
+  const absMin = Math.abs(diffMin);
+  if (absMin < 60) {
+    return rtf.format(diffMin, "minute");
+  }
+  const diffHour = Math.round(diffMin / 60);
+  if (Math.abs(diffHour) < 24) {
+    return rtf.format(diffHour, "hour");
+  }
+  const diffDay = Math.round(diffHour / 24);
+  if (Math.abs(diffDay) < 30) {
+    return rtf.format(diffDay, "day");
+  }
+  const diffMonth = Math.round(diffDay / 30);
+  if (Math.abs(diffMonth) < 12) {
+    return rtf.format(diffMonth, "month");
+  }
+  return rtf.format(Math.round(diffMonth / 12), "year");
+}
+
 export default function GroupsPage() {
   const {
     navigate,
@@ -477,16 +508,34 @@ export default function GroupsPage() {
           </div>
         ) : (
           <>
-            {/* Mobile: card list */}
-            <div className="flex flex-col gap-3 p-3 md:hidden">
+            {/* 群列表:单套自适应清单行(窄屏/宽屏共用,不再有双套实现)。
+                一行 = 状态圆点 + 群名(可进入/行内改名) + 摘要行 + 相对时间;
+                操作按钮收敛为纯图标,桌面端 hover 行时显现(移动端无 hover,常显)。 */}
+            <ul
+              role="list"
+              data-testid="groups-list"
+              className="flex flex-col gap-1 p-3"
+            >
               {groups.map((group) => (
-                <div
+                <li
                   key={group.id}
-                  className="flex flex-col gap-2 rounded-lg border bg-card p-4"
+                  role="listitem"
+                  className="group flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-3 transition-colors hover:bg-muted/60"
                 >
-                  <div className="flex items-center justify-between gap-2">
+                  {/* 状态圆点:active 用 --status-running + 淡色光晕(同 RequirementStepper
+                      running 手法),archived 用中性灰 --border。 */}
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "size-[7px] shrink-0 rounded-full",
+                      group.status === "active"
+                        ? "bg-status-running ring-4 ring-status-running/25 animate-pulse motion-reduce:animate-none"
+                        : "bg-border",
+                    )}
+                  />
+                  <div className="min-w-0 flex-1">
                     {editingTitleId === group.id ? (
-                      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <div className="flex min-w-0 items-center gap-1.5">
                         <Input
                           autoFocus
                           value={titleDraft}
@@ -522,7 +571,7 @@ export default function GroupsPage() {
                     ) : (
                       <button
                         type="button"
-                        className="flex min-w-0 flex-1 items-center gap-1 truncate text-left text-sm font-medium hover:underline"
+                        className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-left text-sm font-medium hover:underline"
                         onClick={() => navigate(`/groups/${group.id}`)}
                       >
                         <span className="truncate">{group.title}</span>
@@ -537,197 +586,69 @@ export default function GroupsPage() {
                         />
                       </button>
                     )}
-                    <StatusBadge status={group.status} />
-                  </div>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <span className="inline-flex items-center gap-1">
-                      <Users className="size-3.5" />
-                      {t("groups.memberCount", { count: group.memberCount })}
-                    </span>
-                    {previewFor(group) && (
-                      <span className="inline-flex min-w-0 items-center gap-1">
-                        <MessageSquare className="size-3.5 shrink-0" />
-                        <span className="truncate">{previewFor(group)}</span>
+                    {/* 摘要行:成员数 + 最近消息预览(需求维度摘要留待后续票,当前接口无该数据)。 */}
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                      <span className="shrink-0">
+                        {t("groups.memberCount", { count: group.memberCount })}
                       </span>
-                    )}
+                      {previewFor(group) && (
+                        <span className="min-w-0 truncate">
+                          {previewFor(group)}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="mt-1 flex flex-wrap gap-2">
+                  {/* 相对时间:当前数据仅有群创建时间 createdAt,先用它。 */}
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {formatRelativeTime(group.createdAt)}
+                  </span>
+                  {/* 操作(成员管理/归档|恢复/删除):图标化收敛;桌面端 hover 行时显现,
+                      键盘焦点移入(focus-within)同样显现;移动端无 hover 保持常显。 */}
+                  <div className="flex shrink-0 items-center gap-0.5 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
                     <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t("groups.members.manage")}
+                      title={t("groups.members.manage")}
                       onClick={() => navigate(`/groups/${group.id}/members`)}
                     >
-                      {t("groups.members.manage")}
+                      <Users />
                     </Button>
                     {group.status === "active" ? (
                       <Button
-                        variant="outline"
-                        size="sm"
-                        className="flex-1"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t("groups.archive")}
+                        title={t("groups.archive")}
                         onClick={() => handleArchive(group)}
                       >
                         <Archive />
-                        {t("groups.archive")}
                       </Button>
                     ) : (
                       <Button
-                        variant="outline"
-                        size="sm"
-                        className="flex-1"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t("groups.restore")}
+                        title={t("groups.restore")}
                         onClick={() => handleRestore(group)}
                       >
                         <RotateCcw />
-                        {t("groups.restore")}
                       </Button>
                     )}
                     <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 text-red-600 hover:text-red-700"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t("common.delete")}
+                      title={t("common.delete")}
+                      className="text-red-600 hover:text-red-700"
                       onClick={() => handleDelete(group)}
                     >
                       <Trash2 />
-                      {t("common.delete")}
                     </Button>
                   </div>
-                </div>
+                </li>
               ))}
-            </div>
-            {/* Desktop: table */}
-            <table className="hidden w-full text-sm md:table">
-              <thead>
-                <tr className="border-b text-left text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">
-                    {t("groups.table.name")}
-                  </th>
-                  <th className="px-4 py-3 font-medium">
-                    {t("groups.table.status")}
-                  </th>
-                  <th className="px-4 py-3 font-medium">
-                    {t("groups.table.members")}
-                  </th>
-                  <th className="px-4 py-3 font-medium">
-                    {t("groups.table.lastMessage")}
-                  </th>
-                  <th className="px-4 py-3 text-right font-medium">
-                    {t("groups.table.actions")}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {groups.map((group) => (
-                  <tr key={group.id} className="border-b last:border-0">
-                    <td className="px-4 py-3">
-                      {editingTitleId === group.id ? (
-                        <div className="flex items-center gap-1.5">
-                          <Input
-                            autoFocus
-                            value={titleDraft}
-                            onChange={(e) => setTitleDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                void handleRenameTitle();
-                              } else if (e.key === "Escape") {
-                                setEditingTitleId(null);
-                              }
-                            }}
-                            aria-label={t("groups.renameInputAria")}
-                            className="h-8 w-56"
-                          />
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={savingTitle || !titleDraft.trim()}
-                            onClick={() => void handleRenameTitle()}
-                          >
-                            {savingTitle
-                              ? t("common.saving")
-                              : t("groups.renameSave")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setEditingTitleId(null)}
-                          >
-                            {t("groups.renameCancel")}
-                          </Button>
-                        </div>
-                      ) : (
-                        <span className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            className="font-medium hover:underline"
-                            onClick={() => navigate(`/groups/${group.id}`)}
-                          >
-                            {group.title}
-                          </button>
-                          <Pencil
-                            data-testid={`rename-title-${group.id}`}
-                            className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
-                            onClick={() => startRenameTitle(group)}
-                            aria-label={t("groups.renameAria")}
-                          />
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={group.status} />
-                    </td>
-                    <td className="px-4 py-3 text-muted-foreground">
-                      {group.memberCount}
-                    </td>
-                    <td className="max-w-56 px-4 py-3 text-muted-foreground">
-                      <span className="block truncate">
-                        {previewFor(group) ?? t("common.noMessages")}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() =>
-                            navigate(`/groups/${group.id}/members`)
-                          }
-                        >
-                          <Users />
-                          {t("groups.members.manage")}
-                        </Button>
-                        {group.status === "active" ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleArchive(group)}
-                          >
-                            <Archive />
-                            {t("groups.archive")}
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleRestore(group)}
-                          >
-                            <RotateCcw />
-                            {t("groups.restore")}
-                          </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-red-600 hover:text-red-700"
-                          onClick={() => handleDelete(group)}
-                        >
-                          <Trash2 />
-                          {t("common.delete")}
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            </ul>
             {/* 分页:还有更多时才显示「加载更多」,加载中禁用防重复点击 */}
             {groups.length > 0 && groups.length < total && (
               <div className="flex justify-center border-t p-3">

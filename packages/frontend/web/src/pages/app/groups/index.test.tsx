@@ -913,7 +913,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
     renderWithProviders(<GroupsPage />, "/groups");
 
     await screen.findAllByText("模型训练任务");
-    const rows = screen.getAllByRole("row");
+    const rows = screen.getAllByRole("listitem");
     const activeRow = rows.find((r) =>
       r.textContent?.includes("模型训练任务"),
     )!;
@@ -936,7 +936,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
 
     await screen.findAllByText("已完成的评审");
     const archivedRow = screen
-      .getAllByRole("row")
+      .getAllByRole("listitem")
       .find((r) => r.textContent?.includes("已完成的评审"))!;
     fireEvent.click(within(archivedRow).getByRole("button", { name: "删除" }));
 
@@ -964,7 +964,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
 
     await screen.findAllByText("模型训练任务");
     const activeRow = screen
-      .getAllByRole("row")
+      .getAllByRole("listitem")
       .find((r) => r.textContent?.includes("模型训练任务"))!;
     fireEvent.click(within(activeRow).getByRole("button", { name: "删除" }));
 
@@ -992,7 +992,7 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
 
     await screen.findAllByText("模型训练任务");
     const activeRow = screen
-      .getAllByRole("row")
+      .getAllByRole("listitem")
       .find((r) => r.textContent?.includes("模型训练任务"))!;
     fireEvent.click(within(activeRow).getByRole("button", { name: "删除" }));
     expect(confirmMock).toHaveBeenCalled();
@@ -1200,20 +1200,39 @@ describe("GroupMembersPage 成员管理", () => {
 });
 
 describe("GroupsPage 窄屏适配 (ticket 34)", () => {
-  it("窄屏分支:移动卡片与桌面表格并存,卡片操作行可换行", async () => {
+  it("单套清单行:窄屏宽屏共用,无 <table>,行内含状态圆点/摘要/相对时间/操作", async () => {
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
     await screen.findAllByText("模型训练任务");
 
-    // 移动卡片容器(md:hidden)与桌面表格(hidden md:table)同时渲染,
-    // 由 CSS 断点切换显隐(jsdom 不解析 CSS,用 className 锁定分支)。
-    const cardList = document.querySelector(".md\\:hidden");
-    expect(cardList?.className).toContain("flex flex-col gap-3");
-    const table = document.querySelector("table");
-    expect(table?.className).toContain("hidden");
-    expect(table?.className).toContain("md:table");
-    // 卡片内操作行 flex-wrap:窄屏下三个按钮可换行而不横向挤压。
-    expect(cardList?.querySelector(".flex-wrap")).not.toBeNull();
+    // 列表只有一套实现:移动卡片 + 桌面表格已合并为自适应清单行,<table> 已删除。
+    expect(document.querySelector("table")).toBeNull();
+    const list = document.querySelector('[data-testid="groups-list"]');
+    expect(list?.className).toContain("flex flex-col");
+    // 行 = 状态圆点(active 用 --status-running,archived 用中性灰 --border)
+    // + 群名 + 摘要行 + 相对时间 + 操作(成员管理/归档|恢复/删除)。
+    const rows = screen.getAllByRole("listitem");
+    const activeRow = rows.find((r) =>
+      r.textContent?.includes("模型训练任务"),
+    )!;
+    expect(activeRow.querySelector(".bg-status-running")).not.toBeNull();
+    expect(within(activeRow).getByText(/名成员/)).toBeInTheDocument();
+    expect(
+      within(activeRow).getByRole("button", { name: "成员管理" }),
+    ).toBeInTheDocument();
+    expect(
+      within(activeRow).getByRole("button", { name: "归档" }),
+    ).toBeInTheDocument();
+    expect(
+      within(activeRow).getByRole("button", { name: "删除" }),
+    ).toBeInTheDocument();
+    const archivedRow = rows.find((r) =>
+      r.textContent?.includes("已完成的评审"),
+    )!;
+    expect(archivedRow.querySelector(".bg-border")).not.toBeNull();
+    expect(
+      within(archivedRow).getByRole("button", { name: "恢复" }),
+    ).toBeInTheDocument();
     // 页面根容器铺满宽度(w-full),窄屏收紧留白(p-4),sm 起恢复 p-6。
     const root = document.querySelector(".w-full");
     expect(root?.className).toContain("p-4");
