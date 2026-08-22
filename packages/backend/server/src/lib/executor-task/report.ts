@@ -90,6 +90,11 @@ export function parseTaskReport(text: string): TaskReport {
         .replace(/^[^:：]*[:：]\s*/, "")
         .trim();
       if (value.length === 0) continue;
+      // 执行器可能先回显完整任务书,其中的结构化汇报段是模板占位符。
+      // 忽略整个占位符段,否则例如模板「遗留」段会把回显后续内容吞进结果;
+      // 真实汇报若随后出现,仍会按正常段落解析。
+      const firstLine = value.split("\n", 1)[0].trim();
+      if (/^<[^>\n]+>/.test(firstLine)) continue;
       if (key === "hash") {
         // 提交段只取首个 token:形如 7~40 位 hex 才算 hash,否则省略(避免把
         // 描述性文字当 hash 落库)。
