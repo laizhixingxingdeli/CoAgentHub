@@ -1,6 +1,6 @@
 # Spec: 协调任务的生命周期与平台的完成路径冲突
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者),见文末「L3 检视记录」
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **来源**: 三层链路首次端到端实测(群 `01a029c4-b67f-737d-837e-e49933fd3e38`)
@@ -140,3 +140,33 @@ codex 转录里自己写着:
   改的是 `lib/executor-task/queue.ts` 的 `onOutput` 与 `output-buffer.ts`)。
   **本票也要改 `queue.ts`——先 `git log`/`git status` 看清当前状态再动手**,
   不要覆盖它的改动。有冲突就等它落地,或在汇报里说明。
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `e3e6061`。
+
+核实过的点:
+- 完成路径隔离复用了既有的 `detached` 机制(`## ReplyMode: detached` 那套),
+  没有另起一套并行逻辑——静默检测/无进展检测/超时兜底对两种触发方式一视同仁,
+  是干净的复用而不是分叉
+- 汇报解析的双空格段头支持,直接对应实测里 `提交  40e1a8f` 这种无冒号格式;
+  段落长度上限 4000 字符,新增测试覆盖「全占位符 / 段后大量文本 / 末段无结束标题」
+- 插件侧断点的诊断(`coagenthub-codex/mcp-server/src/tools.ts:70`,
+  `dispatcherSessionId` 取自 `resolveCodexThreadId(extra?._meta)`,
+  codex CLI 未带 `x-codex-turn-metadata` 时恒为 `undefined`)复核属实,
+  且改动确实没有跨仓越界去动 coagenthub-codex
+- 相关测试单独重跑 52/52 通过,与汇报数字一致
+
+**一处非阻塞发现,记录以供后续参考**:
+
+`isCoordinatorTask` 按「目标 participant 在本群 roles 含 coordinator」判定是否
+detached。若某成员在同一群里**同时持有 `executor` 与 `coordinator`**两个角色,
+它收到的**每一张**任务(哪怕是普通实现票)都会被误判为协调任务——保持 running
+直到 24 小时兜底超时,因为它并不知道自己需要 PATCH。
+
+当前库内无此类双角色成员(已查),且 24 小时兜底把损害范围限定住,**不构成
+阻塞项**。但这条风险与 `specs/group-creation-gaps.md` 缺口二(建群者被自动塞成
+coordinator,可能与已有角色重叠)是同一类问题的两个表现,该票落地时一并考虑。

@@ -90,6 +90,16 @@ await tx.insert(groupMemberTable).values({
   接口描述与 `CONTEXT.md` 里写明
 - **C. 其他** —— 只要能让「检视者建群」不静默退化为两层
 
+### 关联风险(2026-08-23 补记,来自 coordination-task-lifecycle 的 L3 检视)
+
+`lib/executor-task/queue.ts` 的 `isCoordinatorTask` 现在按「目标成员在本群
+roles 含 coordinator」判定任务是否走 detached 生命周期。若本票的修复方案会让
+某成员同时持有 `coordinator` 与其他角色(如检视者建群后手动加了 `executor`),
+**该成员收到的所有任务都会被误判为协调任务**,直到 24 小时兜底超时才恢复。
+
+实现本票时,若方案会产生任何双角色成员,请确认这条影响在预期内(或在汇报中
+说明为何可接受)。
+
 ⚠️ **不要**取消「创建者自动入群」这个行为本身：
 群不能没有成员，这个保护是对的，问题只在角色写死。
 
