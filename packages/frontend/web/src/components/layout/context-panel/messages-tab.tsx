@@ -10,7 +10,7 @@ import { MessageList } from "@/pages/app/groups/messages/MessageList";
  * 消息流 hook 由 ContextPanel 顶层持有(useMessagesPage 实例随面板组件常驻,
  * 面板收起/抽屉关闭也不断 WS 订阅/通知/未读清零),本组件只消费其返回值。
  *
- * 只读:不渲染 Composer(无发送入口);消息搜索(原主区标题栏)随流一并搬入,
+ * 只读:不渲染输入框或发送入口;消息搜索(原主区标题栏)随流一并搬入,
  * 搜索框在 Tab 内切换。MessageList 的回复/复制/编辑/删除操作条原样保留
  * (归档/软删群的只读由 isReadOnly 驱动,与搬移前一致)。
  */
@@ -41,7 +41,6 @@ export function MessagesTab({
     handleStreamScroll,
     pendingCount,
     handleJumpToBottom,
-    handleReply,
     handleCopy,
     handleEditStart,
     handleEditSave,
@@ -162,7 +161,7 @@ export function MessagesTab({
         handleStreamScroll={handleStreamScroll}
         pendingCount={pendingCount}
         handleJumpToBottom={handleJumpToBottom}
-        handleReply={handleReply}
+        handleReply={() => {}}
         handleCopy={handleCopy}
         handleEditStart={handleEditStart}
         handleEditSave={handleEditSave}

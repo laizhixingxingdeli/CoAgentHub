@@ -27,7 +27,7 @@ interface MessageListProps {
   messages: MessageItem[];
   members: Member[];
   myParticipantId: string | null;
-  /** 归档/软删群只读:编辑/回复/删除按钮禁用并提示(发送已由 Composer 层禁用)。 */
+  /** 归档/软删群只读:编辑/回复/删除按钮禁用并提示。 */
   readOnly: boolean;
   expandedIds: ReadonlySet<string>;
   collapsedRootIds: ReadonlySet<string>;

@@ -394,18 +394,6 @@ function stubFetch(mock: ReturnType<typeof createFetchMock>) {
   return mock;
 }
 
-/** Type into the composer and move the caret to the end of the value. */
-function typeMessage(value: string, selectionStart?: number) {
-  const textarea = screen.getByLabelText("消息内容");
-  fireEvent.change(textarea, {
-    target: {
-      value,
-      selectionStart: selectionStart ?? value.length,
-    },
-  });
-  return textarea;
-}
-
 /** Find the POST /:id/messages call and return its parsed body. */
 function lastPostPayload(fetchMock: ReturnType<typeof createFetchMock>) {
   const call = fetchMock.mock.calls.find(
@@ -997,285 +985,6 @@ describe("GroupMessagesPage 气泡方向 (ticket 18)", () => {
   });
 });
 
-// Composer 已从群内页移除(聊天流降级为右栏「消息」Tab 的只读流水,无输入
-// 入口),@ 提及输入、发送 payload、测试执行器下拉等 Composer 交互能力随之
-// 下线。这些用例保留为能力记录(describe.skip 不删除),待下一票决定这些
-// 能力的去留。
-describe.skip("GroupMessagesPage @ 提及输入 (ticket 18)", () => {
-  it("输入 @ 弹出候选列表:角色名 + 群成员 name", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("@");
-    const listbox = await screen.findByRole("listbox", { name: "提及候选" });
-    const options = Array.from(listbox.querySelectorAll("[role='option']")).map(
-      (o) => o.textContent,
-    );
-    // GROUP_ROLES 的角色名
-    expect(options.some((t) => t?.startsWith("@reviewer"))).toBe(true);
-    expect(options.some((t) => t?.startsWith("@executor"))).toBe(true);
-    // 群成员 name
-    expect(options.some((t) => t?.startsWith("@hermes-mac"))).toBe(true);
-    expect(options.some((t) => t?.startsWith("@win-hermes"))).toBe(true);
-  });
-
-  it("按前缀过滤候选,点击选项插入 @名字", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("@herm");
-    const listbox = await screen.findByRole("listbox", { name: "提及候选" });
-    const options = Array.from(listbox.querySelectorAll("[role='option']"));
-    // 只有匹配前缀的成员(角色名不含 herm)
-    expect(options.length).toBe(1);
-    fireEvent.click(options[0]);
-
-    const textarea = screen.getByLabelText("消息内容") as HTMLTextAreaElement;
-    expect(textarea.value).toBe("@hermes-mac");
-    // 选中后候选列表关闭
-    expect(screen.queryByRole("listbox", { name: "提及候选" })).toBeNull();
-  });
-
-  it("键盘选择:方向键移动高亮,回车插入", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    const textarea = typeMessage("@");
-    const listbox = await screen.findByRole("listbox", { name: "提及候选" });
-    const options = Array.from(listbox.querySelectorAll("[role='option']"));
-    // 初始高亮第一项(human)
-    expect(options[0]).toHaveAttribute("aria-selected", "true");
-    // 下移到第二项(coordinator)
-    fireEvent.keyDown(textarea, { key: "ArrowDown" });
-    expect(options[1]).toHaveAttribute("aria-selected", "true");
-    // 回车插入
-    fireEvent.keyDown(textarea, { key: "Enter" });
-    expect((textarea as HTMLTextAreaElement).value).toBe("@coordinator");
-    expect(screen.queryByRole("listbox", { name: "提及候选" })).toBeNull();
-  });
-
-  it("Escape 关闭候选列表", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    const textarea = typeMessage("@");
-    await screen.findByRole("listbox", { name: "提及候选" });
-    fireEvent.keyDown(textarea, { key: "Escape" });
-    expect(screen.queryByRole("listbox", { name: "提及候选" })).toBeNull();
-  });
-
-  it("发送前显示解析结果预览(role / participant / broadcast)", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    const preview = () => screen.getByTestId("audience-preview").textContent;
-
-    typeMessage("@reviewer 请评审");
-    expect(preview()).toContain("将发送给 role:reviewer");
-
-    typeMessage("@win-hermes 私聊");
-    expect(preview()).toContain("将发送给 participant:win-hermes");
-
-    typeMessage("普通广播");
-    expect(preview()).toContain("将发送给 全体成员");
-
-    typeMessage("@nobody 未命中");
-    expect(preview()).toContain("将发送给 全体成员");
-  });
-});
-
-describe.skip("GroupMessagesPage 发送 payload (ticket 18)", () => {
-  it("@<角色名> → audience=role + audienceRef=角色名", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("@reviewer 请评审");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "@reviewer 请评审",
-        audience: "role",
-        audienceRef: "reviewer",
-      });
-    });
-  });
-
-  it("@<成员 name> → audience=participant + audienceRef=participantId", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("@win-hermes 只给你");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "@win-hermes 只给你",
-        audience: "participant",
-        audienceRef: "participant-2",
-      });
-    });
-  });
-
-  it("无 @ → 默认广播 audience=broadcast", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("执行最终版");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "执行最终版",
-        audience: "broadcast",
-      });
-    });
-  });
-
-  it("未命中候选的 @xxx 按普通文本 → audience=broadcast(正文保留)", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    typeMessage("@nobody 大家好");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "@nobody 大家好",
-        audience: "broadcast",
-      });
-    });
-  });
-
-  it("Enter 发送 / Shift+Enter 换行保留", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    const textarea = screen.getByLabelText("消息内容");
-    // Shift+Enter 换行:不触发发送
-    fireEvent.change(textarea, { target: { value: "第一行" } });
-    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
-    expect(lastPostPayloadIfAny(fetchMock)).toBeUndefined();
-
-    // Enter 发送
-    fireEvent.change(textarea, { target: { value: "第一行" } });
-    fireEvent.keyDown(textarea, { key: "Enter" });
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "第一行",
-        audience: "broadcast",
-      });
-    });
-  });
-
-  // Shift+Enter 不应产生 POST —— 用独立断言避免与上面的 waitFor 冲突。
-  function lastPostPayloadIfAny(fetchMock: ReturnType<typeof createFetchMock>) {
-    return fetchMock.mock.calls.find(
-      ([url, init]) =>
-        init?.method === "POST" && String(url).endsWith("/messages"),
-    )?.[1]?.body;
-  }
-});
-
-describe.skip("GroupMessagesPage 测试执行器下拉(任务书分工固化)", () => {
-  /** 含 executor 角色成员,供「测试执行器」下拉显式选择。 */
-  const EXEC_MEMBERS = [
-    {
-      participantId: "participant-1",
-      name: "hermes-mac",
-      device: "mac-mini",
-      roles: ["coordinator"],
-      joinedAt: "2026-08-01T00:00:00.000Z",
-    },
-    {
-      participantId: "participant-2",
-      name: "win-hermes",
-      device: "win-pc",
-      roles: ["executor"],
-      joinedAt: "2026-08-01T00:01:00.000Z",
-    },
-  ];
-
-  const selectTestExecutor = (value: string) =>
-    fireEvent.change(screen.getByLabelText("测试执行器"), {
-      target: { value },
-    });
-
-  it("默认「自动」→ body 不附加测试执行器行", async () => {
-    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-
-    typeMessage("默认自动任务");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "默认自动任务",
-        audience: "broadcast",
-      });
-      expect(String(lastPostPayload(fetchMock).body)).not.toContain(
-        "测试执行器",
-      );
-    });
-  });
-
-  it("选「同一执行器」→ body 附加 **测试执行器:同一执行器** 行", async () => {
-    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-
-    selectTestExecutor("same");
-    typeMessage("同一执行器任务");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      const payload = lastPostPayload(fetchMock);
-      expect(payload.audience).toBe("broadcast");
-      expect(String(payload.body)).toContain("**测试执行器:同一执行器**");
-    });
-  });
-
-  it("显式选成员 → body 附加 **测试执行器:<成员名>** 行", async () => {
-    const fetchMock = stubFetch(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
-    await screen.findByText("任务草稿");
-
-    selectTestExecutor("participant-2");
-    typeMessage("显式测试任务");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      const payload = lastPostPayload(fetchMock);
-      expect(String(payload.body)).toContain("**测试执行器:win-hermes**");
-    });
-  });
-
-  it("下拉候选 = 群内 executor/specialist 角色成员", async () => {
-    renderGroupPage(messagesFetchMock(MESSAGES, EXEC_MEMBERS));
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    const options = Array.from(
-      screen.getByLabelText("测试执行器").querySelectorAll("option"),
-    ).map((o) => o.textContent);
-    expect(options).toContain("自动(按分工提示词)");
-    expect(options).toContain("同一执行器");
-    expect(options).toContain("win-hermes"); // executor 角色成员
-    expect(options).not.toContain("hermes-mac"); // coordinator 不入候选
-  });
-});
-
 describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
   it("已归档群组渲染只读横幅;历史仍可查看;全页无消息输入框", async () => {
     renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS, "archived"));
@@ -1332,54 +1041,6 @@ describe("GroupMessagesPage 归档只读 (ticket 16)", () => {
   });
 });
 
-// Composer 已从群内页移除:身份禁言(人身份无发言入口 + 引导文案)这一
-// Composer 层能力随之失效(群内页现在本就没有任何消息输入入口)。用例保留
-// 为能力记录,待下一票决定其去留。
-describe.skip("GroupMessagesPage 身份禁言 (reviewer spec §3.9 票 10)", () => {
-  /** 当前绑定的身份(human-1)在本群持 human 角色 —— 与 MEMBERS 里已有的
-   *  coordinator/reviewer 成员并存,验证只按「当前身份的角色」判定。 */
-  const HUMAN_MEMBERS = [
-    {
-      participantId: "human-1",
-      name: "本地用户",
-      device: null,
-      roles: ["human"],
-      joinedAt: "2026-08-01T00:00:00.000Z",
-    },
-    ...MEMBERS,
-  ];
-
-  it("当前身份在本群持 human 角色:Composer 输入入口不渲染,引导文案可见", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "human-1");
-    renderGroupPage(messagesFetchMock(MESSAGES, HUMAN_MEMBERS));
-    await openMessagesTab();
-
-    await screen.findByText("任务草稿");
-    // 无任何发言入口:textarea / 发送按钮 / 测试执行器下拉都不渲染。
-    expect(screen.queryByLabelText("消息内容")).toBeNull();
-    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
-    expect(screen.queryByLabelText("测试执行器")).toBeNull();
-    // 引导文案可见,语义与后端 403 措辞(群是 agent 协作空间,请与检视者
-    // agent 直接对话)对齐。
-    expect(
-      screen.getByText(
-        "群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。",
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("当前身份持非 human 角色(coordinator):Composer 正常可用,无引导文案", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    renderGroupPage(messagesFetchMock(MESSAGES, MEMBERS));
-    await openMessagesTab();
-
-    await screen.findByText("任务草稿");
-    expect(screen.getByLabelText("消息内容")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
-    expect(screen.queryByText(/群是 agent 协作空间/)).toBeNull();
-  });
-});
-
 describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
   // jsdom has no WebSocket — the manual mock drives the page's live channel.
   const pushMessage = (ws: MockWebSocket, body: string, id: string) =>
@@ -1415,20 +1076,18 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
     expect(await screen.findByText("实时新消息")).toBeInTheDocument();
   });
 
-  // Composer 已从群内页移除(消息 Tab 只读):发送后 reload 与 WS 回显去重
-  // 依赖发送链路,随之下线。保留为能力记录,待下一票决定这些能力的去留。
-  it.skip("WS 回显与发送后 reload 不重复(按 id 去重)", async () => {
+  it("WS 推送与 reload 不重复(按 id 去重)", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     vi.stubGlobal("WebSocket", MockWebSocket);
     let reloads = 0;
-    const SENT_MSG = {
+    const wsMessage = {
       id: "msg-9",
       groupId: "group-1",
       senderId: "participant-1",
       parentId: null,
       audience: "broadcast" as const,
       audienceRef: null,
-      body: "已发送",
+      body: "实时消息",
       depth: 0,
       createdAt: "2026-08-02T00:00:00.000Z",
     };
@@ -1443,15 +1102,11 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
         match: (url) =>
           String(url).includes("/api/groups/") &&
           String(url).endsWith("/messages"),
-        respond: (_url, init) => {
-          if ((init?.method ?? "GET") === "POST") {
-            return jsonResponse({ id: "msg-9", body: "已发送" });
-          }
-          // The reload reflects server truth: it already contains msg-9.
+        respond: () => {
+          // The second full reload reflects server truth and contains the
+          // message that was already received through WebSocket.
           reloads += 1;
-          return jsonResponse(
-            reloads >= 2 ? [...MESSAGES, SENT_MSG] : MESSAGES,
-          );
+          return jsonResponse(reloads >= 2 ? [...MESSAGES, wsMessage] : MESSAGES);
         },
       },
       {
@@ -1462,21 +1117,27 @@ describe("GroupMessagesPage WebSocket 实时更新 (ticket 14)", () => {
       },
     ]);
     stubFetch(fetchMock);
-    renderWithProviders(<GroupMessagesPage />, "/groups/group-1");
+    renderWithProviders(
+      <GroupLayout groupId="group-1">
+        <GroupMessagesPage />
+      </GroupLayout>,
+      "/groups/group-1",
+    );
+    await openMessagesTab();
     await screen.findByText("任务草稿");
 
-    // Send → POST + reload now shows the sent message once.
-    fireEvent.change(screen.getByLabelText("消息内容"), {
-      target: { value: "已发送" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    // A message arrives through WebSocket first.
+    pushMessage(messagesWs(), "实时消息", "msg-9");
     await waitFor(() => {
-      expect(screen.getAllByText("已发送")).toHaveLength(1);
+      expect(screen.getAllByText("实时消息")).toHaveLength(1);
     });
 
-    // The WS echo of the same message arrives afterwards — still one row.
-    pushMessage(messagesWs(), "已发送", "msg-9");
-    expect(screen.getAllByText("已发送")).toHaveLength(1);
+    // A later full reload contains the same id — still one rendered row.
+    fireEvent.click(screen.getByRole("button", { name: "搜索消息" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除搜索" }));
+    await waitFor(() => {
+      expect(screen.getAllByText("实时消息")).toHaveLength(1);
+    });
   });
 
   it("其它群组的 group_message 帧不追加", async () => {
@@ -1707,25 +1368,6 @@ describe("GroupMessagesPage 窄屏渲染 (ticket 18)", () => {
 });
 
 describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
-  // Composer 已从群内页移除(消息 Tab 只读,无输入区):输入区布局断言失去
-  // 意义。保留为能力记录,待下一票决定 Composer 相关能力的去留。
-  it.skip("输入区布局:textarea 全宽、受众预览可截断、发送按钮固定不挤压", async () => {
-    renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    expect(screen.getByLabelText("消息内容").className).toContain("w-full");
-    expect(screen.getByTestId("audience-preview").className).toContain(
-      "min-w-0",
-    );
-    expect(screen.getByTestId("audience-preview").className).toContain(
-      "truncate",
-    );
-    expect(screen.getByRole("button", { name: "发送" }).className).toContain(
-      "shrink-0",
-    );
-  });
-
   it("操作条双形态:桌面 hover 条 md:flex,移动点击条 md:hidden", async () => {
     renderGroupPage(messagesFetchMock());
     await openMessagesTab();
@@ -1795,67 +1437,6 @@ describe("GroupMessagesPage 窄屏适配 (ticket 34)", () => {
 
 describe("GroupMessagesPage 消息操作 (ticket 21)", () => {
   const rowOf = (body: string) => screen.getByText(body).closest("li");
-
-  // Composer 已从群内页移除(消息 Tab 只读):回复引用条(Composer 层 UI)与
-  // 其 parentId 发送链路下线。保留为能力记录,待下一票决定这些能力的去留。
-  it.skip("点回复 → 引用条出现(发送者名 + 正文前 30 字),发送带 parentId,成功后引用条清除", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    // 回复 msg-1(participant-1 的「任务草稿」)
-    fireEvent.click(
-      within(rowOf("任务草稿")!).getByRole("button", { name: "回复" }),
-    );
-    const quoteBar = screen.getByTestId("reply-quote-bar");
-    expect(quoteBar).toBeInTheDocument();
-    // 发送者名取成员 name,引用预览为正文前 30 字
-    expect(within(quoteBar).getByText(/回复 hermes-mac/)).toBeInTheDocument();
-    expect(within(quoteBar).getByText("任务草稿")).toBeInTheDocument();
-    // 输入框聚焦(引用条不阻塞输入)
-    await waitFor(() => {
-      expect(screen.getByLabelText("消息内容")).toHaveFocus();
-    });
-
-    typeMessage("收到,马上办");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "收到,马上办",
-        audience: "broadcast",
-        parentId: "msg-1",
-      });
-    });
-    // 发送成功后引用条清除
-    await waitFor(() => {
-      expect(screen.queryByTestId("reply-quote-bar")).toBeNull();
-    });
-  });
-
-  // Composer 已从群内页移除(消息 Tab 只读):「取消回复」关闭引用条同样依赖
-  // Composer 层。保留为能力记录,待下一票决定这些能力的去留。
-  it.skip("取消回复关闭引用条,后续发送不带 parentId", async () => {
-    const fetchMock = renderGroupPage(messagesFetchMock());
-    await openMessagesTab();
-    await screen.findByText("任务草稿");
-
-    fireEvent.click(
-      within(rowOf("任务草稿")!).getByRole("button", { name: "回复" }),
-    );
-    expect(screen.getByTestId("reply-quote-bar")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "取消回复" }));
-    expect(screen.queryByTestId("reply-quote-bar")).toBeNull();
-
-    typeMessage("不引用直接发");
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    await waitFor(() => {
-      expect(lastPostPayload(fetchMock)).toEqual({
-        body: "不引用直接发",
-        audience: "broadcast",
-      });
-    });
-  });
 
   it("点复制 → navigator.clipboard.writeText 被调用并短暂显示「已复制」", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -2934,7 +2515,7 @@ describe("Ticket 33: 项目绑定与分工总览(右栏项目/成员 Tab)", () =
     // 成员 Tab 是默认激活的右栏 Tab,直接等待成员列表加载。
     await screen.findByTestId("members-tab");
     await screen.findByText("hermes-mac");
-    // 成员名(限定成员 Tab 作用域:新 Composer 测试执行器下拉也含成员名,避免歧义)
+    // 成员名(限定成员 Tab 作用域,避免与其它成员名来源混淆)
     const membersTab = within(screen.getByTestId("members-tab"));
     expect(membersTab.getByText("hermes-mac")).toBeInTheDocument();
     expect(membersTab.getByText("win-hermes")).toBeInTheDocument();

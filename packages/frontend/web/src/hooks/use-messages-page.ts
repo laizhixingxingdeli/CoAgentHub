@@ -16,13 +16,7 @@ import {
 import { t } from "@/lib/i18n";
 import { maybeNotifyGroupMessage } from "@/lib/notifications";
 import {
-  detectMention,
-  type MentionCandidate,
-  resolveAudience,
-} from "@/pages/app/groups/messages/lib";
-import {
   DELETED_MESSAGE_BODY,
-  GROUP_ROLES,
   type Member,
   type MessageItem,
 } from "@/pages/app/groups/messages/types";
@@ -30,9 +24,9 @@ import {
 /**
  * All state, effects and handlers for the group message page (ticket 18):
  * the message stream, member roster, group status/title, WS live updates,
- * composer/@-mention state, thread collapse, search, reply/copy/edit/delete
+ * thread collapse, search, reply/copy/edit/delete
  * and the read-only banner state. Extracted from GroupMessagesPage so the
- * page component is a thin composition of this hook, MessageList and Composer.
+ * page component is a thin composition of this hook and MessageList.
  */
 export function useMessagesPage(groupId: string | undefined) {
   // wouter navigate — used by the desktop notification click handler to jump
@@ -42,43 +36,23 @@ export function useMessagesPage(groupId: string | undefined) {
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 测试执行器(纯辅助,不改消息 schema):"auto"(默认,按分工提示词自动选择)/
-  // "same"(同一执行器)/ participantId(显式指定成员)。显式选择在发送时往 body
-  // 追加一行「**测试执行器:<名>**」,由 buildTicket 原样保留进任务书。
-  const [testExecutor, setTestExecutor] = useState<string>("auto");
   // 群标题 / 群状态 / 行内改名与页面头部共享同一实现(useGroupHeader):消息
   // 流已搬进右栏消息 Tab,不再渲染页面头部,但桌面通知(群标题)与只读判定
   // (归档/软删)仍需要这两份数据。
   const header = useGroupHeader(groupId);
-  const [body, setBody] = useState("");
   // Collapsed thread roots (ticket 15). Keyed by root message id and kept in
   // its own state so a WS merge (which replaces the message list) never resets
   // the user's fold choices — the badge counts below recompute from the list.
   const [collapsedRootIds, setCollapsedRootIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  // Active "@ mention" at the caret (ticket 18): { start, query } or null.
-  const [mention, setMention] = useState<{
-    start: number;
-    query: string;
-  } | null>(null);
-  const [caret, setCaret] = useState(0);
-  const [highlightIndex, setHighlightIndex] = useState(0);
   // Auto-scroll stickiness: stay at the bottom for new messages unless the
   // user has scrolled up (no forced pull).
   const [stickToBottom, setStickToBottom] = useState(true);
   // Accumulated new messages while the user is scrolled up (ticket 21): the
   // WS handler counts them; scrolling back to the bottom clears the counter.
   const [pendingCount, setPendingCount] = useState(0);
-  // In-progress reply quote (ticket 21): set by 回复, sent as parentId, and
-  // cleared after a successful send or when the user dismisses the bar.
-  const [replyTo, setReplyTo] = useState<{
-    id: string;
-    senderName: string;
-    preview: string;
-  } | null>(null);
   // Mobile action bar: which message's actions are open (tap-to-open, tap
   // outside to close). Desktop uses the CSS hover bar instead.
   const [openActionsId, setOpenActionsId] = useState<string | null>(null);
@@ -129,7 +103,6 @@ export function useMessagesPage(groupId: string | undefined) {
   const loadSeqRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Latest stickToBottom for the WS callback. Synced during render (not in an
   // effect) so the stable socket callback always reads the live value — an
   // effect would lag one commit behind and could miss a pending-count bump in
@@ -137,7 +110,6 @@ export function useMessagesPage(groupId: string | undefined) {
   const stickToBottomRef = useRef(true);
   stickToBottomRef.current = stickToBottom;
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const focusRafRef = useRef<number | null>(null);
 
   // The bound participant id (saved on the groups page identity panel). Absent ⇒
   // no "own" messages: everything renders left-aligned without the 我 badge.
@@ -160,10 +132,7 @@ export function useMessagesPage(groupId: string | undefined) {
   const myParticipantIdRef = useRef<string | null>(null);
   myParticipantIdRef.current = myParticipantId;
 
-  // Archived AND soft-deleted groups are read-only (the backend rejects any
-  // non-active group with 400): fetch the single-group status so the page can
-  // render a banner and lock the composer (history stays browsable). The same
-  // response carries the title for the chat header.
+  // Archived and soft-deleted groups remain browsable as read-only history.
   // (已随头部数据一并移入 useGroupHeader,此处仅保留消息流自身的加载。)
   const loadMessages = useCallback(
     async (q?: string) => {
@@ -198,8 +167,8 @@ export function useMessagesPage(groupId: string | undefined) {
         }
         // A full (non-search) reload means the screen is back on the unfiltered
         // stream: reset the search state so the banner, the WS pause and the
-        // data source stay consistent (group switch, post-send reload and the
-        // one-click clear all land here).
+        // data source stay consistent (group switch and the one-click clear
+        // all land here).
         setSearchActiveQuery(null);
         setSearchQuery("");
         // Merge into current state instead of replacing it wholesale: a message
@@ -269,7 +238,7 @@ export function useMessagesPage(groupId: string | undefined) {
       }
       setMembers(await res.json());
     } catch {
-      // The sender badges and the mention candidates just stay sparse.
+      // The sender badges stay sparse when the roster request fails.
     }
   }, [groupId]);
   useEffect(() => {
@@ -282,7 +251,7 @@ export function useMessagesPage(groupId: string | undefined) {
 
   // Live updates (ticket 14): the WS hub pushes every group message frame for
   // this group (including the sender's own echo). Merge new messages by id so
-  // the echo and the post-send reload stay idempotent — duplicates never render
+  // a WS push and a later reload stay idempotent — duplicates never render
   // twice. While the user has scrolled up, each incoming NEW message bumps the
   // new-message pill counter (ticket 21) instead of being silently appended
   // off-screen; updated/deleted frames never bump it (the bubble is already on
@@ -354,15 +323,11 @@ export function useMessagesPage(groupId: string | undefined) {
 
   useGroupWs(groupId, handleWsEvent);
 
-  // Clear the copy-feedback timer and any pending focus rAF on unmount so no
-  // stale handle fires into an unmounted component.
+  // Clear the copy-feedback timer on unmount.
   useEffect(() => {
     return () => {
       if (copyTimeoutRef.current !== null) {
         clearTimeout(copyTimeoutRef.current);
-      }
-      if (focusRafRef.current !== null) {
-        cancelAnimationFrame(focusRafRef.current);
       }
     };
   }, []);
@@ -419,187 +384,6 @@ export function useMessagesPage(groupId: string | undefined) {
     });
   };
 
-  // Lock the composer for every non-active status (archived or soft-deleted):
-  // the backend rejects writes to either with 400, so the UI must not offer
-  // the send affordance at all. `null` (status not yet loaded) stays unlocked.
-  // (只读判定与页面头部共享:统一来自 useGroupHeader,MessageList 经返回的
-  // isReadOnly/isDeleted 读取。)
-
-  const handleSend = async () => {
-    const trimmed = body.trim();
-    if (!groupId || !trimmed) {
-      return;
-    }
-    setSending(true);
-    setError(null);
-    try {
-      // 测试执行器(纯辅助,不改消息 schema):显式选择 → body 追加一行
-      // 「**测试执行器:<名>**」,由 buildTicket 原样保留进任务书;"auto"/"same"
-      // 不加行(自动规则由 buildTicket 应用)。
-      let sendBody = trimmed;
-      if (testExecutor === "same") {
-        sendBody = `${trimmed}\n\n**测试执行器:${t("messages.send.testExecutor.same")}**`;
-      } else if (testExecutor !== "auto") {
-        const picked = members.find((m) => m.participantId === testExecutor);
-        if (picked) {
-          sendBody = `${trimmed}\n\n**测试执行器:${picked.name}**`;
-        }
-      }
-      // Ticket 18: the audience comes from the @ mentions in the body, never
-      // from a picker. Unmatched @xxx stays plain text → broadcast.
-      const resolved = resolveAudience(sendBody, members);
-      const payload: Record<string, unknown> = {
-        body: sendBody,
-        audience: resolved.audience,
-      };
-      if (resolved.audienceRef) {
-        payload.audienceRef = resolved.audienceRef;
-      }
-      // Ticket 21: a reply carries the replied message id (backend supports
-      // parentId on POST already).
-      if (replyTo) {
-        payload.parentId = replyTo.id;
-      }
-      const res = await fetch(`/api/groups/${groupId}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
-        },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      setBody("");
-      setMention(null);
-      setCaret(0);
-      setReplyTo(null);
-      await loadMessages();
-    } catch (e) {
-      setError(
-        t("messages.error.sendFailed", {
-          detail: e instanceof Error ? e.message : String(e),
-        }),
-      );
-    } finally {
-      setSending(false);
-    }
-  };
-
-  // 测试执行器候选(纯辅助下拉):群内 executor/specialist 角色成员。
-  const executorMembers = useMemo<Member[]>(
-    () =>
-      members.filter(
-        (m) => m.roles.includes("executor") || m.roles.includes("specialist"),
-      ),
-    [members],
-  );
-
-  // ── "@ mention" composer (ticket 18) ──────────────────────────────────────
-  const mentionCandidates = useMemo<MentionCandidate[]>(() => {
-    if (!mention) {
-      return [];
-    }
-    const q = mention.query.toLowerCase();
-    const seen = new Set<string>();
-    const list: MentionCandidate[] = [];
-    for (const role of GROUP_ROLES) {
-      if (!q || role.startsWith(q)) {
-        list.push({ token: role, kind: "role" });
-        seen.add(role);
-      }
-    }
-    for (const m of members) {
-      if (seen.has(m.name)) {
-        continue;
-      }
-      if (!q || m.name.toLowerCase().startsWith(q)) {
-        list.push({ token: m.name, kind: "participant" });
-      }
-    }
-    return list;
-  }, [mention, members]);
-
-  const insertMention = (candidate: MentionCandidate) => {
-    if (!mention) {
-      return;
-    }
-    const insertPos = mention.start + candidate.token.length + 1;
-    const next =
-      body.slice(0, mention.start) + `@${candidate.token}` + body.slice(caret);
-    setBody(next);
-    setMention(null);
-    setHighlightIndex(0);
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(insertPos, insertPos);
-      }
-    });
-  };
-
-  const handleBodyChange = (value: string, selectionStart: number) => {
-    setBody(value);
-    setCaret(selectionStart);
-    setMention(detectMention(value, selectionStart));
-    setHighlightIndex(0);
-  };
-
-  const handleComposerKeyDown = (
-    e: React.KeyboardEvent<HTMLTextAreaElement>,
-  ) => {
-    if (mention && mentionCandidates.length > 0) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setHighlightIndex((h) => (h + 1) % mentionCandidates.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setHighlightIndex(
-          (h) => (h - 1 + mentionCandidates.length) % mentionCandidates.length,
-        );
-        return;
-      }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        insertMention(mentionCandidates[highlightIndex]);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setMention(null);
-        return;
-      }
-    }
-    // Enter sends, Shift+Enter inserts a newline (kept from the old composer).
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void handleSend();
-    }
-  };
-
-  // Live preview of the resolved audience (ticket 18): "将发送给 …".
-  const audiencePreview = useMemo(() => {
-    const trimmed = body.trim();
-    if (!trimmed) {
-      return null;
-    }
-    const resolved = resolveAudience(trimmed, members);
-    if (resolved.audience === "role") {
-      return `role:${resolved.audienceRef}`;
-    }
-    if (resolved.audience === "participant") {
-      const target = members.find(
-        (m) => m.participantId === resolved.audienceRef,
-      );
-      return `participant:${target ? target.name : resolved.audienceRef}`;
-    }
-    return t("messages.audience.all");
-  }, [body, members]);
-
   // Auto-scroll: follow new messages while at the bottom; never yank the view
   // back down once the user has scrolled up (collapse changes too — expanding
   // a thread below the fold scrolls it into view).
@@ -636,22 +420,6 @@ export function useMessagesPage(groupId: string | undefined) {
     }
     setStickToBottom(true);
     setPendingCount(0);
-  };
-
-  // Reply (ticket 21): open the quote bar above the composer, prefill it with
-  // the sender name + the first 30 chars of the body, and focus the textarea.
-  const handleReply = (msg: MessageItem) => {
-    const senderName =
-      members.find((m) => m.participantId === msg.senderId)?.name ??
-      msg.senderId.slice(0, 8);
-    const text = msg.body || msg.fileRef?.name || "";
-    const preview = text.length > 30 ? `${text.slice(0, 30)}…` : text;
-    setReplyTo({ id: msg.id, senderName, preview });
-    setOpenActionsId(null);
-    focusRafRef.current = requestAnimationFrame(() => {
-      focusRafRef.current = null;
-      textareaRef.current?.focus();
-    });
   };
 
   // Copy (ticket 21): write the body (file-only messages copy the file name)
@@ -791,10 +559,7 @@ export function useMessagesPage(groupId: string | undefined) {
     messages,
     members,
     loading,
-    sending,
     error,
-    testExecutor,
-    setTestExecutor,
     groupStatus: header.groupStatus,
     groupTitle: header.groupTitle,
     editingTitle: header.editingTitle,
@@ -802,14 +567,8 @@ export function useMessagesPage(groupId: string | undefined) {
     titleDraft: header.titleDraft,
     setTitleDraft: header.setTitleDraft,
     savingTitle: header.savingTitle,
-    body,
     collapsedRootIds,
-    mention,
-    highlightIndex,
-    setHighlightIndex,
     pendingCount,
-    replyTo,
-    setReplyTo,
     openActionsId,
     setOpenActionsId,
     copiedId,
@@ -826,7 +585,6 @@ export function useMessagesPage(groupId: string | undefined) {
     searchActive,
     searchActiveQuery,
     scrollRef,
-    textareaRef,
     myParticipantId,
     threadTree,
     toggleCollapsed,
@@ -837,18 +595,10 @@ export function useMessagesPage(groupId: string | undefined) {
     handleClearSearch,
     handleStreamScroll,
     handleJumpToBottom,
-    handleReply,
     handleCopy,
     handleEditStart,
     handleEditSave,
     handleEditCancel,
     handleDelete,
-    handleSend,
-    executorMembers,
-    mentionCandidates,
-    insertMention,
-    handleBodyChange,
-    handleComposerKeyDown,
-    audiencePreview,
   };
 }
