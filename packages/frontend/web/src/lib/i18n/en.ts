@@ -156,6 +156,16 @@ export const en: Record<DictKey, string> = {
   "participants.form.model": "Model (optional)",
   "participants.form.modelPlaceholder":
     "e.g. deepseek-v4-flash (supports {model})",
+  "participants.form.prompt": "Prompt (optional)",
+  "participants.form.promptPlaceholder":
+    "Describe what this executor is good at. The coordinator uses this to decide who to dispatch to — leave empty if it has no preference.",
+  "participants.form.promptHint":
+    "Used as the default division-of-labor note when joining a group; it can still be customized per group after joining.",
+  "participants.form.check": "Check",
+  "participants.form.checking": "Checking…",
+  "participants.check.found": "Found",
+  "participants.check.notFound": "Command not found",
+  "participants.badge.a2a": "A2A",
   "participants.list.title": "Executors",
   "participants.list.empty": "No executors yet — add one above",
   "participants.list.count": "{count} total",

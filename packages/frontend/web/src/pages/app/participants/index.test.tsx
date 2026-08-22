@@ -103,15 +103,20 @@ describe("接入参与方页", () => {
 
     renderWithProviders(<ExecutorsPage />, "/participants");
 
-    // 表单字段:名字/调用方式/命令/参数模板/设备/模型
+    // 表单字段:名字/调用方式/命令/参数模板/设备/模型/提示词
     expect(screen.getByLabelText("名字")).toBeInTheDocument();
     expect(screen.getByText("调用方式")).toBeInTheDocument();
-    expect(screen.getByLabelText("cli(本地命令)")).toBeInTheDocument();
-    expect(screen.getByLabelText("a2a(远程 gateway)")).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: "cli(本地命令)" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: "a2a(远程 gateway)" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("命令")).toBeInTheDocument();
     expect(screen.getByLabelText("参数模板(可选)")).toBeInTheDocument();
     expect(screen.getByLabelText("设备(可选)")).toBeInTheDocument();
     expect(screen.getByLabelText("模型(可选)")).toBeInTheDocument();
+    expect(screen.getByLabelText("提示词(可选)")).toBeInTheDocument();
 
     // 内置执行器已展示(加载完成后)
     await waitFor(() => {
@@ -134,6 +139,9 @@ describe("接入参与方页", () => {
     });
     fireEvent.change(screen.getByLabelText("模型(可选)"), {
       target: { value: "deepseek-v4-flash" },
+    });
+    fireEvent.change(screen.getByLabelText("提示词(可选)"), {
+      target: { value: "擅长代码评审与重构" },
     });
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
@@ -159,6 +167,7 @@ describe("接入参与方页", () => {
     expect(payload.args).toEqual(["-y", "-p", "{ticket}"]);
     expect(payload.device).toBe("mac-mini");
     expect(payload.model).toBe("deepseek-v4-flash");
+    expect(payload.prompt).toBe("擅长代码评审与重构");
     expect(payload).not.toHaveProperty("token");
     expect(payload).not.toHaveProperty("tokenHash");
     // participant.type 已移除:载荷不含 type。
@@ -174,7 +183,7 @@ describe("接入参与方页", () => {
 
     renderWithProviders(<ExecutorsPage />, "/participants");
 
-    fireEvent.click(screen.getByLabelText("a2a(远程 gateway)"));
+    fireEvent.click(screen.getByRole("radio", { name: "a2a(远程 gateway)" }));
     await waitFor(() => {
       expect(screen.getByLabelText("Gateway 地址")).toBeInTheDocument();
     });
@@ -248,7 +257,7 @@ describe("接入参与方页", () => {
     });
 
     // 内置项:编辑按钮禁用(提示内置不可编辑),没有删除按钮
-    const builtinRow = screen.getByText("AtomCode 执行器").closest("li")!;
+    const builtinRow = screen.getByTestId("executor-row-executor");
     const builtinEditBtn = within(builtinRow).getByRole("button", {
       name: "编辑执行器",
     });
@@ -258,7 +267,7 @@ describe("接入参与方页", () => {
     ).not.toBeInTheDocument();
 
     // 非内置项可删除
-    const extraRow = screen.getByText("Extra Participant").closest("li")!;
+    const extraRow = screen.getByTestId("executor-row-extra-participant");
     fireEvent.click(within(extraRow).getByRole("button", { name: "删除" }));
 
     await waitFor(() => {
@@ -283,6 +292,7 @@ describe("接入参与方页", () => {
         args: ["-y", "-p", "{ticket}"],
         label: "edit-target",
         model: "deepseek-v4-flash",
+        prompt: "擅长测试驱动开发",
         builtin: false,
       },
     ];
@@ -317,7 +327,7 @@ describe("接入参与方页", () => {
     await waitFor(() => {
       expect(screen.getByText("Edit Target")).toBeInTheDocument();
     });
-    const row = screen.getByText("Edit Target").closest("li")!;
+    const row = screen.getByTestId("executor-row-edit-target");
     fireEvent.click(within(row).getByRole("button", { name: "编辑执行器" }));
 
     // 弹窗预填现有配置(bin/args/model/device/agentName);查询限定在弹窗内
@@ -335,6 +345,10 @@ describe("接入参与方页", () => {
     expect(
       (within(dialog).getByLabelText("模型(可选)") as HTMLInputElement).value,
     ).toBe("deepseek-v4-flash");
+    expect(
+      (within(dialog).getByLabelText("提示词(可选)") as HTMLTextAreaElement)
+        .value,
+    ).toBe("擅长测试驱动开发");
 
     // 改 bin/args/model 并保存
     fireEvent.change(within(dialog).getByLabelText("命令"), {
@@ -342,6 +356,9 @@ describe("接入参与方页", () => {
     });
     fireEvent.change(within(dialog).getByLabelText("模型(可选)"), {
       target: { value: "gpt-4o" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("提示词(可选)"), {
+      target: { value: "擅长集成测试" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
@@ -362,12 +379,77 @@ describe("接入参与方页", () => {
     >;
     expect(payload.bin).toBe("new-bin");
     expect(payload.model).toBe("gpt-4o");
+    expect(payload.prompt).toBe("擅长集成测试");
     expect(payload.agentName).toBe("Edit Target");
     // 弹窗关闭,列表即时刷新出新值
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
     expect(screen.getByText(/gpt-4o/)).toBeInTheDocument();
+  });
+
+  it("命令字段「检测」:found=true 展示绿色对勾 + resolvedPath,URL 带编码后的 bin", async () => {
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => String(url).startsWith("/api/executors/check-bin"),
+        respond: (url) => {
+          const query = String(url).split("?")[1] ?? "";
+          expect(new URLSearchParams(query).get("bin")).toBe("my tool");
+          return jsonResponse({
+            found: true,
+            resolvedPath: "/usr/local/bin/my-tool",
+          });
+        },
+      },
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/executors"),
+        respond: () => jsonResponse(BUILTIN),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("AtomCode 执行器");
+    fireEvent.change(screen.getByLabelText("命令"), {
+      target: { value: "my tool" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "检测" }));
+
+    expect(await screen.findByText("已找到")).toBeInTheDocument();
+    expect(screen.getByText("/usr/local/bin/my-tool")).toBeInTheDocument();
+  });
+
+  it("命令「检测」未找到时轻量提示,输入变化后旧结果失效", async () => {
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => String(url).startsWith("/api/executors/check-bin"),
+        respond: () => jsonResponse({ found: false, resolvedPath: null }),
+      },
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/executors"),
+        respond: () => jsonResponse(BUILTIN),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("AtomCode 执行器");
+    fireEvent.change(screen.getByLabelText("命令"), {
+      target: { value: "no-such-cmd" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "检测" }));
+
+    expect(await screen.findByText("未找到该命令")).toBeInTheDocument();
+
+    // 输入变化 → 旧结果失效,不展示过期检测结果。
+    fireEvent.change(screen.getByLabelText("命令"), {
+      target: { value: "another-cmd" },
+    });
+    expect(screen.queryByText("未找到该命令")).not.toBeInTheDocument();
   });
 
   // ── Participant 自管理(ticket: 补全 /participants 页)──────────────────────────────
@@ -509,7 +591,7 @@ describe("接入参与方页", () => {
     renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Online Bot");
-    const row = screen.getByText("Online Bot").closest("li")!;
+    const row = screen.getByTestId("executor-row-online-bot");
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
 
     // 对话框预填现有注册信息
@@ -562,7 +644,7 @@ describe("接入参与方页", () => {
     renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Never Bot");
-    const row = screen.getByText("Never Bot").closest("li")!;
+    const row = screen.getByTestId("executor-row-never-bot");
     expect(within(row).getByText("从未在线")).toBeInTheDocument();
 
     fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
@@ -586,7 +668,7 @@ describe("接入参与方页", () => {
     renderWithProviders(<ExecutorsPage />, "/participants");
 
     await screen.findByText("Online Bot");
-    const row = screen.getByText("Online Bot").closest("li")!;
+    const row = screen.getByTestId("executor-row-online-bot");
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
     await screen.findByText(/未绑定身份,请先在群组页身份面板/);
 

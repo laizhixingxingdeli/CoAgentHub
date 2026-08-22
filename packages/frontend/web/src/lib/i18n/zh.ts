@@ -145,6 +145,16 @@ export const zh = {
   "participants.form.model": "模型(可选)",
   "participants.form.modelPlaceholder":
     "如 deepseek-v4-flash(支持 {model} 占位)",
+  "participants.form.prompt": "提示词(可选)",
+  "participants.form.promptPlaceholder":
+    "描述这个执行器擅长什么。协调者据此判断该派谁执行——留空就当它没有偏好。",
+  "participants.form.promptHint":
+    "加入群组时作为分工说明的默认值,进群后还能针对该群单独改。",
+  "participants.form.check": "检测",
+  "participants.form.checking": "检测中…",
+  "participants.check.found": "已找到",
+  "participants.check.notFound": "未找到该命令",
+  "participants.badge.a2a": "A2A",
   "participants.list.title": "执行器列表",
   "participants.list.empty": "暂无执行器,请先在上方新增",
   "participants.list.count": "共 {count} 个",

@@ -1,10 +1,12 @@
 import {
   Bot,
+  CheckCircle2,
   HeartPulse,
   Loader2,
   Pencil,
   Settings2,
   Trash2,
+  XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
 
@@ -26,8 +29,13 @@ import { t } from "@/lib/i18n";
  * 接入 Participant(ticket: 网页 @executor 发布):管理执行器配置。
  *
  * 表单字段 = 名字 / 调用方式(cli|a2a)/ 命令或 gateway 地址 / 参数模板
- * (cli,可空)/ 设备(可选)。提交调 POST /api/executors,server 自动注册对应
- * participant(token 认证已移除,界面绝不出现任何 token/token_hash 字段)。
+ * (cli,可空)/ 设备(可选)/ 模型(可选)/ 提示词(可选,协调者分工判断用)。
+ * 提交调 POST /api/executors,server 自动注册对应 participant(token 认证已
+ * 移除,界面绝不出现任何 token/token_hash 字段)。
+ *
+ * 命令(bin)字段带「检测」按钮:调 GET /api/executors/check-bin 探测命令在
+ * 服务器上是否可执行。只读辅助功能:点击时查一次(不防抖),网络失败静默;
+ * 输入变化后旧结果失效,未找到不阻断提交(可能先填一个之后才部署的命令)。
  *
  * 列表 = 内置执行器 + DB 配置(GET /api/executors 合并返回),内置项不可删除。
  *
@@ -35,6 +43,12 @@ import { t } from "@/lib/i18n";
  * (GET /api/participants,按 name 匹配),展示 device / capabilities / 在线状态;
  * 绑定后自己的 participant 可编辑(PATCH)与上报在线(heartbeat)。
  */
+
+/** check-bin 探测结果(与后端 GET /api/executors/check-bin 响应一致)。 */
+type BinCheckResult = {
+  found: boolean;
+  resolvedPath: string | null;
+};
 
 type ExecutorItem = {
   key: string;
@@ -47,6 +61,8 @@ type ExecutorItem = {
   label: string;
   /** 执行器默认模型(args 模板 {model} 占位);未配置为 null。 */
   model: string | null;
+  /** 默认分工说明(加入群组时作为该执行器分工说明的默认值);未配置为 null。 */
+  prompt: string | null;
   builtin: boolean;
   /** 加载时按 name 匹配到的 participant id;渲染按 id 取 participant(改名后仍能对应)。 */
   participantId?: string;
@@ -64,6 +80,27 @@ type ParticipantInfo = {
 /** 在线判定(与后端 T13 约定一致):lastSeen 距今 < 60s 视为在线。 */
 const ONLINE_WINDOW_MS = 60_000;
 
+/** 检测结果展示:找到 → 绿色对勾 + 等宽路径;未找到 → 轻量提示(不阻断提交)。 */
+function BinCheckResultView({ result }: { result: BinCheckResult }) {
+  if (result.found) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+        <CheckCircle2 className="size-3.5 shrink-0" />
+        <span className="shrink-0">{t("participants.check.found")}</span>
+        <code className="truncate font-mono text-muted-foreground">
+          {result.resolvedPath}
+        </code>
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <XCircle className="size-3.5 shrink-0" />
+      {t("participants.check.notFound")}
+    </p>
+  );
+}
+
 export default function ExecutorsPage() {
   const [items, setItems] = useState<ExecutorItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,10 +115,18 @@ export default function ExecutorsPage() {
   const [args, setArgs] = useState("");
   const [model, setModel] = useState("");
   const [device, setDevice] = useState("");
+  const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
-  // 执行器编辑:对话框(bin/args/model/device/agentName)+ PATCH 保存
+  // 命令检测:checkingBin = 请求中;binCheckResult = 最近一次检测结果
+  // (bin 输入变化后置 null,避免展示过期结果)。
+  const [checkingBin, setCheckingBin] = useState(false);
+  const [binCheckResult, setBinCheckResult] = useState<BinCheckResult | null>(
+    null,
+  );
+
+  // 执行器编辑:对话框(bin/args/model/device/prompt/agentName)+ PATCH 保存
   const [editingExecutor, setEditingExecutor] = useState<ExecutorItem | null>(
     null,
   );
@@ -90,6 +135,10 @@ export default function ExecutorsPage() {
   const [editArgs, setEditArgs] = useState("");
   const [editModel, setEditModel] = useState("");
   const [editExecutorDevice, setEditExecutorDevice] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editCheckingBin, setEditCheckingBin] = useState(false);
+  const [editBinCheckResult, setEditBinCheckResult] =
+    useState<BinCheckResult | null>(null);
   const [savingExecutorEdit, setSavingExecutorEdit] = useState(false);
 
   // Participant 自管理:编辑对话框 + 心跳
@@ -175,6 +224,7 @@ export default function ExecutorsPage() {
         kind,
         device: device.trim() || undefined,
         model: model.trim() || undefined,
+        prompt: prompt.trim() || undefined,
       };
       if (kind === "a2a") {
         if (!url.trim()) {
@@ -214,6 +264,8 @@ export default function ExecutorsPage() {
       setArgs("");
       setModel("");
       setDevice("");
+      setPrompt("");
+      setBinCheckResult(null);
       await load();
     } catch (e) {
       setError(
@@ -402,7 +454,7 @@ export default function ExecutorsPage() {
     }
   };
 
-  /** 打开「编辑执行器」对话框(bin/args/model/device/agentName);内置项入口禁用。 */
+  /** 打开「编辑执行器」对话框(bin/args/model/device/prompt/agentName);内置项入口禁用。 */
   const startEditExecutor = (item: ExecutorItem) => {
     setEditingExecutor(item);
     setEditAgentName(item.agentName);
@@ -411,6 +463,8 @@ export default function ExecutorsPage() {
     setEditModel(item.model ?? "");
     // device 属于 participant 注册信息,编辑时按 name 匹配预填。
     setEditExecutorDevice(participantById(item.participantId)?.device ?? "");
+    setEditPrompt(item.prompt ?? "");
+    setEditBinCheckResult(null);
   };
 
   /** PATCH /api/executors/:key 保存;成功后重新加载列表即时刷新。 */
@@ -425,6 +479,8 @@ export default function ExecutorsPage() {
         bin: editBin.trim() || undefined,
         model: editModel.trim() || null,
         device: editExecutorDevice.trim() || null,
+        // 空字符串 = 清空(与后端 PATCH prompt 语义一致)。
+        prompt: editPrompt.trim(),
       };
       // 参数模板:空白分词(与新增表单一致)。
       const argList = editArgs
@@ -461,8 +517,41 @@ export default function ExecutorsPage() {
     }
   };
 
+  /** 调 check-bin 探测;空输入或请求失败返回 null(辅助功能,静默失败不打扰主流程)。 */
+  const runBinCheck = async (value: string): Promise<BinCheckResult | null> => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const res = await fetch(
+        `/api/executors/check-bin?bin=${encodeURIComponent(trimmed)}`,
+      );
+      if (!res.ok) return null;
+      return (await res.json()) as BinCheckResult;
+    } catch {
+      return null;
+    }
+  };
+
+  /** 新增表单的检测按钮:点击时查一次,不做防抖。 */
+  const handleCheckBin = async () => {
+    setCheckingBin(true);
+    setBinCheckResult(null);
+    const result = await runBinCheck(bin);
+    setBinCheckResult(result);
+    setCheckingBin(false);
+  };
+
+  /** 编辑执行器对话框的检测按钮:逻辑与新增表单一致。 */
+  const handleEditCheckBin = async () => {
+    setEditCheckingBin(true);
+    setEditBinCheckResult(null);
+    const result = await runBinCheck(editBin);
+    setEditBinCheckResult(result);
+    setEditCheckingBin(false);
+  };
+
   return (
-    <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
+    <div className="mx-auto w-full max-w-[760px] p-4 sm:p-6">
       <div className="mb-6">
         <h2 className="text-xl font-semibold">{t("participants.title")}</h2>
         <p className="text-muted-foreground text-sm">
@@ -484,50 +573,87 @@ export default function ExecutorsPage() {
         </p>
       )}
 
-      {/* 新增表单 */}
-      <div className="mb-8 rounded-lg border bg-card p-4 sm:p-5">
+      {/* 新增表单:白底圆角卡片,字段分组(名字+调用方式 / 命令 / 参数模板 /
+          模型+设备 / 提示词) */}
+      <div className="mb-8 rounded-lg border bg-card p-4 shadow-sm sm:p-5">
         <div className="mb-4 flex items-center gap-2 text-sm font-medium">
           <Bot className="size-4" />
           {t("participants.form.title")}
         </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="grid gap-1.5">
-            <Label htmlFor="ex-name">{t("participants.form.name")}</Label>
-            <Input
-              id="ex-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t("participants.form.namePlaceholder")}
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label>{t("participants.form.invoke")}</Label>
-            <div className="flex items-center gap-4 pt-1.5">
-              {(["cli", "a2a"] as const).map((k) => (
-                <label key={k} className="flex items-center gap-1.5 text-sm">
-                  <input
-                    type="radio"
-                    name="kind"
-                    checked={kind === k}
-                    onChange={() => setKind(k)}
-                  />
-                  {k === "cli"
-                    ? t("participants.form.invokeCli")
-                    : t("participants.form.invokeA2a")}
-                </label>
-              ))}
+        <div className="grid gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="ex-name">{t("participants.form.name")}</Label>
+              <Input
+                id="ex-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={t("participants.form.namePlaceholder")}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label>{t("participants.form.invoke")}</Label>
+              {/* 分段控件:两个选项拼在一起、互斥选择,选中态高亮 */}
+              <div
+                role="radiogroup"
+                className="grid grid-cols-2 gap-0.5 rounded-lg border bg-muted/50 p-0.5"
+              >
+                {(["cli", "a2a"] as const).map((k) => {
+                  const active = kind === k;
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => setKind(k)}
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                        active
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {k === "cli"
+                        ? t("participants.form.invokeCli")
+                        : t("participants.form.invokeA2a")}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
+
           <div className="grid gap-1.5">
             {kind === "cli" ? (
               <>
                 <Label htmlFor="ex-bin">{t("participants.form.command")}</Label>
-                <Input
-                  id="ex-bin"
-                  value={bin}
-                  onChange={(e) => setBin(e.target.value)}
-                  placeholder={t("participants.form.commandPlaceholder")}
-                />
+                <div className="flex gap-2">
+                  <Input
+                    id="ex-bin"
+                    value={bin}
+                    onChange={(e) => {
+                      setBin(e.target.value);
+                      // 输入变化后旧检测结果失效,避免展示过期结果。
+                      setBinCheckResult(null);
+                    }}
+                    placeholder={t("participants.form.commandPlaceholder")}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleCheckBin()}
+                    disabled={checkingBin || !bin.trim()}
+                    className="shrink-0"
+                  >
+                    {checkingBin && <Loader2 className="size-4 animate-spin" />}
+                    {checkingBin
+                      ? t("participants.form.checking")
+                      : t("participants.form.check")}
+                  </Button>
+                </div>
+                {binCheckResult && (
+                  <BinCheckResultView result={binCheckResult} />
+                )}
               </>
             ) : (
               <>
@@ -541,6 +667,7 @@ export default function ExecutorsPage() {
               </>
             )}
           </div>
+
           {kind === "cli" && (
             <div className="grid gap-1.5">
               <Label htmlFor="ex-args">{t("participants.form.args")}</Label>
@@ -552,23 +679,39 @@ export default function ExecutorsPage() {
               />
             </div>
           )}
-          <div className="grid gap-1.5">
-            <Label htmlFor="ex-device">{t("participants.form.device")}</Label>
-            <Input
-              id="ex-device"
-              value={device}
-              onChange={(e) => setDevice(e.target.value)}
-              placeholder={t("participants.form.devicePlaceholder")}
-            />
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="ex-model">{t("participants.form.model")}</Label>
+              <Input
+                id="ex-model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={t("participants.form.modelPlaceholder")}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="ex-device">{t("participants.form.device")}</Label>
+              <Input
+                id="ex-device"
+                value={device}
+                onChange={(e) => setDevice(e.target.value)}
+                placeholder={t("participants.form.devicePlaceholder")}
+              />
+            </div>
           </div>
+
           <div className="grid gap-1.5">
-            <Label htmlFor="ex-model">{t("participants.form.model")}</Label>
-            <Input
-              id="ex-model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={t("participants.form.modelPlaceholder")}
+            <Label htmlFor="ex-prompt">{t("participants.form.prompt")}</Label>
+            <Textarea
+              id="ex-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={t("participants.form.promptPlaceholder")}
             />
+            <p className="text-xs text-muted-foreground">
+              {t("participants.form.promptHint")}
+            </p>
           </div>
         </div>
         <div className="mt-4 flex justify-end">
@@ -579,9 +722,9 @@ export default function ExecutorsPage() {
         </div>
       </div>
 
-      {/* 执行器列表(内置 + DB 配置),行内带 participant 自管理字段 */}
-      <div className="rounded-lg border bg-card">
-        <div className="flex items-center justify-between border-b px-4 py-3">
+      {/* 执行器列表(内置 + DB 配置),卡片行;行内带 participant 自管理字段 */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between px-1">
           <span className="text-sm font-medium">
             {t("participants.list.title")}
           </span>
@@ -592,124 +735,136 @@ export default function ExecutorsPage() {
           </span>
         </div>
         {items.length === 0 && !loading ? (
-          <p className="px-4 py-6 text-sm text-muted-foreground">
+          <p className="rounded-lg border border-dashed px-4 py-6 text-sm text-muted-foreground">
             {t("participants.list.empty")}
           </p>
         ) : (
-          <ul className="divide-y">
-            {items.map((item) => {
-              const participant = participantById(item.participantId);
-              const lastSeen = participant?.lastSeen ?? null;
-              const online =
-                lastSeen != null &&
-                Date.now() - Date.parse(lastSeen) < ONLINE_WINDOW_MS;
-              return (
-                <li
-                  key={item.key}
-                  className="flex items-start justify-between gap-2 px-4 py-3"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      {renamingKey === item.key ? (
-                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                          <Input
-                            autoFocus
-                            value={renameName}
-                            onChange={(e) => setRenameName(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                void handleSaveRename();
-                              } else if (e.key === "Escape") {
-                                setRenamingKey(null);
-                              }
-                            }}
-                            aria-label={t("participants.renameInputAria")}
-                            className="h-8 flex-1"
-                          />
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={savingRename || !renameName.trim()}
-                            onClick={() => void handleSaveRename()}
-                          >
-                            {savingRename
-                              ? t("common.saving")
-                              : t("participants.renameSave")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setRenamingKey(null)}
-                          >
-                            {t("participants.renameCancel")}
-                          </Button>
-                        </div>
-                      ) : (
-                        <>
-                          <span
-                            className="truncate text-sm font-medium"
-                            data-testid={`participant-name-${item.key}`}
-                          >
-                            {participant?.name ?? item.agentName}
-                          </span>
-                          <Pencil
-                            data-testid={`rename-participant-${item.key}`}
-                            className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
-                            aria-label={t("participants.renameAria")}
-                            onClick={() => startRename(item)}
-                          />
-                          {item.builtin && (
-                            <span className="inline-flex shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                              {t("common.builtin")}
-                            </span>
-                          )}
-                          {/* 在线状态徽标:绿点在线 / 灰点离线 / 从未在线 */}
-                          {participant && (
-                            <span
-                              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ${
-                                online
-                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
-                                  : "bg-muted text-muted-foreground"
-                              }`}
+          items.map((item) => {
+            const participant = participantById(item.participantId);
+            const lastSeen = participant?.lastSeen ?? null;
+            const online =
+              lastSeen != null &&
+              Date.now() - Date.parse(lastSeen) < ONLINE_WINDOW_MS;
+            return (
+              <div
+                key={item.key}
+                data-testid={`executor-row-${item.key}`}
+                className="rounded-lg border bg-card p-4 shadow-sm"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
+                    {/* 圆角方块头像:先固定一个背景色,不做角色色识别 */}
+                    <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Bot className="size-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        {renamingKey === item.key ? (
+                          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                            <Input
+                              autoFocus
+                              value={renameName}
+                              onChange={(e) => setRenameName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  void handleSaveRename();
+                                } else if (e.key === "Escape") {
+                                  setRenamingKey(null);
+                                }
+                              }}
+                              aria-label={t("participants.renameInputAria")}
+                              className="h-8 flex-1"
+                            />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={savingRename || !renameName.trim()}
+                              onClick={() => void handleSaveRename()}
                             >
-                              <span
-                                className={`size-1.5 rounded-full ${
-                                  online
-                                    ? "bg-emerald-500"
-                                    : "bg-muted-foreground/60"
-                                }`}
-                              />
-                              {lastSeen == null
-                                ? t("common.neverOnline")
-                                : online
-                                  ? t("common.online")
-                                  : t("common.offline")}
+                              {savingRename
+                                ? t("common.saving")
+                                : t("participants.renameSave")}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setRenamingKey(null)}
+                            >
+                              {t("participants.renameCancel")}
+                            </Button>
+                          </div>
+                        ) : (
+                          <>
+                            <span
+                              className="truncate text-sm font-medium"
+                              data-testid={`participant-name-${item.key}`}
+                            >
+                              {participant?.name ?? item.agentName}
                             </span>
-                          )}
-                        </>
+                            <Pencil
+                              data-testid={`rename-participant-${item.key}`}
+                              className="size-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                              aria-label={t("participants.renameAria")}
+                              onClick={() => startRename(item)}
+                            />
+                            {item.builtin && (
+                              <Badge variant="secondary">
+                                {t("common.builtin")}
+                              </Badge>
+                            )}
+                            {item.kind === "a2a" && (
+                              <Badge variant="outline">
+                                {t("participants.badge.a2a")}
+                              </Badge>
+                            )}
+                            {/* 在线状态:小圆点 + 文字(不是纯色块);无 participant
+                                注册信息时不展示 */}
+                            {participant && (
+                              <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                                <span
+                                  className={`size-1.5 rounded-full ${
+                                    online
+                                      ? "bg-emerald-500"
+                                      : "bg-muted-foreground/60"
+                                  }`}
+                                />
+                                {lastSeen == null
+                                  ? t("common.neverOnline")
+                                  : online
+                                    ? t("common.online")
+                                    : t("common.offline")}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {/* 元信息行:等宽字体展示 bin/url + device(参数模板/模型仍保留) */}
+                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                        {item.kind === "a2a" && item.url ? item.url : item.bin}
+                        {participant?.device ? ` ${participant.device}` : ""}
+                        {item.args.length > 0 ? ` ${item.args.join(" ")}` : ""}
+                        {item.model ? ` ${item.model}` : ""}
+                      </p>
+                      {/* 提示词摘要(超长省略号截断) */}
+                      {item.prompt ? (
+                        <p className="mt-1 truncate text-xs text-muted-foreground">
+                          {item.prompt}
+                        </p>
+                      ) : null}
+                      {/* capabilities 标签 chips */}
+                      {participant && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          {participant.capabilities.map((cap) => (
+                            <Badge key={cap} variant="secondary">
+                              {cap}
+                            </Badge>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {item.type} · {item.kind}
-                      {participant?.device ? ` · ${participant.device}` : ""}
-                      {item.label !== item.agentName ? ` · ${item.label}` : ""}
-                      {item.kind === "a2a" && item.url ? ` · ${item.url}` : ""}
-                      {!item.builtin && ` · ${item.bin}`}
-                      {item.args.length > 0 ? ` · ${item.args.join(" ")}` : ""}
-                      {item.model ? ` · ${item.model}` : ""}
-                    </div>
-                    {/* capabilities 标签 chips */}
-                    {participant && (
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                        {participant.capabilities.map((cap) => (
-                          <Badge key={cap} variant="secondary">
-                            {cap}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  {/* 操作按钮列(右侧) */}
+                  <div className="flex shrink-0 flex-col items-end gap-1.5">
                     <Button
                       variant="outline"
                       size="sm"
@@ -761,10 +916,10 @@ export default function ExecutorsPage() {
                       </Button>
                     )}
                   </div>
-                </li>
-              );
-            })}
-          </ul>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
 
@@ -826,7 +981,7 @@ export default function ExecutorsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 编辑执行器对话框(DB 配置;bin/args/model/device/agentName 可改) */}
+      {/* 编辑执行器对话框(DB 配置;bin/args/model/device/prompt/agentName 可改) */}
       <Dialog
         open={editingExecutor !== null}
         onOpenChange={(open) => {
@@ -855,12 +1010,35 @@ export default function ExecutorsPage() {
               <Label htmlFor="edit-ex-bin">
                 {t("participants.form.command")}
               </Label>
-              <Input
-                id="edit-ex-bin"
-                value={editBin}
-                onChange={(e) => setEditBin(e.target.value)}
-                placeholder={t("participants.form.commandPlaceholder")}
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="edit-ex-bin"
+                  value={editBin}
+                  onChange={(e) => {
+                    setEditBin(e.target.value);
+                    // 输入变化后旧检测结果失效。
+                    setEditBinCheckResult(null);
+                  }}
+                  placeholder={t("participants.form.commandPlaceholder")}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void handleEditCheckBin()}
+                  disabled={editCheckingBin || !editBin.trim()}
+                  className="shrink-0"
+                >
+                  {editCheckingBin && (
+                    <Loader2 className="size-4 animate-spin" />
+                  )}
+                  {editCheckingBin
+                    ? t("participants.form.checking")
+                    : t("participants.form.check")}
+                </Button>
+              </div>
+              {editBinCheckResult && (
+                <BinCheckResultView result={editBinCheckResult} />
+              )}
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="edit-ex-args">
@@ -894,6 +1072,20 @@ export default function ExecutorsPage() {
                 onChange={(e) => setEditExecutorDevice(e.target.value)}
                 placeholder={t("participants.form.devicePlaceholder")}
               />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-ex-prompt">
+                {t("participants.form.prompt")}
+              </Label>
+              <Textarea
+                id="edit-ex-prompt"
+                value={editPrompt}
+                onChange={(e) => setEditPrompt(e.target.value)}
+                placeholder={t("participants.form.promptPlaceholder")}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("participants.form.promptHint")}
+              </p>
             </div>
           </div>
           <DialogFooter>
