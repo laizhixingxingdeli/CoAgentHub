@@ -1,6 +1,12 @@
 # Spec: 群详情页可读性 —— 任务看不出在做什么
 
-> **状态**: Ready for Implementation
+> **状态**: Superseded — 已作废,不要按本文件下发
+>
+> 拆分为四票(2026-08-23,检视者):
+> - 问题一、问题二 → `specs/timeline-readability.md`
+> - 问题三(右栏)→ `specs/remove-context-panel-and-settings-page.md`
+>   ——该节内容已作废:原写「移除任务 tab、其余 tab 保留」,现改为整个右栏删除
+> - 实时日志相关 → `specs/live-output-in-timeline.md` + `specs/executor-output-ansi-strip.md`
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **协作模式**: 三层
