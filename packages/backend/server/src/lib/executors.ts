@@ -143,8 +143,13 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     agentName: "Reviewer 检视器",
     type: "participant",
     kind: "cli",
-    // 占位标识,业务方部署时用 EXECUTOR_BIN_REVIEWER 覆盖为实际 CLI 命令
-    // (applyEnvOverrides 按 EXECUTOR_BIN_<KEY 大写> 自动覆盖,无需改动)。
+    // 占位标识,**永远不会被 spawn**(spec v3.8 §3.17.4/§3.17.5):自 v3.8 起
+    // L3 架构检视不再向本执行器下发任务,而是由协调者 PATCH 自己那条 detached
+    // 任务为终态、经 DB trigger 写完成事件唤醒检视者已有会话。本条目存在的
+    // 唯一理由是 DISPATCH_CAPABLE_KEYS 派生的 canDispatch —— 保证检视者自己
+    // 下发任务时 callbackRef 不被当作"执行器伪造 metadata"剥离。
+    // 因此**不需要设置 EXECUTOR_BIN_REVIEWER**;旧文档要求三层模式必须配置它
+    // (否则 spawn reviewer ENOENT)的说法已作废。
     bin: "reviewer",
     args: ["-y", "-p", "{ticket}"],
     label: "reviewer",

@@ -173,28 +173,38 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
      - **两层模式**：直接结案（见 §4.4），**跳过 L3**。
    - ❌ 有未通过项 → **直接重下发修正任务**（任务书引用发现项），**不进入 L3**。发消息 `❌ 验收未通过：<reason>` 后重下发。两种模式行为相同。
 
-#### 4.2 下发 L3 检视任务 (Dispatch L3 Review) — 仅三层模式
+#### 4.2 交回检视者做 L3 (Hand Back for L3) — 仅三层模式
 
 > 本步**仅三层模式适用**。两层模式下 L2 通过即结案，跳过本步（见 §4.1 的 L2 分支）。
 
-L2 通过后，向检视者下发 L3 检视任务：
+**不要向检视者下发新任务。** L3 是**检视者当初下发给你的那条 detached 任务的收尾**——
+你 PATCH 自己这条任务为终态，服务端 DB trigger 会自动往检视者收件箱写一条完成事件，
+检视者的适配器据此在**它自己的会话上下文**里被唤醒并做 L3（spec §3.17.4）。
 
-- `executorName`: **检视者执行器**（内置 key=`reviewer`，展示名「Reviewer 检视器」）。
-- 任务内容含 `review_request` 结构化载荷（格式见 spec §3.10，字段名照抄）：
+L2 通过后：
+
+1. `PATCH /api/groups/:groupId/tasks/:taskId`，把**检视者下发给你的那条任务**置为 `done`
+2. `diffSummary` 里带上 `review_request` 结构化载荷（格式见 spec §3.10，字段名照抄）：
 
 ```json
 {"type":"review_request","layer":3,"taskId":"<被检视任务id>","specRef":"specs/x.md","specHash":"...","diffSummary":"..."}
 ```
 
-- 任务书带 `## ReplyMode: detached`（spec §3.5）——发送即视为已派发，不等结果；检视者完成侧检视后由其**回写**终态。
-- `callback` 带 `sessionRef` = 你当前会话 id，检视者的完成回调才能 `resume` 回同一个会话。
-- 下发前确认检视者已加载 `coagenthub-reviewer` skill（见 §3.5）。
+3. 读检视者在本群 `group_members.prompt` 里声明的**送达档位**（spec §3.17.1）：
+   - **live** 档（能注入活跃会话）→ 不必额外留言，检视者会当场收到
+   - **resume** 档（靠 spawn 恢复会话）→ 在群里补一条「已交回 L3，请查收」的消息，
+     否则用户可能一直等在那儿不知道结果已经到了
 
-> ⚠️ **部署前置（三层模式专属）**：内置 reviewer 执行器的 `bin` 是占位标识 `"reviewer"`，**未设 `EXECUTOR_BIN_REVIEWER` 时下发 L3 检视任务会以 `spawn reviewer ENOENT` 失败**（实测确认）。三层模式必须设置 `EXECUTOR_BIN_REVIEWER` 指向检视者 runtime 的实际 CLI 命令；两层模式不受此影响（不下发 L3，开箱即用）。详见 spec §3.14.5。
+> ⚠️ **不要设置 `EXECUTOR_BIN_REVIEWER`，也不要向内置 `reviewer` 执行器下发任务。**
+> 该条目存在的唯一理由是 `canDispatch`（保证检视者下发时 `callbackRef` 不被剥离），
+> 它的 `bin` 是占位标识、**永远不该被 spawn**。旧版本要求"三层模式必须设
+> `EXECUTOR_BIN_REVIEWER`，否则 `spawn reviewer ENOENT`"的说法已随 spec v3.8 作废：
+> 现在根本没人向它下发任务。就算配上真实 CLI，spawn 出来的也是个**没有 spec 讨论
+> 上下文的新实例**，做不了有意义的架构检视。
 
 #### 4.3 读 review_result 裁决 (Adjudicate) — 仅三层模式
 
-收到检视任务的完成事件后，读其汇报段中的 `review_result` 载荷（格式见 spec §3.10，字段名照抄）：
+检视者做完 L3 后会把 `review_result` 作为**群消息**公布（它不是被下发的执行器，没有"完成回调"可回）。从群消息流里读该载荷（格式见 spec §3.10，字段名照抄）：
 
 ```json
 {"type":"review_result","layer":3,"taskId":"<被检视任务id>","verdict":"pass|findings","findings":[{"severity":"...","note":"..."}]}

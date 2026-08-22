@@ -1,9 +1,10 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.7（修正 3.6：优先级由协调者读 prompt 自行判断，不建关键词匹配、
-> 不写代码——协调者本身就是 LLM，读得懂自然语言）
-> **日期**: 2026-08-21
+> **版本**: 3.8（新增检视者适配契约：三种 runtime 的唤醒方式统一为「收件箱权威 +
+> 注入可选」；L3 不再下发给 reviewer 执行器，改为协调者 PATCH 自身任务终态触发；
+> 推翻 v3.4 关于 `EXECUTOR_BIN_REVIEWER` 是部署前置条件的表述）
+> **日期**: 2026-08-22
 > **依赖**: 服务端 specRef/specHash 透传、Skill 安装 API、durable task-completion events、
 > executor 任务通道（spawn/回调）、coordinator/executor/bugfix skills、Matt 协议 v1.2 对齐
 > **取代**: 本文件 v2.1（架构不变，实现细节按下文调整；v2.1 的 A2A 相关表述在 Phase 1 不实现）
@@ -60,6 +61,18 @@
     再下发一个 L3 检视任务，而检视任务在平台眼里只是普通 task），且冗余标记
     会与成员表漂移。两层模式下协调者**按需加载 reviewer skill** 承担其职责 A，
     严禁把 Grill/To-Spec 复制回 coordinator skill。
+
+11. **检视者适配契约：收件箱权威 + 注入可选**（v3.8 追加，见 §3.17）：dsh / codex /
+    Claude Code 三家 runtime 都能当检视者，**正确性契约（C1–C5）强制一致，送达时机
+    按 runtime 能力分档并显式声明**。三家的注入原语分别是 `Agent.followup()`（进程内）、
+    `codex queue --thread`（CLI，可直接喂给 callback-agent）、`Monitor` 工具（会话内订阅）。
+    **前两家是"外面往里推"，Claude Code 是"里面往外拉"，方向相反**，因此
+    callback-agent 的外部投递模型对 Claude Code 结构上不适用。
+12. **L3 不再下发给 reviewer 执行器**（v3.8 追加，见 §3.17.4）：改为协调者 L2 通过后
+    **PATCH 自己那条 detached 任务为终态**，由 DB trigger 写完成事件到检视者收件箱触发。
+    这同时**推翻了 v3.4 把 `EXECUTOR_BIN_REVIEWER` 列为三层模式部署前置条件的表述**
+    （§3.15）——不再有人向 `reviewer` 执行器下发任务，其 bin 永不 spawn。
+    内置条目保留仅为 `canDispatch`。
 
 ## 1. 背景与目标
 
@@ -649,6 +662,92 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
   `spawn reviewer ENOENT`）；补协调者若要用 detached 会话延续需自行注册执行器。
 - `docs/usage.md` / `docs/usage_CN.md`：环境变量表补 `EXECUTOR_BIN_REVIEWER`
   （及 `EXECUTOR_BIN_<KEY>` 通用覆盖规则的说明，若尚未记载）。
+
+### 3.17 检视者适配契约（v3.8 新增）
+
+三种 runtime（dsh / codex / Claude Code）都要能当检视者，且**行为一致**。
+"一致"必须定义清楚，否则会变成"看起来都能用，出问题时各有各的坑"。
+
+#### 3.17.1 一致的是什么，不一致的是什么
+
+把两件事分开，这是本节的支点：
+
+| | 要求 | 是否强制一致 |
+|---|---|---|
+| **正确性契约** | 不丢事件、不重复副作用、最终一定处理 | ✅ 强制，不可降级 |
+| **送达时机** | 是否出现在用户正看着的会话里 | ❌ 由 runtime 决定，**显式声明，不得隐藏** |
+
+把时机差异伪装成"都差不多"是有害的：用户会以为关掉会话也照样收得到，
+结果消息躺在别处没人看。**档位必须写进 `group_members.prompt`**，
+让协调者知道对面是哪一档（复用 v3.7「协调者读 prompt 自行判断」，无需新机制）。
+
+#### 3.17.2 正确性契约 C1–C5（三家强制）
+
+- **C1 收件箱是唯一权威源**：MUST 消费
+  `GET /api/participants/:id/task-completion-events`，走
+  list → claim（租约）→ 处理 → ack 完整循环。
+  **MUST NOT 把 WS 当可靠来源**——`executor-task/notify.ts` 的注释已写死：
+  「DB trigger 已持久化 completion event，此处发轻量 WS 提示（仅低延迟提示，
+  可靠性来源始终是数据库 inbox）」。
+- **C2 失败必须退回**：处理失败（无活跃会话 / 注入抛错 / 超时）MUST 调 fail
+  端点退回，保持可重投。**MUST NOT 静默 ack**——吞掉事件且不留痕迹是最坏的失败模式。
+- **C3 按 eventId 去重**：MUST 有持久化 dedupe store。顺序 MUST 是
+  **先写 dedupe 再 ack**：崩在中间只会重复 ack（幂等），不会重复执行副作用。
+- **C4 WS 只是加速器**：MAY 订阅 `ws://<host>/api/ws?participantId=<id>`。
+  若订阅：MUST 指数退避重连，重连后 MUST 用 `GET /groups/:id/messages?after=<lastId>`
+  补拉。**前置条件（实测踩过）**：检视者 participant 必须是**群成员**，
+  WS 按 `visibleMemberIds` 扇出，不入群一条都收不到。
+- **C5 L3 在检视者自己的会话上下文里做**：MUST NOT 由平台 spawn 全新无头实例。
+  否则检视者退化成没有前因后果的代码审查器。
+
+#### 3.17.3 两种适配器形态（结构不对称，必须认清）
+
+| runtime | 注入原语 | 适配器位置 | 消息流向 | callback-agent 适用 |
+|---|---|---|---|---|
+| **dsh** | `Agent.followup(UserMessage)` | agent 进程内（插件） | 外 → 推进会话 | 否（已自研等价物） |
+| **codex** | `codex queue --thread <id> --message <text>` | 进程外（CLI） | 外 → 推进会话 | ✅ **零代码，配 JSON** |
+| **Claude Code** | `Monitor` 工具（ws / command 源） | **会话内** | **会话 → 主动订阅** | ❌ **结构上不适用** |
+
+前两家是"外面往里推"，Claude Code 是"里面往外拉"，**方向相反**。
+所以 `callback-agent`（外部进程投递模型）对 Claude Code 不成立，
+它的循环只能跑在会话内部：Monitor 托管收件箱轮询，claim/ack 用 HTTP 直接发。
+
+**代价（如实记录）**：Claude Code 的检视者必须有一个活着的会话在订阅；
+会话关闭期间无人消费收件箱（事件不丢，但要等下次开会话才处理）。
+dsh / codex 靠外部进程，会话关着也能被唤起。
+
+#### 3.17.4 L3 改为协调者 PATCH 自身任务终态
+
+**问题**：现 §4.2 写的是「下发 L3 检视任务，`executorName` = 内置 key=`reviewer`」，
+会让服务端 spawn `bin: "reviewer"`——实测报 `spawn reviewer ENOENT`。
+即使配上真实 CLI，spawn 出的也是**无上下文的新实例**，违反 C5。
+
+**改为**：L3 是检视者自己那条 detached 任务的收尾。
+
+1. 检视者向协调者下发任务，带 `## ReplyMode: detached` + `callback`
+2. 协调者拆票 → 下发执行者 → 执行者 L1 自检 → 协调者 L2 功能验收
+3. L2 通过后，协调者 **PATCH 自己那条任务为 `done`**，结论写进 `diffSummary`
+4. DB trigger 首次进入终态时持久化 completion event 到**检视者收件箱**
+5. 三家适配器各自唤醒 → 在**原有上下文**做 L3
+
+不需要 reviewer 的 bin，ENOENT 从根上消失，复用全是现成链路。
+
+#### 3.17.5 推翻 v3.4：`EXECUTOR_BIN_REVIEWER` 不是部署前置条件
+
+§3.15 曾把 `EXECUTOR_BIN_REVIEWER` 列为三层模式的部署前置条件
+（未设置则 L3 任务 `spawn reviewer ENOENT`）。**该表述随 §3.17.4 作废**：
+不再有人向 `reviewer` 执行器下发任务，其 `bin` **永远不会被 spawn**。
+
+内置 `reviewer` 执行器条目**保留但仅为 `canDispatch`**
+（`DISPATCH_CAPABLE_KEYS`，防止检视者下发时 `callbackRef` 被剥离——那是修过的真实 bug）。
+`executors.ts` 该条目注释 MUST 写明「bin 永不 spawn」，避免后人误配。
+
+#### 3.17.6 平台侧改动：零
+
+现有三条通道职责清晰，够用：收件箱（权威）/ WS（提示）/ `?after=` 游标（补拉）。
+
+**这条作为原则守住**：以后若发现"要改平台才能接某个新 agent"，
+是设计出了问题，应回头审视契约，而不是给平台加特例。
 
 ## 4. 验收标准
 
