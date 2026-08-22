@@ -1,7 +1,7 @@
 # Spec: 删除右栏,群设置并入一页
 
 > **状态**: Ready for Implementation
-> **版本**: 1.0
+> **版本**: 1.1
 > **日期**: 2026-08-23
 > **协作模式**: 三层
 > **取代**: `specs/group-detail-readability.md` 的问题三(那节写的是「移除任务 tab、
@@ -75,8 +75,16 @@
 ```
 
 - 入口:群标题栏的齿轮,**唯一入口**
-- 路由 `/groups/:id/members` 的既有链接不能变成 404
-  (重定向或保留别名,自行判断并**在汇报里说明**)
+- **路由改成 `/groups/:id/settings`**(v1.1 定稿,不再自行判断):
+  页面已不只是成员管理,`members` 这个名字与内容不符
+- `/groups/:id/members` **重定向**到新路由,既有链接不得 404。已知的站内引用:
+  - `router.tsx:15,90` —— 路由声明与 lazy import
+  - `pages/app/groups/members.tsx:56` —— `useRoute("/groups/:id/members")`
+  - `pages/app/groups/index.tsx:426` —— 群列表页的跳转按钮
+  - `components/sidebar/nav-main.tsx:12`、`components/sidebar/conversations.tsx:46`
+    —— 侧栏高亮的子路由匹配,**改路由后高亮会失效,必须同步**
+  - `context-panel/members-tab.tsx:194` —— 该文件本票会删除,无需处理
+  (以上是 grep 结果,**不保证穷尽**,自行再查一遍)
 - 项目绑定搬过来时,`PATCH /groups/:id` 的校验反馈要保留
   (路径非法时说清为什么,不是静默失败)
 
@@ -98,7 +106,10 @@
 - [ ] `/groups/:id/settings` 含基本信息 / 项目绑定 / 成员与分工三区
 - [ ] 设置页由 `members.tsx` 扩容而来,未重写
 - [ ] 群标题栏有齿轮入口
-- [ ] `/groups/:id/members` 不 404(方案已在汇报中说明)
+- [ ] 路由为 `/groups/:id/settings`
+- [ ] `/groups/:id/members` 重定向到新路由,不 404
+- [ ] **侧栏在设置页上仍正确高亮「群组」**(两处匹配器已同步)
+- [ ] 群列表页的跳转按钮指向新路由
 - [ ] 项目路径非法时有明确报错,不是静默失败
 - [ ] 列表页的重命名 / 归档仍可用
 - [ ] `pnpm --filter @laizhixingxingdeli/web test` 全绿(先跑一次确认基线;
