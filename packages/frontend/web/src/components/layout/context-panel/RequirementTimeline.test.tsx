@@ -507,3 +507,135 @@ describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
     expect(failedBar).toHaveClass("text-status-failed");
   });
 });
+
+describe("RequirementTimeline 实时输出接入 (live-output-in-timeline)", () => {
+  it("running 任务:折叠态显示 liveOutputs 最后一非空行(跳过空行/空白行,单行省略)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-live", status: "running" })]}
+        liveOutputs={{ "t-live": "构建中...\n\n  \n正在执行测试" }}
+      />,
+    );
+    const preview = screen.getByTestId(
+      "requirement-timeline-live-preview-t-live",
+    );
+    expect(preview).toHaveTextContent("正在执行测试");
+    expect(preview).not.toHaveTextContent("构建中");
+    expect(preview).toHaveClass("truncate");
+    // 折叠态不出现展开详情区。
+    expect(
+      screen.queryByTestId("requirement-timeline-detail-t-live"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("running 任务无输出:不显示预览行(不留空占位)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-live", status: "running" })]}
+      />,
+    );
+    expect(
+      screen.queryByTestId("requirement-timeline-live-preview-t-live"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-timeline-toggle-t-live"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("展开态复用共享 LiveOutput 终端块:点击展开显示全量缓冲", () => {
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-live", status: "running" })]}
+        liveOutputs={{ "t-live": "line1\nline2\nline3" }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-t-live"));
+    const detail = screen.getByTestId("requirement-timeline-detail-t-live");
+    const output = detail.querySelector('[data-testid="task-live-output"]');
+    expect(output).toBeInTheDocument();
+    expect(output).toHaveClass("bg-slate-950");
+    // 展开态显示全量缓冲(多行原样保留;jest-dom 默认折叠空白,显式关闭)。
+    expect(output).toHaveTextContent("line1\nline2\nline3", {
+      normalizeWhitespace: false,
+    });
+  });
+
+  it("取值优先级:liveOutputs 优先于 diffSummary.outputTail", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-live",
+            status: "running",
+            diffSummary: { outputTail: "旧的尾巴" },
+          }),
+        ]}
+        liveOutputs={{ "t-live": "实时的输出" }}
+      />,
+    );
+    const preview = screen.getByTestId(
+      "requirement-timeline-live-preview-t-live",
+    );
+    expect(preview).toHaveTextContent("实时的输出");
+    expect(preview).not.toHaveTextContent("旧的尾巴");
+  });
+
+  it("取值优先级:liveOutputs 为空时回落 diffSummary.outputTail", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-live",
+            status: "running",
+            diffSummary: { outputTail: "兜底尾巴" },
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-live-preview-t-live"),
+    ).toHaveTextContent("兜底尾巴");
+  });
+
+  it("done 任务折叠态不显示输出预览行(设计表:折叠显示汇报摘要),但展开入口仍在", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-done",
+            diffSummary: { summary: "做完了", outputTail: "尾巴" },
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByTestId("requirement-timeline-live-preview-t-done"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-t-done"));
+    expect(
+      screen.getByTestId("requirement-timeline-detail-t-done").textContent,
+    ).toContain("尾巴");
+  });
+
+  it("失败任务:diffSummary.outputTail 展开态仍可见(未被误删)", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-fail",
+            status: "failed",
+            diffSummary: {
+              summary: "失败",
+              error: "boom",
+              outputTail: "崩溃前最后输出",
+            },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-t-fail"));
+    expect(
+      screen.getByTestId("requirement-timeline-detail-t-fail").textContent,
+    ).toContain("崩溃前最后输出");
+  });
+});

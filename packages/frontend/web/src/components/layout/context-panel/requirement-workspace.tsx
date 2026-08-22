@@ -4,6 +4,7 @@ import {
   PARTICIPANT_ID_KEY,
   participantIdentityHeaders,
 } from "@/lib/api-client";
+import { appendOutputTail } from "@/lib/output-buffer";
 import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
@@ -164,13 +165,17 @@ export function RequirementWorkspace({
     void loadGroupStatus();
   }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
 
-  // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(展开行流式显示);
+  // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(有界缓冲,
+  // 与后端 output-buffer.ts 同款上限:1000 行 / 256KB,超限保留尾部);
   // 无进展提醒:task_stall_alert 事件 → 该任务行标记黄色警示(非失败)。
   useGroupWs(groupId, (event) => {
     if (event.type === "task_output") {
       setLiveOutputs((prev) => ({
         ...prev,
-        [event.taskId]: (prev[event.taskId] ?? "") + event.chunk,
+        [event.taskId]: appendOutputTail(
+          prev[event.taskId] ?? "",
+          event.chunk,
+        ),
       }));
       return;
     }
@@ -413,6 +418,7 @@ export function RequirementWorkspace({
                 requirement={selectedRequirement}
                 messages={messages}
                 members={members}
+                liveOutputs={liveOutputs}
               />
             </div>
           </div>

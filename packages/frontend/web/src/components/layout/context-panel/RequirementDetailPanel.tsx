@@ -22,12 +22,16 @@ type RequirementDetailPanelProps = {
   messages: MessageItem[];
   /** 该群成员(真实角色数据源)。 */
   members: Member[];
+  /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接),透传给时间线;
+   * running 任务折叠态预览最后非空行、展开态显示全量输出。 */
+  liveOutputs?: Record<string, string>;
 };
 
 export default function RequirementDetailPanel({
   requirement,
   messages,
   members,
+  liveOutputs = {},
 }: RequirementDetailPanelProps) {
   if (!requirement) {
     return (
@@ -50,6 +54,7 @@ export default function RequirementDetailPanel({
         tasks={requirement.tasks}
         messages={messages}
         members={members}
+        liveOutputs={liveOutputs}
       />
     </div>
   );

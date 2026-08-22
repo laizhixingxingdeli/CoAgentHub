@@ -20,6 +20,8 @@
  */
 
 import { useMemo, useState } from "react";
+import { LiveOutput } from "@/components/live-output";
+import { lastNonEmptyLine } from "@/lib/output-buffer";
 import { formatMessageTime, TASK_STATUS_CLASSES } from "@/pages/app/groups/messages/lib";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import { TASK_UNCONFIRMED_CLASSES } from "@/pages/app/groups/messages/TaskPanel";
@@ -90,12 +92,17 @@ type RequirementTimelineProps = {
   messages?: MessageItem[];
   /** 该群成员(真实角色数据源);缺省为空 → 角色回落字符串猜测。 */
   members?: Member[];
+  /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接)。running 任务折叠态
+   * 取最后非空行预览,展开态显示全量输出;缺省为空 → 回落
+   * diffSummary.outputTail(与 TaskPanel 的取值优先级一致)。 */
+  liveOutputs?: Record<string, string>;
 };
 
 export default function RequirementTimeline({
   tasks,
   messages = [],
   members = [],
+  liveOutputs = {},
 }: RequirementTimelineProps) {
   // 展开的卡片 id 集合(长内容折叠;多张卡片可同时展开)。
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(
@@ -218,9 +225,17 @@ export default function RequirementTimeline({
     const todo = readText(task.diffSummary, "todo");
     const outputTail = readText(task.diffSummary, "outputTail");
     const errorText = readText(task.diffSummary, "error");
+    // 实时输出:WS 缓冲优先,includeOutput/diffSummary.outputTail 兜底(与
+    // TaskPanel.tsx:277 同一优先级);展开态复用共享 LiveOutput 终端块。
+    const outputText = liveOutputs[task.id] ?? outputTail ?? "";
+    // 折叠态预览:最后一非空行(执行器输出常有空行/纯空白行),无输出则
+    // 不显示该行(不留空占位)。仅 running 任务显示 —— done/failed 折叠态
+    // 维持汇报摘要/失败原因(设计表),不额外铺输出预览。
+    const previewLine =
+      task.status === "running" ? lastNonEmptyLine(outputText) : null;
     const testsLong = tests !== null && tests.length > FOLD_THRESHOLD;
     const todoLong = todo !== null && todo.length > FOLD_THRESHOLD;
-    const foldable = testsLong || todoLong || outputTail !== null;
+    const foldable = testsLong || todoLong || outputText.length > 0;
     const expanded = expandedIds.has(task.id);
     // 失败任务:失败条(醒目但不喧宾夺主,颜色走 --status-* token);结果未确认
     // (failed + diffSummary.unconfirmed)用琥珀色,与任务面板的语义一致。
@@ -288,6 +303,16 @@ export default function RequirementTimeline({
               遗留 {todo}
             </p>
           )}
+          {/* 折叠态实时输出预览:最后一非空行,单行省略;无输出不占位。 */}
+          {previewLine && (
+            <p
+              data-testid={`requirement-timeline-live-preview-${task.id}`}
+              className="mt-1 truncate font-mono text-xs text-muted-foreground"
+              title={previewLine}
+            >
+              {previewLine}
+            </p>
+          )}
           {foldable && (
             <button
               type="button"
@@ -314,11 +339,7 @@ export default function RequirementTimeline({
                   遗留 {todo}
                 </p>
               )}
-              {outputTail && (
-                <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted px-2 py-1.5 font-mono text-xs leading-relaxed">
-                  {outputTail}
-                </pre>
-              )}
+              {outputText && <LiveOutput text={outputText} />}
             </div>
           )}
         </div>
