@@ -20,17 +20,36 @@ export interface TaskReport {
   tokenUsage?: string;
 }
 
-/** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。 */
+/** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。
+ * 也接受报告格式中的双空格分隔(如「提交  <hash>」)。 */
 const REPORT_SECTION_RE: ReadonlyArray<{
   key: keyof TaskReport;
   re: RegExp;
 }> = [
-  { key: "hash", re: /^\s*(?:提交|commit|hash)\s*[:：]/i },
-  { key: "tests", re: /^\s*(?:测试|test|tests)\s*[:：]/i },
-  { key: "summary", re: /^\s*(?:汇报|report|summary)\s*[:：]/i },
-  { key: "todo", re: /^\s*(?:遗留|todo|remaining)\s*[:：]/i },
-  { key: "tokenUsage", re: /^\s*(?:token|tokens|消耗)\s*[:：]/i },
+  {
+    key: "hash",
+    re: /^\s*(?:提交|commit|hash)(?:\s*[:：]\s*|\s{2,})/i,
+  },
+  {
+    key: "tests",
+    re: /^\s*(?:测试|test|tests)(?:\s*[:：]\s*|\s{2,})/i,
+  },
+  {
+    key: "summary",
+    re: /^\s*(?:汇报|report|summary)(?:\s*[:：]\s*|\s{2,})/i,
+  },
+  {
+    key: "todo",
+    re: /^\s*(?:遗留|todo|remaining)(?:\s*[:：]\s*|\s{2,})/i,
+  },
+  {
+    key: "tokenUsage",
+    re: /^\s*(?:token|tokens|消耗)(?:\s*[:：]\s*|\s{2,})/i,
+  },
 ];
+
+/** 单个汇报段的最大字符数,避免无结束标题时吞入完整执行转录。 */
+const REPORT_SECTION_MAX_LENGTH = 4_000;
 
 /** 清洗 token 段值:去空格与千分位逗号,取首个数字组(去 token/tokens 等后缀词)。 */
 function cleanTokenValue(raw: string): string | undefined {
@@ -68,11 +87,16 @@ export function parseTaskReport(text: string): TaskReport {
   const lines = clean.split("\n");
 
   // 段落头定位:每段从段头行取内容,直到下一个段头(或输出末尾)。
-  const found: Array<{ key: keyof TaskReport; start: number }> = [];
+  const found: Array<{
+    key: keyof TaskReport;
+    start: number;
+    re: RegExp;
+  }> = [];
   for (let i = 0; i < lines.length; i++) {
-    for (const { key, re } of REPORT_SECTION_RE) {
+    for (const section of REPORT_SECTION_RE) {
+      const { key, re } = section;
       if (re.test(lines[i])) {
-        found.push({ key, start: i });
+        found.push({ key, start: i, re });
         break;
       }
     }
@@ -80,12 +104,15 @@ export function parseTaskReport(text: string): TaskReport {
   if (found.length > 0) {
     const report: TaskReport = {};
     for (let f = 0; f < found.length; f++) {
-      const { key, start } = found[f];
+      const { key, start, re } = found[f];
       const end = f + 1 < found.length ? found[f + 1].start : lines.length;
-      const value = lines
-        .slice(start, end)
+      const value = [
+        lines[start].replace(re, ""),
+        ...lines.slice(start + 1, end),
+      ]
         .join("\n")
-        .replace(/^[^:：]*[:：]\s*/, "")
+        .trim()
+        .slice(0, REPORT_SECTION_MAX_LENGTH)
         .trim();
       if (value.length === 0) continue;
       // 执行器可能先回显完整任务书,其中的结构化汇报段是模板占位符。

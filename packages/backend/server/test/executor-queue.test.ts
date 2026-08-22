@@ -383,6 +383,55 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(taskStatus.some((m) => m.body.startsWith("📋"))).toBe(true);
   }, 30_000);
 
+  it("目标成员是 coordinator 时进程退出不自动终态,显式 PATCH 后才完成", async () => {
+    delete process.env.FAKE_SLEEP_SECS;
+    const dispatcher = await registerParticipant({ name: "coord-lifecycle" });
+    const coordinator = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const group = await createGroup(dispatcher.id, "协调任务生命周期");
+    await addMember(dispatcher.id, group.id, coordinator.id, ["coordinator"]);
+
+    const message = await postMessage(dispatcher.id, group.id, {
+      body: "协调任务:执行后等待协调者回写",
+      audience: "participant",
+      audienceRef: coordinator.id,
+    });
+    const running = await waitForTaskStatus(
+      dispatcher.id,
+      group.id,
+      message.id,
+      "running",
+    );
+
+    // fake bin 会很快退出；若队列按普通执行器处理，这里会错误地变成 done。
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const stillRunning = (await listTasks(dispatcher.id, group.id)).find(
+      (task) => task.id === running.id,
+    );
+    expect(stillRunning?.status).toBe("running");
+
+    const patch = await app.request(
+      `/api/groups/${group.id}/tasks/${running.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({
+          status: "done",
+          diffSummary: { summary: "协调者完成 L2" },
+        }),
+      },
+    );
+    expect(patch.status).toBe(200);
+    expect((await patch.json()).status).toBe("done");
+
+    const completed = (await listTasks(dispatcher.id, group.id)).find(
+      (task) => task.id === running.id,
+    );
+    expect(completed?.status).toBe("done");
+  }, 30_000);
+
   it("并行:两个不同 project_path 的任务可同时 running", async () => {
     process.env.FAKE_SLEEP_SECS = "5";
     const { coordinator, codebuddy } = await setupGroup();

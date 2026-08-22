@@ -426,6 +426,44 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       expect(report).toEqual({});
     });
 
+    it("parseTaskReport:无冒号的全套占位符也不落库", () => {
+      const report = parseTaskReport(
+        [
+          "提交  <真实 commit hash>",
+          "测试  <测试结果摘要>",
+          "Token  <本执行消耗的 token 数量>",
+          "汇报  <做了什么,3-5 句>",
+          '遗留  <未完成事项,无则写"无">',
+        ].join("\n"),
+      );
+
+      expect(report).toEqual({});
+    });
+
+    it("parseTaskReport:无结束标题的段落截断无关长文本", () => {
+      const noise = "无关转录 ".repeat(2_000);
+      const report = parseTaskReport(`汇报:真实结果\n${noise}`);
+
+      expect(report.summary).toBeDefined();
+      expect(report.summary).toContain("真实结果");
+      expect(report.summary?.length).toBeLessThanOrEqual(4_000);
+      expect(report.summary).not.toContain(noise);
+    });
+
+    it("parseTaskReport:末段没有结束标题时同样受长度上限保护", () => {
+      const noise = "后续无关文本 ".repeat(2_000);
+      const report = parseTaskReport(
+        `提交: 0123456789abcdef0123456789abcdef01234567\n遗留:待处理\n${noise}`,
+      );
+
+      expect(report).toMatchObject({
+        hash: "0123456789ab",
+      });
+      expect(report.todo).toContain("待处理");
+      expect(report.todo?.length).toBeLessThanOrEqual(4_000);
+      expect(report.todo).not.toContain(noise);
+    });
+
     it("parseTaskReport:真实汇报以尖括号开头时按已知局限跳过", () => {
       // 已知局限：占位符识别会把真实的「<T> 泛型参数处理有误」也视为模板。
       expect(

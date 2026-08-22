@@ -246,6 +246,24 @@ export function currentRunningTask(groupId?: string): {
 }
 
 /**
+ * 协调任务的职责跨越一次 CLI 进程生命周期:目标 participant 在本群持有
+ * coordinator 角色时,进程退出只代表协调者 runtime 暂时离开,不代表 task
+ * 完成。角色来自 group_members 的实时关系,因此无需新增 task 字段或模式配置。
+ */
+async function isCoordinatorTask(
+  db: DataBase,
+  groupId: string,
+  participantId: string,
+): Promise<boolean> {
+  const membership = await db.query.groupMember.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, participantId)),
+    columns: { roles: true },
+  });
+  return membership?.roles.includes("coordinator") ?? false;
+}
+
+/**
  * 取消排队中的任务(停止指令专用):taskId 缺省 → 取消本群全部排队任务;指定 →
  * 仅取消本群匹配项。只处理排队中的任务(未 spawn,直接移出队列 + 置 cancelled)
  * 以及「已出队未 spawn」的过渡窗口任务(kill 句柄尚未就绪,置 stopped 后由
@@ -696,9 +714,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 二者都走同一 handle 形状,后续 done/failed/超时回传逻辑共用。
     const isA2a = ex.kind === "a2a";
     // 第3层:任务书标记「## ReplyMode: detached」(大小写不敏感、允许前后空白)
-    // → 发送(spawn / a2a 调用)后保持 running,由执行器恢复后 PATCH 回写终态
-    // (适用于重启自身所在 dsh web 之类的断线型 ops 任务)。cli 与 a2a 均支持。
-    const detached = /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(body);
+    // 或目标 participant 在本群持有 coordinator 角色 → 发送(spawn / a2a 调用)
+    // 后保持 running,由执行器恢复后 PATCH 回写终态。前者适用于断线型 ops
+    // 任务,后者覆盖协调者进程生命周期短于其协调职责的场景。
+    const detachedByReplyMode = /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(
+      body,
+    );
+    const detached =
+      detachedByReplyMode ||
+      (await isCoordinatorTask(db, groupId, participantId));
     run.detached = detached;
     // 记忆开关:仅 memory="per-group" 的协调器启用 contextId 延续(查/回写);
     // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
