@@ -345,6 +345,105 @@ describe("T17 participant 自更新与扩展字段", () => {
       ).toEqual(["code-review"]);
     });
 
+    it("R2: PATCH installedSkills 幂等追加对应 capability,不覆盖既有值", async () => {
+      const { id } = await registerParticipant({
+        name: "onboarding-report",
+        capabilities: ["code-review"],
+      });
+
+      const res = await app.request(`/api/participants/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ installedSkills: ["executor"] }),
+      });
+      expect(res.status).toBe(200);
+      const updated = (await res.json()) as { capabilities: string[] };
+      // 映射成 coagenthub-executor 追加,既有 code-review 保留(不覆盖)。
+      expect(updated.capabilities).toEqual([
+        "code-review",
+        "coagenthub-executor",
+      ]);
+
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as Array<{ id: string; capabilities: string[] }>;
+      expect(list.find((a) => a.id === id)?.capabilities).toEqual([
+        "code-review",
+        "coagenthub-executor",
+      ]);
+    });
+
+    it("R2: 重复上报 installedSkills 幂等,capabilities 不出现重复项", async () => {
+      const { id } = await registerParticipant({
+        name: "idempotent-report",
+      });
+
+      const patch = (skills: string[]) =>
+        app.request(`/api/participants/${id}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": id,
+          },
+          body: JSON.stringify({ installedSkills: skills }),
+        });
+
+      const first = await patch(["executor", "coordinator"]);
+      expect(first.status).toBe(200);
+      const second = await patch(["executor", "coordinator"]);
+      expect(second.status).toBe(200);
+      const again = await patch(["executor"]);
+      expect(again.status).toBe(200);
+
+      const list = (await (
+        await app.request("/api/participants")
+      ).json()) as Array<{ id: string; capabilities: string[] }>;
+      const caps = list.find((a) => a.id === id)?.capabilities ?? [];
+      expect(caps.filter((c) => c === "coagenthub-executor")).toHaveLength(1);
+      expect(caps.filter((c) => c === "coagenthub-coordinator")).toHaveLength(1);
+    });
+
+    it("R2: installedSkills 仅接受已知 skill 名(未知 → 400),仅报它也算有效更新", async () => {
+      const { id } = await registerParticipant({
+        name: "report-validation",
+      });
+
+      const bad = await app.request(`/api/participants/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ installedSkills: ["unknown-skill"] }),
+      });
+      expect(bad.status).toBe(400);
+
+      const only = await app.request(`/api/participants/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ installedSkills: ["bugfix"] }),
+      });
+      expect(only.status).toBe(200);
+      expect(
+        ((await only.json()) as { capabilities: string[] }).capabilities,
+      ).toEqual(["coagenthub-bugfix"]);
+    });
+
+    it("R2: 接入注册不凭空写入 skill capability(POST 不带,能力仍是空)", async () => {
+      const { body } = await registerParticipant({ name: "no-freebie" });
+      expect(body.capabilities).toEqual([]);
+      expect(body.capabilities).not.toContain("coagenthub-executor");
+      expect(body.capabilities).not.toContain("coagenthub-coordinator");
+      expect(body.capabilities).not.toContain("coagenthub-bugfix");
+      expect(body.capabilities).not.toContain("coagenthub-reviewer");
+    });
+
     it("加成员时轻量能力提示:已知能力与角色不匹配时给建议,绝不拒绝", async () => {
       const coordinator = await registerParticipant({
         name: "hermes-mac",
@@ -352,7 +451,8 @@ describe("T17 participant 自更新与扩展字段", () => {
       const group = await createGroup(coordinator.id, "能力匹配任务");
       const executor = await registerParticipant({
         name: "executor-bot",
-        capabilities: ["text-generation"],
+        // 已装 coagenthub-executor → 后续分配 executor 角色时不触发 skill 缺失提示。
+        capabilities: ["text-generation", "coagenthub-executor"],
       });
 
       // 分配 observer —— 与 text-generation 建议角色(executor/specialist)
@@ -365,7 +465,8 @@ describe("T17 participant 自更新与扩展字段", () => {
       expect(member.capabilityHint).toContain("建议角色");
       expect(member.capabilityHint).toContain("executor");
 
-      // 分配 executor —— 与建议角色有交集 → 无匹配提示(null)。
+      // 分配 executor —— 与建议角色有交集,且 capabilities 已含 coagenthub-executor
+      // → 无匹配提示、无 skill 缺失提示(null)。
       const matchRes = await addMember(coordinator.id, group.id, executor.id, [
         "executor",
       ]);

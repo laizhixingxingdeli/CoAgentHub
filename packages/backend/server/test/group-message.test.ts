@@ -473,8 +473,8 @@ describe("群组消息树与受众路由", () => {
         .select({ id: groupMessageTable.id })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      // 1 根消息 + 64 层回复 + 2 条 skill 安装引导(reviewer + executor 成员加群自动发)。
-      expect(msgRows).toHaveLength(67);
+      // 1 根消息 + 64 层回复(R3 起加群不再自动发 skill 安装引导)。
+      expect(msgRows).toHaveLength(65);
     });
   });
 
@@ -982,12 +982,12 @@ describe("群组消息树与受众路由", () => {
       expect(await res.json()).toEqual({ success: true });
 
       // 行保留:body 变占位,闭包树(children 的 depth)不变。
-      // 行数 = 根 + 回复 + 2 条 skill 安装引导(reviewer + executor 成员加群自动发)。
+      // 行数 = 根 + 回复(R3 起无加群自动发的 skill 安装引导)。
       const rows = await testDb
         .select({ id: groupMessageTable.id, body: groupMessageTable.body })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      expect(rows).toHaveLength(4);
+      expect(rows).toHaveLength(2);
       const rootRow = rows.find((r) => r.id === root.id);
       expect(rootRow?.body).toBe("[消息已删除]");
       const childRow = rows.find((r) => r.id === child.id);

@@ -6,6 +6,18 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
+ * skill 类型 → capability 标签映射。agent 安装 skill 后,按其 skill 类型把
+ * 对应 capability 幂等追加到 participant.capabilities,供后续调度/加群提示参考。
+ * 定义在 KNOWN_CAPABILITIES 之前:后者展开引用了它(const 初始化顺序要求)。
+ */
+export const COAGENTHUB_SKILL_CAPABILITIES = {
+  executor: "coagenthub-executor",
+  coordinator: "coagenthub-coordinator",
+  bugfix: "coagenthub-bugfix",
+  reviewer: "coagenthub-reviewer",
+} as const;
+
+/**
  * 能力标签的轻量提示校验 (ticket 17): 已知能力目录 + 能力→建议角色映射。
  * 仅做提示性校验,绝不硬性拒绝 —— 加成员时若声明的能力含未知标签,或能力
  * 与分配角色完全不匹配,在响应里附 capabilityHint 提示,仍照常放行。
@@ -16,6 +28,9 @@ export const KNOWN_CAPABILITIES = [
   "model-training",
   "file-serving",
   "human-interface",
+  // R3:coagenthub-* 是平台自家生成的 skill capability(见 COAGENTHUB_SKILL_CAPABILITIES),
+  // 是已知能力标签,不应被判为「未知能力」。
+  ...Object.values(COAGENTHUB_SKILL_CAPABILITIES),
 ] as const;
 
 /** 已知能力 → 与该能力最契合的角色建议(提示用,非强制)。 */
@@ -31,14 +46,36 @@ export const CAPABILITY_ROLE_SUGGESTIONS: Record<string, readonly GroupRole[]> =
 /**
  * 对加成员请求做能力↔角色匹配提示。返回 null 表示无需提示(未声明能力,
  * 或声明的能力全部已知且与分配角色有交集)。不抛错、不影响加成员本身。
+ *
+ * R3:除既有匹配提示外,还按 COAGENTHUB_SKILL_CAPABILITIES 检查「该角色对应
+ * 的 skill capability 是否已装」——缺装时提示先装 skill。与既有提示同一出口
+ * (capabilityHint 字段),不产生任何群消息。
  */
 export function capabilityHint(
   capabilities: string[] | null | undefined,
   assignedRoles: readonly string[],
 ): string | null {
-  if (!capabilities || capabilities.length === 0) return null;
-
   const hints: string[] = [];
+
+  // R3:角色 → skill 的映射复用 COAGENTHUB_SKILL_CAPABILITIES,不新建映射表。
+  // bugfix 不是群角色,assignedRoles 里不会有它,映射时自然跳过(查不到即无提示)。
+  const caps = capabilities ?? [];
+  for (const role of assignedRoles) {
+    const skillCapability =
+      COAGENTHUB_SKILL_CAPABILITIES[
+        role as keyof typeof COAGENTHUB_SKILL_CAPABILITIES
+      ];
+    if (skillCapability && !caps.includes(skillCapability)) {
+      hints.push(
+        `未安装 ${skillCapability} skill:请先在 agent 机器上 GET /api/skills/${role} 获取并写入 skills 目录,安装完成后通过消息「✅ skill 已安装」或 PATCH capabilities 上报`,
+      );
+    }
+  }
+
+  if (!capabilities || capabilities.length === 0) {
+    return hints.length > 0 ? hints.join("; ") : null;
+  }
+
   const known = KNOWN_CAPABILITIES as readonly string[];
   const unknown = capabilities.filter((c) => !known.includes(c));
   if (unknown.length > 0) {
@@ -63,15 +100,21 @@ export function capabilityHint(
 }
 
 /**
- * skill 类型 → capability 标签映射。agent 安装 skill 后,按其 skill 类型把
- * 对应 capability 幂等追加到 participant.capabilities,供后续调度/加群提示参考。
+ * 幂等合并 capabilities:把 additions 中尚未存在于 base 的项追加到 base 末尾。
+ * capabilities 上报的唯一合并实现 —— 消息确认(handleSkillInstallConfirmation)
+ * 与接入上报(PATCH installedSkills)两条路径都走这里,保证「重复上报不产生
+ * 重复项」只有一份代码。
  */
-export const COAGENTHUB_SKILL_CAPABILITIES = {
-  executor: "coagenthub-executor",
-  coordinator: "coagenthub-coordinator",
-  bugfix: "coagenthub-bugfix",
-  reviewer: "coagenthub-reviewer",
-} as const;
+export function mergeCapabilities(
+  base: readonly string[],
+  additions: readonly string[],
+): string[] {
+  const merged = [...base];
+  for (const item of additions) {
+    if (!merged.includes(item)) merged.push(item);
+  }
+  return merged;
+}
 
 /**
  * 识别 agent 的 skill 安装确认消息(如 "✅ skill 已安装" 或 "✅ skill 已安装: executor"),
@@ -99,17 +142,18 @@ export async function handleSkillInstallConfirmation(
       : undefined;
   if (!capability) return;
 
-  // 更新 participant capabilities(幂等追加)。
+  // 更新 participant capabilities(幂等追加,与 PATCH installedSkills 共用实现)。
   const participant = await db.query.participant.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
   });
   if (!participant) return;
 
   const current = participant.capabilities ?? [];
-  if (!current.includes(capability)) {
+  const merged = mergeCapabilities(current, [capability]);
+  if (merged.length !== current.length) {
     await db
       .update(participantTable)
-      .set({ capabilities: [...current, capability] })
+      .set({ capabilities: merged })
       .where(eq(participantTable.id, senderId));
   }
 }

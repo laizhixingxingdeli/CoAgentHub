@@ -11,12 +11,31 @@ import { Hono } from "hono";
 // (第一个 ../ 连同文件名一起被 URL 解析消耗,故 5 个 ../ 即到仓库根)。
 const REPO_ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const SKILLS_DIR = resolve(REPO_ROOT, "skills");
-const SKILL_NAMES = ["coordinator", "executor", "bugfix", "reviewer"] as const;
+export const SKILL_NAMES = [
+  "coordinator",
+  "executor",
+  "bugfix",
+  "reviewer",
+] as const;
 
 function readSkillDescription(name: string): string {
   const content = readFileSync(resolve(SKILLS_DIR, name, "SKILL.md"), "utf8");
   const match = content.match(/^description:\s*(.+)$/m);
   return match?.[1]?.trim() ?? "";
+}
+
+/**
+ * 一次性读取全部 skill(接入参与方时投递用):返回 name/description/content/path。
+ * 形状与 GET /api/skills 的 items 协调(同源同字段),只是多了 content 字段,
+ * 供无消息通道的接入场景把全套 skill 内容随注册响应一次带回。
+ */
+export function readSkillBundle() {
+  return SKILL_NAMES.map((name) => ({
+    name,
+    description: readSkillDescription(name),
+    content: readFileSync(resolve(SKILLS_DIR, name, "SKILL.md"), "utf8"),
+    path: `skills/${name}/SKILL.md`,
+  }));
 }
 
 const app = new Hono()

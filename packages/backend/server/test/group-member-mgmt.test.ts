@@ -699,7 +699,7 @@ describe("群组成员管理 API (ticket 20)", () => {
     });
   });
 
-  describe("加群自动发 skill 安装指令 (skill 加载强化)", () => {
+  describe("加群 skill 提示 (R3: 不再发引导群消息,改在响应里按能力提示)", () => {
     async function groupSkillMessages(groupId: string): Promise<string[]> {
       const rows = await testDb
         .select({ body: groupMessageTable.body })
@@ -708,71 +708,108 @@ describe("群组成员管理 API (ticket 20)", () => {
       return rows.map((r) => r.body ?? "");
     }
 
-    it("添加 executor 成员后自动发 coagenthub-executor 安装引导", async () => {
+    it("添加 executor 成员不再产生 skill 安装引导群消息,响应提示未装", async () => {
       const { id } = await registerParticipant({ name: "coord-skill" });
       const { id: executorId } = await registerParticipant({
         name: "skill-executor",
       });
-      const group = await createGroup(id, "skill 引导群");
-      await addMember(id, group.id, executorId, ["executor"]);
+      const group = await createGroup(id, "skill 提示群");
 
-      await new Promise((r) => setTimeout(r, 50));
-      const bodies = await groupSkillMessages(group.id);
-      expect(bodies.some((b) => b.includes("coagenthub-executor"))).toBe(true);
-      // 不匹配 coordinator 的内容。
-      expect(bodies.some((b) => b.includes("coagenthub-coordinator"))).toBe(
-        false,
-      );
-    });
-
-    it("添加 coordinator 成员后自动发 coagenthub-coordinator 安装引导", async () => {
-      const { id } = await registerParticipant({ name: "coord-skill2" });
-      const { id: coordinatorId } = await registerParticipant({
-        name: "skill-coordinator",
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: executorId, roles: ["executor"] }),
       });
-      const group = await createGroup(id, "coordinator 引导群");
-      await addMember(id, group.id, coordinatorId, ["coordinator"]);
+      expect(res.status).toBe(200);
+      const member = (await res.json()) as { capabilityHint: string | null };
+      // 该成员 capabilities 未含 coagenthub-executor → 响应带未装提示。
+      expect(member.capabilityHint).toContain("coagenthub-executor");
+      expect(member.capabilityHint).toContain("未安装");
 
+      // 不产生任何群消息(等待 fire-and-forget 的窗口时间后仍无)。
       await new Promise((r) => setTimeout(r, 50));
       const bodies = await groupSkillMessages(group.id);
-      expect(bodies.some((b) => b.includes("coagenthub-coordinator"))).toBe(
-        true,
-      );
+      expect(bodies.some((b) => b.includes("请先安装"))).toBe(false);
     });
 
-    it("添加 reviewer 成员后自动发 coagenthub-reviewer 安装引导(定向给该成员)", async () => {
+    it("capabilities 已含对应 skill 时,加群响应无提示(已装不提示)", async () => {
+      const { id } = await registerParticipant({ name: "coord-skill5" });
+      const { id: executorId } = await registerParticipant({
+        name: "skill-executor-installed",
+        capabilities: ["coagenthub-executor"],
+      });
+      const group = await createGroup(id, "已装 skill 群");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: executorId, roles: ["executor"] }),
+      });
+      expect(res.status).toBe(200);
+      const member = (await res.json()) as { capabilityHint: string | null };
+      expect(member.capabilityHint).toBeNull();
+
+      // 同样不产生群消息。
+      await new Promise((r) => setTimeout(r, 50));
+      const bodies = await groupSkillMessages(group.id);
+      expect(bodies.some((b) => b.includes("请先安装"))).toBe(false);
+    });
+
+    it("reviewer 角色缺 skill 时响应提示、不产生群消息;bugfix 非群角色无对应提示", async () => {
       const { id } = await registerParticipant({ name: "coord-skill3" });
       const { id: reviewerId } = await registerParticipant({
         name: "skill-reviewer",
       });
-      const group = await createGroup(id, "reviewer 引导群");
-      await addMember(id, group.id, reviewerId, ["reviewer"]);
+      const group = await createGroup(id, "reviewer 提示群");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: reviewerId, roles: ["reviewer"] }),
+      });
+      expect(res.status).toBe(200);
+      const member = (await res.json()) as { capabilityHint: string | null };
+      expect(member.capabilityHint).toContain("coagenthub-reviewer");
+      expect(member.capabilityHint).toContain("未安装");
 
       await new Promise((r) => setTimeout(r, 50));
       const rows = await testDb
-        .select({
-          body: groupMessageTable.body,
-          audience: groupMessageTable.audience,
-          audienceRef: groupMessageTable.audienceRef,
-        })
+        .select({ body: groupMessageTable.body })
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
-      const guide = rows.find((r) =>
-        (r.body ?? "").includes("coagenthub-reviewer"),
-      );
-      expect(guide).toBeTruthy();
-      // 定向投递给该 reviewer 成员(audience=participant,audienceRef=成员 id)。
-      expect(guide!.audience).toBe("participant");
-      expect(guide!.audienceRef).toBe(reviewerId);
+      // 无任何「请先安装」引导消息。
+      expect(
+        rows.some((r) => (r.body ?? "").includes("请先安装")),
+      ).toBe(false);
     });
 
-    it("添加 observer 成员不发 skill 引导消息", async () => {
+    it("添加 observer 成员:无群消息,也无 skill 提示(observer 无对应 skill)", async () => {
       const { id } = await registerParticipant({ name: "coord-skill4" });
       const { id: observerId } = await registerParticipant({
         name: "skill-observer",
       });
-      const group = await createGroup(id, "observer 无引导");
-      await addMember(id, group.id, observerId, ["observer"]);
+      const group = await createGroup(id, "observer 无提示");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: observerId, roles: ["observer"] }),
+      });
+      expect(res.status).toBe(200);
+      const member = (await res.json()) as { capabilityHint: string | null };
+      expect(member.capabilityHint).toBeNull();
 
       await new Promise((r) => setTimeout(r, 50));
       const bodies = await groupSkillMessages(group.id);

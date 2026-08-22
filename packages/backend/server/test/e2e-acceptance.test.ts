@@ -200,11 +200,10 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     expect(draft.parentId).toBeNull();
 
     // ── 5. reviewer 收到(拉取)→ 发检视意见(子消息,parentId=草稿)
-    // 需求命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到;
-    // 加群自动发的 coagenthub-reviewer 安装引导也定向投递给 reviewer。
+    // 需求命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到。
+    // (R3 起加群不再自动发 skill 安装引导,消息流更干净。)
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
     expect(reviewerSeen.map((m) => m.body)).toEqual([
-      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
       command.body,
       draft.body,
     ]);
@@ -273,16 +272,9 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
       expect(executorBodies).not.toContain(draft.body);
       expect(executorBodies).not.toContain(review.body);
       // 任务工作流消息:executor 只见最终版及之后(结果、文件信令);
-      // 需求命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中;
-      // 另含加群自动发的 skill 安装引导(coagenthub-executor)。
-      const executorSkillMsg = executorFull.find((m) =>
-        m.body.startsWith("请先安装 coagenthub-executor skill"),
-      );
-      expect(executorSkillMsg).toBeTruthy();
-      const nonSkillExecutorBodies = executorBodies.filter(
-        (b) => !b.startsWith("请先安装"),
-      );
-      expect(nonSkillExecutorBodies).toEqual([
+      // 需求命令是 broadcast,按可见性规则全员可见,同样出现在 executor 视野中。
+      // (R3 起无加群自动发的 skill 安装引导。)
+      expect(executorBodies).toEqual([
         command.body,
         final.body,
         result.body,
@@ -313,13 +305,11 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
         fileSha256,
       );
 
-      // ── 10. user(human)增量拉取:全程可见,一条不落(含发往 reviewer/executor 的 skill 安装引导)
+      // ── 10. user(human)增量拉取:全程可见,一条不落(R3 起无引导消息)。
       const humanSeen = await fetchMessages(user.id, group.id);
       const humanBodies = humanSeen.map((m) => m.body);
-      expect(humanBodies).toHaveLength(8);
+      expect(humanBodies).toHaveLength(6);
       expect(humanBodies).toEqual([
-        expect.stringContaining("请先安装 coagenthub-reviewer skill"),
-        expect.stringContaining("请先安装 coagenthub-executor skill"),
         command.body,
         draft.body,
         review.body,

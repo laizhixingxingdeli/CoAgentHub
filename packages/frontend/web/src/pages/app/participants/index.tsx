@@ -80,6 +80,84 @@ type ParticipantInfo = {
 /** 在线判定(与后端 T13 约定一致):lastSeen 距今 < 60s 视为在线。 */
 const ONLINE_WINDOW_MS = 60_000;
 
+/**
+ * 平台四件套 skill → capability 标签(R4:参与方页面同步状态)。
+ * 与后端 COAGENTHUB_SKILL_CAPABILITIES 保持一致,展示「已装 / 未装」。
+ */
+const SKILL_SYNC_ITEMS = [
+  { name: "executor", capability: "coagenthub-executor" },
+  { name: "coordinator", capability: "coagenthub-coordinator" },
+  { name: "bugfix", capability: "coagenthub-bugfix" },
+  { name: "reviewer", capability: "coagenthub-reviewer" },
+] as const;
+
+/**
+ * 参与方 skill 同步状态(数据源 participant.capabilities):已装 → 绿勾;
+ * 未装 → 提示 + 可操作指引(在 agent 机器上 GET /api/skills/:name 并写盘、
+ * 安装后上报),不只显示一个红叉。compact 模式只显示四枚状态徽标(指引放
+ * title 悬停),完整模式额外列出未装项的操作指引。
+ */
+function SkillSyncStatus({
+  capabilities,
+  compact = false,
+}: {
+  capabilities: string[];
+  compact?: boolean;
+}) {
+  const installed = (capability: string) => capabilities.includes(capability);
+  return (
+    <div className={compact ? "" : "grid gap-1"}>
+      {!compact && (
+        <span className="text-xs font-medium text-muted-foreground">
+          {t("participants.skills.title")}
+        </span>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {SKILL_SYNC_ITEMS.map(({ name, capability }) => {
+          const ok = installed(capability);
+          return (
+            <span
+              key={name}
+              className={`flex items-center gap-1 text-xs ${
+                ok
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-amber-600 dark:text-amber-500"
+              }`}
+              title={
+                ok ? undefined : t("participants.skills.guide", { name })
+              }
+            >
+              {ok ? (
+                <CheckCircle2 className="size-3.5 shrink-0" />
+              ) : (
+                <XCircle className="size-3.5 shrink-0" />
+              )}
+              {name}
+              <span className="text-muted-foreground">
+                {ok
+                  ? t("participants.skills.installed")
+                  : t("participants.skills.notInstalled")}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+      {!compact &&
+        SKILL_SYNC_ITEMS.filter(({ capability }) => !installed(capability)).map(
+          ({ name }) => (
+            <p
+              key={name}
+              className="text-xs text-muted-foreground"
+              data-testid={`skill-guide-${name}`}
+            >
+              {t("participants.skills.guide", { name })}
+            </p>
+          ),
+        )}
+    </div>
+  );
+}
+
 /** 检测结果展示:找到 → 绿色对勾 + 等宽路径;未找到 → 轻量提示(不阻断提交)。 */
 function BinCheckResultView({ result }: { result: BinCheckResult }) {
   if (result.found) {
@@ -861,6 +939,15 @@ export default function ExecutorsPage() {
                           ))}
                         </div>
                       )}
+                      {/* R4:四 skill 同步状态(已装/未装),紧凑徽标,指引放 title */}
+                      {participant && (
+                        <div className="mt-1.5">
+                          <SkillSyncStatus
+                            capabilities={participant.capabilities}
+                            compact
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                   {/* 操作按钮列(右侧) */}
@@ -963,6 +1050,16 @@ export default function ExecutorsPage() {
                 onChange={(e) => setEditCapabilities(e.target.value)}
                 placeholder={t("participants.edit.capsPlaceholder")}
               />
+              {/* R4:编辑时按当前文本实时反映四 skill 同步状态,未装给操作指引。
+                  capabilities 仍是自由文本(逗号分隔),这里只是只读呈现。 */}
+              <div className="mt-1">
+                <SkillSyncStatus
+                  capabilities={editCapabilities
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter((s) => s.length > 0)}
+                />
+              </div>
             </div>
           </div>
           <DialogFooter>

@@ -176,6 +176,11 @@ export const zh = {
   "participants.edit.devicePlaceholder": "如 mac-mini",
   "participants.edit.caps": "能力标签(逗号分隔)",
   "participants.edit.capsPlaceholder": "如 text-generation, code-review",
+  "participants.skills.title": "技能同步状态",
+  "participants.skills.installed": "已装",
+  "participants.skills.notInstalled": "未装",
+  "participants.skills.guide":
+    "在 agent 机器上:GET /api/skills/{name} 获取内容并写入 skills 目录,安装后通过「✅ skill 已安装」消息或 PATCH capabilities 上报",
   "participants.heartbeat": "上报在线",
   "participants.reporting": "上报中…",
   "participants.renamed": "已改名为「{name}」",

@@ -144,13 +144,10 @@ describe("检视流程协议(ticket 04)", () => {
     expect(draft.parentId).toBeNull();
     expect(draft.depth).toBe(0);
 
-    // b. reviewer 拉取:只见草稿 + 加群自动发的 coagenthub-reviewer 安装引导;
+    // b. reviewer 拉取:只见草稿(R3 起加群不再自动发 skill 安装引导);
     //    以草稿为父发检视意见,回给 coordinator
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
-    expect(reviewerSeen.map((m) => m.body)).toEqual([
-      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
-      draft.body,
-    ]);
+    expect(reviewerSeen.map((m) => m.body)).toEqual([draft.body]);
 
     const review = await sendMessage(reviewer.id, group.id, {
       body: "检视意见:数据增强部分需要补充清洗步骤",
@@ -162,13 +159,10 @@ describe("检视流程协议(ticket 04)", () => {
     expect(review.parentId).toBe(draft.id);
     expect(review.depth).toBe(1);
 
-    // c. coordinator 拉取:可见草稿+检视意见(+ 加群自动发的 reviewer 安装引导
-    //     —— 本测试 coordinator 与 reviewer 同名 "hermes",注册时 409 复用同一
-    //     participant,故定向给 reviewer 的引导对 coordinator 同样可见);
+    // c. coordinator 拉取:可见草稿+检视意见(R3 起无加群引导消息);
     //    采纳后发最终版,audience=role:executor
     const coordSeen = await fetchMessages(coordinator.id, group.id);
     expect(coordSeen.map((m) => m.body)).toEqual([
-      expect.stringContaining("请先安装 coagenthub-reviewer skill"),
       draft.body,
       review.body,
     ]);
@@ -182,19 +176,13 @@ describe("检视流程协议(ticket 04)", () => {
     expect(final.audienceRef).toBe("executor");
 
     // d. executor 增量拉取(无游标=拉取全部可见历史):从未见过草稿与检视意见,只见最终版。
-    //    加群自动发的 skill 安装引导(coagenthub-executor)也定向投递给 executor。
+    //    (R3 起加群不再自动发 skill 安装引导,消息流更干净。)
     const executorSeen = await fetchMessages(executor.id, group.id);
-    const executorSkillMsg = executorSeen.find((m) =>
-      m.body.startsWith("请先安装 coagenthub-executor skill"),
-    );
     // 验收核心:草稿与检视意见不在 executor 的可见消息集合中
     const executorBodies = executorSeen.map((m) => m.body);
     expect(executorBodies).not.toContain(draft.body);
     expect(executorBodies).not.toContain(review.body);
-    // 可见消息 = skill 安装引导 + 最终版(排除 skill 引导后即最终版)
-    expect(executorSkillMsg).toBeTruthy();
-    expect(executorBodies).toContain(final.body);
-    expect(executorBodies).toHaveLength(2);
+    expect(executorBodies).toEqual([final.body]);
     // 增量语义:以最终版为游标继续拉,没有新消息
     const afterFinal = await fetchMessages(executor.id, group.id, final.id);
     expect(afterFinal).toEqual([]);
@@ -207,15 +195,13 @@ describe("检视流程协议(ticket 04)", () => {
     expect(result.audience).toBe("broadcast");
     expect(result.parentId).toBeNull();
 
-    // f. human 拉取:可见全部(草稿/检视意见/最终版/执行结果 + 两条 skill 安装引导)。
-    //    用户要看全过程 → 含发送给 reviewer/executor 的 skill 安装引导。
+    // f. human 拉取:可见全部(草稿/检视意见/最终版/执行结果)。R3 起无引导消息。
     const humanSeen = await fetchMessages(human.id, group.id);
     const humanBodies = humanSeen.map((m) => m.body);
-    expect(humanBodies).toHaveLength(6);
+    expect(humanBodies).toHaveLength(4);
     expect(humanBodies).toContain(draft.body);
     expect(humanBodies).toContain(review.body);
     expect(humanBodies).toContain(final.body);
     expect(humanBodies).toContain(result.body);
-    expect(humanBodies.some((b) => b.startsWith("请先安装"))).toBe(true);
   });
 });

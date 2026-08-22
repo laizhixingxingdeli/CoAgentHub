@@ -583,6 +583,103 @@ describe("接入参与方页", () => {
     expect(screen.getByText("从未在线")).toBeInTheDocument();
   });
 
+  it("R4: 列表行展示四 skill 同步状态(已装=绿勾,未装=徽标)", async () => {
+    const participants = [
+      {
+        id: "p-skilled",
+        name: "Skilled Bot",
+        device: null,
+        capabilities: ["coagenthub-executor"],
+        lastSeen: null,
+      },
+      {
+        id: "p-bare",
+        name: "Bare Bot",
+        device: null,
+        capabilities: [],
+        lastSeen: null,
+      },
+    ];
+    const executors = [
+      {
+        key: "skilled-bot",
+        agentName: "Skilled Bot",
+        type: "custom",
+        kind: "cli",
+        bin: "sb",
+        url: null,
+        args: [],
+        label: "skilled-bot",
+        builtin: false,
+      },
+      {
+        key: "bare-bot",
+        agentName: "Bare Bot",
+        type: "custom",
+        kind: "cli",
+        bin: "bb",
+        url: null,
+        args: [],
+        label: "bare-bot",
+        builtin: false,
+      },
+    ];
+    const fetchMock = createFetchMock([
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/participants"),
+        respond: () => jsonResponse(participants),
+      },
+      {
+        match: (url, init) =>
+          (!init?.method || init.method === "GET") &&
+          String(url).endsWith("/api/executors"),
+        respond: () => jsonResponse(executors),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("Skilled Bot");
+    const skilledRow = screen.getByTestId("executor-row-skilled-bot");
+    const bareRow = screen.getByTestId("executor-row-bare-bot");
+    // 已装 coagenthub-executor → 该行 1 枚「已装」+ 3 枚「未装」;空能力行 4 枚「未装」。
+    expect(within(skilledRow).getByText("已装")).toBeInTheDocument();
+    expect(within(skilledRow).getAllByText("未装")).toHaveLength(3);
+    expect(within(bareRow).getAllByText("未装")).toHaveLength(4);
+  });
+
+  it("R4: 编辑对话框展示四 skill 同步状态与操作指引,编辑文本实时联动,自由文本保留", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
+    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
+    const fetchMock = participantsFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    await screen.findByText("Online Bot");
+    const row = screen.getByTestId("executor-row-online-bot");
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+
+    // 完整模式:标题 + 四个未装项各带操作指引。
+    expect(await screen.findByText("技能同步状态")).toBeInTheDocument();
+    expect(screen.getByTestId("skill-guide-executor")).toBeInTheDocument();
+    expect(screen.getByTestId("skill-guide-coordinator")).toBeInTheDocument();
+    expect(screen.getByTestId("skill-guide-bugfix")).toBeInTheDocument();
+    expect(screen.getByTestId("skill-guide-reviewer")).toBeInTheDocument();
+
+    // capabilities 仍是自由文本编辑:输入已装 executor → 该指引消失、状态变已装。
+    fireEvent.change(screen.getByLabelText("能力标签(逗号分隔)"), {
+      target: { value: "text-generation, coagenthub-executor" },
+    });
+    expect(
+      screen.queryByTestId("skill-guide-executor"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("skill-guide-coordinator"),
+    ).toBeInTheDocument();
+  });
+
   it("编辑对话框可改 name/device/capabilities,PATCH 保存并即时刷新", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");

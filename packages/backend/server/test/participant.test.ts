@@ -83,6 +83,34 @@ describe("participant 注册与身份 API", () => {
     expect(row.device).toBe("mac-mini");
   });
 
+  it("POST /api/participants 响应带回全套 skill 内容(R1:接入时一次投递)", async () => {
+    const res = await register({ name: "onboarding-agent" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      skills?: Array<{
+        name: string;
+        description: string;
+        content: string;
+        path: string;
+      }>;
+    };
+    expect(body.skills).toHaveLength(4);
+    const names = (body.skills ?? []).map((s) => s.name).sort();
+    expect(names).toEqual(["bugfix", "coordinator", "executor", "reviewer"]);
+    for (const skill of body.skills ?? []) {
+      // 形状与 GET /api/skills 协调:name/description/path 同源,另带 content。
+      expect(typeof skill.name).toBe("string");
+      expect(typeof skill.description).toBe("string");
+      expect(typeof skill.content).toBe("string");
+      expect(skill.content.length).toBeGreaterThan(0);
+      expect(skill.path).toBe(`skills/${skill.name}/SKILL.md`);
+    }
+    const coordinator = (body.skills ?? []).find(
+      (s) => s.name === "coordinator",
+    );
+    expect(coordinator?.content).toContain("CoAgentHub");
+  });
+
   it("GET /api/participants 列表返回全部 participant 且不泄露 tokenHash/token", async () => {
     const created = await register({ name: "atomcode-cli" });
     const { id } = (await created.json()) as { id: string };

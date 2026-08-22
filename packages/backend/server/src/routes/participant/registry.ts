@@ -8,10 +8,15 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
 import { participantIdentity } from "@server/middleware/participant-identity";
+import {
+  COAGENTHUB_SKILL_CAPABILITIES,
+  mergeCapabilities,
+} from "@server/lib/participant-capabilities";
 import { desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
+import { readSkillBundle, SKILL_NAMES } from "../skills";
 
 // 注册(公开)与自管理(participantIdentity)并存:POST / 不挂中间件 —— 首次注册
 // 必须先于任何身份存在;PATCH / 与 PUT /heartbeat 挂身份声明中间件(全信模型,
@@ -79,6 +84,9 @@ app
         device: participant.device,
         capabilities: participant.capabilities,
         createdAt: participant.createdAt,
+        // 接入即投递全套 skill(接入时尚未入群、无消息通道,响应体是唯一
+        // 一次到位的投递口):复用 routes/skills.ts 的读盘逻辑,不写第二份。
+        skills: readSkillBundle(),
       });
     },
   )
@@ -136,12 +144,17 @@ app
           device: z.string().nullable().optional(),
           // 自由能力标签 (ticket 17): 与注册同语义,逗号输入前端转数组后提交。
           capabilities: z.array(z.string()).max(64).optional(),
+          // skill 安装上报(R2):接入时无群消息通道,agent 写盘后把「装好了哪些」
+          // 报告给平台。名字必须是 COAGENTHUB_SKILL_CAPABILITIES 的键,映射成
+          // capability 后与既有值幂等合并——不凭空置位,重复上报不产生重复项。
+          installedSkills: z.array(z.enum(SKILL_NAMES)).max(4).optional(),
         })
         .refine(
           (v) =>
             v.name !== undefined ||
             v.device !== undefined ||
-            v.capabilities !== undefined,
+            v.capabilities !== undefined ||
+            v.installedSkills !== undefined,
           { message: "at least one field to update is required" },
         ),
     ),
@@ -162,6 +175,25 @@ app
       if (input.device !== undefined) patch.device = input.device ?? null;
       if (input.capabilities !== undefined) {
         patch.capabilities = input.capabilities;
+      }
+      // skill 安装上报(R2):接入时无群消息通道,agent 写盘后通过 PATCH
+      // installedSkills 报告「装好了哪些」。按 COAGENTHUB_SKILL_CAPABILITIES
+      // 映射成 capability,用 mergeCapabilities 幂等合并到既有 capabilities
+      // (不凭空置位、重复上报不产生重复项);capabilities 字段本身的替换语义
+      // 不受影响,前端自由文本编辑(含移除)照旧。
+      if (
+        input.installedSkills !== undefined &&
+        input.installedSkills.length > 0
+      ) {
+        const [row] = await db
+          .select({ capabilities: participantTable.capabilities })
+          .from(participantTable)
+          .where(eq(participantTable.id, id));
+        const base = input.capabilities ?? row?.capabilities ?? [];
+        const additions = input.installedSkills.map(
+          (skill) => COAGENTHUB_SKILL_CAPABILITIES[skill],
+        );
+        patch.capabilities = mergeCapabilities(base, additions);
       }
 
       const [updated] = await db

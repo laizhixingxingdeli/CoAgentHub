@@ -189,6 +189,11 @@ export const en: Record<DictKey, string> = {
   "participants.edit.devicePlaceholder": "e.g. mac-mini",
   "participants.edit.caps": "Capability tags (comma-separated)",
   "participants.edit.capsPlaceholder": "e.g. text-generation, code-review",
+  "participants.skills.title": "Skill sync status",
+  "participants.skills.installed": "Installed",
+  "participants.skills.notInstalled": "Not installed",
+  "participants.skills.guide":
+    "On the agent machine: GET /api/skills/{name} → write it into the skills directory, then report via a “✅ skill 已安装” message or PATCH capabilities",
   "participants.heartbeat": "Report online",
   "participants.reporting": "Reporting…",
   "participants.renamed": "Renamed to “{name}”",
