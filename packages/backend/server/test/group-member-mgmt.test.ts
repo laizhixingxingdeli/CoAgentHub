@@ -431,6 +431,165 @@ describe("群组成员管理 API (ticket 20)", () => {
       );
     });
 
+    /**
+     * 协助函数:通过执行器 API 新建一个执行器配置(自动注册同名 participant),
+     * 返回其 participant id 与 executorConfig.prompt。关联键为
+     * participant.name === executor_config.agent_name(服务端按 name 查询)。
+     */
+    async function createExecutor(
+      agentName: string,
+      prompt?: string,
+    ): Promise<string> {
+      const res = await app.request("/api/executors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentName,
+          kind: "cli",
+          bin: "/usr/bin/true",
+          args: [],
+          ...(prompt !== undefined ? { prompt } : {}),
+        }),
+      });
+      expect(res.status).toBe(200);
+      const [p] = await testDb.query.participant.findMany({
+        where: (t, { eq }) => eq(t.name, agentName),
+      });
+      expect(p).toBeDefined();
+      return p.id;
+    }
+
+    it("新建成员未传 prompt → 回落到执行器 executor_config.prompt 默认值", async () => {
+      const { id } = await registerParticipant({ name: "coord-fallback" });
+      const exPid = await createExecutor(
+        "fallback-executor",
+        "默认负责数据库迁移与评审",
+      );
+      const group = await createGroup(id, "回落默认值");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: exPid, roles: ["executor"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { prompt: string | null }).prompt).toBe(
+        "默认负责数据库迁移与评审",
+      );
+    });
+
+    it("显式传 prompt 以调用方为准,不回落(非空)", async () => {
+      const { id } = await registerParticipant({ name: "coord-explicit" });
+      const exPid = await createExecutor(
+        "explicit-executor",
+        "执行器默认分工",
+      );
+      const group = await createGroup(id, "显式优先");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({
+          participantId: exPid,
+          roles: ["executor"],
+          prompt: "调用方自定义分工",
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { prompt: string | null }).prompt).toBe(
+        "调用方自定义分工",
+      );
+    });
+
+    it("显式传空串 prompt 以调用方为准,不回落到执行器默认值", async () => {
+      const { id } = await registerParticipant({ name: "coord-empty-prompt" });
+      const exPid = await createExecutor(
+        "empty-prompt-executor",
+        "执行器默认分工",
+      );
+      const group = await createGroup(id, "显式空串");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({
+          participantId: exPid,
+          roles: ["executor"],
+          prompt: "",
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { prompt: string | null }).prompt).toBe("");
+    });
+
+    it("已存在成员行未传 prompt → 保持既有分工,不被执行器默认值覆盖", async () => {
+      const { id } = await registerParticipant({ name: "coord-keep" });
+      // participant 本身就是执行器,且执行器默认 prompt 存在,用来证明 update
+      // 分支绝不回落:首建已显式设过分工,二发未传 prompt 必须保留旧值。
+      const exPid = await createExecutor(
+        "keep-executor",
+        "执行器默认分工(不该覆盖)",
+      );
+      const group = await createGroup(id, "保留既有值");
+
+      const first = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({
+          participantId: exPid,
+          roles: ["executor"],
+          prompt: "我针对这群改的分工",
+        }),
+      });
+      expect(first.status).toBe(200);
+
+      const second = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: exPid, roles: ["reviewer"] }),
+      });
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as { prompt: string | null }).prompt).toBe(
+        "我针对这群改的分工",
+      );
+    });
+
+    it("非执行器 participant 未传 prompt → 行为不变(prompt 为 null)", async () => {
+      const { id } = await registerParticipant({ name: "coord-non-exec" });
+      const { id: plainId } = await registerParticipant({
+        name: "non-exec-participant",
+      });
+      const group = await createGroup(id, "非执行器");
+
+      const res = await app.request(`/api/groups/${group.id}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": id,
+        },
+        body: JSON.stringify({ participantId: plainId, roles: ["observer"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(
+        ((await res.json()) as { prompt: string | null }).prompt,
+      ).toBeNull();
+    });
+
     it("PATCH 只改 prompt:roles 不变", async () => {
       const { id } = await registerParticipant({
         name: "coord-patch-prompt",

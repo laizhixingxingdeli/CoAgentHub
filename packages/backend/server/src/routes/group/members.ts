@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import {
   GROUP_ROLES,
+  executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -70,19 +71,37 @@ app
           "一个群内只能持有一种角色",
         );
       }
+
+      // 新建成员时的 prompt 默认值:调用方显式传了 prompt(含空串)一律以调用方
+      // 为准;未传时才回落到该 participant 对应执行器的 executor_config.prompt
+      // (participant.name === executor_config.agent_name)。非执行器
+      // (executor_config 查不到,或查到但 prompt 为空)则不带 prompt 字段,行为
+      // 与改动前一致。注意:该默认值**仅用于 insert 分支**,update 分支(已有
+      // 成员行幂等重发)绝不回落,以免覆盖用户已针对该群改过的分工说明。
+      let defaultPrompt = prompt;
+      if (prompt === undefined) {
+        const ex = await db.query.executorConfig.findFirst({
+          where: (t, { eq }) => eq(t.agentName, participant.name),
+        });
+        if (ex?.prompt) {
+          defaultPrompt = ex.prompt;
+        }
+      }
+
       const [member] = await db
         .insert(groupMemberTable)
         .values({
           groupId: id,
           participantId,
           roles: dedupedRoles,
-          ...(prompt !== undefined ? { prompt } : {}),
+          ...(defaultPrompt !== undefined ? { prompt: defaultPrompt } : {}),
         })
         .onConflictDoUpdate({
           target: [groupMemberTable.groupId, groupMemberTable.participantId],
           set: {
             roles: dedupedRoles,
             // prompt 未提供时保持既有值,避免幂等 upsert 清掉已有分工说明。
+            // 此处必须用调用方原始 prompt(非执行器默认值),确保不回落覆盖。
             ...(prompt !== undefined ? { prompt } : {}),
           },
         })
