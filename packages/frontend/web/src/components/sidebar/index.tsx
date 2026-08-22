@@ -24,6 +24,7 @@ import {
   BreadcrumbSeparator,
 } from "../ui/breadcrumb";
 import { ConversationList } from "./conversations";
+import { IdentitySwitcher } from "./identity-switcher";
 import { NavMain } from "./nav-main";
 import { NavSecondary } from "./nav-secondary";
 import { ThemeToggle } from "./theme-toggle";
@@ -102,6 +103,9 @@ export default function AppSidebar({
         </SidebarContent>
         <SidebarFooter>
           <SidebarMenu>
+            <SidebarMenuItem>
+              <IdentitySwitcher />
+            </SidebarMenuItem>
             <SidebarMenuItem>
               <ThemeToggle />
             </SidebarMenuItem>

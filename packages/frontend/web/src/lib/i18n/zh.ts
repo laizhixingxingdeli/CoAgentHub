@@ -388,6 +388,8 @@ export const zh = {
   "sidebar.theme.aria": "切换深色模式",
   "sidebar.theme.dark": "深色模式",
   "sidebar.theme.light": "浅色模式",
+  "sidebar.identity.aria": "身份切换",
+  "sidebar.identity.unbound": "未绑定身份",
   "sidebar.sheet.title": "侧边栏",
   "sidebar.sheet.desc": "移动端侧边栏导航。",
 

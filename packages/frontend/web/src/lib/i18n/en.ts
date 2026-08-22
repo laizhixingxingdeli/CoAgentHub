@@ -407,6 +407,8 @@ export const en: Record<DictKey, string> = {
   "sidebar.theme.aria": "Toggle dark mode",
   "sidebar.theme.dark": "Dark mode",
   "sidebar.theme.light": "Light mode",
+  "sidebar.identity.aria": "Switch identity",
+  "sidebar.identity.unbound": "No identity bound",
   "sidebar.sheet.title": "Sidebar",
   "sidebar.sheet.desc": "Mobile sidebar navigation.",
 

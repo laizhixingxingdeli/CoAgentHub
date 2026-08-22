@@ -1,6 +1,5 @@
 import {
   Archive,
-  KeyRound,
   Pencil,
   Plus,
   RotateCcw,
@@ -8,13 +7,13 @@ import {
   SearchX,
   Settings,
   Trash2,
-  UserPlus,
   Users,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useGroupsPage } from "@/hooks/use-groups-page";
+import { useIdentityPanel } from "@/hooks/use-identity-panel";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -83,9 +82,18 @@ export default function GroupsPage() {
     setSearchQuery,
     debouncedQuery,
     previewFor,
+    handleCreate,
+    startRenameTitle,
+    handleRenameTitle,
+    handleArchive,
+    handleRestore,
+    handleDelete,
+    loadMore,
+  } = useGroupsPage();
+  // 身份面板已搬去侧栏(IdentitySwitcher);本页仅保留「参与方设置」区,
+  // 绑定状态与侧栏共享 useIdentityPanel(store 为唯一数据源)。
+  const {
     boundParticipantId,
-    identityInput,
-    setIdentityInput,
     participantInfo,
     settingsOpen,
     setSettingsOpen,
@@ -94,30 +102,10 @@ export default function GroupsPage() {
     deviceInput,
     setDeviceInput,
     savingSettings,
-    registerOpen,
-    setRegisterOpen,
-    regName,
-    setRegName,
-    regDevice,
-    setRegDevice,
-    registering,
-    participants,
-    participantsLoading,
-    participantsError,
-    handleSaveIdentity,
-    handleClearIdentity,
-    handleBind,
-    handleRegister,
+    settingsMessage,
+    settingsError,
     handleSaveSettings,
-    handleCreate,
-    startRenameTitle,
-    handleRenameTitle,
-    handleArchive,
-    handleRestore,
-    handleDelete,
-    loadMore,
-    currentParticipant,
-  } = useGroupsPage();
+  } = useIdentityPanel();
 
   return (
     <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
@@ -163,191 +151,6 @@ export default function GroupsPage() {
                 })
               : t("groups.count.total", { count: groups.length })}
         </p>
-      </div>
-
-      {/* 身份面板(ticket 29):当前身份 + 已有 Participant 选择 + 手动输入 id + 注册 */}
-      <div className="mb-6 rounded-lg border bg-card">
-        {/* ① 当前身份:已绑定显示「使用中: name(typedevice)」,未绑定提示 */}
-        <div className="border-b px-4 py-3">
-          <div className="flex items-center justify-between gap-2">
-            {boundParticipantId ? (
-              <span className="inline-flex min-w-0 items-center gap-2 text-sm font-medium">
-                <KeyRound className="size-4 shrink-0" />
-                <span className="truncate">
-                  {t("groups.identity.inUse")}{" "}
-                  {currentParticipant
-                    ? `${currentParticipant.name}${
-                        currentParticipant.device
-                          ? `(${currentParticipant.device})`
-                          : ""
-                      }`
-                    : t("groups.identity.bound")}
-                </span>
-              </span>
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                {t("groups.identity.unbound")}
-              </span>
-            )}
-            {boundParticipantId && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleClearIdentity}
-                className="shrink-0"
-              >
-                {t("common.clear")}
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* ② 已有 Participant 列表:选择身份(全信模型,声明即绑定,无服务端调用) */}
-        <div className="border-b px-4 py-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">
-              {t("groups.identity.existing")}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {participantsLoading
-                ? t("common.loading")
-                : t("groups.identity.count", { count: participants.length })}
-            </span>
-          </div>
-          {participantsError && (
-            <p className="mb-2 text-xs text-red-600">{participantsError}</p>
-          )}
-          {participants.length === 0 && !participantsLoading ? (
-            <p className="text-sm text-muted-foreground">
-              {t("groups.identity.empty")}
-            </p>
-          ) : (
-            <ul className="max-h-48 space-y-1 overflow-y-auto pr-1">
-              {participants.map((participant) => {
-                const isBound = participant.id === boundParticipantId;
-                return (
-                  <li
-                    key={participant.id}
-                    className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm">{participant.name}</div>
-                      {participant.device && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          {participant.device}
-                        </div>
-                      )}
-                    </div>
-                    {isBound ? (
-                      <span className="inline-flex shrink-0 items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
-                        {t("common.inUse")}
-                      </span>
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleBind(participant)}
-                        className="shrink-0"
-                      >
-                        {t("common.use")}
-                      </Button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
-        {/* ③ 手动输入 participant id(全信模型:任意声称的 id 都被接受) */}
-        <div className="border-b px-4 py-3">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Input
-              type="text"
-              placeholder={t("groups.identity.inputPlaceholder")}
-              value={identityInput}
-              onChange={(e) => setIdentityInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleSaveIdentity();
-                }
-              }}
-              aria-label={t("groups.identity.inputAria")}
-              className="sm:max-w-xs"
-            />
-            <Button
-              size="sm"
-              onClick={handleSaveIdentity}
-              disabled={!identityInput.trim()}
-              className="shrink-0"
-            >
-              {t("groups.identity.bind")}
-            </Button>
-          </div>
-        </div>
-
-        {/* ④ 注册新 Participant(ticket 28):替代终端 curl 注册;成功即自动绑定并切换身份 */}
-        <div className="border-t px-4 py-3">
-          <button
-            type="button"
-            onClick={() => setRegisterOpen((v) => !v)}
-            className="flex w-full items-center justify-between text-sm font-medium"
-            aria-expanded={registerOpen}
-          >
-            <span className="inline-flex items-center gap-2">
-              <UserPlus className="size-4" />
-              {t("groups.identity.register")}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {registerOpen ? t("common.collapse") : t("common.expand")}
-            </span>
-          </button>
-          {registerOpen && (
-            <div className="mt-3 flex flex-col gap-3">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="text"
-                  placeholder={t("groups.identity.regNamePlaceholder")}
-                  value={regName}
-                  onChange={(e) => setRegName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleRegister();
-                    }
-                  }}
-                  aria-label={t("groups.identity.regNameAria")}
-                  className="sm:max-w-xs"
-                />
-                <Input
-                  type="text"
-                  placeholder={t("groups.identity.regDevicePlaceholder")}
-                  value={regDevice}
-                  onChange={(e) => setRegDevice(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleRegister();
-                    }
-                  }}
-                  aria-label={t("groups.identity.regDeviceAria")}
-                  className="sm:max-w-xs"
-                />
-                <Button
-                  size="sm"
-                  onClick={handleRegister}
-                  disabled={registering}
-                  className="shrink-0"
-                >
-                  {registering
-                    ? t("groups.identity.registering")
-                    : t("groups.identity.registerButton")}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {t("groups.identity.registerHint")}
-              </p>
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Participant 设置(ticket 20):绑定后可见,展示并编辑自己的注册信息 */}
@@ -405,6 +208,16 @@ export default function GroupsPage() {
                   {savingSettings ? t("common.saving") : t("common.save")}
                 </Button>
               </div>
+              {settingsMessage && (
+                <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
+                  {settingsMessage}
+                </div>
+              )}
+              {settingsError && (
+                <div className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-200">
+                  {settingsError}
+                </div>
+              )}
             </div>
           )}
         </div>
