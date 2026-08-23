@@ -42,6 +42,19 @@ Write the code. Follow the repo's coding standards:
 - Use the domain vocabulary from `CONTEXT.md` — don't invent synonyms.
 - Respect existing ADRs in `docs/adr/`.
 
+#### 2.1 修复票越界 → 立即上报，不要自行扩张（闸二，v4.0）
+
+若任务书的 `dispatchKind` 是 `fix`（修复票，复用一份既有冻结 spec），而你发现
+**必须越过那份 spec 的边界**才能改动——新增/改变契约、调整数据模型、引入新模块
+或推翻既有 ADR：
+
+**停下，不要动手改架构。** 在汇报里写明「本票越界」+ 越界点，交回协调者退回
+检视者做 `spec_amended`，按 `requirement` 与新 `specHash` 重新下发。
+
+理由：`fix` 票**不跑 L3**（架构检视在它复用的那份 spec 冻结时已经做过）。你在
+`fix` 名义下改架构，等于让一处架构改动**绕开了唯一的架构检视环节**——没有任何
+后续关卡会发现它。这不是流程洁癖，是这条链上真实存在的漏洞。
+
 ### 3. Test
 
 Testing is **reference-only discipline** — a reference for how to write code, not a mandated step sequence. The loop is just **red → green**:

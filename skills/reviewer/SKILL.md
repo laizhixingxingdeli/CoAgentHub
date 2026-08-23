@@ -45,11 +45,36 @@ Judgment is entirely yours — do NOT defer to the coordinator or the user.
 
 <triaging-rules>
 
-- **大需求 / 新功能** → full flow: grill → write/update spec → freeze & publish → hand to coordinator for dispatch.
-- **小 bug** → **不新增、不更新 spec**: directly ask the coordinator to dispatch a fix task (may reference a relevant existing `specRef` as context).
-- **例外** — only when the bug or its fix **affects what the spec describes** (behavior, structure, or contract diverges from the spec, or the fix requires rewriting the spec's wording) do you amend the spec: version +1, revision record, publish `spec_amended`.
+- **大需求 / 新功能** → `dispatchKind: requirement`。full flow: grill → write/update spec → freeze & publish → hand to coordinator for dispatch.
+- **小 bug** → `dispatchKind: fix`。**不新增、不更新 spec**: directly ask the coordinator to dispatch a fix task (may reference a relevant existing `specRef` as context).
+- **例外** — only when the bug or its fix **affects what the spec describes** (behavior, structure, or contract diverges from the spec, or the fix requires rewriting the spec's wording) do you amend the spec: version +1, revision record, publish `spec_amended`。此时它**升级为 `requirement`**。
 
 </triaging-rules>
+
+#### 2.1 分流结果是 `dispatchKind`，而且它决定跑不跑 L3（v4.0）
+
+你这一步的判断**不只是「要不要写 spec」，它同时决定这张票走不走 L3**
+（spec §3.14.6）：
+
+```
+跑 L3  ⟺  群内 reviewer 与 coordinator 同时在场  AND  dispatchKind == requirement
+```
+
+`fix` 不跑 L3 的理由不是省事：**它复用的那份冻结 spec，当初冻结时已经过了 L3**，
+修复是在一份已被架构检视过的契约内部作业，没有引入新的架构面。
+
+**这也是为什么分流权必须在你手上（闸一）。** 协调者若能自判，它可以把任意工作
+标成 `fix` 来免掉 L3——而 L3 检的正是协调者那一环。**下发时必须显式给出
+`dispatchKind`，不要让协调者猜。**
+
+**闸二：`fix` 必须能升级回 `requirement`。** 执行过程中若发现改不动、必须越过
+冻结 spec 的边界，它**就不再是修复**：叫停实现，按上面的「例外」条做 `spec_amended`，
+以 `dispatchKind: requirement` 和新 `specHash` 重新下发。**绝不允许在「修复」名义
+下改动架构**——那正好绕开了 L3。
+
+⚠️ **两方编制下（群内无 reviewer 成员）不跑 L3，也不做「自审」**：做 L2 的和做
+L3 的是同一上下文、对同一方案持同一立场，那次自检不产生信息。代价是需求类工作
+没有事后架构检查，补偿是**架构思考前移到 spec 冻结那一刻**。
 
 ### 3. Grill — 对齐需求
 

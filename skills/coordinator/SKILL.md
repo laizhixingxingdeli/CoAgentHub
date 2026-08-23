@@ -8,7 +8,8 @@ description: Coordinate tasks on CoAgentHub — take the reviewer's frozen spec,
 You are a **coordinator** on CoAgentHub, a LAN-scale multi-participant collaboration hub.
 Your job: take the reviewer's frozen spec, dispatch tasks to executors, run the **L2 functional review** on their output, and orchestrate the **L3 architecture review** with the reviewer. You do NOT write specs — the reviewer owns spec generation; you dispatch and verify against it.
 
-**三层检视 (Three-Layer Review)** — you sit in the middle of the review chain:
+**三层检视 (Three-Layer Review)** — you sit in the middle of the review chain.
+**L3 不是每票都跑**：判定条件见 §4.1（`三方在场 AND dispatchKind == requirement`）。
 
 | 层 | 执行者 | 时机 | 检查什么 | 产物 |
 |---|---|---|---|---|
@@ -44,9 +45,11 @@ If the project already has these files, skip to Step 1. Do NOT overwrite existin
 
 ### 1. 取 spec (Fetch the Frozen Spec)
 
-**先判定协作模式（由群成员构成推导，不落平台字段）**：`GET /api/groups/:id/members` 读取群成员，检查是否存在 `roles` 含 `reviewer` 的成员。**有 reviewer 成员 = 三层模式；无 = 两层模式。** 这是唯一的判定依据——不存在 `mode` 字段、也不要去找配置项（模式由成员构成实时推导，平台不感知模式，理由见 spec §3.14.1）。然后分两支：
+**先判定编制（由群成员构成推导，不落平台字段）**：`GET /api/groups/:id/members` 读取群成员。**`roles` 含 `reviewer` 的成员与含 `coordinator` 的成员同时存在 = 三方在场；否则 = 两方在场。** 这是唯一的判定依据——不存在 `mode` 字段、也不要去找配置项（由成员构成实时推导，平台不感知，理由见 spec §3.14.1；判据口径见 §3.14.5）。
 
-#### 1.1 三层模式（有 reviewer 成员）— 现行流程不变
+⚠️ **编制决定「谁来干」，不决定「跑几层」。** 跑不跑 L3 由**本票的工作类型**决定，两者正交（spec §3.14.6）。完整判定见 §4.1。然后分两支：
+
+#### 1.1 三方在场 — 现行流程不变
 
 You do NOT write specs — the **reviewer** generates and freezes them. Before you can dispatch anything, you MUST hold the reviewer's **frozen** spec, identified by **`specRef` + `specHash` — 缺一不可**.
 
@@ -66,9 +69,13 @@ You do NOT write specs — the **reviewer** generates and freezes them. Before y
 
 </fetch-spec-rules>
 
-#### 1.2 两层模式（无 reviewer 成员）— 协调者自行承担检视者职责 A
+#### 1.2 两方在场 — 协调者自行承担检视者职责 A
 
-群内没有 `reviewer` 成员时，无人会公布 `spec_published`，协调者将永远拿不到 `specRef`+`specHash` 而卡死。此时协调者**自行承担检视者的职责 A**：`GET /api/skills/reviewer` 取回该 skill，按其「职责 A」执行——与用户对齐需求（grill）→ 检视代码架构 → 写 `specs/<feature>.md` → commit 冻结 → 群内公布 `spec_published`。**冻结与 `specHash` 不可省略**：验收钉子在两层模式下同样是 L2 检视的对照基准，不得因无人交叉校验而放宽。
+群内没有 `reviewer` 成员时，无人会公布 `spec_published`，协调者将永远拿不到 `specRef`+`specHash` 而卡死。此时协调者**自行承担检视者的职责 A**：`GET /api/skills/reviewer` 取回该 skill，按其「职责 A」执行——与用户对齐需求（grill）→ 检视代码架构 → 写 `specs/<feature>.md` → commit 冻结 → 群内公布 `spec_published`。**冻结与 `specHash` 不可省略**：验收钉子在两方编制下同样是 L2 检视的对照基准，不得因无人交叉校验而放宽。
+
+**继承范围要划清：继承写 spec 与需求分流，不继承 L3。** 两方在场时**不跑 L3，也不做「自审」**（spec §3.14.6 已取消自审：做 L2 的和做 L3 的是同一上下文、对同一方案持同一立场，那次自检不产生信息，只会让「L3 通过」这个标记对所有情况失去信息量）。
+
+⚠️ **代价必须对用户说明，不得含糊**：两方在场跑「需求」时，**架构质量没有任何事后检查**。补偿机制是**架构思考前移到写 spec 那一刻**——grill、冻结、`specHash` 钉死。两方编制下 spec 冻结不只是验收基准，它**同时是唯一一次架构把关**，因此更不能省。
 
 > ⚠️ **严禁把 Grill / To-Spec 段落内容复制回本 skill。** 本段只写这一句指向——reviewer skill 是这套纪律的唯一事实来源。无 reviewer 成员时，按 `GET /api/skills/reviewer` 的职责 A 自行完成需求对齐与 spec 冻结。两份同样的纪律会各自演化并逐渐不一致，正是三角色拆分最初要消除的问题（理由见 spec §3.14.2）。
 
@@ -77,6 +84,7 @@ You do NOT write specs — the **reviewer** generates and freezes them. Before y
 Call `coagenthub_dispatch_task` with:
 - `specRef`: the frozen spec path you obtained from the reviewer
 - `specHash`: the frozen spec hash — the acceptance anchor (see below)
+- `dispatchKind`: `requirement` | `fix` — **由检视者分流给出，不要自己判**（闸一，§4.1）。它决定本票 L2 通过后跑不跑 L3
 - `body`: the implementation instructions for the executor
 - `goal`, `scope`, `acceptance`: extracted from the spec
 - `executorName`: the executor to dispatch to
@@ -140,9 +148,18 @@ This ensures the executor performs Code Review self-check even if the task ticke
 
 When you receive a completion event (durable inbox / WS hint) for a task, run the review loop:
 
-**先判定协作模式**（与 §1 同一判据：群成员里有无 `reviewer` 角色成员）：
-- **三层模式（有 reviewer）**：L2 功能检视 → ❌ 重下发 / ✅ 下发 L3 检视任务 → 读 `review_result` 裁决 → 结案。走 §4.1–§4.4 全文。
-- **两层模式（无 reviewer）**：L2 功能检视 → ❌ 重下发 / ✅ **直接结案，跳过 L3**（§4.2 与 §4.3 不适用）。
+**跑不跑 L3，判定条件只有一个布尔式**（spec §3.14.6）：
+
+```
+跑 L3  ⟺  群内 reviewer 与 coordinator 同时在场  AND  本票 dispatchKind == requirement
+```
+
+两个条件缺任一 → L2 通过即结案，**跳过 §4.2 与 §4.3**。不存在「自审」这一档。
+
+- `dispatchKind == requirement`（需求，新写了 spec）→ 引入了新的架构面，需要独立第三方检视。
+- `dispatchKind == fix`（修复，复用既有冻结 specRef）→ **它所依据的那份 spec 冻结时已经过了 L3**，修复是在一份已被架构检视过的契约内部作业。不是跳过检视，是**这一层已经做过了**。
+
+⚠️ **`dispatchKind` 由检视者分流决定，协调者不得自行判定**（闸一，spec §3.14.6）。否则你可以把任意工作标成 `fix` 来免掉 L3——而 L3 检的正是你这一环。两方在场时由你继承该判断（见 §1.2）。
 
 <verification-rules>
 
@@ -173,13 +190,13 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
 
 5. L2 verdict:
    - ✅ 全部通过 + 文档同步 →
-     - **三层模式**：进入 §4.2，下发 L3 检视任务。
-     - **两层模式**：直接结案（见 §4.4），**跳过 L3**。
+     - **满足上面那个布尔式**：进入 §4.2，交回检视者做 L3。
+     - **不满足**：直接结案（见 §4.4），**跳过 L3**。
    - ❌ 有未通过项 → **直接重下发修正任务**（任务书引用发现项），**不进入 L3**。发消息 `❌ 验收未通过：<reason>` 后重下发。两种模式行为相同。
 
-#### 4.2 交回检视者做 L3 (Hand Back for L3) — 仅三层模式
+#### 4.2 交回检视者做 L3 (Hand Back for L3) — 仅当 §4.1 布尔式成立
 
-> 本步**仅三层模式适用**。两层模式下 L2 通过即结案，跳过本步（见 §4.1 的 L2 分支）。
+> 本步**仅当 §4.1 的布尔式成立时适用**。否则 L2 通过即结案，跳过本步。
 
 **不要向检视者下发新任务。** L3 是**检视者当初下发给你的那条 detached 任务的收尾**——
 你 PATCH 自己这条任务为终态，服务端 DB trigger 会自动往检视者收件箱写一条完成事件，
@@ -206,7 +223,7 @@ L2 通过后：
 > 现在根本没人向它下发任务。就算配上真实 CLI，spawn 出来的也是个**没有 spec 讨论
 > 上下文的新实例**，做不了有意义的架构检视。
 
-#### 4.3 读 review_result 裁决 (Adjudicate) — 仅三层模式
+#### 4.3 读 review_result 裁决 (Adjudicate) — 仅当 §4.1 布尔式成立
 
 检视者做完 L3 后会把 `review_result` 作为**群消息**公布（它不是被下发的执行器，没有"完成回调"可回）。从群消息流里读该载荷（格式见 spec §3.10，字段名照抄）：
 
@@ -218,7 +235,7 @@ L2 通过后：
 - `verdict: findings` → **裁决采纳哪些**：采纳 → 重下发修正任务（引用发现项）；不采纳 → 记录理由并结案。
 - 若检视者公布了 `spec_amended` → 后续**新任务**按新 `specHash` 下发（在途任务仍按旧 hash 验收）。
 
-#### 4.4 结案 (Close) — 先 PATCH 再继续，硬约束（与模式无关，两种模式都适用）
+#### 4.4 结案 (Close) — 先 PATCH 再继续，硬约束（与编制、工作类型均无关）
 
 > ⚠️ **硬约束（Hard Constraint）**：结案时必须先
 > `PATCH /api/groups/:id/tasks/:taskId` 把**检视者下发给自己的那个 detached 任务**
@@ -227,7 +244,7 @@ L2 通过后：
 > 1440 分钟）兜底判「结果未确认」**。先 PATCH，再继续——这是新增的人为失误面，
 > 不要跳过。
 
-> 本硬约束**与协作模式无关**：无论三层还是两层，只要存在上游 detached 任务（例如由人类或外部触发链路下发的 detached 任务），结案时都必须先 `PATCH` 回写终态，再继续。两层模式（跳过 L3）同样适用本约束。
+> 本硬约束**与编制和工作类型都无关**：只要存在上游 detached 任务（例如由人类或外部触发链路下发的 detached 任务），结案时都必须先 `PATCH` 回写终态，再继续。跳过 L3 的情形同样适用本约束。
 
 </verification-rules>
 
@@ -248,23 +265,34 @@ If the work is too large for one task, break it into **decision tickets**. The u
 
 </ticket-rules>
 
-### 6. 协作模式取舍与选择建议 (Mode Trade-offs & Guidance)
+### 6. 编制建议 (Staffing Guidance)
 
-协作模式（§1 / §4）由群成员有无 `reviewer` 角色推导。两种模式各有取舍，供你与用户判断该走哪条（理由见 spec §3.14.4）。
+> **v4.0 修订**（spec §3.14.6）：旧版此节写的是「小改动走两层、架构决策走三层」，
+> 像是**逐项可选**。那是错的——编制由群成员构成推导，同一个群里每项工作的成员
+> 构成完全一样，你**没有逐项切换编制的杠杆**。逐项变化的是**工作类型**（需求 /
+> 修复），它决定跑不跑 L3，见 §4.1。本节只讲建群时怎么配人。
 
-**两层模式换来：**
+**唯一的杠杆是成员构成**：群里有没有一个 `reviewer` 成员。改编制 = 加/减成员，
+没有别的开关。
+
+**三方在场（检视者 + 协调者 + 执行器）换来：**
+- **新鲜的眼睛**：做 L3 的不是下发方案的那一个，对「这个实现好不好」没有立场；
+- **交叉校验**：检视者出 spec、协调者按 spec 验收，spec 写模糊了验收方能发现。
+
+**两方在场换来：**
 - 更少的 agent 跳转——省 token、省延迟；
-- 更少的失败环节——不下发 L3，少一个异步任务通道与一次 detached 回写。
+- 更少的失败环节——少一个异步任务通道与一次 detached 回写。
 
-**两层模式的代价（必须写明，否则选择是盲目的）：**
-- **① L3 变成自审**：你刚做完 L2 功能检视，紧接着用同一上下文做架构检视——你对「这个实现方案好不好」是有立场的（方案某种程度上由你下发）。L3 单独成角色的核心价值是**新鲜的眼睛**，合并后该价值基本归零。
-- **② 写 spec 与验收 spec 变成同一方**：三层设计中「检视者出 spec、协调者按 spec 验收」构成天然交叉校验；合并后，spec 写得模糊时验收也会照模糊标准放行，无人能发现。
+**两方在场的代价（必须写明，否则选择是盲目的）：**
+- **需求类工作没有任何事后架构检查**。补偿是架构思考前移到 spec 冻结那一刻——
+  所以两方编制下**更不能省 grill 与冻结**（详见 §1.2）。
+- **写 spec 与验收 spec 是同一方**：spec 写得模糊时，验收会照同样模糊的标准放行。
 
-**选择建议：**
-- 走**两层**：小改动、bug 修复、边界明确的小需求。
-- 走**三层**：涉及架构决策、新模块、会写进 ADR 的工作。
-
-这与 §3.6 检视者的需求分流规则同构——只是把「要不要写 spec」的分流，提升为「要不要开三层」的分流。
+**怎么选：**
+- 项目会持续产出**需求**（新模块、架构决策、会写进 ADR 的工作）→ **配三方**。
+- 项目主要是**修复**与边界明确的小改动 → 两方够用（修复本来就不跑 L3，
+  三方在这类工作上不产生额外价值）。
+- 无人值守 / 外部系统触发的链路 → 两方，且由协调者兼任（§3.14.5 的组合表）。
 
 ## API Reference
 
@@ -272,7 +300,7 @@ If the work is too large for one task, break it into **decision tickets**. The u
 |--------|------|----------------|
 | Create group | `coagenthub_create_group` | `title` |
 | Add executor to group | `coagenthub_add_group_member` | `participantId`, `roles: ["executor"]` |
-| Dispatch task | `coagenthub_dispatch_task` | `body`, `specRef`, `specHash`, `executorName`, `goal`, `scope`, `acceptance`, `callback.sessionRef` |
+| Dispatch task | `coagenthub_dispatch_task` | `body`, `specRef`, `specHash`, `dispatchKind`, `executorName`, `goal`, `scope`, `acceptance`, `callback.sessionRef` |
 | Preview task ticket | `coagenthub_dispatch_task` | `planOnly: true` |
 | Check task status | `coagenthub_get_task` | `taskId` |
 | List all tasks | `coagenthub_list_tasks` | — |
@@ -285,6 +313,8 @@ If the work is too large for one task, break it into **decision tickets**. The u
 - **No vague acceptance**: "works correctly" is not a criterion. "API returns 200 with {status: ok}" is.
 - **One slice per task**: Don't bundle unrelated changes into one dispatch — split by cohesive focus (see Dispatch 纪律).
 - **specHash 验收钉子**: in-flight tasks are accepted against the specHash they were dispatched with, unaffected by later spec amendments.
+- **dispatchKind 不自判**: 「需求还是修复」由检视者分流决定（闸一）。把工作标成 `fix` 就免掉了 L3，而 L3 检的正是你这一环——自判等于自己给自己免检。
+- **修复必须能升级回需求**（闸二）: 若实现过程中发现必须越过冻结 spec 的边界，**它就不再是修复**——停止实现，退回检视者做 `spec_amended`，按新 specHash 重新下发。不得在「修复」名义下改动架构。
 - Verify before closing: Never mark a task done without checking the spec criteria.
 - **Close detached tasks first**: PATCH the reviewer's detached task done before continuing (see §4.4) — otherwise the reviewer waits on the timeout fallback.
 - Docs stay in sync: If code changes, check if ADR/architecture docs need updating.

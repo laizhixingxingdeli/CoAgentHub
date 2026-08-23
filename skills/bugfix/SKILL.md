@@ -15,7 +15,8 @@ Bug reports reach the **reviewer** first — the user-side single entry point. H
 
 | 旧职责 | 现在在哪 | 指引 |
 |--------|---------|------|
-| Triage / 需求分流（大需求 vs 小 bug） | **reviewer** skill — `### 2. Triage Requirements` | 小 bug：**不新增、不更新 spec**，直接请协调者下发修正任务（可引用相关既有 `specRef` 作为上下文）；仅当 bug/修复影响 spec 描述时才修订 spec（版本 +1，公布 `spec_amended`） |
+| Triage / 需求分流（大需求 vs 小 bug） | **reviewer** skill — `### 2. Triage Requirements` / `#### 2.1` | 小 bug：`dispatchKind: fix`，**不新增、不更新 spec**，直接请协调者下发修正任务（可引用相关既有 `specRef` 作为上下文）；仅当 bug/修复影响 spec 描述时才修订 spec（版本 +1，公布 `spec_amended`），**此时升级为 `requirement`** |
+| **修复越界 → 升级**（闸二，v4.0） | **reviewer** skill `#### 2.1` | 实现中发现必须越过冻结 spec 的边界 → **它不再是修复**：叫停，退回检视者做 `spec_amended`，以 `requirement` 和新 `specHash` 重新下发。**不得在「修复」名义下改动架构**——那正好绕开 L3 |
 | Diagnose / 定位根因 | **reviewer** skill 的分流职责（复现/定位纪律） | 根因定位纪律见 reviewer skill；协调者不再自行诊断 |
 | To-Fix-Spec → 方案描述 | **coordinator** skill — `### 2. Dispatch` | **不落 `specs/`**：方案描述直接进任务书 body；仍需 reviewer 冻结的 `specRef`（小 bug 引用相关既有 spec） |
 | Dispatch | **coordinator** skill — `### 2. Dispatch`（含 `2.1 Dispatch 纪律`、`2.2 限额处理`） | 按 `specRef` + `specHash` 下发，一票一个内聚关注点 |
