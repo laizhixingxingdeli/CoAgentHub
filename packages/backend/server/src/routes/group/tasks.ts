@@ -180,6 +180,8 @@ app
           // callback 路由信息(Part B):透传 opaque 路由 { platform?,
           // endpointRef?, sessionRef? };老任务为 null。
           callbackRef: true,
+          // 下发目标审计:按 task 可回查下发者、目标、候选状态与可选理由。
+          dispatchAudit: true,
           // 规范驱动下发:列表透出 specRef/specHash,UI 按 specRef 分组任务需要该
           // 字段(老任务为 null)。
           specRef: true,
@@ -275,6 +277,7 @@ app
         // callback 路由信息(Part B):透传 opaque 路由 { platform?,
         // endpointRef?, sessionRef? };老任务为 null。
         callbackRef: task.callbackRef ?? null,
+        dispatchAudit: task.dispatchAudit ?? null,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       };

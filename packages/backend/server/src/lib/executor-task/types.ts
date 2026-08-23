@@ -28,6 +28,8 @@ export interface DispatchExecutorInput {
   /** 任务下发会话(Part A):仅 coordinator/human 且非执行器发送者携带的
    *  metadata.dispatcherSessionId;否则为 null。绝不从 body 解析。 */
   dispatcherSessionId: string | null;
+  /** 调用方主动提供的目标选择理由;未提供时审计记录为 null。 */
+  selectionReason?: string | null;
   /** 规范驱动下发:任务携带的规范文档路径(如 `specs/login-v2.md`),任务书
    *  模板据此插入「关联规范」段;null = 指令驱动任务,行为与旧版一致。 */
   specRef: string | null;

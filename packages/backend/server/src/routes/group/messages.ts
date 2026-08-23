@@ -83,6 +83,9 @@ app
           metadata: z
             .object({
               dispatcherSessionId: z.string().max(200).optional(),
+              // 调用方可主动说明为什么选中该目标;平台只审计原文,绝不从
+              // task body 推断或补写理由。
+              selectionReason: z.string().min(1).max(500).optional(),
             })
             .optional(),
           // callback 路由信息(Part B):可选,仅允许 { platform?, endpointRef?,
@@ -296,6 +299,7 @@ app
         // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 且非纯执行器
         // 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
         const rawSessionId = metadata?.dispatcherSessionId;
+        const selectionReason = metadata?.selectionReason ?? null;
         const dispatcherSessionId =
           rawSessionId && canCarryDispatcher ? rawSessionId : null;
         // Part B:callback 路由信息 —— 三个字段均为可选、不超过 200 字符的非空
@@ -377,6 +381,7 @@ app
           body: body ?? "",
           dispatcherParticipantId: senderId,
           dispatcherSessionId: finalDispatcherSessionId,
+          selectionReason,
           specRef: specRef ?? null,
           specHash: specHash ?? null,
           callbackRef,

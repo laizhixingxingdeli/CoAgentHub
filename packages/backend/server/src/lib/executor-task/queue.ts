@@ -8,7 +8,9 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
+  type DispatchTargetAudit,
   type TaskAttempt,
+  taskDispatchWarning as taskDispatchWarningTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
@@ -348,6 +350,7 @@ export async function maybeDispatchExecutorTask(
     body,
     dispatcherParticipantId,
     dispatcherSessionId,
+    selectionReason,
     specRef,
     specHash,
     callbackRef,
@@ -402,6 +405,7 @@ export async function maybeDispatchExecutorTask(
     groupPrompt,
     dispatcherParticipantId,
     dispatcherSessionId,
+    selectionReason: selectionReason ?? null,
     specRef,
     specHash,
     callbackRef,
@@ -422,6 +426,8 @@ async function dispatchTask(
     dispatcherParticipantId: string;
     /** 任务下发会话(Part A):见 DispatchExecutorInput。 */
     dispatcherSessionId: string | null;
+    /** 调用方主动提供的目标选择理由;未提供时持久化为 null。 */
+    selectionReason: string | null;
     /** 规范驱动下发:规范文档路径(任务书「关联规范」段用);null = 指令驱动。 */
     specRef: string | null;
     /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
@@ -443,6 +449,7 @@ async function dispatchTask(
     groupPrompt,
     dispatcherParticipantId,
     dispatcherSessionId,
+    selectionReason,
     specRef,
     specHash,
     callbackRef,
@@ -463,6 +470,14 @@ async function dispatchTask(
     columns: { id: true },
   });
 
+  const dispatchAudit = await buildDispatchTargetAudit(
+    db,
+    groupId,
+    dispatcherParticipantId,
+    { id: participantId, name: ex.agentName },
+    selectionReason ?? null,
+  );
+
   const [created] = await db
     .insert(taskTable)
     .values({
@@ -482,6 +497,7 @@ async function dispatchTask(
       // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
       dispatcherParticipantId,
       dispatcherSessionId,
+      dispatchAudit,
       // callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
       // 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。
       callbackRef,
@@ -512,6 +528,14 @@ async function dispatchTask(
   } else {
     // 任务创建(queued)→ WS 推送:插件/前端免轮询感知任务入队。
     await notifyTaskStatusChanged(db, task.id, groupId, "queued", created);
+    if (dispatchAudit.selfDispatch) {
+      await createSelfDispatchWarnings(
+        db,
+        groupId,
+        task.id,
+        dispatcherParticipantId,
+      );
+    }
   }
 
   const summary = summaryOf(body);
@@ -628,6 +652,134 @@ async function dispatchTask(
     getClaimTimeoutMs(),
   );
   void pumpQueue();
+}
+
+/**
+ * Capture the server-observable target choice at dispatch time. Candidate
+ * means a different group member with executor role and a configured executor;
+ * the caller's reasoning is intentionally never inferred from message text.
+ */
+async function buildDispatchTargetAudit(
+  db: DataBase,
+  groupId: string,
+  dispatcherParticipantId: string,
+  target: { id: string; name: string },
+  selectionReason: string | null,
+): Promise<DispatchTargetAudit> {
+  const members = await db.query.groupMember.findMany({
+    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
+  });
+  const candidateMemberIds = members
+    .filter(
+      (member) =>
+        member.participantId !== dispatcherParticipantId &&
+        member.roles.includes("executor"),
+    )
+    .map((member) => member.participantId);
+  const participants = candidateMemberIds.length
+    ? await db.query.participant.findMany({
+        where: (t, { inArray: inArrayFn }) =>
+          inArrayFn(t.id, candidateMemberIds),
+      })
+    : [];
+  const configuredCandidates = (
+    await Promise.all(
+      participants.map(async (participant) => ({
+        participant,
+        executor: await findExecutorByParticipantName(db, participant.name),
+      })),
+    )
+  )
+    .filter(
+      (
+        entry,
+      ): entry is {
+        participant: (typeof participants)[number];
+        executor: ExecutorConfig;
+      } => entry.executor !== undefined,
+    )
+    .map((entry) => entry.participant)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const candidateIds = configuredCandidates.map(
+    (participant) => participant.id,
+  );
+  const candidateTasks = candidateIds.length
+    ? await db.query.task.findMany({
+        where: (t, { and: andFn, eq: eqFn, inArray: inArrayFn }) =>
+          andFn(
+            eqFn(t.groupId, groupId),
+            inArrayFn(t.executorParticipantId, candidateIds),
+          ),
+        columns: {
+          executorParticipantId: true,
+          status: true,
+          updatedAt: true,
+        },
+        orderBy: (t, { desc: descFn }) => [descFn(t.updatedAt)],
+      })
+    : [];
+  const tasksByCandidate = new Map<string, typeof candidateTasks>();
+  for (const task of candidateTasks) {
+    const tasks = tasksByCandidate.get(task.executorParticipantId) ?? [];
+    tasks.push(task);
+    tasksByCandidate.set(task.executorParticipantId, tasks);
+  }
+
+  return {
+    dispatcherParticipantId,
+    targetParticipantId: target.id,
+    targetParticipantName: target.name,
+    selfDispatch: dispatcherParticipantId === target.id,
+    candidates: configuredCandidates.map((participant) => {
+      const tasks = tasksByCandidate.get(participant.id) ?? [];
+      const latest = tasks[0];
+      return {
+        participantId: participant.id,
+        participantName: participant.name,
+        status: tasks.some((task) => task.status === "running")
+          ? "running"
+          : latest?.status === "failed"
+            ? "recently_failed"
+            : "available",
+      };
+    }),
+    selectionReason,
+  };
+}
+
+/** Persist and announce the self-dispatch warning without changing dispatch. */
+async function createSelfDispatchWarnings(
+  db: DataBase,
+  groupId: string,
+  taskId: string,
+  dispatcherParticipantId: string,
+): Promise<void> {
+  const members = await db.query.groupMember.findMany({
+    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
+    columns: { participantId: true, roles: true },
+  });
+  const reviewers = members
+    .filter((member) => member.roles.includes("reviewer"))
+    .map((member) => member.participantId);
+  // Two-layer groups have no reviewer; retain a warning in the dispatcher’s
+  // own inbox so the audit remains visible instead of silently disappearing.
+  const recipients =
+    reviewers.length > 0 ? reviewers : [dispatcherParticipantId];
+  await db
+    .insert(taskDispatchWarningTable)
+    .values(
+      recipients.map((recipientParticipantId) => ({
+        taskId,
+        groupId,
+        recipientParticipantId,
+      })),
+    )
+    .onConflictDoNothing();
+  await wsHub.broadcastTaskDispatchWarningAvailable(
+    groupId,
+    taskId,
+    recipients,
+  );
 }
 
 /** 取(或建)指定组键的组队列;组键插入顺序即组触达顺序(公平轮转)。 */

@@ -32,6 +32,20 @@ export const TASK_STATUSES = [
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
+/** 下发目标审计:服务器可观察的选择事实,调用方未提供理由时保持 null。 */
+export interface DispatchTargetAudit {
+  dispatcherParticipantId: string;
+  targetParticipantId: string;
+  targetParticipantName: string;
+  selfDispatch: boolean;
+  candidates: Array<{
+    participantId: string;
+    participantName: string;
+    status: "available" | "running" | "recently_failed";
+  }>;
+  selectionReason: string | null;
+}
+
 /** 单次执行尝试(attempt 时间线,任务执行历史)。 */
 export interface TaskAttempt {
   /** 尝试序号(1 起)。 */
@@ -106,6 +120,9 @@ export const task = pgTable(
     // 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。只读 —— 由
     // POST /messages 校验后写入,任务生命周期内不改。null = 无 callback。
     callbackRef: jsonb("callback_ref"),
+    // 下发目标审计:目标、下发者、自派标记与当时本群执行器候选状态持久化在
+    // task 上,以便按 task 事后回查;选择理由仅记录调用方明确提供的原文。
+    dispatchAudit: jsonb("dispatch_audit").$type<DispatchTargetAudit>(),
     ...timeColumns("both"),
   },
   // group_id 索引:GET /:id/tasks 按 group_id 过滤 + created_at 排序分页,

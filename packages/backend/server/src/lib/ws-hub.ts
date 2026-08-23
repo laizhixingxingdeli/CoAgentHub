@@ -297,6 +297,36 @@ export class WsHub {
         }),
     );
   }
+  /** Durable self-dispatch warnings use this as their low-latency inbox hint. */
+  async broadcastTaskDispatchWarningAvailable(
+    groupId: string,
+    taskId: string,
+    recipientParticipantIds: readonly string[],
+  ): Promise<void> {
+    if (recipientParticipantIds.length === 0 || this.conns.size === 0) return;
+    const event = JSON.stringify({
+      type: "task_dispatch_warning_available",
+      groupId,
+      taskId,
+    });
+    for (const participantId of recipientParticipantIds) {
+      const sockets = this.conns.get(participantId);
+      if (!sockets) continue;
+      for (const ws of sockets) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(event, (err) => {
+            if (err) {
+              console.warn(
+                `[ws] self-dispatch warning to participant ${participantId} failed:`,
+                err.message,
+              );
+            }
+          });
+        }
+      }
+    }
+  }
+
   /** 取群成员(短缓存):fanOut 高频调用时避免每条消息都查 group_members。 */
   private async getGroupMembers(
     groupId: string,
