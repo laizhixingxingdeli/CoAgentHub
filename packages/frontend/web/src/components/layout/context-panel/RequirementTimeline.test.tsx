@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatDurationMs,
   formatMessageTime,
@@ -74,6 +74,106 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     expect(card).toHaveClass("border");
     expect(screen.getByText("接好了任务面板的分组数据层")).toBeInTheDocument();
     expect(screen.getByText("补了组件测试")).toBeInTheDocument();
+  });
+
+  it("停止/回滚控制跟随任务卡片,历史任务仍可回滚", () => {
+    const onStop = vi.fn();
+    const onRollback = vi.fn();
+    const historicalTask = makeTask({
+      id: "historical-task",
+      status: "done",
+      checkpointRef: "refs/coagenthub-cp/historical-task",
+    });
+    const currentTask = makeTask({ id: "current-task", status: "running" });
+    render(
+      <RequirementTimeline
+        tasks={[historicalTask, currentTask]}
+        onStop={onStop}
+        onRollback={onRollback}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("task-rollback-historical-task"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("task-stop-current-task")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("task-rollback-historical-task"));
+    fireEvent.click(screen.getByTestId("task-stop-current-task"));
+    expect(onRollback).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "historical-task" }),
+    );
+    expect(onStop).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "current-task" }),
+    );
+  });
+
+  it("控制判定只允许 queued/running 停止,done/failed 且有 checkpoint 回滚", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({ id: "queued", status: "queued" }),
+          makeTask({ id: "done-with-checkpoint", checkpointRef: "checkpoint" }),
+          makeTask({
+            id: "failed-with-checkpoint",
+            status: "failed",
+            checkpointRef: "checkpoint",
+          }),
+          makeTask({ id: "done-without-checkpoint" }),
+          makeTask({ id: "cancelled", status: "cancelled" }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("task-stop-queued")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("task-rollback-done-with-checkpoint"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("task-rollback-failed-with-checkpoint"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("task-stop-done-without-checkpoint"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("task-rollback-done-without-checkpoint"),
+    ).toBeNull();
+    expect(screen.queryByTestId("task-stop-cancelled")).toBeNull();
+    expect(screen.queryByTestId("task-rollback-cancelled")).toBeNull();
+  });
+
+  it("控制按钮保留发送中/回滚中/已恢复态,并遵守权限与只读禁用提示", () => {
+    const { rerender } = render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({ id: "sending", status: "running" }),
+          makeTask({ id: "rolling", checkpointRef: "checkpoint" }),
+          makeTask({ id: "restored", checkpointRef: "checkpoint" }),
+        ]}
+        commandSending="sending"
+        rollbackStates={{ rolling: "rolling", restored: "done" }}
+      />,
+    );
+    expect(screen.getByTestId("task-stop-sending")).toHaveTextContent(
+      "发送中…",
+    );
+    expect(screen.getByTestId("task-rollback-rolling")).toHaveTextContent(
+      "回滚中…",
+    );
+    expect(screen.getByTestId("task-rollback-restored")).toHaveTextContent(
+      "已恢复",
+    );
+
+    rerender(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "read-only", status: "running" })]}
+        canControl={false}
+        readOnly
+      />,
+    );
+    const button = screen.getByTestId("task-stop-read-only");
+    expect(button).toBeDisabled();
+    expect(button.parentElement).toHaveAttribute("title", "群已归档,只读");
   });
 
   it("头像底色引用 --role-* token:executorKey 决定协调者/检视者/执行者色", () => {

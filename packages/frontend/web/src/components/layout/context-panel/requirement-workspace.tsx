@@ -12,7 +12,6 @@ import { groupTasksBySpec, type Requirement } from "./group-tasks-by-spec";
 import { mergeTaskStatusChanged } from "./merge-task-status";
 import RequirementDetailPanel from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
-import { RequirementControlBar } from "./requirement-control-bar";
 
 /**
  * 需求工作区(共享组件,UI-04b-2):从原 TasksTab 抽取,供「群内页主区」与右栏
@@ -31,7 +30,7 @@ import { RequirementControlBar } from "./requirement-control-bar";
  * 绑定身份也能看列表);「停止/回滚」需要 coordinator/human 身份 —— 以
  * 是否已绑定身份判断,未绑定时按钮禁用并提示。
  *
- * 主从两栏:有需求时渲染「左需求列表 + 右详情(含控制条)」;左列宽度由
+ * 主从两栏:有需求时渲染「左需求列表 + 右详情」;左列宽度由
  * listClassName 控制(右栏任务 Tab 空间小取窄列,主区按设计稿取宽列),
  * 右列自适应占剩余空间。无需求时回退 TaskPanel 扁平任务列表。
  */
@@ -361,7 +360,7 @@ export function RequirementWorkspace({
     };
   }, []);
 
-  // 当前选中的需求(用于右栏详情 + 控制条);选中项失效时回落到 null → 详情空态。
+  // 当前选中的需求(用于右栏详情);选中项失效时回落到 null → 详情空态。
   const selectedRequirement =
     requirements.find((r) => r.id === selectedRequirementId) ?? null;
 
@@ -373,24 +372,21 @@ export function RequirementWorkspace({
     }
   };
 
-  // 详情区块(控制条 + 详情面板):桌面两栏右列与窄视口详情页共用,避免重复。
+  // 详情区块:桌面两栏右列与窄视口详情页共用,避免重复。
   const detailPane = (
     <>
-      <RequirementControlBar
-        requirement={selectedRequirement}
-        canControl={canControl}
-        readOnly={readOnly}
-        commandSending={commandSending}
-        rollbackStates={rollbackStates}
-        onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
-        onRollback={(task) => void handleRollback(task)}
-      />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <RequirementDetailPanel
           requirement={selectedRequirement}
           messages={messages}
           members={members}
           liveOutputs={liveOutputs}
+          canControl={canControl}
+          readOnly={readOnly}
+          commandSending={commandSending}
+          rollbackStates={rollbackStates}
+          onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+          onRollback={(task) => void handleRollback(task)}
         />
       </div>
     </>
@@ -423,7 +419,7 @@ export function RequirementWorkspace({
           onRollback={(task) => void handleRollback(task)}
         />
       ) : isDesktop ? (
-        // 桌面(lg ≥1024px)两栏:左列表(master) + 右详情(detail,含控制条)。
+        // 桌面(lg ≥1024px)两栏:左列表(master) + 右详情(detail)。
         // 左列宽度由 listClassName 控制(右栏任务 Tab 取窄列,主区取宽列),
         // 右列自适应占剩余空间(R2:左栏设 min/max,详情区有最小宽度)。
         <div className="flex min-h-0 flex-1 gap-2">
@@ -435,7 +431,7 @@ export function RequirementWorkspace({
               onSelect={handleSelectRequirement}
             />
           </div>
-          {/* 右栏:控制条 + 详情(阶梯 + 时间线)。R2:详情区有最小宽度,
+          {/* 右栏:详情(阶梯 + 时间线)。R2:详情区有最小宽度,
               窄到低于该值时按断点退化为单栏(见上方 isDesktop)。 */}
           <div className="flex min-w-64 flex-1 flex-col">{detailPane}</div>
         </div>

@@ -21,7 +21,9 @@
 
 import { useMemo, useState } from "react";
 import { LiveOutput } from "@/components/live-output";
+import { t } from "@/lib/i18n";
 import { lastNonEmptyLine } from "@/lib/output-buffer";
+import { ControlButton } from "@/pages/app/groups/messages/control-button";
 import {
   formatDuration,
   formatMessageTime,
@@ -144,6 +146,16 @@ type RequirementTimelineProps = {
    * 取最后非空行预览,展开态显示全量输出;缺省为空 → 回落
    * diffSummary.outputTail(与 TaskPanel 的取值优先级一致)。 */
   liveOutputs?: Record<string, string>;
+  /** 是否有 coordinator/human 权限:false 时停止/回滚禁用。 */
+  canControl?: boolean;
+  /** 归档/软删群只读:即使有控制权限,停止/回滚也禁用并提示。 */
+  readOnly?: boolean;
+  /** 正在发送命令的任务 id(null = 空闲),驱动按钮的「发送中…」。 */
+  commandSending?: string | null;
+  /** 回滚状态(taskId → rolling=回滚中… | done=已恢复)。 */
+  rollbackStates?: Record<string, "rolling" | "done">;
+  onStop?: (task: TaskItem) => void;
+  onRollback?: (task: TaskItem) => void;
 };
 
 export default function RequirementTimeline({
@@ -151,6 +163,12 @@ export default function RequirementTimeline({
   messages = [],
   members = [],
   liveOutputs = {},
+  canControl = true,
+  readOnly = false,
+  commandSending = null,
+  rollbackStates = {},
+  onStop = () => undefined,
+  onRollback = () => undefined,
 }: RequirementTimelineProps) {
   // 展开的卡片 id 集合(长内容折叠;多张卡片可同时展开)。
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(
@@ -331,6 +349,16 @@ export default function RequirementTimeline({
       terminal ? task.updatedAt : null,
       now,
     );
+    const busy = commandSending === task.id;
+    // 与 TaskPanel 同款判定:queued/running 可停止;done/failed 且带 checkpoint
+    // 可回滚。历史任务也在时间线卡片中保留这套能力。
+    const canStop = task.status === "queued" || task.status === "running";
+    const canRollback =
+      (task.status === "done" || task.status === "failed") &&
+      Boolean(task.checkpointRef);
+    const rollbackState = rollbackStates[task.id];
+    const rolling = rollbackState === "rolling";
+    const rollbackDone = rollbackState === "done";
     return (
       <li
         key={task.id}
@@ -466,6 +494,43 @@ export default function RequirementTimeline({
                 </p>
               )}
               {outputText && <LiveOutput text={outputText} />}
+            </div>
+          )}
+          {(canStop || canRollback) && (
+            <div
+              data-testid={`requirement-timeline-controls-${task.id}`}
+              className="mt-2 flex justify-end gap-1.5"
+            >
+              {canStop && (
+                <ControlButton
+                  size="sm"
+                  variant="outline"
+                  data-testid={`task-stop-${task.id}`}
+                  disabled={busy}
+                  canControl={canControl}
+                  readOnly={readOnly}
+                  onClick={() => onStop(task)}
+                >
+                  {busy ? t("common.sending") : t("tasks.stop")}
+                </ControlButton>
+              )}
+              {canRollback && (
+                <ControlButton
+                  size="sm"
+                  variant="outline"
+                  data-testid={`task-rollback-${task.id}`}
+                  disabled={busy || rolling || rollbackDone}
+                  canControl={canControl}
+                  readOnly={readOnly}
+                  onClick={() => onRollback(task)}
+                >
+                  {rolling
+                    ? t("tasks.rollbacking")
+                    : rollbackDone
+                      ? t("tasks.rollbackDone")
+                      : t("tasks.rollback")}
+                </ControlButton>
+              )}
             </div>
           )}
         </div>

@@ -1,5 +1,5 @@
 /**
- * 停止/回滚控制按钮(共享):被 TaskPanel 与需求详情控制条(RequirementControlBar)
+ * 停止/回滚控制按钮(共享):被 TaskPanel 与需求时间线任务卡片
  * 复用,避免两段相同的按钮 UI + 禁用/提示逻辑。无权限或归档只读时禁用并给出
  * 提示。title 挂在包裹 span 上 —— disabled 按钮自身不触发 title 悬浮提示。
  */

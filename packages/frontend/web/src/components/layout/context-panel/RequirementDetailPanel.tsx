@@ -45,6 +45,12 @@ type RequirementDetailPanelProps = {
   /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接),透传给时间线;
    * running 任务折叠态预览最后非空行、展开态显示全量输出。 */
   liveOutputs?: Record<string, string>;
+  canControl?: boolean;
+  readOnly?: boolean;
+  commandSending?: string | null;
+  rollbackStates?: Record<string, "rolling" | "done">;
+  onStop?: (task: Requirement["tasks"][number]) => void;
+  onRollback?: (task: Requirement["tasks"][number]) => void;
 };
 
 /** 层状态:阶梯四态之外,两层模式下的 L3 用「不适用」。 */
@@ -371,6 +377,12 @@ export default function RequirementDetailPanel({
   messages,
   members,
   liveOutputs = {},
+  canControl = true,
+  readOnly = false,
+  commandSending = null,
+  rollbackStates = {},
+  onStop,
+  onRollback,
 }: RequirementDetailPanelProps) {
   const [expandedLayers, setExpandedLayers] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -540,6 +552,12 @@ export default function RequirementDetailPanel({
           messages={messages}
           members={members}
           liveOutputs={liveOutputs}
+          canControl={canControl}
+          readOnly={readOnly}
+          commandSending={commandSending}
+          rollbackStates={rollbackStates}
+          onStop={onStop}
+          onRollback={onRollback}
         />
       </section>
     </div>

@@ -18,7 +18,7 @@ import { RequirementWorkspace } from "./requirement-workspace";
 /**
  * RequirementWorkspace 响应式布局测试(requirement-pane-responsive):
  * - 窄视口(<1024px):单栏 —— 列表 / 详情二选一,点击行进详情,返回键回列表;
- * - 桌面(≥1024px):两栏 —— 列表与详情(含控制条)同时可见。
+ * - 桌面(≥1024px):两栏 —— 列表与详情同时可见。
  * 断点判定走 useIsDesktop(读 window.innerWidth ≥ 1024),测试通过覆盖
  * window.innerWidth 模拟视口宽度;matchMedia 由 setup.ts 提供桩。
  */
@@ -111,12 +111,15 @@ describe("RequirementWorkspace 响应式布局", () => {
       screen.queryByTestId("requirement-detail-panel"),
     ).not.toBeInTheDocument();
 
-    // 点击「需求A」行 → 切到详情(含控制条),列表隐藏。
+    // 点击「需求A」行 → 切到详情,列表隐藏。
     fireEvent.click(screen.getByTestId("requirement-row-specs/a.md"));
     expect(
       await screen.findByTestId("requirement-detail-panel"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("task-stop-task-a")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-control-bar"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("requirement-list")).not.toBeInTheDocument();
 
     // 返回键 → 回到列表,详情隐藏。
@@ -144,7 +147,7 @@ describe("RequirementWorkspace 响应式布局", () => {
     expect(screen.queryByText("需求A")).not.toBeInTheDocument();
   });
 
-  it("桌面(≥1024px)两栏:列表与详情(含控制条)同时可见", async () => {
+  it("桌面(≥1024px)两栏:列表与详情同时可见", async () => {
     setViewport(1280);
     renderWorkspace(TWO_REQUIREMENTS);
 
@@ -152,8 +155,16 @@ describe("RequirementWorkspace 响应式布局", () => {
     expect(
       await screen.findByTestId("requirement-detail-panel"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("task-stop-task-b")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-control-bar"),
+    ).not.toBeInTheDocument();
     // 两栏模式下默认选中最新需求(需求B),列表行仍可见;详情区标题同为 B。
+    const requirementList = screen.getByTestId("requirement-list");
+    expect(requirementList).toBeInTheDocument();
+    expect(
+      within(requirementList).queryByTestId(/task-(stop|rollback)-/),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("requirement-row-specs/a.md"),
     ).toBeInTheDocument();
