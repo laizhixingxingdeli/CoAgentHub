@@ -1,6 +1,6 @@
 # Spec: 一次失败的启动尝试会摧毁健康实例的任务状态
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **严重性**: 高 —— 它会伪装成 `server-restart`,掩盖真实原因
@@ -90,3 +90,21 @@
 - 后端以 `pnpm --filter server start`(无 watch)在 3001 运行中
 - **复现方式**:后端跑着时再启一个实例,观察 DB 里 running 任务是否被标 failed
   —— ⚠️ **不要在有真实在途任务时复现**,会破坏协调链路。用测试或空闲时段验证
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `ce05c53`。
+
+- **实测验证**(不只是读代码):把一条任务改回 `running` → 启第二个实例 →
+  实例 `Exit status 1`(端口占用)→ **那条任务仍是 running,未被摧毁**。修复前会被标 failed。
+- 抽出 `lib/server-startup.ts`,顺序改为 `listen()` 成功后才 `recoverInterruptedTasks()`,
+  符合 R1
+- 端口占用报错含端口号(`server-startup.ts:56`),符合 R2
+- `recoverInterruptedTasks` 判定范围**未改动**(`git diff` 对 queue.ts 为空),符合 R3
+- 带独立测试文件 `server-startup.test.ts`
+
+**跳过 L2 说明**:协调者进程在 13:45 启动后无产出即退出(23 分钟内零提交、零群消息、
+未 PATCH),L2 未完成。经用户裁决跳过 L2,由检视者直接 L3。

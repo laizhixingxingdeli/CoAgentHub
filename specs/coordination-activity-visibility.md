@@ -1,6 +1,6 @@
 # Spec: 平台看不出协调者是否真的协调过
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **关系**: `specs/dispatch-target-audit.md`(`5f07d8e`)覆盖「派给了自己」;
@@ -119,3 +119,25 @@ detached 协调任务转终态(PATCH)时,记录该任务生命周期内的可观
 - ⚠️ **测试基线**:`test/dispatcher-fields.test.ts` 的 afterAll 钩子超时导致
   `pnpm --filter server test` **退出码为 1**(用例本身全过)。
   另有票 `2268564` 在修。判断基线看**用例数**,不要看退出码
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `d66d4ff`。
+
+- 零子任务警告在 `routes/group/tasks.ts:437`,**在任务已落终态之后**触发,
+  且整段包在 try/catch 里(注释:`task remains terminal`)——审计失败不影响任务终态,
+  符合「警告不拒绝」
+- 子任务数经 `parentTaskId` 反查(`coordination-activity.ts:61`),用的是 `6cfc84e`
+  落地的那条边
+- **复用** `a780e50` 的 `task-dispatch-warnings` 通道,无新表、无新迁移,符合 R4
+- **未做工作区/提交归因**(`coordination-activity.ts` 内无 git 相关调用),符合 R3
+- 带独立测试文件 `coordination-activity.test.ts`
+
+**跳过 L2 说明**:同 `startup-recovery-order`。
+
+**一处观察**:本票的机制只在协调任务**落终态时**触发。而本轮实际发生的是
+协调任务**永远到不了终态**(进程死了没人 PATCH),该机制照不亮这种情况——
+已另立 detached 任务存活探测的需求,见群内说明。
