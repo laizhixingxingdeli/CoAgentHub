@@ -1,6 +1,6 @@
 # Spec: 任务标 failed 却没有原因
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L1/L2/L3 均通过(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 
@@ -85,3 +85,14 @@ diff_summary->>'error':  (无)
 - 本仓是 **pnpm** 项目
 - 后端以 `pnpm --filter server start`(无 watch)运行:改完需 build + restart
 - ⚠️ **重启前确认无在途任务**
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `00ae648`。
+
+检视者**实测**:不带原因 PATCH 到 failed → `INVALID_REQUEST「status=failed 必须在 diffSummary.error 中提供失败原因」`;带原因 → 接受(测完已还原状态)。
+
+R1 的硬约束核对通过:`recoverInterruptedTasks` 是**直写 DB**(`queue.ts:211` `.update().set()`),不经 PATCH,**内部失败路径不会被新校验误伤**。`cancelled` 与 `failed` 同等要求。server 436/436。

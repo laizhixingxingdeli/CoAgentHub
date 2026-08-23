@@ -1,6 +1,6 @@
 # Spec: 静默降级要有可见信号
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L1/L2/L3 均通过(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 
@@ -92,3 +92,12 @@
 - 本仓是 **pnpm** 项目
 - 后端以 `pnpm --filter server start`(无 watch)运行中:改完需手动 build + restart
 - 沙箱执行器注意:需监听本地端口的测试会报 `listen EPERM`,那是环境限制不是回归
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,实现在 `6cfc84e`(含 `docs/architecture.md §9.10`),测试补充在 `704d342`。
+
+⚠️ `6cfc84e` 现已知装了**五张票**(`task-parent-link` / `verify-agent-claims` / `coordination-payload-contract` / `task-execution-context` / 本票)。这是「一票一提交」(`fc04c89`)成为硬约束前的产物;五票合一时其中的迁移遗漏直接导致 `/tasks` 全线 500,而没有任何单票边界能帮助定位。历史不追溯拆分,此处记录真实落地位置。
