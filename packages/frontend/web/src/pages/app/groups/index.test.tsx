@@ -970,7 +970,7 @@ describe("GroupsPage 窄屏适配 (ticket 34)", () => {
     ).toHaveTextContent("任务运行中");
     expect(
       within(activeRow).getByTestId("group-mode-group-1"),
-    ).toHaveTextContent("协调者");
+    ).toHaveTextContent("三方");
     expect(
       within(activeRow).getByRole("button", { name: "成员管理" }),
     ).toBeInTheDocument();

@@ -1,6 +1,7 @@
 import { Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
+import { GroupCompositionBadge } from "@/components/group-composition-badge";
 import {
   SidebarGroup,
   SidebarGroupLabel,
@@ -15,7 +16,6 @@ import {
 } from "@/hooks/use-unread";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
-import { RoleBadge } from "@/pages/app/groups/messages/types";
 
 /** Active-group row shape from GET /api/groups?status=active (ticket 23). */
 type ConversationItem = {
@@ -139,12 +139,11 @@ export function ConversationList() {
                           <span className="truncate text-sm">
                             {group.title}
                           </span>
-                          {group.memberRoles?.includes("reviewer") &&
-                            group.memberRoles.includes("coordinator") && (
-                              <span className="shrink-0" title="三层协作">
-                                <RoleBadge role="reviewer" />
-                              </span>
-                            )}
+                          {group.memberRoles && (
+                            <GroupCompositionBadge
+                              memberRoles={group.memberRoles}
+                            />
+                          )}
                         </span>
                         <span className="flex items-center justify-between gap-2">
                           <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">

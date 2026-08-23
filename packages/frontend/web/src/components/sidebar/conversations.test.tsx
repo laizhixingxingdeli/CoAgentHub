@@ -33,6 +33,7 @@ const GROUPS = [
     title: "评审任务",
     status: "active",
     memberCount: 3,
+    memberRoles: ["coordinator", "reviewer"],
     createdAt: "2026-08-01T00:00:00.000Z",
   },
   {
@@ -40,6 +41,7 @@ const GROUPS = [
     title: "部署上线",
     status: "active",
     memberCount: 2,
+    memberRoles: ["coordinator", "executor"],
     createdAt: "2026-08-02T00:00:00.000Z",
   },
 ];
@@ -89,6 +91,37 @@ describe("ConversationList (ticket 23)", () => {
     expect(screen.getByText("部署上线")).toBeInTheDocument();
     // No message seen yet for either group.
     expect(screen.getAllByText("暂无消息")).toHaveLength(2);
+  });
+
+  it("shows the participant composition for both two-party and three-party groups", async () => {
+    vi.stubGlobal("fetch", conversationFetchMock());
+
+    renderConversations();
+
+    expect(await screen.findByLabelText("三方编制")).toHaveAttribute(
+      "title",
+      "三方编制",
+    );
+    const twoPartyBadge = screen.getByLabelText("两方编制");
+    expect(twoPartyBadge).toHaveAttribute("title", "两方编制");
+    expect(twoPartyBadge).toHaveAttribute("data-composition", "two-party");
+    expect(twoPartyBadge.className).toContain("text-muted-foreground");
+  });
+
+  it("keeps the composition badge from shrinking beside a long group name", async () => {
+    const longNameGroup = [
+      {
+        ...GROUPS[0],
+        title: "这是一个很长很长很长很长的群组名称",
+      },
+    ];
+    vi.stubGlobal("fetch", conversationFetchMock(longNameGroup));
+
+    renderConversations();
+
+    const badge = await screen.findByLabelText("三方编制");
+    expect(badge.className).toContain("shrink-0");
+    expect(badge.className).toContain("whitespace-nowrap");
   });
 
   it("shows 还没有群组 for an empty list", async () => {

@@ -9,12 +9,12 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { GroupCompositionBadge } from "@/components/group-composition-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useGroupsPage } from "@/hooks/use-groups-page";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { RoleBadge } from "./messages/types";
 
 /**
  * Group list page (ticket 02): shows all groups with task state signals,
@@ -357,18 +357,9 @@ export default function GroupsPage() {
                           data-testid={`group-mode-${group.id}`}
                           className="inline-flex items-center gap-1"
                         >
-                          {group.memberRoles.includes("reviewer") &&
-                          group.memberRoles.includes("coordinator") ? (
-                            <>
-                              <RoleBadge role="coordinator" />
-                              <RoleBadge role="reviewer" />
-                              <span className="sr-only">三层协作</span>
-                            </>
-                          ) : (
-                            <span className="rounded-full border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
-                              两层协作
-                            </span>
-                          )}
+                          <GroupCompositionBadge
+                            memberRoles={group.memberRoles}
+                          />
                         </span>
                       )}
                       {previewFor(group) && (
