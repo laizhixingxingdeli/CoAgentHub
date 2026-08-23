@@ -1128,7 +1128,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               columns: { status: true },
             });
             // 已回写终态(如 detached 超时先行)→ 不覆盖。
-            if (!cur || cur.status !== "running") return;
+            if (cur?.status !== "running") return;
             const hint = executorStartupFailureHint(ex.bin, msg);
             await failTask(
               db,
@@ -1587,7 +1587,7 @@ function handleDetachedTimeout(run: QueuedRun): void {
           andFn(eqFn(t.id, run.taskId), eqFn(t.groupId, run.groupId)),
         columns: { status: true },
       });
-      if (!cur || cur.status !== "running") {
+      if (cur?.status !== "running") {
         // 执行器已 PATCH 回写终态(或已停止):结果已确认/已取消,不再覆盖。
         return;
       }
