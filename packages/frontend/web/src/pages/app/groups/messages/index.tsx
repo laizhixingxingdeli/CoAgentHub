@@ -213,7 +213,12 @@ function GroupSettingsDrawer({
         className="relative z-10 flex h-full w-full max-w-[480px] flex-col overflow-y-auto border-l bg-background shadow-2xl sm:w-[480px]"
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b bg-background/95 px-4 py-3 backdrop-blur">
-          <h2 className="text-base font-semibold">群设置</h2>
+          <div>
+            <h2 className="text-base font-semibold">群设置</h2>
+            <p className="text-sm text-muted-foreground">
+              {t("members.subtitle")}
+            </p>
+          </div>
           <button
             type="button"
             data-testid="close-group-settings"

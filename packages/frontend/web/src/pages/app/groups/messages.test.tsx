@@ -82,6 +82,9 @@ describe("群页面布局", () => {
     expect(
       await screen.findByTestId("group-settings-drawer"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("管理基本信息、项目绑定,以及成员与分工"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("requirement-workspace")).toBeInTheDocument();
     // The in-memory router used by renderWithProviders does not mirror
     // window.location; the still-mounted workspace is the navigation guard.
