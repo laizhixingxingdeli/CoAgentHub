@@ -100,6 +100,77 @@ describe("协作载荷 API 契约", () => {
     }
   });
 
+  it("仅在 reviewer 群提示缺 specHash,未传 callback 不产生剥离提示", async () => {
+    const owner = await register(`warning-scope-owner-${randomUUID()}`);
+    const target = await register("CodeBuddy 执行器");
+    const reviewer = await register(`warning-scope-reviewer-${randomUUID()}`);
+
+    const createGroup = (title: string) =>
+      app.request("/api/groups", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": owner.id,
+        },
+        body: JSON.stringify({ title }),
+      });
+    const addMember = (
+      groupId: string,
+      participantId: string,
+      roles: string[],
+    ) =>
+      app.request(`/api/groups/${groupId}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": owner.id,
+        },
+        body: JSON.stringify({ participantId, roles }),
+      });
+    const postTask = (groupId: string) =>
+      app.request(`/api/groups/${groupId}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": owner.id,
+        },
+        body: JSON.stringify({
+          body: "没有 callback 的指令驱动任务",
+          audience: "participant",
+          audienceRef: target.id,
+        }),
+      });
+
+    const noReviewerGroup = (await (
+      await createGroup("无 reviewer 信号范围")
+    ).json()) as {
+      id: string;
+    };
+    expect(
+      (await addMember(noReviewerGroup.id, target.id, ["executor"])).status,
+    ).toBe(200);
+    const noReviewerResponse = await postTask(noReviewerGroup.id);
+    expect(noReviewerResponse.status).toBe(200);
+    expect(noReviewerResponse.headers.get("X-CoAgentHub-Warning")).toBeNull();
+
+    const reviewerGroup = (await (
+      await createGroup("有 reviewer 信号范围")
+    ).json()) as {
+      id: string;
+    };
+    expect(
+      (await addMember(reviewerGroup.id, target.id, ["executor"])).status,
+    ).toBe(200);
+    expect(
+      (await addMember(reviewerGroup.id, reviewer.id, ["reviewer"])).status,
+    ).toBe(200);
+    const reviewerResponse = await postTask(reviewerGroup.id);
+    expect(reviewerResponse.status).toBe(200);
+    expect(reviewerResponse.headers.get("X-CoAgentHub-Warning")).toBe(
+      "SPEC_HASH_MISSING",
+    );
+  });
+
   it("群消息校验已知 type,但放行自由文本与未知 type", async () => {
     const { coordinator, group } = await setup();
     const post = (body: string) =>
