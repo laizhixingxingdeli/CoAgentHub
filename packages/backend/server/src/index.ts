@@ -6,7 +6,6 @@ initSentry();
 import "zod-openapi/extend";
 
 import type { Server as HttpServer } from "node:http";
-import { serve } from "@hono/node-server";
 import { sentry } from "@hono/sentry";
 import BizError from "@laizhixingxingdeli/error/biz";
 
@@ -26,6 +25,7 @@ import { recoverInterruptedTasks } from "./lib/executor-task";
 import { ensureExecutorParticipants } from "./lib/executors";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
+import { startServer } from "./lib/server-startup";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
 import { loggerMiddleware } from "./middleware/logger";
@@ -151,28 +151,20 @@ async function run() {
   // read-only check; applying migrations remains an explicit operator action.
   await assertNoPendingMigrations(db);
 
-  // On restart, mark queued/running executor tasks as failed (the queue is
-  // in-memory; persistence only exists as a failure backstop).
-  try {
-    await recoverInterruptedTasks(db);
-  } catch (err) {
-    console.warn("[executor] task recovery failed, continuing startup:", err);
-  }
-
-  // 桥已退役:server 是唯一调度器——开机时把执行器配置(含 hermes)对应的
-  // participant 幂等注册进 participant 表。
-  try {
-    await ensureExecutorParticipants(db);
-  } catch (err) {
-    console.warn(
-      "[executor] participant auto-registration failed, continuing:",
-      err,
-    );
-  }
-
-  const server = serve({ fetch: app.fetch, port }, ({ address, port: p }) => {
-    console.log(`server listening on ${address}:${p}`);
-    showRoutes(app);
+  // Bind first. Recovery and executor participant registration write to the
+  // database, so they must only run after this process owns the port.
+  const server = await startServer({
+    fetch: app.fetch,
+    port,
+    recoverInterruptedTasks: () => recoverInterruptedTasks(db),
+    ensureExecutorParticipants: () => ensureExecutorParticipants(db),
+    onListening: (listeningServer, listeningPort) => {
+      const address = listeningServer.address();
+      console.log(
+        `server listening on ${typeof address === "string" ? address : address?.address}:${listeningPort}`,
+      );
+      showRoutes(app);
+    },
   });
 
   // Realtime push: attach the WS hub to the same HTTP server so /api/ws
