@@ -353,6 +353,7 @@ export async function maybeDispatchExecutorTask(
     selectionReason,
     specRef,
     specHash,
+    dispatchKind,
     callbackRef,
   } = input;
 
@@ -407,6 +408,7 @@ export async function maybeDispatchExecutorTask(
     selectionReason: selectionReason ?? null,
     specRef,
     specHash,
+    dispatchKind,
     callbackRef,
   });
 }
@@ -431,6 +433,8 @@ async function dispatchTask(
     specRef: string | null;
     /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
     specHash: string | null;
+    /** 规范驱动下发类型:需求票或修复票;null = 指令驱动任务。 */
+    dispatchKind: "requirement" | "fix" | null;
     /** callback 路由信息(Part B):见 DispatchExecutorInput。 */
     callbackRef: {
       platform?: string;
@@ -451,6 +455,7 @@ async function dispatchTask(
     selectionReason,
     specRef,
     specHash,
+    dispatchKind,
     callbackRef,
   } = opts;
 
@@ -492,6 +497,7 @@ async function dispatchTask(
       // 详情/WS 事件透传的数据源;null = 指令驱动任务)。
       specRef,
       specHash,
+      dispatchKind,
       // 任务下发者信息(Part A):sender + 会话 id(仅 coordinator/human 非执行器
       // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
       dispatcherParticipantId,

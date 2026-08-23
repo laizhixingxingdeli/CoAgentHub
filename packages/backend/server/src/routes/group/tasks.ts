@@ -127,6 +127,29 @@ app
       const existing = await db.query.task.findFirst({
         where: (t, { eq }) => eq(t.messageId, messageId),
       });
+      if (!existing) {
+        throw new BizError(
+          BizCodeEnum.Conflict,
+          "Task for messageId already exists but could not be reloaded",
+        );
+      }
+      const conflicts = [
+        specRef !== undefined && specRef !== existing.specRef
+          ? "specRef"
+          : null,
+        specHash !== undefined && specHash !== existing.specHash
+          ? "specHash"
+          : null,
+        dispatchKind !== undefined && dispatchKind !== existing.dispatchKind
+          ? "dispatchKind"
+          : null,
+      ].filter((field): field is string => field !== null);
+      if (conflicts.length > 0) {
+        throw new BizError(
+          BizCodeEnum.Conflict,
+          `Task for messageId already exists with conflicting fields: ${conflicts.join(", ")}`,
+        );
+      }
       return c.json(existing);
     },
   )

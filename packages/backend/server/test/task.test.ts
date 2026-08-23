@@ -146,6 +146,78 @@ describe("任务实体(server 单一状态源)", () => {
     expect(t2.messageId).toBe(messageId);
   });
 
+  it("同 message_id 携带不同规范字段时返回 409 并列出冲突字段", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const messageId = "00000000-0000-7000-8000-000000000007";
+
+    const first = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: execA.id,
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    const conflicting = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: execA.id,
+        specRef: "specs/dispatch-fields-silent-loss.md",
+        specHash: "987f54a",
+        dispatchKind: "requirement",
+      }),
+    });
+    expect(conflicting.status).toBe(409);
+    const error = (await conflicting.json()) as { message: string };
+    expect(error.message).toContain("specRef");
+    expect(error.message).toContain("specHash");
+    expect(error.message).toContain("dispatchKind");
+  });
+
+  it("同 message_id 携带与既有任务一致的规范字段时仍幂等放行", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const messageId = "00000000-0000-7000-8000-000000000008";
+    const fields = {
+      messageId,
+      executorParticipantId: execA.id,
+      specRef: "specs/dispatch-fields-silent-loss.md",
+      specHash: "987f54a",
+      dispatchKind: "requirement",
+    } as const;
+
+    const first = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify(fields),
+    });
+    expect(first.status).toBe(200);
+    const original = (await first.json()) as { id: string };
+
+    const repeated = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify(fields),
+    });
+    expect(repeated.status).toBe(200);
+    expect(((await repeated.json()) as { id: string }).id).toBe(original.id);
+  });
+
   it("POST 接受 requirement 与 fix 并落库", async () => {
     const { coordinator, execA, group } = await setupGroup();
 

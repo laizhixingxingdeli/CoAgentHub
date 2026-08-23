@@ -35,6 +35,8 @@ export interface DispatchExecutorInput {
   specRef: string | null;
   /** 规范文档的 Git Hash(版本快照,审计用);无版本哈希时为 null。 */
   specHash: string | null;
+  /** 规范驱动下发类型:需求票或修复票;null = 指令驱动任务。 */
+  dispatchKind: "requirement" | "fix" | null;
   /** callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
    *  三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。 */
   callbackRef: {

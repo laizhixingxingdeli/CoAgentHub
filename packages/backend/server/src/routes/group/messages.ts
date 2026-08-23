@@ -77,6 +77,7 @@ app
           // 「关联规范」段;不传 = 指令驱动任务,行为与旧版完全一致。
           specRef: z.string().max(500).optional(),
           specHash: z.string().max(64).optional(),
+          dispatchKind: z.enum(["requirement", "fix"]).optional(),
           // 任务下发者信息(Part A):只读取 metadata.dispatcherSessionId(≤200),
           // 其他 metadata 字段忽略,不影响任务创建;超长拒绝(400)。是否写入
           // 任务行由 handler 按发送者角色/身份判定(见下),此处只做格式约束。
@@ -127,6 +128,7 @@ app
         metadata,
         specRef,
         specHash,
+        dispatchKind,
         callback,
       } = c.req.valid("json");
 
@@ -286,15 +288,7 @@ app
           warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
         }
         if (isExecutorTarget && !specHash?.trim()) {
-          const groupMembers = await db.query.groupMember.findMany({
-            where: (t, { eq }) => eq(t.groupId, id),
-            columns: { roles: true },
-          });
-          if (
-            groupMembers.some((member) => member.roles.includes("reviewer"))
-          ) {
-            warnings.push("SPEC_HASH_MISSING");
-          }
+          warnings.push("SPEC_HASH_MISSING");
         }
         // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 且非纯执行器
         // 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
@@ -384,6 +378,7 @@ app
           selectionReason,
           specRef: specRef ?? null,
           specHash: specHash ?? null,
+          dispatchKind: dispatchKind ?? null,
           callbackRef,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
         if (warnings.length > 0) {

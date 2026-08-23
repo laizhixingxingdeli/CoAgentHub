@@ -100,7 +100,7 @@ describe("协作载荷 API 契约", () => {
     }
   });
 
-  it("仅在 reviewer 群提示缺 specHash,未传 callback 不产生剥离提示", async () => {
+  it("两方与三方编制都提示缺 specHash,未传 callback 不产生剥离提示", async () => {
     const owner = await register(`warning-scope-owner-${randomUUID()}`);
     const target = await register("CodeBuddy 执行器");
     const reviewer = await register(`warning-scope-reviewer-${randomUUID()}`);
@@ -151,7 +151,9 @@ describe("协作载荷 API 契约", () => {
     ).toBe(200);
     const noReviewerResponse = await postTask(noReviewerGroup.id);
     expect(noReviewerResponse.status).toBe(200);
-    expect(noReviewerResponse.headers.get("X-CoAgentHub-Warning")).toBeNull();
+    expect(noReviewerResponse.headers.get("X-CoAgentHub-Warning")).toBe(
+      "SPEC_HASH_MISSING",
+    );
 
     const reviewerGroup = (await (
       await createGroup("有 reviewer 信号范围")
@@ -169,6 +171,138 @@ describe("协作载荷 API 契约", () => {
     expect(reviewerResponse.headers.get("X-CoAgentHub-Warning")).toBe(
       "SPEC_HASH_MISSING",
     );
+  });
+
+  it("消息自动派发路径落库 dispatchKind 与规范字段", async () => {
+    const owner = await register(`dispatch-kind-owner-${randomUUID()}`);
+    const target = await register("CodeBuddy 执行器");
+    const groupResponse = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ title: "消息自动派发规范字段" }),
+    });
+    const group = (await groupResponse.json()) as { id: string };
+    const add = await app.request(`/api/groups/${group.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ participantId: target.id, roles: ["executor"] }),
+    });
+    expect(add.status).toBe(200);
+
+    const message = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({
+        body: "带规范字段的自动派发",
+        audience: "participant",
+        audienceRef: target.id,
+        specRef: "specs/dispatch-fields-silent-loss.md",
+        specHash: "987f54a",
+        dispatchKind: "requirement",
+      }),
+    });
+    expect(message.status).toBe(200);
+    const { id: messageId } = (await message.json()) as { id: string };
+
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const tasksResponse = await app.request(`/api/groups/${group.id}/tasks`);
+      const tasks = (await tasksResponse.json()) as Array<{
+        messageId: string;
+        specRef: string | null;
+        specHash: string | null;
+        dispatchKind: string | null;
+      }>;
+      const task = tasks.find((entry) => entry.messageId === messageId);
+      if (task) {
+        expect(task.specRef).toBe("specs/dispatch-fields-silent-loss.md");
+        expect(task.specHash).toBe("987f54a");
+        expect(task.dispatchKind).toBe("requirement");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("消息自动派发任务未在预期时间内创建");
+  });
+
+  it("R5:自动派发已建空字段任务后显式补字段返回 409", async () => {
+    const owner = await register(`silent-loss-owner-${randomUUID()}`);
+    const target = await register("CodeBuddy 执行器");
+    const groupResponse = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ title: "验收钉子冲突" }),
+    });
+    const group = (await groupResponse.json()) as { id: string };
+    const add = await app.request(`/api/groups/${group.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ participantId: target.id, roles: ["executor"] }),
+    });
+    expect(add.status).toBe(200);
+
+    const message = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({
+        body: "先发消息再补任务字段",
+        audience: "participant",
+        audienceRef: target.id,
+      }),
+    });
+    expect(message.status).toBe(200);
+    const { id: messageId } = (await message.json()) as { id: string };
+
+    let taskCreated = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const tasksResponse = await app.request(`/api/groups/${group.id}/tasks`);
+      const tasks = (await tasksResponse.json()) as Array<{
+        messageId: string;
+      }>;
+      if (tasks.some((task) => task.messageId === messageId)) {
+        taskCreated = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(taskCreated).toBe(true);
+
+    const explicit = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: target.id,
+        specRef: "specs/dispatch-fields-silent-loss.md",
+        specHash: "987f54a",
+        dispatchKind: "requirement",
+      }),
+    });
+    expect(explicit.status).toBe(409);
+    const error = (await explicit.json()) as { message: string };
+    expect(error.message).toContain("specRef");
+    expect(error.message).toContain("specHash");
+    expect(error.message).toContain("dispatchKind");
   });
 
   it("群消息校验已知 type,但放行自由文本与未知 type", async () => {
