@@ -469,6 +469,48 @@ describe("时间线可读性与系统状态过滤", () => {
     ).toHaveTextContent("重试 2 次");
   });
 
+  it("任务状态徽章使用中文 i18n、共享状态色,失败态带图标", () => {
+    const statuses = [
+      ["queued", "排队中"],
+      ["running", "执行中"],
+      ["done", "已完成"],
+      ["failed", "失败"],
+      ["cancelled", "已取消"],
+    ] as const;
+    render(
+      <RequirementTimeline
+        tasks={statuses.map(([status], index) =>
+          makeTask({
+            id: `t-${status}`,
+            messageId: `trigger-${status}`,
+            status,
+            diffSummary: null,
+            createdAt: `2026-08-01T09:${String(index).padStart(2, "0")}:00.000Z`,
+          }),
+        )}
+        messages={statuses.map(([status]) =>
+          makeMessage(`trigger-${status}`, "任务书"),
+        )}
+      />,
+    );
+
+    for (const [status, label] of statuses) {
+      const badge = screen.getByTestId(
+        `requirement-timeline-task-status-trigger-${status}`,
+      );
+      expect(badge).toHaveTextContent(`任务 ${label}`);
+      expect(badge).toHaveClass(
+        `border-status-${status}`,
+        `bg-status-${status}/10`,
+        `text-status-${status}`,
+      );
+    }
+
+    expect(
+      screen.getByTestId("requirement-timeline-task-status-trigger-failed"),
+    ).toHaveAttribute("data-failure-signal", "icon");
+  });
+
   it("带汇报内容的 task_status 仍保留", () => {
     render(
       <RequirementTimeline

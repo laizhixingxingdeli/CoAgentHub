@@ -36,6 +36,7 @@ import RequirementStepper from "./RequirementStepper";
 import RequirementTimeline, {
   roleFromMemberRoles,
 } from "./RequirementTimeline";
+import { LAYER_STATUS_CLASS } from "./status-classes";
 
 type RequirementDetailPanelProps = {
   /** 当前选中的需求(null = 未选中)。 */
@@ -285,15 +286,6 @@ export function stepStatusesForRequirement(
 }
 
 /** 层状态徽标配色(done/failed/running/pending 与两种缺层状态均保留中性灰)。 */
-const LAYER_STATUS_CLASS: Record<LayerStatus, string> = {
-  done: "border-status-done bg-status-done/10 text-status-done",
-  failed: "border-status-failed bg-status-failed/10 text-status-failed",
-  running: "border-status-running bg-status-running/10 text-status-running",
-  pending: "border-muted-foreground/30 bg-muted/50 text-muted-foreground",
-  "na-fix": "border-border bg-muted text-muted-foreground",
-  "na-no-reviewer": "border-border bg-muted text-muted-foreground",
-};
-
 const LAYER_STATUS_LABEL: Record<LayerStatus, string> = {
   done: "通过",
   failed: "未通过",

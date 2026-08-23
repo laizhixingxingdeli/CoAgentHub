@@ -19,6 +19,7 @@
  * 动画过渡)。
  */
 
+import { AlertTriangle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { LiveOutput } from "@/components/live-output";
 import { t } from "@/lib/i18n";
@@ -27,11 +28,13 @@ import { ControlButton } from "@/pages/app/groups/messages/control-button";
 import {
   formatDuration,
   formatMessageTime,
-  TASK_STATUS_CLASSES,
   useLiveNow,
 } from "@/pages/app/groups/messages/lib";
-import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
-import { TASK_UNCONFIRMED_CLASSES } from "@/pages/app/groups/messages/TaskPanel";
+import {
+  TASK_UNCONFIRMED_CLASSES,
+  type TaskItem,
+  taskStatusLabel,
+} from "@/pages/app/groups/messages/TaskPanel";
 import {
   FOLD_PREVIEW_LENGTH as MESSAGE_FOLD_PREVIEW_LENGTH,
   FOLD_THRESHOLD as MESSAGE_FOLD_THRESHOLD,
@@ -44,6 +47,7 @@ import {
   mergeRequirementTimeline,
   type TimelineEvent,
 } from "./merge-requirement-timeline";
+import { TASK_STATUS_CLASS } from "./status-classes";
 
 /** 视觉分色用的角色档位(不是后端权威角色,仅用于头像配色)。 */
 export type TimelineRole = "coordinator" | "reviewer" | "executor";
@@ -262,9 +266,18 @@ export default function RequirementTimeline({
           {taskStatus && (
             <span
               data-testid={`requirement-timeline-task-status-${message.id}`}
-              className="mt-1 inline-flex rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+              data-status={taskStatus.status}
+              data-failure-signal={
+                taskStatus.status === "failed" ? "icon" : undefined
+              }
+              className={`mt-1 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
+                taskStatus.status === "failed" ? "border-2" : ""
+              } ${TASK_STATUS_CLASS[taskStatus.status]}`}
             >
-              任务 {taskStatus.status}
+              {taskStatus.status === "failed" && (
+                <AlertTriangle className="size-3" aria-hidden="true" />
+              )}
+              任务 {taskStatusLabel(taskStatus.status)}
               {taskStatus.retries > 0 ? ` · 重试 ${taskStatus.retries} 次` : ""}
             </span>
           )}
@@ -386,10 +399,12 @@ export default function RequirementTimeline({
               className={`mt-1.5 rounded-md border px-2 py-1 text-xs ${
                 unconfirmed
                   ? TASK_UNCONFIRMED_CLASSES
-                  : TASK_STATUS_CLASSES.failed
+                  : TASK_STATUS_CLASS.failed
               }`}
             >
-              {unconfirmed ? "结果未确认" : "任务失败"}
+              {unconfirmed
+                ? t("tasks.unconfirmed")
+                : `任务${t("tasks.status.failed")}`}
               {errorText ? `: ${errorText}` : ""}
             </p>
           )}
