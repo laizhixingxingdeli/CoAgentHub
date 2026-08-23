@@ -1,5 +1,12 @@
 import { sql } from "drizzle-orm";
-import { jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
@@ -16,24 +23,31 @@ import { timeColumns } from "../utils/columns.js";
  * participant(参与者)——「agent」易与「AI 智能体」混淆。旧表名/旧列名仅
  * 存在于历史迁移与 git 历史中。
  */
-export const participant = pgTable("participant", {
-  id: uuid("id").primaryKey().$defaultFn(uuidv7),
-  // 名字是 participant 的运行时唯一键(执行器注册/身份名册均按名字判重);
-  // UNIQUE 约束让「按名字幂等」在数据库层也成立(见 migration 0013)。
-  name: text("name").notNull().unique(),
-  device: text("device"),
-  tokenHash: text("token_hash").notNull(),
-  // 心跳在线 (ticket 17): REST 心跳写 last_seen,与 WS 在线状态合并构成
-  // 在线判定(T13 的 ws-hub 消费)。可空 = 从未上报过心跳。
-  lastSeen: timestamp("last_seen", { withTimezone: true }),
-  // 自由能力标签 (ticket 17): 注册时声明(如 ["text-generation","code-review"]),
-  // 缺省空数组;仅做轻量提示性校验,不做硬性运行时强制。
-  capabilities: jsonb("capabilities")
-    .$type<string[]>()
-    .notNull()
-    .default(sql`'[]'::jsonb`),
-  ...timeColumns("create-only"),
-});
+export const participant = pgTable(
+  "participant",
+  {
+    id: uuid("id").primaryKey().$defaultFn(uuidv7),
+    // 名字是 participant 的显示文本,不是执行器路由键。唯一约束仍保留以
+    // 兼容身份名册的现有注册语义(见 migration 0013)。
+    name: text("name").notNull().unique(),
+    // 稳定执行器绑定。消息先按 participant id 命中身份,再按此配置键路由;
+    // 名字因此可以自由修改而不会丢路由。
+    executorKey: text("executor_key"),
+    device: text("device"),
+    tokenHash: text("token_hash").notNull(),
+    // 心跳在线 (ticket 17): REST 心跳写 last_seen,与 WS 在线状态合并构成
+    // 在线判定(T13 的 ws-hub 消费)。可空 = 从未上报过心跳。
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    // 自由能力标签 (ticket 17): 注册时声明(如 ["text-generation","code-review"]),
+    // 缺省空数组;仅做轻量提示性校验,不做硬性运行时强制。
+    capabilities: jsonb("capabilities")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    ...timeColumns("create-only"),
+  },
+  (t) => [uniqueIndex("participant_executor_key_unique").on(t.executorKey)],
+);
 export const Participant = createSelectSchema(participant);
 export type Participant = typeof participant.$inferSelect;
 export const NewParticipant = createInsertSchema(participant);

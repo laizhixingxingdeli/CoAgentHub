@@ -16,6 +16,7 @@ import { useGroupsPage } from "@/hooks/use-groups-page";
 import { useIdentityPanel } from "@/hooks/use-identity-panel";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import { RoleBadge } from "./messages/types";
 
 /**
  * Group list page (ticket 02): shows all groups with status and member
@@ -324,15 +325,10 @@ export default function GroupsPage() {
             {/* 群列表:单套自适应清单行(窄屏/宽屏共用,不再有双套实现)。
                 一行 = 状态圆点 + 群名(可进入/行内改名) + 摘要行 + 相对时间;
                 操作按钮收敛为纯图标,桌面端 hover 行时显现(移动端无 hover,常显)。 */}
-            <ul
-              role="list"
-              data-testid="groups-list"
-              className="flex flex-col gap-1 p-3"
-            >
+            <ul data-testid="groups-list" className="flex flex-col gap-1 p-3">
               {groups.map((group) => (
                 <li
                   key={group.id}
-                  role="listitem"
                   className="group flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-3 transition-colors hover:bg-muted/60"
                 >
                   {/* 状态圆点:active 用 --status-running + 淡色光晕(同 RequirementStepper
@@ -404,6 +400,25 @@ export default function GroupsPage() {
                       <span className="shrink-0">
                         {t("groups.memberCount", { count: group.memberCount })}
                       </span>
+                      {group.memberRoles && (
+                        <span
+                          data-testid={`group-mode-${group.id}`}
+                          className="inline-flex items-center gap-1"
+                        >
+                          {group.memberRoles.includes("reviewer") &&
+                          group.memberRoles.includes("coordinator") ? (
+                            <>
+                              <RoleBadge role="coordinator" />
+                              <RoleBadge role="reviewer" />
+                              <span className="sr-only">三层协作</span>
+                            </>
+                          ) : (
+                            <span className="rounded-full border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+                              两层协作
+                            </span>
+                          )}
+                        </span>
+                      )}
                       {previewFor(group) && (
                         <span className="min-w-0 truncate">
                           {previewFor(group)}

@@ -8,7 +8,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, describe, expect, it } from "vitest";
+import { testDb } from "./db";
 
 /**
  * 阶段2-票2 + 调度并行化(票4):server 按 project_path 分组的执行队列(同组
@@ -113,6 +116,10 @@ const { createTestApp } = await import("./app");
 
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
+  const executorKeyByName: Record<string, string> = {
+    "CodeBuddy 执行器": "codebuddy",
+    "AtomCode 执行器": "executor",
+  };
 
   async function registerParticipant(body: Record<string, unknown>) {
     const res = await app.request("/api/participants", {
@@ -127,10 +134,26 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
         name: string;
       }[];
       const existing = list.find((p) => p.name === body.name);
-      if (existing) return { id: existing.id };
+      if (existing) {
+        const executorKey = executorKeyByName[String(body.name)];
+        if (executorKey) {
+          await testDb
+            .update(participantTable)
+            .set({ executorKey })
+            .where(eq(participantTable.id, existing.id));
+        }
+        return { id: existing.id };
+      }
     }
     expect(res.status).toBe(200);
     const { id } = (await res.json()) as { id: string };
+    const executorKey = executorKeyByName[String(body.name)];
+    if (executorKey) {
+      await testDb
+        .update(participantTable)
+        .set({ executorKey })
+        .where(eq(participantTable.id, id));
+    }
     return { id };
   }
 
@@ -660,10 +683,8 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
 
     // 群里出现 ⛔「不支持中断」回传(以执行器身份;⛔ 不在 STATUS_EMOJI_RE 内,
     // 回传为 text/plain,故只按 body 内容匹配)。
-    await waitForMessage(
-      coordinator.id,
-      group.id,
-      (m) => m.body.includes("不支持中断"),
+    await waitForMessage(coordinator.id, group.id, (m) =>
+      m.body.includes("不支持中断"),
     );
     // 任务不受影响,继续跑到 done(未被 kill 成 cancelled)。
     await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
@@ -800,10 +821,8 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     });
     const bAfter = await listTasks(coordinator.id, groupB.id);
     expect(bAfter.find((x) => x.id === tB.id)?.status).toBe("running");
-    await waitForMessage(
-      coordinator.id,
-      groupA.id,
-      (m) => m.body.startsWith("⛔"),
+    await waitForMessage(coordinator.id, groupA.id, (m) =>
+      m.body.startsWith("⛔"),
     );
     await waitForTaskStatus(coordinator.id, groupB.id, mB.id, "done");
   }, 30_000);

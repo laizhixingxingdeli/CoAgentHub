@@ -15,6 +15,7 @@ const GROUPS = [
     title: "模型训练任务",
     status: "active",
     memberCount: 2,
+    memberRoles: ["coordinator", "reviewer"],
     createdAt: "2026-08-01T00:00:00.000Z",
   },
   {
@@ -974,6 +975,9 @@ describe("GroupsPage 窄屏适配 (ticket 34)", () => {
     )!;
     expect(activeRow.querySelector(".bg-status-running")).not.toBeNull();
     expect(within(activeRow).getByText(/名成员/)).toBeInTheDocument();
+    expect(
+      within(activeRow).getByTestId("group-mode-group-1"),
+    ).toHaveTextContent("协调者");
     expect(
       within(activeRow).getByRole("button", { name: "成员管理" }),
     ).toBeInTheDocument();

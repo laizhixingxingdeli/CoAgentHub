@@ -11,7 +11,7 @@ import { resolveLocalUser } from "./local-participant";
 /**
  * 执行器配置(server 单一来源):每一条对应「一个 AI 工具 = 一个 participant
  * 身份」。server 在 POST /groups/:id/messages 检测 audience=participant 且
- * audienceRef 命中本配置(按 participant.name === agentName 匹配)时创建 task
+ * audienceRef 命中 participant 后,按 participant.executorKey 命中本配置时创建 task
  * 并 spawn 执行器;开机时由 ensureExecutorParticipants 幂等注册对应 participant。
  *
  * 完整集合 = 内置默认(DEFAULT_EXECUTORS)+ DB 持久化配置(executor_config 表,
@@ -25,9 +25,8 @@ export interface ExecutorConfig {
   /** 唯一 key,写入 task.executor_key,标记任务由哪个执行器跑。 */
   key: string;
   /**
-   * participant 展示名;与 participant 表 name 匹配用(注册的 participant 名)。
-   * 字段名 agentName 保留旧名(兼容既有 executors.json/DB 行,agent 为
-   * participant 的旧名)。
+   * participant 初始展示名。字段名 agentName 保留旧名(兼容既有
+   * executors.json/DB 行);运行时路由使用 participant.executorKey。
    */
   agentName: string;
   type: string;
@@ -81,6 +80,21 @@ export interface ExecutorConfig {
    * 接线批再加),纯代码派生字段,不落 DB 列。
    */
   canDispatch?: boolean;
+}
+
+/** Built-in participant display names are deliberately role-neutral. */
+const BUILTIN_PARTICIPANT_NAMES: Record<string, string> = {
+  executor: "AtomCode",
+  reasonix: "Reasoning",
+  codebuddy: "CodeBuddy",
+  codex: "Codex",
+  reviewer: "Reviewer",
+  hermes: "Hermes",
+  "win-hermes": "Win Hermes",
+};
+
+function participantDisplayName(ex: ExecutorConfig): string {
+  return BUILTIN_PARTICIPANT_NAMES[ex.key] ?? ex.agentName;
 }
 
 const DEFAULT_EXECUTORS: ExecutorConfig[] = [
@@ -443,14 +457,43 @@ export async function effectiveExecutors(
     return cachedEffectiveExecutors;
   }
   const rows = await listExecutorConfigs(db);
-  cachedEffectiveExecutors = [...defaultExecutors(), ...rows.map(rowToConfig)].map(
-    (ex) => (DISPATCH_CAPABLE_KEYS.has(ex.key) ? { ...ex, canDispatch: true } : ex),
+  cachedEffectiveExecutors = [
+    ...defaultExecutors(),
+    ...rows.map(rowToConfig),
+  ].map((ex) =>
+    DISPATCH_CAPABLE_KEYS.has(ex.key) ? { ...ex, canDispatch: true } : ex,
   );
   cachedEffectiveExecutorsAt = Date.now();
   return cachedEffectiveExecutors;
 }
 
-/** 按 participant 表 name 匹配执行器配置(audienceRef → participant.name → executor)。 */
+/** 按 participant 的稳定 executorKey 解析执行器配置。 */
+export async function findExecutorByParticipant(
+  db: DataBase,
+  participant: { executorKey: string | null },
+): Promise<ExecutorConfig | undefined> {
+  const all = await effectiveExecutors(db);
+  return participant.executorKey
+    ? all.find((ex) => ex.key === participant.executorKey)
+    : undefined;
+}
+
+/**
+ * Resolve the initial binding for a newly registered participant. This is
+ * intentionally only a registration-time compatibility path; dispatch always
+ * uses participant.executorKey, so later display-name edits are safe.
+ */
+export async function findExecutorKeyByInitialName(
+  db: DataBase,
+  name: string,
+): Promise<string | undefined> {
+  const all = await effectiveExecutors(db);
+  return all.find(
+    (ex) => ex.agentName === name || participantDisplayName(ex) === name,
+  )?.key;
+}
+
+/** 迁移期兼容 helper;新调度路径不得按名字判定 participant 身份。 */
 export async function findExecutorByParticipantName(
   db: DataBase,
   participantName: string,
@@ -673,8 +716,8 @@ export function readDispatchPolicy(): DispatchPolicy {
 }
 
 /**
- * 注册单个执行器配置对应的 participant(幂等,按 name 判重,以 participant
- * 表为唯一事实源)。token 认证已移除:不再生成/持久化 token。返回是否真的
+ * 注册单个执行器配置对应的 participant(幂等,按 executorKey 判重,并以旧
+ * agentName 仅作一次性存量兼容)。token 认证已移除:不再生成/持久化 token。返回是否真的
  * 新建了 participant。供 ensureExecutorParticipants 与 POST /api/executors 复用。
  */
 export async function registerExecutorParticipant(
@@ -682,26 +725,49 @@ export async function registerExecutorParticipant(
   ex: ExecutorConfig,
   device?: string,
 ): Promise<boolean> {
-  const [existing] = await db
+  const [bound] = await db
     .select({ name: participantTable.name })
+    .from(participantTable)
+    .where(eq(participantTable.executorKey, ex.key))
+    .limit(1);
+  if (bound) return false;
+
+  // Migration 0022 backfills current rows. This fallback keeps a freshly
+  // upgraded database safe if the helper runs before the backfill has been
+  // observed, without making display names the ongoing routing key.
+  const [legacy] = await db
+    .select({
+      id: participantTable.id,
+      executorKey: participantTable.executorKey,
+    })
     .from(participantTable)
     .where(eq(participantTable.name, ex.agentName))
     .limit(1);
-  if (existing) return false;
+  if (legacy) {
+    if (legacy.executorKey && legacy.executorKey !== ex.key) return false;
+    await db
+      .update(participantTable)
+      .set({ executorKey: ex.key })
+      .where(eq(participantTable.id, legacy.id));
+    return true;
+  }
 
   await db.insert(participantTable).values({
-    name: ex.agentName,
+    name: participantDisplayName(ex),
+    executorKey: ex.key,
     device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
     tokenHash: "",
     capabilities: [],
   });
-  console.log(`[executors] 已注册 participant: ${ex.agentName}`);
+  console.log(
+    `[executors] 已注册 participant: ${participantDisplayName(ex)}`,
+  );
   return true;
 }
 
 /**
  * 开机自注册:把执行器配置(内置 + DB 配置)对应的 participant 补进
- * participant 表(幂等,按 name 判重)。桥已退役,注册职责由 server 承担。
+ * participant 表(幂等,按 executorKey 判重)。桥已退役,注册职责由 server 承担。
  */
 export async function ensureExecutorParticipants(db: DataBase): Promise<void> {
   // Pre-create the default LAN observer so anonymous access has a stable id.

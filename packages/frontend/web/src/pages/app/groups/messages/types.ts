@@ -26,6 +26,8 @@ export function roleLabel(role: string): string {
   return t(`roles.${role}` as import("@/lib/i18n").DictKey);
 }
 
+export { RoleBadge } from "./role-badge";
+
 export type FileRef = {
   name: string;
   size: number;

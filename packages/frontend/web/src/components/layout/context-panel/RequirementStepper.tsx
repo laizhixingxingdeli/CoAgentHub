@@ -17,6 +17,7 @@
  */
 
 import { Fragment } from "react";
+import { RoleBadge } from "@/pages/app/groups/messages/types";
 import type { StepStatus } from "./group-tasks-by-spec";
 
 /** 图标外圈:尺寸 + 光晕 / 呼吸动画(失败态视觉上比其他步骤更「重」)。 */
@@ -102,11 +103,14 @@ type RequirementStepperProps = {
   steps: StepStatus[];
   /** 面向人的「执行者 · 任务名」标签;缺省保持旧调用方兼容。 */
   labels?: string[];
+  /** 每步对应的真实群内角色;仅用于可访问的文字徽章。 */
+  stepRoles?: Array<string | null>;
 };
 
 export default function RequirementStepper({
   steps,
   labels = [],
+  stepRoles = [],
 }: RequirementStepperProps) {
   if (steps.length === 0) {
     return null;
@@ -143,11 +147,11 @@ export default function RequirementStepper({
                 <StepIcon status={step} />
               </span>
             </span>
-            <span
-              className="max-w-40 truncate text-[11px] leading-none text-muted-foreground"
-              title={labels[i] ?? `步骤 ${i + 1}`}
-            >
-              {labels[i] ?? `步骤 ${i + 1}`}
+            <span className="flex max-w-40 items-center gap-1 truncate text-[11px] leading-none text-muted-foreground">
+              {stepRoles[i] && <RoleBadge role={stepRoles[i]} />}
+              <span className="truncate" title={labels[i] ?? `步骤 ${i + 1}`}>
+                {labels[i] ?? `步骤 ${i + 1}`}
+              </span>
             </span>
           </li>
         </Fragment>

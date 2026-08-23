@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  participant as participantTable,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { testDb } from "./db";
 
@@ -89,11 +93,29 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         name: string;
       }[];
       const existing = list.find((p) => p.name === body.name);
-      if (existing) return { id: existing.id };
+      if (existing) {
+        await bindExecutorKey(existing.id, body.name);
+        return { id: existing.id };
+      }
     }
     expect(res.status).toBe(200);
     const { id } = (await res.json()) as { id: string };
+    await bindExecutorKey(id, body.name);
     return { id };
+  }
+
+  async function bindExecutorKey(id: string, name: unknown) {
+    const keyByName: Record<string, string> = {
+      "CodeBuddy 执行器": "codebuddy",
+      "Win Hermes": "win-hermes",
+    };
+    const executorKey = typeof name === "string" ? keyByName[name] : undefined;
+    if (executorKey) {
+      await testDb
+        .update(participantTable)
+        .set({ executorKey })
+        .where(eq(participantTable.id, id));
+    }
   }
 
   async function createGroup(participantId: string, title: string) {
@@ -202,9 +224,20 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     const coordinator = await registerParticipant({
       name: "coord-exec",
     });
-    const codebuddy = await registerParticipant({
-      name: "CodeBuddy 执行器", // executors.ts 的 agentName,触发匹配靠它
-    });
+    let codebuddy = await testDb
+      .select({ id: participantTable.id })
+      .from(participantTable)
+      .where(eq(participantTable.executorKey, "codebuddy"))
+      .then(([participant]) => participant);
+    if (!codebuddy) {
+      codebuddy = await registerParticipant({
+        name: "CodeBuddy 执行器",
+      });
+      await testDb
+        .update(participantTable)
+        .set({ executorKey: "codebuddy" })
+        .where(eq(participantTable.id, codebuddy.id));
+    }
     const group = await createGroup(coordinator.id, "执行器触发测试");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };
@@ -215,8 +248,15 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     rmSync(repoDir, { recursive: true, force: true });
   });
 
-  it("定向消息命中执行器 → 自动建 task(executor_key=codebuddy)+ spawn 完成 done", async () => {
+  it("改名后定向消息仍按稳定绑定路由到执行器配置", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
+
+    const rename = await app.request(`/api/participants/${codebuddy.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "CodeBuddy" }),
+    });
+    expect(rename.status).toBe(200);
 
     const msg = await postMessage(coordinator.id, group.id, {
       body: "建一个文件 hello.txt",

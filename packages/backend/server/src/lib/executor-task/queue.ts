@@ -26,7 +26,7 @@ import {
 } from "@server/lib/executor-runner";
 import {
   type ExecutorConfig,
-  findExecutorByParticipantName,
+  findExecutorByParticipant,
   parseRateLimitRecoveryMs,
   renderExecutorArgs,
 } from "@server/lib/executors";
@@ -368,7 +368,7 @@ export async function maybeDispatchExecutorTask(
     return;
   }
 
-  // audienceRef → participant → executor 配置(按 name 匹配,与桥注册的 participant 名一致)。
+  // audienceRef → participant → executor 配置(按 participant.executorKey 稳定绑定)。
   const participant = await db.query.participant.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef),
   });
@@ -378,7 +378,7 @@ export async function maybeDispatchExecutorTask(
     );
     return;
   }
-  const ex = await findExecutorByParticipantName(db, participant.name);
+  const ex = await findExecutorByParticipant(db, participant);
   if (!ex) {
     console.log(
       `[executor] 跳过:participant ${participant.name} 不在执行器配置中`,
@@ -391,10 +391,9 @@ export async function maybeDispatchExecutorTask(
     where: (t, { and: andFn, eq: eqFn }) =>
       andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, participant.id)),
   });
-  const groupPrompt: GroupPromptInfo | null =
-    membership && membership.prompt
-      ? { roles: membership.roles, prompt: membership.prompt }
-      : null;
+  const groupPrompt: GroupPromptInfo | null = membership?.prompt
+    ? { roles: membership.roles, prompt: membership.prompt }
+    : null;
 
   await dispatchTask(db, {
     groupId,
@@ -686,7 +685,7 @@ async function buildDispatchTargetAudit(
     await Promise.all(
       participants.map(async (participant) => ({
         participant,
-        executor: await findExecutorByParticipantName(db, participant.name),
+        executor: await findExecutorByParticipant(db, participant),
       })),
     )
   )

@@ -6,7 +6,7 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
-import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -167,7 +167,36 @@ app
         limit !== undefined
           ? await query.limit(limit).offset(offset ?? 0)
           : await query;
-      return c.json({ items: groups, total });
+      const memberRoles = groups.length
+        ? await db
+            .select({
+              groupId: groupMemberTable.groupId,
+              roles: groupMemberTable.roles,
+            })
+            .from(groupMemberTable)
+            .where(
+              inArray(
+                groupMemberTable.groupId,
+                groups.map((group) => group.id),
+              ),
+            )
+        : [];
+      const rolesByGroup = new Map<string, Set<string>>();
+      for (const member of memberRoles) {
+        const roles = rolesByGroup.get(member.groupId) ?? new Set<string>();
+        for (const role of member.roles) roles.add(role);
+        rolesByGroup.set(member.groupId, roles);
+      }
+      return c.json({
+        items: groups.map((group) => ({
+          ...group,
+          // Computed from current group_members; this is intentionally not a
+          // persisted mode field. The UI derives two/three-layer status from
+          // reviewer + coordinator presence.
+          memberRoles: [...(rolesByGroup.get(group.id) ?? [])],
+        })),
+        total,
+      });
     },
   )
   .get(

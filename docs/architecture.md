@@ -213,6 +213,8 @@ CoAgentHub/
   (fire-and-forget,幂等靠 `message_id` 唯一约束),不再有独立的调度进程。
 - 执行器配置:`lib/executors.ts` 内置 + `executor_config` 表(DB 持久化,`/api/executors`
   管理);participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
+  执行器 participant 通过 `participant.executor_key` 稳定绑定配置 `key`,显示名
+  (`participant.name`) 仅是可修改的身份文本,不得作为调度路由键。
   `DEFAULT_EXECUTORS` 内置含 reviewer 检视器(key=`reviewer`、agentName=`Reviewer 检视器`、
   kind=cli、`maxConcurrency: 1`;`canDispatch` 由 `DISPATCH_CAPABLE_KEYS` 派生为 true)。
 - **下发门与控制门**:`DISPATCH_ALLOWED_ROLES`(`lib/executor-task/types.ts`,管**下发**)与

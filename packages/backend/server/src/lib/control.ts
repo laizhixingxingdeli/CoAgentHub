@@ -30,7 +30,7 @@ import {
 import {
   type ExecutorConfig,
   effectiveExecutors,
-  findExecutorByParticipantName,
+  findExecutorByParticipant,
 } from "@server/lib/executors";
 import { and, eq, inArray } from "drizzle-orm";
 
@@ -83,7 +83,7 @@ export async function maybeHandleControlCommand(
     where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
   });
   if (sender) {
-    const senderExecutor = await findExecutorByParticipantName(db, sender.name);
+    const senderExecutor = await findExecutorByParticipant(db, sender);
     if (senderExecutor && !senderExecutor.canDispatch) {
       console.log(`[control] 跳过:发送者是纯执行器 participant(防回环)`);
       return;
@@ -94,10 +94,11 @@ export async function maybeHandleControlCommand(
   // 定向到其他非执行器 participant 的消息按普通指令识别(与现状对 non-hermes
   // 非执行器一致)。
   if (audience === "participant" && audienceRef) {
+    const targetParticipantId = audienceRef;
     const target = await db.query.participant.findFirst({
-      where: (t, { eq: eqFn }) => eqFn(t.id, audienceRef!),
+      where: (t, { eq: eqFn }) => eqFn(t.id, targetParticipantId),
     });
-    if (target && (await findExecutorByParticipantName(db, target.name))) {
+    if (target && (await findExecutorByParticipant(db, target))) {
       console.log(`[control] 跳过:定向到执行器 participant(视为任务)`);
       return;
     }

@@ -11,6 +11,8 @@ type GroupItem = {
   status: "active" | "archived";
   memberCount: number;
   createdAt: string;
+  /** Roles currently present in group_members; mode is derived, never stored. */
+  memberRoles?: string[];
 };
 
 /** Status filter tabs; "all" fetches without a ?status= param. */

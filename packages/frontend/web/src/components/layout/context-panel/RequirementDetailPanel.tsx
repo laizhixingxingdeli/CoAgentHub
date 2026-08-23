@@ -31,7 +31,9 @@ import {
   stepStatusFromTask,
 } from "./group-tasks-by-spec";
 import RequirementStepper from "./RequirementStepper";
-import RequirementTimeline from "./RequirementTimeline";
+import RequirementTimeline, {
+  roleFromMemberRoles,
+} from "./RequirementTimeline";
 
 type RequirementDetailPanelProps = {
   /** 当前选中的需求(null = 未选中)。 */
@@ -411,11 +413,19 @@ export default function RequirementDetailPanel({
       "执行者";
     return `${executor} · ${deriveBriefTitle(task.brief) || requirement.label}`;
   });
+  const stepRoles = requirement.tasks.map((task) =>
+    roleFromMemberRoles(
+      members.find(
+        (member) => member.participantId === task.executorParticipantId,
+      )?.roles,
+    ),
+  );
   const stepStatuses = requirement.tasks.map((task) =>
     stepStatusFromTask(task.status),
   );
   stepStatuses.push(l3.status === "na" ? "pending" : l3.status);
   stepLabels.push(l3.status === "na" ? "L3 不适用" : "L3 检视");
+  stepRoles.push(null);
 
   return (
     <div
@@ -423,7 +433,11 @@ export default function RequirementDetailPanel({
       className="flex flex-col gap-2 px-4 py-3"
     >
       <p className="truncate text-sm font-medium">{requirement.label}</p>
-      <RequirementStepper steps={stepStatuses} labels={stepLabels} />
+      <RequirementStepper
+        steps={stepStatuses}
+        labels={stepLabels}
+        stepRoles={stepRoles}
+      />
 
       {/* L3 检视:review_result 载荷;两层模式显式「不适用」。 */}
       <LayerCard

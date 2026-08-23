@@ -94,18 +94,19 @@ describe("路由", () => {
     // 群标题(来自 GET /api/groups/:id)。
     expect(await screen.findByText("群组消息流")).toBeInTheDocument();
     // 主区:需求工作区(无任务 → TaskPanel 空态)。
-    expect(await screen.findByTestId("requirement-workspace")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "群设置" })).toHaveAttribute(
-      "href",
-      "/groups/group-1/settings",
-    );
+    expect(
+      await screen.findByTestId("requirement-workspace"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("open-group-settings")).toBeInTheDocument();
   });
 
   it("/groups/:id 不再渲染右栏上下文面板", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
-    expect(await screen.findByTestId("requirement-workspace")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-workspace"),
+    ).toBeInTheDocument();
     expect(screen.queryByTestId("context-panel")).toBeNull();
   });
 

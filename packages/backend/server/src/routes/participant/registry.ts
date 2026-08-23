@@ -7,11 +7,12 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
-import { participantIdentity } from "@server/middleware/participant-identity";
+import { findExecutorKeyByInitialName } from "@server/lib/executors";
 import {
   COAGENTHUB_SKILL_CAPABILITIES,
   mergeCapabilities,
 } from "@server/lib/participant-capabilities";
+import { participantIdentity } from "@server/middleware/participant-identity";
 import { desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -68,10 +69,13 @@ app
 
       // token 认证已移除(全信模型):不再生成 token。token_hash 列保留(方案 B
       // 再删),插入占位值以满足 NOT NULL;响应不含任何 token 字段。
+      // 仅在注册瞬间用初始显示名补齐稳定绑定,后续调度不再读 name。
+      const executorKey = await findExecutorKeyByInitialName(db, input.name);
       const [participant] = await db
         .insert(participantTable)
         .values({
           name: input.name,
+          executorKey,
           device: input.device ?? null,
           tokenHash: "",
           capabilities: input.capabilities ?? [],

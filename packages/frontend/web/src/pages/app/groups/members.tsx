@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { roleLabel } from "./messages/types";
+import { RoleBadge, roleLabel } from "./messages/types";
 
 /**
  * Preset role catalog (mirrors the server-side GROUP_ROLES in
@@ -59,6 +59,18 @@ export default function GroupMembersPage() {
   const [, membersParams] = useRoute("/groups/:id/members");
   const groupId = settingsParams?.id ?? membersParams?.id;
 
+  return groupId ? <GroupSettingsContent groupId={groupId} /> : null;
+}
+
+export function GroupSettingsContent({
+  groupId,
+  embedded = false,
+  onDirtyChange,
+}: {
+  groupId: string;
+  embedded?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const [members, setMembers] = useState<Member[]>([]);
   const [participants, setParticipants] = useState<ParticipantOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -74,6 +86,7 @@ export default function GroupMembersPage() {
     "active" | "archived" | "deleted" | null
   >(null);
   const [titleDraft, setTitleDraft] = useState("");
+  const [savedTitle, setSavedTitle] = useState("");
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectPathInput, setProjectPathInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
@@ -150,6 +163,7 @@ export default function GroupMembersPage() {
       };
       setCreatedBy(group.createdBy);
       setTitleDraft(group.title ?? "");
+      setSavedTitle(group.title ?? "");
       setProjectPath(group.projectPath ?? null);
       setGroupStatus(
         group.status === "active" || group.status === "archived"
@@ -170,6 +184,17 @@ export default function GroupMembersPage() {
   // 归档/软删群只读:非 active 群禁止成员写操作(添加/编辑/移除)。
   const readOnly = groupStatus !== null && groupStatus !== "active";
   const readOnlyHint = readOnly ? t("members.readOnly") : undefined;
+
+  const dirty =
+    titleDraft !== savedTitle ||
+    projectPathInput.trim().length > 0 ||
+    editingParticipantId !== null ||
+    editingPromptParticipantId !== null ||
+    newPrompt.trim().length > 0;
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const patchGroup = async (body: Record<string, unknown>) => {
     if (!groupId || savingSettings) {
@@ -210,6 +235,7 @@ export default function GroupMembersPage() {
     }
     const updated = await patchGroup({ title });
     if (updated) {
+      setSavedTitle(title);
       setMessage("群名称已保存");
     }
   };
@@ -219,9 +245,9 @@ export default function GroupMembersPage() {
     if (!path) {
       return;
     }
-    const updated = (await patchGroup({ projectPath: path })) as
-      | { projectPath?: string | null }
-      | null;
+    const updated = (await patchGroup({ projectPath: path })) as {
+      projectPath?: string | null;
+    } | null;
     if (updated) {
       setProjectPath(updated.projectPath ?? path);
       setProjectPathInput("");
@@ -461,20 +487,35 @@ export default function GroupMembersPage() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
-      <div className="mb-6">
-        <a
-          href={groupId ? `/groups/${groupId}` : "/groups"}
-          className="mb-2 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="size-4" />
-          {t("members.back")}
-        </a>
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-xl font-semibold">群设置</h2>
+    <div
+      data-testid={
+        embedded
+          ? "group-settings-drawer-content"
+          : "group-settings-page-content"
+      }
+      className={
+        embedded
+          ? "flex min-h-full flex-col p-4"
+          : "mx-auto w-full max-w-[1440px] p-4 sm:p-6"
+      }
+    >
+      {!embedded && (
+        <div className="mb-6">
+          <a
+            href={`/groups/${groupId}`}
+            className="mb-2 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" />
+            {t("members.back")}
+          </a>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-xl font-semibold">群设置</h2>
+          </div>
+          <p className="text-muted-foreground text-sm">
+            {t("members.subtitle")}
+          </p>
         </div>
-        <p className="text-muted-foreground text-sm">{t("members.subtitle")}</p>
-      </div>
+      )}
 
       {message && (
         <div className="mb-4 rounded-md border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
@@ -881,12 +922,7 @@ function RoleBadges({ roles }: { roles: string[] }) {
   return (
     <div className="flex flex-wrap gap-1.5">
       {roles.map((role) => (
-        <span
-          key={role}
-          className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
-        >
-          {roleLabel(role as GroupRole) ?? role}
-        </span>
+        <RoleBadge key={role} role={role}></RoleBadge>
       ))}
     </div>
   );

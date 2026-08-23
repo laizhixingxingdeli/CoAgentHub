@@ -35,6 +35,7 @@ import {
   FOLD_THRESHOLD as MESSAGE_FOLD_THRESHOLD,
   type Member,
   type MessageItem,
+  RoleBadge,
 } from "@/pages/app/groups/messages/types";
 import {
   mergeRequirementTimeline,
@@ -211,6 +212,7 @@ export default function RequirementTimeline({
                   命中成员时回落 senderId 前缀(与消息流一致)。 */}
               {sender?.name ?? message.senderId.slice(0, 8)}
             </span>
+            <RoleBadge role={role} />
             {target && (
               <span
                 data-testid={`requirement-timeline-target-${message.id}`}
@@ -346,6 +348,7 @@ export default function RequirementTimeline({
             <span className="truncate text-xs font-medium">
               {executorMember?.name ?? task.executorKey ?? "执行者"}
             </span>
+            <RoleBadge role={role} />
             <span
               data-testid={`requirement-timeline-time-${task.id}`}
               className="ml-auto shrink-0 text-xs text-muted-foreground"

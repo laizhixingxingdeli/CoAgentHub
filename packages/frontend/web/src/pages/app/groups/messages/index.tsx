@@ -1,5 +1,5 @@
 import { Archive, ArrowLeft, Pencil, Settings } from "lucide-react";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRoute } from "wouter";
 import { RequirementWorkspace } from "@/components/layout/context-panel/requirement-workspace";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   colorForId as participantColor,
 } from "@/lib/avatar-color";
 import { t } from "@/lib/i18n";
+import { GroupSettingsContent } from "../members";
 
 // Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
 // `participantColor`/`PARTICIPANT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
@@ -23,6 +24,8 @@ import { t } from "@/lib/i18n";
 export default function GroupMessagesPage() {
   const [, params] = useRoute("/groups/:id");
   const groupId = params?.id;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
 
   // Ticket 23: 进入消息页即清零该群侧栏未读徽标。常驻消息流 hook(右栏
   // ContextPanel 顶层)不负责此项 —— 成员页也共享该面板,进入成员页不应误清零。
@@ -46,6 +49,14 @@ export default function GroupMessagesPage() {
     isDeleted,
     error,
   } = useGroupHeader(groupId);
+
+  const closeSettings = useCallback(() => {
+    if (settingsDirty && !window.confirm("有未保存的编辑,确定关闭吗?")) {
+      return;
+    }
+    setSettingsOpen(false);
+    setSettingsDirty(false);
+  }, [settingsDirty]);
 
   return (
     <div className="mx-auto flex h-[calc(100dvh-4rem)] w-full max-w-[1440px] flex-col px-4 sm:px-6">
@@ -115,14 +126,16 @@ export default function GroupMessagesPage() {
           </h2>
         )}
         {groupId && (
-          <a
-            href={`/groups/${groupId}/settings`}
+          <button
+            type="button"
+            data-testid="open-group-settings"
+            onClick={() => setSettingsOpen(true)}
             aria-label="群设置"
             title="群设置"
             className="inline-flex shrink-0 items-center justify-center rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             <Settings className="size-4" />
-          </a>
+          </button>
         )}
       </div>
 
@@ -148,6 +161,69 @@ export default function GroupMessagesPage() {
           listClassName="min-w-48 w-96 max-w-96 shrink"
         />
       )}
+      {groupId && settingsOpen && (
+        <GroupSettingsDrawer
+          groupId={groupId}
+          onClose={closeSettings}
+          onDirtyChange={setSettingsDirty}
+        />
+      )}
+    </div>
+  );
+}
+
+function GroupSettingsDrawer({
+  groupId,
+  onClose,
+  onDirtyChange,
+}: {
+  groupId: string;
+  onClose: () => void;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      data-testid="group-settings-drawer"
+      className="fixed inset-0 z-50 flex justify-end"
+    >
+      <button
+        type="button"
+        aria-label="关闭群设置遮罩"
+        className="absolute inset-0 cursor-default bg-black/40"
+        onClick={onClose}
+      />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="群设置"
+        className="relative z-10 flex h-full w-full max-w-[480px] flex-col overflow-y-auto border-l bg-background shadow-2xl sm:w-[480px]"
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b bg-background/95 px-4 py-3 backdrop-blur">
+          <h2 className="text-base font-semibold">群设置</h2>
+          <button
+            type="button"
+            data-testid="close-group-settings"
+            aria-label="关闭群设置"
+            className="rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <GroupSettingsContent
+          groupId={groupId}
+          embedded
+          onDirtyChange={onDirtyChange}
+        />
+      </aside>
     </div>
   );
 }

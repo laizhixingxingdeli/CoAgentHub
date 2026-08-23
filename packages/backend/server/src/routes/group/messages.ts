@@ -14,7 +14,7 @@ import {
   maybeDispatchExecutorTask,
   refreshA2AActivity,
 } from "@server/lib/executor-task";
-import { findExecutorByParticipantName } from "@server/lib/executors";
+import { findExecutorByParticipant } from "@server/lib/executors";
 import type { ParticipantType } from "@server/lib/group-visibility";
 import { resolveLocalUser } from "@server/lib/local-participant";
 import {
@@ -188,7 +188,7 @@ app
         });
         const isExecutorTarget =
           targetParticipant !== undefined &&
-          (await findExecutorByParticipantName(db, targetParticipant.name));
+          (await findExecutorByParticipant(db, targetParticipant));
         if (
           isExecutorTarget &&
           !membership.roles.some((r) =>
@@ -251,13 +251,13 @@ app
         const targetParticipantForDispatch =
           await db.query.participant.findFirst({
             where: (t, { eq }) => eq(t.id, audienceRef),
-            columns: { name: true },
+            columns: { name: true, executorKey: true },
           });
         const isExecutorTarget =
           targetParticipantForDispatch !== undefined &&
-          (await findExecutorByParticipantName(
+          (await findExecutorByParticipant(
             db,
-            targetParticipantForDispatch.name,
+            targetParticipantForDispatch,
           )) !== undefined;
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
         // coordinator/human 且**非执行器 participant** 的发送者可携带
@@ -271,9 +271,9 @@ app
         // (协调者/检视者 runtime)允许携带——不再按"是否在执行器配置表中"一刀切。
         const senderExecutor =
           senderParticipantForDispatcher !== undefined
-            ? await findExecutorByParticipantName(
+            ? await findExecutorByParticipant(
                 db,
-                senderParticipantForDispatcher.name,
+                senderParticipantForDispatcher,
               )
             : undefined;
         const senderIsPureExecutor =

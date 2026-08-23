@@ -16,6 +16,7 @@ import {
 import { participantIdentityHeaders } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
+import { RoleBadge } from "@/pages/app/groups/messages/types";
 
 /** Active-group row shape from GET /api/groups?status=active (ticket 23). */
 type ConversationItem = {
@@ -24,6 +25,7 @@ type ConversationItem = {
   status: "active" | "archived";
   memberCount: number;
   createdAt: string;
+  memberRoles?: string[];
 };
 
 /** 微信/QQ-style preview: clip to ~12 characters. */
@@ -137,7 +139,17 @@ export function ConversationList() {
                         {group.title.slice(0, 1).toUpperCase()}
                       </span>
                       <span className="grid min-w-0 flex-1 gap-0.5 text-left">
-                        <span className="truncate text-sm">{group.title}</span>
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span className="truncate text-sm">
+                            {group.title}
+                          </span>
+                          {group.memberRoles?.includes("reviewer") &&
+                            group.memberRoles.includes("coordinator") && (
+                              <span className="shrink-0" title="三层协作">
+                                <RoleBadge role="reviewer" />
+                              </span>
+                            )}
+                        </span>
                         <span className="flex items-center justify-between gap-2">
                           <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">
                             {preview ? truncatePreview(preview) : "暂无消息"}
