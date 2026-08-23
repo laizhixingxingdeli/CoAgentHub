@@ -5,7 +5,6 @@ import {
   RotateCcw,
   Search,
   SearchX,
-  Settings,
   Trash2,
   Users,
   X,
@@ -13,14 +12,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useGroupsPage } from "@/hooks/use-groups-page";
-import { useIdentityPanel } from "@/hooks/use-identity-panel";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { RoleBadge } from "./messages/types";
 
 /**
- * Group list page (ticket 02): shows all groups with status and member
- * counts, lets the operator create a new group and archive finished ones.
+ * Group list page (ticket 02): shows all groups with task state signals,
+ * lets the operator create a new group and archive finished ones.
  * The web viewer acts as a human participant: an identity (participant id) can
  * be selected at the top of the page, and every request carries it as
  * `X-Participant-Id` so the identity middleware treats the browser session as
@@ -64,6 +62,7 @@ export default function GroupsPage() {
   const {
     navigate,
     groups,
+    taskSignals,
     loading,
     total,
     loadingMore,
@@ -91,22 +90,6 @@ export default function GroupsPage() {
     handleDelete,
     loadMore,
   } = useGroupsPage();
-  // 身份面板已搬去侧栏(IdentitySwitcher);本页仅保留「参与方设置」区,
-  // 绑定状态与侧栏共享 useIdentityPanel(store 为唯一数据源)。
-  const {
-    boundParticipantId,
-    participantInfo,
-    settingsOpen,
-    setSettingsOpen,
-    nameInput,
-    setNameInput,
-    deviceInput,
-    setDeviceInput,
-    savingSettings,
-    settingsMessage,
-    settingsError,
-    handleSaveSettings,
-  } = useIdentityPanel();
 
   return (
     <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">
@@ -153,76 +136,6 @@ export default function GroupsPage() {
               : t("groups.count.total", { count: groups.length })}
         </p>
       </div>
-
-      {/* Participant 设置(ticket 20):绑定后可见,展示并编辑自己的注册信息 */}
-      {boundParticipantId && participantInfo && (
-        <div className="mb-6 rounded-lg border bg-card p-4">
-          <button
-            type="button"
-            onClick={() => setSettingsOpen((v) => !v)}
-            className="flex w-full items-center justify-between text-sm font-medium"
-            aria-expanded={settingsOpen}
-          >
-            <span className="inline-flex items-center gap-2">
-              <Settings className="size-4" />
-              {t("groups.settings.title")}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {settingsOpen ? t("common.collapse") : t("common.expand")}
-            </span>
-          </button>
-          {settingsOpen && (
-            <div className="mt-3 flex flex-col gap-3">
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>
-                  {t("groups.settings.name")}
-                  {participantInfo.name}
-                </span>
-                <span>
-                  {t("groups.settings.device")}
-                  {participantInfo.device ?? "-"}
-                </span>
-              </div>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="text"
-                  placeholder={t("groups.settings.namePlaceholder")}
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  aria-label={t("groups.settings.nameAria")}
-                  className="sm:max-w-xs"
-                />
-                <Input
-                  type="text"
-                  placeholder={t("groups.settings.devicePlaceholder")}
-                  value={deviceInput}
-                  onChange={(e) => setDeviceInput(e.target.value)}
-                  aria-label={t("groups.settings.deviceAria")}
-                  className="sm:max-w-xs"
-                />
-                <Button
-                  size="sm"
-                  onClick={handleSaveSettings}
-                  disabled={savingSettings}
-                  className="shrink-0"
-                >
-                  {savingSettings ? t("common.saving") : t("common.save")}
-                </Button>
-              </div>
-              {settingsMessage && (
-                <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
-                  {settingsMessage}
-                </div>
-              )}
-              {settingsError && (
-                <div className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-200">
-                  {settingsError}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Create group */}
       <div className="mb-6 flex flex-col gap-2 sm:flex-row">
@@ -329,7 +242,14 @@ export default function GroupsPage() {
               {groups.map((group) => (
                 <li
                   key={group.id}
-                  className="group flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-3 transition-colors hover:bg-muted/60"
+                  className={cn(
+                    "group flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-transparent px-2 py-3 transition-colors hover:bg-muted/60",
+                    group.status === "archived" &&
+                      !taskSignals[group.id]?.hasAttention &&
+                      "opacity-55 grayscale",
+                    taskSignals[group.id]?.hasAttention &&
+                      "border-red-300/70 bg-red-50/60 dark:border-red-900/70 dark:bg-red-950/20",
+                  )}
                 >
                   {/* 状态圆点:active 用 --status-running + 淡色光晕(同 RequirementStepper
                       running 手法),archived 用中性灰 --border。 */}
@@ -395,11 +315,45 @@ export default function GroupsPage() {
                         />
                       </button>
                     )}
-                    {/* 摘要行:成员数 + 最近消息预览(需求维度摘要留待后续票,当前接口无该数据)。 */}
+                    {/* 摘要行:任务信号 + 最近消息预览。成员数是配置,不占状态位置。 */}
                     <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                      <span className="shrink-0">
-                        {t("groups.memberCount", { count: group.memberCount })}
-                      </span>
+                      {(() => {
+                        const signal = taskSignals[group.id];
+                        const attention = signal?.hasAttention;
+                        const running = !attention && signal?.hasRunning;
+                        return (
+                          <span
+                            data-testid={`group-task-signal-${group.id}`}
+                            className={cn(
+                              "inline-flex shrink-0 items-center gap-1 font-medium",
+                              attention
+                                ? "text-red-700 dark:text-red-300"
+                                : running
+                                  ? "text-status-running"
+                                  : "text-muted-foreground",
+                            )}
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={cn(
+                                "size-1.5 rounded-full",
+                                attention
+                                  ? "bg-red-600"
+                                  : running
+                                    ? "bg-status-running animate-pulse motion-reduce:animate-none"
+                                    : "bg-muted-foreground/50",
+                              )}
+                            />
+                            {attention
+                              ? t("groups.task.attention")
+                              : running
+                                ? t("groups.task.running")
+                                : signal?.hasTasks
+                                  ? t("groups.task.complete")
+                                  : t("groups.task.none")}
+                          </span>
+                        );
+                      })()}
                       {group.memberRoles && (
                         <span
                           data-testid={`group-mode-${group.id}`}

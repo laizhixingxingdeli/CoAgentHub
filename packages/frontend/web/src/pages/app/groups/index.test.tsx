@@ -53,12 +53,20 @@ const PARTICIPANTS = [
   { id: "participant-9", name: "atomcode-cli", device: null },
 ];
 
-function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
+function groupsFetchMock(
+  groups: unknown[] = GROUPS,
+  registerError?: number,
+  taskOverrides?: Record<string, unknown[]>,
+) {
   // Stateful list: a successful POST create appends, archive flips status.
   // The list handler also honors ?status= so tab filtering can be asserted.
   let current = [...groups] as Array<Record<string, unknown>>;
   // Ticket 29: 状态化 participant 名册 — 注册会追加,供身份面板「使用中」标记断言。
   const roster: Array<Record<string, unknown>> = [...PARTICIPANTS];
+  const tasksByGroup: Record<string, unknown[]> = taskOverrides ?? {
+    "group-1": [{ id: "task-1", status: "running", diffSummary: null }],
+    "group-2": [{ id: "task-2", status: "failed", diffSummary: null }],
+  };
   return createFetchMock([
     {
       // Ticket 28: participant 注册(POST /api/participants,公开端点)返回 id,
@@ -81,6 +89,15 @@ function groupsFetchMock(groups: unknown[] = GROUPS, registerError?: number) {
         };
         roster.push(created);
         return jsonResponse(created);
+      },
+    },
+    {
+      // GroupsPage fetches task rows separately because the groups endpoint
+      // must keep its existing response shape and filtering behavior.
+      match: (url) => /^\/api\/groups\/[^/]+\/tasks(?:\?|$)/.test(String(url)),
+      respond: (url) => {
+        const groupId = String(url).split("/")[3];
+        return jsonResponse(tasksByGroup[groupId] ?? []);
       },
     },
     {
@@ -263,8 +280,8 @@ describe("GroupsPage 群组列表", () => {
     // Status badges
     expect(screen.getAllByText("进行中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已归档").length).toBeGreaterThan(0);
-    // Member counts (mobile cards)
-    expect(screen.getAllByText(/2 名成员|3 名成员/)).not.toHaveLength(0);
+    expect(screen.getAllByText("任务运行中").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("需要关注").length).toBeGreaterThan(0);
   });
 
   it("无群组时显示空态(图标 + 引导文案)", async () => {
@@ -760,38 +777,15 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
   });
 });
 
-describe("GroupsPage 参与方设置 (ticket 20)", () => {
-  it("绑定后显示设置区,保存调用 PATCH /api/participants/:id", async () => {
+describe("GroupsPage 参与方设置已移除", () => {
+  it("列表页不再渲染参与方设置卡片", async () => {
     localStorage.setItem(PARTICIPANT_ID_KEY, "tok-20");
     localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
-    const fetchMock = stubFetch(groupsFetchMock());
+    stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 
-    // 设置区在绑定 + 拉取到自己信息后出现;展示 name/device(只读)。
-    const settingsButton = await screen.findByRole("button", {
-      name: /参与方设置/,
-    });
-    fireEvent.click(settingsButton);
-    expect(screen.getByText(/名称:hermes-mac/)).toBeInTheDocument();
-
-    // 修改名称并保存;device 沿用当前值。
-    const nameInput = screen.getByLabelText("参与方名称") as HTMLInputElement;
-    fireEvent.change(nameInput, { target: { value: "hermes-mac-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      const call = fetchMock.mock.calls.find(
-        ([url, init]) =>
-          init?.method === "PATCH" &&
-          String(url).includes("/api/participants/"),
-      );
-      expect(call).toBeDefined();
-      expect(String(call![0])).toBe("/api/participants/participant-1");
-      expect(JSON.parse(String(call![1]?.body))).toEqual({
-        name: "hermes-mac-2",
-        device: "mac-mini",
-      });
-    });
+    await screen.findAllByText("模型训练任务");
+    expect(screen.queryByRole("button", { name: /参与方设置/ })).toBeNull();
   });
 });
 
@@ -974,7 +968,9 @@ describe("GroupsPage 窄屏适配 (ticket 34)", () => {
       r.textContent?.includes("模型训练任务"),
     )!;
     expect(activeRow.querySelector(".bg-status-running")).not.toBeNull();
-    expect(within(activeRow).getByText(/名成员/)).toBeInTheDocument();
+    expect(
+      within(activeRow).getByTestId("group-task-signal-group-1"),
+    ).toHaveTextContent("任务运行中");
     expect(
       within(activeRow).getByTestId("group-mode-group-1"),
     ).toHaveTextContent("协调者");
@@ -998,6 +994,32 @@ describe("GroupsPage 窄屏适配 (ticket 34)", () => {
     const root = document.querySelector(".w-full");
     expect(root?.className).toContain("p-4");
     expect(root?.className).toContain("sm:p-6");
+  });
+
+  it("任务全部完成时保持安静,归档行降低对比度且仍可读", async () => {
+    stubFetch(
+      groupsFetchMock(GROUPS, undefined, {
+        "group-1": [{ id: "task-1", status: "done", diffSummary: null }],
+        "group-2": [{ id: "task-2", status: "done", diffSummary: null }],
+      }),
+    );
+    renderWithProviders(<GroupsPage />, "/groups");
+    await screen.findAllByText("模型训练任务");
+
+    const rows = screen.getAllByRole("listitem");
+    const activeRow = rows.find((r) =>
+      r.textContent?.includes("模型训练任务"),
+    )!;
+    expect(
+      within(activeRow).getByTestId("group-task-signal-group-1"),
+    ).toHaveTextContent("已完成");
+    expect(within(activeRow).queryByText(/名成员/)).toBeNull();
+
+    const archivedRow = rows.find((r) =>
+      r.textContent?.includes("已完成的评审"),
+    )!;
+    expect(archivedRow.className).toContain("opacity-55");
+    expect(archivedRow.textContent).toContain("已完成的评审");
   });
 
   it("创建群组输入 + 按钮:窄屏纵排(sm 起横排),按钮不溢出", async () => {

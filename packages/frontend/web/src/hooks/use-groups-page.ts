@@ -15,11 +15,49 @@ type GroupItem = {
   memberRoles?: string[];
 };
 
+export type GroupTaskSignal = {
+  hasRunning: boolean;
+  hasAttention: boolean;
+  hasTasks: boolean;
+};
+
+type GroupTask = {
+  status?: string;
+  diffSummary?: unknown;
+};
+
 /** Status filter tabs; "all" fetches without a ?status= param. */
 type StatusFilter = "all" | "active" | "archived";
 
 /** 群列表分页:首屏/重置每次取一页,「加载更多」按此步长追加。 */
 const PAGE_SIZE = 20;
+
+const EMPTY_TASK_SIGNAL: GroupTaskSignal = {
+  hasRunning: false,
+  hasAttention: false,
+  hasTasks: false,
+};
+
+function summarizeTasks(tasks: GroupTask[]): GroupTaskSignal {
+  return {
+    hasRunning: tasks.some((task) => task.status === "running"),
+    hasAttention: tasks.some((task) => {
+      if (task.status === "failed") {
+        return true;
+      }
+      if (
+        typeof task.diffSummary !== "object" ||
+        task.diffSummary === null ||
+        Array.isArray(task.diffSummary)
+      ) {
+        return false;
+      }
+      const summary = task.diffSummary as Record<string, unknown>;
+      return summary.unconfirmed === true || summary.stallAlerted === true;
+    }),
+    hasTasks: tasks.length > 0,
+  };
+}
 
 /**
  * Turn a non-OK response into a human-readable error. The identity middleware
@@ -45,6 +83,9 @@ function throwForStatus(res: Response, sentIdentity: boolean): never {
 export function useGroupsPage() {
   const [, navigate] = useLocation();
   const [groups, setGroups] = useState<GroupItem[]>([]);
+  const [taskSignals, setTaskSignals] = useState<
+    Record<string, GroupTaskSignal>
+  >({});
   const [loading, setLoading] = useState(false);
   // 分页:total 为满足当前过滤条件的总数(由后端返回),用于判断是否还有更多;
   // loadingMore 表示「加载更多」请求进行中(按钮禁用防重复点击)。
@@ -73,6 +114,36 @@ export function useGroupsPage() {
     }
     return body.length > 30 ? `${body.slice(0, 30)}…` : body;
   };
+
+  const fetchTaskSignal = useCallback(async (groupId: string) => {
+    try {
+      const res = await fetch(`/api/groups/${groupId}/tasks?limit=100`, {
+        headers: participantIdentityHeaders(),
+      });
+      if (!res.ok) {
+        return EMPTY_TASK_SIGNAL;
+      }
+      const tasks = (await res.json()) as unknown;
+      return Array.isArray(tasks)
+        ? summarizeTasks(tasks as GroupTask[])
+        : EMPTY_TASK_SIGNAL;
+    } catch {
+      return EMPTY_TASK_SIGNAL;
+    }
+  }, []);
+
+  const fetchTaskSignals = useCallback(
+    async (items: GroupItem[]) =>
+      Object.fromEntries(
+        await Promise.all(
+          items.map(
+            async (group) =>
+              [group.id, await fetchTaskSignal(group.id)] as const,
+          ),
+        ),
+      ),
+    [fetchTaskSignal],
+  );
 
   const loadGroups = useCallback(async () => {
     setLoading(true);
@@ -105,6 +176,7 @@ export function useGroupsPage() {
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
         setGroups(data.items);
+        setTaskSignals(await fetchTaskSignals(data.items));
         setTotal(data.total);
       }
     } catch (e) {
@@ -120,7 +192,7 @@ export function useGroupsPage() {
         setLoading(false);
       }
     }
-  }, [statusFilter, debouncedQuery]);
+  }, [statusFilter, debouncedQuery, fetchTaskSignals]);
 
   // 「加载更多」:按当前已加载数量作为 offset 追加下一页;仅当前过滤条件
   // 未变化时提交结果,避免与新的搜索/过滤请求交错。
@@ -149,7 +221,12 @@ export function useGroupsPage() {
       }
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
+        const nextTaskSignals = await fetchTaskSignals(data.items);
         setGroups((prev) => [...prev, ...data.items]);
+        setTaskSignals((prev) => ({
+          ...prev,
+          ...nextTaskSignals,
+        }));
         setTotal(data.total);
       }
     } catch (e) {
@@ -165,7 +242,13 @@ export function useGroupsPage() {
         setLoadingMore(false);
       }
     }
-  }, [statusFilter, debouncedQuery, groups.length, loadingMore]);
+  }, [
+    statusFilter,
+    debouncedQuery,
+    groups.length,
+    loadingMore,
+    fetchTaskSignals,
+  ]);
 
   useEffect(() => {
     loadGroups();
@@ -351,6 +434,7 @@ export function useGroupsPage() {
   return {
     navigate,
     groups,
+    taskSignals,
     loading,
     total,
     loadingMore,
