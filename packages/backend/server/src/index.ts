@@ -22,7 +22,6 @@ import { corsOrigins, serverPort } from "./lib/config";
 import type { DataBase } from "./lib/database";
 import db from "./lib/database";
 import { recoverInterruptedTasks } from "./lib/executor-task";
-import { ensureExecutorParticipants } from "./lib/executors";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
 import { startServer } from "./lib/server-startup";
@@ -151,13 +150,19 @@ async function run() {
   // read-only check; applying migrations remains an explicit operator action.
   await assertNoPendingMigrations(db);
 
-  // Bind first. Recovery and executor participant registration write to the
-  // database, so they must only run after this process owns the port.
+  // Bind first. Recovery writes to the database, so it must only run after
+  // this process owns the port.
+  //
+  // Built-in executors are intentionally NOT auto-registered as participants
+  // here (removed per user request). Onboarding is always an explicit step
+  // via POST /api/participants, which already resolves executorKey by
+  // matching the registered name against known executor configs
+  // (findExecutorKeyByInitialName in lib/executors.ts) — so routing works
+  // correctly for a manually-onboarded participant without this callback.
   const server = await startServer({
     fetch: app.fetch,
     port,
     recoverInterruptedTasks: () => recoverInterruptedTasks(db),
-    ensureExecutorParticipants: () => ensureExecutorParticipants(db),
     onListening: (listeningServer, listeningPort) => {
       const address = listeningServer.address();
       console.log(

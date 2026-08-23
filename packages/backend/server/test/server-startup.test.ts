@@ -64,4 +64,26 @@ describe("server startup ordering", () => {
     expect(calls).toEqual(["recover", "ensure"]);
     expect((server as unknown as FakeServer).listenedPort).toBe(port);
   });
+
+  it("boots without ensureExecutorParticipants (built-ins are no longer auto-registered)", async () => {
+    const port = 31_003;
+    const server = fakeServer();
+    let recovered = 0;
+
+    const startup = startServer({
+      fetch: () => new Response("ok"),
+      port,
+      serverFactory: () => server,
+      recoverInterruptedTasks: async () => {
+        recovered += 1;
+      },
+      // ensureExecutorParticipants intentionally omitted — matches
+      // production wiring in index.ts.
+    });
+    queueMicrotask(() => server.emit("listening"));
+    await startup;
+
+    expect(recovered).toBe(1);
+    expect((server as unknown as FakeServer).listenedPort).toBe(port);
+  });
 });

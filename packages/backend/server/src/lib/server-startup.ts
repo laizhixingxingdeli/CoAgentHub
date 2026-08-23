@@ -6,7 +6,16 @@ interface StartServerOptions {
   port: number;
   serverFactory?: () => HttpServer;
   recoverInterruptedTasks: () => Promise<unknown>;
-  ensureExecutorParticipants: () => Promise<unknown>;
+  /**
+   * Omitted by production wiring (index.ts): built-in executors are no longer
+   * auto-registered as participants at boot. Onboarding is now always an
+   * explicit step (POST /api/participants), which already resolves
+   * executorKey by matching the registered name against known executor
+   * configs (see findExecutorKeyByInitialName) — so manual onboarding wires
+   * up routing correctly without this callback. Kept optional so tests and
+   * any future admin "resync" flow can still opt in.
+   */
+  ensureExecutorParticipants?: () => Promise<unknown>;
   onListening?: (server: HttpServer, port: number) => void;
 }
 
@@ -34,13 +43,15 @@ export async function startServer({
     console.warn("[executor] task recovery failed, continuing startup:", err);
   }
 
-  try {
-    await ensureExecutorParticipants();
-  } catch (err) {
-    console.warn(
-      "[executor] participant auto-registration failed, continuing:",
-      err,
-    );
+  if (ensureExecutorParticipants) {
+    try {
+      await ensureExecutorParticipants();
+    } catch (err) {
+      console.warn(
+        "[executor] participant auto-registration failed, continuing:",
+        err,
+      );
+    }
   }
 
   return server;
