@@ -47,7 +47,7 @@ export function RequirementControlBar({
       data-testid="requirement-control-bar"
       className="flex shrink-0 flex-col gap-1 border-b px-4 py-2"
     >
-      <span className="text-xs font-medium">{requirement.label} · 控制</span>
+      <span className="text-xs font-medium">控制</span>
       {requirement.tasks.map((task) => {
         const busy = commandSending === task.id;
         // 与 TaskPanel 同款判定:queued/running 可停止;done/failed 且带 checkpoint

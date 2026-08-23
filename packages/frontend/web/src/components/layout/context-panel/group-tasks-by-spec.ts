@@ -83,26 +83,60 @@ export function stepStatusFromTask(status: TaskStatus): StepStatus {
  * 计算一条需求的展示标题:
  * - 有 specRef → 从 specRef 提取文件名去掉扩展名(更稳定的可读标题,例如
  *   "specs/auth/login.md" → "login")。specRef 可能是完整路径、带或不带扩展名。
- * - specRef 为 null(旧任务)→ 用最早那条任务的 id 兜底(TaskItem 没有 brief
- *   字段;UI 后续可接消息流把正文摘要补进 label)。
+ * - specRef 为 null(旧任务)→ 用最早那条任务的 id 兜底。
  */
+const TEMPLATE_TITLES = new Set(["coagenthub task", "coagenthub 任务"]);
+const GOAL_SECTION_HEADING = /^#{2,6}\s*(?:goal|目标|任务内容)\s*$/i;
+const MAX_TITLE_LENGTH = 64;
+
+function formatTitle(value: string): string | null {
+  const title = value.replace(/\s+/g, " ").trim();
+  if (!title || title.startsWith("```")) return null;
+  return title.length > MAX_TITLE_LENGTH
+    ? `${title.slice(0, MAX_TITLE_LENGTH)}…`
+    : title;
+}
+
+function titleFromFirstLine(line: string): string | null {
+  const title = line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^(?:任务|task)\s*[:：]\s*/i, "")
+    .trim();
+  if (TEMPLATE_TITLES.has(title.toLocaleLowerCase())) return null;
+  return formatTitle(title);
+}
+
+function titleFromGoalSection(lines: string[]): string | null {
+  const goalIndex = lines.findIndex((line) => GOAL_SECTION_HEADING.test(line));
+  if (goalIndex === -1) return null;
+  let goalLine: string | null = null;
+  for (const line of lines.slice(goalIndex + 1)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) break;
+    if (trimmed) {
+      goalLine = trimmed;
+      break;
+    }
+  }
+  if (!goalLine) return null;
+  const firstSentenceEnd = goalLine.search(/[。！？.!?]/);
+  return formatTitle(
+    firstSentenceEnd === -1
+      ? goalLine
+      : goalLine.slice(0, firstSentenceEnd + 1),
+  );
+}
+
 export function deriveBriefTitle(
   brief: string | null | undefined,
 ): string | null {
-  const briefLine = brief
-    ?.split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (briefLine && !briefLine.startsWith("##")) {
-    const title = briefLine
-      .replace(/^#{1,6}\s*/, "")
-      .replace(/^(?:任务|task)\s*[:：]\s*/i, "")
-      .trim();
-    if (title && title.length <= 160 && !title.startsWith("```")) {
-      return title.length > 64 ? `${title.slice(0, 64)}…` : title;
-    }
+  const lines = brief?.split(/\r?\n/) ?? [];
+  const firstLine = lines.map((line) => line.trim()).find(Boolean);
+  if (firstLine && !firstLine.startsWith("##")) {
+    const title = titleFromFirstLine(firstLine);
+    if (title) return title;
   }
-  return null;
+  return titleFromGoalSection(lines);
 }
 
 export function deriveLabel(tasks: TaskItem[]): string {

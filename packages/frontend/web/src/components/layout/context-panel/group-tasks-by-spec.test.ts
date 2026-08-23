@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import {
+  deriveBriefTitle,
   deriveLabel,
   groupTasksBySpec,
   stepStatusFromTask,
@@ -290,5 +291,83 @@ describe("deriveLabel", () => {
         }),
       ]),
     ).toBe("internal-key");
+  });
+
+  it.each(["# CoAgentHub Task", "# CoAgentHub 任务"])(
+    "模板标题 %s 改用 Goal 段首句",
+    (templateTitle) => {
+      expect(
+        deriveLabel([
+          makeTask({
+            id: "templated",
+            specRef: "specs/internal-key.md",
+            brief: `${templateTitle}\n\n## Goal\n修复任务标题的可读性。后续说明不应进入标题。`,
+          }),
+        ]),
+      ).toBe("修复任务标题的可读性。");
+    },
+  );
+
+  it("保留用户手写的 markdown 任务标题", () => {
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "handwritten",
+          specRef: "specs/internal-key.md",
+          brief: "# 任务:修 MCP 契约两缺陷\n\n## Goal\n不应覆盖手写标题",
+        }),
+      ]),
+    ).toBe("修 MCP 契约两缺陷");
+  });
+
+  it("无 Goal 时回落 specRef,完全无信息时回落任务 id", () => {
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "with-spec",
+          specRef: "specs/task-title-readability.md",
+          brief: "# CoAgentHub Task\n\n## Scope\n只改前端",
+        }),
+      ]),
+    ).toBe("task-title-readability");
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "task-id-fallback",
+          specRef: null,
+          brief: "# CoAgentHub 任务\n\n## 范围\n只改前端",
+        }),
+      ]),
+    ).toBe("task-id-fallback");
+  });
+
+  it("空 Goal 段不借用下一段内容", () => {
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "empty-goal",
+          specRef: "specs/empty-goal.md",
+          brief: "# CoAgentHub Task\n\n## Goal\n\n## Scope\n这不是任务标题",
+        }),
+      ]),
+    ).toBe("empty-goal");
+  });
+
+  it.each(["目标", "任务内容"])("支持 ## %s 段", (heading) => {
+    expect(
+      deriveLabel([
+        makeTask({
+          id: "localized-goal",
+          specRef: "specs/localized-goal.md",
+          brief: `# CoAgentHub 任务\n\n## ${heading}\n从本段提取标题`,
+        }),
+      ]),
+    ).toBe("从本段提取标题");
+  });
+
+  it("长标题保留足够的前半句", () => {
+    const title =
+      "让任务标题在左侧列表和阶梯标签中保持清晰可读，即使任务书正文非常长也不影响识别，并且仍然应该保留足够的前半句供人判断任务内容，避免在开头几个字就截断而失去任务语义";
+    expect(deriveBriefTitle(`# ${title}`)).toBe(`${title.slice(0, 64)}…`);
   });
 });
