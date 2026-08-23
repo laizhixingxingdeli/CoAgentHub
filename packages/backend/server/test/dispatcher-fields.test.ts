@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * Part A(任务下发者信息记录与透传):POST /groups/:id/messages 接受
@@ -33,12 +33,10 @@ writeFileSync(
 );
 chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
+process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
-const { __resetExecutorQueueForTests } = await import(
-  "../src/lib/executor-task"
-);
 
 const app = createTestApp();
 
@@ -77,10 +75,6 @@ afterAll(async () => {
 });
 
 describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与透传", () => {
-  beforeEach(() => {
-    // 清空模块级队列,避免上一个用例残留的 running/queued 影响后续断言。
-    __resetExecutorQueueForTests();
-  });
   async function registerParticipant(body: Record<string, unknown>) {
     const res = await app.request("/api/participants", {
       method: "POST",
@@ -229,14 +223,17 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
 
   it("执行器伪造 metadata:不写入(即便执行器持有 coordinator 角色)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup("下发者 C");
+    const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+    await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);
     // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
-    // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,「执行器发送的消息
-    // 即使带 metadata 也忽略」仍必须拦截。
+    // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,即使带 metadata
+    // 也必须被拦截。目标改为另一名普通执行器,避免 coordinator 任务正确进入
+    // detached 状态而无法在本测试中结束。
     await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
     const { res, json } = await postMessage(codebuddy.id, group.id, {
       body: "执行器伪造 metadata",
       audience: "participant",
-      audienceRef: codebuddy.id,
+      audienceRef: atomcode.id,
       metadata: { dispatcherSessionId: "forged-session" },
     });
     expect(res.status).toBe(200);
