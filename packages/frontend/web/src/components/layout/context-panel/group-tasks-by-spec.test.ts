@@ -4,7 +4,6 @@ import {
   deriveBriefTitle,
   deriveLabel,
   groupTasksBySpec,
-  stepStatusFromTask,
 } from "./group-tasks-by-spec";
 
 /** 构造最小可用的 TaskItem,只填分组/排序/展示所需的字段。 */
@@ -186,7 +185,7 @@ describe("groupTasksBySpec", () => {
     ]);
   });
 
-  it("steps 占位:步数 = 任务数,每步状态套用对应任务状态", () => {
+  it("阶梯固定三步,不随任务数变化并按 L1 聚合执行任务", () => {
     const tasks = [
       makeTask({
         id: "a",
@@ -208,32 +207,34 @@ describe("groupTasksBySpec", () => {
       }),
     ];
     const reqs = groupTasksBySpec(tasks);
-    expect(reqs[0].steps).toEqual(["done", "running", "failed"]);
+    expect(reqs[0].steps).toEqual(["running", "pending", "pending"]);
   });
 
-  it("running 任务映射到 running 步骤(不再笼统归进 pending)", () => {
+  it("L1 全部完成时为 done,重试次数只作为需求附属信息", () => {
     const tasks = [
       makeTask({
         id: "q",
         specRef: "specs/r.md",
-        status: "queued",
+        status: "done",
         createdAt: "2026-08-01T00:00:00.000Z",
       }),
       makeTask({
         id: "r",
         specRef: "specs/r.md",
-        status: "running",
+        status: "done",
         createdAt: "2026-08-01T01:00:00.000Z",
       }),
       makeTask({
         id: "c",
         specRef: "specs/r.md",
-        status: "cancelled",
+        status: "done",
+        retryCount: 2,
         createdAt: "2026-08-01T02:00:00.000Z",
       }),
     ];
     const reqs = groupTasksBySpec(tasks);
-    expect(reqs[0].steps).toEqual(["pending", "running", "pending"]);
+    expect(reqs[0].steps).toEqual(["done", "pending", "pending"]);
+    expect(reqs[0].retryCount).toBe(2);
   });
 
   it("空输入返回空数组", () => {
@@ -384,18 +385,6 @@ describe("groupTasksBySpec", () => {
       expect(reqs[0].id).toBe("top");
       expect(reqs[0].tasks.map((t) => t.id)).toEqual(["top", "mid", "leaf"]);
     });
-  });
-});
-
-describe("stepStatusFromTask (占位算法)", () => {
-  it("done → done", () => expect(stepStatusFromTask("done")).toBe("done"));
-  it("failed → failed", () =>
-    expect(stepStatusFromTask("failed")).toBe("failed"));
-  it("running → running(UI-04b-1:呼吸青环单独成一档)", () =>
-    expect(stepStatusFromTask("running")).toBe("running"));
-  it("queued/cancelled → pending", () => {
-    expect(stepStatusFromTask("queued")).toBe("pending");
-    expect(stepStatusFromTask("cancelled")).toBe("pending");
   });
 });
 

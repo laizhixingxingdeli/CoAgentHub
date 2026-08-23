@@ -1,5 +1,5 @@
 /**
- * 精细阶梯状态条(UI-04b-1):把一条需求的 `steps`(UI-04a 的占位数据)画成
+ * 精细阶梯状态条:把一条需求的固定三层 `steps` 画成
  * 「圆形图标 + 连接线 + 步骤标签」的横向阶梯。四种状态的图标全部用 SVG 绘制
  * (勾 / 叉 / 环),不用 emoji 或 unicode 符号:
  *
@@ -121,7 +121,7 @@ export default function RequirementStepper({
       className="flex items-start px-1 py-2"
     >
       {steps.map((step, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 阶梯步骤只有位置身份(占位数据无 id)
+        // biome-ignore lint/suspicious/noArrayIndexKey: 阶梯步骤只有层级位置身份
         <Fragment key={i}>
           {i > 0 && (
             // 连接线纵向对齐 32px 图标行的中心(mt-4);颜色取上一步状态。

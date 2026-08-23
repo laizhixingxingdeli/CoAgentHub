@@ -10,9 +10,9 @@
  *    任务状态即 L2 是否完成。
  *  - L1 执行:执行任务的 `diffSummary`(summary/tests/todo/hash/tokenUsage/
  *    claimVerification)与耗时,由下方 RequirementTimeline 呈现。
- *  - 两层模式:reviewer 与 coordinator **同时在场** = 三层,否则两层
- *    (spec v3.9 §3.14.5;不用 v3.8 的「有无 reviewer」旧判据)。两层模式下
- *    L3 显式显示为「不适用」,不静默省略。
+ *  - 三层模式要求 reviewer 与 coordinator **同时在场**
+ *    (spec v3.9 §3.14.5;不用 v3.8 的「有无 reviewer」旧判据)。缺层时
+ *    L3 显式显示「未检视·无检视者」,修复票则显示「不适用·修复」。
  *
  * 时间线从 UI-04b-1 升级起消费「消息 + 任务」合并流:父级(TasksTab)把群
  * 消息与成员传进来,RequirementTimeline 据此渲染消息卡片(谁发给谁)与任务
@@ -25,10 +25,11 @@
 import { type ReactNode, useState } from "react";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import {
-  deriveBriefTitle,
+  coordinationTaskForTasks,
+  executionTasksForRequirement,
   type Requirement,
   type StepStatus,
-  stepStatusFromTask,
+  taskStatusToStepStatus,
 } from "./group-tasks-by-spec";
 import RequirementStepper from "./RequirementStepper";
 import RequirementTimeline, {
@@ -53,8 +54,8 @@ type RequirementDetailPanelProps = {
   onRollback?: (task: Requirement["tasks"][number]) => void;
 };
 
-/** 层状态:阶梯四态之外,两层模式下的 L3 用「不适用」。 */
-export type LayerStatus = StepStatus | "na";
+/** L3 的两个中性缺层状态必须与正常四态及彼此保持可区分。 */
+export type LayerStatus = StepStatus | "na-fix" | "na-no-reviewer";
 
 /** L2 层状态:协调任务 + L2 结论文本(diffSummary.review_request.diffSummary)。 */
 export type L2State = {
@@ -71,10 +72,6 @@ export type L3State = {
   specRef: string | null;
   specHash: string | null;
 };
-
-function containsReviewRequest(task: Requirement["tasks"][number]): boolean {
-  return JSON.stringify(task.diffSummary ?? {}).includes("review_request");
-}
 
 /** diffSummary 是否整体就是 review_request 载荷({type:"review_request",…})。 */
 function isReviewRequestPayload(
@@ -118,17 +115,7 @@ export function layerModeFromMembers(members: Member[]): "three" | "two" {
  * 载荷的遗留协调任务(同 specRef 组内,无孩子)。
  */
 function deriveL2(requirement: Requirement): L2State {
-  const parentIds = new Set(
-    requirement.tasks
-      .map((task) => task.parentTaskId)
-      .filter((id): id is string => Boolean(id)),
-  );
-  const byParent = requirement.tasks.find((task) => parentIds.has(task.id));
-  const byPayload = requirement.tasks.find(
-    (task) =>
-      containsReviewRequest(task) || isReviewRequestPayload(task.diffSummary),
-  );
-  const task = byParent ?? byPayload ?? null;
+  const task = coordinationTaskForTasks(requirement.tasks);
   return { task, conclusion: reviewRequestConclusion(task) };
 }
 
@@ -219,35 +206,41 @@ function findSpecAnchor(
     : null;
 }
 
-/**
- * L3 层:review_result 载荷(v3.9 判据先行)。
- *  - 两层模式 → 「不适用」(显式,不静默省略)。
- *  - 三层模式且有 review_result → verdict pass=通过(done)/其余=未通过(failed)。
- *  - 三层模式尚无结果 → L2 已完成则「进行中」(running),否则「未开始」(pending)。
- */
+/** L3 层:review_result、修复票与双角色缺层判定。 */
 function deriveL3(
   requirement: Requirement,
   messages: MessageItem[],
   mode: "three" | "two",
   l2: L2State,
 ): L3State {
-  if (mode === "two") {
+  const anchor = findSpecAnchor(requirement, messages);
+  if (requirement.dispatchKind === "fix") {
     return {
-      status: "na",
+      status: "na-fix",
       verdict: null,
       findings: null,
       note: null,
-      specRef: null,
-      specHash: null,
+      specRef: anchor?.specRef ?? null,
+      specHash: anchor?.specHash ?? null,
     };
   }
   const taskIds = new Set(requirement.tasks.map((task) => task.id));
-  const anchor = findSpecAnchor(requirement, messages);
+  if (mode === "two") {
+    return {
+      status: "na-no-reviewer",
+      verdict: null,
+      findings: null,
+      note: null,
+      specRef: anchor?.specRef ?? null,
+      specHash: anchor?.specHash ?? null,
+    };
+  }
   for (const message of messages) {
     const result = parseReviewResult(message.body);
     if (
       result &&
-      (!result.taskId || taskIds.has(result.taskId)) &&
+      result.taskId !== null &&
+      taskIds.has(result.taskId) &&
       result.verdict
     ) {
       return {
@@ -270,13 +263,34 @@ function deriveL3(
   };
 }
 
-/** 层状态徽标配色(done/failed/running/pending 走 --status-* token;na 用中性灰)。 */
+/** 需求阶梯的固定三步状态,供左侧需求列表与详情阶梯共用。 */
+export function stepStatusesForRequirement(
+  requirement: Requirement,
+  messages: MessageItem[],
+  members: Member[],
+): StepStatus[] {
+  const mode = layerModeFromMembers(members);
+  const l2 = deriveL2(requirement);
+  const l3 = deriveL3(requirement, messages, mode, l2);
+  const l3Status: StepStatus =
+    l3.status === "na-fix" || l3.status === "na-no-reviewer"
+      ? "pending"
+      : l3.status;
+  return [
+    requirement.steps[0] ?? "pending",
+    l2.task ? taskStatusToStepStatus(l2.task.status) : "pending",
+    l3Status,
+  ];
+}
+
+/** 层状态徽标配色(done/failed/running/pending 与两种缺层状态均保留中性灰)。 */
 const LAYER_STATUS_CLASS: Record<LayerStatus, string> = {
   done: "border-status-done bg-status-done/10 text-status-done",
   failed: "border-status-failed bg-status-failed/10 text-status-failed",
   running: "border-status-running bg-status-running/10 text-status-running",
   pending: "border-muted-foreground/30 bg-muted/50 text-muted-foreground",
-  na: "border-border bg-muted text-muted-foreground",
+  "na-fix": "border-border bg-muted text-muted-foreground",
+  "na-no-reviewer": "border-border bg-muted text-muted-foreground",
 };
 
 const LAYER_STATUS_LABEL: Record<LayerStatus, string> = {
@@ -284,7 +298,8 @@ const LAYER_STATUS_LABEL: Record<LayerStatus, string> = {
   failed: "未通过",
   running: "进行中",
   pending: "未开始",
-  na: "不适用",
+  "na-fix": "不适用·修复",
+  "na-no-reviewer": "未检视·无检视者",
 };
 
 /** 长内容折叠阈值/按钮文案:与 RequirementTimeline 同款规则,不另起一套。 */
@@ -414,30 +429,42 @@ export default function RequirementDetailPanel({
   const l2 = deriveL2(requirement);
   const l3 = deriveL3(requirement, messages, mode, l2);
 
-  // 阶梯:每步 = 一条任务(含协调任务 L2),末尾追加 L3 虚拟格(三层=检视状态,
-  // 两层=「不适用」)。与详情区表达同一件事(requirement-three-layer-view R4)。
-  const stepLabels = requirement.tasks.map((task) => {
-    const executor =
-      members.find(
-        (member) => member.participantId === task.executorParticipantId,
-      )?.name ??
-      task.executorKey ??
-      "执行者";
-    return `${executor} · ${deriveBriefTitle(task.brief) || requirement.label}`;
-  });
-  const stepRoles = requirement.tasks.map((task) =>
-    roleFromMemberRoles(
-      members.find(
-        (member) => member.participantId === task.executorParticipantId,
-      )?.roles,
-    ),
-  );
-  const stepStatuses = requirement.tasks.map((task) =>
-    stepStatusFromTask(task.status),
-  );
-  stepStatuses.push(l3.status === "na" ? "pending" : l3.status);
-  stepLabels.push(l3.status === "na" ? "L3 不适用" : "L3 检视");
-  stepRoles.push(null);
+  // 阶梯固定三步:重试只作为 L1 标签的附属信息,不增加步骤。
+  const l1Tasks = executionTasksForRequirement(requirement.tasks);
+  const l1Status = requirement.steps[0] ?? "pending";
+  const l2Status = l2.task ? taskStatusToStepStatus(l2.task.status) : "pending";
+  const retrySuffix =
+    requirement.retryCount > 0 ? ` · 重试 ${requirement.retryCount} 次` : "";
+  const l1Executor = l1Tasks[0];
+  const l1Role = l1Executor
+    ? roleFromMemberRoles(
+        members.find(
+          (member) => member.participantId === l1Executor.executorParticipantId,
+        )?.roles,
+      )
+    : null;
+  const l2Role = l2.task
+    ? roleFromMemberRoles(
+        members.find(
+          (member) => member.participantId === l2.task?.executorParticipantId,
+        )?.roles,
+      )
+    : null;
+  const l3StepperStatus: StepStatus =
+    l3.status === "na-fix" || l3.status === "na-no-reviewer"
+      ? "pending"
+      : l3.status;
+  const stepStatuses: StepStatus[] = [l1Status, l2Status, l3StepperStatus];
+  const stepLabels = [
+    `L1 执行${retrySuffix}`,
+    "L2 协调",
+    l3.status === "na-fix"
+      ? "L3 不适用·修复"
+      : l3.status === "na-no-reviewer"
+        ? "L3 未检视·无检视者"
+        : "L3 检视",
+  ];
+  const stepRoles = [l1Role, l2Role, null];
 
   return (
     <div
@@ -451,18 +478,25 @@ export default function RequirementDetailPanel({
         stepRoles={stepRoles}
       />
 
-      {/* L3 检视:review_result 载荷;两层模式显式「不适用」。 */}
+      {/* L3 检视:review_result 载荷与两个独立的中性缺层状态。 */}
       <LayerCard
         testId="requirement-layer-l3"
         title="L3 检视"
         status={l3.status}
       >
-        {mode === "two" ? (
+        {l3.status === "na-fix" ? (
           <p
-            data-testid="requirement-l3-na"
+            data-testid="requirement-l3-na-fix"
             className="text-xs text-muted-foreground"
           >
-            检视者与协调者未同时在场,本群按两层模式运行,L3 不适用。
+            本票是修复票,按设计不运行 L3 检视(不适用·修复)。
+          </p>
+        ) : l3.status === "na-no-reviewer" ? (
+          <p
+            data-testid="requirement-l3-no-reviewer"
+            className="text-xs text-muted-foreground"
+          >
+            检视者与协调者未同时在场,本群按两层模式运行(未检视·无检视者)。
           </p>
         ) : l3.verdict ? (
           <>
@@ -508,7 +542,7 @@ export default function RequirementDetailPanel({
       <LayerCard
         testId="requirement-layer-l2"
         title="L2 协调"
-        status={l2.task ? stepStatusFromTask(l2.task.status) : "pending"}
+        status={l2Status}
       >
         {l2.task ? (
           <>
@@ -544,8 +578,11 @@ export default function RequirementDetailPanel({
         data-testid="requirement-layer-l1"
         className="flex flex-col gap-2"
       >
-        <span className="text-xs font-medium text-muted-foreground">
+        <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
           L1 执行与沟通记录
+          <LayerBadge status={l1Status}>
+            {`L1 ${LAYER_STATUS_LABEL[l1Status]}`}
+          </LayerBadge>
         </span>
         <RequirementTimeline
           tasks={requirement.tasks}

@@ -19,17 +19,12 @@
  */
 
 import type {
+  DispatchKind,
   TaskItem,
   TaskStatus,
 } from "@/pages/app/groups/messages/TaskPanel";
 
-/**
- * 阶梯每步的状态(占位类型)。UI-04b 会做精细的「检视 / 协调 / 执行」三层
- * 语义判定;本票只留这个承载字段,具体算法见 stepStatusFromTask 的占位实现。
- *
- * UI-04b-1 补充 "running":精细阶梯要把「正在跑」画成呼吸青环,与「还没开始」
- * 的空心灰圈区分,笼统归进 pending 会丢掉这个视觉信息。
- */
+/** 阶梯每层的状态。阶梯固定为 L1 执行、L2 协调、L3 检视三步。 */
 export type StepStatus = "done" | "failed" | "running" | "pending";
 
 /** 一条「需求」:同 specRef 任务的聚合结果。 */
@@ -44,45 +39,96 @@ export type Requirement = {
   latestTask: TaskItem;
   /** 需求状态 = 最新任务的状态。 */
   status: TaskStatus;
+  /** 需求工作类型,取组内最新任务;历史任务为 null。 */
+  dispatchKind: DispatchKind | null;
+  /** 需求下执行任务的累计重试次数,用于 L1 标签附属信息。 */
+  retryCount: number;
   /** 需求更新时间 = 最新任务的 updatedAt(可能为 null)。 */
   updatedAt: string | null;
   /** 展示用标题(见 deriveLabel)。 */
   label: string;
-  /**
-   * 阶梯每一步的状态。⚠️ 占位算法 —— 每步对应一个任务,状态直接套用该任务
-   * 的状态(done→done / failed→failed / 其余→pending)。精确的「三层还是两层」
-   * 层级判定(需读检视/协调/执行的语义)留给 UI-04b 或更后面的票,不要假装这是
-   * 最终实现。
-   */
+  /** 固定三步: L1 执行、L2 协调、L3 检视。 */
   steps: StepStatus[];
 };
 
-/** 是否应当显示为「完成」:done 视为完成。 */
-function isDone(status: TaskStatus): boolean {
-  return status === "done";
-}
-/** 是否应当显示为「失败」:failed 视为失败。 */
-function isFailed(status: TaskStatus): boolean {
-  return status === "failed";
-}
-/** 是否应当显示为「进行中」:running 视为进行中(UI-04b-1 起单独成一档)。 */
-function isRunning(status: TaskStatus): boolean {
-  return status === "running";
+/** 单个任务状态映射为层状态,供 L2 协调任务展示。 */
+export function taskStatusToStepStatus(status: TaskStatus): StepStatus {
+  if (status === "done") return "done";
+  if (status === "failed") return "failed";
+  if (status === "running") return "running";
+  return "pending";
 }
 
-/**
- * ⚠️ 占位算法(非最终实现):把单个任务的状态映射到阶梯的一步。
- * - done 任务 → "done"
- * - failed 任务 → "failed"
- * - running 任务 → "running"(UI-04b-1:呼吸青环,与未开始区分)
- * - 其余(queued/cancelled) → "pending"
- * 后续票会基于检视/协调/执行的语义替换为精确层级判定。
- */
-export function stepStatusFromTask(status: TaskStatus): StepStatus {
-  if (isDone(status)) return "done";
-  if (isFailed(status)) return "failed";
-  if (isRunning(status)) return "running";
+/** 协调任务的 review_request 载荷识别。 */
+function isReviewRequestTask(task: TaskItem): boolean {
+  return JSON.stringify(task.diffSummary ?? {}).includes("review_request");
+}
+
+/** 需求中的协调任务:父任务优先,兼容无子任务的历史 review_request。 */
+export function coordinationTaskForTasks(tasks: TaskItem[]): TaskItem | null {
+  const parentIds = new Set(
+    tasks
+      .map((task) => task.parentTaskId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  return (
+    tasks.find((task) => parentIds.has(task.id)) ??
+    tasks.find(isReviewRequestTask) ??
+    null
+  );
+}
+
+/** 需求中真正代表 L1 的执行任务,排除协调任务。 */
+export function executionTasksForRequirement(tasks: TaskItem[]): TaskItem[] {
+  const coordinationIds = new Set(
+    tasks
+      .map((task) => task.parentTaskId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  return tasks.filter(
+    (task) => !coordinationIds.has(task.id) && !isReviewRequestTask(task),
+  );
+}
+
+/** 聚合一个层的任务状态:running 优先,随后全 done,再判定未被成功重试的失败。 */
+export function aggregateTaskStatuses(statuses: TaskStatus[]): StepStatus {
+  if (statuses.length === 0) return "pending";
+  if (statuses.some((status) => status === "running")) return "running";
+  if (statuses.every((status) => status === "done")) return "done";
+
+  let lastFailed = -1;
+  let lastDone = -1;
+  for (let index = 0; index < statuses.length; index += 1) {
+    if (statuses[index] === "failed") lastFailed = index;
+    if (statuses[index] === "done") lastDone = index;
+  }
+  if (lastFailed >= 0 && lastDone <= lastFailed) return "failed";
   return "pending";
+}
+
+function retriesForTask(task: TaskItem): number {
+  const retryCount = task.retryCount ?? 0;
+  const attemptRetries = Math.max((task.attempts?.length ?? 0) - 1, 0);
+  return Math.max(retryCount, attemptRetries);
+}
+
+/** 计算需求 L1 的附属重试次数,兼容旧 API 缺少 retryCount/attempts 的数据。 */
+function retryCountForTasks(tasks: TaskItem[]): number {
+  const recorded = tasks.reduce((sum, task) => sum + retriesForTask(task), 0);
+  return recorded > 0 ? recorded : Math.max(tasks.length - 1, 0);
+}
+
+/** 从任务聚合出固定的 L1/L2/L3 三步;L3 需由消息与群成员补全。 */
+function requirementSteps(tasks: TaskItem[]): StepStatus[] {
+  const executionTasks = executionTasksForRequirement(tasks);
+  const coordinationTask = coordinationTaskForTasks(tasks);
+  return [
+    aggregateTaskStatuses(executionTasks.map((task) => task.status)),
+    coordinationTask
+      ? taskStatusToStepStatus(coordinationTask.status)
+      : "pending",
+    "pending",
+  ];
 }
 
 /**
@@ -249,10 +295,11 @@ export function groupTasksBySpec(tasks: TaskItem[]): Requirement[] {
       tasks: sorted,
       latestTask: latest,
       status: latest.status,
+      dispatchKind: latest.dispatchKind ?? null,
+      retryCount: retryCountForTasks(executionTasksForRequirement(sorted)),
       updatedAt: latest.updatedAt,
       label: deriveLabel(sorted),
-      // ⚠️ 占位:阶梯步数 = 组内任务数,每步状态直接套用对应任务的状态。
-      steps: sorted.map((t) => stepStatusFromTask(t.status)),
+      steps: requirementSteps(sorted),
     });
   }
 

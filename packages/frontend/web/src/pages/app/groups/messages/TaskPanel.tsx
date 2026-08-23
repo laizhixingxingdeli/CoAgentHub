@@ -25,6 +25,7 @@ import type { Member, MessageItem } from "./types";
 
 /** 与 GET /groups/:id/tasks 返回行对齐(server task 表行形状)。 */
 export type TaskStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type DispatchKind = "requirement" | "fix";
 
 /** 单次执行尝试(attempt 时间线,执行历史)。 */
 export type TaskAttempt = {
@@ -47,7 +48,11 @@ export type TaskItem = {
   executorParticipantId: string;
   executorKey: string | null;
   status: TaskStatus;
+  /** 工作类型分流;历史任务为 null。 */
+  dispatchKind?: DispatchKind | null;
   checkpointRef: string | null;
+  /** 服务端自动重试次数;历史任务可能缺失。 */
+  retryCount?: number;
   /** 规范驱动下发:同 specRef 的任务在 UI 合并为「需求」(UI-04)。老任务为 null。 */
   specRef: string | null;
   /** specRef 指向规范的哈希,用于变更检测。老任务为 null。 */

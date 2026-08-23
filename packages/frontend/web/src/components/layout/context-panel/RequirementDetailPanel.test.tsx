@@ -135,7 +135,7 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     ).not.toBeInTheDocument();
   });
 
-  it("有需求:顶部阶梯 + 下方时间线,阶梯步数与任务数一致", () => {
+  it("有需求:顶部阶梯固定三步 + 下方时间线", () => {
     const [requirement] = groupTasksBySpec([
       makeTask({
         id: "t-1",
@@ -161,17 +161,25 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     // 标题取 Requirement.label(specRef 文件名去扩展名)。
     expect(screen.getByText("ui-04b")).toBeInTheDocument();
     expect(screen.getByTestId("requirement-stepper")).toBeInTheDocument();
+    // L1 聚合为 running;L2/L3 各占一个固定位置。
     expect(screen.getByTestId("requirement-stepper-step-0")).toHaveAttribute(
-      "data-status",
-      "done",
-    );
-    // running 任务 → running 步骤(呼吸环),不再归进 pending。
-    expect(screen.getByTestId("requirement-stepper-step-1")).toHaveAttribute(
       "data-status",
       "running",
     );
-    // 无检视者 → 两层模式:末尾追加「L3 不适用」虚拟格(缺层显式,不静默省略)。
-    expect(screen.getByText("L3 不适用")).toBeInTheDocument();
+    expect(screen.getByTestId("requirement-stepper-step-1")).toHaveAttribute(
+      "data-status",
+      "pending",
+    );
+    expect(screen.getByTestId("requirement-stepper-step-2")).toHaveAttribute(
+      "data-status",
+      "pending",
+    );
+    expect(screen.getAllByTestId(/requirement-stepper-step-/)).toHaveLength(3);
+    // null dispatchKind 按 requirement 处理;两角色未同时在场时是可行动的未检视。
+    expect(screen.getByText("L3 未检视·无检视者")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-l3-no-reviewer"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("requirement-timeline")).toBeInTheDocument();
     expect(
       screen.getByTestId("requirement-timeline-item-t-1"),
@@ -218,7 +226,7 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     expect(
       screen.getByTestId("requirement-timeline-claim-exec-1"),
     ).toHaveAttribute("data-status", "verified");
-    // 阶梯:协调任务一步 + 执行任务一步 + L3 虚拟格 = 3 步,末尾通过。
+    // 阶梯固定为 L1 执行 + L2 协调 + L3 检视,末尾通过。
     expect(screen.getByTestId("requirement-stepper-step-0")).toHaveAttribute(
       "data-status",
       "done",
@@ -292,7 +300,7 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     );
   });
 
-  it("两层模式(无 reviewer):L3 显式「不适用」,不渲染检视载荷", () => {
+  it("两层模式(无 reviewer):L3 显式「未检视·无检视者」,不渲染检视载荷", () => {
     const [requirement] = groupTasksBySpec([
       coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
       executionTask({
@@ -308,13 +316,59 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
         members={[COORDINATOR]}
       />,
     );
-    // v3.9 判据:只有 coordinator 没有 reviewer → 两层 → L3 不适用。
-    expect(screen.getByTestId("requirement-l3-na")).toBeInTheDocument();
-    expect(screen.getByText("L3 不适用")).toBeInTheDocument();
+    // v3.9 判据:只有 coordinator 没有 reviewer → 未检视·无检视者。
+    expect(
+      screen.getByTestId("requirement-l3-no-reviewer"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("L3 未检视·无检视者")).toBeInTheDocument();
     expect(screen.queryByText("检视通过")).not.toBeInTheDocument();
     // L2 / L1 仍正常呈现。
     expect(screen.getByTestId("requirement-layer-l2")).toBeInTheDocument();
     expect(screen.getByTestId("requirement-layer-l1")).toBeInTheDocument();
+  });
+
+  it("只有 reviewer 没有 coordinator 也属于未检视·无检视者", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[REVIEWER]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-l3-no-reviewer"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("L3 未检视·无检视者")).toBeInTheDocument();
+  });
+
+  it("修复票的 L3 与无检视者状态分开呈现", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({
+        dispatchKind: "fix",
+        createdAt: "2026-08-01T09:00:00.000Z",
+      }),
+      executionTask({
+        id: "exec-fix",
+        dispatchKind: "fix",
+        parentTaskId: "l2",
+        createdAt: "2026-08-01T10:00:00.000Z",
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR]}
+      />,
+    );
+    expect(screen.getByTestId("requirement-l3-na-fix")).toBeInTheDocument();
+    expect(screen.getByText("L3 不适用·修复")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-l3-no-reviewer"),
+    ).not.toBeInTheDocument();
   });
 
   it("缺 L2(无协调任务):L2 层显式「未开始」", () => {

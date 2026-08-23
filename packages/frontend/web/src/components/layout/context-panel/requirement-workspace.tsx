@@ -10,7 +10,9 @@ import TaskPanel, {
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import { groupTasksBySpec, type Requirement } from "./group-tasks-by-spec";
 import { mergeTaskStatusChanged } from "./merge-task-status";
-import RequirementDetailPanel from "./RequirementDetailPanel";
+import RequirementDetailPanel, {
+  stepStatusesForRequirement,
+} from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
 
 /**
@@ -73,8 +75,12 @@ export function RequirementWorkspace({
   // UI-04a:把扁平任务列表按 specRef 聚合成需求(Requirement)。分组结果随
   // tasks 变化重算;顺序由分组函数保证(最新需求在数组最后)。
   const requirements = useMemo<Requirement[]>(
-    () => groupTasksBySpec(tasks),
-    [tasks],
+    () =>
+      groupTasksBySpec(tasks).map((requirement) => ({
+        ...requirement,
+        steps: stepStatusesForRequirement(requirement, messages, members),
+      })),
+    [tasks, messages, members],
   );
   // 当前选中的需求 id:默认选中数组最后一个(最新需求);任务刷新导致当前选中项
   // 失效时回落到最新,仍保持「默认选中最新」的约定。
