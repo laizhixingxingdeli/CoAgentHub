@@ -85,6 +85,8 @@ Call `coagenthub_dispatch_task` with:
 <dispatch-rules>
 
 - NEVER dispatch without **`specRef` + `specHash`** both present. If you don't have them, go back to step 1.
+- **先选目标再下发**：初次下发和限额后的改派都先读取群成员与任务状态；候选必须是本群的 executor，且**不得是你自己的 participant ID**。有空闲的非自身 executor 时，按其群内 prompt 的分工选择；不要把协调者自己当作默认回退目标。
+- 若没有健康、空闲的非自身 executor，停止下发并在群内说明阻塞原因；这需要协调者/检视者明确处置，不能静默自派。
 - The executor sees the spec reference in its task ticket and must follow it.
 - Use `planOnly: true` first to preview the task ticket before sending.
 - **`specHash` 验收钉子**: in-flight tasks are accepted against the `specHash` they were dispatched with — a later `spec_amended` does NOT retroactively change acceptance for in-flight tasks. Record the hash on the ticket; verify against that version.
@@ -153,7 +155,7 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
 
 | 改动类型 | 需要更新的文档 | 检查方式 |
 |---------|---------------|---------|
-| **数据库 Schema 变更** | `docs/architecture.md` §3 数据模型表 + 新建迁移 SQL | `git diff` 里有没有 `.sql` 文件？architecture.md 的表定义有没有同步？ |
+| **数据库 Schema 变更** | `docs/architecture.md` §3 数据模型表 + 新建迁移 SQL | `git diff` 里有没有 `.sql` 文件？architecture.md 的表定义有没有同步？L2 还必须确认目标数据库已运行迁移（`pnpm --filter @laizhixingxingdeli/database migrate`），不能只确认 SQL 文件存在。 |
 | **API 端点变更**（新增/修改/删除） | `docs/architecture.md` §4 API 全貌表 | `git diff` 里 routes/ 有没有改动？architecture.md 的 API 表有没有同步？ |
 | **架构决策变更**（技术选型/模式/重大重构） | `docs/adr/` 新建 ADR | 这是一个架构级改动吗？如果是，有没有新建 `docs/adr/000X-xxx.md`？ |
 | **开发流程变更**（环境变量/启动命令/协作方式） | `AGENTS.md` + `CONTEXT.md` | 有没有新增 env 变量？启动命令变了？AGENTS.md 和 CONTEXT.md 有没有同步？ |

@@ -24,6 +24,7 @@ import type { DataBase } from "./lib/database";
 import db from "./lib/database";
 import { recoverInterruptedTasks } from "./lib/executor-task";
 import { ensureExecutorParticipants } from "./lib/executors";
+import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
@@ -145,6 +146,10 @@ app.get(
 /* ---------- bootstrap ---------- */
 async function run() {
   const port = serverPort();
+
+  // Do not let a new build serve requests against an older schema. This is a
+  // read-only check; applying migrations remains an explicit operator action.
+  await assertNoPendingMigrations(db);
 
   // On restart, mark queued/running executor tasks as failed (the queue is
   // in-memory; persistence only exists as a failure backstop).
