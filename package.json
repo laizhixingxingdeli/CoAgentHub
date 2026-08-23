@@ -20,6 +20,7 @@
     "build:frontend": "turbo run build --filter @laizhixingxingdeli/web",
     "dev": "turbo run dev --parallel",
     "start": "turbo run start",
+    "coagenthub:init": "node scripts/coagenthub-init.mjs",
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:e2e": "playwright test",
