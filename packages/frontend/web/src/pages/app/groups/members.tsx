@@ -75,7 +75,7 @@ export function GroupSettingsContent({
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [selectedParticipantId, setSelectedParticipantId] = useState("");
-  const [selectedRoles, setSelectedRoles] = useState<GroupRole[]>(["observer"]);
+  const [selectedRoles, setSelectedRoles] = useState<GroupRole[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   // Ticket 20: 群主(createdBy)不可被移除;成员行内编辑角色的表单状态。
@@ -88,6 +88,7 @@ export function GroupSettingsContent({
   const [savedTitle, setSavedTitle] = useState("");
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectPathInput, setProjectPathInput] = useState("");
+  const [editingProjectPath, setEditingProjectPath] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [editingParticipantId, setEditingParticipantId] = useState<
     string | null
@@ -182,7 +183,7 @@ export function GroupSettingsContent({
     titleDraft !== savedTitle ||
     projectPathInput.trim().length > 0 ||
     selectedParticipantId !== "" ||
-    selectedRoles.some((role) => role !== "observer") ||
+    selectedRoles.length > 0 ||
     editingParticipantId !== null ||
     editingPromptParticipantId !== null ||
     newPrompt.trim().length > 0;
@@ -245,15 +246,31 @@ export function GroupSettingsContent({
     if (updated) {
       setProjectPath(updated.projectPath ?? path);
       setProjectPathInput("");
-      setMessage(`已绑定项目: ${updated.projectPath ?? path}`);
+      setEditingProjectPath(false);
+      setMessage(t("projectTab.bound", { path: updated.projectPath ?? path }));
     }
+  };
+
+  const handleEditProjectPath = () => {
+    if (!projectPath) {
+      return;
+    }
+    setProjectPathInput(projectPath);
+    setEditingProjectPath(true);
+  };
+
+  const handleCancelProjectPathEdit = () => {
+    setProjectPathInput("");
+    setEditingProjectPath(false);
   };
 
   const handleUnbindProject = async () => {
     const updated = await patchGroup({ projectPath: null });
     if (updated) {
       setProjectPath(null);
-      setMessage("已解绑项目");
+      setProjectPathInput("");
+      setEditingProjectPath(false);
+      setMessage(t("projectTab.unbound"));
     }
   };
 
@@ -288,7 +305,7 @@ export function GroupSettingsContent({
   };
 
   const handleAddMember = async () => {
-    if (!groupId || !selectedParticipantId) {
+    if (!groupId || !selectedParticipantId || selectedRoles.length === 0) {
       return;
     }
     setAdding(true);
@@ -315,7 +332,7 @@ export function GroupSettingsContent({
       }
       setMessage(t("members.added"));
       setSelectedParticipantId("");
-      setSelectedRoles(["observer"]);
+      setSelectedRoles([]);
       setNewPrompt("");
       await loadMembers();
     } catch (e) {
@@ -573,8 +590,8 @@ export function GroupSettingsContent({
           data-testid="group-settings-project"
           className="rounded-lg border bg-card p-4"
         >
-          <h3 className="mb-3 text-sm font-medium">项目绑定</h3>
-          {projectPath && (
+          <h3 className="mb-3 text-sm font-medium">{t("projectTab.title")}</h3>
+          {projectPath && !editingProjectPath && (
             <div className="mb-3 flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
                 {projectPath}
@@ -582,33 +599,55 @@ export function GroupSettingsContent({
               <Button
                 variant="outline"
                 size="sm"
+                onClick={handleEditProjectPath}
+                disabled={savingSettings}
+              >
+                {t("projectTab.edit")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => void handleUnbindProject()}
                 disabled={savingSettings}
               >
-                解绑
+                {t("projectTab.unbind")}
               </Button>
             </div>
           )}
-          <div className="flex gap-2">
-            <Input
-              aria-label="项目绝对路径"
-              placeholder="输入项目绝对路径"
-              value={projectPathInput}
-              onChange={(e) => setProjectPathInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  void handleSaveProjectPath();
-                }
-              }}
-            />
-            <Button
-              size="sm"
-              onClick={() => void handleSaveProjectPath()}
-              disabled={savingSettings || !projectPathInput.trim()}
-            >
-              保存
-            </Button>
-          </div>
+          {(!projectPath || editingProjectPath) && (
+            <div className="flex gap-2">
+              <Input
+                aria-label={t("projectTab.pathAria")}
+                placeholder={t("projectTab.pathPlaceholder")}
+                value={projectPathInput}
+                onChange={(e) => setProjectPathInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void handleSaveProjectPath();
+                  }
+                }}
+              />
+              <Button
+                size="sm"
+                onClick={() => void handleSaveProjectPath()}
+                disabled={savingSettings || !projectPathInput.trim()}
+              >
+                {savingSettings
+                  ? t("projectTab.processing")
+                  : t("projectTab.bind")}
+              </Button>
+              {projectPath && editingProjectPath && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCancelProjectPathEdit}
+                  disabled={savingSettings}
+                >
+                  {t("projectTab.cancel")}
+                </Button>
+              )}
+            </div>
+          )}
         </section>
       </div>
 
@@ -666,6 +705,11 @@ export function GroupSettingsContent({
               </label>
             ))}
           </div>
+          {selectedRoles.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              {t("members.selectRoleHint")}
+            </p>
+          )}
           <div className="flex flex-col gap-1.5">
             <label
               htmlFor="member-prompt"
@@ -686,7 +730,12 @@ export function GroupSettingsContent({
           <div>
             <Button
               onClick={handleAddMember}
-              disabled={adding || !selectedParticipantId || readOnly}
+              disabled={
+                adding ||
+                !selectedParticipantId ||
+                selectedRoles.length === 0 ||
+                readOnly
+              }
               title={readOnlyHint}
               size="sm"
             >

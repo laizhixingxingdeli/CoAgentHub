@@ -44,22 +44,38 @@ function membersFetchMock(
   members: unknown[] = MEMBERS,
   participants: unknown[] = PARTICIPANTS,
   groupStatus: "active" | "archived" = "active",
+  projectPath: string | null = null,
 ) {
   // Stateful roster: POST appends, PATCH updates roles/prompt, so the list
   // refresh after each action can be asserted against the DOM.
   let current = [...members] as Array<Record<string, unknown>>;
+  let currentProjectPath = projectPath;
   return createFetchMock([
     {
       // Group detail: the creator (createdBy) drives the remove-button guard;
       // status drives the archived read-only state.
-      match: (url) => String(url) === "/api/groups/group-1",
+      match: (url, init) =>
+        String(url) === "/api/groups/group-1" &&
+        (init?.method ?? "GET") === "GET",
       respond: () =>
         jsonResponse({
           id: "group-1",
           title: "模型训练任务",
           status: groupStatus,
           createdBy: "participant-1",
+          projectPath: currentProjectPath,
         }),
+    },
+    {
+      match: (url, init) =>
+        String(url) === "/api/groups/group-1" && init?.method === "PATCH",
+      respond: (_url, init) => {
+        const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (Object.hasOwn(patch, "projectPath")) {
+          currentProjectPath = (patch.projectPath as string | null) ?? null;
+        }
+        return jsonResponse({ projectPath: currentProjectPath, ...patch });
+      },
     },
     {
       match: (url) => url.endsWith("/api/participants"),
@@ -111,6 +127,55 @@ afterEach(() => {
 });
 
 describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
+  it("未选角色时提示至少选择一个角色并禁用添加", async () => {
+    stubFetch(membersFetchMock());
+    renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
+
+    expect(await screen.findByText("请至少选择一个角色")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("选择成员 participant"), {
+      target: { value: "participant-9" },
+    });
+    expect(screen.getByRole("button", { name: "添加成员" })).toBeDisabled();
+  });
+
+  it("已绑定项目点击修改时只显示一个输入框并预填当前路径", async () => {
+    const fetchMock = stubFetch(
+      membersFetchMock(MEMBERS, PARTICIPANTS, "active", "/Users/me/project"),
+    );
+    renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
+
+    const project = screen.getByTestId("group-settings-project");
+    await within(project).findByText("/Users/me/project");
+    expect(within(project).queryByRole("textbox")).toBeNull();
+
+    fireEvent.click(within(project).getByRole("button", { name: "修改" }));
+    const input = within(project).getByRole("textbox");
+    expect(input).toHaveValue("/Users/me/project");
+
+    fireEvent.change(input, { target: { value: "/Users/me/updated-project" } });
+    fireEvent.click(within(project).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url) === "/api/groups/group-1" && init?.method === "PATCH",
+      );
+      if (!call) {
+        throw new Error("project path update request was not sent");
+      }
+      expect(JSON.parse(String(call[1]?.body))).toEqual({
+        projectPath: "/Users/me/updated-project",
+      });
+    });
+
+    await waitFor(() => {
+      expect(within(project).queryByRole("textbox")).toBeNull();
+      expect(
+        within(project).getByText("/Users/me/updated-project"),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("加成员表单有「本群分工提示词」输入框,提交 POST 带 prompt 并显示在列表", async () => {
     const fetchMock = stubFetch(membersFetchMock());
     renderWithProviders(<GroupMembersPage />, "/groups/group-1/members");
@@ -120,6 +185,7 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
     fireEvent.change(screen.getByLabelText("选择成员 participant"), {
       target: { value: "participant-9" },
     });
+    fireEvent.click(screen.getAllByText("观察者")[0]);
     fireEvent.change(screen.getByLabelText("本群分工提示词(可选)"), {
       target: { value: "在本组你负责 code review,重点关注测试覆盖与可读性" },
     });
@@ -129,8 +195,10 @@ describe("GroupMembersPage 成员管理(ticket 21 prompt)", () => {
       const call = fetchMock.mock.calls.find(
         ([, init]) => init?.method === "POST",
       );
-      expect(call).toBeDefined();
-      const body = JSON.parse(String(call![1]?.body)) as Record<string, string>;
+      if (!call) {
+        throw new Error("add member request was not sent");
+      }
+      const body = JSON.parse(String(call[1]?.body)) as Record<string, string>;
       expect(body.participantId).toBe("participant-9");
       expect(body.prompt).toBe(
         "在本组你负责 code review,重点关注测试覆盖与可读性",

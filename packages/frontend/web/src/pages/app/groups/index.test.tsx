@@ -828,8 +828,7 @@ describe("GroupMembersPage 成员管理", () => {
     });
 
     fireEvent.change(select, { target: { value: "participant-9" } });
-    // Default observer is pre-checked; also pick reviewer (click the checkbox
-    // inside its label — the label text also appears in role badges).
+    // Explicitly pick reviewer; no role is pre-checked.
     const reviewerCheckbox = screen
       .getAllByRole("checkbox")
       .find((el) => el.closest("label")?.textContent === "检视者")!;
@@ -844,7 +843,7 @@ describe("GroupMembersPage 成员管理", () => {
       expect(call).toBeDefined();
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         participantId: "participant-9",
-        roles: ["observer", "reviewer"],
+        roles: ["reviewer"],
       });
     });
   });

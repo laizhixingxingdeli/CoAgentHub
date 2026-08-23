@@ -298,7 +298,7 @@ export const en: Record<DictKey, string> = {
   "members.title": "Members & roles ({count})",
   "members.pageTitle": "Group members",
   "members.subtitle":
-    "Members take on roles within the group (the same participant can hold different roles in different groups)",
+    "Manage basic information, project binding, and members and their assignments",
   "members.back": "Back to messages",
   "members.empty": "No members",
   "members.emptyHint":
@@ -311,7 +311,8 @@ export const en: Record<DictKey, string> = {
   "members.noCandidates": "No participant to add",
   "members.selectPlaceholder": "Select a participant to add…",
   "members.promptPlaceholder":
-    "In this group you are responsible for code review — focus on test coverage and readability",
+    "Example: review code, focusing on test coverage and readability",
+  "members.selectRoleHint": "Select at least one role",
   "members.editRoles": "Edit roles",
   "members.editPrompt": "Edit prompt",
   "members.removing": "Removing…",
@@ -351,6 +352,8 @@ export const en: Record<DictKey, string> = {
     "Enter an absolute project path, e.g. /Users/me/proj…",
   "projectTab.pathAria": "Project absolute path",
   "projectTab.bind": "Save",
+  "projectTab.edit": "Edit",
+  "projectTab.cancel": "Cancel",
   "projectTab.unbind": "Unbind",
   "projectTab.processing": "Processing…",
   "projectTab.bound": "Bound project:{path}",
