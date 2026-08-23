@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -409,10 +410,16 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain(
         "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
       );
-      expect(ticket).toContain("- participantId:");
+      // participantId 是接收者自己的 id(非发送者),带认证说明。
+      expect(ticket).toContain(`- participantId: ${codebuddy.id}`);
       expect(ticket).toContain(`- groupId: ${group.id}`);
       expect(ticket).toContain(`- taskId: ${task.id}`);
       expect(ticket).toContain("- apiBase: http://localhost:");
+      expect(ticket).toContain(
+        `- 认证:全信模型,请求带 HTTP 头 X-Participant-Id: ${codebuddy.id}`,
+      );
+      // 普通任务(非 detached)不应出现 detached 回写说明。
+      expect(ticket).not.toContain("这是 detached 任务");
     } finally {
       delete process.env.TICKET_CAPTURE;
     }
@@ -530,6 +537,80 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     } finally {
       if (previousApiBase === undefined) delete process.env.COAGENTHUB_API_BASE;
       else process.env.COAGENTHUB_API_BASE = previousApiBase;
+      delete process.env.TICKET_CAPTURE;
+    }
+  });
+
+  it("ReplyMode: detached 的任务书含额外回写说明(PATCH 方法 + 不回写后果)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+
+    const capture = path.join(fakeDir, "ticket-detached.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "CLI detached 任务\n## ReplyMode: detached",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      // detached 任务 spawn 后保持 running(不解析 stdout,等执行器 PATCH 回写)。
+      // 任务书在 spawn 前已写入,但 fake bin 的拷贝发生在 spawn 之后——轮询等
+      // capture 文件就绪再读,避免与 running 状态之间存在拷贝竞态。
+      const deadline = Date.now() + 10_000;
+      let taskId: string | null = null;
+      for (;;) {
+        const tasks = await listTasks(coordinator.id, group.id);
+        const t = tasks.find((x) => x.messageId === msg.id);
+        if (t && t.status === "running") {
+          taskId = t.id;
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error("detached 任务未在 10s 内进入 running");
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(taskId).not.toBeNull();
+      const captureDeadline = Date.now() + 10_000;
+      for (;;) {
+        if (existsSync(capture)) break;
+        if (Date.now() > captureDeadline) {
+          throw new Error("任务书 capture 未在 10s 内写入");
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      const ticket = readFileSync(capture, "utf8");
+      // 上下文段照常出现(detached 也是普通上下文 + 额外说明)。
+      expect(ticket).toContain(
+        "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
+      );
+      // R3:写明回写终态的方法(完整 URL 含 groupId/taskId 与 status/diffSummary)。
+      expect(ticket).toContain("这是 detached 任务。完成后必须 PATCH");
+      expect(ticket).toContain(
+        `/groups/${group.id}/tasks/${taskId}，带 status 与 diffSummary 回写终态。`,
+      );
+      // R3:写明不回写的后果(detachedTimeoutMinutes 兜底超时)。
+      expect(ticket).toContain(
+        "不回写会使任务保持 running，直到 detachedTimeoutMinutes(默认 1440 分钟)兜底超时，检视者会一直等不到结果。",
+      );
+
+      // 收尾:按任务书指引 PATCH 回写终态,避免遗留 running 任务。
+      const patch = await app.request(
+        `/api/groups/${group.id}/tasks/${taskId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({
+            status: "done",
+            diffSummary: { summary: "PATCH 回写完成" },
+          }),
+        },
+      );
+      expect(patch.status).toBe(200);
+    } finally {
       delete process.env.TICKET_CAPTURE;
     }
   });
