@@ -1,6 +1,6 @@
 # Spec: 角色标识体系 —— 现在名字压过颜色,颜色又几乎没用
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 实现通过 L3(2026-08-23);流程问题另见批次八裁决
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **前置**: `specs/participant-name-not-a-key.md`(`b68b03c`)—— 改名要先解开路由绑定
@@ -109,3 +109,20 @@
   —— **改完请肉眼确认:不再出现「Codex 执行器 · 协调者」这种自相矛盾的显示**,
   这是本票真正的验收信号
 - 改名涉及后端数据,需 build + restart;**重启前确认没有 running 任务**
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `a62b871`(含迁移 `0023_rename_executor_participants`)。
+
+- 模式判据用 **v3.9 §3.14.5「reviewer 与 coordinator 同时在场」**(`RequirementDetailPanel.tsx:106`),**未用 v3.8 旧判据**
+- participant 名字已去掉角色词(「AtomCode 执行器」→「AtomCode」)
+- 新增 `RoleBadge`(文字 + 颜色),复用既有 `roleLabel()`
+- web 260/260
+
+视觉未确认——检视者截图工具此期间持续超时。
+
+⚠️ **本票与另两票合并在同一个提交 `a62b871` 中落地**,违反「一票一提交」(`fc04c89`)。
+实现本身不受影响,记录在此以备追溯。

@@ -1,6 +1,6 @@
 # Spec: participant 名字不该是路由键
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 实现通过 L3(2026-08-23);流程问题另见批次八裁决
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **前置于**: `specs/role-identity-display.md`(改名要先解开这个绑定)
@@ -95,3 +95,15 @@
 - ⚠️ **Schema 变更须确认迁移已应用**(启动守卫会拒绝启动并列名)
 - ⚠️ **重启前先确认没有 running 任务**——`ce05c53` 已修「失败启动摧毁任务状态」,
   但正常重启仍会把 running 任务标 failed(那是设计如此)
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `a62b871`(含迁移 `0022_add_participant_executor_key`)。
+
+**唯一验收信号做到了**:`test/executor-trigger.test.ts:251`「改名后定向消息仍按稳定绑定路由到执行器配置」——改名 → 定向消息 → 任务真的路由到正确执行器配置并跑完(断言 `executorKey === "codebuddy"` 且 `status === "done"`)。路由键从 `agentName` 换成 `participant.executorKey`(`executors.ts:477`)。server 435/435。
+
+⚠️ **本票与另两票合并在同一个提交 `a62b871` 中落地**,违反「一票一提交」(`fc04c89`)。
+实现本身不受影响,记录在此以备追溯。
