@@ -76,6 +76,7 @@ import {
   type GroupPromptInfo,
   type GroupQueue,
   type QueuedRun,
+  sumAttemptTokenUsage,
 } from "./types";
 
 /** 为执行器启动失败补充能直接指向排查方向的提示。 */
@@ -302,7 +303,7 @@ export function cancelQueuedTasks(
         ex: q.ex,
       });
       clearRunTimers(q);
-      void markTaskCancelled(q.db, q.taskId, q.groupId);
+      void markTaskCancelled(q.db, q.taskId, q.groupId, q.attempts);
     }
     g.queue.length = 0;
     g.queue.push(...remaining);
@@ -424,7 +425,11 @@ async function dispatchTask(
     /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
     specHash: string | null;
     /** callback 路由信息(Part B):见 DispatchExecutorInput。 */
-    callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null;
+    callbackRef: {
+      platform?: string;
+      endpointRef?: string;
+      sessionRef?: string;
+    } | null;
   },
 ): Promise<void> {
   const {
@@ -660,7 +665,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     if (run.stopped) {
       console.log(`[executor] 任务已在 spawn 前被停止: ${taskId}`);
       clearRunTimers(run);
-      await markTaskCancelled(db, taskId, groupId);
+      await markTaskCancelled(db, taskId, groupId, run.attempts);
       return;
     }
 
@@ -954,7 +959,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             // 已回写终态(如 detached 超时先行)→ 不覆盖。
             if (!cur || cur.status !== "running") return;
             const hint = executorStartupFailureHint(ex.bin, msg);
-            await failTask(db, taskId, `执行器启动失败: ${msg}${hint}`);
+            await failTask(
+              db,
+              taskId,
+              `执行器启动失败: ${msg}${hint}`,
+              0,
+              undefined,
+              run.attempts,
+            );
             await postStatus(
               db,
               groupId,
@@ -983,9 +995,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         console.log(`[executor] 任务已停止: ${taskId}`);
         await endAttempt(run, { status: "cancelled" });
         releaseTaskOutput(taskId);
+        const tokenUsage = sumAttemptTokenUsage(run.attempts);
         const [cancelled] = await db
           .update(taskTable)
-          .set({ status: "cancelled", diffSummary: { error: "stopped" } })
+          .set({
+            status: "cancelled",
+            diffSummary: {
+              error: "stopped",
+              ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+            },
+          })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
           .returning();
         if (cancelled) {
@@ -1107,7 +1126,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           status: "done",
           summary: report.summary,
           hash: report.hash,
+          tokenUsage: report.tokenUsage,
         });
+        const tokenUsage = sumAttemptTokenUsage(run.attempts);
+        if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
         releaseTaskOutput(taskId);
         const [done] = await db
           .update(taskTable)
@@ -1185,7 +1207,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       await endAttempt(run, { status: "failed", error: msg });
       releaseTaskOutput(taskId);
       const hint = executorStartupFailureHint(ex.bin, msg);
-      await failTask(db, taskId, `${msg}${hint}`);
+      await failTask(db, taskId, `${msg}${hint}`, 0, undefined, run.attempts);
       await postStatus(
         db,
         groupId,
@@ -1345,9 +1367,14 @@ async function handleUnconfirmed(run: QueuedRun): Promise<void> {
     error: "执行器未按协议回复，结果未确认",
   });
   releaseTaskOutput(taskId);
-  await failTask(db, taskId, "执行器未按协议回复，结果未确认", run.retryCount, {
-    unconfirmed: true,
-  });
+  await failTask(
+    db,
+    taskId,
+    "执行器未按协议回复，结果未确认",
+    run.retryCount,
+    { unconfirmed: true },
+    run.attempts,
+  );
   await postStatus(
     db,
     run.groupId,
@@ -1431,9 +1458,12 @@ async function failTask(
   reason: string,
   retries = 0,
   extra?: Record<string, unknown>,
+  attempts?: TaskAttempt[],
 ): Promise<void> {
   const diffSummary: Record<string, unknown> = { error: reason, ...extra };
   if (retries > 0) diffSummary.retries = retries;
+  const tokenUsage = attempts ? sumAttemptTokenUsage(attempts) : undefined;
+  if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
   const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
   if (tail) diffSummary.outputTail = tail;
   const [failed] = await db
@@ -1467,10 +1497,12 @@ async function beginAttempt(run: QueuedRun): Promise<void> {
   }
 }
 
-/** 任务终态时更新最后一条 attempt(endedAt/status/error/summary/hash)并落库。 */
+/** 任务终态时更新最后一条 attempt(endedAt/status/error/summary/hash/tokenUsage)并落库。 */
 async function endAttempt(
   run: QueuedRun,
-  patch: Partial<Pick<TaskAttempt, "status" | "error" | "summary" | "hash">>,
+  patch: Partial<
+    Pick<TaskAttempt, "status" | "error" | "summary" | "hash" | "tokenUsage">
+  >,
 ): Promise<void> {
   const last = run.attempts[run.attempts.length - 1];
   if (!last) return;
@@ -1507,7 +1539,7 @@ async function handleFailure(
 
   if (!canRetry) {
     // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
-    await failTask(db, taskId, reason, run.retryCount);
+    await failTask(db, taskId, reason, run.retryCount, undefined, run.attempts);
     releaseTaskOutput(taskId);
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;
@@ -1525,7 +1557,7 @@ async function handleFailure(
       // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
       const msg = `${reason};回滚失败,终止重试: ${res.message}`;
       console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
-      await failTask(db, taskId, msg, run.retryCount);
+      await failTask(db, taskId, msg, run.retryCount, undefined, run.attempts);
       await postStatus(
         db,
         run.groupId,
@@ -1570,7 +1602,7 @@ async function handleFailure(
   const group = groupQueues.get(run.groupKey);
   if (!group) {
     // 组已被清空(测试重置等异常)→ 无法重试,按最终失败处理。
-    await failTask(db, taskId, reason, run.retryCount);
+    await failTask(db, taskId, reason, run.retryCount, undefined, run.attempts);
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;
   }
@@ -1622,7 +1654,14 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
   const group = groupQueues.get(run.groupKey);
   if (!group) {
     // 组已被清空(测试重置等异常)→ 无法重排,按最终失败处理(尽力而为)。
-    await failTask(db, taskId, "执行器并发冲突(403),且组队列已不可用");
+    await failTask(
+      db,
+      taskId,
+      "执行器并发冲突(403),且组队列已不可用",
+      0,
+      undefined,
+      run.attempts,
+    );
     return;
   }
   group.queue.push(run);
@@ -1761,10 +1800,7 @@ export async function resolveTestExecutor(
  */
 /** 规范驱动下发:「关联规范」段模板行(CLI ticket 与 a2a prompt 共用,
  *  避免两路漂移)。specRef 为空时应由调用方自行跳过,本函数不做判断。 */
-function buildSpecSection(
-  specRef: string,
-  specHash: string | null,
-): string[] {
+function buildSpecSection(specRef: string, specHash: string | null): string[] {
   return [
     `## 📜 关联规范 (Spec Reference)`,
     `- **文档路径**: ${specRef}`,

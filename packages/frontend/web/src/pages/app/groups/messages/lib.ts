@@ -1,9 +1,41 @@
+import { useEffect, useState } from "react";
 import {
   type Audience,
   GROUP_ROLES,
   type Member,
   type TaskStatusKind,
 } from "./types";
+
+/** Format elapsed time without exposing raw milliseconds or timestamps. */
+export function formatDurationMs(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+/** Calculate an elapsed duration from ISO timestamps. */
+export function formatDuration(
+  startedAt: string,
+  endedAt?: string | null,
+  now = Date.now(),
+): string {
+  const start = Date.parse(startedAt);
+  const end = endedAt ? Date.parse(endedAt) : now;
+  return formatDurationMs(
+    Number.isFinite(start) && Number.isFinite(end) ? end - start : 0,
+  );
+}
+
+/** Re-render once per second while a running duration is visible. */
+export function useLiveNow(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
 
 export function taskStatusKind(body: string): TaskStatusKind {
   if (/^✅/.test(body)) return "done";
@@ -17,10 +49,8 @@ export function taskStatusKind(body: string): TaskStatusKind {
 // 配对深色值,故组件层不再写 dark: 前缀。
 export const TASK_STATUS_CLASSES: Record<TaskStatusKind, string> = {
   done: "border-status-done/60 bg-status-done/10 text-status-done",
-  failed:
-    "border-status-failed/60 bg-status-failed/10 text-status-failed",
-  running:
-    "border-status-running/60 bg-status-running/10 text-status-running",
+  failed: "border-status-failed/60 bg-status-failed/10 text-status-failed",
+  running: "border-status-running/60 bg-status-running/10 text-status-running",
   cancelled:
     "border-status-cancelled/60 bg-status-cancelled/10 text-status-cancelled",
 };

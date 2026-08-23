@@ -47,6 +47,8 @@ export interface TaskAttempt {
   summary?: string;
   /** 提交 hash(仅 done)。 */
   hash?: string;
+  /** 本次执行消耗的 token 数(纯数字字符串,缺失表示执行器未汇报)。 */
+  tokenUsage?: string;
 }
 
 export const task = pgTable(
@@ -73,7 +75,7 @@ export const task = pgTable(
     retryCount: integer("retry_count").notNull().default(0),
     // 执行历史(attempt 时间线):每次 spawn 执行器前 append 一条
     // {n, startedAt, status:"running"},任务结束(done/failed/cancelled)时补
-    // endedAt/status/error/summary/hash。重试 = 多条;不重试也有一条。
+    // endedAt/status/error/summary/hash/tokenUsage。重试 = 多条;不重试也有一条。
     attempts: jsonb("attempts")
       .$type<TaskAttempt[]>()
       .notNull()

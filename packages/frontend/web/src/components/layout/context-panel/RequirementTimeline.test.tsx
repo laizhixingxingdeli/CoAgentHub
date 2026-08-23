@@ -1,6 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { formatMessageTime } from "@/pages/app/groups/messages/lib";
+import {
+  formatDurationMs,
+  formatMessageTime,
+} from "@/pages/app/groups/messages/lib";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import RequirementTimeline, {
@@ -40,6 +43,11 @@ describe("roleFromExecutorKey 角色推断(executorKey 字符串映射的简化�
 });
 
 describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
+  it("耗时格式使用秒或分秒,不显示裸毫秒", () => {
+    expect(formatDurationMs(9_000)).toBe("9s");
+    expect(formatDurationMs(65_000)).toBe("1m 5s");
+  });
+
   it("空任务列表不渲染任何内容", () => {
     const { container } = render(<RequirementTimeline tasks={[]} />);
     expect(container).toBeEmptyDOMElement();
@@ -106,6 +114,33 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     );
     expect(screen.getByText("提交 0123456789ab")).toBeInTheDocument();
     expect(screen.getByText("测试 web test 全绿")).toBeInTheDocument();
+  });
+
+  it("展示 token 与任务整体耗时,无 token 时不渲染占位符", () => {
+    const { rerender } = render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-1",
+            diffSummary: { summary: "做完了", tokenUsage: "8000" },
+            createdAt: "2026-08-01T09:00:00.000Z",
+            updatedAt: "2026-08-01T09:01:05.000Z",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-token-t-1"),
+    ).toHaveTextContent("Token 8000");
+    expect(
+      screen.getByTestId("requirement-timeline-duration-t-1"),
+    ).toHaveTextContent("耗时 1m 5s");
+
+    rerender(<RequirementTimeline tasks={[makeTask({ id: "t-2" })]} />);
+    expect(screen.queryByText(/Token/)).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-timeline-duration-t-2"),
+    ).toBeInTheDocument();
   });
 
   it("没有汇报内容时给出占位文案,且不出现展开入口", () => {

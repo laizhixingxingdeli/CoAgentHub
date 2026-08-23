@@ -15,7 +15,12 @@ import type { ReactElement } from "react";
 import { LiveOutput } from "@/components/live-output";
 import { t } from "@/lib/i18n";
 import { ControlButton } from "./control-button";
-import { formatMessageTime, TASK_STATUS_CLASSES } from "./lib";
+import {
+  formatDuration,
+  formatMessageTime,
+  TASK_STATUS_CLASSES,
+  useLiveNow,
+} from "./lib";
 import type { Member, MessageItem } from "./types";
 
 /** 与 GET /groups/:id/tasks 返回行对齐(server task 表行形状)。 */
@@ -30,6 +35,7 @@ export type TaskAttempt = {
   error?: string;
   summary?: string;
   hash?: string;
+  tokenUsage?: string;
 };
 
 export type TaskItem = {
@@ -149,8 +155,10 @@ function attemptStatusLabel(status: TaskStatus): string {
 /** attempt 时间线(执行历史):「第 1 次 失败 exit 1 → 第 2 次 成功 abc1234」。 */
 function AttemptTimeline({
   attempts,
+  now,
 }: {
   attempts: TaskAttempt[];
+  now: number;
 }): ReactElement | null {
   if (attempts.length === 0) {
     return null;
@@ -168,6 +176,7 @@ function AttemptTimeline({
             {attemptStatusLabel(a.status)}
             {a.status === "failed" && a.error ? ` ${a.error}` : ""}
             {a.status === "done" && a.hash ? ` ${a.hash}` : ""}
+            {` · 耗时 ${formatDuration(a.startedAt, a.endedAt, now)}`}
           </span>
         </span>
       ))}
@@ -193,6 +202,10 @@ export default function TaskPanel({
   onStop,
   onRollback,
 }: TaskPanelProps) {
+  const hasLiveAttempt = tasks.some((task) =>
+    task.attempts?.some((attempt) => !attempt.endedAt),
+  );
+  const now = useLiveNow(hasLiveAttempt);
   return (
     <div data-testid="task-panel" className="shrink-0 border-b px-4 py-3">
       <span className="text-xs font-medium text-muted-foreground">
@@ -346,7 +359,10 @@ export default function TaskPanel({
                   )}
                   {expanded && (
                     <div className="mt-2 space-y-2">
-                      <AttemptTimeline attempts={task.attempts ?? []} />
+                      <AttemptTimeline
+                        attempts={task.attempts ?? []}
+                        now={now}
+                      />
                       <div>
                         <p className="mb-1 text-xs font-medium text-muted-foreground">
                           {t("tasks.output.title")}

@@ -23,8 +23,10 @@ import { useMemo, useState } from "react";
 import { LiveOutput } from "@/components/live-output";
 import { lastNonEmptyLine } from "@/lib/output-buffer";
 import {
+  formatDuration,
   formatMessageTime,
   TASK_STATUS_CLASSES,
+  useLiveNow,
 } from "@/pages/app/groups/messages/lib";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import { TASK_UNCONFIRMED_CLASSES } from "@/pages/app/groups/messages/TaskPanel";
@@ -127,6 +129,12 @@ export default function RequirementTimeline({
     () => mergeRequirementTimeline(tasks, messages, members),
     [tasks, messages, members],
   );
+  const hasLiveDuration = tasks.some(
+    (task) =>
+      task.status === "running" ||
+      task.attempts?.some((attempt) => !attempt.endedAt),
+  );
+  const now = useLiveNow(hasLiveDuration);
 
   if (events.length === 0) {
     return null;
@@ -237,6 +245,7 @@ export default function RequirementTimeline({
     const hash = readText(task.diffSummary, "hash");
     const tests = readText(task.diffSummary, "tests");
     const todo = readText(task.diffSummary, "todo");
+    const tokenUsage = readText(task.diffSummary, "tokenUsage");
     const outputTail =
       readText(task.diffSummary, "outputTail") ?? task.outputTail ?? null;
     const errorText = readText(task.diffSummary, "error");
@@ -268,6 +277,15 @@ export default function RequirementTimeline({
     // 这条「消息」的发生时间:汇报在任务结束时落库,updatedAt 更贴近汇报
     // 时刻;老数据 updatedAt 可能为 null,回退 createdAt。
     const timestamp = task.updatedAt ?? task.createdAt;
+    const terminal =
+      task.status === "done" ||
+      task.status === "failed" ||
+      task.status === "cancelled";
+    const duration = formatDuration(
+      task.createdAt,
+      terminal ? task.updatedAt : null,
+      now,
+    );
     return (
       <li
         key={task.id}
@@ -326,6 +344,19 @@ export default function RequirementTimeline({
           {todo && !todoLong && (
             <p className="mt-1 text-xs text-muted-foreground">遗留 {todo}</p>
           )}
+          <div
+            data-testid={`requirement-timeline-metrics-${task.id}`}
+            className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground"
+          >
+            {tokenUsage && (
+              <span data-testid={`requirement-timeline-token-${task.id}`}>
+                Token {tokenUsage}
+              </span>
+            )}
+            <span data-testid={`requirement-timeline-duration-${task.id}`}>
+              耗时 {duration}
+            </span>
+          </div>
           {retries > 0 && (
             <p
               data-testid={`requirement-timeline-retries-${task.id}`}

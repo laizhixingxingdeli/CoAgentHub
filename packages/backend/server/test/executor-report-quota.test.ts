@@ -90,6 +90,7 @@ const {
   parseTaskReport,
   renderTaskCard,
   resolveTestExecutor,
+  sumAttemptTokenUsage,
 } = await import("@server/lib/executor-task");
 
 // PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与 executor-trigger /
@@ -182,6 +183,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       status: string;
       retryCount: number;
       diffSummary: unknown;
+      attempts?: Array<{ tokenUsage?: string }>;
     }>;
   }
 
@@ -310,6 +312,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           todo: "无",
           tokenUsage: "12345",
         });
+        expect(t.attempts?.[0]?.tokenUsage).toBe("12345");
         expect(
           typeof (t.diffSummary as Record<string, unknown> | null)?.outputTail,
         ).toBe("string");
@@ -333,6 +336,20 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         delete process.env.FAKE_STRUCTURED;
       }
     }, 30_000);
+
+    it("任务级 tokenUsage 跨 attempt 求和,跳过缺失值,全缺失时省略", () => {
+      const attempt = (tokenUsage?: string) => ({
+        n: 1,
+        startedAt: "2026-08-23T00:00:00.000Z",
+        status: "done" as const,
+        ...(tokenUsage ? { tokenUsage } : {}),
+      });
+      expect(
+        sumAttemptTokenUsage([attempt("5000"), attempt(), attempt("3000")]),
+      ).toBe("8000");
+      expect(sumAttemptTokenUsage([attempt("5000"), attempt()])).toBe("5000");
+      expect(sumAttemptTokenUsage([attempt(), attempt()])).toBeUndefined();
+    });
 
     it("老格式自由文本(无段落)→ 旧行为:关键词摘要 + hash,无 tests/todo", async () => {
       // 默认 fake bin 输出「commit <hex>」裸行 + 「汇报:修改完成」,无段落头。
@@ -400,7 +417,8 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       expect(parseTaskReport(stdout)).toMatchObject({
         hash: "0123456789ab",
         tests: "定向 Vitest 18/18 通过",
-        summary: "补充了任务书回显占位符的回归测试。\n真实汇报正文没有混入任务书内容。",
+        summary:
+          "补充了任务书回显占位符的回归测试。\n真实汇报正文没有混入任务书内容。",
         todo: "无",
       });
       expect(parseTaskReport(stdout).todo).not.toContain("本群分工");
@@ -509,7 +527,9 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       ).toEqual({ hash: "0123456789ab", tests: "ok" });
       // 非法/空值 → 省略。
       expect(
-        parseTaskReport("token: n/a\n提交: 0123456789abcdef0123456789abcdef01234567"),
+        parseTaskReport(
+          "token: n/a\n提交: 0123456789abcdef0123456789abcdef01234567",
+        ),
       ).toEqual({ hash: "0123456789ab" });
     });
 

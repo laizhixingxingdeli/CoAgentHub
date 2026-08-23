@@ -43,4 +43,5 @@ export {
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type GroupPromptInfo,
+  sumAttemptTokenUsage,
 } from "./types";

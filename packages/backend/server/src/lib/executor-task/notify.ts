@@ -1,5 +1,6 @@
 import {
   type Task,
+  type TaskAttempt,
   type TaskStatus,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -9,6 +10,7 @@ import type { GroupMessageFull } from "@server/lib/services/message-service";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
+import { sumAttemptTokenUsage } from "./types";
 
 /**
  * 任务状态通知(executor-task 拆分):任务状态落库后的 WS 推送
@@ -65,11 +67,7 @@ export async function notifyTaskStatusChanged(
     // Durable Task Completion Events:首次进入终态且有 dispatcher 时,
     // DB trigger 已持久化 completion event,此处发轻量 WS 提示(仅低延迟提示,
     // 可靠性来源始终是数据库 inbox)。fire-and-forget,失败不影响主流程。
-    if (
-      status === "done" ||
-      status === "failed" ||
-      status === "cancelled"
-    ) {
+    if (status === "done" || status === "failed" || status === "cancelled") {
       await wsHub.broadcastTaskCompletionAvailable(
         groupId,
         taskId,
@@ -113,10 +111,18 @@ export async function markTaskCancelled(
   db: DataBase,
   taskId: string,
   groupId: string,
+  attempts: readonly TaskAttempt[] = [],
 ): Promise<unknown> {
+  const tokenUsage = sumAttemptTokenUsage(attempts);
   const [updated] = await db
     .update(taskTable)
-    .set({ status: "cancelled", diffSummary: { error: "stopped" } })
+    .set({
+      status: "cancelled",
+      diffSummary: {
+        error: "stopped",
+        ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+      },
+    })
     .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
     .returning();
   if (updated) {

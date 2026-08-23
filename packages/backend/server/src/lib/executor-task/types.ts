@@ -10,7 +10,11 @@ import type { ExecutorConfig } from "@server/lib/executors";
 /** 下发门角色门槛(与桥 EXEC_ALLOWED_ROLES 同语义):coordinator / human /
  *  reviewer 能发布任务(human 禁言后需求下发由 reviewer 代发)。与 control.ts
  *  的 CONTROL_ALLOWED_ROLES 分开维护——语义不同:前者管下发,后者管停止/回滚。 */
-export const DISPATCH_ALLOWED_ROLES = ["coordinator", "human", "reviewer"] as const;
+export const DISPATCH_ALLOWED_ROLES = [
+  "coordinator",
+  "human",
+  "reviewer",
+] as const;
 
 export interface DispatchExecutorInput {
   groupId: string;
@@ -31,7 +35,11 @@ export interface DispatchExecutorInput {
   specHash: string | null;
   /** callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
    *  三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。 */
-  callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null;
+  callbackRef: {
+    platform?: string;
+    endpointRef?: string;
+    sessionRef?: string;
+  } | null;
 }
 
 /** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */
@@ -117,6 +125,22 @@ export interface QueuedRun {
   concurrencyRetryAt: number;
   /** 执行历史(attempt 时间线):spawn 前 append running,结束时补 endedAt/status。 */
   attempts: TaskAttempt[];
+}
+
+/** Sum token usage across all attempts, omitting attempts without a report. */
+export function sumAttemptTokenUsage(
+  attempts: readonly TaskAttempt[],
+): string | undefined {
+  let total = 0;
+  let found = false;
+  for (const attempt of attempts) {
+    if (typeof attempt.tokenUsage !== "string") continue;
+    const value = Number.parseInt(attempt.tokenUsage, 10);
+    if (!Number.isFinite(value)) continue;
+    total += value;
+    found = true;
+  }
+  return found ? String(total) : undefined;
 }
 
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
