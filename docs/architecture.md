@@ -80,7 +80,7 @@ CoAgentHub/
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
 | `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
-| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
+| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
 | `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`(UNIQUE → 同一 task 最多一个终态 event)、`group_id`、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建(task_id 唯一约束保证幂等) |
 
 ## 4. API 全貌
@@ -365,6 +365,23 @@ CoAgentHub/
 即使执行器声明「不会触碰」,`git commit` 不带 `--only` 仍会把**已在暂存区**的
 无关文件一并提交。协调者应在执行器提交前确认暂存区干净。
 
+## 9.10 静默降级必须有可见信号
+
+凡是「调用方本意要生效、实际没生效」的路径,必须有可见信号——报错、响应里的警告字段、
+或群内消息,不能什么都不说。静默丢弃未声明字段(zod 默认行为)、静默回落默认值、
+静默跳过某项处理,在本项目里都属于需要显式处理的情况,不是可接受的默认。
+
+本原则的已知实例:
+
+| 现象 | 后果 | 处置 |
+|---|---|---|
+| `POST /groups` 丢弃 `projectPath` | 群未绑定项目 | 已修复 |
+| 建群者角色写死 coordinator | 协作模式静默退化 | 已修复 |
+| 加群无条件发 skill 引导 | 重复引导消息 | 已修复 |
+| ANSI 未剥离 | 前端乱码 | 已修复 |
+| callback 被无权发送者携带 | 完成后无法回调下发者 | `X-CoAgentHub-Warning: CALLBACK_STRIPPED_NOT_AUTHORIZED` |
+| reviewer 群下发缺 `specHash` | 验收钉子缺失 | `X-CoAgentHub-Warning: SPEC_HASH_MISSING`,但不拒绝下发 |
+
 ## 10. 消息搜索与分组
 
 - `GET /groups/:id/messages?q=` 关键词搜索(ILIKE,`%`/`_` 转义),与可见性过滤和
@@ -404,4 +421,3 @@ completion-event inbox 并恢复 CLI Agent 原 session。**不在 callback agent
 | CLI 模式 | 一次性 `run` + 持续 `daemon`(`SIGINT`/`SIGTERM` 优雅退出) |
 
 详见 `packages/callback-agent/README.md` 与 `specs/callback-agent-command-driver.md`。
-

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   index,
   integer,
   jsonb,
@@ -58,6 +59,8 @@ export const task = pgTable(
     groupId: uuid("group_id")
       .notNull()
       .references(() => groups.id),
+    // Parent execution in the same group; top-level and historical tasks are null.
+    parentTaskId: uuid("parent_task_id").references((): AnyPgColumn => task.id),
     // 唯一约束 → 幂等:同一消息只建一次任务(重复 POST 返回既有行)。
     messageId: uuid("message_id").notNull().unique(),
     executorParticipantId: uuid("executor_participant_id")
@@ -107,7 +110,7 @@ export const task = pgTable(
   },
   // group_id 索引:GET /:id/tasks 按 group_id 过滤 + created_at 排序分页,
   // 无索引时每次全表扫描。
-  (t) => [index().on(t.groupId)],
+  (t) => [index().on(t.groupId), index().on(t.parentTaskId)],
 );
 
 export const Task = createSelectSchema(task);

@@ -3,6 +3,8 @@ import {
   FileRefInput,
   GROUP_ROLES,
   GroupMessageAudienceInput,
+  parseKnownCoordinationPayload,
+  REVIEW_REQUEST_EXAMPLE,
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import { maybeHandleControlCommand } from "@server/lib/control";
@@ -125,6 +127,19 @@ app
         callback,
       } = c.req.valid("json");
 
+      if (contentType === "application/json") {
+        try {
+          parseKnownCoordinationPayload(body ?? "");
+        } catch (error) {
+          const detail =
+            error instanceof z.ZodError ? error.message : String(error);
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            `协作载荷形状无效: ${detail}。review_request 期望示例: ${JSON.stringify(REVIEW_REQUEST_EXAMPLE)}`,
+          );
+        }
+      }
+
       // Archive = read-only: an archived (or soft-deleted) group rejects new
       // messages with 403 + reason; reading (GET messages / GET members /
       // GET :id) stays open so history remains browsable.
@@ -216,8 +231,8 @@ app
 
       // skill 安装确认(skill 加载强化):识别 "✅ skill 已安装" 等确认消息,幂等
       // 更新发送者 capabilities。fire-and-forget,不匹配即静默返回,不阻塞消息。
-      void handleSkillInstallConfirmation(db, senderId, body ?? "").catch((err) =>
-        console.warn("[messages] skill 安装确认处理失败(忽略):", err),
+      void handleSkillInstallConfirmation(db, senderId, body ?? "").catch(
+        (err) => console.warn("[messages] skill 安装确认处理失败(忽略):", err),
       );
 
       // 第1层(A2A 进度信号):执行器 participant 在本群发的消息 → 刷新同群 running
@@ -229,12 +244,25 @@ app
       // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,
       // 失败只记日志,绝不阻塞消息响应)。
       if (aud === "participant" && audienceRef) {
+        const warnings: string[] = [];
+        const targetParticipantForDispatch =
+          await db.query.participant.findFirst({
+            where: (t, { eq }) => eq(t.id, audienceRef),
+            columns: { name: true },
+          });
+        const isExecutorTarget =
+          targetParticipantForDispatch !== undefined &&
+          (await findExecutorByParticipantName(
+            db,
+            targetParticipantForDispatch.name,
+          )) !== undefined;
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
         // coordinator/human 且**非执行器 participant** 的发送者可携带
         // (与 dispatcherSessionId 同规则);执行器/observer 伪造一律丢弃。
-        const senderParticipantForDispatcher = await db.query.participant.findFirst({
-          where: (t, { eq }) => eq(t.id, senderId),
-        });
+        const senderParticipantForDispatcher =
+          await db.query.participant.findFirst({
+            where: (t, { eq }) => eq(t.id, senderId),
+          });
         // §3.2 判据:发送者命中执行器配置且该配置 canDispatch !== true = 纯执行器,
         // 其携带的 dispatcher/callback 路由信息一律丢弃;canDispatch: true 的执行器
         // (协调者/检视者 runtime)允许携带——不再按"是否在执行器配置表中"一刀切。
@@ -251,6 +279,20 @@ app
           membership.roles.some((r) =>
             (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
           ) && !senderIsPureExecutor;
+        if (callback && !canCarryDispatcher) {
+          warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
+        }
+        if (isExecutorTarget && !specHash?.trim()) {
+          const groupMembers = await db.query.groupMember.findMany({
+            where: (t, { eq }) => eq(t.groupId, id),
+            columns: { roles: true },
+          });
+          if (
+            groupMembers.some((member) => member.roles.includes("reviewer"))
+          ) {
+            warnings.push("SPEC_HASH_MISSING");
+          }
+        }
         // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 且非纯执行器
         // 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
         const rawSessionId = metadata?.dispatcherSessionId;
@@ -261,12 +303,17 @@ app
         // 只提供 callback.sessionRef 时同步写入兼容字段 dispatcherSessionId;
         // 同时提供两者且不等 → 400。伪造(无权携带)时整个 callback 丢弃。
         const rawCallback = callback;
-        let callbackRef: { platform?: string; endpointRef?: string; sessionRef?: string } | null = null;
+        let callbackRef: {
+          platform?: string;
+          endpointRef?: string;
+          sessionRef?: string;
+        } | null = null;
         let callbackSessionId: string | null = null;
         if (rawCallback && canCarryDispatcher) {
           // 拒绝嵌套对象 / 非 string 字段:此处 zod 已约束为 string | undefined,
           // 只需过滤空串 + 拒绝非法内容。
-          const strip = (s?: string) => (s && s.trim().length > 0 ? s.trim() : undefined);
+          const strip = (s?: string) =>
+            s && s.trim().length > 0 ? s.trim() : undefined;
           const platform = strip(rawCallback.platform);
           const endpointRef = strip(rawCallback.endpointRef);
           const sessionRef = strip(rawCallback.sessionRef);
@@ -276,7 +323,11 @@ app
           // /bearer/authorization/credential 等凭据关键词)。
           const FORBIDDEN_RE =
             /^https?:\/\/|^ssh:\/\/|^ftp:\/\/|\s|\$\(|`|&&|\|\||=|(?:token|secret|password|apikey|api[_-]?key|bearer|authorization|credential)/i;
-          for (const [k, v] of Object.entries({ platform, endpointRef, sessionRef })) {
+          for (const [k, v] of Object.entries({
+            platform,
+            endpointRef,
+            sessionRef,
+          })) {
             if (!v) continue;
             if (FORBIDDEN_RE.test(v)) {
               throw new BizError(
@@ -290,7 +341,11 @@ app
             callbackSessionId = sessionRef ?? null;
           }
           // 冲突:同时提供 dispatcherSessionId 与 callback.sessionRef 且不等 → 400。
-          if (callbackSessionId !== null && rawSessionId && callbackSessionId !== rawSessionId) {
+          if (
+            callbackSessionId !== null &&
+            rawSessionId &&
+            callbackSessionId !== rawSessionId
+          ) {
             throw new BizError(
               BizCodeEnum.InvalidRequest,
               "callback.sessionRef 与 dispatcherSessionId 冲突:两者必须相等",
@@ -299,7 +354,8 @@ app
         }
         // 兼容字段:只提供 callback.sessionRef 时同步写入 dispatcherSessionId;
         // 否则沿用 metadata.dispatcherSessionId(未携带/伪造时为 null)。
-        const finalDispatcherSessionId = callbackSessionId ?? dispatcherSessionId;
+        const finalDispatcherSessionId =
+          callbackSessionId ?? dispatcherSessionId;
         // 首次任务初始化检查(项目脚手架):当消息触发任务(即即将调用
         // maybeDispatchExecutorTask)且群绑定了 projectPath 时,检查 Matt 文档
         // 脚手架;缺失则响应 header 返回 warning(不阻塞消息发送/任务下发)。
@@ -325,6 +381,9 @@ app
           specHash: specHash ?? null,
           callbackRef,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
+        if (warnings.length > 0) {
+          c.header("X-CoAgentHub-Warning", warnings.join(","));
+        }
       }
       // 阶段2-票2:控制指令(「停止/stop」「回滚 [taskId]」)识别放 server;
       // fire-and-forget,命中与否/权限/防回环在 control.ts 内处理。定向到

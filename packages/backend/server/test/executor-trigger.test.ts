@@ -8,7 +8,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { testDb } from "./db";
 
 /**
  * 阶段2-票1:server 内嵌执行器触发链路。
@@ -154,6 +156,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       messageId: string;
       executorParticipantId: string;
       executorKey: string | null;
+      parentTaskId: string | null;
       status: string;
       diffSummary: unknown;
       a2aContextId: string | null;
@@ -403,6 +406,13 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain("执行器: codebuddy");
       expect(ticket).toContain("## 任务内容");
       expect(ticket).toContain("建一个文件 hello.txt");
+      expect(ticket).toContain(
+        "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
+      );
+      expect(ticket).toContain("- participantId:");
+      expect(ticket).toContain(`- groupId: ${group.id}`);
+      expect(ticket).toContain(`- taskId: ${task.id}`);
+      expect(ticket).toContain("- apiBase: http://localhost:");
     } finally {
       delete process.env.TICKET_CAPTURE;
     }
@@ -444,6 +454,37 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }
   });
 
+  it("发送者有 running 任务时自动建立 parentTaskId", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    const parentMessageId = "00000000-0000-7000-8000-000000000901";
+    const [parent] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId: group.id,
+        messageId: parentMessageId,
+        executorParticipantId: coordinator.id,
+        status: "running",
+      })
+      .returning({ id: taskTable.id });
+    const msg = await postMessage(coordinator.id, group.id, {
+      body: "带父任务的执行",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const child = await waitForTask(coordinator.id, group.id, msg.id);
+    expect(child.parentTaskId).toBe(parent.id);
+
+    const topLevel = await postMessage(coordinator.id, group.id, {
+      body: "顶层执行",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const top = await waitForTask(coordinator.id, group.id, topLevel.id);
+    // Multiple running rows are deterministic: the most recently updated
+    // parent is selected, and normal scheduler policy keeps this at one.
+    expect(top.parentTaskId).toBe(parent.id);
+  });
+
   it("带 specRef/specHash 的定向消息 → task 行落库 + 任务书含「关联规范」段 + 详情透传", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
 
@@ -451,6 +492,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     process.env.TICKET_CAPTURE = capture;
     const specRef = "specs/login-v2.md";
     const specHash = "abcdef012345";
+    const previousApiBase = process.env.COAGENTHUB_API_BASE;
+    process.env.COAGENTHUB_API_BASE = "http://hub.example/api/";
     try {
       const msg = await postMessage(coordinator.id, group.id, {
         body: "登录改造",
@@ -462,13 +505,11 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       const task = await waitForTask(coordinator.id, group.id, msg.id);
       expect(task.status).toBe("done");
       // 验收:task 行写入 specRef/specHash(详情/WS 事件透传的数据源)。
-      const detail = (
-        await (
-          await app.request(`/api/groups/${group.id}/tasks/${task.id}`, {
-            headers: { "X-Participant-Id": coordinator.id },
-          })
-        ).json()
-      ) as Record<string, unknown>;
+      const detail = (await (
+        await app.request(`/api/groups/${group.id}/tasks/${task.id}`, {
+          headers: { "X-Participant-Id": coordinator.id },
+        })
+      ).json()) as Record<string, unknown>;
       expect(detail.specRef).toBe(specRef);
       expect(detail.specHash).toBe(specHash);
 
@@ -482,8 +523,13 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(specIdx).toBeLessThan(contentIdx); // Spec 优先于任务内容
       expect(ticket).toContain(`- **文档路径**: ${specRef}`);
       expect(ticket).toContain(`- **版本哈希**: ${specHash}`);
-      expect(ticket).toContain("请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。");
+      expect(ticket).toContain(
+        "请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。",
+      );
+      expect(ticket).toContain("- apiBase: http://hub.example/api");
     } finally {
+      if (previousApiBase === undefined) delete process.env.COAGENTHUB_API_BASE;
+      else process.env.COAGENTHUB_API_BASE = previousApiBase;
       delete process.env.TICKET_CAPTURE;
     }
   });

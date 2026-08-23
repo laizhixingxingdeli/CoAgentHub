@@ -12,6 +12,7 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
+import { serverPort } from "@server/lib/config";
 import type { DataBase } from "@server/lib/database";
 import {
   createCheckpoint,
@@ -30,6 +31,7 @@ import {
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { createAnsiStripper } from "./ansi";
+import { verifyCommitClaim } from "./claim-verification";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -446,11 +448,27 @@ async function dispatchTask(
     callbackRef,
   } = opts;
 
+  // A coordinator's detached task is the parent of the executor task it
+  // dispatches. Pick the most recently updated running task in this group;
+  // normal single-scheduler operation means there is at most one, while an
+  // ambiguous state remains deterministic and never blocks dispatch.
+  const parent = await db.query.task.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(
+        eqFn(t.groupId, groupId),
+        eqFn(t.executorParticipantId, dispatcherParticipantId),
+        eqFn(t.status, "running"),
+      ),
+    orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    columns: { id: true },
+  });
+
   const [created] = await db
     .insert(taskTable)
     .values({
       groupId,
       messageId,
+      parentTaskId: parent?.id ?? null,
       executorParticipantId: participantId,
       executorKey: ex.key,
       status: "queued",
@@ -806,6 +824,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             body,
             ex.label,
             repoRoot,
+            run,
             groupPrompt,
             testExecutor,
             run.specRef,
@@ -1118,6 +1137,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             }
           : parseTaskReport(output);
         const diffSummary: Record<string, unknown> = { ...report };
+        if (!isA2a) {
+          const claimVerification = await verifyCommitClaim(
+            report.hash,
+            repoRoot,
+            run.attempts,
+          );
+          if (claimVerification) {
+            diffSummary.claimVerification = claimVerification;
+          }
+        }
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
         // 完成回填:最近 500 行输出写进 diffSummary.outputTail(之后不依赖内存)。
         const doneTail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
@@ -1809,10 +1838,36 @@ function buildSpecSection(specRef: string, specHash: string | null): string[] {
   ];
 }
 
+/** HTTP coordinates embedded in every task book/prompt; no plugin env is needed. */
+export function executionApiBase(): string {
+  const configured = process.env.COAGENTHUB_API_BASE?.trim();
+  const base = configured || `http://localhost:${serverPort()}/api`;
+  return base.replace(/\/+$/, "");
+}
+
+function buildExecutionContextSection(run: QueuedRun): string[] {
+  const lines = [
+    "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
+    `- apiBase: ${executionApiBase()}`,
+    `- participantId: ${run.participantId} (这是接收者自己的 participant id)`,
+    `- groupId: ${run.groupId}`,
+    `- taskId: ${run.taskId} (这是你自己的 task id)`,
+    `- 认证:全信模型,请求带 HTTP 头 X-Participant-Id: ${run.participantId}`,
+  ];
+  if (run.detached) {
+    lines.push(
+      `- 这是 detached 任务。完成后必须 PATCH ${executionApiBase()}/groups/${run.groupId}/tasks/${run.taskId}，带 status 与 diffSummary 回写终态。`,
+      "- 不回写会使任务保持 running，直到 detachedTimeoutMinutes(默认 1440 分钟)兜底超时，检视者会一直等不到结果。",
+    );
+  }
+  return lines;
+}
+
 function buildTicket(
   body: string,
   label: string,
   repoRoot: string,
+  run: QueuedRun,
   groupPrompt: GroupPromptInfo | null = null,
   testExecutor: string | null = null,
   specRef: string | null = null,
@@ -1843,6 +1898,8 @@ function buildTicket(
     `汇报: <做了什么,3-5 句>`,
     `遗留: <未完成事项,无则写"无">`,
   );
+  const context = buildExecutionContextSection(run);
+  lines.splice(4, 0, ...context);
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
   // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
   if (groupPrompt && groupPrompt.prompt.trim().length > 0) {

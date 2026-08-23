@@ -1,5 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import {
+  normalizeReviewRequestDiffSummary,
+  REVIEW_REQUEST_EXAMPLE,
   TASK_STATUSES,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -53,8 +55,13 @@ app
       const db = c.get("db");
       const callerId = c.get("participantId");
       const { id } = c.req.valid("param");
-      const { messageId, executorParticipantId, checkpointRef, specRef, specHash } =
-        c.req.valid("json");
+      const {
+        messageId,
+        executorParticipantId,
+        checkpointRef,
+        specRef,
+        specHash,
+      } = c.req.valid("json");
 
       // 归档/软删群组只读:不能发新任务(与消息/成员同款守卫)。
       await assertGroupWritable(db, id);
@@ -155,6 +162,7 @@ app
         columns: {
           id: true,
           groupId: true,
+          parentTaskId: true,
           messageId: true,
           executorParticipantId: true,
           executorKey: true,
@@ -249,6 +257,7 @@ app
       const detail: Record<string, unknown> = {
         id: task.id,
         groupId: task.groupId,
+        parentTaskId: task.parentTaskId ?? null,
         messageId: task.messageId,
         executorParticipantId: task.executorParticipantId,
         executorKey: task.executorKey,
@@ -331,6 +340,26 @@ app
       const participantId = c.get("participantId");
       const { id, taskId } = c.req.valid("param");
       const { status, diffSummary, checkpointRef, brief } = c.req.valid("json");
+      let normalizedDiffSummary = diffSummary;
+      if (
+        typeof diffSummary === "object" &&
+        diffSummary !== null &&
+        !Array.isArray(diffSummary) &&
+        ((diffSummary as Record<string, unknown>).type === "review_request" ||
+          Object.hasOwn(diffSummary, "review_request"))
+      ) {
+        try {
+          normalizedDiffSummary =
+            normalizeReviewRequestDiffSummary(diffSummary);
+        } catch (error) {
+          const detail =
+            error instanceof z.ZodError ? error.message : String(error);
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            `diffSummary.review_request 形状无效: ${detail}。期望示例: ${JSON.stringify(REVIEW_REQUEST_EXAMPLE)}`,
+          );
+        }
+      }
 
       // 归档/软删群组只读:不能改任务状态(与 POST /tasks 同款守卫)。
       await assertGroupWritable(db, id);
@@ -379,7 +408,9 @@ app
         .update(taskTable)
         .set({
           ...(status !== undefined ? { status } : {}),
-          ...(diffSummary !== undefined ? { diffSummary } : {}),
+          ...(diffSummary !== undefined
+            ? { diffSummary: normalizedDiffSummary }
+            : {}),
           ...(checkpointRef !== undefined ? { checkpointRef } : {}),
           ...(brief !== undefined ? { brief } : {}),
         })

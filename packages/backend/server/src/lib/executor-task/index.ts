@@ -23,6 +23,7 @@ export { taskOutputTail } from "./output-buffer";
 export {
   cancelQueuedTasks,
   currentRunningTask,
+  executionApiBase,
   formatExecutorStartupFailure,
   isConcurrencyConflict,
   maybeDispatchExecutorTask,

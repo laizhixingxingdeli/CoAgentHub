@@ -4,3 +4,4 @@ export * from "./schema/group-message.js";
 export * from "./schema/participant.js";
 export * from "./schema/task.js";
 export * from "./schema/task-completion-event.js";
+export * from "./schema/coordination-payload.js";
