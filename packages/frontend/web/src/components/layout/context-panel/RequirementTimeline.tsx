@@ -90,6 +90,48 @@ function readText(
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/** 汇报 commit 核实结果(claimVerification,spec verify-agent-claims v1.1)。 */
+type ClaimVerification = {
+  status: "verified" | "not_found" | "outside_window" | "skipped";
+  reason?: string;
+};
+
+function readClaimVerification(
+  diffSummary: Record<string, unknown> | null,
+): ClaimVerification | null {
+  const value = diffSummary?.claimVerification;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  if (
+    status !== "verified" &&
+    status !== "not_found" &&
+    status !== "outside_window" &&
+    status !== "skipped"
+  ) {
+    return null;
+  }
+  const reason = typeof record.reason === "string" ? record.reason : undefined;
+  return { status, reason };
+}
+
+/** claimVerification 状态配色:核实通过走绿,未找到/超窗/未核实走警示。 */
+const CLAIM_STATUS_CLASS: Record<ClaimVerification["status"], string> = {
+  verified: "text-status-done",
+  not_found: "text-status-unconfirmed",
+  outside_window: "text-status-unconfirmed",
+  skipped: "text-status-unconfirmed",
+};
+
+const CLAIM_STATUS_LABEL: Record<ClaimVerification["status"], string> = {
+  verified: "commit 已核实",
+  not_found: "commit 未找到",
+  outside_window: "commit 超出时间窗",
+  skipped: "commit 未核实",
+};
+
 type RequirementTimelineProps = {
   /** 一个需求下的所有任务(mergeRequirementTimeline 内部按时间排序)。 */
   tasks: TaskItem[];
@@ -246,6 +288,7 @@ export default function RequirementTimeline({
     const tests = readText(task.diffSummary, "tests");
     const todo = readText(task.diffSummary, "todo");
     const tokenUsage = readText(task.diffSummary, "tokenUsage");
+    const claimVerification = readClaimVerification(task.diffSummary);
     const outputTail =
       readText(task.diffSummary, "outputTail") ?? task.outputTail ?? null;
     const errorText = readText(task.diffSummary, "error");
@@ -331,6 +374,19 @@ export default function RequirementTimeline({
           {hash && (
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               提交 {hash.slice(0, 12)}
+            </p>
+          )}
+          {claimVerification && (
+            <p
+              data-testid={`requirement-timeline-claim-${task.id}`}
+              data-status={claimVerification.status}
+              className={`mt-1 text-xs ${CLAIM_STATUS_CLASS[claimVerification.status]}`}
+            >
+              {CLAIM_STATUS_LABEL[claimVerification.status]}
+              {claimVerification.status === "skipped" &&
+              claimVerification.reason
+                ? ` (${claimVerification.reason})`
+                : ""}
             </p>
           )}
           {tests && (

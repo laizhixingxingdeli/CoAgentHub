@@ -239,6 +239,152 @@ describe("groupTasksBySpec", () => {
   it("空输入返回空数组", () => {
     expect(groupTasksBySpec([])).toEqual([]);
   });
+
+  describe("parentTaskId 父子归并(requirement-three-layer-view)", () => {
+    it("执行任务归入协调任务所属需求,协调任务不单独成行", () => {
+      const tasks = [
+        makeTask({
+          id: "coord",
+          specRef: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+          status: "done",
+          brief: "协调请求(检视者 → 协调者)· 第 X 批",
+        }),
+        makeTask({
+          id: "exec-1",
+          parentTaskId: "coord",
+          specRef: "specs/three-layer.md",
+          createdAt: "2026-08-01T01:00:00.000Z",
+          status: "done",
+          brief: "# CoAgentHub Task\n\n## Goal\n实现三层链条展示。",
+        }),
+        makeTask({
+          id: "exec-2",
+          parentTaskId: "coord",
+          specRef: "specs/three-layer.md",
+          createdAt: "2026-08-01T02:00:00.000Z",
+          status: "running",
+        }),
+      ];
+      const reqs = groupTasksBySpec(tasks);
+      // 只出一条需求(协调任务不再独立成行)。
+      expect(reqs).toHaveLength(1);
+      // 分组键 = 根(协调任务)的 specRef ?? id → 协调任务 id。
+      expect(reqs[0].id).toBe("coord");
+      expect(reqs[0].tasks.map((t) => t.id)).toEqual([
+        "coord",
+        "exec-1",
+        "exec-2",
+      ]);
+      // 标题不取协调任务的「协调请求」样板,取执行任务的 Goal。
+      expect(reqs[0].label).toBe("实现三层链条展示。");
+      expect(reqs[0].latestTask.id).toBe("exec-2");
+    });
+
+    it("同一协调任务下多个执行任务(拆票/收尾)归在同一条需求", () => {
+      const tasks = [
+        makeTask({
+          id: "coord",
+          specRef: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+        }),
+        makeTask({
+          id: "c1",
+          parentTaskId: "coord",
+          specRef: null,
+          createdAt: "2026-08-01T01:00:00.000Z",
+        }),
+        makeTask({
+          id: "c2",
+          parentTaskId: "coord",
+          specRef: null,
+          createdAt: "2026-08-01T02:00:00.000Z",
+        }),
+        makeTask({
+          id: "c3",
+          parentTaskId: "coord",
+          specRef: null,
+          createdAt: "2026-08-01T03:00:00.000Z",
+        }),
+      ];
+      const reqs = groupTasksBySpec(tasks);
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].tasks.map((t) => t.id)).toEqual([
+        "coord",
+        "c1",
+        "c2",
+        "c3",
+      ]);
+    });
+
+    it("历史 parentTaskId 为 null 的任务保持各自成行,不猜测父子关系", () => {
+      const tasks = [
+        makeTask({
+          id: "a",
+          specRef: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+        }),
+        makeTask({
+          id: "b",
+          specRef: null,
+          createdAt: "2026-08-01T01:00:00.000Z",
+        }),
+        makeTask({
+          id: "c",
+          specRef: "specs/shared.md",
+          createdAt: "2026-08-01T02:00:00.000Z",
+        }),
+      ];
+      const reqs = groupTasksBySpec(tasks);
+      expect(reqs.map((r) => r.id)).toEqual(["a", "b", "specs/shared.md"]);
+    });
+
+    it("悬空父(parentTaskId 指向列表外)→ 按无父处理,不猜测", () => {
+      const tasks = [
+        makeTask({
+          id: "orphan",
+          specRef: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+        }),
+      ];
+      const reqs = groupTasksBySpec([
+        makeTask({
+          id: "child",
+          parentTaskId: "ghost-parent",
+          specRef: null,
+          createdAt: "2026-08-01T01:00:00.000Z",
+        }),
+        ...tasks,
+      ]);
+      expect(reqs.map((r) => r.id).sort()).toEqual(["child", "orphan"]);
+    });
+
+    it("深链(父的父)→ 归到最顶层根", () => {
+      const tasks = [
+        makeTask({
+          id: "top",
+          specRef: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+        }),
+        makeTask({
+          id: "mid",
+          parentTaskId: "top",
+          specRef: null,
+          createdAt: "2026-08-01T01:00:00.000Z",
+        }),
+        makeTask({
+          id: "leaf",
+          parentTaskId: "mid",
+          specRef: null,
+          createdAt: "2026-08-01T02:00:00.000Z",
+        }),
+      ];
+      const reqs = groupTasksBySpec(tasks);
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].id).toBe("top");
+      expect(reqs[0].tasks.map((t) => t.id)).toEqual(["top", "mid", "leaf"]);
+    });
+  });
 });
 
 describe("stepStatusFromTask (占位算法)", () => {

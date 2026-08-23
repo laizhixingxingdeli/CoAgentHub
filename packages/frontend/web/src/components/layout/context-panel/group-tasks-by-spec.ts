@@ -1,5 +1,5 @@
 /**
- * 把 GET /groups/:id/tasks 返回的扁平任务列表按 `specRef` 聚合成「需求」
+ * 把 GET /groups/:id/tasks 返回的扁平任务列表按 specRef 聚合成「需求」
  * (Requirement)。本文件只做「数据分组 + 基础展示字段」,不做最终布局/图标
  * (属于 UI-04b 的范围)。
  *
@@ -7,6 +7,12 @@
  *  - 同 `specRef`(非 null)的多个任务 → 聚合为一条 Requirement。
  *  - `specRef` 为 null 的任务 → 各自独立成一条(旧数据 / 未走 spec 驱动流程,
  *    不能强行归并),分组键用任务自身 id。
+ *  - 有 `parentTaskId` 的执行任务 → 沿父链归到它的协调任务(父)之下:父任务
+ *    的分组键即整条需求的分组键。协调任务因此**不单独成行** —— 它是该需求
+ *    的 L2 层,同一条协调任务下的多个执行任务(拆票/打回/收尾)都归在同一
+ *    条需求里。
+ *  - 历史数据 `parentTaskId` 为 null → 保持现状各自成行,**不猜测父子关系**;
+ *    parentTaskId 指向列表外的悬空父同样按无父处理(不猜)。
  *
  * 分组结果按「最新任务的 createdAt」正序排列 —— 最新的需求排在数组最后。
  * 这是给上层 UI 用的顺序约定:UI-04b 会按此顺序渲染,并把最新的放视觉底部。
@@ -84,6 +90,10 @@ export function stepStatusFromTask(status: TaskStatus): StepStatus {
  * - 有 specRef → 从 specRef 提取文件名去掉扩展名(更稳定的可读标题,例如
  *   "specs/auth/login.md" → "login")。specRef 可能是完整路径、带或不带扩展名。
  * - specRef 为 null(旧任务)→ 用最早那条任务的 id 兜底。
+ *
+ * 协调任务(组内是其他任务 parentTaskId 的父)不参与标题提取:它的 brief 是
+ * 「协调请求(检视者 → 协调者)」样板,不是需求标题。归并组里优先取执行任务
+ * (子)的标题。
  */
 const TEMPLATE_TITLES = new Set(["coagenthub task", "coagenthub 任务"]);
 const GOAL_SECTION_HEADING = /^#{2,6}\s*(?:goal|目标|任务内容)\s*$/i;
@@ -139,33 +149,83 @@ export function deriveBriefTitle(
   return titleFromGoalSection(lines);
 }
 
+/** 组内「协调任务」id 集合:是其他任务 parentTaskId 的父 → 不参与标题提取。 */
+function coordinationTaskIds(tasks: TaskItem[]): ReadonlySet<string> {
+  const parents = new Set<string>();
+  for (const task of tasks) {
+    if (task.parentTaskId) {
+      parents.add(task.parentTaskId);
+    }
+  }
+  return parents;
+}
+
 export function deriveLabel(tasks: TaskItem[]): string {
   const first = tasks[0];
   if (!first) return "";
-  const briefTitle = tasks
+  // 跳过协调任务的 brief(样板标题);协调任务自身也不参与 specRef/id 兜底。
+  const coordIds = coordinationTaskIds(tasks);
+  const candidates = tasks.filter((task) => !coordIds.has(task.id));
+  const titleSource = candidates.length > 0 ? candidates : tasks;
+  const briefTitle = titleSource
     .map((task) => deriveBriefTitle(task.brief))
     .find((title): title is string => title !== null);
   if (briefTitle) {
     return briefTitle;
   }
-  if (first.specRef) {
-    const base = first.specRef.split("/").pop() ?? first.specRef;
+  const anchor = titleSource[0];
+  if (anchor.specRef) {
+    const base = anchor.specRef.split("/").pop() ?? anchor.specRef;
     const withoutExt = base.replace(/\.[^./\\]+$/, "");
-    return withoutExt || first.specRef;
+    return withoutExt || anchor.specRef;
   }
-  return first.id;
+  return anchor.id;
 }
 
 /**
- * 把任务列表按 specRef 聚合成需求。
+ * 把任务列表按 specRef 聚合成需求,并在其上叠加 parentTaskId 父子归并。
+ *
+ * 归并规则:
+ *  - 先按「根任务」分组:沿 parentTaskId 链上溯到最顶层(父必须在列表内;
+ *    为 null / 悬空父 → 自身即根,不猜)。根任务的分组键 = 根.specRef ?? 根.id。
+ *  - 有父的任务(执行任务)随其根(协调任务)入桶 —— 协调任务不单独成行,
+ *    它的 specRef 为 null 时桶键是它自己的 id(稳定,不随子任务变化)。
+ *  - 组内 tasks 按 createdAt 升序;latestTask / status / updatedAt 仍取最新任务。
+ *
  * @param tasks 扁平任务列表(通常来自 GET /groups/:id/tasks)。
  * @returns 已按最新任务 createdAt 正序排列的 Requirement[]。
  */
 export function groupTasksBySpec(tasks: TaskItem[]): Requirement[] {
-  // 第一遍:按分组键(非 null 用 specRef,null 用自身 id)分桶。
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+
+  // 每个任务沿 parentTaskId 上溯到根(带 visited 防环;父不在列表即停)。
+  const rootOf = new Map<string, TaskItem>();
+  const resolveRoot = (task: TaskItem): TaskItem => {
+    const cached = rootOf.get(task.id);
+    if (cached) {
+      return cached;
+    }
+    let root = task;
+    const visited = new Set<string>([task.id]);
+    let cursor: TaskItem | null = task;
+    while (cursor.parentTaskId && !visited.has(cursor.parentTaskId)) {
+      visited.add(cursor.parentTaskId);
+      const parent = byId.get(cursor.parentTaskId);
+      if (!parent) {
+        break;
+      }
+      cursor = parent;
+      root = parent;
+    }
+    rootOf.set(task.id, root);
+    return root;
+  };
+
+  // 第一遍:按「根任务」的分组键(根.specRef ?? 根.id)分桶。
   const buckets = new Map<string, TaskItem[]>();
   for (const task of tasks) {
-    const key = task.specRef ?? task.id;
+    const root = resolveRoot(task);
+    const key = root.specRef ?? root.id;
     const bucket = buckets.get(key);
     if (bucket) {
       bucket.push(task);

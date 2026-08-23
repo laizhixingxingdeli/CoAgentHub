@@ -52,6 +52,8 @@ export type TaskItem = {
   specRef: string | null;
   /** specRef 指向规范的哈希,用于变更检测。老任务为 null。 */
   specHash: string | null;
+  /** 父任务 id(执行任务指向其协调任务);顶层 / 历史任务为 null 或缺省。 */
+  parentTaskId?: string | null;
   diffSummary: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string | null;
