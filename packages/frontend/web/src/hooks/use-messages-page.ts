@@ -312,7 +312,11 @@ export function useMessagesPage(groupId: string | undefined) {
         return;
       }
       // task_output(实时进度)由任务面板 TasksTab 自己订阅处理,消息流忽略。
-      if (event.type === "task_output" || event.type === "task_stall_alert") {
+      if (
+        event.type === "task_output" ||
+        event.type === "task_stall_alert" ||
+        event.type === "task_status_changed"
+      ) {
         return;
       }
       // group_message_deleted carries only the id — mark the placeholder locally.

@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import type {
+  TaskItem,
+  TaskStatus,
+} from "@/pages/app/groups/messages/TaskPanel";
 
 /** First reconnect delay; doubles per failed attempt until the cap below. */
 const INITIAL_RECONNECT_DELAY = 1000;
@@ -63,13 +67,44 @@ export type WsTaskStallAlertEvent = {
   taskId: string;
 };
 
+/** 任务状态事件中的任务快照(server ws-hub 的 task_status_changed 载荷)。 */
+export type WsTaskStatusChangedTask = {
+  id: string;
+  status: TaskStatus;
+  executorParticipantId: string;
+  executorKey: string | null;
+  brief: string | null;
+  diffSummary: Record<string, unknown> | null;
+  specRef: string | null;
+  specHash: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+  retryCount: number;
+  /** 旧服务端载荷未提供的任务详情字段,存在时透传。 */
+  messageId?: string;
+  checkpointRef?: string | null;
+  parentTaskId?: string | null;
+  attempts?: TaskItem["attempts"];
+  outputTail?: string;
+};
+
+/** 任务状态变更事件:task 快照可选,以兼容轻量状态通知。 */
+export type WsTaskStatusChangedEvent = {
+  type: "task_status_changed";
+  groupId: string;
+  taskId: string;
+  status: TaskStatus;
+  task?: WsTaskStatusChangedTask;
+};
+
 /** Any frame the server WS hub pushes for a group (tickets 13/22, 实时进度). */
 export type WsGroupEvent =
   | GroupMessageEvent
   | GroupMessageUpdatedEvent
   | GroupMessageDeletedEvent
   | WsTaskOutputEvent
-  | WsTaskStallAlertEvent;
+  | WsTaskStallAlertEvent
+  | WsTaskStatusChangedEvent;
 
 /**
  * Loose shape of a raw WS frame, validated before forwarding as a typed
@@ -98,6 +133,13 @@ type WsGroupFrame =
       type: "task_stall_alert";
       groupId?: string;
       taskId?: string;
+    }
+  | {
+      type: "task_status_changed";
+      groupId?: string;
+      taskId?: string;
+      status?: string;
+      task?: WsTaskStatusChangedTask;
     };
 
 type MessageEventLike = { data: unknown };
@@ -271,8 +313,27 @@ export function useGroupWs(
         typeof frame.type !== "string" ||
         (!frame.type.startsWith("group_message") &&
           frame.type !== "task_output" &&
-          frame.type !== "task_stall_alert")
+          frame.type !== "task_stall_alert" &&
+          frame.type !== "task_status_changed")
       ) {
+        return;
+      }
+      if (frame.type === "task_status_changed") {
+        if (
+          frame.taskId &&
+          frame.status &&
+          ["queued", "running", "done", "failed", "cancelled"].includes(
+            frame.status,
+          )
+        ) {
+          onEventRef.current({
+            type: "task_status_changed",
+            groupId,
+            taskId: frame.taskId,
+            status: frame.status as TaskStatus,
+            ...(frame.task ? { task: frame.task } : {}),
+          });
+        }
         return;
       }
       if (frame.type === "task_output") {

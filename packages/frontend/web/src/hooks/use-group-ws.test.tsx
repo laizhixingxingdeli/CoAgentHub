@@ -130,6 +130,47 @@ describe("useGroupWs (ticket 14)", () => {
     });
   });
 
+  it("forwards task_status_changed with its task snapshot", () => {
+    stubWebSocket();
+    const onEvent = vi.fn();
+    renderHook(() => useGroupWs("group-1", onEvent));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.open());
+
+    const task = {
+      id: "task-1",
+      status: "running",
+      executorParticipantId: "participant-1",
+      executorKey: "codex",
+      brief: "# 实时需求",
+      diffSummary: null,
+      specRef: "specs/live.md",
+      specHash: null,
+      createdAt: "2026-08-02T00:00:00.000Z",
+      updatedAt: "2026-08-02T00:01:00.000Z",
+      retryCount: 0,
+    };
+    act(() =>
+      ws.receive(
+        JSON.stringify({
+          type: "task_status_changed",
+          groupId: "group-1",
+          taskId: "task-1",
+          status: "running",
+          task,
+        }),
+      ),
+    );
+
+    expect(onEvent).toHaveBeenCalledWith({
+      type: "task_status_changed",
+      groupId: "group-1",
+      taskId: "task-1",
+      status: "running",
+      task,
+    });
+  });
+
   it("ignores frames for other groups, other types and malformed payloads", () => {
     stubWebSocket();
     const onEvent = vi.fn();

@@ -9,6 +9,7 @@ import TaskPanel, {
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import { groupTasksBySpec, type Requirement } from "./group-tasks-by-spec";
+import { mergeTaskStatusChanged } from "./merge-task-status";
 import RequirementDetailPanel from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
 import { RequirementControlBar } from "./requirement-control-bar";
@@ -81,14 +82,27 @@ export function RequirementWorkspace({
   const [selectedRequirementId, setSelectedRequirementId] = useState<
     string | null
   >(null);
+  const selectionInitializedRef = useRef(false);
   useEffect(() => {
+    // An initially empty list may receive its first task over WS, so only mark
+    // the default selection as initialized once there is a requirement.
+    if (requirements.length === 0) {
+      if (selectionInitializedRef.current) {
+        setSelectedRequirementId(null);
+      }
+      return;
+    }
     setSelectedRequirementId((prev) => {
       if (prev !== null && requirements.some((r) => r.id === prev)) {
         return prev;
       }
-      return requirements.length > 0
-        ? requirements[requirements.length - 1].id
-        : null;
+      if (!selectionInitializedRef.current) {
+        selectionInitializedRef.current = true;
+        return requirements[requirements.length - 1].id;
+      }
+      // A selected requirement disappearing must not move the user to another
+      // row while the task collection is being refreshed.
+      return null;
     });
   }, [requirements]);
 
@@ -166,6 +180,10 @@ export function RequirementWorkspace({
   // 与后端 output-buffer.ts 同款上限:1000 行 / 256KB,超限保留尾部);
   // 无进展提醒:task_stall_alert 事件 → 该任务行标记黄色警示(非失败)。
   useGroupWs(groupId, (event) => {
+    if (event.type === "task_status_changed") {
+      setTasks((prev) => mergeTaskStatusChanged(prev, event));
+      return;
+    }
     if (event.type === "task_output") {
       setLiveOutputs((prev) => ({
         ...prev,

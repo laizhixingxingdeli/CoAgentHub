@@ -1,7 +1,17 @@
-import { fireEvent, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
-import { createFetchMock, jsonResponse, renderWithProviders } from "@/test/utils";
+import {
+  createFetchMock,
+  jsonResponse,
+  renderWithProviders,
+} from "@/test/utils";
 import { MockWebSocket } from "@/test/ws-mock";
 import { RequirementWorkspace } from "./requirement-workspace";
 
@@ -97,18 +107,24 @@ describe("RequirementWorkspace 响应式布局", () => {
 
     // 默认单栏列表:详情不渲染。
     expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
-    expect(screen.queryByTestId("requirement-detail-panel")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-detail-panel"),
+    ).not.toBeInTheDocument();
 
     // 点击「需求A」行 → 切到详情(含控制条),列表隐藏。
     fireEvent.click(screen.getByTestId("requirement-row-specs/a.md"));
-    expect(await screen.findByTestId("requirement-detail-panel")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
     expect(screen.queryByTestId("requirement-list")).not.toBeInTheDocument();
 
     // 返回键 → 回到列表,详情隐藏。
     fireEvent.click(screen.getByTestId("requirement-mobile-back"));
     expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
-    expect(screen.queryByTestId("requirement-detail-panel")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-detail-panel"),
+    ).not.toBeInTheDocument();
   });
 
   it("窄视口单栏切换:重新选中另一需求,详情随之切换", async () => {
@@ -121,7 +137,9 @@ describe("RequirementWorkspace 响应式布局", () => {
     // 返回列表 → 点「需求B」→ 详情切到 B。
     fireEvent.click(screen.getByTestId("requirement-mobile-back"));
     fireEvent.click(await screen.findByTestId("requirement-row-specs/b.md"));
-    expect(await screen.findByTestId("requirement-detail-panel")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByText("需求B")).toBeInTheDocument();
     expect(screen.queryByText("需求A")).not.toBeInTheDocument();
   });
@@ -131,12 +149,94 @@ describe("RequirementWorkspace 响应式布局", () => {
     renderWorkspace(TWO_REQUIREMENTS);
 
     expect(await screen.findByTestId("requirement-list")).toBeInTheDocument();
-    expect(await screen.findByTestId("requirement-detail-panel")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-detail-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("requirement-control-bar")).toBeInTheDocument();
     // 两栏模式下默认选中最新需求(需求B),列表行仍可见;详情区标题同为 B。
-    expect(screen.getByTestId("requirement-row-specs/a.md")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-row-specs/a.md"),
+    ).toBeInTheDocument();
     expect(
       within(screen.getByTestId("requirement-detail-panel")).getByText("需求B"),
+    ).toBeInTheDocument();
+  });
+
+  it("通过 task_status_changed 增量显示新需求,不重拉任务列表", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(TWO_REQUIREMENTS);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    await screen.findByTestId("requirement-row-specs/b.md");
+    const tasksRequestCount = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/tasks"),
+    ).length;
+    const task = makeTask({
+      id: "task-c",
+      specRef: "specs/c.md",
+      brief: "# 需求C",
+      createdAt: "2026-08-01T02:00:00.000Z",
+      updatedAt: "2026-08-01T02:00:00.000Z",
+    });
+
+    act(() =>
+      MockWebSocket.instances[0].receive(
+        JSON.stringify({
+          type: "task_status_changed",
+          groupId: "group-1",
+          taskId: task.id,
+          status: task.status,
+          task: { ...task, retryCount: 0 },
+        }),
+      ),
+    );
+
+    expect(
+      await screen.findByTestId("requirement-row-specs/c.md"),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks")),
+    ).toHaveLength(tasksRequestCount);
+  });
+
+  it("更新任务状态时保持选中的需求不变", async () => {
+    setViewport(1280);
+    renderWorkspace(TWO_REQUIREMENTS);
+
+    await screen.findByTestId("requirement-row-specs/b.md");
+    fireEvent.click(screen.getByTestId("requirement-row-specs/a.md"));
+    const task = makeTask({
+      id: "task-a",
+      specRef: "specs/a.md",
+      brief: "# 需求A",
+      status: "done",
+      updatedAt: "2026-08-01T03:00:00.000Z",
+    });
+
+    act(() =>
+      MockWebSocket.instances[0].receive(
+        JSON.stringify({
+          type: "task_status_changed",
+          groupId: "group-1",
+          taskId: task.id,
+          status: task.status,
+          task: { ...task, retryCount: 0 },
+        }),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("requirement-row-specs/a.md")).toHaveAttribute(
+        "data-selected",
+        "true",
+      );
+      expect(
+        screen.getByTestId("requirement-step-specs/a.md-0"),
+      ).toHaveAttribute("data-status", "done");
+    });
+    expect(
+      within(screen.getByTestId("requirement-detail-panel")).getByText("需求A"),
     ).toBeInTheDocument();
   });
 });
