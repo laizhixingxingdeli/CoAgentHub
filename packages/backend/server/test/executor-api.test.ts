@@ -127,7 +127,16 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       maxConcurrency: 1,
       // --approve-for-me 自带 workspace-write 沙箱,不能再叠 --sandbox;
       // 旧写法的 --ask-for-approval 在 codex-cli 0.149.0 已不存在。
-      args: ["exec", "--approve-for-me", "--ephemeral", "{ticket}"],
+      // network_access=true:该沙箱默认禁网(连 localhost 也不通),而协调者
+      // 必须能 PATCH 回平台才能把 L3 交回检视者,否则三层链路在最后一步断掉。
+      args: [
+        "exec",
+        "--approve-for-me",
+        "--ephemeral",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "{ticket}",
+      ],
     });
 
     const added = list.find((x) => x.key === "cli-tester");

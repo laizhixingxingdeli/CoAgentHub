@@ -127,7 +127,22 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     // (叠了报 "cannot be used with")。旧写法 `--sandbox workspace-write
     // --ask-for-approval never` 在 codex-cli 0.149.0 已失效:--ask-for-approval
     // 这个参数不存在了,spawn 直接报 unexpected argument。实测于 0.149.0。
-    args: ["exec", "--approve-for-me", "--ephemeral", "{ticket}"],
+    //
+    // sandbox_workspace_write.network_access=true:workspace-write 沙箱默认**禁网**,
+    // 连 localhost 也不通(实测:沙箱内 curl localhost:3001 得 exit 7 / 000,
+    // 同一条命令在沙箱外得 200)。协调者按 spec §3.17.4 必须 PATCH 自己那条
+    // detached 任务才能把 L3 交回检视者——禁网时它做完 L2 却回传不了,
+    // 三层链路在最后一步断掉(实测连续三轮:12:59 / 13:45 / 14:30)。
+    // 只放开网络、保留文件系统沙箱;不用 --sandbox danger-full-access
+    // (那会连文件系统限制一并取消,过宽)。
+    args: [
+      "exec",
+      "--approve-for-me",
+      "--ephemeral",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "{ticket}",
+    ],
     // 当前 runner 以共享工作区执行,避免同一 Codex participant 并发改文件。
     maxConcurrency: 1,
   },
