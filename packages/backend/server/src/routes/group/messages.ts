@@ -555,13 +555,14 @@ app
         // 消息搜索(enhancement):正文关键词,LIKE 通配符(%、_)按字面转义;
         // 空串视为无搜索。上限 200 字符防止超长模式串。
         q: z.string().max(200).optional(),
+        limit: z.coerce.number().int().min(1).max(200).optional(),
       }),
     ),
     async (c) => {
       const db = c.get("db");
       const requesterId = c.get("participantId");
       const { id } = c.req.valid("param");
-      const { after, q } = c.req.valid("query");
+      const { after, q, limit } = c.req.valid("query");
 
       const group = await db.query.groups.findFirst({
         where: (t, { eq }) => eq(t.id, id),
@@ -594,6 +595,7 @@ app
         {
           after,
           q,
+          limit,
           participantType,
         },
       );

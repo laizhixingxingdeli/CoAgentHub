@@ -21,7 +21,7 @@ import {
   messageVisibleToMemberSql,
   type ParticipantType,
 } from "@server/lib/group-visibility";
-import { and, asc, eq, gt, ilike, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, ne, sql } from "drizzle-orm";
 
 /** Soft-delete placeholder (ticket 22): the row is kept (closure/reply tree stays intact), the body becomes this string. */
 export const DELETED_MESSAGE_PLACEHOLDER = "[消息已删除]";
@@ -197,7 +197,7 @@ export interface ListVisibleMessagesOptions {
   after?: string;
   /** 正文关键词搜索;空串视为无搜索,LIKE 通配符(%、_)按字面转义。 */
   q?: string;
-  /** 分页大小,缺省 LIMIT 200(与原路由 MESSAGE_PAGE_LIMIT 一致)。 */
+  /** 显式分页大小;未传时保留原有 LIMIT 200 行为。 */
   limit?: number;
   /**
    * 请求方参与者类型:human = 无条件全可见(先于成员/audience 判定,不要求
@@ -208,8 +208,9 @@ export interface ListVisibleMessagesOptions {
 
 /**
  * 列表查询:可见性 SQL(与 webhook/WS 扇出同一套规则,见 group-visibility.ts)
- * + ?after= 增量游标 + q 关键词 + LIMIT,整体下推到 SQL,翻页发生在
- * *可见* 流上而不是全量拉到 JS 再过滤。
+ * + ?after= 增量游标 + q 关键词 + 可选 LIMIT,整体下推到 SQL,翻页发生在
+ * *可见* 流上而不是全量拉到 JS 再过滤。显式 limit 取最新 N 条后翻回
+ * 正序;未传 limit 保留既有正序 LIMIT 200 行为。
  */
 export async function listVisibleMessages(
   db: DataBase,
@@ -218,7 +219,9 @@ export async function listVisibleMessages(
   roles: string[],
   options: ListVisibleMessagesOptions = {},
 ): Promise<GroupMessageFull[]> {
-  const { after, q, limit = MESSAGE_PAGE_LIMIT, participantType } = options;
+  const { after, q, limit, participantType } = options;
+  const hasExplicitLimit = limit !== undefined;
+  const pageLimit = limit ?? MESSAGE_PAGE_LIMIT;
 
   const conditions = [
     eq(groupMessageTable.groupId, groupId),
@@ -251,7 +254,7 @@ export async function listVisibleMessages(
     .where(eq(groupMessageClosureTable.groupId, groupId))
     .groupBy(groupMessageClosureTable.descendantId)
     .as("depth_agg");
-  return db
+  const messages = await db
     .select({
       id: groupMessageTable.id,
       groupId: groupMessageTable.groupId,
@@ -269,8 +272,12 @@ export async function listVisibleMessages(
     .from(groupMessageTable)
     .leftJoin(depthAgg, eq(depthAgg.descendantId, groupMessageTable.id))
     .where(and(...conditions))
-    .orderBy(asc(groupMessageTable.id))
-    .limit(limit);
+    .orderBy(
+      hasExplicitLimit ? desc(groupMessageTable.id) : asc(groupMessageTable.id),
+    )
+    .limit(pageLimit);
+
+  return hasExplicitLimit ? messages.reverse() : messages;
 }
 
 /**

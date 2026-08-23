@@ -100,6 +100,7 @@ describe("群组消息树与受众路由", () => {
     groupId: string,
     after?: string,
     q?: string,
+    limit?: number,
   ) {
     const params = new URLSearchParams();
     if (after) {
@@ -107,6 +108,9 @@ describe("群组消息树与受众路由", () => {
     }
     if (q !== undefined) {
       params.set("q", q);
+    }
+    if (limit !== undefined) {
+      params.set("limit", String(limit));
     }
     const qs = params.toString();
     const res = await app.request(
@@ -623,11 +627,13 @@ describe("群组消息树与受众路由", () => {
         body: "human 试图发言",
       });
       expect(rejected.status).toBe(403);
-      const preWriteCount = (await (
-        await app.request(`/api/groups/${group.id}/messages`, {
-          headers: { "X-Participant-Id": human.id },
-        })
-      ).json() as MessageItem[]).length;
+      const preWriteCount = (
+        (await (
+          await app.request(`/api/groups/${group.id}/messages`, {
+            headers: { "X-Participant-Id": human.id },
+          })
+        ).json()) as MessageItem[]
+      ).length;
 
       // agent 角色照常协作:广播 + role 定向 + participant 定向
       await sendMessage(coordinator.id, group.id, {
@@ -684,6 +690,64 @@ describe("群组消息树与受众路由", () => {
       // 创建时间升序
       const times = inc.map((m) => new Date(m.createdAt).getTime());
       expect(times[1]).toBeGreaterThanOrEqual(times[0]);
+    });
+
+    it("不传 ?limit= 时保持现状:返回全部可见消息并按时间正序", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.id, group.id, { body: "第一条" });
+      await sendMessage(coordinator.id, group.id, { body: "第二条" });
+      await sendMessage(coordinator.id, group.id, { body: "第三条" });
+
+      const list = await fetchMessages(coordinator.id, group.id);
+      expect(list.map((m) => m.body)).toEqual(["第一条", "第二条", "第三条"]);
+    });
+
+    it("?limit= 返回最新 N 条,但保持时间正序", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.id, group.id, { body: "第一条" });
+      await sendMessage(coordinator.id, group.id, { body: "第二条" });
+      await sendMessage(coordinator.id, group.id, { body: "第三条" });
+      await sendMessage(coordinator.id, group.id, { body: "第四条" });
+
+      const list = await fetchMessages(
+        coordinator.id,
+        group.id,
+        undefined,
+        undefined,
+        2,
+      );
+      expect(list.map((m) => m.body)).toEqual(["第三条", "第四条"]);
+    });
+
+    it("?limit= 超出 1–200 范围返回 400", async () => {
+      const { group, coordinator } = await setupGroup();
+
+      for (const limit of [0, 201]) {
+        const res = await app.request(
+          `/api/groups/${group.id}/messages?limit=${limit}`,
+          { headers: { "X-Participant-Id": coordinator.id } },
+        );
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it("?after= 与 ?limit= 组合返回游标之后最新的 N 条", async () => {
+      const { group, coordinator } = await setupGroup();
+      await sendMessage(coordinator.id, group.id, { body: "第一条" });
+      const second = (await (
+        await sendMessage(coordinator.id, group.id, { body: "第二条" })
+      ).json()) as MessageItem;
+      await sendMessage(coordinator.id, group.id, { body: "第三条" });
+      await sendMessage(coordinator.id, group.id, { body: "第四条" });
+
+      const list = await fetchMessages(
+        coordinator.id,
+        group.id,
+        second.id,
+        undefined,
+        1,
+      );
+      expect(list.map((m) => m.body)).toEqual(["第四条"]);
     });
 
     it("?q= 搜索:按正文关键词过滤,保留可见性过滤", async () => {
@@ -1115,9 +1179,7 @@ describe("群组消息树与受众路由", () => {
       await waitForCapability(executor.id, "coagenthub-executor");
       const caps = await participantCapabilities(executor.id);
       // 幂等:重复追加不重复(capabilities 中该值只出现一次)。
-      expect(
-        caps.filter((c) => c === "coagenthub-executor").length,
-      ).toBe(1);
+      expect(caps.filter((c) => c === "coagenthub-executor").length).toBe(1);
     });
 
     it('发送 "✅ skill 已安装: coordinator" 更新 coordinator capability', async () => {
@@ -1138,9 +1200,7 @@ describe("群组消息树与受众路由", () => {
       await waitForCapability(executor.id, "coagenthub-reviewer");
       const caps = await participantCapabilities(executor.id);
       // 幂等:重复追加不重复(capabilities 中该值只出现一次)。
-      expect(
-        caps.filter((c) => c === "coagenthub-reviewer").length,
-      ).toBe(1);
+      expect(caps.filter((c) => c === "coagenthub-reviewer").length).toBe(1);
     });
 
     it("普通消息不更新 capabilities", async () => {

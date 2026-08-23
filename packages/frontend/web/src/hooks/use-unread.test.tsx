@@ -182,11 +182,7 @@ describe("seedGroupPreviews (ticket: 侧栏预览对所有群生效)", () => {
     return createFetchMock([
       {
         match: (url) => String(url).includes("/api/groups/group-1/messages"),
-        respond: () =>
-          jsonResponse([
-            { id: "m0", body: "群1较早一条" },
-            { id: "m1", body: "群1最后一条" },
-          ]),
+        respond: () => jsonResponse([{ id: "m1", body: "群1最后一条" }]),
       },
       {
         match: (url) => String(url).includes("/api/groups/group-2/messages"),
@@ -197,10 +193,16 @@ describe("seedGroupPreviews (ticket: 侧栏预览对所有群生效)", () => {
 
   it("seeds a preview for every group from its newest message", async () => {
     stubWebSocket();
-    vi.stubGlobal("fetch", seedFetchMock());
+    const fetchMock = seedFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useUnread());
     await act(() => seedGroupPreviews(["group-1", "group-2"]));
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/groups/group-1/messages?limit=1",
+      "/api/groups/group-2/messages?limit=1",
+    ]);
 
     // The newest row (last element, id-ascending) wins, never the older one.
     expect(result.current.lastMessageByGroup.get("group-1")?.body).toBe(

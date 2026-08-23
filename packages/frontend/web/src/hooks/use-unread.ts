@@ -157,8 +157,7 @@ export function updateLastMessage(groupId: string, body: string): void {
  * Failures degrade silently per group (HTTP error, network error, archived
  * group): that group simply keeps showing the 暂无消息
  * placeholder while the rest of the list is unaffected. The preview uses the
- * existing GET /groups/:id/messages response (id-ascending, so the last row is
- * the newest) and only takes its body — no backend change required.
+ * latest row from GET /groups/:id/messages and only takes its body.
  */
 export async function seedGroupPreviews(groupIds: string[]): Promise<void> {
   // Reserve every id synchronously (before any await) so a second call during
@@ -177,7 +176,7 @@ export async function seedGroupPreviews(groupIds: string[]): Promise<void> {
   await Promise.all(
     pending.map(async (groupId) => {
       try {
-        const res = await fetch(`/api/groups/${groupId}/messages`);
+        const res = await fetch(`/api/groups/${groupId}/messages?limit=1`);
         if (!res.ok) {
           return; // 401/403/404 — silent: keep the 暂无消息 placeholder
         }
