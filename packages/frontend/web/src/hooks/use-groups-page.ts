@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { useUnread } from "@/hooks/use-unread";
-import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
-import { useIdentityStore } from "@/lib/stores/identity";
 
 type GroupItem = {
   id: string;
@@ -62,23 +60,16 @@ function summarizeTasks(tasks: GroupTask[]): GroupTaskSignal {
 /**
  * Turn a non-OK response into a human-readable error. The identity middleware
  * never returns 401/403 (LAN full-trust model), so a 4xx here is a plain
- * request error — the message just describes which identity was declared.
+ * request error.
  */
-function throwForStatus(res: Response, sentIdentity: boolean): never {
-  if (res.status === 401 || res.status === 403) {
-    throw new Error(
-      sentIdentity
-        ? t("groups.error.identityRejected")
-        : t("groups.error.identityMissing"),
-    );
-  }
+function throwForStatus(res: Response): never {
   throw new Error(`HTTP ${res.status}`);
 }
 
 /**
  * All state and data-fetching logic for the group list page (ticket 02).
  * Extracted from GroupsPage so the page component is a thin composition of
- * this hook, the identity/participant panel sections and the list rendering.
+ * this hook and the list rendering.
  */
 export function useGroupsPage() {
   const [, navigate] = useLocation();
@@ -117,9 +108,7 @@ export function useGroupsPage() {
 
   const fetchTaskSignal = useCallback(async (groupId: string) => {
     try {
-      const res = await fetch(`/api/groups/${groupId}/tasks?limit=100`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/tasks?limit=100`);
       if (!res.ok) {
         return EMPTY_TASK_SIGNAL;
       }
@@ -155,7 +144,6 @@ export function useGroupsPage() {
     const filter = statusFilter;
     const q = debouncedQuery;
     try {
-      const headers = participantIdentityHeaders();
       // "all" carries no ?status= (server returns active + archived and hides
       // soft-deleted rows); the tabs pass the exact enum the server filters on.
       // A non-empty search appends ?q= (title ILIKE) and combines with the tab.
@@ -169,9 +157,9 @@ export function useGroupsPage() {
       // 分页:首次加载/过滤重置总是从第一页(limit=20,offset=0)开始。
       params.set("limit", String(PAGE_SIZE));
       params.set("offset", "0");
-      const res = await fetch(`/api/groups?${params.toString()}`, { headers });
+      const res = await fetch(`/api/groups?${params.toString()}`);
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
@@ -205,7 +193,6 @@ export function useGroupsPage() {
     setLoadingMore(true);
     setError(null);
     try {
-      const headers = participantIdentityHeaders();
       const params = new URLSearchParams();
       if (filter !== "all") {
         params.set("status", filter);
@@ -215,9 +202,9 @@ export function useGroupsPage() {
       }
       params.set("limit", String(PAGE_SIZE));
       params.set("offset", String(groups.length));
-      const res = await fetch(`/api/groups?${params.toString()}`, { headers });
+      const res = await fetch(`/api/groups?${params.toString()}`);
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       const data = (await res.json()) as { items: GroupItem[]; total: number };
       if (filter === statusFilter && q === debouncedQuery) {
@@ -261,18 +248,6 @@ export function useGroupsPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // 身份切换后群列表刷新:绑定/清除发生在侧栏(身份切换器),页面不再直接持有
-  // commitIdentity;订阅 identity store 的 participantId,变化即重新拉取列表,
-  // 与旧实现中 commitIdentity 调用 loadGroups() 的语义一致。
-  const identityId = useIdentityStore((s) => s.participantId);
-  const prevIdentityId = useRef(identityId);
-  useEffect(() => {
-    if (prevIdentityId.current !== identityId) {
-      prevIdentityId.current = identityId;
-      void loadGroups();
-    }
-  }, [identityId, loadGroups]);
-
   const handleCreate = async () => {
     const title = newTitle.trim();
     if (!title) {
@@ -284,7 +259,6 @@ export function useGroupsPage() {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...participantIdentityHeaders(),
       };
       const res = await fetch("/api/groups", {
         method: "POST",
@@ -292,7 +266,7 @@ export function useGroupsPage() {
         body: JSON.stringify({ title }),
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       setNewTitle("");
       setMessage(t("groups.created", { title }));
@@ -324,14 +298,13 @@ export function useGroupsPage() {
     setMessage(null);
     setSavingTitle(true);
     try {
-      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${editingTitleId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", ...headers },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       setMessage(t("groups.renamed", { title }));
       setEditingTitleId(null);
@@ -354,13 +327,11 @@ export function useGroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}/archive`, {
         method: "POST",
-        headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       setMessage(t("groups.archived", { title: group.title }));
       await loadGroups();
@@ -377,13 +348,11 @@ export function useGroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}/unarchive`, {
         method: "POST",
-        headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       setMessage(t("groups.restored", { title: group.title }));
       await loadGroups();
@@ -412,13 +381,11 @@ export function useGroupsPage() {
     setError(null);
     setMessage(null);
     try {
-      const headers = participantIdentityHeaders();
       const res = await fetch(`/api/groups/${group.id}`, {
         method: "DELETE",
-        headers,
       });
       if (!res.ok) {
-        throwForStatus(res, Boolean(headers["X-Participant-Id"]));
+        throwForStatus(res);
       }
       setMessage(t("groups.deleted", { title: group.title }));
       await loadGroups();

@@ -6,13 +6,7 @@ import {
   useGroupWs,
   type WsGroupEvent,
 } from "@/hooks/use-group-ws";
-import {
-  updateLastMessage,
-} from "@/hooks/use-unread";
-import {
-  PARTICIPANT_ID_KEY,
-  participantIdentityHeaders,
-} from "@/lib/api-client";
+import { updateLastMessage } from "@/hooks/use-unread";
 import { t } from "@/lib/i18n";
 import { maybeNotifyGroupMessage } from "@/lib/notifications";
 import {
@@ -111,15 +105,9 @@ export function useMessagesPage(groupId: string | undefined) {
   stickToBottomRef.current = stickToBottom;
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The bound participant id (saved on the groups page identity panel). Absent ⇒
-  // no "own" messages: everything renders left-aligned without the 我 badge.
-  const myParticipantId = useMemo(
-    () =>
-      typeof localStorage !== "undefined"
-        ? localStorage.getItem(PARTICIPANT_ID_KEY)
-        : null,
-    [],
-  );
+  // The browser no longer binds to a participant, so message ownership is not
+  // inferred from localStorage.
+  const myParticipantId: string | null = null;
 
   // Latest group title / members / own id for the stable WS callback (same
   // sync-during-render pattern as searchActiveRef above): the notification
@@ -146,9 +134,7 @@ export function useMessagesPage(groupId: string | undefined) {
         const url = q
           ? `/api/groups/${groupId}/messages?q=${encodeURIComponent(q)}`
           : `/api/groups/${groupId}/messages`;
-        const res = await fetch(url, {
-          headers: participantIdentityHeaders(),
-        });
+        const res = await fetch(url);
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
@@ -230,9 +216,7 @@ export function useMessagesPage(groupId: string | undefined) {
       return;
     }
     try {
-      const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/members`);
       if (!res.ok) {
         return;
       }
@@ -477,7 +461,6 @@ export function useMessagesPage(groupId: string | undefined) {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ body: trimmed }),
       });
@@ -514,7 +497,6 @@ export function useMessagesPage(groupId: string | undefined) {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages/${msg.id}`, {
         method: "DELETE",
-        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);

@@ -2,12 +2,8 @@ import { ArrowLeft } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGroupWs } from "@/hooks/use-group-ws";
 import { useIsDesktop } from "@/hooks/use-mobile";
-import {
-  PARTICIPANT_ID_KEY,
-  participantIdentityHeaders,
-} from "@/lib/api-client";
-import { appendOutputTail } from "@/lib/output-buffer";
 import { t } from "@/lib/i18n";
+import { appendOutputTail } from "@/lib/output-buffer";
 import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
@@ -104,9 +100,7 @@ export function RequirementWorkspace({
 
   const loadGroupStatus = useCallback(async () => {
     try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}`);
       if (res.ok) {
         const group = (await res.json()) as { status: string };
         setGroupStatus(
@@ -124,9 +118,7 @@ export function RequirementWorkspace({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/groups/${groupId}/tasks`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/tasks`);
       if (!res.ok) {
         // 只读放开后 403 不再是预期状态(仅群不存在 404);统一按失败处理,
         // 不再把 403 当整面板「无权限」错误态。
@@ -143,9 +135,7 @@ export function RequirementWorkspace({
 
   const loadMessages = useCallback(async () => {
     try {
-      const res = await fetch(`/api/groups/${groupId}/messages`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/messages`);
       if (res.ok) {
         setMessages(await res.json());
       }
@@ -156,9 +146,7 @@ export function RequirementWorkspace({
 
   const loadMembers = useCallback(async () => {
     try {
-      const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/members`);
       if (res.ok) {
         setMembers(await res.json());
       }
@@ -181,10 +169,7 @@ export function RequirementWorkspace({
     if (event.type === "task_output") {
       setLiveOutputs((prev) => ({
         ...prev,
-        [event.taskId]: appendOutputTail(
-          prev[event.taskId] ?? "",
-          event.chunk,
-        ),
+        [event.taskId]: appendOutputTail(prev[event.taskId] ?? "", event.chunk),
       }));
       return;
     }
@@ -225,7 +210,6 @@ export function RequirementWorkspace({
           try {
             const res = await fetch(
               `/api/groups/${groupId}/tasks?includeOutput=1`,
-              { headers: participantIdentityHeaders() },
             );
             if (!res.ok) {
               return;
@@ -254,10 +238,7 @@ export function RequirementWorkspace({
         return;
       }
       try {
-        const res = await fetch(
-          `/api/groups/${groupId}/tasks?includeOutput=1`,
-          { headers: participantIdentityHeaders() },
-        );
+        const res = await fetch(`/api/groups/${groupId}/tasks?includeOutput=1`);
         if (!res.ok) {
           return;
         }
@@ -275,12 +256,10 @@ export function RequirementWorkspace({
     [expandedTaskId, foldedTaskIds, groupId, liveOutputs],
   );
 
-  // 停止/回滚需要 coordinator/human 身份:已绑定身份即视为有控制权限;
-  // 未绑定(Local User)时列表只读、按钮禁用。每次渲染读取,绑定/清除即时生效。
-  const canControl =
-    typeof localStorage !== "undefined" &&
-    Boolean(localStorage.getItem(PARTICIPANT_ID_KEY));
-  // 归档/软删群只读:群状态非 active 时,即使有身份,停止/回滚也禁用。
+  // Local User is the browser's server-side human identity. The backend remains
+  // the authority for group membership and control permissions.
+  const canControl = true;
+  // 归档/软删群只读:群状态非 active 时,控制按钮仍禁用。
   const readOnly = groupStatus !== null && groupStatus !== "active";
 
   /** 停止/回滚 = 发一条 broadcast 命令消息(与手动输入等效,服务端 control.ts
@@ -296,14 +275,13 @@ export function RequirementWorkspace({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ body: commandBody, audience: "broadcast" }),
       });
       if (!res.ok) {
         setError(
           res.status === 403
-            ? "无权限,请以协调者/人类身份绑定参与方"
+            ? "无权限,请确认当前 Local User 是群成员"
             : `命令发送失败: HTTP ${res.status}`,
         );
         return;
@@ -329,15 +307,12 @@ export function RequirementWorkspace({
     const deadline = Date.now() + 30_000;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/groups/${groupId}/tasks`, {
-          headers: participantIdentityHeaders(),
-        });
+        const res = await fetch(`/api/groups/${groupId}/tasks`);
         if (res.ok) {
           const rows = (await res.json()) as TaskItem[];
           const updated = rows.find((r) => r.id === task.id);
           if (
-            updated &&
-            updated.diffSummary &&
+            updated?.diffSummary &&
             typeof updated.diffSummary === "object" &&
             (updated.diffSummary as Record<string, unknown>).error ===
               "rollback"

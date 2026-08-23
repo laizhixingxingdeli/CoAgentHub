@@ -13,7 +13,6 @@ import {
   syncUnreadConnection,
   useUnread,
 } from "@/hooks/use-unread";
-import { participantIdentityHeaders } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
 import { RoleBadge } from "@/pages/app/groups/messages/types";
@@ -40,12 +39,12 @@ function truncatePreview(body: string): string {
  * The list itself is fetched on mount and re-fetched on every navigation —
  * previews intentionally update on reload/navigation only (no per-frame
  * refetch); the unread badge is driven in real time by the global store's WS
- * connection. Fetch failures are silent: a missing/invalid participant identity
- * must never block the rest of the sidebar.
+ * connection. Fetch failures are silent so the sidebar never blocks the rest
+ * of the app.
  *
  * The always-mounted section also owns `activeGroupId` in the unread store
  * (it reads the current route), so entering/leaving a group clears its badge
- * and the resident WS picks up an identity bound on the groups page.
+ * and the resident Local User WS connection remains available across navigation.
  */
 export function ConversationList() {
   const [location, navigate] = useLocation();
@@ -61,16 +60,13 @@ export function ConversationList() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: navigation pulse — refetch the list when the route changes (location deliberately watched)
   useEffect(() => {
     let cancelled = false;
-    // Navigation pulse: an identity bound on the groups page (same-tab localStorage
-    // writes fire no event) starts the unread store's resident socket here.
+    // Navigation pulse keeps the resident unread connection alive.
     syncUnreadConnection();
     (async () => {
       try {
-        const res = await fetch("/api/groups?status=active", {
-          headers: participantIdentityHeaders(),
-        });
+        const res = await fetch("/api/groups?status=active");
         if (!res.ok) {
-          return; // silent: identity missing/invalid or server error
+          return; // silent on server errors
         }
         const data = (await res.json()) as {
           items: ConversationItem[];

@@ -1,6 +1,5 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -651,8 +650,6 @@ describe("接入参与方页", () => {
   });
 
   it("R4: 编辑对话框展示四 skill 同步状态与操作指引,编辑文本实时联动,自由文本保留", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/participants");
@@ -675,14 +672,10 @@ describe("接入参与方页", () => {
     expect(
       screen.queryByTestId("skill-guide-executor"),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByTestId("skill-guide-coordinator"),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("skill-guide-coordinator")).toBeInTheDocument();
   });
 
   it("编辑对话框可改 name/device/capabilities,PATCH 保存并即时刷新", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/participants");
@@ -734,8 +727,6 @@ describe("接入参与方页", () => {
   });
 
   it("心跳按钮调用 PUT heartbeat 并即时刷新在线状态", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-never");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/participants");
@@ -759,27 +750,7 @@ describe("接入参与方页", () => {
     expect(screen.getByText(/已上报「Never Bot」在线/)).toBeInTheDocument();
   });
 
-  it("未绑定身份时编辑/心跳给出提示(全信模型:绑定后任意身份都可管理)", async () => {
-    const fetchMock = participantsFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
-    renderWithProviders(<ExecutorsPage />, "/participants");
-
-    await screen.findByText("Online Bot");
-    const row = screen.getByTestId("executor-row-online-bot");
-    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
-    await screen.findByText(/未绑定身份,请先在群组页身份面板/);
-
-    fireEvent.click(within(row).getByRole("button", { name: "上报在线" }));
-    expect(
-      screen.getByText(/未绑定身份,请先在群组页身份面板/),
-    ).toBeInTheDocument();
-    // 编辑对话框未被打开
-    expect(screen.queryByLabelText("参与方名字")).not.toBeInTheDocument();
-  });
-
   it("参与者行内改名:铅笔 → 输入 → PATCH /api/participants/:id {name} → 行内刷新", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-1");
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-online");
     const fetchMock = participantsFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ExecutorsPage />, "/participants");
@@ -812,7 +783,6 @@ describe("接入参与方页", () => {
   it("内置执行器行内改名给出「执行器名由配置管理」提示,不进入编辑", async () => {
     // 内置执行器无对应 participant 注册(executors 列表里只有内置项时),
     // 点击铅笔直接提示「执行器名由配置管理」,不进入编辑态。
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-any");
     vi.stubGlobal("fetch", executorsFetchMock());
     renderWithProviders(<ExecutorsPage />, "/participants");
 

@@ -1,5 +1,10 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { participantIdentityHeaders } from "@/lib/api-client";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import { t } from "@/lib/i18n";
 
 export type GroupHeader = {
@@ -56,9 +61,7 @@ export function useGroupHeader(groupId: string | undefined): GroupHeader {
       return;
     }
     try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}`);
       if (!res.ok) {
         return;
       }
@@ -90,7 +93,6 @@ export function useGroupHeader(groupId: string | undefined): GroupHeader {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ title }),
       });

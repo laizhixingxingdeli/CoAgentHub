@@ -1,8 +1,4 @@
 import { useSyncExternalStore } from "react";
-import {
-  PARTICIPANT_ID_KEY,
-  participantIdentityHeaders,
-} from "@/lib/api-client";
 import { connectParticipantWs } from "./use-group-ws";
 
 /**
@@ -51,25 +47,16 @@ let state: StoreState = {
 
 const listeners = new Set<() => void>();
 
-// Resident connection state: the participant id the current socket was opened
-// with and its teardown. `socketId` stays set while the socket is mid-backoff,
-// so a no-op re-check never restarts the retry sequence.
-let socketId: string | null = null;
+// Resident connection state and teardown. The server resolves an omitted
+// participant id to Local User, so the browser does not need identity state.
 let teardownWs: (() => void) | null = null;
 let started = false;
-let storageListener: (() => void) | null = null;
 
 // Groups whose preview seed was already attempted this session. The sidebar
 // seeds previews on list load (first screen only), so a group with no messages
 // yet or a transient fetch failure must not be re-attempted on every
 // navigation pulse — once attempted, later updates come from the WS store.
 const previewSeedAttempted = new Set<string>();
-
-function readParticipantId(): string {
-  return typeof localStorage !== "undefined"
-    ? (localStorage.getItem(PARTICIPANT_ID_KEY) ?? "")
-    : "";
-}
 
 function setState(next: StoreState) {
   state = next;
@@ -96,38 +83,17 @@ function startIfNeeded() {
   }
   started = true;
   syncUnreadConnection();
-  // Token saved/cleared in another tab — same-tab binding is picked up by the
-  // sidebar conversation list's navigation pulse (localStorage writes fire no
-  // storage event in the tab that wrote them).
-  storageListener = () => syncUnreadConnection();
-  window.addEventListener("storage", storageListener);
 }
 
 /**
- * (Re)connect the resident socket to match the current identity — the
- * navigation pulse the sidebar conversation list calls on mount and every
- * navigation. No identity ⇒ stay silent (the sidebar renders without badges,
- * nothing is fetched). Same id ⇒ keep the existing socket or its in-flight
- * backoff untouched.
+ * Connect the resident socket as Local User. The navigation pulse the sidebar
+ * conversation list calls on mount and every navigation is idempotent while
+ * the current socket or its in-flight backoff exists.
  */
 export function syncUnreadConnection(): void {
-  const participantId = readParticipantId();
-  if (!participantId) {
-    if (teardownWs) {
-      teardownWs();
-      teardownWs = null;
-    }
-    socketId = null;
-    return;
-  }
-  if (socketId === participantId) {
-    return;
-  }
   if (teardownWs) {
-    teardownWs();
-    teardownWs = null;
+    return;
   }
-  socketId = participantId;
   teardownWs = connectParticipantWs({
     onFrame: handleFrame,
   });
@@ -188,8 +154,8 @@ export function updateLastMessage(groupId: string, body: string): void {
  * fetched at most once, so this never becomes a polling loop: later updates
  * keep flowing through the WS store.
  *
- * Failures degrade silently per group (missing/invalid identity, HTTP error,
- * network error, archived group): that group simply keeps showing the 暂无消息
+ * Failures degrade silently per group (HTTP error, network error, archived
+ * group): that group simply keeps showing the 暂无消息
  * placeholder while the rest of the list is unaffected. The preview uses the
  * existing GET /groups/:id/messages response (id-ascending, so the last row is
  * the newest) and only takes its body — no backend change required.
@@ -211,9 +177,7 @@ export async function seedGroupPreviews(groupIds: string[]): Promise<void> {
   await Promise.all(
     pending.map(async (groupId) => {
       try {
-        const res = await fetch(`/api/groups/${groupId}/messages`, {
-          headers: participantIdentityHeaders(),
-        });
+        const res = await fetch(`/api/groups/${groupId}/messages`);
         if (!res.ok) {
           return; // 401/403/404 — silent: keep the 暂无消息 placeholder
         }
@@ -282,11 +246,6 @@ export function __resetUnreadStore(): void {
     teardownWs();
     teardownWs = null;
   }
-  if (storageListener) {
-    window.removeEventListener("storage", storageListener);
-    storageListener = null;
-  }
-  socketId = null;
   started = false;
   previewSeedAttempted.clear();
   state = {

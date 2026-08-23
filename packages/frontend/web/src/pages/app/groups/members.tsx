@@ -13,7 +13,6 @@ import { useRoute } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { RoleBadge, roleLabel } from "./messages/types";
@@ -111,9 +110,7 @@ export function GroupSettingsContent({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/groups/${groupId}/members`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}/members`);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
@@ -131,9 +128,7 @@ export function GroupSettingsContent({
 
   const loadParticipants = useCallback(async () => {
     try {
-      const res = await fetch("/api/participants", {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch("/api/participants");
       if (!res.ok) {
         return;
       }
@@ -149,9 +144,7 @@ export function GroupSettingsContent({
       return;
     }
     try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        headers: participantIdentityHeaders(),
-      });
+      const res = await fetch(`/api/groups/${groupId}`);
       if (!res.ok) {
         return;
       }
@@ -208,7 +201,6 @@ export function GroupSettingsContent({
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify(body),
       });
@@ -274,7 +266,6 @@ export function GroupSettingsContent({
       const action = groupStatus === "archived" ? "unarchive" : "archive";
       const res = await fetch(`/api/groups/${groupId}/${action}`, {
         method: "POST",
-        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -306,7 +297,6 @@ export function GroupSettingsContent({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({
           participantId: selectedParticipantId,
@@ -375,7 +365,6 @@ export function GroupSettingsContent({
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...participantIdentityHeaders(),
           },
           body: JSON.stringify({ roles: editRoles }),
         },
@@ -421,7 +410,6 @@ export function GroupSettingsContent({
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...participantIdentityHeaders(),
           },
           // 空字符串表示清空分工说明(PATCH 可单独更新 prompt)。
           body: JSON.stringify({ prompt: editPromptValue.trim() }),
@@ -464,7 +452,6 @@ export function GroupSettingsContent({
         `/api/groups/${groupId}/members/${member.participantId}`,
         {
           method: "DELETE",
-          headers: participantIdentityHeaders(),
         },
       );
       if (!res.ok) {

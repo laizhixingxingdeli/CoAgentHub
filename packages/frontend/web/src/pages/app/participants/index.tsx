@@ -22,7 +22,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { participantIdentityHeaders } from "@/lib/api-client";
 import { t } from "@/lib/i18n";
 
 /**
@@ -123,9 +122,7 @@ function SkillSyncStatus({
                   ? "text-emerald-600 dark:text-emerald-400"
                   : "text-amber-600 dark:text-amber-500"
               }`}
-              title={
-                ok ? undefined : t("participants.skills.guide", { name })
-              }
+              title={ok ? undefined : t("participants.skills.guide", { name })}
             >
               {ok ? (
                 <CheckCircle2 className="size-3.5 shrink-0" />
@@ -278,16 +275,6 @@ export default function ExecutorsPage() {
     [participants],
   );
 
-  /** 编辑/心跳前置检查:未绑定身份时给出提示(全信模型下任意身份都可管理任意
-   *  participant),返回 true 表示已拦截。 */
-  const requireBoundIdentity = (): boolean => {
-    if (Object.keys(participantIdentityHeaders()).length === 0) {
-      setError(t("participants.error.identityRequired"));
-      return true;
-    }
-    return false;
-  };
-
   const handleSubmit = async () => {
     setMessage(null);
     setError(null);
@@ -388,7 +375,6 @@ export default function ExecutorsPage() {
 
   /** 打开编辑对话框(全信模型:任意身份都可管理任意 participant)。 */
   const startEdit = (participant: ParticipantInfo) => {
-    if (requireBoundIdentity()) return;
     setEditName(participant.name);
     setEditDevice(participant.device ?? "");
     // capabilities 逗号分隔展示,提交时再转数组。
@@ -411,7 +397,6 @@ export default function ExecutorsPage() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({
           name: editName.trim() || undefined,
@@ -443,14 +428,12 @@ export default function ExecutorsPage() {
 
   /** PUT /api/participants/:id/heartbeat 上报在线;成功后该行立即变在线。 */
   const handleHeartbeat = async (participant: ParticipantInfo) => {
-    if (requireBoundIdentity()) return;
     setHeartbeatingId(participant.id);
     setMessage(null);
     setError(null);
     try {
       const res = await fetch(`/api/participants/${participant.id}/heartbeat`, {
         method: "PUT",
-        headers: participantIdentityHeaders(),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as {
@@ -477,7 +460,6 @@ export default function ExecutorsPage() {
   /** 行内改名(网页体验批次):PATCH /api/participants/:id { name }。内置执行器
    *  名由 executor 配置驱动,不改(点击时提示「执行器名由配置管理」)。 */
   const startRename = (item: ExecutorItem) => {
-    if (requireBoundIdentity()) return;
     if (item.builtin) {
       setError(t("participants.renameBuiltinHint"));
       return;
@@ -506,7 +488,6 @@ export default function ExecutorsPage() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          ...participantIdentityHeaders(),
         },
         body: JSON.stringify({ name }),
       });

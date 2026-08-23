@@ -11,7 +11,6 @@ import { Router, useLocation } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { __resetUnreadStore } from "@/hooks/use-unread";
-import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { groupMessageFrame } from "@/test/frames";
 import { createFetchMock, jsonResponse } from "@/test/utils";
@@ -82,7 +81,6 @@ afterEach(() => {
 
 describe("ConversationList (ticket 23)", () => {
   it("renders the active groups with a preview placeholder", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("fetch", conversationFetchMock());
 
     renderConversations();
@@ -94,7 +92,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("shows 还没有群组 for an empty list", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("fetch", conversationFetchMock([]));
 
     renderConversations();
@@ -103,7 +100,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("fills a preview for every group from its messages endpoint, not just the open one", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal(
       "fetch",
       createFetchMock([
@@ -136,7 +132,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("keeps 暂无消息 for a group whose preview fetch fails, others unaffected", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal(
       "fetch",
       createFetchMock([
@@ -178,7 +173,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("shows the live unread badge and the WS-fed preview (latest body, truncated)", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("WebSocket", MockWebSocket);
     vi.stubGlobal("fetch", conversationFetchMock());
 
@@ -206,7 +200,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("renders a group-first-char round avatar with a stable hash color", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("fetch", conversationFetchMock());
 
     renderConversations();
@@ -224,7 +217,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("caps the unread badge at 99+", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("WebSocket", MockWebSocket);
     vi.stubGlobal("fetch", conversationFetchMock());
 
@@ -244,7 +236,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("navigates to the message page and clears the badge on click", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("WebSocket", MockWebSocket);
     vi.stubGlobal("fetch", conversationFetchMock());
 
@@ -265,7 +256,6 @@ describe("ConversationList (ticket 23)", () => {
   });
 
   it("highlights the currently open group", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
     vi.stubGlobal("fetch", conversationFetchMock());
 
     renderConversations("/groups/group-1");

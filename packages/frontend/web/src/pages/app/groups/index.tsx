@@ -19,10 +19,8 @@ import { RoleBadge } from "./messages/types";
 /**
  * Group list page (ticket 02): shows all groups with task state signals,
  * lets the operator create a new group and archive finished ones.
- * The web viewer acts as a human participant: an identity (participant id) can
- * be selected at the top of the page, and every request carries it as
- * `X-Participant-Id` so the identity middleware treats the browser session as
- * that participant. All state and data fetching live in useGroupsPage — this
+ * The web viewer uses the server's Local User identity. All state and data
+ * fetching live in useGroupsPage — this
  * component only orchestrates the hook and renders the sections.
  */
 

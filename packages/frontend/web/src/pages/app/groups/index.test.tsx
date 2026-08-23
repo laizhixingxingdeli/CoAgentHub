@@ -1,6 +1,5 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import {
   createFetchMock,
   jsonResponse,
@@ -779,8 +778,6 @@ describe("GroupsPage 删除群组按钮 (ticket 24)", () => {
 
 describe("GroupsPage 参与方设置已移除", () => {
   it("列表页不再渲染参与方设置卡片", async () => {
-    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-20");
-    localStorage.setItem(PARTICIPANT_ID_KEY, "participant-1");
     stubFetch(groupsFetchMock());
     renderWithProviders(<GroupsPage />, "/groups");
 

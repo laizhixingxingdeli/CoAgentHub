@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 
 /** First reconnect delay; doubles per failed attempt until the cap below. */
 const INITIAL_RECONNECT_DELAY = 1000;
@@ -139,11 +138,11 @@ export function mergeGroupMessages<T extends { id: string }>(
  * Low-level participant-WS connection shared by the per-group message hook and the
  * global unread store (ticket 23).
  *
- * Opens `ws(s)://<host>/api/ws?participantId=<id>` — the scheme follows the
+ * Opens `ws(s)://<host>/api/ws` — the scheme follows the
  * page protocol (https → wss, otherwise ws); `<host>` is the current page
  * host, so dev goes through the vite proxy on :5173 and prod through serve.mjs
- * on :3000. The id is re-read from localStorage on every (re)connect. Every
- * parsed frame (any type, any group) is delivered to `onFrame`; connection
+ * on :3000. The missing participant id is resolved by the server as Local User.
+ * Every parsed frame (any type, any group) is delivered to `onFrame`; connection
  * state is reported through `onStatusChange`. Failed connections retry with
  * exponential backoff 1s→2s→4s… capped at 30s. The returned teardown detaches
  * the handlers and cancels any pending retry — the caller's own close must not
@@ -171,11 +170,10 @@ export function connectParticipantWs(opts: {
     if (disposed) {
       return;
     }
-    const participantId = localStorage.getItem(PARTICIPANT_ID_KEY) ?? "";
     // 按页面协议选择 WS 协议:https → wss,否则 ws(dev 经 vite 代理、prod 经
-    // serve.mjs 均保持 /api/ws 路径与 participantId 查询参数不变)。
+    // serve.mjs 均保持 /api/ws 路径不变)。服务端将缺失身份解析为 Local User。
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${wsProtocol}//${window.location.host}/api/ws?participantId=${encodeURIComponent(participantId)}`;
+    const url = `${wsProtocol}//${window.location.host}/api/ws`;
     socket = new WebSocket(url);
 
     socket.onopen = () => {
