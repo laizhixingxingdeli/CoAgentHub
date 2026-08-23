@@ -8,7 +8,7 @@
  * Policies:
  * - Only fire while `document.hidden` is true — a visible page already appends
  *   the message in-stream, no extra popups.
- * - Never notify the user's own messages (senderId === bound participant id).
+ * - Never notify the user's own messages (senderId === the server's Local User id).
  * - Permission is requested lazily on the first notifiable message, never at
  *   app load; a denied permission degrades silently (no re-requesting).
  * - Clicking the notification focuses the window and jumps to the group's
@@ -63,8 +63,8 @@ export type NotifyGroupMessageOptions = {
   /** Resolved sender display name (member name, else id prefix). */
   senderName: string;
   message: NotifyMessage;
-  /** Bound participant id; null means no identity — never treat as own. */
-  myParticipantId: string | null;
+  /** Server-provided Local User id; undefined means it is not resolved yet. */
+  myParticipantId: string | null | undefined;
   /** Navigate to the group page (wouter). */
   navigate: (to: string) => void;
 };
@@ -86,6 +86,11 @@ export function maybeNotifyGroupMessage(opts: NotifyGroupMessageOptions): void {
   try {
     // Visible tab: the message already appears in-stream — no popup.
     if (!document.hidden) {
+      return;
+    }
+    // Do not risk notifying about the Local User's own WS echo while the
+    // server-provided id is still being resolved.
+    if (myParticipantId === undefined) {
       return;
     }
     // Own message (including the sender's own WS echo): never notify.

@@ -79,35 +79,6 @@ export const zh = {
     "确定删除进行中的群组「{title}」吗?删除后不可恢复(数据保留,仅从列表移除),群内消息与成员关系都将被移除。建议先归档。",
   "groups.confirm.deleteArchived":
     "确定删除群组「{title}」吗?删除后不可恢复(数据保留,仅从列表移除)。",
-  "groups.error.identityRejected":
-    "请求被拒绝,请检查上方绑定的参与方身份是否有效",
-  "groups.error.identityMissing":
-    "请求被拒绝:未绑定参与方身份,请在身份面板选择或输入",
-
-  // ── 群组列表页:身份面板 ──────────────────────────────────────────────────
-  "groups.identity.inUse": "使用中:",
-  "groups.identity.bound": "已绑定",
-  "groups.identity.unbound": "未绑定参与方,从下方列表选择,或手动输入参与方 id",
-  "groups.identity.existing": "已有参与方",
-  "groups.identity.empty": "暂无已注册参与方,展开下方「注册新参与方」创建",
-  "groups.identity.inputPlaceholder": "输入参与方 id(可选,用于以该身份发言)…",
-  "groups.identity.inputAria": "参与方 ID",
-  "groups.identity.bind": "绑定",
-  "groups.identity.register": "注册新参与方",
-  "groups.identity.regNamePlaceholder": "参与方名称(必填,如「我的 Mac」)",
-  "groups.identity.regNameAria": "注册参与方名称",
-  "groups.identity.regDevicePlaceholder": "设备(可选,如 mac / iphone / cli)",
-  "groups.identity.regDeviceAria": "注册参与方设备",
-  "groups.identity.registering": "注册中…",
-  "groups.identity.registerButton": "注册并绑定",
-  "groups.identity.registerHint": "注册成功后将自动切换为该身份,无需终端 curl",
-  "groups.identity.switched": "已切换为 {name}",
-  "groups.identity.registeredAndBound": "✅ 已注册并绑定 {name}",
-  "groups.identity.nameRequired": "参与方名称不能为空",
-  "groups.identity.registerFailed": "注册失败: {detail}",
-  "groups.identity.listFailed": "参与方列表加载失败: {detail}",
-  "groups.identity.count": "共 {count} 个",
-
   // ── 群组列表页:参与方设置 ────────────────────────────────────────────────
   "groups.settings.title": "参与方设置",
   "groups.settings.name": "名称:",

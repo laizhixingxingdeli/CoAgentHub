@@ -146,6 +146,15 @@ describe("maybeNotifyGroupMessage 桌面通知", () => {
     expect(MockNotification.instances).toHaveLength(1);
   });
 
+  it("Local User id 尚未从服务端解析时保持静默", () => {
+    setHidden(true);
+    maybeNotifyGroupMessage({
+      ...BASE_OPTS,
+      myParticipantId: undefined,
+    });
+    expect(MockNotification.instances).toHaveLength(0);
+  });
+
   it("点击通知 → 聚焦窗口 + 跳转 /groups/:id + 关闭通知", () => {
     setHidden(true);
     maybeNotifyGroupMessage(BASE_OPTS);

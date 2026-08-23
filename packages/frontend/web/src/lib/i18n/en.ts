@@ -83,41 +83,6 @@ export const en: Record<DictKey, string> = {
     "Delete the active group “{title}”? It cannot be recovered (data is kept, only removed from the list); messages and member relations will be removed. Archiving first is recommended.",
   "groups.confirm.deleteArchived":
     "Delete group “{title}”? It cannot be recovered (data is kept, only removed from the list).",
-  "groups.error.identityRejected":
-    "Request rejected — check that the bound Participant identity above is valid",
-  "groups.error.identityMissing":
-    "Request rejected: no Participant identity bound — pick or enter one in the identity panel",
-
-  // ── Groups list page: identity panel ─────────────────────────────────────
-  "groups.identity.inUse": "In use:",
-  "groups.identity.bound": "Bound",
-  "groups.identity.unbound":
-    "No participant bound — choose one from the list below, or enter a participant id manually",
-  "groups.identity.existing": "Existing participants",
-  "groups.identity.empty":
-    "No participants registered yet — expand “Register new participant” below to create one",
-  "groups.identity.inputPlaceholder":
-    "Enter a participant id (optional, to speak as that identity)…",
-  "groups.identity.inputAria": "Participant ID",
-  "groups.identity.bind": "Bind",
-  "groups.identity.register": "Register new participant",
-  "groups.identity.regNamePlaceholder":
-    "Participant name (required, e.g. “My Mac”)",
-  "groups.identity.regNameAria": "Register participant name",
-  "groups.identity.regDevicePlaceholder":
-    "Device (optional, e.g. mac / iphone / cli)",
-  "groups.identity.regDeviceAria": "Register participant device",
-  "groups.identity.registering": "Registering…",
-  "groups.identity.registerButton": "Register and bind",
-  "groups.identity.registerHint":
-    "After registering you will automatically switch to that identity — no terminal curl needed",
-  "groups.identity.switched": "Switched to {name}",
-  "groups.identity.registeredAndBound": "✅ Registered and bound {name}",
-  "groups.identity.nameRequired": "Participant name cannot be empty",
-  "groups.identity.registerFailed": "Register failed: {detail}",
-  "groups.identity.listFailed": "Failed to load participants: {detail}",
-  "groups.identity.count": "{count} total",
-
   // ── Groups list page: participant settings ───────────────────────────────
   "groups.settings.title": "Participant settings",
   "groups.settings.name": "Name:",

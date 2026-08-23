@@ -8,6 +8,7 @@ import {
 } from "@/hooks/use-group-ws";
 import { updateLastMessage } from "@/hooks/use-unread";
 import { t } from "@/lib/i18n";
+import { fetchLocalUserParticipantId } from "@/lib/local-user";
 import { maybeNotifyGroupMessage } from "@/lib/notifications";
 import {
   DELETED_MESSAGE_BODY,
@@ -105,9 +106,10 @@ export function useMessagesPage(groupId: string | undefined) {
   stickToBottomRef.current = stickToBottom;
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The browser no longer binds to a participant, so message ownership is not
-  // inferred from localStorage.
-  const myParticipantId: string | null = null;
+  // The browser no longer binds to a participant. The server-created Local User
+  // id is read from the participant roster only for notification self-filtering.
+  // undefined means the roster lookup is still pending (or unavailable).
+  const [myParticipantId, setMyParticipantId] = useState<string | undefined>();
 
   // Latest group title / members / own id for the stable WS callback (same
   // sync-during-render pattern as searchActiveRef above): the notification
@@ -117,8 +119,28 @@ export function useMessagesPage(groupId: string | undefined) {
   groupTitleRef.current = header.groupTitle;
   const membersRef = useRef<Member[]>([]);
   membersRef.current = members;
-  const myParticipantIdRef = useRef<string | null>(null);
+  const myParticipantIdRef = useRef<string | undefined>(undefined);
   myParticipantIdRef.current = myParticipantId;
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchLocalUserParticipantId()
+      .then((participantId) => {
+        if (cancelled || !participantId) {
+          return;
+        }
+        // Update the ref before state so an event arriving in the same turn as
+        // the roster response is filtered even before React re-renders.
+        myParticipantIdRef.current = participantId;
+        setMyParticipantId(participantId);
+      })
+      .catch(() => {
+        // Notifications stay silent when the Local User cannot be resolved.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Archived and soft-deleted groups remain browsable as read-only history.
   // (已随头部数据一并移入 useGroupHeader,此处仅保留消息流自身的加载。)
