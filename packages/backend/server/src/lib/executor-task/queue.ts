@@ -33,7 +33,7 @@ import {
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { createAnsiStripper } from "./ansi";
-import { verifyCommitClaim } from "./claim-verification";
+import { verifyReportedCommit } from "./claim-verification";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -1289,15 +1289,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             }
           : parseTaskReport(output);
         const diffSummary: Record<string, unknown> = { ...report };
-        if (!isA2a) {
-          const claimVerification = await verifyCommitClaim(
-            report.hash,
-            repoRoot,
-            run.attempts,
-          );
-          if (claimVerification) {
-            diffSummary.claimVerification = claimVerification;
-          }
+        // 汇报 commit 核实(spec verify-agent-claims v1.1):CLI 完成与 a2a 完成
+        // 共用同一套 claim-verification 逻辑;cli 在任务实际仓库核实,a2a 本地
+        // 无仓库 → 留下 status=skipped 的「未核实」痕迹(不再静默跳过)。
+        const claimVerification = await verifyReportedCommit(
+          report.hash,
+          repoRoot,
+          run.attempts,
+          isA2a ? "a2a" : "cli",
+        );
+        if (claimVerification) {
+          diffSummary.claimVerification = claimVerification;
         }
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
         // 完成回填:最近 500 行输出写进 diffSummary.outputTail(之后不依赖内存)。

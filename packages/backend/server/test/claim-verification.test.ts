@@ -2,8 +2,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { TaskAttempt } from "@laizhixingxingdeli/database/schema";
 import { describe, expect, it } from "vitest";
-import { verifyCommitClaim } from "../src/lib/executor-task/claim-verification";
+import {
+  verifyCommitClaim,
+  verifyReportedCommit,
+} from "../src/lib/executor-task/claim-verification";
 
 function repo() {
   const dir = mkdtempSync(path.join(tmpdir(), "coagenthub-claim-"));
@@ -16,6 +20,13 @@ function repo() {
     cwd: dir,
   });
   return dir;
+}
+
+function headHash(dir: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
 }
 
 describe("执行器提交声称核实", () => {
@@ -66,5 +77,57 @@ describe("执行器提交声称核实", () => {
     await expect(
       verifyCommitClaim("0123456789abcdef", "/path/does/not/exist", []),
     ).resolves.toBeUndefined();
+  });
+
+  it("共用入口:a2a 模式留下明确的未核实标记(skipped),不碰仓库", async () => {
+    const dir = repo();
+    try {
+      const hash = headHash(dir);
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          status: "running",
+        },
+      ];
+      // 故意传一个不可达仓库:即使仓库不存在,a2a 也走标记分支而非报错。
+      await expect(
+        verifyReportedCommit(hash, "/path/does/not/exist", attempts, "a2a"),
+      ).resolves.toEqual({
+        status: "skipped",
+        hash,
+        reason: "a2a_no_local_repo",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("共用入口:cli 模式透传仓库核实;hash 非法/仓库不可达 → undefined", async () => {
+    const dir = repo();
+    try {
+      const hash = headHash(dir);
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          status: "running",
+        },
+      ];
+      await expect(
+        verifyReportedCommit(hash, dir, attempts, "cli"),
+      ).resolves.toMatchObject({ status: "verified" });
+      await expect(
+        verifyReportedCommit("garbage!", dir, attempts, "cli"),
+      ).resolves.toBeUndefined();
+      await expect(
+        verifyReportedCommit(hash, null, attempts, "cli"),
+      ).resolves.toBeUndefined();
+      await expect(
+        verifyReportedCommit(hash, "/path/does/not/exist", attempts, "cli"),
+      ).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

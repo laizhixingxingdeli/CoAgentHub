@@ -1,5 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { testDb } from "./db";
 
 /**
  * Task first-class entity (ticket 35): the server is the single source of
@@ -732,5 +736,86 @@ describe("任务实体(server 单一状态源)", () => {
       { headers: { "X-Participant-Id": coordinator.id } },
     );
     expect(cross.status).toBe(404);
+  });
+
+  it("PATCH 带真实 hash:diffSummary 写入核实结果(verified),任务照常 done", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000091",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+    // 种子 attempts(首次 spawn 窗口起点),使窗口校验有据可依。
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "running",
+          },
+        ],
+      })
+      .where(eq(taskTable.id, task.id));
+    // 测试仓库(setup.ts 的 COAGENTHUB_REPO_ROOT)HEAD 一定落在
+    // [startedAt=epoch, now] 窗口内。
+    const repoRoot = process.env.COAGENTHUB_REPO_ROOT;
+    if (!repoRoot) throw new Error("COAGENTHUB_REPO_ROOT 未设置");
+    const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+
+    const res = await patchTask(execA.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { hash, summary: "PATCH 完成" },
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as Task;
+    expect(updated.status).toBe("done");
+    const summary = updated.diffSummary as Record<string, unknown>;
+    expect(summary.claimVerification).toMatchObject({
+      status: "verified",
+      hash,
+    });
+  });
+
+  it("PATCH 带不存在的 hash:核实标记 not_found,任务仍照常终态不判 failed", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000092",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "running",
+          },
+        ],
+      })
+      .where(eq(taskTable.id, task.id));
+
+    const res = await patchTask(execA.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { hash: "0123456789abcdef", summary: "PATCH 完成" },
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as Task;
+    expect(updated.status).toBe("done");
+    const summary = updated.diffSummary as Record<string, unknown>;
+    expect(summary.claimVerification).toMatchObject({
+      status: "not_found",
+      hash: "0123456789abcdef",
+    });
   });
 });

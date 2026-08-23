@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { zValidator } from "@hono/zod-validator";
 import {
   normalizeReviewRequestDiffSummary,
@@ -7,13 +8,20 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
+import { findRepoRoot } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
   isTerminalTaskStatus,
   notifyTaskStatusChanged,
   recordCoordinationActivity,
+  resolveTaskRepo,
   taskOutputTail,
 } from "@server/lib/executor-task";
+import {
+  type ClaimVerificationMode,
+  verifyReportedCommit,
+} from "@server/lib/executor-task/claim-verification";
+import { findExecutorByKey } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -410,13 +418,63 @@ app
       if (wantsLifecycle && !isExecutor) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
+      // 汇报 commit 核实(spec verify-agent-claims v1.1):任何写入
+      // diffSummary.hash 的入口都要核实——CLI 完成 / detached PATCH / a2a 完成
+      // 共用 claim-verification 同一套逻辑。核实是尽力而为:仓库不可达 / 非 git /
+      // git 失败 → 跳过(不写核实字段);a2a 执行器本地无仓库 → 留下
+      // status=skipped 的「未核实」痕迹。核实失败只标记、绝不把任务判 failed。
+      let summaryToWrite = normalizedDiffSummary;
+      if (
+        diffSummary !== undefined &&
+        typeof normalizedDiffSummary === "object" &&
+        normalizedDiffSummary !== null &&
+        !Array.isArray(normalizedDiffSummary)
+      ) {
+        const raw = normalizedDiffSummary as Record<string, unknown>;
+        const reportedHash =
+          typeof raw.hash === "string" && raw.hash.trim() !== ""
+            ? raw.hash
+            : undefined;
+        if (reportedHash) {
+          try {
+            const executorConfig = task.executorKey
+              ? await findExecutorByKey(db, task.executorKey)
+              : undefined;
+            const mode: ClaimVerificationMode =
+              executorConfig?.kind === "a2a" ? "a2a" : "cli";
+            // 与派发时 spawn cwd 同源的仓库:任务书声明 → 群 project_path →
+            // findRepoRoot 兜底(与 queue.ts 派发路径一致)。
+            const group = await db.query.groups.findFirst({
+              where: (g, { eq }) => eq(g.id, id),
+            });
+            const declaredRoot = resolveTaskRepo(
+              task.brief ?? "",
+              group?.projectPath ?? null,
+            );
+            const repoRoot =
+              declaredRoot && existsSync(declaredRoot)
+                ? declaredRoot
+                : findRepoRoot();
+            const verification = await verifyReportedCommit(
+              reportedHash,
+              repoRoot,
+              task.attempts,
+              mode,
+            );
+            if (verification) {
+              summaryToWrite = { ...raw, claimVerification: verification };
+            }
+          } catch (e) {
+            // 核实绝不拖垮完成路径:任何异常都跳过核实,任务照常落终态。
+            console.warn(`[tasks] commit 核实跳过(${taskId}): ${e}`);
+          }
+        }
+      }
       const [updated] = await db
         .update(taskTable)
         .set({
           ...(status !== undefined ? { status } : {}),
-          ...(diffSummary !== undefined
-            ? { diffSummary: normalizedDiffSummary }
-            : {}),
+          ...(diffSummary !== undefined ? { diffSummary: summaryToWrite } : {}),
           ...(checkpointRef !== undefined ? { checkpointRef } : {}),
           ...(brief !== undefined ? { brief } : {}),
         })

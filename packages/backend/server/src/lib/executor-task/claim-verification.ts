@@ -1,11 +1,47 @@
 import type { TaskAttempt } from "@laizhixingxingdeli/database/schema";
 import { gitExec } from "@server/lib/executor-runner";
 
+export type ClaimVerificationStatus =
+  | "verified"
+  | "not_found"
+  | "outside_window"
+  | "skipped";
+
 export interface ClaimVerification {
-  status: "verified" | "not_found" | "outside_window";
+  status: ClaimVerificationStatus;
   hash: string;
+  /** 仅 skipped:未核实的原因(如 a2a 执行器本地无对应仓库)。 */
+  reason?: string;
   commitAt?: string;
   windowStartedAt?: string;
+}
+
+/** 核实入口的执行器类别:cli=本地有仓库可核实;a2a=远端执行,本地无仓库。 */
+export type ClaimVerificationMode = "cli" | "a2a";
+
+/**
+ * 三个写入 diffSummary.hash 的完成入口(CLI 完成 / detached 任务 PATCH /
+ * a2a 完成)共用的核实入口(spec verify-agent-claims v1.1)。
+ *
+ * - hash 缺失/格式非法 → 无可核实,返回 undefined
+ * - a2a 执行器本地没有对应仓库 → 留下显式「未核实」痕迹(status=skipped),
+ *   而不是让 hash 看起来像是已核实过
+ * - cli → 走仓库核实(verifyCommitClaim);仓库不可达/非 git/git 失败返回
+ *   undefined(按 spec R4 跳过核实、不写核实字段)
+ * 任何情况下都不抛错,不影响任务落终态。
+ */
+export async function verifyReportedCommit(
+  hash: string | undefined,
+  repoRoot: string | null,
+  attempts: readonly TaskAttempt[],
+  mode: ClaimVerificationMode,
+): Promise<ClaimVerification | undefined> {
+  if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) return undefined;
+  if (mode === "a2a") {
+    return { status: "skipped", hash, reason: "a2a_no_local_repo" };
+  }
+  if (!repoRoot) return undefined;
+  return verifyCommitClaim(hash, repoRoot, attempts);
 }
 
 /**
