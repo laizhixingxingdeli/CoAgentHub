@@ -1,6 +1,6 @@
 # Spec: 缺少「按参与方过滤的群列表」,迫使插件端扫全平台
 
-> **状态**: 待验收 — 实现已落地(`7c6c4a2`),**L2 与 L3 均未完成**
+> **状态**: Landed — L2 + L3 均通过(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **来源**: dsh adapter-gaps(`f562a82`)L3 检视时发现,同一提交里独立命中两次
@@ -68,3 +68,14 @@ await Promise.all(groups.items.map(async group => {
 
 - 本仓是 **pnpm** 项目
 - 后端以 `pnpm --filter server start`(无 watch)运行中:改完需手动 build + restart
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**,commit `7c6c4a2` + `a5b808b`(文档补齐)。
+
+本票经历了一次完整的 L2 打回—修复—重验循环:协调者最初以「`docs/architecture.md` §4 未同步 participantId 参数」打回,AtomCode 补齐文档后重验通过。核对:participantId 过滤、不传参数向后兼容、与 `status`/`q`/`limit`/`offset` 组合、`memberCount` 完整性,测试均在位。
+
+本票的起因是 dsh adapter-gaps 的 L3——同一个「拉全平台群再逐个过滤」的绕法在一个提交里独立出现两次,说明缺口是真实的。
