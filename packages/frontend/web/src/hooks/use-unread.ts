@@ -1,5 +1,8 @@
 import { useSyncExternalStore } from "react";
-import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
+import {
+  PARTICIPANT_ID_KEY,
+  participantIdentityHeaders,
+} from "@/lib/api-client";
 import { connectParticipantWs } from "./use-group-ws";
 
 /**
@@ -55,6 +58,12 @@ let socketId: string | null = null;
 let teardownWs: (() => void) | null = null;
 let started = false;
 let storageListener: (() => void) | null = null;
+
+// Groups whose preview seed was already attempted this session. The sidebar
+// seeds previews on list load (first screen only), so a group with no messages
+// yet or a transient fetch failure must not be re-attempted on every
+// navigation pulse — once attempted, later updates come from the WS store.
+const previewSeedAttempted = new Set<string>();
 
 function readParticipantId(): string {
   return typeof localStorage !== "undefined"
@@ -171,6 +180,55 @@ export function updateLastMessage(groupId: string, body: string): void {
   setState({ ...state, lastMessageByGroup });
 }
 
+/**
+ * Seed the sidebar preview for every group that has none yet (ticket: 侧栏
+ * 预览对所有群生效). Called once per group per session by the sidebar
+ * conversation list after it loads the group list — groups already holding a
+ * preview (from a WS frame or the message page) are skipped, and each group is
+ * fetched at most once, so this never becomes a polling loop: later updates
+ * keep flowing through the WS store.
+ *
+ * Failures degrade silently per group (missing/invalid identity, HTTP error,
+ * network error, archived group): that group simply keeps showing the 暂无消息
+ * placeholder while the rest of the list is unaffected. The preview uses the
+ * existing GET /groups/:id/messages response (id-ascending, so the last row is
+ * the newest) and only takes its body — no backend change required.
+ */
+export async function seedGroupPreviews(groupIds: string[]): Promise<void> {
+  // Reserve every id synchronously (before any await) so a second call during
+  // an in-flight seed cannot double-fetch; skip groups that already hold a
+  // preview (WS frame or message page).
+  const pending: string[] = [];
+  for (const groupId of groupIds) {
+    if (previewSeedAttempted.has(groupId)) {
+      continue;
+    }
+    previewSeedAttempted.add(groupId);
+    if (!state.lastMessageByGroup.has(groupId)) {
+      pending.push(groupId);
+    }
+  }
+  await Promise.all(
+    pending.map(async (groupId) => {
+      try {
+        const res = await fetch(`/api/groups/${groupId}/messages`, {
+          headers: participantIdentityHeaders(),
+        });
+        if (!res.ok) {
+          return; // 401/403/404 — silent: keep the 暂无消息 placeholder
+        }
+        const fetched = (await res.json()) as Array<{ body?: unknown }>;
+        const last = fetched[fetched.length - 1];
+        if (last && typeof last.body === "string") {
+          updateLastMessage(groupId, last.body);
+        }
+      } catch {
+        // network/parse error — silent per group, never blocks the others
+      }
+    }),
+  );
+}
+
 /** Clear a group's unread badge (opening its message page). */
 export function markRead(groupId: string): void {
   if (!state.unread.has(groupId)) {
@@ -230,6 +288,7 @@ export function __resetUnreadStore(): void {
   }
   socketId = null;
   started = false;
+  previewSeedAttempted.clear();
   state = {
     unread: new Map(),
     lastMessageByGroup: new Map(),

@@ -2,10 +2,12 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PARTICIPANT_ID_KEY } from "@/lib/api-client";
 import { groupMessageFrame } from "@/test/frames";
+import { createFetchMock, jsonResponse } from "@/test/utils";
 import { MockWebSocket } from "@/test/ws-mock";
 import {
   __resetUnreadStore,
   markRead,
+  seedGroupPreviews,
   setActiveGroupId,
   syncUnreadConnection,
   updateLastMessage,
@@ -220,5 +222,132 @@ describe("useUnread (ticket 23)", () => {
     next(16_000);
     next(30_000);
     next(30_000);
+  });
+});
+
+describe("seedGroupPreviews (ticket: 侧栏预览对所有群生效)", () => {
+  function seedFetchMock() {
+    return createFetchMock([
+      {
+        match: (url) => String(url).includes("/api/groups/group-1/messages"),
+        respond: () =>
+          jsonResponse([
+            { id: "m0", body: "群1较早一条" },
+            { id: "m1", body: "群1最后一条" },
+          ]),
+      },
+      {
+        match: (url) => String(url).includes("/api/groups/group-2/messages"),
+        respond: () => jsonResponse([{ id: "m2", body: "群2最后一条" }]),
+      },
+    ]);
+  }
+
+  it("seeds a preview for every group from its newest message", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    stubWebSocket();
+    vi.stubGlobal("fetch", seedFetchMock());
+
+    const { result } = renderHook(() => useUnread());
+    await act(() => seedGroupPreviews(["group-1", "group-2"]));
+
+    // The newest row (last element, id-ascending) wins, never the older one.
+    expect(result.current.lastMessageByGroup.get("group-1")?.body).toBe(
+      "群1最后一条",
+    );
+    expect(result.current.lastMessageByGroup.get("group-2")?.body).toBe(
+      "群2最后一条",
+    );
+    // Seeding never touches the unread badge.
+    expect(result.current.unread.size).toBe(0);
+  });
+
+  it("degrades silently when a single group's fetch fails", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    stubWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      createFetchMock([
+        {
+          match: (url) => String(url).includes("/api/groups/group-1/messages"),
+          respond: () => jsonResponse({ message: "not found" }, 404),
+        },
+        {
+          match: (url) => String(url).includes("/api/groups/group-2/messages"),
+          respond: () => jsonResponse([{ id: "m2", body: "群2最后一条" }]),
+        },
+      ]),
+    );
+
+    const { result } = renderHook(() => useUnread());
+    await act(() => seedGroupPreviews(["group-1", "group-2"]));
+
+    // group-1 keeps 暂无消息 (no entry), group-2 unaffected, nothing thrown.
+    expect(result.current.lastMessageByGroup.has("group-1")).toBe(false);
+    expect(result.current.lastMessageByGroup.get("group-2")?.body).toBe(
+      "群2最后一条",
+    );
+  });
+
+  it("is silent on network failure for a group (no throw, others seed)", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    stubWebSocket();
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).includes("group-1")) {
+        throw new TypeError("network down");
+      }
+      return jsonResponse([{ id: "m2", body: "群2最后一条" }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUnread());
+    await act(() => seedGroupPreviews(["group-1", "group-2"]));
+
+    expect(result.current.lastMessageByGroup.has("group-1")).toBe(false);
+    expect(result.current.lastMessageByGroup.get("group-2")?.body).toBe(
+      "群2最后一条",
+    );
+  });
+
+  it("fetches each group at most once per session (no polling)", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    stubWebSocket();
+    const fetchMock = seedFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUnread());
+    await act(() => seedGroupPreviews(["group-1", "group-2"]));
+    await act(() => seedGroupPreviews(["group-1", "group-2"]));
+    await act(() => seedGroupPreviews(["group-1"]));
+
+    // 4 fetches max: one per group across the whole session.
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/messages")),
+    ).toHaveLength(2);
+    expect(result.current.lastMessageByGroup.get("group-1")?.body).toBe(
+      "群1最后一条",
+    );
+  });
+
+  it("skips groups that already hold a preview (WS frame or message page)", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    stubWebSocket();
+    const fetchMock = seedFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUnread());
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.open());
+    act(() => ws.receive(groupMessageFrame("group-1", "WS 实时帧")));
+
+    await act(() => seedGroupPreviews(["group-1"]));
+
+    // The WS-fed preview wins; no fetch was issued for group-1.
+    expect(result.current.lastMessageByGroup.get("group-1")?.body).toBe(
+      "WS 实时帧",
+    );
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/messages")),
+    ).toHaveLength(0);
   });
 });

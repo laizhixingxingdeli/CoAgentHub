@@ -8,7 +8,11 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { syncUnreadConnection, useUnread } from "@/hooks/use-unread";
+import {
+  seedGroupPreviews,
+  syncUnreadConnection,
+  useUnread,
+} from "@/hooks/use-unread";
 import { participantIdentityHeaders } from "@/lib/api-client";
 import { colorForId } from "@/lib/avatar-color";
 import { cn } from "@/lib/utils";
@@ -72,6 +76,10 @@ export function ConversationList() {
         };
         if (!cancelled) {
           setGroups(data.items);
+          // First screen only (ticket: 侧栏预览对所有群生效): seed a preview
+          // for every group that has none yet — each group is fetched at most
+          // once per session, later updates flow through the WS store.
+          void seedGroupPreviews(data.items.map((group) => group.id));
         }
       } catch {
         // silent

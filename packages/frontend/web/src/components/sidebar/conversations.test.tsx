@@ -102,6 +102,67 @@ describe("ConversationList (ticket 23)", () => {
     expect(await screen.findByText("还没有群组")).toBeInTheDocument();
   });
 
+  it("fills a preview for every group from its messages endpoint, not just the open one", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    vi.stubGlobal(
+      "fetch",
+      createFetchMock([
+        // Messages endpoints must be matched before the /api/groups list one.
+        {
+          match: (url) => String(url).includes("/api/groups/group-1/messages"),
+          respond: () =>
+            jsonResponse([
+              { id: "m0", body: "评审任务较早一条" },
+              { id: "m1", body: "评审任务最后一条" },
+            ]),
+        },
+        {
+          match: (url) => String(url).includes("/api/groups/group-2/messages"),
+          respond: () => jsonResponse([{ id: "m2", body: "部署上线最新" }]),
+        },
+        {
+          match: (url) => String(url).includes("/api/groups"),
+          respond: () => jsonResponse({ items: GROUPS, total: GROUPS.length }),
+        },
+      ]),
+    );
+
+    renderConversations();
+
+    // Newest row wins for group-1; group-2 was never opened yet.
+    expect(await screen.findByText("评审任务最后一条")).toBeInTheDocument();
+    expect(screen.getByText("部署上线最新")).toBeInTheDocument();
+    expect(screen.queryByText("暂无消息")).not.toBeInTheDocument();
+  });
+
+  it("keeps 暂无消息 for a group whose preview fetch fails, others unaffected", async () => {
+    localStorage.setItem(PARTICIPANT_ID_KEY, "tok-abc");
+    vi.stubGlobal(
+      "fetch",
+      createFetchMock([
+        {
+          match: (url) => String(url).includes("/api/groups/group-1/messages"),
+          respond: () => jsonResponse({ message: "not found" }, 404),
+        },
+        {
+          match: (url) => String(url).includes("/api/groups/group-2/messages"),
+          respond: () => jsonResponse([{ id: "m2", body: "部署上线最新" }]),
+        },
+        {
+          match: (url) => String(url).includes("/api/groups"),
+          respond: () => jsonResponse({ items: GROUPS, total: GROUPS.length }),
+        },
+      ]),
+    );
+
+    renderConversations();
+
+    expect(await screen.findByText("部署上线最新")).toBeInTheDocument();
+    // group-1 degrades to the placeholder; the rest of the list stays intact.
+    expect(screen.getByText("评审任务")).toBeInTheDocument();
+    expect(screen.getAllByText("暂无消息")).toHaveLength(1);
+  });
+
   it("stays silent when the fetch fails (no error, no fake empty state)", async () => {
     vi.stubGlobal(
       "fetch",
