@@ -8,6 +8,7 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
+import { getDetachedTaskLiveness } from "@server/lib/detached-task-liveness";
 import { findRepoRoot } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
@@ -293,6 +294,7 @@ app
       if (!task) {
         throw new BizError(BizCodeEnum.TaskNotFound);
       }
+      const liveness = await getDetachedTaskLiveness(db, task);
       // 只返回任务详情约定字段(不泄露 attempts/a2aContextId 等内部列)。
       const detail: Record<string, unknown> = {
         id: task.id,
@@ -317,6 +319,8 @@ app
         // endpointRef?, sessionRef? };老任务为 null。
         callbackRef: task.callbackRef ?? null,
         dispatchAudit: task.dispatchAudit ?? null,
+        livenessWarning: liveness.livenessWarning,
+        lastSignalAt: liveness.lastSignalAt,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       };

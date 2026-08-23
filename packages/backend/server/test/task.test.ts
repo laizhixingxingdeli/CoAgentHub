@@ -2,6 +2,10 @@ import { execFileSync } from "node:child_process";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import {
+  appendTaskOutput,
+  releaseTaskOutput,
+} from "../src/lib/executor-task/output-buffer";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
@@ -911,6 +915,160 @@ describe("任务实体(server 单一状态源)", () => {
     );
     const detail2 = (await res2.json()) as Record<string, unknown>;
     expect(detail2.outputTail).toBe("tail line 1\ntail line 2");
+  });
+
+  it("GET 单任务:detached 超过 30 分钟无信号时标记需要关注", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(coordinator.id, group.id, "悬空协调任务");
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    expect(
+      (
+        await patchTask(coordinator.id, group.id, task.id, {
+          status: "running",
+        })
+      ).status,
+    ).toBe(200);
+
+    const stale = new Date(Date.now() - 30 * 60 * 1000 - 1000);
+    await testDb
+      .update(taskTable)
+      .set({ createdAt: stale, updatedAt: stale })
+      .where(eq(taskTable.id, task.id));
+
+    const response = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const detail = (await response.json()) as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    expect(detail.status).toBe("running");
+    expect(detail.livenessWarning).toBe(true);
+    expect(detail.lastSignalAt).toBe(stale.toISOString());
+  });
+
+  it("GET 单任务:detached 的 outputTail 更新会刷新存活判定", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "输出中的协调任务",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await patchTask(coordinator.id, group.id, task.id, { status: "running" });
+    const stale = new Date(Date.now() - 30 * 60 * 1000 - 1000);
+    await testDb
+      .update(taskTable)
+      .set({ createdAt: stale, updatedAt: stale })
+      .where(eq(taskTable.id, task.id));
+    appendTaskOutput(task.id, "仍在工作");
+
+    try {
+      const response = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+        { headers: { "X-Participant-Id": coordinator.id } },
+      );
+      const detail = (await response.json()) as Record<string, unknown>;
+      expect(response.status).toBe(200);
+      expect(detail.livenessWarning).toBe(false);
+      expect(new Date(String(detail.lastSignalAt)).getTime()).toBeGreaterThan(
+        stale.getTime(),
+      );
+    } finally {
+      releaseTaskOutput(task.id);
+    }
+  });
+
+  it("GET 单任务:detached 新建子任务会刷新存活判定", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "派发中的协调任务",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await patchTask(coordinator.id, group.id, task.id, { status: "running" });
+    const stale = new Date(Date.now() - 30 * 60 * 1000 - 1000);
+    await testDb
+      .update(taskTable)
+      .set({ createdAt: stale, updatedAt: stale })
+      .where(eq(taskTable.id, task.id));
+
+    const childMessage = await postMessage(
+      coordinator.id,
+      group.id,
+      "子任务消息",
+    );
+    await testDb.insert(taskTable).values({
+      groupId: group.id,
+      parentTaskId: task.id,
+      messageId: childMessage.id,
+      executorParticipantId: execA.id,
+      status: "queued",
+    });
+
+    const response = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const detail = (await response.json()) as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    expect(detail.livenessWarning).toBe(false);
+    expect(new Date(String(detail.lastSignalAt)).getTime()).toBeGreaterThan(
+      stale.getTime(),
+    );
+  });
+
+  it("GET 单任务:detached 终态不参与存活探测", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "已结束协调任务",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(done.status).toBe(200);
+
+    const stale = new Date(Date.now() - 30 * 60 * 1000 - 1000);
+    await testDb
+      .update(taskTable)
+      .set({ createdAt: stale, updatedAt: stale })
+      .where(eq(taskTable.id, task.id));
+    const response = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const detail = (await response.json()) as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    expect(detail.status).toBe("done");
+    expect(detail.livenessWarning).toBe(false);
+    expect(detail.lastSignalAt).toBeNull();
   });
 
   it("GET 单任务:群不存在 404、任务不存在/属其他群 404", async () => {
