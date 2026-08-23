@@ -1,6 +1,6 @@
 # Spec: 自派警告与下发目标审计
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **来源**: `.scratch/diagnosis/self-dispatch.md`(codex 诊断,2026-08-23)
@@ -96,3 +96,19 @@
 - ⚠️ **测试基线注意**:`test/dispatcher-fields.test.ts` 的 `afterAll` 钩子当前会超时,
   导致 `pnpm --filter server test` **退出码为 1**(用例本身 423 passed / 该文件 8 passed)。
   这是既有问题、**非本票引入**,另有票在修。判断基线时看**用例数**,不要看退出码
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**，commit `a780e50`。逐条核实：
+
+- **警告不拒绝**：`queue.ts:531` 在任务创建之后才发警告，任务照常执行
+- **检视者免轮询可见**：新建 `task-dispatch-warnings` 持久化收件箱，
+  且注释写明「不占用任务唯一的完成事件」——这个考虑到位
+- **候选上下文**：记录 `available` / `running` / `recently_failed` 三态
+- **理由不编造**：新增 `metadata.selectionReason`，注释明确
+  「平台只审计原文，绝不从 task body 推断或补写理由」
+- **未新增自派开关**（grep 零结果），符合 R3
+- 迁移 `0021` 已应用（`dispatch_audit` 列 + `task_dispatch_warning` 表均在库）

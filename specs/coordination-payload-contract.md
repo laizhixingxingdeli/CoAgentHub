@@ -1,6 +1,6 @@
 # Spec: 协作载荷从散文契约变成代码契约
 
-> **状态**: Ready for Implementation
+> **状态**: 待验收 — 实现已落地(`6cfc84e`),**L2 与 L3 均未完成**
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **上游**: `specs/reviewer-role-spec-generation.md` v3.9 §3.10 / §3.18

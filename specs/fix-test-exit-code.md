@@ -1,6 +1,6 @@
 # Spec: `pnpm test` 退出码为 1,让所有「测试全绿」判断失真
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-23,检视者)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **优先级**: 高 —— 它污染每一票的验收信号
@@ -86,3 +86,17 @@ Exit status 1
 - 单文件复现:`pnpm --filter server exec vitest run test/dispatcher-fields.test.ts`
   —— 约 12 秒即可复现,不必跑全量
 - 沙箱执行器注意:需监听本地端口的用例会报 `listen EPERM`,那是环境限制不是回归
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**，commit `d002cb3`。
+
+找到真根因而非调超时糊弄：`EXECUTOR_BIN_EXECUTOR` 未指向假 bin（派给 executor 的任务
+会去 spawn 真实 atomcode 然后挂住）+ `beforeEach` 里 `__resetExecutorQueueForTests()`
+中途清队列制造孤儿任务，`afterAll` 因此永远等不到队列清空。
+
+**删掉了绕过式的清理，而不是放大超时**，符合 R3。实测：退出码 **0**、35 文件全过、
+**425 用例**（从 423 增加，未减少）。

@@ -1,6 +1,6 @@
 # Spec: 任务标题可读 —— 左栏 11 行 8 行叫「CoAgentHub Task」
 
-> **状态**: Ready for Implementation
+> **状态**: 待验收 — 实现已落地(`b67d3e9`),**L2 与 L3 均未完成**
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **修正**: `specs/timeline-readability.md` 问题一的实现假设有误(详见背景)
