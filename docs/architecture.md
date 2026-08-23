@@ -95,7 +95,7 @@ CoAgentHub/
 | `/api/participants/:id/heartbeat` | PUT | 上报在线,写 `last_seen`;在线判定 = WS 在线 ∪ REST 心跳新鲜 |
 | `/api/participants/:id` | DELETE | 删除 participant(成员关系与消息同事务清理;建过群或消息被引用为父消息 → 409) |
 | `/api/groups` | POST | 建群(`title`);创建者同一事务内自动加入并持 `coordinator` 角色 |
-| `/api/groups` | GET | 列群组,带 `memberCount`;`?status=active\|archived` 过滤、`?q=` 标题搜索、`?limit=&offset=` 分页(limit 上限 100,缺省不截断),返回 `{ items, total }` |
+| `/api/groups` | GET | 列群组,带 `memberCount`;`?status=active\|archived` 过滤、`?q=` 标题搜索、`?participantId=<uuid>` 按成员过滤(只返回该参与方所属的群:`group_members` 存在性判定,与 `memberCount` 的 join 分离,不影响计数)、`?limit=&offset=` 分页(limit 上限 100,缺省不截断),返回 `{ items, total }`(`total` 受过滤参数影响、与分页无关) |
 | `/api/groups/:id` | GET | 群组详情(含 status) |
 | `/api/groups/:id/members` | POST | 添加成员并分配角色(幂等 upsert,缺省 `["observer"]`);单角色校验:去重后 `roles.length > 1` → 400 |
 | `/api/groups/:id/members` | GET | 列成员(participant 信息 + 群内角色,按加入时间升序) |
