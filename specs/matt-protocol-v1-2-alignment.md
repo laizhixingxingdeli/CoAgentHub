@@ -1,6 +1,6 @@
 # Spec: Skills 对齐 Matt 协议 v1.2
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 已由 56f666a 落地(2026-08-23 核实)
 > **版本**: 1.0
 > **日期**: 2026-08-21
 > **上游基准**: mattpocock/skills v1.2.3(2026-08-06 发布,含 v1.2.0/v1.2.2/v1.2.3 变更集)
@@ -204,3 +204,10 @@ diagnosis-rules 追加三条:
 - 脱敏要求只约束"展示/汇报"层,不改变任务执行与 git 提交行为
 - 落地后与上游 v1.2.3 的关系:吸收全部行为级变化;分发形态差异(单文件 vs plugin)与
   未复刻的独立 skill 为有意偏离,记录于本节
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+提交 `56f666a docs(skills): align coordinator/executor/bugfix to Matt protocol v1.2.3` 已完成对齐,早于本轮工作。

@@ -1,6 +1,6 @@
 # Spec: Composer 下线后的死代码清理
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 已完成(2026-08-23 核实)
 > **版本**: 1.0
 > **日期**: 2026-08-22
 > **协作模式**: 两层（群 `01a02953-e519-77f6-be9c-55fb4b31c898` 无 reviewer 成员，
@@ -99,3 +99,10 @@
 这台机器负载高（无关进程占用大量 CPU），全量并行跑测试会偶发超时，
 失败文件每次漂移且单独跑全绿。判断是否真回归请用
 `cd packages/frontend/web && npx vitest run --maxWorkers=1` 串行跑一次。
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+检视者核实:`Composer` 相关文件已从 `packages/frontend/web/src` 全部移除(`find` 零结果)。

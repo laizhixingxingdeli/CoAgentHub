@@ -1,6 +1,6 @@
 # Spec: Spec-Driven Task Dispatch (规范驱动任务下发)
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 实现已在位并长期运行(2026-08-23 核实)
 > **版本**: 1.0
 > **日期**: 2026-08-18
 
@@ -162,3 +162,10 @@ specHash: string | null;
 - `specRef` / `specHash` 均为可选字段，不传时行为与现有完全一致
 - 旧任务行的新列为 null，不影响现有数据
 - API 向后兼容：不传 specRef 的请求与当前行为完全相同
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+检视者核实:`specRef`/`specHash` 在 `routes/group/messages.ts`(3 处)与 `lib/executor-task/queue.ts`(19 处)已全面接线;库里 54 个任务中 27 个带 `specRef`,本轮全部三层协作都建立在这条能力上(验收钉子、`spec_published` 载荷、L2 对照)。**能力已实现且是当前主流程的基础**,无需再下发。

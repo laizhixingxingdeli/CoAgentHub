@@ -1,6 +1,6 @@
 # Spec: Skill 安装引导 API (Skill Installation API)
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 实现在位,但本轮发现并修复了一处使其全线 500 的缺陷(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-18
 
@@ -139,3 +139,19 @@ import skillsRouter from "./routes/skills";
 - 新增只读 API，不影响现有端点
 - skill 内容仍可从 git 仓库直接获取（双通道）
 - agent 可自由选择 API 安装或手动复制
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+`GET /api/skills` 与 `GET /api/skills/:name` 早已实现。但本轮清理时实测发现**线上返回 500**:
+
+`routes/skills.ts` 按「模块路径上溯 5 级 = 仓库根」定位 `skills/`,该假设只在源码布局成立;打包成 `dist/server.mjs` 后深度少两级,上溯 5 级落到仓库**父目录** → ENOENT → 全线 500。
+
+```
+src  上溯5级 = /Users/apple/Projects/CoAgentHub/   ✓
+dist 上溯5级 = /Users/apple/Projects/              ✗
+```
+
+已由检视者修复(`262fbdb`):改为从模块目录逐级上溯取第一个含 `skills/` 的目录,源码与打包两种布局都成立;新增 `test/skills-route.test.ts` 四项断言防退回。实测已恢复 200。
