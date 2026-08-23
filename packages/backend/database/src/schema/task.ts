@@ -32,6 +32,19 @@ export const TASK_STATUSES = [
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
+/** 协调任务终态时服务器可观察的活动事实。 */
+export interface CoordinationActivityAudit {
+  startedAt: string;
+  endedAt: string;
+  childTaskCount: number;
+  childTaskTargets: Array<{
+    taskId: string;
+    participantId: string;
+    participantName: string;
+  }>;
+  messageCount: number;
+}
+
 /** 下发目标审计:服务器可观察的选择事实,调用方未提供理由时保持 null。 */
 export interface DispatchTargetAudit {
   dispatcherParticipantId: string;
@@ -44,6 +57,8 @@ export interface DispatchTargetAudit {
     status: "available" | "running" | "recently_failed";
   }>;
   selectionReason: string | null;
+  /** Filled when a coordinator task reaches a terminal state. */
+  coordinationActivity?: CoordinationActivityAudit;
 }
 
 /** 单次执行尝试(attempt 时间线,任务执行历史)。 */

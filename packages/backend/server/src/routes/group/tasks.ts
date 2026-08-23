@@ -8,7 +8,10 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 import {
+  createTaskDispatchWarnings,
+  isTerminalTaskStatus,
   notifyTaskStatusChanged,
+  recordCoordinationActivity,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import { and, eq } from "drizzle-orm";
@@ -429,6 +432,24 @@ app
           status,
           updated,
         );
+        if (isTerminalTaskStatus(status)) {
+          try {
+            const activity = await recordCoordinationActivity(db, updated);
+            if (activity?.childTaskCount === 0) {
+              await createTaskDispatchWarnings(
+                db,
+                updated.groupId,
+                updated.id,
+                updated.executorParticipantId,
+              );
+            }
+          } catch (error) {
+            console.warn(
+              `[coordination] activity audit failed (${updated.id}), task remains terminal:`,
+              error,
+            );
+          }
+        }
       }
       return c.json(updated);
     },

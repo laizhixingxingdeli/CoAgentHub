@@ -17,11 +17,16 @@
  *                    弱验收 / 执行历史 / 测试执行器选择)
  */
 
+export {
+  isTerminalTaskStatus,
+  recordCoordinationActivity,
+} from "../coordination-activity";
 export { createAnsiStripper, stripAnsi } from "./ansi";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
   cancelQueuedTasks,
+  createTaskDispatchWarnings,
   currentRunningTask,
   executionApiBase,
   formatExecutorStartupFailure,

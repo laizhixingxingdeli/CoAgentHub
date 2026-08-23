@@ -297,7 +297,7 @@ export class WsHub {
         }),
     );
   }
-  /** Durable self-dispatch warnings use this as their low-latency inbox hint. */
+  /** Durable dispatch audit warnings use this as their low-latency inbox hint. */
   async broadcastTaskDispatchWarningAvailable(
     groupId: string,
     taskId: string,
@@ -317,7 +317,7 @@ export class WsHub {
           ws.send(event, (err) => {
             if (err) {
               console.warn(
-                `[ws] self-dispatch warning to participant ${participantId} failed:`,
+                `[ws] dispatch audit warning to participant ${participantId} failed:`,
                 err.message,
               );
             }

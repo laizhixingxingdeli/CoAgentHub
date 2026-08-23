@@ -529,7 +529,7 @@ async function dispatchTask(
     // 任务创建(queued)→ WS 推送:插件/前端免轮询感知任务入队。
     await notifyTaskStatusChanged(db, task.id, groupId, "queued", created);
     if (dispatchAudit.selfDispatch) {
-      await createSelfDispatchWarnings(
+      await createTaskDispatchWarnings(
         db,
         groupId,
         task.id,
@@ -747,8 +747,8 @@ async function buildDispatchTargetAudit(
   };
 }
 
-/** Persist and announce the self-dispatch warning without changing dispatch. */
-async function createSelfDispatchWarnings(
+/** Persist and announce a dispatch audit warning without changing dispatch. */
+export async function createTaskDispatchWarnings(
   db: DataBase,
   groupId: string,
   taskId: string,
