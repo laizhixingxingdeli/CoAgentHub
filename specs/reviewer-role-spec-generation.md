@@ -1,7 +1,10 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
 > **状态**: Ready for Implementation
-> **版本**: 3.8（新增检视者适配契约：三种 runtime 的唤醒方式统一为「收件箱权威 +
+> **版本**: 3.9（新增 §3.18 组件边界：插件只做检视者适配；§3.14 模式推导判据
+> 由「有无 reviewer」改为「reviewer 与 coordinator 是否同时在场」。3.8 原文见下）
+>
+> **v3.8**:（新增检视者适配契约：三种 runtime 的唤醒方式统一为「收件箱权威 +
 > 注入可选」；L3 不再下发给 reviewer 执行器，改为协调者 PATCH 自身任务终态触发；
 > 推翻 v3.4 关于 `EXECUTOR_BIN_REVIEWER` 是部署前置条件的表述）
 > **日期**: 2026-08-22
@@ -571,6 +574,10 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
 
 `skills/coordinator/SKILL.md` 的「取 spec」段增加模式分支：
 
+> ⚠️ **判据已于 v3.9 修订**（见本节末「v3.9 修订」小节）：
+> 由「有无 reviewer 成员」改为「**reviewer 与 coordinator 是否同时在场**」。
+> 下面三条的措辞保留原文，实际判据以 v3.9 为准。
+
 - **Dispatch 前先判定模式**：读群成员（`GET /api/groups/:id/members`），检查是否
   存在 `roles` 含 `reviewer` 的成员。
 - **三层模式（有 reviewer）**：现行流程**完全不变**——向检视者取冻结 spec，
@@ -662,6 +669,101 @@ body；Dispatch/Verify（现 `### 4`/`### 5`）并入 coordinator skill 的三�
   `spawn reviewer ENOENT`）；补协调者若要用 detached 会话延续需自行注册执行器。
 - `docs/usage.md` / `docs/usage_CN.md`：环境变量表补 `EXECUTOR_BIN_REVIEWER`
   （及 `EXECUTOR_BIN_<KEY>` 通用覆盖规则的说明，若尚未记载）。
+
+#### 3.14.5 v3.9 修订：判据改为「两个角色是否同时在场」
+
+**v3.8 的判据（有无 reviewer 成员）在一种合法配置下判错。**
+
+两层模式有两种成员组合，各自适用不同场景：
+
+| 组合 | 谁兼任什么 | 适用 |
+|---|---|---|
+| **检视者 + 执行者** | 检视者兼任下发与 L2 | **有人在用（默认推荐）** |
+| 协调者 + 执行者 | 协调者兼任对话与写 spec | 无人值守 / 外部系统触发 |
+
+按 v3.8 的判据，「检视者 + 执行者」会被判成**三层**（因为有 reviewer 成员），
+于是协调者那一层找不到人，L2 环节悬空。
+
+**v3.9 判据**：读群成员，
+
+- **同时存在** `roles` 含 `reviewer` 的成员 **与** `roles` 含 `coordinator` 的成员
+  → **三层**
+- 否则 → **两层**，由在场的那一个兼任缺席角色的职责
+
+仍然是**从成员构成实时推导，不落平台字段**——§3.14.1 的理由完全不变。
+
+**为什么「检视者 + 执行者」是两层的默认推荐**：
+
+1. **用户入口**。检视者的定义属性就是「与用户直接对话的那一个」。协调者是平台
+   spawn 出的子进程，每票一个、跑完即止，没有与用户的持续会话——用它做两层，
+   需求得靠人工从网页/API 手动灌进去，凭空多一个无人担责的环节。
+2. **不必绕路**。v3.8 让协调者 `GET /api/skills/reviewer` 把检视者 skill 拉过来
+   执行职责 A——让 A 装 B 的技能。反过来（检视者兼任下发与 L2）更直接。
+3. **会话连续性**。协调者 `memory: null`，每票冷启动。这不是理论问题：
+   实测中三个 codex 实例对同一段 §3.10 散文产出了**三种不同结构**的
+   `review_request` 载荷。检视者常驻会话，无此问题。
+
+**成本对称，不构成区分理由**：有人会认为「检视者兼协调 = 写 spec 与验收 spec
+同一方」。但协调者兼检视**同样是同一方**（§3.14.4 已写明该代价）。这是两层模式
+的固有成本，与选哪一对无关。
+
+**连带影响**：前端 `RequirementDetailPanel` 的 L3 虚拟节点当前判的是「有无 reviewer」
+（`specs/timeline-readability.md` v1.1），需按本节判据同步修订。
+
+---
+
+### 3.18 组件边界：插件只做检视者适配（v3.9 新增）
+
+**原则**：协调者与执行者的能力**不通过插件实现**；插件里只做检视者适配。
+
+#### 3.18.1 分界线依据：参与方怎么运行
+
+| 角色 | 运行方式 | 需要什么 |
+|---|---|---|
+| **检视者** | 常驻在 agent 会话里，平台**够不着**它 | **必须有插件**——收件箱消费、去重、ack、把结果注入**正在进行的会话**。这是进程外做不到的事 |
+| **协调者 / 执行者** | 平台 spawn 的子进程，每票一个 | **只需能调 HTTP API**。任何能跑 shell 的 CLI 都够 |
+
+检视者需要插件，是因为「唤醒一个已经在跑的会话」只能从运行时内部做。
+协调者/执行者是平台自己拉起来的，平台完全掌控其输入——不需要任何运行时适配。
+
+#### 3.18.2 推翻：`coagenthub_*` 工具名不是平台契约
+
+`skills/coordinator/SKILL.md` 结尾的 harness-neutral 约束写着：
+
+> The `coagenthub_*` tool names are the platform contract and are exempt.
+
+**该豁免作废。** `coagenthub_*` 是**插件的实现**，不是平台契约；平台契约是 HTTP API。
+
+实测后果：coordinator skill 有 13 处引用这些工具名，等于要求协调者必须装
+codex/dsh 插件。而 `coagenthub-codex` 的 MCP server 只有 7 个工具、**没有
+`coagenthub_post_message`**——协调者因此在群里**说不了任何话**：
+skill 要求的「限额时群内说明处置」「L2 不通过发 ❌ 验收未通过」全都执行不了
+（实测：该 participant 发出的 10 条 text/plain 消息**全部是任务书**，无一条自由发言）。
+
+#### 3.18.3 前置缺口：任务书不带执行上下文
+
+`buildTicket`（`lib/executor-task/queue.ts`）产出的任务书含
+执行器 label / 项目路径 / 发布时间 / 关联规范 / 任务内容 / 汇报格式，
+**但不含调 API 所需的任何上下文**：API base URL、自己的 `participantId`、
+`groupId`、**自己的 `taskId`**。
+
+任务书里写着「未安装 skill 就 `GET /api/skills/executor`」，却没说 API 在哪。
+
+现在能跑通，全靠插件的 env（`COAGENTHUB_API_BASE` / `COAGENTHUB_GROUP_ID` /
+participant-id 文件）兜着。**去插件化的前置条件就是把这四样放进任务书**——
+尤其 `taskId`：§3.17.4 要求协调者 PATCH 自己那条任务，不知道 taskId 就做不到
+（现状是靠 `list_tasks` 反查自己找出来，能 work 但绕）。
+
+#### 3.18.4 落地方向
+
+- 任务书新增执行上下文段（`apiBase` / `participantId` / `groupId` / `taskId`）
+- `coordinator skill` 的 13 处 `coagenthub_*` 改为具体 HTTP 调用，撤销 §287 豁免
+- 插件中协调者/执行者面的工具（`dispatch_task` / `list_tasks` 等）逐步退役，
+  只留检视者适配（收件箱消费 + 会话唤醒）。**dsh 插件同理**——其 18 个工具里
+  大部分是协调者/执行者面的
+- 上述为方向性约束，各自单独立票，不在本 spec 内展开实现细节
+
+---
 
 ### 3.17 检视者适配契约（v3.8 新增）
 
