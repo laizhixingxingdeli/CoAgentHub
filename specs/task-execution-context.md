@@ -1,6 +1,6 @@
 # Spec: 任务书带上执行上下文
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L2 + L3 均通过(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **上游**: `specs/reviewer-role-spec-generation.md` v3.9 §3.18.3
@@ -112,3 +112,28 @@ participant-id 文件)兜着。这正是 v3.9 要拆掉的那层依赖。
 - 本仓是 **pnpm** 项目
 - 后端以 `pnpm --filter server start`(无 watch)运行中:改完需手动 build + restart
 - 沙箱执行器注意:需监听本地端口的测试会报 `listen EPERM`,那是环境限制不是回归
+
+
+---
+
+## L3 检视记录(2026-08-23)
+
+**verdict: pass**。实现在 `6cfc84e`(`buildExecutionContextSection`,`queue.ts:2001`),
+测试补充在 `8441248`,server 435/435。
+
+逐项核实:
+
+- `apiBase`:`COAGENTHUB_API_BASE` 优先,缺省用 `serverPort()` 的**实际监听端口**,
+  **未硬编码 3001**——符合 R2
+- `participantId`:用 `run.participantId`,即**接收者自己的** id,非发送者(R4)
+- detached 分支**复用 `run.detached`**,未新写判定逻辑(R3)
+- detached 任务额外写明 PATCH 地址,以及「不回写会挂到 `detachedTimeoutMinutes`
+  1440 分钟兜底、检视者一直等不到结果」的后果
+
+**⚠️ 检视时的新发现**:该实现早已在 `6cfc84e` 中,也就是说那个提交实际装了
+**四张票**(`task-parent-link` / `verify-agent-claims` / `coordination-payload-contract` /
+本票),而非此前认为的三张。
+
+这加重了「一票一提交」(`fc04c89`)的必要性:四票合一时其中的迁移遗漏直接导致
+`/api/groups/:id/tasks` 全线 500,而**没有任何单票边界能帮助定位**。
+历史提交不追溯拆分,此处记录其真实落地位置。
