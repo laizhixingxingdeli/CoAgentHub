@@ -1,16 +1,33 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
-// skills 目录锚定到本模块所在仓库,而不是 process.cwd()/COAGENTHUB_REPO_ROOT:
-// cwd 可能不是仓库根(serve.mjs 之外的启动方式),而 COAGENTHUB_REPO_ROOT 在
-// 测试里被重定向到临时 git 仓库(executor 快照用),两种情况下按仓库根解析
-// skills 都会落到不存在的目录 → 500。模块路径是唯一确定不变的位置。
-// 本文件位于 packages/backend/server/src/routes/skills.ts,上溯 5 级 = 仓库根
-// (第一个 ../ 连同文件名一起被 URL 解析消耗,故 5 个 ../ 即到仓库根)。
-const REPO_ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
-const SKILLS_DIR = resolve(REPO_ROOT, "skills");
+// skills 目录按「模块路径向上找 skills/」解析,不用固定层数。
+//
+// ⚠️ 曾经写死「上溯 5 级 = 仓库根」,那在源码目录 (src/routes/skills.ts) 成立,
+// 但打包成 dist/server.mjs 后深度少两级,上溯 5 级会落到仓库的**父目录**,
+// 于是去 <父目录>/skills 找 → ENOENT → GET /api/skills 全线 500。
+// 实测:src 上溯5级 = .../CoAgentHub/ ✓;dist 上溯5级 = .../Projects/ ✗
+//
+// 改为从模块所在目录逐级上溯,取第一个含 skills/ 的目录——源码与打包两种
+// 布局都成立,且不依赖 process.cwd()(cwd 可能不是仓库根)或
+// COAGENTHUB_REPO_ROOT(测试里被重定向到临时 git 仓库)。
+function resolveSkillsDir(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const candidate = resolve(dir, "skills");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // 找不到时返回按模块路径推算的默认值,让 readFileSync 抛出带路径的 ENOENT,
+  // 便于定位;不静默返回空目录。
+  return resolve(dirname(fileURLToPath(import.meta.url)), "skills");
+}
+
+export const SKILLS_DIR = resolveSkillsDir();
 export const SKILL_NAMES = [
   "coordinator",
   "executor",
