@@ -234,6 +234,7 @@ export const en: Record<DictKey, string> = {
   "messages.error.deleteFailed": "Delete failed: {detail}",
   "messages.back.aria": "Back to groups",
   "messages.back.label": "Back",
+  "messages.backToList": "Back to list",
   "messages.titleFallback": "Group messages",
   "messages.search.placeholder": "Search messages…",
   "messages.search.aria": "Search messages",

@@ -63,7 +63,7 @@ export function RequirementControlBar({
           <div
             key={task.id}
             data-testid={`requirement-control-row-${task.id}`}
-            className="flex items-center gap-2"
+            className="flex flex-wrap items-center gap-2"
           >
             <span className="flex-1 truncate text-xs text-muted-foreground">
               {task.executorKey ?? task.id}

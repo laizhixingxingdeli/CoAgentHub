@@ -1,10 +1,13 @@
+import { ArrowLeft } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGroupWs } from "@/hooks/use-group-ws";
+import { useIsDesktop } from "@/hooks/use-mobile";
 import {
   PARTICIPANT_ID_KEY,
   participantIdentityHeaders,
 } from "@/lib/api-client";
 import { appendOutputTail } from "@/lib/output-buffer";
+import { t } from "@/lib/i18n";
 import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
@@ -92,6 +95,12 @@ export function RequirementWorkspace({
         : null;
     });
   }, [requirements]);
+
+  // 响应式断点:复用项目既有 useIsDesktop(lg ≥1024px)约定。窄视口(<1024px)
+  // 放不下「需求列表 | 详情」两栏 → 单栏:列表 / 详情二选一,点击行进详情,
+  // 返回键回列表(requirement-pane-responsive R1)。
+  const isDesktop = useIsDesktop();
+  const [mobilePane, setMobilePane] = useState<"list" | "detail">("list");
 
   const loadGroupStatus = useCallback(async () => {
     try {
@@ -363,6 +372,37 @@ export function RequirementWorkspace({
   const selectedRequirement =
     requirements.find((r) => r.id === selectedRequirementId) ?? null;
 
+  /** 选择需求:桌面两栏仅切换选中;窄视口单栏同时切到详情页(R1 切换行为)。 */
+  const handleSelectRequirement = (id: string) => {
+    setSelectedRequirementId(id);
+    if (!isDesktop) {
+      setMobilePane("detail");
+    }
+  };
+
+  // 详情区块(控制条 + 详情面板):桌面两栏右列与窄视口详情页共用,避免重复。
+  const detailPane = (
+    <>
+      <RequirementControlBar
+        requirement={selectedRequirement}
+        canControl={canControl}
+        readOnly={readOnly}
+        commandSending={commandSending}
+        rollbackStates={rollbackStates}
+        onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+        onRollback={(task) => void handleRollback(task)}
+      />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <RequirementDetailPanel
+          requirement={selectedRequirement}
+          messages={messages}
+          members={members}
+          liveOutputs={liveOutputs}
+        />
+      </div>
+    </>
+  );
+
   return (
     <div
       data-testid="requirement-workspace"
@@ -389,39 +429,45 @@ export function RequirementWorkspace({
           onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
           onRollback={(task) => void handleRollback(task)}
         />
-      ) : (
-        // UI-04b-2 主从两栏:左列表(master) + 右详情(detail,含控制条)。
+      ) : isDesktop ? (
+        // 桌面(lg ≥1024px)两栏:左列表(master) + 右详情(detail,含控制条)。
         // 左列宽度由 listClassName 控制(右栏任务 Tab 取窄列,主区取宽列),
-        // 右列自适应占剩余空间。
+        // 右列自适应占剩余空间(R2:左栏设 min/max,详情区有最小宽度)。
         <div className="flex min-h-0 flex-1 gap-2">
           {/* 左栏:需求列表。多需求时可独立滚动。 */}
           <div className={`${listClassName} overflow-y-auto border-r`}>
             <RequirementList
               requirements={requirements}
               selectedId={selectedRequirementId}
-              onSelect={setSelectedRequirementId}
+              onSelect={handleSelectRequirement}
             />
           </div>
-          {/* 右栏:控制条(停止/回滚)+ 需求详情(阶梯 + 时间线)。 */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <RequirementControlBar
-              requirement={selectedRequirement}
-              canControl={canControl}
-              readOnly={readOnly}
-              commandSending={commandSending}
-              rollbackStates={rollbackStates}
-              onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
-              onRollback={(task) => void handleRollback(task)}
-            />
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <RequirementDetailPanel
-                requirement={selectedRequirement}
-                messages={messages}
-                members={members}
-                liveOutputs={liveOutputs}
-              />
-            </div>
-          </div>
+          {/* 右栏:控制条 + 详情(阶梯 + 时间线)。R2:详情区有最小宽度,
+              窄到低于该值时按断点退化为单栏(见上方 isDesktop)。 */}
+          <div className="flex min-w-64 flex-1 flex-col">{detailPane}</div>
+        </div>
+      ) : mobilePane === "list" ? (
+        // 窄视口(<1024px)单栏:只显示需求列表,点击行进详情。
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <RequirementList
+            requirements={requirements}
+            selectedId={selectedRequirementId}
+            onSelect={handleSelectRequirement}
+          />
+        </div>
+      ) : (
+        // 窄视口(<1024px)单栏:只显示选中需求详情(控制条 + 详情),返回键回列表。
+        <div className="flex min-h-0 flex-1 flex-col">
+          <button
+            type="button"
+            data-testid="requirement-mobile-back"
+            onClick={() => setMobilePane("list")}
+            className="flex shrink-0 items-center gap-1 border-b px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" />
+            {t("messages.backToList")}
+          </button>
+          {detailPane}
         </div>
       )}
     </div>

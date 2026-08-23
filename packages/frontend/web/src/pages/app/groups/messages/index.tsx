@@ -145,7 +145,7 @@ export default function GroupMessagesPage() {
       {groupId && (
         <RequirementWorkspace
           groupId={groupId}
-          listClassName="min-w-48 w-96 shrink"
+          listClassName="min-w-48 w-96 max-w-96 shrink"
         />
       )}
     </div>

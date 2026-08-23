@@ -219,6 +219,7 @@ export const zh = {
   "messages.error.deleteFailed": "删除失败: {detail}",
   "messages.back.aria": "返回群组列表",
   "messages.back.label": "返回",
+  "messages.backToList": "返回列表",
   "messages.titleFallback": "群组消息",
   "messages.search.placeholder": "搜索消息…",
   "messages.search.aria": "搜索消息",
