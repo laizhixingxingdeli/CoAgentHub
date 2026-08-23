@@ -1,6 +1,6 @@
 # Spec: 执行器启动失败时给出可操作的提示
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — 已实现并有测试(2026-08-23 核实)
 > **版本**: 1.0
 > **日期**: 2026-08-22
 > **协作模式**: 两层（协调者兼任写 spec，spec v3.8 §3.14）
@@ -87,3 +87,19 @@ codex-cli 0.149.0：  exec --approve-for-me --ephemeral {ticket}
 ## 不涉及
 
 - 不改前端、不改 schema、不加接口
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+检视者逐条核对验收标准,四条全部满足:
+
+- 参数类失败 → 「执行器参数配置可能与当前 CLI 版本不匹配,请核对 executors.ts 中的 args 配置」
+- ENOENT 类 → 「可能未安装或不在 PATH,请用 which 确认或填写绝对路径」
+- 另有 EACCES 档(超出 spec 要求)
+- 两处调用(`queue.ts:1145` / `1398`)**共用同一个 `formatExecutorStartupFailure`**,判断逻辑只有一份
+- 其他失败类型返回空提示,原样透出 `msg`
+- `test/executor-startup-failure.test.ts` 覆盖参数类与 ENOENT 两个分支
+
+实现位于 `lib/executor-task/queue.ts:86-114`。

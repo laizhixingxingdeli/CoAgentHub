@@ -1,6 +1,6 @@
 # Spec: 三角色三层检视流程（检视者出 spec / 协调者派发 / 执行者实现）
 
-> **状态**: Ready for Implementation
+> **状态**: Living document — 架构契约,非实现票(不下发)
 > **版本**: 3.9（新增 §3.18 组件边界：插件只做检视者适配；§3.14 模式推导判据
 > 由「有无 reviewer」改为「reviewer 与 coordinator 是否同时在场」。3.8 原文见下）
 >

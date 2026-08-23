@@ -1,6 +1,6 @@
 # Spec: Skill 加载强化 + 任务书精简 + 项目初始化检查
 
-> **状态**: Ready for Implementation
+> **状态**: Partially superseded — 三项已实现,一项被 skill-sync-at-onboarding 推翻(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-18
 > **依赖**: 服务端 specRef/specHash（465658f）、Skill 安装 API（e3d9a28）、coordinator/executor/bugfix skills（5b2cb6c）
@@ -201,3 +201,23 @@ export function findMissingProjectDocs(projectPath: string): string[] {
 - 加群自动发消息仅对新增成员生效，不影响既有成员
 - capabilities 更新幂等（重复安装不会重复追加）
 - 初始化检查不阻塞消息发送（仅返回 warning）
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+逐条核对四条验收标准:
+
+| 条目 | 现状 |
+|---|---|
+| buildTicket 含「执行方式」段、不含旧的冗长段 | ✅ 已实现(`queue.ts:2043`) |
+| **加群后自动发 skill 安装定向消息** | ❌ **已被推翻** |
+| skill 安装确认 → 更新 capabilities | ✅ `handleSkillInstallConfirmation` 在位 |
+| 首次下发时缺失文档返回 warning | ✅ `findMissingProjectDocs` 有 3 处引用 |
+
+**第 2 条被 `specs/skill-sync-at-onboarding.md`(`0a8c160`)反转**:那票的结论是
+skill 是**参与方级资产**、角色是**群组级绑定**,因此改为接入参与方时一次投递全套,
+**加群不再发安装引导群消息**(实测 `members.ts` 中该发送块已整段移除)。
+
+本票其余三项已完成,第 2 条不再执行。

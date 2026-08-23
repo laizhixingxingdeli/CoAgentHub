@@ -1,6 +1,6 @@
 # Spec: Plugin & Skill Adaptation for Spec-Driven Task Dispatch
 
-> **状态**: Ready for Implementation
+> **状态**: Superseded — 被 spec v3.9 §3.18 推翻(2026-08-23)
 > **版本**: 1.0
 > **日期**: 2026-08-18
 > **依赖**: 服务端 Spec-Driven Task Dispatch（specs/spec-driven-task-dispatch.md）已完成
@@ -167,3 +167,21 @@ description: "Dispatch a task to a CoAgentHub executor...
 - specRef/specHash 均为可选，不传时完全兼容现有行为
 - AGENTS.md 新增段落不影响现有 agent 工作流（增量信息）
 - 工具描述更新不影响参数 schema（仅 description 文案变化）
+
+
+---
+
+## 清理核实记录(2026-08-23)
+
+本票(2026-08-18)要求扩展 **dsh-coagenthub 插件的 `coagenthub_dispatch_task`** 以携带 `specRef`/`specHash`,即把协调者能力做进插件。
+
+`specs/reviewer-role-spec-generation.md` v3.9 §3.18 已确立相反的组件边界:
+
+> **协调者与执行者的能力不通过插件实现,插件里只做检视者适配。**
+> `coagenthub_*` 工具名不是平台契约,是插件实现;平台契约是 HTTP API。
+
+本票的目标(下发携带 spec 引用)**已由平台侧实现并长期运行**——见
+`specs/spec-driven-task-dispatch.md`:`specRef`/`specHash` 在 `messages.ts` 与
+`queue.ts` 全面接线,库里 54 个任务中 27 个带 `specRef`。
+
+因此本票**不再执行**:目标已达成,而达成路径与 v3.9 的边界相反。
