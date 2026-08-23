@@ -136,7 +136,7 @@ detached 协调任务转终态(PATCH)时,记录该任务生命周期内的可观
 - **未做工作区/提交归因**(`coordination-activity.ts` 内无 git 相关调用),符合 R3
 - 带独立测试文件 `coordination-activity.test.ts`
 
-**跳过 L2 说明**:同 `startup-recovery-order`。
+**L2 记载更正**:同 `startup-recovery-order` —— L2 实际已完成,断点在检视者重启后端。
 
 **一处观察**:本票的机制只在协调任务**落终态时**触发。而本轮实际发生的是
 协调任务**永远到不了终态**(进程死了没人 PATCH),该机制照不亮这种情况——
