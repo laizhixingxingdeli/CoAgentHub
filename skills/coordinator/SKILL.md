@@ -100,6 +100,7 @@ Call `coagenthub_dispatch_task` with:
 - 单张任务书只对应 spec 里的**一个内聚关注点**（通常是一个小节，或一组紧密相关的文件）。不把 spec 的多个小节、多组不相关文件一次性塞进同一张任务书。
 - 即使 spec 自己的阶段划分（如某个「批次」）把多个关注点归在一起，Dispatch 前也要按文件集合/关注点**再拆成多张任务书**。宁可多几轮 下发-验收，也不要一张票扛太多。
 - **理由**：任务书越大，执行器执行到一半被打断（额度/超时/环境问题）时留下的半成品状态越难收拾——源码/测试/提交各自处于不同完成度，验收时说不清整体状态；检视是逐条对照验收标准，任务书关注点越单一，L2/L3 检视越准。
+- **一张任务书 = 一个提交边界**：不同任务书的改动不得合并进同一个提交；同一张任务书允许有多个提交（例如实现后修复自检发现的问题）。这保证回滚能精确落在一票、L2 能逐票对照 `specHash`，并隔离事故：`6cfc84e` 曾把迁移和两项无关改动捆在一起，一处迁移遗漏就让整个任务接口崩溃。
 
 </dispatch-discipline>
 
@@ -149,7 +150,8 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
 
 1. Pull task details: `coagenthub_get_task` — check `diffSummary`, `outputTail`, `status`.
 2. Check each acceptance criterion from the spec **against the pinned `specHash` version**（验收钉子：在途任务一律按下发时刻的 specHash 口径验收，不受后续 spec 修订影响）。
-3. **文档同步检查** — 根据改动类型，检查以下文档是否需要更新：
+3. **提交边界检查** — 确认本票改动独立成提交，未与其他任务书的产物混合；若发现混合，要求执行器拆分并重新提交后再验收，不记录后放行。
+4. **文档同步检查** — 根据改动类型，检查以下文档是否需要更新：
 
 <doc-sync-checklist>
 
@@ -169,7 +171,7 @@ When you receive a completion event (durable inbox / WS hint) for a task, run th
 - **要求执行器补文档**：发消息 `❌ 验收未通过：缺少文档更新（xxx.md 需要同步）`，让执行器重试。
 - **或协调者自己补**：如果文档更新很简单（如 architecture.md 加一行），协调者可以直接改。
 
-4. L2 verdict:
+5. L2 verdict:
    - ✅ 全部通过 + 文档同步 →
      - **三层模式**：进入 §4.2，下发 L3 检视任务。
      - **两层模式**：直接结案（见 §4.4），**跳过 L3**。
