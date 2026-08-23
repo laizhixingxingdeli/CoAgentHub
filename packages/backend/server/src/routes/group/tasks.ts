@@ -418,6 +418,29 @@ app
       if (wantsLifecycle && !isExecutor) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
+      // Terminal state changes are an audited interruption of the task
+      // lifecycle. Require the caller to persist the explanation in the
+      // existing diffSummary.error field so a failed/cancelled task never
+      // becomes an unexplained terminal event. Internal server paths write
+      // directly to the database and already provide their own reasons.
+      if (
+        status !== undefined &&
+        status !== task.status &&
+        (status === "failed" || status === "cancelled")
+      ) {
+        const summary =
+          typeof normalizedDiffSummary === "object" &&
+          normalizedDiffSummary !== null &&
+          !Array.isArray(normalizedDiffSummary)
+            ? (normalizedDiffSummary as Record<string, unknown>)
+            : undefined;
+        if (typeof summary?.error !== "string" || summary.error.trim() === "") {
+          throw new BizError(
+            BizCodeEnum.InvalidRequest,
+            `status=${status} 必须在 diffSummary.error 中提供失败原因`,
+          );
+        }
+      }
       // 汇报 commit 核实(spec verify-agent-claims v1.1):任何写入
       // diffSummary.hash 的入口都要核实——CLI 完成 / detached PATCH / a2a 完成
       // 共用 claim-verification 同一套逻辑。核实是尽力而为:仓库不可达 / 非 git /

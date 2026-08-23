@@ -221,7 +221,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(updated.status).toBe("done");
   });
 
-  it("状态流转:running → failed / cancelled;diffSummary 可随 PATCH 写入", async () => {
+  it("状态流转:running → failed / cancelled;终态 PATCH 必须携带原因", async () => {
     const { coordinator, execA, group } = await setupGroup();
 
     // failed
@@ -229,22 +229,53 @@ describe("任务实体(server 单一状态源)", () => {
     const t1 = (await (
       await createTask(coordinator.id, group.id, m1, execA.id)
     ).json()) as Task;
+    const missingFailureReason = await app.request(
+      `/api/groups/${group.id}/tasks/${t1.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": execA.id,
+        },
+        body: JSON.stringify({ status: "failed" }),
+      },
+    );
+    expect(missingFailureReason.status).toBe(400);
+
     const fail = await app.request(`/api/groups/${group.id}/tasks/${t1.id}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
         "X-Participant-Id": execA.id,
       },
-      body: JSON.stringify({ status: "failed" }),
+      body: JSON.stringify({
+        status: "failed",
+        diffSummary: { error: "执行器返回非零退出码" },
+      }),
     });
     expect(fail.status).toBe(200);
-    expect(((await fail.json()) as Task).status).toBe("failed");
+    expect(((await fail.json()) as Task).diffSummary).toEqual({
+      error: "执行器返回非零退出码",
+    });
 
     // cancelled + checkpointRef + diffSummary 一起写
     const m2 = "00000000-0000-7000-8000-000000000042";
     const t2 = (await (
       await createTask(coordinator.id, group.id, m2, execA.id)
     ).json()) as Task;
+    const missingCancellationReason = await app.request(
+      `/api/groups/${group.id}/tasks/${t2.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": execA.id,
+        },
+        body: JSON.stringify({ status: "cancelled" }),
+      },
+    );
+    expect(missingCancellationReason.status).toBe(400);
+
     const patch = await app.request(`/api/groups/${group.id}/tasks/${t2.id}`, {
       method: "PATCH",
       headers: {
@@ -254,7 +285,11 @@ describe("任务实体(server 单一状态源)", () => {
       body: JSON.stringify({
         status: "cancelled",
         checkpointRef: "refs/coagenthub-cp/xyz",
-        diffSummary: { hash: "abc123", diffStat: "1 file changed" },
+        diffSummary: {
+          error: "协调者主动取消",
+          hash: "abc123",
+          diffStat: "1 file changed",
+        },
       }),
     });
     expect(patch.status).toBe(200);
@@ -262,6 +297,7 @@ describe("任务实体(server 单一状态源)", () => {
     expect(updated.status).toBe("cancelled");
     expect(updated.checkpointRef).toBe("refs/coagenthub-cp/xyz");
     expect(updated.diffSummary).toEqual({
+      error: "协调者主动取消",
       hash: "abc123",
       diffStat: "1 file changed",
     });
@@ -565,7 +601,10 @@ describe("任务实体(server 单一状态源)", () => {
         execA.id,
       )
     ).json()) as Task;
-    await patchTask(execA.id, group.id, tFailed.id, { status: "failed" });
+    await patchTask(execA.id, group.id, tFailed.id, {
+      status: "failed",
+      diffSummary: { error: "执行器失败" },
+    });
     const r3 = await patchTask(coordinator.id, group.id, tFailed.id, {
       brief: "x",
     });
