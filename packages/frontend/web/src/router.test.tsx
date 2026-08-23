@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFetchMock,
@@ -110,12 +110,26 @@ describe("路由", () => {
     expect(screen.queryByTestId("context-panel")).toBeNull();
   });
 
-  it("/groups/:id/settings 渲染群组设置与成员管理页", async () => {
+  it("/groups/:id/settings 以抽屉打开设置且保留底层群页面", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1/settings");
 
-    expect(await screen.findByText("群设置")).toBeInTheDocument();
-    expect(await screen.findByText("返回消息流")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("group-settings-drawer"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("requirement-workspace"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("group-settings-drawer-content"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("返回消息流")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("close-group-settings"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("group-settings-drawer")).toBeNull(),
+    );
+    expect(screen.getByTestId("requirement-workspace")).toBeInTheDocument();
   });
 
   it("/groups/:id/members 重定向到设置页", async () => {

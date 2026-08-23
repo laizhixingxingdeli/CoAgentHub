@@ -1,6 +1,6 @@
 import { Archive, ArrowLeft, Pencil, Settings } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { useRoute } from "wouter";
+import { useLocation, useRoute } from "wouter";
 import { RequirementWorkspace } from "@/components/layout/context-panel/requirement-workspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,9 +22,12 @@ import { GroupSettingsContent } from "../members";
  * 软删)由 useGroupHeader 提供,驱动只读横幅。
  */
 export default function GroupMessagesPage() {
-  const [, params] = useRoute("/groups/:id");
-  const groupId = params?.id;
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [, messageParams] = useRoute("/groups/:id");
+  const [, settingsParams] = useRoute("/groups/:id/settings");
+  const [, navigate] = useLocation();
+  const groupId = messageParams?.id ?? settingsParams?.id;
+  const openedFromSettingsRoute = Boolean(settingsParams?.id);
+  const [settingsOpen, setSettingsOpen] = useState(openedFromSettingsRoute);
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   // Ticket 23: 进入消息页即清零该群侧栏未读徽标。常驻消息流 hook(右栏
@@ -56,7 +59,10 @@ export default function GroupMessagesPage() {
     }
     setSettingsOpen(false);
     setSettingsDirty(false);
-  }, [settingsDirty]);
+    if (openedFromSettingsRoute && groupId) {
+      navigate(`/groups/${groupId}`);
+    }
+  }, [groupId, navigate, openedFromSettingsRoute, settingsDirty]);
 
   return (
     <div className="mx-auto flex h-[calc(100dvh-4rem)] w-full max-w-[1440px] flex-col px-4 sm:px-6">

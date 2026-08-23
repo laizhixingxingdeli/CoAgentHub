@@ -181,6 +181,8 @@ export function GroupSettingsContent({
   const dirty =
     titleDraft !== savedTitle ||
     projectPathInput.trim().length > 0 ||
+    selectedParticipantId !== "" ||
+    selectedRoles.some((role) => role !== "observer") ||
     editingParticipantId !== null ||
     editingPromptParticipantId !== null ||
     newPrompt.trim().length > 0;

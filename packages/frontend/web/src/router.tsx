@@ -12,7 +12,6 @@ const ParticipantsPage = lazy(() => import("./pages/app/participants"));
 const HelpPage = lazy(() => import("./pages/app/help"));
 const FeedbackPage = lazy(() => import("./pages/app/feedback"));
 const GroupsPage = lazy(() => import("./pages/app/groups"));
-const GroupSettingsPage = lazy(() => import("./pages/app/groups/members"));
 const GroupMessagesPage = lazy(() => import("./pages/app/groups/messages"));
 
 // Suspense fallback:轻量骨架占位,复用项目已有 Skeleton,不引入新依赖。
@@ -89,7 +88,7 @@ const App = () => (
                 path="/groups/:id/settings"
                 component={({ params }: { params: { id: string } }) => (
                   <GroupLayout groupId={params.id}>
-                    <GroupSettingsPage />
+                    <GroupMessagesPage />
                   </GroupLayout>
                 )}
               />
