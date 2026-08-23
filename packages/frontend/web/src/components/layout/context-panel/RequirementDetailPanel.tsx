@@ -24,6 +24,7 @@
 
 import { type ReactNode, useState } from "react";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
+import { FoldableContent } from "./FoldableContent";
 import {
   coordinationTaskForTasks,
   executionTasksForRequirement,
@@ -373,15 +374,17 @@ function FoldableText({
         {long && !expanded ? `${text.slice(0, LAYER_FOLD_THRESHOLD)}…` : text}
       </p>
       {long && (
-        <button
-          type="button"
-          data-testid={`${testId}-toggle`}
-          aria-expanded={expanded}
-          onClick={onToggle}
-          className="mt-1 text-xs font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+        <FoldableContent
+          toggleTestId={`${testId}-toggle`}
+          detailTestId={`${testId}-detail`}
+          textForMeasurement={text}
+          expanded={expanded}
+          onToggle={onToggle}
         >
-          {expanded ? "收起" : "展开"}
-        </button>
+          <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+            {text}
+          </p>
+        </FoldableContent>
       )}
     </div>
   );

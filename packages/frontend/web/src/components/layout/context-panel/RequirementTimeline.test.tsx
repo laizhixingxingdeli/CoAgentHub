@@ -325,6 +325,43 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     ).toContain("npm test");
   });
 
+  it("上千行输出在有界滚动区内展开,滚到底部仍可直接收起", () => {
+    const longOutput = Array.from(
+      { length: 1001 },
+      (_, index) => `line-${index}`,
+    ).join("\n");
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-long-output",
+            status: "running",
+            diffSummary: { outputTail: longOutput },
+          }),
+        ]}
+      />,
+    );
+
+    const toggle = screen.getByTestId(
+      "requirement-timeline-toggle-t-long-output",
+    );
+    expect(toggle).toHaveTextContent(/展开.*1001 行/);
+    fireEvent.click(toggle);
+
+    const detail = screen.getByTestId(
+      "requirement-timeline-detail-t-long-output",
+    );
+    expect(detail).toHaveClass("max-h-[60vh]", "overflow-y-auto");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveTextContent("收起");
+
+    // The toggle is outside the independently scrolling detail region.
+    fireEvent.click(toggle);
+    expect(
+      screen.queryByTestId("requirement-timeline-detail-t-long-output"),
+    ).not.toBeInTheDocument();
+  });
+
   it("长 todo 只在展开区出现,不在折叠状态铺开", () => {
     const longTodo = `${"遗".repeat(85)}尾`;
     render(

@@ -39,6 +39,7 @@ import {
   type MessageItem,
   RoleBadge,
 } from "@/pages/app/groups/messages/types";
+import { FoldableContent } from "./FoldableContent";
 import {
   mergeRequirementTimeline,
   type TimelineEvent,
@@ -268,25 +269,17 @@ export default function RequirementTimeline({
             </span>
           )}
           {!softDeleted && longBody && (
-            <button
-              type="button"
-              data-testid={`requirement-timeline-toggle-${message.id}`}
-              aria-expanded={expanded}
-              onClick={() => toggle(message.id)}
-              className="mt-1.5 text-xs font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
-            >
-              {expanded ? "收起" : "展开"}
-            </button>
-          )}
-          {!softDeleted && longBody && expanded && (
-            <div
-              data-testid={`requirement-timeline-detail-${message.id}`}
-              className="mt-1.5 border-t pt-1.5"
+            <FoldableContent
+              toggleTestId={`requirement-timeline-toggle-${message.id}`}
+              detailTestId={`requirement-timeline-detail-${message.id}`}
+              textForMeasurement={message.body}
+              expanded={expanded}
+              onToggle={() => toggle(message.id)}
             >
               <p className="whitespace-pre-wrap break-words text-sm">
                 {message.body}
               </p>
-            </div>
+            </FoldableContent>
           )}
         </div>
       </li>
@@ -332,6 +325,9 @@ export default function RequirementTimeline({
     const todoLong = todo !== null && todo.length > FOLD_THRESHOLD;
     const foldable =
       summaryLong || testsLong || todoLong || outputText.length > 0;
+    const foldableText = [summary, tests, todo, outputText]
+      .filter((value): value is string => value !== null && value.length > 0)
+      .join("\n");
     const expanded = expandedIds.has(task.id);
     // 失败任务:失败条(醒目但不喧宾夺主,颜色走 --status-* token);结果未确认
     // (failed + diffSummary.unconfirmed)用琥珀色,与任务面板的语义一致。
@@ -463,20 +459,12 @@ export default function RequirementTimeline({
             </p>
           )}
           {foldable && (
-            <button
-              type="button"
-              data-testid={`requirement-timeline-toggle-${task.id}`}
-              aria-expanded={expanded}
-              onClick={() => toggle(task.id)}
-              className="mt-1.5 text-xs font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
-            >
-              {expanded ? "收起" : "展开"}
-            </button>
-          )}
-          {foldable && expanded && (
-            <div
-              data-testid={`requirement-timeline-detail-${task.id}`}
-              className="mt-1.5 space-y-1.5 border-t pt-1.5"
+            <FoldableContent
+              toggleTestId={`requirement-timeline-toggle-${task.id}`}
+              detailTestId={`requirement-timeline-detail-${task.id}`}
+              textForMeasurement={foldableText}
+              expanded={expanded}
+              onToggle={() => toggle(task.id)}
             >
               {summaryLong && summary && (
                 <p className="whitespace-pre-wrap break-words text-sm text-foreground/75">
@@ -494,7 +482,7 @@ export default function RequirementTimeline({
                 </p>
               )}
               {outputText && <LiveOutput text={outputText} />}
-            </div>
+            </FoldableContent>
           )}
           {(canStop || canRollback) && (
             <div
