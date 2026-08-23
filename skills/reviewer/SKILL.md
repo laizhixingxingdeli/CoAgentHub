@@ -198,7 +198,23 @@ Read the spec + read the implementation diff, then check **architecture quality*
 ### 10. Report the Verdict — 回发结论
 
 你不是被下发的执行器，**没有"完成回调"可回**。把 `review_result` 作为**群消息**公布
-（见「结构化载荷」节）：`verdict: "pass" | "findings"` + `findings[]`。协调者从群消息流里读它。
+（见「结构化载荷」节）：`verdict: "pass" | "findings"` + `findings[]`。
+
+⚠️ **但群消息唤不醒协调者**（v4.0 §3.14.7）。它 `memory: null`、每票 spawn、跑完即退——
+它 PATCH 终态那一刻进程就结束了，等你公布 `review_result` 时**没有任何协调者进程存在**。
+旧版「协调者从群消息流里读它」是**结构上不可执行**的。所以：
+
+| verdict | 你要做的 |
+|---|---|
+| `pass` | 公布 `review_result` 留痕，**结束**。不需要唤醒任何人。 |
+| `findings` | ① 公布 `review_result`（留痕 + 前端展示，不变）；② **另下发一张 `dispatchKind: fix` 的修正任务给协调者**，任务书引用发现项，`specRef` 与被检视票相同。**②是唯一能唤醒它的通道。** |
+
+发现项驱动的修正票**天然是 `fix`**：复用同一份冻结 spec，不引入新架构面。若某条发现项
+大到需要改 spec → 走第 11 步 `spec_amended`，并**升级为 `requirement`**（闸二）。
+
+**采纳与否由你决定，协调者不再「裁决」发现项**——发现项是你出的，而 L3 检的正是协调者
+那一环，让它否决针对自己的架构发现与本层存在的目的相反。它若不认同，会在群里说明并
+写进 PATCH 结论；**那是对话，不是否决**。
 
 处理完该完成事件后 MUST **ack**（先写 dedupe 再 ack，见 C3）；
 若检视中途失败，MUST 调 fail 退回而不是静默 ack（C2）。
