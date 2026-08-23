@@ -169,6 +169,13 @@
       "when": 1787460434380,
       "tag": "0023_rename_executor_participants",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1787460434381,
+      "tag": "0024_add_task_dispatch_kind",
+      "breakpoints": true
     }
   ]
 }

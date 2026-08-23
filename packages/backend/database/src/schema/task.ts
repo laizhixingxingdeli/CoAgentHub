@@ -123,6 +123,7 @@ export const task = pgTable(
     // 任务书模板据此插入「关联规范」段,执行器严格按 Spec 实现。
     specRef: text("spec_ref"),
     specHash: text("spec_hash"),
+    dispatchKind: text("dispatch_kind").$type<"requirement" | "fix">(),
     // 任务下发者信息(Part A):记录下发该任务的消息发送者 participant 与会话 id,
     // 任务完成/失败事件据此定向通知下发者所在会话(插件 TaskWatcher 用)。
     // 可空:老任务 / 桥直发任务无此信息;dispatcher_participant_id 仅由服务端

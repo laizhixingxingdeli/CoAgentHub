@@ -57,6 +57,7 @@ describe("任务实体(server 单一状态源)", () => {
     executorParticipantId: string;
     status: "queued" | "running" | "done" | "failed" | "cancelled";
     checkpointRef: string | null;
+    dispatchKind: "requirement" | "fix" | null;
     brief: string | null;
     diffSummary: unknown;
     createdAt: string;
@@ -85,6 +86,7 @@ describe("任务实体(server 单一状态源)", () => {
     messageId: string,
     executorParticipantId: string,
     checkpointRef?: string,
+    dispatchKind?: "requirement" | "fix",
   ) {
     return app.request(`/api/groups/${groupId}/tasks`, {
       method: "POST",
@@ -96,6 +98,7 @@ describe("任务实体(server 单一状态源)", () => {
         messageId,
         executorParticipantId,
         ...(checkpointRef !== undefined ? { checkpointRef } : {}),
+        ...(dispatchKind !== undefined ? { dispatchKind } : {}),
       }),
     });
   }
@@ -141,6 +144,98 @@ describe("任务实体(server 单一状态源)", () => {
     const t2 = (await res2.json()) as Task;
     expect(t2.id).toBe(t1.id);
     expect(t2.messageId).toBe(messageId);
+  });
+
+  it("POST 接受 requirement 与 fix 并落库", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+
+    const requirement = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000002",
+      execA.id,
+      undefined,
+      "requirement",
+    );
+    expect(requirement.status).toBe(200);
+    expect(((await requirement.json()) as Task).dispatchKind).toBe(
+      "requirement",
+    );
+
+    const fix = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000003",
+      execA.id,
+      undefined,
+      "fix",
+    );
+    expect(fix.status).toBe(200);
+    expect(((await fix.json()) as Task).dispatchKind).toBe("fix");
+  });
+
+  it("列表与详情透出 dispatchKind", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000004",
+      execA.id,
+      undefined,
+      "requirement",
+    );
+    const task = (await created.json()) as Task;
+
+    const list = await app.request(`/api/groups/${group.id}/tasks`);
+    expect(list.status).toBe(200);
+    expect(
+      ((await list.json()) as Task[]).find((entry) => entry.id === task.id)
+        ?.dispatchKind,
+    ).toBe("requirement");
+
+    const detail = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+    );
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as Task).dispatchKind).toBe("requirement");
+  });
+
+  it("dispatchKind 非法值返回 400 且不落库", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const messageId = "00000000-0000-7000-8000-000000000005";
+    const response = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: execA.id,
+        dispatchKind: "bug",
+      }),
+    });
+    expect(response.status).toBe(400);
+
+    const list = await app.request(`/api/groups/${group.id}/tasks`);
+    expect(list.status).toBe(200);
+    expect(
+      ((await list.json()) as Task[]).some(
+        (entry) => entry.messageId === messageId,
+      ),
+    ).toBe(false);
+  });
+
+  it("不传 dispatchKind 时保持 null", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const response = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000006",
+      execA.id,
+    );
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as Task).dispatchKind).toBeNull();
   });
 
   it("不同 message_id 各自建独立任务;列表按创建时间倒序", async () => {
