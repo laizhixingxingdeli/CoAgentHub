@@ -387,12 +387,13 @@ export async function maybeDispatchExecutorTask(
     return;
   }
 
-  // 角色解绑后:查目标成员在本群的分工(roles + prompt);prompt 非空才拼进任务书。
+  // 角色解绑后:查目标成员在本群的分工。角色必须无条件传入任务书模板;
+  // prompt 仅是可选的展示信息,不能决定任务书采用哪份 skill。
   const membership = await db.query.groupMember.findFirst({
     where: (t, { and: andFn, eq: eqFn }) =>
       andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, participant.id)),
   });
-  const groupPrompt: GroupPromptInfo | null = membership?.prompt
+  const groupPrompt: GroupPromptInfo | null = membership
     ? { roles: membership.roles, prompt: membership.prompt }
     : null;
 
@@ -2022,6 +2023,57 @@ function buildExecutionContextSection(run: QueuedRun): string[] {
   return lines;
 }
 
+type TicketRole = "coordinator" | "executor" | "fallback";
+
+function ticketRole(groupPrompt: GroupPromptInfo | null): TicketRole {
+  const roles = groupPrompt?.roles ?? [];
+  if (roles.includes("coordinator")) return "coordinator";
+  if (roles.includes("executor")) return "executor";
+  return "fallback";
+}
+
+function buildExecutionModeSection(role: TicketRole): string[] {
+  if (role === "coordinator") {
+    return [
+      "## 执行方式",
+      "本任务按 `coagenthub-coordinator` skill 执行。",
+      "- 已安装：直接按 skill 流程执行（获取冻结 spec→下发任务→L2 功能检视→按编制交回 L3→结案）。",
+      "- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。",
+    ];
+  }
+
+  const section = [
+    "## 执行方式",
+    "本任务按 `coagenthub-executor` skill 执行。",
+    "- 已安装：直接按 skill 流程执行（读规范→写代码→测试→Code Review 自检→汇报）。",
+    "- 未安装：先 GET /api/skills/executor 获取 skill 内容，安装到 skills 目录后执行。",
+  ];
+  if (role === "fallback") {
+    section.push(
+      "⚠️ 本群分工角色不含 coordinator 或 executor，按 executor skill 兜底执行；请确认角色是否匹配。",
+    );
+  }
+  return section;
+}
+
+function buildReportSection(role: TicketRole): string[] {
+  if (role === "coordinator") {
+    return [
+      "## 汇报格式要求(stdout 请按此输出)",
+      "PATCH 自身这条 detached 任务为终态。",
+      "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（参见 spec §3.10 / coordinator skill §4.2）。",
+    ];
+  }
+  return [
+    "## 汇报格式要求(stdout 请按此输出)",
+    "提交: <commit hash>",
+    "测试: <测试结果摘要>",
+    "Token: <本执行消耗的 token 数量>",
+    "汇报: <做了什么,3-5 句>",
+    '遗留: <未完成事项,无则写"无">',
+  ];
+}
+
 function buildTicket(
   body: string,
   label: string,
@@ -2043,25 +2095,18 @@ function buildTicket(
   if (specRef) {
     lines.push(...buildSpecSection(specRef, specHash));
   }
+  const role = ticketRole(groupPrompt);
   lines.push(
     `## 任务内容`,
     body,
-    `## 执行方式`,
-    `本任务按 \`coagenthub-executor\` skill 执行。`,
-    `- 已安装：直接按 skill 流程执行（读规范→写代码→测试→Code Review 自检→汇报）。`,
-    `- 未安装：先 GET /api/skills/executor 获取 skill 内容，安装到 skills 目录后执行。`,
-    `## 汇报格式要求(stdout 请按此输出)`,
-    `提交: <commit hash>`,
-    `测试: <测试结果摘要>`,
-    `Token: <本执行消耗的 token 数量>`,
-    `汇报: <做了什么,3-5 句>`,
-    `遗留: <未完成事项,无则写"无">`,
+    ...buildExecutionModeSection(role),
+    ...buildReportSection(role),
   );
   const context = buildExecutionContextSection(run);
   lines.splice(4, 0, ...context);
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
   // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
-  if (groupPrompt && groupPrompt.prompt.trim().length > 0) {
+  if (groupPrompt?.prompt?.trim()) {
     lines.push(
       `本群分工:角色=[${groupPrompt.roles.join(",")}];提示词=${groupPrompt.prompt}`,
     );

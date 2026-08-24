@@ -502,6 +502,90 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }
   });
 
+  it("目标角色为 coordinator 且无 prompt → 任务书按协调者流程并包含回写契约", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
+
+    const capture = path.join(fakeDir, "ticket-coordinator.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "协调任务模板测试",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const deadline = Date.now() + 10_000;
+      let task: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
+      while (Date.now() <= deadline) {
+        task = (await listTasks(coordinator.id, group.id)).find(
+          (candidate) => candidate.messageId === msg.id,
+        );
+        if (task?.status === "running" && existsSync(capture)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(task?.status).toBe("running");
+      if (!task) throw new Error("协调者任务未创建");
+      const ticket = readFileSync(capture, "utf8");
+      expect(ticket).toContain("coagenthub-coordinator");
+      expect(ticket).toContain("GET /api/skills/coordinator");
+      expect(ticket).not.toContain("coagenthub-executor");
+      expect(ticket).toContain("PATCH 自身这条 detached 任务为终态");
+      expect(ticket).toContain(
+        "`diffSummary` 必须带 `review_request` 结构化载荷",
+      );
+
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({
+            status: "done",
+            diffSummary: {
+              type: "review_request",
+              layer: 3,
+              taskId: task.id,
+              specRef: "specs/test.md",
+              specHash: "test-hash",
+              diffSummary: "模板测试",
+            },
+          }),
+        },
+      );
+      expect(patchRes.status).toBe(200);
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  }, 30_000);
+
+  it("目标角色既不含 coordinator 也不含 executor → executor 兜底并提示角色不匹配", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    await addMember(coordinator.id, group.id, codebuddy.id, ["observer"]);
+
+    const capture = path.join(fakeDir, "ticket-role-fallback.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "角色兜底模板测试",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const task = await waitForTask(coordinator.id, group.id, msg.id);
+      expect(task.status).toBe("done");
+      const ticket = readFileSync(capture, "utf8");
+      expect(ticket).toContain("coagenthub-executor");
+      expect(ticket).toContain("角色不含 coordinator 或 executor");
+      expect(ticket.indexOf("角色不含 coordinator 或 executor")).toBeLessThan(
+        ticket.indexOf("## 汇报格式要求"),
+      );
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  }, 30_000);
+
   it("发送者有 running 任务时自动建立 parentTaskId", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const parentMessageId = "00000000-0000-7000-8000-000000000901";

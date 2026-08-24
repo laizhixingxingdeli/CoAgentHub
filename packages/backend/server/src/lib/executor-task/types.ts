@@ -46,10 +46,10 @@ export interface DispatchExecutorInput {
   } | null;
 }
 
-/** 群内分工信息(角色解绑后):成员在本群的角色集 + 分工提示词,拼进任务书。 */
+/** 群内分工信息(角色解绑后):成员在本群的角色集 + 可选分工提示词。 */
 export interface GroupPromptInfo {
   roles: string[];
-  prompt: string;
+  prompt: string | null;
 }
 
 /** 队列条目:一次待执行/执行中的运行。 */
