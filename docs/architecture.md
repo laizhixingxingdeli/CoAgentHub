@@ -80,8 +80,10 @@ CoAgentHub/
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
 | `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
-| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`supersedes_task_id`(可空自引用,迁移 0025,被替代的先前尝试)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
+| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`dispatch_kind`(可空,`requirement`\|`fix`,迁移 0024,检视者的逐票工作类型分流结果)、`supersedes_task_id`(可空自引用,迁移 0025,被替代的先前尝试)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
 | `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`(UNIQUE → 同一 task 最多一个终态 event)、`group_id`、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建(task_id 唯一约束保证幂等) |
+
+`dispatch_kind` 不是模式字段:模式(编制)仍由群成员构成实时推导、不落平台字段;它记录的是检视者对每一票作出的工作类型分流结果,与编制正交。`supersedes_task_id` 是可选的自引用,新任务填写它即可指向被替代的先前尝试,以保留执行器切换的完整现场。
 
 ## 4. API 全貌
 
@@ -102,12 +104,12 @@ CoAgentHub/
 | `/api/groups/:id/members/:participantId` | DELETE/PATCH | 移除成员(群主不可移除)/更新角色(同单角色校验,`roles.length > 1` → 400) |
 | `/api/groups/:id/archive`、`/unarchive` | POST | 归档/恢复(active ↔ archived) |
 | `/api/groups/:id` | DELETE | 软删除(active\|archived → deleted;行保留,列表隐藏) |
-| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS。**human 角色成员 403**(群是 agent 协作空间) |
-| `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标 |
+| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`、`dispatchKind?`、`supersedesTaskId?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS。**human 角色成员 403**(群是 agent 协作空间) |
+| `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标;`?limit=<n>` 限制返回条数(上限 200) |
 | `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整);human 角色成员 403(同写接口只读约束) |
-| `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`) |
+| `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`;接受 `dispatchKind?` 与 `supersedesTaskId?`) |
 | `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
-| `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空) |
+| `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空);目标为协调任务时才派生 `l1`(`childCount`/`supersededCount`/`status`/`allTerminal`) 与 `l3`(`answered`/`verdict`/`awaitingSince`/`overdue`),非协调任务不含这两个字段 |
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
 | `/api/participants/:id/task-completion-events` | GET | 列出 participant 的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
 | `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
@@ -131,7 +133,7 @@ CoAgentHub/
 
 - **统一错误出口**(`server/src/index.ts` 的 `onError`):BizError → 业务码 + status;其余 → 500。一律经 winston logger 记录(含 `requestId`),响应体附 `requestId`(与 `hono/request-id` 中间件同源),便于客户端定位问题。
 - **CORS 可配**:`CORS_ORIGIN` env(逗号分隔多个来源),缺省 `http://localhost:3000`(见 `lib/config.ts`)。
-- **统一配置读取**收敛在 `lib/config.ts`(CORS / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);调度策略与执行器配置仍在各自领域模块读取。
+- **统一配置读取**收敛在 `lib/config.ts`(CORS / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);调度策略与执行器配置仍在各自领域模块读取。`scripts/dispatch-policy.json` 的 `maxConcurrentPerWorkspace` 缺省为 1(同一工作树串行),`l3ResponseMinutes` 缺省为 120(L3 应答超时,仅用于派生 `l3.overdue` 观测)。
 - **文件流式读写**:`/api/file/upload` 从 File 流式写盘(不再构造整块 Buffer 二次拷贝),`GET /api/file/:name` 流式下载(createReadStream),`serve.mjs` 静态文件同样流式返回且路径穿越校验使用 `path.sep` 组件边界。
 - **DB 索引**:迁移 0015 为 `group_message.group_id` 与 `task.group_id` 补索引(列表查询按群过滤 + 排序分页,此前无索引会全表扫描);`group_message_closure` 的 group_id/ancestor_id/descendant_id 索引与 `group_members` 联合主键已在库中。
 
