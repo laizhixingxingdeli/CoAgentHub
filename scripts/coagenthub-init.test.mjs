@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,9 +6,13 @@ import {
   hasCoAgentHubSection,
   initializeCoAgentHubProject,
   isCoAgentHubProject,
+  RUNTIME_SKILL_LAYOUTS,
+  resolveSkillInstallPath,
   updateCoAgentHubGroupId,
   writeCoAgentHubGroupId,
 } from "./coagenthub-init.mjs";
+import { planSync } from "./coagenthub-sync-skills.mjs";
+import { RUNTIME_SKILL_LAYOUTS as SOURCE_RUNTIME_SKILL_LAYOUTS } from "./runtime-skills-dirs.mjs";
 
 function tempProject() {
   return mkdtempSync(join(tmpdir(), "coagenthub-init-"));
@@ -96,3 +100,57 @@ describe("CoAgentHub project onboarding", () => {
     );
   });
 });
+
+describe("skill-sync runtime mapping reuse (spec: 复用同一份目录约定)", () => {
+  it("installer imports the shared runtime layout table, not its own copy", () => {
+    // The installer re-exports the single source of truth rather than defining
+    // its own copy (skill-sync-mechanism acceptance: 未各写一份).
+    expect(RUNTIME_SKILL_LAYOUTS).toBe(SOURCE_RUNTIME_SKILL_LAYOUTS);
+    expect(RUNTIME_SKILL_LAYOUTS).toEqual([
+      { runtime: "Claude Code", subdir: ".claude/skills" },
+      { runtime: "codex", subdir: ".codex/skills" },
+      { runtime: "atomcode", subdir: ".atomcode/skills" },
+      { runtime: "codebuddy", subdir: ".codebuddy/skills" },
+    ]);
+  });
+
+  it("installer resolves the same skill-install path the sync command computes", () => {
+    const homeRoot = mkdtempSync(join(tmpdir(), "coagenthub-reuse-"));
+    // Create each runtime's skills root so planSync yields install paths.
+    for (const { subdir } of RUNTIME_SKILL_LAYOUTS)
+      mkdirSync(join(homeRoot, subdir), { recursive: true });
+
+    const verdicts = planSync(homeRoot, ["executor"], {});
+    const syncPaths = new Map();
+    for (const v of verdicts)
+      if (v.runtime && v.status === "missing") syncPaths.set(v.runtime, v.path);
+
+    for (const { runtime } of RUNTIME_SKILL_LAYOUTS) {
+      const installerPath = resolveSkillInstallPath(
+        homeRoot,
+        runtime,
+        "executor",
+      );
+      expect(installerPath).toBe(syncPaths.get(runtime));
+      expect(installerPath).toBe(
+        join(
+          homeRoot,
+          runtimeSubdir(runtime),
+          "coagenthub-executor",
+          "SKILL.md",
+        ),
+      );
+    }
+  });
+
+  it("returns null for an unknown runtime instead of guessing a path", () => {
+    const homeRoot = mkdtempSync(join(tmpdir(), "coagenthub-unknown-"));
+    expect(resolveSkillInstallPath(homeRoot, "nonsense", "executor")).toBe(
+      null,
+    );
+  });
+});
+
+function runtimeSubdir(runtime) {
+  return RUNTIME_SKILL_LAYOUTS.find((l) => l.runtime === runtime)?.subdir;
+}

@@ -4,6 +4,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Single source of truth for the runtime -> skills-directory mapping, shared
+// with the skill-sync command (spec skill-sync-mechanism R3) and the
+// project-onboarding-interactive R6 installer. We import it here rather than
+// duplicating the table so the installer and the sync command cannot drift
+// apart (spec: 复用同一份目录约定, 不要各写一份).
+import {
+  coagenthubRoleDir,
+  RUNTIME_SKILL_LAYOUTS,
+  resolveRuntimeSkillRoot,
+  roleSkillPath,
+} from "./runtime-skills-dirs.mjs";
+
+export {
+  coagenthubRoleDir,
+  RUNTIME_SKILL_LAYOUTS,
+  resolveRuntimeSkillRoot,
+  roleSkillPath,
+};
+
 export const COAGENTHUB_SECTION = `## CoAgentHub
 
 \`\`\`json coagenthub
@@ -225,6 +244,22 @@ export function initializeCoAgentHubProject(projectPath = ".") {
   }
 
   return { projectPath: absolutePath, created, skipped };
+}
+
+/**
+ * Resolve the absolute install path of a member's skill file under a home
+ * root, given the member's runtime and role. This is the R6 (skill install)
+ * directory resolution: it reuses the shared runtime-directory mapping so the
+ * installer and the sync command resolve exactly the same paths.
+ *
+ * Returns null for an unknown runtime so callers can list the member as a
+ * manual-install item rather than guessing a path (project-onboarding-interactive
+ * R6: 不猜、不创建).
+ */
+export function resolveSkillInstallPath(homeRoot, runtime, role) {
+  const root = resolveRuntimeSkillRoot(homeRoot, runtime);
+  if (root === null) return null;
+  return roleSkillPath(root, role);
 }
 
 function usage() {
