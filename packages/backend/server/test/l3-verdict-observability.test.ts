@@ -1,0 +1,544 @@
+import { randomUUID } from "node:crypto";
+import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import { __setL3ResponseMinutesForTests } from "@server/lib/executor-task";
+import { eq } from "drizzle-orm";
+import { v4 as uuidv4 } from "uuid";
+import { afterEach, describe, expect, it } from "vitest";
+import { createTestApp } from "./app";
+import { testDb } from "./db";
+
+/**
+ * L3 裁决的可观测与校验(R1-R6,specs/l3-verdict-observability.md):
+ *
+ * - R1/R2 在 routes/group/messages.ts:载荷校验不再依赖调用方声明 contentType,
+ *   按消息体形状探测四类已知协作载荷;review_result 的 taskId 必须指向本群
+ *   真实任务。
+ * - R3 在 routes/group/tasks.ts 详情 GET:协调任务 done + 带 review_request 时
+ *   派生 l3 字段(answered/verdict/awaitingSince/overdue)。
+ * - R4 阈值经 scripts/dispatch-policy.json 配置,缺省 120 分钟。
+ */
+
+describe("L3 裁决的可观测与校验 (R1-R6)", () => {
+  const app = createTestApp();
+
+  afterEach(() => {
+    __setL3ResponseMinutesForTests(120);
+  });
+
+  async function register(name: string) {
+    const res = await app.request("/api/participants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (res.status === 409) {
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
+      const existing = list.find((p) => p.name === name);
+      if (existing) return { id: existing.id };
+    }
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  async function createGroup(coordinatorId: string, title: string) {
+    const res = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinatorId,
+      },
+      body: JSON.stringify({ title }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  async function addMember(
+    actorId: string,
+    groupId: string,
+    participantId: string,
+    roles: string[],
+  ) {
+    const res = await app.request(`/api/groups/${groupId}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": actorId,
+      },
+      body: JSON.stringify({ participantId, roles }),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  /** 发群消息;messageBody 为消息文本(载荷 JSON 时即 payload 字符串)。 */
+  async function postMessageRaw(
+    actorId: string,
+    groupId: string,
+    messageBody: string,
+    contentType?: string,
+  ) {
+    return app.request(`/api/groups/${groupId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": actorId,
+      },
+      body: JSON.stringify(
+        contentType === undefined
+          ? { body: messageBody }
+          : { body: messageBody, contentType },
+      ),
+    });
+  }
+
+  async function createTask(
+    coordinatorId: string,
+    groupId: string,
+    messageId: string,
+    executorParticipantId: string,
+    dispatchKind?: "requirement" | "fix",
+  ) {
+    const res = await app.request(`/api/groups/${groupId}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinatorId,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId,
+        ...(dispatchKind !== undefined ? { dispatchKind } : {}),
+      }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      id: string;
+      status: string;
+      dispatchKind: "requirement" | "fix" | null;
+    };
+  }
+
+  async function patchTask(
+    participantId: string,
+    groupId: string,
+    taskId: string,
+    body: Record<string, unknown>,
+  ) {
+    return app.request(`/api/groups/${groupId}/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function getTaskDetail(groupId: string, taskId: string) {
+    const res = await app.request(`/api/groups/${groupId}/tasks/${taskId}`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  /** 直接插一条指向 parentTaskId 的执行子任务,使 R1 放行。 */
+  async function addChild(
+    groupId: string,
+    parentTaskId: string,
+    executorParticipantId: string,
+  ) {
+    await testDb.insert(taskTable).values({
+      groupId,
+      parentTaskId,
+      messageId: uuidv4(),
+      executorParticipantId,
+      status: "queued",
+    });
+  }
+
+  function reviewRequest(taskId: string) {
+    return {
+      review_request: {
+        type: "review_request",
+        layer: 3,
+        taskId,
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+        diffSummary: "测试交接载荷",
+      },
+    };
+  }
+
+  function reviewResult(taskId: string, verdict: "pass" | "findings") {
+    return {
+      type: "review_result",
+      layer: 3,
+      taskId,
+      verdict,
+      findings: [],
+    };
+  }
+
+  /** 搭建一个可落 done 的协调任务(三方在场 + 子任务 + review_request)。 */
+  async function setupDoneCoordinationTask() {
+    const coordinator = await register(`l3-coord-${randomUUID()}`);
+    const reviewer = await register(`l3-reviewer-${randomUUID()}`);
+    const execA = await register(`l3-exec-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-${randomUUID()}`);
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
+    expect(msg.status).toBe(200);
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+      "requirement",
+    );
+    await addChild(group.id, task.id, execA.id);
+    const patched = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: reviewRequest(task.id),
+    });
+    expect(patched.status).toBe(200);
+    return { coordinator, reviewer, execA, group, task };
+  }
+
+  /* ---------------- R1:载荷校验不再依赖 contentType ---------------- */
+
+  it("R1:不设 contentType 发送形状错误的 review_result → 400(本票核心,此前静默放行)", async () => {
+    const coordinator = await register(`l3-r1-bad-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r1-bad-${randomUUID()}`);
+    // verdict 非法 → 形状不合;不传 contentType 字段,仅凭 body 形状触发校验。
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({ type: "review_result", layer: 3, verdict: "bogus" }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain("协作载荷形状无效");
+  });
+
+  it("R1:不设 contentType 发送形状正确的四种载荷 → 放行", async () => {
+    const coordinator = await register(`l3-r1-ok-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r1-ok-${randomUUID()}`);
+    // review_result 的 R2 需要本群存在任务,先建一条普通执行任务供其引用。
+    const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    const payloads = [
+      {
+        type: "spec_published",
+        specRef: "specs/x.md",
+        specHash: "abc123",
+        summary: "s",
+      },
+      {
+        type: "spec_amended",
+        specRef: "specs/x.md",
+        specHash: "abc123",
+        reason: "r",
+      },
+      {
+        type: "review_request",
+        layer: 3,
+        taskId: "any-task-id",
+        specRef: "specs/x.md",
+        specHash: "abc123",
+        diffSummary: "d",
+      },
+      reviewResult(task.id, "pass"),
+    ];
+    for (const payload of payloads) {
+      const res = await postMessageRaw(
+        coordinator.id,
+        group.id,
+        JSON.stringify(payload),
+      );
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("R1:普通自由文本 / 任务书 markdown / 伪 JSON 文本 → 行为完全不变(回归)", async () => {
+    const coordinator = await register(`l3-r1-free-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r1-free-${randomUUID()}`);
+    for (const body of [
+      "普通自由文本消息",
+      "# 任务书\n\n实现登录页,验收标准:……",
+      "{ 这不是合法 JSON,但以花括号开头",
+      "[1, 2, 3]",
+    ]) {
+      const res = await postMessageRaw(coordinator.id, group.id, body);
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("R1:type 为未知值的 JSON 消息 → 放行,不校验", async () => {
+    const coordinator = await register(`l3-r1-unknown-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r1-unknown-${randomUUID()}`,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({ type: "some_other_convention", anything: true }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("R1:保留 contentType=application/json 时的既有校验路径(仍校验)", async () => {
+    const coordinator = await register(`l3-r1-ct-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r1-ct-${randomUUID()}`);
+    const bad = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({ type: "review_result", layer: 3, verdict: "bogus" }),
+      "application/json",
+    );
+    expect(bad.status).toBe(400);
+    const ok = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({ type: "spec_published", specRef: "s", specHash: "h", summary: "x" }),
+      "application/json",
+    );
+    expect(ok.status).toBe(200);
+  });
+
+  /* ---------------- R2:review_result 的 taskId 必须在本群 ---------------- */
+
+  it("R2:review_result 的 taskId 不在本群 → 400,信息点明原因", async () => {
+    const coordinator = await register(`l3-r2-missing-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r2-missing-${randomUUID()}`,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify(reviewResult(uuidv4(), "pass")),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain(
+      "review_result 引用的 taskId 在本群不存在",
+    );
+  });
+
+  it("R2:taskId 非 UUID 字符串 → 400(不触发 DB uuid 比较 500)", async () => {
+    const coordinator = await register(`l3-r2-notuuid-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r2-notuuid-${randomUUID()}`,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify(reviewResult("not-a-uuid", "pass")),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("R2:taskId 存在但该任务无 review_request → 放行(R2 的例外)", async () => {
+    const coordinator = await register(`l3-r2-norr-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r2-norr-${randomUUID()}`);
+    const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    // 该任务无 review_request(普通执行任务),检视者主动出具意见应放行。
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "findings")),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  /* ---------------- R3:任务详情派生 l3 字段 ---------------- */
+
+  it("R3:协调任务 done + 带 review_request + 无 review_result → l3.answered=false", async () => {
+    const { group, task } = await setupDoneCoordinationTask();
+    const detail = await getTaskDetail(group.id, task.id);
+    expect(detail.l3).toEqual({
+      answered: false,
+      verdict: null,
+      awaitingSince: expect.any(String),
+      overdue: false,
+    });
+  });
+
+  it("R3:超过 l3ResponseMinutes 仍未应答 → l3.overdue=true", async () => {
+    const { group, task } = await setupDoneCoordinationTask();
+    // 把落 done 时刻(coordinatorActivity.endedAt / updatedAt)回拨到 2 分钟前,
+    // 阈值压到 1 分钟 → now - awaitingSince > 阈值 且未应答。dispatchAudit 为
+    // 完整 DispatchTargetAudit 形状(测试只关心 coordinationActivity)。
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000);
+    await testDb
+      .update(taskTable)
+      .set({
+        updatedAt: twoMinutesAgo,
+        dispatchAudit: {
+          dispatcherParticipantId: "00000000-0000-4000-8000-000000000000",
+          targetParticipantId: "00000000-0000-4000-8000-000000000000",
+          targetParticipantName: "test",
+          selfDispatch: true,
+          candidates: [],
+          selectionReason: null,
+          coordinationActivity: {
+            startedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+            endedAt: twoMinutesAgo.toISOString(),
+            childTaskCount: 1,
+            childTaskTargets: [],
+            messageCount: 0,
+          },
+        },
+      })
+      .where(eq(taskTable.id, task.id));
+    __setL3ResponseMinutesForTests(1);
+    const detail = await getTaskDetail(group.id, task.id);
+    const l3 = detail.l3 as {
+      answered: boolean;
+      verdict: string | null;
+      overdue: boolean;
+    };
+    expect(l3.answered).toBe(false);
+    expect(l3.overdue).toBe(true);
+  });
+
+  it("R3:已有 review_result → l3.answered=true 且 verdict 正确", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "pass")),
+    );
+    expect(res.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    const l3 = detail.l3 as { answered: boolean; verdict: string };
+    expect(l3.answered).toBe(true);
+    expect(l3.verdict).toBe("pass");
+  });
+
+  it("R3:verdict=findings 的 review_result 也能被识别", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "findings")),
+    );
+    expect(res.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    expect((detail.l3 as { verdict: string }).verdict).toBe("findings");
+  });
+
+  it("R3:不满足触发条件的任务详情不含 l3 字段(普通任务 done)", async () => {
+    const coordinator = await register(`l3-r3-plain-${randomUUID()}`);
+    // 执行人必须是普通 executor(非 coordinator),否则 isDetachedTask 判定为
+    // 协调任务,触发 L1 完整性校验。
+    const executor = await register(`l3-r3-plain-exec-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r3-plain-${randomUUID()}`);
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      executor.id,
+    );
+    const patched = await patchTask(executor.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(patched.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    expect(detail).not.toHaveProperty("l3");
+    // 其余载荷保持既有字段(逐字不变的回归锚点)。
+    expect(detail.status).toBe("done");
+    expect(detail.id).toBe(task.id);
+    expect(detail.groupId).toBe(group.id);
+  });
+
+  it("R3:不满足触发条件的任务详情不含 l3 字段(协调任务未落 done)", async () => {
+    const coordinator = await register(`l3-r3-queued-${randomUUID()}`);
+    const reviewer = await register(`l3-r3-queued-rv-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r3-queued-${randomUUID()}`);
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+      "requirement",
+    );
+    const detail = await getTaskDetail(group.id, task.id);
+    expect(detail.status).toBe("queued");
+    expect(detail).not.toHaveProperty("l3");
+  });
+
+  it("R3:协调任务 done 但无 review_request → 不含 l3 字段", async () => {
+    const coordinator = await register(`l3-r3-norr-${randomUUID()}`);
+    const execA = await register(`l3-r3-norr-exec-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `l3-r3-norr-${randomUUID()}`);
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    await addChild(group.id, task.id, execA.id);
+    // 两方在场(无 reviewer)→ shouldWalkL3=false,不带 review_request 也可 done。
+    const patched = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { noExecutionReason: "无需执行器" },
+    });
+    expect(patched.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    expect(detail.status).toBe("done");
+    expect(detail).not.toHaveProperty("l3");
+  });
+
+  it("R3:协调任务 done + 带 review_request,review_result 指向别的任务 → 不算 answered", async () => {
+    const { reviewer, coordinator, group, task } =
+      await setupDoneCoordinationTask();
+    // 另一条普通任务(与协调任务同群)。
+    const msg = await postMessageRaw(coordinator.id, group.id, "别的任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const otherTask = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(otherTask.id, "pass")),
+    );
+    expect(res.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    const l3 = detail.l3 as { answered: boolean; verdict: string | null };
+    expect(l3.answered).toBe(false);
+    expect(l3.verdict).toBe(null);
+  });
+});

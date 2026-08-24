@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { zValidator } from "@hono/zod-validator";
 import {
+  type CoordinationPayload,
   normalizeReviewRequestDiffSummary,
+  parseKnownCoordinationPayload,
   REVIEW_REQUEST_EXAMPLE,
   TASK_STATUSES,
   task as taskTable,
@@ -15,6 +17,7 @@ import {
 import { findRepoRoot } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
+  getL3ResponseMinutesMs,
   isTerminalTaskStatus,
   notifyTaskStatusChanged,
   recordCoordinationActivity,
@@ -26,7 +29,7 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { findExecutorByKey } from "@server/lib/executors";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ilike } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -39,6 +42,21 @@ import { assertGroupWritable } from "./helpers";
  */
 
 type TaskRow = typeof taskTable.$inferSelect;
+
+/** diffSummary 是否携带 review_request 交接载荷(顶层 type 或嵌套键两种形式)。 */
+function summaryHasReviewRequest(diffSummary: unknown): boolean {
+  const summary =
+    typeof diffSummary === "object" &&
+    diffSummary !== null &&
+    !Array.isArray(diffSummary)
+      ? (diffSummary as Record<string, unknown>)
+      : undefined;
+  return (
+    summary !== undefined &&
+    (summary.type === "review_request" ||
+      Object.hasOwn(summary, "review_request"))
+  );
+}
 
 /**
  * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
@@ -84,11 +102,7 @@ async function assertCoordinationCloseIntegrity(
 
   // R2:应走 L3(三方在场且 dispatchKind 非 fix)时,review_request 不得缺失。
   if (await shouldWalkL3(db, task)) {
-    const hasReviewRequest =
-      summary !== undefined &&
-      (summary.type === "review_request" ||
-        Object.hasOwn(summary, "review_request"));
-    if (!hasReviewRequest) {
+    if (!summaryHasReviewRequest(diffSummary)) {
       throw new BizError(
         BizCodeEnum.InvalidRequest,
         "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场且非 fix 票)。",
@@ -109,6 +123,76 @@ async function shouldWalkL3(db: DataBase, task: TaskRow): Promise<boolean> {
   });
   const presentRoles = new Set<string>(members.flatMap((m) => m.roles));
   return presentRoles.has("reviewer") && presentRoles.has("coordinator");
+}
+
+/**
+ * L3 应答状态派生(R3,specs/l3-verdict-observability.md):仅对「协调任务 +
+ * 已落 done + 带 review_request」的任务输出 l3 字段;不满足触发条件返回
+ * undefined(调用方不输出 l3,保持载荷逐字不变)。
+ *
+ * awaitingSince = 落 done 的时刻:优先取 dispatchAudit.coordinationActivity
+ * .endedAt(终态审计时刻),老任务/未记录时兜底 updatedAt。overdue = 超过
+ * l3ResponseMinutes 且未应答(只观测不强制,不拒绝任何终态)。
+ */
+async function deriveL3Answer(
+  db: DataBase,
+  task: TaskRow,
+): Promise<
+  | {
+      answered: boolean;
+      verdict: "pass" | "findings" | null;
+      awaitingSince: string;
+      overdue: boolean;
+    }
+  | undefined
+> {
+  if (task.status !== "done") return undefined;
+  if (!(await isDetachedTask(db, task))) return undefined;
+  const summary =
+    typeof task.diffSummary === "object" && task.diffSummary !== null
+      ? (task.diffSummary as Record<string, unknown>)
+      : undefined;
+  const hasReviewRequest =
+    summary !== undefined &&
+    (summary.type === "review_request" ||
+      Object.hasOwn(summary, "review_request"));
+  if (!hasReviewRequest) return undefined;
+
+  const audit = task.dispatchAudit ?? null;
+  // updatedAt 可空(旧库行):null 时退回 createdAt,保证 awaitingSince 恒有值。
+  const awaitingSince =
+    audit?.coordinationActivity?.endedAt ??
+    (task.updatedAt ?? task.createdAt).toISOString();
+
+  // 在本群消息中找 taskId 指向本任务的 review_result 载荷。历史消息在 R1 校验
+  // 落地前未校验形状,解析失败的行跳过(不影响 answered 判定)。
+  let answered = false;
+  let verdict: "pass" | "findings" | null = null;
+  const candidates = await db.query.groupMessage.findMany({
+    where: (t, { and: andFn, eq: eqFn, ilike: ilikeFn }) =>
+      andFn(
+        eqFn(t.groupId, task.groupId),
+        ilikeFn(t.body, "%review_result%"),
+      ),
+    columns: { body: true },
+  });
+  for (const message of candidates) {
+    let parsed: CoordinationPayload | undefined;
+    try {
+      parsed = parseKnownCoordinationPayload(message.body);
+    } catch {
+      continue;
+    }
+    if (parsed?.type === "review_result" && parsed.taskId === task.id) {
+      answered = true;
+      verdict = parsed.verdict;
+      break;
+    }
+  }
+  const overdue =
+    !answered &&
+    Date.now() - Date.parse(awaitingSince) > getL3ResponseMinutesMs();
+  return { answered, verdict, awaitingSince, overdue };
 }
 
 const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
@@ -413,6 +497,12 @@ app
             ? summary.outputTail
             : undefined;
         detail.outputTail = buffered ?? backfilled ?? null;
+      }
+      // L3 应答状态(R3):协调任务 done + 带 review_request 时派生 l3 字段;
+      // 不满足触发条件不输出(不是空对象),其余载荷保持逐字不变。
+      const l3 = await deriveL3Answer(db, task);
+      if (l3) {
+        detail.l3 = l3;
       }
       return c.json(detail);
     },

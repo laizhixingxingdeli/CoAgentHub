@@ -44,6 +44,11 @@ let a2aSilenceTimeoutMs = dispatchPolicy.a2aSilenceTimeoutMinutes * 60_000;
  *  终态 → 按「结果未确认」处理;启动时读配置,缺省 24h。 */
 let detachedTimeoutMs = dispatchPolicy.detachedTimeoutMinutes * 60_000;
 
+/** L3 应答超时阈值(ms):协调任务落 done 且带 review_request 后,检视者超过
+ *  该时长未公布 review_result → 任务详情派生 l3.overdue=true;启动时读配置,
+ *  缺省 120min(只观测不强制,specs/l3-verdict-observability.md R3/R4)。 */
+let l3ResponseMinutes = dispatchPolicy.l3ResponseMinutes;
+
 /** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */
 let retryPolicy: RetryPolicy = dispatchPolicy.retry;
 
@@ -135,6 +140,11 @@ export function getDetachedTimeoutMs(): number {
   return detachedTimeoutMs;
 }
 
+/** 读 L3 应答超时阈值(ms)。 */
+export function getL3ResponseMinutesMs(): number {
+  return l3ResponseMinutes * 60_000;
+}
+
 /** 读最大并行组数。 */
 export function getMaxParallelGroups(): number {
   return maxParallelGroups;
@@ -200,6 +210,7 @@ export function __resetExecutorQueueForTests(): void {
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
   a2aSilenceTimeoutMs = policy.a2aSilenceTimeoutMinutes * 60_000;
   detachedTimeoutMs = policy.detachedTimeoutMinutes * 60_000;
+  l3ResponseMinutes = policy.l3ResponseMinutes;
   retryPolicy = policy.retry;
   rateLimitPatterns = policy.rateLimit.detectPatterns;
   rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
@@ -239,6 +250,12 @@ export function __setReliabilityTimeoutsForTests(
     detachedMsOverride !== undefined
       ? Math.max(1, Math.floor(detachedMsOverride))
       : Math.max(60_000, Math.floor(stallMs));
+}
+
+/** 测试专用:覆盖 L3 应答超时阈值(默认读 scripts/dispatch-policy.json,单位
+ * 分钟;=1 时退化为 1 分钟,测试用 1 分钟级小阈值验证 overdue 派生)。 */
+export function __setL3ResponseMinutesForTests(minutes: number): void {
+  l3ResponseMinutes = Math.max(1, Math.floor(minutes));
 }
 
 /**

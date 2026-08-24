@@ -1,5 +1,6 @@
 import { zValidator } from "@hono/zod-validator";
 import {
+  type CoordinationPayload,
   FileRefInput,
   GROUP_ROLES,
   GroupMessageAudienceInput,
@@ -132,9 +133,16 @@ app
         callback,
       } = c.req.valid("json");
 
-      if (contentType === "application/json") {
+      // 协作载荷校验(R1/R2,specs/l3-verdict-observability.md):不再只认调用方
+      // 声明的 contentType —— 消息体 trim 后以 `{` 开头(看起来像结构化载荷)也
+      // 走 parseKnownCoordinationPayload:已知 type 但形状不合 → 400;自由文本
+      // / 未知 type 的 JSON → undefined,原样放行,行为与改动前完全一致。
+      // 保留 contentType === "application/json" 时的既有校验路径(仍校验)。
+      const trimmedBody = (body ?? "").trim();
+      if (contentType === "application/json" || trimmedBody.startsWith("{")) {
+        let parsed: CoordinationPayload | undefined;
         try {
-          parseKnownCoordinationPayload(body ?? "");
+          parsed = parseKnownCoordinationPayload(body ?? "");
         } catch (error) {
           const detail =
             error instanceof z.ZodError ? error.message : String(error);
@@ -142,6 +150,27 @@ app
             BizCodeEnum.InvalidRequest,
             `协作载荷形状无效: ${detail}。review_request 期望示例: ${JSON.stringify(REVIEW_REQUEST_EXAMPLE)}`,
           );
+        }
+        // R2:review_result 引用的 taskId 必须指向本群一条真实任务。拼错 taskId
+        // 是静默失败的头号来源(需求永远显示「L3 进行中」),此校验把静默失败变成
+        // 即时失败。不校验该任务是否带 review_request(检视者主动治理合法)。
+        // taskId 非 UUID 时不可能指向本群任何任务(uuid 主键),先按不存在处理,
+        // 避免 uuid 列与非法字符串比较触发 DB 错误(500)。
+        if (parsed?.type === "review_result") {
+          const taskIdIsUuid = z.string().uuid().safeParse(parsed.taskId).success;
+          const referenced = taskIdIsUuid
+            ? await db.query.task.findFirst({
+                where: (t, { and: andFn, eq: eqFn }) =>
+                  andFn(eqFn(t.groupId, id), eqFn(t.id, parsed.taskId)),
+                columns: { id: true },
+              })
+            : undefined;
+          if (!referenced) {
+            throw new BizError(
+              BizCodeEnum.InvalidRequest,
+              "review_result 引用的 taskId 在本群不存在",
+            );
+          }
         }
       }
 

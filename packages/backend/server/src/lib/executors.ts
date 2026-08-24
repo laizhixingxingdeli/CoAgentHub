@@ -550,6 +550,9 @@ export interface DispatchPolicy {
   /** detached 超时(分钟):ReplyMode: detached 任务发送后执行器超过该时长仍未
    *  PATCH 回写终态 → 按「结果未确认」处理。 */
   detachedTimeoutMinutes: number;
+  /** L3 应答超时(分钟):协调任务落 done 且带 review_request 后,检视者超过该
+   *  时长仍未公布 review_result → 任务详情派生 l3.overdue=true(只观测不强制)。 */
+  l3ResponseMinutes: number;
   /** 失败自动重试策略。 */
   retry: RetryPolicy;
   /** 额度/速率限制失败后的冷却调度策略。 */
@@ -573,6 +576,11 @@ export const DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES = 30;
 
 /** 默认 detached 超时(分钟,24 小时);缺失/非法时兜底。 */
 export const DEFAULT_DETACHED_TIMEOUT_MINUTES = 1440;
+
+/** 默认 L3 应答超时(分钟,2 小时);缺失/非法时兜底。
+ *  检视者运行在常驻会话里,收到完成事件后通常分钟级响应;但它可能正在与用户
+ *  对话,给足余量。这个数字不是精确结论 —— 若有更好依据可提出并说明理由。 */
+export const DEFAULT_L3_RESPONSE_MINUTES = 120;
 
 /** 默认重试策略:重试 1 次、重试前回滚工作区、同一执行器重跑。 */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
@@ -631,6 +639,7 @@ export function readDispatchPolicy(): DispatchPolicy {
       claimTimeoutMinutes?: unknown;
       a2aSilenceTimeoutMinutes?: unknown;
       detachedTimeoutMinutes?: unknown;
+      l3ResponseMinutes?: unknown;
       retry?: {
         maxRetries?: unknown;
         resetWorkspace?: unknown;
@@ -674,6 +683,10 @@ export function readDispatchPolicy(): DispatchPolicy {
         raw.detachedTimeoutMinutes,
         DEFAULT_DETACHED_TIMEOUT_MINUTES,
       ),
+      l3ResponseMinutes: positiveInt(
+        raw.l3ResponseMinutes,
+        DEFAULT_L3_RESPONSE_MINUTES,
+      ),
       retry: {
         maxRetries: nonNegativeInt(
           raw.retry?.maxRetries,
@@ -710,6 +723,7 @@ export function readDispatchPolicy(): DispatchPolicy {
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
     a2aSilenceTimeoutMinutes: DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES,
     detachedTimeoutMinutes: DEFAULT_DETACHED_TIMEOUT_MINUTES,
+    l3ResponseMinutes: DEFAULT_L3_RESPONSE_MINUTES,
     retry: DEFAULT_RETRY_POLICY,
     rateLimit: DEFAULT_RATE_LIMIT_POLICY,
   };

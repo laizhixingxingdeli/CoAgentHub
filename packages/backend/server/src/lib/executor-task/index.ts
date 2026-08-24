@@ -40,7 +40,9 @@ export {
 } from "./queue";
 export { parseTaskReport, renderTaskCard, type TaskReport } from "./report";
 export {
+  getL3ResponseMinutesMs,
   __resetExecutorQueueForTests,
+  __setL3ResponseMinutesForTests,
   __setMaxParallelGroupsForTests,
   __setRateLimitForTests,
   __setReliabilityTimeoutsForTests,

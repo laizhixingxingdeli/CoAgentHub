@@ -5,6 +5,7 @@
   "claimTimeoutMinutes": 30,
   "a2aSilenceTimeoutMinutes": 30,
   "detachedTimeoutMinutes": 1440,
+  "l3ResponseMinutes": 120,
   "retry": {
     "maxRetries": 1,
     "resetWorkspace": true,
