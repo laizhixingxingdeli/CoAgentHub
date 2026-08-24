@@ -241,6 +241,12 @@ export function deriveLabel(tasks: TaskItem[]): string {
   const coordIds = coordinationTaskIds(tasks);
   const candidates = tasks.filter((task) => !coordIds.has(task.id));
   const titleSource = candidates.length > 0 ? candidates : tasks;
+  const specRef = titleSource.find((task) => task.specRef)?.specRef;
+  if (specRef) {
+    const base = specRef.split("/").pop() ?? specRef;
+    const withoutExt = base.replace(/\.[^./\\]+$/, "");
+    return withoutExt || specRef;
+  }
   const briefTitle = titleSource
     .map((task) => deriveBriefTitle(task.brief))
     .find((title): title is string => title !== null);
@@ -248,11 +254,6 @@ export function deriveLabel(tasks: TaskItem[]): string {
     return briefTitle;
   }
   const anchor = titleSource[0];
-  if (anchor.specRef) {
-    const base = anchor.specRef.split("/").pop() ?? anchor.specRef;
-    const withoutExt = base.replace(/\.[^./\\]+$/, "");
-    return withoutExt || anchor.specRef;
-  }
   return anchor.id;
 }
 

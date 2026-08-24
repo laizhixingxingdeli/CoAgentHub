@@ -154,7 +154,7 @@ describe("RequirementWorkspace 响应式布局", () => {
       screen.queryByTestId("requirement-detail-panel"),
     ).not.toBeInTheDocument();
 
-    // 点击「需求A」行 → 切到详情,列表隐藏。
+    // 点击 specRef 派生标题「a」行 → 切到详情,列表隐藏。
     fireEvent.click(screen.getByTestId("requirement-row-specs/a.md"));
     expect(
       await screen.findByTestId("requirement-detail-panel"),
@@ -178,16 +178,16 @@ describe("RequirementWorkspace 响应式布局", () => {
     renderWorkspace(TWO_REQUIREMENTS);
 
     fireEvent.click(await screen.findByTestId("requirement-row-specs/a.md"));
-    expect(await screen.findByText("需求A")).toBeInTheDocument();
+    expect(await screen.findByText("a")).toBeInTheDocument();
 
-    // 返回列表 → 点「需求B」→ 详情切到 B。
+    // 返回列表 → 点 specRef 派生标题「b」→ 详情切到 B。
     fireEvent.click(screen.getByTestId("requirement-mobile-back"));
     fireEvent.click(await screen.findByTestId("requirement-row-specs/b.md"));
     expect(
       await screen.findByTestId("requirement-detail-panel"),
     ).toBeInTheDocument();
-    expect(screen.getByText("需求B")).toBeInTheDocument();
-    expect(screen.queryByText("需求A")).not.toBeInTheDocument();
+    expect(screen.getByText("b")).toBeInTheDocument();
+    expect(screen.queryByText("a")).not.toBeInTheDocument();
   });
 
   it("桌面(≥1024px)两栏:列表与详情同时可见", async () => {
@@ -202,7 +202,7 @@ describe("RequirementWorkspace 响应式布局", () => {
     expect(
       screen.queryByTestId("requirement-control-bar"),
     ).not.toBeInTheDocument();
-    // 两栏模式下默认选中最新需求(需求B),列表行仍可见;详情区标题同为 B。
+    // 两栏模式下默认选中最新需求(b),列表行仍可见;详情区标题同为 b。
     const requirementList = screen.getByTestId("requirement-list");
     expect(requirementList).toBeInTheDocument();
     expect(
@@ -212,7 +212,7 @@ describe("RequirementWorkspace 响应式布局", () => {
       screen.getByTestId("requirement-row-specs/a.md"),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByTestId("requirement-detail-panel")).getByText("需求B"),
+      within(screen.getByTestId("requirement-detail-panel")).getByText("b"),
     ).toBeInTheDocument();
   });
 
@@ -290,7 +290,7 @@ describe("RequirementWorkspace 响应式布局", () => {
       ).toHaveAttribute("data-status", "done");
     });
     expect(
-      within(screen.getByTestId("requirement-detail-panel")).getByText("需求A"),
+      within(screen.getByTestId("requirement-detail-panel")).getByText("a"),
     ).toBeInTheDocument();
   });
 });

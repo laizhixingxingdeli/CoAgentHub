@@ -47,6 +47,7 @@ describe("groupTasksBySpec", () => {
     expect(reqs).toHaveLength(1);
     expect(reqs[0].id).toBe("specs/auth/login.md");
     expect(reqs[0].tasks.map((t) => t.id)).toEqual(["t-1", "t-2", "t-3"]);
+    expect(reqs[0].label).toBe("login");
   });
 
   it("不同 specRef 各自独立成一条", () => {
@@ -277,8 +278,8 @@ describe("groupTasksBySpec", () => {
         "exec-1",
         "exec-2",
       ]);
-      // 标题不取协调任务的「协调请求」样板,取执行任务的 Goal。
-      expect(reqs[0].label).toBe("实现三层链条展示。");
+      // 标题不取协调任务的「协调请求」样板,优先取执行任务的 specRef。
+      expect(reqs[0].label).toBe("three-layer");
       expect(reqs[0].latestTask.id).toBe("exec-2");
     });
 
@@ -407,7 +408,7 @@ describe("deriveLabel", () => {
     );
   });
 
-  it("优先使用任务书第一行的人类可读标题,并回落 specRef", () => {
+  it("优先使用 specRef 派生标题,无 specRef 时使用任务书标题", () => {
     expect(
       deriveLabel([
         makeTask({
@@ -416,16 +417,16 @@ describe("deriveLabel", () => {
           brief: "# 修复时间线可读性\n\n## 关联规范",
         }),
       ]),
-    ).toBe("修复时间线可读性");
+    ).toBe("internal-key");
     expect(
       deriveLabel([
         makeTask({
-          id: "fallback",
-          specRef: "specs/internal-key.md",
-          brief: "## 关联规范\n正文",
+          id: "brief-title",
+          specRef: null,
+          brief: "# 无规范任务标题\n\n## 任务内容",
         }),
       ]),
-    ).toBe("internal-key");
+    ).toBe("无规范任务标题");
   });
 
   it.each(["# CoAgentHub Task", "# CoAgentHub 任务"])(
@@ -435,7 +436,7 @@ describe("deriveLabel", () => {
         deriveLabel([
           makeTask({
             id: "templated",
-            specRef: "specs/internal-key.md",
+            specRef: null,
             brief: `${templateTitle}\n\n## Goal\n修复任务标题的可读性。后续说明不应进入标题。`,
           }),
         ]),
@@ -448,7 +449,7 @@ describe("deriveLabel", () => {
       deriveLabel([
         makeTask({
           id: "handwritten",
-          specRef: "specs/internal-key.md",
+          specRef: null,
           brief: "# 任务:修 MCP 契约两缺陷\n\n## Goal\n不应覆盖手写标题",
         }),
       ]),
@@ -493,7 +494,7 @@ describe("deriveLabel", () => {
       deriveLabel([
         makeTask({
           id: "localized-goal",
-          specRef: "specs/localized-goal.md",
+          specRef: null,
           brief: `# CoAgentHub 任务\n\n## ${heading}\n从本段提取标题`,
         }),
       ]),
