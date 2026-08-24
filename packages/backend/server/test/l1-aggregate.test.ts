@@ -188,6 +188,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     executorParticipantId: string,
     status: TaskStatus,
     createdAt: Date,
+    supersedesTaskId?: string,
   ) {
     await testDb.insert(taskTable).values({
       groupId,
@@ -196,7 +197,33 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
       executorParticipantId,
       status,
       createdAt,
+      ...(supersedesTaskId !== undefined ? { supersedesTaskId } : {}),
     });
+  }
+
+  /** 同 addChild,但返回新建子任务的 id(供后续任务以 supersedesTaskId 指向它)。 */
+  async function addChildReturningId(
+    groupId: string,
+    parentTaskId: string,
+    executorParticipantId: string,
+    status: TaskStatus,
+    createdAt: Date,
+    supersedesTaskId?: string,
+  ) {
+    const [row] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId,
+        parentTaskId,
+        messageId: uuidv4(),
+        executorParticipantId,
+        status,
+        createdAt,
+        ...(supersedesTaskId !== undefined ? { supersedesTaskId } : {}),
+      })
+      .returning({ id: taskTable.id });
+    if (!row) throw new Error("addChildReturningId 未返回行");
+    return row.id;
   }
 
   it("协调任务零子任务 → l1 { childCount: 0, status: 'pending' }", async () => {
@@ -213,6 +240,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail = await getDetail(group.id, task.id);
     expect(detail.l1).toEqual({
       childCount: 0,
+      supersededCount: 0,
       status: "pending",
       allTerminal: false,
     });
@@ -247,6 +275,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail = await getDetail(group.id, task.id);
     expect(detail.l1).toEqual({
       childCount: 2,
+      supersededCount: 0,
       status: "done",
       allTerminal: true,
     });
@@ -281,6 +310,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail = await getDetail(group.id, task.id);
     expect(detail.l1).toEqual({
       childCount: 2,
+      supersededCount: 0,
       status: "running",
       allTerminal: false,
     });
@@ -315,6 +345,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail = await getDetail(group.id, task.id);
     expect(detail.l1).toEqual({
       childCount: 2,
+      supersededCount: 0,
       status: "failed",
       allTerminal: true,
     });
@@ -344,12 +375,13 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail2 = await getDetail(group.id, task2.id);
     expect(detail2.l1).toEqual({
       childCount: 2,
+      supersededCount: 0,
       status: "pending",
       allTerminal: true,
     });
   });
 
-  it("l1 只含 childCount/status/allTerminal,不含任何执行器身份字段", async () => {
+  it("l1 只含 childCount/supersededCount/status/allTerminal,不含任何执行器身份字段", async () => {
     const coordinator = await register("l1-id-coord");
     const execA = await register("l1-id-exec");
     const group = await createGroup(coordinator.id, "l1-id");
@@ -374,10 +406,92 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
       "allTerminal",
       "childCount",
       "status",
+      "supersededCount",
     ]);
     expect(l1).not.toHaveProperty("executorParticipantId");
     expect(l1).not.toHaveProperty("executorKey");
     expect(l1).not.toHaveProperty("executorName");
+  });
+
+  it("被替代的子任务不计入 childCount,supersededCount 如实计数", async () => {
+    const coordinator = await register("l1-sup-coord");
+    const execA = await register("l1-sup-exec");
+    const group = await createGroup(coordinator.id, "l1-sup");
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    // A 被 B 替代(A 是较早的一次尝试,B 是换执行器后的替代)。
+    const childA = await addChildReturningId(
+      group.id,
+      task.id,
+      execA.id,
+      "failed",
+      new Date("2026-08-01T00:00:00Z"),
+    );
+    await addChild(
+      group.id,
+      task.id,
+      execA.id,
+      "done",
+      new Date("2026-08-01T01:00:00Z"),
+      childA,
+    );
+    const detail = await getDetail(group.id, task.id);
+    expect(detail.l1).toEqual({
+      childCount: 1,
+      supersededCount: 1,
+      status: "done",
+      allTerminal: true,
+    });
+  });
+
+  it("连续替代(换两次执行器)→ childCount 只留最后一次,supersededCount=2", async () => {
+    const coordinator = await register("l1-sup2-coord");
+    const execA = await register("l1-sup2-exec");
+    const group = await createGroup(coordinator.id, "l1-sup2");
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childA = await addChildReturningId(
+      group.id,
+      task.id,
+      execA.id,
+      "failed",
+      new Date("2026-08-01T00:00:00Z"),
+    );
+    const childB = await addChildReturningId(
+      group.id,
+      task.id,
+      execA.id,
+      "failed",
+      new Date("2026-08-01T01:00:00Z"),
+      childA,
+    );
+    await addChild(
+      group.id,
+      task.id,
+      execA.id,
+      "done",
+      new Date("2026-08-01T02:00:00Z"),
+      childB,
+    );
+    const detail = await getDetail(group.id, task.id);
+    expect(detail.l1).toEqual({
+      childCount: 1,
+      supersededCount: 2,
+      status: "done",
+      allTerminal: true,
+    });
   });
 
   it("协调任务判定复用 isDetachedTask():brief 含 ReplyMode: detached 也透出 l1", async () => {
@@ -402,6 +516,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
     const detail = await getDetail(group.id, task.id);
     expect(detail.l1).toEqual({
       childCount: 1,
+      supersededCount: 0,
       status: "done",
       allTerminal: true,
     });
@@ -460,6 +575,7 @@ describe("非协调任务详情回归(R1:不输出 l1,载荷逐字不变)", () =
       "specHash",
       "specRef",
       "status",
+      "supersedesTaskId",
       "updatedAt",
     ]);
   });

@@ -34,7 +34,7 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
-import { assertGroupWritable } from "./helpers";
+import { assertGroupWritable, assertSupersededTaskInGroup } from "./helpers";
 
 /**
  * 群任务子路由:创建(按 message_id 幂等)/ 列表(分页 + 可选 outputTail)/
@@ -291,6 +291,11 @@ app
         specRef: z.string().max(500).optional(),
         specHash: z.string().max(64).optional(),
         dispatchKind: z.enum(["requirement", "fix"]).optional(),
+        // 替代关系(executor-switch-task-identity R2):本任务替代
+        // supersedesTaskId 所指的那次尝试(同一工作项的先后尝试);指向的任务
+        // 必须属于同一群组(否则 400,见 assertSupersededTaskInGroup),不校验
+        // 其是否已终态。不传 = null。
+        supersedesTaskId: z.string().uuid().optional(),
       }),
     ),
     async (c) => {
@@ -304,6 +309,7 @@ app
         specRef,
         specHash,
         dispatchKind,
+        supersedesTaskId,
       } = c.req.valid("json");
 
       // 归档/软删群组只读:不能发新任务(与消息/成员同款守卫)。
@@ -323,6 +329,8 @@ app
       if (!executor) {
         throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
+      // 替代关系(R2):被替代的任务必须属于同一群组,否则 400;不校验其终态。
+      await assertSupersededTaskInGroup(db, id, supersedesTaskId);
 
       // 任务书快照:从触发消息取 body 原文写入 brief(消息后续编辑/软删除
       // 不影响已触发任务语义);消息不存在时留空(可空列)。
@@ -345,6 +353,8 @@ app
           specRef: specRef ?? null,
           specHash: specHash ?? null,
           dispatchKind: dispatchKind ?? null,
+          // 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试;不传为 null。
+          supersedesTaskId: supersedesTaskId ?? null,
           brief: triggerMessage?.body ?? null,
           // 显式置 queued:不依赖 DB 默认值(旧库默认值可能仍是 running)。
           status: "queued",
@@ -372,6 +382,10 @@ app
           : null,
         dispatchKind !== undefined && dispatchKind !== existing.dispatchKind
           ? "dispatchKind"
+          : null,
+        supersedesTaskId !== undefined &&
+        supersedesTaskId !== existing.supersedesTaskId
+          ? "supersedesTaskId"
           : null,
       ].filter((field): field is string => field !== null);
       if (conflicts.length > 0) {
@@ -454,6 +468,8 @@ app
           specRef: true,
           specHash: true,
           dispatchKind: true,
+          // 替代关系(R3):列表透出 supersedesTaskId(老任务为 null)。
+          supersedesTaskId: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -541,6 +557,8 @@ app
         specRef: task.specRef ?? null,
         specHash: task.specHash ?? null,
         dispatchKind: task.dispatchKind ?? null,
+        // 替代关系(R3):详情透出 supersedesTaskId(老任务为 null)。
+        supersedesTaskId: task.supersedesTaskId ?? null,
         // 任务下发者信息(Part A):透传给插件(定向通知用);老任务为 null。
         dispatcherParticipantId: task.dispatcherParticipantId ?? null,
         dispatcherSessionId: task.dispatcherSessionId ?? null,

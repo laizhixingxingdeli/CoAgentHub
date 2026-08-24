@@ -354,6 +354,7 @@ export async function maybeDispatchExecutorTask(
     specRef,
     specHash,
     dispatchKind,
+    supersedesTaskId,
     callbackRef,
   } = input;
 
@@ -410,6 +411,7 @@ export async function maybeDispatchExecutorTask(
     specRef,
     specHash,
     dispatchKind,
+    supersedesTaskId,
     callbackRef,
   });
 }
@@ -436,6 +438,8 @@ async function dispatchTask(
     specHash: string | null;
     /** 规范驱动下发类型:需求票或修复票;null = 指令驱动任务。 */
     dispatchKind: "requirement" | "fix" | null;
+    /** 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试;null = 无。 */
+    supersedesTaskId: string | null;
     /** callback 路由信息(Part B):见 DispatchExecutorInput。 */
     callbackRef: {
       platform?: string;
@@ -457,6 +461,7 @@ async function dispatchTask(
     specRef,
     specHash,
     dispatchKind,
+    supersedesTaskId,
     callbackRef,
   } = opts;
 
@@ -499,6 +504,8 @@ async function dispatchTask(
       specRef,
       specHash,
       dispatchKind,
+      // 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试(null = 无)。
+      supersedesTaskId,
       // 任务下发者信息(Part A):sender + 会话 id(仅 coordinator/human 非执行器
       // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
       dispatcherParticipantId,

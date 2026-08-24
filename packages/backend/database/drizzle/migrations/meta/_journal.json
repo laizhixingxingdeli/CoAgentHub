@@ -176,6 +176,13 @@
       "when": 1787460434381,
       "tag": "0024_add_task_dispatch_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1787640000000,
+      "tag": "0025_add_task_supersedes_task_id",
+      "breakpoints": true
     }
   ]
 }

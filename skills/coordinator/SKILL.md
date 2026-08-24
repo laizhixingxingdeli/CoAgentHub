@@ -119,7 +119,7 @@ Call `coagenthub_dispatch_task` with:
 执行器返回限额错误（429 / `rate limit` / `quota` /「使用量已超出频率限制」等，探测模式见 `scripts/dispatch-policy.json` 的 `rateLimit.detectPatterns`）时：
 
 - **不判该票失败、不缩减范围**——限额是外部资源约束，与任务内容无关。
-- **先找空闲执行器**：查群内其余执行器谁没在 running、谁不在限额冷却中（`coagenthub_list_tasks`）。**有空闲的就把同一张票原样交给它**——任务书内容、`specRef`、`specHash` 全不变，只换执行目标。
+- **先找空闲执行器**：查群内其余执行器谁没在 running、谁不在限额冷却中（`coagenthub_list_tasks`）。**有空闲的就把同一张票原样交给它**——任务书内容、`specRef`、`specHash` 全不变，只换执行目标。**下发时带 `supersedesTaskId` 指向被替代的那条任务**——两条 task 行由此记录为同一工作项的先后尝试（`l1.childCount` 只算有效尝试，`supersededCount` 透出换过几次，检视者不必靠 `specRef` 猜）。
 - **多个都空闲时读分工提示词自己判断**：看候选执行器在本群的 `prompt`（成员列表里的分工说明），按其中写明的分工挑谁接这张票——例如 prompt 写着「主要执行者」的就是主力。**没写、或看不出主次，随便挑一个**，不必纠结。不要在心里固化某个执行器名字：优先级写在 prompt 里，换部署只改 prompt。
 - **全忙或全限额时才等**：从失败输出解析重置时间（平台的 `parseRateLimitRecoveryMs` 已实现；解析不出退回 `rateLimit.cooldownMinutes`，缺省 300 分钟），到点后重新下发同一张票。
 - 无论走哪条，都在群内说明当前处置——换给了谁，或正在等到几点（`coagenthub_post_message`）。**不要静默停滞**，否则旁观者无法区分「在等限额」与「链路挂死」。

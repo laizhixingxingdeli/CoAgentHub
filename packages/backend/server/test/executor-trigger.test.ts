@@ -14,6 +14,7 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
+import { v4 as uuidv4 } from "uuid";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { testDb } from "./db";
 
@@ -183,6 +184,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       status: string;
       diffSummary: unknown;
       a2aContextId: string | null;
+      supersedesTaskId: string | null;
     }>;
   }
 
@@ -281,6 +283,75 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(true);
     expect(statusMsgs.some((m) => m.body.startsWith("✅"))).toBe(true);
     expect(statusMsgs.every((m) => m.senderId === codebuddy.id)).toBe(true);
+  });
+
+  it("消息自动派发接受 supersedesTaskId 并落库(换执行器重发)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    // 先直建一条被替代的任务(仅登记行,不触发 spawn)。
+    const prev = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId: uuidv4(),
+        executorParticipantId: codebuddy.id,
+      }),
+    });
+    expect(prev.status).toBe(200);
+    const prevTask = (await prev.json()) as { id: string };
+
+    // 同一张票换执行器重发:定向消息携带 supersedesTaskId 指向被替代的任务。
+    const msg = await postMessage(coordinator.id, group.id, {
+      body: "换执行器重发同一张票",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+      supersedesTaskId: prevTask.id,
+    });
+    const task = await waitForTask(coordinator.id, group.id, msg.id);
+    expect(task.supersedesTaskId).toBe(prevTask.id);
+  });
+
+  it("消息携带指向跨群任务的 supersedesTaskId → 400 且不写消息", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    // 另一个群里建一条任务作为「跨群」被替代目标。
+    const otherGroup = await createGroup(coordinator.id, "跨群消息任务");
+    await addMember(coordinator.id, otherGroup.id, codebuddy.id, ["executor"]);
+    const other = await app.request(`/api/groups/${otherGroup.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId: uuidv4(),
+        executorParticipantId: codebuddy.id,
+      }),
+    });
+    expect(other.status).toBe(200);
+    const otherTask = (await other.json()) as { id: string };
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        body: "跨群替代",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+        supersedesTaskId: otherTask.id,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as { message: string };
+    expect(err.message).toContain("supersedesTaskId");
+
+    // 校验在消息插入前 → 群内不留下消息行。
+    const messages = await listMessages(coordinator.id, group.id);
+    expect(messages.some((m) => m.body === "跨群替代")).toBe(false);
   });
 
   it("定向到非执行器 participant 的消息不建 task", async () => {
@@ -399,6 +470,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         specRef: null,
         specHash: null,
         dispatchKind: null,
+        // 替代关系(R2):直调入口按测试语义补可选字段(null = 无替代)。
+        supersedesTaskId: null,
         // callback 路由信息(Part B):直调入口按测试语义补可选字段(null = 无 callback)。
         callbackRef: null,
       },

@@ -90,6 +90,12 @@ export const task = pgTable(
       .references(() => groups.id),
     // Parent execution in the same group; top-level and historical tasks are null.
     parentTaskId: uuid("parent_task_id").references((): AnyPgColumn => task.id),
+    // 替代关系(换执行器产生的多条任务,specs/executor-switch-task-identity.md
+    // R1):本任务替代 supersedesTaskId 所指的那次尝试,两者是同一工作项的先后
+    // 尝试;null = 不是任何任务的替代。不加索引(当前无按此列查询的需求)。
+    supersedesTaskId: uuid("supersedes_task_id").references(
+      (): AnyPgColumn => task.id,
+    ),
     // 唯一约束 → 幂等:同一消息只建一次任务(重复 POST 返回既有行)。
     messageId: uuid("message_id").notNull().unique(),
     executorParticipantId: uuid("executor_participant_id")

@@ -37,6 +37,10 @@ export interface DispatchExecutorInput {
   specHash: string | null;
   /** 规范驱动下发类型:需求票或修复票;null = 指令驱动任务。 */
   dispatchKind: "requirement" | "fix" | null;
+  /** 替代关系(executor-switch-task-identity R2):本任务替代 supersedesTaskId
+   *  所指的那次尝试(同一工作项的先后尝试,如换执行器重发);null = 不替代任何
+   *  任务。指向的任务必须属于同一群组(路由层 400),不校验其终态。 */
+  supersedesTaskId: string | null;
   /** callback 路由信息(Part B):仅允许 { platform?, endpointRef?, sessionRef? }
    *  三个短字符串(≤200 字符),不得存 URL/token/命令/secret。null = 无 callback。 */
   callbackRef: {

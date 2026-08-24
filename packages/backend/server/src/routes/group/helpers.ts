@@ -76,3 +76,28 @@ export function assertMemberNotHuman(membership: GroupMember): void {
     );
   }
 }
+
+/**
+ * supersedesTaskId 同群校验(executor-switch-task-identity R2):被替代的任务
+ * 必须属于同一群组,否则 400 —— 跨群指向是调用方错误,不等同于 FK 违例(500)。
+ * 不校验被指向任务是否已终态(R2 明确:协调者可能在原任务仍 running 时就决定
+ * 替代,例如已确认执行器挂死)。未传(null/undefined)时静默通过。
+ */
+export async function assertSupersededTaskInGroup(
+  db: DataBase,
+  groupId: string,
+  supersedesTaskId: string | null | undefined,
+): Promise<void> {
+  if (supersedesTaskId == null) return;
+  const target = await db.query.task.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, supersedesTaskId), eq(t.groupId, groupId)),
+    columns: { id: true },
+  });
+  if (!target) {
+    throw new BizError(
+      BizCodeEnum.InvalidRequest,
+      "supersedesTaskId 指向的任务不存在或不属于本群",
+    );
+  }
+}

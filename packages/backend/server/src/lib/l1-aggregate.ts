@@ -31,7 +31,10 @@ export function aggregateTaskStatuses(statuses: string[]): StepStatus {
 }
 
 export interface L1Aggregate {
+  /** 有效尝试数:排除被其它子任务以 supersedesTaskId 替代的子任务。 */
   childCount: number;
+  /** 被替代的子任务数(换执行器/重发的次数信号)。 */
+  supersededCount: number;
   status: StepStatus;
   allTerminal: boolean;
 }
@@ -41,6 +44,11 @@ type Task = typeof taskTable.$inferSelect;
 /**
  * 派生子任务的 L1 聚合。子任务 = parentTaskId 指向本协调任务的任务,按
  * createdAt 升序(与前端 L1 步的入参顺序一致)。
+ *
+ * 有效尝试口径(executor-switch-task-identity R3):若子任务 A 被子任务 B 以
+ * supersedesTaskId = A 替代,则 A 是「被替代的尝试」,不计入 childCount ——
+ * 检视者据此判断「这次工作实际由几个子任务完成」;被替代次数单独透出
+ * supersededCount(质量信号,不抹掉)。无替代关系时与改动前完全一致。
  *
  * allTerminal = 子任务非空且全部已到终态(done/failed/cancelled);零子任务时
  * 为 false —— 零子任务意味着 L1 层未发生(与 coordination-close-integrity 的
@@ -52,15 +60,22 @@ export async function deriveL1Aggregate(
 ): Promise<L1Aggregate> {
   const children = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
-    columns: { status: true },
+    columns: { id: true, status: true, supersedesTaskId: true },
     orderBy: (t, { asc }) => asc(t.createdAt),
   });
-  const statuses = children.map((child) => child.status);
+  const supersededIds = new Set(
+    children
+      .map((child) => child.supersedesTaskId)
+      .filter((id): id is string => id !== null),
+  );
+  const effective = children.filter((child) => !supersededIds.has(child.id));
+  const statuses = effective.map((child) => child.status);
   return {
-    childCount: children.length,
+    childCount: effective.length,
+    supersededCount: supersededIds.size,
     status: aggregateTaskStatuses(statuses),
     allTerminal:
-      children.length > 0 &&
-      children.every((child) => isTerminalTaskStatus(child.status)),
+      effective.length > 0 &&
+      effective.every((child) => isTerminalTaskStatus(child.status)),
   };
 }

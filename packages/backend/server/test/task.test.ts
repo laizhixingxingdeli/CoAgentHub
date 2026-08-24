@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
+import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
 import {
   appendTaskOutput,
@@ -62,6 +63,7 @@ describe("任务实体(server 单一状态源)", () => {
     status: "queued" | "running" | "done" | "failed" | "cancelled";
     checkpointRef: string | null;
     dispatchKind: "requirement" | "fix" | null;
+    supersedesTaskId: string | null;
     brief: string | null;
     diffSummary: unknown;
     createdAt: string;
@@ -312,6 +314,142 @@ describe("任务实体(server 单一状态源)", () => {
     );
     expect(response.status).toBe(200);
     expect(((await response.json()) as Task).dispatchKind).toBeNull();
+  });
+
+  it("POST 接受 supersedesTaskId 并落库,列表与详情透出", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    // 先建一条被替代的任务。
+    const target = await createTask(
+      coordinator.id,
+      group.id,
+      uuidv4(),
+      execA.id,
+    );
+    const targetTask = (await target.json()) as Task;
+    const newMessageId = uuidv4();
+
+    const created = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId: newMessageId,
+        executorParticipantId: execA.id,
+        supersedesTaskId: targetTask.id,
+      }),
+    });
+    expect(created.status).toBe(200);
+    const task = (await created.json()) as Task;
+    expect(task.supersedesTaskId).toBe(targetTask.id);
+
+    // 列表透出。
+    const list = await app.request(`/api/groups/${group.id}/tasks`);
+    expect(list.status).toBe(200);
+    expect(
+      ((await list.json()) as Task[]).find((entry) => entry.id === task.id)
+        ?.supersedesTaskId,
+    ).toBe(targetTask.id);
+
+    // 详情透出。
+    const detail = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+    );
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as Task).supersedesTaskId).toBe(
+      targetTask.id,
+    );
+  });
+
+  it("不传 supersedesTaskId 时保持 null(列表与详情透出 null)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const response = await createTask(
+      coordinator.id,
+      group.id,
+      uuidv4(),
+      execA.id,
+    );
+    expect(response.status).toBe(200);
+    const task = (await response.json()) as Task;
+    expect(task.supersedesTaskId).toBeNull();
+
+    const detail = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+    );
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as Task).supersedesTaskId).toBeNull();
+  });
+
+  it("指向跨群任务 → 400,不落库", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    // 另一个群里的任务。
+    const otherGroup = await createGroup(coordinator.id, "跨群任务测试");
+    const other = await createTask(
+      coordinator.id,
+      otherGroup.id,
+      uuidv4(),
+      execA.id,
+    );
+    const otherTask = (await other.json()) as Task;
+    const newMessageId = uuidv4();
+
+    const response = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId: newMessageId,
+        executorParticipantId: execA.id,
+        supersedesTaskId: otherTask.id,
+      }),
+    });
+    expect(response.status).toBe(400);
+    const error = (await response.json()) as { message: string };
+    expect(error.message).toContain("supersedesTaskId");
+
+    const list = await app.request(`/api/groups/${group.id}/tasks`);
+    expect(list.status).toBe(200);
+    expect(
+      ((await list.json()) as Task[]).some(
+        (entry) => entry.messageId === newMessageId,
+      ),
+    ).toBe(false);
+  });
+
+  it("指向同群仍 running 的任务 → 放行(不校验终态)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const target = await createTask(
+      coordinator.id,
+      group.id,
+      uuidv4(),
+      execA.id,
+    );
+    const targetTask = (await target.json()) as Task;
+    // 用执行器身份 PATCH 到 running(模拟已确认挂死、仍在 running 的原任务)。
+    const patch = await patchTask(execA.id, group.id, targetTask.id, {
+      status: "running",
+    });
+    expect(patch.status).toBe(200);
+
+    const created = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId: uuidv4(),
+        executorParticipantId: execA.id,
+        supersedesTaskId: targetTask.id,
+      }),
+    });
+    expect(created.status).toBe(200);
+    expect(((await created.json()) as Task).supersedesTaskId).toBe(
+      targetTask.id,
+    );
   });
 
   it("不同 message_id 各自建独立任务;列表按创建时间倒序", async () => {

@@ -33,7 +33,11 @@ import { wsHub } from "@server/lib/ws-hub";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
-import { assertGroupWritable, assertMemberNotHuman } from "./helpers";
+import {
+  assertGroupWritable,
+  assertMemberNotHuman,
+  assertSupersededTaskInGroup,
+} from "./helpers";
 
 /**
  * 群消息子路由:发送 / 编辑 / 软删 / 列表(可见性过滤 + ?after= 增量拉取 +
@@ -79,6 +83,11 @@ app
           specRef: z.string().max(500).optional(),
           specHash: z.string().max(64).optional(),
           dispatchKind: z.enum(["requirement", "fix"]).optional(),
+          // 替代关系(executor-switch-task-identity R2):本任务替代
+          // supersedesTaskId 所指的那次尝试;指向的任务必须属于同一群组(否则
+          // 400,见 assertSupersededTaskInGroup),不校验其是否已终态。不传 =
+          // null。
+          supersedesTaskId: z.string().uuid().optional(),
           // 任务下发者信息(Part A):只读取 metadata.dispatcherSessionId(≤200),
           // 其他 metadata 字段忽略,不影响任务创建;超长拒绝(400)。是否写入
           // 任务行由 handler 按发送者角色/身份判定(见下),此处只做格式约束。
@@ -130,6 +139,7 @@ app
         specRef,
         specHash,
         dispatchKind,
+        supersedesTaskId,
         callback,
       } = c.req.valid("json");
 
@@ -234,6 +244,14 @@ app
       } else if (audienceRef) {
         // broadcast has no reference; a stray one is a client bug.
         throw new BizError(BizCodeEnum.InvalidRequest);
+      }
+
+      // 替代关系(executor-switch-task-identity R2):被替代的任务必须属于同一
+      // 群组,否则 400;不校验其终态(协调者可能在原任务仍 running 时就决定
+      // 替代)。只在派发路径(定向执行器消息)校验;放在消息插入前,400 不会
+      // 留下已提交的消息行。
+      if (aud === "participant" && audienceRef && supersedesTaskId != null) {
+        await assertSupersededTaskInGroup(db, id, supersedesTaskId);
       }
 
       // Message + closure rows are written atomically (shared helper — the
@@ -408,6 +426,7 @@ app
           specRef: specRef ?? null,
           specHash: specHash ?? null,
           dispatchKind: dispatchKind ?? null,
+          supersedesTaskId: supersedesTaskId ?? null,
           callbackRef,
         }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
         if (warnings.length > 0) {
