@@ -46,7 +46,7 @@ CoAgentHub/
 │   │   │       │   └── helpers.ts    #      共享守卫(assertGroupWritable)
 │   │   │       ├── routes/system/     #    health
 │   │   │       ├── routes/file.ts     #    LAN 文件上传下载,纯磁盘无鉴权,流式读写
-│   │   │       ├── routes/skills.ts   #    暴露 skills/{coordinator|executor|bugfix|reviewer}/SKILL.md(GET /api/skills[:/:name])
+│   │   │       ├── routes/skills.ts   #    暴露 skills/{coordinator|executor|bugfix|reviewer}/SKILL.md(GET /api/skills[:/:name][/:name/digest]);正文接口带内容哈希 version
 │   │   │       ├── middleware/participant-identity.ts  # X-Participant-Id 身份声明(无鉴权/校验)
 │   │   │       ├── lib/config.ts             # 统一配置读取(CORS/FILE_DIR/上传上限/PORT)
 │   │   │       ├── lib/group-visibility.ts   # 消息可见性规则(单一来源)
@@ -118,7 +118,8 @@ CoAgentHub/
 | `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`) |
 | `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效) |
 | `/api/skills` | GET | 列出 `skills/` 下 skills(name + description + SKILL.md path) |
-| `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容(coordinator/executor/bugfix/reviewer;未知 404) |
+| `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容与基于文件内容的 SHA-256 前 12 位 `version`(coordinator/executor/bugfix/reviewer;未知 404) |
+| `/api/skills/:name/digest` | GET | 仅返回 skill 的内容哈希 `version`,不下载正文(未知 404) |
 | `/api/docs`、`/api/openapi` | GET | Scalar API 文档与 OpenAPI 规范 |
 
 ### 身份声明与可见性
