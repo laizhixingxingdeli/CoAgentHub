@@ -21,6 +21,7 @@
     "dev": "turbo run dev --parallel",
     "start": "turbo run start",
     "coagenthub:init": "node scripts/coagenthub-init.mjs",
+    "coagenthub:sync": "node scripts/coagenthub-sync-skills.mjs",
     "lint": "turbo run lint",
     "test": "vitest run",
     "test:e2e": "playwright test",
