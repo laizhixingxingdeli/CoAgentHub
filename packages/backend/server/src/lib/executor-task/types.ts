@@ -20,7 +20,12 @@ export interface DispatchExecutorInput {
   groupId: string;
   messageId: string;
   senderRoles: string[];
-  /** audienceRef = 被 @ 的 participant id(即执行器 participant 身份)。 */
+  /** 消息投递范围:缺省 "participant"(既有路径逐字不变,audienceRef =
+   *  participant id);"role" = 角色定向(R1,audienceRef = 角色名,派发层
+   *  按角色解析本群目标成员后走同一 dispatchTask 流程)。 */
+  audience?: "participant" | "role";
+  /** audienceRef = 被 @ 的 participant id(即执行器 participant 身份);
+   *  audience="role" 时 = 目标角色名。 */
   audienceRef: string;
   body: string;
   /** 任务下发者(Part A):消息发送者 participant(服务端识别,请求体不可伪造)。 */
@@ -55,6 +60,19 @@ export interface GroupPromptInfo {
   roles: string[];
   prompt: string | null;
 }
+
+/**
+ * maybeDispatchExecutorTask 的可观察结果:角色定向(R1)失败时返回明确原因,
+ * 调用方(消息路由)可据此发出可见信号(响应头),不再静默跳过;成功与
+ * participant 路径返回 undefined(行为逐字不变)。
+ */
+export type DispatchOutcome =
+  | { status: "dispatched"; participantId: string }
+  | {
+      status: "role-unresolved";
+      reason: "role-not-legal" | "role-no-member" | "role-no-executor";
+      role: string;
+    };
 
 /** 队列条目:一次待执行/执行中的运行。 */
 export interface QueuedRun {

@@ -167,7 +167,10 @@ app
         // taskId 非 UUID 时不可能指向本群任何任务(uuid 主键),先按不存在处理,
         // 避免 uuid 列与非法字符串比较触发 DB 错误(500)。
         if (parsed?.type === "review_result") {
-          const taskIdIsUuid = z.string().uuid().safeParse(parsed.taskId).success;
+          const taskIdIsUuid = z
+            .string()
+            .uuid()
+            .safeParse(parsed.taskId).success;
           const referenced = taskIdIsUuid
             ? await db.query.task.findFirst({
                 where: (t, { and: andFn, eq: eqFn }) =>
@@ -294,15 +297,22 @@ app
 
       // 阶段2-票1:定向到执行器 participant 的消息 → server 直接建 task + spawn
       // (fire-and-forget;命中与否/幂等/双跑防重都在 executor-task 内处理,
-      // 失败只记日志,绝不阻塞消息响应)。
-      if (aud === "participant" && audienceRef) {
+      // 失败只记日志,绝不阻塞消息响应)。audience=role(角色定向)由派发层按
+      // 角色解析目标成员(specs/dispatch-to-role.md R1),此处等待其解析结果
+      // 以便把「角色无匹配」作为可见信号(响应头)返回,不静默跳过(R3)。
+      if ((aud === "participant" || aud === "role") && audienceRef) {
         const warnings: string[] = [];
-        const targetParticipantForDispatch =
-          await db.query.participant.findFirst({
-            where: (t, { eq }) => eq(t.id, audienceRef),
-            columns: { name: true, executorKey: true },
-          });
+        const isRoleDispatch = aud === "role";
+        // 角色定向的目标在派发层按角色解析,路由层无法预知具体 participant;
+        // SPEC_HASH_MISSING 提示仅对 participant 定向有意义。
+        const targetParticipantForDispatch = isRoleDispatch
+          ? undefined
+          : await db.query.participant.findFirst({
+              where: (t, { eq }) => eq(t.id, audienceRef),
+              columns: { name: true, executorKey: true },
+            });
         const isExecutorTarget =
+          !isRoleDispatch &&
           targetParticipantForDispatch !== undefined &&
           (await findExecutorByParticipant(
             db,
@@ -414,10 +424,12 @@ app
             );
           }
         }
-        void maybeDispatchExecutorTask(db, {
+        const dispatchInput = {
           groupId: id,
           messageId: full.id,
           senderRoles: membership.roles,
+          audience:
+            aud === "role" ? ("role" as const) : ("participant" as const),
           audienceRef,
           body: body ?? "",
           dispatcherParticipantId: senderId,
@@ -428,7 +440,26 @@ app
           dispatchKind: dispatchKind ?? null,
           supersedesTaskId: supersedesTaskId ?? null,
           callbackRef,
-        }).catch((err) => console.warn("[executor] 后台调度失败(忽略):", err));
+        };
+        // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发结果,
+        // 把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,spec R3)。
+        // 意外错误一律只记日志,绝不阻塞消息响应。
+        if (aud === "role") {
+          const outcome = await maybeDispatchExecutorTask(
+            db,
+            dispatchInput,
+          ).catch((err) => {
+            console.warn("[executor] 后台调度失败(忽略):", err);
+            return undefined;
+          });
+          if (outcome?.status === "role-unresolved") {
+            warnings.push(`ROLE_UNRESOLVED:${outcome.role}:${outcome.reason}`);
+          }
+        } else {
+          void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>
+            console.warn("[executor] 后台调度失败(忽略):", err),
+          );
+        }
         if (warnings.length > 0) {
           c.header("X-CoAgentHub-Warning", warnings.join(","));
         }

@@ -9,6 +9,8 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
   type DispatchTargetAudit,
+  GROUP_ROLES,
+  type GroupMember,
   type TaskAttempt,
   taskDispatchWarning as taskDispatchWarningTable,
   task as taskTable,
@@ -31,7 +33,7 @@ import {
   renderExecutorArgs,
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
+import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
 import {
@@ -80,6 +82,7 @@ import {
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
+  type DispatchOutcome,
   type GroupPromptInfo,
   type GroupQueue,
   type QueuedRun,
@@ -340,15 +343,18 @@ export function cancelQueuedTasks(
 /**
  * 触发入口(路由 fire-and-forget 调用,不 await):命中执行器配置则
  * 幂等建 task + 入队;不命中/无权限/桥已执行则静默返回。
+ * audience=role(角色定向)时按 R1 解析本群目标成员后走同一流程,失败返回
+ * DispatchOutcome 供调用方发出可见信号(R3,不静默跳过)。
  */
 export async function maybeDispatchExecutorTask(
   db: DataBase,
   input: DispatchExecutorInput,
-): Promise<void> {
+): Promise<DispatchOutcome | undefined> {
   const {
     groupId,
     messageId,
     senderRoles,
+    audience,
     audienceRef,
     body,
     dispatcherParticipantId,
@@ -371,6 +377,45 @@ export async function maybeDispatchExecutorTask(
       `[executor] 跳过:发送者角色 [${senderRoles.join(",")}] 无权限发布任务`,
     );
     return;
+  }
+
+  // R1:audience=role → 按角色解析本群目标成员,其余流程(建任务、任务书、
+  // spawn)与 participant 定向完全一致。
+  // R5:平台按角色选出的是**接收这张协调任务的协调者**,不是 L1 执行器 ——
+  // 协调者收到后仍应按协调者 skill §2.2 自行挑选执行器下发 L1,平台不代劳。
+  if ((audience ?? "participant") === "role") {
+    const resolved = await resolveRoleTarget(db, groupId, audienceRef);
+    if (resolved.status !== "ok") {
+      console.error(
+        `[executor] 角色定向失败:role=${resolved.role} reason=${resolved.reason},不创建任务`,
+      );
+      return {
+        status: "role-unresolved",
+        reason: resolved.reason,
+        role: resolved.role,
+      };
+    }
+    const groupPrompt: GroupPromptInfo = {
+      roles: resolved.membership.roles,
+      prompt: resolved.membership.prompt,
+    };
+    await dispatchTask(db, {
+      groupId,
+      messageId,
+      participantId: resolved.participant.id,
+      ex: resolved.ex,
+      body,
+      groupPrompt,
+      dispatcherParticipantId,
+      dispatcherSessionId,
+      selectionReason: selectionReason ?? null,
+      specRef,
+      specHash,
+      dispatchKind,
+      supersedesTaskId,
+      callbackRef,
+    });
+    return { status: "dispatched", participantId: resolved.participant.id };
   }
 
   // audienceRef → participant → executor 配置(按 participant.executorKey 稳定绑定)。
@@ -417,6 +462,69 @@ export async function maybeDispatchExecutorTask(
     supersedesTaskId,
     callbackRef,
   });
+}
+
+/** 角色定向(R1)选出的目标成员及其执行器配置。 */
+interface ResolvedRoleTarget {
+  participant: { id: string; executorKey: string | null };
+  ex: ExecutorConfig;
+  membership: GroupMember;
+}
+
+/**
+ * R2:角色定向(R1)的目标成员选取 —— 全部复用既有可用性判定,不另写一套调度
+ * (另写一份必然与主路径漂移,isDetachedTask 先例):按顺序排除
+ *  1. 不在执行器配置中的(findExecutorByParticipant 返回空)
+ *  2. 处于限额冷却的(isInCooldown)
+ *  3. 已达并发上限的(runningExecutorCount vs maxConcurrency,同 isRunDispatchable)
+ * 余下取第一个;都不可用则回退到第一个持有执行器配置的成员,由现有排队机制
+ * (isRunDispatchable / pumpQueue)等其可用后再派发 —— 不报错、不跳过。
+ * 失败返回明确原因(R3):角色非法 / 本群无成员持有该角色 / 无成员在执行器配置中。
+ */
+async function resolveRoleTarget(
+  db: DataBase,
+  groupId: string,
+  role: string,
+): Promise<
+  | ({ status: "ok" } & ResolvedRoleTarget)
+  | {
+      status: "error";
+      reason: "role-not-legal" | "role-no-member" | "role-no-executor";
+      role: string;
+    }
+> {
+  // R3:非法角色名 → 明确失败,不静默跳过(消息层校验之外的第二道闸)。
+  if (!(GROUP_ROLES as readonly string[]).includes(role)) {
+    return { status: "error", reason: "role-not-legal", role };
+  }
+  const members = await db.query.groupMember.findMany({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.groupId, groupId), arrayContains(t.roles, [role])),
+  });
+  // R3:本群无成员持有该角色 → 明确失败。
+  if (members.length === 0) {
+    return { status: "error", reason: "role-no-member", role };
+  }
+  let fallback: ResolvedRoleTarget | null = null;
+  for (const membership of members) {
+    const participant = await db.query.participant.findFirst({
+      where: (t, { eq: eqFn }) => eqFn(t.id, membership.participantId),
+    });
+    if (!participant) continue;
+    const ex = await findExecutorByParticipant(db, participant);
+    if (!ex) continue; // R2-1:不在执行器配置中,排除
+    if (!fallback) fallback = { participant, ex, membership };
+    if (isInCooldown(ex)) continue; // R2-2:冷却中,排除
+    const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
+    if (runningExecutorCount(ex.key) >= cap) continue; // R2-3:并发已满,排除
+    return { status: "ok", participant, ex, membership };
+  }
+  if (fallback) {
+    // 可用候选都被冷却/并发排除 → 交给现有排队机制等其可用(不报错、不跳过)。
+    return { status: "ok", ...fallback };
+  }
+  // 成员都在执行器配置之外 → 无目标可派发,明确失败。
+  return { status: "error", reason: "role-no-executor", role };
 }
 
 /** 幂等建 task(复用 POST /tasks 的 message_id 唯一逻辑)后入队。 */
@@ -1763,14 +1871,10 @@ async function handleQuotaFailure(
       parseRateLimitRecoveryMs(tail) ?? Date.now() + getRateLimitCooldownMs(),
     ),
   );
-  await handleFailure(
-    run,
-    `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`,
-    {
-      retryable: false,
-      message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
-    },
-  );
+  await handleFailure(run, `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`, {
+    retryable: false,
+    message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
+  });
 }
 
 /**
