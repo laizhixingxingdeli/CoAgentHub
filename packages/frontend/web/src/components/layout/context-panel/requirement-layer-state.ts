@@ -1,3 +1,7 @@
+import {
+  type CoordinationPayload,
+  parseKnownCoordinationPayload,
+} from "@laizhixingxingdeli/database/schema";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import type { Requirement, StepStatus } from "./group-tasks-by-spec";
 import {
@@ -63,57 +67,41 @@ export function layerModeFromMembers(members: Member[]): "three" | "two" {
   return roles.has("reviewer") && roles.has("coordinator") ? "three" : "two";
 }
 
+function parseCoordinationPayload(body: string): CoordinationPayload | null {
+  try {
+    return parseKnownCoordinationPayload(body.trim()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function parseReviewResult(body: string): {
   verdict: string;
   findings: string | null;
   note: string | null;
   taskId: string | null;
 } | null {
-  if (!body.includes("review_result")) return null;
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    const payload = JSON.parse(body.slice(start, end + 1)) as {
-      type?: string;
-      taskId?: string;
-      verdict?: string;
-      findings?: string;
-      note?: string;
-    };
-    if (payload.type !== "review_result") return null;
-    return {
-      verdict: payload.verdict ?? "",
-      findings: payload.findings ?? null,
-      note: payload.note ?? null,
-      taskId: payload.taskId ?? null,
-    };
-  } catch {
-    return null;
-  }
+  const payload = parseCoordinationPayload(body);
+  if (payload?.type !== "review_result") return null;
+  return {
+    verdict: payload.verdict,
+    findings:
+      payload.findings.length > 0
+        ? payload.findings
+            .map(({ severity, note }) => `${severity}: ${note}`)
+            .join("\n")
+        : null,
+    note: payload.note ?? null,
+    taskId: payload.taskId,
+  };
 }
 
 function parseSpecPublished(
   body: string,
 ): { specRef: string; specHash: string | null } | null {
-  if (!body.includes("spec_published")) return null;
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    const payload = JSON.parse(body.slice(start, end + 1)) as {
-      type?: string;
-      specRef?: string;
-      specHash?: string;
-    };
-    if (payload.type !== "spec_published" || !payload.specRef) return null;
-    return {
-      specRef: payload.specRef,
-      specHash: typeof payload.specHash === "string" ? payload.specHash : null,
-    };
-  } catch {
-    return null;
-  }
+  const payload = parseCoordinationPayload(body);
+  if (payload?.type !== "spec_published") return null;
+  return { specRef: payload.specRef, specHash: payload.specHash };
 }
 
 function findSpecAnchor(

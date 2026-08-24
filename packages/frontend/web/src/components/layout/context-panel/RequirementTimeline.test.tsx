@@ -564,6 +564,104 @@ const MOCK_MEMBERS: Member[] = [
 ];
 
 describe("RequirementTimeline 消息卡片 (UI-04b-1 合并流)", () => {
+  it("结构化载荷按协议渲染为人读事件,不显示原始 JSON", () => {
+    const payloads = [
+      {
+        id: "spec-published",
+        body: JSON.stringify({
+          type: "spec_published",
+          specRef: "specs/structured-payload-rendering.md",
+          specHash: "b7c2cf1f",
+          summary: "时间线只显示可读信息。",
+        }),
+      },
+      {
+        id: "spec-amended",
+        body: JSON.stringify({
+          type: "spec_amended",
+          specRef: "specs/structured-payload-rendering.md",
+          specHash: "new-hash",
+          reason: "补充解析失败提示。",
+        }),
+      },
+      {
+        id: "review-request",
+        body: JSON.stringify({
+          type: "review_request",
+          layer: 3,
+          taskId: "l2",
+          specRef: "specs/structured-payload-rendering.md",
+          specHash: "b7c2cf1f",
+          diffSummary: "L2 已通过,请进行架构检视。",
+        }),
+      },
+      {
+        id: "review-result",
+        body: JSON.stringify({
+          type: "review_result",
+          layer: 3,
+          taskId: "l2",
+          verdict: "findings",
+          findings: [{ severity: "中", note: "需要补测试。" }],
+          note: "请补充测试后再合并。",
+        }),
+      },
+    ];
+
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "l2", messageId: "spec-published" })]}
+        messages={payloads.map(({ id, body }) => makeMessage({ id, body }))}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("requirement-timeline-coordination-spec-published"),
+    ).toHaveTextContent(
+      "公布规范 specs/structured-payload-rendering.md @b7c2cf1f时间线只显示可读信息。",
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-coordination-spec-amended"),
+    ).toHaveTextContent(
+      "修订规范 specs/structured-payload-rendering.md → new-hash",
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-coordination-review-request"),
+    ).toHaveTextContent("交回 L3 检视");
+    expect(
+      screen.getByTestId("requirement-timeline-coordination-review-result"),
+    ).toHaveTextContent("检视者公布 L3 裁决 · 有发现项");
+
+    const timeline = screen.getByTestId("requirement-timeline");
+    expect(timeline).not.toHaveTextContent('"type"');
+    expect(timeline).not.toHaveTextContent("请补充测试后再合并");
+    expect(timeline).not.toHaveTextContent("需要补测试");
+  });
+
+  it("形似结构化载荷但解析失败时显式标注并折叠保留原文", () => {
+    const malformed = '{"type":"review_result","layer":3,"findings":"坏形状"}';
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1", messageId: "malformed" })]}
+        messages={[makeMessage({ id: "malformed", body: malformed })]}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("requirement-timeline-invalid-coordination-malformed"),
+    ).toHaveTextContent("无法解析的协作载荷");
+    expect(screen.getByText("查看原文")).toBeInTheDocument();
+    expect(
+      screen
+        .getByTestId("requirement-timeline-invalid-coordination-malformed")
+        .querySelector("details"),
+    ).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("查看原文"));
+    expect(
+      screen.getByTestId("requirement-timeline-invalid-coordination-malformed"),
+    ).toHaveTextContent(malformed);
+  });
+
   it("消息卡片:发送者名 + 定向对象(participant → 对方名 / role → 角色名 / broadcast 无箭头)", () => {
     render(
       <RequirementTimeline

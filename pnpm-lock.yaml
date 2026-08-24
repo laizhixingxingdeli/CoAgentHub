@@ -266,6 +266,9 @@ importers:
 
   packages/frontend/web:
     dependencies:
+      '@laizhixingxingdeli/database':
+        specifier: workspace:*
+        version: link:../../backend/database
       '@laizhixingxingdeli/server':
         specifier: workspace:*
         version: link:../../backend/server

@@ -12,6 +12,7 @@
     "check-types": "tsc -b"
   },
   "dependencies": {
+    "@laizhixingxingdeli/database": "workspace:*",
     "@laizhixingxingdeli/server": "workspace:*",
     "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-collapsible": "^1.1.11",

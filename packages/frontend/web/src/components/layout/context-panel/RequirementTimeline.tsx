@@ -19,6 +19,10 @@
  * 动画过渡)。
  */
 
+import {
+  type CoordinationPayload,
+  parseKnownCoordinationPayload,
+} from "@laizhixingxingdeli/database/schema";
 import { AlertTriangle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { LiveOutput } from "@/components/live-output";
@@ -85,6 +89,79 @@ const ROLE_AVATAR_CLASS: Record<TimelineRole, string> = {
 
 /** 超过该字数的 tests/todo 视为长内容 → 收进「展开」。 */
 const FOLD_THRESHOLD = 80;
+
+type CoordinationPresentation =
+  | { kind: "free-text" }
+  | { kind: "invalid" }
+  | { kind: "known"; payload: CoordinationPayload };
+
+/**
+ * Coordination messages are a protocol, not free-form text.  Keep the
+ * protocol判定 delegated to the database package so the timeline cannot
+ * drift from the server's schema.
+ */
+function coordinationPresentation(body: string): CoordinationPresentation {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{") || !trimmed.includes('"type"')) {
+    return { kind: "free-text" };
+  }
+
+  try {
+    const payload = parseKnownCoordinationPayload(trimmed);
+    return payload ? { kind: "known", payload } : { kind: "invalid" };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+function renderCoordinationPayload(
+  payload: CoordinationPayload,
+  messageId: string,
+) {
+  switch (payload.type) {
+    case "spec_published":
+      return (
+        <div data-testid={`requirement-timeline-coordination-${messageId}`}>
+          <p className="whitespace-pre-wrap break-words text-sm">
+            公布规范 <code>{payload.specRef}</code> @{payload.specHash}
+          </p>
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground/75">
+            {payload.summary}
+          </p>
+        </div>
+      );
+    case "spec_amended":
+      return (
+        <div data-testid={`requirement-timeline-coordination-${messageId}`}>
+          <p className="whitespace-pre-wrap break-words text-sm">
+            修订规范 <code>{payload.specRef}</code> → {payload.specHash}
+          </p>
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground/75">
+            {payload.reason}
+          </p>
+        </div>
+      );
+    case "review_request":
+      return (
+        <p
+          data-testid={`requirement-timeline-coordination-${messageId}`}
+          className="whitespace-pre-wrap break-words text-sm"
+        >
+          交回 L3 检视
+        </p>
+      );
+    case "review_result":
+      return (
+        <p
+          data-testid={`requirement-timeline-coordination-${messageId}`}
+          className="whitespace-pre-wrap break-words text-sm"
+        >
+          检视者公布 L3 裁决 ·{" "}
+          {payload.verdict === "pass" ? "通过" : "有发现项"}
+        </p>
+      );
+  }
+}
 
 /** 从 diffSummary 取非空字符串字段(diffSummary 是 unknown 记录,需运行时判型)。 */
 function readText(
@@ -216,6 +293,9 @@ export default function RequirementTimeline({
       ? `${message.body.slice(0, MESSAGE_FOLD_PREVIEW_LENGTH)}…`
       : message.body;
     const expanded = expandedIds.has(message.id);
+    const coordination = softDeleted
+      ? ({ kind: "free-text" } satisfies CoordinationPresentation)
+      : coordinationPresentation(message.body);
     return (
       <li
         key={message.id}
@@ -258,6 +338,21 @@ export default function RequirementTimeline({
             >
               消息已删除
             </p>
+          ) : coordination.kind === "known" ? (
+            renderCoordinationPayload(coordination.payload, message.id)
+          ) : coordination.kind === "invalid" ? (
+            <div
+              data-testid={`requirement-timeline-invalid-coordination-${message.id}`}
+              className="mt-1"
+            >
+              <p className="text-sm">无法解析的协作载荷</p>
+              <details className="mt-1 text-xs text-muted-foreground">
+                <summary className="cursor-pointer">查看原文</summary>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2">
+                  {message.body}
+                </pre>
+              </details>
+            </div>
           ) : (
             <p className="mt-1 whitespace-pre-wrap break-words text-sm">
               {preview}
@@ -281,7 +376,7 @@ export default function RequirementTimeline({
               {taskStatus.retries > 0 ? ` · 重试 ${taskStatus.retries} 次` : ""}
             </span>
           )}
-          {!softDeleted && longBody && (
+          {!softDeleted && coordination.kind === "free-text" && longBody && (
             <FoldableContent
               toggleTestId={`requirement-timeline-toggle-${message.id}`}
               detailTestId={`requirement-timeline-detail-${message.id}`}

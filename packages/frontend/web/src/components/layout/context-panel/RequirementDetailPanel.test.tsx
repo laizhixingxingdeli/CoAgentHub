@@ -91,7 +91,7 @@ function reviewResult(
       specHash: "abc1234",
       verdict,
       note,
-      findings,
+      findings: findings ? [{ severity: "发现", note: findings }] : [],
     }),
     contentType: "text/plain",
     fileRef: null,
