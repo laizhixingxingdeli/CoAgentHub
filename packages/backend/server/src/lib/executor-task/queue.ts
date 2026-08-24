@@ -242,7 +242,7 @@ export function currentRunningTask(groupId?: string): {
     const r = g.running.find(
       (rr) => rr?.kill && (!groupId || rr.groupId === groupId),
     );
-    if (r && r.kill) {
+    if (r?.kill) {
       return {
         taskId: r.taskId,
         participantId: r.participantId,
@@ -321,9 +321,7 @@ export function cancelQueuedTasks(
     // 保证「停止指令已执行但任务照跑」不会发生在 spawn 前窗口。
     const r = g.running.find(
       (rr) =>
-        !rr.kill &&
-        rr.groupId === groupId &&
-        (!taskId || rr.taskId === taskId),
+        !rr.kill && rr.groupId === groupId && (!taskId || rr.taskId === taskId),
     );
     if (r) {
       r.stopped = true;
@@ -836,7 +834,7 @@ async function pumpQueue(): Promise<void> {
       // 或退避定时器会再次泵送自动派发)。
       const group = [...groupQueues.values()].find(
         (g) =>
-          g.running.length < workspaceCap(g.key) &&
+          runningForWorkspace(g) < workspaceCap(g.key) &&
           g.queue.length > 0 &&
           isRunDispatchable(g.queue[0]),
       );
@@ -856,6 +854,13 @@ async function pumpQueue(): Promise<void> {
  *  维持单槽(改动前行为);绑定 projectPath 的组按 maxConcurrentPerWorkspace。 */
 function workspaceCap(key: string): number {
   return key === DEFAULT_GROUP_KEY ? 1 : getMaxConcurrentPerWorkspace();
+}
+
+/** 工作树闸计数:未绑定 projectPath 的默认组沿用组内单槽,绑定项目按路径聚合。 */
+function runningForWorkspace(group: GroupQueue): number {
+  return group.key === DEFAULT_GROUP_KEY
+    ? group.running.length
+    : runningWorkspaceCount(group.key);
 }
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
