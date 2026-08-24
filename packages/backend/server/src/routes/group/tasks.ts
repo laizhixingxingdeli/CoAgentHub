@@ -29,7 +29,8 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { findExecutorByKey } from "@server/lib/executors";
-import { and, eq, ilike } from "drizzle-orm";
+import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -503,6 +504,13 @@ app
       const l3 = await deriveL3Answer(db, task);
       if (l3) {
         detail.l3 = l3;
+      }
+      // L1 聚合(R1,specs/reviewer-needs-no-executor-visibility.md):目标是协调
+      // 任务(isDetachedTask)时派生 l1 字段(子任务数/聚合态/是否全终态),供
+      // 检视者验收 L1 层是否发生;不含执行器身份。非协调任务不输出 l1(不是
+      // 空对象),其余载荷保持逐字不变。
+      if (await isDetachedTask(db, task)) {
+        detail.l1 = await deriveL1Aggregate(db, task);
       }
       return c.json(detail);
     },
