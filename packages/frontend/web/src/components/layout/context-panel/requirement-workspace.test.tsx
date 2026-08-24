@@ -40,8 +40,12 @@ function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
   };
 }
 
-function workspaceFetchMock(tasks: TaskItem[]) {
+function workspaceFetchMock(tasks: TaskItem[], stale = false) {
   return createFetchMock([
+    {
+      match: (url) => url === "/api/health",
+      respond: () => jsonResponse({ stale }),
+    },
     {
       match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
       respond: () =>
@@ -76,8 +80,8 @@ function setViewport(width: number) {
   });
 }
 
-function renderWorkspace(tasks: TaskItem[]) {
-  vi.stubGlobal("fetch", workspaceFetchMock(tasks));
+function renderWorkspace(tasks: TaskItem[], stale = false) {
+  vi.stubGlobal("fetch", workspaceFetchMock(tasks, stale));
   return renderWithProviders(<RequirementWorkspace groupId="group-1" />);
 }
 
@@ -101,6 +105,20 @@ afterEach(() => {
 });
 
 describe("RequirementWorkspace 响应式布局", () => {
+  it("runtime stale 只在页面级显示一次且可关闭", async () => {
+    setViewport(1280);
+    renderWorkspace(TWO_REQUIREMENTS, true);
+
+    const banner = await screen.findByTestId("runtime-stale-banner");
+    expect(banner).toHaveTextContent("后端运行的不是最新构建");
+    expect(screen.getAllByTestId("runtime-stale-banner")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭后端状态提示" }));
+    expect(
+      screen.queryByTestId("runtime-stale-banner"),
+    ).not.toBeInTheDocument();
+  });
+
   it("真实零子任务协调载荷:列表与详情共享 na-declared/done 状态", async () => {
     setViewport(1280);
     const reason = "本票由发布者直接定向 codex 完成实现,未创建下游执行子任务。";

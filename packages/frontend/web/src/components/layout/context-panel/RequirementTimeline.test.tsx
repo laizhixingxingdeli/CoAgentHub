@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   formatDurationMs,
   formatMessageTime,
@@ -43,6 +43,10 @@ describe("roleFromExecutorKey 角色推断(executorKey 字符串映射的简化�
 });
 
 describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("耗时格式使用秒或分秒,不显示裸毫秒", () => {
     expect(formatDurationMs(9_000)).toBe("9s");
     expect(formatDurationMs(65_000)).toBe("1m 5s");
@@ -74,6 +78,29 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     expect(card).toHaveClass("border");
     expect(screen.getByText("接好了任务面板的分组数据层")).toBeInTheDocument();
     expect(screen.getByText("补了组件测试")).toBeInTheDocument();
+  });
+
+  it("liveness warning 在任务卡片显示无信号时长", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T02:00:00.000Z"));
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "stalled-task",
+            status: "running",
+            liveness: {
+              warning: true,
+              lastSignalAt: "2026-08-24T01:45:00.000Z",
+            },
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("requirement-timeline-liveness-stalled-task"),
+    ).toHaveTextContent("疑似中断 · 已 15 分钟无信号");
   });
 
   it("停止/回滚控制跟随任务卡片,历史任务仍可回滚", () => {

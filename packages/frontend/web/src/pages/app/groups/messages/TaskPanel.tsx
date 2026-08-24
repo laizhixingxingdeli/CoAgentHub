@@ -39,6 +39,31 @@ export type TaskAttempt = {
   tokenUsage?: string;
 };
 
+export type TaskObservability = {
+  l1?: {
+    childCount: number;
+    supersededCount: number;
+    status: string;
+    allTerminal: boolean;
+  };
+  l3?: {
+    answered: boolean;
+    verdict: "pass" | "findings" | null;
+    awaitingSince: string;
+    overdue: boolean;
+  };
+  liveness?: {
+    warning: boolean;
+    lastSignalAt: string;
+  };
+  /** Runtime freshness is global; kept here only to mirror task detail shape. */
+  runtime?: {
+    startedAt: string;
+    entryMtime: string | null;
+    stale: boolean;
+  };
+};
+
 export type TaskItem = {
   id: string;
   groupId: string;
@@ -66,6 +91,11 @@ export type TaskItem = {
   attempts?: TaskAttempt[];
   /** includeOutput=1 时返回的实时输出缓冲(running 任务/完成回填)。 */
   outputTail?: string;
+  /** Task detail observability fields, loaded lazily for the selected requirement. */
+  l1?: TaskObservability["l1"];
+  l3?: TaskObservability["l3"];
+  liveness?: TaskObservability["liveness"];
+  runtime?: TaskObservability["runtime"];
 };
 
 export function taskStatusLabel(status: TaskStatus): string {

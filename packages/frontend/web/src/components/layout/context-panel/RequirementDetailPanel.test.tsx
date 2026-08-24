@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import { groupTasksBySpec } from "./group-tasks-by-spec";
@@ -122,6 +122,10 @@ function specPublished(): MessageItem {
 }
 
 describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-three-layer-view)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("requirement 为 null:显示空态提示,不渲染阶梯/时间线", () => {
     render(
       <RequirementDetailPanel requirement={null} messages={[]} members={[]} />,
@@ -278,6 +282,84 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     expect(screen.getByText("检视尚未开始")).toBeInTheDocument();
     expect(screen.getByTestId("requirement-layer-l3")).toHaveTextContent(
       "未开始",
+    );
+  });
+
+  it("L1 使用有效执行次数并显示替代执行器次数", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({
+        l1: {
+          childCount: 2,
+          supersededCount: 1,
+          status: "done",
+          allTerminal: true,
+        },
+      }),
+      executionTask({ id: "exec-1", parentTaskId: "l2" }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[]}
+      />,
+    );
+
+    expect(screen.getByTestId("requirement-layer-l1")).toHaveTextContent(
+      "2 次执行 · 换过 1 次执行器",
+    );
+  });
+
+  it("L3 未答复显示等待时长,超时使用警示文案", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T02:00:00.000Z"));
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({
+        l3: {
+          answered: false,
+          verdict: null,
+          awaitingSince: "2026-08-24T01:30:00.000Z",
+          overdue: false,
+        },
+      }),
+    ]);
+    const { rerender } = render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+    expect(screen.getByTestId("requirement-l3-waiting")).toHaveTextContent(
+      "等待检视 · 已等待 30 分钟",
+    );
+    expect(screen.getByTestId("requirement-l3-waiting")).not.toHaveClass(
+      "text-status-unconfirmed",
+    );
+
+    rerender(
+      <RequirementDetailPanel
+        requirement={{
+          ...requirement,
+          tasks: requirement.tasks.map((task) => ({
+            ...task,
+            l3: {
+              answered: false,
+              verdict: null,
+              awaitingSince: "2026-08-24T00:00:00.000Z",
+              overdue: true,
+            },
+          })),
+        }}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+    expect(screen.getByTestId("requirement-l3-waiting")).toHaveTextContent(
+      "等待检视超时 · 已等待 2 小时",
+    );
+    expect(screen.getByTestId("requirement-l3-waiting")).toHaveClass(
+      "text-status-unconfirmed",
     );
   });
 

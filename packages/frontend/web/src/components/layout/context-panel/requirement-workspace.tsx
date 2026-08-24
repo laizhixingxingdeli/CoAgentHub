@@ -6,6 +6,7 @@ import { t } from "@/lib/i18n";
 import { appendOutputTail } from "@/lib/output-buffer";
 import TaskPanel, {
   type TaskItem,
+  type TaskObservability,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import { groupTasksBySpec } from "./group-tasks-by-spec";
@@ -77,12 +78,25 @@ export function RequirementWorkspace({
   // 任务行内正文预览(前 40 字)与执行者名需要消息流与成员数据。
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  // Detail-only observability fields are loaded for the selected requirement;
+  // the task list remains the lightweight source for the rest of the panel.
+  const [taskObservability, setTaskObservability] = useState<
+    Record<string, TaskObservability>
+  >({});
+  const loadedTaskDetailsRef = useRef(new Set<string>());
+  const [runtimeStale, setRuntimeStale] = useState(false);
+  const [runtimeDismissed, setRuntimeDismissed] = useState(false);
+  const runtimeWasStaleRef = useRef(false);
 
   // UI-04a:把扁平任务列表按 specRef 聚合成需求(Requirement)。分组结果随
   // tasks 变化重算;顺序由分组函数保证(最新需求在数组最后)。
   const { requirements, layerStates } = useMemo(() => {
     const states = new Map<string, RequirementLayerState>();
-    const grouped = groupTasksBySpec(tasks).map((requirement) => {
+    const observedTasks = tasks.map((task) => ({
+      ...task,
+      ...(taskObservability[task.id] ?? {}),
+    }));
+    const grouped = groupTasksBySpec(observedTasks).map((requirement) => {
       const layerState = deriveRequirementLayerState(
         requirement,
         messages,
@@ -92,7 +106,7 @@ export function RequirementWorkspace({
       return { ...requirement, steps: layerState.steps };
     });
     return { requirements: grouped, layerStates: states };
-  }, [tasks, messages, members]);
+  }, [tasks, taskObservability, messages, members]);
   // 「需求 / 修复」二态切换(requirement-list-kind-tabs R1):null dispatchKind
   // 按「需求」处理(R2);过滤只影响列表展示,不改分组数据本身。
   const [requirementKind, setRequirementKind] =
@@ -207,12 +221,34 @@ export function RequirementWorkspace({
     }
   }, [groupId]);
 
+  const loadRuntimeStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/health");
+      if (!res.ok) return;
+      const status = (await res.json()) as { stale?: unknown };
+      if (typeof status.stale !== "boolean") return;
+      if (status.stale && !runtimeWasStaleRef.current) {
+        setRuntimeDismissed(false);
+      }
+      runtimeWasStaleRef.current = status.stale;
+      setRuntimeStale(status.stale);
+    } catch {
+      // Health is advisory; a failed probe must not add a persistent error row.
+    }
+  }, []);
+
   useEffect(() => {
     void loadTasks();
     void loadMessages();
     void loadMembers();
     void loadGroupStatus();
   }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
+
+  useEffect(() => {
+    void loadRuntimeStatus();
+    const timer = setInterval(() => void loadRuntimeStatus(), 30_000);
+    return () => clearInterval(timer);
+  }, [loadRuntimeStatus]);
 
   // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(有界缓冲,
   // 与后端 output-buffer.ts 同款上限:1000 行 / 256KB,超限保留尾部);
@@ -403,6 +439,52 @@ export function RequirementWorkspace({
   const selectedRequirement =
     requirements.find((r) => r.id === selectedRequirementId) ?? null;
 
+  const selectedTaskIds =
+    selectedRequirement?.tasks.map((task) => task.id).join(",") ?? "";
+  useEffect(() => {
+    if (!selectedRequirement || !selectedTaskIds) return;
+    const taskRows = selectedRequirement.tasks.filter(
+      (task) => !loadedTaskDetailsRef.current.has(task.id),
+    );
+    if (taskRows.length === 0) return;
+    let cancelled = false;
+    const loadDetails = async () => {
+      const results = await Promise.all(
+        taskRows.map(async (task) => {
+          try {
+            const res = await fetch(`/api/groups/${groupId}/tasks/${task.id}`);
+            loadedTaskDetailsRef.current.add(task.id);
+            if (!res.ok) return null;
+            const detail = (await res.json()) as TaskItem;
+            const observability: TaskObservability = {};
+            if (detail.l1) observability.l1 = detail.l1;
+            if (detail.l3) observability.l3 = detail.l3;
+            if (detail.liveness) observability.liveness = detail.liveness;
+            if (detail.runtime) observability.runtime = detail.runtime;
+            return { id: task.id, observability };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const next = results.reduce<Record<string, TaskObservability>>(
+        (accumulator, result) => {
+          if (result) accumulator[result.id] = result.observability;
+          return accumulator;
+        },
+        {},
+      );
+      if (Object.keys(next).length > 0) {
+        setTaskObservability((previous) => ({ ...previous, ...next }));
+      }
+    };
+    void loadDetails();
+    return () => {
+      cancelled = true;
+    };
+  }, [groupId, selectedRequirement, selectedTaskIds]);
+
   /** 切换「需求 / 修复」标签:原选中若不在新标签列表,回落为未选中,
    *  不自动挑一条(requirement-list-kind-tabs R5,同 live-refresh R3 原则)。 */
   const handleKindChange = (kind: RequirementKind) => {
@@ -456,6 +538,25 @@ export function RequirementWorkspace({
       data-testid="requirement-workspace"
       className="flex min-h-0 flex-1 flex-col"
     >
+      {runtimeStale && !runtimeDismissed && (
+        <div
+          data-testid="runtime-stale-banner"
+          role="status"
+          className="mx-4 mt-2 flex shrink-0 items-center gap-2 rounded-md border border-status-unconfirmed/50 bg-status-unconfirmed/10 px-3 py-2 text-sm text-status-unconfirmed"
+        >
+          <span className="min-w-0 flex-1">
+            后端运行的不是最新构建 —— 你看到的接口可能不含刚落地的改动
+          </span>
+          <button
+            type="button"
+            aria-label="关闭后端状态提示"
+            onClick={() => setRuntimeDismissed(true)}
+            className="shrink-0 rounded px-1.5 py-0.5 text-base leading-none hover:bg-status-unconfirmed/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            ×
+          </button>
+        </div>
+      )}
       {requirements.length === 0 ? (
         // 没有任何按 specRef 分组的需求:回退到原始任务列表(TaskPanel),
         // 保留完整能力(停止/回滚/实时输出/执行历史 + 无进展提醒)。

@@ -24,6 +24,7 @@
 
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { useLiveNow } from "@/pages/app/groups/messages/lib";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import {
   executionTasksForRequirement,
@@ -185,6 +186,13 @@ export default function RequirementDetailPanel({
   const [expandedRequirementId, setExpandedRequirementId] = useState<
     string | null
   >(null);
+  const now = useLiveNow(
+    Boolean(
+      requirement?.tasks.some(
+        (task) => task.l3?.answered === false && task.l3.awaitingSince,
+      ),
+    ),
+  );
 
   if (!requirement) {
     return (
@@ -304,11 +312,22 @@ export default function RequirementDetailPanel({
   const firstTaskSummary = l1Tasks
     .map((task) => task.diffSummary?.summary)
     .find((summary): summary is string => typeof summary === "string");
-  const l1Summary = l1Tasks.length
-    ? `${l1Tasks.length} 次执行${firstTaskSummary ? ` · ${firstLine(firstTaskSummary)}` : ""}`
-    : l1.noExecutionReason
-      ? firstLine(l1.noExecutionReason)
-      : "暂无执行记录";
+  const l1Summary =
+    l1.childCount > 0
+      ? `${l1.childCount} 次执行${l1.supersededCount > 0 ? ` · 换过 ${l1.supersededCount} 次执行器` : ""}${firstTaskSummary ? ` · ${firstLine(firstTaskSummary)}` : ""}`
+      : l1.noExecutionReason
+        ? firstLine(l1.noExecutionReason)
+        : "暂无执行记录";
+  const waitingMinutes = l3.awaitingSince
+    ? Math.max(0, Math.floor((now - Date.parse(l3.awaitingSince)) / 60_000))
+    : 0;
+  const waitingHours = Math.max(1, Math.floor(waitingMinutes / 60));
+  const l3WaitingSummary =
+    l3.answered === false && l3.awaitingSince
+      ? l3.overdue
+        ? `等待检视超时 · 已等待 ${waitingHours} 小时`
+        : `等待检视 · 已等待 ${waitingMinutes} 分钟`
+      : null;
   const l3Expanded = isLayerExpanded("l3", l3.status);
   const l2Expanded = isLayerExpanded("l2", l2.status);
   const l1Expanded = isLayerExpanded("l1", l1.status);
@@ -332,9 +351,24 @@ export default function RequirementDetailPanel({
         status={l3.status}
         summary={
           <>
-            {l3.verdict === "pass" && "检视通过"}
-            {l3.verdict === "findings" && <span>检视发现</span>}
-            {l3.verdict && (l3.findings || l3.note) && (
+            {l3WaitingSummary ? (
+              <span
+                data-testid="requirement-l3-waiting"
+                className={
+                  l3.overdue
+                    ? "font-medium text-status-unconfirmed"
+                    : "text-muted-foreground"
+                }
+              >
+                {l3WaitingSummary}
+              </span>
+            ) : (
+              <>
+                {l3.verdict === "pass" && "检视通过"}
+                {l3.verdict === "findings" && <span>检视发现</span>}
+              </>
+            )}
+            {!l3WaitingSummary && l3.verdict && (l3.findings || l3.note) && (
               <span className="ml-1">
                 {l3.findings ? (
                   <span
@@ -355,7 +389,7 @@ export default function RequirementDetailPanel({
                 )}
               </span>
             )}
-            {!l3.verdict && l3Summary}
+            {!l3WaitingSummary && !l3.verdict && l3Summary}
             {l3.specRef && (
               <span
                 data-testid="requirement-l3-anchor"

@@ -274,11 +274,15 @@ export default function RequirementTimeline({
     () => providedEvents ?? mergeRequirementTimeline(tasks, messages, members),
     [providedEvents, tasks, messages, members],
   );
-  const hasLiveDuration = tasks.some(
-    (task) =>
-      task.status === "running" ||
-      task.attempts?.some((attempt) => !attempt.endedAt),
-  );
+  const hasLiveDuration =
+    tasks.some(
+      (task) =>
+        task.status === "running" ||
+        task.attempts?.some((attempt) => !attempt.endedAt),
+    ) ||
+    events.some(
+      (event) => event.kind === "task" && event.task.liveness?.warning === true,
+    );
   const now = useLiveNow(hasLiveDuration);
 
   if (events.length === 0) {
@@ -465,6 +469,13 @@ export default function RequirementTimeline({
     const rollbackState = rollbackStates[task.id];
     const rolling = rollbackState === "rolling";
     const rollbackDone = rollbackState === "done";
+    const livenessWarning = task.liveness?.warning === true;
+    const signalMinutes = task.liveness?.lastSignalAt
+      ? Math.max(
+          0,
+          Math.floor((now - Date.parse(task.liveness.lastSignalAt)) / 60_000),
+        )
+      : 0;
     return (
       <li
         key={task.id}
@@ -490,6 +501,14 @@ export default function RequirementTimeline({
               {formatMessageTime(timestamp)}
             </span>
           </div>
+          {livenessWarning && (
+            <p
+              data-testid={`requirement-timeline-liveness-${task.id}`}
+              className={`mt-1.5 rounded-md border px-2 py-1 text-xs ${TASK_UNCONFIRMED_CLASSES}`}
+            >
+              疑似中断 · 已 {signalMinutes} 分钟无信号
+            </p>
+          )}
           {failed && (
             <p
               data-testid={`requirement-timeline-failed-${task.id}`}

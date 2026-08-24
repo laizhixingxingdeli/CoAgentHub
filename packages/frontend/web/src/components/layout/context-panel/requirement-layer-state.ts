@@ -25,11 +25,18 @@ export type L3State = {
   note: string | null;
   specRef: string | null;
   specHash: string | null;
+  /** API observability; null means this older task has no l3 detail yet. */
+  answered: boolean | null;
+  awaitingSince: string | null;
+  overdue: boolean;
 };
 
 export type L1State = {
   status: StepStatus;
   noExecutionReason: string | null;
+  /** API effective-attempt counts; fallback is derived from list rows. */
+  childCount: number;
+  supersededCount: number;
 };
 
 export type RequirementLayerState = {
@@ -122,15 +129,14 @@ function findSpecAnchor(
 function deriveL1(requirement: Requirement): L1State {
   const coordinationTask = coordinationTaskForTasks(requirement.tasks);
   const reason = noExecutionReasonForTask(coordinationTask);
+  const executionTasks = executionTasksForRequirement(requirement.tasks);
   return {
     status: reason
       ? "na-declared"
-      : aggregateTaskStatuses(
-          executionTasksForRequirement(requirement.tasks).map(
-            (task) => task.status,
-          ),
-        ),
+      : aggregateTaskStatuses(executionTasks.map((task) => task.status)),
     noExecutionReason: reason,
+    childCount: coordinationTask?.l1?.childCount ?? executionTasks.length,
+    supersededCount: coordinationTask?.l1?.supersededCount ?? 0,
   };
 }
 
@@ -150,6 +156,8 @@ function deriveL3(
   l2: L2State,
 ): L3State {
   const anchor = findSpecAnchor(requirement, messages);
+  const coordinationTask = coordinationTaskForTasks(requirement.tasks);
+  const apiL3 = coordinationTask?.l3;
   if (requirement.dispatchKind === "fix") {
     return {
       status: "na-fix",
@@ -158,6 +166,9 @@ function deriveL3(
       note: null,
       specRef: anchor?.specRef ?? null,
       specHash: anchor?.specHash ?? null,
+      answered: null,
+      awaitingSince: null,
+      overdue: false,
     };
   }
   const taskIds = new Set(requirement.tasks.map((task) => task.id));
@@ -169,6 +180,9 @@ function deriveL3(
       note: null,
       specRef: anchor?.specRef ?? null,
       specHash: anchor?.specHash ?? null,
+      answered: null,
+      awaitingSince: null,
+      overdue: false,
     };
   }
   for (const message of messages) {
@@ -186,8 +200,24 @@ function deriveL3(
         note: result.note,
         specRef: anchor?.specRef ?? null,
         specHash: anchor?.specHash ?? null,
+        answered: true,
+        awaitingSince: apiL3?.awaitingSince ?? null,
+        overdue: false,
       };
     }
+  }
+  if (apiL3?.answered && apiL3.verdict) {
+    return {
+      status: apiL3.verdict === "pass" ? "done" : "failed",
+      verdict: apiL3.verdict,
+      findings: null,
+      note: null,
+      specRef: anchor?.specRef ?? null,
+      specHash: anchor?.specHash ?? null,
+      answered: true,
+      awaitingSince: apiL3.awaitingSince,
+      overdue: false,
+    };
   }
   return {
     status: l2.status === "done" ? "running" : "pending",
@@ -196,6 +226,9 @@ function deriveL3(
     note: null,
     specRef: anchor?.specRef ?? null,
     specHash: anchor?.specHash ?? null,
+    answered: apiL3?.answered ?? null,
+    awaitingSince: apiL3?.awaitingSince ?? null,
+    overdue: apiL3?.overdue ?? false,
   };
 }
 
