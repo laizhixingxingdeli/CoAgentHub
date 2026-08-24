@@ -36,6 +36,19 @@ export async function isDetachedTask(
 }
 
 /**
+ * 存活信号取最大值(ms):同一口径供 detached 与执行器任务存活判定复用
+ * (specs/executor-task-liveness.md R1「复用其取值逻辑」)。null 信号忽略。
+ */
+export function computeLastSignalMs(
+  signals: readonly (Date | number | null)[],
+): number {
+  const times = signals
+    .filter((value): value is Date | number => value !== null)
+    .map((value) => (typeof value === "number" ? value : value.getTime()));
+  return Math.max(...times);
+}
+
+/**
  * Derive detached liveness at read time. The database remains the source of
  * durable signals; output timestamps are process-local because outputTail is
  * process-local as well.
@@ -54,15 +67,12 @@ export async function getDetachedTaskLiveness(
     orderBy: (t, { desc }) => [desc(t.createdAt)],
     columns: { createdAt: true },
   });
-  const signalTimes = [
+  const lastSignalMs = computeLastSignalMs([
     task.createdAt,
     task.updatedAt,
     latestChild?.createdAt ?? null,
     taskOutputUpdatedAt(task.id),
-  ]
-    .filter((value): value is Date | number => value !== null)
-    .map((value) => (typeof value === "number" ? value : value.getTime()));
-  const lastSignalMs = Math.max(...signalTimes);
+  ]);
 
   return {
     livenessWarning:

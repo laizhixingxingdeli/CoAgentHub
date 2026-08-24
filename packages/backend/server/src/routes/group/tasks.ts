@@ -28,6 +28,7 @@ import {
   type ClaimVerificationMode,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
+import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
 import { findExecutorByKey } from "@server/lib/executors";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
@@ -541,6 +542,7 @@ app
         throw new BizError(BizCodeEnum.TaskNotFound);
       }
       const liveness = await getDetachedTaskLiveness(db, task);
+      const executorLiveness = await getExecutorTaskLiveness(db, task);
       // 只返回任务详情约定字段(不泄露 attempts/a2aContextId 等内部列)。
       const detail: Record<string, unknown> = {
         id: task.id,
@@ -591,6 +593,13 @@ app
       const l3 = await deriveL3Answer(db, task);
       if (l3) {
         detail.l3 = l3;
+      }
+      // 执行器任务存活探测(R1,specs/executor-task-liveness.md):仅对
+      // running 且非协调任务派生 liveness 字段(协调任务走既有
+      // livenessWarning/lastSignalAt);不满足条件不输出(不是空对象),
+      // 判定不修改 task.status。阈值复用 stallTimeoutMinutes,不新增配置。
+      if (executorLiveness) {
+        detail.liveness = executorLiveness;
       }
       // L1 聚合(R1,specs/reviewer-needs-no-executor-visibility.md):目标是协调
       // 任务(isDetachedTask)时派生 l1 字段(子任务数/聚合态/是否全终态),供
