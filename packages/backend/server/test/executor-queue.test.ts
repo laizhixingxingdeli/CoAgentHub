@@ -559,6 +559,166 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
   }, 30_000);
 
+  it("工作树闸:maxConcurrentPerWorkspace=2 时同一 project_path 允许两个并行", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { __setMaxConcurrentPerWorkspaceForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxConcurrentPerWorkspaceForTests(2);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-ws2-");
+      await bindProject(coordinator.id, group.id, proj);
+
+      const m1 = await postMessage(coordinator.id, group.id, {
+        body: "工作树任务一(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      // 同一 project_path 的第二个任务:工作树闸放行(=2),允许并行 running。
+      const m2 = await postMessage(coordinator.id, group.id, {
+        body: "工作树任务二",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m2.id,
+        "running",
+      );
+      expect(t2.status).toBe("running");
+      // 核心不变量:同工作树两条任务同时 running(而非排队)。
+      const again = await listTasks(coordinator.id, group.id);
+      const running = again.filter((t) => t.status === "running");
+      expect(running.map((t) => t.messageId).sort()).toEqual(
+        [m1.id, m2.id].sort(),
+      );
+
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, group.id, m2.id, "done");
+    } finally {
+      const { __setMaxConcurrentPerWorkspaceForTests: restore } = await import(
+        "@server/lib/executor-task"
+      );
+      restore(1);
+    }
+  }, 30_000);
+
+  it("工作树闸:maxConcurrentPerWorkspace=2 时第三条排队,前一条落终态后自动开始", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { __setMaxConcurrentPerWorkspaceForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxConcurrentPerWorkspaceForTests(2);
+    try {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-ws3-");
+      await bindProject(coordinator.id, group.id, proj);
+
+      const m1 = await postMessage(coordinator.id, group.id, {
+        body: "工作树任务一(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "running");
+      const m2 = await postMessage(coordinator.id, group.id, {
+        body: "工作树任务二(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.id, group.id, m2.id, "running");
+
+      // 工作树闸(=2)已满:第三条必须排队,不能 running。
+      const m3 = await postMessage(coordinator.id, group.id, {
+        body: "工作树任务三",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t3 = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        m3.id,
+        "queued",
+      );
+      expect(t3.status).toBe("queued");
+      const again = await listTasks(coordinator.id, group.id);
+      expect(
+        again
+          .filter((t) => t.status === "running")
+          .some((t) => t.messageId === m3.id),
+      ).toBe(false);
+
+      // 前一条任务落终态 → 排队任务自动开始,无需人工干预。
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, group.id, m3.id, "done");
+      await waitForTaskStatus(coordinator.id, group.id, m2.id, "done");
+    } finally {
+      const { __setMaxConcurrentPerWorkspaceForTests: restore } = await import(
+        "@server/lib/executor-task"
+      );
+      restore(1);
+    }
+  }, 30_000);
+
+  it("工作树闸:不同群但同 project_path + maxConcurrentPerWorkspace=2 → 计入同一个闸,两条可并行", async () => {
+    process.env.FAKE_SLEEP_SECS = "5";
+    const { __setMaxConcurrentPerWorkspaceForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxConcurrentPerWorkspaceForTests(2);
+    try {
+      const { coordinator, codebuddy } = await setupGroup();
+      const proj = makeGitRepo("coagenthub-wsg-");
+      const groupA = await createGroup(coordinator.id, "同路径并行群 A");
+      await addMember(coordinator.id, groupA.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, groupA.id, proj);
+      const groupB = await createGroup(coordinator.id, "同路径并行群 B");
+      await addMember(coordinator.id, groupB.id, codebuddy.id, ["executor"]);
+      await bindProject(coordinator.id, groupB.id, proj);
+
+      const m1 = await postMessage(coordinator.id, groupA.id, {
+        body: "A 群任务(慢)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "running");
+      // 同 project_path 的 B 群任务:工作树闸放行(=2),与 A 群任务并行。
+      const m2 = await postMessage(coordinator.id, groupB.id, {
+        body: "B 群任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        groupB.id,
+        m2.id,
+        "running",
+      );
+      expect(t2.status).toBe("running");
+      const again = await listTasks(coordinator.id, groupB.id);
+      expect(
+        again.filter((t) => t.status === "running").some((t) => t.id === t2.id),
+      ).toBe(true);
+
+      await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
+    } finally {
+      const { __setMaxConcurrentPerWorkspaceForTests: restore } = await import(
+        "@server/lib/executor-task"
+      );
+      restore(1);
+    }
+  }, 30_000);
+
   it("退化:maxParallelGroups=1 时不同 project_path 也严格串行(全局串行)", async () => {
     process.env.FAKE_SLEEP_SECS = "5";
     const { __setMaxParallelGroupsForTests } = await import(

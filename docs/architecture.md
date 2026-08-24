@@ -233,8 +233,9 @@ CoAgentHub/
   消息 body 追加一行 `**测试执行器:<名>**`,由 buildTicket 原样保留进任务书(「同一
   执行器」= 测试由实现执行器自己完成,与自动解析的固定段并存,执行器以显式行为准)。
 - 任务:定向消息命中执行器 → server 建 task(queued)→ **按 project_path 分组的并行队列**
-  (同一 `project_path` 组内串行、不同项目并行,并行组数 ≤ `maxParallelGroups`,
-  `scripts/dispatch-policy.json` 配置,缺省 2;未绑定 project_path 的群任务归默认组)
+  (同一 `project_path` 组内并行数 ≤ `maxConcurrentPerWorkspace`,`scripts/dispatch-policy.json`
+  配置,缺省 1 = 串行;不同项目并行,并行组数 ≤ `maxParallelGroups`,缺省 2;未绑定
+  project_path 的群任务归默认组,不参与工作树闸,单槽不变)
   → spawn(CLI 或 A2A)→ git 快照(checkpointRef)→ done/failed;默认超时 120 分钟
   (EXECUTOR_TIMEOUT_MS)。
 - **停止/取消语义(2026-08 收窄)**:只能取消**排队中**的任务(`cancelQueuedTasks(groupId,

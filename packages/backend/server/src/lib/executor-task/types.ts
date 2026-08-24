@@ -154,9 +154,11 @@ export function sumAttemptTokenUsage(
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
 export const DEFAULT_GROUP_KEY = "__default__";
 
-/** 单个 project_path 的组队列:组内串行 FIFO,不同组并行(受组槽位数限制)。 */
+/** 单个 project_path 的组队列:组内 FIFO,不同组并行(受组槽位数限制)。
+ *  running 为当前运行中任务列表(同一工作树并行数 ≤ maxConcurrentPerWorkspace,
+ *  缺省 1 = 组内串行;projectPath 为空的默认组始终单槽,不参与工作树闸)。 */
 export interface GroupQueue {
   key: string;
   queue: QueuedRun[];
-  running: QueuedRun | null;
+  running: QueuedRun[];
 }

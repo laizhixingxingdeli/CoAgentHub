@@ -60,6 +60,7 @@ import {
   getA2ASilenceTimeoutMs,
   getClaimTimeoutMs,
   getDetachedTimeoutMs,
+  getMaxConcurrentPerWorkspace,
   getMaxParallelGroups,
   getRateLimitCooldownMs,
   getRetryPolicy,
@@ -71,6 +72,7 @@ import {
   pumping,
   runningExecutorCount,
   runningGroupCount,
+  runningWorkspaceCount,
   setPumping,
 } from "./state";
 import {
@@ -237,8 +239,10 @@ export function currentRunningTask(groupId?: string): {
   kill: () => void;
 } | null {
   for (const g of groupQueues.values()) {
-    const r = g.running;
-    if (r?.kill && (!groupId || r.groupId === groupId)) {
+    const r = g.running.find(
+      (rr) => rr?.kill && (!groupId || rr.groupId === groupId),
+    );
+    if (r && r.kill) {
       return {
         taskId: r.taskId,
         participantId: r.participantId,
@@ -312,16 +316,16 @@ export function cancelQueuedTasks(
     g.queue.length = 0;
     g.queue.push(...remaining);
 
-    // 已出队未 spawn 的过渡窗口(pump 已置 group.running、kill 句柄未就绪):
+    // 已出队未 spawn 的过渡窗口(pump 已置 running、kill 句柄未就绪):
     // 置 stopped 标记,runOne 的 spawn 前 guard 会在真正启动前取消该任务——
     // 保证「停止指令已执行但任务照跑」不会发生在 spawn 前窗口。
-    const r = g.running;
-    if (
-      r &&
-      !r.kill &&
-      r.groupId === groupId &&
-      (!taskId || r.taskId === taskId)
-    ) {
+    const r = g.running.find(
+      (rr) =>
+        !rr.kill &&
+        rr.groupId === groupId &&
+        (!taskId || rr.taskId === taskId),
+    );
+    if (r) {
       r.stopped = true;
       clearRunTimers(r);
       stopped.push({
@@ -562,25 +566,33 @@ async function dispatchTask(
   const groupKey = projectPath ?? DEFAULT_GROUP_KEY;
   const group = ensureGroupQueue(groupKey);
 
-  // 排队位置:同组 running(1)+ 同组排队数;组未运行但槽位已被其他组占满时,
-  // 还要等当前运行中的组先释放槽位。执行器级并发上限(设计修正):目标执行器
-  // running 数已达 maxConcurrency 时,本任务即使组槽位空闲也会排队 → 📋 排队
-  // 提示照常回传(「前面还有」计入执行器级先行任务数,避免插件/前端误以为已下发)。
+  // 排队位置:同工作树 running(1)+ 同工作树排队数(工作树闸:同一 projectPath
+  // 并行上限 maxConcurrentPerWorkspace,缺省 1 = 与改动前一致的组内串行);
+  // 组未运行但槽位已被其他组占满时,还要等当前运行中的组先释放槽位。执行器级
+  // 并发上限(设计修正):目标执行器 running 数已达 maxConcurrency 时,本任务即使
+  // 组槽位空闲也会排队 → 📋 排队提示照常回传(「前面还有」计入执行器级先行任务
+  // 数,避免插件/前端误以为已下发)。
   const running = runningGroupCount();
   const freeSlots = getMaxParallelGroups() - running;
   const exCap = ex.maxConcurrency;
   // exAhead 只统计目标执行器「在其他组」里正在跑的任务:runningExecutorCount
-  // 会累加所有组,但本组正在跑的任务(group.running)已被上面的 +1 计入,需在此
-  // 排除,否则同项目+同执行器场景下该任务被重复计数(算出 2 而非 1)。
-  const exSelfRunning = group.running?.ex.key === ex.key ? 1 : 0;
+  // 会累加所有组,但本组正在跑的任务已被上面的工作树先行数计入,需在此排除,
+  // 否则同项目+同执行器场景下该任务被重复计数(算出 2 而非 1)。
+  const exSelfRunning = group.running.filter((r) => r.ex.key === ex.key).length;
   const exAhead =
     exCap !== undefined && runningExecutorCount(ex.key) >= exCap
       ? Math.max(0, runningExecutorCount(ex.key) - exSelfRunning)
       : 0;
+  // 工作树先行数:本组(工作树)running + 已排队,超出并行上限的部分才算真正
+  // 排在前面;缺省 1 时与改动前一致(running 1 + queue N → 前面还有 N+1)。
+  const wsCap = workspaceCap(groupKey);
+  const wsAhead = Math.max(
+    0,
+    group.running.length + group.queue.length - (wsCap - 1),
+  );
   const ahead =
-    (group.running ? 1 : 0) +
-    group.queue.length +
-    (group.running || freeSlots > 0 ? 0 : running) +
+    wsAhead +
+    (group.running.length > 0 || freeSlots > 0 ? 0 : running) +
     exAhead;
   if (ahead > 0) {
     // 只有真正排队才回传 📋(与桥一致)。
@@ -799,18 +811,19 @@ export async function createTaskDispatchWarnings(
 function ensureGroupQueue(key: string): GroupQueue {
   let g = groupQueues.get(key);
   if (!g) {
-    g = { key, queue: [], running: null };
+    g = { key, queue: [], running: [] };
     groupQueues.set(key, g);
   }
   return g;
 }
 
 /**
- * 泵调度:组槽位有空闲时,按组触达顺序取「有排队且未运行」的组,运行其队首
- * (组内串行:同组只有一条 running;执行器级并发上限与 403 反应式排队由
- * isRunDispatchable 在选组时统一判定,不满足条件的组队首保持 queued)。
- * 并行组数 ≤ maxParallelGroups,=1 时退化为全局串行(原行为)。完成回调在
- * finally 里再泵,无需在此 await。
+ * 泵调度:组槽位有空闲时,按组触达顺序取「running 未达工作树上限且未运行满
+ * 组内配额」的组,运行其队首(工作树闸:同一 projectPath 并行数 ≤
+ * maxConcurrentPerWorkspace,缺省 1 = 组内串行;projectPath 为空的默认组始终
+ * 单槽;执行器级并发上限与 403 反应式排队由 isRunDispatchable 在选组时统一
+ * 判定,不满足条件的组队首保持 queued)。并行组数 ≤ maxParallelGroups,=1 时
+ * 退化为全局串行(原行为)。完成回调在 finally 里再泵,无需在此 await。
  */
 async function pumpQueue(): Promise<void> {
   if (pumping) return;
@@ -823,18 +836,26 @@ async function pumpQueue(): Promise<void> {
       // 或退避定时器会再次泵送自动派发)。
       const group = [...groupQueues.values()].find(
         (g) =>
-          !g.running && g.queue.length > 0 && isRunDispatchable(g.queue[0]),
+          g.running.length < workspaceCap(g.key) &&
+          g.queue.length > 0 &&
+          isRunDispatchable(g.queue[0]),
       );
       if (!group) break;
       const run = group.queue.shift();
       // find 谓词保证 queue 非空,此处不可能为 undefined(防御性判空)。
       if (!run) break;
-      group.running = run;
+      group.running.push(run);
       void runOne(run, group);
     }
   } finally {
     setPumping(false);
   }
+}
+
+/** 组(工作树)可同时运行的任务数上限:空 projectPath 的默认组不参与工作树闸,
+ *  维持单槽(改动前行为);绑定 projectPath 的组按 maxConcurrentPerWorkspace。 */
+function workspaceCap(key: string): number {
+  return key === DEFAULT_GROUP_KEY ? 1 : getMaxConcurrentPerWorkspace();
 }
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
@@ -1113,7 +1134,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 第3层(detached, CLI):spawn 后立即视为「已派发」——不等待进程退出决定
     // 终态,任务保持 running,由执行器(协调者/检视者 runtime)恢复后 PATCH
     // 回写终态。不解析 stdout 汇报;队列槽位由 finally 照常释放
-    // (group.running = null);超时兜底复用 detachedTimer / handleDetachedTimeout
+    // (group.running 移除本任务);超时兜底复用 detachedTimer / handleDetachedTimeout
     // (超时按「结果未确认」处理)。spawn 的进程继续在后台跑,其退出不再决定
     // 终态,承诺结果由收件方显式回写。
     if (!isA2a && run.detached) {
@@ -1413,7 +1434,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     }
   } finally {
     clearRunTimers(run);
-    group.running = null;
+    group.running = group.running.filter((r) => r !== run);
     void pumpQueue();
   }
 }
@@ -1515,11 +1536,15 @@ export function refreshA2AActivity(
   participantId: string,
 ): boolean {
   for (const g of groupQueues.values()) {
-    const run = g.running;
-    if (!run || run.stopped || run.a2aSilenced) continue;
-    if (run.groupId !== groupId || run.participantId !== participantId)
-      continue;
-    if (run.ex.kind !== "a2a") continue;
+    const run = g.running.find(
+      (rr) =>
+        !rr.stopped &&
+        !rr.a2aSilenced &&
+        rr.groupId === groupId &&
+        rr.participantId === participantId &&
+        rr.ex.kind === "a2a",
+    );
+    if (!run) continue;
     run.lastActivityAt = Date.now();
     if (run.a2aSilenceTimer) {
       clearTimeout(run.a2aSilenceTimer);

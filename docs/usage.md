@@ -275,6 +275,7 @@ values fall back to defaults and never block startup):
 | Field | Default | Description |
 | --- | --- | --- |
 | `maxParallelGroups` | `2` | max parallel groups: same `project_path` serial, different projects parallel, at most this many groups at once |
+| `maxConcurrentPerWorkspace` | `1` | per-workspace concurrency gate: max tasks running on the same `project_path` at once; `=2` allows two parallel on one workspace; groups without a bound `project_path` do not participate (unchanged) |
 | `stallAlertMinutes` | `15` | no-progress reminder threshold: running task with no output → remind the coordinator (group message + row flag, not a failure) |
 | `stallTimeoutMinutes` | `30` | silent timeout: no output beyond this → `failed` |
 | `claimTimeoutMinutes` | `30` | claim timeout: `queued` task not entering `running` within this → `failed` |

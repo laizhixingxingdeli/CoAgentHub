@@ -26,6 +26,10 @@ const dispatchPolicy: DispatchPolicy = readDispatchPolicy();
 /** 最大并行组数:server 启动时从 scripts/dispatch-policy.json 读取。 */
 let maxParallelGroups = dispatchPolicy.maxParallelGroups;
 
+/** 工作树并发上限:同一 projectPath 下同时 running 的任务数上限;启动时读取,
+ *  缺省 1(同一工作树串行)。projectPath 为空的默认组不参与本闸(单槽不变)。 */
+let maxConcurrentPerWorkspace = dispatchPolicy.maxConcurrentPerWorkspace;
+
 /** 静默超时阈值(ms):running 连续无输出超过即失败;启动时读配置,缺省 30min。 */
 let stallTimeoutMs = dispatchPolicy.stallTimeoutMinutes * 60_000;
 
@@ -89,7 +93,7 @@ export function isInCooldown(ex: { key: string }): boolean {
 /** 当前运行中的组数(组槽位占用数)。 */
 export function runningGroupCount(): number {
   let n = 0;
-  for (const g of groupQueues.values()) if (g.running) n += 1;
+  for (const g of groupQueues.values()) if (g.running.length > 0) n += 1;
   return n;
 }
 
@@ -102,7 +106,26 @@ export function runningGroupCount(): number {
 export function runningExecutorCount(exKey: string): number {
   let n = 0;
   for (const g of groupQueues.values()) {
-    if (g.running && g.running.ex.key === exKey) n += 1;
+    for (const r of g.running) {
+      if (r.ex.key === exKey) n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * 工作树维度当前 running 的任务数:同一 projectPath(群绑定项目路径)下跨
+ * 所有组(不同群绑同一路径也计入同一闸)正在 running 的任务数;pumpQueue
+ * 按 maxConcurrentPerWorkspace 上限判定是否还能向该工作树派发。projectPath
+ * 为空 → 不参与本闸,恒返回 0(默认组由组内单槽维持原行为)。
+ */
+export function runningWorkspaceCount(projectPath: string | null): number {
+  if (!projectPath) return 0;
+  let n = 0;
+  for (const g of groupQueues.values()) {
+    for (const r of g.running) {
+      if (r.projectPath === projectPath) n += 1;
+    }
   }
   return n;
 }
@@ -150,6 +173,11 @@ export function getMaxParallelGroups(): number {
   return maxParallelGroups;
 }
 
+/** 读工作树并发上限。 */
+export function getMaxConcurrentPerWorkspace(): number {
+  return maxConcurrentPerWorkspace;
+}
+
 /** 读失败重试策略。 */
 export function getRetryPolicy(): RetryPolicy {
   return retryPolicy;
@@ -190,10 +218,10 @@ export function clearRunTimers(run: QueuedRun): void {
  */
 export function __resetExecutorQueueForTests(): void {
   for (const g of groupQueues.values()) {
-    if (g.running) {
-      g.running.stopped = true;
-      g.running.kill?.();
-      clearRunTimers(g.running);
+    for (const r of g.running) {
+      r.stopped = true;
+      r.kill?.();
+      clearRunTimers(r);
     }
     for (const q of g.queue) clearRunTimers(q);
     g.queue.length = 0;
@@ -205,6 +233,7 @@ export function __resetExecutorQueueForTests(): void {
   executorCooldowns.clear();
   const policy = readDispatchPolicy();
   maxParallelGroups = policy.maxParallelGroups;
+  maxConcurrentPerWorkspace = policy.maxConcurrentPerWorkspace;
   stallTimeoutMs = policy.stallTimeoutMinutes * 60_000;
   stallAlertMs = policy.stallAlertMinutes * 60_000;
   claimTimeoutMs = policy.claimTimeoutMinutes * 60_000;
@@ -219,6 +248,12 @@ export function __resetExecutorQueueForTests(): void {
 /** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */
 export function __setMaxParallelGroupsForTests(n: number): void {
   maxParallelGroups = Math.max(1, Math.floor(n));
+}
+
+/** 测试专用:覆盖工作树并发上限(默认读 scripts/dispatch-policy.json)。
+ *  =2 时同一 projectPath 允许两个并行;=1 恢复串行(改动前行为)。 */
+export function __setMaxConcurrentPerWorkspaceForTests(n: number): void {
+  maxConcurrentPerWorkspace = Math.max(1, Math.floor(n));
 }
 
 /**

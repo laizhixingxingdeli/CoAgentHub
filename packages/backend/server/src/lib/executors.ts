@@ -537,6 +537,11 @@ export interface RateLimitPolicy {
 export interface DispatchPolicy {
   /** 最大并行组数:同一 project_path 的组内串行,不同组并行,并行组数不超过此值。 */
   maxParallelGroups: number;
+  /** 工作树并发闸:同一 projectPath(群绑定项目路径)下同时 running 的任务数上限。
+   *  缺省 1 = 同一工作树串行;设为 2 允许同一工作树两个并行。projectPath 为空的群
+   *  不参与本闸(不在共享工作树上作业)。与 maxParallelGroups / 执行器 maxConcurrency
+   *  三个闸各管一维,叠加生效。 */
+  maxConcurrentPerWorkspace: number;
   /** 无进展提醒(分钟):running 任务连续无输出超过该值 → 提醒协调者(发群消息
    *  + 任务行警示标记,不失败);静默继续到 stallTimeoutMinutes 才标 failed。 */
   stallAlertMinutes: number;
@@ -561,6 +566,10 @@ export interface DispatchPolicy {
 
 /** 默认最大并行组数(dispatch-policy.json 缺失时兜底)。 */
 const DEFAULT_MAX_PARALLEL_GROUPS = 2;
+
+/** 默认工作树并发上限(dispatch-policy.json 缺失时兜底):1 = 同一 projectPath
+ *  串行(本票新增维度,缺省值与改动前的既有行为一致)。 */
+const DEFAULT_MAX_CONCURRENT_PER_WORKSPACE = 1;
 
 /** 默认无进展提醒(分钟);缺失/非法时兜底。 */
 export const DEFAULT_STALL_ALERT_MINUTES = 15;
@@ -634,6 +643,7 @@ export function readDispatchPolicy(): DispatchPolicy {
       readFileSync(resolveDispatchPolicyFile(), "utf8"),
     ) as {
       maxParallelGroups?: unknown;
+      maxConcurrentPerWorkspace?: unknown;
       stallAlertMinutes?: unknown;
       stallTimeoutMinutes?: unknown;
       claimTimeoutMinutes?: unknown;
@@ -662,6 +672,10 @@ export function readDispatchPolicy(): DispatchPolicy {
       maxParallelGroups: positiveInt(
         raw.maxParallelGroups,
         DEFAULT_MAX_PARALLEL_GROUPS,
+      ),
+      maxConcurrentPerWorkspace: positiveInt(
+        raw.maxConcurrentPerWorkspace,
+        DEFAULT_MAX_CONCURRENT_PER_WORKSPACE,
       ),
       stallAlertMinutes: positiveInt(
         raw.stallAlertMinutes,
@@ -718,6 +732,7 @@ export function readDispatchPolicy(): DispatchPolicy {
   }
   return {
     maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS,
+    maxConcurrentPerWorkspace: DEFAULT_MAX_CONCURRENT_PER_WORKSPACE,
     stallAlertMinutes: DEFAULT_STALL_ALERT_MINUTES,
     stallTimeoutMinutes: DEFAULT_STALL_TIMEOUT_MINUTES,
     claimTimeoutMinutes: DEFAULT_CLAIM_TIMEOUT_MINUTES,
