@@ -244,6 +244,10 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
       status: "pending",
       allTerminal: false,
     });
+    expect(detail.runtime).toMatchObject({ stale: false });
+    expect(typeof (detail.runtime as { startedAt: string }).startedAt).toBe(
+      "string",
+    );
   });
 
   it("子任务全部 done → status done, allTerminal true", async () => {
@@ -553,6 +557,7 @@ describe("非协调任务详情回归(R1:不输出 l1,载荷逐字不变)", () =
     const body = (await detail.json()) as Record<string, unknown>;
     // 执行人无 coordinator 角色且 brief 无 ReplyMode → 非协调任务。
     expect(body).not.toHaveProperty("l1");
+    expect(body).not.toHaveProperty("runtime");
     expect(Object.keys(body).sort()).toEqual([
       "brief",
       "callbackRef",

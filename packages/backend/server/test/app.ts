@@ -5,6 +5,7 @@ import executorRouter from "../src/routes/executor";
 import fileRouter from "../src/routes/file";
 import groupRouter from "../src/routes/group";
 import participantRouter from "../src/routes/participant";
+import runtimeHealthRouter from "../src/routes/runtime-health";
 import skillsRouter from "../src/routes/skills";
 import systemRouter from "../src/routes/system";
 
@@ -31,6 +32,7 @@ export function createTestApp() {
   return (
     app
       .route("/system", systemRouter)
+      .route("/health", runtimeHealthRouter)
       .route("/file", fileRouter)
       // /participants 为主路径;/agents 是历史别名(agent 为 participant 的旧名),
       // 与 index.ts 挂载保持一致,过渡期兼容旧客户端。

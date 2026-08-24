@@ -17,4 +17,17 @@ describe("GET /api/system/health", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok" });
   });
+
+  it("/api/health 返回运行时新鲜度字段", async () => {
+    const res = await app.request("/api/health");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      startedAt: string;
+      entryMtime: string | null;
+      stale: boolean;
+    };
+    expect(typeof body.startedAt).toBe("string");
+    expect(typeof body.entryMtime).toBe("string");
+    expect(body.stale).toBe(false);
+  });
 });

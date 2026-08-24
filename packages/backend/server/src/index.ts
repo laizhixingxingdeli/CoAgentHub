@@ -24,6 +24,7 @@ import db from "./lib/database";
 import { recoverInterruptedTasks } from "./lib/executor-task";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
+import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
 import { startServer } from "./lib/server-startup";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
@@ -32,6 +33,7 @@ import executorRouter from "./routes/executor";
 import fileRouter from "./routes/file";
 import groupRouter from "./routes/group";
 import participantRouter from "./routes/participant";
+import runtimeHealthRouter from "./routes/runtime-health";
 import skillsRouter from "./routes/skills";
 import systemRouter from "./routes/system";
 
@@ -117,6 +119,7 @@ export const routes = new Hono()
   .route("/agents", participantRouter)
   .route("/executors", executorRouter)
   .route("/groups", groupRouter)
+  .route("/health", runtimeHealthRouter)
   .route("/skills", skillsRouter);
 
 app.route("/", routes);
@@ -144,6 +147,9 @@ app.get(
 
 /* ---------- bootstrap ---------- */
 async function run() {
+  configureRuntimeEntry(import.meta.url);
+  logRuntimeStartup();
+
   const port = serverPort();
 
   // Do not let a new build serve requests against an older schema. This is a

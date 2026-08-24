@@ -30,6 +30,7 @@ import {
 } from "@server/lib/executor-task/claim-verification";
 import { findExecutorByKey } from "@server/lib/executors";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
+import { getRuntimeStatus } from "@server/lib/runtime-status";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -597,6 +598,7 @@ app
       // 空对象),其余载荷保持逐字不变。
       if (await isDetachedTask(db, task)) {
         detail.l1 = await deriveL1Aggregate(db, task);
+        detail.runtime = getRuntimeStatus();
       }
       return c.json(detail);
     },
