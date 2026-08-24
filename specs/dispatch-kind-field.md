@@ -1,6 +1,6 @@
 # Spec: `dispatchKind` —— 记录工作类型分流结果
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `9881d9f4`
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **依据**: `specs/reviewer-role-spec-generation.md` v4.0 §3.14.6

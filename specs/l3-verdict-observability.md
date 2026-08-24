@@ -1,6 +1,6 @@
 # Spec: L3 裁决的可观测与校验 —— 交出去之后不能进黑洞
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `adb698cd + bcc8232a(fix)`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **前置**: `specs/coordination-close-integrity.md`(已落地 `89f8ddba`)补齐了

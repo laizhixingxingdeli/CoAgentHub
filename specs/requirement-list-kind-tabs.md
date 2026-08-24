@@ -1,6 +1,6 @@
 # Spec: 需求列表按 dispatchKind 分「需求 / 修复」
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `97dbe91e`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **依赖**: `specs/dispatch-kind-field.md`(已 L3 通过,`dispatchKind` 已可读)、

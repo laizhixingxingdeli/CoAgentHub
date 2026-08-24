@@ -1,6 +1,6 @@
 # Spec: `/init` 一条命令完成接入 —— 把接入散文变成可执行流程
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `4fbfa2f3`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **推翻**: `specs/project-onboarding-init.md`(已落地 `7c915235`)的 **R3 离线优先**、

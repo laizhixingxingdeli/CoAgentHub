@@ -1,6 +1,6 @@
 # Spec: 协调任务落终态的完整性校验 —— 跳过的层不能拿到绿勾
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `89f8ddba`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **前置**: `specs/ticket-template-role-blind.md`(已落地 `94721245`)—— 先让协调者

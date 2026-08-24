@@ -1,6 +1,6 @@
 # Spec: L2 必须直面提交核实结论 —— `claimVerification` 不能只是个没人读的字段
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `d8dd7113`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **前置**: `specs/coordination-close-integrity.md`(`89f8ddba`)、
