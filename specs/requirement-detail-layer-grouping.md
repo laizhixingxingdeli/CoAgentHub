@@ -1,6 +1,6 @@
 # Spec: 详情页按「层」组织,不再按时间堆
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `a95daf4c`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **前置**: `layer-status-contradiction`(`97dcf397`)、
