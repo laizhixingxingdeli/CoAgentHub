@@ -22,14 +22,18 @@
  * 引入词典条目。
  */
 
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
-import { FoldableContent } from "./FoldableContent";
 import {
   executionTasksForRequirement,
   type Requirement,
   type StepStatus,
 } from "./group-tasks-by-spec";
+import {
+  mergeRequirementTimeline,
+  partitionRequirementTimeline,
+} from "./merge-requirement-timeline";
 import RequirementStepper from "./RequirementStepper";
 import RequirementTimeline, {
   roleFromMemberRoles,
@@ -83,9 +87,6 @@ const LAYER_STATUS_LABEL: Record<StepStatus, string> = {
   "na-no-reviewer": "未检视·无检视者",
 };
 
-/** 长内容折叠阈值/按钮文案:与 RequirementTimeline 同款规则,不另起一套。 */
-const LAYER_FOLD_THRESHOLD = 80;
-
 function LayerBadge({
   status,
   children,
@@ -111,11 +112,17 @@ function LayerCard({
   testId,
   title,
   status,
+  summary,
+  expanded,
+  onToggle,
   children,
 }: {
   testId: string;
   title: string;
   status: LayerStatus;
+  summary: ReactNode;
+  expanded: boolean;
+  onToggle: () => void;
   children: ReactNode;
 }) {
   return (
@@ -123,50 +130,38 @@ function LayerCard({
       data-testid={testId}
       className="rounded-xl border bg-card px-3 py-2"
     >
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <span className="text-xs font-medium">{title}</span>
         <LayerBadge status={status}>{LAYER_STATUS_LABEL[status]}</LayerBadge>
-      </div>
-      <div className="mt-1.5 space-y-1 text-sm">{children}</div>
-    </section>
-  );
-}
-
-/** 长文本:超过阈值收进「展开/收起」(与时间线折叠同一规则)。 */
-function FoldableText({
-  testId,
-  text,
-  expanded,
-  onToggle,
-}: {
-  testId: string;
-  text: string;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const long = text.length > LAYER_FOLD_THRESHOLD;
-  return (
-    <div>
-      <p
-        data-testid={testId}
-        className="whitespace-pre-wrap break-words text-sm text-muted-foreground"
-      >
-        {long && !expanded ? `${text.slice(0, LAYER_FOLD_THRESHOLD)}…` : text}
-      </p>
-      {long && (
-        <FoldableContent
-          toggleTestId={`${testId}-toggle`}
-          detailTestId={`${testId}-detail`}
-          textForMeasurement={text}
-          expanded={expanded}
-          onToggle={onToggle}
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          {summary}
+        </span>
+        <button
+          type="button"
+          data-testid={`${testId}-toggle`}
+          aria-expanded={expanded}
+          aria-controls={`${testId}-content`}
+          onClick={onToggle}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
-            {text}
-          </p>
-        </FoldableContent>
+          {expanded ? (
+            <ChevronUp className="size-4" aria-hidden="true" />
+          ) : (
+            <ChevronDown className="size-4" aria-hidden="true" />
+          )}
+          <span>{expanded ? "收起" : "展开"}</span>
+        </button>
+      </div>
+      {expanded && (
+        <div
+          id={`${testId}-content`}
+          data-testid={`${testId}-content`}
+          className="mt-1.5 space-y-1 text-sm"
+        >
+          {children}
+        </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -186,17 +181,10 @@ export default function RequirementDetailPanel({
   const [expandedLayers, setExpandedLayers] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const toggleLayer = (key: string) => {
-    setExpandedLayers((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  };
+  const [hasExplicitLayerState, setHasExplicitLayerState] = useState(false);
+  const [expandedRequirementId, setExpandedRequirementId] = useState<
+    string | null
+  >(null);
 
   if (!requirement) {
     return (
@@ -216,6 +204,46 @@ export default function RequirementDetailPanel({
 
   // 阶梯固定三步:重试只作为 L1 标签的附属信息,不增加步骤。
   const l1Tasks = executionTasksForRequirement(requirement.tasks);
+  const mergedTimeline = mergeRequirementTimeline(
+    requirement.tasks,
+    messages,
+    members,
+  );
+  const timelineLayers = partitionRequirementTimeline(
+    mergedTimeline,
+    new Set(l1Tasks.map((task) => task.id)),
+    l2.task?.id ?? null,
+  );
+  const explicitStateActive =
+    hasExplicitLayerState && expandedRequirementId === requirement.id;
+  const defaultExpanded = (status: LayerStatus) => status !== "done";
+  const isLayerExpanded = (key: string, status: LayerStatus) =>
+    explicitStateActive ? expandedLayers.has(key) : defaultExpanded(status);
+  const toggleLayer = (key: string) => {
+    setExpandedRequirementId(requirement.id);
+    setHasExplicitLayerState(true);
+    setExpandedLayers((prev) => {
+      const next = new Set(
+        explicitStateActive
+          ? prev
+          : (["l1", "l2", "l3"] as const).filter((layer) =>
+              defaultExpanded(
+                layer === "l1"
+                  ? l1.status
+                  : layer === "l2"
+                    ? l2.status
+                    : l3.status,
+              ),
+            ),
+      );
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
   const l1Status = l1.status;
   const l2Status = l2.status;
   const retrySuffix =
@@ -248,6 +276,42 @@ export default function RequirementDetailPanel({
         : "L3 检视",
   ];
   const stepRoles = [l1Role, l2Role, null];
+  const firstLine = (text: string | null) => {
+    if (!text) return "";
+    const line =
+      text
+        .split(/\r?\n/)
+        .find((part) => part.trim())
+        ?.trim() ?? "";
+    return line.length > 72 ? `${line.slice(0, 72)}…` : line;
+  };
+  const l3Summary = l3.verdict
+    ? l3.findings
+      ? firstLine(l3.findings)
+      : firstLine(l3.note) || "检视通过"
+    : l3.status === "na-fix"
+      ? "修复票不运行 L3"
+      : l3.status === "na-no-reviewer"
+        ? "本群未同时配置检视者与协调者"
+        : l3.status === "running"
+          ? "等待检视结论"
+          : "检视尚未开始";
+  const l2Summary = l2.conclusion
+    ? firstLine(l2.conclusion)
+    : l2.task
+      ? "协调任务暂无结论"
+      : "该需求还没有协调任务";
+  const firstTaskSummary = l1Tasks
+    .map((task) => task.diffSummary?.summary)
+    .find((summary): summary is string => typeof summary === "string");
+  const l1Summary = l1Tasks.length
+    ? `${l1Tasks.length} 次执行${firstTaskSummary ? ` · ${firstLine(firstTaskSummary)}` : ""}`
+    : l1.noExecutionReason
+      ? firstLine(l1.noExecutionReason)
+      : "暂无执行记录";
+  const l3Expanded = isLayerExpanded("l3", l3.status);
+  const l2Expanded = isLayerExpanded("l2", l2.status);
+  const l1Expanded = isLayerExpanded("l1", l1.status);
 
   return (
     <div
@@ -266,6 +330,45 @@ export default function RequirementDetailPanel({
         testId="requirement-layer-l3"
         title="L3 检视"
         status={l3.status}
+        summary={
+          <>
+            {l3.verdict === "pass" && "检视通过"}
+            {l3.verdict === "findings" && <span>检视发现</span>}
+            {l3.verdict && (l3.findings || l3.note) && (
+              <span className="ml-1">
+                {l3.findings ? (
+                  <span
+                    data-testid={
+                      !l3Expanded ? "requirement-l3-findings" : undefined
+                    }
+                  >
+                    {l3Summary}
+                  </span>
+                ) : (
+                  <span
+                    data-testid={
+                      !l3Expanded ? "requirement-l3-note" : undefined
+                    }
+                  >
+                    {l3Summary}
+                  </span>
+                )}
+              </span>
+            )}
+            {!l3.verdict && l3Summary}
+            {l3.specRef && (
+              <span
+                data-testid="requirement-l3-anchor"
+                className="ml-1 font-mono text-[10px]"
+              >
+                {l3.specRef}
+                {l3.specHash ? ` @${l3.specHash}` : ""}
+              </span>
+            )}
+          </>
+        }
+        expanded={l3Expanded}
+        onToggle={() => toggleLayer("l3")}
       >
         {l3.status === "na-fix" ? (
           <p
@@ -281,43 +384,41 @@ export default function RequirementDetailPanel({
           >
             检视者与协调者未同时在场,本群按两层模式运行(未检视·无检视者)。
           </p>
-        ) : l3.verdict ? (
-          <>
-            <p className="text-sm">
-              {l3.verdict === "pass" ? "检视通过" : "检视发现"}
-              {l3.specRef && (
-                <span
-                  data-testid="requirement-l3-anchor"
-                  className="ml-1 font-mono text-xs text-muted-foreground"
-                >
-                  {l3.specRef}
-                  {l3.specHash ? ` @${l3.specHash}` : ""}
-                </span>
-              )}
-            </p>
-            {l3.note && (
-              <FoldableText
-                testId="requirement-l3-note"
-                text={l3.note}
-                expanded={expandedLayers.has("l3-note")}
-                onToggle={() => toggleLayer("l3-note")}
-              />
-            )}
-            {l3.findings && (
-              <FoldableText
-                testId="requirement-l3-findings"
-                text={l3.findings}
-                expanded={expandedLayers.has("l3-findings")}
-                onToggle={() => toggleLayer("l3-findings")}
-              />
-            )}
-          </>
         ) : (
-          <p className="text-xs text-muted-foreground">
-            {l3.status === "running"
-              ? "L2 已完成,等待检视结论…"
-              : "检视尚未开始"}
-          </p>
+          <>
+            {l3.verdict && (l3.note || l3.findings) && (
+              <div className="max-h-[60vh] space-y-1 overflow-y-auto border-b pb-1.5">
+                {l3.note && (
+                  <p
+                    data-testid={l3Expanded ? "requirement-l3-note" : undefined}
+                    className="whitespace-pre-wrap break-words text-sm text-muted-foreground"
+                  >
+                    {l3.note}
+                  </p>
+                )}
+                {l3.findings && (
+                  <p
+                    data-testid={
+                      l3Expanded ? "requirement-l3-findings" : undefined
+                    }
+                    className="whitespace-pre-wrap break-words text-sm text-muted-foreground"
+                  >
+                    {l3.findings}
+                  </p>
+                )}
+              </div>
+            )}
+            {!l3.verdict && l3.status === "running" && (
+              <p className="text-xs text-muted-foreground">
+                L2 已完成,等待检视结论…
+              </p>
+            )}
+            <RequirementTimeline
+              tasks={[]}
+              events={timelineLayers.l3}
+              members={members}
+            />
+          </>
         )}
       </LayerCard>
 
@@ -326,6 +427,15 @@ export default function RequirementDetailPanel({
         testId="requirement-layer-l2"
         title="L2 协调"
         status={l2Status}
+        summary={
+          l2.conclusion ? (
+            <span data-testid="requirement-l2-conclusion">{l2Summary}</span>
+          ) : (
+            l2Summary
+          )
+        }
+        expanded={l2Expanded}
+        onToggle={() => toggleLayer("l2")}
       >
         {l2.task ? (
           <>
@@ -336,18 +446,16 @@ export default function RequirementDetailPanel({
                   member.participantId === l2.task?.executorParticipantId,
               )?.name ?? l2.task.executorKey}
             </p>
-            {l2.conclusion ? (
-              <FoldableText
-                testId="requirement-l2-conclusion"
-                text={l2.conclusion}
-                expanded={expandedLayers.has("l2-conclusion")}
-                onToggle={() => toggleLayer("l2-conclusion")}
-              />
-            ) : (
+            {!l2.conclusion && (
               <p className="text-xs text-muted-foreground">
                 协调任务进行中,尚无 L2 结论
               </p>
             )}
+            <RequirementTimeline
+              tasks={[]}
+              events={timelineLayers.l2}
+              members={members}
+            />
           </>
         ) : (
           <p className="text-xs text-muted-foreground">
@@ -357,30 +465,34 @@ export default function RequirementDetailPanel({
       </LayerCard>
 
       {/* L1 执行 + 沟通记录:任务汇报卡片与群消息时间线(既有实现)。 */}
-      <section
-        data-testid="requirement-layer-l1"
-        className="flex flex-col gap-2"
-      >
-        <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          {l1.status === "na-declared"
+      <LayerCard
+        testId="requirement-layer-l1"
+        title={
+          l1.status === "na-declared"
             ? "L1 不适用 · 已声明理由"
-            : "L1 执行与沟通记录"}
-          <LayerBadge status={l1Status}>
-            {`L1 ${LAYER_STATUS_LABEL[l1Status]}`}
-          </LayerBadge>
-        </span>
+            : l1.status === "pending" && l1Tasks.length === 0
+              ? "L1 未开始"
+              : "L1 执行"
+        }
+        status={l1Status}
+        summary={l1Summary}
+        expanded={l1Expanded}
+        onToggle={() => toggleLayer("l1")}
+      >
         {l1.noExecutionReason && (
-          <FoldableText
-            testId="requirement-l1-no-execution-reason"
-            text={l1.noExecutionReason}
-            expanded={expandedLayers.has("l1-no-execution-reason")}
-            onToggle={() => toggleLayer("l1-no-execution-reason")}
-          />
+          <div className="max-h-[60vh] overflow-y-auto">
+            <p
+              data-testid="requirement-l1-no-execution-reason"
+              className="whitespace-pre-wrap break-words text-sm text-muted-foreground"
+            >
+              {l1.noExecutionReason}
+            </p>
+          </div>
         )}
         <RequirementTimeline
-          tasks={requirement.tasks}
-          messages={messages}
+          tasks={l1Tasks}
           members={members}
+          events={timelineLayers.l1}
           liveOutputs={liveOutputs}
           canControl={canControl}
           readOnly={readOnly}
@@ -389,7 +501,7 @@ export default function RequirementDetailPanel({
           onStop={onStop}
           onRollback={onRollback}
         />
-      </section>
+      </LayerCard>
     </div>
   );
 }

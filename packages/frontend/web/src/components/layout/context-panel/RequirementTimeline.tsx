@@ -152,13 +152,12 @@ function renderCoordinationPayload(
       );
     case "review_result":
       return (
-        <p
-          data-testid={`requirement-timeline-coordination-${messageId}`}
-          className="whitespace-pre-wrap break-words text-sm"
-        >
-          检视者公布 L3 裁决 ·{" "}
-          {payload.verdict === "pass" ? "通过" : "有发现项"}
-        </p>
+        <div data-testid={`requirement-timeline-coordination-${messageId}`}>
+          <p className="whitespace-pre-wrap break-words text-sm">
+            检视者公布 L3 裁决 ·{" "}
+            {payload.verdict === "pass" ? "通过" : "有发现项"}
+          </p>
+        </div>
       );
   }
 }
@@ -220,6 +219,8 @@ const CLAIM_STATUS_LABEL: Record<ClaimVerification["status"], string> = {
 type RequirementTimelineProps = {
   /** 一个需求下的所有任务(mergeRequirementTimeline 内部按时间排序)。 */
   tasks: TaskItem[];
+  /** Optional pre-partitioned events; omitted callers retain the old merged view. */
+  events?: TimelineEvent[];
   /** 该群全部消息;缺省为空 → 只渲染任务(保持旧行为)。 */
   messages?: MessageItem[];
   /** 该群成员(真实角色数据源);缺省为空 → 角色回落字符串猜测。 */
@@ -242,6 +243,7 @@ type RequirementTimelineProps = {
 
 export default function RequirementTimeline({
   tasks,
+  events: providedEvents,
   messages = [],
   members = [],
   liveOutputs = {},
@@ -269,8 +271,8 @@ export default function RequirementTimeline({
   };
 
   const events = useMemo(
-    () => mergeRequirementTimeline(tasks, messages, members),
-    [tasks, messages, members],
+    () => providedEvents ?? mergeRequirementTimeline(tasks, messages, members),
+    [providedEvents, tasks, messages, members],
   );
   const hasLiveDuration = tasks.some(
     (task) =>

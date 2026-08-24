@@ -20,6 +20,10 @@
  *  不满足以上两档的消息不显示(宁缺毋滥,不把无关对话混进需求时间线)。
  */
 
+import {
+  type CoordinationPayload,
+  parseKnownCoordinationPayload,
+} from "@laizhixingxingdeli/database/schema";
 import type {
   TaskItem,
   TaskStatus,
@@ -58,6 +62,8 @@ export type TimelineEvent =
       timestamp: string;
     };
 
+export type RequirementTimelineLayer = "l1" | "l2" | "l3";
+
 function isSkillSystemMessage(message: MessageItem): boolean {
   return (
     /skill/i.test(message.body) &&
@@ -70,6 +76,69 @@ function isPureTaskStatus(message: MessageItem): boolean {
     message.contentType === "task_status" &&
     /^(?:🚀|📋|↻|🛑|⚠️)/u.test(message.body.trim())
   );
+}
+
+function coordinationPayload(body: string): CoordinationPayload | null {
+  try {
+    return parseKnownCoordinationPayload(body.trim()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Known coordination records can arrive after the task's active window. */
+function isRequirementCoordinationMessage(
+  message: MessageItem,
+  taskIds: ReadonlySet<string>,
+  specRefs: ReadonlySet<string>,
+): boolean {
+  const payload = coordinationPayload(message.body);
+  if (!payload) return false;
+  if (payload.type === "review_result" || payload.type === "review_request") {
+    return taskIds.has(payload.taskId);
+  }
+  return specRefs.has(payload.specRef);
+}
+
+export function timelineLayerForEvent(
+  event: TimelineEvent,
+  executionTaskIds: ReadonlySet<string>,
+  coordinationTaskId: string | null,
+): RequirementTimelineLayer {
+  if (event.kind === "task") {
+    if (executionTaskIds.has(event.task.id)) return "l1";
+    if (event.task.id === coordinationTaskId) return "l2";
+    return "l1";
+  }
+
+  const payload = coordinationPayload(event.message.body);
+  if (
+    payload?.type === "review_result" ||
+    payload?.type === "spec_amended" ||
+    payload?.type === "spec_published"
+  ) {
+    return "l3";
+  }
+  if (payload?.type === "review_request") return "l2";
+  return "l1";
+}
+
+export function partitionRequirementTimeline(
+  events: TimelineEvent[],
+  executionTaskIds: ReadonlySet<string>,
+  coordinationTaskId: string | null,
+): Record<RequirementTimelineLayer, TimelineEvent[]> {
+  const layers: Record<RequirementTimelineLayer, TimelineEvent[]> = {
+    l1: [],
+    l2: [],
+    l3: [],
+  };
+  for (const event of events) {
+    layers[
+      timelineLayerForEvent(event, executionTaskIds, coordinationTaskId)
+    ].push(event);
+  }
+  return layers;
 }
 
 /** 解析消息的定向对象(broadcast / 无 audienceRef → null)。 */
@@ -108,6 +177,12 @@ export function mergeRequirementTimeline(
   const memberById = new Map(members.map((m) => [m.participantId, m]));
   const messageById = new Map(messages.map((m) => [m.id, m]));
   const taskByMessageId = new Map(tasks.map((task) => [task.messageId, task]));
+  const taskIds = new Set(tasks.map((task) => task.id));
+  const specRefs = new Set(
+    tasks
+      .map((task) => task.specRef)
+      .filter((ref): ref is string => Boolean(ref)),
+  );
 
   // 第一档:本需求任务的触发消息 id 集合(任务书/指令消息)。
   const triggerIds = new Set(
@@ -153,11 +228,16 @@ export function mergeRequirementTimeline(
       continue;
     }
     const linked = linkedIds.has(message.id) || triggerIds.has(message.id);
+    const coordination = isRequirementCoordinationMessage(
+      message,
+      taskIds,
+      specRefs,
+    );
     const inWindow =
       !linked &&
       Date.parse(message.createdAt) >= windowStart &&
       Date.parse(message.createdAt) <= windowEnd;
-    if (!linked && !inWindow) {
+    if (!linked && !inWindow && !coordination) {
       continue;
     }
     events.push({

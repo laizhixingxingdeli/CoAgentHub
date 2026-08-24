@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
@@ -223,6 +223,7 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     );
     // L1 层:执行任务汇报 + claimVerification 可见。
     expect(screen.getByTestId("requirement-layer-l1")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("requirement-layer-l1-toggle"));
     expect(
       screen.getByTestId("requirement-timeline-claim-exec-1"),
     ).toHaveAttribute("data-status", "verified");
@@ -278,6 +279,72 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     expect(screen.getByTestId("requirement-layer-l3")).toHaveTextContent(
       "未开始",
     );
+  });
+
+  it("全部通过默认折叠,打开 L1 后只显示执行记录与控制", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
+      executionTask({
+        id: "exec-1",
+        parentTaskId: "l2",
+        createdAt: "2026-08-01T10:00:00.000Z",
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[specPublished(), reviewResult("pass")]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+
+    expect(screen.getByTestId("requirement-layer-l3-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByTestId("requirement-layer-l2-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByTestId("requirement-layer-l1-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(
+      screen.queryByTestId("requirement-timeline"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("requirement-layer-l1-toggle"));
+    expect(
+      screen.getByTestId("requirement-timeline-item-exec-1"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-timeline-item-l2"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("失败层默认展开,发现项内容归入 L3", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[reviewResult("findings", undefined, "需要补测试")]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+
+    expect(screen.getByTestId("requirement-layer-l3-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(
+      screen.getByTestId("requirement-layer-l3-content"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-timeline-coordination-review-findings"),
+    ).toBeInTheDocument();
   });
 
   it("协调任务声明 noExecutionReason 时,L1 为不适用且理由与阶梯状态同源", () => {

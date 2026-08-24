@@ -7,7 +7,10 @@
 import { describe, expect, it } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
-import { mergeRequirementTimeline } from "./merge-requirement-timeline";
+import {
+  mergeRequirementTimeline,
+  partitionRequirementTimeline,
+} from "./merge-requirement-timeline";
 
 /** 构造最小可用的 TaskItem(合并函数只消费 id/messageId/createdAt/updatedAt)。 */
 function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
@@ -28,7 +31,9 @@ function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
 }
 
 /** 构造最小可用的 MessageItem。默认 createdAt 落在 makeTask 默认窗口内。 */
-function makeMessage(overrides: Partial<MessageItem> & { id: string }): MessageItem {
+function makeMessage(
+  overrides: Partial<MessageItem> & { id: string },
+): MessageItem {
   return {
     groupId: "group-1",
     senderId: "participant-coord",
@@ -89,11 +94,7 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
       "2026-08-01T12:00:00.000Z",
       "2026-08-01T13:00:00.000Z",
     ]);
-    expect(events.map((e) => e.kind)).toEqual([
-      "message",
-      "task",
-      "message",
-    ]);
+    expect(events.map((e) => e.kind)).toEqual(["message", "task", "message"]);
   });
 
   it("归属规则:任务的触发消息(id === task.messageId)必归属", () => {
@@ -251,7 +252,9 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     );
     const msgEvents = events.filter((e) => e.kind === "message");
     const byId = (id: string) => {
-      const e = msgEvents.find((m) => m.kind === "message" && m.message.id === id);
+      const e = msgEvents.find(
+        (m) => m.kind === "message" && m.message.id === id,
+      );
       return e && e.kind === "message" ? e : null;
     };
     expect(byId("m-1")?.sender?.name).toBe("检视者");
@@ -259,5 +262,73 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     expect(byId("m-2")?.softDeleted).toBe(true);
     expect(byId("m-3")?.softDeleted).toBe(true);
     expect(byId("m-4")?.sender).toBeNull();
+  });
+
+  it("协调载荷超出任务时间窗仍归属对应层,普通记录兜底进 L1", () => {
+    const execution = makeTask({
+      id: "exec-1",
+      createdAt: "2026-08-01T09:00:00.000Z",
+      updatedAt: "2026-08-01T10:00:00.000Z",
+    });
+    const coordination = makeTask({
+      id: "coord-1",
+      messageId: "coord-trigger",
+      specRef: "specs/r.md",
+      createdAt: "2026-08-01T09:00:00.000Z",
+      updatedAt: "2026-08-01T10:00:00.000Z",
+    });
+    const review = makeMessage({
+      id: "review-result",
+      createdAt: "2026-08-01T13:00:00.000Z",
+      body: JSON.stringify({
+        type: "review_result",
+        layer: 3,
+        taskId: "coord-1",
+        verdict: "findings",
+        findings: [{ severity: "高", note: "需要补测试" }],
+      }),
+    });
+    const amended = makeMessage({
+      id: "spec-amended",
+      createdAt: "2026-08-01T14:00:00.000Z",
+      body: JSON.stringify({
+        type: "spec_amended",
+        specRef: "specs/r.md",
+        specHash: "new-hash",
+        reason: "补充验收标准",
+      }),
+    });
+    const ordinary = makeMessage({
+      id: "ordinary",
+      createdAt: "2026-08-01T09:30:00.000Z",
+      body: "执行沟通",
+    });
+    const events = mergeRequirementTimeline(
+      [execution, coordination],
+      [review, amended, ordinary],
+      MEMBERS,
+    );
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["exec-1"]),
+      "coord-1",
+    );
+
+    expect(
+      layers.l3.map((event) => event.kind === "message" && event.message.id),
+    ).toEqual(["review-result", "spec-amended"]);
+    expect(
+      layers.l2.map((event) => event.kind === "task" && event.task.id),
+    ).toEqual(["coord-1"]);
+    expect(
+      layers.l1.some(
+        (event) => event.kind === "message" && event.message.id === "ordinary",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l1.some(
+        (event) => event.kind === "task" && event.task.id === "exec-1",
+      ),
+    ).toBe(true);
   });
 });
