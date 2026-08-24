@@ -1,6 +1,6 @@
 # Spec: 这一轮补的可观测字段,人一个都看不见
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `e7f5b9a2`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **前置**: `requirement-detail-layer-grouping`(`a95daf4c`)—— 三段式布局已就位,
