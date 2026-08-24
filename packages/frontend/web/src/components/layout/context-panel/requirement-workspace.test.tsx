@@ -251,3 +251,149 @@ describe("RequirementWorkspace 响应式布局", () => {
     ).toBeInTheDocument();
   });
 });
+
+// 需求/修复二态标签(requirement-list-kind-tabs):三种类型任务(requirement /
+// fix / null)混合,验证过滤、null 归类、计数、空态与切换标签的选中回落。
+const MIXED_KINDS = [
+  makeTask({
+    id: "task-req",
+    specRef: "specs/req.md",
+    brief: "# 需求X",
+    dispatchKind: "requirement",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+  }),
+  makeTask({
+    id: "task-old",
+    specRef: "specs/old.md",
+    brief: "# 旧任务",
+    dispatchKind: null,
+    createdAt: "2026-08-01T01:00:00.000Z",
+    updatedAt: "2026-08-01T01:00:00.000Z",
+  }),
+  makeTask({
+    id: "task-fix",
+    specRef: "specs/fix.md",
+    brief: "# 修复Y",
+    dispatchKind: "fix",
+    createdAt: "2026-08-01T02:00:00.000Z",
+    updatedAt: "2026-08-01T02:00:00.000Z",
+  }),
+];
+
+describe("RequirementWorkspace 需求/修复标签(requirement-list-kind-tabs)", () => {
+  it("默认「需求」标签:null dispatchKind 归入需求,修复项不显示", async () => {
+    setViewport(1280);
+    renderWorkspace(MIXED_KINDS);
+
+    // 需求 (2):requirement + null;修复 (1):fix。
+    expect(
+      await screen.findByTestId("requirement-kind-tab-requirement"),
+    ).toHaveTextContent("需求 (2)");
+    expect(screen.getByTestId("requirement-kind-tab-fix")).toHaveTextContent(
+      "修复 (1)",
+    );
+    expect(
+      screen.getByTestId("requirement-row-specs/req.md"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-row-specs/old.md"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-row-specs/fix.md"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("切到「修复」标签:只显示 fix 项,计数不变", async () => {
+    setViewport(1280);
+    renderWorkspace(MIXED_KINDS);
+
+    fireEvent.click(await screen.findByTestId("requirement-kind-tab-fix"));
+    expect(
+      screen.getByTestId("requirement-row-specs/fix.md"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-row-specs/req.md"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-row-specs/old.md"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-kind-tab-requirement"),
+    ).toHaveTextContent("需求 (2)");
+    expect(screen.getByTestId("requirement-kind-tab-fix")).toHaveTextContent(
+      "修复 (1)",
+    );
+  });
+
+  it("某标签下为空时显示空态,标签本身仍可见可点", async () => {
+    setViewport(1280);
+    renderWorkspace(TWO_REQUIREMENTS);
+
+    // 两条都是 null → 全部归「需求」,「修复」计数为 0。
+    expect(
+      await screen.findByTestId("requirement-kind-tab-fix"),
+    ).toHaveTextContent("修复 (0)");
+
+    fireEvent.click(screen.getByTestId("requirement-kind-tab-fix"));
+    // 空态提示出现,标签栏与两个标签仍在。
+    expect(screen.getByTestId("requirement-kind-empty")).toHaveTextContent(
+      "暂无修复任务",
+    );
+    expect(screen.getByTestId("requirement-kind-tabs")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-kind-tab-requirement"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("requirement-list")).not.toBeInTheDocument();
+
+    // 切回「需求」:列表恢复。
+    fireEvent.click(screen.getByTestId("requirement-kind-tab-requirement"));
+    expect(screen.getByTestId("requirement-list")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-row-specs/a.md"),
+    ).toBeInTheDocument();
+  });
+
+  it("切换标签:原选中不在新列表时回落为未选中,不自动挑一条", async () => {
+    setViewport(1280);
+    renderWorkspace(MIXED_KINDS);
+
+    // 初始默认选中「需求」标签下最新一条(specs/old.md,01:00 晚于 req 的 00:00)。
+    // 行渲染先于选中 effect 生效,用 waitFor 等选中应用(否则慢环境会抢先断言)。
+    await screen.findByTestId("requirement-row-specs/old.md");
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("requirement-row-specs/old.md"),
+      ).toHaveAttribute("data-selected", "true");
+    });
+
+    // 切到「修复」:原选中(old)不在新列表 → 回落未选中,详情空态,不自动选 fix。
+    fireEvent.click(screen.getByTestId("requirement-kind-tab-fix"));
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("requirement-detail-empty"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("requirement-row-specs/fix.md"),
+    ).not.toHaveAttribute("data-selected");
+    expect(
+      screen.queryByTestId("requirement-kind-empty"),
+    ).not.toBeInTheDocument();
+
+    // 手动选中 fix 后再切回「需求」:同样回落,不自动跳选。
+    fireEvent.click(screen.getByTestId("requirement-row-specs/fix.md"));
+    expect(screen.getByTestId("requirement-row-specs/fix.md")).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
+    fireEvent.click(screen.getByTestId("requirement-kind-tab-requirement"));
+    expect(
+      screen.getByTestId("requirement-row-specs/req.md"),
+    ).not.toHaveAttribute("data-selected");
+    expect(
+      screen.getByTestId("requirement-row-specs/old.md"),
+    ).not.toHaveAttribute("data-selected");
+    expect(screen.getByTestId("requirement-detail-empty")).toBeInTheDocument();
+  });
+});

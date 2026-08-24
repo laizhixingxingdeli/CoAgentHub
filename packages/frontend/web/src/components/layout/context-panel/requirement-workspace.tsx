@@ -14,6 +14,12 @@ import RequirementDetailPanel, {
   stepStatusesForRequirement,
 } from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
+import {
+  countRequirementsByKind,
+  filterRequirementsByKind,
+  type RequirementKind,
+  requirementKindOf,
+} from "./requirement-kind";
 
 /**
  * 需求工作区(共享组件,UI-04b-2):从原 TasksTab 抽取,供「群内页主区」与右栏
@@ -82,6 +88,19 @@ export function RequirementWorkspace({
       })),
     [tasks, messages, members],
   );
+  // 「需求 / 修复」二态切换(requirement-list-kind-tabs R1):null dispatchKind
+  // 按「需求」处理(R2);过滤只影响列表展示,不改分组数据本身。
+  const [requirementKind, setRequirementKind] =
+    useState<RequirementKind>("requirement");
+  const visibleRequirements = useMemo(
+    () => filterRequirementsByKind(requirements, requirementKind),
+    [requirements, requirementKind],
+  );
+  // 两个标签的计数:与当前选中标签无关,空标签也保持可见可点(R3)。
+  const kindCounts = useMemo(
+    () => countRequirementsByKind(requirements),
+    [requirements],
+  );
   // 当前选中的需求 id:默认选中数组最后一个(最新需求);任务刷新导致当前选中项
   // 失效时回落到最新,仍保持「默认选中最新」的约定。
   const [selectedRequirementId, setSelectedRequirementId] = useState<
@@ -103,13 +122,22 @@ export function RequirementWorkspace({
       }
       if (!selectionInitializedRef.current) {
         selectionInitializedRef.current = true;
-        return requirements[requirements.length - 1].id;
+        // 初始默认选中当前标签下最新的一条(初始标签为「需求」):避免初始选中
+        // 落在另一标签(隐藏)的项上,造成「列表无高亮、详情却是另一条」。
+        for (let i = requirements.length - 1; i >= 0; i--) {
+          if (requirementKindOf(requirements[i]) === requirementKind) {
+            return requirements[i].id;
+          }
+        }
+        return null;
       }
       // A selected requirement disappearing must not move the user to another
       // row while the task collection is being refreshed.
       return null;
     });
-  }, [requirements]);
+    // requirementKind 也参与:切标签后该 effect 重跑,但 selectionInitializedRef
+    // 一旦置位就不再自动跳选,「回落未选中」由 handleKindChange 决定。
+  }, [requirements, requirementKind]);
 
   // 响应式断点:复用项目既有 useIsDesktop(lg ≥1024px)约定。窄视口(<1024px)
   // 放不下「需求列表 | 详情」两栏 → 单栏:列表 / 详情二选一,点击行进详情,
@@ -370,10 +398,25 @@ export function RequirementWorkspace({
   const selectedRequirement =
     requirements.find((r) => r.id === selectedRequirementId) ?? null;
 
+  /** 切换「需求 / 修复」标签:原选中若不在新标签列表,回落为未选中,
+   *  不自动挑一条(requirement-list-kind-tabs R5,同 live-refresh R3 原则)。 */
+  const handleKindChange = (kind: RequirementKind) => {
+    setRequirementKind(kind);
+    setSelectedRequirementId((prev) => {
+      if (prev === null) {
+        return null;
+      }
+      const stillVisible = requirements.some(
+        (r) => r.id === prev && requirementKindOf(r) === kind,
+      );
+      return stillVisible ? prev : null;
+    });
+  };
+
   /** 选择需求:桌面两栏仅切换选中;窄视口单栏同时切到详情页(R1 切换行为)。 */
-  const handleSelectRequirement = (id: string) => {
+  const handleSelectRequirement = (id: string | null) => {
     setSelectedRequirementId(id);
-    if (!isDesktop) {
+    if (id !== null && !isDesktop) {
       setMobilePane("detail");
     }
   };
@@ -432,7 +475,10 @@ export function RequirementWorkspace({
           {/* 左栏:需求列表。多需求时可独立滚动。 */}
           <div className={`${listClassName} overflow-y-auto border-r`}>
             <RequirementList
-              requirements={requirements}
+              visibleRequirements={visibleRequirements}
+              kindCounts={kindCounts}
+              kind={requirementKind}
+              onKindChange={handleKindChange}
               selectedId={selectedRequirementId}
               onSelect={handleSelectRequirement}
             />
@@ -445,7 +491,10 @@ export function RequirementWorkspace({
         // 窄视口(<1024px)单栏:只显示需求列表,点击行进详情。
         <div className="min-h-0 flex-1 overflow-y-auto">
           <RequirementList
-            requirements={requirements}
+            visibleRequirements={visibleRequirements}
+            kindCounts={kindCounts}
+            kind={requirementKind}
+            onKindChange={handleKindChange}
             selectedId={selectedRequirementId}
             onSelect={handleSelectRequirement}
           />
