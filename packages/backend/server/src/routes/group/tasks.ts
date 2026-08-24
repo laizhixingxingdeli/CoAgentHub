@@ -60,6 +60,30 @@ function summaryHasReviewRequest(diffSummary: unknown): boolean {
 }
 
 /**
+ * 需表态的提交核实结论集合(specs/l2-must-read-claim-verification.md R1)。
+ * - not_found / outside_window → 必须显式表态
+ * - verified / skipped → 无需表态(skipped 为环境限制,非执行器过错)
+ */
+const NEEDS_CLAIM_ADJUDICATION = new Set<string>([
+  "not_found",
+  "outside_window",
+]);
+
+/** 从子任务自身的 diffSummary 提取 claimVerification.status(读子任务,不读协调任务)。 */
+function childClaimVerificationStatus(raw: unknown): string | undefined {
+  const summary =
+    typeof raw === "object" && raw !== null && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const cv = summary?.claimVerification;
+  if (typeof cv !== "object" || cv === null || Array.isArray(cv)) {
+    return undefined;
+  }
+  const status = (cv as Record<string, unknown>).status;
+  return typeof status === "string" ? status : undefined;
+}
+
+/**
  * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
  * 仅当目标状态为 done 且任务为协调任务(detached)时生效;failed/cancelled 不触发(R3)。
  * 协调任务判定必须复用 lib/detached-task-liveness 的 isDetachedTask(),不另写一套。
@@ -107,6 +131,50 @@ async function assertCoordinationCloseIntegrity(
       throw new BizError(
         BizCodeEnum.InvalidRequest,
         "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场且非 fix 票)。",
+      );
+    }
+  }
+
+  // L2 必须直面提交核实结论(specs/l2-must-read-claim-verification.md):
+  // 任一执行子任务的 claimVerification.status 属需表态集合(not_found /
+  // outside_window)时,协调任务 diffSummary.claimAdjudication[childTaskId]
+  // 必须提供 accepted(布尔)与非空 reason,否则 400 且点明子任务与其核实结论。
+  // claimVerification 读自子任务自身 diffSummary,而非协调任务的。
+  const children = await db.query.task.findMany({
+    where: (t, { eq }) => eq(t.parentTaskId, task.id),
+    columns: { id: true, diffSummary: true },
+  });
+  const adjudication =
+    summary !== undefined &&
+    typeof summary.claimAdjudication === "object" &&
+    summary.claimAdjudication !== null &&
+    !Array.isArray(summary.claimAdjudication)
+      ? (summary.claimAdjudication as Record<string, unknown>)
+      : undefined;
+  for (const child of children) {
+    const status = childClaimVerificationStatus(child.diffSummary);
+    if (status === undefined || !NEEDS_CLAIM_ADJUDICATION.has(status)) {
+      continue;
+    }
+    const entry = adjudication?.[child.id];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `子任务 ${child.id} 的提交核实结论为 ${status},必须在 diffSummary.claimAdjudication["${child.id}"] 中显式表态(accepted 布尔 + 非空 reason)。`,
+      );
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.accepted !== "boolean") {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `子任务 ${child.id} 的 claimAdjudication.accepted 缺失或非布尔,必须显式给出 true 或 false。`,
+      );
+    }
+    const reason = typeof e.reason === "string" ? e.reason : "";
+    if (reason.trim() === "") {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `子任务 ${child.id} 的 claimAdjudication.reason 为空,必须填写非空理由。`,
       );
     }
   }
