@@ -136,7 +136,7 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     });
   }
 
-  /** 取最后插入的子任务 id(DB 按插入顺序,createdAt 最新)。 */
+  /** 取最后插入的子任务 id(createdAt 最新)。按 createdAt desc 排序后,最新的是 rows[0]。 */
   async function lastChildId(groupId: string, parentTaskId: string) {
     const rows = await testDb.query.task.findMany({
       where: (t, { and, eq }) =>
@@ -144,7 +144,7 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
       columns: { id: true },
       orderBy: (t, { desc }) => [desc(t.createdAt)],
     });
-    return rows[rows.length - 1].id;
+    return rows[0].id;
   }
 
   function adjudication(childId: string, accepted: boolean, reason: string) {
@@ -303,6 +303,8 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const first = await lastChildId(group.id, task.id);
     await addChild(group.id, task.id, coordinator.id, "outside_window");
     const second = await lastChildId(group.id, task.id);
+    // 守卫:helper 必须取“第二个”子任务,而非重复返回第一个,否则下面只断言缺 first。
+    expect(first).not.toBe(second);
 
     // 只表态 first,缺 second → 400 点名 second
     const res = await patchTask(coordinator.id, group.id, task.id, {
