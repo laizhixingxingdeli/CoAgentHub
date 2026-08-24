@@ -6,7 +6,10 @@ import {
   hasCoAgentHubSection,
   initializeCoAgentHubProject,
   isCoAgentHubProject,
+  onboardProject,
+  parseCliArgs,
   RUNTIME_SKILL_LAYOUTS,
+  readCoAgentHubGroupId,
   resolveSkillInstallPath,
   updateCoAgentHubGroupId,
   writeCoAgentHubGroupId,
@@ -16,6 +19,34 @@ import { RUNTIME_SKILL_LAYOUTS as SOURCE_RUNTIME_SKILL_LAYOUTS } from "./runtime
 
 function tempProject() {
   return mkdtempSync(join(tmpdir(), "coagenthub-init-"));
+}
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
+function routeFetch(routes, calls) {
+  return async (url, init = {}) => {
+    const path = new URL(url).pathname.replace(/^\/api(?=\/|$)/, "");
+    const method = init.method || "GET";
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path, body, headers: init.headers });
+    const route = routes.find(
+      (candidate) =>
+        candidate.method === method &&
+        (typeof candidate.path === "function"
+          ? candidate.path(path, body)
+          : candidate.path === path),
+    );
+    if (!route) throw new Error(`unexpected request: ${method} ${path}`);
+    return typeof route.response === "function"
+      ? route.response(path, body)
+      : jsonResponse(route.response, route.status);
+  };
 }
 
 describe("CoAgentHub project onboarding", () => {
@@ -148,6 +179,299 @@ describe("skill-sync runtime mapping reuse (spec: 复用同一份目录约定)",
     expect(resolveSkillInstallPath(homeRoot, "nonsense", "executor")).toBe(
       null,
     );
+  });
+});
+
+describe("interactive /init onboarding flow", () => {
+  it("creates, aligns, installs skills, and writes the exact group id", async () => {
+    const projectPath = tempProject();
+    const homeRoot = mkdtempSync(join(tmpdir(), "coagenthub-home-"));
+    mkdirSync(join(homeRoot, ".codex/skills"), { recursive: true });
+    mkdirSync(join(homeRoot, ".atomcode/skills"), { recursive: true });
+    mkdirSync(join(homeRoot, ".codex/skills/coagenthub-reviewer"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(homeRoot, ".codex/skills/coagenthub-reviewer/SKILL.md"),
+      "old reviewer skill",
+    );
+    const calls = [];
+    const fetchImpl = routeFetch(
+      [
+        {
+          method: "GET",
+          path: "/participants",
+          response: [{ id: "p-reviewer", name: "reviewer", device: "mac" }],
+        },
+        {
+          method: "POST",
+          path: "/participants",
+          response: { id: "p-executor", name: "executor", device: "mac" },
+        },
+        {
+          method: "POST",
+          path: "/groups",
+          response: { id: "group-1" },
+        },
+        {
+          method: "GET",
+          path: "/groups/group-1/members",
+          response: [{ participantId: "p-reviewer", roles: ["reviewer"] }],
+        },
+        {
+          method: "POST",
+          path: "/groups/group-1/members",
+          response: { participantId: "p-executor", roles: ["executor"] },
+        },
+        {
+          method: "GET",
+          path: "/skills/reviewer",
+          response: { content: "reviewer skill" },
+        },
+        {
+          method: "GET",
+          path: "/skills/executor",
+          response: { content: "executor skill" },
+        },
+      ],
+      calls,
+    );
+
+    const result = await onboardProject({
+      projectPath,
+      apiBase: "http://fake.test/api",
+      title: "Project one",
+      homeRoot,
+      creator: {
+        name: "reviewer",
+        role: "reviewer",
+        runtime: "codex",
+        device: "mac",
+      },
+      members: [
+        {
+          name: "executor",
+          role: "executor",
+          runtime: "atomcode",
+          device: "mac",
+        },
+      ],
+      fetchImpl,
+    });
+
+    expect(result.status, result.report).toBe("completed");
+    expect(result.exitCode).toBe(0);
+    expect(result.reusedParticipants).toEqual(["reviewer"]);
+    expect(result.registeredParticipants).toEqual(["executor"]);
+    expect(readCoAgentHubGroupId(projectPath)).toBe("group-1");
+    expect(
+      readFileSync(
+        join(homeRoot, ".codex/skills/coagenthub-reviewer/SKILL.md"),
+        "utf8",
+      ),
+    ).toBe("reviewer skill");
+    expect(
+      readFileSync(
+        join(homeRoot, ".atomcode/skills/coagenthub-executor/SKILL.md"),
+        "utf8",
+      ),
+    ).toBe("executor skill");
+    expect(result.report).toContain("已更新 skill");
+
+    const groupCall = calls.find(
+      (call) => call.method === "POST" && call.path === "/groups",
+    );
+    expect(groupCall.body).toEqual({
+      title: "Project one",
+      creatorRole: "reviewer",
+    });
+    expect(
+      calls.filter(
+        (call) =>
+          call.method === "POST" && call.path === "/groups/group-1/members",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps only the scaffold and exits non-zero when the platform is unreachable", async () => {
+    const projectPath = tempProject();
+    const result = await onboardProject({
+      projectPath,
+      apiBase: "http://offline.test/api",
+      creator: { name: "reviewer", role: "reviewer", runtime: "codex" },
+      fetchImpl: async () => {
+        throw new Error("connection refused");
+      },
+    });
+
+    expect(result.platformUnavailable).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.completedSteps).toEqual(["脚手架"]);
+    expect(readCoAgentHubGroupId(projectPath)).toBe("");
+    expect(result.report).toContain(
+      "COAGENTHUB_API_BASE 当前取值为 http://offline.test/api",
+    );
+  });
+
+  it("rejects an exact-name participant whose explicit device conflicts", async () => {
+    const projectPath = tempProject();
+    const calls = [];
+    const result = await onboardProject({
+      projectPath,
+      creator: {
+        name: "reviewer",
+        role: "reviewer",
+        runtime: "codex",
+        device: "mac",
+      },
+      fetchImpl: routeFetch(
+        [
+          {
+            method: "GET",
+            path: "/participants",
+            response: [{ id: "p-reviewer", name: "reviewer", device: "linux" }],
+          },
+        ],
+        calls,
+      ),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.report).toContain("属性冲突");
+    expect(calls.some((call) => call.path === "/groups")).toBe(false);
+    expect(readCoAgentHubGroupId(projectPath)).toBe("");
+  });
+
+  it("continues an existing group without creating a replacement group", async () => {
+    const projectPath = tempProject();
+    const homeRoot = mkdtempSync(join(tmpdir(), "coagenthub-home-"));
+    mkdirSync(join(homeRoot, ".codex/skills"), { recursive: true });
+    initializeCoAgentHubProject(projectPath);
+    writeCoAgentHubGroupId(projectPath, "existing-group");
+    const calls = [];
+    const result = await onboardProject({
+      projectPath,
+      homeRoot,
+      creator: { name: "reviewer", role: "reviewer", runtime: "codex" },
+      fetchImpl: routeFetch(
+        [
+          {
+            method: "GET",
+            path: "/groups/existing-group",
+            response: { id: "existing-group" },
+          },
+          {
+            method: "GET",
+            path: "/participants",
+            response: [{ id: "p-reviewer", name: "reviewer", device: null }],
+          },
+          {
+            method: "GET",
+            path: "/groups/existing-group/members",
+            response: [{ participantId: "p-reviewer", roles: ["reviewer"] }],
+          },
+          {
+            method: "GET",
+            path: "/skills/reviewer",
+            response: { content: "latest reviewer skill" },
+          },
+        ],
+        calls,
+      ),
+    });
+
+    expect(result.status, result.report).toBe("completed");
+    expect(calls.some((call) => call.path === "/groups")).toBe(false);
+    expect(
+      calls.some(
+        (call) =>
+          call.path === "/groups/existing-group/members" &&
+          call.method === "POST",
+      ),
+    ).toBe(false);
+    expect(readCoAgentHubGroupId(projectPath)).toBe("existing-group");
+  });
+
+  it("reports an unknown runtime for manual skill installation and exits non-zero", async () => {
+    const projectPath = tempProject();
+    const calls = [];
+    const result = await onboardProject({
+      projectPath,
+      creator: { name: "reviewer", role: "reviewer", runtime: "hermes" },
+      fetchImpl: routeFetch(
+        [
+          {
+            method: "GET",
+            path: "/participants",
+            response: [],
+          },
+          {
+            method: "POST",
+            path: "/participants",
+            response: { id: "p-reviewer", name: "reviewer" },
+          },
+          {
+            method: "POST",
+            path: "/groups",
+            response: { id: "group-unknown" },
+          },
+          {
+            method: "GET",
+            path: "/groups/group-unknown/members",
+            response: [],
+          },
+          {
+            method: "POST",
+            path: "/groups/group-unknown/members",
+            response: { participantId: "p-reviewer", roles: ["reviewer"] },
+          },
+        ],
+        calls,
+      ),
+    });
+
+    expect(result.status).toBe("completed-with-warnings");
+    expect(result.exitCode).toBe(1);
+    expect(result.manualInstall).toEqual([
+      {
+        member: "reviewer",
+        role: "reviewer",
+        runtime: "hermes",
+        reason: "unknown-runtime",
+      },
+    ]);
+    expect(result.report).toContain("以下成员的 skill 需手工安装: reviewer");
+    expect(readCoAgentHubGroupId(projectPath)).toBe("group-unknown");
+    expect(calls.some((call) => call.path === "/skills/reviewer")).toBe(false);
+  });
+
+  it("requires explicit allocation in non-TTY mode and skips option values as paths", () => {
+    expect(() =>
+      parseCliArgs(["--title", "Project", "--member", "e:executor:codex"], {
+        isTTY: false,
+      }),
+    ).toThrow(/非 TTY/);
+    const options = parseCliArgs(
+      [
+        "project",
+        "--title",
+        "Project",
+        "--creator",
+        "r:reviewer:codex",
+        "--member",
+        "e:executor:atomcode",
+      ],
+      { isTTY: false },
+    );
+    expect(options.projectPath).toBe("project");
+    expect(options.creator).toEqual({
+      name: "r",
+      role: "reviewer",
+      runtime: "codex",
+    });
+    expect(options.members).toEqual([
+      { name: "e", role: "executor", runtime: "atomcode" },
+    ]);
   });
 });
 
