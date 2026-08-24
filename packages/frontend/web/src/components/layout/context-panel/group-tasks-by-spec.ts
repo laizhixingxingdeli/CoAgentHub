@@ -24,8 +24,15 @@ import type {
   TaskStatus,
 } from "@/pages/app/groups/messages/TaskPanel";
 
-/** 阶梯每层的状态。阶梯固定为 L1 执行、L2 协调、L3 检视三步。 */
-export type StepStatus = "done" | "failed" | "running" | "pending";
+/** 阶梯每层的状态。中性状态与 pending 区分「不适用」和「未开始」。 */
+export type StepStatus =
+  | "done"
+  | "failed"
+  | "running"
+  | "pending"
+  | "na-declared"
+  | "na-fix"
+  | "na-no-reviewer";
 
 /** 一条「需求」:同 specRef 任务的聚合结果。 */
 export type Requirement = {
@@ -61,7 +68,19 @@ export function taskStatusToStepStatus(status: TaskStatus): StepStatus {
 
 /** 协调任务的 review_request 载荷识别。 */
 function isReviewRequestTask(task: TaskItem): boolean {
-  return JSON.stringify(task.diffSummary ?? {}).includes("review_request");
+  if (!task.diffSummary || typeof task.diffSummary !== "object") return false;
+  const hasReviewRequest = JSON.stringify(task.diffSummary).includes(
+    "review_request",
+  );
+  const reason = task.diffSummary.noExecutionReason;
+  return (
+    hasReviewRequest || (typeof reason === "string" && reason.trim().length > 0)
+  );
+}
+
+function noExecutionReasonForTask(task: TaskItem | null): string | null {
+  const reason = task?.diffSummary?.noExecutionReason;
+  return typeof reason === "string" && reason.trim().length > 0 ? reason : null;
 }
 
 /** 需求中的协调任务:父任务优先,兼容无子任务的历史 review_request。 */
@@ -123,7 +142,9 @@ function requirementSteps(tasks: TaskItem[]): StepStatus[] {
   const executionTasks = executionTasksForRequirement(tasks);
   const coordinationTask = coordinationTaskForTasks(tasks);
   return [
-    aggregateTaskStatuses(executionTasks.map((task) => task.status)),
+    noExecutionReasonForTask(coordinationTask)
+      ? "na-declared"
+      : aggregateTaskStatuses(executionTasks.map((task) => task.status)),
     coordinationTask
       ? taskStatusToStepStatus(coordinationTask.status)
       : "pending",

@@ -96,6 +96,20 @@ describe("RequirementStepper 精细阶梯状态条 (UI-04b-1)", () => {
     expect(icon.querySelector("path")).toBeNull();
   });
 
+  it("不适用态:中性实心圈与横杠,不同于未开始空心灰圈", () => {
+    render(<RequirementStepper steps={["na-declared", "pending"]} />);
+    const icon = iconSvg(0);
+    expect(icon.querySelector("circle")).toHaveAttribute(
+      "fill",
+      "var(--muted)",
+    );
+    expect(icon.querySelector("path")).toHaveAttribute(
+      "stroke",
+      "var(--muted-foreground)",
+    );
+    expect(iconSvg(1).querySelector("circle")).toHaveAttribute("fill", "none");
+  });
+
   it("步骤下标与状态挂在 data-status 上,便于上层断言视觉分支", () => {
     render(
       <RequirementStepper steps={["done", "failed", "running", "pending"]} />,

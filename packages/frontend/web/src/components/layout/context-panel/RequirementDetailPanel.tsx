@@ -26,17 +26,18 @@ import { type ReactNode, useState } from "react";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import { FoldableContent } from "./FoldableContent";
 import {
-  coordinationTaskForTasks,
   executionTasksForRequirement,
   type Requirement,
   type StepStatus,
-  taskStatusToStepStatus,
 } from "./group-tasks-by-spec";
 import RequirementStepper from "./RequirementStepper";
 import RequirementTimeline, {
   roleFromMemberRoles,
 } from "./RequirementTimeline";
+import { deriveRequirementLayerState } from "./requirement-layer-state";
 import { LAYER_STATUS_CLASS } from "./status-classes";
+
+export type LayerStatus = StepStatus;
 
 type RequirementDetailPanelProps = {
   /** 当前选中的需求(null = 未选中)。 */
@@ -56,241 +57,23 @@ type RequirementDetailPanelProps = {
   onRollback?: (task: Requirement["tasks"][number]) => void;
 };
 
-/** L3 的两个中性缺层状态必须与正常四态及彼此保持可区分。 */
-export type LayerStatus = StepStatus | "na-fix" | "na-no-reviewer";
-
-/** L2 层状态:协调任务 + L2 结论文本(diffSummary.review_request.diffSummary)。 */
-export type L2State = {
-  task: Requirement["tasks"][number] | null;
-  conclusion: string | null;
-};
-
-/** L3 层状态:review_result 载荷 + 显式缺层状态。 */
-export type L3State = {
-  status: LayerStatus;
-  verdict: string | null;
-  findings: string | null;
-  note: string | null;
-  specRef: string | null;
-  specHash: string | null;
-};
-
-/** diffSummary 是否整体就是 review_request 载荷({type:"review_request",…})。 */
-function isReviewRequestPayload(
-  diffSummary: Record<string, unknown> | null,
-): boolean {
-  return (
-    typeof diffSummary === "object" &&
-    diffSummary !== null &&
-    diffSummary.type === "review_request"
-  );
-}
-
-/** 从 diffSummary 里取 review_request 的结论文本(rr.diffSummary 字段)。 */
-function reviewRequestConclusion(
-  task: Requirement["tasks"][number] | null,
-): string | null {
-  if (!task?.diffSummary || typeof task.diffSummary !== "object") {
-    return null;
-  }
-  const payload = isReviewRequestPayload(task.diffSummary)
-    ? task.diffSummary
-    : task.diffSummary.review_request;
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-  const conclusion = (payload as Record<string, unknown>).diffSummary;
-  return typeof conclusion === "string" && conclusion.trim().length > 0
-    ? conclusion
-    : null;
-}
-
-/** 层判定:reviewer 与 coordinator 同时在场 = 三层,否则两层(v3.9 §3.14.5)。 */
-export function layerModeFromMembers(members: Member[]): "three" | "two" {
-  const roles = new Set(members.flatMap((member) => member.roles ?? []));
-  return roles.has("reviewer") && roles.has("coordinator") ? "three" : "two";
-}
-
-/**
- * L2 层:协调任务 = ① 组内是其他任务 parentTaskId 的父(父子归并的根,
- * 可能尚无 review_request,任务状态即 L2 进行度);② 带 review_request
- * 载荷的遗留协调任务(同 specRef 组内,无孩子)。
- */
-function deriveL2(requirement: Requirement): L2State {
-  const task = coordinationTaskForTasks(requirement.tasks);
-  return { task, conclusion: reviewRequestConclusion(task) };
-}
-
-/** 解析一条消息体里的 review_result 载荷(容错:找不到 JSON 就跳过)。 */
-function parseReviewResult(body: string): {
-  verdict: string;
-  findings: string | null;
-  note: string | null;
-  taskId: string | null;
-} | null {
-  if (!body.includes("review_result")) {
-    return null;
-  }
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(body.slice(start, end + 1)) as {
-      type?: string;
-      taskId?: string;
-      verdict?: string;
-      findings?: string;
-      note?: string;
-    };
-    if (payload.type !== "review_result") {
-      return null;
-    }
-    return {
-      verdict: payload.verdict ?? "",
-      findings: payload.findings ?? null,
-      note: payload.note ?? null,
-      taskId: payload.taskId ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** 从消息体解析 spec_published 载荷(规范发布公告,作为需求的规范锚点)。 */
-function parseSpecPublished(
-  body: string,
-): { specRef: string; specHash: string | null } | null {
-  if (!body.includes("spec_published")) {
-    return null;
-  }
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(body.slice(start, end + 1)) as {
-      type?: string;
-      specRef?: string;
-      specHash?: string;
-    };
-    if (payload.type !== "spec_published" || !payload.specRef) {
-      return null;
-    }
-    return {
-      specRef: payload.specRef,
-      specHash: typeof payload.specHash === "string" ? payload.specHash : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** 需求对应的规范锚点:优先 spec_published 消息(specRef 精确匹配),兜底
- * 需求自身 specRef。spec_published 是发布者(协调者)发出的「本需求按这份
- * 规范执行」公告,比 specRef 字段更权威。 */
-function findSpecAnchor(
-  requirement: Requirement,
-  messages: MessageItem[],
-): { specRef: string; specHash: string | null } | null {
-  if (requirement.specRef) {
-    for (const message of messages) {
-      const published = parseSpecPublished(message.body);
-      if (published && published.specRef === requirement.specRef) {
-        return published;
-      }
-    }
-  }
-  return requirement.specRef
-    ? { specRef: requirement.specRef, specHash: null }
-    : null;
-}
-
-/** L3 层:review_result、修复票与双角色缺层判定。 */
-function deriveL3(
-  requirement: Requirement,
-  messages: MessageItem[],
-  mode: "three" | "two",
-  l2: L2State,
-): L3State {
-  const anchor = findSpecAnchor(requirement, messages);
-  if (requirement.dispatchKind === "fix") {
-    return {
-      status: "na-fix",
-      verdict: null,
-      findings: null,
-      note: null,
-      specRef: anchor?.specRef ?? null,
-      specHash: anchor?.specHash ?? null,
-    };
-  }
-  const taskIds = new Set(requirement.tasks.map((task) => task.id));
-  if (mode === "two") {
-    return {
-      status: "na-no-reviewer",
-      verdict: null,
-      findings: null,
-      note: null,
-      specRef: anchor?.specRef ?? null,
-      specHash: anchor?.specHash ?? null,
-    };
-  }
-  for (const message of messages) {
-    const result = parseReviewResult(message.body);
-    if (
-      result &&
-      result.taskId !== null &&
-      taskIds.has(result.taskId) &&
-      result.verdict
-    ) {
-      return {
-        status: result.verdict === "pass" ? "done" : "failed",
-        verdict: result.verdict,
-        findings: result.findings,
-        note: result.note,
-        specRef: anchor?.specRef ?? null,
-        specHash: anchor?.specHash ?? null,
-      };
-    }
-  }
-  return {
-    status: l2.task?.status === "done" ? "running" : "pending",
-    verdict: null,
-    findings: null,
-    note: null,
-    specRef: anchor?.specRef ?? null,
-    specHash: anchor?.specHash ?? null,
-  };
-}
-
+export { layerModeFromMembers } from "./requirement-layer-state";
 /** 需求阶梯的固定三步状态,供左侧需求列表与详情阶梯共用。 */
 export function stepStatusesForRequirement(
   requirement: Requirement,
   messages: MessageItem[],
   members: Member[],
 ): StepStatus[] {
-  const mode = layerModeFromMembers(members);
-  const l2 = deriveL2(requirement);
-  const l3 = deriveL3(requirement, messages, mode, l2);
-  const l3Status: StepStatus =
-    l3.status === "na-fix" || l3.status === "na-no-reviewer"
-      ? "pending"
-      : l3.status;
-  return [
-    requirement.steps[0] ?? "pending",
-    l2.task ? taskStatusToStepStatus(l2.task.status) : "pending",
-    l3Status,
-  ];
+  return deriveRequirementLayerState(requirement, messages, members).steps;
 }
 
-/** 层状态徽标配色(done/failed/running/pending 与两种缺层状态均保留中性灰)。 */
-const LAYER_STATUS_LABEL: Record<LayerStatus, string> = {
+/** 层状态徽标配色(done/failed/running/pending 与中性状态均保留可区分样式)。 */
+const LAYER_STATUS_LABEL: Record<StepStatus, string> = {
   done: "通过",
   failed: "未通过",
   running: "进行中",
   pending: "未开始",
+  "na-declared": "不适用 · 已声明理由",
   "na-fix": "不适用·修复",
   "na-no-reviewer": "未检视·无检视者",
 };
@@ -420,14 +203,17 @@ export default function RequirementDetailPanel({
     );
   }
 
-  const mode = layerModeFromMembers(members);
-  const l2 = deriveL2(requirement);
-  const l3 = deriveL3(requirement, messages, mode, l2);
+  const layerState = deriveRequirementLayerState(
+    requirement,
+    messages,
+    members,
+  );
+  const { l1, l2, l3 } = layerState;
 
   // 阶梯固定三步:重试只作为 L1 标签的附属信息,不增加步骤。
   const l1Tasks = executionTasksForRequirement(requirement.tasks);
-  const l1Status = requirement.steps[0] ?? "pending";
-  const l2Status = l2.task ? taskStatusToStepStatus(l2.task.status) : "pending";
+  const l1Status = l1.status;
+  const l2Status = l2.status;
   const retrySuffix =
     requirement.retryCount > 0 ? ` · 重试 ${requirement.retryCount} 次` : "";
   const l1Executor = l1Tasks[0];
@@ -445,13 +231,11 @@ export default function RequirementDetailPanel({
         )?.roles,
       )
     : null;
-  const l3StepperStatus: StepStatus =
-    l3.status === "na-fix" || l3.status === "na-no-reviewer"
-      ? "pending"
-      : l3.status;
-  const stepStatuses: StepStatus[] = [l1Status, l2Status, l3StepperStatus];
+  const stepStatuses = layerState.steps;
   const stepLabels = [
-    `L1 执行${retrySuffix}`,
+    l1.status === "na-declared"
+      ? "L1 不适用 · 已声明理由"
+      : `L1 执行${retrySuffix}`,
     "L2 协调",
     l3.status === "na-fix"
       ? "L3 不适用·修复"
@@ -533,7 +317,7 @@ export default function RequirementDetailPanel({
         )}
       </LayerCard>
 
-      {/* L2 协调:协调任务的 review_request(L2 结论文本);无协调任务 → 未开始。 */}
+      {/* L2 协调:状态来自协调任务自身,子任务只参与 L1。 */}
       <LayerCard
         testId="requirement-layer-l2"
         title="L2 协调"
@@ -574,11 +358,21 @@ export default function RequirementDetailPanel({
         className="flex flex-col gap-2"
       >
         <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          L1 执行与沟通记录
+          {l1.status === "na-declared"
+            ? "L1 不适用 · 已声明理由"
+            : "L1 执行与沟通记录"}
           <LayerBadge status={l1Status}>
             {`L1 ${LAYER_STATUS_LABEL[l1Status]}`}
           </LayerBadge>
         </span>
+        {l1.noExecutionReason && (
+          <FoldableText
+            testId="requirement-l1-no-execution-reason"
+            text={l1.noExecutionReason}
+            expanded={expandedLayers.has("l1-no-execution-reason")}
+            onToggle={() => toggleLayer("l1-no-execution-reason")}
+          />
+        )}
         <RequirementTimeline
           tasks={requirement.tasks}
           messages={messages}

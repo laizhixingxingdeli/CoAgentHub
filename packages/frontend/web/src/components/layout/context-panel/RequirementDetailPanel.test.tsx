@@ -172,7 +172,7 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     );
     expect(screen.getByTestId("requirement-stepper-step-2")).toHaveAttribute(
       "data-status",
-      "pending",
+      "na-no-reviewer",
     );
     expect(screen.getAllByTestId(/requirement-stepper-step-/)).toHaveLength(3);
     // null dispatchKind 按 requirement 处理;两角色未同时在场时是可行动的未检视。
@@ -277,6 +277,62 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     expect(screen.getByText("检视尚未开始")).toBeInTheDocument();
     expect(screen.getByTestId("requirement-layer-l3")).toHaveTextContent(
       "未开始",
+    );
+  });
+
+  it("协调任务声明 noExecutionReason 时,L1 为不适用且理由与阶梯状态同源", () => {
+    const reason =
+      "上一轮执行任务已完成完整实现并留下暂存成果,本票仅做 L2 核对。";
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({
+        diffSummary: { noExecutionReason: reason },
+        createdAt: "2026-08-01T09:00:00.000Z",
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+
+    expect(screen.getByTestId("requirement-layer-l1")).toHaveTextContent(
+      "L1 不适用 · 已声明理由",
+    );
+    expect(
+      screen.getByTestId("requirement-l1-no-execution-reason"),
+    ).toHaveTextContent(reason);
+    expect(
+      screen.getByTestId("requirement-layer-status-na-declared"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("requirement-stepper-step-0")).toHaveAttribute(
+      "data-status",
+      "na-declared",
+    );
+    expect(screen.getByTestId("requirement-stepper-step-1")).toHaveAttribute(
+      "data-status",
+      "done",
+    );
+  });
+
+  it("零子任务但没有 noExecutionReason 的历史协调任务仍是 L1 未开始", () => {
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+    expect(screen.getByTestId("requirement-stepper-step-0")).toHaveAttribute(
+      "data-status",
+      "pending",
+    );
+    expect(screen.getByTestId("requirement-layer-l1")).toHaveTextContent(
+      "L1 未开始",
     );
   });
 

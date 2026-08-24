@@ -11,6 +11,7 @@
  *            `motion-reduce:animate-none` 编译为 @media (prefers-reduced-motion:
  *            reduce) 下 animation: none,即减少动效偏好时静止
  *  - pending 空心灰圈(--border 描边,背景透明)
+ *  - na-* 中性实心圈 + 横杠,与 pending 的未开始灰圈视觉区分
  *
  * 颜色全部走 index.css 注册的 --status-* token,不硬编码色值。
  * 状态仍由上层计算;本组件只负责把执行者与任务标题绘制成紧凑标签。
@@ -27,6 +28,9 @@ const STEP_WRAPPER_CLASS: Record<StepStatus, string> = {
   running:
     "size-6 ring-4 ring-status-running/25 animate-pulse motion-reduce:animate-none",
   pending: "size-6",
+  "na-declared": "size-6",
+  "na-fix": "size-6",
+  "na-no-reviewer": "size-6",
 };
 
 /** 连接线配色:上一步走过了就用它的状态色,没走到用 --border 灰。 */
@@ -35,6 +39,9 @@ const CONNECTOR_CLASS: Record<StepStatus, string> = {
   failed: "bg-status-failed",
   running: "bg-status-running",
   pending: "bg-border",
+  "na-declared": "bg-border",
+  "na-fix": "bg-border",
+  "na-no-reviewer": "bg-border",
 };
 
 /** 白色勾/叉的描边宽度(加粗 + 圆头,小尺寸下也清晰)。 */
@@ -93,6 +100,27 @@ function StepIcon({ status }: { status: StepStatus }) {
           stroke="var(--border)"
           strokeWidth={2}
         />
+      )}
+      {(status === "na-declared" ||
+        status === "na-fix" ||
+        status === "na-no-reviewer") && (
+        <>
+          <circle
+            cx="12"
+            cy="12"
+            r="10"
+            fill="var(--muted)"
+            stroke="var(--muted-foreground)"
+            strokeWidth={2}
+          />
+          <path
+            d="M8 12 H16"
+            fill="none"
+            stroke="var(--muted-foreground)"
+            strokeWidth={2}
+            strokeLinecap="round"
+          />
+        </>
       )}
     </svg>
   );

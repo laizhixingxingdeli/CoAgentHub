@@ -22,6 +22,9 @@ const STEP_DOT_CLASS: Record<StepStatus, string> = {
   failed: "bg-status-failed",
   running: "bg-status-running",
   pending: "border border-muted-foreground/40",
+  "na-declared": "border border-muted-foreground bg-muted",
+  "na-fix": "border border-muted-foreground bg-muted",
+  "na-no-reviewer": "border border-muted-foreground bg-muted",
 };
 
 const KIND_LABEL: Record<RequirementKind, string> = {
@@ -117,6 +120,7 @@ export default function RequirementList({
                     className="flex items-center gap-1"
                   >
                     {req.steps.map((step, i) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: 阶梯步骤只有固定层级位置身份
                       <Fragment key={i}>
                         {i > 0 && (
                           <span className="h-px w-3 bg-muted-foreground/40" />
