@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/utils/nanoid.ts"],
+  "sourcesContent": ["import { nanoid } from 'nanoid'\nimport { z } from 'zod'\n\n/** Generates a default value */\nexport const nanoidSchema = z\n  .string()\n  .min(7)\n  .default(() => nanoid())\n\n/** UID format for objects */\nexport type Nanoid = z.infer<typeof nanoidSchema>\n\n/** All of our Zod brands for entities, used to brand nanoidSchemas. */\nexport type ENTITY_BRANDS = {\n  COLLECTION: 'collection'\n  COOKIE: 'cookie'\n  ENVIRONMENT: 'environment'\n  EXAMPLE: 'example'\n  OPERATION: 'operation'\n  SECURITY_SCHEME: 'securityScheme'\n  SERVER: 'server'\n  TAG: 'tag'\n  WORKSPACE: 'workspace'\n}\n"],
+  "mappings": "AAAA,SAAS,cAAc;AACvB,SAAS,SAAS;AAGX,MAAM,eAAe,EACzB,OAAO,EACP,IAAI,CAAC,EACL,QAAQ,MAAM,OAAO,CAAC;",
+  "names": []
+}

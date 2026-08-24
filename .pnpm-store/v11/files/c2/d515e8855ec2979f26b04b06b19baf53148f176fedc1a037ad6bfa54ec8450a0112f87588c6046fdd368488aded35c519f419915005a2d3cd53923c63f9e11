@@ -1,0 +1,38 @@
+{
+    "name": "@types/pg",
+    "version": "8.20.4",
+    "description": "TypeScript definitions for pg",
+    "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/pg",
+    "license": "MIT",
+    "contributors": [
+        {
+            "name": "Phips Peter",
+            "githubUsername": "pspeter3",
+            "url": "https://github.com/pspeter3"
+        }
+    ],
+    "main": "",
+    "types": "index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./index.d.mts",
+            "require": "./index.d.ts"
+        },
+        "./lib/*": "./lib/*.d.ts",
+        "./package.json": "./package.json"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+        "directory": "types/pg"
+    },
+    "scripts": {},
+    "dependencies": {
+        "@types/node": "*",
+        "pg-protocol": "*",
+        "pg-types": "^2.2.0"
+    },
+    "peerDependencies": {},
+    "typesPublisherContentHash": "8429d89c55d60069e4b40d48ba2d8af14835d0c19e3e82e2ebd251a47705bc3c",
+    "typeScriptVersion": "5.6"
+}

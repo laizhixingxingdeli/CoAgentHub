@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/legacy/index.ts"],
+  "sourcesContent": ["export type {\n  ContentType,\n  Heading,\n} from './reference-config'\nexport { XScalarStability } from './reference-config'\n"],
+  "mappings": "AAIA,SAAS,wBAAwB;",
+  "names": []
+}

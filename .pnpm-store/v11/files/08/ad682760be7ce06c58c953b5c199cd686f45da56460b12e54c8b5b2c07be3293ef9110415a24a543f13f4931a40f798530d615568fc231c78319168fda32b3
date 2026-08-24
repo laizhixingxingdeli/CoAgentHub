@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["import { Scalar } from './scalar'\n\nexport {\n  Scalar,\n  /**\n   * @deprecated Use `Scalar` instead.\n   */\n  Scalar as apiReference,\n}\n\nexport type { ApiReferenceConfiguration } from './types'\n"],
+  "mappings": "AAAA,SAAS,cAAc;",
+  "names": []
+}

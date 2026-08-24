@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/api-reference/index.ts"],
+  "sourcesContent": ["export {\n  type ApiClientConfiguration,\n  apiClientConfigurationSchema,\n} from './api-client-configuration'\nexport { type ApiClientPlugin, apiClientPluginSchema, hooksSchema } from './api-client-plugin'\nexport {\n  type AnyApiReferenceConfiguration,\n  type ApiReferenceConfiguration,\n  type ApiReferenceConfigurationRaw,\n  type ApiReferenceConfigurationWithMultipleSources,\n  type ApiReferenceConfigurationWithSource,\n  apiReferenceConfigurationSchema,\n  apiReferenceConfigurationWithSourceSchema,\n  isConfigurationWithSources,\n} from './api-reference-configuration'\nexport type {\n  ApiReferencePlugin,\n  SpecificationExtension,\n  ViewComponent,\n} from './api-reference-plugin'\nexport type { AuthenticationConfiguration } from './authentication-configuration'\nexport type { ApiReferenceInstance, CreateApiReference } from './html-api'\nexport {\n  type HtmlRenderingConfiguration,\n  htmlRenderingConfigurationSchema,\n} from './html-rendering-configuration'\nexport {\n  type SourceConfiguration,\n  sourceConfigurationSchema,\n} from './source-configuration'\n"],
+  "mappings": "AAAA;AAAA,EAEE;AAAA,OACK;AACP,SAA+B,uBAAuB,mBAAmB;AACzE;AAAA,EAME;AAAA,EACA;AAAA,EACA;AAAA,OACK;AAQP;AAAA,EAEE;AAAA,OACK;AACP;AAAA,EAEE;AAAA,OACK;",
+  "names": []
+}

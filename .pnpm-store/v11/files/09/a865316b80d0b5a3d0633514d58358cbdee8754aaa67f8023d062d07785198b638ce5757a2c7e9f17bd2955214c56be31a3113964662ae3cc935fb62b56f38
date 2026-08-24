@@ -1,0 +1,43 @@
+Object.defineProperty(exports, '__esModule', { value: true });
+
+const utils = require('@sentry/utils');
+const currentScopes = require('./currentScopes.js');
+
+/**
+ * Send user feedback to Sentry.
+ */
+function captureFeedback(
+  feedbackParams,
+  hint = {},
+  scope = currentScopes.getCurrentScope(),
+) {
+  const { message, name, email, url, source, associatedEventId } = feedbackParams;
+
+  const feedbackEvent = {
+    contexts: {
+      feedback: utils.dropUndefinedKeys({
+        contact_email: email,
+        name,
+        message,
+        url,
+        source,
+        associated_event_id: associatedEventId,
+      }),
+    },
+    type: 'feedback',
+    level: 'info',
+  };
+
+  const client = (scope && scope.getClient()) || currentScopes.getClient();
+
+  if (client) {
+    client.emit('beforeSendFeedback', feedbackEvent, hint);
+  }
+
+  const eventId = scope.captureEvent(feedbackEvent, hint);
+
+  return eventId;
+}
+
+exports.captureFeedback = captureFeedback;
+//# sourceMappingURL=feedback.js.map

@@ -1,0 +1,45 @@
+{
+  "name": "@scalar/core",
+  "description": "Shared libraries for our packages",
+  "license": "MIT",
+  "author": "Scalar (https://github.com/scalar)",
+  "homepage": "https://github.com/scalar/scalar",
+  "bugs": "https://github.com/scalar/scalar/issues/new/choose",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scalar/scalar.git",
+    "directory": "packages/core"
+  },
+  "keywords": [],
+  "version": "0.3.45",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "exports": {
+    "./libs/html-rendering": {
+      "import": "./dist/libs/html-rendering/index.js",
+      "types": "./dist/libs/html-rendering/index.d.ts",
+      "default": "./dist/libs/html-rendering/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "@scalar/types": "0.6.10"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1",
+    "@scalar/build-tooling": "0.4.1"
+  },
+  "scripts": {
+    "build": "scalar-build-esbuild",
+    "lint:check": "scalar-lint-check",
+    "lint:fix": "scalar-lint-fix",
+    "test": "vitest",
+    "types:build": "scalar-types-build",
+    "types:check": "scalar-types-check"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/api-reference/html-rendering-configuration.ts"],
+  "sourcesContent": ["import { z } from 'zod'\n\nimport type { ApiReferenceConfigurationWithMultipleSources } from './api-reference-configuration'\n\n/**\n * Zod schema for HTML rendering configuration\n */\nexport const htmlRenderingConfigurationSchema = z.object({\n  /**\n   * The URL to the Scalar API Reference JS CDN.\n   *\n   * Use this to pin a specific version of the Scalar API Reference.\n   *\n   * @default https://cdn.jsdelivr.net/npm/@scalar/api-reference\n   *\n   * @example https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.122\n   */\n  cdn: z.string().optional().default('https://cdn.jsdelivr.net/npm/@scalar/api-reference'),\n  /**\n   * The title of the page.\n   */\n  pageTitle: z.string().optional().default('Scalar API Reference'),\n})\n\n/**\n * The configuration for the static HTML rendering using the CDN.\n *\n * It's the ApiReferenceConfiguration, but extended with the `pageTitle` and `cdn` options.\n */\nexport type HtmlRenderingConfiguration = Partial<ApiReferenceConfigurationWithMultipleSources> &\n  z.infer<typeof htmlRenderingConfigurationSchema>\n"],
+  "mappings": "AAAA,SAAS,SAAS;AAOX,MAAM,mCAAmC,EAAE,OAAO;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA,EAUvD,KAAK,EAAE,OAAO,EAAE,SAAS,EAAE,QAAQ,oDAAoD;AAAA;AAAA;AAAA;AAAA,EAIvF,WAAW,EAAE,OAAO,EAAE,SAAS,EAAE,QAAQ,sBAAsB;AACjE,CAAC;",
+  "names": []
+}

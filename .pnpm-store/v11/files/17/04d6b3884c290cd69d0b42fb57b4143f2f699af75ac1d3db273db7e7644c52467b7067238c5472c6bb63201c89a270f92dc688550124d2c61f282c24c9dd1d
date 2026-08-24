@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/api-reference/api-client-configuration.ts"],
+  "sourcesContent": ["import type z from 'zod'\n\nimport { baseConfigurationSchema } from './base-configuration'\nimport { sourceConfigurationSchema } from './source-configuration'\n\nexport const apiClientConfigurationSchema = baseConfigurationSchema.extend(sourceConfigurationSchema.shape)\n\nexport type ApiClientConfiguration = z.infer<typeof apiClientConfigurationSchema>\n"],
+  "mappings": "AAEA,SAAS,+BAA+B;AACxC,SAAS,iCAAiC;AAEnC,MAAM,+BAA+B,wBAAwB,OAAO,0BAA0B,KAAK;",
+  "names": []
+}

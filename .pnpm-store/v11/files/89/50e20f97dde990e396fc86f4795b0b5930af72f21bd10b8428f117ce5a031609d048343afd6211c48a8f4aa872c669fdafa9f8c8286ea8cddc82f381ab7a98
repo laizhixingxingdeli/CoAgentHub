@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["/**\n * We should not use these exports anymore, but we need them for commonjs compatibility.\n */\n\n// biome-ignore lint/performance/noReExportAll: leave this to avoid copy exports\nexport * from './api-reference/index'\nexport { XScalarStability } from './legacy/index'\n"],
+  "mappings": "AAKA,cAAc;AACd,SAAS,wBAAwB;",
+  "names": []
+}

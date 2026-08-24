@@ -1,0 +1,8 @@
+# This overrides TEST_PASS from .env
+TEST_PASS=some\$pass
+
+# This will use TEST_PORT_REVERSE from .env
+TEST_URL_REVERSE=http://localhost:${TEST_PORT_REVERSE}/api/v1
+
+# I want this to contribute to TEST_URL in .env
+TEST_PORT=3000

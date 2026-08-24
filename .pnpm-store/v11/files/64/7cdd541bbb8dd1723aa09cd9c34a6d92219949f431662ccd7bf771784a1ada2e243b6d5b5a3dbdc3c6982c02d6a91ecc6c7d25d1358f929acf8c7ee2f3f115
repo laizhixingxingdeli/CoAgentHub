@@ -1,0 +1,102 @@
+{
+  "name": "zod-openapi",
+  "version": "4.2.4",
+  "description": "Convert Zod Schemas to OpenAPI v3.x documentation",
+  "keywords": [
+    "typescript",
+    "json-schema",
+    "swagger",
+    "openapi",
+    "openapi3",
+    "zod",
+    "zod-openapi"
+  ],
+  "homepage": "https://github.com/samchungy/zod-openapi#readme",
+  "bugs": {
+    "url": "https://github.com/samchungy/zod-openapi/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/samchungy/zod-openapi.git"
+  },
+  "license": "MIT",
+  "sideEffects": [
+    "dist/extend.*",
+    "dist/side-effects/**",
+    "src/entries/extend.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": {
+        "import": "./dist/index.d.mts",
+        "require": "./dist/index.d.ts"
+      },
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./api": {
+      "types": {
+        "import": "./dist/api.d.mts",
+        "require": "./dist/api.d.ts"
+      },
+      "import": "./dist/api.mjs",
+      "require": "./dist/api.cjs"
+    },
+    "./extend": {
+      "types": {
+        "import": "./dist/extend.d.mts",
+        "require": "./dist/extend.d.ts"
+      },
+      "import": "./dist/extend.mjs",
+      "require": "./dist/extend.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "api",
+    "dist",
+    "extend"
+  ],
+  "scripts": {
+    "build": "pnpm copy:types && crackle package",
+    "copy:types": "skuba node scripts/copyTypes.ts",
+    "create:docs": " skuba node examples/simple/createSchema.ts && redocly build-docs examples/simple/openapi.yml --output=examples/simple/redoc-static.html",
+    "format": "skuba format",
+    "lint": "skuba lint",
+    "prepare": "pnpm build",
+    "test": "skuba test",
+    "test:ci": "skuba test --coverage",
+    "test:watch": "skuba test --watch"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.17.2",
+    "@crackle/cli": "0.15.5",
+    "@redocly/cli": "1.34.0",
+    "@types/node": "^20.3.0",
+    "eslint-plugin-zod-openapi": "1.0.0",
+    "openapi3-ts": "4.4.0",
+    "skuba": "10.1.0",
+    "yaml": "2.7.0",
+    "zod": "3.24.2"
+  },
+  "peerDependencies": {
+    "zod": "^3.21.4"
+  },
+  "packageManager": "pnpm@9.0.5",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "skuba": {
+    "entryPoint": "src/index.ts",
+    "template": "oss-npm-package",
+    "type": "package",
+    "version": "10.1.0"
+  }
+}

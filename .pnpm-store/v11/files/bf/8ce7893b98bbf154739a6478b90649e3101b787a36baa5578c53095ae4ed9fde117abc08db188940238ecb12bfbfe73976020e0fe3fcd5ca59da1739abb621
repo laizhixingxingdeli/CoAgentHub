@@ -1,0 +1,139 @@
+{
+  "name": "snappy",
+  "version": "7.2.2",
+  "description": "Fastest Snappy compression library in Node.js",
+  "main": "index.js",
+  "repository": "https://github.com/Brooooooklyn/snappy",
+  "license": "MIT",
+  "keywords": [
+    "snappy",
+    "snap",
+    "compression",
+    "compress",
+    "napi-rs",
+    "NAPI",
+    "N-API",
+    "Rust",
+    "Node-API",
+    "node-addon",
+    "node-addon-api"
+  ],
+  "files": [
+    "index.d.ts",
+    "index.js"
+  ],
+  "napi": {
+    "name": "snappy",
+    "package": {
+      "name": "@napi-rs/snappy"
+    },
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "i686-pc-windows-msvc",
+        "armv7-unknown-linux-gnueabihf",
+        "aarch64-apple-darwin",
+        "aarch64-linux-android",
+        "arm-linux-androideabi",
+        "x86_64-unknown-freebsd",
+        "aarch64-unknown-linux-musl",
+        "aarch64-pc-windows-msvc"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">= 10"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "bench": "node -r @swc-node/register benchmark/bench.ts",
+    "build": "napi build --platform --release --pipe \"prettier --loglevel silent -w\"",
+    "build:debug": "napi build --platform",
+    "format": "run-p format:source format:rs",
+    "format:rs": "cargo fmt",
+    "format:source": "prettier --config ./package.json --write .",
+    "lint": "eslint -c ./.eslintrc.yml .",
+    "prepublishOnly": "napi prepublish -t npm && esbuild --minify --outfile=index.js --allow-overwrite index.js",
+    "test": "ava",
+    "test:mem": "node ./memory-leak-detect.mjs",
+    "version": "napi version && conventional-changelog -p angular -i CHANGELOG.md -s && git add CHANGELOG.md"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.10.3",
+    "@swc-node/register": "^1.5.1",
+    "@types/node": "^18.6.2",
+    "@typescript-eslint/eslint-plugin": "^5.31.0",
+    "@typescript-eslint/parser": "^5.31.0",
+    "ava": "^5.0.0",
+    "benny": "^3.7.1",
+    "chalk": "^5.0.1",
+    "conventional-changelog-cli": "^2.2.2",
+    "esbuild": "^0.15.0",
+    "eslint": "^8.20.0",
+    "eslint-config-prettier": "^8.5.0",
+    "eslint-plugin-import": "^2.26.0",
+    "eslint-plugin-prettier": "^4.2.1",
+    "husky": "^8.0.1",
+    "legacy-snappy": "npm:snappy@6",
+    "lint-staged": "^13.0.3",
+    "npm-run-all": "^4.1.5",
+    "prettier": "^2.7.1",
+    "pretty-bytes": "^6.0.0",
+    "table": "^6.8.0",
+    "typescript": "^4.7.4"
+  },
+  "lint-staged": {
+    "*.@(js|ts|tsx)": [
+      "eslint -c .eslintrc.yml --fix"
+    ],
+    "*.@(js|ts|tsx|yml|yaml|md|json)": [
+      "prettier --write"
+    ]
+  },
+  "ava": {
+    "require": [
+      "@swc-node/register"
+    ],
+    "extensions": [
+      "ts"
+    ],
+    "timeout": "2m",
+    "workerThreads": false,
+    "environmentVariables": {
+      "TS_NODE_PROJECT": "./tsconfig.json"
+    }
+  },
+  "prettier": {
+    "printWidth": 120,
+    "semi": false,
+    "trailingComma": "all",
+    "singleQuote": true,
+    "arrowParens": "always"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/Brooooooklyn"
+  },
+  "packageManager": "yarn@3.2.4",
+  "optionalDependencies": {
+    "@napi-rs/snappy-win32-x64-msvc": "7.2.2",
+    "@napi-rs/snappy-darwin-x64": "7.2.2",
+    "@napi-rs/snappy-linux-x64-gnu": "7.2.2",
+    "@napi-rs/snappy-linux-x64-musl": "7.2.2",
+    "@napi-rs/snappy-linux-arm64-gnu": "7.2.2",
+    "@napi-rs/snappy-win32-ia32-msvc": "7.2.2",
+    "@napi-rs/snappy-linux-arm-gnueabihf": "7.2.2",
+    "@napi-rs/snappy-darwin-arm64": "7.2.2",
+    "@napi-rs/snappy-android-arm64": "7.2.2",
+    "@napi-rs/snappy-android-arm-eabi": "7.2.2",
+    "@napi-rs/snappy-freebsd-x64": "7.2.2",
+    "@napi-rs/snappy-linux-arm64-musl": "7.2.2",
+    "@napi-rs/snappy-win32-arm64-msvc": "7.2.2"
+  }
+}

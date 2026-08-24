@@ -1,0 +1,87 @@
+import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
+import { defineIntegration, getClient, SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN } from '@sentry/core';
+import { generateInstrumentOnce } from '../../otel/instrument.js';
+import { SentryNodeFetchInstrumentation } from './SentryNodeFetchInstrumentation.js';
+
+const INTEGRATION_NAME = 'NodeFetch';
+
+const instrumentOtelNodeFetch = generateInstrumentOnce(
+  INTEGRATION_NAME,
+  UndiciInstrumentation,
+  (options) => {
+    return getConfigWithDefaults(options);
+  },
+);
+
+const instrumentSentryNodeFetch = generateInstrumentOnce(
+  `${INTEGRATION_NAME}.sentry`,
+  SentryNodeFetchInstrumentation,
+  (options) => {
+    return options;
+  },
+);
+
+const _nativeNodeFetchIntegration = ((options = {}) => {
+  return {
+    name: 'NodeFetch',
+    setupOnce() {
+      const instrumentSpans = _shouldInstrumentSpans(options, getClient()?.getOptions());
+
+      // This is the "regular" OTEL instrumentation that emits spans
+      if (instrumentSpans) {
+        instrumentOtelNodeFetch(options);
+      }
+
+      // This is the Sentry-specific instrumentation that creates breadcrumbs & propagates traces
+      // This must be registered after the OTEL one, to ensure that the core trace propagation logic takes presedence
+      // Otherwise, the sentry-trace header may be set multiple times
+      instrumentSentryNodeFetch(options);
+    },
+  };
+}) ;
+
+const nativeNodeFetchIntegration = defineIntegration(_nativeNodeFetchIntegration);
+
+// Matching the behavior of the base instrumentation
+function getAbsoluteUrl(origin, path = '/') {
+  const url = `${origin}`;
+
+  if (url.endsWith('/') && path.startsWith('/')) {
+    return `${url}${path.slice(1)}`;
+  }
+
+  if (!url.endsWith('/') && !path.startsWith('/')) {
+    return `${url}/${path.slice(1)}`;
+  }
+
+  return `${url}${path}`;
+}
+
+function _shouldInstrumentSpans(options, clientOptions = {}) {
+  // If `spans` is passed in, it takes precedence
+  // Else, we by default emit spans, unless `skipOpenTelemetrySetup` is set to `true`
+  return typeof options.spans === 'boolean' ? options.spans : !clientOptions.skipOpenTelemetrySetup;
+}
+
+function getConfigWithDefaults(options = {}) {
+  const instrumentationConfig = {
+    requireParentforSpans: false,
+    ignoreRequestHook: request => {
+      const url = getAbsoluteUrl(request.origin, request.path);
+      const _ignoreOutgoingRequests = options.ignoreOutgoingRequests;
+      const shouldIgnore = _ignoreOutgoingRequests && url && _ignoreOutgoingRequests(url);
+
+      return !!shouldIgnore;
+    },
+    startSpanHook: () => {
+      return {
+        [SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN]: 'auto.http.otel.node_fetch',
+      };
+    },
+  } ;
+
+  return instrumentationConfig;
+}
+
+export { nativeNodeFetchIntegration };
+//# sourceMappingURL=index.js.map

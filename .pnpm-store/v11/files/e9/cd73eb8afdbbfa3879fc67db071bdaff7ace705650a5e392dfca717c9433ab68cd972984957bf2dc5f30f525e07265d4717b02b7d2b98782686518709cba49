@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/snippetz/index.ts"],
+  "sourcesContent": ["export type {\n  AvailableClient,\n  AvailableClients,\n  ClientId,\n  FormDataParam,\n  HarRequest,\n  HarResponse,\n  Plugin,\n  PluginConfiguration,\n  PostDataCommon,\n  Target,\n  TargetId,\n} from './snippetz'\nexport { AVAILABLE_CLIENTS, GROUPED_CLIENTS } from './snippetz'\n"],
+  "mappings": "AAaA,SAAS,mBAAmB,uBAAuB;",
+  "names": []
+}

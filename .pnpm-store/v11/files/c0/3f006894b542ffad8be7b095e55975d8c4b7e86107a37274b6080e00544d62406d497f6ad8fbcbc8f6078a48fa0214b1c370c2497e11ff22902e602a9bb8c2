@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/libs/html-rendering/index.ts"],
+  "sourcesContent": ["export {\n  type HtmlRenderingConfiguration,\n  getConfiguration,\n  getHtmlDocument,\n  getScriptTags,\n} from './html-rendering'\n"],
+  "mappings": "AAAA;AAAA,EAEE;AAAA,EACA;AAAA,EACA;AAAA,OACK;",
+  "names": []
+}

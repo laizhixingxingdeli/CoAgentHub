@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/legacy/reference-config.ts"],
+  "sourcesContent": ["type OptionalCharset = string | null\n\nexport type ContentType =\n  | `application/json${OptionalCharset}`\n  | `application/xml${OptionalCharset}`\n  | `text/plain${OptionalCharset}`\n  | `text/html${OptionalCharset}`\n  | `application/octet-stream${OptionalCharset}`\n  | `application/x-www-form-urlencoded${OptionalCharset}`\n  | `multipart/form-data${OptionalCharset}`\n  | `*/*${OptionalCharset}`\n  | `application/vnd.${string}+json${OptionalCharset}`\n\nexport enum XScalarStability {\n  Deprecated = 'deprecated',\n  Experimental = 'experimental',\n  Stable = 'stable',\n}\n\nexport type Heading = {\n  depth: number\n  value: string\n  slug?: string\n}\n"],
+  "mappings": "AAaO,IAAK,mBAAL,kBAAKA,sBAAL;AACL,EAAAA,kBAAA,gBAAa;AACb,EAAAA,kBAAA,kBAAe;AACf,EAAAA,kBAAA,YAAS;AAHC,SAAAA;AAAA,GAAA;",
+  "names": ["XScalarStability"]
+}

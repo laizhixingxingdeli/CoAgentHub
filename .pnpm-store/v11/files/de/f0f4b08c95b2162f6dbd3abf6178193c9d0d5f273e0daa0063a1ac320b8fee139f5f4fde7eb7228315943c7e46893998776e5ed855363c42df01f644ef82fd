@@ -1,0 +1,6 @@
+TEST_PASS=
+TEST_URL=http://localhost:${TEST_PORT}/api/v1
+
+TEST_PORT_REVERSE=4000
+# Default value for port if no other specifies it
+TEST_PORT=5000
