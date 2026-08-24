@@ -83,8 +83,16 @@ writeFileSync(
     "fi",
     // 弱验收要求工作树干净 + HEAD 有新提交:默认真正提交一次(显式身份,CI 无
     // 全局 git config 也能跑);FAKE_NO_COMMIT 跳过提交(验收失败测试用)。
+    // 同一工作树的并行队列测试仍并行运行执行器,但 Git index 本身需要
+    // 串行访问;用原子 mkdir 只保护 fake commit 临界区,避免 fixture 自身
+    // 制造 .git/index.lock 竞态。
     'if [ -z "$FAKE_NO_COMMIT" ]; then',
-    '  git add -A && git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m "fake bin change"',
+    '  git_lock="$COAGENTHUB_REPO_ROOT/.coagenthub-test-git-lock"',
+    '  while ! mkdir "$git_lock" 2>/dev/null; do sleep 0.01; done',
+    "  trap 'rmdir \"$git_lock\" 2>/dev/null || true' EXIT",
+    '  if ! git add -A || ! git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m "fake bin change"; then exit 1; fi',
+    '  rmdir "$git_lock"',
+    "  trap - EXIT",
     "fi",
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:修改完成"',

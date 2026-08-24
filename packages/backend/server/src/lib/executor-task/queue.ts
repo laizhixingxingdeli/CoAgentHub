@@ -52,6 +52,7 @@ import {
   type TaskReport,
 } from "./report";
 import {
+  activeRuns,
   clearRunTimers,
   cooldownEndMs,
   cooldownTimers,
@@ -843,6 +844,7 @@ async function pumpQueue(): Promise<void> {
       // find 谓词保证 queue 非空,此处不可能为 undefined(防御性判空)。
       if (!run) break;
       group.running.push(run);
+      activeRuns.add(run);
       void runOne(run, group);
     }
   } finally {
@@ -1439,6 +1441,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     }
   } finally {
     clearRunTimers(run);
+    activeRuns.delete(run);
     group.running = group.running.filter((r) => r !== run);
     void pumpQueue();
   }

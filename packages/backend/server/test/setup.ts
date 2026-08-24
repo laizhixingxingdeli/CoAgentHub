@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, vi } from "vitest";
-import { testClient, testDb } from "./db";
+import { testClient } from "./db";
 
 /**
  * Test setup for @laizhixingxingdeli/server.
@@ -80,6 +80,41 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Message dispatch is intentionally fire-and-forget. Waiting only for the
+  // in-memory queue misses the interval after a run leaves the queue but before
+  // runOne finishes its final DB write; closing PGlite in that interval caused
+  // the flaky suite failure (`PGlite is closed`, often after an earlier Git
+  // index-lock error). Drain the queue and the complete runOne lifecycle before
+  // closing the per-file database.
+  const {
+    activeExecutorTaskCount,
+    currentRunningTask,
+    queuedExecutorTaskCount,
+  } = await import("../src/lib/executor-task");
+  const deadline = Date.now() + 20_000;
+  let idleSince: number | null = null;
+  for (;;) {
+    const inMemoryBusy =
+      activeExecutorTaskCount() > 0 ||
+      currentRunningTask() !== null ||
+      queuedExecutorTaskCount() > 0;
+    if (!inMemoryBusy) {
+      // The route deliberately does not await maybeDispatchExecutorTask. Keep
+      // the worker alive briefly after the first idle observation so its
+      // microtask can enqueue a run before PGlite is closed.
+      idleSince ??= Date.now();
+      if (Date.now() - idleSince >= 1_000) break;
+    } else {
+      idleSince = null;
+    }
+    if (Date.now() >= deadline) {
+      // Do not turn a stuck executor into an unbounded test hang. The bounded
+      // wait still gives normal fire-and-forget work time to finish; the test
+      // runner's worker isolation prevents a later file from reusing this DB.
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   await testClient.close();
   rmSync(testFileDir, { recursive: true, force: true });
   rmSync(testRepoDir, { recursive: true, force: true });

@@ -1,1 +1,0 @@
-{"version":3,"sources":["../../src/neon/index.ts"],"sourcesContent":["export * from './neon-identity.ts';\nexport * from './rls.ts';\n"],"mappings":";;;;;;;;;;;;;;;AAAA;AAAA;AAAA,yBAAc,+BAAd;AACA,yBAAc,qBADd;","names":[]}

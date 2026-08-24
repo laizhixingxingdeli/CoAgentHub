@@ -46,6 +46,7 @@ export {
   __setMaxParallelGroupsForTests,
   __setRateLimitForTests,
   __setReliabilityTimeoutsForTests,
+  activeExecutorTaskCount,
   getL3ResponseMinutesMs,
 } from "./state";
 export {

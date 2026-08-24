@@ -161,7 +161,9 @@ app
         )
         .where(and(...conditions))
         .groupBy(groupsTable.id)
-        .orderBy(desc(groupsTable.createdAt));
+        // created_at has timestamp precision, so several groups can share a
+        // value. The unique id tie-breaker keeps limit/offset pages stable.
+        .orderBy(desc(groupsTable.createdAt), desc(groupsTable.id));
       // 不带 limit 参数时行为与旧版一致:返回全量(不截断)。
       const groups =
         limit !== undefined

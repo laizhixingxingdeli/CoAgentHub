@@ -1,5 +1,4 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
-import { and, desc, eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
@@ -120,31 +119,24 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     executorParticipantId: string,
     claimStatus?: ClaimStatus,
   ) {
-    await testDb.insert(taskTable).values({
-      groupId,
-      parentTaskId,
-      messageId: uuidv4(),
-      executorParticipantId,
-      status: "queued",
-      ...(claimStatus !== undefined
-        ? {
-            diffSummary: {
-              claimVerification: { status: claimStatus, hash: "a5b808b" },
-            },
-          }
-        : {}),
-    });
-  }
-
-  /** 取最后插入的子任务 id(createdAt 最新)。按 createdAt desc 排序后,最新的是 rows[0]。 */
-  async function lastChildId(groupId: string, parentTaskId: string) {
-    const rows = await testDb.query.task.findMany({
-      where: (t, { and, eq }) =>
-        and(eq(t.groupId, groupId), eq(t.parentTaskId, parentTaskId)),
-      columns: { id: true },
-      orderBy: (t, { desc }) => [desc(t.createdAt)],
-    });
-    return rows[0].id;
+    const [child] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId,
+        parentTaskId,
+        messageId: uuidv4(),
+        executorParticipantId,
+        status: "queued",
+        ...(claimStatus !== undefined
+          ? {
+              diffSummary: {
+                claimVerification: { status: claimStatus, hash: "a5b808b" },
+              },
+            }
+          : {}),
+      })
+      .returning({ id: taskTable.id });
+    return child.id;
   }
 
   function adjudication(childId: string, accepted: boolean, reason: string) {
@@ -157,9 +149,18 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-a");
     const group = await createGroup(coordinator.id, "ca-a");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "not_found");
-    const childId = await lastChildId(group.id, task.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "not_found",
+    );
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
     });
@@ -173,9 +174,18 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-b");
     const group = await createGroup(coordinator.id, "ca-b");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "not_found");
-    const childId = await lastChildId(group.id, task.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "not_found",
+    );
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
       diffSummary: adjudication(
@@ -191,9 +201,18 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-c");
     const group = await createGroup(coordinator.id, "ca-c");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "not_found");
-    const childId = await lastChildId(group.id, task.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "not_found",
+    );
     for (const reason of ["", "   ", "\t\n"]) {
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
@@ -210,9 +229,18 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-d");
     const group = await createGroup(coordinator.id, "ca-d");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "not_found");
-    const childId = await lastChildId(group.id, task.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "not_found",
+    );
 
     // accepted 缺失
     const resMissing = await patchTask(coordinator.id, group.id, task.id, {
@@ -240,9 +268,18 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-e");
     const group = await createGroup(coordinator.id, "ca-e");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "outside_window");
-    const childId = await lastChildId(group.id, task.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "outside_window",
+    );
 
     // 无表态 → 400,点明 outside_window
     const res = await patchTask(coordinator.id, group.id, task.id, {
@@ -271,7 +308,12 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-f");
     const group = await createGroup(coordinator.id, "ca-f");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
     // R1 放行需要一个子任务;用 verified 子任务充当(不触发需表态)。
     await addChild(group.id, task.id, coordinator.id, "skipped");
     const res = await patchTask(coordinator.id, group.id, task.id, {
@@ -284,7 +326,12 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-g");
     const group = await createGroup(coordinator.id, "ca-g");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
     await addChild(group.id, task.id, coordinator.id, "verified");
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
@@ -298,12 +345,24 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-h");
     const group = await createGroup(coordinator.id, "ca-h");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
-    await addChild(group.id, task.id, coordinator.id, "not_found");
-    const first = await lastChildId(group.id, task.id);
-    await addChild(group.id, task.id, coordinator.id, "outside_window");
-    const second = await lastChildId(group.id, task.id);
-    // 守卫:helper 必须取“第二个”子任务,而非重复返回第一个,否则下面只断言缺 first。
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const first = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "not_found",
+    );
+    const second = await addChild(
+      group.id,
+      task.id,
+      coordinator.id,
+      "outside_window",
+    );
     expect(first).not.toBe(second);
 
     // 只表态 first,缺 second → 400 点名 second
@@ -335,7 +394,12 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-i");
     const group = await createGroup(coordinator.id, "ca-i");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
     await addChild(group.id, task.id, coordinator.id, "not_found");
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "failed",
@@ -363,7 +427,12 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     const coordinator = await register("ca-coord-k");
     const group = await createGroup(coordinator.id, "ca-k");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
-    const task = await createTask(coordinator.id, group.id, msg.id, coordinator.id);
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
       diffSummary: {

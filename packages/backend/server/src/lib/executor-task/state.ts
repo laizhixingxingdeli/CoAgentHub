@@ -20,6 +20,9 @@ import type { QueuedRun } from "./types";
  */
 export const groupQueues = new Map<string, import("./types").GroupQueue>();
 
+/** All runs handed from a queue to runOne, including the pre-spawn window. */
+export const activeRuns = new Set<import("./types").QueuedRun>();
+
 /** 调度策略:启动时读取一次,所有阈值从同一快照取值,避免重复读盘与不一致。 */
 const dispatchPolicy: DispatchPolicy = readDispatchPolicy();
 
@@ -128,6 +131,11 @@ export function runningWorkspaceCount(projectPath: string | null): number {
     }
   }
   return n;
+}
+
+/** Test teardown visibility for the fire-and-forget runOne lifecycle. */
+export function activeExecutorTaskCount(): number {
+  return activeRuns.size;
 }
 
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
