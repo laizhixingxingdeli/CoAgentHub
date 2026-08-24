@@ -53,6 +53,18 @@ writeFileSync(
     // FAKE_QUOTA_FAIL 输出额度关键词后 exit 1(归类额度失败,不重试)。
     'if [ -n "$FAKE_ALWAYS_FAIL" ]; then echo "always-fail (attempt $n)"; exit 1; fi',
     'if [ -n "$FAKE_QUOTA_FAIL" ]; then echo "error: rate limit exceeded (429)"; exit 1; fi',
+    // 成功路径额度检测(quota-failure-on-clean-exit 规范):
+    //  FAKE_QUOTA_EXIT0:尾部打印额度关键词后 exit 0(应判额度失败,不是 done);
+    //  FAKE_QUOTA_FRONT:额度关键词只出现在输出最前面(不在尾部 20 行),继续
+    //    走 done 路径(避免误判停派)。
+    // 恢复时间用 "try again in 600 seconds"(相对未来,避免 "resets around HH:MM"
+    // 因已过而回退 now 导致冷却瞬间过期,使 isInCooldown 断言不稳定)。
+    'if [ -n "$FAKE_QUOTA_EXIT0" ]; then echo "[rate-limited] 5h window exhausted — try again in 600 seconds"; exit 0; fi',
+    'if [ -n "$FAKE_QUOTA_FRONT" ]; then echo "[rate-limited] 5h window exhausted — try again in 600 seconds"; i=0; while [ $i -lt 30 ]; do echo "normal progress line $i"; i=$((i+1)); done; fi',
+    // 超时分支回归:尾部打印额度关键词后 sleep 超过 EXECUTOR_TIMEOUT_MS → 超时
+    // 分支(1261)仍应命中额度检测(失败 + 冷却 + 不重试)。写 stderr(行缓冲/不
+    // 缓冲):管道 stdout 在 SIGKILL 前可能未刷出,导致超时瞬间捕获不到额度关键词。
+    'if [ -n "$FAKE_TIMEOUT_QUOTA" ]; then echo "[rate-limited] 5h window exhausted — try again in 600 seconds" >&2; sleep 5; exit 0; fi',
     'if [ -n "$FAKE_FAIL_UNTIL" ] && [ "$n" -le "$FAKE_FAIL_UNTIL" ]; then',
     '  echo "attempt $n: intended failure"',
     "  exit 1",
@@ -85,9 +97,12 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
-const { __resetExecutorQueueForTests, taskOutputTail } = await import(
-  "@server/lib/executor-task"
-);
+const {
+  __resetExecutorQueueForTests,
+  taskOutputTail,
+  __setRateLimitForTests,
+} = await import("@server/lib/executor-task");
+const { isInCooldown } = await import("@server/lib/executor-task/state");
 const { parseRateLimitRecoveryMs, renderExecutorArgs } = await import(
   "@server/lib/executors"
 );
@@ -104,8 +119,12 @@ describe("任务面板增强批次 server 侧测试", () => {
       "FAKE_ANSI",
       "FAKE_ALWAYS_FAIL",
       "FAKE_QUOTA_FAIL",
+      "FAKE_QUOTA_EXIT0",
+      "FAKE_QUOTA_FRONT",
+      "FAKE_TIMEOUT_QUOTA",
       "FAKE_FAIL_UNTIL",
       "FAKE_COUNTER_FILE",
+      "EXECUTOR_TIMEOUT_MS",
     ]) {
       delete process.env[key];
     }
@@ -463,7 +482,7 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(a?.hash).toBeTruthy();
     });
 
-    it("失败任务:1 条 attempt(failed + error)", async () => {
+    it("失败任务(非零 exit):1 条 attempt(failed + 额度冷却 + 不重试 + 回传预计恢复时间)", async () => {
       const { coordinator, codebuddy, group } = await setupGroup();
       // 额度失败不自动重试 → 恰好 1 条 failed attempt(普通失败会重试成 2 条)。
       process.env.FAKE_QUOTA_FAIL = "1";
@@ -483,6 +502,16 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(a?.status).toBe("failed");
       expect(a?.error).toBeTruthy();
       expect(typeof a?.endedAt).toBe("string");
+      // 额度失败逐条行为(与成功路径一致):failed / 冷却 / 不重试 / 回传预计恢复时间。
+      expect(t.status).toBe("failed");
+      // 执行器进入额度冷却(isInCooldown 为 true;key=codebuddy 来自 executors 配置)。
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      // 不自动重试:retryCount 不增长(diffSummary.retries 不应出现)。
+      expect(t.diffSummary?.retries).toBeUndefined();
+      // 回传含预计恢复时间。
+      const err = String(t.diffSummary?.error ?? "");
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
     });
 
     it("自动重试:2 条 attempt(第一次 failed,第二次 done)", async () => {
@@ -511,6 +540,120 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(t.attempts?.[1]?.status).toBe("done");
       expect(t.attempts?.[1]?.n).toBe(2);
       expect(t.diffSummary?.retries).toBe(1);
+    }, 30_000);
+  });
+
+  /* ---------------- 成功路径额度检测(quota-failure-on-clean-exit 规范) ---------------- */
+
+  // 测试环境 cwd 下无 scripts/dispatch-policy.json,readDispatchPolicy 会回退到
+  // 默认关键词(不含 "window exhausted");用与真实配置一致的集合显式覆盖,使
+  // 成功路径额度检测可按规范验收(默认 + window exhausted)。
+  const QUOTA_PATTERNS = [
+    "rate limit",
+    "rate-lim",
+    "quota",
+    "429",
+    "额度",
+    "次数限制",
+    "limit reached",
+    "too many requests",
+    "window exhausted",
+  ];
+
+  describe("成功路径额度检测(exit 0 也要过额度检测)", () => {
+    it("exit 0 + 输出尾部含 window exhausted → failed(非 done)+ 冷却 + 不重试 + 回传预计恢复时间", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // 执行器礼貌打印额度耗尽说明后正常退出(exit 0);成功路径必须过额度检测,
+      // 不能落 done。
+      process.env.FAKE_QUOTA_EXIT0 = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "礼貌放弃任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      expect(t.status).toBe("failed");
+      // 与失败分支(1365)逐条一致:冷却该执行器、不自动重试、回传预计恢复时间。
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      expect(t.attempts).toHaveLength(1);
+      expect(t.diffSummary?.retries).toBeUndefined();
+      const err = String(t.diffSummary?.error ?? "");
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
+    }, 30_000);
+
+    it("exit 0 + 输出不含额度关键词 → 行为不变(done)", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // 不设置任何 FAKE_* 开关:默认成功路径(commit + 汇报段落)→ done 不变。
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "正常成功任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.status).toBe("done");
+      // 未触发额度冷却(回归:成功路径无额度关键词不应误判)。
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+    }, 30_000);
+
+    it("额度关键词在输出前部(不在尾部 20 行)→ 不命中,落 done(R2 避免误判)", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // FAKE_QUOTA_FRONT 仅在输出最前面打印额度关键词,后续走正常成功路径
+      // (commit + 汇报段落),尾部 20 行不含额度关键词 → 不应判额度失败。
+      process.env.FAKE_QUOTA_FRONT = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "前部命中尾部不命中",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.status).toBe("done");
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+    }, 30_000);
+
+    it("超时分支回归:超时 + 输出含额度关键词仍命中额度检测(失败 + 冷却 + 不重试)", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // EXECUTOR_TIMEOUT_MS=1000:fake bin 打印额度关键词后 sleep 5s → 走超时
+      // 分支(1261);该分支历史行为应未改变,仍命中额度检测 → 失败 + 冷却。
+      process.env.EXECUTOR_TIMEOUT_MS = "1000";
+      process.env.FAKE_TIMEOUT_QUOTA = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "超时额度任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      expect(t.status).toBe("failed");
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      expect(t.attempts).toHaveLength(1);
+      expect(t.diffSummary?.retries).toBeUndefined();
+      const err = String(t.diffSummary?.error ?? "");
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
     }, 30_000);
   });
 

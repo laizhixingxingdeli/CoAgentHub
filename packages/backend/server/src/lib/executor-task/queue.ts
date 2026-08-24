@@ -1285,6 +1285,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       }
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (result.code === 0) {
+        // 成功路径也要过额度检测(quota-failure-on-clean-exit 规范):执行器
+        // 礼貌地打印额度耗尽说明后正常退出(如 `[rate-limited] 5h window
+        // exhausted`),走的是 exit 0 路径,若只在超时/失败分支检测会漏判为
+        // done。与失败分支(1365)同界(尾部 20 行)命中 → 按额度失败处理(逐条
+        // 一致:failed / 冷却 / 不重试 / 回传预计恢复时间);前部命中尾部不命中
+        // 则不判(避免误判停派)。不含额度关键词时行为完全不变(继续 done 路径)。
+        const successTail = lastLinesOf(output, 20).slice(0, 1500);
+        if (isQuotaFailure([`exit 0`, successTail])) {
+          await handleQuotaFailure(run, "exit 0", successTail);
+          return;
+        }
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不做段落解析;hash 仍从输出提取。CLI 路径走结构化段落解析(票7)。
         const a2aHash = findCommitHash(output);
@@ -1367,22 +1378,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 其余失败保持原重试行为。限定尾部避免全量输出里的无关 "429/quota"
         // 字样造成误判(误判会停派该执行器整段冷却期)。
         if (isQuotaFailure([`exit ${result.code}`, tail])) {
-          // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
-          const eta = formatEta(
-            enterCooldown(
-              ex,
-              parseRateLimitRecoveryMs(tail) ??
-                Date.now() + getRateLimitCooldownMs(),
-            ),
-          );
-          await handleFailure(
-            run,
-            `exit ${result.code}(执行器额度限制,预计 ${eta} 恢复)`,
-            {
-              retryable: false,
-              message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
-            },
-          );
+          await handleQuotaFailure(run, `exit ${result.code}`, tail);
         } else {
           await handleFailure(run, `exit ${result.code}`, {
             retryable: true,
@@ -1704,6 +1700,37 @@ async function endAttempt(
   } catch (e) {
     console.warn(`[executor] 写 attempts 失败(${run.taskId}): ${e}`);
   }
+}
+
+/**
+ * 额度/速率限制失败统一出口(票7 + quota-failure-on-clean-exit 规范):冷却该
+ * 执行器、不自动重试、❌ 回传注明预计恢复时间。tail 为命中检测与恢复时间解析
+ * 所用的输出尾部(与失败回传同界:`lastLinesOf(out, 20)`),reasonLabel 为失败
+ * 原因前缀(如 "exit 0" / "exit 2" / "执行超时")。
+ *
+ * 失败分支(1365)/ 成功路径(本规范)共用本出口,保证额度处理逐条一致;超时分支
+ * (1261)单独保留全量输出解析(历史行为,不在本规范改动范围)。
+ */
+async function handleQuotaFailure(
+  run: QueuedRun,
+  reasonLabel: string,
+  tail: string,
+): Promise<void> {
+  // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
+  const eta = formatEta(
+    enterCooldown(
+      run.ex,
+      parseRateLimitRecoveryMs(tail) ?? Date.now() + getRateLimitCooldownMs(),
+    ),
+  );
+  await handleFailure(
+    run,
+    `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`,
+    {
+      retryable: false,
+      message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
+    },
+  );
 }
 
 /**
