@@ -101,6 +101,49 @@ afterEach(() => {
 });
 
 describe("RequirementWorkspace 响应式布局", () => {
+  it("真实零子任务协调载荷:列表与详情共享 na-declared/done 状态", async () => {
+    setViewport(1280);
+    const reason = "本票由发布者直接定向 codex 完成实现,未创建下游执行子任务。";
+    renderWorkspace([
+      makeTask({
+        id: "project-onboarding-coordination",
+        status: "done",
+        specRef: "specs/project-onboarding-interactive.md",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            taskId: "project-onboarding-coordination",
+            specRef: "specs/project-onboarding-interactive.md",
+            specHash: "0b03bd37",
+            diffSummary: "L2 功能验收通过。",
+          },
+          noExecutionReason: reason,
+        },
+      }),
+    ]);
+
+    const row = await screen.findByTestId(
+      "requirement-row-specs/project-onboarding-interactive.md",
+    );
+    expect(
+      within(row).getByTestId(
+        "requirement-step-specs/project-onboarding-interactive.md-0",
+      ),
+    ).toHaveAttribute("data-status", "na-declared");
+    expect(
+      within(row).getByTestId(
+        "requirement-step-specs/project-onboarding-interactive.md-1",
+      ),
+    ).toHaveAttribute("data-status", "done");
+    expect(
+      await screen.findByTestId("requirement-l1-no-execution-reason"),
+    ).toHaveTextContent(reason);
+    expect(
+      await screen.findByTestId("requirement-l2-conclusion"),
+    ).toHaveTextContent("L2 功能验收通过。");
+  });
+
   it("窄视口(<1024px)单栏:默认列表,点击行进详情,返回键回列表", async () => {
     setViewport(500);
     renderWorkspace(TWO_REQUIREMENTS);

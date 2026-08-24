@@ -316,6 +316,53 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     );
   });
 
+  it("真实协调载荷同时含 review_request 与 noExecutionReason 时命中 L1/L2", () => {
+    const reason = "本票由发布者直接定向 codex 完成实现,未创建下游执行子任务。";
+    const [requirement] = groupTasksBySpec([
+      coordinationTask({
+        id: "project-onboarding-coordination",
+        specRef: "specs/project-onboarding-interactive.md",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            taskId: "project-onboarding-coordination",
+            specRef: "specs/project-onboarding-interactive.md",
+            specHash: "0b03bd37",
+            diffSummary: "L2 功能验收通过。",
+          },
+          noExecutionReason: reason,
+        },
+      }),
+    ]);
+
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[]}
+      />,
+    );
+
+    expect(screen.getByTestId("requirement-stepper-step-0")).toHaveAttribute(
+      "data-status",
+      "na-declared",
+    );
+    expect(screen.getByTestId("requirement-stepper-step-1")).toHaveAttribute(
+      "data-status",
+      "done",
+    );
+    expect(
+      screen.getByTestId("requirement-l1-no-execution-reason"),
+    ).toHaveTextContent(reason);
+    expect(screen.getByTestId("requirement-layer-l2")).not.toHaveTextContent(
+      "该需求还没有协调任务(L2 未开始)",
+    );
+    expect(screen.getByTestId("requirement-l2-conclusion")).toHaveTextContent(
+      "L2 功能验收通过。",
+    );
+  });
+
   it("零子任务但没有 noExecutionReason 的历史协调任务仍是 L1 未开始", () => {
     const [requirement] = groupTasksBySpec([
       coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),

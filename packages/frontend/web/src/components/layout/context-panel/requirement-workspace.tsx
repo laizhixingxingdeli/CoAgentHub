@@ -8,11 +8,9 @@ import TaskPanel, {
   type TaskItem,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
-import { groupTasksBySpec, type Requirement } from "./group-tasks-by-spec";
+import { groupTasksBySpec } from "./group-tasks-by-spec";
 import { mergeTaskStatusChanged } from "./merge-task-status";
-import RequirementDetailPanel, {
-  stepStatusesForRequirement,
-} from "./RequirementDetailPanel";
+import RequirementDetailPanel from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
 import {
   countRequirementsByKind,
@@ -20,6 +18,8 @@ import {
   type RequirementKind,
   requirementKindOf,
 } from "./requirement-kind";
+import type { RequirementLayerState } from "./requirement-layer-state";
+import { deriveRequirementLayerState } from "./requirement-layer-state";
 
 /**
  * 需求工作区(共享组件,UI-04b-2):从原 TasksTab 抽取,供「群内页主区」与右栏
@@ -80,14 +80,19 @@ export function RequirementWorkspace({
 
   // UI-04a:把扁平任务列表按 specRef 聚合成需求(Requirement)。分组结果随
   // tasks 变化重算;顺序由分组函数保证(最新需求在数组最后)。
-  const requirements = useMemo<Requirement[]>(
-    () =>
-      groupTasksBySpec(tasks).map((requirement) => ({
-        ...requirement,
-        steps: stepStatusesForRequirement(requirement, messages, members),
-      })),
-    [tasks, messages, members],
-  );
+  const { requirements, layerStates } = useMemo(() => {
+    const states = new Map<string, RequirementLayerState>();
+    const grouped = groupTasksBySpec(tasks).map((requirement) => {
+      const layerState = deriveRequirementLayerState(
+        requirement,
+        messages,
+        members,
+      );
+      states.set(requirement.id, layerState);
+      return { ...requirement, steps: layerState.steps };
+    });
+    return { requirements: grouped, layerStates: states };
+  }, [tasks, messages, members]);
   // 「需求 / 修复」二态切换(requirement-list-kind-tabs R1):null dispatchKind
   // 按「需求」处理(R2);过滤只影响列表展示,不改分组数据本身。
   const [requirementKind, setRequirementKind] =
@@ -427,6 +432,11 @@ export function RequirementWorkspace({
       <div className="min-h-0 flex-1 overflow-y-auto">
         <RequirementDetailPanel
           requirement={selectedRequirement}
+          layerState={
+            selectedRequirement
+              ? (layerStates.get(selectedRequirement.id) ?? null)
+              : null
+          }
           messages={messages}
           members={members}
           liveOutputs={liveOutputs}

@@ -34,7 +34,10 @@ import RequirementStepper from "./RequirementStepper";
 import RequirementTimeline, {
   roleFromMemberRoles,
 } from "./RequirementTimeline";
-import { deriveRequirementLayerState } from "./requirement-layer-state";
+import {
+  deriveRequirementLayerState,
+  type RequirementLayerState,
+} from "./requirement-layer-state";
 import { LAYER_STATUS_CLASS } from "./status-classes";
 
 export type LayerStatus = StepStatus;
@@ -42,6 +45,8 @@ export type LayerStatus = StepStatus;
 type RequirementDetailPanelProps = {
   /** 当前选中的需求(null = 未选中)。 */
   requirement: Requirement | null;
+  /** 工作区为列表与详情共享的单次派生结果。 */
+  layerState?: RequirementLayerState | null;
   /** 该群全部消息(时间线消息卡片数据源 + review_result / spec_published)。 */
   messages: MessageItem[];
   /** 该群成员(真实角色数据源;三层/两层判据)。 */
@@ -167,6 +172,7 @@ function FoldableText({
 
 export default function RequirementDetailPanel({
   requirement,
+  layerState: providedLayerState = null,
   messages,
   members,
   liveOutputs = {},
@@ -203,11 +209,9 @@ export default function RequirementDetailPanel({
     );
   }
 
-  const layerState = deriveRequirementLayerState(
-    requirement,
-    messages,
-    members,
-  );
+  const layerState =
+    providedLayerState ??
+    deriveRequirementLayerState(requirement, messages, members);
   const { l1, l2, l3 } = layerState;
 
   // 阶梯固定三步:重试只作为 L1 标签的附属信息,不增加步骤。

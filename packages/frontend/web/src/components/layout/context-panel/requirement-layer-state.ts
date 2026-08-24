@@ -4,6 +4,7 @@ import {
   aggregateTaskStatuses,
   coordinationTaskForTasks,
   executionTasksForRequirement,
+  noExecutionReasonForTask,
   taskStatusToStepStatus,
 } from "./group-tasks-by-spec";
 
@@ -55,13 +56,6 @@ function reviewRequestConclusion(
   return typeof conclusion === "string" && conclusion.trim().length > 0
     ? conclusion
     : null;
-}
-
-function noExecutionReason(
-  task: Requirement["tasks"][number] | null,
-): string | null {
-  const reason = task?.diffSummary?.noExecutionReason;
-  return typeof reason === "string" && reason.trim().length > 0 ? reason : null;
 }
 
 export function layerModeFromMembers(members: Member[]): "three" | "two" {
@@ -139,7 +133,7 @@ function findSpecAnchor(
 
 function deriveL1(requirement: Requirement): L1State {
   const coordinationTask = coordinationTaskForTasks(requirement.tasks);
-  const reason = noExecutionReason(coordinationTask);
+  const reason = noExecutionReasonForTask(coordinationTask);
   return {
     status: reason
       ? "na-declared"

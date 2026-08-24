@@ -66,19 +66,26 @@ export function taskStatusToStepStatus(status: TaskStatus): StepStatus {
   return "pending";
 }
 
-/** 协调任务的 review_request 载荷识别。 */
-function isReviewRequestTask(task: TaskItem): boolean {
-  if (!task.diffSummary || typeof task.diffSummary !== "object") return false;
-  const hasReviewRequest = JSON.stringify(task.diffSummary).includes(
-    "review_request",
-  );
-  const reason = task.diffSummary.noExecutionReason;
-  return (
-    hasReviewRequest || (typeof reason === "string" && reason.trim().length > 0)
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function noExecutionReasonForTask(task: TaskItem | null): string | null {
+/** 从任务 diffSummary 取规范化的 review_request 载荷。 */
+function reviewRequestForTask(task: TaskItem): Record<string, unknown> | null {
+  const summary = task.diffSummary;
+  if (!isRecord(summary)) return null;
+  if (summary.type === "review_request") return summary;
+  return isRecord(summary.review_request) ? summary.review_request : null;
+}
+
+/** 协调任务的 review_request 载荷识别。 */
+function isReviewRequestTask(task: TaskItem): boolean {
+  const reason = noExecutionReasonForTask(task);
+  return reviewRequestForTask(task) !== null || reason !== null;
+}
+
+/** 取协调任务声明的 L1 豁免理由;空串/纯空白不算声明。 */
+export function noExecutionReasonForTask(task: TaskItem | null): string | null {
   const reason = task?.diffSummary?.noExecutionReason;
   return typeof reason === "string" && reason.trim().length > 0 ? reason : null;
 }
