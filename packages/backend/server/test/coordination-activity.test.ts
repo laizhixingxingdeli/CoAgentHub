@@ -58,17 +58,37 @@ async function postGroupMessage(actorId: string, groupId: string) {
   expect(response.status).toBe(200);
 }
 
-async function finishTask(actorId: string, groupId: string, taskId: string) {
+async function finishTask(
+  actorId: string,
+  groupId: string,
+  taskId: string,
+  extraDiffSummary: Record<string, unknown> = {},
+) {
   const response = await app.request(`/api/groups/${groupId}/tasks/${taskId}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
       "X-Participant-Id": actorId,
     },
-    body: JSON.stringify({ status: "done", diffSummary: { ok: true } }),
+    body: JSON.stringify({
+      status: "done",
+      diffSummary: { ok: true, ...extraDiffSummary },
+    }),
   });
   expect(response.status).toBe(200);
 }
+
+// 合法 review_request 交接载荷(形状校验要求的最小字段)。
+const VALID_REVIEW_REQUEST = {
+  review_request: {
+    type: "review_request",
+    layer: 3,
+    taskId: "coordination-activity-test",
+    specRef: "specs/coordination-close-integrity.md",
+    specHash: "449e4a1e",
+    diffSummary: "测试交接载荷",
+  },
+};
 
 async function listWarnings(reviewerId: string) {
   const response = await app.request(
@@ -110,7 +130,7 @@ describe("coordination activity visibility", () => {
       status: "done",
     });
     await postGroupMessage(coordinator.id, group.id);
-    await finishTask(coordinator.id, group.id, parentId);
+    await finishTask(coordinator.id, group.id, parentId, VALID_REVIEW_REQUEST);
 
     const detail = await app.request(
       `/api/groups/${group.id}/tasks/${parentId}`,
@@ -153,7 +173,10 @@ describe("coordination activity visibility", () => {
       executorKey: "coordinator-runtime",
       status: "running",
     });
-    await finishTask(coordinator.id, group.id, taskId);
+    await finishTask(coordinator.id, group.id, taskId, {
+      noExecutionReason: "本测试协调任务刻意零子任务,以验证 zero-child 警示",
+      ...VALID_REVIEW_REQUEST,
+    });
 
     const warnings = await listWarnings(reviewer.id);
     expect(warnings.warnings).toEqual([

@@ -442,7 +442,12 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
         },
         body: JSON.stringify({
           status: "done",
-          diffSummary: { summary: "协调者完成 L2" },
+          diffSummary: {
+            summary: "协调者完成 L2",
+            // 本测试协调任务经内嵌执行器直接完成,无 L1 子任务 → R1 逃生舱。
+            noExecutionReason:
+              "测试用协调任务,通过内嵌执行器直接完成,无 L1 子任务",
+          },
         }),
       },
     );
@@ -863,7 +868,12 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       },
       body: JSON.stringify({
         status: "done",
-        diffSummary: { summary: "PATCH 回写完成" },
+        diffSummary: {
+          summary: "PATCH 回写完成",
+          // 本测试 detached 任务经内嵌执行器直接完成,无 L1 子任务 → R1 逃生舱。
+          noExecutionReason:
+            "测试用 detached 任务,通过内嵌执行器直接完成,无 L1 子任务",
+        },
       }),
     });
     expect(patch.status).toBe(200);

@@ -373,7 +373,12 @@ describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
       },
       body: JSON.stringify({
         status: "done",
-        diffSummary: { summary: "dsh web 已重启" },
+        diffSummary: {
+          summary: "dsh web 已重启",
+          // 本测试 detached 任务经内嵌执行器直接完成,无 L1 子任务 → R1 逃生舱。
+          noExecutionReason:
+            "测试用 detached 任务,通过内嵌执行器直接完成,无 L1 子任务",
+        },
       }),
     });
     expect(patch.status).toBe(200);

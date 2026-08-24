@@ -545,12 +545,17 @@ describe("server 内嵌执行器触发链路(票1)", () => {
           body: JSON.stringify({
             status: "done",
             diffSummary: {
-              type: "review_request",
-              layer: 3,
-              taskId: task.id,
-              specRef: "specs/test.md",
-              specHash: "test-hash",
-              diffSummary: "模板测试",
+              review_request: {
+                type: "review_request",
+                layer: 3,
+                taskId: task.id,
+                specRef: "specs/test.md",
+                specHash: "test-hash",
+                diffSummary: "模板测试",
+              },
+              // 本测试协调任务经内嵌执行器直接完成,无 L1 子任务 → R1 逃生舱。
+              noExecutionReason:
+                "测试用协调任务,通过内嵌执行器直接完成,无 L1 子任务",
             },
           }),
         },
@@ -730,7 +735,12 @@ describe("server 内嵌执行器触发链路(票1)", () => {
           },
           body: JSON.stringify({
             status: "done",
-            diffSummary: { summary: "PATCH 回写完成" },
+            diffSummary: {
+              summary: "PATCH 回写完成",
+              // 本测试 detached 任务经内嵌执行器直接完成,无 L1 子任务 → R1 逃生舱。
+              noExecutionReason:
+                "测试用 detached 任务,通过内嵌执行器直接完成,无 L1 子任务",
+            },
           }),
         },
       );

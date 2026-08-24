@@ -1052,6 +1052,10 @@ describe("任务实体(server 单一状态源)", () => {
     const task = (await created.json()) as Task;
     const done = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
+      // 悬空协调任务(本群无 reviewer,不触发 R2);以 noExecutionReason 走 R1 逃生舱。
+      diffSummary: {
+        noExecutionReason: "测试用悬空协调任务,无需下发执行器",
+      },
     });
     expect(done.status).toBe(200);
 

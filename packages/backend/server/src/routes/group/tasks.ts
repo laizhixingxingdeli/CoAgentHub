@@ -8,7 +8,10 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
-import { getDetachedTaskLiveness } from "@server/lib/detached-task-liveness";
+import {
+  getDetachedTaskLiveness,
+  isDetachedTask,
+} from "@server/lib/detached-task-liveness";
 import { findRepoRoot } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
@@ -34,6 +37,79 @@ import { assertGroupWritable } from "./helpers";
  * 详情 / 状态回写(执行器 PATCH)。server 为单一状态源,桥是纯执行器客户端。
  * 挂在 /api/groups 下(路径 /:id/tasks...),与拆分前完全一致。
  */
+
+type TaskRow = typeof taskTable.$inferSelect;
+
+/**
+ * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
+ * 仅当目标状态为 done 且任务为协调任务(detached)时生效;failed/cancelled 不触发(R3)。
+ * 协调任务判定必须复用 lib/detached-task-liveness 的 isDetachedTask(),不另写一套。
+ */
+async function assertCoordinationCloseIntegrity(
+  db: DataBase,
+  task: TaskRow,
+  targetStatus: string | undefined,
+  diffSummary: unknown,
+): Promise<void> {
+  // R3:只管 done,不管 failed/cancelled。
+  if (targetStatus !== "done") return;
+  // 协调任务判定复用 isDetachedTask()(显式 ReplyMode 或目标含 coordinator 角色)。
+  if (!(await isDetachedTask(db, task))) return;
+
+  const summary =
+    typeof diffSummary === "object" &&
+    diffSummary !== null &&
+    !Array.isArray(diffSummary)
+      ? (diffSummary as Record<string, unknown>)
+      : undefined;
+
+  // R1:done 的协调任务必须有执行子任务(L1 层发生过),否则 400 且点明 L1 层未发生。
+  const hasExecutionChild = await db.query.task.findFirst({
+    where: (t, { eq }) => eq(t.parentTaskId, task.id),
+    columns: { id: true },
+  });
+  if (!hasExecutionChild) {
+    // R4:逃生舱 —— 显式声明非空 noExecutionReason 放行(空串/纯空白仍拒绝)。
+    const noExecutionReason =
+      typeof summary?.noExecutionReason === "string"
+        ? summary.noExecutionReason
+        : "";
+    if (noExecutionReason.trim() === "") {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
+      );
+    }
+  }
+
+  // R2:应走 L3(三方在场且 dispatchKind 非 fix)时,review_request 不得缺失。
+  if (await shouldWalkL3(db, task)) {
+    const hasReviewRequest =
+      summary !== undefined &&
+      (summary.type === "review_request" ||
+        Object.hasOwn(summary, "review_request"));
+    if (!hasReviewRequest) {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场且非 fix 票)。",
+      );
+    }
+  }
+}
+
+/**
+ * 应走 L3 ⟺ 群内 reviewer 与 coordinator 同时在场 AND 本票 dispatchKind != 'fix'。
+ * dispatchKind 为 null(历史/未走新字段)按 requirement 处理,保守要求 review_request。
+ */
+async function shouldWalkL3(db: DataBase, task: TaskRow): Promise<boolean> {
+  if (task.dispatchKind === "fix") return false;
+  const members = await db.query.groupMember.findMany({
+    where: (t, { eq }) => eq(t.groupId, task.groupId),
+    columns: { roles: true },
+  });
+  const presentRoles = new Set<string>(members.flatMap((m) => m.roles));
+  return presentRoles.has("reviewer") && presentRoles.has("coordinator");
+}
 
 const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
@@ -473,6 +549,9 @@ app
           );
         }
       }
+      // 协调任务落终态的完整性校验(R1/R2):仅 done + 协调任务触发;
+      // 复用 isDetachedTask() 判定协调任务,不另写一套。
+      await assertCoordinationCloseIntegrity(db, task, status, diffSummary);
       // 汇报 commit 核实(spec verify-agent-claims v1.1):任何写入
       // diffSummary.hash 的入口都要核实——CLI 完成 / detached PATCH / a2a 完成
       // 共用 claim-verification 同一套逻辑。核实是尽力而为:仓库不可达 / 非 git /
