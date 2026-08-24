@@ -41,6 +41,11 @@ export const reviewResultPayload = z
         .object({ severity: z.string().min(1), note: z.string().min(1) })
         .strict(),
     ),
+    // 可选附加字段:检视者可在 verdict 之外附上被检 spec 引用与自由文本说明。
+    // 保持 .strict():仅放行这三个已知可选字段,其它未知字段仍 400。
+    specRef: z.string().min(1).optional(),
+    specHash: z.string().min(1).optional(),
+    note: z.string().min(1).optional(),
   })
   .strict();
 

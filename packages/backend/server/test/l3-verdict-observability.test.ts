@@ -541,4 +541,108 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     expect(l3.answered).toBe(false);
     expect(l3.verdict).toBe(null);
   });
+
+  /* -------- 修复票:reviewResultPayload 可选字段(strict 保留) -------- */
+
+  it("补丁:review_result 携带可选 specRef/specHash/note → 200", async () => {
+    const coordinator = await register(`l3-fix-fields-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-fix-fields-${randomUUID()}`,
+    );
+    const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({
+        ...reviewResult(task.id, "pass"),
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+        note: "补充说明",
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("补丁:review_result 携带未知字段 noteX → 仍 400(strict 保留)", async () => {
+    const coordinator = await register(`l3-fix-strict-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-fix-strict-${randomUUID()}`,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({ ...reviewResult(uuidv4(), "pass"), noteX: "x" }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain("协作载荷形状无效");
+  });
+
+  it("补丁:仅五个原字段(不带可选字段)仍 200", async () => {
+    const coordinator = await register(`l3-fix-five-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-fix-five-${randomUUID()}`,
+    );
+    const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    const res = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "findings")),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("补丁:reviewRequestPayload 与其它载荷校验回归不变", async () => {
+    const coordinator = await register(`l3-fix-regress-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-fix-regress-${randomUUID()}`,
+    );
+    // review_request 携带未知字段仍 400(strict 未放宽)。
+    const rrBad = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({
+        type: "review_request",
+        layer: 3,
+        taskId: "task-1",
+        specRef: "specs/x.md",
+        specHash: "abc1234",
+        diffSummary: "d",
+        noteX: "x",
+      }),
+    );
+    expect(rrBad.status).toBe(400);
+    // 形状正确的 review_request 仍放行。
+    const rrOk = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      JSON.stringify({
+        type: "review_request",
+        layer: 3,
+        taskId: "task-1",
+        specRef: "specs/x.md",
+        specHash: "abc1234",
+        diffSummary: "d",
+      }),
+    );
+    expect(rrOk.status).toBe(200);
+  });
 });
