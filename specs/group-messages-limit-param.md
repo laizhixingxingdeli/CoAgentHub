@@ -1,6 +1,6 @@
 # Spec: `GET /groups/:id/messages` 缺 `limit`,预览拉取整群消息
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `cc37471e`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 > **发现于**: `sidebar-preview-all-groups`(`d66d4ff` 一带)的 L3 非阻塞发现,

@@ -1,6 +1,6 @@
 # Spec: 悬空 detached 任务的存活探测
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `9f789f9a`
 > **版本**: 1.0
 > **日期**: 2026-08-24
 

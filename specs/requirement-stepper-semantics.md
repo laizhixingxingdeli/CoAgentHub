@@ -1,6 +1,6 @@
 # Spec: 阶梯进度条的单位不统一(占位算法的收尾)
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `6fba2f9a`
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **依据**: `specs/reviewer-role-spec-generation.md` v4.0 §3.14.6

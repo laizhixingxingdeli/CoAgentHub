@@ -1,6 +1,6 @@
 # Spec: 群设置面的四处内容问题
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-24),实现 `a73a7f79 + ac960fc4(fix)`
 > **版本**: 1.0
 > **日期**: 2026-08-23
 > **前置**: `specs/group-settings-drawer.md` v1.1 —— **本票排在其后**。
