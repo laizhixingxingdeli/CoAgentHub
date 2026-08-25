@@ -18,6 +18,7 @@ import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
   getL3ResponseMinutesMs,
+  isResumeTask,
   isTerminalTaskStatus,
   notifyTaskStatusChanged,
   recordCoordinationActivity,
@@ -298,9 +299,16 @@ async function assertCoordinationCloseIntegrity(
   // R1:done 的协调任务必须有执行子任务(L1 层发生过),否则 400 且点明 L1 层未发生。
   const children = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
-    columns: { id: true, status: true, updatedAt: true, attempts: true },
+    columns: {
+      id: true,
+      status: true,
+      updatedAt: true,
+      attempts: true,
+      diffSummary: true,
+    },
   });
-  if (children.length === 0 && !canUseAlreadySatisfied) {
+  const effectiveChildren = children.filter((child) => !isResumeTask(child));
+  if (effectiveChildren.length === 0 && !canUseAlreadySatisfied) {
     if (hasAlreadySatisfied) {
       throw new BizError(
         BizCodeEnum.InvalidRequest,
@@ -336,7 +344,7 @@ async function assertCoordinationCloseIntegrity(
   // 对照子任务窗口并生成可核查的拒绝信息。
   if (commits && commits.length > 0 && !canUseAlreadySatisfied) {
     const now = new Date();
-    const windows = executionWindows(children, now);
+    const windows = executionWindows(effectiveChildren, now);
     const unassigned: Array<{ hash: string; commitAt: string }> = [];
     for (const hash of commits) {
       const commitAt = await commitTimestamp(repoRoot, hash);
@@ -391,7 +399,9 @@ async function assertCoordinationCloseIntegrity(
     !Array.isArray(summary.claimAdjudication)
       ? (summary.claimAdjudication as Record<string, unknown>)
       : undefined;
-  for (const child of claimChildren) {
+  for (const child of claimChildren.filter(
+    (candidate) => !isResumeTask(candidate),
+  )) {
     const status = childClaimVerificationStatus(child.diffSummary);
     if (status === undefined || !NEEDS_CLAIM_ADJUDICATION.has(status)) {
       continue;

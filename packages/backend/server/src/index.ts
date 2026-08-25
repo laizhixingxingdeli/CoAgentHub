@@ -21,7 +21,10 @@ import type { Logger } from "winston";
 import { corsOrigins, serverPort } from "./lib/config";
 import type { DataBase } from "./lib/database";
 import db from "./lib/database";
-import { recoverInterruptedTasks } from "./lib/executor-task";
+import {
+  recoverInterruptedTasks,
+  startCoordinatorResumeConsumer,
+} from "./lib/executor-task";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
@@ -181,6 +184,7 @@ async function run() {
   // Realtime push: attach the WS hub to the same HTTP server so /api/ws
   // upgrade requests (identity via ?participantId=) are handled alongside HTTP.
   wsHub.handleUpgrade(server as HttpServer);
+  startCoordinatorResumeConsumer(db);
 }
 
 run().catch((err) => {

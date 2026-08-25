@@ -1,5 +1,6 @@
 import type { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
+import { isResumeTask } from "@server/lib/executor-task/coordinator-resume";
 import { isTerminalTaskStatus } from "./coordination-activity";
 
 /**
@@ -60,15 +61,23 @@ export async function deriveL1Aggregate(
 ): Promise<L1Aggregate> {
   const children = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
-    columns: { id: true, status: true, supersedesTaskId: true },
+    columns: {
+      id: true,
+      status: true,
+      supersedesTaskId: true,
+      diffSummary: true,
+    },
     orderBy: (t, { asc }) => asc(t.createdAt),
   });
+  const effectiveChildren = children.filter((child) => !isResumeTask(child));
   const supersededIds = new Set(
-    children
+    effectiveChildren
       .map((child) => child.supersedesTaskId)
       .filter((id): id is string => id !== null),
   );
-  const effective = children.filter((child) => !supersededIds.has(child.id));
+  const effective = effectiveChildren.filter(
+    (child) => !supersededIds.has(child.id),
+  );
   const statuses = effective.map((child) => child.status);
   return {
     childCount: effective.length,

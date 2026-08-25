@@ -207,7 +207,7 @@ export function queuedExecutorTaskCount(groupId?: string): number {
 }
 
 /** process.kill(pid, 0) 只探测进程是否存在,不发送信号。 */
-function isExecutorProcessAlive(pid: number): boolean {
+export function isExecutorProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -291,7 +291,7 @@ export function currentRunningTask(groupId?: string): {
  * coordinator 角色时,进程退出只代表协调者 runtime 暂时离开,不代表 task
  * 完成。角色来自 group_members 的实时关系,因此无需新增 task 字段或模式配置。
  */
-async function isCoordinatorTask(
+export async function isCoordinatorTask(
   db: DataBase,
   groupId: string,
   participantId: string,
@@ -553,6 +553,135 @@ async function resolveRoleTarget(
   }
   // 成员都在执行器配置之外 → 无目标可派发,明确失败。
   return { status: "error", reason: "role-no-executor", role };
+}
+
+/**
+ * 将已经持久化的 task 放入现有队列并启动 pump。
+ *
+ * Coordinator resume tasks are created by the durable completion-event
+ * consumer, so they cannot go through the message route a second time. This
+ * helper is the same queue admission path used by normal dispatch, without
+ * creating another task row or another spawn mechanism.
+ */
+export async function enqueueTaskRun(
+  db: DataBase,
+  task: typeof taskTable.$inferSelect,
+  opts: {
+    groupId: string;
+    messageId: string;
+    participantId: string;
+    ex: ExecutorConfig;
+    body: string;
+    groupPrompt: GroupPromptInfo | null;
+    specRef: string | null;
+    specHash: string | null;
+  },
+): Promise<void> {
+  const {
+    groupId,
+    messageId,
+    participantId,
+    ex,
+    body,
+    groupPrompt,
+    specRef,
+    specHash,
+  } = opts;
+  const summary = summaryOf(body);
+  const groupRow = await db.query.groups.findFirst({
+    where: (t, { eq: eqFn }) => eqFn(t.id, groupId),
+  });
+  const projectPath = groupRow?.projectPath?.trim() || null;
+  const groupKey = projectPath ?? DEFAULT_GROUP_KEY;
+  const group = ensureGroupQueue(groupKey);
+  const running = runningGroupCount();
+  const freeSlots = getMaxParallelGroups() - running;
+  const exCap = ex.maxConcurrency;
+  const exSelfRunning = group.running.filter((r) => r.ex.key === ex.key).length;
+  const exAhead =
+    exCap !== undefined && runningExecutorCount(ex.key) >= exCap
+      ? Math.max(0, runningExecutorCount(ex.key) - exSelfRunning)
+      : 0;
+  const wsCap = workspaceCap(groupKey);
+  const wsAhead = Math.max(
+    0,
+    group.running.length + group.queue.length - (wsCap - 1),
+  );
+  const ahead =
+    wsAhead +
+    (group.running.length > 0 || freeSlots > 0 ? 0 : running) +
+    exAhead;
+  if (ahead > 0) {
+    await postStatus(
+      db,
+      groupId,
+      participantId,
+      ex,
+      `📋 [${ex.label}] 任务已排队(前面还有 ${ahead} 个): ${summary}`,
+    );
+  }
+
+  const run: QueuedRun = {
+    db,
+    groupId,
+    messageId,
+    taskId: task.id,
+    participantId,
+    ex,
+    body,
+    summary,
+    groupPrompt,
+    groupKey,
+    projectPath,
+    kill: null,
+    stopped: false,
+    createdAt: Date.now(),
+    runningAt: null,
+    lastOutputAt: 0,
+    lastActivityAt: 0,
+    claimTimer: null,
+    stallTimer: null,
+    stallAlertTimer: null,
+    a2aSilenceTimer: null,
+    detachedTimer: null,
+    stalled: false,
+    stallAlerted: false,
+    a2aSilenced: false,
+    detached: false,
+    detachedTimedOut: false,
+    retryCount: 0,
+    checkpointRef: null,
+    specRef,
+    specHash,
+    concurrencyBlocked: false,
+    concurrencyRetryAt: 0,
+    attempts: Array.isArray(task.attempts) ? task.attempts : [],
+  };
+  group.queue.push(run);
+
+  if (isInCooldown(ex)) {
+    const eta = formatEta(cooldownEndMs(ex));
+    await db
+      .update(taskTable)
+      .set({ diffSummary: { waiting: `等待执行器额度恢复(预计 ${eta})` } })
+      .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)))
+      .catch((error) =>
+        console.warn(`[executor] 写等待恢复标记失败(${task.id}): ${error}`),
+      );
+    await postStatus(
+      db,
+      groupId,
+      participantId,
+      ex,
+      `⏳ [${ex.label}] 任务等待执行器额度恢复(预计 ${eta}): ${summary}`,
+    );
+  }
+
+  run.claimTimer = setTimeout(
+    () => handleClaimTimeout(run),
+    getClaimTimeoutMs(),
+  );
+  void pumpQueue();
 }
 
 /** 幂等建 task(复用 POST /tasks 的 message_id 唯一逻辑)后入队。 */
@@ -2318,6 +2447,7 @@ function buildExecutionModeSection(role: TicketRole): string[] {
       "本任务按 `coagenthub-coordinator` skill 执行。",
       "- 已安装：直接按 skill 流程执行（获取冻结 spec→下发任务→L2 功能检视→按编制交回 L3→结案）。",
       "- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。",
+      "- 派发后可退出本次进程；子任务进入终态时平台会重新拉起你做 L2。",
       "- 后端以自动重载方式运行时，改完源码无需重启；若确需重启，由发起方在验收阶段自行处理，不要在执行窗口内停掉后端。",
     ];
   }

@@ -22,15 +22,24 @@ export {
   recordCoordinationActivity,
 } from "../coordination-activity";
 export { createAnsiStripper, stripAnsi } from "./ansi";
+export {
+  consumePendingCompletionEvents,
+  isResumeTask,
+  maybeCreateCoordinatorResumeTask,
+  startCoordinatorResumeConsumer,
+} from "./coordinator-resume";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
   cancelQueuedTasks,
   createTaskDispatchWarnings,
   currentRunningTask,
+  enqueueTaskRun,
   executionApiBase,
   formatExecutorStartupFailure,
   isConcurrencyConflict,
+  isCoordinatorTask,
+  isExecutorProcessAlive,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
   recoverInterruptedTasks,
