@@ -90,36 +90,6 @@ import {
   sumAttemptTokenUsage,
 } from "./types";
 
-/** 为执行器启动失败补充能直接指向排查方向的提示。 */
-function executorStartupFailureHint(bin: string, msg: string): string {
-  const lowerMsg = msg.toLowerCase();
-
-  if (
-    lowerMsg.includes("unexpected argument") ||
-    lowerMsg.includes("unrecognized") ||
-    lowerMsg.includes("cannot be used with") ||
-    lowerMsg.includes("invalid value")
-  ) {
-    return "；执行器参数配置可能与当前 CLI 版本不匹配，请核对 executors.ts 中的 args 配置";
-  } else if (
-    lowerMsg.includes("enoent") ||
-    lowerMsg.includes("command not found")
-  ) {
-    return `；${bin} 可能未安装或不在 PATH，请用 which ${bin} 确认或填写绝对路径`;
-  } else if (
-    lowerMsg.includes("eacces") ||
-    lowerMsg.includes("permission denied")
-  ) {
-    return `；${bin} 没有可执行权限，请检查文件的可执行位`;
-  }
-
-  return "";
-}
-
-export function formatExecutorStartupFailure(bin: string, msg: string): string {
-  return `无法启动 ${bin} (${msg})${executorStartupFailureHint(bin, msg)}`;
-}
-
 /* ---------------- 额度感知调度(票7) ---------------- */
 
 /**
@@ -169,6 +139,36 @@ export function isConcurrencyConflict(text: string): boolean {
   return /403\s*atomgit_session_concurrency_conflict|atomgit_session_concurrency_conflict/i.test(
     text ?? "",
   );
+}
+
+/** 根据 spawn 失败的实际错误串给出可操作的排查方向。 */
+export function spawnFailureHint(msg: string): string {
+  if (
+    /unexpected argument|unrecognized|cannot be used with|invalid value/i.test(
+      msg,
+    )
+  ) {
+    return "；执行器参数配置可能与当前 CLI 版本不匹配，请核对 executors.ts 中的内置配置";
+  }
+  if (/ENOENT|command not found/i.test(msg)) {
+    return "；执行器可能未安装或不在 PATH，请使用 which <bin> 确认或配置绝对路径";
+  }
+  if (/EACCES|permission denied/i.test(msg)) {
+    return "；执行器文件可能没有可执行权限，请检查可执行位";
+  }
+  return "";
+}
+
+function spawnFailureStatus(ex: ExecutorConfig, msg: string): string {
+  return `❌ [${ex.label}] 任务失败: 无法启动 ${ex.bin} (${msg})${spawnFailureHint(msg)}`;
+}
+
+function spawnFailureReason(msg: string): string {
+  return `${msg}${spawnFailureHint(msg)}`;
+}
+
+export function formatExecutorStartupFailure(bin: string, msg: string): string {
+  return `无法启动 ${bin} (${msg})${spawnFailureHint(msg)}`;
 }
 
 /**
@@ -1320,11 +1320,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             });
             // 已回写终态(如 detached 超时先行)→ 不覆盖。
             if (cur?.status !== "running") return;
-            const hint = executorStartupFailureHint(ex.bin, msg);
             await failTask(
               db,
               taskId,
-              `执行器启动失败: ${msg}${hint}`,
+              `执行器启动失败: ${spawnFailureReason(msg)}`,
               0,
               undefined,
               run.attempts,
@@ -1334,10 +1333,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               groupId,
               participantId,
               ex,
-              `❌ [${ex.label}] 任务失败: ${formatExecutorStartupFailure(
-                ex.bin,
-                msg,
-              )}`,
+              spawnFailureStatus(ex, msg),
             );
           } catch (err) {
             console.warn(
@@ -1576,17 +1572,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.error(`[executor] 执行器启动失败: ${msg}`);
       await endAttempt(run, { status: "failed", error: msg });
       releaseTaskOutput(taskId);
-      const hint = executorStartupFailureHint(ex.bin, msg);
-      await failTask(db, taskId, `${msg}${hint}`, 0, undefined, run.attempts);
+      await failTask(
+        db,
+        taskId,
+        spawnFailureReason(msg),
+        0,
+        undefined,
+        run.attempts,
+      );
       await postStatus(
         db,
         groupId,
         participantId,
         ex,
-        `❌ [${ex.label}] 任务失败: ${formatExecutorStartupFailure(
-          ex.bin,
-          msg,
-        )}`,
+        spawnFailureStatus(ex, msg),
       );
     }
   } finally {

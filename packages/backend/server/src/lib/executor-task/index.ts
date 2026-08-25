@@ -37,6 +37,7 @@ export {
   refreshA2AActivity,
   resolveTaskRepo,
   resolveTestExecutor,
+  spawnFailureHint,
 } from "./queue";
 export { parseTaskReport, renderTaskCard, type TaskReport } from "./report";
 export {
