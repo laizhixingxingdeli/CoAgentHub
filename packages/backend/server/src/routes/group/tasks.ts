@@ -868,10 +868,9 @@ app
           : undefined;
       if (
         task.status === "failed" &&
-        isTerminalTaskStatus(task.status) &&
         typeof summary?.error === "string" &&
         summary.error.trim() !== "" &&
-        runtime.stale
+        summary.staleBuildSuspected === true
       ) {
         detail.staleBuildSuspected = true;
       }
@@ -1109,6 +1108,34 @@ app
           ...(summaryToWrite as Record<string, unknown>),
           l1Bypass,
         };
+      }
+      // R3: staleBuildSuspected is a platform-owned snapshot of the runtime
+      // at the failed transition, not a live property of every detail read.
+      // Strip client-provided values so a later read cannot manufacture the
+      // signal, then persist it only for a non-terminal -> failed transition.
+      if (
+        diffSummary !== undefined &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        const summaryWithoutStaleMarker = {
+          ...(summaryToWrite as Record<string, unknown>),
+        };
+        delete summaryWithoutStaleMarker.staleBuildSuspected;
+        const shouldPersistStaleBuildSuspected =
+          status === "failed" &&
+          status !== task.status &&
+          !isTerminalTaskStatus(task.status) &&
+          typeof summaryWithoutStaleMarker.error === "string" &&
+          summaryWithoutStaleMarker.error.trim() !== "" &&
+          getRuntimeStatus().stale;
+        summaryToWrite = shouldPersistStaleBuildSuspected
+          ? {
+              ...summaryWithoutStaleMarker,
+              staleBuildSuspected: true,
+            }
+          : summaryWithoutStaleMarker;
       }
       const [updated] = await db
         .update(taskTable)

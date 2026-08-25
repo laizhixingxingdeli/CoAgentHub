@@ -346,7 +346,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
-  it("R3:failed + error + 终态 + 陈旧运行时 → 详情透出 staleBuildSuspected", async () => {
+  it("R3:failed 结案时记录陈旧状态,重建后详情仍透出 staleBuildSuspected", async () => {
     const coordinator = await register("ci-coord-stale-signal");
     const group = await createGroup(coordinator.id, "ci-stale-signal");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
@@ -363,12 +363,52 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
         diffSummary: { error: "实现已提交 abc123,因旧构建守卫拒绝回写" },
       });
       expect(patch.status).toBe(200);
+      const patchBody = (await patch.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(patchBody.diffSummary.staleBuildSuspected).toBe(true);
+    });
+
+    await withFreshRuntime(async () => {
       const detail = await app.request(
         `/api/groups/${group.id}/tasks/${task.id}`,
       );
       expect(detail.status).toBe(200);
       const body = (await detail.json()) as Record<string, unknown>;
       expect(body.staleBuildSuspected).toBe(true);
+    });
+  });
+
+  it("R3:终态时运行时不陈旧,之后变陈旧也不追溯透出信号", async () => {
+    const coordinator = await register("ci-coord-no-retroactive-stale-signal");
+    const group = await createGroup(
+      coordinator.id,
+      "ci-no-retroactive-stale-signal",
+    );
+    const msg = await postMessage(coordinator.id, group.id, "失败任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+
+    await withFreshRuntime(async () => {
+      const patch = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "真实失败" },
+      });
+      expect(patch.status).toBe(200);
+    });
+
+    await withStaleRuntime(async () => {
+      const detail = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+      );
+      expect(detail.status).toBe(200);
+      expect(
+        (await detail.json()) as Record<string, unknown>,
+      ).not.toHaveProperty("staleBuildSuspected");
     });
   });
 

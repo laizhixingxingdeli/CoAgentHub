@@ -7,6 +7,10 @@ import {
   appendTaskOutput,
   releaseTaskOutput,
 } from "../src/lib/executor-task/output-buffer";
+import {
+  configureSourceScanRoots,
+  resetSourceScanCache,
+} from "../src/lib/runtime-status";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
@@ -84,6 +88,17 @@ describe("任务实体(server 单一状态源)", () => {
       },
       body: JSON.stringify(body),
     });
+  }
+
+  async function withFreshRuntime<T>(callback: () => Promise<T>) {
+    configureSourceScanRoots([]);
+    resetSourceScanCache();
+    try {
+      return await callback();
+    } finally {
+      configureSourceScanRoots(null);
+      resetSourceScanCache();
+    }
   }
 
   async function createTask(
@@ -551,20 +566,22 @@ describe("任务实体(server 单一状态源)", () => {
     );
     expect(missingFailureReason.status).toBe(400);
 
-    const fail = await app.request(`/api/groups/${group.id}/tasks/${t1.id}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Participant-Id": execA.id,
-      },
-      body: JSON.stringify({
-        status: "failed",
-        diffSummary: { error: "执行器返回非零退出码" },
-      }),
-    });
-    expect(fail.status).toBe(200);
-    expect(((await fail.json()) as Task).diffSummary).toEqual({
-      error: "执行器返回非零退出码",
+    await withFreshRuntime(async () => {
+      const fail = await app.request(`/api/groups/${group.id}/tasks/${t1.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": execA.id,
+        },
+        body: JSON.stringify({
+          status: "failed",
+          diffSummary: { error: "执行器返回非零退出码" },
+        }),
+      });
+      expect(fail.status).toBe(200);
+      expect(((await fail.json()) as Task).diffSummary).toEqual({
+        error: "执行器返回非零退出码",
+      });
     });
 
     // cancelled + checkpointRef + diffSummary 一起写
