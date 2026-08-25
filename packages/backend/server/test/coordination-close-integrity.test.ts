@@ -1,4 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
@@ -138,6 +143,48 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   }
 
+  function createGitRepo() {
+    const repoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-close-git-"));
+    execFileSync("git", ["init", "-q"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.email", "test@coagenthub.local"], {
+      cwd: repoDir,
+    });
+    execFileSync("git", ["config", "user.name", "coagenthub-test"], {
+      cwd: repoDir,
+    });
+    const oldDate = new Date(Date.now() - 60_000).toISOString();
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "seed"], {
+      cwd: repoDir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: oldDate,
+        GIT_COMMITTER_DATE: oldDate,
+      },
+    });
+    return repoDir;
+  }
+
+  async function setTaskWindow(taskId: string, startedAt: string) {
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [{ n: 1, startedAt, status: "running" }],
+      })
+      .where(eq(taskTable.id, taskId));
+  }
+
+  async function withRepo<T>(repoDir: string, callback: () => Promise<T>) {
+    const previous = process.env.COAGENTHUB_REPO_ROOT;
+    process.env.COAGENTHUB_REPO_ROOT = repoDir;
+    try {
+      return await callback();
+    } finally {
+      if (previous === undefined) delete process.env.COAGENTHUB_REPO_ROOT;
+      else process.env.COAGENTHUB_REPO_ROOT = previous;
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  }
+
   function reviewRequest(taskId: string) {
     return {
       review_request: {
@@ -187,6 +234,93 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("escape hatch:窗口内有提交 + 有理由 → 400,且包含哈希与窗口起点", async () => {
+    const coordinator = await register("ci-coord-commit-window");
+    const group = await createGroup(coordinator.id, "ci-commit-window");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      // git 的 %cI 精度为秒,把窗口起点放在当前秒之前,避免刚创建的
+      // 提交因毫秒精度比较被误判为 outside_window。
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { noExecutionReason: "无需下发执行器" },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(hash);
+      expect(body.message).toContain(windowStartedAt);
+    });
+  });
+
+  it("escape hatch:窗口内无提交 + 有理由 → 200", async () => {
+    const coordinator = await register("ci-coord-no-commit-window");
+    const group = await createGroup(coordinator.id, "ci-no-commit-window");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { noExecutionReason: "确认无需改动" },
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  it("escape hatch:非 git 目录 → 放行,不抛错", async () => {
+    const coordinator = await register("ci-coord-no-git-window");
+    const group = await createGroup(coordinator.id, "ci-no-git-window");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const nonGitDir = mkdtempSync(path.join(tmpdir(), "coagenthub-no-git-"));
+    await withRepo(nonGitDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { noExecutionReason: "环境检查票,无需执行器" },
+      });
+      expect(res.status).toBe(200);
+    });
   });
 
   it("R1:noExecutionReason 空串/纯空白 → 仍 400", async () => {

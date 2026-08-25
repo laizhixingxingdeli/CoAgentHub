@@ -14,7 +14,7 @@ import {
   getDetachedTaskLiveness,
   isDetachedTask,
 } from "@server/lib/detached-task-liveness";
-import { findRepoRoot } from "@server/lib/executor-runner";
+import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
   getL3ResponseMinutesMs,
@@ -86,6 +86,77 @@ function childClaimVerificationStatus(raw: unknown): string | undefined {
 }
 
 /**
+ * 查找任务窗口内的提交。git/仓库不可用时返回 undefined,表示按 R2 放行;
+ * 空数组表示 git 可用且窗口内没有提交。
+ */
+async function commitsInTaskWindow(
+  repoRoot: string,
+  windowStartedAt: string | undefined,
+): Promise<string[] | undefined> {
+  if (!windowStartedAt) return undefined;
+  const startMs = Date.parse(windowStartedAt);
+  if (!Number.isFinite(startMs)) return undefined;
+
+  try {
+    const repository = await gitExec(
+      ["rev-parse", "--is-inside-work-tree"],
+      repoRoot,
+    );
+    if (repository.status !== 0 || repository.stdout.trim() !== "true") {
+      return undefined;
+    }
+
+    const log = await gitExec(
+      [
+        "log",
+        "--exclude=refs/coagenthub-cp/*",
+        "--all",
+        `--since=${windowStartedAt}`,
+        "--format=%H%x00%cI",
+      ],
+      repoRoot,
+    );
+    if (log.status !== 0) return undefined;
+
+    const nowMs = Date.now();
+    const hashes: string[] = [];
+    for (const line of log.stdout.split("\n")) {
+      const [hash, commitAt] = line.trim().split("\0");
+      if (!hash || !commitAt) continue;
+      const commitMs = Date.parse(commitAt);
+      if (
+        Number.isFinite(commitMs) &&
+        commitMs >= startMs &&
+        commitMs <= nowMs
+      ) {
+        hashes.push(hash);
+        if (hashes.length === 5) break;
+      }
+    }
+    return hashes;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve the same repository used by executor commit verification. */
+async function resolveTaskRepoRoot(
+  db: DataBase,
+  task: TaskRow,
+): Promise<string> {
+  const group = await db.query.groups.findFirst({
+    where: (g, { eq }) => eq(g.id, task.groupId),
+  });
+  const declaredRoot = resolveTaskRepo(
+    task.brief ?? "",
+    group?.projectPath ?? null,
+  );
+  return declaredRoot && existsSync(declaredRoot)
+    ? declaredRoot
+    : findRepoRoot();
+}
+
+/**
  * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
  * 仅当目标状态为 done 且任务为协调任务(detached)时生效;failed/cancelled 不触发(R3)。
  * 协调任务判定必须复用 lib/detached-task-liveness 的 isDetachedTask(),不另写一套。
@@ -123,6 +194,21 @@ async function assertCoordinationCloseIntegrity(
       throw new BizError(
         BizCodeEnum.InvalidRequest,
         "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
+      );
+    }
+
+    // escape-hatch-became-the-default R1/R2/R3:有理由也不能掩盖协调者
+    // 在同一任务窗口内直接提交代码。窗口起点必须复用 verifyCommitClaim
+    // 的 attempts[0].startedAt;git/仓库失败时按 R2 放行。
+    const commits = await commitsInTaskWindow(
+      await resolveTaskRepoRoot(db, task),
+      task.attempts[0]?.startedAt,
+    );
+    if (commits && commits.length > 0) {
+      const windowStartedAt = task.attempts[0]?.startedAt;
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `L1 层未发生:本协调任务没有任何执行子任务,但任务窗口内检测到提交(${commits.join(", ")})。代码改动应经执行器完成。窗口起点: ${windowStartedAt}。`,
       );
     }
   }
@@ -241,10 +327,7 @@ async function deriveL3Answer(
   let verdict: "pass" | "findings" | null = null;
   const candidates = await db.query.groupMessage.findMany({
     where: (t, { and: andFn, eq: eqFn, ilike: ilikeFn }) =>
-      andFn(
-        eqFn(t.groupId, task.groupId),
-        ilikeFn(t.body, "%review_result%"),
-      ),
+      andFn(eqFn(t.groupId, task.groupId), ilikeFn(t.body, "%review_result%")),
     columns: { body: true },
   });
   for (const message of candidates) {
@@ -773,17 +856,7 @@ app
               executorConfig?.kind === "a2a" ? "a2a" : "cli";
             // 与派发时 spawn cwd 同源的仓库:任务书声明 → 群 project_path →
             // findRepoRoot 兜底(与 queue.ts 派发路径一致)。
-            const group = await db.query.groups.findFirst({
-              where: (g, { eq }) => eq(g.id, id),
-            });
-            const declaredRoot = resolveTaskRepo(
-              task.brief ?? "",
-              group?.projectPath ?? null,
-            );
-            const repoRoot =
-              declaredRoot && existsSync(declaredRoot)
-                ? declaredRoot
-                : findRepoRoot();
+            const repoRoot = await resolveTaskRepoRoot(db, task);
             const verification = await verifyReportedCommit(
               reportedHash,
               repoRoot,

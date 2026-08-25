@@ -416,6 +416,8 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
 
   it("目标成员是 coordinator 时进程退出不自动终态,显式 PATCH 后才完成", async () => {
     delete process.env.FAKE_SLEEP_SECS;
+    // 本测试只验证 detached 的显式回写,不应制造会被逃生舱拦截的窗口内提交。
+    process.env.FAKE_NO_COMMIT = "1";
     const dispatcher = await registerParticipant({ name: "coord-lifecycle" });
     const coordinator = await registerParticipant({ name: "CodeBuddy 执行器" });
     const group = await createGroup(dispatcher.id, "协调任务生命周期");
@@ -461,6 +463,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     );
     expect(patch.status).toBe(200);
     expect((await patch.json()).status).toBe("done");
+    process.env.FAKE_NO_COMMIT = "";
 
     const completed = (await listTasks(dispatcher.id, group.id)).find(
       (task) => task.id === running.id,
@@ -1002,6 +1005,8 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
 
   it("CLI 执行器 ## ReplyMode: detached:spawn 后槽位立即释放、任务保持 running、不解析 stdout,PATCH 回写 done", async () => {
     process.env.FAKE_SLEEP_SECS = "";
+    // 本测试验证 detached 生命周期;窗口内无提交才能走逃生舱放行路径。
+    process.env.FAKE_NO_COMMIT = "1";
     const { coordinator, codebuddy, group } = await setupGroup();
     const msg = await postMessage(coordinator.id, group.id, {
       body: "CLI detached 任务\n## ReplyMode: detached",
@@ -1046,6 +1051,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     });
     expect(patch.status).toBe(200);
     await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+    process.env.FAKE_NO_COMMIT = "";
   }, 30_000);
 
   it("CLI detached 超时未回写 → 结果未确认(failed + unconfirmed)", async () => {
@@ -1174,9 +1180,10 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(tasks.find((x) => x.messageId === mLegacy)?.status).toBe("failed");
     expect(tasks.find((x) => x.messageId === mBridge)?.status).toBe("running");
     for (const m of [mDead, mLegacy]) {
-      const diff = tasks.find((x) => x.messageId === m)?.diffSummary as
-        | Record<string, unknown>
-        | null;
+      const diff = tasks.find((x) => x.messageId === m)?.diffSummary as Record<
+        string,
+        unknown
+      > | null;
       expect(diff?.error).toBe("server-restart");
     }
 
