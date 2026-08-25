@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { testDb } from "./db";
 
 /**
@@ -1116,7 +1116,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(rolled?.status).toBe("failed");
   }, 30_000);
 
-  it("重启兜底:queued/running 任务自动恢复为 failed(server-restart)", async () => {
+  it("重启兜底:只回收已死亡/历史任务,保留存活任务并豁免桥任务", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const { testDb } = await import("./db");
     const { task: taskTable } = await import(
@@ -1126,22 +1126,39 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       "@server/lib/executor-task"
     );
 
-    // 直接落库两条遗留任务:一条 queued、一条 running(模拟重启瞬间)。
-    const mQueued = "00000000-0000-7000-8000-0000000000a1";
-    const mRunning = "00000000-0000-7000-8000-0000000000a2";
+    // 直接落库:存活 PID、已消失 PID、历史 null PID,以及 executor_key 为空的桥任务。
+    const mAlive = "00000000-0000-7000-8000-0000000000a1";
+    const mDead = "00000000-0000-7000-8000-0000000000a2";
+    const mLegacy = "00000000-0000-7000-8000-0000000000a3";
+    const mBridge = "00000000-0000-7000-8000-0000000000a4";
     await testDb.insert(taskTable).values([
       {
         groupId: group.id,
-        messageId: mQueued,
+        messageId: mAlive,
+        executorParticipantId: codebuddy.id,
+        executorKey: "codebuddy",
+        executorPid: process.pid,
+        status: "running",
+      },
+      {
+        groupId: group.id,
+        messageId: mDead,
+        executorParticipantId: codebuddy.id,
+        executorKey: "codebuddy",
+        status: "running",
+        executorPid: 999_999_999,
+      },
+      {
+        groupId: group.id,
+        messageId: mLegacy,
         executorParticipantId: codebuddy.id,
         executorKey: "codebuddy",
         status: "queued",
       },
       {
         groupId: group.id,
-        messageId: mRunning,
+        messageId: mBridge,
         executorParticipantId: codebuddy.id,
-        executorKey: "codebuddy",
         status: "running",
       },
     ]);
@@ -1152,12 +1169,44 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(affected).toBe(2);
 
     const tasks = await listTasks(coordinator.id, group.id);
-    for (const m of [mQueued, mRunning]) {
-      const t = tasks.find((x) => x.messageId === m);
-      expect(t?.status).toBe("failed");
-      const diff = t?.diffSummary as Record<string, unknown> | null;
+    expect(tasks.find((x) => x.messageId === mAlive)?.status).toBe("running");
+    expect(tasks.find((x) => x.messageId === mDead)?.status).toBe("failed");
+    expect(tasks.find((x) => x.messageId === mLegacy)?.status).toBe("failed");
+    expect(tasks.find((x) => x.messageId === mBridge)?.status).toBe("running");
+    for (const m of [mDead, mLegacy]) {
+      const diff = tasks.find((x) => x.messageId === m)?.diffSummary as
+        | Record<string, unknown>
+        | null;
       expect(diff?.error).toBe("server-restart");
     }
+
+    const epError = Object.assign(new Error("operation not permitted"), {
+      code: "EPERM",
+    });
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === 123_456 && signal === 0) throw epError;
+      return true;
+    });
+    const mEperm = "00000000-0000-7000-8000-0000000000a5";
+    await testDb.insert(taskTable).values({
+      groupId: group.id,
+      messageId: mEperm,
+      executorParticipantId: codebuddy.id,
+      executorKey: "codebuddy",
+      executorPid: 123_456,
+      status: "running",
+    });
+    expect(
+      await recoverInterruptedTasks(
+        testDb as unknown as Parameters<typeof recoverInterruptedTasks>[0],
+      ),
+    ).toBe(0);
+    expect(
+      (await listTasks(coordinator.id, group.id)).find(
+        (x) => x.messageId === mEperm,
+      )?.status,
+    ).toBe("running");
+    kill.mockRestore();
   }, 30_000);
 
   it("静默超时:无输出的假 bin 超过 stall 阈值 → failed + ❌ 回传(原因含「静默」)", async () => {

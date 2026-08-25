@@ -61,6 +61,8 @@ export interface ExecutorRunResult {
 }
 
 export interface ExecutorRunHandle {
+  /** detached child 的进程组 id;A2A 或 spawn 失败时缺省。 */
+  pid: number | undefined;
   /** 完成时 resolve;timeout/kill 也 resolve(带 timedOut/非零 code)。 */
   promise: Promise<ExecutorRunResult>;
   /** 终止整个进程组(停止指令用);幂等,可安全重复调用。 */
@@ -87,6 +89,7 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   } catch (e) {
     const err = e as Error;
     return {
+      pid: undefined,
       promise: Promise.reject(
         new Error(`无法启动 ${bin}: ${err.message}`, { cause: err }),
       ),
@@ -159,6 +162,7 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   });
 
   return {
+    pid: child.pid,
     promise,
     kill: () => {
       if (child.pid === undefined) return;

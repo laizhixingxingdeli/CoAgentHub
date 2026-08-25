@@ -105,6 +105,8 @@ export const task = pgTable(
       .references(() => participant.id),
     // 哪个执行器(key)在跑这个任务;桥退役后一律由 server 写入,用于审计与重放。
     executorKey: text("executor_key"),
+    // detached spawn 返回的进程组 id;可空兼容历史任务,终态后保留供排障。
+    executorPid: integer("executor_pid"),
     // 任务书快照:任务触发时消息 body 的完整复制(可空 = 无原文可快照,如桥直发)。
     // 消息后续被编辑/软删除不影响已触发任务语义 —— 任务面板显示这份原文。
     brief: text("brief"),

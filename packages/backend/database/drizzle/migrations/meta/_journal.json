@@ -183,6 +183,13 @@
       "when": 1787640000000,
       "tag": "0025_add_task_supersedes_task_id",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1787650000000,
+      "tag": "0026_add_task_executor_pid",
+      "breakpoints": true
     }
   ]
 }

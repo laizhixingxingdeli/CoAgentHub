@@ -21,6 +21,7 @@ import type { DataBase } from "@server/lib/database";
 import {
   createCheckpoint,
   type ExecutorRunResult,
+  type ExecutorRunHandle,
   findRepoRoot,
   readTimeoutMs,
   resetToCheckpoint,
@@ -203,26 +204,53 @@ export function queuedExecutorTaskCount(groupId?: string): number {
   return n;
 }
 
+/** process.kill(pid, 0) 只探测进程是否存在,不发送信号。 */
+function isExecutorProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but this process cannot signal it. Only
+    // ESRCH proves that the PID has disappeared; preserve everything else.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /**
- * 重启兜底(server 启动时调用):把 DB 里 status=queued/running 且属于本
- * server 的任务(executor_key 非空)恢复为 failed(附原因 server-restart),
- * 不自动重跑。返回受影响行数。
+ * 重启兜底(server 启动时调用):只把确认已经死亡的 server 任务恢复为
+ * failed(附原因 server-restart),不自动重跑。历史任务没有 PID 时保持旧行为。
  *
- * 只回收本 server 直接 spawn 的任务:双跑期桥也会建 running 任务(executor_key
- * 为空),若一并置 failed,同消息再次投递会被当作 failed 重新执行 → 与桥并行
- * 双跑。executor_key 非空 = server 自己登记的任务,重启后确认是孤儿。
+ * 只检查本 server 直接 spawn 的任务:双跑期桥也会建 running 任务
+ * (executor_key 为空),仍不参与回收。
  */
 export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
-  const rows = await db
-    .update(taskTable)
-    .set({ status: "failed", diffSummary: { error: "server-restart" } })
-    .where(
-      and(
-        inArray(taskTable.status, ["queued", "running"]),
-        isNotNull(taskTable.executorKey),
-      ),
+  const candidates = await db.query.task.findMany({
+    where: and(
+      inArray(taskTable.status, ["queued", "running"]),
+      isNotNull(taskTable.executorKey),
+    ),
+  });
+  const deadTaskIds = candidates
+    .filter(
+      (row) =>
+        row.executorPid === null || !isExecutorProcessAlive(row.executorPid),
     )
-    .returning();
+    .map((row) => row.id);
+  const retainedCount = candidates.length - deadTaskIds.length;
+  const rows =
+    deadTaskIds.length === 0
+      ? []
+      : await db
+          .update(taskTable)
+          .set({ status: "failed", diffSummary: { error: "server-restart" } })
+          .where(inArray(taskTable.id, deadTaskIds))
+          .returning();
+
+  if (candidates.length > 0) {
+    console.log(
+      `[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务`,
+    );
+  }
   if (rows.length > 0) {
     console.log(
       `[executor] 重启兜底:${rows.length} 个 queued/running 任务置为 failed (server-restart)`,
@@ -1052,7 +1080,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
     // 声明在分支外:完成路径(回写)同样需要判断,不能只在 a2a 分支内定义。
     const memoryPerGroup = isA2a && ex.memory === "per-group";
-    let handle: { promise: Promise<ExecutorRunResult>; kill: () => void };
+    let handle: ExecutorRunHandle;
     if (isA2a) {
       const a2aUrl = ex.a2a?.url ?? "";
       console.log(
@@ -1094,6 +1122,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         ? `${buildSpecSection(run.specRef, run.specHash).join("\n")}\n\n${body}`
         : body;
       handle = {
+        pid: undefined,
         promise: runA2AExecutor({
           url: a2aUrl,
           token: ex.a2a?.token ?? "",
@@ -1232,6 +1261,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           getStallAlertMs(),
         );
       }
+    }
+    if (handle.pid !== undefined) {
+      await db
+        .update(taskTable)
+        .set({ executorPid: handle.pid })
+        .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
     }
     run.kill = handle.kill;
     // 第1层:A2A 无进展超时起点——running 起点即置最近活跃时间(进度消息只会
