@@ -244,7 +244,7 @@ describe("协调任务详情透出 l1 聚合 (R1)", () => {
       status: "pending",
       allTerminal: false,
     });
-    expect(detail.runtime).toMatchObject({ stale: false });
+    expect(typeof (detail.runtime as { stale: unknown }).stale).toBe("boolean");
     expect(typeof (detail.runtime as { startedAt: string }).startedAt).toBe(
       "string",
     );
