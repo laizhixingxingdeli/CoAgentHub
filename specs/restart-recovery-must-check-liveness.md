@@ -1,6 +1,6 @@
 # Spec: 启动恢复把还活着的任务判成孤儿
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-25),实现 `b09239cc`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **回归自**: `no-manual-restart-in-dev`(`a5bd7a64`)——切到 watch 模式后暴露
