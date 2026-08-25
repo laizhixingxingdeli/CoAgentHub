@@ -3,6 +3,7 @@ import {
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
   participant as participantTable,
+  task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -142,6 +143,10 @@ describe("群组消息树与受众路由", () => {
     await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
     await addMember(coordinator.id, group.id, executor.id, ["executor"]);
     await addMember(coordinator.id, group.id, human.id, ["human"]);
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: "executor" })
+      .where(eq(participantTable.id, executor.id));
     return { group, coordinator, reviewer, executor, human };
   }
 
@@ -196,6 +201,56 @@ describe("群组消息树与受众路由", () => {
       expect(err.code).toBe("FORBIDDEN");
       // 专属措辞:群是 agent 协作空间,请与检视者 agent 直接对话
       expect(err.message).toContain("检视者 agent");
+    });
+
+    it("human 仅可通过带完整规范钉子的定向消息下发任务并留下触发审计", async () => {
+      const { group, human, executor } = await setupGroup();
+      const incomplete = await sendMessage(human.id, group.id, {
+        body: "缺少版本钉子",
+        audience: "participant",
+        audienceRef: executor.id,
+        specRef: "specs/two-party-has-no-entry-point.md",
+      });
+      expect(incomplete.status).toBe(403);
+
+      const broadcast = await sendMessage(human.id, group.id, {
+        body: "带规范但仍是广播",
+        audience: "broadcast",
+        specRef: "specs/two-party-has-no-entry-point.md",
+        specHash: "a1b39890",
+      });
+      expect(broadcast.status).toBe(403);
+
+      const directed = await sendMessage(human.id, group.id, {
+        body: "外部触发任务",
+        audience: "participant",
+        audienceRef: executor.id,
+        specRef: "specs/two-party-has-no-entry-point.md",
+        specHash: "a1b39890",
+      });
+      expect(directed.status).toBe(200);
+      const message = (await directed.json()) as MessageItem;
+
+      const deadline = Date.now() + 5_000;
+      let task: { dispatchAudit: unknown } | undefined;
+      while (Date.now() <= deadline) {
+        const [row] = await testDb
+          .select({ dispatchAudit: taskTable.dispatchAudit })
+          .from(taskTable)
+          .where(eq(taskTable.messageId, message.id));
+        if (row) {
+          task = row;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(task).toBeDefined();
+      expect(task?.dispatchAudit).toEqual(
+        expect.objectContaining({
+          dispatcherParticipantId: human.id,
+          triggerSource: "human",
+        }),
+      );
     });
 
     it("非 human 角色成员发消息不受影响(agent 角色均 200)", async () => {

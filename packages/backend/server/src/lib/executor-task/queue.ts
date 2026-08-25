@@ -887,6 +887,13 @@ async function buildDispatchTargetAudit(
 
   return {
     dispatcherParticipantId,
+    triggerSource: members.some(
+      (member) =>
+        member.participantId === dispatcherParticipantId &&
+        member.roles.includes("human"),
+    )
+      ? "human"
+      : "participant",
     targetParticipantId: target.id,
     targetParticipantName: target.name,
     selfDispatch: dispatcherParticipantId === target.id,
