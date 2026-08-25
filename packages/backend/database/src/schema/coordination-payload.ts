@@ -67,16 +67,16 @@ export const REVIEW_REQUEST_EXAMPLE = {
   diffSummary: "<summary>",
 } as const;
 
-/** Returns the known JSON coordination payload, or undefined for free text. */
-export function parseKnownCoordinationPayload(
-  body: string,
+const KNOWN_COORDINATION_PAYLOAD_TYPES = new Set([
+  "spec_published",
+  "spec_amended",
+  "review_request",
+  "review_result",
+]);
+
+function parseKnownCoordinationPayloadValue(
+  value: unknown,
 ): CoordinationPayload | undefined {
-  let value: unknown;
-  try {
-    value = JSON.parse(body);
-  } catch {
-    return undefined;
-  }
   if (
     typeof value !== "object" ||
     value === null ||
@@ -85,17 +85,39 @@ export function parseKnownCoordinationPayload(
     return undefined;
   }
   const type = (value as { type: string }).type;
-  if (
-    ![
-      "spec_published",
-      "spec_amended",
-      "review_request",
-      "review_result",
-    ].includes(type)
-  ) {
+  if (!KNOWN_COORDINATION_PAYLOAD_TYPES.has(type)) return undefined;
+  return coordinationPayload.parse(value);
+}
+
+/** Returns the known JSON coordination payload, or undefined for free text. */
+export function parseKnownCoordinationPayload(
+  body: string,
+): CoordinationPayload | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    // Markdown messages are human-readable, so accept a known coordination
+    // payload from a JSON or language-less fenced code block as a fallback.
+    // Each candidate is independent: malformed, unknown, or non-JSON fences
+    // must not turn ordinary prose into a coordination-payload validation
+    // error, and a later valid fence may still be used.
+    const fencePattern = /```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/gi;
+    for (const match of body.matchAll(fencePattern)) {
+      try {
+        const payload = parseKnownCoordinationPayloadValue(
+          JSON.parse(match[1].trim()),
+        );
+        if (payload) return payload;
+      } catch {
+        // Try the next fence. Only a fully valid, known payload is accepted.
+      }
+    }
     return undefined;
   }
-  return coordinationPayload.parse(value);
+  // Keep the existing whole-body path intact: a syntactically valid known
+  // payload with an invalid shape still throws for the caller to reject.
+  return parseKnownCoordinationPayloadValue(value);
 }
 
 /** Normalize both observed review_request locations to nested form. */

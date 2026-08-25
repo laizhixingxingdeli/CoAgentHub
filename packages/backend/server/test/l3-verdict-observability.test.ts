@@ -182,6 +182,21 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     };
   }
 
+  function markdownReviewResult(
+    taskId: string,
+    verdict: "pass" | "findings",
+  ): string {
+    return [
+      `## L3 裁决：${verdict}`,
+      "",
+      "检视说明正文",
+      "",
+      "```json",
+      JSON.stringify(reviewResult(taskId, verdict)),
+      "```",
+    ].join("\n");
+  }
+
   /** 搭建一个可落 done 的协调任务(三方在场 + 子任务 + review_request)。 */
   async function setupDoneCoordinationTask() {
     const coordinator = await register(`l3-coord-${randomUUID()}`);
@@ -479,6 +494,36 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     expect(((await res.json()) as { message: string }).message).toContain(
       "定向到 coordinator",
     );
+  });
+
+  it("R3:markdown 包裹的 findings 广播 → 400", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      markdownReviewResult(task.id, "findings"),
+      undefined,
+      {
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+      },
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message: string }).message).toContain(
+      "定向到 coordinator",
+    );
+  });
+
+  it("R3:markdown 包裹的 pass → 200 且 l3 应答", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      markdownReviewResult(task.id, "pass"),
+    );
+    expect(res.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    expect(detail.l3).toMatchObject({ answered: true, verdict: "pass" });
   });
 
   it("R3:不满足触发条件的任务详情不含 l3 字段(普通任务 done)", async () => {

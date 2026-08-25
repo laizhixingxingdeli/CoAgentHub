@@ -200,14 +200,11 @@ app
       } = c.req.valid("json");
       const aud = audience ?? "broadcast";
 
-      // 协作载荷校验(R1/R2,specs/l3-verdict-observability.md):不再只认调用方
-      // 声明的 contentType —— 消息体 trim 后以 `{` 开头(看起来像结构化载荷)也
-      // 走 parseKnownCoordinationPayload:已知 type 但形状不合 → 400;自由文本
-      // / 未知 type 的 JSON → undefined,原样放行,行为与改动前完全一致。
-      // 保留 contentType === "application/json" 时的既有校验路径(仍校验)。
-      const trimmedBody = (body ?? "").trim();
+      // 协作载荷校验(R1/R2,specs/l3-verdict-observability.md):所有消息正文
+      // 都经过共享解析器,因此人读的 markdown 标题 + fenced JSON 也能触发
+      // 已知载荷校验;自由文本 / 未知 type 的 JSON → undefined,原样放行。
       let parsed: CoordinationPayload | undefined;
-      if (contentType === "application/json" || trimmedBody.startsWith("{")) {
+      if (body !== undefined) {
         try {
           parsed = parseKnownCoordinationPayload(body ?? "");
         } catch (error) {
