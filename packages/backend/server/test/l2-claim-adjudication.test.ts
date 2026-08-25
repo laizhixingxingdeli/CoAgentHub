@@ -112,7 +112,9 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
     });
   }
 
-  /** 插入一条指向 parentTaskId 的执行子任务,带 claimVerification 核实结论。 */
+  /** 插入一条已完成的执行子任务,带 claimVerification 核实结论。
+   * claimVerification 只会随子任务终态回写,因此协调任务落 done 的夹具
+   * 必须同时满足 close-requires-terminal-children 的 R1。 */
   async function addChild(
     groupId: string,
     parentTaskId: string,
@@ -126,7 +128,7 @@ describe("L2 必须直面提交核实结论 (claimAdjudication)", () => {
         parentTaskId,
         messageId: uuidv4(),
         executorParticipantId,
-        status: "queued",
+        status: "done",
         ...(claimStatus !== undefined
           ? {
               diffSummary: {

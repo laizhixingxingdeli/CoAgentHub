@@ -144,7 +144,7 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     return (await res.json()) as Record<string, unknown>;
   }
 
-  /** 直接插一条指向 parentTaskId 的执行子任务,使 R1 放行。 */
+  /** 直接插入一条已完成的执行子任务,使协调任务可以合法落 done。 */
   async function addChild(
     groupId: string,
     parentTaskId: string,
@@ -155,7 +155,7 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
       parentTaskId,
       messageId: uuidv4(),
       executorParticipantId,
-      status: "queued",
+      status: "done",
     });
   }
 
