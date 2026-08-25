@@ -272,6 +272,121 @@ describe("角色定向下发(specs/dispatch-to-role.md)", () => {
     }
   });
 
+  it("L3 findings 定向 coordinator → 创建 fix 任务且任务书逐条包含发现项", async () => {
+    const coordinator = await registerParticipant(
+      `findings-coord-${randomUUID()}`,
+    );
+    await bindExecutorKey(coordinator.id, "executor");
+    const reviewer = await registerParticipant(
+      `findings-reviewer-${randomUUID()}`,
+    );
+    const group = await createGroup(coordinator.id, "L3 findings 定向协调者");
+    await addMember(group.id, group.id, reviewer.id, ["reviewer"]);
+
+    const anchorResponse = await postMessage(coordinator.id, group.id, {
+      body: "已有实现任务",
+    });
+    const anchorMessage = (await anchorResponse.json()) as { id: string };
+    const [anchorTask] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId: group.id,
+        messageId: anchorMessage.id,
+        executorParticipantId: coordinator.id,
+        status: "queued",
+      })
+      .returning({ id: taskTable.id });
+
+    const res = await postMessage(reviewer.id, group.id, {
+      body: JSON.stringify({
+        type: "review_result",
+        layer: 3,
+        taskId: anchorTask.id,
+        verdict: "findings",
+        findings: [
+          { severity: "high", note: "缺少事务边界" },
+          { severity: "low", note: "测试名称未使用领域词汇" },
+        ],
+      }),
+      audience: "role",
+      audienceRef: "coordinator",
+      specRef: "specs/findings-must-reach-coordinator.md",
+      specHash: "68446529c8031236ddbad2173837749be3d37cc8",
+      dispatchKind: "requirement",
+    });
+    expect(res.status).toBe(200);
+    const message = (await res.json()) as { id: string };
+    const task = await waitForTaskByMessage(message.id);
+
+    expect(task.parentTaskId).toBeNull();
+    expect(task.dispatchKind).toBe("fix");
+    expect(task.specRef).toBe("specs/findings-must-reach-coordinator.md");
+    expect(task.specHash).toBe("68446529c8031236ddbad2173837749be3d37cc8");
+    expect(task.brief).toContain("severity: high");
+    expect(task.brief).toContain("note: 缺少事务边界");
+    expect(task.brief).toContain("severity: low");
+    expect(task.brief).toContain("note: 测试名称未使用领域词汇");
+  });
+
+  it("L3 findings 广播或非 coordinator 定向 → 400 且说明正确发法", async () => {
+    const coordinator = await registerParticipant(
+      `findings-reject-coord-${randomUUID()}`,
+    );
+    const reviewer = await registerParticipant(
+      `findings-reject-reviewer-${randomUUID()}`,
+    );
+    const executor = await registerParticipant(
+      `findings-reject-executor-${randomUUID()}`,
+    );
+    await bindExecutorKey(executor.id, "codebuddy");
+    const group = await createGroup(coordinator.id, "L3 findings 拒绝错误投递");
+    await addMember(group.id, group.id, reviewer.id, ["reviewer"]);
+    await addMember(group.id, group.id, executor.id, ["executor"]);
+
+    const anchorResponse = await postMessage(coordinator.id, group.id, {
+      body: "已有实现任务",
+    });
+    const anchorMessage = (await anchorResponse.json()) as { id: string };
+    const [anchorTask] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId: group.id,
+        messageId: anchorMessage.id,
+        executorParticipantId: coordinator.id,
+        status: "queued",
+      })
+      .returning({ id: taskTable.id });
+
+    const payload = JSON.stringify({
+      type: "review_result",
+      layer: 3,
+      taskId: anchorTask.id,
+      verdict: "findings",
+      findings: [{ severity: "medium", note: "需要补充回归测试" }],
+    });
+    const common = {
+      body: payload,
+      specRef: "specs/findings-must-reach-coordinator.md",
+      specHash: "68446529c8031236ddbad2173837749be3d37cc8",
+    };
+
+    const broadcast = await postMessage(reviewer.id, group.id, common);
+    expect(broadcast.status).toBe(400);
+    expect(((await broadcast.json()) as { message: string }).message).toContain(
+      "定向到 coordinator",
+    );
+
+    const executorTarget = await postMessage(reviewer.id, group.id, {
+      ...common,
+      audience: "participant",
+      audienceRef: executor.id,
+    });
+    expect(executorTarget.status).toBe(400);
+    expect(
+      ((await executorTarget.json()) as { message: string }).message,
+    ).toContain("定向到 coordinator");
+  });
+
   it("R1 回归:audience=participant 行为不变(定向成员建任务)", async () => {
     const owner = await registerParticipant(`role-owner-${randomUUID()}`);
     const executor = await registerParticipant(`role-exec-${randomUUID()}`);

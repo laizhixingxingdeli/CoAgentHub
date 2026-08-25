@@ -48,6 +48,61 @@ import {
 
 const app = new Hono<{ Variables: { db: DataBase; participantId: string } }>();
 
+type ReviewResultPayload = Extract<
+  CoordinationPayload,
+  { type: "review_result" }
+>;
+
+function renderFindingsTaskBrief(
+  payload: ReviewResultPayload,
+  originalBody: string,
+): string {
+  const findings = payload.findings
+    .map(
+      (finding, index) =>
+        `${index + 1}. severity: ${finding.severity}\nnote: ${finding.note}`,
+    )
+    .join("\n");
+  return [
+    "L3 检视发现项：请协调者处理以下 findings",
+    "",
+    findings,
+    "",
+    "原始 review_result：",
+    originalBody,
+  ].join("\n");
+}
+
+function assertFindingsReviewResultDispatch(
+  payload: CoordinationPayload | undefined,
+  options: {
+    audience: "broadcast" | "role" | "participant";
+    audienceRef?: string;
+    targetRoles?: string[];
+    specRef?: string;
+    specHash?: string;
+  },
+): void {
+  if (payload?.type !== "review_result" || payload.verdict !== "findings") {
+    return;
+  }
+
+  const targetedToCoordinator =
+    (options.audience === "role" && options.audienceRef === "coordinator") ||
+    (options.audience === "participant" &&
+      options.targetRoles?.includes("coordinator"));
+  if (
+    !targetedToCoordinator ||
+    !options.specRef?.trim() ||
+    !options.specHash?.trim()
+  ) {
+    throw new BizError(
+      BizCodeEnum.InvalidRequest,
+      "review_result verdict=findings 必须定向到 coordinator(role:coordinator 或 coordinator participant)，并携带 specRef + specHash",
+    );
+  }
+}
+
 app
   .post(
     "/:id/messages",
@@ -151,8 +206,8 @@ app
       // / 未知 type 的 JSON → undefined,原样放行,行为与改动前完全一致。
       // 保留 contentType === "application/json" 时的既有校验路径(仍校验)。
       const trimmedBody = (body ?? "").trim();
+      let parsed: CoordinationPayload | undefined;
       if (contentType === "application/json" || trimmedBody.startsWith("{")) {
-        let parsed: CoordinationPayload | undefined;
         try {
           parsed = parseKnownCoordinationPayload(body ?? "");
         } catch (error) {
@@ -169,14 +224,15 @@ app
         // taskId 非 UUID 时不可能指向本群任何任务(uuid 主键),先按不存在处理,
         // 避免 uuid 列与非法字符串比较触发 DB 错误(500)。
         if (parsed?.type === "review_result") {
+          const reviewResult = parsed;
           const taskIdIsUuid = z
             .string()
             .uuid()
-            .safeParse(parsed.taskId).success;
+            .safeParse(reviewResult.taskId).success;
           const referenced = taskIdIsUuid
             ? await db.query.task.findFirst({
                 where: (t, { and: andFn, eq: eqFn }) =>
-                  andFn(eqFn(t.groupId, id), eqFn(t.id, parsed.taskId)),
+                  andFn(eqFn(t.groupId, id), eqFn(t.id, reviewResult.taskId)),
                 columns: { id: true },
               })
             : undefined;
@@ -254,6 +310,32 @@ app
         // broadcast has no reference; a stray one is a client bug.
         throw new BizError(BizCodeEnum.InvalidRequest);
       }
+
+      // L3 findings are actionable only when they enter the existing task
+      // dispatch path. Broadcast cannot wake the coordinator, so reject it;
+      // direct participant dispatch additionally must target a coordinator
+      // member rather than merely any participant.
+      let findingsTargetRoles: string[] | undefined;
+      if (
+        parsed?.type === "review_result" &&
+        parsed.verdict === "findings" &&
+        aud === "participant" &&
+        audienceRef
+      ) {
+        const targetMembership = await db.query.groupMember.findFirst({
+          where: (t, { and, eq }) =>
+            and(eq(t.groupId, id), eq(t.participantId, audienceRef)),
+          columns: { roles: true },
+        });
+        findingsTargetRoles = targetMembership?.roles;
+      }
+      assertFindingsReviewResultDispatch(parsed, {
+        audience: aud,
+        audienceRef,
+        targetRoles: findingsTargetRoles,
+        specRef,
+        specHash,
+      });
 
       // 替代关系(executor-switch-task-identity R2):被替代的任务必须属于同一
       // 群组,否则 400;不校验其终态(协调者可能在原任务仍 running 时就决定
@@ -430,6 +512,10 @@ app
             );
           }
         }
+        const findingsReviewResult =
+          parsed?.type === "review_result" && parsed.verdict === "findings"
+            ? parsed
+            : undefined;
         const dispatchInput = {
           groupId: id,
           messageId: full.id,
@@ -437,13 +523,15 @@ app
           audience:
             aud === "role" ? ("role" as const) : ("participant" as const),
           audienceRef,
-          body: body ?? "",
+          body: findingsReviewResult
+            ? renderFindingsTaskBrief(findingsReviewResult, body ?? "")
+            : (body ?? ""),
           dispatcherParticipantId: senderId,
           dispatcherSessionId: finalDispatcherSessionId,
           selectionReason,
           specRef: specRef ?? null,
           specHash: specHash ?? null,
-          dispatchKind: dispatchKind ?? null,
+          dispatchKind: findingsReviewResult ? "fix" : (dispatchKind ?? null),
           supersedesTaskId: supersedesTaskId ?? null,
           callbackRef,
         };

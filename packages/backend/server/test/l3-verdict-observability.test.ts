@@ -79,6 +79,7 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     groupId: string,
     messageBody: string,
     contentType?: string,
+    extra: Record<string, unknown> = {},
   ) {
     return app.request(`/api/groups/${groupId}/messages`, {
       method: "POST",
@@ -88,8 +89,8 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
       },
       body: JSON.stringify(
         contentType === undefined
-          ? { body: messageBody }
-          : { body: messageBody, contentType },
+          ? { body: messageBody, ...extra }
+          : { body: messageBody, contentType, ...extra },
       ),
     });
   }
@@ -366,6 +367,13 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
       coordinator.id,
       group.id,
       JSON.stringify(reviewResult(task.id, "findings")),
+      undefined,
+      {
+        audience: "participant",
+        audienceRef: coordinator.id,
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+      },
     );
     expect(res.status).toBe(200);
   });
@@ -436,15 +444,41 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
   });
 
   it("R3:verdict=findings 的 review_result 也能被识别", async () => {
+    const { reviewer, coordinator, group, task } =
+      await setupDoneCoordinationTask();
+    const res = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "findings")),
+      undefined,
+      {
+        audience: "participant",
+        audienceRef: coordinator.id,
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+      },
+    );
+    expect(res.status).toBe(200);
+    const detail = await getTaskDetail(group.id, task.id);
+    expect((detail.l3 as { verdict: string }).verdict).toBe("findings");
+  });
+
+  it("R3:verdict=findings 的广播形式 → 400 且指向正确派发方式", async () => {
     const { reviewer, group, task } = await setupDoneCoordinationTask();
     const res = await postMessageRaw(
       reviewer.id,
       group.id,
       JSON.stringify(reviewResult(task.id, "findings")),
+      undefined,
+      {
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+      },
     );
-    expect(res.status).toBe(200);
-    const detail = await getTaskDetail(group.id, task.id);
-    expect((detail.l3 as { verdict: string }).verdict).toBe("findings");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message: string }).message).toContain(
+      "定向到 coordinator",
+    );
   });
 
   it("R3:不满足触发条件的任务详情不含 l3 字段(普通任务 done)", async () => {
@@ -605,6 +639,13 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
       coordinator.id,
       group.id,
       JSON.stringify(reviewResult(task.id, "findings")),
+      undefined,
+      {
+        audience: "participant",
+        audienceRef: coordinator.id,
+        specRef: "specs/l3-verdict-observability.md",
+        specHash: "24541d3d",
+      },
     );
     expect(res.status).toBe(200);
   });

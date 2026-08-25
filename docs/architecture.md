@@ -104,7 +104,7 @@ CoAgentHub/
 | `/api/groups/:id/members/:participantId` | DELETE/PATCH | 移除成员(群主不可移除)/更新角色(同单角色校验,`roles.length > 1` → 400) |
 | `/api/groups/:id/archive`、`/unarchive` | POST | 归档/恢复(active ↔ archived) |
 | `/api/groups/:id` | DELETE | 软删除(active\|archived → deleted;行保留,列表隐藏) |
-| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`、`dispatchKind?`、`supersedesTaskId?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS。**human 角色成员默认 403**(群是 agent 协作空间)，但带完整 `specRef` + `specHash` 且定向到 `role`/`participant` 的规范驱动任务可作为外部触发入口放行 |
+| `/api/groups/:id/messages` | POST | 发消息(`body`/`fileRef` 至少其一;`parentId?`、`audience?`、`audienceRef?`、`contentType?`、`dispatchKind?`、`supersedesTaskId?`);返回带 `depth` 的完整消息;写后 fire-and-forget 推 WS。**human 角色成员默认 403**(群是 agent 协作空间)，但带完整 `specRef` + `specHash` 且定向到 `role`/`participant` 的规范驱动任务可作为外部触发入口放行。`review_result` 的 `verdict: "findings"` 必须定向到 coordinator 并带 `specRef` + `specHash`，由现有派发路径生成 `dispatch_kind=fix` 任务；广播形式返回 400。 |
 | `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标;`?limit=<n>` 限制返回条数(上限 200) |
 | `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整);human 角色成员 403(同写接口只读约束) |
 | `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`;接受 `dispatchKind?` 与 `supersedesTaskId?`) |
