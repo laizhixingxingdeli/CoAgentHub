@@ -499,11 +499,18 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     );
     const repoDir = createGitRepo();
     await withRepo(repoDir, async () => {
-      const existingHash = execFileSync("git", ["rev-parse", "HEAD"], {
-        cwd: repoDir,
-        encoding: "utf8",
-      }).trim();
-      await setTaskWindow(task.id, new Date(Date.now() - 1_000).toISOString());
+      const commitDateValue = new Date(
+        Math.floor((Date.now() - 10_000) / 1000) * 1000,
+      ).toISOString();
+      await setTaskWindow(
+        task.id,
+        new Date(Date.parse(commitDateValue) - 30_000).toISOString(),
+      );
+      const existingHash = commitWithDate(
+        repoDir,
+        "already-satisfied",
+        commitDateValue,
+      );
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
         diffSummary: {
@@ -514,6 +521,44 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
         },
       });
       expect(res.status).toBe(200);
+    });
+  });
+
+  it("R2b:缺 verification 的 alreadySatisfied → 400 且点明 claim 不合法", async () => {
+    const coordinator = await register("ci-coord-already-invalid-zero-child");
+    const group = await createGroup(
+      coordinator.id,
+      "ci-already-invalid-zero-child",
+    );
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const commitDateValue = new Date(
+        Math.floor((Date.now() - 10_000) / 1000) * 1000,
+      ).toISOString();
+      await setTaskWindow(
+        task.id,
+        new Date(Date.parse(commitDateValue) - 30_000).toISOString(),
+      );
+      const hash = commitWithDate(
+        repoDir,
+        "invalid-already-satisfied",
+        commitDateValue,
+      );
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { alreadySatisfied: { commits: [hash] } },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("alreadySatisfied");
+      expect(body.message).not.toContain("noExecutionReason");
     });
   });
 

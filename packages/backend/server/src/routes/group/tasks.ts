@@ -287,12 +287,13 @@ async function assertCoordinationCloseIntegrity(
     repoRoot,
     task.attempts[0]?.startedAt,
   );
+  const hasAlreadySatisfied =
+    summary !== undefined && Object.hasOwn(summary, "alreadySatisfied");
 
   // R2b:已存在的实现由协调者指名提交并提供验证摘要时,平台核实提交
   // 真实存在后允许跳过当前任务的执行窗口归属校验。git 不可用时不能
   // 把未核实的 alreadySatisfied 当成有效声明,但仍遵循 R3 的放行原则。
-  const canUseAlreadySatisfied =
-    alreadySatisfiedStatus === "verified" && commits?.length === 0;
+  const canUseAlreadySatisfied = alreadySatisfiedStatus === "verified";
 
   // R1:done 的协调任务必须有执行子任务(L1 层发生过),否则 400 且点明 L1 层未发生。
   const children = await db.query.task.findMany({
@@ -300,6 +301,12 @@ async function assertCoordinationCloseIntegrity(
     columns: { id: true, status: true, updatedAt: true, attempts: true },
   });
   if (children.length === 0 && !canUseAlreadySatisfied) {
+    if (hasAlreadySatisfied) {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        "alreadySatisfied 不合法: commits 中的提交必须真实存在,且 verification 必须为非空字符串。",
+      );
+    }
     // R4:逃生舱 —— 显式声明非空 noExecutionReason 放行(空串/纯空白仍拒绝)。
     const noExecutionReason =
       typeof summary?.noExecutionReason === "string"
