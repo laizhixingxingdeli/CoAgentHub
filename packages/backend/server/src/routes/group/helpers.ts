@@ -78,6 +78,30 @@ export function assertMemberNotHuman(membership: GroupMember): void {
 }
 
 /**
+ * human 成员可以作为外部触发方下发规范驱动的定向任务,但仍不能在群内
+ * 自由发言。广播与缺少任一验收钉子(specRef/specHash)的消息继续走原有
+ * 只读守卫,错误码与措辞保持不变。
+ */
+export function assertMemberCanPostMessage(
+  membership: GroupMember,
+  options: {
+    audience: "broadcast" | "role" | "participant";
+    specRef?: string | null;
+    specHash?: string | null;
+  },
+): void {
+  const isHumanTaskDispatch =
+    membership.roles.includes("human") &&
+    (options.audience === "role" || options.audience === "participant") &&
+    Boolean(options.specRef?.trim()) &&
+    Boolean(options.specHash?.trim());
+
+  if (!isHumanTaskDispatch) {
+    assertMemberNotHuman(membership);
+  }
+}
+
+/**
  * supersedesTaskId 同群校验(executor-switch-task-identity R2):被替代的任务
  * 必须属于同一群组,否则 400 —— 跨群指向是调用方错误,不等同于 FK 违例(500)。
  * 不校验被指向任务是否已终态(R2 明确:协调者可能在原任务仍 running 时就决定

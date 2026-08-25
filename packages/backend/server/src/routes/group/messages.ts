@@ -35,6 +35,7 @@ import { describeRoute } from "hono-openapi";
 import { z } from "zod";
 import {
   assertGroupWritable,
+  assertMemberCanPostMessage,
   assertMemberNotHuman,
   assertSupersededTaskInGroup,
 } from "./helpers";
@@ -142,6 +143,7 @@ app
         supersedesTaskId,
         callback,
       } = c.req.valid("json");
+      const aud = audience ?? "broadcast";
 
       // 协作载荷校验(R1/R2,specs/l3-verdict-observability.md):不再只认调用方
       // 声明的 contentType —— 消息体 trim 后以 `{` 开头(看起来像结构化载荷)也
@@ -199,10 +201,14 @@ app
       if (!membership) {
         throw new BizError(BizCodeEnum.Forbidden);
       }
-      // human 角色只读(§3.8):群是 agent 协作空间,human 成员可旁观不可发言。
-      assertMemberNotHuman(membership);
-
-      const aud = audience ?? "broadcast";
+      // human 角色只读(§3.8)仍然生效,但规范驱动的定向任务是外部触发入口:
+      // 必须同时带 specRef + specHash,且 audience 只能是 role/participant。
+      // 自由文本、广播与缺少任一规范字段仍返回原有 403。
+      assertMemberCanPostMessage(membership, {
+        audience: aud,
+        specRef,
+        specHash,
+      });
       if (aud === "role") {
         // audienceRef is the target role name; the preset catalog is the
         // source of truth for legal roles.

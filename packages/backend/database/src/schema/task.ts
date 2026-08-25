@@ -48,6 +48,8 @@ export interface CoordinationActivityAudit {
 /** 下发目标审计:服务器可观察的选择事实,调用方未提供理由时保持 null。 */
 export interface DispatchTargetAudit {
   dispatcherParticipantId: string;
+  /** Human marks the external-trigger path; older audit rows omit this field. */
+  triggerSource?: "human" | "participant";
   targetParticipantId: string;
   targetParticipantName: string;
   selfDispatch: boolean;
