@@ -1,6 +1,7 @@
 import type { TaskAttempt } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import type { ExecutorConfig } from "@server/lib/executors";
+import type { TokenUsage, TokenUsageReason } from "./token-usage";
 
 /**
  * 执行器触发链路共享类型(executor-task 拆分):队列条目 / 组队列 / 输入 /
@@ -153,20 +154,48 @@ export interface QueuedRun {
   attempts: TaskAttempt[];
 }
 
-/** Sum token usage across all attempts, omitting attempts without a report. */
+export type { TokenUsage, TokenUsageReason } from "./token-usage";
+
+/** Sum platform-collected token usage across attempts. */
 export function sumAttemptTokenUsage(
   attempts: readonly TaskAttempt[],
-): string | undefined {
-  let total = 0;
-  let found = false;
-  for (const attempt of attempts) {
-    if (typeof attempt.tokenUsage !== "string") continue;
-    const value = Number.parseInt(attempt.tokenUsage, 10);
-    if (!Number.isFinite(value)) continue;
-    total += value;
-    found = true;
+): TokenUsage | null | undefined {
+  const usages = attempts
+    .map((attempt) => attempt.tokenUsage)
+    .filter(
+      (usage): usage is TokenUsage =>
+        usage !== null && typeof usage === "object",
+    );
+  if (usages.length === 0) {
+    return attempts.some((attempt) => "tokenUsage" in attempt)
+      ? null
+      : undefined;
   }
-  return found ? String(total) : undefined;
+  const source = usages.every((usage) => usage.source === usages[0].source)
+    ? usages[0].source
+    : "mixed";
+  return {
+    inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
+    outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
+    cachedInputTokens: usages.reduce(
+      (sum, usage) => sum + (usage.cachedInputTokens ?? 0),
+      0,
+    ),
+    totalTokens: usages.reduce((sum, usage) => sum + usage.totalTokens, 0),
+    source,
+  };
+}
+
+export function sumAttemptTokenUsageReason(
+  attempts: readonly TaskAttempt[],
+): TokenUsageReason | undefined {
+  const reasons = attempts
+    .map((attempt) => attempt.tokenUsageReason)
+    .filter((reason): reason is TokenUsageReason => reason !== undefined);
+  if (reasons.length === 0) return undefined;
+  return reasons.every((reason) => reason === reasons[0])
+    ? reasons[0]
+    : "unavailable";
 }
 
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */

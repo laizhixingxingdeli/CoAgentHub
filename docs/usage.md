@@ -40,7 +40,7 @@ The default set (`key` → `agentName` → invocation):
 | `executor` | AtomCode 执行器 | local CLI (`atomcode -y -p {ticket}`) |
 | `reasonix` | Reasoning 执行器 | local CLI (`reasonix run -y --model {model} {ticket}`, default model `deepseek-v4-flash`) |
 | `codebuddy` | CodeBuddy 执行器 | local CLI (`codebuddy -y -p {ticket}`) |
-| `codex` | Codex 执行器 | local CLI (`codex exec --sandbox workspace-write --ask-for-approval never --ephemeral {ticket}`), single concurrency |
+| `codex` | Codex 执行器 | local CLI (`codex exec --approve-for-me --ephemeral --json {ticket}`), single concurrency |
 | `hermes` | Hermes 规划 | local CLI (`hermes -z {ticketContent}`, full task book inlined) |
 | `win-hermes` | Win Hermes | A2A (`kind=a2a`, via gateway `http://192.168.31.180:9900/`; `memory=per-group` keeps a per-group contextId) |
 

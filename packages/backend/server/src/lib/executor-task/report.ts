@@ -16,7 +16,7 @@ export interface TaskReport {
   tests?: string;
   /** 遗留事项(遗留段)。 */
   todo?: string;
-  /** 本执行消耗的 token 数(纯数字字符串;token 段,缺段/非法值省略)。 */
+  /** 执行器自报值仅作解析参考,平台终态不再据此落库。 */
   tokenUsage?: string;
 }
 

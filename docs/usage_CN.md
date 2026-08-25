@@ -37,7 +37,7 @@ participant 名)。
 | `executor` | AtomCode 执行器 | 本地 CLI(`atomcode -y -p {ticket}`) |
 | `reasonix` | Reasoning 执行器 | 本地 CLI(`reasonix run -y --model {model} {ticket}`,缺省模型 `deepseek-v4-flash`) |
 | `codebuddy` | CodeBuddy 执行器 | 本地 CLI(`codebuddy -y -p {ticket}`) |
-| `codex` | Codex 执行器 | 本地 CLI(`codex exec --sandbox workspace-write --ask-for-approval never --ephemeral {ticket}`),单并发 |
+| `codex` | Codex 执行器 | 本地 CLI(`codex exec --approve-for-me --ephemeral --json {ticket}`),单并发 |
 | `hermes` | Hermes 规划 | 本地 CLI(`hermes -z {ticketContent}`,任务书全文内联) |
 | `win-hermes` | Win Hermes | A2A(kind=`a2a`,经 gateway `http://192.168.31.180:9900/` 调用远端设备;`memory=per-group` 按群延续 contextId) |
 

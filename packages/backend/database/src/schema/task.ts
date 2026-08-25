@@ -79,8 +79,19 @@ export interface TaskAttempt {
   summary?: string;
   /** 提交 hash(仅 done)。 */
   hash?: string;
-  /** 本次执行消耗的 token 数(纯数字字符串,缺失表示执行器未汇报)。 */
-  tokenUsage?: string;
+  /** 平台从执行器原生记录采集的 token 用量;null 表示未采到。 */
+  tokenUsage?:
+    | {
+        inputTokens: number;
+        outputTokens: number;
+        cachedInputTokens?: number;
+        totalTokens: number;
+        source: string;
+      }
+    | string
+    | null;
+  /** tokenUsage 为 null 时的明确原因,不允许自由文本。 */
+  tokenUsageReason?: "unsupported" | "unavailable";
 }
 
 export const task = pgTable(

@@ -10,7 +10,7 @@ import type { GroupMessageFull } from "@server/lib/services/message-service";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
-import { sumAttemptTokenUsage } from "./types";
+import { sumAttemptTokenUsage, sumAttemptTokenUsageReason } from "./types";
 
 /**
  * 任务状态通知(executor-task 拆分):任务状态落库后的 WS 推送
@@ -114,6 +114,7 @@ export async function markTaskCancelled(
   attempts: readonly TaskAttempt[] = [],
 ): Promise<unknown> {
   const tokenUsage = sumAttemptTokenUsage(attempts);
+  const tokenUsageReason = sumAttemptTokenUsageReason(attempts);
   const [updated] = await db
     .update(taskTable)
     .set({
@@ -121,6 +122,7 @@ export async function markTaskCancelled(
       diffSummary: {
         error: "stopped",
         ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+        ...(tokenUsageReason ? { tokenUsageReason } : {}),
       },
     })
     .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))

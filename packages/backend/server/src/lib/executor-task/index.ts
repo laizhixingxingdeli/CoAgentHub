@@ -51,8 +51,17 @@ export {
   getL3ResponseMinutesMs,
 } from "./state";
 export {
+  collectTokenUsage,
+  extractCodexExecText,
+  type TokenUsage,
+  type TokenUsageCollectionInput,
+  type TokenUsageReason,
+  type TokenUsageResult,
+} from "./token-usage";
+export {
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type GroupPromptInfo,
   sumAttemptTokenUsage,
+  sumAttemptTokenUsageReason,
 } from "./types";

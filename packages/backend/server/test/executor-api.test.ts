@@ -31,8 +31,8 @@ chmodSync(fakeBin, 0o755);
 // 新增执行器 key=clitest,bin 用 env 覆盖指向 fake 脚本(spawn 才能完成)。
 process.env.EXECUTOR_BIN_CLITEST = fakeBin;
 
-import { testDb } from "./db";
 import type { DataBase } from "../src/lib/database";
+import { testDb } from "./db";
 
 const app = createTestApp();
 
@@ -133,6 +133,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
         "exec",
         "--approve-for-me",
         "--ephemeral",
+        "--json",
         "-c",
         "sandbox_workspace_write.network_access=true",
         "{ticket}",
@@ -557,7 +558,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       body: JSON.stringify({ prompt: "待清空" }),
     });
     expect(setRes.status).toBe(200);
-    expect((await setRes.json() as Record<string, unknown>).prompt).toBe(
+    expect(((await setRes.json()) as Record<string, unknown>).prompt).toBe(
       "待清空",
     );
 

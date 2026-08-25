@@ -352,7 +352,8 @@ CoAgentHub/
 
 ### 9.9.3 codex 执行器带沙箱:禁网络、禁写 `.git/`
 
-平台用 `exec --approve-for-me --ephemeral` 调用 codex,该模式带 workspace-write 沙箱。
+平台用 `exec --approve-for-me --ephemeral --json` 调用 codex,该模式带 workspace-write 沙箱；
+`--json` 的 stdout JSONL 同时提供原生 `token_count` 事件，供平台在任务终态采集。
 实测(`codex sandbox -- ...` 直接验证):
 
 - 沙箱内**完全禁网**:直连 `000`、经代理 `000`、DNS `FAIL`

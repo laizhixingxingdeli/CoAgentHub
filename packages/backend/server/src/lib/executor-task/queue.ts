@@ -20,8 +20,8 @@ import { serverPort } from "@server/lib/config";
 import type { DataBase } from "@server/lib/database";
 import {
   createCheckpoint,
-  type ExecutorRunResult,
   type ExecutorRunHandle,
+  type ExecutorRunResult,
   findRepoRoot,
   readTimeoutMs,
   resetToCheckpoint,
@@ -79,6 +79,7 @@ import {
   runningWorkspaceCount,
   setPumping,
 } from "./state";
+import { collectTokenUsage, extractCodexExecText } from "./token-usage";
 import {
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
@@ -88,6 +89,7 @@ import {
   type GroupQueue,
   type QueuedRun,
   sumAttemptTokenUsage,
+  sumAttemptTokenUsageReason,
 } from "./types";
 
 /* ---------------- 额度感知调度(票7) ---------------- */
@@ -247,9 +249,7 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
           .returning();
 
   if (candidates.length > 0) {
-    console.log(
-      `[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务`,
-    );
+    console.log(`[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务`);
   }
   if (rows.length > 0) {
     console.log(
@@ -1304,49 +1304,64 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           getDetachedTimeoutMs(),
         );
       }
-      // 进程句柄保留在 run 上(handleDetachedTimeout 复查 DB 状态用)。悬挂的
-      // 进程 promise:正常退出 resolve(不决定终态,忽略);reject 只在 spawn
-      // 失败(bin 不存在等)或进程 error 事件时发生——启动失败不能让任务静默
-      // 挂 running 直到 detached 超时,立即失败并 ❌ 回传。
-      handle.promise.catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[executor] detached 任务启动失败(${taskId}): ${msg}`);
-        void (async () => {
-          try {
-            const cur = await db.query.task.findFirst({
-              where: (t, { and: andFn, eq: eqFn }) =>
-                andFn(eqFn(t.id, taskId), eqFn(t.groupId, groupId)),
-              columns: { status: true },
-            });
-            // 已回写终态(如 detached 超时先行)→ 不覆盖。
-            if (cur?.status !== "running") return;
-            await failTask(
-              db,
-              taskId,
-              `执行器启动失败: ${spawnFailureReason(msg)}`,
-              0,
-              undefined,
-              run.attempts,
+      // 进程句柄保留在 run 上(handleDetachedTimeout 复查 DB 状态用)。正常退出
+      // 不决定 detached 任务终态,但仍在这里读取该进程的原生 token 账本并写入
+      // attempt;之后由执行器 runtime PATCH 任务终态。reject 只在 spawn 失败
+      // (bin 不存在等)或进程 error 事件时发生——启动失败不能让任务静默挂
+      // running 直到 detached 超时,立即失败并 ❌ 回传。
+      void handle.promise
+        .then(
+          (result) =>
+            collectAttemptTokenUsage(run, handle.pid, repoRoot, result),
+          (e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(
+              `[executor] detached 任务启动失败(${taskId}): ${msg}`,
             );
-            await postStatus(
-              db,
-              groupId,
-              participantId,
-              ex,
-              spawnFailureStatus(ex, msg),
-            );
-          } catch (err) {
-            console.warn(
-              `[executor] detached 启动失败处理异常(${taskId}): ${err}`,
-            );
-          }
-        })();
-      });
+            void (async () => {
+              try {
+                const cur = await db.query.task.findFirst({
+                  where: (t, { and: andFn, eq: eqFn }) =>
+                    andFn(eqFn(t.id, taskId), eqFn(t.groupId, groupId)),
+                  columns: { status: true },
+                });
+                // 已回写终态(如 detached 超时先行)→ 不覆盖。
+                if (cur?.status !== "running") return;
+                markAttemptTokenUnavailable(run);
+                await failTask(
+                  db,
+                  taskId,
+                  `执行器启动失败: ${spawnFailureReason(msg)}`,
+                  0,
+                  undefined,
+                  run.attempts,
+                );
+                await postStatus(
+                  db,
+                  groupId,
+                  participantId,
+                  ex,
+                  spawnFailureStatus(ex, msg),
+                );
+              } catch (err) {
+                console.warn(
+                  `[executor] detached 启动失败处理异常(${taskId}): ${err}`,
+                );
+              }
+            })();
+          },
+        )
+        .catch((e) => {
+          console.warn(
+            `[executor] detached token usage 采集失败(${taskId}): ${e}`,
+          );
+        });
       return;
     }
 
     try {
       const result = await handle.promise;
+      await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
       // 停止指令已 kill 进程组:完成回调置 cancelled,不再回传 ❌/✅(停止
       // 指令自己已回传 🛑)。
       if (run.stopped) {
@@ -1354,6 +1369,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         await endAttempt(run, { status: "cancelled" });
         releaseTaskOutput(taskId);
         const tokenUsage = sumAttemptTokenUsage(run.attempts);
+        const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
         const [cancelled] = await db
           .update(taskTable)
           .set({
@@ -1361,6 +1377,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             diffSummary: {
               error: "stopped",
               ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+              ...(tokenUsageReason ? { tokenUsageReason } : {}),
             },
           })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
@@ -1464,7 +1481,13 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         }
         return;
       }
-      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+      const executorText =
+        ex.key === "codex"
+          ? extractCodexExecText(result.stdout ?? "")
+          : undefined;
+      const output = executorText
+        ? `${executorText}\n${result.stderr ?? ""}`
+        : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (result.code === 0) {
         // 成功路径也要过额度检测(quota-failure-on-clean-exit 规范):执行器
         // 礼貌地打印额度耗尽说明后正常退出(如 `[rate-limited] 5h window
@@ -1486,7 +1509,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               ...(a2aHash ? { hash: a2aHash } : {}),
             }
           : parseTaskReport(output);
-        const diffSummary: Record<string, unknown> = { ...report };
+        const diffSummary: Record<string, unknown> = Object.fromEntries(
+          Object.entries(report).filter(([key]) => key !== "tokenUsage"),
+        );
         // 汇报 commit 核实(spec verify-agent-claims v1.1):CLI 完成与 a2a 完成
         // 共用同一套 claim-verification 逻辑;cli 在任务实际仓库核实,a2a 本地
         // 无仓库 → 留下 status=skipped 的「未核实」痕迹(不再静默跳过)。
@@ -1507,10 +1532,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           status: "done",
           summary: report.summary,
           hash: report.hash,
-          tokenUsage: report.tokenUsage,
         });
         const tokenUsage = sumAttemptTokenUsage(run.attempts);
         if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
+        const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
+        if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
         releaseTaskOutput(taskId);
         const [done] = await db
           .update(taskTable)
@@ -1570,6 +1596,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[executor] 执行器启动失败: ${msg}`);
+      markAttemptTokenUnavailable(run);
       await endAttempt(run, { status: "failed", error: msg });
       releaseTaskOutput(taskId);
       await failTask(
@@ -1838,6 +1865,10 @@ async function failTask(
   if (retries > 0) diffSummary.retries = retries;
   const tokenUsage = attempts ? sumAttemptTokenUsage(attempts) : undefined;
   if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
+  const tokenUsageReason = attempts
+    ? sumAttemptTokenUsageReason(attempts)
+    : undefined;
+  if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
   const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
   if (tail) diffSummary.outputTail = tail;
   const [failed] = await db
@@ -1868,6 +1899,42 @@ async function beginAttempt(run: QueuedRun): Promise<void> {
       .where(eq(taskTable.id, run.taskId));
   } catch (e) {
     console.warn(`[executor] 写 attempts 失败(${run.taskId}): ${e}`);
+  }
+}
+
+function markAttemptTokenUnavailable(run: QueuedRun): void {
+  const last = run.attempts.at(-1);
+  if (!last) return;
+  last.tokenUsage = null;
+  last.tokenUsageReason = "unavailable";
+}
+
+async function collectAttemptTokenUsage(
+  run: QueuedRun,
+  executorPid: number | undefined,
+  cwd: string,
+  result: ExecutorRunResult,
+): Promise<void> {
+  const last = run.attempts.at(-1);
+  if (!last) return;
+  const collected = await collectTokenUsage({
+    executorKey: run.ex.key,
+    executorPid,
+    cwd,
+    startedAt: last.startedAt,
+    endedAt: new Date().toISOString(),
+    stdout: result.stdout,
+  });
+  last.tokenUsage = collected.tokenUsage;
+  if (collected.reason) last.tokenUsageReason = collected.reason;
+  else delete last.tokenUsageReason;
+  try {
+    await run.db
+      .update(taskTable)
+      .set({ attempts: run.attempts })
+      .where(eq(taskTable.id, run.taskId));
+  } catch (e) {
+    console.warn(`[executor] 写 token usage 失败(${run.taskId}): ${e}`);
   }
 }
 

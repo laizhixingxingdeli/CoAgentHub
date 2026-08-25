@@ -183,7 +183,10 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       status: string;
       retryCount: number;
       diffSummary: unknown;
-      attempts?: Array<{ tokenUsage?: string }>;
+      attempts?: Array<{
+        tokenUsage?: Record<string, unknown> | null;
+        tokenUsageReason?: "unsupported" | "unavailable";
+      }>;
     }>;
   }
 
@@ -310,9 +313,11 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           hash: "0123456789ab",
           tests: "全部通过 (42 tests)",
           todo: "无",
-          tokenUsage: "12345",
+          tokenUsage: null,
+          tokenUsageReason: "unavailable",
         });
-        expect(t.attempts?.[0]?.tokenUsage).toBe("12345");
+        expect(t.attempts?.[0]?.tokenUsage).toBeNull();
+        expect(t.attempts?.[0]?.tokenUsageReason).toBe("unavailable");
         expect(
           typeof (t.diffSummary as Record<string, unknown> | null)?.outputTail,
         ).toBe("string");
@@ -338,16 +343,37 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
     }, 30_000);
 
     it("任务级 tokenUsage 跨 attempt 求和,跳过缺失值,全缺失时省略", () => {
-      const attempt = (tokenUsage?: string) => ({
+      const attempt = (tokenUsage?: number) => ({
         n: 1,
         startedAt: "2026-08-23T00:00:00.000Z",
         status: "done" as const,
-        ...(tokenUsage ? { tokenUsage } : {}),
+        ...(tokenUsage
+          ? {
+              tokenUsage: {
+                inputTokens: tokenUsage,
+                outputTokens: 0,
+                totalTokens: tokenUsage,
+                source: "test",
+              },
+            }
+          : {}),
       });
       expect(
-        sumAttemptTokenUsage([attempt("5000"), attempt(), attempt("3000")]),
-      ).toBe("8000");
-      expect(sumAttemptTokenUsage([attempt("5000"), attempt()])).toBe("5000");
+        sumAttemptTokenUsage([attempt(5000), attempt(), attempt(3000)]),
+      ).toEqual({
+        inputTokens: 8000,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        totalTokens: 8000,
+        source: "test",
+      });
+      expect(sumAttemptTokenUsage([attempt(5000), attempt()])).toEqual({
+        inputTokens: 5000,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        totalTokens: 5000,
+        source: "test",
+      });
       expect(sumAttemptTokenUsage([attempt(), attempt()])).toBeUndefined();
     });
 

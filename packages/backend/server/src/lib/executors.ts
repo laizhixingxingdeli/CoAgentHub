@@ -153,6 +153,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
       "exec",
       "--approve-for-me",
       "--ephemeral",
+      "--json",
       "-c",
       "sandbox_workspace_write.network_access=true",
       "{ticket}",
@@ -788,9 +789,7 @@ export async function registerExecutorParticipant(
     tokenHash: "",
     capabilities: [],
   });
-  console.log(
-    `[executors] 已注册 participant: ${participantDisplayName(ex)}`,
-  );
+  console.log(`[executors] 已注册 participant: ${participantDisplayName(ex)}`);
   return true;
 }
 
