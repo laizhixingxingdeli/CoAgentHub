@@ -206,4 +206,80 @@ describe("runtime freshness", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("treats the whole scan as failed when any root is missing", () => {
+    const directory = makeRuntimeDir();
+    const entryTime = new Date(Date.now() - 60_000);
+    writeEntry(directory, entryTime);
+    const goodSrc = join(directory, "good-src");
+    const srcTime = new Date(Date.now() + 60_000);
+    writeSource(goodSrc, "index.ts", srcTime);
+    const missingSrc = join(directory, "missing-src");
+    configureSourceScanRoots([goodSrc, missingSrc]);
+
+    try {
+      // 一个根缺失 → 整体失败 → 不陈旧、无 newestSourceMtime,而非用 goodSrc 的部分结果。
+      const status = getRuntimeStatus();
+      expect(status.newestSourceMtime).toBeUndefined();
+      expect(status).toMatchObject({ stale: false, staleReason: null });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("caches a failed scan so consecutive probes do not rescan", () => {
+    const directory = makeRuntimeDir();
+    const entryTime = new Date(Date.now() - 60_000);
+    writeEntry(directory, entryTime);
+    const src = join(directory, "src");
+    configureSourceScanRoots([src]);
+
+    try {
+      // 首次:src 目录不存在 → 扫描失败 → 不陈旧、无 newestSourceMtime。
+      const first = getRuntimeStatus();
+      expect(first).toMatchObject({ stale: false, staleReason: null });
+      expect(first.newestSourceMtime).toBeUndefined();
+
+      // TTL 内补建更新的源码:失败结果在缓存内,不重扫,仍不陈旧。
+      const srcTime = new Date(Date.now() + 60_000);
+      writeSource(src, "index.ts", srcTime);
+      const second = getRuntimeStatus();
+      expect(second.newestSourceMtime).toBeUndefined();
+      expect(second).toMatchObject({ stale: false, staleReason: null });
+
+      // 清缓存后重扫:能看到新增源码 → build 陈旧。
+      resetSourceScanCache();
+      const rescanned = getRuntimeStatus();
+      expect(rescanned.newestSourceMtime).toBe(srcTime.toISOString());
+      expect(rescanned.staleReason).toBe("build");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("caches an empty scan result within the TTL", () => {
+    const directory = makeRuntimeDir();
+    const entryTime = new Date(Date.now() - 60_000);
+    writeEntry(directory, entryTime);
+    const src = join(directory, "src");
+    // src 存在但无文件 → 空结果,同样不陈旧。
+    mkdirSync(src, { recursive: true });
+    configureSourceScanRoots([src]);
+
+    try {
+      const first = getRuntimeStatus();
+      expect(first.newestSourceMtime).toBeUndefined();
+      expect(first).toMatchObject({ stale: false, staleReason: null });
+
+      // TTL 内新增文件:空结果被缓存,不重扫。
+      const srcTime = new Date(Date.now() + 60_000);
+      writeSource(src, "index.ts", srcTime);
+      expect(getRuntimeStatus().newestSourceMtime).toBeUndefined();
+
+      resetSourceScanCache();
+      expect(getRuntimeStatus().newestSourceMtime).toBe(srcTime.toISOString());
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

@@ -32,7 +32,17 @@ const EXCLUDED_DIR_NAMES = new Set(["node_modules", "test", "dist"]);
 
 // undefined = auto-resolve from the module location; [] = no scan; else roots.
 let scanRootsOverride: string[] | null | undefined;
-let scanCache: { at: number; newestMtime: Date } | null = null;
+
+/** Outcome of a source scan: ok with the newest mtime, or failed/no-result. */
+type SourceScanResult = { ok: true; newestMtime: Date } | { ok: false };
+
+/** Roots resolved for scanning: ok with the roots, or failed to resolve. */
+type ResolvedRoots = { ok: true; roots: string[] } | { ok: false };
+
+/** Outcome of walking one root: ok (possibly empty), or failed mid-walk. */
+type RootScanResult = { ok: true; newestMtime: Date | null } | { ok: false };
+
+let scanCache: { at: number; result: SourceScanResult } | null = null;
 
 function readScanTtlMs(): number {
   const raw = process.env.RUNTIME_SOURCE_SCAN_TTL_MS;
@@ -80,11 +90,11 @@ export function getRuntimeStatus(): RuntimeStatus {
   const processStale =
     entryMtime !== undefined && entryMtime.getTime() > startedAt.getTime();
 
-  const scanned = scanSourceTree();
+  const scan = scanSourceTree();
   const buildStale =
-    scanned !== null &&
+    scan.ok &&
     entryMtime !== undefined &&
-    scanned.newestMtime.getTime() > entryMtime.getTime();
+    scan.newestMtime.getTime() > entryMtime.getTime();
 
   const staleReason: StaleReason =
     processStale && buildStale
@@ -101,8 +111,8 @@ export function getRuntimeStatus(): RuntimeStatus {
     stale: processStale || buildStale,
     staleReason,
   };
-  if (scanned !== null) {
-    status.newestSourceMtime = scanned.newestMtime.toISOString();
+  if (scan.ok) {
+    status.newestSourceMtime = scan.newestMtime.toISOString();
   }
   return status;
 }
@@ -127,48 +137,61 @@ export function logRuntimeStartup(): void {
 }
 
 /**
- * Scan the packaged source trees for the newest file mtime. The scan is
- * cached for SCAN_TTL_MS; any failure (unreadable dir, unresolvable dep) is
- * treated as "not build stale" rather than an error.
+ * Scan the packaged source trees for the newest file mtime. The outcome is
+ * cached for SCAN_TTL_MS — successful, failed and empty scans alike — so
+ * consecutive probes never rescan within the TTL. Any failure (unreadable
+ * dir, unresolvable dep) yields { ok: false }, which the caller treats as
+ * "not build stale" rather than an error.
  */
-function scanSourceTree(): { newestMtime: Date } | null {
+function scanSourceTree(): SourceScanResult {
   const now = Date.now();
   if (scanCache !== null && now - scanCache.at < SCAN_TTL_MS) {
-    return scanCache;
+    return scanCache.result;
   }
 
+  const result = performSourceScan();
+  scanCache = { at: now, result };
+  return result;
+}
+
+/** Walk the resolved source trees; the caller owns caching. */
+function performSourceScan(): SourceScanResult {
   const roots = resolveScanRoots();
-  if (roots === null || roots.length === 0) return null;
+  if (!roots.ok) return { ok: false };
 
   let newest: Date | null = null;
-  for (const root of roots) {
-    const rootNewest = newestFileMtime(root);
+  for (const root of roots.roots) {
+    const rootScan = newestFileMtime(root);
+    if (!rootScan.ok) return { ok: false };
     if (
-      rootNewest !== null &&
-      (newest === null || rootNewest.getTime() > newest.getTime())
+      rootScan.newestMtime !== null &&
+      (newest === null || rootScan.newestMtime.getTime() > newest.getTime())
     ) {
-      newest = rootNewest;
+      newest = rootScan.newestMtime;
     }
   }
-  if (newest === null) return null;
-
-  scanCache = { at: now, newestMtime: newest };
-  return scanCache;
+  if (newest === null) return { ok: false };
+  return { ok: true, newestMtime: newest };
 }
 
 /** Server src plus the src of direct workspace dependencies. */
-function resolveScanRoots(): string[] | null {
-  if (scanRootsOverride !== undefined) return scanRootsOverride;
+function resolveScanRoots(): ResolvedRoots {
+  if (scanRootsOverride !== undefined && scanRootsOverride !== null) {
+    return { ok: true, roots: scanRootsOverride };
+  }
 
   const serverRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
-  if (serverRoot === null) return null;
+  if (serverRoot === null) return { ok: false };
 
   const roots = [join(serverRoot, "src")];
-  for (const dep of workspaceSrcDeps(serverRoot)) {
+  const deps = workspaceSrcDeps(serverRoot);
+  if (deps === null) return { ok: false };
+  for (const dep of deps) {
     const depSrc = resolveWorkspaceDepSrc(serverRoot, dep);
-    if (depSrc !== null) roots.push(depSrc);
+    if (depSrc === null) return { ok: false };
+    roots.push(depSrc);
   }
-  return roots;
+  return { ok: true, roots };
 }
 
 /** Walk up from a module dir until a package.json is found (server root). */
@@ -182,13 +205,17 @@ function findPackageRoot(fromDir: string): string | null {
   }
 }
 
-/** Names of the server's direct `workspace:` protocol dependencies. */
-function workspaceSrcDeps(serverRoot: string): string[] {
+/**
+ * Names of the server's direct `workspace:` protocol dependencies. Returns
+ * null when package.json cannot be read — the dependency list is unknowable,
+ * so the scan cannot be complete.
+ */
+function workspaceSrcDeps(serverRoot: string): string[] | null {
   let pkg: { dependencies?: Record<string, string> };
   try {
     pkg = JSON.parse(readFileSync(join(serverRoot, "package.json"), "utf8"));
   } catch {
-    return [];
+    return null;
   }
   return Object.entries(pkg.dependencies ?? {})
     .filter(([, spec]) => spec.startsWith("workspace:"))
@@ -209,8 +236,12 @@ function resolveWorkspaceDepSrc(
   }
 }
 
-/** Newest file mtime under root, skipping excluded dirs and symlinks. */
-function newestFileMtime(root: string): Date | null {
+/**
+ * Newest file mtime under root, skipping excluded dirs and symlinks. Any
+ * unreadable directory or failed stat fails the whole scan ({ ok: false })
+ * so staleness is never derived from a partial tree.
+ */
+function newestFileMtime(root: string): RootScanResult {
   let newest: Date | null = null;
   const stack = [root];
   while (stack.length > 0) {
@@ -219,25 +250,27 @@ function newestFileMtime(root: string): Date | null {
     try {
       entries = readdirSync(current, { withFileTypes: true });
     } catch {
-      // Unreadable subtree → skip, not an error.
-      continue;
+      // Unreadable subtree → fail the scan, not a partial result.
+      return { ok: false };
     }
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
         stack.push(join(current, entry.name));
       } else if (entry.isFile()) {
+        let mtime: Date;
         try {
-          const mtime = statSync(join(current, entry.name)).mtime;
-          if (newest === null || mtime.getTime() > newest.getTime()) {
-            newest = mtime;
-          }
+          mtime = statSync(join(current, entry.name)).mtime;
         } catch {
-          // Unreadable file → skip.
+          // Unreadable file → fail the scan, not a partial result.
+          return { ok: false };
+        }
+        if (newest === null || mtime.getTime() > newest.getTime()) {
+          newest = mtime;
         }
       }
       // Symlinks are ignored: they can point outside the tree or form cycles.
     }
   }
-  return newest;
+  return { ok: true, newestMtime: newest };
 }
