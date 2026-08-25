@@ -1,5 +1,7 @@
 # Spec: Durable Task Completion Events
 
+> **状态**: Landed(早于状态规范建立,实现已在库中;状态头为 2026-08-25 补记)
+
 ## 背景
 
 协调者通过 skill 下发 task 时，skill 本身不是常驻运行时，无法在执行器结束后主动

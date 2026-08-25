@@ -1,5 +1,7 @@
 # Spec: Generic Callback Agent and Command Driver
 
+> **状态**: Landed(早于状态规范建立,实现已在库中;状态头为 2026-08-25 补记)
+
 ## 背景
 
 CoAgentHub core 的 durable task completion event 只负责可靠产生、认领和确认事件，

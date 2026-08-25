@@ -1,5 +1,7 @@
 # Spec: dsh Durable Task Completion Consumer
 
+> **状态**: Landed(早于状态规范建立,实现已在库中;状态头为 2026-08-25 补记)
+
 ## 背景
 
 dsh-coagenthub 已能通过 `Agent.followup(UserMessage)` 主动唤醒原 session，但当前
