@@ -258,7 +258,9 @@ async function resolveTaskRepoRoot(
 
 /**
  * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
- * 仅当目标状态为 done 且任务为协调任务(detached)时生效;failed/cancelled 不触发(R3)。
+ * done 分支:仅当目标状态为 done 且任务为协调任务(detached)时生效,失败返回 400;
+ * failed/cancelled 分支(l1-bypass-must-be-visible R1):零执行子任务时返回平台写入
+ * diffSummary 的 l1Bypass 载荷(窗口内无提交或 git 不可用时返回 undefined,不写字段)。
  * 协调任务判定必须复用 lib/detached-task-liveness 的 isDetachedTask(),不另写一套。
  */
 async function assertCoordinationCloseIntegrity(
@@ -266,9 +268,15 @@ async function assertCoordinationCloseIntegrity(
   task: TaskRow,
   targetStatus: string | undefined,
   diffSummary: unknown,
-): Promise<void> {
-  // R3:只管 done,不管 failed/cancelled。
-  if (targetStatus !== "done") return;
+): Promise<{ commits: string[]; windowStartedAt: string } | undefined> {
+  // R2:done 分支逐字不变;failed/cancelled 走 l1Bypass 检测(R3 不再直接返回)。
+  if (
+    targetStatus !== "done" &&
+    targetStatus !== "failed" &&
+    targetStatus !== "cancelled"
+  ) {
+    return;
+  }
   // 协调任务判定复用 isDetachedTask()(显式 ReplyMode 或目标含 coordinator 角色)。
   if (!(await isDetachedTask(db, task))) return;
 
@@ -308,6 +316,20 @@ async function assertCoordinationCloseIntegrity(
     },
   });
   const effectiveChildren = children.filter((child) => !isResumeTask(child));
+
+  // l1-bypass-must-be-visible R1:协调任务落 failed/cancelled 且零执行子任务时,
+  // 平台执行与 R1 守卫相同的窗口提交检测并返回 l1Bypass 载荷;有执行子任务(R3)、
+  // 窗口内无提交或 git 不可用(R1)时不写字段。done 分支行为不受影响(R2)。
+  if (targetStatus === "failed" || targetStatus === "cancelled") {
+    if (effectiveChildren.length === 0 && commits && commits.length > 0) {
+      const windowStartedAt = task.attempts[0]?.startedAt;
+      if (windowStartedAt) {
+        return { commits, windowStartedAt };
+      }
+    }
+    return;
+  }
+
   if (effectiveChildren.length === 0 && !canUseAlreadySatisfied) {
     if (hasAlreadySatisfied) {
       throw new BizError(
@@ -1008,7 +1030,14 @@ app
       }
       // 协调任务落终态的完整性校验(R1/R2):仅 done + 协调任务触发;
       // 复用 isDetachedTask() 判定协调任务,不另写一套。
-      await assertCoordinationCloseIntegrity(db, task, status, diffSummary);
+      // l1-bypass-must-be-visible R1:failed/cancelled + 零执行子任务时返回
+      // l1Bypass 载荷,由平台写入 diffSummary。
+      const l1Bypass = await assertCoordinationCloseIntegrity(
+        db,
+        task,
+        status,
+        diffSummary,
+      );
       // 汇报 commit 核实(spec verify-agent-claims v1.1):任何写入
       // diffSummary.hash 的入口都要核实——CLI 完成 / detached PATCH / a2a 完成
       // 共用 claim-verification 同一套逻辑。核实是尽力而为:仓库不可达 / 非 git /
@@ -1050,6 +1079,19 @@ app
             console.warn(`[tasks] commit 核实跳过(${taskId}): ${e}`);
           }
         }
+      }
+      // l1-bypass-must-be-visible R1:平台把 l1Bypass 并入 diffSummary(与
+      // claimVerification 同款写入模式),不覆盖执行器自报的其它字段。
+      if (
+        l1Bypass &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        summaryToWrite = {
+          ...(summaryToWrite as Record<string, unknown>),
+          l1Bypass,
+        };
       }
       const [updated] = await db
         .update(taskTable)

@@ -1026,4 +1026,264 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     expect(body.message).toContain(runningId);
     expect(body.message).not.toContain(doneId);
   });
+
+  it("l1Bypass:零子任务 + 窗口内有提交 + failed → 200 且写入 l1Bypass", async () => {
+    const coordinator = await register("ci-coord-l1bypass-failed");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-failed");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: {
+          l1Bypass?: { commits: string[]; windowStartedAt: string };
+        };
+      };
+      expect(body.diffSummary.l1Bypass).toBeDefined();
+      expect(body.diffSummary.l1Bypass?.commits).toContain(hash);
+      expect(body.diffSummary.l1Bypass?.windowStartedAt).toBe(windowStartedAt);
+    });
+  });
+
+  it("l1Bypass:零子任务 + 窗口内有提交 + cancelled → 200 且同样写入", async () => {
+    const coordinator = await register("ci-coord-l1bypass-cancelled");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-cancelled");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "cancelled",
+        diffSummary: { error: "协调者取消" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: {
+          l1Bypass?: { commits: string[]; windowStartedAt: string };
+        };
+      };
+      expect(body.diffSummary.l1Bypass).toBeDefined();
+      expect(body.diffSummary.l1Bypass?.commits).toContain(hash);
+      expect(body.diffSummary.l1Bypass?.windowStartedAt).toBe(windowStartedAt);
+    });
+  });
+
+  it("l1Bypass:零子任务 + 窗口内无提交 + failed → 200 且不写 l1Bypass", async () => {
+    const coordinator = await register("ci-coord-l1bypass-no-commit");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-no-commit");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      // seed 提交在窗口起点之前,窗口内不产生任何新提交。
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(Object.hasOwn(body.diffSummary, "l1Bypass")).toBe(false);
+      // R4:无该字段的任务详情响应中也不出现该键。
+      const detailRes = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+      );
+      expect(detailRes.status).toBe(200);
+      const detail = (await detailRes.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(Object.hasOwn(detail.diffSummary, "l1Bypass")).toBe(false);
+    });
+  });
+
+  it("l1Bypass:git 不可用 → 200 且不写 l1Bypass、不抛错", async () => {
+    const coordinator = await register("ci-coord-l1bypass-no-git");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-no-git");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const nonGitDir = mkdtempSync(
+      path.join(tmpdir(), "coagenthub-l1bypass-no-git-"),
+    );
+    await withRepo(nonGitDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(Object.hasOwn(body.diffSummary, "l1Bypass")).toBe(false);
+    });
+  });
+
+  it("l1Bypass:有执行子任务 + failed → 200 且不检测、不写字段(回归)", async () => {
+    const coordinator = await register("ci-coord-l1bypass-child");
+    const executor = await register("ci-exec-l1bypass-child");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-child");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      await addChild(group.id, task.id, executor.id); // 终态执行子任务
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(Object.hasOwn(body.diffSummary, "l1Bypass")).toBe(false);
+    });
+  });
+
+  it("l1Bypass:任务详情透出 l1Bypass(含提交哈希)", async () => {
+    const coordinator = await register("ci-coord-l1bypass-detail");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-detail");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const detailRes = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+      );
+      expect(detailRes.status).toBe(200);
+      const detail = (await detailRes.json()) as {
+        diffSummary: { l1Bypass?: { commits: string[] } };
+      };
+      expect(detail.diffSummary.l1Bypass).toBeDefined();
+      expect(detail.diffSummary.l1Bypass?.commits).toContain(hash);
+    });
+  });
+
+  it("l1Bypass:平台写入不覆盖执行器自报的其它 diffSummary 字段(回归)", async () => {
+    const coordinator = await register("ci-coord-l1bypass-merge");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-merge");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: {
+          error: "诚实的失败上报",
+          summary: "协调者直接实现",
+          customField: { nested: true },
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      expect(body.diffSummary.error).toBe("诚实的失败上报");
+      expect(body.diffSummary.summary).toBe("协调者直接实现");
+      expect(body.diffSummary.customField).toEqual({ nested: true });
+      expect(body.diffSummary.l1Bypass).toBeDefined();
+    });
+  });
 });
