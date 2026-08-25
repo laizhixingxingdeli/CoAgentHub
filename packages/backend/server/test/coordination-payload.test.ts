@@ -136,4 +136,60 @@ describe("协作载荷代码契约", () => {
       ),
     ).toBeUndefined();
   });
+
+  // 头条验收信号(unit 级):解析器从 markdown 取出载荷后,enforce 路径据此
+  // 把 findings 广播判 400、把 pass 派生 l3.answered=true。这里直接锁定解析器
+  // 对两种 verdict 的提取结果,使端到端信号有可审计的单元级根因。
+  it("markdown 包裹的 findings review_result 解析为 verdict=findings 载荷", () => {
+    const findings = [
+      { severity: "high", note: "needs work" },
+    ] as const;
+    const body = [
+      "## L3 裁决：发现项",
+      "",
+      "<人读说明>",
+      "",
+      "```json",
+      JSON.stringify({
+        type: "review_result",
+        layer: 3,
+        taskId: "task-1",
+        verdict: "findings",
+        findings,
+      }),
+      "```",
+    ].join("\n");
+    const parsed = parseKnownCoordinationPayload(body);
+    expect(parsed).toEqual({
+      type: "review_result",
+      layer: 3,
+      taskId: "task-1",
+      verdict: "findings",
+      findings,
+    });
+  });
+
+  it("markdown 包裹的 pass review_result 解析为 verdict=pass 载荷", () => {
+    const body = [
+      "## L3 裁决：通过 —— pass",
+      "",
+      "<人读说明>",
+      "",
+      "```json",
+      JSON.stringify({
+        type: "review_result",
+        layer: 3,
+        taskId: "task-1",
+        verdict: "pass",
+        findings: [],
+      }),
+      "```",
+    ].join("\n");
+    const parsed = parseKnownCoordinationPayload(body);
+    expect(parsed).toMatchObject({
+      type: "review_result",
+      verdict: "pass",
+      findings: [],
+    });
+  });
 });
