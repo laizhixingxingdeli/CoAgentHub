@@ -27,6 +27,7 @@ interface UsageTotals {
 export interface TokenUsageCollectionInput {
   executorKey: string;
   executorPid?: number;
+  taskId?: string;
   cwd: string;
   startedAt: string;
   endedAt: string;
@@ -294,7 +295,8 @@ function collectAtomCode(
 ): TokenUsage | undefined {
   const start = Date.parse(input.startedAt);
   const end = Date.parse(input.endedAt);
-  const matches: TokenUsage[] = [];
+  const namedMatches: TokenUsage[] = [];
+  const fallbackMatches: TokenUsage[] = [];
   for (const file of walkFiles(
     join(input.homeDir ?? homedir(), ".atomcode", "sessions"),
     ".meta",
@@ -303,25 +305,38 @@ function collectAtomCode(
     if (!raw) continue;
     try {
       const session = JSON.parse(raw) as Record<string, unknown>;
+      const sessionName = session.name;
+      const ticketPrefix =
+        typeof sessionName === "string" &&
+        sessionName.startsWith("/tmp/coagenthub-ticket-")
+          ? sessionName.slice("/tmp/coagenthub-ticket-".length)
+          : undefined;
+      const isTaskTicketMatch =
+        input.taskId !== undefined &&
+        ticketPrefix !== undefined &&
+        ticketPrefix.length > 0 &&
+        input.taskId.startsWith(ticketPrefix);
       const created = timestampMs(session.created_at);
       const updated = timestampMs(session.updated_at);
-      if (
-        session.working_dir !== input.cwd ||
-        created === undefined ||
-        updated === undefined
-      )
-        continue;
-      const sessionPid = nonNegativeNumber(
-        session.pid ?? session.process_id ?? session.processId,
-      );
-      if (
-        input.executorPid !== undefined &&
-        sessionPid !== undefined &&
-        sessionPid !== input.executorPid
-      ) {
-        continue;
+      if (!isTaskTicketMatch) {
+        if (
+          session.working_dir !== input.cwd ||
+          created === undefined ||
+          updated === undefined
+        )
+          continue;
+        if (created > end + 5_000 || updated < start - 5_000) continue;
+        const sessionPid = nonNegativeNumber(
+          session.pid ?? session.process_id ?? session.processId,
+        );
+        if (
+          input.executorPid !== undefined &&
+          sessionPid !== undefined &&
+          sessionPid !== input.executorPid
+        ) {
+          continue;
+        }
       }
-      if (created > end + 5_000 || updated < start - 5_000) continue;
       const totals: UsageTotals = {
         inputTokens: 0,
         outputTokens: 0,
@@ -331,17 +346,29 @@ function collectAtomCode(
       const stats = Array.isArray(session.turn_stats) ? session.turn_stats : [];
       for (const stat of stats) {
         if (!stat || typeof stat !== "object") continue;
-        const tokens = (stat as Record<string, unknown>).tokens;
-        const usage = readUsageObject(tokens);
-        if (usage) addTotals(totals, usage);
+        const modelUsage = (stat as Record<string, unknown>).model_usage;
+        if (!Array.isArray(modelUsage)) continue;
+        for (const model of modelUsage) {
+          const tokens =
+            model && typeof model === "object"
+              ? (model as Record<string, unknown>).tokens
+              : undefined;
+          const usage = readUsageObject(tokens);
+          if (usage) addTotals(totals, usage);
+        }
       }
-      if (totals.totalTokens > 0)
+      if (totals.totalTokens > 0) {
+        const matches = isTaskTicketMatch ? namedMatches : fallbackMatches;
         matches.push(finishTotals(totals, "atomcode-session-meta"));
+      }
     } catch {
       // Ignore a session that is being written while the task ends.
     }
   }
-  return matches.length === 1 ? matches[0] : undefined;
+  if (namedMatches.length > 0) {
+    return namedMatches.length === 1 ? namedMatches[0] : undefined;
+  }
+  return fallbackMatches.length === 1 ? fallbackMatches[0] : undefined;
 }
 
 /**

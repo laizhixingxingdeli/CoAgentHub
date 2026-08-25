@@ -2049,6 +2049,7 @@ async function collectAttemptTokenUsage(
   const collected = await collectTokenUsage({
     executorKey: run.ex.key,
     executorPid,
+    taskId: run.taskId,
     cwd,
     startedAt: last.startedAt,
     endedAt: new Date().toISOString(),
