@@ -567,6 +567,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain("测试: <测试结果摘要>");
       expect(ticket).toContain("汇报: <做了什么,3-5 句>");
       expect(ticket).toContain('遗留: <未完成事项,无则写"无">');
+      expect(ticket).not.toContain("不要在执行窗口内停掉后端");
       expect(ticket).toContain(
         "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
       );
@@ -606,6 +607,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain(
         "`diffSummary` 必须带 `review_request` 结构化载荷",
       );
+      expect(ticket).toContain("不要在执行窗口内停掉后端");
+      expect(ticket).not.toContain("必须重启");
 
       const patchRes = await app.request(
         `/api/groups/${group.id}/tasks/${task.id}`,

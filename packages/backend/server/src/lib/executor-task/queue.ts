@@ -2210,6 +2210,7 @@ function buildExecutionModeSection(role: TicketRole): string[] {
       "本任务按 `coagenthub-coordinator` skill 执行。",
       "- 已安装：直接按 skill 流程执行（获取冻结 spec→下发任务→L2 功能检视→按编制交回 L3→结案）。",
       "- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。",
+      "- 后端以自动重载方式运行时，改完源码无需重启；若确需重启，由发起方在验收阶段自行处理，不要在执行窗口内停掉后端。",
     ];
   }
 

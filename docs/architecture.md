@@ -331,23 +331,22 @@ CoAgentHub/
 
 启动后端时务必带上代理变量(若你的网络需要代理)。
 
-### 9.9.2 跑「会改后端代码」的任务时,后端必须用非 watch 模式
+### 9.9.2 后端开发与生产/验收启动模式
 
-`pnpm --filter server dev` 是 `tsx watch`。执行器修改
-`packages/backend/server/src/**` 会触发后端重启,**连带杀死它自己 spawn 的执行器子进程**,
-任务被标记 `failed`,`diffSummary.error = "server-restart"`。
+后端入口统一先加载 `dotenv/config`，因此两种启动方式都会读取同一套
+`DATABASE_URL` 等环境变量；开发模式由 `tsx` 直接执行源码，生产/验收模式由
+`dist/server.mjs` 执行打包产物。
 
-这是自伤循环:监管任务的进程,被它监管的任务改代码触发了自杀。
+| 模式 | 命令 | 何时用 | 改完源码 |
+|---|---|---|---|
+| 开发期 | `pnpm --filter server dev` (`tsx watch src/index.ts`) | 日常协作、执行票 | **自动重载** |
+| 生产/验收 | `pnpm --filter server start` (`node dist/server.mjs`) | 需要验证打包产物时 | 手动重启 |
 
-| 场景 | 启动方式 |
-|---|---|
-| 本地迭代后端(人写代码) | `pnpm --filter server dev` |
-| **平台下发会改后端代码的任务** | **`pnpm --filter server start`**(跑 `dist/`,无 watch) |
-
-切 start 前先 `pnpm --filter server build`。
-
-> `node dist/server.mjs` 直接跑会报 `DATABASE_URL is not set` —— dotenv 按 cwd 找 `.env`,
-> 必须用 `pnpm --filter server start`(在包目录内执行)。
+日常协作与执行票应使用开发期 watch 模式；只有验证打包产物时才切生产/验收模式。
+用生产模式跑开发流程，是本轮 4 次任务失败的根因：执行器停掉后端做验证后，
+监工任务失去宿主进程，任务无法回写终态并被记录为 `server-restart`。不做平台层
+自动重启；生产模式仍保留手动重启语义，`stale-runtime-detection` 与
+`executor-task-liveness` 仍按各自职责工作。
 
 ### 9.9.3 codex 执行器带沙箱:禁网络、禁写 `.git/`
 
