@@ -1,6 +1,6 @@
 # Spec: token 消耗改由平台采集,不再依赖 agent 自报
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-25),实现 `13fb895e`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **取代**: `token-usage-extraction.md` 的自报路径(该 spec 其余部分不变)
@@ -36,8 +36,8 @@ CLI **自己**会记账,那不是 agent 自报,agent 也改不了:
 |---|---|---|
 | **codex** | ✅ | `~/.codex/sessions/<年>/<月>/<日>/rollout-<ISO时间>-<uuid>.jsonl` → `total_token_usage`(含 `input_tokens` / `cached_input_tokens` / `output_tokens` / `reasoning_output_tokens` / `total_tokens`) |
 | **claude** | ✅ | `~/.claude/projects/<slug>/*.jsonl` → 每条消息的 `usage` |
-| atomcode | ❌ | `~/.atomcode/history/history` 无 token 字段 |
-| codebuddy | ❌ | `~/.codebuddy/sessions/<pid>.json` 仅心跳元数据 |
+| atomcode | ✅(**本 spec 原判断有误,已由实现核验推翻**)| `~/.atomcode/**/*.meta` → `total_tokens` / `used_tokens` |
+| codebuddy | ✅(**本 spec 原判断有误,已由实现核验推翻**)| `~/.codebuddy/projects/**/*.jsonl` → `usage`(sessions/<pid>.json 确实只有心跳,但不是唯一位置)|
 
 ### ⚠️ 一个已查明的硬约束
 
