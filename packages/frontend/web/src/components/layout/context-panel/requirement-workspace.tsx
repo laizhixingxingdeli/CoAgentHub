@@ -43,6 +43,21 @@ import { deriveRequirementLayerState } from "./requirement-layer-state";
  * listClassName 控制(右栏任务 Tab 空间小取窄列,主区按设计稿取宽列),
  * 右列自适应占剩余空间。无需求时回退 TaskPanel 扁平任务列表。
  */
+/** 后端陈旧提示文案:按 staleReason 给出具体动作(R3)。 */
+function runtimeStaleMessage(
+  reason: "process" | "build" | "both" | null,
+): string {
+  switch (reason) {
+    case "build":
+      return "后端构建落后于源码 —— 需重新 build 再重启,改动才会生效";
+    case "both":
+      return "源码已改且未重建,运行的也不是当前构建 —— 需 build 后重启";
+    default:
+      // process(或旧后端未上报 reason):重启后端即可,经典情形。
+      return "后端运行的不是最新构建 —— 重启后端即可让改动生效";
+  }
+}
+
 export function RequirementWorkspace({
   groupId,
   listClassName = "w-28 shrink-0",
@@ -85,6 +100,9 @@ export function RequirementWorkspace({
   >({});
   const loadedTaskDetailsRef = useRef(new Set<string>());
   const [runtimeStale, setRuntimeStale] = useState(false);
+  const [runtimeStaleReason, setRuntimeStaleReason] = useState<
+    "process" | "build" | "both" | null
+  >(null);
   const [runtimeDismissed, setRuntimeDismissed] = useState(false);
   const runtimeWasStaleRef = useRef(false);
 
@@ -225,13 +243,23 @@ export function RequirementWorkspace({
     try {
       const res = await fetch("/api/health");
       if (!res.ok) return;
-      const status = (await res.json()) as { stale?: unknown };
+      const status = (await res.json()) as {
+        stale?: unknown;
+        staleReason?: unknown;
+      };
       if (typeof status.stale !== "boolean") return;
       if (status.stale && !runtimeWasStaleRef.current) {
         setRuntimeDismissed(false);
       }
       runtimeWasStaleRef.current = status.stale;
       setRuntimeStale(status.stale);
+      setRuntimeStaleReason(
+        status.staleReason === "process" ||
+          status.staleReason === "build" ||
+          status.staleReason === "both"
+          ? status.staleReason
+          : null,
+      );
     } catch {
       // Health is advisory; a failed probe must not add a persistent error row.
     }
@@ -545,7 +573,7 @@ export function RequirementWorkspace({
           className="mx-4 mt-2 flex shrink-0 items-center gap-2 rounded-md border border-status-unconfirmed/50 bg-status-unconfirmed/10 px-3 py-2 text-sm text-status-unconfirmed"
         >
           <span className="min-w-0 flex-1">
-            后端运行的不是最新构建 —— 你看到的接口可能不含刚落地的改动
+            {runtimeStaleMessage(runtimeStaleReason)}
           </span>
           <button
             type="button"

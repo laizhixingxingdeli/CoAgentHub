@@ -7,7 +7,7 @@ const app = new Hono().get(
   describeRoute({
     tags: ["Health"],
     description:
-      "Runtime freshness probe: reports the process start time, entry mtime, and whether the entry was updated after boot.",
+      "Runtime freshness probe: reports the process start time, entry mtime, staleness reason (process/build/both), and the newest scanned source mtime.",
     responses: {
       200: { description: "Runtime status" },
     },

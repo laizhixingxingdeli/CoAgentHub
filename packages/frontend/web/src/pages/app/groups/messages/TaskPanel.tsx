@@ -61,6 +61,8 @@ export type TaskObservability = {
     startedAt: string;
     entryMtime: string | null;
     stale: boolean;
+    staleReason: "process" | "build" | "both" | null;
+    newestSourceMtime?: string;
   };
 };
 

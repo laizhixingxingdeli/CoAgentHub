@@ -40,11 +40,19 @@ function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
   };
 }
 
-function workspaceFetchMock(tasks: TaskItem[], stale = false) {
+type HealthBody = {
+  stale?: boolean;
+  staleReason?: "process" | "build" | "both" | null;
+};
+
+function workspaceFetchMock(
+  tasks: TaskItem[],
+  health: HealthBody = { stale: false },
+) {
   return createFetchMock([
     {
       match: (url) => url === "/api/health",
-      respond: () => jsonResponse({ stale }),
+      respond: () => jsonResponse(health),
     },
     {
       match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
@@ -80,8 +88,11 @@ function setViewport(width: number) {
   });
 }
 
-function renderWorkspace(tasks: TaskItem[], stale = false) {
-  vi.stubGlobal("fetch", workspaceFetchMock(tasks, stale));
+function renderWorkspace(
+  tasks: TaskItem[],
+  health: HealthBody = { stale: false },
+) {
+  vi.stubGlobal("fetch", workspaceFetchMock(tasks, health));
   return renderWithProviders(<RequirementWorkspace groupId="group-1" />);
 }
 
@@ -107,7 +118,7 @@ afterEach(() => {
 describe("RequirementWorkspace 响应式布局", () => {
   it("runtime stale 只在页面级显示一次且可关闭", async () => {
     setViewport(1280);
-    renderWorkspace(TWO_REQUIREMENTS, true);
+    renderWorkspace(TWO_REQUIREMENTS, { stale: true });
 
     const banner = await screen.findByTestId("runtime-stale-banner");
     expect(banner).toHaveTextContent("后端运行的不是最新构建");
@@ -117,6 +128,22 @@ describe("RequirementWorkspace 响应式布局", () => {
     expect(
       screen.queryByTestId("runtime-stale-banner"),
     ).not.toBeInTheDocument();
+  });
+
+  it("build 陈旧时提示重新 build 再重启", async () => {
+    setViewport(1280);
+    renderWorkspace(TWO_REQUIREMENTS, { stale: true, staleReason: "build" });
+
+    const banner = await screen.findByTestId("runtime-stale-banner");
+    expect(banner).toHaveTextContent("需重新 build 再重启");
+  });
+
+  it("both 陈旧时提示 build 后重启", async () => {
+    setViewport(1280);
+    renderWorkspace(TWO_REQUIREMENTS, { stale: true, staleReason: "both" });
+
+    const banner = await screen.findByTestId("runtime-stale-banner");
+    expect(banner).toHaveTextContent("需 build 后重启");
   });
 
   it("真实零子任务协调载荷:列表与详情共享 na-declared/done 状态", async () => {
