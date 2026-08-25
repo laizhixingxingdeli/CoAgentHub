@@ -128,19 +128,25 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   }
 
-  /** 直接插一条指向 parentTaskId 的执行子任务,使 R1 放行。 */
+  /** 直接插一条指向 parentTaskId 的执行子任务,使 R1 放行。默认终态(done):
+   *  close-requires-terminal-children R1 后,协调任务落 done 要求全部子任务已终态,
+   *  非终态子任务会被守卫 400 拦截;需要非终态子任务时显式传 status。 */
   async function addChild(
     groupId: string,
     parentTaskId: string,
     executorParticipantId: string,
+    status: "queued" | "running" | "done" | "failed" | "cancelled" = "done",
   ) {
+    const childId = uuidv4();
     await testDb.insert(taskTable).values({
+      id: childId,
       groupId,
       parentTaskId,
       messageId: uuidv4(),
       executorParticipantId,
-      status: "queued",
+      status,
     });
+    return childId;
   }
 
   async function addChildWithWindow(
@@ -148,7 +154,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     parentTaskId: string,
     executorParticipantId: string,
     startedAt: string,
-    status: "running" | "done" = "running",
+    status: "running" | "done" = "done",
     updatedAt?: Date,
   ) {
     const childId = uuidv4();
@@ -406,7 +412,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
-  it("R1:提交落在未终态执行子任务窗口内 → 200", async () => {
+  it("R1:提交落在终态执行子任务窗口内 → 200", async () => {
     const coordinator = await register("ci-coord-child-window-running");
     const executor = await register("ci-exec-child-window-running");
     const group = await createGroup(coordinator.id, "ci-child-window-running");
@@ -894,5 +900,130 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("R1:有非终态执行子任务(running)+ done → 400,错误含子任务 id 与状态", async () => {
+    const coordinator = await register("ci-coord-running-child");
+    const executor = await register("ci-exec-running-child");
+    const group = await createGroup(coordinator.id, "ci-running-child");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChildWithWindow(
+      group.id,
+      task.id,
+      executor.id,
+      new Date().toISOString(),
+      "running",
+    );
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain(childId);
+    expect(body.message).toContain("running");
+  });
+
+  it("R1:有非终态执行子任务(queued)+ done → 400,queued 非终态", async () => {
+    const coordinator = await register("ci-coord-queued-child");
+    const executor = await register("ci-exec-queued-child");
+    const group = await createGroup(coordinator.id, "ci-queued-child");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const childId = await addChild(group.id, task.id, executor.id, "queued");
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain(childId);
+    expect(body.message).toContain("queued");
+  });
+
+  it("R1:全部执行子任务终态(done/failed)+ done → 200(回归)", async () => {
+    const coordinator = await register("ci-coord-all-terminal");
+    const executor = await register("ci-exec-all-terminal");
+    const group = await createGroup(coordinator.id, "ci-all-terminal");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    await addChild(group.id, task.id, executor.id, "done");
+    await addChild(group.id, task.id, executor.id, "failed");
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("R1:有非终态执行子任务 + failed → 200(不触发)", async () => {
+    const coordinator = await register("ci-coord-failed-child");
+    const executor = await register("ci-exec-failed-child");
+    const group = await createGroup(coordinator.id, "ci-failed-child");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    await addChildWithWindow(
+      group.id,
+      task.id,
+      executor.id,
+      new Date().toISOString(),
+      "running",
+    );
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "failed",
+      diffSummary: { error: "诚实的失败上报" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("R1:多个子任务其一非终态 → 400,只列出非终态的那个", async () => {
+    const coordinator = await register("ci-coord-multi-child");
+    const executor = await register("ci-exec-multi-child");
+    const group = await createGroup(coordinator.id, "ci-multi-child");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const doneId = await addChild(group.id, task.id, executor.id, "done");
+    const runningId = await addChildWithWindow(
+      group.id,
+      task.id,
+      executor.id,
+      new Date().toISOString(),
+      "running",
+    );
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain(runningId);
+    expect(body.message).not.toContain(doneId);
   });
 });

@@ -339,6 +339,23 @@ async function assertCoordinationCloseIntegrity(
     }
   }
 
+  // R1:done 的协调任务若已有有效执行子任务,所有子任务必须先到终态。
+  // allTerminal 复用 L1 聚合的派生口径,避免在结案路径另写终态集合。
+  if (effectiveChildren.length > 0) {
+    const l1 = await deriveL1Aggregate(db, task);
+    if (!l1.allTerminal) {
+      const nonTerminal = effectiveChildren.filter(
+        (child) => !isTerminalTaskStatus(child.status),
+      );
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `L1 层未完成:存在非终态执行子任务: ${nonTerminal
+          .map((child) => `${child.id} (${child.status})`)
+          .join(", ")}`,
+      );
+    }
+  }
+
   // R1:父任务窗口内的每个提交都必须落入某个执行子任务窗口。
   // commitsInTaskWindow 仍是提交集合的唯一来源;这里仅补读提交时间来
   // 对照子任务窗口并生成可核查的拒绝信息。
