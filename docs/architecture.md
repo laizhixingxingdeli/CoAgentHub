@@ -116,7 +116,7 @@ CoAgentHub/
 | `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered;相同 token 重复 ack 幂等 |
 | `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending;超过 10 次进入 dead |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
-| `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale`；仅报告不拦截) |
+| `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale` / `staleReason`；源码扫描时附 `newestSourceMtime`；仅报告不拦截) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
 | `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`) |
 | `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效) |

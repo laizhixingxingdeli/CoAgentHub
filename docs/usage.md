@@ -255,6 +255,7 @@ Environment variables (read centrally in
 | `CORS_ORIGIN` | `http://localhost:3000` | allowed CORS origins, comma-separated |
 | `FILE_DIR` | `<cwd>/data/files` | LAN file-store directory (relative paths resolve to absolute) |
 | `MAX_FILE_UPLOAD_BYTES` | `200MB` | per-file upload cap (bytes); invalid values fall back with a warning |
+| `RUNTIME_SOURCE_SCAN_TTL_MS` | `10000` | runtime source freshness scan cache duration in milliseconds; invalid or non-positive values use the default |
 | `COAGENTHUB_REPO_ROOT` | auto-detected | repo root override (walked up from cwd to the outermost dir containing `package.json`); executor spawn cwd and git operations use it |
 | `EXECUTOR_TIMEOUT_MS` | CLI `120` min / A2A `30` min | per-execution timeout (ms); SIGKILL / abort request on expiry |
 | `SENTRY_DSN` | off | enables Sentry (winston transport + Hono middleware) |
