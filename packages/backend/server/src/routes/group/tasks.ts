@@ -87,6 +87,17 @@ interface ExecutionWindow {
   endMs: number;
 }
 
+function coordinationCloseError(message: string): BizError {
+  const runtime = getRuntimeStatus();
+  if (!runtime.stale) {
+    return new BizError(BizCodeEnum.InvalidRequest, message);
+  }
+  return new BizError(
+    BizCodeEnum.InvalidRequest,
+    `${message} 注意:当前运行时为陈旧构建(staleReason: ${runtime.staleReason}),本次拒绝可能来自旧版守卫;若已在源码中修改结案规则,请在发起方重启后重试回写。`,
+  );
+}
+
 function parseAlreadySatisfiedClaim(
   summary: Record<string, unknown> | undefined,
 ): AlreadySatisfiedClaim | undefined {
@@ -116,8 +127,7 @@ async function validateAlreadySatisfiedClaim(
   for (const hash of claim.commits) {
     const existence = await verifyCommitExists(hash, repoRoot);
     if (existence === "not_found") {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `alreadySatisfied.commits 中的提交 ${hash} 在仓库中不存在。`,
       );
     }
@@ -332,8 +342,7 @@ async function assertCoordinationCloseIntegrity(
 
   if (effectiveChildren.length === 0 && !canUseAlreadySatisfied) {
     if (hasAlreadySatisfied) {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         "alreadySatisfied 不合法: commits 中的提交必须真实存在,且 verification 必须为非空字符串。",
       );
     }
@@ -343,8 +352,7 @@ async function assertCoordinationCloseIntegrity(
         ? summary.noExecutionReason
         : "";
     if (noExecutionReason.trim() === "") {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
       );
     }
@@ -354,8 +362,7 @@ async function assertCoordinationCloseIntegrity(
     // 的 attempts[0].startedAt;git/仓库失败时按 R2 放行。
     if (commits && commits.length > 0) {
       const windowStartedAt = task.attempts[0]?.startedAt;
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `L1 层未发生:本协调任务没有任何执行子任务,但任务窗口内检测到提交(${commits.join(", ")})。代码改动应经执行器完成。窗口起点: ${windowStartedAt}。`,
       );
     }
@@ -369,8 +376,7 @@ async function assertCoordinationCloseIntegrity(
       const nonTerminal = effectiveChildren.filter(
         (child) => !isTerminalTaskStatus(child.status),
       );
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `L1 层未完成:存在非终态执行子任务: ${nonTerminal
           .map((child) => `${child.id} (${child.status})`)
           .join(", ")}`,
@@ -403,8 +409,7 @@ async function assertCoordinationCloseIntegrity(
       }
     }
     if (unassigned.length > 0) {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `提交归属校验失败:以下提交不在任何执行子任务窗口内: ${unassigned
           .map((commit) => `${commit.hash} (${commit.commitAt})`)
           .join(", ")}。各执行子任务窗口: ${formatExecutionWindows(windows)}。`,
@@ -415,8 +420,7 @@ async function assertCoordinationCloseIntegrity(
   // R2:应走 L3(三方在场且 dispatchKind 非 fix)时,review_request 不得缺失。
   if (await shouldWalkL3(db, task)) {
     if (!summaryHasReviewRequest(diffSummary)) {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场且非 fix 票)。",
       );
     }
@@ -447,22 +451,19 @@ async function assertCoordinationCloseIntegrity(
     }
     const entry = adjudication?.[child.id];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `子任务 ${child.id} 的提交核实结论为 ${status},必须在 diffSummary.claimAdjudication["${child.id}"] 中显式表态(accepted 布尔 + 非空 reason)。`,
       );
     }
     const e = entry as Record<string, unknown>;
     if (typeof e.accepted !== "boolean") {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `子任务 ${child.id} 的 claimAdjudication.accepted 缺失或非布尔,必须显式给出 true 或 false。`,
       );
     }
     const reason = typeof e.reason === "string" ? e.reason : "";
     if (reason.trim() === "") {
-      throw new BizError(
-        BizCodeEnum.InvalidRequest,
+      throw coordinationCloseError(
         `子任务 ${child.id} 的 claimAdjudication.reason 为空,必须填写非空理由。`,
       );
     }
@@ -827,6 +828,7 @@ app
       }
       const liveness = await getDetachedTaskLiveness(db, task);
       const executorLiveness = await getExecutorTaskLiveness(db, task);
+      const runtime = getRuntimeStatus();
       // 只返回任务详情约定字段(不泄露 attempts/a2aContextId 等内部列)。
       const detail: Record<string, unknown> = {
         id: task.id,
@@ -858,6 +860,21 @@ app
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
       };
+      const summary =
+        typeof task.diffSummary === "object" &&
+        task.diffSummary !== null &&
+        !Array.isArray(task.diffSummary)
+          ? (task.diffSummary as Record<string, unknown>)
+          : undefined;
+      if (
+        task.status === "failed" &&
+        isTerminalTaskStatus(task.status) &&
+        typeof summary?.error === "string" &&
+        summary.error.trim() !== "" &&
+        runtime.stale
+      ) {
+        detail.staleBuildSuspected = true;
+      }
       // 实时进度:includeOutput=1 时附 outputTail(running 任务 = 内存缓冲;
       // 已完成任务 = diffSummary.outputTail 回填或留空)。
       if (wantOutput) {
@@ -891,7 +908,7 @@ app
       // 空对象),其余载荷保持逐字不变。
       if (await isDetachedTask(db, task)) {
         detail.l1 = await deriveL1Aggregate(db, task);
-        detail.runtime = getRuntimeStatus();
+        detail.runtime = runtime;
       }
       return c.json(detail);
     },

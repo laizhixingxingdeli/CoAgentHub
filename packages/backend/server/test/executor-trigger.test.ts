@@ -608,6 +608,8 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         "`diffSummary` 必须带 `review_request` 结构化载荷",
       );
       expect(ticket).toContain("不要在执行窗口内停掉后端");
+      expect(ticket).toContain("结案被拒且运行时陈旧时");
+      expect(ticket).toContain("实现已提交 <hash>,因旧构建守卫拒绝回写");
       expect(ticket).not.toContain("必须重启");
 
       const patchRes = await app.request(

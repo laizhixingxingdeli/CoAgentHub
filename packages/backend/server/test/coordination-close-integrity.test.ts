@@ -1,8 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  configureSourceScanRoots,
+  resetSourceScanCache,
+} from "@server/lib/runtime-status";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
@@ -235,6 +239,34 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     }
   }
 
+  async function withStaleRuntime<T>(callback: () => Promise<T>) {
+    const scanDir = mkdtempSync(path.join(tmpdir(), "coagenthub-stale-scan-"));
+    const marker = path.join(scanDir, "newer-source.ts");
+    writeFileSync(marker, "export {};\n");
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(marker, future, future);
+    configureSourceScanRoots([scanDir]);
+    resetSourceScanCache();
+    try {
+      return await callback();
+    } finally {
+      configureSourceScanRoots(null);
+      resetSourceScanCache();
+      rmSync(scanDir, { recursive: true, force: true });
+    }
+  }
+
+  async function withFreshRuntime<T>(callback: () => Promise<T>) {
+    configureSourceScanRoots([]);
+    resetSourceScanCache();
+    try {
+      return await callback();
+    } finally {
+      configureSourceScanRoots(null);
+      resetSourceScanCache();
+    }
+  }
+
   function reviewRequest(taskId: string) {
     return {
       review_request: {
@@ -265,6 +297,132 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { message: string };
     expect(body.message).toContain("L1 层未发生");
+  });
+
+  it("R1:陈旧运行时追加旧版守卫恢复提示,但仍拒绝结案", async () => {
+    const coordinator = await register("ci-coord-stale-close");
+    const group = await createGroup(coordinator.id, "ci-stale-close");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+
+    await withStaleRuntime(async () => {
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("L1 层未发生");
+      expect(body.message).toContain("可能来自旧版守卫");
+      expect(body.message).toContain("请在发起方重启后重试回写");
+    });
+  });
+
+  it("R1:非陈旧运行时的结案 400 信息逐字不变", async () => {
+    const coordinator = await register("ci-coord-fresh-close");
+    const group = await createGroup(coordinator.id, "ci-fresh-close");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+
+    await withFreshRuntime(async () => {
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toBe(
+        "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
+      );
+      expect(body.message).not.toContain("可能来自旧版守卫");
+    });
+  });
+
+  it("R3:failed + error + 终态 + 陈旧运行时 → 详情透出 staleBuildSuspected", async () => {
+    const coordinator = await register("ci-coord-stale-signal");
+    const group = await createGroup(coordinator.id, "ci-stale-signal");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+
+    await withStaleRuntime(async () => {
+      const patch = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "实现已提交 abc123,因旧构建守卫拒绝回写" },
+      });
+      expect(patch.status).toBe(200);
+      const detail = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+      );
+      expect(detail.status).toBe(200);
+      const body = (await detail.json()) as Record<string, unknown>;
+      expect(body.staleBuildSuspected).toBe(true);
+    });
+  });
+
+  it("R3:非陈旧或非 failed/error 任务详情不透出 staleBuildSuspected", async () => {
+    const coordinator = await register("ci-coord-no-stale-signal");
+    const group = await createGroup(coordinator.id, "ci-no-stale-signal");
+    const failedMsg = await postMessage(coordinator.id, group.id, "失败任务");
+    const failedTask = await createTask(
+      coordinator.id,
+      group.id,
+      failedMsg.id,
+      coordinator.id,
+    );
+    const cancelledMsg = await postMessage(
+      coordinator.id,
+      group.id,
+      "取消任务",
+    );
+    const cancelledTask = await createTask(
+      coordinator.id,
+      group.id,
+      cancelledMsg.id,
+      coordinator.id,
+    );
+
+    await withFreshRuntime(async () => {
+      const failed = await patchTask(coordinator.id, group.id, failedTask.id, {
+        status: "failed",
+        diffSummary: { error: "真实失败" },
+      });
+      expect(failed.status).toBe(200);
+      const failedDetail = await app.request(
+        `/api/groups/${group.id}/tasks/${failedTask.id}`,
+      );
+      expect(failedDetail.status).toBe(200);
+      expect(
+        (await failedDetail.json()) as Record<string, unknown>,
+      ).not.toHaveProperty("staleBuildSuspected");
+
+      const cancelled = await patchTask(
+        coordinator.id,
+        group.id,
+        cancelledTask.id,
+        { status: "cancelled", diffSummary: { error: "主动取消" } },
+      );
+      expect(cancelled.status).toBe(200);
+      const cancelledDetail = await app.request(
+        `/api/groups/${group.id}/tasks/${cancelledTask.id}`,
+      );
+      expect(cancelledDetail.status).toBe(200);
+      expect(
+        (await cancelledDetail.json()) as Record<string, unknown>,
+      ).not.toHaveProperty("staleBuildSuspected");
+    });
   });
 
   it("R1:带非空 noExecutionReason → 放行", async () => {

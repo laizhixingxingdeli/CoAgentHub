@@ -2449,6 +2449,7 @@ function buildExecutionModeSection(role: TicketRole): string[] {
       "- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。",
       "- 派发后可退出本次进程；子任务进入终态时平台会重新拉起你做 L2。",
       "- 后端以自动重载方式运行时，改完源码无需重启；若确需重启，由发起方在验收阶段自行处理，不要在执行窗口内停掉后端。",
+      "- 结案被拒且运行时陈旧时，不要反复重试、不要改代码迎合旧守卫、不要自行重启后端；应以 failed 结案，并在 error 中写明「实现已提交 <hash>,因旧构建守卫拒绝回写」。",
     ];
   }
 
