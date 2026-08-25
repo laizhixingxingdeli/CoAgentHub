@@ -1,6 +1,6 @@
 # Spec: 「协调者 + 执行者」两方编制没有任何触发入口
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-25),实现 `35740d47`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **发现于**: 试图端到端验证 `coordination-close-integrity` R2 的两方分支时
