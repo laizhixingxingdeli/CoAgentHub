@@ -1,6 +1,6 @@
 # Spec: spawn 失败只报原始错误串,看不出该怎么办
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-25),实现 `bd8df5e5`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **来源**: `stash@{0}` 一份未验证的历史半成品(「T3 codex 半成品:queue.ts 已 patch 未验证」)
