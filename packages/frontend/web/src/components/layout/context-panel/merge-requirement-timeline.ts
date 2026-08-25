@@ -100,6 +100,20 @@ function isRequirementCoordinationMessage(
   return specRefs.has(payload.specRef);
 }
 
+/** 发送者角色 → 层(R1):reviewer/human → L3,coordinator → L2,executor → L1。
+ * 角色不在四档内(observer/specialist 等)或发送者未知 → null(由调用方回落形态判据)。 */
+function layerForSenderRoles(
+  roles: string[] | undefined,
+): RequirementTimelineLayer | null {
+  if (!roles) return null;
+  const lower = roles.map((r) => r.toLowerCase());
+  if (lower.includes("reviewer")) return "l3";
+  if (lower.includes("coordinator")) return "l2";
+  if (lower.includes("executor")) return "l1";
+  if (lower.includes("human")) return "l3";
+  return null;
+}
+
 export function timelineLayerForEvent(
   event: TimelineEvent,
   executionTaskIds: ReadonlySet<string>,
@@ -111,6 +125,11 @@ export function timelineLayerForEvent(
     return "l1";
   }
 
+  // 主判据是发送者在本群的角色(R1),不再按消息形态分层。
+  const roleLayer = layerForSenderRoles(event.sender?.roles);
+  if (roleLayer) return roleLayer;
+
+  // 兜底(R2/R3):发送者角色查不到(已退群/历史数据/observer 等)→ 回落形态判据。
   const payload = coordinationPayload(event.message.body);
   if (
     payload?.type === "review_result" ||

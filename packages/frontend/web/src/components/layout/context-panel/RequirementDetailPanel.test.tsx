@@ -310,6 +310,26 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     );
   });
 
+  it("L1 段标题显示「L1 执行」,data-testid 保持 requirement-layer-l1 不变", () => {
+    const [requirement] = groupTasksBySpec([
+      executionTask({ id: "exec-1", createdAt: "2026-08-01T10:00:00.000Z" }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[]}
+      />,
+    );
+    // R4:L1 只含执行器动作,标题改为「L1 执行」;testid 未改名。
+    expect(screen.getByTestId("requirement-layer-l1")).toHaveTextContent(
+      "L1 执行",
+    );
+    expect(
+      screen.getByTestId("requirement-layer-l1-toggle"),
+    ).toBeInTheDocument();
+  });
+
   it("L3 未答复显示等待时长,超时使用警示文案", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-24T02:00:00.000Z"));

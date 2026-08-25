@@ -61,6 +61,18 @@ const MEMBERS: Member[] = [
     device: null,
     roles: ["reviewer"],
   },
+  {
+    participantId: "participant-exec",
+    name: "执行者",
+    device: null,
+    roles: ["executor"],
+  },
+  {
+    participantId: "participant-human",
+    name: "用户",
+    device: null,
+    roles: ["human"],
+  },
 ];
 
 describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
@@ -279,6 +291,7 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     });
     const review = makeMessage({
       id: "review-result",
+      senderId: "participant-review",
       createdAt: "2026-08-01T13:00:00.000Z",
       body: JSON.stringify({
         type: "review_result",
@@ -290,6 +303,7 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     });
     const amended = makeMessage({
       id: "spec-amended",
+      senderId: "participant-review",
       createdAt: "2026-08-01T14:00:00.000Z",
       body: JSON.stringify({
         type: "spec_amended",
@@ -300,6 +314,7 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     });
     const ordinary = makeMessage({
       id: "ordinary",
+      senderId: "participant-exec",
       createdAt: "2026-08-01T09:30:00.000Z",
       body: "执行沟通",
     });
@@ -328,6 +343,196 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     expect(
       layers.l1.some(
         (event) => event.kind === "task" && event.task.id === "exec-1",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", () => {
+  it("检视者下发的自由文本任务书 → L3,不再落 L1", () => {
+    const task = makeTask({ id: "t-1" });
+    const taskBook = makeMessage({
+      id: "reviewer-taskbook",
+      senderId: "participant-review",
+      body: "# 任务书\n检视者下发",
+    });
+    const events = mergeRequirementTimeline([task], [taskBook], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l3.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "reviewer-taskbook",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l1.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "reviewer-taskbook",
+      ),
+    ).toBe(false);
+  });
+
+  it("协调者派发给执行器的自由文本任务书 → L2", () => {
+    const task = makeTask({ id: "t-1" });
+    const taskBook = makeMessage({
+      id: "coord-taskbook",
+      senderId: "participant-coord",
+      body: "# 任务\n协调者派发",
+    });
+    const events = mergeRequirementTimeline([task], [taskBook], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l2.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "coord-taskbook",
+      ),
+    ).toBe(true);
+  });
+
+  it("执行器的自由文本(输出/汇报)→ L1(回归)", () => {
+    const task = makeTask({ id: "t-1" });
+    const output = makeMessage({
+      id: "exec-output",
+      senderId: "participant-exec",
+      body: "执行输出:测试通过",
+    });
+    const events = mergeRequirementTimeline([task], [output], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l1.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "exec-output",
+      ),
+    ).toBe(true);
+  });
+
+  it("human 触发的下发 → L3(外部发起侧与检视者同层)", () => {
+    const task = makeTask({ id: "t-1" });
+    const human = makeMessage({
+      id: "human-dispatch",
+      senderId: "participant-human",
+      body: "用户下发的需求",
+    });
+    const events = mergeRequirementTimeline([task], [human], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l3.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "human-dispatch",
+      ),
+    ).toBe(true);
+  });
+
+  it("spec_published 由检视者发出 → L3(回归)", () => {
+    const task = makeTask({ id: "t-1", specRef: "specs/r.md" });
+    const published = makeMessage({
+      id: "spec-published",
+      senderId: "participant-review",
+      body: JSON.stringify({
+        type: "spec_published",
+        specRef: "specs/r.md",
+        specHash: "abc1234",
+        summary: "规范发布",
+      }),
+    });
+    const events = mergeRequirementTimeline([task], [published], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l3.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "spec-published",
+      ),
+    ).toBe(true);
+  });
+
+  it("review_request 由协调者发出 → L2(回归)", () => {
+    const task = makeTask({ id: "t-1" });
+    const request = makeMessage({
+      id: "review-request",
+      senderId: "participant-coord",
+      body: JSON.stringify({
+        type: "review_request",
+        layer: 3,
+        taskId: "t-1",
+        specRef: "specs/r.md",
+        specHash: "abc1234",
+        diffSummary: "L2 已通过,请进行架构检视。",
+      }),
+    });
+    const events = mergeRequirementTimeline([task], [request], MEMBERS);
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    expect(
+      layers.l2.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "review-request",
+      ),
+    ).toBe(true);
+  });
+
+  it("发送者不在成员表时回落形态判据,记录不丢失", () => {
+    const task = makeTask({ id: "t-1" });
+    const unknownReview = makeMessage({
+      id: "unknown-review",
+      senderId: "no-such-participant",
+      body: JSON.stringify({
+        type: "review_result",
+        layer: 3,
+        taskId: "t-1",
+        verdict: "pass",
+        findings: [],
+      }),
+    });
+    const unknownPlain = makeMessage({
+      id: "unknown-plain",
+      senderId: "no-such-participant",
+      body: "退群成员的普通消息",
+    });
+    const events = mergeRequirementTimeline(
+      [task],
+      [unknownReview, unknownPlain],
+      MEMBERS,
+    );
+    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    // review_result 形态 → L3;普通消息形态无法判定 → L1;两条记录都不丢。
+    expect(
+      layers.l3.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "unknown-review",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l1.some(
+        (event) =>
+          event.kind === "message" && event.message.id === "unknown-plain",
+      ),
+    ).toBe(true);
+    expect(events.filter((event) => event.kind === "message")).toHaveLength(2);
+  });
+
+  it("任务事件规则不变:执行任务 → L1,协调任务 → L2", () => {
+    const execution = makeTask({ id: "exec-1" });
+    const coordination = makeTask({
+      id: "coord-1",
+      messageId: "coord-trigger",
+    });
+    const events = mergeRequirementTimeline(
+      [execution, coordination],
+      [],
+      MEMBERS,
+    );
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["exec-1"]),
+      "coord-1",
+    );
+    expect(
+      layers.l1.some(
+        (event) => event.kind === "task" && event.task.id === "exec-1",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l2.some(
+        (event) => event.kind === "task" && event.task.id === "coord-1",
       ),
     ).toBe(true);
   });
