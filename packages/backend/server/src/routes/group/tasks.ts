@@ -26,6 +26,8 @@ import {
 } from "@server/lib/executor-task";
 import {
   type ClaimVerificationMode,
+  COMMIT_TIME_TOLERANCE_MS,
+  verifyCommitExists,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
@@ -70,6 +72,103 @@ const NEEDS_CLAIM_ADJUDICATION = new Set<string>([
   "not_found",
   "outside_window",
 ]);
+
+interface AlreadySatisfiedClaim {
+  commits: string[];
+  verification: string;
+}
+
+interface ExecutionWindow {
+  childTaskId: string;
+  startedAt: string;
+  endedAt: string;
+  startMs: number;
+  endMs: number;
+}
+
+function parseAlreadySatisfiedClaim(
+  summary: Record<string, unknown> | undefined,
+): AlreadySatisfiedClaim | undefined {
+  const raw = summary?.alreadySatisfied;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const claim = raw as Record<string, unknown>;
+  const commits = claim.commits;
+  const verification = claim.verification;
+  if (
+    !Array.isArray(commits) ||
+    commits.length === 0 ||
+    !commits.every((commit): commit is string => typeof commit === "string") ||
+    typeof verification !== "string" ||
+    verification.trim() === ""
+  ) {
+    return undefined;
+  }
+  return { commits, verification };
+}
+
+async function validateAlreadySatisfiedClaim(
+  repoRoot: string,
+  claim: AlreadySatisfiedClaim,
+): Promise<"verified" | "unavailable"> {
+  for (const hash of claim.commits) {
+    const existence = await verifyCommitExists(hash, repoRoot);
+    if (existence === "not_found") {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `alreadySatisfied.commits 中的提交 ${hash} 在仓库中不存在。`,
+      );
+    }
+    if (existence === undefined) return "unavailable";
+  }
+  return "verified";
+}
+
+async function commitTimestamp(
+  repoRoot: string,
+  hash: string,
+): Promise<string | undefined> {
+  try {
+    const shown = await gitExec(["show", "-s", "--format=%cI", hash], repoRoot);
+    if (shown.status !== 0) return undefined;
+    const timestamp = shown.stdout.trim();
+    return timestamp && Number.isFinite(Date.parse(timestamp))
+      ? timestamp
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function executionWindows(
+  children: Array<Pick<TaskRow, "id" | "status" | "updatedAt" | "attempts">>,
+  now: Date,
+): ExecutionWindow[] {
+  return children.flatMap((child) => {
+    const startedAt = child.attempts[0]?.startedAt;
+    const startMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+    if (!startedAt || !Number.isFinite(startMs)) return [];
+
+    const terminal = isTerminalTaskStatus(child.status);
+    const endedAt = terminal
+      ? (child.updatedAt ?? now).toISOString()
+      : now.toISOString();
+    const endMs = Date.parse(endedAt);
+    if (!Number.isFinite(endMs)) return [];
+    return [{ childTaskId: child.id, startedAt, endedAt, startMs, endMs }];
+  });
+}
+
+function formatExecutionWindows(windows: ExecutionWindow[]): string {
+  if (windows.length === 0) return "(没有可用的执行子任务窗口)";
+  return windows
+    .map(
+      (window) =>
+        `${window.childTaskId}: [${window.startedAt} ~ ${window.endedAt}]`,
+    )
+    .join("; ");
+}
 
 /** 从子任务自身的 diffSummary 提取 claimVerification.status(读子任务,不读协调任务)。 */
 function childClaimVerificationStatus(raw: unknown): string | undefined {
@@ -179,12 +278,28 @@ async function assertCoordinationCloseIntegrity(
       ? (diffSummary as Record<string, unknown>)
       : undefined;
 
+  const repoRoot = await resolveTaskRepoRoot(db, task);
+  const alreadySatisfied = parseAlreadySatisfiedClaim(summary);
+  const alreadySatisfiedStatus = alreadySatisfied
+    ? await validateAlreadySatisfiedClaim(repoRoot, alreadySatisfied)
+    : undefined;
+  const commits = await commitsInTaskWindow(
+    repoRoot,
+    task.attempts[0]?.startedAt,
+  );
+
+  // R2b:已存在的实现由协调者指名提交并提供验证摘要时,平台核实提交
+  // 真实存在后允许跳过当前任务的执行窗口归属校验。git 不可用时不能
+  // 把未核实的 alreadySatisfied 当成有效声明,但仍遵循 R3 的放行原则。
+  const canUseAlreadySatisfied =
+    alreadySatisfiedStatus === "verified" && commits?.length === 0;
+
   // R1:done 的协调任务必须有执行子任务(L1 层发生过),否则 400 且点明 L1 层未发生。
-  const hasExecutionChild = await db.query.task.findFirst({
+  const children = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
-    columns: { id: true },
+    columns: { id: true, status: true, updatedAt: true, attempts: true },
   });
-  if (!hasExecutionChild) {
+  if (children.length === 0 && !canUseAlreadySatisfied) {
     // R4:逃生舱 —— 显式声明非空 noExecutionReason 放行(空串/纯空白仍拒绝)。
     const noExecutionReason =
       typeof summary?.noExecutionReason === "string"
@@ -200,15 +315,45 @@ async function assertCoordinationCloseIntegrity(
     // escape-hatch-became-the-default R1/R2/R3:有理由也不能掩盖协调者
     // 在同一任务窗口内直接提交代码。窗口起点必须复用 verifyCommitClaim
     // 的 attempts[0].startedAt;git/仓库失败时按 R2 放行。
-    const commits = await commitsInTaskWindow(
-      await resolveTaskRepoRoot(db, task),
-      task.attempts[0]?.startedAt,
-    );
     if (commits && commits.length > 0) {
       const windowStartedAt = task.attempts[0]?.startedAt;
       throw new BizError(
         BizCodeEnum.InvalidRequest,
         `L1 层未发生:本协调任务没有任何执行子任务,但任务窗口内检测到提交(${commits.join(", ")})。代码改动应经执行器完成。窗口起点: ${windowStartedAt}。`,
+      );
+    }
+  }
+
+  // R1:父任务窗口内的每个提交都必须落入某个执行子任务窗口。
+  // commitsInTaskWindow 仍是提交集合的唯一来源;这里仅补读提交时间来
+  // 对照子任务窗口并生成可核查的拒绝信息。
+  if (commits && commits.length > 0 && !canUseAlreadySatisfied) {
+    const now = new Date();
+    const windows = executionWindows(children, now);
+    const unassigned: Array<{ hash: string; commitAt: string }> = [];
+    for (const hash of commits) {
+      const commitAt = await commitTimestamp(repoRoot, hash);
+      // R3:提交时间无法读取(git 失败)时按「宁可漏判不可卡死」放行,
+      // 不把该提交判为无法归属。
+      if (!commitAt) continue;
+      const commitMs = Date.parse(commitAt);
+      const assigned =
+        Number.isFinite(commitMs) &&
+        windows.some(
+          (window) =>
+            commitMs >= window.startMs - COMMIT_TIME_TOLERANCE_MS &&
+            commitMs <= window.endMs + COMMIT_TIME_TOLERANCE_MS,
+        );
+      if (!assigned) {
+        unassigned.push({ hash, commitAt });
+      }
+    }
+    if (unassigned.length > 0) {
+      throw new BizError(
+        BizCodeEnum.InvalidRequest,
+        `提交归属校验失败:以下提交不在任何执行子任务窗口内: ${unassigned
+          .map((commit) => `${commit.hash} (${commit.commitAt})`)
+          .join(", ")}。各执行子任务窗口: ${formatExecutionWindows(windows)}。`,
       );
     }
   }
@@ -228,7 +373,7 @@ async function assertCoordinationCloseIntegrity(
   // outside_window)时,协调任务 diffSummary.claimAdjudication[childTaskId]
   // 必须提供 accepted(布尔)与非空 reason,否则 400 且点明子任务与其核实结论。
   // claimVerification 读自子任务自身 diffSummary,而非协调任务的。
-  const children = await db.query.task.findMany({
+  const claimChildren = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
     columns: { id: true, diffSummary: true },
   });
@@ -239,7 +384,7 @@ async function assertCoordinationCloseIntegrity(
     !Array.isArray(summary.claimAdjudication)
       ? (summary.claimAdjudication as Record<string, unknown>)
       : undefined;
-  for (const child of children) {
+  for (const child of claimChildren) {
     const status = childClaimVerificationStatus(child.diffSummary);
     if (status === undefined || !NEEDS_CLAIM_ADJUDICATION.has(status)) {
       continue;

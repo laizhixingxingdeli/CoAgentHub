@@ -143,6 +143,28 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   }
 
+  async function addChildWithWindow(
+    groupId: string,
+    parentTaskId: string,
+    executorParticipantId: string,
+    startedAt: string,
+    status: "running" | "done" = "running",
+    updatedAt?: Date,
+  ) {
+    const childId = uuidv4();
+    await testDb.insert(taskTable).values({
+      id: childId,
+      groupId,
+      parentTaskId,
+      messageId: uuidv4(),
+      executorParticipantId,
+      status,
+      attempts: [{ n: 1, startedAt, status }],
+      ...(updatedAt ? { updatedAt } : {}),
+    });
+    return childId;
+  }
+
   function createGitRepo() {
     const repoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-close-git-"));
     execFileSync("git", ["init", "-q"], { cwd: repoDir });
@@ -162,6 +184,28 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       },
     });
     return repoDir;
+  }
+
+  function commitWithDate(repoDir: string, message: string, date: string) {
+    execFileSync("git", ["commit", "--allow-empty", "-qm", message], {
+      cwd: repoDir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: date,
+        GIT_COMMITTER_DATE: date,
+      },
+    });
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
+  }
+
+  function commitDate(repoDir: string) {
+    return execFileSync("git", ["show", "-s", "--format=%cI", "HEAD"], {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
   }
 
   async function setTaskWindow(taskId: string, startedAt: string) {
@@ -323,6 +367,230 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
+  it("R1:提交早于全部执行子任务窗口 → 400,列出提交时间与窗口", async () => {
+    const coordinator = await register("ci-coord-child-window-before");
+    const executor = await register("ci-exec-child-window-before");
+    const group = await createGroup(coordinator.id, "ci-child-window-before");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const commitDateValue = new Date(
+        Math.floor((Date.now() - 30_000) / 1000) * 1000,
+      ).toISOString();
+      const parentStartedAt = new Date(
+        Date.parse(commitDateValue) - 30_000,
+      ).toISOString();
+      await setTaskWindow(task.id, parentStartedAt);
+      const hash = commitWithDate(repoDir, "before-child", commitDateValue);
+      const actualCommitAt = commitDate(repoDir);
+      const childStartedAt = new Date(
+        Date.parse(actualCommitAt) + 10_000,
+      ).toISOString();
+      await addChildWithWindow(group.id, task.id, executor.id, childStartedAt);
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(hash);
+      expect(body.message).toContain(actualCommitAt);
+      expect(body.message).toContain(childStartedAt);
+    });
+  });
+
+  it("R1:提交落在未终态执行子任务窗口内 → 200", async () => {
+    const coordinator = await register("ci-coord-child-window-running");
+    const executor = await register("ci-exec-child-window-running");
+    const group = await createGroup(coordinator.id, "ci-child-window-running");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const commitDateValue = new Date(
+        Math.floor((Date.now() - 10_000) / 1000) * 1000,
+      ).toISOString();
+      await setTaskWindow(
+        task.id,
+        new Date(Date.parse(commitDateValue) - 30_000).toISOString(),
+      );
+      const hash = commitWithDate(repoDir, "inside-child", commitDateValue);
+      const actualCommitAt = commitDate(repoDir);
+      await addChildWithWindow(
+        group.id,
+        task.id,
+        executor.id,
+        new Date(Date.parse(actualCommitAt) - 5_000).toISOString(),
+      );
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+      });
+      expect(res.status).toBe(200);
+      expect(hash).toMatch(/^[0-9a-f]{40}$/);
+    });
+  });
+
+  it("R1:多个提交中只列出无法归属的提交", async () => {
+    const coordinator = await register("ci-coord-child-window-multiple");
+    const executor = await register("ci-exec-child-window-multiple");
+    const group = await createGroup(coordinator.id, "ci-child-window-multiple");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      await setTaskWindow(task.id, new Date(base - 60_000).toISOString());
+      const beforeHash = commitWithDate(
+        repoDir,
+        "before-child",
+        new Date(base - 30_000).toISOString(),
+      );
+      const insideHash = commitWithDate(
+        repoDir,
+        "inside-child",
+        new Date(base - 10_000).toISOString(),
+      );
+      await addChildWithWindow(
+        group.id,
+        task.id,
+        executor.id,
+        new Date(base - 20_000).toISOString(),
+      );
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(beforeHash);
+      expect(body.message).not.toContain(insideHash);
+    });
+  });
+
+  it("R2b:合法 alreadySatisfied 指向真实既有提交 → 200 且可跳过归属", async () => {
+    const coordinator = await register("ci-coord-already-satisfied");
+    const group = await createGroup(coordinator.id, "ci-already-satisfied");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const existingHash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+      await setTaskWindow(task.id, new Date(Date.now() - 1_000).toISOString());
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: {
+          alreadySatisfied: {
+            commits: [existingHash],
+            verification: "上一轮实现已存在,相关测试已通过",
+          },
+        },
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  it("R2b:alreadySatisfied 不存在的提交 → 400 点明该 hash", async () => {
+    const coordinator = await register("ci-coord-already-missing");
+    const group = await createGroup(coordinator.id, "ci-already-missing");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const missingHash = "0123456789abcdef0123456789abcdef01234567";
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: {
+          alreadySatisfied: {
+            commits: [missingHash],
+            verification: "已验证",
+          },
+        },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(missingHash);
+    });
+  });
+
+  it("R2b:缺 verification 不跳过归属校验", async () => {
+    const coordinator = await register("ci-coord-already-no-verification");
+    const executor = await register("ci-exec-already-no-verification");
+    const group = await createGroup(
+      coordinator.id,
+      "ci-already-no-verification",
+    );
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const commitDateValue = new Date(
+        Math.floor((Date.now() - 10_000) / 1000) * 1000,
+      ).toISOString();
+      await setTaskWindow(
+        task.id,
+        new Date(Date.parse(commitDateValue) - 30_000).toISOString(),
+      );
+      const hash = commitWithDate(
+        repoDir,
+        "missing-verification",
+        commitDateValue,
+      );
+      const actualCommitAt = commitDate(repoDir);
+      await addChildWithWindow(
+        group.id,
+        task.id,
+        executor.id,
+        new Date(Date.parse(actualCommitAt) + 10_000).toISOString(),
+      );
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { alreadySatisfied: { commits: [hash] } },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(hash);
+    });
+  });
+
   it("R1:noExecutionReason 空串/纯空白 → 仍 400", async () => {
     const coordinator = await register("ci-coord-3");
     const group = await createGroup(coordinator.id, "ci-3");
@@ -447,6 +715,28 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "failed",
       diffSummary: { error: "诚实的失败上报" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("R3:PATCH cancelled 时两条规则均不生效", async () => {
+    const coordinator = await register("ci-coord-cancelled");
+    const reviewer = await register("ci-reviewer-cancelled");
+    const execA = await register("ci-exec-cancelled");
+    const group = await createGroup(coordinator.id, "ci-cancelled");
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    // 零子任务 + 三方 + null dispatchKind:若是 done 会被 R1/R2 双拒。
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "cancelled",
+      diffSummary: { error: "协调者取消" },
     });
     expect(res.status).toBe(200);
   });

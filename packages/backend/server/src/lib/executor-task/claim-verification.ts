@@ -19,6 +19,40 @@ export interface ClaimVerification {
 /** 核实入口的执行器类别:cli=本地有仓库可核实;a2a=远端执行,本地无仓库。 */
 export type ClaimVerificationMode = "cli" | "a2a";
 
+/** Timestamp precision tolerance shared by task and child execution windows. */
+export const COMMIT_TIME_TOLERANCE_MS = 5_000;
+
+export type CommitExistence = "verified" | "not_found";
+
+/**
+ * Best-effort existence check for a commit claim that is not tied to the
+ * current task window (for example, an alreadySatisfied close claim).
+ * Undefined means the repository or git was unavailable, matching the
+ * lifecycle-preserving behavior of verifyCommitClaim.
+ */
+export async function verifyCommitExists(
+  hash: string | undefined,
+  repoRoot: string,
+): Promise<CommitExistence | undefined> {
+  if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) return "not_found";
+  try {
+    const repository = await gitExec(
+      ["rev-parse", "--is-inside-work-tree"],
+      repoRoot,
+    );
+    if (repository.status !== 0 || repository.stdout.trim() !== "true") {
+      return undefined;
+    }
+    const exists = await gitExec(
+      ["cat-file", "-e", `${hash}^{commit}`],
+      repoRoot,
+    );
+    return exists.status === 0 ? "verified" : "not_found";
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 三个写入 diffSummary.hash 的完成入口(CLI 完成 / detached 任务 PATCH /
  * a2a 完成)共用的核实入口(spec verify-agent-claims v1.1)。
@@ -56,18 +90,9 @@ export async function verifyCommitClaim(
 ): Promise<ClaimVerification | undefined> {
   if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) return undefined;
   try {
-    const repository = await gitExec(
-      ["rev-parse", "--is-inside-work-tree"],
-      repoRoot,
-    );
-    if (repository.status !== 0 || repository.stdout.trim() !== "true") {
-      return undefined;
-    }
-    const exists = await gitExec(
-      ["cat-file", "-e", `${hash}^{commit}`],
-      repoRoot,
-    );
-    if (exists.status !== 0) {
+    const existence = await verifyCommitExists(hash, repoRoot);
+    if (existence === undefined) return undefined;
+    if (existence === "not_found") {
       return { status: "not_found", hash };
     }
     const shown = await gitExec(["show", "-s", "--format=%cI", hash], repoRoot);
@@ -81,8 +106,8 @@ export async function verifyCommitClaim(
     if (
       !Number.isFinite(commitMs) ||
       !Number.isFinite(startMs) ||
-      commitMs < startMs ||
-      commitMs > nowMs
+      commitMs < startMs - COMMIT_TIME_TOLERANCE_MS ||
+      commitMs > nowMs + COMMIT_TIME_TOLERANCE_MS
     ) {
       return { status: "outside_window", hash, commitAt, windowStartedAt };
     }
