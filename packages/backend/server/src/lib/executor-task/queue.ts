@@ -748,11 +748,18 @@ async function dispatchTask(
     columns: { id: true },
   });
 
+  // 审计记录服务端观察到的派发目标:名字取该 participant 在库中的真实 name,
+  // 而不是执行器配置的 agentName —— 角色词(「执行器」等)与群无关,烙进审计
+  // 名会误导协调者按名字推断角色(见 spec agent-name-says-executor-regardless-of-role)。
+  const targetParticipant = await db.query.participant.findFirst({
+    where: (t, { eq: eqFn }) => eqFn(t.id, participantId),
+    columns: { name: true },
+  });
   const dispatchAudit = await buildDispatchTargetAudit(
     db,
     groupId,
     dispatcherParticipantId,
-    { id: participantId, name: ex.agentName },
+    { id: participantId, name: targetParticipant?.name ?? ex.agentName },
     selectionReason ?? null,
   );
 

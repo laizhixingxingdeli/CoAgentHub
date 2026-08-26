@@ -213,13 +213,13 @@ afterAll(async () => {
 });
 
 describe("task_status_changed(任务状态实时推送)", () => {
-  /** coordinator + CodeBuddy 执行器成员就绪。 */
+  /** coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup(title: string) {
     const coordinator = await registerParticipant({
       name: `coord-${title}`,
     });
     const codebuddy = await registerParticipant({
-      name: "CodeBuddy 执行器", // executors.ts 的 agentName,触发匹配靠它
+      name: "CodeBuddy", // executors.ts 的 agentName,触发匹配靠它
     });
     const group = await createGroup(coordinator.id, title);
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);

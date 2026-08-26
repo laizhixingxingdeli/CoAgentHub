@@ -78,7 +78,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   it("POST 重复 agentName → 409(内置与 DB 同名都算重复)", async () => {
     // 与内置执行器重名
     const dup = await createExecutor({
-      agentName: "AtomCode 执行器",
+      agentName: "AtomCode",
       kind: "cli",
       bin: fakeBin,
     });
@@ -120,7 +120,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
 
     const codex = list.find((x) => x.key === "codex");
     expect(codex).toMatchObject({
-      agentName: "Codex 执行器",
+      agentName: "Codex",
       kind: "cli",
       bin: "codex",
       builtin: true,
@@ -154,6 +154,20 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(JSON.stringify(list)).not.toContain("token_hash");
   });
 
+  it("R1:内置执行器 agentName 均不含角色词(执行器/Executor/检视器/规划)", async () => {
+    const res = await app.request("/api/executors");
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as Array<{
+      builtin?: boolean;
+      agentName: string;
+    }>;
+    const builtins = list.filter((x) => x.builtin);
+    expect(builtins.length).toBeGreaterThanOrEqual(7); // 7 内置
+    for (const ex of builtins) {
+      expect(ex.agentName).not.toMatch(/执行器|Executor|检视器|规划/);
+    }
+  });
+
   it("内置 reviewer 执行器:effectiveExecutors 派生 canDispatch=true(DISPATCH_CAPABLE_KEYS)", async () => {
     // GET /api/executors 不透出 canDispatch 字段;直接走 effectiveExecutors
     // 验证 DISPATCH_CAPABLE_KEYS(["reviewer"]) 在合并时派生 canDispatch: true。
@@ -161,7 +175,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const all = await effectiveExecutors(testDb as unknown as DataBase);
     const reviewer = all.find((x) => x.key === "reviewer");
     expect(reviewer).toBeDefined();
-    expect(reviewer!.agentName).toBe("Reviewer 检视器");
+    expect(reviewer!.agentName).toBe("Reviewer");
     expect(reviewer!.canDispatch).toBe(true);
     expect(reviewer).not.toHaveProperty("commitMode");
   });

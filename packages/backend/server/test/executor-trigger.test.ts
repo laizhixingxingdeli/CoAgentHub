@@ -107,7 +107,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
 
   async function bindExecutorKey(id: string, name: unknown) {
     const keyByName: Record<string, string> = {
-      "CodeBuddy 执行器": "codebuddy",
+      "CodeBuddy": "codebuddy",
       "Win Hermes": "win-hermes",
     };
     const executorKey = typeof name === "string" ? keyByName[name] : undefined;
@@ -221,7 +221,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }
   }
 
-  /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
+  /** 群主的 coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "coord-exec",
@@ -233,7 +233,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       .then(([participant]) => participant);
     if (!codebuddy) {
       codebuddy = await registerParticipant({
-        name: "CodeBuddy 执行器",
+        name: "CodeBuddy",
       });
       await testDb
         .update(participantTable)

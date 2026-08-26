@@ -100,7 +100,7 @@ function participantDisplayName(ex: ExecutorConfig): string {
 const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   {
     key: "executor",
-    agentName: "AtomCode 执行器",
+    agentName: "AtomCode",
     // type 旧值为 "agent"(participant 旧名);只影响新注册行的展示值,
     // 不与任何路由/权限逻辑耦合,改名后统一为 "participant"。
     type: "participant",
@@ -113,7 +113,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   },
   {
     key: "reasonix",
-    agentName: "Reasoning 执行器",
+    agentName: "Reasoning",
     type: "participant",
     bin: "reasonix",
     label: "reasonix",
@@ -124,7 +124,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   },
   {
     key: "codebuddy",
-    agentName: "CodeBuddy 执行器",
+    agentName: "CodeBuddy",
     type: "participant",
     bin: "codebuddy",
     label: "codebuddy",
@@ -132,7 +132,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   },
   {
     key: "codex",
-    agentName: "Codex 执行器",
+    agentName: "Codex",
     type: "participant",
     bin: "codex",
     label: "codex",
@@ -166,7 +166,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     // 手写 —— 由 DISPATCH_CAPABLE_KEYS(["reviewer"])在 effectiveExecutors 合并时
     // 派生为 true(检视者既是执行器又是下发方,见 ExecutorConfig.canDispatch)。
     key: "reviewer",
-    agentName: "Reviewer 检视器",
+    agentName: "Reviewer",
     type: "participant",
     kind: "cli",
     // 占位标识,**永远不会被 spawn**(spec v3.8 §3.17.4/§3.17.5):自 v3.8 起
@@ -184,7 +184,7 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
   },
   {
     key: "hermes",
-    agentName: "Hermes 规划",
+    agentName: "Hermes",
     type: "hermes",
     bin: "hermes",
     label: "hermes",

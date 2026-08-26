@@ -134,9 +134,9 @@ describe("自派警告与下发目标审计", () => {
 
   it("自派仍创建任务,向检视者持久化警告并记录候选状态", async () => {
     const coordinator = await registerParticipant("audit-self-coordinator");
-    const codebuddy = await registerParticipant("CodeBuddy 执行器");
-    const atomcode = await registerParticipant("AtomCode 执行器");
-    const reasonix = await registerParticipant("Reasoning 执行器");
+    const codebuddy = await registerParticipant("CodeBuddy");
+    const atomcode = await registerParticipant("AtomCode");
+    const reasonix = await registerParticipant("Reasoning");
     const reviewer = await registerParticipant("audit-self-reviewer");
     const group = await createGroup(coordinator.id, "自派审计");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
@@ -167,10 +167,17 @@ describe("自派警告与下发目标审计", () => {
     const task = await waitForTask(group.id, message.id);
     expect(["queued", "running"]).toContain(task.status);
     const audit = task.dispatchAudit as {
+      targetParticipantId: string;
+      targetParticipantName: string;
       selfDispatch: boolean;
       selectionReason: string | null;
       candidates: Array<{ participantId: string; status: string }>;
     };
+    // R3:审计记录的是 participant 在库中的真实名字,不是执行器配置的 agentName
+    // (角色词已从内置 agentName 移除;此处直接断言不含角色词)。
+    expect(audit.targetParticipantId).toBe(codebuddy.id);
+    expect(audit.targetParticipantName).toBe("CodeBuddy");
+    expect(audit.targetParticipantName).not.toMatch(/执行器|Executor/);
     expect(audit.selfDispatch).toBe(true);
     expect(audit.selectionReason).toBeNull();
     expect(audit.candidates).toEqual(
@@ -206,7 +213,7 @@ describe("自派警告与下发目标审计", () => {
 
   it("非自派不产生警告,调用方提供的理由原样写入审计", async () => {
     const coordinator = await registerParticipant("audit-direct-coordinator");
-    const codebuddy = await registerParticipant("CodeBuddy 执行器");
+    const codebuddy = await registerParticipant("CodeBuddy");
     const reviewer = await registerParticipant("audit-direct-reviewer");
     const group = await createGroup(coordinator.id, "定向审计");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
@@ -217,9 +224,15 @@ describe("自派警告与下发目标审计", () => {
     });
     const task = await waitForTask(group.id, message.id);
     const audit = task.dispatchAudit as {
+      targetParticipantId: string;
+      targetParticipantName: string;
       selfDispatch: boolean;
       selectionReason: string | null;
     };
+    // R3:目标名字取 participant 表的真实 name(非自派定向 CodeBuddy)。
+    expect(audit.targetParticipantId).toBe(codebuddy.id);
+    expect(audit.targetParticipantName).toBe("CodeBuddy");
+    expect(audit.targetParticipantName).not.toMatch(/执行器|Executor/);
     expect(audit.selfDispatch).toBe(false);
     expect(audit.selectionReason).toBe("按本群测试职责选择");
     await waitForTerminalTask(group.id, task.id as string);

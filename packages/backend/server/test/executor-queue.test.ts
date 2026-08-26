@@ -101,7 +101,7 @@ writeFileSync(
 );
 chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
-// AtomCode 执行器(内置 maxConcurrency=1)的 bin 同样指向 fake bin:声明式并发
+// AtomCode(内置 maxConcurrency=1)的 bin 同样指向 fake bin:声明式并发
 // 上限测试用同一脚本驱动(该脚本忽略 args,仅按 FAKE_* 环境变量行为)。
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
@@ -125,8 +125,8 @@ const { createTestApp } = await import("./app");
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
   const executorKeyByName: Record<string, string> = {
-    "CodeBuddy 执行器": "codebuddy",
-    "AtomCode 执行器": "executor",
+    "CodeBuddy": "codebuddy",
+    "AtomCode": "executor",
   };
 
   async function registerParticipant(body: Record<string, unknown>) {
@@ -310,13 +310,13 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     }
   }
 
-  /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
+  /** 群主的 coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup() {
     const coordinator = await registerParticipant({
       name: "coord-queue",
     });
     const codebuddy = await registerParticipant({
-      name: "CodeBuddy 执行器",
+      name: "CodeBuddy",
     });
     const group = await createGroup(coordinator.id, "队列控制测试");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
@@ -419,7 +419,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     // 本测试只验证 detached 的显式回写,不应制造会被逃生舱拦截的窗口内提交。
     process.env.FAKE_NO_COMMIT = "1";
     const dispatcher = await registerParticipant({ name: "coord-lifecycle" });
-    const coordinator = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const coordinator = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(dispatcher.id, "协调任务生命周期");
     await addMember(dispatcher.id, group.id, coordinator.id, ["coordinator"]);
 
@@ -1689,8 +1689,8 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
       process.env.FAKE_SLEEP_SECS = "3";
       const { coordinator } = await setupGroup();
-      // AtomCode 执行器(内置 maxConcurrency=1):与 codebuddy 共用同一 fake bin。
-      const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+      // AtomCode(内置 maxConcurrency=1):与 codebuddy 共用同一 fake bin。
+      const atomcode = await registerParticipant({ name: "AtomCode" });
       const projA = makeGitRepo("coagenthub-mc-a-");
       const projB = makeGitRepo("coagenthub-mc-b-");
       const groupA = await createGroup(coordinator.id, "并发上限群 A");
@@ -1888,7 +1888,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       );
       __setReliabilityTimeoutsForTests(60_000, 60_000);
       const { coordinator } = await setupGroup();
-      const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+      const atomcode = await registerParticipant({ name: "AtomCode" });
       const proj = makeGitRepo("coagenthub-qpos-");
       const group = await createGroup(coordinator.id, "排队位置验证群");
       await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);

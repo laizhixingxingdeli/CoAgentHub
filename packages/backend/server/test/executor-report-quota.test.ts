@@ -245,10 +245,10 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
     }
   }
 
-  /** 群主的 coordinator + CodeBuddy 执行器成员就绪。 */
+  /** 群主的 coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-report" });
-    const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(coordinator.id, "汇报与额度测试");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };

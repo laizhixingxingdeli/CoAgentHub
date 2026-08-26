@@ -215,7 +215,7 @@ describe("任务书声明仓库 → spawn cwd/快照/弱验收落到声明仓库
 
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-repo" });
-    const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(coordinator.id, "仓库解析测试");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };

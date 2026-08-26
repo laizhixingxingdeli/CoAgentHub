@@ -327,10 +327,10 @@ describe("Durable Task Completion Events", () => {
     }
   }
 
-  /** coordinator + CodeBuddy 执行器成员就绪。 */
+  /** coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup(title: string) {
     const coordinator = await registerParticipant({ name: `coord-${title}` });
-    const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(coordinator.id, title);
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };

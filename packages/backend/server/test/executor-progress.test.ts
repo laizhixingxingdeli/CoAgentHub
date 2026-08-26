@@ -273,7 +273,7 @@ describe("任务面板增强批次 server 侧测试", () => {
 
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-progress" });
-    const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(coordinator.id, "进度测试");
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };

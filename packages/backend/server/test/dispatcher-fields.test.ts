@@ -181,10 +181,10 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
     }
   }
 
-  /** coordinator + CodeBuddy 执行器成员就绪。 */
+  /** coordinator + CodeBuddy 成员就绪。 */
   async function setupGroup(title: string) {
     const coordinator = await registerParticipant({ name: `coord-${title}` });
-    const codebuddy = await registerParticipant({ name: "CodeBuddy 执行器" });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
     const group = await createGroup(coordinator.id, title);
     await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
     return { coordinator, codebuddy, group };
@@ -223,7 +223,7 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
 
   it("执行器伪造 metadata:不写入(即便执行器持有 coordinator 角色)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup("下发者 C");
-    const atomcode = await registerParticipant({ name: "AtomCode 执行器" });
+    const atomcode = await registerParticipant({ name: "AtomCode" });
     await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);
     // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
     // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,即使带 metadata
@@ -245,11 +245,11 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
   }, 15_000);
 
   it("canDispatch: true 的执行器(检视者 runtime)可携带 dispatcher/callback(§3.2 判据)", async () => {
-    // 内置 reviewer 执行器(key=reviewer,agentName="Reviewer 检视器")命中
+    // 内置 reviewer 执行器(key=reviewer,agentName="Reviewer")命中
     // DISPATCH_CAPABLE_KEYS → effectiveExecutors 派生 canDispatch: true(纯代码
     // 派生,不落 DB 列)——检视者既要被下发任务唤醒(注册为执行器),又能自己
     // 下发任务携带 callbackRef,不再被当"纯执行器"丢弃。
-    const reviewer = await registerParticipant({ name: "Reviewer 检视器" });
+    const reviewer = await registerParticipant({ name: "Reviewer" });
     const { coordinator, codebuddy, group } = await setupGroup("下发者 R");
     await addMember(coordinator.id, group.id, reviewer.id, ["coordinator"]);
     const { res, json } = await postMessage(reviewer.id, group.id, {

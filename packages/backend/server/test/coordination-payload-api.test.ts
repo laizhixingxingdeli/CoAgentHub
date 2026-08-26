@@ -45,8 +45,8 @@ describe("协作载荷 API 契约", () => {
 
   it("下发缺 specHash/剥离 callback 时用响应头发出可见信号", async () => {
     const owner = await register(`warning-owner-${randomUUID()}`);
-    const sender = await register("AtomCode 执行器");
-    const target = await register("CodeBuddy 执行器");
+    const sender = await register("AtomCode");
+    const target = await register("CodeBuddy");
     const groupResponse = await app.request("/api/groups", {
       method: "POST",
       headers: {
@@ -102,7 +102,7 @@ describe("协作载荷 API 契约", () => {
 
   it("两方与三方编制都提示缺 specHash,未传 callback 不产生剥离提示", async () => {
     const owner = await register(`warning-scope-owner-${randomUUID()}`);
-    const target = await register("CodeBuddy 执行器");
+    const target = await register("CodeBuddy");
     const reviewer = await register(`warning-scope-reviewer-${randomUUID()}`);
 
     const createGroup = (title: string) =>
@@ -175,7 +175,7 @@ describe("协作载荷 API 契约", () => {
 
   it("消息自动派发路径落库 dispatchKind 与规范字段", async () => {
     const owner = await register(`dispatch-kind-owner-${randomUUID()}`);
-    const target = await register("CodeBuddy 执行器");
+    const target = await register("CodeBuddy");
     const groupResponse = await app.request("/api/groups", {
       method: "POST",
       headers: {
@@ -235,7 +235,7 @@ describe("协作载荷 API 契约", () => {
 
   it("R5:自动派发已建空字段任务后显式补字段返回 409", async () => {
     const owner = await register(`silent-loss-owner-${randomUUID()}`);
-    const target = await register("CodeBuddy 执行器");
+    const target = await register("CodeBuddy");
     const groupResponse = await app.request("/api/groups", {
       method: "POST",
       headers: {
