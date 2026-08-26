@@ -15,10 +15,19 @@ const outputUpdatedAt = new Map<string, number>();
 /**
  * 追加输出块到任务缓冲:按行数/字节数双上限截断,超限只留尾部(环形)。
  * 任务结束(releaseTaskOutput)时从 Map 移除,避免内存泄漏。
+ *
+ * R4:prev 与 chunk 边界均无换行时补一个 \n(裸 prev + chunk 会把多句粘成
+ * 一段,几十句粘成一行后 OUTPUT_TAIL_MAX_LINES 永远够不着,实际只有字节
+ * 上限在起作用)。
  */
 export function appendTaskOutput(taskId: string, chunk: string): void {
   const prev = runningOutputs.get(taskId) ?? "";
-  let next = prev + chunk;
+  const needsJoin =
+    prev.length > 0 &&
+    chunk.length > 0 &&
+    !prev.endsWith("\n") &&
+    !chunk.startsWith("\n");
+  let next = prev + (needsJoin ? "\n" : "") + chunk;
   if (next.length > OUTPUT_TAIL_MAX_BYTES) {
     next = next.slice(-OUTPUT_TAIL_MAX_BYTES);
   }

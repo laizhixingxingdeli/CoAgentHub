@@ -31,6 +31,10 @@ export {
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
+  createExecutorOutputParser,
+  type ExecutorOutputParser,
+} from "./output-parser";
+export {
   cancelQueuedTasks,
   createTaskDispatchWarnings,
   currentRunningTask,
@@ -48,7 +52,12 @@ export {
   resolveTestExecutor,
   spawnFailureHint,
 } from "./queue";
-export { parseTaskReport, renderTaskCard, type TaskReport } from "./report";
+export {
+  extractCodeBuddyStreamResult,
+  parseTaskReport,
+  renderTaskCard,
+  type TaskReport,
+} from "./report";
 export {
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,

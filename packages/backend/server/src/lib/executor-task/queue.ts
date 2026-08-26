@@ -47,7 +47,9 @@ import {
   releaseTaskOutput,
   taskOutputTail,
 } from "./output-buffer";
+import { createExecutorOutputParser } from "./output-parser";
 import {
+  extractCodeBuddyStreamResult,
   findCommitHash,
   lastLinesOf,
   parseTaskReport,
@@ -1224,6 +1226,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // 声明在分支外:完成路径(回写)同样需要判断,不能只在 a2a 分支内定义。
     const memoryPerGroup = isA2a && ex.memory === "per-group";
     let handle: ExecutorRunHandle;
+    // 执行器输出解析器:每次执行一个,按 executorKey 把 codex JSONL / AtomCode
+    // 前缀行解析成动作行后再进缓冲(压缩噪音);解析不出的行逐字保留。
+    // 声明在分支外:完成路径(进程退出后 flush 残留)同样需要引用,不能只在
+    // CLI 分支内定义;a2a 分支的解析器是透传空实现,不会被 flush 到。
+    const parseOutput = createExecutorOutputParser(ex.key);
     if (isA2a) {
       const a2aUrl = ex.a2a?.url ?? "";
       console.log(
@@ -1366,8 +1373,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           // 走剥离后的文本——剥在唯一源头,前端/插件/兜底拉取一次性受益。
           process.stdout.write(chunk);
           const clean = stripAnsiChunk(chunk);
-          appendTaskOutput(taskId, clean);
-          void wsHub.broadcastTaskOutput(groupId, taskId, clean);
+          const parsed = parseOutput(clean);
+          appendTaskOutput(taskId, parsed);
+          void wsHub.broadcastTaskOutput(groupId, taskId, parsed);
           // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
           run.lastOutputAt = Date.now();
           if (run.stallTimer) {
@@ -1498,6 +1506,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     try {
       const result = await handle.promise;
       await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
+      // 进程已退出:吐出解析器残留的未成行尾部(逐字),保证 R3 不丢任何一行。
+      const flushed = parseOutput.flush();
+      if (flushed) {
+        appendTaskOutput(taskId, flushed);
+        void wsHub.broadcastTaskOutput(groupId, taskId, flushed);
+      }
       // 停止指令已 kill 进程组:完成回调置 cancelled,不再回传 ❌/✅(停止
       // 指令自己已回传 🛑)。
       if (run.stopped) {
@@ -1620,7 +1634,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       const executorText =
         ex.key === "codex"
           ? extractCodexExecText(result.stdout ?? "")
-          : undefined;
+          : ex.key === "codebuddy"
+            ? extractCodeBuddyStreamResult(result.stdout ?? "")
+            : undefined;
       const output = executorText
         ? `${executorText}\n${result.stderr ?? ""}`
         : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;

@@ -87,6 +87,7 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 const { createTestApp } = await import("./app");
 const {
   __resetExecutorQueueForTests,
+  extractCodeBuddyStreamResult,
   parseTaskReport,
   renderTaskCard,
   resolveTestExecutor,
@@ -557,6 +558,72 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           "token: n/a\n提交: 0123456789abcdef0123456789abcdef01234567",
         ),
       ).toEqual({ hash: "0123456789ab" });
+    });
+
+    it("extractCodeBuddyStreamResult:stream-json stdout 提取最终正文", () => {
+      // R1 打开 codebuddy --output-format stream-json 后 stdout 变 JSONL:
+      // 汇报嵌在 {"type":"result",...} 的 result 字段(实跑 2026-08-26 形状)。
+      const reportText = [
+        "提交: 0123456789abcdef0123456789abcdef01234567",
+        "测试: 定向 Vitest 18/18 通过",
+        "Token: 12345",
+        "汇报: 完成了实时输出改造",
+        "遗留: 无",
+      ].join("\n");
+      const stdout = [
+        JSON.stringify({ type: "system", subtype: "init", uuid: "u1" }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", name: "Read", input: { file_path: "a.txt" } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "中间过程文本" }] },
+        }),
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: reportText,
+        }),
+      ].join("\n");
+      const extracted = extractCodeBuddyStreamResult(stdout);
+      expect(extracted).toBe(reportText);
+      // 提取结果交给 parseTaskReport → 五段结构化(JSONL 直解只能拿到转义乱码)。
+      expect(parseTaskReport(`${extracted}\n`)).toMatchObject({
+        hash: "0123456789ab",
+        tests: "定向 Vitest 18/18 通过",
+        summary: "完成了实时输出改造",
+        todo: "无",
+      });
+    });
+
+    it("extractCodeBuddyStreamResult:无 result 事件回退最后一条 assistant 文本", () => {
+      const stdout = [
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "第一条" }] },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "最后一条" }] },
+        }),
+      ].join("\n");
+      expect(extractCodeBuddyStreamResult(stdout)).toBe("最后一条");
+    });
+
+    it("extractCodeBuddyStreamResult:非 JSONL / 空输出 → undefined", () => {
+      expect(
+        extractCodeBuddyStreamResult("plain text line\n提交: 好了"),
+      ).toBeUndefined();
+      expect(extractCodeBuddyStreamResult("")).toBeUndefined();
+      expect(
+        extractCodeBuddyStreamResult(undefined as unknown as string),
+      ).toBeUndefined();
     });
 
     it("renderTaskCard:缺段占位(hash→无,其余→-)与超长截断", () => {

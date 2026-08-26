@@ -181,3 +181,41 @@ function legacyExtractSummary(clean: string): string {
   if (out.length > 20000) out = out.slice(0, 20000) + "\n…(截断)";
   return out;
 }
+
+/**
+ * 从 codebuddy --output-format stream-json 的 stdout 提取最终正文(供汇报段落
+ * 解析):取最后一个 {"type":"result",...} 事件的 result 字段;无 result 事件时
+ * 回退最后一条 assistant 文本消息。R1 打开该开关后 stdout 变 JSONL,不提取则
+ * parseTaskReport 只能把整条转义 JSON 当 summary(实跑 2026-08-26 验证)。
+ */
+export function extractCodeBuddyStreamResult(text: string): string | undefined {
+  let resultText: string | undefined;
+  let lastAssistantText: string | undefined;
+  for (const line of (text ?? "").split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(trimmed);
+    } catch {
+      continue; // 非 JSONL 行(告警等)跳过,与 token-usage parseJsonLines 同界。
+    }
+    if (typeof row !== "object" || row === null) continue;
+    const record = row as Record<string, unknown>;
+    if (record.type === "result" && typeof record.result === "string") {
+      resultText = record.result;
+    }
+    if (record.type === "assistant") {
+      const message = record.message as Record<string, unknown> | undefined;
+      const content = Array.isArray(message?.content) ? message.content : [];
+      const texts = content
+        .filter((part): part is Record<string, unknown> =>
+          Boolean(part && typeof part === "object"),
+        )
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text as string);
+      if (texts.length > 0) lastAssistantText = texts.join("\n");
+    }
+  }
+  return resultText ?? lastAssistantText;
+}

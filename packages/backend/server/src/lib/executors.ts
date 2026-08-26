@@ -106,7 +106,9 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     type: "participant",
     bin: "atomcode",
     label: "atomcode",
-    args: ["-y", "-p", "{ticket}"],
+    // -v:实跑确认(2026-08-26)在 stderr 输出 [tool→ name] {args} / [tool← status]
+    // / [done] 动作行;executor-runner 已把 stderr 并入 onOutput,无需改传输链路。
+    args: ["-y", "-v", "-p", "{ticket}"],
     // 声明式并发上限:AtomCode 的 atomgit session 同一时间只能执行一个任务,
     // 并发会触发 403 atomgit_session_concurrency_conflict → 服务端按 1 排队。
     maxConcurrency: 1,
@@ -128,7 +130,10 @@ const DEFAULT_EXECUTORS: ExecutorConfig[] = [
     type: "participant",
     bin: "codebuddy",
     label: "codebuddy",
-    args: ["-y", "-p", "{ticket}"],
+    // --output-format stream-json 置于 {ticket} 之后:实跑确认(2026-08-26)
+    // 尾置旗标兼容(help 注明 only works with --print,两者是搭配不是冲突),
+    // stdout 变为 {"type":...} JSONL(动作/结果可见);ticket 保持 $3 位置。
+    args: ["-y", "-p", "{ticket}", "--output-format", "stream-json"],
   },
   {
     key: "codex",
