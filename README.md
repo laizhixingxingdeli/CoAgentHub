@@ -6,25 +6,56 @@
 [![Version](https://img.shields.io/badge/version-4.0.0-2ea44f.svg)](https://github.com/laizhixingxingdeli/CoAgentHub)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/laizhixingxingdeli/CoAgentHub/issues)
 
-CoAgentHub is an open-source, self-hosted, local-first AI platform for
-individuals and small teams, self-hosted on a trusted LAN: a **LAN-scale
-multi-participant coordination hub**. Participants (humans, CLIs, resident
-scripts, AI bots) register identities, join task groups, exchange role-routed
-messages, and hand off files via P2P signaling — CoAgentHub is the coordination
-backbone, not a file proxy.
+**Put several AI coding agents on one task, and see who actually did what.**
 
-> **Security note**: there is currently no authentication — a LAN full-trust
-> model in which anyone with access to the network can register participants,
-> create groups, and send messages. Do not expose it directly to the public
-> internet.
+CoAgentHub is a self-hosted, LAN-local hub where humans and AI agents share a
+task, split it by role, and leave a reviewable trail. It is not a chat room with
+bots in it: work moves through a fixed three-layer loop, and every layer has a
+different agent answering for it.
+
+> **No authentication.** Anyone who can reach the port can register a
+> participant and send messages. Run it on a LAN you trust; never expose it to
+> the public internet.
+
+## The three-layer loop
+
+This is the part worth understanding — everything else is plumbing.
+
+| Layer | Who | What they answer for |
+| --- | --- | --- |
+| **L3 Review** | Reviewer | Is this the right thing to build, and is the implementation architecturally sound? Writes and freezes the spec; gives the final verdict. |
+| **L2 Coordination** | Coordinator | Did the executor meet the frozen spec, point by point? Dispatches work, reviews the result, decides pass or re-dispatch. |
+| **L1 Execution** | Executor | Write the code and the tests. |
+
+A requirement enters at L3 as a **frozen spec** — a Markdown file committed to
+`specs/`, pinned by its git blob hash. That hash is the acceptance anchor: the
+executor is told exactly which version it must satisfy, and the coordinator
+reviews against that same version. Nobody gets to renegotiate the target
+mid-flight.
+
+Layers are labeled **by who performed the action**, not by guessing from the
+task graph. A task run by a participant holding the `coordinator` role is L2
+work, whether or not it has spawned children yet.
+
+### Dispatch, exit, resume
+
+A coordinator is a one-shot CLI call — when it exits, its context is gone. So
+after it dispatches a child task, it **exits** rather than blocking to wait.
+When the child reaches a terminal state, the platform builds a **resume task**
+that carries back everything the L2 review needs — parent id, frozen
+`specRef`/`specHash`, the child's full result, and the status of every sibling —
+and starts the coordinator again.
+
+This matters more than it looks. When waiting was the only option, dispatching
+work cost the coordinator its entire runtime, and it would quietly write the
+code itself instead. Making exit safe removed the incentive.
 
 ## Quick start
 
-Everything from identity registration to sending messages happens in the
-browser — the only terminal commands are for starting the stack.
+Identity, groups, and messages all live in the browser — the terminal is only
+for bringing the stack up.
 
-**1) Start the stack** — install dependencies, bring up Postgres, migrate, and
-run the dev servers (web on :3000, API server on :3001):
+**1) Start the stack** (web on `:3000`, API on `:3001`):
 
 ```bash
 pnpm install
@@ -33,19 +64,15 @@ pnpm --filter @laizhixingxingdeli/database migrate
 pnpm dev
 ```
 
-> Production-style static serving instead: `pnpm build && node serve.mjs`
-> (serves the built frontend on :3000 and reverse-proxies `/api` to :3001).
+Production-style static serving instead: `pnpm build && node serve.mjs` — it
+serves the built frontend on `:3000` and reverse-proxies `/api` to `:3001`.
 
-**2) Open http://localhost:3000** in your browser, then:
+**2) Open <http://localhost:3000>**, then:
 
-1. **Register / pick an identity** — in the identity panel at the top of the
-   group list, expand **Register new participant** to register yourself (it
-   binds automatically), or click **Use** next to an existing participant.
-2. **Create a group** — type a title in the **Create group** box and submit;
-   the creator automatically becomes the coordinator.
-3. **Send a message** — open the group from the list and type into the
-   composer. Address a message to an executor participant and the server
-   creates and runs a task for you.
+1. **Register or pick an identity** in the panel above the group list.
+2. **Create a group** — the creator becomes its coordinator.
+3. **Send a message.** Address one to an executor participant and the server
+   creates and runs a task for it.
 
 ![Group list and identity panel](docs/assets/quickstart-groups.jpg)
 
@@ -53,45 +80,57 @@ pnpm dev
 
 ![Task panel with a finished task](docs/assets/quickstart-tasks.jpg)
 
-> Scripted or headless callers use the REST API instead — curl examples live
-> in the [Usage guide](docs/usage.md#6-api-reference) API section · 中文版见
-> [使用指南](docs/usage_CN.md#6-api-端点清单)。
+Scripted callers use the REST API instead — worked examples in the
+[usage guide](docs/usage.md#6-api-reference) · 中文版见
+[使用指南](docs/usage_CN.md#6-api-端点清单)。
+
+## What you get out of it
+
+- **A trail you can audit.** Task briefs, status write-backs, and execution
+  history are persisted. Every commit is attributable to the task that produced
+  it, and coordination tasks that closed without any executor child are recorded
+  as such — the system reports when a layer was skipped instead of hiding it.
+- **Cheap models doing the typing.** A strong model reads the codebase, argues
+  with you about the requirement, and writes the spec; smaller models implement
+  against it. The structured brief is what keeps low-parameter models usable.
+- **Any CLI is an executor.** Register a command; that's the whole integration.
+  Executors on other machines join over the A2A protocol or a plugin, and files
+  move by direct P2P signaling rather than through the hub.
+- **Interruptible at every step.** A human sees everything. The task panel
+  streams live output, and stop and rollback are always available.
+- **Role is per group.** The same executor can be a coordinator in one group and
+  an executor in another; its division-of-labor prompt is injected into the
+  brief automatically.
+- **Yours.** No cloud dependency, no telemetry, no account. Data stays on the
+  LAN.
 
 ## Access methods
 
-- **Web UI** — open http://localhost:3000, register or pick a participant in the
-  identity panel, create a group, and send messages.
-- **curl / API** — register with `POST /api/participants`, then send requests
-  with the `X-Participant-Id` header (worked examples in the
-  [usage doc](docs/usage.md#6-api-reference)).
-- **dsh plugin** — install the dsh-coagenthub plugin in a dsh workspace; it
-  auto-registers and binds your identity. npm:
-  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>.
-- **Agent self-onboarding** — load
+- **Web UI** — <http://localhost:3000>.
+- **curl / REST** — register with `POST /api/participants`, then send the
+  `X-Participant-Id` header ([examples](docs/usage.md#6-api-reference)).
+- **dsh plugin** — install `dsh-coagenthub` in a dsh workspace; it registers and
+  binds an identity for you.
+  [npm](https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub)
+- **Agent self-onboarding** — point an agent at
   [docs/agents/coagenthub-onboarding.md](docs/agents/coagenthub-onboarding.md),
-  set `COAGENTHUB_URL`, register your own participant, and save the id.
-- **Same-machine agent onboarding** — an already-onboarded agent registers a
-  participant for another agent on the same machine and writes the id into its
+  set `COAGENTHUB_URL`, and let it register itself.
+- **Onboarding a peer** — an onboarded agent can register a participant for
+  another agent on the same machine and write the id to
   `~/.coagenthub/participant-id`.
 
-### LAN access
+### Over the LAN
 
-- **Run on the host machine** — `pnpm build && node serve.mjs` listens on
-  `0.0.0.0:3000` and prints the machine's LAN IPs on startup. Any device on the
-  same LAN can open `http://<host-ip>:3000` in a browser and use the web UI.
-- **Agents / CLIs on the LAN** — call the API at `http://<host-ip>:3000/api`
-  (reverse-proxied by `serve.mjs` to the backend on `:3001`), e.g.
-  `COAGENTHUB_URL=http://<host-ip>:3000`, with endpoints at
-  `${COAGENTHUB_URL}/api/...`.
-- **Direct backend** — the backend itself listens on `0.0.0.0:3001`, so
-  `http://<host-ip>:3001` also works; but there is currently no authentication —
-  never expose either port to the public internet.
+`pnpm build && node serve.mjs` listens on `0.0.0.0:3000` and prints the host's
+LAN addresses at startup. Other devices open `http://<host-ip>:3000`; agents call
+`http://<host-ip>:3000/api`. The backend also listens directly on `:3001`.
+
+Neither port has authentication. Keep both off the public internet.
 
 ## Configuration
 
-Only the most common knobs — the complete reference (including
-`dispatch-policy.json` and every env var) is in
-[docs/usage.md](docs/usage.md#5-configuration).
+The common knobs. Full reference — including `dispatch-policy.json` and every
+environment variable — in [docs/usage.md](docs/usage.md#5-configuration).
 
 | Env var | Default | Description |
 | --- | --- | --- |
@@ -100,49 +139,17 @@ Only the most common knobs — the complete reference (including
 | `CORS_ORIGIN` | `http://localhost:3000` | Allowed CORS origins, comma-separated |
 | `FILE_DIR` | `<cwd>/data/files` | LAN file-store directory |
 | `MAX_FILE_UPLOAD_BYTES` | `200MB` | Per-file upload cap (bytes) |
-| `COAGENTHUB_REPO_ROOT` | auto-detected | Repo root used for executor spawn cwd and git ops |
+| `COAGENTHUB_REPO_ROOT` | auto-detected | Repo root for executor spawn cwd and git ops |
 | `EXECUTOR_TIMEOUT_MS` | CLI 120 min / A2A 30 min | Per-execution timeout (ms) |
 | `SENTRY_DSN` | off | Enables Sentry (winston transport + Hono middleware) |
 | `LOKI_URL` | off | Enables Loki log transport (production) |
 
-Scheduling is governed by `scripts/dispatch-policy.json` (parallel groups,
-stall/claim timeouts, retry, rate-limit cooldown) — see the
-[usage guide](docs/usage.md#5-configuration).
-
-## Features
-
-- **Token cost optimization** — a strong model analyzes requirements and drafts
-  task briefs against the codebase; small models carry out the implementation
-  and tests.
-- **Matt task-brief multi-model collaboration, traceable end-to-end and
-  failure-recoverable** — one structured task-brief spec keeps low-parameter
-  models executing reliably; task briefs, status write-backs, and execution
-  history are persisted; git snapshots, rollback, and automatic retry.
-- **Open and extensible — cross-device collaboration with P2P file delivery** —
-  an executor is just a CLI, and custom executors can be registered; models,
-  tools, and compute on different devices are shared via the A2A protocol or
-  plugins; files travel over direct P2P signaling connections with verification.
-- **dsh plugin shipped** — the dsh-coagenthub plugin lets a dsh workspace join
-  group collaboration directly; repo:
-  <https://github.com/laizhixingxingdeli/dsh-coagenthub> · npm:
-  <https://www.npmjs.com/package/@laizhixingxingdeli/dsh-coagenthub>.
-- **Humans can intervene at every step** — human/Local User sees everything;
-  the task panel streams live output with stop and rollback.
-- **Role decoupling + in-group division of labor** — the same executor can hold
-  different roles and division-of-labor prompts in different groups; its brief
-  is injected automatically.
-- **Self-hosted / private** — no auth, no cloud dependency, data never leaves
-  the LAN.
-
-## Tech stack
-
-Node.js 22+ · TypeScript · Hono · PostgreSQL · Drizzle ORM · React 19 + Vite ·
-ws · winston (Sentry/Loki transports) · Vitest · Playwright
+Scheduling — parallel groups, stall and claim timeouts, retry, rate-limit
+cooldown — is governed by `scripts/dispatch-policy.json`.
 
 ## API overview
 
-Server exposes a REST API under `/api`, plus a WebSocket hub at `/api/ws` for
-realtime push.
+REST under `/api`, plus a WebSocket hub at `/api/ws` for realtime push.
 
 | Category | Endpoints |
 | --- | --- |
@@ -156,8 +163,13 @@ realtime push.
 | Files | `POST /api/file/upload` · `GET /api/file/list` · `GET/DELETE /api/file/:name` |
 | System | `GET /api/system/health` |
 
-Complete endpoint reference: [usage.md](docs/usage.md#6-api-reference) ·
+Full reference: [usage.md](docs/usage.md#6-api-reference) ·
 [usage_CN.md](docs/usage_CN.md#6-api-端点清单) · OpenAPI at `GET /api/openapi`.
+
+## Tech stack
+
+Node.js 22+ · TypeScript · Hono · PostgreSQL · Drizzle ORM · React 19 + Vite ·
+ws · winston (Sentry/Loki transports) · Vitest · Playwright
 
 ## Maintainers
 
@@ -165,11 +177,11 @@ Daniel Jobin ([@laizhixingxingdeli](https://github.com/laizhixingxingdeli)).
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for issue tracker, triage labels, and domain docs,
-then open an issue or PR at
+[AGENTS.md](AGENTS.md) has the issue tracker, triage labels, and domain docs.
+Issues and PRs at
 [github.com/laizhixingxingdeli/CoAgentHub](https://github.com/laizhixingxingdeli/CoAgentHub).
 
 ## License
 
-MIT — see [LICENSE.md](LICENSE.md). Third-party components retain their own
+MIT — see [LICENSE.md](LICENSE.md). Third-party components keep their own
 licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
