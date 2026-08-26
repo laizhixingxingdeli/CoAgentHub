@@ -1137,6 +1137,49 @@ app
             }
           : summaryWithoutStaleMarker;
       }
+      // token-fields-clobbered-by-close R1:平台在任务结束路径补写的 token 字段
+      // (queue.ts 完成回填)不得被调用方 PATCH 整体替换冲掉。复用 l1Bypass 的
+      // 平台补写模式:载荷不含该键时保留平台原值;载荷显式提供(含 null)时以
+      // 调用方为准(R2)。
+      if (
+        diffSummary !== undefined &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        const incoming =
+          typeof normalizedDiffSummary === "object" &&
+          normalizedDiffSummary !== null &&
+          !Array.isArray(normalizedDiffSummary)
+            ? (normalizedDiffSummary as Record<string, unknown>)
+            : undefined;
+        const existing =
+          typeof task.diffSummary === "object" &&
+          task.diffSummary !== null &&
+          !Array.isArray(task.diffSummary)
+            ? (task.diffSummary as Record<string, unknown>)
+            : undefined;
+        if (incoming && existing) {
+          if (
+            !Object.hasOwn(incoming, "tokenUsage") &&
+            Object.hasOwn(existing, "tokenUsage")
+          ) {
+            summaryToWrite = {
+              ...(summaryToWrite as Record<string, unknown>),
+              tokenUsage: existing.tokenUsage,
+            };
+          }
+          if (
+            !Object.hasOwn(incoming, "tokenUsageReason") &&
+            Object.hasOwn(existing, "tokenUsageReason")
+          ) {
+            summaryToWrite = {
+              ...(summaryToWrite as Record<string, unknown>),
+              tokenUsageReason: existing.tokenUsageReason,
+            };
+          }
+        }
+      }
       const [updated] = await db
         .update(taskTable)
         .set({

@@ -1341,4 +1341,200 @@ describe("任务实体(server 单一状态源)", () => {
       hash: "0123456789abcdef",
     });
   });
+
+  it("PATCH 结案:平台已写 tokenUsage,载荷不含该键 → 保留原值", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(平台 token)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    // 模拟平台完成路径补写(queue.ts 同款语义)。
+    await testDb
+      .update(taskTable)
+      .set({
+        diffSummary: { tokenUsage: 279888, tokenUsageReason: "unavailable" },
+      })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "协调者结案",
+        noExecutionReason: "无需下发执行器",
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.tokenUsage).toBe(279888);
+    expect(summary.tokenUsageReason).toBe("unavailable");
+    expect(summary.summary).toBe("协调者结案");
+  });
+
+  it("PATCH 结案:平台已写 tokenUsageReason,载荷不含该键 → 保留原值", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(仅 reason)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({ diffSummary: { tokenUsageReason: "codex-unavailable" } })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "结案",
+        noExecutionReason: "无需下发执行器",
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.tokenUsageReason).toBe("codex-unavailable");
+    expect(Object.hasOwn(summary, "tokenUsage")).toBe(false);
+  });
+
+  it("PATCH 结案:载荷显式提供 tokenUsage/tokenUsageReason → 以调用方为准", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(显式 token)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({ diffSummary: { tokenUsage: 111, tokenUsageReason: "platform" } })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "结案",
+        noExecutionReason: "无需下发执行器",
+        tokenUsage: 222,
+        tokenUsageReason: "caller",
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.tokenUsage).toBe(222);
+    expect(summary.tokenUsageReason).toBe("caller");
+  });
+
+  it("PATCH 结案:载荷显式传 null → 按 null 写入,不被保留逻辑覆盖", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(显式 null)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({ diffSummary: { tokenUsage: 111, tokenUsageReason: "platform" } })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "结案",
+        noExecutionReason: "无需下发执行器",
+        tokenUsage: null,
+        tokenUsageReason: null,
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(summary, "tokenUsage")).toBe(true);
+    expect(summary.tokenUsage).toBeNull();
+    expect(Object.hasOwn(summary, "tokenUsageReason")).toBe(true);
+    expect(summary.tokenUsageReason).toBeNull();
+  });
+
+  it("PATCH 结案:token 字段保留与 claimVerification 写入并存(回归)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-0000000000a1",
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "running",
+          },
+        ],
+        diffSummary: { tokenUsage: 777, tokenUsageReason: "platform" },
+      })
+      .where(eq(taskTable.id, task.id));
+    const repoRoot = process.env.COAGENTHUB_REPO_ROOT;
+    if (!repoRoot) throw new Error("COAGENTHUB_REPO_ROOT 未设置");
+    const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+
+    const res = await patchTask(execA.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { hash, summary: "PATCH 完成" },
+    });
+    expect(res.status).toBe(200);
+    const summary = ((await res.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.claimVerification).toMatchObject({
+      status: "verified",
+      hash,
+    });
+    expect(summary.tokenUsage).toBe(777);
+    expect(summary.tokenUsageReason).toBe("platform");
+  });
 });
