@@ -1,7 +1,7 @@
 # Spec: 内置名字写死「执行器」,协调者据此判定要派给自己,死锁
 
 > **状态**: Ready for Implementation
-> **版本**: 1.0
+> **版本**: 1.1
 > **日期**: 2026-08-26
 
 ## 现象:连续两张票停在同一句话上
@@ -23,8 +23,16 @@ key: "codex",
 agentName: "Codex 执行器",
 ```
 
-该 `agentName` 被用作 participant 名称,进而进入
-`dispatchAudit.targetParticipantName`(`executor-task/queue.ts:1027`):
+⚠️ **v1.1 更正**:该 `agentName` **不是** participant 表里的名字。
+库中 `participant.name` 就是 `Codex`(`01a03be2-4a40…`),完全正常。
+带角色词的名字来自 `executor-task/queue.ts:755` 传给审计构造函数的实参:
+
+```ts
+{ id: participantId, name: ex.agentName }   // ex 是执行器配置,不是 participant 行
+```
+
+于是同一个 id 有两个名字:库里是 `Codex`,审计里是「Codex 执行器」。
+审计写入见 `queue.ts:1027`:
 
 ```json
 "targetParticipantName": "Codex 执行器",
@@ -60,16 +68,17 @@ agentName: "Codex 执行器",
 (`coordination-task-is-not-l1` 立的规矩),后端亦有成员角色查询。
 **不要新写第三种角色查法。**
 
-### R3. 已注册的 participant 名称需迁移
+### R3(v1.1 改写). 审计应记录 participant 的真实名字
 
-`ensureExecutorParticipants` 幂等注册时用的是 `agentName`,
-库中已存在旧名(如「Codex 执行器」)。改名后需保证:
+原 v1.0 要求迁移 participant 名称 —— **那是基于错误诊断,已删除**。
+库中 participant 名字本来就正常(`Codex`),不需要迁移。
 
-- 现有 participant **按 id 稳定**,不因改名产生新 participant(必测)
-- 群成员关系、历史任务的 `executor_participant_id` 关联**不断**(必测)
+真正要改的是 `queue.ts:755`:传给审计的名字应取**该 participant 在库中的名字**,
+而不是执行器配置的 `agentName`。审计是「服务端观察到的派发目标」,
+它记录的应当是任务实际指向的那个 participant。
 
-⚠️ **不要**新建 participant 再迁移数据 —— 那会让历史任务失去归属。
-就地更名。
+⚠️ 若某处确实需要展示「用的是哪个 CLI 工具」,那是**另一个字段**的职责,
+不要把它塞进 `targetParticipantName`。本票不新增字段。
 
 ### R4. 不改角色语义与派发规则
 
@@ -80,8 +89,9 @@ agentName: "Codex 执行器",
 ## 验收标准
 
 - [ ] 内置条目的 `agentName` 均不含角色词(读代码确认,必测)
-- [ ] 改名后 participant **id 不变**,群成员关系与历史任务关联完好(必测)
-- [ ] `dispatchAudit.targetParticipantName` 不再出现角色词(必测)
+- [ ] `dispatchAudit.targetParticipantName` 等于该 participant 在库中的
+      `name`(本例应为 `Codex`),不再出现角色词(v1.1 核心,必测)
+- [ ] 不新增字段、不迁移 participant 数据(v1.1:原迁移要求已删除,读代码确认)
 - [ ] 任何角色判定均来自 `group_members.roles`,代码中**没有**按名称含
       「执行器」/「executor」推断角色的分支(读代码确认,必测)
 - [ ] 「禁止自派」规则行为逐字不变(回归,必测)
