@@ -243,13 +243,22 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     expect(screen.getByText("测试 web test 全绿")).toBeInTheDocument();
   });
 
-  it("展示 token 与任务整体耗时,无 token 时不渲染占位符", () => {
+  it("从真实 tokenUsage 形状展示 totalTokens 与任务整体耗时", () => {
     const { rerender } = render(
       <RequirementTimeline
         tasks={[
           makeTask({
             id: "t-1",
-            diffSummary: { summary: "做完了", tokenUsage: "8000" },
+            diffSummary: {
+              summary: "做完了",
+              tokenUsage: {
+                source: "atomcode-session-meta",
+                inputTokens: 81_924,
+                outputTokens: 17_387,
+                cachedInputTokens: 807_936,
+                totalTokens: 907_247,
+              },
+            },
             createdAt: "2026-08-01T09:00:00.000Z",
             updatedAt: "2026-08-01T09:01:05.000Z",
           }),
@@ -258,16 +267,47 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     );
     expect(
       screen.getByTestId("requirement-timeline-token-t-1"),
-    ).toHaveTextContent("Token 8000");
+    ).toHaveTextContent("Token 907,247");
+    expect(
+      screen.getByTestId("requirement-timeline-token-t-1"),
+    ).not.toHaveTextContent("Token 81,924");
     expect(
       screen.getByTestId("requirement-timeline-duration-t-1"),
     ).toHaveTextContent("耗时 1m 5s");
 
-    rerender(<RequirementTimeline tasks={[makeTask({ id: "t-2" })]} />);
+    rerender(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-2", diffSummary: { summary: "无 token" } })]}
+      />,
+    );
     expect(screen.queryByText(/Token/)).not.toBeInTheDocument();
     expect(
       screen.getByTestId("requirement-timeline-duration-t-2"),
     ).toBeInTheDocument();
+  });
+
+  it("有 tokenUsageReason 时显示未采集并在 title 中保留原因", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "unavailable",
+            diffSummary: {
+              summary: "做完了",
+              tokenUsageReason: "unavailable",
+            },
+          }),
+        ]}
+      />,
+    );
+
+    const token = screen.getByTestId("requirement-timeline-token-unavailable");
+    expect(token).toHaveTextContent("Token 未采集");
+    expect(token).toHaveAttribute(
+      "title",
+      expect.stringContaining("unavailable"),
+    );
+    expect(screen.queryByText("Token 0")).not.toBeInTheDocument();
   });
 
   it("没有汇报内容时给出占位文案,且不出现展开入口", () => {

@@ -160,6 +160,22 @@ function readText(
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/** 从对象形 tokenUsage 取总用量;缺失或非整数时不渲染 token 指标。 */
+function readTokenUsage(
+  diffSummary: Record<string, unknown> | null,
+): number | null {
+  const value = diffSummary?.tokenUsage;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const totalTokens = (value as Record<string, unknown>).totalTokens;
+  return typeof totalTokens === "number" &&
+    totalTokens >= 0 &&
+    Number.isSafeInteger(totalTokens)
+    ? totalTokens
+    : null;
+}
+
 /** 汇报 commit 核实结果(claimVerification,spec verify-agent-claims v1.1)。 */
 type ClaimVerification = {
   status: "verified" | "not_found" | "outside_window" | "skipped";
@@ -400,7 +416,8 @@ export default function RequirementTimeline({
     const hash = readText(task.diffSummary, "hash");
     const tests = readText(task.diffSummary, "tests");
     const todo = readText(task.diffSummary, "todo");
-    const tokenUsage = readText(task.diffSummary, "tokenUsage");
+    const tokenUsage = readTokenUsage(task.diffSummary);
+    const tokenUsageReason = readText(task.diffSummary, "tokenUsageReason");
     const claimVerification = readClaimVerification(task.diffSummary);
     const outputTail =
       readText(task.diffSummary, "outputTail") ?? task.outputTail ?? null;
@@ -548,10 +565,19 @@ export default function RequirementTimeline({
             data-testid={`requirement-timeline-metrics-${task.id}`}
             className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground"
           >
-            {tokenUsage && (
+            {tokenUsage !== null ? (
               <span data-testid={`requirement-timeline-token-${task.id}`}>
-                Token {tokenUsage}
+                Token {tokenUsage.toLocaleString("en-US")}
               </span>
+            ) : (
+              tokenUsageReason && (
+                <span
+                  data-testid={`requirement-timeline-token-${task.id}`}
+                  title={tokenUsageReason}
+                >
+                  Token 未采集
+                </span>
+              )
             )}
             <span data-testid={`requirement-timeline-duration-${task.id}`}>
               耗时 {duration}
