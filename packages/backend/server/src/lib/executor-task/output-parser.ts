@@ -14,7 +14,8 @@
  *    内容块 tool_use → [工具](input 只取键名)、text → [汇报];user tool_result
  *    → [工具] 名 ok/error(按 tool_use_id 关联工具名);system.task_started →
  *    [命令];result → [汇报]。uuid/session_id/_requestId 等信封一律不进缓冲;
- *    同 chunk 内重复动作行折叠只留首条(R5);解析失败/未知 type/未知块逐字保留。
+ *    同 chunk 内重复动作行折叠只留首条(R5,按来源区分工具调用与工具结果,
+ *    调用与匹配结果互不折叠);解析失败/未知 type/未知块逐字保留。
  *  - 其他执行器:原样透传,创建时对未知 executorKey 记一次观测日志(R4)。
  *
  * R3 是硬要求:任何一行解析失败/前缀不认识/格式变了 → 原样进缓冲,不丢弃。
@@ -318,13 +319,33 @@ function renderCodeBuddyLine(
 }
 
 /**
- * 动作行折叠键(R5 压缩比):同 chunk 内同一(标记, 工具/命令名)的重复动作行
- * 只保留首条——同一工具被反复调用时实时输出不必刷屏 40 遍。整行文本也参与
- * 去重(如 [汇报] 完全相同的正文)。透传行(R3)不进本函数、永不折叠。
+ * 来源行动作类别:assistant 行渲染工具调用(call)、user 行渲染工具结果
+ * (result);其余类型(含无法解析的行)返回 undefined,折叠键不追加类别。
+ * 折叠键必须按来源区分:同 chunk 内 tool_use 与其匹配的 tool_result 渲染
+ * 文本前缀相同(如 [工具] Read file_path 与 [工具] Read ok done),只按
+ * 工具名取键会把结果误判为重复调用而静默吞掉(ticket 01a03f35 回归)。
  */
-function actionDedupKey(rendered: string): string {
+function lineActionKind(line: string): "call" | "result" | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const type = (parsed as Record<string, unknown>).type;
+  return type === "assistant" ? "call" : type === "user" ? "result" : undefined;
+}
+
+/**
+ * 动作行折叠键(R5 压缩比):同 chunk 内同一(标记, 工具/命令名, 动作类别)的
+ * 重复动作行只保留首条——同一工具被反复调用时实时输出不必刷屏 40 遍。整行
+ * 文本也参与去重(如 [汇报] 完全相同的正文)。透传行(R3)不进本函数、永不折叠。
+ */
+function actionDedupKey(rendered: string, kind?: "call" | "result"): string {
   const m = /^\[(工具|命令)\] (\S+)/.exec(rendered);
-  return m ? `${m[1]}|${m[2]}` : rendered;
+  if (!m) return rendered;
+  return kind ? `${m[1]}|${m[2]}|${kind}` : `${m[1]}|${m[2]}`;
 }
 
 /** codebuddy:行缓冲 + 渲染动作行;其余逐字保留(R3)。跨行状态由闭包持有。 */
@@ -342,8 +363,9 @@ function createCodeBuddyParser(): ExecutorOutputParser {
     for (const l of lines) {
       const rendered = renderCodeBuddyLine(l, state);
       if (rendered !== l) {
-        // R5:折叠同 chunk 内的重复动作行;R3 透传行不参与、逐字保留
-        const key = actionDedupKey(rendered);
+        // R5:折叠同 chunk 内的重复动作行;R3 透传行不参与、逐字保留。
+        // 折叠键按来源区分调用/结果,同 chunk 的 tool_use + tool_result 不互吞。
+        const key = actionDedupKey(rendered, lineActionKind(l));
         if (seen.has(key)) continue;
         seen.add(key);
       }

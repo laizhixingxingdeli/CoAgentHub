@@ -461,6 +461,35 @@ describe("codebuddy:同 chunk 重复动作行折叠(R5 支撑)", () => {
     );
   });
 
+  it("同 chunk 的 tool_use 与其匹配 tool_result 都可见,折叠键不按同名吞掉结果(ticket 01a03f35 回归)", () => {
+    const parse = createExecutorOutputParser("codebuddy");
+    const use = codeBuddyAssistant([
+      {
+        type: "tool_use",
+        id: "tool-1",
+        name: "Read",
+        input: { file_path: "a.txt" },
+      },
+    ]);
+    const result = JSON.stringify({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-1",
+            content: [{ type: "text", text: "done" }],
+            is_error: false,
+          },
+        ],
+      },
+    });
+    // 调用与结果在同一个 chunk,两行都按序可见;tool_result 不得被折叠键静默吞掉
+    expect(parse(`${use}\n${result}\n`)).toBe(
+      "[工具] Read file_path\n[工具] Read ok done\n",
+    );
+  });
+
   it("R3 透传行不被折叠:两条相同旁白都保留", () => {
     const parse = createExecutorOutputParser("codebuddy");
     const plain = "plain warning line\n";
