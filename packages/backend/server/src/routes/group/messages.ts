@@ -22,6 +22,7 @@ import {
   findMissingProjectDocs,
   handleSkillInstallConfirmation,
 } from "@server/lib/participant-capabilities";
+import { assertClaimedSenderExists } from "@server/lib/unknown-participant";
 import {
   DELETED_MESSAGE_PLACEHOLDER,
   insertGroupMessage,
@@ -246,13 +247,20 @@ app
       // messages with 403 + reason; reading (GET messages / GET members /
       // GET :id) stays open so history remains browsable.
       await assertGroupWritable(db, id);
+      // sender 身份不存在 → 404 点明身份问题(而不是回落 Local User 后误报
+      // 403);存在但非本群成员 → 403 点明「不是本群成员」。缺失/非法 header
+      // 回落 Local User 的宽容行为保持(不改中间件)。
+      await assertClaimedSenderExists(db, c.req.header("X-Participant-Id")?.trim());
       // The sender must be a group member (any role) to post.
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
           and(eq(t.groupId, id), eq(t.participantId, senderId)),
       });
       if (!membership) {
-        throw new BizError(BizCodeEnum.Forbidden);
+        throw new BizError(
+          BizCodeEnum.Forbidden,
+          `参与方 ${senderId} 不是本群成员`,
+        );
       }
       // human 角色只读(§3.8)仍然生效,但规范驱动的定向任务是外部触发入口:
       // 必须同时带 specRef + specHash,且 audience 只能是 role/participant。

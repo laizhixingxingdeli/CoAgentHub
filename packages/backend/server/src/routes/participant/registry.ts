@@ -12,6 +12,7 @@ import {
   COAGENTHUB_SKILL_CAPABILITIES,
   mergeCapabilities,
 } from "@server/lib/participant-capabilities";
+import { throwParticipantNotFound } from "@server/lib/unknown-participant";
 import { participantIdentity } from "@server/middleware/participant-identity";
 import { desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -213,7 +214,7 @@ app
           createdAt: participantTable.createdAt,
         });
       if (!updated) {
-        throw new BizError(BizCodeEnum.ParticipantNotFound);
+        throwParticipantNotFound(id);
       }
 
       return c.json(updated);
@@ -247,7 +248,7 @@ app
         .where(eq(participantTable.id, id))
         .returning({ lastSeen: participantTable.lastSeen });
       if (!updated) {
-        throw new BizError(BizCodeEnum.ParticipantNotFound);
+        throwParticipantNotFound(id);
       }
 
       return c.json({ lastSeen: updated.lastSeen });
@@ -324,7 +325,7 @@ app
         return removed;
       });
       if (!deleted) {
-        throw new BizError(BizCodeEnum.ParticipantNotFound);
+        throwParticipantNotFound(id);
       }
 
       return c.json({ success: true, id: deleted.id, name: deleted.name });

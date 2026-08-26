@@ -5,6 +5,7 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
+import { assertPathParticipantExists } from "@server/lib/unknown-participant";
 import { participantIdentity } from "@server/middleware/participant-identity";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -36,6 +37,9 @@ app.get(
   async (c) => {
     const db = c.get("db");
     const { id: participantId } = c.req.valid("param");
+    // 路径 participant 不存在 → 404(身份问题,含修复建议);存在但调用者
+    // 不符 → 403(措辞逐字不变,回归必测)。
+    await assertPathParticipantExists(db, participantId);
     if (participantId !== c.get("participantId")) {
       throw new BizError(BizCodeEnum.Forbidden);
     }

@@ -191,6 +191,36 @@ describe("群组消息树与受众路由", () => {
       expect((await forbidden.json()).code).toBe("FORBIDDEN");
     });
 
+    it("sender 身份不存在 → 404 并点明身份问题(而不是回落 Local User 后误报 403)", async () => {
+      const { group } = await setupGroup();
+      const deadId = "00000000-0000-4000-8000-0000000000ff";
+      const res = await app.request(`/api/groups/${group.id}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": deadId,
+        },
+        body: JSON.stringify({ body: "我是死 id" }),
+      });
+      expect(res.status).toBe(404);
+      const err = (await res.json()) as { code: string; message: string };
+      expect(err.code).toBe("PARTICIPANT_NOT_FOUND");
+      expect(err.message).toContain(deadId);
+      expect(err.message).toContain("重新注册并更新 COAGENTHUB_PARTICIPANT_ID");
+    });
+
+    it("sender 存在但非本群成员 → 403 并点明「不是本群成员」", async () => {
+      const { group } = await setupGroup();
+      const outsider = await registerParticipant({ name: "outsider-2" });
+      const res = await sendMessage(outsider.id, group.id, {
+        body: "我不在群里",
+      });
+      expect(res.status).toBe(403);
+      const err = (await res.json()) as { code: string; message: string };
+      expect(err.code).toBe("FORBIDDEN");
+      expect(err.message).toContain("不是本群成员");
+    });
+
     it("human 角色成员发消息返回 403(§3.8 群内只读)", async () => {
       const { group, human } = await setupGroup();
       const res = await sendMessage(human.id, group.id, {

@@ -363,3 +363,104 @@ describe("participant 注册与身份 API", () => {
     expect(res.status).toBe(200);
   });
 });
+
+/**
+ * 身份不存在与无权限的区分(specs/unknown-participant-is-not-forbidden.md):
+ * 路径 participant 不存在 → 404 且消息含 id + 修复建议;存在但调用者 id 不符
+ * → 仍 403,措辞逐字不变(回归,必测)。
+ */
+describe("participant 路由:未知 participant 返回 404,存在但无权仍 403", () => {
+  const app = createTestApp();
+  const DEAD_ID = "00000000-0000-4000-8000-0000000000ff";
+
+  async function register(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  it("task-completion-events:路径 participant 不存在 → 404,消息含 id 与 COAGENTHUB_PARTICIPANT_ID", async () => {
+    const res = await app.request(
+      `/api/participants/${DEAD_ID}/task-completion-events`,
+      { headers: { "X-Participant-Id": DEAD_ID } },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
+    expect(body.message).toContain(DEAD_ID);
+    expect(body.message).toContain("重新注册并更新 COAGENTHUB_PARTICIPANT_ID");
+  });
+
+  it("task-dispatch-warnings:路径 participant 不存在 → 404,消息含 id 与修复建议", async () => {
+    const res = await app.request(
+      `/api/participants/${DEAD_ID}/task-dispatch-warnings`,
+      { headers: { "X-Participant-Id": DEAD_ID } },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
+    expect(body.message).toContain(DEAD_ID);
+    expect(body.message).toContain("重新注册并更新 COAGENTHUB_PARTICIPANT_ID");
+  });
+
+  it("task-completion-events:存在但调用者 id 不符 → 仍 403,措辞逐字不变", async () => {
+    const owner = await register({ name: "tce-owner" });
+    const other = await register({ name: "tce-other" });
+
+    const res = await app.request(
+      `/api/participants/${owner.id}/task-completion-events`,
+      { headers: { "X-Participant-Id": other.id } },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("FORBIDDEN");
+    // 既有措辞逐字不变:仍是裸 "Forbidden"。
+    expect(body.message).toBe("Forbidden");
+  });
+
+  it("task-dispatch-warnings:存在但调用者 id 不符 → 仍 403,措辞逐字不变", async () => {
+    const owner = await register({ name: "tdw-owner" });
+    const other = await register({ name: "tdw-other" });
+
+    const res = await app.request(
+      `/api/participants/${owner.id}/task-dispatch-warnings`,
+      { headers: { "X-Participant-Id": other.id } },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("FORBIDDEN");
+    expect(body.message).toBe("Forbidden");
+  });
+
+  it("PATCH /:id:participant 不存在 → 404,消息含 id 与修复建议", async () => {
+    const res = await app.request(`/api/participants/${DEAD_ID}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": DEAD_ID,
+      },
+      body: JSON.stringify({ name: "x" }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
+    expect(body.message).toContain(DEAD_ID);
+    expect(body.message).toContain("重新注册并更新 COAGENTHUB_PARTICIPANT_ID");
+  });
+
+  it("PUT /:id/heartbeat:participant 不存在 → 404,消息含 id 与修复建议", async () => {
+    const res = await app.request(`/api/participants/${DEAD_ID}/heartbeat`, {
+      method: "PUT",
+      headers: { "X-Participant-Id": DEAD_ID },
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code: string; message: string };
+    expect(body.code).toBe("PARTICIPANT_NOT_FOUND");
+    expect(body.message).toContain(DEAD_ID);
+    expect(body.message).toContain("重新注册并更新 COAGENTHUB_PARTICIPANT_ID");
+  });
+});
