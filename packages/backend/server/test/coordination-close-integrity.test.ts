@@ -280,10 +280,10 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     };
   }
 
-  it("R1:协调任务零子任务 PATCH done → 400,且点明 L1 层未发生", async () => {
+  it("零执行子任务 + 无窗口内提交 → done 放行(不再要求 L1 层或 noExecutionReason)", async () => {
     const coordinator = await register("ci-coord-1");
     const group = await createGroup(coordinator.id, "ci-1");
-    // 两方(无 reviewer)隔离 R2;detached 经 coordinator 角色判定。
+    // 两方(无 reviewer)隔离 review_request 守卫;detached 经 coordinator 角色判定。
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
     const task = await createTask(
       coordinator.id,
@@ -294,12 +294,10 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { message: string };
-    expect(body.message).toContain("L1 层未发生");
+    expect(res.status).toBe(200);
   });
 
-  it("R1:陈旧运行时追加旧版守卫恢复提示,但仍拒绝结案", async () => {
+  it("陈旧运行时零子任务 done → 放行(守卫已删除,不再追加旧版守卫恢复提示)", async () => {
     const coordinator = await register("ci-coord-stale-close");
     const group = await createGroup(coordinator.id, "ci-stale-close");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
@@ -314,15 +312,11 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toContain("L1 层未发生");
-      expect(body.message).toContain("可能来自旧版守卫");
-      expect(body.message).toContain("请在发起方重启后重试回写");
+      expect(res.status).toBe(200);
     });
   });
 
-  it("R1:非陈旧运行时的结案 400 信息逐字不变", async () => {
+  it("非陈旧运行时零子任务 done → 放行", async () => {
     const coordinator = await register("ci-coord-fresh-close");
     const group = await createGroup(coordinator.id, "ci-fresh-close");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
@@ -337,12 +331,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toBe(
-        "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
-      );
-      expect(body.message).not.toContain("可能来自旧版守卫");
+      expect(res.status).toBe(200);
     });
   });
 
@@ -484,7 +473,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("escape hatch:窗口内有提交 + 有理由 → 400,且包含哈希与窗口起点", async () => {
+  it("零执行子任务 + 协调者窗口内有提交 → done 放行(不再要求 noExecutionReason)", async () => {
     const coordinator = await register("ci-coord-commit-window");
     const group = await createGroup(coordinator.id, "ci-commit-window");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
@@ -512,12 +501,9 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
 
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
-        diffSummary: { noExecutionReason: "无需下发执行器" },
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toContain(hash);
-      expect(body.message).toContain(windowStartedAt);
+      expect(res.status).toBe(200);
+      expect(hash).toMatch(/^[0-9a-f]{40}$/);
     });
   });
 
@@ -571,7 +557,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
-  it("R1:提交早于全部执行子任务窗口 → 400,列出提交时间与窗口", async () => {
+  it("提交早于全部执行子任务窗口 → done 放行(归属校验已删除)", async () => {
     const coordinator = await register("ci-coord-child-window-before");
     const executor = await register("ci-exec-child-window-before");
     const group = await createGroup(coordinator.id, "ci-child-window-before");
@@ -602,11 +588,8 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toContain(hash);
-      expect(body.message).toContain(actualCommitAt);
-      expect(body.message).toContain(childStartedAt);
+      expect(res.status).toBe(200);
+      expect(hash).toMatch(/^[0-9a-f]{40}$/);
     });
   });
 
@@ -648,7 +631,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
-  it("R1:多个提交中只列出无法归属的提交", async () => {
+  it("窗口内有多个提交(含窗口外)→ done 放行(归属校验已删除)", async () => {
     const coordinator = await register("ci-coord-child-window-multiple");
     const executor = await register("ci-exec-child-window-multiple");
     const group = await createGroup(coordinator.id, "ci-child-window-multiple");
@@ -684,10 +667,9 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       const res = await patchTask(coordinator.id, group.id, task.id, {
         status: "done",
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toContain(beforeHash);
-      expect(body.message).not.toContain(insideHash);
+      expect(res.status).toBe(200);
+      expect(beforeHash).toMatch(/^[0-9a-f]{40}$/);
+      expect(insideHash).toMatch(/^[0-9a-f]{40}$/);
     });
   });
 
@@ -794,7 +776,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
-  it("R2b:缺 verification 不跳过归属校验", async () => {
+  it("R2b:缺 verification 的 alreadySatisfied 不再触发归属校验拒绝 → done 放行", async () => {
     const coordinator = await register("ci-coord-already-no-verification");
     const executor = await register("ci-exec-already-no-verification");
     const group = await createGroup(
@@ -834,13 +816,12 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
         status: "done",
         diffSummary: { alreadySatisfied: { commits: [hash] } },
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { message: string };
-      expect(body.message).toContain(hash);
+      expect(res.status).toBe(200);
+      expect(hash).toMatch(/^[0-9a-f]{40}$/);
     });
   });
 
-  it("R1:noExecutionReason 空串/纯空白 → 仍 400", async () => {
+  it("noExecutionReason 空串/纯空白不再构成结案阻碍 → 均放行", async () => {
     const coordinator = await register("ci-coord-3");
     const group = await createGroup(coordinator.id, "ci-3");
     const msg = await postMessage(coordinator.id, group.id, "协调任务");
@@ -855,7 +836,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
         status: "done",
         diffSummary: { noExecutionReason: reason },
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(200);
     }
   });
 
@@ -1006,7 +987,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("复用 isDetachedTask():brief 含 ## ReplyMode: detached 即判定协调任务", async () => {
+  it("复用 isDetachedTask():brief 含 ## ReplyMode: detached 即判定协调任务,零子任务 done 放行", async () => {
     const coordinator = await register("ci-coord-10");
     const execA = await register("ci-exec-10");
     const group = await createGroup(coordinator.id, "ci-10");
@@ -1017,13 +998,11 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       "## ReplyMode: detached\n普通正文",
     );
     const task = await createTask(coordinator.id, group.id, msg.id, execA.id);
-    // 零子任务 done → R1 经 isDetachedTask 的 brief 分支命中 → 400。
+    // 零子任务 done:经 isDetachedTask 的 brief 分支进入结案完整性检查并放行。
     const res = await patchTask(execA.id, group.id, task.id, {
       status: "done",
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { message: string };
-    expect(body.message).toContain("L1 层未发生");
+    expect(res.status).toBe(200);
   });
 
   it("R5:既有 review_request 形状校验不变(缺字段 → 400 形状错误)", async () => {

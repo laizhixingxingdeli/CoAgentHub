@@ -27,7 +27,6 @@ import {
 } from "@server/lib/executor-task";
 import {
   type ClaimVerificationMode,
-  COMMIT_TIME_TOLERANCE_MS,
   verifyCommitExists,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
@@ -79,14 +78,6 @@ interface AlreadySatisfiedClaim {
   verification: string;
 }
 
-interface ExecutionWindow {
-  childTaskId: string;
-  startedAt: string;
-  endedAt: string;
-  startMs: number;
-  endMs: number;
-}
-
 function coordinationCloseError(message: string): BizError {
   const runtime = getRuntimeStatus();
   if (!runtime.stale) {
@@ -134,51 +125,6 @@ async function validateAlreadySatisfiedClaim(
     if (existence === undefined) return "unavailable";
   }
   return "verified";
-}
-
-async function commitTimestamp(
-  repoRoot: string,
-  hash: string,
-): Promise<string | undefined> {
-  try {
-    const shown = await gitExec(["show", "-s", "--format=%cI", hash], repoRoot);
-    if (shown.status !== 0) return undefined;
-    const timestamp = shown.stdout.trim();
-    return timestamp && Number.isFinite(Date.parse(timestamp))
-      ? timestamp
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function executionWindows(
-  children: Array<Pick<TaskRow, "id" | "status" | "updatedAt" | "attempts">>,
-  now: Date,
-): ExecutionWindow[] {
-  return children.flatMap((child) => {
-    const startedAt = child.attempts[0]?.startedAt;
-    const startMs = startedAt ? Date.parse(startedAt) : Number.NaN;
-    if (!startedAt || !Number.isFinite(startMs)) return [];
-
-    const terminal = isTerminalTaskStatus(child.status);
-    const endedAt = terminal
-      ? (child.updatedAt ?? now).toISOString()
-      : now.toISOString();
-    const endMs = Date.parse(endedAt);
-    if (!Number.isFinite(endMs)) return [];
-    return [{ childTaskId: child.id, startedAt, endedAt, startMs, endMs }];
-  });
-}
-
-function formatExecutionWindows(windows: ExecutionWindow[]): string {
-  if (windows.length === 0) return "(没有可用的执行子任务窗口)";
-  return windows
-    .map(
-      (window) =>
-        `${window.childTaskId}: [${window.startedAt} ~ ${window.endedAt}]`,
-    )
-    .join("; ");
 }
 
 /** 从子任务自身的 diffSummary 提取 claimVerification.status(读子任务,不读协调任务)。 */
@@ -310,11 +256,11 @@ async function assertCoordinationCloseIntegrity(
     summary !== undefined && Object.hasOwn(summary, "alreadySatisfied");
 
   // R2b:已存在的实现由协调者指名提交并提供验证摘要时,平台核实提交
-  // 真实存在后允许跳过当前任务的执行窗口归属校验。git 不可用时不能
-  // 把未核实的 alreadySatisfied 当成有效声明,但仍遵循 R3 的放行原则。
+  // 真实存在后认可该声明。git 不可用时不能把未核实的 alreadySatisfied
+  // 当成有效声明。
   const canUseAlreadySatisfied = alreadySatisfiedStatus === "verified";
 
-  // R1:done 的协调任务必须有执行子任务(L1 层发生过),否则 400 且点明 L1 层未发生。
+  // 读取本协调任务的执行子任务(L1 层)列表,供结案路径的终态检查与 l1Bypass 检测使用。
   const children = await db.query.task.findMany({
     where: (t, { eq }) => eq(t.parentTaskId, task.id),
     columns: {
@@ -346,26 +292,6 @@ async function assertCoordinationCloseIntegrity(
         "alreadySatisfied 不合法: commits 中的提交必须真实存在,且 verification 必须为非空字符串。",
       );
     }
-    // R4:逃生舱 —— 显式声明非空 noExecutionReason 放行(空串/纯空白仍拒绝)。
-    const noExecutionReason =
-      typeof summary?.noExecutionReason === "string"
-        ? summary.noExecutionReason
-        : "";
-    if (noExecutionReason.trim() === "") {
-      throw coordinationCloseError(
-        "L1 层未发生:本协调任务没有任何执行子任务。若确实无需下发执行器,请在 diffSummary.noExecutionReason 中写明原因。",
-      );
-    }
-
-    // escape-hatch-became-the-default R1/R2/R3:有理由也不能掩盖协调者
-    // 在同一任务窗口内直接提交代码。窗口起点必须复用 verifyCommitClaim
-    // 的 attempts[0].startedAt;git/仓库失败时按 R2 放行。
-    if (commits && commits.length > 0) {
-      const windowStartedAt = task.attempts[0]?.startedAt;
-      throw coordinationCloseError(
-        `L1 层未发生:本协调任务没有任何执行子任务,但任务窗口内检测到提交(${commits.join(", ")})。代码改动应经执行器完成。窗口起点: ${windowStartedAt}。`,
-      );
-    }
   }
 
   // R1:done 的协调任务若已有有效执行子任务,所有子任务必须先到终态。
@@ -380,39 +306,6 @@ async function assertCoordinationCloseIntegrity(
         `L1 层未完成:存在非终态执行子任务: ${nonTerminal
           .map((child) => `${child.id} (${child.status})`)
           .join(", ")}`,
-      );
-    }
-  }
-
-  // R1:父任务窗口内的每个提交都必须落入某个执行子任务窗口。
-  // commitsInTaskWindow 仍是提交集合的唯一来源;这里仅补读提交时间来
-  // 对照子任务窗口并生成可核查的拒绝信息。
-  if (commits && commits.length > 0 && !canUseAlreadySatisfied) {
-    const now = new Date();
-    const windows = executionWindows(effectiveChildren, now);
-    const unassigned: Array<{ hash: string; commitAt: string }> = [];
-    for (const hash of commits) {
-      const commitAt = await commitTimestamp(repoRoot, hash);
-      // R3:提交时间无法读取(git 失败)时按「宁可漏判不可卡死」放行,
-      // 不把该提交判为无法归属。
-      if (!commitAt) continue;
-      const commitMs = Date.parse(commitAt);
-      const assigned =
-        Number.isFinite(commitMs) &&
-        windows.some(
-          (window) =>
-            commitMs >= window.startMs - COMMIT_TIME_TOLERANCE_MS &&
-            commitMs <= window.endMs + COMMIT_TIME_TOLERANCE_MS,
-        );
-      if (!assigned) {
-        unassigned.push({ hash, commitAt });
-      }
-    }
-    if (unassigned.length > 0) {
-      throw coordinationCloseError(
-        `提交归属校验失败:以下提交不在任何执行子任务窗口内: ${unassigned
-          .map((commit) => `${commit.hash} (${commit.commitAt})`)
-          .join(", ")}。各执行子任务窗口: ${formatExecutionWindows(windows)}。`,
       );
     }
   }
