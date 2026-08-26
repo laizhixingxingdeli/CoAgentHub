@@ -52,7 +52,7 @@ Migrate the database before exercising the server:
 - **Frontend**: React + Vite + wouter; **backend**: Hono + Drizzle ORM + PostgreSQL.
 - Linting and formatting are enforced by **Biome** (config in `biome.json`).
 - Backend domain logic is split into focused, independently-testable modules
-  (e.g. `lib/executor-task/` → types/state/output-buffer/notify/report/queue);
+  (e.g. `lib/executor-task/` → types/state/output-buffer/output-parser/notify/report/queue);
   keep the exported surface stable and unit-testable.
 - TypeScript strict mode; run `check-types` after non-trivial changes.
 - No new dependencies without justification.

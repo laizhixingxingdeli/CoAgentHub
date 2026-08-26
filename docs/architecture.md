@@ -56,6 +56,7 @@ CoAgentHub/
 │   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
 │   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail)
+│   │   │           ├── output-parser.ts #    按执行器格式流式渲染动作行(解析失败原样保留)
 │   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
 │   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard;含 Token 消耗提取)
 │   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/取消排队/超时/重试)
