@@ -351,15 +351,18 @@ describe.sequential("协调者续跑完整验收", () => {
     });
   });
 
-  describe.sequential("R5:协调者任务书含「派发后可退出」那行(必测)", () => {
-    it("协调者任务书含「派发后可退出」那行", async () => {
+  describe.sequential("R5:协调者任务书强制「派发成功后立即退出本轮、不得轮询子任务终态」(必测)", () => {
+    it("协调者任务书强制退出本轮且明确禁止轮询子任务终态", async () => {
       // 这里直接锁定 coordinator 分支的任务书模板源码,避免该纯模板验收
       // 启动真实 CLI,与端到端测试共享临时 git 仓库造成竞态。
       const source = readFileSync(
         path.resolve(import.meta.dirname, "../src/lib/executor-task/queue.ts"),
         "utf8",
       );
-      expect(source).toContain("派发后可退出");
+      expect(source).toContain("### 派发成功后立即退出本轮（强制）");
+      expect(source).toContain(
+        "严禁在派发成功后用 `coagenthub_get_task` 轮询自身任务或子任务状态来等待其终态",
+      );
       expect(source).toContain("coagenthub-coordinator` skill");
     }, 30_000);
   });
