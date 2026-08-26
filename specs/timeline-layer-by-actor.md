@@ -1,6 +1,6 @@
 # Spec: 时间线分层按消息形态而非动作主体,下发落错了层
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `813077e7`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **修正**: `requirement-detail-layer-grouping`(`a95daf4c`)的 **R2 归属规则**

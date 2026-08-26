@@ -1,6 +1,6 @@
 # Spec: 载荷契约要求整条消息是 JSON,而人读的消息都包 markdown
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `211b9ae3 + 1bdd3ae5`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **修正**: `findings-must-reach-coordinator`(`68446529`)的 R2 强制口径

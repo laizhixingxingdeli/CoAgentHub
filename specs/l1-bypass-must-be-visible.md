@@ -1,6 +1,6 @@
 # Spec: 标 `failed` 就能绕开 L1 守卫,而代码照样落地
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `c4529cda`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **补齐**: `escape-hatch-became-the-default`(`e824be15`)的 **R4「只管 done」**

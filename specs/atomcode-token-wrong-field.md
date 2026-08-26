@@ -1,6 +1,6 @@
 # Spec: AtomCode token 采集读错字段,从未成功过一次
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `1f60cd81`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **修正**: `token-usage-from-cli-records`(`13fb895e`)的 AtomCode 分支

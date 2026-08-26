@@ -1,6 +1,6 @@
 # Spec: 协调任务在子任务还在跑的时候就结案了
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `84605aba + 6c72d83f(夹具修正)`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **补齐**: `coordination-close-integrity` R1

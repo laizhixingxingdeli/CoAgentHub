@@ -1,6 +1,6 @@
 # Spec: 「有执行子任务」被一个事后补建的只读子任务满足了
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `eca54304 + 28825b6a(R2b 修正)`
 > **版本**: 1.1
 > **日期**: 2026-08-26
 > **收紧**: `coordination-close-integrity` R1 的 `hasExecutionChild` 判据

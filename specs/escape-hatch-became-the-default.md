@@ -1,6 +1,6 @@
 # Spec: 协调者用逃生舱跳过 L1,自己动手改代码
 
-> **状态**: Ready for Implementation
+> **状态**: Landed — L3 通过(2026-08-26),实现 `d58ba392`
 > **版本**: 1.0
 > **日期**: 2026-08-25
 > **收紧**: `coordination-close-integrity`(`89f8ddba`)的 **R4 逃生舱**
