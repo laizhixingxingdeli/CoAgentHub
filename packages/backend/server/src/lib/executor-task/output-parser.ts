@@ -10,7 +10,12 @@
  *  - atomcode(-v):动作行本身已紧凑([tool→ name] {args} 等),逐字保留;
  *    只把粘连在中行内的已知前缀(如 `…read the file.[tokens] prompt=…`)
  *    拆到行首,治「多句粘成一段」。未知行逐字保留。
- *  - 其他执行器:原样透传。
+ *  - codebuddy(--output-format stream-json):Claude Code 风格 JSONL。assistant
+ *    内容块 tool_use → [工具](input 只取键名)、text → [汇报];user tool_result
+ *    → [工具] 名 ok/error(按 tool_use_id 关联工具名);system.task_started →
+ *    [命令];result → [汇报]。uuid/session_id/_requestId 等信封一律不进缓冲;
+ *    同 chunk 内重复动作行折叠只留首条(R5);解析失败/未知 type/未知块逐字保留。
+ *  - 其他执行器:原样透传,创建时对未知 executorKey 记一次观测日志(R4)。
  *
  * R3 是硬要求:任何一行解析失败/前缀不认识/格式变了 → 原样进缓冲,不丢弃。
  * 宁可多显示,不可静默吞掉。
@@ -36,6 +41,19 @@ const ATOMCODE_PREFIX_MARKERS = [
 /** 截断到 N 字符,超长加省略号。 */
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/**
+ * 未知 executorKey 观测日志去重:只记一次,避免高吞吐时逐 chunk 刷屏。
+ * 下一个新执行器接入即可立刻被发现,而不是等缓冲顶满才察觉(R4)。
+ */
+const observedUnknownExecutorKeys = new Set<string>();
+function observeUnknownExecutorKey(executorKey: string): void {
+  if (observedUnknownExecutorKeys.has(executorKey)) return;
+  observedUnknownExecutorKeys.add(executorKey);
+  console.warn(
+    `[executor-output-parser] unknown executorKey=${executorKey}; falling back to identity passthrough (output not parsed).`,
+  );
 }
 
 /**
@@ -177,6 +195,171 @@ function createIdentityParser(): ExecutorOutputParser {
 }
 
 /**
+ * 从 user tool_result 的 content 抽取可见文本:content 为文本块数组时取 text
+ * 字段拼接;为裸字符串时直接用。其余形态返回空串(不渲染全文,治 39.7% 噪音)。
+ */
+function extractToolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (typeof block === "object" && block !== null) {
+        const text = (block as Record<string, unknown>).text;
+        if (typeof text === "string") return text;
+      }
+      return "";
+    })
+    .filter((t) => t.length > 0)
+    .join(" ");
+}
+
+/**
+ * 渲染一条 codebuddy(--output-format stream-json)的 Claude Code 风格 JSONL 行。
+ * 形状取自任务 01a03eb9 实跑:assistant 内容块(tool_use/text/thinking)、
+ * user 内容块(tool_result)、system.task_started、result。
+ *
+ *  - tool_use    → [工具] 工具名 + 参数键名(不渲染 input 值,治 55.6% 噪音)
+ *  - text        → [汇报] 正文
+ *  - tool_result → [工具] 工具名(按 tool_use_id 关联)+ ok/error + 文本摘要
+ *  - system.task_started(Bash) → [命令] description(命令可见)
+ *  - result      → [汇报] 最终正文
+ *
+ * R3 硬要求:解析失败 / 非法 JSON / 未知顶层 type / 未知 content 块 / 非
+ * tool_result 的用户块 → 整行逐字保留,绝不丢弃(宁可多显示)。
+ * state 持有 tool_use_id → 工具名的跨行关联,由闭包持有。
+ */
+function renderCodeBuddyLine(
+  line: string,
+  state: { toolNameByUseId: Map<string, string> },
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return line; // R3:非法/非 JSON 逐字保留
+  }
+  if (typeof parsed !== "object" || parsed === null) return line;
+  const record = parsed as Record<string, unknown>;
+
+  switch (record.type) {
+    case "assistant": {
+      const message = record.message;
+      const content =
+        message && typeof message === "object"
+          ? (message as Record<string, unknown>).content
+          : undefined;
+      if (!Array.isArray(content)) return line; // R3:结构不认识 → 原样保留
+      const parts: string[] = [];
+      for (const blockRaw of content) {
+        if (typeof blockRaw !== "object" || blockRaw === null) return line;
+        const block = blockRaw as Record<string, unknown>;
+        if (block.type === "tool_use") {
+          const name = typeof block.name === "string" ? block.name : "?";
+          const useId = typeof block.id === "string" ? block.id : undefined;
+          if (useId) state.toolNameByUseId.set(useId, name);
+          const argKeys = compactArgKeys(block.input);
+          parts.push(argKeys ? `[工具] ${name} ${argKeys}` : `[工具] ${name}`);
+        } else if (block.type === "text") {
+          const text = typeof block.text === "string" ? block.text : "";
+          parts.push(`[汇报] ${text}`);
+        } else {
+          // thinking / 未知块:逐字保留整行(R3)
+          return line;
+        }
+      }
+      return parts.join("\n");
+    }
+    case "user": {
+      const message = record.message;
+      const content =
+        message && typeof message === "object"
+          ? (message as Record<string, unknown>).content
+          : undefined;
+      if (!Array.isArray(content)) return line; // R3:无 content → 原样保留
+      const parts: string[] = [];
+      for (const blockRaw of content) {
+        if (typeof blockRaw !== "object" || blockRaw === null) return line;
+        const block = blockRaw as Record<string, unknown>;
+        if (block.type === "tool_result") {
+          const useId =
+            typeof block.tool_use_id === "string"
+              ? block.tool_use_id
+              : undefined;
+          const name =
+            (useId && state.toolNameByUseId.get(useId)) || useId || "?";
+          const isError = block.is_error === true;
+          const text = extractToolResultText(block.content);
+          parts.push(
+            `[工具] ${name} ${isError ? "error" : "ok"}${text ? ` ${text}` : ""}`,
+          );
+        } else {
+          // 非 tool_result 块(如人类消息正文)→ 整行逐字保留(R3)
+          return line;
+        }
+      }
+      return parts.join("\n");
+    }
+    case "system": {
+      if (
+        record.subtype === "task_started" &&
+        typeof record.description === "string"
+      ) {
+        return `[命令] ${record.description}`;
+      }
+      return line; // R3:其他 system 子类型(已知噪音)逐字保留
+    }
+    case "result": {
+      if (typeof record.result === "string") return `[汇报] ${record.result}`;
+      return line; // R3:result 无正文 → 原样保留
+    }
+    default:
+      return line; // R3:未知顶层 type 逐字保留
+  }
+}
+
+/**
+ * 动作行折叠键(R5 压缩比):同 chunk 内同一(标记, 工具/命令名)的重复动作行
+ * 只保留首条——同一工具被反复调用时实时输出不必刷屏 40 遍。整行文本也参与
+ * 去重(如 [汇报] 完全相同的正文)。透传行(R3)不进本函数、永不折叠。
+ */
+function actionDedupKey(rendered: string): string {
+  const m = /^\[(工具|命令)\] (\S+)/.exec(rendered);
+  return m ? `${m[1]}|${m[2]}` : rendered;
+}
+
+/** codebuddy:行缓冲 + 渲染动作行;其余逐字保留(R3)。跨行状态由闭包持有。 */
+function createCodeBuddyParser(): ExecutorOutputParser {
+  let pending = "";
+  const state: { toolNameByUseId: Map<string, string> } = {
+    toolNameByUseId: new Map(),
+  };
+  const parser = ((chunk: string): string => {
+    const lines = `${pending}${chunk ?? ""}`.split("\n");
+    pending = lines.pop() ?? "";
+    if (lines.length === 0) return "";
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const l of lines) {
+      const rendered = renderCodeBuddyLine(l, state);
+      if (rendered !== l) {
+        // R5:折叠同 chunk 内的重复动作行;R3 透传行不参与、逐字保留
+        const key = actionDedupKey(rendered);
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      out.push(rendered);
+    }
+    return `${out.join("\n")}\n`;
+  }) as ExecutorOutputParser;
+  parser.flush = () => {
+    const tail = pending;
+    pending = "";
+    return tail.length > 0 ? renderCodeBuddyLine(tail, state) : "";
+  };
+  return parser;
+}
+
+/**
  * 按 executorKey 创建流式输出解析器(每次执行一个;跨 chunk 状态由闭包持有,
  * 与 createAnsiStripper 同款)。codex 解析 JSONL 动作行,atomcode 拆粘连前缀,
  * 其余执行器原样透传。
@@ -187,10 +370,13 @@ export function createExecutorOutputParser(
   switch (executorKey) {
     case "codex":
       return createCodexParser();
+    case "codebuddy":
+      return createCodeBuddyParser();
     case "atomcode":
     case "executor":
       return createAtomCodeParser();
     default:
+      observeUnknownExecutorKey(executorKey);
       return createIdentityParser();
   }
 }

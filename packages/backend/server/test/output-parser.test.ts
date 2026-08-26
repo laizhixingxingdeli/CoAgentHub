@@ -444,6 +444,30 @@ describe("codebuddy:R5 压缩比(真实形状基线)", () => {
   });
 });
 
+describe("codebuddy:同 chunk 重复动作行折叠(R5 支撑)", () => {
+  it("同一工具反复调用只渲染首条,不同工具仍各自渲染", () => {
+    const parse = createExecutorOutputParser("codebuddy");
+    const a = codeBuddyAssistant([
+      { type: "tool_use", id: "tool-1", name: "read_file", input: { file_path: "a.txt" } },
+    ]);
+    const b = codeBuddyAssistant([
+      { type: "tool_use", id: "tool-2", name: "read_file", input: { file_path: "b.txt" } },
+    ]);
+    const c = codeBuddyAssistant([
+      { type: "tool_use", id: "tool-3", name: "TaskCreate", input: { subject: "x" } },
+    ]);
+    expect(parse(`${a}\n${b}\n${c}\n`)).toBe(
+      "[工具] read_file file_path\n[工具] TaskCreate subject\n",
+    );
+  });
+
+  it("R3 透传行不被折叠:两条相同旁白都保留", () => {
+    const parse = createExecutorOutputParser("codebuddy");
+    const plain = "plain warning line\n";
+    expect(parse(`${plain}${plain}`)).toBe(`${plain}${plain}`);
+  });
+});
+
 describe("其他执行器:原样透传", () => {
   it("reasonix / win-hermes / 未知 key 不解析,创建时只记一次观测日志", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
