@@ -1,6 +1,6 @@
 # Spec: CodeBuddy 的实时输出未被解析,缓冲顶满上限
 
-> **状态**: Frozen — 待实现
+> **状态**: Frozen(v1.1 修订)— 待实现
 > **版本**: 1.0
 > **日期**: 2026-08-27
 
@@ -51,6 +51,30 @@ content[] 元素形如 { type: "text", text: ... };工具调用为 tool_use 类�
 
 噪音来源与 codex 那次同构:**有用的只是 `message.content[]` 里的文本与工具调用,
 其余 uuid / session_id / model / usage / _requestId 等全是信封**。
+
+## ⚠️ 测试已存在,实现尚未存在
+
+`packages/backend/server/test/output-parser.test.ts` 中已有 **9 个 codebuddy 用例**
+(来自子任务 `01a03eca`,该任务因额度耗尽只留下测试;检视者在冻结本 spec 时
+误将其一并提交于 `439f03eb`,已如实记录)。当前**全部失败**,因为实现缺失。
+
+这些用例形状取自 `01a03eb9` 实跑,覆盖面比本 spec 原列更细:
+
+```
+tool_use 块    → [工具] 工具名 + input 键名,不带 uuid/session_id/input 值
+text 块        → [汇报] 正文
+tool_result 块 → [工具] 工具名(按 tool_use_id 关联) + ok/error
+system task_started(Bash) → [命令] description(命令可见)
+result 事件    → [汇报] 最终正文
+流式跨 chunk   → JSONL 行被切成两半,拼接后渲染一次
+进程结束 flush → 吐出未成行残留(逐字,R3)
+R5 压缩比      → 动作行可见且不含 uuid/session_id 噪音
+未知 key       → 不解析,创建时只记一次观测日志
+```
+
+⚠️ **以这批用例为准**:实现要让它们全部通过。
+若某条用例的期望与本 spec 正文冲突,**以用例为准**并在汇报中指出冲突点。
+⚠️ 不得为了让测试通过而删改这些用例;确需调整的,先在汇报中说明理由。
 
 ## 要做的
 
