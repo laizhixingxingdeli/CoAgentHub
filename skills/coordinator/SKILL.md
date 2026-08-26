@@ -127,6 +127,37 @@ Call `coagenthub_dispatch_task` with:
 
 </rate-limit-rules>
 
+#### 2.3 派发成功后退出本轮 (Exit After Dispatch)
+
+<exit-after-dispatch>
+
+派发**确认成功**（接口返回成功且拿到子任务 id）后，**结束本轮 CLI 调用**——不要为了
+等待子任务终态而轮询、`sleep` 或以任何形式阻塞。子任务进入终态时，平台会创建
+**续跑任务**把你重新拉起做 L2（`coordinator-resume.ts` 的 `buildResumeBrief` 已带齐
+恢复上下文），无需你守着。
+
+**退出是安全的，因为续跑任务书会带回：**
+
+- 父任务 id、`specRef`、`specHash`
+- 本次终态子任务的 id、状态、完整 `diffSummary`
+- 全部子任务的 id 与当前状态
+- 操作指引（做 L2 → 结案父任务 → 结案续跑任务）
+
+L2 是「对着冻结规范检视产出」，本就只依赖可复得的事实（仓库里的 spec、`diffSummary`、
+任务详情 API），不依赖上一轮 CLI 里想过什么。平台在父进程仍存活时不创建续跑
+（`isExecutorProcessAlive` 判定），所以退出不会导致双跑。
+
+⚠️ **退出的前提是派发确已成功**：只有子任务**确认创建成功**（接口返回成功且拿到
+子任务 id）后才可以结束本轮。**派发失败、被 403/400 拒绝、或找不到健康执行器时
+不适用本条**——那些情况按 §2 的现有规则处置（在群内说明阻塞原因 / 以 `failed` 结案
+并写明），**绝不能**在没有任何子任务的情况下静默退出：那样既没有子任务能触发续跑，
+父任务也会挂成僵尸。
+
+**一次只派一个，天然串行**：派一个 → 退出 → 续跑时再派下一个。**不要**为省几次往返
+在一轮里连派多个子任务——它们会成为共享同一棵 git 树的并行进程。
+
+</exit-after-dispatch>
+
 ### 3.5 Ensure Executor Skills (确保执行器已加载 skill)
 
 Before dispatching to an executor, verify the executor has the `coagenthub-executor` skill loaded (and, before dispatching an L3 review task, that the reviewer has `coagenthub-reviewer` loaded).
@@ -147,6 +178,13 @@ This ensures the executor performs Code Review self-check even if the task ticke
 ### 4. 验收编排 (Three-Layer Review Orchestration)
 
 When you receive a completion event (durable inbox / WS hint) for a task, run the review loop:
+
+<resume-rules>
+
+**被续跑任务拉起后，先读全部子任务的当前状态**（续跑任务书里已列出），再决定动作。
+已完成的工作**不得重复派发**——只处理尚未完成或新出现的子任务。
+
+</resume-rules>
 
 **跑不跑 L3，判定条件只有一个布尔式**（spec §3.14.6）：
 
@@ -323,6 +361,7 @@ If the work is too large for one task, break it into **decision tickets**. The u
 - **specHash 验收钉子**: in-flight tasks are accepted against the specHash they were dispatched with, unaffected by later spec amendments.
 - **dispatchKind 不自判**: 「需求还是修复」由检视者分流决定（闸一）。把工作标成 `fix` 就免掉了 L3，而 L3 检的正是你这一环——自判等于自己给自己免检。
 - **修复必须能升级回需求**（闸二）: 若实现过程中发现必须越过冻结 spec 的边界，**它就不再是修复**——停止实现，退回检视者做 `spec_amended`，按新 specHash 重新下发。不得在「修复」名义下改动架构。
+- **派发成功后退出本轮**: 确认子任务创建成功后结束本轮 CLI 调用、不轮询等待；派发失败 / 被拒 / 无健康执行器时**不得静默退出**，按 §2.3 处置。
 - Verify before closing: Never mark a task done without checking the spec criteria.
 - **Close detached tasks first**: PATCH the reviewer's detached task done before continuing (see §4.4) — otherwise the reviewer waits on the timeout fallback.
 - Docs stay in sync: If code changes, check if ADR/architecture docs need updating.
