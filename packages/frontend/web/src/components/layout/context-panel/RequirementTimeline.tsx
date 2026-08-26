@@ -47,14 +47,15 @@ import {
   RoleBadge,
 } from "@/pages/app/groups/messages/types";
 import { FoldableContent } from "./FoldableContent";
+import { roleFromMemberRoles, type TimelineRole } from "./member-role";
 import {
   mergeRequirementTimeline,
   type TimelineEvent,
 } from "./merge-requirement-timeline";
 import { TASK_STATUS_CLASS } from "./status-classes";
 
-/** 视觉分色用的角色档位(不是后端权威角色,仅用于头像配色)。 */
-export type TimelineRole = "coordinator" | "reviewer" | "executor";
+export type { TimelineRole } from "./member-role";
+export { roleFromMemberRoles } from "./member-role";
 
 /** executorKey 字符串 → 角色档位(大小写不敏感;null/未知按执行者)。
  * 刻意保留的回落实现(有测试覆盖):成员真实角色关联不上时才用它。 */
@@ -63,21 +64,6 @@ export function roleFromExecutorKey(executorKey: string | null): TimelineRole {
   if (key.includes("coordinator")) return "coordinator";
   if (key.includes("reviewer")) return "reviewer";
   return "executor";
-}
-
-/** Member.roles → 角色档位(协调者 > 检视者 > 执行者 优先级;都不含 → null,
- * 由调用方决定回落)。human/observer/specialist 等角色不在三档内 → null。 */
-export function roleFromMemberRoles(
-  roles: string[] | undefined,
-): TimelineRole | null {
-  if (!roles) {
-    return null;
-  }
-  const lower = roles.map((r) => r.toLowerCase());
-  if (lower.includes("coordinator")) return "coordinator";
-  if (lower.includes("reviewer")) return "reviewer";
-  if (lower.includes("executor")) return "executor";
-  return null;
 }
 
 /** 头像底色:引用 --role-* token(index.css 已注册),不硬编码十六进制。 */

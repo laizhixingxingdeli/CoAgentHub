@@ -24,7 +24,7 @@ import type {
   TaskStatus,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member } from "@/pages/app/groups/messages/types";
-import { roleFromMemberRoles } from "./RequirementTimeline";
+import { roleFromMemberRoles } from "./member-role";
 
 /** 阶梯每层的状态。中性状态与 pending 区分「不适用」和「未开始」。 */
 export type StepStatus =
