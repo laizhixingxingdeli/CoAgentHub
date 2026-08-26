@@ -13,9 +13,11 @@
 #       任何一项无法确认「无在途」,一律本轮跳过重建并记录明确日志(宁可不动,不可误杀在途任务)。
 #     - R3 失败退避:重建失败计数持久化到文件(--once 是单次调用,内存态不跨调用),
 #       连续失败达阈值(默认 3 次)后停止自动重建只记日志;一次成功归零。
-#     - R2 重建后复核:restart --build 返回 0 后必须重新读取 /api/health,
-#       仅当 stale===false(且 staleReason 不再是 build/both)才算成功并清零失败计数;
-#       仍陈旧或健康响应不可验证 → 计为失败并进入持久化退避。
+#     - R2 重建后复核:restart --build 的退出码仅作日志佐证,无论是否为 0,
+#       都在等待后重新读取 /api/health;仅当 stale===false(fresh)才算成功并清零失败计数;
+#       仍陈旧(build/both/stale)或健康响应不可验证(unknown)→ 计为失败并进入持久化退避。
+#       切忌「退出码非零即计失败」:重建实际成功但脚本退出码非零会误累加退避,形成
+#       每 5 分钟重试不收敛的高危闭环缺陷(见本票 Goal #1)。
 #
 # 用法:
 #   scripts/coagenthub-watchdog.sh            # 默认循环,每 5 分钟查一次
@@ -235,22 +237,26 @@ run_once() {
       return 0
     fi
     echo "$(date '+%F %T') WARN 构建陈旧 (staleReason=$reason),尝试 prod restart --build" >> "$WATCHDOG_LOG"
-    if "$PROD_SCRIPT" restart --build >/dev/null 2>&1; then
-      # R2:重建返回成功,必须重新读取 /api/health 复核,确认 stale===false 才算成功
-      sleep "$RESTART_SLEEP"
-      local post
-      post="$(read_runtime)"
-      if [ "$post" = "fresh" ]; then
-        stale_fail_reset
-        echo "$(date '+%F %T') OK   重建成功,复核 /api/health stale=false,失败计数已归零" >> "$WATCHDOG_LOG"
-        return 0
-      fi
-      stale_fail_inc
-      echo "$(date '+%F %T') FAIL 重建返回成功但复核 /api/health 仍陈旧或不可验证(stale状态=$post),计为失败进入退避(连续 $(stale_fail_count) 次)" >> "$WATCHDOG_LOG"
-      return 1
+    # R2:restart --build 的退出码仅作日志佐证,不作为成功/失败判定依据——
+    # 即便退出码非零,只要重启后复核 /api/health 显示 stale=false(fresh)即视为重建成功。
+    # 只有「复核仍为 build/both/stale,或健康响应不可验证(unknown)」,才以复核为准累加退避。
+    # 这避免了「重建实际成功但脚本退出码非零 → 误累加退避 → 永不归零」的高危闭环。
+    local build_rc=0
+    "$PROD_SCRIPT" restart --build >/dev/null 2>&1 || build_rc=$?
+    sleep "$RESTART_SLEEP"
+    local post
+    post="$(read_runtime)"
+    if [ "$post" = "fresh" ]; then
+      stale_fail_reset
+      local note=""
+      [ "$build_rc" != 0 ] && note=" (restart --build 退出码=$build_rc,以复核 stale=false 为准)"
+      echo "$(date '+%F %T') OK   重建成功,复核 /api/health stale=false,失败计数已归零$note" >> "$WATCHDOG_LOG"
+      return 0
     fi
     stale_fail_inc
-    echo "$(date '+%F %T') FAIL 重建失败(连续 $(stale_fail_count) 次)" >> "$WATCHDOG_LOG"
+    local tail=""
+    [ "$build_rc" != 0 ] && tail=" (restart --build 退出码=$build_rc)"
+    echo "$(date '+%F %T') FAIL 重建后复核 /api/health 仍陈旧或不可验证(stale状态=$post)$tail,计为失败进入退避(连续 $(stale_fail_count) 次)" >> "$WATCHDOG_LOG"
     return 1
   fi
 

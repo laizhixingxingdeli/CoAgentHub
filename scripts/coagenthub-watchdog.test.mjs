@@ -45,14 +45,20 @@ function tempDir() {
 }
 
 /** 记录每次调用的参数行;prod 脚本退出码由 exitCode 控制。
- *  exitCode=0 时额外 touch 一个 rebuilt-ok 标记,供 stub 模拟「重建后陈旧清除」。 */
-function writeStubProd(dir, { exitCode = 0 } = {}) {
+ *  exitCode=0 时额外 touch 一个 rebuilt-ok 标记,供 stub 模拟「重建后陈旧清除」。
+ *  markRebuild=1 时即便 exitCode 非零也 touch 标记——用于模拟
+ *  「restart --build 退出码非零,但重建实际成功(陈旧已清除)」的回归场景。 */
+function writeStubProd(dir, { exitCode = 0, markRebuild = false } = {}) {
   const path = join(dir, "stub-prod.sh");
+  // 归一化为字面量 1/0,避免布尔 true 被 bash 当成字符串 "true" 比较失败
+  const mr = markRebuild ? 1 : 0;
   writeFileSync(
     path,
     `#!/bin/bash
 echo "$*" >> "${dir}/prod-calls.txt"
-[ "${exitCode}" = 0 ] && touch "${dir}/rebuilt-ok"
+if [ "${exitCode}" = 0 ] || [ "${mr}" = 1 ]; then
+  touch "${dir}/rebuilt-ok"
+fi
 exit ${exitCode}
 `,
   );
@@ -488,7 +494,7 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(prodCalls(dir)).toEqual(["restart --build"]);
     expect(failCount(dir)).toBe("1");
     expect(
-      logLines(dir).some((l) => l.includes("FAIL 重建返回成功但复核")),
+      logLines(dir).some((l) => l.includes("FAIL 重建后复核")),
     ).toBe(true);
   });
 
@@ -504,7 +510,43 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(prodCalls(dir)).toEqual(["restart --build"]);
     expect(failCount(dir)).toBe("1");
     expect(
-      logLines(dir).some((l) => l.includes("FAIL 重建返回成功但复核")),
+      logLines(dir).some((l) => l.includes("FAIL 重建后复核")),
+    ).toBe(true);
+  });
+
+  // ---------- R2 高危闭环回归:退出码非零不应误累加退避 ----------
+  it("R2 restart --build 退出码非零但复核 stale=false(fresh) → 不计失败、归零、记成功", async () => {
+    const dir = tempDir();
+    const stub = stubServer();
+    await stub.listen();
+    // prod 退出码 1(模拟「脚本退出非零」),但重建实际成功(标记 rebuilt-ok → 复核 fresh)
+    const prod = writeStubProd(dir, { exitCode: 1, markRebuild: true });
+    stub.runtime = { stale: true, staleReason: "build" };
+    stub.runtimeFlip = true;
+    stub.rebuiltMarker = join(dir, "rebuilt-ok");
+    const r = await runWatchdog({ server: stub.server, prod, dir });
+    expect(r.status).toBe(0);
+    expect(prodCalls(dir)).toEqual(["restart --build"]);
+    // 关键:退出码非零但复核 fresh → 不算失败,失败计数归零(文件被删)
+    expect(failCount(dir)).toBe(null);
+    expect(
+      logLines(dir).some((l) => l.includes("OK   重建成功")),
+    ).toBe(true);
+  });
+
+  it("R2 restart --build 退出码非零且复核仍陈旧 → 计失败并进入退避", async () => {
+    const dir = tempDir();
+    const stub = stubServer();
+    await stub.listen();
+    // 退出码 1 且未重建 → 复核仍为 build/stale,应累加退避
+    const prod = writeStubProd(dir, { exitCode: 1 });
+    stub.runtime = { stale: true, staleReason: "build" };
+    const r = await runWatchdog({ server: stub.server, prod, dir });
+    expect(r.status).toBe(1);
+    expect(prodCalls(dir)).toEqual(["restart --build"]);
+    expect(failCount(dir)).toBe("1");
+    expect(
+      logLines(dir).some((l) => l.includes("FAIL 重建后复核")),
     ).toBe(true);
   });
 
