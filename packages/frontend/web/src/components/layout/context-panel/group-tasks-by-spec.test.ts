@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
+import type { Member } from "@/pages/app/groups/messages/types";
 import {
+  coordinationTaskForTasks,
+  coordinationTasksForRequirement,
   deriveBriefTitle,
   deriveLabel,
+  executionTasksForRequirement,
   groupTasksBySpec,
 } from "./group-tasks-by-spec";
 
@@ -23,6 +27,14 @@ function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
     ...overrides,
   };
 }
+
+/** 构造最小可用的 Member(角色判定只读 participantId 与 roles)。 */
+function makeMember(participantId: string, roles: string[]): Member {
+  return { participantId, name: participantId, device: null, roles };
+}
+
+const COORDINATOR = makeMember("participant-coordinator", ["coordinator"]);
+const EXECUTOR = makeMember("participant-executor", ["executor"]);
 
 describe("groupTasksBySpec", () => {
   it("同 specRef(非 null)的多个任务聚合为一条 Requirement", () => {
@@ -505,5 +517,273 @@ describe("deriveLabel", () => {
     const title =
       "让任务标题在左侧列表和阶梯标签中保持清晰可读，即使任务书正文非常长也不影响识别，并且仍然应该保留足够的前半句供人判断任务内容，避免在开头几个字就截断而失去任务语义";
     expect(deriveBriefTitle(`# ${title}`)).toBe(`${title.slice(0, 64)}…`);
+  });
+});
+
+describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
+  it("零子任务的 coordinator 任务归 L2,L1 为空且不参与执行聚合", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "running",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
+    // L2 跟随该协调任务(running),L1 无执行任务 → pending。
+    expect(requirement.steps).toEqual(["pending", "running", "pending"]);
+    expect(executionTasksForRequirement(tasks, [COORDINATOR])).toEqual([]);
+  });
+
+  it("协调任务零子任务时 L1 为空(显示「暂无执行记录」的数据前提)", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
+    expect(requirement.steps).toEqual(["pending", "done", "pending"]);
+    expect(requirement.retryCount).toBe(0);
+  });
+
+  it("executor 任务始终归 L1,即使它被别的任务当作父", () => {
+    const tasks = [
+      makeTask({
+        id: "exec-parent",
+        specRef: "specs/r.md",
+        executorParticipantId: EXECUTOR.participantId,
+        status: "running",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "child",
+        parentTaskId: "exec-parent",
+        specRef: "specs/r.md",
+        executorParticipantId: EXECUTOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [EXECUTOR]);
+    expect(requirement.steps).toEqual(["running", "pending", "pending"]);
+    expect(coordinationTasksForRequirement(tasks, [EXECUTOR])).toEqual([]);
+  });
+
+  it("成员查不到时回退 parentTaskId 反推,旧行为逐字一致", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: null,
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "exec-1",
+        parentTaskId: "coord",
+        specRef: "specs/r.md",
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+    ];
+    // 成员表为空 → 协调任务靠反推认出(与改动前一致)。
+    const [requirement] = groupTasksBySpec(tasks);
+    expect(requirement.steps).toEqual(["done", "done", "pending"]);
+    expect(requirement.label).toBe("r");
+  });
+
+  it("review_request 任务仍被排除出 L1", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            specRef: "specs/r.md",
+            specHash: "abc1234",
+            diffSummary: "L2 通过",
+          },
+        },
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "exec-1",
+        specRef: "specs/r.md",
+        executorParticipantId: EXECUTOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR, EXECUTOR]);
+    expect(requirement.steps).toEqual(["done", "done", "pending"]);
+    expect(
+      executionTasksForRequirement(tasks, [COORDINATOR, EXECUTOR]),
+    ).toEqual([tasks[1]]);
+  });
+
+  it("零子任务 review_request 协调任务在成员查不到时经兜底归 L2(回归)", () => {
+    const reason = "本票由发布者直接定向实现,未创建下游执行子任务。";
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: "specs/r.md",
+        executorParticipantId: "participant-coordinator",
+        status: "done",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            taskId: "coord",
+            specRef: "specs/r.md",
+            specHash: "0b03bd37",
+            diffSummary: "L2 功能验收通过。",
+          },
+          noExecutionReason: reason,
+        },
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+    ];
+    // 成员表为空 → 角色查不到,回退 review_request 兜底,行为与改动前一致。
+    const [requirement] = groupTasksBySpec(tasks);
+    expect(requirement.steps).toEqual(["na-declared", "done", "pending"]);
+    expect(coordinationTasksForRequirement(tasks)).toEqual(tasks);
+  });
+
+  it("标题提取与分层共用同一判定:coordinator 任务不参与标题", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: null,
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        brief: "协调请求(检视者 → 协调者)· 第 X 批",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "exec-1",
+        parentTaskId: "coord",
+        specRef: "specs/three-layer.md",
+        executorParticipantId: EXECUTOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+    ];
+    expect(deriveLabel(tasks, [COORDINATOR, EXECUTOR])).toBe("three-layer");
+  });
+
+  it("父协调任务 + 续跑协调任务都出现在 L2,状态聚合(done+running → running)", () => {
+    const tasks = [
+      makeTask({
+        id: "coord-parent",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "exec-1",
+        parentTaskId: "coord-parent",
+        specRef: "specs/r.md",
+        executorParticipantId: EXECUTOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+      makeTask({
+        id: "coord-resume",
+        parentTaskId: "exec-1",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "running",
+        diffSummary: {
+          platform: { resumeOf: "coord-parent" },
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            specRef: "specs/r.md",
+            specHash: "abc1234",
+            diffSummary: "续跑做 L2",
+          },
+        },
+        createdAt: "2026-08-01T02:00:00.000Z",
+      }),
+    ];
+    const coordinationTasks = coordinationTasksForRequirement(tasks, [
+      COORDINATOR,
+      EXECUTOR,
+    ]);
+    expect(coordinationTasks.map((task) => task.id)).toEqual([
+      "coord-parent",
+      "coord-resume",
+    ]);
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR, EXECUTOR]);
+    // L1 只含 exec-1(done);L2 聚合 done+running → running。
+    expect(requirement.steps).toEqual(["done", "running", "pending"]);
+  });
+
+  it("L2 聚合:两条协调任务皆 done → done", () => {
+    const tasks = [
+      makeTask({
+        id: "coord-parent",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "coord-resume",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        createdAt: "2026-08-01T02:00:00.000Z",
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
+    expect(requirement.steps).toEqual(["pending", "done", "pending"]);
+  });
+
+  it("coordinationTaskForTasks 单条签名与语义不变(回归)", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: null,
+        status: "done",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      makeTask({
+        id: "exec-1",
+        parentTaskId: "coord",
+        specRef: "specs/r.md",
+        status: "done",
+        createdAt: "2026-08-01T01:00:00.000Z",
+      }),
+    ];
+    // 父任务优先;无子任务时回落 review_request(单条语义不变)。
+    expect(coordinationTaskForTasks(tasks)?.id).toBe("coord");
+    expect(
+      coordinationTaskForTasks([
+        makeTask({
+          id: "solo",
+          specRef: null,
+          diffSummary: {
+            review_request: {
+              type: "review_request",
+              layer: 3,
+              specRef: "specs/r.md",
+              specHash: "abc1234",
+              diffSummary: "L2 通过",
+            },
+          },
+        }),
+      ])?.id,
+    ).toBe("solo");
   });
 });

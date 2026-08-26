@@ -7,9 +7,9 @@ import type { Requirement, StepStatus } from "./group-tasks-by-spec";
 import {
   aggregateTaskStatuses,
   coordinationTaskForTasks,
+  coordinationTasksForRequirement,
   executionTasksForRequirement,
   noExecutionReasonForTask,
-  taskStatusToStepStatus,
 } from "./group-tasks-by-spec";
 
 export type L2State = {
@@ -126,10 +126,13 @@ function findSpecAnchor(
     : null;
 }
 
-function deriveL1(requirement: Requirement): L1State {
+function deriveL1(requirement: Requirement, members: Member[]): L1State {
   const coordinationTask = coordinationTaskForTasks(requirement.tasks);
   const reason = noExecutionReasonForTask(coordinationTask);
-  const executionTasks = executionTasksForRequirement(requirement.tasks);
+  const executionTasks = executionTasksForRequirement(
+    requirement.tasks,
+    members,
+  );
   return {
     status: reason
       ? "na-declared"
@@ -140,11 +143,16 @@ function deriveL1(requirement: Requirement): L1State {
   };
 }
 
-function deriveL2(requirement: Requirement): L2State {
-  const task = coordinationTaskForTasks(requirement.tasks);
+function deriveL2(requirement: Requirement, members: Member[]): L2State {
+  const coordinationTasks = coordinationTasksForRequirement(
+    requirement.tasks,
+    members,
+  );
+  // 展示锚点取最新一条协调任务(续跑任务);状态由全部协调者任务聚合(R6)。
+  const task = coordinationTasks[coordinationTasks.length - 1] ?? null;
   return {
     task,
-    status: task ? taskStatusToStepStatus(task.status) : "pending",
+    status: aggregateTaskStatuses(coordinationTasks.map((task) => task.status)),
     conclusion: reviewRequestConclusion(task),
   };
 }
@@ -237,8 +245,8 @@ export function deriveRequirementLayerState(
   messages: MessageItem[],
   members: Member[],
 ): RequirementLayerState {
-  const l1 = deriveL1(requirement);
-  const l2 = deriveL2(requirement);
+  const l1 = deriveL1(requirement, members);
+  const l2 = deriveL2(requirement, members);
   const l3 = deriveL3(requirement, messages, layerModeFromMembers(members), l2);
   return {
     l1,

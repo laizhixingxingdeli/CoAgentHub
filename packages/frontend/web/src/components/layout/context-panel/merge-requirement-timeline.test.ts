@@ -326,7 +326,7 @@ describe("mergeRequirementTimeline 消息 + 任务合并流", () => {
     const layers = partitionRequirementTimeline(
       events,
       new Set(["exec-1"]),
-      "coord-1",
+      new Set(["coord-1"]),
     );
 
     expect(
@@ -357,7 +357,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       body: "# 任务书\n检视者下发",
     });
     const events = mergeRequirementTimeline([task], [taskBook], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l3.some(
         (event) =>
@@ -380,7 +384,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       body: "# 任务\n协调者派发",
     });
     const events = mergeRequirementTimeline([task], [taskBook], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l2.some(
         (event) =>
@@ -397,7 +405,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       body: "执行输出:测试通过",
     });
     const events = mergeRequirementTimeline([task], [output], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l1.some(
         (event) =>
@@ -414,7 +426,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       body: "用户下发的需求",
     });
     const events = mergeRequirementTimeline([task], [human], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l3.some(
         (event) =>
@@ -436,7 +452,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       }),
     });
     const events = mergeRequirementTimeline([task], [published], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l3.some(
         (event) =>
@@ -460,7 +480,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       }),
     });
     const events = mergeRequirementTimeline([task], [request], MEMBERS);
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     expect(
       layers.l2.some(
         (event) =>
@@ -492,7 +516,11 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
       [unknownReview, unknownPlain],
       MEMBERS,
     );
-    const layers = partitionRequirementTimeline(events, new Set(["t-1"]), null);
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["t-1"]),
+      new Set(),
+    );
     // review_result 形态 → L3;普通消息形态无法判定 → L1;两条记录都不丢。
     expect(
       layers.l3.some(
@@ -523,7 +551,7 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
     const layers = partitionRequirementTimeline(
       events,
       new Set(["exec-1"]),
-      "coord-1",
+      new Set(["coord-1"]),
     );
     expect(
       layers.l1.some(
@@ -535,5 +563,44 @@ describe("timelineLayerForEvent 角色优先分层 (timeline-layer-by-actor)", (
         (event) => event.kind === "task" && event.task.id === "coord-1",
       ),
     ).toBe(true);
+  });
+
+  it("多条协调任务(父 + 续跑)都归 L2,续跑任务不从时间线消失", () => {
+    const execution = makeTask({ id: "exec-1" });
+    const coordParent = makeTask({ id: "coord-1", messageId: "coord-trigger" });
+    const coordResume = makeTask({
+      id: "coord-2",
+      messageId: "resume-trigger",
+    });
+    const events = mergeRequirementTimeline(
+      [execution, coordParent, coordResume],
+      [],
+      MEMBERS,
+    );
+    const layers = partitionRequirementTimeline(
+      events,
+      new Set(["exec-1"]),
+      new Set(["coord-1", "coord-2"]),
+    );
+    expect(
+      layers.l1.some(
+        (event) => event.kind === "task" && event.task.id === "exec-1",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l2.some(
+        (event) => event.kind === "task" && event.task.id === "coord-1",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l2.some(
+        (event) => event.kind === "task" && event.task.id === "coord-2",
+      ),
+    ).toBe(true);
+    expect(
+      layers.l1.some(
+        (event) => event.kind === "task" && event.task.id === "coord-2",
+      ),
+    ).toBe(false);
   });
 });

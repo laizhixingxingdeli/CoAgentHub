@@ -23,6 +23,8 @@ import type {
   TaskItem,
   TaskStatus,
 } from "@/pages/app/groups/messages/TaskPanel";
+import type { Member } from "@/pages/app/groups/messages/types";
+import { roleFromMemberRoles } from "./RequirementTimeline";
 
 /** 阶梯每层的状态。中性状态与 pending 区分「不适用」和「未开始」。 */
 export type StepStatus =
@@ -57,14 +59,6 @@ export type Requirement = {
   /** 固定三步: L1 执行、L2 协调、L3 检视。 */
   steps: StepStatus[];
 };
-
-/** 单个任务状态映射为层状态,供 L2 协调任务展示。 */
-export function taskStatusToStepStatus(status: TaskStatus): StepStatus {
-  if (status === "done") return "done";
-  if (status === "failed") return "failed";
-  if (status === "running") return "running";
-  return "pending";
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -104,16 +98,62 @@ export function coordinationTaskForTasks(tasks: TaskItem[]): TaskItem | null {
   );
 }
 
-/** 需求中真正代表 L1 的执行任务,排除协调任务。 */
-export function executionTasksForRequirement(tasks: TaskItem[]): TaskItem[] {
-  const coordinationIds = new Set(
+/** 需求内协调任务的判定:执行者在本群的角色含 `coordinator` → 协调任务(R1,
+ * 与它有没有子任务无关);成员查不到/角色未知时回退到现有反推 ——
+ * 被别的任务当作父(parentTaskId)或带 review_request 载荷(旧
+ * coordinationTaskForTasks 的兜底),行为与改动前逐字一致(R2)。
+ * 角色是权威,反推是兜底 —— 不取并集。
+ * 返回协调任务 id 集合,供分层与标题提取共用(R3,不两处各写一份)。 */
+function coordinationTaskIds(
+  tasks: TaskItem[],
+  members: Member[],
+): ReadonlySet<string> {
+  const parentIds = new Set(
     tasks
       .map((task) => task.parentTaskId)
       .filter((id): id is string => Boolean(id)),
   );
+  const result = new Set<string>();
+  for (const task of tasks) {
+    const member = members.find(
+      (m) => m.participantId === task.executorParticipantId,
+    );
+    const role = roleFromMemberRoles(member?.roles);
+    if (role === "coordinator") {
+      result.add(task.id);
+    } else if (
+      role === null &&
+      (parentIds.has(task.id) || isReviewRequestTask(task))
+    ) {
+      result.add(task.id);
+    }
+  }
+  return result;
+}
+
+/** 需求中真正代表 L1 的执行任务,排除协调任务与检视请求任务。 */
+export function executionTasksForRequirement(
+  tasks: TaskItem[],
+  members: Member[] = [],
+): TaskItem[] {
+  const coordinationIds = coordinationTaskIds(tasks, members);
   return tasks.filter(
     (task) => !coordinationIds.has(task.id) && !isReviewRequestTask(task),
   );
+}
+
+/** 需求中全部协调者任务,按 createdAt 升序(R6,供 L2 聚合展示)。 */
+export function coordinationTasksForRequirement(
+  tasks: TaskItem[],
+  members: Member[] = [],
+): TaskItem[] {
+  const coordinationIds = coordinationTaskIds(tasks, members);
+  return tasks
+    .filter((task) => coordinationIds.has(task.id))
+    .sort(
+      (a, b) =>
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
 }
 
 /** 聚合一个层的任务状态:running 优先,随后全 done,再判定未被成功重试的失败。 */
@@ -145,16 +185,15 @@ function retryCountForTasks(tasks: TaskItem[]): number {
 }
 
 /** 从任务聚合出固定的 L1/L2/L3 三步;L3 需由消息与群成员补全。 */
-function requirementSteps(tasks: TaskItem[]): StepStatus[] {
-  const executionTasks = executionTasksForRequirement(tasks);
+function requirementSteps(tasks: TaskItem[], members: Member[]): StepStatus[] {
+  const executionTasks = executionTasksForRequirement(tasks, members);
   const coordinationTask = coordinationTaskForTasks(tasks);
+  const coordinationTasks = coordinationTasksForRequirement(tasks, members);
   return [
     noExecutionReasonForTask(coordinationTask)
       ? "na-declared"
       : aggregateTaskStatuses(executionTasks.map((task) => task.status)),
-    coordinationTask
-      ? taskStatusToStepStatus(coordinationTask.status)
-      : "pending",
+    aggregateTaskStatuses(coordinationTasks.map((task) => task.status)),
     "pending",
   ];
 }
@@ -223,22 +262,11 @@ export function deriveBriefTitle(
   return titleFromGoalSection(lines);
 }
 
-/** 组内「协调任务」id 集合:是其他任务 parentTaskId 的父 → 不参与标题提取。 */
-function coordinationTaskIds(tasks: TaskItem[]): ReadonlySet<string> {
-  const parents = new Set<string>();
-  for (const task of tasks) {
-    if (task.parentTaskId) {
-      parents.add(task.parentTaskId);
-    }
-  }
-  return parents;
-}
-
-export function deriveLabel(tasks: TaskItem[]): string {
+export function deriveLabel(tasks: TaskItem[], members: Member[] = []): string {
   const first = tasks[0];
   if (!first) return "";
   // 跳过协调任务的 brief(样板标题);协调任务自身也不参与 specRef/id 兜底。
-  const coordIds = coordinationTaskIds(tasks);
+  const coordIds = coordinationTaskIds(tasks, members);
   const candidates = tasks.filter((task) => !coordIds.has(task.id));
   const titleSource = candidates.length > 0 ? candidates : tasks;
   const specRef = titleSource.find((task) => task.specRef)?.specRef;
@@ -268,9 +296,13 @@ export function deriveLabel(tasks: TaskItem[]): string {
  *  - 组内 tasks 按 createdAt 升序;latestTask / status / updatedAt 仍取最新任务。
  *
  * @param tasks 扁平任务列表(通常来自 GET /groups/:id/tasks)。
+ * @param members 该群成员(协调任务按角色判定;缺省为空 → 回退反推)。
  * @returns 已按最新任务 createdAt 正序排列的 Requirement[]。
  */
-export function groupTasksBySpec(tasks: TaskItem[]): Requirement[] {
+export function groupTasksBySpec(
+  tasks: TaskItem[],
+  members: Member[] = [],
+): Requirement[] {
   const byId = new Map(tasks.map((task) => [task.id, task]));
 
   // 每个任务沿 parentTaskId 上溯到根(带 visited 防环;父不在列表即停)。
@@ -325,10 +357,12 @@ export function groupTasksBySpec(tasks: TaskItem[]): Requirement[] {
       latestTask: latest,
       status: latest.status,
       dispatchKind: latest.dispatchKind ?? null,
-      retryCount: retryCountForTasks(executionTasksForRequirement(sorted)),
+      retryCount: retryCountForTasks(
+        executionTasksForRequirement(sorted, members),
+      ),
       updatedAt: latest.updatedAt,
-      label: deriveLabel(sorted),
-      steps: requirementSteps(sorted),
+      label: deriveLabel(sorted, members),
+      steps: requirementSteps(sorted, members),
     });
   }
 

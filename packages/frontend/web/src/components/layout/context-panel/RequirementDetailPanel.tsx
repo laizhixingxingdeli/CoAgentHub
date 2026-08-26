@@ -27,6 +27,7 @@ import { type ReactNode, useState } from "react";
 import { useLiveNow } from "@/pages/app/groups/messages/lib";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
 import {
+  coordinationTasksForRequirement,
   executionTasksForRequirement,
   type Requirement,
   type StepStatus,
@@ -211,7 +212,12 @@ export default function RequirementDetailPanel({
   const { l1, l2, l3 } = layerState;
 
   // 阶梯固定三步:重试只作为 L1 标签的附属信息,不增加步骤。
-  const l1Tasks = executionTasksForRequirement(requirement.tasks);
+  const l1Tasks = executionTasksForRequirement(requirement.tasks, members);
+  const coordinationTaskIds = new Set(
+    coordinationTasksForRequirement(requirement.tasks, members).map(
+      (task) => task.id,
+    ),
+  );
   const mergedTimeline = mergeRequirementTimeline(
     requirement.tasks,
     messages,
@@ -220,7 +226,7 @@ export default function RequirementDetailPanel({
   const timelineLayers = partitionRequirementTimeline(
     mergedTimeline,
     new Set(l1Tasks.map((task) => task.id)),
-    l2.task?.id ?? null,
+    coordinationTaskIds,
   );
   const explicitStateActive =
     hasExplicitLayerState && expandedRequirementId === requirement.id;

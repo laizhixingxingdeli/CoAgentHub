@@ -117,11 +117,11 @@ function layerForSenderRoles(
 export function timelineLayerForEvent(
   event: TimelineEvent,
   executionTaskIds: ReadonlySet<string>,
-  coordinationTaskId: string | null,
+  coordinationTaskIds: ReadonlySet<string>,
 ): RequirementTimelineLayer {
   if (event.kind === "task") {
     if (executionTaskIds.has(event.task.id)) return "l1";
-    if (event.task.id === coordinationTaskId) return "l2";
+    if (coordinationTaskIds.has(event.task.id)) return "l2";
     return "l1";
   }
 
@@ -145,7 +145,7 @@ export function timelineLayerForEvent(
 export function partitionRequirementTimeline(
   events: TimelineEvent[],
   executionTaskIds: ReadonlySet<string>,
-  coordinationTaskId: string | null,
+  coordinationTaskIds: ReadonlySet<string>,
 ): Record<RequirementTimelineLayer, TimelineEvent[]> {
   const layers: Record<RequirementTimelineLayer, TimelineEvent[]> = {
     l1: [],
@@ -154,7 +154,7 @@ export function partitionRequirementTimeline(
   };
   for (const event of events) {
     layers[
-      timelineLayerForEvent(event, executionTaskIds, coordinationTaskId)
+      timelineLayerForEvent(event, executionTaskIds, coordinationTaskIds)
     ].push(event);
   }
   return layers;

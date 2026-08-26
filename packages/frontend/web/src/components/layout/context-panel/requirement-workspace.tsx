@@ -114,15 +114,17 @@ export function RequirementWorkspace({
       ...task,
       ...(taskObservability[task.id] ?? {}),
     }));
-    const grouped = groupTasksBySpec(observedTasks).map((requirement) => {
-      const layerState = deriveRequirementLayerState(
-        requirement,
-        messages,
-        members,
-      );
-      states.set(requirement.id, layerState);
-      return { ...requirement, steps: layerState.steps };
-    });
+    const grouped = groupTasksBySpec(observedTasks, members).map(
+      (requirement) => {
+        const layerState = deriveRequirementLayerState(
+          requirement,
+          messages,
+          members,
+        );
+        states.set(requirement.id, layerState);
+        return { ...requirement, steps: layerState.steps };
+      },
+    );
     return { requirements: grouped, layerStates: states };
   }, [tasks, taskObservability, messages, members]);
   // 「需求 / 修复」二态切换(requirement-list-kind-tabs R1):null dispatchKind
