@@ -1,7 +1,7 @@
 # Spec: 协调者派出子任务之前,界面把它显示成执行者
 
 > **状态**: Ready for Implementation
-> **版本**: 1.0
+> **版本**: 1.1
 > **日期**: 2026-08-26
 
 ## 现象:界面说「还没有协调任务」,而协调任务正在跑
@@ -16,6 +16,19 @@ L1 执行    进行中    1 次执行  →  Codex(协调者)
 数据层完全正常 —— 检视者发给 `role/coordinator`,Codex 接单,`parentTaskId` 为
 null,进程在跑。**错的只是显示**,而这个错误显示会让人得出「协调者被跳过了」
 的结论,并据此去排查一个并不存在的故障。
+
+### v1.1 追加的第二个失败场景:续跑任务整个消失
+
+实测本群 `coordinator-exits-after-dispatch` 那一票的三条任务:
+
+| 任务 | 执行方 | 当前逻辑判成 |
+|---|---|---|
+| `01a03bfa` | Codex(协调) | L2 |
+| `01a03bfd` | AtomCode(执行) | L1 |
+| `01a03c00`(续跑) | Codex(协调,正在做 L2) | **哪一层都不是** |
+
+续跑任务有父任务,所以不被认作协调任务;又带 `review_request`,所以被排除出 L1
+—— 于是**从时间线上消失**。而「派完就退」已经落地,这条路径**今后每票必现**。
 
 ## 根因:靠「有没有人认它当父」反推身份
 
@@ -67,6 +80,38 @@ l1Tasks = tasks.filter((t) => !coordinationIds.has(t.id) && !isReviewRequestTask
 有 `parentTaskId` 的任务仍沿父链归到父之下(现有注释 `:10-15` 描述的规则不变);
 悬空父仍按无父处理,**不猜测父子关系**。本票只改「哪个任务算 L2」。
 
+### R6. 一个需求可能有**多条**协调者任务,L2 要能表达
+
+⚠️ **本条是 v1.1 新增,与 R1 同一根因,不要当成另一件事。**
+
+`coordinator-exits-after-dispatch`(`3645c741`)落地后,协调者**派完子任务即退出**,
+子任务终态时平台创建**续跑任务**把它拉回来做 L2。于是**每一票至少有两条协调者任务**
+(父任务 + 续跑任务),失败重试会更多。
+
+现有数据模型假设只有一条:
+
+```ts
+const coordinationTask = coordinationTaskForTasks(tasks);   // TaskItem | null
+L2 状态 = taskStatusToStepStatus(coordinationTask.status)    // 只跟随这一条
+```
+
+**只做 R1 修不好这个**:R1 会让父任务与续跑任务都被判为协调任务,但 `find()`
+只返回第一条,续跑任务**仍然从时间线上消失**(实测本群 `01a03c00`:
+既不是返回的那条协调任务,又因带 `review_request` 被排除出 L1,**哪一层都不显示**)。
+
+要做的:
+
+- `coordinationTaskForTasks` 之外**增加**一个返回**全部**协调者任务的取法
+  (命名自便,例如 `coordinationTasksForRequirement`),按 `created_at` 升序
+- L2 的状态改用**现有的** `aggregateTaskStatuses` 对这批任务聚合,
+  **不要**另写一套聚合规则
+- ⚠️ **保留** `coordinationTaskForTasks` 单条语义供 `noExecutionReason`
+  等既有调用点使用,**不要**改它的签名去适配本条 —— 那会波及无关调用方
+
+⚠️ **不要**给续跑任务做特例判断(例如检测 `diffSummary.platform.resumeOf`)。
+它之所以属于 L2,是因为**它的执行方是协调者**,和 R1 是同一条判据;
+按 `resumeOf` 特判等于又引入一种反推。
+
 ## 验收标准
 
 - [ ] 协调者的任务**零子任务**时:归入 L2,L2 状态跟随该任务(进行中/完成/失败),
@@ -77,6 +122,14 @@ l1Tasks = tasks.filter((t) => !coordinationIds.has(t.id) && !isReviewRequestTask
 - [ ] 成员查不到时回退反推,结果与改动前**逐字一致**(回归,必测)
 - [ ] 检视请求任务(`isReviewRequestTask`)仍被排除在 L1 之外(回归,必测)
 - [ ] 标题提取:协调任务仍不参与提取,零子任务时也不参与(回归,必测)
+- [ ] **续跑任务**(执行方角色为 `coordinator`、`diffSummary.platform.resumeOf` 非空)
+      归入 **L2**,不出现在 L1,也**不从时间线上消失**(v1.1 核心场景,必测)
+- [ ] 一个需求下有父协调任务 + 续跑任务时:L2 状态由**两条聚合**得出
+      (复用 `aggregateTaskStatuses`),不是只跟随其中一条(必测)
+- [ ] 该聚合对「父 done + 续跑 running」得出 `running`,
+      对「两条皆 done」得出 `done`(必测)
+- [ ] `coordinationTaskForTasks` 的单条语义与签名**未改变**(回归,必测)
+- [ ] 实现中**没有**针对 `resumeOf` 的特例分支(读代码确认)
 - [ ] 前端测试全绿,贴出用例数
 
 ## 不涉及
