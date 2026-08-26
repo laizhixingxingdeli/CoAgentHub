@@ -128,6 +128,15 @@ describe("codex:R3 解析不出的行逐字保留", () => {
     const line = JSON.stringify({ type: "item.completed" });
     expect(parse(`${line}\n`)).toBe(`${line}\n`);
   });
+
+  it("跨 chunk 拼接后半截非法 JSON 原样保留(R3 回归)", () => {
+    const parse = createExecutorOutputParser("codex");
+    const garbage =
+      '{"type":"item.completed","item":{"item_type":"mcp_tool_call","tool":"read_file","arguments":}}';
+    const cut = 17; // 在词中间切开,与真实流式 chunk 一致
+    expect(parse(garbage.slice(0, cut))).toBe("");
+    expect(parse(`${garbage.slice(cut)}\n`)).toBe(`${garbage}\n`);
+  });
 });
 
 describe("codex:流式跨 chunk", () => {

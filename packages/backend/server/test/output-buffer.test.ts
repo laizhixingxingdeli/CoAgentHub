@@ -6,10 +6,11 @@ import {
 import { beforeEach, describe, expect, it } from "vitest";
 
 /**
- * 实时输出缓冲(output-buffer.ts,R4):appendTaskOutput 在 prev 与 chunk 边界
- * 均无换行时补一个 \n——治执行器多句粘成一段,顺带让 OUTPUT_TAIL_MAX_LINES
- * 在真实多行输入上确实生效(改动前几十句粘一行,行上限永远够不着,只有
- * 256KB 字节上限在起作用;本文件为隐含回归点)。
+ * 实时输出缓冲(output-buffer.ts):appendTaskOutput 仅以真实换行边界构成行——
+ * chunk 一律裸拼接(prev + chunk),不在 chunk 边界补 \n。流式 chunk 常在词中间
+ * 切开(如 `[tool→ read_fi` + `le] ok\n`),边界补换行会把一条真实动作行切成
+ * 「词中间碎片」与半截 [tool→ 行;裸拼接让未以换行结尾的 chunk 与后续 chunk
+ * 自然接续,直到真实 \n 才成为完整行。行数/字节截断只作用于已构成的行。
  */
 
 const TAIL_MAX_LINES = 1000;
@@ -18,31 +19,39 @@ beforeEach(() => {
   clearAllTaskOutputs();
 });
 
-describe("R4:chunk 边界补换行", () => {
-  it("prev 与 chunk 均不以换行结尾/开头 → 补一个 \\n", () => {
+describe("仅以真实换行边界构成行", () => {
+  it("未以换行结尾的 chunk 与后续 chunk 裸拼接,直到真实换行才成完整行", () => {
     appendTaskOutput("t1", "line-1");
     appendTaskOutput("t1", "line-2");
-    expect(taskOutputTail("t1")).toBe("line-1\nline-2");
+    expect(taskOutputTail("t1")).toBe("line-1line-2");
+    appendTaskOutput("t1", "\n");
+    expect(taskOutputTail("t1")).toBe("line-1line-2\n");
   });
 
-  it("prev 以换行结尾 → 不补", () => {
+  it("跨 chunk 的半截动作行重组为完整行,不产生词中间碎片(回归)", () => {
+    appendTaskOutput("t1", "[tool→ read_fi");
+    appendTaskOutput("t1", "le] ok\n");
+    expect(taskOutputTail("t1")).toBe("[tool→ read_file] ok\n");
+  });
+
+  it("prev 以换行结尾 → 新 chunk 直接开始新行", () => {
     appendTaskOutput("t1", "line-1\n");
     appendTaskOutput("t1", "line-2");
     expect(taskOutputTail("t1")).toBe("line-1\nline-2");
   });
 
-  it("chunk 以换行开头 → 不补", () => {
+  it("chunk 以换行开头 → 直接续行", () => {
     appendTaskOutput("t1", "line-1");
     appendTaskOutput("t1", "\nline-2");
     expect(taskOutputTail("t1")).toBe("line-1\nline-2");
   });
 
-  it("首块(无 prev)→ 不补", () => {
+  it("首块(无 prev)→ 原样入缓冲", () => {
     appendTaskOutput("t1", "first");
     expect(taskOutputTail("t1")).toBe("first");
   });
 
-  it("空 chunk → 不补、不刷新时间戳", () => {
+  it("空 chunk → 不追加、不刷新时间戳", () => {
     appendTaskOutput("t1", "a");
     appendTaskOutput("t1", "");
     expect(taskOutputTail("t1")).toBe("a");
