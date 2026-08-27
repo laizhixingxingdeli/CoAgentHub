@@ -25,7 +25,6 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import { AlertTriangle } from "lucide-react";
 import { useMemo, useState } from "react";
-import { LiveOutput } from "@/components/live-output";
 import { t } from "@/lib/i18n";
 import { lastNonEmptyLine } from "@/lib/output-buffer";
 import { ControlButton } from "@/pages/app/groups/messages/control-button";
@@ -52,6 +51,7 @@ import {
   mergeRequirementTimeline,
   type TimelineEvent,
 } from "./merge-requirement-timeline";
+import { OutputDetailBlock } from "./OutputDetailBlock";
 import { TASK_STATUS_CLASS } from "./status-classes";
 
 export type { TimelineRole } from "./member-role";
@@ -624,7 +624,13 @@ export default function RequirementTimeline({
                   遗留 {todo}
                 </p>
               )}
-              {outputText && <LiveOutput text={outputText} />}
+              {outputText && (
+                <OutputDetailBlock
+                  groupId={task.groupId}
+                  taskId={task.id}
+                  text={outputText}
+                />
+              )}
             </FoldableContent>
           )}
           {(canStop || canRollback) && (
