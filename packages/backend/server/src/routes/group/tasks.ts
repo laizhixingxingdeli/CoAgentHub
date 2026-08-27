@@ -18,6 +18,7 @@ import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
   getL3ResponseMinutesMs,
+  isExecutorProcessAlive,
   isResumeTask,
   isTerminalTaskStatus,
   notifyTaskStatusChanged,
@@ -47,6 +48,12 @@ import { assertGroupWritable, assertSupersededTaskInGroup } from "./helpers";
  */
 
 type TaskRow = typeof taskTable.$inferSelect;
+
+/** 存活信号(R6,specs/orphan-tasks-only-reconcile-on-restart.md):pid 为 null
+ * 时返回 null(无 pid 可核验),否则以 process.kill(pid, 0) 探测进程是否存在。 */
+function pidAliveOf(pid: number | null): boolean | null {
+  return pid === null ? null : isExecutorProcessAlive(pid);
+}
 
 /** diffSummary 是否携带 review_request 交接载荷(顶层 type 或嵌套键两种形式)。 */
 function summaryHasReviewRequest(diffSummary: unknown): boolean {
@@ -627,6 +634,9 @@ app
           messageId: true,
           executorParticipantId: true,
           executorKey: true,
+          // 存活信号(R6,specs/orphan-tasks-only-reconcile-on-restart.md):
+          // 列表透出 executorPid,并派生 pidAlive 供看门狗等外部消费方判断。
+          executorPid: true,
           brief: true,
           status: true,
           checkpointRef: true,
@@ -657,12 +667,18 @@ app
         offset: offset ?? 0,
         orderBy: (t, { desc }) => desc(t.createdAt),
       });
+      // 存活信号(R6):列表每行派生 pidAlive(null = 无 pid 可核验,与
+      // executorPid 为 null 一一对应);与详情同源,供看门狗等外部消费方判断。
+      const withPidAlive = tasks.map((task) => ({
+        ...task,
+        pidAlive: pidAliveOf(task.executorPid),
+      }));
       // 实时进度:includeOutput=1 时给每个任务附 outputTail(running 任务 =
       // 内存缓冲;已完成任务 = diffSummary.outputTail 回填或留空)。
       if (!wantOutput) {
-        return c.json(tasks);
+        return c.json(withPidAlive);
       }
-      const withOutput = tasks.map((task) => {
+      const withOutput = withPidAlive.map((task) => {
         const buffered = taskOutputTail(task.id);
         const summary =
           typeof task.diffSummary === "object" && task.diffSummary !== null
@@ -730,6 +746,10 @@ app
         messageId: task.messageId,
         executorParticipantId: task.executorParticipantId,
         executorKey: task.executorKey,
+        // 存活信号(R6):详情透出 executorPid 与 pidAlive(null = 无 pid 可核验),
+        // 供看门狗等外部消费方判断执行器进程是否仍在运行。
+        executorPid: task.executorPid ?? null,
+        pidAlive: pidAliveOf(task.executorPid),
         brief: task.brief,
         status: task.status,
         checkpointRef: task.checkpointRef,

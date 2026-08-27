@@ -25,6 +25,7 @@ import {
   recoverInterruptedTasks,
   startCoordinatorResumeConsumer,
 } from "./lib/executor-task";
+import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { getLogger } from "./lib/plugins/winston";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
@@ -185,6 +186,7 @@ async function run() {
   // upgrade requests (identity via ?participantId=) are handled alongside HTTP.
   wsHub.handleUpgrade(server as HttpServer);
   startCoordinatorResumeConsumer(db);
+  startOrphanReconciler(db);
 }
 
 run().catch((err) => {
