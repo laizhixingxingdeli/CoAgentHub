@@ -49,8 +49,8 @@ Web (:3000, serve.mjs) ──/api 反代+WS──► Server (:3001, Hono)
 ```
 
 实现布局(2026-08 架构审视后):`routes/group/` 按职责拆为 groups/members/messages/tasks 子路由 +
-`helpers.ts`(共享守卫,API 路径/响应不变);`lib/executor-task/` 拆为 types/state/output-buffer/output-parser/
-notify/report/queue 七个子模块(barrel 导出面不变,`@server/lib/executor-task` 导入兼容);统一配置读取收敛在
+`helpers.ts`(共享守卫,API 路径/响应不变);`lib/executor-task/` 拆为 types/state/output-buffer/output-parser/detail-store/
+notify/report/queue 八个子模块(barrel 导出面不变,`@server/lib/executor-task` 导入兼容);统一配置读取收敛在
 `lib/config.ts`(CORS_ORIGIN / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);`participant.token_hash` 列为
 已知历史遗留(token 认证已移除),**不删除**,标记 deprecated 待删。
 

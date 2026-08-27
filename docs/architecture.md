@@ -52,11 +52,19 @@ CoAgentHub/
 │   │   │       ├── lib/group-visibility.ts   # 消息可见性规则(单一来源)
 │   │   │       ├── lib/services/message-service.ts  # 消息域纯 db 逻辑(列表/编辑/软删/写入)
 │   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws,成员短缓存)
+│   │   │       ├── lib/orphan-task-reconciler.ts # 孤儿任务周期收敛(10s;判据=executorPid 经
+│   │   │       │                             #   process.kill(pid,0) 抛 ESRCH 才判死,非「无输出超时」;
+│   │   │       │                             #   协调根任务在「有非终态子任务」或「续跑尚未创建」窗口内豁免;
+│   │   │       │                             #   续跑任务(resumeOf)自身不豁免;显式 enabled 开关供测试注入)
 │   │   │       └── lib/executor-task/        # 执行器调度(拆分 barrel,导出面兼容)
 │   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
 │   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail,摘要流)
-│   │   │           ├── output-parser.ts #    结构化条目解析(id/kind/summary/detail,摘要带 #id;解析失败原样保留)
+│   │   │           ├── output-parser.ts #    结构化条目解析(id/kind/summary/detail,摘要带 #id)
+│   │   │           │                    #    分支:codex(item.completed;已知冗余事件 item.started/
+│   │   │           │                    #      thread.started/turn.* 显式跳过并计数)、atomcode、
+│   │   │           │                    #      codebuddy(stream-json)、default 通用语义解析(丢信封留正文)
+│   │   │           │                    #    各分支均带 pending 行缓冲;解析失败/未知格式一律原样保留
 │   │   │           ├── detail-store.ts  #    明细磁盘 JSONL(/tmp,14 天清理;不驻留内存、不进 diffSummary)
 │   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
 │   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard;含 Token 消耗提取)
