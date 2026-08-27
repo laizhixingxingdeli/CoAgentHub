@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
  *    summary 带 #id(如 `[工具 #t3]`)进摘要流,detail 进明细存储(R4)。
  *  - codex(exec --json):只渲染 type == "item.completed" 的三类 item 为
  *    [工具]/[命令]/[汇报] 动作行,不输出 arguments/result 全文(result 进 detail);
- *    非法 JSON、非 completed 事件、未知 item_type 逐字保留;跨 chunk 半截行拼接;
+ *    非法 JSON、非 completed 事件、未知 item type 值逐字保留;跨 chunk 半截行拼接;
  *    进程结束时 flush 吐出未成行残留。
  *  - atomcode(-v):[thinking] 行折叠为 [思考 #id] 首句要旨 + detail 全文;
  *    [tool→/[tool← 动作行摘要逐字 + #id,超长行折叠;未知行逐字保留;
@@ -51,7 +51,7 @@ describe("codex:item.completed 渲染为动作行", () => {
     const parse = createExecutorOutputParser("codex");
     const resultText = "result-full-text-should-not-appear-anywhere".repeat(20);
     const line = completed({
-      item_type: "mcp_tool_call",
+      type: "mcp_tool_call",
       tool: "coagenthub_get_task",
       status: "success",
       arguments: {
@@ -76,13 +76,13 @@ describe("codex:item.completed 渲染为动作行", () => {
   it("mcp_tool_call 失败:error 全文在摘要(status/error 可见,不折叠)", () => {
     const parse = createExecutorOutputParser("codex");
     const ok = completed({
-      item_type: "mcp_tool_call",
+      type: "mcp_tool_call",
       tool: "curl",
       status: "success",
       arguments: { url: "http://localhost:3001/api" },
     });
     const failed = completed({
-      item_type: "mcp_tool_call",
+      type: "mcp_tool_call",
       tool: "curl",
       status: "error",
       error: "connection refused",
@@ -100,12 +100,12 @@ describe("codex:item.completed 渲染为动作行", () => {
   it("command_execution → [命令] 命令 + exit 码", () => {
     const parse = createExecutorOutputParser("codex");
     const line = completed({
-      item_type: "command_execution",
+      type: "command_execution",
       command: "git status --short",
       exit_code: 0,
     });
     const failLine = completed({
-      item_type: "command_execution",
+      type: "command_execution",
       command: "curl -sS http://localhost:3001/api",
       exit_code: 5,
     });
@@ -118,7 +118,7 @@ describe("codex:item.completed 渲染为动作行", () => {
   it("command_execution 折行命令压成单行,超长截断", () => {
     const parse = createExecutorOutputParser("codex");
     const line = completed({
-      item_type: "command_execution",
+      type: "command_execution",
       command: `printf "a\nb\nc" && ${"x".repeat(600)}`,
       exit_code: 0,
     });
@@ -132,13 +132,34 @@ describe("codex:item.completed 渲染为动作行", () => {
   it("agent_message → [汇报] 正文", () => {
     const parse = createExecutorOutputParser("codex");
     const line = completed({
-      item_type: "agent_message",
+      type: "agent_message",
       text: "Dispatch succeeded: child task 01a03d88 is running under AtomCode",
     });
     const entries = parse(`${line}\n`);
     expect(entries[0].kind).toBe("report");
     expect(entries[0].summary).toBe(
       "[汇报 #t1] Dispatch succeeded: child task 01a03d88 is running under AtomCode",
+    );
+  });
+});
+
+describe("codex:真实 item.completed JSONL 回归(item.type 协议字段)", () => {
+  it("真实运行固化的 command_execution 行 → [命令] 动作行 + 明细全文,不退化为 raw", () => {
+    const parse = createExecutorOutputParser("codex");
+    // 取自 2026-08-27 生产日志的真实 codex(exec --json)行,完整 JSONL 原样固化:
+    // item 类型字段是 type(非 item_type),命令输出字段是 aggregated_output。
+    const realLine =
+      '{"type":"item.completed","item":{"id":"item_13","type":"command_execution","command":"/bin/zsh -lc \'git diff 44c58590\'\'^ 44c58590 --name-only && git status --short\'","aggregated_output":"scripts/coagenthub-watchdog.sh\\nscripts/coagenthub-watchdog.test.mjs\\n","exit_code":0,"status":"completed"}}';
+    const entries = parse(`${realLine}\n`);
+    expect(entries).toHaveLength(1);
+    // 修复前读 item_type 落空,该行退化为 raw;现在按 item.type 解析为 [命令] 动作行。
+    expect(entries[0].kind).toBe("command");
+    expect(entries[0].summary).toBe(
+      "[命令 #t1] /bin/zsh -lc 'git diff 44c58590''^ 44c58590 --name-only && git status --short' exit 0",
+    );
+    // R3:命令输出全文进明细(aggregated_output),摘要只含命令行。
+    expect(entries[0].detail).toBe(
+      "scripts/coagenthub-watchdog.sh\nscripts/coagenthub-watchdog.test.mjs\n",
     );
   });
 });
@@ -157,7 +178,7 @@ describe("codex:R3 解析不出的行逐字保留", () => {
     const parse = createExecutorOutputParser("codex");
     const started = JSON.stringify({
       type: "item.started",
-      item: { item_type: "mcp_tool_call", tool: "read_file" },
+      item: { type: "mcp_tool_call", tool: "read_file" },
     });
     const weird = JSON.stringify({ type: "some_future_event", payload: 1 });
     const entries = parse(`${started}\n${weird}\n`);
@@ -166,11 +187,11 @@ describe("codex:R3 解析不出的行逐字保留", () => {
     );
   });
 
-  it("未知 item_type 原样保留", () => {
+  it("未知 item type 值原样保留", () => {
     const parse = createExecutorOutputParser("codex");
     const line = JSON.stringify({
       type: "item.completed",
-      item: { item_type: "brand_new_item_kind", data: { a: 1 } },
+      item: { type: "brand_new_item_kind", data: { a: 1 } },
     });
     const entries = parse(`${line}\n`);
     expect(entries[0].summary).toBe(line);
@@ -186,7 +207,7 @@ describe("codex:R3 解析不出的行逐字保留", () => {
   it("跨 chunk 拼接后半截非法 JSON 原样保留(R3 回归)", () => {
     const parse = createExecutorOutputParser("codex");
     const garbage =
-      '{"type":"item.completed","item":{"item_type":"mcp_tool_call","tool":"read_file","arguments":}}';
+      '{"type":"item.completed","item":{"type":"mcp_tool_call","tool":"read_file","arguments":}}';
     const cut = 17; // 在词中间切开,与真实流式 chunk 一致
     expect(parse(garbage.slice(0, cut))).toEqual([]);
     const entries = parse(`${garbage.slice(cut)}\n`);
@@ -199,7 +220,7 @@ describe("codex:流式跨 chunk", () => {
     const parse = createExecutorOutputParser("codex");
     const line = JSON.stringify({
       type: "item.completed",
-      item: { item_type: "agent_message", text: "half and half" },
+      item: { type: "agent_message", text: "half and half" },
     });
     const cut = Math.floor(line.length / 2);
     expect(parse(line.slice(0, cut))).toEqual([]);
@@ -707,12 +728,12 @@ describe("codex:R5 压缩比(基线 262143 字节)", () => {
         item:
           n % 4 === 0
             ? {
-                item_type: "command_execution",
+                type: "command_execution",
                 command: `coagenthub_get_task --task ${n} --group 01a03be2`,
                 exit_code: n % 8 === 0 ? 5 : 0,
               }
             : {
-                item_type: "mcp_tool_call",
+                type: "mcp_tool_call",
                 tool: "coagenthub_get_task",
                 status: "success",
                 // 键名用 taskbook(避开断言关键词):多层转义回显只藏在值里。

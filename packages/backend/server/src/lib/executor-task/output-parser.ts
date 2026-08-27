@@ -19,7 +19,7 @@
  *  - codex(exec --json):行缓冲拼接跨 chunk 的 JSONL 行,只渲染
  *    type == "item.completed" 事件为 [工具]/[命令]/[汇报] 动作行;不渲染
  *    arguments/result 全文(那正是 65% 噪音的来源),全文进明细(detail)。
- *    其余 JSONL 事件、非法 JSON、未知 item_type 一律逐字保留(raw)。
+ *    其余 JSONL 事件、非法 JSON、未知 item type 值一律逐字保留(raw)。
  *  - atomcode(-v):动作行本身已紧凑([tool→ name] {args} 等),摘要逐字保留 +
  *    #id;只把粘连在中行内的已知前缀(如 `…read the file.[tokens] prompt=…`)
  *    拆到行首,治「多句粘成一段」;[thinking] 行折叠为 [思考 #id] 要旨 +
@@ -206,7 +206,7 @@ function renderAgentMessage(item: Record<string, unknown>): string {
 
 /**
  * 渲染一条 codex JSONL 行:只处理 type == "item.completed" 的三类 item;
- * 其余(非法 JSON、其他 type、未知 item_type)返回 raw 透传条目(R7 逐字保留)。
+ * 其余(非法 JSON、其他 type、未知 item type 值)返回 raw 透传条目(R7 逐字保留)。
  */
 function renderCodexLine(
   line: string,
@@ -225,7 +225,9 @@ function renderCodexLine(
   const item = record.item;
   if (typeof item !== "object" || item === null) return raw(line);
   const it = item as Record<string, unknown>;
-  switch (it.item_type) {
+  // codex 真实协议:item 的类型字段是 type(实测 item.completed 的
+  // command_execution/mcp_tool_call/agent_message 均带 item.type),不是 item_type。
+  switch (it.type) {
     case "mcp_tool_call": {
       const hasError =
         it.status === "error" ||
@@ -242,12 +244,14 @@ function renderCodexLine(
       return entry(
         "command",
         renderCommand(it),
-        detailText(it.output ?? it.result), // R3:命令输出全文进明细
+        // R3:命令输出全文进明细;codex 真实协议输出字段是 aggregated_output
+        // (实测 item.completed 行),output/result 仅为旧格式兜底。
+        detailText(it.aggregated_output ?? it.output ?? it.result),
       );
     case "agent_message":
       return entry("report", renderAgentMessage(it));
     default:
-      return raw(line); // R3:未知 item_type 逐字保留
+      return raw(line); // R3:未知 item type 值逐字保留
   }
 }
 
