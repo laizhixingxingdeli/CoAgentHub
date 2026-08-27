@@ -373,6 +373,65 @@ function collectAtomCode(
 }
 
 /**
+ * Recursively visit every nested object in a parsed JSON value. Used by the
+ * generic fallback to locate a usage record no matter how deep it is nested.
+ */
+function walkJsonObjects(
+  value: unknown,
+  visit: (obj: Record<string, unknown>) => void,
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) walkJsonObjects(item, visit);
+    return;
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    visit(obj);
+    for (const key of Object.keys(obj)) walkJsonObjects(obj[key], visit);
+  }
+}
+
+/**
+ * Generic, CLI-agnostic fallback. Scan every JSONL line of `stdout` and
+ * recursively inspect every nested object; any object `readUsageObject` can
+ * parse into a real (input+output) usage record is a candidate. We keep the
+ * LAST candidate because cumulative totals usually appear in the final event.
+ * This deliberately judges by *semantics* (parseable usage) rather than by a
+ * fixed `type` or nesting level, so an unknown executor still yields its real
+ * accounting instead of `unsupported`.
+ */
+function collectGenericJsonl(stdout: string): TokenUsage | undefined {
+  let latest: UsageTotals | undefined;
+  let latestExplicitTotal: number | undefined;
+  for (const row of parseJsonLines(stdout)) {
+    walkJsonObjects(row, (obj) => {
+      const usage = readUsageObject(obj);
+      if (usage) {
+        latest = usage;
+        latestExplicitTotal = nonNegativeNumber(
+          obj.total_tokens ?? obj.totalTokens,
+        );
+      }
+    });
+  }
+  if (!latest) return undefined;
+  // Conservative total caliber. OpenAI/Codex-family usage reports `cached_*`
+  // and `reasoning_*` as subsets of `input_tokens`/`output_tokens`; adding them
+  // again would double-count (this is exactly why the dedicated Codex collector
+  // uses input+output). When a source object supplies an explicit
+  // `total_tokens`/`totalTokens` we trust it as authoritative; otherwise the
+  // safe universal default is total = input + output so we never inflate by
+  // re-adding cache/reasoning subsets. For CLIs where cached tokens are
+  // strictly additive (Claude/CodeBuddy/AtomCode models) this generic scan may
+  // report a lower total than their dedicated collectors — those executors have
+  // custom paths, so the scan only runs for unknown keys where the subset
+  // assumption is the safest default.
+  const totalTokens =
+    latestExplicitTotal ?? latest.inputTokens + latest.outputTokens;
+  return finishTotals({ ...latest, totalTokens }, "generic-jsonl-scan");
+}
+
+/**
  * Collect native CLI accounting at task termination. A missing match is never
  * guessed: callers persist `unavailable` (or `unsupported` for runtimes with
  * no native source) explicitly.
@@ -394,6 +453,13 @@ export async function collectTokenUsage(
           ? collectClaude(input)
           : undefined;
   if (usage) return { tokenUsage: usage };
+  // Generic semantic fallback. The custom branches above are precise
+  // accelerators; for every other executor (including the previously
+  // `unsupported` reasonix/hermes/win-hermes/reviewer) we scan the whole
+  // stdout JSONL and take the last object that readUsageObject can parse as a
+  // real usage record — regardless of CLI type or how deeply it is nested.
+  const generic = collectGenericJsonl(input.stdout ?? "");
+  if (generic) return { tokenUsage: generic };
   if (
     ["reasonix", "hermes", "win-hermes", "reviewer"].includes(input.executorKey)
   ) {

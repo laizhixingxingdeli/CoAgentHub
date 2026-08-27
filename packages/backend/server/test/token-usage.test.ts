@@ -350,4 +350,221 @@ describe("platform token usage collection", () => {
       }),
     ).resolves.toEqual({ tokenUsage: null, reason: "unavailable" });
   });
+
+  it("generic fallback collects the LAST usage object from an unknown executor's stdout JSONL", async () => {
+    // An executor key with no custom collector must still resolve real usage
+    // by scanning the stdout JSONL, not return `unsupported`.
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: [
+        JSON.stringify({
+          type: "progress",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: {
+            input_tokens: 100,
+            cached_input_tokens: 30,
+            output_tokens: 20,
+          },
+        }),
+      ].join("\n"),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 30,
+      // Conservative total = input + output (cached is a subset, never added).
+      totalTokens: 100 + 20,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic fallback matches the Codex custom path for the same real Codex stdout", async () => {
+    // Replays one real Codex stdout: with the `codex` key (custom path) and with
+    // an unknown key (generic scan). The collected totalTokens must be identical
+    // — the fallback must not invent a second caliber.
+    const codexStdout = [
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 16932,
+          cached_input_tokens: 11008,
+          cache_write_input_tokens: 0,
+          output_tokens: 5,
+          reasoning_output_tokens: 0,
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "提交: abcdef1" }],
+        },
+      }),
+    ].join("\n");
+    const custom = await collectTokenUsage({
+      executorKey: "codex",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: codexStdout,
+    });
+    const generic = await collectTokenUsage({
+      executorKey: "unknown-codex-like",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: codexStdout,
+    });
+    expect(custom.tokenUsage?.totalTokens).toBe(16932 + 5);
+    expect(generic.tokenUsage?.totalTokens).toBe(
+      custom.tokenUsage?.totalTokens,
+    );
+    expect(generic.tokenUsage?.source).toBe("generic-jsonl-scan");
+  });
+
+  it("generic fallback matches the AtomCode custom path for the same representative totals", async () => {
+    // AtomCode custom path reads session .meta; generic reads stdout JSONL.
+    // Same representative totals (cache-free) must yield the same totalTokens.
+    const atomcodeLikeStdout = JSON.stringify({
+      type: "usage_report",
+      data: { input: 50, output: 10, cached_input: 0 },
+    });
+    const generic = await collectTokenUsage({
+      executorKey: "unknown-atomcode-like",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: atomcodeLikeStdout,
+    });
+    // Mirrors the AtomCode custom collector: input + cached + output = 60.
+    expect(generic.tokenUsage?.totalTokens).toBe(50 + 10);
+    expect(generic.tokenUsage?.source).toBe("generic-jsonl-scan");
+  });
+
+  it("generic fallback reports unavailable when no usage object exists anywhere", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: [
+        JSON.stringify({ type: "log", message: "no usage here" }),
+        JSON.stringify({ type: "turn.started" }),
+      ].join("\n"),
+    });
+    expect(result).toEqual({ tokenUsage: null, reason: "unavailable" });
+  });
+
+  it("generic fallback collects deeply nested usage for reasonix", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "reasonix",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        event: "token_usage",
+        payload: {
+          result: {
+            token_usage: {
+              input_tokens: 1200,
+              cached_input_tokens: 400,
+              output_tokens: 300,
+            },
+          },
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 1200,
+      outputTokens: 300,
+      cachedInputTokens: 400,
+      totalTokens: 1200 + 300,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic fallback collects deeply nested usage for hermes", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "hermes",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        kind: "metrics",
+        nested: {
+          deep: {
+            usage: {
+              inputTokens: 800,
+              outputTokens: 150,
+              cacheReadInputTokens: 200,
+            },
+          },
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 800,
+      outputTokens: 150,
+      cachedInputTokens: 200,
+      totalTokens: 800 + 150,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic fallback collects deeply nested usage for win-hermes", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "win-hermes",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: [
+        JSON.stringify({ event: "noop", value: 1 }),
+        JSON.stringify({
+          stream: [
+            { type: "partial", tokens: 3 },
+            {
+              type: "final",
+              usage: {
+                input_tokens: 2400,
+                cached_tokens: 600,
+                output_tokens: 500,
+              },
+            },
+          ],
+        }),
+      ].join("\n"),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 2400,
+      outputTokens: 500,
+      cachedInputTokens: 600,
+      totalTokens: 2400 + 500,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic fallback prefers an explicit total_tokens over input+output when present", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 999,
+        },
+      }),
+    });
+    expect(result.tokenUsage?.totalTokens).toBe(999);
+    expect(result.tokenUsage?.source).toBe("generic-jsonl-scan");
+  });
 });
