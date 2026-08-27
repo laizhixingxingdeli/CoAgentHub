@@ -6,10 +6,11 @@ import {
   taskCompletionEvent as taskCompletionEventTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataBase } from "../src/lib/database";
+import { consumePendingCompletionEvents } from "../src/lib/executor-task";
 import {
   reconcileOrphanTasks,
   startOrphanReconciler,
@@ -490,5 +491,136 @@ describe("孤儿任务周期收敛", () => {
 
     expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
     expect((await findTask(resume.id))?.status).toBe("failed");
+  });
+
+  // ---- 本 spec 必经竞态窗口:子任务刚转终态、续跑尚未创建 ----
+
+  it("竞态窗口:子任务刚转终态(done)+ 完成事件 pending + 续跑尚未创建 → 父任务不被收敛", async () => {
+    const coordinator = await registerParticipant({ name: "orc-race-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-竞态窗口");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-race-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "done",
+      diffSummary: { summary: "子任务完成" },
+    });
+    // 子任务首次进入终态 → DB trigger 同事务落 pending 完成事件(dispatcher =
+    // 协调者);此刻消费方尚未创建续跑,resumeOf 续跑任务还不存在。
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: child.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending",
+    });
+
+    // 续跑尚未创建:hasNonTerminalChildTask 已失效(done 是终态),但 pending
+    // 完成事件说明续跑创建在途(消费方下一周期即创建)→ 父任务不得被判死。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+  });
+
+  it("续跑任务自身的 pending 完成事件 → 不计入等待续跑,父任务仍照常收敛(终止性)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-resume-ev-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-续跑事件不豁免");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const resume = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      parentTaskId: parent.id,
+      status: "done",
+      diffSummary: { platform: { resumeOf: parent.id } },
+    });
+    // 续跑任务终态 → trigger 落 pending 事件,但 R4 防环使消费方永远跳过它,
+    // 事件不会产生任何新续跑 → 不得凭它豁免父任务(R2/R3 防回归死锁)。
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: resume.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending",
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    expect((await findTask(parent.id))?.status).toBe("failed");
+  });
+
+  it("完整链路:父任务不被收敛 → 子任务终态事件消费 → resumeOf 续跑创建 → 父任务结案 done", async () => {
+    const coordinator = await registerParticipant({ name: "orc-chain-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-完整链路");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-chain-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "done",
+      diffSummary: { summary: "子任务完成" },
+    });
+    // 竞态窗口:子任务已终态、完成事件 pending、resumeOf 续跑尚未创建。
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: child.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending",
+    });
+
+    // 1) 孤儿收敛先跑:等待续跑的父任务不得被判死。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+
+    // 2) 消费完成事件 → 创建带 diffSummary.platform.resumeOf 的续跑任务。
+    expect(await consumePendingCompletionEvents(orphanDb)).toBe(1);
+    const resumes = await testDb.query.task.findMany({
+      where: and(
+        eq(taskTable.parentTaskId, parent.id),
+        eq(taskTable.executorParticipantId, coordinator.id),
+      ),
+    });
+    expect(resumes.length).toBe(1);
+    expect(
+      (resumes[0].diffSummary as Record<string, unknown>).platform,
+    ).toMatchObject({ resumeOf: parent.id });
+
+    // 3) 续跑期间父任务仍非终态,再收敛一轮也不误杀(续跑为非终态子任务)。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+
+    // 4) 续跑完成(模拟协调者做完 L2 后 PATCH 续跑任务 done),协调者 PATCH
+    //    父任务结案 → 全部子任务终态,结案守卫放行 → done。
+    await testDb
+      .update(taskTable)
+      .set({ status: "done" })
+      .where(eq(taskTable.id, resumes[0].id));
+    const patchRes = await app.request(
+      `/api/groups/${group.id}/tasks/${parent.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({
+          status: "done",
+          diffSummary: { summary: "L2 通过" },
+        }),
+      },
+    );
+    const patchBody = await patchRes.text();
+    expect(patchRes.status, patchBody).toBe(200);
+    expect((await findTask(parent.id))?.status).toBe("done");
   });
 });

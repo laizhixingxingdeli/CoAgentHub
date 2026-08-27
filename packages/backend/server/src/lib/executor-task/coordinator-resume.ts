@@ -56,6 +56,45 @@ export async function hasNonTerminalChildTask(
   return rows.length > 0;
 }
 
+/**
+ * 父任务是否存在「应创建而尚未创建的续跑」(孤儿收敛豁免的另一半,
+ * specs/orphan-reconciler-kills-pending-resume.md 的必经竞态窗口):
+ * 存在一条 pending 的 task completion event,其所属子任务**不是续跑任务**。
+ *
+ * 完成事件由 DB trigger 在子任务首次进入终态时**同事务**创建,因此
+ * 「子任务刚转终态而续跑任务尚未创建」的窗口恰等于该子任务的完成事件仍为
+ * pending —— 这正是 consumePendingCompletionEvents 下一个周期会消费并创建
+ * 续跑的窗口,期间父协调任务不得被孤儿收敛判死。事件被消费(续跑创建、事件置
+ * delivered)后本判定自然失效,续跑任务作为新的非终态子任务由
+ * hasNonTerminalChildTask 接续豁免。
+ *
+ * 终止性(R2/R3,防回归死锁):续跑任务自身的完成事件不计入等待续跑 —— 它的
+ * 终态会被 R4 防环跳过、事件永久 pending,若计入会把「子任务(含续跑)全部
+ * 终态、协调者仍未回来」的父任务永久豁免。其余不可能出现「pending 事件永不
+ * 产生续跑」的组合:父任务终态/执行器存活/非协调者都不是孤儿收敛的候选,唯一
+ * 的 R3 去重(已存在非终态续跑)由 hasNonTerminalChildTask 先行豁免,续跑终态
+ * 后该 pending 事件重新可消费。
+ */
+export async function hasPendingResumeEvent(
+  db: DataBase,
+  parentTaskId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({
+      id: taskTable.id,
+      diffSummary: taskTable.diffSummary,
+    })
+    .from(taskCompletionEventTable)
+    .innerJoin(taskTable, eq(taskTable.id, taskCompletionEventTable.taskId))
+    .where(
+      and(
+        eq(taskCompletionEventTable.state, "pending"),
+        eq(taskTable.parentTaskId, parentTaskId),
+      ),
+    );
+  return rows.some((row) => !isResumeTask(row));
+}
+
 /** 续跑任务是否带平台标记(判定「本任务是一条续跑任务」,R4 防环用)。 */
 export function isResumeTask(task: { diffSummary: unknown }): boolean {
   const summary =

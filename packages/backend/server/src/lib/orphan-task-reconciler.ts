@@ -15,6 +15,7 @@ import type { DataBase } from "@server/lib/database";
 import { and, eq } from "drizzle-orm";
 import {
   hasNonTerminalChildTask,
+  hasPendingResumeEvent,
   isCoordinatorTask,
   isExecutorProcessAlive,
   isResumeTask,
@@ -65,7 +66,10 @@ export async function reconcileOrphanTasks(
     // R1(本 spec):等待续跑的协调者根任务豁免收敛 —— 执行方是协调者
     // (isCoordinatorTask 同源判定)且名下存在非终态执行子任务
     // (hasNonTerminalChildTask,与 coordinator-resume 同源口径)时,pid 消失
-    // 不判死,等子任务终态触发续跑。R3:resumeOf 标识的续跑任务自身不豁免。
+    // 不判死,等子任务终态触发续跑。本 spec 的必经竞态窗口——子任务刚转终态而
+    // 续跑尚未创建——由 hasPendingResumeEvent 兜住:完成事件与终态同事务落库,
+    // pending 事件 = 消费方下一个周期就会创建续跑,期间父任务同样不判死。
+    // R3:resumeOf 标识的续跑任务自身不豁免。
     if (
       !isResumeTask(task) &&
       (await isCoordinatorTask(
@@ -73,7 +77,8 @@ export async function reconcileOrphanTasks(
         task.groupId,
         task.executorParticipantId ?? "",
       )) &&
-      (await hasNonTerminalChildTask(db, task.id))
+      ((await hasNonTerminalChildTask(db, task.id)) ||
+        (await hasPendingResumeEvent(db, task.id)))
     ) {
       continue;
     }
