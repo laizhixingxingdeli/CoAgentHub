@@ -109,8 +109,8 @@ CoAgentHub/
 | `/api/groups/:id/messages` | GET | 按接收顺序列当前成员可见消息(带 `depth`);`?after=<messageId>` 增量游标;`?limit=<n>` 限制返回条数(上限 200) |
 | `/api/groups/:id/messages/:messageId` | PATCH/DELETE | 编辑正文(仅发送者)/软删除(占位符 `[消息已删除]`,树保持完整);human 角色成员 403(同写接口只读约束) |
 | `/api/groups/:id/tasks` | POST | 建任务(`messageId` 唯一幂等——同一消息只建一次,重复 POST 返回既有行;body 快照写入 `brief`;接受 `dispatchKind?` 与 `supersedesTaskId?`) |
-| `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
-| `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空);目标为协调任务时才派生 `l1`(`childCount`/`supersededCount`/`status`/`allTerminal`) 与 `l3`(`answered`/`verdict`/`awaitingSince`/`overdue`),非协调任务不含这两个字段;running 且非协调任务另含读时求值的 `liveness`(`warning`/`lastSignalAt`);任务为 failed 且带非空 `diffSummary.error`、运行时为陈旧构建时才含 `staleBuildSuspected:true` |
+| `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序),每行含 `executorPid` 与读时派生的 `pidAlive`(`null` = 无 pid 可核验);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
+| `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列),含 `executorPid` 与读时派生的 `pidAlive`(`null` = 无 pid 可核验);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空);目标为协调任务时才派生 `l1`(`childCount`/`supersededCount`/`status`/`allTerminal`) 与 `l3`(`answered`/`verdict`/`awaitingSince`/`overdue`),非协调任务不含这两个字段;running 且非协调任务另含读时求值的 `liveness`(`warning`/`lastSignalAt`);任务为 failed 且带非空 `diffSummary.error`、运行时为陈旧构建时才含 `staleBuildSuspected:true` |
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
 | `/api/participants/:id/task-completion-events` | GET | 列出 participant 的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
 | `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
