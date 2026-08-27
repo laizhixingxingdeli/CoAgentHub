@@ -106,6 +106,35 @@ function observeUnknownExecutorKey(executorKey: string): void {
 }
 
 /**
+ * R4:codex 已知冗余事件的跳过观测 —— 计数 + 去重日志(spec:
+ * codex-known-events-leak-as-raw)。签名如 `item.started/mcp_tool_call`、
+ * `thread.started`;计数按签名累加,日志只对每种签名记一次(去重),避免高吞吐
+ * 下逐 chunk 刷屏;便于确认跳过的是预期的那些,而不是悄悄吞掉了别的东西。
+ */
+const codexSkippedEventCounts = new Map<string, number>();
+const observedCodexSkippedSignatures = new Set<string>();
+function observeCodexSkippedEvent(signature: string): void {
+  const count = (codexSkippedEventCounts.get(signature) ?? 0) + 1;
+  codexSkippedEventCounts.set(signature, count);
+  if (observedCodexSkippedSignatures.has(signature)) return;
+  observedCodexSkippedSignatures.add(signature);
+  console.warn(
+    `[executor-output-parser] codex known redundant event skipped: ${signature} (count so far: ${count}); info is covered by a later item.completed, dropped from summary (R1).`,
+  );
+}
+
+/** R4 可观测性:当前 codex 跳过计数快照(按事件签名),供采样统计与测试断言。 */
+export function getCodexSkippedEventCounts(): Readonly<Record<string, number>> {
+  return Object.fromEntries(codexSkippedEventCounts);
+}
+
+/** R4 可观测性:重置 codex 跳过计数(测试隔离用,生产无需调用)。 */
+export function resetCodexSkippedEventCounts(): void {
+  codexSkippedEventCounts.clear();
+  observedCodexSkippedSignatures.clear();
+}
+
+/**
  * 结构化条目工厂(每次执行一个):分配任务内单调递增的短 id(t1, t2, …),
  * 把 #id 注入行首 [标签] 形式(如 `[工具] x` → `[工具 #t3] x`);raw 透传条目
  * 不加 #id,保证 R7 逐字保留。
@@ -204,54 +233,122 @@ function renderAgentMessage(item: Record<string, unknown>): string {
   return `[汇报] ${String(item.text ?? "").trim()}`;
 }
 
+/** R2:错误信息提取 —— 字符串直取;对象取 message/error 字段;其余序列化兜底。 */
+function codexErrorMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value !== null && typeof value === "object") {
+    const rec = value as Record<string, unknown>;
+    if (typeof rec.message === "string" && rec.message.length > 0) {
+      return rec.message;
+    }
+    if (typeof rec.error === "string" && rec.error.length > 0) {
+      return rec.error;
+    }
+    const s = JSON.stringify(value);
+    return s ? s : "";
+  }
+  return value === undefined || value === null ? "" : String(value);
+}
+
+/** R1:item.started 的跳过签名取 item.type(无 item 时为 ?)。 */
+function codexItemTypeOf(item: unknown): string {
+  if (typeof item === "object" && item !== null) {
+    const t = (item as Record<string, unknown>).type;
+    if (typeof t === "string" && t.length > 0) return t;
+  }
+  return "?";
+}
+
 /**
- * 渲染一条 codex JSONL 行:只处理 type == "item.completed" 的三类 item;
- * 其余(非法 JSON、其他 type、未知 item type 值)返回 raw 透传条目(R7 逐字保留)。
+ * R1:codex 已知冗余事件类型 —— 显式识别后跳过,不产出任何条目。
+ * item.started(信息被随后的 item.completed 完全覆盖)、会话生命周期事件。
+ * ⚠️ 必须是显式识别后跳过,不得靠「匹配不上就丢弃」——那会把真正的未知
+ * 格式也一起吞掉(spec: codex-known-events-leak-as-raw R1)。
+ */
+const CODEX_REDUNDANT_EVENT_TYPES = new Set([
+  "item.started",
+  "thread.started",
+  "turn.started",
+  "turn.completed",
+]);
+
+/**
+ * 渲染一条 codex JSONL 行:
+ *  - R1:已知冗余事件(item.started / thread.started / turn.started /
+ *    turn.completed)显式识别后跳过,不产出条目,并计数 + 去重日志(R4);
+ *  - R2:顶层 error 与 item.completed/error 渲染为不折叠的 [错误] <message>;
+ *  - R3:非法 JSON、未知顶层 type、未知 item type 值逐字保留(raw 透传)。
  */
 function renderCodexLine(
   line: string,
   entry: ReturnType<typeof createEntryMaker>["entry"],
   raw: ReturnType<typeof createEntryMaker>["raw"],
-): OutputEntry {
+): OutputEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return raw(line); // R3:非法 JSON 逐字保留
+    return [raw(line)]; // R3:非法 JSON 逐字保留
   }
-  if (typeof parsed !== "object" || parsed === null) return raw(line);
+  if (typeof parsed !== "object" || parsed === null) return [raw(line)];
   const record = parsed as Record<string, unknown>;
-  if (record.type !== "item.completed") return raw(line); // R3:非 completed 事件逐字保留
+  const type = record.type;
+  // R1:显式识别已知冗余事件后跳过(不是「匹配不上就丢弃」)。
+  if (typeof type === "string" && CODEX_REDUNDANT_EVENT_TYPES.has(type)) {
+    const signature =
+      type === "item.started"
+        ? `item.started/${codexItemTypeOf(record.item)}`
+        : type;
+    observeCodexSkippedEvent(signature);
+    return [];
+  }
+  // R2:顶层错误事件 → [错误] <message>,错误永不折叠(全文在摘要,不进明细)。
+  if (type === "error") {
+    const message = codexErrorMessage(record.message ?? record.error);
+    if (message.length > 0) return [entry("error", `[错误] ${message}`)];
+    return [raw(line)]; // R3:无 message/error 的 error 形状不认识 → 逐字保留
+  }
+  if (type !== "item.completed") return [raw(line)]; // R3:未知顶层 type 逐字保留
   const item = record.item;
-  if (typeof item !== "object" || item === null) return raw(line);
+  if (typeof item !== "object" || item === null) return [raw(line)];
   const it = item as Record<string, unknown>;
   // codex 真实协议:item 的类型字段是 type(实测 item.completed 的
   // command_execution/mcp_tool_call/agent_message 均带 item.type),不是 item_type。
   switch (it.type) {
+    case "error": {
+      // R2:item.completed/error → [错误] <message>,错误永不折叠。
+      const message = codexErrorMessage(it.error ?? it.message);
+      if (message.length > 0) return [entry("error", `[错误] ${message}`)];
+      return [raw(line)]; // R3:无错误信息的 error item → 逐字保留
+    }
     case "mcp_tool_call": {
       const hasError =
         it.status === "error" ||
         (it.error !== undefined &&
           it.error !== null &&
           String(it.error) !== "");
-      return entry(
-        hasError ? "error" : "tool",
-        renderToolCall(it),
-        detailText(it.result), // R3:工具结果全文进明细
-      );
+      return [
+        entry(
+          hasError ? "error" : "tool",
+          renderToolCall(it),
+          detailText(it.result), // R3:工具结果全文进明细
+        ),
+      ];
     }
     case "command_execution":
-      return entry(
-        "command",
-        renderCommand(it),
-        // R3:命令输出全文进明细;codex 真实协议输出字段是 aggregated_output
-        // (实测 item.completed 行),output/result 仅为旧格式兜底。
-        detailText(it.aggregated_output ?? it.output ?? it.result),
-      );
+      return [
+        entry(
+          "command",
+          renderCommand(it),
+          // R3:命令输出全文进明细;codex 真实协议输出字段是 aggregated_output
+          // (实测 item.completed 行),output/result 仅为旧格式兜底。
+          detailText(it.aggregated_output ?? it.output ?? it.result),
+        ),
+      ];
     case "agent_message":
-      return entry("report", renderAgentMessage(it));
+      return [entry("report", renderAgentMessage(it))];
     default:
-      return raw(line); // R3:未知 item type 值逐字保留
+      return [raw(line)]; // R3:未知 item type 值逐字保留
   }
 }
 
@@ -286,7 +383,7 @@ export interface ExecutorOutputParser {
   flush(): OutputEntry[];
 }
 
-/** codex:行缓冲 + 渲染 item.completed;其余逐字保留。 */
+/** codex:行缓冲 + 渲染 item.completed / 显式跳过已知冗余事件 / 逐字兜底。 */
 function createCodexParser(): ExecutorOutputParser {
   let pending = "";
   const { entry, raw } = createEntryMaker();
@@ -294,12 +391,12 @@ function createCodexParser(): ExecutorOutputParser {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
     if (lines.length === 0) return [];
-    return lines.map((l) => renderCodexLine(l, entry, raw));
+    return lines.flatMap((l) => renderCodexLine(l, entry, raw));
   }) as ExecutorOutputParser;
   parser.flush = () => {
     const tail = pending;
     pending = "";
-    return tail.length > 0 ? [renderCodexLine(tail, entry, raw)] : [];
+    return tail.length > 0 ? renderCodexLine(tail, entry, raw) : [];
   };
   return parser;
 }

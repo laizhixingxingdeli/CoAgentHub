@@ -1,5 +1,9 @@
 import type { OutputEntry } from "@server/lib/executor-task";
-import { createExecutorOutputParser } from "@server/lib/executor-task";
+import {
+  createExecutorOutputParser,
+  getCodexSkippedEventCounts,
+  resetCodexSkippedEventCounts,
+} from "@server/lib/executor-task";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -7,10 +11,12 @@ import { describe, expect, it, vi } from "vitest";
  * two-tier-output-summary-and-detail):
  *  - 解析器产出**结构化条目**(OutputEntry:id/kind/summary/detail),不再是纯字符串;
  *    summary 带 #id(如 `[工具 #t3]`)进摘要流,detail 进明细存储(R4)。
- *  - codex(exec --json):只渲染 type == "item.completed" 的三类 item 为
- *    [工具]/[命令]/[汇报] 动作行,不输出 arguments/result 全文(result 进 detail);
- *    非法 JSON、非 completed 事件、未知 item type 值逐字保留;跨 chunk 半截行拼接;
- *    进程结束时 flush 吐出未成行残留。
+ *  - codex(exec --json):只渲染 type == "item.completed" 的三类 item 与两类
+ *    error 事件为动作行([工具]/[命令]/[汇报]/[错误],错误不折叠),不输出
+ *    arguments/result 全文(result 进 detail);已知冗余事件(item.started /
+ *    thread.started / turn.started / turn.completed)显式跳过并计数 + 去重日志
+ *    (R1/R4);非法 JSON、未知顶层 type、未知 item type 值逐字保留;跨 chunk
+ *    半截行拼接;进程结束时 flush 吐出未成行残留。
  *  - atomcode(-v):[thinking] 行折叠为 [思考 #id] 首句要旨 + detail 全文;
  *    [tool→/[tool← 动作行摘要逐字 + #id,超长行折叠;未知行逐字保留;
  *    中行内已知前缀拆到行首(治多句粘成一段,内容不丢);跨 chunk 半截行拼接,
@@ -175,17 +181,13 @@ describe("codex:R3 解析不出的行逐字保留", () => {
     expect(entries[0].summary).toBe(garbage);
   });
 
-  it("非 completed 事件(item.started / 其他 type)原样保留", () => {
+  it("未知顶层 type 原样保留(R3)", () => {
     const parse = createExecutorOutputParser("codex");
-    const started = JSON.stringify({
-      type: "item.started",
-      item: { type: "mcp_tool_call", tool: "read_file" },
-    });
     const weird = JSON.stringify({ type: "some_future_event", payload: 1 });
-    const entries = parse(`${started}\n${weird}\n`);
-    expect(entries.map((e) => e.summary).join("\n")).toBe(
-      `${started}\n${weird}`,
-    );
+    const entries = parse(`${weird}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("raw");
+    expect(entries[0].summary).toBe(weird);
   });
 
   it("未知 item type 值原样保留", () => {
@@ -239,6 +241,120 @@ describe("codex:流式跨 chunk", () => {
     expect(flushed[0].kind).toBe("raw");
     expect(flushed[0].summary).toBe(partial);
     expect(parse.flush()).toEqual([]);
+  });
+});
+
+describe("codex:已知冗余事件显式跳过(R1)", () => {
+  it("item.started 各类 item 均显式跳过,不产出任何条目", () => {
+    const parse = createExecutorOutputParser("codex");
+    const startedCommand = JSON.stringify({
+      type: "item.started",
+      item: { type: "command_execution", command: "git status" },
+    });
+    const startedTool = JSON.stringify({
+      type: "item.started",
+      item: { type: "mcp_tool_call", tool: "read_file" },
+    });
+    const startedAgent = JSON.stringify({
+      type: "item.started",
+      item: { type: "agent_message", text: "hi" },
+    });
+    const entries = parse(
+      `${startedCommand}\n${startedTool}\n${startedAgent}\n`,
+    );
+    expect(entries).toEqual([]); // 显式识别后跳过,不得靠默认吞弃
+  });
+
+  it("thread.started / turn.started / turn.completed 不产出条目", () => {
+    const parse = createExecutorOutputParser("codex");
+    const lines = [
+      { type: "thread.started", thread_id: "thr_1" },
+      { type: "turn.started", turn_id: "trn_1" },
+      { type: "turn.completed", turn_id: "trn_1" },
+    ].map((e) => JSON.stringify(e));
+    const entries = parse(`${lines.join("\n")}\n`);
+    expect(entries).toEqual([]);
+  });
+
+  it("跳过计数按事件签名累加;去重日志每种签名只记一次(R4)", () => {
+    resetCodexSkippedEventCounts();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const parse = createExecutorOutputParser("codex");
+      const started = (itemType: string): string =>
+        JSON.stringify({ type: "item.started", item: { type: itemType } });
+      const lines = [
+        started("mcp_tool_call"),
+        started("mcp_tool_call"),
+        started("command_execution"),
+        JSON.stringify({ type: "thread.started" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({ type: "turn.completed" }),
+      ];
+      expect(parse(`${lines.join("\n")}\n`)).toEqual([]);
+      expect(getCodexSkippedEventCounts()).toEqual({
+        "item.started/mcp_tool_call": 2,
+        "item.started/command_execution": 1,
+        "thread.started": 1,
+        "turn.started": 1,
+        "turn.completed": 1,
+      });
+      // 去重:同签名多次跳过只记一次日志,不逐行刷屏(R4 限频)。
+      expect(warn).toHaveBeenCalledTimes(5);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("item.started/mcp_tool_call"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("codex:错误事件渲染为 [错误](R2,永不折叠)", () => {
+  it("顶层 {type:error,message} → [错误] <message>,全文在摘要、不进明细", () => {
+    const parse = createExecutorOutputParser("codex");
+    const line = JSON.stringify({
+      type: "error",
+      message: "Reconnecting... 5/5 (request timed out)",
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("error");
+    expect(entries[0].summary).toBe(
+      "[错误 #t1] Reconnecting... 5/5 (request timed out)",
+    );
+    // 错误永不折叠:完整信息留在摘要流,不进明细。
+    expect(entries[0].detail).toBeUndefined();
+  });
+
+  it("item.completed 且 item.type=error → [错误] <message>", () => {
+    const parse = createExecutorOutputParser("codex");
+    const line = JSON.stringify({
+      type: "item.completed",
+      item: { id: "item_9", type: "error", error: "Agent crashed: OOM" },
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("error");
+    expect(entries[0].summary).toBe("[错误 #t1] Agent crashed: OOM");
+    expect(entries[0].detail).toBeUndefined();
+  });
+
+  it("item.completed/error 的错误为对象时取 message/error 字段", () => {
+    const parse = createExecutorOutputParser("codex");
+    const line = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item_10",
+        type: "error",
+        error: { message: "sandbox blocked network access" },
+      },
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries[0].kind).toBe("error");
+    expect(entries[0].summary).toBe(
+      "[错误 #t1] sandbox blocked network access",
+    );
   });
 });
 

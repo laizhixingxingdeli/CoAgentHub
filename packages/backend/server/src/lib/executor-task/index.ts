@@ -44,8 +44,10 @@ export { taskOutputTail } from "./output-buffer";
 export {
   createExecutorOutputParser,
   type ExecutorOutputParser,
+  getCodexSkippedEventCounts,
   type OutputEntry,
   type OutputEntryKind,
+  resetCodexSkippedEventCounts,
 } from "./output-parser";
 export {
   cancelQueuedTasks,
