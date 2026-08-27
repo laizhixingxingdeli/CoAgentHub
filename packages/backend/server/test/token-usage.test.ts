@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 describe("platform token usage collection", () => {
-  it("reads Codex token_count from --json stdout and extracts the final report", async () => {
+  it("reads Codex turn.completed usage from --json stdout and extracts the final report", async () => {
     const result = await collectTokenUsage({
       executorKey: "codex",
       cwd,
@@ -29,17 +29,13 @@ describe("platform token usage collection", () => {
       endedAt,
       stdout: [
         JSON.stringify({
-          type: "event_msg",
-          payload: {
-            type: "token_count",
-            info: {
-              total_token_usage: {
-                input_tokens: 100,
-                cached_input_tokens: 40,
-                output_tokens: 20,
-                total_tokens: 120,
-              },
-            },
+          type: "turn.completed",
+          usage: {
+            input_tokens: 16932,
+            cached_input_tokens: 11008,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
           },
         }),
         JSON.stringify({
@@ -54,13 +50,66 @@ describe("platform token usage collection", () => {
     });
     expect(result).toEqual({
       tokenUsage: {
-        inputTokens: 100,
-        outputTokens: 20,
-        cachedInputTokens: 40,
-        totalTokens: 120,
+        inputTokens: 16932,
+        outputTokens: 5,
+        cachedInputTokens: 11008,
+        totalTokens: 16932 + 11008 + 5,
         source: "codex-stdout-jsonl",
       },
     });
+  });
+
+  it("treats reasoning_output_tokens as a subset of output_tokens, not additive (real production record)", async () => {
+    // Real coordinator run captured from production stdout on 2026-08-28.
+    // Per OpenAI Responses API usage semantics, `output_tokens` is the total
+    // output token count and `reasoning_output_tokens` is a breakdown already
+    // contained within `output_tokens` (not an extra additive component). We
+    // therefore must NOT add reasoning tokens on top of output tokens.
+    const result = await collectTokenUsage({
+      executorKey: "codex",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 499823,
+          cached_input_tokens: 436992,
+          cache_write_input_tokens: 0,
+          output_tokens: 5707,
+          reasoning_output_tokens: 2221,
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 499823,
+      outputTokens: 5707,
+      cachedInputTokens: 436992,
+      totalTokens: 499823 + 436992 + 5707,
+      source: "codex-stdout-jsonl",
+    });
+  });
+
+  it("reports unavailable for Codex stdout that carries no turn.completed usage", async () => {
+    await expect(
+      collectTokenUsage({
+        executorKey: "codex",
+        cwd,
+        startedAt,
+        endedAt,
+        stdout: [
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "done" }],
+            },
+          }),
+          JSON.stringify({ type: "turn.started" }),
+        ].join("\n"),
+      }),
+    ).resolves.toEqual({ tokenUsage: null, reason: "unavailable" });
   });
 
   it("matches Claude JSONL by cwd and execution window", async () => {

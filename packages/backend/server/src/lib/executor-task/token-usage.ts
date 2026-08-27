@@ -156,11 +156,12 @@ function tokenUsageFromCodexJsonl(text: string): TokenUsage | undefined {
     if (!row || typeof row !== "object") continue;
     const record = row as Record<string, unknown>;
     const payload = (record.payload ?? record) as Record<string, unknown>;
-    if (payload.type !== "token_count") continue;
-    const info = payload.info as Record<string, unknown> | undefined;
-    const usage = readUsageObject(
-      info?.total_token_usage ?? payload.total_token_usage,
-    );
+    // Real `codex exec --json` output reports token usage under `turn.completed`
+    // events (verified against captured stdout). The previously-assumed
+    // `token_count` type never appears in actual output, which is why every
+    // coordinator run was recorded as `unavailable`. Take the last such record.
+    if (payload.type !== "turn.completed") continue;
+    const usage = readUsageObject(payload.usage);
     if (usage) latest = usage;
   }
   return latest ? finishTotals(latest, "codex-stdout-jsonl") : undefined;
