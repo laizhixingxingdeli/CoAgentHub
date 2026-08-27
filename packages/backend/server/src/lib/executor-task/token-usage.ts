@@ -71,13 +71,22 @@ function readUsageObject(value: unknown): UsageTotals | undefined {
       ? undefined
       : (cachedReadTokens ?? 0) + (cachedCreationTokens ?? 0);
   const explicitTotal = nonNegativeNumber(row.total_tokens ?? row.totalTokens);
-  if (inputTokens === undefined || outputTokens === undefined) return undefined;
+  // Frozen spec semantic criterion is "input OR output": any object that
+  // resolves to a real input count or a real output count is a usage candidate.
+  // A missing side is treated as 0 so input-only / output-only objects are still
+  // valid (used by the generic recursive scan). We do NOT add new key-name
+  // mapping here, nor a second aggregation algorithm — only this guard is
+  // relaxed; the existing key variants and the total caliber are unchanged.
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  const resolvedInput = inputTokens ?? 0;
+  const resolvedOutput = outputTokens ?? 0;
   return {
-    inputTokens,
-    outputTokens,
+    inputTokens: resolvedInput,
+    outputTokens: resolvedOutput,
     cachedInputTokens: cachedInputTokens ?? 0,
     totalTokens:
-      explicitTotal ?? inputTokens + (cachedInputTokens ?? 0) + outputTokens,
+      explicitTotal ??
+      resolvedInput + (cachedInputTokens ?? 0) + resolvedOutput,
   };
 }
 
@@ -433,37 +442,35 @@ function collectGenericJsonl(stdout: string): TokenUsage | undefined {
 
 /**
  * Collect native CLI accounting at task termination. A missing match is never
- * guessed: callers persist `unavailable` (or `unsupported` for runtimes with
- * no native source) explicitly.
+ * guessed: custom-path misses degrade to the generic JSONL scan, and a final
+ * miss is recorded as `unavailable` (frozen spec R4) — never `unsupported`.
  */
 export async function collectTokenUsage(
   input: TokenUsageCollectionInput,
 ): Promise<TokenUsageResult> {
+  // Custom collectors are precise accelerators for known CLIs. They are left
+  // byte-for-byte unchanged (frozen spec R5); only this dispatch flow changes so
+  // that a custom miss degrades to the generic scan instead of giving up early.
+  let usage: TokenUsage | undefined;
   if (input.executorKey === "codex") {
-    const stdoutUsage = tokenUsageFromCodexJsonl(input.stdout ?? "");
-    if (stdoutUsage) return { tokenUsage: stdoutUsage };
-    return { tokenUsage: null, reason: "unavailable" };
+    usage = tokenUsageFromCodexJsonl(input.stdout ?? "");
+  } else if (input.executorKey === "executor") {
+    usage = collectAtomCode(input);
+  } else if (input.executorKey === "codebuddy") {
+    usage = collectCodeBuddy(input);
+  } else if (input.executorKey === "claude") {
+    usage = collectClaude(input);
   }
-  const usage =
-    input.executorKey === "executor"
-      ? collectAtomCode(input)
-      : input.executorKey === "codebuddy"
-        ? collectCodeBuddy(input)
-        : input.executorKey === "claude"
-          ? collectClaude(input)
-          : undefined;
   if (usage) return { tokenUsage: usage };
-  // Generic semantic fallback. The custom branches above are precise
-  // accelerators; for every other executor (including the previously
-  // `unsupported` reasonix/hermes/win-hermes/reviewer) we scan the whole
-  // stdout JSONL and take the last object that readUsageObject can parse as a
-  // real usage record — regardless of CLI type or how deeply it is nested.
+  // Generic semantic fallback (frozen spec R1). Any executor whose custom path
+  // missed — including codex, and the previously `unsupported`
+  // reasonix/hermes/win-hermes/reviewer — is scanned by recursing the whole
+  // stdout JSONL for the last object readUsageObject can parse as a real
+  // (input and/or output) usage record, regardless of CLI type or nesting.
   const generic = collectGenericJsonl(input.stdout ?? "");
   if (generic) return { tokenUsage: generic };
-  if (
-    ["reasonix", "hermes", "win-hermes", "reviewer"].includes(input.executorKey)
-  ) {
-    return { tokenUsage: null, reason: "unsupported" };
-  }
+  // Still no usage: never guess, never fabricate, never fall back to another
+  // number. Per frozen spec R4 every miss — custom or generic — is recorded as
+  // `unavailable`, including the four keys that used to return `unsupported`.
   return { tokenUsage: null, reason: "unavailable" };
 }

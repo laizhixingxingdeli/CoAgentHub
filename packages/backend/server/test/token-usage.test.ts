@@ -329,16 +329,23 @@ describe("platform token usage collection", () => {
     ).resolves.toEqual({ tokenUsage: null, reason: "unavailable" });
   });
 
-  it("uses explicit unsupported/unavailable reasons and never guesses", async () => {
-    await expect(
-      collectTokenUsage({
-        executorKey: "reasonix",
-        cwd,
-        startedAt,
-        endedAt,
-        homeDir: home(),
-      }),
-    ).resolves.toEqual({ tokenUsage: null, reason: "unsupported" });
+  it("records unavailable (never unsupported) for the four previously-unsupported keys when no usage exists (R4)", async () => {
+    // Frozen spec R4: a generic miss is always `unavailable`, including the four
+    // keys that used to return `unsupported`. We never guess or fabricate.
+    for (const key of ["reasonix", "hermes", "win-hermes", "reviewer"]) {
+      await expect(
+        collectTokenUsage({
+          executorKey: key,
+          cwd,
+          startedAt,
+          endedAt,
+          homeDir: home(),
+        }),
+      ).resolves.toEqual({ tokenUsage: null, reason: "unavailable" });
+    }
+  });
+
+  it("records unavailable for codex when stdout carries no parseable usage", async () => {
     await expect(
       collectTokenUsage({
         executorKey: "codex",
@@ -566,5 +573,116 @@ describe("platform token usage collection", () => {
     });
     expect(result.tokenUsage?.totalTokens).toBe(999);
     expect(result.tokenUsage?.source).toBe("generic-jsonl-scan");
+  });
+
+  it("generic scan treats an input-only object as a valid candidate (missing output = 0, R3)", async () => {
+    // Frozen-spec R3: the semantic criterion is "input OR output". An object with
+    // only an input count (no output) is still a valid candidate; the missing side
+    // is resolved to 0. No new key mapping or aggregation algorithm is added.
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: { input_tokens: 40, cached_input_tokens: 12 },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 40,
+      outputTokens: 0,
+      cachedInputTokens: 12,
+      totalTokens: 40,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic scan treats an output-only object as a valid candidate (missing input = 0, R3)", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: { output_tokens: 12, cached_input_tokens: 3 },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 12,
+      cachedInputTokens: 3,
+      totalTokens: 12,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("codex key falls back to generic-jsonl-scan when the codex-specific type is absent but nested usage is parseable (R1)", async () => {
+    // L2 finding: codex-form stdout that does NOT satisfy the codex collector's
+    // strict `type === "turn.completed"` / `usage` location must still be
+    // recovered by the generic scan when it carries a parseable nested usage.
+    // executorKey=codex therefore must NOT return unavailable here.
+    const codexLikeStdout = JSON.stringify({
+      type: "response",
+      result: {
+        usage: { input_tokens: 100, cached_input_tokens: 30, output_tokens: 20 },
+      },
+    });
+    const result = await collectTokenUsage({
+      executorKey: "codex",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: codexLikeStdout,
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 30,
+      totalTokens: 100 + 20,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("AtomCode custom path and generic scan agree on totalTokens for the same representative usage (R4 finder)", async () => {
+    // Frozen-spec acceptance + L2 requirement 4: build ONE representative usage,
+    // feed it to the custom AtomCode collector (via session .meta,
+    // executorKey=executor) and to the generic scan (via stdout JSONL with a
+    // non-existent key). Both must report the SAME totalTokens — the generic
+    // fallback must not invent a second caliber. Cache-free so the two caliber
+    // rules (custom: input+cached+output; generic: input+output) converge.
+    const root = home();
+    const atomDir = join(root, ".atomcode", "sessions", "session");
+    mkdirSync(atomDir, { recursive: true });
+    const representative = { input: 50, output: 10 };
+    writeFileSync(
+      join(atomDir, "session.meta"),
+      JSON.stringify({
+        name: "/tmp/coagenthub-ticket-01a04abc-def0-123",
+        working_dir: cwd,
+        created_at: Date.parse(startedAt),
+        updated_at: Date.parse(endedAt),
+        turn_stats: [{ model_usage: [{ tokens: representative }] }],
+      }),
+    );
+    const custom = await collectTokenUsage({
+      executorKey: "executor",
+      taskId: "01a04abc-def0-1234-5678-90abcdef1234",
+      cwd,
+      startedAt,
+      endedAt,
+      homeDir: root,
+    });
+    const generic = await collectTokenUsage({
+      executorKey: "no-such-executor-atomcode",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({ usage: representative }),
+    });
+    // Assert equality across both sides (not two independent constants) so a
+    // drift on either path fails the test. Both resolve to 60.
+    expect(custom.tokenUsage?.totalTokens).toBe(60);
+    expect(generic.tokenUsage?.totalTokens).toBe(custom.tokenUsage?.totalTokens);
+    expect(generic.tokenUsage?.source).toBe("generic-jsonl-scan");
   });
 });
