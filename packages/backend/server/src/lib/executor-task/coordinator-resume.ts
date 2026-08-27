@@ -30,6 +30,32 @@ type Task = typeof taskTable.$inferSelect;
 /** 续跑任务平台标记键:diffSummary.platform.resumeOf = 父协调任务 id。 */
 const PLATFORM_MARKER_KEY = "resumeOf";
 
+/**
+ * 非终态任务状态集合:R3 去重查询与孤儿收敛豁免共用同一口径,
+ * 不另写一套「非终态」定义(specs/orphan-reconciler-kills-pending-resume.md R1)。
+ */
+const NON_TERMINAL_TASK_STATUSES = ["queued", "running"] as const;
+
+/**
+ * 父任务名下是否存在非终态执行子任务(孤儿收敛豁免的同源判定):
+ * parentTaskId = 父任务 && status ∈ 非终态集合。协调者根任务派完子任务退出后,
+ * 只要还有子任务在跑就不应被孤儿收敛判死,等子任务终态触发续跑。
+ */
+export async function hasNonTerminalChildTask(
+  db: DataBase,
+  parentTaskId: string,
+): Promise<boolean> {
+  const rows = await db.query.task.findMany({
+    where: and(
+      eq(taskTable.parentTaskId, parentTaskId),
+      inArray(taskTable.status, [...NON_TERMINAL_TASK_STATUSES]),
+    ),
+    columns: { id: true },
+    limit: 1,
+  });
+  return rows.length > 0;
+}
+
 /** 续跑任务是否带平台标记(判定「本任务是一条续跑任务」,R4 防环用)。 */
 export function isResumeTask(task: { diffSummary: unknown }): boolean {
   const summary =
@@ -91,7 +117,7 @@ export async function maybeCreateCoordinatorResumeTask(
     where: and(
       eq(taskTable.parentTaskId, parent.id),
       eq(taskTable.executorParticipantId, parent.executorParticipantId),
-      inArray(taskTable.status, ["queued", "running"]),
+      inArray(taskTable.status, [...NON_TERMINAL_TASK_STATUSES]),
     ),
     columns: { id: true, diffSummary: true },
   });

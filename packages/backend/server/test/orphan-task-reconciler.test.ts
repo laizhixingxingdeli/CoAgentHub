@@ -1,8 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  groupMember as groupMemberTable,
+  groups as groupsTable,
+  participant as participantTable,
+  taskCompletionEvent as taskCompletionEventTable,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataBase } from "../src/lib/database";
 import {
   reconcileOrphanTasks,
@@ -16,6 +22,15 @@ import { testDb } from "./db";
 const orphanDb = testDb as unknown as DataBase;
 
 type Task = typeof taskTable.$inferSelect;
+
+/** 每个用例独立数据集,避免前面用例遗留的 running+dead-pid 任务污染计数。 */
+beforeEach(async () => {
+  await testDb.delete(taskCompletionEventTable);
+  await testDb.delete(taskTable);
+  await testDb.delete(groupMemberTable);
+  await testDb.delete(groupsTable);
+  await testDb.delete(participantTable);
+});
 
 /** 生成一个已退出进程的 pid(process.kill(pid,0) → ESRCH = 已退出)。 */
 function deadPid(): number {
@@ -71,6 +86,7 @@ describe("孤儿任务周期收敛", () => {
   async function insertTaskRow(row: {
     groupId: string;
     executorParticipantId: string;
+    parentTaskId?: string | null;
     executorPid?: number | null;
     status?: Task["status"];
     createdAt?: Date;
@@ -83,6 +99,7 @@ describe("孤儿任务周期收敛", () => {
       .values({
         groupId: row.groupId,
         executorParticipantId: row.executorParticipantId,
+        parentTaskId: row.parentTaskId ?? null,
         messageId: uuidv4(),
         executorPid: row.executorPid ?? null,
         status: row.status ?? "running",
@@ -225,7 +242,7 @@ describe("孤儿任务周期收敛", () => {
 
   // ---- R1:周期任务驱动 ----
 
-  it("startOrphanReconciler:一个周期内收敛孤儿,stop 后停止", async () => {
+  it("startOrphanReconciler:一个周期内收敛孤儿,stop 后停止(缺省开关 = 生产默认路径自动启动)", async () => {
     const participant = await registerParticipant({ name: "orc-exec-g" });
     const group = await createGroup(participant.id, "孤儿收敛-周期");
     const task = await insertTaskRow({
@@ -234,24 +251,58 @@ describe("孤儿任务周期收敛", () => {
       executorPid: deadPid(),
     });
 
-    const stop = startOrphanReconciler(orphanDb, 50);
+    // 生产创建 server/app 的默认路径(index.ts)不传 options → enabled 缺省 true,
+    // 本用例证明该默认调用确实注册定时器并在一个周期内收敛。驱动用 fake timers,
+    // 测试环境不注册真实 OS 定时器,避免泄漏的在途收敛抢跑后续用例(回归修复)。
+    vi.useFakeTimers();
     try {
-      // 等最多 2s:一个周期(50ms)内应完成收敛。
-      const deadline = Date.now() + 2_000;
-      for (;;) {
-        if ((await findTask(task.id))?.status !== "running") break;
-        if (Date.now() >= deadline) break;
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-    } finally {
+      const stop = startOrphanReconciler(orphanDb, 50);
+      // 推进一步(50ms):一个周期内应完成收敛。
+      await vi.advanceTimersByTimeAsync(50);
+      expect((await findTask(task.id))?.status).toBe("failed");
+      const summary = (await findTask(task.id))?.diffSummary as Record<
+        string,
+        unknown
+      >;
+      expect(summary.reconciledReason).toContain("no longer exists");
+
+      // stop 后不再收敛新孤儿:插一条新的 dead-pid 任务,再推进一步周期仍保持 running。
+      const second = await insertTaskRow({
+        groupId: group.id,
+        executorParticipantId: participant.id,
+        executorPid: deadPid(),
+      });
       stop();
+      await vi.advanceTimersByTimeAsync(50);
+      expect((await findTask(second.id))?.status).toBe("running");
+    } finally {
+      vi.useRealTimers();
     }
+  });
+
+  it("startOrphanReconciler 显式开关 enabled:false → 不注册定时器(测试环境不自动启动),显式调用仍收敛", async () => {
+    const participant = await registerParticipant({ name: "orc-disabled-a" });
+    const group = await createGroup(participant.id, "孤儿收敛-开关关闭");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorPid: deadPid(),
+    });
+
+    // 测试环境注入 enabled:false:不注册任何定时器,孤儿保持 running,不被后台误判 failed。
+    vi.useFakeTimers();
+    try {
+      const stop = startOrphanReconciler(orphanDb, 50, { enabled: false });
+      await vi.advanceTimersByTimeAsync(200); // 跨多个周期,仍无任何收敛动作
+      expect((await findTask(task.id))?.status).toBe("running");
+      expect(stop()).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 纯函数路径不受开关影响:显式调用 reconcileOrphanTasks 仍照常收敛。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
     expect((await findTask(task.id))?.status).toBe("failed");
-    const summary = (await findTask(task.id))?.diffSummary as Record<
-      string,
-      unknown
-    >;
-    expect(summary.reconciledReason).toContain("no longer exists");
   });
 
   // ---- R6:详情/列表 API 暴露 executorPid 与 pidAlive ----
@@ -339,5 +390,105 @@ describe("孤儿任务周期收敛", () => {
       expect(byId.get(none.id)?.executorPid).toBeNull();
       expect(byId.get(none.id)?.pidAlive).toBeNull();
     }
+  });
+
+  // ---- 本 spec R1-R3:等待续跑的协调者任务不收敛,其余照常收敛 ----
+
+  it("协调者任务名下存在非终态子任务 → 豁免收敛(等待续跑,pid 消失仍保持 running)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-wait-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-待续跑豁免");
+    // 建群者默认持有 coordinator 角色 → isCoordinatorTask 命中。
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-wait-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "running",
+      executorPid: process.pid,
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+    expect((await findTask(child.id))?.status).toBe("running");
+  });
+
+  it("协调者任务名下子任务处于 queued → 同样豁免收敛", async () => {
+    const coordinator = await registerParticipant({ name: "orc-wait-c" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-待续跑queued");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-wait-d" });
+    await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "queued",
+      executorPid: null,
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+  });
+
+  it("协调者任务无任何子任务 + pid 消失 → 照常收敛为 failed(R2 防回归死锁)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-nokid-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-无子任务");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    expect((await findTask(parent.id))?.status).toBe("failed");
+  });
+
+  it("协调者任务子任务全部终态 + pid 消失 → 照常收敛为 failed(R2)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-alldone-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-子任务终态");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-alldone-b" });
+    await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "done",
+      diffSummary: { summary: "子任务完成" },
+    });
+    await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "cancelled",
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    expect((await findTask(parent.id))?.status).toBe("failed");
+  });
+
+  it("resumeOf 标识的续跑任务(协调者名下)→ 不享受豁免,pid 消失仍收敛为 failed(R3)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-resume-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-续跑不豁免");
+    const resume = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+      diffSummary: { platform: { resumeOf: "parent-task-id" } },
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    expect((await findTask(resume.id))?.status).toBe("failed");
   });
 });

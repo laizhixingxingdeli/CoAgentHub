@@ -13,10 +13,21 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import { and, eq } from "drizzle-orm";
-import { isExecutorProcessAlive, notifyTaskStatusChanged } from "./executor-task";
+import {
+  hasNonTerminalChildTask,
+  isCoordinatorTask,
+  isExecutorProcessAlive,
+  isResumeTask,
+  notifyTaskStatusChanged,
+} from "./executor-task";
 
 /** 孤儿收敛周期(默认 10s;测试可注入更短间隔)。 */
 export const ORPHAN_RECONCILE_INTERVAL_MS = 10_000;
+
+/** startOrphanReconciler 的显式开关:enabled=false 时不注册定时器(测试环境注入,避免后台收敛误判测试任务);缺省 = 生产默认路径自动启动。 */
+export interface StartOrphanReconcilerOptions {
+  enabled?: boolean;
+}
 
 /**
  * 单轮孤儿收敛:扫描全部 running 任务,把持有已退出 executorPid 的任务收敛为
@@ -38,13 +49,34 @@ export async function reconcileOrphanTasks(
 ): Promise<number> {
   const candidates = await db.query.task.findMany({
     where: (t, { eq: eqFn }) => eqFn(t.status, "running"),
-    columns: { id: true, groupId: true, executorPid: true },
+    columns: {
+      id: true,
+      groupId: true,
+      executorPid: true,
+      executorParticipantId: true,
+      diffSummary: true,
+    },
   });
 
   let reconciled = 0;
   for (const task of candidates) {
     if (task.executorPid === null) continue;
     if (isExecutorProcessAlive(task.executorPid)) continue;
+    // R1(本 spec):等待续跑的协调者根任务豁免收敛 —— 执行方是协调者
+    // (isCoordinatorTask 同源判定)且名下存在非终态执行子任务
+    // (hasNonTerminalChildTask,与 coordinator-resume 同源口径)时,pid 消失
+    // 不判死,等子任务终态触发续跑。R3:resumeOf 标识的续跑任务自身不豁免。
+    if (
+      !isResumeTask(task) &&
+      (await isCoordinatorTask(
+        db,
+        task.groupId,
+        task.executorParticipantId ?? "",
+      )) &&
+      (await hasNonTerminalChildTask(db, task.id))
+    ) {
+      continue;
+    }
     const reason = `executor pid ${task.executorPid} no longer exists`;
     const [updated] = await db
       .update(taskTable)
@@ -73,7 +105,14 @@ export async function reconcileOrphanTasks(
 export function startOrphanReconciler(
   db: DataBase,
   intervalMs = ORPHAN_RECONCILE_INTERVAL_MS,
+  options: StartOrphanReconcilerOptions = {},
 ): () => void {
+  // 显式开关:enabled=false 不注册定时器(测试环境注入,避免后台收敛在测试
+  // 运行期间误判 running 任务为 failed);缺省 true = 生产创建 server/app 的
+  // 默认路径(index.ts)仍自动启动。不用 NODE_ENV 隐式判断,开关显式可注入。
+  if (options.enabled === false) {
+    return () => {};
+  }
   const timer = setInterval(() => {
     void reconcileOrphanTasks(db).catch((error) => {
       console.warn(`[orphan] 孤儿收敛失败: ${error}`);
