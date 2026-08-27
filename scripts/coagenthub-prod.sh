@@ -3,8 +3,8 @@
 #
 # 用法:
 #   scripts/coagenthub-prod.sh start [--build]   # 一键启动(幂等:已占用端口跳过;--build 才构建)
-#   scripts/coagenthub-prod.sh stop              # 停止本脚本启动的三服务
-#   scripts/coagenthub-prod.sh restart [--build] # stop + start(健康看门狗用)
+#   scripts/coagenthub-prod.sh stop              # 停止目标端口实际监听的进程(幂等;PID 文件仅加速)
+#   scripts/coagenthub-prod.sh restart [--build] # stop + start;进程必须确实被替换,否则非零退出(健康看门狗用)
 #   scripts/coagenthub-prod.sh status            # 检查三端口监听 + PID(自愈:launchd com.coagenthub.watchdog 每 5 分钟)
 #   scripts/coagenthub-prod.sh plist-install     # 复制 LaunchAgent 模板到 ~/Library/LaunchAgents(不 load)
 #   scripts/coagenthub-prod.sh plist-uninstall   # launchctl unload + 删文件
@@ -68,6 +68,24 @@ wait_up() {
     sleep 0.5
   done
   return 1
+}
+
+# 等端口释放,最多 5s
+wait_free() {
+  for _ in $(seq 1 10); do
+    is_up "$1" || return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# 端口对应的 PID 文件(server 与 web 共用同一命名规则)
+port_pidfile() {
+  if [ "$1" = "$SERVER_PORT" ]; then
+    echo "$PIDFILE"
+  else
+    echo "/tmp/coagenthub-prod-web-$WEB_PORT.pid"
+  fi
 }
 
 # 启动时清理超过 14 天的按天日志(零依赖:find -mtime +14 -delete)
@@ -159,31 +177,82 @@ cmd_start() {
 }
 
 cmd_stop() {
-  # 按 PID 文件杀本脚本启动的进程;杀完等端口释放
-  local killed=0
-  for p in "$PIDFILE" "/tmp/coagenthub-prod-web-$WEB_PORT.pid"; do
-    if [ -f "$p" ]; then
-      local pid
-      pid="$(cat "$p" 2>/dev/null)"
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null && echo "STOP  pid $pid ($p)" && killed=1
-        for _ in $(seq 1 20); do
-          kill -0 "$pid" 2>/dev/null || break
-          sleep 0.3
-        done
-        kill -9 "$pid" 2>/dev/null
-      fi
-      rm -f "$p"
+  # 停「端口上实际监听的进程」:PID 文件仅作加速路径(须校验它就是该端口的监听者),
+  # 文件缺失或与实际不符时回退到 lsof 按端口定位实际监听者 —— 绝不波及端口之外的进程。
+  local killed=0 port pfile fpid lpid pid
+  for port in "$SERVER_PORT" "$WEB_PORT"; do
+    pfile="$(port_pidfile "$port")"
+    fpid=""
+    [ -f "$pfile" ] && fpid="$(cat "$pfile" 2>/dev/null || true)"
+    lpid="$(port_pid "$port")"
+    if [ -n "$fpid" ] && [ "$fpid" = "$lpid" ]; then
+      pid="$fpid"   # PID 文件与端口监听者一致 → 加速路径
+    else
+      pid="$lpid"   # PID 文件缺失/失准 → 回退:按端口定位实际监听者
     fi
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null && echo "STOP  pid $pid (:$port 实际监听者)" && killed=1
+      for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.3
+      done
+      kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$pfile"
   done
-  [ "$killed" = 0 ] && echo "没有由本脚本启动的进程(PID 文件不存在)。"
+  [ "$killed" = 0 ] && echo "没有监听目标端口的进程(PID 文件缺失或已失效)。"
   echo "== 剩余监听 =="
   cmd_status
 }
 
 cmd_restart() {
+  # restart 语义:进程必须确实被替换;任何一环失败都非零退出,
+  # 不被 start 的「端口占用则跳过」幂等逻辑掩盖。
+  local old_server old_web port pfile label old now mine
+  old_server="$(port_pid "$SERVER_PORT")"
+  old_web="$(port_pid "$WEB_PORT")"
+
   cmd_stop
+
+  # R2: stop 之后端口仍被占用 = 异常,必须失败
+  for port in "$SERVER_PORT" "$WEB_PORT"; do
+    if ! wait_free "$port"; then
+      echo "FAIL  restart :$port stop 后端口仍被占用 (pid $(port_pid "$port")),拒绝继续" >&2
+      exit 1
+    fi
+  done
+
   cmd_start "$@"
+
+  # R3: 校验替换结果 —— 新 pid 存在、来自本脚本新启动(与 PID 文件一致)、且不同于停止前
+  for port in "$SERVER_PORT" "$WEB_PORT"; do
+    pfile="$(port_pidfile "$port")"
+    if [ "$port" = "$SERVER_PORT" ]; then
+      label="server"; old="$old_server"
+    else
+      label="web"; old="$old_web"
+    fi
+    now="$(port_pid "$port")"
+    if [ -z "$now" ]; then
+      echo "FAIL  restart :$label(:$port) 启动后无进程监听,进程未被替换" >&2
+      exit 1
+    fi
+    if [ ! -f "$pfile" ]; then
+      echo "FAIL  restart :$label(:$port) 启动被跳过(端口被 pid $now 占用但无本脚本 PID 文件),进程未被替换" >&2
+      exit 1
+    fi
+    mine="$(cat "$pfile" 2>/dev/null || true)"
+    if [ -n "$mine" ] && [ "$now" != "$mine" ]; then
+      echo "FAIL  restart :$label(:$port) 端口监听者 pid $now 与本脚本记录 pid $mine 不符,进程未被替换" >&2
+      exit 1
+    fi
+    if [ -n "$old" ] && [ "$now" = "$old" ]; then
+      echo "FAIL  restart :$label(:$port) 新 pid $now 与停止前相同,进程未被替换" >&2
+      exit 1
+    fi
+  done
+
+  echo "OK    restart : 进程已替换 server ${old_server}→$(port_pid "$SERVER_PORT"), web ${old_web}→$(port_pid "$WEB_PORT")"
 }
 
 cmd_status() {
