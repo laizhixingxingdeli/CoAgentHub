@@ -1,6 +1,6 @@
 # Spec: 协调者的 token 一次都没采到,十次全是 unavailable
 
-> **状态**: Ready for Implementation
+> **状态**: Frozen(v1.1 修订:根因已由检视者实证)— 待实现
 > **版本**: 1.0
 > **日期**: 2026-08-26
 
@@ -34,6 +34,39 @@ const usage = readUsageObject(info?.total_token_usage ?? payload.total_token_usa
 
 ⚠️ 这与 `atomcode-token-wrong-field` 是**同一类错误**:照着想象中的结构写解析,
 从未拿真实输出核对过。
+
+## ⚠️ 根因已由检视者实证,不必再猜(2026-08-28)
+
+从生产日志统计真实 codex 输出的全部事件类型:
+
+```
+item.completed 1594 | item.started 1131 | turn.started 66
+thread.started 66   | turn.completed 63 | error 55
+```
+
+**`token_count` 一次都没有出现过。** 用量在 `turn.completed` 里:
+
+```json
+{"type":"turn.completed","usage":{
+  "input_tokens":499823, "cached_input_tokens":436992,
+  "cache_write_input_tokens":0, "output_tokens":5707,
+  "reasoning_output_tokens":2221}}
+```
+
+对照 `token-usage.ts:159` 现有实现:
+
+```ts
+if (payload.type !== "token_count") continue;              // ← 该类型不存在
+const usage = readUsageObject(info?.total_token_usage ?? payload.total_token_usage);
+                                     // ← 实际在 payload.usage
+```
+
+✅ **好消息**:`readUsageObject` 已认识 `input_tokens` / `output_tokens` /
+`cached_input_tokens` 等带后缀键名,**字段名无需改动**,只需修正类型名与取值路径。
+
+⚠️ **注意 `reasoning_output_tokens`**:codex 单列推理 token,
+现有 `readUsageObject` 未必计入。需确认它是否已含在 `output_tokens` 内 ——
+**用同一条真实记录核对总量**,不要假设。若未含,须计入总量并在汇报中说明依据。
 
 ## 决策
 
