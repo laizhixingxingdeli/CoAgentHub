@@ -334,18 +334,36 @@ function renderAtomCodeLine(
   return raw(line); // R7:[done]/[tokens]/[headless]/未知行逐字保留
 }
 
-/** atomcode:无缓冲,只做中行前缀拆行 + 逐行结构化;未知行逐字保留。 */
+/**
+ * atomcode:行缓冲(与 codex/通用解析器同构)——未成行的尾段留在 pending,
+ * 与下一 chunk 拼接后再按真实换行分帧,消除流式词中间碎片;进程结束时
+ * flush 逐字吐出残留。中行前缀拆行(splitMidLinePrefixes)在重组与分帧
+ * 之后、渲染之前执行:跨 chunk 被切开的已知前缀先重组再拆分,二者不互相破坏。
+ * 未知行逐字保留。
+ */
 function createAtomCodeParser(): ExecutorOutputParser {
+  let pending = "";
   const { entry, raw } = createEntryMaker();
   const parser = ((chunk: string): OutputEntry[] => {
-    const text = splitMidLinePrefixes(chunk ?? "");
-    if (text.length === 0) return [];
-    const lines = text.split("\n");
-    // 行终止符产生的空尾元素不构成条目(与行缓冲解析器同界:只消费完整行)。
-    if (lines[lines.length - 1] === "") lines.pop();
-    return lines.map((l) => renderAtomCodeLine(l, entry, raw));
+    const lines = `${pending}${chunk ?? ""}`.split("\n");
+    pending = lines.pop() ?? "";
+    if (lines.length === 0) return [];
+    const out: OutputEntry[] = [];
+    for (const line of lines) {
+      for (const piece of splitMidLinePrefixes(line).split("\n")) {
+        out.push(renderAtomCodeLine(piece, entry, raw));
+      }
+    }
+    return out;
   }) as ExecutorOutputParser;
-  parser.flush = () => [];
+  parser.flush = () => {
+    const tail = pending;
+    pending = "";
+    if (tail.length === 0) return [];
+    return splitMidLinePrefixes(tail)
+      .split("\n")
+      .map((l) => renderAtomCodeLine(l, entry, raw));
+  };
   return parser;
 }
 

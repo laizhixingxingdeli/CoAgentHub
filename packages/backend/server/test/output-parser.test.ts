@@ -13,7 +13,8 @@ import { describe, expect, it, vi } from "vitest";
  *    进程结束时 flush 吐出未成行残留。
  *  - atomcode(-v):[thinking] 行折叠为 [思考 #id] 首句要旨 + detail 全文;
  *    [tool→/[tool← 动作行摘要逐字 + #id,超长行折叠;未知行逐字保留;
- *    中行内已知前缀拆到行首(治多句粘成一段,内容不丢)。
+ *    中行内已知前缀拆到行首(治多句粘成一段,内容不丢);跨 chunk 半截行拼接,
+ *    进程结束时 flush 吐出未成行残留。
  *  - codebuddy(--output-format stream-json):有状态 JSONL 解析,形状取自任务
  *    01a03eb9 实跑(2026-08-26)。assistant 内容块 tool_use/text/thinking →
  *    [工具](input 只取键名,值进 detail)/[汇报]/[思考](要旨 + detail);user 内容块
@@ -318,14 +319,56 @@ describe("atomcode:前缀行与未知行(两层级)", () => {
     expect(entries[0].detail).toContain(longArgs);
   });
 
-  it("flush 无残留", () => {
+  it("完整行(以换行结尾)立即渲染,flush 无残留", () => {
     const parse = createExecutorOutputParser("executor");
-    const entries = parse('[tool→ read_file] {"file_path": "a.txt"}');
+    const entries = parse('[tool→ read_file] {"file_path": "a.txt"}\n');
     expect(entries).toHaveLength(1);
     expect(entries[0].summary).toBe(
       '[tool→ read_file #t1] {"file_path": "a.txt"}',
     );
     expect(parse.flush()).toEqual([]);
+  });
+});
+
+describe("atomcode:流式跨 chunk(行缓冲)", () => {
+  it("跨 chunk 半截行拼接后只在真实换行处渲染一次", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    const line = '[tool→ read_file] {"file_path": "a.txt"}';
+    const cut = Math.floor(line.length / 2);
+    // 半截行未遇到真实换行:不渲染,留在 pending。
+    expect(parse(line.slice(0, cut))).toEqual([]);
+    const entries = parse(`${line.slice(cut)}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("tool");
+    expect(entries[0].summary).toBe(
+      '[tool→ read_file #t1] {"file_path": "a.txt"}',
+    );
+  });
+
+  it("进程结束 flush 吐出未成行残留(逐字,R3)", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    const partial = "半截行 And"; // 无结尾换行的残留
+    expect(parse(partial)).toEqual([]);
+    const flushed = parse.flush();
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].kind).toBe("raw");
+    expect(flushed[0].summary).toBe(partial);
+    expect(parse.flush()).toEqual([]);
+  });
+
+  it("已知前缀被 chunk 边界切开 → pending 重组后再拆到行首(R5)", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    // [tokens] 前缀在 chunk 边界被切成两半:前一 chunk 以 "[t" 结尾。
+    const first = "The user asks to read the file.[t";
+    const second = "okens] prompt=17916 completion=81 cached=6656\n";
+    expect(parse(first)).toEqual([]);
+    const entries = parse(second);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].kind).toBe("raw");
+    expect(entries[0].summary).toBe("The user asks to read the file.");
+    expect(entries[1].summary).toBe(
+      "[tokens] prompt=17916 completion=81 cached=6656",
+    );
   });
 });
 
