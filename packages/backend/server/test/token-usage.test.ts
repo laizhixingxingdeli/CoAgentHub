@@ -624,7 +624,11 @@ describe("platform token usage collection", () => {
     const codexLikeStdout = JSON.stringify({
       type: "response",
       result: {
-        usage: { input_tokens: 100, cached_input_tokens: 30, output_tokens: 20 },
+        usage: {
+          input_tokens: 100,
+          cached_input_tokens: 30,
+          output_tokens: 20,
+        },
       },
     });
     const result = await collectTokenUsage({
@@ -682,7 +686,9 @@ describe("platform token usage collection", () => {
     // Assert equality across both sides (not two independent constants) so a
     // drift on either path fails the test. Both resolve to 60.
     expect(custom.tokenUsage?.totalTokens).toBe(60);
-    expect(generic.tokenUsage?.totalTokens).toBe(custom.tokenUsage?.totalTokens);
+    expect(generic.tokenUsage?.totalTokens).toBe(
+      custom.tokenUsage?.totalTokens,
+    );
     expect(generic.tokenUsage?.source).toBe("generic-jsonl-scan");
   });
 });
