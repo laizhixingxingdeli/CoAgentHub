@@ -17,11 +17,13 @@ import {
 import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
+  findTaskDetail,
   getL3ResponseMinutesMs,
   isExecutorProcessAlive,
   isResumeTask,
   isTerminalTaskStatus,
   notifyTaskStatusChanged,
+  readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
   taskOutputTail,
@@ -823,6 +825,117 @@ app
         detail.runtime = runtime;
       }
       return c.json(detail);
+    },
+  )
+  .get(
+    "/:id/tasks/:taskId/output",
+    describeRoute({
+      description:
+        "整份任务明细(?detail=1,spec two-tier-output-summary-and-detail R5):返回该任务明细 JSONL 的全部条目,供事后排障按需展开",
+      responses: {
+        200: {
+          description: "Task detail entries",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    zValidator(
+      "param",
+      z.object({ id: z.string().uuid(), taskId: z.string().uuid() }),
+    ),
+    zValidator(
+      "query",
+      z.object({
+        // 整份明细必须显式带 detail=1(与 includeOutput 同款枚举口径,不放宽)。
+        detail: z.enum(["1", "0", "true", "false"]).optional(),
+      }),
+    ),
+    async (c) => {
+      const db = c.get("db");
+      const { id, taskId } = c.req.valid("param");
+      const { detail } = c.req.valid("query");
+      // 群/任务存在性校验与任务详情路由一致(includeOutput 同授权口径,不放宽)。
+      const group = await db.query.groups.findFirst({
+        where: (t, { eq }) => eq(t.id, id),
+      });
+      if (!group) {
+        throw new BizError(BizCodeEnum.GroupNotFound);
+      }
+      const task = await db.query.task.findFirst({
+        where: (t, { and, eq }) => and(eq(t.id, taskId), eq(t.groupId, id)),
+      });
+      if (!task) {
+        throw new BizError(BizCodeEnum.TaskNotFound);
+      }
+      if (detail !== "1" && detail !== "true") {
+        throw new BizError(
+          BizCodeEnum.InvalidRequest,
+          "整份明细需显式携带 ?detail=1",
+        );
+      }
+      const rows = readTaskDetail(taskId);
+      if (rows === null) {
+        // R5:404 并说明原因,不得静默返回空。
+        throw new BizError(
+          BizCodeEnum.TaskNotFound,
+          "任务明细文件不存在(可能已被 14 天清理,或该任务无明细记录)",
+        );
+      }
+      return c.json({ taskId, entries: rows });
+    },
+  )
+  .get(
+    "/:id/tasks/:taskId/output/:entryId",
+    describeRoute({
+      description:
+        "单条任务明细(spec two-tier-output-summary-and-detail R5):按摘要行 #id 展开完整原文;找不到返回 404 并说明原因",
+      responses: {
+        200: {
+          description: "Single detail entry",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    zValidator(
+      "param",
+      z.object({
+        id: z.string().uuid(),
+        taskId: z.string().uuid(),
+        entryId: z.string(),
+      }),
+    ),
+    async (c) => {
+      const db = c.get("db");
+      const { id, taskId, entryId } = c.req.valid("param");
+      // 群/任务存在性校验与任务详情路由一致(includeOutput 同授权口径,不放宽)。
+      const group = await db.query.groups.findFirst({
+        where: (t, { eq }) => eq(t.id, id),
+      });
+      if (!group) {
+        throw new BizError(BizCodeEnum.GroupNotFound);
+      }
+      const task = await db.query.task.findFirst({
+        where: (t, { and, eq }) => and(eq(t.id, taskId), eq(t.groupId, id)),
+      });
+      if (!task) {
+        throw new BizError(BizCodeEnum.TaskNotFound);
+      }
+      const row = findTaskDetail(taskId, entryId);
+      if (row === undefined) {
+        // R5:明细文件不存在(已被清理 / 任务无明细),404 说明原因。
+        throw new BizError(
+          BizCodeEnum.TaskNotFound,
+          "明细文件不存在(可能已被 14 天清理,或该任务无明细记录)",
+        );
+      }
+      if (row === null) {
+        // R5:id 不存在,404 说明原因,不得静默返回空。
+        throw new BizError(
+          BizCodeEnum.TaskNotFound,
+          `条目 ${entryId} 不存在(摘要行里的 #id 无对应明细)`,
+        );
+      }
+      return c.json(row);
     },
   )
   .patch(

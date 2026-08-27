@@ -1,25 +1,40 @@
 /**
- * 执行器输出解析(实时输出动作行,spec: live-output-shows-narration-not-actions):
- * 在执行器输出进入 task 缓冲前按 executorKey 把「动作」从噪音里解析出来,让
- * 实时输出显示 agent 实际调用的工具/命令/汇报,而不是被 JSONL 噪音埋住。
+ * 执行器输出解析(实时输出动作行,spec: live-output-shows-narration-not-actions +
+ * two-tier-output-summary-and-detail):在执行器输出进入 task 缓冲前按 executorKey
+ * 把「动作」从噪音里解析出来,让实时输出显示 agent 实际调用的工具/命令/汇报,
+ * 而不是被 JSONL 噪音埋住。
+ *
+ * 两层级输出(spec: two-tier-output-summary-and-detail,R1-R7):
+ *  - 解析器产出**结构化条目**(OutputEntry:id/kind/summary/detail),不再是纯字符串;
+ *  - summary 一行,进摘要流(环形缓冲,上限 1000 行 / 256KB 不变);既有渲染口径
+ *    ([工具]/[命令]/[汇报])保持不变,只是多带 #id(如 `[工具 #t3]`),供展开 API 引用;
+ *  - detail 可选完整原文,进明细存储(磁盘 JSONL,R4)——不驻留内存、不进 diffSummary;
+ *  - R2:thinking 摘要取首句要旨,绝不取字数统计;
+ *  - R3:thinking / 工具结果全文 / 命令输出全文 / 超长参数值 → 折叠(summary 一行 +
+ *    detail 全文);工具名 + 参数键名 / 命令行本身 / 简短汇报 → 仅摘要;
+ *    ⚠️ 错误信息永不折叠 —— 全文留在摘要流;
+ *  - R7:解析失败 / 结构不认识的行仍逐字保留(raw 条目,不带 #id,字节不变);
+ *    未知 executorKey 仍走通用解析器并只记一次观测日志。
  *
  *  - codex(exec --json):行缓冲拼接跨 chunk 的 JSONL 行,只渲染
  *    type == "item.completed" 事件为 [工具]/[命令]/[汇报] 动作行;不渲染
- *    arguments/result 全文(那正是 65% 噪音的来源)。其余 JSONL 事件、非法
- *    JSON、未知 item_type 一律逐字保留。
- *  - atomcode(-v):动作行本身已紧凑([tool→ name] {args} 等),逐字保留;
- *    只把粘连在中行内的已知前缀(如 `…read the file.[tokens] prompt=…`)
- *    拆到行首,治「多句粘成一段」。未知行逐字保留。
+ *    arguments/result 全文(那正是 65% 噪音的来源),全文进明细(detail)。
+ *    其余 JSONL 事件、非法 JSON、未知 item_type 一律逐字保留(raw)。
+ *  - atomcode(-v):动作行本身已紧凑([tool→ name] {args} 等),摘要逐字保留 +
+ *    #id;只把粘连在中行内的已知前缀(如 `…read the file.[tokens] prompt=…`)
+ *    拆到行首,治「多句粘成一段」;[thinking] 行折叠为 [思考 #id] 要旨 +
+ *    明细全文;未知行逐字保留(raw)。
  *  - codebuddy(--output-format stream-json):Claude Code 风格 JSONL。assistant
- *    内容块 tool_use → [工具](input 只取键名)、text → [汇报];user tool_result
- *    → [工具] 名 ok/error(按 tool_use_id 关联工具名);system.task_started →
- *    [命令];result → [汇报]。uuid/session_id/_requestId 等信封一律不进缓冲;
+ *    内容块 tool_use → [工具](input 只取键名,全文进明细)、text → [汇报]、
+ *    thinking → [思考] 要旨 + 明细全文;user tool_result → [工具] 名 ok/error
+ *    (按 tool_use_id 关联工具名,全文进明细,error 不折叠);system.task_started
+ *    → [命令];result → [汇报]。uuid/session_id/_requestId 等信封一律不进缓冲;
  *    同 chunk 内重复动作行折叠只留首条(R5,按来源区分工具调用与工具结果,
- *    调用与匹配结果互不折叠);解析失败/未知 type/未知块逐字保留。
+ *    调用与匹配结果互不折叠);解析失败/未知 type/未知块逐字保留(raw)。
  *  - 其他执行器(default):通用语义解析器(spec: generic-executor-output-parsing)。
  *    逐行判定:能 JSON.parse → 按字段语义递归「丢信封、留动作/正文/错误」并截断
- *    长值;匹配 [前缀] 形式 → 前缀作为动作类型保留,正文部分可解析则同样压缩;
- *    都不是 → 逐字保留。未知 executorKey 仍记一次观测日志(R5)。
+ *    长值(全文整行进明细);匹配 [前缀] 形式 → 前缀作为动作类型保留,正文部分可
+ *    解析则同样压缩;都不是 → 逐字保留(raw)。未知 executorKey 仍记一次观测日志。
  *
  * R3 是硬要求:任何一行解析失败/前缀不认识/格式变了 → 原样进缓冲,不丢弃。
  * 宁可多显示,不可静默吞掉。
@@ -27,10 +42,18 @@
 
 /** 单参数键名列表的最大字符数。 */
 const MAX_ARGS_CHARS = 240;
-/** mcp_tool_call error 字段的最大字符数。 */
-const MAX_ERROR_CHARS = 200;
 /** command_execution 命令的最大字符数(折行命令压成单行后截断)。 */
 const MAX_COMMAND_CHARS = 400;
+/** 通用解析器正文/工具/错误值的截断长度(R2:超阈值只保留前 N 字符 + 省略号)。 */
+const MAX_GENERIC_TEXT_CHARS = 200;
+/** 通用解析器递归深度上限:防畸形/恶意嵌套把栈打穿。 */
+const MAX_GENERIC_DEPTH = 8;
+/** R2:thinking 摘要取首句要旨的最大字符数(截断加省略号)。 */
+const MAX_THINKING_SUMMARY_CHARS = 120;
+/** R3:工具结果摘要的最大字符数(全文进明细)。 */
+const MAX_TOOL_RESULT_SUMMARY_CHARS = 160;
+/** R3:atomcode 超长工具行(超长参数值)折叠阈值,超过则摘要截断 + 全文进明细。 */
+const MAX_FOLDED_LINE_CHARS = 400;
 
 /** AtomCode stderr 的已知前缀(实跑 2026-08-26 确认,含尾随空格)。 */
 const ATOMCODE_PREFIX_MARKERS = [
@@ -41,6 +64,28 @@ const ATOMCODE_PREFIX_MARKERS = [
   "[thinking] ",
   "[headless] ",
 ] as const;
+
+/** 结构化条目的类别(spec two-tier-output-summary-and-detail R1)。 */
+export type OutputEntryKind =
+  | "thinking"
+  | "tool"
+  | "command"
+  | "result"
+  | "report"
+  | "error"
+  | "raw";
+
+/** 解析器产出的结构化条目:一行摘要进摘要流,#id 供展开 API 引用;detail 进明细存储。 */
+export interface OutputEntry {
+  /** 任务内单调递增的短标识(如 t7),供展开 API 引用。 */
+  id: string;
+  /** 类别:thinking / tool / command / result / report / error / raw。 */
+  kind: OutputEntryKind;
+  /** 一行摘要,进摘要流;既有渲染口径([工具]/[命令]/[汇报])+ #id。 */
+  summary: string;
+  /** 可选完整原文,进明细存储(磁盘 JSONL,R4);raw 条目无明细不落盘。 */
+  detail?: string;
+}
 
 /** 截断到 N 字符,超长加省略号。 */
 function truncate(value: string, max: number): string {
@@ -58,6 +103,59 @@ function observeUnknownExecutorKey(executorKey: string): void {
   console.warn(
     `[executor-output-parser] unknown executorKey=${executorKey}; falling back to generic heuristic parser (JSONL envelope fields dropped, rest kept verbatim).`,
   );
+}
+
+/**
+ * 结构化条目工厂(每次执行一个):分配任务内单调递增的短 id(t1, t2, …),
+ * 把 #id 注入行首 [标签] 形式(如 `[工具] x` → `[工具 #t3] x`);raw 透传条目
+ * 不加 #id,保证 R7 逐字保留。
+ */
+function createEntryMaker() {
+  let seq = 0;
+  const withId = (summary: string, id: string): string => {
+    const m = /^(\[[^\]]*\])(.*)$/s.exec(summary);
+    if (!m) return summary;
+    return `${m[1].slice(0, -1)} #${id}]${m[2]}`;
+  };
+  return {
+    entry(
+      kind: OutputEntryKind,
+      summary: string,
+      detail?: string,
+    ): OutputEntry {
+      const id = `t${(seq += 1)}`;
+      return {
+        id,
+        kind,
+        summary: withId(summary, id),
+        ...(detail ? { detail } : {}),
+      };
+    },
+    raw(line: string): OutputEntry {
+      return { id: `t${(seq += 1)}`, kind: "raw", summary: line };
+    },
+  };
+}
+
+/** 明细原文提取:字符串直接取;对象/数组 JSON 序列化(完整原文);其余为空。 */
+function detailText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.length > 0 ? value : undefined;
+  if (value !== null && typeof value === "object") {
+    const s = JSON.stringify(value);
+    return s ? s : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * R2:thinking 摘要取要旨 —— 取首句(。.!?;… 截止)或前 N 字并截断,
+ * 绝不输出「N 段,共 M 字」这类字数统计。
+ */
+function thinkingSummary(text: string): string {
+  const clean = (text ?? "").replace(/\s+/g, " ").trim();
+  if (clean.length === 0) return "";
+  const firstSentence = /^.*?[。.!?;…]/.exec(clean)?.[0] ?? clean;
+  return truncate(firstSentence.trim(), MAX_THINKING_SUMMARY_CHARS);
 }
 
 /**
@@ -83,7 +181,8 @@ function renderToolCall(item: Record<string, unknown>): string {
   }
   const error = item.error;
   if (error !== undefined && error !== null && String(error) !== "") {
-    parts.push(`error=${truncate(String(error), MAX_ERROR_CHARS)}`);
+    // R3:错误信息永不折叠,全文留在摘要流(不截断)。
+    parts.push(`error=${String(error)}`);
   }
   return parts.join(" ");
 }
@@ -107,29 +206,48 @@ function renderAgentMessage(item: Record<string, unknown>): string {
 
 /**
  * 渲染一条 codex JSONL 行:只处理 type == "item.completed" 的三类 item;
- * 其余(非法 JSON、其他 type、未知 item_type)返回 null → 调用方逐字保留。
+ * 其余(非法 JSON、其他 type、未知 item_type)返回 raw 透传条目(R7 逐字保留)。
  */
-function renderCodexLine(line: string): string {
+function renderCodexLine(
+  line: string,
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+  raw: ReturnType<typeof createEntryMaker>["raw"],
+): OutputEntry {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return line; // R3:非法 JSON 逐字保留
+    return raw(line); // R3:非法 JSON 逐字保留
   }
-  if (typeof parsed !== "object" || parsed === null) return line;
+  if (typeof parsed !== "object" || parsed === null) return raw(line);
   const record = parsed as Record<string, unknown>;
-  if (record.type !== "item.completed") return line; // R3:非 completed 事件逐字保留
+  if (record.type !== "item.completed") return raw(line); // R3:非 completed 事件逐字保留
   const item = record.item;
-  if (typeof item !== "object" || item === null) return line;
-  switch ((item as Record<string, unknown>).item_type) {
-    case "mcp_tool_call":
-      return renderToolCall(item as Record<string, unknown>);
+  if (typeof item !== "object" || item === null) return raw(line);
+  const it = item as Record<string, unknown>;
+  switch (it.item_type) {
+    case "mcp_tool_call": {
+      const hasError =
+        it.status === "error" ||
+        (it.error !== undefined &&
+          it.error !== null &&
+          String(it.error) !== "");
+      return entry(
+        hasError ? "error" : "tool",
+        renderToolCall(it),
+        detailText(it.result), // R3:工具结果全文进明细
+      );
+    }
     case "command_execution":
-      return renderCommand(item as Record<string, unknown>);
+      return entry(
+        "command",
+        renderCommand(it),
+        detailText(it.output ?? it.result), // R3:命令输出全文进明细
+      );
     case "agent_message":
-      return renderAgentMessage(item as Record<string, unknown>);
+      return entry("report", renderAgentMessage(it));
     default:
-      return line; // R3:未知 item_type 逐字保留
+      return raw(line); // R3:未知 item_type 逐字保留
   }
 }
 
@@ -159,41 +277,73 @@ function splitMidLinePrefixes(text: string): string {
 
 /** 流式解析器:可调用(喂 chunk)+ flush(进程结束时吐出残留,逐字)。 */
 export interface ExecutorOutputParser {
-  (chunk: string): string;
+  (chunk: string): OutputEntry[];
   /** 进程结束时吐出尚未成行的残留(逐字),保证 R3 不丢任何一行。 */
-  flush(): string;
+  flush(): OutputEntry[];
 }
 
 /** codex:行缓冲 + 渲染 item.completed;其余逐字保留。 */
 function createCodexParser(): ExecutorOutputParser {
   let pending = "";
-  const parser = ((chunk: string): string => {
+  const { entry, raw } = createEntryMaker();
+  const parser = ((chunk: string): OutputEntry[] => {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
-    if (lines.length === 0) return "";
-    const rendered = lines.map(renderCodexLine).join("\n");
-    return `${rendered}\n`;
+    if (lines.length === 0) return [];
+    return lines.map((l) => renderCodexLine(l, entry, raw));
   }) as ExecutorOutputParser;
   parser.flush = () => {
     const tail = pending;
     pending = "";
-    return tail.length > 0 ? renderCodexLine(tail) : "";
+    return tail.length > 0 ? [renderCodexLine(tail, entry, raw)] : [];
   };
   return parser;
 }
 
-/** atomcode:无缓冲,只做中行前缀拆行,内容逐字保留。 */
-function createAtomCodeParser(): ExecutorOutputParser {
-  const parser = ((chunk: string): string =>
-    splitMidLinePrefixes(chunk ?? "")) as ExecutorOutputParser;
-  parser.flush = () => "";
-  return parser;
+/**
+ * 渲染一条 atomcode 输出行(两层级):[thinking] → [思考 #id] 要旨 + 明细全文;
+ * [tool→ / [tool← 动作行摘要逐字保留(工具名/参数可见),超长行折叠;其余逐字 raw。
+ */
+function renderAtomCodeLine(
+  line: string,
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+  raw: ReturnType<typeof createEntryMaker>["raw"],
+): OutputEntry {
+  const thinking = /^\[thinking\]\s*(.*)$/.exec(line);
+  if (thinking) {
+    const full = thinking[1].trim();
+    const gist = thinkingSummary(full);
+    // 空内容行按 raw 逐字保留(无要旨可折叠)。
+    return full.length > 0
+      ? entry("thinking", `[思考] ${gist}`, full)
+      : raw(line);
+  }
+  const tool = /^\[(tool→|tool←)\s*/.exec(line);
+  if (tool) {
+    const kind: OutputEntryKind = tool[1] === "tool→" ? "tool" : "result";
+    // R3:超长工具行(超长参数值)折叠 —— 摘要截断,全文进明细。
+    if (line.length > MAX_FOLDED_LINE_CHARS) {
+      return entry(kind, truncate(line, MAX_FOLDED_LINE_CHARS), line);
+    }
+    return entry(kind, line);
+  }
+  return raw(line); // R7:[done]/[tokens]/[headless]/未知行逐字保留
 }
 
-/** 通用解析器正文/工具/错误值的截断长度(R2:超阈值只保留前 N 字符 + 省略号)。 */
-const MAX_GENERIC_TEXT_CHARS = 200;
-/** 通用解析器递归深度上限:防畸形/恶意嵌套把栈打穿。 */
-const MAX_GENERIC_DEPTH = 8;
+/** atomcode:无缓冲,只做中行前缀拆行 + 逐行结构化;未知行逐字保留。 */
+function createAtomCodeParser(): ExecutorOutputParser {
+  const { entry, raw } = createEntryMaker();
+  const parser = ((chunk: string): OutputEntry[] => {
+    const text = splitMidLinePrefixes(chunk ?? "");
+    if (text.length === 0) return [];
+    const lines = text.split("\n");
+    // 行终止符产生的空尾元素不构成条目(与行缓冲解析器同界:只消费完整行)。
+    if (lines[lines.length - 1] === "") lines.pop();
+    return lines.map((l) => renderAtomCodeLine(l, entry, raw));
+  }) as ExecutorOutputParser;
+  parser.flush = () => [];
+  return parser;
+}
 
 /** 信封字段名(uuid/session_id/_requestId 等纯标识与遥测字段,逐字不进缓冲)。 */
 const GENERIC_ENVELOPE_KEYS = new Set([
@@ -256,7 +406,7 @@ function genericValueSummary(value: unknown): string {
 /**
  * 按字段语义递归提取动作/正文片段(R2,spec: generic-executor-output-parsing):
  *  - 动作:键名含 tool/function → [工具];含 command/cmd → [命令];
- *  - 错误:键名含 err 且值为字符串 → [汇报] error=…;
+ *  - 错误:键名含 err 且值为字符串 → [汇报] error=…(R3:错误永不折叠,全文);
  *  - 正文:键名含 text/content/message/output/result → [汇报];对象/数组值
  *    (如 content 块数组)继续递归找正文,不把键名当正文渲染;
  *  - 信封:跳过;未分类对象/数组继续递归(动作可能藏在更深层);
@@ -280,11 +430,9 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
     } else if (lk.includes("command") || lk.includes("cmd")) {
       fragments.push(`[命令] ${genericValueSummary(value)}`);
     } else if (lk.includes("err")) {
-      // 布尔/对象错误标记不刷屏,只渲染字符串错误。
+      // 布尔/对象错误标记不刷屏,只渲染字符串错误;错误永不折叠(R3),全文可见。
       if (typeof value === "string") {
-        fragments.push(
-          `[汇报] error=${truncate(value, MAX_GENERIC_TEXT_CHARS)}`,
-        );
+        fragments.push(`[汇报] error=${value}`);
       }
     } else if (
       lk.includes("text") ||
@@ -308,25 +456,48 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
 /** [前缀] 形式:行首的方括号标记(如 [tool→ read_file])作为动作类型保留。 */
 const GENERIC_PREFIX_RE = /^\[([^\]]+)\](.*)$/;
 
+/** 通用片段 → 结构化条目:类别按片段标签判定,明细 = 原始整行(完整原文)。 */
+function genericFragmentEntry(
+  fragment: string,
+  original: string,
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+): OutputEntry {
+  const kind: OutputEntryKind = fragment.startsWith("[工具]")
+    ? "tool"
+    : fragment.startsWith("[命令]")
+      ? "command"
+      : fragment.startsWith("[汇报] error=")
+        ? "error"
+        : "report";
+  return entry(kind, fragment, original);
+}
+
 /**
  * 渲染一条通用解析行(R1 三序判定):
- * 1. 能 JSON.parse → R2 通用提取,提取出片段则渲染动作行,否则逐字保留;
+ * 1. 能 JSON.parse → R2 通用提取,提取出片段则逐片段渲染动作条目(明细 = 整行
+ *    原文),否则逐字保留;
  * 2. 匹配 [前缀] 形式 → 前缀作为动作类型渲染(正文部分可解析则同样压缩);
  * 3. 都不是 → 逐字保留。
  * R3 硬要求:任何路径提取不出正文都逐字保留,绝不丢弃。
  */
-function renderGenericLine(line: string): string {
+function renderGenericLine(
+  line: string,
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+  raw: ReturnType<typeof createEntryMaker>["raw"],
+): OutputEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
     const m = GENERIC_PREFIX_RE.exec(line);
-    if (m) return renderGenericPrefixLine(m[1], m[2], line);
-    return line;
+    if (m) return renderGenericPrefixLine(m[1], m[2], line, entry, raw);
+    return [raw(line)];
   }
-  if (typeof parsed !== "object" || parsed === null) return line; // R3:标量 JSON
+  if (typeof parsed !== "object" || parsed === null) return [raw(line)]; // R3:标量 JSON
   const fragments = extractGenericFragments(parsed, 0);
-  return fragments.length > 0 ? fragments.join("\n") : line; // R3:提取不出正文
+  return fragments.length > 0
+    ? fragments.map((f) => genericFragmentEntry(f, line, entry))
+    : [raw(line)]; // R3:提取不出正文
 }
 
 /** [前缀] 行的渲染:前缀作为动作类型保留,正文若能解析出语义则压缩,否则整行逐字保留。 */
@@ -334,33 +505,52 @@ function renderGenericPrefixLine(
   prefix: string,
   rest: string,
   original: string,
-): string {
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+  raw: ReturnType<typeof createEntryMaker>["raw"],
+): OutputEntry[] {
   const trimmed = rest.trim();
-  if (trimmed.length === 0) return original;
+  if (trimmed.length === 0) return [raw(original)];
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return original; // R3:前缀行正文不是 JSON → 逐字保留
+    return [raw(original)]; // R3:前缀行正文不是 JSON → 逐字保留
   }
-  if (typeof parsed !== "object" || parsed === null) return original;
+  if (typeof parsed !== "object" || parsed === null) return [raw(original)];
   const fragments = extractGenericFragments(parsed, 0);
-  return fragments.length > 0 ? `[${prefix}] ${fragments.join(" ")}` : original; // R3:提取不出语义 → 逐字保留
+  return fragments.length > 0
+    ? fragments.map((f) =>
+        entry(genericFragmentKind(f), `[${prefix}] ${f}`, original),
+      )
+    : [raw(original)]; // R3:提取不出语义 → 逐字保留
+}
+
+/** 从通用片段标签推导类别(前缀行条目共用)。 */
+function genericFragmentKind(fragment: string): OutputEntryKind {
+  if (fragment.startsWith("[工具]")) return "tool";
+  if (fragment.startsWith("[命令]")) return "command";
+  if (fragment.startsWith("[汇报] error=")) return "error";
+  return "report";
 }
 
 /** 通用解析器:行缓冲 + R1 三序判定;跨 chunk 半截行拼接,flush 吐残留。 */
 function createGenericParser(): ExecutorOutputParser {
   let pending = "";
-  const parser = ((chunk: string): string => {
+  const { entry, raw } = createEntryMaker();
+  const renderLine = (line: string): OutputEntry[] =>
+    renderGenericLine(line, entry, raw);
+  const parser = ((chunk: string): OutputEntry[] => {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
-    if (lines.length === 0) return "";
-    return `${lines.map(renderGenericLine).join("\n")}\n`;
+    if (lines.length === 0) return [];
+    const out: OutputEntry[] = [];
+    for (const l of lines) out.push(...renderLine(l));
+    return out;
   }) as ExecutorOutputParser;
   parser.flush = () => {
     const tail = pending;
     pending = "";
-    return tail.length > 0 ? renderGenericLine(tail) : "";
+    return tail.length > 0 ? renderLine(tail) : [];
   };
   return parser;
 }
@@ -389,9 +579,11 @@ function extractToolResultText(content: unknown): string {
  * 形状取自任务 01a03eb9 实跑:assistant 内容块(tool_use/text/thinking)、
  * user 内容块(tool_result)、system.task_started、result。
  *
- *  - tool_use    → [工具] 工具名 + 参数键名(不渲染 input 值,治 55.6% 噪音)
+ *  - tool_use    → [工具] 工具名 + 参数键名(input 值全文进明细,治 55.6% 噪音)
  *  - text        → [汇报] 正文
- *  - tool_result → [工具] 工具名(按 tool_use_id 关联)+ ok/error + 文本摘要
+ *  - thinking    → [思考] 首句要旨(R2)+ 明细全文
+ *  - tool_result → [工具] 工具名(按 tool_use_id 关联)+ ok/error + 短摘要
+ *    (全文进明细;is_error 时错误不折叠,全文留在摘要)
  *  - system.task_started(Bash) → [命令] description(命令可见)
  *  - result      → [汇报] 最终正文
  *
@@ -402,14 +594,16 @@ function extractToolResultText(content: unknown): string {
 function renderCodeBuddyLine(
   line: string,
   state: { toolNameByUseId: Map<string, string> },
-): string {
+  entry: ReturnType<typeof createEntryMaker>["entry"],
+  raw: ReturnType<typeof createEntryMaker>["raw"],
+): OutputEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return line; // R3:非法/非 JSON 逐字保留
+    return [raw(line)]; // R3:非法/非 JSON 逐字保留
   }
-  if (typeof parsed !== "object" || parsed === null) return line;
+  if (typeof parsed !== "object" || parsed === null) return [raw(line)];
   const record = parsed as Record<string, unknown>;
 
   switch (record.type) {
@@ -419,26 +613,41 @@ function renderCodeBuddyLine(
         message && typeof message === "object"
           ? (message as Record<string, unknown>).content
           : undefined;
-      if (!Array.isArray(content)) return line; // R3:结构不认识 → 原样保留
-      const parts: string[] = [];
+      if (!Array.isArray(content)) return [raw(line)]; // R3:结构不认识 → 原样保留
+      const out: OutputEntry[] = [];
       for (const blockRaw of content) {
-        if (typeof blockRaw !== "object" || blockRaw === null) return line;
+        if (typeof blockRaw !== "object" || blockRaw === null) {
+          return [raw(line)];
+        }
         const block = blockRaw as Record<string, unknown>;
         if (block.type === "tool_use") {
           const name = typeof block.name === "string" ? block.name : "?";
           const useId = typeof block.id === "string" ? block.id : undefined;
           if (useId) state.toolNameByUseId.set(useId, name);
           const argKeys = compactArgKeys(block.input);
-          parts.push(argKeys ? `[工具] ${name} ${argKeys}` : `[工具] ${name}`);
+          out.push(
+            entry(
+              "tool",
+              argKeys ? `[工具] ${name} ${argKeys}` : `[工具] ${name}`,
+              detailText(block.input), // R3:超长参数值全文进明细
+            ),
+          );
         } else if (block.type === "text") {
           const text = typeof block.text === "string" ? block.text : "";
-          parts.push(`[汇报] ${text}`);
+          out.push(entry("report", `[汇报] ${text}`));
+        } else if (block.type === "thinking") {
+          const thinking =
+            typeof block.thinking === "string" ? block.thinking : "";
+          // R2/R3:thinking 折叠 —— 摘要取首句要旨,全文进明细。
+          out.push(
+            entry("thinking", `[思考] ${thinkingSummary(thinking)}`, thinking),
+          );
         } else {
-          // thinking / 未知块:逐字保留整行(R3)
-          return line;
+          // 未知块:逐字保留整行(R3)
+          return [raw(line)];
         }
       }
-      return parts.join("\n");
+      return out;
     }
     case "user": {
       const message = record.message;
@@ -446,10 +655,11 @@ function renderCodeBuddyLine(
         message && typeof message === "object"
           ? (message as Record<string, unknown>).content
           : undefined;
-      if (!Array.isArray(content)) return line; // R3:无 content → 原样保留
-      const parts: string[] = [];
+      if (!Array.isArray(content)) return [raw(line)]; // R3:无 content → 原样保留
+      const out: OutputEntry[] = [];
       for (const blockRaw of content) {
-        if (typeof blockRaw !== "object" || blockRaw === null) return line;
+        if (typeof blockRaw !== "object" || blockRaw === null)
+          return [raw(line)];
         const block = blockRaw as Record<string, unknown>;
         if (block.type === "tool_result") {
           const useId =
@@ -460,31 +670,37 @@ function renderCodeBuddyLine(
             (useId && state.toolNameByUseId.get(useId)) || useId || "?";
           const isError = block.is_error === true;
           const text = extractToolResultText(block.content);
-          parts.push(
-            `[工具] ${name} ${isError ? "error" : "ok"}${text ? ` ${text}` : ""}`,
+          // R3:is_error 时错误永不折叠(全文在摘要);正常结果折叠,全文进明细。
+          const summary = isError
+            ? `[工具] ${name} error${text ? ` ${text}` : ""}`
+            : `[工具] ${name} ok${text ? ` ${truncate(text, MAX_TOOL_RESULT_SUMMARY_CHARS)}` : ""}`;
+          out.push(
+            entry(isError ? "error" : "result", summary, text || undefined),
           );
         } else {
           // 非 tool_result 块(如人类消息正文)→ 整行逐字保留(R3)
-          return line;
+          return [raw(line)];
         }
       }
-      return parts.join("\n");
+      return out;
     }
     case "system": {
       if (
         record.subtype === "task_started" &&
         typeof record.description === "string"
       ) {
-        return `[命令] ${record.description}`;
+        return [entry("command", `[命令] ${record.description}`)];
       }
-      return line; // R3:其他 system 子类型(已知噪音)逐字保留
+      return [raw(line)]; // R3:其他 system 子类型(已知噪音)逐字保留
     }
     case "result": {
-      if (typeof record.result === "string") return `[汇报] ${record.result}`;
-      return line; // R3:result 无正文 → 原样保留
+      if (typeof record.result === "string") {
+        return [entry("report", `[汇报] ${record.result}`)];
+      }
+      return [raw(line)]; // R3:result 无正文 → 原样保留
     }
     default:
-      return line; // R3:未知顶层 type 逐字保留
+      return [raw(line)]; // R3:未知顶层 type 逐字保留
   }
 }
 
@@ -510,11 +726,13 @@ function lineActionKind(line: string): "call" | "result" | undefined {
 /**
  * 动作行折叠键(R5 压缩比):同 chunk 内同一(标记, 工具/命令名, 动作类别)的
  * 重复动作行只保留首条——同一工具被反复调用时实时输出不必刷屏 40 遍。整行
- * 文本也参与去重(如 [汇报] 完全相同的正文)。透传行(R3)不进本函数、永不折叠。
+ * 文本也参与去重(如 [汇报] 完全相同的正文)。去重前剥离摘要内的 #id(否则
+ * 每个条目 id 唯一导致去重失效);raw 透传行(R7)不进本函数、永不折叠。
  */
 function actionDedupKey(rendered: string, kind?: "call" | "result"): string {
-  const m = /^\[(工具|命令)\] (\S+)/.exec(rendered);
-  if (!m) return rendered;
+  const stable = rendered.replace(/ #t\d+\]/g, "]");
+  const m = /^\[(工具|命令)\] (\S+)/.exec(stable);
+  if (!m) return stable;
   return kind ? `${m[1]}|${m[2]}|${kind}` : `${m[1]}|${m[2]}`;
 }
 
@@ -524,29 +742,32 @@ function createCodeBuddyParser(): ExecutorOutputParser {
   const state: { toolNameByUseId: Map<string, string> } = {
     toolNameByUseId: new Map(),
   };
-  const parser = ((chunk: string): string => {
+  const { entry, raw } = createEntryMaker();
+  const parser = ((chunk: string): OutputEntry[] => {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
-    if (lines.length === 0) return "";
+    if (lines.length === 0) return [];
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: OutputEntry[] = [];
     for (const l of lines) {
-      const rendered = renderCodeBuddyLine(l, state);
-      if (rendered !== l) {
-        // R5:折叠同 chunk 内的重复动作行;R3 透传行不参与、逐字保留。
+      const rendered = renderCodeBuddyLine(l, state, entry, raw);
+      for (const e of rendered) {
+        // R5:折叠同 chunk 内的重复动作行;R7 透传行不参与、逐字保留。
         // 折叠键按来源区分调用/结果,同 chunk 的 tool_use + tool_result 不互吞。
-        const key = actionDedupKey(rendered, lineActionKind(l));
-        if (seen.has(key)) continue;
-        seen.add(key);
+        if (e.kind !== "raw") {
+          const key = actionDedupKey(e.summary, lineActionKind(l));
+          if (seen.has(key)) continue;
+          seen.add(key);
+        }
+        out.push(e);
       }
-      out.push(rendered);
     }
-    return `${out.join("\n")}\n`;
+    return out;
   }) as ExecutorOutputParser;
   parser.flush = () => {
     const tail = pending;
     pending = "";
-    return tail.length > 0 ? renderCodeBuddyLine(tail, state) : "";
+    return tail.length > 0 ? renderCodeBuddyLine(tail, state, entry, raw) : [];
   };
   return parser;
 }
@@ -554,7 +775,7 @@ function createCodeBuddyParser(): ExecutorOutputParser {
 /**
  * 按 executorKey 创建流式输出解析器(每次执行一个;跨 chunk 状态由闭包持有,
  * 与 createAnsiStripper 同款)。codex / codebuddy 解析 JSONL 动作行,atomcode
- * 拆粘连前缀,其余执行器(default)走通用语义解析器(spec:
+ * 拆粘连前缀 + 折叠 thinking,其余执行器(default)走通用语义解析器(spec:
  * generic-executor-output-parsing)——按字段语义丢信封、留动作/正文,保证新增
  * agent 的 JSONL 输出不会顶满缓冲;未知 key 仍记一次观测日志(R5)。
  */

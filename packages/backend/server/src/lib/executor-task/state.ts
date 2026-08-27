@@ -3,6 +3,7 @@ import {
   type RetryPolicy,
   readDispatchPolicy,
 } from "@server/lib/executors";
+import { clearAllTaskDetails } from "./detail-store";
 import { clearAllTaskOutputs } from "./output-buffer";
 import type { QueuedRun } from "./types";
 
@@ -236,6 +237,7 @@ export function __resetExecutorQueueForTests(): void {
   }
   groupQueues.clear();
   clearAllTaskOutputs();
+  clearAllTaskDetails();
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
   executorCooldowns.clear();

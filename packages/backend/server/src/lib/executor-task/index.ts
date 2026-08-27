@@ -28,11 +28,22 @@ export {
   maybeCreateCoordinatorResumeTask,
   startCoordinatorResumeConsumer,
 } from "./coordinator-resume";
+export {
+  appendTaskDetail,
+  cleanupExpiredTaskDetails,
+  clearAllTaskDetails,
+  findTaskDetail,
+  readTaskDetail,
+  type StoredTaskDetail,
+  taskDetailFilePath,
+} from "./detail-store";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
   createExecutorOutputParser,
   type ExecutorOutputParser,
+  type OutputEntry,
+  type OutputEntryKind,
 } from "./output-parser";
 export {
   cancelQueuedTasks,

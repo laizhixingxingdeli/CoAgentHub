@@ -37,6 +37,7 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
+import { appendTaskDetail } from "./detail-store";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -1373,9 +1374,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           // 走剥离后的文本——剥在唯一源头,前端/插件/兜底拉取一次性受益。
           process.stdout.write(chunk);
           const clean = stripAnsiChunk(chunk);
-          const parsed = parseOutput(clean);
-          appendTaskOutput(taskId, parsed);
-          void wsHub.broadcastTaskOutput(groupId, taskId, parsed);
+          // 两层级输出(spec two-tier-output-summary-and-detail):解析器产出结构化
+          // 条目,摘要进环形缓冲 + WS 广播(带 #id,上限不变),完整原文逐条落盘
+          // 明细 JSONL(R4,不驻留内存)。
+          const entries = parseOutput(clean);
+          if (entries.length > 0) {
+            const summaryText = `${entries.map((e) => e.summary).join("\n")}\n`;
+            appendTaskOutput(taskId, summaryText);
+            void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+            for (const entry of entries) appendTaskDetail(taskId, entry);
+          }
           // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
           run.lastOutputAt = Date.now();
           if (run.stallTimer) {
@@ -1508,9 +1516,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
       // 进程已退出:吐出解析器残留的未成行尾部(逐字),保证 R3 不丢任何一行。
       const flushed = parseOutput.flush();
-      if (flushed) {
-        appendTaskOutput(taskId, flushed);
-        void wsHub.broadcastTaskOutput(groupId, taskId, flushed);
+      if (flushed.length > 0) {
+        const summaryText = `${flushed.map((e) => e.summary).join("\n")}\n`;
+        appendTaskOutput(taskId, summaryText);
+        void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+        for (const entry of flushed) appendTaskDetail(taskId, entry);
       }
       // 停止指令已 kill 进程组:完成回调置 cancelled,不再回传 ❌/✅(停止
       // 指令自己已回传 🛑)。

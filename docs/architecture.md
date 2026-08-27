@@ -55,8 +55,9 @@ CoAgentHub/
 │   │   │       └── lib/executor-task/        # 执行器调度(拆分 barrel,导出面兼容)
 │   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
-│   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail)
-│   │   │           ├── output-parser.ts #    按执行器格式流式渲染动作行(解析失败原样保留)
+│   │   │           ├── output-buffer.ts #    实时输出缓冲(环形 tail,摘要流)
+│   │   │           ├── output-parser.ts #    结构化条目解析(id/kind/summary/detail,摘要带 #id;解析失败原样保留)
+│   │   │           ├── detail-store.ts  #    明细磁盘 JSONL(/tmp,14 天清理;不驻留内存、不进 diffSummary)
 │   │   │           ├── notify.ts      #      状态通知(task_status_changed/回传/cancelled)
 │   │   │           ├── report.ts      #      汇报解析与渲染(parseTaskReport/renderTaskCard;含 Token 消耗提取)
 │   │   │           └── queue.ts       #      队列核心(入队/组调度/运行/取消排队/超时/重试)
@@ -112,6 +113,8 @@ CoAgentHub/
 | `/api/groups/:id/tasks` | GET | 列群任务(createdAt 倒序),每行含 `executorPid` 与读时派生的 `pidAlive`(`null` = 无 pid 可核验);`?limit=&offset=` 分页(缺省 50,上限 100)、`?includeOutput=1` 附实时输出尾部 |
 | `/api/groups/:id/tasks/:taskId` | GET | 任务详情(仅约定字段,不泄露 attempts/a2aContextId 等内部列),含 `executorPid` 与读时派生的 `pidAlive`(`null` = 无 pid 可核验);`?includeOutput=1` 附实时输出尾部 `outputTail`(running = 内存缓冲,已完成 = diffSummary 回填或留空);目标为协调任务时才派生 `l1`(`childCount`/`supersededCount`/`status`/`allTerminal`) 与 `l3`(`answered`/`verdict`/`awaitingSince`/`overdue`),非协调任务不含这两个字段;running 且非协调任务另含读时求值的 `liveness`(`warning`/`lastSignalAt`);任务为 failed 且带非空 `diffSummary.error`、运行时为陈旧构建时才含 `staleBuildSuspected:true` |
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
+| `/api/groups/:id/tasks/:taskId/output?detail=1` | GET | 整份任务明细(spec two-tier-output-summary-and-detail R5):返回该任务明细 JSONL 全部条目(`{taskId, entries:[{id,kind,at,text}]}`);未带 `detail=1` → 400;明细文件不存在(已清理/该任务无明细)→ 404 并说明原因 |
+| `/api/groups/:id/tasks/:taskId/output/:entryId` | GET | 单条明细展开(R5):按摘要行 `#id` 取回完整原文(`{id,kind,at,text}`);授权口径与 `includeOutput` 一致(群/任务存在性校验同任务详情路由,不放宽);`id 不存在` / `明细文件不存在` → 404 并说明原因 |
 | `/api/participants/:id/task-completion-events` | GET | 列出 participant 的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
 | `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
 | `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered;相同 token 重复 ack 幂等 |
