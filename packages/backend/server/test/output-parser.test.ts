@@ -17,7 +17,10 @@ import { describe, expect, it, vi } from "vitest";
  *    不进缓冲;已知噪音(file-history-snapshot、task_updated/task_notification)
  *    不渲染;非法/非 JSON/未知 type/未知 content block 逐字保留(R3);
  *    跨 chunk 拼接 + 结束时 flush。
- *  - 其他执行器:原样透传(创建时记一次观测日志,不逐 chunk 刷屏)。
+ *  - 其他执行器(default):通用语义解析器(spec: generic-executor-output-parsing)。
+ *    逐行判定 JSON 语义提取 → [前缀] 动作渲染 → 逐字保留;按字段语义递归丢
+ *    信封、留动作/正文/错误并截断长值;解析失败/结构不认识逐字保留(R3);
+ *    未知 executorKey 创建时只记一次观测日志(R5)。
  *  - R5:262143 字节基线夹具压缩超过一个数量级,且不含多层转义 brief 回显。
  */
 
@@ -564,5 +567,289 @@ describe("codex:R5 压缩比(基线 262143 字节)", () => {
     // 结果不含多层转义的任务书回显(brief 只存在于键名外的原始噪音中)。
     expect(out).not.toContain("brief");
     expect(out).not.toContain('\\"');
+  });
+});
+
+/* ======================================================================
+ * default 分支:通用语义解析器(spec: generic-executor-output-parsing)
+ * ====================================================================== */
+
+describe("default:通用解析器 R1 判定顺序(JSON 语义 → [前缀] → 逐字)", () => {
+  it("JSON 语义提取优先:工具/正文渲染为动作行,信封字段不进缓冲", () => {
+    const parse = createExecutorOutputParser("reasonix");
+    const line = JSON.stringify({
+      type: "item.completed",
+      uuid: "6d8bda2d755d43829ed17aec797bbc23",
+      item: {
+        item_type: "mcp_tool_call",
+        tool: "coagenthub_get_task",
+        arguments: { taskId: "01a03d87", groupId: "01a03be2" },
+        result: "ok",
+      },
+    });
+    const out = parse(`${line}\n`);
+    expect(out).toContain("[工具] coagenthub_get_task");
+    expect(out).toContain("[汇报] ok");
+    expect(out).not.toContain("6d8bda2d");
+    expect(out).not.toContain("taskId");
+    expect(out).not.toContain("groupId");
+  });
+
+  it("error 字段可见,信封字段不渲染", () => {
+    const parse = createExecutorOutputParser("reasonix");
+    const line = JSON.stringify({
+      tool: "curl",
+      arguments: { url: "http://localhost:3001/api" },
+      error: "connection refused",
+      session_id: "s-1",
+    });
+    expect(parse(`${line}\n`)).toBe(
+      "[工具] curl\n[汇报] error=connection refused\n",
+    );
+  });
+
+  it("长文本值截断到阈值 + 省略号(R2)", () => {
+    const parse = createExecutorOutputParser("reasonix");
+    const line = JSON.stringify({ text: "x".repeat(600) });
+    const out = parse(`${line}\n`).trim();
+    expect(out.startsWith("[汇报] ")).toBe(true);
+    expect(out.length).toBeLessThan(300);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("[前缀] 形式:前缀作为动作类型保留,正文可解析则压缩", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const out = parse('[tool← ok] {"result": "done","uuid":"u1"}\n');
+    expect(out).toBe("[tool← ok] [汇报] done\n");
+  });
+
+  it("[前缀] 行正文不是 JSON → 整行逐字保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const line = "[tool→ read_file] 这不是 JSON,原样保留\n";
+    expect(parse(line)).toBe(line);
+  });
+
+  it("[done] 这类纯前缀行逐字保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const line = "[done] 6.1s tokens=35.90K\n";
+    expect(parse(line)).toBe(line);
+  });
+
+  it("非 JSON 行与提取不出正文的 JSON 逐字保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const input = '任意旁白,原样保留\n{"json": true}\n';
+    expect(parse(input)).toBe(input);
+  });
+});
+
+describe("default:reasonix/hermes/win-hermes 代表性输入(验收 R2/R4)", () => {
+  it("reasonix:JSONL 工具行 → [工具] + [汇报],无信封字段", () => {
+    const parse = createExecutorOutputParser("reasonix");
+    const rows = [
+      {
+        type: "tool_call",
+        uuid: "6d8bda2d755d43829ed17aec797bbc23",
+        tool: "read_file",
+        arguments: { file_path: "a.txt" },
+      },
+      {
+        type: "text",
+        session_id: "65d329c3-7f28-4266-8515-7e58b3b03b07",
+        text: "file read ok",
+      },
+    ];
+    const out = parse(`${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    expect(out).toContain("[工具] read_file");
+    expect(out).toContain("[汇报] file read ok");
+    expect(out).not.toContain("6d8bda2d");
+    expect(out).not.toContain("session_id");
+  });
+
+  it("hermes:命令行 → [命令],无会话噪音", () => {
+    const parse = createExecutorOutputParser("hermes");
+    const line = JSON.stringify({
+      type: "command",
+      session_id: "sess-hermes",
+      command: "pnpm test --filter server",
+      exit_code: 0,
+    });
+    const out = parse(`${line}\n`);
+    expect(out).toContain("[命令] pnpm test --filter server");
+    expect(out).not.toContain("sess-hermes");
+  });
+
+  it("win-hermes:嵌套 message/content → [汇报],request_id 不出现", () => {
+    const parse = createExecutorOutputParser("win-hermes");
+    const line = JSON.stringify({
+      type: "assistant",
+      request_id: "req-123",
+      message: {
+        id: "msg-1",
+        content: [{ type: "text", text: "All tasks done, see report" }],
+      },
+    });
+    const out = parse(`${line}\n`);
+    expect(out).toBe("[汇报] All tasks done, see report\n");
+    expect(out).not.toContain("req-123");
+  });
+});
+
+describe("default:R3 解析失败/结构不认识逐字保留", () => {
+  it("非法 JSON 原样保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const garbage = '{ "unterminated": tru';
+    expect(parse(`${garbage}\n`)).toBe(`${garbage}\n`);
+  });
+
+  it("标量 JSON(字符串/数字/数组)原样保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const input = '"just a string"\n123\n[1,2,3]\n';
+    expect(parse(input)).toBe(input);
+  });
+
+  it("结构不认识(提取不出正文)原样保留", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const line = JSON.stringify({ type: "brand_new_event", payload: { a: 1 } });
+    expect(parse(`${line}\n`)).toBe(`${line}\n`);
+  });
+});
+
+describe("default:未知 key 重放 codex/codebuddy 实跑输出(兜底真实性,验收 R5)", () => {
+  /** 与既有 codex R5 夹具同构的多层转义任务书回显片段。 */
+  function escapedBriefBlock(length: number): string {
+    const unit =
+      '\\\\\\"brief\\\\\\":\\\\\\"# 任务:技能从未说过「不要自己实现」\\\\\\"';
+    return unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
+  }
+
+  it("codex 实跑输出走 default:缓冲不顶满且有动作行(贴前后字节数)", () => {
+    const parse = createExecutorOutputParser("codex-replay");
+    const rows: string[] = [];
+    let total = 0;
+    for (let n = 1; total < 262_143; n += 1) {
+      const blob = escapedBriefBlock(12_000);
+      const row = JSON.stringify({
+        type: "item.completed",
+        item:
+          n % 4 === 0
+            ? {
+                item_type: "command_execution",
+                command: `coagenthub_get_task --task ${n} --group 01a03be2`,
+                exit_code: n % 8 === 0 ? 5 : 0,
+              }
+            : {
+                item_type: "mcp_tool_call",
+                tool: "coagenthub_get_task",
+                status: "success",
+                arguments: { taskbook: blob, taskId: `01a03d8${n % 10}` },
+                result: blob,
+              },
+      });
+      rows.push(row);
+      total += row.length + 1;
+    }
+    const input = rows.join("\n");
+    expect(input.length).toBeGreaterThanOrEqual(262_143);
+    const out = parse(`${input}\n`);
+    // 兜底:缓冲不顶满、压缩超一个数量级、动作行可见
+    expect(out.length).toBeLessThan(262_143);
+    expect(out.length).toBeLessThan(input.length / 10);
+    expect(out).toContain("[工具] coagenthub_get_task");
+    expect(out).toContain("[汇报]");
+    console.log(
+      `[replay] codex default: input=${input.length}B output=${out.length}B (${((out.length / input.length) * 100).toFixed(2)}%)`,
+    );
+  });
+
+  it("codebuddy 实跑输出走 default:缓冲不顶满且有动作行(贴前后字节数)", () => {
+    const parse = createExecutorOutputParser("codebuddy-replay");
+    const rows: string[] = [];
+    for (let n = 1; n <= 40; n += 1) {
+      rows.push(
+        JSON.stringify({
+          type: "assistant",
+          uuid: `uuid-${n}`,
+          session_id: `session-${n}`,
+          message: {
+            id: `msg-${n}`,
+            content: [
+              {
+                type: "tool_use",
+                id: `tool-${n}`,
+                name: "coagenthub_get_task",
+                input: { taskId: `01a03d8${n % 10}`, groupId: "01a03be2" },
+              },
+            ],
+          },
+        }),
+      );
+      rows.push(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: `tool-${n}`,
+                content: [{ type: "text", text: escapedBriefBlock(3_000) }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+      );
+    }
+    rows.push(
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "提交: abc123\n测试: 全绿\n汇报: 完成了\n",
+      }),
+    );
+    const input = rows.join("\n");
+    const out = parse(`${input}\n`);
+    // 兜底:缓冲不顶满、正文可见(tool_result 的长文本被截断压缩)
+    expect(out.length).toBeLessThan(262_143);
+    expect(out.length).toBeLessThan(input.length / 2);
+    expect(out).toContain("[汇报]");
+    console.log(
+      `[replay] codebuddy default: input=${input.length}B output=${out.length}B (${((out.length / input.length) * 100).toFixed(2)}%)`,
+    );
+  });
+});
+
+describe("default:R5 未知 key 观测日志只记一次", () => {
+  it("同一未知 key 创建多次只 warn 一次", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const key = "brand-new-executor-01";
+      createExecutorOutputParser(key);
+      createExecutorOutputParser(key);
+      createExecutorOutputParser(key);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("default:流式跨 chunk", () => {
+  it("JSONL 行被切成两半 → 拼接后渲染一次", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const line = JSON.stringify({ tool: "read_file", text: "half and half" });
+    const cut = Math.floor(line.length / 2);
+    expect(parse(line.slice(0, cut))).toBe("");
+    expect(parse(`${line.slice(cut)}\n`)).toBe(
+      "[工具] read_file\n[汇报] half and half\n",
+    );
+  });
+
+  it("进程结束 flush 吐出未成行残留(逐字,R3)", () => {
+    const parse = createExecutorOutputParser("whatever");
+    const partial = '{"tool": "read_';
+    expect(parse(partial)).toBe("");
+    expect(parse.flush()).toBe(partial);
+    expect(parse.flush()).toBe("");
   });
 });
