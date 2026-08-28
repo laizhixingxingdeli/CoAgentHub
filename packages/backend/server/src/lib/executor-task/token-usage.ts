@@ -64,7 +64,12 @@ function readUsageObject(value: unknown): UsageTotals | undefined {
       row.cacheReadInputTokens,
   );
   const cachedCreationTokens = nonNegativeNumber(
-    row.cache_creation_input_tokens ?? row.cacheCreationInputTokens,
+    row.cache_creation_input_tokens ??
+      row.cacheCreationInputTokens ??
+      // Codex (OpenAI Responses API) names cache-creation tokens
+      // `cache_write_input_tokens`; they are a subset of `input_tokens`.
+      row.cache_write_input_tokens ??
+      row.cacheWriteInputTokens,
   );
   const cachedInputTokens =
     cachedReadTokens === undefined && cachedCreationTokens === undefined
@@ -173,7 +178,26 @@ function tokenUsageFromCodexJsonl(text: string): TokenUsage | undefined {
     const usage = readUsageObject(payload.usage);
     if (usage) latest = usage;
   }
-  return latest ? finishTotals(latest, "codex-stdout-jsonl") : undefined;
+  if (!latest) return undefined;
+  // Codex (OpenAI Responses API) usage semantics: `input_tokens` is the TOTAL
+  // input and already *includes* `cached_input_tokens` (cache reads) and
+  // `cache_write_input_tokens` (cache creation). Likewise `output_tokens`
+  // already includes `reasoning_output_tokens`. This was verified against real
+  // captured stdout where `input_tokens` always exceeds `cached_input_tokens`
+  // (e.g. 16936 > 11008) and `output_tokens` always exceeds
+  // `reasoning_output_tokens` (e.g. 231 > 117). Adding those subsets again
+  // would double-count, so the total is just input + output, with the cache and
+  // reasoning breakdowns reported as subsets.
+  const totalTokens = latest.inputTokens + latest.outputTokens;
+  return {
+    inputTokens: latest.inputTokens,
+    outputTokens: latest.outputTokens,
+    ...(latest.cachedInputTokens > 0
+      ? { cachedInputTokens: latest.cachedInputTokens }
+      : {}),
+    totalTokens,
+    source: "codex-stdout-jsonl",
+  };
 }
 
 /** Extract the final assistant text from `codex exec --json` output. */

@@ -53,7 +53,10 @@ describe("platform token usage collection", () => {
         inputTokens: 16932,
         outputTokens: 5,
         cachedInputTokens: 11008,
-        totalTokens: 16932 + 11008 + 5,
+        // Codex total = input + output; cached_input_tokens is a *subset* of
+        // input_tokens (verified: 16936 > 11008 on the captured real run) and
+        // must not be added on top.
+        totalTokens: 16932 + 5,
         source: "codex-stdout-jsonl",
       },
     });
@@ -64,7 +67,8 @@ describe("platform token usage collection", () => {
     // Per OpenAI Responses API usage semantics, `output_tokens` is the total
     // output token count and `reasoning_output_tokens` is a breakdown already
     // contained within `output_tokens` (not an extra additive component). We
-    // therefore must NOT add reasoning tokens on top of output tokens.
+    // therefore must NOT add reasoning tokens on top of output tokens. Likewise
+    // `cached_input_tokens` is a subset of `input_tokens` and is not added.
     const result = await collectTokenUsage({
       executorKey: "codex",
       cwd,
@@ -85,7 +89,40 @@ describe("platform token usage collection", () => {
       inputTokens: 499823,
       outputTokens: 5707,
       cachedInputTokens: 436992,
-      totalTokens: 499823 + 436992 + 5707,
+      totalTokens: 499823 + 5707,
+      source: "codex-stdout-jsonl",
+    });
+  });
+
+  it("counts cache_write_input_tokens as a cache subset and never double-counts (non-zero cache write)", async () => {
+    // Codex reports cache-creation tokens under `cache_write_input_tokens`
+    // (OpenAI Responses API `cache_creation_tokens`), a subset of `input_tokens`.
+    // The parser must (a) not drop them — they surface in cachedInputTokens
+    // alongside cached reads — and (b) not add them to the total a second time.
+    const result = await collectTokenUsage({
+      executorKey: "codex",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 1000,
+          cached_input_tokens: 200,
+          cache_write_input_tokens: 300,
+          output_tokens: 50,
+          reasoning_output_tokens: 10,
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 1000,
+      outputTokens: 50,
+      // cached reads + cache writes, reported as the cached subset of input.
+      cachedInputTokens: 200 + 300,
+      // Total = input + output only; the 500 cached tokens and 10 reasoning
+      // tokens are already inside input/output and must not be re-added.
+      totalTokens: 1000 + 50,
       source: "codex-stdout-jsonl",
     });
   });
