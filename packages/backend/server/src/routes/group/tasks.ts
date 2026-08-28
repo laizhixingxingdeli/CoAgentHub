@@ -42,6 +42,7 @@ import { findExecutorByKey } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
+import { hasReviewResult } from "@server/lib/l3-overdue-reminder";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -423,9 +424,155 @@ async function shouldWalkL3(db: DataBase, task: TaskRow): Promise<boolean> {
 }
 
 /**
+ * L3 请求按 spec 去重(specs/l3-is-per-spec-not-per-task.md R1-R4):
+ * - 结案带 review_request 时,同 specRef+specHash 已存在未应答请求 → 不新增
+ *   第二条,新的 L2 结论并入既有请求(属主任务的 review_request.diffSummary
+ *   追加,先前的结论保留),本任务以 platform.l3MergedInto 标记指向属主;
+ * - R2:既有请求已应答 → 允许新建;R3:续跑任务(resumeOf)并入父任务请求;
+ * - R4:并入任务的 l3 派生经由属主(一次裁决使全部并入任务 answered=true)。
+ */
+const L3_MERGED_INTO_KEY = "l3MergedInto";
+
+/** 取 diffSummary 的平台块(平台自有标记命名空间,如 resumeOf)。 */
+function platformBlockOf(
+  diffSummary: unknown,
+): Record<string, unknown> | undefined {
+  const summary =
+    typeof diffSummary === "object" &&
+    diffSummary !== null &&
+    !Array.isArray(diffSummary)
+      ? (diffSummary as Record<string, unknown>)
+      : undefined;
+  const platform = summary?.platform;
+  return typeof platform === "object" &&
+    platform !== null &&
+    !Array.isArray(platform)
+    ? (platform as Record<string, unknown>)
+    : undefined;
+}
+
+/** 从任务 diffSummary 提取 review_request 载荷(顶层/嵌套两形皆可;坏载荷返回 undefined)。 */
+function reviewRequestPayloadOf(
+  diffSummary: unknown,
+): Extract<CoordinationPayload, { type: "review_request" }> | undefined {
+  try {
+    return normalizeReviewRequestDiffSummary(diffSummary)?.review_request as
+      | Extract<CoordinationPayload, { type: "review_request" }>
+      | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 解析结案时应并入的请求属主任务(R1/R2/R3):
+ * - R3:本任务为续跑任务(diffSummary.platform.resumeOf 非空)→ 并入父任务请求
+ *   (不新起一条,不要求父请求未应答);
+ * - R1:同群 done 任务中同 specRef+specHash 且未应答的请求(排除自身)→ 并入;
+ * - R2:既有匹配请求已应答 → 跳过,允许新建请求。
+ * 无属主 → undefined(正常新增请求)。
+ */
+async function resolveL3RequestMergeOwner(
+  db: DataBase,
+  groupId: string,
+  closingTask: TaskRow,
+  incomingRequest: Extract<CoordinationPayload, { type: "review_request" }>,
+): Promise<TaskRow | undefined> {
+  const { specRef, specHash } = incomingRequest;
+  const platform = platformBlockOf(closingTask.diffSummary);
+  const resumeOf =
+    typeof platform?.resumeOf === "string" ? platform.resumeOf : undefined;
+
+  if (resumeOf !== undefined && resumeOf !== closingTask.id) {
+    const parent = await db.query.task.findFirst({
+      where: (t, { and: andFn, eq: eqFn }) =>
+        andFn(eqFn(t.groupId, groupId), eqFn(t.id, resumeOf)),
+    });
+    const parentRequest = parent
+      ? reviewRequestPayloadOf(parent.diffSummary)
+      : undefined;
+    if (
+      parent &&
+      parentRequest?.specRef === specRef &&
+      parentRequest?.specHash === specHash
+    ) {
+      return parent;
+    }
+  }
+
+  const candidates = await db.query.task.findMany({
+    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
+  });
+  for (const candidate of candidates) {
+    if (candidate.id === closingTask.id) continue;
+    if (candidate.status !== "done") continue;
+    const request = reviewRequestPayloadOf(candidate.diffSummary);
+    if (
+      !request ||
+      request.specRef !== specRef ||
+      request.specHash !== specHash
+    ) {
+      continue;
+    }
+    if (await hasReviewResult(db, groupId, candidate.id)) continue;
+    return candidate;
+  }
+  return undefined;
+}
+
+/** 把本任务的 L2 结论追加进属主请求(先前结论保留,不覆盖不删除)。 */
+async function appendL3ConclusionToOwner(
+  db: DataBase,
+  owner: TaskRow,
+  closingTaskId: string,
+  conclusion: string,
+): Promise<void> {
+  const normalized = normalizeReviewRequestDiffSummary(owner.diffSummary);
+  const ownerRequest = normalized?.review_request as
+    | Extract<CoordinationPayload, { type: "review_request" }>
+    | undefined;
+  if (!normalized || !ownerRequest) return;
+  const mergedText = `${ownerRequest.diffSummary}\n\n[并入任务 ${closingTaskId} 的 L2 结论]\n${conclusion}`;
+  await db
+    .update(taskTable)
+    .set({
+      diffSummary: {
+        ...normalized,
+        review_request: {
+          ...ownerRequest,
+          diffSummary: mergedText,
+        },
+      },
+    })
+    .where(eq(taskTable.id, owner.id));
+}
+
+/** 本任务不再携带独立 review_request,改挂 platform.l3MergedInto 指向属主。 */
+function markL3MergedInto(
+  summaryToWrite: Record<string, unknown>,
+  existingDiffSummary: unknown,
+  ownerId: string,
+): Record<string, unknown> {
+  const { review_request: _dropped, ...rest } = summaryToWrite;
+  const incomingPlatform = platformBlockOf(rest) ?? {};
+  const existingPlatform = platformBlockOf(existingDiffSummary) ?? {};
+  return {
+    ...rest,
+    platform: {
+      ...existingPlatform,
+      ...incomingPlatform,
+      [L3_MERGED_INTO_KEY]: ownerId,
+    },
+  };
+}
+
+/**
  * L3 应答状态派生(R3,specs/l3-verdict-observability.md):仅对「协调任务 +
  * 已落 done + 带 review_request」的任务输出 l3 字段;不满足触发条件返回
  * undefined(调用方不输出 l3,保持载荷逐字不变)。
+ *
+ * R4(l3-is-per-spec-not-per-task):并入任务自身不携带 review_request,经
+ * platform.l3MergedInto 解析到请求属主,裁决/等待时间线随属主请求。
  *
  * awaitingSince = 落 done 的时刻:优先取 dispatchAudit.coordinationActivity
  * .endedAt(终态审计时刻),老任务/未记录时兜底 updatedAt。overdue = 超过
@@ -453,21 +600,40 @@ async function deriveL3Answer(
     summary !== undefined &&
     (summary.type === "review_request" ||
       Object.hasOwn(summary, "review_request"));
-  if (!hasReviewRequest) return undefined;
+  const platform = platformBlockOf(task.diffSummary);
+  const mergedInto =
+    typeof platform?.[L3_MERGED_INTO_KEY] === "string"
+      ? (platform[L3_MERGED_INTO_KEY] as string)
+      : undefined;
+  if (!hasReviewRequest && mergedInto === undefined) return undefined;
 
-  const audit = task.dispatchAudit ?? null;
+  // R4(l3-is-per-spec-not-per-task):并入任务自身无 review_request,解析到
+  // 请求属主任务,裁决与等待时间线随属主(一次裁决使全部并入任务 answered=true)。
+  const resolved = hasReviewRequest
+    ? task
+    : mergedInto === undefined
+      ? undefined
+      : await db.query.task.findFirst({
+          where: eq(taskTable.id, mergedInto),
+        });
+  if (!resolved) return undefined;
+
+  const audit = resolved.dispatchAudit ?? null;
   // updatedAt 可空(旧库行):null 时退回 createdAt,保证 awaitingSince 恒有值。
   const awaitingSince =
     audit?.coordinationActivity?.endedAt ??
-    (task.updatedAt ?? task.createdAt).toISOString();
+    (resolved.updatedAt ?? resolved.createdAt).toISOString();
 
-  // 在本群消息中找 taskId 指向本任务的 review_result 载荷。历史消息在 R1 校验
+  // 在本群消息中找 taskId 指向属主任务的 review_result 载荷。历史消息在 R1 校验
   // 落地前未校验形状,解析失败的行跳过(不影响 answered 判定)。
   let answered = false;
   let verdict: "pass" | "findings" | null = null;
   const candidates = await db.query.groupMessage.findMany({
     where: (t, { and: andFn, eq: eqFn, ilike: ilikeFn }) =>
-      andFn(eqFn(t.groupId, task.groupId), ilikeFn(t.body, "%review_result%")),
+      andFn(
+        eqFn(t.groupId, resolved.groupId),
+        ilikeFn(t.body, "%review_result%"),
+      ),
     columns: { body: true },
   });
   for (const message of candidates) {
@@ -477,7 +643,7 @@ async function deriveL3Answer(
     } catch {
       continue;
     }
-    if (parsed?.type === "review_result" && parsed.taskId === task.id) {
+    if (parsed?.type === "review_result" && parsed.taskId === resolved.id) {
       answered = true;
       verdict = parsed.verdict;
       break;
@@ -1246,6 +1412,40 @@ app
               ...(summaryToWrite as Record<string, unknown>),
               tokenUsageReason: existing.tokenUsageReason,
             };
+          }
+        }
+      }
+      // L3 请求按 spec 去重(specs/l3-is-per-spec-not-per-task.md R1-R4):
+      // 结案 done 且带 review_request 时,同 specRef+specHash 已存在未应答请求
+      // 则不新增第二条——新的 L2 结论并入既有请求(追加,先前结论保留),本任务
+      // 改挂 platform.l3MergedInto 标记指向属主(R4 裁决对全部并入任务生效);
+      // 续跑任务(resumeOf)并入父任务请求,不新起一条(R3)。
+      if (
+        status === "done" &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        const incomingRequest = reviewRequestPayloadOf(summaryToWrite);
+        if (incomingRequest) {
+          const owner = await resolveL3RequestMergeOwner(
+            db,
+            id,
+            task,
+            incomingRequest,
+          );
+          if (owner) {
+            await appendL3ConclusionToOwner(
+              db,
+              owner,
+              taskId,
+              incomingRequest.diffSummary,
+            );
+            summaryToWrite = markL3MergedInto(
+              summaryToWrite as Record<string, unknown>,
+              task.diffSummary,
+              owner.id,
+            );
           }
         }
       }

@@ -35,7 +35,8 @@ function reviewRequestOf(
   }
 }
 
-async function hasReviewResult(
+/** 本群是否已有指向该任务的 review_result 裁决消息(R2「已应答」判据)。 */
+export async function hasReviewResult(
   db: DataBase,
   groupId: string,
   taskId: string,
