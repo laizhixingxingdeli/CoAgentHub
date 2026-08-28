@@ -32,6 +32,26 @@
 「提交归属对吗」→ 用 `alreadySatisfied` 指名自己的提交。
 本票把规范补上,并把理由讲清。
 
+
+## ⚠️ 实现来历更正(检视者补记,2026-08-28)
+
+本票的实现产物**被误并入了一个不相干的提交**,特此存档以便追溯:
+
+```
+提交 7c2863b2  docs(specs): freeze quota-exhaustion-triggers-infinite-retry
+  packages/backend/server/src/lib/executor-availability.ts  +100   ← 本票 R4 产物
+  packages/backend/server/src/routes/group/tasks.ts          +42   ← 本票 R4 产物
+  skills/coordinator/SKILL.md                                +59   ← 本票 R1/R2/R3 产物
+  specs/quota-exhaustion-triggers-infinite-retry.md         +102   ← 另一张票的 spec
+```
+
+成因:执行器已 `git add` 但未 commit,检视者提交自己的 spec 时
+`git commit` 提交了**整个暂存区**,把这三个文件一并带走。
+提交信息与内容不符,但**内容完好、未丢失**。
+
+⚠️ 不改写历史(其他会话可能已基于该提交工作)。
+验收本票时以**文件内容**为准,不以提交信息为准。
+
 ## 决策
 
 ### R1. 明写常态:实现由执行器完成
