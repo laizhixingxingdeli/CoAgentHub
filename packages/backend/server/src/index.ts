@@ -25,8 +25,9 @@ import {
   recoverInterruptedTasks,
   startCoordinatorResumeConsumer,
 } from "./lib/executor-task";
-import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
+import { startL3OverdueReminder } from "./lib/l3-overdue-reminder";
 import { assertNoPendingMigrations } from "./lib/migration-health";
+import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
 import { getLogger } from "./lib/plugins/winston";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
 import { startServer } from "./lib/server-startup";
@@ -187,6 +188,7 @@ async function run() {
   wsHub.handleUpgrade(server as HttpServer);
   startCoordinatorResumeConsumer(db);
   startOrphanReconciler(db);
+  await startL3OverdueReminder(db);
 }
 
 run().catch((err) => {

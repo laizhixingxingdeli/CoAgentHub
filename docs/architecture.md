@@ -146,7 +146,7 @@ CoAgentHub/
 
 - **统一错误出口**(`server/src/index.ts` 的 `onError`):BizError → 业务码 + status;其余 → 500。一律经 winston logger 记录(含 `requestId`),响应体附 `requestId`(与 `hono/request-id` 中间件同源),便于客户端定位问题。
 - **CORS 可配**:`CORS_ORIGIN` env(逗号分隔多个来源),缺省 `http://localhost:3000`(见 `lib/config.ts`)。
-- **统一配置读取**收敛在 `lib/config.ts`(CORS / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);调度策略与执行器配置仍在各自领域模块读取。`scripts/dispatch-policy.json` 的 `maxConcurrentPerWorkspace` 缺省为 1(同一工作树串行),`l3ResponseMinutes` 缺省为 120(L3 应答超时,仅用于派生 `l3.overdue` 观测)。
+- **统一配置读取**收敛在 `lib/config.ts`(CORS / FILE_DIR / MAX_FILE_UPLOAD_BYTES / PORT);调度策略与执行器配置仍在各自领域模块读取。`scripts/dispatch-policy.json` 的 `maxConcurrentPerWorkspace` 缺省为 1(同一工作树串行),`l3ResponseMinutes` 缺省为 120(L3 应答超时:任务详情仍读时派生 `l3.overdue`;平台按请求去重在群内提醒一次,不改变任务状态、不代替 reviewer 裁决)。
 - **文件流式读写**:`/api/file/upload` 从 File 流式写盘(不再构造整块 Buffer 二次拷贝),`GET /api/file/:name` 流式下载(createReadStream),`serve.mjs` 静态文件同样流式返回且路径穿越校验使用 `path.sep` 组件边界。
 - **DB 索引**:迁移 0015 为 `group_message.group_id` 与 `task.group_id` 补索引(列表查询按群过滤 + 排序分页,此前无索引会全表扫描);`group_message_closure` 的 group_id/ancestor_id/descendant_id 索引与 `group_members` 联合主键已在库中。
 

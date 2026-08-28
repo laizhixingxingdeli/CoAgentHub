@@ -575,7 +575,8 @@ export interface DispatchPolicy {
    *  PATCH 回写终态 → 按「结果未确认」处理。 */
   detachedTimeoutMinutes: number;
   /** L3 应答超时(分钟):协调任务落 done 且带 review_request 后,检视者超过该
-   *  时长仍未公布 review_result → 任务详情派生 l3.overdue=true(只观测不强制)。 */
+   *  时长仍未公布 review_result → 任务详情派生 l3.overdue=true 并由平台发一次
+   *  群提醒;不改变任务状态或替代检视者裁决。 */
   l3ResponseMinutes: number;
   /** 失败自动重试策略。 */
   retry: RetryPolicy;

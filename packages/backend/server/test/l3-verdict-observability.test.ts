@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import type { DataBase } from "@server/lib/database";
 import { __setL3ResponseMinutesForTests } from "@server/lib/executor-task";
+import {
+  remindOverdueL3Requests,
+  resetL3OverdueReminderStateForTests,
+} from "@server/lib/l3-overdue-reminder";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
+
+const reminderDb = testDb as unknown as DataBase;
 
 /**
  * L3 裁决的可观测与校验(R1-R6,specs/l3-verdict-observability.md):
@@ -23,6 +30,7 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
 
   afterEach(() => {
     __setL3ResponseMinutesForTests(120);
+    resetL3OverdueReminderStateForTests();
   });
 
   async function register(name: string) {
@@ -144,6 +152,46 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     return (await res.json()) as Record<string, unknown>;
   }
 
+  async function makeTaskOverdue(taskId: string) {
+    __setL3ResponseMinutesForTests(1);
+    // 测试库跨用例保留历史行:先按生产启动语义登记既有逾期请求,避免它们
+    // 干扰当前用例只针对 taskId 的断言。
+    await remindOverdueL3Requests(reminderDb, new Date(), {
+      suppressExistingOverdue: true,
+    });
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000);
+    await testDb
+      .update(taskTable)
+      .set({
+        updatedAt: twoMinutesAgo,
+        dispatchAudit: {
+          dispatcherParticipantId: "00000000-0000-4000-8000-000000000000",
+          targetParticipantId: "00000000-0000-4000-8000-000000000000",
+          targetParticipantName: "test",
+          selfDispatch: true,
+          candidates: [],
+          selectionReason: null,
+          coordinationActivity: {
+            startedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+            endedAt: twoMinutesAgo.toISOString(),
+            childTaskCount: 1,
+            childTaskTargets: [],
+            messageCount: 0,
+          },
+        },
+      })
+      .where(eq(taskTable.id, taskId));
+  }
+
+  async function l3ReminderMessages(groupId: string) {
+    const res = await app.request(`/api/groups/${groupId}/messages`);
+    expect(res.status).toBe(200);
+    const messages = (await res.json()) as { body: string }[];
+    return messages.filter((message) =>
+      message.body.includes("L3 逾期提醒（平台自动）"),
+    );
+  }
+
   /** 直接插入一条已完成的执行子任务,使协调任务可以合法落 done。 */
   async function addChild(
     groupId: string,
@@ -228,7 +276,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
 
   it("R1:不设 contentType 发送形状错误的 review_result → 400(本票核心,此前静默放行)", async () => {
     const coordinator = await register(`l3-r1-bad-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r1-bad-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r1-bad-${randomUUID()}`,
+    );
     // verdict 非法 → 形状不合;不传 contentType 字段,仅凭 body 形状触发校验。
     const res = await postMessageRaw(
       coordinator.id,
@@ -287,7 +338,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
 
   it("R1:普通自由文本 / 任务书 markdown / 伪 JSON 文本 → 行为完全不变(回归)", async () => {
     const coordinator = await register(`l3-r1-free-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r1-free-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r1-free-${randomUUID()}`,
+    );
     for (const body of [
       "普通自由文本消息",
       "# 任务书\n\n实现登录页,验收标准:……",
@@ -326,7 +380,12 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     const ok = await postMessageRaw(
       coordinator.id,
       group.id,
-      JSON.stringify({ type: "spec_published", specRef: "s", specHash: "h", summary: "x" }),
+      JSON.stringify({
+        type: "spec_published",
+        specRef: "s",
+        specHash: "h",
+        summary: "x",
+      }),
       "application/json",
     );
     expect(ok.status).toBe(200);
@@ -347,9 +406,7 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     );
     expect(res.status).toBe(400);
     const body = (await res.json()) as { message: string };
-    expect(body.message).toContain(
-      "review_result 引用的 taskId 在本群不存在",
-    );
+    expect(body.message).toContain("review_result 引用的 taskId 在本群不存在");
   });
 
   it("R2:taskId 非 UUID 字符串 → 400(不触发 DB uuid 比较 500)", async () => {
@@ -368,7 +425,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
 
   it("R2:taskId 存在但该任务无 review_request → 放行(R2 的例外)", async () => {
     const coordinator = await register(`l3-r2-norr-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r2-norr-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r2-norr-${randomUUID()}`,
+    );
     const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
     const messageId = ((await msg.json()) as { id: string }).id;
     const task = await createTask(
@@ -442,6 +502,95 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     };
     expect(l3.answered).toBe(false);
     expect(l3.overdue).toBe(true);
+  });
+
+  /* -------- l3-overdue-should-actually-remind R1-R4 -------- */
+
+  it("逾期请求 → 平台群消息含 specRef、等待时长与群内 reviewer,且不改任务状态", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    await makeTaskOverdue(task.id);
+
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(1);
+    const reminders = await l3ReminderMessages(group.id);
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]?.body).toContain("specs/l3-verdict-observability.md");
+    expect(reminders[0]?.body).toContain("已等待 2 分钟");
+    expect(reminders[0]?.body).toContain("应裁决方=");
+    expect(reminders[0]?.body).toContain(reviewer.id);
+    expect((await getTaskDetail(group.id, task.id)).status).toBe("done");
+  });
+
+  it("同一条逾期请求重复扫描只提醒一次", async () => {
+    const { group, task } = await setupDoneCoordinationTask();
+    await makeTaskOverdue(task.id);
+
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(1);
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(0);
+    expect(await l3ReminderMessages(group.id)).toHaveLength(1);
+  });
+
+  it("未逾期请求不提醒", async () => {
+    const { group } = await setupDoneCoordinationTask();
+
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(0);
+    expect(await l3ReminderMessages(group.id)).toHaveLength(0);
+  });
+
+  it("已被裁决的逾期请求不提醒", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    await makeTaskOverdue(task.id);
+    const result = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "pass")),
+    );
+    expect(result.status).toBe(200);
+
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(0);
+    expect(await l3ReminderMessages(group.id)).toHaveLength(0);
+  });
+
+  it("旧请求被裁决后,同一 spec 的新逾期请求允许再次提醒", async () => {
+    const {
+      coordinator,
+      reviewer,
+      execA,
+      group,
+      task: firstTask,
+    } = await setupDoneCoordinationTask();
+    await makeTaskOverdue(firstTask.id);
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(1);
+
+    const result = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(firstTask.id, "pass")),
+    );
+    expect(result.status).toBe(200);
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(0);
+
+    const message = await postMessageRaw(
+      coordinator.id,
+      group.id,
+      "同一 spec 的新协调任务",
+    );
+    const secondTask = await createTask(
+      coordinator.id,
+      group.id,
+      ((await message.json()) as { id: string }).id,
+      coordinator.id,
+      "requirement",
+    );
+    await addChild(group.id, secondTask.id, execA.id);
+    const patched = await patchTask(coordinator.id, group.id, secondTask.id, {
+      status: "done",
+      diffSummary: reviewRequest(secondTask.id),
+    });
+    expect(patched.status).toBe(200);
+    await makeTaskOverdue(secondTask.id);
+
+    expect(await remindOverdueL3Requests(reminderDb)).toBe(1);
+    expect(await l3ReminderMessages(group.id)).toHaveLength(2);
   });
 
   it("R3:已有 review_result → l3.answered=true 且 verdict 正确", async () => {
@@ -531,7 +680,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     // 执行人必须是普通 executor(非 coordinator),否则 isDetachedTask 判定为
     // 协调任务,触发 L1 完整性校验。
     const executor = await register(`l3-r3-plain-exec-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r3-plain-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r3-plain-${randomUUID()}`,
+    );
     await addMember(coordinator.id, group.id, executor.id, ["executor"]);
     const msg = await postMessageRaw(coordinator.id, group.id, "执行任务");
     const messageId = ((await msg.json()) as { id: string }).id;
@@ -556,7 +708,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
   it("R3:不满足触发条件的任务详情不含 l3 字段(协调任务未落 done)", async () => {
     const coordinator = await register(`l3-r3-queued-${randomUUID()}`);
     const reviewer = await register(`l3-r3-queued-rv-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r3-queued-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r3-queued-${randomUUID()}`,
+    );
     await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
     const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
     const messageId = ((await msg.json()) as { id: string }).id;
@@ -575,7 +730,10 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
   it("R3:协调任务 done 但无 review_request → 不含 l3 字段", async () => {
     const coordinator = await register(`l3-r3-norr-${randomUUID()}`);
     const execA = await register(`l3-r3-norr-exec-${randomUUID()}`);
-    const group = await createGroup(coordinator.id, `l3-r3-norr-${randomUUID()}`);
+    const group = await createGroup(
+      coordinator.id,
+      `l3-r3-norr-${randomUUID()}`,
+    );
     await addMember(coordinator.id, group.id, execA.id, ["executor"]);
     const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
     const messageId = ((await msg.json()) as { id: string }).id;

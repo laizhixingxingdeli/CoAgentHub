@@ -54,7 +54,7 @@ let detachedTimeoutMs = dispatchPolicy.detachedTimeoutMinutes * 60_000;
 
 /** L3 应答超时阈值(ms):协调任务落 done 且带 review_request 后,检视者超过
  *  该时长未公布 review_result → 任务详情派生 l3.overdue=true;启动时读配置,
- *  缺省 120min(只观测不强制,specs/l3-verdict-observability.md R3/R4)。 */
+ *  缺省 120min。逾期只触发群提醒,不改变任务状态或替代检视者裁决。 */
 let l3ResponseMinutes = dispatchPolicy.l3ResponseMinutes;
 
 /** 失败重试策略:exit≠0/超时/静默失败后按此配置自动重试;启动时读配置。 */

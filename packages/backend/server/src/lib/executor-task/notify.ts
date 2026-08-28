@@ -85,9 +85,9 @@ export async function postStatus(
   db: DataBase,
   groupId: string,
   senderId: string,
-  ex: ExecutorConfig,
+  ex: Pick<ExecutorConfig, "label">,
   body: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const full: GroupMessageFull = await insertGroupMessage(db, {
       groupId,
@@ -101,8 +101,10 @@ export async function postStatus(
     });
     // 与 POST /messages 一致的火力外扇出:WS,让群里实时可见。
     void wsHub.broadcastGroupMessage(full);
+    return true;
   } catch (e) {
     console.warn(`[executor] 状态回传失败(${ex.label}):`, e);
+    return false;
   }
 }
 
