@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  participant as participantTable,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
 import {
   configureSourceScanRoots,
   resetSourceScanCache,
@@ -1461,6 +1464,54 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
       expect(body.diffSummary.summary).toBe("协调者直接实现");
       expect(body.diffSummary.customField).toEqual({ nested: true });
       expect(body.diffSummary.l1Bypass).toBeDefined();
+    });
+  });
+
+  it("R4:同时满足 l1Bypass 且有可用执行器时,只写 l1Bypass、不写 degradedToTwoParty", async () => {
+    const coordinator = await register("ci-coord-l1bypass-avail-exec");
+    const executor = await register("ci-exec-l1bypass-avail-exec");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-avail-exec");
+    await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+    // 可用执行器:挂上默认执行器 key(executor),不在额度冷却、无 running 任务。
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: "executor" })
+      .where(eq(participantTable.id, executor.id));
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: Record<string, unknown>;
+      };
+      // R4 语义边界:有可用执行器 = 平台判定不降级 → 只写 l1Bypass。
+      expect(Object.hasOwn(body.diffSummary, "degradedToTwoParty")).toBe(false);
+      const l1 = body.diffSummary.l1Bypass as
+        | { commits: string[]; windowStartedAt: string }
+        | undefined;
+      expect(l1).toBeDefined();
+      expect(l1?.commits).toContain(hash);
     });
   });
 });

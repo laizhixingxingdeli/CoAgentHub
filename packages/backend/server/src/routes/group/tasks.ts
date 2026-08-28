@@ -1110,7 +1110,7 @@ app
       // 复用 isDetachedTask() 判定协调任务,不另写一套。
       // l1-bypass-must-be-visible R1:failed/cancelled + 零执行子任务时返回
       // l1Bypass 载荷,由平台写入 diffSummary。
-      const l1Bypass = await assertCoordinationCloseIntegrity(
+      const closeIntegrity = await assertCoordinationCloseIntegrity(
         db,
         task,
         status,
@@ -1158,17 +1158,24 @@ app
           }
         }
       }
-      // l1-bypass-must-be-visible R1:平台把 l1Bypass 并入 diffSummary(与
-      // claimVerification 同款写入模式),不覆盖执行器自报的其它字段。
+      // l1-bypass-must-be-visible R1 + R4(dispatching-should-be-the-default):
+      // 平台把 l1Bypass / degradedToTwoParty 分键并入 diffSummary(与
+      // claimVerification 同款写入模式),不覆盖执行器自报的其它字段。两个键
+      // 各自独立:仅当对应载荷存在时才写,避免把降级载荷误塞进 l1Bypass 键。
       if (
-        l1Bypass &&
+        closeIntegrity &&
         typeof summaryToWrite === "object" &&
         summaryToWrite !== null &&
         !Array.isArray(summaryToWrite)
       ) {
         summaryToWrite = {
           ...(summaryToWrite as Record<string, unknown>),
-          l1Bypass,
+          ...(closeIntegrity.l1Bypass !== undefined
+            ? { l1Bypass: closeIntegrity.l1Bypass }
+            : {}),
+          ...(closeIntegrity.degradedToTwoParty !== undefined
+            ? { degradedToTwoParty: closeIntegrity.degradedToTwoParty }
+            : {}),
         };
       }
       // R3: staleBuildSuspected is a platform-owned snapshot of the runtime
