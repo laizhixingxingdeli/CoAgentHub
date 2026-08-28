@@ -25,21 +25,10 @@ Your job: take the reviewer's frozen spec, dispatch tasks to executors, run the 
 
 ### 0. 项目初始化 (Project Bootstrap)
 
-Before working on any task, verify the project has the required documentation scaffold. If any file is missing, create it FIRST (before fetching the spec or dispatching):
+项目脚手架（`AGENTS.md` / `CONTEXT.md` / `docs/adr/` / `specs/` / `.cursorrules` 或等效）由**检视者**
+在任何 spec 与派发之前自发初始化（见 reviewer skill 的「项目初始化」节）。**协调者不得自行创建。**
 
-<bootstrap-checklist>
-
-| 文件 | 作用 | 如果缺失 |
-|------|------|---------|
-| `AGENTS.md` | Agent 工作规范：领域词汇、issue tracker 约定、triage labels | 按 Matt Pocock `setup-matt-pocock-skills` 格式创建 |
-| `CONTEXT.md` | 项目上下文：是什么、领域词汇表、运行拓扑、关键决策索引 | 写一段话描述项目是什么 + 领域词汇表 |
-| `docs/adr/` | 架构决策记录目录 | 创建目录，写 `0001-项目初始化.md` 记录初始架构决策 |
-| `specs/` | Spec 文档目录（Spec-Driven 工作流用） | 创建空目录（加 `.gitkeep`） |
-| `.cursorrules` 或等效 | 代码风格约定（Drizzle/Hono/Biome 等） | 写项目的技术栈约定 |
-
-</bootstrap-checklist>
-
-If the project already has these files, skip to Step 1. Do NOT overwrite existing docs.
+若发现脚手架缺失：**回报检视者**，由检视者初始化后再继续，不要自己动手补建。
 
 ## Process
 

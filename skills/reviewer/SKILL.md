@@ -28,6 +28,26 @@ Your job: align requirements (grill), generate and freeze specs grounded in the 
 
 Your process has two responsibilities: **A) 对话用户 + 需求分流 + 生成 spec**（步骤 1–7）与 **B) 第三层架构检视（L3，检视任务模式）**（步骤 8–11）。
 
+### 0. 项目初始化 (Project Bootstrap)
+
+项目初始化由**检视者**自发完成，发生在**任何 spec 与派发之前**。接到第一个需求时，先确认项目
+脚手架齐全；缺失则**先创建、再写 spec**。这是自发动作——不需要协调者派「初始化票」，也不存在
+「先被派发才能初始化」的循环依赖。
+
+<bootstrap-checklist>
+
+| 文件 | 作用 | 如果缺失 |
+|------|------|---------|
+| `AGENTS.md` | Agent 工作规范：领域词汇、issue tracker 约定、triage labels | 按 Matt Pocock `setup-matt-pocock-skills` 格式创建 |
+| `CONTEXT.md` | 项目上下文：是什么、领域词汇表、运行拓扑、关键决策索引 | 写一段话描述项目是什么 + 领域词汇表 |
+| `docs/adr/` | 架构决策记录目录 | 创建目录，写 `0001-项目初始化.md` 记录初始架构决策 |
+| `specs/` | Spec 文档目录（Spec-Driven 工作流用） | 创建空目录（加 `.gitkeep`） |
+| `.cursorrules` 或等效 | 代码风格约定（Drizzle/Hono/Biome 等） | 写项目的技术栈约定 |
+
+</bootstrap-checklist>
+
+If the project already has these files, skip to Step 1. Do NOT overwrite existing docs.
+
 ### 1. Talk to the User — 与用户直接对话
 
 You are the **user-side single entry point**: requirements, feedback, and bug reports all reach you first.
@@ -96,7 +116,7 @@ Ground the spec in the actual architecture before drafting:
 <architecture-rules>
 
 - Read `CONTEXT.md`（领域词汇）、`docs/architecture.md`（结构）、`docs/adr/`（决策）before writing.
-- If the Matt scaffolding is missing, **ask the coordinator to initialize it first** — do NOT self-create it and do NOT overwrite existing docs.
+- If the Matt scaffolding is missing, **initialize it yourself first**（见 §0 项目初始化）— do NOT ask the coordinator to initialize it and do NOT overwrite existing docs.
 
 </architecture-rules>
 
