@@ -34,7 +34,13 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
+import {
+  type TwoPartyDegradation,
+  judgeTwoPartyDegradation,
+} from "@server/lib/executor-availability";
 import { findExecutorByKey } from "@server/lib/executors";
+import { insertGroupMessage } from "@server/lib/services/message-service";
+import { wsHub } from "@server/lib/ws-hub";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
 import { and, eq } from "drizzle-orm";
@@ -221,19 +227,30 @@ async function resolveTaskRepoRoot(
     : findRepoRoot();
 }
 
+/** 协调任务落终态时平台回写的结案载荷(l1Bypass + R4 降级留痕)。 */
+interface CloseIntegrityResult {
+  l1Bypass?: { commits: string[]; windowStartedAt: string };
+  degradedToTwoParty?: TwoPartyDegradation;
+}
+
 /**
  * 协调任务落终态的完整性校验(R1/R2,见 specs/coordination-close-integrity.md)。
  * done 分支:仅当目标状态为 done 且任务为协调任务(detached)时生效,失败返回 400;
  * failed/cancelled 分支(l1-bypass-must-be-visible R1):零执行子任务时返回平台写入
  * diffSummary 的 l1Bypass 载荷(窗口内无提交或 git 不可用时返回 undefined,不写字段)。
  * 协调任务判定必须复用 lib/detached-task-liveness 的 isDetachedTask(),不另写一套。
+ *
+ * R4(specs/dispatching-should-be-the-default.md v1.1):零执行子任务 = 协调者兼任
+ * 执行(降级为两方)的信号。是否真降级由**平台**判定——复用 executor-task-liveness
+ * 与 executors 的额度冷却状态,不采信协调者自述「无人可派」。平台判定无可用执行器
+ * → 返回 degradedToTwoParty 载荷;判定有可用执行器 → 不写(调用方伪造不足以触发)。
  */
 async function assertCoordinationCloseIntegrity(
   db: DataBase,
   task: TaskRow,
   targetStatus: string | undefined,
   diffSummary: unknown,
-): Promise<{ commits: string[]; windowStartedAt: string } | undefined> {
+): Promise<CloseIntegrityResult | undefined> {
   // R2:done 分支逐字不变;failed/cancelled 走 l1Bypass 检测(R3 不再直接返回)。
   if (
     targetStatus !== "done" &&
@@ -282,6 +299,16 @@ async function assertCoordinationCloseIntegrity(
   });
   const effectiveChildren = children.filter((child) => !isResumeTask(child));
 
+  // R4 降级判定(specs/dispatching-should-be-the-default.md v1.1):零执行子任务 =
+  // 协调者兼任执行(降级为两方)的信号。是否真降级由**平台**判定——复用
+  // executor-task-liveness 与 executors 的额度冷却状态,不采信协调者自述
+  // 「无人可派」。有任一可用执行器 → undefined(不写,调用方伪造不足以触发);
+  // 全部候选不可用 → 平台写入载荷(降级时刻 + 每个候选执行器的 name/reason)。
+  const degradedToTwoParty =
+    effectiveChildren.length === 0
+      ? ((await judgeTwoPartyDegradation(db, task)) ?? undefined)
+      : undefined;
+
   // l1-bypass-must-be-visible R1:协调任务落 failed/cancelled 且零执行子任务时,
   // 平台执行与 R1 守卫相同的窗口提交检测并返回 l1Bypass 载荷;有执行子任务(R3)、
   // 窗口内无提交或 git 不可用(R1)时不写字段。done 分支行为不受影响(R2)。
@@ -289,10 +316,15 @@ async function assertCoordinationCloseIntegrity(
     if (effectiveChildren.length === 0 && commits && commits.length > 0) {
       const windowStartedAt = task.attempts[0]?.startedAt;
       if (windowStartedAt) {
-        return { commits, windowStartedAt };
+        return {
+          l1Bypass: { commits, windowStartedAt },
+          degradedToTwoParty,
+        };
       }
     }
-    return;
+    return degradedToTwoParty !== undefined
+      ? { degradedToTwoParty }
+      : undefined;
   }
 
   if (effectiveChildren.length === 0 && !canUseAlreadySatisfied) {
@@ -370,6 +402,10 @@ async function assertCoordinationCloseIntegrity(
       );
     }
   }
+
+  // R4:done 分支结束时同样携带平台判定的降级载荷(零执行子任务 + 平台判定
+  // 无可用执行器时才有;有可用执行器时为 undefined,不写字段)。
+  return degradedToTwoParty !== undefined ? { degradedToTwoParty } : undefined;
 }
 
 /**
