@@ -244,6 +244,19 @@ export function parseRateLimitRecoveryMs(
     target.setHours(Number(around[1]), Number(around[2]), 0, 0);
     return target.getTime() > now ? target.getTime() : now;
   }
+  // "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"(24 小时制):
+  // 事故原文 "try again at 3:32 PM" 即此形态(quota-exhaustion R1/R2)。
+  const at = clean.match(/try again at\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (at) {
+    let hour = Number(at[1]);
+    const minute = Number(at[2]);
+    const meridiem = at[3]?.toLowerCase();
+    if (meridiem === "pm" && hour < 12) hour += 12;
+    if (meridiem === "am" && hour === 12) hour = 0;
+    const target = new Date(now);
+    target.setHours(hour, minute, 0, 0);
+    return target.getTime() > now ? target.getTime() : now;
+  }
   const retryIn = clean.match(/try again in\s+(\d+)\s*seconds?/i);
   if (retryIn) {
     return now + Number(retryIn[1]) * 1000;
@@ -604,9 +617,12 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   switchExecutor: false,
 };
 
-/** 默认额度策略:关键词覆盖中英文常见额度/限流文案,冷却 5 小时。 */
+/** 默认额度策略:关键词覆盖中英文常见额度/限流文案,冷却 5 小时。
+ *  语义特征(quota-exhaustion R1):"usage limit"(Codex 事故原文)与
+ *  "try again at"(恢复时刻提示)必须覆盖;其余关键词兼容既有 CLI 文案。 */
 export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
   detectPatterns: [
+    "usage limit",
     "rate limit",
     "quota",
     "429",
@@ -614,6 +630,7 @@ export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
     "次数限制",
     "limit reached",
     "too many requests",
+    "try again at",
   ],
   cooldownMinutes: 300,
   fallbackExecutor: null,

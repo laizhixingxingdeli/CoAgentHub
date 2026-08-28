@@ -22,7 +22,6 @@ import {
   findMissingProjectDocs,
   handleSkillInstallConfirmation,
 } from "@server/lib/participant-capabilities";
-import { assertClaimedSenderExists } from "@server/lib/unknown-participant";
 import {
   DELETED_MESSAGE_PLACEHOLDER,
   insertGroupMessage,
@@ -30,6 +29,7 @@ import {
   softDeleteMessage,
   updateMessageBody,
 } from "@server/lib/services/message-service";
+import { assertClaimedSenderExists } from "@server/lib/unknown-participant";
 import { wsHub } from "@server/lib/ws-hub";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -250,7 +250,10 @@ app
       // sender 身份不存在 → 404 点明身份问题(而不是回落 Local User 后误报
       // 403);存在但非本群成员 → 403 点明「不是本群成员」。缺失/非法 header
       // 回落 Local User 的宽容行为保持(不改中间件)。
-      await assertClaimedSenderExists(db, c.req.header("X-Participant-Id")?.trim());
+      await assertClaimedSenderExists(
+        db,
+        c.req.header("X-Participant-Id")?.trim(),
+      );
       // The sender must be a group member (any role) to post.
       const membership = await db.query.groupMember.findFirst({
         where: (t, { and, eq }) =>
@@ -553,6 +556,8 @@ app
           });
           if (outcome?.status === "role-unresolved") {
             warnings.push(`ROLE_UNRESOLVED:${outcome.role}:${outcome.reason}`);
+          } else if (outcome?.status === "redispatch-stopped") {
+            warnings.push(`REDISPATCH_STOPPED:${outcome.parentTaskId}`);
           }
         } else {
           void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>

@@ -65,6 +65,13 @@ let rateLimitPatterns = dispatchPolicy.rateLimit.detectPatterns;
 let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;
 
 /**
+ * 重派熔断阈值(票 quota-exhaustion R4):同一父任务名下**连续失败**子任务数达到
+ * 该值后停止重派(兜底防线,与原因识别无关 —— 即使原因识别失败也必须熔断)。
+ * 默认 5(建议值),启动时读配置;测试可覆盖。
+ */
+let redispatchFailureLimit = 5;
+
+/**
  * 执行器额度冷却(票7,内存态):executorKey → 冷却结束时间(epoch ms)。重启
  * 丢失可接受(重启后冷却失效,任务按普通状态恢复)。
  */
@@ -197,6 +204,11 @@ export function getRateLimitCooldownMs(): number {
   return rateLimitCooldownMs;
 }
 
+/** 读重派熔断阈值(同一父任务连续失败子任务数上限)。 */
+export function getRedispatchFailureLimit(): number {
+  return redispatchFailureLimit;
+}
+
 /**
  * 取消单个 run 的认领/静默定时器(幂等;停止/完成/重置时调用)。
  *  detachedTimer 不在清理范围:detached 任务发送完成后 run 已离开队列,超时
@@ -253,6 +265,7 @@ export function __resetExecutorQueueForTests(): void {
   retryPolicy = policy.retry;
   rateLimitPatterns = policy.rateLimit.detectPatterns;
   rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
+  redispatchFailureLimit = 5;
 }
 
 /** 测试专用:覆盖最大并行组数(默认读 scripts/dispatch-policy.json)。 */

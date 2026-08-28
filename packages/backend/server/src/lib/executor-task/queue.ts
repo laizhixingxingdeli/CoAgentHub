@@ -70,6 +70,7 @@ import {
   getMaxConcurrentPerWorkspace,
   getMaxParallelGroups,
   getRateLimitCooldownMs,
+  getRedispatchFailureLimit,
   getRetryPolicy,
   getStallAlertMs,
   getStallTimeoutMs,
@@ -430,7 +431,7 @@ export async function maybeDispatchExecutorTask(
       roles: resolved.membership.roles,
       prompt: resolved.membership.prompt,
     };
-    await dispatchTask(db, {
+    const outcome = await dispatchTask(db, {
       groupId,
       messageId,
       participantId: resolved.participant.id,
@@ -446,7 +447,12 @@ export async function maybeDispatchExecutorTask(
       supersedesTaskId,
       callbackRef,
     });
-    return { status: "dispatched", participantId: resolved.participant.id };
+    return (
+      outcome ?? {
+        status: "dispatched",
+        participantId: resolved.participant.id,
+      }
+    );
   }
 
   // audienceRef → participant → executor 配置(按 participant.executorKey 稳定绑定)。
@@ -718,7 +724,7 @@ async function dispatchTask(
       sessionRef?: string;
     } | null;
   },
-): Promise<void> {
+): Promise<DispatchOutcome | undefined> {
   const {
     groupId,
     messageId,
@@ -748,8 +754,26 @@ async function dispatchTask(
         eqFn(t.status, "running"),
       ),
     orderBy: (t, { desc }) => [desc(t.updatedAt)],
-    columns: { id: true },
+    columns: {
+      id: true,
+      groupId: true,
+      executorKey: true,
+      executorParticipantId: true,
+      diffSummary: true,
+    },
   });
+
+  // 重派熔断(R4,specs/quota-exhaustion-triggers-infinite-retry):同一父任务名下
+  // 连续失败子任务数达阈值(默认 5)后停止重派 —— 兜底防线,与原因识别无关
+  // (即使原因识别失败,只要连续失败达阈值也必须熔断,否则 72 连派事故还会发生)。
+  // 命中 → 不创建任务,父任务 diffSummary + 群消息各留一条可读记录(等待人工介入)。
+  if (parent) {
+    const consecutive = await countConsecutiveFailedChildren(db, parent.id);
+    if (consecutive >= getRedispatchFailureLimit()) {
+      await recordRedispatchStopped(db, parent, consecutive);
+      return { status: "redispatch-stopped", parentTaskId: parent.id };
+    }
+  }
 
   // 审计记录服务端观察到的派发目标:名字取该 participant 在库中的真实 name,
   // 而不是执行器配置的 agentName —— 角色词(「执行器」等)与群无关,烙进审计
@@ -951,6 +975,92 @@ async function dispatchTask(
     getClaimTimeoutMs(),
   );
   void pumpQueue();
+}
+
+/* ---------------- 重派熔断(R4,specs/quota-exhaustion-triggers-infinite-retry) ---------------- */
+
+/** 与 coordinator-resume.isResumeTask 同源判定(diffSummary.platform.resumeOf);
+ *  queue.ts 内联避免与 coordinator-resume 的循环依赖。 */
+function isPlatformResumeTaskLike(task: { diffSummary: unknown }): boolean {
+  const summary =
+    task.diffSummary && typeof task.diffSummary === "object"
+      ? (task.diffSummary as Record<string, unknown>)
+      : undefined;
+  const platform =
+    summary?.platform && typeof summary.platform === "object"
+      ? (summary.platform as Record<string, unknown>)
+      : undefined;
+  return typeof platform?.["resumeOf"] === "string";
+}
+
+/**
+ * 同一父任务名下「连续失败」执行子任务数(R4 熔断口径):按 createdAt 升序,从
+ * 最新往回数连续 failed 的子任务。平台续跑任务不计入 —— 它是平台拉起协调者的
+ * 任务,不是协调者派发的执行子任务,其成败都不应打断「子任务连续失败」的计数。
+ */
+async function countConsecutiveFailedChildren(
+  db: DataBase,
+  parentTaskId: string,
+): Promise<number> {
+  const children = await db.query.task.findMany({
+    where: (t, { eq: eqFn }) => eqFn(t.parentTaskId, parentTaskId),
+    columns: { id: true, status: true, diffSummary: true },
+    orderBy: (t, { asc: ascFn }) => ascFn(t.createdAt),
+  });
+  let n = 0;
+  for (let i = children.length - 1; i >= 0; i--) {
+    if (isPlatformResumeTaskLike(children[i])) continue;
+    if (children[i].status !== "failed") break;
+    n += 1;
+  }
+  return n;
+}
+
+/** R4/R5 留痕:父任务 diffSummary 写入熔断记录 + 群内发一条可读消息(等待人工介入)。 */
+async function recordRedispatchStopped(
+  db: DataBase,
+  parent: {
+    id: string;
+    groupId: string;
+    executorKey: string | null;
+    executorParticipantId: string | null;
+    diffSummary: unknown;
+  },
+  consecutive: number,
+): Promise<void> {
+  const limit = getRedispatchFailureLimit();
+  const prev =
+    parent.diffSummary && typeof parent.diffSummary === "object"
+      ? { ...(parent.diffSummary as Record<string, unknown>) }
+      : {};
+  prev.redispatchStopped = {
+    at: new Date().toISOString(),
+    consecutiveFailures: consecutive,
+    limit,
+    reason: `子任务连续失败达 ${consecutive} 次(阈值 ${limit}),平台已停止重派,等待人工介入`,
+  };
+  try {
+    await db
+      .update(taskTable)
+      .set({ diffSummary: prev })
+      .where(
+        and(eq(taskTable.id, parent.id), eq(taskTable.groupId, parent.groupId)),
+      );
+  } catch (e) {
+    console.warn(`[executor] 写重派熔断留痕失败(${parent.id}): ${e}`);
+  }
+  if (parent.executorParticipantId) {
+    const coordinatorEx = await findExecutorByParticipant(db, parent);
+    if (coordinatorEx) {
+      await postStatus(
+        db,
+        parent.groupId,
+        parent.executorParticipantId,
+        coordinatorEx,
+        `🛑 [${coordinatorEx.label}] 已停止重派:父任务子任务连续失败达 ${consecutive} 次(阈值 ${limit}),等待人工介入`,
+      );
+    }
+  }
 }
 
 /**

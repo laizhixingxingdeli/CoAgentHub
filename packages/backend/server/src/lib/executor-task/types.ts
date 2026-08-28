@@ -69,6 +69,7 @@ export interface GroupPromptInfo {
  */
 export type DispatchOutcome =
   | { status: "dispatched"; participantId: string }
+  | { status: "redispatch-stopped"; parentTaskId: string }
   | {
       status: "role-unresolved";
       reason: "role-not-legal" | "role-no-member" | "role-no-executor";
