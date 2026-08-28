@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
+import { startServer } from "@server/lib/server-startup";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { testDb } from "./db";
@@ -462,6 +465,53 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       expect(olderCleaned?.diffSummary).toEqual({
         error: "更早的执行器额度限制",
       });
+    });
+
+    it("服务启动恢复未到期冷却且保持绝对到期时刻", async () => {
+      const { codebuddy, group } = await setupGroup("quota-startup-restore");
+      const persistedEnd = Date.now() + 60_000;
+      const [failedTask] = await testDb
+        .insert(taskTable)
+        .values({
+          groupId: group.id,
+          messageId: randomUUID(),
+          executorParticipantId: codebuddy.id,
+          executorKey: "codebuddy",
+          status: "failed",
+          diffSummary: {
+            error: "执行器额度限制",
+            executorCooldownEndMs: persistedEnd,
+          },
+        })
+        .returning();
+      __resetExecutorQueueForTests();
+
+      const server = new EventEmitter() as unknown as HttpServer;
+      Object.assign(server, { listen: () => server });
+      const startup = startServer({
+        fetch: () => new Response("ok"),
+        port: 31_004,
+        serverFactory: () => server,
+        recoverInterruptedTasks: async () => undefined,
+        restoreExecutorCooldowns: () =>
+          restoreExecutorCooldowns(
+            testDb as unknown as Parameters<typeof restoreExecutorCooldowns>[0],
+          ),
+      });
+      queueMicrotask(() => server.emit("listening"));
+
+      try {
+        await startup;
+        expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+        expect(cooldownEndMs({ key: "codebuddy" })).toBe(persistedEnd);
+      } finally {
+        await clearPersistedExecutorCooldown(
+          testDb as unknown as Parameters<
+            typeof clearPersistedExecutorCooldown
+          >[0],
+          failedTask.id,
+        );
+      }
     });
 
     it("无额度关键词的普通崩溃不进入冷却(回归:不误判停派)", async () => {
