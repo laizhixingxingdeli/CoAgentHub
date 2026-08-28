@@ -54,25 +54,12 @@ process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 const { createTestApp } = await import("./app");
 const {
   __resetExecutorQueueForTests,
-  __setRateLimitForTests,
   cooldownEndMs,
   executorCooldowns,
   getRedispatchFailureLimit,
   isInCooldown,
 } = await import("../src/lib/executor-task/state");
 const { parseRateLimitRecoveryMs } = await import("@server/lib/executors");
-
-/** 本文件依赖的额度检测关键词(与真实配置同界):usage limit(事故原文)与
- *  try again at 必须命中;其余兼容常用 CLI 文案。全量 pnpm test 的 cwd 是仓库
- *  根,会读到 scripts/dispatch-policy.json(其 detectPatterns 不含 usage limit),
- *  必须显式注入,与 executor-progress.test.ts 的 QUOTA_PATTERNS 做法一致。 */
-const QUOTA_PATTERNS = [
-  "usage limit",
-  "try again at",
-  "rate limit",
-  "quota",
-  "429",
-];
 
 describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry)", () => {
   const app = createTestApp();
@@ -303,10 +290,10 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     it("识别为额度失败 → 冷却至恢复时刻 + 不自动重试 + 双通道留痕", async () => {
       const { coordinator, codebuddy, group } =
         await setupGroup("quota-usage-limit");
-      // 显式注入检测关键词:全量 pnpm test(cwd=仓库根)会读 scripts/
-      // dispatch-policy.json(旧 detectPatterns 缺 usage limit),须与
-      // executor-progress.test.ts 的 QUOTA_PATTERNS 同法覆盖。
-      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // 不做关键词注入:全量 pnpm test(cwd=仓库根)读到 scripts/
+      // dispatch-policy.json,其 detectPatterns 与代码默认关键词并集后已含
+      // usage limit / try again at(见 dispatch-policy.test.ts)。这里必须跑
+      // 真实运行时策略,否则配置路径上的漏判会被私有注入掩盖。
       process.env.FAKE_QUOTA_USAGE_LIMIT = "1";
       const tryAgain = futureTryAgainAt(30);
       process.env.FAKE_TRY_AGAIN_AT = tryAgain;
@@ -355,8 +342,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     it("无额度关键词的普通崩溃不进入冷却(回归:不误判停派)", async () => {
       const { coordinator, codebuddy, group } =
         await setupGroup("quota-plain-crash");
-      // 与上例同界注入:普通崩溃文本不含任何额度关键词,不应命中冷却。
-      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // 同上:真实运行时策略下,普通崩溃文本不含任何额度关键词,不应命中冷却。
       process.env.FAKE_ALWAYS_FAIL = "1";
       const msg = await postMessage(coordinator.id, group.id, {
         body: "普通崩溃任务",

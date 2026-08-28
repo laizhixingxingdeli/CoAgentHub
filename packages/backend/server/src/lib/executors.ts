@@ -657,6 +657,29 @@ function nonNegativeInt(value: unknown, fallback: number): number {
 }
 
 /**
+ * 额度关键词合并:配置文件的 detectPatterns 与默认关键词取**并集**。
+ *
+ * 整段覆盖(有配置就用配置、不看默认)会让随代码版本化的
+ * scripts/dispatch-policy.json 悄悄丢掉代码里后续新增的语义关键词 ——
+ * quota-exhaustion R1 的 "usage limit" / "try again at" 正是这样在仓库根
+ * cwd 下失效的(事故原文关键词没进配置,就被配置顶掉了)。故默认关键词恒
+ * 生效,配置里的非空关键词追加其后并去重。
+ *
+ * 例外(既有契约,保持不变):显式的空数组 = 关闭额度检测。
+ */
+function mergeRateLimitPatterns(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return DEFAULT_RATE_LIMIT_POLICY.detectPatterns;
+  if (raw.length === 0) return [];
+  const merged = [...DEFAULT_RATE_LIMIT_POLICY.detectPatterns];
+  for (const p of raw) {
+    if (typeof p === "string" && p.trim().length > 0 && !merged.includes(p)) {
+      merged.push(p);
+    }
+  }
+  return merged;
+}
+
+/**
  * 读取调度策略(server 启动时调用):scripts/dispatch-policy.json 随代码
  * 版本化,缺失/损坏/数值非法时回退默认值(不因配置问题阻塞启动)。
  */
@@ -684,12 +707,7 @@ export function readDispatchPolicy(): DispatchPolicy {
         fallbackExecutor?: unknown;
       };
     };
-    // 额度关键词:只取非空字符串;显式空数组 = 关闭额度检测(不兜底默认值)。
-    const rawPatterns = Array.isArray(raw.rateLimit?.detectPatterns)
-      ? raw.rateLimit.detectPatterns.filter(
-          (p): p is string => typeof p === "string" && p.trim().length > 0,
-        )
-      : DEFAULT_RATE_LIMIT_POLICY.detectPatterns;
+    const rawPatterns = mergeRateLimitPatterns(raw.rateLimit?.detectPatterns);
     const rawFallback = raw.rateLimit?.fallbackExecutor;
     return {
       maxParallelGroups: positiveInt(
