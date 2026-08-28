@@ -1,11 +1,12 @@
-import { createAdaptorServer } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
+import { createAdaptorServer } from "@hono/node-server";
 
 interface StartServerOptions {
   fetch: Parameters<typeof createAdaptorServer>[0]["fetch"];
   port: number;
   serverFactory?: () => HttpServer;
   recoverInterruptedTasks: () => Promise<unknown>;
+  restoreExecutorCooldowns?: () => Promise<unknown>;
   /**
    * Omitted by production wiring (index.ts): built-in executors are no longer
    * auto-registered as participants at boot. Onboarding is now always an
@@ -29,6 +30,7 @@ export async function startServer({
   port,
   serverFactory,
   recoverInterruptedTasks,
+  restoreExecutorCooldowns,
   ensureExecutorParticipants,
   onListening,
 }: StartServerOptions): Promise<HttpServer> {
@@ -41,6 +43,17 @@ export async function startServer({
     await recoverInterruptedTasks();
   } catch (err) {
     console.warn("[executor] task recovery failed, continuing startup:", err);
+  }
+
+  if (restoreExecutorCooldowns) {
+    try {
+      await restoreExecutorCooldowns();
+    } catch (err) {
+      console.warn(
+        "[executor] cooldown recovery failed, continuing startup:",
+        err,
+      );
+    }
   }
 
   if (ensureExecutorParticipants) {

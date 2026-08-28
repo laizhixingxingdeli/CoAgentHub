@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Server as HttpServer } from "node:http";
-import { describe, expect, it } from "vitest";
 import { startServer } from "@server/lib/server-startup";
+import { describe, expect, it } from "vitest";
 
 class FakeServer extends EventEmitter {
   listenedPort: number | undefined;
@@ -54,6 +54,9 @@ describe("server startup ordering", () => {
       recoverInterruptedTasks: async () => {
         calls.push("recover");
       },
+      restoreExecutorCooldowns: async () => {
+        calls.push("restore-cooldowns");
+      },
       ensureExecutorParticipants: async () => {
         calls.push("ensure");
       },
@@ -61,7 +64,7 @@ describe("server startup ordering", () => {
     queueMicrotask(() => server.emit("listening"));
     await startup;
 
-    expect(calls).toEqual(["recover", "ensure"]);
+    expect(calls).toEqual(["recover", "restore-cooldowns", "ensure"]);
     expect((server as unknown as FakeServer).listenedPort).toBe(port);
   });
 

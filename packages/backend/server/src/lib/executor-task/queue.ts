@@ -37,6 +37,11 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
+import {
+  clearPersistedExecutorCooldown,
+  EXECUTOR_COOLDOWN_END_MS_FIELD,
+  listPersistedExecutorCooldowns,
+} from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
 import {
   markTaskCancelled,
@@ -106,8 +111,16 @@ import {
  * endMs 为绝对到期时刻(冷却动态化):调用方先尝试从失败输出解析恢复时间
  * (parseRateLimitRecoveryMs),解析失败才回退 now + 固定冷却时长。
  */
-function enterCooldown(ex: ExecutorConfig, endMs: number): number {
-  const end = Math.max(Date.now() + 1, endMs);
+function normalizeCooldownEnd(endMs: number): number {
+  return Math.max(Date.now() + 1, endMs);
+}
+
+function enterCooldown(
+  ex: Pick<ExecutorConfig, "key" | "label">,
+  endMs: number,
+  persisted?: { db: DataBase; taskId: string },
+): number {
+  const end = endMs;
   executorCooldowns.set(ex.key, end);
   const prev = cooldownTimers.get(ex.key);
   if (prev) clearTimeout(prev);
@@ -119,6 +132,16 @@ function enterCooldown(ex: ExecutorConfig, endMs: number): number {
       cooldownTimers.delete(ex.key);
       executorCooldowns.delete(ex.key);
       console.log(`[executor] 执行器 ${ex.key} 额度冷却结束,恢复派发`);
+      if (persisted) {
+        void clearPersistedExecutorCooldown(
+          persisted.db,
+          persisted.taskId,
+        ).catch((error) => {
+          console.warn(
+            `[executor] 清理持久化额度冷却失败(${ex.key}): ${error}`,
+          );
+        });
+      }
       void pumpQueue();
     },
     Math.max(1, end - Date.now()),
@@ -128,6 +151,46 @@ function enterCooldown(ex: ExecutorConfig, endMs: number): number {
     `[executor] 执行器 ${ex.key} 触发额度冷却,预计 ${formatEta(end)} 恢复`,
   );
   return end;
+}
+
+/**
+ * 服务启动恢复额度冷却:每个 executorKey 采用最新一条未过期的 task 记录,
+ * 重建内存判定状态与到期定时器;过期或被更新记录立即清理,不得复活。
+ */
+export async function restoreExecutorCooldowns(
+  db: DataBase,
+  nowMs = Date.now(),
+): Promise<number> {
+  const records = await listPersistedExecutorCooldowns(db);
+  const seenKeys = new Set<string>();
+  const restoredKeys = new Set<string>();
+
+  for (const record of records) {
+    // 最新记录决定该执行器的重启前最终状态。即使最新记录已过期,也不能继续
+    // 向后寻找更老但到期更晚的记录,否则会把已结束的旧冷却复活。
+    if (seenKeys.has(record.executorKey)) {
+      await clearPersistedExecutorCooldown(db, record.taskId);
+      continue;
+    }
+    seenKeys.add(record.executorKey);
+    if (record.endMs <= nowMs) {
+      await clearPersistedExecutorCooldown(db, record.taskId);
+      continue;
+    }
+    restoredKeys.add(record.executorKey);
+    enterCooldown(
+      { key: record.executorKey, label: record.executorKey },
+      record.endMs,
+      { db, taskId: record.taskId },
+    );
+  }
+
+  if (restoredKeys.size > 0) {
+    console.log(
+      `[executor] 启动恢复:${restoredKeys.size} 个执行器仍处于额度冷却`,
+    );
+  }
+  return restoredKeys.size;
 }
 
 /* ---------------- 执行器级并发(设计修正:按执行器实际并发能力排队) ---------------- */
@@ -1728,19 +1791,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
         if (isQuotaFailure(["执行超时", lastLinesOf(out, 20)])) {
           // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
-          const eta = formatEta(
-            enterCooldown(
-              ex,
-              parseRateLimitRecoveryMs(out) ??
-                Date.now() + getRateLimitCooldownMs(),
-            ),
+          const cooldownEnd = normalizeCooldownEnd(
+            parseRateLimitRecoveryMs(out) ??
+              Date.now() + getRateLimitCooldownMs(),
           );
+          const eta = formatEta(cooldownEnd);
           await handleFailure(
             run,
             `执行超时(执行器额度限制,预计 ${eta} 恢复)`,
             {
               retryable: false,
               message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
+              extra: { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd },
+              afterPersisted: () =>
+                enterCooldown(ex, cooldownEnd, { db, taskId }),
             },
           );
         } else {
@@ -2246,15 +2310,19 @@ async function handleQuotaFailure(
   tail: string,
 ): Promise<void> {
   // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
-  const eta = formatEta(
-    enterCooldown(
-      run.ex,
-      parseRateLimitRecoveryMs(tail) ?? Date.now() + getRateLimitCooldownMs(),
-    ),
+  const cooldownEnd = normalizeCooldownEnd(
+    parseRateLimitRecoveryMs(tail) ?? Date.now() + getRateLimitCooldownMs(),
   );
+  const eta = formatEta(cooldownEnd);
   await handleFailure(run, `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`, {
     retryable: false,
     message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
+    extra: { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd },
+    afterPersisted: () =>
+      enterCooldown(run.ex, cooldownEnd, {
+        db: run.db,
+        taskId: run.taskId,
+      }),
   });
 }
 
@@ -2268,7 +2336,12 @@ async function handleQuotaFailure(
 async function handleFailure(
   run: QueuedRun,
   reason: string,
-  opts: { retryable: boolean; message: string },
+  opts: {
+    retryable: boolean;
+    message: string;
+    extra?: Record<string, unknown>;
+    afterPersisted?: () => void;
+  },
 ): Promise<void> {
   const { db, taskId } = run;
   // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
@@ -2280,7 +2353,15 @@ async function handleFailure(
 
   if (!canRetry) {
     // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
-    await failTask(db, taskId, reason, run.retryCount, undefined, run.attempts);
+    await failTask(
+      db,
+      taskId,
+      reason,
+      run.retryCount,
+      opts.extra,
+      run.attempts,
+    );
+    opts.afterPersisted?.();
     releaseTaskOutput(taskId);
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;

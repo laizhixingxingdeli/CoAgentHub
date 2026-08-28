@@ -65,6 +65,7 @@ export {
   refreshA2AActivity,
   resolveTaskRepo,
   resolveTestExecutor,
+  restoreExecutorCooldowns,
   spawnFailureHint,
 } from "./queue";
 export {

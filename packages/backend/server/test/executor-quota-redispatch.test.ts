@@ -59,6 +59,12 @@ const {
   getRedispatchFailureLimit,
   isInCooldown,
 } = await import("../src/lib/executor-task/state");
+const { restoreExecutorCooldowns } = await import(
+  "../src/lib/executor-task/queue"
+);
+const { clearPersistedExecutorCooldown } = await import(
+  "../src/lib/executor-task/cooldown-store"
+);
 const { parseRateLimitRecoveryMs } = await import("@server/lib/executors");
 
 describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry)", () => {
@@ -331,13 +337,132 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       const err = String(t.diffSummary?.error ?? "");
       expect(err).toContain("执行器额度限制");
       expect(err).toMatch(/预计 .+ 恢复/);
+      const persistedEnd = t.diffSummary?.executorCooldownEndMs;
+      expect(typeof persistedEnd).toBe("number");
+
+      // executor-cooldown-lost-on-restart R1/R2/R5:模拟进程内状态丢失后从
+      // task.diffSummary 的绝对 epoch ms 恢复,到期时刻必须逐值不变。
+      const beforeRestart = cooldownEndMs({ key: "codebuddy" });
+      __resetExecutorQueueForTests();
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+      expect(
+        await restoreExecutorCooldowns(
+          testDb as unknown as Parameters<typeof restoreExecutorCooldowns>[0],
+        ),
+      ).toBe(1);
+      const afterRestart = cooldownEndMs({ key: "codebuddy" });
+      expect(afterRestart).toBe(beforeRestart);
+      expect(afterRestart).toBe(persistedEnd);
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+
+      // R1 下游效果:恢复出的冷却继续被 executor-availability 读取;协调任务
+      // 零执行子任务结案时,平台据此写入真实 degradedToTwoParty 留痕。
+      const [coordinationTask] = await testDb
+        .insert(taskTable)
+        .values({
+          groupId: group.id,
+          messageId: randomUUID(),
+          executorParticipantId: coordinator.id,
+          executorKey: "codex",
+          status: "running",
+          brief: "协调者降级兼任",
+        })
+        .returning();
+      const closeRes = await app.request(
+        `/api/groups/${group.id}/tasks/${coordinationTask.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": coordinator.id,
+          },
+          body: JSON.stringify({
+            status: "failed",
+            diffSummary: { error: "协调者降级兼任" },
+          }),
+        },
+      );
+      expect(closeRes.status).toBe(200);
+      const closed = (await closeRes.json()) as {
+        diffSummary: {
+          degradedToTwoParty?: {
+            executors: Array<{ name: string; reason: string }>;
+          };
+        };
+      };
+      expect(closed.diffSummary.degradedToTwoParty?.executors).toEqual([
+        expect.objectContaining({
+          reason: expect.stringContaining("额度冷却"),
+        }),
+      ]);
+
       const msgText = await waitForMessage(
         coordinator.id,
         group.id,
         (m) => m.body.includes("执行器额度限制") && m.body.includes("恢复"),
       );
       expect(msgText.body).toMatch(/❌/);
+      await clearPersistedExecutorCooldown(
+        testDb as unknown as Parameters<
+          typeof clearPersistedExecutorCooldown
+        >[0],
+        t.id,
+      );
     }, 30_000);
+
+    it("启动时清理已过期冷却记录,不得复活", async () => {
+      const { codebuddy, group } = await setupGroup("quota-expired-cooldown");
+      const [olderLiveTask] = await testDb
+        .insert(taskTable)
+        .values({
+          groupId: group.id,
+          messageId: randomUUID(),
+          executorParticipantId: codebuddy.id,
+          executorKey: "codebuddy",
+          status: "failed",
+          diffSummary: {
+            error: "更早的执行器额度限制",
+            executorCooldownEndMs: Date.now() + 60_000,
+          },
+          createdAt: new Date(Date.now() - 120_000),
+        })
+        .returning();
+      const expiredEnd = Date.now() - 60_000;
+      const [failedTask] = await testDb
+        .insert(taskTable)
+        .values({
+          groupId: group.id,
+          messageId: randomUUID(),
+          executorParticipantId: codebuddy.id,
+          executorKey: "codebuddy",
+          status: "failed",
+          diffSummary: {
+            error: "执行器额度限制",
+            executorCooldownEndMs: expiredEnd,
+          },
+        })
+        .returning();
+
+      expect(
+        await restoreExecutorCooldowns(
+          testDb as unknown as Parameters<typeof restoreExecutorCooldowns>[0],
+        ),
+      ).toBe(0);
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+
+      const cleaned = await testDb.query.task.findFirst({
+        where: (row, { eq: eqFn }) => eqFn(row.id, failedTask.id),
+        columns: { diffSummary: true },
+      });
+      expect(cleaned?.diffSummary).toEqual({ error: "执行器额度限制" });
+      const olderCleaned = await testDb.query.task.findFirst({
+        where: (row, { eq: eqFn }) => eqFn(row.id, olderLiveTask.id),
+        columns: { diffSummary: true },
+      });
+      expect(olderCleaned?.diffSummary).toEqual({
+        error: "更早的执行器额度限制",
+      });
+    });
 
     it("无额度关键词的普通崩溃不进入冷却(回归:不误判停派)", async () => {
       const { coordinator, codebuddy, group } =

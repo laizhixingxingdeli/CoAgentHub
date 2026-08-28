@@ -23,6 +23,7 @@ import type { DataBase } from "./lib/database";
 import db from "./lib/database";
 import {
   recoverInterruptedTasks,
+  restoreExecutorCooldowns,
   startCoordinatorResumeConsumer,
 } from "./lib/executor-task";
 import { startL3OverdueReminder } from "./lib/l3-overdue-reminder";
@@ -174,6 +175,7 @@ async function run() {
     fetch: app.fetch,
     port,
     recoverInterruptedTasks: () => recoverInterruptedTasks(db),
+    restoreExecutorCooldowns: () => restoreExecutorCooldowns(db),
     onListening: (listeningServer, listeningPort) => {
       const address = listeningServer.address();
       console.log(

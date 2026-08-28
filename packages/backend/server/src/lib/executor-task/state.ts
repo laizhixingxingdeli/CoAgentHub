@@ -72,8 +72,8 @@ let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;
 let redispatchFailureLimit = 5;
 
 /**
- * 执行器额度冷却(票7,内存态):executorKey → 冷却结束时间(epoch ms)。重启
- * 丢失可接受(重启后冷却失效,任务按普通状态恢复)。
+ * 执行器额度冷却(票7):executorKey → 冷却结束时间(epoch ms)。运行时判定仍读
+ * 此 Map;额度失败时同步写入 task.diffSummary,启动时由 queue 恢复未到期记录。
  */
 export const executorCooldowns = new Map<string, number>();
 
