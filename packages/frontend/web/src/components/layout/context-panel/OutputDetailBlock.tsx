@@ -226,10 +226,16 @@ export function OutputDetailBlock({
     >
       {lines.map((line, index) => {
         const entryId = line.entryId;
+        // 行间分隔:`\n` 文本节点只在相邻两行都是纯文本时插入 —— 动作行是
+        // 块级 span,自带换行,再叠加 `\n` 会产生额外空行(本票修复点);
+        // 纯文本行之间没有块级换行,必须靠 `\n` 分行。真实空行(原始输出
+        // 里的空行)是纯文本行之间的 `\n`,原样保留。
+        const needsSeparator =
+          index > 0 && lines[index - 1].entryId === null && entryId === null;
         return (
           // biome-ignore lint/suspicious/noArrayIndexKey: 输出流按位置追加,普通行只有位置身份
           <Fragment key={`${entryId ?? "plain"}-${index}`}>
-            {index > 0 ? "\n" : null}
+            {needsSeparator ? "\n" : null}
             {entryId === null ? (
               line.line
             ) : (
