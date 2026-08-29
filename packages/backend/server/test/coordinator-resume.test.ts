@@ -109,6 +109,7 @@ async function insertTask(opts: {
   specHash?: string | null;
   diffSummary?: unknown;
   supersedesTaskId?: string | null;
+  brief?: string | null;
 }) {
   const [row] = await testDb
     .insert(taskTable)
@@ -125,6 +126,7 @@ async function insertTask(opts: {
       specHash: opts.specHash ?? null,
       diffSummary: opts.diffSummary ?? null,
       supersedesTaskId: opts.supersedesTaskId ?? null,
+      brief: opts.brief ?? null,
     })
     .returning();
   return row;
@@ -370,6 +372,88 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(after.status).toBe("running");
       expect(after.status).not.toBe("failed");
     });
+
+    it("续跑任务 diffSummary.platform 同时记录 resumeForChild = 触发续跑的子任务 id", async () => {
+      const { parent, child } = await seedParentChild({});
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const resumes = await resumeTasksFor(parent.id);
+      expect(resumes.length).toBe(1);
+      const platform = (resumes[0].diffSummary as Record<string, unknown>)
+        .platform as Record<string, unknown>;
+      expect(platform.resumeForChild).toBe(child.id);
+    });
+
+    it("续跑任务书回显被替代任务的验收标准与红线原文", async () => {
+      const { parent, executor } = await seedParentChild({});
+      // 构造被替代任务(第一次尝试),其 brief 含验收标准与红线。
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: [
+          "## Acceptance",
+          "1. 必须实现功能 A",
+          "2. 测试全绿",
+          "",
+          "## 红线",
+          "- 不得改 schema",
+        ].join("\n"),
+      });
+      // 第二次尝试,替代 attempt1。
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).toContain("被替代任务验收标准与红线");
+      expect(brief).toContain(attempt1.id);
+      expect(brief).toContain("必须实现功能 A");
+      expect(brief).toContain("不得改 schema");
+    });
+
+    it("续跑任务书缺失验收标准/红线时显式说明无法取得,不得伪造", async () => {
+      const { parent, executor } = await seedParentChild({});
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: "无章节正文",
+      });
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).toContain("无法取得该任务书的验收标准原文");
+      expect(brief).toContain("无法取得该任务书的红线原文");
+    });
+
+    it("首次尝试(无 supersedesTaskId)的续跑任务书不含被替代任务章节", async () => {
+      const { parent, child } = await seedParentChild({});
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).not.toContain("被替代任务验收标准与红线");
+    });
   });
 
   describe.sequential("consumePendingCompletionEvents (事件消费 → 续跑任务)", () => {
@@ -495,6 +579,7 @@ describe.sequential("协调者续跑完整验收", () => {
         id: string;
         messageId: string;
         status: string;
+        supersedesTaskId: string | null;
       }>;
     }
 
@@ -613,6 +698,157 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(patchRes.status, patchBody).toBe(200);
       const closed = await findTask(parentTask.id);
       expect(closed.status).toBe("done");
+    }, 60_000);
+
+    it("L2 重发路径:协调者未传 supersedesTaskId 时平台根据续跑上下文自动补齐", async () => {
+      const coordinator = await registerParticipant(
+        `coord-auto-${crypto.randomUUID()}`,
+      );
+      const executor = await registerParticipant(
+        `exec-auto-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      await bindExecutorKey(executor.id, "executor");
+      const group = await createGroup(coordinator.id, "自动补链测试");
+      await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+
+      // 1) 协调者父任务 running。
+      const parentMsg = await postMessage(coordinator.id, group.id, {
+        body: "需求票:实现 Y",
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      const parentTask = await waitForTask(group.id, parentMsg.id, "running");
+      const dead = deadPid();
+      await testDb
+        .update(taskTable)
+        .set({ executorPid: dead })
+        .where(eq(taskTable.id, parentTask.id));
+
+      // 2) 子任务失败 → 平台创建续跑任务。
+      const childMsg = await postMessage(coordinator.id, group.id, {
+        body: "执行 Y",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const childTask = await waitForTask(group.id, childMsg.id, "done");
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(1);
+
+      // 3) 协调者发重试消息,未带 supersedesTaskId → 平台自动补齐。
+      const retryMsg = await postMessage(coordinator.id, group.id, {
+        body: "重试执行 Y",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const retryTask = await waitForTask(group.id, retryMsg.id, "done");
+      expect(retryTask.supersedesTaskId).toBe(childTask.id);
+    }, 60_000);
+
+    it("L2 重发路径:显式传 supersedesTaskId 时保持兼容,不被覆盖", async () => {
+      const coordinator = await registerParticipant(
+        `coord-explicit-${crypto.randomUUID()}`,
+      );
+      const executor = await registerParticipant(
+        `exec-explicit-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      await bindExecutorKey(executor.id, "executor");
+      const group = await createGroup(coordinator.id, "显式传值测试");
+      await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+
+      const parentMsg = await postMessage(coordinator.id, group.id, {
+        body: "需求票:实现 Z",
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      const parentTask = await waitForTask(group.id, parentMsg.id, "running");
+      await testDb
+        .update(taskTable)
+        .set({ executorPid: deadPid() })
+        .where(eq(taskTable.id, parentTask.id));
+
+      const childMsg = await postMessage(coordinator.id, group.id, {
+        body: "执行 Z",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const childTask = await waitForTask(group.id, childMsg.id, "done");
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(1);
+
+      // 显式传一个不同的(但有效的)task id 作为 supersedesTaskId。
+      const dummyTask = await insertTask({
+        groupId: group.id,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parentTask.id,
+        dispatcherParticipantId: coordinator.id,
+      });
+      const retryMsg = await postMessage(coordinator.id, group.id, {
+        body: "重试执行 Z",
+        audience: "participant",
+        audienceRef: executor.id,
+        supersedesTaskId: dummyTask.id,
+      });
+      const retryTask = await waitForTask(group.id, retryMsg.id, "done");
+      expect(retryTask.supersedesTaskId).toBe(dummyTask.id);
+      expect(retryTask.supersedesTaskId).not.toBe(childTask.id);
+    }, 60_000);
+
+    it("首次派发(无续跑上下文)不自动补 supersedesTaskId", async () => {
+      const coordinator = await registerParticipant(
+        `coord-first-${crypto.randomUUID()}`,
+      );
+      const executor = await registerParticipant(
+        `exec-first-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      await bindExecutorKey(executor.id, "executor");
+      const group = await createGroup(coordinator.id, "首次派发测试");
+      await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+
+      // 父任务 running,但无子任务终态 → 无续跑上下文。
+      const parentMsg = await postMessage(coordinator.id, group.id, {
+        body: "需求票:首次派发",
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      const parentTask = await waitForTask(group.id, parentMsg.id, "running");
+      await testDb
+        .update(taskTable)
+        .set({ executorPid: deadPid() })
+        .where(eq(taskTable.id, parentTask.id));
+
+      const childMsg = await postMessage(coordinator.id, group.id, {
+        body: "首次执行",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const _childTask = await waitForTask(group.id, childMsg.id, "done");
+      // 不消费完成事件,因此无续跑任务;再次派发应视为首次,不补链。
+      const secondMsg = await postMessage(coordinator.id, group.id, {
+        body: "第二次执行(非重试)",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const secondTask = await waitForTask(group.id, secondMsg.id, "done");
+      expect(secondTask.supersedesTaskId).toBeNull();
+    }, 60_000);
+
+    it("协调者自派(目标=自己)不自动补 supersedesTaskId", async () => {
+      const coordinator = await registerParticipant(
+        `coord-self-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      const group = await createGroup(coordinator.id, "自派测试");
+
+      // 协调者给自己发消息 → 自派,不补链。
+      const selfMsg = await postMessage(coordinator.id, group.id, {
+        body: "协调者自派",
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      const selfTask = await waitForTask(group.id, selfMsg.id, "running");
+      expect(selfTask.supersedesTaskId).toBeNull();
     }, 60_000);
   });
 });

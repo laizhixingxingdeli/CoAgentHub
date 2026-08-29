@@ -12,6 +12,7 @@ import { maybeHandleControlCommand } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import {
   DISPATCH_ALLOWED_ROLES,
+  inferSupersedesTaskId,
   maybeDispatchExecutorTask,
   refreshA2AActivity,
 } from "@server/lib/executor-task";
@@ -349,8 +350,27 @@ app
       // 群组,否则 400;不校验其终态(协调者可能在原任务仍 running 时就决定
       // 替代)。只在派发路径(定向执行器消息)校验;放在消息插入前,400 不会
       // 留下已提交的消息行。
-      if (aud === "participant" && audienceRef && supersedesTaskId != null) {
-        await assertSupersededTaskInGroup(db, id, supersedesTaskId);
+      // L2 重发路径安全网:调用方未显式传 supersedesTaskId 时,平台根据当前
+      // 续跑上下文自动指向刚结束/被替代的子任务(首次派发不补、跨父任务不串链)。
+      let finalSupersedesTaskId: string | null | undefined = supersedesTaskId;
+      if (
+        aud === "participant" &&
+        audienceRef &&
+        finalSupersedesTaskId == null
+      ) {
+        finalSupersedesTaskId = await inferSupersedesTaskId(
+          db,
+          id,
+          senderId,
+          audienceRef,
+        );
+      }
+      if (
+        aud === "participant" &&
+        audienceRef &&
+        finalSupersedesTaskId != null
+      ) {
+        await assertSupersededTaskInGroup(db, id, finalSupersedesTaskId);
       }
 
       // Message + closure rows are written atomically (shared helper — the
@@ -540,7 +560,7 @@ app
           specRef: specRef ?? null,
           specHash: specHash ?? null,
           dispatchKind: findingsReviewResult ? "fix" : (dispatchKind ?? null),
-          supersedesTaskId: supersedesTaskId ?? null,
+          supersedesTaskId: finalSupersedesTaskId ?? null,
           callbackRef,
         };
         // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发结果,

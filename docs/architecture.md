@@ -332,6 +332,13 @@ CoAgentHub/
     的同一会话;超过 `detachedTimeoutMinutes`(默认 1440)未回写 → 按「结果未确认」处理。
 - **done 判定**:仅依据执行器进程 exit code + `parseTaskReport` 汇报解析(提交/测试/
   Token/汇报/遗留五段),不再对工作区做旁路 git 检查。
+- **L2 重试完整性(L2 retry integrity)**:平台将两项 previously skill-only 的约束提升为
+  平台可见的强约束。① 续跑任务书(`coordinator-resume.ts`)在构建时,若本次终态子任务
+  带有 `supersedesTaskId`,则读取被替代任务的 `brief`,提取其中的验收标准与红线段落
+  并原文回显到续跑任务书中,清楚标注来源 task id;缺失时显式说明无法取得,不得伪造。
+  ② L2 重发路径中,调用方未显式传 `supersedesTaskId` 时,平台根据当前续跑上下文
+  (`diffSummary.platform.resumeForChild`)自动补齐为刚结束的子任务;首次派发(无续跑上下文)
+  不补、协调者自派不补、跨父任务不串链。显式合法值保持兼容。
 - **human 全可见**:参与者 `type=human`(含 Local User)对任何群的消息无条件可见
   (含定向消息,不要求群成员);audience 仍是 agent 间的路由机制。前端对定向消息显示
   「📨 定向给 <执行器名>」标签。

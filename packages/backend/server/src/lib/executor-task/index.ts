@@ -26,6 +26,7 @@ export {
   consumePendingCompletionEvents,
   hasNonTerminalChildTask,
   hasPendingResumeEvent,
+  inferSupersedesTaskId,
   isResumeTask,
   maybeCreateCoordinatorResumeTask,
   startCoordinatorResumeConsumer,

@@ -29,6 +29,8 @@ type Task = typeof taskTable.$inferSelect;
 
 /** 续跑任务平台标记键:diffSummary.platform.resumeOf = 父协调任务 id。 */
 const PLATFORM_MARKER_KEY = "resumeOf";
+/** 续跑任务平台标记键:diffSummary.platform.resumeForChild = 触发续跑的子任务 id。 */
+const RESUME_FOR_CHILD_KEY = "resumeForChild";
 
 /**
  * 非终态任务状态集合:R3 去重查询与孤儿收敛豁免共用同一口径,
@@ -166,6 +168,48 @@ export async function maybeCreateCoordinatorResumeTask(
   return "created";
 }
 
+/** 从任务书正文提取验收标准与红线段落(按 markdown 章节头匹配)。 */
+function extractTaskSections(brief: string | null): {
+  acceptance: string | null;
+  redline: string | null;
+} {
+  if (!brief) return { acceptance: null, redline: null };
+  const acceptanceRe =
+    /(#{1,3}\s*(?:Acceptance|验收|验收标准)[^\n]*)\n([\s\S]*?)(?=\n#{1,3}\s|$)/i;
+  const redlineRe =
+    /(#{1,3}\s*(?:红线|Red[-\s]?line|红线\(重发不得触碰\))[^\n]*)\n([\s\S]*?)(?=\n#{1,3}\s|$)/i;
+  const a = brief.match(acceptanceRe);
+  const r = brief.match(redlineRe);
+  return {
+    acceptance: a ? a[0].trim() : null,
+    redline: r ? r[0].trim() : null,
+  };
+}
+
+/** 构建被替代任务验收标准与红线回显段。 */
+function buildSupersededEchoSection(
+  supersededTask: Task | null | undefined,
+): string[] {
+  if (!supersededTask) return [];
+  const sections = extractTaskSections(supersededTask.brief);
+  const lines: string[] = [
+    "## 被替代任务验收标准与红线",
+    `- 来源任务 id: ${supersededTask.id}`,
+  ];
+  if (sections.acceptance) {
+    lines.push("", sections.acceptance);
+  } else {
+    lines.push("- 无法取得该任务书的验收标准原文。");
+  }
+  if (sections.redline) {
+    lines.push("", sections.redline);
+  } else {
+    lines.push("- 无法取得该任务书的红线原文。");
+  }
+  lines.push("");
+  return lines;
+}
+
 /** 构建续跑任务书(R1 要求的全部信息:父任务 id、终态子任务、spec、全部子任务)。 */
 function buildResumeBrief(
   parent: Task,
@@ -175,6 +219,7 @@ function buildResumeBrief(
     status: string;
     supersedesTaskId: string | null;
   }>,
+  supersededTask?: Task | null,
 ): string {
   const diffSummary =
     childTask.diffSummary !== null &&
@@ -204,6 +249,7 @@ function buildResumeBrief(
     "## 全部子任务(id 与当前状态)",
     childrenLines || "- (无)",
     "",
+    ...buildSupersededEchoSection(supersededTask),
     ...buildRetryContextSection(childTask, children),
     "## 操作",
     "1. 读取父任务详情与冻结 spec,对本次终态子任务做 L2 检视。",
@@ -270,7 +316,15 @@ async function createCoordinatorResumeTask(
     orderBy: (t, { asc: ascFn }) => ascFn(t.createdAt),
   });
 
-  const brief = buildResumeBrief(parent, childTask, children);
+  let supersededTask: Task | undefined;
+  if (childTask.supersedesTaskId) {
+    supersededTask =
+      (await db.query.task.findFirst({
+        where: eq(taskTable.id, childTask.supersedesTaskId),
+      })) ?? undefined;
+  }
+
+  const brief = buildResumeBrief(parent, childTask, children, supersededTask);
   const messageId = uuidv7();
 
   const [created] = await db
@@ -287,7 +341,13 @@ async function createCoordinatorResumeTask(
       specHash: parent.specHash,
       dispatchKind: parent.dispatchKind ?? null,
       // 平台标记(R4):续跑任务自身终态时消费方据此防环;不依赖任务书文本。
-      diffSummary: { platform: { [PLATFORM_MARKER_KEY]: parent.id } },
+      // 同时记录 resumeForChild,供 L2 重发路径自动补齐 supersedesTaskId 使用。
+      diffSummary: {
+        platform: {
+          [PLATFORM_MARKER_KEY]: parent.id,
+          [RESUME_FOR_CHILD_KEY]: childTask.id,
+        },
+      },
       // 完成事件定向给协调者(与父任务同执行方),供其收件箱留存。
       dispatcherParticipantId: parent.executorParticipantId,
     })
@@ -371,6 +431,87 @@ export async function consumePendingCompletionEvents(
     }
   }
   return created;
+}
+
+/**
+ * L2 重发路径安全网:调用方未显式传 supersedesTaskId 时,平台根据当前续跑上下文
+ * 自动指向刚结束/被替代的子任务。规则:
+ * - 首次派发(无续跑上下文)不补;
+ * - 协调者自派(目标=自己)不补;
+ * - 跨父任务不串链(只查当前 running 父任务下的续跑任务);
+ * - 显式合法值保持兼容(本函数不被调用)。
+ */
+export async function inferSupersedesTaskId(
+  db: DataBase,
+  groupId: string,
+  senderId: string,
+  targetParticipantId: string,
+): Promise<string | null> {
+  // 首次派发/协调者自派时不自动补链。
+  if (senderId === targetParticipantId) return null;
+
+  // 查找发送者在本群的 running detached 父任务(协调任务)。
+  // 必须取根任务(parentTaskId 为 null),排除续跑任务本身。
+  const parent = await db.query.task.findFirst({
+    where: and(
+      eq(taskTable.groupId, groupId),
+      eq(taskTable.executorParticipantId, senderId),
+      eq(taskTable.status, "running"),
+      isNull(taskTable.parentTaskId),
+    ),
+    orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    columns: { id: true },
+  });
+  if (!parent) return null;
+
+  // 取该父任务下最新的续跑任务,读取其 resumeForChild 标记。
+  const resumeTask = await db.query.task.findFirst({
+    where: and(
+      eq(taskTable.parentTaskId, parent.id),
+      eq(taskTable.executorParticipantId, senderId),
+    ),
+    orderBy: (t, { desc }) => [desc(t.createdAt)],
+    columns: { diffSummary: true },
+  });
+  if (!resumeTask) return null;
+
+  const summary =
+    resumeTask.diffSummary &&
+    typeof resumeTask.diffSummary === "object" &&
+    !Array.isArray(resumeTask.diffSummary)
+      ? (resumeTask.diffSummary as Record<string, unknown>)
+      : undefined;
+  const platform =
+    summary?.platform &&
+    typeof summary.platform === "object" &&
+    !Array.isArray(summary.platform)
+      ? (summary.platform as Record<string, unknown>)
+      : undefined;
+  const resumeChildId =
+    typeof platform?.[RESUME_FOR_CHILD_KEY] === "string"
+      ? (platform[RESUME_FOR_CHILD_KEY] as string)
+      : null;
+  if (!resumeChildId) return null;
+
+  // 校验 resumeForChild 指向的任务:已终态、非续跑任务、且未被替代。
+  const child = await db.query.task.findFirst({
+    where: and(
+      eq(taskTable.id, resumeChildId),
+      eq(taskTable.groupId, groupId),
+      inArray(taskTable.status, ["done", "failed", "cancelled"]),
+    ),
+    columns: { id: true, diffSummary: true },
+  });
+  if (!child) return null;
+  if (isResumeTask(child)) return null;
+
+  const successor = await db.query.task.findFirst({
+    where: eq(taskTable.supersedesTaskId, child.id),
+    columns: { id: true },
+  });
+  if (successor) return null;
+
+  return child.id;
 }
 
 /** 周期性消费完成事件(server 启动时注册);返回停止函数(测试用)。 */

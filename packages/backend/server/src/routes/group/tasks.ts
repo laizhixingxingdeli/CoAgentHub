@@ -23,6 +23,7 @@ import {
   createTaskDispatchWarnings,
   findTaskDetail,
   getL3ResponseMinutesMs,
+  inferSupersedesTaskId,
   isExecutorProcessAlive,
   isResumeTask,
   isTerminalTaskStatus,
@@ -43,8 +44,6 @@ import { findExecutorByKey } from "@server/lib/executors";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { hasReviewResult } from "@server/lib/l3-overdue-reminder";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
-import { insertGroupMessage } from "@server/lib/services/message-service";
-import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -722,7 +721,18 @@ app
         throw new BizError(BizCodeEnum.ParticipantNotFound);
       }
       // 替代关系(R2):被替代的任务必须属于同一群组,否则 400;不校验其终态。
-      await assertSupersededTaskInGroup(db, id, supersedesTaskId);
+      // L2 重发路径安全网:调用方未显式传 supersedesTaskId 时,平台根据当前
+      // 续跑上下文自动指向刚结束/被替代的子任务(首次派发不补、跨父任务不串链)。
+      let finalSupersedesTaskId: string | null | undefined = supersedesTaskId;
+      if (finalSupersedesTaskId == null) {
+        finalSupersedesTaskId = await inferSupersedesTaskId(
+          db,
+          id,
+          callerId,
+          executorParticipantId,
+        );
+      }
+      await assertSupersededTaskInGroup(db, id, finalSupersedesTaskId);
 
       // 任务书快照:从触发消息取 body 原文写入 brief(消息后续编辑/软删除
       // 不影响已触发任务语义);消息不存在时留空(可空列)。
@@ -746,7 +756,7 @@ app
           specHash: specHash ?? null,
           dispatchKind: dispatchKind ?? null,
           // 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试;不传为 null。
-          supersedesTaskId: supersedesTaskId ?? null,
+          supersedesTaskId: finalSupersedesTaskId ?? null,
           brief: triggerMessage?.body ?? null,
           // 显式置 queued:不依赖 DB 默认值(旧库默认值可能仍是 running)。
           status: "queued",
@@ -775,8 +785,8 @@ app
         dispatchKind !== undefined && dispatchKind !== existing.dispatchKind
           ? "dispatchKind"
           : null,
-        supersedesTaskId !== undefined &&
-        supersedesTaskId !== existing.supersedesTaskId
+        finalSupersedesTaskId !== undefined &&
+        finalSupersedesTaskId !== existing.supersedesTaskId
           ? "supersedesTaskId"
           : null,
       ].filter((field): field is string => field !== null);
