@@ -12,6 +12,7 @@
 
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
+import { parseRateLimitRecoveryMs } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import {
   hasNonTerminalChildTask,
@@ -19,7 +20,16 @@ import {
   isCoordinatorTask,
   isExecutorProcessAlive,
   notifyTaskStatusChanged,
+  taskOutputTail,
 } from "./executor-task";
+import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
+import { enterCooldown, normalizeCooldownEnd } from "./executor-task/queue";
+import { lastLinesOf } from "./executor-task/report";
+import {
+  formatEta,
+  getRateLimitCooldownMs,
+  isQuotaFailure,
+} from "./executor-task/state";
 
 /** 孤儿收敛周期(默认 10s;测试可注入更短间隔)。 */
 export const ORPHAN_RECONCILE_INTERVAL_MS = 10_000;
@@ -54,6 +64,7 @@ export async function reconcileOrphanTasks(
       groupId: true,
       executorPid: true,
       executorParticipantId: true,
+      executorKey: true,
       diffSummary: true,
     },
   });
@@ -84,9 +95,28 @@ export async function reconcileOrphanTasks(
       continue;
     }
     const reason = `executor pid ${task.executorPid} no longer exists`;
+    // 判死写库前只检查已捕获输出尾部 20 行(与 queue 超时/失败/成功分支同界
+    // lastLinesOf(out, 20),不放宽):命中额度关键词 → 复用既有额度语义 —— error
+    // 用既有额度失败文案并含 ETA、diffSummary 写 executorCooldownEndMs、冷却该
+    // 执行器(enterCooldown,不自动重试 —— 收敛本身无重试路径)。非额度路径逐字
+    // 不变。executorKey 缺失(历史任务)时无法冷却指定执行器 → 走普通路径。
+    const tail = lastLinesOf(taskOutputTail(task.id) ?? "", 20);
+    const quota = task.executorKey !== null && isQuotaFailure([tail]);
+    let error = reason;
+    let cooldownEnd: number | null = null;
+    if (quota) {
+      cooldownEnd = normalizeCooldownEnd(
+        parseRateLimitRecoveryMs(tail, now.getTime()) ??
+          now.getTime() + getRateLimitCooldownMs(),
+        now.getTime(),
+      );
+      error = `${reason}(执行器额度限制,预计 ${formatEta(cooldownEnd)} 恢复)`;
+    }
     // R2(本 spec):收敛写回以现有 diffSummary 为底合并,仅新增/覆盖
     // error / reconciledReason / reconciledAt 三键 —— 保留 platform.*(resumeOf
     // 等)、tokenUsage、tokenUsageReason 与执行器已写字段,不整体替换抹掉证据。
+    // 额度路径额外写 executorCooldownEndMs(与 queue 的 handleQuotaFailure 同键,
+    // 重启由 restoreExecutorCooldowns 恢复)。
     const base =
       task.diffSummary !== null &&
       task.diffSummary !== undefined &&
@@ -100,9 +130,12 @@ export async function reconcileOrphanTasks(
         status: "failed",
         diffSummary: {
           ...base,
-          error: reason,
-          reconciledReason: reason,
+          error,
+          reconciledReason: error,
           reconciledAt: now.toISOString(),
+          ...(cooldownEnd !== null
+            ? { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd }
+            : {}),
         },
       })
       // R5:以「仍为 running」为条件更新,并发写回 done 的任务不再匹配。
@@ -111,8 +144,15 @@ export async function reconcileOrphanTasks(
     if (!updated) continue;
     reconciled += 1;
     console.log(
-      `[orphan] 收敛孤儿任务 ${task.id}: ${reason} (${now.toISOString()})`,
+      `[orphan] 收敛孤儿任务 ${task.id}: ${error} (${now.toISOString()})`,
     );
+    if (quota && task.executorKey !== null && cooldownEnd !== null) {
+      enterCooldown(
+        { key: task.executorKey, label: task.executorKey },
+        cooldownEnd,
+        { db, taskId: task.id },
+      );
+    }
     await notifyTaskStatusChanged(db, task.id, task.groupId, "failed", updated);
   }
   return reconciled;

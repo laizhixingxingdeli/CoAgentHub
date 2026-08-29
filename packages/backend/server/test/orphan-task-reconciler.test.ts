@@ -10,7 +10,12 @@ import { and, eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataBase } from "../src/lib/database";
-import { consumePendingCompletionEvents } from "../src/lib/executor-task";
+import {
+  __resetExecutorQueueForTests,
+  consumePendingCompletionEvents,
+} from "../src/lib/executor-task";
+import { appendTaskOutput } from "../src/lib/executor-task/output-buffer";
+import { cooldownEndMs, isInCooldown } from "../src/lib/executor-task/state";
 import {
   reconcileOrphanTasks,
   startOrphanReconciler,
@@ -26,6 +31,9 @@ type Task = typeof taskTable.$inferSelect;
 
 /** 每个用例独立数据集,避免前面用例遗留的 running+dead-pid 任务污染计数。 */
 beforeEach(async () => {
+  // 先清模块级输出缓冲与冷却登记(额度用例会 appendTaskOutput / enterCooldown),
+  // 再清库 —— 避免上一用例的缓冲/冷却泄漏到本用例。
+  __resetExecutorQueueForTests();
   await testDb.delete(taskCompletionEventTable);
   await testDb.delete(taskTable);
   await testDb.delete(groupMemberTable);
@@ -89,6 +97,7 @@ describe("孤儿任务周期收敛", () => {
     executorParticipantId: string;
     parentTaskId?: string | null;
     executorPid?: number | null;
+    executorKey?: string | null;
     status?: Task["status"];
     createdAt?: Date;
     updatedAt?: Date | null;
@@ -103,6 +112,7 @@ describe("孤儿任务周期收敛", () => {
         parentTaskId: row.parentTaskId ?? null,
         messageId: uuidv4(),
         executorPid: row.executorPid ?? null,
+        executorKey: row.executorKey ?? null,
         status: row.status ?? "running",
         diffSummary: row.diffSummary ?? null,
         createdAt: row.createdAt ?? base,
@@ -770,5 +780,157 @@ describe("孤儿任务周期收敛", () => {
     const patchBody = await patchRes.text();
     expect(patchRes.status, patchBody).toBe(200);
     expect((await findTask(resume.id))?.status).toBe("done");
+  });
+
+  // ---- 本票(quota-failure-on-clean-exit 语义复用):判死前检查已捕获输出尾部 20 行 ----
+
+  it("输出尾部 20 行含 usage limit + try again at 7:50 PM → 额度收敛:failed + executorCooldownEndMs + 冷却 + error 用既有额度文案含 ETA", async () => {
+    const participant = await registerParticipant({ name: "orc-quota-a" });
+    const group = await createGroup(participant.id, "孤儿收敛-额度尾部");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    // 模拟 detached 执行器已捕获输出:额度关键词与恢复时刻都在尾部 20 行内。
+    appendTaskOutput(
+      task.id,
+      "some work\nYou've hit your usage limit. try again at 7:50 PM\n",
+    );
+    // 固定基准时间(本地 10:00),冷却解析与冷却登记都以它为基准,断言确定性。
+    const now = new Date(2026, 7, 29, 10, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      expect(await reconcileOrphanTasks(orphanDb, now)).toBe(1);
+      const row = await findTask(task.id);
+      expect(row?.status).toBe("failed");
+      const summary = row?.diffSummary as Record<string, unknown>;
+      // error 用既有额度失败文案并含 ETA。
+      const err = String(summary.error);
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
+      // 冷却至解析出的恢复时刻:7:50 PM(12 小时制)→ 当天 19:50。
+      const expectedEnd = new Date(2026, 7, 29, 19, 50, 0, 0).getTime();
+      expect(summary.executorCooldownEndMs).toBe(expectedEnd);
+      // 执行器进入冷却(冷却登记与 diffSummary 同值)。
+      expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("输出尾部含 resets around 18:33 → 冷却解析至当天 18:33", async () => {
+    const participant = await registerParticipant({ name: "orc-quota-b" });
+    const group = await createGroup(participant.id, "孤儿收敛-额度resets");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    appendTaskOutput(task.id, "usage limit reached — resets around 18:33\n");
+    const now = new Date(2026, 7, 29, 10, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      await reconcileOrphanTasks(orphanDb, now);
+      const summary = (await findTask(task.id))?.diffSummary as Record<
+        string,
+        unknown
+      >;
+      expect(summary.executorCooldownEndMs).toBe(
+        new Date(2026, 7, 29, 18, 33, 0, 0).getTime(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("输出不含额度关键词 → error/reconciledReason/reconciledAt 三键行为不变(回归)", async () => {
+    const participant = await registerParticipant({ name: "orc-quota-c" });
+    const group = await createGroup(participant.id, "孤儿收敛-非额度");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    // 有已捕获输出但不含额度关键词 → 普通收敛路径逐字不变。
+    appendTaskOutput(task.id, "ordinary crash\nsome stack trace\n");
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const row = await findTask(task.id);
+    expect(row?.status).toBe("failed");
+    const summary = row?.diffSummary as Record<string, unknown>;
+    expect(summary.error).toBe(
+      `executor pid ${task.executorPid} no longer exists`,
+    );
+    expect(summary.reconciledReason).toBe(
+      `executor pid ${task.executorPid} no longer exists`,
+    );
+    expect(typeof summary.reconciledAt).toBe("string");
+    expect(Number.isNaN(Date.parse(String(summary.reconciledAt)))).toBe(false);
+    // 非额度路径不写冷却字段、不进入冷却。
+    expect(summary.executorCooldownEndMs).toBeUndefined();
+    expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+  });
+
+  it("额度关键词在输出前部但不在尾部 20 行 → 不命中(R2 防误判)", async () => {
+    const participant = await registerParticipant({ name: "orc-quota-d" });
+    const group = await createGroup(participant.id, "孤儿收敛-额度前部");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    // 关键词只在最前面,尾部 20 行全部是普通输出。
+    const lines = [
+      "You've hit your usage limit",
+      ...Array.from({ length: 25 }, (_, i) => `line ${i}`),
+    ];
+    appendTaskOutput(task.id, `${lines.join("\n")}\n`);
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const summary = (await findTask(task.id))?.diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.error).toBe(
+      `executor pid ${task.executorPid} no longer exists`,
+    );
+    expect(summary.executorCooldownEndMs).toBeUndefined();
+    expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+  });
+
+  it("额度收敛后该执行器冷却中不可用,其他执行器不受影响(可改派前提)", async () => {
+    const participant = await registerParticipant({ name: "orc-quota-e" });
+    const group = await createGroup(participant.id, "孤儿收敛-冷却改派");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    appendTaskOutput(
+      task.id,
+      "You've hit your usage limit. try again at 7:50 PM\n",
+    );
+    const now = new Date(2026, 7, 29, 10, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      await reconcileOrphanTasks(orphanDb, now);
+      // 冷却中的执行器不可用(isInCooldown true → 调度层跳过它)。
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      // 其他健康执行器不在冷却 → 存在可改派对象(与 executor-quota-redispatch
+      // 的「角色定向改派」用例衔接:调度层只跳过冷却执行器)。
+      expect(isInCooldown({ key: "codex" })).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -117,11 +117,14 @@ import {
  * endMs 为绝对到期时刻(冷却动态化):调用方先尝试从失败输出解析恢复时间
  * (parseRateLimitRecoveryMs),解析失败才回退 now + 固定冷却时长。
  */
-function normalizeCooldownEnd(endMs: number): number {
-  return Math.max(Date.now() + 1, endMs);
+export function normalizeCooldownEnd(
+  endMs: number,
+  nowMs = Date.now(),
+): number {
+  return Math.max(nowMs + 1, endMs);
 }
 
-function enterCooldown(
+export function enterCooldown(
   ex: Pick<ExecutorConfig, "key" | "label">,
   endMs: number,
   persisted?: { db: DataBase; taskId: string },
