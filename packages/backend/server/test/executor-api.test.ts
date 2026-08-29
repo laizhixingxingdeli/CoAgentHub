@@ -590,6 +590,145 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const list = (await listRes.json()) as Array<Record<string, unknown>>;
     expect(list.find((x) => x.key === "patch-prompt")!.prompt).toBe("");
   });
+
+  // ── R1:4 个新可选配置字段(executor-config-over-code 批1)────────────────
+  it("POST 携带 maxConcurrency/inputMode/env/outputProfile 持久化,GET 返回", async () => {
+    const res = await createExecutor({
+      agentName: "R1 Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["-y", "{ticket}"],
+      maxConcurrency: 1,
+      inputMode: "inline",
+      env: { FOO: "bar", BAZ: "qux" },
+      outputProfile: { parser: "generic" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.maxConcurrency).toBe(1);
+    expect(body.inputMode).toBe("inline");
+    expect(body.env).toEqual({ FOO: "bar", BAZ: "qux" });
+    expect(body.outputProfile).toEqual({ parser: "generic" });
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "r1-executor");
+    expect(item!.maxConcurrency).toBe(1);
+    expect(item!.inputMode).toBe("inline");
+    expect(item!.env).toEqual({ FOO: "bar", BAZ: "qux" });
+    expect(item!.outputProfile).toEqual({ parser: "generic" });
+  });
+
+  it("POST 不带 4 个新字段 → 响应与 GET 均为 null(既有行行为不变)", async () => {
+    const res = await createExecutor({
+      agentName: "R1 Legacy Executor",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.maxConcurrency).toBe(null);
+    expect(body.inputMode).toBe(null);
+    expect(body.env).toBe(null);
+    expect(body.outputProfile).toBe(null);
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "r1-legacy-executor");
+    expect(item!.maxConcurrency).toBe(null);
+    expect(item!.inputMode).toBe(null);
+    expect(item!.env).toBe(null);
+    expect(item!.outputProfile).toBe(null);
+  });
+
+  it("POST inputMode 非法取值 → 400(仅 path/inline/at-file/stdin)", async () => {
+    const res = await createExecutor({
+      agentName: "R1 Bad Mode",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+      inputMode: "script",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST maxConcurrency 非正整数 → 400", async () => {
+    const res = await createExecutor({
+      agentName: "R1 Bad MC",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+      maxConcurrency: 0,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH 更新/清空 4 个新字段生效(GET 验证)", async () => {
+    const created = await createExecutor({
+      agentName: "R1 Patch",
+      kind: "cli",
+      bin: fakeBin,
+      args: ["-y", "{ticket}"],
+    });
+    expect(created.status).toBe(200);
+
+    // 设置
+    const setRes = await app.request("/api/executors/r1-patch", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        maxConcurrency: 2,
+        inputMode: "at-file",
+        env: { TOKEN_MODE: "inline" },
+        outputProfile: { parser: "generic" },
+      }),
+    });
+    expect(setRes.status).toBe(200);
+    const setBody = (await setRes.json()) as Record<string, unknown>;
+    expect(setBody.maxConcurrency).toBe(2);
+    expect(setBody.inputMode).toBe("at-file");
+    expect(setBody.env).toEqual({ TOKEN_MODE: "inline" });
+    expect(setBody.outputProfile).toEqual({ parser: "generic" });
+
+    // 清空(null 回缺省)
+    const clearRes = await app.request("/api/executors/r1-patch", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        maxConcurrency: null,
+        inputMode: null,
+        env: null,
+        outputProfile: null,
+      }),
+    });
+    expect(clearRes.status).toBe(200);
+    const clearBody = (await clearRes.json()) as Record<string, unknown>;
+    expect(clearBody.maxConcurrency).toBe(null);
+    expect(clearBody.inputMode).toBe(null);
+    expect(clearBody.env).toBe(null);
+    expect(clearBody.outputProfile).toBe(null);
+
+    const listRes = await app.request("/api/executors");
+    const list = (await listRes.json()) as Array<Record<string, unknown>>;
+    const item = list.find((x) => x.key === "r1-patch");
+    expect(item!.maxConcurrency).toBe(null);
+    expect(item!.inputMode).toBe(null);
+    expect(item!.env).toBe(null);
+    expect(item!.outputProfile).toBe(null);
+  });
+
+  it("PATCH 只带 4 个新字段之一 → 放行(不在『至少一个字段』校验中缺失)", async () => {
+    const res = await app.request("/api/executors/r1-patch", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inputMode: "stdin" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // stdin 只保留取值,不实现执行分支(R1.1)。
+    expect(body.inputMode).toBe("stdin");
+  });
 });
 
 describe("GET /api/executors/check-bin(接入表单 bin 即时校验)", () => {

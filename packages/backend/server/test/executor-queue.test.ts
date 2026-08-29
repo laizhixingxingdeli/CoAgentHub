@@ -125,8 +125,8 @@ const { createTestApp } = await import("./app");
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
   const executorKeyByName: Record<string, string> = {
-    "CodeBuddy": "codebuddy",
-    "AtomCode": "executor",
+    CodeBuddy: "codebuddy",
+    AtomCode: "executor",
   };
 
   async function registerParticipant(body: Record<string, unknown>) {
@@ -1735,6 +1735,76 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       ).toBe(false);
 
       // 第一条 done 后,第二条才轮到并完成。
+      await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
+    }, 30_000);
+
+    it("DB 行 maxConcurrency=1:接入界面填的并发上限自动作用于调度(第二票 queued,第一票终态后出队)", async () => {
+      // 验收 5:界面接入新执行器并填 maxConcurrency:1 → 并发下发两条任务,
+      // 第二条保持 queued,第一条终态后自动出队。maxConcurrency 来自 DB 行
+      // (rowToConfig),不是内置配置。
+      process.env.FAKE_SLEEP_SECS = "3";
+      const { coordinator } = await setupGroup();
+
+      // 经 POST /api/executors 接入一个 DB 配置行,填 maxConcurrency=1。
+      const created = await app.request("/api/executors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentName: "DB MC Executor",
+          kind: "cli",
+          bin: fakeBin,
+          args: [],
+          maxConcurrency: 1,
+        }),
+      });
+      expect(created.status).toBe(200);
+
+      const participantsRes = await app.request("/api/participants");
+      const participants = (await participantsRes.json()) as Array<{
+        id: string;
+        name: string;
+      }>;
+      const dbMc = participants.find((p) => p.name === "DB MC Executor");
+      expect(dbMc).toBeTruthy();
+
+      const projA = makeGitRepo("coagenthub-dbmc-a-");
+      const projB = makeGitRepo("coagenthub-dbmc-b-");
+      const groupA = await createGroup(coordinator.id, "DB 并发群 A");
+      await addMember(coordinator.id, groupA.id, dbMc!.id, ["executor"]);
+      await bindProject(coordinator.id, groupA.id, projA);
+      const groupB = await createGroup(coordinator.id, "DB 并发群 B");
+      await addMember(coordinator.id, groupB.id, dbMc!.id, ["executor"]);
+      await bindProject(coordinator.id, groupB.id, projB);
+
+      const m1 = await postMessage(coordinator.id, groupA.id, {
+        body: "DB 行任务一(慢)",
+        audience: "participant",
+        audienceRef: dbMc!.id,
+      });
+      const t1 = await waitForTaskStatus(
+        coordinator.id,
+        groupA.id,
+        m1.id,
+        "running",
+      );
+      expect(t1.status).toBe("running");
+
+      // 不同 project_path → 组槽位空闲;但 DB 行 maxConcurrency=1:第二条排队。
+      const m2 = await postMessage(coordinator.id, groupB.id, {
+        body: "DB 行任务二",
+        audience: "participant",
+        audienceRef: dbMc!.id,
+      });
+      const t2 = await waitForTaskStatus(
+        coordinator.id,
+        groupB.id,
+        m2.id,
+        "queued",
+      );
+      expect(t2.status).toBe("queued");
+
+      // 第一票终态后自动出队并完成。
       await waitForTaskStatus(coordinator.id, groupA.id, m1.id, "done");
       await waitForTaskStatus(coordinator.id, groupB.id, m2.id, "done");
     }, 30_000);

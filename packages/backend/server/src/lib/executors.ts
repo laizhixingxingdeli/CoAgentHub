@@ -69,9 +69,18 @@ export interface ExecutorConfig {
    * `403 atomgit_session_concurrency_conflict`)。pump 调度时,目标执行器当前
    * running 数 >= maxConcurrency → 新任务保持 queued,等既有任务终态后自动出队。
    * 无配置的执行器走反应式排队:先按 running 尝试下发,收到 403 再转 queued。
-   * 注:DB 持久化配置(executor_config 表)暂无可持久化列,按缺省(不限制)处理。
    */
   maxConcurrency?: number;
+  /**
+   * 任务书传递方式(见 spec R1.1):path = 任务书文件路径作为参数(缺省)/
+   * inline = 任务书正文作为参数 / at-file = 路径前缀 `@` / stdin = 正文经 stdin
+   * 喂入。⚠️ stdin 当前 runner 未实现,只保留取值;null/缺省按 "path" 处理。
+   */
+  inputMode?: "path" | "inline" | "at-file" | "stdin";
+  /** spawn 时注入的额外环境变量(键值对);缺省 = 无。 */
+  env?: Record<string, string>;
+  /** 输出画像(批2 消费,本批只存不读);缺省 = 走通用解析器。 */
+  outputProfile?: unknown;
   /**
    * 该执行器同时也是下发方(协调者/检视者 runtime):其发出的消息可携带
    * dispatcher/callback 路由信息。默认 false(纯执行器)——messages.ts /
@@ -371,6 +380,14 @@ export interface AddExecutorConfigInput {
   memory?: "per-group" | null;
   /** 默认分工说明(可空);加入群组时作为 group_members.prompt 的默认值。 */
   prompt?: string | null;
+  /** 同一执行器最大并发 running 任务数;null = 不限制(缺省行为不变)。 */
+  maxConcurrency?: number | null;
+  /** 任务书传递方式(见 spec R1.1);null = 按 "path" 处理(既有行为)。 */
+  inputMode?: "path" | "inline" | "at-file" | "stdin" | null;
+  /** spawn 时注入的额外环境变量(键值对);null = 无。 */
+  env?: Record<string, string> | null;
+  /** 输出画像(批2 消费,本批只存不读);null = 走通用解析器。 */
+  outputProfile?: unknown | null;
 }
 
 /** 插入一条 DB 执行器配置并返回整行。 */
@@ -392,6 +409,10 @@ export async function addExecutorConfig(
       model: input.model ?? null,
       memory: input.memory ?? null,
       prompt: input.prompt ?? null,
+      maxConcurrency: input.maxConcurrency ?? null,
+      inputMode: input.inputMode ?? null,
+      env: input.env ?? null,
+      outputProfile: input.outputProfile ?? null,
     })
     .returning();
   invalidateExecutorsCache();
@@ -426,6 +447,18 @@ function rowToConfig(row: ExecutorConfigRow): ExecutorConfig {
   if (row.model != null) base.model = row.model;
   if (row.memory === "per-group") base.memory = row.memory;
   if (row.prompt != null) base.prompt = row.prompt;
+  if (row.maxConcurrency != null) base.maxConcurrency = row.maxConcurrency;
+  // input_mode 是自由 text 列,仅放行已知枚举值;未知值按缺省(path)处理。
+  if (
+    row.inputMode === "path" ||
+    row.inputMode === "inline" ||
+    row.inputMode === "at-file" ||
+    row.inputMode === "stdin"
+  ) {
+    base.inputMode = row.inputMode;
+  }
+  if (row.env != null) base.env = row.env;
+  if (row.outputProfile != null) base.outputProfile = row.outputProfile;
   if (base.kind === "a2a") {
     base.a2a = { url: row.url ?? "", token: "" };
   }
@@ -442,7 +475,17 @@ export async function updateExecutorConfig(
   patch: Partial<
     Pick<
       AddExecutorConfigInput,
-      "agentName" | "bin" | "args" | "label" | "model" | "memory" | "prompt"
+      | "agentName"
+      | "bin"
+      | "args"
+      | "label"
+      | "model"
+      | "memory"
+      | "prompt"
+      | "maxConcurrency"
+      | "inputMode"
+      | "env"
+      | "outputProfile"
     >
   >,
 ): Promise<ExecutorConfigRow | undefined> {
@@ -455,6 +498,12 @@ export async function updateExecutorConfig(
   if (patch.memory !== undefined) values.memory = patch.memory ?? null;
   // prompt:"" 表示清空(与 members.ts 的 PATCH 语义一致:空串落库即清空)。
   if (patch.prompt !== undefined) values.prompt = patch.prompt ?? null;
+  if (patch.maxConcurrency !== undefined)
+    values.maxConcurrency = patch.maxConcurrency ?? null;
+  if (patch.inputMode !== undefined) values.inputMode = patch.inputMode ?? null;
+  if (patch.env !== undefined) values.env = patch.env ?? null;
+  if (patch.outputProfile !== undefined)
+    values.outputProfile = patch.outputProfile ?? null;
 
   const [row] = await db
     .update(executorConfigTable)

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
@@ -40,6 +40,16 @@ export const executorConfig = pgTable("executor_config", {
   // 默认值(见 routes/group/members.ts);进群后可针对该群单独修改。
   // 协调者据此判断该派哪个执行器执行(spec v3.7 §3.16)。
   prompt: text("prompt"),
+  // 同一执行器最大并发 running 任务数;null = 不限制(声明式并发上限,
+  // 调度侧 pump 读取,见 lib/executors.ts ExecutorConfig.maxConcurrency)。
+  maxConcurrency: integer("max_concurrency"),
+  // 任务书传递方式(见 R1.1):path | inline | at-file | stdin;
+  // null 按 "path" 处理(既有行为)。stdin 本批只保留取值,不实现执行分支。
+  inputMode: text("input_mode"),
+  // spawn 时注入的额外环境变量(键值对);null = 无。
+  env: jsonb("env").$type<Record<string, string>>(),
+  // 输出画像(批2 消费,本批只加列不读);null = 走通用解析器。
+  outputProfile: jsonb("output_profile"),
   ...timeColumns("both"),
 });
 

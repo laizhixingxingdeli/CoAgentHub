@@ -59,6 +59,17 @@ const CreateExecutorSchema = z
     memory: z.enum(["per-group"]).nullable().optional(),
     /** 默认分工说明(接入时填一次):可空,最长 1000(与 group_members.prompt 一致)。 */
     prompt: z.string().max(1000).optional(),
+    /** 同一执行器最大并发 running 任务数;null = 不限制(缺省行为不变)。 */
+    maxConcurrency: z.number().int().positive().nullable().optional(),
+    /** 任务书传递方式(见 spec R1.1);null = 按 "path" 处理(既有行为)。 */
+    inputMode: z
+      .enum(["path", "inline", "at-file", "stdin"])
+      .nullable()
+      .optional(),
+    /** spawn 时注入的额外环境变量(键值对);null = 无。 */
+    env: z.record(z.string(), z.string()).nullable().optional(),
+    /** 输出画像(批2 消费,本批只存不读);null = 走通用解析器。 */
+    outputProfile: z.unknown().nullable().optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
     message: "kind=a2a 需要 url,kind=cli 需要 bin",
@@ -84,8 +95,22 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const input = c.req.valid("json");
-      const { agentName, kind, bin, url, args, label, device, model, memory, prompt } =
-        input;
+      const {
+        agentName,
+        kind,
+        bin,
+        url,
+        args,
+        label,
+        device,
+        model,
+        memory,
+        prompt,
+        maxConcurrency,
+        inputMode,
+        env,
+        outputProfile,
+      } = input;
       // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
       const type = input.type ?? "custom";
 
@@ -122,6 +147,10 @@ const app2 = app
         model,
         memory,
         prompt,
+        maxConcurrency,
+        inputMode,
+        env,
+        outputProfile,
       };
 
       await addExecutorConfig(db, config);
@@ -155,6 +184,10 @@ const app2 = app
         model: model ?? null,
         memory: memory ?? null,
         prompt: prompt ?? null,
+        maxConcurrency: maxConcurrency ?? null,
+        inputMode: inputMode ?? null,
+        env: env ?? null,
+        outputProfile: outputProfile ?? null,
       });
     },
   )
@@ -187,6 +220,9 @@ const app2 = app
           memory: ex.memory ?? null,
           prompt: ex.prompt ?? null,
           maxConcurrency: ex.maxConcurrency ?? null,
+          inputMode: ex.inputMode ?? null,
+          env: ex.env ?? null,
+          outputProfile: ex.outputProfile ?? null,
           builtin: isBuiltinExecutorKey(ex.key),
         })),
       );
@@ -279,6 +315,13 @@ const app2 = app
           device: z.string().max(100).nullable().optional(),
           // 默认分工说明:空字符串表示清空(与 members.ts 的 PATCH 语义一致)。
           prompt: z.string().max(1000).optional(),
+          maxConcurrency: z.number().int().positive().nullable().optional(),
+          inputMode: z
+            .enum(["path", "inline", "at-file", "stdin"])
+            .nullable()
+            .optional(),
+          env: z.record(z.string(), z.string()).nullable().optional(),
+          outputProfile: z.unknown().nullable().optional(),
         })
         .refine(
           (v) =>
@@ -289,7 +332,11 @@ const app2 = app
             v.model !== undefined ||
             v.memory !== undefined ||
             v.device !== undefined ||
-            v.prompt !== undefined,
+            v.prompt !== undefined ||
+            v.maxConcurrency !== undefined ||
+            v.inputMode !== undefined ||
+            v.env !== undefined ||
+            v.outputProfile !== undefined,
           { message: "at least one field to update is required" },
         ),
     ),
@@ -346,6 +393,10 @@ const app2 = app
         model: input.model,
         memory: input.memory,
         prompt: input.prompt,
+        maxConcurrency: input.maxConcurrency,
+        inputMode: input.inputMode,
+        env: input.env,
+        outputProfile: input.outputProfile,
       });
       if (!updated) {
         throw new BizError(BizCodeEnum.ExecutorNotFound);
@@ -372,6 +423,10 @@ const app2 = app
         model: updated.model ?? null,
         memory: updated.memory ?? null,
         prompt: updated.prompt ?? null,
+        maxConcurrency: updated.maxConcurrency ?? null,
+        inputMode: updated.inputMode ?? null,
+        env: updated.env ?? null,
+        outputProfile: updated.outputProfile ?? null,
         builtin: false,
       });
     },
