@@ -41,6 +41,10 @@ import { describe, expect, it, vi } from "vitest";
 const summaryText = (entries: OutputEntry[]): string =>
   entries.length === 0 ? "" : `${entries.map((e) => e.summary).join("\n")}\n`;
 
+/** 摘要中形如 `[汇报 #tN] 0` 的账目标量渲染条数(修复后应为 0)。 */
+const zeroReportCount = (entries: OutputEntry[]): number =>
+  entries.filter((e) => /^\[汇报 #[^\]]+\] 0$/.test(e.summary)).length;
+
 /** codebuddy assistant 事件夹具:形状与 01a03eb9 实跑一致(uuid/session_id 噪音)。 */
 const codeBuddyAssistant = (blocks: unknown[]): string =>
   JSON.stringify({
@@ -1238,5 +1242,113 @@ describe("default:流式跨 chunk", () => {
     expect(flushed[0].kind).toBe("raw");
     expect(flushed[0].summary).toBe(partial);
     expect(parse.flush()).toEqual([]);
+  });
+});
+
+describe("default:账目字段不渲染(Pi 修复回归)", () => {
+  it("result 为数字 0 不再渲染 [汇报] 0,字符串正文照常渲染", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "tool_execution_result",
+      tool: "bash",
+      status: "success",
+      result: 0,
+      cost: 0.0,
+      text: "ok",
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].summary).toBe("[工具 #t1] bash");
+    expect(entries[1].summary).toBe("[汇报 #t2] ok");
+    expect(zeroReportCount(entries)).toBe(0);
+  });
+
+  it("Usage/Cost/Tokens 大小写变体视为信封,嵌套 output_tokens 不渲染", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      Type: "report",
+      Usage: { output_tokens: 0, total_tokens: 0 },
+      Cost: { amount: 0.5, currency: "USD" },
+      Tokens: { output_tokens: 0 },
+      Text: "done",
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].summary).toBe("[汇报 #t1] done");
+    expect(zeroReportCount(entries)).toBe(0);
+  });
+
+  it("仅有 usage/cost 的行提取不出正文 → 逐字 raw 保留(R3,字节不变)", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "report",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      cost: 0.0,
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("raw");
+    expect(entries[0].summary).toBe(line);
+  });
+});
+
+describe("default:同 chunk 重复动作行折叠(R5,Pi 修复回归)", () => {
+  /** Pi 代表性 JSONL:同一 command 的 60 条 tool_execution_update + 结果/汇报行。 */
+  const updateLine = (): string =>
+    JSON.stringify({
+      type: "tool_execution_update",
+      tool: "bash",
+      command: "git status --short",
+      status: "running",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      cost: 0.0,
+    });
+  const countKind = (entries: OutputEntry[], prefix: string): number =>
+    entries.filter((e) => e.summary.startsWith(prefix)).length;
+
+  it("重复 update 只留首条,调用与结果互不折叠,无 [汇报] 0", () => {
+    const parse = createExecutorOutputParser("pi");
+    const input = [
+      ...Array.from({ length: 60 }, updateLine),
+      JSON.stringify({
+        type: "tool_execution_result",
+        tool: "bash",
+        status: "success",
+        result: 0,
+        cost: 0.0,
+      }),
+      JSON.stringify({
+        type: "agent_message",
+        content: "All changes committed",
+      }),
+      JSON.stringify({ type: "report", text: "提交: abc123", cost: 0.0 }),
+    ].join("\n");
+    const entries = parse(`${input}\n`);
+    // 修复前基线:60 条 update 各渲染 [工具]+[命令] 两条(120),result 行渲染
+    // [工具]+[汇报 0] 两条,message/report 各一条 → 124 行;修复后 5 行。
+    const baseline = 60 * 2 + 2 + 1 + 1;
+    expect(entries.length).toBe(5);
+    expect(entries.length).toBeLessThanOrEqual(baseline / 10);
+    expect(countKind(entries, "[命令")).toBe(1); // 同一 command 只渲染一次
+    expect(countKind(entries, "[工具")).toBe(2); // 调用(call)与结果(result)并存
+    expect(zeroReportCount(entries)).toBe(0);
+    expect(summaryText(entries)).toContain("[汇报 #t");
+    console.log(
+      `[pi-replay] baseline=${baseline} lines, fixed=${entries.length} lines (${((entries.length / baseline) * 100).toFixed(1)}%)`,
+    );
+  });
+
+  it("错误条目永不折叠:同 chunk 相同错误行逐条保留", () => {
+    const parse = createExecutorOutputParser("pi");
+    const errLine = JSON.stringify({
+      type: "tool_execution_update",
+      tool: "bash",
+      command: "git status",
+      error: "connection reset",
+    });
+    const input = `${errLine}\n${errLine}\n`;
+    const entries = parse(input);
+    expect(entries).toHaveLength(4); // [工具]×1 + [命令]×1 + error×2
+    expect(entries.filter((e) => e.kind === "error")).toHaveLength(2);
   });
 });

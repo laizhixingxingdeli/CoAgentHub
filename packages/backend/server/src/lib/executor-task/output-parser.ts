@@ -34,7 +34,10 @@
  *  - 其他执行器(default):通用语义解析器(spec: generic-executor-output-parsing)。
  *    逐行判定:能 JSON.parse → 按字段语义递归「丢信封、留动作/正文/错误」并截断
  *    长值(全文整行进明细);匹配 [前缀] 形式 → 前缀作为动作类型保留,正文部分可
- *    解析则同样压缩;都不是 → 逐字保留(raw)。未知 executorKey 仍记一次观测日志。
+ *    解析则同样压缩;都不是 → 逐字保留(raw)。usage/cost/price/pricing/billing/
+ *    tokens 大小写不敏感视为信封,文本族键仅字符串渲染,数字/布尔等账目标量不再
+ *    刷屏;同 chunk 重复动作行折叠只留首条(R5,按来源区分调用/结果,错误永不
+ *    折叠);未知 executorKey 仍记一次观测日志。
  *
  * R3 是硬要求:任何一行解析失败/前缀不认识/格式变了 → 原样进缓冲,不丢弃。
  * 宁可多显示,不可静默吞掉。
@@ -481,13 +484,29 @@ const GENERIC_ENVELOPE_KEYS = new Set([
 ]);
 
 /**
+ * 账目/用量信封字段(R2 + Pi 修复):usage/cost/price/pricing/billing/tokens
+ * 大小写不敏感地视为信封——正文提取跳过,避免嵌套的 output_tokens 等被文本族
+ * 键误渲染成 [汇报] 0。token 收集职责在 token-usage.ts,与解析器相互独立。
+ */
+const GENERIC_ACCOUNT_KEYS = new Set([
+  "usage",
+  "cost",
+  "price",
+  "pricing",
+  "billing",
+  "tokens",
+]);
+
+/**
  * 信封判定(R2):键名以 `_` 开头、或为纯 id 类(名为 id / *_id / *Id)、或为时间戳
- * 类(含 time/date)。必须**先于**动作/正文判定——tool_use_id 同时含 tool,不能
+ * 类(含 time/date),或为账目/用量键(usage/cost/price/pricing/billing/tokens,
+ * 大小写不敏感)。必须**先于**动作/正文判定——tool_use_id 同时含 tool,不能
  * 误判成动作。通用启发,不见过的 agent 的 id/遥测字段同样被丢弃。
  */
 function isEnvelopeKey(key: string): boolean {
   if (key.startsWith("_")) return true;
   if (GENERIC_ENVELOPE_KEYS.has(key)) return true;
+  if (GENERIC_ACCOUNT_KEYS.has(key.toLowerCase())) return true;
   if (/id$/i.test(key)) return true;
   return /time|date/i.test(key);
 }
@@ -528,8 +547,10 @@ function genericValueSummary(value: unknown): string {
  *  - 错误:键名含 err 且值为字符串 → [汇报] error=…(R3:错误永不折叠,全文);
  *  - 正文:键名含 text/content/message/output/result → [汇报];对象/数组值
  *    (如 content 块数组)继续递归找正文,不把键名当正文渲染;
- *  - 信封:跳过;未分类对象/数组继续递归(动作可能藏在更深层);
- *  - 标量:跳过(不渲染,防噪音)。
+ *  - 信封:跳过(含 usage/cost/price/pricing/billing/tokens 大小写不敏感变体);
+ *    未分类对象/数组继续递归(动作可能藏在更深层);
+ *  - 标量:跳过(不渲染,防噪音)——文本族键同样只渲染字符串值(Pi 修复:
+ *    result:0 / output_tokens:0 不再渲染成 [汇报] 0)。
  * 不做 agent 格式白名单——按字段语义即可让未见过的 agent 降级可用(R4)。
  */
 function extractGenericFragments(node: unknown, depth: number): string[] {
@@ -560,10 +581,12 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
       lk.includes("output") ||
       lk.includes("result")
     ) {
-      if (typeof value === "object" && value !== null) {
-        fragments.push(...extractGenericFragments(value, depth + 1));
-      } else {
+      // 文本族键仅在值为字符串时渲染;数字/布尔等标量跳过(Pi 修复:result:0、
+      // output_tokens:0 不再渲染成 [汇报] 0);对象/数组继续递归找正文。
+      if (typeof value === "string") {
         fragments.push(`[汇报] ${genericValueSummary(value)}`);
+      } else if (typeof value === "object" && value !== null) {
+        fragments.push(...extractGenericFragments(value, depth + 1));
       }
     } else if (typeof value === "object" && value !== null) {
       fragments.push(...extractGenericFragments(value, depth + 1));
@@ -652,7 +675,38 @@ function genericFragmentKind(fragment: string): OutputEntryKind {
   return "report";
 }
 
-/** 通用解析器:行缓冲 + R1 三序判定;跨 chunk 半截行拼接,flush 吐残留。 */
+/**
+ * 通用行动作来源判定(与 codebuddy lineActionKind 同思路,供 R5 折叠区分):按
+ * 行内 type/event 字段把动作行归为「调用/过程」(call)或「结果」(result),使
+ * 同一工具/命令的调用与结果在折叠时互不吞并;取不到语义返回 undefined(仅按
+ * 整行文本去重)。非 JSON 行返回 undefined。
+ */
+function genericLineActionKind(line: string): "call" | "result" | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const marker = [record.type, record.event]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ")
+    .toLowerCase();
+  if (marker.includes("result")) return "result";
+  if (
+    marker.includes("call") ||
+    marker.includes("update") ||
+    marker.includes("execution") ||
+    marker.includes("start")
+  ) {
+    return "call";
+  }
+  return undefined;
+}
+
+/** 通用解析器:行缓冲 + R1 三序判定 + R5 同 chunk 重复动作行折叠;跨 chunk 半截行拼接,flush 吐残留。 */
 function createGenericParser(): ExecutorOutputParser {
   let pending = "";
   const { entry, raw } = createEntryMaker();
@@ -662,8 +716,22 @@ function createGenericParser(): ExecutorOutputParser {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
     if (lines.length === 0) return [];
+    const seen = new Set<string>();
     const out: OutputEntry[] = [];
-    for (const l of lines) out.push(...renderLine(l));
+    for (const l of lines) {
+      const rendered = renderLine(l);
+      for (const e of rendered) {
+        // R5(同 codebuddy):折叠同 chunk 内重复动作行只留首条;raw 透传行与
+        // error 条目永不折叠(R3:错误信息永不折叠)。折叠键按来源区分调用/结果,
+        // 同 chunk 的工具调用与工具结果互不吞并。
+        if (e.kind !== "raw" && e.kind !== "error") {
+          const key = actionDedupKey(e.summary, genericLineActionKind(l));
+          if (seen.has(key)) continue;
+          seen.add(key);
+        }
+        out.push(e);
+      }
+    }
     return out;
   }) as ExecutorOutputParser;
   parser.flush = () => {
