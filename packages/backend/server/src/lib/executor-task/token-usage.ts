@@ -35,24 +35,35 @@ export interface TokenUsageCollectionInput {
   homeDir?: string;
 }
 
-function nonNegativeNumber(value: unknown): number | undefined {
+function nonNegativeNumber(
+  value: unknown,
+  integerOnly = false,
+): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  if (integerOnly && !Number.isInteger(value)) {
     return undefined;
   }
   return value;
 }
 
-function readUsageObject(value: unknown): UsageTotals | undefined {
+function readUsageObject(
+  value: unknown,
+  integerOnly = false,
+): UsageTotals | undefined {
   if (!value || typeof value !== "object") return undefined;
   const row = value as Record<string, unknown>;
   const inputTokens = nonNegativeNumber(
     row.input_tokens ?? row.inputTokens ?? row.input,
+    integerOnly,
   );
   const outputTokens = nonNegativeNumber(
     row.output_tokens ??
       row.outputTokens ??
       row.output ??
       row.completion_tokens,
+    integerOnly,
   );
   const cachedReadTokens = nonNegativeNumber(
     row.cached_input_tokens ??
@@ -62,6 +73,7 @@ function readUsageObject(value: unknown): UsageTotals | undefined {
       row.cachedTokens ??
       row.cache_read_input_tokens ??
       row.cacheReadInputTokens,
+    integerOnly,
   );
   const cachedCreationTokens = nonNegativeNumber(
     row.cache_creation_input_tokens ??
@@ -70,12 +82,16 @@ function readUsageObject(value: unknown): UsageTotals | undefined {
       // `cache_write_input_tokens`; they are a subset of `input_tokens`.
       row.cache_write_input_tokens ??
       row.cacheWriteInputTokens,
+    integerOnly,
   );
   const cachedInputTokens =
     cachedReadTokens === undefined && cachedCreationTokens === undefined
       ? undefined
       : (cachedReadTokens ?? 0) + (cachedCreationTokens ?? 0);
-  const explicitTotal = nonNegativeNumber(row.total_tokens ?? row.totalTokens);
+  const explicitTotal = nonNegativeNumber(
+    row.total_tokens ?? row.totalTokens,
+    integerOnly,
+  );
   // Frozen spec semantic criterion is "input OR output": any object that
   // resolves to a real input count or a real output count is a usage candidate.
   // A missing side is treated as 0 so input-only / output-only objects are still
@@ -408,19 +424,32 @@ function collectAtomCode(
 /**
  * Recursively visit every nested object in a parsed JSON value. Used by the
  * generic fallback to locate a usage record no matter how deep it is nested.
+ *
+ * `skipKeys` objects whose parent key matches (case-insensitively) are skipped
+ * entirely — this prevents cost/price subtrees from being misread as tokens.
  */
 function walkJsonObjects(
   value: unknown,
   visit: (obj: Record<string, unknown>) => void,
+  skipKeys?: string[],
+  parentKey?: string,
 ): void {
   if (Array.isArray(value)) {
-    for (const item of value) walkJsonObjects(item, visit);
+    for (const item of value)
+      walkJsonObjects(item, visit, skipKeys, parentKey);
     return;
   }
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;
+    if (
+      parentKey &&
+      skipKeys?.some((k) => k.toLowerCase() === parentKey.toLowerCase())
+    ) {
+      return;
+    }
     visit(obj);
-    for (const key of Object.keys(obj)) walkJsonObjects(obj[key], visit);
+    for (const key of Object.keys(obj))
+      walkJsonObjects(obj[key], visit, skipKeys, key);
   }
 }
 
@@ -436,16 +465,22 @@ function walkJsonObjects(
 function collectGenericJsonl(stdout: string): TokenUsage | undefined {
   let latest: UsageTotals | undefined;
   let latestExplicitTotal: number | undefined;
+  const skipKeys = ["cost", "price", "pricing", "usd", "billing"];
   for (const row of parseJsonLines(stdout)) {
-    walkJsonObjects(row, (obj) => {
-      const usage = readUsageObject(obj);
-      if (usage) {
-        latest = usage;
-        latestExplicitTotal = nonNegativeNumber(
-          obj.total_tokens ?? obj.totalTokens,
-        );
-      }
-    });
+    walkJsonObjects(
+      row,
+      (obj) => {
+        const usage = readUsageObject(obj, true);
+        if (usage) {
+          latest = usage;
+          latestExplicitTotal = nonNegativeNumber(
+            obj.total_tokens ?? obj.totalTokens,
+            true,
+          );
+        }
+      },
+      skipKeys,
+    );
   }
   if (!latest) return undefined;
   // Conservative total caliber. OpenAI/Codex-family usage reports `cached_*`

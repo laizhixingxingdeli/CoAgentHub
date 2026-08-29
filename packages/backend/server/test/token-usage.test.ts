@@ -684,6 +684,81 @@ describe("platform token usage collection", () => {
     });
   });
 
+  it("generic scan ignores nested cost decimals and keeps real integer tokens (Pi regression)", async () => {
+    // Pi JSONL: cost subtree carries decimal amounts that must NOT be
+    // misidentified as token counts. Only integer fields count.
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: {
+          input: 1632,
+          output: 27,
+          cacheRead: 0,
+          totalTokens: 1659,
+          cost: {
+            input: 0.00155,
+            output: 0.000108,
+            total: 0.00166,
+          },
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 1632,
+      outputTokens: 27,
+      totalTokens: 1659,
+      source: "generic-jsonl-scan",
+    });
+  });
+
+  it("generic scan returns unavailable when only cost decimals exist and no integer token fields", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: {
+          cost: {
+            input: 0.00155,
+            output: 0.000108,
+            total: 0.00166,
+          },
+        },
+      }),
+    });
+    expect(result).toEqual({ tokenUsage: null, reason: "unavailable" });
+  });
+
+  it("generic scan skips cost/price/pricing/usd/billing subtrees case-insensitively", async () => {
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        metrics: {
+          input_tokens: 100,
+          output_tokens: 20,
+          Cost: { input: 0.01, output: 0.02 },
+          PRICE: { input: 0.03 },
+          Pricing: { total: 0.05 },
+          USD: { amount: 0.1 },
+          Billing: { total: 0.2 },
+        },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      source: "generic-jsonl-scan",
+    });
+  });
+
   it("AtomCode custom path and generic scan agree on totalTokens for the same representative usage (R4 finder)", async () => {
     // Frozen-spec acceptance + L2 requirement 4: build ONE representative usage,
     // feed it to the custom AtomCode collector (via session .meta,
