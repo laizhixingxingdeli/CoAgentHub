@@ -311,11 +311,103 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
   });
 
   it("没有汇报内容时给出占位文案,且不出现展开入口", () => {
-    render(<RequirementTimeline tasks={[makeTask({ id: "t-1" })]} />);
+    render(
+      <RequirementTimeline
+        tasks={[makeTask({ id: "t-1", status: "running" })]}
+      />,
+    );
     expect(screen.getByText("暂无汇报内容")).toBeInTheDocument();
     expect(
       screen.queryByTestId("requirement-timeline-toggle-t-1"),
     ).not.toBeInTheDocument();
+  });
+
+  it("终态任务无汇报无原因时不渲染汇报段落", () => {
+    for (const status of ["done", "failed", "cancelled"] as const) {
+      const { unmount } = render(
+        <RequirementTimeline
+          tasks={[makeTask({ id: `t-${status}`, status })]}
+        />,
+      );
+      expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("有汇报的终态任务仍正常渲染汇报内容", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-done",
+            status: "done",
+            diffSummary: { summary: "已完成修复" },
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("已完成修复")).toBeInTheDocument();
+    expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
+  });
+
+  it("failed 且带 error 时仅显示失败条,不显示暂无汇报内容", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-fail",
+            status: "failed",
+            diffSummary: { error: "spawn reviewer ENOENT" },
+          }),
+        ]}
+      />,
+    );
+    const failedBar = screen.getByTestId(
+      "requirement-timeline-failed-t-fail",
+    );
+    expect(failedBar).toHaveTextContent("任务失败: spawn reviewer ENOENT");
+    expect(failedBar).toHaveClass("text-status-failed");
+    expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
+  });
+
+  it("failed 且带 reconciledReason 时显示失败条并展示原因", () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-fail",
+            status: "failed",
+            diffSummary: { reconciledReason: "checkpoint 不可用" },
+          }),
+        ]}
+      />,
+    );
+    const failedBar = screen.getByTestId(
+      "requirement-timeline-failed-t-fail",
+    );
+    expect(failedBar).toHaveTextContent("任务失败: checkpoint 不可用");
+    expect(failedBar).toHaveClass("text-status-failed");
+    expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
+  });
+
+  it('cancelled 且 diffSummary.error="stopped" 时显示 stopped 条,不显示暂无汇报内容', () => {
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "t-stop",
+            status: "cancelled",
+            diffSummary: { error: "stopped" },
+          }),
+        ]}
+      />,
+    );
+    const stoppedBar = screen.getByTestId(
+      "requirement-timeline-stopped-t-stop",
+    );
+    expect(stoppedBar).toHaveTextContent("stopped");
+    expect(stoppedBar).toHaveClass("text-status-cancelled");
+    expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
   });
 
   it("短 tests / todo 直接铺开,不生成展开入口", () => {

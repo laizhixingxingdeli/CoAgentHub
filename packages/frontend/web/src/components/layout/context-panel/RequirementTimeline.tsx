@@ -455,6 +455,7 @@ export default function RequirementTimeline({
     const outputTail =
       readText(task.diffSummary, "outputTail") ?? task.outputTail ?? null;
     const errorText = readText(task.diffSummary, "error");
+    const reconciledReason = readText(task.diffSummary, "reconciledReason");
     const retries =
       typeof task.diffSummary?.retries === "number"
         ? task.diffSummary.retries
@@ -483,6 +484,7 @@ export default function RequirementTimeline({
     // (failed + diffSummary.unconfirmed)用琥珀色,与任务面板的语义一致。
     const failed = task.status === "failed";
     const unconfirmed = task.diffSummary?.unconfirmed === true;
+    const stopped = task.status === "cancelled" && errorText === "stopped";
     // 这条「消息」的发生时间:汇报在任务结束时落库,updatedAt 更贴近汇报
     // 时刻;老数据 updatedAt 可能为 null,回退 createdAt。
     const timestamp = task.updatedAt ?? task.createdAt;
@@ -555,16 +557,25 @@ export default function RequirementTimeline({
               }`}
             >
               {unconfirmed
-                ? t("tasks.unconfirmed")
-                : `任务${t("tasks.status.failed")}`}
-              {errorText ? `: ${errorText}` : ""}
+                ? `${t("tasks.unconfirmed")}${errorText ? `: ${errorText}` : ""}`
+                : `任务${t("tasks.status.failed")}${errorText ? `: ${errorText}` : reconciledReason ? `: ${reconciledReason}` : ""}`}
             </p>
           )}
-          <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-            {summaryPreview ?? (
-              <span className="text-muted-foreground">暂无汇报内容</span>
-            )}
-          </p>
+          {stopped && (
+            <p
+              data-testid={`requirement-timeline-stopped-${task.id}`}
+              className={`mt-1.5 rounded-md border px-2 py-1 text-xs ${TASK_STATUS_CLASS.cancelled}`}
+            >
+              stopped
+            </p>
+          )}
+          {(summaryPreview !== null || !terminal) && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+              {summaryPreview ?? (
+                <span className="text-muted-foreground">暂无汇报内容</span>
+              )}
+            </p>
+          )}
           {hash && (
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               提交 {hash.slice(0, 12)}
