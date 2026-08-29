@@ -14,6 +14,10 @@ import {
   getDetachedTaskLiveness,
   isDetachedTask,
 } from "@server/lib/detached-task-liveness";
+import {
+  judgeTwoPartyDegradation,
+  type TwoPartyDegradation,
+} from "@server/lib/executor-availability";
 import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   createTaskDispatchWarnings,
@@ -22,12 +26,11 @@ import {
   isExecutorProcessAlive,
   isResumeTask,
   isTerminalTaskStatus,
+  mergePlatformTokenFields,
   notifyTaskStatusChanged,
   readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
-  sumAttemptTokenUsage,
-  sumAttemptTokenUsageReason,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import {
@@ -36,16 +39,12 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
-import {
-  type TwoPartyDegradation,
-  judgeTwoPartyDegradation,
-} from "@server/lib/executor-availability";
 import { findExecutorByKey } from "@server/lib/executors";
-import { insertGroupMessage } from "@server/lib/services/message-service";
-import { wsHub } from "@server/lib/ws-hub";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { hasReviewResult } from "@server/lib/l3-overdue-reminder";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
+import { insertGroupMessage } from "@server/lib/services/message-service";
+import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -1381,55 +1380,21 @@ app
       // 平台原值有两个来源:任务结束路径的完成回填(diffSummary)与采集结果
       // (attempts)。真实 detached 协调链路走后者 —— 任务由协调者 PATCH 落终态,
       // 平台完成回填从未跑过,diffSummary 里根本没有这两个键。取值口径与
-      // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写)。
+      // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写),两处共用
+      // mergePlatformTokenFields。
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&
         summaryToWrite !== null &&
         !Array.isArray(summaryToWrite)
       ) {
-        const incoming =
-          typeof normalizedDiffSummary === "object" &&
-          normalizedDiffSummary !== null &&
-          !Array.isArray(normalizedDiffSummary)
-            ? (normalizedDiffSummary as Record<string, unknown>)
-            : undefined;
-        if (incoming) {
-          const existing =
-            typeof task.diffSummary === "object" &&
-            task.diffSummary !== null &&
-            !Array.isArray(task.diffSummary)
-              ? (task.diffSummary as Record<string, unknown>)
-              : undefined;
-          const attempts = Array.isArray(task.attempts) ? task.attempts : [];
-          // diffSummary 里已有该键时它就是平台完成回填的结果,不再回到 attempts。
-          const platformTokenUsage =
-            existing && Object.hasOwn(existing, "tokenUsage")
-              ? existing.tokenUsage
-              : sumAttemptTokenUsage(attempts);
-          const platformTokenUsageReason =
-            existing && Object.hasOwn(existing, "tokenUsageReason")
-              ? existing.tokenUsageReason
-              : sumAttemptTokenUsageReason(attempts);
-          if (
-            !Object.hasOwn(incoming, "tokenUsage") &&
-            platformTokenUsage !== undefined
-          ) {
-            summaryToWrite = {
-              ...(summaryToWrite as Record<string, unknown>),
-              tokenUsage: platformTokenUsage,
-            };
-          }
-          if (
-            !Object.hasOwn(incoming, "tokenUsageReason") &&
-            platformTokenUsageReason
-          ) {
-            summaryToWrite = {
-              ...(summaryToWrite as Record<string, unknown>),
-              tokenUsageReason: platformTokenUsageReason,
-            };
-          }
-        }
+        summaryToWrite = mergePlatformTokenFields(
+          summaryToWrite as Record<string, unknown>,
+          {
+            existing: task.diffSummary,
+            attempts: Array.isArray(task.attempts) ? task.attempts : [],
+          },
+        );
       }
       // L3 请求按 spec 去重(specs/l3-is-per-spec-not-per-task.md R1-R4):
       // 结案 done 且带 review_request 时,同 specRef+specHash 已存在未应答请求

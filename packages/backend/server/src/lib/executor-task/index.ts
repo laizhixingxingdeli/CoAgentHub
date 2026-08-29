@@ -50,6 +50,7 @@ export {
   resetCodexSkippedEventCounts,
 } from "./output-parser";
 export {
+  backfillDetachedClosedTokenFields,
   cancelQueuedTasks,
   createTaskDispatchWarnings,
   currentRunningTask,
@@ -96,6 +97,7 @@ export {
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type GroupPromptInfo,
+  mergePlatformTokenFields,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";

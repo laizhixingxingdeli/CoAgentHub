@@ -199,6 +199,55 @@ export function sumAttemptTokenUsageReason(
     : "unavailable";
 }
 
+/** diffSummary 归一化:JSON 列可能是 null / 数组 / 基本类型,只有对象是有效载荷。 */
+export function asDiffSummaryRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * 平台采集的 token 字段并入 diffSummary(spec token-fields-clobbered-by-close
+ * R1/R2),PATCH 结案与 detached 采集落库两条写入链共用同一口径:
+ *
+ * - summary 已含该键(含显式 null)→ 以调用方为准,不覆盖(R2);
+ * - summary 不含该键 → 写平台值:优先取既有 diffSummary(平台完成回填的结果),
+ *   缺失时回落到 attempts 采集口径(sumAttemptToken*;undefined 不写)。
+ *
+ * 未改动时原样返回入参(引用相等),调用方据此判断是否需要落库。
+ */
+export function mergePlatformTokenFields(
+  summary: Record<string, unknown>,
+  platform: {
+    /** 既有的 diffSummary(平台完成回填的落点);null/非对象视为无。 */
+    existing?: unknown;
+    /** 采集结果(attempts 时间线);缺省空数组。 */
+    attempts?: readonly TaskAttempt[];
+  },
+): Record<string, unknown> {
+  const existing = asDiffSummaryRecord(platform.existing);
+  const attempts = platform.attempts ?? [];
+  // diffSummary 里已有该键时它就是平台完成回填的结果,不再回到 attempts。
+  const tokenUsage =
+    existing && Object.hasOwn(existing, "tokenUsage")
+      ? existing.tokenUsage
+      : sumAttemptTokenUsage(attempts);
+  const tokenUsageReason =
+    existing && Object.hasOwn(existing, "tokenUsageReason")
+      ? existing.tokenUsageReason
+      : sumAttemptTokenUsageReason(attempts);
+  let next = summary;
+  if (!Object.hasOwn(next, "tokenUsage") && tokenUsage !== undefined) {
+    next = { ...next, tokenUsage };
+  }
+  if (!Object.hasOwn(next, "tokenUsageReason") && tokenUsageReason) {
+    next = { ...next, tokenUsageReason };
+  }
+  return next;
+}
+
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
 export const DEFAULT_GROUP_KEY = "__default__";
 

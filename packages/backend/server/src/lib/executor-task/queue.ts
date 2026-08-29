@@ -35,6 +35,7 @@ import {
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
+import { isTerminalTaskStatus } from "../coordination-activity";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
 import {
@@ -90,12 +91,14 @@ import {
 } from "./state";
 import { collectTokenUsage, extractCodexExecText } from "./token-usage";
 import {
+  asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type DispatchOutcome,
   type GroupPromptInfo,
   type GroupQueue,
+  mergePlatformTokenFields,
   type QueuedRun,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
@@ -1629,8 +1632,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // running 直到 detached 超时,立即失败并 ❌ 回传。
       void handle.promise
         .then(
-          (result) =>
-            collectAttemptTokenUsage(run, handle.pid, repoRoot, result),
+          async (result) => {
+            await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
+            // 续跑任务(及任何由协调者自己在进程内 PATCH 结案的 detached 任务):
+            // 结案那一刻 attempts 尚无 tokenUsage(采集只在进程退出后发生),
+            // PATCH 路由的 R1 回填因此落空。进程退出、采集落库后,若任务已被
+            // PATCH 落终态且 diffSummary 缺这两个键 → 在此补写(与 PATCH R1
+            // 同口径:sumAttemptToken* + undefined 不写,调用方显式键优先)。
+            await backfillDetachedClosedTokenFields(
+              run.db,
+              run.taskId,
+              run.groupId,
+              run.attempts,
+            );
+          },
           (e) => {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(
@@ -2266,6 +2281,37 @@ async function collectAttemptTokenUsage(
   } catch (e) {
     console.warn(`[executor] 写 token usage 失败(${run.taskId}): ${e}`);
   }
+}
+
+/**
+ * 续跑任务(及任何由协调者自己在进程内 PATCH 结案的 detached 任务)进程退出后
+ * 补写 diffSummary 的 token 字段:结案那一刻 attempts 尚无 tokenUsage(采集只在
+ * 进程退出后发生),PATCH 路由的 R1 回填因此落空。进程退出、采集落库后,若任务
+ * 已被 PATCH 落终态且 diffSummary 缺这两个键,以与 tasks.ts PATCH R1 同口径补写
+ * (mergePlatformTokenFields:undefined 不写;调用方显式提供的键已存在于
+ * diffSummary,不覆盖)。
+ */
+export async function backfillDetachedClosedTokenFields(
+  db: DataBase,
+  taskId: string,
+  groupId: string,
+  attempts: readonly TaskAttempt[],
+): Promise<void> {
+  const row = await db.query.task.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.id, taskId), eqFn(t.groupId, groupId)),
+    columns: { status: true, diffSummary: true },
+  });
+  if (!row || !isTerminalTaskStatus(row.status)) return;
+  const existing = asDiffSummaryRecord(row.diffSummary);
+  if (!existing) return;
+  // 引用相等 = 无需补写(键已存在,或 attempts 没采到值)。
+  const next = mergePlatformTokenFields(existing, { attempts });
+  if (next === existing) return;
+  await db
+    .update(taskTable)
+    .set({ diffSummary: next })
+    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
 }
 
 /** 任务终态时更新最后一条 attempt(endedAt/status/error/summary/hash/tokenUsage)并落库。 */
