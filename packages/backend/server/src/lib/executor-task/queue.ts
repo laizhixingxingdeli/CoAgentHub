@@ -65,6 +65,7 @@ import {
   lastLinesOf,
   parseTaskReport,
   renderTaskCard,
+  taskOutputTailLines,
   type TaskReport,
 } from "./report";
 import {
@@ -1912,7 +1913,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         }
         if (run.retryCount > 0) diffSummary.retries = run.retryCount;
         // 完成回填:最近 500 行输出写进 diffSummary.outputTail(之后不依赖内存)。
-        const doneTail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
+        const doneTail = taskOutputTailLines(taskId);
         if (doneTail) diffSummary.outputTail = doneTail;
         await endAttempt(run, {
           status: "done",
@@ -2237,7 +2238,7 @@ function handleClaimTimeout(run: QueuedRun): void {
 /** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。
  *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用);extra 合并进
  *  diffSummary(结果未确认等附加标记,如 { unconfirmed: true })。running 任务
- *  存在输出缓冲时,把最近 50 行写进 diffSummary.outputTail(完成回填,之后
+ *  存在输出缓冲时,把最近 500 行写进 diffSummary.outputTail(完成回填,之后
  *  不依赖内存也能看;无缓冲(未 spawn 的失败)则不加)。 */
 async function failTask(
   db: DataBase,
@@ -2255,7 +2256,7 @@ async function failTask(
     ? sumAttemptTokenUsageReason(attempts)
     : undefined;
   if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
-  const tail = lastLinesOf(taskOutputTail(taskId) ?? "", 500);
+  const tail = taskOutputTailLines(taskId);
   if (tail) diffSummary.outputTail = tail;
   const [failed] = await db
     .update(taskTable)

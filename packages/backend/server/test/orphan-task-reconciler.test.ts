@@ -225,6 +225,52 @@ describe("孤儿任务周期收敛", () => {
     expect((await findTask(task.id))?.status).toBe("running");
   });
 
+  // ---- 本票:孤儿收敛 outputTail 回填 ----
+
+  it("孤儿收敛且缓冲非空:diffSummary 含 outputTail,最多 500 行,三键与豁免逻辑不变", async () => {
+    const participant = await registerParticipant({ name: "orc-tail-a" });
+    const group = await createGroup(participant.id, "孤儿收敛-缓冲非空");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorPid: deadPid(),
+    });
+    const lines = Array.from(
+      { length: 60 },
+      (_, i) => `tail-line-${i + 1}`,
+    );
+    appendTaskOutput(task.id, lines.join("\n") + "\n");
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const row = await findTask(task.id);
+    const summary = row?.diffSummary as Record<string, unknown>;
+    // 60 行全部保留(在 500 以内)。
+    expect(summary.outputTail).toContain("tail-line-1");
+    expect(summary.outputTail).toContain("tail-line-60");
+    // 不截断为 50 行:line-51 必须存在。
+    expect(summary.outputTail).toContain("tail-line-51");
+    // 既有三键不变。
+    expect(summary.error).toContain("no longer exists");
+    expect(summary.reconciledReason).toContain("no longer exists");
+    expect(typeof summary.reconciledAt).toBe("string");
+  });
+
+  it("孤儿收敛且缓冲为空:不写 outputTail 键,不得写空字符串", async () => {
+    const participant = await registerParticipant({ name: "orc-tail-b" });
+    const group = await createGroup(participant.id, "孤儿收敛-缓冲为空");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorPid: deadPid(),
+    });
+
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const row = await findTask(task.id);
+    const summary = row?.diffSummary as Record<string, unknown>;
+    expect("outputTail" in summary).toBe(false);
+    expect(summary.outputTail).toBeUndefined();
+  });
+
   // ---- R2:存活静默 pid 不收敛(防误杀) ----
 
   it("pid 仍存活但超过 30 分钟无输出 → 不收敛(status 保持 running)", async () => {

@@ -24,7 +24,7 @@ import {
 } from "./executor-task";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
 import { enterCooldown, normalizeCooldownEnd } from "./executor-task/queue";
-import { lastLinesOf } from "./executor-task/report";
+import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
   formatEta,
   getRateLimitCooldownMs,
@@ -124,6 +124,7 @@ export async function reconcileOrphanTasks(
       !Array.isArray(task.diffSummary)
         ? { ...(task.diffSummary as Record<string, unknown>) }
         : {};
+    const outputTail = taskOutputTailLines(task.id);
     const [updated] = await db
       .update(taskTable)
       .set({
@@ -133,6 +134,7 @@ export async function reconcileOrphanTasks(
           error,
           reconciledReason: error,
           reconciledAt: now.toISOString(),
+          ...(outputTail ? { outputTail } : {}),
           ...(cooldownEnd !== null
             ? { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd }
             : {}),

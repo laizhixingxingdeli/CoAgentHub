@@ -5,6 +5,7 @@
  */
 
 import { ANSI_RE } from "./ansi";
+import { taskOutputTail } from "./output-buffer";
 
 /** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
 export interface TaskReport {
@@ -85,6 +86,11 @@ export function lastLinesOf(text: string, lines: number): string {
   const clean = (text ?? "").replace(ANSI_RE, "").trim();
   const arr = clean.split("\n").filter((l) => l.trim());
   return arr.slice(-lines).join("\n");
+}
+
+/** 从任务输出缓冲取尾部最近 N 行(清理 ANSI + 空行,非空行计数)。 */
+export function taskOutputTailLines(taskId: string, maxLines = 500): string {
+  return lastLinesOf(taskOutputTail(taskId) ?? "", maxLines);
 }
 
 /** 提交段 token 剥除成对的 Markdown 包裹(支持嵌套,如 **bold**),剥到无可剥为止。 */

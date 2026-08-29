@@ -514,6 +514,34 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(err).toMatch(/预计 .+ 恢复/);
     });
 
+    it("失败路径保留最近 500 行输出到 diffSummary.outputTail", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      process.env.FAKE_LINES = Array.from(
+        { length: 60 },
+        (_, i) => `fail-line-${i + 1}`,
+      ).join("|");
+      process.env.FAKE_ALWAYS_FAIL = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "失败保留 500 行",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const tail = String(
+        (t.diffSummary as Record<string, unknown>)?.outputTail ?? "",
+      );
+      // 60 行全部保留(在 500 以内)。
+      expect(tail).toContain("fail-line-1");
+      expect(tail).toContain("fail-line-60");
+      // 不截断为 50 行:line-51 必须存在。
+      expect(tail).toContain("fail-line-51");
+    }, 15_000);
+
     it("自动重试:2 条 attempt(第一次 failed,第二次 done)", async () => {
       const { coordinator, codebuddy, group } = await setupGroup();
       // 尝试计数需要跨进程持久化(每次 spawn 是新进程):用计数文件区分尝试。
