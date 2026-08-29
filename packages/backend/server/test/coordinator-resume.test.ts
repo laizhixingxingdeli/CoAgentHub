@@ -61,6 +61,9 @@ const {
   consumePendingCompletionEvents,
   maybeCreateCoordinatorResumeTask,
 } = await import("../src/lib/executor-task");
+const { buildSupersededEchoSection } = await import(
+  "../src/lib/executor-task/coordinator-resume"
+);
 
 const runtimeDb = testDb as unknown as DataBase;
 
@@ -453,6 +456,148 @@ describe.sequential("协调者续跑完整验收", () => {
       const resumes = await resumeTasksFor(parent.id);
       const brief = resumes[0].brief ?? "";
       expect(brief).not.toContain("被替代任务验收标准与红线");
+    });
+
+    it("回显明确标注来源任务 id 与哪一次尝试", async () => {
+      const { parent, executor } = await seedParentChild({});
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: [
+          "## Acceptance",
+          "1. 必须实现功能 A",
+          "",
+          "## 红线",
+          "- 不得改 schema",
+        ].join("\n"),
+      });
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).toContain(`来源任务 id: ${attempt1.id}`);
+      expect(brief).toContain("哪一次尝试: 第 1 次尝试");
+    });
+
+    it("被替代任务不存在时明确写无上次任务书可回显", () => {
+      const result = buildSupersededEchoSection(undefined, true, 1);
+      const text = result.join("\n");
+      expect(text).toContain("被替代任务验收标准与红线");
+      expect(text).toContain("无上次任务书可回显");
+    });
+
+    it("被替代任务 brief 为空时明确写无上次任务书可回显", async () => {
+      const { parent, executor } = await seedParentChild({});
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: null,
+      });
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).toContain("被替代任务验收标准与红线");
+      expect(brief).toContain("无上次任务书可回显");
+    });
+
+    it("被替代任务 brief 超长时有界截断并标注截断位置", async () => {
+      const { parent, executor } = await seedParentChild({});
+      const longContent = "A".repeat(5000);
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: [
+          "## Acceptance",
+          longContent,
+          "",
+          "## 红线",
+          "- 不得改 schema",
+        ].join("\n"),
+      });
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      expect(brief).toContain("被替代任务验收标准与红线");
+      expect(brief).toContain("【截断】");
+      expect(brief).toContain("原文共");
+      expect(brief).toContain("保留前");
+      expect(brief).not.toContain(longContent);
+    });
+
+    it("既有续跑任务书其余内容逐字不变", async () => {
+      const { parent, executor } = await seedParentChild({});
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        brief: "## Acceptance\n1. 功能A\n\n## 红线\n- 不得改 schema",
+      });
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+
+      // 重试上下文逐字不变
+      expect(brief).toContain("## 重试上下文");
+      expect(brief).toContain("第 2 次尝试");
+      expect(brief).toContain("上次失败的判定");
+      expect(brief).toContain("本次要避开什么");
+      expect(brief).toContain("逐字相同");
+      expect(brief).toContain("三次");
+
+      // 子任务状态与 L2 指令逐字不变
+      expect(brief).toContain("## 全部子任务");
+      expect(brief).toContain("## 操作");
+      expect(brief).toContain("PATCH 父任务为 done");
     });
   });
 

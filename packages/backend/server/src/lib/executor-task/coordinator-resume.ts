@@ -186,26 +186,86 @@ function extractTaskSections(brief: string | null): {
   };
 }
 
-/** 构建被替代任务验收标准与红线回显段。 */
-function buildSupersededEchoSection(
+/** 被替代任务回显长度上限,防止任务书体积失控。 */
+const MAX_SUPERSEDED_ECHO_LENGTH = 4000;
+
+/** 计算尝试链与当前尝试次数。 */
+function computeAttemptChain(
+  childTask: Task,
+  children: Array<{ id: string; status: string; supersedesTaskId: string | null }>,
+): { chain: string[]; attempt: number } {
+  const byId = new Map(children.map((child) => [child.id, child]));
+  const chain: string[] = [];
+  let cursor: { id: string; supersedesTaskId: string | null } | null = {
+    id: childTask.id,
+    supersedesTaskId: childTask.supersedesTaskId,
+  };
+  while (cursor && chain.length <= 10) {
+    chain.push(cursor.id);
+    const nextId = cursor.supersedesTaskId;
+    if (!nextId) break;
+    const next = byId.get(nextId);
+    if (!next) break; // 被替代任务不在本父任务名下(跨链)则停止回溯。
+    cursor = { id: next.id, supersedesTaskId: next.supersedesTaskId };
+  }
+  return { chain, attempt: chain.length };
+}
+
+/** 构建被替代任务验收标准与红线回显段(导出供定向测试)。 */
+export function buildSupersededEchoSection(
   supersededTask: Task | null | undefined,
+  hasSupersededTask: boolean,
+  supersededAttempt: number | null,
 ): string[] {
-  if (!supersededTask) return [];
+  if (!hasSupersededTask) return [];
+
+  if (
+    !supersededTask ||
+    !supersededTask.brief ||
+    supersededTask.brief.trim().length === 0
+  ) {
+    return [
+      "## 被替代任务验收标准与红线",
+      "- 无上次任务书可回显",
+      "",
+    ];
+  }
+
   const sections = extractTaskSections(supersededTask.brief);
   const lines: string[] = [
     "## 被替代任务验收标准与红线",
     `- 来源任务 id: ${supersededTask.id}`,
   ];
+  if (supersededAttempt !== null) {
+    lines.push(`- 哪一次尝试: 第 ${supersededAttempt} 次尝试`);
+  }
+
+  const contentLines: string[] = [];
   if (sections.acceptance) {
-    lines.push("", sections.acceptance);
+    contentLines.push("", sections.acceptance);
   } else {
-    lines.push("- 无法取得该任务书的验收标准原文。");
+    contentLines.push("- 无法取得该任务书的验收标准原文。");
   }
   if (sections.redline) {
-    lines.push("", sections.redline);
+    contentLines.push("", sections.redline);
   } else {
-    lines.push("- 无法取得该任务书的红线原文。");
+    contentLines.push("- 无法取得该任务书的红线原文。");
   }
+
+  const content = contentLines.join("\n");
+  if (content.length > MAX_SUPERSEDED_ECHO_LENGTH) {
+    const truncated = content.slice(0, MAX_SUPERSEDED_ECHO_LENGTH);
+    lines.push(
+      truncated,
+      "",
+      `--- 【截断】以上内容已截断,原文共 ${content.length} 字符,此处保留前 ${MAX_SUPERSEDED_ECHO_LENGTH} 字符 ---`,
+    );
+  } else {
+    for (const line of contentLines) {
+      lines.push(line);
+    }
+  }
+
   lines.push("");
   return lines;
 }
@@ -221,6 +281,7 @@ function buildResumeBrief(
   }>,
   supersededTask?: Task | null,
 ): string {
+  const { chain, attempt } = computeAttemptChain(childTask, children);
   const diffSummary =
     childTask.diffSummary !== null &&
     childTask.diffSummary !== undefined &&
@@ -249,8 +310,12 @@ function buildResumeBrief(
     "## 全部子任务(id 与当前状态)",
     childrenLines || "- (无)",
     "",
-    ...buildSupersededEchoSection(supersededTask),
-    ...buildRetryContextSection(childTask, children),
+    ...buildSupersededEchoSection(
+      supersededTask,
+      !!childTask.supersedesTaskId,
+      chain.length > 1 ? chain.length - 1 : null,
+    ),
+    ...buildRetryContextSection(childTask, chain, attempt),
     "## 操作",
     "1. 读取父任务详情与冻结 spec,对本次终态子任务做 L2 检视。",
     "2. 若可结案:PATCH 父任务为 done(附 diffSummary)。",
@@ -268,27 +333,9 @@ function buildResumeBrief(
  */
 function buildRetryContextSection(
   childTask: Task,
-  children: Array<{
-    id: string;
-    status: string;
-    supersedesTaskId: string | null;
-  }>,
+  chain: string[],
+  attempt: number,
 ): string[] {
-  const byId = new Map(children.map((child) => [child.id, child]));
-  const chain: string[] = [];
-  let cursor: { id: string; supersedesTaskId: string | null } | null = {
-    id: childTask.id,
-    supersedesTaskId: childTask.supersedesTaskId,
-  };
-  while (cursor && chain.length <= 10) {
-    chain.push(cursor.id);
-    const nextId = cursor.supersedesTaskId;
-    if (!nextId) break;
-    const next = byId.get(nextId);
-    if (!next) break; // 被替代任务不在本父任务名下(跨链)则停止回溯。
-    cursor = { id: next.id, supersedesTaskId: next.supersedesTaskId };
-  }
-  const attempt = chain.length;
   return [
     "## 重试上下文",
     `- 本次终态子任务 ${childTask.id} 是第 ${attempt} 次尝试(替代链: ${chain.join(" → ")};无链 = 首次尝试)。`,
