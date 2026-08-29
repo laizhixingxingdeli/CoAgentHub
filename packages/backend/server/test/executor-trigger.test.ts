@@ -24,8 +24,7 @@ import { testDb } from "./db";
  * 用 fake bin 做集成测试(票面允许):把 EXECUTOR_BIN_CODEBUDDY 指到一个
  * 临时 shell 脚本(打印「汇报」+ commit hash 后 exit 0),再向 CodeBuddy
  * 执行器 participant 发定向消息 → 断言 server 自动建 task(executor_key=codebuddy)、
- * spawn 完成后 status=done + diffSummary,且群里出现 ✅ 状态回传(不再有
- * 🚀 开始执行,该平台代发状态消息已移除)。
+ * spawn 完成后 status=done + diffSummary,且群里出现 🚀/✅ 状态回传。
  *
  * 票2 起 server 在 spawn 前打 git 快照(refs/coagenthub-cp/<taskId>),必须把
  * COAGENTHUB_REPO_ROOT 指到一个临时 git 仓库,避免在真实仓库上跑 git add/commit。
@@ -278,11 +277,10 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     // 结构化段落解析(票7):「汇报:」段只取段值,不再带关键词前缀。
     expect(String(diff!.summary)).toContain("建文件完成");
 
-    // 状态回传:不再有 🚀 开始执行(平台代发已移除),✅ 完成仍在,以执行器
-    // 身份、contentType=task_status。
+    // 状态回传:🚀 开始执行 + ✅ 完成,以执行器身份、contentType=task_status。
     const messages = await listMessages(coordinator.id, group.id);
     const statusMsgs = messages.filter((m) => m.contentType === "task_status");
-    expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(false);
+    expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(true);
     expect(statusMsgs.some((m) => m.body.startsWith("✅"))).toBe(true);
     expect(statusMsgs.every((m) => m.senderId === codebuddy.id)).toBe(true);
   });
@@ -892,12 +890,12 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         "Bearer test-a2a-token",
       );
 
-      // 完成回传:不再有 🚀 开始执行,✅(含远端回复文本)仍在,以 win-hermes 身份。
+      // 完成回传:🚀 + ✅(含远端回复文本),以 win-hermes 身份。
       const messages = await listMessages(coordinator.id, group.id);
       const statusMsgs = messages.filter(
         (m) => m.contentType === "task_status",
       );
-      expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(false);
+      expect(statusMsgs.some((m) => m.body.startsWith("🚀"))).toBe(true);
       const doneMsg = statusMsgs.find((m) => m.body.startsWith("✅"));
       expect(doneMsg).toBeDefined();
       expect(doneMsg!.body).toContain("ACAT-WIN-OK");

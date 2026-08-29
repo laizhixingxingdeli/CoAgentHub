@@ -54,7 +54,10 @@ import {
   releaseTaskOutput,
   taskOutputTail,
 } from "./output-buffer";
-import { createExecutorOutputParser } from "./output-parser";
+import {
+  createExecutorOutputParser,
+  type OutputEntry,
+} from "./output-parser";
 import {
   extractCodeBuddyStreamResult,
   findCommitHash,
@@ -1323,9 +1326,27 @@ function runningForWorkspace(group: GroupQueue): number {
     : runningWorkspaceCount(group.key);
 }
 
+/**
+ * 摘要流文本(spec live-output-hide-thinking-and-autoscroll R1):`kind=thinking`
+ * 的条目不进摘要流 —— 用户要看的是 agent 在做什么(工具/命令/汇报),思考行会把
+ * 动作行稀释(实测占缓冲行数 64%-95%)。判据取解析器已解析出的 kind,不做
+ * 「思考」二字文本匹配(后者会误伤汇报正文里出现该词的行)。
+ *
+ * ⚠️ 只截断摘要流:明细仍由调用方对**未过滤**的 entries 逐条 appendTaskDetail
+ * 落盘,思考全文照常可经 ?detail=1 / 单条展开取回(R2)。
+ */
+function summaryStreamText(entries: readonly OutputEntry[]): string {
+  const lines = entries
+    .filter((entry) => entry.kind !== "thinking")
+    .map((entry) => entry.summary);
+  // 整批都是 thinking 时不产出空行:缓冲与 WS 广播都不该收到空 task_output。
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
-  const { db, groupId, taskId, participantId, ex, body, groupPrompt } = run;
+  const { db, groupId, taskId, participantId, ex, body, summary, groupPrompt } =
+    run;
 
   try {
     // 停止指令可能在 spawn 前到达(kill 句柄尚未就绪):标记 stopped 后
@@ -1362,8 +1383,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.warn(`[executor] 置 running 失败(${taskId}): ${e}`);
     }
 
-    // 开始执行不再发群状态消息(平台代发 🚀 状态条已移除;queued→running
-    // 状态迁移与 notifyTaskStatusChanged 通知在下方保留,任务卡片所需数据不受影响)。
+    // 🚀 开始执行(与桥的 emoji 状态条一致;spec live-output-hide-thinking-…
+    // R6 恢复 —— 状态条承载排队位次/失败原因等信息,问题在于前端把它渲染成
+    // 一条普通发言,修复在渲染侧:task_status 按轻量状态提示渲染)。
+    await postStatus(
+      db,
+      groupId,
+      participantId,
+      ex,
+      `🚀 [${ex.label}] 开始执行:${summary}`,
+    );
 
     // 执行历史:每次 spawn 前 append 一条 running attempt(重试 = 多条)。
     await beginAttempt(run);
@@ -1548,9 +1577,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           // 明细 JSONL(R4,不驻留内存)。
           const entries = parseOutput(clean);
           if (entries.length > 0) {
-            const summaryText = `${entries.map((e) => e.summary).join("\n")}\n`;
-            appendTaskOutput(taskId, summaryText);
-            void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+            // 摘要流过滤 thinking(R1);明细对未过滤的 entries 逐条落盘(R2)。
+            const summaryText = summaryStreamText(entries);
+            if (summaryText.length > 0) {
+              appendTaskOutput(taskId, summaryText);
+              void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+            }
             for (const entry of entries) appendTaskDetail(taskId, entry);
           }
           // 静默检测:每次输出刷新「最近活跃」时间戳并重排静默定时器。
@@ -1698,9 +1730,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 进程已退出:吐出解析器残留的未成行尾部(逐字),保证 R3 不丢任何一行。
       const flushed = parseOutput.flush();
       if (flushed.length > 0) {
-        const summaryText = `${flushed.map((e) => e.summary).join("\n")}\n`;
-        appendTaskOutput(taskId, summaryText);
-        void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+        // 与 onOutput 同口径:摘要过滤 thinking,明细照常落盘。
+        const summaryText = summaryStreamText(flushed);
+        if (summaryText.length > 0) {
+          appendTaskOutput(taskId, summaryText);
+          void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+        }
         for (const entry of flushed) appendTaskDetail(taskId, entry);
       }
       // 停止指令已 kill 进程组:完成回调置 cancelled,不再回传 ❌/✅(停止

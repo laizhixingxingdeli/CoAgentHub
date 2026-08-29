@@ -46,6 +46,7 @@ import {
   RoleBadge,
 } from "@/pages/app/groups/messages/types";
 import { FoldableContent } from "./FoldableContent";
+import { MarkdownBody } from "./MarkdownBody";
 import { roleFromMemberRoles, type TimelineRole } from "./member-role";
 import {
   mergeRequirementTimeline,
@@ -304,6 +305,41 @@ export default function RequirementTimeline({
     const coordination = softDeleted
       ? ({ kind: "free-text" } satisfies CoordinationPresentation)
       : coordinationPresentation(message.body);
+
+    // R6:task_status 是平台/桥代发的状态条(📋 排队 / ⏳ 额度等待 / ✅ 完成 /
+    // ❌ 失败 …),信息点在排队位次、失败原因、额度恢复时刻这些一行里能读完的
+    // 东西 —— 按轻量状态提示渲染,不占发言气泡(与 MessageList 的居中状态条
+    // 同口径)。多行卡片(✅ 完成卡片)取首行做提示,完整正文挂在 title 上,
+    // 详细汇报在同一时间线的任务卡片里。
+    if (
+      !softDeleted &&
+      (message.contentType ?? "text/plain") === "task_status"
+    ) {
+      const headline = message.body.split("\n")[0] ?? "";
+      return (
+        <li
+          key={message.id}
+          data-testid={`requirement-timeline-item-${message.id}`}
+          data-content-type="task_status"
+          className="flex items-baseline gap-2 pl-10 text-xs text-muted-foreground"
+        >
+          <span
+            data-testid={`requirement-timeline-status-${message.id}`}
+            className="min-w-0 flex-1 truncate"
+            title={message.body}
+          >
+            {headline}
+          </span>
+          <span
+            data-testid={`requirement-timeline-time-${message.id}`}
+            className="shrink-0"
+          >
+            {formatMessageTime(message.createdAt)}
+          </span>
+        </li>
+      );
+    }
+
     return (
       <li
         key={message.id}
@@ -362,9 +398,8 @@ export default function RequirementTimeline({
               </details>
             </div>
           ) : (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-              {preview}
-            </p>
+            // R7:任务书/汇报按 markdown 渲染(防注入见 MarkdownBody 文件头)。
+            <MarkdownBody className="mt-1" body={preview} />
           )}
           {taskStatus && (
             <span
@@ -392,9 +427,7 @@ export default function RequirementTimeline({
               expanded={expanded}
               onToggle={() => toggle(message.id)}
             >
-              <p className="whitespace-pre-wrap break-words text-sm">
-                {message.body}
-              </p>
+              <MarkdownBody body={message.body} />
             </FoldableContent>
           )}
         </div>
@@ -629,6 +662,7 @@ export default function RequirementTimeline({
                   groupId={task.groupId}
                   taskId={task.id}
                   text={outputText}
+                  running={task.status === "running"}
                 />
               )}
             </FoldableContent>

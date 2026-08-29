@@ -12,6 +12,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  *    /output/:entryId(单条)按 #id 展开;权限与任务详情路由一致(includeOutput
  *    同口径,不放宽);单条找不到返回 404 并说明原因(明细文件不存在 / id 不存在)。
  *  - R2/R3:thinking 摘要为首句要旨;错误信息永不折叠,全文留在摘要流。
+ *  - spec live-output-hide-thinking-and-autoscroll R1/R2:摘要流不再出现
+ *    thinking 行(只按解析出的 kind 过滤),但明细照常落盘 —— 运行中采样与
+ *    ?detail=1 必须仍能取回 thinking 全文。
  *
  * fake codebuddy bin 与 executor-progress.test.ts 同款集成方式:
  * EXECUTOR_BIN_CODEBUDDY 指向可配置临时脚本,COAGENTHUB_REPO_ROOT 指向临时 git
@@ -299,6 +302,16 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
     }
   }
 
+  /**
+   * 摘要流中以前缀开头的行(R1 采样用:thinking 行的行首标签是 `[思考`)。
+   * 判据用行首标签而非整行包含,避免正文里出现同名词被误判。
+   */
+  function tailLinesStartingWith(tail: string, prefix: string): string[] {
+    return tail
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith(prefix));
+  }
+
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-detail" });
     const codebuddy = await registerParticipant({ name: "CodeBuddy" });
@@ -316,7 +329,7 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       audienceRef: codebuddy.id,
     });
 
-    // 运行中:摘要流已含 thinking 要旨行与完整错误文本(错误未折叠)。
+    // 运行中:摘要流含工具/错误等动作行(错误未折叠),且不含 thinking 行。
     const running = await waitForTaskStatus(
       coordinator.id,
       group.id,
@@ -329,14 +342,15 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       running.id,
       "ENOENT: no such file or directory, open guard.ts",
     );
-    // R2:摘要行是一句要旨,不是字数统计。
-    expect(runningTail).toContain(
-      "[思考 #t1] Let me check the guard file location.",
-    );
+    // R1:两次 thinking(共 4KB)已在 thinking 之后仍有动作行的时刻被滤出摘要流。
+    expect(tailLinesStartingWith(runningTail, "[思考")).toEqual([]);
+    // 动作行完整:工具调用 + 未折叠的错误全文。
+    expect(runningTail).toContain("[工具 #t3] read_file");
     // R3:错误信息未被折叠 —— 全文留在摘要流。
     expect(runningTail).toContain(
       "ENOENT: no such file or directory, open guard.ts",
     );
+    console.log(`[detail] 运行中摘要流采样:\n${runningTail}`);
     // 运行中即可按 #id 展开明细(明细随输出逐条落盘)。
     const runningExpand = await app.request(
       `/api/groups/${group.id}/tasks/${running.id}/output/t1`,
@@ -354,9 +368,11 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       msg.id,
       "done",
     );
-    expect(done.diffSummary?.outputTail).toContain(
-      "[思考 #t1] Let me check the guard file location.",
-    );
+    // 终态摘要流同样不含 thinking 行(R1),动作行保留。
+    expect(
+      tailLinesStartingWith(String(done.diffSummary?.outputTail ?? ""), "[思考"),
+    ).toEqual([]);
+    expect(done.diffSummary?.outputTail).toContain("[工具 #t3] read_file");
     // 摘要流字节数对比:thinking 原文 2×2000 字进明细,摘要只留一行要旨
     // (改造前同形态任务摘要≈全文,现下降超一个数量级)。
     const summaryBytes = (
@@ -524,5 +540,53 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
     );
     expect(manual.status).toBe(200);
     expect(taskDetailFilePath(done.id)).toContain(done.id);
+  });
+
+  it("R1/R2:运行中摘要流无 [思考] 行,同一时刻 ?detail=1 仍取回 thinking 全文", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    process.env.FAKE_JSONL = "1";
+    const msg = await postMessage(coordinator.id, group.id, {
+      body: "摘要流过滤 thinking",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+    });
+    const running = await waitForTaskStatus(
+      coordinator.id,
+      group.id,
+      msg.id,
+      "running",
+    );
+    // 采样点:错误行已到达 —— 它排在两条 thinking 之后,故此刻摘要流若含
+    // thinking 行,只可能是「没过滤成功」。
+    const tail = await waitForOutputTail(
+      coordinator.id,
+      group.id,
+      running.id,
+      "ENOENT: no such file or directory, open guard.ts",
+    );
+    expect(tailLinesStartingWith(tail, "[思考")).toEqual([]);
+    // 动作行完整可见(工具调用 + 未折叠错误),说明过滤只针对 thinking。
+    expect(tail).toContain("[工具 #t3] read_file");
+    expect(tail).toContain("[工具 #t4] read_file error");
+
+    // R2:同一时刻整份明细仍包含两条 thinking 全文。
+    const allRes = await app.request(
+      `/api/groups/${group.id}/tasks/${running.id}/output?detail=1`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    expect(allRes.status).toBe(200);
+    const all = (await allRes.json()) as {
+      entries: Array<{ id: string; kind: string; text: string }>;
+    };
+    const thinkings = all.entries.filter((e) => e.kind === "thinking");
+    expect(thinkings.map((e) => e.id)).toEqual(["t1", "t2"]);
+    expect(thinkings[0].text).toContain("Let me check the guard file location.");
+    expect(thinkings[0].text).toContain(THINKING_BODY);
+    expect(thinkings[1].text).toContain("Now read the guard file to confirm");
+    console.log(
+      `[detail] 运行中 detail=1 采样: entries=${all.entries.map((e) => `${e.id}:${e.kind}`).join(", ")}; thinking 全文=${thinkings.reduce((n, e) => n + e.text.length, 0)}B; 摘要流=${tail.length}B`,
+    );
+
+    await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
   });
 });
