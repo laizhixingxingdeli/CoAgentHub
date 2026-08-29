@@ -876,6 +876,66 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       ).toBeUndefined();
     });
 
+    it("extractGenericJsonlText:agent_end 事件级 messages 数组取最后一条 assistant 正文", () => {
+      // 真实 Pi agent_end 单行含 messages:[user, assistant],应从 messages 尾部
+      // 逆序取得 assistant 五段正文(现有 e583ceeb 只读 record.message 导致 undefined)。
+      const reportText = [
+        "提交: 0123456789abcdef0123456789abcdef01234567",
+        "测试: 定向 Vitest 18/18 通过",
+        "Token: 12345",
+        "汇报: 完成了通用 JSONL 兜底改造",
+        "遗留: 无",
+      ].join("\n");
+      const stdout = JSON.stringify({
+        type: "agent_end",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "# CoAgentHub 任务\n## 汇报格式要求\n提交: <commit hash>",
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: reportText }],
+          },
+        ],
+      });
+      const extracted = extractGenericJsonlText(stdout);
+      expect(extracted).toBe(reportText);
+      expect(parseTaskReport(`${extracted}\n`)).toMatchObject({
+        hash: "0123456789ab",
+        tests: "定向 Vitest 18/18 通过",
+        summary: "完成了通用 JSONL 兜底改造",
+        todo: "无",
+      });
+    });
+
+    it("extractGenericJsonlText:messages[] 只有 user 时返回 undefined", () => {
+      const stdout = JSON.stringify({
+        type: "agent_end",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "任务书" }] },
+          { role: "user", content: [{ type: "text", text: "补充说明" }] },
+        ],
+      });
+      expect(extractGenericJsonlText(stdout)).toBeUndefined();
+    });
+
+    it("extractGenericJsonlText:messages[] assistant 无文本时返回 undefined", () => {
+      const stdout = JSON.stringify({
+        type: "agent_end",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "任务书" }] },
+          { role: "assistant", content: [{ type: "tool_use", name: "Read" }] },
+        ],
+      });
+      expect(extractGenericJsonlText(stdout)).toBeUndefined();
+    });
+
     it("extractGenericJsonlText:content/text 字符串字段等价接受,role 在事件外层也认", () => {
       expect(
         extractGenericJsonlText(

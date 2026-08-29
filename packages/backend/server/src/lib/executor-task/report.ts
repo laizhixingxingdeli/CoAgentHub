@@ -328,6 +328,22 @@ export function extractGenericJsonlText(text: string): string | undefined {
     const row = rows[i];
     if (typeof row !== "object" || row === null) continue;
     const record = row as Record<string, unknown>;
+
+    // 事件级 messages 数组(真实 Pi agent_end 形状):从尾部逆序扫,取最后一条
+    // role=assistant 的文本块;找不到不猜,继续扫前一行。
+    if (Array.isArray(record.messages)) {
+      const messages = record.messages as Array<unknown>;
+      for (let j = messages.length - 1; j >= 0; j--) {
+        const msg = messages[j];
+        if (typeof msg !== "object" || msg === null) continue;
+        const m = msg as Record<string, unknown>;
+        if (m.role !== "assistant") continue;
+        const block = extractAssistantTextBlock(m);
+        if (block !== undefined) return block;
+      }
+      continue;
+    }
+
     const message =
       typeof record.message === "object" && record.message !== null
         ? (record.message as Record<string, unknown>)
