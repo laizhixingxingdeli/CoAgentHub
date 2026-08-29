@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
 import type { OutputEntry } from "@server/lib/executor-task";
 import {
   createExecutorOutputParser,
   getCodexSkippedEventCounts,
+  getGenericSkippedEventCounts,
   resetCodexSkippedEventCounts,
+  resetGenericSkippedEventCounts,
+  summaryStreamText,
 } from "@server/lib/executor-task";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1278,17 +1282,17 @@ describe("default:账目字段不渲染(Pi 修复回归)", () => {
     expect(zeroReportCount(entries)).toBe(0);
   });
 
-  it("仅有 usage/cost 的行提取不出正文 → 逐字 raw 保留(R3,字节不变)", () => {
+  it("仅有 usage/cost 的可解析但无语义 JSON → 显式跳过 + 计数(L2,不再 raw 刷屏)", () => {
     const parse = createExecutorOutputParser("pi");
     const line = JSON.stringify({
       type: "report",
       usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
       cost: 0.0,
     });
+    resetGenericSkippedEventCounts();
     const entries = parse(`${line}\n`);
-    expect(entries).toHaveLength(1);
-    expect(entries[0].kind).toBe("raw");
-    expect(entries[0].summary).toBe(line);
+    expect(entries).toHaveLength(0);
+    expect(getGenericSkippedEventCounts()).toEqual({ report: 1 });
   });
 });
 
@@ -1350,5 +1354,218 @@ describe("default:同 chunk 重复动作行折叠(R5,Pi 修复回归)", () => {
     const entries = parse(input);
     expect(entries).toHaveLength(4); // [工具]×1 + [命令]×1 + error×2
     expect(entries.filter((e) => e.kind === "error")).toHaveLength(2);
+  });
+});
+
+describe("default:可解析但无语义 JSON 显式跳过(L2,计数 + 去重日志)", () => {
+  it("message_update 全信封/增量字段 → 跳过并计数,每签名只记一次日志", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "message_update",
+      usage: { input: 0, output: 0, totalTokens: 0 },
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 1,
+        delta: "500",
+      },
+    });
+    resetGenericSkippedEventCounts();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(parse(`${line}\n${line}\n${line}\n`)).toEqual([]);
+      expect(getGenericSkippedEventCounts()).toEqual({ message_update: 3 });
+      // 去重日志:同签名多次跳过只记一次,不逐行刷屏。
+      expect(
+        warn.mock.calls.filter((c) => c[0]?.includes("message_update")).length,
+      ).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("agent_settled 仅分类字段 → 跳过并计数", () => {
+    const parse = createExecutorOutputParser("pi");
+    resetGenericSkippedEventCounts();
+    expect(parse('{"type":"agent_settled"}\n')).toEqual([]);
+    expect(getGenericSkippedEventCounts()).toEqual({ agent_settled: 1 });
+  });
+
+  it("未知键(payload 等)仍是未知结构 → R3 逐字保留,字节不变", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "brand_new_event",
+      payload: { a: 1 },
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries[0].kind).toBe("raw");
+    expect(entries[0].summary).toBe(line);
+  });
+});
+
+describe("default:toolcall_delta 参数源码不进摘要(L2,验收 6)", () => {
+  it("input_json_delta 增量碎片 → 整行跳过,摘要不含源码", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "tool_call_delta",
+      tool_call_id: "call-1",
+      input_json_delta: '{"command":"echo source-code-here"}',
+    });
+    resetGenericSkippedEventCounts();
+    const entries = parse(`${line}\n`);
+    expect(entries).toEqual([]);
+    expect(getGenericSkippedEventCounts()).toEqual({ tool_call_delta: 1 });
+  });
+
+  it("完整 tool_use 事件 → 摘要截断(不出现成片源码),原文整行进 detail", () => {
+    const parse = createExecutorOutputParser("pi");
+    const longSource = "full source body ".repeat(60); // 远超 200 字符截断阈值
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "read_file",
+            input: { file_path: "/src/a.ts", content: longSource },
+          },
+        ],
+      },
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries.length).toBeGreaterThan(0);
+    // 验收 6:工具参数/结果全文可从 detail 取回;摘要不出现成片源码。
+    expect(entries[0].detail).toBe(line);
+    expect(entries[0].summary).not.toContain(longSource);
+    expect(entries[0].summary.length).toBeLessThan(longSource.length);
+  });
+});
+
+describe("default:跨 chunk seen 折叠(L2,seen 提升到闭包)", () => {
+  it("同一动作行跨 chunk 只保留首条,不同工具仍各自渲染", () => {
+    const parse = createExecutorOutputParser("pi");
+    const call = JSON.stringify({
+      type: "tool_execution_update",
+      tool: "bash",
+      command: "git status --short",
+      status: "running",
+      usage: { input_tokens: 0 },
+    });
+    // chunk1:动作行;chunk2:同一动作行(seen 不再按 chunk 重建 → 折叠)
+    const first = parse(`${call}\n`);
+    const second = parse(`${call}\n`);
+    expect(first.length).toBeGreaterThan(0);
+    expect(second).toEqual([]);
+  });
+
+  it("跨 chunk 的 raw 透传行永不折叠(逐字)", () => {
+    const parse = createExecutorOutputParser("pi");
+    expect(parse("plain text line\n").map((e) => e.summary)).toEqual([
+      "plain text line",
+    ]);
+    expect(parse("plain text line\n").map((e) => e.summary)).toEqual([
+      "plain text line",
+    ]);
+  });
+});
+
+describe("default:summaryStreamText 空摘要过滤(L2,空行治理)", () => {
+  it('raw("") 空摘要不进摘要流,并计为 <empty> 跳过', () => {
+    const entry = (summary: string): OutputEntry => ({
+      id: "t1",
+      kind: summary.length === 0 ? "raw" : "report",
+      summary,
+    });
+    resetGenericSkippedEventCounts();
+    expect(summaryStreamText([entry(""), entry("有内容")])).toBe("有内容\n");
+    expect(getGenericSkippedEventCounts()).toEqual({ "<empty>": 1 });
+  });
+
+  it("全空批不产出空行(与既有 thinking 全过滤同界)", () => {
+    const empty: OutputEntry = { id: "t1", kind: "raw", summary: "" };
+    expect(summaryStreamText([empty])).toBe("");
+  });
+});
+
+describe("真实 outputTail 重放(验收 1-3:Pi / AtomCode fixture)", () => {
+  const piFixture = readFileSync(
+    new URL("./fixtures/pi-task-outputTail.txt", import.meta.url),
+    "utf8",
+  );
+  const atomcodeFixture = readFileSync(
+    new URL("./fixtures/atomcode-task-outputTail.txt", import.meta.url),
+    "utf8",
+  );
+
+  it("Pi 重放:相对 177KB 基线降 ≥80%,裸 JSON 行占比 <5%,动作行不减少", () => {
+    const parse = createExecutorOutputParser("pi");
+    resetGenericSkippedEventCounts();
+    // 分块喂入(每块以换行结尾),模拟真实流式;进程结束时 flush 残留。
+    const chunks = piFixture.split("\n").map((l) => `${l}\n`);
+    const entries = chunks.flatMap((c) => parse(c));
+    const flushed = parse.flush();
+    const output = summaryStreamText([...entries, ...flushed]);
+    const outputBytes = Buffer.byteLength(output, "utf8");
+    const baselineBytes = 177_000;
+    // 验收 1:同一份 Pi 真实输出摘要相对 177KB 基线下降至少 80%。
+    expect(outputBytes).toBeLessThanOrEqual(0.2 * baselineBytes);
+    // 验收 2:裸 JSON 行占比 <5%(跳过后的输出不应再有裸 JSON)。
+    const jsonLines = output
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .filter((l) => {
+        try {
+          JSON.parse(l);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    expect(jsonLines.length).toBeLessThan(0.05 * output.split("\n").length);
+    // 验收 3:非 JSON 行全部逐字保留(动作行/正文不减少、字节不变)。
+    const preserved = piFixture
+      .split("\n")
+      .filter((l) => {
+        try {
+          JSON.parse(l);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .join("\n");
+    expect(output).toBe(`${preserved}\n`);
+    // 跳过观测:message_update 181 条 + agent_settled 1 条。
+    expect(getGenericSkippedEventCounts()).toEqual({
+      message_update: 181,
+      agent_settled: 1,
+    });
+    console.log(
+      `[replay-pi] fixture=${Buffer.byteLength(piFixture, "utf8")}B output=${outputBytes}B (${((outputBytes / baselineBytes) * 100).toFixed(2)}% of 177KB baseline)`,
+    );
+  });
+
+  it("AtomCode 重放:空行占比 <2%,动作行数量不减少", () => {
+    const parse = createExecutorOutputParser("executor");
+    const chunks = atomcodeFixture.split("\n").map((l) => `${l}\n`);
+    const entries = chunks.flatMap((c) => parse(c));
+    const output = summaryStreamText(entries);
+    const lines = output.split("\n").filter((l) => l.length > 0);
+    const emptyShare =
+      lines.length === 0
+        ? 0
+        : output.split("\n").filter((l) => l.length === 0).length /
+          (lines.length + 1);
+    expect(emptyShare).toBeLessThan(0.02);
+    // 动作行([tool→/[tool←)数量不减少:每个输入动作行都保留为输出动作行。
+    const inputActions = atomcodeFixture
+      .split("\n")
+      .filter((l) => /^\[(tool→|tool←)/.test(l)).length;
+    const outputActions = output
+      .split("\n")
+      .filter((l) => /^\[(tool→|tool←)/.test(l)).length;
+    expect(outputActions).toBeGreaterThanOrEqual(inputActions);
+    console.log(
+      `[replay-atomcode] fixture=${Buffer.byteLength(atomcodeFixture, "utf8")}B output=${Buffer.byteLength(output, "utf8")}B actions=${inputActions}→${outputActions}`,
+    );
   });
 });

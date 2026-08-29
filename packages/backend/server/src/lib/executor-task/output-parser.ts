@@ -138,6 +138,38 @@ export function resetCodexSkippedEventCounts(): void {
 }
 
 /**
+ * L2:通用解析器跳过观测 —— 可解析但无语义的 JSON(全信封/分类/增量字段)显式
+ * 跳过,计数按签名累加、日志只对每种签名记一次,避免高吞吐下逐 chunk 刷屏;
+ * 便于确认跳过的是预期的噪音(message_update/tool_call_delta…),而不是悄悄吞掉
+ * 了别的内容。签名取 `type` 字段值,无 type 时按顶层键排序拼接。
+ */
+const genericSkippedEventCounts = new Map<string, number>();
+const observedGenericSkippedSignatures = new Set<string>();
+/** 通用跳过观测(供 queue.ts 共享摘要边界调用,如空摘要过滤)。 */
+export function observeGenericSkippedEvent(signature: string): void {
+  const count = (genericSkippedEventCounts.get(signature) ?? 0) + 1;
+  genericSkippedEventCounts.set(signature, count);
+  if (observedGenericSkippedSignatures.has(signature)) return;
+  observedGenericSkippedSignatures.add(signature);
+  console.warn(
+    `[executor-output-parser] generic no-info JSON skipped: ${signature} (count so far: ${count}); parseable but semantically empty, dropped from summary (L2).`,
+  );
+}
+
+/** L2 可观测性:通用跳过计数快照(按签名),供采样统计与测试断言。 */
+export function getGenericSkippedEventCounts(): Readonly<
+  Record<string, number>
+> {
+  return Object.fromEntries(genericSkippedEventCounts);
+}
+
+/** L2 可观测性:重置通用跳过计数(测试隔离用,生产无需调用)。 */
+export function resetGenericSkippedEventCounts(): void {
+  genericSkippedEventCounts.clear();
+  observedGenericSkippedSignatures.clear();
+}
+
+/**
  * 结构化条目工厂(每次执行一个):分配任务内单调递增的短 id(t1, t2, …),
  * 把 #id 注入行首 [标签] 形式(如 `[工具] x` → `[工具 #t3] x`);raw 透传条目
  * 不加 #id,保证 R7 逐字保留。
@@ -498,6 +530,27 @@ const GENERIC_ACCOUNT_KEYS = new Set([
 ]);
 
 /**
+ * L2:分类/生命周期字段名(大小写不敏感)—— 单值标记,不是正文。可解析但只含
+ * 信封 + 分类 + 增量碎片的 JSON 视为「可解析但无语义」,显式跳过(计数 + 去重
+ * 日志),不再整行 raw 刷屏(Pi message_update / tool_call_delta 实测噪音)。
+ */
+const GENERIC_CLASSIFICATION_KEYS = new Set([
+  "type",
+  "event",
+  "status",
+  "subtype",
+  "role",
+  "kind",
+  "level",
+  "state",
+  "phase",
+  "step",
+  "stage",
+  "version",
+  "index",
+]);
+
+/**
  * 信封判定(R2):键名以 `_` 开头、或为纯 id 类(名为 id / *_id / *Id)、或为时间戳
  * 类(含 time/date),或为账目/用量键(usage/cost/price/pricing/billing/tokens,
  * 大小写不敏感)。必须**先于**动作/正文判定——tool_use_id 同时含 tool,不能
@@ -542,6 +595,26 @@ function genericValueSummary(value: unknown): string {
 }
 
 /**
+ * 内容族键名判定(R2 保留清单,大小写不敏感):动作族(tool/function →
+ * [工具]、command/cmd → [命令])+ 错误族(err)+ 文本族(text/content/message/
+ * output/result → [汇报])。提取通用解析器与无语义判定共用,避免两份清单漂移。
+ */
+function isGenericContentKey(lk: string): boolean {
+  return (
+    lk.includes("tool") ||
+    lk.includes("function") ||
+    lk.includes("command") ||
+    lk.includes("cmd") ||
+    lk.includes("err") ||
+    lk.includes("text") ||
+    lk.includes("content") ||
+    lk.includes("message") ||
+    lk.includes("output") ||
+    lk.includes("result")
+  );
+}
+
+/**
  * 按字段语义递归提取动作/正文片段(R2,spec: generic-executor-output-parsing):
  *  - 动作:键名含 tool/function → [工具];含 command/cmd → [命令];
  *  - 错误:键名含 err 且值为字符串 → [汇报] error=…(R3:错误永不折叠,全文);
@@ -565,6 +638,13 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
     if (isEnvelopeKey(key)) continue;
     const lk = key.toLowerCase();
+    if (!isGenericContentKey(lk)) {
+      // 非内容族:对象/数组继续递归(动作可能藏在更深层),标量跳过。
+      if (typeof value === "object" && value !== null) {
+        fragments.push(...extractGenericFragments(value, depth + 1));
+      }
+      continue;
+    }
     if (lk.includes("tool") || lk.includes("function")) {
       fragments.push(`[工具] ${genericValueSummary(value)}`);
     } else if (lk.includes("command") || lk.includes("cmd")) {
@@ -574,13 +654,7 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
       if (typeof value === "string") {
         fragments.push(`[汇报] error=${value}`);
       }
-    } else if (
-      lk.includes("text") ||
-      lk.includes("content") ||
-      lk.includes("message") ||
-      lk.includes("output") ||
-      lk.includes("result")
-    ) {
+    } else {
       // 文本族键仅在值为字符串时渲染;数字/布尔等标量跳过(Pi 修复:result:0、
       // output_tokens:0 不再渲染成 [汇报] 0);对象/数组继续递归找正文。
       if (typeof value === "string") {
@@ -588,8 +662,6 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
       } else if (typeof value === "object" && value !== null) {
         fragments.push(...extractGenericFragments(value, depth + 1));
       }
-    } else if (typeof value === "object" && value !== null) {
-      fragments.push(...extractGenericFragments(value, depth + 1));
     }
   }
   return fragments;
@@ -597,6 +669,45 @@ function extractGenericFragments(node: unknown, depth: number): string[] {
 
 /** [前缀] 形式:行首的方括号标记(如 [tool→ read_file])作为动作类型保留。 */
 const GENERIC_PREFIX_RE = /^\[([^\]]+)\](.*)$/;
+
+/**
+ * L2:可解析但无语义判定 —— 递归检查对象树,所有键都落在噪音集合(信封/账目/
+ * 分类/增量碎片)内,或落在内容族但值不可渲染(标量/空对象,Pi 修复同源:result:0
+ * 不渲染),返回 true → 显式跳过;只要出现不认识的键(非任何已知族)→ false,
+ * 保持 R3 逐字保留(未知结构)。增量键(含 delta)视为噪音:tool_call_delta /
+ * input_json_delta 是流式碎片,全文在后续完整事件里,不该进摘要。
+ */
+function isGenericNoInfo(node: unknown, depth: number): boolean {
+  if (depth > MAX_GENERIC_DEPTH) return false;
+  if (Array.isArray(node)) {
+    return node.every((el) => isGenericNoInfo(el, depth + 1));
+  }
+  if (typeof node !== "object" || node === null) return true;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const lk = key.toLowerCase();
+    if (isEnvelopeKey(key)) continue;
+    if (GENERIC_ACCOUNT_KEYS.has(lk)) continue;
+    if (GENERIC_CLASSIFICATION_KEYS.has(lk)) continue;
+    if (lk.includes("delta")) continue;
+    if (isGenericContentKey(lk)) {
+      if (typeof value === "string") return false; // 有正文 → 有语义
+      if (value !== null && typeof value === "object") {
+        if (!isGenericNoInfo(value, depth + 1)) return false;
+      }
+      continue; // 内容族标量(如 result:0)→ 噪音
+    }
+    return false; // 不认识的键 → 未知结构 → R3 逐字
+  }
+  return true;
+}
+
+/** L2:跳过签名 —— type 字段值优先,否则按顶层键排序拼接,便于观测聚合。 */
+function genericSkipSignature(parsed: Record<string, unknown>): string {
+  if (typeof parsed.type === "string" && parsed.type.length > 0) {
+    return parsed.type;
+  }
+  return `json:${Object.keys(parsed).sort().join(",")}`;
+}
 
 /** 通用片段 → 结构化条目:类别按片段标签判定,明细 = 原始整行(完整原文)。 */
 function genericFragmentEntry(
@@ -617,10 +728,10 @@ function genericFragmentEntry(
 /**
  * 渲染一条通用解析行(R1 三序判定):
  * 1. 能 JSON.parse → R2 通用提取,提取出片段则逐片段渲染动作条目(明细 = 整行
- *    原文),否则逐字保留;
+ *    原文);可解析但无语义(全信封/分类/增量)显式跳过 + 计数(L2),其余逐字保留;
  * 2. 匹配 [前缀] 形式 → 前缀作为动作类型渲染(正文部分可解析则同样压缩);
  * 3. 都不是 → 逐字保留。
- * R3 硬要求:任何路径提取不出正文都逐字保留,绝不丢弃。
+ * R3 硬要求:解析失败 / 未知结构 / 标量 / 顶层数组逐字保留,绝不丢弃。
  */
 function renderGenericLine(
   line: string,
@@ -636,10 +747,19 @@ function renderGenericLine(
     return [raw(line)];
   }
   if (typeof parsed !== "object" || parsed === null) return [raw(line)]; // R3:标量 JSON
-  const fragments = extractGenericFragments(parsed, 0);
-  return fragments.length > 0
-    ? fragments.map((f) => genericFragmentEntry(f, line, entry))
-    : [raw(line)]; // R3:提取不出正文
+  if (Array.isArray(parsed)) return [raw(line)]; // R3:顶层数组视为未知结构
+  const record = parsed as Record<string, unknown>;
+  const fragments = extractGenericFragments(record, 0);
+  if (fragments.length > 0) {
+    return fragments.map((f) => genericFragmentEntry(f, line, entry));
+  }
+  // L2:可解析但无语义(全信封/分类/增量字段)→ 显式跳过 + 计数 + 去重日志;
+  // 不认识的键保持 R3 逐字(字节不变)。
+  if (isGenericNoInfo(record, 0)) {
+    observeGenericSkippedEvent(genericSkipSignature(record));
+    return [];
+  }
+  return [raw(line)]; // R3:提取不出正文且非纯噪音 → 逐字保留
 }
 
 /** [前缀] 行的渲染:前缀作为动作类型保留,正文若能解析出语义则压缩,否则整行逐字保留。 */
@@ -706,9 +826,13 @@ function genericLineActionKind(line: string): "call" | "result" | undefined {
   return undefined;
 }
 
-/** 通用解析器:行缓冲 + R1 三序判定 + R5 同 chunk 重复动作行折叠;跨 chunk 半截行拼接,flush 吐残留。 */
+/** 通用解析器:行缓冲 + R1 三序判定 + R5 重复动作行折叠(L2:seen 提升到闭包,跨 chunk 生效);跨 chunk 半截行拼接,flush 吐残留。 */
 function createGenericParser(): ExecutorOutputParser {
   let pending = "";
+  // L2:seen 提升到解析器闭包 —— 原实现每次 parse(chunk) 重建,同动作行落在不同
+  // chunk 时折叠失效(同一工具跨 chunk 反复调用仍逐行刷屏)。raw 透传行/error
+  // 条目不进 seen,永不折叠(R3),与 codebuddy 同 chunk 折叠同口径。
+  const seen = new Set<string>();
   const { entry, raw } = createEntryMaker();
   const renderLine = (line: string): OutputEntry[] =>
     renderGenericLine(line, entry, raw);
@@ -716,14 +840,13 @@ function createGenericParser(): ExecutorOutputParser {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
     if (lines.length === 0) return [];
-    const seen = new Set<string>();
     const out: OutputEntry[] = [];
     for (const l of lines) {
       const rendered = renderLine(l);
       for (const e of rendered) {
-        // R5(同 codebuddy):折叠同 chunk 内重复动作行只留首条;raw 透传行与
-        // error 条目永不折叠(R3:错误信息永不折叠)。折叠键按来源区分调用/结果,
-        // 同 chunk 的工具调用与工具结果互不吞并。
+        // R5:折叠同 chunk 内重复动作行只留首条;raw 透传行与 error 条目永不
+        // 折叠(R3:错误信息永不折叠)。折叠键按来源区分调用/结果,同 chunk 的
+        // 工具调用与工具结果互不吞并。
         if (e.kind !== "raw" && e.kind !== "error") {
           const key = actionDedupKey(e.summary, genericLineActionKind(l));
           if (seen.has(key)) continue;

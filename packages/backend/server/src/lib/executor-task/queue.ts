@@ -57,6 +57,7 @@ import {
 import {
   createExecutorOutputParser,
   type OutputEntry,
+  observeGenericSkippedEvent,
 } from "./output-parser";
 import {
   extractCodeBuddyStreamResult,
@@ -65,8 +66,8 @@ import {
   lastLinesOf,
   parseTaskReport,
   renderTaskCard,
-  taskOutputTailLines,
   type TaskReport,
+  taskOutputTailLines,
 } from "./report";
 import {
   activeRuns,
@@ -1339,14 +1340,28 @@ function runningForWorkspace(group: GroupQueue): number {
  *
  * ⚠️ 只截断摘要流:明细仍由调用方对**未过滤**的 entries 逐条 appendTaskDetail
  * 落盘,思考全文照常可经 ?detail=1 / 单条展开取回(R2)。
+ *
+ * L2:空摘要(raw(""))同样不进摘要流 —— 原子码/通用解析器对空白输入行产出
+ * raw("") 条目,逐条 join 会把空行写进 task_output(实测 AtomCode 摘要流空行
+ * 占比过高);共享边界过滤并计为一次 <empty> 跳过(计数 + 去重日志),与
+ * 通用解析器的无语义 JSON 跳过同一观测体系。
  */
 function summaryStreamText(entries: readonly OutputEntry[]): string {
-  const lines = entries
-    .filter((entry) => entry.kind !== "thinking")
-    .map((entry) => entry.summary);
-  // 整批都是 thinking 时不产出空行:缓冲与 WS 广播都不该收到空 task_output。
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "thinking") continue;
+    if (entry.summary.length === 0) {
+      observeGenericSkippedEvent("<empty>");
+      continue;
+    }
+    lines.push(entry.summary);
+  }
+  // 整批都是 thinking/空摘要时不产出空行:缓冲与 WS 广播都不该收到空 task_output。
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
+
+/** L2 可观测性导出:共享摘要过滤函数(供定向回归测试直接断言空行治理)。 */
+export { summaryStreamText };
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
@@ -1838,10 +1853,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词且带结构证据
         // (恢复时刻/错误行形状)→ 额度失败。
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-        const timeoutQuota = classifyQuotaFailure(
-          [lastLinesOf(out, 20)],
-          { taskBook: run.body },
-        );
+        const timeoutQuota = classifyQuotaFailure([lastLinesOf(out, 20)], {
+          taskBook: run.body,
+        });
         if (timeoutQuota.isQuota) {
           // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
           const cooldownEnd = normalizeCooldownEnd(
@@ -1876,10 +1890,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           ? extractCodexExecText(result.stdout ?? "")
           : ex.key === "codebuddy"
             ? extractCodeBuddyStreamResult(result.stdout ?? "")
-            // 无专用提取器的执行器(如 Pi):通用 JSONL 兜底,从最后一条
-            // assistant 消息/事件取文本正文;非 JSONL / 无 assistant 文本时
-            // 返回 undefined,保持 legacy 路径逐字一致。
-            : extractGenericJsonlText(result.stdout ?? "");
+            : // 无专用提取器的执行器(如 Pi):通用 JSONL 兜底,从最后一条
+              // assistant 消息/事件取文本正文;非 JSONL / 无 assistant 文本时
+              // 返回 undefined,保持 legacy 路径逐字一致。
+              extractGenericJsonlText(result.stdout ?? "");
       const output = executorText
         ? `${executorText}\n${result.stderr ?? ""}`
         : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
