@@ -226,18 +226,30 @@ export function OutputDetailBlock({
     >
       {lines.map((line, index) => {
         const entryId = line.entryId;
-        // 行间分隔:`\n` 文本节点只在相邻两行都是纯文本时插入 —— 动作行是
-        // 块级 span,自带换行,再叠加 `\n` 会产生额外空行(本票修复点);
-        // 纯文本行之间没有块级换行,必须靠 `\n` 分行。真实空行(原始输出
-        // 里的空行)是纯文本行之间的 `\n`,原样保留。
+        // 行身份一致化(本票第 2 次尝试):每个原始逻辑行只有一种渲染身份 ——
+        // 纯文本行是文本节点,动作行是块级 span。行间 `\n` 分隔只在相邻两行
+        // 都是非空纯文本时插入;真实空行渲染为自身的 `\n` 文本节点,不再
+        // 依赖相邻行的分隔符。原因:空行盒只有「以保留换行结尾」才会被浏览器
+        // 保留(CSS 2.1 空行盒规则),块级边界前的尾随 `\n` 构成空行盒会被丢弃
+        // —— L2 实测 `line1\n\n[工具 #t2] read` 仅 40px,动作行前的真实空行
+        // 被吞;而块级之后的 `\n` 作为行首换行,空行盒以保留换行结尾能存活,
+        // 于是产生「行前空行消失、行后空行保留」的非对称。空行自带 `\n` 后,
+        // 空行盒两侧都以保留换行结尾;此时空行之后不能再插 `\n`,否则多出一行。
         const needsSeparator =
-          index > 0 && lines[index - 1].entryId === null && entryId === null;
+          index > 0 &&
+          lines[index - 1].entryId === null &&
+          lines[index - 1].line !== "" &&
+          entryId === null;
         return (
           // biome-ignore lint/suspicious/noArrayIndexKey: 输出流按位置追加,普通行只有位置身份
           <Fragment key={`${entryId ?? "plain"}-${index}`}>
             {needsSeparator ? "\n" : null}
             {entryId === null ? (
-              line.line
+              line.line === "" ? (
+                "\n"
+              ) : (
+                line.line
+              )
             ) : (
               <span className="block">
                 <button
