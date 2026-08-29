@@ -239,6 +239,57 @@ describe("任务实体(server 单一状态源)", () => {
     expect(((await repeated.json()) as { id: string }).id).toBe(original.id);
   });
 
+  it("同 message_id 显式传冲突的 supersedesTaskId 时仍返回 409", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    // 建两条被替代的任务。
+    const target1 = await createTask(
+      coordinator.id,
+      group.id,
+      uuidv4(),
+      execA.id,
+    );
+    const targetTask1 = (await target1.json()) as Task;
+    const target2 = await createTask(
+      coordinator.id,
+      group.id,
+      uuidv4(),
+      execA.id,
+    );
+    const targetTask2 = (await target2.json()) as Task;
+
+    const messageId = uuidv4();
+    const first = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: execA.id,
+        supersedesTaskId: targetTask1.id,
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    // 重复 POST 但显式传不同的 supersedesTaskId → 409。
+    const conflicting = await app.request(`/api/groups/${group.id}/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        messageId,
+        executorParticipantId: execA.id,
+        supersedesTaskId: targetTask2.id,
+      }),
+    });
+    expect(conflicting.status).toBe(409);
+    const error = (await conflicting.json()) as { message: string };
+    expect(error.message).toContain("supersedesTaskId");
+  });
+
   it("POST 接受 requirement 与 fix 并落库", async () => {
     const { coordinator, execA, group } = await setupGroup();
 

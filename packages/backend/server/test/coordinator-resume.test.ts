@@ -850,5 +850,169 @@ describe.sequential("协调者续跑完整验收", () => {
       const selfTask = await waitForTask(group.id, selfMsg.id, "running");
       expect(selfTask.supersedesTaskId).toBeNull();
     }, 60_000);
+
+    it("同 messageId 重复 POST 且省略 supersedesTaskId 时,自动推断后仍幂等返回同一任务(回归)", async () => {
+      const coordinator = await registerParticipant(
+        `coord-dup-${crypto.randomUUID()}`,
+      );
+      const executor = await registerParticipant(
+        `exec-dup-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      await bindExecutorKey(executor.id, "executor");
+      const group = await createGroup(coordinator.id, "重复 POST 幂等测试");
+      await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+
+      // 1) 父任务 running,进程已退出。
+      const parentMsg = await postMessage(coordinator.id, group.id, {
+        body: "需求票:实现 Dup",
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      const parentTask = await waitForTask(group.id, parentMsg.id, "running");
+      await testDb
+        .update(taskTable)
+        .set({ executorPid: deadPid() })
+        .where(eq(taskTable.id, parentTask.id));
+
+      // 2) 子任务完成 → 平台创建续跑任务(写入 resumeForChild)。
+      const childMsg = await postMessage(coordinator.id, group.id, {
+        body: "执行 Dup",
+        audience: "participant",
+        audienceRef: executor.id,
+      });
+      const childTask = await waitForTask(group.id, childMsg.id, "done");
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(1);
+
+      // 3) 协调者直接 POST /tasks(非消息路径),省略 supersedesTaskId。
+      // 直接插入消息行(不走消息派发路径,避免消息端自动建 task 抢占 messageId)。
+      const [retryMsg] = await testDb
+        .insert(groupMessageTable)
+        .values({
+          groupId: group.id,
+          senderId: coordinator.id,
+          body: "重试执行 Dup(POST 路径)",
+          audience: "participant",
+          audienceRef: executor.id,
+        })
+        .returning();
+
+      const postTask = (messageId: string) =>
+        app.request(`/api/groups/${group.id}/tasks`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": coordinator.id,
+          },
+          body: JSON.stringify({
+            messageId,
+            executorParticipantId: executor.id,
+          }),
+        });
+
+      // 首次 POST:自动推断 supersedesTaskId = childTask.id。
+      const res1 = await postTask(retryMsg.id);
+      expect(res1.status).toBe(200);
+      const task1 = (await res1.json()) as {
+        id: string;
+        supersedesTaskId: string | null;
+      };
+      expect(task1.supersedesTaskId).toBe(childTask.id);
+
+      // 重复 POST:必须幂等返回同一任务,不得 409。
+      const res2 = await postTask(retryMsg.id);
+      expect(res2.status).toBe(200);
+      const task2 = (await res2.json()) as {
+        id: string;
+        supersedesTaskId: string | null;
+      };
+      expect(task2.id).toBe(task1.id);
+      expect(task2.supersedesTaskId).toBe(childTask.id);
+    }, 60_000);
+
+    it("跨父任务隔离:inferSupersedesTaskId 只取最新父任务的续跑上下文,不串链", async () => {
+      const coordinator = await registerParticipant(
+        `coord-cross-${crypto.randomUUID()}`,
+      );
+      const executor = await registerParticipant(
+        `exec-cross-${crypto.randomUUID()}`,
+      );
+      await bindExecutorKey(coordinator.id, "codebuddy");
+      await bindExecutorKey(executor.id, "executor");
+      const group = await createGroup(coordinator.id, "跨父任务隔离测试");
+      await addMember(coordinator.id, group.id, executor.id, ["executor"]);
+
+      // 父任务 A:running,进程已退出。
+      const parentA = await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "running",
+        executorPid: deadPid(),
+      });
+      // 子任务 A1 完成。
+      const childA1 = await insertTask({
+        groupId: group.id,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parentA.id,
+        dispatcherParticipantId: coordinator.id,
+      });
+      // 为 A 创建续跑任务( resumeForChild = childA1 )。
+      await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "queued",
+        parentTaskId: parentA.id,
+        dispatcherParticipantId: coordinator.id,
+        diffSummary: {
+          platform: { resumeOf: parentA.id, resumeForChild: childA1.id },
+        },
+      });
+
+      // 父任务 B:running,进程已退出,且更新时刻更新(成为"最新"父任务)。
+      const parentB = await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "running",
+        executorPid: deadPid(),
+      });
+      // 让 B 的 updatedAt 更新,确保它是"最新"的 running 父任务。
+      await testDb
+        .update(taskTable)
+        .set({ updatedAt: new Date() })
+        .where(eq(taskTable.id, parentB.id));
+      // 子任务 B1 完成。
+      const childB1 = await insertTask({
+        groupId: group.id,
+        executorParticipantId: executor.id,
+        status: "done",
+        parentTaskId: parentB.id,
+        dispatcherParticipantId: coordinator.id,
+      });
+      // 为 B 创建续跑任务( resumeForChild = childB1 )。
+      await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "queued",
+        parentTaskId: parentB.id,
+        dispatcherParticipantId: coordinator.id,
+        diffSummary: {
+          platform: { resumeOf: parentB.id, resumeForChild: childB1.id },
+        },
+      });
+
+      // inferSupersedesTaskId 应返回 B1(最新父任务 B 的续跑上下文),而不是 A1。
+      const { inferSupersedesTaskId: infer } = await import(
+        "../src/lib/executor-task"
+      );
+      const inferred = await infer(
+        runtimeDb,
+        group.id,
+        coordinator.id,
+        executor.id,
+      );
+      expect(inferred).toBe(childB1.id);
+      expect(inferred).not.toBe(childA1.id);
+    }, 30_000);
   });
 });

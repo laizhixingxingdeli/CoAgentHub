@@ -785,7 +785,7 @@ app
         dispatchKind !== undefined && dispatchKind !== existing.dispatchKind
           ? "dispatchKind"
           : null,
-        finalSupersedesTaskId !== undefined &&
+        supersedesTaskId !== undefined &&
         finalSupersedesTaskId !== existing.supersedesTaskId
           ? "supersedesTaskId"
           : null,
