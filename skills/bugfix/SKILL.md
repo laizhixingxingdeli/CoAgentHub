@@ -20,7 +20,7 @@ Bug reports reach the **reviewer** first — the user-side single entry point. H
 | Diagnose / 定位根因 | **reviewer** skill 的分流职责（复现/定位纪律） | 根因定位纪律见 reviewer skill；协调者不再自行诊断 |
 | To-Fix-Spec → 方案描述 | **coordinator** skill — `### 2. Dispatch` | **不落 `specs/`**：方案描述直接进任务书 body；仍需 reviewer 冻结的 `specRef`（小 bug 引用相关既有 spec） |
 | Dispatch | **coordinator** skill — `### 2. Dispatch`（含 `2.1 Dispatch 纪律`、`2.2 限额处理`） | 按 `specRef` + `specHash` 下发，一票一个内聚关注点 |
-| Verify | **coordinator** skill — `### 4. 验收编排`（L2 → L3 → 裁决 → 结案） | 三层检视闭环；L2 未过直接重下发，L2 通过后下发 L3 检视任务 |
+| Verify | **coordinator** skill — `### 4. 验收编排`（L2 → L3 → 裁决 → 结案） | 三层检视闭环；L2 未过按 **coordinator §4.1.1 重发协议**生成两段式重试任务书后重下发（消费上次证据、可见差异、三次上限），L2 通过后下发 L3 检视任务 |
 
 ## Constraints
 

@@ -108,6 +108,7 @@ async function insertTask(opts: {
   specRef?: string | null;
   specHash?: string | null;
   diffSummary?: unknown;
+  supersedesTaskId?: string | null;
 }) {
   const [row] = await testDb
     .insert(taskTable)
@@ -123,6 +124,7 @@ async function insertTask(opts: {
       specRef: opts.specRef ?? null,
       specHash: opts.specHash ?? null,
       diffSummary: opts.diffSummary ?? null,
+      supersedesTaskId: opts.supersedesTaskId ?? null,
     })
     .returning();
   return row;
@@ -266,6 +268,44 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(brief).toContain(parent.specHash ?? "");
       expect(brief).toContain(sibling.id);
       expect(brief).toContain(sibling.status);
+      // 重试上下文:首次尝试(无 supersedesTaskId 链)必须如实标注第 1 次尝试。
+      expect(brief).toContain("第 1 次尝试");
+    });
+
+    it("R1:brief 含重试上下文 —— 沿 supersedesTaskId 链给出第几次尝试,并强制重发任务书两段式", async () => {
+      const { parent } = await seedParentChild({});
+      const executor2 = await insertParticipant(`exec-${crypto.randomUUID()}`);
+      // 第一次尝试:失败(留下证据)。
+      const attempt1 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor2.id,
+        status: "failed",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        diffSummary: { error: "测试失败,用例 xxx 红" },
+      });
+      // 第二次尝试:L2 重发,替代 attempt1 后完成。
+      const attempt2 = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: executor2.id,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        supersedesTaskId: attempt1.id,
+        diffSummary: { summary: "子任务完成" },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, attempt2);
+      const resumes = await resumeTasksFor(parent.id);
+      const brief = resumes[0].brief ?? "";
+      // 沿 supersedesTaskId 链回溯:第 2 次尝试,链上列出 attempt1。
+      expect(brief).toContain("第 2 次尝试");
+      expect(brief).toContain(attempt1.id);
+      // 重发协议强制注入每轮必读的续跑任务书:两段式 + 可见差异 + 三次上限。
+      expect(brief).toContain("上次失败的判定");
+      expect(brief).toContain("本次要避开什么");
+      expect(brief).toContain("逐字相同");
+      expect(brief).toContain("三次");
     });
 
     it("R2:父进程仍存活 → 不创建续跑任务(回归,必测)", async () => {

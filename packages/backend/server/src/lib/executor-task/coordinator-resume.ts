@@ -170,7 +170,11 @@ export async function maybeCreateCoordinatorResumeTask(
 function buildResumeBrief(
   parent: Task,
   childTask: Task,
-  children: Array<{ id: string; status: string }>,
+  children: Array<{
+    id: string;
+    status: string;
+    supersedesTaskId: string | null;
+  }>,
 ): string {
   const diffSummary =
     childTask.diffSummary !== null &&
@@ -200,11 +204,58 @@ function buildResumeBrief(
     "## 全部子任务(id 与当前状态)",
     childrenLines || "- (无)",
     "",
+    ...buildRetryContextSection(childTask, children),
     "## 操作",
     "1. 读取父任务详情与冻结 spec,对本次终态子任务做 L2 检视。",
     "2. 若可结案:PATCH 父任务为 done(附 diffSummary)。",
-    "3. 完成后 PATCH 本条续跑任务为 done。",
+    "3. 若 L2 未通过:按协调 skill §4.1.1 重发协议生成两段式重试任务书并重下发,",
+    "   supersedesTaskId 指向本次失败子任务;同一工作项连续三次重发仍失败 →",
+    "   停止重试,在群内说明并交回检视者,不得无限重试。",
+    "4. 完成后 PATCH 本条续跑任务为 done。",
   ].join("\n");
+}
+
+/**
+ * 重试上下文(协议注入,协调者每轮必读):沿 supersedesTaskId 链回溯本次终态子任务
+ * 是第几次尝试,并强制重发任务书的两段式要求、可见差异、三次上限。与 queue.ts
+ * 的「派发后立即退出」同款上下文注入 —— 不依赖协调者是否主动读到 SKILL.md §4.1.1。
+ */
+function buildRetryContextSection(
+  childTask: Task,
+  children: Array<{
+    id: string;
+    status: string;
+    supersedesTaskId: string | null;
+  }>,
+): string[] {
+  const byId = new Map(children.map((child) => [child.id, child]));
+  const chain: string[] = [];
+  let cursor: { id: string; supersedesTaskId: string | null } | null = {
+    id: childTask.id,
+    supersedesTaskId: childTask.supersedesTaskId,
+  };
+  while (cursor && chain.length <= 10) {
+    chain.push(cursor.id);
+    const nextId = cursor.supersedesTaskId;
+    if (!nextId) break;
+    const next = byId.get(nextId);
+    if (!next) break; // 被替代任务不在本父任务名下(跨链)则停止回溯。
+    cursor = { id: next.id, supersedesTaskId: next.supersedesTaskId };
+  }
+  const attempt = chain.length;
+  return [
+    "## 重试上下文",
+    `- 本次终态子任务 ${childTask.id} 是第 ${attempt} 次尝试(替代链: ${chain.join(" → ")};无链 = 首次尝试)。`,
+    "- 若为重发(L2 未通过后的重下发):重发任务书必须包含两段,缺任一段即不合格 ——",
+    "  ① 上次失败的判定:是什么失败(零产出/测试不过/越界/超时/额度),依据是什么",
+    "     (提交为空/哪条用例红/哪个文件越界),引用具体证据而非「上次失败了」;",
+    "  ② 本次要避开什么:据此给出的具体约束或提示。",
+    "- 重发任务书必须与上一次存在可见差异;逐字相同视为不合格重试。",
+    "- 失败原因无法判定时,如实写「未能判定失败原因」并说明已查过什么;不得编造,也不得跳过该段。",
+    "- 重发 `diffSummary.retries` 如实记录第几次尝试;同一工作项连续三次重发仍失败 →",
+    "  停止重试,在群内说明并交回检视者,不得无限重试。",
+    "- 验收标准与红线是检视者定的,重发时逐字保持,只允许增补失败判定与避坑提示;不得因重试放宽验收。",
+  ];
 }
 
 /** 为父协调任务创建续跑任务并复用现有队列路径拉起。 */
@@ -215,7 +266,7 @@ async function createCoordinatorResumeTask(
 ): Promise<void> {
   const children = await db.query.task.findMany({
     where: eq(taskTable.parentTaskId, parent.id),
-    columns: { id: true, status: true },
+    columns: { id: true, status: true, supersedesTaskId: true },
     orderBy: (t, { asc: ascFn }) => ascFn(t.createdAt),
   });
 
