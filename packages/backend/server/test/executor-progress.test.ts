@@ -61,6 +61,16 @@ writeFileSync(
     // 因已过而回退 now 导致冷却瞬间过期,使 isInCooldown 断言不稳定)。
     'if [ -n "$FAKE_QUOTA_EXIT0" ]; then echo "[rate-limited] 5h window exhausted — try again in 600 seconds"; exit 0; fi',
     'if [ -n "$FAKE_QUOTA_FRONT" ]; then echo "[rate-limited] 5h window exhausted — try again in 600 seconds"; i=0; while [ $i -lt 30 ]; do echo "normal progress line $i"; i=$((i+1)); done; fi',
+    // 伪额度回显回归(伪额度回显修复):FAKE_QUOTA_ECHO_EXIT0 在输出尾部回显含
+    //  quota/额度 字样的测试文件名与测试源码(01a04e01-b50b / 01a04e31-3194 的
+    //  误判现场)后 exit 0 —— 无恢复时刻、无错误行形状 → 不应判额度失败;
+    //  FAKE_QUOTA_RESETS_EXIT0 尾部打印 "resets around HH:MM"(未来时刻)→ 应判
+    //  配额并冷却至该时刻(成功路径保留真额度检测)。
+    'if [ -n "$FAKE_QUOTA_ECHO_EXIT0" ]; then',
+    '  echo "测试: 全量 L1 通过 — **59 测试文件 / 860 用例**(executor-report-quota.test.ts 38/38 通过)"',
+    '  echo "expect(err).toContain(\\"执行器额度限制\\")"',
+    "fi",
+    'if [ -n "$FAKE_QUOTA_RESETS_EXIT0" ]; then echo "usage limit reached — resets around $FAKE_RESETS_AT"; fi',
     // 超时分支回归:尾部打印额度关键词后 sleep 超过 EXECUTOR_TIMEOUT_MS → 超时
     // 分支(1261)仍应命中额度检测(失败 + 冷却 + 不重试)。写 stderr(行缓冲/不
     // 缓冲):管道 stdout 在 SIGKILL 前可能未刷出,导致超时瞬间捕获不到额度关键词。
@@ -102,7 +112,9 @@ const {
   taskOutputTail,
   __setRateLimitForTests,
 } = await import("@server/lib/executor-task");
-const { isInCooldown } = await import("@server/lib/executor-task/state");
+const { cooldownEndMs, isInCooldown } = await import(
+  "@server/lib/executor-task/state"
+);
 const { parseRateLimitRecoveryMs, renderExecutorArgs } = await import(
   "@server/lib/executors"
 );
@@ -121,6 +133,9 @@ describe("任务面板增强批次 server 侧测试", () => {
       "FAKE_QUOTA_FAIL",
       "FAKE_QUOTA_EXIT0",
       "FAKE_QUOTA_FRONT",
+      "FAKE_QUOTA_ECHO_EXIT0",
+      "FAKE_QUOTA_RESETS_EXIT0",
+      "FAKE_RESETS_AT",
       "FAKE_TIMEOUT_QUOTA",
       "FAKE_FAIL_UNTIL",
       "FAKE_COUNTER_FILE",
@@ -682,6 +697,75 @@ describe("任务面板增强批次 server 侧测试", () => {
       const err = String(t.diffSummary?.error ?? "");
       expect(err).toContain("执行器额度限制");
       expect(err).toMatch(/预计 .+ 恢复/);
+    }, 30_000);
+
+    it("exit 0 + 回显含 quota/额度 的测试名与源码 → 不判额度,落 done(伪额度回显回归)", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // FAKE_QUOTA_ECHO_EXIT0:尾部回显含 quota/额度 字样的测试文件名与测试源码
+      // (01a04e01-b50b / 01a04e31-3194 的误判现场)后 exit 0 —— 无恢复时刻、无
+      // 错误行形状 → 不算额度证据,继续 done 路径(不冷却、不失败)。
+      process.env.FAKE_QUOTA_ECHO_EXIT0 = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "回显额度字样任务",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.status).toBe("done");
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+      expect(String(t.diffSummary?.error ?? "")).not.toContain("执行器额度限制");
+      // 无 quotaMatchedLine 留痕(未判配额)。
+      const summary = t.diffSummary as Record<string, unknown> | null;
+      expect(summary?.quotaMatchedLine).toBeUndefined();
+    }, 30_000);
+
+    it("exit 0 + resets around 未来时刻 → 仍配额,冷却至该时刻,diffSummary 留 quotaMatchedLine", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // FAKE_QUOTA_RESETS_EXIT0:尾部打印 "usage limit reached — resets around
+      // HH:MM"(未来时刻)后 exit 0 → 成功路径仍保留真额度检测:判配额 + 冷却至
+      // 解析出的恢复时刻 + diffSummary.quotaMatchedLine 记录命中原始行。
+      const target = new Date(Date.now() + 25 * 60_000);
+      // 跨午夜时 setHours 会回落到过去 → 保守不延长(冷却瞬间过期),断言改用
+      // 「冷却已登记」;未跨午夜则断言精确到期。
+      const resetsAt = `${target.getHours()}:${String(target.getMinutes()).padStart(2, "0")}`;
+      process.env.FAKE_QUOTA_RESETS_EXIT0 = "1";
+      process.env.FAKE_RESETS_AT = resetsAt;
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "礼貌放弃任务2",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      expect(t.status).toBe("failed");
+      expect(t.diffSummary?.retries).toBeUndefined();
+      const err = String(t.diffSummary?.error ?? "");
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
+      // quotaMatchedLine 记录命中原始行(截断)。
+      const summary = t.diffSummary as Record<string, unknown> | null;
+      expect(String(summary?.quotaMatchedLine)).toContain("usage limit reached");
+      // 冷却至解析出的恢复时刻(与 parseRateLimitRecoveryMs 同源)。
+      const expectedEnd = parseRateLimitRecoveryMs(
+        `usage limit reached — resets around ${resetsAt}`,
+      );
+      if (expectedEnd !== null && expectedEnd > Date.now() + 10_000) {
+        expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
+        expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      } else {
+        expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      }
     }, 30_000);
   });
 

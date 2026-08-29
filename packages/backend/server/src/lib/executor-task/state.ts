@@ -1,5 +1,6 @@
 import {
   type DispatchPolicy,
+  parseRateLimitRecoveryMs,
   type RetryPolicy,
   readDispatchPolicy,
 } from "@server/lib/executors";
@@ -80,10 +81,109 @@ export const executorCooldowns = new Map<string, number>();
 /** 冷却结束定时器(executorKey → timer):到期清冷却并泵一次,让排队任务自动派发。 */
 export const cooldownTimers = new Map<string, NodeJS.Timeout>();
 
-/** 额度失败文本是否命中关键词(rate limit/quota/429/额度 等,大小写不敏感)。 */
+/**
+ * 额度判定的调用上下文(伪额度回显修复):只靠关键词命中不足以判额度 ——
+ * 必须至少有一条结构证据:非零退出码 / 输出含真实恢复时刻 / 命中行呈提供方
+ * 错误行形状。同时排除「自指」命中行:detectPatterns 定义本身与任务书回显。
+ */
+export interface QuotaFailureContext {
+  /** 进程退出码;null/undefined = 未知(如孤儿收敛无退出码可取)。 */
+  exitCode?: number | null;
+  /** 任务书全文(回显排除):命中行若逐字出现在任务书里 → 视为回显,不计证据。 */
+  taskBook?: string | null;
+}
+
+/** 额度判定结果:isQuota 为真时 matchedLine 为命中的原始行(安全截断)。 */
+export interface QuotaFailureVerdict {
+  isQuota: boolean;
+  /** 命中的原始行(截断到 QUOTA_MATCHED_LINE_MAX 字符);非配额为 null。 */
+  matchedLine: string | null;
+}
+
+/** quotaMatchedLine 落库的最大长度(安全截断,避免超长 JSONL 行原样入 diffSummary)。 */
+const QUOTA_MATCHED_LINE_MAX = 300;
+
+/** 提供方错误行语义形状(逐行):命中行需呈现「报错/限流诊断」外观,而不是源码
+ *  回显或文件名里的 quota 字样。与 CLI 无关,不写死任何执行器名。
+ *   - error/fatal 前缀
+ *   - [rate-limited] 等方括号限流标签
+ *   - {"type":"error",...} JSON 错误事件(Codex 事故原文形态)
+ *   - 限流/额度动词短语(rate limit exceeded / window exhausted / ...)
+ *   - HTTP 状态码 429 / 5xx */
+const PROVIDER_ERROR_LINE_SHAPES: ReadonlyArray<RegExp> = [
+  /^\s*(?:error|fatal)\b/i,
+  /^\s*\[(?:rate[- ]?limit(?:ed)?|quota|limit|429)\]/i,
+  /"type"\s*:\s*"error"/i,
+  /\b(?:rate[- ]?limit(?:ed)? exceeded|too many requests|window exhausted|quota exceeded|usage limit(?:ed)?|you'?ve hit your (?:usage|rate) limit|limit reached|exhausted)\b/i,
+  /\b(?:HTTP\s*)?(?:429|5\d{2})\b/,
+];
+
+/** 是否「detectPatterns 定义」自指行:输出里出现配置定义本身(含 detectPatterns
+ *  键名,或 ≥2 个引号包裹的关键词列表,形如 "usage limit", "rate limit", "quota")。
+ *  这类行只是回显了模式表,不是执行器真遇到的额度报错。 */
+function isDetectPatternsDefinitionLine(line: string): boolean {
+  if (/\bdetectPatterns\b/i.test(line)) return true;
+  const quoted = line.match(/"[^"]*"/g) ?? [];
+  const patternHits = quoted.filter((q) =>
+    rateLimitPatterns.some((p) => q.toLowerCase().includes(p.toLowerCase())),
+  );
+  return patternHits.length >= 2;
+}
+
+/** 是否任务书逐字回显(自指):命中行整行出现在任务书正文里 → 不算证据。
+ *  只做「整行包含」判定(逐字回显),不抓长行里夹带的任务书片段。 */
+function isTaskBookEcho(line: string, taskBook: string | null | undefined): boolean {
+  if (!taskBook) return false;
+  const trimmed = line.trim();
+  return trimmed.length > 0 && taskBook.includes(trimmed);
+}
+
+/**
+ * 额度失败判定(伪额度回显修复):对每行做「关键词命中 → 排除自指 → 结构证据」
+ * 三段判定。结构证据至少满足一条才算额度:非零退出码(整次运行级)、命中行可
+ * 解析出真实恢复时刻、命中行呈提供方错误行形状。仅关键词命中(如输出回显了
+ * 含 quota 字样的源码/测试名/任务书)→ 不算额度,避免误冷却停派。
+ *
+ * 返回命中的原始行(截断),供 diffSummary.quotaMatchedLine 留痕。
+ */
+export function classifyQuotaFailure(
+  texts: string[],
+  ctx: QuotaFailureContext = {},
+): QuotaFailureVerdict {
+  const { exitCode, taskBook } = ctx;
+  const nonzeroExit = typeof exitCode === "number" && exitCode !== 0;
+  for (const raw of texts) {
+    for (const rawLine of raw.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const lower = line.toLowerCase();
+      if (!rateLimitPatterns.some((p) => lower.includes(p.toLowerCase()))) {
+        continue;
+      }
+      // 自指排除:detectPatterns 定义 / 任务书回显。
+      if (isDetectPatternsDefinitionLine(line)) continue;
+      if (isTaskBookEcho(line, taskBook)) continue;
+      // 结构证据:非零退出码 / 真实恢复时刻 / 提供方错误行形状。
+      const hasEvidence =
+        nonzeroExit ||
+        parseRateLimitRecoveryMs(line) !== null ||
+        PROVIDER_ERROR_LINE_SHAPES.some((re) => re.test(line));
+      if (hasEvidence) {
+        return {
+          isQuota: true,
+          matchedLine: line.slice(0, QUOTA_MATCHED_LINE_MAX),
+        };
+      }
+    }
+  }
+  return { isQuota: false, matchedLine: null };
+}
+
+/** 额度失败文本是否命中关键词(rate limit/quota/429/额度 等,大小写不敏感)。
+ *  保持原签名(孤儿收敛等既有调用点不变);底层复用 classifyQuotaFailure 的
+ *  结构证据判定(无退出码、无任务书时可退化为恢复时刻 / 错误行形状证据)。 */
 export function isQuotaFailure(texts: string[]): boolean {
-  const haystack = texts.join("\n").toLowerCase();
-  return rateLimitPatterns.some((p) => haystack.includes(p.toLowerCase()));
+  return classifyQuotaFailure(texts).isQuota;
 }
 
 /** 格式化冷却结束时间(zh-CN 本地时间,与认领超时回传一致)。 */

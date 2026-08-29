@@ -70,6 +70,7 @@ import {
 } from "./report";
 import {
   activeRuns,
+  classifyQuotaFailure,
   clearRunTimers,
   cooldownEndMs,
   cooldownTimers,
@@ -87,7 +88,6 @@ import {
   getStallTimeoutMs,
   groupQueues,
   isInCooldown,
-  isQuotaFailure,
   pumping,
   runningExecutorCount,
   runningGroupCount,
@@ -1835,9 +1835,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           await handleUnconfirmed(run);
           return;
         }
-        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词 → 额度失败。
+        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词且带结构证据
+        // (恢复时刻/错误行形状)→ 额度失败。
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-        if (isQuotaFailure(["执行超时", lastLinesOf(out, 20)])) {
+        const timeoutQuota = classifyQuotaFailure(
+          [lastLinesOf(out, 20)],
+          { taskBook: run.body },
+        );
+        if (timeoutQuota.isQuota) {
           // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
           const cooldownEnd = normalizeCooldownEnd(
             parseRateLimitRecoveryMs(out) ??
@@ -1850,7 +1855,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             {
               retryable: false,
               message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
-              extra: { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd },
+              extra: {
+                [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+                quotaMatchedLine: timeoutQuota.matchedLine,
+              },
               afterPersisted: () =>
                 enterCooldown(ex, cooldownEnd, { db, taskId }),
             },
@@ -1883,8 +1891,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 一致:failed / 冷却 / 不重试 / 回传预计恢复时间);前部命中尾部不命中
         // 则不判(避免误判停派)。不含额度关键词时行为完全不变(继续 done 路径)。
         const successTail = lastLinesOf(output, 20).slice(0, 1500);
-        if (isQuotaFailure([`exit 0`, successTail])) {
-          await handleQuotaFailure(run, "exit 0", successTail);
+        const successQuota = classifyQuotaFailure([successTail], {
+          exitCode: 0,
+          taskBook: run.body,
+        });
+        if (successQuota.isQuota) {
+          await handleQuotaFailure(
+            run,
+            "exit 0",
+            successTail,
+            successQuota.matchedLine,
+          );
           return;
         }
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
@@ -1968,11 +1985,21 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           return;
         }
         // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
-        // → 归类「额度失败」,冷却该执行器、不自动重试、❌ 注明预计恢复时间;
-        // 其余失败保持原重试行为。限定尾部避免全量输出里的无关 "429/quota"
-        // 字样造成误判(误判会停派该执行器整段冷却期)。
-        if (isQuotaFailure([`exit ${result.code}`, tail])) {
-          await handleQuotaFailure(run, `exit ${result.code}`, tail);
+        // 且带结构证据(非零退出码/恢复时刻/错误行形状)→ 归类「额度失败」,冷却
+        // 该执行器、不自动重试、❌ 注明预计恢复时间;其余失败保持原重试行为。
+        // 限定尾部避免全量输出里的无关 "429/quota" 字样造成误判(误判会停派该
+        // 执行器整段冷却期);结构证据排除仅回显源码/任务书的伪命中。
+        const failureQuota = classifyQuotaFailure([tail], {
+          exitCode: result.code,
+          taskBook: run.body,
+        });
+        if (failureQuota.isQuota) {
+          await handleQuotaFailure(
+            run,
+            `exit ${result.code}`,
+            tail,
+            failureQuota.matchedLine,
+          );
         } else {
           await handleFailure(run, `exit ${result.code}`, {
             retryable: true,
@@ -2390,6 +2417,7 @@ async function handleQuotaFailure(
   run: QueuedRun,
   reasonLabel: string,
   tail: string,
+  matchedLine: string | null,
 ): Promise<void> {
   // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
   const cooldownEnd = normalizeCooldownEnd(
@@ -2399,7 +2427,12 @@ async function handleQuotaFailure(
   await handleFailure(run, `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`, {
     retryable: false,
     message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
-    extra: { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd },
+    extra: {
+      [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+      // 伪额度回显修复 R5:记录命中的原始行(截断),便于人判断是真实额度还是
+      // 源码/任务书回显造成的伪命中。
+      ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
+    },
     afterPersisted: () =>
       enterCooldown(run.ex, cooldownEnd, {
         db: run.db,
