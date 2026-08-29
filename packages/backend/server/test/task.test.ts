@@ -1492,6 +1492,162 @@ describe("任务实体(server 单一状态源)", () => {
     expect(summary.tokenUsageReason).toBeNull();
   });
 
+  it("PATCH 结案:diffSummary 无 token 字段而 attempts 已采集 → 平台回填", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(真实 detached 时序)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    // 真实时序:平台只把采集结果写进 attempts,diffSummary 全程由协调者撰写
+    // (任务结束即由协调者 PATCH 落终态,平台完成回填从未跑过)。
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "done",
+            tokenUsage: {
+              inputTokens: 545000,
+              outputTokens: 875,
+              totalTokens: 545875,
+              source: "codex-stdout-jsonl",
+            },
+          },
+        ],
+      })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "协调者结案",
+        noExecutionReason: "无需下发执行器",
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    // 与 queue.ts 完成回填同款汇总口径(含 cachedInputTokens 归零)。
+    expect(summary.tokenUsage).toEqual({
+      inputTokens: 545000,
+      outputTokens: 875,
+      cachedInputTokens: 0,
+      totalTokens: 545875,
+      source: "codex-stdout-jsonl",
+    });
+    expect(summary.summary).toBe("协调者结案");
+  });
+
+  it("PATCH 结案:attempts 只有 tokenUsageReason → 回填 reason", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(attempts 仅 reason)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "done",
+            tokenUsage: null,
+            tokenUsageReason: "unavailable",
+          },
+        ],
+      })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "结案",
+        noExecutionReason: "无需下发执行器",
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.tokenUsageReason).toBe("unavailable");
+    expect(summary.tokenUsage).toBeNull();
+  });
+
+  it("PATCH 结案:attempts 已采集但载荷显式提供(含 null)→ 调用方优先", async () => {
+    const { coordinator, group } = await setupGroup();
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "协调任务(attempts 与显式载荷冲突)",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    await testDb
+      .update(taskTable)
+      .set({
+        attempts: [
+          {
+            n: 1,
+            startedAt: new Date(0).toISOString(),
+            status: "done",
+            tokenUsage: {
+              inputTokens: 1,
+              outputTokens: 2,
+              totalTokens: 3,
+              source: "attempts",
+            },
+          },
+        ],
+      })
+      .where(eq(taskTable.id, task.id));
+
+    const done = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        summary: "结案",
+        noExecutionReason: "无需下发执行器",
+        tokenUsage: null,
+        tokenUsageReason: null,
+      },
+    });
+    expect(done.status).toBe(200);
+    const summary = ((await done.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(summary, "tokenUsage")).toBe(true);
+    expect(summary.tokenUsage).toBeNull();
+    expect(Object.hasOwn(summary, "tokenUsageReason")).toBe(true);
+    expect(summary.tokenUsageReason).toBeNull();
+  });
+
   it("PATCH 结案:token 字段保留与 claimVerification 写入并存(回归)", async () => {
     const { coordinator, execA, group } = await setupGroup();
     const created = await createTask(

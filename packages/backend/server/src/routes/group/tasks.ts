@@ -26,6 +26,8 @@ import {
   readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
+  sumAttemptTokenUsage,
+  sumAttemptTokenUsageReason,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import {
@@ -1372,10 +1374,14 @@ app
             }
           : summaryWithoutStaleMarker;
       }
-      // token-fields-clobbered-by-close R1:平台在任务结束路径补写的 token 字段
-      // (queue.ts 完成回填)不得被调用方 PATCH 整体替换冲掉。复用 l1Bypass 的
-      // 平台补写模式:载荷不含该键时保留平台原值;载荷显式提供(含 null)时以
-      // 调用方为准(R2)。
+      // token-fields-clobbered-by-close R1:平台已采集的 token 字段不得被调用方
+      // PATCH 整体替换冲掉。复用 l1Bypass 的平台补写模式:载荷不含该键时写回
+      // 平台原值;载荷显式提供(含 null)时以调用方为准(R2)。
+      //
+      // 平台原值有两个来源:任务结束路径的完成回填(diffSummary)与采集结果
+      // (attempts)。真实 detached 协调链路走后者 —— 任务由协调者 PATCH 落终态,
+      // 平台完成回填从未跑过,diffSummary 里根本没有这两个键。取值口径与
+      // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写)。
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&
@@ -1388,29 +1394,39 @@ app
           !Array.isArray(normalizedDiffSummary)
             ? (normalizedDiffSummary as Record<string, unknown>)
             : undefined;
-        const existing =
-          typeof task.diffSummary === "object" &&
-          task.diffSummary !== null &&
-          !Array.isArray(task.diffSummary)
-            ? (task.diffSummary as Record<string, unknown>)
-            : undefined;
-        if (incoming && existing) {
+        if (incoming) {
+          const existing =
+            typeof task.diffSummary === "object" &&
+            task.diffSummary !== null &&
+            !Array.isArray(task.diffSummary)
+              ? (task.diffSummary as Record<string, unknown>)
+              : undefined;
+          const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+          // diffSummary 里已有该键时它就是平台完成回填的结果,不再回到 attempts。
+          const platformTokenUsage =
+            existing && Object.hasOwn(existing, "tokenUsage")
+              ? existing.tokenUsage
+              : sumAttemptTokenUsage(attempts);
+          const platformTokenUsageReason =
+            existing && Object.hasOwn(existing, "tokenUsageReason")
+              ? existing.tokenUsageReason
+              : sumAttemptTokenUsageReason(attempts);
           if (
             !Object.hasOwn(incoming, "tokenUsage") &&
-            Object.hasOwn(existing, "tokenUsage")
+            platformTokenUsage !== undefined
           ) {
             summaryToWrite = {
               ...(summaryToWrite as Record<string, unknown>),
-              tokenUsage: existing.tokenUsage,
+              tokenUsage: platformTokenUsage,
             };
           }
           if (
             !Object.hasOwn(incoming, "tokenUsageReason") &&
-            Object.hasOwn(existing, "tokenUsageReason")
+            platformTokenUsageReason
           ) {
             summaryToWrite = {
               ...(summaryToWrite as Record<string, unknown>),
-              tokenUsageReason: existing.tokenUsageReason,
+              tokenUsageReason: platformTokenUsageReason,
             };
           }
         }
