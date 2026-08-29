@@ -54,8 +54,8 @@ CoAgentHub/
 │   │   │       ├── lib/ws-hub.ts             # WebSocket 实时推送(/api/ws,成员短缓存)
 │   │   │       ├── lib/orphan-task-reconciler.ts # 孤儿任务周期收敛(10s;判据=executorPid 经
 │   │   │       │                             #   process.kill(pid,0) 抛 ESRCH 才判死,非「无输出超时」;
-│   │   │       │                             #   协调根任务在「有非终态子任务」或「续跑尚未创建」窗口内豁免;
-│   │   │       │                             #   续跑任务(resumeOf)自身不豁免;显式 enabled 开关供测试注入)
+│   │   │       │                             #   协调任务(含 resumeOf 续跑任务)在「有非终态子任务」或「续跑尚未创建」窗口内豁免;
+│   │   │       │                             #   无非终态子任务且无待建续跑时仍收敛;显式 enabled 开关供测试注入)
 │   │   │       └── lib/executor-task/        # 执行器调度(拆分 barrel,导出面兼容)
 │   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
