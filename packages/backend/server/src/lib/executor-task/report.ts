@@ -51,6 +51,17 @@ const REPORT_SECTION_RE: ReadonlyArray<{
 /** 单个汇报段的最大字符数,避免无结束标题时吞入完整执行转录。 */
 const REPORT_SECTION_MAX_LENGTH = 4_000;
 
+/** 提交段 token 剥除的成对 Markdown 包裹(反引号/星号/尖括号/方括号)。 */
+const HASH_WRAP_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["`", "`"],
+  ["*", "*"],
+  ["<", ">"],
+  ["[", "]"],
+];
+
+/** 裸「commit/hash <hex>」行(旧自由文本格式的提交行),汇报块回退向前吸收用。 */
+const BARE_COMMIT_LINE_RE = /^(?:commit|hash)\s*[:：]?\s*[0-9a-f]{7,40}$/i;
+
 /** 清洗 token 段值:去空格与千分位逗号,取首个数字组(去 token/tokens 等后缀词)。 */
 function cleanTokenValue(raw: string): string | undefined {
   const compact = raw.replace(/\s+/g, "");
@@ -74,6 +85,59 @@ export function lastLinesOf(text: string, lines: number): string {
   const clean = (text ?? "").replace(ANSI_RE, "").trim();
   const arr = clean.split("\n").filter((l) => l.trim());
   return arr.slice(-lines).join("\n");
+}
+
+/** 提交段 token 剥除成对的 Markdown 包裹(支持嵌套,如 **bold**),剥到无可剥为止。 */
+function stripHashWrappers(token: string): string {
+  let t = token.trim();
+  let changed = true;
+  while (changed && t.length > 1) {
+    changed = false;
+    for (const [open, close] of HASH_WRAP_PAIRS) {
+      if (t.startsWith(open) && t.endsWith(close)) {
+        t = t.slice(open.length, t.length - close.length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  return t;
+}
+
+/** 段是否为任务书回显占位符:段内容首行形如 <...>(模板占位符)。 */
+function isPlaceholderSection(
+  lines: string[],
+  section: { re: RegExp; start: number },
+): boolean {
+  const firstLine = lines[section.start].replace(section.re, "").trim();
+  return /^<[^>\n]+>/.test(firstLine);
+}
+
+/**
+ * 汇报块起点:最后一个段头行起,向前吸收紧邻的真实段头行与裸 commit/hash 行;
+ * 占位符段头(任务书回显)不吸收;首个非汇报行即停。结构化汇报存在时,回退扫描
+ * 只限该块,不扫任意前文工具输出(避免误取前文旧 hash / 任务书里的 specHash)。
+ */
+function reportBlockStart(
+  lines: string[],
+  found: ReadonlyArray<{ key: keyof TaskReport; start: number; re: RegExp }>,
+): number {
+  const last = found[found.length - 1];
+  let start = last.start;
+  for (let i = last.start - 1; i >= 0; i--) {
+    const section = found.find((f) => f.start === i);
+    if (section) {
+      if (isPlaceholderSection(lines, section)) break;
+      start = i;
+      continue;
+    }
+    if (BARE_COMMIT_LINE_RE.test(lines[i])) {
+      start = i;
+      continue;
+    }
+    break;
+  }
+  return start;
 }
 
 /**
@@ -115,30 +179,38 @@ export function parseTaskReport(text: string): TaskReport {
         .slice(0, REPORT_SECTION_MAX_LENGTH)
         .trim();
       if (value.length === 0) continue;
-      // 执行器可能先回显完整任务书,其中的结构化汇报段是模板占位符。
-      // 忽略整个占位符段,否则例如模板「遗留」段会把回显后续内容吞进结果;
-      // 真实汇报若随后出现,仍会按正常段落解析。
-      const firstLine = value.split("\n", 1)[0].trim();
-      if (/^<[^>\n]+>/.test(firstLine)) continue;
       if (key === "hash") {
-        // 提交段只取首个 token:形如 7~40 位 hex 才算 hash,否则省略(避免把
-        // 描述性文字当 hash 落库)。
-        const token = value.split("\n")[0].trim().split(/\s+/)[0];
+        // 提交段只取首个 token:剥除成对的 Markdown 包裹(反引号/星号/尖括号/
+        // 方括号)后校验,形如 7~40 位 hex 才算 hash,否则省略(避免把描述性
+        // 文字当 hash 落库;包裹内容非 hex 的占位符自然落空)。
+        const token = stripHashWrappers(
+          value.split("\n")[0].trim().split(/\s+/)[0],
+        );
         if (/^[0-9a-f]{7,40}$/i.test(token)) {
           report.hash = token.length === 40 ? token.slice(0, 12) : token;
         }
-      } else if (key === "tokenUsage") {
-        // token 段只取清洗后的纯数字,非法/空值省略(不影响既有四段)。
-        const cleaned = cleanTokenValue(value);
-        if (cleaned) report.tokenUsage = cleaned;
       } else {
-        report[key] = value;
+        // 执行器可能先回显完整任务书,其中的结构化汇报段是模板占位符。
+        // 忽略整个占位符段,否则例如模板「遗留」段会把回显后续内容吞进结果;
+        // 真实汇报若随后出现,仍会按正常段落解析。
+        const firstLine = value.split("\n", 1)[0].trim();
+        if (/^<[^>\n]+>/.test(firstLine)) continue;
+        if (key === "tokenUsage") {
+          // token 段只取清洗后的纯数字,非法/空值省略(不影响既有四段)。
+          const cleaned = cleanTokenValue(value);
+          if (cleaned) report.tokenUsage = cleaned;
+        } else {
+          report[key] = value;
+        }
       }
     }
-    // 提交段缺失/无 hex 时回退全量输出提取(兼容「commit <hex>」裸行 + 段落
-    // 混排的旧输出,hash 不因缺段丢失)。
+    // 提交段缺失/无 hex 时在汇报块内回退提取(兼容「commit <hex>」裸行 + 段落
+    // 混排的旧输出,hash 不因缺段丢失)。汇报块边界见 reportBlockStart:块外的
+    // 工具转录 / 任务书回显一律不扫,避免结构化汇报存在时误取前文旧 hash。
     if (!report.hash) {
-      const h = findCommitHash(clean);
+      const h = findCommitHash(
+        lines.slice(reportBlockStart(lines, found)).join("\n"),
+      );
       if (h) report.hash = h;
     }
     return report;

@@ -560,6 +560,107 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       ).toEqual({ hash: "0123456789ab" });
     });
 
+    it("parseTaskReport:提交段剥除成对 Markdown 包裹后取 hash", () => {
+      // L3 finding:反引号/星号/尖括号/方括号包裹的提交段此前过不了 hex 校验,
+      // 会回退全量输出而误取前文旧 hash。
+      expect(parseTaskReport("提交: `463dee23`\n测试: ok")).toEqual({
+        hash: "463dee23",
+        tests: "ok",
+      });
+      expect(parseTaskReport("提交: *463dee23*\n测试: ok")).toEqual({
+        hash: "463dee23",
+        tests: "ok",
+      });
+      expect(parseTaskReport("提交: <463dee23>\n测试: ok")).toEqual({
+        hash: "463dee23",
+        tests: "ok",
+      });
+      expect(parseTaskReport("提交: [463dee23]\n测试: ok")).toEqual({
+        hash: "463dee23",
+        tests: "ok",
+      });
+      // 40 位 hash 嵌套包裹(如 **bold**)后仍按既有规则缩为 12 位。
+      expect(
+        parseTaskReport(
+          "提交: **0123456789abcdef0123456789abcdef01234567**\n测试: ok",
+        ),
+      ).toEqual({ hash: "0123456789ab", tests: "ok" });
+      // 包裹内容非 hex → 仍省略(占位符不落库);短于 7 位 → 仍省略。
+      expect(
+        parseTaskReport("提交: <commit hash,如无则写无>\n测试: ok"),
+      ).toEqual({ tests: "ok" });
+      expect(parseTaskReport("提交: 463dee\n测试: ok")).toEqual({
+        tests: "ok",
+      });
+    });
+
+    it("parseTaskReport:提交段合法时前文 40 位旧 hash 不被回退采用", () => {
+      // L3 finding:结构化汇报存在时,回退不得扫任意前文工具输出。
+      const stdout = [
+        "工具输出: 3a45793fab84a67a4befc454d4499649ef836c40", // 前文旧 hash
+        "提交: 0123456789abcdef0123456789abcdef01234567",
+        "测试: ok",
+      ].join("\n");
+      expect(parseTaskReport(stdout).hash).toBe("0123456789ab");
+    });
+
+    it("parseTaskReport:提交段包裹时前文 40 位旧 hash 不被回退采用", () => {
+      const stdout = [
+        "工具输出: 3a45793fab84a67a4befc454d4499649ef836c40",
+        "提交: `0123456789abcdef0123456789abcdef01234567`",
+        "测试: ok",
+      ].join("\n");
+      expect(parseTaskReport(stdout).hash).toBe("0123456789ab");
+    });
+
+    it("parseTaskReport:结构化汇报存在但提交段非法,回退限于汇报块", () => {
+      // 前文工具输出含 40 位 hex;提交段非 hex → 回退只能在汇报块内扫,
+      // 不得取前文旧 hash。
+      const stdout = [
+        "工具输出: 3a45793fab84a67a4befc454d4499649ef836c40",
+        "提交: 无",
+        "测试: ok",
+        "遗留: 无",
+      ].join("\n");
+      const report = parseTaskReport(stdout);
+      expect(report.hash).toBeUndefined();
+      expect(report.tests).toBe("ok");
+      expect(report.todo).toBe("无");
+    });
+
+    it("parseTaskReport:结构化汇报存在但提交段缺失,回退在汇报块内可找到 hash", () => {
+      // 汇报块 = 最后一个段头起向前吸收紧邻的段头/裸 commit 行;块内裸
+      // 「commit <hex>」行(旧自由文本提交行)仍可回退解析,块外前文 hex 不取。
+      const stdout = [
+        "工具输出: 3a45793fab84a67a4befc454d4499649ef836c40",
+        "commit 0123456789abcdef0123456789abcdef01234567",
+        "汇报: 修改完成",
+      ].join("\n");
+      expect(parseTaskReport(stdout)).toEqual({
+        summary: "修改完成",
+        hash: "0123456789ab",
+      });
+    });
+
+    it("parseTaskReport:任务书回显含 40 位 specHash 时不误取(汇报块边界)", () => {
+      // 回显的任务书含 specHash(40 位 hex),真实汇报在其后;提交段缺失时
+      // 回退只扫汇报块,不取任务书里的 specHash。
+      const stdout = [
+        "## 关联规范",
+        "- specHash: c0d882c0a5198c7dc6c1e89f9b8701210375c093",
+        "## 汇报格式要求(stdout 请按此输出)",
+        "提交: <commit hash>",
+        "测试: <测试结果摘要>",
+        "遗留: <未完成事项,无则写无>",
+        "测试: 定向 Vitest 18/18 通过",
+        "遗留: 无",
+      ].join("\n");
+      expect(parseTaskReport(stdout)).toEqual({
+        tests: "定向 Vitest 18/18 通过",
+        todo: "无",
+      });
+    });
+
     it("extractCodeBuddyStreamResult:stream-json stdout 提取最终正文", () => {
       // R1 打开 codebuddy --output-format stream-json 后 stdout 变 JSONL:
       // 汇报嵌在 {"type":"result",...} 的 result 字段(实跑 2026-08-26 形状)。
