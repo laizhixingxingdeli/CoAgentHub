@@ -1467,6 +1467,56 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     });
   });
 
+  it("l1Bypass:平台已写 token 字段的 failed 结案 → l1Bypass 与 token 字段并存(回归)", async () => {
+    const coordinator = await register("ci-coord-l1bypass-token");
+    const group = await createGroup(coordinator.id, "ci-l1bypass-token");
+    const msg = await postMessage(coordinator.id, group.id, "协调任务");
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      msg.id,
+      coordinator.id,
+    );
+    // 平台完成路径补写的 token 字段(queue.ts 同款语义);调用方载荷不含这两个键。
+    await testDb
+      .update(taskTable)
+      .set({
+        diffSummary: { tokenUsage: 279888, tokenUsageReason: "unavailable" },
+      })
+      .where(eq(taskTable.id, task.id));
+    const repoDir = createGitRepo();
+    await withRepo(repoDir, async () => {
+      const windowStartedAt = new Date(
+        Math.floor(Date.now() / 1000) * 1000 - 1000,
+      ).toISOString();
+      await setTaskWindow(task.id, windowStartedAt);
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "window"], {
+        cwd: repoDir,
+      });
+      const hash = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+
+      const res = await patchTask(coordinator.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: "诚实的失败上报" },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        diffSummary: {
+          l1Bypass?: { commits: string[]; windowStartedAt: string };
+          tokenUsage?: number;
+          tokenUsageReason?: string;
+        };
+      };
+      expect(body.diffSummary.l1Bypass).toBeDefined();
+      expect(body.diffSummary.l1Bypass?.commits).toContain(hash);
+      expect(body.diffSummary.tokenUsage).toBe(279888);
+      expect(body.diffSummary.tokenUsageReason).toBe("unavailable");
+    });
+  });
+
   it("R4:同时满足 l1Bypass 且有可用执行器时,只写 l1Bypass、不写 degradedToTwoParty", async () => {
     const coordinator = await register("ci-coord-l1bypass-avail-exec");
     const executor = await register("ci-exec-l1bypass-avail-exec");
