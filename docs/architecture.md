@@ -103,6 +103,7 @@ CoAgentHub/
 | `group_members` | `schema/group.ts` | 联合主键(`group_id`,`participant_id`)、`roles`(text[])、`joined_at`;一个 participant 可在不同群组持有不同角色。角色目录 `GROUP_ROLES`:human / coordinator / reviewer / executor / observer / specialist |
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
 | `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
+| `executor_config` | `schema/executor-config.ts` | `id`、`key`/`agent_name`(唯一)、`kind`(`cli`\|`a2a`)、`bin`/`url`、`args`(jsonb)、`label`、`model`、`memory`、`prompt`;迁移 0027 新增可空 `max_concurrency`(声明式并发上限)、`input_mode`(`path`\|`inline`\|`at-file`\|`stdin`)、`env`(jsonb 键值对)、`output_profile`(jsonb,批2消费) |
 | `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`dispatch_kind`(可空,`requirement`\|`fix`,迁移 0024,检视者的逐票工作类型分流结果)、`supersedes_task_id`(可空自引用,迁移 0025,被替代的先前尝试)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`executor_pid`(可空,迁移 0026,detached spawn 的进程组 id,终态后保留)、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`(额度失败时含绝对时间 `executorCooldownEndMs`,服务启动恢复未到期记录并清理过期记录)、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
 | `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`(UNIQUE → 同一 task 最多一个终态 event)、`group_id`、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建(task_id 唯一约束保证幂等) |
 
@@ -143,8 +144,8 @@ CoAgentHub/
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale` / `staleReason`；源码扫描时附 `newestSourceMtime`；仅报告不拦截) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
-| `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`) |
-| `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效) |
+| `/api/executors` | GET/POST | 列出(内置合并 DB 配置)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`、`prompt`、`maxConcurrency`、`inputMode`、`env`、`outputProfile`; 后四项可空) |
+| `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(内置执行器拒绝:DELETE 409 / PATCH 403;key 不可改;`memory` 仅 `kind=a2a` 生效;可部分更新 `maxConcurrency`/`inputMode`/`env`/`outputProfile`) |
 | `/api/skills` | GET | 列出 `skills/` 下 skills(name + description + SKILL.md path) |
 | `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容与基于文件内容的 SHA-256 前 12 位 `version`(coordinator/executor/bugfix/reviewer;未知 404) |
 | `/api/skills/:name/digest` | GET | 仅返回 skill 的内容哈希 `version`,不下载正文(未知 404) |
