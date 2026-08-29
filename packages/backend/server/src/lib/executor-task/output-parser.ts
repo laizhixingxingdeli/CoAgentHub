@@ -23,7 +23,9 @@
  *  - atomcode(-v):动作行本身已紧凑([tool→ name] {args} 等),摘要逐字保留 +
  *    #id;只把粘连在中行内的已知前缀(如 `…read the file.[tokens] prompt=…`)
  *    拆到行首,治「多句粘成一段」;[thinking] 行折叠为 [思考 #id] 要旨 +
- *    明细全文;未知行逐字保留(raw)。
+ *    明细全文;[tokens] 账目行与裸叙述行(无前缀正文)结构化识别后摘要抑制
+ *    (走 thinking 通道:摘要不进流、全文进明细,按 #tN/detail 可取回);
+ *    [done]/[headless]/未知结构逐字保留(raw)。
  *  - codebuddy(--output-format stream-json):Claude Code 风格 JSONL。assistant
  *    内容块 tool_use → [工具](input 只取键名,全文进明细)、text → [汇报]、
  *    thinking → [思考] 要旨 + 明细全文;user tool_result → [工具] 名 ok/error
@@ -438,7 +440,10 @@ function createCodexParser(): ExecutorOutputParser {
 
 /**
  * 渲染一条 atomcode 输出行(两层级):[thinking] → [思考 #id] 要旨 + 明细全文;
- * [tool→ / [tool← 动作行摘要逐字保留(工具名/参数可见),超长行折叠;其余逐字 raw。
+ * [tool→ / [tool← 动作行摘要逐字保留(工具名/参数可见),超长行折叠;
+ * [tokens] 账目行与裸叙述行(无前缀正文)→ 结构化识别后摘要抑制 —— 走 thinking
+ * 通道(summaryStreamText 唯一过滤的类别:摘要不进流、全文进明细,按 #tN / detail
+ * 可取回,不得静默丢弃);[done]/[headless]/未知 [前缀] / JSON 形态逐字 raw。
  */
 function renderAtomCodeLine(
   line: string,
@@ -463,7 +468,24 @@ function renderAtomCodeLine(
     }
     return entry(kind, line);
   }
-  return raw(line); // R7:[done]/[tokens]/[headless]/未知行逐字保留
+  // [tokens] 账目行:结构化识别 → 摘要抑制(thinking 通道),全文进明细。
+  if (/^\[tokens\]\s*/.test(line)) {
+    const body = line.replace(/^\[tokens\]\s*/, "");
+    // 空内容行按 raw 逐字保留(与 [thinking] 空行同界)。
+    return body.length > 0 ? entry("thinking", line, line) : raw(line);
+  }
+  // 裸叙述行(无 [ 前缀、非 JSON 形态、非空)→ 摘要抑制 + 全文进明细。
+  // 纯结构判据,不匹配任何正文关键词。
+  if (isBareNarrativeLine(line)) {
+    return entry("thinking", line, line);
+  }
+  return raw(line); // R7:[done]/[headless]/未知 [前缀]/JSON 形态逐字保留
+}
+
+/** 裸叙述行判定(纯结构):首字符非 `[` 非 `{` 的非空行视为 agent 旁白正文。 */
+function isBareNarrativeLine(line: string): boolean {
+  const first = line.trimStart()[0] ?? "";
+  return first !== "" && first !== "[" && first !== "{";
 }
 
 /**

@@ -25,9 +25,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  *    (R1/R4);非法 JSON、未知顶层 type、未知 item type 值逐字保留;跨 chunk
  *    半截行拼接;进程结束时 flush 吐出未成行残留。
  *  - atomcode(-v):[thinking] 行折叠为 [思考 #id] 首句要旨 + detail 全文;
- *    [tool→/[tool← 动作行摘要逐字 + #id,超长行折叠;未知行逐字保留;
- *    中行内已知前缀拆到行首(治多句粘成一段,内容不丢);跨 chunk 半截行拼接,
- *    进程结束时 flush 吐出未成行残留。
+ *    [tool→/[tool← 动作行摘要逐字 + #id,超长行折叠;[tokens] 账目行与裸叙述行
+ *    (无前缀正文)结构化识别后摘要抑制(thinking 通道,全文进 detail,按 #tN
+ *    可取回);[done]/[headless]/未知结构逐字保留;中行内已知前缀拆到行首
+ *    (治多句粘成一段,内容不丢);跨 chunk 半截行拼接,进程结束时 flush 吐出
+ *    未成行残留。
  *  - codebuddy(--output-format stream-json):有状态 JSONL 解析,形状取自任务
  *    01a03eb9 实跑(2026-08-26)。assistant 内容块 tool_use/text/thinking →
  *    [工具](input 只取键名,值进 detail)/[汇报]/[思考](要旨 + detail);user 内容块
@@ -396,14 +398,20 @@ describe("atomcode:前缀行与未知行(两层级)", () => {
     );
     expect(summaryText(entries)).toBe(
       "[思考 #t1] The user asks to read the file.\n" +
-        "[tokens] prompt=17916 completion=81 cached=6656\n",
+        "[tokens #t2] prompt=17916 completion=81 cached=6656\n",
     );
     // R2:[thinking] 行折叠,明细 = 完整原文。
     expect(entries[0].kind).toBe("thinking");
     expect(entries[0].detail).toBe("The user asks to read the file.");
+    // 拆出的 [tokens] 账目行:结构化识别后摘要抑制(thinking 通道),全文进明细。
+    expect(entries[1].kind).toBe("thinking");
+    expect(entries[1].detail).toBe(
+      "[tokens] prompt=17916 completion=81 cached=6656",
+    );
+    expect(summaryStreamText(entries)).toBe("");
   });
 
-  it("已知前缀与未知行:thinking 折叠,其余原样保留(不过滤旁白)", () => {
+  it("已知前缀与未知行:thinking 折叠,裸叙述抑制,JSON 形态逐字保留", () => {
     const parse = createExecutorOutputParser("executor");
     const input =
       "[headless] --dangerously-skip-permissions\n" +
@@ -414,23 +422,27 @@ describe("atomcode:前缀行与未知行(两层级)", () => {
     expect(entries).toHaveLength(4);
     expect(entries[0].kind).toBe("raw"); // [headless]
     expect(entries[1].kind).toBe("thinking");
-    expect(entries[2].kind).toBe("raw");
-    expect(entries[3].kind).toBe("raw");
+    expect(entries[2].kind).toBe("thinking"); // 裸叙述:摘要抑制
+    expect(entries[3].kind).toBe("raw"); // { 开头的 JSON 形态:未知结构逐字
     expect(entries[0].summary).toBe(
       "[headless] --dangerously-skip-permissions",
     );
     expect(entries[1].summary).toBe("[思考 #t2] plain thinking line");
     expect(entries[2].summary).toBe("任意一行没有前缀的旁白,原样保留");
     expect(entries[3].summary).toBe('{ "not": "an action" }');
+    // 裸叙述抑制后不进摘要流,全文按 #tN 进明细可取回。
+    expect(summaryStreamText([entries[2]])).toBe("");
+    expect(entries[2].detail).toBe("任意一行没有前缀的旁白,原样保留");
   });
 
-  it("行首已知前缀不重复拆行", () => {
+  it("行首已知前缀不重复拆行([tokens] 账目行结构化识别)", () => {
     const parse = createExecutorOutputParser("executor");
     const line = "[tokens] prompt=1 cached=2\n";
     const entries = parse(line);
     expect(entries).toHaveLength(1);
-    expect(entries[0].kind).toBe("raw");
-    expect(entries[0].summary).toBe("[tokens] prompt=1 cached=2");
+    expect(entries[0].kind).toBe("thinking");
+    expect(entries[0].summary).toBe("[tokens #t1] prompt=1 cached=2");
+    expect(entries[0].detail).toBe("[tokens] prompt=1 cached=2");
   });
 
   it("超长工具行(超长参数值)折叠:摘要截断,全文进明细", () => {
@@ -472,14 +484,16 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     );
   });
 
-  it("进程结束 flush 吐出未成行残留(逐字,R3)", () => {
+  it("进程结束 flush 吐出未成行残留(逐字,裸叙述走 thinking 通道)", () => {
     const parse = createExecutorOutputParser("atomcode");
     const partial = "半截行 And"; // 无结尾换行的残留
     expect(parse(partial)).toEqual([]);
     const flushed = parse.flush();
     expect(flushed).toHaveLength(1);
-    expect(flushed[0].kind).toBe("raw");
+    // 裸叙述残留:结构化识别为 thinking,摘要抑制 + 全文进明细(不静默丢弃)。
+    expect(flushed[0].kind).toBe("thinking");
     expect(flushed[0].summary).toBe(partial);
+    expect(flushed[0].detail).toBe(partial);
     expect(parse.flush()).toEqual([]);
   });
 
@@ -491,9 +505,15 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(parse(first)).toEqual([]);
     const entries = parse(second);
     expect(entries).toHaveLength(2);
-    expect(entries[0].kind).toBe("raw");
+    // 拆出的旁白与 [tokens] 账目行:结构化识别后摘要抑制,全文进明细。
+    expect(entries[0].kind).toBe("thinking");
     expect(entries[0].summary).toBe("The user asks to read the file.");
+    expect(entries[0].detail).toBe("The user asks to read the file.");
+    expect(entries[1].kind).toBe("thinking");
     expect(entries[1].summary).toBe(
+      "[tokens #t2] prompt=17916 completion=81 cached=6656",
+    );
+    expect(entries[1].detail).toBe(
       "[tokens] prompt=17916 completion=81 cached=6656",
     );
   });
@@ -1600,5 +1620,100 @@ describe("真实 outputTail 重放(验收 1-3:Pi / AtomCode fixture)", () => {
     console.log(
       `[replay-atomcode] fixture=${Buffer.byteLength(atomcodeFixture, "utf8")}B output=${Buffer.byteLength(output, "utf8")}B actions=${inputActions}→${outputActions}`,
     );
+  });
+});
+
+describe("atomcode:任务 01a04f70-9101 outputTail 重放(裸叙述与 [tokens] 摘要抑制)", () => {
+  const atomcode01a04f70Fixture = readFileSync(
+    new URL(
+      "./fixtures/atomcode-task-01a04f70-outputTail.txt",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  // 明细落盘用独立任务 id,避免与 detail-store 测试互踩;afterEach 只清理本文件。
+  const DETAIL_TASK_ID = "00000000-0000-4000-8000-00000000d1f0";
+
+  afterEach(() => {
+    const p = taskDetailFilePath(DETAIL_TASK_ID);
+    if (existsSync(p)) rmSync(p);
+  });
+
+  /** 分块喂入(每块以换行结尾),模拟真实流式;进程结束时 flush 残留。 */
+  const replayEntries = (fixture: string): OutputEntry[] => {
+    const parse = createExecutorOutputParser("executor");
+    const chunks = fixture.split("\n").map((l) => `${l}\n`);
+    const entries = chunks.flatMap((c) => parse(c));
+    return [...entries, ...parse.flush()];
+  };
+
+  it("验收 1:152 非空行输入重放后,摘要流动作行占比 >= 85%,[tool→/←] >= 82", () => {
+    const entries = replayEntries(atomcode01a04f70Fixture);
+    const summary = summaryStreamText(entries);
+    const summaryLines = summary.split("\n").filter((l) => l.length > 0);
+    const actionLines = summaryLines.filter((l) =>
+      /^\[(tool→|tool←)/.test(l),
+    ).length;
+    expect(actionLines).toBeGreaterThanOrEqual(82); // 基线 82
+    expect(actionLines / summaryLines.length).toBeGreaterThanOrEqual(0.85);
+    console.log(
+      `[replay-01a04f70] summary=${summaryLines.length} lines, actions=${actionLines} (${((actionLines / summaryLines.length) * 100).toFixed(1)}%)`,
+    );
+  });
+
+  it("验收 2:45 裸叙述 + 23 [tokens] 全文仍进入明细存储,按 #tN / detail 可取回", () => {
+    const entries = replayEntries(atomcode01a04f70Fixture);
+    // 被抑制的条目:kind=thinking 且带明细全文(裸叙述 + [tokens] 账目)。
+    const suppressed = entries.filter(
+      (e) => e.kind === "thinking" && e.detail !== undefined,
+    );
+    expect(suppressed.length).toBe(68); // 45 裸叙述 + 23 [tokens]
+    // 全文按 #tN 落盘:appendTaskDetail 后 readTaskDetail 逐条取回,字节不变。
+    for (const e of suppressed) appendTaskDetail(DETAIL_TASK_ID, e);
+    const rows = readTaskDetail(DETAIL_TASK_ID);
+    expect(rows).not.toBeNull();
+    expect(rows).toHaveLength(68);
+    for (const e of suppressed) {
+      const row = rows?.find((r) => r.id === e.id);
+      expect(row).toBeDefined();
+      expect(row?.text).toBe(e.detail);
+    }
+  });
+
+  it("验收 3:[done] 汇报行与错误行保留;未知/解析失败行逐字保留", () => {
+    const entries = replayEntries(atomcode01a04f70Fixture);
+    const summary = summaryStreamText(entries);
+    // [done] 汇报行保留在摘要流(不抑制)。
+    expect(summary).toContain("[done] 217.4s tokens=1.26M");
+    // [headless] 未知前缀行逐字保留(raw)。
+    const headless = entries.find((e) => e.summary.startsWith("[headless]"));
+    expect(headless?.kind).toBe("raw");
+    expect(headless?.summary).toBe(
+      "[headless] --dangerously-skip-permissions：所有工具调用将自动批准",
+    );
+    // 输入 152 非空行 = 82 动作 + 68 抑制 + [done] + [headless],无其余漏网。
+    // (fixture 末尾换行经 split 产生一个空 chunk → raw("") 空摘要,不进摘要流,
+    //  与真实流式同界,不计入非空非 thinking 条目。)
+    const nonThinking = entries.filter(
+      (e) => e.kind !== "thinking" && e.summary.length > 0,
+    );
+    expect(nonThinking.length).toBe(84); // 82 动作 + [done] + [headless]
+  });
+
+  it("验收 4:不用正文关键词启发式 —— 分类只依据行首结构", () => {
+    // 裸叙述按「无 [ 前缀、非 { 开头」结构化判定,不以正文词面匹配;
+    // 含「思考」「现在」等词的汇报正文仍是 raw,不被误抑制。
+    const parse = createExecutorOutputParser("executor");
+    const entries = parse(
+      "[done] 本次思考消耗 1200 tokens,现在完成\n" +
+        "汇报:现在开始,先思考再动手\n",
+    );
+    expect(entries).toHaveLength(2);
+    // [done] 前缀行逐字保留(含「思考」词面也不抑制)。
+    expect(entries[0].kind).toBe("raw");
+    expect(entries[0].summary).toBe("[done] 本次思考消耗 1200 tokens,现在完成");
+    // 裸叙述(无前缀)→ 抑制,全文进明细。
+    expect(entries[1].kind).toBe("thinking");
+    expect(entries[1].detail).toBe("汇报:现在开始,先思考再动手");
   });
 });
