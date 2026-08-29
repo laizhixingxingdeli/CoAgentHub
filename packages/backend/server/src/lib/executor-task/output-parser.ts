@@ -709,6 +709,18 @@ function genericSkipSignature(parsed: Record<string, unknown>): string {
   return `json:${Object.keys(parsed).sort().join(",")}`;
 }
 
+/**
+ * L2 修复:增量事件判定 —— 顶层 type 或键名含 delta(tool_call_delta /
+ * input_json_delta / tool_result_delta 等)视为携带工具参数/结果源码的流式碎片:
+ * 摘要抑制但仍须落盘 detail store,不得静默丢弃、不依赖后续完整 tool_use。
+ * message_update 等纯无信息事件(type 与顶层键均无 delta)不落入,保持仅计数跳过。
+ */
+function isGenericDeltaEvent(record: Record<string, unknown>): boolean {
+  const sig = genericSkipSignature(record).toLowerCase();
+  if (sig.includes("delta")) return true;
+  return Object.keys(record).some((k) => k.toLowerCase().includes("delta"));
+}
+
 /** 通用片段 → 结构化条目:类别按片段标签判定,明细 = 原始整行(完整原文)。 */
 function genericFragmentEntry(
   fragment: string,
@@ -753,10 +765,17 @@ function renderGenericLine(
   if (fragments.length > 0) {
     return fragments.map((f) => genericFragmentEntry(f, line, entry));
   }
-  // L2:可解析但无语义(全信封/分类/增量字段)→ 显式跳过 + 计数 + 去重日志;
-  // 不认识的键保持 R3 逐字(字节不变)。
+  // L2:可解析但无语义(全信封/分类/增量字段)→ 摘要抑制 + 签名计数;增量事件
+  // (tool_call_delta/input_json_delta 携带工具参数/结果源码)仍产生 detail-bearing
+  // 条目落盘,不得静默丢弃(不依赖后续完整 tool_use);纯无信息(usage/message_update)
+  // 只计数跳过。不认识的键保持 R3 逐字(字节不变)。
   if (isGenericNoInfo(record, 0)) {
     observeGenericSkippedEvent(genericSkipSignature(record));
+    if (isGenericDeltaEvent(record)) {
+      // 空摘要 → 不进摘要流;detail = 原始整行,经 appendTaskDetail 落盘后
+      // 可按 entry id 完整取回(字节不变)。
+      return [entry("report", "", line)];
+    }
     return [];
   }
   return [raw(line)]; // R3:提取不出正文且非纯噪音 → 逐字保留
@@ -847,7 +866,10 @@ function createGenericParser(): ExecutorOutputParser {
         // R5:折叠同 chunk 内重复动作行只留首条;raw 透传行与 error 条目永不
         // 折叠(R3:错误信息永不折叠)。折叠键按来源区分调用/结果,同 chunk 的
         // 工具调用与工具结果互不吞并。
-        if (e.kind !== "raw" && e.kind !== "error") {
+        // L2 修复:空摘要条目(detail-only,如 tool_call_delta/input_json_delta
+        // 增量碎片)不参与折叠 —— 每条增量都是独立的参数/结果源码,必须逐条
+        // 落盘,按 entry id 可完整取回;折叠只针对进摘要流的动作行。
+        if (e.kind !== "raw" && e.kind !== "error" && e.summary.length > 0) {
           const key = actionDedupKey(e.summary, genericLineActionKind(l));
           if (seen.has(key)) continue;
           seen.add(key);

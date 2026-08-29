@@ -1,14 +1,17 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import type { OutputEntry } from "@server/lib/executor-task";
 import {
+  appendTaskDetail,
   createExecutorOutputParser,
   getCodexSkippedEventCounts,
   getGenericSkippedEventCounts,
+  readTaskDetail,
   resetCodexSkippedEventCounts,
   resetGenericSkippedEventCounts,
   summaryStreamText,
+  taskDetailFilePath,
 } from "@server/lib/executor-task";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * 执行器输出解析器(output-parser.ts,spec: live-output-shows-narration-not-actions +
@@ -1402,8 +1405,16 @@ describe("default:可解析但无语义 JSON 显式跳过(L2,计数 + 去重日�
   });
 });
 
-describe("default:toolcall_delta 参数源码不进摘要(L2,验收 6)", () => {
-  it("input_json_delta 增量碎片 → 整行跳过,摘要不含源码", () => {
+describe("default:toolcall_delta 参数源码不进摘要但落盘明细(L2 修复,验收 1/2)", () => {
+  // 明细落盘用独立任务 id,避免与 detail-store 测试互踩;afterEach 只清理本文件。
+  const DETAIL_TASK_ID = "00000000-0000-4000-8000-00000000d1e1";
+
+  afterEach(() => {
+    const p = taskDetailFilePath(DETAIL_TASK_ID);
+    if (existsSync(p)) rmSync(p);
+  });
+
+  it("input_json_delta 增量碎片 → 摘要抑制(空摘要),detail 携带原始整行", () => {
     const parse = createExecutorOutputParser("pi");
     const line = JSON.stringify({
       type: "tool_call_delta",
@@ -1412,8 +1423,30 @@ describe("default:toolcall_delta 参数源码不进摘要(L2,验收 6)", () => {
     });
     resetGenericSkippedEventCounts();
     const entries = parse(`${line}\n`);
-    expect(entries).toEqual([]);
+    // 不再静默丢弃:摘要为空(不进摘要流),原始整行经 detail 保留。
+    expect(entries).toHaveLength(1);
+    expect(entries[0].summary).toBe("");
+    expect(entries[0].detail).toBe(line);
     expect(getGenericSkippedEventCounts()).toEqual({ tool_call_delta: 1 });
+    expect(summaryStreamText(entries)).toBe("");
+  });
+
+  it("集成:detail 条目经 appendTaskDetail/readTaskDetail 按 id 完整取回,字节不变", () => {
+    const parse = createExecutorOutputParser("pi");
+    const line = JSON.stringify({
+      type: "tool_call_delta",
+      tool_call_id: "call-1",
+      input_json_delta: '{"command":"echo source-code-here"}',
+    });
+    const entries = parse(`${line}\n`);
+    expect(entries).toHaveLength(1);
+    // queue.ts 同款装配:对 parser 返回的 entries 逐条 appendTaskDetail。
+    appendTaskDetail(DETAIL_TASK_ID, entries[0]);
+    const rows = readTaskDetail(DETAIL_TASK_ID);
+    expect(rows).not.toBeNull();
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0].id).toBe(entries[0].id);
+    expect(rows?.[0].text).toBe(line);
   });
 
   it("完整 tool_use 事件 → 摘要截断(不出现成片源码),原文整行进 detail", () => {
