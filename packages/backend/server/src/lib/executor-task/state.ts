@@ -157,7 +157,12 @@ export function classifyQuotaFailure(
       const line = rawLine.trim();
       if (!line) continue;
       const lower = line.toLowerCase();
-      if (!rateLimitPatterns.some((p) => lower.includes(p.toLowerCase()))) {
+      const normalized = lower.replace(/-/g, " ");
+      if (
+        !rateLimitPatterns.some(
+          (p) => lower.includes(p.toLowerCase()) || normalized.includes(p.toLowerCase()),
+        )
+      ) {
         continue;
       }
       // 自指排除:detectPatterns 定义 / 任务书回显。

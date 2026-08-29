@@ -209,6 +209,220 @@ describe("classifyQuotaFailure:结构证据与自指排除(伪额度回显修复
     ).toBeNull();
   });
 
+  it("样本 1: [rate-limited] window exhausted + resets around 04:33 → quota(零产出/exit 0 不阻止)", () => {
+    useRealPatterns();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 0)); // 20:00, 04:33 已过
+    try {
+      const line = "[rate-limited] 5h window exhausted — resets around 04:33";
+      const verdict = classifyQuotaFailure([line], {
+        exitCode: 0,
+        taskBook: "无关内容",
+      });
+      expect(verdict.isQuota).toBe(true);
+      expect(verdict.matchedLine).toBe(line);
+      // 恢复时刻应落到下一合理窗口(明天 04:33)。
+      expect(parseRateLimitRecoveryMs(line)).toBe(
+        new Date(2026, 7, 30, 4, 33, 0).getTime(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("样本 2: 执行器额度限制 + resets around 18:33 → quota, cooldown 至明天 18:33", () => {
+    useRealPatterns();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 0)); // 20:00, 18:33 已过
+    try {
+      const line = "exit 0(执行器额度限制,预计 ... resets around 18:33)";
+      const verdict = classifyQuotaFailure([line], {
+        exitCode: 0,
+        taskBook: "无关内容",
+      });
+      expect(verdict.isQuota).toBe(true);
+      expect(verdict.matchedLine).toBe(line);
+      expect(parseRateLimitRecoveryMs(line)).toBe(
+        new Date(2026, 7, 30, 18, 33, 0).getTime(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("样本 3: usage limit + try again at 7:50 PM → quota, cooldown 至 19:50", () => {
+    useRealPatterns();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 29, 14, 0, 0)); // 14:00, 19:50 未过
+    try {
+      const line = "usage limit. ... try again at 7:50 PM";
+      const verdict = classifyQuotaFailure([line], {
+        exitCode: 0,
+        taskBook: "无关内容",
+      });
+      expect(verdict.isQuota).toBe(true);
+      expect(verdict.matchedLine).toBe(line);
+      expect(parseRateLimitRecoveryMs(line)).toBe(
+        new Date(2026, 7, 29, 19, 50, 0).getTime(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("样本 4: 01a04e01-b50b 真实自指输出(读取额度检测源码,含额度/quota 大量回显) → 非配额", () => {
+    useRealPatterns();
+    // 完整保留足以触发历史问题的真实上下文:工具读文件回显 + 源码片段 +
+    // 中文汇报,exit 0 且无恢复时刻/错误行形状 → 必须判非额度。
+    const echoLines = [
+      '[tool→ read_file #t1] {"file_path": "/Users/apple/Projects/CoAgentHub/packages/backend/server/src/lib/executor-task/state.ts", "limit": 200}',
+      'export const EXECUTOR_COOLDOWN_END_MS_FIELD = "executorCooldownEndMs";',
+      'export const executorCooldowns = new Map<string, number>();',
+      'export const cooldownTimers = new Map<string, NodeJS.Timeout>();',
+      'let rateLimitPatterns = dispatchPolicy.rateLimit.detectPatterns;',
+      'let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;',
+      'export function classifyQuotaFailure(',
+      '  texts: string[],',
+      '  ctx: QuotaFailureContext = {},',
+      '): QuotaFailureVerdict {',
+      '  const { exitCode, taskBook } = ctx;',
+      '  const nonzeroExit = typeof exitCode === "number" && exitCode !== 0;',
+      '  for (const raw of texts) {',
+      '    for (const rawLine of raw.split("\\n")) {',
+      '      const line = rawLine.trim();',
+      '      if (!line) continue;',
+      '      const lower = line.toLowerCase();',
+      '      if (!rateLimitPatterns.some((p) => lower.includes(p.toLowerCase()))) {',
+      '        continue;',
+      '      }',
+      '      if (isDetectPatternsDefinitionLine(line)) continue;',
+      '      if (isTaskBookEcho(line, taskBook)) continue;',
+      '      const hasEvidence =',
+      '        nonzeroExit ||',
+      '        parseRateLimitRecoveryMs(line) !== null ||',
+      '        PROVIDER_ERROR_LINE_SHAPES.some((re) => re.test(line));',
+      '      if (hasEvidence) {',
+      '        return {',
+      '          isQuota: true,',
+      '          matchedLine: line.slice(0, QUOTA_MATCHED_LINE_MAX),',
+      '        };',
+      '      }',
+      '    }',
+      '  }',
+      '  return { isQuota: false, matchedLine: null };',
+      '}',
+      '[tool← read_file #t1] 成功读取 42 行',
+      '[tool→ read_file #t2] {"file_path": "/Users/apple/Projects/CoAgentHub/packages/backend/server/src/lib/executor-task/cooldown-store.ts", "limit": 80}',
+      'export async function listPersistedExecutorCooldowns(',
+      '  db: DataBase,',
+      '): Promise<PersistedExecutorCooldown[]> {',
+      '  const rows = await db.query.task.findMany({',
+      '    where: (task, { isNotNull }) => isNotNull(task.diffSummary),',
+      '    columns: { id: true, executorKey: true, diffSummary: true },',
+      '    orderBy: (task, { desc }) => [desc(task.createdAt)],',
+      '  });',
+      '  const records: PersistedExecutorCooldown[] = [];',
+      '  for (const row of rows) {',
+      '    if (!row.executorKey) continue;',
+      '    const diffSummary = asDiffSummary(row.diffSummary);',
+      '    if (!diffSummary) continue;',
+      '    const endMs = diffSummary[EXECUTOR_COOLDOWN_END_MS_FIELD];',
+      '    if (typeof endMs !== "number" || !Number.isFinite(endMs)) continue;',
+      '    records.push({ taskId: row.id, executorKey: row.executorKey, endMs });',
+      '  }',
+      '  return records;',
+      '}',
+      '[tool← read_file #t2] 成功读取 28 行',
+      '汇报: 读取并分析了额度检测与冷却存储的源码实现，理解了 classifyQuotaFailure 的判定逻辑。',
+      '遗留: 无',
+    ];
+    const verdict = classifyQuotaFailure(echoLines, { exitCode: 0 });
+    expect(verdict.isQuota).toBe(false);
+    expect(verdict.matchedLine).toBeNull();
+  });
+
+  it("样本 5: 01a04e31-3194 同类自指输出(读取额度测试源码 + JSONL 回显) → 非配额", () => {
+    useRealPatterns();
+    // 完整保留真实上下文:测试源码回显 + message_update JSONL + 中文汇报,
+    // 含「额度」多次但无恢复时刻/错误行形状/非零退出码 → 必须判非额度。
+    const echoLines = [
+      '[tool→ read_file #t3] {"file_path": "/Users/apple/Projects/CoAgentHub/packages/backend/server/test/executor-report-quota.test.ts", "limit": 150}',
+      'describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {',
+      '  const app = createTestApp();',
+      '  beforeEach(() => {',
+      '    __resetExecutorQueueForTests();',
+      '  });',
+      '  describe("额度感知调度(票7)", () => {',
+      '    it("rate limit 退出 → failed + 原因含「额度」+ 不重试 + ❌ 注明恢复时间", async () => {',
+      '      const counterDir = mkdtempSync(',
+      '        path.join(tmpdir(), "coagenthub-quota-cnt-"),',
+      '      );',
+      '      const counterFile = path.join(counterDir, "n.txt");',
+      '      process.env.FAKE_RATE_LIMIT = "1";',
+      '      process.env.FAKE_COUNTER_FILE = counterFile;',
+      '      try {',
+      '        const { __setRateLimitForTests } = await import(',
+      '          "@server/lib/executor-task"',
+      '        );',
+      '        __setRateLimitForTests(60_000, ["rate limit", "429"]);',
+      '        const { coordinator, codebuddy, group } = await setupGroup();',
+      '        const msg = await postMessage(coordinator.id, group.id, {',
+      '          body: "额度受限任务",',
+      '          audience: "participant",',
+      '          audienceRef: codebuddy.id,',
+      '        });',
+      '        const t = await waitForTaskStatus(',
+      '          coordinator.id, group.id, msg.id, "failed",',
+      '        );',
+      '        const diff = t.diffSummary as Record<string, unknown> | null;',
+      '        expect(String(diff?.error)).toContain("额度");',
+      '        expect(t.retryCount).toBe(0);',
+      '        expect(readFileSync(counterFile, "utf8").trim()).toBe("1");',
+      '        const messages = await listMessages(coordinator.id, group.id);',
+      '        expect(messages.some((m) => m.body.startsWith("↻"))).toBe(false);',
+      '        await waitForMessage(',
+      '          coordinator.id, group.id,',
+      '          (m) =>',
+      '            m.body.includes("执行器额度限制") &&',
+      '            m.body.includes("预计") &&',
+      '            m.body.includes("恢复"),',
+      '        );',
+      '      } finally {',
+      '        delete process.env.FAKE_RATE_LIMIT;',
+      '        delete process.env.FAKE_COUNTER_FILE;',
+      '        rmSync(counterDir, { recursive: true, force: true });',
+      '      }',
+      '    }, 30_000);',
+      '[tool← read_file #t3] 成功读取 48 行',
+      '[tool→ read_file #t4] {"file_path": "/Users/apple/Projects/CoAgentHub/packages/backend/server/test/executor-quota-redispatch.test.ts", "limit": 120}',
+      'describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry)", () => {',
+      '  const app = createTestApp();',
+      '  beforeEach(() => {',
+      '    __resetExecutorQueueForTests();',
+      '    for (const key of [',
+      '      "FAKE_QUOTA_USAGE_LIMIT",',
+      '      "FAKE_TRY_AGAIN_AT",',
+      '      "FAKE_ALWAYS_FAIL",',
+      '    ]) {',
+      '      delete process.env[key];',
+      '    }',
+      '  });',
+      '  afterEach(() => {',
+      '    __resetExecutorQueueForTests();',
+      '  });',
+      '  async function registerParticipant(name: string) {',
+      '[tool← read_file #t4] 成功读取 32 行',
+      '{"type":"message_update","usage":{"input":0},"assistantMessageEvent":{"type":"text_delta","delta":"额度"}}',
+      '{"type":"message_update","usage":{"output":0},"assistantMessageEvent":{"type":"text_delta","delta":"检测"}}',
+      '{"type":"message_update","usage":{"total":0},"assistantMessageEvent":{"type":"text_delta","delta":"源码"}}',
+      '汇报: 读取了 executor-report-quota 与 executor-quota-redispatch 测试文件，分析了额度感知调度与无限重派修复的测试用例。',
+      '遗留: 无',
+    ];
+    const verdict = classifyQuotaFailure(echoLines, { exitCode: 0 });
+    expect(verdict.isQuota).toBe(false);
+    expect(verdict.matchedLine).toBeNull();
+  });
+
   it("回归 fixture 01a04e01-b50b:回显含 quota 的测试文件名 → exit 0 非配额(验收 6)", () => {
     useRealPatterns();
     // 该任务输出尾部回显了 executor-report-quota.test.ts 等含 quota 字样的

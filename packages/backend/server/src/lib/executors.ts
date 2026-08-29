@@ -237,7 +237,9 @@ export function isBuiltinExecutorKey(key: string): boolean {
 /**
  * 从失败输出解析执行器额度恢复时间(冷却动态化,票8):
  *  - "resets around 13:33"(大小写不敏感)→ 今天该时刻;若该时刻已过,视为
- *    now(立即恢复,保守不再延长)。
+ *    明天同一时刻(下一合理窗口)。
+ *  - "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"
+ *    (24 小时制)→ 今天该时刻;若已过,视为明天同一时刻。
  *  - "try again in 5 seconds"(大小写不敏感)→ now + N 秒。
  * 解析成功返回冷却到期时刻(epoch ms);无匹配返回 null(调用方回退固定冷却)。
  * now 参数便于测试注入固定基准时间。
@@ -251,7 +253,7 @@ export function parseRateLimitRecoveryMs(
   if (around) {
     const target = new Date(now);
     target.setHours(Number(around[1]), Number(around[2]), 0, 0);
-    return target.getTime() > now ? target.getTime() : now;
+    return target.getTime() > now ? target.getTime() : target.getTime() + 24 * 60 * 60 * 1000;
   }
   // "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"(24 小时制):
   // 事故原文 "try again at 3:32 PM" 即此形态(quota-exhaustion R1/R2)。
@@ -264,7 +266,7 @@ export function parseRateLimitRecoveryMs(
     if (meridiem === "am" && hour === 12) hour = 0;
     const target = new Date(now);
     target.setHours(hour, minute, 0, 0);
-    return target.getTime() > now ? target.getTime() : now;
+    return target.getTime() > now ? target.getTime() : target.getTime() + 24 * 60 * 60 * 1000;
   }
   const retryIn = clean.match(/try again in\s+(\d+)\s*seconds?/i);
   if (retryIn) {

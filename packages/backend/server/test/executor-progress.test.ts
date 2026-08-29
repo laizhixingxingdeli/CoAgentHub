@@ -310,9 +310,9 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(end).toBe(new Date(2026, 7, 14, 13, 33, 0).getTime());
     });
 
-    it("resets around HH:MM 已过 → 视为 now(保守不延长)", () => {
+    it("resets around HH:MM 已过 → 明天同一时刻(下一合理窗口)", () => {
       const end = parseRateLimitRecoveryMs("resets around 03:00", now);
-      expect(end).toBe(now);
+      expect(end).toBe(new Date(2026, 7, 15, 3, 0, 0).getTime());
     });
 
     it("Try again in N seconds(大小写不敏感)→ now + N 秒", () => {

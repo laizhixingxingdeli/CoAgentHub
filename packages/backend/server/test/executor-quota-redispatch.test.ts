@@ -288,8 +288,10 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       );
     });
 
-    it("try again at 3:32 AM 已过(08:00 后)→ 视为 now(保守不延长)", () => {
-      expect(parseRateLimitRecoveryMs("try again at 3:32 AM", now)).toBe(now);
+    it("try again at 3:32 AM 已过(08:00 后)→ 明天 03:32(下一合理窗口)", () => {
+      expect(parseRateLimitRecoveryMs("try again at 3:32 AM", now)).toBe(
+        new Date(2026, 7, 15, 3, 32, 0).getTime(),
+      );
     });
   });
 
