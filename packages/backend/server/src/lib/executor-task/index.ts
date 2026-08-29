@@ -71,6 +71,7 @@ export {
 } from "./queue";
 export {
   extractCodeBuddyStreamResult,
+  extractGenericJsonlText,
   parseTaskReport,
   renderTaskCard,
   type TaskReport,

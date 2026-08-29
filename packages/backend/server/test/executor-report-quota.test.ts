@@ -51,6 +51,17 @@ writeFileSync(
     // 弱验收要求工作树干净 + HEAD 有新提交:真正提交一次(显式身份,CI 无全局
     // git config 也能跑)。
     'git add -A && git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m "fake bin change"',
+    // 通用 JSONL 兜底模式(Pi 等价):stdout 是 agent_end 事件流,user 消息回显
+    // 任务书、assistant 消息携带五段汇报;非 codex/codebuddy 执行器应取
+    // assistant 正文而非原始 JSON 行。
+    // 注意:必须用 printf '%s\n' + 单引号参数输出——echo 在 sh 模式下会把 JSON
+    // 文本里的 \n 解释成真换行,把一行 JSON 拆成多行(实测导致整行 JSON.parse
+    // 失败、回退 legacy 路径)。
+    'if [ -n "$FAKE_JSONL" ]; then',
+    "  printf '%s\\n' '{\"type\":\"agent_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"# CoAgentHub 任务\\n## 汇报格式要求\\n提交: <commit hash>\"}]}}'",
+    "  printf '%s\\n' '{\"type\":\"agent_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"提交: 0123456789abcdef0123456789abcdef01234567\\n测试: 全绿\\n汇报: 从 assistant 正文取到汇报\\n遗留: 无\"}]}}'",
+    "  exit 0",
+    "fi",
     // 结构化四段汇报模式。
     'if [ -n "$FAKE_STRUCTURED" ]; then',
     '  echo "提交: 0123456789abcdef0123456789abcdef01234567"',
@@ -68,6 +79,9 @@ writeFileSync(
 );
 chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
+// AtomCode(内置 key=executor,无专用提取器)同样指向 fake bin:通用 JSONL
+// 兜底的端到端回归走这条路径(该脚本忽略 args,仅按 FAKE_* 环境变量行为)。
+process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
 // 执行前快照/弱验收需要真实 git 仓库;COAGENTHUB_REPO_ROOT 覆盖 findRepoRoot。
 const repoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-report-repo-"));
@@ -88,6 +102,7 @@ const { createTestApp } = await import("./app");
 const {
   __resetExecutorQueueForTests,
   extractCodeBuddyStreamResult,
+  extractGenericJsonlText,
   parseTaskReport,
   renderTaskCard,
   resolveTestExecutor,
@@ -727,6 +742,163 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       ).toBeUndefined();
     });
 
+    it("extractGenericJsonlText:agent_end JSONL(user 任务书 + assistant 五段汇报)取 assistant 正文", () => {
+      // 无专用提取器的执行器(如 Pi)stdout 是 agent_end 事件流:user 消息回显
+      // 任务书(含模板占位符),assistant 消息携带真实五段汇报。通用兜底必须取
+      // assistant 正文,既不是原始 JSON 行,也不是 user 任务书。
+      const reportText = [
+        "提交: 0123456789abcdef0123456789abcdef01234567",
+        "测试: 定向 Vitest 18/18 通过",
+        "Token: 12345",
+        "汇报: 完成了通用 JSONL 兜底改造",
+        "遗留: 无",
+      ].join("\n");
+      const stdout = [
+        JSON.stringify({
+          type: "agent_end",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "# CoAgentHub 任务\n## 汇报格式要求\n提交: <commit hash>",
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "agent_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: reportText }],
+          },
+        }),
+      ].join("\n");
+      const extracted = extractGenericJsonlText(stdout);
+      expect(extracted).toBe(reportText);
+      // 提取结果交给 parseTaskReport → 五段结构化(summary 来自 assistant 正文)。
+      expect(parseTaskReport(`${extracted}\n`)).toMatchObject({
+        hash: "0123456789ab",
+        tests: "定向 Vitest 18/18 通过",
+        summary: "完成了通用 JSONL 兜底改造",
+        todo: "无",
+      });
+    });
+
+    it("extractGenericJsonlText:仅 user 消息且无 assistant 文本 → undefined", () => {
+      const stdout = [
+        JSON.stringify({
+          type: "agent_end",
+          message: { role: "user", content: [{ type: "text", text: "任务书" }] },
+        }),
+        JSON.stringify({
+          type: "agent_end",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "补充说明" }],
+          },
+        }),
+      ].join("\n");
+      expect(extractGenericJsonlText(stdout)).toBeUndefined();
+    });
+
+    it("extractGenericJsonlText:非 JSONL 纯文本 / 空输出 → undefined(保持 legacy 路径)", () => {
+      expect(
+        extractGenericJsonlText("提交: abc\n汇报: 完成了"),
+      ).toBeUndefined();
+      expect(extractGenericJsonlText("")).toBeUndefined();
+      expect(
+        extractGenericJsonlText(undefined as unknown as string),
+      ).toBeUndefined();
+    });
+
+    it("extractGenericJsonlText:JSON.parse 成功占比低于阈值 → 不判定为 JSONL", () => {
+      // 4 行非 JSON + 1 行 JSON:占比 20% < 50% 阈值 → 整体按非 JSONL 处理。
+      const stdout = [
+        "warning: log line one",
+        "info: log line two",
+        "notice: log line three",
+        "debug: log line four",
+        JSON.stringify({
+          role: "assistant",
+          content: [{ type: "text", text: "汇报正文" }],
+        }),
+      ].join("\n");
+      expect(extractGenericJsonlText(stdout)).toBeUndefined();
+      // 占比达标(3 JSON / 5 行 = 60%)且含 assistant 文本 → 正常提取。
+      const mixed = [
+        JSON.stringify({
+          role: "assistant",
+          content: [{ type: "text", text: "正文一" }],
+        }),
+        JSON.stringify({
+          role: "assistant",
+          content: [{ type: "text", text: "正文二" }],
+        }),
+        JSON.stringify({
+          role: "assistant",
+          content: [{ type: "text", text: "正文三" }],
+        }),
+        "non-json noise",
+        "more noise",
+      ].join("\n");
+      expect(extractGenericJsonlText(mixed)).toBe("正文三");
+    });
+
+    it("extractGenericJsonlText:从后往前扫,最后一条 assistant 无文本块则继续往前,找不到不猜", () => {
+      const stdout = [
+        JSON.stringify({
+          type: "agent_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "较早的正文" }],
+          },
+        }),
+        JSON.stringify({
+          type: "agent_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "tool_use", name: "Read" }],
+          },
+        }),
+      ].join("\n");
+      expect(extractGenericJsonlText(stdout)).toBe("较早的正文");
+      // 全部无文本块 → undefined(不猜)。
+      expect(
+        extractGenericJsonlText(
+          [
+            JSON.stringify({
+              role: "assistant",
+              content: [{ type: "tool_use", name: "Read" }],
+            }),
+          ].join("\n"),
+        ),
+      ).toBeUndefined();
+    });
+
+    it("extractGenericJsonlText:content/text 字符串字段等价接受,role 在事件外层也认", () => {
+      expect(
+        extractGenericJsonlText(
+          JSON.stringify({ role: "assistant", content: "直接 content 字符串" }),
+        ),
+      ).toBe("直接 content 字符串");
+      expect(
+        extractGenericJsonlText(
+          JSON.stringify({ role: "assistant", text: "直接 text 字段" }),
+        ),
+      ).toBe("直接 text 字段");
+      // role 挂在事件外层、正文在 message 里(等价形状)。
+      expect(
+        extractGenericJsonlText(
+          JSON.stringify({
+            type: "agent_end",
+            role: "assistant",
+            message: { content: [{ type: "text", text: "嵌套正文" }] },
+          }),
+        ),
+      ).toBe("嵌套正文");
+    });
+
     it("renderTaskCard:缺段占位(hash→无,其余→-)与超长截断", () => {
       expect(renderTaskCard("codebuddy", {})).toBe(
         [
@@ -761,6 +933,38 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
           "遗留  无",
         ].join("\n"),
       );
+    });
+
+    it("通用 JSONL 兜底端到端:AtomCode 输出 agent_end JSONL → summary 来自 assistant 正文", async () => {
+      // 无专用提取器的执行器(内置 key=executor,非 codex/codebuddy)输出 Pi 等价
+      // 的 agent_end JSONL(user 任务书回显 + assistant 五段汇报):适配点必须取
+      // assistant 正文,不是原始 JSON 行,也不是 user 任务书。
+      process.env.FAKE_JSONL = "1";
+      try {
+        const coordinator = await registerParticipant({ name: "coord-jsonl" });
+        const atomcode = await registerParticipant({ name: "AtomCode" });
+        const group = await createGroup(coordinator.id, "JSONL 兜底测试");
+        await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "输出 JSONL 汇报",
+          audience: "participant",
+          audienceRef: atomcode.id,
+        });
+        const t = await waitForTaskStatus(
+          coordinator.id,
+          group.id,
+          msg.id,
+          "done",
+        );
+        expect(t.diffSummary).toMatchObject({
+          summary: "从 assistant 正文取到汇报",
+          hash: "0123456789ab",
+          tests: "全绿",
+          todo: "无",
+        });
+      } finally {
+        delete process.env.FAKE_JSONL;
+      }
     });
   });
 

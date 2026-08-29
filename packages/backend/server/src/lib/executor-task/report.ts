@@ -291,3 +291,73 @@ export function extractCodeBuddyStreamResult(text: string): string | undefined {
   }
   return resultText ?? lastAssistantText;
 }
+
+/** 判定 JSONL 的非空行 JSON.parse 成功占比阈值(通用兜底):过半行可解析才
+ * 视为 JSONL——纯文本 legacy 输出几乎全部解析失败,直接回落旧路径。 */
+const JSONL_PARSE_RATIO_THRESHOLD = 0.5;
+
+/**
+ * 通用 JSONL 兜底提取(无专用提取器的执行器,如 Pi):从后往前扫描,取最后一
+ * 条 role=assistant 的文本块(消息的 content[] type=text,或等价 text/content
+ * 字符串字段),返回正文供 parseTaskReport 段落解析。判定为 JSONL(非空行
+ * JSON.parse 成功占比 ≥ JSONL_PARSE_RATIO_THRESHOLD)才提取;找不到 assistant
+ * 文本块返回 undefined(不猜,保持 legacy 路径逐字一致)。
+ */
+export function extractGenericJsonlText(text: string): string | undefined {
+  const lines = (text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return undefined;
+
+  const rows: Array<unknown> = [];
+  let parsedCount = 0;
+  for (const line of lines) {
+    try {
+      rows.push(JSON.parse(line));
+      parsedCount += 1;
+    } catch {
+      rows.push(undefined); // 非 JSON 行(告警等)跳过,与既有提取器同界。
+    }
+  }
+  if (parsedCount / lines.length < JSONL_PARSE_RATIO_THRESHOLD) {
+    return undefined; // 非 JSONL(纯文本 legacy)→ 不提取,保持旧路径。
+  }
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (typeof row !== "object" || row === null) continue;
+    const record = row as Record<string, unknown>;
+    const message =
+      typeof record.message === "object" && record.message !== null
+        ? (record.message as Record<string, unknown>)
+        : record;
+    const role = message.role ?? record.role;
+    if (role !== "assistant") continue;
+    const block = extractAssistantTextBlock(message);
+    if (block !== undefined) return block;
+  }
+  return undefined;
+}
+
+/** 从 assistant 消息取文本块:content[] type=text 各段拼接;content/text 为
+ * 非空字符串时直接采用;无文本块返回 undefined(不猜)。 */
+function extractAssistantTextBlock(
+  message: Record<string, unknown>,
+): string | undefined {
+  const content = message.content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((part): part is Record<string, unknown> =>
+        Boolean(part && typeof part === "object"),
+      )
+      .filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text as string);
+    return texts.length > 0 ? texts.join("\n") : undefined;
+  }
+  if (typeof content === "string" && content.trim().length > 0) return content;
+  if (typeof message.text === "string" && message.text.trim().length > 0) {
+    return message.text;
+  }
+  return undefined;
+}

@@ -60,6 +60,7 @@ import {
 } from "./output-parser";
 import {
   extractCodeBuddyStreamResult,
+  extractGenericJsonlText,
   findCommitHash,
   lastLinesOf,
   parseTaskReport,
@@ -1866,7 +1867,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           ? extractCodexExecText(result.stdout ?? "")
           : ex.key === "codebuddy"
             ? extractCodeBuddyStreamResult(result.stdout ?? "")
-            : undefined;
+            // 无专用提取器的执行器(如 Pi):通用 JSONL 兜底,从最后一条
+            // assistant 消息/事件取文本正文;非 JSONL / 无 assistant 文本时
+            // 返回 undefined,保持 legacy 路径逐字一致。
+            : extractGenericJsonlText(result.stdout ?? "");
       const output = executorText
         ? `${executorText}\n${result.stderr ?? ""}`
         : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
