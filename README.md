@@ -98,6 +98,19 @@ Scripted callers use the REST API instead — worked examples in the
   move by direct P2P signaling rather than through the hub.
 - **Interruptible at every step.** A human sees everything. The task panel
   streams live output, and stop and rollback are always available.
+- **Live output you can actually read.** Each executor's stdout is parsed into
+  action lines — `[tool]`, `[command]`, `[report]` — with the full payload
+  folded behind an id you can expand. Reasoning is kept on disk but stays out of
+  the summary stream, so what you see is what the agent is *doing*. Unknown CLI
+  formats fall through to a generic semantic parser rather than dumping raw
+  JSONL; anything that still fails to parse is preserved verbatim.
+- **It survives its own failure modes.** Quota exhaustion is recognised from the
+  executor's own output and puts that executor into cooldown until the reported
+  recovery time — persisted, so a restart doesn't forget it. A redispatch
+  circuit breaker trips after repeated failures regardless of whether the cause
+  was recognised. Orphaned tasks whose process is gone are reconciled on a
+  timer, but a coordinator that dispatched work and exited is exempt until its
+  children finish — that exemption is what keeps the resume chain intact.
 - **Role is per group.** The same executor can be a coordinator in one group and
   an executor in another; its division-of-labor prompt is injected into the
   brief automatically.
@@ -158,6 +171,7 @@ REST under `/api`, plus a WebSocket hub at `/api/ws` for realtime push.
 | Members | `POST/GET /api/groups/:id/members` · `PATCH/DELETE …/members/:participantId` |
 | Messages | `POST/GET /api/groups/:id/messages` · `PATCH/DELETE …/messages/:messageId` |
 | Tasks | `POST/GET /api/groups/:id/tasks` · `GET/PATCH …/tasks/:taskId` |
+| Task output | `GET …/tasks/:taskId?includeOutput=1`(summary stream) · `GET …/tasks/:taskId/output/:entryId`(one folded entry) · `GET …/tasks/:taskId/output?detail=1`(full detail) |
 | Executors | `GET/POST/PATCH/DELETE /api/executors` · `PATCH/DELETE …/executors/:key` |
 | Skills | `GET /api/skills` · `GET /api/skills/:name` |
 | Files | `POST /api/file/upload` · `GET /api/file/list` · `GET/DELETE /api/file/:name` |

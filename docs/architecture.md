@@ -56,6 +56,11 @@ CoAgentHub/
 │   │   │       │                             #   process.kill(pid,0) 抛 ESRCH 才判死,非「无输出超时」;
 │   │   │       │                             #   协调任务(含 resumeOf 续跑任务)在「有非终态子任务」或「续跑尚未创建」窗口内豁免;
 │   │   │       │                             #   无非终态子任务且无待建续跑时仍收敛;显式 enabled 开关供测试注入)
+│   │   │       ├── lib/executor-availability.ts # 执行器可用性平台判定(复用冷却与存活口径;
+│   │   │       │                             #   无可用执行器时产出 degradedToTwoParty 载荷,
+│   │   │       │                             #   由平台写入,协调者自述不足以触发)
+│   │   │       ├── lib/l3-overdue-reminder.ts # L3 请求逾期周期提醒(按请求去重,一条只提醒一次;
+│   │   │       │                             #   只催办不裁决,不改任务状态)
 │   │   │       └── lib/executor-task/        # 执行器调度(拆分 barrel,导出面兼容)
 │   │   │           ├── types.ts       #      共享类型(队列条目/组队列/汇报结构)
 │   │   │           ├── state.ts       #      模块级状态(组队列/超时/重试/冷却)+ 测试重置
@@ -76,6 +81,13 @@ CoAgentHub/
 │   └── frontend/
 │       └── web/                       # React + Vite + wouter 前端
 │           └── src/pages/app/groups/  #    群组列表 / 消息(气泡聊天)/ 成员页
+│           └── src/components/layout/context-panel/
+│               ├── MarkdownBody.tsx   #    消息正文 markdown 渲染(react-markdown;
+│               │                      #      不经 innerHTML、未启 rehype-raw,原始 HTML 转义)
+│               ├── OutputDetailBlock.tsx # 实时输出摘要流:#id 行可展开明细、
+│               │                      #      展开定位到底部、在底部时跟随、未完成命令显示已耗时
+│               └── RequirementTimeline.tsx # 时间线:按 content_type 分渲染
+│                                      #      (task_status=轻量状态提示 / text/plain=发言卡片)
 │           └── src/hooks/             #    use-groups-page / use-messages-page / use-group-ws
 └── packages/backend/server/test/      # 验收测试(review-workflow 等)
 ```
@@ -403,6 +415,30 @@ CoAgentHub/
 | ANSI 未剥离 | 前端乱码 | 已修复 |
 | callback 被无权发送者携带 | 完成后无法回调下发者 | `X-CoAgentHub-Warning: CALLBACK_STRIPPED_NOT_AUTHORIZED` |
 | reviewer 群下发缺 `specHash` | 验收钉子缺失 | `X-CoAgentHub-Warning: SPEC_HASH_MISSING`,但不拒绝下发 |
+| 解析器 `default` 原样透传 | 新接入 agent 的输出顶满缓冲被截断 | 已修复:default 走通用语义解析,未知 key 仍记一次观测日志 |
+| token 采集按 CLI 写死 | 未覆盖的 executorKey 一律 `unsupported` | 已修复:定制路径未命中则走通用 JSONL 兜底 |
+| `restart` 在 PID 文件失准时空转 | 报告成功但进程未替换,重建后验证全部失真 | 已修复:stop 回退按端口查实际监听者,restart 校验 pid 确已更换 |
+| 额度耗尽被当作普通进程消失 | 10 秒一轮无限重派,耗尽额度需人工停机 | 已修复:识别配额失败进入冷却 + 重派熔断(与原因识别无关的兜底)|
+| 冷却状态仅存内存 | 重启即失忆,熔断被削弱 | 已修复:冷却持久化,启动时恢复未到期记录 |
+| 续跑任务被孤儿收敛误杀 | 子任务干完无人结案,L2 整层跳过 | 已修复:续跑任务与协调根任务适用同一豁免 |
+| 收敛写回整体替换 `diffSummary` | 抹掉 `platform.*` / `tokenUsage`,事后无法追溯 | 已修复:改为合并,仅新增收敛三键 |
+| 协调者 PATCH 结案整体替换 `diffSummary` | 平台采集的 token 被冲掉 | 已修复:载荷不含该键时从 attempts 回填 |
+
+## 9.11 运维语义速查(2026-08-29)
+
+不看代码不会知道、但直接影响判断的约定:
+
+| 机制 | 判据 | 边界 |
+|---|---|---|
+| 孤儿收敛 | `process.kill(pid,0)` 抛 ESRCH 才判死,**不是**「无输出超时」 | 周期 10s;协调根任务与**续跑任务**在「有非终态子任务」或「续跑待建」时豁免;两者都无事可做才收敛 |
+| 额度熔断 | 输出含 `usage limit` / `rate limit` / `429` / `try again at` 等语义特征 | 冷却至解析出的恢复时刻,解析不出则保守固定冷却;**另有与原因无关的兜底**:同一父任务连续失败达阈值即停止重派 |
+| 冷却持久化 | 存**绝对到期时刻**(epoch ms),非剩余时长 | 启动时恢复未到期记录并重建定时器,已过期的清理不复活 |
+| 实时输出 | 摘要流按 `kind` 过滤:`thinking` **不进摘要流但照常落盘明细** | 明细存 `/tmp/coagenthub-task-detail-<taskId>.jsonl`,14 天留存,`?detail=1` 可取回 |
+| 消息渲染 | 按 `content_type` 分流 | `task_status` → 轻量状态提示;`text/plain` → 发言卡片(markdown 渲染,不经 innerHTML)|
+| L3 请求 | 按 `specRef` + `specHash` 去重 | 已有未应答请求时**并入**而非新增;一次裁决使参与合并的全部任务 `answered=true` |
+
+⚠️ **重启前必须当场复查在途任务**。「队列已空」的旧快照不可信 ——
+协调者可能在其后派出新子任务,贸然重启会把整条链路打断(实测一次打断 5 条)。
 
 ## 10. 消息搜索与分组
 

@@ -243,6 +243,20 @@ backfill or empty):
 }
 ```
 
+**Task output detail** — the summary stream returned by `?includeOutput=1`
+carries action lines only; each folded entry is tagged `#<entryId>`.
+
+- `GET /api/groups/:id/tasks/:taskId/output/:entryId` — one entry's full text.
+  Returns 404 with a reason when the entry is unknown or already cleaned up;
+  never silently empty.
+- `GET /api/groups/:id/tasks/:taskId/output?detail=1` — the whole detail file.
+
+Detail is written to `/tmp/coagenthub-task-detail-<taskId>.jsonl` and kept for
+14 days, so it stays readable **after** the task reaches a terminal state — the
+in-memory buffer is released, the file is not. Reasoning (`kind: thinking`) is
+excluded from the summary stream but still stored here.
+
+
 ## 5. Configuration
 
 Environment variables (read centrally in

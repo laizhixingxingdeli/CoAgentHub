@@ -200,6 +200,18 @@ vite 代理、prod 经 `serve.mjs` 均保持此路径)。身份解析与 HTTP �
 }
 ```
 
+**任务明细读取**:`?includeOutput=1` 返回的摘要流只含动作行,每条被折叠的条目
+带 `#<entryId>` 标记。
+
+- `GET /api/groups/:id/tasks/:taskId/output/:entryId` —— 取单条明细全文。
+  条目不存在或已被清理时返回 404 并说明原因,**不静默返回空**。
+- `GET /api/groups/:id/tasks/:taskId/output?detail=1` —— 取整份明细。
+
+明细写入 `/tmp/coagenthub-task-detail-<taskId>.jsonl`,保留 14 天,因此在任务
+**进入终态之后仍可读**(内存缓冲会释放,文件不会)。思考(`kind: thinking`)
+不进摘要流,但仍存于此。
+
+
 ## 5. 配置项
 
 环境变量(读取集中在 `packages/backend/server/src/lib/config.ts` 及各领域模块):
