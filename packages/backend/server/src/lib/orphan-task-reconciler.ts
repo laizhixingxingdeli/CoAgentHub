@@ -18,7 +18,6 @@ import {
   hasPendingResumeEvent,
   isCoordinatorTask,
   isExecutorProcessAlive,
-  isResumeTask,
   notifyTaskStatusChanged,
 } from "./executor-task";
 
@@ -63,15 +62,17 @@ export async function reconcileOrphanTasks(
   for (const task of candidates) {
     if (task.executorPid === null) continue;
     if (isExecutorProcessAlive(task.executorPid)) continue;
-    // R1(本 spec):等待续跑的协调者根任务豁免收敛 —— 执行方是协调者
+    // R1(本 spec):等待续跑的协调者任务豁免收敛 —— 执行方是协调者
     // (isCoordinatorTask 同源判定)且名下存在非终态执行子任务
     // (hasNonTerminalChildTask,与 coordinator-resume 同源口径)时,pid 消失
     // 不判死,等子任务终态触发续跑。本 spec 的必经竞态窗口——子任务刚转终态而
     // 续跑尚未创建——由 hasPendingResumeEvent 兜住:完成事件与终态同事务落库,
     // pending 事件 = 消费方下一个周期就会创建续跑,期间父任务同样不判死。
-    // R3:resumeOf 标识的续跑任务自身不豁免。
+    // R1(本 spec):resumeOf 标识的续跑任务与协调根任务同条件豁免 —— 它「派完
+    // 即退」、名下仍有非终态子任务或待建续跑事件时不判死;仅当它自己也无事可做
+    // (无非终态子任务且无待建续跑)时才收敛,保住 R3 的「不被永远豁免」本意。
+    // hasPendingResumeEvent 已排除续跑任务自身的完成事件,终止性判定不受影响。
     if (
-      !isResumeTask(task) &&
       (await isCoordinatorTask(
         db,
         task.groupId,
@@ -83,11 +84,22 @@ export async function reconcileOrphanTasks(
       continue;
     }
     const reason = `executor pid ${task.executorPid} no longer exists`;
+    // R2(本 spec):收敛写回以现有 diffSummary 为底合并,仅新增/覆盖
+    // error / reconciledReason / reconciledAt 三键 —— 保留 platform.*(resumeOf
+    // 等)、tokenUsage、tokenUsageReason 与执行器已写字段,不整体替换抹掉证据。
+    const base =
+      task.diffSummary !== null &&
+      task.diffSummary !== undefined &&
+      typeof task.diffSummary === "object" &&
+      !Array.isArray(task.diffSummary)
+        ? { ...(task.diffSummary as Record<string, unknown>) }
+        : {};
     const [updated] = await db
       .update(taskTable)
       .set({
         status: "failed",
         diffSummary: {
+          ...base,
           error: reason,
           reconciledReason: reason,
           reconciledAt: now.toISOString(),

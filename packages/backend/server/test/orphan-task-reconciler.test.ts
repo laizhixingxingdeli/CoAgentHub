@@ -143,6 +143,50 @@ describe("孤儿任务周期收敛", () => {
     // 留痕可事后区分「平台收敛的孤儿」与「执行器自报的失败」。
   });
 
+  it("收敛写回合并 diffSummary:保留 platform.resumeOf、tokenUsage 与执行器字段,仅新增/覆盖收敛三键(R2)", async () => {
+    const participant = await registerParticipant({ name: "orc-merge-a" });
+    const group = await createGroup(participant.id, "孤儿收敛-合并diffSummary");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorPid: deadPid(),
+      // 收敛前已有 platform 标记、平台采集的 token 字段与执行器自定义字段,
+      // 且 error/reconciledReason/reconciledAt 已有旧值(模拟第二次收敛)。
+      diffSummary: {
+        platform: { resumeOf: "parent-task-id" },
+        tokenUsage: { totalTokens: 12345 },
+        tokenUsageReason: "executor reported",
+        custom: { note: "executor wrote this" },
+        error: "old error",
+        reconciledReason: "old reason",
+        reconciledAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+    const before = (await findTask(task.id))?.diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const row = await findTask(task.id);
+    expect(row?.status).toBe("failed");
+    const summary = row?.diffSummary as Record<string, unknown>;
+    // 原有字段全部保留(收敛前后对照)。
+    expect(summary.platform).toEqual(before.platform);
+    expect(summary.tokenUsage).toEqual(before.tokenUsage);
+    expect(summary.tokenUsageReason).toBe("executor reported");
+    expect(summary.custom).toEqual(before.custom);
+    // 三键以本次收敛值覆盖旧值。
+    expect(summary.error).toBe(
+      `executor pid ${task.executorPid} no longer exists`,
+    );
+    expect(summary.reconciledReason).toBe(
+      `executor pid ${task.executorPid} no longer exists`,
+    );
+    expect(summary.reconciledAt).not.toBe(before.reconciledAt);
+    expect(Number.isNaN(Date.parse(String(summary.reconciledAt)))).toBe(false);
+  });
+
   it("再次扫描已收敛的任务 → 不再重复写(终态不在 running 扫描集内)", async () => {
     const participant = await registerParticipant({ name: "orc-exec-b" });
     const group = await createGroup(participant.id, "孤儿收敛-幂等");
@@ -479,9 +523,12 @@ describe("孤儿任务周期收敛", () => {
     expect((await findTask(parent.id))?.status).toBe("failed");
   });
 
-  it("resumeOf 标识的续跑任务(协调者名下)→ 不享受豁免,pid 消失仍收敛为 failed(R3)", async () => {
+  it("续跑任务边界:无非终态子任务且无待建续跑事件 + pid 消失 → 仍收敛为 failed(R1 防永远不收敛)", async () => {
     const coordinator = await registerParticipant({ name: "orc-resume-a" });
-    const group = await createGroup(coordinator.id, "孤儿收敛-续跑不豁免");
+    const group = await createGroup(coordinator.id, "孤儿收敛-续跑无事可做");
+    // R1 边界:续跑任务与协调根任务同条件豁免 —— 仅当名下还有非终态子任务或
+    // 待建续跑事件时才不收敛;自己也无事可做时仍照常收敛,防止「反复被续跑的
+    // 任务永远不被收敛」(specs/resume-task-killed-and-summary-clobbered.md R1)。
     const resume = await insertTaskRow({
       groupId: group.id,
       executorParticipantId: coordinator.id,
@@ -622,5 +669,106 @@ describe("孤儿任务周期收敛", () => {
     const patchBody = await patchRes.text();
     expect(patchRes.status, patchBody).toBe(200);
     expect((await findTask(parent.id))?.status).toBe("done");
+  });
+
+  it("核心场景:续跑任务派出子任务后 pid 消失 → 不收敛;子任务终态后产生新续跑,父任务最终 done", async () => {
+    const coordinator = await registerParticipant({
+      name: "orc-resume-chain-a",
+    });
+    const group = await createGroup(coordinator.id, "孤儿收敛-续跑派完即退");
+    // 原协调任务(已 done,仅作 resumeOf 指向)。
+    const root = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      status: "done",
+    });
+    // 续跑任务:派完即退 → pid 消失,名下仍有非终态子任务。
+    const resume = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+      diffSummary: { platform: { resumeOf: root.id } },
+    });
+    const executor = await registerParticipant({ name: "orc-resume-chain-b" });
+    const childRunning = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: resume.id,
+      status: "running",
+      executorPid: process.pid,
+    });
+    const childQueued = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: resume.id,
+      status: "queued",
+      executorPid: null,
+    });
+
+    // 1) 核心回归:续跑任务 pid 消失但名下存在非终态子任务 → 不收敛。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(resume.id))?.status).toBe("running");
+
+    // 2) 子任务全部终态 → 完成事件 pending(trigger 同事务落库,续跑尚未创建)。
+    await testDb
+      .update(taskTable)
+      .set({ status: "done", diffSummary: { summary: "子任务完成" } })
+      .where(eq(taskTable.id, childRunning.id));
+    await testDb
+      .update(taskTable)
+      .set({ status: "done", diffSummary: { summary: "子任务完成" } })
+      .where(eq(taskTable.id, childQueued.id));
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: childRunning.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending",
+    });
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: childQueued.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending",
+    });
+
+    // 竞态窗口:子任务已终态、续跑尚未创建 → hasPendingResumeEvent 兜住,仍不收敛。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(resume.id))?.status).toBe("running");
+
+    // 3) 消费完成事件 → 为续跑任务派出的子任务创建新续跑。
+    expect(await consumePendingCompletionEvents(orphanDb)).toBe(1);
+    const resumes = await testDb.query.task.findMany({
+      where: and(
+        eq(taskTable.parentTaskId, resume.id),
+        eq(taskTable.executorParticipantId, coordinator.id),
+      ),
+    });
+    expect(resumes.length).toBe(1);
+    expect(
+      (resumes[0].diffSummary as Record<string, unknown>).platform,
+    ).toMatchObject({ resumeOf: resume.id });
+
+    // 4) 新续跑完成 → 协调者 PATCH 续跑任务结案 done(父任务最终 done)。
+    await testDb
+      .update(taskTable)
+      .set({ status: "done" })
+      .where(eq(taskTable.id, resumes[0].id));
+    const patchRes = await app.request(
+      `/api/groups/${group.id}/tasks/${resume.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({
+          status: "done",
+          diffSummary: { summary: "L2 通过" },
+        }),
+      },
+    );
+    const patchBody = await patchRes.text();
+    expect(patchRes.status, patchBody).toBe(200);
+    expect((await findTask(resume.id))?.status).toBe("done");
   });
 });
