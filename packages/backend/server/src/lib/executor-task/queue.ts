@@ -1322,8 +1322,7 @@ function runningForWorkspace(group: GroupQueue): number {
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
-  const { db, groupId, taskId, participantId, ex, body, summary, groupPrompt } =
-    run;
+  const { db, groupId, taskId, participantId, ex, body, groupPrompt } = run;
 
   try {
     // 停止指令可能在 spawn 前到达(kill 句柄尚未就绪):标记 stopped 后
@@ -1360,14 +1359,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.warn(`[executor] 置 running 失败(${taskId}): ${e}`);
     }
 
-    // 🚀 开始执行(与桥的 emoji 状态条一致)。
-    await postStatus(
-      db,
-      groupId,
-      participantId,
-      ex,
-      `🚀 [${ex.label}] 开始执行:${summary}`,
-    );
+    // 开始执行不再发群状态消息(平台代发 🚀 状态条已移除;queued→running
+    // 状态迁移与 notifyTaskStatusChanged 通知在下方保留,任务卡片所需数据不受影响)。
 
     // 执行历史:每次 spawn 前 append 一条 running attempt(重试 = 多条)。
     await beginAttempt(run);

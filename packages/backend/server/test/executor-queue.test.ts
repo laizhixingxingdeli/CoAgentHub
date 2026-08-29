@@ -407,10 +407,10 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
     await waitForTaskStatus(coordinator.id, group.id, m2.id, "done");
 
-    // 状态回传:第一条 🚀 先到,第二条 📋 排队 + 🚀 随后。
+    // 状态回传:不再有 🚀 开始执行(平台代发已移除),📋 排队提示仍在。
     const messages = await listMessages(coordinator.id, group.id);
     const taskStatus = messages.filter((m) => m.contentType === "task_status");
-    expect(taskStatus.some((m) => m.body.startsWith("🚀"))).toBe(true);
+    expect(taskStatus.some((m) => m.body.startsWith("🚀"))).toBe(false);
     expect(taskStatus.some((m) => m.body.startsWith("📋"))).toBe(true);
   }, 30_000);
 
