@@ -45,6 +45,10 @@ writeFileSync(
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_TICKET_COPY" ]; then cp "$3" "$FAKE_TICKET_COPY"; fi',
+    // 瞬时限流(分级应判 transient):短相对恢复提示 + 提供方限流行形状。
+    'if [ -n "$FAKE_TRANSIENT_QUOTA" ]; then echo "[rate-limited] try again in 5 seconds"; exit 1; fi',
+    // 额度耗尽(分级应判 exhausted):绝对恢复时刻。
+    'if [ -n "$FAKE_EXHAUSTED_QUOTA" ]; then echo "usage limit reached — resets around 23:59"; exit 1; fi',
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
     'echo "汇报:修改完成"',
     "exit 0",
@@ -59,8 +63,15 @@ const { createTestApp } = await import("./app");
 const {
   __resetExecutorQueueForTests,
   consumePendingCompletionEvents,
+  enqueueTaskRun,
+  hasExemptingChildTask,
   maybeCreateCoordinatorResumeTask,
 } = await import("../src/lib/executor-task");
+const { __setTransientQuotaForTests, isInCooldown } = await import(
+  "../src/lib/executor-task/state"
+);
+const { enterCooldown } = await import("../src/lib/executor-task/queue");
+const { findExecutorByKey } = await import("@server/lib/executors");
 const { buildSupersededEchoSection, buildDiffSummaryEcho } = await import(
   "../src/lib/executor-task/coordinator-resume"
 );
@@ -603,6 +614,159 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(brief).toContain("## 操作");
       expect(brief).toContain("PATCH 父任务为 done");
     });
+  });
+
+  describe.sequential("R2 交互回归:瞬时限流退避不得夺走 queued 子任务的父协调者豁免(specs/transient-ratelimit-escalated-to-long-cooldown 验收 3)", () => {
+    // 本组用例自带临时 git 仓库:本文件其它用例的 fire-and-forget spawn 会在
+    // setup.ts 的共享临时仓库里做 git add/commit,被测试重置 SIGKILL 后可能
+    // 留下 index.lock,使本组 spawn 的「执行前快照」失败(本文件既有 flake,
+    // 与本票改动无关 —— 端到端用例同样偶发)。隔离后本组不受其影响。
+    const ownRepo = mkdtempSync(path.join(tmpdir(), "coagenthub-resume-repo-"));
+    const originalRepoRoot = process.env.COAGENTHUB_REPO_ROOT;
+    beforeAll(() => {
+      spawnSync("git", ["init", "-q"], { cwd: ownRepo });
+      spawnSync(
+        "git",
+        [
+          "-c",
+          "user.name=coagenthub-test",
+          "-c",
+          "user.email=coagenthub-test@example.com",
+          "commit",
+          "-q",
+          "--allow-empty",
+          "-m",
+          "init",
+        ],
+        { cwd: ownRepo },
+      );
+      process.env.COAGENTHUB_REPO_ROOT = ownRepo;
+    });
+    afterAll(() => {
+      if (originalRepoRoot === undefined) {
+        delete process.env.COAGENTHUB_REPO_ROOT;
+      } else {
+        process.env.COAGENTHUB_REPO_ROOT = originalRepoRoot;
+      }
+      rmSync(ownRepo, { recursive: true, force: true });
+    });
+
+    /** 父协调者(running,pid 已消失)+ 子任务(queued,执行器 key = executor)。 */
+    async function seedParentWithQueuedChild() {
+      const coordinator = await insertParticipant(
+        `coord-${crypto.randomUUID()}`,
+      );
+      const executor = await insertParticipant(`exec-${crypto.randomUUID()}`);
+      const group = await insertGroup(coordinator.id);
+      await insertMember(group.id, coordinator.id, ["coordinator"]);
+      await insertMember(group.id, executor.id, ["executor"]);
+      const parent = await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "running",
+        executorPid: deadPid(),
+      });
+      const child = await insertTask({
+        groupId: group.id,
+        executorParticipantId: executor.id,
+        status: "queued",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: coordinator.id,
+      });
+      return { coordinator, executor, group, parent, child };
+    }
+
+    /** 轮询子任务直到谓词成立(瞬时限流处置是 fire-and-forget)。 */
+    async function waitForChild(
+      childId: string,
+      predicate: (t: { status: string; attempts: unknown[] | null | undefined }) => boolean,
+      timeoutMs = 20_000,
+    ) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const row = await findTask(childId);
+        if (row && predicate(row)) return row;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `子任务 ${childId} 在 ${timeoutMs}ms 内未满足断言(当前状态=${
+              row?.status ?? "无"
+            }, diffSummary=${JSON.stringify(row?.diffSummary ?? null)})`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    /** 等瞬时限流的 ⏳ 回传落库:回传与落库异步,否则用例结束时回传会撞上
+     *  beforeEach 的清表(next test 拿到一堆「状态回传失败」噪音)。 */
+    async function waitForStatusMessage(
+      groupId: string,
+      prefix: string,
+      timeoutMs = 10_000,
+    ) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const rows = await testDb
+          .select({ body: groupMessageTable.body })
+          .from(groupMessageTable)
+          .where(eq(groupMessageTable.groupId, groupId));
+        const hit = rows.find((r) => r.body.startsWith(prefix));
+        if (hit) return hit.body;
+        if (Date.now() > deadline) {
+          throw new Error(`群里未出现 ${prefix} 开头的回传`);
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    it("子任务因瞬时限流退避而 queued → 执行器不在冷却 → 父协调者仍获豁免", async () => {
+      const { executor, group, parent, child } =
+        await seedParentWithQueuedChild();
+      __setTransientQuotaForTests(2_000, 3);
+      process.env.FAKE_TRANSIENT_QUOTA = "1";
+      const ex = await findExecutorByKey(runtimeDb, "executor");
+      if (!ex) throw new Error("executor 执行器配置缺失(seed 未生效)");
+
+      try {
+        await enqueueTaskRun(runtimeDb, child, {
+          groupId: group.id,
+          messageId: crypto.randomUUID(),
+          participantId: executor.id,
+          ex,
+          body: "瞬时限流退避任务",
+          groupPrompt: null,
+          specRef: null,
+          specHash: null,
+        });
+        const settled = await waitForChild(
+          child.id,
+          (t) => (t.attempts?.length ?? 0) >= 1 && t.status === "queued",
+        );
+
+        // 本 spec 的核心:瞬时限流走 per-run 退避,不写 executorCooldowns。
+        expect(isInCooldown({ key: "executor" })).toBe(false);
+        // 于是 queued 子任务的执行器仍判为可派发 → 父协调者不被孤儿收敛判死。
+        expect(await hasExemptingChildTask(runtimeDb, parent.id)).toBe(true);
+        const diff = settled.diffSummary as Record<string, unknown> | null;
+        expect(diff?.quotaKind).toBe("transient");
+        expect(String(diff?.waiting ?? "")).toContain("瞬时限流");
+        // ⏳ 回传说明退避后自动重试(不是 ❌ 失败回传)。
+        const backoffMsg = await waitForStatusMessage(group.id, "⏳");
+        expect(backoffMsg).toContain("瞬时限流");
+        expect(backoffMsg).toContain("保持排队");
+      } finally {
+        delete process.env.FAKE_TRANSIENT_QUOTA;
+      }
+    }, 30_000);
+
+    it("对比:同一 queued 子任务在其执行器处于额度冷却时 → 不豁免(上一条的判据就是 isInCooldown)", async () => {
+      const { parent } = await seedParentWithQueuedChild();
+      // 只动一个变量:把执行器置入冷却 —— 这正是瞬时限流必须避免的副作用
+      // (spec §2.1:短冷却 + 任务回 queued 会杀掉整条协调链)。
+      enterCooldown({ key: "executor", label: "executor" }, Date.now() + 60_000);
+      expect(isInCooldown({ key: "executor" })).toBe(true);
+      expect(await hasExemptingChildTask(runtimeDb, parent.id)).toBe(false);
+    }, 30_000);
   });
 
   describe.sequential("子任务 diffSummary 回显有界(specs/resume-brief-echoes-unbounded-diffsummary.md)", () => {

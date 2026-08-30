@@ -154,9 +154,26 @@ export interface QueuedRun {
    * 调度的退避定时器(或既有 running 任务终态后的泵送)触发。
    */
   concurrencyRetryAt: number;
+  /**
+   * 同一 run 连续被判「瞬时限流」的次数(spec transient-ratelimit-escalated-to-
+   * long-cooldown R2):达到 transientEscalationLimit 的那一次升级为耗尽处理
+   * (防 per-run 退避死循环);非瞬时限流的失败出口(handleFailure)归零,
+   * 保证计数是「连续」而非「累计」。
+   */
+  transientQuotaCount: number;
   /** 执行历史(attempt 时间线):spawn 前 append running,结束时补 endedAt/status。 */
   attempts: TaskAttempt[];
 }
+
+/**
+ * 额度失败分级(spec transient-ratelimit-escalated-to-long-cooldown R1):
+ *  - `transient`:供应方要求短退避(如 `try again in 5 seconds`)—— 解析准确但
+ *    时长很短,走 QueuedRun 的 per-run 退避重试,**不进执行器级冷却**;
+ *  - `exhausted`:额度/窗口耗尽(恢复时刻是绝对时刻,或相对时长超过瞬时分界)
+ *    —— 既有冷却路径逐字不变。
+ * 分级由 classifyQuotaFailure 单点产出,调用方只读 kind,不得自行判定。
+ */
+export type QuotaFailureKind = "transient" | "exhausted";
 
 export type { TokenUsage, TokenUsageReason } from "./token-usage";
 

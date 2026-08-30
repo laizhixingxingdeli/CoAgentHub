@@ -23,6 +23,8 @@
       "window exhausted"
     ],
     "cooldownMinutes": 300,
-    "fallbackExecutor": null
+    "fallbackExecutor": null,
+    "transientBackoffSeconds": 120,
+    "transientEscalationLimit": 3
   }
 }

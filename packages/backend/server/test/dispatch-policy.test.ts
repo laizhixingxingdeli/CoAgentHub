@@ -15,8 +15,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { DEFAULT_RATE_LIMIT_POLICY, readDispatchPolicy, parseRateLimitRecoveryMs } =
   await import("@server/lib/executors");
-const { __resetExecutorQueueForTests, isQuotaFailure, classifyQuotaFailure } =
-  await import("../src/lib/executor-task/state");
+const {
+  __resetExecutorQueueForTests,
+  getTransientQuotaPolicy,
+  isQuotaFailure,
+  classifyQuotaFailure,
+} = await import("../src/lib/executor-task/state");
 
 /** 仓库根(test/ → server/ → backend/ → packages/ → 根)。 */
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -36,6 +40,13 @@ function usePolicyFile(policy: unknown): void {
 /** 让 state.ts 的额度关键词重新按当前策略文件取值(与真实启动同路径)。 */
 function reloadRateLimitPatterns(): void {
   __resetExecutorQueueForTests();
+}
+
+/** 切到真实运行时策略(仓库根 dispatch-policy.json 与默认关键词并集)。 */
+function useRealPatterns(): void {
+  delete process.env[policyFileEnv];
+  process.chdir(repoRoot);
+  reloadRateLimitPatterns();
 }
 
 const originalEnv = process.env[policyFileEnv];
@@ -116,13 +127,6 @@ describe("readDispatchPolicy:额度关键词合并边界", () => {
  * detectPatterns 定义与任务书逐字回显(自指)。本组用例逐条覆盖票面验收 1-6。
  */
 describe("classifyQuotaFailure:结构证据与自指排除(伪额度回显修复)", () => {
-  /** 切到真实运行时策略(仓库根 dispatch-policy.json 与默认关键词并集)。 */
-  function useRealPatterns(): void {
-    delete process.env[policyFileEnv];
-    process.chdir(repoRoot);
-    reloadRateLimitPatterns();
-  }
-
   it("exit 0 + quota 关键词但无恢复时刻/错误行形状 → 非配额(验收 1)", () => {
     useRealPatterns();
     // 仅源码/文件名里的 quota 字样回显(旧实现误判的现场),exit 0 无恢复时刻。
@@ -447,5 +451,137 @@ describe("classifyQuotaFailure:结构证据与自指排除(伪额度回显修复
     expect(classifyQuotaFailure(echoLines, { exitCode: 0 }).isQuota).toBe(
       false,
     );
+  });
+});
+
+/**
+ * 额度失败分级(specs/transient-ratelimit-escalated-to-long-cooldown R1):
+ * 分级收敛在 classifyQuotaFailure 单点,先判 exhausted 再判 transient ——
+ * 瞬时限流(短相对恢复提示)不再被 R7 升级成 5 小时冷却。
+ */
+describe("classifyQuotaFailure:额度分级 transient/exhausted", () => {
+  it("验收 1:[rate-limited] try again in 5 seconds → transient", () => {
+    useRealPatterns();
+    // 供应方明确要求等 5 秒:解析准确但很短 → 瞬时退避,不是额度耗尽。
+    const verdict = classifyQuotaFailure(
+      ["[rate-limited] try again in 5 seconds"],
+      { exitCode: 1 },
+    );
+    expect(verdict.isQuota).toBe(true);
+    expect(verdict.kind).toBe("transient");
+  });
+
+  it("验收 2:usage limit reached, resets around 13:33 → exhausted", () => {
+    useRealPatterns();
+    const verdict = classifyQuotaFailure(
+      ["usage limit reached, resets around 13:33"],
+      { exitCode: 1 },
+    );
+    expect(verdict.isQuota).toBe(true);
+    expect(verdict.kind).toBe("exhausted");
+  });
+
+  it("验收 6:仅关键词命中、无结构证据 → isQuota=false 且 kind=null", () => {
+    useRealPatterns();
+    // 源码/文件名回显(伪额度回显现场):不算额度,自然也没有分级。
+    const verdict = classifyQuotaFailure(
+      ["we read executor-report-quota.test.ts"],
+      { exitCode: 0 },
+    );
+    expect(verdict.isQuota).toBe(false);
+    expect(verdict.kind).toBeNull();
+  });
+
+  it("绝对恢复时刻(try again at HH:MM)→ exhausted", () => {
+    useRealPatterns();
+    expect(
+      classifyQuotaFailure(["You've hit your usage limit. try again at 3:32"], {
+        exitCode: 1,
+      }).kind,
+    ).toBe("exhausted");
+  });
+
+  it("相对恢复时长超过瞬时分界(try again in 600 seconds)→ exhausted", () => {
+    useRealPatterns();
+    // 600s 远长于 60s 分界:供应方要求的是长窗口等待,按耗尽处理(保守)。
+    expect(
+      classifyQuotaFailure(
+        ["[rate-limited] 5h window exhausted — try again in 600 seconds"],
+        { exitCode: 0 },
+      ).kind,
+    ).toBe("exhausted");
+  });
+
+  it("同时命中 transient 与 exhausted → exhausted(先判耗尽,保守)", () => {
+    useRealPatterns();
+    expect(
+      classifyQuotaFailure(
+        ["[rate-limited] usage limit reached, try again in 5 seconds"],
+        { exitCode: 1 },
+      ).kind,
+    ).toBe("exhausted");
+  });
+
+  it("429 + retry/backoff 动词且无耗尽关键词 → transient", () => {
+    useRealPatterns();
+    expect(
+      classifyQuotaFailure(["HTTP 429 too many requests, retrying"], {
+        exitCode: 1,
+      }).kind,
+    ).toBe("transient");
+  });
+
+  it("有结构证据但两条判据都不命中 → 回落 exhausted(fail-safe)", () => {
+    useRealPatterns();
+    // 真额度(非零退出 + 错误行形状),但既无恢复时刻也无瞬时特征:
+    // 宁可长冷却也不要无限退避。
+    expect(
+      classifyQuotaFailure(["error: rate limit exceeded"], { exitCode: 1 })
+        .kind,
+    ).toBe("exhausted");
+  });
+});
+
+/**
+ * 瞬时限流配置(spec R5 / §7):两个键缺失或非法 → null → 不启用瞬时处置,
+ * 调用方回落 exhausted 语义(fail-safe:宁可长冷却也不要无限退避)。
+ */
+describe("瞬时限流配置(读不到 → fail-safe 回落 exhausted)", () => {
+  it("scripts/dispatch-policy.json 带两个键 → 读到 120s / 3", () => {
+    delete process.env[policyFileEnv];
+    process.chdir(repoRoot);
+    const policy = readDispatchPolicy().rateLimit;
+    expect(policy.transientBackoffSeconds).toBe(120);
+    expect(policy.transientEscalationLimit).toBe(3);
+    // 缺省策略(配置文件不可读的兜底)不启用瞬时处置。
+    expect(DEFAULT_RATE_LIMIT_POLICY.transientBackoffSeconds).toBeNull();
+    expect(DEFAULT_RATE_LIMIT_POLICY.transientEscalationLimit).toBeNull();
+  });
+
+  it("删掉两个配置键 → null → getTransientQuotaPolicy() 为 null(等价现状)", () => {
+    usePolicyFile({ rateLimit: { cooldownMinutes: 300 } });
+    reloadRateLimitPatterns();
+    expect(readDispatchPolicy().rateLimit.transientBackoffSeconds).toBeNull();
+    expect(readDispatchPolicy().rateLimit.transientEscalationLimit).toBeNull();
+    expect(getTransientQuotaPolicy()).toBeNull();
+  });
+
+  it("非法值(0 / 负数 / 非整数)→ 同样视为未配置", () => {
+    usePolicyFile({
+      rateLimit: { transientBackoffSeconds: 0, transientEscalationLimit: 2.5 },
+    });
+    reloadRateLimitPatterns();
+    expect(getTransientQuotaPolicy()).toBeNull();
+  });
+
+  it("两个键都合法 → 读到退避时长与升级上限", () => {
+    usePolicyFile({
+      rateLimit: { transientBackoffSeconds: 30, transientEscalationLimit: 2 },
+    });
+    reloadRateLimitPatterns();
+    expect(getTransientQuotaPolicy()).toEqual({
+      backoffMs: 30_000,
+      escalationLimit: 2,
+    });
   });
 });

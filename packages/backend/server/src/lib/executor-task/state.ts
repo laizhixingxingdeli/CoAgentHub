@@ -6,7 +6,7 @@ import {
 } from "@server/lib/executors";
 import { clearAllTaskDetails } from "./detail-store";
 import { clearAllTaskOutputs } from "./output-buffer";
-import type { QueuedRun } from "./types";
+import type { QueuedRun, QuotaFailureKind } from "./types";
 
 /**
  * 执行器触发链路的模块级状态(executor-task 拆分):组队列 / 并行槽位 /
@@ -66,6 +66,29 @@ let rateLimitPatterns = dispatchPolicy.rateLimit.detectPatterns;
 let rateLimitCooldownMs = dispatchPolicy.rateLimit.cooldownMinutes * 60_000;
 
 /**
+ * 瞬时限流的 per-run 退避时长(ms);null = 未配置 → 不启用瞬时处置
+ * (spec transient-ratelimit-escalated-to-long-cooldown R5)。
+ */
+let transientBackoffMs = transientBackoffMsOf(
+  dispatchPolicy.rateLimit.transientBackoffSeconds,
+);
+
+/** 同一 run 连续瞬时限流次数上限(达到即升级为 exhausted);null = 未配置。 */
+let transientEscalationLimit = optionalPositiveInt(
+  dispatchPolicy.rateLimit.transientEscalationLimit,
+);
+
+/** 瞬时限流配置:秒 → ms;未配置(null)保持 null(不启用瞬时处置)。 */
+function transientBackoffMsOf(seconds: number | null): number | null {
+  return seconds === null ? null : Math.max(1, Math.floor(seconds * 1_000));
+}
+
+/** 正整数才算配置(0 / 负数 / 非整数 = 未配置)。 */
+function optionalPositiveInt(value: number | null): number | null {
+  return value !== null && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+/**
  * 重派熔断阈值(票 quota-exhaustion R4):同一父任务名下**连续失败**子任务数达到
  * 该值后停止重派(兜底防线,与原因识别无关 —— 即使原因识别失败也必须熔断)。
  * 默认 5(建议值),启动时读配置;测试可覆盖。
@@ -98,6 +121,67 @@ export interface QuotaFailureVerdict {
   isQuota: boolean;
   /** 命中的原始行(截断到 QUOTA_MATCHED_LINE_MAX 字符);非配额为 null。 */
   matchedLine: string | null;
+  /** 分级(transient / exhausted);非配额为 null。 */
+  kind: QuotaFailureKind | null;
+}
+
+/**
+ * 瞬时限流的相对恢复时长上限(ms):解析出的恢复时长 ≤ 该值 → 供应方只是要求
+ * 短暂退避(准确但很短),按 transient 处理;超过 → 按 exhausted 处理(保守)。
+ *
+ * 与 queue.ts 的 MIN_EFFECTIVE_COOLDOWN_MS 同值:二者是同一条边界的两面 ——
+ * R7 把「解析值 ≤ 该窗口」当作形同虚设的冷却而回退固定冷却,本 spec 把同一个
+ * 窗口识别为瞬时退避。二者必须同值,否则会出现「既不算瞬时、又被 R7 回退成
+ * 5 小时冷却」的空档(spec transient-ratelimit-escalated-to-long-cooldown R1)。
+ */
+export const TRANSIENT_RECOVERY_MAX_MS = 60_000;
+
+/**
+ * 额度耗尽语义(命中任一即 exhausted,且**先于** transient 判定 —— 同时命中
+ * 按 exhausted 处理,保守方向)。
+ */
+const EXHAUSTED_QUOTA_SHAPES: ReadonlyArray<RegExp> = [
+  /\busage limit(?:ed)?\b/i,
+  /\bwindow exhausted\b/i,
+  /\bquota exceeded\b/i,
+  /\blimit reached\b/i,
+  /额度/,
+  /次数限制/,
+];
+
+/** 绝对恢复时刻(`resets around HH:MM` / `try again at HH:MM`)→ 窗口耗尽。 */
+const ABSOLUTE_RECOVERY_RE =
+  /\bresets?\s*around\s+\d{1,2}:\d{2}\b|\btry again at\s+\d{1,2}:\d{2}/i;
+
+/** 相对恢复时长(`try again in N seconds/minutes`)→ 供应方要求的短退避。 */
+const RELATIVE_RECOVERY_RE = /\btry again in\s+(\d+)\s*(seconds?|minutes?)\b/i;
+
+/** 瞬时退避动词:429 与 retry/backoff 类动词同时出现(且无耗尽关键词)→ 瞬时。 */
+const TRANSIENT_RETRY_VERB_RE =
+  /\b(?:retry|retrying|retried|backoff|back(?:ing)? off)\b/i;
+
+/**
+ * 额度失败分级(单点判定,调用方只读 kind):先 exhausted 后 transient;两者都
+ * 不命中但确属额度(已有结构证据)→ 回落 exhausted(fail-safe:宁可长冷却也
+ * 不要无限退避)。
+ */
+function classifyQuotaKind(line: string): QuotaFailureKind {
+  const normalized = line.toLowerCase().replace(/-/g, " ");
+  if (EXHAUSTED_QUOTA_SHAPES.some((re) => re.test(normalized))) {
+    return "exhausted";
+  }
+  if (ABSOLUTE_RECOVERY_RE.test(normalized)) return "exhausted";
+  const relative = RELATIVE_RECOVERY_RE.exec(normalized);
+  if (relative) {
+    const unitMs = relative[2].startsWith("minute") ? 60_000 : 1_000;
+    return Number(relative[1]) * unitMs <= TRANSIENT_RECOVERY_MAX_MS
+      ? "transient"
+      : "exhausted";
+  }
+  if (/\b429\b/.test(normalized) && TRANSIENT_RETRY_VERB_RE.test(normalized)) {
+    return "transient";
+  }
+  return "exhausted";
 }
 
 /** quotaMatchedLine 落库的最大长度(安全截断,避免超长 JSONL 行原样入 diffSummary)。 */
@@ -144,7 +228,8 @@ function isTaskBookEcho(line: string, taskBook: string | null | undefined): bool
  * 解析出真实恢复时刻、命中行呈提供方错误行形状。仅关键词命中(如输出回显了
  * 含 quota 字样的源码/测试名/任务书)→ 不算额度,避免误冷却停派。
  *
- * 返回命中的原始行(截断),供 diffSummary.quotaMatchedLine 留痕。
+ * 返回命中的原始行(截断),供 diffSummary.quotaMatchedLine 留痕;并给出分级
+ * kind(瞬时限流 / 额度耗尽),供调用方分流(R1:分级收敛在本函数单点)。
  */
 export function classifyQuotaFailure(
   texts: string[],
@@ -177,11 +262,12 @@ export function classifyQuotaFailure(
         return {
           isQuota: true,
           matchedLine: line.slice(0, QUOTA_MATCHED_LINE_MAX),
+          kind: classifyQuotaKind(line),
         };
       }
     }
   }
-  return { isQuota: false, matchedLine: null };
+  return { isQuota: false, matchedLine: null, kind: null };
 }
 
 /** 额度失败文本是否命中关键词(rate limit/quota/429/额度 等,大小写不敏感)。
@@ -309,6 +395,26 @@ export function getRateLimitCooldownMs(): number {
   return rateLimitCooldownMs;
 }
 
+/**
+ * 读瞬时限流处置配置(per-run 退避时长 + 连续升级上限);未配置 → null。
+ *
+ * null 时调用方必须回落 exhausted 语义(fail-safe:宁可长冷却也不要无限退避,
+ * spec transient-ratelimit-escalated-to-long-cooldown R5/§7)。两个键缺一即
+ * 视为未配置 —— 没有退避时长的退避、没有上限的退避都是半个机制。
+ */
+export function getTransientQuotaPolicy(): {
+  backoffMs: number;
+  escalationLimit: number;
+} | null {
+  if (transientBackoffMs === null || transientEscalationLimit === null) {
+    return null;
+  }
+  return {
+    backoffMs: transientBackoffMs,
+    escalationLimit: transientEscalationLimit,
+  };
+}
+
 /** 读重派熔断阈值(同一父任务连续失败子任务数上限)。 */
 export function getRedispatchFailureLimit(): number {
   return redispatchFailureLimit;
@@ -370,6 +476,12 @@ export function __resetExecutorQueueForTests(): void {
   retryPolicy = policy.retry;
   rateLimitPatterns = policy.rateLimit.detectPatterns;
   rateLimitCooldownMs = policy.rateLimit.cooldownMinutes * 60_000;
+  transientBackoffMs = transientBackoffMsOf(
+    policy.rateLimit.transientBackoffSeconds,
+  );
+  transientEscalationLimit = optionalPositiveInt(
+    policy.rateLimit.transientEscalationLimit,
+  );
   redispatchFailureLimit = 5;
 }
 
@@ -431,4 +543,20 @@ export function __setRateLimitForTests(
 ): void {
   rateLimitCooldownMs = Math.max(1, Math.floor(cooldownMs));
   rateLimitPatterns = [...patterns];
+}
+
+/**
+ * 测试专用:覆盖瞬时限流处置配置(per-run 退避时长 ms + 连续升级上限)。
+ * 传 null(或非法值)即「未配置」→ getTransientQuotaPolicy() 返回 null,
+ * 调用方回落 exhausted 语义(fail-safe,验收 9)。
+ */
+export function __setTransientQuotaForTests(
+  backoffMs: number | null,
+  escalationLimit: number | null,
+): void {
+  transientBackoffMs =
+    backoffMs !== null && Number.isFinite(backoffMs) && backoffMs > 0
+      ? Math.floor(backoffMs)
+      : null;
+  transientEscalationLimit = optionalPositiveInt(escalationLimit);
 }

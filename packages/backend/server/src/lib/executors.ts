@@ -435,6 +435,16 @@ export interface RateLimitPolicy {
   cooldownMinutes: number;
   /** 冷却期备用执行器 key;当前只读配置,不实现换执行器(留接口,后续可做)。 */
   fallbackExecutor: string | null;
+  /**
+   * 瞬时限流(`try again in 5 seconds` 这类短相对恢复提示)的 per-run 退避秒数:
+   * 该 run 退避这么久后重新排队重试,**不写执行器级冷却**。
+   * 缺失/非法 → null → 不启用瞬时处置,回落 exhausted 语义(fail-safe:宁可
+   * 长冷却也不要无限退避;spec transient-ratelimit-escalated-to-long-cooldown R5)。
+   */
+  transientBackoffSeconds: number | null;
+  /** 同一 run 连续瞬时限流达该次数 → 升级为 exhausted 处理(防退避死循环)。
+   *  缺失/非法 → null(同 transientBackoffSeconds 的 fail-safe 语义)。 */
+  transientEscalationLimit: number | null;
 }
 
 /** 调度策略:并行组上限 + 任务可靠性超时(静默/认领)+ 失败重试 + 额度冷却。 */
@@ -520,6 +530,10 @@ export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
   ],
   cooldownMinutes: 300,
   fallbackExecutor: null,
+  // 缺省策略(配置文件不可读时的兜底)不启用瞬时退避:两个键都为 null →
+  // 所有额度失败按 exhausted 处理,与瞬时分级落地前的行为一致(fail-safe)。
+  transientBackoffSeconds: null,
+  transientEscalationLimit: null,
 };
 
 /** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
@@ -534,6 +548,16 @@ function resolveDispatchPolicyFile(): string {
 function positiveInt(value: unknown, fallback: number): number {
   const n = Number(value);
   return Number.isInteger(n) && n >= 1 ? n : fallback;
+}
+
+/**
+ * 正整数解析,缺失/非法返回 null(调用方据此回落到既有的保守语义)。
+ * 用于「配了才启用」的开关型数值:给默认值会掩盖配置缺失,而缺失时应当走
+ * _fail-safe_ 分支而不是悄悄启用新行为。
+ */
+function optionalPositiveInt(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
 /** 非负整数解析(重试次数可配 0 = 不重试)。 */
@@ -591,6 +615,8 @@ export function readDispatchPolicy(): DispatchPolicy {
         detectPatterns?: unknown;
         cooldownMinutes?: unknown;
         fallbackExecutor?: unknown;
+        transientBackoffSeconds?: unknown;
+        transientEscalationLimit?: unknown;
       };
     };
     const rawPatterns = mergeRateLimitPatterns(raw.rateLimit?.detectPatterns);
@@ -652,6 +678,14 @@ export function readDispatchPolicy(): DispatchPolicy {
           typeof rawFallback === "string" && rawFallback.trim().length > 0
             ? rawFallback
             : null,
+        // 瞬时退避两个键**不设默认值**:缺失/非法 → null → 回落 exhausted
+        // 语义(spec R5 fail-safe;§7 兼容性:删掉这两个键即回到现状)。
+        transientBackoffSeconds: optionalPositiveInt(
+          raw.rateLimit?.transientBackoffSeconds,
+        ),
+        transientEscalationLimit: optionalPositiveInt(
+          raw.rateLimit?.transientEscalationLimit,
+        ),
       },
     };
   } catch {

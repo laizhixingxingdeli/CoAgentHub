@@ -94,9 +94,11 @@ import {
   getRetryPolicy,
   getStallAlertMs,
   getStallTimeoutMs,
+  getTransientQuotaPolicy,
   groupQueues,
   isInCooldown,
   pumping,
+  type QuotaFailureVerdict,
   runningExecutorCount,
   runningGroupCount,
   runningWorkspaceCount,
@@ -273,15 +275,18 @@ export function formatExecutorStartupFailure(bin: string, msg: string): string {
  *  - 目标执行器 running 数 >= maxConcurrency(声明式上限)→ 否(保持 queued,
  *    等既有任务终态后由完成路径的泵送自动出队);
  *  - 403 后重新排队(反应式排队)→ 既有同执行器 running 任务未清空 → 否;
- *    退避窗口未过(外部会话占用)→ 否。
+ *    退避窗口未过(外部会话占用)→ 否;
+ *  - per-run 退避窗口(concurrencyRetryAt)未过 → 否(403 退避与瞬时限流退避
+ *    同字段,后者不置 concurrencyBlocked —— 那是并发冲突语义,瞬时限流无需
+ *    等其他 running 任务清空)。
  */
 function isRunDispatchable(run: QueuedRun): boolean {
   if (isInCooldown(run.ex)) return false;
   const cap = run.ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
   if (runningExecutorCount(run.ex.key) >= cap) return false;
-  if (run.concurrencyBlocked) {
-    if (runningExecutorCount(run.ex.key) > 0) return false;
-    if (Date.now() < run.concurrencyRetryAt) return false;
+  if (Date.now() < run.concurrencyRetryAt) return false;
+  if (run.concurrencyBlocked && runningExecutorCount(run.ex.key) > 0) {
+    return false;
   }
   return true;
 }
@@ -756,6 +761,7 @@ export async function enqueueTaskRun(
     dispatchKind: task.dispatchKind,
     concurrencyBlocked: false,
     concurrencyRetryAt: 0,
+    transientQuotaCount: 0,
     attempts: Array.isArray(task.attempts) ? task.attempts : [],
   };
   group.queue.push(run);
@@ -1037,6 +1043,8 @@ async function dispatchTask(
     // 不会置位本标记;收到执行器 403 并发冲突后才置位)。
     concurrencyBlocked: false,
     concurrencyRetryAt: 0,
+    // 连续瞬时限流计数(spec transient-ratelimit-… R2):新 run 从 0 起算。
+    transientQuotaCount: 0,
     // 执行历史:沿用 DB 既有 attempts(重新执行的任务保留旧尝试,新 attempt 续接)。
     attempts: Array.isArray(task.attempts) ? task.attempts : [],
   };
@@ -1882,6 +1890,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           taskBook: run.body,
         });
         if (timeoutQuota.isQuota) {
+          // 瞬时限流(短相对恢复提示):per-run 退避重试,不进执行器级冷却。
+          if (isTransientQuota(timeoutQuota)) {
+            await handleTransientQuotaBackoff(
+              run,
+              "执行超时",
+              out,
+              timeoutQuota.matchedLine,
+            );
+            return;
+          }
           // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
           // R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底。
           const parsedMs = parseRateLimitRecoveryMs(out);
@@ -1891,6 +1909,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           const eta = formatEta(cooldownEnd);
           const extra: Record<string, unknown> = {
             [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+            // 与 handleQuotaFailure 出口同口径的额度分级留痕(R4/验收 7)。
+            quotaKind: "exhausted",
             quotaMatchedLine: timeoutQuota.matchedLine,
           };
           if (
@@ -1964,12 +1984,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               note: "输出尾部命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
             };
           } else {
-            await handleQuotaFailure(
-              run,
-              "exit 0",
-              successTail,
-              successQuota.matchedLine,
-            );
+            await routeQuotaFailure(run, "exit 0", successTail, successQuota);
             return;
           }
         }
@@ -2068,11 +2083,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           taskBook: run.body,
         });
         if (failureQuota.isQuota) {
-          await handleQuotaFailure(
+          await routeQuotaFailure(
             run,
             `exit ${result.code}`,
             tail,
-            failureQuota.matchedLine,
+            failureQuota,
           );
         } else {
           await handleFailure(run, `exit ${result.code}`, {
@@ -2479,6 +2494,148 @@ async function endAttempt(
 }
 
 /**
+ * 额度失败分流(spec transient-ratelimit-escalated-to-long-cooldown R2):
+ *  - `transient` → per-run 退避重排队(不进执行器级冷却,任务不判 failed);
+ *  - `exhausted`(或未启用瞬时处置)→ 既有额度失败出口(逐字不变)。
+ *
+ * 进程退出(exit≠0)与成功尾部(exit 0)两处共用本出口;超时分支单独保留
+ * 全量输出解析(历史行为,不在本 spec 改动范围),但共享 isTransientQuota 判定,
+ * 三处口径一致(验收 7)。
+ */
+async function routeQuotaFailure(
+  run: QueuedRun,
+  reasonLabel: string,
+  tail: string,
+  verdict: QuotaFailureVerdict,
+): Promise<void> {
+  if (isTransientQuota(verdict)) {
+    await handleTransientQuotaBackoff(
+      run,
+      reasonLabel,
+      tail,
+      verdict.matchedLine,
+    );
+    return;
+  }
+  await handleQuotaFailure(run, reasonLabel, tail, verdict.matchedLine);
+}
+
+/**
+ * 是否走瞬时限流处置:分级由 classifyQuotaFailure 单点给出,这里只判「是否
+ * 启用」—— 未配置瞬时退避时回落 exhausted 语义(fail-safe:宁可长冷却也不要
+ * 无限退避)。三处额度调用点共用本判定。
+ */
+function isTransientQuota(verdict: QuotaFailureVerdict): boolean {
+  return verdict.kind === "transient" && getTransientQuotaPolicy() !== null;
+}
+
+/**
+ * 瞬时限流的 per-run 退避处置(spec R2):供应方只要求短暂退避,执行器没坏,
+ * 因此**不调 enterCooldown**(`isInCooldown` 保持「额度耗尽」单一语义,R2 豁免
+ * 判据 isQueuedChildExecutorDispatchable 因此不必改动),任务也不判 failed ——
+ * 回写 queued 并重新入队,退避窗口过后由定时器泵送自动重试(不消耗重试次数)。
+ *
+ * 连续瞬时限流达上限 → 升级为 exhausted 处理(防退避死循环);配置不可用
+ * (fail-safe)→ 同样走 exhausted。
+ */
+async function handleTransientQuotaBackoff(
+  run: QueuedRun,
+  reasonLabel: string,
+  tail: string,
+  matchedLine: string | null,
+): Promise<void> {
+  const policy = getTransientQuotaPolicy();
+  if (!policy) {
+    await handleQuotaFailure(run, reasonLabel, tail, matchedLine);
+    return;
+  }
+  run.transientQuotaCount += 1;
+  if (run.transientQuotaCount >= policy.escalationLimit) {
+    console.warn(
+      `[executor] 连续瞬时限流达 ${run.transientQuotaCount} 次(上限 ${policy.escalationLimit}),升级为额度耗尽处理: ${run.taskId}`,
+    );
+    await handleQuotaFailure(
+      run,
+      `${reasonLabel}(连续瞬时限流 ${run.transientQuotaCount} 次,按额度耗尽处理)`,
+      tail,
+      matchedLine,
+    );
+    return;
+  }
+  const seconds = Math.max(1, Math.round(policy.backoffMs / 1_000));
+  // 先落退避窗口:退避从「判定那一刻」起算,不被随后的 DB 回写延迟吞掉。
+  const retryAt = Date.now() + policy.backoffMs;
+  run.concurrencyRetryAt = retryAt;
+  await endAttempt(run, {
+    status: "failed",
+    error: `瞬时限流,${seconds}s 后退避重试`,
+  });
+
+  // 运行状态回到 queued(运行中曾置 running):任务不判 failed,退避后重试。
+  try {
+    const [updated] = await run.db
+      .update(taskTable)
+      .set({
+        status: "queued",
+        diffSummary: {
+          waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
+          // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
+          quotaKind: "transient",
+          ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
+        },
+      })
+      .where(
+        and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+      )
+      .returning();
+    if (updated) {
+      await notifyTaskStatusChanged(
+        run.db,
+        run.taskId,
+        run.groupId,
+        "queued",
+        updated,
+      );
+    }
+  } catch (e) {
+    console.warn(`[executor] 瞬时限流回写 queued 失败(${run.taskId}): ${e}`);
+  }
+
+  // 不置 concurrencyBlocked —— 那是 403 并发冲突标记,会额外等待同执行器的
+  // 其他 running 任务清空,与「退避到点即重试」的语义不同。
+  run.stalled = false;
+  run.a2aSilenced = false;
+  run.runningAt = null;
+  run.lastOutputAt = 0;
+  run.lastActivityAt = 0;
+  run.kill = null;
+  clearRunTimers(run);
+  const group = groupQueues.get(run.groupKey);
+  if (!group) {
+    // 组已被清空(测试重置等异常)→ 无法退避重试,按最终失败处理。
+    await failTask(
+      run.db,
+      run.taskId,
+      "执行器瞬时限流,但组队列已不可用",
+      0,
+      { quotaKind: "transient" },
+      run.attempts,
+    );
+    return;
+  }
+  group.queue.push(run);
+  await postStatus(
+    run.db,
+    run.groupId,
+    run.participantId,
+    run.ex,
+    `⏳ [${run.ex.label}] 执行器瞬时限流,任务保持排队,${seconds}s 后自动重试: ${run.summary}`,
+  );
+  // 退避到期主动泵送(与 403 反应式排队同款兜底):此时 run 已在队首等待。
+  setTimeout(() => void pumpQueue(), Math.max(1, retryAt - Date.now()));
+}
+
+/**
  * 额度/速率限制失败统一出口(票7 + quota-failure-on-clean-exit 规范):冷却该
  * 执行器、不自动重试、❌ 回传注明预计恢复时间。tail 为命中检测与恢复时间解析
  * 所用的输出尾部(与失败回传同界:`lastLinesOf(out, 20)`),reasonLabel 为失败
@@ -2502,6 +2659,9 @@ async function handleQuotaFailure(
   const eta = formatEta(cooldownEnd);
   const extra: Record<string, unknown> = {
     [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+    // 额度分级留痕(spec transient-ratelimit-… R4):本出口只处理 exhausted,
+    // 与 transient 的 per-run 退避留痕并列,事后可审计分级准确性。
+    quotaKind: "exhausted",
     // 伪额度回显修复 R5:记录命中的原始行(截断),便于人判断是真实额度还是
     // 源码/任务书回显造成的伪命中。
     ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
@@ -2540,6 +2700,8 @@ async function handleFailure(
   },
 ): Promise<void> {
   const { db, taskId } = run;
+  // 非瞬时限流的失败出口:连续瞬时限流计数归零(「连续」而非「累计」)。
+  run.transientQuotaCount = 0;
   // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
   await endAttempt(run, { status: "failed", error: reason });
   const canRetry =
