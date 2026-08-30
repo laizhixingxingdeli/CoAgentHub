@@ -680,6 +680,90 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       });
     });
 
+    it("parseTaskReport:测试输出的夹具 commit 行不在汇报段 → hash 为空(验收 1)", () => {
+      // 实证形态(01a0516a / 01a0512b / 01a04fe3):跑测试时夹具里的假 hash 与
+      // 源码片段进 stdout。整段无汇报段 → hash 与 summary 都不得取自形态扫描。
+      const testRunOutput = [
+        "stdout | test/executor-task-repo.test.ts",
+        '  echo "commit 0123456789abcdef0123456789abcdef01234567"',
+        "  group?.projectPath ?? null,",
+        ");",
+        "const diffSummary: Record<string, unknown> = { error };",
+        " ✔ 18 passed",
+      ].join("\n");
+      const report = parseTaskReport(testRunOutput);
+      expect(report.hash).toBeUndefined();
+      expect(report.summary).toBeUndefined();
+      // 同一串出现在汇报块外时同样不取(有结构化汇报但夹具行在块外)。
+      const withSections = [
+        '工具输出: echo "commit 0123456789abcdef0123456789abcdef01234567"',
+        "测试: 定向 Vitest 18/18 通过",
+        "遗留: 无",
+      ].join("\n");
+      const blockReport = parseTaskReport(withSections);
+      expect(blockReport.hash).toBeUndefined();
+      expect(blockReport.tests).toBe("定向 Vitest 18/18 通过");
+      expect(blockReport.todo).toBe("无");
+    });
+
+    it("parseTaskReport:回显含 40 位版本哈希的任务书且无汇报段 → hash 为空(验收 1b)", () => {
+      // 实证形态(01a052c3):执行器被拒、零输出,stdout 只剩任务书回显;其中的
+      // specHash(40 位 hex)此前被形态扫成提交 hash。
+      const specHash = "e24a81448a2a9b1c7d3e5f60718293a4b5c6d7e8";
+      expect(specHash).toHaveLength(40);
+      const taskBook = [
+        "# CoAgentHub 任务",
+        "- 文档路径: specs/report-extraction-ingests-test-fixtures.md",
+        `版本哈希: ${specHash}`,
+        "## 汇报格式要求(stdout 请按此输出)",
+        "提交: <commit hash>",
+        "汇报: <做了什么,3-5 句>",
+      ].join("\n");
+      // 整份任务书被 JSON 转义成一行回显(无行首段头 → 无汇报段)。
+      const stdout = JSON.stringify({ brief: taskBook });
+      const report = parseTaskReport(stdout);
+      expect(report.hash).toBeUndefined();
+      expect(report.hash).not.toBe(specHash.slice(0, 12));
+      expect(report.summary).toBeUndefined();
+    });
+
+    it("parseTaskReport:汇报段结构化「提交: <真实 hash>」正确提取(验收 2)", () => {
+      const stdout = [
+        "提交: a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "测试: 定向 Vitest 18/18 通过",
+        "汇报: 修正了汇报提取的判据",
+        "遗留: 无",
+      ].join("\n");
+      expect(parseTaskReport(stdout)).toMatchObject({
+        hash: "a1b2c3d4e5f6",
+        tests: "定向 Vitest 18/18 通过",
+        summary: "修正了汇报提取的判据",
+        todo: "无",
+      });
+    });
+
+    it("parseTaskReport:无汇报段 → summary 为空 + 原因标注,且不含源码特征(验收 3)", () => {
+      // 实证形态:summary 曾是一段 TS 源码(用户 2026-08-30 截图)。
+      const stdout = [
+        "[tool→ read_file] 65:  lastLinesOf,",
+        "1839:  if (isQuotaFailure([执行超时, lastLinesOf(out, 20)])) {",
+        "  group?.projectPath ?? null,",
+        ");",
+        "return declaredRoots;",
+        "const diffSummary: Record<string, unknown> = { error };",
+      ].join("\n");
+      const report = parseTaskReport(stdout);
+      // 准确的空:summary 不落库,原因写在 reportMissingReason。
+      expect(report.summary).toBeUndefined();
+      expect(report.reportMissingReason).toBeTruthy();
+      // 整个汇报里不得出现源码特征。
+      const serialized = JSON.stringify(report);
+      expect(serialized).not.toContain("=>");
+      expect(serialized).not.toContain("const ");
+      expect(serialized).not.toContain(");");
+      expect(serialized).not.toContain("lastLinesOf");
+    });
+
     it("extractCodeBuddyStreamResult:stream-json stdout 提取最终正文", () => {
       // R1 打开 codebuddy --output-format stream-json 后 stdout 变 JSONL:
       // 汇报嵌在 {"type":"result",...} 的 result 字段(实跑 2026-08-26 形状)。

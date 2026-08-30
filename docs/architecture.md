@@ -294,7 +294,11 @@ CoAgentHub/
   `Token: <消耗 token 数量>` / `汇报: <做了什么,3-5 句>` / `遗留: <未完成事项>`。stdout
   四段解析由 `lib/executor-task/report.ts` 的 `parseTaskReport` 完成,其中 `Token:` 段
   被清洗为纯数字(tokenUsage:去空格与千分位逗号、非法/空值省略),不会把描述性文字当
-  token 落库。
+  token 落库。提取判据用**位置**不用内容形态(spec:
+  report-extraction-ingests-test-fixtures):hash 只采信汇报段结构化字段与汇报块内的
+  `commit/hash <hex>` 声明行,stdout 其余位置的十六进制串(测试夹具、任务书 specHash、
+  工具回显)一律不取;无汇报段时 summary 留空并给 `reportMissingReason` 原因标注,
+  不回退「取输出尾部若干行」。
 - **Spec-Driven 模式**:specRef 非空时,任务书在「任务内容」前额外插入「关联规范」段
   (文档路径 + 版本哈希 + 指令「以 Spec 为准」),执行器严格按 Spec 实现,冲突以 Spec 为准。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用

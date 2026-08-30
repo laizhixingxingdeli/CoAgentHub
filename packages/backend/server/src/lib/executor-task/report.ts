@@ -9,7 +9,7 @@ import { taskOutputTail } from "./output-buffer";
 
 /** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
 export interface TaskReport {
-  /** 做了什么(汇报段);老格式自由文本时为旧关键词摘要。 */
+  /** 做了什么(汇报段);无汇报段时留空,原因见 reportMissingReason。 */
   summary?: string;
   /** commit hash(提交段);缺段时省略(不误报"无提交")。 */
   hash?: string;
@@ -19,6 +19,8 @@ export interface TaskReport {
   todo?: string;
   /** 执行器自报值仅作解析参考,平台终态不再据此落库。 */
   tokenUsage?: string;
+  /** 未采集到结构化汇报段时的原因标注(R2):summary 留空,原因写在这里。 */
+  reportMissingReason?: string;
 }
 
 /** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。
@@ -60,8 +62,25 @@ const HASH_WRAP_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["[", "]"],
 ];
 
-/** 裸「commit/hash <hex>」行(旧自由文本格式的提交行),汇报块回退向前吸收用。 */
-const BARE_COMMIT_LINE_RE = /^(?:commit|hash)\s*[:：]?\s*[0-9a-f]{7,40}$/i;
+/**
+ * 裸「commit/hash <hex>」声明行(旧自由文本格式的提交行):整行只有声明 + hash,
+ * 行首行尾锚定。汇报块回退向前吸收与 hash 提取共用同一判据 —— 位置(声明行),
+ * 不是内容形态(spec R1:不得在整个 stdout 里做 `[0-9a-f]{7,40}` 扫描)。
+ */
+const DECLARED_COMMIT_LINE_RE =
+  /^(?:commit|hash)\s*[:：]?\s*([0-9a-f]{7,40})$/i;
+
+/** 未采集到结构化汇报段时的原因标注文案(汇报提取 spec R2)。 */
+const REPORT_MISSING_REASON =
+  "未采集到结构化汇报段(stdout 无「提交/测试/汇报/遗留」段头),按位置判据不回退取输出尾部";
+
+/** 取声明行里的 hash(40 位按既有规则缩为 12 位);非声明行返回 undefined。 */
+function declaredCommitHash(line: string): string | undefined {
+  const match = DECLARED_COMMIT_LINE_RE.exec(line.trim());
+  if (!match) return undefined;
+  const token = match[1];
+  return token.length === 40 ? token.slice(0, 12) : token;
+}
 
 /** 清洗 token 段值:去空格与千分位逗号,取首个数字组(去 token/tokens 等后缀词)。 */
 function cleanTokenValue(raw: string): string | undefined {
@@ -72,7 +91,11 @@ function cleanTokenValue(raw: string): string | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-/** 从输出取 commit hash(40 位 hex 或 "commit/hash: xxx" 短格式)。 */
+/**
+ * 从整段文本按**形态**取 commit hash(40 位 hex 或 "commit/hash: xxx" 短格式)。
+ * 只用于 a2a 分支:远端 participant 的回复本身就是交付正文,没有汇报段协议。
+ * CLI 汇报提取走 parseTaskReport 的位置判据(spec R1),不用这里。
+ */
 export function findCommitHash(text: string): string | null {
   const clean = (text ?? "").replace(ANSI_RE, "");
   const full = clean.match(/[0-9a-f]{40}/);
@@ -137,7 +160,7 @@ function reportBlockStart(
       start = i;
       continue;
     }
-    if (BARE_COMMIT_LINE_RE.test(lines[i])) {
+    if (declaredCommitHash(lines[i])) {
       start = i;
       continue;
     }
@@ -148,9 +171,13 @@ function reportBlockStart(
 
 /**
  * 汇报段落解析(票7):从 stdout 提取「提交:」「测试:」「汇报:」「遗留:」四段
- * (支持大小写变体),返回结构化字段;缺段时对应字段省略。stdout 不含任何段落
- * (老格式自由文本)→ 保持旧行为:摘要取「汇报/做了什么/测试结果/commit」关键词
- * 段或末尾 15 行,hash 用 findCommitHash。
+ * (支持大小写变体),返回结构化字段;缺段时对应字段省略。
+ *
+ * 判据用**位置**不用内容(spec: report-extraction-ingests-test-fixtures R1/R2):
+ *  - hash 只采信汇报段的结构化字段,缺段时在汇报块内认「commit/hash <hex>」声明行;
+ *    stdout 其余位置的十六进制串(测试夹具、任务书 specHash、工具回显)一律不取。
+ *  - stdout 不含任何段落 → summary 留空并给 reportMissingReason 标注原因,
+ *    **不**回退「取输出尾部若干行」(那是源码混进汇报的来路)。
  */
 export function parseTaskReport(text: string): TaskReport {
   const clean = (text ?? "").replace(ANSI_RE, "");
@@ -211,21 +238,24 @@ export function parseTaskReport(text: string): TaskReport {
       }
     }
     // 提交段缺失/无 hex 时在汇报块内回退提取(兼容「commit <hex>」裸行 + 段落
-    // 混排的旧输出,hash 不因缺段丢失)。汇报块边界见 reportBlockStart:块外的
-    // 工具转录 / 任务书回显一律不扫,避免结构化汇报存在时误取前文旧 hash。
+    // 混排的旧输出,hash 不因缺段丢失)。回退只认块内的声明行(R1:位置判据),
+    // 块内的其他十六进制串(测试夹具、回显的 specHash)与块外前文的旧 hash 一律不取。
     if (!report.hash) {
-      const h = findCommitHash(
-        lines.slice(reportBlockStart(lines, found)).join("\n"),
-      );
-      if (h) report.hash = h;
+      for (const line of lines.slice(reportBlockStart(lines, found))) {
+        const declared = declaredCommitHash(line);
+        if (declared) {
+          report.hash = declared;
+          break;
+        }
+      }
     }
     return report;
   }
 
-  // 老格式自由文本:保持旧行为(关键词段或末尾 15 行 + findCommitHash)。
-  const summary = legacyExtractSummary(clean);
-  const hash = findCommitHash(clean);
-  return hash ? { summary, hash } : { summary };
+  // 无结构化汇报段(R2):summary 留空 + 原因标注。此前这里回退「关键词段 / 末尾
+  // 15 行」并用 findCommitHash 扫全量输出,把测试夹具的假 hash 与源码片段当成
+  // 提交与汇报上报(任务 01a0516a / 01a052c3 实证);准确的空优于假内容。
+  return { reportMissingReason: REPORT_MISSING_REASON };
 }
 
 /** 群消息成功卡片(票7):固定四行渲染,独立可测;超过 8000 截断。 */
@@ -242,22 +272,6 @@ export function renderTaskCard(label: string, report: TaskReport): string {
   return card.length > TASK_CARD_MAX_LENGTH
     ? card.slice(0, TASK_CARD_MAX_LENGTH)
     : card;
-}
-
-/** 与桥 extractSummary 一致:取「汇报/做了什么/测试结果/commit」段或末尾 15 行。 */
-function legacyExtractSummary(clean: string): string {
-  const lines = clean.split("\n");
-  let start = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/汇报|做了什么|测试结果|commit/.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
-  const slice = start >= 0 ? lines.slice(start) : lines.slice(-15);
-  let out = slice.join("\n").trim();
-  if (out.length > 20000) out = out.slice(0, 20000) + "\n…(截断)";
-  return out;
 }
 
 /**
