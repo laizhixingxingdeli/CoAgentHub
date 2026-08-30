@@ -15,7 +15,7 @@ import {
   consumePendingCompletionEvents,
 } from "../src/lib/executor-task";
 import { appendTaskOutput } from "../src/lib/executor-task/output-buffer";
-import { cooldownEndMs, isInCooldown } from "../src/lib/executor-task/state";
+import { cooldownEndMs, getRateLimitCooldownMs, isInCooldown } from "../src/lib/executor-task/state";
 import {
   reconcileOrphanTasks,
   startOrphanReconciler,
@@ -976,6 +976,72 @@ describe("孤儿任务周期收敛", () => {
       // 其他健康执行器不在冷却 → 存在可改派对象(与 executor-quota-redispatch
       // 的「角色定向改派」用例衔接:调度层只跳过冷却执行器)。
       expect(isInCooldown({ key: "codex" })).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- R7:解析值过近/已过去 → 回退固定冷却 + 三字段留痕 ----
+
+  it("解析值过近(try again in 30s) → 回退固定兜底,diffSummary 同时含 executorCooldownEndMs/cooldownFallbackReason/discardedCooldownEndMs", async () => {
+    const participant = await registerParticipant({ name: "orc-r7-a" });
+    const group = await createGroup(participant.id, "孤儿收敛-r7-过近");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    appendTaskOutput(
+      task.id,
+      "You've hit your usage limit. try again in 30 seconds\n",
+    );
+    const now = new Date(2026, 7, 29, 10, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      expect(await reconcileOrphanTasks(orphanDb, now)).toBe(1);
+      const row = await findTask(task.id);
+      expect(row?.status).toBe("failed");
+      const summary = row?.diffSummary as Record<string, unknown>;
+      const expectedEnd = now.getTime() + getRateLimitCooldownMs();
+      expect(summary.executorCooldownEndMs).toBe(expectedEnd);
+      expect(summary.cooldownFallbackReason).toBe(
+        "解析所得时刻不可用,已回退固定冷却",
+      );
+      expect(summary.discardedCooldownEndMs).toBe(now.getTime() + 30_000);
+      expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("解析值在未来且远于 MIN_EFFECTIVE_COOLDOWN_MS → 冷却时刻逐字等于解析值,不写 cooldownFallbackReason/discardedCooldownEndMs", async () => {
+    const participant = await registerParticipant({ name: "orc-r7-b" });
+    const group = await createGroup(participant.id, "孤儿收敛-r7-远未来");
+    const task = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      executorKey: "codebuddy",
+      executorPid: deadPid(),
+    });
+    appendTaskOutput(
+      task.id,
+      "You've hit your usage limit. try again at 7:50 PM\n",
+    );
+    const now = new Date(2026, 7, 29, 10, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      expect(await reconcileOrphanTasks(orphanDb, now)).toBe(1);
+      const row = await findTask(task.id);
+      expect(row?.status).toBe("failed");
+      const summary = row?.diffSummary as Record<string, unknown>;
+      const expectedEnd = new Date(2026, 7, 29, 19, 50, 0, 0).getTime();
+      expect(summary.executorCooldownEndMs).toBe(expectedEnd);
+      expect(summary.cooldownFallbackReason).toBeUndefined();
+      expect(summary.discardedCooldownEndMs).toBeUndefined();
+      expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
     } finally {
       vi.useRealTimers();
     }

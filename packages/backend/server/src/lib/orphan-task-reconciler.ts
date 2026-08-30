@@ -23,7 +23,7 @@ import {
   taskOutputTail,
 } from "./executor-task";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
-import { enterCooldown, normalizeCooldownEnd } from "./executor-task/queue";
+import { enterCooldown, MIN_EFFECTIVE_COOLDOWN_MS, normalizeCooldownEnd } from "./executor-task/queue";
 import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
   formatEta,
@@ -104,13 +104,22 @@ export async function reconcileOrphanTasks(
     const quota = task.executorKey !== null && isQuotaFailure([tail]);
     let error = reason;
     let cooldownEnd: number | null = null;
+    const extra: Record<string, unknown> = {};
     if (quota) {
+      const parsedMs = parseRateLimitRecoveryMs(tail, now.getTime());
       cooldownEnd = normalizeCooldownEnd(
-        parseRateLimitRecoveryMs(tail, now.getTime()) ??
-          now.getTime() + getRateLimitCooldownMs(),
+        parsedMs ?? now.getTime() + getRateLimitCooldownMs(),
         now.getTime(),
       );
       error = `${reason}(执行器额度限制,预计 ${formatEta(cooldownEnd)} 恢复)`;
+      extra[EXECUTOR_COOLDOWN_END_MS_FIELD] = cooldownEnd;
+      if (
+        parsedMs !== null &&
+        parsedMs <= now.getTime() + MIN_EFFECTIVE_COOLDOWN_MS
+      ) {
+        extra.cooldownFallbackReason = "解析所得时刻不可用,已回退固定冷却";
+        extra.discardedCooldownEndMs = parsedMs;
+      }
     }
     // R2(本 spec):收敛写回以现有 diffSummary 为底合并,仅新增/覆盖
     // error / reconciledReason / reconciledAt 三键 —— 保留 platform.*(resumeOf
@@ -135,9 +144,7 @@ export async function reconcileOrphanTasks(
           reconciledReason: error,
           reconciledAt: now.toISOString(),
           ...(outputTail ? { outputTail } : {}),
-          ...(cooldownEnd !== null
-            ? { [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd }
-            : {}),
+          ...extra,
         },
       })
       // R5:以「仍为 running」为条件更新,并发写回 done 的任务不再匹配。
