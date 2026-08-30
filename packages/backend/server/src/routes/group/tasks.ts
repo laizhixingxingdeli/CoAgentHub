@@ -29,6 +29,7 @@ import {
   isTerminalTaskStatus,
   mergePlatformTokenFields,
   notifyTaskStatusChanged,
+  postStatus,
   readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
@@ -39,8 +40,22 @@ import {
   verifyCommitExists,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
+import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "@server/lib/executor-task/cooldown-store";
+import {
+  enterCooldown,
+  MIN_EFFECTIVE_COOLDOWN_MS,
+  normalizeCooldownEnd,
+} from "@server/lib/executor-task/queue";
+import {
+  classifyQuotaFailure,
+  formatEta,
+  getRateLimitCooldownMs,
+} from "@server/lib/executor-task/state";
 import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
-import { findExecutorByKey } from "@server/lib/executors";
+import {
+  findExecutorByKey,
+  parseRateLimitRecoveryMs,
+} from "@server/lib/executors";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { hasReviewResult } from "@server/lib/l3-overdue-reminder";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
@@ -1461,6 +1476,54 @@ app
           }
         }
       }
+      // R8(v1.1):PATCH failed 终态时复用 classifyQuotaFailure 判定额度失败,
+      // 命中后同口径进入执行器冷却并留痕(与 queue 进程退出/超时/孤儿收敛三条
+      // 路径一致)。
+      let quotaCooldownEnd: number | undefined;
+      let quotaEx: Awaited<ReturnType<typeof findExecutorByKey>> | undefined;
+      let quotaErrorText = "";
+      if (
+        status === "failed" &&
+        status !== task.status &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        const rawSummary = summaryToWrite as Record<string, unknown>;
+        const errorText =
+          typeof rawSummary.error === "string" ? rawSummary.error : "";
+        if (errorText.trim() !== "") {
+          const quotaVerdict = classifyQuotaFailure([errorText], {
+            taskBook: task.brief,
+          });
+          if (quotaVerdict.isQuota) {
+            const parsedMs = parseRateLimitRecoveryMs(errorText);
+            const cooldownEnd = normalizeCooldownEnd(
+              parsedMs ?? Date.now() + getRateLimitCooldownMs(),
+            );
+            const extra: Record<string, unknown> = {
+              [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+              ...(quotaVerdict.matchedLine !== null
+                ? { quotaMatchedLine: quotaVerdict.matchedLine }
+                : {}),
+            };
+            if (
+              parsedMs !== null &&
+              parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+            ) {
+              extra.cooldownFallbackReason =
+                "解析所得时刻不可用,已回退固定冷却";
+              extra.discardedCooldownEndMs = parsedMs;
+            }
+            summaryToWrite = { ...rawSummary, ...extra };
+            quotaCooldownEnd = cooldownEnd;
+            quotaErrorText = errorText;
+            quotaEx = task.executorKey
+              ? await findExecutorByKey(db, task.executorKey)
+              : undefined;
+          }
+        }
+      }
       const [updated] = await db
         .update(taskTable)
         .set({
@@ -1499,6 +1562,18 @@ app
             );
           }
         }
+      }
+      // R8(v1.1):额度冷却与群内留痕在落库后触发(与 queue 路径同口径)。
+      if (quotaCooldownEnd !== undefined && quotaEx) {
+        enterCooldown(quotaEx, quotaCooldownEnd, { db, taskId });
+        const eta = formatEta(quotaCooldownEnd);
+        void postStatus(
+          db,
+          id,
+          task.executorParticipantId,
+          quotaEx,
+          `❌ [${quotaEx.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${quotaErrorText}`,
+        );
       }
       return c.json(updated);
     },

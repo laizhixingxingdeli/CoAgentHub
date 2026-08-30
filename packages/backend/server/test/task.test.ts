@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  participant as participantTable,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
@@ -1743,5 +1746,156 @@ describe("任务实体(server 单一状态源)", () => {
     });
     expect(summary.tokenUsage).toBe(777);
     expect(summary.tokenUsageReason).toBe("platform");
+  });
+
+  describe("PATCH failed 额度判定(R8 v1.1)", () => {
+    async function seedExecutorKey(
+      participantId: string,
+      key: string,
+      taskId: string,
+    ) {
+      await testDb
+        .update(participantTable)
+        .set({ executorKey: key })
+        .where(eq(participantTable.id, participantId));
+      await testDb
+        .update(taskTable)
+        .set({ executorKey: key })
+        .where(eq(taskTable.id, taskId));
+    }
+
+    it("PATCH failed + 额度错误正文 → 执行器进入冷却且 executorCooldownEndMs 落库", async () => {
+      const { __resetExecutorQueueForTests, __setRateLimitForTests } =
+        await import("@server/lib/executor-task");
+      const { isInCooldown } = await import("@server/lib/executor-task/state");
+      __resetExecutorQueueForTests();
+      __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+
+      const { coordinator, execA, group } = await setupGroup();
+      const created = await createTask(
+        coordinator.id,
+        group.id,
+        uuidv4(),
+        execA.id,
+      );
+      const task = (await created.json()) as Task;
+      await seedExecutorKey(execA.id, "codebuddy", task.id);
+
+      const errorBody =
+        "You've hit your usage limit. Upgrade to Pro and try again at 3:32 PM.";
+      const patch = await patchTask(execA.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: { error: errorBody },
+      });
+      expect(patch.status).toBe(200);
+      const updated = (await patch.json()) as Task;
+      const diff = updated.diffSummary as Record<string, unknown> | null;
+      expect(diff?.executorCooldownEndMs).toBeDefined();
+      const endMs = Number(diff?.executorCooldownEndMs);
+      expect(endMs).toBeGreaterThan(Date.now());
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
+      expect(String(diff?.quotaMatchedLine)).toContain("usage limit");
+    });
+
+    it("PATCH done + 同样正文 → 不进入冷却", async () => {
+      const { __resetExecutorQueueForTests, __setRateLimitForTests } =
+        await import("@server/lib/executor-task");
+      const { isInCooldown } = await import("@server/lib/executor-task/state");
+      __resetExecutorQueueForTests();
+      __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+
+      const { coordinator, execA, group } = await setupGroup();
+      const created = await createTask(
+        coordinator.id,
+        group.id,
+        uuidv4(),
+        execA.id,
+      );
+      const task = (await created.json()) as Task;
+      await seedExecutorKey(execA.id, "codebuddy", task.id);
+
+      const errorBody =
+        "You've hit your usage limit. Upgrade to Pro and try again at 3:32 PM.";
+      const patch = await patchTask(execA.id, group.id, task.id, {
+        status: "done",
+        diffSummary: { error: errorBody, summary: "done with mention" },
+      });
+      expect(patch.status).toBe(200);
+      const updated = (await patch.json()) as Task;
+      const diff = updated.diffSummary as Record<string, unknown> | null;
+      expect(diff?.executorCooldownEndMs).toBeUndefined();
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+    });
+
+    it("PATCH failed + 非额度错误正文 → 既有行为逐字不变", async () => {
+      const { __resetExecutorQueueForTests, __setRateLimitForTests } =
+        await import("@server/lib/executor-task");
+      const { isInCooldown } = await import("@server/lib/executor-task/state");
+      __resetExecutorQueueForTests();
+      __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+
+      const { coordinator, execA, group } = await setupGroup();
+      const created = await createTask(
+        coordinator.id,
+        group.id,
+        uuidv4(),
+        execA.id,
+      );
+      const task = (await created.json()) as Task;
+      await seedExecutorKey(execA.id, "codebuddy", task.id);
+
+      await withFreshRuntime(async () => {
+        const patch = await patchTask(execA.id, group.id, task.id, {
+          status: "failed",
+          diffSummary: { error: "执行器返回非零退出码" },
+        });
+        expect(patch.status).toBe(200);
+        const updated = (await patch.json()) as Task;
+        const diff = updated.diffSummary as Record<string, unknown> | null;
+        expect(diff?.executorCooldownEndMs).toBeUndefined();
+        expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+        expect(diff).toEqual({ error: "执行器返回非零退出码" });
+      });
+    });
+
+    it("PATCH failed + 自指文本(任务书回显) → 不误判为额度失败", async () => {
+      const { __resetExecutorQueueForTests, __setRateLimitForTests } =
+        await import("@server/lib/executor-task");
+      const { isInCooldown } = await import("@server/lib/executor-task/state");
+      __resetExecutorQueueForTests();
+      __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+
+      const { coordinator, execA, group } = await setupGroup();
+      const created = await createTask(
+        coordinator.id,
+        group.id,
+        uuidv4(),
+        execA.id,
+      );
+      const task = (await created.json()) as Task;
+      await seedExecutorKey(execA.id, "codebuddy", task.id);
+      // 将错误正文写入任务书,使 classifyQuotaFailure 的 isTaskBookEcho 命中,
+      // 从而排除自指回显。
+      await testDb
+        .update(taskTable)
+        .set({
+          brief:
+            "You've hit your usage limit. Upgrade to Pro and try again at 3:32 PM.",
+        })
+        .where(eq(taskTable.id, task.id));
+
+      const patch = await patchTask(execA.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: {
+          error:
+            "You've hit your usage limit. Upgrade to Pro and try again at 3:32 PM.",
+        },
+      });
+      expect(patch.status).toBe(200);
+      const updated = (await patch.json()) as Task;
+      const diff = updated.diffSummary as Record<string, unknown> | null;
+      expect(diff?.executorCooldownEndMs).toBeUndefined();
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+    });
   });
 });
