@@ -361,6 +361,27 @@ async function assertCoordinationCloseIntegrity(
     }
   }
 
+  // R3:反向守卫——不该走 L3 时不得产出 review_request。
+  // fix 票复用冻结 spec,不产生新架构面;无 reviewer 时两层编制不跑 L3。
+  // dispatchKind 为 null 的历史行保守按 requirement 处理,不拒绝。
+  if (summaryHasReviewRequest(diffSummary)) {
+    if (task.dispatchKind === "fix") {
+      throw coordinationCloseError(
+        "fix 票复用已过 L3 的冻结 spec,不产生新的架构面。",
+      );
+    }
+    const members = await db.query.groupMember.findMany({
+      where: (t, { eq }) => eq(t.groupId, task.groupId),
+      columns: { roles: true },
+    });
+    const presentRoles = new Set(members.flatMap((m) => m.roles));
+    if (!presentRoles.has("reviewer")) {
+      throw coordinationCloseError(
+        "群内无 reviewer 成员,不得携带 review_request。",
+      );
+    }
+  }
+
   // L2 必须直面提交核实结论(specs/l2-must-read-claim-verification.md):
   // 任一执行子任务的 claimVerification.status 属需表态集合(not_found /
   // outside_window)时,协调任务 diffSummary.claimAdjudication[childTaskId]

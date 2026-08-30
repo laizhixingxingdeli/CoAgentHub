@@ -583,6 +583,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
   it("目标角色为 coordinator 且无 prompt → 任务书按协调者流程并包含回写契约", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
+    // R3 反向守卫要求群内有 reviewer 才允许携带 review_request。
+    const reviewer = await registerParticipant({ name: "exec-reviewer" });
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
 
     const capture = path.join(fakeDir, "ticket-coordinator.md");
     process.env.TICKET_CAPTURE = capture;

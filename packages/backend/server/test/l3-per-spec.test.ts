@@ -511,4 +511,104 @@ describe("L3 请求按 spec 去重 (R1-R4)", () => {
     });
     expect(patched.status, await patched.text()).toBe(200);
   });
+
+  /* ---------------- R3 反向守卫:不该走 L3 时不得产出 review_request ---------------- */
+
+  it("R3:fix 票终态携带 review_request → 400 且终态不写入", async () => {
+    const { coordinator, execA, group } = await setupGroupAndCoordinationTask();
+    const msg = await postMessageRaw(coordinator.id, group.id, "fix 带 review");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+      "fix",
+    );
+    await addChild(group.id, task.id, execA.id);
+    const patched = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: reviewRequest(task.id, "specs/r3-fix.md", "hash1", "fix 结论"),
+    });
+    expect(patched.status).toBe(400);
+    const body = (await patched.json()) as { message: string };
+    expect(body.message).toContain("fix 票复用已过 L3 的冻结 spec");
+
+    const row = await findTaskRow(task.id);
+    expect(row?.status).not.toBe("done");
+  });
+
+  it("R3:群内无 reviewer 时携带 review_request → 400 且终态不写入", async () => {
+    const coordinator = await register(`r3-no-reviewer-coord-${randomUUID()}`);
+    const execA = await register(`r3-no-reviewer-exec-${randomUUID()}`);
+    const group = await createGroup(coordinator.id, `r3-no-reviewer-${randomUUID()}`);
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+
+    const msg = await postMessageRaw(coordinator.id, group.id, "无 reviewer");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+      "requirement",
+    );
+    await addChild(group.id, task.id, execA.id);
+    const patched = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: reviewRequest(task.id, "specs/r3-no-reviewer.md", "hash2", "结论"),
+    });
+    expect(patched.status).toBe(400);
+    const body = (await patched.json()) as { message: string };
+    expect(body.message).toContain("群内无 reviewer 成员");
+
+    const row = await findTaskRow(task.id);
+    expect(row?.status).not.toBe("done");
+  });
+
+  it("R3 回归:dispatchKind=null 历史任务仍允许携带 review_request", async () => {
+    const { coordinator, reviewer, execA, group } =
+      await setupGroupAndCoordinationTask();
+    const msg = await postMessageRaw(coordinator.id, group.id, "历史任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      coordinator.id,
+    );
+    expect(task.dispatchKind).toBeNull();
+    await addChild(group.id, task.id, execA.id);
+    const payload = reviewRequest(task.id, "specs/r3-null.md", "hash3", "历史结论");
+    const patched = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: payload,
+    });
+    expect(patched.status, await patched.text()).toBe(200);
+
+    const row = await findTaskRow(task.id);
+    expect(row?.diffSummary).toEqual(payload);
+  });
+
+  it("R3 回归:非协调任务不携带 review_request 的普通 PATCH 行为不变", async () => {
+    const { coordinator, execA, group } = await setupGroupAndCoordinationTask();
+    const msg = await postMessageRaw(coordinator.id, group.id, "普通执行器任务");
+    const messageId = ((await msg.json()) as { id: string }).id;
+    const task = await createTask(
+      coordinator.id,
+      group.id,
+      messageId,
+      execA.id,
+      "requirement",
+    );
+    const patched = await patchTask(execA.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { summary: "执行器完成" },
+    });
+    expect(patched.status, await patched.text()).toBe(200);
+
+    const row = await findTaskRow(task.id);
+    expect(row?.status).toBe("done");
+    expect(row?.diffSummary).toEqual({ summary: "执行器完成" });
+  });
 });
