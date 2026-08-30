@@ -803,4 +803,105 @@ describe("platform token usage collection", () => {
     );
     expect(generic.tokenUsage?.source).toBe("generic-jsonl-scan");
   });
+
+  it("R4: recognizes the cacheRead and cache_read aliases via the generic scan", async () => {
+    // Spec R4 adds `cacheRead` / `cache_read` as cache-read aliases. They are
+    // cache subsets and, per the frozen generic caliber, never added to total.
+    const camel = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({ usage: { input: 100, output: 10, cacheRead: 3 } }),
+    });
+    const snake = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({ usage: { input: 100, output: 10, cache_read: 3 } }),
+    });
+    for (const result of [camel, snake]) {
+      expect(result.tokenUsage).toEqual({
+        inputTokens: 100,
+        outputTokens: 10,
+        cachedInputTokens: 3,
+        totalTokens: 110,
+        source: "generic-jsonl-scan",
+      });
+    }
+  });
+
+  it("R4: recognizes the cacheWrite and cache_write aliases via the generic scan", async () => {
+    const camel = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: { input: 100, output: 10, cacheWrite: 4 },
+      }),
+    });
+    const snake = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: { input: 100, output: 10, cache_write: 4 },
+      }),
+    });
+    for (const result of [camel, snake]) {
+      expect(result.tokenUsage).toEqual({
+        inputTokens: 100,
+        outputTokens: 10,
+        cachedInputTokens: 4,
+        totalTokens: 110,
+        source: "generic-jsonl-scan",
+      });
+    }
+  });
+
+  it("R4: reasoning/reasoningTokens/reasoning_tokens are a final output fallback, never additive", async () => {
+    // Reasoning tokens are a breakdown *inside* output_tokens; without an
+    // explicit output count they may stand in as the output side, but they must
+    // never be added on top of a resolved output.
+    for (const key of ["reasoning", "reasoningTokens", "reasoning_tokens"]) {
+      const result = await collectTokenUsage({
+        executorKey: "does-not-exist",
+        cwd,
+        startedAt,
+        endedAt,
+        stdout: JSON.stringify({ usage: { input: 100, [key]: 5 } }),
+      });
+      expect(result.tokenUsage).toEqual({
+        inputTokens: 100,
+        outputTokens: 5,
+        totalTokens: 105,
+        source: "generic-jsonl-scan",
+      });
+    }
+  });
+
+  it("R4: output_tokens wins over reasoning_tokens — outputTokens is 100, not 140 (acceptance 2)", async () => {
+    // Frozen acceptance: when both an explicit output count and a reasoning
+    // breakdown are present, the explicit count is authoritative. Reasoning is
+    // only the last fallback of the output chain, so it must not inflate.
+    const result = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        usage: { input_tokens: 1000, output_tokens: 100, reasoning_tokens: 40 },
+      }),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 1000,
+      outputTokens: 100,
+      totalTokens: 1100,
+      source: "generic-jsonl-scan",
+    });
+    expect(result.tokenUsage?.outputTokens).toBe(100);
+  });
 });

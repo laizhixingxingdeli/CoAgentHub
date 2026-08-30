@@ -62,7 +62,13 @@ function readUsageObject(
     row.output_tokens ??
       row.outputTokens ??
       row.output ??
-      row.completion_tokens,
+      row.completion_tokens ??
+      // R4 (spec R4): reasoning tokens are a breakdown *inside* output_tokens,
+      // never an additive extra — so reasoning is only a final fallback alias
+      // when no explicit output count is present.
+      row.reasoning ??
+      row.reasoningTokens ??
+      row.reasoning_tokens,
     integerOnly,
   );
   const cachedReadTokens = nonNegativeNumber(
@@ -72,7 +78,9 @@ function readUsageObject(
       row.cached_tokens ??
       row.cachedTokens ??
       row.cache_read_input_tokens ??
-      row.cacheReadInputTokens,
+      row.cacheReadInputTokens ??
+      row.cacheRead ??
+      row.cache_read,
     integerOnly,
   );
   const cachedCreationTokens = nonNegativeNumber(
@@ -81,7 +89,9 @@ function readUsageObject(
       // Codex (OpenAI Responses API) names cache-creation tokens
       // `cache_write_input_tokens`; they are a subset of `input_tokens`.
       row.cache_write_input_tokens ??
-      row.cacheWriteInputTokens,
+      row.cacheWriteInputTokens ??
+      row.cacheWrite ??
+      row.cache_write,
     integerOnly,
   );
   const cachedInputTokens =
