@@ -1,7 +1,7 @@
 # Spec: 汇报提取吃进测试夹具,把假 hash 和源码当成提交与汇报
 
 > **状态**: Ready for Implementation
-> **版本**: 1.1
+> **版本**: 1.2
 > **日期**: 2026-08-30
 
 ## 1. 现象
@@ -107,7 +107,16 @@ claimVerification = not_found  ← 拦下了
 2. 构造一份汇报段里写明「提交: <真实 hash>」的 stdout → 正确提取该 hash。必测。
 3. 取不到汇报段时:`summary` 为空并带原因标注;
    **断言其中不含源码特征**(如 `=>` / `const ` / `);` 连续出现)。必测。
-4. **不得存在夹具值排除名单**:全仓 grep `0123456789ab` 在 `src/` 下零命中。必测。
+4. **不得存在夹具值排除名单** —— 判据限定在**提取实现本身**:
+   `packages/backend/server/src/lib/executor-task/` 下 grep `0123456789ab` 零命中,
+   且提取实现中不存在任何以「具体 hash 字面量」为条件的分支。必测。
+
+   ⚠️ **v1.2 更正**:v1.1 把这条写成「全仓 `packages/**/src/` 零命中」,
+   **无法满足** —— 前端有 3 个文件(`RequirementTimeline.test.tsx` /
+   `RequirementDetailPanel.test.tsx` / `RequirementTimeline.render.test.tsx`)
+   本就用该字符串作展示样例,而同一份 spec 又禁止改前端。
+   L2 正确地判定「不修订 spec 就不存在合规的重试路径」并停下(任务 01a05324-a27b)。
+   **错在检视者用了代理指标(全仓 grep)代替危害本身(实现里的排除名单)。**
 5. 既有能正确提取的样本(pi / AtomCode / codex 各一)行为**逐字不变**(回归)。
 6. `claimVerification` 相关测试全绿且未被修改。
 
@@ -128,3 +137,9 @@ claimVerification = not_found  ← 拦下了
   提取器把**任务书自身的 `specHash`** 当成了提交 hash,证明污染源不限于测试夹具
   —— 平台自己写进任务书的字段同样会被形态扫描误采。R1「用位置不用内容」的
   判据选择因此更有必要,v1.0 的方向不变。
+
+- **v1.2(2026-08-30)**:更正验收 4 的范围。原文要求「全仓 `packages/**/src/`
+  零命中」,与「不改前端」的红线**直接冲突**且不可满足;真正要防的是
+  **提取实现里出现按具体 hash 字面量排除的分支**,判据应限定在
+  `lib/executor-task/`。实现 `3f8fe5e7` 本身符合原意(该目录下零命中),
+  卡住的是标准写法,不是实现。
