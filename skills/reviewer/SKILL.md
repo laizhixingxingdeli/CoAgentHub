@@ -222,12 +222,13 @@ Read the spec + read the implementation diff, then check **architecture quality*
 
 ⚠️ **但群消息唤不醒协调者**（v4.0 §3.14.7）。它 `memory: null`、每票 spawn、跑完即退——
 它 PATCH 终态那一刻进程就结束了，等你公布 `review_result` 时**没有任何协调者进程存在**。
-旧版「协调者从群消息流里读它」是**结构上不可执行**的。所以：
+旧版「协调者从群消息流里读它」是**结构上不可执行**的。所以 `findings` 必须走平台的
+**定向派发路径**——广播形式会被平台 **400** 拒收：
 
 | verdict | 你要做的 |
 |---|---|
 | `pass` | 公布 `review_result` 留痕，**结束**。不需要唤醒任何人。 |
-| `findings` | ① 公布 `review_result`（留痕 + 前端展示，不变）；② **另下发一张 `dispatchKind: fix` 的修正任务给协调者**，任务书引用发现项，`specRef` 与被检视票相同。**②是唯一能唤醒它的通道。** |
+| `findings` | ① 公布 `review_result` 并**定向到 coordinator**（`audience: role` 指向 `coordinator` 角色，或 `audience: participant` 指向协调者 participant），且必须带 `specRef` + `specHash`（留痕 + 前端展示，不变）；② 修正任务由平台现有派发路径**自动生成** `dispatchKind: fix` 任务——任务书引用发现项、`specRef` 与被检视票相同，**无需你另发任务**。 |
 
 发现项驱动的修正票**天然是 `fix`**：复用同一份冻结 spec，不引入新架构面。若某条发现项
 大到需要改 spec → 走第 11 步 `spec_amended`，并**升级为 `requirement`**（闸二）。

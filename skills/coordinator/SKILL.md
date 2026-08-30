@@ -329,7 +329,13 @@ L2 未通过而重下发时,**必须消费上次尝试的可核实证据**,不�
 L2 通过后：
 
 1. `PATCH /api/groups/:groupId/tasks/:taskId`，把**检视者下发给你的那条任务**置为 `done`
-2. `diffSummary` 里带上 `review_request` 结构化载荷（格式见 spec §3.10，字段名照抄）：
+2. **仅当平台判定允许携带时**，`diffSummary` 才带 `review_request` 结构化载荷（格式见
+   spec §3.10，字段名照抄）。判定与平台共用（`reviewRequestCarryAllowed`）：
+   - 本票 `dispatchKind` **非 `fix`**（fix 票复用已过 L3 的冻结 spec，不产生新的架构面）；
+   - 群内有 **reviewer** 成员（无 reviewer 时两层编制不跑 L3）；
+   - `dispatchKind` 为 **null** 的历史行**按 `requirement` 处理**（允许携带）。
+   条件不成立时**不得携带**——PATCH 终态会被平台 **400** 拒收（任务书「汇报格式要求」段
+   按同一判定提示「不要携带」）：
 
 ```json
 {"type":"review_request","layer":3,"taskId":"<被检视任务id>","specRef":"specs/x.md","specHash":"...","diffSummary":"..."}
