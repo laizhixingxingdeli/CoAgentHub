@@ -233,10 +233,10 @@ CoAgentHub/
 
 ## 9. 执行器与任务
 
-**三角色职责分离 + 三层检视闭环**:检视者(reviewer)与用户直接对话、生成并冻结 spec;协调者(coordinator)据冻结 spec 下发任务;执行者(executor)按任务书实现。三层检视:L1 执行者会话内自检(Standards + Spec 双轴)/ L2 协调者功能检视(对照 spec 验收标准,✅ 放行 / ❌ 重下发)/ L3 检视者架构检视(是否最佳实现、ADR 合规、领域词汇;发现项 → 修订 spec)。检视编排由三个 skill 的纪律承载,平台不建编排引擎;检视请求/结论复用**任务通道**(L3 = 检视任务,载荷用结构化 JSON,字段对齐未来 `review_requests` 表)。
+**三角色职责分离 + 三层检视闭环**:检视者(reviewer)与用户直接对话、生成并冻结 spec;协调者(coordinator)据冻结 spec 下发任务;执行者(executor)按任务书实现。三层检视:L1 执行者会话内自检(Standards + Spec 双轴)/ L2 协调者功能检视(对照 spec 验收标准,✅ 放行 / ❌ 重下发)/ L3 检视者架构检视(是否最佳实现、ADR 合规、领域词汇;发现项 → 修订 spec)。检视编排由三个 skill 的纪律承载,平台不建编排引擎;L3 架构检视由 reviewer 通过 **task_completion_event inbox 认领**触发,不再以任务形式下发。
 
-- **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——群成员里有没有 `reviewer` 角色成员决定:有 `reviewer` = **三层**(L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视);无 `reviewer` = **两层**(协调者兼任检视者的写 spec 职责,L2 通过即结案,跳过 L3)。两模式唯一差异是协调者 L2 通过后是否再下发一个 L3 检视任务(在平台眼里只是普通 task),平台不感知模式。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」**自行 grill + 写 spec + 冻结公布(严禁把内容复制回 coordinator skill);取舍见 spec §3.14.4——更少跳转 vs L3 变自审、写与验收同一方。
-  - **L2 之后的分支**:三层下 L2 功能检视通过 → 下发 L3 检视任务(`detached` + `review_request` 载荷)→ 读 `review_result` 裁决 → 结案;两层下 L2 通过即结案,跳过 L3。结案时若存在上游 detached 任务仍须 `PATCH` 回写终态(与模式无关)。
+- **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——群成员里有没有 `reviewer` 角色成员决定:有 `reviewer` = **三层**(L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视);无 `reviewer` = **两层**(协调者兼任检视者的写 spec 职责,L2 通过即结案,跳过 L3)。两模式唯一差异是 L2 通过后是否进入 L3 架构检视:三层有 reviewer 在场,L2 通过即触发 completion event,由 reviewer inbox 认领完成检视;两层无 reviewer,L2 通过即结案。平台不感知模式。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」**自行 grill + 写 spec + 冻结公布(严禁把内容复制回 coordinator skill);取舍见 spec §3.14.4——更少跳转 vs L3 变自审、写与验收同一方。
+  - **L2 之后的分支**:三层下 L2 功能检视通过 → 任务终态后 DB trigger 自动创建 `task_completion_event` → reviewer 从 inbox 认领并完成架构检视 → 结案;两层下 L2 通过即结案,跳过 L3。结案时若存在上游 detached 任务仍须 `PATCH` 回写终态(与模式无关)。
   - **L3 检视通过 completion event 唤醒**:三层模式下 L2 通过后,协调者不再向 reviewer participant 直接下发 task;任务终态时 DB trigger 自动创建 `task_completion_event`,reviewer 从 inbox 认领并完成架构检视。reviewer 不对应执行器配置,其消息走普通消息/控制指令路径。
   - **协调者用 detached 需自行注册执行器**:协调者若要使用 spec §3.5 的会话延续(`detached`),需自行 `POST /api/executors` 注册为可被唤醒的执行器(`kind=cli`);`canDispatch` 标记决定是否保留 dispatcher/callback 路由信息(当前 DB 行均未设此标记,缺省 false=纯执行器)。
 
