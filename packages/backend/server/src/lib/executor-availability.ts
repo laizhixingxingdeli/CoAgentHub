@@ -2,8 +2,13 @@ import type { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import { findExecutorByParticipant } from "@server/lib/executors";
 import { and, arrayContains, desc, eq } from "drizzle-orm";
+import {
+  cooldownEndMs,
+  formatEta,
+  isInCooldown,
+  runningExecutorCount,
+} from "./executor-task/state";
 import { getExecutorTaskLiveness } from "./executor-task-liveness";
-import { cooldownEndMs, formatEta, isInCooldown } from "./executor-task/state";
 
 /** degradedToTwoParty.executors 的单个条目:候选执行器名字 + 不可用原因。 */
 export interface DegradedExecutorEntry {
@@ -17,6 +22,50 @@ export interface TwoPartyDegradation {
   at: string;
   /** 当时每个候选执行器的实际状态(name + 不可用原因)。 */
   executors: DegradedExecutorEntry[];
+}
+
+/** R1 单条执行器权威可用性的返回形状(GET /api/executors 每条恒含三字段)。 */
+export interface ExecutorAvailability {
+  available: boolean;
+  unavailableReason: string | null;
+  cooldownEndMs: number | null;
+}
+
+/** 冷却不可用文案(单一权威出处:judgeTwoPartyDegradation 与 executorAvailability 共用)。 */
+function cooldownUnavailableReason(ex: { key: string }): string {
+  return `额度冷却至 ${formatEta(cooldownEndMs(ex))}`;
+}
+
+/** running 占用不可用文案(单一权威出处:并发饱和与既有 running 判定共用)。 */
+const RUNNING_TASK_UNAVAILABLE_REASON = "正在运行任务";
+
+/**
+ * R1(specs/executor-availability-visibility-and-queued-child-pinning.md):
+ * 单条执行器的权威可用性。冷却中 → false / 冷却文案 / cooldownEndMs;并发饱和
+ * (runningExecutorCount >= maxConcurrency,与 pumpQueue 的 isRunDispatchable
+ * 前两条同口径)→ false / 「正在运行任务」/ null;否则 true / null / null。
+ * GET /api/executors 只消费本导出,不在路由里另写判定或文案。
+ */
+export function executorAvailability(ex: {
+  key: string;
+  maxConcurrency?: number | null;
+}): ExecutorAvailability {
+  if (isInCooldown(ex)) {
+    return {
+      available: false,
+      unavailableReason: cooldownUnavailableReason(ex),
+      cooldownEndMs: cooldownEndMs(ex),
+    };
+  }
+  const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
+  if (runningExecutorCount(ex.key) >= cap) {
+    return {
+      available: false,
+      unavailableReason: RUNNING_TASK_UNAVAILABLE_REASON,
+      cooldownEndMs: null,
+    };
+  }
+  return { available: true, unavailableReason: null, cooldownEndMs: null };
 }
 
 type Task = typeof taskTable.$inferSelect;
@@ -65,7 +114,7 @@ export async function judgeTwoPartyDegradation(
     if (isInCooldown(ex)) {
       entries.push({
         name: participant.name,
-        reason: `额度冷却至 ${formatEta(cooldownEndMs(ex))}`,
+        reason: cooldownUnavailableReason(ex),
       });
       continue;
     }
@@ -84,7 +133,7 @@ export async function judgeTwoPartyDegradation(
         name: participant.name,
         reason: liveness?.warning
           ? "任务失联(静默超时警告)"
-          : "正在运行任务",
+          : RUNNING_TASK_UNAVAILABLE_REASON,
       });
       continue;
     }

@@ -3,15 +3,9 @@ import { participant as participantTable } from "@laizhixingxingdeli/database/sc
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import db, { type DataBase } from "@server/lib/database";
 import { resolveBin } from "@server/lib/exec-bin";
-import {
-  cooldownEndMs,
-  formatEta,
-  isInCooldown,
-  runningExecutorCount,
-} from "@server/lib/executor-task/state";
+import { executorAvailability } from "@server/lib/executor-availability";
 import {
   addExecutorConfig,
-  type ExecutorConfig,
   effectiveExecutors,
   findExecutorByKey,
   registerExecutorParticipant,
@@ -34,37 +28,6 @@ import { z } from "zod";
  * GET 直接返回 DB 行,不再有内置 key,因此 DELETE/PATCH 对所有 key 一律放行。
  */
 const app = new Hono<{ Variables: { db: DataBase } }>();
-
-/**
- * R1(specs/executor-availability-visibility-and-queued-child-pinning.md):
- * 单条执行器的权威可用性。复用 executor-availability.ts 的同一权威源
- * (executor-task/state 的 isInCooldown / cooldownEndMs / formatEta,与
- * runningExecutorCount vs maxConcurrency —— isRunDispatchable 前两条同口径),
- * 不在路由里另写一套判定;文案逐字复用既有「额度冷却至 …」/「正在运行任务」。
- * 三字段恒定返回(不可用时为 false/null/数值),杜绝「缺字段被读成可用」。
- */
-function availabilityOf(ex: ExecutorConfig): {
-  available: boolean;
-  unavailableReason: string | null;
-  cooldownEndMs: number | null;
-} {
-  if (isInCooldown(ex)) {
-    return {
-      available: false,
-      unavailableReason: `额度冷却至 ${formatEta(cooldownEndMs(ex))}`,
-      cooldownEndMs: cooldownEndMs(ex),
-    };
-  }
-  const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
-  if (runningExecutorCount(ex.key) >= cap) {
-    return {
-      available: false,
-      unavailableReason: "正在运行任务",
-      cooldownEndMs: null,
-    };
-  }
-  return { available: true, unavailableReason: null, cooldownEndMs: null };
-}
 
 app.use(async (c, next) => {
   c.set("db", db);
@@ -246,8 +209,9 @@ const app2 = app
       return c.json(
         all.map((ex) => {
           // R1:每条恒含可用性三字段(available/unavailableReason/cooldownEndMs),
-          // 追加在既有字段之后,既有字段与顺序逐字不变。
-          const availability = availabilityOf(ex);
+          // 追加在既有字段之后,既有字段与顺序逐字不变;判定与文案全部来自
+          // executor-availability.ts 的权威导出,路由不写第二套。
+          const availability = executorAvailability(ex);
           return {
             key: ex.key,
             agentName: ex.agentName,

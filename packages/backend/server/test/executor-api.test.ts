@@ -790,8 +790,8 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
 
   // ── R1(specs/executor-availability-visibility-and-queued-child-pinning.md)──
   // GET 每条恒含 available/unavailableReason/cooldownEndMs 三字段;冷却/并发饱和
-  // 均复用 executor-availability.ts 同源判定(isInCooldown / runningExecutorCount
-  // vs maxConcurrency),文案逐字一致,不另写一套。
+  // 判定与文案均由 executor-availability.ts 的 executorAvailability 权威导出
+  // 产生(单一权威源),测试只与权威导出比对,不手写第二套文案。
   it("R1:非冷却执行器三字段恒出现,值 true/null/null(own 键,非缺失)", async () => {
     const res = await app.request("/api/executors");
     expect(res.status).toBe(200);
@@ -809,22 +809,28 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     }
   });
 
-  it("R1:冷却中执行器 available=false,unavailableReason 与权威源逐字一致,cooldownEndMs 数值", async () => {
-    const { executorCooldowns, formatEta } = await import(
+  it("R1:冷却中执行器 available=false,unavailableReason 与权威导出逐字一致,cooldownEndMs 数值", async () => {
+    const { executorCooldowns } = await import(
       "../src/lib/executor-task/state"
+    );
+    const { executorAvailability } = await import(
+      "../src/lib/executor-availability"
     );
     const end = Date.now() + 60_000;
     // 直接登记冷却(与既有测试同款:executorCooldowns 即 isInCooldown 的读源)。
     executorCooldowns.set("executor", end);
     try {
+      // 期望 reason 由权威导出产生(同一内存冷却表,路由与测试读到同一判定),
+      // 不手写「额度冷却至 …」文案 —— 单一权威源,不得第二套。
+      const expected = executorAvailability({ key: "executor" });
       const res = await app.request("/api/executors");
       expect(res.status).toBe(200);
       const list = (await res.json()) as Array<Record<string, unknown>>;
       const item = list.find((x) => x.key === "executor");
       expect(item).toBeTruthy();
-      expect(item!.available).toBe(false);
-      // 与 executor-availability.ts 的既有文案逐字相同(同一权威源,不得第二套)。
-      expect(item!.unavailableReason).toBe(`额度冷却至 ${formatEta(end)}`);
+      expect(item!.available).toBe(expected.available);
+      expect(item!.unavailableReason).toBe(expected.unavailableReason);
+      expect(item!.cooldownEndMs).toBe(expected.cooldownEndMs);
       expect(item!.cooldownEndMs).toBe(end);
       expect(typeof item!.cooldownEndMs).toBe("number");
       // 冷却只影响该执行器:其余执行器仍是 true/null/null(own 键)。
@@ -841,6 +847,9 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
 
   it("R1:maxConcurrency 饱和执行器 available=false(权威 reason,cooldownEndMs=null)", async () => {
     const { groupQueues } = await import("../src/lib/executor-task/state");
+    const { executorAvailability } = await import(
+      "../src/lib/executor-availability"
+    );
     // 向内存组队列塞一个 running 占位:runningExecutorCount 只读 r.ex.key,
     // executor(seed 行)maxConcurrency=1,1 个 running 即饱和。占位对象仅带
     // 计数所需字段(测试假体,非真实 QueuedRun)。
@@ -850,14 +859,20 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       running: [{ ex: { key: "executor" } }] as unknown as never[],
     });
     try {
+      // 期望 reason 由权威导出产生(同一内存运行表,路由与测试读到同一判定),
+      // 不手写「正在运行任务」文案 —— 单一权威源,不得第二套。
+      const expected = executorAvailability({
+        key: "executor",
+        maxConcurrency: 1,
+      });
       const res = await app.request("/api/executors");
       expect(res.status).toBe(200);
       const list = (await res.json()) as Array<Record<string, unknown>>;
       const item = list.find((x) => x.key === "executor");
       expect(item).toBeTruthy();
-      expect(item!.available).toBe(false);
-      // 饱和不是冷却:reason 用权威文案「正在运行任务」,cooldownEndMs 为 null。
-      expect(item!.unavailableReason).toBe("正在运行任务");
+      expect(item!.available).toBe(expected.available);
+      expect(item!.unavailableReason).toBe(expected.unavailableReason);
+      expect(item!.cooldownEndMs).toBe(expected.cooldownEndMs);
       expect(item!.cooldownEndMs).toBeNull();
       // 未饱和执行器不受影响(own 键 true/null/null)。
       const codebuddy = list.find((x) => x.key === "codebuddy");
