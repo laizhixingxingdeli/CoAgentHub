@@ -119,12 +119,20 @@ import {
  *
  * endMs 为绝对到期时刻(冷却动态化):调用方先尝试从失败输出解析恢复时间
  * (parseRateLimitRecoveryMs),解析失败才回退 now + 固定冷却时长。
+ *
+ * R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底,避免产出
+ * 形同虚设的冷却(如 1ms / 15s)。
  */
+export const MIN_EFFECTIVE_COOLDOWN_MS = 60_000;
+
 export function normalizeCooldownEnd(
   endMs: number,
   nowMs = Date.now(),
 ): number {
-  return Math.max(nowMs + 1, endMs);
+  if (endMs <= nowMs + MIN_EFFECTIVE_COOLDOWN_MS) {
+    return nowMs + getRateLimitCooldownMs();
+  }
+  return endMs;
 }
 
 export function enterCooldown(
@@ -1859,21 +1867,30 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         });
         if (timeoutQuota.isQuota) {
           // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
+          // R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底。
+          const parsedMs = parseRateLimitRecoveryMs(out);
           const cooldownEnd = normalizeCooldownEnd(
-            parseRateLimitRecoveryMs(out) ??
-              Date.now() + getRateLimitCooldownMs(),
+            parsedMs ?? Date.now() + getRateLimitCooldownMs(),
           );
           const eta = formatEta(cooldownEnd);
+          const extra: Record<string, unknown> = {
+            [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+            quotaMatchedLine: timeoutQuota.matchedLine,
+          };
+          if (
+            parsedMs !== null &&
+            parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+          ) {
+            extra.cooldownFallbackReason = "解析所得时刻不可用,已回退固定冷却";
+            extra.discardedCooldownEndMs = parsedMs;
+          }
           await handleFailure(
             run,
             `执行超时(执行器额度限制,预计 ${eta} 恢复)`,
             {
               retryable: false,
               message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
-              extra: {
-                [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
-                quotaMatchedLine: timeoutQuota.matchedLine,
-              },
+              extra,
               afterPersisted: () =>
                 enterCooldown(ex, cooldownEnd, { db, taskId }),
             },
@@ -2435,19 +2452,26 @@ async function handleQuotaFailure(
   matchedLine: string | null,
 ): Promise<void> {
   // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
+  // R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底。
+  const parsedMs = parseRateLimitRecoveryMs(tail);
   const cooldownEnd = normalizeCooldownEnd(
-    parseRateLimitRecoveryMs(tail) ?? Date.now() + getRateLimitCooldownMs(),
+    parsedMs ?? Date.now() + getRateLimitCooldownMs(),
   );
   const eta = formatEta(cooldownEnd);
+  const extra: Record<string, unknown> = {
+    [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+    // 伪额度回显修复 R5:记录命中的原始行(截断),便于人判断是真实额度还是
+    // 源码/任务书回显造成的伪命中。
+    ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
+  };
+  if (parsedMs !== null && parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS) {
+    extra.cooldownFallbackReason = "解析所得时刻不可用,已回退固定冷却";
+    extra.discardedCooldownEndMs = parsedMs;
+  }
   await handleFailure(run, `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`, {
     retryable: false,
     message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
-    extra: {
-      [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
-      // 伪额度回显修复 R5:记录命中的原始行(截断),便于人判断是真实额度还是
-      // 源码/任务书回显造成的伪命中。
-      ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
-    },
+    extra,
     afterPersisted: () =>
       enterCooldown(run.ex, cooldownEnd, {
         db: run.db,

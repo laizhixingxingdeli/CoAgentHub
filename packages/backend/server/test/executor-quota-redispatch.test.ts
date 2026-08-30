@@ -37,7 +37,8 @@ writeFileSync(
     // 额度失败模式:打印 usage limit + 恢复时刻后 exit 1(quota-exhaustion R1)。
     'if [ -n "$FAKE_QUOTA_USAGE_LIMIT" ]; then',
     '  echo "You hit your usage limit. Upgrade to Pro or wait for the limit to reset."',
-    '  echo "try again at $FAKE_TRY_AGAIN_AT"',
+    '  if [ -n "$FAKE_TRY_AGAIN_AT" ]; then echo "try again at $FAKE_TRY_AGAIN_AT"; fi',
+    '  if [ -n "$FAKE_TRY_AGAIN_IN" ]; then echo "try again in $FAKE_TRY_AGAIN_IN seconds"; fi',
     "  exit 1",
     "fi",
     // 普通崩溃模式:非额度关键词,exit 1(回归:重试行为不变)。
@@ -62,8 +63,13 @@ const {
   getRedispatchFailureLimit,
   isInCooldown,
 } = await import("../src/lib/executor-task/state");
-const { restoreExecutorCooldowns } = await import(
-  "../src/lib/executor-task/queue"
+const {
+  restoreExecutorCooldowns,
+  normalizeCooldownEnd,
+  MIN_EFFECTIVE_COOLDOWN_MS,
+} = await import("../src/lib/executor-task/queue");
+const { getRateLimitCooldownMs } = await import(
+  "../src/lib/executor-task/state"
 );
 const { clearPersistedExecutorCooldown } = await import(
   "../src/lib/executor-task/cooldown-store"
@@ -82,6 +88,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     for (const key of [
       "FAKE_QUOTA_USAGE_LIMIT",
       "FAKE_TRY_AGAIN_AT",
+      "FAKE_TRY_AGAIN_IN",
       "FAKE_ALWAYS_FAIL",
     ]) {
       delete process.env[key];
@@ -297,6 +304,67 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
         new Date(2026, 7, 15, 3, 32, 0).getTime(),
       );
     });
+  });
+
+  /* ---------------- R7:解析时刻无效回退固定冷却 ---------------- */
+
+  describe("normalizeCooldownEnd(R7)", () => {
+    it("过去/等于当前的解析值 → 最终冷却时长 >= 固定兜底", () => {
+      const now = Date.now();
+      const fallback = getRateLimitCooldownMs();
+      expect(normalizeCooldownEnd(now - 1000, now)).toBe(now + fallback);
+      expect(normalizeCooldownEnd(now, now)).toBe(now + fallback);
+      expect(normalizeCooldownEnd(now + MIN_EFFECTIVE_COOLDOWN_MS, now)).toBe(
+        now + fallback,
+      );
+    });
+
+    it("未来且超过最小有效冷却的值 → 逐字等于解析值", () => {
+      const now = Date.now();
+      const future = now + MIN_EFFECTIVE_COOLDOWN_MS + 1000;
+      expect(normalizeCooldownEnd(future, now)).toBe(future);
+    });
+  });
+
+  describe("解析值过近 → 回退固定冷却且 diffSummary 留痕(R7)", () => {
+    it("try again in 30s(短于最小有效冷却) → 回退固定兜底 + 留痕含被丢弃原值", async () => {
+      const { coordinator, codebuddy, group } =
+        await setupGroup("quota-near-future");
+      process.env.FAKE_QUOTA_USAGE_LIMIT = "1";
+      process.env.FAKE_TRY_AGAIN_IN = "30";
+
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "额度耗尽任务(过近)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+
+      // 冷却时长应回退到固定兜底(远大于 30s),而不是 30s。
+      const actualEnd = cooldownEndMs({ key: "codebuddy" });
+      const remaining = actualEnd - Date.now();
+      expect(remaining).toBeGreaterThanOrEqual(60_000);
+
+      // diffSummary 留痕:回退说明 + 被丢弃的原始毫秒值。
+      const diff = t.diffSummary as Record<string, unknown> | null;
+      expect(diff?.cooldownFallbackReason).toBe(
+        "解析所得时刻不可用,已回退固定冷却",
+      );
+      expect(typeof diff?.discardedCooldownEndMs).toBe("number");
+
+      // 清理持久化冷却,避免影响后续测试。
+      await clearPersistedExecutorCooldown(
+        testDb as unknown as Parameters<
+          typeof clearPersistedExecutorCooldown
+        >[0],
+        t.id,
+      );
+    }, 30_000);
   });
 
   /* ---------------- R1+R2:usage limit 识别 → 冷却至恢复时刻 → 不重试 ---------------- */
