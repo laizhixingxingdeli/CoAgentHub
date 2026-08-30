@@ -157,6 +157,11 @@ export const task = pgTable(
     // 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。只读 —— 由
     // POST /messages 校验后写入,任务生命周期内不改。null = 无 callback。
     callbackRef: jsonb("callback_ref"),
+    // 完成事件收件人(R1,specs/l3-request-delivery-and-scope.md):应用层在任务
+    // 落终态时裁定的 recipient 列表,必须与 status 同一条 UPDATE 写入 ——
+    // trg_task_completion_event 只读 NEW.*,不查 group_members。null = 未裁定,
+    // trigger 回落下发者(队列完成 / 停止 / 孤儿收敛等路径的既有行为)。
+    recipientParticipantIds: text("recipient_participant_ids").array(),
     // 下发目标审计:目标、下发者、自派标记与当时本群执行器候选状态持久化在
     // task 上,以便按 task 事后回查;选择理由仅记录调用方明确提供的原文。
     dispatchAudit: jsonb("dispatch_audit").$type<DispatchTargetAudit>(),

@@ -7,6 +7,7 @@
  *
  * 职责划分:
  *  - ansi.ts        ANSI 转义序列剥离(流式跨 chunk 扣尾;report 与输出路径共用)
+ *  - completion-recipient.ts 完成事件收件人裁定(R1:载荷决定投递对象)
  *  - types.ts        共享类型(队列条目 / 组队列 / 输入 / 分工 / 汇报结构)
  *  - state.ts        模块级可变状态(组队列 / 超时阈值 / 重试与额度配置 /
  *                    冷却登记)+ 测试重置入口
@@ -22,6 +23,13 @@ export {
   recordCoordinationActivity,
 } from "../coordination-activity";
 export { createAnsiStripper, stripAnsi } from "./ansi";
+export {
+  adjudicatedRecipientsOfTask,
+  dispatcherRecipients,
+  reviewerMemberIds,
+  reviewRequestRecipients,
+  sameRecipients,
+} from "./completion-recipient";
 export {
   consumePendingCompletionEvents,
   hasExemptingChildTask,
@@ -40,10 +48,6 @@ export {
   type StoredTaskDetail,
   taskDetailFilePath,
 } from "./detail-store";
-export {
-  groupHasReviewerMember,
-  reviewRequestCarryAllowed,
-} from "./review-request-policy";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
@@ -84,6 +88,10 @@ export {
   renderTaskCard,
   type TaskReport,
 } from "./report";
+export {
+  groupHasReviewerMember,
+  reviewRequestCarryAllowed,
+} from "./review-request-policy";
 export {
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,

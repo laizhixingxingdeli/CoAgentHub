@@ -26,13 +26,16 @@ const MIGRATION_0029_WHEN = 1787991800000;
 const MIGRATION_0028_WHEN = 1787991700000;
 
 /**
- * 造一份「旧安装」迁移目录:只含 0000..0028 的 .sql 文件(去掉 0029),
- * 与真实旧装机在 0029 存在前跑过的迁移状态一致。
+ * 造一份「旧安装」迁移目录:只含 0000..0028 的 .sql 文件(0029 及其之后的
+ * 迁移全部排除),与真实旧装机在 0029 存在前跑过的迁移状态一致。
+ *
+ * 必须排除**之后的所有**迁移而不只是 0029:老库只应用过 0028,若把 0030 的
+ * SQL 也预先灌进去,迁移器随后重放 0030 会因约束已存在而失败。
  */
 function makeOldInstallMigrationsDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "coagenthub-mig-old-"));
   for (const f of readdirSync(realMigrationsDir)) {
-    if (!f.endsWith(".sql") || f.startsWith("0029")) continue;
+    if (!f.endsWith(".sql") || f >= "0029") continue;
     copyFileSync(path.join(realMigrationsDir, f), path.join(dir, f));
   }
   return dir;

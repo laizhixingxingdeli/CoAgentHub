@@ -104,8 +104,8 @@ CoAgentHub/
 | `group_message` | `schema/group-message.ts` | `id`、`group_id`(索引,迁移 0015)、`sender_id` → participant.id、`parent_id` → group_message.id(回复挂父消息,构成消息树)、`audience`(`broadcast`\|`role`\|`participant`,默认 broadcast)、`audience_ref`、`body`、`content_type`(默认 `text/plain`)、`file_ref`(jsonb,P2P 文件信令:name/size/sha256/fetchUrl/expiresAt)、`created_at`/`updated_at` |
 | `group_message_closure` | `schema/group-message.ts` | 闭包表,物化消息树:联合主键(`ancestor_id`,`descendant_id`)、`group_id`(索引)、`depth`;每条消息有自指行(depth 0),子消息对每个祖先一行(depth = 祖先层级) |
 | `executor_config` | `schema/executor-config.ts` | `id`、`key`/`agent_name`(唯一)、`kind`(`cli`\|`a2a`)、`bin`/`url`、`args`(jsonb)、`label`、`model`、`memory`、`prompt`;迁移 0027 新增可空 `max_concurrency`(声明式并发上限)、`input_mode`(`path`\|`inline`\|`at-file`\|`stdin`)、`env`(jsonb 键值对)、`output_profile`(jsonb,批2消费) |
-| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`dispatch_kind`(可空,`requirement`\|`fix`,迁移 0024,检视者的逐票工作类型分流结果)、`supersedes_task_id`(可空自引用,迁移 0025,被替代的先前尝试)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`executor_pid`(可空,迁移 0026,detached spawn 的进程组 id,终态后保留)、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`(额度失败时含绝对时间 `executorCooldownEndMs`,服务启动恢复未到期记录并清理过期记录)、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、时间列 |
-| `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`(UNIQUE → 同一 task 最多一个终态 event)、`group_id`、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建(task_id 唯一约束保证幂等) |
+| `task` | `schema/task.ts` | `id`、`group_id`(索引,迁移 0015)、`parent_task_id`(可空自引用+索引,迁移 0020)、`dispatch_kind`(可空,`requirement`\|`fix`,迁移 0024,检视者的逐票工作类型分流结果)、`supersedes_task_id`(可空自引用,迁移 0025,被替代的先前尝试)、`message_id`(唯一约束 → 幂等:同一消息只建一次任务)、`executor_participant_id`、`executor_key`、`executor_pid`(可空,迁移 0026,detached spawn 的进程组 id,终态后保留)、`status`(`queued`\|`running`\|`done`\|`failed`\|`cancelled`)、`diff_summary`(额度失败时含绝对时间 `executorCooldownEndMs`,服务启动恢复未到期记录并清理过期记录)、`spec_ref`(迁移 0017,规范文档路径)、`spec_hash`(迁移 0017,版本哈希)、`dispatcher_participant_id`/`dispatcher_session_id`(迁移 0016,任务下发者)、`callback_ref`(迁移 0018,opaque 路由 `{ platform?, endpointRef?, sessionRef? }`)、`recipient_participant_ids`(可空 `text[]`,迁移 0030,应用层在终态裁定的完成事件收件人;null → trigger 回落下发者)、时间列 |
+| `task_completion_event` | `schema/task-completion-event.ts` | `id`(uuidv7)、`task_id`、`group_id`、`recipient_participant_id`(迁移 0030,投递对象;回填后 = 下发者,新事件由载荷裁定)、`dispatcher_participant_id`、`dispatcher_session_id`、`callback_ref`(jsonb,opaque 路由)、`state`(`pending`\|`leased`\|`delivered`\|`dead`)、`attempts`/`next_attempt_at`/`lease_token`/`lease_expires_at`/`delivered_at`/`last_error`、时间列。由 `trg_task_completion_event` trigger 在 task 首次进入终态时自动创建;(`task_id`,`recipient_participant_id`)唯一约束保证幂等 —— 同一 task 对同一收件人最多一条,群内多个 reviewer 各得一条 |
 
 `dispatch_kind` 不是模式字段:模式(编制)仍由群成员构成实时推导、不落平台字段;它记录的是检视者对每一票作出的工作类型分流结果,与编制正交。`supersedes_task_id` 是可选的自引用,新任务填写它即可指向被替代的先前尝试,以保留执行器切换的完整现场。
 
@@ -137,10 +137,10 @@ CoAgentHub/
 | `/api/groups/:id/tasks/:taskId` | PATCH | 更新任务(`status`/`diffSummary`/`checkpointRef`;仅该任务执行器 participant 可改,detached 模式回写终态用;status 实际变更时复用推送 `task_status_changed`) |
 | `/api/groups/:id/tasks/:taskId/output?detail=1` | GET | 整份任务明细(spec two-tier-output-summary-and-detail R5):返回该任务明细 JSONL 全部条目(`{taskId, entries:[{id,kind,at,text}]}`);未带 `detail=1` → 400;明细文件不存在(已清理/该任务无明细)→ 404 并说明原因 |
 | `/api/groups/:id/tasks/:taskId/output/:entryId` | GET | 单条明细展开(R5):按摘要行 `#id` 取回完整原文(`{id,kind,at,text}`);授权口径与 `includeOutput` 一致(群/任务存在性校验同任务详情路由,不放宽);`id 不存在` / `明细文件不存在` → 404 并说明原因 |
-| `/api/participants/:id/task-completion-events` | GET | 列出 participant 的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
-| `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
-| `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered;相同 token 重复 ack 幂等 |
-| `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending;超过 10 次进入 dead |
+| `/api/participants/:id/task-completion-events` | GET | 列出**以该 participant 为收件人**的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
+| `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;仅收件人本人可认领,同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
+| `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered(仅收件人本人);相同 token 重复 ack 幂等 |
+| `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending(仅收件人本人);超过 10 次进入 dead |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale` / `staleReason`；源码扫描时附 `newestSourceMtime`；仅报告不拦截) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
@@ -238,6 +238,7 @@ CoAgentHub/
 - **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——群成员里有没有 `reviewer` 角色成员决定:有 `reviewer` = **三层**(L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视);无 `reviewer` = **两层**(协调者兼任检视者的写 spec 职责,L2 通过即结案,跳过 L3)。两模式唯一差异是 L2 通过后是否进入 L3 架构检视:三层有 reviewer 在场,L2 通过即触发 completion event,由 reviewer inbox 认领完成检视;两层无 reviewer,L2 通过即结案。平台不感知模式。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」**自行 grill + 写 spec + 冻结公布(严禁把内容复制回 coordinator skill);取舍见 spec §3.14.4——更少跳转 vs L3 变自审、写与验收同一方。
   - **L2 之后的分支**:三层下 L2 功能检视通过 → 任务终态后 DB trigger 自动创建 `task_completion_event` → reviewer 从 inbox 认领并完成架构检视 → 结案;两层下 L2 通过即结案,跳过 L3。结案时若存在上游 detached 任务仍须 `PATCH` 回写终态(与模式无关)。
   - **L3 检视通过 completion event 唤醒**:三层模式下 L2 通过后,协调者不再向 reviewer participant 直接下发 task;任务终态时 DB trigger 自动创建 `task_completion_event`,reviewer 从 inbox 认领并完成架构检视。reviewer 不对应执行器配置,其消息走普通消息/控制指令路径。
+  - **completion event 的投递对象由载荷决定,不由下发者决定**(specs/l3-request-delivery-and-scope.md R1/R2):终态 `diffSummary` **带 `review_request`** → 收件人是**群内 reviewer 角色成员**(多个 reviewer 各得一条事件);其余完成事件 → 收件人仍是下发者。收件人由**应用层**在落终态时裁定并写入 `task.recipient_participant_ids`(与 `status` 同一条 UPDATE),trigger 只搬运该列 —— 它不查 `group_members`、不理解角色,角色语义只有应用层这一个权威源。未裁定的路径(队列完成 / 停止 / 控制回滚 / 孤儿收敛)回落下发者,行为逐字不变。inbox 的列举 / claim / ack / fail 一律按 `recipient_participant_id` 归属。这条修掉的缺陷是:协调者自派(续跑 / detached)的属主任务,其下发者是协调者自己,而协调者 `memory: null`、每票 spawn、跑完即退、从不读自己的收件箱 —— 按下发者投递时这类 L3 请求**结构上永远送不到**。
   - **协调者用 detached 需自行注册执行器**:协调者若要使用 spec §3.5 的会话延续(`detached`),需自行 `POST /api/executors` 注册为可被唤醒的执行器(`kind=cli`);下发权由群内角色裁定(spec R3 / ADR-0008 第三条),不依赖执行器配置上的标记。
 
 - **server 是唯一调度器**(旧任务桥已退役,webhook 通道已移除):`POST /messages` 定向到
@@ -445,7 +446,7 @@ CoAgentHub/
 | 冷却持久化 | 存**绝对到期时刻**(epoch ms),非剩余时长 | 启动时恢复未到期记录并重建定时器,已过期的清理不复活 |
 | 实时输出 | 摘要流按 `kind` 过滤:`thinking` **不进摘要流但照常落盘明细** | 明细存 `/tmp/coagenthub-task-detail-<taskId>.jsonl`,14 天留存,`?detail=1` 可取回 |
 | 消息渲染 | 按 `content_type` 分流 | `task_status` → 轻量状态提示;`text/plain` → 发言卡片(markdown 渲染,不经 innerHTML)|
-| L3 请求 | 按 `specRef` + `specHash` 去重 | 已有未应答请求时**并入**而非新增;一次裁决使参与合并的全部任务 `answered=true` |
+| L3 请求 | 按 `specRef` + `specHash` 去重 | 已有未应答请求时**并入**而非新增;一次裁决使参与合并的全部任务 `answered=true`;候选属主的收件人与本任务不同时**不并入**(并入不得降低可送达性) |
 
 ⚠️ **重启前必须当场复查在途任务**。「队列已空」的旧快照不可信 ——
 协调者可能在其后派出新子任务,贸然重启会把整条链路打断(实测一次打断 5 条)。

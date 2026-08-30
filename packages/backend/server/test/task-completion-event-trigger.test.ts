@@ -73,6 +73,23 @@ async function countEvents(taskId: string): Promise<number> {
   return rows.length;
 }
 
+/** 事件的收件人 / 下发者两列(trigger 只搬运收件人,不改写下发者)。 */
+async function recipientsOf(
+  taskId: string,
+): Promise<{ recipient: string | null; dispatcher: string | null }[]> {
+  const { taskCompletionEvent } = await import(
+    "@laizhixingxingdeli/database/schema"
+  );
+  const rows = await testDb
+    .select({
+      recipient: taskCompletionEvent.recipientParticipantId,
+      dispatcher: taskCompletionEvent.dispatcherParticipantId,
+    })
+    .from(taskCompletionEvent)
+    .where(eq(taskCompletionEvent.taskId, taskId));
+  return rows;
+}
+
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
 });
@@ -133,6 +150,70 @@ describe("task_completion_event trigger", () => {
         .where(eq(taskTable.id, task.id));
       expect(await countEvents(task.id)).toBe(1);
     }
+  });
+
+  it("收件人列由 trigger 逐字搬运:多收件人各一条,未裁定时回落下发者", async () => {
+    const { participant, group } = await seedIdentity();
+    // 1) 未裁定(recipient_participant_ids 为 null)→ 收件人 = 下发者(既有行为)。
+    const plain = await insertTask({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      dispatcherParticipantId: participant.id,
+    });
+    await testDb
+      .update(taskTable)
+      .set({ status: "done" })
+      .where(eq(taskTable.id, plain.id));
+    const plainRows = await recipientsOf(plain.id);
+    expect(plainRows.length).toBe(1);
+    expect(plainRows[0]?.recipient).toBe(participant.id);
+    expect(plainRows[0]?.dispatcher).toBe(participant.id);
+
+    // 2) 应用层裁定两个收件人(带 review_request 时的群内 reviewer)→ 每人一条;
+    //    下发者列仍是下发者(审计事实不被裁定改写)。
+    const [[reviewerA], [reviewerB]] = await Promise.all(
+      ["trig-r-a", "trig-r-b"].map((prefix) =>
+        testDb
+          .insert(participantTable)
+          .values({
+            name: `${prefix}-${crypto.randomUUID().slice(0, 8)}`,
+            tokenHash: "",
+          })
+          .returning(),
+      ),
+    );
+    const multi = await insertTask({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      dispatcherParticipantId: participant.id,
+    });
+    await testDb
+      .update(taskTable)
+      .set({
+        status: "done",
+        recipientParticipantIds: [reviewerA.id, reviewerB.id],
+      })
+      .where(eq(taskTable.id, multi.id));
+    const multiRows = await recipientsOf(multi.id);
+    expect(multiRows.length).toBe(2);
+    expect(multiRows.map((r) => r.recipient).sort()).toEqual(
+      [reviewerA.id, reviewerB.id].sort(),
+    );
+    expect(multiRows.every((r) => r.dispatcher === participant.id)).toBe(true);
+
+    // 3) 裁定为空数组 → 同样回落下发者(不得产生无收件人的事件)。
+    const empty = await insertTask({
+      groupId: group.id,
+      executorParticipantId: participant.id,
+      dispatcherParticipantId: participant.id,
+    });
+    await testDb
+      .update(taskTable)
+      .set({ status: "done", recipientParticipantIds: [] })
+      .where(eq(taskTable.id, empty.id));
+    const emptyRows = await recipientsOf(empty.id);
+    expect(emptyRows.length).toBe(1);
+    expect(emptyRows[0]?.recipient).toBe(participant.id);
   });
 
   it("历史终态 task 不因后续更新回填 event(无回溯)", async () => {

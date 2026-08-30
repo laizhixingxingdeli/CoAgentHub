@@ -20,7 +20,9 @@ import {
 } from "@server/lib/executor-availability";
 import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
+  adjudicatedRecipientsOfTask,
   createTaskDispatchWarnings,
+  dispatcherRecipients,
   findTaskDetail,
   getL3ResponseMinutesMs,
   groupHasReviewerMember,
@@ -35,6 +37,8 @@ import {
   recordCoordinationActivity,
   resolveTaskRepo,
   reviewRequestCarryAllowed,
+  reviewRequestRecipients,
+  sameRecipients,
   taskOutputTail,
 } from "@server/lib/executor-task";
 import {
@@ -503,6 +507,10 @@ function reviewRequestPayloadOf(
  *   (不新起一条,不要求父请求未应答);
  * - R1:同群 done 任务中同 specRef+specHash 且未应答的请求(排除自身)→ 并入;
  * - R2:既有匹配请求已应答 → 跳过,允许新建请求。
+ *
+ * R4(specs/l3-request-delivery-and-scope.md):候选属主的**收件人**与本任务
+ * 不同时不并入 —— 并入是优化,任何情况下都不得把一条能送达的请求搬到送不达
+ * 的地方。R1 落地后同群同角色会收敛到同一收件人,本条是防御性的。
  * 无属主 → undefined(正常新增请求)。
  */
 async function resolveL3RequestMergeOwner(
@@ -510,6 +518,7 @@ async function resolveL3RequestMergeOwner(
   groupId: string,
   closingTask: TaskRow,
   incomingRequest: Extract<CoordinationPayload, { type: "review_request" }>,
+  incomingRecipients: readonly string[],
 ): Promise<TaskRow | undefined> {
   const { specRef, specHash } = incomingRequest;
   const platform = platformBlockOf(closingTask.diffSummary);
@@ -527,7 +536,8 @@ async function resolveL3RequestMergeOwner(
     if (
       parent &&
       parentRequest?.specRef === specRef &&
-      parentRequest?.specHash === specHash
+      parentRequest?.specHash === specHash &&
+      sameRecipients(incomingRecipients, adjudicatedRecipientsOfTask(parent))
     ) {
       return parent;
     }
@@ -548,6 +558,16 @@ async function resolveL3RequestMergeOwner(
       continue;
     }
     if (await hasReviewResult(db, groupId, candidate.id)) continue;
+    // R4(l3-request-delivery-and-scope):收件人不同的候选属主不并入,各自
+    // 独立成请求 —— 并入不得降低可送达性。
+    if (
+      !sameRecipients(
+        incomingRecipients,
+        adjudicatedRecipientsOfTask(candidate),
+      )
+    ) {
+      continue;
+    }
     return candidate;
   }
   return undefined;
@@ -1439,6 +1459,21 @@ app
           },
         );
       }
+      // R1(specs/l3-request-delivery-and-scope.md):完成事件的投递对象由**载荷**
+      // 决定,不由下发者决定 —— 终态 diffSummary 带 review_request 时收件人是群内
+      // reviewer 成员,其余完成事件仍是下发者。裁定只发生在应用层,trigger 仅搬运
+      // task.recipient_participant_ids(它不查 group_members、不理解角色)。
+      // 非终态的 PATCH 不裁定:trigger 不会触发,列保持上一次裁定的原值。
+      const terminalTransition =
+        status !== undefined &&
+        isTerminalTaskStatus(status) &&
+        !isTerminalTaskStatus(task.status);
+      let ownRecipients: string[] | undefined;
+      if (status !== undefined && isTerminalTaskStatus(status)) {
+        ownRecipients = summaryHasReviewRequest(summaryToWrite)
+          ? await reviewRequestRecipients(db, id, task.dispatcherParticipantId)
+          : dispatcherRecipients(task.dispatcherParticipantId);
+      }
       // L3 请求按 spec 去重(specs/l3-is-per-spec-not-per-task.md R1-R4):
       // 结案 done 且带 review_request 时,同 specRef+specHash 已存在未应答请求
       // 则不新增第二条——新的 L2 结论并入既有请求(追加,先前结论保留),本任务
@@ -1457,6 +1492,7 @@ app
             id,
             task,
             incomingRequest,
+            ownRecipients ?? [],
           );
           if (owner) {
             await appendL3ConclusionToOwner(
@@ -1473,6 +1509,15 @@ app
           }
         }
       }
+      // 并入后本任务不再携带 review_request → 收件人回落下发者(R1 缺省语义);
+      // 未并入时保留上面按载荷裁定的收件人。仅终态转换写入:trigger 只在这一刻
+      // 读 NEW.recipient_participant_ids。
+      const recipientsToWrite =
+        ownRecipients === undefined
+          ? undefined
+          : summaryHasReviewRequest(summaryToWrite)
+            ? ownRecipients
+            : dispatcherRecipients(task.dispatcherParticipantId);
       // R8(v1.1):PATCH failed 终态时复用 classifyQuotaFailure 判定额度失败,
       // 命中后同口径进入执行器冷却并留痕(与 queue 进程退出/超时/孤儿收敛三条
       // 路径一致)。
@@ -1554,6 +1599,9 @@ app
           ...(diffSummary !== undefined ? { diffSummary: summaryToWrite } : {}),
           ...(checkpointRef !== undefined ? { checkpointRef } : {}),
           ...(brief !== undefined ? { brief } : {}),
+          ...(terminalTransition && recipientsToWrite !== undefined
+            ? { recipientParticipantIds: recipientsToWrite }
+            : {}),
         })
         .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, id)))
         .returning();

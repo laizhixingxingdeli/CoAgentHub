@@ -101,7 +101,9 @@ app
 
       const now = new Date();
       const conditions = [
-        eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
+        // R2(specs/l3-request-delivery-and-scope.md):inbox 归属按**收件人**
+        // —— 带 review_request 的事件投给群内 reviewer,其余仍投给下发者。
+        eq(taskCompletionEventTable.recipientParticipantId, participantId),
         // 只列可认领事件:pending 且重试时间已到(nextAttemptAt 为 null = 从未
         // fail;≤ now = 重试窗口已到),或 lease 已过期(leased 但 leaseExpiresAt
         // ≤ now)。delivered/dead 不列出。
@@ -197,7 +199,7 @@ app
         .where(
           and(
             eq(taskCompletionEventTable.id, eventId),
-            eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
+            eq(taskCompletionEventTable.recipientParticipantId, participantId),
             or(
               and(
                 eq(taskCompletionEventTable.state, "pending"),
@@ -274,7 +276,7 @@ app
         .where(
           and(
             eq(taskCompletionEventTable.id, eventId),
-            eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
+            eq(taskCompletionEventTable.recipientParticipantId, participantId),
             eq(taskCompletionEventTable.leaseToken, leaseToken),
           ),
         )
@@ -330,7 +332,7 @@ app
       const event = await db.query.taskCompletionEvent.findFirst({
         where: and(
           eq(taskCompletionEventTable.id, eventId),
-          eq(taskCompletionEventTable.dispatcherParticipantId, participantId),
+          eq(taskCompletionEventTable.recipientParticipantId, participantId),
         ),
       });
       if (!event || event.leaseToken !== leaseToken) {
