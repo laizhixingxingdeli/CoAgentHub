@@ -144,7 +144,7 @@ CoAgentHub/
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale` / `staleReason`；源码扫描时附 `newestSourceMtime`；仅报告不拦截) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |
-| `/api/executors` | GET/POST | 列出 DB 持久化配置/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`、`prompt`、`maxConcurrency`、`inputMode`、`env`、`outputProfile`; 后四项可空) |
+| `/api/executors` | GET/POST | 列出 DB 持久化配置(GET 每条恒含可用性三字段 `available` / `unavailableReason` / `cooldownEndMs`,复用 `executor-availability.ts` 同源判定,不可用时为 `false`/文案/数值,杜绝「缺字段被读成可用」)/新增执行器配置并自动注册 participant(`agentName`、`kind=cli 或 a2a`、`bin` 或 `url`、`args`、`label`、`device`、`model`、`memory`、`prompt`、`maxConcurrency`、`inputMode`、`env`、`outputProfile`; 后四项可空) |
 | `/api/executors/:key` | DELETE/PATCH | 删除/部分更新执行器配置(key 不可改;`memory` 仅 `kind=a2a` 生效;可部分更新 `maxConcurrency`/`inputMode`/`env`/`outputProfile`) |
 | `/api/skills` | GET | 列出 `skills/` 下 skills(name + description + SKILL.md path) |
 | `/api/skills/:name` | GET | 返回 `skills/<name>/SKILL.md` 内容与基于文件内容的 SHA-256 前 12 位 `version`(coordinator/executor/bugfix/reviewer;未知 404) |

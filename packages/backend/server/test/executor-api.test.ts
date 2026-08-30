@@ -436,14 +436,28 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(res.status).toBe(200);
     const updated = (await res.json()) as Record<string, unknown>;
     expect(updated.model).toBe("gpt-4o");
-    expect(updated.args).toEqual(["-y", "-v", "-p", "{ticket}", "--model", "{model}"]);
+    expect(updated.args).toEqual([
+      "-y",
+      "-v",
+      "-p",
+      "{ticket}",
+      "--model",
+      "{model}",
+    ]);
 
     // 缓存失效后 effectiveExecutors 读到新值(同时验证 args 与 model)。
     const { effectiveExecutors } = await import("../src/lib/executors");
     const all = await effectiveExecutors(testDb as unknown as DataBase);
     const executor = all.find((x) => x.key === "executor");
     expect(executor!.model).toBe("gpt-4o");
-    expect(executor!.args).toEqual(["-y", "-v", "-p", "{ticket}", "--model", "{model}"]);
+    expect(executor!.args).toEqual([
+      "-y",
+      "-v",
+      "-p",
+      "{ticket}",
+      "--model",
+      "{model}",
+    ]);
     // 恢复原值,避免影响同文件其他用例。
     await app.request("/api/executors/executor", {
       method: "PATCH",
@@ -772,6 +786,87 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const body = (await res.json()) as Record<string, unknown>;
     // stdin 只保留取值,不实现执行分支(R1.1)。
     expect(body.inputMode).toBe("stdin");
+  });
+
+  // ── R1(specs/executor-availability-visibility-and-queued-child-pinning.md)──
+  // GET 每条恒含 available/unavailableReason/cooldownEndMs 三字段;冷却/并发饱和
+  // 均复用 executor-availability.ts 同源判定(isInCooldown / runningExecutorCount
+  // vs maxConcurrency),文案逐字一致,不另写一套。
+  it("R1:非冷却执行器三字段恒出现,值 true/null/null(own 键,非缺失)", async () => {
+    const res = await app.request("/api/executors");
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as Array<Record<string, unknown>>;
+    expect(list.length).toBeGreaterThanOrEqual(6);
+    for (const item of list) {
+      // 「字段缺失(undefined)」与「值为 null」在 JSON 上不可区分,必须同时
+      // 验证键存在(hasOwnProperty)且值为 null —— 正是 R1 要消灭的误读路径。
+      expect(Object.hasOwn(item, "available")).toBe(true);
+      expect(Object.hasOwn(item, "unavailableReason")).toBe(true);
+      expect(Object.hasOwn(item, "cooldownEndMs")).toBe(true);
+      expect(item.available).toBe(true);
+      expect(item.unavailableReason).toBeNull();
+      expect(item.cooldownEndMs).toBeNull();
+    }
+  });
+
+  it("R1:冷却中执行器 available=false,unavailableReason 与权威源逐字一致,cooldownEndMs 数值", async () => {
+    const { executorCooldowns, formatEta } = await import(
+      "../src/lib/executor-task/state"
+    );
+    const end = Date.now() + 60_000;
+    // 直接登记冷却(与既有测试同款:executorCooldowns 即 isInCooldown 的读源)。
+    executorCooldowns.set("executor", end);
+    try {
+      const res = await app.request("/api/executors");
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<Record<string, unknown>>;
+      const item = list.find((x) => x.key === "executor");
+      expect(item).toBeTruthy();
+      expect(item!.available).toBe(false);
+      // 与 executor-availability.ts 的既有文案逐字相同(同一权威源,不得第二套)。
+      expect(item!.unavailableReason).toBe(`额度冷却至 ${formatEta(end)}`);
+      expect(item!.cooldownEndMs).toBe(end);
+      expect(typeof item!.cooldownEndMs).toBe("number");
+      // 冷却只影响该执行器:其余执行器仍是 true/null/null(own 键)。
+      for (const other of list) {
+        if (other.key === "executor") continue;
+        expect(other.available).toBe(true);
+        expect(other.unavailableReason).toBeNull();
+        expect(other.cooldownEndMs).toBeNull();
+      }
+    } finally {
+      executorCooldowns.delete("executor");
+    }
+  });
+
+  it("R1:maxConcurrency 饱和执行器 available=false(权威 reason,cooldownEndMs=null)", async () => {
+    const { groupQueues } = await import("../src/lib/executor-task/state");
+    // 向内存组队列塞一个 running 占位:runningExecutorCount 只读 r.ex.key,
+    // executor(seed 行)maxConcurrency=1,1 个 running 即饱和。占位对象仅带
+    // 计数所需字段(测试假体,非真实 QueuedRun)。
+    groupQueues.set("__r1-saturation__", {
+      key: "__r1-saturation__",
+      queue: [],
+      running: [{ ex: { key: "executor" } }] as unknown as never[],
+    });
+    try {
+      const res = await app.request("/api/executors");
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<Record<string, unknown>>;
+      const item = list.find((x) => x.key === "executor");
+      expect(item).toBeTruthy();
+      expect(item!.available).toBe(false);
+      // 饱和不是冷却:reason 用权威文案「正在运行任务」,cooldownEndMs 为 null。
+      expect(item!.unavailableReason).toBe("正在运行任务");
+      expect(item!.cooldownEndMs).toBeNull();
+      // 未饱和执行器不受影响(own 键 true/null/null)。
+      const codebuddy = list.find((x) => x.key === "codebuddy");
+      expect(codebuddy!.available).toBe(true);
+      expect(codebuddy!.unavailableReason).toBeNull();
+      expect(codebuddy!.cooldownEndMs).toBeNull();
+    } finally {
+      groupQueues.delete("__r1-saturation__");
+    }
   });
 });
 
