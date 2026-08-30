@@ -137,6 +137,9 @@ export interface QueuedRun {
   specRef: string | null;
   /** 规范文档版本哈希(任务书「关联规范」段用);无版本哈希为 null。 */
   specHash: string | null;
+  /** 规范驱动下发类型(任务书「汇报格式要求」段裁定 review_request 是否可携带
+   *  用,与 tasks.ts R3 守卫共用判定);null = 指令驱动任务。 */
+  dispatchKind: "requirement" | "fix" | null;
   /**
    * 反应式排队标记(403 后排队):执行器返回 `403 atomgit_session_concurrency_conflict`
    * 后由 handleConcurrencyConflict 置位并重新入队 —— pump 在该执行器仍有其他

@@ -651,6 +651,119 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }
   }, 30_000);
 
+  it("fix 协调任务:任务书明确不要携带 review_request,PATCH 终态不带 → 200(非 400)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
+    // fix 票即使群内有 reviewer 也不得携带(R3:复用已过 L3 的冻结 spec)。
+    const reviewer = await registerParticipant({ name: "exec-reviewer-fix" });
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+
+    const capture = path.join(fakeDir, "ticket-coordinator-fix.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "修复票协调任务模板测试",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+        dispatchKind: "fix",
+      });
+      const deadline = Date.now() + 10_000;
+      let task: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
+      while (Date.now() <= deadline) {
+        task = (await listTasks(coordinator.id, group.id)).find(
+          (candidate) => candidate.messageId === msg.id,
+        );
+        if (task?.status === "running" && existsSync(capture)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(task?.status).toBe("running");
+      if (!task) throw new Error("fix 协调者任务未创建");
+      const ticket = readFileSync(capture, "utf8");
+      // fix 票:不含「必须带」,明确「不要携带」,理由为复用已过 L3 的冻结 spec。
+      expect(ticket).not.toContain("必须带 `review_request`");
+      expect(ticket).toContain("不要携带 `review_request`");
+      expect(ticket).toContain("fix 票复用已过 L3 的冻结 spec");
+
+      // 端到端:严格按生成任务书 PATCH 终态(不带 review_request)→ 200,非 400。
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({
+            status: "done",
+            diffSummary: {
+              summary: "修复完成,按任务书不携带 review_request",
+              noExecutionReason:
+                "测试用 fix 协调任务,通过内嵌执行器直接完成,无 L1 子任务",
+            },
+          }),
+        },
+      );
+      expect(patchRes.status).toBe(200);
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  }, 30_000);
+
+  it("群内无 reviewer 的协调任务:任务书明确不要携带 review_request,PATCH 不带 → 200", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup();
+    await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
+    // 群内只有 coordinator + executor,无 reviewer 成员 → 两层编制不跑 L3。
+
+    const capture = path.join(fakeDir, "ticket-coordinator-no-reviewer.md");
+    process.env.TICKET_CAPTURE = capture;
+    try {
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "无 reviewer 群协调任务模板测试",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+        dispatchKind: "requirement",
+      });
+      const deadline = Date.now() + 10_000;
+      let task: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
+      while (Date.now() <= deadline) {
+        task = (await listTasks(coordinator.id, group.id)).find(
+          (candidate) => candidate.messageId === msg.id,
+        );
+        if (task?.status === "running" && existsSync(capture)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(task?.status).toBe("running");
+      if (!task) throw new Error("无 reviewer 协调者任务未创建");
+      const ticket = readFileSync(capture, "utf8");
+      // 无 reviewer:不含「必须带」,明确「不要携带」,理由为本群无 reviewer 成员。
+      expect(ticket).not.toContain("必须带 `review_request`");
+      expect(ticket).toContain("不要携带 `review_request`");
+      expect(ticket).toContain("本群无 reviewer 成员");
+
+      const patchRes = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({
+            status: "done",
+            diffSummary: {
+              summary: "无 reviewer 群,按任务书不携带 review_request",
+              noExecutionReason:
+                "测试用协调任务,通过内嵌执行器直接完成,无 L1 子任务",
+            },
+          }),
+        },
+      );
+      expect(patchRes.status).toBe(200);
+    } finally {
+      delete process.env.TICKET_CAPTURE;
+    }
+  }, 30_000);
+
   it("目标角色既不含 coordinator 也不含 executor → executor 兜底并提示角色不匹配", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     await addMember(coordinator.id, group.id, codebuddy.id, ["observer"]);

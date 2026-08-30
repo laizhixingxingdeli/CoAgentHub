@@ -70,6 +70,10 @@ import {
   taskOutputTailLines,
 } from "./report";
 import {
+  groupHasReviewerMember,
+  reviewRequestCarryAllowed,
+} from "./review-request-policy";
+import {
   activeRuns,
   classifyQuotaFailure,
   clearRunTimers,
@@ -745,6 +749,8 @@ export async function enqueueTaskRun(
     checkpointRef: null,
     specRef,
     specHash,
+    // 规范驱动下发类型(任务书「汇报格式要求」段裁定 review_request 用)。
+    dispatchKind: task.dispatchKind,
     concurrencyBlocked: false,
     concurrencyRetryAt: 0,
     attempts: Array.isArray(task.attempts) ? task.attempts : [],
@@ -1022,6 +1028,8 @@ async function dispatchTask(
     // 规范驱动下发:随任务书「关联规范」段写入 ticket;null = 指令驱动任务。
     specRef,
     specHash,
+    // 规范驱动下发类型(任务书「汇报格式要求」段裁定 review_request 用)。
+    dispatchKind: task.dispatchKind,
     // 403 反应式排队标记:默认未阻塞(显式 maxConcurrency 由 pump 直接排队,
     // 不会置位本标记;收到执行器 403 并发冲突后才置位)。
     concurrencyBlocked: false,
@@ -1526,6 +1534,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         );
       }
       try {
+        // R3 反向守卫共用判定:任务书「汇报格式要求」段按 dispatchKind + 群内
+        // reviewer 编制裁定 review_request 是否可携带(与 tasks.ts PATCH 终态
+        // 守卫共用同一判定,避免任务书教协调者携带会被 400 拒收的载荷)。
+        const groupHasReviewer = await groupHasReviewerMember(db, run.groupId);
         writeFileSync(
           ticketPath,
           buildTicket(
@@ -1537,6 +1549,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             testExecutor,
             run.specRef,
             run.specHash,
+            groupHasReviewer,
           ),
         );
       } catch (e) {
@@ -2854,12 +2867,34 @@ function buildExecutionModeSection(role: TicketRole): string[] {
   return section;
 }
 
-function buildReportSection(role: TicketRole): string[] {
+/**
+ * 协调者任务书「汇报格式要求」段(R3 反向守卫同步):仅当 review_request 可携带
+ * (非 fix 且群内有 reviewer,与 tasks.ts R3 守卫共用判定)时保留「必须带」指令;
+ * fix 票复用已过 L3 的冻结 spec、或群内无 reviewer 时,明确「不要携带」——
+ * 否则任务书会教协调者携带一个 PATCH 终态必被 400 拒收的载荷。
+ * requirement / dispatchKind=null + 有 reviewer 的文案与旧版逐字一致。
+ */
+function buildReportSection(
+  role: TicketRole,
+  dispatchKind: "requirement" | "fix" | null,
+  groupHasReviewer: boolean,
+): string[] {
   if (role === "coordinator") {
+    if (reviewRequestCarryAllowed(dispatchKind, groupHasReviewer)) {
+      return [
+        "## 汇报格式要求(stdout 请按此输出)",
+        "PATCH 自身这条 detached 任务为终态。",
+        "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（参见 spec §3.10 / coordinator skill §4.2）。",
+      ];
+    }
+    const forbiddenReason =
+      dispatchKind === "fix"
+        ? "fix 票复用已过 L3 的冻结 spec，不产生新的架构面"
+        : "本群无 reviewer 成员，两层编制不跑 L3";
     return [
       "## 汇报格式要求(stdout 请按此输出)",
       "PATCH 自身这条 detached 任务为终态。",
-      "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（参见 spec §3.10 / coordinator skill §4.2）。",
+      `PATCH 时，\`diffSummary\` 不要携带 \`review_request\`（${forbiddenReason}）。`,
     ];
   }
   return [
@@ -2881,6 +2916,7 @@ function buildTicket(
   testExecutor: string | null = null,
   specRef: string | null = null,
   specHash: string | null = null,
+  groupHasReviewer = false,
 ): string {
   const lines = [
     `# CoAgentHub 任务`,
@@ -2898,7 +2934,7 @@ function buildTicket(
     `## 任务内容`,
     body,
     ...buildExecutionModeSection(role),
-    ...buildReportSection(role),
+    ...buildReportSection(role, run.dispatchKind, groupHasReviewer),
   );
   const context = buildExecutionContextSection(run);
   lines.splice(4, 0, ...context);

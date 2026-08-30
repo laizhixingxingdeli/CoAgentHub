@@ -40,6 +40,10 @@ export {
   type StoredTaskDetail,
   taskDetailFilePath,
 } from "./detail-store";
+export {
+  groupHasReviewerMember,
+  reviewRequestCarryAllowed,
+} from "./review-request-policy";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export { taskOutputTail } from "./output-buffer";
 export {
