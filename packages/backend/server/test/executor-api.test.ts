@@ -423,27 +423,35 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(participant!.device).toBe("mac-pro");
   });
 
-  it("PATCH seed 行(executor)改 args/model → 200 且缓存失效后生效(验收 #3)", async () => {
+  it("PATCH seed 行(executor)同时改 args+model → 200 且缓存失效后生效(验收 #3)", async () => {
     // 内置禁令已移除:seed 行 executor 现在可编辑,不再 403。
     const res = await app.request("/api/executors/executor", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o" }),
+      body: JSON.stringify({
+        args: ["-y", "-v", "-p", "{ticket}", "--model", "{model}"],
+        model: "gpt-4o",
+      }),
     });
     expect(res.status).toBe(200);
     const updated = (await res.json()) as Record<string, unknown>;
     expect(updated.model).toBe("gpt-4o");
+    expect(updated.args).toEqual(["-y", "-v", "-p", "{ticket}", "--model", "{model}"]);
 
-    // 缓存失效后 GET /effectiveExecutors 读到新值。
+    // 缓存失效后 effectiveExecutors 读到新值(同时验证 args 与 model)。
     const { effectiveExecutors } = await import("../src/lib/executors");
     const all = await effectiveExecutors(testDb as unknown as DataBase);
     const executor = all.find((x) => x.key === "executor");
     expect(executor!.model).toBe("gpt-4o");
+    expect(executor!.args).toEqual(["-y", "-v", "-p", "{ticket}", "--model", "{model}"]);
     // 恢复原值,避免影响同文件其他用例。
     await app.request("/api/executors/executor", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: null }),
+      body: JSON.stringify({
+        args: ["-y", "-v", "-p", "{ticket}"],
+        model: null,
+      }),
     });
   });
 

@@ -21,7 +21,7 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **callbackRef** | 可选 opaque 路由信息,只允许 `{ platform?, endpointRef?, sessionRef? }` 三个短字符串(≤200 字符),不存 URL/token/命令/secret。task 首次进入终态时由 DB trigger 据此创建 completion event,宿主按 callbackRef 恢复会话 |
 | **completion event** | Durable Task Completion Event:task 首次从非终态进入 done/failed/cancelled 时,若存在 dispatcherParticipantId,由 DB trigger 在 task 同事务内持久化到 `task_completion_event` 表(task_id 唯一约束保证幂等)。状态机 `pending → leased → delivered → dead`,participant-scoped inbox + claim/lease/ack/fail API 交付 |
 | **inbox** | participant-scoped completion event 视图:`GET /api/participants/:id/task-completion-events` 查询 pending/可重试/lease 已过期的事件(可靠性来源始终是数据库 inbox,WS 仅低延迟提示) |
-| **executor_config** | 执行器配置(DB 持久化;内置在 `lib/executors.ts`) |
+| **executor_config** | 执行器配置(DB 持久化;0028 迁移 seed 默认 6 条,不再代码内置) |
 | **Local User** | 无身份声明请求的默认身份(human,全可见);局域网全信模型 |
 | **项目记忆** | 群绑定 `project_path` → 读取仓库文档(静态记忆) |
 | **决策票(decision ticket)** | 大特性拆票的单元是「以决策为解的问句」，不是实现切片；实现切片才是下发执行器的 task |

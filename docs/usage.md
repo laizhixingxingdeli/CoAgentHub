@@ -26,14 +26,17 @@ task message → POST /messages (audience=participant, audienceRef=<executor par
 
 Executor configuration is managed through `GET/POST/PATCH/DELETE /api/executors`
 (the web "Connect participant" page; PATCH can change
-`bin`/`args`/`model`/`device`/`agentName`, built-in executors cannot be edited,
+`bin`/`args`/`model`/`device`/`agentName`,
 and renaming one does not rename the participant).
 
 ## 2. Executor integration
 
-### Built-in executors
+### Default seeded executors
 
-The default set (`key` → `agentName` → invocation):
+Fresh installations get 6 default rows via migration `0028`
+(`ON CONFLICT DO NOTHING`, so re-running the migration is safe and user edits are
+preserved). These are ordinary DB configs — they can be edited or deleted like any
+other row.
 
 | key | agentName | invocation |
 | --- | --- | --- |
@@ -47,12 +50,6 @@ The default set (`key` → `agentName` → invocation):
 Overrides:
 
 - CLI binary paths: env `EXECUTOR_BIN_<KEY_UPPER>` (e.g. `EXECUTOR_BIN_CODEBUDDY`).
-- To run **L3 architecture-review tasks in three-layer mode** (group has a
-  `reviewer` member), the built-in reviewer executor's `bin` is a placeholder
-  (`"reviewer"`) — you must set `EXECUTOR_BIN_REVIEWER` to the actual CLI path,
-  otherwise dispatching an L3 review task fails with `spawn reviewer ENOENT`
-  (confirmed). Two-layer mode (no `reviewer` member) does not dispatch L3 and
-  needs no such setting.
 - Before using Codex, run `codex login` as the same OS user that runs the server. If
   the server cannot find it on `PATH`, set `EXECUTOR_BIN_CODEX` to the absolute path.
 - A2A gateway URL / bearer token: `COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`.
@@ -279,10 +276,12 @@ Environment variables (read centrally in
 | `COAGENTHUB_DISPATCH_POLICY_FILE` | `scripts/dispatch-policy.json` | dispatch-policy file path override |
 | `EXECUTOR_BIN_<KEY>` | embedded config | override a CLI executor binary (e.g. `EXECUTOR_BIN_CODEBUDDY`) |
 
-> `EXECUTOR_BIN_REVIEWER` is the **three-layer-mode prerequisite**: it points the
-> built-in reviewer executor (placeholder `bin` = `"reviewer"`) at the actual CLI,
-> without which L3 review tasks fail with `spawn reviewer ENOENT` (confirmed).
-> Two-layer mode (no `reviewer` member) dispatches no L3 and needs no such setting.
+> **L3 review wakeup via completion event**: In three-layer mode, after L2 passes
+> the coordinator no longer dispatches a task to the reviewer participant.
+> Instead, the task's terminal state triggers a `task_completion_event` (created
+> by a DB trigger); the reviewer claims it from its inbox and performs the
+> architecture review. The reviewer is a regular participant, not an executor
+> config, so no `EXECUTOR_BIN_REVIEWER` setting is required.
 
 `scripts/dispatch-policy.json` (versioned with the code; missing/corrupt/invalid
 values fall back to defaults and never block startup):
@@ -329,10 +328,9 @@ at `GET /api/docs` (Scalar UI) and `GET /api/openapi`.
   (`?includeOutput=1`); `PATCH /:id/tasks/:taskId` (the executor itself writes
   back status/diffSummary/checkpointRef; coordinator/human may edit the task-book
   brief while `queued`).
-- **executors** — `GET /api/executors` list (built-in + DB merged);
+- **executors** — `GET /api/executors` list DB configs;
   `POST /api/executors` add and auto-register participant;
-  `PATCH` / `DELETE /api/executors/:key` edit / delete (built-ins rejected:
-  edit 403 / delete 409, key immutable).
+  `PATCH` / `DELETE /api/executors/:key` edit / delete (key immutable).
 - **file** — `POST /api/file/upload` upload; `GET /api/file/list` list;
   `GET /api/file/:name` download; `DELETE /api/file/:name` delete (pure disk, no
   DB, filename sanitized against path traversal, streamed read/write).

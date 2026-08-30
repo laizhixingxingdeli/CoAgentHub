@@ -23,14 +23,14 @@ Reasoning / CodeBuddy / Codex 执行器,以及经 A2A gateway 调用的远端 Wi
 ```
 
 执行器配置经 `GET/POST/PATCH/DELETE /api/executors` 管理(网页「接入 Participant」页;
-PATCH 支持改 bin/args/model/device/agentName,内置执行器不可编辑,改名不会自动改
-participant 名)。
+PATCH 支持改 bin/args/model/device/agentName,改名不会自动改 participant 名)。
 
 ## 2. 执行器接入
 
-### 内置执行器
+### 默认 seed 执行器
 
-缺省集合(`key` → `agentName` → 调用方式):
+全新装机由迁移 `0028` 写入 6 条默认配置(`ON CONFLICT DO NOTHING`,重复执行不覆盖、
+不重复,用户改过的行也保留)。这些与普通 DB 行无异,均可编辑或删除。
 
 | key | agentName | 调用方式 |
 | --- | --- | --- |
@@ -44,7 +44,6 @@ participant 名)。
 覆盖方式:
 
 - CLI 命令路径:env `EXECUTOR_BIN_<KEY 大写>`(如 `EXECUTOR_BIN_CODEBUDDY`)。
-- 三层模式下(群内有 `reviewer` 成员)运行 L3 架构检视任务时,内置 reviewer 执行器的 `bin` 是占位标识 `"reviewer"`,需设置 `EXECUTOR_BIN_REVIEWER` 指向检视者 runtime 的实际 CLI,否则下发 L3 检视任务会以 `spawn reviewer ENOENT` 失败(实测确认)。两层模式(无 `reviewer` 成员)不下发 L3,无需此项。
 - Codex 首次使用前,在 **server 运行的同一操作系统用户** 下执行 `codex login`。
   若 server 的 PATH 找不到 Codex,用 `EXECUTOR_BIN_CODEX=/绝对路径/codex` 覆盖。
 - A2A gateway 地址 / Bearer 令牌:`COAGENTHUB_WIN_A2A_URL` / `COAGENTHUB_WIN_A2A_TOKEN`。
@@ -232,7 +231,7 @@ vite 代理、prod 经 `serve.mjs` 均保持此路径)。身份解析与 HTTP �
 | `COAGENTHUB_DISPATCH_POLICY_FILE` | `scripts/dispatch-policy.json` | 调度策略文件路径覆盖 |
 | `EXECUTOR_BIN_<KEY>` | 配置内嵌 | 覆盖 CLI 执行器命令路径(如 `EXECUTOR_BIN_CODEBUDDY`) |
 
-> `EXECUTOR_BIN_REVIEWER` 是**三层模式的部署前置条件**:它把内置 reviewer 执行器(占位 `bin` = `"reviewer"`)指向实际 CLI,未设置则 L3 检视任务以 `spawn reviewer ENOENT` 失败(实测确认)。两层模式(无 `reviewer` 成员)不下发 L3,无需此项。
+> **L3 检视通过 completion event 唤醒**:三层模式下 L2 通过后,协调者不再向 reviewer participant 直接下发 task;任务进入终态时由 DB trigger 自动创建 `task_completion_event`,reviewer 从 inbox 认领并完成架构检视。reviewer 是普通 participant,不是执行器配置,无需设置 `EXECUTOR_BIN_REVIEWER`。
 
 `scripts/dispatch-policy.json`(随代码版本化;缺失/损坏/数值非法时回退默认值,不阻塞启动):
 
@@ -272,9 +271,9 @@ vite 代理、prod 经 `serve.mjs` 均保持此路径)。身份解析与 HTTP �
   (`?includeOutput=1`);`GET /:id/tasks/:taskId` 详情(`?includeOutput=1`);
   `PATCH /:id/tasks/:taskId`(执行器本人回写 status/diffSummary/checkpointRef;
   coordinator/human 可在 queued 时改任务书 brief)。
-- **executors** — `GET /api/executors` 列表(内置 + DB 合并);`POST /api/executors`
+- **executors** — `GET /api/executors` 列表 DB 配置;`POST /api/executors`
   新增并自动注册 participant;`PATCH` / `DELETE /api/executors/:key` 编辑 / 删除
-  (内置执行器拒绝:编辑 403 / 删除 409,key 不可改)。
+  (key 不可改)。
 - **file** — `POST /api/file/upload` 上传;`GET /api/file/list` 列表;
   `GET /api/file/:name` 下载;`DELETE /api/file/:name` 删除(纯磁盘、无 DB,文件名消毒
   防路径穿越,流式读写)。
