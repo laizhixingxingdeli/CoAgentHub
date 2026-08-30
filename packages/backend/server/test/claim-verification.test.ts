@@ -5,6 +5,7 @@ import path from "node:path";
 import type { TaskAttempt } from "@laizhixingxingdeli/database/schema";
 import { describe, expect, it } from "vitest";
 import {
+  hasCommitInTaskWindow,
   verifyCommitClaim,
   verifyReportedCommit,
 } from "../src/lib/executor-task/claim-verification";
@@ -125,6 +126,82 @@ describe("执行器提交声称核实", () => {
       ).resolves.toBeUndefined();
       await expect(
         verifyReportedCommit(hash, "/path/does/not/exist", attempts, "cli"),
+      ).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("R6 主闸提交窗口探测(quota-failure-on-clean-exit v1.1)", () => {
+  it("窗口起点后存在提交 → true", async () => {
+    const dir = repo();
+    try {
+      // repo() 的初始提交发生在「现在」;窗口起点取 1 秒前 → 提交落在窗口内。
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          status: "running",
+        },
+      ];
+      await expect(hasCommitInTaskWindow(dir, attempts)).resolves.toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("窗口起点在未来(提交早于窗口)→ false", async () => {
+    const dir = repo();
+    try {
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() + 60_000).toISOString(),
+          status: "running",
+        },
+      ];
+      await expect(hasCommitInTaskWindow(dir, attempts)).resolves.toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("仓库/git 不可达或无窗口起点 → undefined(调用方按无提交证据处理)", async () => {
+    const dir = repo();
+    try {
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          status: "running",
+        },
+      ];
+      await expect(
+        hasCommitInTaskWindow(null, attempts),
+      ).resolves.toBeUndefined();
+      await expect(
+        hasCommitInTaskWindow("/path/does/not/exist", attempts),
+      ).resolves.toBeUndefined();
+      await expect(hasCommitInTaskWindow(dir, [])).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("空仓库(无 HEAD)→ undefined,不抛错", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "coagenthub-claim-empty-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      const attempts: TaskAttempt[] = [
+        {
+          n: 1,
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          status: "running",
+        },
+      ];
+      await expect(
+        hasCommitInTaskWindow(dir, attempts),
       ).resolves.toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -79,6 +79,64 @@ export async function verifyReportedCommit(
 }
 
 /**
+ * R6 主闸(quota-failure-on-clean-exit v1.1):本次运行在任务窗口内是否产生提交。
+ *
+ * 双探针,优先级从前到后:
+ * 1. **执行前快照探针**(checkpointRef 存在时,CLI 主路径):`<checkpoint>..HEAD`
+ *    的提交 = 本次运行在预运行快照之上新增的提交,与时钟完全无关。上一轮运行
+ *    (同一工作树、可能几秒前刚提交过)的提交都是快照的祖先,严格排除;本轮提交
+ *    无论是否与 startedAt 同秒都必然计入 —— 规避 git 提交时间为整秒精度、而
+ *    attempts 窗口起点为毫秒精度的同秒歧义。
+ * 2. **时间窗口探针**(无快照,如 detached/a2a 路径):窗口 = [首次 attempt 开始
+ *    时刻, 当前时刻],提交时间取 committer date(与 verifyCommitClaim 的 %cI
+ *    同口径)。git 的 `--since` 会截断毫秒 ISO 到整秒,故 git 侧只做带 60s 余量
+ *    的粗过滤,窗口判定在 JS 侧按毫秒精确比较。
+ *
+ * 返回 true = 窗口内确有提交;false = 确认无提交;undefined = 仓库/git 不可达
+ * 或无法判定 —— 调用方按「无提交证据」处理,保留既有额度语义。
+ */
+export async function hasCommitInTaskWindow(
+  repoRoot: string | null,
+  attempts: readonly TaskAttempt[],
+  checkpointRef?: string | null,
+): Promise<boolean | undefined> {
+  if (!repoRoot) return undefined;
+  if (checkpointRef) {
+    try {
+      const count = await gitExec(
+        ["rev-list", "--count", `${checkpointRef}..HEAD`],
+        repoRoot,
+      );
+      if (count.status !== 0) return undefined;
+      const n = Number.parseInt(count.stdout.trim(), 10);
+      if (Number.isFinite(n)) return n > 0;
+    } catch {
+      return undefined;
+    }
+  }
+  const windowStart = attempts[0]?.startedAt;
+  if (!windowStart) return undefined;
+  const startMs = Date.parse(windowStart);
+  if (!Number.isFinite(startMs)) return undefined;
+  try {
+    const coarse = new Date(startMs - 60_000).toISOString();
+    const log = await gitExec(
+      ["log", "--format=%cI", `--since=${coarse}`, "HEAD"],
+      repoRoot,
+    );
+    if (log.status !== 0) return undefined;
+    let inWindow = 0;
+    for (const line of log.stdout.split("\n")) {
+      const commitMs = Date.parse(line.trim());
+      if (Number.isFinite(commitMs) && commitMs >= startMs) inWindow += 1;
+    }
+    return inWindow > 0;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Best-effort verification of a reported commit in the same repository used
  * by the executor. Any repository/git failure is intentionally omitted from
  * the result so it cannot change task lifecycle state.

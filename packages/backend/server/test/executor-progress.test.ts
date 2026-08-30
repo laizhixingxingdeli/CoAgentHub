@@ -73,13 +73,20 @@ writeFileSync(
     // 伪额度回显回归(伪额度回显修复):FAKE_QUOTA_ECHO_EXIT0 在输出尾部回显含
     //  quota/额度 字样的测试文件名与测试源码(01a04e01-b50b / 01a04e31-3194 的
     //  误判现场)后 exit 0 —— 无恢复时刻、无错误行形状 → 不应判额度失败;
-    //  FAKE_QUOTA_RESETS_EXIT0 尾部打印 "resets around HH:MM"(未来时刻)→ 应判
-    //  配额并冷却至该时刻(成功路径保留真额度检测)。
+    //  FAKE_QUOTA_RESETS_EXIT0 尾部打印 "resets around HH:MM"(未来时刻)后立即
+    //  exit 0(不提交)→ 应判配额并冷却至该时刻(成功路径保留真额度检测)。
     'if [ -n "$FAKE_QUOTA_ECHO_EXIT0" ]; then',
     '  echo "测试: 全量 L1 通过 — **59 测试文件 / 860 用例**(executor-report-quota.test.ts 38/38 通过)"',
     '  echo "expect(err).toContain(\\"执行器额度限制\\")"',
     "fi",
-    'if [ -n "$FAKE_QUOTA_RESETS_EXIT0" ]; then echo "usage limit reached — resets around $FAKE_RESETS_AT"; fi',
+    'if [ -n "$FAKE_QUOTA_RESETS_EXIT0" ]; then echo "usage limit reached — resets around $FAKE_RESETS_AT"; exit 0; fi',
+    // R6 主闸(quota-failure-on-clean-exit v1.1):
+    //  FAKE_AUTO_CONTINUING_EXIT0:尾部打印自愈退避行后**照常提交并 exit 0**
+    //    (任务窗口内有提交)→ 应被主闸拦下:不判额度、不冷却,任务落 done;
+    //  FAKE_QUOTA_NO_RECOVERY_EXIT0:打印无可解析恢复时刻的额度行后 exit 0
+    //    (无提交)→ 仍判额度并走固定兜底冷却。
+    'if [ -n "$FAKE_AUTO_CONTINUING_EXIT0" ]; then echo "[rate-limited] auto-continuing in 3s…"; fi',
+    'if [ -n "$FAKE_QUOTA_NO_RECOVERY_EXIT0" ]; then echo "error: rate limit exceeded (429 too many requests)"; exit 0; fi',
     // 超时分支回归:尾部打印额度关键词后 sleep 超过 EXECUTOR_TIMEOUT_MS → 超时
     // 分支(1261)仍应命中额度检测(失败 + 冷却 + 不重试)。写 stderr(行缓冲/不
     // 缓冲):管道 stdout 在 SIGKILL 前可能未刷出,导致超时瞬间捕获不到额度关键词。
@@ -145,6 +152,8 @@ describe("任务面板增强批次 server 侧测试", () => {
       "FAKE_QUOTA_FRONT",
       "FAKE_QUOTA_ECHO_EXIT0",
       "FAKE_QUOTA_RESETS_EXIT0",
+      "FAKE_AUTO_CONTINUING_EXIT0",
+      "FAKE_QUOTA_NO_RECOVERY_EXIT0",
       "FAKE_RESETS_AT",
       "FAKE_TIMEOUT_QUOTA",
       "FAKE_FAIL_UNTIL",
@@ -780,6 +789,83 @@ describe("任务面板增强批次 server 侧测试", () => {
       } else {
         expect(isInCooldown({ key: "codebuddy" })).toBe(true);
       }
+    }, 30_000);
+
+    it("R6 主闸:exit 0 + auto-continuing 退避行 + 窗口内有提交 → 不判额度、不冷却,落 done 并留可读说明", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // FAKE_AUTO_CONTINUING_EXIT0:尾部打印瞬时限流退避行后照常提交并 exit 0
+      // (实证 01a05103-db4c 的现场)。v1.1 R6 主闸:任务窗口内有提交 → 一律不判
+      // 额度、不进入冷却;diffSummary 留 quotaMatchedButCommitFound 可读说明。
+      process.env.FAKE_AUTO_CONTINUING_EXIT0 = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "瞬时限流退避但完成提交",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "done",
+      );
+      expect(t.status).toBe("done");
+      expect(t.diffSummary?.retries).toBeUndefined();
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+      const summary = t.diffSummary as Record<string, unknown> | null;
+      // 匹配到但被提交闸掉:留可读说明 + 命中行,便于区分「没匹配到」与「被闸掉」。
+      const gate = summary?.quotaMatchedButCommitFound as
+        | { matchedLine?: string; note?: string }
+        | undefined;
+      expect(gate).toBeTruthy();
+      expect(String(gate?.matchedLine)).toContain("auto-continuing");
+      expect(String(gate?.note)).toContain("不判额度");
+      // 未走额度失败路径:无冷却结束键、无 quotaMatchedLine。
+      expect(summary?.executorCooldownEndMs).toBeUndefined();
+      expect(summary?.quotaMatchedLine).toBeUndefined();
+      // 无 ❌ 额度失败回传。
+      const doneMsg = await waitForMessage(
+        coordinator.id,
+        group.id,
+        (m) => m.contentType === "task_status" && m.body.startsWith("✅"),
+      );
+      expect(doneMsg.body).toContain("任务完成");
+    }, 30_000);
+
+    it("R6 反向:exit 0 + 限流字样 + 无提交 + 无可解析恢复时刻 → 仍判额度,走固定兜底冷却", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup();
+      __setRateLimitForTests(300_000, QUOTA_PATTERNS);
+      // FAKE_QUOTA_NO_RECOVERY_EXIT0:无可解析恢复时刻的额度行(429)后 exit 0,
+      // 不产生提交 → 主闸不拦,仍判额度;parseRateLimitRecoveryMs 无命中 →
+      // 冷却回退固定兜底(now + cooldown)。
+      process.env.FAKE_QUOTA_NO_RECOVERY_EXIT0 = "1";
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "礼貌放弃任务-无恢复时刻",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      expect(t.status).toBe("failed");
+      expect(t.diffSummary?.retries).toBeUndefined();
+      const err = String(t.diffSummary?.error ?? "");
+      expect(err).toContain("执行器额度限制");
+      expect(err).toMatch(/预计 .+ 恢复/);
+      const summary = t.diffSummary as Record<string, unknown> | null;
+      expect(String(summary?.quotaMatchedLine)).toContain(
+        "rate limit exceeded",
+      );
+      // 固定兜底:冷却终点 = now + 固定冷却(300s),未命中「解析所得时刻」。
+      expect(summary?.cooldownFallbackReason).toBeUndefined();
+      const end = cooldownEndMs({ key: "codebuddy" });
+      const remaining = end - Date.now();
+      expect(remaining).toBeGreaterThanOrEqual(60_000);
+      expect(remaining).toBeLessThanOrEqual(300_000 + 10_000);
+      expect(isInCooldown({ key: "codebuddy" })).toBe(true);
     }, 30_000);
   });
 

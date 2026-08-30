@@ -39,6 +39,7 @@ import {
 } from "@server/lib/executor-task";
 import {
   type ClaimVerificationMode,
+  hasCommitInTaskWindow,
   verifyCommitExists,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
@@ -1493,30 +1494,56 @@ app
             taskBook: task.brief,
           });
           if (quotaVerdict.isQuota) {
-            const parsedMs = parseRateLimitRecoveryMs(errorText);
-            const cooldownEnd = normalizeCooldownEnd(
-              parsedMs ?? Date.now() + getRateLimitCooldownMs(),
-            );
-            const extra: Record<string, unknown> = {
-              [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
-              ...(quotaVerdict.matchedLine !== null
-                ? { quotaMatchedLine: quotaVerdict.matchedLine }
-                : {}),
-            };
-            if (
-              parsedMs !== null &&
-              parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-            ) {
-              extra.cooldownFallbackReason =
-                "解析所得时刻不可用,已回退固定冷却";
-              extra.discardedCooldownEndMs = parsedMs;
+            // R6 主闸(quota-failure-on-clean-exit v1.1):PATCH failed 同样先以
+            // 任务窗口内是否产生提交为闸 —— 有提交 → 不判额度、不冷却(有产出即
+            // 非耗尽);无提交 → 保留 R8 既有额度语义。探测尽力而为:仓库/git
+            // 不可达按「无提交证据」处理,不改变既有判定。
+            let commitInWindow: boolean | undefined = false;
+            try {
+              commitInWindow = await hasCommitInTaskWindow(
+                await resolveTaskRepoRoot(db, task),
+                task.attempts,
+                task.checkpointRef,
+              );
+            } catch {
+              commitInWindow = undefined;
             }
-            summaryToWrite = { ...rawSummary, ...extra };
-            quotaCooldownEnd = cooldownEnd;
-            quotaErrorText = errorText;
-            quotaEx = task.executorKey
-              ? await findExecutorByKey(db, task.executorKey)
-              : undefined;
+            if (commitInWindow === true) {
+              // 匹配到但被提交闸掉:diffSummary 留可读说明,便于事后区分
+              // 「没匹配到」与「匹配到但被闸掉」(spec 验收 5/6)。
+              summaryToWrite = {
+                ...rawSummary,
+                quotaMatchedButCommitFound: {
+                  matchedLine: quotaVerdict.matchedLine,
+                  note: "error 命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
+                },
+              };
+            } else {
+              const parsedMs = parseRateLimitRecoveryMs(errorText);
+              const cooldownEnd = normalizeCooldownEnd(
+                parsedMs ?? Date.now() + getRateLimitCooldownMs(),
+              );
+              const extra: Record<string, unknown> = {
+                [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+                ...(quotaVerdict.matchedLine !== null
+                  ? { quotaMatchedLine: quotaVerdict.matchedLine }
+                  : {}),
+              };
+              if (
+                parsedMs !== null &&
+                parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+              ) {
+                extra.cooldownFallbackReason =
+                  "解析所得时刻不可用,已回退固定冷却";
+                extra.discardedCooldownEndMs = parsedMs;
+              }
+              summaryToWrite = { ...rawSummary, ...extra };
+              quotaCooldownEnd = cooldownEnd;
+              quotaErrorText = errorText;
+              quotaEx = task.executorKey
+                ? await findExecutorByKey(db, task.executorKey)
+                : undefined;
+            }
           }
         }
       }

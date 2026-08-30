@@ -1897,5 +1897,58 @@ describe("任务实体(server 单一状态源)", () => {
       expect(diff?.executorCooldownEndMs).toBeUndefined();
       expect(isInCooldown({ key: "codebuddy" })).toBe(false);
     });
+
+    it("R6 主闸:PATCH failed + 额度正文 + 任务窗口内有提交 → 不冷却,留可读说明", async () => {
+      const { __resetExecutorQueueForTests, __setRateLimitForTests } =
+        await import("@server/lib/executor-task");
+      const { isInCooldown } = await import("@server/lib/executor-task/state");
+      __resetExecutorQueueForTests();
+      __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+
+      const { coordinator, execA, group } = await setupGroup();
+      const created = await createTask(
+        coordinator.id,
+        group.id,
+        uuidv4(),
+        execA.id,
+      );
+      const task = (await created.json()) as Task;
+      await seedExecutorKey(execA.id, "codebuddy", task.id);
+      // 种子 attempts 使窗口起点落在仓库首个提交之前 → 任务窗口内存在提交
+      // (setup.ts 的 COAGENTHUB_REPO_ROOT 仓库 HEAD 落在窗口内)→ R6 主闸拦下。
+      await testDb
+        .update(taskTable)
+        .set({
+          attempts: [
+            {
+              n: 1,
+              startedAt: new Date(0).toISOString(),
+              status: "running",
+            },
+          ],
+        })
+        .where(eq(taskTable.id, task.id));
+
+      const patch = await patchTask(execA.id, group.id, task.id, {
+        status: "failed",
+        diffSummary: {
+          error:
+            "You've hit your usage limit. Upgrade to Pro and try again at 3:32 PM.",
+        },
+      });
+      expect(patch.status).toBe(200);
+      const updated = (await patch.json()) as Task;
+      const diff = updated.diffSummary as Record<string, unknown> | null;
+      // 匹配到但被提交闸掉:不冷却、不写额度键;diffSummary 留可读说明 + 命中行。
+      expect(diff?.executorCooldownEndMs).toBeUndefined();
+      expect(diff?.quotaMatchedLine).toBeUndefined();
+      expect(isInCooldown({ key: "codebuddy" })).toBe(false);
+      const gate = diff?.quotaMatchedButCommitFound as
+        | { matchedLine?: string; note?: string }
+        | undefined;
+      expect(gate).toBeTruthy();
+      expect(String(gate?.matchedLine)).toContain("usage limit");
+      expect(String(gate?.note)).toContain("不判额度");
+    });
   });
 });

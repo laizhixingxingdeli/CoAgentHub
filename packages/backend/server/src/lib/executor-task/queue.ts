@@ -37,7 +37,10 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { isTerminalTaskStatus } from "../coordination-activity";
 import { createAnsiStripper } from "./ansi";
-import { verifyReportedCommit } from "./claim-verification";
+import {
+  hasCommitInTaskWindow,
+  verifyReportedCommit,
+} from "./claim-verification";
 import {
   clearPersistedExecutorCooldown,
   EXECUTOR_COOLDOWN_END_MS_FIELD,
@@ -1940,14 +1943,35 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           exitCode: 0,
           taskBook: run.body,
         });
+        // R6 主闸(quota-failure-on-clean-exit v1.1):exit 0 时先以「本次任务
+        // 窗口内是否产生提交」为闸 —— 有提交 → 一律不判额度、不进入冷却(运行
+        // 中途出现瞬时限流退避行不代表耗尽,实证 01a05103-db4c:提交 1862e03f
+        // 真实存在却因 [rate-limited] auto-continuing in 3s… 被误判停派 5 小时);
+        // 无提交 → 保留既有额度语义。只收紧干净退出这一条路径,非零退出/超时
+        // 分支逐字不变。
+        let quotaMatchedButCommitFound:
+          | { matchedLine: string | null; note: string }
+          | undefined;
         if (successQuota.isQuota) {
-          await handleQuotaFailure(
-            run,
-            "exit 0",
-            successTail,
-            successQuota.matchedLine,
+          const commitInWindow = await hasCommitInTaskWindow(
+            repoRoot,
+            run.attempts,
+            run.checkpointRef,
           );
-          return;
+          if (commitInWindow === true) {
+            quotaMatchedButCommitFound = {
+              matchedLine: successQuota.matchedLine,
+              note: "输出尾部命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
+            };
+          } else {
+            await handleQuotaFailure(
+              run,
+              "exit 0",
+              successTail,
+              successQuota.matchedLine,
+            );
+            return;
+          }
         }
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不做段落解析;hash 仍从输出提取。CLI 路径走结构化段落解析(票7)。
@@ -1961,6 +1985,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         const diffSummary: Record<string, unknown> = Object.fromEntries(
           Object.entries(report).filter(([key]) => key !== "tokenUsage"),
         );
+        // R6 主闸留痕:命中额度关键词但被「窗口内有提交」闸掉 → diffSummary 写
+        // 可读说明,便于事后区分「没匹配到」与「匹配到但被闸掉」(spec 验收 5/6)。
+        if (quotaMatchedButCommitFound) {
+          diffSummary.quotaMatchedButCommitFound = quotaMatchedButCommitFound;
+        }
         // 汇报 commit 核实(spec verify-agent-claims v1.1):CLI 完成与 a2a 完成
         // 共用同一套 claim-verification 逻辑;cli 在任务实际仓库核实,a2a 本地
         // 无仓库 → 留下 status=skipped 的「未核实」痕迹(不再静默跳过)。
