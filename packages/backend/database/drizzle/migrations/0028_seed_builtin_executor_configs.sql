@@ -4,17 +4,10 @@
 -- DEFAULT_EXECUTORS array is deleted in the same change. 6 rows are seeded,
 -- each carrying the current built-in values verbatim (including
 -- max_concurrency for executor/codex). The `reviewer` entry is NOT migrated
--- (spec §3 R3 removes it): reviewer is a role, not an executor — it must not
--- appear in executor_config at all.
---
--- R3 also clears any stale participant.executor_key = 'reviewer' binding left
--- over from the pre-config era (when reviewer was registered as a fake
--- built-in executor), so no participant points at a non-existent config.
+-- (spec §3 R3 removes it; its participant cleanup is a separate ticket).
 --
 -- Idempotency: ON CONFLICT (key) DO NOTHING — re-running the migration on an
--- existing install must not duplicate rows nor overwrite user-edited rows; the
--- UPDATE below only touches rows that still carry executor_key = 'reviewer',
--- so a second run is a no-op.
+-- existing install must not duplicate rows nor overwrite user-edited rows.
 --
 -- win-hermes carries NO token: its a2a token is read from the
 -- COAGENTHUB_WIN_A2A_TOKEN environment variable at runtime (same as today),
@@ -49,7 +42,3 @@ INSERT INTO "executor_config" (
     'http://192.168.31.180:9900/', '[]'::jsonb, 'win-hermes', NULL, 'per-group', NULL
   )
 ON CONFLICT ("key") DO NOTHING;
-
--- R3:reviewer 不再是执行器配置——清掉指向不存在配置的悬空绑定。
--- 幂等:仅命中 executor_key = 'reviewer' 的行,重复执行是 no-op。
-UPDATE "participant" SET "executor_key" = NULL WHERE "executor_key" = 'reviewer';
