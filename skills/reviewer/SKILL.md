@@ -220,15 +220,18 @@ Read the spec + read the implementation diff, then check **architecture quality*
 你不是被下发的执行器，**没有"完成回调"可回**。把 `review_result` 作为**群消息**公布
 （见「结构化载荷」节）：`verdict: "pass" | "findings"` + `findings[]`。
 
-⚠️ **但群消息唤不醒协调者**（v4.0 §3.14.7）。它 `memory: null`、每票 spawn、跑完即退——
-它 PATCH 终态那一刻进程就结束了，等你公布 `review_result` 时**没有任何协调者进程存在**。
-旧版「协调者从群消息流里读它」是**结构上不可执行**的。所以 `findings` 必须走平台的
-**定向派发路径**——广播形式会被平台 **400** 拒收：
+`findings` 走平台的**定向派发路径**——广播形式会被平台 **400** 拒收（docs/architecture.md
+对 `review_result.verdict: "findings"` 的约束：定向到 coordinator 并带
+`specRef` + `specHash`，由现有派发路径生成 `dispatch_kind=fix` 任务）：
 
 | verdict | 你要做的 |
 |---|---|
 | `pass` | 公布 `review_result` 留痕，**结束**。不需要唤醒任何人。 |
 | `findings` | ① 公布 `review_result` 并**定向到 coordinator**（`audience: role` 指向 `coordinator` 角色，或 `audience: participant` 指向协调者 participant），且必须带 `specRef` + `specHash`（留痕 + 前端展示，不变）；② 修正任务由平台现有派发路径**自动生成** `dispatchKind: fix` 任务——任务书引用发现项、`specRef` 与被检视票相同，**无需你另发任务**。 |
+
+⚠️ 平台自动生成的修正任务书**只含发现项列表 + `review_result` 原文，没有验收标准与红线**。
+执行器没有别的验收依据，因此 `review_result` 的每条发现项正文**必须自带机制 + 实证 + 修正方向**——
+执行器才知道改什么、怎么验证，协调者才能据此做 L2。
 
 发现项驱动的修正票**天然是 `fix`**：复用同一份冻结 spec，不引入新架构面。若某条发现项
 大到需要改 spec → 走第 11 步 `spec_amended`，并**升级为 `requirement`**（闸二）。
