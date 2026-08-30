@@ -441,24 +441,27 @@ describe("Durable Task Completion Events", () => {
       }
     });
 
-    it("越权伪造:执行器 participant 发送 callback 一律丢弃(与 dispatcherSessionId 同规则)", async () => {
+    it("行为验证 1(callback):coordinator 角色执行器 participant 的 callback 保留(spec R3)", async () => {
       const { coordinator, codebuddy, group } = await setupGroup(
         "cb-forgedByExecutor",
       );
-      // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
-      // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,「执行器发送的
-      // callback 即使携带也忽略」仍必须拦截(与 dispatcherSessionId 伪造同规则)。
+      // 给执行器 participant 单独加 coordinator 角色:下发权只由群内角色裁定
+      // (spec R3 / ADR-0008 第三条),codebuddy 即便命中执行器配置,携带的
+      // callback 也不再被 canDispatch 全局否决——保留写入。
       await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
       const { res, json: msg } = await postMessage(codebuddy.id, group.id, {
-        body: "执行器伪造 callback",
+        body: "coordinator 角色执行器 participant 的 callback",
         audience: "participant",
         audienceRef: codebuddy.id,
         callback: { platform: "codex", sessionRef: "forged-session" },
       });
       expect(res.status).toBe(200);
       const task = await waitForTask(group.id, msg.id as string);
-      expect(task.callbackRef).toBeNull();
-      expect(task.dispatcherSessionId).toBeNull();
+      expect(task.callbackRef).toEqual({
+        platform: "codex",
+        sessionRef: "forged-session",
+      });
+      expect(task.dispatcherSessionId).toBe("forged-session");
     }, 15_000);
 
     it("无 callback 时 task.callback_ref 为 null(兼容旧版)", async () => {

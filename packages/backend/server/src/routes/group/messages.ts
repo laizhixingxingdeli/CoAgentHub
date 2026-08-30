@@ -435,36 +435,21 @@ app
             targetParticipantForDispatch,
           )) !== undefined;
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
-        // coordinator/human 且**非执行器 participant** 的发送者可携带
-        // (与 dispatcherSessionId 同规则);执行器/observer 伪造一律丢弃。
-        const senderParticipantForDispatcher =
-          await db.query.participant.findFirst({
-            where: (t, { eq }) => eq(t.id, senderId),
-          });
-        // §3.2 判据:发送者命中执行器配置且该配置 canDispatch !== true = 纯执行器,
-        // 其携带的 dispatcher/callback 路由信息一律丢弃;canDispatch: true 的执行器
-        // (协调者/检视者 runtime)允许携带——不再按"是否在执行器配置表中"一刀切。
-        const senderExecutor =
-          senderParticipantForDispatcher !== undefined
-            ? await findExecutorByParticipant(
-                db,
-                senderParticipantForDispatcher,
-              )
-            : undefined;
-        const senderIsPureExecutor =
-          senderExecutor !== undefined && !senderExecutor.canDispatch;
-        const canCarryDispatcher =
-          membership.roles.some((r) =>
-            (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
-          ) && !senderIsPureExecutor;
+        // coordinator/human/reviewer(群内角色)的发送者可携带;执行器/observer
+        // 伪造一律丢弃。下发权只由群内角色裁定(spec R3 / ADR-0008 第三条),
+        // 不再叠加「是否命中执行器配置」的全局否决——即便发送者同时命中一个
+        // 执行器配置,只要群内角色有权下发即可携带。
+        const canCarryDispatcher = membership.roles.some((r) =>
+          (DISPATCH_ALLOWED_ROLES as readonly string[]).includes(r),
+        );
         if (callback && !canCarryDispatcher) {
           warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
         }
         if (isExecutorTarget && !specHash?.trim()) {
           warnings.push("SPEC_HASH_MISSING");
         }
-        // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 且非纯执行器
-        // 发送者可携带(执行器伪造 metadata 一律忽略),否则为 null。
+        // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 发送者可携带
+        // (执行器伪造 metadata 一律忽略),否则为 null。
         const rawSessionId = metadata?.dispatcherSessionId;
         const selectionReason = metadata?.selectionReason ?? null;
         const dispatcherSessionId =

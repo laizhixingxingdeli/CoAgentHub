@@ -48,7 +48,7 @@ describe("协作载荷 API 契约", () => {
     };
   }
 
-  it("下发缺 specHash/剥离 callback 时用响应头发出可见信号", async () => {
+  it("下发缺 specHash 时用响应头发出可见信号(reviewer 角色发送者携带 callback 保留,spec R3)", async () => {
     const owner = await register(`warning-owner-${randomUUID()}`);
     const sender = await register("AtomCode");
     const target = await register("CodeBuddy");
@@ -86,8 +86,11 @@ describe("协作载荷 API 契约", () => {
       }),
     });
     expect(response.status).toBe(200);
+    // R3:下发权只由群内角色裁定——sender 持 reviewer 角色(在 DISPATCH_ALLOWED_ROLES
+    // 内),即便同时命中执行器配置,携带的 callback 也保留,不再产生
+    // CALLBACK_STRIPPED_NOT_AUTHORIZED;仅缺 specHash 信号保留。
     expect(response.headers.get("X-CoAgentHub-Warning")).toBe(
-      "CALLBACK_STRIPPED_NOT_AUTHORIZED,SPEC_HASH_MISSING",
+      "SPEC_HASH_MISSING",
     );
     // The warning is synchronous, but task creation/spawn is intentionally
     // fire-and-forget. Drain the short-lived fake executor before PGlite closes.

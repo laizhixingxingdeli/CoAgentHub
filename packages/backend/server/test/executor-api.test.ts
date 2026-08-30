@@ -175,8 +175,8 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   });
 
   it("effectiveExecutors 返回 seed 的 6 条(无 reviewer;executor/codex maxConcurrency=1)", async () => {
-    // GET /api/executors 不透出 canDispatch 字段;直接走 effectiveExecutors
-    // 验证 0028 seed 落库后有效执行器集合包含 6 条 DB 行,reviewer 不在其中。
+    // 直接走 effectiveExecutors 验证 0028 seed 落库后有效执行器集合包含 6 条
+    // DB 行,reviewer 不在其中(spec R3:reviewer 不对应执行器配置)。
     const { effectiveExecutors } = await import("../src/lib/executors");
     const all = await effectiveExecutors(testDb as unknown as DataBase);
     const keys = all.map((x) => x.key);

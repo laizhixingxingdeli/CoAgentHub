@@ -238,18 +238,20 @@ CoAgentHub/
 - **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——群成员里有没有 `reviewer` 角色成员决定:有 `reviewer` = **三层**(L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视);无 `reviewer` = **两层**(协调者兼任检视者的写 spec 职责,L2 通过即结案,跳过 L3)。两模式唯一差异是 L2 通过后是否进入 L3 架构检视:三层有 reviewer 在场,L2 通过即触发 completion event,由 reviewer inbox 认领完成检视;两层无 reviewer,L2 通过即结案。平台不感知模式。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」**自行 grill + 写 spec + 冻结公布(严禁把内容复制回 coordinator skill);取舍见 spec §3.14.4——更少跳转 vs L3 变自审、写与验收同一方。
   - **L2 之后的分支**:三层下 L2 功能检视通过 → 任务终态后 DB trigger 自动创建 `task_completion_event` → reviewer 从 inbox 认领并完成架构检视 → 结案;两层下 L2 通过即结案,跳过 L3。结案时若存在上游 detached 任务仍须 `PATCH` 回写终态(与模式无关)。
   - **L3 检视通过 completion event 唤醒**:三层模式下 L2 通过后,协调者不再向 reviewer participant 直接下发 task;任务终态时 DB trigger 自动创建 `task_completion_event`,reviewer 从 inbox 认领并完成架构检视。reviewer 不对应执行器配置,其消息走普通消息/控制指令路径。
-  - **协调者用 detached 需自行注册执行器**:协调者若要使用 spec §3.5 的会话延续(`detached`),需自行 `POST /api/executors` 注册为可被唤醒的执行器(`kind=cli`);`canDispatch` 标记决定是否保留 dispatcher/callback 路由信息(当前 DB 行均未设此标记,缺省 false=纯执行器)。
+  - **协调者用 detached 需自行注册执行器**:协调者若要使用 spec §3.5 的会话延续(`detached`),需自行 `POST /api/executors` 注册为可被唤醒的执行器(`kind=cli`);下发权由群内角色裁定(spec R3 / ADR-0008 第三条),不依赖执行器配置上的标记。
 
 - **server 是唯一调度器**(旧任务桥已退役,webhook 通道已移除):`POST /messages` 定向到
   执行器 participant(`audience=participant` + `audienceRef`)时,由 server 直接建 task
   (fire-and-forget,幂等靠 `message_id` 唯一约束),不再有独立的调度进程。
 - 执行器配置:`executor_config` 表是**唯一真相源**(DB 持久化,`/api/executors`
-  管理);0028 迁移把旧 6 条内置配置写成 seed 行(幂等,`ON CONFLICT DO NOTHING`),不再有代码内置默认执行器。participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。执行器 participant 通过 `participant.executor_key` 稳定绑定配置 `key`,显示名 (`participant.name`) 仅是可修改的身份文本,不得作为调度路由键。`canDispatch` 标记决定该执行器发出的消息是否保留 dispatcher/callback 路由信息;当前 DB 行均未设此标记(缺省 false=纯执行器),reviewer 不再以执行器身份存在。
+  管理);0028 迁移把旧 6 条内置配置写成 seed 行(幂等,`ON CONFLICT DO NOTHING`),不再有代码内置默认执行器。participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。执行器 participant 通过 `participant.executor_key` 稳定绑定配置 `key`,显示名 (`participant.name`) 仅是可修改的身份文本,不得作为调度路由键。reviewer 不对应执行器配置(0028 不 seed,`participant.executor_key = 'reviewer'` 已被迁移清空),其消息走普通消息/控制指令路径。
 - **下发门与控制门**:`DISPATCH_ALLOWED_ROLES`(`lib/executor-task/types.ts`,管**下发**)与
   `CONTROL_ALLOWED_ROLES`(`lib/control.ts`,管**停止/回滚**)是两个独立常量,均含
-  coordinator/human/reviewer。dispatcher/callback 路由判据用 `ExecutorConfig.canDispatch`
-  (显式标记,缺省 false=纯执行器),而非「发送者是否在执行器配置表」:命中执行器配置**且**
-  `canDispatch !== true` 才算纯执行器,其消息不携带 dispatcher/callback 路由信息。
+  coordinator/human/reviewer。dispatcher/callback 路由判据只检查群内角色(spec R3 /
+  ADR-0008 第三条):发送者群内角色命中 `DISPATCH_ALLOWED_ROLES` 即可携带,不再叠加
+  「是否命中执行器配置」的全局否决——群内持 coordinator 角色的 participant 即便同时
+  命中执行器配置,其携带的路由信息仍保留;只持 executor 角色者仍被剥离并产生
+  `CALLBACK_STRIPPED_NOT_AUTHORIZED` 警告。
 - **执行器分工选择**:定向消息(`audience=participant`)指定的执行器 = **实现执行器**;
   **测试执行器**按群成员分工提示词自动选择(`resolveTestExecutor`,纯函数可单测):
   群成员中 roles 含 executor/specialist 且 prompt 文本匹配测试职责(关键词:测试/验证/

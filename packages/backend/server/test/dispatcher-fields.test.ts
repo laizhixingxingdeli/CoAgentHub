@@ -226,34 +226,66 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
     expect(task.dispatcherSessionId).toBeNull();
   }, 15_000);
 
-  it("执行器伪造 metadata:不写入(即便执行器持有 coordinator 角色)", async () => {
+  it("行为验证 1:coordinator 角色 participant 即便同时命中执行器配置,dispatcher/callback 仍保留(spec R3)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup("下发者 C");
     const atomcode = await registerParticipant({ name: "AtomCode" });
     await addMember(coordinator.id, group.id, atomcode.id, ["executor"]);
-    // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
-    // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,即使带 metadata
-    // 也必须被拦截。目标改为另一名普通执行器,避免 coordinator 任务正确进入
-    // detached 状态而无法在本测试中结束。
+    // codebuddy 命中执行器配置,但同时持有 coordinator 角色:下发权只由群内角色
+    // 裁定(spec R3 / ADR-0008 第三条),不再被 canDispatch 全局否决——其携带的
+    // dispatcher/callback 路由信息保留。
     await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
     const { res, json } = await postMessage(codebuddy.id, group.id, {
-      body: "执行器伪造 metadata",
+      body: "coordinator 角色执行器 participant 下发",
       audience: "participant",
       audienceRef: atomcode.id,
-      metadata: { dispatcherSessionId: "forged-session" },
+      metadata: { dispatcherSessionId: "coord-session" },
+      callback: { platform: "codex", sessionRef: "coord-session" },
     });
     expect(res.status).toBe(200);
+    // 保留:dispatcher/callback 全部写入(不产生剥离警告)。
+    const warning = res.headers.get("X-CoAgentHub-Warning");
+    expect(warning ?? "").not.toContain("CALLBACK_STRIPPED_NOT_AUTHORIZED");
     const task = await waitForTask(group.id, json.id as string);
-    // 不写入:sessionId 为 null(伪造被忽略);participant 仍是服务端识别的
-    // sender(执行器自己),不会被请求体伪造。
-    expect(task.dispatcherSessionId).toBeNull();
+    expect(task.dispatcherSessionId).toBe("coord-session");
+    expect(task.callbackRef).toEqual({
+      platform: "codex",
+      sessionRef: "coord-session",
+    });
     expect(task.dispatcherParticipantId).toBe(codebuddy.id);
   }, 15_000);
 
-  it("canDispatch: true 的执行器(检视者 runtime)可携带 dispatcher/callback(§3.2 判据)", async () => {
-    // 内置 reviewer 执行器(key=reviewer,agentName="Reviewer")命中
-    // DISPATCH_CAPABLE_KEYS → effectiveExecutors 派生 canDispatch: true(纯代码
-    // 派生,不落 DB 列)——检视者既要被下发任务唤醒(注册为执行器),又能自己
-    // 下发任务携带 callbackRef,不再被当"纯执行器"丢弃。
+  it("行为验证 2:仅 executor 角色 participant 的 dispatcher/callback 仍剥离,并产生 CALLBACK_STRIPPED_NOT_AUTHORIZED(spec R3)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("下发者 C2");
+    // 目标必须是**非执行器** participant:定向到执行器 participant 的消息会先被
+    // 路由层 403 发布门槛拦截(任务发布门槛,非 coordinator/human 直接 403),
+    // 剥离逻辑只对能通过门槛的消息生效。
+    const peer = await registerParticipant({ name: "C2-peer" });
+    await addMember(coordinator.id, group.id, peer.id, ["coordinator"]);
+    // codebuddy 仅持 executor 角色(不在 DISPATCH_ALLOWED_ROLES):同类路由信息被剥离。
+    const { res, json } = await postMessage(codebuddy.id, group.id, {
+      body: "纯执行器下发(应被剥离)",
+      audience: "participant",
+      audienceRef: peer.id,
+      metadata: { dispatcherSessionId: "forged-session" },
+      callback: { platform: "codex", sessionRef: "forged-session" },
+    });
+    expect(res.status).toBe(200);
+    // 剥离信号:警告头携带 CALLBACK_STRIPPED_NOT_AUTHORIZED。
+    const warning = res.headers.get("X-CoAgentHub-Warning");
+    expect(warning ?? "").toContain("CALLBACK_STRIPPED_NOT_AUTHORIZED");
+    // 消息本身不含 dispatcherSessionId / metadata(伪造不落库)。
+    expect(json.dispatcherSessionId).toBeUndefined();
+    expect(json.metadata).toBeUndefined();
+    // 无任务:纯执行器发送者无下发权,maybeDispatchExecutorTask 直接跳过。
+    await new Promise((r) => setTimeout(r, 500));
+    const tasks = await listTasks(group.id);
+    expect(tasks.some((t) => t.messageId === json.id)).toBe(false);
+  }, 15_000);
+
+  it("reviewer participant(coordinator 角色)可携带 dispatcher/callback(spec R3:下发权由群内角色裁定)", async () => {
+    // R3 后 reviewer 不再对应执行器配置(0028 不 seed);其 participant 持
+    // coordinator 角色即有权下发并携带 callbackRef——下发权只看群内角色,
+    // 不再依赖 canDispatch 全局标记。
     const reviewer = await registerParticipant({ name: "Reviewer" });
     const { coordinator, codebuddy, group } = await setupGroup("下发者 R");
     await addMember(coordinator.id, group.id, reviewer.id, ["coordinator"]);
@@ -266,13 +298,31 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
     });
     expect(res.status).toBe(200);
     const task = await waitForTask(group.id, json.id as string);
-    // canDispatch: true → 不是纯执行器 → dispatcher/callback 正常写入。
     expect(task.dispatcherSessionId).toBe("reviewer-session");
     expect(task.callbackRef).toEqual({
       platform: "codex",
       sessionRef: "reviewer-session",
     });
     expect(task.dispatcherParticipantId).toBe(reviewer.id);
+  }, 15_000);
+
+  it("行为验证 3:定向 reviewer participant 不创建 task,走普通消息路径(spec R3)", async () => {
+    const { coordinator, group } = await setupGroup("下发者 R3");
+    const reviewer = await registerParticipant({ name: "R3-reviewer" });
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    const { res, json } = await postMessage(coordinator.id, group.id, {
+      body: "给检视者的普通消息",
+      audience: "participant",
+      audienceRef: reviewer.id,
+    });
+    expect(res.status).toBe(200);
+    // isExecutorTarget 为假:reviewer 不对应执行器配置 → 不创建 task。
+    await new Promise((r) => setTimeout(r, 500));
+    const tasks = await listTasks(group.id);
+    expect(tasks.some((t) => t.messageId === json.id)).toBe(false);
+    // 走普通消息路径:reviewer 可见该定向消息。
+    const reviewerSeen = await listMessages(reviewer.id, group.id);
+    expect(reviewerSeen.some((m) => m.id === json.id)).toBe(true);
   }, 15_000);
 
   it("coordinator/human 之外的发送者带 metadata:忽略(消息正常,不暴露)", async () => {

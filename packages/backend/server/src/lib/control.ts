@@ -4,10 +4,10 @@
  * task.checkpoint_ref 由执行前快照写入)。指令识别放 server(executor-task
  * 之外独立成文件);双跑期桥的同类指令仍会响应,票3 退役桥后只剩 server。
  *
- * 门槛与桥一致:发送者须持 coordinator / human 角色;执行器 participant 自身发
- * 的回传不触发(防回环,发送者命中执行器配置即跳过)。停止携带 taskId
- * (「停止 <taskId>」)时仅终止该任务(当其 running);回滚 taskId 缺省时
- * 回滚该群最近一次带快照的任务。
+ * 门槛与桥一致:发送者须持 coordinator / human 角色;控制门只检查群内角色
+ * (spec R3 / ADR-0008 第三条后,不再按「发送者命中执行器配置」跳过)。
+ * 停止携带 taskId(「停止 <taskId>」)时仅终止该任务(当其 running);回滚
+ * taskId 缺省时回滚该群最近一次带快照的任务。
  */
 
 import {
@@ -62,7 +62,7 @@ export async function maybeHandleControlCommand(
   db: DataBase,
   input: ControlCommandInput,
 ): Promise<void> {
-  const { groupId, senderId, senderRoles, audience, audienceRef, body } = input;
+  const { groupId, senderRoles, audience, audienceRef, body } = input;
 
   // 控制门角色门槛:非 coordinator/human/reviewer 不执行。
   if (
@@ -76,19 +76,9 @@ export async function maybeHandleControlCommand(
     return;
   }
 
-  // 防回环:纯执行器 participant 自己发的回传不触发(命中执行器配置且
-  // canDispatch !== true);canDispatch: true 的执行器(协调者/检视者 runtime)
-  // 保留发控制指令的权限——与 §3.2 messages.ts 的 dispatcher 判据同款。
-  const sender = await db.query.participant.findFirst({
-    where: (t, { eq: eqFn }) => eqFn(t.id, senderId),
-  });
-  if (sender) {
-    const senderExecutor = await findExecutorByParticipant(db, sender);
-    if (senderExecutor && !senderExecutor.canDispatch) {
-      console.log(`[control] 跳过:发送者是纯执行器 participant(防回环)`);
-      return;
-    }
-  }
+  // 防回环:不再按「发送者命中执行器配置」跳过(spec R3 / ADR-0008 第三条——
+  // 下发权只由群内角色裁定);发送者是否执行器 participant 与其是否可发控制
+  // 指令无关,控制门只检查上面的 CONTROL_ALLOWED_ROLES 角色门槛。
 
   // 定向到执行器 participant 的消息是任务,不是控制指令(与桥 !ex 路由一致);
   // 定向到其他非执行器 participant 的消息按普通指令识别(与现状对 non-hermes
