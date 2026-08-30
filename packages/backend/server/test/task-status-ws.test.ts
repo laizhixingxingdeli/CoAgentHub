@@ -15,6 +15,7 @@ import {
 } from "vitest";
 import { type RawData, WebSocket } from "ws";
 import { wsHub } from "../src/lib/ws-hub";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * task_status_changed(任务状态实时推送)集成测试:用 fake bin 驱动真实执行器
@@ -187,6 +188,7 @@ async function postDirectedTaskMessage(
 }
 
 beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
   server = createServer(app.fetch as unknown as RequestListener);
   wsHub.handleUpgrade(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -279,12 +281,7 @@ describe("task_status_changed(任务状态实时推送)", () => {
     const frames = attachCollector(coordinatorWs);
     const spec = { specRef: "specs/login-v2.md", specHash: "abc123def456" };
 
-    await postDirectedTaskMessage(
-      coordinator.id,
-      group.id,
-      codebuddy.id,
-      spec,
-    );
+    await postDirectedTaskMessage(coordinator.id, group.id, codebuddy.id, spec);
 
     await waitFor(() =>
       frames.some(

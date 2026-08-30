@@ -15,8 +15,8 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { afterAll, describe, expect, it, vi } from "vitest";
-import { testDb } from "./db";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 阶段2-票1:server 内嵌执行器触发链路。
@@ -78,6 +78,10 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
 
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
+
 describe("server 内嵌执行器触发链路(票1)", () => {
   const app = createTestApp();
 
@@ -107,7 +111,7 @@ describe("server 内嵌执行器触发链路(票1)", () => {
 
   async function bindExecutorKey(id: string, name: unknown) {
     const keyByName: Record<string, string> = {
-      "CodeBuddy": "codebuddy",
+      CodeBuddy: "codebuddy",
       "Win Hermes": "win-hermes",
     };
     const executorKey = typeof name === "string" ? keyByName[name] : undefined;

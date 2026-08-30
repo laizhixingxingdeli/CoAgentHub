@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { afterAll, describe, expect, it, vi } from "vitest";
-import { testDb } from "./db";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 阶段2-票2 + 调度并行化(票4):server 按 project_path 分组的执行队列(同组
@@ -121,6 +121,10 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();

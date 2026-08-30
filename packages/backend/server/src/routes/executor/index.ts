@@ -7,7 +7,6 @@ import {
   addExecutorConfig,
   effectiveExecutors,
   findExecutorByKey,
-  isBuiltinExecutorKey,
   registerExecutorParticipant,
   removeExecutorConfig,
   updateExecutorConfig,
@@ -24,8 +23,8 @@ import { z } from "zod";
  * 都能读取/新增/删除/编辑执行器配置。新增时自动注册对应 participant(名字=agentName;
  * token 认证已移除,不再生成 token)。
  *
- * 内置执行器(DEFAULT_EXECUTORS)不落 DB:GET 合并展示,DELETE/PATCH 对内置 key
- * 直接拒绝(409/403),避免误删/误改默认执行器。
+ * 全部配置都落 DB(executor_config 唯一真相源,0028 seed 行携带旧内置配置):
+ * GET 直接返回 DB 行,不再有内置 key,因此 DELETE/PATCH 对所有 key 一律放行。
  */
 const app = new Hono<{ Variables: { db: DataBase } }>();
 
@@ -195,7 +194,7 @@ const app2 = app
     "/",
     describeRoute({
       description:
-        "List all executors (built-in defaults merged with DB configs; tokenHash/token never exposed)",
+        "List all executors (DB configs; tokenHash/token never exposed)",
       responses: {
         200: {
           description: "Successful response",
@@ -223,7 +222,6 @@ const app2 = app
           inputMode: ex.inputMode ?? null,
           env: ex.env ?? null,
           outputProfile: ex.outputProfile ?? null,
-          builtin: isBuiltinExecutorKey(ex.key),
         })),
       );
     },
@@ -261,7 +259,7 @@ const app2 = app
     "/:key",
     describeRoute({
       description:
-        "Delete an executor config by key; built-in executors are refused (409)",
+        "Delete an executor config by key (all keys deletable — no built-ins)",
       responses: {
         200: {
           description: "Config deleted",
@@ -274,11 +272,6 @@ const app2 = app
       const db = c.get("db");
       const { key } = c.req.valid("param");
 
-      // 内置执行器不可删除(不在 DB,删了也只是空操作,直接拒绝)。
-      if (isBuiltinExecutorKey(key)) {
-        throw new BizError(BizCodeEnum.Conflict, `内置执行器不可删除: ${key}`);
-      }
-
       const removed = await removeExecutorConfig(db, key);
       if (!removed) {
         throw new BizError(BizCodeEnum.ExecutorNotFound);
@@ -290,7 +283,7 @@ const app2 = app
     "/:key",
     describeRoute({
       description:
-        "Partially update an executor config by key (bin/args/model/device/agentName); built-in executors are refused (403); key is immutable (400); unknown key 404. device changes sync to the registered participant (name changes do NOT rename the participant — recorded only)",
+        "Partially update an executor config by key (bin/args/model/device/agentName); key is immutable (400); unknown key 404. device changes sync to the registered participant (name changes do NOT rename the participant — recorded only)",
       responses: {
         200: {
           description: "Config updated",
@@ -348,11 +341,6 @@ const app2 = app
       // key 不可改:请求体带 key 字段直接拒绝(避免"换 key"语义)。
       if (input.key !== undefined) {
         throw new BizError(BizCodeEnum.InvalidRequest, "执行器 key 不可修改");
-      }
-
-      // 内置执行器不落 DB,不可编辑(与 DELETE 的 409 不同,编辑用 403)。
-      if (isBuiltinExecutorKey(key)) {
-        throw new BizError(BizCodeEnum.Forbidden, `内置执行器不可编辑: ${key}`);
       }
 
       const existing = await findExecutorByKey(db, key);
@@ -427,7 +415,6 @@ const app2 = app
         inputMode: updated.inputMode ?? null,
         env: updated.env ?? null,
         outputProfile: updated.outputProfile ?? null,
-        builtin: false,
       });
     },
   );

@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { type RawData, WebSocket } from "ws";
 import { wsHub } from "../src/lib/ws-hub";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * Durable Task Completion Events (specs/durable-task-completion-events.md):
@@ -101,6 +102,10 @@ interface InboxEventItem extends CompletionEventEnvelope {
   state: string;
   attempts: number;
 }
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("Durable Task Completion Events", () => {
   beforeEach(() => {
@@ -364,7 +369,8 @@ describe("Durable Task Completion Events", () => {
     }, 15_000);
 
     it("兼容:只提供 callback.sessionRef 时同步写入 dispatcherSessionId", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup("cb-sessiononly");
+      const { coordinator, codebuddy, group } =
+        await setupGroup("cb-sessiononly");
       const { res, json: msg } = await postMessage(coordinator.id, group.id, {
         body: "只有 sessionRef",
         audience: "participant",
@@ -414,7 +420,8 @@ describe("Durable Task Completion Events", () => {
     });
 
     it("非法内容:callback 字段含 URL/命令/凭据/空白 → 400", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup("cb-forbidden");
+      const { coordinator, codebuddy, group } =
+        await setupGroup("cb-forbidden");
       for (const bad of [
         { platform: "https://example.com/webhook" },
         { endpointRef: "ssh://user@host" },
@@ -435,7 +442,9 @@ describe("Durable Task Completion Events", () => {
     });
 
     it("越权伪造:执行器 participant 发送 callback 一律丢弃(与 dispatcherSessionId 同规则)", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup("cb-forgedByExecutor");
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "cb-forgedByExecutor",
+      );
       // 给执行器 participant 单独加 coordinator 角色:单角色约束(§3.7)下只能持
       // 一种角色;CodeBuddy 无 canDispatch 仍是「纯执行器」,「执行器发送的
       // callback 即使携带也忽略」仍必须拦截(与 dispatcherSessionId 伪造同规则)。
@@ -499,7 +508,8 @@ describe("Durable Task Completion Events", () => {
     }, 30_000);
 
     it("completion event 与 task 终态具有事务一致性(同一 task 只产生一个 event)", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup("ce-idempotent");
+      const { coordinator, codebuddy, group } =
+        await setupGroup("ce-idempotent");
       const { res, json: msg } = await postMessage(coordinator.id, group.id, {
         body: "幂等测试",
         audience: "participant",
@@ -589,9 +599,9 @@ describe("Durable Task Completion Events", () => {
       );
       expect(resAfter.status).toBe(200);
       const afterBody = (await resAfter.json()) as { events: InboxEventItem[] };
-      expect(
-        afterBody.events.some((e) => e.eventId === ev.eventId),
-      ).toBe(false);
+      expect(afterBody.events.some((e) => e.eventId === ev.eventId)).toBe(
+        false,
+      );
     }, 30_000);
 
     it("claim:原子认领,返回 leaseToken + event;重复 claim 返回 409", async () => {
@@ -668,7 +678,11 @@ describe("Durable Task Completion Events", () => {
       const task = await waitForTask(group.id, msg.id as string);
       await waitForTaskTerminal(group.id, task.id as string);
       const ev = await waitForPendingEvent(coordinator.id, task.id as string);
-      const claim = await claimEvent(coordinator.id, ev.eventId, "ack-consumer");
+      const claim = await claimEvent(
+        coordinator.id,
+        ev.eventId,
+        "ack-consumer",
+      );
       const { leaseToken } = claim.json;
       // 第一次 ack
       const ack1 = await ackEvent(coordinator.id, ev.eventId, leaseToken);
@@ -700,7 +714,11 @@ describe("Durable Task Completion Events", () => {
       const task = await waitForTask(group.id, msg.id as string);
       await waitForTaskTerminal(group.id, task.id as string);
       const ev = await waitForPendingEvent(coordinator.id, task.id as string);
-      const claim = await claimEvent(coordinator.id, ev.eventId, "fail-consumer");
+      const claim = await claimEvent(
+        coordinator.id,
+        ev.eventId,
+        "fail-consumer",
+      );
       const { leaseToken } = claim.json;
       // fail 一次:attempts → 1, state → pending
       const fail1 = await failEvent(
@@ -755,7 +773,11 @@ describe("Durable Task Completion Events", () => {
       const { events } = await inboxList(coordinator.id);
       expect(events.some((e) => e.task?.taskId === taskId)).toBe(false);
       // dead 后 claim → 409
-      const deadClaim = await claimEvent(coordinator.id, ev.eventId, "dead-again");
+      const deadClaim = await claimEvent(
+        coordinator.id,
+        ev.eventId,
+        "dead-again",
+      );
       expect(deadClaim.res.status).toBe(409);
     }, 30_000);
 
@@ -773,8 +795,16 @@ describe("Durable Task Completion Events", () => {
       const before = await waitForTaskTerminal(group.id, taskId);
       const ev = await waitForPendingEvent(coordinator.id, taskId);
       // claim + ack(改变 completion event 状态)
-      const claim = await claimEvent(coordinator.id, ev.eventId, "status-consumer");
-      const ack = await ackEvent(coordinator.id, ev.eventId, claim.json.leaseToken);
+      const claim = await claimEvent(
+        coordinator.id,
+        ev.eventId,
+        "status-consumer",
+      );
+      const ack = await ackEvent(
+        coordinator.id,
+        ev.eventId,
+        claim.json.leaseToken,
+      );
       expect(ack.res.status).toBe(200);
       // task 终态与 diffSummary 不变
       const after = await getTaskDetail(group.id, taskId);
@@ -1003,8 +1033,7 @@ describe("Durable Task Completion Events", () => {
       await waitForPendingEvent(coordinator.id, taskId);
       await waitFor(() =>
         frames.some(
-          (f) =>
-            f.type === "task_completion_available" && f.taskId === taskId,
+          (f) => f.type === "task_completion_available" && f.taskId === taskId,
         ),
       );
       const frame = frames.find(

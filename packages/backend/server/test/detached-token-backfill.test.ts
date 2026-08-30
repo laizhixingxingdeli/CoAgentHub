@@ -8,11 +8,11 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { DataBase } from "../src/lib/database";
 import { backfillDetachedClosedTokenFields } from "../src/lib/executor-task";
 import { createTestApp } from "./app";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 const runtimeDb = testDb as unknown as DataBase;
 
@@ -200,6 +200,10 @@ async function waitUntil<T>(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("detached 任务采集落库后补写 diffSummary token 字段", () => {
   it("续跑时序:结案时 attempts 无采集 → 采集落库后补写 diffSummary.tokenUsage 与 reason", async () => {

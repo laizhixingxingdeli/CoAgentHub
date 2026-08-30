@@ -8,8 +8,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { testDb } from "./db";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 调度改造批次收尾(票7):任务书模板化 + 汇报结构化 + 额度感知调度。
@@ -58,8 +58,8 @@ writeFileSync(
     // 文本里的 \n 解释成真换行,把一行 JSON 拆成多行(实测导致整行 JSON.parse
     // 失败、回退 legacy 路径)。
     'if [ -n "$FAKE_JSONL" ]; then',
-    "  printf '%s\\n' '{\"type\":\"agent_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"# CoAgentHub 任务\\n## 汇报格式要求\\n提交: <commit hash>\"}]}}'",
-    "  printf '%s\\n' '{\"type\":\"agent_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"提交: 0123456789abcdef0123456789abcdef01234567\\n测试: 全绿\\n汇报: 从 assistant 正文取到汇报\\n遗留: 无\"}]}}'",
+    '  printf \'%s\\n\' \'{"type":"agent_end","message":{"role":"user","content":[{"type":"text","text":"# CoAgentHub 任务\\n## 汇报格式要求\\n提交: <commit hash>"}]}}\'',
+    '  printf \'%s\\n\' \'{"type":"agent_end","message":{"role":"assistant","content":[{"type":"text","text":"提交: 0123456789abcdef0123456789abcdef01234567\\n测试: 全绿\\n汇报: 从 assistant 正文取到汇报\\n遗留: 无"}]}}\'',
     "  exit 0",
     "fi",
     // 结构化四段汇报模式。
@@ -112,6 +112,10 @@ const {
 // PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与 executor-trigger /
 // executor-queue 同款 cast);resolveTestExecutor 只走共享的 query API。
 const teDb = testDb as unknown as Parameters<typeof resolveTestExecutor>[0];
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
   const app = createTestApp();
@@ -789,7 +793,10 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
       const stdout = [
         JSON.stringify({
           type: "agent_end",
-          message: { role: "user", content: [{ type: "text", text: "任务书" }] },
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "任务书" }],
+          },
         }),
         JSON.stringify({
           type: "agent_end",

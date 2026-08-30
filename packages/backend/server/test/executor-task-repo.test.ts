@@ -8,7 +8,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * 修复:任务书显式声明目标仓库(`仓库:`/`仓库路径:`/`Repository:`/`Repo:`)时,
@@ -62,6 +63,10 @@ const { createTestApp } = await import("./app");
 const { __resetExecutorQueueForTests, resolveTaskRepo } = await import(
   "@server/lib/executor-task"
 );
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("resolveTaskRepo 纯函数(行级声明解析)", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "rtr-dir-"));

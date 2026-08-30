@@ -8,7 +8,7 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataBase } from "../src/lib/database";
 import {
   __resetExecutorQueueForTests,
@@ -21,7 +21,7 @@ import {
   startOrphanReconciler,
 } from "../src/lib/orphan-task-reconciler";
 import { createTestApp } from "./app";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 // PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与 executor-trigger /
 // executor-queue 同款 cast);纯函数只走共享的 query API。
@@ -55,6 +55,10 @@ function deadPid(): number {
  * (reconciledReason/reconciledAt);pid 存活(含静默超阈值)不收敛;条件更新
  * 不覆盖并发写入的 done;详情/列表 API 暴露 executorPid 与 pidAlive。
  */
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
+
 describe("孤儿任务周期收敛", () => {
   const app = createTestApp();
 
@@ -235,10 +239,7 @@ describe("孤儿任务周期收敛", () => {
       executorParticipantId: participant.id,
       executorPid: deadPid(),
     });
-    const lines = Array.from(
-      { length: 60 },
-      (_, i) => `tail-line-${i + 1}`,
-    );
+    const lines = Array.from({ length: 60 }, (_, i) => `tail-line-${i + 1}`);
     appendTaskOutput(task.id, lines.join("\n") + "\n");
 
     expect(await reconcileOrphanTasks(orphanDb)).toBe(1);

@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 describe("协作载荷 API 契约", () => {
   const app = createTestApp();
+
+  beforeAll(async () => {
+    await seedBuiltinExecutorConfigs();
+  });
 
   async function register(name: string) {
     const response = await app.request("/api/participants", {

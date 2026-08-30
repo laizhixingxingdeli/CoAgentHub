@@ -13,8 +13,8 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { testDb } from "./db";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 角色定向下发(specs/dispatch-to-role.md R1-R5):audience=role 时派发层按角色
@@ -59,6 +59,10 @@ const { createTestApp } = await import("./app");
 const { __resetExecutorQueueForTests, executorCooldowns } = await import(
   "../src/lib/executor-task/state"
 );
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("角色定向下发(specs/dispatch-to-role.md)", () => {
   const app = createTestApp();

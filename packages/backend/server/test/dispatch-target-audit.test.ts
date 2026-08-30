@@ -4,7 +4,8 @@ import path from "node:path";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-audit-bin-"));
 const fakeBin = path.join(fakeDir, "fake-executor.sh");
@@ -32,6 +33,10 @@ const app = createTestApp();
 afterAll(() => {
   __resetExecutorQueueForTests();
   rmSync(fakeDir, { recursive: true, force: true });
+});
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
 });
 
 describe("自派警告与下发目标审计", () => {

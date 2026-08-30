@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * 明细存储 + 展开 API(spec two-tier-output-summary-and-detail R4/R5):
@@ -156,6 +157,10 @@ const {
   readTaskDetail,
   taskDetailFilePath,
 } = await import("@server/lib/executor-task");
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("任务明细落盘与展开 API(R4/R5)", () => {
   const app = createTestApp();
@@ -370,7 +375,10 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
     );
     // 终态摘要流同样不含 thinking 行(R1),动作行保留。
     expect(
-      tailLinesStartingWith(String(done.diffSummary?.outputTail ?? ""), "[思考"),
+      tailLinesStartingWith(
+        String(done.diffSummary?.outputTail ?? ""),
+        "[思考",
+      ),
     ).toEqual([]);
     expect(done.diffSummary?.outputTail).toContain("[工具 #t3] read_file");
     // 摘要流字节数对比:thinking 原文 2×2000 字进明细,摘要只留一行要旨
@@ -580,7 +588,9 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
     };
     const thinkings = all.entries.filter((e) => e.kind === "thinking");
     expect(thinkings.map((e) => e.id)).toEqual(["t1", "t2"]);
-    expect(thinkings[0].text).toContain("Let me check the guard file location.");
+    expect(thinkings[0].text).toContain(
+      "Let me check the guard file location.",
+    );
     expect(thinkings[0].text).toContain(THINKING_BODY);
     expect(thinkings[1].text).toContain("Now read the guard file to confirm");
     console.log(

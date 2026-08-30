@@ -18,9 +18,9 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DataBase } from "../src/lib/database";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 子任务终态时把协调者重新拉起(specs/wake-the-coordinator-on-child-completion.md
@@ -228,6 +228,10 @@ beforeEach(async () => {
 
 afterAll(() => {
   rmSync(fakeDir, { recursive: true, force: true });
+});
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
 });
 
 describe.sequential("协调者续跑完整验收", () => {

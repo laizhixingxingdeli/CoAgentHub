@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * A2A 协议可靠性(第1-3层):进度/心跳、结果未确认、ReplyMode: detached。
@@ -25,6 +26,10 @@ process.env.COAGENTHUB_WIN_A2A_TOKEN = "test-a2a-token";
 const { createTestApp } = await import("./app");
 const { __resetExecutorQueueForTests, __setReliabilityTimeoutsForTests } =
   await import("@server/lib/executor-task");
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("A2A 协议可靠性(进度/结果未确认/detached)", () => {
   const app = createTestApp();

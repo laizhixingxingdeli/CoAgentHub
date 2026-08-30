@@ -1,7 +1,8 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * Part A(任务下发者信息记录与透传):POST /groups/:id/messages 接受
@@ -72,6 +73,10 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 100));
   }
   rmSync(fakeDir, { recursive: true, force: true });
+});
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
 });
 
 describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与透传", () => {

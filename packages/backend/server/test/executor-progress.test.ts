@@ -2,7 +2,16 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
  * 任务面板增强批次(实时进度 + 执行历史 + 冷却动态化 + model 字段 + 回滚体验):
@@ -107,11 +116,8 @@ process.env.COAGENTHUB_REPO_ROOT = repoDir;
 
 // 顶层 await 动态 import:env 设置先于模块求值。
 const { createTestApp } = await import("./app");
-const {
-  __resetExecutorQueueForTests,
-  taskOutputTail,
-  __setRateLimitForTests,
-} = await import("@server/lib/executor-task");
+const { __resetExecutorQueueForTests, taskOutputTail, __setRateLimitForTests } =
+  await import("@server/lib/executor-task");
 const { cooldownEndMs, isInCooldown } = await import(
   "@server/lib/executor-task/state"
 );
@@ -119,6 +125,10 @@ const { parseRateLimitRecoveryMs, renderExecutorArgs } = await import(
   "@server/lib/executors"
 );
 const { wsHub } = await import("../src/lib/ws-hub");
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("任务面板增强批次 server 侧测试", () => {
   const app = createTestApp();
@@ -719,7 +729,9 @@ describe("任务面板增强批次 server 侧测试", () => {
       );
       expect(t.status).toBe("done");
       expect(isInCooldown({ key: "codebuddy" })).toBe(false);
-      expect(String(t.diffSummary?.error ?? "")).not.toContain("执行器额度限制");
+      expect(String(t.diffSummary?.error ?? "")).not.toContain(
+        "执行器额度限制",
+      );
       // 无 quotaMatchedLine 留痕(未判配额)。
       const summary = t.diffSummary as Record<string, unknown> | null;
       expect(summary?.quotaMatchedLine).toBeUndefined();
@@ -755,7 +767,9 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(err).toMatch(/预计 .+ 恢复/);
       // quotaMatchedLine 记录命中原始行(截断)。
       const summary = t.diffSummary as Record<string, unknown> | null;
-      expect(String(summary?.quotaMatchedLine)).toContain("usage limit reached");
+      expect(String(summary?.quotaMatchedLine)).toContain(
+        "usage limit reached",
+      );
       // 冷却至解析出的恢复时刻(与 parseRateLimitRecoveryMs 同源)。
       const expectedEnd = parseRateLimitRecoveryMs(
         `usage limit reached — resets around ${resetsAt}`,

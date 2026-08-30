@@ -14,8 +14,9 @@ import { resolveLocalUser } from "./local-participant";
  * audienceRef 命中 participant 后,按 participant.executorKey 命中本配置时创建 task
  * 并 spawn 执行器;开机时由 ensureExecutorParticipants 幂等注册对应 participant。
  *
- * 完整集合 = 内置默认(DEFAULT_EXECUTORS)+ DB 持久化配置(executor_config 表,
- * 经「接入 Participant」界面写入),见 effectiveExecutors(db)。
+ * 完整集合 = DB 持久化配置(executor_config 表,经「接入 Participant」界面写入,
+ * 0028 迁移把旧内置配置写成 seed 行),见 effectiveExecutors(db)。不再有代码内置
+ * 默认执行器(ADR-0008):列表里有的,就是这台机器上真的配了的。
  *
  * bin 可用环境变量覆盖(测试/本机路径差异):EXECUTOR_BIN_<KEY 大写> 优先,
  * 回退到配置默认值。
@@ -89,149 +90,6 @@ export interface ExecutorConfig {
    * 接线批再加),纯代码派生字段,不落 DB 列。
    */
   canDispatch?: boolean;
-}
-
-/** Built-in participant display names are deliberately role-neutral. */
-const BUILTIN_PARTICIPANT_NAMES: Record<string, string> = {
-  executor: "AtomCode",
-  reasonix: "Reasoning",
-  codebuddy: "CodeBuddy",
-  codex: "Codex",
-  reviewer: "Reviewer",
-  hermes: "Hermes",
-  "win-hermes": "Win Hermes",
-};
-
-function participantDisplayName(ex: ExecutorConfig): string {
-  return BUILTIN_PARTICIPANT_NAMES[ex.key] ?? ex.agentName;
-}
-
-const DEFAULT_EXECUTORS: ExecutorConfig[] = [
-  {
-    key: "executor",
-    agentName: "AtomCode",
-    // type 旧值为 "agent"(participant 旧名);只影响新注册行的展示值,
-    // 不与任何路由/权限逻辑耦合,改名后统一为 "participant"。
-    type: "participant",
-    bin: "atomcode",
-    label: "atomcode",
-    // -v:实跑确认(2026-08-26)在 stderr 输出 [tool→ name] {args} / [tool← status]
-    // / [done] 动作行;executor-runner 已把 stderr 并入 onOutput,无需改传输链路。
-    args: ["-y", "-v", "-p", "{ticket}"],
-    // 声明式并发上限:AtomCode 的 atomgit session 同一时间只能执行一个任务,
-    // 并发会触发 403 atomgit_session_concurrency_conflict → 服务端按 1 排队。
-    maxConcurrency: 1,
-  },
-  {
-    key: "reasonix",
-    agentName: "Reasoning",
-    type: "participant",
-    bin: "reasonix",
-    label: "reasonix",
-    // 支持 --model:args 模板用 {model} 占位(有 model 替换,无 model 时该参数
-    // 项连同前置 --model flag 一并移除,避免 CLI 收到空参数)。
-    args: ["run", "-y", "--model", "{model}", "{ticket}"],
-    model: "deepseek-v4-flash",
-  },
-  {
-    key: "codebuddy",
-    agentName: "CodeBuddy",
-    type: "participant",
-    bin: "codebuddy",
-    label: "codebuddy",
-    // --output-format stream-json 置于 {ticket} 之后:实跑确认(2026-08-26)
-    // 尾置旗标兼容(help 注明 only works with --print,两者是搭配不是冲突),
-    // stdout 变为 {"type":...} JSONL(动作/结果可见);ticket 保持 $3 位置。
-    args: ["-y", "-p", "{ticket}", "--output-format", "stream-json"],
-  },
-  {
-    key: "codex",
-    agentName: "Codex",
-    type: "participant",
-    bin: "codex",
-    label: "codex",
-    // Headless Codex task:允许改工作区,不等待审批,每个 task 使用新上下文。
-    // --approve-for-me 自带 workspace-write 沙箱,**不能再叠 --sandbox**
-    // (叠了报 "cannot be used with")。旧写法 `--sandbox workspace-write
-    // --ask-for-approval never` 在 codex-cli 0.149.0 已失效:--ask-for-approval
-    // 这个参数不存在了,spawn 直接报 unexpected argument。实测于 0.149.0。
-    //
-    // sandbox_workspace_write.network_access=true:workspace-write 沙箱默认**禁网**,
-    // 连 localhost 也不通(实测:沙箱内 curl localhost:3001 得 exit 7 / 000,
-    // 同一条命令在沙箱外得 200)。协调者按 spec §3.17.4 必须 PATCH 自己那条
-    // detached 任务才能把 L3 交回检视者——禁网时它做完 L2 却回传不了,
-    // 三层链路在最后一步断掉(实测连续三轮:12:59 / 13:45 / 14:30)。
-    // 只放开网络、保留文件系统沙箱;不用 --sandbox danger-full-access
-    // (那会连文件系统限制一并取消,过宽)。
-    args: [
-      "exec",
-      "--approve-for-me",
-      "--ephemeral",
-      "--json",
-      "-c",
-      "sandbox_workspace_write.network_access=true",
-      "{ticket}",
-    ],
-    // 当前 runner 以共享工作区执行,避免同一 Codex participant 并发改文件。
-    maxConcurrency: 1,
-  },
-  {
-    // 检视者 runtime:注册为执行器以被下发 L3 检视任务唤醒。canDispatch 不在此
-    // 手写 —— 由 DISPATCH_CAPABLE_KEYS(["reviewer"])在 effectiveExecutors 合并时
-    // 派生为 true(检视者既是执行器又是下发方,见 ExecutorConfig.canDispatch)。
-    key: "reviewer",
-    agentName: "Reviewer",
-    type: "participant",
-    kind: "cli",
-    // 占位标识,**永远不会被 spawn**(spec v3.8 §3.17.4/§3.17.5):自 v3.8 起
-    // L3 架构检视不再向本执行器下发任务,而是由协调者 PATCH 自己那条 detached
-    // 任务为终态、经 DB trigger 写完成事件唤醒检视者已有会话。本条目存在的
-    // 唯一理由是 DISPATCH_CAPABLE_KEYS 派生的 canDispatch —— 保证检视者自己
-    // 下发任务时 callbackRef 不被当作"执行器伪造 metadata"剥离。
-    // 因此**不需要设置 EXECUTOR_BIN_REVIEWER**;旧文档要求三层模式必须配置它
-    // (否则 spawn reviewer ENOENT)的说法已作废。
-    bin: "reviewer",
-    args: ["-y", "-p", "{ticket}"],
-    label: "reviewer",
-    // 检视任务串行即可:同一检视者 runtime 同时只处理一个 L3 检视任务。
-    maxConcurrency: 1,
-  },
-  {
-    key: "hermes",
-    agentName: "Hermes",
-    type: "hermes",
-    bin: "hermes",
-    label: "hermes",
-    args: ["-z", "{ticketContent}"],
-  },
-  {
-    // 远端设备上的 hermes(Windows 192.168.31.180):A2A gateway 调用,
-    // 不用本地 bin(spawn 路径按 kind=a2a 分流,bin 仅作占位标识)。
-    key: "win-hermes",
-    agentName: "Win Hermes",
-    type: "hermes",
-    bin: "win-hermes",
-    label: "win-hermes",
-    args: [],
-    kind: "a2a",
-    // 协调器:开启按群记忆(a2a 跨任务按群延续 contextId)。纯粹执行器保持
-    // 无记忆(任务书自包含,每次任务独立执行)。
-    memory: "per-group",
-    a2a: {
-      url: "http://192.168.31.180:9900/",
-      token: "",
-    },
-  },
-];
-
-/** 内置默认 + env 覆盖(不改 DB,与 DB 行互不影响)。 */
-function defaultExecutors(): ExecutorConfig[] {
-  return DEFAULT_EXECUTORS.map(applyEnvOverrides);
-}
-
-/** 判断 key 是否为内置默认执行器(内置配置不可删除/跳过删除)。 */
-export function isBuiltinExecutorKey(key: string): boolean {
-  return DEFAULT_EXECUTORS.some((ex) => ex.key === key);
 }
 
 /**
@@ -516,7 +374,7 @@ export async function updateExecutorConfig(
   return row;
 }
 
-/** 完整执行器集合 = 内置默认 + DB 配置(合并,DB 行追加在默认之后)。 */
+/** 完整执行器集合 = DB 配置(executor_config 唯一真相源,无内置默认)。 */
 export async function effectiveExecutors(
   db: DataBase,
 ): Promise<ExecutorConfig[]> {
@@ -527,10 +385,7 @@ export async function effectiveExecutors(
     return cachedEffectiveExecutors;
   }
   const rows = await listExecutorConfigs(db);
-  cachedEffectiveExecutors = [
-    ...defaultExecutors(),
-    ...rows.map(rowToConfig),
-  ].map((ex) =>
+  cachedEffectiveExecutors = rows.map(rowToConfig).map((ex) =>
     DISPATCH_CAPABLE_KEYS.has(ex.key) ? { ...ex, canDispatch: true } : ex,
   );
   cachedEffectiveExecutorsAt = Date.now();
@@ -558,9 +413,7 @@ export async function findExecutorKeyByInitialName(
   name: string,
 ): Promise<string | undefined> {
   const all = await effectiveExecutors(db);
-  return all.find(
-    (ex) => ex.agentName === name || participantDisplayName(ex) === name,
-  )?.key;
+  return all.find((ex) => ex.agentName === name)?.key;
 }
 
 /** 迁移期兼容 helper;新调度路径不得按名字判定 participant 身份。 */
@@ -875,18 +728,18 @@ export async function registerExecutorParticipant(
   }
 
   await db.insert(participantTable).values({
-    name: participantDisplayName(ex),
+    name: ex.agentName,
     executorKey: ex.key,
     device: device ?? (ex.kind === "a2a" ? "remote" : "mac"),
     tokenHash: "",
     capabilities: [],
   });
-  console.log(`[executors] 已注册 participant: ${participantDisplayName(ex)}`);
+  console.log(`[executors] 已注册 participant: ${ex.agentName}`);
   return true;
 }
 
 /**
- * 开机自注册:把执行器配置(内置 + DB 配置)对应的 participant 补进
+ * 开机自注册:把执行器配置(全部来自 DB,无内置)对应的 participant 补进
  * participant 表(幂等,按 executorKey 判重)。桥已退役,注册职责由 server 承担。
  */
 export async function ensureExecutorParticipants(db: DataBase): Promise<void> {

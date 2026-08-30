@@ -1,7 +1,7 @@
 import type { TaskStatus } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
-import { testDb } from "./db";
+import { beforeAll, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * Durable Task Completion Events — 数据库 trigger 行为(specs/
@@ -14,17 +14,26 @@ import { testDb } from "./db";
  * 直接驱动真实 SQL(与生产同构的 PGlite),不经过消息/调度管线。
  */
 
-const { task: taskTable, groups: groupsTable, participant: participantTable } =
-  await import("@laizhixingxingdeli/database/schema");
+const {
+  task: taskTable,
+  groups: groupsTable,
+  participant: participantTable,
+} = await import("@laizhixingxingdeli/database/schema");
 
 async function seedIdentity() {
   const [participant] = await testDb
     .insert(participantTable)
-    .values({ name: `trig-p-${crypto.randomUUID().slice(0, 8)}`, tokenHash: "" })
+    .values({
+      name: `trig-p-${crypto.randomUUID().slice(0, 8)}`,
+      tokenHash: "",
+    })
     .returning();
   const [group] = await testDb
     .insert(groupsTable)
-    .values({ title: `trig-g-${crypto.randomUUID().slice(0, 8)}`, createdBy: participant.id })
+    .values({
+      title: `trig-g-${crypto.randomUUID().slice(0, 8)}`,
+      createdBy: participant.id,
+    })
     .returning();
   return { participant, group };
 }
@@ -63,6 +72,10 @@ async function countEvents(taskId: string): Promise<number> {
     .where(eq(taskCompletionEvent.taskId, taskId));
   return rows.length;
 }
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("task_completion_event trigger", () => {
   it("queued → done(有 dispatcher)时创建且仅创建一个 event,路由字段透传", async () => {

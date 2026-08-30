@@ -10,8 +10,8 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import { startServer } from "@server/lib/server-startup";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { testDb } from "./db";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry.md):
@@ -69,6 +69,10 @@ const { clearPersistedExecutorCooldown } = await import(
   "../src/lib/executor-task/cooldown-store"
 );
 const { parseRateLimitRecoveryMs } = await import("@server/lib/executors");
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry)", () => {
   const app = createTestApp();

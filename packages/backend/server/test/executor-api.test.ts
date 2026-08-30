@@ -8,9 +8,13 @@ import { createTestApp } from "./app";
  * 执行器配置管理 API(ticket: 网页 @executor 发布):
  *  - POST /api/executors 新增配置 + 自动注册 participant(名字唯一,重复 → 409;
  *    token 认证已移除,响应绝不含 token);
- *  - GET /api/executors 返回内置 + DB 全部(不含 token);
- *  - DELETE /api/executors/:key 删除 DB 配置(内置 key → 409);
- *  - 定向消息调度新增执行器:建 task + spawn(与内置执行器同链路)。
+ *  - GET /api/executors 返回 DB 全部(0028 seed 携带旧内置 6 条,不含 token);
+ *  - DELETE /api/executors/:key 删除 DB 配置(无内置禁令,全部可删);
+ *  - PATCH /api/executors/:key 编辑配置(无内置禁令,全部可改);
+ *  - 定向消息调度新增执行器:建 task + spawn(与 DB 配置同链路)。
+ *
+ * fixture:显式插入 6 条旧内置配置(幂等,ON CONFLICT DO NOTHING)——测试不依赖
+ * 「系统自带某个 key」(spec R5)。
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-bin-"));
@@ -32,7 +36,7 @@ chmodSync(fakeBin, 0o755);
 process.env.EXECUTOR_BIN_CLITEST = fakeBin;
 
 import type { DataBase } from "../src/lib/database";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 const app = createTestApp();
 
@@ -46,6 +50,11 @@ async function createExecutor(body: Record<string, unknown>) {
 }
 
 describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
+  beforeAll(async () => {
+    // 显式 fixture:6 条旧内置配置(与 0028 seed 同值,幂等)。
+    await seedBuiltinExecutorConfigs();
+  });
+
   afterAll(() => {
     rmSync(fakeDir, { recursive: true, force: true });
   });
@@ -75,8 +84,8 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(participant.device).toBe("mac-mini");
   });
 
-  it("POST 重复 agentName → 409(内置与 DB 同名都算重复)", async () => {
-    // 与内置执行器重名
+  it("POST 重复 agentName → 409(与 seed/DB 同名都算重复)", async () => {
+    // 与 seed 行(executor 的 agentName)重名
     const dup = await createExecutor({
       agentName: "AtomCode",
       kind: "cli",
@@ -93,37 +102,36 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(dup2.status).toBe(409);
   });
 
-  it("GET /api/executors 返回内置 + 新增,不含 token", async () => {
+  it("GET /api/executors 返回 seed 6 条 + 新增,无 builtin 字段,不含 token", async () => {
     const res = await app.request("/api/executors");
     expect(res.status).toBe(200);
     const list = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(list)).toBe(true);
-    expect(list.length).toBeGreaterThanOrEqual(8); // 7 内置 + 1 新增
+    // 0028 seed 6 条(executor/reasonix/codebuddy/codex/hermes/win-hermes)+ 新增。
+    expect(list.length).toBeGreaterThanOrEqual(7);
 
-    const builtin = list.find((x) => x.key === "executor");
-    expect(builtin).toBeTruthy();
-    expect(builtin!.builtin).toBe(true);
+    // 无 builtin 字段:内置禁令已移除,所有配置都是普通 DB 行。
+    for (const item of list) {
+      expect(item).not.toHaveProperty("builtin");
+    }
 
-    // 内置 reviewer 执行器(§3.12 接线):builtin=true,串行,无 commitMode 字段。
-    const reviewer = list.find((x) => x.key === "reviewer");
-    expect(reviewer).toBeTruthy();
-    expect(reviewer!.builtin).toBe(true);
-    expect(reviewer!.kind).toBe("cli");
-    expect(reviewer!.maxConcurrency).toBe(1);
-    expect(reviewer).not.toHaveProperty("commitMode");
+    const executor = list.find((x) => x.key === "executor");
+    expect(executor).toBeTruthy();
+    expect(executor!.agentName).toBe("AtomCode");
+    // 声明式并发上限:executor 串行。
+    expect(executor!.maxConcurrency).toBe(1);
 
     // win-hermes 默认 memory="per-group"(协调器按群记忆);其他执行器无记忆。
     const winHermes = list.find((x) => x.key === "win-hermes");
     expect(winHermes?.memory).toBe("per-group");
-    expect(builtin!.memory).toBe(null);
-    expect(builtin).not.toHaveProperty("token");
+    expect(executor!.memory).toBe(null);
+    expect(executor).not.toHaveProperty("token");
 
     const codex = list.find((x) => x.key === "codex");
     expect(codex).toMatchObject({
       agentName: "Codex",
       kind: "cli",
       bin: "codex",
-      builtin: true,
       maxConcurrency: 1,
       // --approve-for-me 自带 workspace-write 沙箱,不能再叠 --sandbox;
       // 旧写法的 --ask-for-approval 在 codex-cli 0.149.0 已不存在。
@@ -140,9 +148,11 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       ],
     });
 
+    // 不再有 reviewer 执行器(R3 移除,0028 不 seed)。
+    expect(list.some((x) => x.key === "reviewer")).toBe(false);
+
     const added = list.find((x) => x.key === "cli-tester");
     expect(added).toBeTruthy();
-    expect(added!.builtin).toBe(false);
     expect(added!.kind).toBe("cli");
     expect(added!.args).toEqual(["-y", "-p", "{ticket}"]);
 
@@ -154,33 +164,40 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(JSON.stringify(list)).not.toContain("token_hash");
   });
 
-  it("R1:内置执行器 agentName 均不含角色词(执行器/Executor/检视器/规划)", async () => {
+  it("执行器 agentName 均不含角色词(执行器/Executor/检视器/规划)", async () => {
     const res = await app.request("/api/executors");
     expect(res.status).toBe(200);
-    const list = (await res.json()) as Array<{
-      builtin?: boolean;
-      agentName: string;
-    }>;
-    const builtins = list.filter((x) => x.builtin);
-    expect(builtins.length).toBeGreaterThanOrEqual(7); // 7 内置
-    for (const ex of builtins) {
+    const list = (await res.json()) as Array<{ agentName: string }>;
+    expect(list.length).toBeGreaterThanOrEqual(6);
+    for (const ex of list) {
       expect(ex.agentName).not.toMatch(/执行器|Executor|检视器|规划/);
     }
   });
 
-  it("内置 reviewer 执行器:effectiveExecutors 派生 canDispatch=true(DISPATCH_CAPABLE_KEYS)", async () => {
+  it("effectiveExecutors 返回 seed 的 6 条(无 reviewer;executor/codex maxConcurrency=1)", async () => {
     // GET /api/executors 不透出 canDispatch 字段;直接走 effectiveExecutors
-    // 验证 DISPATCH_CAPABLE_KEYS(["reviewer"]) 在合并时派生 canDispatch: true。
+    // 验证 0028 seed 落库后有效执行器集合包含 6 条 DB 行,reviewer 不在其中。
     const { effectiveExecutors } = await import("../src/lib/executors");
     const all = await effectiveExecutors(testDb as unknown as DataBase);
-    const reviewer = all.find((x) => x.key === "reviewer");
-    expect(reviewer).toBeDefined();
-    expect(reviewer!.agentName).toBe("Reviewer");
-    expect(reviewer!.canDispatch).toBe(true);
-    expect(reviewer).not.toHaveProperty("commitMode");
+    const keys = all.map((x) => x.key);
+    for (const key of [
+      "codebuddy",
+      "codex",
+      "executor",
+      "hermes",
+      "reasonix",
+      "win-hermes",
+    ]) {
+      expect(keys).toContain(key);
+    }
+    const executor = all.find((x) => x.key === "executor");
+    const codex = all.find((x) => x.key === "codex");
+    expect(executor!.maxConcurrency).toBe(1);
+    expect(codex!.maxConcurrency).toBe(1);
+    expect(all.some((x) => x.key === "reviewer")).toBe(false);
   });
 
-  it("DELETE /api/executors/:key 删除 DB 配置;内置 key → 409", async () => {
+  it("DELETE /api/executors/:key 删除 DB 配置(含 seed 行,不再有 409 禁令)", async () => {
     const del = await app.request("/api/executors/cli-tester", {
       method: "DELETE",
     });
@@ -190,10 +207,14 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const list = (await after.json()) as Array<{ key: string }>;
     expect(list.some((x) => x.key === "cli-tester")).toBe(false);
 
-    const delBuiltin = await app.request("/api/executors/executor", {
+    // 内置禁令已移除:seed 行 reasonix 可删除,且真的删除(验收 #4)。
+    const delSeed = await app.request("/api/executors/reasonix", {
       method: "DELETE",
     });
-    expect(delBuiltin.status).toBe(409);
+    expect(delSeed.status).toBe(200);
+    const afterSeed = await app.request("/api/executors");
+    const listSeed = (await afterSeed.json()) as Array<{ key: string }>;
+    expect(listSeed.some((x) => x.key === "reasonix")).toBe(false);
   });
 
   it("DELETE 不存在的 key → 404", async () => {
@@ -402,13 +423,28 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(participant!.device).toBe("mac-pro");
   });
 
-  it("PATCH 内置执行器 → 403", async () => {
+  it("PATCH seed 行(executor)改 args/model → 200 且缓存失效后生效(验收 #3)", async () => {
+    // 内置禁令已移除:seed 行 executor 现在可编辑,不再 403。
     const res = await app.request("/api/executors/executor", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bin: "evil" }),
+      body: JSON.stringify({ model: "gpt-4o" }),
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as Record<string, unknown>;
+    expect(updated.model).toBe("gpt-4o");
+
+    // 缓存失效后 GET /effectiveExecutors 读到新值。
+    const { effectiveExecutors } = await import("../src/lib/executors");
+    const all = await effectiveExecutors(testDb as unknown as DataBase);
+    const executor = all.find((x) => x.key === "executor");
+    expect(executor!.model).toBe("gpt-4o");
+    // 恢复原值,避免影响同文件其他用例。
+    await app.request("/api/executors/executor", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: null }),
+    });
   });
 
   it("PATCH 未知 key → 404", async () => {

@@ -6,9 +6,9 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { and, eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * Group message tree & audience routing (ticket 03): POST/GET messages with
@@ -16,6 +16,10 @@ import { testDb } from "./db";
  * (human sees everything), incremental pull via ?after=, and closure-table
  * tree materialization.
  */
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
+
 describe("群组消息树与受众路由", () => {
   const app = createTestApp();
 

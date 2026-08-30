@@ -12,9 +12,9 @@ import {
 } from "@server/lib/runtime-status";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * 协调任务落终态的完整性校验(R1-R5,specs/coordination-close-integrity.md)。
@@ -31,6 +31,10 @@ type Task = {
   dispatchKind: "requirement" | "fix" | null;
   diffSummary: unknown;
 };
+
+beforeAll(async () => {
+  await seedBuiltinExecutorConfigs();
+});
 
 describe("协调任务落终态完整性校验 (R1-R5)", () => {
   const app = createTestApp();
