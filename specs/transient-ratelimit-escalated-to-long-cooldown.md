@@ -1,8 +1,9 @@
 # Spec: 瞬时限流被升级为 5 小时冷却
 
-> **状态**: Ready for Implementation
-> **版本**: 1.0
-> **日期**: 2026-08-31
+> **状态**: v1.0 Landed(实现 `41fcbcf7`);
+> **v1.1 新增 R7,Ready for Implementation**
+> **版本**: 1.1
+> **日期**: 2026-08-31(v1.1)
 
 ## 1. 现象
 
@@ -164,6 +165,81 @@ transient 冷却进 executorCooldowns
 7. 三处调用点分流口径一致(各有断言)。
 8. 既有 quota 相关测试全绿。
 
+## R7 — 分级必须按「距恢复还有多久」判,不得按措辞判(v1.1 新增)
+
+R1 的判据表把分级挂在**英文措辞**上(`usage limit` / `try again in N seconds`
+/ `resets around HH:MM`)。实现 `41fcbcf7` 逐字照做,L2 逐条对照全绿 ——
+三方都没错,但**这张票在它最可能发生的形态上原封不动**。
+
+### 实证(2026-08-31,拿真实输入实跑落地后的判据)
+
+```
+transient  | [rate-limited] try again in 5 seconds
+exhausted  | usage limit reached, resets around 13:33
+exhausted  | 429 您的使用量已超出频率限制,将在 2026-08-31 18:03:10 重置
+exhausted  | 429 请求过于频繁,请稍后重试            ← 应为 transient
+exhausted  | 429 触发限流,请 10 秒后重试            ← 应为 transient
+transient  | 429 too many requests, retrying in a moment
+exhausted  | 您的额度已用尽
+```
+
+群内三个执行器(AtomCode / CodeBuddy / Pi)的限流回显都是中文。
+它们真正的**瞬时**限流全部落到兜底 `exhausted` → 吃 300 分钟冷却,
+**正是本 spec 要修的那个病**。方向安全(fail-safe),但覆盖为零。
+
+⚠️ 这是**本 spec 自己的账**,不是实现的账:R1 的判据表就是这么写的。
+`quota-exhaustion-triggers-infinite-retry` R1 早写过「不要为每个 CLI 写一套正则」,
+v1.0 违反的是同一条 —— 只不过它写的不是「一个 CLI 一套」,是「一种语言一套」。
+
+### 根因:判据挂在措辞上,而事实是时长
+
+真正决定 transient / exhausted 的事实只有一个:**距离恢复还有多久**。
+措辞只是这个事实的一种表达,而表达随供应方和语言变。v1.0 把**表达**当成了
+**事实**,于是每多一种表达就多一个盲区 —— 这是本轮反复出现的同一个形状。
+
+### 要求
+
+- **R7-a(必须):分级的主轴改为恢复时长,与语言无关。**
+  从命中行提取恢复信息,只分三种结构,不分措辞:
+
+  | 结构 | 例 | 分级 |
+  |---|---|---|
+  | **相对时长**(数字 + 时间单位) | `in 5 seconds` / `10 秒后` / `1 分钟后` | 时长 ≤ `TRANSIENT_RECOVERY_MAX_MS` → `transient`,否则 `exhausted` |
+  | **绝对时刻**(时钟或日期时间) | `resets around 13:33` / `将在 2026-08-31 18:03:10 重置` | 距 now ≤ `TRANSIENT_RECOVERY_MAX_MS` → `transient`,否则 `exhausted` |
+  | **无恢复信息** | `429 请求过于频繁` | 见 R7-b |
+
+  时间单位至少覆盖:`s/sec/secs/second(s)/秒`、`m/min/mins/minute(s)/分/分钟`、
+  `h/hr/hour(s)/小时`。⚠️ 这是**单位表**,不是措辞表 —— 它随语言增长,
+  但不随供应方增长,且每一项都指向同一个可计算的量。
+
+- **R7-b(必须):无恢复信息时,才回落到关键词。**
+  耗尽关键词(`usage limit` / `quota exceeded` / `额度` / `用尽` / `次数限制` 等)
+  命中 → `exhausted`;瞬时动词(`retry` / `backoff` / `重试` / `稍后` / `请求过于频繁`)
+  命中且**无**耗尽关键词 → `transient`;都不命中 → `exhausted`(fail-safe,不变)。
+  ⚠️ 关键词表**必须中英双语**,且**必须**在 spec 与实现里都标注为「兜底,非主轴」。
+
+- **R7-c(必须):耗尽关键词仍先于时长判定。**
+  `usage limit reached, resets around 13:33` 同时含耗尽关键词与绝对时刻 →
+  仍判 `exhausted`(保守方向,v1.0 R1 的既有口径逐字保留)。
+
+- ⚠️ **判定仍收敛在 `classifyQuotaFailure` 单点**,不得新增第二处。
+- ⚠️ **不改** `TRANSIENT_RECOVERY_MAX_MS` 取值、不改 R2 的分流处置、
+  不改 R3/R5/R6,不改 `handleTransientQuotaBackoff`。本条只换分级的判据。
+
+### 验收标准(v1.1)
+
+1. 中文瞬时形态 `429 请求过于频繁,请稍后重试` → `transient`。必测。
+2. 中文相对时长 `429 触发限流,请 10 秒后重试` → `transient`;
+   `请 10 分钟后重试` → `exhausted`。必测(同一结构、跨越阈值的两侧)。
+3. 中文绝对时刻 `429 您的使用量已超出频率限制,将在 <明日某时> 重置` → `exhausted`。必测。
+4. v1.0 的全部英文用例**逐字回归**:`try again in 5 seconds` → `transient`;
+   `usage limit reached, resets around 13:33` → `exhausted`(R7-c);
+   `429 too many requests, retrying in a moment` → `transient`。必测。
+5. 无恢复信息、无任何关键词 → `exhausted`(fail-safe 回归)。必测。
+6. 验收 1–5 必须以**表驱动**形式落成一张用例表,新增一种语言/单位时
+   只加行不改判定逻辑 —— 这是本条能否防住下一次盲区的判据。
+
+
 ## 6. 不涉及的改动
 
 - 不做下发前配额预检(提案 P2-2,依赖本 spec 的 `quotaKind` 留痕,另立)。
@@ -175,3 +251,11 @@ transient 冷却进 executorCooldowns
 - 配置缺省即新行为;删除两个配置键 → 回落 exhausted 语义(等价于现状)。
 - `quotaKind` 是 `diffSummary` 附加键,不影响既有消费方。
 - 无 schema 变更、无迁移。
+
+## 8. 修订记录
+
+- **v1.1(2026-08-31)**:新增 R7。起因:v1.0 落地(`41fcbcf7`)后,拿真实输入
+  实跑落地的判据,发现分级只认英文措辞 —— 群内三个中文执行器的瞬时限流
+  全部落到兜底 `exhausted`,本 spec 要修的病在它最可能发生的形态上原封不动。
+  这是 spec R1 判据表自身的缺陷,实现逐字照做无过,L2 对着验收标准也查不出
+  (验收标准同样只写了英文用例)。R7 把分级主轴从**措辞**换成**恢复时长**。
