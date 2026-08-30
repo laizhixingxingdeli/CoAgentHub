@@ -61,7 +61,7 @@ const {
   consumePendingCompletionEvents,
   maybeCreateCoordinatorResumeTask,
 } = await import("../src/lib/executor-task");
-const { buildSupersededEchoSection } = await import(
+const { buildSupersededEchoSection, buildDiffSummaryEcho } = await import(
   "../src/lib/executor-task/coordinator-resume"
 );
 
@@ -602,6 +602,177 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(brief).toContain("## 全部子任务");
       expect(brief).toContain("## 操作");
       expect(brief).toContain("PATCH 父任务为 done");
+    });
+  });
+
+  describe.sequential("子任务 diffSummary 回显有界(specs/resume-brief-echoes-unbounded-diffsummary.md)", () => {
+    /** spec R1 建议的上限,与 MAX_RESUME_DS_ECHO_LENGTH 对齐。 */
+    const ECHO_LIMIT = 2000;
+    /** 省略提示的固定文案开销上界(省略字符数 + 明细 API 路径)。 */
+    const NOTICE_OVERHEAD = 200;
+    /** 纯函数用例用的占位 task id(不落库)。 */
+    const childEchoTaskId = "task-echo-1";
+
+    /** L2 检视真正要的信息:执行器五段汇报,全部在输出末尾。 */
+    const TAIL_REPORT = [
+      "提交: 0123456789abcdef0123456789abcdef01234567",
+      "测试: 12 passed / 0 failed",
+      "Token: 123456",
+      "汇报: 已限制 diffSummary 回显体积",
+      "遗留: 无",
+    ].join("\n");
+
+    /** 构造 spec §1 实测规模(111K)的 outputTail:过程输出在前,汇报在末尾。 */
+    function bigOutputTail(total = 111_106): string {
+      const filler = "#".repeat(Math.max(0, total - TAIL_REPORT.length - 1));
+      return `${filler}\n${TAIL_REPORT}`;
+    }
+
+    /** 从任务书正文取出 `- diffSummary: ` 后的 JSON 并解析回对象。 */
+    function echoFromBrief(brief: string): Record<string, unknown> {
+      const line = brief
+        .split("\n")
+        .find((l) => l.startsWith("- diffSummary: "));
+      expect(line).toBeDefined();
+      return JSON.parse(
+        (line as string).slice("- diffSummary: ".length),
+      ) as Record<string, unknown>;
+    }
+
+    it("超长 outputTail 保尾截断:末尾逐字保留、其余键原样、回显体积有界", async () => {
+      const outputTail = bigOutputTail();
+      const { parent, child } = await seedParentChild({
+        childDiffSummary: {
+          summary: "子任务完成",
+          outputTail,
+          tests: ["a"],
+        },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const brief = (await resumeTasksFor(parent.id))[0].brief ?? "";
+
+      // 回显体积有界:111K outputTail 不再整体进任务书。
+      expect(brief.length).toBeLessThan(6_000);
+
+      const echo = echoFromBrief(brief);
+      const tail = echo.outputTail;
+      expect(typeof tail).toBe("string");
+      expect((tail as string).length).toBeLessThanOrEqual(
+        ECHO_LIMIT + NOTICE_OVERHEAD,
+      );
+      // 保尾:末尾 N 字符逐字保留(防 slice(0,N) 的唯一闸门)。
+      expect((tail as string).endsWith(TAIL_REPORT)).toBe(true);
+      // R1:其余键原样保留(summary / tests 等 L2 依据)。
+      expect(echo.summary).toBe("子任务完成");
+      expect(echo.tests).toEqual(["a"]);
+    });
+
+    it("保尾方向必测:输出末尾的五段汇报在回显中可见(提交/测试/Token/汇报/遗留)", async () => {
+      const { parent, child } = await seedParentChild({
+        childDiffSummary: { outputTail: bigOutputTail() },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const brief = (await resumeTasksFor(parent.id))[0].brief ?? "";
+      const tail = echoFromBrief(brief).outputTail as string;
+
+      expect(tail).toContain("提交: 0123456789abcdef0123456789abcdef01234567");
+      expect(tail).toContain("测试: 12 passed / 0 failed");
+      expect(tail).toContain("Token: 123456");
+      expect(tail).toContain("汇报: 已限制 diffSummary 回显体积");
+      expect(tail).toContain("遗留: 无");
+    });
+
+    it("截断提示含准确省略字符数与明细 API 取回路径(禁止静默截断)", async () => {
+      const outputTail = bigOutputTail();
+      const { parent, child } = await seedParentChild({
+        childDiffSummary: { outputTail },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const brief = (await resumeTasksFor(parent.id))[0].brief ?? "";
+      const tail = echoFromBrief(brief).outputTail as string;
+
+      expect(tail).toContain(`前 ${outputTail.length - ECHO_LIMIT} 字符省略`);
+      expect(tail).toContain(
+        `GET /api/groups/${parent.groupId}/tasks/${child.id}/output?detail=1`,
+      );
+    });
+
+    it("未超上限的 outputTail 逐字不变(小任务零行为变化)", async () => {
+      const diffSummary = {
+        summary: "子任务完成",
+        outputTail: "line-1\nline-2\nline-3",
+        tests: ["a", "b"],
+      };
+      // 与旧版 JSON.stringify 完全一致。
+      expect(
+        buildDiffSummaryEcho({
+          id: childEchoTaskId,
+          groupId: "g-echo",
+          diffSummary,
+        }),
+      ).toBe(JSON.stringify(diffSummary));
+
+      const { parent, child } = await seedParentChild({
+        childDiffSummary: diffSummary,
+      });
+      // jsonb 不保留键序,期望值取库内实际读回的对象来比。
+      const stored = await findTask(child.id);
+      const expected = JSON.stringify(stored.diffSummary);
+      expect(buildDiffSummaryEcho(stored)).toBe(expected);
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      const brief = (await resumeTasksFor(parent.id))[0].brief ?? "";
+      // 任务书正文里出现的仍是完整 JSON,不含省略提示。
+      expect(brief).toContain(`- diffSummary: ${expected}`);
+      expect(brief).not.toContain("字符省略");
+    });
+
+    it("outputTail 缺失 / 非字符串 / diffSummary 为 null 时不报错,行为与旧版一致", () => {
+      // diffSummary 为 null → 「无」。
+      expect(
+        buildDiffSummaryEcho({
+          id: childEchoTaskId,
+          groupId: "g-echo",
+          diffSummary: null,
+        }),
+      ).toBe("无");
+      // outputTail 非字符串 → 不截断,原样 stringify。
+      const nonString = { summary: "x", outputTail: 12345 };
+      expect(
+        buildDiffSummaryEcho({
+          id: childEchoTaskId,
+          groupId: "g-echo",
+          diffSummary: nonString,
+        }),
+      ).toBe(JSON.stringify(nonString));
+      // outputTail 缺失 → 不截断,原样 stringify。
+      const missing = { summary: "x" };
+      expect(
+        buildDiffSummaryEcho({
+          id: childEchoTaskId,
+          groupId: "g-echo",
+          diffSummary: missing,
+        }),
+      ).toBe(JSON.stringify(missing));
+    });
+
+    it("只改任务书文本:DB 中 diff_summary 本体(含完整 outputTail)不受影响", async () => {
+      const outputTail = bigOutputTail();
+      const { parent, child } = await seedParentChild({
+        childDiffSummary: { summary: "子任务完成", outputTail },
+      });
+
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      // 任务书已生成(回显被截断)。
+      expect((await resumeTasksFor(parent.id))[0].brief).toContain("字符省略");
+
+      const after = await findTask(child.id);
+      const stored = after.diffSummary as Record<string, unknown>;
+      expect(stored.outputTail).toBe(outputTail);
+      expect(stored.summary).toBe("子任务完成");
     });
   });
 

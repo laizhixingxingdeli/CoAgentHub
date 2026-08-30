@@ -223,6 +223,51 @@ function extractTaskSections(brief: string | null): {
 /** 被替代任务回显长度上限,防止任务书体积失控。 */
 const MAX_SUPERSEDED_ECHO_LENGTH = 4000;
 
+/**
+ * 子任务 diffSummary.outputTail 回显长度上限。取值小于
+ * MAX_SUPERSEDED_ECHO_LENGTH:outputTail 全文在 DB 与明细 API 里都取得到,
+ * 本处不是唯一信息源。
+ *
+ * 方向必须是**保尾**(`slice(-N)`):outputTail 是执行器输出的末尾若干行,
+ * 而 L2 检视真正要的五段汇报(提交/测试/Token/汇报/遗留)、失败原因、额度报错
+ * 全在末尾 —— 保头(`slice(0, N)`)会恰好切掉最值钱的部分。
+ * (specs/resume-brief-echoes-unbounded-diffsummary.md R1/R2)
+ */
+const MAX_RESUME_DS_ECHO_LENGTH = 2000;
+
+/**
+ * 子任务 diffSummary 的任务书回显文本:除 `outputTail` 超限被保尾截断外,
+ * 其余键原样保留(它们都是 KB 级以内,且正是 L2 检视的依据)。
+ *
+ * 非对象(含 null / undefined)→ 回退到与旧版一致的「无」;outputTail 缺失或
+ * 非字符串 → 不截断。只影响任务书正文,不触碰 DB 中的 diff_summary 本体。
+ */
+export function buildDiffSummaryEcho(
+  childTask: Pick<Task, "id" | "groupId" | "diffSummary">,
+): string {
+  const raw = childTask.diffSummary;
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    return "无";
+  }
+
+  const summary = raw as Record<string, unknown>;
+  const outputTail = summary.outputTail;
+  if (
+    typeof outputTail !== "string" ||
+    outputTail.length <= MAX_RESUME_DS_ECHO_LENGTH
+  ) {
+    return JSON.stringify(raw);
+  }
+
+  // 静默截断是被禁止的降级:必须写明省略了多少字符 + 全文取回路径。
+  const omitted = outputTail.length - MAX_RESUME_DS_ECHO_LENGTH;
+  const notice = `…(前 ${omitted} 字符省略;完整明细:GET /api/groups/${childTask.groupId}/tasks/${childTask.id}/output?detail=1)`;
+  return JSON.stringify({
+    ...summary,
+    outputTail: `${notice}\n${outputTail.slice(-MAX_RESUME_DS_ECHO_LENGTH)}`,
+  });
+}
+
 /** 计算尝试链与当前尝试次数。 */
 function computeAttemptChain(
   childTask: Task,
@@ -316,12 +361,7 @@ function buildResumeBrief(
   supersededTask?: Task | null,
 ): string {
   const { chain, attempt } = computeAttemptChain(childTask, children);
-  const diffSummary =
-    childTask.diffSummary !== null &&
-    childTask.diffSummary !== undefined &&
-    typeof childTask.diffSummary === "object"
-      ? JSON.stringify(childTask.diffSummary)
-      : "无";
+  const diffSummary = buildDiffSummaryEcho(childTask);
   const childrenLines = children
     .map((child) => `- ${child.id}: ${child.status}`)
     .join("\n");
