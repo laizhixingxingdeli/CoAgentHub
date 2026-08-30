@@ -24,7 +24,7 @@ export {
 export { createAnsiStripper, stripAnsi } from "./ansi";
 export {
   consumePendingCompletionEvents,
-  hasNonTerminalChildTask,
+  hasExemptingChildTask,
   hasPendingResumeEvent,
   inferSupersedesTaskId,
   isResumeTask,

@@ -13,7 +13,10 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
-import { findExecutorByParticipant } from "@server/lib/executors";
+import {
+  findExecutorByKey,
+  findExecutorByParticipant,
+} from "@server/lib/executors";
 import { and, asc, eq, inArray, isNull, lte, or } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
 import { isTerminalTaskStatus } from "../coordination-activity";
@@ -23,6 +26,7 @@ import {
   isCoordinatorTask,
   isExecutorProcessAlive,
 } from "./queue";
+import { isInCooldown, runningExecutorCount } from "./state";
 import type { GroupPromptInfo } from "./types";
 
 type Task = typeof taskTable.$inferSelect;
@@ -39,11 +43,17 @@ const RESUME_FOR_CHILD_KEY = "resumeForChild";
 const NON_TERMINAL_TASK_STATUSES = ["queued", "running"] as const;
 
 /**
- * 父任务名下是否存在非终态执行子任务(孤儿收敛豁免的同源判定):
- * parentTaskId = 父任务 && status ∈ 非终态集合。协调者根任务派完子任务退出后,
- * 只要还有子任务在跑就不应被孤儿收敛判死,等子任务终态触发续跑。
+ * 父任务名下是否存在「当前构成孤儿收敛豁免」的执行子任务(R2,
+ * specs/executor-availability-visibility-and-queued-child-pinning.md):
+ *  - running 子任务 → 豁免(子任务仍在干活,本机制存在的理由,逐字不变);
+ *  - queued 且从未启动(executor_pid 必为空)的子任务 → 仅当其执行器当前可派发
+ *    (不在额度冷却且未达并发上限,复用 isInCooldown / runningExecutorCount /
+ *    maxConcurrency,与 pumpQueue 的 isRunDispatchable 前两条同口径)才豁免 ——
+ *    否则排队子任务并不在干活,不构成豁免,父协调者按普通孤儿收敛处理。
+ * 协调者根任务派完子任务退出后,只要还有「在跑或马上会启动」的子任务就不应被
+ * 孤儿收敛判死,等子任务终态触发续跑。
  */
-export async function hasNonTerminalChildTask(
+export async function hasExemptingChildTask(
   db: DataBase,
   parentTaskId: string,
 ): Promise<boolean> {
@@ -52,10 +62,34 @@ export async function hasNonTerminalChildTask(
       eq(taskTable.parentTaskId, parentTaskId),
       inArray(taskTable.status, [...NON_TERMINAL_TASK_STATUSES]),
     ),
-    columns: { id: true },
-    limit: 1,
+    columns: { id: true, status: true, executorKey: true },
   });
-  return rows.length > 0;
+  for (const child of rows) {
+    if (child.status === "running") return true;
+    if (await isQueuedChildExecutorDispatchable(db, child.executorKey)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * queued 子任务的执行器当前是否可派发:不在额度冷却且未达并发上限
+ * (复用 isInCooldown / runningExecutorCount / 执行器声明的 maxConcurrency,
+ * 与 pumpQueue 的 isRunDispatchable 前两条同口径,不另写一套可用性判定)。
+ * executorKey 缺失或查无配置 → 不可派发(该子任务永远无法启动,不构成豁免)。
+ */
+async function isQueuedChildExecutorDispatchable(
+  db: DataBase,
+  executorKey: string | null,
+): Promise<boolean> {
+  if (!executorKey) return false;
+  const ex = await findExecutorByKey(db, executorKey);
+  if (!ex) return false;
+  if (isInCooldown(ex)) return false;
+  const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
+  if (runningExecutorCount(ex.key) >= cap) return false;
+  return true;
 }
 
 /**
@@ -68,13 +102,13 @@ export async function hasNonTerminalChildTask(
  * pending —— 这正是 consumePendingCompletionEvents 下一个周期会消费并创建
  * 续跑的窗口,期间父协调任务不得被孤儿收敛判死。事件被消费(续跑创建、事件置
  * delivered)后本判定自然失效,续跑任务作为新的非终态子任务由
- * hasNonTerminalChildTask 接续豁免。
+ * hasExemptingChildTask 接续豁免。
  *
  * 终止性(R2/R3,防回归死锁):续跑任务自身的完成事件不计入等待续跑 —— 它的
  * 终态会被 R4 防环跳过、事件永久 pending,若计入会把「子任务(含续跑)全部
  * 终态、协调者仍未回来」的父任务永久豁免。其余不可能出现「pending 事件永不
  * 产生续跑」的组合:父任务终态/执行器存活/非协调者都不是孤儿收敛的候选,唯一
- * 的 R3 去重(已存在非终态续跑)由 hasNonTerminalChildTask 先行豁免,续跑终态
+ * 的 R3 去重(已存在非终态续跑)由 hasExemptingChildTask 先行豁免,续跑终态
  * 后该 pending 事件重新可消费。
  */
 export async function hasPendingResumeEvent(

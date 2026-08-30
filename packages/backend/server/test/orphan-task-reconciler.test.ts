@@ -15,6 +15,7 @@ import {
   consumePendingCompletionEvents,
 } from "../src/lib/executor-task";
 import { appendTaskOutput } from "../src/lib/executor-task/output-buffer";
+import { enterCooldown } from "../src/lib/executor-task/queue";
 import { cooldownEndMs, getRateLimitCooldownMs, isInCooldown } from "../src/lib/executor-task/state";
 import {
   reconcileOrphanTasks,
@@ -519,7 +520,7 @@ describe("孤儿任务周期收敛", () => {
     expect((await findTask(child.id))?.status).toBe("running");
   });
 
-  it("协调者任务名下子任务处于 queued → 同样豁免收敛", async () => {
+  it("协调者任务名下 queued 子任务执行器可派发(未冷却、未达并发上限)→ 仍豁免收敛(R2)", async () => {
     const coordinator = await registerParticipant({ name: "orc-wait-c" });
     const group = await createGroup(coordinator.id, "孤儿收敛-待续跑queued");
     const parent = await insertTaskRow({
@@ -528,16 +529,55 @@ describe("孤儿任务周期收敛", () => {
       executorPid: deadPid(),
     });
     const executor = await registerParticipant({ name: "orc-wait-d" });
-    await insertTaskRow({
+    const child = await insertTaskRow({
       groupId: group.id,
       executorParticipantId: executor.id,
+      executorKey: "codebuddy",
       parentTaskId: parent.id,
       status: "queued",
       executorPid: null,
     });
 
+    // queued 子任务执行器可派发(不在冷却、未达并发上限)→ 该子任务马上就会
+    // 启动,父协调者仍豁免收敛,pid 消失不判死。
     expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
     expect((await findTask(parent.id))?.status).toBe("running");
+    expect((await findTask(child.id))?.status).toBe("queued");
+  });
+
+  it("queued 子任务执行器冷却中(不可派发)→ 不豁免:父协调者收敛为 failed,子任务仍 queued(R2)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-cd-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-queued冷却");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-cd-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      executorKey: "codebuddy",
+      parentTaskId: parent.id,
+      status: "queued",
+      executorPid: null,
+    });
+    // 执行器进入冷却(与既有 enterCooldown 同源登记,isInCooldown 可读到)。
+    enterCooldown(
+      { key: "codebuddy", label: "codebuddy" },
+      Date.now() + 60_000,
+    );
+
+    // 排队子任务不在干活且执行器不可派发 → 不构成豁免,父协调者按普通孤儿
+    // 收敛处理(pid 已消失 → 判死并留痕);子任务不被连带改状态,仍 queued。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const parentRow = await findTask(parent.id);
+    expect(parentRow?.status).toBe("failed");
+    const summary = parentRow?.diffSummary as Record<string, unknown>;
+    expect(summary.reconciledReason).toBe(
+      `executor pid ${parent.executorPid} no longer exists`,
+    );
+    expect((await findTask(child.id))?.status).toBe("queued");
   });
 
   it("协调者任务无任何子任务 + pid 消失 → 照常收敛为 failed(R2 防回归死锁)", async () => {
@@ -698,6 +738,14 @@ describe("孤儿任务周期收敛", () => {
     expect(
       (resumes[0].diffSummary as Record<string, unknown>).platform,
     ).toMatchObject({ resumeOf: parent.id });
+
+    // 平台泵送已把续跑派发给协调者执行器(生产中秒级拉起)→ 模拟其为 running
+    // 且 pid 存活;R2 口径下「queued 且从未启动」不构成豁免,这里必须以真实
+    // 运行态验证「续跑期间父任务不被误杀」。
+    await testDb
+      .update(taskTable)
+      .set({ status: "running", executorPid: process.pid })
+      .where(eq(taskTable.id, resumes[0].id));
 
     // 3) 续跑期间父任务仍非终态,再收敛一轮也不误杀(续跑为非终态子任务)。
     expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
