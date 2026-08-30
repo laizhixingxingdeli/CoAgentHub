@@ -137,8 +137,9 @@ export interface QuotaFailureVerdict {
 export const TRANSIENT_RECOVERY_MAX_MS = 60_000;
 
 /**
- * 额度耗尽语义(命中任一即 exhausted,且**先于** transient 判定 —— 同时命中
- * 按 exhausted 处理,保守方向)。
+ * 额度耗尽关键词(兜底表,非分级主轴 —— R7-b:无恢复信息时才回落;中英双语)。
+ * 命中任一即 exhausted,且**先于**时长判定(R7-c:同时命中按 exhausted,保守)。
+ * spec R7-b:usage limit / quota exceeded / 额度 / 用尽 / 次数限制 等。
  */
 const EXHAUSTED_QUOTA_SHAPES: ReadonlyArray<RegExp> = [
   /\busage limit(?:ed)?\b/i,
@@ -147,38 +148,90 @@ const EXHAUSTED_QUOTA_SHAPES: ReadonlyArray<RegExp> = [
   /\blimit reached\b/i,
   /额度/,
   /次数限制/,
+  /用尽/,
 ];
 
-/** 绝对恢复时刻(`resets around HH:MM` / `try again at HH:MM`)→ 窗口耗尽。 */
-const ABSOLUTE_RECOVERY_RE =
-  /\bresets?\s*around\s+\d{1,2}:\d{2}\b|\btry again at\s+\d{1,2}:\d{2}/i;
+/**
+ * R7-a 相对时长单位表(倍率 ms):这是**单位表不是措辞表** —— 它随语言增长,
+ * 不随供应方增长,且每一项都指向同一个可计算的量。单位至少覆盖
+ * s/sec/secs/second(s)/秒、m/min/mins/minute(s)/分/分钟、h/hr/hour(s)/小时。
+ */
+const RELATIVE_RECOVERY_UNITS_MS: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\b(\d+)\s*(?:sec(?:ond)?s?|s)\b/i, 1_000],
+  [/\b(\d+)\s*(?:min(?:ute)?s?|m)\b/i, 60_000],
+  [/\b(\d+)\s*(?:hours?|hrs?|h)\b/i, 3_600_000],
+  [/(\d+)\s*(?:分钟|分)/, 60_000],
+  [/(\d+)\s*秒/, 1_000],
+  [/(\d+)\s*小时/, 3_600_000],
+];
 
-/** 相对恢复时长(`try again in N seconds/minutes`)→ 供应方要求的短退避。 */
-const RELATIVE_RECOVERY_RE = /\btry again in\s+(\d+)\s*(seconds?|minutes?)\b/i;
-
-/** 瞬时退避动词:429 与 retry/backoff 类动词同时出现(且无耗尽关键词)→ 瞬时。 */
-const TRANSIENT_RETRY_VERB_RE =
-  /\b(?:retry|retrying|retried|backoff|back(?:ing)? off)\b/i;
+/** R7-a 中文绝对时刻(`将在 2026-08-31 18:03:10 重置`):按本地时区解析,与
+ *  parseRateLimitRecoveryMs 的时钟解析同一口径。 */
+const CN_ABSOLUTE_DATETIME_RE =
+  /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/;
 
 /**
- * 额度失败分级(单点判定,调用方只读 kind):先 exhausted 后 transient;两者都
- * 不命中但确属额度(已有结构证据)→ 回落 exhausted(fail-safe:宁可长冷却也
- * 不要无限退避)。
+ * R7-b 兜底:瞬时动词(无恢复信息时回落;标注:兜底,非分级主轴)。中英双语:
+ * retry/backoff、重试/稍后/请求过于频繁。
  */
-function classifyQuotaKind(line: string): QuotaFailureKind {
+const TRANSIENT_RETRY_VERB_RE =
+  /\b(?:retry|retrying|retried|backoff|back(?:ing)? off)\b|重试|稍后|过于频繁/i;
+
+/**
+ * R7-a 恢复时长提取(分级主轴,与语言无关):从命中行提取恢复信息,只分三种
+ * 结构 —— 相对时长(数字+时间单位)/ 绝对时刻(时钟或日期时间)/ 无恢复信息。
+ * 返回「距 now 的毫秒数」,>0 为未来;无恢复信息返回 null。绝对时刻优先复用
+ * parseRateLimitRecoveryMs 的时钟解析(不改其解析规则,R6),中文日期时间在此
+ * 独立解析;恢复时刻已过去 → 负值,由调用方按 exhausted 处理(R3:垃圾解析 →
+ * 回退固定冷却)。
+ */
+function recoveryDistanceMs(line: string, nowMs: number): number | null {
+  for (const [unitRe, unitMs] of RELATIVE_RECOVERY_UNITS_MS) {
+    const m = unitRe.exec(line);
+    if (m) return Number(m[1]) * unitMs;
+  }
+  const clockTs = parseRateLimitRecoveryMs(line, nowMs);
+  if (clockTs !== null) return clockTs - nowMs;
+  const dt = CN_ABSOLUTE_DATETIME_RE.exec(line);
+  if (dt) {
+    const ts = new Date(
+      Number(dt[1]),
+      Number(dt[2]) - 1,
+      Number(dt[3]),
+      Number(dt[4]),
+      Number(dt[5]),
+      dt[6] ? Number(dt[6]) : 0,
+      0,
+    ).getTime();
+    return ts - nowMs;
+  }
+  return null;
+}
+
+/**
+ * 额度失败分级(单点判定,调用方只读 kind)。
+ *
+ * 主轴(R7-a):恢复时长 —— 相对时长/绝对时刻距 now ≤ TRANSIENT_RECOVERY_MAX_MS
+ * → transient,超过 → exhausted(与语言无关)。
+ * 兜底(R7-b,非主轴):无恢复信息时才回落关键词 —— 耗尽关键词 → exhausted;
+ * 瞬时动词且无耗尽关键词 → transient;都不命中 → exhausted(fail-safe)。
+ * 优先级(R7-c):耗尽关键词先于时长判定(同时命中按 exhausted,保守,v1.0 口径)。
+ */
+function classifyQuotaKind(
+  line: string,
+  nowMs: number = Date.now(),
+): QuotaFailureKind {
   const normalized = line.toLowerCase().replace(/-/g, " ");
   if (EXHAUSTED_QUOTA_SHAPES.some((re) => re.test(normalized))) {
     return "exhausted";
   }
-  if (ABSOLUTE_RECOVERY_RE.test(normalized)) return "exhausted";
-  const relative = RELATIVE_RECOVERY_RE.exec(normalized);
-  if (relative) {
-    const unitMs = relative[2].startsWith("minute") ? 60_000 : 1_000;
-    return Number(relative[1]) * unitMs <= TRANSIENT_RECOVERY_MAX_MS
+  const recoveryMs = recoveryDistanceMs(line, nowMs);
+  if (recoveryMs !== null) {
+    return recoveryMs > 0 && recoveryMs <= TRANSIENT_RECOVERY_MAX_MS
       ? "transient"
       : "exhausted";
   }
-  if (/\b429\b/.test(normalized) && TRANSIENT_RETRY_VERB_RE.test(normalized)) {
+  if (TRANSIENT_RETRY_VERB_RE.test(normalized)) {
     return "transient";
   }
   return "exhausted";

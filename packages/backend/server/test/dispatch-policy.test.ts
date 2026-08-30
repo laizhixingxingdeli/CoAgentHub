@@ -543,6 +543,75 @@ describe("classifyQuotaFailure:额度分级 transient/exhausted", () => {
 });
 
 /**
+ * R7 分级按恢复时长(spec v1.1):分级主轴从**措辞**换成**恢复时长** ——
+ * 相对时长(数字+时间单位)/ 绝对时刻(时钟或日期时间)距 now ≤
+ * TRANSIENT_RECOVERY_MAX_MS → transient,超过 → exhausted;无恢复信息才回落
+ * 关键词兜底(中英双语,标注兜底)。验收 1–5 与单位表落成同一张表驱动用例表,
+ * 新增一种语言/单位时只加行不改判定逻辑。
+ */
+describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", () => {
+  it("验收 1–5 + 单位表 + 关键词优先级,同一张表驱动用例表", () => {
+    useRealPatterns();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 30)); // 本地 20:00:30
+    try {
+      const cases: ReadonlyArray<{
+        line: string;
+        exitCode: number;
+        kind: "transient" | "exhausted";
+        note: string;
+      }> = [
+        // 验收 1:中文无恢复信息瞬时形态(兜底瞬时动词)。
+        { line: "429 请求过于频繁,请稍后重试", exitCode: 0, kind: "transient", note: "验收1 中文瞬时形态(无恢复信息→兜底动词)" },
+        // 验收 2:中文相对时长跨阈值两侧(同一结构,只差单位)。
+        { line: "429 触发限流,请 10 秒后重试", exitCode: 0, kind: "transient", note: "验收2 10秒 ≤ 60s" },
+        { line: "429 触发限流,请 10 分钟后重试", exitCode: 0, kind: "exhausted", note: "验收2 10分钟 > 60s" },
+        // 验收 3:中文绝对时刻(明日)→ exhausted。
+        { line: "429 您的使用量已超出频率限制,将在 2026-07-30 18:03:10 重置", exitCode: 0, kind: "exhausted", note: "验收3 中文绝对时刻(明日,距 now > 60s)" },
+        // 验收 4:v1.0 英文用例逐字回归。
+        { line: "[rate-limited] try again in 5 seconds", exitCode: 1, kind: "transient", note: "验收4 英文相对时长" },
+        { line: "usage limit reached, resets around 13:33", exitCode: 1, kind: "exhausted", note: "验收4/R7-c 耗尽关键词先于绝对时刻" },
+        { line: "429 too many requests, retrying in a moment", exitCode: 0, kind: "transient", note: "验收4 英文瞬时动词兜底" },
+        // 验收 5:无恢复信息、无任何关键词 → exhausted(fail-safe)。
+        { line: "error: rate limit exceeded", exitCode: 1, kind: "exhausted", note: "验收5 fail-safe" },
+        // 单位表:s/sec/secs/second(s)/秒 → 短 → transient。
+        { line: "[rate-limited] try again in 5 s", exitCode: 1, kind: "transient", note: "单位 s" },
+        { line: "[rate-limited] try again in 5 sec", exitCode: 1, kind: "transient", note: "单位 sec" },
+        { line: "[rate-limited] try again in 5 secs", exitCode: 1, kind: "transient", note: "单位 secs" },
+        { line: "[rate-limited] try again in 5 second", exitCode: 1, kind: "transient", note: "单位 second" },
+        { line: "[rate-limited] try again in 5 seconds", exitCode: 1, kind: "transient", note: "单位 seconds" },
+        { line: "429 触发限流,请 30 秒后重试", exitCode: 0, kind: "transient", note: "单位 秒" },
+        // 单位表:m/min/mins/minute(s)/分/分钟 → 5 分钟 > 60s → exhausted。
+        { line: "[rate-limited] try again in 5 m", exitCode: 1, kind: "exhausted", note: "单位 m" },
+        { line: "[rate-limited] try again in 5 min", exitCode: 1, kind: "exhausted", note: "单位 min" },
+        { line: "[rate-limited] try again in 5 mins", exitCode: 1, kind: "exhausted", note: "单位 mins" },
+        { line: "[rate-limited] try again in 5 minute", exitCode: 1, kind: "exhausted", note: "单位 minute" },
+        { line: "[rate-limited] try again in 5 minutes", exitCode: 1, kind: "exhausted", note: "单位 minutes" },
+        { line: "429 触发限流,请 5 分后重试", exitCode: 0, kind: "exhausted", note: "单位 分" },
+        { line: "429 触发限流,请 5 分钟后重试", exitCode: 0, kind: "exhausted", note: "单位 分钟" },
+        // 单位表:h/hr/hour(s)/小时 → exhausted。
+        { line: "[rate-limited] try again in 1 h", exitCode: 1, kind: "exhausted", note: "单位 h" },
+        { line: "[rate-limited] try again in 1 hr", exitCode: 1, kind: "exhausted", note: "单位 hr" },
+        { line: "[rate-limited] try again in 1 hour", exitCode: 1, kind: "exhausted", note: "单位 hour" },
+        { line: "[rate-limited] try again in 1 hours", exitCode: 1, kind: "exhausted", note: "单位 hours" },
+        { line: "429 触发限流,请 1 小时后重试", exitCode: 0, kind: "exhausted", note: "单位 小时" },
+        // R7-c:耗尽关键词先于时长判定(短相对时长 + 耗尽关键词 → exhausted)。
+        { line: "[rate-limited] usage limit reached, try again in 5 seconds", exitCode: 1, kind: "exhausted", note: "R7-c 耗尽关键词先于短时长" },
+        // R7-a:绝对时刻距 now ≤ 60s → transient(时钟形态,距 now 30s)。
+        { line: "[rate-limited] try again at 20:01", exitCode: 1, kind: "transient", note: "R7-a 绝对时刻距 now ≤ 60s" },
+      ];
+      for (const c of cases) {
+        const verdict = classifyQuotaFailure([c.line], { exitCode: c.exitCode });
+        expect(verdict.isQuota, `isQuota(${c.line})`).toBe(true);
+        expect(verdict.kind, `kind(${c.line}) — ${c.note}`).toBe(c.kind);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
  * 瞬时限流配置(spec R5 / §7):两个键缺失或非法 → null → 不启用瞬时处置,
  * 调用方回落 exhausted 语义(fail-safe:宁可长冷却也不要无限退避)。
  */
