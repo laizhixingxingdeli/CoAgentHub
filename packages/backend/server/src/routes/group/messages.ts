@@ -159,8 +159,9 @@ app
             .optional(),
           // callback 路由信息(Part B):可选,仅允许 { platform?, endpointRef?,
           // sessionRef? } 三个短字符串(≤200 字符),不得存 URL/token/命令/secret。
-          // 仅 coordinator/human 非执行器发送者可携带(与 dispatcherSessionId
-          // 同规则)。三个字段都缺省 = 无 callback,归一为 null。
+          // 仅群内角色命中 DISPATCH_ALLOWED_ROLES 的发送者可携带
+          // (与 dispatcherSessionId 同规则)。三个字段都缺省 = 无 callback,
+          // 归一为 null。
           // strict():未知字段/嵌套对象直接拒绝(400),不允许静默剥离 ——
           // 未知字段可能是试图夹带 URL/凭据的旁路。
           callback: z

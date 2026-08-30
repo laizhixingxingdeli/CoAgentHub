@@ -31,8 +31,8 @@ export interface DispatchExecutorInput {
   body: string;
   /** 任务下发者(Part A):消息发送者 participant(服务端识别,请求体不可伪造)。 */
   dispatcherParticipantId: string;
-  /** 任务下发会话(Part A):仅 coordinator/human 且非执行器发送者携带的
-   *  metadata.dispatcherSessionId;否则为 null。绝不从 body 解析。 */
+  /** 任务下发会话(Part A):仅群内角色命中 DISPATCH_ALLOWED_ROLES
+   *  的发送者携带的 metadata.dispatcherSessionId;否则为 null。绝不从 body 解析。 */
   dispatcherSessionId: string | null;
   /** 调用方主动提供的目标选择理由;未提供时审计记录为 null。 */
   selectionReason?: string | null;

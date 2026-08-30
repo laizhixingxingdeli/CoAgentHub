@@ -883,8 +883,9 @@ async function dispatchTask(
       dispatchKind,
       // 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试(null = 无)。
       supersedesTaskId,
-      // 任务下发者信息(Part A):sender + 会话 id(仅 coordinator/human 非执行器
-      // 发送者的 metadata;否则 null)。body 绝不注入任何 session 元数据。
+      // 任务下发者信息(Part A):sender + 会话 id(仅群内角色命中
+      // DISPATCH_ALLOWED_ROLES 的发送者 metadata;否则 null)。body 绝不注入
+      // 任何 session 元数据。
       dispatcherParticipantId,
       dispatcherSessionId,
       dispatchAudit,
