@@ -553,7 +553,7 @@ describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", (
   it("验收 1–5 + 单位表 + 关键词优先级,同一张表驱动用例表", () => {
     useRealPatterns();
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 30)); // 本地 20:00:30
+    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 30)); // T = 本地 2026-08-29 20:00:30(month 7 = 八月);验收 3 的 T+1 天 / T−1 月以此为基准
     try {
       const cases: ReadonlyArray<{
         line: string;
@@ -566,8 +566,10 @@ describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", (
         // 验收 2:中文相对时长跨阈值两侧(同一结构,只差单位)。
         { line: "429 触发限流,请 10 秒后重试", exitCode: 0, kind: "transient", note: "验收2 10秒 ≤ 60s" },
         { line: "429 触发限流,请 10 分钟后重试", exitCode: 0, kind: "exhausted", note: "验收2 10分钟 > 60s" },
-        // 验收 3:中文绝对时刻(明日)→ exhausted。
-        { line: "429 您的使用量已超出频率限制,将在 2026-07-30 18:03:10 重置", exitCode: 0, kind: "exhausted", note: "验收3 中文绝对时刻(明日,距 now > 60s)" },
+        // 验收 3:中文绝对时刻(明日 T+1 天 = 2026-08-30,距 T > 60s)→ exhausted。
+        { line: "429 您的使用量已超出频率限制,将在 2026-08-30 18:03:10 重置", exitCode: 0, kind: "exhausted", note: "验收3 中文绝对时刻(T+1 天 2026-08-30,距 T 约 22h > 60s)" },
+        // 对照:中文绝对时刻(上月 T−1 月 = 2026-07-30,已早于 T)→ 过去时刻仍 exhausted(R3)。
+        { line: "429 您的使用量已超出频率限制,将在 2026-07-30 18:03:10 重置", exitCode: 0, kind: "exhausted", note: "对照 中文绝对时刻(T−1 月 2026-07-30,早于 T → 过去 → exhausted)" },
         // 验收 4:v1.0 英文用例逐字回归。
         { line: "[rate-limited] try again in 5 seconds", exitCode: 1, kind: "transient", note: "验收4 英文相对时长" },
         { line: "usage limit reached, resets around 13:33", exitCode: 1, kind: "exhausted", note: "验收4/R7-c 耗尽关键词先于绝对时刻" },
