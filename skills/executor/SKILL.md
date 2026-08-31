@@ -115,6 +115,7 @@ Review checklist:
 - [ ] **No dead code**: no unused imports, commented-out code, or unreachable branches?
 - [ ] **Error handling**: are errors handled the same way as the rest of the codebase?
 - [ ] **No secrets**: no hardcoded tokens, passwords, or API keys?
+- [ ] **判据指名事实(ADR-0009)**: 本次改动若引入或修改了用于分流/放行/拦截的**判据**(关键词表、模式匹配、阈值、计数),注释或 spec 中必须答出两句 —— ①这个判据在拿什么代替什么?②那个代替在什么条件下不成立?第②句写不出来通常意味着还没想清楚,而不是没有前提。同时确认:同一个事实**没有第二个判定出处**(两套判据一定会在某个输入上分叉,而分叉时没人在看)。
 - [ ] **Bad smells**: self-check against Fowler's refactoring bad-smell vocabulary — mysterious name / duplicated code / feature envy / data clumps / primitive obsession / repeated switches / divergent change / speculative generality / message chains / middleman. The model carries priors on these; hit any → fix it. (The words themselves trigger the prior; the full vocabulary is listed here.)
 
 #### Axis B: Spec Compliance

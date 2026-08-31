@@ -210,6 +210,8 @@ Read the spec + read the implementation diff, then check **architecture quality*
 
 - Read the spec (`specRef`) and the implementation diff (`diffSummary`).
 - Check: is this the **best implementation**? Is it **ADR-compliant**? Is the **domain vocabulary** from `CONTEXT.md` used correctly? Are there architecture decisions that **should be recorded** (missing ADR)?
+- **判据推广性(ADR-0009)**:本次若引入或修改了判据,**拿验收标准之外的真实输入实跑它**,不得靠读代码推断。重点是本群执行器的**实际输出形态**(语言、措辞、格式),而不只是 spec 举的例子。⚠️ 这是 L2 结构上看不见的那一路 —— L2 对着 spec 的验收标准查,而这类缺陷常常就写在 spec 自己的判据表里,验收标准继承了同一个盲区。
+- **单一判定出处(ADR-0009)**:核对本次是否为某个已有事实引入了第二个判定点;多来源写同一事实时,合并规则是否按**置信度**而非到达顺序(低置信兜底不得覆盖高置信解析结果)。
 - **明确不检查功能正确性** — that is the coordinator's L2 responsibility.
 - Findings are recorded as severity + note.
 

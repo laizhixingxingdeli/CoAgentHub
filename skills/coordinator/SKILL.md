@@ -223,6 +223,13 @@ This ensures the executor performs Code Review self-check even if the task ticke
 
 ### 4. 验收编排 (Three-Layer Review Orchestration)
 
+⚠️ **判据表的覆盖核对(ADR-0009)**:验收标准中出现**判据表 / 关键词表 / 模式匹配**时,
+除逐条对照外,还要核对该表是否覆盖**本群实际执行器**的真实输出形态(语言、措辞、格式)
+—— 而不只是 spec 举的例子。spec 举英文例子、执行器说中文,这种情况下逐条验收会全绿,
+但判据在生产里完全失效(实证:额度分级对本群三个中文执行器整体不生效)。
+覆盖不足**不是**你自行放宽验收的理由 —— 如实记入 L2 结论,由检视者决定改不改 spec。
+
+
 When you receive a completion event (durable inbox / WS hint) for a task, run the review loop:
 
 <resume-rules>
