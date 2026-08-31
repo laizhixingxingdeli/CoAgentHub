@@ -12,7 +12,11 @@
  *    claimVerification)与耗时,由下方 RequirementTimeline 呈现。
  *  - 三层模式要求 reviewer 与 coordinator **同时在场**
  *    (spec v3.9 §3.14.5;不用 v3.8 的「有无 reviewer」旧判据)。缺层时
- *    L3 显式显示「未检视·无检视者」,修复票则显示「不适用·修复」。
+ *    L3 显式显示「未检视·无检视者」。
+ *  - L3 档位(spec v4.1 §3.14.6):跑过 L3(已出 verdict)后按档位区分
+ *    「已检视 · 完整」(requirement)与「已检视 · 精简」(fix,免 spec
+ *    对照,弱一档的断言)。「不适用·修复」状态 v4.1 已删除:fix 票在三方
+ *    在场时照常走 L3(精简档),两方在场时是 na-no-reviewer(编制所致)。
  *
  * 时间线从 UI-04b-1 升级起消费「消息 + 任务」合并流:父级(TasksTab)把群
  * 消息与成员传进来,RequirementTimeline 据此渲染消息卡片(谁发给谁)与任务
@@ -85,7 +89,6 @@ const LAYER_STATUS_LABEL: Record<StepStatus, string> = {
   running: "进行中",
   pending: "未开始",
   "na-declared": "不适用 · 已声明理由",
-  "na-fix": "不适用·修复",
   "na-no-reviewer": "未检视·无检视者",
 };
 
@@ -283,10 +286,12 @@ export default function RequirementDetailPanel({
       ? "L1 不适用 · 已声明理由"
       : `L1 执行${retrySuffix}`,
     "L2 协调",
-    l3.status === "na-fix"
-      ? "L3 不适用·修复"
-      : l3.status === "na-no-reviewer"
-        ? "L3 未检视·无检视者"
+    l3.status === "na-no-reviewer"
+      ? "L3 未检视·无检视者"
+      : l3.verdict
+        ? l3.depth === "lite"
+          ? "L3 已检视·精简"
+          : "L3 已检视·完整"
         : "L3 检视",
   ];
   const stepRoles = [l1Role, l2Role, null];
@@ -303,13 +308,11 @@ export default function RequirementDetailPanel({
     ? l3.findings
       ? firstLine(l3.findings)
       : firstLine(l3.note) || "检视通过"
-    : l3.status === "na-fix"
-      ? "修复票不运行 L3"
-      : l3.status === "na-no-reviewer"
-        ? "本群未同时配置检视者与协调者"
-        : l3.status === "running"
-          ? "等待检视结论"
-          : "检视尚未开始";
+    : l3.status === "na-no-reviewer"
+      ? "本群未同时配置检视者与协调者"
+      : l3.status === "running"
+        ? "等待检视结论"
+        : "检视尚未开始";
   const l2Summary = l2.conclusion
     ? firstLine(l2.conclusion)
     : l2.task
@@ -350,10 +353,17 @@ export default function RequirementDetailPanel({
         stepRoles={stepRoles}
       />
 
-      {/* L3 检视:review_result 载荷与两个独立的中性缺层状态。 */}
+      {/* L3 检视:review_result 载荷 + 缺层状态;已出 verdict 后按档位
+          区分「已检视 · 完整 / 已检视 · 精简」(spec v4.1 §3.14.6)。 */}
       <LayerCard
         testId="requirement-layer-l3"
-        title="L3 检视"
+        title={
+          l3.verdict
+            ? l3.depth === "lite"
+              ? "L3 已检视·精简"
+              : "L3 已检视·完整"
+            : "L3 检视"
+        }
         status={l3.status}
         summary={
           <>
@@ -410,14 +420,7 @@ export default function RequirementDetailPanel({
         expanded={l3Expanded}
         onToggle={() => toggleLayer("l3")}
       >
-        {l3.status === "na-fix" ? (
-          <p
-            data-testid="requirement-l3-na-fix"
-            className="text-xs text-muted-foreground"
-          >
-            本票是修复票,按设计不运行 L3 检视(不适用·修复)。
-          </p>
-        ) : l3.status === "na-no-reviewer" ? (
+        {l3.status === "na-no-reviewer" ? (
           <p
             data-testid="requirement-l3-no-reviewer"
             className="text-xs text-muted-foreground"

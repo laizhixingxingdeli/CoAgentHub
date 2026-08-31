@@ -471,7 +471,7 @@ describe("L3 请求按 spec 去重 (R1-R4)", () => {
     expect(row?.diffSummary).toEqual(payload);
   });
 
-  it("R5 回归:§4.1 布尔不变——三方在场 + 非 fix + 无 review_request 仍 400", async () => {
+  it("R5 回归:v4.1 布尔——三方在场 + requirement + 无 review_request 仍 400", async () => {
     const { coordinator, execA, group } = await setupGroupAndCoordinationTask();
     const msg = await postMessageRaw(coordinator.id, group.id, "协调任务");
     const messageId = ((await msg.json()) as { id: string }).id;
@@ -493,7 +493,7 @@ describe("L3 请求按 spec 去重 (R1-R4)", () => {
     );
   });
 
-  it("R5 回归:§4.1 布尔不变——fix 票不强制 review_request(可正常 done)", async () => {
+  it("R5 回归:v4.1——fix 票强制 review_request(缺载荷 400;带 lite:true 可正常 done)", async () => {
     const { coordinator, execA, group } = await setupGroupAndCoordinationTask();
     const msg = await postMessageRaw(coordinator.id, group.id, "修复票");
     const messageId = ((await msg.json()) as { id: string }).id;
@@ -505,16 +505,34 @@ describe("L3 请求按 spec 去重 (R1-R4)", () => {
       "fix",
     );
     await addChild(group.id, task.id, execA.id);
-    const patched = await patchTask(coordinator.id, group.id, task.id, {
+    // v4.1:fix 票三方在场同样走 L3(精简档),缺 review_request → 400。
+    const missing = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
       diffSummary: { summary: "修复完成" },
     });
-    expect(patched.status, await patched.text()).toBe(200);
+    expect(missing.status).toBe(400);
+
+    // 带载荷且 lite:true(精简档)→ 200。
+    const okLite = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        review_request: {
+          type: "review_request",
+          layer: 3,
+          taskId: task.id,
+          specRef: "specs/r5-fix.md",
+          specHash: "fixhash",
+          diffSummary: "修复结论",
+          lite: true,
+        },
+      },
+    });
+    expect(okLite.status, await okLite.text()).toBe(200);
   });
 
   /* ---------------- R3 反向守卫:不该走 L3 时不得产出 review_request ---------------- */
 
-  it("R3:fix 票终态携带 review_request → 400 且终态不写入", async () => {
+  it("R3 回归:v4.1——fix 票缺 lite:true 终态携带 review_request → 400 且终态不写入", async () => {
     const { coordinator, execA, group } = await setupGroupAndCoordinationTask();
     const msg = await postMessageRaw(coordinator.id, group.id, "fix 带 review");
     const messageId = ((await msg.json()) as { id: string }).id;
@@ -526,13 +544,14 @@ describe("L3 请求按 spec 去重 (R1-R4)", () => {
       "fix",
     );
     await addChild(group.id, task.id, execA.id);
+    // v4.1:fix 票允许携带,但必须带 lite:true(精简档);缺 lite → 400。
     const patched = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
       diffSummary: reviewRequest(task.id, "specs/r3-fix.md", "hash1", "fix 结论"),
     });
     expect(patched.status).toBe(400);
     const body = (await patched.json()) as { message: string };
-    expect(body.message).toContain("fix 票复用已过 L3 的冻结 spec");
+    expect(body.message).toContain('"lite": true');
 
     const row = await findTaskRow(task.id);
     expect(row?.status).not.toBe("done");

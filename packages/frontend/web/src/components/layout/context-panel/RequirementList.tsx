@@ -23,7 +23,6 @@ const STEP_DOT_CLASS: Record<StepStatus, string> = {
   running: "bg-status-running",
   pending: "border border-muted-foreground/40",
   "na-declared": "border border-muted-foreground bg-muted",
-  "na-fix": "border border-muted-foreground bg-muted",
   "na-no-reviewer": "border border-muted-foreground bg-muted",
 };
 

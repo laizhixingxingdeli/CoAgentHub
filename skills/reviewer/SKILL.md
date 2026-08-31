@@ -71,20 +71,30 @@ Judgment is entirely yours — do NOT defer to the coordinator or the user.
 
 </triaging-rules>
 
-#### 2.1 分流结果是 `dispatchKind`，而且它决定跑不跑 L3（v4.0）
+#### 2.1 分流结果是 `dispatchKind`，而且它决定 L3 的深度（v4.1）
 
-你这一步的判断**不只是「要不要写 spec」，它同时决定这张票走不走 L3**
-（spec §3.14.6）：
+你这一步的判断**不只是「要不要写 spec」，它同时决定这张票的 L3 走哪一档**
+（spec §3.14.6 v4.1）：
 
 ```
-跑 L3  ⟺  群内 reviewer 与 coordinator 同时在场  AND  dispatchKind == requirement
+跑 L3  ⟺  群内 reviewer 与 coordinator 同时在场
+L3 深度 = dispatchKind == requirement ? 完整档 : 精简档
 ```
 
-`fix` 不跑 L3 的理由不是省事：**它复用的那份冻结 spec，当初冻结时已经过了 L3**，
-修复是在一份已被架构检视过的契约内部作业，没有引入新的架构面。
+**跑不跑 L3 只看群成员构成**（三方在场就都跑）；`dispatchKind` 只选择**深度**：
+
+- `requirement` → **完整档**：对照冻结 spec 全文检视架构质量。
+- `fix` → **精简档**：免 spec 对照、免功能复验，只检 diff 的架构质量、
+  触及的 ADR（重点 ADR-0009）与领域词汇（见第 9 步）。
+
+> ⚠️ **v4.1 推翻了 v4.0 的「fix 不跑 L3」**。v4.0 的理由是「它复用的那份冻结
+> spec 当初冻结时已经过了 L3，修复不引入新的架构面」——这个假设**对 spec 成立、
+> 对 diff 不成立**：修正票经常是跨模块重构（实证：DK-L3 修正票实为跨三模块的
+> helper 重构，在 v4.0 下无任何独立架构检视即上线）。spec 的架构面检过了，
+> 不代表 diff 的架构面也干净——精简档就是补这一层的。
 
 **这也是为什么分流权必须在你手上（闸一）。** 协调者若能自判，它可以把任意工作
-标成 `fix` 来免掉 L3——而 L3 检的正是协调者那一环。**下发时必须显式给出
+标成 `fix` 来把 L3 降为精简档——而 L3 检的正是协调者那一环。**下发时必须显式给出
 `dispatchKind`，不要让协调者猜。**
 
 **闸二：`fix` 必须能升级回 `requirement`。** 执行过程中若发现改不动、必须越过
@@ -204,6 +214,13 @@ Claude Code 用 `Monitor` 工具订阅（**会话内主动拉，方向与前两�
 
 ### 9. Execute the Review — 执行检视
 
+先看 `review_request` 载荷里有没有可选布尔 **`lite`**（v4.1），它标记 L3 深度：
+**缺省或 `lite: false` = 完整档**（requirement 票）；**`lite: true` = 精简档**
+（fix 票，免 spec 对照、免功能复验）。`lite` 只是深度提示——两档的
+发现项通道、verdict 回发方式完全相同（见第 10 步）。
+
+#### 9a. 完整档（requirement / 缺省 `lite`）
+
 Read the spec + read the implementation diff, then check **architecture quality**:
 
 <review-checklist>
@@ -217,10 +234,36 @@ Read the spec + read the implementation diff, then check **architecture quality*
 
 </review-checklist>
 
+#### 9b. 精简档（`lite: true`，fix 票）
+
+**免**的部分：
+
+- **免 spec 对照**——fix 票复用的冻结 spec 冻结时已过完整 L3，契约的架构面已被
+  检视过；不再逐条对照 spec 全文。
+- **免重复 L2 结论**——功能事实已由协调者 L2 逐条验收，不复验功能。
+
+**只检**的部分（全部针对 diff 本身）：
+
+<lite-checklist>
+
+1. **diff 的架构质量**：重复副本（同一不变量多处实现）、死代码、不必要的
+   抽象层级、跨模块耦合方向。
+2. **ADR 合规**：只查 diff **触及**的条目，重点是 **ADR-0009**——diff 引入的
+   判据是否指名它裁定的事实、是否造成同一事实的第二个判定出处。
+3. **领域词汇**（`CONTEXT.md`）在 diff 新增命名中的使用。
+
+Findings are recorded as severity + note（与完整档同构，第 10 步回发方式不变）。
+
+</lite-checklist>
+
+精简档是**弱一档的断言**：前端会把「已检视·精简」与「已检视·完整」区分展示
+（spec §3.14.6「L3 的三种展示状态」）。两档都是独立第三方检视，都不做自审。
+
 ### 10. Report the Verdict — 回发结论
 
-你不是被下发的执行器，**没有"完成回调"可回**。把 `review_result` 作为**群消息**公布
-（见「结构化载荷」节）：`verdict: "pass" | "findings"` + `findings[]`。
+**完整档与精简档的回发方式完全相同**——`lite` 只影响第 9 步检什么，不影响结论
+怎么回。你不是被下发的执行器，**没有"完成回调"可回**。把 `review_result` 作为
+**群消息**公布（见「结构化载荷」节）：`verdict: "pass" | "findings"` + `findings[]`。
 
 `findings` 走平台的**定向派发路径**——广播形式会被平台 **400** 拒收（docs/architecture.md
 对 `review_result.verdict: "findings"` 的约束：定向到 coordinator 并带
@@ -262,7 +305,9 @@ Field names are fixed — copy them verbatim, never use free-text markers（防�
 
 ```json
 // 收 — 协调者 → 检视者：L3 检视任务内容
-{"type":"review_request","layer":3,"taskId":"<被检视任务id>","specRef":"specs/x.md","specHash":"...","diffSummary":"..."}
+// v4.1：可选布尔 lite 标记深度 — fix 票带 "lite": true(精简档:免 spec
+// 对照,只检 diff 架构质量)；requirement 票不带(缺省=完整档)。
+{"type":"review_request","layer":3,"taskId":"<被检视任务id>","specRef":"specs/x.md","specHash":"...","diffSummary":"...","lite":true}
 
 // 发 — 检视者 → 协调者：检视任务汇报段中的结论
 {"type":"review_result","layer":3,"taskId":"<被检视任务id>","verdict":"pass|findings","findings":[{"severity":"...","note":"..."}]}

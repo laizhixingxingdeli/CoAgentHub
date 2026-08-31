@@ -5,17 +5,18 @@ import type { DataBase } from "@server/lib/database";
  * 与 tasks.ts PATCH 终态守卫共用同一判定,避免两处漂移 —— 任务书不能教协调者
  * 携带一个 PATCH 终态会被 400 拒收的载荷。
  *
- * 允许携带 review_request 仅当:
- *  - dispatchKind 非 'fix'(fix 票复用已过 L3 的冻结 spec,不产生新的架构面);
- *  - 群内有 reviewer 成员(无 reviewer 时两层编制不跑 L3)。
- * dispatchKind 为 null 的历史行保守按 requirement 处理(允许),与
- * tasks.ts shouldWalkL3 的 null 处理逐字一致。
+ * v4.1(spec §3.14.6):本谓词裁定的事实是「群成员构成是否允许独立 L3」——
+ * 仅当群内有 reviewer 成员(无 reviewer 时两层编制不跑 L3)。
+ * `dispatchKind` 只**选择深度**(requirement=完整档,fix=精简档,见载荷
+ * 可选布尔 `lite`),不决定是否携带;它作为参数保留只为调用方显式记录
+ * 本票工作类型,不参与裁定。dispatchKind=null 的历史行行为保持允许
+ * (由 groupHasReviewer 单独裁定)。
  */
 export function reviewRequestCarryAllowed(
-  dispatchKind: "requirement" | "fix" | null,
+  _dispatchKind: "requirement" | "fix" | null,
   groupHasReviewer: boolean,
 ): boolean {
-  return dispatchKind !== "fix" && groupHasReviewer;
+  return groupHasReviewer;
 }
 
 /** 群内是否存在 reviewer 角色成员(R3 共用判定的输入;任务书与守卫同源查询)。 */

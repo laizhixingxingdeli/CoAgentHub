@@ -29,7 +29,6 @@ const STEP_WRAPPER_CLASS: Record<StepStatus, string> = {
     "size-6 ring-4 ring-status-running/25 animate-pulse motion-reduce:animate-none",
   pending: "size-6",
   "na-declared": "size-6",
-  "na-fix": "size-6",
   "na-no-reviewer": "size-6",
 };
 
@@ -40,7 +39,6 @@ const CONNECTOR_CLASS: Record<StepStatus, string> = {
   running: "bg-status-running",
   pending: "bg-border",
   "na-declared": "bg-border",
-  "na-fix": "bg-border",
   "na-no-reviewer": "bg-border",
 };
 
@@ -101,9 +99,7 @@ function StepIcon({ status }: { status: StepStatus }) {
           strokeWidth={2}
         />
       )}
-      {(status === "na-declared" ||
-        status === "na-fix" ||
-        status === "na-no-reviewer") && (
+      {(status === "na-declared" || status === "na-no-reviewer") && (
         <>
           <circle
             cx="12"

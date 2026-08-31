@@ -27,13 +27,18 @@ import type { Member } from "@/pages/app/groups/messages/types";
 import { roleFromMemberRoles } from "./member-role";
 
 /** 阶梯每层的状态。中性状态与 pending 区分「不适用」和「未开始」。 */
+/**
+ * v4.1(spec §3.14.6):「na-fix / 不适用·修复」状态删除——fix 票在三方在场时
+ * 走 L3 精简档,与 requirement 票共用 running/pending/done/failed/
+ * na-no-reviewer 状态;档位(完整/精简)由 review_request 载荷的 `lite`
+ * 表达,见 L3State.depth。
+ */
 export type StepStatus =
   | "done"
   | "failed"
   | "running"
   | "pending"
   | "na-declared"
-  | "na-fix"
   | "na-no-reviewer";
 
 /** 一条「需求」:同 specRef 任务的聚合结果。 */
@@ -64,8 +69,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 从任务 diffSummary 取规范化的 review_request 载荷。 */
-function reviewRequestForTask(task: TaskItem): Record<string, unknown> | null {
+/**
+ * 从任务 diffSummary 取规范化的 review_request 载荷。导出供
+ * requirement-layer-state 推导 L3 档位(`lite` 布尔,spec §3.14.6)。
+ */
+export function reviewRequestForTask(
+  task: TaskItem,
+): Record<string, unknown> | null {
   const summary = task.diffSummary;
   if (!isRecord(summary)) return null;
   if (summary.type === "review_request") return summary;

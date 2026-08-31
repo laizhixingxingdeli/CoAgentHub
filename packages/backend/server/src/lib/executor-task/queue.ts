@@ -3111,11 +3111,13 @@ function buildExecutionModeSection(role: TicketRole): string[] {
 }
 
 /**
- * 协调者任务书「汇报格式要求」段(R3 反向守卫同步):仅当 review_request 可携带
- * (非 fix 且群内有 reviewer,与 tasks.ts R3 守卫共用判定)时保留「必须带」指令;
- * fix 票复用已过 L3 的冻结 spec、或群内无 reviewer 时,明确「不要携带」——
- * 否则任务书会教协调者携带一个 PATCH 终态必被 400 拒收的载荷。
- * requirement / dispatchKind=null + 有 reviewer 的文案与旧版逐字一致。
+ * 协调者任务书「汇报格式要求」段(R3 反向守卫同步,v4.1 spec §3.14.6):
+ * 仅当 review_request 可携带(群内有 reviewer,与 tasks.ts R3 守卫共用
+ * reviewRequestCarryAllowed 判定)时保留「必须带」指令;无 reviewer 时明确
+ * 「不要携带」——否则任务书会教协调者携带一个 PATCH 终态必被 400 拒收的载荷。
+ * 深度按 dispatchKind 分流:fix 带 `"lite": true` 精简档;
+ * requirement / dispatchKind=null 不带 lite(完整档,requirement 文案与旧版
+ * 语义一致)。
  */
 function buildReportSection(
   role: TicketRole,
@@ -3124,20 +3126,20 @@ function buildReportSection(
 ): string[] {
   if (role === "coordinator") {
     if (reviewRequestCarryAllowed(dispatchKind, groupHasReviewer)) {
+      const payloadLine =
+        dispatchKind === "fix"
+          ? "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷且带 `\"lite\": true`（fix 票走 L3 精简档:免 spec 对照,只检 diff 架构质量;参见 spec §3.10 / coordinator skill §4.2）。"
+          : "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（完整档,不带 `lite`;参见 spec §3.10 / coordinator skill §4.2）。";
       return [
         "## 汇报格式要求(stdout 请按此输出)",
         "PATCH 自身这条 detached 任务为终态。",
-        "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（参见 spec §3.10 / coordinator skill §4.2）。",
+        payloadLine,
       ];
     }
-    const forbiddenReason =
-      dispatchKind === "fix"
-        ? "fix 票复用已过 L3 的冻结 spec，不产生新的架构面"
-        : "本群无 reviewer 成员，两层编制不跑 L3";
     return [
       "## 汇报格式要求(stdout 请按此输出)",
       "PATCH 自身这条 detached 任务为终态。",
-      `PATCH 时，\`diffSummary\` 不要携带 \`review_request\`（${forbiddenReason}）。`,
+      "PATCH 时，`diffSummary` 不要携带 `review_request`（本群无 reviewer 成员，两层编制不跑 L3）。",
     ];
   }
   return [

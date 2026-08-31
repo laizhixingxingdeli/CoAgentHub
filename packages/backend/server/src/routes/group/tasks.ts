@@ -375,26 +375,34 @@ async function assertCoordinationCloseIntegrity(
     }
   }
 
-  // R2:应走 L3(三方在场且 dispatchKind 非 fix)时,review_request 不得缺失。
-  if (await shouldWalkL3(db, task)) {
+  // R2:应走 L3(v4.1 spec §3.14.6:三方在场,任何 dispatchKind)时,
+  // review_request 不得缺失;fix 票另要求带 lite:true(精简档)。
+  const groupHasReviewer = await groupHasReviewerMember(db, task.groupId);
+  if (await shouldWalkL3(db, task, groupHasReviewer)) {
     if (!summaryHasReviewRequest(diffSummary)) {
       throw coordinationCloseError(
-        "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场且非 fix 票)。",
+        "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场)。",
+      );
+    }
+    if (
+      task.dispatchKind === "fix" &&
+      !reviewRequestLiteFlag(diffSummary)
+    ) {
+      throw coordinationCloseError(
+        "fix 票的 review_request 必须带 \"lite\": true(L3 精简档:免 spec 对照,只检 diff 架构质量)。",
       );
     }
   }
 
   // R3:反向守卫——不该走 L3 时不得产出 review_request。
-  // fix 票复用冻结 spec,不产生新架构面;无 reviewer 时两层编制不跑 L3。
+  // v4.1:携带与否只由群成员构成裁定(无 reviewer 时两层编制不跑 L3);
+  // dispatchKind 只选择深度(lite),不决定是否携带。
   // dispatchKind 为 null 的历史行保守按 requirement 处理,不拒绝。
   // 判定与任务书 buildReportSection 共用(review-request-policy),两处不漂移。
   if (summaryHasReviewRequest(diffSummary)) {
-    const groupHasReviewer = await groupHasReviewerMember(db, task.groupId);
     if (!reviewRequestCarryAllowed(task.dispatchKind, groupHasReviewer)) {
       throw coordinationCloseError(
-        task.dispatchKind === "fix"
-          ? "fix 票复用已过 L3 的冻结 spec,不产生新的架构面。"
-          : "群内无 reviewer 成员,不得携带 review_request。",
+        "群内无 reviewer 成员,不得携带 review_request。",
       );
     }
   }
@@ -448,17 +456,28 @@ async function assertCoordinationCloseIntegrity(
 }
 
 /**
- * 应走 L3 ⟺ 群内 reviewer 与 coordinator 同时在场 AND 本票 dispatchKind != 'fix'。
- * dispatchKind 为 null(历史/未走新字段)按 requirement 处理,保守要求 review_request。
+ * 应走 L3(v4.1 spec §3.14.6)⟺ 群内 reviewer 与 coordinator 同时在场。
+ * `dispatchKind` 只选择深度(requirement=完整档,fix=精简档),不决定跑不跑;
+ * 深度选择落在 review_request 载荷的 `lite` 布尔上(R2 对 fix 票校验)。
+ * groupHasReviewer 由调用方查询后传入(R3 反向守卫同一次查询,两处不漂移)。
  */
-async function shouldWalkL3(db: DataBase, task: TaskRow): Promise<boolean> {
-  if (task.dispatchKind === "fix") return false;
+async function shouldWalkL3(
+  db: DataBase,
+  task: TaskRow,
+  groupHasReviewer: boolean,
+): Promise<boolean> {
+  if (!groupHasReviewer) return false;
   const members = await db.query.groupMember.findMany({
     where: (t, { eq }) => eq(t.groupId, task.groupId),
     columns: { roles: true },
   });
   const presentRoles = new Set<string>(members.flatMap((m) => m.roles));
-  return presentRoles.has("reviewer") && presentRoles.has("coordinator");
+  return presentRoles.has("coordinator");
+}
+
+/** review_request 载荷的可选布尔 `lite`(fix 票精简档标记;缺省=false 完整档)。 */
+function reviewRequestLiteFlag(diffSummary: unknown): boolean {
+  return reviewRequestPayloadOf(diffSummary)?.lite === true;
 }
 
 /**

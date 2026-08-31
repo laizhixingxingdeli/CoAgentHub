@@ -847,7 +847,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     }
   });
 
-  it("R2:三方在场 + dispatchKind 非 fix + 无 review_request → 400", async () => {
+  it("R2:v4.1 三方在场 + requirement + 无 review_request → 400", async () => {
     const coordinator = await register("ci-coord-4");
     const reviewer = await register("ci-reviewer-4");
     const execA = await register("ci-exec-4");
@@ -871,7 +871,7 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     expect(body.message).toContain("review_request");
   });
 
-  it("R2:三方在场 + dispatchKind='fix' + 无 review_request → 放行", async () => {
+  it("R2:v4.1——三方在场 + fix + 无 review_request → 400(回归:不再放行)", async () => {
     const coordinator = await register("ci-coord-5");
     const reviewer = await register("ci-reviewer-5");
     const execA = await register("ci-exec-5");
@@ -890,7 +890,66 @@ describe("协调任务落终态完整性校验 (R1-R5)", () => {
     const res = await patchTask(coordinator.id, group.id, task.id, {
       status: "done",
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message: string }).message).toContain(
+      "review_request",
+    );
+  });
+
+  it("R2:v4.1——三方在场 + fix + review_request 带 lite:true → 200(完成事件进 reviewer inbox)", async () => {
+    const coordinator = await register("ci-coord-5b");
+    const reviewer = await register("ci-reviewer-5b");
+    const execA = await register("ci-exec-5b");
+    const group = await createGroup(coordinator.id, "ci-5b");
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+    await addMember(coordinator.id, group.id, execA.id, ["executor"]);
+    // 直接插库建协调任务:POST /tasks 不写下发者字段,而完成事件 trigger
+    // 以 dispatcherParticipantId 非空为前提(与 l3-request-recipient 同口径)。
+    const [task] = await testDb
+      .insert(taskTable)
+      .values({
+        groupId: group.id,
+        messageId: uuidv4(),
+        // 自派:执行人 = 协调者本人 → isDetachedTask 为真,L3 守卫生效。
+        executorParticipantId: coordinator.id,
+        dispatcherParticipantId: coordinator.id,
+        dispatchKind: "fix",
+        status: "queued",
+      })
+      .returning();
+    await addChild(group.id, task.id, execA.id);
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: {
+        review_request: {
+          type: "review_request",
+          layer: 3,
+          taskId: task.id,
+          specRef: "specs/ci-5b.md",
+          specHash: "ci5bhash",
+          diffSummary: "fix 票 L2 结论",
+          lite: true,
+        },
+      },
+    });
+    expect(res.status, await res.text()).toBe(200);
+    // 回归:fix 票完成事件进入 reviewer 收件箱(按 review_request 路由)。
+    const events = await app.request(
+      `/api/participants/${reviewer.id}/task-completion-events`,
+      { headers: { "X-Participant-Id": reviewer.id } },
+    );
+    expect(events.status).toBe(200);
+    const inbox = (await events.json()) as {
+      events: Array<{
+        task: { taskId: string; status: string | null };
+      }>;
+    };
+    expect(
+      inbox.events.some(
+        (event) =>
+          event.task.taskId === task.id && event.task.status === "done",
+      ),
+    ).toBe(true);
   });
 
   it("R2:两方在场(无 reviewer)+ 无 review_request → 放行", async () => {

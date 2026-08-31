@@ -10,6 +10,7 @@ import {
   coordinationTasksForRequirement,
   executionTasksForRequirement,
   noExecutionReasonForTask,
+  reviewRequestForTask,
 } from "./group-tasks-by-spec";
 
 export type L2State = {
@@ -17,6 +18,13 @@ export type L2State = {
   status: StepStatus;
   conclusion: string | null;
 };
+
+/**
+ * L3 档位(spec §3.14.6 v4.1):requirement 票 = "full"(完整档,强断言);
+ * fix 票 = "lite"(精简档,弱一档的断言,免 spec 对照);
+ * "na-no-reviewer" 时 = null(没有 L3 可言)。
+ */
+export type L3Depth = "full" | "lite" | null;
 
 export type L3State = {
   status: StepStatus;
@@ -29,6 +37,8 @@ export type L3State = {
   answered: boolean | null;
   awaitingSince: string | null;
   overdue: boolean;
+  /** 本票 L3 档位(v4.1 三态:已检视·完整 / 已检视·精简 / 未检视·无检视者)。 */
+  depth: L3Depth;
 };
 
 export type L1State = {
@@ -166,19 +176,22 @@ function deriveL3(
   const anchor = findSpecAnchor(requirement, messages);
   const coordinationTask = coordinationTaskForTasks(requirement.tasks);
   const apiL3 = coordinationTask?.l3;
-  if (requirement.dispatchKind === "fix") {
-    return {
-      status: "na-fix",
-      verdict: null,
-      findings: null,
-      note: null,
-      specRef: anchor?.specRef ?? null,
-      specHash: anchor?.specHash ?? null,
-      answered: null,
-      awaitingSince: null,
-      overdue: false,
-    };
-  }
+  // v4.1(spec §3.14.6):「na-fix / 不适用·修复」状态删除——fix 票在三方在场时
+  // 与 requirement 票共用 L3 状态推导(精简档);两方在场时所有票都是
+  // na-no-reviewer(编制所致,与「因为是修复」不再混同)。
+  // 档位按协调任务 review_request 载荷的 `lite` 布尔;载荷缺失(历史数据)
+  // 时按 dispatchKind 兜底,缺省 = 完整档。
+  const requestPayload = coordinationTask
+    ? reviewRequestForTask(coordinationTask)
+    : null;
+  const depth: L3Depth =
+    typeof requestPayload?.lite === "boolean"
+      ? requestPayload.lite
+        ? "lite"
+        : "full"
+      : requirement.dispatchKind === "fix"
+        ? "lite"
+        : "full";
   const taskIds = new Set(requirement.tasks.map((task) => task.id));
   if (mode === "two") {
     return {
@@ -191,6 +204,7 @@ function deriveL3(
       answered: null,
       awaitingSince: null,
       overdue: false,
+      depth: null,
     };
   }
   for (const message of messages) {
@@ -211,6 +225,7 @@ function deriveL3(
         answered: true,
         awaitingSince: apiL3?.awaitingSince ?? null,
         overdue: false,
+        depth,
       };
     }
   }
@@ -225,6 +240,7 @@ function deriveL3(
       answered: true,
       awaitingSince: apiL3.awaitingSince,
       overdue: false,
+      depth,
     };
   }
   return {
@@ -237,6 +253,7 @@ function deriveL3(
     answered: apiL3?.answered ?? null,
     awaitingSince: apiL3?.awaitingSince ?? null,
     overdue: apiL3?.overdue ?? false,
+    depth,
   };
 }
 

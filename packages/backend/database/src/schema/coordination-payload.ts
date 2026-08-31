@@ -27,6 +27,10 @@ export const reviewRequestPayload = z
     specRef: z.string().min(1),
     specHash: z.string().min(1),
     diffSummary: z.string().min(1),
+    // v4.1(spec §3.14.6):L3 深度提示 — fix 票带 true(精简档:免 spec 对照,
+    // 只检 diff 架构质量);requirement 票不带(缺省=完整档)。仅载荷字段,
+    // 不入数据库 schema,不改 review_result 回流。
+    lite: z.boolean().optional(),
   })
   .strict();
 

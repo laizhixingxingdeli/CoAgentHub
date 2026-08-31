@@ -651,10 +651,10 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     }
   }, 30_000);
 
-  it("fix 协调任务:任务书明确不要携带 review_request,PATCH 终态不带 → 200(非 400)", async () => {
+  it("fix 协调任务(v4.1):任务书要求携带 review_request 且 lite:true,PATCH 终态带载荷 → 200(非 400)", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     await addMember(coordinator.id, group.id, codebuddy.id, ["coordinator"]);
-    // fix 票即使群内有 reviewer 也不得携带(R3:复用已过 L3 的冻结 spec)。
+    // v4.1:fix 票三方在场同样走 L3(精简档),review_request 可携带。
     const reviewer = await registerParticipant({ name: "exec-reviewer-fix" });
     await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
 
@@ -679,12 +679,13 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(task?.status).toBe("running");
       if (!task) throw new Error("fix 协调者任务未创建");
       const ticket = readFileSync(capture, "utf8");
-      // fix 票:不含「必须带」,明确「不要携带」,理由为复用已过 L3 的冻结 spec。
-      expect(ticket).not.toContain("必须带 `review_request`");
-      expect(ticket).toContain("不要携带 `review_request`");
-      expect(ticket).toContain("fix 票复用已过 L3 的冻结 spec");
+      // v4.1:fix 票要求携带且带 "lite": true(精简档),不再是「不要携带」。
+      expect(ticket).toContain("必须带 `review_request` 结构化载荷");
+      expect(ticket).toContain('`"lite": true`');
+      expect(ticket).not.toContain("不要携带 `review_request`");
 
-      // 端到端:严格按生成任务书 PATCH 终态(不带 review_request)→ 200,非 400。
+      // 端到端:严格按生成任务书 PATCH 终态(带 review_request + lite:true)
+      // → 200,非 400(v4.0 此处是 400 回归点)。
       const patchRes = await app.request(
         `/api/groups/${group.id}/tasks/${task.id}`,
         {
@@ -696,7 +697,15 @@ describe("server 内嵌执行器触发链路(票1)", () => {
           body: JSON.stringify({
             status: "done",
             diffSummary: {
-              summary: "修复完成,按任务书不携带 review_request",
+              review_request: {
+                type: "review_request",
+                layer: 3,
+                taskId: task.id,
+                specRef: "specs/test.md",
+                specHash: "test-hash",
+                diffSummary: "fix 票 L2 结论",
+                lite: true,
+              },
               noExecutionReason:
                 "测试用 fix 协调任务,通过内嵌执行器直接完成,无 L1 子任务",
             },
@@ -704,6 +713,36 @@ describe("server 内嵌执行器触发链路(票1)", () => {
         },
       );
       expect(patchRes.status).toBe(200);
+
+      // 反向回归:fix 票带载荷但缺 lite:true → 400(R2 深度校验)。
+      const noLite = await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({
+            status: "done",
+            diffSummary: {
+              review_request: {
+                type: "review_request",
+                layer: 3,
+                taskId: task.id,
+                specRef: "specs/test.md",
+                specHash: "test-hash",
+                diffSummary: "fix 票 L2 结论(缺 lite)",
+              },
+              noExecutionReason:
+                "测试用 fix 协调任务,通过内嵌执行器直接完成,无 L1 子任务",
+            },
+          }),
+        },
+      );
+      expect(noLite.status).toBe(400);
+      // 400 消息中 lite 引号被 JSON 转义,断言转义后的形式。
+      expect(await noLite.text()).toContain('必须带 \\"lite\\": true');
     } finally {
       delete process.env.TICKET_CAPTURE;
     }
