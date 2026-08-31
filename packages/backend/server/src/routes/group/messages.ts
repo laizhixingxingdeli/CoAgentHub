@@ -530,6 +530,16 @@ app
           parsed?.type === "review_result" && parsed.verdict === "findings"
             ? parsed
             : undefined;
+        // R1:显式 dispatchKind 优先, findings 缺省才推定为 fix; R2:缺省留痕
+        const finalDispatchKind =
+          dispatchKind ?? (findingsReviewResult ? "fix" : null);
+        const initialDiffSummary =
+          findingsReviewResult && !dispatchKind
+            ? {
+                dispatchKindNote:
+                  "dispatchKind 由 findings 缺省推定为 fix,未由检视者显式指定",
+              }
+            : null;
         const dispatchInput = {
           groupId: id,
           messageId: full.id,
@@ -545,9 +555,10 @@ app
           selectionReason,
           specRef: specRef ?? null,
           specHash: specHash ?? null,
-          dispatchKind: findingsReviewResult ? "fix" : (dispatchKind ?? null),
+          dispatchKind: finalDispatchKind,
           supersedesTaskId: finalSupersedesTaskId ?? null,
           callbackRef,
+          initialDiffSummary,
         };
         // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发结果,
         // 把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,spec R3)。

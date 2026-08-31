@@ -323,7 +323,7 @@ describe("角色定向下发(specs/dispatch-to-role.md)", () => {
     const task = await waitForTaskByMessage(message.id);
 
     expect(task.parentTaskId).toBeNull();
-    expect(task.dispatchKind).toBe("fix");
+    expect(task.dispatchKind).toBe("requirement");
     expect(task.specRef).toBe("specs/findings-must-reach-coordinator.md");
     expect(task.specHash).toBe("68446529c8031236ddbad2173837749be3d37cc8");
     expect(task.brief).toContain("severity: high");

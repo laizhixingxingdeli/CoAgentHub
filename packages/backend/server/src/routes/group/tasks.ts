@@ -1249,6 +1249,8 @@ app
       const participantId = c.get("participantId");
       const { id, taskId } = c.req.valid("param");
       const { status, diffSummary, checkpointRef, brief } = c.req.valid("json");
+      // R3:分流权归检视者,下游 PATCH 不得改写已落库 dispatchKind —— 任何携带的
+      // dispatchKind 字段静默丢弃,不参与 update(c.req.valid("json") passthrough 亦忽略).
       let normalizedDiffSummary = diffSummary;
       if (
         typeof diffSummary === "object" &&
@@ -1445,6 +1447,21 @@ app
       // 平台完成回填从未跑过,diffSummary 里根本没有这两个键。取值口径与
       // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写),两处共用
       // mergePlatformTokenFields。
+      // R2 缺省留痕跨终态保留:任何 diffSummary 覆盖不得丢失 dispatchKindNote
+      if (
+        diffSummary !== undefined &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        const prevNote =
+          task.diffSummary && typeof task.diffSummary === "object" && !Array.isArray(task.diffSummary)
+            ? (task.diffSummary as Record<string, unknown>).dispatchKindNote
+            : undefined;
+        if (prevNote && !Object.hasOwn(summaryToWrite as Record<string, unknown>, "dispatchKindNote")) {
+          (summaryToWrite as Record<string, unknown>).dispatchKindNote = prevNote;
+        }
+      }
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&

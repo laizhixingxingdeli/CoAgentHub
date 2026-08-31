@@ -119,6 +119,18 @@ import {
   sumAttemptTokenUsageReason,
 } from "./types";
 
+/** R2 缺省审计跨生命周期保留:任何 diffSummary 覆盖都需保留 dispatchKindNote */
+function preserveDispatchKindNote(
+  existing: unknown,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const prev = asDiffSummaryRecord(existing);
+  if (prev?.dispatchKindNote && !Object.hasOwn(next, "dispatchKindNote")) {
+    next.dispatchKindNote = prev.dispatchKindNote;
+  }
+  return next;
+}
+
 /* ---------------- 额度感知调度(票7) ---------------- */
 
 /**
@@ -341,11 +353,20 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
   const rows =
     deadTaskIds.length === 0
       ? []
-      : await db
-          .update(taskTable)
-          .set({ status: "failed", diffSummary: { error: "server-restart" } })
-          .where(inArray(taskTable.id, deadTaskIds))
-          .returning();
+      : await (async () => {
+          const toFail = candidates.filter((row) => deadTaskIds.includes(row.id));
+          const updated: typeof candidates = [];
+          for (const row of toFail) {
+            const next = preserveDispatchKindNote(row.diffSummary, { error: "server-restart" });
+            const [u] = await db
+              .update(taskTable)
+              .set({ status: "failed", diffSummary: next })
+              .where(eq(taskTable.id, row.id))
+              .returning();
+            if (u) updated.push(u as unknown as typeof candidates[number]);
+          }
+          return updated;
+        })();
 
   if (candidates.length > 0) {
     console.log(`[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务`);
@@ -492,6 +513,7 @@ export async function maybeDispatchExecutorTask(
     dispatchKind,
     supersedesTaskId,
     callbackRef,
+    initialDiffSummary,
   } = input;
 
   // 与桥相同的角色门槛(下发门):非 coordinator/human/reviewer 不执行(桥侧也会拒绝)。
@@ -541,6 +563,7 @@ export async function maybeDispatchExecutorTask(
       dispatchKind,
       supersedesTaskId,
       callbackRef,
+      initialDiffSummary: initialDiffSummary ?? null,
     });
     return (
       outcome ?? {
@@ -593,6 +616,7 @@ export async function maybeDispatchExecutorTask(
     dispatchKind,
     supersedesTaskId,
     callbackRef,
+    initialDiffSummary: initialDiffSummary ?? null,
   });
 }
 
@@ -768,9 +792,10 @@ export async function enqueueTaskRun(
 
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
+    const nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
     await db
       .update(taskTable)
-      .set({ diffSummary: { waiting: `等待执行器额度恢复(预计 ${eta})` } })
+      .set({ diffSummary: nextWaiting })
       .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)))
       .catch((error) =>
         console.warn(`[executor] 写等待恢复标记失败(${task.id}): ${error}`),
@@ -821,6 +846,8 @@ async function dispatchTask(
       endpointRef?: string;
       sessionRef?: string;
     } | null;
+    /** R2 缺省审计:findings 未显式指定 dispatchKind 而缺省为 fix 时的 diffSummary 留痕 */
+    initialDiffSummary?: Record<string, unknown> | null;
   },
 ): Promise<DispatchOutcome | undefined> {
   const {
@@ -838,6 +865,7 @@ async function dispatchTask(
     dispatchKind,
     supersedesTaskId,
     callbackRef,
+    initialDiffSummary,
   } = opts;
 
   // A coordinator's detached task is the parent of the executor task it
@@ -906,6 +934,8 @@ async function dispatchTask(
       dispatchKind,
       // 替代关系(R2):本任务替代 supersedesTaskId 所指的那次尝试(null = 无)。
       supersedesTaskId,
+      // R2 缺省审计:findings 未显式指定 dispatchKind 而缺省为 fix 时的留痕
+      diffSummary: initialDiffSummary ?? null,
       // 任务下发者信息(Part A):sender + 会话 id(仅群内角色命中
       // DISPATCH_ALLOWED_ROLES 的发送者 metadata;否则 null)。body 绝不注入
       // 任何 session 元数据。
@@ -1054,10 +1084,11 @@ async function dispatchTask(
   // (泵送跳过冷却执行器,冷却结束定时器会自动派发,任务保持 queued 等待)。
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
+    const nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
     try {
       await db
         .update(taskTable)
-        .set({ diffSummary: { waiting: `等待执行器额度恢复(预计 ${eta})` } })
+        .set({ diffSummary: nextWaiting })
         .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)));
     } catch (e) {
       console.warn(`[executor] 写等待恢复标记失败(${task.id}): ${e}`);
@@ -1799,26 +1830,33 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         releaseTaskOutput(taskId);
         const tokenUsage = sumAttemptTokenUsage(run.attempts);
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
-        const [cancelled] = await db
-          .update(taskTable)
-          .set({
-            status: "cancelled",
-            diffSummary: {
-              error: "stopped",
-              ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-              ...(tokenUsageReason ? { tokenUsageReason } : {}),
-            },
-          })
-          .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-          .returning();
-        if (cancelled) {
-          await notifyTaskStatusChanged(
-            db,
-            taskId,
-            groupId,
-            "cancelled",
-            cancelled,
-          );
+        {
+          const cur = await db.query.task.findFirst({
+            where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            columns: { diffSummary: true },
+          });
+          const nextCancelled = preserveDispatchKindNote(cur?.diffSummary, {
+            error: "stopped",
+            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+            ...(tokenUsageReason ? { tokenUsageReason } : {}),
+          });
+          const [cancelled] = await db
+            .update(taskTable)
+            .set({
+              status: "cancelled",
+              diffSummary: nextCancelled,
+            })
+            .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+            .returning();
+          if (cancelled) {
+            await notifyTaskStatusChanged(
+              db,
+              taskId,
+              groupId,
+              "cancelled",
+              cancelled,
+            );
+          }
         }
         return;
       }
@@ -2030,6 +2068,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
         if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
+        // R2 缺省留痕跨终态保留:合并既有 dispatchKindNote
+        {
+          const cur = await db.query.task.findFirst({
+            where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            columns: { diffSummary: true },
+          });
+          preserveDispatchKindNote(cur?.diffSummary, diffSummary);
+        }
         releaseTaskOutput(taskId);
         const [done] = await db
           .update(taskTable)
@@ -2162,9 +2208,14 @@ function handleStallAlert(run: QueuedRun): void {
     );
     // 警示标记落库(diffSummary.stallAlerted),任务面板行加黄色警示样式。
     try {
+      const cur = await run.db.query.task.findFirst({
+        where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+        columns: { diffSummary: true },
+      });
+      const nextAlert = preserveDispatchKindNote(cur?.diffSummary, { stallAlerted: true });
       await run.db
         .update(taskTable)
-        .set({ diffSummary: { stallAlerted: true } })
+        .set({ diffSummary: nextAlert })
         .where(
           and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
         );
@@ -2374,6 +2425,13 @@ async function failTask(
   if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
   const tail = taskOutputTailLines(taskId);
   if (tail) diffSummary.outputTail = tail;
+  {
+    const cur = await db.query.task.findFirst({
+      where: eq(taskTable.id, taskId),
+      columns: { diffSummary: true },
+    });
+    preserveDispatchKindNote(cur?.diffSummary, diffSummary);
+  }
   const [failed] = await db
     .update(taskTable)
     .set({ status: "failed", diffSummary })
@@ -2573,16 +2631,21 @@ async function handleTransientQuotaBackoff(
 
   // 运行状态回到 queued(运行中曾置 running):任务不判 failed,退避后重试。
   try {
+    const curTransient = await run.db.query.task.findFirst({
+      where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+      columns: { diffSummary: true },
+    });
+    const transientNext = preserveDispatchKindNote(curTransient?.diffSummary, {
+      waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
+      // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
+      quotaKind: "transient",
+      ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
+    });
     const [updated] = await run.db
       .update(taskTable)
       .set({
         status: "queued",
-        diffSummary: {
-          waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
-          // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
-          quotaKind: "transient",
-          ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
-        },
+        diffSummary: transientNext,
       })
       .where(
         and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),

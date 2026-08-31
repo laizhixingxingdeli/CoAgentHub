@@ -54,6 +54,8 @@ export interface DispatchExecutorInput {
     endpointRef?: string;
     sessionRef?: string;
   } | null;
+  /** R2 缺省审计:findings 未显式指定 dispatchKind 而缺省为 fix 时的 diffSummary 留痕 */
+  initialDiffSummary?: Record<string, unknown> | null;
 }
 
 /** 群内分工信息(角色解绑后):成员在本群的角色集 + 可选分工提示词。 */

@@ -10,7 +10,11 @@ import type { GroupMessageFull } from "@server/lib/services/message-service";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
-import { sumAttemptTokenUsage, sumAttemptTokenUsageReason } from "./types";
+import {
+  asDiffSummaryRecord,
+  sumAttemptTokenUsage,
+  sumAttemptTokenUsageReason,
+} from "./types";
 
 /**
  * 任务状态通知(executor-task 拆分):任务状态落库后的 WS 推送
@@ -117,15 +121,24 @@ export async function markTaskCancelled(
 ): Promise<unknown> {
   const tokenUsage = sumAttemptTokenUsage(attempts);
   const tokenUsageReason = sumAttemptTokenUsageReason(attempts);
+  const cur = await db.query.task.findFirst({
+    where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+    columns: { diffSummary: true },
+  });
+  const prev = asDiffSummaryRecord(cur?.diffSummary);
+  const next: Record<string, unknown> = {
+    error: "stopped",
+    ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+    ...(tokenUsageReason ? { tokenUsageReason } : {}),
+  };
+  if (prev?.dispatchKindNote && !Object.hasOwn(next, "dispatchKindNote")) {
+    next.dispatchKindNote = prev.dispatchKindNote;
+  }
   const [updated] = await db
     .update(taskTable)
     .set({
       status: "cancelled",
-      diffSummary: {
-        error: "stopped",
-        ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-        ...(tokenUsageReason ? { tokenUsageReason } : {}),
-      },
+      diffSummary: next,
     })
     .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
     .returning();
