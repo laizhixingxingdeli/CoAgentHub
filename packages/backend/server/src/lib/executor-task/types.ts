@@ -231,6 +231,29 @@ export function asDiffSummaryRecord(
 }
 
 /**
+ * R2 缺省留痕跨生命周期保留(spec findings-ticket-hardcoded-to-fix-bypasses-l3
+ * R2 的审计口径):任何 diffSummary 覆盖都不得丢失既有 dispatchKindNote。
+ * 三条生命周期路径(队列内回填/取消落库、PATCH /tasks 结案)共用此单点,
+ * 禁止各自内联副本:
+ *
+ * - existing 不可解析为 record(null/数组/标量)→ 安全不写,原样返回 next;
+ * - existing 有 note 且 next 缺该键 → 以旧值补写(原地变更,返回 next);
+ * - next 已显式含该键(含 null)→ 以新值为准,保留规则的唯一出口。
+ *
+ * 无需保留时原样返回入参(引用相等),调用方据此判断是否需要落库。
+ */
+export function preserveDispatchKindNote(
+  existing: unknown,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const prev = asDiffSummaryRecord(existing);
+  if (prev?.dispatchKindNote && !Object.hasOwn(next, "dispatchKindNote")) {
+    next.dispatchKindNote = prev.dispatchKindNote;
+  }
+  return next;
+}
+
+/**
  * 平台采集的 token 字段并入 diffSummary(spec token-fields-clobbered-by-close
  * R1/R2),PATCH 结案与 detached 采集落库两条写入链共用同一口径:
  *

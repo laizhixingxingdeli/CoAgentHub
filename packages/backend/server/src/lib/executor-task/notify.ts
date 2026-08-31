@@ -11,7 +11,7 @@ import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import {
-  asDiffSummaryRecord,
+  preserveDispatchKindNote,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";
@@ -125,15 +125,11 @@ export async function markTaskCancelled(
     where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
     columns: { diffSummary: true },
   });
-  const prev = asDiffSummaryRecord(cur?.diffSummary);
-  const next: Record<string, unknown> = {
+  const next = preserveDispatchKindNote(cur?.diffSummary, {
     error: "stopped",
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(tokenUsageReason ? { tokenUsageReason } : {}),
-  };
-  if (prev?.dispatchKindNote && !Object.hasOwn(next, "dispatchKindNote")) {
-    next.dispatchKindNote = prev.dispatchKindNote;
-  }
+  });
   const [updated] = await db
     .update(taskTable)
     .set({

@@ -115,6 +115,7 @@ export {
   type DispatchExecutorInput,
   type GroupPromptInfo,
   mergePlatformTokenFields,
+  preserveDispatchKindNote,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";

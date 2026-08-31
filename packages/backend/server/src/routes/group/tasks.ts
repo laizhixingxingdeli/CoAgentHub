@@ -33,6 +33,7 @@ import {
   mergePlatformTokenFields,
   notifyTaskStatusChanged,
   postStatus,
+  preserveDispatchKindNote,
   readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
@@ -1448,19 +1449,17 @@ app
       // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写),两处共用
       // mergePlatformTokenFields。
       // R2 缺省留痕跨终态保留:任何 diffSummary 覆盖不得丢失 dispatchKindNote
+      // (共享单点,与 queue.ts 回填/notify.ts 取消落库同一 helper)。
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&
         summaryToWrite !== null &&
         !Array.isArray(summaryToWrite)
       ) {
-        const prevNote =
-          task.diffSummary && typeof task.diffSummary === "object" && !Array.isArray(task.diffSummary)
-            ? (task.diffSummary as Record<string, unknown>).dispatchKindNote
-            : undefined;
-        if (prevNote && !Object.hasOwn(summaryToWrite as Record<string, unknown>, "dispatchKindNote")) {
-          (summaryToWrite as Record<string, unknown>).dispatchKindNote = prevNote;
-        }
+        summaryToWrite = preserveDispatchKindNote(
+          task.diffSummary,
+          summaryToWrite as Record<string, unknown>,
+        );
       }
       if (
         diffSummary !== undefined &&

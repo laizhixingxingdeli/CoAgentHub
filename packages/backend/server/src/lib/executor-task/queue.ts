@@ -114,22 +114,11 @@ import {
   type GroupPromptInfo,
   type GroupQueue,
   mergePlatformTokenFields,
+  preserveDispatchKindNote,
   type QueuedRun,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";
-
-/** R2 缺省审计跨生命周期保留:任何 diffSummary 覆盖都需保留 dispatchKindNote */
-function preserveDispatchKindNote(
-  existing: unknown,
-  next: Record<string, unknown>,
-): Record<string, unknown> {
-  const prev = asDiffSummaryRecord(existing);
-  if (prev?.dispatchKindNote && !Object.hasOwn(next, "dispatchKindNote")) {
-    next.dispatchKindNote = prev.dispatchKindNote;
-  }
-  return next;
-}
 
 /* ---------------- 额度感知调度(票7) ---------------- */
 
