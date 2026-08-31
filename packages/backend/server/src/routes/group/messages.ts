@@ -8,7 +8,10 @@ import {
   REVIEW_REQUEST_EXAMPLE,
 } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
-import { maybeHandleControlCommand } from "@server/lib/control";
+import {
+  isControlCommand,
+  maybeHandleControlCommand,
+} from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
 import {
   DISPATCH_ALLOWED_ROLES,
@@ -435,6 +438,14 @@ app
             db,
             targetParticipantForDispatch,
           )) !== undefined;
+        // 控制通道与派发通道并行时不重复动作:正文命中停止/回滚指令(control
+        // 唯一判定 isControlCommand,同一正则)且控制通道会执行它(即非
+        // 「participant 定向执行器」)→ 跳过任务创建并留警告。participant 定向
+        // 执行器的消息在控制通道被视为任务而跳过(既有语义)→ 派发照常,不
+        // 受影响;role 定向必由控制通道执行 → 跳过;broadcast 不走派发入口,
+        // 行为不变。
+        const skipDispatchForControlCommand =
+          isControlCommand(body ?? "") && !isExecutorTarget;
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
         // coordinator/human/reviewer(群内角色)的发送者可携带;执行器/observer
         // 伪造一律丢弃。下发权只由群内角色裁定(spec R3 / ADR-0008 第三条),
@@ -446,7 +457,12 @@ app
         if (callback && !canCarryDispatcher) {
           warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
         }
-        if (isExecutorTarget && !specHash?.trim()) {
+        if (
+          isExecutorTarget &&
+          !specHash?.trim() &&
+          !skipDispatchForControlCommand
+        ) {
+          // 跳过派发的控制指令不产生「将建任务却缺 specHash」的警告(任务根本不会建)。
           warnings.push("SPEC_HASH_MISSING");
         }
         // Part A:dispatcher_session_id 仅 coordinator/human/reviewer 发送者可携带
@@ -560,26 +576,34 @@ app
           callbackRef,
           initialDiffSummary,
         };
-        // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发结果,
-        // 把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,spec R3)。
-        // 意外错误一律只记日志,绝不阻塞消息响应。
-        if (aud === "role") {
-          const outcome = await maybeDispatchExecutorTask(
-            db,
-            dispatchInput,
-          ).catch((err) => {
-            console.warn("[executor] 后台调度失败(忽略):", err);
-            return undefined;
-          });
-          if (outcome?.status === "role-unresolved") {
-            warnings.push(`ROLE_UNRESOLVED:${outcome.role}:${outcome.reason}`);
-          } else if (outcome?.status === "redispatch-stopped") {
-            warnings.push(`REDISPATCH_STOPPED:${outcome.parentTaskId}`);
-          }
+        // 控制通道已执行的控制指令跳过派发(判定见 skipDispatchForControlCommand
+        // 注释);participant 定向执行器与 broadcast 的行为均不受影响。
+        if (skipDispatchForControlCommand) {
+          warnings.push("CONTROL_COMMAND_SKIPPED_DISPATCH");
         } else {
-          void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>
-            console.warn("[executor] 后台调度失败(忽略):", err),
-          );
+          // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发
+          // 结果,把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,
+          // spec R3)。意外错误一律只记日志,绝不阻塞消息响应。
+          if (aud === "role") {
+            const outcome = await maybeDispatchExecutorTask(
+              db,
+              dispatchInput,
+            ).catch((err) => {
+              console.warn("[executor] 后台调度失败(忽略):", err);
+              return undefined;
+            });
+            if (outcome?.status === "role-unresolved") {
+              warnings.push(
+                `ROLE_UNRESOLVED:${outcome.role}:${outcome.reason}`,
+              );
+            } else if (outcome?.status === "redispatch-stopped") {
+              warnings.push(`REDISPATCH_STOPPED:${outcome.parentTaskId}`);
+            }
+          } else {
+            void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>
+              console.warn("[executor] 后台调度失败(忽略):", err),
+            );
+          }
         }
         if (warnings.length > 0) {
           c.header("X-CoAgentHub-Warning", warnings.join(","));

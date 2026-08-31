@@ -44,6 +44,17 @@ const STOP_RE = /^(?:停止|取消|停一下|stop)(?:\s+(\S+))?/i;
 /** 「回滚 [taskId]」;taskId 可缺省(回滚最近一次快照)。 */
 const ROLLBACK_RE = /^回滚\s*(\S+)?/;
 
+/**
+ * 「正文是否为停止/回滚控制指令」的唯一判定(派发入口与控制通道共用):命中
+ * 同一 STOP_RE/ROLLBACK_RE 语义,不复制第二份正则(messages 派发入口用它
+ * 避免给控制通道已处理的消息重复建任务)。ADR-0009:该判据以语法匹配代替
+ * 「消息是否属于控制通道」;正文恰好以停止开头但语义并非停止任务(如「停止
+ * 讨论,开始实现 X」)时不成立——既有歧义,明确保持按控制指令处理。
+ */
+export function isControlCommand(body: string): boolean {
+  return ROLLBACK_RE.test(body) || STOP_RE.test(body);
+}
+
 export interface ControlCommandInput {
   groupId: string;
   senderId: string;
