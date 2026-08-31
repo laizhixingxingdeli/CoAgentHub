@@ -28,6 +28,10 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  * 务(如「停止讨论,开始实现 X」)时不成立——既有歧义,本票明确保持(仍按控
  * 制指令处理)。
  *
+ * 回归:coordinator participant 为可被平台拉起同时绑定执行器 key 时,定向
+ * 控制指令仍归控制通道执行、派发入口跳过不建任务(旧判据「绑定执行器 key =
+ * 执行器任务目标」在该场景不成立,曾误建 detached task 并回 SPEC_HASH_MISSING)。
+ *
  * 集成部分与 executor-task-role-dispatch.test.ts 同款 fake bin:coordinator 绑
  * 定执行器 key(重复建任务的缺陷只有在目标可派发时才显形),派发会真实 spawn。
  */
@@ -61,7 +65,9 @@ const { createTestApp } = await import("./app");
 const { __resetExecutorQueueForTests } = await import(
   "../src/lib/executor-task/state"
 );
-const { isControlCommand } = await import("../src/lib/control");
+const { isControlCommand, isExecutorTaskTarget } = await import(
+  "../src/lib/control"
+);
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
@@ -85,6 +91,97 @@ describe("control 导出:isControlCommand 与控制通道共用唯一判定", ()
     ["", false],
   ])("isControlCommand(%j) → %s", (body, expected) => {
     expect(isControlCommand(body)).toBe(expected);
+  });
+});
+
+/**
+ * 派发入口与控制通道共用的唯一目标分类事实 isExecutorTaskTarget(ADR-0009):
+ * 以「本群唯一角色 = executor」代替「participant 是否绑定执行器 key」。该替代
+ * 仅在 coordinator participant 为可被平台拉起而同时绑定执行器 key 时不成立
+ * (本票回归的触发条件);此时按群角色归类为 coordinator,控制指令仍归控制
+ * 通道执行,而非当作 participant 定向执行器的任务。
+ */
+describe("control 导出:isExecutorTaskTarget 目标分类(按本群唯一角色)", () => {
+  const app = createTestApp();
+  // PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与
+  // executor-task-role-dispatch / l3-verdict-observability 同款 cast);
+  // isExecutorTaskTarget 只走共享的 query API。
+  const targetDb = testDb as unknown as Parameters<
+    typeof isExecutorTaskTarget
+  >[0];
+
+  async function register(name: string) {
+    const res = await app.request("/api/participants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (res.status === 409) {
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
+      const existing = list.find((p) => p.name === name);
+      if (existing) return { id: existing.id };
+    }
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  async function bindKey(id: string, key: string) {
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: null })
+      .where(eq(participantTable.executorKey, key));
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: key })
+      .where(eq(participantTable.id, id));
+  }
+
+  /** 建一个 owner 群并把 participant 以指定角色加为成员,返回群 id。 */
+  async function makeMember(participantId: string, roles: string[]) {
+    const owner = await register(`own-${randomUUID()}`);
+    const group = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ title: `t-${randomUUID()}` }),
+    });
+    expect(group.status).toBe(200);
+    const gid = (await group.json()) as { id: string };
+    const add = await app.request(`/api/groups/${gid.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": owner.id,
+      },
+      body: JSON.stringify({ participantId, roles }),
+    });
+    expect(add.status).toBe(200);
+    return gid.id;
+  }
+
+  it("绑定执行器 key 且本群角色 = executor → 是执行器任务目标", async () => {
+    const ex = await register(`ex-${randomUUID()}`);
+    await bindKey(ex.id, "executor");
+    const groupId = await makeMember(ex.id, ["executor"]);
+    expect(await isExecutorTaskTarget(targetDb, ex.id, groupId)).toBe(true);
+  });
+
+  it("绑定执行器 key 但本群角色 = coordinator → 不是执行器任务目标(本票回归)", async () => {
+    const coord = await register(`coord-${randomUUID()}`);
+    await bindKey(coord.id, "executor");
+    const groupId = await makeMember(coord.id, ["coordinator"]);
+    expect(await isExecutorTaskTarget(targetDb, coord.id, groupId)).toBe(false);
+  });
+
+  it("未绑定执行器 key 且本群角色 = executor → 不是执行器任务目标(无法派发)", async () => {
+    const ex = await register(`ex2-${randomUUID()}`);
+    const groupId = await makeMember(ex.id, ["executor"]);
+    expect(await isExecutorTaskTarget(targetDb, ex.id, groupId)).toBe(false);
   });
 });
 
@@ -311,6 +408,24 @@ describe("定向 coordinator 的控制指令不再重复建任务(派发入口�
     );
   }, 30_000);
 
+  /**
+   * 群主 = coordinator 且绑定执行器 key(为可被平台拉起而同时持有 key):
+   * 验收 1 的「已绑定 coordinator participant」路径。
+   */
+  async function setupGroupWithBoundCoordinator() {
+    const coordinator = await registerParticipant(
+      `ctl-skip-coord-${randomUUID()}`,
+    );
+    const codebuddy = await registerCodeBuddy();
+    await bindExecutorKey(codebuddy.id, "codebuddy");
+    const group = await createGroup(coordinator.id, "控制指令跳过派发");
+    await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
+    // 关键场景:coordinator 本群角色是 coordinator(群主),同时绑定执行器
+    // key(平台可拉起)。目标分类必须按本群角色,不能只看 key 绑定。
+    await bindExecutorKey(coordinator.id, "executor");
+    return { coordinator, codebuddy, group };
+  }
+
   it("验收1:「停止 <id>」定向 coordinator participant → 不建任务、响应头带跳过警告、控制照常回传", async () => {
     // coordinator 不绑执行器:participant 定向它的消息在控制通道不走
     // 「执行器即任务」分支,控制照常执行(⛔ 回传),派发入口跳过不建任务。
@@ -328,6 +443,34 @@ describe("定向 coordinator 的控制指令不再重复建任务(派发入口�
     await assertNoTaskForMessage(msg.id);
     await waitForGroupMessage(coordinator.id, group.id, (m) =>
       m.body.startsWith("⛔"),
+    );
+  }, 30_000);
+
+  it("验收1(回归):「停止/回滚 <id>」定向绑定执行器 key 的 coordinator participant → 不建任务、跳过警告、控制照常执行", async () => {
+    // coordinator 本群角色是 coordinator,但为可被平台拉起同时绑定执行器
+    // key。旧判据「participant 是否绑定执行器 key = 是否执行器任务目标」在此
+    // 不成立:它曾让控制通道把停止指令当作任务、派发入口建出 detached task 并
+    // 回 SPEC_HASH_MISSING。目标分类按本群唯一角色:coordinator → 控制通道。
+    const { coordinator, group } = await setupGroupWithBoundCoordinator();
+    for (const body of [`停止 ${randomUUID()}`, `回滚 ${randomUUID()}`]) {
+      const res = await postMessage(coordinator.id, group.id, {
+        body,
+        audience: "participant",
+        audienceRef: coordinator.id,
+      });
+      expect(res.status).toBe(200);
+      // 控制指令归控制通道 → 派发入口跳过(跳过警告),而非误建任务。
+      expect(res.headers.get("X-CoAgentHub-Warning")).toBe(
+        "CONTROL_COMMAND_SKIPPED_DISPATCH",
+      );
+      const msg = (await res.json()) as { id: string };
+      await assertNoTaskForMessage(msg.id);
+    }
+    // 控制照常执行:停止/回滚都由控制通道回传(⛔/❌),证明未被当作任务。
+    await waitForGroupMessage(
+      coordinator.id,
+      group.id,
+      (m) => m.body.startsWith("⛔") || m.body.startsWith("❌"),
     );
   }, 30_000);
 

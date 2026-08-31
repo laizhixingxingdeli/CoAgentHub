@@ -10,6 +10,7 @@ import {
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import {
   isControlCommand,
+  isExecutorTaskTarget,
   maybeHandleControlCommand,
 } from "@server/lib/control";
 import type { DataBase } from "@server/lib/database";
@@ -439,13 +440,17 @@ app
             targetParticipantForDispatch,
           )) !== undefined;
         // 控制通道与派发通道并行时不重复动作:正文命中停止/回滚指令(control
-        // 唯一判定 isControlCommand,同一正则)且控制通道会执行它(即非
-        // 「participant 定向执行器」)→ 跳过任务创建并留警告。participant 定向
-        // 执行器的消息在控制通道被视为任务而跳过(既有语义)→ 派发照常,不
-        // 受影响;role 定向必由控制通道执行 → 跳过;broadcast 不走派发入口,
-        // 行为不变。
+        // 唯一判定 isControlCommand,同一正则)且控制通道会执行它(即目标不
+        // 是执行器任务目标)→ 跳过任务创建并留警告。目标分类用 control 唯一
+        // 判定 isExecutorTaskTarget(本群角色 = executor),与控制通道同一事
+        // 实:coordinator participant 即使绑定执行器 key,participant 定向它
+        // 的控制指令仍归控制通道执行 → 这里跳过派发;执行器任务目标(既有语
+        // 义视为任务,控制通道跳过)→ 派发照常,不受影响;role 定向必由控制
+        // 通道执行 → 跳过;broadcast 不走派发入口,行为不变。
         const skipDispatchForControlCommand =
-          isControlCommand(body ?? "") && !isExecutorTarget;
+          isControlCommand(body ?? "") &&
+          (isRoleDispatch ||
+            !(await isExecutorTaskTarget(db, audienceRef, id)));
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
         // coordinator/human/reviewer(群内角色)的发送者可携带;执行器/observer
         // 伪造一律丢弃。下发权只由群内角色裁定(spec R3 / ADR-0008 第三条),

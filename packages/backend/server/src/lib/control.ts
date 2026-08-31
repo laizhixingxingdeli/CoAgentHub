@@ -27,11 +27,7 @@ import {
   postStatus,
   queuedExecutorTaskCount,
 } from "@server/lib/executor-task";
-import {
-  type ExecutorConfig,
-  effectiveExecutors,
-  findExecutorByParticipant,
-} from "@server/lib/executors";
+import { type ExecutorConfig, effectiveExecutors } from "@server/lib/executors";
 import { and, eq, inArray } from "drizzle-orm";
 
 /** 控制门角色门槛(与下发门 DISPATCH_ALLOWED_ROLES 同值但语义分开):
@@ -53,6 +49,43 @@ const ROLLBACK_RE = /^回滚\s*(\S+)?/;
  */
 export function isControlCommand(body: string): boolean {
   return ROLLBACK_RE.test(body) || STOP_RE.test(body);
+}
+
+/**
+ * 「audience=participant 定向到该 participant 时,它在本群是否执行器任务目标」
+ * 的唯一判定(messages 派发入口与控制通道共用)。
+ *
+ * ADR-0009 判据指名事实:
+ *  ① 这个判据拿「本群成员角色 = executor(且 participant 绑定执行器 key)」
+ *     代替什么?—— 代替「participant 是否绑定执行器 key」(仅看全局 key 绑定)
+ *     作为「该 participant 是否 participant 定向执行器的任务目标」的判据。
+ *  ② 那个代替在什么条件下不成立?—— 当一个 coordinator participant 为可被
+ *     平台拉起而同时绑定执行器 key 时:它在本群的唯一角色是 coordinator,
+ *     不应被当作执行器任务目标;仅看 key 绑定会把控制指令误分类成任务。
+ *
+ * 取本群角色而非 key 绑定,是因为 groupMember.roles 是「该 participant 在本
+ * 群」的分工事实,而 executorKey 是跨群的全局身份——任务目标分类应以前者
+ * 为准,同一事实不再有两套判定出处(派发入口与控制通道都用它)。
+ *
+ * 角色为 coordinator 时(即使绑 key),participant 定向它的是控制指令/协调
+ * 消息,归控制通道,不是执行器任务;角色为 executor 时保持既有语义(视为任
+ * 务)。绑定执行器 key 是派发的必要条件,故与角色合取(未绑 key 的 executor
+ * 行既派不出任务也不应被分类为执行器任务目标)。
+ */
+export async function isExecutorTaskTarget(
+  db: DataBase,
+  participantId: string,
+  groupId: string,
+): Promise<boolean> {
+  const target = await db.query.participant.findFirst({
+    where: (t, { eq: eqFn }) => eqFn(t.id, participantId),
+  });
+  if (!target?.executorKey) return false;
+  const membership = await db.query.groupMember.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.participantId, participantId), eqFn(t.groupId, groupId)),
+  });
+  return membership?.roles.includes("executor") ?? false;
 }
 
 export interface ControlCommandInput {
@@ -91,18 +124,18 @@ export async function maybeHandleControlCommand(
   // 下发权只由群内角色裁定);发送者是否执行器 participant 与其是否可发控制
   // 指令无关,控制门只检查上面的 CONTROL_ALLOWED_ROLES 角色门槛。
 
-  // 定向到执行器 participant 的消息是任务,不是控制指令(与桥 !ex 路由一致);
-  // 定向到其他非执行器 participant 的消息按普通指令识别(与现状对 non-hermes
-  // 非执行器一致)。
-  if (audience === "participant" && audienceRef) {
-    const targetParticipantId = audienceRef;
-    const target = await db.query.participant.findFirst({
-      where: (t, { eq: eqFn }) => eqFn(t.id, targetParticipantId),
-    });
-    if (target && (await findExecutorByParticipant(db, target))) {
-      console.log(`[control] 跳过:定向到执行器 participant(视为任务)`);
-      return;
-    }
+  // 定向到执行器任务目标的消息是任务,不是控制指令(与桥 !ex 路由一致);
+  // 定向到其他非执行器 participant 的消息按普通指令识别。目标分类用唯一判
+  // 定 isExecutorTaskTarget(本群角色 = executor):coordinator participant
+  // 即使绑定执行器 key 也不算执行器任务目标,控制指令照常执行(与派发入口
+  // 共用同一事实,不另写判定)。
+  if (
+    audience === "participant" &&
+    audienceRef &&
+    (await isExecutorTaskTarget(db, audienceRef, groupId))
+  ) {
+    console.log(`[control] 跳过:定向到执行器任务目标(视为任务)`);
+    return;
   }
 
   const rollback = body.match(ROLLBACK_RE);
