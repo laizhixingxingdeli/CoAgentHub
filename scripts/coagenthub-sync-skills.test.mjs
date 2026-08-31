@@ -93,12 +93,13 @@ describe("shared runtime-directory mapping (reused with R6)", () => {
     expect(resolveRuntimeSkillRoot("/h", "nope")).toBeNull();
   });
 
-  it("lists exactly the four known runtimes", () => {
+  it("lists exactly the five known runtimes", () => {
     expect(RUNTIME_SKILL_LAYOUTS.map((l) => l.runtime)).toEqual([
       "Claude Code",
       "codex",
       "atomcode",
       "codebuddy",
+      "pi",
     ]);
   });
 });
@@ -143,13 +144,13 @@ describe("planSync verdicts", () => {
   });
 
   it("skips a runtime whose root directory does not exist (no creation)", () => {
-    // home is empty: no .codex/.claude/.atomcode/.codebuddy present
+    // home is empty: no .codex/.claude/.atomcode/.codebuddy/.pi present
     const verdicts = planSync(home, ["executor"], {
       executor: { version: "deadbeef0000" },
     });
     expect(
       verdicts.filter((v) => v.status === "skipped").map((v) => v.runtime),
-    ).toEqual(["Claude Code", "codex", "atomcode", "codebuddy"]);
+    ).toEqual(["Claude Code", "codex", "atomcode", "codebuddy", "pi"]);
     // nothing was created
     expect(
       RUNTIME_SKILL_LAYOUTS.every((l) => !existsSync(join(home, l.subdir))),

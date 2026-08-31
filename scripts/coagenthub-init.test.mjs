@@ -142,6 +142,7 @@ describe("skill-sync runtime mapping reuse (spec: 复用同一份目录约定)",
       { runtime: "codex", subdir: ".codex/skills" },
       { runtime: "atomcode", subdir: ".atomcode/skills" },
       { runtime: "codebuddy", subdir: ".codebuddy/skills" },
+      { runtime: "pi", subdir: ".pi/skills" },
     ]);
   });
 

@@ -20,6 +20,10 @@ export const RUNTIME_SKILL_LAYOUTS = [
   { runtime: "codex", subdir: ".codex/skills" },
   { runtime: "atomcode", subdir: ".atomcode/skills" },
   { runtime: "codebuddy", subdir: ".codebuddy/skills" },
+  // pi 由 executor_config args 显式 --skill 加载(见 specs/onboard-pi-executor.md),
+  // 目录布局与其他 runtime 一致(~/.pi/skills/coagenthub-<role>/SKILL.md)。
+  // 2026-08-31 兑现:Pi 曾用 8/29 旧 executor skill 跑票,因不在此表而漏同步。
+  { runtime: "pi", subdir: ".pi/skills" },
 ];
 
 export const ROLE_SKILL_FILE_NAME = "SKILL.md";
