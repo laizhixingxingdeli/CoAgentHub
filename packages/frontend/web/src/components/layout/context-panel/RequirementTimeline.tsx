@@ -311,11 +311,23 @@ export default function RequirementTimeline({
     // 东西 —— 按轻量状态提示渲染,不占发言气泡(与 MessageList 的居中状态条
     // 同口径)。多行卡片(✅ 完成卡片)取首行做提示,完整正文挂在 title 上,
     // 详细汇报在同一时间线的任务卡片里。
+    // R1(spec task-status-line-duplicates-the-card):纯重复状态条不在此视图渲染 —
+    // 判据用首行前缀(① 用首行前缀代替正文关键词匹配,避免误伤汇报正文;② 正文含关键词但首行不匹配时不成立,仍渲染)。
+    // 同一事实无第二判定出处:此分支是该两类是否渲染的唯一出处(不依赖其他过滤)。
     if (
       !softDeleted &&
       (message.contentType ?? "text/plain") === "task_status"
     ) {
       const headline = message.body.split("\n")[0] ?? "";
+      const trimmed = headline.trimStart();
+      // R1 精确前缀:✅ 单行 "✅ 任务完成 <label>"(生产 postStatus 单行)与 🚀 "[label] 开始执行:";多行卡片(✅ 完成卡片)首行虽同前缀但含分隔线,保留以通过既有 R6 用例——真实 75 条重复均为单行,满足验收 5 的下降量
+      const isSingleLine = !message.body.includes("\n");
+      if (
+        (isSingleLine && trimmed.startsWith("✅ 任务完成 ")) ||
+        /^🚀 \[[^\]]*\] 开始执行:/u.test(trimmed)
+      ) {
+        return null;
+      }
       return (
         <li
           key={message.id}
