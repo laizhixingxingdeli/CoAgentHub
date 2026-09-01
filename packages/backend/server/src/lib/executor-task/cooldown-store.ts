@@ -1,6 +1,6 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 export const EXECUTOR_COOLDOWN_END_MS_FIELD = "executorCooldownEndMs";
 
@@ -28,7 +28,11 @@ export async function listPersistedExecutorCooldowns(
   db: DataBase,
 ): Promise<PersistedExecutorCooldown[]> {
   const rows = await db.query.task.findMany({
-    where: (task, { isNotNull }) => isNotNull(task.diffSummary),
+    where: (task, { isNotNull }) =>
+      and(
+        isNotNull(task.diffSummary),
+        sql`${task.diffSummary} ? ${EXECUTOR_COOLDOWN_END_MS_FIELD}`,
+      ),
     columns: {
       id: true,
       executorKey: true,
