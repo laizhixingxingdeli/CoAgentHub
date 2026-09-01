@@ -114,10 +114,9 @@ export function extractRateLimitRecoveryMs(
   // An absolute recovery timestamp is the provider's direct declaration. It
   // takes precedence over unrelated quantities such as rate/window sizes;
   // relative duration matching is only a fallback when no timestamp exists.
-  const absolute = clean.match(
-    /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/,
-  );
-  if (absolute) {
+  const absolutePattern =
+    /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/g;
+  for (const absolute of clean.matchAll(absolutePattern)) {
     const year = Number(absolute[1]);
     const month = Number(absolute[2]) - 1;
     const day = Number(absolute[3]);
@@ -125,18 +124,18 @@ export function extractRateLimitRecoveryMs(
     const minute = Number(absolute[5]);
     const second = absolute[6] ? Number(absolute[6]) : 0;
     const timezone = clean
-      .slice((absolute.index ?? 0) + absolute[0].length)
+      .slice(absolute.index + absolute[0].length)
       .match(/^\s*UTC([+-])(\d{1,2})(?::?(\d{2}))?/i);
-    if (timezone) {
-      const offsetMinutes =
+    const absoluteMs = timezone
+      ? Date.UTC(year, month, day, hour, minute, second) -
         (Number(timezone[2]) * 60 + Number(timezone[3] ?? 0)) *
-        (timezone[1] === "+" ? 1 : -1);
-      return (
-        Date.UTC(year, month, day, hour, minute, second) -
-        offsetMinutes * 60_000
-      );
-    }
-    return new Date(year, month, day, hour, minute, second, 0).getTime();
+          (timezone[1] === "+" ? 1 : -1) *
+          60_000
+      : new Date(year, month, day, hour, minute, second, 0).getTime();
+    // Lines commonly carry a past log timestamp before the provider's
+    // recovery message.  A past timestamp cannot be the recovery moment;
+    // continue to the provider-specific recovery forms below.
+    if (absoluteMs > now) return absoluteMs;
   }
   const around = clean.match(/resets?\s*around\s+(\d{1,2}):(\d{2})/i);
   if (around) {

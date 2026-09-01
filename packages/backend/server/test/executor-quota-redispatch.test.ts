@@ -323,6 +323,42 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
         ),
       ).toBe(new Date(2026, 7, 15, 18, 3, 10).getTime());
     });
+
+    it("过去的日志时间戳前缀不会遮蔽 resets around", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "2026-08-14T07:59:13.903Z WARN 429 rate limited; resets around 13:33",
+          now,
+        ),
+      ).toBe(new Date(2026, 7, 14, 13, 33, 0).getTime());
+    });
+
+    it("过去的日志时间戳前缀不会遮蔽 try again at", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "2026-08-14 07:59:13 ERROR 429 quota exhausted, try again at 3:32 PM",
+          now,
+        ),
+      ).toBe(new Date(2026, 7, 14, 15, 32, 0).getTime());
+    });
+
+    it("过去的日志时间戳前缀不会遮蔽 try again in", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "2026-08-14T07:59:13.903Z ERROR 429 slow down, try again in 300 seconds",
+          now,
+        ),
+      ).toBe(now + 300_000);
+    });
+
+    it("过去的日志时间戳前缀不会遮蔽中文绝对恢复时刻", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "2026-08-14T07:59:13.903Z ERROR 429 将在 2026-08-14 18:03:10 UTC+8 重置",
+          now,
+        ),
+      ).toBe(new Date(2026, 7, 14, 18, 3, 10).getTime());
+    });
   });
 
   /* ---------------- R7:解析时刻无效回退固定冷却 ---------------- */
