@@ -334,8 +334,12 @@ describe.sequential("协调者续跑完整验收", () => {
         parentPid: process.pid, // 本测试进程存活
       });
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      // 暂时 skip(父进程存活,条件可能变化)→ reason 为 null。
-      expect(result).toEqual({ kind: "skipped", reason: null });
+      // 暂时 skip(父进程存活,条件可能变化)→ 带诊断原因但保持 temporary。
+      expect(result).toEqual({
+        kind: "skipped",
+        permanence: "temporary",
+        reason: expect.stringContaining("仍存活"),
+      });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
     });
 
@@ -344,9 +348,13 @@ describe.sequential("协调者续跑完整验收", () => {
       // 先创建一条续跑任务(queued)。
       await maybeCreateCoordinatorResumeTask(runtimeDb, child);
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
-      // 再消费一次 → R3 命中,不重复创建(暂时 skip,reason 为 null)。
+      // 再消费一次 → R3 命中,不重复创建(带诊断原因的暂时 skip)。
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toEqual({ kind: "skipped", reason: null });
+      expect(result).toEqual({
+        kind: "skipped",
+        permanence: "temporary",
+        reason: expect.stringContaining("非终态续跑"),
+      });
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
     });
 
@@ -365,6 +373,7 @@ describe.sequential("协调者续跑完整验收", () => {
       // 永久 skip(R4 防环)→ reason 非 null。
       expect(result).toEqual({
         kind: "skipped",
+        permanence: "permanent",
         reason: expect.stringContaining("R4"),
       });
       expect(await resumeTasksFor(parent.id)).toHaveLength(1); // 只有这条 resume 本身
@@ -375,6 +384,7 @@ describe.sequential("协调者续跑完整验收", () => {
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
       expect(result).toEqual({
         kind: "skipped",
+        permanence: "permanent",
         reason: expect.stringContaining("终态"),
       });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
@@ -390,7 +400,11 @@ describe.sequential("协调者续跑完整验收", () => {
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
       // 暂时 skip:群成员角色运行期可变(该成员可恢复 coordinator),保留 pending
       // 下轮重试(specs/completion-events-never-reach-terminal-state.md §3.2)。
-      expect(result).toEqual({ kind: "skipped", reason: null });
+      expect(result).toEqual({
+        kind: "skipped",
+        permanence: "temporary",
+        reason: expect.stringContaining("不是协调者"),
+      });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
     });
 
@@ -1040,6 +1054,7 @@ describe.sequential("协调者续跑完整验收", () => {
       );
       expect(result).toEqual({
         kind: "skipped",
+        permanence: "permanent",
         reason: expect.stringContaining("不存在"),
       });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);

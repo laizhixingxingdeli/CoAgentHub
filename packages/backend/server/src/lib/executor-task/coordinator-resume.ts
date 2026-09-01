@@ -151,16 +151,18 @@ export function isResumeTask(task: { diffSummary: unknown }): boolean {
 /**
  * 续跑判定结果(specs/completion-events-never-reach-terminal-state.md R1/R2):
  * - `created`:已创建续跑任务,消费方把事件置 delivered;
- * - `skipped` 且 reason 为 null:**暂时**不可处理(父执行器仍存活 / 已存在非终态
- *   续跑 / 父执行方当前非协调者),条件可能变化,消费方**保持 pending** 下轮重试;
- * - `skipped` 且 reason 非 null:**永久**不可处理,条件不会自行变化
+ * - `skipped` 且 permanence 为 `temporary`:不可处理的运行期条件可能变化,
+ *   消费方**保持 pending**下轮重试;可选 reason 仅用于诊断,不写入 lastError;
+ * - `skipped` 且 permanence 为 `permanent`:条件不会自行变化
  *   (事件属续跑任务自身 / 无父任务 / 父任务查不到 / 父任务已终态),消费方把
  *   事件置 dead 并以 reason 写 lastError。静默丢弃是被禁止的降级 —— 永久 skip
- *   必须留下可审计的原因。
+ *   必须留下可审计的原因。显式 permanence 防止未来新增带诊断文本的暂时 skip
+ *   被误判为永久。
  */
 export type ResumeDecision =
   | { kind: "created" }
-  | { kind: "skipped"; reason: string | null };
+  | { kind: "skipped"; permanence: "permanent"; reason: string }
+  | { kind: "skipped"; permanence: "temporary"; reason?: string };
 
 /**
  * R1-R4 判定 + 创建续跑任务。子任务进入终态后调用;返回创建/跳过决策
@@ -179,6 +181,7 @@ export async function maybeCreateCoordinatorResumeTask(
   if (isResumeTask(childTask)) {
     return {
       kind: "skipped",
+      permanence: "permanent",
       reason: "事件属于续跑任务自身,按 R4 防环不产生续跑",
     };
   }
@@ -187,6 +190,7 @@ export async function maybeCreateCoordinatorResumeTask(
   if (!childTask.parentTaskId) {
     return {
       kind: "skipped",
+      permanence: "permanent",
       reason: "事件所属任务没有父任务(非被派发的子任务),无续跑对象",
     };
   }
@@ -196,12 +200,14 @@ export async function maybeCreateCoordinatorResumeTask(
   if (!parent) {
     return {
       kind: "skipped",
+      permanence: "permanent",
       reason: "父任务记录不存在(可能被删除),无法创建续跑",
     };
   }
   if (isTerminalTaskStatus(parent.status)) {
     return {
       kind: "skipped",
+      permanence: "permanent",
       reason: "父任务已处于终态,无续跑对象",
     };
   }
@@ -213,7 +219,11 @@ export async function maybeCreateCoordinatorResumeTask(
   if (
     !(await isCoordinatorTask(db, parent.groupId, parent.executorParticipantId))
   ) {
-    return { kind: "skipped", reason: null };
+    return {
+      kind: "skipped",
+      permanence: "temporary",
+      reason: "父任务执行方当前不是协调者,等待角色恢复后重试",
+    };
   }
 
   // R2:父协调进程仍存活 → 不创建(协调者会自己消费完成事件)。暂时。
@@ -221,7 +231,11 @@ export async function maybeCreateCoordinatorResumeTask(
     parent.executorPid !== null &&
     isExecutorProcessAlive(parent.executorPid)
   ) {
-    return { kind: "skipped", reason: null };
+    return {
+      kind: "skipped",
+      permanence: "temporary",
+      reason: "父协调进程仍存活,等待其自行消费完成事件",
+    };
   }
 
   // R3:只把平台标记的非终态续跑任务视为重复。父任务下可能同时存在
@@ -235,7 +249,13 @@ export async function maybeCreateCoordinatorResumeTask(
     ),
     columns: { id: true, diffSummary: true },
   });
-  if (existing.some(isResumeTask)) return { kind: "skipped", reason: null };
+  if (existing.some(isResumeTask)) {
+    return {
+      kind: "skipped",
+      permanence: "temporary",
+      reason: "父任务已有非终态续跑任务,等待该续跑任务终态",
+    };
+  }
 
   await createCoordinatorResumeTask(db, parent, childTask);
   return { kind: "created" };
@@ -560,10 +580,10 @@ async function createCoordinatorResumeTask(
  * 返回创建的续跑任务数。
  *
  * 判据(specs/completion-events-never-reach-terminal-state.md R1/R2):
- * 「永久/暂时」由 maybeCreateCoordinatorResumeTask 的判定原因区分 —— 永久类
- * 是事件自身事实(无父任务/父已终态/父不存在/自身是续跑任务),不会自行变化;
- * 暂时类依赖运行期可变状态(进程存活、成员角色、在途续跑)。本消费循环不另
- * 建第二套判据,reason 是同一事实的唯一判定出处。
+ * 「永久/暂时」由 maybeCreateCoordinatorResumeTask 的显式 permanence 判定 ——
+ * 永久类是事件自身事实(无父任务/父已终态/父不存在/自身是续跑任务),不会自行
+ * 变化;暂时类依赖运行期可变状态(进程存活、成员角色、在途续跑)。本消费循环
+ * 不另建第二套判据,permanence 是同一事实的唯一判定出处;reason 仅是诊断文本。
  */
 export async function consumePendingCompletionEvents(
   db: DataBase,
@@ -596,7 +616,7 @@ export async function consumePendingCompletionEvents(
         .update(taskCompletionEventTable)
         .set({ state: "delivered", deliveredAt: now, updatedAt: now })
         .where(eq(taskCompletionEventTable.id, event.id));
-    } else if (result.reason) {
+    } else if (result.permanence === "permanent") {
       // 永久不可处理:条件不会自行变化,保持 pending 只会无限重扫。条件更新
       // 防止覆盖 inbox 并发路径(claim→ack/fail)的写回。
       await db
