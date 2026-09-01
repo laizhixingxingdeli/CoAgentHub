@@ -56,6 +56,19 @@ Migrate the database before exercising the server:
   keep the exported surface stable and unit-testable.
 - TypeScript strict mode; run `check-types` after non-trivial changes.
 - No new dependencies without justification.
+- **Responsive breakpoints follow the container, not the viewport.** Tailwind's
+  `sm:`/`md:`/`lg:` are viewport-based. A component rendered inside a
+  fixed-width shell (the 480px group-settings drawer, a sidebar, a card) will
+  match `lg:` on a wide desktop while having only ~445px to work with — the
+  wide-layout branch then overflows a container that has no `overflow-x`, and
+  the excess is unreachable. When a component can render inside such a shell,
+  drive the layout from a prop (`embedded`), not from the viewport breakpoint.
+  Verify with `clientWidth === scrollWidth` on the shell, not by eyeballing.
+  (2026-09-02: `members.tsx` overflowed its drawer by 167px this way.)
+  ⚠️ Adding `overflow-x-auto` as a safety net can backfire: it makes the element
+  a scroll container, which under a `flex ... flex-col` parent loses
+  `min-height: auto` and collapses the child (observed: 1093px content squashed
+  to 57px). Fix the breakpoint, don't paper over it.
 
 ## Issue tracker
 
