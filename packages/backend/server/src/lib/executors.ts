@@ -111,6 +111,33 @@ export function extractRateLimitRecoveryMs(
   now: number = Date.now(),
 ): number | null {
   const clean = (text ?? "").replace(ANSI_RE, "");
+  // An absolute recovery timestamp is the provider's direct declaration. It
+  // takes precedence over unrelated quantities such as rate/window sizes;
+  // relative duration matching is only a fallback when no timestamp exists.
+  const absolute = clean.match(
+    /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/,
+  );
+  if (absolute) {
+    const year = Number(absolute[1]);
+    const month = Number(absolute[2]) - 1;
+    const day = Number(absolute[3]);
+    const hour = Number(absolute[4]);
+    const minute = Number(absolute[5]);
+    const second = absolute[6] ? Number(absolute[6]) : 0;
+    const timezone = clean
+      .slice((absolute.index ?? 0) + absolute[0].length)
+      .match(/^\s*UTC([+-])(\d{1,2})(?::?(\d{2}))?/i);
+    if (timezone) {
+      const offsetMinutes =
+        (Number(timezone[2]) * 60 + Number(timezone[3] ?? 0)) *
+        (timezone[1] === "+" ? 1 : -1);
+      return (
+        Date.UTC(year, month, day, hour, minute, second) -
+        offsetMinutes * 60_000
+      );
+    }
+    return new Date(year, month, day, hour, minute, second, 0).getTime();
+  }
   const around = clean.match(/resets?\s*around\s+(\d{1,2}):(\d{2})/i);
   if (around) {
     const target = new Date(now);
@@ -150,30 +177,6 @@ export function extractRateLimitRecoveryMs(
         ? 60_000
         : 3_600_000;
     return now + amount * multiplier;
-  }
-  const absolute = clean.match(
-    /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/,
-  );
-  if (absolute) {
-    const year = Number(absolute[1]);
-    const month = Number(absolute[2]) - 1;
-    const day = Number(absolute[3]);
-    const hour = Number(absolute[4]);
-    const minute = Number(absolute[5]);
-    const second = absolute[6] ? Number(absolute[6]) : 0;
-    const timezone = clean
-      .slice((absolute.index ?? 0) + absolute[0].length)
-      .match(/^\s*UTC([+-])(\d{1,2})(?::?(\d{2}))?/i);
-    if (timezone) {
-      const offsetMinutes =
-        (Number(timezone[2]) * 60 + Number(timezone[3] ?? 0)) *
-        (timezone[1] === "+" ? 1 : -1);
-      return (
-        Date.UTC(year, month, day, hour, minute, second) -
-        offsetMinutes * 60_000
-      );
-    }
-    return new Date(year, month, day, hour, minute, second, 0).getTime();
   }
   return null;
 }

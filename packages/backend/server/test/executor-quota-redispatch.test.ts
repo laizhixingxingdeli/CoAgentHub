@@ -314,6 +314,15 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
         new Date(2026, 7, 15, 3, 32, 0).getTime(),
       );
     });
+
+    it("同一行含速率窗口时长与绝对时刻→优先绝对时刻", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "429 rate limit: 100000 tokens per 1h, resets 2026-08-15 18:03:10 UTC+8",
+          now,
+        ),
+      ).toBe(new Date(2026, 7, 15, 18, 3, 10).getTime());
+    });
   });
 
   /* ---------------- R7:解析时刻无效回退固定冷却 ---------------- */

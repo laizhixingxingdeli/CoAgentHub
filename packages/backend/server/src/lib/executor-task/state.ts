@@ -162,13 +162,6 @@ const EXHAUSTED_QUOTA_SHAPES: ReadonlyArray<RegExp> = [
 ];
 
 /**
- * R7-a 相对时长单位表(倍率 ms):这是**单位表不是措辞表** —— 它随语言增长,
- * 不随供应方增长,且每一项都指向同一个可计算的量。单位至少覆盖
- * s/sec/secs/second(s)/秒、m/min/mins/minute(s)/分/分钟、h/hr/hour(s)/小时。
- */
-/** R7-a 中文绝对时刻(`将在 2026-08-31 18:03:10 重置`):按本地时区解析,与
- *  parseRateLimitRecoveryMs 的时钟解析同一口径。 */
-/**
  * R7-b 兜底:瞬时动词(无恢复信息时回落;标注:兜底,非分级主轴)。中英双语:
  * retry/backoff、重试/稍后/请求过于频繁。
  */
