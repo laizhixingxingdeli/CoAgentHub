@@ -339,17 +339,21 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
     deadTaskIds.length === 0
       ? []
       : await (async () => {
-          const toFail = candidates.filter((row) => deadTaskIds.includes(row.id));
+          const toFail = candidates.filter((row) =>
+            deadTaskIds.includes(row.id),
+          );
           const updated: typeof candidates = [];
           for (const row of toFail) {
-            let next = preserveDispatchKindNote(row.diffSummary, { error: "server-restart" });
+            let next = preserveDispatchKindNote(row.diffSummary, {
+              error: "server-restart",
+            });
             next = preserveRollbackSkipped(row.diffSummary, next);
             const [u] = await db
               .update(taskTable)
               .set({ status: "failed", diffSummary: next })
               .where(eq(taskTable.id, row.id))
               .returning();
-            if (u) updated.push(u as unknown as typeof candidates[number]);
+            if (u) updated.push(u as unknown as (typeof candidates)[number]);
           }
           return updated;
         })();
@@ -778,8 +782,13 @@ export async function enqueueTaskRun(
 
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    let nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
-    nextWaiting = preserveRollbackSkipped(task.diffSummary, nextWaiting as Record<string, unknown>);
+    let nextWaiting = preserveDispatchKindNote(task.diffSummary, {
+      waiting: `等待执行器额度恢复(预计 ${eta})`,
+    });
+    nextWaiting = preserveRollbackSkipped(
+      task.diffSummary,
+      nextWaiting as Record<string, unknown>,
+    );
     await db
       .update(taskTable)
       .set({ diffSummary: nextWaiting })
@@ -1071,8 +1080,13 @@ async function dispatchTask(
   // (泵送跳过冷却执行器,冷却结束定时器会自动派发,任务保持 queued 等待)。
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    let nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
-    nextWaiting = preserveRollbackSkipped(task.diffSummary, nextWaiting as Record<string, unknown>);
+    let nextWaiting = preserveDispatchKindNote(task.diffSummary, {
+      waiting: `等待执行器额度恢复(预计 ${eta})`,
+    });
+    nextWaiting = preserveRollbackSkipped(
+      task.diffSummary,
+      nextWaiting as Record<string, unknown>,
+    );
     try {
       await db
         .update(taskTable)
@@ -1744,7 +1758,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 写这棵工作树(L2 测试代跑),但 detached 任务 spawn 后队列槽位立即释放
       // —— 既有工作树闸看不见它。这里按「进程存活」把它计入占用,与执行器任务
       // 合并计数:协调进程的存活期间,同工作树的执行器任务与新协调票都排队。
-      if (isCoordinator) registerCoordinatorProcess(run.projectPath, handle.pid);
+      if (isCoordinator)
+        registerCoordinatorProcess(run.projectPath, handle.pid);
       console.log(
         `[executor] detached 任务已派发(cli),等待执行器回写终态: ${taskId}`,
       );
@@ -1855,7 +1870,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
         {
           const cur = await db.query.task.findFirst({
-            where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            where: and(
+              eq(taskTable.id, taskId),
+              eq(taskTable.groupId, groupId),
+            ),
             columns: { diffSummary: true },
           });
           let nextCancelled = preserveDispatchKindNote(cur?.diffSummary, {
@@ -1863,14 +1881,19 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             ...(tokenUsage !== undefined ? { tokenUsage } : {}),
             ...(tokenUsageReason ? { tokenUsageReason } : {}),
           });
-          nextCancelled = preserveRollbackSkipped(cur?.diffSummary, nextCancelled);
+          nextCancelled = preserveRollbackSkipped(
+            cur?.diffSummary,
+            nextCancelled,
+          );
           const [cancelled] = await db
             .update(taskTable)
             .set({
               status: "cancelled",
               diffSummary: nextCancelled,
             })
-            .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
+            .where(
+              and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            )
             .returning();
           if (cancelled) {
             await notifyTaskStatusChanged(
@@ -2095,7 +2118,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // R2 缺省留痕跨终态保留:合并既有 dispatchKindNote / rollbackSkipped
         {
           const cur = await db.query.task.findFirst({
-            where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
+            where: and(
+              eq(taskTable.id, taskId),
+              eq(taskTable.groupId, groupId),
+            ),
             columns: { diffSummary: true },
           });
           preserveDispatchKindNote(cur?.diffSummary, diffSummary);
@@ -2234,10 +2260,15 @@ function handleStallAlert(run: QueuedRun): void {
     // 警示标记落库(diffSummary.stallAlerted),任务面板行加黄色警示样式。
     try {
       const cur = await run.db.query.task.findFirst({
-        where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+        where: and(
+          eq(taskTable.id, run.taskId),
+          eq(taskTable.groupId, run.groupId),
+        ),
         columns: { diffSummary: true },
       });
-      let nextAlert = preserveDispatchKindNote(cur?.diffSummary, { stallAlerted: true });
+      let nextAlert = preserveDispatchKindNote(cur?.diffSummary, {
+        stallAlerted: true,
+      });
       nextAlert = preserveRollbackSkipped(cur?.diffSummary, nextAlert);
       await run.db
         .update(taskTable)
@@ -2663,7 +2694,10 @@ async function handleTransientQuotaBackoff(
   // 运行状态回到 queued(运行中曾置 running):任务不判 failed,退避后重试。
   try {
     const curTransient = await run.db.query.task.findFirst({
-      where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
+      where: and(
+        eq(taskTable.id, run.taskId),
+        eq(taskTable.groupId, run.groupId),
+      ),
       columns: { diffSummary: true },
     });
     let transientNext = preserveDispatchKindNote(curTransient?.diffSummary, {
@@ -2672,7 +2706,10 @@ async function handleTransientQuotaBackoff(
       quotaKind: "transient",
       ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
     });
-    transientNext = preserveRollbackSkipped(curTransient?.diffSummary, transientNext as Record<string, unknown>);
+    transientNext = preserveRollbackSkipped(
+      curTransient?.diffSummary,
+      transientNext as Record<string, unknown>,
+    );
     const [updated] = await run.db
       .update(taskTable)
       .set({
@@ -2850,7 +2887,8 @@ async function handleFailure(
           columns: { diffSummary: true },
         });
         const base =
-          asDiffSummaryRecord(cur?.diffSummary) ?? ({} as Record<string, unknown>);
+          asDiffSummaryRecord(cur?.diffSummary) ??
+          ({} as Record<string, unknown>);
         const existing = asDiffSummaryRecord(cur?.diffSummary);
         const next: Record<string, unknown> = { ...base, rollbackSkipped };
         if (
@@ -2882,7 +2920,14 @@ async function handleFailure(
         // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
         const msg = `${reason};回滚失败,终止重试: ${res.message}`;
         console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
-        await failTask(db, taskId, msg, run.retryCount, undefined, run.attempts);
+        await failTask(
+          db,
+          taskId,
+          msg,
+          run.retryCount,
+          undefined,
+          run.attempts,
+        );
         await postStatus(
           db,
           run.groupId,
@@ -3023,7 +3068,10 @@ async function countCommitsAfterCheckpoint(
 ): Promise<number | null> {
   const head = await gitExec(["rev-parse", "HEAD"], repoRoot);
   if (head.status !== 0) return null;
-  const count = await gitExec(["rev-list", "--count", `${ref}..HEAD`], repoRoot);
+  const count = await gitExec(
+    ["rev-list", "--count", `${ref}..HEAD`],
+    repoRoot,
+  );
   if (count.status !== 0) return null;
   const n = parseInt((count.stdout ?? "").trim(), 10);
   return Number.isFinite(n) ? n : null;
@@ -3248,7 +3296,7 @@ function buildReportSection(
     if (reviewRequestCarryAllowed(dispatchKind, groupHasReviewer)) {
       const payloadLine =
         dispatchKind === "fix"
-          ? "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷且带 `\"lite\": true`（fix 票走 L3 精简档:免 spec 对照,只检 diff 架构质量;参见 spec §3.10 / coordinator skill §4.2）。"
+          ? 'PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷且带 `"lite": true`（fix 票走 L3 精简档:免 spec 对照,只检 diff 架构质量;参见 spec §3.10 / coordinator skill §4.2）。'
           : "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（完整档,不带 `lite`;参见 spec §3.10 / coordinator skill §4.2）。";
       return [
         "## 汇报格式要求(stdout 请按此输出)",

@@ -385,12 +385,9 @@ async function assertCoordinationCloseIntegrity(
         "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场)。",
       );
     }
-    if (
-      task.dispatchKind === "fix" &&
-      !reviewRequestLiteFlag(diffSummary)
-    ) {
+    if (task.dispatchKind === "fix" && !reviewRequestLiteFlag(diffSummary)) {
       throw coordinationCloseError(
-        "fix 票的 review_request 必须带 \"lite\": true(L3 精简档:免 spec 对照,只检 diff 架构质量)。",
+        'fix 票的 review_request 必须带 "lite": true(L3 精简档:免 spec 对照,只检 diff 架构质量)。',
       );
     }
   }
