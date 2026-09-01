@@ -10,6 +10,7 @@ export interface PersistedExecutorCooldown {
   taskId: string;
   executorKey: string;
   endMs: number;
+  source?: "parsed" | "fallback";
 }
 
 function asDiffSummary(value: unknown): Record<string, unknown> | null {
@@ -43,7 +44,13 @@ export async function listPersistedExecutorCooldowns(
     if (!diffSummary) continue;
     const endMs = diffSummary[EXECUTOR_COOLDOWN_END_MS_FIELD];
     if (typeof endMs !== "number" || !Number.isFinite(endMs)) continue;
-    records.push({ taskId: row.id, executorKey: row.executorKey, endMs });
+    const source = diffSummary.executorCooldownSource;
+    records.push({
+      taskId: row.id,
+      executorKey: row.executorKey,
+      endMs,
+      source: source === "parsed" || source === "fallback" ? source : undefined,
+    });
   }
   return records;
 }

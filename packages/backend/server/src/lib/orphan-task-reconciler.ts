@@ -23,7 +23,11 @@ import {
   taskOutputTail,
 } from "./executor-task";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
-import { enterCooldown, MIN_EFFECTIVE_COOLDOWN_MS, normalizeCooldownEnd } from "./executor-task/queue";
+import {
+  enterCooldown,
+  MIN_EFFECTIVE_COOLDOWN_MS,
+  normalizeCooldownEnd,
+} from "./executor-task/queue";
 import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
   formatEta,
@@ -109,6 +113,7 @@ export async function reconcileOrphanTasks(
     const quota = task.executorKey !== null && isQuotaFailure([tail]);
     let error = reason;
     let cooldownEnd: number | null = null;
+    let cooldownSource: "parsed" | "fallback" = "fallback";
     const extra: Record<string, unknown> = {};
     if (quota) {
       const parsedMs = parseRateLimitRecoveryMs(tail, now.getTime());
@@ -118,6 +123,12 @@ export async function reconcileOrphanTasks(
       );
       error = `${reason}(执行器额度限制,预计 ${formatEta(cooldownEnd)} 恢复)`;
       extra[EXECUTOR_COOLDOWN_END_MS_FIELD] = cooldownEnd;
+      cooldownSource =
+        parsedMs !== null &&
+        parsedMs > now.getTime() + MIN_EFFECTIVE_COOLDOWN_MS
+          ? "parsed"
+          : "fallback";
+      extra.executorCooldownSource = cooldownSource;
       if (
         parsedMs !== null &&
         parsedMs <= now.getTime() + MIN_EFFECTIVE_COOLDOWN_MS
@@ -164,6 +175,7 @@ export async function reconcileOrphanTasks(
       enterCooldown(
         { key: task.executorKey, label: task.executorKey },
         cooldownEnd,
+        cooldownSource,
         { db, taskId: task.id },
       );
     }

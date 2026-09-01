@@ -10,7 +10,15 @@ import {
 } from "@laizhixingxingdeli/database/schema";
 import { startServer } from "@server/lib/server-startup";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
@@ -60,10 +68,12 @@ const {
   __resetExecutorQueueForTests,
   cooldownEndMs,
   executorCooldowns,
+  executorCooldownRecords,
   getRedispatchFailureLimit,
   isInCooldown,
 } = await import("../src/lib/executor-task/state");
 const {
+  enterCooldown,
   restoreExecutorCooldowns,
   normalizeCooldownEnd,
   MIN_EFFECTIVE_COOLDOWN_MS,
@@ -323,6 +333,35 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       const now = Date.now();
       const future = now + MIN_EFFECTIVE_COOLDOWN_MS + 1000;
       expect(normalizeCooldownEnd(future, now)).toBe(future);
+    });
+  });
+
+  describe("冷却来源合并与恢复时刻单点解析(R1-R5)", () => {
+    it("parsed 冷却不会被未到期 fallback 覆盖,且中文 UTC+8 时刻可解析", () => {
+      vi.useFakeTimers();
+      const now = new Date(2026, 7, 31, 10, 0, 0).getTime();
+      vi.setSystemTime(now);
+      const parsedEnd = now + 60 * 60_000;
+      const fallbackEnd = now + 5 * 60 * 60_000;
+      enterCooldown(
+        { key: "codebuddy", label: "codebuddy" },
+        parsedEnd,
+        "parsed",
+      );
+      enterCooldown(
+        { key: "codebuddy", label: "codebuddy" },
+        fallbackEnd,
+        "fallback",
+      );
+      expect(executorCooldowns.get("codebuddy")).toBe(parsedEnd);
+      expect(executorCooldownRecords.get("codebuddy")?.source).toBe("parsed");
+      expect(
+        parseRateLimitRecoveryMs(
+          "429 将在 2026-08-31 18:03:10 UTC+8 重置",
+          now,
+        ),
+      ).toBe(new Date(2026, 7, 31, 18, 3, 10).getTime());
+      vi.useRealTimers();
     });
   });
 

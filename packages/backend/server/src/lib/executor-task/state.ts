@@ -1,6 +1,6 @@
 import {
   type DispatchPolicy,
-  parseRateLimitRecoveryMs,
+  extractRateLimitRecoveryMs,
   type RetryPolicy,
   readDispatchPolicy,
 } from "@server/lib/executors";
@@ -100,6 +100,16 @@ let redispatchFailureLimit = 5;
  * 此 Map;额度失败时同步写入 task.diffSummary,启动时由 queue 恢复未到期记录。
  */
 export const executorCooldowns = new Map<string, number>();
+export type ExecutorCooldownSource = "parsed" | "fallback";
+export interface ExecutorCooldownRecord {
+  endMs: number;
+  source: ExecutorCooldownSource;
+  taskId?: string;
+}
+export const executorCooldownRecords = new Map<
+  string,
+  ExecutorCooldownRecord
+>();
 
 /** 冷却结束定时器(executorKey → timer):到期清冷却并泵一次,让排队任务自动派发。 */
 export const cooldownTimers = new Map<string, NodeJS.Timeout>();
@@ -156,20 +166,8 @@ const EXHAUSTED_QUOTA_SHAPES: ReadonlyArray<RegExp> = [
  * 不随供应方增长,且每一项都指向同一个可计算的量。单位至少覆盖
  * s/sec/secs/second(s)/秒、m/min/mins/minute(s)/分/分钟、h/hr/hour(s)/小时。
  */
-const RELATIVE_RECOVERY_UNITS_MS: ReadonlyArray<readonly [RegExp, number]> = [
-  [/\b(\d+)\s*(?:sec(?:ond)?s?|s)\b/i, 1_000],
-  [/\b(\d+)\s*(?:min(?:ute)?s?|m)\b/i, 60_000],
-  [/\b(\d+)\s*(?:hours?|hrs?|h)\b/i, 3_600_000],
-  [/(\d+)\s*(?:分钟|分)/, 60_000],
-  [/(\d+)\s*秒/, 1_000],
-  [/(\d+)\s*小时/, 3_600_000],
-];
-
 /** R7-a 中文绝对时刻(`将在 2026-08-31 18:03:10 重置`):按本地时区解析,与
  *  parseRateLimitRecoveryMs 的时钟解析同一口径。 */
-const CN_ABSOLUTE_DATETIME_RE =
-  /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/;
-
 /**
  * R7-b 兜底:瞬时动词(无恢复信息时回落;标注:兜底,非分级主轴)。中英双语:
  * retry/backoff、重试/稍后/请求过于频繁。
@@ -186,26 +184,8 @@ const TRANSIENT_RETRY_VERB_RE =
  * 回退固定冷却)。
  */
 function recoveryDistanceMs(line: string, nowMs: number): number | null {
-  for (const [unitRe, unitMs] of RELATIVE_RECOVERY_UNITS_MS) {
-    const m = unitRe.exec(line);
-    if (m) return Number(m[1]) * unitMs;
-  }
-  const clockTs = parseRateLimitRecoveryMs(line, nowMs);
-  if (clockTs !== null) return clockTs - nowMs;
-  const dt = CN_ABSOLUTE_DATETIME_RE.exec(line);
-  if (dt) {
-    const ts = new Date(
-      Number(dt[1]),
-      Number(dt[2]) - 1,
-      Number(dt[3]),
-      Number(dt[4]),
-      Number(dt[5]),
-      dt[6] ? Number(dt[6]) : 0,
-      0,
-    ).getTime();
-    return ts - nowMs;
-  }
-  return null;
+  const recoveryTs = extractRateLimitRecoveryMs(line, nowMs);
+  return recoveryTs === null ? null : recoveryTs - nowMs;
 }
 
 /**
@@ -269,7 +249,10 @@ function isDetectPatternsDefinitionLine(line: string): boolean {
 
 /** 是否任务书逐字回显(自指):命中行整行出现在任务书正文里 → 不算证据。
  *  只做「整行包含」判定(逐字回显),不抓长行里夹带的任务书片段。 */
-function isTaskBookEcho(line: string, taskBook: string | null | undefined): boolean {
+function isTaskBookEcho(
+  line: string,
+  taskBook: string | null | undefined,
+): boolean {
   if (!taskBook) return false;
   const trimmed = line.trim();
   return trimmed.length > 0 && taskBook.includes(trimmed);
@@ -298,7 +281,9 @@ export function classifyQuotaFailure(
       const normalized = lower.replace(/-/g, " ");
       if (
         !rateLimitPatterns.some(
-          (p) => lower.includes(p.toLowerCase()) || normalized.includes(p.toLowerCase()),
+          (p) =>
+            lower.includes(p.toLowerCase()) ||
+            normalized.includes(p.toLowerCase()),
         )
       ) {
         continue;
@@ -309,7 +294,7 @@ export function classifyQuotaFailure(
       // 结构证据:非零退出码 / 真实恢复时刻 / 提供方错误行形状。
       const hasEvidence =
         nonzeroExit ||
-        parseRateLimitRecoveryMs(line) !== null ||
+        extractRateLimitRecoveryMs(line) !== null ||
         PROVIDER_ERROR_LINE_SHAPES.some((re) => re.test(line));
       if (hasEvidence) {
         return {
@@ -585,6 +570,7 @@ export function __resetExecutorQueueForTests(): void {
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
   executorCooldowns.clear();
+  executorCooldownRecords.clear();
   const policy = readDispatchPolicy();
   maxParallelGroups = policy.maxParallelGroups;
   maxConcurrentPerWorkspace = policy.maxConcurrentPerWorkspace;

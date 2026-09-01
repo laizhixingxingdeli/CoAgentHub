@@ -99,11 +99,25 @@ export function parseRateLimitRecoveryMs(
   now: number = Date.now(),
 ): number | null {
   const clean = (text ?? "").replace(ANSI_RE, "");
+  return extractRateLimitRecoveryMs(clean, now);
+}
+
+/**
+ * Extract the provider's recovery moment.  This is the single recovery-time
+ * authority used by both cooldown calculation and quota classification.
+ */
+export function extractRateLimitRecoveryMs(
+  text: string,
+  now: number = Date.now(),
+): number | null {
+  const clean = (text ?? "").replace(ANSI_RE, "");
   const around = clean.match(/resets?\s*around\s+(\d{1,2}):(\d{2})/i);
   if (around) {
     const target = new Date(now);
     target.setHours(Number(around[1]), Number(around[2]), 0, 0);
-    return target.getTime() > now ? target.getTime() : target.getTime() + 24 * 60 * 60 * 1000;
+    return target.getTime() > now
+      ? target.getTime()
+      : target.getTime() + 24 * 60 * 60 * 1000;
   }
   // "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"(24 小时制):
   // 事故原文 "try again at 3:32 PM" 即此形态(quota-exhaustion R1/R2)。
@@ -116,11 +130,50 @@ export function parseRateLimitRecoveryMs(
     if (meridiem === "am" && hour === 12) hour = 0;
     const target = new Date(now);
     target.setHours(hour, minute, 0, 0);
-    return target.getTime() > now ? target.getTime() : target.getTime() + 24 * 60 * 60 * 1000;
+    return target.getTime() > now
+      ? target.getTime()
+      : target.getTime() + 24 * 60 * 60 * 1000;
   }
   const retryIn = clean.match(/try again in\s+(\d+)\s*seconds?/i);
   if (retryIn) {
     return now + Number(retryIn[1]) * 1000;
+  }
+  const relative = clean.match(
+    /(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|秒|分钟|分|小时)/i,
+  );
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2].toLowerCase();
+    const multiplier = /^(?:s|sec|secs|second|seconds|秒)$/.test(unit)
+      ? 1_000
+      : /^(?:m|min|mins|minute|minutes|分|分钟)$/.test(unit)
+        ? 60_000
+        : 3_600_000;
+    return now + amount * multiplier;
+  }
+  const absolute = clean.match(
+    /(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?/,
+  );
+  if (absolute) {
+    const year = Number(absolute[1]);
+    const month = Number(absolute[2]) - 1;
+    const day = Number(absolute[3]);
+    const hour = Number(absolute[4]);
+    const minute = Number(absolute[5]);
+    const second = absolute[6] ? Number(absolute[6]) : 0;
+    const timezone = clean
+      .slice((absolute.index ?? 0) + absolute[0].length)
+      .match(/^\s*UTC([+-])(\d{1,2})(?::?(\d{2}))?/i);
+    if (timezone) {
+      const offsetMinutes =
+        (Number(timezone[2]) * 60 + Number(timezone[3] ?? 0)) *
+        (timezone[1] === "+" ? 1 : -1);
+      return (
+        Date.UTC(year, month, day, hour, minute, second) -
+        offsetMinutes * 60_000
+      );
+    }
+    return new Date(year, month, day, hour, minute, second, 0).getTime();
   }
   return null;
 }

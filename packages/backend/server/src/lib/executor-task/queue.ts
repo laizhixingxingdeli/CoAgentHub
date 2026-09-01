@@ -50,11 +50,7 @@ import {
   notifyTaskStatusChanged,
   postStatus,
 } from "./notify";
-import {
-  appendTaskOutput,
-  releaseTaskOutput,
-  taskOutputTail,
-} from "./output-buffer";
+import { appendTaskOutput, releaseTaskOutput } from "./output-buffer";
 import {
   createExecutorOutputParser,
   type OutputEntry,
@@ -80,6 +76,8 @@ import {
   clearRunTimers,
   cooldownEndMs,
   cooldownTimers,
+  type ExecutorCooldownSource,
+  executorCooldownRecords,
   executorCooldowns,
   formatEta,
   getA2ASilenceTimeoutMs,
@@ -150,10 +148,51 @@ export function normalizeCooldownEnd(
 export function enterCooldown(
   ex: Pick<ExecutorConfig, "key" | "label">,
   endMs: number,
+  sourceOrPersisted:
+    | ExecutorCooldownSource
+    | { db: DataBase; taskId: string } = "fallback",
   persisted?: { db: DataBase; taskId: string },
 ): number {
-  const end = endMs;
+  // Keep the pre-source call shape usable by existing internal/test callers;
+  // production call sites pass the source explicitly.
+  const source: ExecutorCooldownSource =
+    typeof sourceOrPersisted === "string" ? sourceOrPersisted : "fallback";
+  const effectivePersisted =
+    typeof sourceOrPersisted === "string" ? persisted : sourceOrPersisted;
+  const previous = executorCooldownRecords.get(ex.key);
+  const isActive = previous !== undefined && previous.endMs > Date.now();
+  const discarded =
+    source === "fallback" && previous?.source === "parsed" && isActive
+      ? endMs
+      : undefined;
+  const end =
+    discarded !== undefined
+      ? (previous?.endMs ?? endMs)
+      : previous === undefined ||
+          previous.endMs <= Date.now() ||
+          (source === "parsed" && previous.source === "fallback")
+        ? endMs
+        : Math.max(previous.endMs, endMs);
+  const record = {
+    endMs: end,
+    source: discarded === undefined ? source : (previous?.source ?? source),
+    taskId: effectivePersisted?.taskId ?? previous?.taskId,
+  } satisfies import("./state").ExecutorCooldownRecord;
+  executorCooldownRecords.set(ex.key, record);
   executorCooldowns.set(ex.key, end);
+  if (discarded !== undefined) {
+    console.log(
+      `[executor] 丢弃 ${ex.key} fallback 冷却 ${endMs},已有 parsed 冷却 ${end}:仍未到期`,
+    );
+    if (effectivePersisted)
+      void appendCooldownAudit(
+        effectivePersisted.db,
+        effectivePersisted.taskId,
+        end,
+        source,
+        discarded,
+      );
+  }
   const prev = cooldownTimers.get(ex.key);
   if (prev) clearTimeout(prev);
   const timer = setTimeout(
@@ -163,11 +202,12 @@ export function enterCooldown(
       if (cooldownTimers.get(ex.key) !== timer) return;
       cooldownTimers.delete(ex.key);
       executorCooldowns.delete(ex.key);
+      executorCooldownRecords.delete(ex.key);
       console.log(`[executor] 执行器 ${ex.key} 额度冷却结束,恢复派发`);
-      if (persisted) {
+      if (effectivePersisted) {
         void clearPersistedExecutorCooldown(
-          persisted.db,
-          persisted.taskId,
+          effectivePersisted.db,
+          effectivePersisted.taskId,
         ).catch((error) => {
           console.warn(
             `[executor] 清理持久化额度冷却失败(${ex.key}): ${error}`,
@@ -183,6 +223,38 @@ export function enterCooldown(
     `[executor] 执行器 ${ex.key} 触发额度冷却,预计 ${formatEta(end)} 恢复`,
   );
   return end;
+}
+
+async function appendCooldownAudit(
+  db: DataBase,
+  taskId: string,
+  endMs: number,
+  source: ExecutorCooldownSource,
+  discardedEndMs: number,
+): Promise<void> {
+  const row = await db.query.task.findFirst({
+    where: (task, { eq }) => eq(task.id, taskId),
+    columns: { diffSummary: true },
+  });
+  const base =
+    row?.diffSummary !== null &&
+    row?.diffSummary !== undefined &&
+    typeof row.diffSummary === "object" &&
+    !Array.isArray(row.diffSummary)
+      ? (row.diffSummary as Record<string, unknown>)
+      : {};
+  await db
+    .update(taskTable)
+    .set({
+      diffSummary: {
+        ...base,
+        executorCooldownSource: source,
+        executorCooldownEndMs: endMs,
+        discardedCooldownEndMs: discardedEndMs,
+        cooldownDiscardReason: "已有未到期 parsed 冷却,拒绝 fallback 覆盖",
+      },
+    })
+    .where(eq(taskTable.id, taskId));
 }
 
 /**
@@ -213,6 +285,7 @@ export async function restoreExecutorCooldowns(
     enterCooldown(
       { key: record.executorKey, label: record.executorKey },
       record.endMs,
+      record.source ?? "fallback",
       { db, taskId: record.taskId },
     );
   }
@@ -1991,6 +2064,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           const eta = formatEta(cooldownEnd);
           const extra: Record<string, unknown> = {
             [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+            executorCooldownSource:
+              parsedMs !== null &&
+              parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+                ? "parsed"
+                : "fallback",
             // 与 handleQuotaFailure 出口同口径的额度分级留痕(R4/验收 7)。
             quotaKind: "exhausted",
             quotaMatchedLine: timeoutQuota.matchedLine,
@@ -2010,7 +2088,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
               extra,
               afterPersisted: () =>
-                enterCooldown(ex, cooldownEnd, { db, taskId }),
+                enterCooldown(
+                  ex,
+                  cooldownEnd,
+                  parsedMs !== null &&
+                    parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+                    ? "parsed"
+                    : "fallback",
+                  { db, taskId },
+                ),
             },
           );
         } else {
@@ -2810,6 +2896,10 @@ async function handleQuotaFailure(
   const eta = formatEta(cooldownEnd);
   const extra: Record<string, unknown> = {
     [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+    executorCooldownSource:
+      parsedMs !== null && parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+        ? "parsed"
+        : "fallback",
     // 额度分级留痕(spec transient-ratelimit-… R4):本出口只处理 exhausted,
     // 与 transient 的 per-run 退避留痕并列,事后可审计分级准确性。
     quotaKind: "exhausted",
@@ -2826,10 +2916,14 @@ async function handleQuotaFailure(
     message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
     extra,
     afterPersisted: () =>
-      enterCooldown(run.ex, cooldownEnd, {
-        db: run.db,
-        taskId: run.taskId,
-      }),
+      enterCooldown(
+        run.ex,
+        cooldownEnd,
+        parsedMs !== null && parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+          ? "parsed"
+          : "fallback",
+        { db: run.db, taskId: run.taskId },
+      ),
   });
 }
 

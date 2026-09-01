@@ -1566,6 +1566,7 @@ app
       // 命中后同口径进入执行器冷却并留痕(与 queue 进程退出/超时/孤儿收敛三条
       // 路径一致)。
       let quotaCooldownEnd: number | undefined;
+      let quotaCooldownSource: "parsed" | "fallback" = "fallback";
       let quotaEx: Awaited<ReturnType<typeof findExecutorByKey>> | undefined;
       let quotaErrorText = "";
       if (
@@ -1628,6 +1629,11 @@ app
               }
               summaryToWrite = { ...rawSummary, ...extra };
               quotaCooldownEnd = cooldownEnd;
+              quotaCooldownSource =
+                parsedMs !== null &&
+                parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+                  ? "parsed"
+                  : "fallback";
               quotaErrorText = errorText;
               quotaEx = task.executorKey
                 ? await findExecutorByKey(db, task.executorKey)
@@ -1680,7 +1686,10 @@ app
       }
       // R8(v1.1):额度冷却与群内留痕在落库后触发(与 queue 路径同口径)。
       if (quotaCooldownEnd !== undefined && quotaEx) {
-        enterCooldown(quotaEx, quotaCooldownEnd, { db, taskId });
+        enterCooldown(quotaEx, quotaCooldownEnd, quotaCooldownSource, {
+          db,
+          taskId,
+        });
         const eta = formatEta(quotaCooldownEnd);
         void postStatus(
           db,
