@@ -149,7 +149,22 @@ export function isResumeTask(task: { diffSummary: unknown }): boolean {
 }
 
 /**
- * R1-R4 判定 + 创建续跑任务。子任务进入终态后调用;返回是否创建了续跑任务。
+ * 续跑判定结果(specs/completion-events-never-reach-terminal-state.md R1/R2):
+ * - `created`:已创建续跑任务,消费方把事件置 delivered;
+ * - `skipped` 且 reason 为 null:**暂时**不可处理(父执行器仍存活 / 已存在非终态
+ *   续跑 / 父执行方当前非协调者),条件可能变化,消费方**保持 pending** 下轮重试;
+ * - `skipped` 且 reason 非 null:**永久**不可处理,条件不会自行变化
+ *   (事件属续跑任务自身 / 无父任务 / 父任务查不到 / 父任务已终态),消费方把
+ *   事件置 dead 并以 reason 写 lastError。静默丢弃是被禁止的降级 —— 永久 skip
+ *   必须留下可审计的原因。
+ */
+export type ResumeDecision =
+  | { kind: "created" }
+  | { kind: "skipped"; reason: string | null };
+
+/**
+ * R1-R4 判定 + 创建续跑任务。子任务进入终态后调用;返回创建/跳过决策
+ * (跳过时区分永久/暂时,见 ResumeDecision)。
  *
  * - R1:子任务有父任务且父协调任务仍非终态;
  * - R2:父协调任务的 executor_pid 仍存活 → 不创建(协调者自己会消费完成事件);
@@ -159,35 +174,59 @@ export function isResumeTask(task: { diffSummary: unknown }): boolean {
 export async function maybeCreateCoordinatorResumeTask(
   db: DataBase,
   childTask: Task,
-): Promise<"created" | "skipped"> {
+): Promise<ResumeDecision> {
   // R4:续跑任务自身终态 → 不再触发续跑(防环)。
-  if (isResumeTask(childTask)) return "skipped";
+  if (isResumeTask(childTask)) {
+    return {
+      kind: "skipped",
+      reason: "事件属于续跑任务自身,按 R4 防环不产生续跑",
+    };
+  }
 
   // R1:必须是被派发的子任务(有父任务)。
-  if (!childTask.parentTaskId) return "skipped";
+  if (!childTask.parentTaskId) {
+    return {
+      kind: "skipped",
+      reason: "事件所属任务没有父任务(非被派发的子任务),无续跑对象",
+    };
+  }
   const parent = await db.query.task.findFirst({
     where: eq(taskTable.id, childTask.parentTaskId),
   });
-  if (!parent) return "skipped";
-  if (isTerminalTaskStatus(parent.status)) return "skipped";
+  if (!parent) {
+    return {
+      kind: "skipped",
+      reason: "父任务记录不存在(可能被删除),无法创建续跑",
+    };
+  }
+  if (isTerminalTaskStatus(parent.status)) {
+    return {
+      kind: "skipped",
+      reason: "父任务已处于终态,无续跑对象",
+    };
+  }
 
   // 父任务执行方必须是协调者(角色实时判定,与 isCoordinatorTask 同源)。
+  // 角色运行期可变(可增删成员/改角色),故判为**暂时**:保留 pending,
+  // 待该成员恢复 coordinator 角色后下轮重试(specs/completion-events-
+  // never-reach-terminal-state.md §3.2)。
   if (
     !(await isCoordinatorTask(db, parent.groupId, parent.executorParticipantId))
   ) {
-    return "skipped";
+    return { kind: "skipped", reason: null };
   }
 
-  // R2:父协调进程仍存活 → 不创建(协调者会自己消费完成事件)。
+  // R2:父协调进程仍存活 → 不创建(协调者会自己消费完成事件)。暂时。
   if (
     parent.executorPid !== null &&
     isExecutorProcessAlive(parent.executorPid)
   ) {
-    return "skipped";
+    return { kind: "skipped", reason: null };
   }
 
   // R3:只把平台标记的非终态续跑任务视为重复。父任务下可能同时存在
-  // 协调者主动派给自己的普通子任务,它不应阻止平台创建恢复任务。
+  // 协调者主动派给自己的普通子任务,它不应阻止平台创建恢复任务。暂时:
+  // 续跑终态后本判定失效,事件重新可消费。
   const existing = await db.query.task.findMany({
     where: and(
       eq(taskTable.parentTaskId, parent.id),
@@ -196,10 +235,10 @@ export async function maybeCreateCoordinatorResumeTask(
     ),
     columns: { id: true, diffSummary: true },
   });
-  if (existing.some(isResumeTask)) return "skipped";
+  if (existing.some(isResumeTask)) return { kind: "skipped", reason: null };
 
   await createCoordinatorResumeTask(db, parent, childTask);
-  return "created";
+  return { kind: "created" };
 }
 
 /** 从任务书正文提取验收标准与红线段落(按 markdown 章节头匹配)。 */
@@ -271,7 +310,11 @@ export function buildDiffSummaryEcho(
 /** 计算尝试链与当前尝试次数。 */
 function computeAttemptChain(
   childTask: Task,
-  children: Array<{ id: string; status: string; supersedesTaskId: string | null }>,
+  children: Array<{
+    id: string;
+    status: string;
+    supersedesTaskId: string | null;
+  }>,
 ): { chain: string[]; attempt: number } {
   const byId = new Map(children.map((child) => [child.id, child]));
   const chain: string[] = [];
@@ -303,11 +346,7 @@ export function buildSupersededEchoSection(
     !supersededTask.brief ||
     supersededTask.brief.trim().length === 0
   ) {
-    return [
-      "## 被替代任务验收标准与红线",
-      "- 无上次任务书可回显",
-      "",
-    ];
+    return ["## 被替代任务验收标准与红线", "- 无上次任务书可回显", ""];
   }
 
   const sections = extractTaskSections(supersededTask.brief);
@@ -515,8 +554,16 @@ async function createCoordinatorResumeTask(
 
 /**
  * 消费 pending 的 task completion event:对每条事件所属任务执行
- * maybeCreateCoordinatorResumeTask,创建了续跑任务的把事件置为 delivered,
- * 避免重复消费。返回创建的续跑任务数。
+ * maybeCreateCoordinatorResumeTask —— 创建了续跑任务的把事件置为 delivered,
+ * 永久不可处理的置 dead 并把原因写入 lastError(静默丢弃是被禁止的降级),
+ * 暂时不可处理的保持 pending 下轮重试(条件可能变化)。避免重复消费。
+ * 返回创建的续跑任务数。
+ *
+ * 判据(specs/completion-events-never-reach-terminal-state.md R1/R2):
+ * 「永久/暂时」由 maybeCreateCoordinatorResumeTask 的判定原因区分 —— 永久类
+ * 是事件自身事实(无父任务/父已终态/父不存在/自身是续跑任务),不会自行变化;
+ * 暂时类依赖运行期可变状态(进程存活、成员角色、在途续跑)。本消费循环不另
+ * 建第二套判据,reason 是同一事实的唯一判定出处。
  */
 export async function consumePendingCompletionEvents(
   db: DataBase,
@@ -543,12 +590,24 @@ export async function consumePendingCompletionEvents(
     });
     if (!task) continue;
     const result = await maybeCreateCoordinatorResumeTask(db, task);
-    if (result === "created") {
+    if (result.kind === "created") {
       created += 1;
       await db
         .update(taskCompletionEventTable)
         .set({ state: "delivered", deliveredAt: now, updatedAt: now })
         .where(eq(taskCompletionEventTable.id, event.id));
+    } else if (result.reason) {
+      // 永久不可处理:条件不会自行变化,保持 pending 只会无限重扫。条件更新
+      // 防止覆盖 inbox 并发路径(claim→ack/fail)的写回。
+      await db
+        .update(taskCompletionEventTable)
+        .set({ state: "dead", lastError: result.reason, updatedAt: now })
+        .where(
+          and(
+            eq(taskCompletionEventTable.id, event.id),
+            eq(taskCompletionEventTable.state, "pending"),
+          ),
+        );
     }
   }
   return created;

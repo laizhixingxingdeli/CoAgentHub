@@ -65,6 +65,7 @@ const {
   consumePendingCompletionEvents,
   enqueueTaskRun,
   hasExemptingChildTask,
+  hasPendingResumeEvent,
   maybeCreateCoordinatorResumeTask,
 } = await import("../src/lib/executor-task");
 const { __setTransientQuotaForTests, isInCooldown } = await import(
@@ -250,7 +251,7 @@ describe.sequential("协调者续跑完整验收", () => {
     it("R1:子任务 done + 父协调任务 running + 父进程已退出 → 创建续跑任务", async () => {
       const { coordinator, group, parent, child } = await seedParentChild({});
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toBe("created");
+      expect(result).toEqual({ kind: "created" });
 
       const resumes = await resumeTasksFor(parent.id);
       expect(resumes.length).toBe(1);
@@ -333,7 +334,8 @@ describe.sequential("协调者续跑完整验收", () => {
         parentPid: process.pid, // 本测试进程存活
       });
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toBe("skipped");
+      // 暂时 skip(父进程存活,条件可能变化)→ reason 为 null。
+      expect(result).toEqual({ kind: "skipped", reason: null });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
     });
 
@@ -342,9 +344,9 @@ describe.sequential("协调者续跑完整验收", () => {
       // 先创建一条续跑任务(queued)。
       await maybeCreateCoordinatorResumeTask(runtimeDb, child);
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
-      // 再消费一次 → R3 命中,不重复创建。
+      // 再消费一次 → R3 命中,不重复创建(暂时 skip,reason 为 null)。
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toBe("skipped");
+      expect(result).toEqual({ kind: "skipped", reason: null });
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
     });
 
@@ -360,14 +362,21 @@ describe.sequential("协调者续跑完整验收", () => {
         diffSummary: { platform: { resumeOf: parent.id } },
       });
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, resume);
-      expect(result).toBe("skipped");
+      // 永久 skip(R4 防环)→ reason 非 null。
+      expect(result).toEqual({
+        kind: "skipped",
+        reason: expect.stringContaining("R4"),
+      });
       expect(await resumeTasksFor(parent.id)).toHaveLength(1); // 只有这条 resume 本身
     });
 
-    it("父任务已终态 → 不创建续跑任务", async () => {
+    it("父任务已终态 → 不创建续跑任务(永久 skip,reason 非 null)", async () => {
       const { parent, child } = await seedParentChild({ parentStatus: "done" });
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toBe("skipped");
+      expect(result).toEqual({
+        kind: "skipped",
+        reason: expect.stringContaining("终态"),
+      });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
     });
 
@@ -379,7 +388,9 @@ describe.sequential("协调者续跑完整验收", () => {
         .set({ executorParticipantId: child.executorParticipantId })
         .where(eq(taskTable.id, parent.id));
       const result = await maybeCreateCoordinatorResumeTask(runtimeDb, child);
-      expect(result).toBe("skipped");
+      // 暂时 skip:群成员角色运行期可变(该成员可恢复 coordinator),保留 pending
+      // 下轮重试(specs/completion-events-never-reach-terminal-state.md §3.2)。
+      expect(result).toEqual({ kind: "skipped", reason: null });
       expect(await resumeTasksFor(parent.id)).toHaveLength(0);
     });
 
@@ -679,7 +690,10 @@ describe.sequential("协调者续跑完整验收", () => {
     /** 轮询子任务直到谓词成立(瞬时限流处置是 fire-and-forget)。 */
     async function waitForChild(
       childId: string,
-      predicate: (t: { status: string; attempts: unknown[] | null | undefined }) => boolean,
+      predicate: (t: {
+        status: string;
+        attempts: unknown[] | null | undefined;
+      }) => boolean,
       timeoutMs = 20_000,
     ) {
       const deadline = Date.now() + timeoutMs;
@@ -763,7 +777,10 @@ describe.sequential("协调者续跑完整验收", () => {
       const { parent } = await seedParentWithQueuedChild();
       // 只动一个变量:把执行器置入冷却 —— 这正是瞬时限流必须避免的副作用
       // (spec §2.1:短冷却 + 任务回 queued 会杀掉整条协调链)。
-      enterCooldown({ key: "executor", label: "executor" }, Date.now() + 60_000);
+      enterCooldown(
+        { key: "executor", label: "executor" },
+        Date.now() + 60_000,
+      );
       expect(isInCooldown({ key: "executor" })).toBe(true);
       expect(await hasExemptingChildTask(runtimeDb, parent.id)).toBe(false);
     }, 30_000);
@@ -956,6 +973,206 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(await consumePendingCompletionEvents(runtimeDb)).toBe(1);
       expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
+    });
+  });
+
+  describe.sequential("完成事件状态机缺口(specs/completion-events-never-reach-terminal-state.md R1/R2)", () => {
+    async function eventFor(taskId: string) {
+      const rows = await testDb
+        .select()
+        .from(taskCompletionEventTable)
+        .where(eq(taskCompletionEventTable.taskId, taskId));
+      return rows[0];
+    }
+
+    it("永久 skip 1:事件属续跑任务自身(R4)→ 事件置 dead 且 lastError 写明 R4 防环", async () => {
+      const { parent } = await seedParentChild({});
+      const resume = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: parent.executorParticipantId,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        diffSummary: { platform: { resumeOf: parent.id } },
+      });
+      await insertPendingCompletionEvent(resume, parent.executorParticipantId);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const event = await eventFor(resume.id);
+      expect(event?.state).toBe("dead");
+      expect(event?.lastError).toContain("R4");
+      // 没有产生第二条续跑(防环)。
+      expect(await resumeTasksFor(parent.id)).toHaveLength(1);
+    });
+
+    it("永久 skip 2:事件所属任务无父任务 → 事件置 dead 且 lastError 写明无续跑对象", async () => {
+      const { group, coordinator } = await seedParentChild({});
+      // 顶层任务(无 parentTaskId)首次终态同样产生 pending 完成事件;
+      // 本场景只为它落事件(不触碰 child 的事件)。
+      const orphan = await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "done",
+      });
+      await insertPendingCompletionEvent(orphan, coordinator.id);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const deads = await testDb
+        .select()
+        .from(taskCompletionEventTable)
+        .where(eq(taskCompletionEventTable.state, "dead"));
+      expect(deads).toHaveLength(1);
+      expect(deads[0].taskId).toBe(orphan.id);
+      expect(deads[0].lastError).toContain("父任务");
+    });
+
+    it("永久 skip 3:父任务记录查不到 → 函数级判定为永久 skip(reason 非 null)", async () => {
+      // parent_task_id 有自引用 FK,数据库层造不出悬空父;该分支按函数级
+      // 契约验证(消费循环里事件任务本身必存在,父缺失即永久无续跑对象)。
+      const { parent, child } = await seedParentChild({});
+      const childRow = await findTask(child.id);
+      expect(childRow).toBeTruthy();
+      const orphaned = {
+        ...childRow,
+        parentTaskId: crypto.randomUUID(),
+      } as typeof taskTable.$inferSelect;
+      const result = await maybeCreateCoordinatorResumeTask(
+        runtimeDb,
+        orphaned,
+      );
+      expect(result).toEqual({
+        kind: "skipped",
+        reason: expect.stringContaining("不存在"),
+      });
+      expect(await resumeTasksFor(parent.id)).toHaveLength(0);
+    });
+
+    it("永久 skip 4:父任务已终态 → 事件置 dead 且 lastError 写明父任务终态", async () => {
+      const ctx = await seedParentChild({ parentStatus: "done" });
+      await insertPendingCompletionEvent(ctx.child, ctx.coordinator.id);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const event = await eventFor(ctx.child.id);
+      expect(event?.state).toBe("dead");
+      expect(event?.lastError).toContain("终态");
+    });
+
+    it("暂时 skip 1:父协调进程仍存活 → 事件保持 pending(回归)", async () => {
+      const ctx = await seedParentChild({ parentPid: process.pid });
+      await insertPendingCompletionEvent(ctx.child, ctx.coordinator.id);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const event = await eventFor(ctx.child.id);
+      expect(event?.state).toBe("pending");
+      expect(event?.lastError).toBeNull();
+      expect(await resumeTasksFor(ctx.parent.id)).toHaveLength(0);
+    });
+
+    it("暂时 skip 2:已存在非终态续跑(R3)→ 事件保持 pending(回归)", async () => {
+      const { parent, child } = await seedParentChild({});
+      // 先创建一条续跑任务(queued,非终态)。
+      await maybeCreateCoordinatorResumeTask(runtimeDb, child);
+      expect(await resumeTasksFor(parent.id)).toHaveLength(1);
+      await insertPendingCompletionEvent(child, parent.executorParticipantId);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const event = await eventFor(child.id);
+      expect(event?.state).toBe("pending");
+      expect(event?.lastError).toBeNull();
+      // 未重复创建。
+      expect(await resumeTasksFor(parent.id)).toHaveLength(1);
+    });
+
+    it("暂时 skip 3:父执行方当前不是协调者 → 事件保持 pending(回归,§3.2)", async () => {
+      const ctx = await seedParentChild({});
+      // 把父任务执行方改成非 coordinator 角色成员(executor 本人);角色运行期
+      // 可变,恢复 coordinator 后该事件下轮重试 —— 保守保留 pending。
+      await testDb
+        .update(taskTable)
+        .set({ executorParticipantId: ctx.child.executorParticipantId })
+        .where(eq(taskTable.id, ctx.parent.id));
+      await insertPendingCompletionEvent(ctx.child, ctx.coordinator.id);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      const event = await eventFor(ctx.child.id);
+      expect(event?.state).toBe("pending");
+      expect(event?.lastError).toBeNull();
+      expect(await resumeTasksFor(ctx.parent.id)).toHaveLength(0);
+    });
+
+    it("正常路径:成功创建续跑 → 事件仍置 delivered(回归)", async () => {
+      const { coordinator, child } = await seedParentChild({});
+      await insertPendingCompletionEvent(child, coordinator.id);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(1);
+      const event = await eventFor(child.id);
+      expect(event?.state).toBe("delivered");
+      expect(event?.lastError).toBeNull();
+    });
+
+    it("一轮消费后 pending 只剩暂时性事件:永久类全部 dead,暂时类保持 pending", async () => {
+      // 混合四个场景:
+      //  a) 续跑任务自身事件(R4,永久)
+      //  b) 顶层无父任务事件(永久)
+      //  c) 父已终态(永久)
+      //  d) 父进程存活(暂时)
+      const a = await seedParentChild({});
+      const resumeA = await insertTask({
+        groupId: a.parent.groupId,
+        executorParticipantId: a.parent.executorParticipantId,
+        status: "done",
+        parentTaskId: a.parent.id,
+        dispatcherParticipantId: a.parent.executorParticipantId,
+        diffSummary: { platform: { resumeOf: a.parent.id } },
+      });
+      await insertPendingCompletionEvent(
+        resumeA,
+        a.parent.executorParticipantId,
+      );
+
+      const b = await seedParentChild({});
+      const orphan = await insertTask({
+        groupId: b.group.id,
+        executorParticipantId: b.coordinator.id,
+        status: "done",
+      });
+      await insertPendingCompletionEvent(orphan, b.coordinator.id);
+
+      const c = await seedParentChild({ parentStatus: "done" });
+      await insertPendingCompletionEvent(c.child, c.coordinator.id);
+
+      const d = await seedParentChild({ parentPid: process.pid });
+      await insertPendingCompletionEvent(d.child, d.coordinator.id);
+
+      expect(await countPendingEvents()).toBe(4);
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      expect(await countPendingEvents()).toBe(1); // 仅剩 d(暂时)
+      const deads = await testDb
+        .select()
+        .from(taskCompletionEventTable)
+        .where(eq(taskCompletionEventTable.state, "dead"));
+      expect(deads).toHaveLength(3);
+      for (const dead of deads) {
+        expect(dead.lastError).toBeTruthy();
+      }
+      const pending = await testDb
+        .select()
+        .from(taskCompletionEventTable)
+        .where(eq(taskCompletionEventTable.state, "pending"));
+      expect(pending[0]?.taskId).toBe(d.child.id);
+    });
+
+    it("永久置 dead 不干扰 hasPendingResumeEvent 豁免(specs §3.3 第一点)", async () => {
+      // 父任务下仅有「续跑任务自身」的事件:置 dead 前后豁免判定必须一致
+      // (判定本就把续跑任务自身事件排除,dead 只是让这一排除显式化)。
+      const { parent } = await seedParentChild({});
+      const resume = await insertTask({
+        groupId: parent.groupId,
+        executorParticipantId: parent.executorParticipantId,
+        status: "done",
+        parentTaskId: parent.id,
+        dispatcherParticipantId: parent.executorParticipantId,
+        diffSummary: { platform: { resumeOf: parent.id } },
+      });
+      await insertPendingCompletionEvent(resume, parent.executorParticipantId);
+      expect(await hasPendingResumeEvent(runtimeDb, parent.id)).toBe(false);
+      // 消费 → 事件置 dead。
+      expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      expect((await eventFor(resume.id))?.state).toBe("dead");
+      expect(await hasPendingResumeEvent(runtimeDb, parent.id)).toBe(false);
     });
   });
 

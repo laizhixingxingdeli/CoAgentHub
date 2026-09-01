@@ -16,7 +16,11 @@ import {
 } from "../src/lib/executor-task";
 import { appendTaskOutput } from "../src/lib/executor-task/output-buffer";
 import { enterCooldown } from "../src/lib/executor-task/queue";
-import { cooldownEndMs, getRateLimitCooldownMs, isInCooldown } from "../src/lib/executor-task/state";
+import {
+  cooldownEndMs,
+  getRateLimitCooldownMs,
+  isInCooldown,
+} from "../src/lib/executor-task/state";
 import {
   reconcileOrphanTasks,
   startOrphanReconciler,
@@ -666,6 +670,36 @@ describe("孤儿任务周期收敛", () => {
 
     // 续跑尚未创建:hasNonTerminalChildTask 已失效(done 是终态),但 pending
     // 完成事件说明续跑创建在途(消费方下一周期即创建)→ 父任务不得被判死。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+    expect((await findTask(parent.id))?.status).toBe("running");
+  });
+
+  it("豁免交互回归(specs/completion-events-never-reach-terminal-state.md 验收4):父协调进程已退、子任务事件仍 pending → 父任务仍被豁免", async () => {
+    // 消费方现在会把永久 skip 事件置 dead(缩小 pending 集合)——豁免判定
+    // 不得因此分叉:只要「子任务终态、续跑未创建」的 pending 事件还在,
+    // 父任务就必须继续豁免,与事件最终落到 dead/delivered 无关。
+    const coordinator = await registerParticipant({ name: "orc-dead-ev-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-dead交互");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(), // 协调进程已退
+    });
+    const executor = await registerParticipant({ name: "orc-dead-ev-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      parentTaskId: parent.id,
+      status: "done",
+      diffSummary: { summary: "子任务完成" },
+    });
+    await testDb.insert(taskCompletionEventTable).values({
+      taskId: child.id,
+      groupId: group.id,
+      dispatcherParticipantId: coordinator.id,
+      state: "pending", // 子任务事件仍 pending(尚未消费)
+    });
+
     expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
     expect((await findTask(parent.id))?.status).toBe("running");
   });
