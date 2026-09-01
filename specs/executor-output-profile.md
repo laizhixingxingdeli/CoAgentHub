@@ -1,6 +1,12 @@
 # Spec: 执行器输出画像(批2)——三个适配点改读配置
 
-> **状态**: Draft — 待批1 落地后冻结
+> **状态**: 暂缓(Deferred)— 2026-09-02 改走适配器注册表,见
+> [executor-adapter-registry.md](executor-adapter-registry.md)。
+> 暂缓理由:画像表达不了 token 采集(四家里三家读家目录会话文件,
+> 需扫目录/解析文件/时间窗筛选/唯一性断言),§3 硬验收当场卡住;
+> 且以最小代码为目标,解释器投入大于它省下的分支。
+> **画像未被否决**——注册表是容器,`declarativeAdapter(profile)` 可作为其中一员
+> 将来共存。`executor_config.output_profile` 列保留不动。
 > **版本**: 0.1
 > **日期**: 2026-08-29
 > **ADR**: [ADR-0008](../docs/adr/0008-executor-adaptation-config-over-code.md)

@@ -534,7 +534,13 @@ export function GroupSettingsContent({
         </div>
       )}
 
-      <div className="mb-6 grid gap-4 lg:grid-cols-2">
+      {/* 断点按容器而非视口:嵌入抽屉(480px)时强制单列,否则桌面视口下
+          lg:grid-cols-2 会在 445px 的可用宽度里挤成两栏。 */}
+      <div
+        className={
+          embedded ? "mb-6 grid gap-4" : "mb-6 grid gap-4 lg:grid-cols-2"
+        }
+      >
         <section
           data-testid="group-settings-basic"
           className="rounded-lg border bg-card p-4"
@@ -754,7 +760,15 @@ export function GroupSettingsContent({
         ) : (
           <>
             {/* Mobile: card list */}
-            <div className="flex flex-col gap-3 p-3 md:hidden">
+            {/* 卡片列表:窄视口,以及嵌入抽屉时(容器仅 445px,宽于 md 断点的
+                视口不代表这里放得下表格)。 */}
+            <div
+              className={
+                embedded
+                  ? "flex flex-col gap-3 p-3"
+                  : "flex flex-col gap-3 p-3 md:hidden"
+              }
+            >
               {members.map((member) => (
                 <div
                   key={member.participantId}
@@ -842,7 +856,11 @@ export function GroupSettingsContent({
               ))}
             </div>
             {/* Desktop: table */}
-            <table className="hidden w-full text-sm md:table">
+            {/* 表格固有宽度约 629px,嵌入抽屉(容器 445px)时一律不渲染,
+                改用上面的卡片列表。 */}
+            <table
+              className={embedded ? "hidden" : "hidden w-full text-sm md:table"}
+            >
               <thead>
                 <tr className="border-b text-left text-muted-foreground">
                   <th className="px-4 py-3 font-medium">
