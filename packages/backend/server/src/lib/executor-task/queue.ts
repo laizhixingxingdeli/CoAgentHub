@@ -96,9 +96,12 @@ import {
   getStallTimeoutMs,
   getTransientQuotaPolicy,
   groupQueues,
+  isExecutorProcessAlive,
   isInCooldown,
   pumping,
   type QuotaFailureVerdict,
+  registerCoordinatorProcess,
+  releaseCoordinatorProcess,
   runningExecutorCount,
   runningGroupCount,
   runningWorkspaceCount,
@@ -306,17 +309,8 @@ export function queuedExecutorTaskCount(groupId?: string): number {
   return n;
 }
 
-/** process.kill(pid, 0) 只探测进程是否存在,不发送信号。 */
-export function isExecutorProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but this process cannot signal it. Only
-    // ESRCH proves that the PID has disappeared; preserve everything else.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
+/** 进程存活判定随其余共享状态收在 state.ts;此处转出保持既有导入路径可用。 */
+export { isExecutorProcessAlive } from "./state";
 
 /**
  * 重启兜底(server 启动时调用):只把确认已经死亡的 server 任务恢复为
@@ -1381,6 +1375,27 @@ function runningForWorkspace(group: GroupQueue): number {
 }
 
 /**
+ * 任务是否被工作树闸合法阻塞(R1.1 豁免的唯一判定出处,ADR-0009 第 2 条):
+ * 占用计数复用泵的同一组口径(runningForWorkspace / workspaceCap),不另写
+ * 第二套「队列是否阻塞」判定。
+ *
+ * 被本判定命中的任务是被泵**合法**跳过的,不是被遗弃 —— 认领超时不得把它
+ * 标 failed(spec multiple-coordinators-with-global-serialization R1.1)。
+ * 反过来说,因其它原因排队的任务(并行组数上限、执行器冷却、403 退避)不受
+ * 该豁免。
+ *
+ * ⚠️ 默认组(未绑 projectPath)的「组内单槽」不是工作树闸(spec R1:默认组不
+ * 参与工作树闸,沿用 serial-dispatch-guard 既有口径)—— 它的排队任务被单槽
+ * 阻塞**同样**走认领超时,不享受 R1.1 豁免:豁免只豁免「工作树闸」这一个
+ * 事实,单槽是另一套既有机制,混入豁免会悄悄放宽默认组 30 分钟未认领的
+ * 既有语义。
+ */
+function workspaceGateBlocked(group: GroupQueue): boolean {
+  if (group.key === DEFAULT_GROUP_KEY) return false;
+  return runningForWorkspace(group) >= workspaceCap(group.key);
+}
+
+/**
  * 摘要流文本(spec live-output-hide-thinking-and-autoscroll R1):`kind=thinking`
  * 的条目不进摘要流 —— 用户要看的是 agent 在做什么(工具/命令/汇报),思考行会把
  * 动作行稀释(实测占缓冲行数 64%-95%)。判据取解析器已解析出的 kind,不做
@@ -1484,9 +1499,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     const detachedByReplyMode = /^\s*##\s*replymode\s*:\s*detached\s*$/im.test(
       body,
     );
-    const detached =
-      detachedByReplyMode ||
-      (await isCoordinatorTask(db, groupId, participantId));
+    const isCoordinator = await isCoordinatorTask(db, groupId, participantId);
+    const detached = detachedByReplyMode || isCoordinator;
     run.detached = detached;
     // 记忆开关:仅 memory="per-group" 的协调器启用 contextId 延续(查/回写);
     // 纯粹执行器(无 memory 标记,含普通 a2a)无记忆——任务书自包含。
@@ -1721,6 +1735,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     // (超时按「结果未确认」处理)。spawn 的进程继续在后台跑,其退出不再决定
     // 终态,承诺结果由收件方显式回写。
     if (!isA2a && run.detached) {
+      // R1(spec multiple-coordinators-with-global-serialization):协调进程同样
+      // 写这棵工作树(L2 测试代跑),但 detached 任务 spawn 后队列槽位立即释放
+      // —— 既有工作树闸看不见它。这里按「进程存活」把它计入占用,与执行器任务
+      // 合并计数:协调进程的存活期间,同工作树的执行器任务与新协调票都排队。
+      if (isCoordinator) registerCoordinatorProcess(run.projectPath, handle.pid);
       console.log(
         `[executor] detached 任务已派发(cli),等待执行器回写终态: ${taskId}`,
       );
@@ -1730,6 +1749,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           getDetachedTimeoutMs(),
         );
       }
+      // 进程退出 = 工作树占用释放:撤销登记后泵一次,让被闸挡住的任务由既有
+      // 排队/泵机制拉起(不新建调度器)。登记表的存活判定本身已足以让占用在
+      // 退出即消失,这里只是把「释放」这个已知出口显式化,避免依赖僵尸进程回收
+      // 的时序。成功与启动失败两条出口同一处置。
+      const releaseCoordinatorGate = () => {
+        releaseCoordinatorProcess(handle.pid);
+        void pumpQueue();
+      };
       // 进程句柄保留在 run 上(handleDetachedTimeout 复查 DB 状态用)。正常退出
       // 不决定 detached 任务终态,但仍在这里读取该进程的原生 token 账本并写入
       // attempt;之后由执行器 runtime PATCH 任务终态。reject 只在 spawn 失败
@@ -1738,6 +1765,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       void handle.promise
         .then(
           async (result) => {
+            releaseCoordinatorGate();
             await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
             // 续跑任务(及任何由协调者自己在进程内 PATCH 结案的 detached 任务):
             // 结案那一刻 attempts 尚无 tokenUsage(采集只在进程退出后发生),
@@ -1752,6 +1780,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             );
           },
           (e) => {
+            releaseCoordinatorGate();
             const msg = e instanceof Error ? e.message : String(e);
             console.error(
               `[executor] detached 任务启动失败(${taskId}): ${msg}`,
@@ -2374,6 +2403,10 @@ function handleClaimTimeout(run: QueuedRun): void {
   if (g) {
     const idx = g.queue.indexOf(run);
     if (idx < 0) return; // 已被取走开始运行 → 认领完成,放弃。
+    // 工作树闸已满:任务是被泵**合法**跳过的(不是遗弃),豁免认领超时 ——
+    // 保持 queued 等闸释放,由既有任务终态的泵送拉起(R1.1)。判据复用泵的
+    // 闸判定(workspaceGateBlocked),不另写第二套「队列是否阻塞」(ADR-0009)。
+    if (workspaceGateBlocked(g)) return;
     g.queue.splice(idx, 1);
   }
   clearRunTimers(run);

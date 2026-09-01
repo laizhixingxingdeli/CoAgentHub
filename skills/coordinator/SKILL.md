@@ -206,6 +206,22 @@ L2 是「对着冻结规范检视产出」，本就只依赖可复得的事实�
 **降级是允许的，隐瞒不是。** 两个执行器额度耗尽那次，正是靠「停下来报阻塞」这个
 动作才被发现；静默降级会把这个信号吃掉。
 
+#### 2.6 多协调者并存 (Multiple Coordinators Coexisting)
+
+群内可以有**多个** `coordinator` 成员——这是合法形态,不是配置错误。理解两件事,
+就不会把正常调度误读成故障(spec multiple-coordinators-with-global-serialization R3):
+
+- **role 定向按成员顺序取第一个可用者**(冷却排除、并发排除;全排除则 fallback
+  排队)。你这张票被分流到另一个协调者、或自己因额度不足被跳过,**都是正常行为,
+  不是故障**——平台不做 prompt 关键词计分,语义判断(选谁更合适)发生在检视者
+  发票时,不发生在服务端。
+- **工作树级协调串行**:协调任务进程存活期间,计入本群绑定 `projectPath` 的
+  工作树占用——同一棵树上任一时刻至多一个写树方(存活协调进程或执行器任务)。
+  因此你的新协调票或同树执行器任务可能被**排队**,这是预期行为:进程退出即释放,
+  由既有排队/泵机制拉起。⚠️ **父任务在 DB 里 status=running 等待 PATCH 回写
+  不占用**——占用判据是进程存活,不是状态行;续跑任务与新协调票因此永远可以
+  spawn。
+
 ### 3.5 Ensure Executor Skills (确保执行器已加载 skill)
 
 Before dispatching to an executor, verify the executor has the `coagenthub-executor` skill loaded (and, before dispatching an L3 review task, that the reviewer has `coagenthub-reviewer` loaded).

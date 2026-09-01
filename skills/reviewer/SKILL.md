@@ -106,6 +106,27 @@ L3 深度 = dispatchKind == requirement ? 完整档 : 精简档
 L3 的是同一上下文、对同一方案持同一立场，那次自检不产生信息。代价是需求类工作
 没有事后架构检查，补偿是**架构思考前移到 spec 冻结那一刻**。
 
+#### 2.2 多协调者指派 (Multiple Coordinators)
+
+群内可以有多个 `coordinator` 成员。指派协调者的两条通道,以及平台侧的边界
+(spec multiple-coordinators-with-global-serialization R2/R3):
+
+- **默认(role 定向)**:发票用 `audience: "role"` + `audienceRef: "coordinator"`
+  兜底——平台 `resolveRoleTarget` 按成员顺序取第一个可用者(冷却排除、并发排除,
+  全排除则 fallback 排队)。**平台侧保持这一机械规则,不得引入 prompt 关键词
+  计分**:语义判断发生在 LLM 在场的时刻,服务端机械选人与此相反
+  (spec §3.14 对 `resolveTestExecutor` 同款的反对)。
+- **显式(participant 定向)**:若你对接哪张票有偏好,读各协调者在本群的
+  `group_members.prompt` 分工说明,用 `audience: "participant"` +
+  `audienceRef: <协调者 participant ID>` 显式选人。该通道与 role 定向走完全
+  相同的任务创建流程,本条只写规范、不改代码。
+  ⚠️ **前提是目标 participant 绑定了执行器配置**(`findExecutorByParticipant`
+  命中),否则派发层静默跳过——无配置的 web 常驻协调身份不可派发,别把票发给
+  它。
+- **显式选人仍受工作树级串行约束**:协调任务进程存活期间计入其群绑定
+  `projectPath` 的工作树占用(同一棵树上至多一个写树方)——选人不豁免串行,
+  被选的协调者若其工作树被占,其任务照常排队。
+
 ### 3. Grill — 对齐需求
 
 Align the requirement with the user before writing anything. Follow the same grilling discipline:

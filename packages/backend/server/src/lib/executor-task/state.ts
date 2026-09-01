@@ -352,6 +352,70 @@ export function runningGroupCount(): number {
   return n;
 }
 
+/** process.kill(pid, 0) 只探测进程是否存在,不发送信号。 */
+export function isExecutorProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but this process cannot signal it. Only
+    // ESRCH proves that the PID has disappeared; preserve everything else.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * 存活协调进程登记(spec multiple-coordinators-with-global-serialization R1):
+ * pid → 该协调任务所在群绑定的 projectPath。
+ *
+ * 为什么需要它:协调任务是 detached 的 —— spawn 后队列槽位立即由 runOne 的
+ * finally 释放(group.running 移除本 run),而工作树闸只数 group.running,
+ * 因此**看不见仍在跑的协调进程**——既有闸的结构性盲区:协调者的 L2 测试代跑
+ * 会与执行器写树重叠(serial-dispatch-guard 只修了执行器那一半)。
+ *
+ * 为什么占用判据是「进程存活」而不是「status=running」:父协调任务在等待
+ * 执行器 PATCH 回写期间恒为 running,而续跑任务只有被 spawn 才能做 L2 并关掉
+ * 父任务 —— 按 status 计数会让 wake-the-coordinator 整体死锁(spec v1.0 的
+ * 缺陷,v1.1 修正点)。
+ */
+const liveCoordinatorProcesses = new Map<number, string>();
+
+/**
+ * 登记一个已 spawn 的协调任务进程。projectPath 为空(群未绑定项目)或 pid 缺失
+ * (a2a 无本地进程)→ 不登记:前者不参与工作树闸(默认组由组内单槽维持原行为),
+ * 后者没有可做存活判定的对象。
+ */
+export function registerCoordinatorProcess(
+  projectPath: string | null,
+  pid: number | undefined,
+): void {
+  if (!projectPath || pid === undefined) return;
+  liveCoordinatorProcesses.set(pid, projectPath);
+}
+
+/** 撤销登记(协调进程退出的已知出口调用;存活判定本身仍是唯一判据)。 */
+export function releaseCoordinatorProcess(pid: number | undefined): void {
+  if (pid === undefined) return;
+  liveCoordinatorProcesses.delete(pid);
+}
+
+/**
+ * 指定工作树上的存活协调进程数:**读取时**判定存活(与孤儿收敛器同源的
+ * process.kill(pid, 0)),因此进程一退出占用即消失,不依赖任何退出回调;已退出
+ * 的条目在此顺手清掉,登记表不会无限增长。
+ */
+export function coordinatorOccupancyCount(projectPath: string): number {
+  let n = 0;
+  for (const [pid, path] of liveCoordinatorProcesses) {
+    if (!isExecutorProcessAlive(pid)) {
+      liveCoordinatorProcesses.delete(pid);
+      continue;
+    }
+    if (path === projectPath) n += 1;
+  }
+  return n;
+}
+
 /**
  * 指定执行器当前 running 的任务数(跨所有组):执行器级并发上限(声明式
  * maxConcurrency)与反应式排队(403 后等待既有任务终态)的调度判定用。
@@ -369,14 +433,17 @@ export function runningExecutorCount(exKey: string): number {
 }
 
 /**
- * 工作树维度当前 running 的任务数:同一 projectPath(群绑定项目路径)下跨
- * 所有组(不同群绑同一路径也计入同一闸)正在 running 的任务数;pumpQueue
- * 按 maxConcurrentPerWorkspace 上限判定是否还能向该工作树派发。projectPath
- * 为空 → 不参与本闸,恒返回 0(默认组由组内单槽维持原行为)。
+ * 工作树维度的占用数(统一占用源,spec multiple-coordinators R1):同一
+ * projectPath(群绑定项目路径)下跨所有组(不同群绑同一路径也计入同一闸)的
+ *  1. 队列内 running 的任务(既有口径),+
+ *  2. 存活的协调进程(detached,队列槽位已释放,只在此登记)。
+ * pumpQueue 按 maxConcurrentPerWorkspace 上限判定是否还能向该工作树派发;
+ * 认领超时豁免复用同一计数的「闸已满」判定(ADR-0009:同一事实只有一个判定
+ * 出处)。projectPath 为空 → 不参与本闸,恒返回 0(默认组由组内单槽维持原行为)。
  */
 export function runningWorkspaceCount(projectPath: string | null): number {
   if (!projectPath) return 0;
-  let n = 0;
+  let n = coordinatorOccupancyCount(projectPath);
   for (const g of groupQueues.values()) {
     for (const r of g.running) {
       if (r.projectPath === projectPath) n += 1;
@@ -512,6 +579,7 @@ export function __resetExecutorQueueForTests(): void {
     g.queue.length = 0;
   }
   groupQueues.clear();
+  liveCoordinatorProcesses.clear();
   clearAllTaskOutputs();
   clearAllTaskDetails();
   for (const t of cooldownTimers.values()) clearTimeout(t);
