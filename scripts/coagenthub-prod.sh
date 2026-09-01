@@ -208,7 +208,26 @@ cmd_stop() {
 cmd_restart() {
   # restart 语义:进程必须确实被替换;任何一环失败都非零退出,
   # 不被 start 的「端口占用则跳过」幂等逻辑掩盖。
-  local old_server old_web port pfile label old now mine
+  local old_server old_web port pfile label old now mine build=0
+  local -a start_args=()
+
+  for a in "$@"; do
+    if [ "$a" = "--build" ]; then
+      build=1
+    else
+      start_args+=("$a")
+    fi
+  done
+
+  # --build must finish while the existing services are still serving.  Keep
+  # cmd_start's standalone --build behavior unchanged, and avoid rebuilding
+  # after the restart has stopped the old processes.
+  if [ "$build" = 1 ]; then
+    echo "== 构建 (--build) =="
+    (cd "$REPO_ROOT" && pnpm build:frontend) || { echo "FAIL 前端构建" >&2; exit 1; }
+    (cd "$SERVER_DIR" && pnpm build) || { echo "FAIL 后端构建" >&2; exit 1; }
+  fi
+
   old_server="$(port_pid "$SERVER_PORT")"
   old_web="$(port_pid "$WEB_PORT")"
 
@@ -222,7 +241,7 @@ cmd_restart() {
     fi
   done
 
-  cmd_start "$@"
+  cmd_start "${start_args[@]}"
 
   # R3: 校验替换结果 —— 新 pid 存在、来自本脚本新启动(与 PID 文件一致)、且不同于停止前
   for port in "$SERVER_PORT" "$WEB_PORT"; do
