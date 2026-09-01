@@ -320,10 +320,8 @@ export default function RequirementTimeline({
     ) {
       const headline = message.body.split("\n")[0] ?? "";
       const trimmed = headline.trimStart();
-      // R1 精确前缀:✅ 单行 "✅ 任务完成 <label>"(生产 postStatus 单行)与 🚀 "[label] 开始执行:";多行卡片(✅ 完成卡片)首行虽同前缀但含分隔线,保留以通过既有 R6 用例——真实 75 条重复均为单行,满足验收 5 的下降量
-      const isSingleLine = !message.body.includes("\n");
       if (
-        (isSingleLine && trimmed.startsWith("✅ 任务完成 ")) ||
+        trimmed.startsWith("✅ 任务完成 ") ||
         /^🚀 \[[^\]]*\] 开始执行:/u.test(trimmed)
       ) {
         return null;

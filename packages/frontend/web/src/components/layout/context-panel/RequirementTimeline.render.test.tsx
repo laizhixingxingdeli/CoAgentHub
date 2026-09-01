@@ -82,7 +82,7 @@ describe("RequirementTimeline 消息渲染口径(R6/R7)", () => {
     ).toBeNull();
   });
 
-  it("R6:多行状态卡片只取首行做提示,完整正文挂在 title 上", () => {
+  it("R6:多行状态卡片不再渲染(重复卡片,首行 ✅ 任务完成 前缀过滤)", () => {
     const card = [
       "✅ 任务完成 CodeBuddy",
       "────────────────",
@@ -93,10 +93,9 @@ describe("RequirementTimeline 消息渲染口径(R6/R7)", () => {
       makeMessage("status-card", card, { contentType: "task_status" }),
     ]);
 
-    const hint = screen.getByTestId("requirement-timeline-status-status-card");
-    expect(hint).toHaveTextContent("✅ 任务完成 CodeBuddy");
-    expect(hint).toHaveAttribute("title", card);
-    // 其余行不铺开成正文(详细汇报在同一时间线的任务卡片里)。
+    expect(
+      screen.queryByTestId("requirement-timeline-item-status-card"),
+    ).toBeNull();
     expect(screen.queryByText(/全部通过/)).toBeNull();
   });
 
