@@ -35,7 +35,8 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **工作类型（需求 / 修复）** | 逐票由检视者分流，落 `dispatchKind`。决定要不要新写 spec、**要不要跑 L3**。与编制**正交** |
 | **替代关系** | `supersedesTaskId`：换执行器时新任务指向被替代的那次尝试。多行保留完整现场，`l1.childCount` 只算有效尝试，`supersededCount` 透出换过几次 |
 | **轴的区分** | **三层 / 两层**是检视深度轴（由工作类型决定），**三方 / 两方**是编制轴（由成员构成决定）；两者不是同一个概念，不能混用 |
-| **验收钉子(specHash)** | 在途任务按下发时刻的 specHash 口径验收，不受后续 spec 修订影响 |
+| **specHash** | `git hash-object <spec文件>` 输出的 Git blob SHA-1（40 位小写十六进制）；不是 commit hash 也不是裸内容哈希，详见 `docs/architecture.md` §9 的完整定义。 |
+| **验收钉子(specHash)** | 冻结 spec 时算出的 `specHash` 是验收锚点：在途任务按下发时刻的 hash 口径验收，spec 修订后须用新 hash 重发，不受后续修订回溯影响；平台仅存储透传、不校验。 |
 | **会话延续(detached)** | `## ReplyMode: detached` 对 CLI 与 a2a 均生效；下发方带 `callback.sessionRef`，收件方结案时 `PATCH` 回写终态，回传经 completion event → callback-agent `resume <sessionRef>` 回到下发时的同一会话 |
 | **单角色约束** | 一个 participant 在一个群内只能持有一种角色（`roles.length ≤ 1`，违反 400）；跨群可不同 |
 

@@ -302,6 +302,7 @@ CoAgentHub/
   不回退「取输出尾部若干行」。
 - **Spec-Driven 模式**:specRef 非空时,任务书在「任务内容」前额外插入「关联规范」段
   (文档路径 + 版本哈希 + 指令「以 Spec 为准」),执行器严格按 Spec 实现,冲突以 Spec 为准。
+- **specHash（验收钉子）——算法与语义**:`specHash` 是冻结时刻 spec 文件的 `git hash-object <file>` 输出，即 Git blob SHA-1（40 位小写十六进制；Git 在计算时对文件内容前置 `blob <字节长度>\0` 头，与裸内容的 SHA-1/SHA-256 结果不同，不可互换）。它不是 commit hash（`git rev-parse HEAD` 等），也不是文件内容的裸哈希。计算对象是工作树中的文件；冻结工作流要求先 `git commit` 再 `git hash-object`，此时 HEAD 版本与工作树一致，hash 同时锚定已提交的契约。验收锚点语义：spec 任何内容改动都会导致 hash 变化；修订 spec 后必须用新 `specHash` 重新下发，后续新任务按新 hash 验收，在途任务仍按下发时刻的旧 `specHash` 口径验收，不受后续修订影响（见 coordinator skill 的验收钉子规则）。平台现状：服务端仅存储与透传 `specHash`（`task.spec_hash` / 消息载荷 `specRef`+`specHash` / WS `task_status_changed` 事件透传），当前不做校验——一致性由“冻结→公布 `spec_published`/`spec_amended`→按 hash 下发→按 hash 验收”的流程纪律保证，读者不应假设有代码兜底。例证（工作树实测 `git hash-object`，与群内在用值一致）：`git hash-object specs/executor-config-over-code.md` → `c0d882c0a5198c7dc6c1e89f9b8701210375c093`；`git hash-object specs/quota-exhaustion-triggers-infinite-retry.md` → `7c2b4df562581e47719d3e7c6a62ae0637d81ea4`；可任选其一复核：`git hash-object <file>` 应与任务书/群消息中携带的 `specHash` 逐字一致。
 - **按群记忆(协调器专属)**:仅 `memory="per-group"` 的执行器(默认 win-hermes)启用
   a2a 跨任务 contextId 延续——调用前按 (executorKey, groupId) 取本群最近非 cancelled
   任务的 `a2a_context_id`,调用后回写;按群隔离,跨群不串。记忆只是加速器,缺失/失败
