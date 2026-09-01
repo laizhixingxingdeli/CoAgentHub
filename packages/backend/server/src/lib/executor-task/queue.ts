@@ -38,10 +38,7 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { isTerminalTaskStatus } from "../coordination-activity";
 import { createAnsiStripper } from "./ansi";
-import {
-  hasCommitInTaskWindow,
-  verifyReportedCommit,
-} from "./claim-verification";
+import { verifyReportedCommit } from "./claim-verification";
 import {
   clearPersistedExecutorCooldown,
   EXECUTOR_COOLDOWN_END_MS_FIELD,
@@ -2054,41 +2051,63 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 真实存在却因 [rate-limited] auto-continuing in 3s… 被误判停派 5 小时);
         // 无提交 → 保留既有额度语义。只收紧干净退出这一条路径,非零退出/超时
         // 分支逐字不变。
+        // R9:为可归因产出判据先解析汇报(与正式汇报同口径),供主闸核实
+        const prelimReport: TaskReport = isA2a
+          ? (() => {
+              const h = findCommitHash(output);
+              return {
+                summary: (result.stdout ?? "").trim(),
+                ...(h ? { hash: h } : {}),
+              };
+            })()
+          : parseTaskReport(output);
         let quotaMatchedButCommitFound:
           | { matchedLine: string | null; note: string }
           | undefined;
+        let quotaMatchedButTransient:
+          | { matchedLine: string | null; note: string }
+          | undefined;
         if (successQuota.isQuota) {
-          const commitInWindow = await hasCommitInTaskWindow(
-            repoRoot,
-            run.attempts,
-            run.checkpointRef,
-          );
-          if (commitInWindow === true) {
-            quotaMatchedButCommitFound = {
+          // R9-a 次闸(必须):复用 classifyQuotaFailure 单点产出的 kind —— 瞬时限流(自愈退避)
+          // 不单独构成结构证据,不判额度、不冷却、不退避,留痕区分「命中但被次闸掉」(验收 6)。
+          if (successQuota.kind === "transient") {
+            quotaMatchedButTransient = {
               matchedLine: successQuota.matchedLine,
-              note: "输出尾部命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
+              note: "输出尾部命中额度关键词,但为瞬时限流退避(短间隔自愈),按 quota-failure-on-clean-exit v1.2 R9-a 不判额度、不进入冷却",
             };
           } else {
-            await routeQuotaFailure(run, "exit 0", successTail, successQuota);
-            return;
+            // R9-b 主闸(必须):可归因产出 = 汇报声明且经 verifyReportedCommit 核实的提交(可归因),
+            // 不再以 checkpointRef..HEAD 全局计数作为产出(不可归因,共享工作树下与第三方提交无法区分)。
+            const verification = await verifyReportedCommit(
+              prelimReport.hash,
+              repoRoot,
+              run.attempts,
+              isA2a ? "a2a" : "cli",
+            );
+            if (verification?.status === "verified") {
+              quotaMatchedButCommitFound = {
+                matchedLine: successQuota.matchedLine,
+                note: "输出尾部命中额度关键词,但汇报声明提交且经核实(本次运行有可归因产出),按 quota-failure-on-clean-exit v1.2 R9-b 不判额度、不进入冷却",
+              };
+            } else {
+              await routeQuotaFailure(run, "exit 0", successTail, successQuota);
+              return;
+            }
           }
         }
         // a2a 执行器(远端 participant)的回复就是最终交付内容,直接作为 summary,
         // 不做段落解析;hash 仍从输出提取。CLI 路径走结构化段落解析(票7)。
-        const a2aHash = findCommitHash(output);
-        const report: TaskReport = isA2a
-          ? {
-              summary: (result.stdout ?? "").trim(),
-              ...(a2aHash ? { hash: a2aHash } : {}),
-            }
-          : parseTaskReport(output);
+        // 复用 prelimReport,避免二次解析漂移
+        const report: TaskReport = prelimReport;
         const diffSummary: Record<string, unknown> = Object.fromEntries(
           Object.entries(report).filter(([key]) => key !== "tokenUsage"),
         );
-        // R6 主闸留痕:命中额度关键词但被「窗口内有提交」闸掉 → diffSummary 写
-        // 可读说明,便于事后区分「没匹配到」与「匹配到但被闸掉」(spec 验收 5/6)。
+        // R6/R9 留痕:区分「未命中」/「命中但被次闸掉」/「命中但有可归因产出」(验收 6)
         if (quotaMatchedButCommitFound) {
           diffSummary.quotaMatchedButCommitFound = quotaMatchedButCommitFound;
+        }
+        if (quotaMatchedButTransient) {
+          diffSummary.quotaMatchedButTransient = quotaMatchedButTransient;
         }
         // 汇报 commit 核实(spec verify-agent-claims v1.1):CLI 完成与 a2a 完成
         // 共用同一套 claim-verification 逻辑;cli 在任务实际仓库核实,a2a 本地

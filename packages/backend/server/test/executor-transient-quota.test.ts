@@ -331,7 +331,7 @@ describe("瞬时限流走 per-run 退避,不进执行器级冷却", () => {
     expect((retryAt ?? 0) - Date.now()).toBeGreaterThan(500);
   }, 30_000);
 
-  it("验收 7b:成功尾部(exit 0 且无提交)→ 与进程退出同口径(transient,不冷却)", async () => {
+  it("验收 7b:成功尾部(exit 0 且无提交)→ R9 次闸抑制 transient,不冷却且落 done", async () => {
     const { coordinator, codebuddy, group } = await setupGroup(
       "transient-clean-exit",
     );
@@ -340,18 +340,15 @@ describe("瞬时限流走 per-run 退避,不进执行器级冷却", () => {
     process.env.FAKE_TRANSIENT_EXIT = "0";
 
     const created = await dispatchTask(coordinator, codebuddy, group);
-    const t = await waitForTask(
-      created.id,
-      (row) => (row.attempts?.length ?? 0) >= 1 && row.status === "queued",
-    );
+    // R9-a: 瞬时退避行不单独构成结构证据,干净退出直接 done,不走 per-run 退避
+    const t = await waitForTask(created.id, (row) => row.status === "done");
 
-    // R6 主闸(quota-failure-on-clean-exit v1.1)只拦「窗口内有提交」的情形:
-    // 这里没有提交,额度判定照常生效 → 按 transient 分流。
-    expect(t.status).toBe("queued");
+    expect(t.status).toBe("done");
     expect(isInCooldown({ key: "codebuddy" })).toBe(false);
     const diff = t.diffSummary as Record<string, unknown> | null;
-    expect(diff?.quotaKind).toBe("transient");
-    expect(queuedRetryAt(t.id)).not.toBeNull();
+    expect(diff?.quotaMatchedButTransient).toBeTruthy();
+    expect(diff?.quotaKind).toBeUndefined();
+    expect(queuedRetryAt(t.id)).toBeNull();
   }, 30_000);
 
   it("验收 4:同一 run 连续 3 次 transient → 第 3 次升级为 exhausted(防退避死循环)", async () => {

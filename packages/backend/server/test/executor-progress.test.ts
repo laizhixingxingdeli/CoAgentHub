@@ -813,10 +813,14 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(t.diffSummary?.retries).toBeUndefined();
       expect(isInCooldown({ key: "codebuddy" })).toBe(false);
       const summary = t.diffSummary as Record<string, unknown> | null;
-      // 匹配到但被提交闸掉:留可读说明 + 命中行,便于区分「没匹配到」与「被闸掉」。
-      const gate = summary?.quotaMatchedButCommitFound as
-        | { matchedLine?: string; note?: string }
-        | undefined;
+      // R9: 瞬时退避行由次闸抑制(可归因闸之前),留 quotaMatchedButTransient;旧 R6 主闸的 commit 闸不再单独构成产出,但本用例仍应不判额度、不冷却
+      const gate =
+        (summary?.quotaMatchedButTransient as
+          | { matchedLine?: string; note?: string }
+          | undefined) ??
+        (summary?.quotaMatchedButCommitFound as
+          | { matchedLine?: string; note?: string }
+          | undefined);
       expect(gate).toBeTruthy();
       expect(String(gate?.matchedLine)).toContain("auto-continuing");
       expect(String(gate?.note)).toContain("不判额度");
