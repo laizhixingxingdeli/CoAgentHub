@@ -275,43 +275,59 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
     const counterFile = path.join(counterDir, "n.txt");
     process.env.FAKE_COUNTER_FILE = counterFile;
     process.env.FAKE_ALWAYS_FAIL = "1";
-    // 通过在消息里声明一个不存在的仓库？改为直接让 checkpoint 无效：我们不绑项目但让 resetWorkspace 仍走 repoDir（全局），然后手动破坏 checkpointRef
-    // 简化：用一个已绑项目，但任务失败后我们直接删掉 checkpoint ref 再触发重试？更直接：测试 countCommitsAfterCheckpoint null 走终止分支——用无效 ref 模拟
-    // 这里用独立逻辑：创建一个任务，首次失败后其 checkpointRef 被我们篡改为无效，再观察重试终止行为需直接调 handleFailure 难以模拟
-    // 改为测：无效 ref 时自动重试应终止，不进入重试（failed 且 retryCount 0）
-    // 实现：让任务在无仓库项目上执行（findRepoRoot 回退到全局 repo，checkpoint 会打在全局 repo，但重试时 ref 仍有效）
-    // 为真正触发无效 ref，我们改为在任务创建后直接把 DB 的 checkpointRef 改为无效值，再让任务失败触发重试
-    const { coordinator, codebuddy, group } = await setupGroup();
-    // 使用默认组（无 projectPath）+ FAKE_ALWAYS_FAIL 触发 handleFailure 且 resetWorkspace 有 checkpoint 但 ref 无效
-    // 需要让 checkpointRef 生效：先做一次正常失败任务拿到 checkpoint，再改无效
-    // 简化验收：直接断言无效 ref 的回滚会终止重试（不要求真实派发，仅做 git 层面的 count=null 回落验证）
-    // 这里做一个轻量 git 验证：无效 ref 时 count 应为 null
-    const proj = makeGitRepo("coagenthub-guard-invalid2-");
-    const invalidRef = "refs/coagenthub-cp/nonexistent-" + Date.now();
-    const { gitExec } = await import("@server/lib/executor-runner");
-    // 验证 helper 行为：无效 ref 的 rev-list 应失败
-    const cntRes = await (await import("@server/lib/executor-runner")).gitExec(["rev-list", "--count", `${invalidRef}..HEAD`], proj);
-    expect(cntRes.status).not.toBe(0);
-    // 再做一次端到端：FAKE_ALWAYS_FAIL + 绑项目但 checkpoint 会被 reset，失败后重试一次仍失败，最终 failed 且无 rollbackSkipped
-    const group2 = await createGroup(coordinator.id, "guard-invalid-e2e-" + Date.now());
-    await addMember(coordinator.id, group2.id, codebuddy.id, ["executor"]);
-    await bindProject(coordinator.id, group2.id, proj);
+    process.env.FAKE_SLEEP_SECS = "2";
+    const proj = makeGitRepo("coagenthub-guard-invalid-");
+    const { coordinator, codebuddy } = await setupGroup();
+    const group = await createGroup(coordinator.id, "guard-invalid-" + Date.now());
+    await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
+    await bindProject(coordinator.id, group.id, proj);
     try {
-      const msg = await postMessage(coordinator.id, group2.id, {
+      const msg = await postMessage(coordinator.id, group.id, {
         body: "guard无效快照任务",
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      const t = await waitForTaskStatus(coordinator.id, group2.id, msg.id, "failed", 25000);
-      // 自动重试了一次后仍失败（always fail），最终 failed
-      expect(t.retryCount).toBe(1);
+      // 等待 checkpoint 已创建且首次 attempt 尚未结束（sleep 窗口内）
+      const running = await waitForTaskStatus(coordinator.id, group.id, msg.id, "running", 10000);
+      expect(running.checkpointRef).toBeTruthy();
+      const checkpointRef = running.checkpointRef!;
+      // 删除真实 checkpoint ref，使任务落库 ref 无效（等价篡改）
+      // polling 确保 ref 已写入 git 后再删除
+      for (let i = 0; i < 20; i++) {
+        const v = await (await import("@server/lib/executor-runner")).gitExec(["rev-parse", "--verify", checkpointRef], proj);
+        if (v.status === 0) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      execFileSync("git", ["update-ref", "-d", checkpointRef], { cwd: proj });
+      const cntRes = await (await import("@server/lib/executor-runner")).gitExec(["rev-list", "--count", `${checkpointRef}..HEAD`], proj);
+      expect(cntRes.status).not.toBe(0);
+      // 等待最终 failed（回滚失败 → 终止重试，不进入第二次 attempt）
+      const t = await waitForTaskStatus(coordinator.id, group.id, msg.id, "failed", 25000);
+      expect(t.checkpointRef).toBe(checkpointRef);
+      expect(t.retryCount).toBe(0);
+      // 无第二次 spawn/attempt：计数器仅 1，attempts 仅一条
+      const counterVal = (() => {
+        try { return readFileSync(counterFile, "utf8").trim(); } catch { return ""; }
+      })();
+      expect(counterVal).toBe("1");
+      // attempts 可选校验：若落库则长度为 1
+      const attempts = (t as unknown as { attempts?: unknown[] }).attempts;
+      if (attempts) expect(attempts.length).toBe(1);
       const diff = t.diffSummary as Record<string, unknown>;
-      expect(diff.error).toContain("exit 1");
+      expect(diff).toBeDefined();
+      expect(String(diff.error)).toContain("exit 1");
+      expect(String(diff.error)).toMatch(/回滚失败|快照不存在/);
+      expect(String(diff.error)).toContain("终止重试");
       expect((diff as Record<string, unknown>).rollbackSkipped).toBeUndefined();
+      // 未产生自动重试提示
+      const msgs = await listMessages(coordinator.id, group.id);
+      expect(msgs.some((m) => m.body.includes("自动重试"))).toBe(false);
     } finally {
       process.env.FAKE_COUNTER_FILE = "";
       process.env.FAKE_ALWAYS_FAIL = "";
+      process.env.FAKE_SLEEP_SECS = "";
       rmSync(counterDir, { recursive: true, force: true });
+      rmSync(proj, { recursive: true, force: true });
     }
   }, 30_000);
 
