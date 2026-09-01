@@ -116,6 +116,7 @@ export {
   type GroupPromptInfo,
   mergePlatformTokenFields,
   preserveDispatchKindNote,
+  preserveRollbackSkipped,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";

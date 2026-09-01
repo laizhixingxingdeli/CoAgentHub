@@ -34,6 +34,7 @@ import {
   notifyTaskStatusChanged,
   postStatus,
   preserveDispatchKindNote,
+  preserveRollbackSkipped,
   readTaskDetail,
   recordCoordinationActivity,
   resolveTaskRepo,
@@ -1476,6 +1477,17 @@ app
         !Array.isArray(summaryToWrite)
       ) {
         summaryToWrite = preserveDispatchKindNote(
+          task.diffSummary,
+          summaryToWrite as Record<string, unknown>,
+        );
+      }
+      if (
+        diffSummary !== undefined &&
+        typeof summaryToWrite === "object" &&
+        summaryToWrite !== null &&
+        !Array.isArray(summaryToWrite)
+      ) {
+        summaryToWrite = preserveRollbackSkipped(
           task.diffSummary,
           summaryToWrite as Record<string, unknown>,
         );

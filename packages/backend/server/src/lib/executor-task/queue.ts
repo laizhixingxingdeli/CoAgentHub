@@ -23,6 +23,7 @@ import {
   type ExecutorRunHandle,
   type ExecutorRunResult,
   findRepoRoot,
+  gitExec,
   readTimeoutMs,
   resetToCheckpoint,
   runExecutor,
@@ -118,6 +119,7 @@ import {
   type GroupQueue,
   mergePlatformTokenFields,
   preserveDispatchKindNote,
+  preserveRollbackSkipped,
   type QueuedRun,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
@@ -340,7 +342,8 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
           const toFail = candidates.filter((row) => deadTaskIds.includes(row.id));
           const updated: typeof candidates = [];
           for (const row of toFail) {
-            const next = preserveDispatchKindNote(row.diffSummary, { error: "server-restart" });
+            let next = preserveDispatchKindNote(row.diffSummary, { error: "server-restart" });
+            next = preserveRollbackSkipped(row.diffSummary, next);
             const [u] = await db
               .update(taskTable)
               .set({ status: "failed", diffSummary: next })
@@ -775,7 +778,8 @@ export async function enqueueTaskRun(
 
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    const nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
+    let nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
+    nextWaiting = preserveRollbackSkipped(task.diffSummary, nextWaiting as Record<string, unknown>);
     await db
       .update(taskTable)
       .set({ diffSummary: nextWaiting })
@@ -1067,7 +1071,8 @@ async function dispatchTask(
   // (泵送跳过冷却执行器,冷却结束定时器会自动派发,任务保持 queued 等待)。
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    const nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
+    let nextWaiting = preserveDispatchKindNote(task.diffSummary, { waiting: `等待执行器额度恢复(预计 ${eta})` });
+    nextWaiting = preserveRollbackSkipped(task.diffSummary, nextWaiting as Record<string, unknown>);
     try {
       await db
         .update(taskTable)
@@ -1853,11 +1858,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
             columns: { diffSummary: true },
           });
-          const nextCancelled = preserveDispatchKindNote(cur?.diffSummary, {
+          let nextCancelled = preserveDispatchKindNote(cur?.diffSummary, {
             error: "stopped",
             ...(tokenUsage !== undefined ? { tokenUsage } : {}),
             ...(tokenUsageReason ? { tokenUsageReason } : {}),
           });
+          nextCancelled = preserveRollbackSkipped(cur?.diffSummary, nextCancelled);
           const [cancelled] = await db
             .update(taskTable)
             .set({
@@ -2086,13 +2092,14 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
         if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
-        // R2 缺省留痕跨终态保留:合并既有 dispatchKindNote
+        // R2 缺省留痕跨终态保留:合并既有 dispatchKindNote / rollbackSkipped
         {
           const cur = await db.query.task.findFirst({
             where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
             columns: { diffSummary: true },
           });
           preserveDispatchKindNote(cur?.diffSummary, diffSummary);
+          preserveRollbackSkipped(cur?.diffSummary, diffSummary);
         }
         releaseTaskOutput(taskId);
         const [done] = await db
@@ -2230,7 +2237,8 @@ function handleStallAlert(run: QueuedRun): void {
         where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
         columns: { diffSummary: true },
       });
-      const nextAlert = preserveDispatchKindNote(cur?.diffSummary, { stallAlerted: true });
+      let nextAlert = preserveDispatchKindNote(cur?.diffSummary, { stallAlerted: true });
+      nextAlert = preserveRollbackSkipped(cur?.diffSummary, nextAlert);
       await run.db
         .update(taskTable)
         .set({ diffSummary: nextAlert })
@@ -2453,6 +2461,7 @@ async function failTask(
       columns: { diffSummary: true },
     });
     preserveDispatchKindNote(cur?.diffSummary, diffSummary);
+    preserveRollbackSkipped(cur?.diffSummary, diffSummary);
   }
   const [failed] = await db
     .update(taskTable)
@@ -2657,12 +2666,13 @@ async function handleTransientQuotaBackoff(
       where: and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
       columns: { diffSummary: true },
     });
-    const transientNext = preserveDispatchKindNote(curTransient?.diffSummary, {
+    let transientNext = preserveDispatchKindNote(curTransient?.diffSummary, {
       waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
       // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
       quotaKind: "transient",
       ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
     });
+    transientNext = preserveRollbackSkipped(curTransient?.diffSummary, transientNext as Record<string, unknown>);
     const [updated] = await run.db
       .update(taskTable)
       .set({
@@ -2813,28 +2823,79 @@ async function handleFailure(
   // 重试前回滚 checkpoint(resetWorkspace=true 且存在快照):恢复工作树到任务前
   // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。回滚
   // 必须在执行前快照所用的仓库(任务书声明的仓库)上进行,与原执行一致。
+  // 外来提交防护(spec retry-rollback-must-not-destroy-foreign-commits R1/R2):
+  // 硬 reset 前检查 checkpoint 之后是否存在提交;存在 → 跳过回滚但继续重试
+  // (降级),留痕并群内说明;干净(0)照常硬 reset;无法判定(null)走既有
+  // 「回滚失败 → 终止重试」语义,不静默跳过。
   if (getRetryPolicy().resetWorkspace && run.checkpointRef) {
     const declaredRoot = resolveTaskRepo(run.body, run.projectPath);
     const repoRoot =
       declaredRoot && existsSync(declaredRoot) ? declaredRoot : findRepoRoot();
-    const res = await resetToCheckpoint(run.checkpointRef, repoRoot);
-    if (!res.ok) {
-      // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
-      const msg = `${reason};回滚失败,终止重试: ${res.message}`;
-      console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
-      await failTask(db, taskId, msg, run.retryCount, undefined, run.attempts);
+    const foreignCount = await countCommitsAfterCheckpoint(
+      run.checkpointRef,
+      repoRoot,
+    );
+    if (foreignCount !== null && foreignCount > 0) {
+      const headRes = await gitExec(["rev-parse", "HEAD"], repoRoot);
+      const headAtSkip =
+        headRes.status === 0 ? (headRes.stdout ?? "").trim() : "unknown";
+      const rollbackSkipped = {
+        reason: "checkpoint 之后存在外来提交,跳过回滚保护共享工作树",
+        headAtSkip,
+        checkpoint: run.checkpointRef,
+      };
+      try {
+        const cur = await db.query.task.findFirst({
+          where: eq(taskTable.id, taskId),
+          columns: { diffSummary: true },
+        });
+        const base =
+          asDiffSummaryRecord(cur?.diffSummary) ?? ({} as Record<string, unknown>);
+        const existing = asDiffSummaryRecord(cur?.diffSummary);
+        const next: Record<string, unknown> = { ...base, rollbackSkipped };
+        if (
+          existing?.dispatchKindNote &&
+          !Object.hasOwn(next, "dispatchKindNote")
+        ) {
+          next.dispatchKindNote = existing.dispatchKindNote;
+        }
+        await db
+          .update(taskTable)
+          .set({ diffSummary: next })
+          .where(eq(taskTable.id, taskId));
+      } catch (e) {
+        console.warn(`[executor] 写 rollbackSkipped 留痕失败(${taskId}): ${e}`);
+      }
+      console.log(
+        `[executor] 检测到检查点之后存在外来提交(${foreignCount} 个),跳过回滚保护共享工作树: ${taskId} HEAD=${headAtSkip.slice(0, 12)} checkpoint=${run.checkpointRef}`,
+      );
       await postStatus(
         db,
         run.groupId,
         run.participantId,
         run.ex,
-        `❌ [${run.ex.label}] 任务失败: ${msg}`,
+        `⚠️ [${run.ex.label}] 检测到检查点之后存在外来提交,已跳过回滚保护共享工作树(HEAD=${headAtSkip.slice(0, 12)} checkpoint=${run.checkpointRef}),将在当前工作树状态上直接重试`,
       );
-      return;
+    } else {
+      const res = await resetToCheckpoint(run.checkpointRef, repoRoot);
+      if (!res.ok) {
+        // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
+        const msg = `${reason};回滚失败,终止重试: ${res.message}`;
+        console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
+        await failTask(db, taskId, msg, run.retryCount, undefined, run.attempts);
+        await postStatus(
+          db,
+          run.groupId,
+          run.participantId,
+          run.ex,
+          `❌ [${run.ex.label}] 任务失败: ${msg}`,
+        );
+        return;
+      }
+      console.log(
+        `[executor] 重试前已回滚工作区到 ${run.checkpointRef}(${taskId})`,
+      );
     }
-    console.log(
-      `[executor] 重试前已回滚工作区到 ${run.checkpointRef}(${taskId})`,
-    );
   }
 
   // retry_count+1 并持久化(最终结果仍由重试后的完成路径回传)。
@@ -2940,6 +3001,32 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
   // 退避定时器:无既有 running 任务(外部会话占用)时,退避到期主动泵送重试;
   // 有既有任务时由它们的完成路径(finally → pumpQueue)触发,本定时器仅兜底。
   setTimeout(() => void pumpQueue(), CONCURRENCY_RETRY_BACKOFF_MS);
+}
+
+/**
+ * 外来提交判定(spec retry-rollback-must-not-destroy-foreign-commits R1/R3):
+ * 检查点 ref 之后到 HEAD 之间是否存在提交(提交可达性,ADR-0009:判据指名
+ * 「checkpoint 之后是否存在提交」这一事实,而非「HEAD 是否等于 checkpoint」)。
+ *
+ * 为何不是 SHA 相等比较:checkpoint 由 createCheckpoint 的 `commit-tree -p HEAD`
+ * 打出的**新**提交对象,其父才是任务起点 HEAD —— checkpoint ref 与 HEAD 的 SHA
+ * 恒不相等,直接比较会把每次重试都误判为外来提交。改用
+ * `git rev-list --count <ref>..HEAD`:干净重试(起点后无提交)→ 0;共享工作树
+ * 在任务启动后接受了外来提交(检视者冻结/其他任务产物/手工提交)→ >0。
+ *
+ * 返回 null 表示无法读取提交图(ref 无效/非仓库/git 失败):调用方不得据此
+ * 跳过回滚(那会静默销毁),应回落既有的「回滚失败 → 终止重试」语义。
+ */
+async function countCommitsAfterCheckpoint(
+  ref: string,
+  repoRoot: string,
+): Promise<number | null> {
+  const head = await gitExec(["rev-parse", "HEAD"], repoRoot);
+  if (head.status !== 0) return null;
+  const count = await gitExec(["rev-list", "--count", `${ref}..HEAD`], repoRoot);
+  if (count.status !== 0) return null;
+  const n = parseInt((count.stdout ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : null;
 }
 
 /**
