@@ -241,7 +241,13 @@ cmd_restart() {
     fi
   done
 
-  cmd_start "${start_args[@]}"
+  # Bash 3.2 treats expanding an empty array under set -u as an unset
+  # variable. Keep the no-argument restart path valid on the system shell.
+  if [ "${#start_args[@]}" -gt 0 ]; then
+    cmd_start "${start_args[@]}"
+  else
+    cmd_start
+  fi
 
   # R3: 校验替换结果 —— 新 pid 存在、来自本脚本新启动(与 PID 文件一致)、且不同于停止前
   for port in "$SERVER_PORT" "$WEB_PORT"; do
