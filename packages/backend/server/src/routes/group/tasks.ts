@@ -651,9 +651,54 @@ function markL3MergedInto(
  * .endedAt(终态审计时刻),老任务/未记录时兜底 updatedAt。overdue = 超过
  * l3ResponseMinutes 且未应答(只观测不强制,不拒绝任何终态)。
  */
+type ReviewResultIndex = Map<string, "pass" | "findings">;
+type L3Task = Pick<
+  TaskRow,
+  | "id"
+  | "groupId"
+  | "executorParticipantId"
+  | "brief"
+  | "status"
+  | "diffSummary"
+  | "dispatchAudit"
+  | "createdAt"
+  | "updatedAt"
+>;
+
+/**
+ * 读取本群所有可识别的 review_result,按 taskId 建立索引。
+ * 该索引以消息载荷代替逐任务全表扫描;同一任务保留扫描中遇到的第一条,
+ * 与详情端点原有判定顺序一致。这个代替在调用方只需要单个任务且不共享
+ * 扫描结果时不成立,因此详情路径会按需建立自己的索引。
+ */
+async function loadReviewResultIndex(
+  db: DataBase,
+  groupId: string,
+): Promise<ReviewResultIndex> {
+  const results: ReviewResultIndex = new Map();
+  const candidates = await db.query.groupMessage.findMany({
+    where: (t, { and: andFn, eq: eqFn, ilike: ilikeFn }) =>
+      andFn(eqFn(t.groupId, groupId), ilikeFn(t.body, "%review_result%")),
+    columns: { body: true },
+  });
+  for (const message of candidates) {
+    let parsed: CoordinationPayload | undefined;
+    try {
+      parsed = parseKnownCoordinationPayload(message.body);
+    } catch {
+      continue;
+    }
+    if (parsed?.type === "review_result" && !results.has(parsed.taskId)) {
+      results.set(parsed.taskId, parsed.verdict);
+    }
+  }
+  return results;
+}
+
 async function deriveL3Answer(
   db: DataBase,
-  task: TaskRow,
+  task: L3Task,
+  reviewResults?: ReviewResultIndex,
 ): Promise<
   | {
       answered: boolean;
@@ -664,7 +709,7 @@ async function deriveL3Answer(
   | undefined
 > {
   if (task.status !== "done") return undefined;
-  if (!(await isDetachedTask(db, task))) return undefined;
+  if (!(await isDetachedTask(db, task as TaskRow))) return undefined;
   const summary =
     typeof task.diffSummary === "object" && task.diffSummary !== null
       ? (task.diffSummary as Record<string, unknown>)
@@ -697,31 +742,12 @@ async function deriveL3Answer(
     audit?.coordinationActivity?.endedAt ??
     (resolved.updatedAt ?? resolved.createdAt).toISOString();
 
-  // 在本群消息中找 taskId 指向属主任务的 review_result 载荷。历史消息在 R1 校验
-  // 落地前未校验形状,解析失败的行跳过(不影响 answered 判定)。
-  let answered = false;
-  let verdict: "pass" | "findings" | null = null;
-  const candidates = await db.query.groupMessage.findMany({
-    where: (t, { and: andFn, eq: eqFn, ilike: ilikeFn }) =>
-      andFn(
-        eqFn(t.groupId, resolved.groupId),
-        ilikeFn(t.body, "%review_result%"),
-      ),
-    columns: { body: true },
-  });
-  for (const message of candidates) {
-    let parsed: CoordinationPayload | undefined;
-    try {
-      parsed = parseKnownCoordinationPayload(message.body);
-    } catch {
-      continue;
-    }
-    if (parsed?.type === "review_result" && parsed.taskId === resolved.id) {
-      answered = true;
-      verdict = parsed.verdict;
-      break;
-    }
-  }
+  // 在本群消息索引中找 taskId 指向属主任务的 review_result 载荷。列表路径
+  // 传入批量索引,详情路径按需建立同一索引;解析失败的行已被跳过。
+  const indexedResults =
+    reviewResults ?? (await loadReviewResultIndex(db, resolved.groupId));
+  const verdict = indexedResults.get(resolved.id) ?? null;
+  const answered = verdict !== null;
   const overdue =
     !answered &&
     Date.now() - Date.parse(awaitingSince) > getL3ResponseMinutesMs();
@@ -961,12 +987,21 @@ app
         ...task,
         pidAlive: pidAliveOf(task.executorPid),
       }));
+      // L3 应答状态与详情端点复用同一派生函数;review_result 先按群批量
+      // 建索引,避免列表中的每条任务各自触发一次全表扫描。
+      const reviewResults = await loadReviewResultIndex(db, id);
+      const withL3 = await Promise.all(
+        withPidAlive.map(async (task) => {
+          const l3 = await deriveL3Answer(db, task, reviewResults);
+          return l3 ? { ...task, l3 } : task;
+        }),
+      );
       // 实时进度:includeOutput=1 时给每个任务附 outputTail(running 任务 =
       // 内存缓冲;已完成任务 = diffSummary.outputTail 回填或留空)。
       if (!wantOutput) {
-        return c.json(withPidAlive);
+        return c.json(withL3);
       }
-      const withOutput = withPidAlive.map((task) => {
+      const withOutput = withL3.map((task) => {
         const buffered = taskOutputTail(task.id);
         const summary =
           typeof task.diffSummary === "object" && task.diffSummary !== null

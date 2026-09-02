@@ -8,7 +8,7 @@ import {
 } from "@server/lib/l3-overdue-reminder";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 
@@ -150,6 +150,12 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     const res = await app.request(`/api/groups/${groupId}/tasks/${taskId}`);
     expect(res.status).toBe(200);
     return (await res.json()) as Record<string, unknown>;
+  }
+
+  async function getTaskList(groupId: string, query = "") {
+    const res = await app.request(`/api/groups/${groupId}/tasks${query}`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>[];
   }
 
   async function makeTaskOverdue(taskId: string) {
@@ -605,6 +611,35 @@ describe("L3 裁决的可观测与校验 (R1-R6)", () => {
     const l3 = detail.l3 as { answered: boolean; verdict: string };
     expect(l3.answered).toBe(true);
     expect(l3.verdict).toBe("pass");
+  });
+
+  it("列表端点复用 L3 派生并批量扫描 review_result", async () => {
+    const { reviewer, group, task } = await setupDoneCoordinationTask();
+    const result = await postMessageRaw(
+      reviewer.id,
+      group.id,
+      JSON.stringify(reviewResult(task.id, "pass")),
+    );
+    expect(result.status).toBe(200);
+
+    const findMany = vi.spyOn(testDb.query.groupMessage, "findMany");
+    const rows = await getTaskList(group.id, "?includeOutput=1");
+    const row = rows.find((candidate) => candidate.id === task.id);
+    expect(row?.l3).toMatchObject({ answered: true, verdict: "pass" });
+    expect(findMany.mock.calls).toHaveLength(1);
+    findMany.mockRestore();
+  });
+
+  it("列表端点对不适用任务不输出 l3,且保留 outputTail 行为", async () => {
+    const { group, task } = await setupDoneCoordinationTask();
+    await testDb
+      .update(taskTable)
+      .set({ status: "queued" })
+      .where(eq(taskTable.id, task.id));
+    const rows = await getTaskList(group.id, "?includeOutput=1");
+    const row = rows.find((candidate) => candidate.id === task.id);
+    expect(row).not.toHaveProperty("l3");
+    expect(row).toHaveProperty("pidAlive");
   });
 
   it("R3:verdict=findings 的 review_result 也能被识别", async () => {
