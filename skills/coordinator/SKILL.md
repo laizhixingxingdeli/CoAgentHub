@@ -87,7 +87,9 @@ Call `coagenthub_dispatch_task` with:
 - **先选目标再下发**：初次下发和限额后的改派都先读取群成员与任务状态；候选必须是本群的 executor，且**不得是你自己的 participant ID**。有空闲的非自身 executor 时，按其群内 prompt 的分工选择；不要把协调者自己当作默认回退目标。
 - 若没有健康、空闲的非自身 executor：**允许降级为两方由你兼任执行，但必须由平台判定**（见 §2.5）——你**不得自述**「无人可派」来触发降级，也不得静默自派。
 - The executor sees the spec reference in its task ticket and must follow it.
-- Use `planOnly: true` first to preview the task ticket before sending.
+- 预览:`planOnly: true` 先看任务书(`{"status":"preview"}` 为预览,不是下发);
+- **真实下发:必须再调用一次不带 `planOnly` 的 `coagenthub_dispatch_task`**;
+- **自证:汇报里必须贴出新建子任务的 id。拿不出 id 就不算下发。**
 - **`specHash` 验收钉子**: in-flight tasks are accepted against the `specHash` they were dispatched with — a later `spec_amended` does NOT retroactively change acceptance for in-flight tasks. Record the hash on the ticket; verify against that version.
 
 </dispatch-rules>
@@ -146,6 +148,8 @@ L2 是「对着冻结规范检视产出」，本就只依赖可复得的事实�
 
 **一次只派一个，天然串行**：派一个 → 退出 → 续跑时再派下一个。**不要**为省几次往返
 在一轮里连派多个子任务——它们会成为共享同一棵 git 树的并行进程。
+
+**派发后自查(防预览误判)**:退出前必须确认该协调任务名下子任务数 > 0(或本轮为兼任实现且工作树确有提交)。二者皆无 → 不得按「已派发」结束。
 
 </exit-after-dispatch>
 
@@ -484,7 +488,7 @@ If the work is too large for one task, break it into **decision tickets**. The u
 | Create group | `coagenthub_create_group` | `title` |
 | Add executor to group | `coagenthub_add_group_member` | `participantId`, `roles: ["executor"]` |
 | Dispatch task | `coagenthub_dispatch_task` | `body`, `specRef`, `specHash`, `dispatchKind`, `executorName`, `goal`, `scope`, `acceptance`, `callback.sessionRef` |
-| Preview task ticket | `coagenthub_dispatch_task` | `planOnly: true` |
+| Preview task ticket | `coagenthub_dispatch_task` | `planOnly: true` 预览，不创建任务；真实下发见上一行 |
 | Check task status | `coagenthub_get_task` | `taskId` |
 | List all tasks | `coagenthub_list_tasks` | — |
 | Post message to group | `coagenthub_post_message` | `body`, `audience` |
