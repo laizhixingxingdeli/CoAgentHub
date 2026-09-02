@@ -53,6 +53,7 @@ import {
 import {
   appendLiveTaskOutput,
   appendTaskOutput,
+  liveTaskOutputTail,
   releaseTaskOutput,
 } from "./output-buffer";
 import {
@@ -1964,6 +1965,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       if (run.stopped) {
         console.log(`[executor] 任务已停止: ${taskId}`);
         await endAttempt(run, { status: "cancelled" });
+        const liveTail = liveTaskOutputTail(taskId);
         releaseTaskOutput(taskId);
         const tokenUsage = sumAttemptTokenUsage(run.attempts);
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
@@ -1979,6 +1981,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             error: "stopped",
             ...(tokenUsage !== undefined ? { tokenUsage } : {}),
             ...(tokenUsageReason ? { tokenUsageReason } : {}),
+            ...(liveTail ? { liveOutputTail: liveTail } : {}),
           });
           nextCancelled = preserveRollbackSkipped(
             cur?.diffSummary,
@@ -2240,6 +2243,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 完成回填:最近 500 行输出写进 diffSummary.outputTail(之后不依赖内存)。
         const doneTail = taskOutputTailLines(taskId);
         if (doneTail) diffSummary.outputTail = doneTail;
+        const liveTail = liveTaskOutputTail(taskId);
+        if (liveTail) diffSummary.liveOutputTail = liveTail;
         await endAttempt(run, {
           status: "done",
           summary: report.summary,
@@ -2332,7 +2337,6 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.error(`[executor] 执行器启动失败: ${msg}`);
       markAttemptTokenUnavailable(run);
       await endAttempt(run, { status: "failed", error: msg });
-      releaseTaskOutput(taskId);
       await failTask(
         db,
         taskId,
@@ -2341,6 +2345,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         undefined,
         run.attempts,
       );
+      releaseTaskOutput(taskId);
       await postStatus(
         db,
         groupId,
@@ -2512,7 +2517,6 @@ async function handleUnconfirmed(run: QueuedRun): Promise<void> {
     status: "failed",
     error: "执行器未按协议回复，结果未确认",
   });
-  releaseTaskOutput(taskId);
   await failTask(
     db,
     taskId,
@@ -2521,6 +2525,7 @@ async function handleUnconfirmed(run: QueuedRun): Promise<void> {
     { unconfirmed: true },
     run.attempts,
   );
+  releaseTaskOutput(taskId);
   await postStatus(
     db,
     run.groupId,
@@ -2620,6 +2625,8 @@ async function failTask(
   if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
   const tail = taskOutputTailLines(taskId);
   if (tail) diffSummary.outputTail = tail;
+  const liveTail = liveTaskOutputTail(taskId);
+  if (liveTail) diffSummary.liveOutputTail = liveTail;
   {
     const cur = await db.query.task.findFirst({
       where: eq(taskTable.id, taskId),

@@ -502,14 +502,19 @@ function isBareNarrativeLine(line: string): boolean {
  * 未知行逐字保留。
  */
 function createAtomCodeParser(): ExecutorOutputParser {
-  let pending = "";
+  const pendingBySource = new Map<"stdout" | "stderr", string>();
   const { entry, raw } = createEntryMaker();
   const parser = ((
     chunk: string,
     source?: "stdout" | "stderr",
   ): OutputEntry[] => {
-    const lines = `${pending}${chunk ?? ""}`.split("\n");
-    pending = lines.pop() ?? "";
+    // stdout/stderr are independent streams; interleaving must not join
+    // fragments from different streams before source-based classification.
+    const stream = source ?? "stderr";
+    const lines = `${pendingBySource.get(stream) ?? ""}${chunk ?? ""}`.split(
+      "\n",
+    );
+    pendingBySource.set(stream, lines.pop() ?? "");
     if (lines.length === 0) return [];
     const out: OutputEntry[] = [];
     for (const line of lines) {
@@ -520,12 +525,21 @@ function createAtomCodeParser(): ExecutorOutputParser {
     return out;
   }) as ExecutorOutputParser;
   parser.flush = (source?: "stdout" | "stderr") => {
-    const tail = pending;
-    pending = "";
-    if (tail.length === 0) return [];
-    return splitMidLinePrefixes(tail)
-      .split("\n")
-      .map((l) => renderAtomCodeLine(l, entry, raw, source));
+    const streams: Array<"stdout" | "stderr"> = source
+      ? [source]
+      : ["stderr", "stdout"];
+    const flushed: OutputEntry[] = [];
+    for (const stream of streams) {
+      const tail = pendingBySource.get(stream) ?? "";
+      pendingBySource.set(stream, "");
+      if (tail.length === 0) continue;
+      flushed.push(
+        ...splitMidLinePrefixes(tail)
+          .split("\n")
+          .map((l) => renderAtomCodeLine(l, entry, raw, stream)),
+      );
+    }
+    return flushed;
   };
   return parser;
 }

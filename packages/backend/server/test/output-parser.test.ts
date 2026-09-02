@@ -497,6 +497,25 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(parse.flush()).toEqual([]);
   });
 
+  it("stdout 末行无换行时 flush 仍保留 AtomCode 答案(回归)", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    const answer = "`a.txt` 共有 2 行。";
+    expect(parse(answer, "stdout")).toEqual([]);
+    const flushed = parse.flush();
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].kind).toBe("report");
+    expect(flushed[0].summary).toBe(`[汇报 #t1] ${answer}`);
+  });
+
+  it("stdout/stderr 交错时分别保留未成行片段(回归)", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    parse("answer", "stdout");
+    parse("[thinking] internal", "stderr");
+    const flushed = parse.flush();
+    expect(flushed.map((entry) => entry.kind)).toEqual(["thinking", "report"]);
+    expect(flushed[1].summary).toBe("[汇报 #t2] answer");
+  });
+
   it("已知前缀被 chunk 边界切开 → pending 重组后再拆到行首(R5)", () => {
     const parse = createExecutorOutputParser("atomcode");
     // [tokens] 前缀在 chunk 边界被切成两半:前一 chunk 以 "[t" 结尾。

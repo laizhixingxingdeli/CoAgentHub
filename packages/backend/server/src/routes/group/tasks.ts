@@ -43,7 +43,6 @@ import {
   sameRecipients,
   taskOutputTail,
 } from "@server/lib/executor-task";
-import { liveTaskOutputTail } from "@server/lib/executor-task/output-buffer";
 import {
   type ClaimVerificationMode,
   hasCommitInTaskWindow,
@@ -51,7 +50,10 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "@server/lib/executor-task/cooldown-store";
-import { releaseTaskOutput } from "@server/lib/executor-task/output-buffer";
+import {
+  liveTaskOutputTail,
+  releaseTaskOutput,
+} from "@server/lib/executor-task/output-buffer";
 import {
   enterCooldown,
   MIN_EFFECTIVE_COOLDOWN_MS,
@@ -1015,7 +1017,11 @@ app
           summary && typeof summary.outputTail === "string"
             ? summary.outputTail
             : undefined;
-        const outputTail = buffered ?? backfilled ?? undefined;
+        const persistedLive =
+          summary && typeof summary.liveOutputTail === "string"
+            ? summary.liveOutputTail
+            : undefined;
+        const outputTail = buffered ?? persistedLive ?? backfilled ?? undefined;
         return outputTail === undefined ? task : { ...task, outputTail };
       });
       return c.json(withOutput);
@@ -1128,7 +1134,11 @@ app
           summary && typeof summary.outputTail === "string"
             ? summary.outputTail
             : undefined;
-        detail.outputTail = buffered ?? backfilled ?? null;
+        const persistedLive =
+          summary && typeof summary.liveOutputTail === "string"
+            ? summary.liveOutputTail
+            : undefined;
+        detail.outputTail = buffered ?? persistedLive ?? backfilled ?? null;
       }
       // L3 应答状态(R3):协调任务 done + 带 review_request 时派生 l3 字段;
       // 不满足触发条件不输出(不是空对象),其余载荷保持逐字不变。
@@ -1643,6 +1653,24 @@ app
           : summaryHasReviewRequest(summaryToWrite)
             ? ownRecipients
             : dispatcherRecipients(task.dispatcherParticipantId);
+      // Persist the report-only view before terminal PATCH releases its memory
+      // buffer, keeping refresh consistent with the live stream.
+      if (
+        terminalTransition &&
+        liveTaskOutputTail(taskId) !== null
+      ) {
+        const liveTail = liveTaskOutputTail(taskId);
+        if (liveTail) {
+          summaryToWrite = {
+            ...(typeof summaryToWrite === "object" &&
+            summaryToWrite !== null &&
+            !Array.isArray(summaryToWrite)
+              ? (summaryToWrite as Record<string, unknown>)
+              : {}),
+            liveOutputTail: liveTail,
+          };
+        }
+      }
       // R8(v1.1):PATCH failed 终态时复用 classifyQuotaFailure 判定额度失败,
       // 命中后同口径进入执行器冷却并留痕(与 queue 进程退出/超时/孤儿收敛三条
       // 路径一致)。
