@@ -1,6 +1,6 @@
 # Spec: detached 任务经 PATCH 结案时从不回填 outputTail,协调者的过程记录永久丢失
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: Landed — L3 通过(2026-09-02),实现 `34740724`
 > **相关**: [ADR-0009](../docs/adr/0009-judgments-must-name-the-fact.md)
 
 ## 1. 现象:56 / 56 全空
