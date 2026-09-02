@@ -1,6 +1,6 @@
 # Spec: 列表端点不输出 l3,需求面板的 L3 步恒显示 running
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: Landed — L3 通过(2026-09-02),实现 `3acaebfb`
 > **相关**: [l3-verdict-observability](l3-verdict-observability.md)
 
 ## 1. 现象(实测)
