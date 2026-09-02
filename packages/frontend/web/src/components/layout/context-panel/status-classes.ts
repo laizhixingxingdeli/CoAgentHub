@@ -13,4 +13,5 @@ export const LAYER_STATUS_CLASS = {
   pending: "border-muted-foreground/30 bg-muted/50 text-muted-foreground",
   "na-declared": "border-border bg-muted text-muted-foreground",
   "na-no-reviewer": "border-border bg-muted text-muted-foreground",
+  "coordinator-served": "border-border bg-muted text-muted-foreground",
 } as const;

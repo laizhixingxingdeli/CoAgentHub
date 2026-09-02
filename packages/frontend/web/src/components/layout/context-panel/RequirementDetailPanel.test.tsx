@@ -250,8 +250,8 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
       "data-status",
       "done",
     );
-    // 「L3 检视」出现两处:阶梯末尾虚拟格标签 + L3 层卡片标题。
-    expect(screen.getAllByText("L3 检视")).toHaveLength(2);
+    // 已检视·完整出现两处:阶梯末尾标签 + L3 层卡片标题( spec v4.1 三态)。
+    expect(screen.getAllByText("L3 已检视·完整")).toHaveLength(2);
   });
 
   it("三层模式无 review_result:L3 显式「未开始」/ L2 完成时「进行中」", () => {
@@ -539,8 +539,12 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
   });
 
   it("零子任务但没有 noExecutionReason 的历史协调任务仍是 L1 未开始", () => {
+    // 该用例为无 review_request 的零子任务(尚未到终态),按 spec R1 不打协调者兼任标记
     const [requirement] = groupTasksBySpec([
-      coordinationTask({ createdAt: "2026-08-01T09:00:00.000Z" }),
+      coordinationTask({
+        diffSummary: null,
+        createdAt: "2026-08-01T09:00:00.000Z",
+      }),
     ]);
     render(
       <RequirementDetailPanel
@@ -642,11 +646,10 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
         members={[COORDINATOR]}
       />,
     );
-    expect(screen.getByTestId("requirement-l3-na-fix")).toBeInTheDocument();
-    expect(screen.getByText("L3 不适用·修复")).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("requirement-l3-no-reviewer"),
-    ).not.toBeInTheDocument();
+    // v4.1: na-fix 已删除,fix 在两方在场时为 na-no-reviewer(未检视·无检视者)
+    expect(screen.getByTestId("requirement-l3-no-reviewer")).toBeInTheDocument();
+    expect(screen.getByText("L3 未检视·无检视者")).toBeInTheDocument();
+    expect(screen.queryByTestId("requirement-l3-na-fix")).not.toBeInTheDocument();
   });
 
   it("缺 L2(无协调任务):L2 层显式「未开始」", () => {

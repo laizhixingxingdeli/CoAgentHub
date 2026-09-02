@@ -24,6 +24,7 @@ const STEP_DOT_CLASS: Record<StepStatus, string> = {
   pending: "border border-muted-foreground/40",
   "na-declared": "border border-muted-foreground bg-muted",
   "na-no-reviewer": "border border-muted-foreground bg-muted",
+  "coordinator-served": "border border-muted-foreground bg-muted",
 };
 
 const KIND_LABEL: Record<RequirementKind, string> = {

@@ -90,6 +90,7 @@ const LAYER_STATUS_LABEL: Record<StepStatus, string> = {
   pending: "未开始",
   "na-declared": "不适用 · 已声明理由",
   "na-no-reviewer": "未检视·无检视者",
+  "coordinator-served": "由协调者兼任",
 };
 
 function LayerBadge({
@@ -281,11 +282,14 @@ export default function RequirementDetailPanel({
       )
     : null;
   const stepStatuses = layerState.steps;
+  const isSelfReviewed = l1.status === "coordinator-served";
   const stepLabels = [
     l1.status === "na-declared"
       ? "L1 不适用 · 已声明理由"
-      : `L1 执行${retrySuffix}`,
-    "L2 协调",
+      : l1.status === "coordinator-served"
+        ? "由协调者兼任"
+        : `L1 执行${retrySuffix}`,
+    isSelfReviewed ? "L2 协调 · 自审" : "L2 协调",
     l3.status === "na-no-reviewer"
       ? "L3 未检视·无检视者"
       : l3.verdict
@@ -468,14 +472,24 @@ export default function RequirementDetailPanel({
       {/* L2 协调:状态来自协调任务自身,子任务只参与 L1。 */}
       <LayerCard
         testId="requirement-layer-l2"
-        title="L2 协调"
+        title={isSelfReviewed ? "L2 协调 · 自审" : "L2 协调"}
         status={l2Status}
         summary={
-          l2.conclusion ? (
-            <span data-testid="requirement-l2-conclusion">{l2Summary}</span>
-          ) : (
-            l2Summary
-          )
+          <span className="inline-flex items-center gap-1">
+            {l2.conclusion ? (
+              <span data-testid="requirement-l2-conclusion">{l2Summary}</span>
+            ) : (
+              l2Summary
+            )}
+            {isSelfReviewed && (
+              <span
+                data-testid="requirement-l2-self-review"
+                className="inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1 py-0 text-[10px] font-medium text-amber-700"
+              >
+                自审
+              </span>
+            )}
+          </span>
         }
         expanded={l2Expanded}
         onToggle={() => toggleLayer("l2")}
@@ -513,9 +527,11 @@ export default function RequirementDetailPanel({
         title={
           l1.status === "na-declared"
             ? "L1 不适用 · 已声明理由"
-            : l1.status === "pending" && l1Tasks.length === 0
-              ? "L1 未开始"
-              : "L1 执行"
+            : l1.status === "coordinator-served"
+              ? "L1 由协调者兼任"
+              : l1.status === "pending" && l1Tasks.length === 0
+                ? "L1 未开始"
+                : "L1 执行"
         }
         status={l1Status}
         summary={l1Summary}

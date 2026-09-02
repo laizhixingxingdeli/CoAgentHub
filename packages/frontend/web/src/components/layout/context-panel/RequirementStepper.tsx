@@ -30,6 +30,7 @@ const STEP_WRAPPER_CLASS: Record<StepStatus, string> = {
   pending: "size-6",
   "na-declared": "size-6",
   "na-no-reviewer": "size-6",
+  "coordinator-served": "size-6",
 };
 
 /** 连接线配色:上一步走过了就用它的状态色,没走到用 --border 灰。 */
@@ -40,6 +41,7 @@ const CONNECTOR_CLASS: Record<StepStatus, string> = {
   pending: "bg-border",
   "na-declared": "bg-border",
   "na-no-reviewer": "bg-border",
+  "coordinator-served": "bg-border",
 };
 
 /** 白色勾/叉的描边宽度(加粗 + 圆头,小尺寸下也清晰)。 */
@@ -99,7 +101,9 @@ function StepIcon({ status }: { status: StepStatus }) {
           strokeWidth={2}
         />
       )}
-      {(status === "na-declared" || status === "na-no-reviewer") && (
+      {(status === "na-declared" ||
+        status === "na-no-reviewer" ||
+        status === "coordinator-served") && (
         <>
           <circle
             cx="12"

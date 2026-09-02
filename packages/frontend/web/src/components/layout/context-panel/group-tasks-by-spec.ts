@@ -39,7 +39,8 @@ export type StepStatus =
   | "running"
   | "pending"
   | "na-declared"
-  | "na-no-reviewer";
+  | "na-no-reviewer"
+  | "coordinator-served";
 
 /** 一条「需求」:同 specRef 任务的聚合结果。 */
 export type Requirement = {
@@ -199,10 +200,21 @@ function requirementSteps(tasks: TaskItem[], members: Member[]): StepStatus[] {
   const executionTasks = executionTasksForRequirement(tasks, members);
   const coordinationTask = coordinationTaskForTasks(tasks);
   const coordinationTasks = coordinationTasksForRequirement(tasks, members);
+  const reason = noExecutionReasonForTask(coordinationTask);
+  let l1: StepStatus;
+  if (reason) {
+    l1 = "na-declared";
+  } else if (
+    executionTasks.length === 0 &&
+    coordinationTask !== null &&
+    reviewRequestForTask(coordinationTask) !== null
+  ) {
+    l1 = "coordinator-served";
+  } else {
+    l1 = aggregateTaskStatuses(executionTasks.map((task) => task.status));
+  }
   return [
-    noExecutionReasonForTask(coordinationTask)
-      ? "na-declared"
-      : aggregateTaskStatuses(executionTasks.map((task) => task.status)),
+    l1,
     aggregateTaskStatuses(coordinationTasks.map((task) => task.status)),
     "pending",
   ];
