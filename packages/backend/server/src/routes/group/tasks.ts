@@ -43,6 +43,7 @@ import {
   sameRecipients,
   taskOutputTail,
 } from "@server/lib/executor-task";
+import { liveTaskOutputTail } from "@server/lib/executor-task/output-buffer";
 import {
   type ClaimVerificationMode,
   hasCommitInTaskWindow,
@@ -1002,7 +1003,10 @@ app
         return c.json(withL3);
       }
       const withOutput = withL3.map((task) => {
-        const buffered = taskOutputTail(task.id);
+        // live 仅 report: running 任务走 live 缓冲(含 WS 一致性),已完成回落 DB 全量。
+        const liveBuffered = liveTaskOutputTail(task.id);
+        const buffered =
+          liveBuffered !== null ? liveBuffered : taskOutputTail(task.id);
         const summary =
           typeof task.diffSummary === "object" && task.diffSummary !== null
             ? (task.diffSummary as Record<string, unknown>)
@@ -1110,10 +1114,12 @@ app
       ) {
         detail.staleBuildSuspected = true;
       }
-      // 实时进度:includeOutput=1 时附 outputTail(running 任务 = 内存缓冲;
-      // 已完成任务 = diffSummary.outputTail 回填或留空)。
+      // 实时进度:includeOutput=1 时附 outputTail(running=live 缓冲 report-only,
+      // 已完成=diffSummary.outputTail 全量回填)。
       if (wantOutput) {
-        const buffered = taskOutputTail(task.id);
+        const liveBuffered = liveTaskOutputTail(task.id);
+        const buffered =
+          liveBuffered !== null ? liveBuffered : taskOutputTail(task.id);
         const summary =
           typeof task.diffSummary === "object" && task.diffSummary !== null
             ? (task.diffSummary as Record<string, unknown>)

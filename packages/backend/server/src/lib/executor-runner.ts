@@ -45,7 +45,7 @@ export interface ExecutorRunOptions {
   cwd?: string;
   timeoutMs?: number;
   /** 流式输出回调(边收边回传/写日志);未提供则仅累积到 stdout/stderr。 */
-  onOutput?: (chunk: string) => void;
+  onOutput?: (chunk: string, source: "stdout" | "stderr") => void;
 }
 
 export interface ExecutorRunResult {
@@ -116,12 +116,12 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   child.stdout!.on("data", (d: Buffer) => {
     const text = d.toString();
     append(text, "out");
-    onOutput?.(text);
+    onOutput?.(text, "stdout");
   });
   child.stderr!.on("data", (d: Buffer) => {
     const text = d.toString();
     append(text, "err");
-    onOutput?.(text);
+    onOutput?.(text, "stderr");
   });
 
   let timedOut = false;

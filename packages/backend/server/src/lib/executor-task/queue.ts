@@ -50,7 +50,11 @@ import {
   notifyTaskStatusChanged,
   postStatus,
 } from "./notify";
-import { appendTaskOutput, releaseTaskOutput } from "./output-buffer";
+import {
+  appendLiveTaskOutput,
+  appendTaskOutput,
+  releaseTaskOutput,
+} from "./output-buffer";
 import {
   createExecutorOutputParser,
   type OutputEntry,
@@ -1512,8 +1516,24 @@ function summaryStreamText(entries: readonly OutputEntry[]): string {
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
+/**
+ * 实时界面流文本(spec live-output-only-agent-narration R1):仅 kind=report 进界面,
+ * 其余类别(tool/command/result/thinking/error/raw)不进界面但全量持久化。判据
+ * 是解析器产出的 kind,代替文本前缀匹配;错误永不折叠的约束保留在持久化侧,
+ * 界面侧错误不显示但明细/DB 仍逐字保留,实现时在 summaryStreamText 注释已记下。
+ */
+function liveStreamText(entries: readonly OutputEntry[]): string {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (entry.kind !== "report") continue;
+    if (entry.summary.length === 0) continue;
+    lines.push(entry.summary);
+  }
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
 /** L2 可观测性导出:共享摘要过滤函数(供定向回归测试直接断言空行治理)。 */
-export { summaryStreamText };
+export { liveStreamText, summaryStreamText };
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
@@ -1742,22 +1762,27 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         bin: ex.bin,
         args,
         cwd: repoRoot,
-        onOutput: (chunk) => {
+        onOutput: (chunk, source) => {
           // 流式日志 + 实时进度:server 控制台保留原样(带色便于排查);入环形
           // 缓冲(includeOutput 拉取/断线重连用)与 WS 广播(task_output 事件)
           // 走剥离后的文本——剥在唯一源头,前端/插件/兜底拉取一次性受益。
           process.stdout.write(chunk);
           const clean = stripAnsiChunk(chunk);
-          // 两层级输出(spec two-tier-output-summary-and-detail):解析器产出结构化
-          // 条目,摘要进环形缓冲 + WS 广播(带 #id,上限不变),完整原文逐条落盘
-          // 明细 JSONL(R4,不驻留内存)。
-          const entries = parseOutput(clean);
+          // 两层级输出(spec two-tier-output-summary-and-detail + live-output-only-agent-narration):
+          // 解析器产出结构化条目,持久化摘要进全量环形缓冲(保留 tool/command/error/raw),
+          // 界面流仅 report 进 live 缓冲 + WS 广播;完整原文逐条落盘明细 JSONL(R4)。
+          const entries = parseOutput(clean, source);
           if (entries.length > 0) {
-            // 摘要流过滤 thinking(R1);明细对未过滤的 entries 逐条落盘(R2)。
+            // R3:持久化口径逐字不变——全量摘要流(仅 thinking/空行过滤)进 appendTaskOutput/DB。
             const summaryText = summaryStreamText(entries);
             if (summaryText.length > 0) {
               appendTaskOutput(taskId, summaryText);
-              void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+            }
+            // R1:界面只渲染 kind=report —— WS 与 includeOutput 同界过滤。
+            const liveText = liveStreamText(entries);
+            if (liveText.length > 0) {
+              appendLiveTaskOutput(taskId, liveText);
+              void wsHub.broadcastTaskOutput(groupId, taskId, liveText);
             }
             for (const entry of entries) appendTaskDetail(taskId, entry);
           }
@@ -1920,13 +1945,17 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       const result = await handle.promise;
       await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
       // 进程已退出:吐出解析器残留的未成行尾部(逐字),保证 R3 不丢任何一行。
+      // flush 无来源信息(pending 属 stderr 侧残留,stdout 已按行成块);保持 stderr 口径。
       const flushed = parseOutput.flush();
       if (flushed.length > 0) {
-        // 与 onOutput 同口径:摘要过滤 thinking,明细照常落盘。
         const summaryText = summaryStreamText(flushed);
         if (summaryText.length > 0) {
           appendTaskOutput(taskId, summaryText);
-          void wsHub.broadcastTaskOutput(groupId, taskId, summaryText);
+        }
+        const liveText = liveStreamText(flushed);
+        if (liveText.length > 0) {
+          appendLiveTaskOutput(taskId, liveText);
+          void wsHub.broadcastTaskOutput(groupId, taskId, liveText);
         }
         for (const entry of flushed) appendTaskDetail(taskId, entry);
       }

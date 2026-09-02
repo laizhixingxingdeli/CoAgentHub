@@ -413,11 +413,11 @@ function splitMidLinePrefixes(text: string): string {
   return out;
 }
 
-/** 流式解析器:可调用(喂 chunk)+ flush(进程结束时吐出残留,逐字)。 */
+/** 流式解析器:可调用(喂 chunk,来源可选)+ flush(进程结束时吐出残留,逐字)。 */
 export interface ExecutorOutputParser {
-  (chunk: string): OutputEntry[];
+  (chunk: string, source?: "stdout" | "stderr"): OutputEntry[];
   /** 进程结束时吐出尚未成行的残留(逐字),保证 R3 不丢任何一行。 */
-  flush(): OutputEntry[];
+  flush(source?: "stdout" | "stderr"): OutputEntry[];
 }
 
 /** codex:行缓冲 + 渲染 item.completed / 显式跳过已知冗余事件 / 逐字兜底。 */
@@ -439,17 +439,23 @@ function createCodexParser(): ExecutorOutputParser {
 }
 
 /**
- * 渲染一条 atomcode 输出行(两层级):[thinking] → [思考 #id] 要旨 + 明细全文;
- * [tool→ / [tool← 动作行摘要逐字保留(工具名/参数可见),超长行折叠;
- * [tokens] 账目行与裸叙述行(无前缀正文)→ 结构化识别后摘要抑制 —— 走 thinking
- * 通道(summaryStreamText 唯一过滤的类别:摘要不进流、全文进明细,按 #tN / detail
- * 可取回,不得静默丢弃);[done]/[headless]/未知 [前缀] / JSON 形态逐字 raw。
+ * 渲染一条 atomcode 输出行(两层级 + R2 来源):来自 stdout 的非空行判为 report
+ * (进界面);来自 stderr 的行维持现有判定。判据来源是执行器免费给出的事实
+ * (stdout/stderr),代替首字符猜测;stderr 侧的首字符判据在 stdout 场景下
+ * 不成立(反引号开头被误判为 thinking)。
  */
 function renderAtomCodeLine(
   line: string,
   entry: ReturnType<typeof createEntryMaker>["entry"],
   raw: ReturnType<typeof createEntryMaker>["raw"],
+  source?: "stdout" | "stderr",
 ): OutputEntry {
+  // R2.2:来自 stdout 的非空行判为 report(进界面),来源可代替结构猜测。
+  if (source === "stdout") {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return raw(line);
+    return entry("report", `[汇报] ${trimmed}`, line);
+  }
   const thinking = /^\[thinking\]\s*(.*)$/.exec(line);
   if (thinking) {
     const full = thinking[1].trim();
@@ -474,8 +480,8 @@ function renderAtomCodeLine(
     // 空内容行按 raw 逐字保留(与 [thinking] 空行同界)。
     return body.length > 0 ? entry("thinking", line, line) : raw(line);
   }
-  // 裸叙述行(无 [ 前缀、非 JSON 形态、非空)→ 摘要抑制 + 全文进明细。
-  // 纯结构判据,不匹配任何正文关键词。
+  // 裸叙述行(无 [ 前缀、非 JSON 形态、非空)→ 来自 stderr 的按原有 suppressed
+  // 处理;stdout 已在上方分支接入 report,不再落此。
   if (isBareNarrativeLine(line)) {
     return entry("thinking", line, line);
   }
@@ -498,25 +504,28 @@ function isBareNarrativeLine(line: string): boolean {
 function createAtomCodeParser(): ExecutorOutputParser {
   let pending = "";
   const { entry, raw } = createEntryMaker();
-  const parser = ((chunk: string): OutputEntry[] => {
+  const parser = ((
+    chunk: string,
+    source?: "stdout" | "stderr",
+  ): OutputEntry[] => {
     const lines = `${pending}${chunk ?? ""}`.split("\n");
     pending = lines.pop() ?? "";
     if (lines.length === 0) return [];
     const out: OutputEntry[] = [];
     for (const line of lines) {
       for (const piece of splitMidLinePrefixes(line).split("\n")) {
-        out.push(renderAtomCodeLine(piece, entry, raw));
+        out.push(renderAtomCodeLine(piece, entry, raw, source));
       }
     }
     return out;
   }) as ExecutorOutputParser;
-  parser.flush = () => {
+  parser.flush = (source?: "stdout" | "stderr") => {
     const tail = pending;
     pending = "";
     if (tail.length === 0) return [];
     return splitMidLinePrefixes(tail)
       .split("\n")
-      .map((l) => renderAtomCodeLine(l, entry, raw));
+      .map((l) => renderAtomCodeLine(l, entry, raw, source));
   };
   return parser;
 }

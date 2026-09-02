@@ -50,10 +50,41 @@ export function taskOutputUpdatedAt(taskId: string): number | null {
 export function releaseTaskOutput(taskId: string): void {
   runningOutputs.delete(taskId);
   outputUpdatedAt.delete(taskId);
+  releaseLiveTaskOutput(taskId);
 }
 
 /** 清空全部输出缓冲(测试重置 __resetExecutorQueueForTests 用)。 */
 export function clearAllTaskOutputs(): void {
   runningOutputs.clear();
   outputUpdatedAt.clear();
+  clearAllLiveTaskOutputs();
+}
+
+/* ---------------- 实时界面缓冲(仅 report,供 WS + includeOutput) ---------------- */
+/** 仅 report 的实时界面缓冲(taskId → 已过滤的 report 行),与 full 缓冲同界。 */
+const runningLiveOutputs = new Map<string, string>();
+
+export function appendLiveTaskOutput(taskId: string, chunk: string): void {
+  const prev = runningLiveOutputs.get(taskId) ?? "";
+  let next = prev + chunk;
+  if (next.length > OUTPUT_TAIL_MAX_BYTES) {
+    next = next.slice(-OUTPUT_TAIL_MAX_BYTES);
+  }
+  const lines = next.split("\n");
+  if (lines.length > OUTPUT_TAIL_MAX_LINES) {
+    next = lines.slice(-OUTPUT_TAIL_MAX_LINES).join("\n");
+  }
+  runningLiveOutputs.set(taskId, next);
+}
+
+export function liveTaskOutputTail(taskId: string): string | null {
+  return runningLiveOutputs.get(taskId) ?? null;
+}
+
+export function releaseLiveTaskOutput(taskId: string): void {
+  runningLiveOutputs.delete(taskId);
+}
+
+export function clearAllLiveTaskOutputs(): void {
+  runningLiveOutputs.clear();
 }

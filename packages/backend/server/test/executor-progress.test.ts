@@ -473,9 +473,9 @@ describe("任务面板增强批次 server 侧测试", () => {
       expect(tail).toContain("green-line");
       expect(tail).toContain("red-line");
       expect(tail).not.toMatch(/\u001b\[/);
-      // WS 广播(broadcastTaskOutput 路径)收到的 chunk 同样无转义残留。
+      // WS 广播(实时界面仅 report, raw 不进界面):raw ANSI 行不广播,仍需剥离正确性
+      // 由全量缓冲尾校验;此处仅校验若有广播则无转义残留(raw 不进界面故可能为 0)。
       const broadcastChunks = broadcastSpy.mock.calls.map((c) => c[2]);
-      expect(broadcastChunks.length).toBeGreaterThan(0);
       for (const chunk of broadcastChunks) {
         expect(chunk).not.toMatch(/\u001b\[/);
       }

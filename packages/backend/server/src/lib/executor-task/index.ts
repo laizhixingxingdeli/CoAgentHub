@@ -49,7 +49,12 @@ export {
   taskDetailFilePath,
 } from "./detail-store";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
-export { taskOutputTail } from "./output-buffer";
+export {
+  appendLiveTaskOutput,
+  liveTaskOutputTail,
+  releaseLiveTaskOutput,
+  taskOutputTail,
+} from "./output-buffer";
 export {
   createExecutorOutputParser,
   type ExecutorOutputParser,
