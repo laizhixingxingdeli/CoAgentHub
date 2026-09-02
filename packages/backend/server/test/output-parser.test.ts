@@ -7,6 +7,7 @@ import {
   getGenericSkippedEventCounts,
   readTaskDetail,
   resetCodexSkippedEventCounts,
+  liveStreamText,
   resetGenericSkippedEventCounts,
   summaryStreamText,
   taskDetailFilePath,
@@ -514,6 +515,44 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     const flushed = parse.flush();
     expect(flushed.map((entry) => entry.kind)).toEqual(["thinking", "report"]);
     expect(flushed[1].summary).toBe("[汇报 #t2] answer");
+  });
+
+  it("真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)", () => {
+    const stdoutRaw = readFileSync("../../../.scratch/probe/samples/atomcode-run.stdout", "utf8");
+    const stderrRaw = readFileSync("../../../.scratch/probe/samples/atomcode-run.stderr", "utf8");
+    const stdoutStripped = stdoutRaw.replace(/\n$/, "");
+    expect(stdoutStripped.endsWith("\n")).toBe(false);
+    const parse = createExecutorOutputParser("atomcode");
+    const outEntries: ReturnType<typeof parse> = [];
+    outEntries.push(...parse(stdoutStripped, "stdout"));
+    outEntries.push(...parse(stderrRaw, "stderr"));
+    outEntries.push(...parse.flush());
+    // 界面仅 report: 恰好 1 行答案(id 随解析顺序递增,不断言具体编号)
+    const live = outEntries.filter((e) => e.kind === "report");
+    expect(live).toHaveLength(1);
+    expect(live[0].summary).toContain("`a.txt` 共有 2 行。");
+    expect(live[0].summary).toMatch(/^\[汇报 #t\d+\] /);
+    // 持久化口径(除 thinking 外)仍含 tool/done 等全量, not only report
+    const summary = summaryStreamText(outEntries);
+    const liveText = liveStreamText(outEntries);
+    expect(liveText).toContain("`a.txt` 共有 2 行。");
+    expect(liveText.split("\n").filter((l) => l.length > 0)).toHaveLength(1);
+    expect(summary).toContain("[tool→");
+    expect(summary).toContain("[done]");
+    expect(summary).toContain("`a.txt` 共有 2 行。");
+  });
+
+  it("stdout/stderr 交错 chunk 切分时不串流(回归)", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    // stdout 分两次喂,中间插入 stderr 半截行
+    expect(parse("`a.txt` 共有 ", "stdout")).toEqual([]);
+    expect(parse("[thinking] half", "stderr")).toEqual([]);
+    expect(parse("2 行。", "stdout")).toEqual([]);
+    expect(parse(" thinking tail\n", "stderr")).toHaveLength(1);
+    const flushed = parse.flush();
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].kind).toBe("report");
+    expect(flushed[0].summary).toBe("[汇报 #t2] `a.txt` 共有 2 行。");
   });
 
   it("已知前缀被 chunk 边界切开 → pending 重组后再拆到行首(R5)", () => {

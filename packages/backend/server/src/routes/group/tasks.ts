@@ -41,7 +41,6 @@ import {
   reviewRequestCarryAllowed,
   reviewRequestRecipients,
   sameRecipients,
-  taskOutputTail,
 } from "@server/lib/executor-task";
 import {
   type ClaimVerificationMode,
@@ -1005,23 +1004,22 @@ app
         return c.json(withL3);
       }
       const withOutput = withL3.map((task) => {
-        // live 仅 report: running 任务走 live 缓冲(含 WS 一致性),已完成回落 DB 全量。
+        // live 仅 report: running 走 live 缓冲,已完成走持久化 liveOutputTail,永不回落全量 outputTail(保持 WS 一致性)。
         const liveBuffered = liveTaskOutputTail(task.id);
-        const buffered =
-          liveBuffered !== null ? liveBuffered : taskOutputTail(task.id);
         const summary =
           typeof task.diffSummary === "object" && task.diffSummary !== null
             ? (task.diffSummary as Record<string, unknown>)
-            : undefined;
-        const backfilled =
-          summary && typeof summary.outputTail === "string"
-            ? summary.outputTail
             : undefined;
         const persistedLive =
           summary && typeof summary.liveOutputTail === "string"
             ? summary.liveOutputTail
             : undefined;
-        const outputTail = buffered ?? persistedLive ?? backfilled ?? undefined;
+        const outputTail =
+          liveBuffered !== null
+            ? liveBuffered
+            : persistedLive !== undefined
+              ? persistedLive
+              : undefined;
         return outputTail === undefined ? task : { ...task, outputTail };
       });
       return c.json(withOutput);
@@ -1121,24 +1119,23 @@ app
         detail.staleBuildSuspected = true;
       }
       // 实时进度:includeOutput=1 时附 outputTail(running=live 缓冲 report-only,
-      // 已完成=diffSummary.outputTail 全量回填)。
+      // 已完成=diffSummary.liveOutputTail,永不回落全量 outputTail)。
       if (wantOutput) {
         const liveBuffered = liveTaskOutputTail(task.id);
-        const buffered =
-          liveBuffered !== null ? liveBuffered : taskOutputTail(task.id);
-        const summary =
+        const summary1 =
           typeof task.diffSummary === "object" && task.diffSummary !== null
             ? (task.diffSummary as Record<string, unknown>)
             : undefined;
-        const backfilled =
-          summary && typeof summary.outputTail === "string"
-            ? summary.outputTail
+        const persistedLive1 =
+          summary1 && typeof summary1.liveOutputTail === "string"
+            ? summary1.liveOutputTail
             : undefined;
-        const persistedLive =
-          summary && typeof summary.liveOutputTail === "string"
-            ? summary.liveOutputTail
-            : undefined;
-        detail.outputTail = buffered ?? persistedLive ?? backfilled ?? null;
+        detail.outputTail =
+          liveBuffered !== null
+            ? liveBuffered
+            : persistedLive1 !== undefined
+              ? persistedLive1
+              : null;
       }
       // L3 应答状态(R3):协调任务 done + 带 review_request 时派生 l3 字段;
       // 不满足触发条件不输出(不是空对象),其余载荷保持逐字不变。
@@ -1655,10 +1652,7 @@ app
             : dispatcherRecipients(task.dispatcherParticipantId);
       // Persist the report-only view before terminal PATCH releases its memory
       // buffer, keeping refresh consistent with the live stream.
-      if (
-        terminalTransition &&
-        liveTaskOutputTail(taskId) !== null
-      ) {
+      if (terminalTransition && liveTaskOutputTail(taskId) !== null) {
         const liveTail = liveTaskOutputTail(taskId);
         if (liveTail) {
           summaryToWrite = {

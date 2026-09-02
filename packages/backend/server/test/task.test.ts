@@ -1103,7 +1103,8 @@ describe("任务实体(server 单一状态源)", () => {
     const detail = (await res.json()) as Record<string, unknown>;
     expect(detail.outputTail).toBeNull();
 
-    // 通过 PATCH 写入 diffSummary.outputTail → includeOutput=1 回填返回。
+    // 通过 PATCH 写入 diffSummary.liveOutputTail(仅 report 的界面视图) → includeOutput=1 回填返回；
+    // outputTail(全量)不再经 includeOutput 暴露,保持 WS 推送一致性。
     const patched = await app.request(
       `/api/groups/${group.id}/tasks/${task.id}`,
       {
@@ -1113,7 +1114,7 @@ describe("任务实体(server 单一状态源)", () => {
           "X-Participant-Id": execA.id,
         },
         body: JSON.stringify({
-          diffSummary: { outputTail: "tail line 1\ntail line 2" },
+          diffSummary: { liveOutputTail: "tail line 1\ntail line 2" },
         }),
       },
     );
@@ -1125,6 +1126,34 @@ describe("任务实体(server 单一状态源)", () => {
     );
     const detail2 = (await res2.json()) as Record<string, unknown>;
     expect(detail2.outputTail).toBe("tail line 1\ntail line 2");
+    // 额外校验: outputTail(全量)经 PATCH 仍落库但不经 includeOutput 暴露
+    const patchedFull = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": execA.id,
+        },
+        body: JSON.stringify({
+          diffSummary: {
+            liveOutputTail: "tail line 1\ntail line 2",
+            outputTail: "full should not leak via includeOutput",
+          },
+        }),
+      },
+    );
+    expect(patchedFull.status).toBe(200);
+    const res3 = await app.request(
+      `/api/groups/${group.id}/tasks/${task.id}?includeOutput=1`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const detail3 = (await res3.json()) as Record<string, unknown>;
+    expect(detail3.outputTail).toBe("tail line 1\ntail line 2");
+    const rawDetail = (await patchedFull.json()) as Task;
+    expect((rawDetail.diffSummary as Record<string, unknown>).outputTail).toBe(
+      "full should not leak via includeOutput",
+    );
   });
 
   it("GET 单任务:detached 超过 30 分钟无信号时标记需要关注", async () => {
