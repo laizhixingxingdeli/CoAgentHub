@@ -9,6 +9,7 @@ import {
   executionTasksForRequirement,
   groupTasksBySpec,
 } from "./group-tasks-by-spec";
+import { deriveRequirementLayerState } from "./requirement-layer-state";
 
 /** 构造最小可用的 TaskItem,只填分组/排序/展示所需的字段。 */
 function makeTask(overrides: Partial<TaskItem> & { id: string }): TaskItem {
@@ -35,6 +36,13 @@ function makeMember(participantId: string, roles: string[]): Member {
 
 const COORDINATOR = makeMember("participant-coordinator", ["coordinator"]);
 const EXECUTOR = makeMember("participant-executor", ["executor"]);
+
+function layerSteps(
+  requirement: ReturnType<typeof groupTasksBySpec>[number],
+  members: Member[] = [],
+) {
+  return deriveRequirementLayerState(requirement, [], members).steps;
+}
 
 describe("groupTasksBySpec", () => {
   it("同 specRef(非 null)的多个任务聚合为一条 Requirement", () => {
@@ -220,7 +228,11 @@ describe("groupTasksBySpec", () => {
       }),
     ];
     const reqs = groupTasksBySpec(tasks);
-    expect(reqs[0].steps).toEqual(["running", "pending", "pending"]);
+    expect(layerSteps(reqs[0])).toEqual([
+      "running",
+      "pending",
+      "na-no-reviewer",
+    ]);
   });
 
   it("L1 全部完成时为 done,重试次数只作为需求附属信息", () => {
@@ -246,7 +258,7 @@ describe("groupTasksBySpec", () => {
       }),
     ];
     const reqs = groupTasksBySpec(tasks);
-    expect(reqs[0].steps).toEqual(["done", "pending", "pending"]);
+    expect(layerSteps(reqs[0])).toEqual(["done", "pending", "na-no-reviewer"]);
     expect(reqs[0].retryCount).toBe(2);
   });
 
@@ -521,6 +533,32 @@ describe("deriveLabel", () => {
 });
 
 describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
+  it("无子执行任务的 review_request 协调任务为 coordinator-served", () => {
+    const tasks = [
+      makeTask({
+        id: "coord",
+        specRef: "specs/r.md",
+        executorParticipantId: COORDINATOR.participantId,
+        status: "done",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            specRef: "specs/r.md",
+            specHash: "abc1234",
+            diffSummary: "L2 通过",
+          },
+        },
+      }),
+    ];
+    const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
+    expect(layerSteps(requirement, [COORDINATOR])).toEqual([
+      "coordinator-served",
+      "done",
+      "na-no-reviewer",
+    ]);
+  });
+
   it("零子任务的 coordinator 任务归 L2,L1 为空且不参与执行聚合", () => {
     const tasks = [
       makeTask({
@@ -533,7 +571,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
     ];
     const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
     // L2 跟随该协调任务(running),L1 无执行任务 → pending。
-    expect(requirement.steps).toEqual(["pending", "running", "pending"]);
+    expect(layerSteps(requirement, [COORDINATOR])).toEqual([
+      "pending",
+      "running",
+      "na-no-reviewer",
+    ]);
     expect(executionTasksForRequirement(tasks, [COORDINATOR])).toEqual([]);
   });
 
@@ -548,7 +590,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
       }),
     ];
     const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
-    expect(requirement.steps).toEqual(["pending", "done", "pending"]);
+    expect(layerSteps(requirement, [COORDINATOR])).toEqual([
+      "pending",
+      "done",
+      "na-no-reviewer",
+    ]);
     expect(requirement.retryCount).toBe(0);
   });
 
@@ -571,7 +617,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
       }),
     ];
     const [requirement] = groupTasksBySpec(tasks, [EXECUTOR]);
-    expect(requirement.steps).toEqual(["running", "pending", "pending"]);
+    expect(layerSteps(requirement, [EXECUTOR])).toEqual([
+      "running",
+      "pending",
+      "na-no-reviewer",
+    ]);
     expect(coordinationTasksForRequirement(tasks, [EXECUTOR])).toEqual([]);
   });
 
@@ -593,7 +643,7 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
     ];
     // 成员表为空 → 协调任务靠反推认出(与改动前一致)。
     const [requirement] = groupTasksBySpec(tasks);
-    expect(requirement.steps).toEqual(["done", "done", "pending"]);
+    expect(layerSteps(requirement)).toEqual(["done", "done", "na-no-reviewer"]);
     expect(requirement.label).toBe("r");
   });
 
@@ -624,7 +674,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
       }),
     ];
     const [requirement] = groupTasksBySpec(tasks, [COORDINATOR, EXECUTOR]);
-    expect(requirement.steps).toEqual(["done", "done", "pending"]);
+    expect(layerSteps(requirement, [COORDINATOR, EXECUTOR])).toEqual([
+      "done",
+      "done",
+      "na-no-reviewer",
+    ]);
     expect(
       executionTasksForRequirement(tasks, [COORDINATOR, EXECUTOR]),
     ).toEqual([tasks[1]]);
@@ -654,7 +708,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
     ];
     // 成员表为空 → 角色查不到,回退 review_request 兜底,行为与改动前一致。
     const [requirement] = groupTasksBySpec(tasks);
-    expect(requirement.steps).toEqual(["na-declared", "done", "pending"]);
+    expect(layerSteps(requirement)).toEqual([
+      "na-declared",
+      "done",
+      "na-no-reviewer",
+    ]);
     expect(coordinationTasksForRequirement(tasks)).toEqual(tasks);
   });
 
@@ -726,7 +784,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
     ]);
     const [requirement] = groupTasksBySpec(tasks, [COORDINATOR, EXECUTOR]);
     // L1 只含 exec-1(done);L2 聚合 done+running → running。
-    expect(requirement.steps).toEqual(["done", "running", "pending"]);
+    expect(layerSteps(requirement, [COORDINATOR, EXECUTOR])).toEqual([
+      "done",
+      "running",
+      "na-no-reviewer",
+    ]);
   });
 
   it("L2 聚合:两条协调任务皆 done → done", () => {
@@ -747,7 +809,11 @@ describe("协调任务按角色判定(coordination-task-is-not-l1)", () => {
       }),
     ];
     const [requirement] = groupTasksBySpec(tasks, [COORDINATOR]);
-    expect(requirement.steps).toEqual(["pending", "done", "pending"]);
+    expect(layerSteps(requirement, [COORDINATOR])).toEqual([
+      "pending",
+      "done",
+      "na-no-reviewer",
+    ]);
   });
 
   it("coordinationTaskForTasks 单条签名与语义不变(回归)", () => {

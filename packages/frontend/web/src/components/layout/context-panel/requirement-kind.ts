@@ -17,10 +17,10 @@ export function requirementKindOf(requirement: Requirement): RequirementKind {
 }
 
 /** 按归类过滤需求列表,返回新数组。 */
-export function filterRequirementsByKind(
-  requirements: readonly Requirement[],
+export function filterRequirementsByKind<T extends Requirement>(
+  requirements: readonly T[],
   kind: RequirementKind,
-): Requirement[] {
+): T[] {
   return requirements.filter(
     (requirement) => requirementKindOf(requirement) === kind,
   );

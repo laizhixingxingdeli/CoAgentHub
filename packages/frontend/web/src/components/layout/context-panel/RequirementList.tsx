@@ -34,7 +34,7 @@ const KIND_LABEL: Record<RequirementKind, string> = {
 
 type RequirementListProps = {
   /** 当前标签下可见的需求(已按 kind 过滤,由上层计算)。 */
-  visibleRequirements: Requirement[];
+  visibleRequirements: (Requirement & { steps: StepStatus[] })[];
   /** 两个标签各自的计数(null dispatchKind 计入「需求」)。 */
   kindCounts: Record<RequirementKind, number>;
   /** 当前选中的需求 id(null = 无选中)。 */

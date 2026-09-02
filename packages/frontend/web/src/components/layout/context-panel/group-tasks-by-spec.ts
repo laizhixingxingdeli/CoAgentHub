@@ -62,8 +62,6 @@ export type Requirement = {
   updatedAt: string | null;
   /** 展示用标题(见 deriveLabel)。 */
   label: string;
-  /** 固定三步: L1 执行、L2 协调、L3 检视。 */
-  steps: StepStatus[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -195,29 +193,27 @@ function retryCountForTasks(tasks: TaskItem[]): number {
   return recorded > 0 ? recorded : Math.max(tasks.length - 1, 0);
 }
 
-/** 从任务聚合出固定的 L1/L2/L3 三步;L3 需由消息与群成员补全。 */
-function requirementSteps(tasks: TaskItem[], members: Member[]): StepStatus[] {
+/**
+ * 需求 L1 的唯一状态判定。层级展示与测试都必须经过这里，避免聚合结果
+ * 携带一份不会被 UI 使用的派生 steps。
+ */
+export function deriveL1Status(
+  tasks: TaskItem[],
+  members: Member[],
+): StepStatus {
   const executionTasks = executionTasksForRequirement(tasks, members);
   const coordinationTask = coordinationTaskForTasks(tasks);
-  const coordinationTasks = coordinationTasksForRequirement(tasks, members);
   const reason = noExecutionReasonForTask(coordinationTask);
-  let l1: StepStatus;
   if (reason) {
-    l1 = "na-declared";
+    return "na-declared";
   } else if (
     executionTasks.length === 0 &&
     coordinationTask !== null &&
     reviewRequestForTask(coordinationTask) !== null
   ) {
-    l1 = "coordinator-served";
-  } else {
-    l1 = aggregateTaskStatuses(executionTasks.map((task) => task.status));
+    return "coordinator-served";
   }
-  return [
-    l1,
-    aggregateTaskStatuses(coordinationTasks.map((task) => task.status)),
-    "pending",
-  ];
+  return aggregateTaskStatuses(executionTasks.map((task) => task.status));
 }
 
 /**
@@ -384,7 +380,6 @@ export function groupTasksBySpec(
       ),
       updatedAt: latest.updatedAt,
       label: deriveLabel(sorted, members),
-      steps: requirementSteps(sorted, members),
     });
   }
 

@@ -8,6 +8,7 @@ import {
   aggregateTaskStatuses,
   coordinationTaskForTasks,
   coordinationTasksForRequirement,
+  deriveL1Status,
   executionTasksForRequirement,
   noExecutionReasonForTask,
   reviewRequestForTask,
@@ -138,25 +139,13 @@ function findSpecAnchor(
 
 function deriveL1(requirement: Requirement, members: Member[]): L1State {
   const coordinationTask = coordinationTaskForTasks(requirement.tasks);
-  const reason = noExecutionReasonForTask(coordinationTask);
   const executionTasks = executionTasksForRequirement(
     requirement.tasks,
     members,
   );
-  let status: StepStatus;
-  if (reason) {
-    status = "na-declared";
-  } else if (
-    executionTasks.length === 0 &&
-    coordinationTask !== null &&
-    reviewRequestForTask(coordinationTask) !== null
-  ) {
-    status = "coordinator-served";
-  } else {
-    status = aggregateTaskStatuses(executionTasks.map((task) => task.status));
-  }
+  const reason = noExecutionReasonForTask(coordinationTask);
   return {
-    status,
+    status: deriveL1Status(requirement.tasks, members),
     noExecutionReason: reason,
     childCount: coordinationTask?.l1?.childCount ?? executionTasks.length,
     supersededCount: coordinationTask?.l1?.supersededCount ?? 0,

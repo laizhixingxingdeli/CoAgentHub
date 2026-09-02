@@ -27,7 +27,6 @@ function makeRequirement(
     retryCount: 0,
     updatedAt: "2026-08-01T00:00:00.000Z",
     label: id,
-    steps: ["done", "done", "done"],
   };
 }
 
