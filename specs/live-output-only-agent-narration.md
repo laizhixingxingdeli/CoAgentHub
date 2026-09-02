@@ -1,7 +1,7 @@
 # Spec: 实时输出只显示 agent 汇报,持久化口径不变
 
-> **状态**: Draft — R4 范围待用户裁定后冻结
-> **版本**: 1.1
+> **状态**: Frozen — 2026-09-02(R4 已拆票并落地,前置条件解除)
+> **版本**: 1.2
 > **日期**: 2026-09-02
 > **相关**: [live-output-hide-thinking-and-autoscroll.md](live-output-hide-thinking-and-autoscroll.md)
 > **相关**: [two-tier-output-summary-and-detail.md](two-tier-output-summary-and-detail.md)
@@ -167,16 +167,21 @@ CLI 上看到的文字」(真实 codex CLI 会显示 `Reconnecting... 2/5`,该�
 
 **验收:改动前后 `diffSummary.outputTail` 对同一份 stdout 逐字节相同。**
 
-### R4 detached 任务结案时回填 outputTail
+### R4 ✅ 已拆票并落地(前置条件解除)
 
-PATCH 结案路径(协调者自己回写终态)与 done 分支同口径回填
-`diffSummary.outputTail`(最近 500 行,取自内存缓冲),回填后再
-`releaseTaskOutput`。顺序不可颠倒(与 `queue.ts:2864` 既有注释同一教训)。
+原文把「detached 结案回填 outputTail」列为范围待定项,并要求「必须与本票同批落地,
+否则 R1 生效后协调者界面变成一行、DB 仍是 null,输出在两处同时消失」。
 
-⚠️ **范围待定** —— 本条是 C5 暴露的独立缺陷,不是 R1/R2/R3 的必要组成。
-若判定超出本票范围,应拆为独立票,但**必须与本票同批落地**:
-否则 R1 生效后协调者界面变成一行、DB 仍是 null,
-协调者的输出将同时在两处消失。
+**该前提已解除**:用户裁定拆为独立票,现已落地并通过 L3 ——
+[detached-close-never-backfills-outputtail.md](detached-close-never-backfills-outputtail.md)
+(实现 `34740724`,L3 通过 2026-09-02)。实测:修复前 56/56 协调任务无 outputTail,
+修复后新协调任务落库 9855 字符。
+
+⇒ **本票 R1 现在可以安全生效** —— 界面收窄的同时,持久化侧已有完整记录。
+
+⚠️ 另需知悉:协调任务的实时输出**当前在界面上根本不渲染**
+(L2 层 `tasks={[]}`,见 [coordinator-live-output-not-rendered.md](coordinator-live-output-not-rendered.md))。
+本票只管**内容口径**,那张管**渲染入口**,两者独立、可任意先后。
 
 ## 硬验收
 
