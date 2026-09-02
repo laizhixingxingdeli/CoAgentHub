@@ -1,6 +1,6 @@
 # Spec: 完成事件永久滞留 pending,被无限重扫
 
-> **状态**: Ready for Implementation
+> **状态**: Landed(2026-09-02 状态订正:DB 中该 specRef 有 4 个 done 任务为证;此前状态未随关票更新)
 > **版本**: 1.0
 > **日期**: 2026-08-31
 

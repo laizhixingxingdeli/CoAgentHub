@@ -1,6 +1,15 @@
 # Spec: 接入 pi —— 实测记录与画像
 
-> **状态**: Blocked — 依赖批2([executor-output-profile.md](executor-output-profile.md))
+> **状态**: 部分落地(2026-09-02 重新裁定)——**接入已完成**,画像部分依赖已变更
+>
+> - **接入部分:已落地。** pi 已在群内正常执行任务(2026-09-02 实测 4 个任务,
+>   3 done);ADR-0008 的「纯界面接入」路径成立,无需代码改动。
+> - **画像部分:依赖已改指向。** 原依赖的批2
+>   [executor-output-profile.md](executor-output-profile.md) 已于 2026-09-02
+>   **暂缓**(画像表达不了 token 采集,见该文件头部),改走
+>   [executor-adapter-registry.md](executor-adapter-registry.md)(Frozen v1.0)。
+> - ⚠️ **本文件的实测记录仍然有效且仍是验收 fixture** —— 注册表方案同样需要
+>   真实输出样本,不因方案更换而作废。**不要删除本文件。**
 > **版本**: 2.0
 > **日期**: 2026-08-29
 > **ADR**: [ADR-0008](../docs/adr/0008-executor-adaptation-config-over-code.md)

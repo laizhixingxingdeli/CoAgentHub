@@ -1,6 +1,6 @@
 # Spec: 执行器全配置化(批1)——去内置、补列、权限归位
 
-> **状态**: Ready for Implementation
+> **状态**: Landed(2026-09-02 状态订正:DB 中该 specRef 有 20 个 done 任务为证;此前状态未随关票更新)
 > **版本**: 1.0
 > **日期**: 2026-08-29
 > **ADR**: [ADR-0008](../docs/adr/0008-executor-adaptation-config-over-code.md)
