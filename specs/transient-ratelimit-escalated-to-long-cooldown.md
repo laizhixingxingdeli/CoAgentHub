@@ -1,6 +1,6 @@
 # Spec: 瞬时限流被升级为 5 小时冷却
 
-> **状态**: v1.0 Landed(实现 `41fcbcf7`);
+> **状态**: Landed — v1.0,实现 `41fcbcf7`
 > **v1.1 新增 R7,Ready for Implementation**
 > **版本**: 1.1
 > **日期**: 2026-08-31(v1.1)

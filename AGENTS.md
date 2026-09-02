@@ -100,6 +100,27 @@ it says "fetch the relevant ticket", run `gh issue view <number> --comments`.
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the
 corresponding label string from this table.
 
+## Spec 状态词表
+
+`specs/*.md` 头部的 `> **状态**:` 只能取以下 8 个值之一,后跟可选的 ` — 说明`
+(说明里放日期、实现 commit、L3 结论等证据)。**这是目录里唯一能用来筛选的字段。**
+
+| 值 | 含义 | 可下发? |
+|---|---|---|
+| `Draft` | 未冻结,内容还会改 | 否 |
+| `Frozen` | 已冻结,`specHash` 可作验收锚点 | **是** |
+| `Landed` | 已落地并通过检视 | 否(已完成) |
+| `Partially landed` | 部分落地,说明里写清哪部分 | 视情况 |
+| `Superseded` | 已作废/被取代,**不要按它下发** | 否 |
+| `Partially superseded` | 部分被取代,说明里写清哪部分 | 视情况 |
+| `Deferred` | 暂缓,说明里写清恢复条件 | 否 |
+| `Living` | 活文档(架构契约等),非实现票 | 否 |
+
+⚠️ **关票时必须更新状态。** 2026-09-02 盘点发现:146 份 spec 里 12 份标着
+「Ready for Implementation」,其中 **11 份在 DB 里已有 done 任务**(4~20 个不等)——
+状态从不随关票更新,于是整个目录看起来都是待办,真正开放的只有 7 份。
+`Ready for Implementation` 已并入 `Frozen`(同义),不再使用。
+
 ## Spec-Driven workflow
 
 CoAgentHub uses a Spec-Driven dispatch flow: the coordinator must not dispatch a

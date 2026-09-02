@@ -1,6 +1,6 @@
 # Spec: 服务端固化执行器流程协议 (Executor Protocol in Task Ticket)
 
-> **状态**: Superseded by skill-enforcement-and-ticket-slim
+> **状态**: Superseded — 被 skill-enforcement-and-ticket-slim 取代
 >
 > **废弃原因**: 本 spec 要求把 executor skill 的完整执行流程固化进任务书；
 > `skill-enforcement-and-ticket-slim` 明确回退过度固化，方法改由

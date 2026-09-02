@@ -1,6 +1,6 @@
 # Spec: agent 自更新过期的 skill 副本
 
-> **状态**: Ready for Implementation
+> **状态**: Frozen
 > **版本**: 1.0
 > **日期**: 2026-08-29
 > **前作**: [skill-sync-mechanism.md](skill-sync-mechanism.md)(2026-08-24 落地,`93fd3152`)

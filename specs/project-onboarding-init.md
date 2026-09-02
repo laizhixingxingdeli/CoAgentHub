@@ -1,6 +1,6 @@
 # Spec: 新项目接入 CoAgentHub —— `/init` + `AGENTS.md` 标记段
 
-> **状态**: **Partially superseded**(2026-08-24)—— R1 检测判据 / R2 只存 groupId /
+> **状态**: Partially superseded — (2026-08-24) R1 检测判据 / R2 只存 groupId /
 > R6 已知局限**继续有效**;**R3 离线优先、R4 接入方式、R5 回填时机已被
 > `specs/project-onboarding-interactive.md`(`0b03bd37`,实现 `4fbfa2f3`)推翻**。
 > 推翻理由:原设计把建群/装 skill/回填 groupId 交给一段「引导指令」散文,
