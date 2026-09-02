@@ -50,11 +50,13 @@ import {
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "@server/lib/executor-task/cooldown-store";
+import { releaseTaskOutput } from "@server/lib/executor-task/output-buffer";
 import {
   enterCooldown,
   MIN_EFFECTIVE_COOLDOWN_MS,
   normalizeCooldownEnd,
 } from "@server/lib/executor-task/queue";
+import { taskOutputTailLines } from "@server/lib/executor-task/report";
 import {
   classifyQuotaFailure,
   formatEta,
@@ -1503,6 +1505,44 @@ app
           },
         );
       }
+      // detached-close-never-backfills-outputtail R1/R2: detached executors close
+      // through this PATCH path, so snapshot the same recent 500 lines as the
+      // queue completion path before releasing the process-local buffer. An
+      // explicit payload outputTail wins; when no buffer exists, persist the
+      // reason instead of silently leaving the audit field absent.
+      const detachedTerminalPatch =
+        status !== undefined &&
+        isTerminalTaskStatus(status) &&
+        (await isDetachedTask(db, task));
+      if (detachedTerminalPatch) {
+        const payloadSummary =
+          typeof summaryToWrite === "object" &&
+          summaryToWrite !== null &&
+          !Array.isArray(summaryToWrite)
+            ? (summaryToWrite as Record<string, unknown>)
+            : undefined;
+        const existingSummary =
+          typeof task.diffSummary === "object" &&
+          task.diffSummary !== null &&
+          !Array.isArray(task.diffSummary)
+            ? (task.diffSummary as Record<string, unknown>)
+            : undefined;
+        const summaryForClose = payloadSummary ?? existingSummary ?? {};
+        if (!Object.hasOwn(summaryForClose, "outputTail")) {
+          const outputTail = taskOutputTailLines(taskId);
+          summaryToWrite = {
+            ...summaryForClose,
+            ...(outputTail
+              ? { outputTail }
+              : {
+                  outputTailMissing:
+                    "PATCH 终态时任务输出缓冲不可用(可能已释放或服务已重启)",
+                }),
+          };
+        } else {
+          summaryToWrite = summaryForClose;
+        }
+      }
       // R1(specs/l3-request-delivery-and-scope.md):完成事件的投递对象由**载荷**
       // 决定,不由下发者决定 —— 终态 diffSummary 带 review_request 时收件人是群内
       // reviewer 成员,其余完成事件仍是下发者。裁定只发生在应用层,trigger 仅搬运
@@ -1646,7 +1686,9 @@ app
         .update(taskTable)
         .set({
           ...(status !== undefined ? { status } : {}),
-          ...(diffSummary !== undefined ? { diffSummary: summaryToWrite } : {}),
+          ...(diffSummary !== undefined || detachedTerminalPatch
+            ? { diffSummary: summaryToWrite }
+            : {}),
           ...(checkpointRef !== undefined ? { checkpointRef } : {}),
           ...(brief !== undefined ? { brief } : {}),
           ...(terminalTransition && recipientsToWrite !== undefined
@@ -1655,6 +1697,9 @@ app
         })
         .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, id)))
         .returning();
+      if (detachedTerminalPatch) {
+        releaseTaskOutput(taskId);
+      }
       // 外部执行器客户端通过 PATCH 推进状态 → 同样推送 task_status_changed
       // (仅当 status 实际变更时;否则订阅者会收到无变化的重复事件)。
       if (updated && status !== undefined && updated.status !== task.status) {

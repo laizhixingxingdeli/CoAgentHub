@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendTaskOutput,
   releaseTaskOutput,
+  taskOutputTail,
 } from "../src/lib/executor-task/output-buffer";
 import {
   configureSourceScanRoots,
@@ -1360,6 +1361,75 @@ describe("任务实体(server 单一状态源)", () => {
     });
   });
 
+  it("PATCH 终态回填最近 500 行 outputTail,显式值优先且结案后释放缓冲", async () => {
+    const { coordinator, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000093",
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    appendTaskOutput(task.id, "buffered coordination output\n");
+
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { summary: "协调者结案" },
+    });
+    expect(res.status).toBe(200);
+    const summary = ((await res.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.outputTail).toBe("buffered coordination output");
+    expect(taskOutputTail(task.id)).toBeNull();
+  });
+
+  it("PATCH 终态无输出缓冲时留下 outputTailMissing,不静默缺失", async () => {
+    const { coordinator, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000094",
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { summary: "无输出结案" },
+    });
+    expect(res.status).toBe(200);
+    const summary = ((await res.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.outputTailMissing).toEqual(expect.any(String));
+  });
+
+  it("PATCH 终态显式 outputTail 不被平台回填覆盖", async () => {
+    const { coordinator, group } = await setupGroup();
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      "00000000-0000-7000-8000-000000000095",
+      coordinator.id,
+    );
+    const task = (await created.json()) as Task;
+    appendTaskOutput(task.id, "buffered output\n");
+
+    const res = await patchTask(coordinator.id, group.id, task.id, {
+      status: "done",
+      diffSummary: { outputTail: "payload output" },
+    });
+    expect(res.status).toBe(200);
+    const summary = ((await res.json()) as Task).diffSummary as Record<
+      string,
+      unknown
+    >;
+    expect(summary.outputTail).toBe("payload output");
+  });
+
   it("PATCH 带不存在的 hash:核实标记 not_found,任务仍照常终态不判 failed", async () => {
     const { coordinator, execA, group } = await setupGroup();
     const created = await createTask(
@@ -1854,7 +1924,9 @@ describe("任务实体(server 单一状态源)", () => {
         const diff = updated.diffSummary as Record<string, unknown> | null;
         expect(diff?.executorCooldownEndMs).toBeUndefined();
         expect(isInCooldown({ key: "codebuddy" })).toBe(false);
-        expect(diff).toEqual({ error: "执行器返回非零退出码" });
+        expect(diff).toEqual({
+          error: "执行器返回非零退出码",
+        });
       });
     });
 
