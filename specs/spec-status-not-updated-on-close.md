@@ -1,6 +1,6 @@
 # Spec: 关票时不更新 spec 状态,目录整体失去可筛选性
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: Landed — L3 通过(2026-09-02),实现 `de9a1c7f`
 > **版本**: 1.0
 > **相关**: [ADR-0009](../docs/adr/0009-judgments-must-name-the-fact.md)
 
