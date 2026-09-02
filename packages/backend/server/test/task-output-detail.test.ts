@@ -341,21 +341,19 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       msg.id,
       "running",
     );
+    // live-only: running live tail only contains report, wait for report arrival then check full via diff later
     const runningTail = await waitForOutputTail(
       coordinator.id,
       group.id,
       running.id,
-      "ENOENT: no such file or directory, open guard.ts",
+      "报告: 完成",
     );
-    // R1:两次 thinking(共 4KB)已在 thinking 之后仍有动作行的时刻被滤出摘要流。
+    // R1: thinking filtered from both live and summary
     expect(tailLinesStartingWith(runningTail, "[思考")).toEqual([]);
-    // 动作行完整:工具调用 + 未折叠的错误全文。
-    expect(runningTail).toContain("[工具 #t3] read_file");
-    // R3:错误信息未被折叠 —— 全文留在摘要流。
-    expect(runningTail).toContain(
-      "ENOENT: no such file or directory, open guard.ts",
-    );
-    console.log(`[detail] 运行中摘要流采样:\n${runningTail}`);
+    // live-only: tool/error not in live tail, only report
+    expect(runningTail).not.toContain("[工具 #t3] read_file");
+    expect(runningTail).toContain("报告: 完成");
+    console.log(`[detail] 运行中live采样:\n${runningTail}`);
     // 运行中即可按 #id 展开明细(明细随输出逐条落盘)。
     const runningExpand = await app.request(
       `/api/groups/${group.id}/tasks/${running.id}/output/t1`,
@@ -373,7 +371,7 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       msg.id,
       "done",
     );
-    // 终态摘要流同样不含 thinking 行(R1),动作行保留。
+    // 终态 full outputTail (persisted) still contains tool/error, thinking filtered
     expect(
       tailLinesStartingWith(
         String(done.diffSummary?.outputTail ?? ""),
@@ -381,6 +379,17 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       ),
     ).toEqual([]);
     expect(done.diffSummary?.outputTail).toContain("[工具 #t3] read_file");
+    expect(String(done.diffSummary?.outputTail ?? "")).toContain(
+      "ENOENT: no such file or directory, open guard.ts",
+    );
+    // live tail via includeOutput should be report only
+    const doneLiveRes = await app.request(
+      `/api/groups/${group.id}/tasks/${done.id}?includeOutput=1`,
+      { headers: { "X-Participant-Id": coordinator.id } },
+    );
+    const doneLive = ((await doneLiveRes.json()) as { outputTail?: string }).outputTail ?? "";
+    expect(doneLive).toContain("报告: 完成");
+    expect(doneLive).not.toContain("[工具 #t3]");
     // 摘要流字节数对比:thinking 原文 2×2000 字进明细,摘要只留一行要旨
     // (改造前同形态任务摘要≈全文,现下降超一个数量级)。
     const summaryBytes = (
@@ -564,18 +573,17 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       msg.id,
       "running",
     );
-    // 采样点:错误行已到达 —— 它排在两条 thinking 之后,故此刻摘要流若含
-    // thinking 行,只可能是「没过滤成功」。
+    // 采样点:report已到达 —— 两条 thinking 之后故此刻若含thinking则过滤失败
     const tail = await waitForOutputTail(
       coordinator.id,
       group.id,
       running.id,
-      "ENOENT: no such file or directory, open guard.ts",
+      "报告: 完成",
     );
     expect(tailLinesStartingWith(tail, "[思考")).toEqual([]);
-    // 动作行完整可见(工具调用 + 未折叠错误),说明过滤只针对 thinking。
-    expect(tail).toContain("[工具 #t3] read_file");
-    expect(tail).toContain("[工具 #t4] read_file error");
+    // live-only: tool not in live, only report
+    expect(tail).not.toContain("[工具 #t3] read_file");
+    expect(tail).toContain("报告: 完成");
 
     // R2:同一时刻整份明细仍包含两条 thinking 全文。
     const allRes = await app.request(

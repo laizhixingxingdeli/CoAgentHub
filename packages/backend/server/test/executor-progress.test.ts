@@ -417,8 +417,10 @@ describe("任务面板增强批次 server 侧测试", () => {
         "?includeOutput=1",
       );
       const w = withOut.find((x) => x.messageId === msg.id);
-      expect(typeof w?.outputTail).toBe("string");
-      expect(w?.outputTail).toContain("a");
+      // live-only: raw FAKE_LINES is not report, so includeOutput (live view) is absent
+      // but full persistence still contains the lines via diffSummary.outputTail
+      expect(w?.outputTail).toBeUndefined();
+      expect(String((w as unknown as { diffSummary?: { outputTail?: string } })?.diffSummary?.outputTail ?? "")).toContain("a");
     });
 
     it("taskOutputTail 环形缓冲上限:超 200 行只留尾部", async () => {
@@ -442,7 +444,9 @@ describe("任务面板增强批次 server 侧测试", () => {
         "?includeOutput=1",
       );
       const t = after.find((x) => x.messageId === msg.id);
-      expect(t?.outputTail ?? t?.diffSummary?.outputTail).toContain("z");
+      // live-only: FAKE_LINES raw not report -> live outputTail absent, full still in diffSummary
+      expect(t?.outputTail).toBeUndefined();
+      expect(String((t as unknown as { diffSummary?: { outputTail?: string } })?.diffSummary?.outputTail ?? "")).toContain("z");
     });
 
     it("ANSI 在源头剥离:缓冲与广播收到干净文本,stdout 保留原样", async () => {
