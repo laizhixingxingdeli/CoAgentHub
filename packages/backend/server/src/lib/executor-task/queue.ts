@@ -1946,7 +1946,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       const result = await handle.promise;
       await collectAttemptTokenUsage(run, handle.pid, repoRoot, result);
       // 进程已退出:吐出解析器残留的未成行尾部(逐字),保证 R3 不丢任何一行。
-      // flush 无来源信息(pending 属 stderr 侧残留,stdout 已按行成块);保持 stderr 口径。
+      // flush 按来源分别吐出 stdout/stderr 两侧残留:stdout 尾段按 report 进界面,
+      // stderr 尾段维持 stderr 判定口径,与流内已成行的行一致。
       const flushed = parseOutput.flush();
       if (flushed.length > 0) {
         const summaryText = summaryStreamText(flushed);
