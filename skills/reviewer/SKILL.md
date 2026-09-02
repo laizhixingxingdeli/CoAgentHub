@@ -159,9 +159,13 @@ Write the spec at `specs/<feature>.md`, following the existing spec template:
 
 # Spec: <feature name>
 
-> **状态**: Ready for Implementation
+> **状态**: Draft
 > **版本**: 1.0
 > **日期**: <date>
+
+状态取值必须来自 AGENTS.md 的 8 个状态值；冻结时改为 `Frozen`，关票时改为
+`Landed`。凡在 spec 中写下数字或「X 会/不会」的断言，必须附可复算的取数语句
+（SQL / 命令）。
 
 ## 1. 背景与目标
 
@@ -292,7 +296,7 @@ Findings are recorded as severity + note（与完整档同构，第 10 步回发
 
 | verdict | 你要做的 |
 |---|---|
-| `pass` | 公布 `review_result` 留痕，**结束**。不需要唤醒任何人。 |
+| `pass` | 公布 `review_result` 留痕 → **把该 spec 的 `> **状态**:` 更新为 `Landed — L3 通过(YYYY-MM-DD),实现 \`<commit>\``** → 结束。不需要唤醒任何人。 |
 | `findings` | ① 公布 `review_result` 并**定向到 coordinator**（`audience: role` 指向 `coordinator` 角色，或 `audience: participant` 指向协调者 participant），且必须带 `specRef` + `specHash`（留痕 + 前端展示，不变）；② 修正任务由平台现有派发路径**自动生成** `dispatchKind: fix` 任务——任务书引用发现项、`specRef` 与被检视票相同，**无需你另发任务**。 |
 
 ⚠️ 平台自动生成的修正任务书**只含发现项列表 + `review_result` 原文，没有验收标准与红线**。
