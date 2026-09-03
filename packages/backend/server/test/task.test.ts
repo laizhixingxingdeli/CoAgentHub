@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { describe, expect, it } from "vitest";
 import {
+  appendLiveTaskOutput,
   appendTaskOutput,
   releaseTaskOutput,
   taskOutputTail,
@@ -1154,6 +1155,62 @@ describe("任务实体(server 单一状态源)", () => {
     expect((rawDetail.diffSummary as Record<string, unknown>).outputTail).toBe(
       "full should not leak via includeOutput",
     );
+  });
+
+  it("includeOutput running→done 同源逐字一致,不回落全量 outputTail(F1 回归)", async () => {
+    const { coordinator, execA, group } = await setupGroup();
+    // detached 任务(任务书带 ReplyMode 标记):结案走 PATCH 路径,与真实
+    // detached 协调链路同一条(detached-close-never-backfills-outputtail)。
+    const message = await postMessage(
+      coordinator.id,
+      group.id,
+      "探针任务书\n## ReplyMode: detached\n",
+    );
+    const created = await createTask(
+      coordinator.id,
+      group.id,
+      message.id,
+      execA.id,
+    );
+    const task = (await created.json()) as Task;
+
+    // 一次真实运行的两个缓冲:全量(持久化侧,含工具/命令行)与仅 report(界面侧)。
+    const fullText = "[工具 #t1] bash\n[命令 #t2] wc -l a.txt\n";
+    const liveText = "[汇报 #t3] a.txt 共 2 行。\n";
+    appendTaskOutput(task.id, fullText);
+    appendLiveTaskOutput(task.id, liveText);
+
+    // running:includeOutput 只给界面流,不给全量。
+    const running = (await (
+      await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}?includeOutput=1`,
+        { headers: { "X-Participant-Id": coordinator.id } },
+      )
+    ).json()) as Record<string, unknown>;
+    expect(running.status).toBe("queued");
+    expect(running.outputTail).toBe(liveText);
+
+    // 结案:终态 PATCH 把界面流落到 diffSummary.liveOutputTail,全量仍落 outputTail。
+    expect(
+      (await patchTask(execA.id, group.id, task.id, { status: "done" })).status,
+    ).toBe(200);
+
+    const done = (await (
+      await app.request(
+        `/api/groups/${group.id}/tasks/${task.id}?includeOutput=1`,
+        { headers: { "X-Participant-Id": coordinator.id } },
+      )
+    ).json()) as Record<string, unknown>;
+    // 逐字一致:done 后读到的界面内容 = running 时读到的界面内容。
+    expect(done.outputTail).toBe(running.outputTail);
+    // 不回落全量:界面内容 ≠ 持久化的全量 outputTail(回落会把工具/命令行带回界面)。
+    const summary = done.diffSummary as Record<string, unknown>;
+    expect(summary.liveOutputTail).toBe(liveText);
+    // 全量回填按行拼接(不带尾换行),口径与 detached-close 回填一致。
+    expect(summary.outputTail).toBe(fullText.trimEnd());
+    expect(done.outputTail).not.toBe(summary.outputTail);
+
+    releaseTaskOutput(task.id);
   });
 
   it("GET 单任务:detached 超过 30 分钟无信号时标记需要关注", async () => {

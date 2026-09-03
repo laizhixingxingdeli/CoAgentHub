@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import type { OutputEntry } from "@server/lib/executor-task";
 import {
@@ -5,9 +6,9 @@ import {
   createExecutorOutputParser,
   getCodexSkippedEventCounts,
   getGenericSkippedEventCounts,
+  liveStreamText,
   readTaskDetail,
   resetCodexSkippedEventCounts,
-  liveStreamText,
   resetGenericSkippedEventCounts,
   summaryStreamText,
   taskDetailFilePath,
@@ -518,8 +519,14 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
   });
 
   it("真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)", () => {
-    const stdoutRaw = readFileSync("../../../.scratch/probe/samples/atomcode-run.stdout", "utf8");
-    const stderrRaw = readFileSync("../../../.scratch/probe/samples/atomcode-run.stderr", "utf8");
+    const stdoutRaw = readFileSync(
+      "../../../.scratch/probe/samples/atomcode-run.stdout",
+      "utf8",
+    );
+    const stderrRaw = readFileSync(
+      "../../../.scratch/probe/samples/atomcode-run.stderr",
+      "utf8",
+    );
     const stdoutStripped = stdoutRaw.replace(/\n$/, "");
     expect(stdoutStripped.endsWith("\n")).toBe(false);
     const parse = createExecutorOutputParser("atomcode");
@@ -1773,5 +1780,91 @@ describe("atomcode:任务 01a04f70-9101 outputTail 重放(裸叙述与 [tokens] 
     // 裸叙述(无前缀)→ 抑制,全文进明细。
     expect(entries[1].kind).toBe("thinking");
     expect(entries[1].detail).toBe("汇报:现在开始,先思考再动手");
+  });
+});
+
+/**
+ * 硬验收 1-4(spec live-output-only-agent-narration):以 .scratch/probe/samples/
+ * 下的**真实样本**为准,界面流(liveStreamText,仅 report)与持久化流
+ * (summaryStreamText,全量)分别断言;持久化侧的哈希取 R1 生效前(fd75035a^)
+ * 同一份样本的实测值,用来锁死 R3「持久化口径逐字不变」。
+ */
+describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", () => {
+  const samplePath = (name: string) =>
+    `../../../.scratch/probe/samples/${name}`;
+
+  function parseSample(key: string, name: string) {
+    const parse = createExecutorOutputParser(key);
+    return [
+      ...parse(readFileSync(samplePath(name), "utf8"), "stdout"),
+      ...parse.flush(),
+    ];
+  }
+
+  const sha256 = (text: string) =>
+    createHash("sha256").update(text, "utf8").digest("hex");
+
+  it("codex 错误样本:界面恰好 2 行(含中途旁白),持久化与改动前逐字节相同", () => {
+    const entries = parseSample("codex", "codex-error-run.jsonl");
+    const live = entries.filter((e) => e.kind === "report");
+    expect(live).toHaveLength(2);
+    expect(live.map((e) => e.summary.replace(/^\[汇报 #t\d+\] /, ""))).toEqual([
+      "我先读取 `a.txt` 并统计其行数。",
+      "当前目录下未找到 `a.txt`，因此无法统计行数。",
+    ]);
+    // 界面只剩这两行:4 条 Reconnecting、传输降级、exit 1 的失败命令都不进界面。
+    expect(liveStreamText(entries)).toBe(
+      `${live[0].summary}\n${live[1].summary}\n`,
+    );
+    // R3:全量摘要流与 fd75035a^ 实测同哈希(471 字节,含全部错误与命令行)。
+    const persisted = summaryStreamText(entries);
+    expect(Buffer.byteLength(persisted)).toBe(471);
+    expect(sha256(persisted)).toBe(
+      "b73a74be332360908fed0a19751a131ebf7226f1602b53b232f79f4ab2970c7b",
+    );
+    expect(persisted).toContain("[错误");
+  });
+
+  it("codebuddy 样本:界面恰好 1 行,3 条 JSON 信封只留持久化", () => {
+    const entries = parseSample("codebuddy", "codebuddy-run.jsonl");
+    const live = entries.filter((e) => e.kind === "report");
+    expect(live).toHaveLength(1);
+    expect(live[0].summary.replace(/^\[汇报 #t\d+\] /, "")).toBe(
+      "a.txt 共 2 行内容（hello、world，文件以换行结尾）。",
+    );
+    // 3 条信封约 2977 字节(摘要流的 88%)不进界面,但逐字节留在持久化侧。
+    const persisted = summaryStreamText(entries);
+    expect(Buffer.byteLength(persisted)).toBe(3365);
+    expect(sha256(persisted)).toBe(
+      "5507f006c69de8f24f8fe7b693ef004d71a939e8ab3043e7ee551e7f0841cdb3",
+    );
+    expect(liveStreamText(entries).length * 10).toBeLessThan(persisted.length);
+  });
+
+  it("atomcode 样本:界面恰好 1 行答案,持久化仍含全部 24 条", () => {
+    const parse = createExecutorOutputParser("atomcode");
+    const entries = [
+      // 真实 stdout 未必以换行结尾:去尾换行后答案只能靠 flush 吐出。
+      ...parse(
+        readFileSync(samplePath("atomcode-run.stdout"), "utf8").replace(
+          /\n$/,
+          "",
+        ),
+        "stdout",
+      ),
+      ...parse(
+        readFileSync(samplePath("atomcode-run.stderr"), "utf8"),
+        "stderr",
+      ),
+      ...parse.flush(),
+    ];
+    expect(entries).toHaveLength(24);
+    const live = entries.filter((e) => e.kind === "report");
+    expect(live).toHaveLength(1);
+    expect(live[0].summary).toMatch(/^\[汇报 #t\d+\] `a\.txt` 共有 2 行。$/);
+    // 界面只有这一行;持久化侧 [tool→ bash] / [done] 与 11 条 raw 全在。
+    const persisted = summaryStreamText(entries);
+    expect(persisted).toContain("[tool→");
+    expect(persisted).toContain("[done]");
   });
 });
