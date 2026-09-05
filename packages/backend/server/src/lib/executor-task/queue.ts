@@ -1527,7 +1527,8 @@ function liveStreamText(entries: readonly OutputEntry[]): string {
   const lines: string[] = [];
   for (const entry of entries) {
     if (entry.kind !== "report") continue;
-    if (entry.summary.length === 0) continue;
+    // R2:纯空白正文不进界面(trim 后的空字符串,如样本里的 `\n`)。
+    if (entry.summary.trim().length === 0) continue;
     lines.push(entry.summary);
   }
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";

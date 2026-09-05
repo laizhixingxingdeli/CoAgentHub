@@ -1339,7 +1339,7 @@ describe("default:流式跨 chunk", () => {
 
 describe("default:账目字段不渲染(Pi 修复回归)", () => {
   it("result 为数字 0 不再渲染 [汇报] 0,字符串正文照常渲染", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "tool_execution_result",
       tool: "bash",
@@ -1356,7 +1356,7 @@ describe("default:账目字段不渲染(Pi 修复回归)", () => {
   });
 
   it("Usage/Cost/Tokens 大小写变体视为信封,嵌套 output_tokens 不渲染", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       Type: "report",
       Usage: { output_tokens: 0, total_tokens: 0 },
@@ -1371,7 +1371,7 @@ describe("default:账目字段不渲染(Pi 修复回归)", () => {
   });
 
   it("仅有 usage/cost 的可解析但无语义 JSON → 显式跳过 + 计数(L2,不再 raw 刷屏)", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "report",
       usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
@@ -1399,7 +1399,7 @@ describe("default:同 chunk 重复动作行折叠(R5,Pi 修复回归)", () => {
     entries.filter((e) => e.summary.startsWith(prefix)).length;
 
   it("重复 update 只留首条,调用与结果互不折叠,无 [汇报] 0", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const input = [
       ...Array.from({ length: 60 }, updateLine),
       JSON.stringify({
@@ -1431,7 +1431,7 @@ describe("default:同 chunk 重复动作行折叠(R5,Pi 修复回归)", () => {
   });
 
   it("错误条目永不折叠:同 chunk 相同错误行逐条保留", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const errLine = JSON.stringify({
       type: "tool_execution_update",
       tool: "bash",
@@ -1447,7 +1447,7 @@ describe("default:同 chunk 重复动作行折叠(R5,Pi 修复回归)", () => {
 
 describe("default:可解析但无语义 JSON 显式跳过(L2,计数 + 去重日志)", () => {
   it("message_update 全信封/增量字段 → 跳过并计数,每签名只记一次日志", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "message_update",
       usage: { input: 0, output: 0, totalTokens: 0 },
@@ -1472,14 +1472,14 @@ describe("default:可解析但无语义 JSON 显式跳过(L2,计数 + 去重日�
   });
 
   it("agent_settled 仅分类字段 → 跳过并计数", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     resetGenericSkippedEventCounts();
     expect(parse('{"type":"agent_settled"}\n')).toEqual([]);
     expect(getGenericSkippedEventCounts()).toEqual({ agent_settled: 1 });
   });
 
   it("未知键(payload 等)仍是未知结构 → R3 逐字保留,字节不变", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "brand_new_event",
       payload: { a: 1 },
@@ -1500,7 +1500,7 @@ describe("default:toolcall_delta 参数源码不进摘要但落盘明细(L2 修�
   });
 
   it("input_json_delta 增量碎片 → 摘要抑制(空摘要),detail 携带原始整行", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "tool_call_delta",
       tool_call_id: "call-1",
@@ -1517,7 +1517,7 @@ describe("default:toolcall_delta 参数源码不进摘要但落盘明细(L2 修�
   });
 
   it("集成:detail 条目经 appendTaskDetail/readTaskDetail 按 id 完整取回,字节不变", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const line = JSON.stringify({
       type: "tool_call_delta",
       tool_call_id: "call-1",
@@ -1535,7 +1535,7 @@ describe("default:toolcall_delta 参数源码不进摘要但落盘明细(L2 修�
   });
 
   it("完整 tool_use 事件 → 摘要截断(不出现成片源码),原文整行进 detail", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const longSource = "full source body ".repeat(60); // 远超 200 字符截断阈值
     const line = JSON.stringify({
       type: "assistant",
@@ -1560,7 +1560,7 @@ describe("default:toolcall_delta 参数源码不进摘要但落盘明细(L2 修�
 
 describe("default:跨 chunk seen 折叠(L2,seen 提升到闭包)", () => {
   it("同一动作行跨 chunk 只保留首条,不同工具仍各自渲染", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     const call = JSON.stringify({
       type: "tool_execution_update",
       tool: "bash",
@@ -1576,7 +1576,7 @@ describe("default:跨 chunk seen 折叠(L2,seen 提升到闭包)", () => {
   });
 
   it("跨 chunk 的 raw 透传行永不折叠(逐字)", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     expect(parse("plain text line\n").map((e) => e.summary)).toEqual([
       "plain text line",
     ]);
@@ -1615,7 +1615,7 @@ describe("真实 outputTail 重放(验收 1-3:Pi / AtomCode fixture)", () => {
   );
 
   it("Pi 重放:相对 177KB 基线降 ≥80%,裸 JSON 行占比 <5%,动作行不减少", () => {
-    const parse = createExecutorOutputParser("pi");
+    const parse = createExecutorOutputParser("generic");
     resetGenericSkippedEventCounts();
     // 分块喂入(每块以换行结尾),模拟真实流式;进程结束时 flush 残留。
     const chunks = piFixture.split("\n").map((l) => `${l}\n`);
@@ -1866,5 +1866,122 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
     const persisted = summaryStreamText(entries);
     expect(persisted).toContain("[tool→");
     expect(persisted).toContain("[done]");
+  });
+});
+
+/**
+ * Pi 专用解析器硬验收(spec live-output-pi-uncovered-shows-thinking-and-tool-results.md §4):
+ * 以 .scratch/probe/samples/pi-run.jsonl 真实样本为准:
+ *  - 界面输出恰好 2 行(不含 thinking/tool/票面回显);
+ *  - 纯空白 text_end 不进界面;
+ *  - 验收脚本必须 import 生产 liveStreamText,不得内联复制。
+ */
+describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
+  const piSample = readFileSync(
+    new URL("../../../../.scratch/probe/samples/pi-run.jsonl", import.meta.url),
+    "utf8",
+  );
+
+  it("Pi 真实样本:界面恰好 2 行,不含 thinking/tool/票面回显", () => {
+    const parse = createExecutorOutputParser("pi");
+    const entries = [...parse(piSample, "stdout"), ...parse.flush()];
+
+    // 生产函数:liveStreamText(仅 kind=report,过滤空白)
+    const live = liveStreamText(entries);
+
+    // 验收 1:界面输出恰好 2 个 text_end 贡献(含嵌入换行的代码块展现为多行)
+    // liveStreamText 按 kind=report 条目拼接,2 条 text_end → 2 段,每段可含嵌入换行
+    const entriesByKind = entries.filter((e) => e.kind === "report" && (e.summary || "").trim().length > 0);
+    expect(entriesByKind).toHaveLength(2);
+
+    // 验收 2:不含英文推理句
+    expect(live).not.toContain("The user wants");
+    expect(live).not.toContain("Let me also use bash");
+    expect(live).not.toContain("The file has");
+
+    // 验收 3:不含工具结果(工具输出被过滤在 kind=tool 层面,agent 叙述中提及的内容不算)
+    expect(live).not.toContain("wc -l");
+
+    // 验收 4:不含票面正文回显
+    expect(live).not.toContain("读取 a.txt");
+    expect(live).not.toContain("并告诉我它有几行");
+
+    // 界面内容应该是两个 text_end 的内容:
+    // "好的，我来读取 `a.txt` 并统计行数"
+    // "`a.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n**共有 2 行。**"
+    expect(live).toContain("好的，我来读取");
+    expect(live).toContain("并统计行数");
+    expect(live).toContain("a.txt");
+    expect(live).toContain("共有 2 行");
+  });
+
+  it("空白 text_end 不进界面(R2)", () => {
+    const parse = createExecutorOutputParser("pi");
+    // 模拟 \n 空文本 text_end
+    const blankEvent = JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_end",
+        contentIndex: 1,
+        content: "\n",
+      },
+    });
+    const entries = parse(`${blankEvent}\n`);
+    const live = liveStreamText(entries);
+    // 纯空白应被 liveStreamText 过滤掉
+    expect(live).toBe("");
+
+    // 非空白 text_end 照常进界面
+    const realEvent = JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_end",
+        contentIndex: 1,
+        content: "答案",
+      },
+    });
+    const entries2 = parse(`${realEvent}\n`);
+    const live2 = liveStreamText(entries2);
+    expect(live2).toBe("答案\n");
+  });
+
+  it("thinking/tool 事件不进界面", () => {
+    const parse = createExecutorOutputParser("pi");
+    const lines = [
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "thinking_end",
+          contentIndex: 0,
+          content: "推理正文",
+        },
+      }),
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "toolcall_end",
+          contentIndex: 1,
+          toolCall: { type: "toolCall", id: "call_1", name: "read", arguments: { path: "/tmp/a.txt" } },
+        },
+      }),
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_end",
+          contentIndex: 2,
+          content: "最终答案",
+        },
+      }),
+      JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } }),
+      JSON.stringify({
+        type: "tool_execution_end",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "file1\nfile2" }] },
+      }),
+    ].join("\n");
+    const entries = parse(`${lines}\n`);
+    const live = liveStreamText(entries);
+    // 仅 text_end 进界面
+    expect(live).toBe("最终答案\n");
   });
 });

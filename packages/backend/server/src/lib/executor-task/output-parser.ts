@@ -1150,11 +1150,142 @@ function createCodeBuddyParser(): ExecutorOutputParser {
 }
 
 /**
+ * Pi 事件流解析器(spec: live-output-pi-uncovered-shows-thinking-and-tool-results.md R1)。
+ * Pi 输出 format 是 JSONL 事件流,每条 JSON 行带 `type` 字段标识事件类型。
+ * 判据基于事件类型,不用文本特征:
+ *  - `message_update.assistantMessageEvent.type === "text_end"` → `report`(进界面)
+ *  - `thinking_end` → `thinking`(不进界面,全文进明细与持久化)
+ *  - `toolcall_end` / `tool_execution_*` → `tool`(不进界面)
+ *  - `*_start` / `*_delta` → 跳过或 detail-only
+ *  - `session` / `turn_*` / `message_*` 骨架 → 跳过
+ *  - 未知事件类型 → `raw`(R3 逐字保留)
+ */
+function createPiParser(): ExecutorOutputParser {
+  let pending = "";
+  const { entry, raw } = createEntryMaker();
+
+  const renderLine = (line: string): OutputEntry[] => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return [raw(line)]; // R3:非 JSON 逐字保留
+    }
+    if (typeof parsed !== "object" || parsed === null) return [raw(line)];
+    const record = parsed as Record<string, unknown>;
+    const type = record.type;
+    if (typeof type !== "string") return [raw(line)];
+
+    switch (type) {
+      case "message_update": {
+        const event = record.assistantMessageEvent;
+        if (typeof event !== "object" || event === null) return [raw(line)];
+        const ev = event as Record<string, unknown>;
+        const evType = ev.type;
+        if (typeof evType !== "string") return [raw(line)];
+
+        // text_end → report(进界面)
+        if (evType === "text_end") {
+          const content = typeof ev.content === "string" ? ev.content : "";
+          return [entry("report", content, line)];
+        }
+
+        // thinking_end → thinking(不进界面,全文进明细)
+        if (evType === "thinking_end") {
+          const content = typeof ev.content === "string" ? ev.content : "";
+          return [entry("thinking", thinkingSummary(content), content)];
+        }
+
+        // toolcall_end → tool
+        if (evType === "toolcall_end") {
+          const toolCall = ev.toolCall;
+          if (typeof toolCall === "object" && toolCall !== null) {
+            const tc = toolCall as Record<string, unknown>;
+            const name = typeof tc.name === "string" ? tc.name : "?";
+            const argKeys = compactArgKeys(tc.arguments);
+            return [
+              entry(
+                "tool",
+                argKeys
+                  ? `[工具] ${name} ${argKeys}`
+                  : `[工具] ${name}`,
+                line,
+              ),
+            ];
+          }
+          return [entry("tool", "[工具] ?", line)];
+        }
+
+        // _start 事件 → 跳过
+        if (evType.endsWith("_start")) return [];
+
+        // _delta 事件 → detail-only(空摘要,整行原文进明细)
+        if (evType.endsWith("_delta")) {
+          return [entry("report", "", line)];
+        }
+
+        // 未知 event type → raw
+        return [raw(line)];
+      }
+
+      case "tool_execution_start": {
+        const name = typeof record.toolName === "string" ? record.toolName : "?";
+        return [entry("tool", `[工具] ${name}`, line)];
+      }
+
+      case "tool_execution_update": {
+        // 部分结果 → detail-only
+        return [entry("report", "", line)];
+      }
+
+      case "tool_execution_end": {
+        const name = typeof record.toolName === "string" ? record.toolName : "?";
+        const result = record.result;
+        const resultText = extractToolResultText(result);
+        return [
+          entry("tool", `[工具] ${name}`, resultText || line),
+        ];
+      }
+
+      // 信封/骨架事件 → 跳过
+      case "session":
+      case "agent_start":
+      case "agent_settled":
+      case "turn_start":
+      case "turn_end":
+      case "message_start":
+      case "message_end":
+        return [];
+
+      default:
+        return [raw(line)]; // 未知顶层 type → raw(R3)
+    }
+  };
+
+  const parser = ((chunk: string): OutputEntry[] => {
+    const lines = `${pending}${chunk ?? ""}`.split("\n");
+    pending = lines.pop() ?? "";
+    if (lines.length === 0) return [];
+    const out: OutputEntry[] = [];
+    for (const l of lines) {
+      out.push(...renderLine(l));
+    }
+    return out;
+  }) as ExecutorOutputParser;
+  parser.flush = () => {
+    const tail = pending;
+    pending = "";
+    return tail.length > 0 ? renderLine(tail) : [];
+  };
+  return parser;
+}
+
+/**
  * 按 executorKey 创建流式输出解析器(每次执行一个;跨 chunk 状态由闭包持有,
  * 与 createAnsiStripper 同款)。codex / codebuddy 解析 JSONL 动作行,atomcode
- * 拆粘连前缀 + 折叠 thinking,其余执行器(default)走通用语义解析器(spec:
- * generic-executor-output-parsing)——按字段语义丢信封、留动作/正文,保证新增
- * agent 的 JSONL 输出不会顶满缓冲;未知 key 仍记一次观测日志(R5)。
+ * 拆粘连前缀 + 折叠 thinking,pi 按事件类型判据,其余执行器(default)走通用语义
+ * 解析器(spec: generic-executor-output-parsing)——按字段语义丢信封、留动作/正文,
+ * 保证新增 agent 的 JSONL 输出不会顶满缓冲;未知 key 仍记一次观测日志(R5)。
  */
 export function createExecutorOutputParser(
   executorKey: string,
@@ -1164,6 +1295,8 @@ export function createExecutorOutputParser(
       return createCodexParser();
     case "codebuddy":
       return createCodeBuddyParser();
+    case "pi":
+      return createPiParser();
     case "atomcode":
     case "executor":
       return createAtomCodeParser();
