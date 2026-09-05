@@ -31,12 +31,19 @@ export {
   sameRecipients,
 } from "./completion-recipient";
 export {
+  type CloseGuardBlockedChild,
+  type CloseGuardResumeMarker,
+  type CloseGuardResumeState,
   consumePendingCompletionEvents,
+  deriveCloseGuardResume,
   hasExemptingChildTask,
+  hasPendingCloseGuardResume,
   hasPendingResumeEvent,
   inferSupersedesTaskId,
   isResumeTask,
   maybeCreateCoordinatorResumeTask,
+  readCloseGuardResume,
+  registerCloseGuardResume,
   startCoordinatorResumeConsumer,
 } from "./coordinator-resume";
 export {

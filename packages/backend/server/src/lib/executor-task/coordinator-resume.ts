@@ -35,6 +35,12 @@ type Task = typeof taskTable.$inferSelect;
 const PLATFORM_MARKER_KEY = "resumeOf";
 /** 续跑任务平台标记键:diffSummary.platform.resumeForChild = 触发续跑的子任务 id。 */
 const RESUME_FOR_CHILD_KEY = "resumeForChild";
+/**
+ * 结案守卫待续跑标记键:diffSummary.platform.closeGuardResume。
+ * 守卫拒绝结案时写在本任务(被结案的那个协调任务)名下,不是创建子任务 ——
+ * 详见 registerCloseGuardResume。
+ */
+const CLOSE_GUARD_RESUME_KEY = "closeGuardResume";
 
 /**
  * 非终态任务状态集合:R3 去重查询与孤儿收敛豁免共用同一口径,
@@ -131,21 +137,225 @@ export async function hasPendingResumeEvent(
   return rows.some((row) => !isResumeTask(row));
 }
 
+/** 取 diffSummary 的平台块(平台自有标记命名空间,如 resumeOf / closeGuardResume)。 */
+function platformBlockOf(
+  diffSummary: unknown,
+): Record<string, unknown> | undefined {
+  const summary =
+    diffSummary !== null &&
+    diffSummary !== undefined &&
+    typeof diffSummary === "object" &&
+    !Array.isArray(diffSummary)
+      ? (diffSummary as Record<string, unknown>)
+      : undefined;
+  const platform = summary?.platform;
+  return typeof platform === "object" &&
+    platform !== null &&
+    !Array.isArray(platform)
+    ? (platform as Record<string, unknown>)
+    : undefined;
+}
+
 /** 续跑任务是否带平台标记(判定「本任务是一条续跑任务」,R4 防环用)。 */
 export function isResumeTask(task: { diffSummary: unknown }): boolean {
-  const summary =
-    task.diffSummary &&
-    typeof task.diffSummary === "object" &&
-    !Array.isArray(task.diffSummary)
-      ? (task.diffSummary as Record<string, unknown>)
-      : undefined;
+  return (
+    typeof platformBlockOf(task.diffSummary)?.[PLATFORM_MARKER_KEY] === "string"
+  );
+}
+
+/** 结案守卫拒绝结案时挡住结案的执行子任务(R3:id + 当时的状态)。 */
+export interface CloseGuardBlockedChild {
+  id: string;
+  /** 拒绝那一刻的子任务状态。 */
+  status: string;
+}
+
+/** 结案守卫登记的待续跑标记(diffSummary.platform.closeGuardResume)。 */
+export interface CloseGuardResumeMarker {
+  /** 登记时刻(ISO)。 */
+  registeredAt: string;
+  /** 拒绝结案时挡住的子任务:id + 当时状态。 */
+  blockedBy: CloseGuardBlockedChild[];
+  /** 平台是否已登记待续跑(false = 登记失败,平台不保证有人回来结案)。 */
+  resumeRegistered: boolean;
+  /** resumeRegistered 为 false 时的失败原因;成功为 null。 */
+  registrationError: string | null;
+}
+
+/** 任务 API 透出的等待续跑状态:标记 + 被登记子任务的当前状态。 */
+export interface CloseGuardResumeState {
+  registeredAt: string;
+  resumeRegistered: boolean;
+  registrationError: string | null;
+  blockedBy: Array<CloseGuardBlockedChild & { currentStatus: string | null }>;
+  /** 仍有被登记的子任务未到终态 → 本任务正处于「因结案守卫等待续跑」。 */
+  awaitingResume: boolean;
+}
+
+/** 把待续跑标记并入现有 diffSummary(platform 块内逐字保留既有标记)。 */
+function withCloseGuardResume(
+  diffSummary: unknown,
+  marker: CloseGuardResumeMarker,
+): Record<string, unknown> {
+  const base =
+    diffSummary !== null &&
+    diffSummary !== undefined &&
+    typeof diffSummary === "object" &&
+    !Array.isArray(diffSummary)
+      ? (diffSummary as Record<string, unknown>)
+      : {};
   const platform =
-    summary?.platform &&
-    typeof summary.platform === "object" &&
-    !Array.isArray(summary.platform)
-      ? (summary.platform as Record<string, unknown>)
-      : undefined;
-  return typeof platform?.[PLATFORM_MARKER_KEY] === "string";
+    typeof base.platform === "object" &&
+    base.platform !== null &&
+    !Array.isArray(base.platform)
+      ? (base.platform as Record<string, unknown>)
+      : {};
+  return { ...base, platform: { ...platform, [CLOSE_GUARD_RESUME_KEY]: marker } };
+}
+
+/**
+ * 结案守卫拒绝结案时登记一次待续跑(R1)并在本任务 diffSummary 留痕(R3)。
+ * 返回是否登记成功(失败时标记仍会写入,resumeRegistered=false)。
+ *
+ * 为什么写标记而不是现在就创建续跑任务:续跑任务由既有完成事件消费路径
+ * (consumePendingCompletionEvents)在子任务**落终态**时创建并拉起协调者 ——
+ * 此刻子任务还没终态,现在创建等于把协调者拉起来做无事可做的一轮。本标记登记
+ * 的是「这次拒绝欠一次续跑」,三个用途:①给 R2 的孤儿回收豁免一个持久依据
+ * (不必重新推算子任务是否可派发);②让「在等」这件事在 API 上可见(验收 3);
+ * ③留下归因(被谁挡住、登记成功与否),不必再靠人读 error 自由文本。
+ */
+export async function registerCloseGuardResume(
+  db: DataBase,
+  task: Pick<Task, "id" | "diffSummary">,
+  blockedBy: CloseGuardBlockedChild[],
+): Promise<boolean> {
+  const registeredAt = new Date().toISOString();
+  const write = (marker: CloseGuardResumeMarker) =>
+    db
+      .update(taskTable)
+      .set({ diffSummary: withCloseGuardResume(task.diffSummary, marker) })
+      .where(eq(taskTable.id, task.id));
+  try {
+    await write({
+      registeredAt,
+      blockedBy,
+      resumeRegistered: true,
+      registrationError: null,
+    });
+    return true;
+  } catch (error) {
+    // 静默丢弃是被禁止的降级:登记失败也要把「没有人为本任务登记续跑」写在
+    // 任务上(而不是只留在日志里),让协调者与外部消费方看得见。
+    const registrationError =
+      error instanceof Error ? error.message : String(error);
+    await write({
+      registeredAt,
+      blockedBy,
+      resumeRegistered: false,
+      registrationError,
+    }).catch((writeError) => {
+      console.warn(
+        `[executor] 结案守卫待续跑登记失败且留痕失败(${task.id}): ${writeError}`,
+      );
+    });
+    return false;
+  }
+}
+
+/** 读取结案守卫待续跑标记(纯解析;无标记或形状不合法 → undefined)。 */
+export function readCloseGuardResume(
+  diffSummary: unknown,
+): CloseGuardResumeMarker | undefined {
+  const marker = platformBlockOf(diffSummary)?.[CLOSE_GUARD_RESUME_KEY];
+  if (
+    typeof marker !== "object" ||
+    marker === null ||
+    Array.isArray(marker) ||
+    typeof (marker as CloseGuardResumeMarker).registeredAt !== "string" ||
+    !Array.isArray((marker as CloseGuardResumeMarker).blockedBy)
+  ) {
+    return undefined;
+  }
+  const raw = marker as Record<string, unknown>;
+  const blockedBy: CloseGuardBlockedChild[] = [];
+  for (const child of raw.blockedBy as unknown[]) {
+    if (typeof child !== "object" || child === null) continue;
+    const { id, status } = child as Record<string, unknown>;
+    if (typeof id === "string" && typeof status === "string") {
+      blockedBy.push({ id, status });
+    }
+  }
+  return {
+    registeredAt: raw.registeredAt as string,
+    resumeRegistered: raw.resumeRegistered === true,
+    registrationError:
+      typeof raw.registrationError === "string" ? raw.registrationError : null,
+    blockedBy,
+  };
+}
+
+/**
+ * 批量派生「因结案守卫等待续跑」状态:一次查询取回全部被登记子任务的当前状态,
+ * 返回按任务 id 索引的状态(仅含带标记的任务)。
+ *
+ * awaitingResume 的判据(ADR-0009):它拿「被登记的子任务是否已终态」代替
+ * 「这棵子树是否还有人会推进」。前提是被登记的子任务终态时会触发完成事件、
+ * 由既有消费路径创建续跑任务把协调者拉起;不成立的情形是被登记的子任务自己
+ * 永远停在非终态(如排队但无人可派发)—— 此时本任务与其子树整体无进展,与
+ * hasExemptingChildTask 的 running 子任务豁免同款取舍,由 detached 超时
+ * (detachedTimeoutMinutes,默认 24h)兜底,不会永久挂起。
+ * 子任务行已不存在(currentStatus=null)不再构成等待。
+ */
+export async function deriveCloseGuardResume(
+  db: DataBase,
+  tasks: ReadonlyArray<Pick<Task, "id" | "diffSummary">>,
+): Promise<Map<string, CloseGuardResumeState>> {
+  const markers = new Map<string, CloseGuardResumeMarker>();
+  const blockedIds = new Set<string>();
+  for (const task of tasks) {
+    const marker = readCloseGuardResume(task.diffSummary);
+    if (!marker) continue;
+    markers.set(task.id, marker);
+    for (const child of marker.blockedBy) blockedIds.add(child.id);
+  }
+  const states = new Map<string, CloseGuardResumeState>();
+  if (markers.size === 0) return states;
+
+  const rows = await db.query.task.findMany({
+    where: (t, { inArray: inArrayFn }) => inArrayFn(t.id, [...blockedIds]),
+    columns: { id: true, status: true },
+  });
+  const currentStatusOf = new Map(rows.map((row) => [row.id, row.status]));
+  for (const [taskId, marker] of markers) {
+    const blockedBy = marker.blockedBy.map((child) => {
+      const currentStatus = currentStatusOf.get(child.id) ?? null;
+      return { ...child, currentStatus };
+    });
+    states.set(taskId, {
+      registeredAt: marker.registeredAt,
+      resumeRegistered: marker.resumeRegistered,
+      registrationError: marker.registrationError,
+      blockedBy,
+      awaitingResume: blockedBy.some(
+        (child) =>
+          child.currentStatus !== null &&
+          !isTerminalTaskStatus(child.currentStatus),
+      ),
+    });
+  }
+  return states;
+}
+
+/**
+ * 本任务是否正处于「因结案守卫等待续跑」(R2 的孤儿回收豁免判据之一)。
+ * 判定与 deriveCloseGuardResume 同源 —— 唯一判定出处,不另写一套。
+ */
+export async function hasPendingCloseGuardResume(
+  db: DataBase,
+  task: Pick<Task, "id" | "diffSummary">,
+): Promise<boolean> {
+  const states = await deriveCloseGuardResume(db, [task]);
+  return states.get(task.id)?.awaitingResume === true;
 }
 
 /**

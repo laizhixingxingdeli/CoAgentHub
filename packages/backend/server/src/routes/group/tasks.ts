@@ -22,6 +22,7 @@ import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   adjudicatedRecipientsOfTask,
   createTaskDispatchWarnings,
+  deriveCloseGuardResume,
   dispatcherRecipients,
   findTaskDetail,
   getL3ResponseMinutesMs,
@@ -37,6 +38,7 @@ import {
   preserveRollbackSkipped,
   readTaskDetail,
   recordCoordinationActivity,
+  registerCloseGuardResume,
   resolveTaskRepo,
   reviewRequestCarryAllowed,
   reviewRequestRecipients,
@@ -372,10 +374,28 @@ async function assertCoordinationCloseIntegrity(
       const nonTerminal = effectiveChildren.filter(
         (child) => !isTerminalTaskStatus(child.status),
       );
+      // R1(specs/detached-close-deadlock-guard-vs-no-poll.md):拒绝的同时登记
+      // 一次待续跑 —— 协调者按 skill 规则不得轮询等待,退出后靠续跑任务被重新
+      // 拉起。守卫本身(子任务非终态不得结案)逐字不变,本处只补交接。
+      // R3:登记内容写进 diffSummary.platform.closeGuardResume(被谁挡住的
+      // id + 当时状态、是否已登记),不再只留在 error 自由文本里。
+      // blockedBy 与拒绝文案取同一个数组,两者不漂移。
+      const blockedBy = nonTerminal.map((child) => ({
+        id: child.id,
+        status: child.status,
+      }));
+      const resumeRegistered = await registerCloseGuardResume(
+        db,
+        task,
+        blockedBy,
+      );
       throw coordinationCloseError(
         `L1 层未完成:存在非终态执行子任务: ${nonTerminal
           .map((child) => `${child.id} (${child.status})`)
-          .join(", ")}`,
+          .join(", ")}` +
+          (resumeRegistered
+            ? ";平台已为本次拒绝登记待续跑:子任务落终态时会创建续跑任务把协调者重新拉起,无需轮询等待"
+            : ";平台登记待续跑失败,协调者需自行安排续跑(见 diffSummary.platform.closeGuardResume.registrationError)"),
       );
     }
   }
@@ -989,11 +1009,19 @@ app
         ...task,
         pidAlive: pidAliveOf(task.executorPid),
       }));
+      // 结案守卫等待续跑(R3,specs/detached-close-deadlock-guard-vs-no-poll.md
+      // 验收 3):请求批量派生,使「因结案守卫等待续跑」与「普通排队」在列表上
+      // 可区分;未登记的任务不输出该字段(不是空对象)。
+      const closeGuardByTask = await deriveCloseGuardResume(db, withPidAlive);
+      const withCloseGuard = withPidAlive.map((task) => {
+        const closeGuardResume = closeGuardByTask.get(task.id);
+        return closeGuardResume ? { ...task, closeGuardResume } : task;
+      });
       // L3 应答状态与详情端点复用同一派生函数;review_result 先按群批量
       // 建索引,避免列表中的每条任务各自触发一次全表扫描。
       const reviewResults = await loadReviewResultIndex(db, id);
       const withL3 = await Promise.all(
-        withPidAlive.map(async (task) => {
+        withCloseGuard.map(async (task) => {
           const l3 = await deriveL3Answer(db, task, reviewResults);
           return l3 ? { ...task, l3 } : task;
         }),
@@ -1149,6 +1177,15 @@ app
       // 判定不修改 task.status。阈值复用 stallTimeoutMinutes,不新增配置。
       if (executorLiveness) {
         detail.liveness = executorLiveness;
+      }
+      // 结案守卫等待续跑(R3,specs/detached-close-deadlock-guard-vs-no-poll.md):
+      // 仅「曾因守卫拒绝而登记待续跑」的任务派生 closeGuardResume(含
+      // awaitingResume),未登记不输出(不是空对象),与 l1/l3/liveness 同款约定。
+      const closeGuardResume = (
+        await deriveCloseGuardResume(db, [task])
+      ).get(task.id);
+      if (closeGuardResume) {
+        detail.closeGuardResume = closeGuardResume;
       }
       // L1 聚合(R1,specs/reviewer-needs-no-executor-visibility.md):目标是协调
       // 任务(isDetachedTask)时派生 l1 字段(子任务数/聚合态/是否全终态),供

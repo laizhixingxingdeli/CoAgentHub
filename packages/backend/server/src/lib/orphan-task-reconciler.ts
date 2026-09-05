@@ -16,6 +16,7 @@ import { parseRateLimitRecoveryMs } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import {
   hasExemptingChildTask,
+  hasPendingCloseGuardResume,
   hasPendingResumeEvent,
   isCoordinatorTask,
   isExecutorProcessAlive,
@@ -92,6 +93,17 @@ export async function reconcileOrphanTasks(
     // 即退」、名下仍有豁免子任务或待建续跑事件时不判死;仅当它自己也无事可做
     // (无豁免子任务且无待建续跑)时才收敛,保住 R3 的「不被永远豁免」本意。
     // hasPendingResumeEvent 已排除续跑任务自身的完成事件,终止性判定不受影响。
+    // 第三判据(R2,specs/detached-close-deadlock-guard-vs-no-poll.md):结案
+    // 守卫拒绝过结案、且已登记待续跑的协调任务同样不判死 —— 它是**被平台挡住**
+    // 才退出的(协调者规则禁止轮询等待),pid 消失是正常的 detached 语义,不是
+    // 失败。判据复用 deriveCloseGuardResume:以「被登记的子任务是否仍有非终态」
+    // 为准,而非「任务上有没有标记」,标记是历史留痕、它自己不会失效。
+    // ADR-0009:本判据拿「被登记的子任务仍未终态」代替「有人在推进这棵子树」,
+    // 前提是子任务终态会触发完成事件并由既有消费路径创建续跑任务把协调者拉起;
+    // 不成立的情形是被登记的子任务自己永远停在非终态(排队但无人可派发)——
+    // 此时与「有 running 子任务」的既有豁免同款,由 detached 超时
+    // (detachedTimeoutMinutes,默认 24h)兜底,不会永久挂 running。真正失联的
+    // 进程(无任何待续跑依据)处置逐字不变。
     if (
       (await isCoordinatorTask(
         db,
@@ -99,7 +111,8 @@ export async function reconcileOrphanTasks(
         task.executorParticipantId ?? "",
       )) &&
       ((await hasExemptingChildTask(db, task.id)) ||
-        (await hasPendingResumeEvent(db, task.id)))
+        (await hasPendingResumeEvent(db, task.id)) ||
+        (await hasPendingCloseGuardResume(db, task)))
     ) {
       continue;
     }
