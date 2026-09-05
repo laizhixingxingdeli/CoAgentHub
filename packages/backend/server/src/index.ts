@@ -25,6 +25,7 @@ import {
   recoverInterruptedTasks,
   restoreExecutorCooldowns,
   startCoordinatorResumeConsumer,
+  startQueuedTaskReclaim,
 } from "./lib/executor-task";
 import { startL3OverdueReminder } from "./lib/l3-overdue-reminder";
 import { assertNoPendingMigrations } from "./lib/migration-health";
@@ -190,6 +191,9 @@ async function run() {
   wsHub.handleUpgrade(server as HttpServer);
   startCoordinatorResumeConsumer(db);
   startOrphanReconciler(db);
+  // 队列兜底:链条失败/重启后遗留的 queued 任务补回队列、不可拾起原因可见、
+  // 超阈值按 stall 告警(specs/queued-task-never-picked-up-after-chain-failure)。
+  startQueuedTaskReclaim(db);
   await startL3OverdueReminder(db);
 }
 

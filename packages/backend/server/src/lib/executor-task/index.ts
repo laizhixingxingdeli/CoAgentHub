@@ -16,6 +16,8 @@
  *  - report.ts       结构化汇报解析与渲染(parseTaskReport / renderTaskCard)
  *  - queue.ts        队列核心(入队 / 组调度 / 运行 / 停止 / 超时 / 重试 /
  *                    弱验收 / 执行历史 / 测试执行器选择)
+ *  - queued-task-reclaim.ts queued 任务周期兜底(链条失败/重启后遗留的排队
+ *                    任务补回队列、不可拾起原因可见、超阈值按 stall 告警)
  */
 
 export {
@@ -94,6 +96,11 @@ export {
   spawnFailureHint,
   summaryStreamText,
 } from "./queue";
+export {
+  type QueuedReclaimResult,
+  reclaimQueuedTasks,
+  startQueuedTaskReclaim,
+} from "./queued-task-reclaim";
 export {
   extractCodeBuddyStreamResult,
   extractGenericJsonlText,

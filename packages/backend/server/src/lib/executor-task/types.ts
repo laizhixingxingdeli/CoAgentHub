@@ -319,6 +319,39 @@ export function mergePlatformTokenFields(
 /** 未绑定项目路径(project_path 为空)的群任务归入默认组。 */
 export const DEFAULT_GROUP_KEY = "__default__";
 
+/**
+ * queued 任务「当前为什么不会被拾起」的判定码(ADR-0009:同一事实只有一个
+ * 判定出处)。由 queue.queuedBlockReason 单点产出,队列泵跳过与回收扫描的
+ * 可见性记录共用,禁止任何一方自行再判一次。
+ */
+export const QUEUED_BLOCK_CODES = [
+  /** 并行组数已达 maxParallelGroups(泵循环的退出条件)。 */
+  "group-slot",
+  /** 本组(工作树 / 默认组单槽)槽位已被占用。 */
+  "workspace-gate",
+  /** 执行器处于额度冷却。 */
+  "executor-cooldown",
+  /** 执行器 running 数已达声明式 maxConcurrency 上限。 */
+  "executor-concurrency",
+  /** 403 并发冲突退避窗口未过。 */
+  "concurrency-retry",
+  /** 403 并发冲突:等待既有同执行器 running 任务终态。 */
+  "concurrency-conflict",
+  /** 本组队列里它前面还有任务(泵只派队首)。 */
+  "queue-ahead",
+  /** 结构性不可派发:查无执行器配置或任务没有执行方 participant。 */
+  "executor-missing",
+] as const;
+
+export type QueuedBlockCode = (typeof QUEUED_BLOCK_CODES)[number];
+
+/** queued 任务不被拾起的原因(落 diffSummary.queuedBlocked 供任务 API 透出)。 */
+export interface QueuedBlockReason {
+  code: QueuedBlockCode;
+  /** 给人看的一句话说明(含阈值/时刻等证据)。 */
+  reason: string;
+}
+
 /** 单个 project_path 的组队列:组内 FIFO,不同组并行(受组槽位数限制)。
  *  running 为当前运行中任务列表(同一工作树并行数 ≤ maxConcurrentPerWorkspace,
  *  缺省 1 = 组内串行;projectPath 为空的默认组始终单槽,不参与工作树闸)。 */

@@ -120,6 +120,7 @@ import {
   mergePlatformTokenFields,
   preserveDispatchKindNote,
   preserveRollbackSkipped,
+  type QueuedBlockReason,
   type QueuedRun,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
@@ -361,15 +362,95 @@ export function formatExecutorStartupFailure(bin: string, msg: string): string {
  *    同字段,后者不置 concurrencyBlocked —— 那是并发冲突语义,瞬时限流无需
  *    等其他 running 任务清空)。
  */
-function isRunDispatchable(run: QueuedRun): boolean {
-  if (isInCooldown(run.ex)) return false;
-  const cap = run.ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
-  if (runningExecutorCount(run.ex.key) >= cap) return false;
-  if (Date.now() < run.concurrencyRetryAt) return false;
-  if (run.concurrencyBlocked && runningExecutorCount(run.ex.key) > 0) {
-    return false;
+/**
+ * 执行器侧不派发的原因(null = 可派发)。与拆分前的 isRunDispatchable 判定
+ * 逐条同序、同条件:冷却 → 声明式并发上限 → 403 退避 → 403 反应式排队。
+ *
+ * 只覆盖 run 自身携带的门槛;组槽位/工作树闸/队列位次在 queuedBlockReason
+ * 里按泵的选组谓词同源补齐(泵的选组谓词不在这里调用本函数之外的判定)。
+ */
+function runBlockReason(run: QueuedRun): QueuedBlockReason | null {
+  if (isInCooldown(run.ex)) {
+    return {
+      code: "executor-cooldown",
+      reason: `执行器 ${run.ex.label} 处于额度冷却,预计 ${formatEta(cooldownEndMs(run.ex))} 恢复`,
+    };
   }
-  return true;
+  const cap = run.ex.maxConcurrency;
+  if (cap !== undefined && runningExecutorCount(run.ex.key) >= cap) {
+    return {
+      code: "executor-concurrency",
+      reason: `执行器 ${run.ex.label} running 数已达并发上限 ${cap}`,
+    };
+  }
+  const retryInMs = run.concurrencyRetryAt - Date.now();
+  if (retryInMs > 0) {
+    return {
+      code: "concurrency-retry",
+      reason: `执行器 ${run.ex.label} 并发冲突退避中,${Math.ceil(retryInMs / 1000)} 秒后重试`,
+    };
+  }
+  if (run.concurrencyBlocked && runningExecutorCount(run.ex.key) > 0) {
+    return {
+      code: "concurrency-conflict",
+      reason: `执行器 ${run.ex.label} 返回并发冲突,等待既有 running 任务终态后重试`,
+    };
+  }
+  return null;
+}
+
+function isRunDispatchable(run: QueuedRun): boolean {
+  return runBlockReason(run) === null;
+}
+
+/**
+ * queued 任务「当前为什么不会被拾起」的判定(R2 可见性的唯一出处,
+ * specs/queued-task-never-picked-up-after-chain-failure.md R2)。
+ *
+ * ADR-0009:本函数**不新增**任何判定,三条门槛全部复用泵的同一组计数 ——
+ * 泵选组谓词里的 `runningForWorkspace(g) < workspaceCap(g.key)`、泵循环的
+ * `runningGroupCount() >= getMaxParallelGroups()` 退出条件,以及
+ * isRunDispatchable 的判定本体(runBlockReason)。「另写一套是否被阻塞」必然
+ * 在某个输入上与泵分叉,而分叉时没人在看。
+ *
+ * 与认领超时豁免(workspaceGateBlocked)的口径差异是**故意**的:豁免只豁免
+ * 「工作树闸」这一个事实,默认组的组内单槽是另一套既有机制;而可见性要回答
+ * 的是「它现在为什么没在跑」,默认组队首被本组 running 占住同样是答案 ——
+ * 所以这里直接用泵的谓词(对默认组与非默认组同式),不复用豁免函数。
+ *
+ * 顺序:执行器侧(最具体、最可操作)→ 组槽位 → 本组槽位 → 队列位次。
+ */
+export function queuedBlockReason(run: QueuedRun): QueuedBlockReason | null {
+  const executorSide = runBlockReason(run);
+  if (executorSide) return executorSide;
+  const group = groupQueues.get(run.groupKey);
+  if (!group) return null;
+  const maxGroups = getMaxParallelGroups();
+  if (runningGroupCount() >= maxGroups) {
+    return {
+      code: "group-slot",
+      reason: `并行组数已达上限 ${maxGroups},等既有组释放槽位`,
+    };
+  }
+  if (runningForWorkspace(group) >= workspaceCap(group.key)) {
+    return group.key === DEFAULT_GROUP_KEY
+      ? {
+          code: "workspace-gate",
+          reason: "默认组单槽:本组有任务正在执行",
+        }
+      : {
+          code: "workspace-gate",
+          reason: `工作树 ${group.key} running 数已达上限 ${workspaceCap(group.key)}`,
+        };
+  }
+  const ahead = group.queue.indexOf(run);
+  if (ahead > 0) {
+    return {
+      code: "queue-ahead",
+      reason: `本组队列中它前面还有 ${ahead} 个任务`,
+    };
+  }
+  return null;
 }
 
 /* ---------------- 队列 / 调度 ---------------- */
@@ -1537,12 +1618,43 @@ function liveStreamText(entries: readonly OutputEntry[]): string {
 /** L2 可观测性导出:共享摘要过滤函数(供定向回归测试直接断言空行治理)。 */
 export { liveStreamText, summaryStreamText };
 
+/**
+ * 同一 taskId 是否已有另一个活跃 run(specs/queued-task-never-picked-up-after-
+ * chain-failure.md R1 的重复入队守卫)。
+ *
+ * 为什么需要它:回收扫描按 DB 的 queued 行补建内存 run,而正常派发是「先插
+ * task 行(queued)、再入内存队列」两步 —— 扫描若正好落在这两步之间,同一个
+ * task 会有两个 run。泵在调用 runOne 前已把 run 放进 activeRuns(同步),
+ * 因此先到的那个一定先可见:后到的据此放弃本次执行,任务不会被 spawn 两次。
+ *
+ * 判据拿「activeRuns 里存在同 taskId 的另一个 run」代替「这个 task 正在被
+ * 执行」;前提是 run 进入 activeRuns 早于 runOne 的任何 await(泵里同步 add)。
+ * 不成立的情形是同一个 task 被两个**不同进程**各派一次 —— 本守卫只覆盖本
+ * 进程内,跨进程仍需 DB 状态兜底(任务状态是 server 单一真相源)。
+ */
+function hasDuplicateActiveRun(run: QueuedRun): boolean {
+  for (const other of activeRuns) {
+    if (other !== run && other.taskId === run.taskId) return true;
+  }
+  return false;
+}
+
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
   const { db, groupId, taskId, participantId, ex, body, summary, groupPrompt } =
     run;
 
   try {
+    // 重复入队(回收扫描与派发竞态):丢弃本次,任务状态不写 —— 先到的那个
+    // run 正在(或已经)执行它。直接 return,finally 照常释放槽位并泵下一个。
+    if (hasDuplicateActiveRun(run)) {
+      clearRunTimers(run);
+      console.warn(
+        `[executor] 任务 ${taskId} 已有活跃 run,丢弃本次重复入队(不重复 spawn)`,
+      );
+      return;
+    }
+
     // 停止指令可能在 spawn 前到达(kill 句柄尚未就绪):标记 stopped 后
     // 在此中止,不再 spawn,直接置 cancelled。
     if (run.stopped) {
