@@ -12,7 +12,7 @@
 
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
-import { parseRateLimitRecoveryMs } from "@server/lib/executors";
+import { parseRateLimitRecoveryMs, listPeerExecutorNames } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import {
   hasExemptingChildTask,
@@ -33,7 +33,7 @@ import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
   formatEta,
   getRateLimitCooldownMs,
-  isQuotaFailure,
+  classifyQuotaFailure,
 } from "./executor-task/state";
 
 /** 孤儿收敛周期(默认 10s;测试可注入更短间隔)。 */
@@ -123,7 +123,13 @@ export async function reconcileOrphanTasks(
     // 执行器(enterCooldown,不自动重试 —— 收敛本身无重试路径)。非额度路径逐字
     // 不变。executorKey 缺失(历史任务)时无法冷却指定执行器 → 走普通路径。
     const tail = lastLinesOf(taskOutputTail(task.id) ?? "", 20);
-    const quota = task.executorKey !== null && isQuotaFailure([tail]);
+    // R2 转述排除:孤儿收敛同样只在「非转述 + 正面证据」时判额度(01a07239
+    // 实证:协调者汇报里的子任务转述被误冷却)。
+    const quota =
+      task.executorKey !== null &&
+      classifyQuotaFailure([tail], {
+        peerExecutorNames: await listPeerExecutorNames(db, task.executorKey),
+      }).isQuota;
     let error = reason;
     let cooldownEnd: number | null = null;
     let cooldownSource: "parsed" | "fallback" = "fallback";

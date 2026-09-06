@@ -12,6 +12,7 @@ import {
   removeExecutorConfig,
   updateExecutorConfig,
 } from "@server/lib/executors";
+import { clearExecutorCooldown } from "@server/lib/executor-task/queue";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -208,9 +209,9 @@ const app2 = app
       const all = await effectiveExecutors(db);
       return c.json(
         all.map((ex) => {
-          // R1:每条恒含可用性三字段(available/unavailableReason/cooldownEndMs),
-          // 追加在既有字段之后,既有字段与顺序逐字不变;判定与文案全部来自
-          // executor-availability.ts 的权威导出,路由不写第二套。
+          // R1:每条恒含可用性字段(available/unavailableReason/cooldownEndMs +
+          // R3 cooldownSource),追加在既有字段之后,既有字段与顺序逐字不变;
+          // 判定与文案全部来自 executor-availability.ts 的权威导出,路由不写第二套。
           const availability = executorAvailability(ex);
           return {
             key: ex.key,
@@ -231,6 +232,7 @@ const app2 = app
             available: availability.available,
             unavailableReason: availability.unavailableReason,
             cooldownEndMs: availability.cooldownEndMs,
+            cooldownSource: availability.cooldownSource,
           };
         }),
       );
@@ -263,6 +265,33 @@ const app2 = app
       const { bin } = c.req.valid("query");
       const resolvedPath = resolveBin(bin);
       return c.json({ found: resolvedPath !== null, resolvedPath });
+    },
+  )
+  // R4(specs/quota-misclassified-from-coordinator-narration.md):手动清除执行器
+  // 额度冷却 —— 内存登记/到期定时器与持久化标记(task.diffSummary)同清并泵队列;
+  // 无冷却时 404,与 DELETE 配置同款(BizError ExecutorNotFound)。注册在 "/:key"
+  // 之前,路径段数不同不会互抢,但读序上先具体后参数更直观。
+  .delete(
+    "/:key/cooldown",
+    describeRoute({
+      description:
+        "R4: clear an executor's quota cooldown (in-memory entry, expiry timer and persisted task marker); 404 when no active cooldown",
+      responses: {
+        200: { description: "Cooldown cleared", content: { "application/json": {} } },
+        404: { description: "No active cooldown", content: { "application/json": {} } },
+      },
+    }),
+    zValidator("param", z.object({ key: z.string().min(1) })),
+    async (c) => {
+      const db = c.get("db");
+      const { key } = c.req.valid("param");
+      const result = await clearExecutorCooldown(db, key);
+      if (!result.cleared) {
+        // 与 DELETE /:key 同语义:目标不存在。执行器配置本身可能仍在,
+        // 但「没有可清除的冷却」对调用方而言等价于目标缺失。
+        throw new BizError(BizCodeEnum.ExecutorNotFound);
+      }
+      return c.json({ success: true, key, taskIds: result.taskIds });
     },
   )
   .delete(

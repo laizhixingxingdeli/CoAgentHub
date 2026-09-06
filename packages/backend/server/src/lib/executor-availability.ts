@@ -4,6 +4,7 @@ import { findExecutorByParticipant } from "@server/lib/executors";
 import { and, arrayContains, desc, eq } from "drizzle-orm";
 import {
   cooldownEndMs,
+  executorCooldownRecords,
   formatEta,
   isInCooldown,
   runningExecutorCount,
@@ -24,16 +25,32 @@ export interface TwoPartyDegradation {
   executors: DegradedExecutorEntry[];
 }
 
-/** R1 单条执行器权威可用性的返回形状(GET /api/executors 每条恒含三字段)。 */
+/**
+ * R1 单条执行器权威可用性的返回形状(GET /api/executors 每条恒含四字段)。
+ * R3(specs/quota-misclassified-from-coordinator-narration.md)新增 cooldownSource:
+ * 冷却中恒为 "parsed"(恢复时刻来自提供方输出解析)或 "fallback"(平台估算
+ * 固定冷却);非冷却恒为 null —— 调用方可用它区分「执行器告知的恢复时刻」
+ * 与「平台估算」,不再从 unavailableReason 文案里猜。
+ */
 export interface ExecutorAvailability {
   available: boolean;
   unavailableReason: string | null;
   cooldownEndMs: number | null;
+  cooldownSource: "parsed" | "fallback" | null;
 }
 
-/** 冷却不可用文案(单一权威出处:judgeTwoPartyDegradation 与 executorAvailability 共用)。 */
+/**
+ * 冷却不可用文案(单一权威出处:judgeTwoPartyDegradation 与 executorAvailability
+ * 共用)。R3:按冷却来源区分 —— parsed=执行器告知(提供方输出的可解析恢复
+ * 时刻),fallback=平台估算(未解析到恢复时刻)。来源判定唯一出处是
+ * executorCooldownRecords(enterCooldown 写入);无记录(测试直接登记内存表)
+ * 按 fallback 处理。
+ */
 function cooldownUnavailableReason(ex: { key: string }): string {
-  return `额度冷却至 ${formatEta(cooldownEndMs(ex))}`;
+  const eta = formatEta(cooldownEndMs(ex));
+  return executorCooldownRecords.get(ex.key)?.source === "parsed"
+    ? `额度冷却至 ${eta}(执行器告知的恢复时刻)`
+    : `额度冷却至 ${eta}(平台估算,未解析到恢复时刻)`;
 }
 
 /** running 占用不可用文案(单一权威出处:并发饱和与既有 running 判定共用)。 */
@@ -55,6 +72,7 @@ export function executorAvailability(ex: {
       available: false,
       unavailableReason: cooldownUnavailableReason(ex),
       cooldownEndMs: cooldownEndMs(ex),
+      cooldownSource: executorCooldownRecords.get(ex.key)?.source ?? "fallback",
     };
   }
   const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
@@ -63,9 +81,15 @@ export function executorAvailability(ex: {
       available: false,
       unavailableReason: RUNNING_TASK_UNAVAILABLE_REASON,
       cooldownEndMs: null,
+      cooldownSource: null,
     };
   }
-  return { available: true, unavailableReason: null, cooldownEndMs: null };
+  return {
+    available: true,
+    unavailableReason: null,
+    cooldownEndMs: null,
+    cooldownSource: null,
+  };
 }
 
 type Task = typeof taskTable.$inferSelect;

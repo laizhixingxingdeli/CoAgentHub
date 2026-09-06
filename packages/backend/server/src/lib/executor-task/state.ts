@@ -115,15 +115,29 @@ export const executorCooldownRecords = new Map<
 export const cooldownTimers = new Map<string, NodeJS.Timeout>();
 
 /**
- * 额度判定的调用上下文(伪额度回显修复):只靠关键词命中不足以判额度 ——
- * 必须至少有一条结构证据:非零退出码 / 输出含真实恢复时刻 / 命中行呈提供方
- * 错误行形状。同时排除「自指」命中行:detectPatterns 定义本身与任务书回显。
+ * 额度判定的调用上下文(伪额度回显修复 + 协调者转述误判修复
+ * specs/quota-misclassified-from-coordinator-narration.md):只靠关键词命中不足
+ * 以判额度 —— 必须至少有一条**正面**结构证据:命中行呈提供方错误行形状,或
+ * 可解析出真实恢复时刻(spec R1:退出码一律不构成证据)。
  */
 export interface QuotaFailureContext {
-  /** 进程退出码;null/undefined = 未知(如孤儿收敛无退出码可取)。 */
+  /**
+   * 进程退出码;null/undefined = 未知(如孤儿收敛无退出码可取)。
+   *
+   * ⚠️ R1(2026-09-06 事故):退出码**不再参与证据判定**(非零与零都不算)。
+   * 协调进程被重启杀掉 → 非零退出;重试次数用尽 → exit 0 —— 两种「普通失败」
+   * 都曾因正文提到 429/quota 被升格成额度冷却。保留本字段仅为调用点留痕与
+   * 接口兼容,判定一律以正面证据为准。
+   */
   exitCode?: number | null;
   /** 任务书全文(回显排除):命中行若逐字出现在任务书里 → 视为回显,不计证据。 */
   taskBook?: string | null;
+  /**
+   * R2 转述排除用:除本执行器外其它执行器的标识(key/label/agentName,
+   * 调用方经 listPeerExecutorNames 取得)。命中行含其一 → 判为「转述他人状态」,
+   * 不算本执行器限流。
+   */
+  peerExecutorNames?: string[];
 }
 
 /** 额度判定结果:isQuota 为真时 matchedLine 为命中的原始行(安全截断)。 */
@@ -213,20 +227,74 @@ function classifyQuotaKind(
 /** quotaMatchedLine 落库的最大长度(安全截断,避免超长 JSONL 行原样入 diffSummary)。 */
 const QUOTA_MATCHED_LINE_MAX = 300;
 
-/** 提供方错误行语义形状(逐行):命中行需呈现「报错/限流诊断」外观,而不是源码
- *  回显或文件名里的 quota 字样。与 CLI 无关,不写死任何执行器名。
- *   - error/fatal 前缀
- *   - [rate-limited] 等方括号限流标签
- *   - {"type":"error",...} JSON 错误事件(Codex 事故原文形态)
- *   - 限流/额度动词短语(rate limit exceeded / window exhausted / ...)
- *   - HTTP 状态码 429 / 5xx */
+/**
+ * 提供方错误行语义形状(逐行):命中行需呈现「报错/限流诊断」外观,而不是源码
+ *  回显或协调者转述。与 CLI 无关,不写死任何执行器名。
+ *
+ * R1(specs/quota-misclassified-from-coordinator-narration.md)收窄:只保留
+ * 「锚定/显式」形状 —— 行首 error/fatal、行首方括号限流标签、JSON error 事件、
+ * 显式限流动词短语、**行首** HTTP 状态码。删掉的两类弱形状正是两次事故的
+ * 判定出处:裸 `429|5\d{2}`(行中数字,「HTTP 429 限流」式转述与参与者 id
+ * 都会命中)与裸 `limit reached`/`exhausted`(平台自身「retry limit reached」
+ * 熔断文案 01a074c6-e033 命中)。真限流在语料里的呈现(行首 429、[rate-limited]
+ * 标签、error 前缀、resets around 时刻)全部仍被保留形状覆盖。
+ *
+ * ADR-0009:本判据拿「错误行形态」代替「输出提到限流词」;不成立的情形是
+ * 提供方只用普通叙述报限流(无错误行形状、无恢复时刻)→ 漏判为普通失败,
+ * 走普通重试路径 —— 代价从「误冷却停派 5 小时」降为「多试一次」,可接受。
+ */
 const PROVIDER_ERROR_LINE_SHAPES: ReadonlyArray<RegExp> = [
   /^\s*(?:error|fatal)\b/i,
   /^\s*\[(?:rate[- ]?limit(?:ed)?|quota|limit|429)\]/i,
+  // 行首 HTTP 状态码(429/5xx,可带 "HTTP/1.1 " / "HTTP " 前缀);行中出现
+  // 的状态码不构成证据 —— 「因 HTTP 429 限流」式转述即靠行中匹配误判。
+  /^\s*(?:HTTP\/?[\d.]*\s+)?(?:429|5\d{2})\b/,
   /"type"\s*:\s*"error"/i,
-  /\b(?:rate[- ]?limit(?:ed)? exceeded|too many requests|window exhausted|quota exceeded|usage limit(?:ed)?|you'?ve hit your (?:usage|rate) limit|limit reached|exhausted)\b/i,
-  /\b(?:HTTP\s*)?(?:429|5\d{2})\b/,
+  /\b(?:rate[- ]?limit(?:ed)?\s*(?:exceeded|exhausted)|too many requests|window exhausted|quota\s*(?:exceeded|exhausted)|usage limit(?:ed)?|you'?ve hit your (?:usage|rate) limit)\b/i,
 ];
+
+/**
+ * R2 转述排除的结构判据(不用语义猜测):命中行里出现以下任一「指向另一个
+ * 任务/执行器」的结构特征 → 判为转述他人状态,不算本执行器限流。
+ *
+ * ADR-0009:本判据拿「行内是否点名他人/引用平台字段」代替「这句话像不像在
+ * 转述」;不成立的情形是转述时不带任何指代(如「上一轮因额度失败」)——
+ * 该情形由 R1 兜底:没有正面证据(错误行形状/恢复时刻)一律不判额度。
+ */
+
+/** 平台 ULID 形 id(任务/参与者/群共享同一生成器:8 位、01 开头的十六进制
+ *  时间戳前缀,短形 01a06663 与长形 01a074c4-7117-… 的首段都命中)。 */
+const PLATFORM_ID_SHAPE = /\b01[0-9a-f]{6}\b/i;
+
+/** 平台自有字段名(带赋值/JSON 键形态,如 `quotaKind=exhausted`、
+ *  `"dispatchKind":"fix"`)。取领域词汇表里的平台专有名,不含 "status"
+ *  这类提供方 JSON 也用的通用键 —— codebuddy 真限流行里的
+ *  `"status":429` 不得被误伤(01a0721c 实证)。 */
+const PLATFORM_FIELD_SHAPE =
+  /\b(?:quotaKind|dispatchKind|checkpointRef|callbackRef|supersedesTaskId|specHash|executorKey|queuedBlocked|resumeOf)\s*[=:]/i;
+
+/** ASCII 执行器标识按整词匹配(避免 "pi" 命中 "api"/"pipeline");非 ASCII
+ *  标签(中文别名)退化为普通包含。 */
+function mentionsExecutorName(line: string, name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  if (/[\u0080-\uffff]/.test(trimmed)) return line.includes(trimmed);
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(line);
+}
+
+/** R2:命中行是否在转述另一个任务/执行器的状态(结构特征判定)。 */
+function isOtherPartyNarrationLine(
+  line: string,
+  peerExecutorNames?: string[],
+): boolean {
+  if (PLATFORM_ID_SHAPE.test(line)) return true;
+  if (PLATFORM_FIELD_SHAPE.test(line)) return true;
+  if (peerExecutorNames?.some((n) => mentionsExecutorName(line, n))) {
+    return true;
+  }
+  return false;
+}
 
 /** 是否「detectPatterns 定义」自指行:输出里出现配置定义本身(含 detectPatterns
  *  键名,或 ≥2 个引号包裹的关键词列表,形如 "usage limit", "rate limit", "quota")。
@@ -234,10 +302,15 @@ const PROVIDER_ERROR_LINE_SHAPES: ReadonlyArray<RegExp> = [
 function isDetectPatternsDefinitionLine(line: string): boolean {
   if (/\bdetectPatterns\b/i.test(line)) return true;
   const quoted = line.match(/"[^"]*"/g) ?? [];
+  if (quoted.length === 0) return false;
   const patternHits = quoted.filter((q) =>
     rateLimitPatterns.some((p) => q.toLowerCase().includes(p.toLowerCase())),
   );
-  return patternHits.length >= 2;
+  // 判据是**密度**而不是绝对条数:配置定义行整行就是关键词列表(命中/引号串 = 1.0),
+  // 而提供方自己的 JSON 结果行有大量业务字段,关键词只占极小比例
+  // (codebuddy 真实 JSONL 实测 2/数十)。只看「≥2 条」会把真限流的结果行
+  // 误判成配置回显 —— 2026-09-06 实测漏判。
+  return patternHits.length >= 2 && patternHits.length / quoted.length >= 0.5;
 }
 
 /** 是否任务书逐字回显(自指):命中行整行出现在任务书正文里 → 不算证据。
@@ -252,10 +325,11 @@ function isTaskBookEcho(
 }
 
 /**
- * 额度失败判定(伪额度回显修复):对每行做「关键词命中 → 排除自指 → 结构证据」
- * 三段判定。结构证据至少满足一条才算额度:非零退出码(整次运行级)、命中行可
- * 解析出真实恢复时刻、命中行呈提供方错误行形状。仅关键词命中(如输出回显了
- * 含 quota 字样的源码/测试名/任务书)→ 不算额度,避免误冷却停派。
+ * 额度失败判定(伪额度回显修复 + 转述误判修复):对每行做「关键词命中 →
+ * 排除自指/转述 → 正面结构证据」三段判定。正面结构证据(spec R1,二选一):
+ * 命中行呈提供方错误行形状,或可解析出真实恢复时刻。退出码(无论零非零)
+ * 一律不构成证据;仅关键词命中(输出回显了含 quota 字样的源码/测试名/任务书)
+ * → 不算额度,避免误冷却停派。
  *
  * 返回命中的原始行(截断),供 diffSummary.quotaMatchedLine 留痕;并给出分级
  * kind(瞬时限流 / 额度耗尽),供调用方分流(R1:分级收敛在本函数单点)。
@@ -264,8 +338,7 @@ export function classifyQuotaFailure(
   texts: string[],
   ctx: QuotaFailureContext = {},
 ): QuotaFailureVerdict {
-  const { exitCode, taskBook } = ctx;
-  const nonzeroExit = typeof exitCode === "number" && exitCode !== 0;
+  const { taskBook, peerExecutorNames } = ctx;
   for (const raw of texts) {
     for (const rawLine of raw.split("\n")) {
       const line = rawLine.trim();
@@ -284,9 +357,10 @@ export function classifyQuotaFailure(
       // 自指排除:detectPatterns 定义 / 任务书回显。
       if (isDetectPatternsDefinitionLine(line)) continue;
       if (isTaskBookEcho(line, taskBook)) continue;
-      // 结构证据:非零退出码 / 真实恢复时刻 / 提供方错误行形状。
+      // 转述排除(R2):点名其它执行器/引用平台任务 id 或字段 → 转述他人状态。
+      if (isOtherPartyNarrationLine(line, peerExecutorNames)) continue;
+      // 正面结构证据(R1):提供方错误行形状 / 真实恢复时刻,二者其一。
       const hasEvidence =
-        nonzeroExit ||
         extractRateLimitRecoveryMs(line) !== null ||
         PROVIDER_ERROR_LINE_SHAPES.some((re) => re.test(line));
       if (hasEvidence) {

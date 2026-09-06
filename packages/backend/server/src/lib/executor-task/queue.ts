@@ -31,6 +31,7 @@ import {
 import {
   type ExecutorConfig,
   findExecutorByParticipant,
+  listPeerExecutorNames,
   parseRateLimitRecoveryMs,
   renderExecutorArgs,
 } from "@server/lib/executors";
@@ -302,6 +303,51 @@ export async function restoreExecutorCooldowns(
     );
   }
   return restoredKeys.size;
+}
+
+/**
+ * R4(specs/quota-misclassified-from-coordinator-narration.md):手动清除执行器
+ * 额度冷却 —— 内存登记 + 到期定时器 + 持久化标记(task.diffSummary 的
+ * executorCooldownEndMs/executorCooldownSource)一并清掉;否则重启时会被
+ * restoreExecutorCooldowns 复活。清完后泵队列,让被冷却挡住的 queued 任务
+ * 立即重试。幂等:本就无冷却时返回 cleared=false,不泵队列。
+ *
+ * ADR-0009:拿「读到的最新未过期标记」代替「逐条历史记录」判定要不要清;
+ * 不成立的情形是有人手工改库回填更老记录 —— 老记录本就应被清除,顺带清掉
+ * 无害(下一次真冷却会写入新标记)。
+ */
+export async function clearExecutorCooldown(
+  db: DataBase,
+  key: string,
+): Promise<{ cleared: boolean; taskIds: string[] }> {
+  const hadInMemory =
+    executorCooldowns.has(key) || executorCooldownRecords.has(key);
+  const timer = cooldownTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    cooldownTimers.delete(key);
+  }
+  executorCooldowns.delete(key);
+  executorCooldownRecords.delete(key);
+
+  // 持久化标记:该执行器最新一条未过期记录即判定状态;清掉它,重启不会复活。
+  const taskIds: string[] = [];
+  const persisted = await listPersistedExecutorCooldowns(db);
+  for (const record of persisted) {
+    if (record.executorKey !== key) continue;
+    if (record.endMs <= Date.now()) continue;
+    await clearPersistedExecutorCooldown(db, record.taskId);
+    taskIds.push(record.taskId);
+  }
+
+  const cleared = hadInMemory || taskIds.length > 0;
+  if (cleared) {
+    console.log(
+      `[executor] 手动清除执行器 ${key} 的额度冷却(内存=${hadInMemory},持久化任务=${taskIds.length}),立即恢复派发`,
+    );
+    void pumpQueue();
+  }
+  return { cleared, taskIds };
 }
 
 /* ---------------- 执行器级并发(设计修正:按执行器实际并发能力排队) ---------------- */
@@ -1645,6 +1691,16 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     run;
 
   try {
+    // R2 转述排除:分类需知「除本执行器外的全部执行器标识」。
+    // ⚠️ 必须**惰性**取:放在 runOne 开头 await 会在「置 running」与「spawn 占位」
+    // 之间插入一个额外的事件循环让点,工作树占位守卫因此出现可观察的空窗
+    // (executor-coordinator-workspace-gate 验收 1 实测 occupancy 读到 0)。
+    // 只有走到额度分类那几条失败路径才需要它,那时再取,TTL 缓存开销可忽略。
+    let peerExecutorNamesCache: string[] | undefined;
+    const getPeerExecutorNames = async (): Promise<string[]> => {
+      peerExecutorNamesCache ??= await listPeerExecutorNames(db, ex.key);
+      return peerExecutorNamesCache;
+    };
     // 重复入队(回收扫描与派发竞态):丢弃本次,任务状态不写 —— 先到的那个
     // run 正在(或已经)执行它。直接 return,finally 照常释放槽位并泵下一个。
     if (hasDuplicateActiveRun(run)) {
@@ -2184,11 +2240,13 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           await handleUnconfirmed(run);
           return;
         }
-        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词且带结构证据
-        // (恢复时刻/错误行形状)→ 额度失败。
+        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词且带正面结构证据
+        // (恢复时刻/错误行形状;R1:退出码不是证据)→ 额度失败;R2:点名其它
+        // 执行器/引用平台 id 或字段的转述行不算证据。
         const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
         const timeoutQuota = classifyQuotaFailure([lastLinesOf(out, 20)], {
           taskBook: run.body,
+          peerExecutorNames: await getPeerExecutorNames(),
         });
         if (timeoutQuota.isQuota) {
           // 瞬时限流(短相对恢复提示):per-run 退避重试,不进执行器级冷却。
@@ -2276,6 +2334,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         const successQuota = classifyQuotaFailure([successTail], {
           exitCode: 0,
           taskBook: run.body,
+          peerExecutorNames: await getPeerExecutorNames(),
         });
         // R6 主闸(quota-failure-on-clean-exit v1.1):exit 0 时先以「本次任务
         // 窗口内是否产生提交」为闸 —— 有提交 → 一律不判额度、不进入冷却(运行
@@ -2424,13 +2483,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           return;
         }
         // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
-        // 且带结构证据(非零退出码/恢复时刻/错误行形状)→ 归类「额度失败」,冷却
-        // 该执行器、不自动重试、❌ 注明预计恢复时间;其余失败保持原重试行为。
-        // 限定尾部避免全量输出里的无关 "429/quota" 字样造成误判(误判会停派该
-        // 执行器整段冷却期);结构证据排除仅回显源码/任务书的伪命中。
+        // 且带正面结构证据(R1:恢复时刻/错误行形状,退出码一律不算)→ 归类
+        // 「额度失败」,冷却该执行器、不自动重试、❌ 注明预计恢复时间;其余失败
+        // 保持原重试行为。限定尾部避免全量输出里的无关 "429/quota" 字样造成误判
+        // (误判会停派该执行器整段冷却期);结构证据排除仅回显源码/任务书的伪命中,
+        // R2 进一步排除点名其它执行器/平台字段的转述行。
         const failureQuota = classifyQuotaFailure([tail], {
           exitCode: result.code,
           taskBook: run.body,
+          peerExecutorNames: await getPeerExecutorNames(),
         });
         if (failureQuota.isQuota) {
           await routeQuotaFailure(

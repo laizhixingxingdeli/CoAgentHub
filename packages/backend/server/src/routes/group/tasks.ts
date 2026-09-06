@@ -69,6 +69,7 @@ import {
 import { getExecutorTaskLiveness } from "@server/lib/executor-task-liveness";
 import {
   findExecutorByKey,
+  listPeerExecutorNames,
   parseRateLimitRecoveryMs,
 } from "@server/lib/executors";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
@@ -1722,6 +1723,7 @@ app
         if (errorText.trim() !== "") {
           const quotaVerdict = classifyQuotaFailure([errorText], {
             taskBook: task.brief,
+            peerExecutorNames: await listPeerExecutorNames(db, task.executorKey),
           });
           if (quotaVerdict.isQuota) {
             // R6 主闸(quota-failure-on-clean-exit v1.1):PATCH failed 同样先以
@@ -1753,8 +1755,17 @@ app
               const cooldownEnd = normalizeCooldownEnd(
                 parsedMs ?? Date.now() + getRateLimitCooldownMs(),
               );
+              const quotaSource: "parsed" | "fallback" =
+                parsedMs !== null &&
+                parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
+                  ? "parsed"
+                  : "fallback";
               const extra: Record<string, unknown> = {
                 [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
+                // R3:冷却来源随终态落库(与 queue/孤儿收敛同口径),供
+                // restoreExecutorCooldowns 重建与 /api/executors 展示区分
+                // 「执行器告知的恢复时刻」与「平台估算」。
+                executorCooldownSource: quotaSource,
                 ...(quotaVerdict.matchedLine !== null
                   ? { quotaMatchedLine: quotaVerdict.matchedLine }
                   : {}),
@@ -1769,11 +1780,7 @@ app
               }
               summaryToWrite = { ...rawSummary, ...extra };
               quotaCooldownEnd = cooldownEnd;
-              quotaCooldownSource =
-                parsedMs !== null &&
-                parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-                  ? "parsed"
-                  : "fallback";
+              quotaCooldownSource = quotaSource;
               quotaErrorText = errorText;
               quotaEx = task.executorKey
                 ? await findExecutorByKey(db, task.executorKey)

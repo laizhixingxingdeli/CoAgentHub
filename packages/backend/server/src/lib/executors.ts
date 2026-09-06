@@ -470,6 +470,27 @@ export async function findExecutorByKey(
   return all.find((ex) => ex.key === key);
 }
 
+/**
+ * R2 转述排除用(specs/quota-misclassified-from-coordinator-narration.md):
+ * 除 excludeKey 外全部执行器的标识(key/label/agentName)。classifyQuotaFailure
+ * 用它判定命中行是否在「转述另一个执行器的状态」—— 行内点名了别的执行器
+ * (如协调者叙述「上次 AtomCode 因 HTTP 429 限流」)→ 不算本执行器限流。
+ * effectiveExecutors 走 TTL 缓存,分类路径调用无额外查询开销。
+ */
+export async function listPeerExecutorNames(
+  db: DataBase,
+  excludeKey?: string | null,
+): Promise<string[]> {
+  const names = new Set<string>();
+  for (const ex of await effectiveExecutors(db)) {
+    if (excludeKey && ex.key === excludeKey) continue;
+    for (const name of [ex.key, ex.label, ex.agentName]) {
+      if (name && name.trim()) names.add(name.trim());
+    }
+  }
+  return [...names];
+}
+
 /* ---------------- 调度策略(dispatch-policy.json) ---------------- */
 
 /** 失败自动重试策略(触发条件:exit≠0 / 超时 / 静默)。 */

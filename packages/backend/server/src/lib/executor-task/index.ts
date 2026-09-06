@@ -93,6 +93,7 @@ export {
   resolveTaskRepo,
   resolveTestExecutor,
   restoreExecutorCooldowns,
+  clearExecutorCooldown,
   spawnFailureHint,
   summaryStreamText,
 } from "./queue";
