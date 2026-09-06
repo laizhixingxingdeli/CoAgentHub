@@ -221,6 +221,18 @@ export function sumAttemptTokenUsageReason(
     : "unavailable";
 }
 
+/**
+ * R1(specs/second-server-instance-sweeps-production-tasks.md)平台标记键:
+ * `diffSummary.platform.ownerServerPid` 记录「本 server 进程 pid」。
+ *
+ * 为什么放 diffSummary.platform 而不是新列:spec §6 明令不新建基础设施,本票又
+ * 不得改 schema/迁移;platform 块是既有的「平台自有标记命名空间」(resumeOf /
+ * l3MergedInto / closeGuardResume 都在此),PATCH 结案、L3 并入、孤儿收敛三条
+ * 覆盖 diffSummary 的路径都保留 platform.*,归属标记因此跨生命周期存活。
+ * 判据只取数据本身(server 进程是否存活),绝不依赖端口或环境变量猜测「沙箱」。
+ */
+export const OWNER_SERVER_PID_KEY = "ownerServerPid";
+
 /** diffSummary 归一化:JSON 列可能是 null / 数组 / 基本类型,只有对象是有效载荷。 */
 export function asDiffSummaryRecord(
   value: unknown,
