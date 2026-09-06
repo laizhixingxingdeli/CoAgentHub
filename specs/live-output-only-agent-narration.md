@@ -126,6 +126,10 @@ codex / codebuddy / atomcode 之一。因此 **R1 的判据表对协调者同样
 | codex | `item.completed` 且 `item.type == "agent_message"` → `item.text`(**全部,含中途旁白**) | 2 条 |
 | codebuddy | `assistant` 消息的 `text` 块;`result.result` 与末条 `text` 逐字相同,由既有 R5 折叠去重 | 1 条 |
 | atomcode | **stdout** 的正文(见 C3 / R2) | 1 条(现被吞) |
+| pi | `assistantMessageEvent.type === "text_end"` 的 `content`(**全部,含中途旁白**);空白 `content` 不进界面(R2) | 2 条(11 条 report 噪音里筛出) |
+
+(pi 行由 [live-output-pi-uncovered-shows-thinking-and-tool-results.md](live-output-pi-uncovered-shows-thinking-and-tool-results.md)
+补入 —— 该票冻结前判据表漏了 Pi,2026-09-02 起 Pi 是本群默认执行器。)
 
 内部统一为 `kind === "report"`。其余类别(tool / command / result / thinking /
 error / raw)不进界面。

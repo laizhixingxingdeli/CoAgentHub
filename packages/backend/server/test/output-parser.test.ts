@@ -1913,6 +1913,14 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     expect(live).toContain("并统计行数");
     expect(live).toContain("a.txt");
     expect(live).toContain("共有 2 行");
+
+    // 验收 1 强化:整份界面流逐字节等于这两条 text_end(中间空白 text_end `\n` 被
+    // R2 过滤,其余 delta/detail-only 条目不进界面)。锁定样本输出的精确形状,
+    // 防止未来判据漂移时验收用 toContain 漏掉多出来的一行。
+    const expectedLive =
+      '好的，我来读取 `a.txt` 并统计行数\n' +
+      '`a.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n**共有 2 行。**\n';
+    expect(live).toBe(expectedLive);
   });
 
   it("空白 text_end 不进界面(R2)", () => {
