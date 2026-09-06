@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -259,7 +266,13 @@ describe("platform token usage collection", () => {
     });
   });
 
-  it("reads Pi message usage from the dedicated session collector", async () => {
+  it("pi no longer reads ~/.pi/agent/sessions — the dead collector is gone (spec v1.1)", async () => {
+    // Spec v1.1 (2026-09-07): the platform invokes pi with --no-session, so
+    // ~/.pi/agent/sessions never receives the run's file — a collector reading
+    // it can never hit in production (its newest file predates every real run).
+    // A matching, in-window session file with plausible usage must therefore be
+    // IGNORED: with no parseable usage on stdout the result is `unavailable`,
+    // not the session file's numbers. Guards against re-wiring the dead path.
     const root = home();
     const piDir = join(root, ".pi", "agent", "sessions", "project");
     mkdirSync(piDir, { recursive: true });
@@ -272,32 +285,153 @@ describe("platform token usage collection", () => {
           timestamp: "2026-08-25T10:01:00.000Z",
           message: {
             role: "assistant",
-            usage: {
-              input: 120,
-              output: 30,
-              cacheRead: 10,
-              cacheWrite: 5,
-              totalTokens: 150,
-            },
+            usage: { input: 120, output: 30, totalTokens: 150 },
           },
         }),
       ].join("\n"),
     );
 
+    await expect(
+      collectTokenUsage({
+        executorKey: "pi",
+        cwd,
+        startedAt,
+        endedAt,
+        stdout: "executor chatter without any JSON usage",
+        homeDir: root,
+      }),
+    ).resolves.toEqual({ tokenUsage: null, reason: "unavailable" });
+  });
+
+  it("pi collects via the generic JSONL scan: last cumulative totalTokens, trusted (spec v1.1)", async () => {
+    // Pi stdout carries usage snapshots whose `totalTokens` is cumulative
+    // (monotonically increasing). The scan takes the LAST parseable usage
+    // object — the authoritative running total — and must NOT sum across
+    // events. Pi is a verified source, so the result is trusted.
     const result = await collectTokenUsage({
       executorKey: "pi",
       cwd,
       startedAt,
       endedAt,
-      homeDir: root,
+      stdout: [
+        JSON.stringify({
+          type: "message_update",
+          usage: {
+            input: 3181,
+            output: 109,
+            cacheRead: 200,
+            totalTokens: 3546,
+          },
+        }),
+        JSON.stringify({
+          type: "message_update",
+          usage: {
+            input: 239,
+            output: 109,
+            cacheRead: 300,
+            totalTokens: 3676,
+          },
+        }),
+        JSON.stringify({
+          type: "message_update",
+          usage: {
+            input: 472,
+            output: 30,
+            cacheRead: 3328,
+            reasoning: 7,
+            totalTokens: 3830,
+          },
+        }),
+      ].join("\n"),
     });
-
     expect(result.tokenUsage).toEqual({
-      inputTokens: 120,
+      inputTokens: 472,
       outputTokens: 30,
-      cachedInputTokens: 15,
-      totalTokens: 150,
-      source: "pi-session-jsonl",
+      cachedInputTokens: 3328,
+      // Last cumulative total (3830), not the sum 3546+3676+3830 and not
+      // input+cacheRead+output of the last event.
+      totalTokens: 3830,
+      source: "generic-jsonl-scan",
+      trusted: true,
+    });
+  });
+
+  it("pi on the real captured corpus resolves the documented running total, trusted", async () => {
+    // Hard-acceptance style: feed the REAL pi stdout captured by the platform
+    // probe (.scratch/probe/samples/pi-run.jsonl, gitignored local fixture —
+    // same convention as output-parser.test.ts). Expected values are the ones
+    // documented in spec v1.1: last usage object input=472/output=30 and
+    // cumulative totalTokens=3830. Skipped when the local fixture is absent.
+    const sampleUrl = new URL(
+      "../../../../.scratch/probe/samples/pi-run.jsonl",
+      import.meta.url,
+    );
+    if (!existsSync(sampleUrl)) return;
+    const result = await collectTokenUsage({
+      executorKey: "pi",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: readFileSync(sampleUrl, "utf8"),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 472,
+      outputTokens: 30,
+      cachedInputTokens: 3328,
+      totalTokens: 3830,
+      source: "generic-jsonl-scan",
+      trusted: true,
+    });
+  });
+
+  it("generic fallback for an unknown executor stays untrusted on identical pi-shaped stdout", async () => {
+    // The trusted marking is per-executor-key, not per-stdout-shape: the same
+    // stdout that makes pi's scan result trusted must stay trusted:false for a
+    // key with no verified accounting caliber. Regression that distinguishes
+    // the verified pi path from the generic fallback.
+    const stdout = JSON.stringify({
+      type: "message_update",
+      usage: { input: 472, output: 30, cacheRead: 3328, totalTokens: 3830 },
+    });
+    const unknown = await collectTokenUsage({
+      executorKey: "does-not-exist",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout,
+    });
+    expect(unknown.tokenUsage).toEqual({
+      inputTokens: 472,
+      outputTokens: 30,
+      cachedInputTokens: 3328,
+      totalTokens: 3830,
+      source: "generic-jsonl-scan",
+      trusted: false,
+    });
+  });
+
+  it("a known executor's custom-path miss degrades to the untrusted generic scan", async () => {
+    // claude has a dedicated collector; with no matching session files it falls
+    // through to the generic scan, which stays untrusted — trust is granted
+    // only to verified keys (pi), never to a custom-path miss.
+    const result = await collectTokenUsage({
+      executorKey: "claude",
+      cwd,
+      startedAt,
+      endedAt,
+      stdout: JSON.stringify({
+        type: "message_update",
+        usage: { input: 472, output: 30, cacheRead: 3328, totalTokens: 3830 },
+      }),
+      homeDir: home(),
+    });
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 472,
+      outputTokens: 30,
+      cachedInputTokens: 3328,
+      totalTokens: 3830,
+      source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 

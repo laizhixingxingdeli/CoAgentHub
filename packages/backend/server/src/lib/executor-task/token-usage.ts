@@ -348,46 +348,6 @@ function collectCodeBuddy(
   return count > 0 ? finishTotals(totals, "codebuddy-jsonl") : undefined;
 }
 
-function collectPi(input: TokenUsageCollectionInput): TokenUsage | undefined {
-  const start = Date.parse(input.startedAt);
-  const end = Date.parse(input.endedAt);
-  const totals: UsageTotals = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    totalTokens: 0,
-  };
-  let count = 0;
-  for (const file of walkFiles(
-    join(input.homeDir ?? homedir(), ".pi", "agent", "sessions"),
-    ".jsonl",
-  )) {
-    const rows = parseJsonLines(readText(file) ?? "");
-    const session = rows.find((row): row is Record<string, unknown> =>
-      Boolean(
-        row &&
-          typeof row === "object" &&
-          (row as Record<string, unknown>).type === "session",
-      ),
-    );
-    const sessionCwd =
-      session && typeof session.cwd === "string" ? session.cwd : undefined;
-    if (sessionCwd !== input.cwd) continue;
-    for (const row of rows) {
-      if (!row || typeof row !== "object") continue;
-      const record = row as Record<string, unknown>;
-      const message = record.message as Record<string, unknown> | undefined;
-      if (message?.role !== "assistant") continue;
-      const usage = readUsageObject(message.usage);
-      const timestamp = record.timestamp ?? message.timestamp;
-      if (!usage || !inWindow(timestamp, start, end)) continue;
-      addTotals(totals, usage);
-      count += 1;
-    }
-  }
-  return count > 0 ? finishTotals(totals, "pi-session-jsonl") : undefined;
-}
-
 function collectAtomCode(
   input: TokenUsageCollectionInput,
 ): TokenUsage | undefined {
@@ -550,6 +510,21 @@ function collectGenericJsonl(stdout: string): TokenUsage | undefined {
 }
 
 /**
+ * Executor keys whose generic-scan accounting is verified against real captured
+ * runs. pi's stdout carries cumulative `totalTokens` snapshots; the scan keeps
+ * the LAST parseable usage object, which is exactly that running total —
+ * verified against the real probe corpus (input=472, output=30, total=3830,
+ * see specs/token-accounting-not-comparable-across-executors.md v1.1).
+ *
+ * What the criterion substitutes: instead of trusting every generic scan (the
+ * fallback once under-reported codebuddy by 400x), trust is granted per executor
+ * key, only where the scan caliber was checked against a real run. It fails when
+ * an executor whose usage is per-event (not cumulative) lands here unchecked —
+ * such a key must stay out of this set until its caliber is verified.
+ */
+const GENERIC_SCAN_TRUSTED_KEYS = new Set(["pi"]);
+
+/**
  * Collect native CLI accounting at task termination. A missing match is never
  * guessed: custom-path misses degrade to the generic JSONL scan, and a final
  * miss is recorded as `unavailable` (frozen spec R4) — never `unsupported`.
@@ -567,8 +542,6 @@ export async function collectTokenUsage(
     usage = collectAtomCode(input);
   } else if (input.executorKey === "codebuddy") {
     usage = collectCodeBuddy(input);
-  } else if (input.executorKey === "pi") {
-    usage = collectPi(input);
   } else if (input.executorKey === "claude") {
     usage = collectClaude(input);
   }
@@ -579,7 +552,17 @@ export async function collectTokenUsage(
   // stdout JSONL for the last object readUsageObject can parse as a real
   // (input and/or output) usage record, regardless of CLI type or nesting.
   const generic = collectGenericJsonl(input.stdout ?? "");
-  if (generic) return { tokenUsage: generic };
+  if (generic) {
+    // pi (spec v1.1): the platform invokes pi with --no-session, so no dedicated
+    // collector can ever hit; its real accounting flows through this scan, whose
+    // last-cumulative-total caliber was verified against a real run. The scan is
+    // therefore trusted for pi only — unknown/unverified executors keep
+    // trusted:false (frozen spec R3).
+    if (GENERIC_SCAN_TRUSTED_KEYS.has(input.executorKey)) {
+      return { tokenUsage: { ...generic, trusted: true } };
+    }
+    return { tokenUsage: generic };
+  }
   // Still no usage: never guess, never fabricate, never fall back to another
   // number. Per frozen spec R4 every miss — custom or generic — is recorded as
   // `unavailable`, including the four keys that used to return `unsupported`.
