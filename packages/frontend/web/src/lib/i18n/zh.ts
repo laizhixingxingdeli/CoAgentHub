@@ -254,6 +254,10 @@ export const zh = {
   "tasks.title": "任务列表({count})",
   "tasks.empty": "暂无任务",
   "tasks.stop": "停止",
+  "tasks.confirm.stop": "停止任务 {task}?当前状态:{status}。{consequence}",
+  "tasks.confirm.stopQueued": "停止后该任务将取消,不会执行。",
+  "tasks.confirm.stopRunning":
+    "停止将终止正在运行的进程,已产出的改动不会自动回滚。",
   "tasks.rollback": "回滚",
   "tasks.rollbacking": "回滚中…",
   "tasks.rollbackDone": "已恢复",

@@ -7,9 +7,10 @@ import { appendOutputTail } from "@/lib/output-buffer";
 import TaskPanel, {
   type TaskItem,
   type TaskObservability,
+  taskStatusLabel,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
-import { groupTasksBySpec } from "./group-tasks-by-spec";
+import { deriveBriefTitle, groupTasksBySpec } from "./group-tasks-by-spec";
 import { mergeTaskStatusChanged } from "./merge-task-status";
 import RequirementDetailPanel from "./RequirementDetailPanel";
 import RequirementList from "./RequirementList";
@@ -56,6 +57,25 @@ function runtimeStaleMessage(
       // process(或旧后端未上报 reason):重启后端即可,经典情形。
       return "后端运行的不是最新构建 —— 重启后端即可让改动生效";
   }
+}
+
+/** 停止确认文案的任务标识:任务名(deriveBriefTitle,与需求列表标题同源)
+ *  存在时用「任务名(taskId 短号)」,否则退回「执行器名(taskId 短号)」——
+ *  短号兜底保证同屏两条同需求任务仍可区分(ADR-0009 判据指名事实)。 */
+export function stopTaskIdentifier(
+  task: Pick<
+    TaskItem,
+    "id" | "brief" | "executorParticipantId" | "executorKey"
+  >,
+  members: ReadonlyArray<Pick<Member, "participantId" | "name">>,
+): string {
+  const shortId = task.id.length > 8 ? task.id.slice(0, 8) : task.id;
+  const name = deriveBriefTitle(task.brief);
+  const executor =
+    members.find((m) => m.participantId === task.executorParticipantId)?.name ??
+    task.executorKey ??
+    "—";
+  return name ? `${name}(${shortId})` : `${executor}(${shortId})`;
 }
 
 export function RequirementWorkspace({
@@ -416,6 +436,31 @@ export function RequirementWorkspace({
     }
   };
 
+  /** 停止(二次确认,stop-button-needs-confirmation R1/R2):与仓内其余 6 处
+   * 破坏性操作同形态 —— window.confirm(t(...)),不引入自定义弹窗。取消则
+   * 不发消息、不刷新、不置 commandSending(直接 return)。文案指名任务标识
+   * (任务名 + id 短号)、当前状态与后果(R3;ADR-0009 判据指名事实):
+   * 排队中 → 取消不再执行;运行中 → 终止进程,已产出改动不会自动回滚。
+   * 确认判断收在这一处,回滚下一票直接复用同款(见 spec §4 实现提示)。 */
+  const handleStop = (task: TaskItem) => {
+    const consequence =
+      task.status === "queued"
+        ? t("tasks.confirm.stopQueued")
+        : t("tasks.confirm.stopRunning");
+    if (
+      !window.confirm(
+        t("tasks.confirm.stop", {
+          task: stopTaskIdentifier(task, members),
+          status: taskStatusLabel(task.status),
+          consequence,
+        }),
+      )
+    ) {
+      return;
+    }
+    void sendCommand(task, `停止 ${task.id}`);
+  };
+
   /** 回滚:发送「回滚 <taskId>」后轮询任务状态,直到 server 落库
    * diffSummary.error === "rollback"(恢复完成)→ 置 done(「已恢复」)。
    * 超时(30s)未确认 → 仍提示「已恢复」(指令已发送,checkpoint 恢复完成),
@@ -556,7 +601,7 @@ export function RequirementWorkspace({
           readOnly={readOnly}
           commandSending={commandSending}
           rollbackStates={rollbackStates}
-          onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+          onStop={handleStop}
           onRollback={(task) => void handleRollback(task)}
         />
       </div>
@@ -605,7 +650,7 @@ export function RequirementWorkspace({
           liveOutputs={liveOutputs}
           rollbackStates={rollbackStates}
           onToggleExpand={(task) => void toggleExpand(task)}
-          onStop={(task) => void sendCommand(task, `停止 ${task.id}`)}
+          onStop={handleStop}
           onRollback={(task) => void handleRollback(task)}
         />
       ) : isDesktop ? (

@@ -7,13 +7,17 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskItem } from "@/pages/app/groups/messages/TaskPanel";
+import type { Member } from "@/pages/app/groups/messages/types";
 import {
   createFetchMock,
   jsonResponse,
   renderWithProviders,
 } from "@/test/utils";
 import { MockWebSocket } from "@/test/ws-mock";
-import { RequirementWorkspace } from "./requirement-workspace";
+import {
+  RequirementWorkspace,
+  stopTaskIdentifier,
+} from "./requirement-workspace";
 
 /**
  * RequirementWorkspace 响应式布局测试(requirement-pane-responsive):
@@ -48,6 +52,8 @@ type HealthBody = {
 function workspaceFetchMock(
   tasks: TaskItem[],
   health: HealthBody = { stale: false },
+  members: Member[] = [],
+  group: { status: "active" | "archived" } = { status: "active" },
 ) {
   return createFetchMock([
     {
@@ -60,7 +66,7 @@ function workspaceFetchMock(
         jsonResponse({
           id: "group-1",
           title: "评审任务",
-          status: "active",
+          status: group.status,
           projectPath: null,
         }),
     },
@@ -70,7 +76,7 @@ function workspaceFetchMock(
     },
     {
       match: (url) => url.includes("/api/groups/") && url.endsWith("/members"),
-      respond: () => jsonResponse([]),
+      respond: () => jsonResponse(members),
     },
     {
       match: (url) => url.includes("/api/groups/") && url.endsWith("/tasks"),
@@ -91,8 +97,10 @@ function setViewport(width: number) {
 function renderWorkspace(
   tasks: TaskItem[],
   health: HealthBody = { stale: false },
+  members: Member[] = [],
+  group: { status: "active" | "archived" } = { status: "active" },
 ) {
-  vi.stubGlobal("fetch", workspaceFetchMock(tasks, health));
+  vi.stubGlobal("fetch", workspaceFetchMock(tasks, health, members, group));
   return renderWithProviders(<RequirementWorkspace groupId="group-1" />);
 }
 
@@ -104,6 +112,13 @@ const TWO_REQUIREMENTS = [
 beforeEach(() => {
   MockWebSocket.reset();
   vi.stubGlobal("WebSocket", MockWebSocket);
+  // jsdom 的 window.confirm 是 no-op 桩(恒 false),逐用例可控(与
+  // files/index.test.tsx 同款做法)。
+  Object.defineProperty(window, "confirm", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => false),
+  });
   // 清掉可能残留的身份绑定,保证 canControl 判定确定性;setup.ts 写入的语言
   // 会被清掉,需补回(否则 t() 回落 en-US 导致中文断言失配)。
   localStorage.clear();
@@ -483,5 +498,236 @@ describe("RequirementWorkspace 需求/修复标签(requirement-list-kind-tabs)",
       screen.getByTestId("requirement-row-specs/old.md"),
     ).not.toHaveAttribute("data-selected");
     expect(screen.getByTestId("requirement-detail-empty")).toBeInTheDocument();
+  });
+});
+
+// 停止按钮二次确认(stop-button-needs-confirmation):点击先 window.confirm,
+// 确认才发「停止 <id>」广播并刷新任务列表;取消则不发消息、不刷新、不置
+// commandSending。requirement-workspace 有两处 onStop 接线 —— 需求详情
+// (RequirementDetailPanel)与无需求回退的 TaskPanel —— 两处都必须走确认(R6)。
+const STOP_MEMBER: Member = {
+  participantId: "participant-1",
+  name: "AtomCode",
+  device: null,
+  roles: ["executor"],
+};
+// id 长度 ≤ 8,确认文案里的短号即全 id(截断行为由 stopTaskIdentifier
+// 单测用真实 36 位 id 覆盖)。
+const STOPPED_TASKS = [
+  makeTask({
+    id: "stop-1",
+    specRef: null,
+    status: "running",
+    brief: "# 停止确认票",
+  }),
+];
+// 带 specRef → 聚合为需求 → 详情接线(RequirementDetailPanel)。
+const DETAIL_TASKS = [
+  makeTask({
+    id: "detail-1",
+    specRef: "specs/stop.md",
+    status: "running",
+    brief: "# 停止确认票",
+  }),
+];
+
+describe("RequirementWorkspace 停止二次确认(stop-button-needs-confirmation)", () => {
+  it("无需求回退 TaskPanel:确认后发送「停止 <id>」广播并刷新任务列表", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(STOPPED_TASKS, undefined, [
+      STOP_MEMBER,
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(window.confirm).mockReturnValue(true);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    const stopCountBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/tasks"),
+    ).length;
+    fireEvent.click(await screen.findByTestId("task-stop-stop-1"));
+
+    // R2/R3:confirm 收到带任务标识、状态与后果的插值文案。
+    expect(vi.mocked(window.confirm)).toHaveBeenCalledWith(
+      expect.stringContaining("停止任务 停止确认票(stop-1)"),
+    );
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toContain(
+      "当前状态:执行中",
+    );
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toContain(
+      "已产出的改动不会自动回滚",
+    );
+    // R1 确认路径:发出「停止 <id>」广播,并重拉任务列表。
+    expect(
+      fetchMock.mock.calls.find(
+        ([, init]) =>
+          init?.method === "POST" &&
+          JSON.parse(String(init.body)).body === "停止 stop-1",
+      ),
+    ).toBeDefined();
+    // loadTasks 是 POST 之后的异步重拉,等它发生。
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks"))
+          .length,
+      ).toBeGreaterThan(stopCountBefore),
+    );
+    // 发送结束后 commandSending 复位 → 按钮不再是「发送中…」。
+    await waitFor(() =>
+      expect(screen.getByTestId("task-stop-stop-1")).toHaveTextContent("停止"),
+    );
+  });
+
+  it("无需求回退 TaskPanel:取消确认不发消息、不刷新、不置 commandSending", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(STOPPED_TASKS, undefined, [
+      STOP_MEMBER,
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    // beforeEach 已把 confirm 桩设为恒 false(取消)。
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    const stopCountBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/tasks"),
+    ).length;
+    fireEvent.click(await screen.findByTestId("task-stop-stop-1"));
+
+    // 按钮可点 → confirm 被触发(二次确认确实发生)。
+    expect(vi.mocked(window.confirm)).toHaveBeenCalledTimes(1);
+    // R1 取消路径:无 POST 停止指令、不重拉任务列表。
+    expect(
+      fetchMock.mock.calls.some(
+        ([, init]) =>
+          init?.method === "POST" && String(init.body).includes("停止"),
+      ),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks"))
+        .length,
+    ).toBe(stopCountBefore);
+    // 按钮保持原样(未进入发送中态)。
+    expect(screen.getByTestId("task-stop-stop-1")).toHaveTextContent("停止");
+  });
+
+  it("需求详情接线:确认后发送「停止 <id>」并刷新", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(DETAIL_TASKS, undefined, [
+      STOP_MEMBER,
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(window.confirm).mockReturnValue(true);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    const stopCountBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/tasks"),
+    ).length;
+    // 桌面两栏默认选中唯一需求 → 详情内的停止按钮即需求详情接线。
+    fireEvent.click(await screen.findByTestId("task-stop-detail-1"));
+
+    expect(vi.mocked(window.confirm)).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.find(
+        ([, init]) =>
+          init?.method === "POST" &&
+          JSON.parse(String(init.body)).body === "停止 detail-1",
+      ),
+    ).toBeDefined();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks"))
+          .length,
+      ).toBeGreaterThan(stopCountBefore),
+    );
+  });
+
+  it("需求详情接线:取消确认不发消息、不刷新", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(DETAIL_TASKS, undefined, [
+      STOP_MEMBER,
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    const stopCountBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/tasks"),
+    ).length;
+    fireEvent.click(await screen.findByTestId("task-stop-detail-1"));
+
+    expect(vi.mocked(window.confirm)).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.some(
+        ([, init]) =>
+          init?.method === "POST" && String(init.body).includes("停止"),
+      ),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks"))
+        .length,
+    ).toBe(stopCountBefore);
+  });
+
+  it("queued 任务:确认文案指明将取消而不执行", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(
+      [
+        makeTask({
+          id: "queued-1",
+          specRef: null,
+          status: "queued",
+          brief: "# 排队票",
+        }),
+      ],
+      undefined,
+      [STOP_MEMBER],
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(window.confirm).mockReturnValue(true);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    fireEvent.click(await screen.findByTestId("task-stop-queued-1"));
+
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toContain("排队中");
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toContain(
+      "停止后该任务将取消,不会执行",
+    );
+  });
+
+  it("归档只读:停止按钮禁用且 ControlButton title 不变,点击不弹确认(R4)", async () => {
+    setViewport(1280);
+    renderWorkspace(STOPPED_TASKS, undefined, [STOP_MEMBER], {
+      status: "archived",
+    });
+
+    const button = await screen.findByTestId("task-stop-stop-1");
+    // 只读态生效后按钮禁用;title 提示仍由 ControlButton 包裹 span 承载。
+    expect(button).toBeDisabled();
+    expect(button.parentElement).toHaveAttribute("title", "群已归档,只读");
+    // 禁用按钮不触发 onClick → 不弹确认框。
+    fireEvent.click(button);
+    expect(vi.mocked(window.confirm)).not.toHaveBeenCalled();
+  });
+
+  it("stopTaskIdentifier:任务名缺失时退回执行器名 + 短号", () => {
+    expect(
+      stopTaskIdentifier(
+        {
+          id: "01a07764-1058-71e0-9a94-f2bd1677fe79",
+          brief: null,
+          executorParticipantId: "participant-1",
+          executorKey: "codex",
+        },
+        [],
+      ),
+    ).toBe("codex(01a07764)");
+    expect(
+      stopTaskIdentifier(
+        {
+          id: "01a07764-1058-71e0-9a94-f2bd1677fe79",
+          brief: "# 停止确认票",
+          executorParticipantId: "participant-1",
+          executorKey: "codex",
+        },
+        [],
+      ),
+    ).toBe("停止确认票(01a07764)");
   });
 });

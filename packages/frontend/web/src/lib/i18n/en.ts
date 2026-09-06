@@ -264,6 +264,11 @@ export const en: Record<DictKey, string> = {
   "tasks.title": "Tasks ({count})",
   "tasks.empty": "No tasks",
   "tasks.stop": "Stop",
+  "tasks.confirm.stop":
+    'Stop task "{task}"? Current status: {status}. {consequence}',
+  "tasks.confirm.stopQueued": "The task will be cancelled and will not run.",
+  "tasks.confirm.stopRunning":
+    "This terminates the running process; changes already produced are NOT rolled back automatically.",
   "tasks.rollback": "Rollback",
   "tasks.rollbacking": "Rolling back…",
   "tasks.rollbackDone": "Restored",
