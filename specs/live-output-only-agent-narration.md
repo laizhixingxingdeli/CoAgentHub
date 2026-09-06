@@ -1,7 +1,16 @@
 # Spec: 实时输出只显示 agent 汇报,持久化口径不变
 
-> **状态**: Frozen — 2026-09-02(R4 已拆票并落地,前置条件解除)
-> **版本**: 1.2
+> **状态**: Frozen — 2026-09-06(v1.3)
+> **版本**: 1.3
+>
+> **v1.3 修订(2026-09-06)**:R1 判据表补入 pi 行。理由见
+> [live-output-pi-uncovered-shows-thinking-and-tool-results.md](live-output-pi-uncovered-shows-thinking-and-tool-results.md)
+> —— 本 spec 冻结时判据表只有 codex / codebuddy / atomcode,漏了 Pi,
+> 而 Pi 自 2026-09-02 起是本群默认执行器。
+>
+> ⚠️ **冻结锚点变更**:v1.2 的 specHash 为 `bc6f5492a5454488bbafcb201004a952f033153e`
+> (F1/F2 那轮 L3 pass 即锚在该版本);v1.3 起以新 hash 为准。
+> 引用旧裁决时请对照 v1.2,不要用新 hash 去核旧结论。
 > **日期**: 2026-09-02
 > **相关**: [live-output-hide-thinking-and-autoscroll.md](live-output-hide-thinking-and-autoscroll.md)
 > **相关**: [two-tier-output-summary-and-detail.md](two-tier-output-summary-and-detail.md)
