@@ -530,13 +530,21 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
       isNotNull(taskTable.executorKey),
     ),
   });
+  // R2(specs/second-server-instance-sweeps-production-tasks.md):从未 spawn 的
+  // queued 任务 executorPid 恒为 null,不构成「被重启打断」—— 它根本没开始过。
+  // 判死它们既与事实不符,也会把另一个实例(沙箱/测试)启动时误伤生产在途任务
+  // (2026-09-06 实测:沙箱实例 :3101 与生产同库,启动即清场,连它自己所属工作项
+  // 的协调任务一起判死)。改为**原样留在 queued**,由 queued-task-reclaim
+  // (54be31ef)按有界时延重新入队。
+  const neverStarted = candidates.filter((row) => row.executorPid === null);
   const deadTaskIds = candidates
     .filter(
       (row) =>
-        row.executorPid === null || !isExecutorProcessAlive(row.executorPid),
+        row.executorPid !== null && !isExecutorProcessAlive(row.executorPid),
     )
     .map((row) => row.id);
-  const retainedCount = candidates.length - deadTaskIds.length;
+  const retainedCount =
+    candidates.length - deadTaskIds.length - neverStarted.length;
   const rows =
     deadTaskIds.length === 0
       ? []
@@ -546,6 +554,8 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
           );
           const updated: typeof candidates = [];
           for (const row of toFail) {
+            // R3:失败原因必须与事实一致。这里只剩「有 pid 但进程不在了」一种,
+            // 才是真正的「被重启/异常打断」。
             let next = preserveDispatchKindNote(row.diffSummary, {
               error: "server-restart",
             });
@@ -561,7 +571,9 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
         })();
 
   if (candidates.length > 0) {
-    console.log(`[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务`);
+    console.log(
+      `[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务,${neverStarted.length} 个未启动的 queued 任务原样留队(R2)`,
+    );
   }
   if (rows.length > 0) {
     console.log(

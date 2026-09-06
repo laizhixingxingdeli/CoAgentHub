@@ -1126,7 +1126,12 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(rolled?.status).toBe("failed");
   }, 30_000);
 
-  it("重启兜底:只回收已死亡/历史任务,保留存活任务并豁免桥任务", async () => {
+  // ⚠️ 契约变更(specs/second-server-instance-sweeps-production-tasks.md R2,
+  // 2026-09-06):从未 spawn 的 queued 任务(executorPid=null)**不再**被判死。
+  // 它没开始过,谈不上「被重启打断」;判死它既与事实不符,也会让另一个实例
+  // (沙箱/测试,同库不同端口)启动时清掉生产在途任务。改为原样留队,由
+  // queued-task-reclaim(54be31ef)按有界时延重新入队。
+  it("重启兜底:只回收有 pid 但进程已消失的任务,保留存活/未启动/桥任务", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const { testDb } = await import("./db");
     const { task: taskTable } = await import(
@@ -1176,14 +1181,15 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     const affected = await recoverInterruptedTasks(
       testDb as unknown as Parameters<typeof recoverInterruptedTasks>[0],
     );
-    expect(affected).toBe(2);
+    expect(affected).toBe(1);
 
     const tasks = await listTasks(coordinator.id, group.id);
     expect(tasks.find((x) => x.messageId === mAlive)?.status).toBe("running");
     expect(tasks.find((x) => x.messageId === mDead)?.status).toBe("failed");
-    expect(tasks.find((x) => x.messageId === mLegacy)?.status).toBe("failed");
+    // R2:未启动的 queued 原样留队,等待 queued-task-reclaim 重新入队。
+    expect(tasks.find((x) => x.messageId === mLegacy)?.status).toBe("queued");
     expect(tasks.find((x) => x.messageId === mBridge)?.status).toBe("running");
-    for (const m of [mDead, mLegacy]) {
+    for (const m of [mDead]) {
       const diff = tasks.find((x) => x.messageId === m)?.diffSummary as Record<
         string,
         unknown
