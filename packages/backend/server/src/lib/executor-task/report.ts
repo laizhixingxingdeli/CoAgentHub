@@ -6,6 +6,7 @@
 
 import { ANSI_RE } from "./ansi";
 import { taskOutputTail } from "./output-buffer";
+import type { TokenUsage } from "./token-usage";
 
 /** 结构化汇报(票7):执行器 stdout 按「提交/测试/汇报/遗留」四段输出后的解析结果。 */
 export interface TaskReport {
@@ -21,6 +22,56 @@ export interface TaskReport {
   tokenUsage?: string;
   /** 未采集到结构化汇报段时的原因标注(R2):summary 留空,原因写在这里。 */
   reportMissingReason?: string;
+}
+
+/**
+ * A provider can reject a request while its CLI still exits successfully.
+ * These are structural protocol facts, so this deliberately does not search
+ * for provider-specific words such as "quota" or "credit".
+ */
+export function findProviderError(text: string): string | undefined {
+  const clean = (text ?? "").replace(ANSI_RE, "");
+  for (const rawLine of clean.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed === "object" && parsed !== null) {
+        const record = parsed as Record<string, unknown>;
+        if (record.type === "api_error" || record.stopReason === "error") {
+          return line;
+        }
+      }
+    } catch {
+      // HTTP error lines are handled below; unrelated text is not evidence.
+    }
+    if (/^(?:HTTP\/\S+\s+)?[45]\d{2}(?:\s|:|$)/i.test(line)) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+/** R1: only the four report sections count as structured task output. */
+export function hasStructuredTaskReport(report: TaskReport): boolean {
+  return (
+    report.hash !== undefined ||
+    report.tests !== undefined ||
+    report.summary !== undefined ||
+    report.todo !== undefined
+  );
+}
+
+/** R1: unavailable usage is equivalent to zero only for the no-report case. */
+export function hasZeroTokenUsage(
+  usage: TokenUsage | null | undefined,
+): boolean {
+  return (
+    usage == null ||
+    (usage.inputTokens === 0 &&
+      usage.outputTokens === 0 &&
+      usage.totalTokens === 0)
+  );
 }
 
 /** 段落头匹配:支持中文与英文(Commit:/commit: 等大小写变体),必须行首。

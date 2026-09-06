@@ -1,7 +1,7 @@
 import type { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import { findExecutorByParticipant } from "@server/lib/executors";
-import { and, arrayContains, desc, eq } from "drizzle-orm";
+import { arrayContains } from "drizzle-orm";
 import {
   cooldownEndMs,
   executorCooldownRecords,
@@ -56,6 +56,22 @@ function cooldownUnavailableReason(ex: { key: string }): string {
 /** running 占用不可用文案(单一权威出处:并发饱和与既有 running 判定共用)。 */
 const RUNNING_TASK_UNAVAILABLE_REASON = "正在运行任务";
 
+const consecutiveZeroOutput = new Map<string, number>();
+const ZERO_OUTPUT_UNAVAILABLE_REASON = "连续零产出,疑似 provider 拒绝";
+
+/** Record the single executor-level fact used by both the queue and GET /executors. */
+export function recordExecutorOutput(key: string, zeroOutput: boolean): number {
+  const next = zeroOutput ? (consecutiveZeroOutput.get(key) ?? 0) + 1 : 0;
+  if (next === 0) consecutiveZeroOutput.delete(key);
+  else consecutiveZeroOutput.set(key, next);
+  return next;
+}
+
+/** Test/process reset; the durable task diffSummary remains the audit trail. */
+export function resetExecutorOutputRecords(): void {
+  consecutiveZeroOutput.clear();
+}
+
 /**
  * R1(specs/executor-availability-visibility-and-queued-child-pinning.md):
  * 单条执行器的权威可用性。冷却中 → false / 冷却文案 / cooldownEndMs;并发饱和
@@ -66,6 +82,7 @@ const RUNNING_TASK_UNAVAILABLE_REASON = "正在运行任务";
 export function executorAvailability(ex: {
   key: string;
   maxConcurrency?: number | null;
+  zeroOutputCount?: number;
 }): ExecutorAvailability {
   if (isInCooldown(ex)) {
     return {
@@ -80,6 +97,17 @@ export function executorAvailability(ex: {
     return {
       available: false,
       unavailableReason: RUNNING_TASK_UNAVAILABLE_REASON,
+      cooldownEndMs: null,
+      cooldownSource: null,
+    };
+  }
+  if (
+    Math.max(consecutiveZeroOutput.get(ex.key) ?? 0, ex.zeroOutputCount ?? 0) >=
+    2
+  ) {
+    return {
+      available: true,
+      unavailableReason: ZERO_OUTPUT_UNAVAILABLE_REASON,
       cooldownEndMs: null,
       cooldownSource: null,
     };

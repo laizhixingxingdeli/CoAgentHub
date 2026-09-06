@@ -38,6 +38,7 @@ import {
 import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { isTerminalTaskStatus } from "../coordination-activity";
+import { recordExecutorOutput } from "../executor-availability";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
 import {
@@ -66,6 +67,9 @@ import {
   extractCodeBuddyStreamResult,
   extractGenericJsonlText,
   findCommitHash,
+  findProviderError,
+  hasStructuredTaskReport,
+  hasZeroTokenUsage,
   lastLinesOf,
   parseTaskReport,
   renderTaskCard,
@@ -2545,6 +2549,36 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
               };
             })()
           : parseTaskReport(output);
+        const providerError = findProviderError(output);
+        const platformTokenUsage = sumAttemptTokenUsage(run.attempts);
+        const zeroOutput =
+          !hasStructuredTaskReport(prelimReport) &&
+          hasZeroTokenUsage(platformTokenUsage);
+        if (providerError || zeroOutput) {
+          const zeroOutputCount = recordExecutorOutput(run.ex.key, zeroOutput);
+          const reason = providerError
+            ? `执行器服务商错误: ${providerError}`
+            : "executor-no-output: 执行器零产出(无结构化汇报且 token 用量为零或不可得)";
+          await handleFailure(run, reason, {
+            retryable: false,
+            message: `❌ [${ex.label}] 任务失败 (${reason})`,
+            extra: {
+              ...(zeroOutput ? { zeroOutput: true } : {}),
+              ...(providerError ? { providerError } : {}),
+            },
+          });
+          if (zeroOutputCount === 2) {
+            await postStatus(
+              db,
+              groupId,
+              participantId,
+              ex,
+              `⚠️ [${ex.label}] 连续零产出 2 次,疑似 provider 拒绝;请介入`,
+            );
+          }
+          return;
+        }
+        recordExecutorOutput(run.ex.key, false);
         let quotaMatchedButCommitFound:
           | { matchedLine: string | null; note: string }
           | undefined;

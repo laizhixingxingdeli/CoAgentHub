@@ -207,12 +207,43 @@ const app2 = app
     async (c) => {
       const db = c.get("db");
       const all = await effectiveExecutors(db);
+      const recentTasks = await db.query.task.findMany({
+        columns: { executorKey: true, status: true, diffSummary: true },
+        orderBy: (t, { desc: descFn }) => [descFn(t.createdAt)],
+      });
+      const zeroOutputCounts = new Map<string, number>();
+      const streaks = new Map<string, number>();
+      const streakClosed = new Set<string>();
+      for (const task of recentTasks) {
+        if (!task.executorKey) continue;
+        if (streakClosed.has(task.executorKey)) continue;
+        const summary =
+          task.diffSummary &&
+          typeof task.diffSummary === "object" &&
+          !Array.isArray(task.diffSummary)
+            ? (task.diffSummary as Record<string, unknown>)
+            : null;
+        const next =
+          task.status === "failed" && summary?.zeroOutput === true
+            ? (streaks.get(task.executorKey) ?? 0) + 1
+            : 0;
+        streaks.set(task.executorKey, next);
+        if (next === 0) {
+          zeroOutputCounts.set(task.executorKey, 0);
+          streakClosed.add(task.executorKey);
+        } else {
+          zeroOutputCounts.set(task.executorKey, next);
+        }
+      }
       return c.json(
         all.map((ex) => {
           // R1:每条恒含可用性字段(available/unavailableReason/cooldownEndMs +
           // R3 cooldownSource),追加在既有字段之后,既有字段与顺序逐字不变;
           // 判定与文案全部来自 executor-availability.ts 的权威导出,路由不写第二套。
-          const availability = executorAvailability(ex);
+          const availability = executorAvailability({
+            ...ex,
+            zeroOutputCount: zeroOutputCounts.get(ex.key) ?? 0,
+          });
           return {
             key: ex.key,
             agentName: ex.agentName,
