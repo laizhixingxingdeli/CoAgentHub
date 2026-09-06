@@ -1,3 +1,5 @@
+import { rmSync } from "node:fs";
+import nodePath from "node:path";
 import {
   type DispatchPolicy,
   extractRateLimitRecoveryMs,
@@ -620,6 +622,31 @@ export function clearRunTimers(run: QueuedRun): void {
  * 测试专用:终止全部运行中任务并清空所有组队列(模块级状态跨测试文件/用例
  * 共享,避免前一个用例残留的 running/queued 影响后续断言)。仅测试调用。
  */
+/**
+ * 清掉共享临时仓库里的陈旧 `.git/index.lock`(2026-09-07 定位)。
+ *
+ * 下面的 `r.kill?.()` 是**不等待**的:被杀的执行器可能正卡在 `git add -A` /
+ * `git write-tree` 中间,留下 `index.lock`。下一个用例的「执行前快照」于是失败
+ * (`fatal: Unable to create '…/.git/index.lock': File exists`),任务直接判失败、
+ * 永远到不了 running —— 表现就是 coordinator-resume 端到端超时、
+ * workspace-gate 的 occupancy 读到 0。实测两文件合跑 6 轮复现 1 次(~17%)。
+ *
+ * 只在 `COAGENTHUB_REPO_ROOT` 指向测试临时仓库时清理;本函数本身就是
+ * test-only 导出,不会在生产路径被调用。
+ */
+export function clearStaleTestRepoIndexLock(): void {
+  // 仅在 vitest 进程内生效:VITEST 由测试运行器注入,生产进程没有它。
+  // 生产环境里删共享仓库的 index.lock 可能打断并发 git 操作,绝不能做。
+  if (!process.env.VITEST) return;
+  const repoRoot = process.env.COAGENTHUB_REPO_ROOT;
+  if (!repoRoot) return;
+  try {
+    rmSync(nodePath.join(repoRoot, ".git", "index.lock"), { force: true });
+  } catch {
+    // 清理是尽力而为:锁不存在或无权限都不该让测试重置抛错。
+  }
+}
+
 export function __resetExecutorQueueForTests(): void {
   for (const g of groupQueues.values()) {
     for (const r of g.running) {
@@ -632,6 +659,7 @@ export function __resetExecutorQueueForTests(): void {
   }
   groupQueues.clear();
   liveCoordinatorProcesses.clear();
+  clearStaleTestRepoIndexLock();
   clearAllTaskOutputs();
   clearAllTaskDetails();
   for (const t of cooldownTimers.values()) clearTimeout(t);

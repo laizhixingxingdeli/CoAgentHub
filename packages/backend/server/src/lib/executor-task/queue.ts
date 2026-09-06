@@ -83,6 +83,7 @@ import {
 import {
   activeRuns,
   classifyQuotaFailure,
+  clearStaleTestRepoIndexLock,
   clearRunTimers,
   cooldownEndMs,
   cooldownTimers,
@@ -2082,6 +2083,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         return;
       }
 
+      // ⚠️ 快照**前**再清一次陈旧锁(仅测试进程内生效)。测试重置里的
+      // `r.kill?.()` 不等待:被杀的 git 可能在重置**之后**才写出 index.lock,
+      // 只在重置时清会漏(实测 10 轮仍复现 1 次)。在用之前清才盖得住这个竞态。
+      clearStaleTestRepoIndexLock();
       // 执行前 git 快照(回滚指令用;与桥 createCheckpoint 一致):失败则中止
       // 任务,不做无回滚保护的执行。快照 ref 写回 task.checkpoint_ref。
       try {

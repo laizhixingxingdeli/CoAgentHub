@@ -268,7 +268,54 @@ export function gitExec(
  * 树挂到隐藏 ref refs/coagenthub-cp/<taskId> 下,不动 HEAD/工作区(仅暂存 index)。
  * 失败抛错(调用方中止任务)。与桥 createCheckpoint 一致。
  */
+/**
+ * 同一仓库的快照必须串行(2026-09-07 定位)。
+ *
+ * `git add -A` / `write-tree` 都要拿 `.git/index.lock`,两个任务同时对同一棵树
+ * 做快照必然有一个拿不到锁:
+ * `fatal: Unable to create '…/.git/index.lock': File exists`。
+ * 生产里 `maxConcurrentPerWorkspace` 通常挡住同树并发,但它按 project_path 分组 ——
+ * **不同 project_path 落在同一个仓库**时(测试里的共享临时仓库、生产里多群指向
+ * 同一棵树)就挡不住,快照直接失败、任务被判死且永远到不了 running。
+ *
+ * 这里按 repoRoot 串行化:同一仓库的快照排队,不同仓库互不影响。
+ * 只影响并发时序,不改任何快照语义。
+ */
+const checkpointLocks = new Map<string, Promise<unknown>>();
+
+async function withRepoCheckpointLock<T>(
+  repoRoot: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = checkpointLocks.get(repoRoot) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  // 链上保留「已结算」的尾巴,失败不阻断后续排队者。
+  checkpointLocks.set(
+    repoRoot,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  try {
+    return await run;
+  } finally {
+    if (checkpointLocks.get(repoRoot) === undefined) {
+      checkpointLocks.delete(repoRoot);
+    }
+  }
+}
+
 export async function createCheckpoint(
+  taskId: string,
+  repoRoot: string,
+): Promise<{ ref: string; sha: string }> {
+  return withRepoCheckpointLock(repoRoot, () =>
+    createCheckpointUnlocked(taskId, repoRoot),
+  );
+}
+
+async function createCheckpointUnlocked(
   taskId: string,
   repoRoot: string,
 ): Promise<{ ref: string; sha: string }> {
