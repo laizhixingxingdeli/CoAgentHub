@@ -647,9 +647,13 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
       />,
     );
     // v4.1: na-fix 已删除,fix 在两方在场时为 na-no-reviewer(未检视·无检视者)
-    expect(screen.getByTestId("requirement-l3-no-reviewer")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-l3-no-reviewer"),
+    ).toBeInTheDocument();
     expect(screen.getByText("L3 未检视·无检视者")).toBeInTheDocument();
-    expect(screen.queryByTestId("requirement-l3-na-fix")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-l3-na-fix"),
+    ).not.toBeInTheDocument();
   });
 
   it("缺 L2(无协调任务):L2 层显式「未开始」", () => {
@@ -693,5 +697,189 @@ describe("RequirementDetailPanel 需求详情面板 (UI-04b-1 + requirement-thre
     expect(
       screen.queryByTestId("requirement-timeline-claim-no-claim"),
     ).not.toBeInTheDocument();
+  });
+
+  // ── L2 协调任务实时输出 / 终态 outputTail(spec coordinator-live-output-not-rendered)──
+  // 协调任务(running):执行者是 coordinator 角色成员 → 归入 L2 层。
+
+  function runningCoordinationTask(
+    overrides: Partial<TaskItem> = {},
+  ): TaskItem {
+    return makeTask({
+      id: "l2-run",
+      executorParticipantId: COORDINATOR.participantId,
+      status: "running",
+      createdAt: "2026-08-01T09:00:00.000Z",
+      updatedAt: null,
+      diffSummary: null,
+      ...overrides,
+    });
+  }
+
+  it("L2 running:协调任务项渲染实时输出,折叠预览随 liveOutputs 更新", () => {
+    const [requirement] = groupTasksBySpec([runningCoordinationTask()]);
+    const { rerender } = render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+        liveOutputs={{
+          "l2-run": "[思考 #t1] 正在阅读 spec\n[动作 #t2] 编辑文件",
+        }}
+      />,
+    );
+    // running → L2 默认展开,协调任务项挂在 L2 时间线上。
+    expect(
+      screen.getByTestId("requirement-timeline-item-l2-run"),
+    ).toBeInTheDocument();
+    // 折叠口径沿用 RequirementTimeline:running 显示最后一非空行。
+    expect(
+      screen.getByTestId("requirement-timeline-live-preview-l2-run"),
+    ).toHaveTextContent("[动作 #t2] 编辑文件");
+    // 展开任务项 → 终端块显示全量实时输出(同一 task-live-output 容器,
+    // 本用例 L1 无任务项,不会冲突)。
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-l2-run"));
+    const terminal = screen.getByTestId("task-live-output");
+    expect(terminal).toHaveTextContent("[思考 #t1] 正在阅读 spec");
+    expect(terminal).toHaveTextContent("[动作 #t2] 编辑文件");
+
+    // 输出随执行推进而更新:预览行跟随最后一非空行变化。
+    rerender(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+        liveOutputs={{
+          "l2-run":
+            "[思考 #t1] 正在阅读 spec\n[动作 #t2] 编辑文件\n[动作 #t3] 运行测试",
+        }}
+      />,
+    );
+    expect(
+      screen.getByTestId("requirement-timeline-live-preview-l2-run"),
+    ).toHaveTextContent("[动作 #t3] 运行测试");
+
+    // spec R2:被删除的卡片行「协调者 {名字}」不再出现(成员名只由任务项
+    // 呈现;其余「协调者」是角色徽章/阶梯的角色词,不是名字重复)。
+    expect(screen.queryAllByText("协调者 协调者")).toHaveLength(0);
+    expect(
+      screen.queryByText("协调任务进行中,尚无 L2 结论"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("L2 终态:任务项显示 diffSummary.outputTail(回填值),无 live 预览行", () => {
+    const [requirement] = groupTasksBySpec([
+      runningCoordinationTask({
+        status: "done",
+        updatedAt: "2026-08-01T10:00:00.000Z",
+        diffSummary: {
+          review_request: {
+            type: "review_request",
+            layer: 3,
+            specRef: "specs/ui-04b.md",
+            specHash: "abc",
+            diffSummary: "L2 通过",
+          },
+          outputTail: "终态输出尾行:提交完成",
+        },
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+    // done → L2 默认折叠;展开后协调任务项在 L2 时间线上,且只有一张
+    // (不因 tasks 与 events 双重来源而重复)。
+    fireEvent.click(screen.getByTestId("requirement-layer-l2-toggle"));
+    const l2Layer = screen.getByTestId("requirement-layer-l2");
+    expect(l2Layer).not.toHaveTextContent("协调任务进行中,尚无 L2 结论");
+    const l2Timeline = screen
+      .getByTestId("requirement-layer-l2-content")
+      .querySelector('[data-testid="requirement-timeline"]');
+    expect(
+      l2Timeline?.querySelectorAll(
+        '[data-testid^="requirement-timeline-item-"]',
+      )?.length,
+    ).toBe(1);
+    // 终态显示回填的 outputTail:任务项默认折叠时点「展开」,输出终端块可见。
+    fireEvent.click(screen.getByTestId("requirement-timeline-toggle-l2-run"));
+    const l2Terminal = l2Layer?.querySelector(
+      '[data-testid="task-live-output"]',
+    );
+    expect(l2Terminal?.textContent).toContain("终态输出尾行:提交完成");
+    // done 任务不显示 live 折叠预览行(口径同 L1)。
+    expect(
+      screen.queryByTestId("requirement-timeline-live-preview-l2-run"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("无协调任务:L2 仍显示「该需求还没有协调任务(L2 未开始)」", () => {
+    const [requirement] = groupTasksBySpec([
+      makeTask({
+        id: "solo",
+        createdAt: "2026-08-01T09:00:00.000Z",
+        diffSummary: { summary: "历史任务" },
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+      />,
+    );
+    expect(
+      screen.getByText("该需求还没有协调任务(L2 未开始)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("requirement-timeline-item-solo"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("L1 渲染逐字不变:协调任务项不出现在 L1,L1 汇报/控制不受影响", () => {
+    const [requirement] = groupTasksBySpec([
+      runningCoordinationTask(),
+      executionTask({
+        id: "exec-1",
+        parentTaskId: "l2-run",
+        createdAt: "2026-08-01T10:00:00.000Z",
+      }),
+    ]);
+    render(
+      <RequirementDetailPanel
+        requirement={requirement}
+        messages={[]}
+        members={[COORDINATOR, REVIEWER]}
+        liveOutputs={{ "l2-run": "[动作 #t1] 读取 spec" }}
+      />,
+    );
+    // 终态需求默认三层折叠:先确认 L1 折叠,再展开 L1 看执行任务项。
+    expect(screen.getByTestId("requirement-layer-l1-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByTestId("requirement-layer-l1-toggle"));
+    const l1Timeline = screen
+      .getByTestId("requirement-layer-l1-content")
+      .querySelector('[data-testid="requirement-timeline"]');
+    expect(
+      l1Timeline?.querySelector(
+        '[data-testid="requirement-timeline-item-exec-1"]',
+      ),
+    ).not.toBeNull();
+    // 协调任务项只在 L2,L1 时间线上不出现(不串层)。
+    expect(
+      l1Timeline?.querySelector(
+        '[data-testid="requirement-timeline-item-l2-run"]',
+      ),
+    ).toBeNull();
+    // L1 执行任务汇报卡片内容(汇报摘要)保持可见 —— 回归「L1 逐字不变」。
+    expect(screen.getByText("L1 完成,测试全绿。")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("requirement-timeline-claim-exec-1"),
+    ).toHaveAttribute("data-status", "verified");
   });
 });

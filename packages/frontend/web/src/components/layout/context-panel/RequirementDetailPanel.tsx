@@ -495,25 +495,14 @@ export default function RequirementDetailPanel({
         onToggle={() => toggleLayer("l2")}
       >
         {l2.task ? (
-          <>
-            <p className="text-xs text-muted-foreground">
-              协调者{" "}
-              {members.find(
-                (member) =>
-                  member.participantId === l2.task?.executorParticipantId,
-              )?.name ?? l2.task.executorKey}
-            </p>
-            {!l2.conclusion && (
-              <p className="text-xs text-muted-foreground">
-                协调任务进行中,尚无 L2 结论
-              </p>
-            )}
-            <RequirementTimeline
-              tasks={[]}
-              events={timelineLayers.l2}
-              members={members}
-            />
-          </>
+          // 协调者名字与状态都由任务项自身呈现(RequirementTimeline 的
+          // 执行者名/实时输出块),卡片行不再重复(spec R2:同一事实不出现两次)。
+          <RequirementTimeline
+            tasks={[l2.task]}
+            events={timelineLayers.l2}
+            members={members}
+            liveOutputs={liveOutputs}
+          />
         ) : (
           <p className="text-xs text-muted-foreground">
             该需求还没有协调任务(L2 未开始)
