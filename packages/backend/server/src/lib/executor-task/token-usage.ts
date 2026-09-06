@@ -10,6 +10,8 @@ export interface TokenUsage {
   cachedInputTokens?: number;
   totalTokens: number;
   source: string;
+  /** Generic fallback values are estimates, not authoritative accounting. */
+  trusted?: boolean;
 }
 
 export interface TokenUsageResult {
@@ -328,7 +330,6 @@ function collectCodeBuddy(
     totalTokens: 0,
   };
   let count = 0;
-  const matchingFiles = new Set<string>();
   for (const file of walkFiles(
     join(input.homeDir ?? homedir(), ".codebuddy", "projects"),
     ".jsonl",
@@ -341,13 +342,50 @@ function collectCodeBuddy(
       if (usage) {
         addTotals(totals, usage);
         count += 1;
-        matchingFiles.add(file);
       }
     }
   }
-  return count > 0 && matchingFiles.size === 1
-    ? finishTotals(totals, "codebuddy-jsonl")
-    : undefined;
+  return count > 0 ? finishTotals(totals, "codebuddy-jsonl") : undefined;
+}
+
+function collectPi(input: TokenUsageCollectionInput): TokenUsage | undefined {
+  const start = Date.parse(input.startedAt);
+  const end = Date.parse(input.endedAt);
+  const totals: UsageTotals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    totalTokens: 0,
+  };
+  let count = 0;
+  for (const file of walkFiles(
+    join(input.homeDir ?? homedir(), ".pi", "agent", "sessions"),
+    ".jsonl",
+  )) {
+    const rows = parseJsonLines(readText(file) ?? "");
+    const session = rows.find((row): row is Record<string, unknown> =>
+      Boolean(
+        row &&
+          typeof row === "object" &&
+          (row as Record<string, unknown>).type === "session",
+      ),
+    );
+    const sessionCwd =
+      session && typeof session.cwd === "string" ? session.cwd : undefined;
+    if (sessionCwd !== input.cwd) continue;
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const record = row as Record<string, unknown>;
+      const message = record.message as Record<string, unknown> | undefined;
+      if (message?.role !== "assistant") continue;
+      const usage = readUsageObject(message.usage);
+      const timestamp = record.timestamp ?? message.timestamp;
+      if (!usage || !inWindow(timestamp, start, end)) continue;
+      addTotals(totals, usage);
+      count += 1;
+    }
+  }
+  return count > 0 ? finishTotals(totals, "pi-session-jsonl") : undefined;
 }
 
 function collectAtomCode(
@@ -445,8 +483,7 @@ function walkJsonObjects(
   parentKey?: string,
 ): void {
   if (Array.isArray(value)) {
-    for (const item of value)
-      walkJsonObjects(item, visit, skipKeys, parentKey);
+    for (const item of value) walkJsonObjects(item, visit, skipKeys, parentKey);
     return;
   }
   if (value && typeof value === "object") {
@@ -506,7 +543,10 @@ function collectGenericJsonl(stdout: string): TokenUsage | undefined {
   // assumption is the safest default.
   const totalTokens =
     latestExplicitTotal ?? latest.inputTokens + latest.outputTokens;
-  return finishTotals({ ...latest, totalTokens }, "generic-jsonl-scan");
+  return {
+    ...finishTotals({ ...latest, totalTokens }, "generic-jsonl-scan"),
+    trusted: false,
+  };
 }
 
 /**
@@ -527,6 +567,8 @@ export async function collectTokenUsage(
     usage = collectAtomCode(input);
   } else if (input.executorKey === "codebuddy") {
     usage = collectCodeBuddy(input);
+  } else if (input.executorKey === "pi") {
+    usage = collectPi(input);
   } else if (input.executorKey === "claude") {
     usage = collectClaude(input);
   }

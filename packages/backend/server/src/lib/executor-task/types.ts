@@ -206,6 +206,9 @@ export function sumAttemptTokenUsage(
     ),
     totalTokens: usages.reduce((sum, usage) => sum + usage.totalTokens, 0),
     source,
+    ...(usages.some((usage) => usage.trusted === false)
+      ? { trusted: false }
+      : {}),
   };
 }
 

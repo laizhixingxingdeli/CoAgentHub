@@ -259,6 +259,86 @@ describe("platform token usage collection", () => {
     });
   });
 
+  it("reads Pi message usage from the dedicated session collector", async () => {
+    const root = home();
+    const piDir = join(root, ".pi", "agent", "sessions", "project");
+    mkdirSync(piDir, { recursive: true });
+    writeFileSync(
+      join(piDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "session", cwd }),
+        JSON.stringify({
+          type: "message",
+          timestamp: "2026-08-25T10:01:00.000Z",
+          message: {
+            role: "assistant",
+            usage: {
+              input: 120,
+              output: 30,
+              cacheRead: 10,
+              cacheWrite: 5,
+              totalTokens: 150,
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await collectTokenUsage({
+      executorKey: "pi",
+      cwd,
+      startedAt,
+      endedAt,
+      homeDir: root,
+    });
+
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cachedInputTokens: 15,
+      totalTokens: 150,
+      source: "pi-session-jsonl",
+    });
+  });
+
+  it("aggregates CodeBuddy usage across multiple matching session files", async () => {
+    const root = home();
+    const buddyDir = join(root, ".codebuddy", "projects", "project");
+    mkdirSync(buddyDir, { recursive: true });
+    for (const [name, inputTokens] of [
+      ["first.jsonl", 100],
+      ["second.jsonl", 200],
+    ] as const) {
+      writeFileSync(
+        join(buddyDir, name),
+        `${JSON.stringify({
+          cwd,
+          timestamp: "2026-08-25T10:03:00.000Z",
+          usage: {
+            inputTokens,
+            outputTokens: 10,
+            totalTokens: inputTokens + 10,
+          },
+        })}\n`,
+      );
+    }
+
+    const result = await collectTokenUsage({
+      executorKey: "codebuddy",
+      cwd,
+      startedAt,
+      endedAt,
+      homeDir: root,
+    });
+
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 300,
+      outputTokens: 20,
+      totalTokens: 320,
+      source: "codebuddy-jsonl",
+    });
+  });
+
   it("accumulates every model_usage entry and skips turns without model usage", async () => {
     const root = home();
     const atomDir = join(root, ".atomcode", "sessions", "session");
@@ -425,6 +505,7 @@ describe("platform token usage collection", () => {
       // Conservative total = input + output (cached is a subset, never added).
       totalTokens: 100 + 20,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -531,6 +612,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 400,
       totalTokens: 1200 + 300,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -559,6 +641,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 200,
       totalTokens: 800 + 150,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -591,6 +674,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 600,
       totalTokens: 2400 + 500,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -631,6 +715,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 12,
       totalTokens: 40,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -650,6 +735,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 3,
       totalTokens: 12,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -681,6 +767,7 @@ describe("platform token usage collection", () => {
       cachedInputTokens: 30,
       totalTokens: 100 + 20,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -711,6 +798,7 @@ describe("platform token usage collection", () => {
       outputTokens: 27,
       totalTokens: 1659,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -756,6 +844,7 @@ describe("platform token usage collection", () => {
       outputTokens: 20,
       totalTokens: 120,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
   });
 
@@ -812,14 +901,18 @@ describe("platform token usage collection", () => {
       cwd,
       startedAt,
       endedAt,
-      stdout: JSON.stringify({ usage: { input: 100, output: 10, cacheRead: 3 } }),
+      stdout: JSON.stringify({
+        usage: { input: 100, output: 10, cacheRead: 3 },
+      }),
     });
     const snake = await collectTokenUsage({
       executorKey: "does-not-exist",
       cwd,
       startedAt,
       endedAt,
-      stdout: JSON.stringify({ usage: { input: 100, output: 10, cache_read: 3 } }),
+      stdout: JSON.stringify({
+        usage: { input: 100, output: 10, cache_read: 3 },
+      }),
     });
     for (const result of [camel, snake]) {
       expect(result.tokenUsage).toEqual({
@@ -828,6 +921,7 @@ describe("platform token usage collection", () => {
         cachedInputTokens: 3,
         totalTokens: 110,
         source: "generic-jsonl-scan",
+        trusted: false,
       });
     }
   });
@@ -858,6 +952,7 @@ describe("platform token usage collection", () => {
         cachedInputTokens: 4,
         totalTokens: 110,
         source: "generic-jsonl-scan",
+        trusted: false,
       });
     }
   });
@@ -879,6 +974,7 @@ describe("platform token usage collection", () => {
         outputTokens: 5,
         totalTokens: 105,
         source: "generic-jsonl-scan",
+        trusted: false,
       });
     }
   });
@@ -901,6 +997,7 @@ describe("platform token usage collection", () => {
       outputTokens: 100,
       totalTokens: 1100,
       source: "generic-jsonl-scan",
+      trusted: false,
     });
     expect(result.tokenUsage?.outputTokens).toBe(100);
   });
