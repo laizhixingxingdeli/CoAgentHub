@@ -17,14 +17,24 @@ import { createTestApp } from "./app";
 const sourceEntry = new URL("../src/lib/runtime-status.ts", import.meta.url)
   .href;
 
+// R4 状态文件路径指向测试隔离目录(缺省指向 /tmp,测试不能碰真实文件)
+const STATE_DIR = mkdtempSync(join(tmpdir(), "coagenthub-watchdog-state-"));
+const STATE_FILE = join(STATE_DIR, "auto-rebuild-state");
+const STALL_FILE = join(STATE_DIR, "stall-state");
+
 beforeEach(() => {
   // 默认不扫描,避免测试触碰真实仓库源码树导致 build 陈旧误判。
   configureSourceScanRoots([]);
+  process.env.COAGENTHUB_AUTO_REBUILD_STATE = STATE_FILE;
+  process.env.COAGENTHUB_STALL_STATE_FILE = STALL_FILE;
 });
 
 afterEach(() => {
   configureRuntimeEntry(sourceEntry);
   configureSourceScanRoots([]);
+  // 只清状态文件本身(目录保留:下一个用例还要写入)
+  rmSync(STATE_FILE, { force: true });
+  rmSync(STALL_FILE, { force: true });
 });
 
 describe("GET /api/system/health", () => {
@@ -36,12 +46,70 @@ describe("GET /api/system/health", () => {
     expect(await res.text()).toBe("ok");
   });
 
-  it("Accept: application/json 时返回 JSON", async () => {
+  it("Accept: application/json 时返回 JSON(默认无停用/停滞状态)", async () => {
     const res = await app.request("/api/system/health", {
       headers: { Accept: "application/json" },
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: "ok" });
+    expect(await res.json()).toEqual({
+      status: "ok",
+      autoRebuild: { disabled: false, disabledAt: null, reason: null },
+      staleStall: { stalledRounds: 0, lastRoundAt: null, notified: false },
+    });
+  });
+
+  it("R4:停用状态文件存在时透出 autoRebuild.disabled 与停用时刻", async () => {
+    writeFileSync(
+      STATE_FILE,
+      JSON.stringify({
+        disabled: true,
+        disabledAt: "2026-09-05T21:00:00+0800",
+        reason: "窗口 86400s 内失败 3 次(≥3)",
+      }) + "\n",
+    );
+    const res = await app.request("/api/system/health", {
+      headers: { Accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { autoRebuild: unknown };
+    expect(body.autoRebuild).toEqual({
+      disabled: true,
+      disabledAt: "2026-09-05T21:00:00+0800",
+      reason: "窗口 86400s 内失败 3 次(≥3)",
+    });
+  });
+
+  it("R2/R4:停滞状态文件存在时透出 staleStall(轮数与升级标记)", async () => {
+    writeFileSync(
+      STALL_FILE,
+      JSON.stringify({
+        stalledRounds: 4,
+        lastRoundAt: "2026-09-05T22:12:00+0800",
+        notified: true,
+      }) + "\n",
+    );
+    const res = await app.request("/api/system/health", {
+      headers: { Accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { staleStall: unknown };
+    expect(body.staleStall).toEqual({
+      stalledRounds: 4,
+      lastRoundAt: "2026-09-05T22:12:00+0800",
+      notified: true,
+    });
+  });
+
+  it("R4:状态文件损坏时健康接口不报错,回落未停用", async () => {
+    writeFileSync(STATE_FILE, "not-json");
+    const res = await app.request("/api/system/health", {
+      headers: { Accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      autoRebuild: { disabled: boolean };
+    };
+    expect(body.autoRebuild.disabled).toBe(false);
   });
 
   it("/api/health 返回运行时新鲜度字段", async () => {
