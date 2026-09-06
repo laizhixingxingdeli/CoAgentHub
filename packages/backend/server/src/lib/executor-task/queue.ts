@@ -2551,10 +2551,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           : parseTaskReport(output);
         const providerError = findProviderError(output);
         const platformTokenUsage = sumAttemptTokenUsage(run.attempts);
+        // 判据收紧到「**执行器根本没输出**」:2026-09-06 事故里 Pi 被 provider
+        // 拒绝时 stdout 是**零字节**。「跑了但没给结构化汇报」是另一回事 ——
+        // 限流退避、R9 次闸等既有路径本来就以 exit 0 + 无汇报 + 无 token 落 done。
         const zeroOutput =
+          output.trim().length === 0 &&
           !hasStructuredTaskReport(prelimReport) &&
           hasZeroTokenUsage(platformTokenUsage);
-        if (providerError || zeroOutput) {
+        // ⚠️ 顺序与优先级(2026-09-07 回归实测):
+        // 1) **额度判定优先**。额度失败常常就是 exit 0 + 零提交 + 零 token,
+        //    零产出抢在前面会把它整类吞掉(实测 11 条既有用例转红)。
+        // 2) **单凭 providerError 不判失败**。`[rate-limited] auto-continuing…`
+        //    也命中提供方错误形状,而那类运行确实在干活、既有语义是落 done;
+        //    拿它判死会吞掉 R6 主闸/R9 次闸整条路径。providerError 只作证据附注。
+        if (zeroOutput && !successQuota.isQuota) {
           const zeroOutputCount = recordExecutorOutput(run.ex.key, zeroOutput);
           const reason = providerError
             ? `执行器服务商错误: ${providerError}`
