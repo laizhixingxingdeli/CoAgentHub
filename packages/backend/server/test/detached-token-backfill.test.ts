@@ -580,6 +580,10 @@ describe.sequential("续跑任务真实派发时序(detached 派发 → 进程�
       cachedInputTokens: 0,
       totalTokens: 1500,
       source: "generic-jsonl-scan",
+      // 契约变更(specs/token-accounting-not-comparable-across-executors.md R3,
+      // 2026-09-07):通用扫描是已知失真的兜底(曾把 codebuddy 少报 400 倍),
+      // 结果必须自带不可信标记,调用方才不会把它当真值。
+      trusted: false,
     });
     // 协调者自报字段逐字保留(补写只加键,不覆盖)。
     expect(summary.summary).toBe("续跑任务完成 L2 并结案");
