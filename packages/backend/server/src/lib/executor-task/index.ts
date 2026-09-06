@@ -77,6 +77,8 @@ export {
 export {
   backfillDetachedClosedTokenFields,
   cancelQueuedTasks,
+  cancelRunningTasks,
+  clearExecutorCooldown,
   createTaskDispatchWarnings,
   currentRunningTask,
   enqueueTaskRun,
@@ -93,7 +95,6 @@ export {
   resolveTaskRepo,
   resolveTestExecutor,
   restoreExecutorCooldowns,
-  clearExecutorCooldown,
   spawnFailureHint,
   summaryStreamText,
 } from "./queue";

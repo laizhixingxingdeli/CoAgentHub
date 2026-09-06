@@ -838,7 +838,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     await waitForTaskStatus(coordinator.id, groupProj.id, m2.id, "done");
   }, 30_000);
 
-  it("「停止 <taskId>」不中断运行中任务:回传「不支持中断」提示,任务继续跑到 done", async () => {
+  it("「停止 <taskId>」终止运行中任务:落 cancelled 并回传已取消", async () => {
     // 默认单测超时 5s,本测试需要跑完真实 sleep + 轮询,显式放宽到 30s。
     process.env.FAKE_SLEEP_SECS = "3";
     const { coordinator, codebuddy, group } = await setupGroup();
@@ -855,19 +855,17 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       "running",
     );
 
-    // 定向「停止 <taskId>」→ 运行中任务不可中断(新语义:只取消排队中任务)。
+    // 定向「停止 <taskId>」→ 终止真实运行中的执行器进程组。
     await postMessage(coordinator.id, group.id, {
       body: `停止 ${t.id}`,
       audience: "broadcast",
     });
 
-    // 群里出现 ⛔「不支持中断」回传(以执行器身份;⛔ 不在 STATUS_EMOJI_RE 内,
-    // 回传为 text/plain,故只按 body 内容匹配)。
+    // 群里出现明确的停止回执,任务卡片同步落 cancelled。
     await waitForMessage(coordinator.id, group.id, (m) =>
-      m.body.includes("不支持中断"),
+      m.body.includes("已取消"),
     );
-    // 任务不受影响,继续跑到 done(未被 kill 成 cancelled)。
-    await waitForTaskStatus(coordinator.id, group.id, msg.id, "done");
+    await waitForTaskStatus(coordinator.id, group.id, msg.id, "cancelled");
   }, 30_000);
 
   it("定向给非执行器 participant 的「停止」仍识别(hermes 特判已移除)", async () => {
@@ -901,7 +899,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     expect(after.filter((m) => m.body.startsWith("⛔"))).toHaveLength(1);
   }, 30_000);
 
-  it("停止按群隔离:A 群的停止指令不影响 B 群的排队/运行中任务", async () => {
+  it("停止按群隔离:A 群的停止指令不影响 B 群的排队任务", async () => {
     process.env.FAKE_SLEEP_SECS = "4";
     const { coordinator, codebuddy } = await setupGroup();
     // 两个群绑定同一 project_path → 同一组键,组内串行:A 群任务占槽,B 群排队。
@@ -939,15 +937,20 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     );
     expect(tB.status).toBe("queued");
 
-    // A 群广播「停止」:只取消 A 群的排队任务(A 群无排队)→ B 群排队任务不受影响。
+    // A 群广播「停止」:取消 A 群当前运行任务→ B 群排队任务不受影响。
     await postMessage(coordinator.id, groupA.id, {
       body: "停止",
       audience: "broadcast",
     });
     const bAfterAStop = await listTasks(coordinator.id, groupB.id);
     expect(bAfterAStop.find((x) => x.id === tB.id)?.status).toBe("queued");
-    const aAfterAStop = await listTasks(coordinator.id, groupA.id);
-    expect(aAfterAStop.find((x) => x.id === tA.id)?.status).toBe("running");
+    const aAfterAStop = await waitForTaskStatus(
+      coordinator.id,
+      groupA.id,
+      mA.id,
+      "cancelled",
+    );
+    expect(aAfterAStop.id).toBe(tA.id);
 
     // B 群自己的「停止 <B 任务>」才取消 B 群排队任务。
     await postMessage(coordinator.id, groupB.id, {
@@ -962,10 +965,9 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     );
     expect(stoppedB.id).toBe(tB.id);
 
-    // A 群运行中任务不受 B 群停止指令影响,继续跑到 done。
+    // A 群任务已取消,不受 B 群停止指令影响。
     const aDuringBStop = await listTasks(coordinator.id, groupA.id);
-    expect(aDuringBStop.find((x) => x.id === tA.id)?.status).toBe("running");
-    await waitForTaskStatus(coordinator.id, groupA.id, mA.id, "done");
+    expect(aDuringBStop.find((x) => x.id === tA.id)?.status).toBe("cancelled");
   }, 30_000);
 
   it("A 群停止指定 B 群运行中任务:不受影响,回传「不支持中断」(跨群 taskId 不误伤)", async () => {

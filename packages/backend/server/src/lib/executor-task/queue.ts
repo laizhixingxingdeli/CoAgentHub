@@ -115,11 +115,11 @@ import {
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
-  OWNER_SERVER_PID_KEY,
   type DispatchOutcome,
   type GroupPromptInfo,
   type GroupQueue,
   mergePlatformTokenFields,
+  OWNER_SERVER_PID_KEY,
   preserveDispatchKindNote,
   preserveRollbackSkipped,
   type QueuedBlockReason,
@@ -787,6 +787,85 @@ export function cancelQueuedTasks(
         ex: r.ex,
       });
     }
+  }
+  return stopped;
+}
+
+/**
+ * 取消本群运行中的任务(停止指令专用):运行态先置 stopped,再终止执行器进程组,
+ * 最后立即落库 cancelled。进程可能已经退出(detached 协调任务尤其如此),kill
+ * 失败不影响取消记账；仍在等待 promise 的 run 会在完成回调中复用同一 cancelled
+ * 分支,不会再发 ❌/✅。
+ */
+export async function cancelRunningTasks(
+  db: DataBase,
+  groupId: string,
+  taskId?: string,
+): Promise<
+  Array<{ taskId: string; participantId: string; ex: ExecutorConfig }>
+> {
+  const stopped: Array<{
+    taskId: string;
+    participantId: string;
+    ex: ExecutorConfig;
+  }> = [];
+  const handled = new Set<string>();
+
+  for (const g of groupQueues.values()) {
+    for (const run of g.running) {
+      if (run.groupId !== groupId || (taskId && run.taskId !== taskId))
+        continue;
+      run.stopped = true;
+      clearRunTimers(run);
+      run.kill?.();
+      handled.add(run.taskId);
+      stopped.push({
+        taskId: run.taskId,
+        participantId: run.participantId,
+        ex: run.ex,
+      });
+      await markTaskCancelled(db, run.taskId, groupId, run.attempts);
+    }
+  }
+
+  // detached CLI tasks release their queue slot after spawn, so their run is no
+  // longer in groupQueues.running. The persisted pid remains the source of truth
+  // for this narrow cancellation window; an exited pid is still a valid cancel.
+  const rows = await db.query.task.findMany({
+    where: (t, { and: andFn, eq: eqFn, isNotNull: isNotNullFn }) =>
+      andFn(
+        eqFn(t.groupId, groupId),
+        eqFn(t.status, "running"),
+        ...(taskId ? [eqFn(t.id, taskId)] : []),
+        isNotNullFn(t.executorPid),
+      ),
+    columns: {
+      id: true,
+      executorParticipantId: true,
+      executorKey: true,
+      executorPid: true,
+      attempts: true,
+    },
+  });
+  for (const row of rows) {
+    if (handled.has(row.id) || row.executorPid === null) continue;
+    try {
+      process.kill(-row.executorPid, "SIGTERM");
+    } catch {
+      // The detached process may have exited already; cancellation is still
+      // required so the task cannot remain running until detached timeout.
+    }
+    const ex = await findExecutorByParticipant(db, {
+      executorKey: row.executorKey,
+    });
+    if (ex) {
+      stopped.push({
+        taskId: row.id,
+        participantId: row.executorParticipantId,
+        ex,
+      });
+    }
+    await markTaskCancelled(db, row.id, groupId, row.attempts ?? []);
   }
   return stopped;
 }

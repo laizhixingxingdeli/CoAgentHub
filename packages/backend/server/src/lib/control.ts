@@ -23,6 +23,7 @@ import {
 } from "@server/lib/executor-runner";
 import {
   cancelQueuedTasks,
+  cancelRunningTasks,
   currentRunningTask,
   postStatus,
   queuedExecutorTaskCount,
@@ -152,9 +153,8 @@ export async function maybeHandleControlCommand(
 /* ---------------- 停止 ---------------- */
 
 /**
- * 「停止 [taskId]」:只取消本群排队中的任务(taskId 缺省 = 本群全部排队任务),
- * 回传 🛑。运行中任务不可中断——命中的话回传「已在执行,不支持中断」提示,
- * 等其进入终态后由协调者下发修正任务(fix-forward)。
+ * 「停止 [taskId]」:取消本群排队中或运行中的任务(taskId 缺省 = 本群当前任务),
+ * 回传 🛑。运行中任务先终止进程组并复用 cancelled 状态路径。
  */
 async function handleStop(
   db: DataBase,
@@ -162,11 +162,13 @@ async function handleStop(
   taskId: string | undefined,
 ): Promise<void> {
   const stopped = cancelQueuedTasks(groupId, taskId);
-  if (stopped.length > 0) {
-    const first = stopped[0];
+  const runningStopped = await cancelRunningTasks(db, groupId, taskId);
+  const allStopped = [...stopped, ...runningStopped];
+  if (allStopped.length > 0) {
+    const first = allStopped[0];
     const label =
-      stopped.length > 1
-        ? `${first.taskId} 等 ${stopped.length} 个任务`
+      allStopped.length > 1
+        ? `${first.taskId} 等 ${allStopped.length} 个任务`
         : first.taskId;
     await postStatus(
       db,
@@ -179,36 +181,13 @@ async function handleStop(
   }
   const fallback = await firstExecutorParticipant(db);
   if (!fallback) return;
-  const running = currentRunningTask(groupId);
   if (taskId) {
-    if (running?.taskId === taskId) {
-      await postStatus(
-        db,
-        groupId,
-        fallback.participantId,
-        fallback.ex,
-        `⛔ 任务 ${taskId} 已在执行,不支持中断;请等待完成后下发修正任务`,
-      );
-      return;
-    }
     await postStatus(
       db,
       groupId,
       fallback.participantId,
       fallback.ex,
       `⛔ 当前没有排队中的任务 ${taskId}`,
-    );
-    return;
-  }
-  if (running) {
-    // 无 taskId 但本群确有运行中任务:明确回传「不支持中断」,而非误导性的
-    // 「没有排队中的任务」(运行中任务不可由用户指令中断,等终态后下发修正)。
-    await postStatus(
-      db,
-      groupId,
-      fallback.participantId,
-      fallback.ex,
-      `⛔ 任务 ${running.taskId} 正在执行,不支持中断;请等待完成后下发修正任务`,
     );
     return;
   }
