@@ -1187,7 +1187,16 @@ function createPiParser(): ExecutorOutputParser {
         // text_end → report(进界面)
         if (evType === "text_end") {
           const content = typeof ev.content === "string" ? ev.content : "";
-          return [entry("report", content, line)];
+          // R2:空白正文不进界面。必须在**产出条目时**判,不能只靠
+          // liveStreamText 的 trim —— 加上 `[汇报 #tN]` 前缀后整串不再是空白,
+          // 下游的 trim 过滤会失效(实测样本里那条 `\n` 因此多显示一行)。
+          if (content.trim().length === 0) {
+            return [entry("thinking", "", line)];
+          }
+          // F3:与另三家同口径 —— `[汇报 #tN] 正文`。entry maker 会把 #tN 插进
+          // 首个方括号里;缺前缀会让 Pi 的行在界面上与其它执行器长得不一样,
+          // 且丢掉取明细用的 #id(两层级输出的 #tN 机制在 Pi 上失效)。
+          return [entry("report", `[汇报] ${content}`, line)];
         }
 
         // thinking_end → thinking(不进界面,全文进明细)
@@ -1219,9 +1228,13 @@ function createPiParser(): ExecutorOutputParser {
         // _start 事件 → 跳过
         if (evType.endsWith("_start")) return [];
 
-        // _delta 事件 → detail-only(空摘要,整行原文进明细)
+        // _delta 事件 → detail-only(空摘要,整行原文进明细)。
+        // F2:kind 用 `thinking`,**不得借用 `report`** —— `report` 是「用户可见
+        // 正文」的唯一语义标记,而 thinking 的既有语义正是「摘要不进流、全文进
+        // 明细」。借用 report 会让明细里躺着上百条空 report,污染任何以
+        // kind === "report" 为判据的下游(实测同一样本 128 条 report 里 126 条空)。
         if (evType.endsWith("_delta")) {
-          return [entry("report", "", line)];
+          return [entry("thinking", "", line)];
         }
 
         // 未知 event type → raw
@@ -1234,8 +1247,8 @@ function createPiParser(): ExecutorOutputParser {
       }
 
       case "tool_execution_update": {
-        // 部分结果 → detail-only
-        return [entry("report", "", line)];
+        // 部分结果 → detail-only(F2:同上,不借用 report)
+        return [entry("thinking", "", line)];
       }
 
       case "tool_execution_end": {

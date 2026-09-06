@@ -1917,10 +1917,12 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     // 验收 1 强化:整份界面流逐字节等于这两条 text_end(中间空白 text_end `\n` 被
     // R2 过滤,其余 delta/detail-only 条目不进界面)。锁定样本输出的精确形状,
     // 防止未来判据漂移时验收用 toContain 漏掉多出来的一行。
-    const expectedLive =
-      '好的，我来读取 `a.txt` 并统计行数\n' +
-      '`a.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n**共有 2 行。**\n';
-    expect(live).toBe(expectedLive);
+    // ⚠️ 2026-09-06 F3:Pi 的 report 摘要与另三家同口径,带 `[汇报 #tN] ` 前缀。
+    // 缺前缀会让 Pi 的行在界面上与其它执行器长得不一样,且丢掉取明细用的 #id。
+    // #tN 的序号取决于该条在整份样本里的位置,断言用正则锁形状而非写死序号。
+    expect(live).toMatch(
+      /^\[汇报 #t\d+\] 好的，我来读取 `a\.txt` 并统计行数\n\[汇报 #t\d+\] `a\.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n\*\*共有 2 行。\*\*\n$/,
+    );
   });
 
   it("空白 text_end 不进界面(R2)", () => {
@@ -1950,7 +1952,8 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     });
     const entries2 = parse(`${realEvent}\n`);
     const live2 = liveStreamText(entries2);
-    expect(live2).toBe("答案\n");
+    // F3:带 [汇报 #tN] 前缀(序号随条目位置变化,锁形状不锁序号)
+    expect(live2).toMatch(/^\[汇报 #t\d+\] 答案\n$/);
   });
 
   it("thinking/tool 事件不进界面", () => {
@@ -1990,6 +1993,7 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     const entries = parse(`${lines}\n`);
     const live = liveStreamText(entries);
     // 仅 text_end 进界面
-    expect(live).toBe("最终答案\n");
+    // F3:带 [汇报 #tN] 前缀
+    expect(live).toMatch(/^\[汇报 #t\d+\] 最终答案\n$/);
   });
 });
