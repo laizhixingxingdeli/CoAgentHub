@@ -1,6 +1,8 @@
 # Spec: 去重命中后不重新确认,事件永远收敛不到 delivered
 
-> **状态**: Frozen
+> **状态**: Landed — L3 通过(2026-09-07),实现 `508ed1ec`;L3 两条 P3 观察见群内
+> `review_result`(去重分支与 Step 1 的 claim 近似重复;`processEvent` 返回值语义
+> 跨分支不一致,后者根因是本 spec §3 R3 只重定义了去重分支,要统一需 `spec_amended`)。
 > **版本**: 1.0
 > **日期**: 2026-09-07
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md) R1

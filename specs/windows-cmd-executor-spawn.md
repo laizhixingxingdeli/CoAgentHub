@@ -1,6 +1,10 @@
 # Spec: Windows 下 `.cmd` 执行器一律 spawn EINVAL,任何票都派不出去
 
-> **状态**: Frozen
+> **状态**: Landed — 2026-09-07,实现 `cf41405e`;端到端验收已满足(任务
+> `01a07a96-994b` 进入 running 且 executorPid 非空,/api/health stale=false)。
+> ⚠️ §4.3「主干回归全绿」在本机**未达成也无法达成**:Windows 基线本身就是
+> 129 failed / 924 passed(测试用 `#!/bin/sh` 假执行器,Windows 起不来),
+> 实际按「改动前后同口径失败数不增加」验收,并用 stash 对照单文件复核过。
 > **版本**: 1.0
 > **日期**: 2026-09-07
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md)
