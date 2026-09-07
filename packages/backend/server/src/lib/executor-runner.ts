@@ -12,8 +12,10 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, normalize, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, normalize, resolve } from "node:path";
 
 /** 默认执行超时:120 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
 const DEFAULT_TIMEOUT_MS = 120 * 60 * 1000;
@@ -277,10 +279,13 @@ const GIT_SYNC_TIMEOUT_MS = 30_000;
  *  基于 spawn,不阻塞事件循环)。 */
 
 /** 异步跑 git(推荐):基于 spawn,不阻塞事件循环;超时 SIGKILL 并报失败。
- *  createCheckpoint / resetToCheckpoint 均使用此实现。 */
+ *  createCheckpoint / resetToCheckpoint 均使用此实现。
+ *  extraEnv 与 process.env 合并后传给子进程(例如用 GIT_INDEX_FILE 把 git 指到
+ *  另一个 index);省略时行为与两参调用一致。 */
 export function gitExec(
   args: string[],
   cwd?: string,
+  extraEnv?: Record<string, string>,
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
@@ -288,6 +293,7 @@ export function gitExec(
       child = spawn("git", args, {
         cwd: cwd ?? findRepoRoot(),
         stdio: ["ignore", "pipe", "pipe"],
+        ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
       });
     } catch (e) {
       const err = e as Error;
@@ -336,8 +342,10 @@ export function gitExec(
 }
 
 /**
- * 任务执行前打快照:git add -A → write-tree → commit-tree -p HEAD,把工作区
- * 树挂到隐藏 ref refs/coagenthub-cp/<taskId> 下,不动 HEAD/工作区(仅暂存 index)。
+ * 任务执行前打快照:在**独立临时 index** 上 read-tree HEAD → add -A →
+ * write-tree,再 commit-tree -p HEAD,把工作区树挂到隐藏 ref
+ * refs/coagenthub-cp/<taskId> 下。不动 HEAD、不动工作区,**也不动用户的真实
+ * 暂存区**(specs/checkpoint-must-not-touch-real-index.md)。
  * 失败抛错(调用方中止任务)。与桥 createCheckpoint 一致。
  */
 /**
@@ -392,41 +400,71 @@ async function createCheckpointUnlocked(
   repoRoot: string,
 ): Promise<{ ref: string; sha: string }> {
   const ref = checkpointRef(taskId);
-  const add = await gitExec(["add", "-A"], repoRoot);
-  if (add.status !== 0) {
-    throw new Error(`git add -A 失败: ${(add.stderr ?? "").trim()}`);
-  }
-  const tree = await gitExec(["write-tree"], repoRoot);
-  if (tree.status !== 0) {
-    throw new Error(`git write-tree 失败: ${(tree.stderr ?? "").trim()}`);
-  }
-  // commit-tree 需要作者身份;CI 全新 runner 无 git user.name/email 配置会报
-  // "Author identity unknown"。用 -c 显式提供兜底身份,只影响该次命令,
-  // 不污染机器全局配置;本机已有全局身份时行为一致(同样用兜底身份)。
-  const commit = await gitExec(
-    [
-      "-c",
-      "user.name=CoAgentHub",
-      "-c",
-      "user.email=coagenthub@localhost",
-      "commit-tree",
-      tree.stdout.trim(),
-      "-p",
-      "HEAD",
-      "-m",
-      `coagenthub checkpoint ${taskId}`,
-    ],
-    repoRoot,
+  // 快照对真实 index 只读:全部在独立临时 index 上构造
+  // (specs/checkpoint-must-not-touch-real-index.md R2)。
+  // 路径唯一 → 并发快照各用各的;放系统临时目录 → 不会被下一次 add -A 看见;
+  // 不预创建文件 → 由 git 自己建,失败时错误信息来自 git 而非 fs。
+  const tmpIndexPath = join(
+    tmpdir(),
+    `coagenthub-cp-index-${randomUUID()}.index`,
   );
-  if (commit.status !== 0) {
-    throw new Error(`git commit-tree 失败: ${(commit.stderr ?? "").trim()}`);
+  const indexEnv = { GIT_INDEX_FILE: tmpIndexPath };
+  try {
+    // 先按 HEAD 铺底,再把工作区叠上去:工作区里删掉的文件才会从树里消失。
+    const base = await gitExec(["read-tree", "HEAD"], repoRoot, indexEnv);
+    if (base.status !== 0) {
+      throw new Error(`git read-tree HEAD 失败: ${(base.stderr ?? "").trim()}`);
+    }
+    const add = await gitExec(["add", "-A"], repoRoot, indexEnv);
+    if (add.status !== 0) {
+      throw new Error(`git add -A 失败: ${(add.stderr ?? "").trim()}`);
+    }
+    const tree = await gitExec(["write-tree"], repoRoot, indexEnv);
+    if (tree.status !== 0) {
+      throw new Error(`git write-tree 失败: ${(tree.stderr ?? "").trim()}`);
+    }
+    // commit-tree 需要作者身份;CI 全新 runner 无 git user.name/email 配置会报
+    // "Author identity unknown"。用 -c 显式提供兜底身份,只影响该次命令,
+    // 不污染机器全局配置;本机已有全局身份时行为一致(同样用兜底身份)。
+    const commit = await gitExec(
+      [
+        "-c",
+        "user.name=CoAgentHub",
+        "-c",
+        "user.email=coagenthub@localhost",
+        "commit-tree",
+        tree.stdout.trim(),
+        "-p",
+        "HEAD",
+        "-m",
+        `coagenthub checkpoint ${taskId}`,
+      ],
+      repoRoot,
+    );
+    if (commit.status !== 0) {
+      throw new Error(`git commit-tree 失败: ${(commit.stderr ?? "").trim()}`);
+    }
+    const sha = commit.stdout.trim();
+    const upd = await gitExec(["update-ref", ref, sha], repoRoot);
+    if (upd.status !== 0) {
+      throw new Error(
+        `git update-ref ${ref} 失败: ${(upd.stderr ?? "").trim()}`,
+      );
+    }
+    return { ref, sha };
+  } finally {
+    // 清理失败只记日志:临时文件残留不该改变快照的结果。
+    try {
+      rmSync(tmpIndexPath, { force: true });
+      rmSync(`${tmpIndexPath}.lock`, { force: true });
+    } catch (e) {
+      console.log(
+        `[executor] 清理临时 index 失败(可忽略): ${tmpIndexPath} ${
+          (e as Error).message
+        }`,
+      );
+    }
   }
-  const sha = commit.stdout.trim();
-  const upd = await gitExec(["update-ref", ref, sha], repoRoot);
-  if (upd.status !== 0) {
-    throw new Error(`git update-ref ${ref} 失败: ${(upd.stderr ?? "").trim()}`);
-  }
-  return { ref, sha };
 }
 
 /**
