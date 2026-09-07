@@ -4,6 +4,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileDir, maxFileUploadBytes } from "@server/lib/config";
+import { getLogger } from "@server/lib/plugins/winston";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 
@@ -74,6 +75,69 @@ async function streamFileToDisk(file: File, dest: string): Promise<void> {
 
 const downloadUrl = (name: string) => `/api/file/${encodeURIComponent(name)}`;
 
+const log = getLogger("server");
+
+/**
+ * 请求体计数闸门标记错误:累计字节越过 `MAX_FILE_UPLOAD_BYTES +
+ * MULTIPART_FRAMING_ALLOWANCE` 时由闸流 controller.error() 抛出,经
+ * `formData()` 原样透传(spec 实测:`instanceof` 成立,`cause` 不设置)。
+ * 自定义类型而非裸 Error,是为了与客户端自身畸形 multipart 的解析错误
+ * (同样是 TypeError)区分开 —— 只有本类才按「文件过大」400 处理。
+ */
+class RequestBodyTooLargeError extends Error {
+  constructor(
+    readonly readBytes: number,
+    readonly limit: number,
+  ) {
+    super(`request body exceeds upload limit: ${readBytes} > ${limit} bytes`);
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+/**
+ * R1/R2:`formData()` 解析之前给请求体套累计字节闸门。
+ *
+ * - 计数以**实际读到的字节**为准:无论请求是否声明 `Content-Length`、
+ *   声明是否属实、有几个 part,所有字节计入同一个计数器(R2);
+ * - 越过 `limit` 立刻 `controller.error()` 中止读取(不得先读完再判断),
+ *   错误经 `formData()` 原样透传,由调用方 `instanceof` 判定;
+ * - 门控流用 `new Request(raw, { body, duplex: "half" })` 交还:
+ *   `duplex: "half"` 对带流 body 的 Request 是 undici 的无条件要求
+ *   (生产路径同样成立);`@types/node` 的 RequestInit 未声明该字段,
+ *   故经结构化对象断言传入。返回的 Request 的 `request.body` 即门控
+ *   流读端(已实测),`formData()` 直接消费它。
+ *
+ * 闸门只挂在 `raw.body` 读端上:预检快速路径(未读 body)与任何提前
+ * 返回都不触碰它,不产生悬空 reader;若请求体本身无流(Blob/字符串),
+ * `c.req.raw.body` 为 null,直接原样返回(这类请求有确定的
+ * Content-Length,预检已覆盖)。
+ */
+function applyUploadByteGate(raw: Request): Request {
+  if (!raw.body) {
+    return raw;
+  }
+  const limit = MAX_FILE_UPLOAD_BYTES + MULTIPART_FRAMING_ALLOWANCE;
+  let readBytes = 0;
+  const gated = raw.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        readBytes += chunk.byteLength;
+        if (readBytes > limit) {
+          controller.error(new RequestBodyTooLargeError(readBytes, limit));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Request(raw, {
+    body: gated,
+    // undici 对 stream body 强制要求 duplex:"half";类型断言仅为
+    // 绕过 @types/node 未声明该字段,不改实现方案。
+    duplex: "half",
+  } as RequestInit);
+}
+
 const app = new Hono()
   .post(
     "/upload",
@@ -110,9 +174,36 @@ const app = new Hono()
         Number.isFinite(contentLength) &&
         contentLength > MAX_FILE_UPLOAD_BYTES + MULTIPART_FRAMING_ALLOWANCE
       ) {
+        // 快速路径:预检拒绝时 handler 不读 body(计数闸门未被挂载消费),
+        // 诚实的超大请求一个字节都不进内存。
         return c.json({ message: "文件过大" }, 400);
       }
-      const formData = await c.req.formData();
+      // R1:解析前对请求体套累计字节闸门(无 Content-Length / 谎报 / 多 part
+      // 的绕过口,闸门以实际读到的字节为准)。预检已排除「声明超限」的请求,
+      // 到这里只处理声明未超限(或缺失)的请求体。
+      let formData: FormData;
+      try {
+        formData = await applyUploadByteGate(c.req.raw).formData();
+      } catch (err) {
+        // 闸门错误经 formData() 原样透传(cause 不设置);防御性地再看一眼
+        // cause,兼容个别实现把原始错误包进 cause 的行为。
+        const gateError =
+          err instanceof RequestBodyTooLargeError
+            ? err
+            : (err as { cause?: unknown })?.cause;
+        if (gateError instanceof RequestBodyTooLargeError) {
+          // R4:超限拒绝可检索 —— 实际读到字节数、上限值、是否声明过
+          // Content-Length(现状的死法恰恰是「没有任何日志说明为什么」)。
+          log.warn("file upload rejected: request body exceeded byte gate", {
+            readBytes: gateError.readBytes,
+            limitBytes: gateError.limit,
+            declaredContentLength: c.req.header("content-length") !== null,
+          });
+          return c.json({ message: "文件过大" }, 400);
+        }
+        // 非闸门错误(客户端畸形 multipart 等)原样抛出,走既有 500 出口。
+        throw err;
+      }
       const file = formData.get("file");
       if (!(file instanceof File)) {
         return c.json({ message: "缺少文件字段(file)" }, 400);
