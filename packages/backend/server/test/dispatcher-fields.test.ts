@@ -1,7 +1,17 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type RequestListener, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  groupMessage,
+  groupMessageClosure,
+  task,
+} from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { type RawData, WebSocket } from "ws";
+import { wsHub } from "../src/lib/ws-hub";
 import { seedBuiltinExecutorConfigs } from "./db";
 
 /**
@@ -417,5 +427,315 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
     const oldDetail = await getTaskDetail(group.id, old?.id as string);
     expect(oldDetail.dispatcherParticipantId).toBeNull();
     expect(oldDetail.dispatcherSessionId).toBeNull();
+  }, 15_000);
+});
+
+/**
+ * callback 校验前置(spec callback-validation-before-message-commit.md):
+ * 两处 400(FORBIDDEN_RE / sessionRef 冲突)移到 insertGroupMessage 之前,
+ * 请求失败时数据库与 WS 不留任何痕迹。每条断言都读最终产物:
+ * group_message / group_message_closure / task 行数 + WS 扇出帧,
+ * 不只断言 HTTP 状态码。WS 扇出观察手法复用 ws-hub / task-status-ws
+ * 既有机制(真实 http server + wsHub.handleUpgrade + 收集器),不新造。
+ */
+describe("callback 语义校验前置(400 不留痕)", () => {
+  let server: Server;
+  let port = 0;
+  const openClients = new Set<WebSocket>();
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const wsUrl = (participantId: string) =>
+    `ws://127.0.0.1:${port}/api/ws?participantId=${participantId}`;
+
+  function connectWs(url: string): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      const timer = setTimeout(() => {
+        ws.terminate();
+        reject(new Error("ws open timeout"));
+      }, 2000);
+      ws.on("open", () => {
+        clearTimeout(timer);
+        openClients.add(ws);
+        resolve(ws);
+      });
+      ws.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  /** 挂一个收集器:把该连接收到的所有帧 JSON 解析后按序追加到数组。 */
+  function attachCollector(ws: WebSocket): Array<Record<string, unknown>> {
+    const frames: Array<Record<string, unknown>> = [];
+    ws.on("message", (data: RawData) => {
+      frames.push(JSON.parse(data.toString()) as Record<string, unknown>);
+    });
+    return frames;
+  }
+
+  async function registerParticipant(body: Record<string, unknown>) {
+    const res = await app.request("/api/participants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 409) {
+      const list = (await (await app.request("/api/participants")).json()) as {
+        id: string;
+        name: string;
+      }[];
+      const existing = list.find((p) => p.name === body.name);
+      if (existing) return { id: existing.id };
+    }
+    expect(res.status).toBe(200);
+    const { id } = (await res.json()) as { id: string };
+    return { id };
+  }
+
+  async function createGroup(participantId: string, title: string) {
+    const res = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify({ title }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string };
+  }
+
+  async function addMember(
+    participantId: string,
+    groupId: string,
+    memberParticipantId: string,
+    roles: string[],
+  ) {
+    const res = await app.request(`/api/groups/${groupId}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify({ participantId: memberParticipantId, roles }),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  async function postMessage(
+    participantId: string,
+    groupId: string,
+    body: Record<string, unknown>,
+  ) {
+    const res = await app.request(`/api/groups/${groupId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": participantId,
+      },
+      body: JSON.stringify(body),
+    });
+    return {
+      res,
+      json: (await res.json()) as Record<string, unknown>,
+    };
+  }
+
+  async function listTasks(groupId: string) {
+    const res = await app.request(`/api/groups/${groupId}/tasks`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Array<Record<string, unknown>>;
+  }
+
+  /** 轮询直到 messageId 对应的任务出现;超时抛错。 */
+  async function waitForTask(groupId: string, messageId: string) {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const tasks = await listTasks(groupId);
+      const t = tasks.find((x) => x.messageId === messageId);
+      if (t) return t;
+      if (Date.now() > deadline) {
+        throw new Error(`task(message=${messageId}) 未在 10000ms 内创建`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  /** coordinator(建群者)+ CodeBuddy executor 成员就绪。 */
+  async function setupGroup(title: string) {
+    const coordinator = await registerParticipant({ name: `cb-pre-${title}` });
+    const codebuddy = await registerParticipant({ name: "CodeBuddy" });
+    const group = await createGroup(coordinator.id, title);
+    await addMember(coordinator.id, group.id, codebuddy.id, ["executor"]);
+    return { coordinator, codebuddy, group };
+  }
+
+  /** 直接读库行数(group_message / group_message_closure / task)。 */
+  async function rowCounts(groupId: string) {
+    const { testDb } = await import("./db");
+    const msgRows = await testDb
+      .select({ n: groupMessage.id })
+      .from(groupMessage)
+      .where(eq(groupMessage.groupId, groupId));
+    const closureRows = await testDb
+      .select({ n: groupMessageClosure.ancestorId })
+      .from(groupMessageClosure)
+      .where(eq(groupMessageClosure.groupId, groupId));
+    const taskRows = await testDb
+      .select({ n: task.id })
+      .from(task)
+      .where(eq(task.groupId, groupId));
+    return {
+      messages: msgRows.length,
+      closures: closureRows.length,
+      tasks: taskRows.length,
+    };
+  }
+
+  /** 等待后台派发(若有)稳定,避免上一用例的 fire-and-forget 串入计数。 */
+  async function settle() {
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  beforeAll(async () => {
+    // 与 ws-hub / task-status-ws 同款:app.fetch 直接驱动真实 upgrade 握手。
+    server = createServer(app.fetch as unknown as RequestListener);
+    wsHub.handleUpgrade(server);
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as AddressInfo).port;
+  });
+
+  afterAll(async () => {
+    wsHub.closeAll();
+    for (const ws of openClients) ws.terminate();
+    openClients.clear();
+    if (server) {
+      server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("非法 callback(FORBIDDEN_RE)→ 400 且零副作用(行数不变 + 无 WS 扇出)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("Z1");
+    const ws = await connectWs(wsUrl(coordinator.id));
+    const frames = attachCollector(ws);
+    await settle();
+
+    const before = await rowCounts(group.id);
+    const { res, json } = await postMessage(coordinator.id, group.id, {
+      body: "非法 callback 任务",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+      callback: { sessionRef: "https://evil.example/x" },
+    });
+    // 400 + 文案逐字(既有文案,不得改)。
+    expect(res.status).toBe(400);
+    expect(json.message).toBe(
+      "callback.sessionRef 含非法内容:不允许 URL、命令、凭据、赋值形态或空白",
+    );
+
+    // 零副作用:三类行数不变。
+    const after = await rowCounts(group.id);
+    expect(after).toEqual(before);
+
+    // 无 group_message 类型 WS 扇出(扇出发生在插入后,现在到不了)。
+    await sleep(200);
+    expect(frames.some((f) => f.type === "group_message")).toBe(false);
+    ws.close();
+  }, 15_000);
+
+  it("callback.sessionRef 与 dispatcherSessionId 冲突 → 400 且零副作用", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("Z2");
+    const ws = await connectWs(wsUrl(coordinator.id));
+    const frames = attachCollector(ws);
+    await settle();
+
+    const before = await rowCounts(group.id);
+    const { res, json } = await postMessage(coordinator.id, group.id, {
+      body: "冲突 callback 任务",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+      metadata: { dispatcherSessionId: "a" },
+      callback: { sessionRef: "b" },
+    });
+    expect(res.status).toBe(400);
+    expect(json.message).toBe(
+      "callback.sessionRef 与 dispatcherSessionId 冲突:两者必须相等",
+    );
+
+    const after = await rowCounts(group.id);
+    expect(after).toEqual(before);
+
+    await sleep(200);
+    expect(frames.some((f) => f.type === "group_message")).toBe(false);
+    ws.close();
+  }, 15_000);
+
+  it("合法 callback 行为不变:task.callbackRef 逐字(既有断言口径)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("Z3");
+    const { res, json } = await postMessage(coordinator.id, group.id, {
+      body: "合法 callback 任务",
+      audience: "participant",
+      audienceRef: codebuddy.id,
+      metadata: { dispatcherSessionId: "coord-session" },
+      callback: { platform: "codex", sessionRef: "coord-session" },
+    });
+    expect(res.status).toBe(200);
+    // 既有断言逐字通过(与「行为验证 1」同款形状)。
+    const task = await waitForTask(group.id, json.id as string);
+    expect(task.callbackRef).toEqual({
+      platform: "codex",
+      endpointRef: undefined,
+      sessionRef: "coord-session",
+    });
+  }, 15_000);
+
+  it("broadcast + 非法 callback 仍不 400(R2 适用面回归:callback 被忽略)", async () => {
+    const { coordinator, group } = await setupGroup("Z4");
+    const { res, json } = await postMessage(coordinator.id, group.id, {
+      body: "广播 + 非法 callback",
+      callback: { sessionRef: "https://evil.example/x" },
+    });
+    // broadcast 消息即使带非法 callback 也不 400:callback 本就被忽略。
+    expect(res.status).toBe(200);
+    // 消息正常写入(与改动前行为一致)。
+    const counts = await rowCounts(group.id);
+    expect(counts.messages).toBe(1);
+    expect(counts.closures).toBe(1);
+    // 广播不触发任务创建;callback 未落任何字段。
+    expect(json.callback).toBeUndefined();
+    expect(json.metadata).toBeUndefined();
+    await settle();
+    const tasks = await listTasks(group.id);
+    expect(tasks).toHaveLength(0);
+  }, 15_000);
+
+  it("仅 executor 角色发送非法 callback 仍走剥离警告(R2 适用面回归)", async () => {
+    const { coordinator, codebuddy, group } = await setupGroup("Z5");
+    // 目标为非执行器 participant:executor 定向执行器会先被发布门槛 403。
+    const peer = await registerParticipant({ name: "Z5-peer" });
+    await addMember(coordinator.id, group.id, peer.id, ["coordinator"]);
+    const { res, json } = await postMessage(codebuddy.id, group.id, {
+      body: "纯执行器非法 callback",
+      audience: "participant",
+      audienceRef: peer.id,
+      callback: { sessionRef: "https://evil.example/x" },
+    });
+    // 仍是 200 + 剥离警告,不是 400(无权携带者不进 400 判定)。
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-CoAgentHub-Warning") ?? "").toContain(
+      "CALLBACK_STRIPPED_NOT_AUTHORIZED",
+    );
+    // 消息正常写入。
+    const counts = await rowCounts(group.id);
+    expect(counts.messages).toBe(1);
+    // 无任务:executor 无下发权,maybeDispatchExecutorTask 跳过;
+    // 即便有任务 callbackRef 也应为 null(此处断言无任务,更直接)。
+    await settle();
+    const tasks = await listTasks(group.id);
+    expect(tasks.some((t) => t.messageId === json.id)).toBe(false);
   }, 15_000);
 });
