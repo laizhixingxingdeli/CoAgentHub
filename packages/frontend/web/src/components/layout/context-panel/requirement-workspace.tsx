@@ -1,12 +1,17 @@
+import {
+  type CoordinationPayload,
+  parseKnownCoordinationPayload,
+} from "@laizhixingxingdeli/database/schema";
 import { ArrowLeft } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useGroupWs } from "@/hooks/use-group-ws";
+import { mergeGroupMessages, useGroupWs } from "@/hooks/use-group-ws";
 import { useIsDesktop } from "@/hooks/use-mobile";
 import { t } from "@/lib/i18n";
 import { appendOutputTail } from "@/lib/output-buffer";
 import TaskPanel, {
   type TaskItem,
   type TaskObservability,
+  type TaskStatus,
   taskStatusLabel,
 } from "@/pages/app/groups/messages/TaskPanel";
 import type { Member, MessageItem } from "@/pages/app/groups/messages/types";
@@ -22,6 +27,31 @@ import {
 } from "./requirement-kind";
 import type { RequirementLayerState } from "./requirement-layer-state";
 import { deriveRequirementLayerState } from "./requirement-layer-state";
+
+/** Terminal task statuses: live-buffer refill skips these (spec R2). */
+function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
+
+function parseReviewResultTaskId(body: string): string | null {
+  let payload: CoordinationPayload | null | undefined;
+  try {
+    payload = parseKnownCoordinationPayload(body.trim());
+  } catch {
+    return null;
+  }
+  if (payload?.type !== "review_result") return null;
+  return typeof payload.taskId === "string" ? payload.taskId : null;
+}
+
+function observabilityFromDetail(detail: TaskItem): TaskObservability {
+  const observability: TaskObservability = {};
+  if (detail.l1) observability.l1 = detail.l1;
+  if (detail.l3) observability.l3 = detail.l3;
+  if (detail.liveness) observability.liveness = detail.liveness;
+  if (detail.runtime) observability.runtime = detail.runtime;
+  return observability;
+}
 
 /**
  * 需求工作区(共享组件,UI-04b-2):从原 TasksTab 抽取,供「群内页主区」与右栏
@@ -118,7 +148,15 @@ export function RequirementWorkspace({
   const [taskObservability, setTaskObservability] = useState<
     Record<string, TaskObservability>
   >({});
+  // Tracks successful detail loads. Entries are cleared to allow re-fetch
+  // (non-terminal refresh / review_result / reconnect) — never permanent.
   const loadedTaskDetailsRef = useRef(new Set<string>());
+  // Bumps to re-run the detail effect after an explicit invalidate.
+  const [detailRefreshEpoch, setDetailRefreshEpoch] = useState(0);
+  // Live-buffer pull failure must stay visible and distinct from "no output".
+  const [liveOutputFetchError, setLiveOutputFetchError] = useState<string | null>(
+    null,
+  );
   const [runtimeStale, setRuntimeStale] = useState(false);
   const [runtimeStaleReason, setRuntimeStaleReason] = useState<
     "process" | "build" | "both" | null
@@ -239,6 +277,77 @@ export function RequirementWorkspace({
     }
   }, [groupId]);
 
+  /**
+   * R2: seed liveOutputs for non-terminal tasks via ?includeOutput=1.
+   * Used on mount (after first task list) and on WS reconnect. Does not
+   * clobber a longer local buffer (WS chunks arrived during the fetch).
+   * R4: failures stay visible and distinct from empty output.
+   */
+  const seedLiveOutputs = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/groups/${groupId}/tasks?includeOutput=1`,
+      );
+      if (!res.ok) {
+        setLiveOutputFetchError(
+          t("tasks.output.fetchFailed", { status: String(res.status) }),
+        );
+        return;
+      }
+      const rows = (await res.json()) as TaskItem[];
+      setLiveOutputFetchError(null);
+      setLiveOutputs((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const row of rows) {
+          if (isTerminalTaskStatus(row.status)) continue;
+          if (typeof row.outputTail !== "string") continue;
+          const existing = prev[row.id];
+          if (
+            existing === undefined ||
+            row.outputTail.length > existing.length
+          ) {
+            next[row.id] = row.outputTail;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      // List rows may carry derived l3; fold them into observability without
+      // waiting for the per-task detail round-trip.
+      setTaskObservability((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const row of rows) {
+          if (!row.l3 && !row.l1 && !row.liveness) continue;
+          const patch = observabilityFromDetail(row);
+          if (Object.keys(patch).length === 0) continue;
+          next[row.id] = { ...next[row.id], ...patch };
+          changed = true;
+        }
+        return changed ? next : prev;
+      });
+    } catch (e) {
+      setLiveOutputFetchError(
+        t("tasks.output.fetchFailed", {
+          status: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  }, [groupId]);
+
+  /** Drop detail cache entries so the effect re-fetches (R3). */
+  const invalidateTaskDetails = useCallback((taskIds?: readonly string[]) => {
+    if (taskIds === undefined) {
+      loadedTaskDetailsRef.current.clear();
+    } else {
+      for (const id of taskIds) {
+        loadedTaskDetailsRef.current.delete(id);
+      }
+    }
+    setDetailRefreshEpoch((epoch) => epoch + 1);
+  }, []);
+
   const loadMessages = useCallback(async () => {
     try {
       const res = await fetch(`/api/groups/${groupId}/messages`);
@@ -288,11 +397,31 @@ export function RequirementWorkspace({
   }, []);
 
   useEffect(() => {
-    void loadTasks();
-    void loadMessages();
-    void loadMembers();
-    void loadGroupStatus();
-  }, [loadTasks, loadMessages, loadMembers, loadGroupStatus]);
+    let cancelled = false;
+    const boot = async () => {
+      await Promise.all([
+        loadTasks(),
+        loadMessages(),
+        loadMembers(),
+        loadGroupStatus(),
+      ]);
+      // R2: after the first task list lands, backfill live buffers for
+      // non-terminal tasks so a late-opened page still shows prior reports.
+      if (!cancelled) {
+        await seedLiveOutputs();
+      }
+    };
+    void boot();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    loadTasks,
+    loadMessages,
+    loadMembers,
+    loadGroupStatus,
+    seedLiveOutputs,
+  ]);
 
   useEffect(() => {
     void loadRuntimeStatus();
@@ -303,29 +432,125 @@ export function RequirementWorkspace({
   // 实时进度:同组 WS task_output 事件 → 追加进 liveOutputs(有界缓冲,
   // 与后端 output-buffer.ts 同款上限:1000 行 / 256KB,超限保留尾部);
   // 无进展提醒:task_stall_alert 事件 → 该任务行标记黄色警示(非失败)。
-  useGroupWs(groupId, (event) => {
-    if (event.type === "task_status_changed") {
-      setTasks((prev) => mergeTaskStatusChanged(prev, event));
-      return;
-    }
-    if (event.type === "task_output") {
-      setLiveOutputs((prev) => ({
-        ...prev,
-        [event.taskId]: appendOutputTail(prev[event.taskId] ?? "", event.chunk),
-      }));
-      return;
-    }
-    if (event.type === "task_stall_alert") {
-      setStallAlertedIds((prev) => {
-        if (prev.has(event.taskId)) {
-          return prev;
+  // R3(a): also ingest group_message so review_result refreshes L3 without a
+  // page reload (L3 is a message, not a task status change).
+  useGroupWs(
+    groupId,
+    (event) => {
+      if (event.type === "task_status_changed") {
+        setTasks((prev) => mergeTaskStatusChanged(prev, event));
+        // Non-terminal may flip fields that live only on the detail payload;
+        // drop the cache entry so the detail effect can re-pull.
+        loadedTaskDetailsRef.current.delete(event.taskId);
+        setDetailRefreshEpoch((epoch) => epoch + 1);
+        return;
+      }
+      if (event.type === "task_output") {
+        setLiveOutputs((prev) => ({
+          ...prev,
+          [event.taskId]: appendOutputTail(
+            prev[event.taskId] ?? "",
+            event.chunk,
+          ),
+        }));
+        // R1: any kind of live signal advances last activity (UI stream still
+        // only shows report text; this only updates the liveness meta).
+        setTaskObservability((prev) => {
+          const prior = prev[event.taskId];
+          return {
+            ...prev,
+            [event.taskId]: {
+              ...prior,
+              liveness: {
+                warning: false,
+                lastSignalAt: new Date().toISOString(),
+              },
+            },
+          };
+        });
+        return;
+      }
+      if (event.type === "task_stall_alert") {
+        setStallAlertedIds((prev) => {
+          if (prev.has(event.taskId)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.add(event.taskId);
+          return next;
+        });
+        setTaskObservability((prev) => {
+          const prior = prev[event.taskId];
+          const lastSignalAt =
+            prior?.liveness?.lastSignalAt ?? new Date().toISOString();
+          return {
+            ...prev,
+            [event.taskId]: {
+              ...prior,
+              liveness: { warning: true, lastSignalAt },
+            },
+          };
+        });
+        return;
+      }
+      if (event.type === "group_message") {
+        const message: MessageItem = {
+          id: event.message.id,
+          groupId: event.message.groupId,
+          senderId: event.message.senderId,
+          parentId: event.message.parentId,
+          audience: event.message.audience,
+          audienceRef: event.message.audienceRef,
+          body: event.message.body,
+          contentType: event.message.contentType,
+          fileRef: event.message.fileRef,
+          depth: event.message.depth,
+          createdAt: event.message.createdAt,
+        };
+        setMessages((prev) => mergeGroupMessages(prev, [message]));
+        // review_result never mutates task.status — force a detail re-pull so
+        // api-derived l3/liveness catch up even if message parse misses.
+        const reviewTaskId = parseReviewResultTaskId(event.message.body);
+        if (reviewTaskId) {
+          invalidateTaskDetails([reviewTaskId]);
         }
-        const next = new Set(prev);
-        next.add(event.taskId);
-        return next;
-      });
-    }
-  });
+        return;
+      }
+      if (event.type === "group_message_updated") {
+        setMessages((prev) =>
+          prev.map((row) =>
+            row.id === event.message.id
+              ? {
+                  ...row,
+                  body: event.message.body,
+                  contentType: event.message.contentType,
+                  fileRef: event.message.fileRef,
+                }
+              : row,
+          ),
+        );
+        return;
+      }
+      if (event.type === "group_message_deleted") {
+        setMessages((prev) =>
+          prev.map((row) =>
+            row.id === event.messageId
+              ? { ...row, deleted: true, body: "[消息已删除]" }
+              : row,
+          ),
+        );
+      }
+    },
+    {
+      // R2: after a true reconnect, refill live buffers (missed report frames
+      // only live in the server ring buffer) and re-open detail cache for
+      // non-terminal tasks so liveness/l3 can catch up.
+      onReconnect: () => {
+        void seedLiveOutputs();
+        invalidateTaskDetails();
+      },
+    },
+  );
 
   /** 展开/折叠任务行:running/done/failed 默认展开(可折叠),点击切换折叠态;
    *  queued/cancelled 仅显式展开时可见。展开时实时缓冲为空(刷新/断线后)
@@ -354,10 +579,14 @@ export function RequirementWorkspace({
               `/api/groups/${groupId}/tasks?includeOutput=1`,
             );
             if (!res.ok) {
+              setLiveOutputFetchError(
+                t("tasks.output.fetchFailed", { status: String(res.status) }),
+              );
               return;
             }
             const rows = (await res.json()) as TaskItem[];
             const seeded = rows.find((r) => r.id === task.id)?.outputTail;
+            setLiveOutputFetchError(null);
             if (seeded) {
               setLiveOutputs((prev) =>
                 prev[task.id] !== undefined
@@ -365,8 +594,12 @@ export function RequirementWorkspace({
                   : { ...prev, [task.id]: seeded },
               );
             }
-          } catch {
-            // 拉取失败不阻塞展开(WS 恢复后仍会流式追加)。
+          } catch (e) {
+            setLiveOutputFetchError(
+              t("tasks.output.fetchFailed", {
+                status: e instanceof Error ? e.message : String(e),
+              }),
+            );
           }
         }
         return;
@@ -382,17 +615,25 @@ export function RequirementWorkspace({
       try {
         const res = await fetch(`/api/groups/${groupId}/tasks?includeOutput=1`);
         if (!res.ok) {
+          setLiveOutputFetchError(
+            t("tasks.output.fetchFailed", { status: String(res.status) }),
+          );
           return;
         }
         const rows = (await res.json()) as TaskItem[];
         const seeded = rows.find((r) => r.id === next)?.outputTail;
+        setLiveOutputFetchError(null);
         if (seeded) {
           setLiveOutputs((prev) =>
             prev[next] !== undefined ? prev : { ...prev, [next]: seeded },
           );
         }
-      } catch {
-        // 拉取失败不阻塞展开(WS 恢复后仍会流式追加)。
+      } catch (e) {
+        setLiveOutputFetchError(
+          t("tasks.output.fetchFailed", {
+            status: e instanceof Error ? e.message : String(e),
+          }),
+        );
       }
     },
     [expandedTaskId, foldedTaskIds, groupId, liveOutputs],
@@ -516,6 +757,10 @@ export function RequirementWorkspace({
 
   const selectedTaskIds =
     selectedRequirement?.tasks.map((task) => task.id).join(",") ?? "";
+  // R3: drop the permanent once-per-task cache. A task id stays cached only
+  // until invalidateTaskDetails clears it (status change / review_result /
+  // reconnect). Non-terminal and terminal both re-fetch when invalidated so
+  // l3 can still move after done.
   useEffect(() => {
     if (!selectedRequirement || !selectedTaskIds) return;
     const taskRows = selectedRequirement.tasks.filter(
@@ -528,24 +773,38 @@ export function RequirementWorkspace({
         taskRows.map(async (task) => {
           try {
             const res = await fetch(`/api/groups/${groupId}/tasks/${task.id}`);
+            if (!res.ok) {
+              // Keep unloaded so a later epoch can retry; surface failure
+              // distinctly from "no derived block yet".
+              return {
+                id: task.id,
+                error: t("tasks.detail.fetchFailed", {
+                  status: String(res.status),
+                }),
+              };
+            }
             loadedTaskDetailsRef.current.add(task.id);
-            if (!res.ok) return null;
             const detail = (await res.json()) as TaskItem;
-            const observability: TaskObservability = {};
-            if (detail.l1) observability.l1 = detail.l1;
-            if (detail.l3) observability.l3 = detail.l3;
-            if (detail.liveness) observability.liveness = detail.liveness;
-            if (detail.runtime) observability.runtime = detail.runtime;
-            return { id: task.id, observability };
-          } catch {
-            return null;
+            return {
+              id: task.id,
+              observability: observabilityFromDetail(detail),
+            };
+          } catch (e) {
+            return {
+              id: task.id,
+              error: t("tasks.detail.fetchFailed", {
+                status: e instanceof Error ? e.message : String(e),
+              }),
+            };
           }
         }),
       );
       if (cancelled) return;
       const next = results.reduce<Record<string, TaskObservability>>(
         (accumulator, result) => {
-          if (result) accumulator[result.id] = result.observability;
+          if (result && "observability" in result && result.observability) {
+            accumulator[result.id] = result.observability;
+          }
           return accumulator;
         },
         {},
@@ -553,12 +812,18 @@ export function RequirementWorkspace({
       if (Object.keys(next).length > 0) {
         setTaskObservability((previous) => ({ ...previous, ...next }));
       }
+      const firstError = results.find(
+        (result) => result && "error" in result && result.error,
+      );
+      if (firstError && "error" in firstError && firstError.error) {
+        setLiveOutputFetchError(firstError.error);
+      }
     };
     void loadDetails();
     return () => {
       cancelled = true;
     };
-  }, [groupId, selectedRequirement, selectedTaskIds]);
+  }, [groupId, selectedRequirement, selectedTaskIds, detailRefreshEpoch]);
 
   /** 切换「需求 / 修复」标签:原选中若不在新标签列表,回落为未选中,
    *  不自动挑一条(requirement-list-kind-tabs R5,同 live-refresh R3 原则)。 */
@@ -597,6 +862,7 @@ export function RequirementWorkspace({
           messages={messages}
           members={members}
           liveOutputs={liveOutputs}
+          liveOutputFetchError={liveOutputFetchError}
           canControl={canControl}
           readOnly={readOnly}
           commandSending={commandSending}
@@ -648,6 +914,7 @@ export function RequirementWorkspace({
           foldedTaskIds={foldedTaskIds}
           stallAlertedIds={stallAlertedIds}
           liveOutputs={liveOutputs}
+          liveOutputFetchError={liveOutputFetchError}
           rollbackStates={rollbackStates}
           onToggleExpand={(task) => void toggleExpand(task)}
           onStop={handleStop}

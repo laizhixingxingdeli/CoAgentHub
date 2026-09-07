@@ -64,6 +64,8 @@ type RequirementDetailPanelProps = {
   /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接),透传给时间线;
    * running 任务折叠态预览最后非空行、展开态显示全量输出。 */
   liveOutputs?: Record<string, string>;
+  /** Live-buffer / detail pull failure; distinct from empty output (R4). */
+  liveOutputFetchError?: string | null;
   canControl?: boolean;
   readOnly?: boolean;
   commandSending?: string | null;
@@ -177,6 +179,7 @@ export default function RequirementDetailPanel({
   messages,
   members,
   liveOutputs = {},
+  liveOutputFetchError = null,
   canControl = true,
   readOnly = false,
   commandSending = null,
@@ -502,6 +505,7 @@ export default function RequirementDetailPanel({
             events={timelineLayers.l2}
             members={members}
             liveOutputs={liveOutputs}
+            liveOutputFetchError={liveOutputFetchError}
           />
         ) : (
           <p className="text-xs text-muted-foreground">
@@ -542,6 +546,7 @@ export default function RequirementDetailPanel({
           members={members}
           events={timelineLayers.l1}
           liveOutputs={liveOutputs}
+          liveOutputFetchError={liveOutputFetchError}
           canControl={canControl}
           readOnly={readOnly}
           commandSending={commandSending}

@@ -79,8 +79,21 @@ function workspaceFetchMock(
       respond: () => jsonResponse(members),
     },
     {
-      match: (url) => url.includes("/api/groups/") && url.endsWith("/tasks"),
+      match: (url) => {
+        const path = String(url).split("?")[0];
+        return path.includes("/api/groups/") && path.endsWith("/tasks");
+      },
       respond: () => jsonResponse(tasks),
+    },
+    {
+      // Per-task detail (l1/l3/liveness). Default empty observability.
+      match: (url) =>
+        /\/api\/groups\/[^/]+\/tasks\/[^/?]+$/.test(String(url).split("?")[0]),
+      respond: (url) => {
+        const id = String(url).split("/").pop() ?? "";
+        const row = tasks.find((task) => task.id === id);
+        return jsonResponse(row ?? { id });
+      },
     },
   ]);
 }
@@ -126,6 +139,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   delete (window as { innerWidth?: number }).innerWidth;
 });
@@ -729,5 +743,403 @@ describe("RequirementWorkspace 停止二次确认(stop-button-needs-confirmation
         [],
       ),
     ).toBe("停止确认票(01a07764)");
+  });
+});
+
+describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-nothing)", () => {
+  const COORDINATOR: Member = {
+    participantId: "participant-coordinator",
+    name: "协调者",
+    device: null,
+    roles: ["coordinator"],
+  };
+  const REVIEWER: Member = {
+    participantId: "participant-reviewer",
+    name: "检视者",
+    device: null,
+    roles: ["reviewer"],
+  };
+  const EXECUTOR: Member = {
+    participantId: "participant-1",
+    name: "执行者",
+    device: null,
+    roles: ["executor"],
+  };
+
+  it("R2 挂载时对非终态任务用 includeOutput=1 补拉并渲染历史 report", async () => {
+    setViewport(1280);
+    const running = makeTask({
+      id: "run-1",
+      status: "running",
+      brief: "# 在跑的任务",
+      specRef: "specs/live.md",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => url === "/api/health",
+        respond: () => jsonResponse({ stale: false }),
+      },
+      {
+        match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
+        respond: () =>
+          jsonResponse({
+            id: "group-1",
+            title: "g",
+            status: "active",
+            projectPath: null,
+          }),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/messages"),
+        respond: () => jsonResponse([]),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/members"),
+        respond: () => jsonResponse([EXECUTOR]),
+      },
+      {
+        match: (url) => {
+          const s = String(url);
+          return s.includes("/tasks?") && s.includes("includeOutput=1");
+        },
+        respond: () =>
+          jsonResponse([
+            {
+              ...running,
+              outputTail: "[汇报 #t1] already produced report\n",
+            },
+          ]),
+      },
+      {
+        match: (url) => {
+          const path = String(url).split("?")[0];
+          return path.endsWith("/tasks");
+        },
+        respond: () => jsonResponse([running]),
+      },
+      {
+        match: (url) =>
+          /\/api\/groups\/[^/]+\/tasks\/[^/?]+$/.test(
+            String(url).split("?")[0],
+          ),
+        respond: () =>
+          jsonResponse({
+            ...running,
+            liveness: {
+              warning: false,
+              lastSignalAt: "2026-08-01T00:05:00.000Z",
+            },
+          }),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("includeOutput=1"),
+        ),
+      ).toBe(true);
+    });
+
+    expect(
+      await screen.findByText("[汇报 #t1] already produced report"),
+    ).toBeInTheDocument();
+  });
+
+  it("R2 重连后再次 includeOutput 补拉", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setViewport(1280);
+    const running = makeTask({
+      id: "run-2",
+      status: "running",
+      brief: "# reconnect",
+      specRef: "specs/re.md",
+    });
+    let includeCalls = 0;
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => url === "/api/health",
+        respond: () => jsonResponse({ stale: false }),
+      },
+      {
+        match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
+        respond: () =>
+          jsonResponse({
+            id: "group-1",
+            title: "g",
+            status: "active",
+            projectPath: null,
+          }),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/messages"),
+        respond: () => jsonResponse([]),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/members"),
+        respond: () => jsonResponse([EXECUTOR]),
+      },
+      {
+        match: (url) => String(url).includes("includeOutput=1"),
+        respond: () => {
+          includeCalls += 1;
+          return jsonResponse([
+            {
+              ...running,
+              outputTail:
+                includeCalls === 1
+                  ? "first\n"
+                  : "first\nafter disconnect\n",
+            },
+          ]);
+        },
+      },
+      {
+        match: (url) => {
+          const path = String(url).split("?")[0];
+          return path.endsWith("/tasks") && !String(url).includes("?");
+        },
+        respond: () => jsonResponse([running]),
+      },
+      {
+        match: (url) =>
+          /\/api\/groups\/[^/]+\/tasks\/[^/?]+$/.test(
+            String(url).split("?")[0],
+          ),
+        respond: () => jsonResponse(running),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+    await screen.findByText("first");
+    expect(includeCalls).toBe(1);
+
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.open());
+    act(() => ws.close());
+    // useGroupWs reconnects with 1s backoff after the first live session.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const latest =
+      MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    act(() => latest.open());
+
+    await waitFor(() => {
+      expect(includeCalls).toBeGreaterThanOrEqual(2);
+    });
+    expect(await screen.findByText("after disconnect")).toBeInTheDocument();
+  });
+
+  it("R3(a) group_message review_result 后 L3 卡片变为已检视 pass,无需刷新", async () => {
+    setViewport(1280);
+    const l2 = makeTask({
+      id: "l2-task",
+      status: "done",
+      brief: "协调请求",
+      executorParticipantId: COORDINATOR.participantId,
+      executorKey: "coordinator",
+      specRef: "specs/l3.md",
+      diffSummary: {
+        review_request: {
+          type: "review_request",
+          layer: 3,
+          specRef: "specs/l3.md",
+          specHash: "h1",
+          diffSummary: "L2 ok",
+        },
+      },
+      l3: {
+        answered: false,
+        verdict: null,
+        awaitingSince: "2026-08-01T00:00:00.000Z",
+        overdue: false,
+      },
+    });
+    const l1 = makeTask({
+      id: "l1-task",
+      status: "done",
+      brief: "# 执行完成",
+      parentTaskId: "l2-task",
+      specRef: "specs/l3.md",
+      diffSummary: { summary: "done" },
+    });
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => url === "/api/health",
+        respond: () => jsonResponse({ stale: false }),
+      },
+      {
+        match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
+        respond: () =>
+          jsonResponse({
+            id: "group-1",
+            title: "g",
+            status: "active",
+            projectPath: null,
+          }),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/messages"),
+        respond: () => jsonResponse([]),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/members"),
+        respond: () => jsonResponse([COORDINATOR, REVIEWER, EXECUTOR]),
+      },
+      {
+        match: (url) => String(url).includes("includeOutput=1"),
+        respond: () => jsonResponse([l2, l1]),
+      },
+      {
+        match: (url) => {
+          const path = String(url).split("?")[0];
+          return path.endsWith("/tasks");
+        },
+        respond: () => jsonResponse([l2, l1]),
+      },
+      {
+        match: (url) =>
+          /\/api\/groups\/[^/]+\/tasks\/[^/?]+$/.test(
+            String(url).split("?")[0],
+          ),
+        respond: (url) => {
+          const id = String(url).split("/").pop();
+          const row = [l2, l1].find((task) => task.id === id) ?? l2;
+          return jsonResponse({
+            ...row,
+            l3:
+              id === "l2-task"
+                ? {
+                    answered: false,
+                    verdict: null,
+                    awaitingSince: "2026-08-01T00:00:00.000Z",
+                    overdue: false,
+                  }
+                : undefined,
+          });
+        },
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    await screen.findByTestId("requirement-layer-l3");
+    // Detail pull is async; wait until api l3.awaitingSince lands in the card.
+    expect(
+      await screen.findByTestId("requirement-l3-waiting"),
+    ).toBeInTheDocument();
+
+    act(() => MockWebSocket.instances[0].open());
+    act(() =>
+      MockWebSocket.instances[0].receive(
+        JSON.stringify({
+          type: "group_message",
+          groupId: "group-1",
+          message: {
+            id: "msg-review-1",
+            groupId: "group-1",
+            senderId: REVIEWER.participantId,
+            parentId: null,
+            audience: "broadcast",
+            audienceRef: null,
+            body: JSON.stringify({
+              type: "review_result",
+              layer: 3,
+              taskId: "l2-task",
+              specRef: "specs/l3.md",
+              specHash: "h1",
+              verdict: "pass",
+              note: "L3 pass",
+              findings: [],
+            }),
+            contentType: "text/plain",
+            fileRef: null,
+            depth: 0,
+            createdAt: "2026-08-01T12:00:00.000Z",
+          },
+        }),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("requirement-l3-waiting"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId("requirement-layer-l3")).toHaveTextContent(
+        "检视通过",
+      );
+    });
+  });
+
+  it("R4 includeOutput 失败时显示拉取失败而非无输出", async () => {
+    setViewport(1280);
+    const running = makeTask({
+      id: "run-err",
+      status: "running",
+      brief: "# 失败可见",
+      specRef: "specs/err.md",
+    });
+    const fetchMock = createFetchMock([
+      {
+        match: (url) => url === "/api/health",
+        respond: () => jsonResponse({ stale: false }),
+      },
+      {
+        match: (url) => /\/api\/groups\/[^/]+$/.test(String(url)),
+        respond: () =>
+          jsonResponse({
+            id: "group-1",
+            title: "g",
+            status: "active",
+            projectPath: null,
+          }),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/messages"),
+        respond: () => jsonResponse([]),
+      },
+      {
+        match: (url) =>
+          url.includes("/api/groups/") && url.endsWith("/members"),
+        respond: () => jsonResponse([EXECUTOR]),
+      },
+      {
+        match: (url) => String(url).includes("includeOutput=1"),
+        respond: () => jsonResponse({ message: "boom" }, 500),
+      },
+      {
+        match: (url) => {
+          const path = String(url).split("?")[0];
+          return path.endsWith("/tasks");
+        },
+        respond: () => jsonResponse([running]),
+      },
+      {
+        match: (url) =>
+          /\/api\/groups\/[^/]+\/tasks\/[^/?]+$/.test(
+            String(url).split("?")[0],
+          ),
+        respond: () => jsonResponse(running),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    expect(
+      await screen.findByTestId("requirement-timeline-output-error-run-err"),
+    ).toHaveTextContent("拉取实时输出失败");
+    expect(screen.queryByText("暂无输出")).not.toBeInTheDocument();
   });
 });

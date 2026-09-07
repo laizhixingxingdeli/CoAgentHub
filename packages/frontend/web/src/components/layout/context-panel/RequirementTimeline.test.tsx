@@ -80,6 +80,35 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
     expect(screen.getByText("补了组件测试")).toBeInTheDocument();
   });
 
+  it("R1 running 无 warning 时仍显示最近活动时间", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T02:00:00.000Z"));
+    render(
+      <RequirementTimeline
+        tasks={[
+          makeTask({
+            id: "active-task",
+            status: "running",
+            liveness: {
+              warning: false,
+              lastSignalAt: "2026-08-24T01:57:00.000Z",
+            },
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("requirement-timeline-last-activity-active-task"),
+    ).toHaveTextContent("最近活动");
+    expect(
+      screen.getByTestId("requirement-timeline-last-activity-active-task"),
+    ).toHaveTextContent("3 分钟前");
+    expect(
+      screen.getByTestId("requirement-timeline-duration-active-task"),
+    ).toBeInTheDocument();
+  });
+
   it("liveness warning 在任务卡片显示无信号时长", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-24T02:00:00.000Z"));

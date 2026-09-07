@@ -142,6 +142,8 @@ type TaskPanelProps = {
   stallAlertedIds: ReadonlySet<string>;
   /** 实时输出缓冲(taskId → 已接收的 WS chunk 拼接;includeOutput 兜底)。 */
   liveOutputs: Record<string, string>;
+  /** Live-buffer pull failure; must not look like empty output (R4). */
+  liveOutputFetchError?: string | null;
   /** 回滚状态(taskId → rolling=回滚中… | done=已恢复)。 */
   rollbackStates: Record<string, "rolling" | "done">;
   onToggleExpand: (task: TaskItem) => void;
@@ -236,13 +238,17 @@ export default function TaskPanel({
   foldedTaskIds,
   stallAlertedIds,
   liveOutputs,
+  liveOutputFetchError = null,
   rollbackStates,
   onToggleExpand,
   onStop,
   onRollback,
 }: TaskPanelProps) {
-  const hasLiveAttempt = tasks.some((task) =>
-    task.attempts?.some((attempt) => !attempt.endedAt),
+  const hasLiveAttempt = tasks.some(
+    (task) =>
+      task.status === "running" ||
+      task.attempts?.some((attempt) => !attempt.endedAt) ||
+      Boolean(task.liveness?.lastSignalAt),
   );
   const now = useLiveNow(hasLiveAttempt);
   return (
@@ -301,6 +307,22 @@ export default function TaskPanel({
                 Boolean(task.checkpointRef);
               // 实时输出:WS 缓冲优先,includeOutput 兜底(未展开任务无缓冲)。
               const outputText = liveOutputs[task.id] ?? task.outputTail ?? "";
+              const lastSignalAt = task.liveness?.lastSignalAt;
+              const lastActivityMinutes =
+                task.status === "running" && lastSignalAt
+                  ? Math.max(
+                      0,
+                      Math.floor((now - Date.parse(lastSignalAt)) / 60_000),
+                    )
+                  : null;
+              const lastActivityLabel =
+                lastActivityMinutes === null
+                  ? null
+                  : lastActivityMinutes <= 0
+                    ? t("tasks.liveness.justNow")
+                    : t("tasks.liveness.minutesAgo", {
+                        n: String(lastActivityMinutes),
+                      });
               return (
                 <li
                   key={task.id}
@@ -346,6 +368,30 @@ export default function TaskPanel({
                         ⚠️ {t("tasks.stallAlerted")}
                       </span>
                     )}
+                    {task.status === "running" && (
+                      <span
+                        data-testid={`task-running-duration-${task.id}`}
+                        className="text-xs text-muted-foreground"
+                      >
+                        {t("tasks.liveness.runningFor", {
+                          duration: formatDuration(
+                            task.createdAt,
+                            null,
+                            now,
+                          ),
+                        })}
+                      </span>
+                    )}
+                    {lastActivityLabel && (
+                        <span
+                          data-testid={`task-last-activity-${task.id}`}
+                          className="text-xs text-muted-foreground"
+                        >
+                          {t("tasks.liveness.recent", {
+                            when: lastActivityLabel,
+                          })}
+                        </span>
+                      )}
                     <span className="text-xs font-medium">{executor}</span>
                     <span
                       data-testid={`task-time-${task.id}`}
@@ -406,7 +452,16 @@ export default function TaskPanel({
                         <p className="mb-1 text-xs font-medium text-muted-foreground">
                           {t("tasks.output.title")}
                         </p>
-                        <LiveOutput text={outputText} />
+                        {liveOutputFetchError && !outputText ? (
+                          <p
+                            data-testid={`task-output-error-${task.id}`}
+                            className="rounded-md border border-status-failed/40 bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
+                          >
+                            {liveOutputFetchError}
+                          </p>
+                        ) : (
+                          <LiveOutput text={outputText} />
+                        )}
                       </div>
                     </div>
                   )}

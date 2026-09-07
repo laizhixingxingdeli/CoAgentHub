@@ -223,6 +223,24 @@ describe("useGroupWs (ticket 14)", () => {
     next(30_000);
   });
 
+  
+  it("fires onReconnect only after a true reconnect, not the first open", () => {
+    vi.useFakeTimers();
+    stubWebSocket();
+    const onReconnect = vi.fn();
+    renderHook(() => useGroupWs("group-1", vi.fn(), { onReconnect }));
+    const first = MockWebSocket.instances[0];
+    act(() => first.open());
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    act(() => first.close());
+    act(() => vi.advanceTimersByTime(1000));
+    const second = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    expect(second).not.toBe(first);
+    act(() => second.open());
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
   it("closes the socket on unmount and never reconnects", () => {
     vi.useFakeTimers();
     stubWebSocket();

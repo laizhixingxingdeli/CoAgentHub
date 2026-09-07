@@ -232,6 +232,8 @@ type RequirementTimelineProps = {
    * 取最后非空行预览,展开态显示全量输出;缺省为空 → 回落
    * diffSummary.outputTail(与 TaskPanel 的取值优先级一致)。 */
   liveOutputs?: Record<string, string>;
+  /** Live-buffer / detail pull failure; distinct from empty output (R4). */
+  liveOutputFetchError?: string | null;
   /** 是否有 coordinator/human 权限:false 时停止/回滚禁用。 */
   canControl?: boolean;
   /** 归档/软删群只读:即使有控制权限,停止/回滚也禁用并提示。 */
@@ -250,6 +252,7 @@ export default function RequirementTimeline({
   messages = [],
   members = [],
   liveOutputs = {},
+  liveOutputFetchError = null,
   canControl = true,
   readOnly = false,
   commandSending = null,
@@ -555,6 +558,33 @@ export default function RequirementTimeline({
               className={`mt-1.5 rounded-md border px-2 py-1 text-xs ${TASK_UNCONFIRMED_CLASSES}`}
             >
               疑似中断 · 已 {signalMinutes} 分钟无信号
+            </p>
+          )}
+          {/* R1: even with zero report lines, running tasks show last-activity
+              meta so "thinking" is distinguishable from "hung". */}
+          {task.status === "running" &&
+            task.liveness?.lastSignalAt &&
+            !livenessWarning && (
+              <p
+                data-testid={`requirement-timeline-last-activity-${task.id}`}
+                className="mt-1.5 text-xs text-muted-foreground"
+              >
+                {t("tasks.liveness.recent", {
+                  when:
+                    signalMinutes <= 0
+                      ? t("tasks.liveness.justNow")
+                      : t("tasks.liveness.minutesAgo", {
+                          n: String(signalMinutes),
+                        }),
+                })}
+              </p>
+            )}
+          {liveOutputFetchError && task.status === "running" && (
+            <p
+              data-testid={`requirement-timeline-output-error-${task.id}`}
+              className="mt-1.5 text-xs text-status-failed"
+            >
+              {liveOutputFetchError}
             </p>
           )}
           {failed && (

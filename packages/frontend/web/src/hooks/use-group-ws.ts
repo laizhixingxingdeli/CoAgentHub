@@ -284,13 +284,26 @@ export function connectParticipantWs(opts: {
  * carries only the id (the receiver marks the placeholder locally). Frames for
  * other groups are ignored, so one socket per group page stays isolated.
  */
+export type UseGroupWsOptions = {
+  /**
+   * Fires when the socket re-opens after a prior live connection (true
+   * reconnect). The first successful open of a mount does **not** fire —
+   * callers seed on mount themselves and reuse this only for gap-fill after
+   * a drop. Shared shape for task-panel live-buffer refill and message R5.
+   */
+  onReconnect?: () => void;
+};
+
 export function useGroupWs(
   groupId: string | undefined,
   onEvent: (event: WsGroupEvent) => void,
+  options?: UseGroupWsOptions,
 ): { connected: boolean } {
   // Keep the latest callback without re-running the connect effect.
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const onReconnectRef = useRef(options?.onReconnect);
+  onReconnectRef.current = options?.onReconnect;
 
   const [connected, setConnected] = useState(false);
 
@@ -298,6 +311,20 @@ export function useGroupWs(
     if (!groupId) {
       return;
     }
+
+    // First open after mount is not a reconnect; only false→true after a
+    // prior live session triggers onReconnect (task-panel + message R5 share).
+    let hadLiveConnection = false;
+
+    const handleStatusChange = (isConnected: boolean) => {
+      setConnected(isConnected);
+      if (isConnected) {
+        if (hadLiveConnection) {
+          onReconnectRef.current?.();
+        }
+        hadLiveConnection = true;
+      }
+    };
 
     const handleFrame = (data: unknown) => {
       if (!data || typeof data !== "object") {
@@ -378,7 +405,7 @@ export function useGroupWs(
 
     return connectParticipantWs({
       onFrame: handleFrame,
-      onStatusChange: setConnected,
+      onStatusChange: handleStatusChange,
     });
   }, [groupId]);
 
