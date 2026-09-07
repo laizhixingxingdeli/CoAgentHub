@@ -17,7 +17,7 @@ import {
   findExecutorByKey,
   findExecutorByParticipant,
 } from "@server/lib/executors";
-import { and, asc, eq, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
 import { isTerminalTaskStatus } from "../coordination-activity";
 import { notifyTaskStatusChanged } from "./notify";
@@ -791,17 +791,26 @@ async function createCoordinatorResumeTask(
  *
  * 判据(specs/completion-events-never-reach-terminal-state.md R1/R2):
  * 「永久/暂时」由 maybeCreateCoordinatorResumeTask 的显式 permanence 判定 ——
- * 永久类是事件自身事实(无父任务/父已终态/父不存在/自身是续跑任务),不会自行
- * 变化;暂时类依赖运行期可变状态(进程存活、成员角色、在途续跑)。本消费循环
+ * 永久类是事件自身事实(父已终态/父不存在/自身是续跑任务),不会自行变化;
+ * 暂时类依赖运行期可变状态(进程存活、成员角色、在途续跑)。本消费循环
  * 不另建第二套判据,permanence 是同一事实的唯一判定出处;reason 仅是诊断文本。
+ *
+ * 扫描集合只含**有父任务**的事件(specs/resume-consumer-kills-reviewer-inbox-events.md R1):
+ * 顶层任务(检视者/外部触发方派发的 detached 任务)的完成事件属于**收件人的
+ * inbox**,不归本消费者处置 —— 此前它们会被判 dead,把检视者的 L3 请求在 5 秒
+ * 内吃掉,L3 回传因此成了竞态。它们保持 pending 直到收件人 claim + ack;
+ * 无人消费时长期 pending 是 inbox 自身的语义,**不由本消费者代为清理**(R3)。
  */
 export async function consumePendingCompletionEvents(
   db: DataBase,
 ): Promise<number> {
   const now = new Date();
+  // join task 并在查询层排除顶层任务:取出来再 continue 会让这些事件每 5 秒
+  // 被反复取出,而当初判 dead 的动机正是避免无限重扫。
   const rows = await db
-    .select()
+    .select({ event: taskCompletionEventTable, task: taskTable })
     .from(taskCompletionEventTable)
+    .innerJoin(taskTable, eq(taskTable.id, taskCompletionEventTable.taskId))
     .where(
       and(
         eq(taskCompletionEventTable.state, "pending"),
@@ -809,16 +818,13 @@ export async function consumePendingCompletionEvents(
           isNull(taskCompletionEventTable.nextAttemptAt),
           lte(taskCompletionEventTable.nextAttemptAt, now),
         ),
+        isNotNull(taskTable.parentTaskId),
       ),
     )
     .orderBy(asc(taskCompletionEventTable.id));
 
   let created = 0;
-  for (const event of rows) {
-    const task = await db.query.task.findFirst({
-      where: eq(taskTable.id, event.taskId),
-    });
-    if (!task) continue;
+  for (const { event, task } of rows) {
     const result = await maybeCreateCoordinatorResumeTask(db, task);
     if (result.kind === "created") {
       created += 1;

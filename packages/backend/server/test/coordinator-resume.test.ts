@@ -1018,7 +1018,12 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(await resumeTasksFor(parent.id)).toHaveLength(1);
     });
 
-    it("永久 skip 2:事件所属任务无父任务 → 事件置 dead 且 lastError 写明无续跑对象", async () => {
+    // 本用例原先断言「无父任务 → 事件置 dead」,那正是
+    // specs/resume-consumer-kills-reviewer-inbox-events.md 记录的缺陷:顶层
+    // 任务(检视者派给协调者的 detached 任务)的完成事件属于收件人的 inbox,
+    // 被本消费者在 5 秒内判死后,检视者的 L3 请求既列不出也认领不了。
+    // 按新契约重写:本消费者不再触碰这类事件。
+    it("无父任务的顶层事件不归本消费者处置 → 保持 pending,不判 dead", async () => {
       const { group, coordinator } = await seedParentChild({});
       // 顶层任务(无 parentTaskId)首次终态同样产生 pending 完成事件;
       // 本场景只为它落事件(不触碰 child 的事件)。
@@ -1033,9 +1038,59 @@ describe.sequential("协调者续跑完整验收", () => {
         .select()
         .from(taskCompletionEventTable)
         .where(eq(taskCompletionEventTable.state, "dead"));
-      expect(deads).toHaveLength(1);
-      expect(deads[0].taskId).toBe(orphan.id);
-      expect(deads[0].lastError).toContain("父任务");
+      expect(deads).toHaveLength(0);
+      const event = await eventFor(orphan.id);
+      expect(event?.state).toBe("pending");
+      expect(event?.lastError).toBeNull();
+      expect(event?.attempts).toBe(0);
+    });
+
+    it("顶层事件多轮扫描后仍可被收件人 claim → ack 到 delivered", async () => {
+      const { group, coordinator } = await seedParentChild({});
+      const top = await insertTask({
+        groupId: group.id,
+        executorParticipantId: coordinator.id,
+        status: "done",
+      });
+      // 收件人 = 协调者本人(顶层任务的完成事件默认回落下发者)。
+      await testDb.insert(taskCompletionEventTable).values({
+        taskId: top.id,
+        groupId: top.groupId,
+        dispatcherParticipantId: coordinator.id,
+        recipientParticipantId: coordinator.id,
+        state: "pending",
+      });
+
+      for (let i = 0; i < 3; i++) {
+        expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
+      }
+      expect((await eventFor(top.id))?.state).toBe("pending");
+
+      const app = createTestApp();
+      const eventId = (await eventFor(top.id))?.id as string;
+      const base = `/api/participants/${coordinator.id}/task-completion-events`;
+      const claimRes = await app.request(`${base}/${eventId}/claim`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({ consumerId: "reviewer-test", leaseMs: 60_000 }),
+      });
+      expect(claimRes.status).toBe(200);
+      const { leaseToken } = (await claimRes.json()) as { leaseToken: string };
+
+      const ackRes = await app.request(`${base}/${eventId}/ack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Participant-Id": coordinator.id,
+        },
+        body: JSON.stringify({ leaseToken }),
+      });
+      expect(ackRes.status).toBe(200);
+      // 读落库的最终记录,不停在响应码。
+      expect((await eventFor(top.id))?.state).toBe("delivered");
     });
 
     it("永久 skip 3:父任务记录查不到 → 函数级判定为永久 skip(reason 非 null)", async () => {
@@ -1118,12 +1173,13 @@ describe.sequential("协调者续跑完整验收", () => {
       expect(event?.lastError).toBeNull();
     });
 
-    it("一轮消费后 pending 只剩暂时性事件:永久类全部 dead,暂时类保持 pending", async () => {
+    it("一轮消费后:续跑域的永久类置 dead,暂时类与顶层事件保持 pending", async () => {
       // 混合四个场景:
-      //  a) 续跑任务自身事件(R4,永久)
-      //  b) 顶层无父任务事件(永久)
-      //  c) 父已终态(永久)
-      //  d) 父进程存活(暂时)
+      //  a) 续跑任务自身事件(R4,永久 → dead)
+      //  b) 顶层无父任务事件(不归本消费者处置 → 保持 pending,
+      //     见 specs/resume-consumer-kills-reviewer-inbox-events.md)
+      //  c) 父已终态(永久 → dead)
+      //  d) 父进程存活(暂时 → 保持 pending)
       const a = await seedParentChild({});
       const resumeA = await insertTask({
         groupId: a.parent.groupId,
@@ -1154,12 +1210,15 @@ describe.sequential("协调者续跑完整验收", () => {
 
       expect(await countPendingEvents()).toBe(4);
       expect(await consumePendingCompletionEvents(runtimeDb)).toBe(0);
-      expect(await countPendingEvents()).toBe(1); // 仅剩 d(暂时)
+      expect(await countPendingEvents()).toBe(2); // b(顶层)+ d(暂时)
       const deads = await testDb
         .select()
         .from(taskCompletionEventTable)
         .where(eq(taskCompletionEventTable.state, "dead"));
-      expect(deads).toHaveLength(3);
+      expect(deads).toHaveLength(2);
+      expect(deads.map((e) => e.taskId).sort()).toEqual(
+        [resumeA.id, c.child.id].sort(),
+      );
       for (const dead of deads) {
         expect(dead.lastError).toBeTruthy();
       }
@@ -1167,7 +1226,9 @@ describe.sequential("协调者续跑完整验收", () => {
         .select()
         .from(taskCompletionEventTable)
         .where(eq(taskCompletionEventTable.state, "pending"));
-      expect(pending[0]?.taskId).toBe(d.child.id);
+      expect(pending.map((e) => e.taskId).sort()).toEqual(
+        [orphan.id, d.child.id].sort(),
+      );
     });
 
     it("永久置 dead 不干扰 hasPendingResumeEvent 豁免(specs §3.3 第一点)", async () => {
