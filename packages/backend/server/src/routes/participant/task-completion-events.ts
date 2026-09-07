@@ -7,7 +7,7 @@ import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 import { assertPathParticipantExists } from "@server/lib/unknown-participant";
 import { participantIdentity } from "@server/middleware/participant-identity";
-import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { z } from "zod";
@@ -31,6 +31,38 @@ const MAX_LEASE_MS = 3600_000;
 
 function eventNotFound() {
   return new BizError(BizCodeEnum.TaskNotFound, "task completion event not found");
+}
+
+/**
+ * fail 命中 0 行后的原因分类(只读,不产生任何写入)。
+ *
+ * 判据:以「当前行的 state」代替「UPDATE 为何没命中」——UPDATE 只回答命中了几行,
+ * 不回答原因。这不成立的场景:UPDATE 与本查询之间行被再次改动(例如另一个消费者
+ * 恰好在这一瞬重领),此时分类会偏旧。后果仅限文案:响应码恒为 409 且已确认没有
+ * 写入,消费者据此不会误判为需要重试,因此接受这个偏差。
+ */
+async function failConflictReason(
+  db: DataBase,
+  eventId: string,
+  participantId: string,
+): Promise<string> {
+  const current = await db.query.taskCompletionEvent.findFirst({
+    where: and(
+      eq(taskCompletionEventTable.id, eventId),
+      eq(taskCompletionEventTable.recipientParticipantId, participantId),
+    ),
+    columns: { state: true },
+  });
+  if (!current) {
+    return "task completion event not found or not addressed to this participant";
+  }
+  if (current.state === "delivered") {
+    return "event already delivered; fail is no longer effective (no retry needed)";
+  }
+  if (current.state === "dead") {
+    return "event is dead (max attempts exceeded); fail is no longer effective (no retry needed)";
+  }
+  return "leaseToken is invalid or the lease has expired (event re-claimed or already failed); claim it again before failing";
 }
 
 /**
@@ -264,8 +296,12 @@ app
       }
 
       const now = new Date();
-      // Idempotent ack: only the matching leaseToken can ack. If already delivered
-      // with the same token, succeed (idempotent).
+      // Idempotent ack: only the matching leaseToken can ack, and only from a
+      // leased (or already delivered — repeat ack) row. `pending`/`dead` rows are
+      // no longer promotable to delivered by a leftover token.
+      // leaseToken is deliberately NOT cleared here: clearing it would break the
+      // repeat-ack idempotency contract (2nd ack → 409); the fail endpoint's
+      // `state='leased'` guard is what prevents delivered → pending instead.
       const [acked] = await db
         .update(taskCompletionEventTable)
         .set({
@@ -278,6 +314,7 @@ app
             eq(taskCompletionEventTable.id, eventId),
             eq(taskCompletionEventTable.recipientParticipantId, participantId),
             eq(taskCompletionEventTable.leaseToken, leaseToken),
+            inArray(taskCompletionEventTable.state, ["leased", "delivered"]),
           ),
         )
         .returning();
@@ -329,31 +366,21 @@ app
         throw new BizError(BizCodeEnum.Forbidden);
       }
 
-      const event = await db.query.taskCompletionEvent.findFirst({
-        where: and(
-          eq(taskCompletionEventTable.id, eventId),
-          eq(taskCompletionEventTable.recipientParticipantId, participantId),
-        ),
-      });
-      if (!event || event.leaseToken !== leaseToken) {
-        throw new BizError(
-          BizCodeEnum.Conflict,
-          "leaseToken mismatch or event not found",
-        );
-      }
-
       const truncatedError = error ? error.slice(0, 2000) : null;
-      const newAttempts = event.attempts + 1;
-      const isDead = newAttempts >= DEFAULT_MAX_ATTEMPTS;
       const nextAttemptAt = new Date(
         Date.now() + (retryAfterMs ?? DEFAULT_RETRY_AFTER_MS),
       );
       const now = new Date();
 
+      // 单条原子 fail(spec completion-event-fail-atomic-lease-guard R1/R2):
+      // WHERE 覆盖 eventId + 收件人 + leaseToken + state='leased' —— 读与写之间
+      // 不存在窗口,过期 lease、重复 fail、ack 之后的迟到 fail 一律命中 0 行。
+      // state 与 attempts 在同一条 UPDATE 内按同一个行版本计算(CASE 表达式读的
+      // 是更新前的 attempts),因此 returning 出的两者必然自洽。
       const [updated] = await db
         .update(taskCompletionEventTable)
         .set({
-          state: isDead ? "dead" : "pending",
+          state: sql`CASE WHEN ${taskCompletionEventTable.attempts} + 1 >= ${DEFAULT_MAX_ATTEMPTS} THEN 'dead' ELSE 'pending' END`,
           // 原子自增:并发 fail(如 lease 过期后另一方重领)不丢计数;
           // returning 的 attempts 即真实新值。
           attempts: sql`${taskCompletionEventTable.attempts} + 1`,
@@ -363,8 +390,24 @@ app
           leaseExpiresAt: null,
           updatedAt: now,
         })
-        .where(eq(taskCompletionEventTable.id, eventId))
+        .where(
+          and(
+            eq(taskCompletionEventTable.id, eventId),
+            eq(taskCompletionEventTable.recipientParticipantId, participantId),
+            eq(taskCompletionEventTable.leaseToken, leaseToken),
+            eq(taskCompletionEventTable.state, "leased"),
+          ),
+        )
         .returning();
+
+      // 0 行命中:不做任何写入,只读回当前行把原因分类(消费者是 LLM 或脚本,
+      // 文案就是它的修复指引)。
+      if (!updated) {
+        throw new BizError(
+          BizCodeEnum.Conflict,
+          await failConflictReason(db, eventId, participantId),
+        );
+      }
 
       return c.json({
         success: true,

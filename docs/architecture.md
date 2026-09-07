@@ -139,8 +139,8 @@ CoAgentHub/
 | `/api/groups/:id/tasks/:taskId/output/:entryId` | GET | 单条明细展开(R5):按摘要行 `#id` 取回完整原文(`{id,kind,at,text}`);授权口径与 `includeOutput` 一致(群/任务存在性校验同任务详情路由,不放宽);`id 不存在` / `明细文件不存在` → 404 并说明原因 |
 | `/api/participants/:id/task-completion-events` | GET | 列出**以该 participant 为收件人**的 completion event inbox(pending / 可重试 / lease 已过期);`?after=<eventId>` 游标、`?limit=<n>`(上限 100) |
 | `/api/participants/:id/task-completion-events/:eventId/claim` | POST | 原子认领(lease):body `{ consumerId, leaseMs }` → `leaseToken + event`;仅收件人本人可认领,同一 event 在有效 lease 内只能被一个 consumer claim,错误 token 返回 409 |
-| `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered(仅收件人本人);相同 token 重复 ack 幂等 |
-| `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending(仅收件人本人);超过 10 次进入 dead |
+| `/api/participants/:id/task-completion-events/:eventId/ack` | POST | 使用 `leaseToken` 标记 delivered(仅收件人本人);仅 `leased`/`delivered` 行可 ack(pending/dead 行的残留 token 不再能把事件改成 delivered);相同 token 重复 ack 幂等(ack 不清空 `leaseToken`) |
+| `/api/participants/:id/task-completion-events/:eventId/fail` | POST | 记录截断错误、增加 attempts,按 `retryAfterMs` 回到 pending(仅收件人本人);超过 10 次进入 dead。单条原子 UPDATE,WHERE 含 eventId + 收件人 + `leaseToken` + `state='leased'`;`state` 与 `attempts` 在同一行版本内算出,必然自洽。命中 0 行 → 409 并按「事件不存在/不属于该收件人 · 已 delivered · 已 dead · lease 失效(过期/被重领/已 fail)」分类文案;**重复 fail 不幂等**(第二次 409,attempts 只 +1) |
 | `/api/system/health` | GET | 健康检查(纯文本 ok 或 JSON) |
 | `/api/health` | GET | 运行时新鲜度检查(返回 `startedAt` / `entryMtime` / `stale` / `staleReason`；源码扫描时附 `newestSourceMtime`；仅报告不拦截) |
 | `/api/file/*` | POST/GET/DELETE | LAN 文件存储(`upload`/`list`/`:name`),纯磁盘无鉴权,文件名防穿越 |

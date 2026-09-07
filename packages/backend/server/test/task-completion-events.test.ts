@@ -816,6 +816,271 @@ describe("Durable Task Completion Events", () => {
     }, 30_000);
   });
 
+  // ── fail/ack 的 lease 原子守卫(specs/completion-event-fail-atomic-lease-guard.md)──
+
+  describe("fail/ack 的 lease 原子守卫", () => {
+    /**
+     * 直接落库一条 completion event:本组用例只考 lease/ack/fail 的并发契约,
+     * 不依赖执行器跑出终态(Windows 上 fake bin 起不来,走真实管线会红)。
+     */
+    async function seedEvent(
+      groupId: string,
+      recipientId: string,
+      executorId: string,
+      overrides: {
+        state?: "pending" | "leased" | "delivered" | "dead";
+        attempts?: number;
+        leaseToken?: string | null;
+      } = {},
+    ) {
+      const { testDb } = await import("./db");
+      const {
+        task: taskTable,
+        taskCompletionEvent: tce,
+      } = await import("@laizhixingxingdeli/database/schema");
+      const [taskRow] = await testDb
+        .insert(taskTable)
+        .values({
+          groupId,
+          messageId: crypto.randomUUID(),
+          executorParticipantId: executorId,
+          executorKey: "codebuddy",
+          status: "done",
+          dispatcherParticipantId: recipientId,
+          callbackRef: { platform: "codex" },
+        })
+        .returning();
+      const [event] = await testDb
+        .insert(tce)
+        .values({
+          taskId: taskRow.id,
+          groupId,
+          recipientParticipantId: recipientId,
+          dispatcherParticipantId: recipientId,
+          state: overrides.state ?? "pending",
+          attempts: overrides.attempts ?? 0,
+          leaseToken: overrides.leaseToken ?? null,
+        })
+        .returning();
+      return event;
+    }
+
+    /** 读数据库最终记录 —— 验收要求,不接受只断言 HTTP 状态码。 */
+    async function readEvent(eventId: string) {
+      const { testDb } = await import("./db");
+      const { taskCompletionEvent: tce } = await import(
+        "@laizhixingxingdeli/database/schema"
+      );
+      const { eq } = await import("drizzle-orm");
+      const [row] = await testDb
+        .select()
+        .from(tce)
+        .where(eq(tce.id, eventId));
+      expect(row).toBeDefined();
+      return row;
+    }
+
+    async function expireLease(eventId: string) {
+      const { testDb } = await import("./db");
+      const { taskCompletionEvent: tce } = await import(
+        "@laizhixingxingdeli/database/schema"
+      );
+      const { eq } = await import("drizzle-orm");
+      await testDb
+        .update(tce)
+        .set({ leaseExpiresAt: new Date(Date.now() - 1_000) })
+        .where(eq(tce.id, eventId));
+    }
+
+    it("过期 lease 的旧消费者 fail → 409,新持有者的 lease 与 attempts 不被改写", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-stale-lease",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      const claimA = await claimEvent(
+        coordinator.id,
+        ev.id,
+        "consumer-A",
+        60_000,
+      );
+      expect(claimA.res.status).toBe(200);
+      // A 的 lease 过期 → B 重领(新 token)
+      await expireLease(ev.id);
+      const claimB = await claimEvent(
+        coordinator.id,
+        ev.id,
+        "consumer-B",
+        60_000,
+      );
+      expect(claimB.res.status).toBe(200);
+      const before = await readEvent(ev.id);
+
+      // A 的迟到 fail(旧 token)
+      const late = await failEvent(
+        coordinator.id,
+        ev.id,
+        claimA.json.leaseToken,
+        "late failure",
+      );
+      expect(late.res.status).toBe(409);
+      expect(String(late.json.message)).toContain("lease");
+
+      const after = await readEvent(ev.id);
+      expect(after.state).toBe("leased");
+      expect(after.leaseToken).toBe(claimB.json.leaseToken);
+      expect(after.leaseExpiresAt).not.toBeNull();
+      expect(after.attempts).toBe(before.attempts);
+      // 0 行命中 = 一次写入都没有(连 updatedAt 都不动)
+      expect(after.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
+    });
+
+    it("ack 之后同 token 的迟到 fail → 409,delivered 不被打回 pending", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-ack-then-fail",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      const claim = await claimEvent(coordinator.id, ev.id, "ack-consumer");
+      expect(claim.res.status).toBe(200);
+      const ack = await ackEvent(coordinator.id, ev.id, claim.json.leaseToken);
+      expect(ack.res.status).toBe(200);
+
+      const late = await failEvent(
+        coordinator.id,
+        ev.id,
+        claim.json.leaseToken,
+        "late failure",
+      );
+      expect(late.res.status).toBe(409);
+      expect(String(late.json.message)).toContain("delivered");
+
+      const after = await readEvent(ev.id);
+      expect(after.state).toBe("delivered");
+      expect(after.deliveredAt).not.toBeNull();
+      expect(after.attempts).toBe(0);
+    });
+
+    it("重复 fail → 第一次 200(attempts=1),第二次 409,attempts 仍为 1", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-dup-fail",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      const claim = await claimEvent(coordinator.id, ev.id, "fail-consumer");
+      expect(claim.res.status).toBe(200);
+
+      const fail1 = await failEvent(
+        coordinator.id,
+        ev.id,
+        claim.json.leaseToken,
+        "boom",
+        0,
+      );
+      expect(fail1.res.status).toBe(200);
+      expect(fail1.json.attempts).toBe(1);
+      expect(fail1.json.state).toBe("pending");
+
+      const fail2 = await failEvent(
+        coordinator.id,
+        ev.id,
+        claim.json.leaseToken,
+        "boom again",
+      );
+      expect(fail2.res.status).toBe(409);
+
+      const after = await readEvent(ev.id);
+      expect(after.attempts).toBe(1);
+      expect(after.state).toBe("pending");
+      expect(after.leaseToken).toBeNull();
+    });
+
+    it("重试阈值:attempts=9 仍 pending、attempts=10 转 dead,dead 后 inbox 不再列出", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-dead-threshold",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      for (let i = 0; i < 10; i++) {
+        const claim = await claimEvent(coordinator.id, ev.id, `dead-${i}`);
+        expect(claim.res.status).toBe(200);
+        const fail = await failEvent(
+          coordinator.id,
+          ev.id,
+          claim.json.leaseToken,
+          `delivery-error-${i}`,
+          0,
+        );
+        expect(fail.res.status).toBe(200);
+        expect(fail.json.attempts).toBe(i + 1);
+        expect(fail.json.state).toBe(i === 9 ? "dead" : "pending");
+        // 响应体的 state 与落库的 state/attempts 必须自洽(同一行版本算出)
+        const row = await readEvent(ev.id);
+        expect(row.attempts).toBe(i + 1);
+        expect(row.state).toBe(i === 9 ? "dead" : "pending");
+      }
+      const { events } = await inboxList(coordinator.id);
+      expect(events.some((e) => e.eventId === ev.id)).toBe(false);
+    });
+
+    it("收件人隔离:换身份调 fail → 403,该行任何字段未变化", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-recipient-isolation",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      const claim = await claimEvent(coordinator.id, ev.id, "fail-consumer");
+      expect(claim.res.status).toBe(200);
+      const before = await readEvent(ev.id);
+
+      const other = await app.request(
+        `/api/participants/${coordinator.id}/task-completion-events/${ev.id}/fail`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Participant-Id": codebuddy.id,
+          },
+          body: JSON.stringify({ leaseToken: claim.json.leaseToken }),
+        },
+      );
+      expect(other.status).toBe(403);
+      const after = await readEvent(ev.id);
+      expect(after).toEqual(before);
+    });
+
+    it("并发交错:同 token 两个 fail 只有一个成功,最终 attempts 与 state 自洽", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-concurrent-fail",
+      );
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
+      const claim = await claimEvent(coordinator.id, ev.id, "fail-consumer");
+      expect(claim.res.status).toBe(200);
+
+      const [r1, r2] = await Promise.all([
+        failEvent(coordinator.id, ev.id, claim.json.leaseToken, "e1", 0),
+        failEvent(coordinator.id, ev.id, claim.json.leaseToken, "e2", 0),
+      ]);
+      const statuses = [r1.res.status, r2.res.status].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const after = await readEvent(ev.id);
+      expect(after.attempts).toBe(1);
+      expect(after.state).toBe("pending");
+    });
+
+    it("ack 的 state 守卫:残留 token 不能把 pending 行直接改成 delivered", async () => {
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "guard-ack-state",
+      );
+      const staleToken = "00000000-0000-7000-8000-000000000000";
+      const ev = await seedEvent(group.id, coordinator.id, codebuddy.id, {
+        state: "pending",
+        leaseToken: staleToken,
+      });
+      const ack = await ackEvent(coordinator.id, ev.id, staleToken);
+      expect(ack.res.status).toBe(409);
+      const after = await readEvent(ev.id);
+      expect(after.state).toBe("pending");
+      expect(after.deliveredAt).toBeNull();
+    });
+  });
+
   // ── 四类终态路径均生成一个 event ──
 
   describe("四类终态路径均生成一个且仅一个 completion event", () => {
