@@ -12,8 +12,8 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, normalize, resolve } from "node:path";
 
 /** 默认执行超时:120 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
 const DEFAULT_TIMEOUT_MS = 120 * 60 * 1000;
@@ -37,6 +37,70 @@ export function findRepoRoot(): string {
     dir = parent;
   }
   return last;
+}
+
+/**
+ * Windows 垫片解析(specs/windows-cmd-executor-spawn.md R1)。
+ *
+ * npm 安装的 CLI 在 Windows 上是 `.cmd` 垫片,而 Node 自 CVE-2024-27980 加固后
+ * 拒绝在无 shell 时 spawn `.cmd`/`.bat`,直接抛 EINVAL —— 于是 Windows 主机上
+ * 任何执行器都起不来。
+ *
+ * **不能用 `shell: true` 换取兼容**:那样 args 会被拼接进命令行且不转义
+ * (Node DEP0190),而 `{ticketContent}` 会把整份多行任务书作为**一个** argv
+ * 元素传入(queue.ts),经 cmd.exe 无法可靠还原。
+ *
+ * 因此在 spawn 前把垫片解析成可直接 spawn 的真实目标,argv 数组语义保持不变:
+ * args 只做前缀追加,不做任何转义或重排。解析不出目标时**原样返回**,让 spawn
+ * 抛出与配置一致的错误,不做兜底猜测。
+ */
+export function resolveWindowsLauncher(
+  bin: string,
+  args: string[],
+  deps: {
+    platform?: NodeJS.Platform;
+    readShim?: (path: string) => string | undefined;
+    exists?: (path: string) => boolean;
+    nodeBin?: string;
+  } = {},
+): { bin: string; args: string[] } {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { bin, args };
+  if (!/\.(cmd|bat)$/i.test(bin)) return { bin, args };
+
+  const readShim =
+    deps.readShim ??
+    ((path: string) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return undefined;
+      }
+    });
+  const shim = readShim(bin);
+  if (!shim) return { bin, args };
+
+  // 垫片的启动行是最后一条含 `%*`(转发全部参数)的行;目标是该行里第一个
+  // 含 `%dp0%` 的引号 token(`%_prog%` 是 node 自身,不是目标)。
+  const launchLine = shim
+    .split(/\r?\n/)
+    .filter((line) => line.includes("%*"))
+    .pop();
+  if (!launchLine) return { bin, args };
+  const target = [...launchLine.matchAll(/"([^"]*)"/g)]
+    .map((m) => m[1])
+    .find((token) => token.includes("%dp0%") && !token.includes("%_prog%"));
+  if (!target) return { bin, args };
+
+  // `%dp0%` 自带结尾反斜杠,替换后会出现双反斜杠,必须规范化。
+  const resolved = normalize(target.replaceAll("%dp0%", `${dirname(bin)}\\`));
+  const exists = deps.exists ?? existsSync;
+  if (!exists(resolved)) return { bin, args };
+
+  // `.exe` 直接起;`.js` 或无扩展名的 node 脚本(shebang)交给 node 起。
+  return resolved.toLowerCase().endsWith(".exe")
+    ? { bin: resolved, args }
+    : { bin: deps.nodeBin ?? process.execPath, args: [resolved, ...args] };
 }
 
 export interface ExecutorRunOptions {
@@ -78,20 +142,28 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   const cwd = opts.cwd ?? findRepoRoot();
   const timeoutMs = opts.timeoutMs ?? readTimeoutMs();
 
+  // Windows 的 .cmd 垫片不能直接 spawn(EINVAL),先解析成真实目标;
+  // 其他平台与非垫片 bin 原样返回。
+  const launcher = resolveWindowsLauncher(bin, args);
+
   let child: ChildProcess;
   try {
     // detached:独立进程组,停止时 process.kill(-pid, SIGTERM) 可整体终止。
-    child = spawn(bin, args, {
+    child = spawn(launcher.bin, launcher.args, {
       cwd,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (e) {
     const err = e as Error;
+    // 错误里同时给出配置里的 bin 与实际尝试的 bin:垫片被解析过时,只报其中
+    // 一个会让排障看到一个与配置对不上的路径。
+    const attempted =
+      launcher.bin === bin ? bin : `${bin}(实际尝试 ${launcher.bin})`;
     return {
       pid: undefined,
       promise: Promise.reject(
-        new Error(`无法启动 ${bin}: ${err.message}`, { cause: err }),
+        new Error(`无法启动 ${attempted}: ${err.message}`, { cause: err }),
       ),
       kill: () => {},
     };
