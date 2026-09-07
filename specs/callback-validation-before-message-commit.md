@@ -1,8 +1,12 @@
 # Spec: callback 语义校验发生在消息提交之后,400 请求仍留下已广播的消息
 
 > **状态**: Frozen
-> **版本**: 1.0
+> **版本**: 1.1
 > **日期**: 2026-09-07
+>
+> **v1.1 修订(2026-09-07)**:§4.6 由「全量后端回归」改为「只跑改动触及的测试文件」。
+> 理由与 [completion-event-fail-atomic-lease-guard.md](completion-event-fail-atomic-lease-guard.md)
+> v1.1 相同(用户决策:本机全量 24 分钟,拖垮下发节奏)。
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md) R3
 > **相关**: [dispatch-fields-silent-loss.md](dispatch-fields-silent-loss.md)、
 > [coordination-payload-contract.md](coordination-payload-contract.md)(均 Landed)——
@@ -155,12 +159,13 @@ cd packages/backend/server && npx vitest run test/group-message.test.ts
    断言:响应 200;响应头含 `CALLBACK_STRIPPED_NOT_AUTHORIZED`;
    task 的 `callbackRef` 为 null。
 
-6. **主干回归**
-   消息写入是主干路径,按 AGENTS.md 跑全量后端回归:
+6. **相关面回归(v1.1 起不再跑全量)**
+   只跑**本次改动触及的测试文件**:
    ```
-   cd packages/backend/server && npx vitest run
+   cd packages/backend/server && npx vitest run test/dispatcher-fields.test.ts test/group-message.test.ts test/executor-trigger.test.ts test/executor-task-role-dispatch.test.ts test/coordination-payload-api.test.ts
    ```
-   汇报中贴出通过/失败计数;仅跑新增用例不算数。
+   汇报中贴出改动前后同口径的通过/失败计数(本机 Windows 是红基线,口径是
+   **失败数不增加**)。发现触及清单之外的模块 → 把对应测试文件加进命令并说明原因。
 
 7. **类型检查**
    ```

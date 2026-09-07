@@ -1,8 +1,13 @@
 # Spec: completion event 的 fail 不校验 lease,旧消费者能改写新租约与已确认状态
 
 > **状态**: Frozen
-> **版本**: 1.0
+> **版本**: 1.1
 > **日期**: 2026-09-07
+>
+> **v1.1 修订(2026-09-07)**:§4.7 由「全量后端回归」改为「只跑改动触及的测试文件」。
+> 理由:用户决策——本机全量后端回归实测 24 分钟,R2 首轮 1 小时 42 分里有 24 分钟
+> 耗在这一条上,而它对本票的缺陷没有增量信息。**本修订适用于在途的 R2 任务**
+> (检视者显式豁免验收钉子,理由记录在此)。
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md) R2
 > **上游**: [durable-task-completion-events.md](durable-task-completion-events.md)(Landed)——本票收紧其
 > lease/ack/fail 的并发契约,不改事件的产生方式与信封形状。
@@ -172,12 +177,14 @@ cd packages/backend/server && npx vitest run test/task-completion-events.test.ts
    断言:数据库最终 `attempts` 与 `state` 自洽(`attempts >= 10 ⇔ state='dead'`),
    且成功响应只有一个。
 
-7. **主干回归**
-   fail/ack 属于完成事件主干路径,按 AGENTS.md 要求跑**全量后端回归**:
+7. **相关面回归(v1.1 起不再跑全量)**
+   只跑**本次改动触及的测试文件**,而不是整包全量:
    ```
-   cd packages/backend/server && npx vitest run
+   cd packages/backend/server && npx vitest run test/task-completion-events.test.ts test/task-completion-event-trigger.test.ts test/coordinator-resume.test.ts
    ```
-   并在汇报中贴出通过/失败计数。仅跑新增用例不算数。
+   汇报中贴出改动前后同口径的通过/失败计数(本机 Windows 是红基线,口径是
+   **失败数不增加**)。若改动过程中发现触及了上面清单之外的模块,把对应测试文件
+   加进这条命令并在汇报里说明为什么加。
 
 8. **类型检查**
    ```
