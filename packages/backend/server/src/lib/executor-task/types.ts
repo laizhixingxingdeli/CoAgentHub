@@ -206,9 +206,16 @@ export function sumAttemptTokenUsage(
     ),
     totalTokens: usages.reduce((sum, usage) => sum + usage.totalTokens, 0),
     source,
+    // trusted 必须**双向**透传:原实现只在有一条 false 时写 false,
+    // 于是 trusted:true 在聚合后整个消失 —— 实测真实 Pi 任务落库后
+    // diffSummary.tokenUsage 里根本没有该字段,R3 的可见性等于没生效。
+    // 口径取最保守的一条:有任何一条 false → false;全部 true → true;
+    // 混杂(有的没标)→ 不写,保持"未表态"。
     ...(usages.some((usage) => usage.trusted === false)
       ? { trusted: false }
-      : {}),
+      : usages.every((usage) => usage.trusted === true)
+        ? { trusted: true }
+        : {}),
   };
 }
 
