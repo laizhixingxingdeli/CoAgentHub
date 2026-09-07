@@ -13,3 +13,9 @@
 
 ## 后果
 - 干净、可复现的执行;协调/记忆职责只属于协调型 participant(见 ADR-0004)。
+
+## 后续演进
+
+调度已从本 ADR 决策时的「全局串行队列」演进为按 `projectPath` 分组:
+同工作树串行(`maxConcurrentPerWorkspace: 1`)+ 有限跨组并行(`maxParallelGroups: 2`)。
+当前配置见 `scripts/dispatch-policy.json`(CONTEXT.md 的 task 词条亦已按分组队列表述)。

@@ -12,7 +12,7 @@
 
 ## 1. 项目概览
 
-一句话:CoAgentHub 让多个 participant(hermes / atomcode / openclaw / human / custom)以角色路由的方式围绕「一个任务一个群组」协作,CoAgentHub 只做协作调度与消息信令,不代理文件字节。
+一句话:CoAgentHub 让多个 participant(hermes / atomcode / openclaw / human / custom)以角色路由的方式围绕「一个任务一个群组」协作;群内 `fileRef` 的 P2P 信令路径只做协作调度与消息信令、不代理文件字节;另有独立的 `/api/file/*` LAN 文件存储会流式上传/下载字节。
 
 | 域 | 说明 |
 | --- | --- |

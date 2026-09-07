@@ -8,8 +8,10 @@ tracker.
 
 CoAgentHub is a LAN-scale multi-participant collaboration hub: participants
 (humans, CLIs, resident scripts, AI bots) register identities, join task
-groups, exchange role-routed messages, and hand off files via P2P signaling. It
-does coordination and messaging only — it does not proxy file bytes.
+groups, exchange role-routed messages, and hand off files via P2P signaling.
+On the group `fileRef` P2P signaling path it does coordination and messaging
+only — it does not proxy those file bytes. Separately, `/api/file/*` is a LAN
+disk file store that does stream upload/download bytes.
 
 ## Domain docs (read these before diving into code)
 
@@ -72,16 +74,23 @@ Migrate the database before exercising the server:
 
 ## 测试与验收(2026-09-07 一批修复中反复付学费的几条)
 
-- **跑定向测试用这条,别猜:**
+- **当前口径(2026-09-07 用户决策):由票面给出显式测试文件清单,执行器照单跑。**
+  定向单文件示例:
   ```
   cd packages/backend/server && npx vitest run test/<文件>.test.ts
   ```
-  不要根 `pnpm test`(全量 77 文件 / 1140 用例,实测 **~490 秒**,必然超过执行器的
-  180 秒命令超时);不要 `pnpm --filter ... test`(带 `pretest`,会先构建 database
-  与 error 两个包)。全量回归由检视者在 L3 跑。
-- **改动落在主干路径(`done` 分支、聚合函数、渲染入口)时必须跑全量。**
-  只跑新增用例 = 只验证了「我想到的那部分」。同一天两次因此漏掉回归:
-  一次 11 条既有用例转红,一次深比较断言未同步新字段。
+  不要根 `pnpm test`;不要 `pnpm --filter ... test`(带 `pretest`,会先构建
+  database 与 error 两个包)。
+- **历史口径(已取代)**:曾写「不要根 `pnpm test`(全量 77 文件 / 1140 用例,
+  另一台主机历史实测 **~490 秒**,会超过执行器 180 秒命令超时);全量回归由
+  检视者在 L3 跑;改动落在主干路径(`done` 分支、聚合函数、渲染入口)时必须
+  跑全量」。**2026-09-07 用户决策**改为只跑票面清单内的文件。理由:本机
+  (CoAgentHub 执行环境)全量实测 **1444 秒 / 约 24 分钟**(2026-09-07 13:48
+  起跑,78 文件 / 1053 用例);当天已有执行器按旧规则跑全量、白耗约 40 分钟。
+- **清单列错就会漏。** 只跑清单里想到的文件 = 只验证了「我想到的那部分」。
+  同一天两次因此漏掉回归:一次 11 条既有用例转红,一次深比较断言未同步新字段。
+  风险已从「跑不跑全量」转移到「票面清单准不准」——列文件时必须覆盖改动触及的
+  既有测试,不能只列新增用例。
 - **验收要走到最终产物,不能停在被测函数的返回值。** 单测里函数返回对了,
   生产路径在函数与落库之间还有一段(attempts 聚合、渲染、API 序列化),
   要求常常就在那段里丢掉。至少要有一次「读落库的 `diffSummary` 字段 /
