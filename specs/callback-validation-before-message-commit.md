@@ -1,7 +1,13 @@
 # Spec: callback 语义校验发生在消息提交之后,400 请求仍留下已广播的消息
 
-> **状态**: Frozen
-> **版本**: 1.1
+> **状态**: Landed — L3 通过(2026-09-07),实现 `a1b61d0a`(AtomCode 直连实施,
+> 检视者完成 L2/L3)。独立基线复核:把 `messages.ts` 切回改前、保留新用例 →
+> **14 红/90 绿**;改后 **12 红/92 绿** —— 多出的 2 条红正是测「零副作用」的两条,
+> 证明新用例真能暴露旧行为(12 红为本机 Windows 既有基线)。
+> **版本**: 1.2
+>
+> **v1.2 修订(2026-09-07)**:§4.5 的断言更正,见该条下方说明(原写法不可构造,
+> 由执行器提出反证)。
 > **日期**: 2026-09-07
 >
 > **v1.1 修订(2026-09-07)**:§4.6 由「全量后端回归」改为「只跑改动触及的测试文件」。
@@ -156,8 +162,16 @@ cd packages/backend/server && npx vitest run test/group-message.test.ts
 
 5. **无权携带者的非法 callback 仍走剥离警告**(R2 的适用面回归)
    构造:仅 `executor` 角色的 participant 发送,带非法 callback。
-   断言:响应 200;响应头含 `CALLBACK_STRIPPED_NOT_AUTHORIZED`;
-   task 的 `callbackRef` 为 null。
+   断言:响应 200;响应头含 `CALLBACK_STRIPPED_NOT_AUTHORIZED`;消息正常写入;
+   **该消息不产生 task**。
+
+   > **v1.2 更正**:本条原写「task 的 `callbackRef` 为 null」,**不可构造**。
+   > `maybeDispatchExecutorTask` 对不命中 `DISPATCH_ALLOWED_ROLES` 的发送者直接
+   > 跳过建 task,因此「仅 executor 角色发送者」根本不会产生 task,不存在
+   > 「callbackRef 为 null 的 task」可读;而「有下发权 + callback 被剥离」这个
+   > 组合按现行规则不存在(有下发权即 `canCarryDispatcher`,callback 不会被剥离)。
+   > 由实施 R3 的执行器在汇报中提出该反证,检视者确认后更正 —— 断言改为等价且
+   > 可观测的「无 task」。
 
 6. **相关面回归(v1.1 起不再跑全量)**
    只跑**本次改动触及的测试文件**:
