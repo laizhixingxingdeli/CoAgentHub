@@ -35,7 +35,8 @@ export type AgentState = "idle" | "polling" | "processing" | "stopped";
  *   5. on failure: call core fail API (no local dedupe write)
  *
  * Crash safety: if the process dies between local dedupe write and ack,
- * the next run sees eventId in the dedupe store and only re-acks.
+ * the next run sees eventId in the dedupe store and re-claims a fresh lease
+ * and re-acks (it never re-executes the command).
  */
 export class CallbackAgent {
   private readonly config: CallbackAgentConfig;
@@ -125,13 +126,41 @@ export class CallbackAgent {
   async processEvent(eventStub: InboxItem): Promise<boolean> {
     const eventId = eventStub.eventId;
 
-    // Skip already-delivered (dedupe guard — handles crash between write & ack)
+    // Dedupe guard: command already ran (crash between dedupe write & ack).
+    // Re-claim a FRESH lease and re-ack to drive the event to delivered.
+    // Never execute the command again — the premise of this branch is that
+    // it already ran successfully.
     if (this.dedupe.isDelivered(eventId)) {
-      this.logger.info?.(
-        `event ${eventId} already in dedupe store; acking only`,
+      let leaseToken: string;
+      try {
+        const claimRes = await this.client.claimEvent(
+          eventId,
+          this.config.consumerId,
+          this.config.leaseMs,
+        );
+        leaseToken = claimRes.leaseToken;
+      } catch (err) {
+        // Not claimable (already leased, delivered, or not found). Skip this
+        // round — no command, no ack, no fail; retry on next poll.
+        this.logger.warn?.(
+          `event ${eventId} is in dedupe store but re-claim failed: ${formatError(err)}`,
+        );
+        return false;
+      }
+      // Re-ack with the fresh lease token. ackWithRetry never throws; a full
+      // retry failure returns false and the next poll re-attempts (dedupe
+      // guard already prevents re-execution).
+      const acked = await this.ackWithRetry(leaseToken, eventId);
+      if (acked) {
+        this.logger.info?.(
+          `event ${eventId} dedupe hit — re-claimed and re-acknowledged (delivered)`,
+        );
+        return true;
+      }
+      this.logger.warn?.(
+        `event ${eventId} dedupe hit — re-ack failed, will retry next poll`,
       );
-      // Best-effort re-ack (idempotent if we still hold a valid lease token)
-      return true; // event was seen, even if just for dedupe check
+      return false;
     }
 
     // Step 1: claim the event (atomic lease)
@@ -248,12 +277,12 @@ export class CallbackAgent {
     leaseToken: string,
     eventId: string,
     retries = 3,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         await this.client.ackEvent(eventId, leaseToken);
         this.logger.info?.(`event ${eventId} acknowledged`);
-        return;
+        return true;
       } catch (err) {
         this.logger.warn?.(
           `ack attempt ${attempt}/${retries} failed for event ${eventId}: ${formatError(err)}`,
@@ -265,6 +294,7 @@ export class CallbackAgent {
     this.logger.error?.(
       `ack failed after ${retries} attempts for event ${eventId}; dedupe store prevents re-execution`,
     );
+    return false;
   }
 
   private async fail(
