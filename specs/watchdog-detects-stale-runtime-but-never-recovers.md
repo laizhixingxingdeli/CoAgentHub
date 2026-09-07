@@ -1,6 +1,8 @@
 # Spec: 看门狗检测到运行时陈旧却不自愈,平台可无限期跑旧代码
 
-> **状态**: Frozen — 2026-09-05
+> **状态**: Landed — 2026-09-07(修复 `b6621462`;L3 已 pass)
+>
+> 落地要点:staleReason=process 触发重启 + 停滞升级可见 + 退避滚动窗;自愈已实测 3 次
 > **文件**: `scripts/coagenthub-watchdog.sh`(LaunchAgent `com.coagenthub.watchdog`,`StartInterval` 300s)
 > **优先级**: 最高。这不是功能缺陷,是**其它票能否收工的前提**。
 

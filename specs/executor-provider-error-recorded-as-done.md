@@ -1,6 +1,8 @@
 # Spec: 执行器被服务商拒绝(exit 0 + 零输出)却被记成 done
 
-> **状态**: Frozen — 2026-09-07
+> **状态**: Landed — 2026-09-07(修复 `c9773149 + b89a4901`;L3 已 pass)
+>
+> 落地要点:零产出不再记 done;判定收窄为『输出为空且非额度失败』
 > **相关**: [quota-misclassified-from-coordinator-narration.md](quota-misclassified-from-coordinator-narration.md)
 > (那张管「不该判额度却判了」;本张管「该判失败却判成功了」)
 

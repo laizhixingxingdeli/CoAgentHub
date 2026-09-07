@@ -1,6 +1,8 @@
 # Spec: 协调者转述子任务限流,被判成自己额度耗尽并停派 5 小时
 
-> **状态**: Frozen — 2026-09-03
+> **状态**: Landed — 2026-09-07(修复 `577e449c`;L3 已 pass)
+>
+> 落地要点:退出码不再构成证据 + 转述排除 + 冷却来源可见 + 手动清除冷却
 > **相关**: `scripts/dispatch-policy.json` 的 `rateLimit`;
 > [quota-exhaustion-triggers-infinite-retry.md](quota-exhaustion-triggers-infinite-retry.md)
 

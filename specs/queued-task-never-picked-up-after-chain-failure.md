@@ -1,6 +1,8 @@
 # Spec: 链条失败后遗留的 queued 任务长时间静默滞留(实测 5 小时)
 
-> **状态**: Frozen — 2026-09-04(v1.1:标题与 §1 更正 —— 原写「永不被拾起」,实为延迟)
+> **状态**: Landed — 2026-09-07(修复 `54be31ef`;L3 已 pass)
+>
+> 落地要点:queued 周期兜底回收 + 阻塞原因可见 + 超阈值告警
 > **相关**: [detached-close-deadlock-guard-vs-no-poll.md](detached-close-deadlock-guard-vs-no-poll.md)(同一次事故的另一处)
 
 ## 1. 现象(2026-09-03 实证)

@@ -1,6 +1,8 @@
 # Spec: 停止按钮对运行中任务无效,但界面显示为可用
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: Landed — 2026-09-07(修复 `5f793b5f`;L3 已 pass)
+>
+> 落地要点:运行中任务可中止,活系统实测进程组消失 + 落 cancelled + 群回执
 > **日期**: 2026-09-02
 > **相关**: [stop-button-needs-confirmation.md](stop-button-needs-confirmation.md)(本票落地后再做)
 

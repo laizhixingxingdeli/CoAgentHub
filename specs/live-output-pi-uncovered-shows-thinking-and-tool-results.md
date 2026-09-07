@@ -1,6 +1,8 @@
 # Spec: Pi 的实时输出未被判据表覆盖,界面显示思考与工具结果
 
-> **状态**: Frozen — 2026-09-03
+> **状态**: Landed — 2026-09-07(修复 `306b2c73 + 08f530ca`;L3 已 pass)
+>
+> 落地要点:判据表补 pi 行;delta 不再借用 report,report 补 [汇报 #tN] 前缀
 > **依赖**: [live-output-only-agent-narration.md](live-output-only-agent-narration.md)(v1.2,已落地)
 > **性质**: 补前一票判据表的洞。前一票的实现按冻结 spec 做对了,本票不追溯其裁决。
 

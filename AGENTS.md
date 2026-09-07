@@ -70,6 +70,50 @@ Migrate the database before exercising the server:
   `min-height: auto` and collapses the child (observed: 1093px content squashed
   to 57px). Fix the breakpoint, don't paper over it.
 
+## 测试与验收(2026-09-07 一批修复中反复付学费的几条)
+
+- **跑定向测试用这条,别猜:**
+  ```
+  cd packages/backend/server && npx vitest run test/<文件>.test.ts
+  ```
+  不要根 `pnpm test`(全量 77 文件 / 1140 用例,实测 **~490 秒**,必然超过执行器的
+  180 秒命令超时);不要 `pnpm --filter ... test`(带 `pretest`,会先构建 database
+  与 error 两个包)。全量回归由检视者在 L3 跑。
+- **改动落在主干路径(`done` 分支、聚合函数、渲染入口)时必须跑全量。**
+  只跑新增用例 = 只验证了「我想到的那部分」。同一天两次因此漏掉回归:
+  一次 11 条既有用例转红,一次深比较断言未同步新字段。
+- **验收要走到最终产物,不能停在被测函数的返回值。** 单测里函数返回对了,
+  生产路径在函数与落库之间还有一段(attempts 聚合、渲染、API 序列化),
+  要求常常就在那段里丢掉。至少要有一次「读落库的 `diffSummary` 字段 /
+  API 响应 / 界面渲染出的那一行」的动作。
+- **加强测试本身可能把「没做」固化成「通过」。** 遇到 findings 票,逐条对着
+  findings 核,不以测试通过替代 —— 曾有一轮新加逐字节 `toBe` 断言,
+  锁的正是**旧**形状。
+
+## 运行时与重启
+
+- **改完 server 代码要重新构建再重启**,否则运行时仍是旧代码:
+  ```
+  cd packages/backend/server && npx tsx esbuild.config.ts
+  scripts/coagenthub-prod.sh restart
+  ```
+  核对方式是 `curl -s localhost:3001/api/health` 的 `"stale": false`,
+  不要靠「我记得我重启过」。
+- **重启必须走 `scripts/coagenthub-prod.sh restart`,绝不 `nohup node dist/server.mjs`。**
+  手工起的进程 pid 与 `/tmp/coagenthub-prod-3001.pid` 对不上,看门狗后续
+  `restart` 会判「进程未被替换」并退出 1;连续 3 次后**永久停用自动重建**。
+  2026-09-03~04 因此运行时卡在旧构建 22 小时,四轮协调链条撞同一个已修好的死结。
+- 看门狗(`com.coagenthub.watchdog`,每 5 分钟)会自愈陈旧运行时,但**有在途任务时
+  按 fail-closed 守卫等待**。发票前先看 `stale`,别指望它刚好在那个窗口动手。
+
+## Git 提交边界
+
+- **提交一律用 `git commit -- <明确路径>`。** `git add <路径>` 之后直接
+  `git commit` 会把**暂存区里别人的改动一起带走** —— 工作树里常同时有多张票
+  的在途产物。检视者 2026-09-04 因此把执行器的实现夹带进了 spec 提交。
+- 拆开的办法:`git reset --soft HEAD~1` → `git reset HEAD -- <别人的路径>` →
+  `git commit -- <自己的路径>`。
+
 ## Issue tracker
 
 Issues and specs are tracked as GitHub issues, operated via the `gh` CLI (the

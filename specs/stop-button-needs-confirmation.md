@@ -1,6 +1,8 @@
 # Spec: 停止按钮需要二次确认,防误触
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: Landed — 2026-09-07(修复 `67d47a1a`;L3 已 pass)
+>
+> 落地要点:window.confirm 二次确认,文案指名任务/状态/后果,两处接线都覆盖
 > **日期**: 2026-09-02
 > **依赖**: [stop-button-cannot-interrupt-running-task.md](stop-button-cannot-interrupt-running-task.md)
 > —— 先让按钮真的能停,再给它加确认;顺序反了会做出「确认一个不生效的动作」。
