@@ -1,6 +1,13 @@
 # Spec: 上传上限没有约束请求流本身,无 Content-Length 的请求可以无限缓冲
 
-> **状态**: Frozen
+> **状态**: Landed — L3 通过(2026-09-08),实现 `d99d540b`(AtomCode 直连实施,
+> 跨越一次 provider 中断与一次机器重启,共 4 段会话;检视者完成 L2/L3)。
+> L2 用 `scripts/test-baseline.mjs` 取数,完整记录了三段证据:
+> 开工前 `0 failed | 12 passed (12)` → 测试已写实现缺失 **`4 failed`** `| 12 passed (16)`
+> → 实现落地 **`0 failed | 16 passed (16)`**。改前红、改后绿,红在正确的位置上。
+> L3 亮点:自定义 `RequestBodyTooLargeError` 而非裸 Error,理由是要与**客户端
+> 自身畸形 multipart 的解析错误**(同样是 TypeError)区分 —— 不做这个区分,
+> 格式错误会被误报成「文件过大」。
 > **版本**: 1.0
 > **日期**: 2026-09-07
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md)
