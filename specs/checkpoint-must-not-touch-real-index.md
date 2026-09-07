@@ -1,7 +1,13 @@
 # Spec: 执行前快照会暂存别人的在途改动 —— checkpoint 必须用独立 Git index
 
-> **状态**: Frozen
-> **版本**: 1.0
+> **状态**: Landed — L3 通过(2026-09-07),实现 `d1626fb3`(CodeBuddy 直连实施,
+> 检视者完成 L2/L3)。独立基线复核(检视者自跑,与执行器报数逐字一致):
+> 改前 **42 红/66 绿**、改后 **39 红/69 绿** —— 失败减 3、通过增 3,恰为新增测试文件
+> 由「3 红 1 绿」转「0 红 4 绿」;其余四文件计数未动,排除此消彼长。
+> **版本**: 1.1
+>
+> **v1.1 修订(2026-09-07)**:§4.6 的验收更正,见该条下方说明(原写法在本机不可达,
+> 由执行器如实报告后更正)。
 > **日期**: 2026-09-07
 > **来源**: [docs/implementation-optimization-review-2026-09-07.md](../docs/implementation-optimization-review-2026-09-07.md) R7
 > **相关**: [checkpoint-concurrent-same-repo.md](checkpoint-concurrent-same-repo.md)(Landed;
@@ -128,7 +134,13 @@ git update-ref <ref> <sha>
 5. **失败路径**:构造 `write-tree` 失败(例如临时 index 指向不可写路径)→ 抛错、
    真实 index 不变、无临时文件残留、无半成品 ref。
 
-6. **回滚不回退**:`resetToCheckpoint` 的既有行为不变 —— `test/retry-rollback-guard.test.ts` 保持绿。
+6. **回滚不回退**:`resetToCheckpoint` 的既有行为不变。
+
+   > **v1.1 更正**:本条原写「`test/retry-rollback-guard.test.ts` 保持绿」,
+   > **在本机做不到** —— 该文件是 Windows 红基线的一部分(用 `#!/bin/sh` 假执行器,
+   > Windows 起不来,`waitForTaskStatus timeout`),改动前后都红。
+   > 由实施本票的执行器如实报告、拒绝声称「绿」,检视者确认后更正为:
+   > 该文件**改动前后失败数不增加**,且 `resetToCheckpoint` 的 diff 为零。
 
 7. **只跑改动触及的测试文件**(不跑全量):
    ```
