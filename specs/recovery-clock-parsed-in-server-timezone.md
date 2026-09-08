@@ -1,7 +1,30 @@
 # Spec: 限流恢复时刻按 server 本地时区解释,a2a 跨时区会整点偏移
 
-> **状态**: Frozen
-> **版本**: 1.0
+> **状态**: Frozen —— **第一批已实现(`1b428c7e`),但未收口**,见下方 v1.1 修订
+> **版本**: 1.1
+>
+> **v1.1 修订(2026-09-08,检视者在 L3 中发现并更正)**:
+> **§2 的改动范围写漏了。** 原文只列 `test/executor-quota-redispatch.test.ts`,
+> 但 `parseRateLimitRecoveryMs` **另有两个文件在测它**:
+>
+> | 文件 | 引用数 | 第一批是否同步 |
+> |---|---|---|
+> | `test/executor-quota-redispatch.test.ts` | 22 | ✅ 已同步 |
+> | `test/executor-progress.test.ts` | 10 | ❌ **漏** |
+> | `test/dispatch-policy.test.ts` | 6 | ❌ **漏** |
+>
+> 后果(检视者实测,同一清单前后对照):
+> `1 failed | 86 passed (87)` → **`11 failed | 76 passed (87)`,多 10 条红**。
+>
+> 典型失败:
+> `parseRateLimitRecoveryMs > resets around HH:MM → 今天该时刻(未过)`
+> 报 `expected null to be 1786685580000` —— 它们编码的是**旧契约**。
+>
+> **这是检视者写 spec 的失误,不是执行者的问题** ——
+> 执行者严格按 §2 执行,并且**主动自曝了这个风险**
+> (「相关用例在本票未改文件里,定向清单外可能转红」),做法正确。
+> §4 新增第 7 条收口标准。
+>
 > **日期**: 2026-09-08
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §13.4 **R11**
 > **性质**: **真实缺陷,不只是测试的时区脆弱性** ——
@@ -54,7 +77,14 @@ parseRateLimitRecoveryMs: try again at HH:MM` 断言差值
 |---|---|
 | `packages/backend/server/src/lib/executors.ts` | `parseRateLimitRecoveryMs` 的纯时钟分支 |
 | `packages/backend/server/test/executor-quota-redispatch.test.ts` | 断言显式设定时区 |
+| **`packages/backend/server/test/executor-progress.test.ts`**(v1.1 补) | 同步纯时钟用例的期望 |
+| **`packages/backend/server/test/dispatch-policy.test.ts`**(v1.1 补) | 同上 |
+| **`packages/backend/server/test/orphan-task-reconciler.test.ts`**(v1.1 补) | 若受分类口径变化影响则同步 |
 | 可能涉及的落库路径测试 | 见 §4 验收 3 |
+
+⚠️ **v1.1 教训**:改一个被多处引用的纯函数时,
+**先 `grep -rl <函数名> test/` 把测它的文件全找出来**,再定改动范围。
+本票第一批就是因为漏了这一步而留下 10 条红。
 
 **不改**:带 `UTC±X` 的绝对时刻分支(它是对的);
 `try again in N seconds` 与相对时长分支(与时区无关);
@@ -116,6 +146,25 @@ node scripts/test-baseline.mjs packages/backend/server test/executor-quota-redis
 4. **相对时长分支不受影响**(回归):`try again in N seconds` 等用例保持原状态。
 5. 定向测试前后对照,**失败数不增加**。
 6. `npx tsc --noEmit -p tsconfig.json` 通过。
+7. **(v1.1 新增,全票收口条件)跨文件期望同步**。
+   基线清单必须覆盖**所有**测 `parseRateLimitRecoveryMs` 的文件:
+
+   ```
+   node scripts/test-baseline.mjs packages/backend/server \
+     test/executor-quota-redispatch.test.ts test/executor-progress.test.ts \
+     test/dispatch-policy.test.ts test/orphan-task-reconciler.test.ts
+   ```
+
+   **取数基准(检视者 2026-09-08 19:28 实测)**:
+   后三个文件在第一批**之前**是 `1 failed | 86 passed (87)`,
+   **之后**是 `11 failed | 76 passed (87)`。
+   收口口径:**回到 1 failed**(那 1 条是既有的超时红,与本票无关)。
+
+   ⚠️ 同步的是**期望文本**,不是测试意图。
+   这些用例原本断言「纯时钟能解析出时刻」——新契约下它应当返回 `null`
+   并回落固定冷却。**按新契约改写期望是正确的**;
+   但若某条用例的意图是别的(例如测分类而非解析),
+   **不要顺手改它** —— 逐条说明你怎么判断的。
 
 ## 5. 不涉及的改动
 
