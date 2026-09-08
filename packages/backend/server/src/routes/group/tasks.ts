@@ -21,6 +21,7 @@ import {
 import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
 import {
   adjudicatedRecipientsOfTask,
+  applyDiffSummaryPatch,
   createTaskDispatchWarnings,
   deriveCloseGuardResume,
   dispatcherRecipients,
@@ -31,11 +32,10 @@ import {
   isExecutorProcessAlive,
   isResumeTask,
   isTerminalTaskStatus,
+  mergeDiffSummary,
   mergePlatformTokenFields,
   notifyTaskStatusChanged,
   postStatus,
-  preserveDispatchKindNote,
-  preserveRollbackSkipped,
   readTaskDetail,
   recordCoordinationActivity,
   registerCloseGuardResume,
@@ -632,13 +632,16 @@ async function appendL3ConclusionToOwner(
   await db
     .update(taskTable)
     .set({
-      diffSummary: {
-        ...normalized,
-        review_request: {
-          ...ownerRequest,
-          diffSummary: mergedText,
+      diffSummary: mergeDiffSummary(
+        owner.diffSummary,
+        {
+          review_request: {
+            ...ownerRequest,
+            diffSummary: mergedText,
+          },
         },
-      },
+        "review",
+      ),
     })
     .where(eq(taskTable.id, owner.id));
 }
@@ -649,17 +652,19 @@ function markL3MergedInto(
   existingDiffSummary: unknown,
   ownerId: string,
 ): Record<string, unknown> {
-  const { review_request: _dropped, ...rest } = summaryToWrite;
-  const incomingPlatform = platformBlockOf(rest) ?? {};
-  const existingPlatform = platformBlockOf(existingDiffSummary) ?? {};
-  return {
-    ...rest,
-    platform: {
-      ...existingPlatform,
-      ...incomingPlatform,
-      [L3_MERGED_INTO_KEY]: ownerId,
-    },
-  };
+  // 先以既有为底并入本次摘要(保留既有 platform.*),再去掉 review_request、
+  // 写 l3MergedInto —— 全部经单一合并入口(spec diffsummary-ownership W2)。
+  // review_request 用 delete 语义(键不出现),避免下游 summaryHasReviewRequest
+  // 因 Object.hasOwn(null) 仍判定「带请求」。
+  let next = applyDiffSummaryPatch(existingDiffSummary, summaryToWrite);
+  const { review_request: _dropped, ...withoutRequest } = next;
+  next = withoutRequest;
+  next = mergeDiffSummary(
+    next,
+    { platform: { [L3_MERGED_INTO_KEY]: ownerId } },
+    "relation",
+  );
+  return next;
 }
 
 /**
@@ -1459,17 +1464,26 @@ app
       // 共用 claim-verification 同一套逻辑。核实是尽力而为:仓库不可达 / 非 git /
       // git 失败 → 跳过(不写核实字段);a2a 执行器本地无仓库 → 留下
       // status=skipped 的「未核实」痕迹。核实失败只标记、绝不把任务判 failed。
-      let summaryToWrite = normalizedDiffSummary;
+      //
+      // diffsummary-ownership W2:客户端 patch 经单一合并入口并入既有摘要,
+      // 不再整袋替换 + 链式 preserve。
+      let summaryToWrite: unknown = task.diffSummary;
+      let clientPatch: Record<string, unknown> | undefined;
       if (
         diffSummary !== undefined &&
         typeof normalizedDiffSummary === "object" &&
         normalizedDiffSummary !== null &&
         !Array.isArray(normalizedDiffSummary)
       ) {
-        const raw = normalizedDiffSummary as Record<string, unknown>;
+        clientPatch = {
+          ...(normalizedDiffSummary as Record<string, unknown>),
+        };
+        // R3: staleBuildSuspected 是平台调度键,剥离客户端自报值。
+        delete clientPatch.staleBuildSuspected;
         const reportedHash =
-          typeof raw.hash === "string" && raw.hash.trim() !== ""
-            ? raw.hash
+          typeof clientPatch.hash === "string" &&
+          clientPatch.hash.trim() !== ""
+            ? clientPatch.hash
             : undefined;
         if (reportedHash) {
           try {
@@ -1488,26 +1502,26 @@ app
               mode,
             );
             if (verification) {
-              summaryToWrite = { ...raw, claimVerification: verification };
+              clientPatch.claimVerification = verification;
             }
           } catch (e) {
             // 核实绝不拖垮完成路径:任何异常都跳过核实,任务照常落终态。
             console.warn(`[tasks] commit 核实跳过(${taskId}): ${e}`);
           }
         }
+        summaryToWrite = applyDiffSummaryPatch(task.diffSummary, clientPatch);
+      } else if (diffSummary !== undefined) {
+        summaryToWrite = normalizedDiffSummary;
       }
       // l1-bypass-must-be-visible R1 + R4(dispatching-should-be-the-default):
-      // 平台把 l1Bypass / degradedToTwoParty 分键并入 diffSummary(与
-      // claimVerification 同款写入模式),不覆盖执行器自报的其它字段。两个键
-      // 各自独立:仅当对应载荷存在时才写,避免把降级载荷误塞进 l1Bypass 键。
+      // 平台把 l1Bypass / degradedToTwoParty 分键并入 diffSummary,review 所有者。
       if (
         closeIntegrity &&
         typeof summaryToWrite === "object" &&
         summaryToWrite !== null &&
         !Array.isArray(summaryToWrite)
       ) {
-        summaryToWrite = {
-          ...(summaryToWrite as Record<string, unknown>),
+        const reviewPatch: Record<string, unknown> = {
           ...(closeIntegrity.l1Bypass !== undefined
             ? { l1Bypass: closeIntegrity.l1Bypass }
             : {}),
@@ -1515,68 +1529,42 @@ app
             ? { degradedToTwoParty: closeIntegrity.degradedToTwoParty }
             : {}),
         };
+        if (Object.keys(reviewPatch).length > 0) {
+          summaryToWrite = mergeDiffSummary(
+            summaryToWrite,
+            reviewPatch,
+            "review",
+          );
+        }
       }
-      // R3: staleBuildSuspected is a platform-owned snapshot of the runtime
-      // at the failed transition, not a live property of every detail read.
-      // Strip client-provided values so a later read cannot manufacture the
-      // signal, then persist it only for a non-terminal -> failed transition.
+      // R3: staleBuildSuspected 仅平台在 non-terminal → failed 时写入。
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&
         summaryToWrite !== null &&
         !Array.isArray(summaryToWrite)
       ) {
-        const summaryWithoutStaleMarker = {
-          ...(summaryToWrite as Record<string, unknown>),
-        };
-        delete summaryWithoutStaleMarker.staleBuildSuspected;
         const shouldPersistStaleBuildSuspected =
           status === "failed" &&
           status !== task.status &&
           !isTerminalTaskStatus(task.status) &&
-          typeof summaryWithoutStaleMarker.error === "string" &&
-          summaryWithoutStaleMarker.error.trim() !== "" &&
+          typeof (summaryToWrite as Record<string, unknown>).error ===
+            "string" &&
+          (
+            (summaryToWrite as Record<string, unknown>).error as string
+          ).trim() !== "" &&
           getRuntimeStatus().stale;
-        summaryToWrite = shouldPersistStaleBuildSuspected
-          ? {
-              ...summaryWithoutStaleMarker,
-              staleBuildSuspected: true,
-            }
-          : summaryWithoutStaleMarker;
+        if (shouldPersistStaleBuildSuspected) {
+          summaryToWrite = mergeDiffSummary(
+            summaryToWrite,
+            { staleBuildSuspected: true },
+            "scheduling",
+          );
+        }
       }
-      // token-fields-clobbered-by-close R1:平台已采集的 token 字段不得被调用方
-      // PATCH 整体替换冲掉。复用 l1Bypass 的平台补写模式:载荷不含该键时写回
-      // 平台原值;载荷显式提供(含 null)时以调用方为准(R2)。
-      //
-      // 平台原值有两个来源:任务结束路径的完成回填(diffSummary)与采集结果
-      // (attempts)。真实 detached 协调链路走后者 —— 任务由协调者 PATCH 落终态,
-      // 平台完成回填从未跑过,diffSummary 里根本没有这两个键。取值口径与
-      // queue.ts 完成路径逐字一致(sumAttemptToken* + undefined 不写),两处共用
-      // mergePlatformTokenFields。
-      // R2 缺省留痕跨终态保留:任何 diffSummary 覆盖不得丢失 dispatchKindNote
-      // (共享单点,与 queue.ts 回填/notify.ts 取消落库同一 helper)。
-      if (
-        diffSummary !== undefined &&
-        typeof summaryToWrite === "object" &&
-        summaryToWrite !== null &&
-        !Array.isArray(summaryToWrite)
-      ) {
-        summaryToWrite = preserveDispatchKindNote(
-          task.diffSummary,
-          summaryToWrite as Record<string, unknown>,
-        );
-      }
-      if (
-        diffSummary !== undefined &&
-        typeof summaryToWrite === "object" &&
-        summaryToWrite !== null &&
-        !Array.isArray(summaryToWrite)
-      ) {
-        summaryToWrite = preserveRollbackSkipped(
-          task.diffSummary,
-          summaryToWrite as Record<string, unknown>,
-        );
-      }
+      // token-fields-clobbered-by-close R1/R2:平台 token 在 PATCH 未带键时保留;
+      // 显式带键以调用方为准。merge 入口已保留既有 metrics 键;此处补 attempts
+      // 采集回填(既有与 client 皆缺时)。
       if (
         diffSummary !== undefined &&
         typeof summaryToWrite === "object" &&
@@ -1616,15 +1604,16 @@ app
         const summaryForClose = payloadSummary ?? existingSummary ?? {};
         if (!Object.hasOwn(summaryForClose, "outputTail")) {
           const outputTail = taskOutputTailLines(taskId);
-          summaryToWrite = {
-            ...summaryForClose,
-            ...(outputTail
+          summaryToWrite = mergeDiffSummary(
+            summaryForClose,
+            outputTail
               ? { outputTail }
               : {
                   outputTailMissing:
                     "PATCH 终态时任务输出缓冲不可用(可能已释放或服务已重启)",
-                }),
-          };
+                },
+            "metrics",
+          );
         } else {
           summaryToWrite = summaryForClose;
         }
@@ -1693,14 +1682,11 @@ app
       if (terminalTransition && liveTaskOutputTail(taskId) !== null) {
         const liveTail = liveTaskOutputTail(taskId);
         if (liveTail) {
-          summaryToWrite = {
-            ...(typeof summaryToWrite === "object" &&
-            summaryToWrite !== null &&
-            !Array.isArray(summaryToWrite)
-              ? (summaryToWrite as Record<string, unknown>)
-              : {}),
-            liveOutputTail: liveTail,
-          };
+          summaryToWrite = mergeDiffSummary(
+            summaryToWrite,
+            { liveOutputTail: liveTail },
+            "metrics",
+          );
         }
       }
       // R8(v1.1):PATCH failed 终态时复用 classifyQuotaFailure 判定额度失败,
@@ -1743,13 +1729,16 @@ app
             if (commitInWindow === true) {
               // 匹配到但被提交闸掉:diffSummary 留可读说明,便于事后区分
               // 「没匹配到」与「匹配到但被闸掉」(spec 验收 5/6)。
-              summaryToWrite = {
-                ...rawSummary,
-                quotaMatchedButCommitFound: {
-                  matchedLine: quotaVerdict.matchedLine,
-                  note: "error 命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
+              summaryToWrite = mergeDiffSummary(
+                rawSummary,
+                {
+                  quotaMatchedButCommitFound: {
+                    matchedLine: quotaVerdict.matchedLine,
+                    note: "error 命中额度关键词,但任务窗口内存在提交(本次运行有产出),按 quota-failure-on-clean-exit v1.1 R6 不判额度、不进入冷却",
+                  },
                 },
-              };
+                "scheduling",
+              );
             } else {
               const parsedMs = parseRateLimitRecoveryMs(errorText);
               const cooldownEnd = normalizeCooldownEnd(
@@ -1778,7 +1767,7 @@ app
                   "解析所得时刻不可用,已回退固定冷却";
                 extra.discardedCooldownEndMs = parsedMs;
               }
-              summaryToWrite = { ...rawSummary, ...extra };
+              summaryToWrite = applyDiffSummaryPatch(rawSummary, extra);
               quotaCooldownEnd = cooldownEnd;
               quotaCooldownSource = quotaSource;
               quotaErrorText = errorText;

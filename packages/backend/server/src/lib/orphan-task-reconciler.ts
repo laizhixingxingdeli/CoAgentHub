@@ -15,6 +15,7 @@ import type { DataBase } from "@server/lib/database";
 import { parseRateLimitRecoveryMs, listPeerExecutorNames } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import {
+  applyDiffSummaryPatch,
   hasExemptingChildTask,
   hasPendingCloseGuardResume,
   hasPendingResumeEvent,
@@ -156,31 +157,23 @@ export async function reconcileOrphanTasks(
         extra.discardedCooldownEndMs = parsedMs;
       }
     }
-    // R2(本 spec):收敛写回以现有 diffSummary 为底合并,仅新增/覆盖
-    // error / reconciledReason / reconciledAt 三键 —— 保留 platform.*(resumeOf
-    // 等)、tokenUsage、tokenUsageReason 与执行器已写字段,不整体替换抹掉证据。
+    // R2 + diffsummary-ownership W2:经单一合并入口以既有为底写入 terminal/
+    // metrics/scheduling 键,保留 platform.* / audit / result 等他有字段。
     // 额度路径额外写 executorCooldownEndMs(与 queue 的 handleQuotaFailure 同键,
     // 重启由 restoreExecutorCooldowns 恢复)。
-    const base =
-      task.diffSummary !== null &&
-      task.diffSummary !== undefined &&
-      typeof task.diffSummary === "object" &&
-      !Array.isArray(task.diffSummary)
-        ? { ...(task.diffSummary as Record<string, unknown>) }
-        : {};
     const outputTail = taskOutputTailLines(task.id);
+    const next = applyDiffSummaryPatch(task.diffSummary, {
+      error,
+      reconciledReason: error,
+      reconciledAt: now.toISOString(),
+      ...(outputTail ? { outputTail } : {}),
+      ...extra,
+    });
     const [updated] = await db
       .update(taskTable)
       .set({
         status: "failed",
-        diffSummary: {
-          ...base,
-          error,
-          reconciledReason: error,
-          reconciledAt: now.toISOString(),
-          ...(outputTail ? { outputTail } : {}),
-          ...extra,
-        },
+        diffSummary: next,
       })
       // R5:以「仍为 running」为条件更新,并发写回 done 的任务不再匹配。
       .where(and(eq(taskTable.id, task.id), eq(taskTable.status, "running")))

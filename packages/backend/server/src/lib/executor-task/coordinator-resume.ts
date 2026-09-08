@@ -20,6 +20,7 @@ import {
 import { and, asc, eq, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
 import { isTerminalTaskStatus } from "../coordination-activity";
+import { mergeDiffSummary } from "./diff-summary";
 import { notifyTaskStatusChanged } from "./notify";
 import {
   enqueueTaskRun,
@@ -197,20 +198,11 @@ function withCloseGuardResume(
   diffSummary: unknown,
   marker: CloseGuardResumeMarker,
 ): Record<string, unknown> {
-  const base =
-    diffSummary !== null &&
-    diffSummary !== undefined &&
-    typeof diffSummary === "object" &&
-    !Array.isArray(diffSummary)
-      ? (diffSummary as Record<string, unknown>)
-      : {};
-  const platform =
-    typeof base.platform === "object" &&
-    base.platform !== null &&
-    !Array.isArray(base.platform)
-      ? (base.platform as Record<string, unknown>)
-      : {};
-  return { ...base, platform: { ...platform, [CLOSE_GUARD_RESUME_KEY]: marker } };
+  return mergeDiffSummary(
+    diffSummary,
+    { platform: { [CLOSE_GUARD_RESUME_KEY]: marker } },
+    "relation",
+  );
 }
 
 /**

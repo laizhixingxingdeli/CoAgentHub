@@ -110,12 +110,21 @@ export function ownerOfDiffSummaryKey(
  *    或未登记 → 应用。
  * 4. `platform`:仅 `relation` 可写;双方均为对象时深合并子键。
  * 5. 同所有者再次写入可覆盖自身键。
- * 6. 显式 `null` **仅**清除本所有者(或未登记归本所有者)的键;他所有者
- *    键上的 null 与其它值一样被忽略 —— 作用域不得越权,否则一次 null
- *    会变成另一种「整袋替换」。
+ * 6. 显式 `null` **仅**可写本所有者(或未登记归本所有者)的键,值为 `null`
+ *    (保留键,供 token 等 R2「调用方显式 null 优先」语义用 Object.hasOwn
+ *    判定);他所有者键上的 null 与其它值一样被忽略 —— 作用域不得越权。
+ *    需要「从对象上抹掉键」的路径(reclaim 清 queuedBlocked)请用
+ *    {@link applyDiffSummaryPatchAllowingClear},它把 undefined 转成
+ *    删除信号再走本入口的删除分支。
  * 7. `undefined` 表示不写(跳过)。
  * 8. 纯函数:不写库、不发 WS、不修改入参。
+ *
+ * 内部删除信号:patch 值若为 `DELETE_KEY`(仅本模块与 allowingClear 使用),
+ * 则 `delete result[key]`。对外 API 仍只接受 `null` / 普通值 / undefined。
  */
+/** @internal 仅 applyDiffSummaryPatchAllowingClear → merge 链使用。 */
+export const DIFF_SUMMARY_DELETE = Symbol("diffSummary.delete");
+
 export function mergeDiffSummary(
   existing: unknown,
   patch: Record<string, unknown>,
@@ -145,9 +154,10 @@ export function mergeDiffSummary(
       continue;
     }
 
-    if (value === null) {
+    if (value === DIFF_SUMMARY_DELETE) {
       delete result[key];
     } else {
+      // 含显式 null:写入 null,保留键(token R2 / 调用方优先)
       result[key] = value;
     }
   }
@@ -165,8 +175,13 @@ function applyPlatformPatch(
   result: Record<string, unknown>,
   platformPatch: unknown,
 ): void {
-  if (platformPatch === null) {
+  if (platformPatch === DIFF_SUMMARY_DELETE) {
     delete result.platform;
+    return;
+  }
+  if (platformPatch === null) {
+    // 显式 null:保留 platform 键,值为 null(与顶层 null 语义一致)
+    result.platform = null;
     return;
   }
 
@@ -188,12 +203,89 @@ function applyPlatformPatch(
       continue;
     }
 
-    if (subValue === null) {
+    if (subValue === DIFF_SUMMARY_DELETE) {
       delete platform[subKey];
     } else {
+      // 含显式 null:写入 null,保留子键
       platform[subKey] = subValue;
     }
   }
 
   result.platform = platform;
+}
+
+/** 稳定的所有者应用顺序(多所有者连续 merge 时确定性)。 */
+const OWNER_APPLY_ORDER: readonly DiffSummaryOwner[] = [
+  "result",
+  "scheduling",
+  "review",
+  "relation",
+  "metrics",
+  "audit",
+  "terminal",
+] as const;
+
+/**
+ * 把「一次写入可能含多所有者键」的混合 patch 按登记表分桶,再逐所有者
+ * 经 {@link mergeDiffSummary} 连续合并。未登记键归 `fallbackOwner`
+ * (默认 `result`,与 spec §3.1 一致)。
+ *
+ * 生产写路径的便捷入口:调用方不必手写 N 次 merge,但正确性仍全部
+ * 落在 `mergeDiffSummary`(本函数不另立合并规则)。
+ *
+ * 注意:本函数按**键的登记所有者**分桶,适合「平台/调用方有意写入
+ * 多个分区」的路径(done / fail / PATCH / reclaim)。若调用方只声明
+ * 单一所有者且 patch 里误带他有键,应直接调 `mergeDiffSummary(..., owner)`
+ * —— 那才会按 B1 拒绝他有键,而不是把误带键改道写进其登记所有者。
+ */
+export function applyDiffSummaryPatch(
+  existing: unknown,
+  patch: Record<string, unknown>,
+  fallbackOwner: DiffSummaryOwner = "result",
+): Record<string, unknown> {
+  const buckets = new Map<DiffSummaryOwner, Record<string, unknown>>();
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    const owner: DiffSummaryOwner =
+      key === "platform"
+        ? "relation"
+        : (DIFF_SUMMARY_KEY_OWNERS[key] ?? fallbackOwner);
+    const bucket = buckets.get(owner);
+    if (bucket) {
+      bucket[key] = value;
+    } else {
+      buckets.set(owner, { [key]: value });
+    }
+  }
+
+  let result: Record<string, unknown> = isPlainObject(existing)
+    ? existing
+    : {};
+  for (const owner of OWNER_APPLY_ORDER) {
+    const bucket = buckets.get(owner);
+    if (!bucket) continue;
+    result = mergeDiffSummary(result, bucket, owner);
+  }
+  return result;
+}
+
+/**
+ * reclaim 等路径用 `undefined` 表示「从对象上抹掉该键」(与 JSON 序列化
+ * 丢弃 undefined 键同口径)。转成内部删除信号后再交给
+ * {@link applyDiffSummaryPatch};普通 `null` 仍按「写入 null」保留键。
+ */
+export function applyDiffSummaryPatchAllowingClear(
+  existing: unknown,
+  patch: Record<string, unknown>,
+  fallbackOwner: DiffSummaryOwner = "result",
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    normalized[key] =
+      value === undefined
+        ? (DIFF_SUMMARY_DELETE as unknown as null)
+        : value;
+  }
+  return applyDiffSummaryPatch(existing, normalized, fallbackOwner);
 }

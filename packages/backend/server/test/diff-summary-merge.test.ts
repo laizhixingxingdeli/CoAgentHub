@@ -187,14 +187,16 @@ describe("mergeDiffSummary", () => {
       "result",
     );
 
-    expect(next).not.toHaveProperty("summary");
-    expect(next).not.toHaveProperty("hash");
+    // 显式 null 写入 null 并保留键(token R2 / Object.hasOwn 语义);
+    // 他所有者键上的 null 被忽略。
+    expect(next.summary).toBeNull();
+    expect(next.hash).toBeNull();
     expect(next.tokenUsage).toBe(99);
     expect(next.dispatchKindNote).toEqual({ reason: "keep-note" });
     expect(next.platform).toEqual({ resumeOf: "p" });
   });
 
-  it("explicit null on audit keys only removes audit keys", () => {
+  it("explicit null on audit keys only nulls audit keys", () => {
     const existing = {
       dispatchKindNote: { reason: "x" },
       rollbackSkipped: { ref: "abc" },
@@ -213,8 +215,8 @@ describe("mergeDiffSummary", () => {
       "audit",
     );
 
-    expect(next).not.toHaveProperty("dispatchKindNote");
-    expect(next).not.toHaveProperty("rollbackSkipped");
+    expect(next.dispatchKindNote).toBeNull();
+    expect(next.rollbackSkipped).toBeNull();
     expect(next.hash).toBe("h");
     expect(next.error).toBe("fail");
   });
@@ -285,7 +287,7 @@ describe("mergeDiffSummary", () => {
     expect(next).toEqual({ summary: "keep", hash: "h" });
   });
 
-  it("relation null on platform sub-key deletes only that sub-key", () => {
+  it("relation null on platform sub-key nulls only that sub-key", () => {
     const existing = {
       platform: { resumeOf: "p", ownerServerPid: 1 },
     };
@@ -294,7 +296,7 @@ describe("mergeDiffSummary", () => {
       { platform: { ownerServerPid: null } },
       "relation",
     );
-    expect(next.platform).toEqual({ resumeOf: "p" });
+    expect(next.platform).toEqual({ resumeOf: "p", ownerServerPid: null });
   });
 
   it("terminal error write preserves foreign owner keys", () => {

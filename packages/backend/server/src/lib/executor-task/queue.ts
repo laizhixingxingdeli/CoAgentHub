@@ -123,6 +123,10 @@ import {
 } from "./state";
 import { collectTokenUsage, extractCodexExecText } from "./token-usage";
 import {
+  applyDiffSummaryPatch,
+  mergeDiffSummary,
+} from "./diff-summary";
+import {
   asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
@@ -132,8 +136,6 @@ import {
   type GroupQueue,
   mergePlatformTokenFields,
   OWNER_SERVER_PID_KEY,
-  preserveDispatchKindNote,
-  preserveRollbackSkipped,
   type QueuedBlockReason,
   type QueuedRun,
   sumAttemptTokenUsage,
@@ -256,24 +258,15 @@ async function appendCooldownAudit(
     where: (task, { eq }) => eq(task.id, taskId),
     columns: { diffSummary: true },
   });
-  const base =
-    row?.diffSummary !== null &&
-    row?.diffSummary !== undefined &&
-    typeof row.diffSummary === "object" &&
-    !Array.isArray(row.diffSummary)
-      ? (row.diffSummary as Record<string, unknown>)
-      : {};
+  const next = applyDiffSummaryPatch(row?.diffSummary, {
+    executorCooldownSource: source,
+    executorCooldownEndMs: endMs,
+    discardedCooldownEndMs: discardedEndMs,
+    cooldownDiscardReason: "已有未到期 parsed 冷却,拒绝 fallback 覆盖",
+  });
   await db
     .update(taskTable)
-    .set({
-      diffSummary: {
-        ...base,
-        executorCooldownSource: source,
-        executorCooldownEndMs: endMs,
-        discardedCooldownEndMs: discardedEndMs,
-        cooldownDiscardReason: "已有未到期 parsed 冷却,拒绝 fallback 覆盖",
-      },
-    })
+    .set({ diffSummary: next })
     .where(eq(taskTable.id, taskId));
 }
 
@@ -547,15 +540,11 @@ async function registerTaskOwnerServer(
     where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
     columns: { diffSummary: true },
   });
-  const existing = asDiffSummaryRecord(row?.diffSummary) ?? {};
-  const platform =
-    typeof existing.platform === "object" && existing.platform !== null
-      ? (existing.platform as Record<string, unknown>)
-      : {};
-  const merged: Record<string, unknown> = {
-    ...existing,
-    platform: { ...platform, [OWNER_SERVER_PID_KEY]: process.pid },
-  };
+  const merged = mergeDiffSummary(
+    row?.diffSummary,
+    { platform: { [OWNER_SERVER_PID_KEY]: process.pid } },
+    "relation",
+  );
   await db
     .update(taskTable)
     .set({ diffSummary: merged })
@@ -641,10 +630,11 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
             // R3:失败原因与事实一致。走到这里的只剩「属主缺失/属主已死且
             // executor 进程不在」—— 本实例重启(或任务进程异常退出)后接管,
             // server-restart 是唯一如实的原因。
-            let next = preserveDispatchKindNote(row.diffSummary, {
-              error: "server-restart",
-            });
-            next = preserveRollbackSkipped(row.diffSummary, next);
+            const next = mergeDiffSummary(
+              row.diffSummary,
+              { error: "server-restart" },
+              "terminal",
+            );
             const [u] = await db
               .update(taskTable)
               .set({ status: "failed", diffSummary: next })
@@ -1237,13 +1227,9 @@ export async function enqueueTaskRun(
 
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    let nextWaiting = preserveDispatchKindNote(task.diffSummary, {
+    const nextWaiting = applyDiffSummaryPatch(task.diffSummary, {
       waiting: `等待执行器额度恢复(预计 ${eta})`,
     });
-    nextWaiting = preserveRollbackSkipped(
-      task.diffSummary,
-      nextWaiting as Record<string, unknown>,
-    );
     await db
       .update(taskTable)
       .set({ diffSummary: nextWaiting })
@@ -1535,13 +1521,9 @@ async function dispatchTask(
   // (泵送跳过冷却执行器,冷却结束定时器会自动派发,任务保持 queued 等待)。
   if (isInCooldown(ex)) {
     const eta = formatEta(cooldownEndMs(ex));
-    let nextWaiting = preserveDispatchKindNote(task.diffSummary, {
+    const nextWaiting = applyDiffSummaryPatch(task.diffSummary, {
       waiting: `等待执行器额度恢复(预计 ${eta})`,
     });
-    nextWaiting = preserveRollbackSkipped(
-      task.diffSummary,
-      nextWaiting as Record<string, unknown>,
-    );
     try {
       await db
         .update(taskTable)
@@ -1620,20 +1602,18 @@ async function recordRedispatchStopped(
   consecutive: number,
 ): Promise<void> {
   const limit = getRedispatchFailureLimit();
-  const prev =
-    parent.diffSummary && typeof parent.diffSummary === "object"
-      ? { ...(parent.diffSummary as Record<string, unknown>) }
-      : {};
-  prev.redispatchStopped = {
-    at: new Date().toISOString(),
-    consecutiveFailures: consecutive,
-    limit,
-    reason: `子任务连续失败达 ${consecutive} 次(阈值 ${limit}),平台已停止重派,等待人工介入`,
-  };
+  const next = applyDiffSummaryPatch(parent.diffSummary, {
+    redispatchStopped: {
+      at: new Date().toISOString(),
+      consecutiveFailures: consecutive,
+      limit,
+      reason: `子任务连续失败达 ${consecutive} 次(阈值 ${limit}),平台已停止重派,等待人工介入`,
+    },
+  });
   try {
     await db
       .update(taskTable)
-      .set({ diffSummary: prev })
+      .set({ diffSummary: next })
       .where(
         and(eq(taskTable.id, parent.id), eq(taskTable.groupId, parent.groupId)),
       );
@@ -2414,16 +2394,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             ),
             columns: { diffSummary: true },
           });
-          let nextCancelled = preserveDispatchKindNote(cur?.diffSummary, {
+          const nextCancelled = applyDiffSummaryPatch(cur?.diffSummary, {
             error: "stopped",
             ...(tokenUsage !== undefined ? { tokenUsage } : {}),
             ...(tokenUsageReason ? { tokenUsageReason } : {}),
             ...(liveTail ? { liveOutputTail: liveTail } : {}),
           });
-          nextCancelled = preserveRollbackSkipped(
-            cur?.diffSummary,
-            nextCancelled,
-          );
           const [cancelled] = await db
             .update(taskTable)
             .set({
@@ -2734,22 +2710,23 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
         const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
         if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
-        // R2 缺省留痕跨终态保留:合并既有 dispatchKindNote / rollbackSkipped
-        {
-          const cur = await db.query.task.findFirst({
-            where: and(
-              eq(taskTable.id, taskId),
-              eq(taskTable.groupId, groupId),
-            ),
-            columns: { diffSummary: true },
-          });
-          preserveDispatchKindNote(cur?.diffSummary, diffSummary);
-          preserveRollbackSkipped(cur?.diffSummary, diffSummary);
-        }
+        // 经单一合并入口写入:以既有为底,result/metrics/scheduling 分所有者合并,
+        // audit / relation 等他有键自动保留(spec diffsummary-ownership W2)。
+        const curDone = await db.query.task.findFirst({
+          where: and(
+            eq(taskTable.id, taskId),
+            eq(taskTable.groupId, groupId),
+          ),
+          columns: { diffSummary: true },
+        });
+        const doneSummary = applyDiffSummaryPatch(
+          curDone?.diffSummary,
+          diffSummary,
+        );
         releaseTaskOutput(taskId);
         const [done] = await db
           .update(taskTable)
-          .set({ status: "done", diffSummary })
+          .set({ status: "done", diffSummary: doneSummary })
           .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
           .returning();
         if (done) {
@@ -2887,10 +2864,11 @@ function handleStallAlert(run: QueuedRun): void {
         ),
         columns: { diffSummary: true },
       });
-      let nextAlert = preserveDispatchKindNote(cur?.diffSummary, {
-        stallAlerted: true,
-      });
-      nextAlert = preserveRollbackSkipped(cur?.diffSummary, nextAlert);
+      const nextAlert = mergeDiffSummary(
+        cur?.diffSummary,
+        { stallAlerted: true },
+        "scheduling",
+      );
       await run.db
         .update(taskTable)
         .set({ diffSummary: nextAlert })
@@ -3097,26 +3075,23 @@ async function failTask(
   extra?: Record<string, unknown>,
   attempts?: TaskAttempt[],
 ): Promise<void> {
-  const diffSummary: Record<string, unknown> = { error: reason, ...extra };
-  if (retries > 0) diffSummary.retries = retries;
+  const patch: Record<string, unknown> = { error: reason, ...extra };
+  if (retries > 0) patch.retries = retries;
   const tokenUsage = attempts ? sumAttemptTokenUsage(attempts) : undefined;
-  if (tokenUsage !== undefined) diffSummary.tokenUsage = tokenUsage;
+  if (tokenUsage !== undefined) patch.tokenUsage = tokenUsage;
   const tokenUsageReason = attempts
     ? sumAttemptTokenUsageReason(attempts)
     : undefined;
-  if (tokenUsageReason) diffSummary.tokenUsageReason = tokenUsageReason;
+  if (tokenUsageReason) patch.tokenUsageReason = tokenUsageReason;
   const tail = taskOutputTailLines(taskId);
-  if (tail) diffSummary.outputTail = tail;
+  if (tail) patch.outputTail = tail;
   const liveTail = liveTaskOutputTail(taskId);
-  if (liveTail) diffSummary.liveOutputTail = liveTail;
-  {
-    const cur = await db.query.task.findFirst({
-      where: eq(taskTable.id, taskId),
-      columns: { diffSummary: true },
-    });
-    preserveDispatchKindNote(cur?.diffSummary, diffSummary);
-    preserveRollbackSkipped(cur?.diffSummary, diffSummary);
-  }
+  if (liveTail) patch.liveOutputTail = liveTail;
+  const cur = await db.query.task.findFirst({
+    where: eq(taskTable.id, taskId),
+    columns: { diffSummary: true },
+  });
+  const diffSummary = applyDiffSummaryPatch(cur?.diffSummary, patch);
   const [failed] = await db
     .update(taskTable)
     .set({ status: "failed", diffSummary })
@@ -3323,16 +3298,12 @@ async function handleTransientQuotaBackoff(
       ),
       columns: { diffSummary: true },
     });
-    let transientNext = preserveDispatchKindNote(curTransient?.diffSummary, {
+    const transientNext = applyDiffSummaryPatch(curTransient?.diffSummary, {
       waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
       // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
       quotaKind: "transient",
       ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
     });
-    transientNext = preserveRollbackSkipped(
-      curTransient?.diffSummary,
-      transientNext as Record<string, unknown>,
-    );
     const [updated] = await run.db
       .update(taskTable)
       .set({
@@ -3517,17 +3488,11 @@ async function handleFailure(
           where: eq(taskTable.id, taskId),
           columns: { diffSummary: true },
         });
-        const base =
-          asDiffSummaryRecord(cur?.diffSummary) ??
-          ({} as Record<string, unknown>);
-        const existing = asDiffSummaryRecord(cur?.diffSummary);
-        const next: Record<string, unknown> = { ...base, rollbackSkipped };
-        if (
-          existing?.dispatchKindNote &&
-          !Object.hasOwn(next, "dispatchKindNote")
-        ) {
-          next.dispatchKindNote = existing.dispatchKindNote;
-        }
+        const next = mergeDiffSummary(
+          cur?.diffSummary,
+          { rollbackSkipped },
+          "audit",
+        );
         await db
           .update(taskTable)
           .set({ diffSummary: next })

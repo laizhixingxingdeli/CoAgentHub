@@ -10,8 +10,8 @@ import type { GroupMessageFull } from "@server/lib/services/message-service";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
+import { applyDiffSummaryPatch } from "./diff-summary";
 import {
-  preserveDispatchKindNote,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
 } from "./types";
@@ -125,7 +125,9 @@ export async function markTaskCancelled(
     where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
     columns: { diffSummary: true },
   });
-  const next = preserveDispatchKindNote(cur?.diffSummary, {
+  // 经单一合并入口写入 terminal + metrics;audit / relation 等他有键自动保留
+  // (spec diffsummary-ownership W2:不再只 preserve dispatchKindNote)。
+  const next = applyDiffSummaryPatch(cur?.diffSummary, {
     error: "stopped",
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(tokenUsageReason ? { tokenUsageReason } : {}),

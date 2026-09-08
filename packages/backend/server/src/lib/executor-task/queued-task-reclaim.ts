@@ -34,12 +34,8 @@ import {
 import { postStatus } from "./notify";
 import { enqueueTaskRun, queuedBlockReason } from "./queue";
 import { activeRuns, getStallAlertMs, groupQueues } from "./state";
-import {
-  asDiffSummaryRecord,
-  preserveDispatchKindNote,
-  preserveRollbackSkipped,
-  type QueuedRun,
-} from "./types";
+import { applyDiffSummaryPatchAllowingClear } from "./diff-summary";
+import { asDiffSummaryRecord, type QueuedRun } from "./types";
 
 /** 回收周期(默认 10s,与孤儿收敛同量级;测试可注入更短间隔)。 */
 export const QUEUED_RECLAIM_INTERVAL_MS = 10_000;
@@ -380,14 +376,10 @@ async function writeQueuedDiffSummary(
   existing: unknown,
   next: Record<string, unknown>,
 ): Promise<void> {
-  // 以既有摘要为底合并 next:同一条 diffSummary 上 R2/R3 先后落笔(同一轮扫描
-  // 里先写 queuedBlocked 再写 stallAlerted),任何一步以 next 整体覆盖都会把
-  // 前一步(或更早写入方)留下的键冲掉 —— R2/R3 必须并存,不是二选一。
-  // 显式 undefined 的键 = 从底稿中删除(JSON.stringify 丢弃 undefined 键)。
-  const base = asDiffSummaryRecord(existing) ?? {};
-  let merged: Record<string, unknown> = { ...base, ...next };
-  merged = preserveDispatchKindNote(existing, merged);
-  merged = preserveRollbackSkipped(existing, merged);
+  // 经单一合并入口以既有为底合并 next(spec diffsummary-ownership W2)。
+  // 同一条 diffSummary 上 R2/R3 先后落笔(queuedBlocked / stallAlerted)必须
+  // 并存;显式 undefined 的键 = 清除(转 null 后由 merge 删除)。
+  const merged = applyDiffSummaryPatchAllowingClear(existing, next);
   await db
     .update(taskTable)
     .set({ diffSummary: merged })

@@ -1,6 +1,10 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import { and, eq, sql } from "drizzle-orm";
+import {
+  DIFF_SUMMARY_DELETE,
+  mergeDiffSummary,
+} from "./diff-summary";
 
 export const EXECUTOR_COOLDOWN_END_MS_FIELD = "executorCooldownEndMs";
 
@@ -71,8 +75,13 @@ export async function clearPersistedExecutorCooldown(
   const diffSummary = asDiffSummary(row?.diffSummary);
   if (!diffSummary || !(EXECUTOR_COOLDOWN_END_MS_FIELD in diffSummary)) return;
 
-  const remaining = { ...diffSummary };
-  delete remaining[EXECUTOR_COOLDOWN_END_MS_FIELD];
+  const remaining = mergeDiffSummary(
+    diffSummary,
+    {
+      [EXECUTOR_COOLDOWN_END_MS_FIELD]: DIFF_SUMMARY_DELETE as unknown as null,
+    },
+    "scheduling",
+  );
   await db
     .update(taskTable)
     .set({ diffSummary: remaining })

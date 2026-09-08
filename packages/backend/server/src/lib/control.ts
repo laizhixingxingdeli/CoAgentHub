@@ -25,6 +25,7 @@ import {
   cancelQueuedTasks,
   cancelRunningTasks,
   currentRunningTask,
+  mergeDiffSummary,
   postStatus,
   queuedExecutorTaskCount,
 } from "@server/lib/executor-task";
@@ -259,10 +260,13 @@ async function handleRollback(
     return;
   }
   // 回滚后 PATCH task failed(快照对应的任务视为未完成)。
+  // 经 mergeDiffSummary 以 terminal 所有者写 error,保留 platform.* / audit 等
+  // 他有键(spec diffsummary-ownership W2:禁止整袋只写 error)。
   if (task) {
+    const next = mergeDiffSummary(task.diffSummary, { error: "rollback" }, "terminal");
     await db
       .update(taskTable)
-      .set({ status: "failed", diffSummary: { error: "rollback" } })
+      .set({ status: "failed", diffSummary: next })
       .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)));
   }
   await reply(`✅ 已回滚到快照 ${res.message}`);

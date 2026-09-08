@@ -154,6 +154,8 @@ export {
   type TokenUsageResult,
 } from "./token-usage";
 export {
+  applyDiffSummaryPatch,
+  applyDiffSummaryPatchAllowingClear,
   DIFF_SUMMARY_KEY_OWNERS,
   type DiffSummaryOwner,
   mergeDiffSummary,
