@@ -1,8 +1,22 @@
 # Spec: workspace-gate 用例等错了计数器,断言必然抢跑
 
-> **状态**: Frozen
+> **状态**: Landed(`be68d102`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - 基线自行复跑:**`0 failed | 13 passed (13)`**,与汇报一致;
+>   改前 `1 failed | 12 passed (13)`。
+> - **连跑 3 次全绿**(竞态票的必要条件),执行者三次结果都贴了。
+> - **R1 满足**:`waitForOccupancy` → `waitForCoordinatorOccupancy`,
+>   轮询的量与断言的量**是同一个**(`coordinatorOccupancyCount`)。
+> - **R2 满足**:仍是 50ms 轮询 + 20s 截止,**没有**引入固定 `sleep`。
+> - **R3 满足**:超时信息为
+>   `coordinatorOccupancyCount 未在 ${timeoutMs}ms 内达到 ${expected}(当前=${cur})`
+>   —— 量名与当前值都在,不再是无上下文的 `expected +0 to be 1`。
+> - **零生产代码改动**:`git show --stat` 仅一个 test 文件,11+/6-。
+>   `queue.ts` / `state.ts` 一行未动,§1.3 的硬约束守住了。
+> - 执行者明确表示对 spec 无异议,并确认「生产闸两项相加不重叠」的分析成立。
 > **来源**: [migrate-remaining-fake-executors.md](migrate-remaining-fake-executors.md)
 > B5 执行者按 §3 R4 交出的 **③ 真实缺陷**;检视者 L3 独立复核后**收窄了结论**
 > (见 §1.3)。
