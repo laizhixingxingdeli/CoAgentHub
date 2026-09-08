@@ -1,7 +1,37 @@
 # Spec: 重录执行器探针样本,让 6 条硬验收重新产生证据
 
-> **状态**: Frozen
+> **状态**: Landed(`985f0a2b`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
+>
+> **L3 收口记录(检视者独立复核)**:
+> - **核心达成**:基线自行复跑 **`0 failed | 132 passed (132)`** ——
+>   **skipped 从 6 变 0**,6 条硬验收全部恢复运行并通过。
+> - **零生产代码**:`git show --name-only` 无 `server/src/**`。
+> - **不再依赖 `.scratch/`**:两个测试文件里 `.scratch` 与 `skipIf` 计数均为 **0**。
+> - **§4.2(本票最有价值、最易糊弄的一条)做到了**:
+>   执行者给出 6 条用例逐条的「**要验的现象是什么 / 新样本里在哪**」表 ——
+>   例如「失败命令不进界面、进持久化」对应
+>   `command_execution exit 1`,并给了 sha 与字节数。
+> - **脱敏**:新增的 5 个 fixture
+>   (`atomcode-run.stdout/.stderr` / `codebuddy-run.jsonl` /
+>   `codex-error-run.jsonl` / `pi-run.jsonl`)**零命中**。
+>   ⚠️ 检视者的自查 grep 曾在 4 个**既有** fixture 上报警,
+>   核实为假阳性:`sk-` 匹配到了 `queued-ta**sk-ne**ver-picked-up` /
+>   `ta**sk-re**claim` 里的 "task-"。
+>   执行者的脱敏细致处:把 codebuddy 的 `apiKeySource` 字段改名为 `keySource`,
+>   因为**字段名本身**会命中 `api[_-]?key`。
+> - **探针无副作用**:`git status` 探针前后对比,仓库无因探针产生的改动。
+>
+> **⚠️ 执行者如实声明的覆盖缺口(检视者确认,并认为处理正确)**:
+>
+> 原硬验收里的 **Codex「Reconnecting ×4 + 传输降级」场景本环境未能复现** ——
+> 它依赖一次真实的网络抖动。执行者用**真实**的 `exit 1` 失败命令 + 两条旁白
+> 重新锁定,**仍覆盖**「界面只留 report 旁白+终稿」「非 report 进持久化不进界面」;
+> **未覆盖**顶层 `type:error` / Reconnecting 在真实 corpus 上的过滤
+> (该路径仍有单元级 synthetic 用例)。
+>
+> **它没有伪造一次断连来凑满覆盖** —— 这正是本票 §3 R3 的底线。
+> 若要求 error 事件也出现在真实 corpus,**需另票在可制造传输错误的环境重采**。
 > **日期**: 2026-09-08
 > **前置**: [tests-depend-on-gitignored-samples.md](tests-depend-on-gitignored-samples.md)
 > (Partially landed `5d42f961`)已消除 ENOENT,但代价是 **6 条硬验收改为
