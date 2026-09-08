@@ -468,11 +468,23 @@ async function createCheckpointUnlocked(
 }
 
 /**
- * 回滚工作区:git reset --hard 到 checkpoint ref(仅回滚指令显式调用,
- * 从不自动执行)。返回 {ok, message};ok=false 时 message 为失败原因。
+ * 回滚工作区到 checkpoint 快照(仅回滚指令与重试路径调用)。
+ * 返回 {ok, message};ok=false 时 message 为失败原因。
  *
- * 与桥行为一致:reset --hard 只恢复已跟踪文件,任务新创建的未跟踪文件
- * 会残留(不跑 git clean,避免误删用户工作区里与任务无关的未跟踪文件)。
+ * 快照提交 C 由 `commit-tree <tree> -p HEAD` 合成,**C 是机器生成的产物,不是
+ * 用户的提交**,所以不能直接 `reset --hard C` —— 那会把 HEAD 停在 C 上,把整棵
+ * 工作树快照(含与之无关的在途改动、有意未跟踪的本机文件)变成分支上的一个
+ * `coagenthub checkpoint` 提交(specs/rollback-puts-checkpoint-commit-on-head.md)。
+ *
+ * 正确语义是两件事(R1):
+ *   1. HEAD 与索引回到 C^(打快照那一刻的真实 HEAD)—— 撤销本次尝试的提交;
+ *   2. 工作树恢复成 C 的树 —— 快照时的未提交改动重新以**未提交**形式出现,
+ *      未跟踪文件仍是 `??`。
+ * 因此这里 `reset --hard C^` 再用 `restore --worktree` 只回写工作树
+ * (不带 --staged:索引留在 C^,改动才是未提交的)。
+ *
+ * 与桥行为一致:只恢复已跟踪文件,任务新创建的未跟踪文件会残留
+ * (不跑 git clean,避免误删用户工作区里与任务无关的未跟踪文件)。
  */
 export async function resetToCheckpoint(
   ref: string,
@@ -482,13 +494,36 @@ export async function resetToCheckpoint(
   if (verify.status !== 0) {
     return { ok: false, message: `快照不存在: ${ref}(任务 id 可能不对)` };
   }
-  const sha = (verify.stdout ?? "").trim().slice(0, 12);
-  const reset = await gitExec(["reset", "--hard", ref], repoRoot);
+  const sha = (verify.stdout ?? "").trim();
+  const short = sha.slice(0, 12);
+  // C^ 即打快照那一刻的真实 HEAD,是回滚的基线。
+  const parent = await gitExec(["rev-parse", "--verify", `${sha}^`], repoRoot);
+  if (parent.status !== 0) {
+    return {
+      ok: false,
+      message: `快照 ${ref}(${short}) 没有父提交,无法确定回滚基线`,
+    };
+  }
+  // 1) HEAD + 索引 + 工作树回到基线;已在 C^ 中跟踪、被本次尝试删除的文件
+  //    也在这一步恢复。
+  const base = parent.stdout.trim();
+  const reset = await gitExec(["reset", "--hard", base], repoRoot);
   if (reset.status !== 0) {
     return {
       ok: false,
       message: `git reset 失败: ${(reset.stderr ?? "").trim()}`,
     };
   }
-  return { ok: true, message: `${ref}(${sha})` };
+  // 2) 只把工作树回写成 C 的树;索引不动,所以改动是「未提交」的。
+  const restore = await gitExec(
+    ["restore", "--source", sha, "--worktree", "--", "."],
+    repoRoot,
+  );
+  if (restore.status !== 0) {
+    return {
+      ok: false,
+      message: `git restore 失败: ${(restore.stderr ?? "").trim()}`,
+    };
+  }
+  return { ok: true, message: `${ref}(${short})` };
 }

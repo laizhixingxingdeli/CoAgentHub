@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -253,6 +254,22 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
     execFileSync("git", ["commit", "-qm", "seed"], { cwd: dir });
     return dir;
   }
+  /** 跑 git 并取 stdout(文本)。 */
+  function gitOut(proj: string, ...args: string[]): string {
+    return execFileSync("git", args, { cwd: proj }).toString();
+  }
+  /** 读工作树文件;本机 core.autocrlf=true,统一成 LF 再比对内容。 */
+  function readText(file: string): string {
+    return readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  }
+  /** 模拟执行器把当前工作树(含未跟踪文件)变成一次提交。 */
+  function commitAll(proj: string, message: string): void {
+    execFileSync("git", ["add", "-A"], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", message], { cwd: proj });
+  }
+  async function runner() {
+    return import("@server/lib/executor-runner");
+  }
   async function setupGroup() {
     const coordinator = await registerParticipant({ name: "coord-guard" });
     const codebuddy = await registerParticipant({ name: "CodeBuddy" });
@@ -406,6 +423,25 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       expect(content).not.toContain("attempt-1-dirty");
       const diff = t.diffSummary as Record<string, unknown>;
       expect((diff as Record<string, unknown>).rollbackSkipped).toBeUndefined();
+      // 回滚不得把 checkpoint 提交推上 HEAD(R1/R2):快照提交不是 HEAD 的祖先,
+      // 日志里也不该出现机器生成的 checkpoint 提交。
+      const cpSha = execFileSync("git", ["rev-parse", t.checkpointRef ?? ""], {
+        cwd: proj,
+      })
+        .toString()
+        .trim();
+      expect(cpSha.length).toBeGreaterThan(0);
+      expect(() =>
+        execFileSync(
+          "git",
+          ["merge-base", "--is-ancestor", cpSha, "HEAD"],
+          { cwd: proj },
+        ),
+      ).toThrow();
+      const log = execFileSync("git", ["log", "--oneline"], {
+        cwd: proj,
+      }).toString();
+      expect(log).not.toContain("coagenthub checkpoint");
     } finally {
       process.env.FAKE_COUNTER_FILE = "";
       process.env.FAKE_FAIL_UNTIL = "";
@@ -586,4 +622,90 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
     const res2 = preserveRollbackSkipped(existing, next2);
     expect(res2.rollbackSkipped).toBeNull();
   });
+
+  it("验收#1b 回滚后 HEAD 停在快照时刻的真实提交(C^)：checkpoint 提交不上 HEAD，未提交改动仍是未提交", async () => {
+    const proj = makeGitRepo("coagenthub-guard-head-");
+    try {
+      // 快照时的工作树：①已跟踪已修改 ②未跟踪
+      writeFileSync(path.join(proj, "hello.txt"), "snapshot-edit\n");
+      writeFileSync(path.join(proj, "local-only.txt"), "snapshot-untracked\n");
+      const { createCheckpoint, resetToCheckpoint } = await runner();
+      const headAtSnapshot = gitOut(proj, "rev-parse", "HEAD").trim();
+      const cp = await createCheckpoint("head-guard-task", proj);
+      expect(cp.sha).not.toBe(headAtSnapshot);
+
+      // 执行器在本次尝试里产生一个提交(把未跟踪文件也一起提交掉)
+      commitAll(proj, "exec attempt change");
+      expect(gitOut(proj, "rev-parse", "HEAD").trim()).not.toBe(headAtSnapshot);
+
+      const res = await resetToCheckpoint(cp.ref, proj);
+      expect(res.ok).toBe(true);
+
+      // R2：HEAD == C^，不等于 checkpoint 提交
+      const head = gitOut(proj, "rev-parse", "HEAD").trim();
+      expect(head).toBe(headAtSnapshot);
+      expect(head).not.toBe(cp.sha);
+      // 日志里既没有 checkpoint 提交，也没有本次尝试的提交(验收#2)
+      const log = gitOut(proj, "log", "--oneline");
+      expect(log).not.toContain("coagenthub checkpoint");
+      expect(log).not.toContain("exec attempt change");
+      // 已跟踪已修改 → 仍是未提交的 M，内容=快照时
+      const status = gitOut(proj, "status", "--porcelain");
+      expect(status).toContain(" M hello.txt");
+      expect(readText(path.join(proj, "hello.txt"))).toBe("snapshot-edit\n");
+      // 未跟踪 → 仍是 ??(不是 A )
+      expect(status).toContain("?? local-only.txt");
+      expect(readText(path.join(proj, "local-only.txt"))).toBe(
+        "snapshot-untracked\n",
+      );
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("验收#3b 执行中删除的已跟踪文件，回滚后恢复(R3)", async () => {
+    const proj = makeGitRepo("coagenthub-guard-deleted-");
+    try {
+      writeFileSync(path.join(proj, "kept.txt"), "kept-at-snapshot\n");
+      execFileSync("git", ["add", "-A"], { cwd: proj });
+      execFileSync("git", ["commit", "-qm", "add kept"], { cwd: proj });
+      const { createCheckpoint, resetToCheckpoint } = await runner();
+      const cp = await createCheckpoint("deleted-file-task", proj);
+
+      // 执行器删掉已跟踪文件并提交
+      rmSync(path.join(proj, "kept.txt"), { force: true });
+      commitAll(proj, "exec removed kept");
+      expect(existsSync(path.join(proj, "kept.txt"))).toBe(false);
+
+      const res = await resetToCheckpoint(cp.ref, proj);
+      expect(res.ok).toBe(true);
+      expect(readText(path.join(proj, "kept.txt"))).toBe("kept-at-snapshot\n");
+      expect(gitOut(proj, "status", "--porcelain")).not.toContain("kept.txt");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("验收#4 执行中新建的文件：未提交的新建保留为 ??，已提交的新建被移除(与现状一致，不跑 git clean)", async () => {
+    const proj = makeGitRepo("coagenthub-guard-newfile-");
+    try {
+      const { createCheckpoint, resetToCheckpoint } = await runner();
+      const cp = await createCheckpoint("new-file-task", proj);
+
+      // 执行器新建并提交了 committed-new.txt；随后又留下一个未提交的 leftover.txt
+      writeFileSync(path.join(proj, "committed-new.txt"), "exec made\n");
+      commitAll(proj, "exec added file");
+      writeFileSync(path.join(proj, "leftover.txt"), "exec leftover\n");
+
+      const res = await resetToCheckpoint(cp.ref, proj);
+      expect(res.ok).toBe(true);
+      // 已提交的新建文件：原本 `reset --hard` 就会移除(它不在快照树里)，行为不变
+      expect(existsSync(path.join(proj, "committed-new.txt"))).toBe(false);
+      // 未提交的新建文件：不跑 git clean，仍然留在工作树里且仍是未跟踪
+      expect(existsSync(path.join(proj, "leftover.txt"))).toBe(true);
+      expect(gitOut(proj, "status", "--porcelain")).toContain("?? leftover.txt");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
