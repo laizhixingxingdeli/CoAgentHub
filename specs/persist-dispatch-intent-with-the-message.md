@@ -1,7 +1,41 @@
 # Spec: 消息已提交、task 未创建的窗口没有恢复手段
 
-> **状态**: Frozen
+> **状态**: Landed(`5074ed7c`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
+>
+> **L3 收口记录(检视者独立复核 —— 本票有 schema 变更,三条重点逐条查过)**:
+>
+> **① R1「意图与消息同事务」—— 成立,不是又一个 fire-and-forget。**
+> `messages.ts` 把 `insertGroupMessage` 的第三个参数做成回调
+> `(tx, created) => { … await writeDispatchIntent(tx, …) }`,
+> **用的是同一个 `tx` 句柄**。消息 + closure + 意图原子提交。
+>
+> **② 验收 4「恢复路径过检视者守卫」—— 成立,这是票面点名最可能踩的坑。**
+> `reclaimDispatchIntents`(`dispatch-intent.ts:186`)内部直调
+> `maybeDispatchExecutorTask`,而缺陷 A 的守卫
+> `isReviewerNotDispatchableTarget` 就在它里面(`68ad401b` 落地的派发层第二道闸)。
+> **恢复不会绕过守卫**,也没有写第二套「该不该派」的判定(ADR-0009 / S3)。
+>
+> **③ 迁移只增不改 —— 成立。**
+> `0031_add_dispatch_intent.sql` 里的 `ALTER TABLE` 全部作用于**新建的
+> `dispatch_intent` 表**(加外键约束),**没有一条**碰既有表的数据
+> (无 UPDATE / DELETE / 对既有表的 ALTER)。历史消息**不追溯、不回填**。
+>
+> **基线**:检视者自行复跑五文件 **`0 failed | 68 passed (68)`**,与汇报一致。
+> (`executor-trigger` 的 8 条 ticket-capture 红是 win32 既有问题
+> —— `/tmp/coagenthub-ticket-*.md` 对 Git bash 不可见,与本票无关,
+> 检视者在多张票上重复量到同一数字。)
+>
+> **表结构**(单一 schema 改动,记录在案):
+> `dispatch_intent` —— `message_id` UNIQUE、`(status, created_at)`、`(group_id)` 索引;
+> `status ∈ {pending, dispatched, rejected, failed}`;
+> `payload` 存 `DispatchExecutorInput` 快照;
+> `reject_reason` / `resolved_participant_id` / `task_id` /
+> `attempt_count` / `last_error` / `stall_alerted` 用于追踪与结算。
+>
+> ⚠️ **未生效**:生产需跑
+> `pnpm --filter @laizhixingxingdeli/database migrate` 应用 `0031`,
+> 并重建重启才装上写意图的逻辑。执行者按票面**未重启 server**。
 > **日期**: 2026-09-08
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §4 **R4**
 > **前置决策(用户 2026-09-07 已拍板)**:**持久化调度意图**,
