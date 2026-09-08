@@ -33,6 +33,7 @@ import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
 import { getLogger } from "./lib/plugins/winston";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
 import { startServer } from "./lib/server-startup";
+import { acquireSingleServerLock } from "./lib/single-server-lock";
 import { wsHub } from "./lib/ws-hub";
 import { connInfoMiddleware } from "./middleware/conn-info";
 import { loggerMiddleware } from "./middleware/logger";
@@ -156,6 +157,16 @@ app.get(
 async function run() {
   configureRuntimeEntry(import.meta.url);
   logRuntimeStartup();
+
+  // Single-server enforcement (ADR-0003 memory-scheduler reality): session
+  // advisory lock on a dedicated non-pooled connection. Fail fast before any
+  // recovery/mutation if another instance already owns this DATABASE_URL.
+  // See lib/single-server-lock.ts (R2: must not use the Drizzle pool).
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is not set");
+  }
+  await acquireSingleServerLock({ connectionString: databaseUrl });
 
   const port = serverPort();
 
