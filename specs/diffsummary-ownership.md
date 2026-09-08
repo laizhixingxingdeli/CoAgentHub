@@ -1,6 +1,45 @@
 # Spec: 明确 diffSummary 的数据归属
 
-> **状态**: Draft
+> **状态**: Frozen(检视者 2026-09-09 §6 冻结)
+>
+> **检视者冻结记录(§6)—— 这是新流程 `coordinator-as-technical-lead` 的第一次实跑**:
+>
+> 草案与计划由**协调者**按 reviewer skill §4–§5 产出(`938d9052`),
+> 检视者只做 §3(需求对齐)与本次 §6(确认冻结)。
+>
+> **协调者的五条异议,逐条裁定**:
+>
+> 1. **「R4 往 diffSummary 加结算字段」不准确 —— 异议成立,检视者写错了。**
+>    检视者复核 `git show 5074ed7c | grep -cE '^\+.*diffSummary'` = **0**,
+>    R4 落的是独立表 `dispatch_intent`。preserve 链变长的主因是
+>    **「整袋替换 + 逐字段补丁」模式本身**,与 R4 无关。需求书那句作废。
+> 2. **本票不做物理嵌套存储** —— **采纳**。注册表 + 合并入口已满足
+>    「有类型结构 + 单一合并 + 所有权」,嵌套会抬高 API 兼容成本,
+>    与需求里「保持 API 兼容」的硬约束冲突。
+> 3. **不与 S1 绑死** —— **采纳**。需求本就写明不做 S1。
+> 4. **基线口径** —— **裁定:验收口径是「不新增失败」,不是「清单必须全绿」。**
+>    编制日基线 server 19 文件 `357 passed / 11 failed`,
+>    前端 4 文件 `81 passed / 0 failed`。那 11 红是既有的,不属本票。
+> 5. **`control` 回滚与 `markTaskCancelled` 漏保留打进 W2** —— **采纳**。
+>    它们与本票是同一缺陷类(整袋替换丢失他有键),且 W2 正好要动这两个文件,
+>    另开票反而割裂。
+>
+> **检视者独立复核了协调者的两条新发现,均属实**(这两条我自己分析时没找到):
+>
+> | 位置 | 问题 |
+> |---|---|
+> | `notify.ts:129` `markTaskCancelled` | 只 `preserveDispatchKindNote`,**漏** `rollbackSkipped` 与整个 `platform.*`(含 `resumeOf` / `ownerServerPid` / `l3MergedInto`) |
+> | `control.ts:265` 回滚 | `diffSummary: { error: "rollback" }` —— **整袋替换,全抹** |
+>
+> 这正是 §10 要的产出:技术分析有了统一产物,**并因此浮出两个真实缺陷**。
+>
+> **验收质量检视者认可**:每条都指明了取数方式(`rg` 命令 / DB 行 / HTTP JSON / WS 事件),
+> 并明写「不只是 helper 返回值」。
+> 其中 **C2**(`rg -n 'function preserve'` 不得新增第三个)是对本票**真实目标**
+> 的可证伪检验,不是走过场 —— 值得后续票参考。
+>
+> **计划**:[plans/diffsummary-ownership.md](../plans/diffsummary-ownership.md),
+> W1 → W2 → W3,顺序理由(先立可验收的合并语义,再改路径,最后钉对外形状)成立。
 > **版本**: 1.0
 > **日期**: 2026-09-09
 > **来源**: 报告 `docs/implementation-optimization-review-2026-09-07.md` §5 S2；检视者 §3 grill 产出（`req-s2-diffsummary`）
