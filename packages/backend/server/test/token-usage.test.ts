@@ -1,5 +1,4 @@
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,10 +11,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { collectTokenUsage } from "../src/lib/executor-task/token-usage";
 
-/** Checked-in executor samples live here (see specs/tests-depend-on-gitignored-samples). */
+/** Checked-in executor samples live here (see specs/re-record-executor-probe-samples). */
 const fixturesDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixturePath = (name: string) => join(fixturesDir, name);
-const hasFixture = (name: string) => existsSync(fixturePath(name));
 
 const cwd = "/tmp/token-usage-project";
 const startedAt = "2026-08-25T10:00:00.000Z";
@@ -362,13 +360,10 @@ describe("platform token usage collection", () => {
     });
   });
 
-  it.skipIf(!hasFixture("pi-run.jsonl"))(
-    "pi on the real captured corpus resolves the documented running total, trusted[需本地样本]",
-    async () => {
+  it("pi on the real captured corpus resolves the documented running total, trusted", async () => {
     // Hard-acceptance style: feed the REAL pi stdout from test/fixtures/pi-run.jsonl
-    // (same fixture as output-parser.test.ts). Expected values are the ones
-    // documented in spec v1.1: last usage object input=472/output=30 and
-    // cumulative totalTokens=3830. skipIf when the fixture is absent — do not forge.
+    // (same fixture as output-parser.test.ts). Expected values are the last
+    // cumulative usage object from the 2026-09-08 re-record.
     const result = await collectTokenUsage({
       executorKey: "pi",
       cwd,
@@ -377,15 +372,14 @@ describe("platform token usage collection", () => {
       stdout: readFileSync(fixturePath("pi-run.jsonl"), "utf8"),
     });
     expect(result.tokenUsage).toEqual({
-      inputTokens: 472,
-      outputTokens: 30,
-      cachedInputTokens: 3328,
-      totalTokens: 3830,
+      inputTokens: 290,
+      outputTokens: 35,
+      cachedInputTokens: 1920,
+      totalTokens: 2245,
       source: "generic-jsonl-scan",
       trusted: true,
     });
-  },
-  );
+  });
 
   it("generic fallback for an unknown executor stays untrusted on identical pi-shaped stdout", async () => {
     // The trusted marking is per-executor-key, not per-stdout-shape: the same

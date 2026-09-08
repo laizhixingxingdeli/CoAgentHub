@@ -17,11 +17,9 @@ import {
 } from "@server/lib/executor-task";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-/** Checked-in executor samples live here (see specs/tests-depend-on-gitignored-samples). */
+/** Checked-in executor samples live here (see specs/re-record-executor-probe-samples). */
 const fixturesDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixturePath = (name: string) => join(fixturesDir, name);
-const hasFixture = (...names: string[]) =>
-  names.every((name) => existsSync(fixturePath(name)));
 
 /**
  * 执行器输出解析器(output-parser.ts,spec: live-output-shows-narration-not-actions +
@@ -526,9 +524,7 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(flushed[1].summary).toBe("[汇报 #t2] answer");
   });
 
-  it.skipIf(!hasFixture("atomcode-run.stdout", "atomcode-run.stderr"))(
-    "真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)[需本地样本]",
-    () => {
+  it("真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)", () => {
     const stdoutRaw = readFileSync(
       fixturePath("atomcode-run.stdout"),
       "utf8",
@@ -557,8 +553,7 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(summary).toContain("[tool→");
     expect(summary).toContain("[done]");
     expect(summary).toContain("`a.txt` 共有 2 行。");
-  },
-  );
+  });
 
   it("stdout/stderr 交错 chunk 切分时不串流(回归)", () => {
     const parse = createExecutorOutputParser("atomcode");
@@ -1797,9 +1792,8 @@ describe("atomcode:任务 01a04f70-9101 outputTail 重放(裸叙述与 [tokens] 
 /**
  * 硬验收 1-4(spec live-output-only-agent-narration):以 test/fixtures/
  * 下的**真实样本**为准,界面流(liveStreamText,仅 report)与持久化流
- * (summaryStreamText,全量)分别断言;持久化侧的哈希取 R1 生效前(fd75035a^)
- * 同一份样本的实测值,用来锁死 R3「持久化口径逐字不变」。
- * 样本缺失时 skip(需本地样本)——不得伪造样本冒充真实采样。
+ * (summaryStreamText,全量)分别断言。样本于 2026-09-08 按
+ * specs/re-record-executor-probe-samples 重录后重新锁定哈希/正文。
  */
 describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", () => {
   function parseSample(key: string, name: string) {
@@ -1813,52 +1807,49 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
   const sha256 = (text: string) =>
     createHash("sha256").update(text, "utf8").digest("hex");
 
-  it.skipIf(!hasFixture("codex-error-run.jsonl"))(
-    "codex 错误样本:界面恰好 2 行(含中途旁白),持久化与改动前逐字节相同[需本地样本]",
-    () => {
+  it("codex 失败命令样本:界面恰好 2 行(含中途旁白),失败命令只留持久化", () => {
     const entries = parseSample("codex", "codex-error-run.jsonl");
     const live = entries.filter((e) => e.kind === "report");
     expect(live).toHaveLength(2);
     expect(live.map((e) => e.summary.replace(/^\[汇报 #t\d+\] /, ""))).toEqual([
-      "我先读取 `a.txt` 并统计其行数。",
-      "当前目录下未找到 `a.txt`，因此无法统计行数。",
+      "我会先用 shell 执行 `cat a.txt`，记录失败结果，然后说明文件不存在，因此无法统计行数；整个过程不修改任何文件。",
+      "找不到文件 `a.txt`，命令执行失败，因此无法统计行数。未修改任何文件。",
     ]);
-    // 界面只剩这两行:4 条 Reconnecting、传输降级、exit 1 的失败命令都不进界面。
+    // 界面只剩这两行:exit 1 的失败命令不进界面。
     expect(liveStreamText(entries)).toBe(
       `${live[0].summary}\n${live[1].summary}\n`,
     );
-    // R3:全量摘要流与 fd75035a^ 实测同哈希(471 字节,含全部错误与命令行)。
+    // 全量摘要流含命令行(exit 1);字节/哈希按 2026-09-08 重录样本锁定。
     const persisted = summaryStreamText(entries);
-    expect(Buffer.byteLength(persisted)).toBe(471);
+    expect(Buffer.byteLength(persisted)).toBe(386);
     expect(sha256(persisted)).toBe(
-      "b73a74be332360908fed0a19751a131ebf7226f1602b53b232f79f4ab2970c7b",
+      "88ed54ccf6264c9c8d46013e15ea1f4b76b351929ac7070b59cebede623b8094",
     );
-    expect(persisted).toContain("[错误");
-  },
-  );
+    expect(persisted).toContain("[命令");
+    expect(persisted).toContain("exit 1");
+    expect(liveStreamText(entries)).not.toContain("[命令");
+  });
 
-  it.skipIf(!hasFixture("codebuddy-run.jsonl"))(
-    "codebuddy 样本:界面恰好 1 行,3 条 JSON 信封只留持久化[需本地样本]",
-    () => {
+  it("codebuddy 样本:界面恰好 1 行,3 条 JSON 信封只留持久化", () => {
     const entries = parseSample("codebuddy", "codebuddy-run.jsonl");
     const live = entries.filter((e) => e.kind === "report");
     expect(live).toHaveLength(1);
     expect(live[0].summary.replace(/^\[汇报 #t\d+\] /, "")).toBe(
-      "a.txt 共 2 行内容（hello、world，文件以换行结尾）。",
+      "a.txt 有 2 行。",
     );
-    // 3 条信封约 2977 字节(摘要流的 88%)不进界面,但逐字节留在持久化侧。
+    // 3 条信封(init/status/file-history-snapshot)不进界面,但逐字节留在持久化侧。
     const persisted = summaryStreamText(entries);
-    expect(Buffer.byteLength(persisted)).toBe(3365);
+    expect(persisted).toContain('"type":"system","subtype":"init"');
+    expect(persisted).toContain('"type":"system","subtype":"status"');
+    expect(persisted).toContain('"type":"file-history-snapshot"');
+    expect(Buffer.byteLength(persisted)).toBe(3341);
     expect(sha256(persisted)).toBe(
-      "5507f006c69de8f24f8fe7b693ef004d71a939e8ab3043e7ee551e7f0841cdb3",
+      "7302b978318bd179946b6653ebac80b848640414137cfa098381fc5aa8ad17bb",
     );
     expect(liveStreamText(entries).length * 10).toBeLessThan(persisted.length);
-  },
-  );
+  });
 
-  it.skipIf(!hasFixture("atomcode-run.stdout", "atomcode-run.stderr"))(
-    "atomcode 样本:界面恰好 1 行答案,持久化仍含全部 24 条[需本地样本]",
-    () => {
+  it("atomcode 样本:界面恰好 1 行答案,持久化仍含 tool/done", () => {
     const parse = createExecutorOutputParser("atomcode");
     const entries = [
       // 真实 stdout 未必以换行结尾:去尾换行后答案只能靠 flush 吐出。
@@ -1875,30 +1866,19 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
       ),
       ...parse.flush(),
     ];
-    expect(entries).toHaveLength(24);
+    // 2026-09-08 重录样本:15 条(含空 raw / thinking / tool / done / report)。
+    expect(entries).toHaveLength(15);
     const live = entries.filter((e) => e.kind === "report");
     expect(live).toHaveLength(1);
     expect(live[0].summary).toMatch(/^\[汇报 #t\d+\] `a\.txt` 共有 2 行。$/);
-    // 界面只有这一行;持久化侧 [tool→ bash] / [done] 与 11 条 raw 全在。
+    // 界面只有这一行;持久化侧 [tool→ read_file] / [done] 仍在。
     const persisted = summaryStreamText(entries);
     expect(persisted).toContain("[tool→");
     expect(persisted).toContain("[done]");
-  },
-  );
+  });
 });
-
-/**
- * Pi 专用解析器硬验收(spec live-output-pi-uncovered-shows-thinking-and-tool-results.md §4):
- * 以 test/fixtures/pi-run.jsonl 真实样本为准:
- *  - 界面输出恰好 2 行(不含 thinking/tool/票面回显);
- *  - 纯空白 text_end 不进界面;
- *  - 验收脚本必须 import 生产 liveStreamText,不得内联复制。
- * 样本缺失时 skip(需本地样本)——不得伪造样本冒充真实采样。
- */
 describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
-  it.skipIf(!hasFixture("pi-run.jsonl"))(
-    "Pi 真实样本:界面恰好 2 行,不含 thinking/tool/票面回显[需本地样本]",
-    () => {
+  it("Pi 真实样本:界面恰好 2 行,不含 thinking/tool/票面回显", () => {
     const piSample = readFileSync(fixturePath("pi-run.jsonl"), "utf8");
     const parse = createExecutorOutputParser("pi");
     const entries = [...parse(piSample, "stdout"), ...parse.flush()];
@@ -1906,42 +1886,37 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     // 生产函数:liveStreamText(仅 kind=report,过滤空白)
     const live = liveStreamText(entries);
 
-    // 验收 1:界面输出恰好 2 个 text_end 贡献(含嵌入换行的代码块展现为多行)
-    // liveStreamText 按 kind=report 条目拼接,2 条 text_end → 2 段,每段可含嵌入换行
-    const entriesByKind = entries.filter((e) => e.kind === "report" && (e.summary || "").trim().length > 0);
+    // 验收 1:界面输出恰好 2 个 text_end 贡献
+    const entriesByKind = entries.filter(
+      (e) => e.kind === "report" && (e.summary || "").trim().length > 0,
+    );
     expect(entriesByKind).toHaveLength(2);
 
-    // 验收 2:不含英文推理句
+    // 验收 2:不含英文推理句(样本 thinking_end 原文)
     expect(live).not.toContain("The user wants");
-    expect(live).not.toContain("Let me also use bash");
-    expect(live).not.toContain("The file has");
+    expect(live).not.toContain("The file a.txt has 2 lines");
+    expect(live).not.toContain("I should just report that");
 
-    // 验收 3:不含工具结果(工具输出被过滤在 kind=tool 层面,agent 叙述中提及的内容不算)
-    expect(live).not.toContain("wc -l");
+    // 验收 3:不含工具结果(read 返回的 hello/world 正文)
+    // 注意:agent 叙述里提到的 `a.txt` 不算工具结果。
+    expect(live).not.toContain("hello\nworld");
+    expect(live).not.toMatch(/^hello$/m);
 
     // 验收 4:不含票面正文回显
-    expect(live).not.toContain("读取 a.txt");
-    expect(live).not.toContain("并告诉我它有几行");
+    expect(live).not.toContain("探针任务");
+    expect(live).not.toContain("读取当前目录下的");
+    expect(live).not.toContain("不要修改、创建或删除");
 
-    // 界面内容应该是两个 text_end 的内容:
-    // "好的，我来读取 `a.txt` 并统计行数"
-    // "`a.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n**共有 2 行。**"
-    expect(live).toContain("好的，我来读取");
-    expect(live).toContain("并统计行数");
+    // 界面内容是两个 text_end
+    expect(live).toContain("I'll read the ticket");
     expect(live).toContain("a.txt");
-    expect(live).toContain("共有 2 行");
+    expect(live).toContain("共有 **2** 行");
 
-    // 验收 1 强化:整份界面流逐字节等于这两条 text_end(中间空白 text_end `\n` 被
-    // R2 过滤,其余 delta/detail-only 条目不进界面)。锁定样本输出的精确形状,
-    // 防止未来判据漂移时验收用 toContain 漏掉多出来的一行。
-    // ⚠️ 2026-09-06 F3:Pi 的 report 摘要与另三家同口径,带 `[汇报 #tN] ` 前缀。
-    // 缺前缀会让 Pi 的行在界面上与其它执行器长得不一样,且丢掉取明细用的 #id。
-    // #tN 的序号取决于该条在整份样本里的位置,断言用正则锁形状而非写死序号。
+    // 整份界面流逐字节等于这两条 text_end;#tN 用正则不锁死序号。
     expect(live).toMatch(
-      /^\[汇报 #t\d+\] 好的，我来读取 `a\.txt` 并统计行数\n\[汇报 #t\d+\] `a\.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n\*\*共有 2 行。\*\*\n$/,
+      /^\[汇报 #t\d+\] I'll read the ticket and `a\.txt` without changing anything\.\n\[汇报 #t\d+\] `a\.txt` 共有 \*\*2\*\* 行。\n$/,
     );
-  },
-  );
+  });
 
   it("空白 text_end 不进界面(R2)", () => {
     const parse = createExecutorOutputParser("pi");
