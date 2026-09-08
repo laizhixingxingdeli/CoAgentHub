@@ -1,8 +1,34 @@
 # Spec: 测试依赖 gitignored 的执行器采样,任何 checkout 都跑不过
 
-> **状态**: Frozen
+> **状态**: **Partially landed**(`5d42f961`,2026-09-08 检视者 L3 通过)
+> —— ENOENT 已消除,但 **6 条硬验收改为 skip,不产生证据**;
+> 真正的收口见 [re-record-executor-probe-samples.md](re-record-executor-probe-samples.md)。
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - 基线自行复跑:`1 failed | 125 passed (132)`,含 **6 skipped**。
+>   改前两个文件**整份 ENOENT、加载不了**,一条证据都不产生。
+> - **R1(样本入库)被执行者驳回,检视者确认驳回成立**:
+>   任务书里检视者说「`logs/` 下有真样本,别走 skipIf」——
+>   **这个前提是错的**。那批用例锁的是**某一次特定探针**的
+>   哈希 / token / 正文;`logs/*.log` 来自**不同任务**,
+>   **格式相同、内容不同**,拿来必红。于是三条路全堵:
+>   用 logs 要改断言(违反「不放宽」)、手写探针要伪造(违反 R3)、
+>   只剩 R2。**执行者的判断是对的,检视者的票面前提是错的。**
+> - **额外的正确改动(未要求)**:把 `token-usage` 里的静默 `return`
+>   改成显式 skip —— 否则 CI 会把「没跑」记成「过了」。
+> - **新暴露(不是新造)的 1 条红**:`atomcode-task-01a04f70-outputTail.txt`
+>   本机是 CRLF,断言要求无 `\r`。改前整文件 ENOENT,这条**根本没跑到**;
+>   修好加载后才显形。已另立
+>   [fixture-line-endings-break-on-windows.md](fixture-line-endings-break-on-windows.md)。
+> - 提交边界:仅两个 test 文件;零生产代码;用户在途工作未被夹带。
+>
+> **执行者回提的两条 spec 改进意见,检视者确认成立**:
+> ① §3 R3 应显式写:logs 若来自**不同任务**、无法满足已锁哈希/token/正文时,
+>    **不得**为迁就 logs 改断言,应走 R2;
+> ② 「logs 足够覆盖断言」这个说法有误导性 ——
+>    它覆盖的是**格式**,不是这批用例锁死的**那一次探针内容**。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §13.3 **V2**
 > **检视者补充实测(2026-09-08)**:比报告描述的更严重 ——
 > `.scratch/probe/samples/` 在**采集样本的这台机器上也已经不存在了**
