@@ -1,8 +1,29 @@
 # Spec: 信任边界的文档描述小于实际授权范围
 
-> **状态**: Frozen
+> **状态**: Landed(`03482f24`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - **零代码改动**:`git show --name-only` 只有 3 个 `.md`。硬约束满足。
+> - **ADR 决策段未改(R1)**:该文件的 diff **只有 `+` 行,没有 `-` 行** ——
+>   是纯追加的「2026-09-08 补记:决策做出后新增的授权面」一节,
+>   决策与背景段零 diff。做法正确:让读者看得出这是后补的。
+> - **四项全覆盖**:注册执行器(任意 bin/args/env + 自动注册 participant)、
+>   spawn 环境继承、任意 `project_path` 写 git ref、`/api/file/*` 无鉴权读写。
+> - **不与报告 §7 冲突**:ADR 补记结尾原句 ——
+>   「**这些不是待修缺陷,而是同一「局域网全信」决策在执行器与文件能力落地后的
+>   自然外延**」;README 仍以「Run it on a LAN you trust」收束,
+>   无 bug / TODO / should add auth 类措辞。
+> - **中英一致(R3)**:英文
+>   「Anyone who can reach the port can **make this machine run arbitrary
+>   programs**」,中文「任何能访问该端口的人都能**让这台机器执行任意程序**」,
+>   四项授权逐条对应。
+>
+> **连带**:本票同时把
+> [executor-config-fields-saved-but-never-honored.md](executor-config-fields-saved-but-never-honored.md)
+> L3 中记录的那处张力(server spawn 继承 `process.env`,而
+> `POST /api/executors` 无鉴权 —— 「已配置」不等于「可信」)在文档层面说准了。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §13.7 **D4**
 > **性质**: **纯文档准确性**问题。
 > **不推翻**报告 §7「LAN 全信边界是决策而非缺陷」的结论,
