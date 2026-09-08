@@ -15,7 +15,7 @@ import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
  * 执行器配置管理 API(ticket: 网页 @executor 发布):
  *  - POST /api/executors 新增配置 + 自动注册 participant(名字唯一,重复 → 409;
  *    token 认证已移除,响应绝不含 token);
- *  - GET /api/executors 返回 DB 全部(0028 seed 携带旧内置 6 条,不含 token);
+ *  - GET /api/executors 返回 DB 全部(测试 fixture 显式 seed 6 条,不含 token);
  *  - DELETE /api/executors/:key 删除 DB 配置(无内置禁令,全部可删);
  *  - PATCH /api/executors/:key 编辑配置(无内置禁令,全部可改);
  *  - 定向消息调度新增执行器:建 task + spawn(与 DB 配置同链路)。
@@ -60,7 +60,7 @@ async function createExecutor(body: Record<string, unknown>) {
 
 describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   beforeAll(async () => {
-    // 显式 fixture:6 条旧内置配置(与 0028 seed 同值,幂等)。
+    // 显式 fixture:6 条历史配置(生产迁移不再播种;测试自包含)。
     await seedBuiltinExecutorConfigs();
   });
 
@@ -116,7 +116,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     expect(res.status).toBe(200);
     const list = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(list)).toBe(true);
-    // 0028 seed 6 条(executor/reasonix/codebuddy/codex/hermes/win-hermes)+ 新增。
+    // fixture 6 条(executor/reasonix/codebuddy/codex/hermes/win-hermes)+ 新增。
     expect(list.length).toBeGreaterThanOrEqual(7);
 
     // 无 builtin 字段:内置禁令已移除,所有配置都是普通 DB 行。
@@ -157,7 +157,7 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       ],
     });
 
-    // 不再有 reviewer 执行器(R3 移除,0028 不 seed)。
+    // 不再有 reviewer 执行器(ADR-0008:reviewer 不对应执行器配置)。
     expect(list.some((x) => x.key === "reviewer")).toBe(false);
 
     const added = list.find((x) => x.key === "cli-tester");
@@ -184,8 +184,8 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
   });
 
   it("effectiveExecutors 返回 seed 的 6 条(无 reviewer;executor/codex maxConcurrency=1)", async () => {
-    // 直接走 effectiveExecutors 验证 0028 seed 落库后有效执行器集合包含 6 条
-    // DB 行,reviewer 不在其中(spec R3:reviewer 不对应执行器配置)。
+    // 直接走 effectiveExecutors 验证 fixture 落库后有效执行器集合包含 6 条
+    // DB 行,reviewer 不在其中(reviewer 不对应执行器配置)。
     const { effectiveExecutors } = await import("../src/lib/executors");
     const all = await effectiveExecutors(testDb as unknown as DataBase);
     const keys = all.map((x) => x.key);

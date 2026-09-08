@@ -36,7 +36,8 @@ import { t } from "@/lib/i18n";
  * 服务器上是否可执行。只读辅助功能:点击时查一次(不防抖),网络失败静默;
  * 输入变化后旧结果失效,未找到不阻断提交(可能先填一个之后才部署的命令)。
  *
- * 列表 = 内置执行器 + DB 配置(GET /api/executors 合并返回),内置项不可删除。
+ * 列表 = DB 配置(GET /api/executors;无代码内置、无迁移播种)。零配置时渲染空态
+ * 引导(specs/no-builtin-executor-seeding.md R4),提示在本页表单新增。
  *
  * Participant 自管理(ticket: 补全 /participants 页):列表行同时带出 participant 注册信息
  * (GET /api/participants,按 name 匹配),展示 device / capabilities / 在线状态;
@@ -781,7 +782,7 @@ export default function ExecutorsPage() {
         </div>
       </div>
 
-      {/* 执行器列表(内置 + DB 配置),卡片行;行内带 participant 自管理字段 */}
+      {/* 执行器列表(仅 DB 配置),卡片行;行内带 participant 自管理字段 */}
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between px-1">
           <span className="text-sm font-medium">
@@ -794,9 +795,15 @@ export default function ExecutorsPage() {
           </span>
         </div>
         {items.length === 0 && !loading ? (
-          <p className="rounded-lg border border-dashed px-4 py-6 text-sm text-muted-foreground">
-            {t("participants.list.empty")}
-          </p>
+          <div
+            data-testid="executors-empty-state"
+            className="rounded-lg border border-dashed px-4 py-6 text-sm text-muted-foreground"
+          >
+            <p className="font-medium text-foreground">
+              {t("participants.list.empty")}
+            </p>
+            <p className="mt-1">{t("participants.list.emptyHint")}</p>
+          </div>
         ) : (
           items.map((item) => {
             const participant = participantById(item.participantId);

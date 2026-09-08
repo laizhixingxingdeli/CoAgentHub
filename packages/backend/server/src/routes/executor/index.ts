@@ -29,8 +29,9 @@ import { z } from "zod";
  * 都能读取/新增/删除/编辑执行器配置。新增时自动注册对应 participant(名字=agentName;
  * token 认证已移除,不再生成 token)。
  *
- * 全部配置都落 DB(executor_config 唯一真相源,0028 seed 行携带旧内置配置):
- * GET 直接返回 DB 行,不再有内置 key,因此 DELETE/PATCH 对所有 key 一律放行。
+ * 全部配置都落 DB(executor_config 唯一真相源;无代码内置、无迁移播种,
+ * specs/no-builtin-executor-seeding.md):GET 直接返回 DB 行(零配置时为 []),
+ * 不再有内置 key,因此 DELETE/PATCH 对所有 key 一律放行。
  */
 const app = new Hono<{ Variables: { db: DataBase } }>();
 

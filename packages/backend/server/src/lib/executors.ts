@@ -14,9 +14,10 @@ import { resolveLocalUser } from "./local-participant";
  * audienceRef 命中 participant 后,按 participant.executorKey 命中本配置时创建 task
  * 并 spawn 执行器;开机时由 ensureExecutorParticipants 幂等注册对应 participant。
  *
- * 完整集合 = DB 持久化配置(executor_config 表,经「接入 Participant」界面写入,
- * 0028 迁移把旧内置配置写成 seed 行),见 effectiveExecutors(db)。不再有代码内置
- * 默认执行器(ADR-0008):列表里有的,就是这台机器上真的配了的。
+ * 完整集合 = DB 持久化配置(executor_config 表,仅经「接入 Participant」界面 /
+ * POST /api/executors 由用户写入),见 effectiveExecutors(db)。不再有代码内置
+ * 默认执行器(ADR-0008),也不再由迁移播种(specs/no-builtin-executor-seeding.md):
+ * 列表里有的,就是这台机器上用户真的配了的。全新安装为 0 行是预期空态。
  *
  * bin 可用环境变量覆盖(测试/本机路径差异):EXECUTOR_BIN_<KEY 大写> 优先,
  * 回退到配置默认值。
@@ -901,11 +902,18 @@ export async function registerExecutorParticipant(
 }
 
 /**
- * 开机自注册:把执行器配置(全部来自 DB,无内置)对应的 participant 补进
- * participant 表(幂等,按 executorKey 判重)。桥已退役,注册职责由 server 承担。
+ * 开机自注册:把执行器配置(全部来自 DB,无内置、无迁移播种)对应的 participant
+ * 补进 participant 表(幂等,按 executorKey 判重)。桥已退役,注册职责由 server 承担。
+ *
+ * 配置为 0 行时只预建 Local User,不创建任何 AI 工具 participant
+ * (specs/no-builtin-executor-seeding.md R3)。
+ *
+ * Local User 例外(R5):它不是「用户的 AI 工具配置」,而是匿名读取路径的稳定
+ * 身份回落(见 local-participant.ts);本函数仍预建它,不得按「去播种」一并删掉。
  */
 export async function ensureExecutorParticipants(db: DataBase): Promise<void> {
   // Pre-create the default LAN observer so anonymous access has a stable id.
+  // 这是 R5 例外,不是执行器配置播种。
   await resolveLocalUser(db);
 
   for (const ex of await effectiveExecutors(db)) {

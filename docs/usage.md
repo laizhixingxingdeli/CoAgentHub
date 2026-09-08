@@ -31,23 +31,19 @@ and renaming one does not rename the participant).
 
 ## 2. Executor integration
 
-### Default seeded executors
+### No built-in executor seeding
 
-Fresh installations get 6 default rows via migration `0028`
-(`ON CONFLICT DO NOTHING`, so re-running the migration is safe and user edits are
-preserved). These are ordinary DB configs — they can be edited or deleted like any
-other row.
+Fresh installations get **zero** `executor_config` rows. Migration `0028` is a
+no-op (`specs/no-builtin-executor-seeding.md`): the platform does not pre-seed AI
+tool identities. Existing installs keep every user-edited row untouched on
+upgrade.
 
-| key | agentName | invocation |
-| --- | --- | --- |
-| `executor` | AtomCode 执行器 | local CLI (`atomcode -y -p {ticket}`) |
-| `reasonix` | Reasoning 执行器 | local CLI (`reasonix run -y --model {model} {ticket}`, default model `deepseek-v4-flash`) |
-| `codebuddy` | CodeBuddy 执行器 | local CLI (`codebuddy -y -p {ticket}`) |
-| `codex` | Codex 执行器 | local CLI (`codex exec --approve-for-me --ephemeral --json {ticket}`), single concurrency |
-| `hermes` | Hermes 规划 | local CLI (`hermes -z {ticketContent}`, full task book inlined) |
-| `win-hermes` | Win Hermes | A2A (`kind=a2a`, via gateway `http://192.168.31.180:9900/`; `memory=per-group` keeps a per-group contextId) |
+First-run path: open **接入参与方** (Connect participant), add an executor
+(`POST /api/executors`), then dispatch from a group. Until then `GET /api/executors`
+returns `[]`; groups/messages still work. `Local User` remains the anonymous-read
+identity fallback and is not an executor config.
 
-Overrides:
+Overrides once you have configs:
 
 - CLI binary paths: env `EXECUTOR_BIN_<KEY_UPPER>` (e.g. `EXECUTOR_BIN_CODEBUDDY`).
 - Before using Codex, run `codex login` as the same OS user that runs the server. If

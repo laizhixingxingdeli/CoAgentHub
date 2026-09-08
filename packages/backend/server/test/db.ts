@@ -13,9 +13,9 @@ export const testClient = new PGlite();
 export const testDb = drizzle(testClient, { schema });
 
 /**
- * 测试内显式插入一条执行器配置 fixture(幂等,与 0028 seed 迁移同语义:
- * ON CONFLICT DO NOTHING)。测试不得依赖「系统自带某个 key」——自己声明并确保
- * 需要的配置行存在(即使 0028 seed 行已提供,显式声明也让用例自包含)。
+ * 测试内显式插入一条执行器配置 fixture(幂等,ON CONFLICT DO NOTHING)。
+ * 生产迁移不再播种内置配置(specs/no-builtin-executor-seeding.md);测试不得
+ * 依赖「系统自带某个 key」——自己声明并确保需要的配置行存在。
  */
 export async function ensureExecutorConfig(
   key: string,
@@ -51,8 +51,8 @@ export async function ensureExecutorConfig(
 }
 
 /**
- * 一次性 seed 6 条旧内置执行器配置(fixture 化入口)。
- * 测试文件在 beforeAll 中调用,确保用例自包含(不依赖 0028 迁移 seed)。
+ * 一次性 seed 6 条历史执行器配置(测试 fixture,非生产迁移)。
+ * 测试文件在 beforeAll 中调用,确保用例自包含——生产路径不再播种这些行。
  */
 export async function seedBuiltinExecutorConfigs(): Promise<void> {
   await ensureExecutorConfig("executor", {

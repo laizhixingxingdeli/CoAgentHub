@@ -246,7 +246,15 @@ CoAgentHub/
   执行器 participant(`audience=participant` + `audienceRef`)时,由 server 直接建 task
   (fire-and-forget,幂等靠 `message_id` 唯一约束),不再有独立的调度进程。
 - 执行器配置:`executor_config` 表是**唯一真相源**(DB 持久化,`/api/executors`
-  管理);0028 迁移把旧 6 条内置配置写成 seed 行(幂等,`ON CONFLICT DO NOTHING`),不再有代码内置默认执行器。participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。执行器 participant 通过 `participant.executor_key` 稳定绑定配置 `key`,显示名 (`participant.name`) 仅是可修改的身份文本,不得作为调度路由键。reviewer 不对应执行器配置(0028 不 seed,`participant.executor_key = 'reviewer'` 已被迁移清空),其消息走普通消息/控制指令路径。
+  管理);不再有代码内置默认执行器(ADR-0008),也不再由迁移播种内置配置
+  (`specs/no-builtin-executor-seeding.md`:0028 现为无操作,全新安装 `executor_config`
+  为 0 行;既有安装的用户行一律不动)。列表即事实——有的就是用户配了的。
+  零配置时空态可操作(GET 返回 `[]`,前端「接入参与方」引导用户新增)。
+  participant 与角色解绑,群内分工由 `group_members.prompt` 表达,调度时拼进任务书。
+  执行器 participant 通过 `participant.executor_key` 稳定绑定配置 `key`,显示名
+  (`participant.name`) 仅是可修改的身份文本,不得作为调度路由键。reviewer 不对应
+  执行器配置(`participant.executor_key = 'reviewer'` 已被 0029 清空),其消息走普通
+  消息/控制指令路径。`Local User` 是匿名读取路径的身份回落例外,不是 AI 工具配置。
 - **下发门与控制门**:`DISPATCH_ALLOWED_ROLES`(`lib/executor-task/types.ts`,管**下发**)与
   `CONTROL_ALLOWED_ROLES`(`lib/control.ts`,管**停止/回滚**)是两个独立常量,均含
   coordinator/human/reviewer。dispatcher/callback 路由判据只检查群内角色(spec R3 /

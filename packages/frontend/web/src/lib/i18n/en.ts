@@ -135,7 +135,9 @@ export const en: Record<DictKey, string> = {
   "participants.check.notFound": "Command not found",
   "participants.badge.a2a": "A2A",
   "participants.list.title": "Executors",
-  "participants.list.empty": "No executors yet — add one above",
+  "participants.list.empty": "No executor configs yet",
+  "participants.list.emptyHint":
+    "Nothing is pre-seeded. Fill in the form above (name, kind, command or gateway URL) and click Connect — only then can you dispatch tasks to it from a group.",
   "participants.list.count": "{count} total",
   "participants.connected":
     "Connected participant “{name}” — you can now direct tasks to it in a group",

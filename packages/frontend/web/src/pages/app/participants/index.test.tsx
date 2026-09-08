@@ -96,6 +96,34 @@ describe("接入参与方页", () => {
     localStorage.clear();
   });
 
+  it("零配置时空态引导可操作(R4):渲染下一步动作指引,不是空白", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createFetchMock([
+        {
+          match: (url, init) =>
+            (!init?.method || init.method === "GET") &&
+            String(url).endsWith("/api/executors"),
+          respond: () => jsonResponse([]),
+        },
+        {
+          match: (url) => String(url).endsWith("/api/participants"),
+          respond: () => jsonResponse([]),
+        },
+      ]),
+    );
+
+    renderWithProviders(<ExecutorsPage />, "/participants");
+
+    const empty = await screen.findByTestId("executors-empty-state");
+    expect(empty).toHaveTextContent(/还没有执行器配置/);
+    expect(empty).toHaveTextContent(/上方表单/);
+    expect(empty).toHaveTextContent(/接入/);
+    // 表单仍在,空态可操作:用户能直接在本页新增
+    expect(screen.getByLabelText("名字")).toBeInTheDocument();
+    expect(screen.getByLabelText("命令")).toBeInTheDocument();
+  });
+
   it("表单字段齐全,提交 POST /api/executors 后列表出现新 participant,且无 token 展示", async () => {
     const fetchMock = executorsFetchMock();
     vi.stubGlobal("fetch", fetchMock);

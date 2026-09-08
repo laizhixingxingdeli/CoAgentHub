@@ -8,6 +8,11 @@ import type { DataBase } from "./database";
  * 懒创建 + 进程内缓存;开机时 ensureExecutorParticipants 也会预建。
  *
  * 文件名原为 local-agent(agent 为 participant 的旧名)。
+ *
+ * ⚠️ 例外保留(specs/no-builtin-executor-seeding.md R5):
+ * Local User 不是「用户的 AI 工具配置」,而是匿名读取路径的稳定身份回落。
+ * 去掉默认执行器播种时不得把这个身份一并删掉——否则未声明身份的 GET
+ * 会失去归属。若将来要去掉 Local User,那是另一张票(匿名访问身份模型)。
  */
 export const DEFAULT_LOCAL_USER_NAME = "Local User";
 

@@ -130,7 +130,9 @@ export const zh = {
   "participants.check.notFound": "未找到该命令",
   "participants.badge.a2a": "A2A",
   "participants.list.title": "执行器列表",
-  "participants.list.empty": "暂无执行器,请先在上方新增",
+  "participants.list.empty": "还没有执行器配置",
+  "participants.list.emptyHint":
+    "平台不会预置任何 AI 工具。请在上方表单填写名字、调用方式与命令(或 gateway 地址),点「接入」新增一个,之后才能在群里定向派发。",
   "participants.list.count": "共 {count} 个",
   "participants.connected": "已接入参与方「{name}」,可在群组里定向到它发布任务",
   "participants.deleted": "已删除「{name}」",
