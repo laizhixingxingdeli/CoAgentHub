@@ -3,10 +3,13 @@ import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { type RawData, WebSocket } from "ws";
 import { wsHub } from "../src/lib/ws-hub";
-import { seedBuiltinExecutorConfigs } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * Durable Task Completion Events (specs/durable-task-completion-events.md):
@@ -25,9 +28,9 @@ import { seedBuiltinExecutorConfigs } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-ce-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 失败模式:FAKE_ALWAYS_FAIL 时直接 exit 1(最终失败路径测试用)。
@@ -40,7 +43,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
 const { createTestApp } = await import("./app");
@@ -105,6 +110,19 @@ interface InboxEventItem extends CompletionEventEnvelope {
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    const [row] = await testDb
+      .select()
+      .from(executorConfigTable)
+      .where(eq(executorConfigTable.key, "codebuddy"));
+    if (row) {
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, "codebuddy"));
+    }
+  }
 });
 
 describe("Durable Task Completion Events", () => {

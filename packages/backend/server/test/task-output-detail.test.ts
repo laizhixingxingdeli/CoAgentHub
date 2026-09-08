@@ -2,8 +2,11 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { seedBuiltinExecutorConfigs } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 明细存储 + 展开 API(spec two-tier-output-summary-and-detail R4/R5):
@@ -24,7 +27,7 @@ import { seedBuiltinExecutorConfigs } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-detail-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 /** thinking 正文长度:模拟真实任务思考占缓冲 84-95% 的形态,验证 10x 压缩。 */
 const THINKING_BODY = "x".repeat(2_000);
 const jsonlFixture = path.join(fakeDir, "fixture.jsonl");
@@ -103,7 +106,7 @@ writeFileSync(
   ].join("\n") + "\n",
 );
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 明细 JSONL 模式:逐行输出 + 行间停顿,保证「运行中」状态可采样。
@@ -132,7 +135,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
 // 执行前快照/弱验收需要真实 git 仓库;COAGENTHUB_REPO_ROOT 覆盖 findRepoRoot。
@@ -160,6 +165,19 @@ const {
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    const [row] = await testDb
+      .select()
+      .from(executorConfigTable)
+      .where(eq(executorConfigTable.key, "codebuddy"));
+    if (row) {
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, "codebuddy"));
+    }
+  }
 });
 
 describe("任务明细落盘与展开 API(R4/R5)", () => {
