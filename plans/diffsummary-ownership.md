@@ -103,8 +103,8 @@
 | 验收方法 | server：`npx vitest run test/diff-summary-compat.test.ts test/task-completion-events.test.ts test/task-status-ws.test.ts`（及 W2 清单回归）。前端：`node scripts/test-baseline.mjs` 同清单，对 `TaskPanel` / `group-tasks-by-spec` / `merge-requirement-timeline` / `requirement-workspace` 对比编制基线（81 passed / 0 failed）。最终产物：至少一次读 **HTTP JSON** 或 **WS 事件** 里的 `diffSummary.hash` / `error` / `review_request` / `platform.resumeOf`，不得只断言 merge 纯函数。 |
 | specRef | `specs/diffsummary-ownership.md` |
 | specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | _离线直调,无平台 task_ |
+| 状态 | **done**(执行器 2026-09-09:D1 五种历史形态真 insert + HTTP GET;D2 completion/WS 扁平场景键;D3 前端 81/0;server 378 passed / 11 failed 零新增失败;A1/C2 rg 仍仅 types 薄委托两 preserve) |
 
 ## 依赖图
 
