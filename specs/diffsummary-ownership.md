@@ -1,6 +1,45 @@
 # Spec: 明确 diffSummary 的数据归属
 
-> **状态**: Frozen(检视者 2026-09-09 §6 冻结)
+> **状态**: **Landed**(W1 `8813d929` + W2 `3269d309` + W3 `e691fd24`,
+> 2026-09-09 检视者 L3 逐项通过)
+>
+> **L3 收口记录(三个工作项逐项复核)**:
+>
+> | 项 | 提交 | 检视者独立复核 |
+> |---|---|---|
+> | **W1** 归属表 + `mergeDiffSummary` | `8813d929` | 纯新增 520 行 / 0 删除,**未碰任何写路径**;`0 failed \| 15 passed` |
+> | **W2** 写路径改接单一入口 | `3269d309` | 两条 `rg` 达标;B2–B5/C1 全走最终产物;`1 failed \| 71 passed`,那 1 红是既有 Windows `EPERM` 清理红 |
+> | **W3** 对外形状回归 | `e691fd24` | 零生产代码;`0 failed \| 42 passed`;前端 `81 passed / 0 failed` |
+>
+> **本票的核心目标是可证伪的,检视者重跑确认**:
+>
+> ```
+> rg 'preserveDispatchKindNote\(' packages/backend/server/src
+>   → 只剩 types.ts:277 定义处,写路径业务代码 0 调用
+> rg 'function preserve' packages/backend/server/src/lib/executor-task
+>   → 仍是 2 个,未长出第三个 preserveXxx
+> ```
+>
+> 「测试绿了」证明不了本票成功;**「那个坏模式没再长出来」才能。**
+> 这两条判据是**协调者起草时自己设计的**,比检视者原来的写法好。
+>
+> **顺带修掉的两个真实缺陷**(协调者读代码发现,检视者复核属实):
+> `notify.ts` `markTaskCancelled` 漏保留 `rollbackSkipped` 与整个 `platform.*`;
+> `control.ts` 回滚 `{ error: "rollback" }` 整袋替换全抹。
+>
+> **D1 做到了最难的那点**:历史夹具是
+> `.insert(taskTable).values({ diffSummary: historicalDiffSummary })`
+> **原样直插、不经 `mergeDiffSummary`** —— 真的旧形状,
+> 不是用新代码写出来的行冒充历史。
+>
+> ⚠️ **一条检视者自己的失误,记在这里**:
+> W1 的「显式 `null` = 删键」语义**与 `types.ts:315` 的既有契约冲突**
+> (那里明写「summary 已含该键,含显式 null → 以调用方为准」)。
+> **检视者 L3 W1 时放过了** —— 当时查了「跨所有者保护在不在」,
+> 没查「语义与别处既有契约合不合」。W2 碰到真实写路径才暴露并更正
+> (对外 `null` = 写入 null,抹键走内部 `DIFF_SUMMARY_DELETE`),
+> 跨所有者保护未被破坏。
+> **W1→W2 的拆分顺序在这里救了场** —— 这正是协调者定该顺序的理由。
 >
 > **检视者冻结记录(§6)—— 这是新流程 `coordinator-as-technical-lead` 的第一次实跑**:
 >
