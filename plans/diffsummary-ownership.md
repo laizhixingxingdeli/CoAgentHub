@@ -9,7 +9,7 @@
 | 字段 | 值 |
 |---|---|
 | specRef | `specs/diffsummary-ownership.md` |
-| specHash | |
+| specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
 | 编制 | 三方 |
 | 更新 | 2026-09-09 |
 | 来源 | 检视者需求下达 `req-s2-diffsummary`；报告 §5 S2 |
@@ -72,7 +72,7 @@
 | 预期产物 | 归属表（与 spec §3 一致）；`mergeDiffSummary`；单测文件（新建，如 `test/diff-summary-merge.test.ts`）；可选：既有 preserve 单测仍绿（若改为委托）。 |
 | 验收方法 | `cd packages/backend/server && npx vitest run test/diff-summary-merge.test.ts`（及若改了委托：`test/dispatchKindNote-preservation.test.ts`）。构造：所有者 `result` 写入 `{ summary }` 不得丢掉既有 `platform.resumeOf` / `dispatchKindNote` / `tokenUsage`；所有者 `scheduling` 写入新键 `queuedBlocked` 不得丢掉 `hash`；同所有者可覆盖自身键；`platform` 深合并保留 `resumeOf` 同时写入 `ownerServerPid`；显式 `null` 仅对**本所有者**键生效。 |
 | specRef | `specs/diffsummary-ownership.md` |
-| specHash | |
+| specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
 | taskId | _未派发_ |
 | 状态 | planned |
 
@@ -87,7 +87,7 @@
 | 预期产物 | 上述文件的写路径改动；路径级回归测试（扩展既有 `task.test.ts` / `orphan-task-reconciler.test.ts` / `executor-queued-reclaim.test.ts` / `dispatchKindNote-preservation.test.ts` / `retry-rollback-guard.test.ts` / `second-instance-sweep.test.ts` 等，按改动触及补断言）。 |
 | 验收方法 | 票面列出的 server 测试文件（见 spec 基线清单）定向 `npx vitest run`。构造场景至少：① spawn 写入 `platform.ownerServerPid` 后 CLI/队列 `done`/`failed`，读库仍有该 pid；② 先有 `dispatchKindNote`+`rollbackSkipped`，`markTaskCancelled` 与 `control` 回滚后两者仍在（回滚可覆盖 `error`）；③ PATCH 只带 `summary`+`review_request`，既有 `tokenUsage` 与 `platform.resumeOf` 仍在；④ 在**单一** scheduling 写入点增加字段后，done/fail/PATCH/cancel **均**无需新 preserve 函数即可保留该字段（用单测证明：grep 写路径无新的 `preserveFoo`）。 |
 | specRef | `specs/diffsummary-ownership.md` |
-| specHash | |
+| specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
 | taskId | _未派发_ |
 | 状态 | planned |
 
@@ -102,7 +102,7 @@
 | 预期产物 | server 侧历史夹具测试（可放 `test/diff-summary-compat.test.ts`）；必要时补强 `task-completion-events` / `task-status-ws` 对关键键的断言；前端清单内测试保持全绿。 |
 | 验收方法 | server：`npx vitest run test/diff-summary-compat.test.ts test/task-completion-events.test.ts test/task-status-ws.test.ts`（及 W2 清单回归）。前端：`node scripts/test-baseline.mjs` 同清单，对 `TaskPanel` / `group-tasks-by-spec` / `merge-requirement-timeline` / `requirement-workspace` 对比编制基线（81 passed / 0 failed）。最终产物：至少一次读 **HTTP JSON** 或 **WS 事件** 里的 `diffSummary.hash` / `error` / `review_request` / `platform.resumeOf`，不得只断言 merge 纯函数。 |
 | specRef | `specs/diffsummary-ownership.md` |
-| specHash | |
+| specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
 | taskId | _未派发_ |
 | 状态 | planned |
 
