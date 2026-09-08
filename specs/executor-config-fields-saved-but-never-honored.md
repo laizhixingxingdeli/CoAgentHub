@@ -1,8 +1,50 @@
 # Spec: 执行器配置里有存了不生效的字段,保存成功暗示了不存在的能力
 
-> **状态**: Frozen
+> **状态**: Landed(`89ebe505`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - **隔离回归对照**(检视者自己做的,不采信汇报的合计数):
+>   单独跑 R8 **没碰过**的 `test/executor-queue.test.ts` ——
+>   改前 `5 failed | 30 passed (35)`,改后 **完全相同**。**零回归。**
+>   (执行者报的「7 failed」是该文件的抖动读数,稳态是 5。)
+> - `executor-api` + `executor-config-fields`:`1 failed | 57 passed (58)`,
+>   那 1 条是既有的 `check-bin` Windows 执行位问题,与本票无关。
+> - **R1 满足**:新模块 `executor-config-fields.ts` 里的
+>   `EXECUTOR_CONFIG_FIELD_CAPABILITIES` 是**唯一出处**;
+>   新增 `/field-capabilities` 端点直接返回该常量;
+>   `docs/architecture.md` **引用**它而不是复制取值表 —— 正是 R1 要的。
+> - **R2**:`inputMode: "stdin"` 新写入 **400**,错误信息把「为什么」也说了:
+>   「保存不会让执行路径生效。当前支持: path, inline, at-file。
+>   存量已保存的配置不追溯」。
+>   存量**不追溯**,运行时降级为 `path` —— 不炸在途任务,处理得当。
+> - **R3**:`env` **真的接上了**(此前从未传给 runner),
+>   经 `resolveExecutorCliSpawn` → `runExecutor({ env })` 单一入口。
+> - **R4 守住**:未实现画像引擎,未改 args 占位符机制与适配器注册表。
+> - `outputProfile` 仍标 `reserved`,未删未实现。
+>
+> **⚠️ 一处需要记录的张力(检视者判断:本票处理正确,但要写下来)**:
+>
+> 执行者把 server 侧 spawn 的环境策略定为
+> 「**继承 `process.env` + 叠加用户 `ex.env`**」,
+> 与同日落地的 [callback-agent-env-allowlist-and-lease.md](callback-agent-env-allowlist-and-lease.md)
+> 的**显式白名单**取向不同,并按 R3 的要求写明了理由(威胁模型不同:
+> 回调跑队列里的任意命令,server 跑已配置的本地 CLI,需要 PATH/HOME/工具 token)。
+>
+> **检视者补一句它没说的**:「已配置」并不等于「可信」——
+> `POST /api/executors` **无鉴权**,局域网内任何人都能注册任意 `bin`,
+> 而它会继承 server 的全部环境变量。
+>
+> 但这是**既有行为**,R8 只是把 `env` 叠加上去,**没有加重**;
+> 改继承模型会让所有执行器失去 PATH 与工具 token,远超本票范围。
+> 正确的处置是**让文档说准这件事** ——
+> 见 [trust-boundary-docs-understate-authority.md](trust-boundary-docs-understate-authority.md)。
+>
+> **执行者的一条实测补充**:Windows 上用 Git Bash `sh` 做假执行器时,
+> `@path` 会被 shell 展开成文件内容,导致 at-file 的 e2e 断不了字面 `@`;
+> 改用 node 假执行器后成立。**这是测试夹具问题,不是 at-file 语义问题** ——
+> 后来者迁移测试时注意。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §4 **R8**
 > **⚠️ 硬约束**:[executor-adapter-registry.md](executor-adapter-registry.md)
 > (Frozen 2026-09-02,ADR-0008)已决定**先做代码适配器注册表,画像暂缓**。
