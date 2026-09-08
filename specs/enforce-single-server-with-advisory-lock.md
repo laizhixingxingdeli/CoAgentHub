@@ -1,8 +1,37 @@
 # Spec: 用数据库咨询锁把「单 server」从声明变成强制
 
-> **状态**: Frozen
+> **状态**: Landed(`0cc0c42f`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - 基线自行复跑:**`0 failed | 9 passed (9)`**,与汇报一致;
+>   改前 `0 failed | 3 passed (3)` —— 新增 6 条用例全绿。
+> - **R2(本票技术核心)守住了**:锁走**专用非池 `pg.Client`**,
+>   模块注释直书 `do NOT use dbPool() / pg.Pool here (R2)`。
+>   验证做得比要求更彻底:
+>   - 正面:另建 `pg.Pool({max:2, idleTimeoutMillis:1})`,
+>     **8 轮 × 12 并行** connect/query/release + `pool.end()`,
+>     再起第二实例**仍然失败** —— 池是真的轮换过了;
+>   - **反证**:经 pool 取锁再 `pool.end()` → **锁真的丢了**。
+>     这条对照证明该失败模式不是假想的,是本票最有价值的一条用例。
+> - **R4 守住**:`git show --stat` 仅 3 个文件,`queue.ts` 一行未动,
+>   PID 启发式原样保留。
+> - **长事务不释放**:侧连接 `BEGIN` → `COMMIT` 后 `pg_try_advisory_lock`
+>   仍为 `false` —— session 锁不是 xact 锁,验证正确。
+> - **R5**:按 `process.env.VITEST` 跳过,锁自身的用例用 `force: true`
+>   打真实 Postgres。生产 `index.ts` 从不设 `VITEST`,不会掩盖生产问题。
+> - **错误信息可读**:
+>   `another server instance is already running against this DATABASE_URL
+>   (PostgreSQL advisory lock held). Stop the other instance first…`
+>
+> **执行者提的一条操作安全意见,检视者确认成立**:
+> 在**共享生产库**上用完整 `index.ts` 做「第二实例」验收会**先跑 recovery**,
+> 与历史 second-instance-sweep 事故同型。它改用 lock 路径子进程验收 ——
+> 判断正确。锁在 recovery 之前,所以完整 boot 的第二实例同样会在 recovery 前失败。
+>
+> ⚠️ **未生效**:3001 上跑的仍是旧构建,锁要**下次正规重启**才生效。
+> 届时**必须先确认没有残留的旧 server 进程**,否则新构建拿不到锁会直接退出。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md`
 > §4 **R6** + §13.6 补充
 > **前置决策(用户 2026-09-07 已拍板)**:**仅支持单 server**。
