@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 执行器配置管理 API(ticket: 网页 @executor 发布):
@@ -18,9 +19,9 @@ import { createTestApp } from "./app";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-exec-bin-"));
-const fakeBin = path.join(fakeDir, "fake-clitest.sh");
+const fakeScript = path.join(fakeDir, "fake-clitest.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 弱验收要求工作树干净 + HEAD 有新提交:真正提交一次(显式身份,CI 无全局
@@ -31,7 +32,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 // 新增执行器 key=clitest,bin 用 env 覆盖指向 fake 脚本(spawn 才能完成)。
 process.env.EXECUTOR_BIN_CLITEST = fakeBin;
 
@@ -230,7 +233,8 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
       agentName: "clitest",
       kind: "cli",
       bin: fakeBin,
-      args: [],
+      // win32: 脚本路径拼进 args 最前面(spawn 才能跑通);非 win32 原样返回。
+      args: withFakeExecutorArgs(fakeArgsPrefix, []),
     });
     expect(res.status).toBe(200);
 

@@ -9,12 +9,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 角色定向下发(specs/dispatch-to-role.md R1-R5):audience=role 时派发层按角色
@@ -31,9 +33,9 @@ const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-role-bin-"));
 // detached 任务完成 git 提交的标记目录(用例等 marker 出现才结束,避免
 // afterEach kill 打断 git 提交留下 index.lock)。
 const markerDir = mkdtempSync(path.join(tmpdir(), "coagenthub-role-done-"));
-const fakeBin = path.join(fakeDir, "fake-executor.sh");
+const fakeScript = path.join(fakeDir, "fake-executor.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 可选:FAKE_SLEEP_MS(毫秒)让任务保持 running(并发闸测试用);sh 的
@@ -50,7 +52,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
@@ -62,6 +66,20 @@ const { __resetExecutorQueueForTests, executorCooldowns } = await import(
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["executor", "codebuddy"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("角色定向下发(specs/dispatch-to-role.md)", () => {
