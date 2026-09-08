@@ -1,8 +1,33 @@
 # Spec: 把剩余测试文件迁移到跨平台假执行器助手
 
-> **状态**: Frozen
+> **状态**: Landed(B1–B5 = `47b2564d` / `cba99530` / `b49ad506` / `6a62095b` /
+> `bcc7090d`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.1
 >
+> **L3 收口记录(检视者独立复核)**:
+> - **§4.1.3 硬约束(零生产代码)**:逐个提交查 `packages/backend/server/src/`
+>   命中数,五批全部 **0**。
+> - **§4.1.4 未改 `.sh` 正文**:`git diff 47b2564d~1 bcc7090d -- test/` 中
+>   无 shebang 增删。
+> - **§4.2.7(v1.1 正确判据)**:「造 `.sh` 假执行器但没引用助手」的文件数
+>   = **1**(`exec-bin.test.ts`),已核实为**误命中** —— 它把 `#!/bin/sh` 当作
+>   喂给 `isExecutableFile` 的**权限判定素材**(755 vs 644),全文不 spawn 任何
+>   假执行器,套助手反而会把「文件内容」与「怎么启动它」混为一谈。
+>   计划 20 个文件 − 它 = 19,与实际改动文件逐一对上。**判定:合规排除。**
+> - **§3 R4 残留红分类**:执行者交出 1 条 ③ 真实缺陷并给了探针证据。
+>   检视者独立复核 `queue.ts:1931`(status=running)与 `queue.ts:2229`
+>   (`registerCoordinatorProcess`)确有约 300 行窗口(其间还夹着
+>   `createCheckpoint` 这个 git 子进程),证据成立。
+>   **但把结论收窄**:`state.ts:500` 的
+>   `runningWorkspaceCount = coordinatorOccupancyCount + 队列 running`
+>   两者**相加不重叠**,窗口期内任务被队列槽位数到、正好一次 ——
+>   **生产闸本身是对的**,缺陷在测试:等待条件(`runningWorkspaceCount`)
+>   守不住它要断言的对象(`coordinatorOccupancyCount`)。
+>   已另开 [workspace-gate-test-waits-on-wrong-counter.md](workspace-gate-test-waits-on-wrong-counter.md)。
+> - **全量回归**:协调者报 `26 failed | 1048 passed (1074)`,708.67s,
+>   对照迁移前 `129 failed | 924 passed`。⚠️ 该数字**采信协调者汇报**,
+>   检视者未独立重跑(用户口径:不跑全量)。
+>>
 > **v1.1 修订(2026-09-08)**:§4.2.7 的判据更正 —— 原 grep 与 R2/R3「不改脚本正文」
 > 自相矛盾,永远不可能归零。检视者在监督中发现并更正。
 > **日期**: 2026-09-08

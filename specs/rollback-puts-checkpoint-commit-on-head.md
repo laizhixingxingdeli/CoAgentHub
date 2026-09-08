@@ -1,8 +1,23 @@
 # Spec: 重试回滚把 checkpoint 提交推上 HEAD,吞掉用户在途工作
 
-> **状态**: Frozen
+> **状态**: Landed(`99113e88`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核,非采信汇报)**:
+> - 「改前红」自行复现:临时换回旧实现后 `3 failed | 5 passed`,其中
+>   **验收#2 报 `expected '47c3097 fake bin change\nef56d07 coag…' not to contain
+>   'coagenthub checkpoint'`** —— 数据吞噬在测试里逐字复现;
+>   验收#1b 报 `expected '4af84ed…' to be '77099fb…'`(HEAD 落在 C 而非 C^)。
+> - 「改后绿」自行复跑:`1 failed | 7 passed (8)`,与汇报逐字一致,失败数未增加。
+>   唯一残留红是**改前即存在**的验收#3(`spawn sh.exe ENOENT` → `checkpointRef`
+>   为 null),属 ② Windows 环境性,与本票无关。
+> - 提交边界:`git show --stat` 仅票面两个文件;`queue.ts` / `control.ts` 未动
+>   (R4/§4.5 满足);用户未提交的报告与未跟踪 `start.ps1` **未被夹带**。
+>
+> ⚠️ **未生效提示**:修复已入库,但**运行中的服务器仍是旧构建** ——
+> 需 `cd packages/backend/server && npx tsx esbuild.config.ts` 后
+> `scripts/coagenthub-prod.sh restart` 才真正生效。在那之前回滚仍会吞工作。
 > **来源**: 2026-09-08 检视者监督平台运行时实测捕获,**当天连续发生两次**。
 > **相关**: [checkpoint-must-not-touch-real-index.md](checkpoint-must-not-touch-real-index.md)
 > (Landed,`d1626fb3`)修的是 checkpoint 污染**暂存区**;本票是它污染**提交历史**的另一半。
