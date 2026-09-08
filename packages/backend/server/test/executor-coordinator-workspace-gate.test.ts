@@ -231,19 +231,24 @@ describe.sequential("工作树级协调串行(spec multiple-coordinators v1.3)",
     }
   }
 
-  /** 轮询直到工作树占用数达到期望值(占用在 spawn 之后才登记)。 */
-  async function waitForOccupancy(
+  /**
+   * 轮询直到 coordinatorOccupancyCount 达到期望值。
+   * 必须等被断言的量本身 —— runningWorkspaceCount 在 status=running 时就已 +1,
+   * 而 coordinatorOccupancyCount 要到 spawn 后 registerCoordinatorProcess 才变 1,
+   * 两者之间隔着 createCheckpoint 等,等错量会必然抢跑。
+   */
+  async function waitForCoordinatorOccupancy(
     projectPath: string,
     expected: number,
     timeoutMs = 20_000,
   ) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const cur = runningWorkspaceCount(projectPath);
+      const cur = coordinatorOccupancyCount(projectPath);
       if (cur === expected) return;
       if (Date.now() > deadline) {
         throw new Error(
-          `工作树占用数未在 ${timeoutMs}ms 内达到 ${expected}(当前=${cur})`,
+          `coordinatorOccupancyCount 未在 ${timeoutMs}ms 内达到 ${expected}(当前=${cur})`,
         );
       }
       await sleep(50);
@@ -343,8 +348,8 @@ describe.sequential("工作树级协调串行(spec multiple-coordinators v1.3)",
       audienceRef: coordA.id,
     });
     await waitForTask(msgA.id, "running");
-    // 统一占用源:存活协调进程计入其工作树占用(既有闸的盲区,本票修正点)。
-    await waitForOccupancy(projectPath, 1);
+    // 等被断言的量本身:spawn 后 registerCoordinatorProcess 才登记占用。
+    await waitForCoordinatorOccupancy(projectPath, 1);
     expect(coordinatorOccupancyCount(projectPath)).toBe(1);
 
     // 给 B 的协调票:不同 executor key,但同一棵工作树 → 必须排队,不 spawn。
