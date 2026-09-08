@@ -24,7 +24,8 @@
 ```
 CoAgentHub/
 ├── serve.mjs                          # 局域网静态托管 + /api 反代 + WS upgrade
-├── specs/                             # Spec 文档(Spec-Driven 工作流)
+├── specs/                             # Spec 文档(Spec-Driven 工作流；冻结契约)
+├── plans/                             # 工作项/诊断计划(与 spec 同名；平台不解析；ADR-0010)
 ├── skills/                            # Agent Skills(coordinator/bugfix/executor/reviewer;bugfix 为索引)
 ├── docs/                              # 纯 Markdown 文档(usage/architecture/adr)
 ├── packages/
@@ -234,9 +235,9 @@ CoAgentHub/
 
 ## 9. 执行器与任务
 
-**三角色职责分离 + 三层检视闭环**:检视者(reviewer)与用户直接对话、生成并冻结 spec;协调者(coordinator)据冻结 spec 下发任务;执行者(executor)按任务书实现。三层检视:L1 执行者会话内自检(Standards + Spec 双轴)/ L2 协调者功能检视(对照 spec 验收标准,✅ 放行 / ❌ 重下发)/ L3 检视者架构检视(是否最佳实现、ADR 合规、领域词汇;发现项 → 修订 spec)。检视编排由三个 skill 的纪律承载,平台不建编排引擎;L3 架构检视由 reviewer 通过 **task_completion_event inbox 认领**触发,不再以任务形式下发。
+**三角色职责分离 + 三层检视闭环**(ADR-0010):检视者(reviewer)与用户直接对话、**§3 grill** 对齐需求、**§6 冻结** spec 并做 **L3**;协调者(coordinator)为**技术负责人**——三方下接 §4 读架构与 §5 起草/拆分(产物 `plans/<spec 同名>.md`),冻结后据 `specRef`+`specHash` 下发并做 **L2**,编排检视者 L3(**协调者不做 L3**);执行者(executor)按任务书实现。三层检视:L1 执行者会话内自检(Standards + Spec 双轴)/ L2 协调者功能检视(对照 spec 验收标准,✅ 放行 / ❌ 重下发)/ L3 检视者架构检视(是否最佳实现、ADR 合规、领域词汇;发现项 → 修订 spec)。检视编排由 skill 纪律承载,平台不建编排引擎;L3 由 reviewer 通过 **task_completion_event inbox 认领**触发,不再以任务形式下发。
 
-- **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——群成员里有没有 `reviewer` 角色成员决定:有 `reviewer` = **三层**(L1 执行者自检 + L2 协调者功能检视 + L3 检视者架构检视);无 `reviewer` = **两层**(协调者兼任检视者的写 spec 职责,L2 通过即结案,跳过 L3)。两模式唯一差异是 L2 通过后是否进入 L3 架构检视:三层有 reviewer 在场,L2 通过即触发 completion event,由 reviewer inbox 认领完成检视;两层无 reviewer,L2 通过即结案。平台不感知模式。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」**自行 grill + 写 spec + 冻结公布(严禁把内容复制回 coordinator skill);取舍见 spec §3.14.4——更少跳转 vs L3 变自审、写与验收同一方。
+- **协作模式(三层 / 两层,由成员构成推导)**:模式**不是配置项、不落 `groups.mode` 字段**——有 `reviewer` = **三层**(L1+L2+L3);无 `reviewer` = **两层**(L2 通过即结案,跳过 L3)。三方流程:检视者明确需求 → 协调者技术细化与 `plans/` 拆分 → 检视者确认冻结 → 协调者逐项下发。两层下协调者**按需加载 `skills/reviewer/SKILL.md` 的「职责 A」整体**自行 grill + 写 spec + 冻结公布(§1.2 既有约定;**严禁把内容复制回 coordinator skill**);取舍见 spec §3.14.4。`plans/` 由 `specRef` 推路径,平台不解析;续跑不改 `buildResumeBrief`。
   - **L2 之后的分支**:三层下 L2 功能检视通过 → 任务终态后 DB trigger 自动创建 `task_completion_event` → reviewer 从 inbox 认领并完成架构检视 → 结案;两层下 L2 通过即结案,跳过 L3。结案时若存在上游 detached 任务仍须 `PATCH` 回写终态(与模式无关)。
   - **L3 检视通过 completion event 唤醒**:三层模式下 L2 通过后,协调者不再向 reviewer participant 直接下发 task;任务终态时 DB trigger 自动创建 `task_completion_event`,reviewer 从 inbox 认领并完成架构检视。reviewer 不对应执行器配置,其消息走普通消息/控制指令路径。
   - **completion event 的投递对象由载荷决定,不由下发者决定**(specs/l3-request-delivery-and-scope.md R1/R2):终态 `diffSummary` **带 `review_request`** → 收件人是**群内 reviewer 角色成员**(多个 reviewer 各得一条事件);其余完成事件 → 收件人仍是下发者。收件人由**应用层**在落终态时裁定并写入 `task.recipient_participant_ids`(与 `status` 同一条 UPDATE),trigger 只搬运该列 —— 它不查 `group_members`、不理解角色,角色语义只有应用层这一个权威源。未裁定的路径(队列完成 / 停止 / 控制回滚 / 孤儿收敛)回落下发者,行为逐字不变。inbox 的列举 / claim / ack / fail 一律按 `recipient_participant_id` 归属。这条修掉的缺陷是:协调者自派(续跑 / detached)的属主任务,其下发者是协调者自己,而协调者 `memory: null`、每票 spawn、跑完即退、从不读自己的收件箱 —— 按下发者投递时这类 L3 请求**结构上永远送不到**。

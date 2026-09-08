@@ -27,10 +27,13 @@ CoAgentHub 是一个**局域网规模的多 participant 协作中枢**:participa
 | **决策票(decision ticket)** | 大特性拆票的单元是「以决策为解的问句」，不是实现切片；实现切片才是下发执行器的 task |
 | **throwaway 分支** | 探索留档分支：`research/<name>`(调研结论)与 `prototype/<name>`(原型产物)，用完不删，主分支只保留被验证过的决策 |
 | **context pointer** | 票/任务上的一行指针：分支名 + 结论一句话，指向 throwaway 分支上的留档 |
-| **reviewer(检视者)** | **用户侧唯一入口**：与用户直接对话（对话发生在检视者 runtime 的原生会话，不经平台群）；需求分流（大需求写 spec / 小 bug 不改 spec / 仅当影响 spec 描述才修订）；生成并冻结 spec（公布 `specRef`+`specHash`）；执行 L3 架构检视；发现实现与预期有出入时修订 spec。**协调者不再自写 spec** |
+| **reviewer(检视者)** | **用户侧唯一入口**：与用户直接对话（对话发生在检视者 runtime 的原生会话，不经平台群）；需求分流；**§3 grill 对齐需求**与**§6 冻结公布** `specRef`+`specHash`（三方下 §4 读架构 / §5 起草交给协调者）；执行 **L3** 架构检视；发现实现与预期有出入时修订 spec。L3 永远是检视者的 |
+| **coordinator(协调者)** | **技术负责人**（ADR-0010）：三方下接评审 skill **§4–§5**（代码调查、技术方案、工作项拆分、Bug 主力诊断），产物写入 `plans/<spec 同名>.md`；冻结后派发与 **L2**；编排检视者 L3。**不做 L3**。两方下仍整体继承职责 A（§1.2） |
+| **工作项(work item)** | 计划里「要完成的事」，≠ task（一次执行）。重派多个 task 可属同一工作项；**未派发工作项不得伪装成 queued task**。计划路径由 `specRef` 推得，平台不解析 |
+| **计划(plans/)** | `specs/<name>.md` → `plans/<name>.md`：可变的工作项列表与诊断段（含**被排除的假设**）。续跑时协调者自读；**计划是提示，task 事实是权威** |
 | **三层检视** | L1 执行者会话内自检（Standards + Spec 双轴）/ L2 协调者功能检视（对照 spec 验收标准，✅ 放行 / ❌ 重下发）/ L3 检视者架构检视（最佳实现、ADR 合规、领域词汇；发现项 → 修订 spec） |
 | **重试任务书（retry ticket）** | L2 未通过重下发时协调者生成的任务书：**强制两段式**（① 上次失败的判定——引用具体证据而非「上次失败了」；② 本次要避开什么），与上一次**必须存在可见差异**（逐字相同 = 不合格），无法判定时如实写「未能判定失败原因」并说明已查过什么；`diffSummary.retries` 如实记录第几次尝试，`supersedesTaskId` 链可追溯；同一工作项失败重发累计 3 次仍失败 → 停止重试并交回检视者（协议见 coordinator skill §4.1.1） |
-| **协作模式（三层 / 两层）** | **三层 / 两层**是检视深度轴，由逐票工作类型决定；**三方 / 两方**是群级编制轴，唯一杠杆是建群时的成员构成。编制由**群成员构成推导**，不是配置项、不落 `groups.mode` 字段。持续产出需求、新模块或架构决策的项目建议配三方（reviewer + coordinator + executor），以获得独立 L3 架构检视与交叉校验；主要是修复、边界明确小改动或无人值守的项目两方够用。两方编制下协调者**兼任检视者的写 spec 职责**——读 `skills/reviewer/SKILL.md` 的「职责 A」自行 grill + 写 spec + 冻结公布（严禁把内容复制回 coordinator skill）；两方编制**不跑 L3，也不做自审**。代价是需求类工作没有事后架构检查，补偿是把架构思考前移到 spec 冻结那一刻。 |
+| **协作模式（三层 / 两层）** | **三层 / 两层**是检视深度轴；**三方 / 两方**是群级编制轴，唯一杠杆是建群时的成员构成（不落 `groups.mode`）。三方：检视者 grill+冻结+L3，协调者技术细化（§4–§5）+计划/诊断+派发+L2。两方：协调者**整体**继承检视者职责 A——读 reviewer skill「职责 A」自行 grill + 写 + 冻结（严禁复制回 coordinator skill）；**不跑 L3，也不做自审**。代价是需求类无事后架构检查，补偿是架构思考前移到 spec 冻结。 |
 | **编制（三方 / 两方）** | 由群成员构成**实时推导**：`reviewer` 与 `coordinator` 同时在场 = 三方，否则两方。**不落平台字段**。决定「谁来干」，不决定「跑几层」 |
 | **工作类型（需求 / 修复）** | 逐票由检视者分流，落 `dispatchKind`。决定要不要新写 spec、**要不要跑 L3**。与编制**正交** |
 | **替代关系** | `supersedesTaskId`：换执行器时新任务指向被替代的那次尝试。多行保留完整现场，`l1.childCount` 只算有效尝试，`supersededCount` 透出换过几次 |
@@ -78,10 +81,10 @@ notify/report/queue 八个子模块(barrel 导出面不变,`@server/lib/executor
 
 ## Spec-Driven Task Dispatch (规范驱动任务下发, 2026-08-18)
 
-协调者在完全确定实现方案前不允许下发任务。任务可携带 `specRef`（规范文档路径）
-和 `specHash`（版本哈希）字段,任务书模板自动插入"关联规范"段,执行器严格按 Spec 实现。
-任务书以精简的"执行方式"段触发 `coagenthub-executor` skill,执行器自检(Code Review
-自检,Standards + Spec Compliance)由 skill 承载;汇报格式要求固定五行(提交/测试/Token/
-汇报/遗留),`Token:` 段由 server 端清洗为纯数字。
-Spec 文档位于 `specs/` 目录。Skills 位于 `skills/` 目录(coordinator/executor/bugfix/reviewer,其中 bugfix 现为索引——诊断/分流归检视者、方案与下发/验收归协调者)。
-详见 `specs/spec-driven-task-dispatch.md` 和 `specs/plugin-skill-adaptation.md`。
+协调者在拿到**冻结** spec（`specRef`+`specHash`）前不允许下发实现任务。三方流程：
+检视者明确需求 → 协调者技术细化与 `plans/` 拆分 → 检视者冻结 → 协调者逐项下发。
+任务书模板自动插入"关联规范"段,执行器严格按 Spec 实现。任务书以精简的"执行方式"
+段触发 `coagenthub-executor` skill;汇报格式要求固定五行(提交/测试/Token/汇报/遗留)。
+Spec 在 `specs/`；工作项/诊断计划在 `plans/`（从 specRef 推路径，平台不解析）。
+Skills 在 `skills/`(coordinator/executor/bugfix/reviewer;bugfix 为索引)。
+详见 `specs/spec-driven-task-dispatch.md`、`specs/coordinator-as-technical-lead.md`、ADR-0010。

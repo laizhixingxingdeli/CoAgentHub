@@ -177,12 +177,20 @@ corresponding label string from this table.
 ## Spec-Driven workflow
 
 CoAgentHub uses a Spec-Driven dispatch flow: the coordinator must not dispatch a
-task until the implementation plan is fully settled in a written spec. The full
-workflow (project bootstrap, pre-flight grill, to-spec, dispatch, post-flight
-verification) lives in the **coordinator skill** and its references:
+task until the implementation plan is fully settled in a **frozen** spec
+(`specRef` + `specHash`). The full workflow lives in the reviewer and coordinator
+skills:
 
-- `skills/coordinator/SKILL.md` — the coordinator procedure.
-- `specs/` — spec documents (Spec-Driven workflow) and `docs/adr/` for decisions.
+- **三方编制（检视者在场）**：检视者 §3 grill 对齐需求 → **协调者（技术负责人）**
+  按 reviewer skill §4–§5 做技术细化与工作项拆分（产物 `plans/<spec 同名>.md`，
+  从 `specRef` 推路径）→ 检视者 §6 确认并冻结 `spec_published` → 协调者逐项下发
+  与 L2，L3 仍由检视者做。协调者 skill **只指向** §4–§5，不复制写 spec 纪律。
+- **两方编制（无 reviewer）**：协调者仍**整体**继承检视者职责 A（grill + 写 + 冻结），
+  见 `skills/coordinator/SKILL.md` §1.2；不跑 L3。
+- `skills/coordinator/SKILL.md` — 技术负责人：计划/诊断、派发、L2、编排 L3。
+- `skills/reviewer/SKILL.md` — 用户入口：grill、冻结、L3。
+- `specs/` — 冻结契约；`plans/` — 可变的工作项/诊断计划（平台不解析）。
+- `docs/adr/` — 决策（含 ADR-0010 协调者技术负责人）。
 
 The executor's method (implement → test → self-review → report) is carried by
 `skills/executor/SKILL.md`; the task ticket only triggers that skill. When you
