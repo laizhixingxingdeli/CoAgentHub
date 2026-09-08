@@ -8,10 +8,17 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
+import {
+  executorConfig as executorConfigTable,
+  participant as participantTable,
+} from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import {
+  resolveFakeExecutor,
+  withFakeExecutorArgs,
+} from "./fake-executor-bin";
 
 /**
  * 阶段2-票2 + 调度并行化(票4):server 按 project_path 分组的执行队列(同组
@@ -35,9 +42,9 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queue-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_SLEEP_SECS" ]; then sleep "$FAKE_SLEEP_SECS"; fi',
@@ -99,7 +106,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 // AtomCode(内置 maxConcurrency=1)的 bin 同样指向 fake bin:声明式并发
 // 上限测试用同一脚本驱动(该脚本忽略 args,仅按 FAKE_* 环境变量行为)。
@@ -124,6 +133,20 @@ const { createTestApp } = await import("./app");
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
@@ -1766,7 +1789,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
           agentName: "DB MC Executor",
           kind: "cli",
           bin: fakeBin,
-          args: [],
+          args: withFakeExecutorArgs(fakeArgsPrefix, []),
           maxConcurrency: 1,
         }),
       });

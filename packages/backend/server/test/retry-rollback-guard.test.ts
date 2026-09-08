@@ -8,15 +8,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
+import {
+  executorConfig as executorConfigTable,
+  participant as participantTable,
+} from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import {
+  resolveFakeExecutor,
+  withFakeExecutorArgs,
+} from "./fake-executor-bin";
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-guard-bin-"));
-const fakeBin = path.join(fakeDir, "fake-guard.sh");
+const fakeScript = path.join(fakeDir, "fake-guard.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_SLEEP_SECS" ]; then sleep "$FAKE_SLEEP_SECS"; fi',
@@ -51,7 +58,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
@@ -72,6 +81,20 @@ const { createTestApp } = await import("./app");
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 afterAll(() => {
   rmSync(fakeDir, { recursive: true, force: true });

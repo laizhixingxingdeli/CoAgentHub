@@ -8,8 +8,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { seedBuiltinExecutorConfigs } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import {
+  resolveFakeExecutor,
+  withFakeExecutorArgs,
+} from "./fake-executor-bin";
 
 /**
  * 修复:任务书显式声明目标仓库(`仓库:`/`仓库路径:`/`Repository:`/`Repo:`)时,
@@ -20,9 +26,9 @@ import { seedBuiltinExecutorConfigs } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-repo-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 捕获任务书全文供断言($3 = {ticket} 路径)。
@@ -34,7 +40,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
 /** 造一个真实 git 仓库(至少 seedCommits 个提交,供弱验收 checkpointRef^ 解析)。 */
@@ -66,6 +74,19 @@ const { __resetExecutorQueueForTests, resolveTaskRepo } = await import(
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    const [row] = await testDb
+      .select()
+      .from(executorConfigTable)
+      .where(eq(executorConfigTable.key, "codebuddy"));
+    if (row) {
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, "codebuddy"));
+    }
+  }
 });
 
 describe("resolveTaskRepo 纯函数(行级声明解析)", () => {
