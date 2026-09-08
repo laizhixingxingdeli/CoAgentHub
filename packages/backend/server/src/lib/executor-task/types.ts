@@ -70,7 +70,7 @@ export interface GroupPromptInfo {
  * participant 路径返回 undefined(行为逐字不变)。
  */
 export type DispatchOutcome =
-  | { status: "dispatched"; participantId: string }
+  | { status: "dispatched"; participantId: string; taskId?: string }
   | { status: "redispatch-stopped"; parentTaskId: string }
   | {
       status: "role-unresolved";
@@ -78,7 +78,15 @@ export type DispatchOutcome =
       role: string;
     }
   /** 目标群内角色含 reviewer → 不可派发(dispatch-must-not-spawn-the-reviewer)。 */
-  | { status: "reviewer-not-dispatchable" };
+  | { status: "reviewer-not-dispatchable" }
+  /** 派发层可观察的静默跳过(意图结算用;消息路由对 participant 路径仍不依赖这些)。 */
+  | {
+      status: "skipped";
+      reason:
+        | "sender-not-authorized"
+        | "participant-not-found"
+        | "executor-not-configured";
+    };
 
 /** 队列条目:一次待执行/执行中的运行。 */
 export interface QueuedRun {

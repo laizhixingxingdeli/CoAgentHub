@@ -87,14 +87,24 @@ export interface InsertGroupMessageInput {
   fileRef?: FileRefInput | null;
 }
 
+/** Optional work that must commit with the message (e.g. dispatch intent). */
+export type AfterMessageInsert = (
+  tx: Parameters<Parameters<DataBase["transaction"]>[0]>[0],
+  created: GroupMessageFull,
+) => Promise<void>;
+
 /**
  * 插入一条群消息 + closure 行(同一事务,含自引用 depth 0 与父链 depth+1),
  * 并返回带 depth 的全量行。parentId 缺失/跨群 → 400;挂载深度超限 → 400
  * (事务内检查,拒绝会回滚消息插入,不留半成品)。
+ *
+ * `afterInsert` 在同一事务内、closure 写完后调用:失败则整笔回滚,用于把
+ * 调度意图与消息原子落库(persist-dispatch-intent-with-the-message R1)。
  */
 export async function insertGroupMessage(
   db: DataBase,
   input: InsertGroupMessageInput,
+  afterInsert?: AfterMessageInsert,
 ): Promise<GroupMessageFull> {
   const {
     groupId,
@@ -188,6 +198,9 @@ export async function insertGroupMessage(
       .select(messageFullColumns)
       .from(groupMessageTable)
       .where(eq(groupMessageTable.id, created.id));
+    if (afterInsert) {
+      await afterInsert(tx, fullRow);
+    }
     return fullRow;
   });
 }

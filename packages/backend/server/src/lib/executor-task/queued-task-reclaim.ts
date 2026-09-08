@@ -27,6 +27,10 @@ import { findExecutorByKey } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
+import {
+  type IntentReclaimResult,
+  reclaimDispatchIntents,
+} from "./dispatch-intent";
 import { postStatus } from "./notify";
 import { enqueueTaskRun, queuedBlockReason } from "./queue";
 import { activeRuns, getStallAlertMs, groupQueues } from "./state";
@@ -67,6 +71,11 @@ export interface QueuedReclaimResult {
   reclaimed: number;
   /** 本轮新发出的滞留告警数(R3;同一个任务只告警一次)。 */
   stalled: number;
+  /**
+   * 本轮调度意图恢复(persist-dispatch-intent-with-the-message):意图有、task 无
+   * → 补建。只增不改 R1/R2/R3;缺省空结果兼容既有调用方。
+   */
+  intents?: IntentReclaimResult;
 }
 
 type TaskRow = typeof taskTable.$inferSelect;
@@ -108,7 +117,11 @@ export async function reclaimQueuedTasks(
     if (run && queuedBlockReason(run) === null) continue;
     if (await alertQueuedStall(db, row, now)) stalled += 1;
   }
-  return { reclaimed, stalled };
+
+  // 只增:意图有、task 无 → 走同一条 maybeDispatchExecutorTask 补建
+  // (persist-dispatch-intent-with-the-message R3)。不改 R1/R2/R3 语义。
+  const intents = await reclaimDispatchIntents(db, now);
+  return { reclaimed, stalled, intents };
 }
 
 /** 周期性 queued 兜底(server 启动时注册);返回停止函数(测试用)。 */
@@ -125,6 +138,7 @@ export function startQueuedTaskReclaim(
       console.warn(`[queued-reclaim] 回收扫描失败: ${error}`);
     });
   }, intervalMs);
+  // 意图恢复挂在同一周期(只增;失败不阻断 queued R1/R2/R3)。
   timer.unref?.();
   return () => clearInterval(timer);
 }

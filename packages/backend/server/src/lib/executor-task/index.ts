@@ -106,6 +106,18 @@ export {
   startQueuedTaskReclaim,
 } from "./queued-task-reclaim";
 export {
+  DISPATCH_INTENT_RECLAIM_GRACE_MS,
+  dispatchAndSettleIntent,
+  dispatchInputFromIntent,
+  findDispatchIntentByMessage,
+  type IntentReclaimResult,
+  payloadFromDispatchInput,
+  reclaimDispatchIntents,
+  recordDispatchIntentFailure,
+  settleDispatchIntentAfterAttempt,
+  writeDispatchIntent,
+} from "./dispatch-intent";
+export {
   extractCodeBuddyStreamResult,
   extractGenericJsonlText,
   parseTaskReport,

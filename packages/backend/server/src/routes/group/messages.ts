@@ -16,10 +16,12 @@ import {
 import type { DataBase } from "@server/lib/database";
 import {
   DISPATCH_ALLOWED_ROLES,
+  dispatchAndSettleIntent,
   inferSupersedesTaskId,
   isReviewerNotDispatchableTarget,
-  maybeDispatchExecutorTask,
+  payloadFromDispatchInput,
   refreshA2AActivity,
+  writeDispatchIntent,
 } from "@server/lib/executor-task";
 import { findExecutorByParticipant } from "@server/lib/executors";
 import type { ParticipantType } from "@server/lib/group-visibility";
@@ -462,27 +464,153 @@ app
       // 否则沿用 metadata.dispatcherSessionId(未携带/伪造时为 null)。
       const finalDispatcherSessionId = callbackSessionId ?? dispatcherSessionId;
 
-      // Message + closure rows are written atomically (shared helper — the
-      // executor runner's status replies reuse the exact same write path so
-      // the two cannot drift): self row depth 0, one row per ancestor with
-      // depth+1, depth check inside the transaction. A failure rolls back the
-      // insert instead of leaving a committed message the client believes
-      // failed.
-      const full = await insertGroupMessage(db, {
-        groupId: id,
-        senderId,
-        parentId: parentId ?? null,
-        audience: aud,
-        audienceRef:
-          aud === "role" || aud === "participant"
-            ? (audienceRef ?? null)
-            : null,
-        body: body ?? "",
-        contentType: contentType ?? "text/plain",
-        // 服务端必填 (ticket 17): 客户端未传 expiresAt 时默认 now + 7d;
-        // 历史 fileRef 元信息随消息永久可见,过期只影响取文件。
-        fileRef: fileRef ?? null,
-      });
+      // 阶段2-票1 派发预判定(在消息事务之前算完):控制指令跳过 / 检视者守卫
+      // / 角色定向等待结果。意图与消息同事务落库(persist-dispatch-intent R1),
+      // 所以跳过原因也要在插入前算好,写入 rejected 终态,意图不悬着。
+      const warnings: string[] = [];
+      const isDirectedDispatch =
+        (aud === "participant" || aud === "role") && !!audienceRef;
+      const isRoleDispatch = aud === "role";
+      let skipDispatchForControlCommand = false;
+      let skipDispatchForReviewerTarget = false;
+      let isExecutorTarget = false;
+      if (isDirectedDispatch && audienceRef) {
+        const targetParticipantForDispatch = isRoleDispatch
+          ? undefined
+          : await db.query.participant.findFirst({
+              where: (t, { eq }) => eq(t.id, audienceRef),
+              columns: { name: true, executorKey: true },
+            });
+        isExecutorTarget =
+          !isRoleDispatch &&
+          targetParticipantForDispatch !== undefined &&
+          (await findExecutorByParticipant(
+            db,
+            targetParticipantForDispatch,
+          )) !== undefined;
+        // 控制通道与派发通道并行时不重复动作:正文命中停止/回滚指令(control
+        // 唯一判定 isControlCommand,同一正则)且控制通道会执行它(即目标不
+        // 是执行器任务目标)→ 跳过任务创建并留警告。目标分类用 control 唯一
+        // 判定 isExecutorTaskTarget(本群角色 = executor),与控制通道同一事
+        // 实:coordinator participant 即使绑定执行器 key,participant 定向它
+        // 的控制指令仍归控制通道执行 → 这里跳过派发;执行器任务目标(既有语
+        // 义视为任务,控制通道跳过)→ 派发照常,不受影响;role 定向必由控制
+        // 通道执行 → 跳过;broadcast 不走派发入口,行为不变。
+        skipDispatchForControlCommand =
+          isControlCommand(body ?? "") &&
+          (isRoleDispatch ||
+            !(await isExecutorTaskTarget(db, audienceRef, id)));
+        // 检视者不可被派发(dispatch-must-not-spawn-the-reviewer R1–R3):
+        // 群内角色含 reviewer → 不建任务、不 spawn;消息已写入,响应头给
+        // 可见 warning(不得静默跳过)。判据在 isReviewerNotDispatchableTarget
+        // (group_members.roles),与派发层共用同一出处(ADR-0009)。
+        skipDispatchForReviewerTarget = await isReviewerNotDispatchableTarget(
+          db,
+          id,
+          isRoleDispatch ? "role" : "participant",
+          audienceRef,
+        );
+        if (skipDispatchForReviewerTarget) {
+          warnings.push("REVIEWER_TARGET_NOT_DISPATCHABLE");
+        }
+        if (callback && !canCarryDispatcher) {
+          warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
+        }
+        if (
+          isExecutorTarget &&
+          !specHash?.trim() &&
+          !skipDispatchForControlCommand &&
+          !skipDispatchForReviewerTarget
+        ) {
+          warnings.push("SPEC_HASH_MISSING");
+        }
+        if (group.projectPath) {
+          const missing = await findMissingProjectDocs(group.projectPath);
+          if (missing.length > 0) {
+            c.header(
+              "X-Project-Init-Warning",
+              `PROJECT_NOT_INITIALIZED:${missing.join(",")}`,
+            );
+          }
+        }
+      }
+
+      const findingsReviewResult =
+        parsed?.type === "review_result" && parsed.verdict === "findings"
+          ? parsed
+          : undefined;
+      const finalDispatchKind =
+        dispatchKind ?? (findingsReviewResult ? "fix" : null);
+      const initialDiffSummary =
+        findingsReviewResult && !dispatchKind
+          ? {
+              dispatchKindNote:
+                "dispatchKind 由 findings 缺省推定为 fix,未由检视者显式指定",
+            }
+          : null;
+
+      // Message + closure (+ optional dispatch intent) are written atomically.
+      // Intent in the same transaction = crash after commit can rebuild the
+      // task (persist-dispatch-intent-with-the-message R1). Historical
+      // messages are not backfilled.
+      const full = await insertGroupMessage(
+        db,
+        {
+          groupId: id,
+          senderId,
+          parentId: parentId ?? null,
+          audience: aud,
+          audienceRef:
+            aud === "role" || aud === "participant"
+              ? (audienceRef ?? null)
+              : null,
+          body: body ?? "",
+          contentType: contentType ?? "text/plain",
+          // 服务端必填 (ticket 17): 客户端未传 expiresAt 时默认 now + 7d;
+          // 历史 fileRef 元信息随消息永久可见,过期只影响取文件。
+          fileRef: fileRef ?? null,
+        },
+        isDirectedDispatch && audienceRef
+          ? async (tx, created) => {
+              const dispatchInput = {
+                groupId: id,
+                messageId: created.id,
+                senderRoles: membership.roles,
+                audience: isRoleDispatch
+                  ? ("role" as const)
+                  : ("participant" as const),
+                audienceRef,
+                body: findingsReviewResult
+                  ? renderFindingsTaskBrief(
+                      findingsReviewResult,
+                      body ?? "",
+                    )
+                  : (body ?? ""),
+                dispatcherParticipantId: senderId,
+                dispatcherSessionId: finalDispatcherSessionId,
+                selectionReason,
+                specRef: specRef ?? null,
+                specHash: specHash ?? null,
+                dispatchKind: finalDispatchKind,
+                supersedesTaskId: finalSupersedesTaskId ?? null,
+                callbackRef,
+                initialDiffSummary,
+              };
+              await writeDispatchIntent(tx, {
+                groupId: id,
+                messageId: created.id,
+                audience: dispatchInput.audience,
+                audienceRef,
+                payload: payloadFromDispatchInput(dispatchInput),
+                rejectReason: skipDispatchForControlCommand
+                  ? "control-command-skipped"
+                  : skipDispatchForReviewerTarget
+                    ? "reviewer-not-dispatchable"
+                    : undefined,
+              });
+            }
+          : undefined,
+      );
 
       // Realtime push (ticket 13): fire-and-forget — the WS hub catches its
       // own failures, so the fan-out cannot block the response; the ?after=
@@ -505,106 +633,15 @@ app
       // 失败只记日志,绝不阻塞消息响应)。audience=role(角色定向)由派发层按
       // 角色解析目标成员(specs/dispatch-to-role.md R1),此处等待其解析结果
       // 以便把「角色无匹配」作为可见信号(响应头)返回,不静默跳过(R3)。
-      if ((aud === "participant" || aud === "role") && audienceRef) {
-        const warnings: string[] = [];
-        const isRoleDispatch = aud === "role";
-        // 角色定向的目标在派发层按角色解析,路由层无法预知具体 participant;
-        // SPEC_HASH_MISSING 提示仅对 participant 定向有意义。
-        const targetParticipantForDispatch = isRoleDispatch
-          ? undefined
-          : await db.query.participant.findFirst({
-              where: (t, { eq }) => eq(t.id, audienceRef),
-              columns: { name: true, executorKey: true },
-            });
-        const isExecutorTarget =
-          !isRoleDispatch &&
-          targetParticipantForDispatch !== undefined &&
-          (await findExecutorByParticipant(
-            db,
-            targetParticipantForDispatch,
-          )) !== undefined;
-        // 控制通道与派发通道并行时不重复动作:正文命中停止/回滚指令(control
-        // 唯一判定 isControlCommand,同一正则)且控制通道会执行它(即目标不
-        // 是执行器任务目标)→ 跳过任务创建并留警告。目标分类用 control 唯一
-        // 判定 isExecutorTaskTarget(本群角色 = executor),与控制通道同一事
-        // 实:coordinator participant 即使绑定执行器 key,participant 定向它
-        // 的控制指令仍归控制通道执行 → 这里跳过派发;执行器任务目标(既有语
-        // 义视为任务,控制通道跳过)→ 派发照常,不受影响;role 定向必由控制
-        // 通道执行 → 跳过;broadcast 不走派发入口,行为不变。
-        const skipDispatchForControlCommand =
-          isControlCommand(body ?? "") &&
-          (isRoleDispatch ||
-            !(await isExecutorTaskTarget(db, audienceRef, id)));
-        // 检视者不可被派发(dispatch-must-not-spawn-the-reviewer R1–R3):
-        // 群内角色含 reviewer → 不建任务、不 spawn;消息已写入,响应头给
-        // 可见 warning(不得静默跳过)。判据在 isReviewerNotDispatchableTarget
-        // (group_members.roles),与派发层共用同一出处(ADR-0009)。
-        const skipDispatchForReviewerTarget =
-          await isReviewerNotDispatchableTarget(
-            db,
-            id,
-            isRoleDispatch ? "role" : "participant",
-            audienceRef,
-          );
-        if (skipDispatchForReviewerTarget) {
-          warnings.push("REVIEWER_TARGET_NOT_DISPATCHABLE");
-        }
-        // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
-        // coordinator/human/reviewer(群内角色)的发送者可携带;执行器/observer
-        // 伪造一律丢弃。下发权只由群内角色裁定(spec R3 / ADR-0008 第三条),
-        // 不再叠加「是否命中执行器配置」的全局否决——即便发送者同时命中一个
-        // 执行器配置,只要群内角色有权下发即可携带。
-        // canCarryDispatcher / dispatcherSessionId / callbackRef /
-        // callbackSessionId / finalDispatcherSessionId 均在消息插入前计算
-        // (callback-validation-before-message-commit.md R1);本分支只消费
-        // 结果,不重算、不再次校验(单一判定出处,ADR-0009)。
-        if (callback && !canCarryDispatcher) {
-          warnings.push("CALLBACK_STRIPPED_NOT_AUTHORIZED");
-        }
-        if (
-          isExecutorTarget &&
-          !specHash?.trim() &&
-          !skipDispatchForControlCommand &&
-          !skipDispatchForReviewerTarget
-        ) {
-          // 跳过派发的控制指令/检视者目标不产生「将建任务却缺 specHash」的警告
-          // (任务根本不会建)。
-          warnings.push("SPEC_HASH_MISSING");
-        }
-        // 首次任务初始化检查(项目脚手架):当消息触发任务(即即将调用
-        // maybeDispatchExecutorTask)且群绑定了 projectPath 时,检查 Matt 文档
-        // 脚手架;缺失则响应 header 返回 warning(不阻塞消息发送/任务下发)。
-        // group 复用插入前 assertGroupWritable 的返回值(同票 R3):可写性
-        // 只判定一次,判定点在写入之前。
-        if (group.projectPath) {
-          const missing = await findMissingProjectDocs(group.projectPath);
-          if (missing.length > 0) {
-            c.header(
-              "X-Project-Init-Warning",
-              `PROJECT_NOT_INITIALIZED:${missing.join(",")}`,
-            );
-          }
-        }
-        const findingsReviewResult =
-          parsed?.type === "review_result" && parsed.verdict === "findings"
-            ? parsed
-            : undefined;
-        // R1:显式 dispatchKind 优先, findings 缺省才推定为 fix; R2:缺省留痕
-        const finalDispatchKind =
-          dispatchKind ?? (findingsReviewResult ? "fix" : null);
-        const initialDiffSummary =
-          findingsReviewResult && !dispatchKind
-            ? {
-                dispatchKindNote:
-                  "dispatchKind 由 findings 缺省推定为 fix,未由检视者显式指定",
-              }
-            : null;
+      // 意图已在消息事务中落库;此处只做 live 派发 + 结算意图状态。
+      if (isDirectedDispatch && audienceRef) {
         const dispatchInput = {
           groupId: id,
           messageId: full.id,
           senderRoles: membership.roles,
-          audience:
-            aud === "role" ? ("role" as const) : ("participant" as const),
+          audience: isRoleDispatch
+            ? ("role" as const)
+            : ("participant" as const),
           audienceRef,
           body: findingsReviewResult
             ? renderFindingsTaskBrief(findingsReviewResult, body ?? "")
@@ -622,6 +659,7 @@ app
         // 控制通道已执行的控制指令跳过派发(判定见 skipDispatchForControlCommand
         // 注释);检视者目标跳过派发(判定见 skipDispatchForReviewerTarget);
         // participant 定向执行器与 broadcast 的行为均不受影响。
+        // 意图已在事务内记为 rejected,这里只补响应头 warning。
         if (skipDispatchForControlCommand) {
           warnings.push("CONTROL_COMMAND_SKIPPED_DISPATCH");
         } else if (skipDispatchForReviewerTarget) {
@@ -630,8 +668,9 @@ app
           // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发
           // 结果,把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,
           // spec R3)。意外错误一律只记日志,绝不阻塞消息响应。
+          // dispatchAndSettleIntent = maybeDispatch + 意图状态结算(同一判定口径)。
           if (aud === "role") {
-            const outcome = await maybeDispatchExecutorTask(
+            const outcome = await dispatchAndSettleIntent(
               db,
               dispatchInput,
             ).catch((err) => {
@@ -651,7 +690,7 @@ app
               }
             }
           } else {
-            void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>
+            void dispatchAndSettleIntent(db, dispatchInput).catch((err) =>
               console.warn("[executor] 后台调度失败(忽略):", err),
             );
           }

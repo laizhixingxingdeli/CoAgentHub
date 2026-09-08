@@ -943,7 +943,7 @@ export async function maybeDispatchExecutorTask(
     console.log(
       `[executor] 跳过:发送者角色 [${senderRoles.join(",")}] 无权限发布任务`,
     );
-    return;
+    return { status: "skipped", reason: "sender-not-authorized" };
   }
 
   // 检视者不可被派发(dispatch-must-not-spawn-the-reviewer):无论是否有执行器
@@ -1017,14 +1017,14 @@ export async function maybeDispatchExecutorTask(
     console.log(
       `[executor] 跳过:audienceRef ${audienceRef} 无对应 participant`,
     );
-    return;
+    return { status: "skipped", reason: "participant-not-found" };
   }
   const ex = await findExecutorByParticipant(db, participant);
   if (!ex) {
     console.log(
       `[executor] 跳过:participant ${participant.name} 不在执行器配置中`,
     );
-    return;
+    return { status: "skipped", reason: "executor-not-configured" };
   }
 
   // 角色解绑后:查目标成员在本群的分工。角色必须无条件传入任务书模板;
@@ -1037,7 +1037,7 @@ export async function maybeDispatchExecutorTask(
     ? { roles: membership.roles, prompt: membership.prompt }
     : null;
 
-  await dispatchTask(db, {
+  const outcome = await dispatchTask(db, {
     groupId,
     messageId,
     participantId: participant.id,
@@ -1054,6 +1054,12 @@ export async function maybeDispatchExecutorTask(
     callbackRef,
     initialDiffSummary: initialDiffSummary ?? null,
   });
+  return (
+    outcome ?? {
+      status: "dispatched",
+      participantId: participant.id,
+    }
+  );
 }
 
 /** 角色定向(R1)选出的目标成员及其执行器配置。 */

@@ -1,4 +1,5 @@
 export * from "./schema/coordination-payload.js";
+export * from "./schema/dispatch-intent.js";
 export * from "./schema/executor-config.js";
 export * from "./schema/group.js";
 export * from "./schema/group-message.js";
