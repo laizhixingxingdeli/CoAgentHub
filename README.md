@@ -13,9 +13,12 @@ task, split it by role, and leave a reviewable trail. It is not a chat room with
 bots in it: work moves through a fixed three-layer loop, and every layer has a
 different agent answering for it.
 
-> **No authentication.** Anyone who can reach the port can register a
-> participant and send messages. Run it on a LAN you trust; never expose it to
-> the public internet.
+> **No authentication.** Anyone who can reach the port can make this machine
+> run arbitrary programs: register executors with any `bin`/`args`/`env`
+> (auto-registers a participant), spawn processes that inherit the server's full
+> environment, write git refs under any `project_path`, and read/write disk via
+> `/api/file/*`. Run it on a LAN you trust; never expose it to the public
+> internet.
 
 ## The three-layer loop
 
