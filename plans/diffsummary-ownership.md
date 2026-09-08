@@ -73,8 +73,8 @@
 | 验收方法 | `cd packages/backend/server && npx vitest run test/diff-summary-merge.test.ts`（及若改了委托：`test/dispatchKindNote-preservation.test.ts`）。构造：所有者 `result` 写入 `{ summary }` 不得丢掉既有 `platform.resumeOf` / `dispatchKindNote` / `tokenUsage`；所有者 `scheduling` 写入新键 `queuedBlocked` 不得丢掉 `hash`；同所有者可覆盖自身键；`platform` 深合并保留 `resumeOf` 同时写入 `ownerServerPid`；显式 `null` 仅对**本所有者**键生效。 |
 | specRef | `specs/diffsummary-ownership.md` |
 | specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | _离线直调,无平台 task_;实现提交 `8813d929` |
+| 状态 | **done**(检视者 2026-09-09 L3 通过:纯新增 520 行/0 删除,未碰任何写路径,`0 failed | 15 passed (15)`;显式 null 作用域有专门用例) |
 
 ### W2 — 全部 diffSummary 写路径改接单一合并入口
 
