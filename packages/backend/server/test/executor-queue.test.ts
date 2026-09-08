@@ -1251,13 +1251,21 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     kill.mockRestore();
   }, 30_000);
 
-  it("静默超时:无输出的假 bin 超过 stall 阈值 → failed + ❌ 回传(原因含「静默」)", async () => {
+  // win32 skip: process.kill(-pid) 是 Unix 进程组语义;Windows 上 stall kill
+  // 杀不掉 sleep 子进程,任务一直 running —— 本机环境性,CI ubuntu 不出现。
+  it.skipIf(process.platform === "win32")(
+    "静默超时:无输出的假 bin 超过 stall 阈值 → failed + ❌ 回传(原因含「静默」)",
+    async () => {
     // 阈值调小(100ms)避免拖慢测试;假 bin 长睡 60s 零输出 → 静默超时杀进程。
+    // maxRetries=0:stall 失败默认可重试,policy maxRetries=3 时会连跑多次,
+    // 15s wait 会卡在中间一次 running 上(CI 34074787902 同类超时根因)。
     process.env.FAKE_SLEEP_SECS = "60";
-    const { __setReliabilityTimeoutsForTests } = await import(
-      "@server/lib/executor-task"
-    );
+    const {
+      __setReliabilityTimeoutsForTests,
+      __setMaxRetriesForTests,
+    } = await import("@server/lib/executor-task");
     __setReliabilityTimeoutsForTests(100, 100);
+    __setMaxRetriesForTests(0);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {
@@ -1285,13 +1293,19 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     }
   }, 30_000);
 
-  it("无进展提醒:静默超 alert 阈值 → ⚠️ 提醒消息 + diffSummary.stallAlerted 警示标记;继续静默到 stall 才 failed", async () => {
+  // win32 skip: 同静默超时 — stall 后半段依赖进程组 kill。
+  it.skipIf(process.platform === "win32")(
+    "无进展提醒:静默超 alert 阈值 → ⚠️ 提醒消息 + diffSummary.stallAlerted 警示标记;继续静默到 stall 才 failed",
+    async () => {
     // alert 阈值 100ms < stall 阈值 5s:先触发提醒(不失败),再静默超时失败。
+    // maxRetries=0:stall 默认可重试,maxRetries=3 时 5s×4 次 > 15s wait。
     process.env.FAKE_SLEEP_SECS = "60";
-    const { __setReliabilityTimeoutsForTests } = await import(
-      "@server/lib/executor-task"
-    );
+    const {
+      __setReliabilityTimeoutsForTests,
+      __setMaxRetriesForTests,
+    } = await import("@server/lib/executor-task");
     __setReliabilityTimeoutsForTests(5_000, 60_000, 100);
+    __setMaxRetriesForTests(0);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {
@@ -1342,13 +1356,15 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     // stall 阈值用 500ms(而非 200ms):macOS `sleep 0.05` 的实际间隔在
     // 0.01~0.2s 之间抖动,200ms 窗口在慢速/高负载机器上会偶发误杀,
     // 500ms 保留「总时长远超阈值 + 输出间隔远小于阈值 → 不误杀」的断言意图。
+    // claim 必须远大于 spawn 耗时:旧值 200ms 在 CI 负载下会在 running 之前
+    // 触发认领超时 → failed,把「不误杀」断言打成假失败(CI 34074787902)。
     process.env.FAKE_SLEEP_SECS = "";
     process.env.FAKE_OUTPUT_LOOPS = "40";
     process.env.FAKE_OUTPUT_INTERVAL_MS = "0.05";
     const { __setReliabilityTimeoutsForTests } = await import(
       "@server/lib/executor-task"
     );
-    __setReliabilityTimeoutsForTests(500, 200);
+    __setReliabilityTimeoutsForTests(500, 60_000);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {
@@ -1380,7 +1396,10 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     const { __setMaxParallelGroupsForTests, __setReliabilityTimeoutsForTests } =
       await import("@server/lib/executor-task");
     __setMaxParallelGroupsForTests(1); // 只剩一个槽位 → 第二个任务必须排队
-    __setReliabilityTimeoutsForTests(60_000, 100); // stall 放宽,claim 调小
+    // claim=2s:须大于「第一条 spawn→running」耗时(win32 sh.exe 冷启动可达
+    // 数百 ms;100ms 会把占位任务自己误杀),又须远小于占位任务总时长(~2s
+    // 持续输出)以便排队任务在占位结束前触发未认领。
+    __setReliabilityTimeoutsForTests(60_000, 2_000);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const m1 = await postMessage(coordinator.id, group.id, {
@@ -1420,11 +1439,13 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
   }, 30_000);
 
   it("已 running 的任务不受认领阈值影响(认领成功后取消认领计时)", async () => {
-    process.env.FAKE_SLEEP_SECS = "1"; // 跑 ~1s,远超 100ms 的 claim 阈值
+    process.env.FAKE_SLEEP_SECS = "2"; // 跑 ~2s,远超 claim 阈值
     const { __setReliabilityTimeoutsForTests } = await import(
       "@server/lib/executor-task"
     );
-    __setReliabilityTimeoutsForTests(60_000, 100); // claim 调小;stall 放宽避免误伤
+    // claim=500ms:大于 spawn 耗时(避免未 running 就被认领超时误杀),小于
+    // 总跑时 2s(进入 running 后取消计时,不应在剩余时间内被杀)。
+    __setReliabilityTimeoutsForTests(60_000, 500);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {
@@ -1595,6 +1616,13 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
     const counterFile = path.join(counterDir, "n.txt");
     process.env.FAKE_COUNTER_FILE = counterFile;
     process.env.FAKE_ALWAYS_FAIL = "1";
+    // pin maxRetries=1:本用例断言「重试一次仍失败」的路径与文案,与
+    // dispatch-policy.json 把默认提到 3 解耦(cwd 是 monorepo 根时读到 3,
+    // 是 packages/backend/server 时回落默认 1 —— 同一断言在两边会分叉)。
+    const { __setMaxRetriesForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxRetriesForTests(1);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
       const msg = await postMessage(coordinator.id, group.id, {

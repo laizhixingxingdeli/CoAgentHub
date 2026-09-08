@@ -571,6 +571,13 @@ describe("任务面板增强批次 server 侧测试", () => {
 
     it("失败路径保留最近 500 行输出到 diffSummary.outputTail", async () => {
       const { coordinator, codebuddy, group } = await setupGroup();
+      // 60 行 × sleep 0.1s ≈ 6s/次;maxRetries=3 时总时长 > 15s 用例超时
+      // (CI 34074787902)。本用例只断言 outputTail 落库,与重试次数无关 →
+      // pin maxRetries=0,失败一次即终态。
+      const { __setMaxRetriesForTests } = await import(
+        "@server/lib/executor-task"
+      );
+      __setMaxRetriesForTests(0);
       process.env.FAKE_LINES = Array.from(
         { length: 60 },
         (_, i) => `fail-line-${i + 1}`,

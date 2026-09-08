@@ -44,11 +44,14 @@ export default defineConfig({
   globalTeardown: "./e2e/global-teardown.ts",
   webServer: [
     {
-      command: "node dist/server.mjs",
+      // Playwright starts webServer during plugin setup, which runs BEFORE
+      // globalSetup. Bootstrap the e2e DB here so server.mjs does not connect
+      // to a missing coagenthub_e2e (CI failure 34074787902).
+      command: "node ../../../e2e/ensure-db.mjs && node dist/server.mjs",
       cwd: "./packages/backend/server",
       url: `http://localhost:${SERVER_PORT}/api/system/health`,
       reuseExistingServer: false,
-      timeout: 60_000,
+      timeout: 120_000,
       env: {
         ...process.env,
         PORT: String(SERVER_PORT),

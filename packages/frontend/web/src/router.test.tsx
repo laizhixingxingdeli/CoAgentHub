@@ -1,10 +1,11 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createFetchMock,
   jsonResponse,
   renderWithProviders,
 } from "@/test/utils";
+import { MockWebSocket } from "@/test/ws-mock";
 import App from "./router";
 
 function routerFetchMock() {
@@ -47,6 +48,13 @@ function routerFetchMock() {
     },
   ]);
 }
+
+beforeEach(() => {
+  // GroupLayout → useMessagesPage → useGroupWs 会 new WebSocket;/groups/:id
+  // 路径若无 mock,jsdom 的 WS 实现各版本行为不一,标题拉取可能被错误打断。
+  MockWebSocket.reset();
+  vi.stubGlobal("WebSocket", MockWebSocket);
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -91,12 +99,15 @@ describe("路由", () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
-    // 群标题(来自 GET /api/groups/:id)。
-    expect(await screen.findByText("群组消息流")).toBeInTheDocument();
-    // 主区:需求工作区(无任务 → TaskPanel 空态)。
+    // 主区先就绪(lazy + Suspense);标题栏异步 GET /api/groups/:id。
+    // 用 testid 等标题栏出现,再断言 mock 的 title —— 比裸 findByText 更稳
+    // (CI 曾因标题还是 fallback「群组消息」而找不到「群组消息流」)。
     expect(
       await screen.findByTestId("requirement-workspace"),
     ).toBeInTheDocument();
+    expect(await screen.findByTestId("group-title-bar")).toHaveTextContent(
+      "群组消息流",
+    );
     expect(screen.getByTestId("open-group-settings")).toBeInTheDocument();
   });
 

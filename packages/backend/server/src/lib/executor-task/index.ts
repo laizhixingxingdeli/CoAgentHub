@@ -139,6 +139,7 @@ export {
   __setL3ResponseMinutesForTests,
   __setMaxConcurrentPerWorkspaceForTests,
   __setMaxParallelGroupsForTests,
+  __setMaxRetriesForTests,
   __setRateLimitForTests,
   __setReliabilityTimeoutsForTests,
   activeExecutorTaskCount,

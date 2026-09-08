@@ -1121,8 +1121,13 @@ describe("Durable Task Completion Events", () => {
 
     it("scheduler 最终失败(failed,自动重试后仍失败):一个 event", async () => {
       const { coordinator, codebuddy, group } = await setupGroup("path-failed");
-      // 失败模式:FAKE_ALWAYS_FAIL=1 时 fake bin 直接 exit 1;重试(maxRetries=1)
-      // 期间仍置位 → 最终 failed(retryCount=1)。
+      // 失败模式:FAKE_ALWAYS_FAIL=1 时 fake bin 直接 exit 1;pin maxRetries=1
+      // 期间仍置位 → 最终 failed(retryCount=1)。与 dispatch-policy 默认 3 解耦
+      // (CI monorepo 根 cwd 读到 3 时旧断言会等到 failed/3 超时)。
+      const { __setMaxRetriesForTests } = await import(
+        "@server/lib/executor-task"
+      );
+      __setMaxRetriesForTests(1);
       process.env.FAKE_ALWAYS_FAIL = "1";
       const { res, json: msg } = await postMessage(coordinator.id, group.id, {
         body: "最终失败路径",

@@ -736,6 +736,20 @@ export function __setL3ResponseMinutesForTests(minutes: number): void {
 }
 
 /**
+ * 测试专用:覆盖自动重试次数上限(默认读 scripts/dispatch-policy.json)。
+ *
+ * 静默/认领等「断言第一次终态」的用例必须 pin 为 0 或 1:policy 把
+ * maxRetries 提到 3 后,可重试的失败(含 stall)会连跑多次,15s 级 wait
+ * 会在中间一次 running 上超时,看起来像「信号永远不来」。
+ */
+export function __setMaxRetriesForTests(n: number): void {
+  retryPolicy = {
+    ...retryPolicy,
+    maxRetries: Math.max(0, Math.floor(n)),
+  };
+}
+
+/**
  * 测试专用:覆盖额度配置(关键词 + 冷却时长,单位 ms——与配置的分钟单位解耦,
  * 测试用 100ms~1s 级小阈值验证冷却拦截与自动恢复,避免拖慢测试)。
  */
