@@ -1,8 +1,41 @@
 # Spec: Callback Agent 的环境白名单名不副实,且命令默认超时长于租约
 
-> **状态**: Frozen
+> **状态**: Landed(`8f9cd9a6`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - 基线自行复跑:**`0 failed | 32 passed (32)`**,与汇报一致;
+>   改前 `7 failed | 17 passed (24)`。
+> - **两条「改前红」都给了实测探针输出**:
+>   ```
+>   PROBE1_ENV_SENTINEL LEAKED {"has":"r9-should-not-leak"}   ← 哨兵确实泄漏
+>   PROBE2_DUAL_COUNT 2 p2_processed 1 claims 2                ← 命令确实启动了两次
+>   ```
+>   第二条用 `leaseMs=400` + `timeoutMs=5000` + sleep 1.5s + 双消费者构造,
+>   `claim=2` —— 缺陷本体被复现了。
+> - **反向注释已删**,改后的注释与实现一致:
+>   「spawn() is never called with `env: undefined`, so the parent process env
+>   is never inherited wholesale」。
+> - **默认值自洽**:`leaseMs` 90000 > `defaultTimeoutMs` 60000;
+>   旧的 `30s lease / 60s timeout` 组合现在**拒绝启动**。
+> - 提交边界:11 个文件**全在 `packages/callback-agent` 内**,未越界到服务端。
+>
+> **⚠️ 检视者 spec 里的一处判断被驳回,驳回成立**:
+> §3 R3 写「**(b) 更简单,(a) 更实用**」。
+> 执行者指出:**在当前 API 面下 (a) 根本做不成** ——
+> 服务端只有 list / claim / ack / fail,**没有 renew 端点**,
+> 而本票明令不得改这些端点。
+> 检视者复核端点清单后确认:**(a) 不可行,不是「不够简单」**。
+> 若将来要支持长命令,需要**单独一张 renew 契约票**。
+>
+> **顺带发现并修掉的真实缺陷(未要求)**:
+> `defaultTimeoutMs` 写在配置里但**从未接到 `executeCommand`** ——
+> 也就是说这个配置项此前完全无效。本次一并接上。
+>
+> **必要的范围外改动(检视者认可)**:一并修了 Windows 上的 timeout kill
+> (shebang `EFTYPE` + `taskkill`)。理由成立:强制 `timeout < lease` 的前提是
+> **超时真能杀掉命令**,而 Windows 上这条路原本是断的。仍在本包内。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §4 **R9**
 > **前置决策(用户 2026-09-07 已拍板)**:环境继承为**显式白名单**,
 > 不是默认允许。R9 原文把这个列为需先决策项 —— 决策已做出。
