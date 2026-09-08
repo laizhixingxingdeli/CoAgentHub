@@ -3,12 +3,14 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 瞬时限流走 per-run 退避、不进执行器级冷却
@@ -31,9 +33,9 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-transient-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 瞬时限流(分级应判 transient):短相对恢复提示 + 提供方限流行形状。
@@ -53,7 +55,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 // 执行超时分支的阈值(EXECUTOR_TIMEOUT_MS 在 spawn 时读取)。
 process.env.EXECUTOR_TIMEOUT_MS = "2000";
@@ -90,6 +94,19 @@ const ESCALATION_LIMIT = 3;
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    const [row] = await testDb
+      .select()
+      .from(executorConfigTable)
+      .where(eq(executorConfigTable.key, "codebuddy"));
+    if (row) {
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, "codebuddy"));
+    }
+  }
 });
 
 describe("瞬时限流走 per-run 退避,不进执行器级冷却", () => {

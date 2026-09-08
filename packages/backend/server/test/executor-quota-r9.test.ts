@@ -2,13 +2,16 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { seedBuiltinExecutorConfigs } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-r9-bin-"));
-const fakeBin = path.join(fakeDir, "fake-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_COUNTER_FILE" ]; then n=0; if [ -f "$FAKE_COUNTER_FILE" ]; then n=$(cat "$FAKE_COUNTER_FILE"); fi; n=$((n + 1)); echo "$n" > "$FAKE_COUNTER_FILE"; fi',
@@ -25,7 +28,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 
 const repoDir = mkdtempSync(path.join(tmpdir(), "coagenthub-r9-repo-"));
 execFileSync("git", ["init", "-q"], { cwd: repoDir });
@@ -49,6 +54,19 @@ describe("R9 quota-failure-on-clean-exit", () => {
     process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
     process.env.COAGENTHUB_REPO_ROOT = repoDir;
     await seedBuiltinExecutorConfigs();
+    // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+    if (fakeArgsPrefix.length > 0) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, "codebuddy"));
+      if (row) {
+        await testDb
+          .update(executorConfigTable)
+          .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+          .where(eq(executorConfigTable.key, "codebuddy"));
+      }
+    }
   });
   beforeEach(() => { __resetExecutorQueueForTests(); });
   afterAll(() => {

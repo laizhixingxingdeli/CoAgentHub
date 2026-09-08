@@ -5,6 +5,7 @@ import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -20,6 +21,7 @@ import {
   vi,
 } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry.md):
@@ -37,9 +39,9 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-quota-bin-"));
-const fakeBin = path.join(fakeDir, "fake-executor.sh");
+const fakeScript = path.join(fakeDir, "fake-executor.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 额度失败模式:打印 usage limit + 恢复时刻后 exit 1(quota-exhaustion R1)。
@@ -58,7 +60,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
@@ -88,6 +92,20 @@ const { parseRateLimitRecoveryMs } = await import("@server/lib/executors");
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-infinite-retry)", () => {

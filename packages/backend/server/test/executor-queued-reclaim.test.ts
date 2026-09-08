@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
   groups as groupsTable,
@@ -36,6 +37,7 @@ import {
   executorCooldowns,
 } from "../src/lib/executor-task/state";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * queued 任务周期兜底(specs/queued-task-never-picked-up-after-chain-failure.md
@@ -56,9 +58,9 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-queued-reclaim-"));
-const fakeBin = path.join(fakeDir, "fake-exec.sh");
+const fakeScript = path.join(fakeDir, "fake-exec.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_SLEEP_SECS" ]; then sleep "$FAKE_SLEEP_SECS"; fi',
@@ -67,7 +69,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 // 执行器进程保持存活 3s:槽位占用/并发判定在测试内可稳定观察。
 process.env.FAKE_SLEEP_SECS = "3";
@@ -89,6 +93,19 @@ type Task = typeof taskTable.$inferSelect;
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    const [row] = await testDb
+      .select()
+      .from(executorConfigTable)
+      .where(eq(executorConfigTable.key, "codebuddy"));
+    if (row) {
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, "codebuddy"));
+    }
+  }
 });
 
 beforeEach(async () => {
