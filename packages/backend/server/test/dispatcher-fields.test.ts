@@ -344,7 +344,11 @@ describe("任务下发者信息(Part A):metadata.dispatcherSessionId 记录与�
       audienceRef: reviewer.id,
     });
     expect(res.status).toBe(200);
-    // isExecutorTarget 为假:reviewer 不对应执行器配置 → 不创建 task。
+    // 群内角色含 reviewer → 不创建 task,并给出可见 warning
+    // (dispatch-must-not-spawn-the-reviewer),即便无执行器配置也一致。
+    expect(res.headers.get("X-CoAgentHub-Warning") ?? "").toContain(
+      "REVIEWER_TARGET_NOT_DISPATCHABLE",
+    );
     await new Promise((r) => setTimeout(r, 500));
     const tasks = await listTasks(group.id);
     expect(tasks.some((t) => t.messageId === json.id)).toBe(false);

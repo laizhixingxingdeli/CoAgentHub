@@ -17,6 +17,7 @@ import type { DataBase } from "@server/lib/database";
 import {
   DISPATCH_ALLOWED_ROLES,
   inferSupersedesTaskId,
+  isReviewerNotDispatchableTarget,
   maybeDispatchExecutorTask,
   refreshA2AActivity,
 } from "@server/lib/executor-task";
@@ -534,6 +535,20 @@ app
           isControlCommand(body ?? "") &&
           (isRoleDispatch ||
             !(await isExecutorTaskTarget(db, audienceRef, id)));
+        // 检视者不可被派发(dispatch-must-not-spawn-the-reviewer R1–R3):
+        // 群内角色含 reviewer → 不建任务、不 spawn;消息已写入,响应头给
+        // 可见 warning(不得静默跳过)。判据在 isReviewerNotDispatchableTarget
+        // (group_members.roles),与派发层共用同一出处(ADR-0009)。
+        const skipDispatchForReviewerTarget =
+          await isReviewerNotDispatchableTarget(
+            db,
+            id,
+            isRoleDispatch ? "role" : "participant",
+            audienceRef,
+          );
+        if (skipDispatchForReviewerTarget) {
+          warnings.push("REVIEWER_TARGET_NOT_DISPATCHABLE");
+        }
         // 任务下发者信息(Part A)+ callback 路由(Part B)共用权限判定:仅
         // coordinator/human/reviewer(群内角色)的发送者可携带;执行器/observer
         // 伪造一律丢弃。下发权只由群内角色裁定(spec R3 / ADR-0008 第三条),
@@ -549,9 +564,11 @@ app
         if (
           isExecutorTarget &&
           !specHash?.trim() &&
-          !skipDispatchForControlCommand
+          !skipDispatchForControlCommand &&
+          !skipDispatchForReviewerTarget
         ) {
-          // 跳过派发的控制指令不产生「将建任务却缺 specHash」的警告(任务根本不会建)。
+          // 跳过派发的控制指令/检视者目标不产生「将建任务却缺 specHash」的警告
+          // (任务根本不会建)。
           warnings.push("SPEC_HASH_MISSING");
         }
         // 首次任务初始化检查(项目脚手架):当消息触发任务(即即将调用
@@ -603,9 +620,12 @@ app
           initialDiffSummary,
         };
         // 控制通道已执行的控制指令跳过派发(判定见 skipDispatchForControlCommand
-        // 注释);participant 定向执行器与 broadcast 的行为均不受影响。
+        // 注释);检视者目标跳过派发(判定见 skipDispatchForReviewerTarget);
+        // participant 定向执行器与 broadcast 的行为均不受影响。
         if (skipDispatchForControlCommand) {
           warnings.push("CONTROL_COMMAND_SKIPPED_DISPATCH");
+        } else if (skipDispatchForReviewerTarget) {
+          // warning 已入列;消息正常写入,不建任务、不 spawn。
         } else {
           // participant 定向保持 fire-and-forget(行为不变);角色定向等待派发
           // 结果,把「角色无匹配/非法」变成响应头里的可见信号(不静默跳过,
@@ -624,6 +644,11 @@ app
               );
             } else if (outcome?.status === "redispatch-stopped") {
               warnings.push(`REDISPATCH_STOPPED:${outcome.parentTaskId}`);
+            } else if (outcome?.status === "reviewer-not-dispatchable") {
+              // 派发层第二道闸(消息层已拦,正常不会到这里);补 warning 防漏。
+              if (!warnings.includes("REVIEWER_TARGET_NOT_DISPATCHABLE")) {
+                warnings.push("REVIEWER_TARGET_NOT_DISPATCHABLE");
+              }
             }
           } else {
             void maybeDispatchExecutorTask(db, dispatchInput).catch((err) =>

@@ -397,6 +397,128 @@ describe("server 内嵌执行器触发链路(票1)", () => {
     expect(tasks).toHaveLength(0);
   });
 
+  /**
+   * specs/dispatch-must-not-spawn-the-reviewer.md 核心验收:
+   * 群内角色为 reviewer 的 participant,即使有执行器配置,定向消息也不建
+   * 任务、不 spawn;消息正常写入;响应头带 REVIEWER_TARGET_NOT_DISPATCHABLE。
+   */
+  it("定向到有执行器配置的 reviewer → 不建任务 + warning(dispatch-must-not-spawn-the-reviewer)", async () => {
+    const { coordinator, group } = await setupGroup();
+    const reviewer = await registerParticipant({
+      name: `reviewer-with-exec-${uuidv4().slice(0, 8)}`,
+    });
+    // 模拟本机 claude:群内仅 reviewer 角色,但绑定了已 seed 的执行器配置
+    // (codex)。用已缓存的 key,避免 ensureExecutorConfig 直插 DB 不失效
+    // effectiveExecutors 短缓存而让 findExecutorByParticipant 漏命中。
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: null })
+      .where(eq(participantTable.executorKey, "codex"));
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: "codex" })
+      .where(eq(participantTable.id, reviewer.id));
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+
+    const tasksBefore = await listTasks(coordinator.id, group.id);
+    const messagesBefore = await listMessages(coordinator.id, group.id);
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        body: "已交回 L3 完整档,请查收 review_request",
+        audience: "participant",
+        audienceRef: reviewer.id,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { id: string };
+    const warning = res.headers.get("X-CoAgentHub-Warning") ?? "";
+    expect(warning).toContain("REVIEWER_TARGET_NOT_DISPATCHABLE");
+
+    // 消息正常写入(+1);任务行数不变(不建任务、不 spawn)。
+    await new Promise((r) => setTimeout(r, 500));
+    const tasksAfter = await listTasks(coordinator.id, group.id);
+    const messagesAfter = await listMessages(coordinator.id, group.id);
+    expect(tasksAfter).toHaveLength(tasksBefore.length);
+    expect(tasksAfter.some((t) => t.messageId === json.id)).toBe(false);
+    expect(messagesAfter.length).toBe(messagesBefore.length + 1);
+    expect(messagesAfter.some((m) => m.id === json.id)).toBe(true);
+  });
+
+  it("audience=role + reviewer → 不建任务 + warning(dispatch-must-not-spawn-the-reviewer)", async () => {
+    const { coordinator, group } = await setupGroup();
+    const reviewer = await registerParticipant({
+      name: `role-reviewer-${uuidv4().slice(0, 8)}`,
+    });
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: null })
+      .where(eq(participantTable.executorKey, "codex"));
+    await testDb
+      .update(participantTable)
+      .set({ executorKey: "codex" })
+      .where(eq(participantTable.id, reviewer.id));
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+
+    const tasksBefore = await listTasks(coordinator.id, group.id);
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        body: "角色定向给检视者",
+        audience: "role",
+        audienceRef: "reviewer",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { id: string };
+    expect(res.headers.get("X-CoAgentHub-Warning") ?? "").toContain(
+      "REVIEWER_TARGET_NOT_DISPATCHABLE",
+    );
+
+    await new Promise((r) => setTimeout(r, 500));
+    const tasksAfter = await listTasks(coordinator.id, group.id);
+    expect(tasksAfter).toHaveLength(tasksBefore.length);
+    expect(tasksAfter.some((t) => t.messageId === json.id)).toBe(false);
+  });
+
+  it("无执行器配置的 reviewer 定向 → 仍不建任务 + warning,不产生新错误", async () => {
+    const { coordinator, group } = await setupGroup();
+    const reviewer = await registerParticipant({
+      name: `plain-reviewer-${uuidv4().slice(0, 8)}`,
+    });
+    await addMember(coordinator.id, group.id, reviewer.id, ["reviewer"]);
+
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        body: "给无配置检视者的说明",
+        audience: "participant",
+        audienceRef: reviewer.id,
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-CoAgentHub-Warning") ?? "").toContain(
+      "REVIEWER_TARGET_NOT_DISPATCHABLE",
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    const tasks = await listTasks(coordinator.id, group.id);
+    expect(tasks).toHaveLength(0);
+  });
+
   it("非协调者定向消息给执行器 → 403,且不产生群消息和任务", async () => {
     const { coordinator, codebuddy, group } = await setupGroup();
     const observer = await registerParticipant({ name: "exec-observer" });

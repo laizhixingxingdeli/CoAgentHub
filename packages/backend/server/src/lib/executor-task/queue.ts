@@ -881,6 +881,30 @@ export async function cancelRunningTasks(
  * audience=role(角色定向)时按 R1 解析本群目标成员后走同一流程,失败返回
  * DispatchOutcome 供调用方发出可见信号(R3,不静默跳过)。
  */
+/**
+ * 目标不可被派发的守卫(specs/dispatch-must-not-spawn-the-reviewer.md R1–R3):
+ *  - audience=role 且 audienceRef=reviewer → 整类目标不可派;
+ *  - audience=participant 且该成员在本群 roles 含 reviewer → 不可派
+ *    (即便同时持有 executor / 即便有执行器配置)。
+ * 判据唯一出处:group_members.roles(不是执行器配置、不是名字)。
+ */
+export async function isReviewerNotDispatchableTarget(
+  db: DataBase,
+  groupId: string,
+  audience: "participant" | "role",
+  audienceRef: string,
+): Promise<boolean> {
+  if (audience === "role") {
+    return audienceRef === "reviewer";
+  }
+  const membership = await db.query.groupMember.findFirst({
+    where: (t, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, audienceRef)),
+    columns: { roles: true },
+  });
+  return membership?.roles.includes("reviewer") ?? false;
+}
+
 export async function maybeDispatchExecutorTask(
   db: DataBase,
   input: DispatchExecutorInput,
@@ -915,11 +939,29 @@ export async function maybeDispatchExecutorTask(
     return;
   }
 
+  // 检视者不可被派发(dispatch-must-not-spawn-the-reviewer):无论是否有执行器
+  // 配置、无论 audience 是 participant 还是 role。消息路由层也会拦,这里是
+  // 派发层第二道闸,避免其它入口漏过。
+  const dispatchAudience = audience ?? "participant";
+  if (
+    await isReviewerNotDispatchableTarget(
+      db,
+      groupId,
+      dispatchAudience,
+      audienceRef,
+    )
+  ) {
+    console.log(
+      `[executor] 跳过:目标为 reviewer(audience=${dispatchAudience},ref=${audienceRef}),不可派发`,
+    );
+    return { status: "reviewer-not-dispatchable" };
+  }
+
   // R1:audience=role → 按角色解析本群目标成员,其余流程(建任务、任务书、
   // spawn)与 participant 定向完全一致。
   // R5:平台按角色选出的是**接收这张协调任务的协调者**,不是 L1 执行器 ——
   // 协调者收到后仍应按协调者 skill §2.2 自行挑选执行器下发 L1,平台不代劳。
-  if ((audience ?? "participant") === "role") {
+  if (dispatchAudience === "role") {
     const resolved = await resolveRoleTarget(db, groupId, audienceRef);
     if (resolved.status !== "ok") {
       console.error(
@@ -1050,6 +1092,9 @@ async function resolveRoleTarget(
   }
   let fallback: ResolvedRoleTarget | null = null;
   for (const membership of members) {
+    // 多角色组合:roles 含 reviewer 即以不可派发为准
+    // (dispatch-must-not-spawn-the-reviewer R3),宁可少派一次。
+    if (membership.roles.includes("reviewer")) continue;
     const participant = await db.query.participant.findFirst({
       where: (t, { eq: eqFn }) => eqFn(t.id, membership.participantId),
     });

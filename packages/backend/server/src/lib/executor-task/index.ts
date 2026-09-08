@@ -87,6 +87,7 @@ export {
   isConcurrencyConflict,
   isCoordinatorTask,
   isExecutorProcessAlive,
+  isReviewerNotDispatchableTarget,
   liveStreamText,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,

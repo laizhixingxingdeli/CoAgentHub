@@ -76,7 +76,9 @@ export type DispatchOutcome =
       status: "role-unresolved";
       reason: "role-not-legal" | "role-no-member" | "role-no-executor";
       role: string;
-    };
+    }
+  /** 目标群内角色含 reviewer → 不可派发(dispatch-must-not-spawn-the-reviewer)。 */
+  | { status: "reviewer-not-dispatchable" };
 
 /** 队列条目:一次待执行/执行中的运行。 */
 export interface QueuedRun {
