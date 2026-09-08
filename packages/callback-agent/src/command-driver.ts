@@ -22,6 +22,82 @@ export interface CommandDriverContext {
 }
 
 /**
+ * Hardcoded minimal env keys copied from the parent when present.
+ * This list is intentionally NOT configurable — a config knob would re-open
+ * unrestricted inheritance. Each key is required for a bare executable to run:
+ *
+ * - PATH: locate the executable and shared dynamic loaders
+ * - HOME: Unix tools resolve user dirs / config (~)
+ * - USERPROFILE, HOMEDRIVE, HOMEPATH: Windows home equivalents
+ * - SYSTEMROOT / WINDIR: Windows native image loader and system DLLs
+ * - TEMP / TMP: scratch dirs used by runtimes and CLIs
+ * - LANG / LC_ALL / LC_CTYPE: locale for CLI message/encoding behavior
+ * - PATHEXT: Windows executable-extension resolution
+ * - COMSPEC: Windows occasionally needed by native tooling
+ */
+export const MINIMAL_CHILD_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "SYSTEMROOT",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "PATHEXT",
+  "COMSPEC",
+] as const;
+
+/**
+ * Build the child process env as an explicit allowlist (never `undefined`,
+ * which would make Node inherit the full parent env including secrets).
+ *
+ * Layers (later wins):
+ * 1. Hardcoded minimal set from the parent (see MINIMAL_CHILD_ENV_KEYS)
+ * 2. `inheritEnv` — named keys copied from the parent when present
+ * 3. `env` — explicit key/value pairs from local static config
+ */
+export function buildChildEnv(
+  driverEnv?: Record<string, string>,
+  inheritEnv?: string[],
+): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  for (const key of MINIMAL_CHILD_ENV_KEYS) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+
+  // Windows stores env names case-insensitively; Node may expose "Path".
+  // Ensure the child always sees a canonical PATH when any variant exists.
+  if (env.PATH === undefined && process.env.Path !== undefined) {
+    env.PATH = process.env.Path;
+  }
+  if (env.SYSTEMROOT === undefined && process.env.SystemRoot !== undefined) {
+    env.SYSTEMROOT = process.env.SystemRoot;
+  }
+
+  if (inheritEnv) {
+    for (const key of inheritEnv) {
+      const val = process.env[key];
+      if (val !== undefined) env[key] = val;
+    }
+  }
+
+  if (driverEnv) {
+    for (const [key, value] of Object.entries(driverEnv)) {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
+/**
  * Execute a command driver for a completion event.
  *
  * SAFETY INVARIANTS:
@@ -30,7 +106,9 @@ export interface CommandDriverContext {
  * - Event content (even shell metacharacters) is only ever passed as a single
  *   argument or written to an event file — never string-interpolated into a command
  * - Mixed placeholders in a single argument are rejected by config validation
- * - Environment variables are explicitly allowlisted — secrets are not inherited
+ * - Child env is an explicit allowlist (minimal hardcoded set + optional
+ *   inheritEnv names + optional env key/values). spawn() is never called with
+ *   env: undefined, so the parent process env is never inherited wholesale.
  */
 export async function executeCommand(
   driver: CommandDriver,
@@ -44,8 +122,8 @@ export async function executeCommand(
     resolvePlaceholder(arg, message, eventFilePath, sessionRef),
   );
 
-  // Build environment: explicit allowlist only, no secret inheritance
-  const env = driver.env ? { ...driver.env } : undefined;
+  // Explicit allowlist only — never pass undefined (Node would inherit all secrets).
+  const env = buildChildEnv(driver.env, driver.inheritEnv);
 
   const timeoutMs = driver.timeoutMs ?? 60_000;
 
@@ -71,14 +149,7 @@ export async function executeCommand(
 
     const timer = setTimeout(() => {
       killed = true;
-      try {
-        // Kill the entire process group
-        if (child.pid) {
-          process.kill(-child.pid, "SIGKILL");
-        }
-      } catch {
-        // Child already exited
-      }
+      killChildTree(child);
     }, timeoutMs);
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -154,6 +225,39 @@ export function createEventFile(event: CompletionEvent): string {
 export function truncate(str: string, maxChars = 2000): string {
   if (str.length <= maxChars) return str;
   return `${str.slice(0, maxChars)}... [truncated, ${str.length} chars total]`;
+}
+
+/**
+ * Kill a spawned child (and its tree). Unix uses the negative-pid process-group
+ * form from `detached: true`; Windows has no POSIX process groups, so we use
+ * `taskkill /T` and fall back to `child.kill()`.
+ */
+function killChildTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  try {
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+        shell: false,
+      });
+      killer.on("error", () => {
+        try {
+          child.kill();
+        } catch {
+          // already exited
+        }
+      });
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Child already exited
+    }
+  }
 }
 
 /** Error class for command driver failures. */

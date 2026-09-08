@@ -11,11 +11,13 @@ import type {
   CompletionEvent,
   InboxItem,
 } from "./config.js";
+import { parseCallbackAgentConfig } from "./config.js";
 import { DedupeStore } from "./dedupe.js";
 import type { Logger } from "./logger.js";
 
 export interface CallbackAgentOptions {
-  config: CallbackAgentConfig;
+  /** Raw or already-parsed config; always re-validated (timeout < lease). */
+  config: CallbackAgentConfig | Record<string, unknown>;
   dedupeStore?: DedupeStore;
   apiClient?: CompletionEventClient;
   logger?: Logger;
@@ -46,7 +48,8 @@ export class CallbackAgent {
   private state: AgentState = "idle";
 
   constructor(options: CallbackAgentOptions) {
-    this.config = options.config;
+    // Enforce timeout < lease even for library callers (not only CLI).
+    this.config = parseCallbackAgentConfig(options.config);
     this.client =
       options.apiClient ??
       new CompletionEventClient(this.config.apiBase, this.config.participantId);
@@ -238,8 +241,15 @@ export class CallbackAgent {
     const eventFilePath = createEventFile(event);
     const sessionRef = event.callbackRef?.sessionRef;
 
+    // Apply agent-level defaultTimeoutMs when the driver omits timeoutMs.
+    // Config validation already guarantees the effective timeout is < leaseMs.
+    const effectiveDriver: CommandDriver = {
+      ...driver,
+      timeoutMs: driver.timeoutMs ?? this.config.defaultTimeoutMs,
+    };
+
     try {
-      const result = await executeCommand(driver, {
+      const result = await executeCommand(effectiveDriver, {
         event,
         eventFilePath,
         sessionRef,
@@ -248,7 +258,7 @@ export class CallbackAgent {
       if (result.timedOut) {
         return {
           success: false,
-          error: `command timed out after ${driver.timeoutMs ?? 60_000}ms`,
+          error: `command timed out after ${effectiveDriver.timeoutMs}ms`,
         };
       }
       if (result.exitCode !== 0) {

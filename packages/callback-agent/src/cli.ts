@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CallbackAgent } from "./callback-agent.js";
-import { CallbackAgentConfigSchema } from "./config.js";
+import { parseCallbackAgentConfig } from "./config.js";
 import { DedupeStore } from "./dedupe.js";
 import type { Logger } from "./logger.js";
 
@@ -91,12 +91,13 @@ function loadConfig(configPath: string) {
     console.error(`Invalid JSON in ${absPath}: ${err}`);
     process.exit(1);
   }
-  const result = CallbackAgentConfigSchema.safeParse(parsed);
-  if (!result.success) {
-    console.error(`Config validation failed:\n${result.error.message}`);
+  try {
+    return parseCallbackAgentConfig(parsed);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Config validation failed:\n${message}`);
     process.exit(1);
   }
-  return result.data;
 }
 
 function createLogger(level: "info" | "warn" | "error"): Logger {

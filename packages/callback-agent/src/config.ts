@@ -81,6 +81,11 @@ export const CommandArgSchema = z.custom<string>(
 /**
  * Command driver configuration — static executable + args + optional env.
  * executable MUST be an absolute path.
+ *
+ * Env is an explicit allowlist (see buildChildEnv):
+ * - `inheritEnv`: names copied from the parent process when present
+ * - `env`: explicit key/value pairs (override inheritEnv / minimal set)
+ * Unmentioned parent vars are never passed to the child.
  */
 export const CommandDriverSchema = z.object({
   driver: z.literal("command"),
@@ -95,6 +100,8 @@ export const CommandDriverSchema = z.object({
     ),
   args: z.array(CommandArgSchema).default([]),
   env: z.record(z.string()).optional(),
+  /** Parent-env key names to copy into the child (allowlist, not a blacklist). */
+  inheritEnv: z.array(z.string().min(1)).optional(),
   timeoutMs: z.number().int().positive().optional(),
   eventFile: z.boolean().optional(),
 });
@@ -114,17 +121,51 @@ export type EndpointConfig = z.infer<typeof EndpointConfigSchema>;
 
 /**
  * Root configuration schema for the callback-agent.
+ *
+ * Lease/timeout invariant (option b): defaultTimeoutMs and every per-driver
+ * timeoutMs must be strictly less than leaseMs, so a command is killed before
+ * its lease can expire and another consumer can re-claim the same event.
+ * Defaults are self-consistent: leaseMs=90s > defaultTimeoutMs=60s.
  */
-export const CallbackAgentConfigSchema = z.object({
-  apiBase: z.string().url(),
-  participantId: z.string().uuid(),
-  consumerId: z.string().min(1).max(200),
-  pollIntervalMs: z.number().int().positive().default(5000),
-  leaseMs: z.number().int().min(1000).default(30000),
-  defaultTimeoutMs: z.number().int().positive().default(60000).optional(),
-  endpoints: z.record(EndpointConfigSchema),
-});
+export const CallbackAgentConfigSchema = z
+  .object({
+    apiBase: z.string().url(),
+    participantId: z.string().uuid(),
+    consumerId: z.string().min(1).max(200),
+    pollIntervalMs: z.number().int().positive().default(5000),
+    leaseMs: z.number().int().min(1000).default(90_000),
+    defaultTimeoutMs: z.number().int().positive().default(60_000),
+    endpoints: z.record(EndpointConfigSchema),
+  })
+  .superRefine((cfg, ctx) => {
+    if (cfg.defaultTimeoutMs >= cfg.leaseMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["defaultTimeoutMs"],
+        message: `defaultTimeoutMs (${cfg.defaultTimeoutMs}) must be < leaseMs (${cfg.leaseMs}) so a command cannot outlive its lease and be re-claimed by another consumer`,
+      });
+    }
+    for (const [ref, ep] of Object.entries(cfg.endpoints)) {
+      const t = ep.driver.timeoutMs;
+      if (t !== undefined && t >= cfg.leaseMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["endpoints", ref, "driver", "timeoutMs"],
+          message: `endpoints.${ref}.driver.timeoutMs (${t}) must be < leaseMs (${cfg.leaseMs}) so a command cannot outlive its lease and be re-claimed by another consumer`,
+        });
+      }
+    }
+  });
 
 export type CallbackAgentConfig = z.infer<typeof CallbackAgentConfigSchema>;
+
+/**
+ * Parse and enforce the callback-agent config contract (including the
+ * timeout < lease invariant). Used by the CLI and by CallbackAgent so library
+ * callers cannot bypass the guard with a raw object.
+ */
+export function parseCallbackAgentConfig(input: unknown): CallbackAgentConfig {
+  return CallbackAgentConfigSchema.parse(input);
+}
 
 export { PLACEHOLDER_PATTERN };

@@ -106,13 +106,22 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
-              executable: fakeBin.path,
-              args: ["exec", "resume", "--json", "{sessionRef}", "{message}"],
+              // node + script: shebang bins hit EFTYPE on Windows
+              executable: process.execPath,
+              args: [
+                fakeBin.path,
+                "exec",
+                "resume",
+                "--json",
+                "{sessionRef}",
+                "{message}",
+              ],
             },
           },
         },
@@ -164,13 +173,14 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "consumer-1",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
-              executable: fakeBin.path,
-              args: ["{message}"],
+              executable: process.execPath,
+              args: [fakeBin.path, "{message}"],
             },
           },
         },
@@ -184,13 +194,14 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "consumer-2",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
-              executable: fakeBin.path,
-              args: ["{message}"],
+              executable: process.execPath,
+              args: [fakeBin.path, "{message}"],
             },
           },
         },
@@ -230,13 +241,17 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 200,
+        // Short lease so the crashed agent's lease expires before restart.
+        // timeout must stay < lease (startup invariant).
+        leaseMs: 1000,
+        defaultTimeoutMs: 800,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
               executable: process.execPath,
               args: [countingBin],
+              timeoutMs: 800,
             },
           },
         },
@@ -262,20 +277,22 @@ describe("CallbackAgent integration", () => {
     // dedupe-hit path must claim a FRESH lease rather than reuse one. Wait for
     // the crashed agent's short lease to expire first, so the event is listed
     // again on this poll (the lease is only listed back once it has lapsed).
-    await sleep(400);
+    await sleep(1200);
     const agent2 = new CallbackAgent({
       config: {
         apiBase: baseUrl,
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 200,
+        leaseMs: 1000,
+        defaultTimeoutMs: 800,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
               executable: process.execPath,
               args: [countingBin],
+              timeoutMs: 800,
             },
           },
         },
@@ -316,7 +333,8 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
@@ -372,7 +390,8 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {},
       },
       dedupeStore: dedupe,
@@ -440,13 +459,14 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
-              executable: fakeBin.path,
-              args: ["{message}"],
+              executable: process.execPath,
+              args: [fakeBin.path, "{message}"],
             },
           },
         },
@@ -474,12 +494,12 @@ describe("CallbackAgent integration", () => {
   });
 
   it("command timeout → fail called", async () => {
-    // Create a fake executable that sleeps longer than the timeout
-    const fakeBin = createFakeExecutable("fake-slow.sh");
-    // Override the script to sleep
-    const fs = await import("node:fs");
-    fs.writeFileSync(fakeBin.path, `#!/bin/sh\nsleep 10\n`);
-    fs.chmodSync(fakeBin.path, 0o755);
+    // Cross-platform slow helper via node (shebang scripts EFTYPE on Windows).
+    const slowBin = join(tmpDir, "slow-timeout.mjs");
+    writeFileSync(
+      slowBin,
+      "await new Promise((r) => setTimeout(r, 10_000));\n",
+    );
 
     const event = fakeApi.addEvent({
       callbackRef: { endpointRef: "dev-mac" },
@@ -493,14 +513,15 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {
           "dev-mac": {
             driver: {
               driver: "command",
-              executable: fakeBin.path,
-              args: ["{message}"],
-              timeoutMs: 500, // 500ms timeout
+              executable: process.execPath,
+              args: [slowBin],
+              timeoutMs: 500, // 500ms timeout (< lease)
             },
           },
         },
@@ -519,8 +540,6 @@ describe("CallbackAgent integration", () => {
 
     // Fail should have been called
     expect(fakeApi.callCounts.fail).toBe(1);
-
-    fakeBin.cleanup();
   });
 
   it("unknown endpoint → fail called", async () => {
@@ -536,7 +555,8 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {},
       },
       dedupeStore: dedupe,
@@ -568,7 +588,8 @@ describe("CallbackAgent integration", () => {
         participantId: fakeApi.participantId,
         consumerId: "test-consumer",
         pollIntervalMs: 100,
-        leaseMs: 30000,
+        leaseMs: 30_000,
+        defaultTimeoutMs: 20_000,
         endpoints: {},
       },
       dedupeStore: dedupe,
@@ -585,5 +606,101 @@ describe("CallbackAgent integration", () => {
 
     // Fail should have been called
     expect(fakeApi.callCounts.fail).toBe(1);
+  });
+
+  it("rejects construction when timeoutMs >= leaseMs (lease/timeout guard)", () => {
+    expect(() =>
+      new CallbackAgent({
+        config: {
+          apiBase: baseUrl,
+          participantId: fakeApi.participantId,
+          consumerId: "test-consumer",
+          pollIntervalMs: 100,
+          leaseMs: 400,
+          defaultTimeoutMs: 300,
+          endpoints: {
+            "dev-mac": {
+              driver: {
+                driver: "command",
+                executable: process.execPath,
+                args: ["-e", "1"],
+                timeoutMs: 5000,
+              },
+            },
+          },
+        },
+        dedupeStore: new DedupeStore(join(tmpDir, "dedupe-reject.jsonl")),
+        logger: silentLogger(),
+      }),
+    ).toThrow(/timeoutMs.*leaseMs|leaseMs.*timeoutMs/i);
+  });
+
+  it("dual consumers: slow command with timeout < lease starts only once", async () => {
+    // Protection is option (b): timeout < lease, so the first consumer kills
+    // the command before the lease expires and a second consumer cannot
+    // re-claim while the first command is still alive.
+    // Pre-fix probe (lease 400ms, timeout 5000ms, sleep 1500ms) observed
+    // count=2 concurrent starts; that config is now rejected at construction.
+    const slowBin = join(tmpDir, "slow-dual.mjs");
+    const countPath = join(tmpDir, "slow-dual.count");
+    writeFileSync(
+      slowBin,
+      [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(countPath)}, 'x');`,
+        "await new Promise((r) => setTimeout(r, 5000));",
+        "",
+      ].join("\n"),
+    );
+
+    fakeApi.addEvent({ callbackRef: { endpointRef: "dev-mac" } });
+
+    const mk = (consumerId: string, dedupeName: string) =>
+      new CallbackAgent({
+        config: {
+          apiBase: baseUrl,
+          participantId: fakeApi.participantId,
+          consumerId,
+          pollIntervalMs: 50,
+          leaseMs: 2000,
+          defaultTimeoutMs: 800,
+          endpoints: {
+            "dev-mac": {
+              driver: {
+                driver: "command",
+                executable: process.execPath,
+                args: [slowBin],
+                timeoutMs: 800,
+              },
+            },
+          },
+        },
+        dedupeStore: new DedupeStore(join(tmpDir, dedupeName)),
+        logger: silentLogger(),
+      });
+
+    const a1 = mk("consumer-a", "dual-a.jsonl");
+    const a2 = mk("consumer-b", "dual-b.jsonl");
+
+    // Stagger the second consumer past where an unprotected short lease would
+    // have expired, but still inside the protected timeout < lease window.
+    const p1 = a1.runOnce();
+    await sleep(1000);
+    const p2 = await a2.runOnce();
+    await p1;
+
+    let count = 0;
+    try {
+      count = readFileSync(countPath, "utf-8")
+        .split("")
+        .filter((c) => c === "x").length;
+    } catch {
+      count = 0;
+    }
+
+    // Second consumer must not have claimed while the first still held the lease.
+    expect(p2).toBe(0);
+    expect(count).toBe(1);
+    expect(fakeApi.callCounts.claim).toBe(1);
   });
 });

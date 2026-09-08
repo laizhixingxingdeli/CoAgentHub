@@ -83,6 +83,16 @@ describe("Config validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("allows inheritEnv name list", () => {
+    const result = CommandDriverSchema.safeParse({
+      driver: "command",
+      executable: "/usr/bin/codex",
+      args: [],
+      inheritEnv: ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"],
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("allows timeoutMs and eventFile options", () => {
     const result = CommandDriverSchema.safeParse({
       driver: "command",
@@ -92,5 +102,59 @@ describe("Config validation", () => {
       eventFile: true,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("default leaseMs/defaultTimeoutMs are self-consistent (timeout < lease)", () => {
+    const result = CallbackAgentConfigSchema.safeParse({
+      apiBase: "http://localhost:3001",
+      participantId: "00000000-0000-7000-8000-000000000001",
+      consumerId: "my-consumer",
+      endpoints: {},
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.defaultTimeoutMs).toBeLessThan(result.data.leaseMs);
+    }
+  });
+
+  it("rejects defaultTimeoutMs >= leaseMs at startup", () => {
+    const result = CallbackAgentConfigSchema.safeParse({
+      apiBase: "http://localhost:3001",
+      participantId: "00000000-0000-7000-8000-000000000001",
+      consumerId: "my-consumer",
+      leaseMs: 30_000,
+      defaultTimeoutMs: 60_000,
+      endpoints: {},
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const msg = result.error.message;
+      expect(msg).toMatch(/defaultTimeoutMs/);
+      expect(msg).toMatch(/leaseMs/);
+    }
+  });
+
+  it("rejects per-driver timeoutMs >= leaseMs", () => {
+    const result = CallbackAgentConfigSchema.safeParse({
+      apiBase: "http://localhost:3001",
+      participantId: "00000000-0000-7000-8000-000000000001",
+      consumerId: "my-consumer",
+      leaseMs: 30_000,
+      defaultTimeoutMs: 20_000,
+      endpoints: {
+        "dev-mac": {
+          driver: {
+            driver: "command",
+            executable: "/usr/bin/codex",
+            args: [],
+            timeoutMs: 120_000,
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toMatch(/timeoutMs/);
+    }
   });
 });

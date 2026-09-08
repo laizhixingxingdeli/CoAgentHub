@@ -3,14 +3,15 @@
   "participantId": "REPLACE_WITH_VALID_UUID",
   "consumerId": "codex-callback-consumer",
   "pollIntervalMs": 5000,
-  "leaseMs": 30000,
-  "defaultTimeoutMs": 60000,
+  "leaseMs": 180000,
+  "defaultTimeoutMs": 120000,
   "endpoints": {
     "developer-mac": {
       "driver": {
         "driver": "command",
         "executable": "/Users/REPLACE/.codex/bin/codex",
         "args": ["exec", "resume", "--json", "{sessionRef}", "{message}"],
+        "inheritEnv": ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"],
         "timeoutMs": 120000
       }
     }

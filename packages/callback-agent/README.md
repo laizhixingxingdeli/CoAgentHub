@@ -32,21 +32,67 @@ Create a JSON config (see [`examples/codex.json`](examples/codex.json) for a Cod
   "participantId": "<uuid>",             // The participant whose inbox to poll
   "consumerId": "my-callback-consumer",  // Lease owner identifier
   "pollIntervalMs": 5000,                // Polling interval in daemon mode
-  "leaseMs": 30000,                      // Lease duration
-  "defaultTimeoutMs": 60000,             // Default command timeout
+  "leaseMs": 90000,                      // Lease duration (must be > timeouts)
+  "defaultTimeoutMs": 60000,             // Default command timeout (< leaseMs)
   "endpoints": {
     "<endpointRef>": {
       "driver": {
         "driver": "command",
         "executable": "/absolute/path/to/bin",  // MUST be absolute
         "args": ["exec", "resume", "{sessionRef}", "{message}"], // static or {placeholder}
-        "env": { "HOME": "/Users/me" },         // optional fixed allowlist
-        "timeoutMs": 120000                     // optional per-endpoint override
+        // Child env is an EXPLICIT ALLOWLIST (see below). Unmentioned parent
+        // vars are never inherited — including secrets and proxy settings.
+        "inheritEnv": ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"],
+        "env": {
+          "MY_APP_MODE": "callback"
+        },
+        "timeoutMs": 60000                     // optional per-endpoint; must be < leaseMs
       }
     }
   }
 }
 ```
+
+#### Environment allowlist (breaking change)
+
+Child processes **do not** inherit the callback-agent process environment.
+
+Layers (later wins):
+
+1. **Hardcoded minimal set** copied from the parent when present: `PATH`, `HOME`,
+   `USERPROFILE` / `HOMEDRIVE` / `HOMEPATH`, `SYSTEMROOT` / `WINDIR`, `TEMP` /
+   `TMP`, `LANG` / `LC_*`, `PATHEXT`, `COMSPEC`. Not configurable.
+2. **`inheritEnv`**: named keys copied from the parent when present (allowlist).
+3. **`env`**: explicit key/value pairs from this config.
+
+**Upgrade note:** configs that previously relied on ambient inheritance (for
+example picking up `HTTPS_PROXY`, `SSL_CERT_FILE`, `AWS_*`, `GH_TOKEN`, or a
+tool's own API keys from the agent process) must now list those names under
+`inheritEnv` or set literal values under `env`.
+
+Copy-paste example when the host command needs a proxy and a custom flag:
+
+```json
+{
+  "driver": "command",
+  "executable": "/usr/local/bin/my-cli",
+  "args": ["{message}"],
+  "inheritEnv": ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"],
+  "env": {
+    "MY_CLI_CONFIG": "/etc/my-cli/callback.toml"
+  },
+  "timeoutMs": 60000
+}
+```
+
+#### Lease vs timeout (startup guard)
+
+`defaultTimeoutMs` and every per-driver `timeoutMs` **must be strictly less than
+`leaseMs`**. The agent refuses to start otherwise. This prevents a still-running
+command from outliving its lease so a second consumer can claim and start the
+same command again.
+
+Defaults are self-consistent: `leaseMs=90000`, `defaultTimeoutMs=60000`.
 
 #### Argument placeholders
 
@@ -96,7 +142,8 @@ await agent.run();
 ## Safety
 
 - **`shell:false` always** — executable and args come from local static config, never from the event.
-- **No secret inheritance** — only explicitly allowlisted env vars are passed to the child.
+- **Explicit env allowlist** — child env is the hardcoded minimal set plus optional `inheritEnv` names and `env` key/values. `spawn` is never called with `env: undefined` (which would inherit every parent secret).
+- **Timeout < lease** — startup validation rejects configs where a command could outlive its lease under dual consumers.
 - **No arbitrary webhooks** — commands are configured locally; the agent never reads URLs, commands, or credentials from the event.
 - **Dedupe-before-ack** — local write happens before core ack; crash between them only results in a redundant ack.
 
@@ -106,4 +153,4 @@ await agent.run();
 pnpm --filter @laizhixingxingdeli/callback-agent test
 ```
 
-Covers all Spec acceptance criteria: fake API integration, competing consumers, ack-failure recovery, non-zero exit / timeout / spawn-error handling, config validation, shell metacharacter safety, and Codex argv ordering.
+Covers all Spec acceptance criteria: fake API integration, competing consumers, ack-failure recovery, non-zero exit / timeout / spawn-error handling, config validation, shell metacharacter safety, env allowlist (sentinel), lease/timeout guard, and Codex argv ordering.

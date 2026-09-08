@@ -2,9 +2,11 @@ export { CompletionEventClient } from "./api.js";
 export { CallbackAgent } from "./callback-agent.js";
 export type { CommandDriverContext, CommandResult } from "./command-driver.js";
 export {
+  buildChildEnv,
   CommandDriverError,
   createEventFile,
   executeCommand,
+  MINIMAL_CHILD_ENV_KEYS,
 } from "./command-driver.js";
 export type {
   CallbackAgentConfig,
@@ -23,6 +25,7 @@ export {
   CompletionEventSchema,
   EndpointConfigSchema,
   InboxItemSchema,
+  parseCallbackAgentConfig,
   PLACEHOLDER_PATTERN,
   TaskSchema,
 } from "./config.js";

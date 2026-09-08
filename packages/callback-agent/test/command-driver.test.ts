@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -45,10 +45,11 @@ describe("Command Driver", () => {
 
   it("Codex example: resolves argv in correct order", async () => {
     const fakeBin = createFakeExecutable("fake-codex.sh");
+    // Drive via node so Windows does not hit EFTYPE on shebang scripts.
     const driver = CommandDriverSchema.parse({
       driver: "command",
-      executable: fakeBin.path,
-      args: ["exec", "resume", "--json", "{sessionRef}", "{message}"],
+      executable: process.execPath,
+      args: [fakeBin.path, "exec", "resume", "--json", "{sessionRef}", "{message}"],
     });
 
     const event = makeEvent();
@@ -81,8 +82,8 @@ describe("Command Driver", () => {
     const fakeBin = createFakeExecutable();
     const driver = CommandDriverSchema.parse({
       driver: "command",
-      executable: fakeBin.path,
-      args: ["{message}"],
+      executable: process.execPath,
+      args: [fakeBin.path, "{message}"],
     });
 
     // Event with shell metacharacters in specRef
@@ -143,8 +144,8 @@ describe("Command Driver", () => {
     ).createFailingExecutable(42);
     const driver = CommandDriverSchema.parse({
       driver: "command",
-      executable: fakeBin.path,
-      args: [],
+      executable: process.execPath,
+      args: [fakeBin.path],
     });
 
     const event = makeEvent();
@@ -164,21 +165,19 @@ describe("Command Driver", () => {
   });
 
   it("timeout returns timedOut=true", async () => {
-    const fs = await import("node:fs");
-    const fakeBin = createFakeExecutable("fake-slow.sh");
-    fs.writeFileSync(fakeBin.path, `#!/bin/sh\nsleep 10\n`);
-    fs.chmodSync(fakeBin.path, 0o755);
+    const slow = join(tmpDir, "slow.mjs");
+    writeFileSync(slow, "await new Promise((r) => setTimeout(r, 10_000));\n");
 
     const driver = CommandDriverSchema.parse({
       driver: "command",
-      executable: fakeBin.path,
-      args: [],
+      executable: process.execPath,
+      args: [slow],
       timeoutMs: 200,
     });
 
     const event = makeEvent();
     const eventFilePath = join(tmpDir, "event.json");
-    fs.writeFileSync(eventFilePath, "msg");
+    writeFileSync(eventFilePath, "msg");
 
     const result = await executeCommand(driver, {
       event,
@@ -186,16 +185,14 @@ describe("Command Driver", () => {
     });
 
     expect(result.timedOut).toBe(true);
-
-    fakeBin.cleanup();
   });
 
   it("missing sessionRef resolves {sessionRef} to empty string", async () => {
     const fakeBin = createFakeExecutable();
     const driver = CommandDriverSchema.parse({
       driver: "command",
-      executable: fakeBin.path,
-      args: ["{sessionRef}"],
+      executable: process.execPath,
+      args: [fakeBin.path, "{sessionRef}"],
     });
 
     const event = makeEvent({ callbackRef: null });
@@ -214,5 +211,112 @@ describe("Command Driver", () => {
     expect(argv[0]).toBe("");
 
     fakeBin.cleanup();
+  });
+
+  /**
+   * Env allowlist probes use `node <helper.mjs>` (process.execPath) so they
+   * run on Windows where bare shebang scripts fail with EFTYPE.
+   * Only the test sentinel is inspected — never real secrets / full env dumps.
+   */
+  it("does not inherit COAGENTHUB_TEST_SENTINEL when env is unset", async () => {
+    const sentinel = "COAGENTHUB_TEST_SENTINEL";
+    const sentinelVal = "r9-should-not-leak";
+    const prev = process.env[sentinel];
+    process.env[sentinel] = sentinelVal;
+
+    const helper = join(tmpDir, "env-sentinel.mjs");
+    const outPath = join(tmpDir, "env-sentinel.out");
+    const eventFilePath = join(tmpDir, "event.json");
+    writeFileSync(
+      helper,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        "const out = process.argv[2];",
+        "writeFileSync(out, process.env.COAGENTHUB_TEST_SENTINEL === undefined ? 'absent' : 'present');",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(eventFilePath, "{}");
+
+    const driver = CommandDriverSchema.parse({
+      driver: "command",
+      executable: process.execPath,
+      args: [helper, outPath],
+      timeoutMs: 10_000,
+    });
+
+    try {
+      const result = await executeCommand(driver, {
+        event: makeEvent(),
+        eventFilePath,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+      const status = (await import("node:fs")).readFileSync(outPath, "utf-8");
+      expect(status).toBe("absent");
+    } finally {
+      if (prev === undefined) delete process.env[sentinel];
+      else process.env[sentinel] = prev;
+    }
+  });
+
+  it("passes only allowlisted env: inheritEnv + explicit env, not the sentinel", async () => {
+    const sentinel = "COAGENTHUB_TEST_SENTINEL";
+    const sentinelVal = "r9-should-not-leak";
+    const proxyKey = "HTTPS_PROXY";
+    const prevSentinel = process.env[sentinel];
+    const prevProxy = process.env[proxyKey];
+    process.env[sentinel] = sentinelVal;
+    process.env[proxyKey] = "http://allowlist-proxy.test:8080";
+
+    const helper = join(tmpDir, "env-allow.mjs");
+    const outPath = join(tmpDir, "env-allow.out");
+    writeFileSync(
+      helper,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        "const out = process.argv[2];",
+        "writeFileSync(out, JSON.stringify({",
+        "  sentinel: process.env.COAGENTHUB_TEST_SENTINEL ?? null,",
+        "  proxy: process.env.HTTPS_PROXY ?? null,",
+        "  custom: process.env.MY_CUSTOM_FLAG ?? null,",
+        "}));",
+        "",
+      ].join("\n"),
+    );
+    const eventFilePath = join(tmpDir, "event.json");
+    writeFileSync(eventFilePath, "{}");
+
+    const driver = CommandDriverSchema.parse({
+      driver: "command",
+      executable: process.execPath,
+      args: [helper, outPath],
+      inheritEnv: [proxyKey],
+      env: { MY_CUSTOM_FLAG: "from-config" },
+      timeoutMs: 10_000,
+    });
+
+    try {
+      const result = await executeCommand(driver, {
+        event: makeEvent(),
+        eventFilePath,
+      });
+      expect(result.exitCode).toBe(0);
+      const dump = JSON.parse(
+        (await import("node:fs")).readFileSync(outPath, "utf-8"),
+      ) as {
+        sentinel: string | null;
+        proxy: string | null;
+        custom: string | null;
+      };
+      expect(dump.sentinel).toBeNull();
+      expect(dump.proxy).toBe("http://allowlist-proxy.test:8080");
+      expect(dump.custom).toBe("from-config");
+    } finally {
+      if (prevSentinel === undefined) delete process.env[sentinel];
+      else process.env[sentinel] = prevSentinel;
+      if (prevProxy === undefined) delete process.env[proxyKey];
+      else process.env[proxyKey] = prevProxy;
+    }
   });
 });
