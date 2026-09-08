@@ -154,6 +154,13 @@ export {
   type TokenUsageResult,
 } from "./token-usage";
 export {
+  DIFF_SUMMARY_KEY_OWNERS,
+  type DiffSummaryOwner,
+  mergeDiffSummary,
+  ownerOfDiffSummaryKey,
+  PLATFORM_KEY_OWNERS,
+} from "./diff-summary";
+export {
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type GroupPromptInfo,
