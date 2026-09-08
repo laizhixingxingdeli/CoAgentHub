@@ -515,6 +515,24 @@ export async function resetToCheckpoint(
     };
   }
   // 2) 只把工作树回写成 C 的树;索引不动,所以改动是「未提交」的。
+  // 空树时 `git restore --source C --worktree -- .` 会因 pathspec '.'
+  // 匹配不到任何路径而失败;但「树为空 = 无需恢复」,第 1 步已完成全部
+  // 工作,不能把这种失败当成回滚失败(会误终止重试)。
+  // 判据:正面查 C 的树是否为空(ls-tree 列名),不靠 stderr 文案。
+  const treeList = await gitExec(
+    ["ls-tree", "-r", "--name-only", sha],
+    repoRoot,
+  );
+  if (treeList.status !== 0) {
+    return {
+      ok: false,
+      message: `git ls-tree 失败: ${(treeList.stderr ?? "").trim()}`,
+    };
+  }
+  const treeHasEntries = (treeList.stdout ?? "").trim().length > 0;
+  if (!treeHasEntries) {
+    return { ok: true, message: `${ref}(${short})` };
+  }
   const restore = await gitExec(
     ["restore", "--source", sha, "--worktree", "--", "."],
     repoRoot,

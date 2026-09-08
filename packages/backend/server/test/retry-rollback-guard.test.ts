@@ -708,4 +708,100 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       rmSync(proj, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("空树快照:跳过 restore,回滚算成功且 HEAD 停在 C^", async () => {
+    // 仓库只有空提交 → createCheckpoint 的树为空;旧实现 git restore -- . 会
+    // pathspec 失败并返回 ok:false,重试被误终止。
+    const proj = mkdtempSync(path.join(tmpdir(), "coagenthub-guard-empty-tree-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: proj });
+      execFileSync("git", ["config", "user.email", "test@coagenthub.local"], {
+        cwd: proj,
+      });
+      execFileSync("git", ["config", "user.name", "coagenthub-test"], {
+        cwd: proj,
+      });
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "empty seed"], {
+        cwd: proj,
+      });
+      const { createCheckpoint, resetToCheckpoint } = await runner();
+      const headAtSnapshot = gitOut(proj, "rev-parse", "HEAD").trim();
+      const cp = await createCheckpoint("empty-tree-task", proj);
+      // 正面确认树为空(与实现判据一致)
+      const treeNames = gitOut(proj, "ls-tree", "-r", "--name-only", cp.sha).trim();
+      expect(treeNames).toBe("");
+
+      // 执行器留下一次空提交(模拟 attempt)
+      execFileSync("git", ["commit", "--allow-empty", "-qm", "exec attempt"], {
+        cwd: proj,
+      });
+      expect(gitOut(proj, "rev-parse", "HEAD").trim()).not.toBe(headAtSnapshot);
+
+      const res = await resetToCheckpoint(cp.ref, proj);
+      expect(res.ok).toBe(true);
+      expect(gitOut(proj, "rev-parse", "HEAD").trim()).toBe(headAtSnapshot);
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("非空树但 restore 真实失败仍返回 ok:false(R2 不放宽过头)", async () => {
+    // 构造非空快照树,但故意删掉树里引用的 blob,使 restore 读对象失败。
+    // ls-tree 仍能列出文件名 → 实现必须走 restore 且把失败向上抛。
+    const proj = makeGitRepo("coagenthub-guard-restore-fail-");
+    try {
+      const { resetToCheckpoint } = await runner();
+      const base = gitOut(proj, "rev-parse", "HEAD").trim();
+      const ghostPath = path.join(proj, "ghost.txt");
+      writeFileSync(ghostPath, "ghost-content-unique-for-r2\n");
+      const blob = execFileSync("git", ["hash-object", "-w", ghostPath], {
+        cwd: proj,
+      })
+        .toString()
+        .trim();
+      const mktree = execFileSync("git", ["mktree"], {
+        cwd: proj,
+        input: `100644 blob ${blob}\tghost.txt\n`,
+      })
+        .toString()
+        .trim();
+      const cSha = execFileSync(
+        "git",
+        ["commit-tree", mktree, "-p", base, "-m", "coagenthub checkpoint r2"],
+        { cwd: proj },
+      )
+        .toString()
+        .trim();
+      const ref = "refs/coagenthub-cp/restore-fail-task";
+      execFileSync("git", ["update-ref", ref, cSha], { cwd: proj });
+      // 树非空
+      expect(
+        gitOut(proj, "ls-tree", "-r", "--name-only", cSha).trim(),
+      ).toBe("ghost.txt");
+      // 删掉 blob 对象,restore 必败;Windows 上 git 对象常带只读属性
+      const objPath = path.join(
+        proj,
+        ".git",
+        "objects",
+        blob.slice(0, 2),
+        blob.slice(2),
+      );
+      try {
+        execFileSync("powershell", [
+          "-Command",
+          `Remove-Item -Force -LiteralPath '${objPath.replace(/'/g, "''")}'`,
+        ]);
+      } catch {
+        rmSync(objPath, { force: true });
+      }
+      expect(existsSync(objPath)).toBe(false);
+      rmSync(ghostPath, { force: true });
+
+      const res = await resetToCheckpoint(ref, proj);
+      expect(res.ok).toBe(false);
+      expect(res.message).toMatch(/git restore 失败/);
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
