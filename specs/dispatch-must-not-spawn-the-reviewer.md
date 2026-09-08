@@ -1,8 +1,32 @@
 # Spec: 定向到检视者的消息被当成派发,平台 spawn 了检视者的 CLI
 
-> **状态**: Frozen
+> **状态**: Landed(`68ad401b`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - **基线自行复跑**:`8 failed | 42 passed (50)`,与汇报逐字一致;
+>   改前 `8 failed | 39 passed (47)` —— 失败数未增加,新增 3 条用例全绿。
+> - **「改前红」证据**:执行者给出实际报错
+>   `expected 'SPEC_HASH_MISSING' to contain 'REVIEWER_TARGET_NOT_DISPATCHABLE'`,
+>   并附**缺陷本体的真实 spawn 日志**
+>   (`[executor] server 侧 spawn: codex exec …` → `spawn codex ENOENT`) ——
+>   即本缺陷在测试里被复现了。
+> - **判据单一出处(R2)**:`isReviewerNotDispatchableTarget` 只读
+>   `group_members.roles`,不看执行器配置、不看名字。
+>   `"reviewer"` 字面量与仓库既有写法一致
+>   (`completion-recipient.ts:31`、`queue.ts:1756`),未引入新风格。
+> - **双闸**:消息路由层拦一道 + `maybeDispatchExecutorTask` 派发层第二道,
+>   避免其它入口漏过。
+> - **R3 多角色**:`roles` 含 `reviewer` 即不可派;`resolveRoleTarget` 亦
+>   `continue` 跳过该成员 —— 符合「宁可少派一次」。
+> - **提交边界**:6 个文件全在票面范围;`DISPATCH_ALLOWED_ROLES` /
+>   `findExecutorByParticipant` 未改(仅注释提及);
+>   用户未提交的报告与未跟踪 `start.ps1` **未被夹带**。
+>
+> ⚠️ **尚未做的验证**:运行中的 server 是 18:19 构建,**不含本修复**。
+> 端到端实盘验证(真发一条定向到检视者的消息,确认不建 task)
+> 留到最终重建重启时做。
 > **来源**: 2026-09-08 检视者监督平台运行时实测捕获,**当天发生两次**
 > (`01a0804b-5f7b` failed、`01a08048-7377` cancelled)。
 > **连带**: 它是 [rollback-puts-checkpoint-commit-on-head.md](rollback-puts-checkpoint-commit-on-head.md)
