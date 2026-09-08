@@ -76,6 +76,7 @@ export {
 } from "./output-parser";
 export {
   backfillDetachedClosedTokenFields,
+  buildTicket,
   cancelQueuedTasks,
   cancelRunningTasks,
   clearExecutorCooldown,
@@ -115,6 +116,12 @@ export {
   groupHasReviewerMember,
   reviewRequestCarryAllowed,
 } from "./review-request-policy";
+export {
+  loadTicketTemplate,
+  resolveTicketTemplatesDir,
+  type TicketRole,
+  type TicketTemplate,
+} from "./ticket-template";
 export {
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,

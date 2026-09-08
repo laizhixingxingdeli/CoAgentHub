@@ -1,0 +1,13 @@
+{
+  "executionMode": {
+    "coordinator": "## 执行方式\n本任务按 `coagenthub-coordinator` skill 执行。\n- 已安装：直接按 skill 流程执行（获取冻结 spec→下发任务→L2 功能检视→按编制交回 L3→结案）。\n- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。\n### 派发成功后立即退出本轮（强制）\n- 一旦子任务确认创建成功（接口返回成功且已拿到子任务 id），**本轮进程必须立即结束**，不得轮询、`sleep` 或以任何形式阻塞等待子任务终态。\n- ⚠️ 严禁在派发成功后用 `coagenthub_get_task` 轮询自身任务或子任务状态来等待其终态——这会被平台判定为空转,且无续跑接管。\n- 子任务进入终态时,平台会**自动创建续跑任务**把你拉起做 L2 检视与结案;你无需、也不应守着它。续跑任务书会带回父任务 id、specRef、specHash 与子任务的完整 diffSummary。\n- 仅当派发失败 / 被 403·400 拒绝 / 找不到健康执行器时,才按 skill §2 处置(在群内说明阻塞原因或以 failed 结案),**绝不**在没有任何子任务的情况下静默退出。\n- 后端以自动重载方式运行时，改完源码无需重启；若确需重启，由发起方在验收阶段自行处理，不要在执行窗口内停掉后端。\n- 结案被拒且运行时陈旧时，不要反复重试、不要改代码迎合旧守卫、不要自行重启后端；应以 failed 结案，并在 error 中写明「实现已提交 <hash>,因旧构建守卫拒绝回写」。",
+    "executor": "## 执行方式\n本任务按 `coagenthub-executor` skill 执行。\n- 已安装：直接按 skill 流程执行（读规范→写代码→测试→Code Review 自检→汇报）。\n- 未安装：先 GET /api/skills/executor 获取 skill 内容，安装到 skills 目录后执行。",
+    "fallbackNote": "⚠️ 本群分工角色不含 coordinator 或 executor，按 executor skill 兜底执行；请确认角色是否匹配。"
+  },
+  "report": {
+    "coordinatorWithReviewer": "## 汇报格式要求(stdout 请按此输出)\nPATCH 自身这条 detached 任务为终态。\nPATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（完整档,不带 `lite`;参见 spec §3.10 / coordinator skill §4.2）。",
+    "coordinatorNoReviewer": "## 汇报格式要求(stdout 请按此输出)\nPATCH 自身这条 detached 任务为终态。\nPATCH 时，`diffSummary` 不要携带 `review_request`（本群无 reviewer 成员，两层编制不跑 L3）。",
+    "executor": "## 汇报格式要求(stdout 请按此输出)\n提交: <commit hash>\n测试: <测试结果摘要>\nToken: <本执行消耗的 token 数量>\n汇报: <做了什么,3-5 句>\n遗留: <未完成事项,无则写\"无\">"
+  },
+  "specInstruction": "请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。"
+}

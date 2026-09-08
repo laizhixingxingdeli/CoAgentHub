@@ -1,0 +1,5 @@
+{
+  "report": {
+    "coordinatorWithReviewer": "## 汇报格式要求(stdout 请按此输出)\nPATCH 自身这条 detached 任务为终态。\nPATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷且带 `\"lite\": true`（fix 票走 L3 精简档:免 spec 对照,只检 diff 架构质量;参见 spec §3.10 / coordinator skill §4.2）。"
+  }
+}

@@ -82,6 +82,12 @@ import {
   reviewRequestCarryAllowed,
 } from "./review-request-policy";
 import {
+  buildExecutionModeLines,
+  buildReportLines,
+  loadTicketTemplate,
+  type TicketRole,
+} from "./ticket-template";
+import {
   activeRuns,
   classifyQuotaFailure,
   clearStaleTestRepoIndexLock,
@@ -2070,7 +2076,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // prompt(与 CLI ticket 同一模板,避免两路漂移——执行器严格按 Spec
       // 实现,冲突以 Spec 为准);无 specRef 时 prompt 与旧版完全一致。
       const prompt = run.specRef
-        ? `${buildSpecSection(run.specRef, run.specHash).join("\n")}\n\n${body}`
+        ? `${buildSpecSection(
+            run.specRef,
+            run.specHash,
+            loadTicketTemplate(run.dispatchKind).specInstruction,
+          ).join("\n")}\n\n${body}`
         : body;
       handle = {
         pid: undefined,
@@ -3813,14 +3823,21 @@ export async function resolveTestExecutor(
  * 定向目标 label;测试执行器 = resolveTestExecutor 解析结果或默认由实现执行器
  * 完成测试;body 中的显式「**测试执行器:**」行原样保留(执行器读任务书即可)。
  */
-/** 规范驱动下发:「关联规范」段模板行(CLI ticket 与 a2a prompt 共用,
- *  避免两路漂移)。specRef 为空时应由调用方自行跳过,本函数不做判断。 */
-function buildSpecSection(specRef: string, specHash: string | null): string[] {
+/**
+ * 规范驱动下发:「关联规范」段(CLI ticket 与 a2a prompt 共用,避免两路漂移)。
+ * 平台事实(路径 / 哈希)留在代码;「指令」方法论文案来自模板(R1 自行判断切分)。
+ * specRef 为空时应由调用方自行跳过,本函数不做判断。
+ */
+function buildSpecSection(
+  specRef: string,
+  specHash: string | null,
+  instruction: string,
+): string[] {
   return [
     `## 📜 关联规范 (Spec Reference)`,
     `- **文档路径**: ${specRef}`,
     ...(specHash ? [`- **版本哈希**: ${specHash}`] : []),
-    `- **指令**: 请严格遵循上述文档中的定义进行开发。如有冲突，以 Spec 为准。`,
+    ...(instruction ? [`- **指令**: ${instruction}`] : []),
   ];
 }
 
@@ -3831,6 +3848,7 @@ export function executionApiBase(): string {
   return base.replace(/\/+$/, "");
 }
 
+/** 平台事实段:不可被模板覆盖或删除(R1 / R5)。 */
 function buildExecutionContextSection(run: QueuedRun): string[] {
   const lines = [
     "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
@@ -3849,8 +3867,6 @@ function buildExecutionContextSection(run: QueuedRun): string[] {
   return lines;
 }
 
-type TicketRole = "coordinator" | "executor" | "fallback";
-
 function ticketRole(groupPrompt: GroupPromptInfo | null): TicketRole {
   const roles = groupPrompt?.roles ?? [];
   if (roles.includes("coordinator")) return "coordinator";
@@ -3858,84 +3874,12 @@ function ticketRole(groupPrompt: GroupPromptInfo | null): TicketRole {
   return "fallback";
 }
 
-function buildExecutionModeSection(role: TicketRole): string[] {
-  if (role === "coordinator") {
-    // 派发后退出本轮的规则直接注入任务书(上下文注入,不改 SKILL.md §2.3 文本):
-    // 取证显示协调者偶发只在任务书里看到 soft 的「派发后可退出」类提示就
-    // 去轮询子任务终态(空转)。把 §2.3 的强制语义写进每轮都必读的任务书,
-    // 不依赖协调者是否主动读到 SKILL.md §2.3,使该节稳定进入每轮上下文。
-    return [
-      "## 执行方式",
-      "本任务按 `coagenthub-coordinator` skill 执行。",
-      "- 已安装：直接按 skill 流程执行（获取冻结 spec→下发任务→L2 功能检视→按编制交回 L3→结案）。",
-      "- 未安装：先 GET /api/skills/coordinator 获取 skill 内容，安装到 skills 目录后执行。",
-      "### 派发成功后立即退出本轮（强制）",
-      "- 一旦子任务确认创建成功（接口返回成功且已拿到子任务 id），**本轮进程必须立即结束**，不得轮询、`sleep` 或以任何形式阻塞等待子任务终态。",
-      "- ⚠️ 严禁在派发成功后用 `coagenthub_get_task` 轮询自身任务或子任务状态来等待其终态——这会被平台判定为空转,且无续跑接管。",
-      "- 子任务进入终态时,平台会**自动创建续跑任务**把你拉起做 L2 检视与结案;你无需、也不应守着它。续跑任务书会带回父任务 id、specRef、specHash 与子任务的完整 diffSummary。",
-      "- 仅当派发失败 / 被 403·400 拒绝 / 找不到健康执行器时,才按 skill §2 处置(在群内说明阻塞原因或以 failed 结案),**绝不**在没有任何子任务的情况下静默退出。",
-      "- 后端以自动重载方式运行时，改完源码无需重启；若确需重启，由发起方在验收阶段自行处理，不要在执行窗口内停掉后端。",
-      "- 结案被拒且运行时陈旧时，不要反复重试、不要改代码迎合旧守卫、不要自行重启后端；应以 failed 结案，并在 error 中写明「实现已提交 <hash>,因旧构建守卫拒绝回写」。",
-    ];
-  }
-
-  const section = [
-    "## 执行方式",
-    "本任务按 `coagenthub-executor` skill 执行。",
-    "- 已安装：直接按 skill 流程执行（读规范→写代码→测试→Code Review 自检→汇报）。",
-    "- 未安装：先 GET /api/skills/executor 获取 skill 内容，安装到 skills 目录后执行。",
-  ];
-  if (role === "fallback") {
-    section.push(
-      "⚠️ 本群分工角色不含 coordinator 或 executor，按 executor skill 兜底执行；请确认角色是否匹配。",
-    );
-  }
-  return section;
-}
-
 /**
- * 协调者任务书「汇报格式要求」段(R3 反向守卫同步,v4.1 spec §3.14.6):
- * 仅当 review_request 可携带(群内有 reviewer,与 tasks.ts R3 守卫共用
- * reviewRequestCarryAllowed 判定)时保留「必须带」指令;无 reviewer 时明确
- * 「不要携带」——否则任务书会教协调者携带一个 PATCH 终态必被 400 拒收的载荷。
- * 深度按 dispatchKind 分流:fix 带 `"lite": true` 精简档;
- * requirement / dispatchKind=null 不带 lite(完整档,requirement 文案与旧版
- * 语义一致)。
+ * 执行器任务书(票7 + S6):标题 / 平台上下文 / 任务内容由代码组装;
+ * 「执行方式」「汇报格式」方法论文案按 dispatchKind 读仓库模板(R2),
+ * 每次 build 读盘,改模板无需重建 server。
  */
-function buildReportSection(
-  role: TicketRole,
-  dispatchKind: "requirement" | "fix" | null,
-  groupHasReviewer: boolean,
-): string[] {
-  if (role === "coordinator") {
-    if (reviewRequestCarryAllowed(dispatchKind, groupHasReviewer)) {
-      const payloadLine =
-        dispatchKind === "fix"
-          ? 'PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷且带 `"lite": true`（fix 票走 L3 精简档:免 spec 对照,只检 diff 架构质量;参见 spec §3.10 / coordinator skill §4.2）。'
-          : "PATCH 时，`diffSummary` 必须带 `review_request` 结构化载荷（完整档,不带 `lite`;参见 spec §3.10 / coordinator skill §4.2）。";
-      return [
-        "## 汇报格式要求(stdout 请按此输出)",
-        "PATCH 自身这条 detached 任务为终态。",
-        payloadLine,
-      ];
-    }
-    return [
-      "## 汇报格式要求(stdout 请按此输出)",
-      "PATCH 自身这条 detached 任务为终态。",
-      "PATCH 时，`diffSummary` 不要携带 `review_request`（本群无 reviewer 成员，两层编制不跑 L3）。",
-    ];
-  }
-  return [
-    "## 汇报格式要求(stdout 请按此输出)",
-    "提交: <commit hash>",
-    "测试: <测试结果摘要>",
-    "Token: <本执行消耗的 token 数量>",
-    "汇报: <做了什么,3-5 句>",
-    '遗留: <未完成事项,无则写"无">',
-  ];
-}
-
-function buildTicket(
+export function buildTicket(
   body: string,
   label: string,
   repoRoot: string,
@@ -3946,6 +3890,8 @@ function buildTicket(
   specHash: string | null = null,
   groupHasReviewer = false,
 ): string {
+  // 策略模板:dispatchKind 专属 → 全局;平台不得写(只读)。
+  const template = loadTicketTemplate(run.dispatchKind);
   const lines = [
     `# CoAgentHub 任务`,
     `执行器: ${label}`,
@@ -3955,15 +3901,23 @@ function buildTicket(
   // 规范驱动下发:specRef 非空时,在「任务内容」之前插入「关联规范」段
   // (Spec 优先于任务内容——执行器严格按 Spec 实现,冲突以 Spec 为准)。
   if (specRef) {
-    lines.push(...buildSpecSection(specRef, specHash));
+    lines.push(
+      ...buildSpecSection(specRef, specHash, template.specInstruction),
+    );
   }
   const role = ticketRole(groupPrompt);
+  // 可携带判定仍走平台机制(与 tasks.ts R3 共用),文案来自模板。
+  const reportHasReviewer = reviewRequestCarryAllowed(
+    run.dispatchKind,
+    groupHasReviewer,
+  );
   lines.push(
     `## 任务内容`,
     body,
-    ...buildExecutionModeSection(role),
-    ...buildReportSection(role, run.dispatchKind, groupHasReviewer),
+    ...buildExecutionModeLines(template, role),
+    ...buildReportLines(template, role, reportHasReviewer),
   );
+  // R5:平台段在模板组装之后强制插入,模板无法删掉 taskId / detached 回写要求。
   const context = buildExecutionContextSection(run);
   lines.splice(4, 0, ...context);
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
