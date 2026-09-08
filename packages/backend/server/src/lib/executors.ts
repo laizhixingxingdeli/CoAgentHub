@@ -86,13 +86,17 @@ export interface ExecutorConfig {
 
 /**
  * 从失败输出解析执行器额度恢复时间(冷却动态化,票8):
- *  - "resets around 13:33"(大小写不敏感)→ 今天该时刻;若该时刻已过,视为
- *    明天同一时刻(下一合理窗口)。
- *  - "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"
- *    (24 小时制)→ 今天该时刻;若已过,视为明天同一时刻。
- *  - "try again in 5 seconds"(大小写不敏感)→ now + N 秒。
- * 解析成功返回冷却到期时刻(epoch ms);无匹配返回 null(调用方回退固定冷却)。
+ *  - "resets around 13:33 UTC+8"(大小写不敏感)→ 该 offset 下今天该时刻;
+ *    已过则明天同一时刻。同行无时区标记 → 不解析(方案 a,见下)。
+ *  - "try again at 3:32 PM UTC+8"(12h+AM/PM)或 "try again at 15:32 UTC-5"
+ *    (24h)→ 同上;无时区标记 → 不解析。
+ *  - "try again in 5 seconds"(大小写不敏感)→ now + N 秒(与时区无关)。
+ * 解析成功返回冷却到期时刻(epoch ms);无匹配返回 null(调用方回退固定冷却:
+ *  queue/orphan 的 `parsedMs ?? now + getRateLimitCooldownMs()` → normalizeCooldownEnd)。
  * now 参数便于测试注入固定基准时间。
+ *
+ * 纯时钟分支(resets around / try again at)按 specs/recovery-clock-parsed-in-
+ * server-timezone.md 方案 (a):必须同行有时区标记,否则不视为可解析恢复时刻。
  */
 export function parseRateLimitRecoveryMs(
   text: string,
@@ -100,6 +104,59 @@ export function parseRateLimitRecoveryMs(
 ): number | null {
   const clean = (text ?? "").replace(ANSI_RE, "");
   return extractRateLimitRecoveryMs(clean, now);
+}
+
+/**
+ * R2 时区标记判据 —— 纯时钟分支(resets around / try again at)**唯一出处**。
+ *
+ * 接受:
+ *   - `UTC±H` / `UTC±HH` / `UTC±HH:MM` / `UTC±HHMM`(大小写不敏感)
+ *   - `GMT±…` 同形(按固定 offset 读,不引入英国夏令时规则)
+ * 不接受(有意):
+ *   - 裸 `Z`:同行常有 ISO 日志时间戳(`…T07:59:13.903Z`),会误吸成 UTC+0
+ *   - 具名缩写(PST/CST/PDT/…):夏令时歧义,没有唯一 offset
+ *   - IANA 名(America/Los_Angeles):供应方限流文案几乎不出现,且需 tz db
+ *
+ * ADR-0009:① 本判据拿「同行显式固定 offset」代替「server 本地时区默认」;
+ * ② 不成立条件 —— 供应方只吐纯时钟、从不带 offset 时,按方案 (a) 不解析,
+ * 回落既有固定冷却(宁可不精确,也不要跨时区整点偏移)。
+ *
+ * @returns 东向 UTC 的分钟数(UTC+8 → 480, UTC-5 → -300);无标记 → null。
+ */
+function matchClockTimezoneOffsetMinutes(fragment: string): number | null {
+  const m = fragment.match(/\b(?:UTC|GMT)([+-])(\d{1,2})(?::?(\d{2}))?/i);
+  if (!m) return null;
+  const hours = Number(m[2]);
+  const mins = Number(m[3] ?? 0);
+  if (hours > 14 || mins > 59) return null;
+  return (m[1] === "+" ? 1 : -1) * (hours * 60 + mins);
+}
+
+/** 含 matchIndex 的那一行文本(纯时钟时区标记的作用域 = 同一行)。 */
+function sameLineSlice(text: string, matchIndex: number): string {
+  const start = text.lastIndexOf("\n", matchIndex - 1) + 1;
+  const nl = text.indexOf("\n", matchIndex);
+  return text.slice(start, nl < 0 ? text.length : nl);
+}
+
+/**
+ * 把 offset 区的民用 HH:MM 换成 epoch ms;若该时刻已过(≤ now)则 +24h。
+ * 用 Date.UTC + 固定分钟 offset,不经过 server 本地 setHours。
+ */
+function clockWithOffsetToUtcMs(
+  now: number,
+  hour: number,
+  minute: number,
+  offsetMinutes: number,
+): number {
+  const shifted = new Date(now + offsetMinutes * 60_000);
+  const y = shifted.getUTCFullYear();
+  const mo = shifted.getUTCMonth();
+  const d = shifted.getUTCDate();
+  let target =
+    Date.UTC(y, mo, d, hour, minute, 0, 0) - offsetMinutes * 60_000;
+  if (target <= now) target += 24 * 60 * 60 * 1000;
+  return target;
 }
 
 /**
@@ -137,28 +194,36 @@ export function extractRateLimitRecoveryMs(
     // continue to the provider-specific recovery forms below.
     if (absoluteMs > now) return absoluteMs;
   }
+  // 纯时钟:必须同行有时区标记(matchClockTimezoneOffsetMinutes 唯一出处)。
+  // 命中纯时钟形态但无标记 → 直接 null,不落入相对时长(避免
+  // "5h window exhausted — resets around 04:33" 把窗口大小 5h 误当恢复时长)。
   const around = clean.match(/resets?\s*around\s+(\d{1,2}):(\d{2})/i);
-  if (around) {
-    const target = new Date(now);
-    target.setHours(Number(around[1]), Number(around[2]), 0, 0);
-    return target.getTime() > now
-      ? target.getTime()
-      : target.getTime() + 24 * 60 * 60 * 1000;
+  if (around && around.index !== undefined) {
+    const offsetMin = matchClockTimezoneOffsetMinutes(
+      sameLineSlice(clean, around.index),
+    );
+    if (offsetMin === null) return null;
+    return clockWithOffsetToUtcMs(
+      now,
+      Number(around[1]),
+      Number(around[2]),
+      offsetMin,
+    );
   }
-  // "try again at 3:32 PM"(12 小时制 + AM/PM)或 "try again at 15:32"(24 小时制):
-  // 事故原文 "try again at 3:32 PM" 即此形态(quota-exhaustion R1/R2)。
+  // "try again at 3:32 PM UTC+8"(12h+AM/PM)或 "try again at 15:32 UTC-5"(24h)。
+  // 事故原文 "try again at 3:32 PM" 无时区 → 方案 (a) 不解析。
   const at = clean.match(/try again at\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i);
-  if (at) {
+  if (at && at.index !== undefined) {
     let hour = Number(at[1]);
     const minute = Number(at[2]);
     const meridiem = at[3]?.toLowerCase();
     if (meridiem === "pm" && hour < 12) hour += 12;
     if (meridiem === "am" && hour === 12) hour = 0;
-    const target = new Date(now);
-    target.setHours(hour, minute, 0, 0);
-    return target.getTime() > now
-      ? target.getTime()
-      : target.getTime() + 24 * 60 * 60 * 1000;
+    const offsetMin = matchClockTimezoneOffsetMinutes(
+      sameLineSlice(clean, at.index),
+    );
+    if (offsetMin === null) return null;
+    return clockWithOffsetToUtcMs(now, hour, minute, offsetMin);
   }
   const retryIn = clean.match(/try again in\s+(\d+)\s*seconds?/i);
   if (retryIn) {

@@ -271,21 +271,28 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     }
   }
 
-  /** 造一个未来时刻的 "H:MM AM/PM" 文本(供 FAKE_TRY_AGAIN_AT)。保证解析后
-   *  落在今天且在未来:跨午夜时逐步回缩,避免 setHours 把目标回落到过去。 */
+  /**
+   * 造一个未来时刻的 "H:MM AM/PM UTC+8" 文本(供 FAKE_TRY_AGAIN_AT)。
+   * 民用时钟按固定 UTC+8 推算(R4:不依赖 server 本地时区);跨该 offset 的午夜
+   * 时逐步回缩,避免目标落到「今天已过」而 +24h。
+   */
   function futureTryAgainAt(minutesAhead: number): string {
-    const base = new Date();
+    const offsetMin = 8 * 60;
+    const now = Date.now();
     let ahead = minutesAhead;
     while (ahead > 0) {
-      const d = new Date(Date.now() + ahead * 60_000);
-      if (d.getDate() === base.getDate()) break;
+      const nowShift = new Date(now + offsetMin * 60_000);
+      const tShift = new Date(now + ahead * 60_000 + offsetMin * 60_000);
+      if (tShift.getUTCDate() === nowShift.getUTCDate()) break;
       ahead -= 5;
     }
-    const d = new Date(Date.now() + Math.max(1, ahead) * 60_000);
-    let h = d.getHours();
+    const tShift = new Date(
+      now + Math.max(1, ahead) * 60_000 + offsetMin * 60_000,
+    );
+    let h = tShift.getUTCHours();
     const meridiem = h >= 12 ? "PM" : "AM";
     h = h % 12 || 12;
-    return `${h}:${String(d.getMinutes()).padStart(2, "0")} ${meridiem}`;
+    return `${h}:${String(tShift.getUTCMinutes()).padStart(2, "0")} ${meridiem} UTC+8`;
   }
 
   /** 标准场景:协调者(群主)+ 执行器(codebuddy)成员就绪。 */
@@ -303,79 +310,114 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
   /* ---------------- R1 识别:parseRateLimitRecoveryMs ---------------- */
 
   describe("parseRateLimitRecoveryMs:try again at HH:MM(12h AM/PM / 24h)", () => {
-    const base = new Date(2026, 7, 14, 8, 0, 0); // 本地 08:00
-    const now = base.getTime();
+    // R4:固定 epoch,不依赖 server 本地时区。
+    // 2026-08-14 00:00:00.000Z == 2026-08-14 08:00 UTC+8。
+    const now = Date.UTC(2026, 7, 14, 0, 0, 0);
+    // UTC+8 下的民用时刻 → epoch:Date.UTC(y,m,d,h,mi) - 8h。
+    const utcPlus8 = (y: number, m: number, d: number, h: number, mi: number, s = 0) =>
+      Date.UTC(y, m, d, h, mi, s) - 8 * 60 * 60 * 1000;
 
-    it("try again at 3:32 PM(12 小时制)→ 今天 15:32", () => {
+    it("纯时钟无时区标记 → null(方案 a,回落固定冷却)", () => {
       expect(
         parseRateLimitRecoveryMs(
           "You've hit your usage limit ... try again at 3:32 PM",
           now,
         ),
-      ).toBe(new Date(2026, 7, 14, 15, 32, 0).getTime());
+      ).toBeNull();
+      expect(parseRateLimitRecoveryMs("try again at 9:05 AM", now)).toBeNull();
+      expect(parseRateLimitRecoveryMs("try again at 15:32", now)).toBeNull();
+      expect(parseRateLimitRecoveryMs("resets around 13:33", now)).toBeNull();
     });
 
-    it("try again at 9:05 AM(12 小时制,上午)→ 今天 09:05", () => {
-      expect(parseRateLimitRecoveryMs("try again at 9:05 AM", now)).toBe(
-        new Date(2026, 7, 14, 9, 5, 0).getTime(),
+    it("try again at 3:32 PM UTC+8(12 小时制)→ 当天 15:32 UTC+8", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "You've hit your usage limit ... try again at 3:32 PM UTC+8",
+          now,
+        ),
+      ).toBe(utcPlus8(2026, 7, 14, 15, 32));
+    });
+
+    it("try again at 9:05 AM UTC+8(12 小时制,上午)→ 当天 09:05 UTC+8", () => {
+      expect(
+        parseRateLimitRecoveryMs("try again at 9:05 AM UTC+8", now),
+      ).toBe(utcPlus8(2026, 7, 14, 9, 5));
+    });
+
+    it("try again at 15:32 UTC+8(24 小时制)→ 当天 15:32 UTC+8", () => {
+      expect(parseRateLimitRecoveryMs("try again at 15:32 UTC+8", now)).toBe(
+        utcPlus8(2026, 7, 14, 15, 32),
       );
     });
 
-    it("try again at 15:32(24 小时制)→ 今天 15:32", () => {
-      expect(parseRateLimitRecoveryMs("try again at 15:32", now)).toBe(
-        new Date(2026, 7, 14, 15, 32, 0).getTime(),
-      );
+    it("try again at 3:32 AM UTC+8 已过(08:00 UTC+8 后)→ 明天 03:32 UTC+8", () => {
+      expect(
+        parseRateLimitRecoveryMs("try again at 3:32 AM UTC+8", now),
+      ).toBe(utcPlus8(2026, 7, 15, 3, 32));
     });
 
-    it("try again at 3:32 AM 已过(08:00 后)→ 明天 03:32(下一合理窗口)", () => {
-      expect(parseRateLimitRecoveryMs("try again at 3:32 AM", now)).toBe(
-        new Date(2026, 7, 15, 3, 32, 0).getTime(),
-      );
+    it("GMT-5 标记与 UTC+8 得到不同 epoch(时区标记真正生效)", () => {
+      const plus8 = parseRateLimitRecoveryMs("try again at 15:32 UTC+8", now);
+      const minus5 = parseRateLimitRecoveryMs("try again at 15:32 GMT-5", now);
+      expect(plus8).toBe(utcPlus8(2026, 7, 14, 15, 32));
+      // now=00:00Z → GMT-5 民用「今天」是 8/13 19:00;15:32 已过 → +24h
+      // → 8/14 15:32 GMT-5 = 8/14 20:32Z。
+      expect(minus5).toBe(Date.UTC(2026, 7, 14, 20, 32, 0));
+      expect(plus8).not.toBe(minus5);
     });
 
-    it("同一行含速率窗口时长与绝对时刻→优先绝对时刻", () => {
+    it("同一行含速率窗口时长与绝对时刻→优先绝对时刻(UTC+8 显式换算)", () => {
       expect(
         parseRateLimitRecoveryMs(
           "429 rate limit: 100000 tokens per 1h, resets 2026-08-15 18:03:10 UTC+8",
           now,
         ),
-      ).toBe(new Date(2026, 7, 15, 18, 3, 10).getTime());
+      ).toBe(utcPlus8(2026, 7, 15, 18, 3, 10));
     });
 
-    it("过去的日志时间戳前缀不会遮蔽 resets around", () => {
+    it("过去的日志时间戳前缀不会遮蔽 resets around(需 UTC±;裸 Z 不算标记)", () => {
+      // 日志戳用 2020(远早于 now):绝对分支无 TZ 时按本地解释,若戳与 now 同日
+      // 会在 TZ=UTC 下被当成「未来恢复时刻」而抢先返回(本票不改绝对无 TZ 分支)。
+      // 裸 Z 在 ISO 日志戳上,不得被当成纯时钟时区标记。
       expect(
         parseRateLimitRecoveryMs(
-          "2026-08-14T07:59:13.903Z WARN 429 rate limited; resets around 13:33",
+          "2020-01-01T07:59:13.903Z WARN 429 rate limited; resets around 13:33",
           now,
         ),
-      ).toBe(new Date(2026, 7, 14, 13, 33, 0).getTime());
-    });
-
-    it("过去的日志时间戳前缀不会遮蔽 try again at", () => {
+      ).toBeNull();
       expect(
         parseRateLimitRecoveryMs(
-          "2026-08-14 07:59:13 ERROR 429 quota exhausted, try again at 3:32 PM",
+          "2020-01-01T07:59:13.903Z WARN 429 rate limited; resets around 13:33 UTC+8",
           now,
         ),
-      ).toBe(new Date(2026, 7, 14, 15, 32, 0).getTime());
+      ).toBe(utcPlus8(2026, 7, 14, 13, 33));
     });
 
-    it("过去的日志时间戳前缀不会遮蔽 try again in", () => {
+    it("过去的日志时间戳前缀不会遮蔽 try again at(带 UTC+8)", () => {
       expect(
         parseRateLimitRecoveryMs(
-          "2026-08-14T07:59:13.903Z ERROR 429 slow down, try again in 300 seconds",
+          "2020-01-01 07:59:13 ERROR 429 quota exhausted, try again at 3:32 PM UTC+8",
+          now,
+        ),
+      ).toBe(utcPlus8(2026, 7, 14, 15, 32));
+    });
+
+    it("过去的日志时间戳前缀不会遮蔽 try again in(相对时长与时区无关)", () => {
+      expect(
+        parseRateLimitRecoveryMs(
+          "2020-01-01T07:59:13.903Z ERROR 429 slow down, try again in 300 seconds",
           now,
         ),
       ).toBe(now + 300_000);
     });
 
-    it("过去的日志时间戳前缀不会遮蔽中文绝对恢复时刻", () => {
+    it("过去的日志时间戳前缀不会遮蔽中文绝对恢复时刻(UTC+8 显式换算)", () => {
       expect(
         parseRateLimitRecoveryMs(
-          "2026-08-14T07:59:13.903Z ERROR 429 将在 2026-08-14 18:03:10 UTC+8 重置",
+          "2020-01-01T07:59:13.903Z ERROR 429 将在 2026-08-14 18:03:10 UTC+8 重置",
           now,
         ),
-      ).toBe(new Date(2026, 7, 14, 18, 3, 10).getTime());
+      ).toBe(utcPlus8(2026, 7, 14, 18, 3, 10));
     });
   });
 
@@ -402,7 +444,8 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
   describe("冷却来源合并与恢复时刻单点解析(R1-R5)", () => {
     it("parsed 冷却不会被未到期 fallback 覆盖,且中文 UTC+8 时刻可解析", () => {
       vi.useFakeTimers();
-      const now = new Date(2026, 7, 31, 10, 0, 0).getTime();
+      // R4:固定 epoch(08:00Z),不依赖 server 本地时区。
+      const now = Date.UTC(2026, 7, 31, 8, 0, 0);
       vi.setSystemTime(now);
       const parsedEnd = now + 60 * 60_000;
       const fallbackEnd = now + 5 * 60 * 60_000;
@@ -423,7 +466,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
           "429 将在 2026-08-31 18:03:10 UTC+8 重置",
           now,
         ),
-      ).toBe(new Date(2026, 7, 31, 18, 3, 10).getTime());
+      ).toBe(Date.UTC(2026, 7, 31, 18, 3, 10) - 8 * 60 * 60 * 1000);
       vi.useRealTimers();
     });
   });
@@ -472,6 +515,51 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
   /* ---------------- R1+R2:usage limit 识别 → 冷却至恢复时刻 → 不重试 ---------------- */
 
   describe("usage limit + try again at HH:MM 识别(验收点 1)", () => {
+    it("纯时钟无时区标记 → 落库 executorCooldownEndMs 走固定冷却兜底(R3/验收3)", async () => {
+      const { coordinator, codebuddy, group } =
+        await setupGroup("quota-pure-clock-fallback");
+      process.env.FAKE_QUOTA_USAGE_LIMIT = "1";
+      // 无 UTC±/GMT± 标记:parseRateLimitRecoveryMs → null →
+      // handleQuotaFailure 的 parsedMs ?? now + getRateLimitCooldownMs()。
+      process.env.FAKE_TRY_AGAIN_AT = "3:32 PM";
+
+      const before = Date.now();
+      const msg = await postMessage(coordinator.id, group.id, {
+        body: "额度耗尽任务(纯时钟无时区)",
+        audience: "participant",
+        audienceRef: codebuddy.id,
+      });
+      const t = await waitForTaskStatus(
+        coordinator.id,
+        group.id,
+        msg.id,
+        "failed",
+      );
+      const after = Date.now();
+      const fallbackMs = getRateLimitCooldownMs();
+      const persistedEnd = t.diffSummary?.executorCooldownEndMs;
+      expect(typeof persistedEnd).toBe("number");
+      // 落库字段必须落在 [before, after] + 固定冷却 窗口内(既有路径,非 0/抛错/自造)。
+      expect(persistedEnd as number).toBeGreaterThanOrEqual(
+        before + fallbackMs - 1_000,
+      );
+      expect(persistedEnd as number).toBeLessThanOrEqual(
+        after + fallbackMs + 1_000,
+      );
+      expect(t.diffSummary?.executorCooldownSource).toBe("fallback");
+      expect(
+        Math.abs(cooldownEndMs({ key: "codebuddy" }) - (persistedEnd as number)),
+      ).toBeLessThan(2_000);
+      expect(t.attempts).toHaveLength(1);
+
+      await clearPersistedExecutorCooldown(
+        testDb as unknown as Parameters<
+          typeof clearPersistedExecutorCooldown
+        >[0],
+        t.id,
+      );
+    }, 30_000);
+
     it("识别为额度失败 → 冷却至恢复时刻 + 不自动重试 + 双通道留痕", async () => {
       const { coordinator, codebuddy, group } =
         await setupGroup("quota-usage-limit");
@@ -480,6 +568,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       // usage limit / try again at(见 dispatch-policy.test.ts)。这里必须跑
       // 真实运行时策略,否则配置路径上的漏判会被私有注入掩盖。
       process.env.FAKE_QUOTA_USAGE_LIMIT = "1";
+      // futureTryAgainAt 已带 UTC+8 标记(方案 a:有标记才解析)。
       const tryAgain = futureTryAgainAt(30);
       process.env.FAKE_TRY_AGAIN_AT = tryAgain;
 
@@ -500,6 +589,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
         `try again at ${tryAgain}`,
         Date.now(),
       );
+      expect(expectedEnd).not.toBeNull();
       expect(
         Math.abs(cooldownEndMs({ key: "codebuddy" }) - (expectedEnd ?? 0)),
       ).toBeLessThan(2_000);
@@ -518,6 +608,7 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       expect(err).toMatch(/预计 .+ 恢复/);
       const persistedEnd = t.diffSummary?.executorCooldownEndMs;
       expect(typeof persistedEnd).toBe("number");
+      expect(t.diffSummary?.executorCooldownSource).toBe("parsed");
 
       // executor-cooldown-lost-on-restart R1/R2/R5:模拟进程内状态丢失后从
       // task.diffSummary 的绝对 epoch ms 恢复,到期时刻必须逐值不变。
