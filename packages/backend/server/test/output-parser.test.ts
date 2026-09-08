@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { OutputEntry } from "@server/lib/executor-task";
 import {
   appendTaskDetail,
@@ -14,6 +16,12 @@ import {
   taskDetailFilePath,
 } from "@server/lib/executor-task";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+/** Checked-in executor samples live here (see specs/tests-depend-on-gitignored-samples). */
+const fixturesDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const fixturePath = (name: string) => join(fixturesDir, name);
+const hasFixture = (...names: string[]) =>
+  names.every((name) => existsSync(fixturePath(name)));
 
 /**
  * 执行器输出解析器(output-parser.ts,spec: live-output-shows-narration-not-actions +
@@ -518,13 +526,15 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(flushed[1].summary).toBe("[汇报 #t2] answer");
   });
 
-  it("真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)", () => {
+  it.skipIf(!hasFixture("atomcode-run.stdout", "atomcode-run.stderr"))(
+    "真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)[需本地样本]",
+    () => {
     const stdoutRaw = readFileSync(
-      "../../../.scratch/probe/samples/atomcode-run.stdout",
+      fixturePath("atomcode-run.stdout"),
       "utf8",
     );
     const stderrRaw = readFileSync(
-      "../../../.scratch/probe/samples/atomcode-run.stderr",
+      fixturePath("atomcode-run.stderr"),
       "utf8",
     );
     const stdoutStripped = stdoutRaw.replace(/\n$/, "");
@@ -547,7 +557,8 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
     expect(summary).toContain("[tool→");
     expect(summary).toContain("[done]");
     expect(summary).toContain("`a.txt` 共有 2 行。");
-  });
+  },
+  );
 
   it("stdout/stderr 交错 chunk 切分时不串流(回归)", () => {
     const parse = createExecutorOutputParser("atomcode");
@@ -1784,19 +1795,17 @@ describe("atomcode:任务 01a04f70-9101 outputTail 重放(裸叙述与 [tokens] 
 });
 
 /**
- * 硬验收 1-4(spec live-output-only-agent-narration):以 .scratch/probe/samples/
+ * 硬验收 1-4(spec live-output-only-agent-narration):以 test/fixtures/
  * 下的**真实样本**为准,界面流(liveStreamText,仅 report)与持久化流
  * (summaryStreamText,全量)分别断言;持久化侧的哈希取 R1 生效前(fd75035a^)
  * 同一份样本的实测值,用来锁死 R3「持久化口径逐字不变」。
+ * 样本缺失时 skip(需本地样本)——不得伪造样本冒充真实采样。
  */
 describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", () => {
-  const samplePath = (name: string) =>
-    `../../../.scratch/probe/samples/${name}`;
-
   function parseSample(key: string, name: string) {
     const parse = createExecutorOutputParser(key);
     return [
-      ...parse(readFileSync(samplePath(name), "utf8"), "stdout"),
+      ...parse(readFileSync(fixturePath(name), "utf8"), "stdout"),
       ...parse.flush(),
     ];
   }
@@ -1804,7 +1813,9 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
   const sha256 = (text: string) =>
     createHash("sha256").update(text, "utf8").digest("hex");
 
-  it("codex 错误样本:界面恰好 2 行(含中途旁白),持久化与改动前逐字节相同", () => {
+  it.skipIf(!hasFixture("codex-error-run.jsonl"))(
+    "codex 错误样本:界面恰好 2 行(含中途旁白),持久化与改动前逐字节相同[需本地样本]",
+    () => {
     const entries = parseSample("codex", "codex-error-run.jsonl");
     const live = entries.filter((e) => e.kind === "report");
     expect(live).toHaveLength(2);
@@ -1823,9 +1834,12 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
       "b73a74be332360908fed0a19751a131ebf7226f1602b53b232f79f4ab2970c7b",
     );
     expect(persisted).toContain("[错误");
-  });
+  },
+  );
 
-  it("codebuddy 样本:界面恰好 1 行,3 条 JSON 信封只留持久化", () => {
+  it.skipIf(!hasFixture("codebuddy-run.jsonl"))(
+    "codebuddy 样本:界面恰好 1 行,3 条 JSON 信封只留持久化[需本地样本]",
+    () => {
     const entries = parseSample("codebuddy", "codebuddy-run.jsonl");
     const live = entries.filter((e) => e.kind === "report");
     expect(live).toHaveLength(1);
@@ -1839,21 +1853,24 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
       "5507f006c69de8f24f8fe7b693ef004d71a939e8ab3043e7ee551e7f0841cdb3",
     );
     expect(liveStreamText(entries).length * 10).toBeLessThan(persisted.length);
-  });
+  },
+  );
 
-  it("atomcode 样本:界面恰好 1 行答案,持久化仍含全部 24 条", () => {
+  it.skipIf(!hasFixture("atomcode-run.stdout", "atomcode-run.stderr"))(
+    "atomcode 样本:界面恰好 1 行答案,持久化仍含全部 24 条[需本地样本]",
+    () => {
     const parse = createExecutorOutputParser("atomcode");
     const entries = [
       // 真实 stdout 未必以换行结尾:去尾换行后答案只能靠 flush 吐出。
       ...parse(
-        readFileSync(samplePath("atomcode-run.stdout"), "utf8").replace(
+        readFileSync(fixturePath("atomcode-run.stdout"), "utf8").replace(
           /\n$/,
           "",
         ),
         "stdout",
       ),
       ...parse(
-        readFileSync(samplePath("atomcode-run.stderr"), "utf8"),
+        readFileSync(fixturePath("atomcode-run.stderr"), "utf8"),
         "stderr",
       ),
       ...parse.flush(),
@@ -1866,23 +1883,23 @@ describe("真实样本:界面仅汇报 + 持久化口径不变(硬验收 1-4)", 
     const persisted = summaryStreamText(entries);
     expect(persisted).toContain("[tool→");
     expect(persisted).toContain("[done]");
-  });
+  },
+  );
 });
 
 /**
  * Pi 专用解析器硬验收(spec live-output-pi-uncovered-shows-thinking-and-tool-results.md §4):
- * 以 .scratch/probe/samples/pi-run.jsonl 真实样本为准:
+ * 以 test/fixtures/pi-run.jsonl 真实样本为准:
  *  - 界面输出恰好 2 行(不含 thinking/tool/票面回显);
  *  - 纯空白 text_end 不进界面;
  *  - 验收脚本必须 import 生产 liveStreamText,不得内联复制。
+ * 样本缺失时 skip(需本地样本)——不得伪造样本冒充真实采样。
  */
 describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
-  const piSample = readFileSync(
-    new URL("../../../../.scratch/probe/samples/pi-run.jsonl", import.meta.url),
-    "utf8",
-  );
-
-  it("Pi 真实样本:界面恰好 2 行,不含 thinking/tool/票面回显", () => {
+  it.skipIf(!hasFixture("pi-run.jsonl"))(
+    "Pi 真实样本:界面恰好 2 行,不含 thinking/tool/票面回显[需本地样本]",
+    () => {
+    const piSample = readFileSync(fixturePath("pi-run.jsonl"), "utf8");
     const parse = createExecutorOutputParser("pi");
     const entries = [...parse(piSample, "stdout"), ...parse.flush()];
 
@@ -1923,7 +1940,8 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
     expect(live).toMatch(
       /^\[汇报 #t\d+\] 好的，我来读取 `a\.txt` 并统计行数\n\[汇报 #t\d+\] `a\.txt` 的内容为：\n\n```\nhello\nworld\n```\n\n\*\*共有 2 行。\*\*\n$/,
     );
-  });
+  },
+  );
 
   it("空白 text_end 不进界面(R2)", () => {
     const parse = createExecutorOutputParser("pi");

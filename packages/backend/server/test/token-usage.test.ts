@@ -8,8 +8,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { collectTokenUsage } from "../src/lib/executor-task/token-usage";
+
+/** Checked-in executor samples live here (see specs/tests-depend-on-gitignored-samples). */
+const fixturesDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const fixturePath = (name: string) => join(fixturesDir, name);
+const hasFixture = (name: string) => existsSync(fixturePath(name));
 
 const cwd = "/tmp/token-usage-project";
 const startedAt = "2026-08-25T10:00:00.000Z";
@@ -356,23 +362,19 @@ describe("platform token usage collection", () => {
     });
   });
 
-  it("pi on the real captured corpus resolves the documented running total, trusted", async () => {
-    // Hard-acceptance style: feed the REAL pi stdout captured by the platform
-    // probe (.scratch/probe/samples/pi-run.jsonl, gitignored local fixture —
-    // same convention as output-parser.test.ts). Expected values are the ones
+  it.skipIf(!hasFixture("pi-run.jsonl"))(
+    "pi on the real captured corpus resolves the documented running total, trusted[需本地样本]",
+    async () => {
+    // Hard-acceptance style: feed the REAL pi stdout from test/fixtures/pi-run.jsonl
+    // (same fixture as output-parser.test.ts). Expected values are the ones
     // documented in spec v1.1: last usage object input=472/output=30 and
-    // cumulative totalTokens=3830. Skipped when the local fixture is absent.
-    const sampleUrl = new URL(
-      "../../../../.scratch/probe/samples/pi-run.jsonl",
-      import.meta.url,
-    );
-    if (!existsSync(sampleUrl)) return;
+    // cumulative totalTokens=3830. skipIf when the fixture is absent — do not forge.
     const result = await collectTokenUsage({
       executorKey: "pi",
       cwd,
       startedAt,
       endedAt,
-      stdout: readFileSync(sampleUrl, "utf8"),
+      stdout: readFileSync(fixturePath("pi-run.jsonl"), "utf8"),
     });
     expect(result.tokenUsage).toEqual({
       inputTokens: 472,
@@ -382,7 +384,8 @@ describe("platform token usage collection", () => {
       source: "generic-jsonl-scan",
       trusted: true,
     });
-  });
+  },
+  );
 
   it("generic fallback for an unknown executor stays untrusted on identical pi-shaped stdout", async () => {
     // The trusted marking is per-executor-key, not per-stdout-shape: the same
