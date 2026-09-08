@@ -9,9 +9,13 @@
 * text=auto eol=lf
 
 # 测试语料:被逐字断言的真实执行器输出。
-# 标成 -text 表示 git 不做任何换行转换 —— 它在任何平台 checkout 出来
-# 都逐字等于入库时的样子,这正是「以真实输出为准」的用例需要的。
-packages/backend/server/test/fixtures/** -text
+# 用 eol=lf(而不是 -text):这些样本入库时就是 LF,断言也要求正文无 \r,
+# 所以要的是「任何平台 checkout 都拿到 LF」。
+#
+# ⚠️ 别改成 -text。-text 是「不做转换、原样存」,在 Windows 上跑
+# `git add --renormalize` 会把 checkout 时被加上的 CRLF 原样写回仓库
+# —— 检视者 2026-09-08 就这么踩过一次,把 152 个 \r 烤进了 blob。
+packages/backend/server/test/fixtures/** text eol=lf
 
 # Windows 本机脚本:由 Windows 工具链执行,保留 CRLF 更合适。
 *.ps1 text eol=crlf
