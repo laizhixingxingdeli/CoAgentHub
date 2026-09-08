@@ -1,8 +1,23 @@
 # Spec: 快照树为空时 `git restore` 报错,回滚被判失败,重试被误终止
 
-> **状态**: Frozen
+> **状态**: Landed(`c05dbe35`,2026-09-08 检视者 L3 通过)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **L3 收口记录(检视者独立复核)**:
+> - 基线自行复跑两文件:`1 failed | 32 passed (33)` ——
+>   `executor-quota-redispatch` 的「普通崩溃」转绿,新增 2 条用例,
+>   唯一残留红是既有的 `验收#3`(Windows 清理阶段 EPERM,与本票无关)。
+> - **R1 判据合格**:用 `git ls-tree -r --name-only <sha>` **正面查树是否为空**,
+>   不靠 stderr 文案(文案会随 git 版本变);`ls-tree` 自身失败仍返回
+>   `{ok:false}`。
+> - **R2 没被放宽**:非空树走原 restore 路径。执行者按要求构造了反向用例 ——
+>   `hash-object -w` → `mktree` → `commit-tree` → `update-ref`,再删掉 blob 文件,
+>   restore 报 `unable to read sha1 file` → 仍 `{ok:false}`。
+>   这是本票最关键的一条,**没有被跳过**。
+> - **缺陷 B 既有验收不倒退**:`验收#1b` / `#2` / `#3b` / `#4` 全绿。
+> - 提交边界:仅票面两文件;用户在途工作未被夹带。
+>
 > **来源**: [rollback-puts-checkpoint-commit-on-head.md](rollback-puts-checkpoint-commit-on-head.md)
 > (Landed `99113e88`)**修复自身引入的回归**,检视者在 R11 第二批的 L3 中
 > 顺藤摸到并复现。
