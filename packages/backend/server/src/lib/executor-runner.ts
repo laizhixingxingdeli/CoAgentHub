@@ -112,6 +112,17 @@ export interface ExecutorRunOptions {
   timeoutMs?: number;
   /** 流式输出回调(边收边回传/写日志);未提供则仅累积到 stdout/stderr。 */
   onOutput?: (chunk: string, source: "stdout" | "stderr") => void;
+  /**
+   * 叠加到 process.env 的执行器配置 env(来源:resolveExecutorCliSpawn 唯一入口)。
+   * 省略时不传 spawn env 选项 —— Node 默认继承父进程,与历史行为一致。
+   * 传入时显式 `{...process.env, ...env}`,保证 CLI 仍有 PATH/HOME 等。
+   */
+  env?: Record<string, string>;
+  /**
+   * 若提供,stdin 管道写入该字符串后 end。
+   * 省略/未用时 stdin 仍为 ignore(inputMode=stdin 未实现期间 resolve 恒不传)。
+   */
+  stdin?: string;
 }
 
 export interface ExecutorRunResult {
@@ -143,6 +154,8 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   const { bin, args, onOutput } = opts;
   const cwd = opts.cwd ?? findRepoRoot();
   const timeoutMs = opts.timeoutMs ?? readTimeoutMs();
+  const stdinPayload = opts.stdin;
+  const useStdin = typeof stdinPayload === "string";
 
   // Windows 的 .cmd 垫片不能直接 spawn(EINVAL),先解析成真实目标;
   // 其他平台与非垫片 bin 原样返回。
@@ -151,11 +164,18 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
   let child: ChildProcess;
   try {
     // detached:独立进程组,停止时 process.kill(-pid, SIGTERM) 可整体终止。
+    // env/stdin 只由 resolveExecutorCliSpawn 决定是否传入(单一消费入口的下游)。
     child = spawn(launcher.bin, launcher.args, {
       cwd,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
+      ...(opts.env
+        ? { env: { ...process.env, ...opts.env } }
+        : {}),
     });
+    if (useStdin && child.stdin) {
+      child.stdin.end(stdinPayload);
+    }
   } catch (e) {
     const err = e as Error;
     // 错误里同时给出配置里的 bin 与实际尝试的 bin:垫片被解析过时,只报其中

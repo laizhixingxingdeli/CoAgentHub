@@ -5,6 +5,10 @@ import db, { type DataBase } from "@server/lib/database";
 import { resolveBin } from "@server/lib/exec-bin";
 import { executorAvailability } from "@server/lib/executor-availability";
 import {
+  EXECUTOR_CONFIG_FIELD_CAPABILITIES,
+  inputModeWriteError,
+} from "@server/lib/executor-config-fields";
+import {
   addExecutorConfig,
   effectiveExecutors,
   findExecutorByKey,
@@ -62,14 +66,14 @@ const CreateExecutorSchema = z
     prompt: z.string().max(1000).optional(),
     /** 同一执行器最大并发 running 任务数;null = 不限制(缺省行为不变)。 */
     maxConcurrency: z.number().int().positive().nullable().optional(),
-    /** 任务书传递方式(见 spec R1.1);null = 按 "path" 处理(既有行为)。 */
+    /** 任务书传递方式;能力表见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode。 */
     inputMode: z
       .enum(["path", "inline", "at-file", "stdin"])
       .nullable()
       .optional(),
-    /** spawn 时注入的额外环境变量(键值对);null = 无。 */
+    /** spawn 叠加 env;能力表见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.env。 */
     env: z.record(z.string(), z.string()).nullable().optional(),
-    /** 输出画像(批2 消费,本批只存不读);null = 走通用解析器。 */
+    /** 输出画像(reserved,只存不读);见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.outputProfile。 */
     outputProfile: z.unknown().nullable().optional(),
   })
   .refine((v) => (v.kind === "a2a" ? !!v.url : !!v.bin), {
@@ -114,6 +118,12 @@ const app2 = app
       } = input;
       // participant.type 已移除;type 仅作 executor_config 展示元数据,缺省 custom。
       const type = input.type ?? "custom";
+
+      // 未实现的 inputMode 取值拒绝写入(R2);存量不追溯,只拦新写入。
+      const modeErr = inputModeWriteError(inputMode ?? null);
+      if (modeErr) {
+        throw new BizError(BizCodeEnum.InvalidRequest, modeErr);
+      }
 
       // 名字唯一:内置 + DB 里已有同名 participant 都算重复(按 agentName 判重)。
       const all = await effectiveExecutors(db);
@@ -298,6 +308,21 @@ const app2 = app
       return c.json({ found: resolvedPath !== null, resolvedPath });
     },
   )
+  // R1:字段能力表唯一 HTTP 出口 —— 与 executor-config-fields.ts 同源,不复制取值。
+  .get(
+    "/field-capabilities",
+    describeRoute({
+      description:
+        "Executor config field capability table (supported/reserved/unimplemented); single source mirrored from EXECUTOR_CONFIG_FIELD_CAPABILITIES",
+      responses: {
+        200: {
+          description: "Capability table",
+          content: { "application/json": {} },
+        },
+      },
+    }),
+    async (c) => c.json(EXECUTOR_CONFIG_FIELD_CAPABILITIES),
+  )
   // R4(specs/quota-misclassified-from-coordinator-narration.md):手动清除执行器
   // 额度冷却 —— 内存登记/到期定时器与持久化标记(task.diffSummary)同清并泵队列;
   // 无冷却时 404,与 DELETE 配置同款(BizError ExecutorNotFound)。注册在 "/:key"
@@ -425,6 +450,14 @@ const app2 = app
           BizCodeEnum.InvalidRequest,
           "memory 仅对 kind=a2a 执行器生效",
         );
+      }
+
+      // 未实现的 inputMode 取值拒绝写入(R2);存量不追溯,只拦新写入。
+      if (input.inputMode !== undefined) {
+        const modeErr = inputModeWriteError(input.inputMode);
+        if (modeErr) {
+          throw new BizError(BizCodeEnum.InvalidRequest, modeErr);
+        }
       }
 
       // 改名唯一性:内置 + DB 已有同名 participant 都算重复(与 POST 同判重)。

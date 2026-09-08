@@ -1,4 +1,10 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -316,6 +322,116 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const diff = task!.diffSummary as Record<string, unknown> | null;
     expect(diff!.hash).toBe("0123456789ab");
     expect(coordinatorId).toBeTruthy();
+  });
+
+  it("R8 e2e:API 存 env+inputMode=at-file → 真 runner → 假执行器读到 env 与 @路径(不只查 DB)", async () => {
+    // node 假执行器:Git Bash sh 会展开 @path 成文件内容,真实 CLI 不会。
+    const probeOut = path.join(fakeDir, "r8-e2e-probe.json");
+    const probeScript = path.join(fakeDir, "r8-e2e-probe.mjs");
+    writeFileSync(
+      probeScript,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        "import { execSync } from 'node:child_process';",
+        `const out = ${JSON.stringify(probeOut)};`,
+        "writeFileSync(out, JSON.stringify({",
+        "  argv: process.argv.slice(2),",
+        "  env: process.env.R8_E2E_ENV_SENTINEL ?? null,",
+        "}));",
+        "execSync('git add -A && git -c user.name=coagenthub-test -c user.email=coagenthub-test@example.com commit -q --allow-empty -m r8-e2e', {stdio:'ignore'});",
+        "console.log('commit 0123456789abcdef0123456789abcdef01234567');",
+        "console.log('汇报:r8 e2e probe');",
+      ].join("\n"),
+    );
+
+    const created = await createExecutor({
+      agentName: "r8e2e",
+      kind: "cli",
+      bin: process.execPath,
+      args: [probeScript, "{ticket}"],
+      inputMode: "at-file",
+      env: { R8_E2E_ENV_SENTINEL: "from-api-config" },
+    });
+    expect(created.status).toBe(200);
+
+    const reg = await app.request("/api/participants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "coord-r8-e2e" }),
+    });
+    const { id: coordinatorId } = (await reg.json()) as { id: string };
+
+    const participantsRes = await app.request("/api/participants");
+    const participants = (await participantsRes.json()) as Array<{
+      id: string;
+      name: string;
+    }>;
+    const target = participants.find((a) => a.name === "r8e2e");
+    expect(target).toBeTruthy();
+
+    const groupRes = await app.request("/api/groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinatorId,
+      },
+      body: JSON.stringify({ title: "r8 e2e env/inputMode" }),
+    });
+    const group = (await groupRes.json()) as { id: string };
+
+    const memberRes = await app.request(`/api/groups/${group.id}/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinatorId,
+      },
+      body: JSON.stringify({ participantId: target!.id, roles: ["executor"] }),
+    });
+    expect(memberRes.status).toBe(200);
+
+    const msgRes = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinatorId,
+      },
+      body: JSON.stringify({
+        body: "r8 e2e 探测任务",
+        audience: "participant",
+        audienceRef: target!.id,
+      }),
+    });
+    expect(msgRes.status).toBe(200);
+    const msg = (await msgRes.json()) as { id: string };
+
+    const deadline = Date.now() + 15_000;
+    let task:
+      | { messageId: string; status: string; executorKey: string | null }
+      | undefined;
+    for (;;) {
+      const tasksRes = await app.request(`/api/groups/${group.id}/tasks`, {
+        headers: { "X-Participant-Id": coordinatorId },
+      });
+      const tasks = (await tasksRes.json()) as (typeof task)[];
+      task = tasks.find((t) => t?.messageId === msg.id);
+      if (task && ["done", "failed", "cancelled"].includes(task.status)) break;
+      if (Date.now() > deadline) throw new Error("r8 e2e task 未在 15s 内终态");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(task!.status).toBe("done");
+    expect(task!.executorKey).toBe("r8e2e");
+
+    // 核心:读假执行器实际写出的探针,而不是 DB 字段。
+    const probe = JSON.parse(readFileSync(probeOut, "utf8")) as {
+      argv: string[];
+      env: string | null;
+    };
+    expect(probe.env).toBe("from-api-config");
+    expect(
+      probe.argv.some(
+        (a) => a.startsWith("@") && a.includes("coagenthub-ticket-"),
+      ),
+    ).toBe(true);
   });
 
   // ── PATCH /api/executors/:key(编辑配置, 执行器管理增强)──────────────────
@@ -784,12 +900,50 @@ describe("执行器配置管理 API(ticket: 接入 Participant)", () => {
     const res = await app.request("/api/executors/r1-patch", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ inputMode: "stdin" }),
+      body: JSON.stringify({ inputMode: "path" }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    // stdin 只保留取值,不实现执行分支(R1.1)。
-    expect(body.inputMode).toBe("stdin");
+    expect(body.inputMode).toBe("path");
+  });
+
+  // ── R2:未实现 inputMode 不得静默成功 ──────────────────────────────
+  it("POST inputMode=stdin → 400 明确说明未实现(不再静默保存)", async () => {
+    const res = await createExecutor({
+      agentName: "R2 Stdin Post",
+      kind: "cli",
+      bin: fakeBin,
+      args: [],
+      inputMode: "stdin",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string; message?: string };
+    expect(body.code).toBe("INVALID_REQUEST");
+    expect(body.message).toMatch(/stdin/);
+    expect(body.message).toMatch(/尚未实现/);
+    expect(body.message).toMatch(/path, inline, at-file/);
+  });
+
+  it("PATCH inputMode=stdin → 400 明确说明未实现", async () => {
+    // r1-patch 由前序「PATCH 更新/清空」用例创建。
+    const res = await app.request("/api/executors/r1-patch", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inputMode: "stdin" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message?: string };
+    expect(body.message).toMatch(/尚未实现/);
+  });
+
+  it("GET /api/executors/field-capabilities 返回与代码同源的能力表", async () => {
+    const { EXECUTOR_CONFIG_FIELD_CAPABILITIES } = await import(
+      "../src/lib/executor-config-fields"
+    );
+    const res = await app.request("/api/executors/field-capabilities");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual(EXECUTOR_CONFIG_FIELD_CAPABILITIES);
   });
 
   // ── R1(specs/executor-availability-visibility-and-queued-child-pinning.md)──

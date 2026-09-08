@@ -73,14 +73,20 @@ export interface ExecutorConfig {
    */
   maxConcurrency?: number;
   /**
-   * 任务书传递方式(见 spec R1.1):path = 任务书文件路径作为参数(缺省)/
-   * inline = 任务书正文作为参数 / at-file = 路径前缀 `@` / stdin = 正文经 stdin
-   * 喂入。⚠️ stdin 当前 runner 未实现,只保留取值;null/缺省按 "path" 处理。
+   * 任务书传递方式。取值能力见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode
+   * (executor-config-fields.ts,唯一出处);由 resolveExecutorCliSpawn 消费。
+   * null/缺省按 "path" 处理。
    */
   inputMode?: "path" | "inline" | "at-file" | "stdin";
-  /** spawn 时注入的额外环境变量(键值对);缺省 = 无。 */
+  /**
+   * spawn 时叠加的额外环境变量;由 resolveExecutorCliSpawn 消费后交给 runner。
+   * 能力状态见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.env。
+   */
   env?: Record<string, string>;
-  /** 输出画像(批2 消费,本批只存不读);缺省 = 走通用解析器。 */
+  /**
+   * 输出画像。能力状态 reserved(ADR-0008 分期,只存不读)——
+   * 见 EXECUTOR_CONFIG_FIELD_CAPABILITIES.outputProfile。
+   */
   outputProfile?: unknown;
 }
 

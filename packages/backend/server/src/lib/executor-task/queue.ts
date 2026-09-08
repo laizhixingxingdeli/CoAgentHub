@@ -28,6 +28,7 @@ import {
   resetToCheckpoint,
   runExecutor,
 } from "@server/lib/executor-runner";
+import { resolveExecutorCliSpawn } from "@server/lib/executor-config-fields";
 import {
   type ExecutorConfig,
   findExecutorByParticipant,
@@ -2156,19 +2157,20 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       }
 
       // hermes 之类的 participant 需要提示词文本而不是文件路径:{ticketContent}
-      // 把刚写好的任务书全文内联进参数;{model} 占位由 renderExecutorArgs 处理
-      // (无 model 时移除该参数项,避免 CLI 收到空参数)。
+      // inputMode/env 的解读**只**走 resolveExecutorCliSpawn(单一消费入口,R3);
+      // {model} 占位由 renderExecutorArgs 处理(无 model 时移除该参数项)。
       const ticketContent = readFileSync(ticketPath, "utf8");
-      const args = renderExecutorArgs(
-        ex.args.map((a) =>
-          a
-            .replaceAll("{ticket}", ticketPath)
-            .replaceAll("{ticketContent}", ticketContent),
-        ),
-        ex.model,
-      );
+      const spawnPlan = resolveExecutorCliSpawn({
+        argsTemplate: ex.args,
+        model: ex.model,
+        inputMode: ex.inputMode,
+        env: ex.env,
+        ticketPath,
+        ticketContent,
+        renderArgs: renderExecutorArgs,
+      });
       console.log(
-        `[executor] server 侧 spawn: ${ex.bin} ${args.join(" ")} (cwd=${repoRoot}, group=${run.groupKey}, task=${taskId})`,
+        `[executor] server 侧 spawn: ${ex.bin} ${spawnPlan.args.join(" ")} (cwd=${repoRoot}, group=${run.groupKey}, task=${taskId})`,
       );
       // R1:登记属主实例(本 server pid)——启动兜底据此区分「本实例的任务」与
       // 「另一个活实例的任务」,不再把同库异端口的实例启动当成生产重启。
@@ -2177,8 +2179,10 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       const stripAnsiChunk = createAnsiStripper();
       handle = runExecutor({
         bin: ex.bin,
-        args,
+        args: spawnPlan.args,
         cwd: repoRoot,
+        ...(spawnPlan.envOverlay ? { env: spawnPlan.envOverlay } : {}),
+        ...(spawnPlan.stdin != null ? { stdin: spawnPlan.stdin } : {}),
         onOutput: (chunk, source) => {
           // 流式日志 + 实时进度:server 控制台保留原样(带色便于排查);入环形
           // 缓冲(includeOutput 拉取/断线重连用)与 WS 广播(task_output 事件)
