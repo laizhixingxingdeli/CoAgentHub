@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   groupMessageClosure as groupMessageClosureTable,
   groupMessage as groupMessageTable,
@@ -14,6 +15,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DataBase } from "../src/lib/database";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 多协调者并存与工作树级协调串行
@@ -35,9 +37,9 @@ import { seedBuiltinExecutorConfigs, testDb } from "./db";
  */
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-wsgate-bin-"));
-const fakeBin = path.join(fakeDir, "fake-agent.sh");
+const fakeScript = path.join(fakeDir, "fake-agent.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'if [ -n "$FAKE_GATE_SLEEP_SECS" ]; then sleep "$FAKE_GATE_SLEEP_SECS"; fi',
@@ -54,7 +56,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 // 三个内置 key 都指向同一个假 bin:协调者 A / 协调者 B / 执行器各用不同 key,
 // 互不干扰(执行器级并发上限按 key 聚合)。
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
@@ -311,6 +315,20 @@ describe.sequential("工作树级协调串行(spec multiple-coordinators v1.3)",
 
   beforeAll(async () => {
     await seedBuiltinExecutorConfigs();
+    // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+    if (fakeArgsPrefix.length > 0) {
+      for (const key of ["codebuddy", "codex", "executor"] as const) {
+        const [row] = await testDb
+          .select()
+          .from(executorConfigTable)
+          .where(eq(executorConfigTable.key, key));
+        if (!row) continue;
+        await testDb
+          .update(executorConfigTable)
+          .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+          .where(eq(executorConfigTable.key, key));
+      }
+    }
   });
 
   it("验收 1:协调者 A 进程存活期间 B 的协调票排队;A 进程退出后 B 被拉起", async () => {

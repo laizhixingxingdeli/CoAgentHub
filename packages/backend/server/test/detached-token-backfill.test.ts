@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   type TaskAttempt,
   task as taskTable,
@@ -13,15 +14,16 @@ import type { DataBase } from "../src/lib/database";
 import { backfillDetachedClosedTokenFields } from "../src/lib/executor-task";
 import { createTestApp } from "./app";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 const runtimeDb = testDb as unknown as DataBase;
 
 // fake bin:续跑任务以 detached 方式派发给协调者,进程起来后先睡(给测试留出
 // 进程内 PATCH 的窗口),再打印一行通用扫描可识别的 token 账本后退出。
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-detached-bin-"));
-const fakeBin = path.join(fakeDir, "fake-resume-executor.sh");
+const fakeScript = path.join(fakeDir, "fake-resume-executor.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     "sleep 1",
@@ -29,7 +31,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 // reasonix 无定制采集器 → 走通用 JSONL 扫描,采集结果只由 stdout 决定。
 process.env.EXECUTOR_BIN_REASONIX = fakeBin;
 
@@ -203,6 +207,20 @@ async function waitUntil<T>(
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["reasonix"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("detached 任务采集落库后补写 diffSummary token 字段", () => {
