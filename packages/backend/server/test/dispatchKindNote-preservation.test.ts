@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -22,6 +23,7 @@ import { markTaskCancelled } from "../src/lib/executor-task/notify";
 import type { DataBase } from "../src/lib/database";
 import { createTestApp } from "./app";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 // PGlite 与 node-postgres 的 drizzle 实例驱动类型不兼容(与
 // executor-report-quota / detached-token-backfill 同款 cast);
@@ -50,9 +52,9 @@ const NOTE = "dispatchKind 由 findings 缺省推定为 fix,未由检视者显�
 // fake bin:结构化四段汇报(票7 协议)后 exit 0,走 queue.ts 真实完成回填
 // 路径(覆盖 diffSummary 写 outputTail/claimVerification/tokenUsage)。
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-dkn-bin-"));
-const fakeBin = path.join(fakeDir, "fake-dkn-codebuddy.sh");
+const fakeScript = path.join(fakeDir, "fake-dkn-codebuddy.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // sleep 留出测试写 diffSummary 留痕的窗口(完成回填读旧值在前)。
@@ -62,7 +64,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 // executor key(内置 AtomCode)无专用提取器,若任务落到它身上会 spawn 真实
 // bin;本文件只用 codebuddy 成员,此覆盖是兜底(防其它用例残留干扰)。
@@ -80,6 +84,20 @@ beforeEach(() => {
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("共享 helper preserveDispatchKindNote(R2 保留规则单点)", () => {

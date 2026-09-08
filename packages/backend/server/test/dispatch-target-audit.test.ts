@@ -1,16 +1,20 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import {
+  executorConfig as executorConfigTable,
+  task as taskTable,
+} from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-audit-bin-"));
-const fakeBin = path.join(fakeDir, "fake-executor.sh");
+const fakeScript = path.join(fakeDir, "fake-executor.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     'echo "commit 0123456789abcdef0123456789abcdef01234567"',
@@ -18,7 +22,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 
@@ -37,6 +43,20 @@ afterAll(() => {
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("自派警告与下发目标审计", () => {

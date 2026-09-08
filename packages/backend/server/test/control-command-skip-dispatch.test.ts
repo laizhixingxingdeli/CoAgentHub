@@ -9,12 +9,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  executorConfig as executorConfigTable,
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 控制指令只走控制通道(fix 票):「停止/stop/回滚 [taskId]」定向 coordinator
@@ -40,9 +42,9 @@ const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-ctl-skip-bin-"));
 // detached/普通任务完成 git 提交的标记目录(用例等 marker 出现才结束,避免
 // afterEach kill 打断 git 提交留下 index.lock)。
 const markerDir = mkdtempSync(path.join(tmpdir(), "coagenthub-ctl-skip-done-"));
-const fakeBin = path.join(fakeDir, "fake-executor.sh");
+const fakeScript = path.join(fakeDir, "fake-executor.sh");
 writeFileSync(
-  fakeBin,
+  fakeScript,
   [
     "#!/bin/sh",
     // 弱验收要求工作树干净 + HEAD 有新提交:真正提交一次(显式身份,CI 无全局
@@ -55,7 +57,9 @@ writeFileSync(
     "exit 0",
   ].join("\n"),
 );
-chmodSync(fakeBin, 0o755);
+chmodSync(fakeScript, 0o755);
+const { bin: fakeBin, argsPrefix: fakeArgsPrefix } =
+  resolveFakeExecutor(fakeScript);
 process.env.EXECUTOR_BIN_EXECUTOR = fakeBin;
 process.env.EXECUTOR_BIN_CODEBUDDY = fakeBin;
 
@@ -71,6 +75,20 @@ const { isControlCommand, isExecutorTaskTarget } = await import(
 
 beforeAll(async () => {
   await seedBuiltinExecutorConfigs();
+  // win32: EXECUTOR_BIN 只覆盖 bin;把脚本路径拼进 args 最前面,原占位参数顺序不变。
+  if (fakeArgsPrefix.length > 0) {
+    for (const key of ["codebuddy", "executor"] as const) {
+      const [row] = await testDb
+        .select()
+        .from(executorConfigTable)
+        .where(eq(executorConfigTable.key, key));
+      if (!row) continue;
+      await testDb
+        .update(executorConfigTable)
+        .set({ args: withFakeExecutorArgs(fakeArgsPrefix, row.args ?? []) })
+        .where(eq(executorConfigTable.key, key));
+    }
+  }
 });
 
 describe("control 导出:isControlCommand 与控制通道共用唯一判定", () => {
