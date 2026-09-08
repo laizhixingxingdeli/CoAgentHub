@@ -1,8 +1,52 @@
 # Spec: 仓库没有 `.gitattributes`,Windows 上换行被改写,fixture 断言与格式检查双双失真
 
-> **状态**: Frozen
+> **状态**: Landed(`b9cd6f37` + `87fb03ad`,2026-09-08 由**检视者亲自实施**)
 > **版本**: 1.0
 > **日期**: 2026-09-08
+>
+> **为什么检视者自己做而不派发**:本票要跑 `git add --renormalize` 扫全仓库,
+> 而工作树里有用户**未提交**的 567 行报告。今晚已经因为这类操作丢过三次工作,
+> 这一步不外包。
+>
+> **实施记录(含检视者自己踩的坑,原样记下)**:
+>
+> 1. **第一版规则写错了。** `test/fixtures/** -text` 是「不做转换、原样存」——
+>    而在 Windows 上跑 `--renormalize` 时,工作树里已经是 checkout 转出来的 CRLF,
+>    于是**原样写回仓库**。该 fixture 的 blob 从 **0 个 `\r` 变成 152 个**,
+>    把问题烤进了历史,方向正好反了。
+>    `87fb03ad` 改为 `text eol=lf` 并把四个 fixture 的 blob 恢复,
+>    `.gitattributes` 注释里写明了「别改回 `-text`」及原因。
+>
+> 2. **`.gitattributes` 单独不够。** 本机 `.git/config` 有
+>    `core.autocrlf=true`,实测它**压得过 `text=auto`,压不过显式 `text`**:
+>
+>    | 文件 | `git check-attr` | checkout 结果 |
+>    |---|---|---|
+>    | `test/fixtures/**`(显式规则) | `text: set` | ✅ LF |
+>    | 其它(走 `* text=auto`) | `text: auto` | ❌ CRLF |
+>
+>    **用户 2026-09-08 拍板关掉它**(`git config core.autocrlf false`,
+>    仓库本地,不动全局),让 `.gitattributes` 说了算。
+>
+> 3. **工作树刷新的正确姿势**:`git checkout-index -f` 对**已存在**的文件
+>    不会真的重写。必须**先删再取**。检视者用
+>    `git ls-files -z -- <限定范围> | xargs -0 rm -f` 再
+>    `xargs -0 git checkout-index -f --`,范围严格限定在 `packages/` 与
+>    根级代码文件,**始终排除 `docs/`**;`start.ps1` 未跟踪,天然不受影响。
+>    ⚠️ 中途有一条带 `|| git checkout -- .` 回退分支的命令被权限分类器拦下,
+>    **拦对了** —— 那个回退会覆盖掉用户的报告。
+>
+> **实测结果**:
+>
+> | 项 | 改前 | 改后 |
+> |---|---|---|
+> | `output-parser` + `token-usage` | `1 failed \| 125 passed (132)` | **`0 failed \| 126 passed (132)`** |
+> | `npx biome check .` 错误数 | **360** | **63** |
+> | 规范化涉及文件的实质改动(`git diff -w`) | — | **空**(纯换行) |
+> | 用户在途工作 | ` M` + `??` | **原样** |
+>
+> 剩余 63 条经抽查是**真实的格式漂移**(行太长、import 顺序),
+> 不是换行噪音 —— 属既有问题,不在本票范围。
 > **来源**: [tests-depend-on-gitignored-samples.md](tests-depend-on-gitignored-samples.md)
 > 修好 fixture 加载后**新暴露**(不是新造)的一条红;
 > 检视者顺查发现根因比那一条更广。
