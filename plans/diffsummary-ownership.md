@@ -88,8 +88,8 @@
 | 验收方法 | 票面列出的 server 测试文件（见 spec 基线清单）定向 `npx vitest run`。构造场景至少：① spawn 写入 `platform.ownerServerPid` 后 CLI/队列 `done`/`failed`，读库仍有该 pid；② 先有 `dispatchKindNote`+`rollbackSkipped`，`markTaskCancelled` 与 `control` 回滚后两者仍在（回滚可覆盖 `error`）；③ PATCH 只带 `summary`+`review_request`，既有 `tokenUsage` 与 `platform.resumeOf` 仍在；④ 在**单一** scheduling 写入点增加字段后，done/fail/PATCH/cancel **均**无需新 preserve 函数即可保留该字段（用单测证明：grep 写路径无新的 `preserveFoo`）。 |
 | specRef | `specs/diffsummary-ownership.md` |
 | specHash | `5f81618be636176048a82702c2c3c38a96898ab2`(检视者 2026-09-09 冻结) |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | _离线直调,无平台 task_;实现提交 `3269d309` |
+| 状态 | **done**(检视者 2026-09-09 L3 通过:A1/C2 两条 rg 均达标,写路径零 preserve 调用、未长出第三个 preserveXxx;B2–B5/C1 全走最终产物;`1 failed | 71 passed (72)`,那 1 红是既有 Windows EPERM 清理红,零回归) |
 
 ### W3 — 历史 JSON、API 与页面形状回归
 
