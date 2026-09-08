@@ -142,20 +142,22 @@ describe("classifyQuotaFailure:结构证据与自指排除(伪额度回显修复
     ).toBe(false);
   });
 
-  it("exit 0 + resets around 18:33 → 仍配额,冷却解析至当天 18:33(验收 2)", () => {
+  it("exit 0 + resets around 18:33 UTC+8 → 仍配额,冷却解析至当天 18:33 UTC+8(验收 2)", () => {
     useRealPatterns();
+    // 意图:exit 0 + 可解析恢复时刻仍构成配额证据,并冷却至该时刻。
+    // 方案 a 要求时区标记——给样本补 UTC+8,保留原验证价值(优于改期望为 null)。
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 7, 29, 10, 0, 0)); // 本地 10:00
+    // 固定 epoch:2026-08-29 02:00:00Z == 10:00 UTC+8。
+    const now = Date.UTC(2026, 7, 29, 2, 0, 0);
+    vi.setSystemTime(now);
     try {
-      const verdict = classifyQuotaFailure(
-        ["usage limit reached — resets around 18:33"],
-        { exitCode: 0 },
-      );
+      const line = "usage limit reached — resets around 18:33 UTC+8";
+      const verdict = classifyQuotaFailure([line], { exitCode: 0 });
       expect(verdict.isQuota).toBe(true);
-      // 冷却到解析出的恢复时刻(与 queue.handleQuotaFailure 同源解析)。
-      expect(
-        parseRateLimitRecoveryMs("usage limit reached — resets around 18:33"),
-      ).toBe(new Date(2026, 7, 29, 18, 33, 0).getTime());
+      // 18:33 UTC+8 = 10:33Z(与 queue.handleQuotaFailure 同源解析)。
+      expect(parseRateLimitRecoveryMs(line, now)).toBe(
+        Date.UTC(2026, 7, 29, 10, 33, 0),
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -213,61 +215,74 @@ describe("classifyQuotaFailure:结构证据与自指排除(伪额度回显修复
     ).toBeNull();
   });
 
-  it("样本 1: [rate-limited] window exhausted + resets around 04:33 → quota(零产出/exit 0 不阻止)", () => {
+  it("样本 1: [rate-limited] window exhausted + resets around 04:33 UTC+8 → quota(零产出/exit 0 不阻止)", () => {
     useRealPatterns();
+    // 意图:错误行形状 + 可解析恢复时刻 → quota;补 UTC+8 保留「下一窗口」解析断言。
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 0)); // 20:00, 04:33 已过
+    // 2026-08-29 12:00Z == 20:00 UTC+8;04:33 UTC+8 已过 → +24h。
+    const now = Date.UTC(2026, 7, 29, 12, 0, 0);
+    vi.setSystemTime(now);
     try {
-      const line = "[rate-limited] 5h window exhausted — resets around 04:33";
+      const line =
+        "[rate-limited] 5h window exhausted — resets around 04:33 UTC+8";
       const verdict = classifyQuotaFailure([line], {
         exitCode: 0,
         taskBook: "无关内容",
       });
       expect(verdict.isQuota).toBe(true);
       expect(verdict.matchedLine).toBe(line);
-      // 恢复时刻应落到下一合理窗口(明天 04:33)。
-      expect(parseRateLimitRecoveryMs(line)).toBe(
-        new Date(2026, 7, 30, 4, 33, 0).getTime(),
+      // 明天 04:33 UTC+8 = 20:33Z(8/29 相对 now 已过 → 8/30 04:33 UTC+8)。
+      expect(parseRateLimitRecoveryMs(line, now)).toBe(
+        Date.UTC(2026, 7, 29, 20, 33, 0),
       );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("样本 2: 执行器额度限制 + resets around 18:33 → quota, cooldown 至明天 18:33", () => {
+  it("样本 2: 执行器额度限制 + resets around 18:33 UTC+8 → quota, cooldown 至明天 18:33 UTC+8", () => {
     useRealPatterns();
+    // 意图:中文「额度限制」行无 PROVIDER_ERROR_LINE_SHAPES 命中,恢复时刻是
+    // 唯一结构证据。无时区标记 → parse null → isQuota false,原验证价值尽失;
+    // 必须补 UTC+8 而非改期望。
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 0)); // 20:00, 18:33 已过
+    const now = Date.UTC(2026, 7, 29, 12, 0, 0); // 20:00 UTC+8
+    vi.setSystemTime(now);
     try {
-      const line = "exit 0(执行器额度限制,预计 ... resets around 18:33)";
+      const line =
+        "exit 0(执行器额度限制,预计 ... resets around 18:33 UTC+8)";
       const verdict = classifyQuotaFailure([line], {
         exitCode: 0,
         taskBook: "无关内容",
       });
       expect(verdict.isQuota).toBe(true);
       expect(verdict.matchedLine).toBe(line);
-      expect(parseRateLimitRecoveryMs(line)).toBe(
-        new Date(2026, 7, 30, 18, 33, 0).getTime(),
+      // 18:33 UTC+8 相对 20:00 UTC+8 已过 → 明天 18:33 UTC+8 = 10:33Z 8/30。
+      expect(parseRateLimitRecoveryMs(line, now)).toBe(
+        Date.UTC(2026, 7, 30, 10, 33, 0),
       );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("样本 3: usage limit + try again at 7:50 PM → quota, cooldown 至 19:50", () => {
+  it("样本 3: usage limit + try again at 7:50 PM UTC+8 → quota, cooldown 至 19:50 UTC+8", () => {
     useRealPatterns();
+    // 意图:quota + 冷却至 19:50;补 UTC+8 保留时刻断言。
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 7, 29, 14, 0, 0)); // 14:00, 19:50 未过
+    const now = Date.UTC(2026, 7, 29, 6, 0, 0); // 14:00 UTC+8
+    vi.setSystemTime(now);
     try {
-      const line = "usage limit. ... try again at 7:50 PM";
+      const line = "usage limit. ... try again at 7:50 PM UTC+8";
       const verdict = classifyQuotaFailure([line], {
         exitCode: 0,
         taskBook: "无关内容",
       });
       expect(verdict.isQuota).toBe(true);
       expect(verdict.matchedLine).toBe(line);
-      expect(parseRateLimitRecoveryMs(line)).toBe(
-        new Date(2026, 7, 29, 19, 50, 0).getTime(),
+      // 19:50 UTC+8 = 11:50Z。
+      expect(parseRateLimitRecoveryMs(line, now)).toBe(
+        Date.UTC(2026, 7, 29, 11, 50, 0),
       );
     } finally {
       vi.useRealTimers();
@@ -600,7 +615,10 @@ describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", (
         // R7-c:耗尽关键词先于时长判定(短相对时长 + 耗尽关键词 → exhausted)。
         { line: "[rate-limited] usage limit reached, try again in 5 seconds", exitCode: 1, kind: "exhausted", note: "R7-c 耗尽关键词先于短时长" },
         // R7-a:绝对时刻距 now ≤ 60s → transient(时钟形态,距 now 30s)。
-        { line: "[rate-limited] try again at 20:01", exitCode: 1, kind: "transient", note: "R7-a 绝对时刻距 now ≤ 60s" },
+        // 方案 a 需时区标记:补 UTC+8;表头 setSystemTime 为本地 20:00:30,
+        // 在 UTC+8 机器上 20:01 UTC+8 恰距 now 30s(与表内中文绝对日
+        // 期用例共享同一 now,不在本票重写整表 TZ 锚定)。
+        { line: "[rate-limited] try again at 20:01 UTC+8", exitCode: 1, kind: "transient", note: "R7-a 绝对时刻距 now ≤ 60s" },
       ];
       for (const c of cases) {
         const verdict = classifyQuotaFailure([c.line], { exitCode: c.exitCode });

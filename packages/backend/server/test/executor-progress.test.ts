@@ -334,22 +334,21 @@ describe("任务面板增强批次 server 侧测试", () => {
   /* ---------------- 冷却动态化:恢复时间解析 ---------------- */
 
   describe("parseRateLimitRecoveryMs(冷却恢复时间解析)", () => {
-    // 用本机时区构造「本地时间」基准,期望值按同样解释(时区无关)。
-    const base = new Date(2026, 7, 14, 8, 0, 0); // 本地 08:00
-    const now = base.getTime();
+    // R4:固定 epoch;纯时钟无时区标记按方案 (a) 返回 null(回落固定冷却)。
+    const now = Date.UTC(2026, 7, 14, 0, 0, 0); // 2026-08-14 00:00Z == 08:00 UTC+8
 
-    it("resets around HH:MM → 今天该时刻(未过)", () => {
-      const end = parseRateLimitRecoveryMs(
-        "[rate-limited] 5h window exhausted — resets around 13:33",
-        now,
-      );
-      // 本地 13:33 晚于基准 08:00 → 精确到期(不跨天,无时区歧义)。
-      expect(end).toBe(new Date(2026, 7, 14, 13, 33, 0).getTime());
+    it("resets around HH:MM 无时区标记 → null(方案 a)", () => {
+      // 意图:纯时钟解析契约。新契约下无 UTC±/GMT± 不视为可解析恢复时刻。
+      expect(
+        parseRateLimitRecoveryMs(
+          "[rate-limited] 5h window exhausted — resets around 13:33",
+          now,
+        ),
+      ).toBeNull();
     });
 
-    it("resets around HH:MM 已过 → 明天同一时刻(下一合理窗口)", () => {
-      const end = parseRateLimitRecoveryMs("resets around 03:00", now);
-      expect(end).toBe(new Date(2026, 7, 15, 3, 0, 0).getTime());
+    it("resets around HH:MM 已过且无时区标记 → null(方案 a,不跨天推算)", () => {
+      expect(parseRateLimitRecoveryMs("resets around 03:00", now)).toBeNull();
     });
 
     it("Try again in N seconds(大小写不敏感)→ now + N 秒", () => {
@@ -772,12 +771,23 @@ describe("任务面板增强批次 server 侧测试", () => {
       const { coordinator, codebuddy, group } = await setupGroup();
       __setRateLimitForTests(300_000, QUOTA_PATTERNS);
       // FAKE_QUOTA_RESETS_EXIT0:尾部打印 "usage limit reached — resets around
-      // HH:MM"(未来时刻)后 exit 0 → 成功路径仍保留真额度检测:判配额 + 冷却至
-      // 解析出的恢复时刻 + diffSummary.quotaMatchedLine 记录命中原始行。
-      const target = new Date(Date.now() + 25 * 60_000);
-      // 跨午夜时 setHours 会回落到过去 → 保守不延长(冷却瞬间过期),断言改用
-      // 「冷却已登记」;未跨午夜则断言精确到期。
-      const resetsAt = `${target.getHours()}:${String(target.getMinutes()).padStart(2, "0")}`;
+      // HH:MM UTC+8"(未来时刻,方案 a 需时区标记)后 exit 0 → 成功路径仍保留
+      // 真额度检测:判配额 + 冷却至解析出的恢复时刻 + quotaMatchedLine。
+      // 民用时钟按固定 UTC+8 推算(R4:不依赖 server 本地时区);跨 offset 午夜
+      // 时逐步回缩,避免目标落到「今天已过」而 +24h。
+      const offsetMin = 8 * 60;
+      let ahead = 25;
+      const origin = Date.now();
+      while (ahead > 0) {
+        const nowShift = new Date(origin + offsetMin * 60_000);
+        const tShift = new Date(origin + ahead * 60_000 + offsetMin * 60_000);
+        if (tShift.getUTCDate() === nowShift.getUTCDate()) break;
+        ahead -= 5;
+      }
+      const tShift = new Date(
+        origin + Math.max(1, ahead) * 60_000 + offsetMin * 60_000,
+      );
+      const resetsAt = `${tShift.getUTCHours()}:${String(tShift.getUTCMinutes()).padStart(2, "0")} UTC+8`;
       process.env.FAKE_QUOTA_RESETS_EXIT0 = "1";
       process.env.FAKE_RESETS_AT = resetsAt;
       const msg = await postMessage(coordinator.id, group.id, {
@@ -805,6 +815,7 @@ describe("任务面板增强批次 server 侧测试", () => {
       const expectedEnd = parseRateLimitRecoveryMs(
         `usage limit reached — resets around ${resetsAt}`,
       );
+      expect(expectedEnd).not.toBeNull();
       if (expectedEnd !== null && expectedEnd > Date.now() + 10_000) {
         expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
         expect(isInCooldown({ key: "codebuddy" })).toBe(true);

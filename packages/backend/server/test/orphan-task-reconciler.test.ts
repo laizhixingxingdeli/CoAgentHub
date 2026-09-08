@@ -21,6 +21,7 @@ import {
   getRateLimitCooldownMs,
   isInCooldown,
 } from "../src/lib/executor-task/state";
+import { parseRateLimitRecoveryMs } from "../src/lib/executors";
 import {
   reconcileOrphanTasks,
   startOrphanReconciler,
@@ -913,7 +914,7 @@ describe("孤儿任务周期收敛", () => {
 
   // ---- 本票(quota-failure-on-clean-exit 语义复用):判死前检查已捕获输出尾部 20 行 ----
 
-  it("输出尾部 20 行含 usage limit + try again at 7:50 PM → 额度收敛:failed + executorCooldownEndMs + 冷却 + error 用既有额度文案含 ETA", async () => {
+  it("输出尾部 20 行含 usage limit + try again at 7:50 PM UTC+8 → 额度收敛:failed + executorCooldownEndMs + 冷却 + error 用既有额度文案含 ETA", async () => {
     const participant = await registerParticipant({ name: "orc-quota-a" });
     const group = await createGroup(participant.id, "孤儿收敛-额度尾部");
     const task = await insertTaskRow({
@@ -923,12 +924,12 @@ describe("孤儿任务周期收敛", () => {
       executorPid: deadPid(),
     });
     // 模拟 detached 执行器已捕获输出:额度关键词与恢复时刻都在尾部 20 行内。
-    appendTaskOutput(
-      task.id,
-      "some work\nYou've hit your usage limit. try again at 7:50 PM\n",
-    );
-    // 固定基准时间(本地 10:00),冷却解析与冷却登记都以它为基准,断言确定性。
-    const now = new Date(2026, 7, 29, 10, 0, 0);
+    // 方案 a:纯时钟需时区标记——补 UTC+8,保留「冷却至解析时刻」原验证价值。
+    const recoveryLine =
+      "You've hit your usage limit. try again at 7:50 PM UTC+8";
+    appendTaskOutput(task.id, `some work\n${recoveryLine}\n`);
+    // 固定 epoch:2026-08-29 02:00Z == 10:00 UTC+8。
+    const now = new Date(Date.UTC(2026, 7, 29, 2, 0, 0));
     vi.useFakeTimers();
     vi.setSystemTime(now);
     try {
@@ -940,8 +941,12 @@ describe("孤儿任务周期收敛", () => {
       const err = String(summary.error);
       expect(err).toContain("执行器额度限制");
       expect(err).toMatch(/预计 .+ 恢复/);
-      // 冷却至解析出的恢复时刻:7:50 PM(12 小时制)→ 当天 19:50。
-      const expectedEnd = new Date(2026, 7, 29, 19, 50, 0, 0).getTime();
+      // 冷却至解析出的恢复时刻(与 parseRateLimitRecoveryMs 同源)。
+      const expectedEnd = parseRateLimitRecoveryMs(
+        recoveryLine,
+        now.getTime(),
+      );
+      expect(expectedEnd).not.toBeNull();
       expect(summary.executorCooldownEndMs).toBe(expectedEnd);
       // 执行器进入冷却(冷却登记与 diffSummary 同值)。
       expect(cooldownEndMs({ key: "codebuddy" })).toBe(expectedEnd);
@@ -951,7 +956,7 @@ describe("孤儿任务周期收敛", () => {
     }
   });
 
-  it("输出尾部含 resets around 18:33 → 冷却解析至当天 18:33", async () => {
+  it("输出尾部含 resets around 18:33 UTC+8 → 冷却解析至当天 18:33 UTC+8", async () => {
     const participant = await registerParticipant({ name: "orc-quota-b" });
     const group = await createGroup(participant.id, "孤儿收敛-额度resets");
     const task = await insertTaskRow({
@@ -960,8 +965,10 @@ describe("孤儿任务周期收敛", () => {
       executorKey: "codebuddy",
       executorPid: deadPid(),
     });
-    appendTaskOutput(task.id, "usage limit reached — resets around 18:33\n");
-    const now = new Date(2026, 7, 29, 10, 0, 0);
+    // 意图:冷却落在解析时刻;补 UTC+8 保留原验证(否则回落固定冷却)。
+    const recoveryLine = "usage limit reached — resets around 18:33 UTC+8";
+    appendTaskOutput(task.id, `${recoveryLine}\n`);
+    const now = new Date(Date.UTC(2026, 7, 29, 2, 0, 0));
     vi.useFakeTimers();
     vi.setSystemTime(now);
     try {
@@ -970,9 +977,12 @@ describe("孤儿任务周期收敛", () => {
         string,
         unknown
       >;
-      expect(summary.executorCooldownEndMs).toBe(
-        new Date(2026, 7, 29, 18, 33, 0, 0).getTime(),
+      const expectedEnd = parseRateLimitRecoveryMs(
+        recoveryLine,
+        now.getTime(),
       );
+      expect(expectedEnd).not.toBeNull();
+      expect(summary.executorCooldownEndMs).toBe(expectedEnd);
     } finally {
       vi.useRealTimers();
     }
@@ -1107,11 +1117,12 @@ describe("孤儿任务周期收敛", () => {
       executorKey: "codebuddy",
       executorPid: deadPid(),
     });
-    appendTaskOutput(
-      task.id,
-      "You've hit your usage limit. try again at 7:50 PM\n",
-    );
-    const now = new Date(2026, 7, 29, 10, 0, 0);
+    // 意图:远未来解析值原样落库(非固定兜底)。无时区 → null → 走兜底,
+    // 会写 cooldownFallbackReason,原验证价值尽失 → 补 UTC+8。
+    const recoveryLine =
+      "You've hit your usage limit. try again at 7:50 PM UTC+8";
+    appendTaskOutput(task.id, `${recoveryLine}\n`);
+    const now = new Date(Date.UTC(2026, 7, 29, 2, 0, 0));
     vi.useFakeTimers();
     vi.setSystemTime(now);
     try {
@@ -1119,7 +1130,11 @@ describe("孤儿任务周期收敛", () => {
       const row = await findTask(task.id);
       expect(row?.status).toBe("failed");
       const summary = row?.diffSummary as Record<string, unknown>;
-      const expectedEnd = new Date(2026, 7, 29, 19, 50, 0, 0).getTime();
+      const expectedEnd = parseRateLimitRecoveryMs(
+        recoveryLine,
+        now.getTime(),
+      );
+      expect(expectedEnd).not.toBeNull();
       expect(summary.executorCooldownEndMs).toBe(expectedEnd);
       expect(summary.cooldownFallbackReason).toBeUndefined();
       expect(summary.discardedCooldownEndMs).toBeUndefined();
