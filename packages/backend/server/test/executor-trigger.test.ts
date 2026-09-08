@@ -573,8 +573,16 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       expect(ticket).toContain('遗留: <未完成事项,无则写"无">');
       expect(ticket).not.toContain("不要在执行窗口内停掉后端");
       expect(ticket).toContain(
-        "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;测试全绿后提交,commit message 按功能写。",
+        "默认约束(除非消息里明确说明):不动 schema/迁移/scripts/ 下其他脚本、不删数据;按票面清单跑测且失败数不增加后提交,commit message 按功能写。",
       );
+      // 新口径三要素:票面清单 / 失败数不增加 / 前后基线 + 基线工具
+      expect(ticket).toContain("只跑票面指定的测试文件清单,不要跑全量。");
+      expect(ticket).toContain("失败数不增加");
+      expect(ticket).toContain("改动前先取一次基线,改动后再取一次,汇报给出前后对照。");
+      expect(ticket).toContain(
+        "取基线:node scripts/test-baseline.mjs <包目录> <测试文件...>",
+      );
+      expect(ticket).not.toContain("测试全绿后提交");
     } finally {
       delete process.env.TICKET_CAPTURE;
     }

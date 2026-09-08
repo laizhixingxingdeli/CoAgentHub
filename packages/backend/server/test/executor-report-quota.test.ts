@@ -1377,8 +1377,16 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         expect(ticket).toContain("## 执行与测试要求");
         expect(ticket).toContain("- 实现执行器:codebuddy(必选,由发布者定向)");
         expect(ticket).toContain("- 测试执行器:默认由实现执行器完成测试");
+        expect(ticket).toContain("- 只跑票面指定的测试文件清单,不要跑全量。");
+        expect(ticket).toContain("失败数不增加");
         expect(ticket).toContain(
-          "- 完成后必须运行测试并验证改动(新增/相关用例),汇报需包含测试结果。",
+          "- 改动前先取一次基线,改动后再取一次,汇报给出前后对照。",
+        );
+        expect(ticket).toContain(
+          "- 取基线:node scripts/test-baseline.mjs <包目录> <测试文件...>",
+        );
+        expect(ticket).toContain(
+          "- 汇报需包含测试结果(含前后基线对照)。",
         );
       } finally {
         delete process.env.FAKE_TICKET_COPY;
