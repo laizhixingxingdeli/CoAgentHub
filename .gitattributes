@@ -1,0 +1,29 @@
+# 换行规范(spec: fixture-line-endings-break-on-windows.md)
+#
+# 没有这份文件时,Windows 上 git 会按 core.autocrlf 把 checkout 出来的文本
+# 改成 CRLF,造成两类持续故障:
+#   ① 逐字断言 fixture 正文的用例在 Windows 红、在 CI(ubuntu)绿;
+#   ② biome 对每个文件都报格式错,假警淹掉真问题。
+
+# 默认:仓库里一律存 LF,checkout 也用 LF(不随平台变)。
+* text=auto eol=lf
+
+# 测试语料:被逐字断言的真实执行器输出。
+# 标成 -text 表示 git 不做任何换行转换 —— 它在任何平台 checkout 出来
+# 都逐字等于入库时的样子,这正是「以真实输出为准」的用例需要的。
+packages/backend/server/test/fixtures/** -text
+
+# Windows 本机脚本:由 Windows 工具链执行,保留 CRLF 更合适。
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制:不做任何转换,也不做 diff。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
