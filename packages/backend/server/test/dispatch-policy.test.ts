@@ -569,6 +569,18 @@ describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", (
     useRealPatterns();
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 7, 29, 20, 0, 30)); // T = 本地 2026-08-29 20:00:30(month 7 = 八月);验收 3 的 T+1 天 / T−1 月以此为基准
+    // R7-a 的绝对时刻行必须相对上面这个锚点算出来,不能写死「20:01 UTC+8」:
+    // 锚点是**本地时间**构造的,在 UTC+8 上等于 12:00:30Z、在 UTC 上等于
+    // 20:00:30Z,写死的 UTC+8 时刻在后者会落到过去 → +24h → 远超 60s。
+    // CI(ubuntu=UTC)因此红过。这里用锚点 +30s 的 **UTC** 时分,配 `UTC+0`
+    // 标记,任何宿主时区下都恰好是「距 now 30s」。
+    const r7aAt = new Date(new Date(2026, 7, 29, 20, 0, 30).getTime() + 30_000);
+    const r7aLine = `[rate-limited] try again at ${String(
+      r7aAt.getUTCHours(),
+    ).padStart(2, "0")}:${String(r7aAt.getUTCMinutes()).padStart(
+      2,
+      "0",
+    )} UTC+0`;
     try {
       const cases: ReadonlyArray<{
         line: string;
@@ -615,10 +627,9 @@ describe("classifyQuotaFailure:R7 分级按恢复时长(表驱动,spec v1.1)", (
         // R7-c:耗尽关键词先于时长判定(短相对时长 + 耗尽关键词 → exhausted)。
         { line: "[rate-limited] usage limit reached, try again in 5 seconds", exitCode: 1, kind: "exhausted", note: "R7-c 耗尽关键词先于短时长" },
         // R7-a:绝对时刻距 now ≤ 60s → transient(时钟形态,距 now 30s)。
-        // 方案 a 需时区标记:补 UTC+8;表头 setSystemTime 为本地 20:00:30,
-        // 在 UTC+8 机器上 20:01 UTC+8 恰距 now 30s(与表内中文绝对日
-        // 期用例共享同一 now,不在本票重写整表 TZ 锚定)。
-        { line: "[rate-limited] try again at 20:01 UTC+8", exitCode: 1, kind: "transient", note: "R7-a 绝对时刻距 now ≤ 60s" },
+        // 方案 a 需时区标记 —— 行内容由上面的 r7aLine 按锚点算出并带 `UTC+0`,
+        // 不写死本地时区,见那里的说明。
+        { line: r7aLine, exitCode: 1, kind: "transient", note: "R7-a 绝对时刻距 now ≤ 60s" },
       ];
       for (const c of cases) {
         const verdict = classifyQuotaFailure([c.line], { exitCode: c.exitCode });

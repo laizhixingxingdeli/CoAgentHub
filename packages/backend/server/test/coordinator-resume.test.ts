@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  dispatchIntent as dispatchIntentTable,
   executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   groupMessageClosure as groupMessageClosureTable,
@@ -234,6 +235,9 @@ async function insertPendingCompletionEvent(
 beforeEach(async () => {
   __resetExecutorQueueForTests();
   await testDb.delete(taskCompletionEventTable);
+  // dispatch_intent 外键指向 group_message(0031),必须先删,否则
+  // 下面这条 delete 会被外键约束挡住,整个 beforeEach 连带失败。
+  await testDb.delete(dispatchIntentTable);
   await testDb.delete(groupMessageClosureTable);
   await testDb.delete(groupMessageTable);
   await testDb.delete(taskTable);
@@ -1272,12 +1276,25 @@ describe.sequential("协调者续跑完整验收", () => {
 
   describe.sequential("R5:协调者任务书强制「派发成功后立即退出本轮、不得轮询子任务终态」(必测)", () => {
     it("协调者任务书强制退出本轮且明确禁止轮询子任务终态", async () => {
-      // 这里直接锁定 coordinator 分支的任务书模板源码,避免该纯模板验收
-      // 启动真实 CLI,与端到端测试共享临时 git 仓库造成竞态。
-      const source = readFileSync(
-        path.resolve(import.meta.dirname, "../src/lib/executor-task/queue.ts"),
+      // 锁定 coordinator 分支的任务书文案,避免该纯模板验收启动真实 CLI,
+      // 与端到端测试共享临时 git 仓库造成竞态。
+      // S6(ticket-text-is-workflow-policy-not-scheduler-code)之后文案在
+      // ticket-templates/*.json,不再在 queue.ts 里;解析后拼接所有字符串值,
+      // 避免直接匹配 JSON 转义后的原文。
+      const raw = readFileSync(
+        path.resolve(
+          import.meta.dirname,
+          "../../../../ticket-templates/default.json",
+        ),
         "utf8",
       );
+      const parts: string[] = [];
+      const walk = (v: unknown): void => {
+        if (typeof v === "string") parts.push(v);
+        else if (v && typeof v === "object") Object.values(v).forEach(walk);
+      };
+      walk(JSON.parse(raw));
+      const source = parts.join("\n");
       expect(source).toContain("### 派发成功后立即退出本轮（强制）");
       expect(source).toContain(
         "严禁在派发成功后用 `coagenthub_get_task` 轮询自身任务或子任务状态来等待其终态",

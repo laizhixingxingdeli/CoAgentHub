@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  dispatchIntent as dispatchIntentTable,
   executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   groupMessage as groupMessageTable,
@@ -113,6 +114,9 @@ beforeEach(async () => {
   __resetExecutorQueueForTests();
   // stall/claim 放宽到 60s(不干扰本票断言),stallAlert 取 3s 作为滞留阈值。
   __setReliabilityTimeoutsForTests(60_000, 60_000, STALL_ALERT_MS);
+  // dispatch_intent(0031)对 task / group_message / participant / groups 都有外键,
+  // 必须先清,否则下面的 delete 会被约束挡住,整个 beforeEach 连带失败。
+  await testDb.delete(dispatchIntentTable);
   await testDb.delete(taskCompletionEventTable);
   await testDb.delete(groupMessageTable);
   await testDb.delete(taskTable);

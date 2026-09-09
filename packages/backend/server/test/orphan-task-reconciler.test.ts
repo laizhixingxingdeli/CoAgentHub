@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  dispatchIntent as dispatchIntentTable,
   groupMember as groupMemberTable,
   groups as groupsTable,
   participant as participantTable,
@@ -40,6 +41,9 @@ beforeEach(async () => {
   // 先清模块级输出缓冲与冷却登记(额度用例会 appendTaskOutput / enterCooldown),
   // 再清库 —— 避免上一用例的缓冲/冷却泄漏到本用例。
   __resetExecutorQueueForTests();
+  // dispatch_intent(0031)对 task / group_message / participant / groups 都有外键,
+  // 必须先清,否则下面的 delete 会被约束挡住,整个 beforeEach 连带失败。
+  await testDb.delete(dispatchIntentTable);
   await testDb.delete(taskCompletionEventTable);
   await testDb.delete(taskTable);
   await testDb.delete(groupMemberTable);

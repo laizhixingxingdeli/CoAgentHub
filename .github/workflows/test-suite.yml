@@ -10,9 +10,27 @@ jobs:
     name: Build and Test
     timeout-minutes: 20
     runs-on: ubuntu-latest
+    services:
+      # 绝大多数单测用 PGlite,不需要这个服务;但
+      # specs/enforce-single-server-with-advisory-lock.md 的用例必须打**真实**
+      # PostgreSQL —— session 级 advisory lock 与连接池回收行为在 PGlite 上
+      # 不存在。没有它,那 5 条会以 AggregateError(ECONNREFUSED)红掉,
+      # 而这是个安全机制,CI 上不能零证据。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # database/error export dist/, so the build step must run first; the
-      # asset step only requires DATABASE_URL to be *set* (tests use PGlite).
+      # asset step only requires DATABASE_URL to be *set* (most tests use PGlite;
+      # the advisory-lock tests use the real service declared above).
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:

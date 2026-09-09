@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  dispatchIntent as dispatchIntentTable,
   executorConfig as executorConfigTable,
   groupMember as groupMemberTable,
   groupMessageClosure as groupMessageClosureTable,
@@ -306,6 +307,9 @@ describe.sequential("工作树级协调串行(spec multiple-coordinators v1.3)",
 
   beforeEach(async () => {
     __resetExecutorQueueForTests();
+    // dispatch_intent 外键指向 group_message(0031),必须先删,否则
+    // 下面这条 delete 会被外键约束挡住,整个 beforeEach 连带失败。
+    await testDb.delete(dispatchIntentTable);
     await testDb.delete(groupMessageClosureTable);
     await testDb.delete(groupMessageTable);
     await testDb.delete(taskTable);

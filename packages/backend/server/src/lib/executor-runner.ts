@@ -15,7 +15,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, resolve } from "node:path";
+import { dirname, join, resolve, win32 as pathWin32 } from "node:path";
 
 /** 默认执行超时:120 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
 const DEFAULT_TIMEOUT_MS = 120 * 60 * 1000;
@@ -95,7 +95,12 @@ export function resolveWindowsLauncher(
   if (!target) return { bin, args };
 
   // `%dp0%` 自带结尾反斜杠,替换后会出现双反斜杠,必须规范化。
-  const resolved = normalize(target.replaceAll("%dp0%", `${dirname(bin)}\\`));
+  // ⚠️ 用 `path.win32` 而不是平台相关的 `path`:本函数在上面已经确认
+  // platform === "win32",处理的自始至终是 Windows 路径字面量。用宿主语义
+  // 会让同一份输入在 Linux 上解析成另一个结果 —— CI(ubuntu)上因此红过。
+  const resolved = pathWin32.normalize(
+    target.replaceAll("%dp0%", `${pathWin32.dirname(bin)}\\`),
+  );
   const exists = deps.exists ?? existsSync;
   if (!exists(resolved)) return { bin, args };
 
