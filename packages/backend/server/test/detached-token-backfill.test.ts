@@ -545,14 +545,19 @@ describe.sequential("续跑任务真实派发时序(detached 派发 → 进程�
       group.id,
       "续跑任务:完成 L2 后自行结案",
     );
-    const created = await createTask(
-      coordinator.id,
-      group.id,
-      message.id,
-      coordinator.id,
-    );
-    expect(created.status).toBe(200);
-    const task = (await created.json()) as { id: string };
+    // ⚠️ 不要再显式 createTask:postMessage 是定向到自己的,消息本身就会让
+    // maybeDispatchExecutorTask 建任务**并入队**。测试若抢先用 POST /tasks
+    // 把任务建出来,那条异步路径会看到「已存在且 queued」而跳过 spawn
+    // (queue.ts:1404),于是任务永远不进 running —— POST /tasks 自己不入队。
+    // 生产上这种孤儿由 queued-task-reclaim 兜底,但测试等不到那个扫描周期。
+    // 直接等派发把任务建出来,顺带测的也是真实路径。
+    const task = await waitUntil(async () => {
+      const rows = await testDb
+        .select()
+        .from(taskTable)
+        .where(eq(taskTable.messageId, message.id));
+      return rows[0];
+    }, `消息 ${message.id} 的任务由派发建出`);
 
     // detached 派发:协调者进程(fake bin)起来后任务保持 running,终态由它自己
     // PATCH 回写。此刻采集尚未发生(采集只在进程退出后)。

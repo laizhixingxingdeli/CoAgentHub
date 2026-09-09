@@ -682,10 +682,16 @@ describe("CallbackAgent integration", () => {
     const a1 = mk("consumer-a", "dual-a.jsonl");
     const a2 = mk("consumer-b", "dual-b.jsonl");
 
-    // Stagger the second consumer past where an unprotected short lease would
-    // have expired, but still inside the protected timeout < lease window.
+    // ⚠️ 不要用 sleep 错开两个消费者:那是在等墙钟,而不是在等被断言的事实。
+    // 本用例断言的是「消费者 1 仍持有租约时,消费者 2 不得认领」——
+    // 所以要等的是「消费者 1 **确实已认领**」,再启动消费者 2。
+    // 原来的 sleep(1000)(lease 2000 / timeout 800)在 CI 上不成立:
+    // 机器快慢一变,t=1000ms 时租约是否仍被持有就不确定了,CI 因此红过。
     const p1 = a1.runOnce();
-    await sleep(1000);
+    for (let i = 0; i < 200 && fakeApi.callCounts.claim < 1; i += 1) {
+      await sleep(10);
+    }
+    expect(fakeApi.callCounts.claim).toBe(1); // 前提:消费者 1 已认领
     const p2 = await a2.runOnce();
     await p1;
 
