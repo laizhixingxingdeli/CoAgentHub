@@ -23,7 +23,7 @@
     "coagenthub:init": "node scripts/coagenthub-init.mjs",
     "coagenthub:sync": "node scripts/coagenthub-sync-skills.mjs",
     "lint": "turbo run lint",
-    "test": "vitest run",
+    "test": "vitest run --no-file-parallelism",
     "test:e2e": "playwright test",
     "pretest": "pnpm --filter @laizhixingxingdeli/database build && pnpm --filter @laizhixingxingdeli/error build"
   },
