@@ -122,6 +122,13 @@ Migrate the database before exercising the server:
   的在途产物。检视者 2026-09-04 因此把执行器的实现夹带进了 spec 提交。
 - 拆开的办法:`git reset --soft HEAD~1` → `git reset HEAD -- <别人的路径>` →
   `git commit -- <自己的路径>`。
+- **无人值守连续派发时挂看门狗**:`sh scripts/worktree-guard.sh [轮数] [间隔秒]`
+  (默认 90 × 20s = 30 分钟)。它记下启动时所有「未提交 / 未跟踪」的路径,
+  逐轮比对,**任一条从该状态消失即告警并以非 0 退出**;
+  另盯 HEAD 是否被 `coagenthub checkpoint` 提交占据。
+  **只告警不自动修复** —— 守护期内执行器的提交可能是有效工作。
+  2026-09-08 用户未提交的 567 行报告被连续吞掉三次之后,它是检视者敢把
+  21 张票连着派出去的前提(spec: `worktree-guard-for-unattended-dispatch`)。
 
 ## Issue tracker
 
