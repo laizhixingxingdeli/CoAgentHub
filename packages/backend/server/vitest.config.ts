@@ -21,6 +21,16 @@ export default defineConfig({
     // the cross-file overlap. Keep the isolation explicit until those fixtures
     // no longer share process-wide state.
     fileParallelism: false,
+    // ⚠️ `fileParallelism` 是 vitest 的 **root-only** 选项:直接在本包里跑
+    // (`cd packages/backend/server && vitest`)时它生效,但 CI 跑的是仓库根的
+    // `pnpm test`(vitest.workspace.ts),那条路径下子项目里的它**会被忽略** ——
+    // 2026-09-09 的 CI 日志里 executor-queue 与 executor-queued-reclaim 的
+    // stdout 交错,就是这个的证据,几条 CI-only 红与 flaky 都指向它。
+    // 项目级要串行必须用 poolOptions:把本项目的全部测试文件塞进同一个 fork。
+    poolOptions: {
+      forks: { singleFork: true },
+      threads: { singleThread: true },
+    },
     // Always include the complete test name and assertion diff on failures;
     // the compact summary alone is not actionable for this suite.
     reporters: ["verbose"],
