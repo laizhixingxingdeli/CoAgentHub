@@ -3,14 +3,20 @@
 # Spec: specs/worktree-guard-for-unattended-dispatch.md
 #
 # 用法:
-#   sh scripts/worktree-guard.sh [轮数] [间隔秒]
+#   sh scripts/worktree-guard.sh [--protect <路径>]... [轮数] [间隔秒]
 #   默认 90 轮 × 20s = 30 分钟,适合挂在一次派发旁边。
 #
-# 不变量:
-#   启动那一刻处于「未提交(空格M)/ 未跟踪(??)」的每一条路径,
-#   在整个守护期内必须保持该状态。
+# 不变量:被守护的每一条路径,在整个守护期内必须保持
+#   「未提交(空格M)/ 未跟踪(??)」状态。
 #   —— 只看「消失」,不看「新增」:守护期内执行器本来就会产生新改动,
-#      那是正常工作;基线路径从这两个状态里消失才是异常。
+#      那是正常工作;被守护路径从这两个状态里消失才是异常。
+#
+# ⚠️ 守护范围怎么选(2026-09-09 实战踩出来的):
+#   **有 --protect 就只守它们**;没有才回落到「启动那一刻在途的一切」。
+#   回落模式会把**你自己有意提交自己的工作**也判成告警 —— 当天检视者
+#   提交 3 个测试文件就触发了一次误报。一个对正常操作狂叫的看门狗
+#   会被养成无视的习惯,而那正是真告警被漏掉的方式。
+#   所以:**知道该守谁的时候就点名**,回落模式只用于完全无人值守。
 #
 # 另一条判据:HEAD 的提交信息以 "coagenthub checkpoint " 开头。
 #   该模式是 commit-tree 的机器产物,永远不该出现在 HEAD 上,命中即损坏。
@@ -21,13 +27,25 @@
 # 退出码:0 = 全程无告警;1 = 出现过告警(可被调用方消费)。
 set -u
 
+PROTECT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --protect)
+      [ $# -ge 2 ] || { echo "--protect 需要一个路径" >&2; exit 2; }
+      PROTECT="${PROTECT}${2}
+"
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
+
 ROUNDS="${1:-90}"
 SLEEP="${2:-20}"
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-# 基线:启动时的「在途」路径集合。
-# porcelain 的 " M path" 与 "?? path" —— 只取这两类,取路径部分。
+# 当前「在途」集合。porcelain 的 " M path" 与 "?? path",取路径部分。
 snapshot_inflight() {
   git status --porcelain 2>/dev/null | awk '
     /^ M / { print "M\t" substr($0, 4); next }
@@ -35,7 +53,18 @@ snapshot_inflight() {
   '
 }
 
-BASE="$(snapshot_inflight)"
+if [ -n "$PROTECT" ]; then
+  # 点名模式:只守这些路径,取它们此刻的状态当基线。
+  NOW0="$(snapshot_inflight)"
+  BASE="$(printf '%s' "$PROTECT" | while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    printf '%s\n' "$NOW0" | grep -F "	$p" || {
+      echo "!!! --protect 指定的路径当前不在途,无法守护:$p" >&2
+    }
+  done)"
+else
+  BASE="$(snapshot_inflight)"
+fi
 BASE_N=$(printf '%s' "$BASE" | grep -c . || true)
 
 echo "== [$(date +%H:%M:%S)] 看门狗启动:守护 $BASE_N 条在途路径,${ROUNDS} 轮 × ${SLEEP}s"
