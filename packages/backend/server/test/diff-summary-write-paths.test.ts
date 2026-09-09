@@ -210,6 +210,7 @@ describe("W2 B4: control 回滚写 error:rollback 保留 platform.resumeOf", () 
 
     await maybeHandleControlCommand(runtimeDb, {
       groupId: group.id,
+      senderId: owner.id,
       senderRoles: ["coordinator"],
       audience: "broadcast",
       audienceRef: null,

@@ -98,6 +98,21 @@ Migrate the database before exercising the server:
 - **加强测试本身可能把「没做」固化成「通过」。** 遇到 findings 票,逐条对着
   findings 核,不以测试通过替代 —— 曾有一轮新加逐字节 `toBe` 断言,
   锁的正是**旧**形状。
+- **`tsc` 要真验,而且 server 单包的 `tsc` 不等于 CI 的构建。**
+  2026-09-09 一次推送在 CI 的 **Build core packages** 步直接挂掉:
+  `test/diff-summary-write-paths.test.ts` 缺 `senderId`,类型不匹配。
+  两层教训:
+  1. **管道会吞掉退出码** —— `npx tsc … | tail -3; echo $?` 拿到的是 `tail` 的 0。
+     执行器与检视者都据此报过「tsc 通过」,而错误就明晃晃打在上面。
+     **要么不接管道,要么用 `${PIPESTATUS[0]}`。**
+  2. **web 包 `tsc -b` 通过 project reference 会把 server 的测试文件一起编译**,
+     所以 `packages/backend/server` 里跑 `tsc --noEmit` 过了不代表 CI 会过。
+  **推送前跑 CI 那条原样的命令**:
+  ```
+  pnpm exec turbo run build --filter @laizhixingxingdeli/database \
+    --filter @laizhixingxingdeli/error --filter @laizhixingxingdeli/server \
+    --filter @laizhixingxingdeli/web
+  ```
 
 ## 运行时与重启
 
