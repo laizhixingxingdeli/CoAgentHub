@@ -1,3 +1,4 @@
+import { invalidateExecutorsCache } from "@server/lib/executors";
 import { PGlite } from "@electric-sql/pglite";
 import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
 import * as schema from "@laizhixingxingdeli/database/schema";
@@ -48,6 +49,9 @@ export async function ensureExecutorConfig(
       maxConcurrency: values.maxConcurrency ?? null,
     })
     .onConflictDoNothing({ target: executorConfigTable.key });
+  // 直接写库绕过了生产 CRUD 的缓存失效;不手动失效的话,先前调用缓存的
+  // 空列表会在 5 秒 TTL 内继续生效,seed 出来的行查不到。
+  invalidateExecutorsCache();
 }
 
 /**

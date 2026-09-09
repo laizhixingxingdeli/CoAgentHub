@@ -40,7 +40,11 @@ const HISTORICAL_EVENT_COUNT = 6;
 function makeOldInstallMigrationsDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "coagenthub-mig-0030-old-"));
   for (const f of readdirSync(realMigrationsDir)) {
-    if (!f.endsWith(".sql") || f.startsWith("0030")) continue;
+    // ⚠️ 排除 0030 **及其之后的一切**,而不是只排除 0030 —— 按字符串前缀
+    // 排除的写法在新增 0031 时漏掉了它,「老库」里因此提前建好了
+    // dispatch_intent,迁移器再跑一次就撞重复约束。按序号比较才稳。
+    const seq = Number.parseInt(f.slice(0, 4), 10);
+    if (!f.endsWith(".sql") || Number.isNaN(seq) || seq >= 30) continue;
     copyFileSync(path.join(realMigrationsDir, f), path.join(dir, f));
   }
   return dir;
@@ -110,13 +114,17 @@ describe("0030 完成事件收件人(回填 + trigger 搬运)", () => {
       const db = drizzle(client);
       await migrate(db, { migrationsFolder: realMigrationsDir });
 
-      // 0030 由迁移器执行(而非手工 SQL),且是 journal 中最新的一条。
+      // 0030 由迁移器执行(而非手工 SQL)。
+      // ⚠️ 这里只断言「0030 被应用了」,不断言它是 journal 里最新的一条 ——
+      // 「最新」是个会随每次新增迁移而失效的假设(0031 落地当天就把它打红了)。
+      // 本用例要验的是「老库能被迁移器发现并推进到 0030」,与之后有多少迁移无关。
       const applied = await client.query<{ created_at: number }>(
         `SELECT created_at FROM drizzle.__drizzle_migrations ORDER BY created_at`,
       );
       const times = applied.rows.map((r) => Number(r.created_at));
       expect(times).toContain(MIGRATION_0030_WHEN);
-      expect(Math.max(...times)).toBe(MIGRATION_0030_WHEN);
+      // 0029 之前的都不该被重跑(迁移器按 created_at 判定)。
+      expect(Math.min(...times)).toBe(MIGRATION_0029_WHEN);
 
       // 验收 4:取样全部历史事件,收件人 == 下发者(投递关系逐字不变)。
       const sampled = await client.query<{

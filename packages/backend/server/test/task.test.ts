@@ -17,7 +17,7 @@ import {
   resetSourceScanCache,
 } from "../src/lib/runtime-status";
 import { createTestApp } from "./app";
-import { testDb } from "./db";
+import { seedBuiltinExecutorConfigs, testDb } from "./db";
 
 /**
  * Task first-class entity (ticket 35): the server is the single source of
@@ -1926,6 +1926,11 @@ describe("任务实体(server 单一状态源)", () => {
       const { isInCooldown } = await import("@server/lib/executor-task/state");
       __resetExecutorQueueForTests();
       __setRateLimitForTests(60_000, ["usage limit", "rate limit", "quota"]);
+      // 冷却登记要查到 key 对应的 executor_config 行。
+      // no-builtin-executor-seeding(73392367)把 0028 变成 no-op 之后,
+      // 测试库里 executor_config 默认是空的 —— 只设 participant.executorKey
+      // 不够,必须显式播种,否则 isInCooldown 永远是 false。
+      await seedBuiltinExecutorConfigs();
 
       const { coordinator, execA, group } = await setupGroup();
       const created = await createTask(

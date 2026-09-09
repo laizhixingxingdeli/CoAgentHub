@@ -320,7 +320,15 @@ let cachedEffectiveExecutors: ExecutorConfig[] | null = null;
 let cachedEffectiveExecutorsAt = 0;
 const EXECUTORS_CACHE_TTL_MS = 5_000;
 
-function invalidateExecutorsCache(): void {
+/**
+ * 失效 effectiveExecutors 短缓存。
+ *
+ * 生产侧的增删改函数内部已经调它;导出是给**测试 fixture** 用 ——
+ * `test/db.ts` 的 seed 直接写库、绕过这些 CRUD 函数,
+ * 而 no-builtin-executor-seeding(73392367)让 executor_config 默认为空之后,
+ * 「先前某次调用把空列表缓存了 5 秒」会让 seed 出来的行查不到。
+ */
+export function invalidateExecutorsCache(): void {
   cachedEffectiveExecutors = null;
   cachedEffectiveExecutorsAt = 0;
 }

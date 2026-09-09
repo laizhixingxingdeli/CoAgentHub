@@ -24,9 +24,30 @@ CREATE TABLE IF NOT EXISTS "dispatch_intent" (
 	"updated_at" timestamp with time zone,
 	CONSTRAINT "dispatch_intent_message_id_unique" UNIQUE("message_id")
 );--> statement-breakpoint
-ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_group_id_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."groups"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_message_id_group_message_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."group_message"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_resolved_participant_id_participant_id_fk" FOREIGN KEY ("resolved_participant_id") REFERENCES "public"."participant"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_task_id_task_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."task"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+-- 四条外键用 DO 块加,而不是裸 ALTER:本文件的 CREATE TABLE / CREATE INDEX
+-- 都带了 IF NOT EXISTS,ALTER ... ADD CONSTRAINT 没有对应写法(PG 不支持),
+-- 于是同一个文件里出现了两套标准 —— 只要这份迁移被重跑一次(测试里
+-- 「裸跑全部 .sql 再调 migrate()」正是这种场景),就会因约束已存在而炸,
+-- 而带 IF NOT EXISTS 的那几条安然无恙。用 DO 块把标准补齐。
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dispatch_intent_group_id_groups_id_fk') THEN
+    ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_group_id_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."groups"("id") ON DELETE no action ON UPDATE no action;
+  END IF;
+END $$;--> statement-breakpoint
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dispatch_intent_message_id_group_message_id_fk') THEN
+    ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_message_id_group_message_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."group_message"("id") ON DELETE no action ON UPDATE no action;
+  END IF;
+END $$;--> statement-breakpoint
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dispatch_intent_resolved_participant_id_participant_id_fk') THEN
+    ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_resolved_participant_id_participant_id_fk" FOREIGN KEY ("resolved_participant_id") REFERENCES "public"."participant"("id") ON DELETE no action ON UPDATE no action;
+  END IF;
+END $$;--> statement-breakpoint
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dispatch_intent_task_id_task_id_fk') THEN
+    ALTER TABLE "dispatch_intent" ADD CONSTRAINT "dispatch_intent_task_id_task_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."task"("id") ON DELETE no action ON UPDATE no action;
+  END IF;
+END $$;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "dispatch_intent_status_created_at_idx" ON "dispatch_intent" USING btree ("status","created_at");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "dispatch_intent_group_id_idx" ON "dispatch_intent" USING btree ("group_id");
