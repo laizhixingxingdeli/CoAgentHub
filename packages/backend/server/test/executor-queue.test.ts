@@ -294,9 +294,10 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
           string,
           unknown
         > | null;
-        const attempts = (cur?.attempts ?? []) as ReadonlyArray<
-          Record<string, unknown>
-        >;
+        // listTasks 的返回类型不含 attempts(列表接口不带),这里按诊断需要
+        // 宽松取用:拿不到就是空数组,不影响其余字段。
+        const attempts = ((cur as Record<string, unknown> | undefined)
+          ?.attempts ?? []) as ReadonlyArray<Record<string, unknown>>;
         throw new Error(
           [
             `task(message=${messageId}) 未在 ${timeoutMs}ms 内达到 ${status}` +
