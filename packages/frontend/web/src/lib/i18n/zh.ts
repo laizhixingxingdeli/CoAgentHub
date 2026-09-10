@@ -1,6 +1,6 @@
 /**
  * 中文词典(默认语言,key 与 en.ts 一一对应)。
- * key 命名:page.component.phrase(如 groups.list.empty、messages.send.placeholder)。
+ * key 命名:page.component.phrase(如 groups.empty.all、messages.readOnly.archived)。
  */
 export const zh = {
   // ── 公共 ────────────────────────────────────────────────────────────────
@@ -47,8 +47,6 @@ export const zh = {
   "groups.filter.all": "全部",
   "groups.filter.active": "进行中",
   "groups.filter.archived": "已归档",
-  "groups.status.active": "进行中",
-  "groups.status.archived": "已归档",
   "groups.memberCount": "{count} 名成员",
   "groups.composition.three": "三方",
   "groups.composition.two": "两方",
@@ -232,14 +230,6 @@ export const zh = {
   "messages.item.validUntil": " · 有效期至 {time}",
   "messages.item.directedTo": "📨 定向给 {name}",
   "messages.newCount": "{count} 条新消息",
-  "messages.send.placeholder": "输入消息内容,@ 提及角色或成员…",
-  "messages.send.archivedPlaceholder": "已归档,无法发送消息",
-  "messages.send.aria": "消息内容",
-  "messages.send.button": "发送",
-  "messages.send.audience": "将发送给 {audience}",
-  "messages.send.testExecutor": "测试执行器",
-  "messages.send.testExecutor.auto": "自动(按分工提示词)",
-  "messages.send.testExecutor.same": "同一执行器",
   "messages.reply.to": "回复 {name}",
   "messages.reply.cancelAria": "取消回复",
   "messages.mention.aria": "提及候选",
