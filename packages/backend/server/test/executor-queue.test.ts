@@ -13,7 +13,15 @@ import {
   participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
 import {
   resolveFakeExecutor,
@@ -151,6 +159,51 @@ beforeAll(async () => {
 
 describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + 重启兜底", () => {
   const app = createTestApp();
+
+  // ⚠️ 用例间的隐式串味是这个文件在 CI 上长期红的根源,两处泄漏:
+  //
+  //  ① `__setMaxRetriesForTests(0)` 写在两条 `skipIf(win32)` 的用例里且**从不还原**。
+  //     Windows 上它们被跳过 → 从没 pin 过 → 后面的重试用例拿到策略默认值;
+  //     Linux 上它们真跑 → 把全局 maxRetries 设成 0 并泄漏 →
+  //     后面「失败自动重试」「重试前回滚 checkpoint」两条**永远不重试**。
+  //     2026-09-10 CI 诊断实证:attempts(1) = [{"n":1,"error":"exit 1"}]。
+  //
+  //  ② `process.env.FAKE_*` 有约 40 处赋值,**没有任何清理**。
+  //     每条用例都依赖前一条把状态留成它期望的样子 —— 顺序一变就串。
+  //     同一轮 CI 里既有「期望 failed 却 done」也有「期望 done 却 failed」,
+  //     两个方向相反的现象正是残留造成的。
+  //
+  // 每条用例开始前回到已知状态:该设的自己设,不继承上一条。
+  const FAKE_ENV_KEYS = Object.keys(process.env).filter((k) =>
+    k.startsWith("FAKE_"),
+  );
+  let defaultMaxRetries = 1;
+  beforeAll(async () => {
+    const { getRetryPolicy } = await import(
+      "@server/lib/executor-task/state"
+    );
+    defaultMaxRetries = getRetryPolicy().maxRetries;
+  });
+  beforeEach(async () => {
+    for (const k of [
+      ...FAKE_ENV_KEYS,
+      "FAKE_SLEEP_SECS",
+      "FAKE_APPEND",
+      "FAKE_NO_COMMIT",
+      "FAKE_ALWAYS_FAIL",
+      "FAKE_FAIL_UNTIL",
+      "FAKE_COUNTER_FILE",
+      "FAKE_CONFLICT_FILE",
+      "FAKE_OUTPUT_LOOPS",
+      "FAKE_OUTPUT_INTERVAL_MS",
+    ]) {
+      delete process.env[k];
+    }
+    const { __setMaxRetriesForTests } = await import(
+      "@server/lib/executor-task"
+    );
+    __setMaxRetriesForTests(defaultMaxRetries);
+  });
   const executorKeyByName: Record<string, string> = {
     CodeBuddy: "codebuddy",
     AtomCode: "executor",
