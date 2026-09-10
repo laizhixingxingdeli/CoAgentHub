@@ -367,6 +367,11 @@ describe.sequential("工作树级协调串行(spec multiple-coordinators v1.3)",
 
     // A 进程退出 → 占用释放 → B 被既有泵机制拉起。
     await waitForProcessExit(msgA.id);
+    // 进程退出 ≠ 占用已释放:释放发生在进程退出**之后**的收尾里,中间有窗口。
+    // 原来这里退出后就直接断言 0,CI 34458523464 上抢到了 1。仍是
+    // waitForCoordinatorOccupancy 文档里那条规矩 —— 等被断言的量本身。
+    // 上面 355-357 行是同一范式的正确写法。
+    await waitForCoordinatorOccupancy(projectPath, 0);
     expect(coordinatorOccupancyCount(projectPath)).toBe(0);
     const tB = await waitForTask(msgB.id, "running");
     expect(tB.executorParticipantId).toBe(coordB.id);
