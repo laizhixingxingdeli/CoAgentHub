@@ -37,13 +37,6 @@ export function useLiveNow(enabled: boolean): number {
   return now;
 }
 
-export function taskStatusKind(body: string): TaskStatusKind {
-  if (/^✅/.test(body)) return "done";
-  if (/^❌/.test(body)) return "failed";
-  if (/^🛑/.test(body)) return "cancelled";
-  return "running";
-}
-
 // 状态色接 index.css 的 --color-status-* token(票 2)。Tailwind v4 对
 // @theme 注册的自定义 color 支持 /opacity 修饰符(color-mix),且 .dark 块已
 // 配对深色值,故组件层不再写 dark: 前缀。
@@ -59,23 +52,6 @@ type AudienceResolution = {
   audience: Audience;
   audienceRef?: string;
 };
-
-/** Human-friendly byte size: B / KB / MB / GB (1 KB = 1024 B). */
-export function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return unit === 0
-    ? `${value} ${units[unit]}`
-    : `${value.toFixed(1)} ${units[unit]}`;
-}
 
 /**
  * Ticket 32 humane timestamps (local time):
@@ -111,36 +87,6 @@ export function formatMessageTime(iso: string): string {
     return `${date.getMonth() + 1}月${date.getDate()}日 ${hhmm}`;
   }
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-}
-
-/** Local calendar-day key (YYYY-M-D) — messages sharing it belong to one day section. */
-export function dayKey(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-}
-
-/** Day-separator label (ticket 21): 今天 / 昨天 / 2026/8/10 for older days. */
-export function dayLabel(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-  ).getTime();
-  const startOfDay = new Date(
-    d.getFullYear(),
-    d.getMonth(),
-    d.getDate(),
-  ).getTime();
-  const diffDays = Math.round((startOfToday - startOfDay) / 86_400_000);
-  if (diffDays === 0) {
-    return "今天";
-  }
-  if (diffDays === 1) {
-    return "昨天";
-  }
-  return d.toLocaleDateString("zh-CN");
 }
 
 /**
