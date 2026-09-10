@@ -71,7 +71,13 @@ function workspaceFetchMock(
         }),
     },
     {
-      match: (url) => url.includes("/api/groups/") && url.endsWith("/messages"),
+      // ⚠️ 匹配 path 而不是整串:loadMessages 现在带 `?limit=` —— 不传 limit 会
+      // 落到后端「最老 200 条」那一支(见 requirement-workspace.tsx 的
+      // MESSAGE_PAGE_LIMIT 注释)。用 endsWith("/messages") 匹配会因为 query
+      // 而失配,mock 不命中,测试以难归因的方式红。也别把 query 硬编进来 ——
+      // 下次调 limit 又会全体失配。
+      match: (url) =>
+        url.includes("/api/groups/") && url.split("?")[0].endsWith("/messages"),
       respond: () => jsonResponse([]),
     },
     {
@@ -288,6 +294,30 @@ describe("RequirementWorkspace 响应式布局", () => {
     expect(
       within(screen.getByTestId("requirement-detail-panel")).getByText("b"),
     ).toBeInTheDocument();
+  });
+
+  it("拉消息必须显式带 limit —— 不带会取到最老的一页", async () => {
+    setViewport(1280);
+    const fetchMock = workspaceFetchMock(TWO_REQUIREMENTS);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithProviders(<RequirementWorkspace groupId="group-1" />);
+
+    await screen.findByTestId("requirement-row-specs/b.md");
+
+    // 为什么要断请求 URL 而不是断渲染结果:这个缺陷的表征是「返回了错的一头」
+    // —— 后端不传 limit 走 ORDER BY id ASC(最老 200 条),传了才走 DESC 再
+    // reverse(最新 n 条)。两种返回在组件侧长得一模一样,只有请求 URL 能证明
+    // 取的是哪一支语义。群一超过 200 条,近期需求的层状态就会基于空集推导。
+    const messagesCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).split("?")[0].endsWith("/messages"),
+    );
+    expect(messagesCall).toBeDefined();
+    // 断解析后的参数,不断整串 —— 整串会被 base 与参数顺序影响而变脆。
+    const limit = new URL(
+      String(messagesCall?.[0]),
+      "http://localhost",
+    ).searchParams.get("limit");
+    expect(limit).toBe("200");
   });
 
   it("通过 task_status_changed 增量显示新需求,不重拉任务列表", async () => {
@@ -793,7 +823,8 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
       },
       {
         match: (url) =>
-          url.includes("/api/groups/") && url.endsWith("/messages"),
+          url.includes("/api/groups/") &&
+          url.split("?")[0].endsWith("/messages"),
         respond: () => jsonResponse([]),
       },
       {
@@ -879,7 +910,8 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
       },
       {
         match: (url) =>
-          url.includes("/api/groups/") && url.endsWith("/messages"),
+          url.includes("/api/groups/") &&
+          url.split("?")[0].endsWith("/messages"),
         respond: () => jsonResponse([]),
       },
       {
@@ -986,7 +1018,8 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
       },
       {
         match: (url) =>
-          url.includes("/api/groups/") && url.endsWith("/messages"),
+          url.includes("/api/groups/") &&
+          url.split("?")[0].endsWith("/messages"),
         respond: () => jsonResponse([]),
       },
       {
@@ -1104,7 +1137,8 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
       },
       {
         match: (url) =>
-          url.includes("/api/groups/") && url.endsWith("/messages"),
+          url.includes("/api/groups/") &&
+          url.split("?")[0].endsWith("/messages"),
         respond: () => jsonResponse([]),
       },
       {

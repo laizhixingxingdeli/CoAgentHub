@@ -22,7 +22,8 @@ function groupPageFetchMock() {
         }),
     },
     {
-      match: (url) => url.includes("/api/groups/") && url.endsWith("/messages"),
+      match: (url) =>
+        url.includes("/api/groups/") && url.split("?")[0].endsWith("/messages"),
       respond: () => jsonResponse([]),
     },
     {

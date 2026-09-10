@@ -28,6 +28,23 @@ import {
 import type { RequirementLayerState } from "./requirement-layer-state";
 import { deriveRequirementLayerState } from "./requirement-layer-state";
 
+/**
+ * 拉消息的页大小。**必须显式传给后端**,不能省。
+ *
+ * `listMessages` 有两套互斥语义(message-service.ts):不传 `limit` 走
+ * `ORDER BY id ASC LIMIT 200` —— 返回**最老的 200 条**;传了才走
+ * `ORDER BY id DESC LIMIT n` 再 reverse,返回**最新的 n 条**。
+ *
+ * 这里要的是最新的一页:messages 会喂给 deriveRequirementLayerState 推导每条
+ * 需求的 L1/L2/L3 层状态,群一超过 200 条,近期需求对应的消息就一条都不在
+ * 返回集里,层状态基于空集推导 —— 表现不是「历史看不全」,而是**近期需求的
+ * 层状态静默失真**(spec requirement-timeline-reads-oldest-messages)。
+ *
+ * 取 200 是为了与后端 MESSAGE_PAGE_LIMIT 同值:只翻转取哪一头,不改变单次
+ * 拉取的数据量,因此没有渲染成本与内存占用的变化。
+ */
+const MESSAGE_PAGE_LIMIT = 200;
+
 /** Terminal task statuses: live-buffer refill skips these (spec R2). */
 function isTerminalTaskStatus(status: TaskStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
@@ -348,7 +365,9 @@ export function RequirementWorkspace({
 
   const loadMessages = useCallback(async () => {
     try {
-      const res = await fetch(`/api/groups/${groupId}/messages`);
+      const res = await fetch(
+        `/api/groups/${groupId}/messages?limit=${MESSAGE_PAGE_LIMIT}`,
+      );
       if (res.ok) {
         setMessages(await res.json());
       }
