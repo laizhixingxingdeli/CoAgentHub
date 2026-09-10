@@ -784,6 +784,16 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     it("无额度关键词的普通崩溃不进入冷却(回归:不误判停派)", async () => {
       const { coordinator, codebuddy, group } =
         await setupGroup("quota-plain-crash");
+      // ⚠️ 显式钉死重试上限:下面断言 attempts 长度 2,那是 maxRetries=1 的值。
+      // 而 maxRetries 来自 scripts/dispatch-policy.json,该文件按 process.cwd()
+      // 解析 —— 本机在包目录里跑读不到、回落默认 1;CI 的 cwd 是仓库根,
+      // 读得到、值是 3 → attempts 变 4,这条因此只在 CI 红。
+      // 测试的意图是「普通崩溃照常重试、不被冻结」,与具体次数无关,
+      // 所以把次数钉死,而不是让它随环境飘。
+      const { __setMaxRetriesForTests } = await import(
+        "@server/lib/executor-task"
+      );
+      __setMaxRetriesForTests(1);
       // 同上:真实运行时策略下,普通崩溃文本不含任何额度关键词,不应命中冷却。
       process.env.FAKE_ALWAYS_FAIL = "1";
       const msg = await postMessage(coordinator.id, group.id, {
