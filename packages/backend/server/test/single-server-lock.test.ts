@@ -12,16 +12,16 @@
  * exercises the real lock path.
  */
 import "dotenv/config";
-import pg from "pg";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireSingleServerLock,
-  shouldAcquireSingleServerLock,
   SINGLE_SERVER_LOCK_CLASSID,
   SINGLE_SERVER_LOCK_HELD_MESSAGE,
   SINGLE_SERVER_LOCK_OBJID,
   type SingleServerLockHandle,
+  shouldAcquireSingleServerLock,
 } from "@server/lib/single-server-lock";
+import pg from "pg";
+import { afterEach, describe, expect, it } from "vitest";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgresql://postgres@127.0.0.1:5432/coagenthub";

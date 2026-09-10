@@ -15,7 +15,7 @@ export {
   CompletionEventSchema,
   EndpointConfigSchema,
   InboxItemSchema,
-  parseCallbackAgentConfig,
   PLACEHOLDER_PATTERN,
+  parseCallbackAgentConfig,
   TaskSchema,
 } from "./config.js";

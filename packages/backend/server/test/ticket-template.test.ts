@@ -3,21 +3,21 @@
  * 改盘上模板无需重建 server。
  */
 import {
-  mkdtempSync,
-  writeFileSync,
   mkdirSync,
-  readFileSync,
+  mkdtempSync,
   readdirSync,
+  readFileSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   buildTicket,
   loadTicketTemplate,
   resolveTicketTemplatesDir,
 } from "@server/lib/executor-task";
+import { afterEach, describe, expect, it } from "vitest";
 import type { QueuedRun } from "../src/lib/executor-task/types";
 
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));

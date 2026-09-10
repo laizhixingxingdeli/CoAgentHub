@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
+import { eq } from "drizzle-orm";
 import {
   afterEach,
   beforeAll,
@@ -11,8 +13,6 @@ import {
   it,
   vi,
 } from "vitest";
-import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
-import { eq } from "drizzle-orm";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
 import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 

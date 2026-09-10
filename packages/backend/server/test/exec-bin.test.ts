@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  MAX_BIN_LENGTH,
   isExecutableFile,
+  MAX_BIN_LENGTH,
   resolveBin,
 } from "../src/lib/exec-bin";
 

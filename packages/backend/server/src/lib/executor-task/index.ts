@@ -57,6 +57,27 @@ export {
   type StoredTaskDetail,
   taskDetailFilePath,
 } from "./detail-store";
+export {
+  applyDiffSummaryPatch,
+  applyDiffSummaryPatchAllowingClear,
+  DIFF_SUMMARY_KEY_OWNERS,
+  type DiffSummaryOwner,
+  mergeDiffSummary,
+  ownerOfDiffSummaryKey,
+  PLATFORM_KEY_OWNERS,
+} from "./diff-summary";
+export {
+  DISPATCH_INTENT_RECLAIM_GRACE_MS,
+  dispatchAndSettleIntent,
+  dispatchInputFromIntent,
+  findDispatchIntentByMessage,
+  type IntentReclaimResult,
+  payloadFromDispatchInput,
+  reclaimDispatchIntents,
+  recordDispatchIntentFailure,
+  settleDispatchIntentAfterAttempt,
+  writeDispatchIntent,
+} from "./dispatch-intent";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export {
   appendLiveTaskOutput,
@@ -106,18 +127,6 @@ export {
   startQueuedTaskReclaim,
 } from "./queued-task-reclaim";
 export {
-  DISPATCH_INTENT_RECLAIM_GRACE_MS,
-  dispatchAndSettleIntent,
-  dispatchInputFromIntent,
-  findDispatchIntentByMessage,
-  type IntentReclaimResult,
-  payloadFromDispatchInput,
-  reclaimDispatchIntents,
-  recordDispatchIntentFailure,
-  settleDispatchIntentAfterAttempt,
-  writeDispatchIntent,
-} from "./dispatch-intent";
-export {
   extractCodeBuddyStreamResult,
   extractGenericJsonlText,
   parseTaskReport,
@@ -128,12 +137,6 @@ export {
   groupHasReviewerMember,
   reviewRequestCarryAllowed,
 } from "./review-request-policy";
-export {
-  loadTicketTemplate,
-  resolveTicketTemplatesDir,
-  type TicketRole,
-  type TicketTemplate,
-} from "./ticket-template";
 export {
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,
@@ -146,6 +149,12 @@ export {
   getL3ResponseMinutesMs,
 } from "./state";
 export {
+  loadTicketTemplate,
+  resolveTicketTemplatesDir,
+  type TicketRole,
+  type TicketTemplate,
+} from "./ticket-template";
+export {
   collectTokenUsage,
   extractCodexExecText,
   type TokenUsage,
@@ -153,15 +162,6 @@ export {
   type TokenUsageReason,
   type TokenUsageResult,
 } from "./token-usage";
-export {
-  applyDiffSummaryPatch,
-  applyDiffSummaryPatchAllowingClear,
-  DIFF_SUMMARY_KEY_OWNERS,
-  type DiffSummaryOwner,
-  mergeDiffSummary,
-  ownerOfDiffSummaryKey,
-  PLATFORM_KEY_OWNERS,
-} from "./diff-summary";
 export {
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,

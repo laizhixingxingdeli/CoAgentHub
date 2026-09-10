@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  OUTPUT_TAIL_MAX_BYTES,
-  OUTPUT_TAIL_MAX_LINES,
   appendOutputTail,
   lastNonEmptyLine,
+  OUTPUT_TAIL_MAX_BYTES,
+  OUTPUT_TAIL_MAX_LINES,
 } from "./output-buffer";
 
 describe("appendOutputTail 前端有界缓冲(与后端 output-buffer.ts 同款上限)", () => {

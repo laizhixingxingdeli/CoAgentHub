@@ -13,8 +13,8 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import {
-  parseRateLimitRecoveryMs,
   listPeerExecutorNames,
+  parseRateLimitRecoveryMs,
 } from "@server/lib/executors";
 import { and, eq } from "drizzle-orm";
 import {
@@ -35,9 +35,9 @@ import {
 } from "./executor-task/queue";
 import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
+  classifyQuotaFailure,
   formatEta,
   getRateLimitCooldownMs,
-  classifyQuotaFailure,
 } from "./executor-task/state";
 
 /** 孤儿收敛周期(默认 10s;测试可注入更短间隔)。 */

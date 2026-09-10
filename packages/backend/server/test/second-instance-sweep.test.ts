@@ -5,7 +5,7 @@
  * **同一个 DATABASE_URL**),其启动兜底把生产在途任务清了场 —— 其中一条正是
  * 它自己所属工作项的协调任务。生产进程从未重启,却有两条任务被标 `server-restart`。
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recoverInterruptedTasks } from "../src/lib/executor-task/queue";
 

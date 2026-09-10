@@ -1,9 +1,9 @@
-import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
-import type { GroupRole } from "@laizhixingxingdeli/database/schema";
-import type { DataBase } from "@server/lib/database";
-import { eq } from "drizzle-orm";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import type { GroupRole } from "@laizhixingxingdeli/database/schema";
+import { participant as participantTable } from "@laizhixingxingdeli/database/schema";
+import type { DataBase } from "@server/lib/database";
+import { eq } from "drizzle-orm";
 
 /**
  * skill 类型 → capability 标签映射。agent 安装 skill 后,按其 skill 类型把

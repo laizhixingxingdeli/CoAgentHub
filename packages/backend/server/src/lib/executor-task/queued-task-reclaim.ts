@@ -27,6 +27,7 @@ import { findExecutorByKey } from "@server/lib/executors";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
+import { applyDiffSummaryPatchAllowingClear } from "./diff-summary";
 import {
   type IntentReclaimResult,
   reclaimDispatchIntents,
@@ -34,7 +35,6 @@ import {
 import { postStatus } from "./notify";
 import { enqueueTaskRun, queuedBlockReason } from "./queue";
 import { activeRuns, getStallAlertMs, groupQueues } from "./state";
-import { applyDiffSummaryPatchAllowingClear } from "./diff-summary";
 import { asDiffSummaryRecord, type QueuedRun } from "./types";
 
 /** 回收周期(默认 10s,与孤儿收敛同量级;测试可注入更短间隔)。 */

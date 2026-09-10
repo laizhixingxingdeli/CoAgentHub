@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
 import { groupMessage as groupMessageTable } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
+import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 import { testDb } from "./db";
 

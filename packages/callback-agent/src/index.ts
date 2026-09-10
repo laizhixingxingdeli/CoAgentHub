@@ -25,8 +25,8 @@ export {
   CompletionEventSchema,
   EndpointConfigSchema,
   InboxItemSchema,
-  parseCallbackAgentConfig,
   PLACEHOLDER_PATTERN,
+  parseCallbackAgentConfig,
   TaskSchema,
 } from "./config.js";
 export { DedupeStore } from "./dedupe.js";

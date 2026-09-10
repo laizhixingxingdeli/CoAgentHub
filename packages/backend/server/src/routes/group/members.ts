@@ -1,7 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import {
-  GROUP_ROLES,
   executorConfig as executorConfigTable,
+  GROUP_ROLES,
   groupMember as groupMemberTable,
   participant as participantTable,
 } from "@laizhixingxingdeli/database/schema";

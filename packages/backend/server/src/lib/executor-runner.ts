@@ -15,7 +15,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, win32 as pathWin32 } from "node:path";
+import { dirname, join, win32 as pathWin32, resolve } from "node:path";
 
 /** 默认执行超时:120 分钟(env EXECUTOR_TIMEOUT_MS 覆盖,单位毫秒)。 */
 const DEFAULT_TIMEOUT_MS = 120 * 60 * 1000;

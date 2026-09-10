@@ -10,8 +10,8 @@ import {
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { v7 as uuidv7 } from "uuid";
 import { timeColumns } from "../utils/columns.js";
-import { groupMessage } from "./group-message.js";
 import { groups } from "./group.js";
+import { groupMessage } from "./group-message.js";
 import { participant } from "./participant.js";
 import { task } from "./task.js";
 

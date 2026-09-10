@@ -18,6 +18,7 @@ import {
 import { runA2AExecutor } from "@server/lib/a2a-runner";
 import { serverPort } from "@server/lib/config";
 import type { DataBase } from "@server/lib/database";
+import { resolveExecutorCliSpawn } from "@server/lib/executor-config-fields";
 import {
   createCheckpoint,
   type ExecutorRunHandle,
@@ -28,7 +29,6 @@ import {
   resetToCheckpoint,
   runExecutor,
 } from "@server/lib/executor-runner";
-import { resolveExecutorCliSpawn } from "@server/lib/executor-config-fields";
 import {
   type ExecutorConfig,
   findExecutorByParticipant,
@@ -48,6 +48,7 @@ import {
   listPersistedExecutorCooldowns,
 } from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
+import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -82,16 +83,10 @@ import {
   reviewRequestCarryAllowed,
 } from "./review-request-policy";
 import {
-  buildExecutionModeLines,
-  buildReportLines,
-  loadTicketTemplate,
-  type TicketRole,
-} from "./ticket-template";
-import {
   activeRuns,
   classifyQuotaFailure,
-  clearStaleTestRepoIndexLock,
   clearRunTimers,
+  clearStaleTestRepoIndexLock,
   cooldownEndMs,
   cooldownTimers,
   type ExecutorCooldownSource,
@@ -121,8 +116,13 @@ import {
   runningWorkspaceCount,
   setPumping,
 } from "./state";
+import {
+  buildExecutionModeLines,
+  buildReportLines,
+  loadTicketTemplate,
+  type TicketRole,
+} from "./ticket-template";
 import { collectTokenUsage, extractCodexExecText } from "./token-usage";
-import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
 import {
   asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,

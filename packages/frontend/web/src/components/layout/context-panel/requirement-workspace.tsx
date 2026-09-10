@@ -753,6 +753,7 @@ export function RequirementWorkspace({
   // until invalidateTaskDetails clears it (status change / review_result /
   // reconnect). Non-terminal and terminal both re-fetch when invalidated so
   // l3 can still move after done.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: detailRefreshEpoch 是失效触发器,不是 effect 体读取的值 —— invalidateTaskDetails 清掉 loadedTaskDetailsRef 后靠 bump 这个计数器把 effect 重新跑起来(346/437 行)。它不出现在 effect 体内是设计使然;按 biome 的 unsafe fix 删掉它,「显式失效后重新拉取详情」就永远不会触发。
   useEffect(() => {
     if (!selectedRequirement || !selectedTaskIds) return;
     const taskRows = selectedRequirement.tasks.filter(

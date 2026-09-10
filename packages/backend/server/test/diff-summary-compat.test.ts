@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import { mergeDiffSummary } from "@server/lib/executor-task";
 import { eq } from "drizzle-orm";
 import {
   afterAll,
@@ -24,7 +25,6 @@ import {
   it,
 } from "vitest";
 import { type RawData, WebSocket } from "ws";
-import { mergeDiffSummary } from "@server/lib/executor-task";
 import { wsHub } from "../src/lib/ws-hub";
 import { createTestApp } from "./app";
 import { testDb } from "./db";

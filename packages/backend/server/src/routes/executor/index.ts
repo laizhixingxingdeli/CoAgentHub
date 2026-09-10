@@ -8,6 +8,7 @@ import {
   EXECUTOR_CONFIG_FIELD_CAPABILITIES,
   inputModeWriteError,
 } from "@server/lib/executor-config-fields";
+import { clearExecutorCooldown } from "@server/lib/executor-task/queue";
 import {
   addExecutorConfig,
   effectiveExecutors,
@@ -16,7 +17,6 @@ import {
   removeExecutorConfig,
   updateExecutorConfig,
 } from "@server/lib/executors";
-import { clearExecutorCooldown } from "@server/lib/executor-task/queue";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";

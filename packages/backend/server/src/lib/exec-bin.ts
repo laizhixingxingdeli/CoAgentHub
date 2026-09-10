@@ -6,8 +6,7 @@
  * 不 spawn `which` 子进程,避免不同操作系统(尤其是 macOS 之外的部署
  * 环境)上行为不一致。
  */
-import { constants } from "node:fs";
-import { accessSync, statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 
 /** bin 输入长度上限(与路由侧 zod 校验保持一致)。 */

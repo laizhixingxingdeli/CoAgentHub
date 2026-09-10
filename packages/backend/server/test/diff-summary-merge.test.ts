@@ -7,10 +7,10 @@
 import { describe, expect, it } from "vitest";
 import {
   DIFF_SUMMARY_KEY_OWNERS,
+  type DiffSummaryOwner,
   mergeDiffSummary,
   ownerOfDiffSummaryKey,
   PLATFORM_KEY_OWNERS,
-  type DiffSummaryOwner,
 } from "../src/lib/executor-task/diff-summary";
 
 describe("diffSummary ownership registry", () => {

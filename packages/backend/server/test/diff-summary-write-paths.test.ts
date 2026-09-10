@@ -12,16 +12,16 @@ import {
   participant as participantTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
-import { eq } from "drizzle-orm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DataBase } from "../src/lib/database";
-import { maybeHandleControlCommand } from "../src/lib/control";
 import {
   __resetExecutorQueueForTests,
   applyDiffSummaryPatch,
   mergeDiffSummary,
   recoverInterruptedTasks,
 } from "@server/lib/executor-task";
+import { eq } from "drizzle-orm";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { maybeHandleControlCommand } from "../src/lib/control";
+import type { DataBase } from "../src/lib/database";
 import { markTaskCancelled } from "../src/lib/executor-task/notify";
 import { createTestApp } from "./app";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
