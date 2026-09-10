@@ -1463,16 +1463,30 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
   }, 30_000);
 
   it("认领超时:queued 任务超过 claim 阈值未被 running → failed + ❌ 回传(含「未认领」)", async () => {
-    process.env.FAKE_SLEEP_SECS = "";
-    // 占位任务持续输出 ~2s,占住唯一组槽位;排队任务超阈值仍未被认领。
-    process.env.FAKE_OUTPUT_LOOPS = "40";
-    process.env.FAKE_OUTPUT_INTERVAL_MS = "0.05";
+    // 占位任务单次 sleep 8s,占住唯一组槽位;排队任务超阈值仍未被认领。
+    //
+    // 这里刻意用 FAKE_SLEEP_SECS(一次 sleep)而不是 FAKE_OUTPUT_LOOPS 循环:
+    // 循环的总时长 = N × (echo + sleep + shell 记账),后面那截开销跨平台差得
+    // 很远,标称值根本不作数。原写法是 40 圈 × 0.05s「≈2s」,而 claim 阈值也
+    // 是 2s —— 下面那段注释写着「须远小于占位任务总时长」,数值却设成了等量,
+    // 于是变成一场竞速:占位任务先跑完释放槽位,排队任务就被正常认领执行,
+    // 状态到 done 而不是 failed(CI 34455889726 的报错里 outputTail 有
+    // tick 0..17,正是排队任务真被跑了的痕迹)。
+    // 把圈数提到 160 也不行:Windows 上每圈开销远超标称 50ms,总时长直接冲破
+    // 等待上限,本地复跑三次全在最后那句「等占位任务 done」上超时。
+    // 单次 sleep 的时长是确定的,不受圈数开销影响 —— 紧邻的下一条用例
+    //(「已 running 的任务不受认领阈值影响」)本来就是这么写的。
+    //
+    // 静默不会误杀:stall 阈值 60s 远大于这 8s。
+    process.env.FAKE_SLEEP_SECS = "8";
+    process.env.FAKE_OUTPUT_LOOPS = "";
+    process.env.FAKE_OUTPUT_INTERVAL_MS = "";
     const { __setMaxParallelGroupsForTests, __setReliabilityTimeoutsForTests } =
       await import("@server/lib/executor-task");
     __setMaxParallelGroupsForTests(1); // 只剩一个槽位 → 第二个任务必须排队
     // claim=2s:须大于「第一条 spawn→running」耗时(win32 sh.exe 冷启动可达
-    // 数百 ms;100ms 会把占位任务自己误杀),又须远小于占位任务总时长(~2s
-    // 持续输出)以便排队任务在占位结束前触发未认领。
+    // 数百 ms;100ms 会把占位任务自己误杀),又须远小于占位任务总时长(8s)
+    // 以便排队任务在占位结束前触发未认领。现在是 4 倍余量。
     __setReliabilityTimeoutsForTests(60_000, 2_000);
     try {
       const { coordinator, codebuddy, group } = await setupGroup();
@@ -1503,14 +1517,13 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
         (m) => m.contentType === "task_status" && m.body.includes("未认领"),
       );
       // 占位任务已 running,不受认领阈值影响,正常完成。
-      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done");
+      await waitForTaskStatus(coordinator.id, group.id, m1.id, "done", 20_000);
     } finally {
-      process.env.FAKE_OUTPUT_LOOPS = "";
-      process.env.FAKE_OUTPUT_INTERVAL_MS = "";
+      process.env.FAKE_SLEEP_SECS = "";
       // 恢复默认并行组数,避免影响后续用例。
       __setMaxParallelGroupsForTests(2);
     }
-  }, 30_000);
+  }, 40_000);
 
   it("已 running 的任务不受认领阈值影响(认领成功后取消认领计时)", async () => {
     process.env.FAKE_SLEEP_SECS = "2"; // 跑 ~2s,远超 claim 阈值
