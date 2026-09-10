@@ -201,7 +201,6 @@ export const en: Record<DictKey, string> = {
   "files.error.deleteFailed": "Delete failed: {detail}",
 
   // ── Messages page ────────────────────────────────────────────────────────
-  "messages.error.sendFailed": "Send failed: {detail}",
   "messages.error.loadFailed": "Failed to load messages: {detail}",
   "messages.error.editFailed": "Edit failed: {detail}",
   "messages.error.deleteFailed": "Delete failed: {detail}",
@@ -209,29 +208,11 @@ export const en: Record<DictKey, string> = {
   "messages.back.label": "Back",
   "messages.backToList": "Back to list",
   "messages.titleFallback": "Group messages",
-  "messages.search.placeholder": "Search messages…",
-  "messages.search.aria": "Search messages",
-  "messages.search.clearAria": "Clear search",
-  "messages.search.label": "Search:",
   "messages.readOnly.deleted":
     "This group was deleted; history is still viewable, sending is disabled.",
   "messages.readOnly.archived":
     "This group is archived and read-only; history remains viewable, sending is disabled.",
-  "messages.readOnly.human":
-    "This group is an agent collaboration space — to send messages, talk directly to the reviewer agent.",
-  "messages.audience.all": "everyone",
-  "messages.list.empty": "No messages yet — send the first one",
-  "messages.list.emptyHint": "@ a role or member to route the message directly",
-  "messages.list.readOnly": "Group archived, read-only",
-  "messages.newCount": "{count} new messages",
-  "messages.reply.to": "Replying to {name}",
-  "messages.reply.cancelAria": "Cancel reply",
-  "messages.edit.cancel": "Cancel",
-  "messages.edit.save": "Save",
-  "messages.edit.saving": "Saving…",
   "messages.delete.confirm": "Delete this message?",
-  "messages.deleted": "Message deleted",
-  "messages.copyFailed": "Copy failed",
 
   // ── Task panel ───────────────────────────────────────────────────────────
   "tasks.title": "Tasks ({count})",

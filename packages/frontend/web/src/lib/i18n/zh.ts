@@ -192,7 +192,6 @@ export const zh = {
   "files.error.deleteFailed": "删除失败: {detail}",
 
   // ── 消息页 ───────────────────────────────────────────────────────────────
-  "messages.error.sendFailed": "发送失败: {detail}",
   "messages.error.loadFailed": "加载消息失败: {detail}",
   "messages.error.editFailed": "编辑失败: {detail}",
   "messages.error.deleteFailed": "删除失败: {detail}",
@@ -200,28 +199,10 @@ export const zh = {
   "messages.back.label": "返回",
   "messages.backToList": "返回列表",
   "messages.titleFallback": "群组消息",
-  "messages.search.placeholder": "搜索消息…",
-  "messages.search.aria": "搜索消息",
-  "messages.search.clearAria": "清除搜索",
-  "messages.search.label": "搜索:",
   "messages.readOnly.deleted": "该群组已删除,历史消息仍可查看,发送已禁用。",
   "messages.readOnly.archived":
     "该群组已归档,处于只读状态;历史消息可继续查看,发送已禁用。",
-  "messages.readOnly.human":
-    "群是 agent 协作空间;如需发言,请与检视者 agent 直接对话。",
-  "messages.audience.all": "全体成员",
-  "messages.list.empty": "暂无消息,发送第一条吧",
-  "messages.list.emptyHint": "@ 角色或成员可以让消息直达目标",
-  "messages.list.readOnly": "群已归档,只读",
-  "messages.newCount": "{count} 条新消息",
-  "messages.reply.to": "回复 {name}",
-  "messages.reply.cancelAria": "取消回复",
-  "messages.edit.cancel": "取消",
-  "messages.edit.save": "保存",
-  "messages.edit.saving": "保存中…",
   "messages.delete.confirm": "确定删除这条消息吗?删除后不可恢复。",
-  "messages.deleted": "消息已删除",
-  "messages.copyFailed": "复制失败",
 
   // ── 任务面板 ─────────────────────────────────────────────────────────────
   "tasks.title": "任务列表({count})",
