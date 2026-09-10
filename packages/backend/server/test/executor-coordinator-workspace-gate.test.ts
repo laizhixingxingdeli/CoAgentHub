@@ -761,13 +761,26 @@ async function waitForResumeTask(parentTaskId: string, timeoutMs = 20_000) {
       .select()
       .from(taskTable)
       .where(eq(taskTable.parentTaskId, parentTaskId));
+    // ⚠️ 认**续跑标记本身**,不能只看「有没有 platform 对象」。
+    // 续跑任务的标记是 platform.resumeOf(coordinator-resume.ts 的
+    // PLATFORM_MARKER_KEY);而普通子任务也会被 registerTaskOwnerServer
+    // 写上 platform.ownerServerPid —— 旧判据把它们一并命中,
+    // 返回哪一个取决于时序,这条用例因此在 CI 上时红时绿
+    // (2026-09-09 四轮里红了两轮,断言拿到的是另一个协调者的任务 id)。
     const hit = rows.find((r) => {
       const summary = r.diffSummary;
+      if (
+        typeof summary !== "object" ||
+        summary === null ||
+        Array.isArray(summary)
+      ) {
+        return false;
+      }
+      const platform = (summary as Record<string, unknown>).platform;
       return (
-        typeof summary === "object" &&
-        summary !== null &&
-        !Array.isArray(summary) &&
-        typeof (summary as Record<string, unknown>).platform === "object"
+        typeof platform === "object" &&
+        platform !== null &&
+        (platform as Record<string, unknown>).resumeOf !== undefined
       );
     });
     if (hit) return hit;

@@ -285,10 +285,30 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
       const t = tasks.find((x) => x.messageId === messageId);
       if (t && t.status === status) return t;
       if (Date.now() > deadline) {
+        // 只报「没到期望状态」不够定位:在 CI(Linux)上这条红过多次,
+        // 而本机(Windows)复现不了,光看状态名查不出为什么。
+        // 把落库的失败原因、attempts 与输出尾部一起带出来 ——
+        // 这些都是任务详情里现成的事实,不是额外插桩。
+        const cur = tasks.find((x) => x.messageId === messageId);
+        const diff = (cur?.diffSummary ?? null) as Record<
+          string,
+          unknown
+        > | null;
+        const attempts = (cur?.attempts ?? []) as ReadonlyArray<
+          Record<string, unknown>
+        >;
         throw new Error(
-          `task(message=${messageId}) 未在 ${timeoutMs}ms 内达到 ${status}(当前=${
-            tasks.find((x) => x.messageId === messageId)?.status ?? "无"
-          })`,
+          [
+            `task(message=${messageId}) 未在 ${timeoutMs}ms 内达到 ${status}` +
+              `(当前=${cur?.status ?? "无"})`,
+            `  taskId      = ${cur?.id ?? "无"}`,
+            `  error       = ${JSON.stringify(diff?.error ?? null)}`,
+            `  retries     = ${JSON.stringify(diff?.retries ?? null)}`,
+            `  attempts(${attempts.length}) = ${JSON.stringify(
+              attempts.map((a) => ({ n: a.n, error: a.error, exit: a.exitCode })),
+            )}`,
+            `  outputTail  = ${String(diff?.outputTail ?? "").slice(-400)}`,
+          ].join("\n"),
         );
       }
       await new Promise((r) => setTimeout(r, 100));
