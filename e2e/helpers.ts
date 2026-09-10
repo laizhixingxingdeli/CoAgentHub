@@ -120,7 +120,17 @@ export async function createTask(
   return (await res.json()) as ApiTask;
 }
 
-/** 在页面加载前把身份写入 localStorage(与 identity store 同一 key)。 */
+/**
+ * @deprecated 空操作,勿在新用例里使用。
+ *
+ * 它写的 localStorage 键 "coagenthub.agentId" 在前端全仓已无任何读写方:
+ * 身份模型在 2026-08-24(f6dc7b22)改成了经 GET /api/participants 找服务端
+ * 建的「Local User」,不再本地持久化身份(web/src/lib/local-user.ts)。
+ * 浏览器侧因此无法再扮演任意 participant —— 一律是 Local User。
+ *
+ * 仍保留仅因为 register.spec.ts / messages.spec.ts 两份已 skip 的用例还引用
+ * 着它;那两份恢复时会连同这里一起重做。详见 register.spec.ts 头部说明。
+ */
 export async function bindIdentity(
   page: Page,
   participantId: string,

@@ -10,8 +10,26 @@ import {
 
 /**
  * 核心路径 3:群内发消息(输入 body → 发送 → 消息出现在列表)。
+ *
+ * ⚠️ 已 skip —— 群页面已经没有消息输入框和消息流了,不是选择器过期。
+ *
+ * /groups/:id 现在渲染的是「标题栏 + 只读横幅 + RequirementWorkspace
+ * (需求列表/详情两栏)」(messages/index.tsx:163-169)。原来的聊天流组件
+ * MessageList.tsx(带 data-testid="message-stream")全仓无人 import,已是
+ * 死代码;i18n 的 messages.send.aria(「消息内容」)同样不再被任何组件渲染。
+ *
+ * 当前 UI 里唯一会 POST /groups/:id/messages 的路径是任务上的「停止」/
+ * 「回滚」按钮(requirement-workspace.tsx:642 的 sendCommand,发的是
+ * broadcast 命令消息),**没有自由文本输入框**。也就是说「输入 body → 发送」
+ * 这个能力在产品里已不存在,无从断言。
+ *
+ * 身份侧还有第二重失效:本用例靠 bindIdentity 扮演自己注册的 participant,
+ * 而身份模型已在 2026-08-24 改为固定的「Local User」——详见 register.spec.ts
+ * 头部那段说明。
+ *
+ * 恢复覆盖需要重新决定「发消息」在新形态下测什么,属产品决策 —— 留债待议。
  */
-test("群内发消息:输入 body → 发送 → 消息出现在列表", async ({
+test.skip("群内发消息:输入 body → 发送 → 消息出现在列表", async ({
   page,
   request,
 }) => {
@@ -42,8 +60,15 @@ test("群内发消息:输入 body → 发送 → 消息出现在列表", async (
  * 核心路径 4:回复树(回复 → parentId 挂载 → 树形渲染)。
  * 根消息经 API 注入,回复动作走真实 UI(消息行 hover → 回复 → 引用条 →
  * 发送),最后用 API 侧断言 parentId 确实挂载、UI 显示回复计数。
+ *
+ * ⚠️ 已 skip —— 同上一条:消息流 UI(message-stream / 消息行 hover / 回复
+ * 引用条 reply-quote-bar / 「N 条回复」计数)随 MessageList.tsx 一起成了
+ * 无人挂载的死代码。parentId 的服务端行为仍由单测覆盖,这里缺的是 UI 侧。
  */
-test("回复树:回复 → parentId 挂载 → 树形渲染", async ({ page, request }) => {
+test.skip("回复树:回复 → parentId 挂载 → 树形渲染", async ({
+  page,
+  request,
+}) => {
   const participant = await registerParticipant(
     request,
     uniqueName("e2e-replier"),
