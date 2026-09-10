@@ -7,14 +7,7 @@ import {
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { eq } from "drizzle-orm";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   __resetExecutorQueueForTests,
   preserveDispatchKindNote,
@@ -111,16 +104,17 @@ describe("共享 helper preserveDispatchKindNote(R2 保留规则单点)", () => 
 
   it("existing 无 note → 不写、返回入参引用", () => {
     const next = { error: "x" };
-    expect(preserveDispatchKindNote({ tokenUsage: { a: 1 } }, next)).toBe(
-      next,
-    );
+    expect(preserveDispatchKindNote({ tokenUsage: { a: 1 } }, next)).toBe(next);
     expect(Object.hasOwn(next, "dispatchKindNote")).toBe(false);
   });
 
   it("existing 有 note 且 next 缺该键 → 保留旧值", () => {
-    const out = preserveDispatchKindNote({ dispatchKindNote: NOTE }, {
-      error: "x",
-    });
+    const out = preserveDispatchKindNote(
+      { dispatchKindNote: NOTE },
+      {
+        error: "x",
+      },
+    );
     expect(out.dispatchKindNote).toBe(NOTE);
   });
 
@@ -156,9 +150,10 @@ async function register(name: string) {
     body: JSON.stringify({ name }),
   });
   if (res.status === 409) {
-    const list = (
-      await (await app.request("/api/participants")).json()
-    ) as { id: string; name: string }[];
+    const list = (await (await app.request("/api/participants")).json()) as {
+      id: string;
+      name: string;
+    }[];
     const existing = list.find((p) => p.name === name);
     if (existing) return { id: existing.id };
   }
@@ -169,7 +164,10 @@ async function register(name: string) {
 async function createGroup(ownerId: string, title: string) {
   const res = await app.request(`/api/groups`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Participant-Id": ownerId },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Participant-Id": ownerId,
+    },
     body: JSON.stringify({ title }),
   });
   expect(res.status).toBe(200);
@@ -184,7 +182,10 @@ async function addMember(
 ) {
   const res = await app.request(`/api/groups/${groupId}/members`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Participant-Id": callerId },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Participant-Id": callerId,
+    },
     body: JSON.stringify({ participantId: memberId, roles }),
   });
   expect(res.status).toBe(200);
@@ -256,9 +257,9 @@ describe("路径一:PATCH /tasks(routes/group/tasks.ts)保留与显式覆盖", (
     expect(patch1.status).toBe(200);
     let row = await getTask(taskId);
     expect(row.diffSummary).toMatchObject({ summary: "覆盖写入" });
-    expect(
-      (row.diffSummary as Record<string, unknown>).dispatchKindNote,
-    ).toBe(NOTE);
+    expect((row.diffSummary as Record<string, unknown>).dispatchKindNote).toBe(
+      NOTE,
+    );
 
     // 显式携带该键 → 以新值为准(保留规则的唯一出口)
     const patch2 = await app.request(
@@ -276,9 +277,9 @@ describe("路径一:PATCH /tasks(routes/group/tasks.ts)保留与显式覆盖", (
     );
     expect(patch2.status).toBe(200);
     row = await getTask(taskId);
-    expect(
-      (row.diffSummary as Record<string, unknown>).dispatchKindNote,
-    ).toBe("显式指定值");
+    expect((row.diffSummary as Record<string, unknown>).dispatchKindNote).toBe(
+      "显式指定值",
+    );
   });
 });
 
@@ -308,67 +309,66 @@ describe("路径二:markTaskCancelled(executor-task/notify.ts)取消落库保留
     const group = await createGroup(owner.id, "dkn-cancel2");
     const taskId = await insertTask(group.id, executor.id, "损坏的旧数据");
 
-    await expect(markTaskCancelled(runtimeDb, taskId, group.id)).resolves.toBeDefined();
+    await expect(
+      markTaskCancelled(runtimeDb, taskId, group.id),
+    ).resolves.toBeDefined();
 
     const row = await getTask(taskId);
     expect(row.status).toBe("cancelled");
     expect(row.diffSummary).toMatchObject({ error: "stopped" });
     expect(
-      Object.hasOwn(row.diffSummary as Record<string, unknown>, "dispatchKindNote"),
+      Object.hasOwn(
+        row.diffSummary as Record<string, unknown>,
+        "dispatchKindNote",
+      ),
     ).toBe(false);
   });
 });
 
 describe("路径三:queue.ts 完成回填(fake bin 真实跑到 done)保留", () => {
-  it(
-    "完成回填覆盖 diffSummary 后仍保留既有 dispatchKindNote",
-    async () => {
-      const coordinator = await register(`dkn-coord-${Date.now()}`);
-      const executorMember = await register(`dkn-exec-${Date.now()}`);
-      // executor 成员(非 coordinator 角色)→ 非 detached,真实 spawn fake
-      // bin 跑完完成回填路径;bin 为 codebuddy 配置(EXECUTOR_BIN_CODEBUDDY
-      // 覆盖为 fake bin,sleep 留出写留痕窗口)。
-      await bindExecutor(executorMember.id, "codebuddy");
-      const group = await createGroup(coordinator.id, "dkn-e2e");
-      await addMember(coordinator.id, group.id, executorMember.id, [
-        "executor",
-      ]);
+  it("完成回填覆盖 diffSummary 后仍保留既有 dispatchKindNote", async () => {
+    const coordinator = await register(`dkn-coord-${Date.now()}`);
+    const executorMember = await register(`dkn-exec-${Date.now()}`);
+    // executor 成员(非 coordinator 角色)→ 非 detached,真实 spawn fake
+    // bin 跑完完成回填路径;bin 为 codebuddy 配置(EXECUTOR_BIN_CODEBUDDY
+    // 覆盖为 fake bin,sleep 留出写留痕窗口)。
+    await bindExecutor(executorMember.id, "codebuddy");
+    const group = await createGroup(coordinator.id, "dkn-e2e");
+    await addMember(coordinator.id, group.id, executorMember.id, ["executor"]);
 
-      const res = await app.request(`/api/groups/${group.id}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Participant-Id": coordinator.id,
-        },
-        body: JSON.stringify({
-          body: "dkn-completion-task",
-          audience: "participant",
-          audienceRef: executorMember.id,
-        }),
-      });
-      expect(res.status).toBe(200);
-      const msg = (await res.json()) as { id: string };
-      const task = await waitForTask(msg.id);
+    const res = await app.request(`/api/groups/${group.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": coordinator.id,
+      },
+      body: JSON.stringify({
+        body: "dkn-completion-task",
+        audience: "participant",
+        audienceRef: executorMember.id,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const msg = (await res.json()) as { id: string };
+    const task = await waitForTask(msg.id);
 
-      // 在终态回填前写入 R2 缺省留痕(findings 缺省 fix 任务创建时即带;
-      // 留痕来源对本路径无意义,保留规则只认既有值):完成路径整体重写
-      // diffSummary(summary/outputTail/tokenUsage/claimVerification),
-      // 留痕必须在覆盖后仍在。
-      await testDb
-        .update(taskTable)
-        .set({ diffSummary: { dispatchKindNote: NOTE } })
-        .where(eq(taskTable.id, task.id));
+    // 在终态回填前写入 R2 缺省留痕(findings 缺省 fix 任务创建时即带;
+    // 留痕来源对本路径无意义,保留规则只认既有值):完成路径整体重写
+    // diffSummary(summary/outputTail/tokenUsage/claimVerification),
+    // 留痕必须在覆盖后仍在。
+    await testDb
+      .update(taskTable)
+      .set({ diffSummary: { dispatchKindNote: NOTE } })
+      .where(eq(taskTable.id, task.id));
 
-      const done = await waitForStatus(task.id, "done", 30_000);
-      expect(done.diffSummary).toMatchObject({
-        summary: "完成 dispatchKindNote 保留验证",
-      });
-      expect(
-        (done.diffSummary as Record<string, unknown>).dispatchKindNote,
-      ).toBe(NOTE);
-    },
-    30_000,
-  );
+    const done = await waitForStatus(task.id, "done", 30_000);
+    expect(done.diffSummary).toMatchObject({
+      summary: "完成 dispatchKindNote 保留验证",
+    });
+    expect((done.diffSummary as Record<string, unknown>).dispatchKindNote).toBe(
+      NOTE,
+    );
+  }, 30_000);
 });
 
 async function waitForTask(messageId: string, timeoutMs = 3_000) {

@@ -23,10 +23,7 @@ import {
   vi,
 } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
-import {
-  resolveFakeExecutor,
-  withFakeExecutorArgs,
-} from "./fake-executor-bin";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 阶段2-票2 + 调度并行化(票4):server 按 project_path 分组的执行队列(同组
@@ -179,9 +176,7 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
   );
   let defaultMaxRetries = 1;
   beforeAll(async () => {
-    const { getRetryPolicy } = await import(
-      "@server/lib/executor-task/state"
-    );
+    const { getRetryPolicy } = await import("@server/lib/executor-task/state");
     defaultMaxRetries = getRetryPolicy().maxRetries;
   });
   beforeEach(async () => {
@@ -359,7 +354,11 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
             `  error       = ${JSON.stringify(diff?.error ?? null)}`,
             `  retries     = ${JSON.stringify(diff?.retries ?? null)}`,
             `  attempts(${attempts.length}) = ${JSON.stringify(
-              attempts.map((a) => ({ n: a.n, error: a.error, exit: a.exitCode })),
+              attempts.map((a) => ({
+                n: a.n,
+                error: a.error,
+                exit: a.exitCode,
+              })),
             )}`,
             `  outputTail  = ${String(diff?.outputTail ?? "").slice(-400)}`,
           ].join("\n"),
@@ -1330,100 +1329,101 @@ describe("执行器队列(按项目分组并行)+ 停止/回滚控制指令 + �
   it.skipIf(process.platform === "win32")(
     "静默超时:无输出的假 bin 超过 stall 阈值 → failed + ❌ 回传(原因含「静默」)",
     async () => {
-    // 阈值调小(100ms)避免拖慢测试;假 bin 长睡 60s 零输出 → 静默超时杀进程。
-    // maxRetries=0:stall 失败默认可重试,policy maxRetries=3 时会连跑多次,
-    // 15s wait 会卡在中间一次 running 上(CI 34074787902 同类超时根因)。
-    process.env.FAKE_SLEEP_SECS = "60";
-    const {
-      __setReliabilityTimeoutsForTests,
-      __setMaxRetriesForTests,
-    } = await import("@server/lib/executor-task");
-    __setReliabilityTimeoutsForTests(100, 100);
-    __setMaxRetriesForTests(0);
-    try {
-      const { coordinator, codebuddy, group } = await setupGroup();
-      const msg = await postMessage(coordinator.id, group.id, {
-        body: "静默任务(无输出)",
-        audience: "participant",
-        audienceRef: codebuddy.id,
-      });
-      const t = await waitForTaskStatus(
-        coordinator.id,
-        group.id,
-        msg.id,
-        "failed",
-      );
-      const diff = t.diffSummary as Record<string, unknown> | null;
-      expect(diff?.error).toContain("静默");
-      // 群里出现 ❌ 静默超时回传(失败原因写进消息)。
-      await waitForMessage(
-        coordinator.id,
-        group.id,
-        (m) =>
-          m.contentType === "task_status" && m.body.includes("执行器静默超时"),
-      );
-    } finally {
-      process.env.FAKE_SLEEP_SECS = "";
-    }
-  }, 30_000);
+      // 阈值调小(100ms)避免拖慢测试;假 bin 长睡 60s 零输出 → 静默超时杀进程。
+      // maxRetries=0:stall 失败默认可重试,policy maxRetries=3 时会连跑多次,
+      // 15s wait 会卡在中间一次 running 上(CI 34074787902 同类超时根因)。
+      process.env.FAKE_SLEEP_SECS = "60";
+      const { __setReliabilityTimeoutsForTests, __setMaxRetriesForTests } =
+        await import("@server/lib/executor-task");
+      __setReliabilityTimeoutsForTests(100, 100);
+      __setMaxRetriesForTests(0);
+      try {
+        const { coordinator, codebuddy, group } = await setupGroup();
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "静默任务(无输出)",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        const t = await waitForTaskStatus(
+          coordinator.id,
+          group.id,
+          msg.id,
+          "failed",
+        );
+        const diff = t.diffSummary as Record<string, unknown> | null;
+        expect(diff?.error).toContain("静默");
+        // 群里出现 ❌ 静默超时回传(失败原因写进消息)。
+        await waitForMessage(
+          coordinator.id,
+          group.id,
+          (m) =>
+            m.contentType === "task_status" &&
+            m.body.includes("执行器静默超时"),
+        );
+      } finally {
+        process.env.FAKE_SLEEP_SECS = "";
+      }
+    },
+    30_000,
+  );
 
   // win32 skip: 同静默超时 — stall 后半段依赖进程组 kill。
   it.skipIf(process.platform === "win32")(
     "无进展提醒:静默超 alert 阈值 → ⚠️ 提醒消息 + diffSummary.stallAlerted 警示标记;继续静默到 stall 才 failed",
     async () => {
-    // alert 阈值 100ms < stall 阈值 5s:先触发提醒(不失败),再静默超时失败。
-    // maxRetries=0:stall 默认可重试,maxRetries=3 时 5s×4 次 > 15s wait。
-    process.env.FAKE_SLEEP_SECS = "60";
-    const {
-      __setReliabilityTimeoutsForTests,
-      __setMaxRetriesForTests,
-    } = await import("@server/lib/executor-task");
-    __setReliabilityTimeoutsForTests(5_000, 60_000, 100);
-    __setMaxRetriesForTests(0);
-    try {
-      const { coordinator, codebuddy, group } = await setupGroup();
-      const msg = await postMessage(coordinator.id, group.id, {
-        body: "静默提醒任务",
-        audience: "participant",
-        audienceRef: codebuddy.id,
-      });
-      // 1) ⚠️ 提醒消息出现(含「无进展」+ 执行器 label + 请介入)。
-      const alertMsg = await waitForMessage(
-        coordinator.id,
-        group.id,
-        (m) => m.contentType === "task_status" && m.body.includes("无进展"),
-      );
-      expect(alertMsg.body).toContain("codebuddy");
-      expect(alertMsg.body).toContain("请介入");
-      // 提醒消息里带的是任务 id(与消息 id 不同,单独取)。
-      const tasks0 = await listTasks(coordinator.id, group.id);
-      const t0 = tasks0.find((x) => x.messageId === msg.id);
-      expect(t0).toBeDefined();
-      expect(alertMsg.body).toContain(String(t0?.id));
-      // 2) 警示标记落库(diffSummary.stallAlerted),任务仍未失败(非失败警示)。
-      const alerted = await waitForTaskDiff(
-        coordinator.id,
-        group.id,
-        msg.id,
-        (diff) => diff?.stallAlerted === true,
-      );
-      expect(alerted).toBeDefined();
-      const before = await listTasks(coordinator.id, group.id);
-      const b = before.find((x) => x.messageId === msg.id);
-      expect(b?.status).toBe("running");
-      // 3) 静默继续到 stall 阈值 → failed(现有行为不被提醒打断)。
-      const t = await waitForTaskStatus(
-        coordinator.id,
-        group.id,
-        msg.id,
-        "failed",
-      );
-      const diff = t.diffSummary as Record<string, unknown> | null;
-      expect(diff?.error).toContain("静默");
-    } finally {
-      process.env.FAKE_SLEEP_SECS = "";
-    }
-  }, 30_000);
+      // alert 阈值 100ms < stall 阈值 5s:先触发提醒(不失败),再静默超时失败。
+      // maxRetries=0:stall 默认可重试,maxRetries=3 时 5s×4 次 > 15s wait。
+      process.env.FAKE_SLEEP_SECS = "60";
+      const { __setReliabilityTimeoutsForTests, __setMaxRetriesForTests } =
+        await import("@server/lib/executor-task");
+      __setReliabilityTimeoutsForTests(5_000, 60_000, 100);
+      __setMaxRetriesForTests(0);
+      try {
+        const { coordinator, codebuddy, group } = await setupGroup();
+        const msg = await postMessage(coordinator.id, group.id, {
+          body: "静默提醒任务",
+          audience: "participant",
+          audienceRef: codebuddy.id,
+        });
+        // 1) ⚠️ 提醒消息出现(含「无进展」+ 执行器 label + 请介入)。
+        const alertMsg = await waitForMessage(
+          coordinator.id,
+          group.id,
+          (m) => m.contentType === "task_status" && m.body.includes("无进展"),
+        );
+        expect(alertMsg.body).toContain("codebuddy");
+        expect(alertMsg.body).toContain("请介入");
+        // 提醒消息里带的是任务 id(与消息 id 不同,单独取)。
+        const tasks0 = await listTasks(coordinator.id, group.id);
+        const t0 = tasks0.find((x) => x.messageId === msg.id);
+        expect(t0).toBeDefined();
+        expect(alertMsg.body).toContain(String(t0?.id));
+        // 2) 警示标记落库(diffSummary.stallAlerted),任务仍未失败(非失败警示)。
+        const alerted = await waitForTaskDiff(
+          coordinator.id,
+          group.id,
+          msg.id,
+          (diff) => diff?.stallAlerted === true,
+        );
+        expect(alerted).toBeDefined();
+        const before = await listTasks(coordinator.id, group.id);
+        const b = before.find((x) => x.messageId === msg.id);
+        expect(b?.status).toBe("running");
+        // 3) 静默继续到 stall 阈值 → failed(现有行为不被提醒打断)。
+        const t = await waitForTaskStatus(
+          coordinator.id,
+          group.id,
+          msg.id,
+          "failed",
+        );
+        const diff = t.diffSummary as Record<string, unknown> | null;
+        expect(diff?.error).toContain("静默");
+      } finally {
+        process.env.FAKE_SLEEP_SECS = "";
+      }
+    },
+    30_000,
+  );
 
   it("持续输出的假 bin 总时长超过阈值但不误杀(输出间隔 < stall 阈值)→ done", async () => {
     // 每 50ms 一行、共 40 行(总 ~2s > 阈值),任意相邻输出间隔远小于阈值。

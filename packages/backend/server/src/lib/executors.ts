@@ -160,8 +160,7 @@ function clockWithOffsetToUtcMs(
   const y = shifted.getUTCFullYear();
   const mo = shifted.getUTCMonth();
   const d = shifted.getUTCDate();
-  let target =
-    Date.UTC(y, mo, d, hour, minute, 0, 0) - offsetMinutes * 60_000;
+  let target = Date.UTC(y, mo, d, hour, minute, 0, 0) - offsetMinutes * 60_000;
   if (target <= now) target += 24 * 60 * 60 * 1000;
   return target;
 }

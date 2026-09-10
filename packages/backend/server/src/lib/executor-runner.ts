@@ -174,9 +174,7 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
       cwd,
       detached: true,
       stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
-      ...(opts.env
-        ? { env: { ...process.env, ...opts.env } }
-        : {}),
+      ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
     });
     if (useStdin && child.stdin) {
       child.stdin.end(stdinPayload);

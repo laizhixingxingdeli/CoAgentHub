@@ -1,10 +1,7 @@
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import { and, eq, sql } from "drizzle-orm";
-import {
-  DIFF_SUMMARY_DELETE,
-  mergeDiffSummary,
-} from "./diff-summary";
+import { DIFF_SUMMARY_DELETE, mergeDiffSummary } from "./diff-summary";
 
 export const EXECUTOR_COOLDOWN_END_MS_FIELD = "executorCooldownEndMs";
 

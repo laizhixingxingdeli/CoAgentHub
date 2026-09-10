@@ -17,7 +17,14 @@ import {
 } from "./fixtures/quota-real-tails";
 
 /** 「其它执行器」的标识 —— **不含本执行器自己**(R2 文档:除本执行器外)。 */
-const PEERS_OF_CODEX = ["pi", "executor", "codebuddy", "AtomCode", "CodeBuddy", "Pi"];
+const PEERS_OF_CODEX = [
+  "pi",
+  "executor",
+  "codebuddy",
+  "AtomCode",
+  "CodeBuddy",
+  "Pi",
+];
 /** codebuddy 自己的输出,peer 列表必须排除 codebuddy 本身。 */
 const PEERS_OF_CODEBUDDY = ["pi", "executor", "codex", "AtomCode", "Pi"];
 
@@ -63,28 +70,40 @@ describe("额度误判(真实语料)", () => {
   });
 
   it("R1:退出码非零本身不构成证据(同一文本,零/非零退出码结论一致)", () => {
-    const a = classifyQuotaFailure([REAL_TAIL_01A074C6], { exitCode: 0, peerExecutorNames: PEERS_OF_CODEX });
-    const b = classifyQuotaFailure([REAL_TAIL_01A074C6], { exitCode: 137, peerExecutorNames: PEERS_OF_CODEX });
+    const a = classifyQuotaFailure([REAL_TAIL_01A074C6], {
+      exitCode: 0,
+      peerExecutorNames: PEERS_OF_CODEX,
+    });
+    const b = classifyQuotaFailure([REAL_TAIL_01A074C6], {
+      exitCode: 137,
+      peerExecutorNames: PEERS_OF_CODEX,
+    });
     expect(a.isQuota).toBe(b.isQuota);
     expect(b.isQuota).toBe(false);
   });
 
   it("验收2:codebuddy 真实 429 叙述行(含真实重置时刻)→ 仍判额度失败", () => {
-    const v = classifyQuotaFailure([REAL_CODEBUDDY_429_LINE], { peerExecutorNames: PEERS_OF_CODEBUDDY });
+    const v = classifyQuotaFailure([REAL_CODEBUDDY_429_LINE], {
+      peerExecutorNames: PEERS_OF_CODEBUDDY,
+    });
     expect(v.isQuota).toBe(true);
   });
 
   it("验收2:codebuddy 真实 JSONL 结果行(errors_info status=429/category=quota)→ 仍判额度失败", () => {
-    const v = classifyQuotaFailure([REAL_CODEBUDDY_JSONL_LINE], { peerExecutorNames: PEERS_OF_CODEBUDDY });
+    const v = classifyQuotaFailure([REAL_CODEBUDDY_JSONL_LINE], {
+      peerExecutorNames: PEERS_OF_CODEBUDDY,
+    });
     expect(v.isQuota).toBe(true);
   });
 
   it("真限流不得漏判:AtomCode 真实 [rate-limited] 尾行 → 判额度失败", () => {
-    const v = classifyQuotaFailure([REAL_TAIL_01A074C8], { peerExecutorNames: PEERS_OF_CODEBUDDY });
+    const v = classifyQuotaFailure([REAL_TAIL_01A074C8], {
+      peerExecutorNames: PEERS_OF_CODEBUDDY,
+    });
     expect(v.isQuota).toBe(true);
   });
 
-  it("R2:真限流行里的提供方 32-hex token 与 \"status\":429 不得被平台 id/字段形状误伤", () => {
+  it('R2:真限流行里的提供方 32-hex token 与 "status":429 不得被平台 id/字段形状误伤', () => {
     // 两条都含长十六进制 token,是提供方自己的 request id,不是平台任务 id
     for (const line of [REAL_CODEBUDDY_429_LINE, REAL_CODEBUDDY_JSONL_LINE]) {
       expect(

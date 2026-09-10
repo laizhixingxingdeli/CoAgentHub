@@ -94,9 +94,10 @@ describe("single-server advisory lock", () => {
           Array.from({ length: 12 }, async (_, i) => {
             const client = await pool.connect();
             try {
-              await client.query("SELECT $1::int AS n, pg_backend_pid() AS pid", [
-                i + round * 12,
-              ]);
+              await client.query(
+                "SELECT $1::int AS n, pg_backend_pid() AS pid",
+                [i + round * 12],
+              );
             } finally {
               client.release();
             }

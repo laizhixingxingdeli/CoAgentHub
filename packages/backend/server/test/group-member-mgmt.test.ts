@@ -483,10 +483,7 @@ describe("群组成员管理 API (ticket 20)", () => {
 
     it("显式传 prompt 以调用方为准,不回落(非空)", async () => {
       const { id } = await registerParticipant({ name: "coord-explicit" });
-      const exPid = await createExecutor(
-        "explicit-executor",
-        "执行器默认分工",
-      );
+      const exPid = await createExecutor("explicit-executor", "执行器默认分工");
       const group = await createGroup(id, "显式优先");
 
       const res = await app.request(`/api/groups/${group.id}/members`, {
@@ -721,7 +718,10 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           "X-Participant-Id": id,
         },
-        body: JSON.stringify({ participantId: executorId, roles: ["executor"] }),
+        body: JSON.stringify({
+          participantId: executorId,
+          roles: ["executor"],
+        }),
       });
       expect(res.status).toBe(200);
       const member = (await res.json()) as { capabilityHint: string | null };
@@ -749,7 +749,10 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           "X-Participant-Id": id,
         },
-        body: JSON.stringify({ participantId: executorId, roles: ["executor"] }),
+        body: JSON.stringify({
+          participantId: executorId,
+          roles: ["executor"],
+        }),
       });
       expect(res.status).toBe(200);
       const member = (await res.json()) as { capabilityHint: string | null };
@@ -774,7 +777,10 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           "X-Participant-Id": id,
         },
-        body: JSON.stringify({ participantId: reviewerId, roles: ["reviewer"] }),
+        body: JSON.stringify({
+          participantId: reviewerId,
+          roles: ["reviewer"],
+        }),
       });
       expect(res.status).toBe(200);
       const member = (await res.json()) as { capabilityHint: string | null };
@@ -787,9 +793,7 @@ describe("群组成员管理 API (ticket 20)", () => {
         .from(groupMessageTable)
         .where(eq(groupMessageTable.groupId, group.id));
       // 无任何「请先安装」引导消息。
-      expect(
-        rows.some((r) => (r.body ?? "").includes("请先安装")),
-      ).toBe(false);
+      expect(rows.some((r) => (r.body ?? "").includes("请先安装"))).toBe(false);
     });
 
     it("添加 observer 成员:无群消息,也无 skill 提示(observer 无对应 skill)", async () => {
@@ -805,7 +809,10 @@ describe("群组成员管理 API (ticket 20)", () => {
           "Content-Type": "application/json",
           "X-Participant-Id": id,
         },
-        body: JSON.stringify({ participantId: observerId, roles: ["observer"] }),
+        body: JSON.stringify({
+          participantId: observerId,
+          roles: ["observer"],
+        }),
       });
       expect(res.status).toBe(200);
       const member = (await res.json()) as { capabilityHint: string | null };

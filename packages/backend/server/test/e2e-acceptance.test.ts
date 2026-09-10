@@ -203,10 +203,7 @@ describe("端到端验收(ticket 08):win 训练 → mac 交付全流程", () => 
     // 需求命令是 broadcast,按可见性规则全员可见,reviewer 同样会看到。
     // (R3 起加群不再自动发 skill 安装引导,消息流更干净。)
     const reviewerSeen = await fetchMessages(reviewer.id, group.id);
-    expect(reviewerSeen.map((m) => m.body)).toEqual([
-      command.body,
-      draft.body,
-    ]);
+    expect(reviewerSeen.map((m) => m.body)).toEqual([command.body, draft.body]);
 
     const review = await sendMessage(reviewer.id, group.id, {
       body: "检视意见:补充数据清洗步骤,否则收敛不稳",

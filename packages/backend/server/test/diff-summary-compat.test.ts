@@ -136,11 +136,7 @@ async function insertHistoricalTask(
   return row;
 }
 
-async function getTaskHttp(
-  groupId: string,
-  taskId: string,
-  actorId: string,
-) {
+async function getTaskHttp(groupId: string, taskId: string, actorId: string) {
   const res = await app.request(`/api/groups/${groupId}/tasks/${taskId}`, {
     headers: { "X-Participant-Id": actorId },
   });
@@ -336,7 +332,9 @@ describe("W3 D1: 五种历史形态经 merge 再写入后 HTTP GET 仍读出原�
     const group = await createGroup(owner.id, "d1-2-nested-rr");
 
     const hist = {
-      review_request: { ...HISTORICAL_SHAPES.nestedReviewRequest.review_request },
+      review_request: {
+        ...HISTORICAL_SHAPES.nestedReviewRequest.review_request,
+      },
       hash: HISTORICAL_SHAPES.nestedReviewRequest.hash,
     };
     const row = await insertHistoricalTask(group.id, executor.id, hist);
@@ -372,9 +370,7 @@ describe("W3 D1: 五种历史形态经 merge 再写入后 HTTP GET 仍读出原�
       .from(taskTable)
       .where(eq(taskTable.id, row.id));
     expect(raw.diffSummary).toEqual(hist);
-    expect(
-      Object.hasOwn(raw.diffSummary as object, "platform"),
-    ).toBe(false);
+    expect(Object.hasOwn(raw.diffSummary as object, "platform")).toBe(false);
 
     // result 写入不得抹掉既有 error(属 terminal);error 保留
     await patchDone(group.id, row.id, executor.id, {
@@ -543,7 +539,11 @@ describe("W3 D2: completion event 与 task_status_changed 的 diffSummary 仍为
       tokenUsage: { input: 9, output: 3 },
       tokenUsageReason: "d2-hist",
       dispatchKindNote: "d2-note",
-      rollbackSkipped: { reason: "d2-skip", headAtSkip: "aa", checkpoint: "cp" },
+      rollbackSkipped: {
+        reason: "d2-skip",
+        headAtSkip: "aa",
+        checkpoint: "cp",
+      },
       platform: { resumeOf },
       hash: "d2-hist-hash",
       review_request: {

@@ -852,10 +852,9 @@ describe("Durable Task Completion Events", () => {
       } = {},
     ) {
       const { testDb } = await import("./db");
-      const {
-        task: taskTable,
-        taskCompletionEvent: tce,
-      } = await import("@laizhixingxingdeli/database/schema");
+      const { task: taskTable, taskCompletionEvent: tce } = await import(
+        "@laizhixingxingdeli/database/schema"
+      );
       const [taskRow] = await testDb
         .insert(taskTable)
         .values({
@@ -890,10 +889,7 @@ describe("Durable Task Completion Events", () => {
         "@laizhixingxingdeli/database/schema"
       );
       const { eq } = await import("drizzle-orm");
-      const [row] = await testDb
-        .select()
-        .from(tce)
-        .where(eq(tce.id, eventId));
+      const [row] = await testDb.select().from(tce).where(eq(tce.id, eventId));
       expect(row).toBeDefined();
       return row;
     }
@@ -911,9 +907,8 @@ describe("Durable Task Completion Events", () => {
     }
 
     it("过期 lease 的旧消费者 fail → 409,新持有者的 lease 与 attempts 不被改写", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup(
-        "guard-stale-lease",
-      );
+      const { coordinator, codebuddy, group } =
+        await setupGroup("guard-stale-lease");
       const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
       const claimA = await claimEvent(
         coordinator.id,
@@ -978,9 +973,8 @@ describe("Durable Task Completion Events", () => {
     });
 
     it("重复 fail → 第一次 200(attempts=1),第二次 409,attempts 仍为 1", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup(
-        "guard-dup-fail",
-      );
+      const { coordinator, codebuddy, group } =
+        await setupGroup("guard-dup-fail");
       const ev = await seedEvent(group.id, coordinator.id, codebuddy.id);
       const claim = await claimEvent(coordinator.id, ev.id, "fail-consumer");
       expect(claim.res.status).toBe(200);
@@ -1083,9 +1077,8 @@ describe("Durable Task Completion Events", () => {
     });
 
     it("ack 的 state 守卫:残留 token 不能把 pending 行直接改成 delivered", async () => {
-      const { coordinator, codebuddy, group } = await setupGroup(
-        "guard-ack-state",
-      );
+      const { coordinator, codebuddy, group } =
+        await setupGroup("guard-ack-state");
       const staleToken = "00000000-0000-7000-8000-000000000000";
       const ev = await seedEvent(group.id, coordinator.id, codebuddy.id, {
         state: "pending",

@@ -35,10 +35,7 @@ const EXE_SHIM = [
   '"%dp0%\\node_modules\\@scope\\pkg\\bin\\cli.exe"   %*',
 ].join("\r\n");
 
-const EXTENSIONLESS_SHIM = NODE_SHIM.replace(
-  "\\bin\\cli.js",
-  "\\bin\\clitool",
-);
+const EXTENSIONLESS_SHIM = NODE_SHIM.replace("\\bin\\cli.js", "\\bin\\clitool");
 
 const BIN = "C:\\Users\\dev\\AppData\\Roaming\\npm\\cli.cmd";
 const NPM_DIR = "C:\\Users\\dev\\AppData\\Roaming\\npm";
@@ -55,7 +52,11 @@ function deps(shim: string | undefined, overrides = {}) {
 
 describe("resolveWindowsLauncher", () => {
   it("node 型垫片 → node + 脚本绝对路径,原 args 逐字保留", () => {
-    const out = resolveWindowsLauncher(BIN, ["-p", "{ticket}"], deps(NODE_SHIM));
+    const out = resolveWindowsLauncher(
+      BIN,
+      ["-p", "{ticket}"],
+      deps(NODE_SHIM),
+    );
     expect(out.bin).toBe("C:\\Program Files\\nodejs\\node.exe");
     expect(out.args).toEqual([
       `${NPM_DIR}\\node_modules\\@scope\\pkg\\bin\\cli.js`,
@@ -125,7 +126,11 @@ describe("resolveWindowsLauncher", () => {
   });
 
   it("垫片里没有 %* 启动行时原样返回", () => {
-    const out = resolveWindowsLauncher(BIN, ["-p"], deps("@ECHO off\r\nEXIT /b"));
+    const out = resolveWindowsLauncher(
+      BIN,
+      ["-p"],
+      deps("@ECHO off\r\nEXIT /b"),
+    );
     expect(out).toEqual({ bin: BIN, args: ["-p"] });
   });
 });

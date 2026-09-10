@@ -318,7 +318,9 @@ describe("persist-dispatch-intent-with-the-message", () => {
       audienceRef: "observer",
     });
     expect(res.status).toBe(200);
-    expect(res.warning ?? "").toMatch(/ROLE_UNRESOLVED:observer:role-no-member/);
+    expect(res.warning ?? "").toMatch(
+      /ROLE_UNRESOLVED:observer:role-no-member/,
+    );
 
     const intent = await findDispatchIntentByMessage(db, res.json.id);
     expect(intent?.status).toBe("rejected");
@@ -459,11 +461,7 @@ describe("persist-dispatch-intent-with-the-message", () => {
     // fire-and-forget:等意图结算
     const deadline = Date.now() + 8_000;
     let intent = await findDispatchIntentByMessage(db, res.json.id);
-    while (
-      intent &&
-      intent.status === "pending" &&
-      Date.now() < deadline
-    ) {
+    while (intent && intent.status === "pending" && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
       intent = await findDispatchIntentByMessage(db, res.json.id);
     }

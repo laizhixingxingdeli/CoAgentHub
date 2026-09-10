@@ -1404,9 +1404,7 @@ describe("任务书模板 + 汇报结构化 + 额度感知调度(票7)", () => {
         expect(ticket).toContain(
           "- 取基线:node scripts/test-baseline.mjs <包目录> <测试文件...>",
         );
-        expect(ticket).toContain(
-          "- 汇报需包含测试结果(含前后基线对照)。",
-        );
+        expect(ticket).toContain("- 汇报需包含测试结果(含前后基线对照)。");
       } finally {
         delete process.env.FAKE_TICKET_COPY;
       }

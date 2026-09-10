@@ -334,8 +334,14 @@ const app2 = app
       description:
         "R4: clear an executor's quota cooldown (in-memory entry, expiry timer and persisted task marker); 404 when no active cooldown",
       responses: {
-        200: { description: "Cooldown cleared", content: { "application/json": {} } },
-        404: { description: "No active cooldown", content: { "application/json": {} } },
+        200: {
+          description: "Cooldown cleared",
+          content: { "application/json": {} },
+        },
+        404: {
+          description: "No active cooldown",
+          content: { "application/json": {} },
+        },
       },
     }),
     zValidator("param", z.object({ key: z.string().min(1) })),

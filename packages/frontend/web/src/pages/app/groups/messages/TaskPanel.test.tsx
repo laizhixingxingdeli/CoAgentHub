@@ -106,9 +106,9 @@ describe("TaskPanel liveness meta (R1/R4)", () => {
         onRollback={() => undefined}
       />,
     );
-    expect(screen.getByTestId("task-running-duration-task-1")).toHaveTextContent(
-      "已运行",
-    );
+    expect(
+      screen.getByTestId("task-running-duration-task-1"),
+    ).toHaveTextContent("已运行");
     expect(screen.getByTestId("task-last-activity-task-1")).toHaveTextContent(
       "最近活动",
     );
@@ -145,4 +145,3 @@ describe("TaskPanel liveness meta (R1/R4)", () => {
     expect(screen.queryByText("暂无输出")).not.toBeInTheDocument();
   });
 });
-

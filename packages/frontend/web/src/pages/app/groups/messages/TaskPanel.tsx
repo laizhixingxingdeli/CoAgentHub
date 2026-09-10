@@ -374,24 +374,20 @@ export default function TaskPanel({
                         className="text-xs text-muted-foreground"
                       >
                         {t("tasks.liveness.runningFor", {
-                          duration: formatDuration(
-                            task.createdAt,
-                            null,
-                            now,
-                          ),
+                          duration: formatDuration(task.createdAt, null, now),
                         })}
                       </span>
                     )}
                     {lastActivityLabel && (
-                        <span
-                          data-testid={`task-last-activity-${task.id}`}
-                          className="text-xs text-muted-foreground"
-                        >
-                          {t("tasks.liveness.recent", {
-                            when: lastActivityLabel,
-                          })}
-                        </span>
-                      )}
+                      <span
+                        data-testid={`task-last-activity-${task.id}`}
+                        className="text-xs text-muted-foreground"
+                      >
+                        {t("tasks.liveness.recent", {
+                          when: lastActivityLabel,
+                        })}
+                      </span>
+                    )}
                     <span className="text-xs font-medium">{executor}</span>
                     <span
                       data-testid={`task-time-${task.id}`}

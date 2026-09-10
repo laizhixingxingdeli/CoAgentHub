@@ -42,7 +42,7 @@ writeFileSync(
     // 退出码由 FAKE_TRANSIENT_EXIT 控制(默认 1,验证「成功尾部」时传 0)。
     'if [ -n "$FAKE_TRANSIENT" ]; then',
     '  echo "[rate-limited] try again in 5 seconds"',
-    '  exit ${FAKE_TRANSIENT_EXIT:-1}',
+    "  exit ${FAKE_TRANSIENT_EXIT:-1}",
     "fi",
     // 额度耗尽(分级应判 exhausted):绝对恢复时刻。
     'if [ -n "$FAKE_EXHAUSTED" ]; then echo "usage limit reached — resets around 23:59"; exit 1; fi',
@@ -327,9 +327,8 @@ describe("瞬时限流走 per-run 退避,不进执行器级冷却", () => {
   }, 30_000);
 
   it("验收 7a:执行超时分支 → 与进程退出同口径(transient,不冷却)", async () => {
-    const { coordinator, codebuddy, group } = await setupGroup(
-      "transient-timeout",
-    );
+    const { coordinator, codebuddy, group } =
+      await setupGroup("transient-timeout");
     __setTransientQuotaForTests(BACKOFF_MS, ESCALATION_LIMIT);
     process.env.FAKE_TRANSIENT_TIMEOUT = "1";
 

@@ -162,10 +162,7 @@ describe("检视流程协议(ticket 04)", () => {
     // c. coordinator 拉取:可见草稿+检视意见(R3 起无加群引导消息);
     //    采纳后发最终版,audience=role:executor
     const coordSeen = await fetchMessages(coordinator.id, group.id);
-    expect(coordSeen.map((m) => m.body)).toEqual([
-      draft.body,
-      review.body,
-    ]);
+    expect(coordSeen.map((m) => m.body)).toEqual([draft.body, review.body]);
 
     const final = await sendMessage(coordinator.id, group.id, {
       body: "最终版:训练 7B 模型(含数据清洗)",

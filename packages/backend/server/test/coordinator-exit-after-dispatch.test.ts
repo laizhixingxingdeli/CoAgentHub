@@ -20,7 +20,10 @@ const TEMPLATE_TEXT = (() => {
   // queue.ts 搬进了 ticket-templates/*.json,所以这里锁的是模板而不是源码。
   // 解析后拼接所有字符串值,避免直接匹配 JSON 转义后的原文。
   const raw = readFileSync(
-    path.resolve(import.meta.dirname, "../../../../ticket-templates/default.json"),
+    path.resolve(
+      import.meta.dirname,
+      "../../../../ticket-templates/default.json",
+    ),
     "utf8",
   );
   const out: string[] = [];

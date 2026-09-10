@@ -314,8 +314,14 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     // 2026-08-14 00:00:00.000Z == 2026-08-14 08:00 UTC+8。
     const now = Date.UTC(2026, 7, 14, 0, 0, 0);
     // UTC+8 下的民用时刻 → epoch:Date.UTC(y,m,d,h,mi) - 8h。
-    const utcPlus8 = (y: number, m: number, d: number, h: number, mi: number, s = 0) =>
-      Date.UTC(y, m, d, h, mi, s) - 8 * 60 * 60 * 1000;
+    const utcPlus8 = (
+      y: number,
+      m: number,
+      d: number,
+      h: number,
+      mi: number,
+      s = 0,
+    ) => Date.UTC(y, m, d, h, mi, s) - 8 * 60 * 60 * 1000;
 
     it("纯时钟无时区标记 → null(方案 a,回落固定冷却)", () => {
       expect(
@@ -339,9 +345,9 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     });
 
     it("try again at 9:05 AM UTC+8(12 小时制,上午)→ 当天 09:05 UTC+8", () => {
-      expect(
-        parseRateLimitRecoveryMs("try again at 9:05 AM UTC+8", now),
-      ).toBe(utcPlus8(2026, 7, 14, 9, 5));
+      expect(parseRateLimitRecoveryMs("try again at 9:05 AM UTC+8", now)).toBe(
+        utcPlus8(2026, 7, 14, 9, 5),
+      );
     });
 
     it("try again at 15:32 UTC+8(24 小时制)→ 当天 15:32 UTC+8", () => {
@@ -351,9 +357,9 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
     });
 
     it("try again at 3:32 AM UTC+8 已过(08:00 UTC+8 后)→ 明天 03:32 UTC+8", () => {
-      expect(
-        parseRateLimitRecoveryMs("try again at 3:32 AM UTC+8", now),
-      ).toBe(utcPlus8(2026, 7, 15, 3, 32));
+      expect(parseRateLimitRecoveryMs("try again at 3:32 AM UTC+8", now)).toBe(
+        utcPlus8(2026, 7, 15, 3, 32),
+      );
     });
 
     it("GMT-5 标记与 UTC+8 得到不同 epoch(时区标记真正生效)", () => {
@@ -516,8 +522,9 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
 
   describe("usage limit + try again at HH:MM 识别(验收点 1)", () => {
     it("纯时钟无时区标记 → 落库 executorCooldownEndMs 走固定冷却兜底(R3/验收3)", async () => {
-      const { coordinator, codebuddy, group } =
-        await setupGroup("quota-pure-clock-fallback");
+      const { coordinator, codebuddy, group } = await setupGroup(
+        "quota-pure-clock-fallback",
+      );
       process.env.FAKE_QUOTA_USAGE_LIMIT = "1";
       // 无 UTC±/GMT± 标记:parseRateLimitRecoveryMs → null →
       // handleQuotaFailure 的 parsedMs ?? now + getRateLimitCooldownMs()。
@@ -548,7 +555,9 @@ describe("额度耗尽触发无限重派修复(specs/quota-exhaustion-triggers-i
       );
       expect(t.diffSummary?.executorCooldownSource).toBe("fallback");
       expect(
-        Math.abs(cooldownEndMs({ key: "codebuddy" }) - (persistedEnd as number)),
+        Math.abs(
+          cooldownEndMs({ key: "codebuddy" }) - (persistedEnd as number),
+        ),
       ).toBeLessThan(2_000);
       expect(t.attempts).toHaveLength(1);
 

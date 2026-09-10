@@ -1187,9 +1187,9 @@ app
       // 结案守卫等待续跑(R3,specs/detached-close-deadlock-guard-vs-no-poll.md):
       // 仅「曾因守卫拒绝而登记待续跑」的任务派生 closeGuardResume(含
       // awaitingResume),未登记不输出(不是空对象),与 l1/l3/liveness 同款约定。
-      const closeGuardResume = (
-        await deriveCloseGuardResume(db, [task])
-      ).get(task.id);
+      const closeGuardResume = (await deriveCloseGuardResume(db, [task])).get(
+        task.id,
+      );
       if (closeGuardResume) {
         detail.closeGuardResume = closeGuardResume;
       }
@@ -1481,8 +1481,7 @@ app
         // R3: staleBuildSuspected 是平台调度键,剥离客户端自报值。
         delete clientPatch.staleBuildSuspected;
         const reportedHash =
-          typeof clientPatch.hash === "string" &&
-          clientPatch.hash.trim() !== ""
+          typeof clientPatch.hash === "string" && clientPatch.hash.trim() !== ""
             ? clientPatch.hash
             : undefined;
         if (reportedHash) {
@@ -1709,7 +1708,10 @@ app
         if (errorText.trim() !== "") {
           const quotaVerdict = classifyQuotaFailure([errorText], {
             taskBook: task.brief,
-            peerExecutorNames: await listPeerExecutorNames(db, task.executorKey),
+            peerExecutorNames: await listPeerExecutorNames(
+              db,
+              task.executorKey,
+            ),
           });
           if (quotaVerdict.isQuota) {
             // R6 主闸(quota-failure-on-clean-exit v1.1):PATCH failed 同样先以

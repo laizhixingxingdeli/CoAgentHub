@@ -525,14 +525,8 @@ describe("atomcode:流式跨 chunk(行缓冲)", () => {
   });
 
   it("真实样本 atomcode-run.stdout 去掉末尾换行后仍得汇报且全量持久化不丢(F2)", () => {
-    const stdoutRaw = readFileSync(
-      fixturePath("atomcode-run.stdout"),
-      "utf8",
-    );
-    const stderrRaw = readFileSync(
-      fixturePath("atomcode-run.stderr"),
-      "utf8",
-    );
+    const stdoutRaw = readFileSync(fixturePath("atomcode-run.stdout"), "utf8");
+    const stderrRaw = readFileSync(fixturePath("atomcode-run.stderr"), "utf8");
     const stdoutStripped = stdoutRaw.replace(/\n$/, "");
     expect(stdoutStripped.endsWith("\n")).toBe(false);
     const parse = createExecutorOutputParser("atomcode");
@@ -1965,7 +1959,12 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
         assistantMessageEvent: {
           type: "toolcall_end",
           contentIndex: 1,
-          toolCall: { type: "toolCall", id: "call_1", name: "read", arguments: { path: "/tmp/a.txt" } },
+          toolCall: {
+            type: "toolCall",
+            id: "call_1",
+            name: "read",
+            arguments: { path: "/tmp/a.txt" },
+          },
         },
       }),
       JSON.stringify({
@@ -1976,7 +1975,11 @@ describe("Pi 专用解析器:仅 text_end 进界面(硬验收)", () => {
           content: "最终答案",
         },
       }),
-      JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } }),
+      JSON.stringify({
+        type: "tool_execution_start",
+        toolName: "bash",
+        args: { command: "ls" },
+      }),
       JSON.stringify({
         type: "tool_execution_end",
         toolName: "bash",

@@ -6,8 +6,19 @@
 // launchd 每 5 分钟(StartInterval)+ 登录时(RunAtLoad)各跑一次;健康时静默退出。
 const { spawnSync } = require("node:child_process");
 const REPO = "/Users/apple/Desktop/Projects/CoAgentHub";
-const r = spawnSync("/bin/bash", [REPO + "/scripts/coagenthub-watchdog.sh", "--once"], {
-  stdio: "inherit",
-  env: { ...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + process.env.HOME + "/.local/bin:/usr/bin:/bin:" + (process.env.PATH || "") },
-});
+const r = spawnSync(
+  "/bin/bash",
+  [REPO + "/scripts/coagenthub-watchdog.sh", "--once"],
+  {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      PATH:
+        "/opt/homebrew/bin:/usr/local/bin:" +
+        process.env.HOME +
+        "/.local/bin:/usr/bin:/bin:" +
+        (process.env.PATH || ""),
+    },
+  },
+);
 process.exit(r.status ?? 1);

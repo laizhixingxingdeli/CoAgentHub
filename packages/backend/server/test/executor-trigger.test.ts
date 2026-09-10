@@ -718,7 +718,9 @@ describe("server 内嵌执行器触发链路(票1)", () => {
       // 新口径三要素:票面清单 / 失败数不增加 / 前后基线 + 基线工具
       expect(ticket).toContain("只跑票面指定的测试文件清单,不要跑全量。");
       expect(ticket).toContain("失败数不增加");
-      expect(ticket).toContain("改动前先取一次基线,改动后再取一次,汇报给出前后对照。");
+      expect(ticket).toContain(
+        "改动前先取一次基线,改动后再取一次,汇报给出前后对照。",
+      );
       expect(ticket).toContain(
         "取基线:node scripts/test-baseline.mjs <包目录> <测试文件...>",
       );

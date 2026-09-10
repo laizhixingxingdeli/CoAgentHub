@@ -259,9 +259,7 @@ export function applyDiffSummaryPatch(
     }
   }
 
-  let result: Record<string, unknown> = isPlainObject(existing)
-    ? existing
-    : {};
+  let result: Record<string, unknown> = isPlainObject(existing) ? existing : {};
   for (const owner of OWNER_APPLY_ORDER) {
     const bucket = buckets.get(owner);
     if (!bucket) continue;
@@ -283,9 +281,7 @@ export function applyDiffSummaryPatchAllowingClear(
   const normalized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
     normalized[key] =
-      value === undefined
-        ? (DIFF_SUMMARY_DELETE as unknown as null)
-        : value;
+      value === undefined ? (DIFF_SUMMARY_DELETE as unknown as null) : value;
   }
   return applyDiffSummaryPatch(existing, normalized, fallbackOwner);
 }

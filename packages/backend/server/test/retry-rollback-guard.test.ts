@@ -16,10 +16,7 @@ import {
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
-import {
-  resolveFakeExecutor,
-  withFakeExecutorArgs,
-} from "./fake-executor-bin";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 const fakeDir = mkdtempSync(path.join(tmpdir(), "coagenthub-guard-bin-"));
 const fakeScript = path.join(fakeDir, "fake-guard.sh");
@@ -432,11 +429,9 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
         .trim();
       expect(cpSha.length).toBeGreaterThan(0);
       expect(() =>
-        execFileSync(
-          "git",
-          ["merge-base", "--is-ancestor", cpSha, "HEAD"],
-          { cwd: proj },
-        ),
+        execFileSync("git", ["merge-base", "--is-ancestor", cpSha, "HEAD"], {
+          cwd: proj,
+        }),
       ).toThrow();
       const log = execFileSync("git", ["log", "--oneline"], {
         cwd: proj,
@@ -703,7 +698,9 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       expect(existsSync(path.join(proj, "committed-new.txt"))).toBe(false);
       // 未提交的新建文件：不跑 git clean，仍然留在工作树里且仍是未跟踪
       expect(existsSync(path.join(proj, "leftover.txt"))).toBe(true);
-      expect(gitOut(proj, "status", "--porcelain")).toContain("?? leftover.txt");
+      expect(gitOut(proj, "status", "--porcelain")).toContain(
+        "?? leftover.txt",
+      );
     } finally {
       rmSync(proj, { recursive: true, force: true });
     }
@@ -712,7 +709,9 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
   it("空树快照:跳过 restore,回滚算成功且 HEAD 停在 C^", async () => {
     // 仓库只有空提交 → createCheckpoint 的树为空;旧实现 git restore -- . 会
     // pathspec 失败并返回 ok:false,重试被误终止。
-    const proj = mkdtempSync(path.join(tmpdir(), "coagenthub-guard-empty-tree-"));
+    const proj = mkdtempSync(
+      path.join(tmpdir(), "coagenthub-guard-empty-tree-"),
+    );
     try {
       execFileSync("git", ["init", "-q"], { cwd: proj });
       execFileSync("git", ["config", "user.email", "test@coagenthub.local"], {
@@ -728,7 +727,13 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       const headAtSnapshot = gitOut(proj, "rev-parse", "HEAD").trim();
       const cp = await createCheckpoint("empty-tree-task", proj);
       // 正面确认树为空(与实现判据一致)
-      const treeNames = gitOut(proj, "ls-tree", "-r", "--name-only", cp.sha).trim();
+      const treeNames = gitOut(
+        proj,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        cp.sha,
+      ).trim();
       expect(treeNames).toBe("");
 
       // 执行器留下一次空提交(模拟 attempt)
@@ -775,9 +780,9 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       const ref = "refs/coagenthub-cp/restore-fail-task";
       execFileSync("git", ["update-ref", ref, cSha], { cwd: proj });
       // 树非空
-      expect(
-        gitOut(proj, "ls-tree", "-r", "--name-only", cSha).trim(),
-      ).toBe("ghost.txt");
+      expect(gitOut(proj, "ls-tree", "-r", "--name-only", cSha).trim()).toBe(
+        "ghost.txt",
+      );
       // 删掉 blob 对象,restore 必败;Windows 上 git 对象常带只读属性
       const objPath = path.join(
         proj,

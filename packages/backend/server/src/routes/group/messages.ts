@@ -581,10 +581,7 @@ app
                   : ("participant" as const),
                 audienceRef,
                 body: findingsReviewResult
-                  ? renderFindingsTaskBrief(
-                      findingsReviewResult,
-                      body ?? "",
-                    )
+                  ? renderFindingsTaskBrief(findingsReviewResult, body ?? "")
                   : (body ?? ""),
                 dispatcherParticipantId: senderId,
                 dispatcherSessionId: finalDispatcherSessionId,

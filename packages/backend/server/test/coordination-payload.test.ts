@@ -141,9 +141,7 @@ describe("协作载荷代码契约", () => {
   // 把 findings 广播判 400、把 pass 派生 l3.answered=true。这里直接锁定解析器
   // 对两种 verdict 的提取结果,使端到端信号有可审计的单元级根因。
   it("markdown 包裹的 findings review_result 解析为 verdict=findings 载荷", () => {
-    const findings = [
-      { severity: "high", note: "needs work" },
-    ] as const;
+    const findings = [{ severity: "high", note: "needs work" }] as const;
     const body = [
       "## L3 裁决：发现项",
       "",

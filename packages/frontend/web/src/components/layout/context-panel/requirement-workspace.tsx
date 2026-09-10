@@ -154,9 +154,9 @@ export function RequirementWorkspace({
   // Bumps to re-run the detail effect after an explicit invalidate.
   const [detailRefreshEpoch, setDetailRefreshEpoch] = useState(0);
   // Live-buffer pull failure must stay visible and distinct from "no output".
-  const [liveOutputFetchError, setLiveOutputFetchError] = useState<string | null>(
-    null,
-  );
+  const [liveOutputFetchError, setLiveOutputFetchError] = useState<
+    string | null
+  >(null);
   const [runtimeStale, setRuntimeStale] = useState(false);
   const [runtimeStaleReason, setRuntimeStaleReason] = useState<
     "process" | "build" | "both" | null
@@ -285,9 +285,7 @@ export function RequirementWorkspace({
    */
   const seedLiveOutputs = useCallback(async () => {
     try {
-      const res = await fetch(
-        `/api/groups/${groupId}/tasks?includeOutput=1`,
-      );
+      const res = await fetch(`/api/groups/${groupId}/tasks?includeOutput=1`);
       if (!res.ok) {
         setLiveOutputFetchError(
           t("tasks.output.fetchFailed", { status: String(res.status) }),
@@ -415,13 +413,7 @@ export function RequirementWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [
-    loadTasks,
-    loadMessages,
-    loadMembers,
-    loadGroupStatus,
-    seedLiveOutputs,
-  ]);
+  }, [loadTasks, loadMessages, loadMembers, loadGroupStatus, seedLiveOutputs]);
 
   useEffect(() => {
     void loadRuntimeStatus();

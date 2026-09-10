@@ -12,10 +12,7 @@ import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/datab
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
-import {
-  resolveFakeExecutor,
-  withFakeExecutorArgs,
-} from "./fake-executor-bin";
+import { resolveFakeExecutor, withFakeExecutorArgs } from "./fake-executor-bin";
 
 /**
  * 修复:任务书显式声明目标仓库(`仓库:`/`仓库路径:`/`Repository:`/`Repo:`)时,

@@ -62,7 +62,10 @@ export function resetUnknownParticipantWarnState(): void {
  */
 export function throwParticipantNotFound(id: string): never {
   recordUnknownParticipantFailure(id);
-  throw new BizError(BizCodeEnum.ParticipantNotFound, unknownParticipantMessage(id));
+  throw new BizError(
+    BizCodeEnum.ParticipantNotFound,
+    unknownParticipantMessage(id),
+  );
 }
 
 /**
@@ -80,7 +83,10 @@ export async function assertPathParticipantExists(
     .limit(1);
   if (!row) {
     recordUnknownParticipantFailure(id);
-    throw new BizError(BizCodeEnum.ParticipantNotFound, unknownParticipantMessage(id));
+    throw new BizError(
+      BizCodeEnum.ParticipantNotFound,
+      unknownParticipantMessage(id),
+    );
   }
 }
 
@@ -104,6 +110,9 @@ export async function assertClaimedSenderExists(
     .limit(1);
   if (!row) {
     recordUnknownParticipantFailure(claimedId);
-    throw new BizError(BizCodeEnum.ParticipantNotFound, unknownParticipantMessage(claimedId));
+    throw new BizError(
+      BizCodeEnum.ParticipantNotFound,
+      unknownParticipantMessage(claimedId),
+    );
   }
 }

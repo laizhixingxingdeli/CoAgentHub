@@ -1215,9 +1215,7 @@ function createPiParser(): ExecutorOutputParser {
             return [
               entry(
                 "tool",
-                argKeys
-                  ? `[工具] ${name} ${argKeys}`
-                  : `[工具] ${name}`,
+                argKeys ? `[工具] ${name} ${argKeys}` : `[工具] ${name}`,
                 line,
               ),
             ];
@@ -1242,7 +1240,8 @@ function createPiParser(): ExecutorOutputParser {
       }
 
       case "tool_execution_start": {
-        const name = typeof record.toolName === "string" ? record.toolName : "?";
+        const name =
+          typeof record.toolName === "string" ? record.toolName : "?";
         return [entry("tool", `[工具] ${name}`, line)];
       }
 
@@ -1252,12 +1251,11 @@ function createPiParser(): ExecutorOutputParser {
       }
 
       case "tool_execution_end": {
-        const name = typeof record.toolName === "string" ? record.toolName : "?";
+        const name =
+          typeof record.toolName === "string" ? record.toolName : "?";
         const result = record.result;
         const resultText = extractToolResultText(result);
-        return [
-          entry("tool", `[工具] ${name}`, resultText || line),
-        ];
+        return [entry("tool", `[工具] ${name}`, resultText || line)];
       }
 
       // 信封/骨架事件 → 跳过

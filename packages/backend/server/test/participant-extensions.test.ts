@@ -403,7 +403,9 @@ describe("T17 participant 自更新与扩展字段", () => {
       ).json()) as Array<{ id: string; capabilities: string[] }>;
       const caps = list.find((a) => a.id === id)?.capabilities ?? [];
       expect(caps.filter((c) => c === "coagenthub-executor")).toHaveLength(1);
-      expect(caps.filter((c) => c === "coagenthub-coordinator")).toHaveLength(1);
+      expect(caps.filter((c) => c === "coagenthub-coordinator")).toHaveLength(
+        1,
+      );
     });
 
     it("R2: installedSkills 仅接受已知 skill 名(未知 → 400),仅报它也算有效更新", async () => {

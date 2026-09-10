@@ -122,10 +122,7 @@ import {
   setPumping,
 } from "./state";
 import { collectTokenUsage, extractCodexExecText } from "./token-usage";
-import {
-  applyDiffSummaryPatch,
-  mergeDiffSummary,
-} from "./diff-summary";
+import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
 import {
   asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,
@@ -555,7 +552,9 @@ async function registerTaskOwnerServer(
 }
 
 /** 取任务登记的属主 server pid(diffSummary.platform.ownerServerPid);无 = null。 */
-export function ownerServerPidOf(task: { diffSummary: unknown }): number | null {
+export function ownerServerPidOf(task: {
+  diffSummary: unknown;
+}): number | null {
   const summary = asDiffSummaryRecord(task.diffSummary);
   const platform =
     summary && typeof summary.platform === "object" && summary.platform !== null
@@ -2713,10 +2712,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         // 经单一合并入口写入:以既有为底,result/metrics/scheduling 分所有者合并,
         // audit / relation 等他有键自动保留(spec diffsummary-ownership W2)。
         const curDone = await db.query.task.findFirst({
-          where: and(
-            eq(taskTable.id, taskId),
-            eq(taskTable.groupId, groupId),
-          ),
+          where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
           columns: { diffSummary: true },
         });
         const doneSummary = applyDiffSummaryPatch(

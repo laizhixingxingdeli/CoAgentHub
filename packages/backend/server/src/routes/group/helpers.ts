@@ -19,7 +19,7 @@ import type { DataBase } from "@server/lib/database";
 export function resolveProjectPath(
   projectPath: string | null | undefined,
 ): string | null {
-  const path = projectPath === "" ? null : projectPath ?? null;
+  const path = projectPath === "" ? null : (projectPath ?? null);
   if (path !== null) {
     // 单个 statSync 调用判断「存在的绝对目录」:不做 existsSync+statSync 两次
     // 系统调用(两次之间目录被删会让 statSync 抛裸 ENOENT 变 500);任何 stat

@@ -106,11 +106,7 @@ async function getTask(taskId: string) {
   return row;
 }
 
-async function getTaskHttp(
-  groupId: string,
-  taskId: string,
-  actorId: string,
-) {
+async function getTaskHttp(groupId: string, taskId: string, actorId: string) {
   const res = await app.request(`/api/groups/${groupId}/tasks/${taskId}`, {
     headers: { "X-Participant-Id": actorId },
   });
@@ -248,23 +244,20 @@ describe("W2 B5: PATCH done 仅带 summary+review_request 时保留 tokenUsage �
       specHash: "5f81618be636176048a82702c2c3c38a96898ab2",
       diffSummary: "W2 B5 结案交接",
     };
-    const patch = await app.request(
-      `/api/groups/${group.id}/tasks/${taskId}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Participant-Id": executor.id,
-        },
-        body: JSON.stringify({
-          status: "done",
-          diffSummary: {
-            summary: "ok",
-            review_request: reviewRequest,
-          },
-        }),
+    const patch = await app.request(`/api/groups/${group.id}/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Participant-Id": executor.id,
       },
-    );
+      body: JSON.stringify({
+        status: "done",
+        diffSummary: {
+          summary: "ok",
+          review_request: reviewRequest,
+        },
+      }),
+    });
     const patchText = await patch.text();
     expect(patch.status, patchText).toBe(200);
     const body = JSON.parse(patchText) as {
@@ -330,10 +323,12 @@ describe("W2 C1: 单一 scheduling 写入后,done/fail/cancel 三路径保留该
       );
       expect(patch.status).toBe(200);
       const row = await getTask(taskId);
-      expect((row.diffSummary as Record<string, unknown>).queuedBlocked).toEqual(
-        blocked,
+      expect(
+        (row.diffSummary as Record<string, unknown>).queuedBlocked,
+      ).toEqual(blocked);
+      expect((row.diffSummary as Record<string, unknown>).summary).toBe(
+        "c1-done",
       );
-      expect((row.diffSummary as Record<string, unknown>).summary).toBe("c1-done");
     }
 
     // 路径 2: recoverInterruptedTasks → failed
@@ -352,9 +347,9 @@ describe("W2 C1: 单一 scheduling 写入后,done/fail/cancel 三路径保留该
       await recoverInterruptedTasks(runtimeDb);
       const row = await getTask(taskId);
       expect(row.status).toBe("failed");
-      expect((row.diffSummary as Record<string, unknown>).queuedBlocked).toEqual(
-        blocked,
-      );
+      expect(
+        (row.diffSummary as Record<string, unknown>).queuedBlocked,
+      ).toEqual(blocked);
     }
 
     // 路径 3: markTaskCancelled
@@ -365,10 +360,12 @@ describe("W2 C1: 单一 scheduling 写入后,done/fail/cancel 三路径保留该
       await markTaskCancelled(runtimeDb, taskId, group.id);
       const row = await getTask(taskId);
       expect(row.status).toBe("cancelled");
-      expect((row.diffSummary as Record<string, unknown>).queuedBlocked).toEqual(
-        blocked,
+      expect(
+        (row.diffSummary as Record<string, unknown>).queuedBlocked,
+      ).toEqual(blocked);
+      expect((row.diffSummary as Record<string, unknown>).error).toBe(
+        "stopped",
       );
-      expect((row.diffSummary as Record<string, unknown>).error).toBe("stopped");
     }
   });
 });

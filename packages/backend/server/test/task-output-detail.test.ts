@@ -405,7 +405,8 @@ describe("任务明细落盘与展开 API(R4/R5)", () => {
       `/api/groups/${group.id}/tasks/${done.id}?includeOutput=1`,
       { headers: { "X-Participant-Id": coordinator.id } },
     );
-    const doneLive = ((await doneLiveRes.json()) as { outputTail?: string }).outputTail ?? "";
+    const doneLive =
+      ((await doneLiveRes.json()) as { outputTail?: string }).outputTail ?? "";
     expect(doneLive).toContain("报告: 完成");
     expect(doneLive).not.toContain("[工具 #t3]");
     // 摘要流字节数对比:thinking 原文 2×2000 字进明细,摘要只留一行要旨

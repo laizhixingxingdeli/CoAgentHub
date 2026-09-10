@@ -223,7 +223,6 @@ describe("useGroupWs (ticket 14)", () => {
     next(30_000);
   });
 
-  
   it("fires onReconnect only after a true reconnect, not the first open", () => {
     vi.useFakeTimers();
     stubWebSocket();

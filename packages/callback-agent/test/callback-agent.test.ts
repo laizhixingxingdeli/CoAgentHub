@@ -609,29 +609,30 @@ describe("CallbackAgent integration", () => {
   });
 
   it("rejects construction when timeoutMs >= leaseMs (lease/timeout guard)", () => {
-    expect(() =>
-      new CallbackAgent({
-        config: {
-          apiBase: baseUrl,
-          participantId: fakeApi.participantId,
-          consumerId: "test-consumer",
-          pollIntervalMs: 100,
-          leaseMs: 400,
-          defaultTimeoutMs: 300,
-          endpoints: {
-            "dev-mac": {
-              driver: {
-                driver: "command",
-                executable: process.execPath,
-                args: ["-e", "1"],
-                timeoutMs: 5000,
+    expect(
+      () =>
+        new CallbackAgent({
+          config: {
+            apiBase: baseUrl,
+            participantId: fakeApi.participantId,
+            consumerId: "test-consumer",
+            pollIntervalMs: 100,
+            leaseMs: 400,
+            defaultTimeoutMs: 300,
+            endpoints: {
+              "dev-mac": {
+                driver: {
+                  driver: "command",
+                  executable: process.execPath,
+                  args: ["-e", "1"],
+                  timeoutMs: 5000,
+                },
               },
             },
           },
-        },
-        dedupeStore: new DedupeStore(join(tmpDir, "dedupe-reject.jsonl")),
-        logger: silentLogger(),
-      }),
+          dedupeStore: new DedupeStore(join(tmpDir, "dedupe-reject.jsonl")),
+          logger: silentLogger(),
+        }),
     ).toThrow(/timeoutMs.*leaseMs|leaseMs.*timeoutMs/i);
   });
 

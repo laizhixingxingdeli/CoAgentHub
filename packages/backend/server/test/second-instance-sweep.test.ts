@@ -19,7 +19,8 @@ type Row = {
 };
 
 function makeDb(rows: Row[]) {
-  const updated: Array<{ id: string; status: string; diffSummary: unknown }> = [];
+  const updated: Array<{ id: string; status: string; diffSummary: unknown }> =
+    [];
   return {
     updated,
     rows,

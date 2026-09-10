@@ -60,9 +60,8 @@ export function inputModeWriteError(
 ): string | null {
   if (mode == null) return null;
   const status =
-    EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode[
-      mode as ExecutorInputMode
-    ] ?? null;
+    EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode[mode as ExecutorInputMode] ??
+    null;
   if (status === "unimplemented") {
     return (
       `inputMode "${mode}" 尚未实现,保存不会让执行路径生效。` +
@@ -127,8 +126,7 @@ export function resolveExecutorCliSpawn(
   // 存量 stdin:降级 path,不写 stdin(R2 不追溯)。
   const mode: ExecutorInputMode =
     requested == null ||
-    EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode[requested] ===
-      "unimplemented"
+    EXECUTOR_CONFIG_FIELD_CAPABILITIES.inputMode[requested] === "unimplemented"
       ? "path"
       : requested;
 

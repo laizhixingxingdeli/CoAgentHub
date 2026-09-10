@@ -263,7 +263,11 @@ async function handleRollback(
   // 经 mergeDiffSummary 以 terminal 所有者写 error,保留 platform.* / audit 等
   // 他有键(spec diffsummary-ownership W2:禁止整袋只写 error)。
   if (task) {
-    const next = mergeDiffSummary(task.diffSummary, { error: "rollback" }, "terminal");
+    const next = mergeDiffSummary(
+      task.diffSummary,
+      { error: "rollback" },
+      "terminal",
+    );
     await db
       .update(taskTable)
       .set({ status: "failed", diffSummary: next })

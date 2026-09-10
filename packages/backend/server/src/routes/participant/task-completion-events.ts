@@ -30,7 +30,10 @@ const DEFAULT_RETRY_AFTER_MS = 60_000;
 const MAX_LEASE_MS = 3600_000;
 
 function eventNotFound() {
-  return new BizError(BizCodeEnum.TaskNotFound, "task completion event not found");
+  return new BizError(
+    BizCodeEnum.TaskNotFound,
+    "task completion event not found",
+  );
 }
 
 /**
@@ -90,9 +93,11 @@ async function buildEnvelope(
       specRef: task?.specRef ?? null,
       specHash: task?.specHash ?? null,
       diffSummary: task?.diffSummary ?? null,
-      outputTail: task?.diffSummary && typeof task.diffSummary === "object"
-        ? (task.diffSummary as Record<string, unknown> | null)?.outputTail ?? null
-        : null,
+      outputTail:
+        task?.diffSummary && typeof task.diffSummary === "object"
+          ? ((task.diffSummary as Record<string, unknown> | null)?.outputTail ??
+            null)
+          : null,
     },
   };
 }
@@ -193,7 +198,10 @@ app
         },
       },
     }),
-    zValidator("param", z.object({ id: z.string().uuid(), eventId: z.string().uuid() })),
+    zValidator(
+      "param",
+      z.object({ id: z.string().uuid(), eventId: z.string().uuid() }),
+    ),
     zValidator(
       "json",
       z.object({
@@ -276,7 +284,10 @@ app
         },
       },
     }),
-    zValidator("param", z.object({ id: z.string().uuid(), eventId: z.string().uuid() })),
+    zValidator(
+      "param",
+      z.object({ id: z.string().uuid(), eventId: z.string().uuid() }),
+    ),
     zValidator(
       "json",
       z.object({
@@ -345,7 +356,10 @@ app
         },
       },
     }),
-    zValidator("param", z.object({ id: z.string().uuid(), eventId: z.string().uuid() })),
+    zValidator(
+      "param",
+      z.object({ id: z.string().uuid(), eventId: z.string().uuid() }),
+    ),
     zValidator(
       "json",
       z.object({

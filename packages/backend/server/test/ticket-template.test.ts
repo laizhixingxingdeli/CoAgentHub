@@ -33,10 +33,7 @@ function useTemplatesDir(dir: string): void {
   process.env[envKey] = dir;
 }
 
-function writeTemplates(
-  dir: string,
-  files: Record<string, unknown>,
-): void {
+function writeTemplates(dir: string, files: Record<string, unknown>): void {
   mkdirSync(dir, { recursive: true });
   for (const [name, body] of Object.entries(files)) {
     writeFileSync(
@@ -218,7 +215,9 @@ describe("ticket-template:R5 平台段不可覆盖", () => {
     // 方法论文案已被掏空。
     expect(ticket).not.toContain("## 执行方式");
     expect(ticket).not.toContain("## 汇报格式要求");
-    expect(ticket).toContain("## 执行上下文 (用于直接调用 CoAgentHub HTTP API)");
+    expect(ticket).toContain(
+      "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
+    );
   });
 });
 

@@ -127,7 +127,9 @@ export async function handleSkillInstallConfirmation(
   body: string,
 ): Promise<void> {
   // 匹配 "✅ skill 已安装" 或 "✅ skill 已安装: executor" 等。
-  const match = body.match(/^✅\s*(?:skill|技能)?\s*已安装(?:\s*[:：]\s*(\w+))?/i);
+  const match = body.match(
+    /^✅\s*(?:skill|技能)?\s*已安装(?:\s*[:：]\s*(\w+))?/i,
+  );
   if (!match) return;
 
   // 推断 skill 类型:显式指定或用默认 executor。

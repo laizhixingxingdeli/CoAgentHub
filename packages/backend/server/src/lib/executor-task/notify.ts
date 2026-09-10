@@ -11,10 +11,7 @@ import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import { applyDiffSummaryPatch } from "./diff-summary";
-import {
-  sumAttemptTokenUsage,
-  sumAttemptTokenUsageReason,
-} from "./types";
+import { sumAttemptTokenUsage, sumAttemptTokenUsageReason } from "./types";
 
 /**
  * 任务状态通知(executor-task 拆分):任务状态落库后的 WS 推送

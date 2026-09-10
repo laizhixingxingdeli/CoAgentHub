@@ -120,9 +120,15 @@ function stubServer() {
         res.end("err");
         return;
       }
-      const b = runtimeFlip && rebuiltMarker && existsSync(rebuiltMarker)
-        ? { startedAt: runtimeBody.startedAt, entryMtime: runtimeBody.entryMtime, stale: false, staleReason: null }
-        : runtimeBody;
+      const b =
+        runtimeFlip && rebuiltMarker && existsSync(rebuiltMarker)
+          ? {
+              startedAt: runtimeBody.startedAt,
+              entryMtime: runtimeBody.entryMtime,
+              stale: false,
+              staleReason: null,
+            }
+          : runtimeBody;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(b));
       return;
@@ -180,9 +186,13 @@ function stubServer() {
         res.end("not-json");
         return;
       }
-      const page = taskPageSize > 0
-        ? Array.from({ length: taskPageSize }, (_, i) => ({ id: `tp-${i}`, status: "done" }))
-        : tasks;
+      const page =
+        taskPageSize > 0
+          ? Array.from({ length: taskPageSize }, (_, i) => ({
+              id: `tp-${i}`,
+              status: "done",
+            }))
+          : tasks;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(page));
       return;
@@ -383,9 +393,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     const r = await runWatchdog({ server: stub.server, prod, dir });
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual(["restart --build"]);
-    expect(logLines(dir).some((l) => l.includes("OK   restart --build 成功"))).toBe(
-      true,
-    );
+    expect(
+      logLines(dir).some((l) => l.includes("OK   restart --build 成功")),
+    ).toBe(true);
   });
 
   it("staleReason=both → restart --build,重建后复核 stale=false 计成功", async () => {
@@ -442,9 +452,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(1);
     expect(prodCalls(dir)).toEqual(["restart"]);
     expect(failCount(dir)).toBe("1");
-    expect(logLines(dir).some((l) => l.includes("FAIL 复核 /api/health 仍陈旧"))).toBe(
-      true,
-    );
+    expect(
+      logLines(dir).some((l) => l.includes("FAIL 复核 /api/health 仍陈旧")),
+    ).toBe(true);
   });
 
   it("staleReason=process 且有 running 任务 → 不重启(在途保护不放松)", async () => {
@@ -526,7 +536,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED") && l.includes("缺 node")),
+      logLines(dir).some(
+        (l) => l.includes("FAIL-CLOSED") && l.includes("缺 node"),
+      ),
     ).toBe(true);
   });
 
@@ -541,7 +553,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED") && l.includes("群列表失败")),
+      logLines(dir).some(
+        (l) => l.includes("FAIL-CLOSED") && l.includes("群列表失败"),
+      ),
     ).toBe(true);
   });
 
@@ -556,7 +570,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED") && l.includes("JSON 解析")),
+      logLines(dir).some(
+        (l) => l.includes("FAIL-CLOSED") && l.includes("JSON 解析"),
+      ),
     ).toBe(true);
   });
 
@@ -572,9 +588,7 @@ describe("coagenthub-watchdog stale 分支", () => {
     const r = await runWatchdog({ server: stub.server, prod, dir });
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
-    expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED")),
-    ).toBe(true);
+    expect(logLines(dir).some((l) => l.includes("FAIL-CLOSED"))).toBe(true);
   });
 
   it("FAIL-CLOSED 任务列表 curl 失败 → 跳过重建并记录日志", async () => {
@@ -588,7 +602,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED") && l.includes("任务失败")),
+      logLines(dir).some(
+        (l) => l.includes("FAIL-CLOSED") && l.includes("任务失败"),
+      ),
     ).toBe(true);
   });
 
@@ -603,7 +619,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED") && l.includes("任务失败")),
+      logLines(dir).some(
+        (l) => l.includes("FAIL-CLOSED") && l.includes("任务失败"),
+      ),
     ).toBe(true);
   });
 
@@ -618,9 +636,7 @@ describe("coagenthub-watchdog stale 分支", () => {
     const r = await runWatchdog({ server: stub.server, prod, dir });
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
-    expect(
-      logLines(dir).some((l) => l.includes("FAIL-CLOSED")),
-    ).toBe(true);
+    expect(logLines(dir).some((l) => l.includes("FAIL-CLOSED"))).toBe(true);
   });
 
   // ---------- R2 重建后复核 ----------
@@ -708,9 +724,7 @@ describe("coagenthub-watchdog stale 分支", () => {
     const r4 = await runWatchdog({ server: stub.server, prod, dir });
     expect(r4.status).toBe(0);
     expect(prodCalls(dir).length).toBe(3);
-    expect(
-      logLines(dir).some((l) => l.includes("自动重建已停用")),
-    ).toBe(true);
+    expect(logLines(dir).some((l) => l.includes("自动重建已停用"))).toBe(true);
     const state = readState(dir, "auto-rebuild-state");
     expect(state?.disabled).toBe(true);
     expect(typeof state?.disabledAt).toBe("string");
@@ -751,7 +765,10 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(readState(dir, "auto-rebuild-state")?.disabled).toBe(true);
     // 把其中 2 条旧化为 25h 前(模拟窗口滑动,失败文件本身仍在、无人删)
     const staleFile = join(dir, "stale-failures");
-    writeFileSync(staleFile, `${now - 25 * 3600}\n${now - 25.5 * 3600}\n${now - 30}\n`);
+    writeFileSync(
+      staleFile,
+      `${now - 25 * 3600}\n${now - 25.5 * 3600}\n${now - 30}\n`,
+    );
     // 下一轮:窗口内只剩 1 条 → 自动恢复尝试。恢复轮要成功:换成成功 prod
     const okProd = writeStubProd(dir, { exitCode: 0 });
     stub.runtimeFlip = true;
@@ -774,9 +791,7 @@ describe("coagenthub-watchdog stale 分支", () => {
     const r = await runWatchdog({ server: stub.server, prod, dir });
     expect(r.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
-    expect(
-      logLines(dir).some((l) => l.includes("自动重建已停用")),
-    ).toBe(true);
+    expect(logLines(dir).some((l) => l.includes("自动重建已停用"))).toBe(true);
     expect(readState(dir, "auto-rebuild-state")?.disabled).toBe(true);
   });
 
@@ -800,7 +815,9 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r3.status).toBe(0);
     expect(prodCalls(dir)).toEqual([]);
     expect(
-      logLines(dir).some((l) => l.includes("WARN staleReason=build 连续 3 轮无法处理")),
+      logLines(dir).some((l) =>
+        l.includes("WARN staleReason=build 连续 3 轮无法处理"),
+      ),
     ).toBe(true);
     const messages = groupMessages(dir, "group-messages.jsonl");
     expect(messages.length).toBe(1);
@@ -812,7 +829,10 @@ describe("coagenthub-watchdog stale 分支", () => {
     expect(r4.status).toBe(0);
     expect(groupMessages(dir, "group-messages.jsonl").length).toBe(1);
     expect(readState(dir, "stall-state")?.stalledRounds).toBe(4);
-    expect(logLines(dir).filter((l) => l.includes("WARN staleReason=build 连续")).length).toBe(1);
+    expect(
+      logLines(dir).filter((l) => l.includes("WARN staleReason=build 连续"))
+        .length,
+    ).toBe(1);
   });
 
   it("R2 停滞:在途清空后停滞计数清零(陈旧被处理即解除)", async () => {

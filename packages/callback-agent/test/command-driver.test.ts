@@ -49,7 +49,14 @@ describe("Command Driver", () => {
     const driver = CommandDriverSchema.parse({
       driver: "command",
       executable: process.execPath,
-      args: [fakeBin.path, "exec", "resume", "--json", "{sessionRef}", "{message}"],
+      args: [
+        fakeBin.path,
+        "exec",
+        "resume",
+        "--json",
+        "{sessionRef}",
+        "{message}",
+      ],
     });
 
     const event = makeEvent();

@@ -236,11 +236,15 @@ function killChildTree(child: ChildProcess): void {
   if (!child.pid) return;
   try {
     if (process.platform === "win32") {
-      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-        shell: false,
-      });
+      const killer = spawn(
+        "taskkill",
+        ["/pid", String(child.pid), "/T", "/F"],
+        {
+          stdio: "ignore",
+          windowsHide: true,
+          shell: false,
+        },
+      );
       killer.on("error", () => {
         try {
           child.kill();

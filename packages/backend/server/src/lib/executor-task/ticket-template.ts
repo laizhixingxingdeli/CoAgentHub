@@ -95,11 +95,10 @@ function parseTemplate(raw: unknown): Partial<TicketTemplate> {
     ) as TicketTemplate["executionMode"];
   }
   if (obj.report && typeof obj.report === "object") {
-    out.report = pickStringFields(obj.report as Record<string, unknown>, [
-      "coordinatorWithReviewer",
-      "coordinatorNoReviewer",
-      "executor",
-    ] as const) as TicketTemplate["report"];
+    out.report = pickStringFields(
+      obj.report as Record<string, unknown>,
+      ["coordinatorWithReviewer", "coordinatorNoReviewer", "executor"] as const,
+    ) as TicketTemplate["report"];
   }
   if ("specInstruction" in obj) {
     out.specInstruction = asString(obj.specInstruction);

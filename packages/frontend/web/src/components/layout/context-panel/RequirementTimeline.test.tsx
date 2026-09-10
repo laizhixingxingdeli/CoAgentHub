@@ -391,9 +391,7 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
         ]}
       />,
     );
-    const failedBar = screen.getByTestId(
-      "requirement-timeline-failed-t-fail",
-    );
+    const failedBar = screen.getByTestId("requirement-timeline-failed-t-fail");
     expect(failedBar).toHaveTextContent("任务失败: spawn reviewer ENOENT");
     expect(failedBar).toHaveClass("text-status-failed");
     expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();
@@ -411,9 +409,7 @@ describe("RequirementTimeline 沟通记录时间线 (UI-04b-1)", () => {
         ]}
       />,
     );
-    const failedBar = screen.getByTestId(
-      "requirement-timeline-failed-t-fail",
-    );
+    const failedBar = screen.getByTestId("requirement-timeline-failed-t-fail");
     expect(failedBar).toHaveTextContent("任务失败: checkpoint 不可用");
     expect(failedBar).toHaveClass("text-status-failed");
     expect(screen.queryByText("暂无汇报内容")).not.toBeInTheDocument();

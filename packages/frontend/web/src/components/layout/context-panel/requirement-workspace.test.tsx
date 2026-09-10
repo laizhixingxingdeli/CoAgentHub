@@ -895,9 +895,7 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
             {
               ...running,
               outputTail:
-                includeCalls === 1
-                  ? "first\n"
-                  : "first\nafter disconnect\n",
+                includeCalls === 1 ? "first\n" : "first\nafter disconnect\n",
             },
           ]);
         },
@@ -929,8 +927,7 @@ describe("RequirementWorkspace 实时输出与派生块刷新 (task-panel-shows-
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
-    const latest =
-      MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    const latest = MockWebSocket.instances[MockWebSocket.instances.length - 1];
     act(() => latest.open());
 
     await waitFor(() => {

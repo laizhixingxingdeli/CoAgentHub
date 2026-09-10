@@ -946,10 +946,7 @@ describe("孤儿任务周期收敛", () => {
       expect(err).toContain("执行器额度限制");
       expect(err).toMatch(/预计 .+ 恢复/);
       // 冷却至解析出的恢复时刻(与 parseRateLimitRecoveryMs 同源)。
-      const expectedEnd = parseRateLimitRecoveryMs(
-        recoveryLine,
-        now.getTime(),
-      );
+      const expectedEnd = parseRateLimitRecoveryMs(recoveryLine, now.getTime());
       expect(expectedEnd).not.toBeNull();
       expect(summary.executorCooldownEndMs).toBe(expectedEnd);
       // 执行器进入冷却(冷却登记与 diffSummary 同值)。
@@ -981,10 +978,7 @@ describe("孤儿任务周期收敛", () => {
         string,
         unknown
       >;
-      const expectedEnd = parseRateLimitRecoveryMs(
-        recoveryLine,
-        now.getTime(),
-      );
+      const expectedEnd = parseRateLimitRecoveryMs(recoveryLine, now.getTime());
       expect(expectedEnd).not.toBeNull();
       expect(summary.executorCooldownEndMs).toBe(expectedEnd);
     } finally {
@@ -1134,10 +1128,7 @@ describe("孤儿任务周期收敛", () => {
       const row = await findTask(task.id);
       expect(row?.status).toBe("failed");
       const summary = row?.diffSummary as Record<string, unknown>;
-      const expectedEnd = parseRateLimitRecoveryMs(
-        recoveryLine,
-        now.getTime(),
-      );
+      const expectedEnd = parseRateLimitRecoveryMs(recoveryLine, now.getTime());
       expect(expectedEnd).not.toBeNull();
       expect(summary.executorCooldownEndMs).toBe(expectedEnd);
       expect(summary.cooldownFallbackReason).toBeUndefined();
