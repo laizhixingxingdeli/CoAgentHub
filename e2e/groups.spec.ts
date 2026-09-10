@@ -12,7 +12,7 @@ function groupRow(page: Page, title: string) {
  *
  * 身份:浏览器一律以服务端建的「Local User」身份访问 —— 2026-08-24
  * (f6dc7b22)起前端不再本地持久化身份,localStorage 绑定那套已废弃
- * (详见 e2e/helpers.ts 的 bindIdentity 与 register.spec.ts 头部)。
+ * (详见 e2e/helpers.ts 的 localUserParticipantId 与 register.spec.ts 头部)。
  */
 test("建群:标题输入 → POST → 群列表出现,状态 active", async ({
   page,
@@ -37,10 +37,10 @@ test("建群:标题输入 → POST → 群列表出现,状态 active", async ({
   const row = groupRow(page, title);
   await expect(row).toBeVisible();
   // 状态 active 的断言不能再找「进行中」徽标:该徽标已换成一个
-  // aria-hidden 的视觉圆点(index.tsx:254),i18n 里 groups.status.active
-  // 成了没人引用的死键,状态在无障碍树上不留任何文本。当前 UI 里
-  // active 与 archived 的唯一可访问区别是行尾按钮:active 给「归档」,
-  // archived 给「恢复」(index.tsx:388-408)。
+  // aria-hidden 的视觉圆点(index.tsx:254),状态在无障碍树上不留任何文本
+  // (对应的死键 groups.status.* 已随本批清理删除)。当前 UI 里 active 与
+  // archived 的唯一可访问区别是行尾按钮:active 给「归档」,archived 给
+  // 「恢复」(index.tsx:388-408)。
   await expect(row.getByRole("button", { name: "归档" })).toBeVisible();
 });
 
@@ -74,9 +74,10 @@ test("归档只读:归档群 → 只读横幅 + 发送禁用", async ({ page, re
 
   // 「发送禁用」这条不能再按原样断言:群页面已经没有消息输入框了。
   // /groups/:id 现在渲染的是标题栏 + 只读横幅 + RequirementWorkspace
-  // (需求列表/详情两栏),原来的聊天流组件 MessageList.tsx 全仓无人 import,
-  // 是死代码;i18n 的 messages.send.aria(「消息内容」)同样不再被渲染。
-  // 当前 UI 里「只读」的可断言表现是:横幅出现(上一行)+ 改名铅笔消失
-  // (messages/index.tsx:121 的 {!isReadOnly && <Pencil …/>})。
+  // (需求列表/详情两栏);原来的聊天流组件 MessageList.tsx 与它的 i18n 键
+  // messages.send.*(含「消息内容」)都已随本批清理删除。只读态在只有归档群
+  // 时的可断言表现是:横幅出现(上一行)+ 改名铅笔消失(messages/index.tsx:121
+  // 的 {!isReadOnly && <Pencil …/>});停止/回滚按钮的只读禁用有单测覆盖
+  // (requirement-workspace.test.tsx「归档只读」),本群无任务不在此断言。
   await expect(page.getByTestId("rename-group-title")).toHaveCount(0);
 });
