@@ -21,7 +21,11 @@ import {
  * the message stream, member roster, group status/title, WS live updates,
  * thread collapse, search, reply/copy/edit/delete
  * and the read-only banner state. Extracted from GroupMessagesPage so the
- * page component is a thin composition of this hook and MessageList.
+ * page component is a thin composition of this hook and the main pane.
+ *
+ * 现在的消费者是 GroupLayout(WS 订阅 + 未读/通知),不再是聊天流:
+ * MessageList.tsx 已随聊天流下线删除(2026-09-10),群内页主区是
+ * RequirementWorkspace。本 hook 里仍留着为聊天流准备的 state/handler。
  */
 export function useMessagesPage(groupId: string | undefined) {
   // wouter navigate — used by the desktop notification click handler to jump

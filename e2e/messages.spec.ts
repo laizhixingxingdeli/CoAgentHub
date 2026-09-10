@@ -1,113 +1,110 @@
 import { expect, test } from "@playwright/test";
 import {
-  bindIdentity,
   createGroup,
+  createTask,
   listMessages,
+  localUserParticipantId,
   postMessage,
   registerParticipant,
   uniqueName,
 } from "./helpers";
 
 /**
- * 核心路径 3:群内发消息(输入 body → 发送 → 消息出现在列表)。
+ * 核心路径 3:群内发消息 —— 现在只剩「任务停止命令」这一条路径。
  *
- * ⚠️ 已 skip —— 群页面已经没有消息输入框和消息流了,不是选择器过期。
+ * 本用例是原「群内发消息:输入 body → 发送 → 消息出现在列表」的重建
+ * (2026-09-10):自由文本发消息在产品里已不存在 —— /groups/:id 现在渲染
+ * 「标题栏 + 只读横幅 + RequirementWorkspace(需求列表/详情两栏)」,没有
+ * 消息输入框;当前 UI 唯一会 POST /groups/:id/messages 的地方是任务卡片上的
+ * 「停止」/「回滚」(requirement-workspace.tsx 的 sendCommand,发 broadcast
+ * 命令消息)。所以这条改测那条真实路径,并顺带覆盖
+ * specs/stop-button-needs-confirmation 的二次确认要求(R1/R2 取消则不发消息;
+ * R3 文案指名任务标识 + 当前状态 + 后果)。
  *
- * /groups/:id 现在渲染的是「标题栏 + 只读横幅 + RequirementWorkspace
- * (需求列表/详情两栏)」(messages/index.tsx:163-169)。原来的聊天流组件
- * MessageList.tsx(带 data-testid="message-stream")全仓无人 import,已是
- * 死代码;i18n 的 messages.send.aria(「消息内容」)同样不再被任何组件渲染。
+ * 同批删掉的是原「回复树:回复 → parentId 挂载 → 树形渲染」:消息行 hover
+ * 回复 / 引用条 / 「N 条回复」计数随 MessageList.tsx 一起下线(该组件已在本批
+ * 删除),新 UI 的需求时间线是平铺渲染 —— parentId 只参与「消息归属到哪条
+ * 需求」的启发式(merge-requirement-timeline.ts),且时间窗兜底会让消息即使
+ * 没有 parentId 也照样归属,E2E 断不出 parentId 起了作用。该行为分别由 server
+ * 端单测(parentId/depth 挂载)与 merge-requirement-timeline 单测(回复子树
+ * 归属)覆盖,不在 E2E 重复。
  *
- * 当前 UI 里唯一会 POST /groups/:id/messages 的路径是任务上的「停止」/
- * 「回滚」按钮(requirement-workspace.tsx:642 的 sendCommand,发的是
- * broadcast 命令消息),**没有自由文本输入框**。也就是说「输入 body → 发送」
- * 这个能力在产品里已不存在,无从断言。
+ * 身份:必须用 Local User 建群(见 helpers.localUserParticipantId)—— 浏览器
+ * 一律以 Local User 访问,建群者自动成为 coordinator 成员,命令消息才发得出去。
  *
- * 身份侧还有第二重失效:本用例靠 bindIdentity 扮演自己注册的 participant,
- * 而身份模型已在 2026-08-24 改为固定的「Local User」——详见 register.spec.ts
- * 头部那段说明。
- *
- * 恢复覆盖需要重新决定「发消息」在新形态下测什么,属产品决策 —— 留债待议。
+ * 不断言任务终态:E2E 不跑真实执行器,API 直接建的任务只在库里是 queued、
+ * 不在 server 的内存队列里,而 control.ts 的 cancelQueuedTasks 只清内存队列
+ * —— 「停止」不会把它翻成「已取消」。这里断的是命令消息真的发出去并落库,
+ * 与 tasks.spec.ts「不依赖真实执行器」同口径。
  */
-test.skip("群内发消息:输入 body → 发送 → 消息出现在列表", async ({
+test("停止命令:二次确认 → 取消不发送 → 确认后广播命令消息落库", async ({
   page,
   request,
 }) => {
-  const participant = await registerParticipant(
-    request,
-    uniqueName("e2e-sender"),
-  );
+  const localUser = await localUserParticipantId(request);
   const group = await createGroup(
     request,
-    uniqueName("e2e-msg-group"),
-    participant.id,
+    uniqueName("e2e-cmd-group"),
+    localUser,
   );
-  await bindIdentity(page, participant.id);
-
-  const body = uniqueName("e2e-body");
-  await page.goto(`/groups/${group.id}`);
-
-  await page.getByLabel("消息内容").fill(body);
-  await page.getByRole("button", { name: "发送" }).click();
-
-  // 消息出现在列表(消息流内可见该 body)
-  await expect(page.locator('[data-testid="message-stream"]')).toContainText(
-    body,
-  );
-});
-
-/**
- * 核心路径 4:回复树(回复 → parentId 挂载 → 树形渲染)。
- * 根消息经 API 注入,回复动作走真实 UI(消息行 hover → 回复 → 引用条 →
- * 发送),最后用 API 侧断言 parentId 确实挂载、UI 显示回复计数。
- *
- * ⚠️ 已 skip —— 同上一条:消息流 UI(message-stream / 消息行 hover / 回复
- * 引用条 reply-quote-bar / 「N 条回复」计数)随 MessageList.tsx 一起成了
- * 无人挂载的死代码。parentId 的服务端行为仍由单测覆盖,这里缺的是 UI 侧。
- */
-test.skip("回复树:回复 → parentId 挂载 → 树形渲染", async ({
-  page,
-  request,
-}) => {
-  const participant = await registerParticipant(
+  const executor = await registerParticipant(
     request,
-    uniqueName("e2e-replier"),
+    uniqueName("e2e-cmd-executor"),
   );
-  const group = await createGroup(
+  // 触发消息 + queued 任务经 API 注入:UI 里造任务要靠真实执行器派发,过重。
+  const trigger = await postMessage(
     request,
-    uniqueName("e2e-reply-group"),
-    participant.id,
+    group.id,
+    uniqueName("e2e-cmd-brief"),
+    localUser,
   );
-  const rootBody = uniqueName("e2e-root");
-  await postMessage(request, group.id, rootBody, participant.id);
-  await bindIdentity(page, participant.id);
+  const task = await createTask(
+    request,
+    group.id,
+    trigger.id,
+    executor.id,
+    localUser,
+  );
 
   await page.goto(`/groups/${group.id}`);
 
-  // 根消息出现
-  const stream = page.locator('[data-testid="message-stream"]');
-  await expect(stream).toContainText(rootBody);
+  // 桌面视口(1280)两栏默认选中最新需求 → 详情区直接渲染该任务卡片和「停止」
+  // 按钮,无需点选。任务不带 specRef 时自己独立成一条需求(分组键 = 任务 id,
+  // 见 tasks.spec.ts 说明)。
+  const stopButton = page.getByTestId(`task-stop-${task.id}`);
+  await expect(stopButton).toBeVisible();
 
-  // hover 消息行 → 点「回复」→ 引用条出现
-  const rootRow = page.locator("li", { hasText: rootBody }).first();
-  await rootRow.hover();
-  await rootRow.getByRole("button", { name: "回复" }).click();
-  await expect(page.getByTestId("reply-quote-bar")).toBeVisible();
+  // R3:确认文案指名任务(短号)、当前状态、后果。R1/R2:取消 → 不发消息。
+  // 用 waitForEvent 而不是 page.once + 变量,避免「弹窗回调与 click 的先后」
+  // 竞争;注册了监听器就必须自己 accept/dismiss(否则 click 永远不返回)。
+  const cancelDialog = page.waitForEvent("dialog");
+  const cancelClick = stopButton.click();
+  const dialog = await cancelDialog;
+  expect(dialog.message()).toContain(task.id.slice(0, 8));
+  expect(dialog.message()).toContain("排队中");
+  expect(dialog.message()).toContain("不会执行");
+  await dialog.dismiss();
+  await cancelClick;
 
-  // 发送回复
-  const replyBody = uniqueName("e2e-reply");
-  await page.getByLabel("消息内容").fill(replyBody);
-  await page.getByRole("button", { name: "发送" }).click();
-  await expect(stream).toContainText(replyBody);
+  const afterCancel = await listMessages(request, group.id);
+  expect(afterCancel.some((m) => m.body.startsWith("停止"))).toBe(false);
 
-  // 树形渲染:根消息出现「1 条回复」计数
-  await expect(page.getByText("1 条回复")).toBeVisible();
+  // 确认 → 发出 broadcast 命令消息「停止 <taskId>」,发送者是 Local User。
+  const acceptDialog = page.waitForEvent("dialog");
+  const acceptClick = stopButton.click();
+  await (await acceptDialog).accept();
+  await acceptClick;
 
-  // parentId 挂载(API 侧验证:回复的 parentId = 根消息 id)
-  const messages = await listMessages(request, group.id);
-  const root = messages.find((m) => m.body === rootBody);
-  const reply = messages.find((m) => m.body === replyBody);
-  expect(root).toBeTruthy();
-  expect(reply).toBeTruthy();
-  expect(reply!.parentId).toBe(root!.id);
+  await expect
+    .poll(async () => {
+      const messages = await listMessages(request, group.id);
+      return messages.some(
+        (m) => m.body === `停止 ${task.id}` && m.senderId === localUser,
+      );
+    })
+    .toBe(true);
+
+  // 请求已结算:按钮从「发送中…」回到「停止」(发送成功与否由上面的落库
+  // 断言判定 —— 需求视图里 sendCommand 的错误态目前没有渲染出口)。
+  await expect(stopButton).toHaveText("停止");
 });
