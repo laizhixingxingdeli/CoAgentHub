@@ -6,15 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useGroupHeader } from "@/hooks/use-group-header";
 import { markRead, setActiveGroupId } from "@/hooks/use-unread";
-import {
-  PARTICIPANT_COLORS,
-  colorForId as participantColor,
-} from "@/lib/avatar-color";
 import { t } from "@/lib/i18n";
 import { GroupSettingsContent } from "../members";
-
-// Ticket 32/33: 头像色板与哈希已抽到 lib(通用 colorForId),这里保持
-// `participantColor`/`PARTICIPANT_COLORS` 的既有导出面,页面内调用与旧测试均不变。
 
 /**
  * 群内页(需求主区改版):主区从「聊天流 + 输入框」改为「需求列表 | 需求详情」
@@ -238,7 +231,3 @@ function GroupSettingsDrawer({
     </div>
   );
 }
-
-export { detectMention, formatMessageTime, resolveAudience } from "./lib";
-// Re-exports kept for the test suite (pre-split module surface).
-export { PARTICIPANT_COLORS, participantColor };
