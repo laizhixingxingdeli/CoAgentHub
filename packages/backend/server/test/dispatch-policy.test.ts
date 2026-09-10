@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
   DEFAULT_RATE_LIMIT_POLICY,
+  DEFAULT_RETRY_POLICY,
+  getDispatchPolicyOrigin,
   readDispatchPolicy,
   parseRateLimitRecoveryMs,
 } = await import("@server/lib/executors");
@@ -832,5 +834,85 @@ describe("瞬时限流配置(读不到 → fail-safe 回落 exhausted)", () => {
       backoffMs: 30_000,
       escalationLimit: 2,
     });
+  });
+});
+
+/**
+ * 策略来源可观测(spec dispatch-policy-load-is-not-observable)。
+ *
+ * 背景:策略文件路径相对 process.cwd() 解析,换个起法就读不到,而回落到兜底
+ * 默认是**静默**的。回落方向本身是对的(fail-safe),本组用例不改它 —— 要验的
+ * 是「读没读到、读的哪个文件」现在能不能从外面看出来。
+ *
+ * 这不是假想场景:排查 CI 与本机重试次数不一致时,需要判断生产是不是一直在用
+ * 默认 maxRetries,当时**没法从系统里查到答案**,只能读代码推断。
+ */
+describe("readDispatchPolicy:策略来源可观测", () => {
+  it("cwd 能读到时:来源是该文件的绝对路径,且标明路径由 cwd 解析", () => {
+    delete process.env[policyFileEnv];
+    process.chdir(repoRoot);
+
+    readDispatchPolicy();
+
+    const origin = getDispatchPolicyOrigin();
+    expect(origin?.source).toBe("file");
+    expect(origin?.resolvedFrom).toBe("cwd");
+    expect(origin?.path).toBe(
+      path.resolve(repoRoot, "scripts/dispatch-policy.json"),
+    );
+  });
+
+  it("env 覆盖时:来源标明是 env,路径是被覆盖的那个", () => {
+    usePolicyFile({ retry: { maxRetries: 7 } });
+    const expected = process.env[policyFileEnv];
+
+    const policy = readDispatchPolicy();
+
+    const origin = getDispatchPolicyOrigin();
+    expect(origin?.source).toBe("file");
+    expect(origin?.resolvedFrom).toBe("env");
+    expect(origin?.path).toBe(expected);
+    // 来源报的是 file,取值就必须真来自那个文件(否则「来源」这个字段没意义)。
+    expect(policy.retry.maxRetries).toBe(7);
+  });
+
+  it("读不到时:标明兜底默认、不抛错,且回落语义逐字未变", () => {
+    // 真造出「读不到」:切到一个没有 scripts/dispatch-policy.json 的空目录。
+    // 只测正常路径的话,这条最该防的情形恰好测不到。
+    delete process.env[policyFileEnv];
+    const empty = mkdtempSync(path.join(tmpdir(), "coagenthub-nopolicy-"));
+    process.chdir(empty);
+
+    // 不抛错是硬要求:回落是有意设计,不能因为配置缺失阻断启动。
+    const policy = readDispatchPolicy();
+
+    const origin = getDispatchPolicyOrigin();
+    expect(origin?.source).toBe("builtin-default");
+    expect(origin?.resolvedFrom).toBe("cwd");
+    expect(origin?.path).toBe(
+      path.resolve(empty, "scripts/dispatch-policy.json"),
+    );
+
+    // 回落语义未变(spec 验收 4):两个瞬时键仍为 null → 额度失败一律按
+    // exhausted 处理;maxRetries 仍是代码内置默认。本票只加可观测性。
+    expect(policy.rateLimit.transientBackoffSeconds).toBeNull();
+    expect(policy.rateLimit.transientEscalationLimit).toBeNull();
+    expect(policy.retry.maxRetries).toBe(DEFAULT_RETRY_POLICY.maxRetries);
+  });
+
+  it("JSON 坏掉也算读不到:不能因为文件存在就报 file", () => {
+    // 「文件在不在」和「读到了没有」是两回事 —— 判据必须是解析成功,
+    // 否则一个坏 JSON 会让端点报着 file、跑着默认值,比没有这个字段更误导。
+    const file = path.join(
+      mkdtempSync(path.join(tmpdir(), "coagenthub-badpolicy-")),
+      "dispatch-policy.json",
+    );
+    writeFileSync(file, "{ 这不是 JSON");
+    process.env[policyFileEnv] = file;
+
+    const policy = readDispatchPolicy();
+
+    expect(getDispatchPolicyOrigin()?.source).toBe("builtin-default");
+    expect(policy.retry.maxRetries).toBe(DEFAULT_RETRY_POLICY.maxRetries);
   });
 });

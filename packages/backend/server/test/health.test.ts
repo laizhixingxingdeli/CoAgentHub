@@ -127,6 +127,49 @@ describe("GET /api/system/health", () => {
     expect(body.staleReason).toBeNull();
   });
 
+  it("/api/health 透出调度策略的当前生效值与来源(可观测,不夹带无关配置)", async () => {
+    const res = await app.request("/api/health");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      // 既有字段:新增 dispatchPolicy 是同级追加,不改这些的形状。
+      stale: boolean;
+      dispatchPolicy: {
+        origin: {
+          source: "file" | "builtin-default";
+          path: string;
+          resolvedFrom: "env" | "cwd";
+        } | null;
+        effective: Record<string, unknown>;
+      };
+    };
+
+    // 既有消费方(前端 requirement-workspace 读 stale/staleReason)不受影响。
+    expect(typeof body.stale).toBe("boolean");
+
+    // 来源三要素齐全 —— 排障要的正是「用的哪个文件 / 还是兜底」。
+    const origin = body.dispatchPolicy.origin;
+    expect(origin).not.toBeNull();
+    expect(["file", "builtin-default"]).toContain(origin?.source);
+    expect(["env", "cwd"]).toContain(origin?.resolvedFrom);
+    expect(typeof origin?.path).toBe("string");
+
+    // 当前生效值:maxRetries 是本票的起因(配了 3 却只重试 1 次,查不到为什么)。
+    const effective = body.dispatchPolicy.effective as {
+      retry: { maxRetries: number };
+      maxParallelGroups: number;
+    };
+    expect(typeof effective.retry.maxRetries).toBe("number");
+    expect(typeof effective.maxParallelGroups).toBe("number");
+
+    // 不夹带无关配置:只有 origin / effective 两个键,且 effective 里不出现
+    // 任何 env 名或路径 —— 这个端点无鉴权,加什么都要有理由。
+    expect(Object.keys(body.dispatchPolicy).sort()).toEqual([
+      "effective",
+      "origin",
+    ]);
+    expect(JSON.stringify(effective)).not.toMatch(/COAGENTHUB_|process\.env/);
+  });
+
   it("/api/health 按 staleReason 区分 build 陈旧并输出 newestSourceMtime", async () => {
     const directory = mkdtempSync(join(tmpdir(), "coagenthub-health-"));
     const entry = join(directory, "server.mjs");

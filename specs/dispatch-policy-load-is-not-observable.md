@@ -1,8 +1,41 @@
 # Spec: 调度策略读没读到不可观测,静默回落让人以为配置生效了
 
-> **状态**: Frozen
+> **状态**: **Landed**(2026-09-11)
 > **版本**: 1.0
-> **日期**: 2026-09-08
+> **日期**: 2026-09-08(落地 2026-09-11)
+>
+> ## ✅ 2026-09-11 落地记录
+>
+> - **R1**:`readDispatchPolicy()` 解析成功打 `console.log` 记下绝对路径与
+>   路径来源;读不到打 **`console.warn`**(比正常读到更显眼,因为「跑在兜底
+>   默认上」通常是意外),文案里连带写出后果:`maxRetries=1`、瞬时退避未启用。
+>   **不报错、不阻断启动** —— 回落语义逐字未动。
+> - **R2**:`/api/health` 新增 `dispatchPolicy: { origin, effective }`。
+>   取值一律走 `state.ts` 的 live getter,**不在端点里重读文件** —— 重读报的是
+>   「文件里写了什么」,而这里要答的是「进程现在按什么在跑」;策略在 state.ts
+>   模块加载时读一次并缓存,cwd 变化或文件被改后两者就会不一致。
+> - **R3**:判据只在 `resolveDispatchPolicyFile()`,它现在返回
+>   `{ path, resolvedFrom }`;`readDispatchPolicy()` 据此记 `lastPolicyOrigin`,
+>   日志与端点都从 `getDispatchPolicyOrigin()` 取,没有第二处判定。
+> - **额外收紧(票面没写但有必要)**:判据是**解析成功**而非「文件存在」。
+>   一份坏 JSON 会走 catch 回落到默认值,若按「文件在不在」判,端点就会报着
+>   `file` 却跑着默认值 —— **比没有这个字段更误导**。已补用例覆盖。
+> - **未透出 `rateLimit.detectPatterns`**:它没有 live getter,且生效值是
+>   「文件里的 ∪ 代码内置默认」的并集,单看哪一边都不代表实际判据。理由写在
+>   `runtime-health.ts` 的注释里,要查它得另立一条。
+>
+> **验证**:`dispatch-policy.test.ts` 35 passed(新增 4 条:cwd 读到 / env
+> 覆盖 / 真造出读不到 / 坏 JSON);`health.test.ts` 8 passed(新增 1 条断端点
+> 形状与不夹带无关配置);受影响 6 个文件合跑 73 passed。
+> `turbo run check-types` 与 `biome check .` 均通过。
+>
+> 顺带留个证据:跑测试时打出的第一条告警是
+> `读不到 …\packages\backend\server\scripts\dispatch-policy.json(路径来自
+> process.cwd())` —— 正是 §1.1 表格里「从包目录起就读不到」那一行,
+> **现在它能被看见了**。
+>
+> ⚠️ **角色说明**:平台 server 未运行,下发通道不通,本票由检视者实现 ——
+> 角色合并,只有单层复核,缺少独立的 L2/L3。
 > **来源**: [restore-ci-green-and-resume-pushing.md](restore-ci-green-and-resume-pushing.md)
 > 的 L3 中,执行者在排查超时根因时**顺带发现**并列入「还差什么」清单第 5 条;
 > 检视者复核后认为成立、值得独立成票。

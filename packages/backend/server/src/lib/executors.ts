@@ -691,12 +691,50 @@ export const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
   transientEscalationLimit: null,
 };
 
-/** 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。 */
-function resolveDispatchPolicyFile(): string {
-  return (
-    process.env.COAGENTHUB_DISPATCH_POLICY_FILE ??
-    resolve(process.cwd(), "scripts/dispatch-policy.json")
-  );
+/** 策略从哪来。`resolvedFrom` 是**路径怎么定的**,`source` 是**最终用了谁**。 */
+export interface DispatchPolicyOrigin {
+  /** file = 读到了那个文件;builtin-default = 读不到,用了兜底默认。 */
+  source: "file" | "builtin-default";
+  /** 尝试读取的绝对路径(无论成功与否都记,读不到时正是它最有用)。 */
+  path: string;
+  /** env = COAGENTHUB_DISPATCH_POLICY_FILE 覆盖;cwd = 相对 process.cwd() 解析。 */
+  resolvedFrom: "env" | "cwd";
+}
+
+/**
+ * 策略文件路径:env COAGENTHUB_DISPATCH_POLICY_FILE 可覆盖(测试写临时文件)。
+ *
+ * ⚠️ **「策略从哪来」的判定只有这一处**(ADR-0009:同一事实只有一个判定
+ * 出处)。启动日志与 /api/health 都从 `getDispatchPolicyOrigin()` 取,
+ * 谁都不要再自己判一次 —— 各判各的迟早会分叉,而这套东西存在的意义恰恰
+ * 是「让人能信任它报的来源」。
+ */
+function resolveDispatchPolicyFile(): Pick<
+  DispatchPolicyOrigin,
+  "path" | "resolvedFrom"
+> {
+  const override = process.env.COAGENTHUB_DISPATCH_POLICY_FILE;
+  if (override) return { path: override, resolvedFrom: "env" };
+  return {
+    path: resolve(process.cwd(), "scripts/dispatch-policy.json"),
+    resolvedFrom: "cwd",
+  };
+}
+
+/**
+ * 最近一次 `readDispatchPolicy()` 的解析结果。
+ *
+ * 生产上 `readDispatchPolicy()` 只在 state.ts 模块加载时调一次(另一处调用在
+ * 测试用的 reset 里),所以「最近一次」== 「当前生效的那次」。
+ */
+let lastPolicyOrigin: DispatchPolicyOrigin | null = null;
+
+/**
+ * 当前策略的来源。返回 null = `readDispatchPolicy()` 还没被调用过
+ * (理论上只发生在 state.ts 加载之前)。
+ */
+export function getDispatchPolicyOrigin(): DispatchPolicyOrigin | null {
+  return lastPolicyOrigin;
 }
 
 /** 数值字段解析:正整数才生效,否则用给定默认值。 */
@@ -749,10 +787,9 @@ function mergeRateLimitPatterns(raw: unknown): string[] {
  * 版本化,缺失/损坏/数值非法时回退默认值(不因配置问题阻塞启动)。
  */
 export function readDispatchPolicy(): DispatchPolicy {
+  const where = resolveDispatchPolicyFile();
   try {
-    const raw = JSON.parse(
-      readFileSync(resolveDispatchPolicyFile(), "utf8"),
-    ) as {
+    const raw = JSON.parse(readFileSync(where.path, "utf8")) as {
       maxParallelGroups?: unknown;
       maxConcurrentPerWorkspace?: unknown;
       stallAlertMinutes?: unknown;
@@ -774,6 +811,11 @@ export function readDispatchPolicy(): DispatchPolicy {
         transientEscalationLimit?: unknown;
       };
     };
+    // 解析成功才算「读到了」:JSON 坏掉会走下面的 catch,记成兜底。
+    lastPolicyOrigin = { source: "file", ...where };
+    console.log(
+      `[dispatch-policy] 已读取 ${where.path}(路径来自 ${where.resolvedFrom === "env" ? "COAGENTHUB_DISPATCH_POLICY_FILE" : "process.cwd()"})`,
+    );
     const rawPatterns = mergeRateLimitPatterns(raw.rateLimit?.detectPatterns);
     const rawFallback = raw.rateLimit?.fallbackExecutor;
     return {
@@ -844,8 +886,16 @@ export function readDispatchPolicy(): DispatchPolicy {
       },
     };
   } catch {
-    // 文件缺失/不可读/非 JSON → 默认。
+    // 文件缺失/不可读/非 JSON → 默认。**不报错、不阻断启动** —— 回落是有意的
+    // fail-safe 设计(两个 transient 键为 null → 额度失败一律按 exhausted)。
+    // 但它得**看得见**:用 warn 而不是 log,因为「跑在兜底默认上」通常是意外
+    // (最常见的就是 cwd 不对),而不是有人主动选的。
+    console.warn(
+      `[dispatch-policy] ⚠️ 读不到 ${where.path}(路径来自 ${where.resolvedFrom === "env" ? "COAGENTHUB_DISPATCH_POLICY_FILE" : "process.cwd()"}),改用兜底默认策略。` +
+        ` 注意 maxRetries=${DEFAULT_RETRY_POLICY.maxRetries},且瞬时退避未启用(额度失败一律按 exhausted)。`,
+    );
   }
+  lastPolicyOrigin = { source: "builtin-default", ...where };
   return {
     maxParallelGroups: DEFAULT_MAX_PARALLEL_GROUPS,
     maxConcurrentPerWorkspace: DEFAULT_MAX_CONCURRENT_PER_WORKSPACE,
