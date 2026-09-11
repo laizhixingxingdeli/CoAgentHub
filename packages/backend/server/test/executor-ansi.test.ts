@@ -1,4 +1,4 @@
-import { createAnsiStripper, stripAnsi } from "@server/lib/executor-task";
+import { createAnsiStripper, stripAnsi } from "../src/lib/executor-task/ansi";
 import { describe, expect, it } from "vitest";
 
 /**
