@@ -11,7 +11,11 @@
  *    与桥的行为一致,子进程及孙进程一并终止)。
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import {
+  type ChildProcess,
+  type SpawnOptions,
+  spawn,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -172,6 +176,47 @@ export interface ExecutorRunHandle {
 }
 
 /**
+ * runExecutor 的 spawn 选项(按平台分叉)。
+ *
+ * - POSIX:`detached: true` 建独立进程组,停止时 `process.kill(-pid)` 可整组终止。
+ * - Windows:POSIX 进程组不存在,负 pid kill 必抛再落 `child.kill()`;再挂
+ *   `detached` 只会让子进程拿自己的控制台(空窗口),是净亏。实测
+ *   (`detached`+`windowsHide` 仍会拉起 OpenConsole/WindowsTerminal 标签;
+ *   仅 `windowsHide` 无 `detached` 才不弹窗),故 Windows 去掉 detached、
+ *   改 `windowsHide: true`。kill 路径本身不动。
+ */
+export function buildExecutorSpawnOptions(input: {
+  cwd: string;
+  useStdin: boolean;
+  env?: Record<string, string>;
+  platform?: NodeJS.Platform;
+}): SpawnOptions {
+  const platform = input.platform ?? process.platform;
+  const stdio: SpawnOptions["stdio"] = [
+    input.useStdin ? "pipe" : "ignore",
+    "pipe",
+    "pipe",
+  ];
+  const envSpread = input.env
+    ? { env: { ...process.env, ...input.env } }
+    : {};
+  if (platform === "win32") {
+    return {
+      cwd: input.cwd,
+      windowsHide: true,
+      stdio,
+      ...envSpread,
+    };
+  }
+  return {
+    cwd: input.cwd,
+    detached: true,
+    stdio,
+    ...envSpread,
+  };
+}
+
+/**
  * 启动执行器:spawn + 流式收集 stdout/stderr + 超时 kill。
  * 失败(spawn 抛错,如 bin 不存在)时 promise reject,由调用方回传 failed。
  */
@@ -188,14 +233,17 @@ export function runExecutor(opts: ExecutorRunOptions): ExecutorRunHandle {
 
   let child: ChildProcess;
   try {
-    // detached:独立进程组,停止时 process.kill(-pid, SIGTERM) 可整体终止。
     // env/stdin 只由 resolveExecutorCliSpawn 决定是否传入(单一消费入口的下游)。
-    child = spawn(launcher.bin, launcher.args, {
-      cwd,
-      detached: true,
-      stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
-      ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
-    });
+    // spawn 选项见 buildExecutorSpawnOptions(Windows 去 detached + windowsHide)。
+    child = spawn(
+      launcher.bin,
+      launcher.args,
+      buildExecutorSpawnOptions({
+        cwd,
+        useStdin,
+        env: opts.env,
+      }),
+    );
     if (useStdin && child.stdin) {
       child.stdin.end(stdinPayload);
     }
