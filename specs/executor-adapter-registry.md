@@ -1,6 +1,63 @@
 # Spec: 执行器适配器注册表——三处 key 分支收敛为一次查表
 
-> **状态**: Frozen — 2026-09-02
+> **状态**: **Landed**(2026-09-11,实现 `248999b2`)
+>
+> ## ✅ L3 收口记录(检视者独立复核)
+>
+> 链路:检视者复核前提 → 协调者 `pi` 出计划下发 → 执行器 `codebuddy` 实现
+> → L2 → L3。任务 `01a08f02` / `01a08f05` / `01a08f13`,全部 done。
+>
+> ### 下发前复核:前提仍然成立,且漂移又发生了一次
+>
+> 票面 §2 列的三处分支**全在**(行号已漂,按内容定位):
+> `output-parser.ts:1301` switch、`token-usage.ts:539` if-else 链、
+> `queue.ts:2557` 三元链。
+>
+> ⚠️ 第三处用的是 `ex.key` 而不是 `executorKey`,按 `executorKey` 搜会漏掉
+>(检视者自己第一次就漏了)。已写进下发消息。
+>
+> **新证据**:`pi` 是本 spec 冻结之后才加进 `output-parser` 那个 switch 的,
+> 而 token-usage 与 queue.ts 两处没跟上 —— 现在 pi 有专用 parser、却走通用
+> token 采集和通用 finalText。**票面 §2 预言的分叉,在等待下发的九天里又
+> 发生了一次。**
+>
+> ### 复核结论:通过
+>
+> **逐 key 核对映射,全部一一对应,覆盖集逐字保持(含那些不一致)**:
+>
+> | key | 重构前 | adapters/ |
+> |---|---|---|
+> | codex | parser + token + finalText | 三项同名同函数 |
+> | codebuddy | parser + token + finalText | 三项同名同函数 |
+> | atomcode | 仅 parser | 仅 parser |
+> | executor | parser + token | parser + token |
+> | claude | 仅 token | 仅 token |
+> | pi | 仅 parser | 仅 parser |
+>
+> 「不要顺手补齐覆盖集」那条守住了 —— 没给 pi 加专用 token 采集。
+>
+> **未知 key 兜底保留**:`adapterFor` 未命中返回 `{}`,三个方法全落缺省通用
+> 实现,不抛错(spec R2)。
+>
+> **检视者独立复跑**:`output-parser.test.ts` + `token-usage.test.ts`
+> **132 passed**(与执行者自述一致);`tsc --noEmit` exit 0。
+> 同批 `executor-report-quota.test.ts` 4 红是本机既有失败(ENOENT ticket.md,
+> 12 处签名与本会话早先 A/B 确认过的一致),与本票无关。
+>
+> ### 两处遗留(不影响验收,记给后续)
+>
+> 1. **`observeUnknownExecutorKey` 的触发点从 1 处变成 3 处**。它是模块级
+>    `Set` 全局按 key 去重,所以净效果不变(每个未知 key 终生一条警告);
+>    但文案写的是 "falling back to generic heuristic parser",从 token 采集
+>    路径触发时措辞不贴。
+> 2. **`GENERIC_SCAN_TRUSTED_KEYS` 是第四处按 key 分派**,留在 token-usage.ts
+>    里没进注册表。票面 §2 只列了三处,§5 也没提它,**执行者照票做对了**;
+>    但票面目标「新增一家 = 新增一个文件 + 此处一行」对一个需要 `trusted`
+>    的新执行器并不完全成立 —— 它仍要改第二个地方。要收得另立票。
+> 3. `plans/executor-adapter-registry.md` 又留成了未跟踪(与上一票同样的
+>    疏漏),已由检视者一并提交。
+>
+> **原状态**: Frozen — 2026-09-02
 > **版本**: 1.0
 > **ADR**: [ADR-0008](../docs/adr/0008-executor-adaptation-config-over-code.md)
 > **取代**: [executor-output-profile.md](executor-output-profile.md)(画像方案,暂缓)
