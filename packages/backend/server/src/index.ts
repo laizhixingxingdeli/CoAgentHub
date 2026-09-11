@@ -7,14 +7,11 @@ import "zod-openapi/extend";
 
 import type { Server as HttpServer } from "node:http";
 import { sentry } from "@hono/sentry";
-import BizError from "@laizhixingxingdeli/error/biz";
-
 import { Scalar } from "@scalar/hono-api-reference";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { showRoutes } from "hono/dev";
 import { requestId } from "hono/request-id";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { openAPISpecs } from "hono-openapi";
 import { v7 as uuidv7 } from "uuid";
 import type { Logger } from "winston";
@@ -31,6 +28,7 @@ import { startL3OverdueReminder } from "./lib/l3-overdue-reminder";
 import { assertNoPendingMigrations } from "./lib/migration-health";
 import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
 import { getLogger } from "./lib/plugins/winston";
+import { createOnError } from "./lib/on-error";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
 import { startServer } from "./lib/server-startup";
 import { acquireSingleServerLock } from "./lib/single-server-lock";
@@ -57,37 +55,11 @@ declare module "hono" {
 const app = new Hono().basePath("/api");
 
 /* ---------- error handling ---------- */
-// 统一错误出口:BizError → 业务码;其余 → 500。一律经 winston 记录(含
-// requestId,便于关联请求日志),响应体带 requestId 便于客户端定位。
+// 统一错误出口,实现见 lib/on-error.ts(specs/json-body-parse-failure-returns-500.md):
+// BizError → 业务码;HTTPException < 500(如 body 解析失败)→ err.status 且 warn;
+// 其余 → 500。一律经 winston 记录(含 requestId),响应体带 requestId 便于定位。
 const errorLog = getLogger("server");
-app.onError((err, c) => {
-  const requestIdValue = c.get("requestId");
-  if (err instanceof BizError) {
-    errorLog.warn("request failed (biz error)", {
-      requestId: requestIdValue,
-      code: err.code,
-      status: err.statusCode,
-      message: err.message,
-      method: c.req.method,
-      path: c.req.path,
-    });
-    return c.json(
-      { code: err.code, message: err.message, requestId: requestIdValue },
-      err.statusCode as ContentfulStatusCode,
-    );
-  }
-  errorLog.error("request failed (internal error)", {
-    requestId: requestIdValue,
-    method: c.req.method,
-    path: c.req.path,
-    error: err instanceof Error ? err.message : String(err),
-    stack: err instanceof Error ? err.stack : undefined,
-  });
-  return c.json(
-    { message: "Internal Server Error", requestId: requestIdValue },
-    500,
-  );
-});
+app.onError(createOnError(errorLog));
 
 /* ---------- global middleware ---------- */
 app.use(

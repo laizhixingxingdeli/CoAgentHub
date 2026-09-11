@@ -1,6 +1,5 @@
-import BizError from "@laizhixingxingdeli/error/biz";
 import { Hono } from "hono";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { createOnError } from "../src/lib/on-error";
 import executorRouter from "../src/routes/executor";
 import fileRouter from "../src/routes/file";
 import groupRouter from "../src/routes/group";
@@ -18,16 +17,15 @@ import systemRouter from "../src/routes/system";
 export function createTestApp() {
   const app = new Hono().basePath("/api");
 
-  // Mirror index.ts error handling: BizError maps to its status code + code.
-  app.onError((err, c) => {
-    if (err instanceof BizError) {
-      return c.json(
-        { code: err.code, message: err.message },
-        err.statusCode as ContentfulStatusCode,
-      );
-    }
-    return c.json({ message: "Internal Server Error" }, 500);
-  });
+  // 与 index.ts 共用同一 onError 实现(lib/on-error.ts),杜绝镜像漂移。
+  // 测试夹具不打日志(生产经 winston)——日志级别契约由
+  // json-body-parse-failure.test.ts 用 spy logger 对同一实现直接断言;
+  // 测试未挂 hono/request-id 中间件,响应体不带 requestId(与既有形状一致)。
+  const silentLogger = {
+    warn: () => undefined,
+    error: () => undefined,
+  };
+  app.onError(createOnError(silentLogger));
 
   return (
     app
