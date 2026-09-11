@@ -1,8 +1,62 @@
 # Spec: 按真实依赖给测试分类 + 解开 barrel 耦合(T1,不动 setup)
 
-> **状态**: Frozen
+> **状态**: **Landed**(2026-09-11,实现 `4ef2cc6b`)
 > **版本**: 1.0
 > **日期**: 2026-09-11
+>
+> ## ✅ L3 收口记录(检视者独立复核)
+>
+> ### 结论先说:本票的**可量化收益接近零**,这是个诚实的负结果
+>
+> 14 个 `@server/lib/executor-task` barrel 导入者逐个查完,**只有 1 个可以解耦**
+>(`executor-ansi.test.ts`)。其余 13 个都有具体理由:
+>
+> - **非纯逻辑测试**(已因 app/DB 拉起全图)→ 解耦无 collect 收益;
+> - **符号本身住在重模块 `queue.ts`** → 直引 `queue.ts` 与经 barrel 拉起的图
+>   一致,换汤不换药;
+> - **跨多子模块**(`output-parser.test.ts`)→ 同上。
+>
+> 票面写「barrel 解耦是本票唯一的量化收益来源」,现在这个来源被证明**比报告
+> 假设的小得多**。本票的真实价值在于分类清单(T2 的输入)与这个负结果本身 ——
+> 它说明 collectionOverhead 的 29.3% **几乎全部压在 `setup.ts` 上**(§1.2 的
+> 每文件建库 + 跑 32 个迁移),而不是散在各测试文件的 import 里。**T2 才是
+> 真正的杠杆。**
+>
+> ### 检视者抽查的四条,全部核实
+>
+> 1. `formatExecutorStartupFailure` / `spawnFailureHint` 确在 `queue.ts`
+>   (:374 / :399)—— 所以「纯逻辑测试但符号在重模块、解耦无用」成立。
+> 2. `ansi.ts` **零 import** —— 确是纯函数模块,那唯一一处解耦是对的。
+> 3. `liveStreamText` / `summaryStreamText` 确在 `queue.ts`(:1865 / :1885,
+>    经 `export { ... }` 导出,不是 `export function`,所以第一次 grep 没搜到)。
+> 4. **文件数对齐分毫不差**:server 87 + web 33 + callback-agent 5 + scripts 4
+>    = **129**,与 CI run `34571914641` 的 129 完全一致。CI 是全仓口径、本机
+>    清单是 server 单包 —— 解释成立,非漏分。
+>
+> ### 票面点名的那处没被无脑改
+>
+> `output-parser.test.ts` 是报告 §12.4 第 2 条特意警告的(「不能直接认定为纯
+> 解析测试」)。执行者查明它跨 output-parser + detail-store(写 FILE_DIR 临时
+> 文件)+ queue 流文本函数,**保留 barrel 并写明原因**。这正是要的判断力。
+>
+> ### 验收核对
+>
+> - **验收 5**:`test/setup.ts` / `test/db.ts` / `vitest.config.ts`
+>   `git diff --stat` **全空**,一行未改。
+> - **验收 4**:测试文件的改动**只有 `executor-ansi.test.ts` 的 1 行 import**,
+>   断言一字未动;复跑 9 passed。
+> - **验收 8**:给 T2 的结论表具体可用 —— **可去 DB fixture 13 个 /
+>   必须保留 60 个**,外加未确认若干(§7)。
+> - 未新增任何测试专用转发层。
+>
+> ### 一处清理(第三张票连续出现同类)
+>
+> 工作区留下 `.gen-doc3.py`(15 KB,执行器用来生成文档的一次性 Python 脚本,
+> 内含写死的绝对路径,文件名带 "3" 说明前面还有两版)。检视者已删除。
+>
+> 这是连续第三张票留下未跟踪的工作文件(`nul` → `.perf-runs/` →
+> `.gen-doc3.py`)。**下一张票的票面应当规定工作文件的去向** —— 这是三次
+> 重复出现的模式,不该每次都靠 L3 顺手收。
 > **来源**: `docs/implementation-optimization-review-2026-09-07.md` §12.4 **T1**
 > **前置**:[ci-per-file-timing.md](ci-per-file-timing.md) 已 Landed —— 靶子
 > 来自 CI 实测而非本机注水口径。
