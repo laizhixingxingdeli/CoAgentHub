@@ -1,8 +1,71 @@
 # Spec: 采集 CI 侧 per-file 计时 —— 把「同构」这个假设变成实测
 
-> **状态**: Frozen
+> **状态**: **Landed**(2026-09-11,实现 `fb053d35` 等)
 > **版本**: 1.0
 > **日期**: 2026-09-11
+>
+> ## ✅ L3 收口记录(检视者独立复核)
+>
+> ### 这张票达成了它的目的:假设被推翻了
+>
+> 本票存在的全部理由是「上一张票说 CI 与本机 per-file **同构**,那是假设不是
+> 实测」。实测结果:**部分成立 —— 阶段排序同构,量级不同构**。
+>
+> | | 本机子集 | CI 实测 |
+> |---|---|---|
+> | exec | 86.8% | **62.0%** |
+> | collectionOverhead | 8.6% | **29.3%** |
+> | teardown | 4.6% | **8.7%** |
+>
+> **collectionOverhead 在 CI 的占比是本机的 ~3.4 倍。** 上一张票推测「去掉注水
+> 后可能从 13% 变成主导项」—— 实测未到主导(exec 仍 62%),但**从 13% 翻到
+> 38%**,是体量远超本机认知的第二大桶。
+>
+> 执行者照票面 R3 的授权**改掉了上一张票的措辞**(§R2 那句「差异仅在本机红
+> 文件的注水一项」已就地修正),没有为维护前票而修饰数据。
+>
+> ### T1 的结论:不是「收益有限」
+>
+> §R6.3 给出可执行靶子:`executor-queue`(CI 上 134s = wall 的 21.3%,即便
+> 在 Linux 上绿也仍是最耗时文件)+ collectionOverhead(29.3%,185s,主要是
+> **每文件×文件数的 PGlite 实例创建**)—— 两项覆盖约 **50% wall** 的可回收
+> 空间,且都指向结构性改造而非逐用例硬抠。
+>
+> 报告里那句话值得留:**「若按本机『collection 仅 8.6%』去排 T1,会系统性
+> 低估 collection 改造的收益」** —— 这正是把这张票排在 T1 之前的理由,事后
+> 被数据证实。
+>
+> ### 检视者独立核实
+>
+> - **run `34571914641` 真实存在**:workflow「Test Perf Timing (per-file)」,
+>   conclusion **success**,artifact `ci-perf-34571914641`(109 804 B)可下载。
+>   不是照着本机数推的。
+> - **验收 1**:`test-perf-timing.yml` 只有 `workflow_dispatch`,无
+>   `push`/`pull_request`,注释里也写明了为什么。
+> - **验收 2 / 8**:`test-suite.yml`、`packages/backend/server/test`、
+>   `vitest.config.ts`、`scripts/test-baseline.mjs`、`package.json`
+>   —— `git diff --stat` **全空**。主验证回路一行未改。
+> - **`if: always()` 在**,该轮红绿数(129 文件全绿 / 1733 用例 0 红)已注明。
+>
+> ### 一处归因写错了(不影响结果)
+>
+> 提交 `9cf6599e` 的说明写「`.perf-runs` gitignored -> stage non-hidden copy」,
+> 把 artifact 上传失败归因于 gitignore。**归因是错的** —— `.gitignore` 对
+> `actions/upload-artifact` 毫无影响。真因是 **v4 默认排除隐藏文件**:检视者
+> 查了前一轮 run `34570640876` 的日志,里面明写 `include-hidden-files: false`,
+> 而 `.perf-runs` 以点开头。
+>
+> 绕法(复制成非隐藏目录 `perf-runs-out/`)**有效,数据已拿到**,所以不返工;
+> 但更干净的做法是 `include-hidden-files: true`。记在这里,免得下一个人去删
+> `.gitignore` 里的 `.perf-runs` 追一个不存在的原因。
+>
+> ### 附带说明:上一次尝试的失败与本票无关
+>
+> 任务 `01a08f26` 曾 failed,原因是检视者把本机 Postgres 注册成 Windows 服务时
+> 停了库,平台 server 的连接池收到 `57P01` 后未处理 `error` 事件、进程退出。
+> server 重启后孤儿收敛器自动判它 failed(`error=server-restart`)——**平台的
+> 恢复路径今晚第一次被真实触发,工作正常**。已用 `supersedesTaskId` 重发,
+> 票面一字未改、specHash 不变。
 > **来源**: [test-perf-baseline-ci-and-local.md](test-perf-baseline-ci-and-local.md)
 > 的 L3 —— 该票验收第 2 条只算**部分满足**,执行者已显式标注限制。
 > 本票专门补齐那一半。
