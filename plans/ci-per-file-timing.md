@@ -15,7 +15,8 @@
 | dispatchKind | `requirement`（完整档 L3） |
 | 更新 | 2026-09-11 |
 | 来源 | 上一张 test-perf-baseline L3 部分满足 → 本票补 CI per-file；阻塞 T1 |
-| 父协调任务 | `01a08f26-b195-7308-8273-3bc040846c59` |
+| 父协调任务 | `01a08f46-8e74-773e-980a-156fdd762667`（重发；supersedes `01a08f26` failed/server-restart） |
+| 前次 W1 | `01a08f29-4103-749c-b9a6-13fe052ae56c`（codebuddy）failed — 进程随 server-restart 消失；已落 workflow 两提交 + CI run 有 artifact |
 
 ## 先做哪一步、为什么
 
@@ -63,8 +64,11 @@
 | 测试文件清单 | 本票以 workflow + 文档 +（条件）计时脚本为主；**不要**为修红跑/改测试。若抽样「未改测试行为」：`node scripts/test-baseline.mjs` 单文件，失败数不增加；**禁止**根 `pnpm test` 全量（~24min 本机 / CI 另有独立计时 job）。 |
 | specRef | `specs/ci-per-file-timing.md` |
 | specHash | `2d61cfef3348dda8c3dda83c84b6736be8bdf44d` |
-| taskId | `01a08f29-4103-749c-b9a6-13fe052ae56c`（codebuddy） |
+| taskId | `01a08f49-71ff-75eb-9a2b-6083caca4ab3`（codebuddy；supersedes `01a08f29`） |
 | 状态 | dispatched |
+| 已落提交 | `8d62e00e` workflow；`9cf6599e` artifact 非隐藏拷贝 |
+| CI 实测 | run `34570640876` success + artifact `ci-perf-34570640876`；run `34571914641` 在途（fix 后） |
+| 缺口 | 基线报告 CI 四阶段/排名/同构结论/T1 结论尚未写入（docs 仍是假设口径） |
 
 ## 依赖图
 
