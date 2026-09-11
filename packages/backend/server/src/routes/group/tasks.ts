@@ -18,7 +18,11 @@ import {
   judgeTwoPartyDegradation,
   type TwoPartyDegradation,
 } from "@server/lib/executor-availability";
-import { findRepoRoot, gitExec } from "@server/lib/executor-runner";
+import {
+  findRepoRoot,
+  gitExec,
+  pathsReferToSameDir,
+} from "@server/lib/executor-runner";
 import {
   adjudicatedRecipientsOfTask,
   applyDiffSummaryPatch,
@@ -131,15 +135,31 @@ interface AlreadySatisfiedClaim {
   verification: string;
 }
 
-function coordinationCloseError(message: string): BizError {
+/**
+ * 结案拒绝文案。陈旧运行时提示只在「群绑定项目路径 = 平台自身仓库」时追加:
+ * runtime.stale 是进程全局状态,对其他项目的执行器是错误排查方向。
+ * 在 rejectCoordinationClose 入口查群路径,避免改 9 处调用点签名。
+ */
+function coordinationCloseError(
+  message: string,
+  groupProjectPath: string | null,
+): BizError {
   const runtime = getRuntimeStatus();
-  if (!runtime.stale) {
+  if (!runtime.stale || !isPlatformOwnProjectPath(groupProjectPath)) {
     return new BizError(BizCodeEnum.InvalidRequest, message);
   }
   return new BizError(
     BizCodeEnum.InvalidRequest,
     `${message} 注意:当前运行时为陈旧构建(staleReason: ${runtime.staleReason}),本次拒绝可能来自旧版守卫;若已在源码中修改结案规则,请在发起方重启后重试回写。`,
   );
+}
+
+/** 群 project_path 是否就是平台仓库根(findRepoRoot / COAGENTHUB_REPO_ROOT)。 */
+function isPlatformOwnProjectPath(
+  groupProjectPath: string | null | undefined,
+): boolean {
+  if (!groupProjectPath) return false;
+  return pathsReferToSameDir(groupProjectPath, findRepoRoot());
 }
 
 /**
@@ -152,7 +172,10 @@ async function rejectCoordinationClose(
   task: TaskRow,
   message: string,
 ): Promise<never> {
-  const err = coordinationCloseError(message);
+  const group = await db.query.groups.findFirst({
+    where: (g, { eq }) => eq(g.id, task.groupId),
+  });
+  const err = coordinationCloseError(message, group?.projectPath ?? null);
   if (!isTerminalTaskStatus(task.status)) {
     const streak = recordWritebackRejection(task.id, message);
     const limit = getWritebackRejectionLimit();

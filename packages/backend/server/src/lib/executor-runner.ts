@@ -42,6 +42,26 @@ export function findRepoRoot(): string {
 }
 
 /**
+ * 规范化目录路径后做全等比较(大小写、分隔符、尾斜杠)。
+ * 禁止用 includes 之类前缀判据 —— `C:\\repo` 不得误配 `C:\\repo-other`。
+ */
+export function pathsReferToSameDir(a: string, b: string): boolean {
+  return normalizeDirPathForCompare(a) === normalizeDirPathForCompare(b);
+}
+
+function normalizeDirPathForCompare(p: string): string {
+  // resolve 吃掉相对段与混用分隔符;再剥尾分隔符(根盘符如 C:\\ 保留)。
+  let n = resolve(p);
+  if (n.length > 1 && (n.endsWith("/") || n.endsWith("\\"))) {
+    n = n.replace(/[/\\]+$/, "");
+    // Windows 盘符根 resolve("C:/") → "C:\\",剥光后只剩 "C:" 时补回分隔符语义由 resolve 保证;
+    // 对普通目录剥尾即可。空串不应出现。
+    if (n.length === 0) n = resolve(p);
+  }
+  return process.platform === "win32" ? n.toLowerCase() : n;
+}
+
+/**
  * Windows 垫片解析(specs/windows-cmd-executor-spawn.md R1)。
  *
  * npm 安装的 CLI 在 Windows 上是 `.cmd` 垫片,而 Node 自 CVE-2024-27980 加固后
