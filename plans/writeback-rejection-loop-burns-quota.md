@@ -171,8 +171,8 @@ sameDirectory(a, b) =
 | 验收方法 | spec §4 全部 7 条；基线前后对照。 |
 | specRef | `specs/writeback-rejection-loop-burns-quota.md` |
 | specHash | `e4db4208662dd3fd08f86027b086f2db891a1ff4` |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | `01a0909f-a577-7364-9367-9083bd7e853b` |
+| 状态 | dispatched |
 | 执行器 | atomcode（实现+测试；票面测试执行器） |
 
 ## 依赖图
@@ -185,4 +185,4 @@ W1
 
 | 时间 | 动作 | taskId | 备注 |
 |---|---|---|---|
-| （派发后回填） | | | |
+| 2026-09-11T13:20+Z | 下发 W1 → atomcode | `01a0909f-a577-7364-9367-9083bd7e853b` | messageId `01a0909f-a55d-755a-94d1-8105d626277b`；parent `01a0909c`；specHash `e4db42…`；dispatchKind fix |
