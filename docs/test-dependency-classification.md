@@ -60,7 +60,7 @@
 | 24 | `e2e-acceptance.test.ts` | DB HTTP | DB: 经 app.request/appWs 驱动 Hono app -> 命中 mock @server/lib/database; HTTP: app.request/appWs 发 HTTP/WS | - | 必须 |
 | 25 | `exec-bin.test.ts` | Temp | Temp: mkdtemp/tmpdir/writeFileSync 建/写临时文件 | - | 可不要 |
 | 26 | `executor-a2a-reliability.test.ts` | DB HTTP Exec | DB: 经 app.request/appWs 驱动 Hono app -> 命中 mock @server/lib/database; HTTP: app.request/appWs 发 HTTP/WS; Exec: import executor-task 重子模块(非纯)或 executor-runner/executors/runtime-status 等重模块(别名或相对路径) | - | 必须 |
-| 27 | `executor-ansi.test.ts` | Pure | Pure: 仅 import 纯子模块(ansi/diff-summary/output-buffer/report/cooldown-store[type]/review-request-policy[type]/unknown-participant/exec-bin/executor-config-fields/group-visibility/token-usage/migration-health/schema 纯函数)或读源码 fixture; 无 db/git/http/temp 运行时依赖 | barrel | 可不要 |
+| 27 | `executor-ansi.test.ts` | Pure | Pure: 仅 import 纯子模块(ansi/diff-summary/output-buffer/report/cooldown-store[type]/review-request-policy[type]/unknown-participant/exec-bin/executor-config-fields/group-visibility/token-usage/migration-health/schema 纯函数)或读源码 fixture; 无 db/git/http/temp 运行时依赖 | 直引(L3 订正:已改为 ../src/lib/executor-task/ansi) | 可不要 |
 | 28 | `executor-api.test.ts` | DB Temp HTTP Exec | DB: 经 app.request/appWs 驱动 Hono app -> 命中 mock @server/lib/database; Temp: mkdtemp/tmpdir/writeFileSync 建/写临时文件; HTTP: app.request/appWs 发 HTTP/WS; Exec: import executor-task 重子模块(非纯)或 executor-runner/executors/runtime-status 等重模块(别名或相对路径) | - | 必须 |
 | 29 | `executor-config-fields.test.ts` | Temp Exec | Temp: mkdtemp/tmpdir/writeFileSync 建/写临时文件; Exec: import executor-task 重子模块(非纯)或 executor-runner/executors/runtime-status 等重模块(别名或相对路径) | - | 未确认 |
 | 30 | `executor-coordinator-workspace-gate.test.ts` | DB Git Temp HTTP Exec | DB: 经 app.request/appWs 驱动 Hono app -> 命中 mock @server/lib/database; Git: execFileSync/spawnSync 'git' 起真实 git 子进程; Temp: mkdtemp/tmpdir/writeFileSync 建/写临时文件; HTTP: app.request/appWs 发 HTTP/WS; Exec: import executor-task 重子模块(非纯)或 executor-runner/executors/runtime-status 等重模块(别名或相对路径) | - | 必须 |
@@ -124,7 +124,7 @@
 
 ## 5. barrel 调查细节 (executor-task 汇总入口)
 
-全部 `@server/lib/executor-task` 导入共 **14** 个文件(见 §4 barrel 列).唯一聚合 barrel 是 `executor-task/index.ts`;`@server/lib/database` 也是 barrel,但它是被 setup mock 的 DB,DB 测试必需,非本票解耦对象.其余 `@server/lib/*` 均为单文件模块,导入即直引,无需处理.
+全部 `@server/lib/executor-task` 导入共 **13** 个文件(见 §4 barrel 列;此数经 L3 订正,原写 14).唯一聚合 barrel 是 `executor-task/index.ts`;`@server/lib/database` 也是 barrel,但它是被 setup mock 的 DB,DB 测试必需,非本票解耦对象.其余 `@server/lib/*` 均为单文件模块,导入即直引,无需处理.
 
 | 文件 | 从 barrel 导入的符号 | 决定 | 理由 |
 |---|---|---|---|
@@ -142,7 +142,7 @@
 | `output-parser.test.ts` | appendTaskDetail, createExecutorOutputParser, getCodexSkippedEventCounts, getGenericSkippedEventCounts, liveStreamText, readTaskDetail, resetCodexSkippedEventCounts, resetGenericSkippedEventCounts, summaryStreamText, taskDetailFilePath (type: OutputEntry) | 保留 | **spec 点名,勿无脑改**.覆盖 output-parser + detail-store(写 FILE_DIR 临时文件) + queue 流文本函数(liveStreamText/summaryStreamText 来自 queue 重子模块),跨多子模块;queue 依赖是重模块,直引仍拉重图,解耦无 collect 收益.保留 barrel,原因写进清单. |
 | `ticket-template.test.ts` | buildTicket, loadTicketTemplate, resolveTicketTemplatesDir | 保留 | Temp 测试(import mkdtemp/tmpdir),非纯逻辑;符号来自 executor-task 重子模块(经模板模块抵达 PGlite).保留 barrel. |
 
-**解耦结论**: 仅 `executor-ansi.test.ts` 由 barrel 改为直引 `../src/lib/executor-task/ansi`(纯子模块,且文件本身无其它重依赖,是唯一有 collect/transform 收益的解耦).其余 13 个保留 barrel,原因如上:要么是非纯逻辑测试(解耦无收益),要么符号来自重子模块 queue(直引仍拉重图),要么跨多子模块(output-parser).未新增任何测试专用转发层/re-export,保持生产导出面不变.
+**解耦结论**: 仅 `executor-ansi.test.ts` 由 barrel 改为直引 `../src/lib/executor-task/ansi`(纯子模块,且文件本身无其它重依赖,是唯一有 collect/transform 收益的解耦).其余 12 个保留 barrel,原因如上:要么是非纯逻辑测试(解耦无收益),要么符号来自重子模块 queue(直引仍拉重图),要么跨多子模块(output-parser).未新增任何测试专用转发层/re-export,保持生产导出面不变.
 
 ## 6. 混合文件 (spec R3)
 
