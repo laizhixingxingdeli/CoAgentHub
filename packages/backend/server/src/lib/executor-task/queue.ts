@@ -3243,7 +3243,7 @@ function isTransientQuota(verdict: QuotaFailureVerdict): boolean {
 /**
  * 瞬时限流的 per-run 退避处置(spec R2):供应方只要求短暂退避,执行器没坏,
  * 因此**不调 enterCooldown**(`isInCooldown` 保持「额度耗尽」单一语义,R2 豁免
- * 判据 isQueuedChildExecutorDispatchable 因此不必改动),任务也不判 failed ——
+ * 判据 mayQueuedChildExecutorStart 因此不必改动),任务也不判 failed ——
  * 回写 queued 并重新入队,退避窗口过后由定时器泵送自动重试(不消耗重试次数)。
  *
  * 连续瞬时限流达上限 → 升级为 exhausted 处理(防退避死循环);配置不可用

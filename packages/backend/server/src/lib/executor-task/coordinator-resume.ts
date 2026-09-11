@@ -27,7 +27,7 @@ import {
   isCoordinatorTask,
   isExecutorProcessAlive,
 } from "./queue";
-import { isInCooldown, runningExecutorCount } from "./state";
+import { isInCooldown } from "./state";
 import type { GroupPromptInfo } from "./types";
 
 type Task = typeof taskTable.$inferSelect;
@@ -53,11 +53,13 @@ const NON_TERMINAL_TASK_STATUSES = ["queued", "running"] as const;
  * 父任务名下是否存在「当前构成孤儿收敛豁免」的执行子任务(R2,
  * specs/executor-availability-visibility-and-queued-child-pinning.md):
  *  - running 子任务 → 豁免(子任务仍在干活,本机制存在的理由,逐字不变);
- *  - queued 且从未启动(executor_pid 必为空)的子任务 → 仅当其执行器当前可派发
- *    (不在额度冷却且未达并发上限,复用 isInCooldown / runningExecutorCount /
- *    maxConcurrency,与 pumpQueue 的 isRunDispatchable 前两条同口径)才豁免 ——
- *    否则排队子任务并不在干活,不构成豁免,父协调者按普通孤儿收敛处理。
- * 协调者根任务派完子任务退出后,只要还有「在跑或马上会启动」的子任务就不应被
+ *  - queued 且从未启动(executor_pid 必为空)的子任务 → 仅当其执行器「仍可能启动」
+ *    才豁免(mayQueuedChildExecutorStart):
+ *      · executorKey 缺失 / 查无配置 → 终局,永远启不了 → 不豁免;
+ *      · 并发已满 → 临时(占槽任务终会终态,子树有进展) → 豁免;
+ *      · 额度冷却 → 虽有 ETA、终会解除,但冷却期内子树无进展(最长 300 分钟),
+ *        与「并发已满=别的任务在推进」不同 → 不豁免。
+ * 协调者根任务派完子任务退出后,只要还有「在跑或仍可能启动」的子任务就不应被
  * 孤儿收敛判死,等子任务终态触发续跑。
  */
 export async function hasExemptingChildTask(
@@ -73,7 +75,7 @@ export async function hasExemptingChildTask(
   });
   for (const child of rows) {
     if (child.status === "running") return true;
-    if (await isQueuedChildExecutorDispatchable(db, child.executorKey)) {
+    if (await mayQueuedChildExecutorStart(db, child.executorKey)) {
       return true;
     }
   }
@@ -81,12 +83,17 @@ export async function hasExemptingChildTask(
 }
 
 /**
- * queued 子任务的执行器当前是否可派发:不在额度冷却且未达并发上限
- * (复用 isInCooldown / runningExecutorCount / 执行器声明的 maxConcurrency,
- * 与 pumpQueue 的 isRunDispatchable 前两条同口径,不另写一套可用性判定)。
- * executorKey 缺失或查无配置 → 不可派发(该子任务永远无法启动,不构成豁免)。
+ * queued 子任务的执行器是否「仍可能启动」(孤儿收敛豁免用,不是 pump 的
+ * 「当前可派发」)。终局不可启动 → false;仅临时占槽(并发已满) → true。
+ *  - ① executorKey 缺失 → false(永远启不了)
+ *  - ② 查无执行器配置 → false(永远启不了)
+ *  - ③ 额度冷却 → false:冷却有 ETA 且终会解除,但冷却期内没有任何任务在为
+ *    本子树腾挪(与 ④ 不同);把父协调者钉住最长 300 分钟且无进展/无告警,不如
+ *    收敛后由上层重派。isInCooldown 口径与 pump 同源,不另写一套。
+ *  - ④ 并发已满 → true:占槽的是别的 running 任务,它们终态后本子任务就会
+ *    被 pump 拉起,子树是有进展的,不得因此把已正常退出的父协调者判死。
  */
-async function isQueuedChildExecutorDispatchable(
+async function mayQueuedChildExecutorStart(
   db: DataBase,
   executorKey: string | null,
 ): Promise<boolean> {
@@ -94,8 +101,6 @@ async function isQueuedChildExecutorDispatchable(
   const ex = await findExecutorByKey(db, executorKey);
   if (!ex) return false;
   if (isInCooldown(ex)) return false;
-  const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
-  if (runningExecutorCount(ex.key) >= cap) return false;
   return true;
 }
 

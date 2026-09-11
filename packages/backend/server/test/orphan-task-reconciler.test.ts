@@ -577,8 +577,73 @@ describe("孤儿任务周期收敛", () => {
       Date.now() + 60_000,
     );
 
-    // 排队子任务不在干活且执行器不可派发 → 不构成豁免,父协调者按普通孤儿
-    // 收敛处理(pid 已消失 → 判死并留痕);子任务不被连带改状态,仍 queued。
+    // 排队子任务不在干活且执行器冷却中(子树无进展) → 不构成豁免,父协调者
+    // 按普通孤儿收敛处理(pid 已消失 → 判死并留痕);子任务不被连带改状态,
+    // 仍 queued。
+    expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
+    const parentRow = await findTask(parent.id);
+    expect(parentRow?.status).toBe("failed");
+    const summary = parentRow?.diffSummary as Record<string, unknown>;
+    expect(summary.reconciledReason).toBe(
+      `executor pid ${parent.executorPid} no longer exists`,
+    );
+    expect((await findTask(child.id))?.status).toBe("queued");
+  });
+
+  it("queued 子任务执行器并发已满 → 仍豁免:父协调者不判死(临时占槽,子树有进展)", async () => {
+    const { groupQueues } = await import("../src/lib/executor-task/state");
+    const coordinator = await registerParticipant({ name: "orc-sat-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-queued并发已满");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-sat-b" });
+    // seed 的 executor 行 maxConcurrency=1;往内存组队列塞 1 个 running 占位
+    // 即饱和。占位仅带 runningExecutorCount 所需字段(测试假体)。
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      executorKey: "executor",
+      parentTaskId: parent.id,
+      status: "queued",
+      executorPid: null,
+    });
+    groupQueues.set("__orc-sat__", {
+      key: "__orc-sat__",
+      queue: [],
+      running: [{ ex: { key: "executor" } }] as unknown as never[],
+    });
+    try {
+      // 并发已满是临时:占槽任务终态后本子任务会启动 → 父协调者仍豁免。
+      expect(await reconcileOrphanTasks(orphanDb)).toBe(0);
+      expect((await findTask(parent.id))?.status).toBe("running");
+      expect((await findTask(child.id))?.status).toBe("queued");
+    } finally {
+      groupQueues.delete("__orc-sat__");
+    }
+  });
+
+  it("queued 子任务执行器查无配置 → 不豁免:父协调者收敛为 failed(终局启不了)", async () => {
+    const coordinator = await registerParticipant({ name: "orc-miss-a" });
+    const group = await createGroup(coordinator.id, "孤儿收敛-queued查无配置");
+    const parent = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: coordinator.id,
+      executorPid: deadPid(),
+    });
+    const executor = await registerParticipant({ name: "orc-miss-b" });
+    const child = await insertTaskRow({
+      groupId: group.id,
+      executorParticipantId: executor.id,
+      executorKey: "no-such-executor-key",
+      parentTaskId: parent.id,
+      status: "queued",
+      executorPid: null,
+    });
+
+    // 查无配置 = 终局,子任务永远启不了 → 不构成豁免,父协调者判死。
     expect(await reconcileOrphanTasks(orphanDb)).toBe(1);
     const parentRow = await findTask(parent.id);
     expect(parentRow?.status).toBe("failed");

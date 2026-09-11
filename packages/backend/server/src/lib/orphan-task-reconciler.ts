@@ -84,12 +84,13 @@ export async function reconcileOrphanTasks(
     if (isExecutorProcessAlive(task.executorPid)) continue;
     // R1(本 spec):等待续跑的协调者任务豁免收敛 —— 执行方是协调者
     // (isCoordinatorTask 同源判定)且名下存在构成豁免的执行子任务
-    // (hasExemptingChildTask,R2 口径:running,或 queued 且其执行器当前可派发;
+    // (hasExemptingChildTask,R2 口径:running,或 queued 且其执行器仍可能启动;
     // 候选状态集与 coordinator-resume 的 NON_TERMINAL_TASK_STATUSES 同源)时,
     // pid 消失不判死,等子任务终态触发续跑。R2 收缩:queued 且从未启动
-    // (executor_pid 为空)、执行器不可派发(冷却中 / 并发已满 / 查无配置)的
-    // 子任务并不在干活,不构成豁免 —— 否则已死的协调者链会被「排队等冷却
-    // (最长 300 分钟)」的子任务无限期钉住,整棵子树无进展也无告警。
+    // (executor_pid 为空)、执行器终局不可启动(key 缺失 / 查无配置)或额度冷却
+    // 中的子任务不构成豁免 —— 否则已死的协调者链会被「排队等冷却(最长 300
+    // 分钟)」的子任务无限期钉住,整棵子树无进展也无告警。并发已满是临时占槽
+    // (别的 running 任务终态后会腾出),子树有进展,仍构成豁免。
     // 本 spec 的必经竞态窗口——子任务刚转终态而续跑尚未创建——由
     // hasPendingResumeEvent 兜住:完成事件与终态同事务落库,pending 事件 =
     // 消费方下一个周期就会创建续跑,期间父任务同样不判死。
