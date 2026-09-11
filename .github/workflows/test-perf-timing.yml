@@ -1,0 +1,143 @@
+name: Test Perf Timing (per-file)
+
+# 独立采集路径 —— 仅手动触发,不挂 push / pull_request。
+# 目的:在 CI(Linux)上跑一套与本机同口径(--no-file-parallelism + 同一自定义
+# reporter)的全量 per-file 四阶段计时,作为 artifact 上传,供
+# specs/ci-per-file-timing.md(W1)把「两列同构」假设变成实测。
+#
+# 不碰主验证回路(Build and Test / Test 步骤):本 workflow 与 test-suite.yml
+# 完全独立,主 job 的 `run: pnpm test` 一行未改。
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "可选备注(仅记录在 run 标题里,不影响测量)"
+        required: false
+        default: ""
+
+jobs:
+  perf:
+    name: CI per-file timing (custom reporter)
+    timeout-minutes: 40
+    runs-on: ubuntu-latest
+    services:
+      # 与主 Test job 对齐:enforce-single-server-with-advisory-lock 的 5 条用例
+      # 必须打真实 PostgreSQL,否则会以 ECONNREFUSED 红掉(属缺服务类,不是
+      # 测量对象)。保持与主 job 同口径。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # 自定义 reporter 用此 run id 隔离写 .perf-runs/<runId>/perf-<pid>.json
+      PERF_RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build core packages
+        run: >-
+          pnpm exec turbo run build
+          --filter @laizhixingxingdeli/database
+          --filter @laizhixingxingdeli/error
+          --filter @laizhixingxingdeli/server
+          --filter @laizhixingxingdeli/web
+
+      - name: Per-file timing (custom reporter) + results capture (json reporter)
+        id: timing
+        run: |
+          # 同一 reporter + --no-file-parallelism(等价 harness;spec R1 允许)。
+          # 额外挂内置 json reporter 仅在 stdout 落 vitest-results.json,
+          # 用于取该轮红绿数(artifact 含之);不改变自定义 reporter 的计时口径。
+          START=$(date +%s%3N)
+          set +e
+          node node_modules/vitest/vitest.mjs run \
+            --no-file-parallelism \
+            --reporter=scripts/test-perf-reporter.mjs \
+            --reporter=json > vitest-results.json 2>&1
+          VITEST_RC=$?
+          END=$(date +%s%3N)
+          WALL=$((END - START))
+          set -e
+          echo "wall_ms=${WALL}" >> "$GITHUB_OUTPUT"
+          echo "vitest_rc=${VITEST_RC}" >> "$GITHUB_OUTPUT"
+          echo "vitest exit=${VITEST_RC}; wall=${WALL}ms (step-level monotonic via date)"
+
+      - name: Merge per-PID perf JSON -> run.json
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const dir = ".perf-runs/" + process.env.PERF_RUN_ID;
+            if (!fs.existsSync(dir)) { console.error("no perf dir", dir); process.exit(0); }
+            const files = fs.readdirSync(dir).filter(f => f.startsWith("perf-") && f.endsWith(".json"));
+            const merged = new Map();
+            let globalSetupMs = 0, reporterFileCount = 0;
+            for (const f of files) {
+              try {
+                const p = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+                globalSetupMs += p.globalSetupMs || 0;
+                reporterFileCount += p.fileCount || 0;
+                for (const x of p.files || []) {
+                  if (x.fileTotalMs == null) continue;
+                  merged.set(x.name, x);
+                }
+              } catch { /* ignore partial */ }
+            }
+            const arr = [...merged.values()].sort((a, b) => (b.fileTotalMs || 0) - (a.fileTotalMs || 0));
+            const sum = (k) => arr.reduce((s, f) => s + (f[k] || 0), 0);
+            const wall = Number(process.env.PERF_WALL_MS || 0);
+            const out = {
+              runId: process.env.PERF_RUN_ID,
+              githubRunId: process.env.PERF_RUN_ID,
+              wallMs: wall,
+              wallSource: "CI step duration (date +%s%3N around vitest)",
+              reporterFileCount,
+              fileCount: arr.length,
+              globalSetupMs,
+              totals: {
+                fileTotalMs: sum("fileTotalMs"),
+                setupMs: sum("setupMs"),
+                teardownMs: sum("teardownMs"),
+                execMs: sum("execMs"),
+                collectionOverheadMs: Math.max(0, wall - sum("fileTotalMs")),
+                fileCount: arr.length,
+              },
+              files: arr,
+            };
+            fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(out, null, 2));
+            console.log("merged", arr.length, "files; wall", wall, "ms; fileTotal sum", sum("fileTotalMs"), "ms");
+          '
+        env:
+          PERF_WALL_MS: ${{ steps.timing.outputs.wall_ms }}
+
+      - name: Upload perf artifact (always, data survives failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf-${{ github.run_id }}
+          path: |
+            .perf-runs/
+            vitest-results.json
+          retention-days: 30
