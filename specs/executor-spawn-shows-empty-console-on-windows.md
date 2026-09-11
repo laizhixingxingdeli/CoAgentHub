@@ -1,8 +1,61 @@
 # Spec: Windows 上每次派发都弹一个空终端窗口
 
-> **状态**: Frozen
+> **状态**: **Landed — L3 通过(2026-09-12),实现 `090bcf7d`**
 > **版本**: 1.0
-> **日期**: 2026-09-11
+> **日期**: 2026-09-11(落地 2026-09-12)
+>
+> ## ✅ L3 收口记录
+>
+> ### R1 的实测做出来了,而且推翻了「最小改动」
+>
+> 票面 §1.4 提出的疑问 —— 「只加 `windowsHide` 够不够」—— 实测给了否定答案:
+>
+> | # | 组合 | 弹窗 | stdout 完整 |
+> |---|---|---|---|
+> | 1 | `detached: true`(现状) | **YES** — 新生 OpenConsole + conhost | YES |
+> | 2 | `detached: true` + `windowsHide: true` | **YES** — 仍拉起 OpenConsole | YES |
+> | 3 | `windowsHide: true`(不传 `detached`) | **NO** ✓ | YES |
+> | 4 | 对照:`start` 起可见 cmd | YES | n/a |
+>
+> #2 无效,与 Win32 的「`CREATE_NO_WINDOW` 与 `DETACHED_PROCESS` 同用时前者
+> 被忽略」一致。**所以「加个 windowsHide」这个最小改动确实不管用**,必须同时
+> 在 Windows 上去掉 `detached` —— 票面不预设结论是对的。
+>
+> ⚠️ **第 4 行是对照组,票面没要求,是执行侧自己加的。** 没有它,「没检测到
+> 窗口」可能只是检测方法坏了。这是本轮方法论上最值得记的一笔。
+>
+> 三种组合都验了 stdout 完整性(验收 4)。
+>
+> ### 实现
+>
+> 抽出 `buildExecutorSpawnOptions`,带**可注入的 `platform` 参数** —— 两个
+> 分支在同一台机器上都能测,不必真的换 OS。
+>
+> - **Windows**:`windowsHide: true`,不传 `detached`;
+> - **POSIX**:`detached: true`,逐字保留(那里进程组 kill 真有用)。
+>
+> ### 检视者独立核实
+>
+> - `tsc --noEmit` exit 0;
+> - `executor-runner-spawn-options.test.ts` + `executor-runner-windows-launcher.test.ts`
+>   合跑 **14 passed**;
+> - **kill 路径零 diff** —— 票面禁止顺手修 Windows 进程树 kill,守住了;
+> - 新测试覆盖了票面警告的那条:**「多块 stdout/stderr 经 onOutput 完整回传」**
+>  (既有的 windows-launcher 测试只覆盖 `.cmd` 垫片解析,不覆盖 stdio)。
+>
+> ### 遗留
+>
+> **Windows 的进程树 kill 仍是缺陷**:`process.kill(-pid)` 在 Windows 必抛、
+> 落到 `child.kill()`,只终止直接子进程、不含后代。去掉 `detached` **没有让
+> 它变差**(此前那条路径就已经是兜底),但也没修 —— 需要 `taskkill /T` 之类的
+> 平台特定手段,另立票。见
+> [restore-ci-green-and-resume-pushing.md](restore-ci-green-and-resume-pushing.md) 第 6 项。
+>
+> ### ⚠️ 本票绕过了平台
+>
+> 平台下发的任务 `01a090bc` 因级联事故被误判 failed(见
+> [r2-exemption-narrowing-kills-healthy-coordinators.md](r2-exemption-narrowing-kills-healthy-coordinators.md))。
+> 本次由检视者直连 `pi.cmd -p --no-session @<票面>` 完成,约 11 分钟一轮。
 > **来源**: 用户观察 —— 「atomcode 调用的时候会有一个空的终端窗口出现」。
 > 检视者复核属实,并查到成因与一个已知缺陷相关。
 
