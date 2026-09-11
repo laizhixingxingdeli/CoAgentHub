@@ -1,8 +1,57 @@
 # Spec: 请求体解析失败返回 500 —— 客户端错误被报成了服务器故障
 
-> **状态**: Frozen
+> **状态**: **Landed — L3 通过(2026-09-11),实现 `7c4e3cb0`**
 > **版本**: 1.0
 > **日期**: 2026-09-11
+>
+> ## ✅ L3 收口记录(精简档,fix 票)
+>
+> 本轮是**第一次走完整 L3 协议**:从收件箱 `list` → `claim`(租约)→ 检视 →
+> `post_message` 公布 `review_result`(消息 `01a09088`)→ `ack`(带
+> `processingSummary`)。此前几轮检视者只做了实质、跳过了协议(详见
+> `skills/reviewer/SKILL.md` §8/§10)。
+>
+> ### 协调者的诊断比票面更准
+>
+> 票面 R2 只写了「判据必须窄,不许一刀切 `SyntaxError→400`」,**没给出正确
+> 判据**。协调者查到:Hono 的 validator 在 JSON 解析失败时**已经**抛
+> `HTTPException(400, "Malformed JSON in request body")` —— 错误在进入
+> `onError` 之前就已归因到「本次请求 body 解析」。判据 `err instanceof
+> HTTPException` 天然窄,不需要票面担心的那种启发式。
+>
+> ### 一处票面没要求、执行侧自己判断出来的架构改进
+>
+> `test/app.ts` 原有一份**简化的 `onError` 副本**:
+>
+> ```js
+> if (err instanceof BizError) { return c.json(..., err.statusCode) }
+> return c.json({ message: "Internal Server Error" }, 500)
+> ```
+>
+> 它逐字复刻了生产的缺陷。**任何对着这个夹具写的测试都会复现 bug 而不是抓住
+> 它** —— 这正是该缺陷能长期存活的原因。本次抽成 `lib/on-error.ts` 由生产与
+> 夹具共用,注释点明「漂移正是本缺陷的温床」。
+>
+> ### 检视者独立核实
+>
+> - `json-body-parse-failure.test.ts` 复跑 **14/14**,与 L2 自述一致;
+> - 验收 3 的核心防线有覆盖:「handler 内 throw `SyntaxError` → 500
+>   (不是一刀切 400)」,另加一条业务 `SyntaxError` 仍走 error 级日志的断言;
+> - `git merge-base --is-ancestor 7c4e3cb0 HEAD` 确认已在主线;
+> - `turbo run build --filter server` exit 0。
+>
+> ### 未做实机复验的理由
+>
+> L2 的 runtimeNote 写了「live curl still 500 until rebuild+restart」。检视者
+> **当时刻意不重启**:`coagenthub-claude-code` 群有任务在跑,重启会造成孤儿。
+> 后于 2026-09-11 13:10 在无在途任务时重启,`stale` 已清为 `false`。
+>
+> ### 子任务的死法已另立票
+>
+> 子任务 `01a09025` 在**提交之后**卡在回写守卫上,从 `#t2909` 重试到
+> `#t6527`(约 3600 轮、1 小时 41 分)直至进程耗尽。实现没丢(提交在死之前),
+> 但该失败模式会无限烧额度 —— 见
+> [writeback-rejection-loop-burns-quota.md](writeback-rejection-loop-burns-quota.md)。
 > **来源**: 检视者在补做 L3 认领流程时实地撞到 —— 第一反应是「平台故障」,
 > 排查后才发现是自己漏传 body。**这正是本缺陷的危害:它让调用方朝错误的
 > 方向排查。**
