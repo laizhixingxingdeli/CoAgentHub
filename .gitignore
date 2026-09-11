@@ -30,3 +30,13 @@ packages/backend/server/data/
 
 # 本地开发启动配置(含机器特定的代理地址),不入库
 .claude/launch.json
+
+# 测试性能基线的本机测量工件(spec test-perf-baseline-ci-and-local)。
+# 逐机器不同、且报告已内嵌关键数字,不入库;但必须忽略,否则永远挂在
+# git status 里干扰「工作区是否干净」的判断。
+.perf-runs/
+.perf-status.json
+
+# Windows 的 `> nul` 重定向在 bash/msys 下不是丢弃,而是**真的建一个名为
+# nul 的文件**。POSIX shell 里要用 /dev/null。见到它就是有人写错了重定向。
+nul

@@ -116,7 +116,7 @@ CI `Test` 步骤(652s)的内部四类拆分:
 CI(整套 652s,绿) vs 本机(代表性 13 文件 468s,含红)。**差异来源逐条拆:**
 
 ### (a) 失败早退 —— 本机**加时**而非省时
-本机子集 13 文件中 **4 文件红、19 用例红**(`node scripts/test-perf-baseline.mjs` 实测:4 failed | 9 passed (13);19 failed | 290 passed (311)):
+本机子集 13 文件中 **4 文件红、19 用例红**(`node scripts/test-baseline.mjs packages/backend/server <13 文件>` 实测:4 failed | 9 passed (13);19 failed | 290 passed (311)):
 `executor-queue`(3 红)、`executor-task-repo`(3 红)、`executor-trigger`(8 红)、`single-server-lock`(5 红)。
 
 vitest **不因失败早退**——红文件照样跑完所有用例。且红用例多为"假执行器 `sh` spawn 失败 → 重试/等超时",**额外耗时**。仅 `executor-queue` 一个文件就 **300s = 子集 70%**(hot3:fileTotal 300 346ms)。CI 上该文件绿、远快。→ **本机被红文件注水 ~300s+(仅 13 文件内)**;全量下注水更大。这是 CI↔本机差异的**首要来源**。
@@ -211,6 +211,58 @@ CI 4 vCPU / 16 GB;本机 16 逻辑线程 / 31 GB。串行执行下额外核不�
 - **输出隔离**:每 run 独立目录;未来若恢复并行,每 worker 自有 `perf-<pid>.json`,不互覆盖(`spec` R2 第 6 条)。
 - **测量工件**:`.perf-runs/{local-rep-cold,local-rep-hot1,local-rep-hot2,local-rep-hot3}/run.json`(未提交,仅本机证据;报告已内嵌关键数)。
 - **票级回归基线工具未改**:`scripts/test-baseline.mjs` 仅被**调用**(`node scripts/test-baseline.mjs packages/backend/server <13 文件>` 取失败数),未做任何修改(`git diff` 见 §6)。
+
+---
+
+## 6. 自证:只测量,未改变被观测对象
+
+> 本节由检视者于 2026-09-11 L3 补正 —— 原报告在 §R1、§测量方法与脚本、
+> 以及下方验收第 6/7 条共**四处**引用「§6 自证」,但文档里没有这一节。
+> 事实成立(检视者独立复核过),缺的是承诺的证据本身。基线文档的价值全在
+> 日后可被引用,悬空的交叉引用等于没有证据。
+
+### 6.1 交付提交只新增,不修改(`git show --stat cfcf4935`)
+
+```
+docs/test-perf-baseline-ci-and-local.md | 226 ++++++++++++++++++++++++++++++++
+scripts/test-perf-reporter.mjs          | 126 ++++++++++++++++++
+scripts/test-perf-timing.mjs            | 151 +++++++++++++++++++++
+3 files changed, 503 insertions(+)
+```
+
+**503 行全是新增,零删除零修改。** 三个文件都是本票产物:报告本身 + 两个
+新建的计时脚本。
+
+### 6.2 禁改路径零 diff(spec §4 验收 6)
+
+```
+git diff --stat a5bfabc4..cfcf4935 -- \
+  scripts/test-baseline.mjs \
+  packages/backend/server/vitest.config.ts vitest.workspace.ts \
+  .github/workflows/test-suite.yml package.json \
+  packages/backend/server/test packages/frontend/web/src
+```
+
+输出为**空**。测试代码、vitest 配置、CI workflow 的执行方式、根测试入口
+一行未改 —— 这是本票「只测量不优化」的硬约束,一旦动了,这份基线就失去
+作为后续 T1–T6 基准的资格。
+
+### 6.3 票级回归基线工具逐字未变(spec §4 验收 7)
+
+```
+git diff a5bfabc4..cfcf4935 -- scripts/test-baseline.mjs | wc -l
+→ 0
+```
+
+`scripts/test-baseline.mjs` 只被**调用**(取失败数),未被改造成性能工具 ——
+spec §1.2 禁止的正是这件事:两个用途混在一个脚本里会让票级对照也变脆。
+性能计时另起了 `test-perf-timing.mjs` + `test-perf-reporter.mjs`。
+
+### 6.4 工作树里那两个长期未提交的文件
+
+`docs/implementation-optimization-review-2026-09-07.md`(已修改)与
+`start.ps1`(未跟踪)是所有者的工作稿,不参与构建与测试,本次测量**未读取、
+未修改**,也没有为了让工作树"干净"去动它们(§R1 已说明)。
 
 ---
 
