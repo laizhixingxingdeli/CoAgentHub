@@ -83,7 +83,7 @@ jobs:
           echo "vitest_rc=${VITEST_RC}" >> "$GITHUB_OUTPUT"
           echo "vitest exit=${VITEST_RC}; wall=${WALL}ms (step-level monotonic via date)"
 
-      - name: Merge per-PID perf JSON -> run.json
+      - name: Merge per-PID perf JSON -> run.json + stage non-hidden artifact
         if: always()
         run: |
           node -e '
@@ -129,15 +129,22 @@ jobs:
             fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(out, null, 2));
             console.log("merged", arr.length, "files; wall", wall, "ms; fileTotal sum", sum("fileTotalMs"), "ms");
           '
+        # .perf-runs/ 被 .gitignore 忽略,upload-artifact v4 会据此排除隐藏目录,
+        # 导致计时数据丢失。复制到非隐藏目录再上传,保持原始 .perf-runs 不动。
         env:
           PERF_WALL_MS: ${{ steps.timing.outputs.wall_ms }}
-
+      - name: Stage timing artifact (non-hidden copy of .perf-runs)
+        if: always()
+        run: |
+          rm -rf perf-runs-out
+          cp -r .perf-runs perf-runs-out
+          echo "staged:"; find perf-runs-out -type f | head
       - name: Upload perf artifact (always, data survives failures)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}
           path: |
-            .perf-runs/
+            perf-runs-out/
             vitest-results.json
           retention-days: 30
