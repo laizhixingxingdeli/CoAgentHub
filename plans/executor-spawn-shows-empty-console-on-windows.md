@@ -30,8 +30,8 @@
 | 验收方法 | 对照冻结 spec §4 验收 1–7；基线 `node scripts/test-baseline.mjs packages/backend/server test/executor-runner-windows-launcher.test.ts`（及本票新增的测试文件）；`npx tsc --noEmit -p tsconfig.json`（server 包） |
 | specRef | `specs/executor-spawn-shows-empty-console-on-windows.md` |
 | specHash | `889c1c6b4d9e8f0dce1a0bc8067c2745ef3c6972` |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | `01a0910f-e100-7632-891b-ca1ac617c865`（atomcode） |
+| 状态 | dispatched |
 
 ## 依赖图
 
