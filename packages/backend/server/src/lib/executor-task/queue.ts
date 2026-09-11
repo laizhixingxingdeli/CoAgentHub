@@ -40,6 +40,7 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { isTerminalTaskStatus } from "../coordination-activity";
 import { recordExecutorOutput } from "../executor-availability";
+import { adapterFor } from "./adapters/registry";
 import { createAnsiStripper } from "./ansi";
 import { verifyReportedCommit } from "./claim-verification";
 import {
@@ -66,7 +67,6 @@ import {
   observeGenericSkippedEvent,
 } from "./output-parser";
 import {
-  extractCodeBuddyStreamResult,
   extractGenericJsonlText,
   findCommitHash,
   findProviderError,
@@ -122,7 +122,7 @@ import {
   loadTicketTemplate,
   type TicketRole,
 } from "./ticket-template";
-import { collectTokenUsage, extractCodexExecText } from "./token-usage";
+import { collectTokenUsage } from "./token-usage";
 import {
   asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,
@@ -2554,14 +2554,11 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         return;
       }
       const executorText =
-        ex.key === "codex"
-          ? extractCodexExecText(result.stdout ?? "")
-          : ex.key === "codebuddy"
-            ? extractCodeBuddyStreamResult(result.stdout ?? "")
-            : // 无专用提取器的执行器(如 Pi):通用 JSONL 兜底,从最后一条
-              // assistant 消息/事件取文本正文;非 JSONL / 无 assistant 文本时
-              // 返回 undefined,保持 legacy 路径逐字一致。
-              extractGenericJsonlText(result.stdout ?? "");
+        adapterFor(ex.key).extractFinalText?.(result.stdout ?? "") ??
+        // 无专用提取器的执行器(如 Pi):通用 JSONL 兜底,从最后一条
+        // assistant 消息/事件取文本正文;非 JSONL / 无 assistant 文本时
+        // 返回 undefined,保持 legacy 路径逐字一致。
+        extractGenericJsonlText(result.stdout ?? "");
       const output = executorText
         ? `${executorText}\n${result.stderr ?? ""}`
         : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;

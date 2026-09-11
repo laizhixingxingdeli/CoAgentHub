@@ -1,3 +1,5 @@
+import { adapterFor } from "./adapters/registry";
+
 /**
  * 执行器输出解析(实时输出动作行,spec: live-output-shows-narration-not-actions +
  * two-tier-output-summary-and-detail):在执行器输出进入 task 缓冲前按 executorKey
@@ -102,7 +104,7 @@ function truncate(value: string, max: number): string {
  * 下一个新执行器接入即可立刻被发现,而不是等缓冲顶满才察觉(R4)。
  */
 const observedUnknownExecutorKeys = new Set<string>();
-function observeUnknownExecutorKey(executorKey: string): void {
+export function observeUnknownExecutorKey(executorKey: string): void {
   if (observedUnknownExecutorKeys.has(executorKey)) return;
   observedUnknownExecutorKeys.add(executorKey);
   console.warn(
@@ -421,7 +423,7 @@ export interface ExecutorOutputParser {
 }
 
 /** codex:行缓冲 + 渲染 item.completed / 显式跳过已知冗余事件 / 逐字兜底。 */
-function createCodexParser(): ExecutorOutputParser {
+export function createCodexParser(): ExecutorOutputParser {
   let pending = "";
   const { entry, raw } = createEntryMaker();
   const parser = ((chunk: string): OutputEntry[] => {
@@ -501,7 +503,7 @@ function isBareNarrativeLine(line: string): boolean {
  * 之后、渲染之前执行:跨 chunk 被切开的已知前缀先重组再拆分,二者不互相破坏。
  * 未知行逐字保留。
  */
-function createAtomCodeParser(): ExecutorOutputParser {
+export function createAtomCodeParser(): ExecutorOutputParser {
   const pendingBySource = new Map<"stdout" | "stderr", string>();
   const { entry, raw } = createEntryMaker();
   const parser = ((
@@ -891,7 +893,7 @@ function genericLineActionKind(line: string): "call" | "result" | undefined {
 }
 
 /** 通用解析器:行缓冲 + R1 三序判定 + R5 重复动作行折叠(L2:seen 提升到闭包,跨 chunk 生效);跨 chunk 半截行拼接,flush 吐残留。 */
-function createGenericParser(): ExecutorOutputParser {
+export function createGenericParser(): ExecutorOutputParser {
   let pending = "";
   // L2:seen 提升到解析器闭包 —— 原实现每次 parse(chunk) 重建,同动作行落在不同
   // chunk 时折叠失效(同一工具跨 chunk 反复调用仍逐行刷屏)。raw 透传行/error
@@ -1114,7 +1116,7 @@ function actionDedupKey(rendered: string, kind?: "call" | "result"): string {
 }
 
 /** codebuddy:行缓冲 + 渲染动作行;其余逐字保留(R3)。跨行状态由闭包持有。 */
-function createCodeBuddyParser(): ExecutorOutputParser {
+export function createCodeBuddyParser(): ExecutorOutputParser {
   let pending = "";
   const state: { toolNameByUseId: Map<string, string> } = {
     toolNameByUseId: new Map(),
@@ -1160,7 +1162,7 @@ function createCodeBuddyParser(): ExecutorOutputParser {
  *  - `session` / `turn_*` / `message_*` 骨架 → 跳过
  *  - 未知事件类型 → `raw`(R3 逐字保留)
  */
-function createPiParser(): ExecutorOutputParser {
+export function createPiParser(): ExecutorOutputParser {
   let pending = "";
   const { entry, raw } = createEntryMaker();
 
@@ -1293,26 +1295,14 @@ function createPiParser(): ExecutorOutputParser {
 
 /**
  * 按 executorKey 创建流式输出解析器(每次执行一个;跨 chunk 状态由闭包持有,
- * 与 createAnsiStripper 同款)。codex / codebuddy 解析 JSONL 动作行,atomcode
- * 拆粘连前缀 + 折叠 thinking,pi 按事件类型判据,其余执行器(default)走通用语义
- * 解析器(spec: generic-executor-output-parsing)——按字段语义丢信封、留动作/正文,
- * 保证新增 agent 的 JSONL 输出不会顶满缓冲;未知 key 仍记一次观测日志(R5)。
+ * 与 createAnsiStripper 同款)。解析器按 key 查适配器注册表(spec:
+ * executor-adapter-registry):命中则取 `createParser`,未命中(或适配器未提供
+ * parser)走通用语义解析器(createGenericParser,spec:
+ * generic-executor-output-parsing)——按字段语义丢信封、留动作/正文,保证新增
+ * agent 的 JSONL 输出不会顶满缓冲;未知 key 由 `adapterFor` 记一次观测日志(R5)。
  */
 export function createExecutorOutputParser(
   executorKey: string,
 ): ExecutorOutputParser {
-  switch (executorKey) {
-    case "codex":
-      return createCodexParser();
-    case "codebuddy":
-      return createCodeBuddyParser();
-    case "pi":
-      return createPiParser();
-    case "atomcode":
-    case "executor":
-      return createAtomCodeParser();
-    default:
-      observeUnknownExecutorKey(executorKey);
-      return createGenericParser();
-  }
+  return adapterFor(executorKey).createParser?.() ?? createGenericParser();
 }

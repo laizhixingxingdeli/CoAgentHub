@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { adapterFor } from "./adapters/registry";
 
 export type TokenUsageReason = "unsupported" | "unavailable";
 
@@ -192,7 +193,7 @@ function parseJsonLines(text: string): unknown[] {
   return rows;
 }
 
-function tokenUsageFromCodexJsonl(text: string): TokenUsage | undefined {
+export function tokenUsageFromCodexJsonl(text: string): TokenUsage | undefined {
   let latest: UsageTotals | undefined;
   for (const row of parseJsonLines(text)) {
     if (!row || typeof row !== "object") continue;
@@ -283,7 +284,7 @@ function readText(path: string): string | undefined {
   }
 }
 
-function collectClaude(
+export function collectClaude(
   input: TokenUsageCollectionInput,
 ): TokenUsage | undefined {
   const start = Date.parse(input.startedAt);
@@ -318,7 +319,7 @@ function collectClaude(
     : undefined;
 }
 
-function collectCodeBuddy(
+export function collectCodeBuddy(
   input: TokenUsageCollectionInput,
 ): TokenUsage | undefined {
   const start = Date.parse(input.startedAt);
@@ -348,7 +349,7 @@ function collectCodeBuddy(
   return count > 0 ? finishTotals(totals, "codebuddy-jsonl") : undefined;
 }
 
-function collectAtomCode(
+export function collectAtomCode(
   input: TokenUsageCollectionInput,
 ): TokenUsage | undefined {
   const start = Date.parse(input.startedAt);
@@ -535,17 +536,15 @@ export async function collectTokenUsage(
   // Custom collectors are precise accelerators for known CLIs. They are left
   // byte-for-byte unchanged (frozen spec R5); only this dispatch flow changes so
   // that a custom miss degrades to the generic scan instead of giving up early.
-  let usage: TokenUsage | undefined;
-  if (input.executorKey === "codex") {
-    usage = tokenUsageFromCodexJsonl(input.stdout ?? "");
-  } else if (input.executorKey === "executor") {
-    usage = collectAtomCode(input);
-  } else if (input.executorKey === "codebuddy") {
-    usage = collectCodeBuddy(input);
-  } else if (input.executorKey === "claude") {
-    usage = collectClaude(input);
+  // The per-key branch is now a single registry lookup (spec
+  // executor-adapter-registry): if the adapter provides a custom collector we
+  // use it, otherwise (and whenever it returns undefined) we fall through to the
+  // generic scan below — preserving the two-level degrade semantics verbatim.
+  const adapter = adapterFor(input.executorKey);
+  if (adapter.collectTokenUsage) {
+    const usage = adapter.collectTokenUsage(input);
+    if (usage) return { tokenUsage: usage };
   }
-  if (usage) return { tokenUsage: usage };
   // Generic semantic fallback (frozen spec R1). Any executor whose custom path
   // missed — including codex, and the previously `unsupported`
   // reasonix/hermes/win-hermes/reviewer — is scanned by recursing the whole

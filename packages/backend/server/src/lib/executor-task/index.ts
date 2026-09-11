@@ -24,6 +24,7 @@ export {
   isTerminalTaskStatus,
   recordCoordinationActivity,
 } from "../coordination-activity";
+export { adapterFor, type ExecutorAdapter } from "./adapters/registry";
 export { createAnsiStripper, stripAnsi } from "./ansi";
 export {
   adjudicatedRecipientsOfTask,
