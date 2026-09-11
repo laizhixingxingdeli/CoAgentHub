@@ -75,6 +75,12 @@ import {
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
 import { hasReviewResult } from "@server/lib/l3-overdue-reminder";
 import { getRuntimeStatus } from "@server/lib/runtime-status";
+import {
+  clearWritebackRejections,
+  formatWritebackRejectionTripError,
+  getWritebackRejectionLimit,
+  recordWritebackRejection,
+} from "@server/lib/writeback-rejection";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
@@ -136,6 +142,75 @@ function coordinationCloseError(message: string): BizError {
   );
 }
 
+/**
+ * 结案守卫拒绝的唯一出口包装:按任务累加连续被拒次数,触顶则平台主动
+ * 把该任务判 failed(diffSummary 含次数与最后一次拒绝原文),再抛原 400。
+ * 已终态任务只抛错、不再计数/改写(避免 done 后误伤)。
+ */
+async function rejectCoordinationClose(
+  db: DataBase,
+  task: TaskRow,
+  message: string,
+): Promise<never> {
+  const err = coordinationCloseError(message);
+  if (!isTerminalTaskStatus(task.status)) {
+    const streak = recordWritebackRejection(task.id, message);
+    const limit = getWritebackRejectionLimit();
+    if (streak.count >= limit) {
+      await forceFailWritebackRejectionLoop(db, task, streak.count, message);
+      clearWritebackRejections(task.id);
+    }
+  }
+  throw err;
+}
+
+/**
+ * 连续回写被拒触顶 → 任务 failed。error 必含次数与最后原文;platform 块
+ * 附结构化字段便于排障。通知与普通终态路径同口径。
+ */
+async function forceFailWritebackRejectionLoop(
+  db: DataBase,
+  task: TaskRow,
+  count: number,
+  lastMessage: string,
+): Promise<void> {
+  const limit = getWritebackRejectionLimit();
+  const error = formatWritebackRejectionTripError(count, limit, lastMessage);
+  const diffSummary = applyDiffSummaryPatch(task.diffSummary, {
+    error,
+    platform: {
+      writebackRejectionTrip: {
+        count,
+        limit,
+        lastMessage,
+      },
+    },
+  });
+  const [updated] = await db
+    .update(taskTable)
+    .set({ status: "failed", diffSummary })
+    .where(
+      and(eq(taskTable.id, task.id), eq(taskTable.groupId, task.groupId)),
+    )
+    .returning();
+  if (updated) {
+    try {
+      await notifyTaskStatusChanged(
+        db,
+        updated.id,
+        updated.groupId,
+        "failed",
+        updated,
+      );
+    } catch (notifyErr) {
+      console.warn(
+        `[writeback-rejection] notify failed after trip (${task.id}):`,
+        notifyErr,
+      );
+    }
+  }
+}
+
 function parseAlreadySatisfiedClaim(
   summary: Record<string, unknown> | undefined,
 ): AlreadySatisfiedClaim | undefined {
@@ -159,13 +234,17 @@ function parseAlreadySatisfiedClaim(
 }
 
 async function validateAlreadySatisfiedClaim(
+  db: DataBase,
+  task: TaskRow,
   repoRoot: string,
   claim: AlreadySatisfiedClaim,
 ): Promise<"verified" | "unavailable"> {
   for (const hash of claim.commits) {
     const existence = await verifyCommitExists(hash, repoRoot);
     if (existence === "not_found") {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         `alreadySatisfied.commits 中的提交 ${hash} 在仓库中不存在。`,
       );
     }
@@ -304,7 +383,7 @@ async function assertCoordinationCloseIntegrity(
   const repoRoot = await resolveTaskRepoRoot(db, task);
   const alreadySatisfied = parseAlreadySatisfiedClaim(summary);
   const alreadySatisfiedStatus = alreadySatisfied
-    ? await validateAlreadySatisfiedClaim(repoRoot, alreadySatisfied)
+    ? await validateAlreadySatisfiedClaim(db, task, repoRoot, alreadySatisfied)
     : undefined;
   const commits = await commitsInTaskWindow(
     repoRoot,
@@ -361,7 +440,9 @@ async function assertCoordinationCloseIntegrity(
 
   if (effectiveChildren.length === 0 && !canUseAlreadySatisfied) {
     if (hasAlreadySatisfied) {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         "alreadySatisfied 不合法: commits 中的提交必须真实存在,且 verification 必须为非空字符串。",
       );
     }
@@ -390,7 +471,9 @@ async function assertCoordinationCloseIntegrity(
         task,
         blockedBy,
       );
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         `L1 层未完成:存在非终态执行子任务: ${nonTerminal
           .map((child) => `${child.id} (${child.status})`)
           .join(", ")}` +
@@ -406,12 +489,16 @@ async function assertCoordinationCloseIntegrity(
   const groupHasReviewer = await groupHasReviewerMember(db, task.groupId);
   if (await shouldWalkL3(db, task, groupHasReviewer)) {
     if (!summaryHasReviewRequest(diffSummary)) {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         "本协调任务应走 L3 三方检视,但 diffSummary 缺少 review_request 交接载荷(群内 reviewer 与 coordinator 同时在场)。",
       );
     }
     if (task.dispatchKind === "fix" && !reviewRequestLiteFlag(diffSummary)) {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         'fix 票的 review_request 必须带 "lite": true(L3 精简档:免 spec 对照,只检 diff 架构质量)。',
       );
     }
@@ -424,7 +511,9 @@ async function assertCoordinationCloseIntegrity(
   // 判定与任务书 buildReportSection 共用(review-request-policy),两处不漂移。
   if (summaryHasReviewRequest(diffSummary)) {
     if (!reviewRequestCarryAllowed(task.dispatchKind, groupHasReviewer)) {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         "群内无 reviewer 成员,不得携带 review_request。",
       );
     }
@@ -455,23 +544,32 @@ async function assertCoordinationCloseIntegrity(
     }
     const entry = adjudication?.[child.id];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         `子任务 ${child.id} 的提交核实结论为 ${status},必须在 diffSummary.claimAdjudication["${child.id}"] 中显式表态(accepted 布尔 + 非空 reason)。`,
       );
     }
     const e = entry as Record<string, unknown>;
     if (typeof e.accepted !== "boolean") {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         `子任务 ${child.id} 的 claimAdjudication.accepted 缺失或非布尔,必须显式给出 true 或 false。`,
       );
     }
     const reason = typeof e.reason === "string" ? e.reason : "";
     if (reason.trim() === "") {
-      throw coordinationCloseError(
+      await rejectCoordinationClose(
+        db,
+        task,
         `子任务 ${child.id} 的 claimAdjudication.reason 为空,必须填写非空理由。`,
       );
     }
   }
+
+  // 一次成功通过结案守卫 → 连续被拒计数清零(否则历史失败会拖死长活跃任务)。
+  clearWritebackRejections(task.id);
 
   // R4:done 分支结束时同样携带平台判定的降级载荷(零执行子任务 + 平台判定
   // 无可用执行器时才有;有可用执行器时为 undefined,不写字段)。

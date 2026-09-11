@@ -18,6 +18,7 @@ import {
 } from "../lib/executor-task/state";
 import { getDispatchPolicyOrigin } from "../lib/executors";
 import { getRuntimeStatus } from "../lib/runtime-status";
+import { getWritebackRejectionLimit } from "../lib/writeback-rejection";
 
 /**
  * 调度策略的**当前生效值**与**来源**(spec dispatch-policy-load-is-not-observable)。
@@ -56,6 +57,7 @@ function describeDispatchPolicy() {
       rateLimitCooldownMs: getRateLimitCooldownMs(),
       transientQuota: getTransientQuotaPolicy(),
       redispatchFailureLimit: getRedispatchFailureLimit(),
+      writebackRejectionLimit: getWritebackRejectionLimit(),
     },
   };
 }

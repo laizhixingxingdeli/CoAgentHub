@@ -628,6 +628,11 @@ export interface DispatchPolicy {
    *  时长仍未公布 review_result → 任务详情派生 l3.overdue=true 并由平台发一次
    *  群提醒;不改变任务状态或替代检视者裁决。 */
   l3ResponseMinutes: number;
+  /**
+   * 回写被拒熔断:同一任务连续被结案守卫拒绝达到此数后,平台主动把该任务
+   * 判为终态 `failed`(打断「执行器无限重试回写」自旋)。一次成功回写清零。
+   */
+  writebackRejectionLimit: number;
   /** 失败自动重试策略。 */
   retry: RetryPolicy;
   /** 额度/速率限制失败后的冷却调度策略。 */
@@ -660,6 +665,12 @@ export const DEFAULT_DETACHED_TIMEOUT_MINUTES = 1440;
  *  检视者运行在常驻会话里,收到完成事件后通常分钟级响应;但它可能正在与用户
  *  对话,给足余量。这个数字不是精确结论 —— 若有更好依据可提出并说明理由。 */
 export const DEFAULT_L3_RESPONSE_MINUTES = 120;
+
+/**
+ * 默认回写被拒熔断阈值。依据:与重派熔断(redispatchFailureLimit=5)同量级;
+ * 给合法的「改载荷再试」留几次机会,又远小于事故中的 ~3600 轮自旋。
+ */
+export const DEFAULT_WRITEBACK_REJECTION_LIMIT = 5;
 
 /** 默认重试策略:重试 1 次、重试前回滚工作区、同一执行器重跑。 */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
@@ -798,6 +809,7 @@ export function readDispatchPolicy(): DispatchPolicy {
       a2aSilenceTimeoutMinutes?: unknown;
       detachedTimeoutMinutes?: unknown;
       l3ResponseMinutes?: unknown;
+      writebackRejectionLimit?: unknown;
       retry?: {
         maxRetries?: unknown;
         resetWorkspace?: unknown;
@@ -850,6 +862,10 @@ export function readDispatchPolicy(): DispatchPolicy {
       l3ResponseMinutes: positiveInt(
         raw.l3ResponseMinutes,
         DEFAULT_L3_RESPONSE_MINUTES,
+      ),
+      writebackRejectionLimit: positiveInt(
+        raw.writebackRejectionLimit,
+        DEFAULT_WRITEBACK_REJECTION_LIMIT,
       ),
       retry: {
         maxRetries: nonNegativeInt(
@@ -905,6 +921,7 @@ export function readDispatchPolicy(): DispatchPolicy {
     a2aSilenceTimeoutMinutes: DEFAULT_A2A_SILENCE_TIMEOUT_MINUTES,
     detachedTimeoutMinutes: DEFAULT_DETACHED_TIMEOUT_MINUTES,
     l3ResponseMinutes: DEFAULT_L3_RESPONSE_MINUTES,
+    writebackRejectionLimit: DEFAULT_WRITEBACK_REJECTION_LIMIT,
     retry: DEFAULT_RETRY_POLICY,
     rateLimit: DEFAULT_RATE_LIMIT_POLICY,
   };
