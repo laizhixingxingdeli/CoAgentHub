@@ -63,8 +63,8 @@
 | 测试文件清单 | 本票以 workflow + 文档 +（条件）计时脚本为主；**不要**为修红跑/改测试。若抽样「未改测试行为」：`node scripts/test-baseline.mjs` 单文件，失败数不增加；**禁止**根 `pnpm test` 全量（~24min 本机 / CI 另有独立计时 job）。 |
 | specRef | `specs/ci-per-file-timing.md` |
 | specHash | `2d61cfef3348dda8c3dda83c84b6736be8bdf44d` |
-| taskId | _未派发_ |
-| 状态 | planned |
+| taskId | `01a08f29-4103-749c-b9a6-13fe052ae56c`（codebuddy） |
+| 状态 | dispatched |
 
 ## 依赖图
 
