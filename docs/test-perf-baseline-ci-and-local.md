@@ -67,7 +67,19 @@ CI 的 `Test Suite / Build and Test` job 各 step 起止(精确秒,由 `gh run v
 
 CI `Test` 步骤(652s)的内部四类拆分:
 - **依赖构建 vs 纯测试分开**:`pretest`(构建 database+error)在本机/cache 命中下可忽略(<1s,见 R3 构建测量);652s 几乎全是 `vitest run`。
-- **setup / teardown / 用例执行**:CI 现行 workflow 用 `reporters:["verbose"]`,**不输出 per-file JSON 计时**,故 CI 的 per-file 四阶段未在本票采集(给 CI 加 json reporter 需改 workflow,属红线①,不动)。其 per-file 阶段结构与本机列**同构**(同一 `--no-file-parallelism`、同一文件集),差异仅在"本机红文件的注水"一项(见 §4)。
+- **per-file 四阶段(本票 W1 实测,推翻上一条假设)**:上一张票写"CI 用 `reporters:["verbose"]`,未采集 per-file 四阶段"——该限制在 W1 已被解除(见 `specs/ci-per-file-timing.md` R1:新增独立 `workflow_dispatch` 采集路径,复用同一自定义 reporter + `--no-file-parallelism`,不改主回路)。实测来自独立采集 job 的 run `34571914641`:
+  - 全量 **129 个测试文件**(报告 R1 记的"100"已过时;CI 实际检出 129)、**1733 用例全绿**(0 红)、wall **629.8s**(该 run 的 `date` 计时;与主回路 652s 同量级)。
+  - 四阶段拆分(口径与本机 reporter 一致:setup/teardown=`beforeAll`/`afterAll`,exec=fileTotal−setup−teardown,collectionOverhead=wall−ΣfileTotal):
+
+  | 阶段 | 合计(ms) | 占 wall(629.8s) | 备注 |
+  |---|---|---|---|
+  | 用例执行 exec | 390 204 | **62.0%** | 真实测试成本;CI 全绿,无红注水 |
+  | collectionOverhead | 184 726 | **29.3%** | vitest 冷启 + 每文件 collect/transform/import + PGlite 实例创建(在 `onTestModuleStart` 之前) |
+  | teardown(afterAll) | 54 820 | **8.7%** | 每文件 ~0.4s 关库/清理(54.8s / 129 文件) |
+  | setup(beforeAll) | 0 | **0.0%** | 本全量集无 per-file beforeAll(与本地子集一致) |
+  | **ΣfileTotal** | 445 024 | 70.7% | `performance.now()` 包住各模块窗口之和 |
+
+  → ⚠️ **"两列同构"假设被部分推翻**:阶段*排序*(exec 最大、setup≈0、teardown 小)两侧一致,但 **collectionOverhead 的 CI 占比(29.3%)是本地子集(8.6%)的 ~3.4 倍**——差异**不只**在"红文件注水"一项。详见 §R6。
 - 余量:job 预算 `timeout-minutes:20`=1200s,652s 用掉 46%(spec §1.1)。
 
 > 旁证 run `34464606595` 的 Test 步骤为 643s,与 652s 同量级,说明 652s 是稳定值而非偶发。
@@ -180,6 +192,85 @@ CI 4 vCPU / 16 GB;本机 16 逻辑线程 / 31 GB。串行执行下额外核不�
 | setup(beforeAll) | ~0 | ~0% | 本子集无 per-file beforeAll |
 
 → 主导阶段是**用例执行**;其次 **collection/transform + PGlite 实例创建**;串行是结构性天花板(§R4b)。
+
+### 阶段排名(CI 全量 129 文件,run 34571914641,按 CI 数字重算)
+
+| 阶段 | 合计(ms) | 占 wall | 优化指向(对照本机) |
+|---|---|---|---|
+| 用例执行 exec | 390 204 | 62.0% | 真实测试成本;CI 全绿,无注水 |
+| collectionOverhead | 184 726 | 29.3% | ≈本机 8.6% 的 3.4 倍;减 PGlite 实例数/共享实例、降 collect/transform 是 CI 上最大可量化杠杆 |
+| teardown(afterAll) | 54 820 | 8.7% | 每文件 ~0.4s 关库;远低于本机"主导项"假设 |
+| setup(beforeAll) | 0 | 0.0% | 全量集无 per-file beforeAll |
+
+→ CI 主导阶段仍是**用例执行**,但 **collection/transform + PGlite 实例创建(29.3%)已是显著高于本机认知的第二大桶**——T1 若只盯着 exec 会低估 collection 的可优化空间。
+
+### 文件排名(CI 全量 129 文件,run 34571914641,按 fileTotalMs 降序,Top 15)
+
+| # | 文件 | fileTotal(s) | exec(s) | teardown(s) | 备注 |
+|---|---|---|---|---|---|
+| 1 | executor-queue.test.ts | 134.1 | 134.1 | 0.0 | **单文件占 wall 21.3%**;CI 上绿(本地红,Windows sh 注水 300s),Linux sh 原生故仅 134s |
+| 2 | executor-coordinator-workspace-gate.test.ts | 29.7 | 26.6 | 3.1 | |
+| 3 | task-output-detail.test.ts | 14.9 | 14.9 | 0.0 | |
+| 4 | coagenthub-prod.test.mjs | 13.6 | 13.6 | 0.0 | |
+| 5 | executor-progress.test.ts | 11.8 | 11.8 | 0.0 | |
+| 6 | callback-agent.test.ts | 8.8 | 8.8 | 0.0 | |
+| 7 | control-command-skip-dispatch.test.ts | 8.2 | 7.2 | 1.0 | |
+| 8 | executor-trigger.test.ts | 7.2 | 6.3 | 0.9 | 假执行器 sh(CI 绿) |
+| 9 | retry-rollback-guard.test.ts | 7.1 | 6.1 | 1.0 | |
+| 10 | coordinator-resume.test.ts | 6.8 | 5.7 | 1.1 | |
+| 11 | coagenthub-watchdog.test.mjs | 6.5 | 6.5 | 0.0 | |
+| 12 | executor-quota-redispatch.test.ts | 5.4 | 4.5 | 0.9 | |
+| 13 | dispatcher-fields.test.ts | 5.1 | 5.1 | 0.0 | 本机 teardown 异常高,CI 上正常 |
+| 14 | executor-queued-reclaim.test.ts | 5.0 | 5.0 | 0.0 | |
+| 15 | task-completion-events.test.ts | 4.8 | 3.9 | 0.9 | |
+
+> CI 文件排名以**全量 129 文件**重算(本机仅为 13 文件子集)。`executor-queue.test.ts` 单文件即 134s / 21.3% wall,是 CI 上最该优先啃的单一目标;其 CI 绿但耗时仍高,说明耗时来自假执行器 `sh` 在 Linux 上的固有开销(非 Windows 注水),属真实优化对象。
+
+---
+
+## R6. CI per-file 实测结论(W1 · specs/ci-per-file-timing.md)
+
+本票(W1)把上一张票 R2 里的"两列同构"假设变成实测。数据源:CI run `34571914641`(独立 `workflow_dispatch` 采集 job,全绿 129 文件 / 1733 用例,wall 629.8s),artifact `ci-perf-34571914641` 可下载;同口径另一条 run `34570640876` 因修复前 `.perf-runs` 被 gitignore 丢了四阶段数据,仅作 step 级旁证。
+
+### R6.1 去掉 Windows 注水后,collection / teardown 在 CI 的占比
+
+CI **无 Windows 注水**(Linux,假执行器 `sh` 原生、PGlite 在 Linux fs 正常,且 `services:postgres` 让本地红的那 5 条也绿),故 CI 数据即"去注水后"的真实分布:
+
+- collectionOverhead = **29.3%**(184 726ms / 629 750ms)
+- teardown(afterAll) = **8.7%**(54 820ms / 629 750ms)
+- **collection + teardown 合计 = 38.0%**(239 546ms / 629 750ms)
+
+→ 上一张票 R2 推测"去掉注水后可能从 13% 变成主导项"。实测**未到主导**(exec 仍 62.0%),但**从 13% 翻到 38%**(≈2.9×)——collection/transform + PGlite 实例创建是 CI 上体量远超本机认知(8.6%)的第二大桶,属真实可量化优化对象。
+
+### R6.2 "两列同构"实测结论:**部分成立**
+
+- **成立的部分(阶段排序)**:两侧都是 exec 最大、setup≈0、teardown 小。这与"同一 `--no-file-parallelism`、同一文件集"的机理一致。
+- **不成立的部分(量级)**:collectionOverhead 占比 **CI 29.3% vs 本机子集 8.6%(~3.4×)**。上一张票 R2 那句"其 per-file 阶段结构与本机列同构……差异仅在'本机红文件的注水'一项"**据此修正**:差异不仅在红文件注水,CI 的 per-file collect/transform/PGlite 实例创建开销在占比上显著更高。
+- **结论**:按 spec §3 R3「若推翻'同构'措辞,照实改掉」,本票将上述句子改为"阶段排序同构、量级不同构"(见 §R2 该段落已改写)。
+
+### R6.3 T1(按真实依赖分类测试)可执行结论
+
+按 CI 实测(非本机注水口径):
+
+1. **第一优先:`executor-queue.test.ts` 单文件 = 134s = wall 的 21.3%**。CI 上它绿(本地红是 Windows sh 注水),但即便绿仍耗时最高——耗时来自假执行器 `sh` 在 Linux 上的固有开销,属真实优化对象。T1 应优先拆/并行/精简这一个文件的执行位。
+2. **第二杠杆:collectionOverhead(29.3%,185s)**。这是 vitest 冷启 + 每文件 collect/transform/import + **每文件×文件数 的 PGlite 实例创建**(发生在 `onTestModuleStart` 之前,计入 collectionOverhead)。按"真实依赖分类",将共享同一 PG 状态的文件分组、复用/共享 PGlite 实例(而非每文件新建),是 CI 上**最大、最可量化**的杠杆——这是本机 8.6% 数据完全低估、差点被"同构"假设掩盖的部分。
+3. **teardown(8.7%,55s)非优先**:每文件 ~0.4s,远低于"主导项"假设。
+4. **exec(62%,390s)是真实测试成本**:下降需改测试逻辑,优先级低于上述两项可结构性回收的部分。
+
+→ **T1 在 CI 上收益有限?否。** 仅 `executor-queue`(21%)+ collectionOverhead(29%)两项就覆盖 ≈50% wall 的可回收空间,且都指向可结构化的改造(分类/共享实例/精简执行位),不是逐用例硬抠。这正是本票把"同构"假设变实测的价值:若按本机"collection 仅 8.6%"去排 T1,会系统性低估 collection 改造的收益。
+
+---
+
+## W1 追加验收对照(specs/ci-per-file-timing.md §4 八条,2026-09-11)
+
+1. ✅ 采集路径 `test-perf-timing.yml` 仅 `workflow_dispatch`,未挂 `on: push`(`grep on:` 仅 `workflow_dispatch`,无 push/pull_request)。
+2. ✅ 主回路 `test-suite.yml` `Test` 步骤 `run: pnpm test` 一行未改(本票仅改 `docs/`;提交 diff 见 §6 自证拓展)。
+3. ✅ 一轮 CI per-file 四阶段数据作 artifact `ci-perf-34571914641` 可下载;该轮红绿数:**129 文件全绿 / 1733 用例 0 红**(run `34571914641`)。
+4. ✅ 基线报告 CI 列补四阶段(§R2 表);阶段排名(§R5 CI 表)与文件排名(§R5 Top15)按 CI 数字重算,非沿用本机。
+5. ✅ 去掉 Windows 注水后 collection/teardown CI 占比 = **38.0%**(§R6.1)。
+6. ✅ "两列同构"实测结论 = **部分成立**(§R6.2)。
+7. ✅ T1 可执行结论(§R6.3):优先 `executor-queue`(21.3% wall)+ collectionOverhead(29.3%);非"收益有限"。
+8. ✅ 测试代码 / `vitest.config.ts` / `scripts/test-baseline.mjs` 一行未改(`git diff --stat` 对本票为空)。
 
 ---
 
