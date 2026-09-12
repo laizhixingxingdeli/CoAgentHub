@@ -41,7 +41,7 @@
 > | 3 | workspace-gate 验收 1 | 已 Landed `be68d102`,检视者复跑 `0 failed | 13 passed` |
 > | 4 | **E2E 业务用例在新 schema 上是否绿** | **真未知**,需 CI |
 > | 5 | **`dispatch-policy.json` 走 `process.cwd()`,换个起法就读不到** | **成立且有价值** —— 见下 |
-> | 6 | Windows 进程组 kill | 生产缺陷,不影响 ubuntu CI |
+> | 6 | Windows 进程组 kill | ~~生产缺陷~~ **不成立**(2026-09-12 实测推翻,见下) |
 > | 7 | 清单外回归 | **真风险**,今晚已两次实证 |
 >
 > **第 5 条另立票**:检视者核实 `executors.ts:691` 确为
@@ -83,6 +83,16 @@
 >   `COAGENTHUB_DISPATCH_POLICY_FILE`,否则本机 cwd 读不到策略、静默回落到
 >   `maxRetries: 1`,而**没有任何输出提示你回落了**。
 > - **第 6 项 Windows 进程组 kill** 仍是生产缺陷,不影响 ubuntu CI,未动。
+>   → **2026-09-12 更正:这条不成立,不要另立票去修。** 为立票做前置实测时
+>   推翻了它:Windows 上杀执行器**会**带走它普通 spawn 的后代,机制是 libuv 的
+>   job object(`KILL_ON_JOB_CLOSE`),不是 POSIX 进程组;`process.kill(-pid)`
+>   抛错落 `child.kill()` 兜底**不构成缺陷**。改前(`detached`)改后
+>   (`windowsHide`)都一样,换 `taskkill /F` 不带 `/T` 也一样。唯一杀不到的是
+>   **后代自己 breakaway 出去**的情形,而那个 `taskkill /T` 同样杀不到。
+>   实测四组对照与机制判别见
+>   [executor-spawn-shows-empty-console-on-windows.md](executor-spawn-shows-empty-console-on-windows.md)
+>   的「2026-09-12 补测」。同处还记了一条那张票**漏报**的语义变化:
+>   Windows 去掉 `detached` 后,执行器不再能在 server 退出后存活。
 >
 > **本机遗留(不拦 CI,如实记下)**:`web/src/router.test.tsx` 有 1 条本地红
 > ——懒加载 chunk 超 `findBy` 默认 1000ms;已 A/B 确认改动前后一模一样,

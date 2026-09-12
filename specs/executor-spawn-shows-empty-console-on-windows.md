@@ -45,11 +45,69 @@
 >
 > ### 遗留
 >
-> **Windows 的进程树 kill 仍是缺陷**:`process.kill(-pid)` 在 Windows 必抛、
-> 落到 `child.kill()`,只终止直接子进程、不含后代。去掉 `detached` **没有让
-> 它变差**(此前那条路径就已经是兜底),但也没修 —— 需要 `taskkill /T` 之类的
-> 平台特定手段,另立票。见
-> [restore-ci-green-and-resume-pushing.md](restore-ci-green-and-resume-pushing.md) 第 6 项。
+> ~~**Windows 的进程树 kill 仍是缺陷**:只终止直接子进程、不含后代,需要
+> `taskkill /T`,另立票。~~
+>
+> ### 🔬 2026-09-12 补测:上面这段是错的,且本票漏报了一个语义变化
+>
+> 收口后检视者为「另立进程树 kill 票」做前置实测,结果推翻了两件事。
+> 探针在 `.scratch/`(已清理),判据用 **tasklist + 心跳文件**双口径,
+> 并带对照组;最后一轮直接 `import` 源码里的 `buildExecutorSpawnOptions`,
+> 不手抄选项。
+>
+> **① 「kill 只终止直接子进程」不成立 —— 那张票不该立。**
+>
+> | # | 组合 | 杀 executor 后,它普通 spawn 的孙进程 |
+> |---|---|---|
+> | G | executor `detached: true`(**改前**) | **也死** |
+> | H | executor `windowsHide: true`(**改后**) | **也死** |
+> | D | 换 `taskkill /F`(不带 `/T`)杀 executor | **也死** |
+> | E | 孙进程自己用 `detached: true` 起 | **活下来** |
+>
+> D 排除了「node 的 kill 实现在级联」——任何终止方式都一样。真正的机制是
+> **libuv 的 job object**(非 detached 的子进程被放进一个 `KILL_ON_JOB_CLOSE`
+> 的 job,句柄只由父进程持有;父进程一死 job 关闭、成员全灭),**不是 POSIX
+> 进程组**。所以 `process.kill(-pid)` 抛错落兜底**根本不是缺陷**,改前改后
+> 后代都会被带走。
+>
+> 唯一的真例外是 E:后代自己 breakaway 出去的杀不到。这不是「只杀直接子进程」,
+> 也不是 `taskkill /T` 能解决的(它同样杀不到已 breakaway 的进程)。
+>
+> → **不要去加 `taskkill /T`。** 见
+> [restore-ci-green-and-resume-pushing.md](restore-ci-green-and-resume-pushing.md)
+> 第 6 项(已同步更正)。
+>
+> **② 本票改变了「server 退出后执行器是否存活」,但汇报里没写 —— §7 明确要求写。**
+>
+> | executor spawn 选项 | server 退出后 executor |
+> |---|---|
+> | `detached: true`(**改前**) | **存活**(breakaway,不在 server 的 job 里) |
+> | `windowsHide: true`(**改后**) | **跟着死** |
+>
+> 又用 detached 的中间进程做过一轮:server-sim 先 breakaway 出外壳的 job,
+> 它起的 executor 照样跟着死 —— 证明这个 job 是 **libuv 在 spawn 侧建的**,
+> 结论对生产成立,不是被 shell 环境污染的探针结果。
+>
+> **判断:对本部署是净改进,不回滚。** 理由:
+>
+> - `start.ps1` 起的是 `node dist/server.mjs`(built 产物),**不是 `tsx watch`**,
+>   所以不存在「改个文件就重启、连带杀掉在跑的执行器」——这是本条能判净改进的
+>   前提,换成 watch 模式起 server 时结论要重估;
+> - CLI(非 detached)任务改前「存活」其实是**假存活**:server 一死 stdout 管道
+>   就断了,结果无法回收,任务挂在 `running` 直到 `detachedTimeoutMinutes`
+>   (默认 24h)兜底,期间白烧额度。2026-09-11 停 Postgres 误杀 server 那次,
+>   正是这个形态;
+> - 改后执行器跟着死 → 重启时 `recoverInterruptedTasks` 的 R3 命中
+>   (`!isExecutorProcessAlive` → `server-restart` failed),**如实判死、可重试**。
+>
+> **代价(如实记)**:长时 **detached** 任务不再能熬过一次刻意重启 ——
+> 它本来不依赖管道、能自己 PATCH 回写,改后这部分可恢复的工作会丢。
+> 当前没有长时 detached 任务在跑,不构成拦截项;若将来有,再按需回到
+> 「按 `run.detached` 分叉 spawn 选项」。
+>
+> **L3 自查**:§7 写着「子进程在 server 退出后的存活行为……后者若有变化必须
+> 写明」。执行侧没写,**检视者也没查** —— 验收 3/4 都只盯 kill 路径和 POSIX
+> 分支,没人去量那句兼容性条款。票面提了要求 ≠ 有人验了。
 >
 > ### ⚠️ 本票绕过了平台
 >
