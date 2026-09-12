@@ -517,6 +517,40 @@ handleSuccessOutcome(run, { result, output, isA2a, repoRoot, getPeerExecutorName
 **搬运票的逐字自证只覆盖函数体,覆盖不到被落在原处的注释** ——
 这是该做法的一个已知盲区。
 
+## 5f. S4 的另一半:`tasks.ts`(L3,2026-09-12,`e732c3a6`)
+
+`src/routes/group/tasks.ts` **1969 → 1155(−41%)**,两个新模块:
+
+| 模块 | 行 | 内容 |
+|---|---|---|
+| `coordination-close.ts` | 523 | 结案完整性一族(10 函数,原 143–605 连续块) |
+| `l3-answer.ts` | 343 | L3 派生一族(10 函数,原 606–902 + `summaryHasReviewRequest`) |
+
+依赖 `tasks(路由) → coordination-close → l3-answer`,单向无环。
+执行侧还把这条约束写进了 `l3-answer.ts` 的模块头注释 —— 值得学。
+
+**检视者独立核实(最硬的一条)**:把两版的**路由区**整段取出来 diff ——
+**1065 行 : 1065 行,exit 0,逐字节相同**。路由是这个文件的行为所在,
+它一字未动,就意味着本次搬运的行为风险接近零。
+
+其余:20 个函数逐字全 ✓(仅行首 `export `);`tsc` / `biome` exit 0;
+测试 **105 passed | 0 failed**;行数账目吻合
+(移出 814 = 两新文件 866 − 两份 import 块 52)。
+
+局部类型一并搬走:`NEEDS_CLAIM_ADJUDICATION` / `AlreadySatisfiedClaim` /
+`CloseIntegrityResult` → close;`L3_MERGED_INTO_KEY` / `ReviewResultIndex` /
+`L3Task` → l3。**这正是 §3.5 记的那个盲区(生成器只认 function/const)**,
+本票在票面里预先点名要求检查,执行侧照做,没有再踩。
+
+### S4 结算
+
+| 文件 | 前 | 后 |
+|---|---|---|
+| `executor-task/queue.ts` | 3916 | **1351**(−65%) |
+| `routes/group/tasks.ts` | 1969 | **1155**(−41%) |
+
+报告 S4「缩小 queue.ts 与 tasks.ts 的职责」两半均已完成。
+
 ## 6. 不涉及的改动
 
 - 阶段 1 不改任何函数签名、行为、导出名(必须加的 `export` 除外)。
