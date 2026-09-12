@@ -15,8 +15,8 @@ import {
   __resetExecutorQueueForTests,
   consumePendingCompletionEvents,
 } from "../src/lib/executor-task";
+import { enterCooldown } from "../src/lib/executor-task/cooldown";
 import { appendTaskOutput } from "../src/lib/executor-task/output-buffer";
-import { enterCooldown } from "../src/lib/executor-task/queue";
 import {
   cooldownEndMs,
   getRateLimitCooldownMs,

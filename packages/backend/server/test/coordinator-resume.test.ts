@@ -76,7 +76,7 @@ const {
 const { __setTransientQuotaForTests, isInCooldown } = await import(
   "../src/lib/executor-task/state"
 );
-const { enterCooldown } = await import("../src/lib/executor-task/queue");
+const { enterCooldown } = await import("../src/lib/executor-task/cooldown");
 const { findExecutorByKey } = await import("@server/lib/executors");
 const { buildSupersededEchoSection, buildDiffSummaryEcho } = await import(
   "../src/lib/executor-task/coordinator-resume"

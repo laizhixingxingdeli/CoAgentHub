@@ -54,16 +54,16 @@ import {
   verifyCommitExists,
   verifyReportedCommit,
 } from "@server/lib/executor-task/claim-verification";
+import {
+  enterCooldown,
+  MIN_EFFECTIVE_COOLDOWN_MS,
+  normalizeCooldownEnd,
+} from "@server/lib/executor-task/cooldown";
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "@server/lib/executor-task/cooldown-store";
 import {
   liveTaskOutputTail,
   releaseTaskOutput,
 } from "@server/lib/executor-task/output-buffer";
-import {
-  enterCooldown,
-  MIN_EFFECTIVE_COOLDOWN_MS,
-  normalizeCooldownEnd,
-} from "@server/lib/executor-task/queue";
 import { taskOutputTailLines } from "@server/lib/executor-task/report";
 import {
   classifyQuotaFailure,

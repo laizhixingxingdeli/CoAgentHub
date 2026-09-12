@@ -81,7 +81,7 @@ const {
   restoreExecutorCooldowns,
   normalizeCooldownEnd,
   MIN_EFFECTIVE_COOLDOWN_MS,
-} = await import("../src/lib/executor-task/queue");
+} = await import("../src/lib/executor-task/cooldown");
 const { getRateLimitCooldownMs } = await import(
   "../src/lib/executor-task/state"
 );

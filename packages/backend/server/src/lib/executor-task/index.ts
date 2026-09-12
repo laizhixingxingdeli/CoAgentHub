@@ -40,6 +40,10 @@ export {
   sameRecipients,
 } from "./completion-recipient";
 export {
+  clearExecutorCooldown,
+  restoreExecutorCooldowns,
+} from "./cooldown";
+export {
   type CloseGuardBlockedChild,
   type CloseGuardResumeMarker,
   type CloseGuardResumeState,
@@ -114,11 +118,9 @@ export {
   requestPump,
 } from "./pump-signal";
 export {
-  clearExecutorCooldown,
   enqueueTaskRun,
   isExecutorProcessAlive,
   maybeDispatchExecutorTask,
-  restoreExecutorCooldowns,
 } from "./queue";
 export {
   type QueuedReclaimResult,

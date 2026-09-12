@@ -39,10 +39,11 @@ import {
 import { hasDuplicateActiveRun } from "./cancel";
 import { verifyReportedCommit } from "./claim-verification";
 import {
-  clearPersistedExecutorCooldown,
-  EXECUTOR_COOLDOWN_END_MS_FIELD,
-  listPersistedExecutorCooldowns,
-} from "./cooldown-store";
+  enterCooldown,
+  MIN_EFFECTIVE_COOLDOWN_MS,
+  normalizeCooldownEnd,
+} from "./cooldown";
+import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
 import { applyDiffSummaryPatch } from "./diff-summary";
 import {
@@ -75,6 +76,11 @@ import {
 import { createExecutorOutputParser } from "./output-parser";
 import { registerPump, requestPump } from "./pump-signal";
 import {
+  handleConcurrencyConflict,
+  handleTransientQuotaBackoff,
+  routeQuotaFailure,
+} from "./quota-failure";
+import {
   extractGenericJsonlText,
   findCommitHash,
   findProviderError,
@@ -99,10 +105,6 @@ import {
   clearRunTimers,
   clearStaleTestRepoIndexLock,
   cooldownEndMs,
-  cooldownTimers,
-  type ExecutorCooldownSource,
-  executorCooldownRecords,
-  executorCooldowns,
   formatEta,
   getA2ASilenceTimeoutMs,
   getClaimTimeoutMs,
@@ -112,11 +114,9 @@ import {
   getRedispatchFailureLimit,
   getStallAlertMs,
   getStallTimeoutMs,
-  getTransientQuotaPolicy,
   groupQueues,
   isInCooldown,
   pumping,
-  type QuotaFailureVerdict,
   registerCoordinatorProcess,
   releaseCoordinatorProcess,
   runningExecutorCount,
@@ -152,224 +152,7 @@ import {
   sumAttemptTokenUsageReason,
 } from "./types";
 
-/* ---------------- 额度感知调度(票7) ---------------- */
-
-/**
- * 执行器进入额度冷却:记录冷却结束时间并调度到期泵送(冷却结束后 pumpQueue
- * 自动把等待中的任务派发出去,无需人工干预)。重复进入只重置结束时间与定时器
- * (定时器防堆积)。返回冷却结束时间(epoch ms)。
- *
- * endMs 为绝对到期时刻(冷却动态化):调用方先尝试从失败输出解析恢复时间
- * (parseRateLimitRecoveryMs),解析失败才回退 now + 固定冷却时长。
- *
- * R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底,避免产出
- * 形同虚设的冷却(如 1ms / 15s)。
- */
-export const MIN_EFFECTIVE_COOLDOWN_MS = 60_000;
-
-export function normalizeCooldownEnd(
-  endMs: number,
-  nowMs = Date.now(),
-): number {
-  if (endMs <= nowMs + MIN_EFFECTIVE_COOLDOWN_MS) {
-    return nowMs + getRateLimitCooldownMs();
-  }
-  return endMs;
-}
-
-export function enterCooldown(
-  ex: Pick<ExecutorConfig, "key" | "label">,
-  endMs: number,
-  sourceOrPersisted:
-    | ExecutorCooldownSource
-    | { db: DataBase; taskId: string } = "fallback",
-  persisted?: { db: DataBase; taskId: string },
-): number {
-  // Keep the pre-source call shape usable by existing internal/test callers;
-  // production call sites pass the source explicitly.
-  const source: ExecutorCooldownSource =
-    typeof sourceOrPersisted === "string" ? sourceOrPersisted : "fallback";
-  const effectivePersisted =
-    typeof sourceOrPersisted === "string" ? persisted : sourceOrPersisted;
-  const previous = executorCooldownRecords.get(ex.key);
-  const isActive = previous !== undefined && previous.endMs > Date.now();
-  const discarded =
-    source === "fallback" && previous?.source === "parsed" && isActive
-      ? endMs
-      : undefined;
-  const end =
-    discarded !== undefined
-      ? (previous?.endMs ?? endMs)
-      : previous === undefined ||
-          previous.endMs <= Date.now() ||
-          (source === "parsed" && previous.source === "fallback")
-        ? endMs
-        : Math.max(previous.endMs, endMs);
-  const record = {
-    endMs: end,
-    source: discarded === undefined ? source : (previous?.source ?? source),
-    taskId: effectivePersisted?.taskId ?? previous?.taskId,
-  } satisfies import("./state").ExecutorCooldownRecord;
-  executorCooldownRecords.set(ex.key, record);
-  executorCooldowns.set(ex.key, end);
-  if (discarded !== undefined) {
-    console.log(
-      `[executor] 丢弃 ${ex.key} fallback 冷却 ${endMs},已有 parsed 冷却 ${end}:仍未到期`,
-    );
-    if (effectivePersisted)
-      void appendCooldownAudit(
-        effectivePersisted.db,
-        effectivePersisted.taskId,
-        end,
-        source,
-        discarded,
-      );
-  }
-  const prev = cooldownTimers.get(ex.key);
-  if (prev) clearTimeout(prev);
-  const timer = setTimeout(
-    () => {
-      // 竞态保护:冷却可能已被更新的 enterCooldown 重置/延长;只有本定时器仍是
-      // 当前登记项时才清理,避免陈旧回调误删新冷却条目(提前解除冷却)。
-      if (cooldownTimers.get(ex.key) !== timer) return;
-      cooldownTimers.delete(ex.key);
-      executorCooldowns.delete(ex.key);
-      executorCooldownRecords.delete(ex.key);
-      console.log(`[executor] 执行器 ${ex.key} 额度冷却结束,恢复派发`);
-      if (effectivePersisted) {
-        void clearPersistedExecutorCooldown(
-          effectivePersisted.db,
-          effectivePersisted.taskId,
-        ).catch((error) => {
-          console.warn(
-            `[executor] 清理持久化额度冷却失败(${ex.key}): ${error}`,
-          );
-        });
-      }
-      requestPump();
-    },
-    Math.max(1, end - Date.now()),
-  );
-  cooldownTimers.set(ex.key, timer);
-  console.log(
-    `[executor] 执行器 ${ex.key} 触发额度冷却,预计 ${formatEta(end)} 恢复`,
-  );
-  return end;
-}
-
-async function appendCooldownAudit(
-  db: DataBase,
-  taskId: string,
-  endMs: number,
-  source: ExecutorCooldownSource,
-  discardedEndMs: number,
-): Promise<void> {
-  const row = await db.query.task.findFirst({
-    where: (task, { eq }) => eq(task.id, taskId),
-    columns: { diffSummary: true },
-  });
-  const next = applyDiffSummaryPatch(row?.diffSummary, {
-    executorCooldownSource: source,
-    executorCooldownEndMs: endMs,
-    discardedCooldownEndMs: discardedEndMs,
-    cooldownDiscardReason: "已有未到期 parsed 冷却,拒绝 fallback 覆盖",
-  });
-  await db
-    .update(taskTable)
-    .set({ diffSummary: next })
-    .where(eq(taskTable.id, taskId));
-}
-
-/**
- * 服务启动恢复额度冷却:每个 executorKey 采用最新一条未过期的 task 记录,
- * 重建内存判定状态与到期定时器;过期或被更新记录立即清理,不得复活。
- */
-export async function restoreExecutorCooldowns(
-  db: DataBase,
-  nowMs = Date.now(),
-): Promise<number> {
-  const records = await listPersistedExecutorCooldowns(db);
-  const seenKeys = new Set<string>();
-  const restoredKeys = new Set<string>();
-
-  for (const record of records) {
-    // 最新记录决定该执行器的重启前最终状态。即使最新记录已过期,也不能继续
-    // 向后寻找更老但到期更晚的记录,否则会把已结束的旧冷却复活。
-    if (seenKeys.has(record.executorKey)) {
-      await clearPersistedExecutorCooldown(db, record.taskId);
-      continue;
-    }
-    seenKeys.add(record.executorKey);
-    if (record.endMs <= nowMs) {
-      await clearPersistedExecutorCooldown(db, record.taskId);
-      continue;
-    }
-    restoredKeys.add(record.executorKey);
-    enterCooldown(
-      { key: record.executorKey, label: record.executorKey },
-      record.endMs,
-      record.source ?? "fallback",
-      { db, taskId: record.taskId },
-    );
-  }
-
-  if (restoredKeys.size > 0) {
-    console.log(
-      `[executor] 启动恢复:${restoredKeys.size} 个执行器仍处于额度冷却`,
-    );
-  }
-  return restoredKeys.size;
-}
-
-/**
- * R4(specs/quota-misclassified-from-coordinator-narration.md):手动清除执行器
- * 额度冷却 —— 内存登记 + 到期定时器 + 持久化标记(task.diffSummary 的
- * executorCooldownEndMs/executorCooldownSource)一并清掉;否则重启时会被
- * restoreExecutorCooldowns 复活。清完后泵队列,让被冷却挡住的 queued 任务
- * 立即重试。幂等:本就无冷却时返回 cleared=false,不泵队列。
- *
- * ADR-0009:拿「读到的最新未过期标记」代替「逐条历史记录」判定要不要清;
- * 不成立的情形是有人手工改库回填更老记录 —— 老记录本就应被清除,顺带清掉
- * 无害(下一次真冷却会写入新标记)。
- */
-export async function clearExecutorCooldown(
-  db: DataBase,
-  key: string,
-): Promise<{ cleared: boolean; taskIds: string[] }> {
-  const hadInMemory =
-    executorCooldowns.has(key) || executorCooldownRecords.has(key);
-  const timer = cooldownTimers.get(key);
-  if (timer) {
-    clearTimeout(timer);
-    cooldownTimers.delete(key);
-  }
-  executorCooldowns.delete(key);
-  executorCooldownRecords.delete(key);
-
-  // 持久化标记:该执行器最新一条未过期记录即判定状态;清掉它,重启不会复活。
-  const taskIds: string[] = [];
-  const persisted = await listPersistedExecutorCooldowns(db);
-  for (const record of persisted) {
-    if (record.executorKey !== key) continue;
-    if (record.endMs <= Date.now()) continue;
-    await clearPersistedExecutorCooldown(db, record.taskId);
-    taskIds.push(record.taskId);
-  }
-
-  const cleared = hadInMemory || taskIds.length > 0;
-  if (cleared) {
-    console.log(
-      `[executor] 手动清除执行器 ${key} 的额度冷却(内存=${hadInMemory},持久化任务=${taskIds.length}),立即恢复派发`,
-    );
-    requestPump();
-  }
-  return { cleared, taskIds };
-}
-
 /* ---------------- 执行器级并发(设计修正:按执行器实际并发能力排队) ---------------- */
-
-/** 403 后重试最小退避(ms):无既有 running 任务(外部会话占用)时防空转热循环。 */
-const CONCURRENCY_RETRY_BACKOFF_MS = 3_000;
 
 /**
  * 组队首任务当前是否可派发(泵送选组谓词):
@@ -1940,270 +1723,6 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
   return db.query.task.findFirst({
     where: (t, { eq: eqFn }) => eqFn(t.messageId, messageId),
   });
-}
-
-/**
- * 额度失败分流(spec transient-ratelimit-escalated-to-long-cooldown R2):
- *  - `transient` → per-run 退避重排队(不进执行器级冷却,任务不判 failed);
- *  - `exhausted`(或未启用瞬时处置)→ 既有额度失败出口(逐字不变)。
- *
- * 进程退出(exit≠0)与成功尾部(exit 0)两处共用本出口;超时分支单独保留
- * 全量输出解析(历史行为,不在本 spec 改动范围),但共享 isTransientQuota 判定,
- * 三处口径一致(验收 7)。
- */
-async function routeQuotaFailure(
-  run: QueuedRun,
-  reasonLabel: string,
-  tail: string,
-  verdict: QuotaFailureVerdict,
-): Promise<void> {
-  if (isTransientQuota(verdict)) {
-    await handleTransientQuotaBackoff(
-      run,
-      reasonLabel,
-      tail,
-      verdict.matchedLine,
-    );
-    return;
-  }
-  await handleQuotaFailure(run, reasonLabel, tail, verdict.matchedLine);
-}
-
-/**
- * 瞬时限流的 per-run 退避处置(spec R2):供应方只要求短暂退避,执行器没坏,
- * 因此**不调 enterCooldown**(`isInCooldown` 保持「额度耗尽」单一语义,R2 豁免
- * 判据 mayQueuedChildExecutorStart 因此不必改动),任务也不判 failed ——
- * 回写 queued 并重新入队,退避窗口过后由定时器泵送自动重试(不消耗重试次数)。
- *
- * 连续瞬时限流达上限 → 升级为 exhausted 处理(防退避死循环);配置不可用
- * (fail-safe)→ 同样走 exhausted。
- */
-async function handleTransientQuotaBackoff(
-  run: QueuedRun,
-  reasonLabel: string,
-  tail: string,
-  matchedLine: string | null,
-): Promise<void> {
-  const policy = getTransientQuotaPolicy();
-  if (!policy) {
-    await handleQuotaFailure(run, reasonLabel, tail, matchedLine);
-    return;
-  }
-  run.transientQuotaCount += 1;
-  if (run.transientQuotaCount >= policy.escalationLimit) {
-    console.warn(
-      `[executor] 连续瞬时限流达 ${run.transientQuotaCount} 次(上限 ${policy.escalationLimit}),升级为额度耗尽处理: ${run.taskId}`,
-    );
-    await handleQuotaFailure(
-      run,
-      `${reasonLabel}(连续瞬时限流 ${run.transientQuotaCount} 次,按额度耗尽处理)`,
-      tail,
-      matchedLine,
-    );
-    return;
-  }
-  const seconds = Math.max(1, Math.round(policy.backoffMs / 1_000));
-  // 先落退避窗口:退避从「判定那一刻」起算,不被随后的 DB 回写延迟吞掉。
-  const retryAt = Date.now() + policy.backoffMs;
-  run.concurrencyRetryAt = retryAt;
-  await endAttempt(run, {
-    status: "failed",
-    error: `瞬时限流,${seconds}s 后退避重试`,
-  });
-
-  // 运行状态回到 queued(运行中曾置 running):任务不判 failed,退避后重试。
-  try {
-    const curTransient = await run.db.query.task.findFirst({
-      where: and(
-        eq(taskTable.id, run.taskId),
-        eq(taskTable.groupId, run.groupId),
-      ),
-      columns: { diffSummary: true },
-    });
-    const transientNext = applyDiffSummaryPatch(curTransient?.diffSummary, {
-      waiting: `执行器瞬时限流,${seconds}s 后退避重试`,
-      // R4 留痕:与 quotaMatchedLine 并列,事后可审计分级准确性。
-      quotaKind: "transient",
-      ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
-    });
-    const [updated] = await run.db
-      .update(taskTable)
-      .set({
-        status: "queued",
-        diffSummary: transientNext,
-      })
-      .where(
-        and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
-      )
-      .returning();
-    if (updated) {
-      await notifyTaskStatusChanged(
-        run.db,
-        run.taskId,
-        run.groupId,
-        "queued",
-        updated,
-      );
-    }
-  } catch (e) {
-    console.warn(`[executor] 瞬时限流回写 queued 失败(${run.taskId}): ${e}`);
-  }
-
-  // 不置 concurrencyBlocked —— 那是 403 并发冲突标记,会额外等待同执行器的
-  // 其他 running 任务清空,与「退避到点即重试」的语义不同。
-  run.stalled = false;
-  run.a2aSilenced = false;
-  run.runningAt = null;
-  run.lastOutputAt = 0;
-  run.lastActivityAt = 0;
-  run.kill = null;
-  clearRunTimers(run);
-  const group = groupQueues.get(run.groupKey);
-  if (!group) {
-    // 组已被清空(测试重置等异常)→ 无法退避重试,按最终失败处理。
-    await failTask(
-      run.db,
-      run.taskId,
-      "执行器瞬时限流,但组队列已不可用",
-      0,
-      { quotaKind: "transient" },
-      run.attempts,
-    );
-    return;
-  }
-  group.queue.push(run);
-  await postStatus(
-    run.db,
-    run.groupId,
-    run.participantId,
-    run.ex,
-    `⏳ [${run.ex.label}] 执行器瞬时限流,任务保持排队,${seconds}s 后自动重试: ${run.summary}`,
-  );
-  // 退避到期主动泵送(与 403 反应式排队同款兜底):此时 run 已在队首等待。
-  setTimeout(() => requestPump(), Math.max(1, retryAt - Date.now()));
-}
-
-/**
- * 额度/速率限制失败统一出口(票7 + quota-failure-on-clean-exit 规范):冷却该
- * 执行器、不自动重试、❌ 回传注明预计恢复时间。tail 为命中检测与恢复时间解析
- * 所用的输出尾部(与失败回传同界:`lastLinesOf(out, 20)`),reasonLabel 为失败
- * 原因前缀(如 "exit 0" / "exit 2" / "执行超时")。
- *
- * 失败分支(1365)/ 成功路径(本规范)共用本出口,保证额度处理逐条一致;超时分支
- * (1261)单独保留全量输出解析(历史行为,不在本规范改动范围)。
- */
-async function handleQuotaFailure(
-  run: QueuedRun,
-  reasonLabel: string,
-  tail: string,
-  matchedLine: string | null,
-): Promise<void> {
-  // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
-  // R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底。
-  const parsedMs = parseRateLimitRecoveryMs(tail);
-  const cooldownEnd = normalizeCooldownEnd(
-    parsedMs ?? Date.now() + getRateLimitCooldownMs(),
-  );
-  const eta = formatEta(cooldownEnd);
-  const extra: Record<string, unknown> = {
-    [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
-    executorCooldownSource:
-      parsedMs !== null && parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-        ? "parsed"
-        : "fallback",
-    // 额度分级留痕(spec transient-ratelimit-… R4):本出口只处理 exhausted,
-    // 与 transient 的 per-run 退避留痕并列,事后可审计分级准确性。
-    quotaKind: "exhausted",
-    // 伪额度回显修复 R5:记录命中的原始行(截断),便于人判断是真实额度还是
-    // 源码/任务书回显造成的伪命中。
-    ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
-  };
-  if (parsedMs !== null && parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS) {
-    extra.cooldownFallbackReason = "解析所得时刻不可用,已回退固定冷却";
-    extra.discardedCooldownEndMs = parsedMs;
-  }
-  await handleFailure(run, `${reasonLabel}(执行器额度限制,预计 ${eta} 恢复)`, {
-    retryable: false,
-    message: `❌ [${run.ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)\n${tail}`,
-    extra,
-    afterPersisted: () =>
-      enterCooldown(
-        run.ex,
-        cooldownEnd,
-        parsedMs !== null && parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-          ? "parsed"
-          : "fallback",
-        { db: run.db, taskId: run.taskId },
-      ),
-  });
-}
-
-/**
- * 反应式排队(403 后排队,设计修正):执行器返回 `403
- * atomgit_session_concurrency_conflict` → 不判任务失败:
- *  - 本次 attempt 结束(原因记 concurrency-conflict,不计入 retry_count,
- *    不触发失败重试的回滚/❌/↻ 流程);
- *  - DB 状态回写 queued(运行中曾置 running)+ WS 推送;
- *  - 重置运行态并重新入队(队尾,FIFO 不变),置 concurrencyBlocked:泵送在
- *    既有同执行器 running 任务终态前不再派发本任务;
- *  - 无既有 running 任务(外部会话占用)→ 退避窗口(concurrencyRetryAt)后由
- *    定时器泵送重试,防空转热循环。
- * 可并发执行器(无 maxConcurrency)首次尝试即可能触发本路径;显式 maxConcurrency
- * 的执行器由 isRunDispatchable 直接排队,正常情况下不会收到 403。
- */
-async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
-  const { db, groupId, taskId, ex } = run;
-  // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
-  await endAttempt(run, { status: "failed", error: "concurrency-conflict" });
-
-  // 保持 queued:回写 DB 状态(运行中曾置 running),并 WS 推送状态变化。
-  try {
-    const [updated] = await db
-      .update(taskTable)
-      .set({ status: "queued" })
-      .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-      .returning();
-    if (updated) {
-      await notifyTaskStatusChanged(db, taskId, groupId, "queued", updated);
-    }
-  } catch (e) {
-    console.warn(`[executor] 403 后回写 queued 失败(${taskId}): ${e}`);
-  }
-
-  // 重置运行态并重新入队(队尾);不释放输出缓冲(保留冲突现场供排查)。
-  run.concurrencyBlocked = true;
-  run.concurrencyRetryAt = Date.now() + CONCURRENCY_RETRY_BACKOFF_MS;
-  run.stalled = false;
-  run.a2aSilenced = false;
-  run.runningAt = null;
-  run.lastOutputAt = 0;
-  run.lastActivityAt = 0;
-  run.kill = null;
-  clearRunTimers(run);
-  const group = groupQueues.get(run.groupKey);
-  if (!group) {
-    // 组已被清空(测试重置等异常)→ 无法重排,按最终失败处理(尽力而为)。
-    await failTask(
-      db,
-      taskId,
-      "执行器并发冲突(403),且组队列已不可用",
-      0,
-      undefined,
-      run.attempts,
-    );
-    return;
-  }
-  group.queue.push(run);
-  await postStatus(
-    db,
-    groupId,
-    run.participantId,
-    ex,
-    `📋 [${ex.label}] 执行器忙(403 并发冲突),任务保持排队,空闲后自动重试: ${run.summary}`,
-  );
-  // 退避定时器:无既有 running 任务(外部会话占用)时,退避到期主动泵送重试;
-  // 有既有任务时由它们的完成路径(finally → 泵送信号)触发,本定时器仅兜底。
-  setTimeout(() => requestPump(), CONCURRENCY_RETRY_BACKOFF_MS);
 }
 
 function summaryOf(body: string): string {

@@ -8,7 +8,7 @@ import {
   EXECUTOR_CONFIG_FIELD_CAPABILITIES,
   inputModeWriteError,
 } from "@server/lib/executor-config-fields";
-import { clearExecutorCooldown } from "@server/lib/executor-task/queue";
+import { clearExecutorCooldown } from "@server/lib/executor-task/cooldown";
 import {
   addExecutorConfig,
   effectiveExecutors,

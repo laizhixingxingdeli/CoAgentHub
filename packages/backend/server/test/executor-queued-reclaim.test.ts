@@ -32,7 +32,8 @@ import {
   vi,
 } from "vitest";
 import type { DataBase } from "../src/lib/database";
-import { enqueueTaskRun, enterCooldown } from "../src/lib/executor-task/queue";
+import { enterCooldown } from "../src/lib/executor-task/cooldown";
+import { enqueueTaskRun } from "../src/lib/executor-task/queue";
 import {
   executorCooldownRecords,
   executorCooldowns,

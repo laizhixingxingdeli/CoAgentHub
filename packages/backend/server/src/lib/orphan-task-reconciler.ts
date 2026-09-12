@@ -27,12 +27,12 @@ import {
   notifyTaskStatusChanged,
   taskOutputTail,
 } from "./executor-task";
-import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
 import {
   enterCooldown,
   MIN_EFFECTIVE_COOLDOWN_MS,
   normalizeCooldownEnd,
-} from "./executor-task/queue";
+} from "./executor-task/cooldown";
+import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./executor-task/cooldown-store";
 import { lastLinesOf, taskOutputTailLines } from "./executor-task/report";
 import {
   classifyQuotaFailure,
