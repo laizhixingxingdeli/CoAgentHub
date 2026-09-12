@@ -24,6 +24,11 @@ Bug reports reach the **reviewer** first — the user-side single entry point. H
 
 ## Constraints
 
+- **比对 skill 指纹**（spec `skill-self-update`）：若你是经任务书进入的，
+  任务书「## 执行上下文」段里有 `COAGENTHUB_SKILL_DIGEST: bugfix=<12位>`。
+  开工前与本地 `SKILL.md` 的 `sha256` 前 12 位比一次；不同 → 按 `AGENTS.md`
+  「skill 自更新」执行五步后按新版继续。**比对失败不阻断任务**，
+  按现有副本继续并在汇报里注明。
 - 以 **reviewer**（分流 / spec）与 **coordinator**（dispatch / verify）两个 skill 为权威来源；本文件仅作索引，不重复造流程。
 - **Regression test is mandatory**: the fix must include a test that would have caught the original bug（该约束由 executor skill 的执行纪律承接）。
 - **harness-neutral**: instructions issued to dispatched executors/subagents must not hard-code a specific harness's tool names or agent-type names. The `coagenthub_*` tool names are the platform contract and are exempt.

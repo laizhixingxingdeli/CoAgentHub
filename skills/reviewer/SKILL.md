@@ -26,6 +26,44 @@ Your job: align requirements (**§3 grill**), triage, **confirm and freeze** spe
 - Participant ID in `~/.coagenthub/participant-id` or `COAGENTHUB_PARTICIPANT_ID` env var.
 - The user talks to you in **your runtime's native session** — the platform group is the agent collaboration space (human role in the group is read-only).
 
+## ⚠️ 比对 skill 指纹(spec `skill-self-update` R2)
+
+**你不接任务书,所以拿不到指纹行。** 其余角色靠任务书的
+`COAGENTHUB_SKILL_DIGEST` 触发,你必须自己查。
+
+**在这三个协议动作之前各比对一次**(一次 `GET`,成本可忽略):
+
+| 动作 | 为什么在这里查 |
+|---|---|
+| **冻结 spec** | 冻结规则改过多次;按旧规则冻结的 spec 会成为后续所有票的错误锚点 |
+| **下发任务** | 票面纪律(边界、验收口径)按旧版写,错会扩散到每一张票 |
+| **执行 L3** | 检视判据按旧版 = 用错误的尺子量 |
+
+比对:`GET {apiBase}/skills/reviewer` 的 `version` ↔ 本地 `SKILL.md` 的
+`sha256` 前 12 位。**相同 → 静默继续;不同 → 你手上是过期副本**,
+按下面五步自更新,然后按新版继续。
+
+1. `GET {apiBase}/skills/reviewer` 取全文;
+2. 备份为 `SKILL.md.bak-<本地指纹>`;
+3. 覆盖安装副本;
+4. **把新全文读回上下文** —— 前三步只动磁盘,**这一步才改变你的行为**;
+5. 会话中显式声明:`协议已更新 <旧> → <新>,本次会话按新版执行`,
+   并列出**至少一条关键差异**。
+
+⚠️ **这条为什么必须同时写在这里和 `AGENTS.md` 里**:过期副本无法自举 ——
+把「检查你是否过期」只写进 skill,而旧副本恰好就是**没有这条检查**的那一版。
+`AGENTS.md` 随 git 更新,不依赖安装副本,是绕开这个死锁的那一半。
+**两处都写不是冗余。**
+
+⚠️ **比对失败不阻断工作** —— 端点不可达时按现有副本继续,并说明
+「指纹比对失败,使用本地副本 `<指纹>`」。
+
+⚠️ **本地被手工改过时(指纹 ≠ 上次同步记录 且 ≠ 平台)→ 只报告,不覆盖。**
+手工改动是需要人裁决的信号,不是要被静默抹掉的噪声。
+
+完整规则(手工改动检测、写入边界、runtime 目录表)见 `AGENTS.md`
+「skill 自更新」节。
+
 ## Process
 
 Your process has two responsibilities: **A) 对话用户 + 需求分流 + 生成 spec**（步骤 1–7）与 **B) 第三层架构检视（L3，检视任务模式）**（步骤 8–11）。
