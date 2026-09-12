@@ -34,6 +34,7 @@ import {
   endAttempt,
   markAttemptTokenUnavailable,
 } from "./attempt-accounting";
+import { trackBackgroundWork } from "./background-work";
 import { hasDuplicateActiveRun } from "./cancel";
 import { appendTaskDetail } from "./detail-store";
 import { applyDiffSummaryPatch } from "./diff-summary";
@@ -750,7 +751,12 @@ async function pumpQueue(): Promise<void> {
       if (!run) break;
       group.running.push(run);
       activeRuns.add(run);
-      void runOne(run, group);
+      // T3:登记 runOne 全生命周期(含离队后的终态写入)。runOne finally 里的
+      // requestPump 在 track 的 finally 解除之前同步跑完,子 runOne 先登记
+      // 再解除父项 —— 父子交接无空计数窗口。
+      void trackBackgroundWork(`runOne:${run.taskId}`, () =>
+        runOne(run, group),
+      );
     }
   } finally {
     setPumping(false);

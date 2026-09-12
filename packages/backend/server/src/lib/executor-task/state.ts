@@ -117,6 +117,33 @@ export const executorCooldownRecords = new Map<
 export const cooldownTimers = new Map<string, NodeJS.Timeout>();
 
 /**
+ * 计划中的泵送定时器(403 退避 / 瞬时额度退避等,非冷却 Map 内的那些)。
+ * 仅用于测试 teardown 取消——不能把几小时后的 timer 当成必须自然跑完。
+ */
+export const scheduledPumpTimers = new Set<NodeJS.Timeout>();
+
+/** 登记一个到期会 requestPump 的 setTimeout,便于测试统一取消。 */
+export function trackScheduledPumpTimer(timer: NodeJS.Timeout): void {
+  scheduledPumpTimers.add(timer);
+}
+
+/** 定时器回调开头调用:正常到期后从集合移除。 */
+export function untrackScheduledPumpTimer(timer: NodeJS.Timeout): void {
+  scheduledPumpTimers.delete(timer);
+}
+
+/**
+ * 测试专用:取消所有计划中的泵送/冷却定时器,不改变生产调度判定。
+ * fixture drain 前调用,避免长冷却 timer 在关库后触发。
+ */
+export function __cancelScheduledPumpsForTests(): void {
+  for (const t of cooldownTimers.values()) clearTimeout(t);
+  cooldownTimers.clear();
+  for (const t of scheduledPumpTimers) clearTimeout(t);
+  scheduledPumpTimers.clear();
+}
+
+/**
  * 额度判定的调用上下文(伪额度回显修复 + 协调者转述误判修复
  * specs/quota-misclassified-from-coordinator-narration.md):只靠关键词命中不足
  * 以判额度 —— 必须至少有一条**正面**结构证据:命中行呈提供方错误行形状,或
@@ -664,6 +691,8 @@ export function __resetExecutorQueueForTests(): void {
   clearAllTaskDetails();
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
+  for (const t of scheduledPumpTimers) clearTimeout(t);
+  scheduledPumpTimers.clear();
   executorCooldowns.clear();
   executorCooldownRecords.clear();
   const policy = readDispatchPolicy();

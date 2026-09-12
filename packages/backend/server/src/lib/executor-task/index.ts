@@ -28,6 +28,14 @@ export { adapterFor, type ExecutorAdapter } from "./adapters/registry";
 export { createAnsiStripper, stripAnsi } from "./ansi";
 export { backfillDetachedClosedTokenFields } from "./attempt-accounting";
 export {
+  __resetBackgroundWorkForTests,
+  type BackgroundWorkItem,
+  backgroundWorkSnapshot,
+  type DrainResult,
+  drainBackgroundWork,
+  trackBackgroundWork,
+} from "./background-work";
+export {
   cancelQueuedTasks,
   cancelRunningTasks,
   currentRunningTask,
@@ -145,6 +153,7 @@ export {
   spawnFailureHint,
 } from "./spawn-failure";
 export {
+  __cancelScheduledPumpsForTests,
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,
   __setMaxConcurrentPerWorkspaceForTests,

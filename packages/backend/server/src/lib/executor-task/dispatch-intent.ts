@@ -16,6 +16,7 @@ import type { DataBase } from "@server/lib/database";
 import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { trackBackgroundWork } from "./background-work";
 import { postStatus } from "./notify";
 import { maybeDispatchExecutorTask } from "./queue";
 import { getStallAlertMs } from "./state";
@@ -160,19 +161,23 @@ export async function recordDispatchIntentFailure(
 /**
  * Live-path wrapper: run maybeDispatchExecutorTask then settle the intent.
  * Keeps participant fire-and-forget / role await semantics at the call site.
+ * T3:整段登记为后台工作(label 用 messageId——派发时尚无 taskId),覆盖
+ * 「消息返回后尚未入队」窗口;路由 void 调用与角色 await 共用本入口。
  */
 export async function dispatchAndSettleIntent(
   db: DataBase,
   input: DispatchExecutorInput,
 ): Promise<DispatchOutcome | undefined> {
-  try {
-    const outcome = await maybeDispatchExecutorTask(db, input);
-    await settleDispatchIntentAfterAttempt(db, input.messageId, outcome);
-    return outcome;
-  } catch (err) {
-    await recordDispatchIntentFailure(db, input.messageId, err);
-    throw err;
-  }
+  return trackBackgroundWork(`dispatch:${input.messageId}`, async () => {
+    try {
+      const outcome = await maybeDispatchExecutorTask(db, input);
+      await settleDispatchIntentAfterAttempt(db, input.messageId, outcome);
+      return outcome;
+    } catch (err) {
+      await recordDispatchIntentFailure(db, input.messageId, err);
+      throw err;
+    }
+  });
 }
 
 /** Single-round recovery: open intents with no task → same dispatch path. */

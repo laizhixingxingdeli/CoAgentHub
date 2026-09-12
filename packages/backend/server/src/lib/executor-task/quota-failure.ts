@@ -19,6 +19,8 @@ import {
   getTransientQuotaPolicy,
   groupQueues,
   type QuotaFailureVerdict,
+  trackScheduledPumpTimer,
+  untrackScheduledPumpTimer,
 } from "./state";
 import type { QueuedRun } from "./types";
 
@@ -163,7 +165,13 @@ export async function handleTransientQuotaBackoff(
     `⏳ [${run.ex.label}] 执行器瞬时限流,任务保持排队,${seconds}s 后自动重试: ${run.summary}`,
   );
   // 退避到期主动泵送(与 403 反应式排队同款兜底):此时 run 已在队首等待。
-  setTimeout(() => requestPump(), Math.max(1, retryAt - Date.now()));
+  // 句柄入 scheduledPumpTimers,测试 teardown 可取消(T3),生产路径语义不变。
+  const delay = Math.max(1, retryAt - Date.now());
+  const timer = setTimeout(() => {
+    untrackScheduledPumpTimer(timer);
+    requestPump();
+  }, delay);
+  trackScheduledPumpTimer(timer);
 }
 
 /**
@@ -286,5 +294,10 @@ export async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
   );
   // 退避定时器:无既有 running 任务(外部会话占用)时,退避到期主动泵送重试;
   // 有既有任务时由它们的完成路径(finally → 泵送信号)触发,本定时器仅兜底。
-  setTimeout(() => requestPump(), CONCURRENCY_RETRY_BACKOFF_MS);
+  // 句柄入 scheduledPumpTimers,测试 teardown 可取消(T3),生产路径语义不变。
+  const timer = setTimeout(() => {
+    untrackScheduledPumpTimer(timer);
+    requestPump();
+  }, CONCURRENCY_RETRY_BACKOFF_MS);
+  trackScheduledPumpTimer(timer);
 }

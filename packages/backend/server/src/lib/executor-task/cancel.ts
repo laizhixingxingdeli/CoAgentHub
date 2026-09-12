@@ -3,6 +3,7 @@ import {
   type ExecutorConfig,
   findExecutorByParticipant,
 } from "@server/lib/executors";
+import { trackBackgroundWork } from "./background-work";
 import { markTaskCancelled } from "./notify";
 import { activeRuns, clearRunTimers, groupQueues } from "./state";
 import type { QueuedRun } from "./types";
@@ -70,7 +71,10 @@ export function cancelQueuedTasks(
         ex: q.ex,
       });
       clearRunTimers(q);
-      void markTaskCancelled(q.db, q.taskId, q.groupId, q.attempts);
+      // T3:排队取消的终态写入是 fire-and-forget,登记后 fixture 才能 drain 到。
+      void trackBackgroundWork(`cancel:${q.taskId}`, () =>
+        markTaskCancelled(q.db, q.taskId, q.groupId, q.attempts),
+      );
     }
     g.queue.length = 0;
     g.queue.push(...remaining);

@@ -68,40 +68,41 @@ if (gitInit.status === 0) {
 
 afterAll(async () => {
   if (dbCreated) {
-    // Message dispatch is intentionally fire-and-forget. Waiting only for the
-    // in-memory queue misses the interval after a run leaves the queue but before
-    // runOne finishes its final DB write; closing PGlite in that interval caused
-    // the flaky suite failure (`PGlite is closed`, often after an earlier Git
-    // index-lock error). Drain the queue and the complete runOne lifecycle before
-    // closing the per-file database.
-    const {
-      activeExecutorTaskCount,
-      currentRunningTask,
-      queuedExecutorTaskCount,
-    } = await import("../src/lib/executor-task");
-    const deadline = Date.now() + 20_000;
-    let idleSince: number | null = null;
-    for (;;) {
-      const inMemoryBusy =
-        activeExecutorTaskCount() > 0 ||
-        currentRunningTask() !== null ||
-        queuedExecutorTaskCount() > 0;
-      if (!inMemoryBusy) {
-        // The route deliberately does not await maybeDispatchExecutorTask. Keep
-        // the worker alive briefly after the first idle observation so its
-        // microtask can enqueue a run before PGlite is closed.
-        idleSince ??= Date.now();
-        if (Date.now() - idleSince >= 1_000) break;
-      } else {
-        idleSince = null;
+    // 历史背景(PGlite is closed 竞态):消息派发是 fire-and-forget。只等内存
+    // 队列变空会漏掉两个窗口——(1) 消息返回后尚未入队;(2) run 离开内存队列
+    // 后仍在写终态。在那些窗口关 PGlite 就会抛 `PGlite is closed`(常跟在更
+    // 早的 Git index-lock 错误之后),表现为 suite 末尾的 flaky 失败。
+    //
+    // 为何改用 drain(T3):activeExecutorTaskCount / currentRunningTask /
+    // queuedExecutorTaskCount 只描述「当前 Map 看起来为空」,不是「已接收的
+    // 工作都做完了」。固定「连续 1 秒空闲 + 100ms 轮询 + 20s 直接 break 当
+    // 通过」既会让无后台工作的文件白等 1 秒,又会在有残留时隐式放过。
+    // trackBackgroundWork 在三个 fire-and-forget 入口同步登记,drain 等到登记
+    // 清零(或超时显式失败并打印残留 label)。定时重试/冷却 timer 先取消——
+    // 不能把几小时后的计划泵送当成必须自然跑完。
+    const { __cancelScheduledPumpsForTests, drainBackgroundWork } =
+      await import("../src/lib/executor-task");
+    __cancelScheduledPumpsForTests();
+    const drained = await drainBackgroundWork({ timeoutMs: 20_000 });
+    if (!drained.ok) {
+      const residual = drained.pending
+        .map((p) => `${p.label} (since ${p.sinceMs}ms)`)
+        .join("; ");
+      console.error(
+        `[test] drainBackgroundWork timed out; residual work: ${residual || "(none listed)"}`,
+      );
+      // 尽量关库、清目录,再让本文件失败 —— 不许再「到 20 秒直接关库当通过」。
+      try {
+        const { testClient } = await import("./db");
+        await testClient.close();
+      } catch (err) {
+        console.warn("[test] close PGlite after drain timeout:", err);
       }
-      if (Date.now() >= deadline) {
-        // Do not turn a stuck executor into an unbounded test hang. The bounded
-        // wait still gives normal fire-and-forget work time to finish; the test
-        // runner's worker isolation prevents a later file from reusing this DB.
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      rmSync(testFileDir, { recursive: true, force: true });
+      rmSync(testRepoDir, { recursive: true, force: true });
+      throw new Error(
+        `drainBackgroundWork timed out with residual work: ${residual || "(none listed)"}`,
+      );
     }
     const { testClient } = await import("./db");
     await testClient.close();
