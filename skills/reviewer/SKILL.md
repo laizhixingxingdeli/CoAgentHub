@@ -239,8 +239,33 @@ L3 **不是**协调者下发给你的新任务，而是**你当初下发给协�
 
 三家 runtime 的注入原语：dsh 用 `Agent.followup()`（进程内）；codex 用
 `codex queue --thread <id> --message <text>`（CLI，可直接配进 callback-agent）；
-Claude Code 用 `Monitor` 工具订阅（**会话内主动拉，方向与前两家相反**，
-因此 callback-agent 的外部投递模型对它不适用）。
+Claude Code **没有可依赖的注入原语** —— 见下。
+
+#### ⚠️ Claude Code：没有推送，只有「用户交互边界上的发现」
+
+~~Claude Code 用 `Monitor` 工具订阅。~~ **这条曾经写在本 skill 里，是错的。**
+`Monitor` 不是可移植基线：它只在装有 Monitor 的交互式 CLI 会话里可用，
+在 Bedrock / Google Cloud Agent Platform / Microsoft Foundry 上不可用，
+设了 `DISABLE_TELEMETRY` 或 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` 也不可用。
+**2026-09-12 实测：本会话的工具面里根本没有 `Monitor`。**
+(依据：CoAgentHub Claude Code 插件自带的能力调研
+`docs/claude-code-capabilities.md` §"Monitor is not a portable baseline"，
+其结论原话是 **"never assume a nonexistent injection primitive"`。)
+
+实际可用的面，由 **CoAgentHub 插件**提供，分两层：
+
+| 层 | 机制 | 性质 |
+|---|---|---|
+| **发现** | `SessionStart` + `UserPromptSubmit` 钩子，各做一次**有界只读**的收件箱检查，把结果作为 `additionalContext` 注入当前轮 | **不是推送** —— 只在会话启动与用户发消息这两个边界触发 |
+| **动作** | 插件的 MCP 工具（`coagenthub_list_task_completion_events` / `claim` / `ack` / `fail` / `post_message` …） | 由你在会话里显式调用 |
+| **手动** | `/coagenthub:inbox` 命令 | 随时重查 |
+
+⚠️ **钩子只做只读检查，绝不 claim / 处理 / ack。** 检查失败时它会明说
+「不能判定为空」而不是报空 —— 看到那句就是**连不上**，不是没有事件。
+
+⚠️ **空闲或已关闭的会话拿不到任何提示。** 所以在 Claude Code 上做检视者，
+**送达档位应声明 `resume` 而不是 `live`** —— 声明 `live` 是在承诺一个
+这个 runtime 给不了的东西，协调者会据此少留一条提醒，事件就可能压很久。
 
 **送达档位 MUST 写进你在本群的 `group_members.prompt`**（`live` 或 `resume`），
 协调者据此决定要不要额外留言提醒（spec §3.17.1）。
