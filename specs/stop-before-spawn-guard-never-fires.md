@@ -1,6 +1,49 @@
 # Spec: spawn 前的停止守卫永远不会触发,停止指令报成功但执行器照跑
 
-> **状态**: **Frozen —— 待下发**
+> **状态**: **Landed — L3 通过(2026-09-12),实现 `7378d741`**
+>
+> ## ✅ L3 收口记录
+>
+> ### 决定性的一条:测试在修复前是红的
+>
+> 检视者把 `queue.ts` 单独回退到修复前(`git checkout HEAD~1 -- <file>`),
+> 跑新增的 `test/stop-before-spawn-guard.test.ts`:
+>
+> ```
+> × R1 CLI: pre-spawn 窗口停止 → 假 bin 哨兵文件不存在(未 spawn)
+> × R1 A2A: pre-spawn 窗口停止 → runA2AExecutor 未被调用
+> × R2: run.kill 在 spawn 返回后的同一同步段即可用
+> Tests  3 failed (3)
+> ```
+>
+> **三条全红,还原后全绿。** 这证明两件事:测试真的在测东西,缺陷真的存在。
+> ⚠️ 验收 1 特意禁止「只断言状态是 cancelled」正是为此 —— 那种断言在修复
+> 前后都是绿的,等于没测。
+>
+> ### 实现
+>
+> - **R1**:A2A(`runA2AExecutor` 构造处)与 CLI(`runExecutor` 调用处)
+>   各在**紧邻上方**重查一次 `run.stopped`;检查同步,只有命中分支才 await
+>   —— **未命中路径没有新让点**,§1.1 的空窗约束守住了。
+>   开头那个不可达的守卫**原样保留**(零成本防御,票面允许)。
+> - **R2**:`run.kill = handle.kill` 移到两条分支拿到 `handle` 的第一时间
+>   (CLI 在 `runExecutor` 返回后、stall 定时器与 pid 落库 await **之前**),
+>   删掉原先落在 pid await 之后的那次赋值。
+>
+> ### 检视者独立核实
+>
+> - 修复前 A/B:3 条新测试全红(见上)✓
+> - 还原后:4 个文件 **44 passed | 0 failed**(基线 41 + 新增 3)✓
+> - `executor-coordinator-workspace-gate` **未回归**(验收 3)✓
+> - `tsc --noEmit` exit 0;`biome check .`(仓库根)exit 0 ✓
+> - 提交边界:仅 `queue.ts`(+24/−1)与新测试文件,未动
+>   `cancel.ts` / `control.ts` / 其它 runOne 分支 ✓
+>
+> ### 判据的质量
+>
+> 测试没有走「看任务状态」这条捷径:CLI 侧让假 bin 一启动就写哨兵文件、
+> **断言文件不存在**;A2A 侧监视 `runA2AExecutor` / `fetch` 的调用次数、
+> **断言从未被调用**。这是「可观察的事实」而不是「推断的结论」。
 > **版本**: 1.0
 > **日期**: 2026-09-12
 > **来源**: 拆解阶段 2 的准入实测
