@@ -1,16 +1,21 @@
 # Spec: queue.ts 拆解设计
 
-> **状态**: **阶段 1 + 倒置已完成(2026-09-12)** ——
-> **queue.ts 3916 → 1730(−56%)**,**强连通分量 1 组 → 0 组**。
-> 剩 7 个函数,其中 `runOne` 918 行占 53%。下一步:拆 `runOne` 的终态分支。
+> **状态**: **三个阶段全部完成(2026-09-12)** ——
+> **queue.ts 3916 → 1351(−65%)**,**强连通分量 1 组 → 0 组**,
+> **`runOne` 918 → 578**。余下是启动段(闭包 / handle 生命周期 / 定时器),
+> 边际收益下降,暂停。
 >
-> | 票 | 内容 | queue.ts |
-> |---|---|---|
-> | `60763ad2` | task-repo / stream-text / cancel / restart-recovery | 3565 → 3091 |
-> | `6c147dcc` | dispatchability / dispatch-target | → 2626 |
-> | `6826a112` | failure / timeout-handlers | → 2185 |
-> | `5379b8b0` | **pump-signal 倒置(SCC 1 → 0)** | → 2212 |
-> | `9f8a8109` | cooldown / quota-failure | → **1730** |
+> | 票 | 内容 | queue.ts | runOne |
+> |---|---|---|---|
+> | `60763ad2` | task-repo / stream-text / cancel / restart-recovery | 3565 → 3091 | |
+> | `6c147dcc` | dispatchability / dispatch-target | → 2626 | |
+> | `6826a112` | failure / timeout-handlers | → 2185 | |
+> | `5379b8b0` | **pump-signal 倒置(SCC 1 → 0)** | → 2212 | |
+> | `9f8a8109` | cooldown / quota-failure | → 1730 | |
+> | `9226bc4d` | 成功终态分支 → `outcome-success.ts` | → 1553 | 918 → 752 |
+> | `da88c030` | 其余 7 个终态分支 → `outcome-handlers.ts` | → **1351** | → **578** |
+>
+> **S4 的另一半 `tasks.ts`(1969 行)另见该文件的拆分票。**
 > **版本**: 1.0
 > **日期**: 2026-09-12
 > **取代**: [queue-ts-slicing.md](queue-ts-slicing.md) 的「按职责猜分片」做法
@@ -469,6 +474,48 @@ handleSuccessOutcome(run, { result, output, isA2a, repoRoot, getPeerExecutorName
 结论:**加它没错,但提交信息里的理由是错的**,留着会误导后来人。
 **抽后续分支时注意**:若某个分支的 `if/else` 之后**还有代码**,漏掉调用点的
 `return` 就是真回归 —— 那时必须有能抓到它的测试,不能靠这次的「反正没事」。
+
+## 5e. 剩余终态分支抽出的收口(L3,2026-09-12,`da88c030`)
+
+7 个分支 → `outcome-handlers.ts`。**`runOne` 752 → 578;`queue.ts` 1553 → 1351。**
+
+**控制流对照(本票的核心,执行侧逐条给了):**
+
+| # | 函数 | 原分支体末尾 `return` | 调用点 `return` |
+|---|---|---|---|
+| 1 | `handleStoppedOutcome` | 有 | 有 |
+| 2 | `handleA2aMemoryOutcome` | **无**(非早退) | **无** |
+| 3 | `handleDetachedOutcome` | 有 | 有 |
+| 4 | `handleStalledOutcome` | 有 | 有 |
+| 5 | `handleA2aSilencedOutcome` | 有 | 有 |
+| 6 | `handleTimedOutOutcome` | 有 | 有 |
+| 7 | `handleNonZeroExitOutcome` | **无** | **无** |
+
+#2 与 #7 被正确识别为非早退 —— 那正是票面预先警告的地方
+(上一票 `9226bc4d` 在这里给过一个错误论证,票面明令不许照抄)。
+
+**检视者的变异验证及其教训**见
+[ADR-0011](../docs/adr/0011-acceptance-tests-must-be-able-to-fail.md)
+的「变异要打在真正覆盖该分支的测试上」一节 —— 简述:给 #2 注入多余的
+`return`,票面清单 62 条全绿,一度被判为覆盖缺口;换到
+`executor-trigger.test.ts` 上打同一个变异,**3 条立刻变红**。
+**缺口在票面的清单选择,不在测试套件。**
+
+### ⚠️ 那段「孤立注释」差点被误删
+
+票面顺带要求清掉 queue.ts 里一段孤立的文档注释,并写明「删前确认
+`dispatchability.ts` 里有同一段,别把唯一一份删了」。
+
+实际情况:那段写的是「组队首任务当前是否可派发(泵送选组谓词)」,
+是 **`isRunDispatchable`** 的文档,而 `dispatchability.ts` 里
+`isRunDispatchable` **上方没有任何注释** —— 它是唯一的一份。
+(`runBlockReason` 的注释确实在那边,措辞不同,容易看串。)
+
+检视者查实后把它放回 `isRunDispatchable` 头上(`9b1b5f08`),内容逐字不变。
+
+**留痕**:搬函数时**注释与函数分离**,后面就会有人把它当孤儿清掉。
+**搬运票的逐字自证只覆盖函数体,覆盖不到被落在原处的注释** ——
+这是该做法的一个已知盲区。
 
 ## 6. 不涉及的改动
 
