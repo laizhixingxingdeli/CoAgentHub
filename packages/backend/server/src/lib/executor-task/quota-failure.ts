@@ -98,6 +98,8 @@ export async function handleTransientQuotaBackoff(
   });
 
   // 运行状态回到 queued(运行中曾置 running):任务不判 failed,退避后重试。
+  // requeueRaceLost:writeTaskStatus 返回 null(竞态)与 catch 异常分开处理。
+  let requeueRaceLost = false;
   try {
     const curTransient = await run.db.query.task.findFirst({
       where: and(
@@ -113,13 +115,20 @@ export async function handleTransientQuotaBackoff(
       ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
     });
     // 原路径 where 含 groupId;notify 默认 true。
-    await writeTaskStatus(run.db, {
+    // 合法前置只有 running(S1 第 2 阶段):停止/超时/孤儿若已先落终态,
+    // 不得把任务复活回 queued,也不重新入队或发退避消息。
+    const requeued = await writeTaskStatus(run.db, {
       taskId: run.taskId,
       groupId: run.groupId,
       status: "queued",
       diffSummary: transientNext,
+      expectedStatuses: ["running"],
     });
+    if (!requeued) {
+      requeueRaceLost = true;
+    }
   } catch (e) {
+    // DB 异常 ≠ 竞态 null:异常保持既有 warn 后继续入队;null 走下方跳过。
     console.warn(`[executor] 瞬时限流回写 queued 失败(${run.taskId}): ${e}`);
   }
 
@@ -143,6 +152,10 @@ export async function handleTransientQuotaBackoff(
       { quotaKind: "transient" },
       run.attempts,
     );
+    return;
+  }
+  if (requeueRaceLost) {
+    console.log(`[executor] 任务 ${run.taskId} 已被并发改为终态,跳过重排队`);
     return;
   }
   group.queue.push(run);
@@ -238,13 +251,20 @@ export async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
 
   // 保持 queued:回写 DB 状态(运行中曾置 running),并 WS 推送状态变化。
   // 原路径 where 含 groupId;notify 默认 true。
+  // 合法前置只有 running(S1 第 2 阶段):终态不得被 403 路径复活回 queued。
+  let requeueRaceLost = false;
   try {
-    await writeTaskStatus(db, {
+    const requeued = await writeTaskStatus(db, {
       taskId,
       groupId,
       status: "queued",
+      expectedStatuses: ["running"],
     });
+    if (!requeued) {
+      requeueRaceLost = true;
+    }
   } catch (e) {
+    // DB 异常 ≠ 竞态 null:异常保持既有 warn 后继续入队;null 走下方跳过。
     console.warn(`[executor] 403 后回写 queued 失败(${taskId}): ${e}`);
   }
 
@@ -269,6 +289,10 @@ export async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
       undefined,
       run.attempts,
     );
+    return;
+  }
+  if (requeueRaceLost) {
+    console.log(`[executor] 任务 ${taskId} 已被并发改为终态,跳过重排队`);
     return;
   }
   group.queue.push(run);
