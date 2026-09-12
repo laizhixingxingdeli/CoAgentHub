@@ -98,14 +98,12 @@ export {
 } from "./output-parser";
 export {
   backfillDetachedClosedTokenFields,
-  buildTicket,
   cancelQueuedTasks,
   cancelRunningTasks,
   clearExecutorCooldown,
   createTaskDispatchWarnings,
   currentRunningTask,
   enqueueTaskRun,
-  executionApiBase,
   formatExecutorStartupFailure,
   isConcurrencyConflict,
   isCoordinatorTask,
@@ -117,7 +115,6 @@ export {
   recoverInterruptedTasks,
   refreshA2AActivity,
   resolveTaskRepo,
-  resolveTestExecutor,
   restoreExecutorCooldowns,
   spawnFailureHint,
   summaryStreamText,
@@ -149,6 +146,11 @@ export {
   activeExecutorTaskCount,
   getL3ResponseMinutesMs,
 } from "./state";
+export {
+  buildTicket,
+  executionApiBase,
+  resolveTestExecutor,
+} from "./ticket-builder";
 export {
   loadTicketTemplate,
   resolveTicketTemplatesDir,
