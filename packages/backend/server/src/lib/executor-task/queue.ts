@@ -21,7 +21,6 @@ import {
   type ExecutorConfig,
   findExecutorByParticipant,
   listPeerExecutorNames,
-  parseRateLimitRecoveryMs,
   renderExecutorArgs,
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
@@ -36,12 +35,6 @@ import {
   markAttemptTokenUnavailable,
 } from "./attempt-accounting";
 import { hasDuplicateActiveRun } from "./cancel";
-import {
-  enterCooldown,
-  MIN_EFFECTIVE_COOLDOWN_MS,
-  normalizeCooldownEnd,
-} from "./cooldown";
-import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
 import { applyDiffSummaryPatch } from "./diff-summary";
 import {
@@ -59,37 +52,35 @@ import {
   runningForWorkspace,
   workspaceCap,
 } from "./dispatchability";
-import { failTask, handleFailure, isTransientQuota } from "./failure";
+import { failTask } from "./failure";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
   postStatus,
 } from "./notify";
+import {
+  handleA2aMemoryOutcome,
+  handleA2aSilencedOutcome,
+  handleDetachedOutcome,
+  handleNonZeroExitOutcome,
+  handleStalledOutcome,
+  handleStoppedOutcome,
+  handleTimedOutOutcome,
+} from "./outcome-handlers";
 import { handleSuccessOutcome } from "./outcome-success";
 import {
   appendLiveTaskOutput,
   appendTaskOutput,
-  liveTaskOutputTail,
   releaseTaskOutput,
 } from "./output-buffer";
 import { createExecutorOutputParser } from "./output-parser";
 import { registerPump, requestPump } from "./pump-signal";
-import {
-  handleConcurrencyConflict,
-  handleTransientQuotaBackoff,
-  routeQuotaFailure,
-} from "./quota-failure";
-import { extractGenericJsonlText, lastLinesOf } from "./report";
+import { extractGenericJsonlText } from "./report";
 import { registerTaskOwnerServer } from "./restart-recovery";
 import { groupHasReviewerMember } from "./review-request-policy";
-import {
-  isConcurrencyConflict,
-  spawnFailureReason,
-  spawnFailureStatus,
-} from "./spawn-failure";
+import { spawnFailureReason, spawnFailureStatus } from "./spawn-failure";
 import {
   activeRuns,
-  classifyQuotaFailure,
   clearRunTimers,
   clearStaleTestRepoIndexLock,
   cooldownEndMs,
@@ -98,7 +89,6 @@ import {
   getClaimTimeoutMs,
   getDetachedTimeoutMs,
   getMaxParallelGroups,
-  getRateLimitCooldownMs,
   getRedispatchFailureLimit,
   getStallAlertMs,
   getStallTimeoutMs,
@@ -125,8 +115,6 @@ import {
   handleDetachedTimeout,
   handleStall,
   handleStallAlert,
-  handleUnconfirmed,
-  hasRecentA2AProgress,
 } from "./timeout-handlers";
 import {
   DEFAULT_GROUP_KEY,
@@ -136,23 +124,7 @@ import {
   type GroupPromptInfo,
   type GroupQueue,
   type QueuedRun,
-  sumAttemptTokenUsage,
-  sumAttemptTokenUsageReason,
 } from "./types";
-
-/* ---------------- 执行器级并发(设计修正:按执行器实际并发能力排队) ---------------- */
-
-/**
- * 组队首任务当前是否可派发(泵送选组谓词):
- *  - 执行器额度冷却中 → 否(票7,冷却结束定时器会再泵送);
- *  - 目标执行器 running 数 >= maxConcurrency(声明式上限)→ 否(保持 queued,
- *    等既有任务终态后由完成路径的泵送自动出队);
- *  - 403 后重新排队(反应式排队)→ 既有同执行器 running 任务未清空 → 否;
- *    退避窗口未过(外部会话占用)→ 否;
- *  - per-run 退避窗口(concurrencyRetryAt)未过 → 否(403 退避与瞬时限流退避
- *    同字段,后者不置 concurrencyBlocked —— 那是并发冲突语义,瞬时限流无需
- *    等其他 running 任务清空)。
- */
 
 /* ---------------- 队列 / 调度 ---------------- */
 
@@ -1272,46 +1244,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 停止指令已 kill 进程组:完成回调置 cancelled,不再回传 ❌/✅(停止
       // 指令自己已回传 🛑)。
       if (run.stopped) {
-        console.log(`[executor] 任务已停止: ${taskId}`);
-        await endAttempt(run, { status: "cancelled" });
-        const liveTail = liveTaskOutputTail(taskId);
-        releaseTaskOutput(taskId);
-        const tokenUsage = sumAttemptTokenUsage(run.attempts);
-        const tokenUsageReason = sumAttemptTokenUsageReason(run.attempts);
-        {
-          const cur = await db.query.task.findFirst({
-            where: and(
-              eq(taskTable.id, taskId),
-              eq(taskTable.groupId, groupId),
-            ),
-            columns: { diffSummary: true },
-          });
-          const nextCancelled = applyDiffSummaryPatch(cur?.diffSummary, {
-            error: "stopped",
-            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-            ...(tokenUsageReason ? { tokenUsageReason } : {}),
-            ...(liveTail ? { liveOutputTail: liveTail } : {}),
-          });
-          const [cancelled] = await db
-            .update(taskTable)
-            .set({
-              status: "cancelled",
-              diffSummary: nextCancelled,
-            })
-            .where(
-              and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
-            )
-            .returning();
-          if (cancelled) {
-            await notifyTaskStatusChanged(
-              db,
-              taskId,
-              groupId,
-              "cancelled",
-              cancelled,
-            );
-          }
-        }
+        await handleStoppedOutcome(run);
         return;
       }
       // A2A 上下文延续:gateway 返回的新 contextId 落库(done/failed 都写;
@@ -1319,131 +1252,35 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 携带。仅 memory="per-group" 的协调器回写;纯粹执行器不回写(任务书
       // 自包含,无记忆)。
       if (memoryPerGroup && result.contextId) {
-        try {
-          await db
-            .update(taskTable)
-            .set({ a2aContextId: result.contextId })
-            .where(
-              and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
-            );
-        } catch (e) {
-          console.warn(`[executor] 写 a2a_context_id 失败(${taskId}): ${e}`);
-        }
+        await handleA2aMemoryOutcome(run, { result });
       }
       // 第3层(detached 可脱离执行):A2A 发送完成即算「已派发」,不按最终回复
       // 定终态——任务保持 running,等执行器恢复后 PATCH /groups/:id/tasks/:taskId
       // 主动回写 done/failed;超过 detachedTimeoutMinutes 仍未回写 → 结果未确认
       // (handleDetachedTimeout)。队列槽位照常释放(24h 等待不该占住组队列)。
       if (run.detached) {
-        console.log(
-          `[executor] detached 任务已发送,等待执行器回写终态: ${taskId}`,
-        );
-        if (!run.detachedTimer && !run.detachedTimedOut && !run.stopped) {
-          run.detachedTimer = setTimeout(
-            () => handleDetachedTimeout(run),
-            getDetachedTimeoutMs(),
-          );
-        }
+        await handleDetachedOutcome(run);
         return;
       }
       // 静默超时已由 handleStall 置 stalled + kill 进程组;失败落库 / ❌ 回传 /
       // 重试判定统一在完成路径处理,避免定时器回调与完成路径并发写状态。
       if (run.stalled) {
-        console.log(`[executor] 任务已因静默超时失败: ${taskId}`);
-        await handleFailure(run, "执行器静默超时", {
-          retryable: true,
-          message: `❌ [${ex.label}] 任务失败 (执行器静默超时)`,
-        });
+        await handleStalledOutcome(run);
         return;
       }
       // A2A 无进展超时已由 handleA2ASilence 置 a2aSilenced + 中止请求:按「无进展
       // 失败」处理(不重试——执行器已失联,重试无意义;不设无进展提醒,与静默
       // 检测同界,仅 a2a 无本地进程输出可观察,不走 stallAlert 提醒)。
       if (run.a2aSilenced) {
-        console.log(`[executor] 任务已因 A2A 无进展超时失败: ${taskId}`);
-        await handleFailure(run, "执行器无进展", {
-          retryable: false,
-          message: `❌ [${ex.label}] 任务失败 (执行器无进展)`,
-        });
+        await handleA2aSilencedOutcome(run);
         return;
       }
       if (result.timedOut) {
-        console.error(`[executor] 任务超时: ${taskId}`);
-        // 第2层:A2A 请求超时但最近有进展信号 → 执行器可能仍在执行/已完成,
-        // 结果无法确认 → 按「结果未确认」处理(不重试,避免重复执行)。
-        if (isA2a && hasRecentA2AProgress(run)) {
-          await handleUnconfirmed(run);
-          return;
-        }
-        // 超时且已捕获输出(尾部,与失败回传同界)含额度关键词且带正面结构证据
-        // (恢复时刻/错误行形状;R1:退出码不是证据)→ 额度失败;R2:点名其它
-        // 执行器/引用平台 id 或字段的转述行不算证据。
-        const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-        const timeoutQuota = classifyQuotaFailure([lastLinesOf(out, 20)], {
-          taskBook: run.body,
-          peerExecutorNames: await getPeerExecutorNames(),
+        await handleTimedOutOutcome(run, {
+          result,
+          isA2a,
+          getPeerExecutorNames,
         });
-        if (timeoutQuota.isQuota) {
-          // 瞬时限流(短相对恢复提示):per-run 退避重试,不进执行器级冷却。
-          if (isTransientQuota(timeoutQuota)) {
-            await handleTransientQuotaBackoff(
-              run,
-              "执行超时",
-              out,
-              timeoutQuota.matchedLine,
-            );
-            return;
-          }
-          // 冷却动态化:优先从失败输出解析恢复时间,解析失败回退固定冷却。
-          // R7:解析出的时刻不在未来或过于接近当前时,回退到固定冷却兜底。
-          const parsedMs = parseRateLimitRecoveryMs(out);
-          const cooldownEnd = normalizeCooldownEnd(
-            parsedMs ?? Date.now() + getRateLimitCooldownMs(),
-          );
-          const eta = formatEta(cooldownEnd);
-          const extra: Record<string, unknown> = {
-            [EXECUTOR_COOLDOWN_END_MS_FIELD]: cooldownEnd,
-            executorCooldownSource:
-              parsedMs !== null &&
-              parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-                ? "parsed"
-                : "fallback",
-            // 与 handleQuotaFailure 出口同口径的额度分级留痕(R4/验收 7)。
-            quotaKind: "exhausted",
-            quotaMatchedLine: timeoutQuota.matchedLine,
-          };
-          if (
-            parsedMs !== null &&
-            parsedMs <= Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-          ) {
-            extra.cooldownFallbackReason = "解析所得时刻不可用,已回退固定冷却";
-            extra.discardedCooldownEndMs = parsedMs;
-          }
-          await handleFailure(
-            run,
-            `执行超时(执行器额度限制,预计 ${eta} 恢复)`,
-            {
-              retryable: false,
-              message: `❌ [${ex.label}] 任务失败 (执行器额度限制,预计 ${eta} 恢复)`,
-              extra,
-              afterPersisted: () =>
-                enterCooldown(
-                  ex,
-                  cooldownEnd,
-                  parsedMs !== null &&
-                    parsedMs > Date.now() + MIN_EFFECTIVE_COOLDOWN_MS
-                    ? "parsed"
-                    : "fallback",
-                  { db, taskId },
-                ),
-            },
-          );
-        } else {
-          await handleFailure(run, "执行超时", {
-            retryable: true,
-            message: `❌ [${ex.label}] 任务失败 (超时)`,
-          });
-        }
         return;
       }
       const executorText =
@@ -1465,51 +1302,12 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         });
         return;
       } else {
-        // 第2层:无法确认执行结果(gateway「did not reply in time」/ 网络错误 /
-        // HTTP 5xx)→ 执行器可能已实际执行,按「结果未确认」处理(不重试、不
-        // 回传 ❌)。其余失败保持原重试行为。
-        if (result.unconfirmed) {
-          console.error(`[executor] 任务结果未确认: ${taskId}`);
-          await handleUnconfirmed(run);
-          return;
-        }
-        const tail = lastLinesOf(output, 20).slice(0, 1500);
-        console.error(`[executor] 任务失败 exit=${result.code}: ${taskId}`);
-        // 执行器并发冲突(设计修正,反应式排队):CLI 返回 `403
-        // atomgit_session_concurrency_conflict`(如 AtomCode 的 atomgit session
-        // 被其他会话占用)→ 不判失败:任务保持 queued 并重新入队,等既有
-        // running 任务终态后自动重试(不消耗重试次数、不回滚工作区)。
-        if (!isA2a && isConcurrencyConflict(output)) {
-          console.warn(
-            `[executor] 执行器并发冲突(403),任务重新排队等待空闲: ${taskId}`,
-          );
-          await handleConcurrencyConflict(run);
-          return;
-        }
-        // 额度/速率限制失败(票7):失败输出尾部(与失败回传同界)命中额度关键词
-        // 且带正面结构证据(R1:恢复时刻/错误行形状,退出码一律不算)→ 归类
-        // 「额度失败」,冷却该执行器、不自动重试、❌ 注明预计恢复时间;其余失败
-        // 保持原重试行为。限定尾部避免全量输出里的无关 "429/quota" 字样造成误判
-        // (误判会停派该执行器整段冷却期);结构证据排除仅回显源码/任务书的伪命中,
-        // R2 进一步排除点名其它执行器/平台字段的转述行。
-        const failureQuota = classifyQuotaFailure([tail], {
-          exitCode: result.code,
-          taskBook: run.body,
-          peerExecutorNames: await getPeerExecutorNames(),
+        await handleNonZeroExitOutcome(run, {
+          result,
+          output,
+          isA2a,
+          getPeerExecutorNames,
         });
-        if (failureQuota.isQuota) {
-          await routeQuotaFailure(
-            run,
-            `exit ${result.code}`,
-            tail,
-            failureQuota,
-          );
-        } else {
-          await handleFailure(run, `exit ${result.code}`, {
-            retryable: true,
-            message: `❌ [${ex.label}] 任务失败 (exit ${result.code})\n${tail}`,
-          });
-        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
