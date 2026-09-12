@@ -26,6 +26,7 @@ export {
 } from "../coordination-activity";
 export { adapterFor, type ExecutorAdapter } from "./adapters/registry";
 export { createAnsiStripper, stripAnsi } from "./ansi";
+export { backfillDetachedClosedTokenFields } from "./attempt-accounting";
 export {
   adjudicatedRecipientsOfTask,
   dispatcherRecipients,
@@ -97,15 +98,12 @@ export {
   resetGenericSkippedEventCounts,
 } from "./output-parser";
 export {
-  backfillDetachedClosedTokenFields,
   cancelQueuedTasks,
   cancelRunningTasks,
   clearExecutorCooldown,
   createTaskDispatchWarnings,
   currentRunningTask,
   enqueueTaskRun,
-  formatExecutorStartupFailure,
-  isConcurrencyConflict,
   isCoordinatorTask,
   isExecutorProcessAlive,
   isReviewerNotDispatchableTarget,
@@ -116,7 +114,6 @@ export {
   refreshA2AActivity,
   resolveTaskRepo,
   restoreExecutorCooldowns,
-  spawnFailureHint,
   summaryStreamText,
 } from "./queue";
 export {
@@ -135,6 +132,11 @@ export {
   groupHasReviewerMember,
   reviewRequestCarryAllowed,
 } from "./review-request-policy";
+export {
+  formatExecutorStartupFailure,
+  isConcurrencyConflict,
+  spawnFailureHint,
+} from "./spawn-failure";
 export {
   __resetExecutorQueueForTests,
   __setL3ResponseMinutesForTests,
