@@ -166,7 +166,7 @@ export async function handleUnconfirmed(run: QueuedRun): Promise<void> {
     status: "failed",
     error: "执行器未按协议回复，结果未确认",
   });
-  await failTask(
+  const failed = await failTask(
     db,
     taskId,
     "执行器未按协议回复，结果未确认",
@@ -175,6 +175,7 @@ export async function handleUnconfirmed(run: QueuedRun): Promise<void> {
     run.attempts,
   );
   releaseTaskOutput(taskId);
+  if (!failed) return;
   await postStatus(
     db,
     run.groupId,
@@ -240,7 +241,8 @@ export function handleClaimTimeout(run: QueuedRun): void {
   const publishedAt = new Date(run.createdAt).toLocaleString("zh-CN");
   console.error(`[executor] 任务未认领: ${run.taskId}`);
   void (async () => {
-    await failTask(run.db, run.taskId, "任务未认领");
+    const failed = await failTask(run.db, run.taskId, "任务未认领");
+    if (!failed) return;
     await postStatus(
       run.db,
       run.groupId,

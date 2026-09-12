@@ -987,7 +987,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           ),
         );
       } catch (e) {
-        await failTask(db, taskId, `任务书写入失败: ${e}`);
+        const failed = await failTask(db, taskId, `任务书写入失败: ${e}`);
+        if (!failed) return;
         await postStatus(
           db,
           groupId,
@@ -1014,7 +1015,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`[executor] 执行前快照失败(${taskId}): ${msg}`);
-        await failTask(db, taskId, `执行前快照失败: ${msg}`);
+        const failed = await failTask(db, taskId, `执行前快照失败: ${msg}`);
+        if (!failed) return;
         await postStatus(
           db,
           groupId,
@@ -1211,7 +1213,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
                 // 已回写终态(如 detached 超时先行)→ 不覆盖。
                 if (cur?.status !== "running") return;
                 markAttemptTokenUnavailable(run);
-                await failTask(
+                const failed = await failTask(
                   db,
                   taskId,
                   `执行器启动失败: ${spawnFailureReason(msg)}`,
@@ -1219,6 +1221,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
                   undefined,
                   run.attempts,
                 );
+                if (!failed) return;
                 await postStatus(
                   db,
                   groupId,
@@ -1334,7 +1337,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       console.error(`[executor] 执行器启动失败: ${msg}`);
       markAttemptTokenUnavailable(run);
       await endAttempt(run, { status: "failed", error: msg });
-      await failTask(
+      const failed = await failTask(
         db,
         taskId,
         spawnFailureReason(msg),
@@ -1343,6 +1346,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         run.attempts,
       );
       releaseTaskOutput(taskId);
+      if (!failed) return;
       await postStatus(
         db,
         groupId,

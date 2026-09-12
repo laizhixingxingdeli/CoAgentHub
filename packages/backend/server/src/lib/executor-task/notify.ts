@@ -131,10 +131,13 @@ export async function markTaskCancelled(
     ...(tokenUsageReason ? { tokenUsageReason } : {}),
   });
   // 原路径 where 含 groupId;notify 默认 true。
+  // 终态只允许从活着的状态写入,并保留 cancelled 幂等重写(S1 第 2 阶段)。
+  // 竞态输了返回 null(既有语义),调用方不宣告取消。
   return writeTaskStatus(db, {
     taskId,
     groupId,
     status: "cancelled",
     diffSummary: next,
+    expectedStatuses: ["queued", "running", "cancelled"],
   });
 }

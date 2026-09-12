@@ -135,12 +135,19 @@ export async function forceFailWritebackRejectionLoop(
   });
   // 原路径 where 含 groupId;notify 默认 true。
   // notifyTaskStatusChanged 内部已吞异常;外层 try/catch 原本也捕不到它抛出。
-  await writeTaskStatus(db, {
+  // 终态只允许从活着的状态写入,并保留 failed 幂等重写(S1 第 2 阶段)。
+  const failed = await writeTaskStatus(db, {
     taskId: task.id,
     groupId: task.groupId,
     status: "failed",
     diffSummary,
+    expectedStatuses: ["queued", "running", "failed"],
   });
+  if (!failed) {
+    console.log(
+      `[coordination-close] 任务 ${task.id} 已被并发改为终态,跳过 writeback-rejection failed 写入与通知`,
+    );
+  }
 }
 
 export function parseAlreadySatisfiedClaim(

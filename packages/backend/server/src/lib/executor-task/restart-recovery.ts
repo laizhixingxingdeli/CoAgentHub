@@ -123,11 +123,14 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
               "terminal",
             );
             // 原路径 where 仅 id(无 groupId);notify:false —— 批量收集后统一通知。
+            // 终态只允许从活着的状态写入,并保留 failed 幂等重写(S1 第 2 阶段)。
+            // 竞态输了返回 null → 不进 rows → 不发 notify(既有 if (u) 已盖住)。
             const u = await writeTaskStatus(db, {
               taskId: row.id,
               status: "failed",
               diffSummary: next,
               notify: false,
+              expectedStatuses: ["queued", "running", "failed"],
             });
             if (u) updated.push(u as unknown as (typeof candidates)[number]);
           }

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  type Task,
   type TaskAttempt,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
@@ -41,7 +42,7 @@ export async function failTask(
   retries = 0,
   extra?: Record<string, unknown>,
   attempts?: TaskAttempt[],
-): Promise<void> {
+): Promise<Task | null> {
   const patch: Record<string, unknown> = { error: reason, ...extra };
   if (retries > 0) patch.retries = retries;
   const tokenUsage = attempts ? sumAttemptTokenUsage(attempts) : undefined;
@@ -60,11 +61,17 @@ export async function failTask(
   });
   const diffSummary = applyDiffSummaryPatch(cur?.diffSummary, patch);
   // 原路径 where 仅 id(无 groupId);notify 默认 true。
-  await writeTaskStatus(db, {
+  // 终态只允许从活着的状态写入,并保留 failed 幂等重写(S1 第 2 阶段)。
+  const failed = await writeTaskStatus(db, {
     taskId,
     status: "failed",
     diffSummary,
+    expectedStatuses: ["queued", "running", "failed"],
   });
+  if (!failed) {
+    console.log(`[executor] 任务 ${taskId} 已被并发改为终态,跳过 failed 写入`);
+  }
+  return failed;
 }
 
 /**
@@ -105,7 +112,7 @@ export async function handleFailure(
 
   if (!canRetry) {
     // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
-    await failTask(
+    const failed = await failTask(
       db,
       taskId,
       reason,
@@ -113,8 +120,10 @@ export async function handleFailure(
       opts.extra,
       run.attempts,
     );
-    opts.afterPersisted?.();
+    // 竞态输了:保留纯清理,不宣告失败、不跑 afterPersisted(冷却等绑定「已落 failed」)。
     releaseTaskOutput(taskId);
+    if (!failed) return;
+    opts.afterPersisted?.();
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;
   }
@@ -176,7 +185,7 @@ export async function handleFailure(
         // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
         const msg = `${reason};回滚失败,终止重试: ${res.message}`;
         console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
-        await failTask(
+        const failed = await failTask(
           db,
           taskId,
           msg,
@@ -184,6 +193,7 @@ export async function handleFailure(
           undefined,
           run.attempts,
         );
+        if (!failed) return;
         await postStatus(
           db,
           run.groupId,
@@ -229,7 +239,15 @@ export async function handleFailure(
   const group = groupQueues.get(run.groupKey);
   if (!group) {
     // 组已被清空(测试重置等异常)→ 无法重试,按最终失败处理。
-    await failTask(db, taskId, reason, run.retryCount, undefined, run.attempts);
+    const failed = await failTask(
+      db,
+      taskId,
+      reason,
+      run.retryCount,
+      undefined,
+      run.attempts,
+    );
+    if (!failed) return;
     await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
     return;
   }

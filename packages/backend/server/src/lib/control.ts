@@ -269,6 +269,8 @@ async function handleRollback(
       "terminal",
     );
     // 原路径不 notify、where 含 groupId;纯收敛对齐。
+    // ⚠️ 合法跨终态:回滚指令故意把已 done 的任务改判为 failed
+    // (「快照对应的任务视为未完成」)。S1 终态守卫不适用于此路径。
     await writeTaskStatus(db, {
       taskId: task.id,
       groupId,

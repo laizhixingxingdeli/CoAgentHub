@@ -62,12 +62,20 @@ export async function handleStoppedOutcome(run: QueuedRun): Promise<void> {
       ...(liveTail ? { liveOutputTail: liveTail } : {}),
     });
     // 原路径 where 含 groupId;notify 默认 true。
-    await writeTaskStatus(db, {
+    // 终态只允许从活着的状态写入,并保留 cancelled 幂等重写(S1 第 2 阶段)。
+    // releaseTaskOutput 已在写前完成(纯清理);竞态输了不抛错、不补宣告。
+    const cancelled = await writeTaskStatus(db, {
       taskId,
       groupId,
       status: "cancelled",
       diffSummary: nextCancelled,
+      expectedStatuses: ["queued", "running", "cancelled"],
     });
+    if (!cancelled) {
+      console.log(
+        `[executor] 任务 ${taskId} 已被并发改为终态,跳过 stopped→cancelled 写入与通知`,
+      );
+    }
   }
 }
 
