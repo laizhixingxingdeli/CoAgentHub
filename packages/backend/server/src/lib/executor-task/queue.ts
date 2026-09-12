@@ -7,11 +7,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
-  type DispatchTargetAudit,
-  GROUP_ROLES,
-  type GroupMember,
   type TaskAttempt,
-  taskDispatchWarning as taskDispatchWarningTable,
   task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
@@ -34,7 +30,7 @@ import {
   renderExecutorArgs,
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, arrayContains, eq, isNotNull, ne } from "drizzle-orm";
+import { and, eq, isNotNull, ne } from "drizzle-orm";
 import { recordExecutorOutput } from "../executor-availability";
 import { adapterFor } from "./adapters/registry";
 import { createAnsiStripper } from "./ansi";
@@ -54,6 +50,22 @@ import {
 } from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
 import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
+import {
+  buildDispatchTargetAudit,
+  countConsecutiveFailedChildren,
+  createTaskDispatchWarnings,
+  isCoordinatorTask,
+  isReviewerNotDispatchableTarget,
+  recordRedispatchStopped,
+  resolveRoleTarget,
+} from "./dispatch-target";
+import {
+  ensureGroupQueue,
+  isRunDispatchable,
+  runningForWorkspace,
+  workspaceCap,
+  workspaceGateBlocked,
+} from "./dispatchability";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -99,7 +111,6 @@ import {
   getA2ASilenceTimeoutMs,
   getClaimTimeoutMs,
   getDetachedTimeoutMs,
-  getMaxConcurrentPerWorkspace,
   getMaxParallelGroups,
   getRateLimitCooldownMs,
   getRedispatchFailureLimit,
@@ -115,7 +126,6 @@ import {
   releaseCoordinatorProcess,
   runningExecutorCount,
   runningGroupCount,
-  runningWorkspaceCount,
   setPumping,
 } from "./state";
 import { liveStreamText, summaryStreamText } from "./stream-text";
@@ -133,7 +143,6 @@ import {
   type DispatchOutcome,
   type GroupPromptInfo,
   type GroupQueue,
-  type QueuedBlockReason,
   type QueuedRun,
   sumAttemptTokenUsage,
   sumAttemptTokenUsageReason,
@@ -369,131 +378,11 @@ const CONCURRENCY_RETRY_BACKOFF_MS = 3_000;
  *    同字段,后者不置 concurrencyBlocked —— 那是并发冲突语义,瞬时限流无需
  *    等其他 running 任务清空)。
  */
-/**
- * 执行器侧不派发的原因(null = 可派发)。与拆分前的 isRunDispatchable 判定
- * 逐条同序、同条件:冷却 → 声明式并发上限 → 403 退避 → 403 反应式排队。
- *
- * 只覆盖 run 自身携带的门槛;组槽位/工作树闸/队列位次在 queuedBlockReason
- * 里按泵的选组谓词同源补齐(泵的选组谓词不在这里调用本函数之外的判定)。
- */
-function runBlockReason(run: QueuedRun): QueuedBlockReason | null {
-  if (isInCooldown(run.ex)) {
-    return {
-      code: "executor-cooldown",
-      reason: `执行器 ${run.ex.label} 处于额度冷却,预计 ${formatEta(cooldownEndMs(run.ex))} 恢复`,
-    };
-  }
-  const cap = run.ex.maxConcurrency;
-  if (cap !== undefined && runningExecutorCount(run.ex.key) >= cap) {
-    return {
-      code: "executor-concurrency",
-      reason: `执行器 ${run.ex.label} running 数已达并发上限 ${cap}`,
-    };
-  }
-  const retryInMs = run.concurrencyRetryAt - Date.now();
-  if (retryInMs > 0) {
-    return {
-      code: "concurrency-retry",
-      reason: `执行器 ${run.ex.label} 并发冲突退避中,${Math.ceil(retryInMs / 1000)} 秒后重试`,
-    };
-  }
-  if (run.concurrencyBlocked && runningExecutorCount(run.ex.key) > 0) {
-    return {
-      code: "concurrency-conflict",
-      reason: `执行器 ${run.ex.label} 返回并发冲突,等待既有 running 任务终态后重试`,
-    };
-  }
-  return null;
-}
-
-function isRunDispatchable(run: QueuedRun): boolean {
-  return runBlockReason(run) === null;
-}
-
-/**
- * queued 任务「当前为什么不会被拾起」的判定(R2 可见性的唯一出处,
- * specs/queued-task-never-picked-up-after-chain-failure.md R2)。
- *
- * ADR-0009:本函数**不新增**任何判定,三条门槛全部复用泵的同一组计数 ——
- * 泵选组谓词里的 `runningForWorkspace(g) < workspaceCap(g.key)`、泵循环的
- * `runningGroupCount() >= getMaxParallelGroups()` 退出条件,以及
- * isRunDispatchable 的判定本体(runBlockReason)。「另写一套是否被阻塞」必然
- * 在某个输入上与泵分叉,而分叉时没人在看。
- *
- * 与认领超时豁免(workspaceGateBlocked)的口径差异是**故意**的:豁免只豁免
- * 「工作树闸」这一个事实,默认组的组内单槽是另一套既有机制;而可见性要回答
- * 的是「它现在为什么没在跑」,默认组队首被本组 running 占住同样是答案 ——
- * 所以这里直接用泵的谓词(对默认组与非默认组同式),不复用豁免函数。
- *
- * 顺序:执行器侧(最具体、最可操作)→ 组槽位 → 本组槽位 → 队列位次。
- */
-export function queuedBlockReason(run: QueuedRun): QueuedBlockReason | null {
-  const executorSide = runBlockReason(run);
-  if (executorSide) return executorSide;
-  const group = groupQueues.get(run.groupKey);
-  if (!group) return null;
-  const maxGroups = getMaxParallelGroups();
-  if (runningGroupCount() >= maxGroups) {
-    return {
-      code: "group-slot",
-      reason: `并行组数已达上限 ${maxGroups},等既有组释放槽位`,
-    };
-  }
-  if (runningForWorkspace(group) >= workspaceCap(group.key)) {
-    return group.key === DEFAULT_GROUP_KEY
-      ? {
-          code: "workspace-gate",
-          reason: "默认组单槽:本组有任务正在执行",
-        }
-      : {
-          code: "workspace-gate",
-          reason: `工作树 ${group.key} running 数已达上限 ${workspaceCap(group.key)}`,
-        };
-  }
-  const ahead = group.queue.indexOf(run);
-  if (ahead > 0) {
-    return {
-      code: "queue-ahead",
-      reason: `本组队列中它前面还有 ${ahead} 个任务`,
-    };
-  }
-  return null;
-}
 
 /* ---------------- 队列 / 调度 ---------------- */
 
-/** 排队中(未开始)任务数;回滚指令前置校验用。groupId 缺省 = 跨全部组。 */
-export function queuedExecutorTaskCount(groupId?: string): number {
-  let n = 0;
-  for (const g of groupQueues.values()) {
-    for (const q of g.queue) {
-      if (groupId && q.groupId !== groupId) continue;
-      n += 1;
-    }
-  }
-  return n;
-}
-
 /** 进程存活判定随其余共享状态收在 state.ts;此处转出保持既有导入路径可用。 */
 export { isExecutorProcessAlive } from "./state";
-
-/**
- * 协调任务的职责跨越一次 CLI 进程生命周期:目标 participant 在本群持有
- * coordinator 角色时,进程退出只代表协调者 runtime 暂时离开,不代表 task
- * 完成。角色来自 group_members 的实时关系,因此无需新增 task 字段或模式配置。
- */
-export async function isCoordinatorTask(
-  db: DataBase,
-  groupId: string,
-  participantId: string,
-): Promise<boolean> {
-  const membership = await db.query.groupMember.findFirst({
-    where: (t, { and: andFn, eq: eqFn }) =>
-      andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, participantId)),
-    columns: { roles: true },
-  });
-  return membership?.roles.includes("coordinator") ?? false;
-}
 
 /**
  * 触发入口(路由 fire-and-forget 调用,不 await):命中执行器配置则
@@ -501,30 +390,6 @@ export async function isCoordinatorTask(
  * audience=role(角色定向)时按 R1 解析本群目标成员后走同一流程,失败返回
  * DispatchOutcome 供调用方发出可见信号(R3,不静默跳过)。
  */
-/**
- * 目标不可被派发的守卫(specs/dispatch-must-not-spawn-the-reviewer.md R1–R3):
- *  - audience=role 且 audienceRef=reviewer → 整类目标不可派;
- *  - audience=participant 且该成员在本群 roles 含 reviewer → 不可派
- *    (即便同时持有 executor / 即便有执行器配置)。
- * 判据唯一出处:group_members.roles(不是执行器配置、不是名字)。
- */
-export async function isReviewerNotDispatchableTarget(
-  db: DataBase,
-  groupId: string,
-  audience: "participant" | "role",
-  audienceRef: string,
-): Promise<boolean> {
-  if (audience === "role") {
-    return audienceRef === "reviewer";
-  }
-  const membership = await db.query.groupMember.findFirst({
-    where: (t, { and: andFn, eq: eqFn }) =>
-      andFn(eqFn(t.groupId, groupId), eqFn(t.participantId, audienceRef)),
-    columns: { roles: true },
-  });
-  return membership?.roles.includes("reviewer") ?? false;
-}
-
 export async function maybeDispatchExecutorTask(
   db: DataBase,
   input: DispatchExecutorInput,
@@ -673,72 +538,6 @@ export async function maybeDispatchExecutorTask(
       participantId: participant.id,
     }
   );
-}
-
-/** 角色定向(R1)选出的目标成员及其执行器配置。 */
-interface ResolvedRoleTarget {
-  participant: { id: string; executorKey: string | null };
-  ex: ExecutorConfig;
-  membership: GroupMember;
-}
-
-/**
- * R2:角色定向(R1)的目标成员选取 —— 全部复用既有可用性判定,不另写一套调度
- * (另写一份必然与主路径漂移,isDetachedTask 先例):按顺序排除
- *  1. 不在执行器配置中的(findExecutorByParticipant 返回空)
- *  2. 处于限额冷却的(isInCooldown)
- *  3. 已达并发上限的(runningExecutorCount vs maxConcurrency,同 isRunDispatchable)
- * 余下取第一个;都不可用则回退到第一个持有执行器配置的成员,由现有排队机制
- * (isRunDispatchable / pumpQueue)等其可用后再派发 —— 不报错、不跳过。
- * 失败返回明确原因(R3):角色非法 / 本群无成员持有该角色 / 无成员在执行器配置中。
- */
-async function resolveRoleTarget(
-  db: DataBase,
-  groupId: string,
-  role: string,
-): Promise<
-  | ({ status: "ok" } & ResolvedRoleTarget)
-  | {
-      status: "error";
-      reason: "role-not-legal" | "role-no-member" | "role-no-executor";
-      role: string;
-    }
-> {
-  // R3:非法角色名 → 明确失败,不静默跳过(消息层校验之外的第二道闸)。
-  if (!(GROUP_ROLES as readonly string[]).includes(role)) {
-    return { status: "error", reason: "role-not-legal", role };
-  }
-  const members = await db.query.groupMember.findMany({
-    where: (t, { and: andFn, eq: eqFn }) =>
-      andFn(eqFn(t.groupId, groupId), arrayContains(t.roles, [role])),
-  });
-  // R3:本群无成员持有该角色 → 明确失败。
-  if (members.length === 0) {
-    return { status: "error", reason: "role-no-member", role };
-  }
-  let fallback: ResolvedRoleTarget | null = null;
-  for (const membership of members) {
-    // 多角色组合:roles 含 reviewer 即以不可派发为准
-    // (dispatch-must-not-spawn-the-reviewer R3),宁可少派一次。
-    if (membership.roles.includes("reviewer")) continue;
-    const participant = await db.query.participant.findFirst({
-      where: (t, { eq: eqFn }) => eqFn(t.id, membership.participantId),
-    });
-    if (!participant) continue;
-    const ex = await findExecutorByParticipant(db, participant);
-    if (!ex) continue; // R2-1:不在执行器配置中,排除
-    if (!fallback) fallback = { participant, ex, membership };
-    if (isInCooldown(ex)) continue; // R2-2:冷却中,排除
-    const cap = ex.maxConcurrency ?? Number.POSITIVE_INFINITY;
-    if (runningExecutorCount(ex.key) >= cap) continue; // R2-3:并发已满,排除
-    return { status: "ok", participant, ex, membership };
-  }
-  if (fallback) {
-    // 可用候选都被冷却/并发排除 → 交给现有排队机制等其可用(不报错、不跳过)。
-    return { status: "ok", ...fallback };
-  }
-  // 成员都在执行器配置之外 → 无目标可派发,明确失败。
-  return { status: "error", reason: "role-no-executor", role };
 }
 
 /**
@@ -1175,233 +974,6 @@ async function dispatchTask(
 
 /* ---------------- 重派熔断(R4,specs/quota-exhaustion-triggers-infinite-retry) ---------------- */
 
-/** 与 coordinator-resume.isResumeTask 同源判定(diffSummary.platform.resumeOf);
- *  queue.ts 内联避免与 coordinator-resume 的循环依赖。 */
-function isPlatformResumeTaskLike(task: { diffSummary: unknown }): boolean {
-  const summary =
-    task.diffSummary && typeof task.diffSummary === "object"
-      ? (task.diffSummary as Record<string, unknown>)
-      : undefined;
-  const platform =
-    summary?.platform && typeof summary.platform === "object"
-      ? (summary.platform as Record<string, unknown>)
-      : undefined;
-  return typeof platform?.["resumeOf"] === "string";
-}
-
-/**
- * 同一父任务名下「连续失败」执行子任务数(R4 熔断口径):按 createdAt 升序,从
- * 最新往回数连续 failed 的子任务。平台续跑任务不计入 —— 它是平台拉起协调者的
- * 任务,不是协调者派发的执行子任务,其成败都不应打断「子任务连续失败」的计数。
- */
-async function countConsecutiveFailedChildren(
-  db: DataBase,
-  parentTaskId: string,
-): Promise<number> {
-  const children = await db.query.task.findMany({
-    where: (t, { eq: eqFn }) => eqFn(t.parentTaskId, parentTaskId),
-    columns: { id: true, status: true, diffSummary: true },
-    orderBy: (t, { asc: ascFn }) => ascFn(t.createdAt),
-  });
-  let n = 0;
-  for (let i = children.length - 1; i >= 0; i--) {
-    if (isPlatformResumeTaskLike(children[i])) continue;
-    if (children[i].status !== "failed") break;
-    n += 1;
-  }
-  return n;
-}
-
-/** R4/R5 留痕:父任务 diffSummary 写入熔断记录 + 群内发一条可读消息(等待人工介入)。 */
-async function recordRedispatchStopped(
-  db: DataBase,
-  parent: {
-    id: string;
-    groupId: string;
-    executorKey: string | null;
-    executorParticipantId: string | null;
-    diffSummary: unknown;
-  },
-  consecutive: number,
-): Promise<void> {
-  const limit = getRedispatchFailureLimit();
-  const next = applyDiffSummaryPatch(parent.diffSummary, {
-    redispatchStopped: {
-      at: new Date().toISOString(),
-      consecutiveFailures: consecutive,
-      limit,
-      reason: `子任务连续失败达 ${consecutive} 次(阈值 ${limit}),平台已停止重派,等待人工介入`,
-    },
-  });
-  try {
-    await db
-      .update(taskTable)
-      .set({ diffSummary: next })
-      .where(
-        and(eq(taskTable.id, parent.id), eq(taskTable.groupId, parent.groupId)),
-      );
-  } catch (e) {
-    console.warn(`[executor] 写重派熔断留痕失败(${parent.id}): ${e}`);
-  }
-  if (parent.executorParticipantId) {
-    const coordinatorEx = await findExecutorByParticipant(db, parent);
-    if (coordinatorEx) {
-      await postStatus(
-        db,
-        parent.groupId,
-        parent.executorParticipantId,
-        coordinatorEx,
-        `🛑 [${coordinatorEx.label}] 已停止重派:父任务子任务连续失败达 ${consecutive} 次(阈值 ${limit}),等待人工介入`,
-      );
-    }
-  }
-}
-
-/**
- * Capture the server-observable target choice at dispatch time. Candidate
- * means a different group member with executor role and a configured executor;
- * the caller's reasoning is intentionally never inferred from message text.
- */
-async function buildDispatchTargetAudit(
-  db: DataBase,
-  groupId: string,
-  dispatcherParticipantId: string,
-  target: { id: string; name: string },
-  selectionReason: string | null,
-): Promise<DispatchTargetAudit> {
-  const members = await db.query.groupMember.findMany({
-    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
-  });
-  const candidateMemberIds = members
-    .filter(
-      (member) =>
-        member.participantId !== dispatcherParticipantId &&
-        member.roles.includes("executor"),
-    )
-    .map((member) => member.participantId);
-  const participants = candidateMemberIds.length
-    ? await db.query.participant.findMany({
-        where: (t, { inArray: inArrayFn }) =>
-          inArrayFn(t.id, candidateMemberIds),
-      })
-    : [];
-  const configuredCandidates = (
-    await Promise.all(
-      participants.map(async (participant) => ({
-        participant,
-        executor: await findExecutorByParticipant(db, participant),
-      })),
-    )
-  )
-    .filter(
-      (
-        entry,
-      ): entry is {
-        participant: (typeof participants)[number];
-        executor: ExecutorConfig;
-      } => entry.executor !== undefined,
-    )
-    .map((entry) => entry.participant)
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const candidateIds = configuredCandidates.map(
-    (participant) => participant.id,
-  );
-  const candidateTasks = candidateIds.length
-    ? await db.query.task.findMany({
-        where: (t, { and: andFn, eq: eqFn, inArray: inArrayFn }) =>
-          andFn(
-            eqFn(t.groupId, groupId),
-            inArrayFn(t.executorParticipantId, candidateIds),
-          ),
-        columns: {
-          executorParticipantId: true,
-          status: true,
-          updatedAt: true,
-        },
-        orderBy: (t, { desc: descFn }) => [descFn(t.updatedAt)],
-      })
-    : [];
-  const tasksByCandidate = new Map<string, typeof candidateTasks>();
-  for (const task of candidateTasks) {
-    const tasks = tasksByCandidate.get(task.executorParticipantId) ?? [];
-    tasks.push(task);
-    tasksByCandidate.set(task.executorParticipantId, tasks);
-  }
-
-  return {
-    dispatcherParticipantId,
-    triggerSource: members.some(
-      (member) =>
-        member.participantId === dispatcherParticipantId &&
-        member.roles.includes("human"),
-    )
-      ? "human"
-      : "participant",
-    targetParticipantId: target.id,
-    targetParticipantName: target.name,
-    selfDispatch: dispatcherParticipantId === target.id,
-    candidates: configuredCandidates.map((participant) => {
-      const tasks = tasksByCandidate.get(participant.id) ?? [];
-      const latest = tasks[0];
-      return {
-        participantId: participant.id,
-        participantName: participant.name,
-        status: tasks.some((task) => task.status === "running")
-          ? "running"
-          : latest?.status === "failed"
-            ? "recently_failed"
-            : "available",
-      };
-    }),
-    selectionReason,
-  };
-}
-
-/** Persist and announce a dispatch audit warning without changing dispatch. */
-export async function createTaskDispatchWarnings(
-  db: DataBase,
-  groupId: string,
-  taskId: string,
-  dispatcherParticipantId: string,
-): Promise<void> {
-  const members = await db.query.groupMember.findMany({
-    where: (t, { eq: eqFn }) => eqFn(t.groupId, groupId),
-    columns: { participantId: true, roles: true },
-  });
-  const reviewers = members
-    .filter((member) => member.roles.includes("reviewer"))
-    .map((member) => member.participantId);
-  // Two-layer groups have no reviewer; retain a warning in the dispatcher’s
-  // own inbox so the audit remains visible instead of silently disappearing.
-  const recipients =
-    reviewers.length > 0 ? reviewers : [dispatcherParticipantId];
-  await db
-    .insert(taskDispatchWarningTable)
-    .values(
-      recipients.map((recipientParticipantId) => ({
-        taskId,
-        groupId,
-        recipientParticipantId,
-      })),
-    )
-    .onConflictDoNothing();
-  await wsHub.broadcastTaskDispatchWarningAvailable(
-    groupId,
-    taskId,
-    recipients,
-  );
-}
-
-/** 取(或建)指定组键的组队列;组键插入顺序即组触达顺序(公平轮转)。 */
-function ensureGroupQueue(key: string): GroupQueue {
-  let g = groupQueues.get(key);
-  if (!g) {
-    g = { key, queue: [], running: [] };
-    groupQueues.set(key, g);
-  }
-  return g;
-}
-
 /**
  * 泵调度:组槽位有空闲时,按组触达顺序取「running 未达工作树上限且未运行满
  * 组内配额」的组,运行其队首(工作树闸:同一 projectPath 并行数 ≤
@@ -1436,40 +1008,6 @@ async function pumpQueue(): Promise<void> {
   } finally {
     setPumping(false);
   }
-}
-
-/** 组(工作树)可同时运行的任务数上限:空 projectPath 的默认组不参与工作树闸,
- *  维持单槽(改动前行为);绑定 projectPath 的组按 maxConcurrentPerWorkspace。 */
-function workspaceCap(key: string): number {
-  return key === DEFAULT_GROUP_KEY ? 1 : getMaxConcurrentPerWorkspace();
-}
-
-/** 工作树闸计数:未绑定 projectPath 的默认组沿用组内单槽,绑定项目按路径聚合。 */
-function runningForWorkspace(group: GroupQueue): number {
-  return group.key === DEFAULT_GROUP_KEY
-    ? group.running.length
-    : runningWorkspaceCount(group.key);
-}
-
-/**
- * 任务是否被工作树闸合法阻塞(R1.1 豁免的唯一判定出处,ADR-0009 第 2 条):
- * 占用计数复用泵的同一组口径(runningForWorkspace / workspaceCap),不另写
- * 第二套「队列是否阻塞」判定。
- *
- * 被本判定命中的任务是被泵**合法**跳过的,不是被遗弃 —— 认领超时不得把它
- * 标 failed(spec multiple-coordinators-with-global-serialization R1.1)。
- * 反过来说,因其它原因排队的任务(并行组数上限、执行器冷却、403 退避)不受
- * 该豁免。
- *
- * ⚠️ 默认组(未绑 projectPath)的「组内单槽」不是工作树闸(spec R1:默认组不
- * 参与工作树闸,沿用 serial-dispatch-guard 既有口径)—— 它的排队任务被单槽
- * 阻塞**同样**走认领超时,不享受 R1.1 豁免:豁免只豁免「工作树闸」这一个
- * 事实,单槽是另一套既有机制,混入豁免会悄悄放宽默认组 30 分钟未认领的
- * 既有语义。
- */
-function workspaceGateBlocked(group: GroupQueue): boolean {
-  if (group.key === DEFAULT_GROUP_KEY) return false;
-  return runningForWorkspace(group) >= workspaceCap(group.key);
 }
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
@@ -3086,6 +2624,3 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
 function summaryOf(body: string): string {
   return body.replace(/\s+/g, " ").slice(0, 40);
 }
-
-/* deep-import 兼容:test/second-instance-sweep 等仍从 ./queue 取 recoverInterruptedTasks */
-export { recoverInterruptedTasks } from "./restart-recovery";

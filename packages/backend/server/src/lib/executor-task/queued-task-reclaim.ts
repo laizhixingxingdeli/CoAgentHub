@@ -32,8 +32,9 @@ import {
   type IntentReclaimResult,
   reclaimDispatchIntents,
 } from "./dispatch-intent";
+import { queuedBlockReason } from "./dispatchability";
 import { postStatus } from "./notify";
-import { enqueueTaskRun, queuedBlockReason } from "./queue";
+import { enqueueTaskRun } from "./queue";
 import { activeRuns, getStallAlertMs, groupQueues } from "./state";
 import { asDiffSummaryRecord, type QueuedRun } from "./types";
 

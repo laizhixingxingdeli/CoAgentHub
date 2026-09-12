@@ -7,7 +7,7 @@
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { recoverInterruptedTasks } from "../src/lib/executor-task/queue";
+import { recoverInterruptedTasks } from "../src/lib/executor-task";
 
 type Row = {
   id: string;

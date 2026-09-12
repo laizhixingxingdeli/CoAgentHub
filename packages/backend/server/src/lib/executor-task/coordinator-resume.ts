@@ -21,12 +21,9 @@ import { and, asc, eq, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
 import { v7 as uuidv7 } from "uuid";
 import { isTerminalTaskStatus } from "../coordination-activity";
 import { mergeDiffSummary } from "./diff-summary";
+import { isCoordinatorTask } from "./dispatch-target";
 import { notifyTaskStatusChanged } from "./notify";
-import {
-  enqueueTaskRun,
-  isCoordinatorTask,
-  isExecutorProcessAlive,
-} from "./queue";
+import { enqueueTaskRun, isExecutorProcessAlive } from "./queue";
 import { isInCooldown } from "./state";
 import type { GroupPromptInfo } from "./types";
 

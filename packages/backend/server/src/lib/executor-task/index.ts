@@ -85,6 +85,12 @@ export {
   settleDispatchIntentAfterAttempt,
   writeDispatchIntent,
 } from "./dispatch-intent";
+export {
+  createTaskDispatchWarnings,
+  isCoordinatorTask,
+  isReviewerNotDispatchableTarget,
+} from "./dispatch-target";
+export { queuedExecutorTaskCount } from "./dispatchability";
 export { notifyTaskStatusChanged, postStatus } from "./notify";
 export {
   appendLiveTaskOutput,
@@ -104,13 +110,9 @@ export {
 } from "./output-parser";
 export {
   clearExecutorCooldown,
-  createTaskDispatchWarnings,
   enqueueTaskRun,
-  isCoordinatorTask,
   isExecutorProcessAlive,
-  isReviewerNotDispatchableTarget,
   maybeDispatchExecutorTask,
-  queuedExecutorTaskCount,
   refreshA2AActivity,
   restoreExecutorCooldowns,
 } from "./queue";
