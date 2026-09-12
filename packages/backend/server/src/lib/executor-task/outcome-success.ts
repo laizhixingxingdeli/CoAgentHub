@@ -196,13 +196,21 @@ export async function handleSuccessOutcome(
   });
   const doneSummary = applyDiffSummaryPatch(curDone?.diffSummary, diffSummary);
   releaseTaskOutput(taskId);
-  // 原路径 where 含 groupId;notify 默认 true。
-  await writeTaskStatus(db, {
+  // 成功终态只允许从 running 写入(S1 第 2 阶段):停止指令 / 超时 / 孤儿
+  // 收敛若已先落 cancelled/failed,done 不得静默覆盖,也不发完成卡片。
+  const done = await writeTaskStatus(db, {
     taskId,
     groupId,
     status: "done",
     diffSummary: doneSummary,
+    expectedStatuses: ["running"],
   });
+  if (!done) {
+    console.log(
+      `[executor] 任务 ${taskId} 已被并发改为终态,跳过 done 写入与完成卡片`,
+    );
+    return;
+  }
   console.log(
     `[executor] 任务完成: ${taskId}${
       report.hash ? ` hash=${report.hash}` : ""
