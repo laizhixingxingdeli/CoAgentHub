@@ -119,6 +119,61 @@ queue.ts(core)    -> 以上全部
 写死行号、明令「不要通读」、**逐字 diff 自证**、预先算出回引符号并把必然出现的
 `export` 差异写进票面、`biome check` 必跑。
 
+### 3.4 第 1 票收口(L3,2026-09-12,`60763ad2`)
+
+`task-repo` + `stream-text` + `cancel` + `restart-recovery`,4 模块 / 13 函数。
+queue.ts **3565 → 3091**(−474)。**独立核实**:
+
+- **13 个函数逐字核验全 ✓**(工具见下),差异只有 3 个预告的 `export`
+- `tsc` exit 0;`biome check .`(仓库根)exit 0
+- 测试 **3 failed | 36 passed**,与基线逐字相同(那 3 条是
+  `executor-task-repo` 既有的假执行器 ENOENT)
+- barrel 公开面 **124 : 124** 零增零减;`git diff --stat` 恰好 6 文件
+- 4 个新模块都不 import `./queue`,彼此也不互引
+
+#### ⚠️ 票面的「只许改 N 个文件」逼出了一条 pass-through re-export
+
+`test/second-instance-sweep.test.ts` **deep-import** 了
+`recoverInterruptedTasks from "../src/lib/executor-task/queue"`。
+搬走之后这条会断,而票面卡死「只许改 6 个文件」,于是执行侧在 queue.ts 末尾
+加了 `export { recoverInterruptedTasks } from "./restart-recovery";` 兜住 ——
+**取舍正确且如实报了遗留,但根因在票面**:我漏算了 deep-import 消费方。
+
+**改进(第 2 票起执行)**:下发前查清「有哪些文件是从 `./queue` 深引、而不是
+走 barrel 的」,把它们**明确列进票面允许改动的清单**,并写明
+**不许用 re-export 兜**。第 2 票据此列了 2 处(`coordinator-resume.ts`、
+`queued-task-reclaim.ts`),并顺带清掉第 1 票留下的那条 re-export。
+
+### 3.5 第 2 票收口(L3,2026-09-12,`6c147dcc`)
+
+`dispatchability` + `dispatch-target`,2 模块 / 16 函数。
+queue.ts **3091 → 2626**(−465)。**独立核实**:
+
+- **16 个函数逐字核验全 ✓**,差异只有 9 个预告的 `export`
+- `tsc` exit 0;`biome check .`(仓库根)exit 0
+- 测试 **114 passed | 0 failed**(基线 106 是前 4 个文件口径,本轮 5 个文件)
+- barrel 公开面 **124 : 124**;`git diff --stat` 7 文件
+- 两个新模块都不 import `./queue`
+- **上一票那条 pass-through re-export 已删**,`second-instance-sweep.test.ts`
+  改走 barrel;queue.ts 现在只剩改动前就有的
+  `export { isExecutorProcessAlive } from "./state";`
+
+#### ⚠️ 事实生成器的盲区:只认 function / const,漏 interface
+
+`ResolvedRoleTarget` 是 `resolveRoleTarget` 正上方的局部 interface,
+票面给的行号区间**没包含它**(生成器只扫 `function` / `const` 声明)。
+执行侧自己发现并一起搬了,否则 `tsc` 过不去。
+
+**第 3 票起**:生成行号区间后,要**人工检查每段起点上方有没有紧邻的
+`interface` / `type` / `const` 声明**,有就一并纳入区间并写进票面。
+
+#### 核验工具 `.scratch/verify-move.mjs`
+
+按函数名从 `<oldRev>` 抽原文与新文件比对,只放行「行首多一个 `export `」。
+
+⚠️ **这个工具自己也做了双向验证才用**:正向能确认 3 个既有模块逐字一致;
+反向注入一个空格能抓出来并 exit 1。**只会说 ✓ 的工具不能拿来验别人。**
+
 ## 4. 阶段 2:拆 `runOne`(896 行 —— 真正的大头)
 
 阶段 1 做完,核心 ~2140 行里 `runOne` 独占 896。**它不拆,拆分就没到位。**
