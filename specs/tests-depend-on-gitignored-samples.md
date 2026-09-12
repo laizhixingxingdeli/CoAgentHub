@@ -1,8 +1,21 @@
 # Spec: 测试依赖 gitignored 的执行器采样,任何 checkout 都跑不过
 
-> **状态**: **Partially landed**(`5d42f961`,2026-09-08 检视者 L3 通过)
-> —— ENOENT 已消除,但 **6 条硬验收改为 skip,不产生证据**;
-> 真正的收口见 [re-record-executor-probe-samples.md](re-record-executor-probe-samples.md)。
+> **状态**: **Landed**(`5d42f961` + `985f0a2b`)
+>
+> ~~Partially landed —— ENOENT 已消除,但 6 条硬验收改为 skip,不产生证据。~~
+>
+> **2026-09-12 复核:整票已收口,状态行此前陈旧。**
+> 后继票 [re-record-executor-probe-samples.md](re-record-executor-probe-samples.md)
+> 已 Landed(`985f0a2b`),检视者复核三条事实:
+> ① 采样 fixtures **已入库**(`git ls-files test/fixtures/` 可见
+> `atomcode-run.stdout` / `codex-error-run.jsonl` / `pi-run.jsonl` 等);
+> ② 当初那 **6 条 skip 已全部消失**;
+> ③ 全测试目录仅剩 `executor-queue.test.ts` 两条 `skipIf(win32)` 平台守卫,
+> 与本票无关。
+>
+> ⚠️ **留痕**:本票挂着 Partially 挂了 4 天,而实际早已由后继票收口。
+> **后继票 Landed 时要回头改前票的状态行** —— 否则 backlog 里会长期躺着
+> 一条其实没有活的条目,每次盘点都要重新查一遍才敢划掉。
 > **版本**: 1.0
 > **日期**: 2026-09-08
 >
