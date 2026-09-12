@@ -5,8 +5,7 @@
  * (barrel index.ts 汇总)。
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   type DispatchTargetAudit,
   GROUP_ROLES,
@@ -35,7 +34,7 @@ import {
   renderExecutorArgs,
 } from "@server/lib/executors";
 import { wsHub } from "@server/lib/ws-hub";
-import { and, arrayContains, eq, inArray, isNotNull, ne } from "drizzle-orm";
+import { and, arrayContains, eq, isNotNull, ne } from "drizzle-orm";
 import { recordExecutorOutput } from "../executor-availability";
 import { adapterFor } from "./adapters/registry";
 import { createAnsiStripper } from "./ansi";
@@ -46,6 +45,7 @@ import {
   endAttempt,
   markAttemptTokenUnavailable,
 } from "./attempt-accounting";
+import { hasDuplicateActiveRun } from "./cancel";
 import { verifyReportedCommit } from "./claim-verification";
 import {
   clearPersistedExecutorCooldown,
@@ -65,11 +65,7 @@ import {
   liveTaskOutputTail,
   releaseTaskOutput,
 } from "./output-buffer";
-import {
-  createExecutorOutputParser,
-  type OutputEntry,
-  observeGenericSkippedEvent,
-} from "./output-parser";
+import { createExecutorOutputParser } from "./output-parser";
 import {
   extractGenericJsonlText,
   findCommitHash,
@@ -82,6 +78,7 @@ import {
   type TaskReport,
   taskOutputTailLines,
 } from "./report";
+import { registerTaskOwnerServer } from "./restart-recovery";
 import { groupHasReviewerMember } from "./review-request-policy";
 import {
   isConcurrencyConflict,
@@ -111,7 +108,6 @@ import {
   getStallTimeoutMs,
   getTransientQuotaPolicy,
   groupQueues,
-  isExecutorProcessAlive,
   isInCooldown,
   pumping,
   type QuotaFailureVerdict,
@@ -122,6 +118,8 @@ import {
   runningWorkspaceCount,
   setPumping,
 } from "./state";
+import { liveStreamText, summaryStreamText } from "./stream-text";
+import { countCommitsAfterCheckpoint, resolveTaskRepo } from "./task-repo";
 import {
   buildSpecSection,
   buildTicket,
@@ -129,14 +127,12 @@ import {
 } from "./ticket-builder";
 import { loadTicketTemplate } from "./ticket-template";
 import {
-  asDiffSummaryRecord,
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
   type DispatchExecutorInput,
   type DispatchOutcome,
   type GroupPromptInfo,
   type GroupQueue,
-  OWNER_SERVER_PID_KEY,
   type QueuedBlockReason,
   type QueuedRun,
   sumAttemptTokenUsage,
@@ -482,197 +478,6 @@ export function queuedExecutorTaskCount(groupId?: string): number {
 export { isExecutorProcessAlive } from "./state";
 
 /**
- * R1(specs/second-server-instance-sweeps-production-tasks.md):把「本 server
- * 进程 pid」登记进 task.diffSummary.platform,作为启动兜底的实例归属判据。
- *
- * 只在 CLI spawn 前写一次(a2a 不本地 spawn、无实例可归属;桥任务 executorKey
- * 为空,本就豁免兜底)。读现有 diffSummary 作底合并,保留 platform 其余键
- * (resumeOf 等)与执行器已写字段 —— 与 writeQueuedDiffSummary 同款口径,不
- * 整体替换。落库失败只告警:兜底对无主任务保持保守语义(见 recoverInterruptedTasks)。
- */
-async function registerTaskOwnerServer(
-  db: DataBase,
-  taskId: string,
-  groupId: string,
-): Promise<void> {
-  const row = await db.query.task.findFirst({
-    where: and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)),
-    columns: { diffSummary: true },
-  });
-  const merged = mergeDiffSummary(
-    row?.diffSummary,
-    { platform: { [OWNER_SERVER_PID_KEY]: process.pid } },
-    "relation",
-  );
-  await db
-    .update(taskTable)
-    .set({ diffSummary: merged })
-    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-    .catch((error) =>
-      console.warn(`[executor] 登记任务属主实例失败(${taskId}): ${error}`),
-    );
-}
-
-/** 取任务登记的属主 server pid(diffSummary.platform.ownerServerPid);无 = null。 */
-export function ownerServerPidOf(task: {
-  diffSummary: unknown;
-}): number | null {
-  const summary = asDiffSummaryRecord(task.diffSummary);
-  const platform =
-    summary && typeof summary.platform === "object" && summary.platform !== null
-      ? (summary.platform as Record<string, unknown>)
-      : undefined;
-  const pid = platform?.[OWNER_SERVER_PID_KEY];
-  return typeof pid === "number" && Number.isInteger(pid) ? pid : null;
-}
-
-/**
- * 重启兜底(server 启动时调用):只把确认已经死亡的**本实例**任务恢复为
- * failed,不自动重跑。
- *
- * 三条判据(specs/second-server-instance-sweeps-production-tasks.md R1/R2/R3):
- * - R2:queued 且 executorPid === null 的任务从未 spawn,不构成「被重启打断」
- *   —— **原样留在 queued**,由 queued-task-reclaim(54be31ef)按有界时延重新
- *   入队;判死它既与事实不符,也是 2026-09-06 沙箱清场的路径之一。
- * - R1:running 且 executorPid 已消失,但登记了**属主实例**(platform.
- *   ownerServerPid)且该属主仍存活 → **跳过**:那是另一个指向同一 DATABASE_URL
- *   的活实例在跑的任务,本实例启动不是它被打断的原因。判据只取数据本身
- *   (属主进程是否存活),不依赖端口/环境变量猜「沙箱」。
- * - R3:其余「有 pid 但进程不在」(属主缺失/属主已死,即本实例真正重启或任务
- *   进程异常退出)才判 server-restart —— 该原因从此与事实一致。
- *
- * 只检查本 server 直接 spawn 的任务:双跑期桥也会建 running 任务
- * (executor_key 为空),仍不参与回收。
- */
-export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
-  const candidates = await db.query.task.findMany({
-    where: and(
-      inArray(taskTable.status, ["queued", "running"]),
-      isNotNull(taskTable.executorKey),
-    ),
-  });
-  // 单遍归类,四桶互斥,优先级从高到低 —— 避免多个 filter 各自计数导致
-  // 同一任务重复落桶(2026-09-06 前正是「谁都能判死」的重灾区)。
-  const deadTaskIds: string[] = [];
-  let neverStarted = 0;
-  let ownedByLiveForeign = 0;
-  let retainedCount = 0;
-  for (const row of candidates) {
-    // R1(最高优先):属主实例仍存活 = 另一个活实例在跑这棵树,本实例**不碰**
-    // —— 无论该任务 pid 存活与否。这是本票的核心修复:第二个实例启动不等于
-    // 打断了它。属主缺失/属主已死不在此列,继续往下判。
-    if (isOwnedByLiveForeignInstance(row)) {
-      ownedByLiveForeign += 1;
-      continue;
-    }
-    // R2:queued 且 executorPid === null —— 从未 spawn,不构成「被重启打断」,
-    // 原样留队,交给 queued-task-reclaim 有界重入。
-    if (row.executorPid === null) {
-      neverStarted += 1;
-      continue;
-    }
-    // R3:有 pid 但进程已消失(属主缺失/属主已死)—— 真正的失联,判
-    // server-restart,原因从此与事实一致。
-    if (!isExecutorProcessAlive(row.executorPid)) {
-      deadTaskIds.push(row.id);
-      continue;
-    }
-    retainedCount += 1;
-  }
-  const rows =
-    deadTaskIds.length === 0
-      ? []
-      : await (async () => {
-          const toFail = candidates.filter((row) =>
-            deadTaskIds.includes(row.id),
-          );
-          const updated: typeof candidates = [];
-          for (const row of toFail) {
-            // R3:失败原因与事实一致。走到这里的只剩「属主缺失/属主已死且
-            // executor 进程不在」—— 本实例重启(或任务进程异常退出)后接管,
-            // server-restart 是唯一如实的原因。
-            const next = mergeDiffSummary(
-              row.diffSummary,
-              { error: "server-restart" },
-              "terminal",
-            );
-            const [u] = await db
-              .update(taskTable)
-              .set({ status: "failed", diffSummary: next })
-              .where(eq(taskTable.id, row.id))
-              .returning();
-            if (u) updated.push(u as unknown as (typeof candidates)[number]);
-          }
-          return updated;
-        })();
-
-  if (candidates.length > 0) {
-    console.log(
-      `[executor] 重启兜底:保留 ${retainedCount} 个仍存活的任务,${neverStarted} 个未启动的 queued 原样留队(R2),${ownedByLiveForeign} 个属主实例存活的任务跳过(R1)`,
-    );
-  }
-  if (rows.length > 0) {
-    console.log(
-      `[executor] 重启兜底:${rows.length} 个任务置为 failed (server-restart)`,
-    );
-    for (const row of rows) {
-      await notifyTaskStatusChanged(db, row.id, row.groupId, "failed", row);
-    }
-  }
-  return rows.length;
-}
-
-/**
- * R1 判据:任务登记了属主 server 实例(非本进程)且该属主进程仍存活。
- *
- * ADR-0009:本判据拿「属主实例进程存活」代替「这个任务不该被本实例回收」。
- * 成立条件:任务行上的 ownerServerPid 是 spawn 它的那个 server 的 pid,且该
- * pid 仍活着 = 那个实例还在负责这棵任务树。不成立(→ 保守判死)的情形:
- * (a) 属主缺失 —— 历史任务/登记失败,无数据可依,宁可按既有语义交回本实例
- *     处理,也不放走一个确实失联的任务;(b) 属主已死 —— 那个实例已经退出,
- *     任务真正处于失联状态,本实例(通常正是重启后的同一部署)接管收敛;
- * (c) pid 复用 —— 属主 pid 被无关进程占用,此时会**跳过**该任务,方向是「宁漏
- *     勿杀」(与孤儿收敛同款取舍:漏判的任务仍由孤儿收敛/queued 回收周期兜底,
- *     误杀则会再次酿成 2026-09-06 式事故)。
- *
- * 判据刻意**与任务状态解耦**:本函数只回答「登记过属主、且属主仍存活?」,不关心
- * 该任务当前是 running 还是 queued —— 由调用方(启动兜底)决定命中后做什么。
- */
-export function isOwnedByLiveForeignInstance(task: {
-  id: string;
-  status: string;
-  diffSummary: unknown;
-}): boolean {
-  const ownerPid = ownerServerPidOf(task);
-  if (ownerPid === null || ownerPid === process.pid) return false;
-  return isExecutorProcessAlive(ownerPid);
-}
-
-/** 当前运行中的任务(停止指令回传用);并行时可能有多个,返回第一个;无则 null。
- *  groupId 缺省 = 跨全部组;指定 = 只看该群。 */
-export function currentRunningTask(groupId?: string): {
-  taskId: string;
-  participantId: string;
-  ex: ExecutorConfig;
-  kill: () => void;
-} | null {
-  for (const g of groupQueues.values()) {
-    const r = g.running.find(
-      (rr) => rr?.kill && (!groupId || rr.groupId === groupId),
-    );
-    if (r?.kill) {
-      return {
-        taskId: r.taskId,
-        participantId: r.participantId,
-        ex: r.ex,
-        kill: r.kill,
-      };
-    }
-  }
-  return null;
-}
-
-/**
  * 协调任务的职责跨越一次 CLI 进程生命周期:目标 participant 在本群持有
  * coordinator 角色时,进程退出只代表协调者 runtime 暂时离开,不代表 task
  * 完成。角色来自 group_members 的实时关系,因此无需新增 task 字段或模式配置。
@@ -688,149 +493,6 @@ export async function isCoordinatorTask(
     columns: { roles: true },
   });
   return membership?.roles.includes("coordinator") ?? false;
-}
-
-/**
- * 取消排队中的任务(停止指令专用):taskId 缺省 → 取消本群全部排队任务;指定 →
- * 仅取消本群匹配项。只处理排队中的任务(未 spawn,直接移出队列 + 置 cancelled)
- * 以及「已出队未 spawn」的过渡窗口任务(kill 句柄尚未就绪,置 stopped 后由
- * runOne 的 spawn 前 guard 取消);已真正运行的进程不受影响——进程组 kill 机制
- * (spawn detached + process.kill(-pid))保留给服务端自身的静默超时 / 执行超时
- * 兜底,不再由用户指令触发。返回所有被取消的任务信息(未命中 → 空数组)。
- */
-export function cancelQueuedTasks(
-  groupId: string,
-  taskId?: string,
-): Array<{
-  taskId: string;
-  participantId: string;
-  ex: ExecutorConfig;
-}> {
-  const stopped: Array<{
-    taskId: string;
-    participantId: string;
-    ex: ExecutorConfig;
-  }> = [];
-
-  for (const g of groupQueues.values()) {
-    const remaining: QueuedRun[] = [];
-    for (const q of g.queue) {
-      if (q.groupId !== groupId) {
-        remaining.push(q);
-        continue;
-      }
-      if (taskId && q.taskId !== taskId) {
-        remaining.push(q);
-        continue;
-      }
-      stopped.push({
-        taskId: q.taskId,
-        participantId: q.participantId,
-        ex: q.ex,
-      });
-      clearRunTimers(q);
-      void markTaskCancelled(q.db, q.taskId, q.groupId, q.attempts);
-    }
-    g.queue.length = 0;
-    g.queue.push(...remaining);
-
-    // 已出队未 spawn 的过渡窗口(pump 已置 running、kill 句柄未就绪):
-    // 置 stopped 标记,runOne 的 spawn 前 guard 会在真正启动前取消该任务——
-    // 保证「停止指令已执行但任务照跑」不会发生在 spawn 前窗口。
-    const r = g.running.find(
-      (rr) =>
-        !rr.kill && rr.groupId === groupId && (!taskId || rr.taskId === taskId),
-    );
-    if (r) {
-      r.stopped = true;
-      clearRunTimers(r);
-      stopped.push({
-        taskId: r.taskId,
-        participantId: r.participantId,
-        ex: r.ex,
-      });
-    }
-  }
-  return stopped;
-}
-
-/**
- * 取消本群运行中的任务(停止指令专用):运行态先置 stopped,再终止执行器进程组,
- * 最后立即落库 cancelled。进程可能已经退出(detached 协调任务尤其如此),kill
- * 失败不影响取消记账；仍在等待 promise 的 run 会在完成回调中复用同一 cancelled
- * 分支,不会再发 ❌/✅。
- */
-export async function cancelRunningTasks(
-  db: DataBase,
-  groupId: string,
-  taskId?: string,
-): Promise<
-  Array<{ taskId: string; participantId: string; ex: ExecutorConfig }>
-> {
-  const stopped: Array<{
-    taskId: string;
-    participantId: string;
-    ex: ExecutorConfig;
-  }> = [];
-  const handled = new Set<string>();
-
-  for (const g of groupQueues.values()) {
-    for (const run of g.running) {
-      if (run.groupId !== groupId || (taskId && run.taskId !== taskId))
-        continue;
-      run.stopped = true;
-      clearRunTimers(run);
-      run.kill?.();
-      handled.add(run.taskId);
-      stopped.push({
-        taskId: run.taskId,
-        participantId: run.participantId,
-        ex: run.ex,
-      });
-      await markTaskCancelled(db, run.taskId, groupId, run.attempts);
-    }
-  }
-
-  // detached CLI tasks release their queue slot after spawn, so their run is no
-  // longer in groupQueues.running. The persisted pid remains the source of truth
-  // for this narrow cancellation window; an exited pid is still a valid cancel.
-  const rows = await db.query.task.findMany({
-    where: (t, { and: andFn, eq: eqFn, isNotNull: isNotNullFn }) =>
-      andFn(
-        eqFn(t.groupId, groupId),
-        eqFn(t.status, "running"),
-        ...(taskId ? [eqFn(t.id, taskId)] : []),
-        isNotNullFn(t.executorPid),
-      ),
-    columns: {
-      id: true,
-      executorParticipantId: true,
-      executorKey: true,
-      executorPid: true,
-      attempts: true,
-    },
-  });
-  for (const row of rows) {
-    if (handled.has(row.id) || row.executorPid === null) continue;
-    try {
-      process.kill(-row.executorPid, "SIGTERM");
-    } catch {
-      // The detached process may have exited already; cancellation is still
-      // required so the task cannot remain running until detached timeout.
-    }
-    const ex = await findExecutorByParticipant(db, {
-      executorKey: row.executorKey,
-    });
-    if (ex) {
-      stopped.push({
-        taskId: row.id,
-        participantId: row.executorParticipantId,
-        ex,
-      });
-    }
-    await markTaskCancelled(db, row.id, groupId, row.attempts ?? []);
-  }
-  return stopped;
 }
 
 /**
@@ -1808,75 +1470,6 @@ function runningForWorkspace(group: GroupQueue): number {
 function workspaceGateBlocked(group: GroupQueue): boolean {
   if (group.key === DEFAULT_GROUP_KEY) return false;
   return runningForWorkspace(group) >= workspaceCap(group.key);
-}
-
-/**
- * 摘要流文本(spec live-output-hide-thinking-and-autoscroll R1):`kind=thinking`
- * 的条目不进摘要流 —— 用户要看的是 agent 在做什么(工具/命令/汇报),思考行会把
- * 动作行稀释(实测占缓冲行数 64%-95%)。判据取解析器已解析出的 kind,不做
- * 「思考」二字文本匹配(后者会误伤汇报正文里出现该词的行)。
- *
- * ⚠️ 只截断摘要流:明细仍由调用方对**未过滤**的 entries 逐条 appendTaskDetail
- * 落盘,思考全文照常可经 ?detail=1 / 单条展开取回(R2)。
- *
- * L2:空摘要(raw(""))同样不进摘要流 —— 原子码/通用解析器对空白输入行产出
- * raw("") 条目,逐条 join 会把空行写进 task_output(实测 AtomCode 摘要流空行
- * 占比过高);共享边界过滤并计为一次 <empty> 跳过(计数 + 去重日志),与
- * 通用解析器的无语义 JSON 跳过同一观测体系。
- */
-function summaryStreamText(entries: readonly OutputEntry[]): string {
-  const lines: string[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "thinking") continue;
-    if (entry.summary.length === 0) {
-      observeGenericSkippedEvent("<empty>");
-      continue;
-    }
-    lines.push(entry.summary);
-  }
-  // 整批都是 thinking/空摘要时不产出空行:缓冲与 WS 广播都不该收到空 task_output。
-  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
-}
-
-/**
- * 实时界面流文本(spec live-output-only-agent-narration R1):仅 kind=report 进界面,
- * 其余类别(tool/command/result/thinking/error/raw)不进界面但全量持久化。判据
- * 是解析器产出的 kind,代替文本前缀匹配;错误永不折叠的约束保留在持久化侧,
- * 界面侧错误不显示但明细/DB 仍逐字保留,实现时在 summaryStreamText 注释已记下。
- */
-function liveStreamText(entries: readonly OutputEntry[]): string {
-  const lines: string[] = [];
-  for (const entry of entries) {
-    if (entry.kind !== "report") continue;
-    // R2:纯空白正文不进界面(trim 后的空字符串,如样本里的 `\n`)。
-    if (entry.summary.trim().length === 0) continue;
-    lines.push(entry.summary);
-  }
-  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
-}
-
-/** L2 可观测性导出:共享摘要过滤函数(供定向回归测试直接断言空行治理)。 */
-export { liveStreamText, summaryStreamText };
-
-/**
- * 同一 taskId 是否已有另一个活跃 run(specs/queued-task-never-picked-up-after-
- * chain-failure.md R1 的重复入队守卫)。
- *
- * 为什么需要它:回收扫描按 DB 的 queued 行补建内存 run,而正常派发是「先插
- * task 行(queued)、再入内存队列」两步 —— 扫描若正好落在这两步之间,同一个
- * task 会有两个 run。泵在调用 runOne 前已把 run 放进 activeRuns(同步),
- * 因此先到的那个一定先可见:后到的据此放弃本次执行,任务不会被 spawn 两次。
- *
- * 判据拿「activeRuns 里存在同 taskId 的另一个 run」代替「这个 task 正在被
- * 执行」;前提是 run 进入 activeRuns 早于 runOne 的任何 await(泵里同步 add)。
- * 不成立的情形是同一个 task 被两个**不同进程**各派一次 —— 本守卫只覆盖本
- * 进程内,跨进程仍需 DB 状态兜底(任务状态是 server 单一真相源)。
- */
-function hasDuplicateActiveRun(run: QueuedRun): boolean {
-  for (const other of activeRuns) {
-    if (other !== run && other.taskId === run.taskId) return true;
-  }
-  return false;
 }
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
@@ -3490,76 +3083,9 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
   setTimeout(() => void pumpQueue(), CONCURRENCY_RETRY_BACKOFF_MS);
 }
 
-/**
- * 外来提交判定(spec retry-rollback-must-not-destroy-foreign-commits R1/R3):
- * 检查点 ref 之后到 HEAD 之间是否存在提交(提交可达性,ADR-0009:判据指名
- * 「checkpoint 之后是否存在提交」这一事实,而非「HEAD 是否等于 checkpoint」)。
- *
- * 为何不是 SHA 相等比较:checkpoint 由 createCheckpoint 的 `commit-tree -p HEAD`
- * 打出的**新**提交对象,其父才是任务起点 HEAD —— checkpoint ref 与 HEAD 的 SHA
- * 恒不相等,直接比较会把每次重试都误判为外来提交。改用
- * `git rev-list --count <ref>..HEAD`:干净重试(起点后无提交)→ 0;共享工作树
- * 在任务启动后接受了外来提交(检视者冻结/其他任务产物/手工提交)→ >0。
- *
- * 返回 null 表示无法读取提交图(ref 无效/非仓库/git 失败):调用方不得据此
- * 跳过回滚(那会静默销毁),应回落既有的「回滚失败 → 终止重试」语义。
- */
-async function countCommitsAfterCheckpoint(
-  ref: string,
-  repoRoot: string,
-): Promise<number | null> {
-  const head = await gitExec(["rev-parse", "HEAD"], repoRoot);
-  if (head.status !== 0) return null;
-  const count = await gitExec(
-    ["rev-list", "--count", `${ref}..HEAD`],
-    repoRoot,
-  );
-  if (count.status !== 0) return null;
-  const n = parseInt((count.stdout ?? "").trim(), 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/**
- * 任务书声明仓库解析:任务书 body 显式声明目标仓库路径时(行级
- * `仓库:` / `仓库路径:` / `Repository:` / `Repo:` 大小写不敏感、允许前后空白),
- * 返回该行第一个路径 token(绝对路径且 existsSync 为目录才采用);否则回退群绑定
- * projectPath(保持现行为,允许为空 → 后续由 findRepoRoot() 兜底)。用于 spawn cwd
- * / 执行前快照 / 重试前回滚统一落在任务书声明的仓库上。
- */
-export function resolveTaskRepo(
-  body: string,
-  groupProjectPath: string | null,
-): string | null {
-  const declared = parseRepoPathFromBody(body);
-  if (
-    declared &&
-    isAbsolute(declared) &&
-    existsSync(declared) &&
-    statSync(declared).isDirectory()
-  ) {
-    return declared;
-  }
-  return groupProjectPath ?? null;
-}
-
-/**
- * 从任务书 body 解析显式声明的仓库路径:命中 `仓库:` / `仓库路径:` /
- * `Repository:` / `Repo:` 行(大小写不敏感、允许前后空白,行首即关键字)取行内
- * 第一个路径 token;无声明 → null。关键字严格从行首(仅允许前导空白)开始,避免
- * 正文偶然出现「仓库:」字样误命中。
- */
-function parseRepoPathFromBody(body: string): string | null {
-  const re = /^\s*(?:仓库路径|仓库|repository|repo)\s*[:：]\s*(.+?)\s*$/i;
-  for (const raw of body.split("\n")) {
-    const m = re.exec(raw);
-    if (m) {
-      const token = m[1].trim().split(/\s+/)[0];
-      if (token) return token;
-    }
-  }
-  return null;
-}
-
 function summaryOf(body: string): string {
   return body.replace(/\s+/g, " ").slice(0, 40);
 }
+
+/* deep-import 兼容:test/second-instance-sweep 等仍从 ./queue 取 recoverInterruptedTasks */
+export { recoverInterruptedTasks } from "./restart-recovery";

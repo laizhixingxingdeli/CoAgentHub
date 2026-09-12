@@ -28,6 +28,11 @@ export { adapterFor, type ExecutorAdapter } from "./adapters/registry";
 export { createAnsiStripper, stripAnsi } from "./ansi";
 export { backfillDetachedClosedTokenFields } from "./attempt-accounting";
 export {
+  cancelQueuedTasks,
+  cancelRunningTasks,
+  currentRunningTask,
+} from "./cancel";
+export {
   adjudicatedRecipientsOfTask,
   dispatcherRecipients,
   reviewerMemberIds,
@@ -98,23 +103,16 @@ export {
   resetGenericSkippedEventCounts,
 } from "./output-parser";
 export {
-  cancelQueuedTasks,
-  cancelRunningTasks,
   clearExecutorCooldown,
   createTaskDispatchWarnings,
-  currentRunningTask,
   enqueueTaskRun,
   isCoordinatorTask,
   isExecutorProcessAlive,
   isReviewerNotDispatchableTarget,
-  liveStreamText,
   maybeDispatchExecutorTask,
   queuedExecutorTaskCount,
-  recoverInterruptedTasks,
   refreshA2AActivity,
-  resolveTaskRepo,
   restoreExecutorCooldowns,
-  summaryStreamText,
 } from "./queue";
 export {
   type QueuedReclaimResult,
@@ -128,6 +126,7 @@ export {
   renderTaskCard,
   type TaskReport,
 } from "./report";
+export { recoverInterruptedTasks } from "./restart-recovery";
 export {
   groupHasReviewerMember,
   reviewRequestCarryAllowed,
@@ -148,6 +147,8 @@ export {
   activeExecutorTaskCount,
   getL3ResponseMinutesMs,
 } from "./state";
+export { liveStreamText, summaryStreamText } from "./stream-text";
+export { resolveTaskRepo } from "./task-repo";
 export {
   buildTicket,
   executionApiBase,
