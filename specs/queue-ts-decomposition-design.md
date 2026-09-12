@@ -1,8 +1,16 @@
 # Spec: queue.ts 拆解设计
 
-> **状态**: **阶段 1 已完成(2026-09-12)** —— 3 票全部 Landed
-> (`60763ad2` / `6c147dcc` / `6826a112`),**queue.ts 3916 → 2185(−44%)**。
-> 阶段 2(拆 `runOne`)待批。
+> **状态**: **阶段 1 + 倒置已完成(2026-09-12)** ——
+> **queue.ts 3916 → 1730(−56%)**,**强连通分量 1 组 → 0 组**。
+> 剩 7 个函数,其中 `runOne` 918 行占 53%。下一步:拆 `runOne` 的终态分支。
+>
+> | 票 | 内容 | queue.ts |
+> |---|---|---|
+> | `60763ad2` | task-repo / stream-text / cancel / restart-recovery | 3565 → 3091 |
+> | `6c147dcc` | dispatchability / dispatch-target | → 2626 |
+> | `6826a112` | failure / timeout-handlers | → 2185 |
+> | `5379b8b0` | **pump-signal 倒置(SCC 1 → 0)** | → 2212 |
+> | `9f8a8109` | cooldown / quota-failure | → **1730** |
 > **版本**: 1.0
 > **日期**: 2026-09-12
 > **取代**: [queue-ts-slicing.md](queue-ts-slicing.md) 的「按职责猜分片」做法
@@ -371,6 +379,62 @@ export function requestPump(): void {
 - 若要做,**必须**:① 上面那个补发 + 告警的版本,不能是静默 no-op;
   ② 加一条测试断言「模块加载后 pump 已注册」;
   ③ `/api/health` 透出注册状态,可观测。
+
+## 5c. 倒置与冷却/额度搬出的收口(L3,2026-09-12)
+
+用户 2026-09-12 裁定**做倒置、拆到底**,于是 §5 的「建议暂不做」作废。
+
+### `5379b8b0` pump-signal —— 环真的解开了
+
+| | 强连通分量 |
+|---|---|
+| 改前 | **1 组** `enterCooldown ⇄ handleConcurrencyConflict ⇄ handleQuotaFailure ⇄ handleTransientQuotaBackoff ⇄ pumpQueue ⇄ routeQuotaFailure ⇄ runOne`(7 函数 / 1282 行) |
+| 改后 | **0 组 —— 整个文件是 DAG** |
+
+8 处 `void pumpQueue()` 全改 `requestPump()`,形态逐条对照无 `await` 引入;
+注册在 `queue.ts` 模块顶层(放函数内则只有该函数被调过才注册)。
+
+**四道防线都验了**:
+- **变异:注释掉注册行 → 3/4 测试变红**(含「模块加载后已注册」与 `/api/health` 那条);
+- 补发逻辑有独立测试(未注册时 `requestPump` 暂存,注册时补发一次);
+- 未注册时 `console.warn`,**不是静默 no-op**;
+- `/api/health` 新增 `pumpSignal: {registered, missed}` —— 排障「派发停了」时
+  能一眼区分是不是注册没发生。
+
+### `9f8a8109` cooldown / quota-failure
+
+12 个文件(2 新模块 + queue + barrel + **8 个 deep-import 消费方**)。
+逐字核实:**cooldown 211 : 211,diff 完全为空**;
+**quota-failure 263 : 263,差异恰好是预告的 3 个 `export`**;
+两个常量(`MIN_EFFECTIVE_COOLDOWN_MS` / `CONCURRENCY_RETRY_BACKOFF_MS`)
+连文档注释逐字节相同。测试 131 passed 与基线一致;barrel 127 : 127。
+
+⚠️ **执行侧改了检视者的核验工具** `.scratch/verify-move.mjs`
+(把「到下一个声明为止」换成花括号配对)。改动本身是改进 —— 旧启发式处理不了
+这次要搬的两个 `const`。**但「执行者修改自己被验的工具」必须独立复核**:
+本次收口的逐字比对**没有用那个工具**,而是直接按行号从 `HEAD~1` 抽原文
+`diff`。结论一致。
+**留给后续**:核验工具应当纳入版本管理(现在在 `.scratch/`,gitignored,
+改了没有记录),或者由检视者每次用「不依赖工具」的方式复核。
+
+⚠️ **发现一处历史残渣**:queue.ts 里有一段孤立的文档注释(原属
+`runBlockReason`,该函数在 `6c147dcc` 搬去 `dispatchability.ts` 时注释被落下)。
+不影响行为,**下次动那一段时顺手清掉**,本票未动(避免扩大边界)。
+
+### 现状:剩 7 个函数 / 1730 行
+
+| 函数 | 行 |
+|---|---|
+| **`runOne`** | **918(占 53%)** |
+| `dispatchTask` | 306 |
+| `maybeDispatchExecutorTask` | 158 |
+| `enqueueTaskRun` | 128 |
+| `pumpQueue` | 32 |
+| `findTaskByMessage` / `summaryOf` | 10 |
+
+**下一步:拆 `runOne` 的终态分支。** 倒置做完后,成功分支调用的
+`routeQuotaFailure` 已在 `quota-failure.ts`,所以
+`outcome-*.ts → quota-failure.ts` 是单向边,**不再成环**。
 
 ## 6. 不涉及的改动
 
