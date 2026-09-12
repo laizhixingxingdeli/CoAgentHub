@@ -73,6 +73,7 @@ import {
   releaseTaskOutput,
 } from "./output-buffer";
 import { createExecutorOutputParser } from "./output-parser";
+import { registerPump, requestPump } from "./pump-signal";
 import {
   extractGenericJsonlText,
   findCommitHash,
@@ -245,7 +246,7 @@ export function enterCooldown(
           );
         });
       }
-      void pumpQueue();
+      requestPump();
     },
     Math.max(1, end - Date.now()),
   );
@@ -360,7 +361,7 @@ export async function clearExecutorCooldown(
     console.log(
       `[executor] 手动清除执行器 ${key} 的额度冷却(内存=${hadInMemory},持久化任务=${taskIds.length}),立即恢复派发`,
     );
-    void pumpQueue();
+    requestPump();
   }
   return { cleared, taskIds };
 }
@@ -675,7 +676,7 @@ export async function enqueueTaskRun(
     () => handleClaimTimeout(run),
     getClaimTimeoutMs(),
   );
-  void pumpQueue();
+  requestPump();
 }
 
 /** 幂等建 task(复用 POST /tasks 的 message_id 唯一逻辑)后入队。 */
@@ -972,7 +973,7 @@ async function dispatchTask(
     () => handleClaimTimeout(run),
     getClaimTimeoutMs(),
   );
-  void pumpQueue();
+  requestPump();
 }
 
 /* ---------------- 重派熔断(R4,specs/quota-exhaustion-triggers-infinite-retry) ---------------- */
@@ -1012,6 +1013,9 @@ async function pumpQueue(): Promise<void> {
     setPumping(false);
   }
 }
+
+// 模块顶层注册:加载本文件即挂上真正的泵,调用方只发 requestPump 信号。
+registerPump(() => void pumpQueue());
 
 /** 运行单个组任务:queued → running → spawn → done/failed → 清槽位 → 泵下一个。 */
 async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
@@ -1404,7 +1408,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // 的时序。成功与启动失败两条出口同一处置。
       const releaseCoordinatorGate = () => {
         releaseCoordinatorProcess(handle.pid);
-        void pumpQueue();
+        requestPump();
       };
       // 进程句柄保留在 run 上(handleDetachedTimeout 复查 DB 状态用)。正常退出
       // 不决定 detached 任务终态,但仍在这里读取该进程的原生 token 账本并写入
@@ -1928,7 +1932,7 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     clearRunTimers(run);
     activeRuns.delete(run);
     group.running = group.running.filter((r) => r !== run);
-    void pumpQueue();
+    requestPump();
   }
 }
 
@@ -2076,7 +2080,7 @@ async function handleTransientQuotaBackoff(
     `⏳ [${run.ex.label}] 执行器瞬时限流,任务保持排队,${seconds}s 后自动重试: ${run.summary}`,
   );
   // 退避到期主动泵送(与 403 反应式排队同款兜底):此时 run 已在队首等待。
-  setTimeout(() => void pumpQueue(), Math.max(1, retryAt - Date.now()));
+  setTimeout(() => requestPump(), Math.max(1, retryAt - Date.now()));
 }
 
 /**
@@ -2198,8 +2202,8 @@ async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
     `📋 [${ex.label}] 执行器忙(403 并发冲突),任务保持排队,空闲后自动重试: ${run.summary}`,
   );
   // 退避定时器:无既有 running 任务(外部会话占用)时,退避到期主动泵送重试;
-  // 有既有任务时由它们的完成路径(finally → pumpQueue)触发,本定时器仅兜底。
-  setTimeout(() => void pumpQueue(), CONCURRENCY_RETRY_BACKOFF_MS);
+  // 有既有任务时由它们的完成路径(finally → 泵送信号)触发,本定时器仅兜底。
+  setTimeout(() => requestPump(), CONCURRENCY_RETRY_BACKOFF_MS);
 }
 
 function summaryOf(body: string): string {

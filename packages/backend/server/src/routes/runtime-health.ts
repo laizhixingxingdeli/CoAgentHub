@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
+import { pumpSignalStatus } from "../lib/executor-task/pump-signal";
 import {
   getA2ASilenceTimeoutMs,
   getClaimTimeoutMs,
@@ -72,10 +73,15 @@ const app = new Hono().get(
       200: { description: "Runtime status" },
     },
   }),
-  // 新增 dispatchPolicy 字段:既有消费方(前端 requirement-workspace 读
-  // stale/staleReason)按键取值,加同级字段不影响它们。
+  // 新增 dispatchPolicy / pumpSignal 字段:既有消费方(前端 requirement-workspace
+  // 读 stale/staleReason)按键取值,加同级字段不影响它们。
   (c) =>
-    c.json({ ...getRuntimeStatus(), dispatchPolicy: describeDispatchPolicy() }),
+    c.json({
+      ...getRuntimeStatus(),
+      dispatchPolicy: describeDispatchPolicy(),
+      // 泵送信号注册态:排障「派发停了」时一眼区分是否注册没发生(静默丢信号)。
+      pumpSignal: pumpSignalStatus(),
+    }),
 );
 
 export default app;
