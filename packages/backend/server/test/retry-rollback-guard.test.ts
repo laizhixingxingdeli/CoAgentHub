@@ -222,6 +222,29 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
       await new Promise((r) => setTimeout(r, 120));
     }
   }
+  /** status=running 与 checkpointRef 落库之间有 await 窗口；轮询到两者同时成立再返回。 */
+  async function waitForRunningWithCheckpoint(
+    pid: string,
+    gid: string,
+    mid: string,
+    timeoutMs = 10000,
+  ) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const tasks = await listTasks(pid, gid);
+      const t = tasks.find((x) => x.messageId === mid);
+      if (t && t.status === "running" && t.checkpointRef) return t;
+      if (Date.now() > deadline) {
+        const detail = t
+          ? `status=${t.status}, checkpointRef=${t.checkpointRef}`
+          : "task not found";
+        throw new Error(
+          `waitForRunningWithCheckpoint timeout: expected running with non-null checkpointRef mid=${mid} (${detail})`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+  }
   async function waitForMessage(
     pid: string,
     gid: string,
@@ -298,17 +321,14 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      // 等任务进入 running（已打 checkpoint）
-      await waitForTaskStatus(
+      // 等 running 且 checkpointRef 已落库（二者写入有先后窗口，不能只等 status）
+      await waitForRunningWithCheckpoint(
         coordinator.id,
         group.id,
         msg.id,
-        "running",
         10000,
       );
       // 模拟检视者在任务运行期间提交一个外来 commit
-      // 稍等确保 checkpoint 已落库
-      await new Promise((r) => setTimeout(r, 300));
       writeFileSync(path.join(proj, "foreign.txt"), "inspector spec v1\n");
       execFileSync("git", ["add", "-A"], { cwd: proj });
       execFileSync("git", ["commit", "-qm", "foreign: inspector commit"], {
@@ -467,12 +487,11 @@ describe("RB-GUARD 重试回滚外来提交防护", () => {
         audience: "participant",
         audienceRef: codebuddy.id,
       });
-      // 等待 checkpoint 已创建且首次 attempt 尚未结束（sleep 窗口内）
-      const running = await waitForTaskStatus(
+      // 直接等「running 且 checkpointRef 非空」——status 先于 checkpointRef 写入，不能假设二者同时就位
+      const running = await waitForRunningWithCheckpoint(
         coordinator.id,
         group.id,
         msg.id,
-        "running",
         10000,
       );
       const checkpointRef = running.checkpointRef;
