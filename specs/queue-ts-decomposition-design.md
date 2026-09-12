@@ -436,6 +436,40 @@ export function requestPump(): void {
 `routeQuotaFailure` 已在 `quota-failure.ts`,所以
 `outcome-*.ts → quota-failure.ts` 是单向边,**不再成环**。
 
+## 5d. 成功分支抽出的收口(L3,2026-09-12,`9226bc4d`)
+
+`runOne` 的 `result.code === 0` 分支体(175 行)→ `outcome-success.ts`
+的 `handleSuccessOutcome`。最终签名由 `tsc` 定稿:
+
+```ts
+handleSuccessOutcome(run, { result, output, isA2a, repoRoot, getPeerExecutorNames })
+```
+
+`db` / `groupId` / `taskId` / `participantId` / `ex` 从 `run` 解构 ——
+**不需要 `RunContext`**,验证了 §4 的那条修正。
+
+**逐字程度**(检视者独立量):去掉缩进后 **173 : 173**,差异只有三处 ——
+① 两行解构(票面 R1③ 就是这么要求的);
+② 一行 `applyDiffSummaryPatch(...)` 因缩进变浅被 biome 折成单行(纯格式);
+③ 抽取边界的一个 `)`(检视者工具的切法问题,非改动)。
+测试 52 passed;`tsc` / `biome` exit 0;`outcome-success.ts` 不 import `./queue`。
+
+**`runOne` 918 → 752;`queue.ts` 1730 → 1553。**
+
+### ⚠️ 代码对,但论证错 —— 记下来
+
+执行侧给调用点 `return` 的理由是:**「否则成功路径会误入 `else`」**。
+**这不成立。** `if (cond) { A } else { B }` 里,A 不 `return` 只会落到
+`if/else` **之后**,不会进入 `B` —— `B` 只在条件为假时执行。
+
+检视者做了变异验证:**注释掉调用点的 `return`,52 条测试全绿**。
+再查实:该 `if/else` 是内层 `try` 的**最后一条语句**(其后紧跟 `} catch`),
+**后面什么都没有**,所以这个 `return` 是**冗余但无害的防御**。
+
+结论:**加它没错,但提交信息里的理由是错的**,留着会误导后来人。
+**抽后续分支时注意**:若某个分支的 `if/else` 之后**还有代码**,漏掉调用点的
+`return` 就是真回归 —— 那时必须有能抓到它的测试,不能靠这次的「反正没事」。
+
 ## 6. 不涉及的改动
 
 - 阶段 1 不改任何函数签名、行为、导出名(必须加的 `export` 除外)。
