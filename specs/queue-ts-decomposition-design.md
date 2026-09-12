@@ -1,6 +1,8 @@
 # Spec: queue.ts 拆解设计
 
-> **状态**: **Draft —— 设计待批,尚未下发任何实施票**
+> **状态**: **阶段 1 已完成(2026-09-12)** —— 3 票全部 Landed
+> (`60763ad2` / `6c147dcc` / `6826a112`),**queue.ts 3916 → 2185(−44%)**。
+> 阶段 2(拆 `runOne`)待批。
 > **版本**: 1.0
 > **日期**: 2026-09-12
 > **取代**: [queue-ts-slicing.md](queue-ts-slicing.md) 的「按职责猜分片」做法
@@ -173,6 +175,44 @@ queue.ts **3091 → 2626**(−465)。**独立核实**:
 
 ⚠️ **这个工具自己也做了双向验证才用**:正向能确认 3 个既有模块逐字一致;
 反向注入一个空格能抓出来并 exit 1。**只会说 ✓ 的工具不能拿来验别人。**
+
+### 3.6 第 3 票收口与阶段 1 结算(L3,2026-09-12,`6826a112`)
+
+`failure` + `timeout-handlers`,2 模块 / 11 函数。queue.ts **2626 → 2185**。
+独立核实:11 个函数逐字全 ✓(差异只有 10 个预告的 `export`);`tsc` / `biome`
+(仓库根)exit 0;测试 **37 passed | 0 failed**;`diff --stat` 恰好 4 文件;
+依赖方向 `timeout-handlers → failure` 单向,两者都不 import `./queue`;
+barrel **124 : 124**;未新增任何 re-export。
+
+**下发前把冷却那 2 个自由函数从本票拿掉了**:`normalizeCooldownEnd` 被
+`orphan-task-reconciler` / `routes/group/tasks` / `executors.ts` /
+`executor-quota-redispatch.test` **4 处从 `./queue` 深引**,且与 `enterCooldown`、
+`MIN_EFFECTIVE_COOLDOWN_MS` 同在一条 import 语句里。只搬 5 个冷却函数里的 2 个,
+会让这 4 处的 import 一分为二,**阶段 3 还得再改一次**。整族等阶段 3 一起走。
+
+### 3.7 阶段 1 结算
+
+| | 函数 | 行 |
+|---|---|---|
+| 搬出 | 40 | 1731 |
+| 留下 | 16 | 2185 |
+
+**`queue.ts` 3916 → 2185(−44%)**,共 10 个新模块
+(含更早的 `ticket-builder` / `spawn-failure` / `attempt-accounting`)。
+三票**零返工、零行为变更**,barrel 公开面自始至终 124 个名字未动。
+
+剩下的 16 个函数:
+
+| 族 | 行 |
+|---|---|
+| **`runOne` 单函数** | **896**(占剩余 41%) |
+| 派发核心(`dispatchTask` 306 / `enqueueTaskRun` 128 / `maybeDispatchExecutorTask` 158 / `pumpQueue` 29) | 621 |
+| 额度族(`routeQuotaFailure` / `handleTransientQuotaBackoff` / `handleQuotaFailure` / `handleConcurrencyConflict`) | 255 |
+| 冷却族(5 个) | 227 |
+| 杂(`findTaskByMessage` / `summaryOf`) | 19 |
+
+与设计预测(~2140)基本吻合。**纯搬运到此为止 —— 剩下的每一族要么在
+`pumpQueue` 的环里,要么就是 `runOne` 本身。**
 
 ## 4. 阶段 2:拆 `runOne`(896 行 —— 真正的大头)
 
