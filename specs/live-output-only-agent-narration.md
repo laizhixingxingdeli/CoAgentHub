@@ -1,6 +1,35 @@
 # Spec: 实时输出只显示 agent 汇报,持久化口径不变
 
-> **状态**: Frozen — 2026-09-06(v1.3)
+> **状态**: **Landed —— 2026-09-12 检视者复核确认全部落地**
+>
+> ~~Frozen — 2026-09-06(v1.3)~~
+>
+> ⚠️ **本票是「幽灵条目」:实现早已由后续票完成,状态行一直没改**,
+> 于是在 backlog 里挂了 6 天,每次盘点都显示成「Frozen 未下发」。
+> 检视者 2026-09-12 逐条核实:
+>
+> | 要求 | 实现位置 | 证据 |
+> |---|---|---|
+> | R1 界面只留 `kind === "report"` | `stream-text.ts` `liveStreamText` | 函数体 `if (entry.kind !== "report") continue;` |
+> | R1 出口①(WS) | `queue.ts:1313-1318` | `liveText` → `appendLiveTaskOutput` + `broadcastTaskOutput` |
+> | R1 出口②(`includeOutput`) | `routes/group/tasks.ts:1161 / 1277` | `liveTaskOutputTail(task.id)` |
+> | R2 空白正文不进界面 | `stream-text.ts` | `if (entry.summary.trim().length === 0) continue;` |
+> | R2.1 `onOutput` 带来源 | `executor-runner.ts:143 / 279 / 287` | 签名即 `(chunk, source: "stdout" \| "stderr")`,两处 `on("data")` 分别传值 |
+> | R2.2 AtomCode 按来源判 report | `output-parser.ts:453-456 / 511-531` | `if (source === "stdout")`;且按流分缓冲(注释写明不混流拼接) |
+> | R3 持久化口径不变 | `queue.ts:1309-1312` | `summaryStreamText(entries)` 仍收**未过滤**的全量 entries → `appendTaskOutput` |
+>
+> `queue.ts:1303-1305` 的注释直接点名本 spec,可作交叉印证。
+>
+> ⚠️ **另两处锚点也已过时**(复核时一并查实,供日后引用时注意):
+> - 硬验收写的样本目录 `.scratch/probe/samples/` **已不存在**;样本由
+>   [re-record-executor-probe-samples.md](re-record-executor-probe-samples.md)
+>   重录并**入库到 `test/fixtures/`**(`atomcode-run.stdout` / `codebuddy-run.jsonl`
+>   / `codex-error-run.jsonl` 等)。
+> - 正文引用的 `queue.ts:1684-1688` / `1853-1857` / `401` / `1519` / `2127` /
+>   `2507` 等行号,在 2026-09-12 的 queue.ts 拆解后全部失效
+>   (`isCoordinatorTask` → `dispatch-target.ts`,`failTask` → `failure.ts`,
+>   `summaryStreamText` / `liveStreamText` → `stream-text.ts`)。
+>   见 [queue-ts-decomposition-design.md](queue-ts-decomposition-design.md)。
 > **版本**: 1.3
 >
 > **v1.3 修订(2026-09-06)**:R1 判据表补入 pi 行。理由见
