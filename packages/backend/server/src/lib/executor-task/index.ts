@@ -113,7 +113,6 @@ export {
   enqueueTaskRun,
   isExecutorProcessAlive,
   maybeDispatchExecutorTask,
-  refreshA2AActivity,
   restoreExecutorCooldowns,
 } from "./queue";
 export {
@@ -162,6 +161,7 @@ export {
   type TicketRole,
   type TicketTemplate,
 } from "./ticket-template";
+export { refreshA2AActivity } from "./timeout-handlers";
 export {
   collectTokenUsage,
   extractCodexExecText,

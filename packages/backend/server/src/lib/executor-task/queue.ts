@@ -6,10 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import {
-  type TaskAttempt,
-  task as taskTable,
-} from "@laizhixingxingdeli/database/schema";
+import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import { runA2AExecutor } from "@server/lib/a2a-runner";
 import type { DataBase } from "@server/lib/database";
 import { resolveExecutorCliSpawn } from "@server/lib/executor-config-fields";
@@ -17,9 +14,7 @@ import {
   createCheckpoint,
   type ExecutorRunHandle,
   findRepoRoot,
-  gitExec,
   readTimeoutMs,
-  resetToCheckpoint,
   runExecutor,
 } from "@server/lib/executor-runner";
 import {
@@ -49,7 +44,7 @@ import {
   listPersistedExecutorCooldowns,
 } from "./cooldown-store";
 import { appendTaskDetail } from "./detail-store";
-import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
+import { applyDiffSummaryPatch } from "./diff-summary";
 import {
   buildDispatchTargetAudit,
   countConsecutiveFailedChildren,
@@ -64,8 +59,8 @@ import {
   isRunDispatchable,
   runningForWorkspace,
   workspaceCap,
-  workspaceGateBlocked,
 } from "./dispatchability";
+import { failTask, handleFailure, isTransientQuota } from "./failure";
 import {
   markTaskCancelled,
   notifyTaskStatusChanged,
@@ -114,7 +109,6 @@ import {
   getMaxParallelGroups,
   getRateLimitCooldownMs,
   getRedispatchFailureLimit,
-  getRetryPolicy,
   getStallAlertMs,
   getStallTimeoutMs,
   getTransientQuotaPolicy,
@@ -129,13 +123,22 @@ import {
   setPumping,
 } from "./state";
 import { liveStreamText, summaryStreamText } from "./stream-text";
-import { countCommitsAfterCheckpoint, resolveTaskRepo } from "./task-repo";
+import { resolveTaskRepo } from "./task-repo";
 import {
   buildSpecSection,
   buildTicket,
   resolveTestExecutor,
 } from "./ticket-builder";
 import { loadTicketTemplate } from "./ticket-template";
+import {
+  handleA2ASilence,
+  handleClaimTimeout,
+  handleDetachedTimeout,
+  handleStall,
+  handleStallAlert,
+  handleUnconfirmed,
+  hasRecentA2AProgress,
+} from "./timeout-handlers";
 import {
   DEFAULT_GROUP_KEY,
   DISPATCH_ALLOWED_ROLES,
@@ -1913,281 +1916,6 @@ async function findTaskByMessage(db: DataBase, messageId: string) {
   });
 }
 
-/* ---------------- 超时 / 进度处理 ---------------- */
-
-/**
- * 无进展提醒处理(网页体验批次):running 任务连续无输出超过 stallAlertMs
- * (默认 15min,先于 stallTimeoutMs)→ 发一条群消息提醒协调者 + 任务面板行
- * 警示标记(黄色,非失败);静默继续到 stallTimeoutMs 才由 handleStall 标
- * failed。停止指令优先:run.stopped 的任务直接跳过。仅 CLI 路径调度(与静默
- * 检测同界,a2a 无本地进程输出可观察)。
- */
-function handleStallAlert(run: QueuedRun): void {
-  if (run.stopped || run.stalled || run.stallAlerted) return;
-  run.stallAlerted = true;
-  if (run.stallAlertTimer) {
-    clearTimeout(run.stallAlertTimer);
-    run.stallAlertTimer = null;
-  }
-  const minutes = Math.max(1, Math.round(getStallAlertMs() / 60_000));
-  console.warn(
-    `[executor] 无进展提醒: ${run.taskId} 已 ${minutes} 分钟无输出,执行器:${run.ex.label}`,
-  );
-  void (async () => {
-    await postStatus(
-      run.db,
-      run.groupId,
-      run.participantId,
-      run.ex,
-      `⚠️ 任务 ${run.taskId} 已 ${minutes} 分钟无进展,执行器:${run.ex.label},请介入`,
-    );
-    // 警示标记落库(diffSummary.stallAlerted),任务面板行加黄色警示样式。
-    try {
-      const cur = await run.db.query.task.findFirst({
-        where: and(
-          eq(taskTable.id, run.taskId),
-          eq(taskTable.groupId, run.groupId),
-        ),
-        columns: { diffSummary: true },
-      });
-      const nextAlert = mergeDiffSummary(
-        cur?.diffSummary,
-        { stallAlerted: true },
-        "scheduling",
-      );
-      await run.db
-        .update(taskTable)
-        .set({ diffSummary: nextAlert })
-        .where(
-          and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
-        );
-    } catch (e) {
-      console.warn(`[executor] 写无进展警示标记失败(${run.taskId}): ${e}`);
-    }
-    void wsHub.broadcastTaskStallAlert(run.groupId, run.taskId);
-  })();
-}
-
-/**
- * 静默超时处理:running 任务连续无输出超过 stallTimeoutMs → kill 进程组 +
- * 置 stalled。失败落库 / ❌ 回传 / 重试判定由 promise 完成路径(runOne 看到
- * run.stalled)统一处理,避免定时器回调与完成路径并发写状态。
- * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径)。
- */
-function handleStall(run: QueuedRun): void {
-  if (run.stopped || run.stalled) return;
-  run.stalled = true;
-  if (run.stallTimer) {
-    clearTimeout(run.stallTimer);
-    run.stallTimer = null;
-  }
-  run.kill?.();
-  console.error(`[executor] 执行器静默超时: ${run.taskId}`);
-}
-
-/**
- * A2A 无进展超时处理(第1层):running 的 A2A 任务连续无任何进展信号(执行器
- * participant 在群里的消息,refreshA2AActivity 顺延)超过 a2aSilenceTimeoutMs
- * → 置 a2aSilenced + 中止在途请求,失败落库 / ❌ 回传由完成路径统一处理
- * (与静默超时同一模式,避免定时器回调与完成路径并发写状态)。
- * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径);
- * detached 任务不设此定时器(发送后静默等待执行器 PATCH 是正常态)。
- */
-function handleA2ASilence(run: QueuedRun): void {
-  if (run.stopped || run.a2aSilenced || run.detached) return;
-  run.a2aSilenced = true;
-  if (run.a2aSilenceTimer) {
-    clearTimeout(run.a2aSilenceTimer);
-    run.a2aSilenceTimer = null;
-  }
-  run.kill?.();
-  console.error(`[executor] A2A 无进展超时: ${run.taskId}`);
-}
-
-/**
- * A2A 进度信号(第1层):执行器 participant 在群里发的消息 → 刷新该执行器在本群
- * running 的 A2A 任务最近活跃时间(lastActivityAt),顺延无进展超时定时器。
- * 由 POST /groups/:id/messages 成功写入消息后调用(fire-and-forget,纯内存
- * 同步操作)。消息可以是普通广播消息,无需新协议。不命中(非 A2A / 非 running /
- * 非本执行器消息 / 已停止或已触发无进展)返回 false,不影响消息响应。
- */
-export function refreshA2AActivity(
-  groupId: string,
-  participantId: string,
-): boolean {
-  for (const g of groupQueues.values()) {
-    const run = g.running.find(
-      (rr) =>
-        !rr.stopped &&
-        !rr.a2aSilenced &&
-        rr.groupId === groupId &&
-        rr.participantId === participantId &&
-        rr.ex.kind === "a2a",
-    );
-    if (!run) continue;
-    run.lastActivityAt = Date.now();
-    if (run.a2aSilenceTimer) {
-      clearTimeout(run.a2aSilenceTimer);
-      run.a2aSilenceTimer = setTimeout(
-        () => handleA2ASilence(run),
-        getA2ASilenceTimeoutMs(),
-      );
-    }
-    return true;
-  }
-  return false;
-}
-
-/**
- * A2A 请求超时时的「最近有进展」判定(第2层):running 起点后有进展信号
- * (lastActivityAt 被进度消息刷新过,即 > runningAt)且距上次进展未超过无进展
- * 窗口 → 视为执行器可能仍在执行/已完成,结果未确认。无进展起点(lastActivityAt
- * === runningAt)或静默已超窗口(此时 a2aSilenceTimer 已先触发)不算。
- */
-function hasRecentA2AProgress(run: QueuedRun): boolean {
-  if (!run.runningAt) return false;
-  if (run.lastActivityAt <= run.runningAt) return false;
-  return Date.now() - run.lastActivityAt < getA2ASilenceTimeoutMs();
-}
-
-/**
- * 结果未确认统一出口(第2层):执行器可能已完成但结果无法确认(gateway「did not
- * reply in time」/ 请求超时但有进展 / 网络错误 / HTTP 5xx / detached 超时未回写)。
- * 落库保持 status=failed(不新增状态,避免迁移/兼容问题),diffSummary 加
- * unconfirmed: true + 协议文案;群消息回传 ⚠️ 而非 ❌。不重试(重试有重复执行
- * 风险)。detached 超时触发前会复查 DB 状态(已回写终态则跳过),见 handleDetachedTimeout。
- */
-async function handleUnconfirmed(run: QueuedRun): Promise<void> {
-  const { db, taskId } = run;
-  await endAttempt(run, {
-    status: "failed",
-    error: "执行器未按协议回复，结果未确认",
-  });
-  await failTask(
-    db,
-    taskId,
-    "执行器未按协议回复，结果未确认",
-    run.retryCount,
-    { unconfirmed: true },
-    run.attempts,
-  );
-  releaseTaskOutput(taskId);
-  await postStatus(
-    db,
-    run.groupId,
-    run.participantId,
-    run.ex,
-    "⚠️ 任务结果未确认：执行器可能已完成，请人工核实",
-  );
-}
-
-/**
- * detached 超时处理(第3层):任务发送后超过 detachedTimeoutMs 执行器仍未 PATCH
- * 回写终态 → 按「结果未确认」处理(第2层)。触发前复查 DB:状态已非 running
- * (执行器已回写 done/failed 或已被停止置 cancelled)→ 跳过,避免覆盖终态。
- */
-function handleDetachedTimeout(run: QueuedRun): void {
-  if (run.stopped || run.detachedTimedOut) return;
-  run.detachedTimedOut = true;
-  if (run.detachedTimer) {
-    clearTimeout(run.detachedTimer);
-    run.detachedTimer = null;
-  }
-  console.error(`[executor] detached 任务超时未回写终态: ${run.taskId}`);
-  void (async () => {
-    try {
-      const cur = await run.db.query.task.findFirst({
-        where: (t, { and: andFn, eq: eqFn }) =>
-          andFn(eqFn(t.id, run.taskId), eqFn(t.groupId, run.groupId)),
-        columns: { status: true },
-      });
-      if (cur?.status !== "running") {
-        // 执行器已 PATCH 回写终态(或已停止):结果已确认/已取消,不再覆盖。
-        return;
-      }
-      await handleUnconfirmed(run);
-    } catch (e) {
-      console.warn(`[executor] detached 超时处理失败(${run.taskId}): ${e}`);
-    }
-  })();
-}
-
-/**
- * 认领超时处理:queued 任务超过 claimTimeoutMs 仍未进入 running → 移出队列 +
- * 置 failed(「任务未被认领」)+ ❌ 回传(注明发布时间)。若任务已被 pump 取走
- * 开始运行(认领完成),从队列找不到即放弃(定时器取消前已入队的回调兜底)。
- * 停止指令优先:run.stopped 的任务直接跳过(停止走 cancelled 路径)。
- */
-function handleClaimTimeout(run: QueuedRun): void {
-  if (run.stopped) return;
-  // 执行器额度冷却中:不按认领超时处理(任务应保持 queued,等冷却结束由
-  // enterCooldown 的定时器泵送自动派发,而非被误标「未认领」)。
-  if (isInCooldown(run.ex)) return;
-  const g = groupQueues.get(run.groupKey);
-  if (g) {
-    const idx = g.queue.indexOf(run);
-    if (idx < 0) return; // 已被取走开始运行 → 认领完成,放弃。
-    // 工作树闸已满:任务是被泵**合法**跳过的(不是遗弃),豁免认领超时 ——
-    // 保持 queued 等闸释放,由既有任务终态的泵送拉起(R1.1)。判据复用泵的
-    // 闸判定(workspaceGateBlocked),不另写第二套「队列是否阻塞」(ADR-0009)。
-    if (workspaceGateBlocked(g)) return;
-    g.queue.splice(idx, 1);
-  }
-  clearRunTimers(run);
-  const publishedAt = new Date(run.createdAt).toLocaleString("zh-CN");
-  console.error(`[executor] 任务未认领: ${run.taskId}`);
-  void (async () => {
-    await failTask(run.db, run.taskId, "任务未认领");
-    await postStatus(
-      run.db,
-      run.groupId,
-      run.participantId,
-      run.ex,
-      `❌ [${run.ex.label}] 任务失败 (未认领,发布于 ${publishedAt})`,
-    );
-  })();
-}
-
-/** 直接落库置 failed(server 是状态源;PATCH 端点是给外部执行器客户端的)。
- *  retries > 0 时把重试次数写进 diffSummary(审计/汇报用);extra 合并进
- *  diffSummary(结果未确认等附加标记,如 { unconfirmed: true })。running 任务
- *  存在输出缓冲时,把最近 500 行写进 diffSummary.outputTail(完成回填,之后
- *  不依赖内存也能看;无缓冲(未 spawn 的失败)则不加)。 */
-async function failTask(
-  db: DataBase,
-  taskId: string,
-  reason: string,
-  retries = 0,
-  extra?: Record<string, unknown>,
-  attempts?: TaskAttempt[],
-): Promise<void> {
-  const patch: Record<string, unknown> = { error: reason, ...extra };
-  if (retries > 0) patch.retries = retries;
-  const tokenUsage = attempts ? sumAttemptTokenUsage(attempts) : undefined;
-  if (tokenUsage !== undefined) patch.tokenUsage = tokenUsage;
-  const tokenUsageReason = attempts
-    ? sumAttemptTokenUsageReason(attempts)
-    : undefined;
-  if (tokenUsageReason) patch.tokenUsageReason = tokenUsageReason;
-  const tail = taskOutputTailLines(taskId);
-  if (tail) patch.outputTail = tail;
-  const liveTail = liveTaskOutputTail(taskId);
-  if (liveTail) patch.liveOutputTail = liveTail;
-  const cur = await db.query.task.findFirst({
-    where: eq(taskTable.id, taskId),
-    columns: { diffSummary: true },
-  });
-  const diffSummary = applyDiffSummaryPatch(cur?.diffSummary, patch);
-  const [failed] = await db
-    .update(taskTable)
-    .set({ status: "failed", diffSummary })
-    .where(eq(taskTable.id, taskId))
-    .returning();
-  if (failed) {
-    await notifyTaskStatusChanged(db, taskId, failed.groupId, "failed", failed);
-  }
-}
-
 /**
  * 额度失败分流(spec transient-ratelimit-escalated-to-long-cooldown R2):
  *  - `transient` → per-run 退避重排队(不进执行器级冷却,任务不判 failed);
@@ -2213,15 +1941,6 @@ async function routeQuotaFailure(
     return;
   }
   await handleQuotaFailure(run, reasonLabel, tail, verdict.matchedLine);
-}
-
-/**
- * 是否走瞬时限流处置:分级由 classifyQuotaFailure 单点给出,这里只判「是否
- * 启用」—— 未配置瞬时退避时回落 exhausted 语义(fail-safe:宁可长冷却也不要
- * 无限退避)。三处额度调用点共用本判定。
- */
-function isTransientQuota(verdict: QuotaFailureVerdict): boolean {
-  return verdict.kind === "transient" && getTransientQuotaPolicy() !== null;
 }
 
 /**
@@ -2391,166 +2110,6 @@ async function handleQuotaFailure(
         { db: run.db, taskId: run.taskId },
       ),
   });
-}
-
-/**
- * 失败统一出口(重试判定):任务失败(exit≠0 / 超时 / 静默)且 retryCount <
- * maxRetries 且可重试时 → 回滚 checkpoint(resetWorkspace)→ retry_count+1 →
- * 回传 ❌(首次失败)+ ↻ 重试提示 → 重新入队重跑;否则按最终失败处理(标
- * failed + ❌ 回传)。认领超时 / 手动停止 / 验收失败不重试(调用方传
- * retryable=false 或直接走各自分支)。
- */
-async function handleFailure(
-  run: QueuedRun,
-  reason: string,
-  opts: {
-    retryable: boolean;
-    message: string;
-    extra?: Record<string, unknown>;
-    afterPersisted?: () => void;
-  },
-): Promise<void> {
-  const { db, taskId } = run;
-  // 非瞬时限流的失败出口:连续瞬时限流计数归零(「连续」而非「累计」)。
-  run.transientQuotaCount = 0;
-  // 本次 attempt 结束(重试会由下一次 spawn 的 beginAttempt 续新条)。
-  await endAttempt(run, { status: "failed", error: reason });
-  const canRetry =
-    opts.retryable &&
-    !run.stopped &&
-    run.retryCount < getRetryPolicy().maxRetries;
-
-  if (!canRetry) {
-    // 注意顺序:failTask 会回填 outputTail(最近 50 行),必须先取后释放。
-    await failTask(
-      db,
-      taskId,
-      reason,
-      run.retryCount,
-      opts.extra,
-      run.attempts,
-    );
-    opts.afterPersisted?.();
-    releaseTaskOutput(taskId);
-    await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
-    return;
-  }
-
-  // 重试前回滚 checkpoint(resetWorkspace=true 且存在快照):恢复工作树到任务前
-  // 状态,避免重试带着首次失败留下的脏改动重跑。a2a 无本地快照直接跳过。回滚
-  // 必须在执行前快照所用的仓库(任务书声明的仓库)上进行,与原执行一致。
-  // 外来提交防护(spec retry-rollback-must-not-destroy-foreign-commits R1/R2):
-  // 硬 reset 前检查 checkpoint 之后是否存在提交;存在 → 跳过回滚但继续重试
-  // (降级),留痕并群内说明;干净(0)照常硬 reset;无法判定(null)走既有
-  // 「回滚失败 → 终止重试」语义,不静默跳过。
-  if (getRetryPolicy().resetWorkspace && run.checkpointRef) {
-    const declaredRoot = resolveTaskRepo(run.body, run.projectPath);
-    const repoRoot =
-      declaredRoot && existsSync(declaredRoot) ? declaredRoot : findRepoRoot();
-    const foreignCount = await countCommitsAfterCheckpoint(
-      run.checkpointRef,
-      repoRoot,
-    );
-    if (foreignCount !== null && foreignCount > 0) {
-      const headRes = await gitExec(["rev-parse", "HEAD"], repoRoot);
-      const headAtSkip =
-        headRes.status === 0 ? (headRes.stdout ?? "").trim() : "unknown";
-      const rollbackSkipped = {
-        reason: "checkpoint 之后存在外来提交,跳过回滚保护共享工作树",
-        headAtSkip,
-        checkpoint: run.checkpointRef,
-      };
-      try {
-        const cur = await db.query.task.findFirst({
-          where: eq(taskTable.id, taskId),
-          columns: { diffSummary: true },
-        });
-        const next = mergeDiffSummary(
-          cur?.diffSummary,
-          { rollbackSkipped },
-          "audit",
-        );
-        await db
-          .update(taskTable)
-          .set({ diffSummary: next })
-          .where(eq(taskTable.id, taskId));
-      } catch (e) {
-        console.warn(`[executor] 写 rollbackSkipped 留痕失败(${taskId}): ${e}`);
-      }
-      console.log(
-        `[executor] 检测到检查点之后存在外来提交(${foreignCount} 个),跳过回滚保护共享工作树: ${taskId} HEAD=${headAtSkip.slice(0, 12)} checkpoint=${run.checkpointRef}`,
-      );
-      await postStatus(
-        db,
-        run.groupId,
-        run.participantId,
-        run.ex,
-        `⚠️ [${run.ex.label}] 检测到检查点之后存在外来提交,已跳过回滚保护共享工作树(HEAD=${headAtSkip.slice(0, 12)} checkpoint=${run.checkpointRef}),将在当前工作树状态上直接重试`,
-      );
-    } else {
-      const res = await resetToCheckpoint(run.checkpointRef, repoRoot);
-      if (!res.ok) {
-        // 快照回滚失败 → 终止重试,按最终失败处理(保留原始失败原因)。
-        const msg = `${reason};回滚失败,终止重试: ${res.message}`;
-        console.error(`[executor] 重试前回滚失败(${taskId}): ${res.message}`);
-        await failTask(
-          db,
-          taskId,
-          msg,
-          run.retryCount,
-          undefined,
-          run.attempts,
-        );
-        await postStatus(
-          db,
-          run.groupId,
-          run.participantId,
-          run.ex,
-          `❌ [${run.ex.label}] 任务失败: ${msg}`,
-        );
-        return;
-      }
-      console.log(
-        `[executor] 重试前已回滚工作区到 ${run.checkpointRef}(${taskId})`,
-      );
-    }
-  }
-
-  // retry_count+1 并持久化(最终结果仍由重试后的完成路径回传)。
-  run.retryCount += 1;
-  try {
-    await db
-      .update(taskTable)
-      .set({ retryCount: run.retryCount })
-      .where(eq(taskTable.id, taskId));
-  } catch (e) {
-    console.warn(`[executor] 写 retry_count 失败(${taskId}): ${e}`);
-  }
-
-  // 首次失败 ❌ + 补发 ↻ 重试提示;最终 ✅/❌ 由重试的完成路径照常回传。
-  await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
-  await postStatus(
-    db,
-    run.groupId,
-    run.participantId,
-    run.ex,
-    `↻ [${run.ex.label}] 自动重试 (第 ${run.retryCount} 次)`,
-  );
-
-  // 重置运行态并重新入队(同组串行,槽位由 runOne 的 finally 释放后 pump 取走;
-  // 任务已被认领过,不再设认领超时)。
-  run.stalled = false;
-  run.runningAt = null;
-  run.lastOutputAt = 0;
-  run.kill = null;
-  const group = groupQueues.get(run.groupKey);
-  if (!group) {
-    // 组已被清空(测试重置等异常)→ 无法重试,按最终失败处理。
-    await failTask(db, taskId, reason, run.retryCount, undefined, run.attempts);
-    await postStatus(db, run.groupId, run.participantId, run.ex, opts.message);
-    return;
-  }
-  group.queue.push(run);
 }
 
 /**
