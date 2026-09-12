@@ -813,16 +813,31 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     run.concurrencyRetryAt = 0;
     run.runningAt = Date.now();
 
-    // queued → running(尽力而为;失败不阻塞执行,终态仍会回写)。
+    // queued → running(尽力而为;DB 异常不阻塞执行,终态仍会回写)。
     // 原路径 where 含 groupId;notify 默认 true。
+    // 合法前置 queued|running(S1 第 2 阶段):防的是终态被覆盖,不是 pin 成
+    // 恰好 queued —— 重试/回收重入可能已是 running。停止/超时/孤儿若已先落
+    // cancelled/failed,不得把终态拉成 running 再 spawn。
+    // startRaceLost:writeTaskStatus 返回 null(竞态)与 catch 异常分开处理。
+    let startRaceLost = false;
     try {
-      await writeTaskStatus(db, {
+      const started = await writeTaskStatus(db, {
         taskId,
         groupId,
         status: "running",
+        expectedStatuses: ["queued", "running"],
       });
+      if (!started) {
+        startRaceLost = true;
+      }
     } catch (e) {
+      // DB 异常 ≠ 竞态 null:异常保持既有 warn 后继续执行;null 走下方跳过。
       console.warn(`[executor] 置 running 失败(${taskId}): ${e}`);
+    }
+    if (startRaceLost) {
+      console.log(`[executor] 任务 ${taskId} 已是终态,跳过执行`);
+      clearRunTimers(run);
+      return;
     }
 
     // 🚀 开始执行(与桥的 emoji 状态条一致;spec live-output-hide-thinking-…
