@@ -1,6 +1,29 @@
 # Spec: 执行器接入向导(批3)——自动推断画像,用户只点确认
 
-> **状态**: Draft — 待批2 落地后冻结
+> **状态**: **Superseded —— 2026-09-12 用户裁定废弃**
+>
+> ~~Draft — 待批2 落地后冻结~~
+>
+> **废弃理由**:本票的整个前提是「**自动推断执行器画像**,用户只点确认」,
+> 依赖批2 [executor-output-profile.md](executor-output-profile.md) 先落地。
+> 但批2 已于 2026-09-02 **Deferred 并改走**
+> [executor-adapter-registry.md](executor-adapter-registry.md),
+> 理由是**画像表达不了 token 采集**(四家里三家要读家目录会话文件,
+> 需扫目录 / 解析文件 / 时间窗筛选 / 唯一性断言,§3 硬验收当场卡住)。
+>
+> ⇒ 「待批2 落地后冻结」这个条件**不是在等,是等不到** ——
+> 画像方案本身已被取代,建立在它之上的向导自然一并失效。
+>
+> ⚠️ **留痕**:本票以 Draft 挂了 14 天,每次盘点都显示成「被批2 阻塞」。
+> 实际上批2 改道的那一刻,它就该被重新裁定。
+> **前置票改道 / 被取代时,要回头处理依赖它的票** —— 否则 backlog 里会
+> 长期躺着一条前提已经消失的条目。这与
+> [tests-depend-on-gitignored-samples.md](tests-depend-on-gitignored-samples.md)
+> 和 [live-output-only-agent-narration.md](live-output-only-agent-narration.md)
+> 的陈旧状态行是同一类问题:**状态不会自己更新**。
+>
+> 若将来仍要做「接入向导」这个产品诉求,**重新写一张**、依赖指向适配器注册表,
+> 不要复用本票的画像假设。
 > **版本**: 0.1
 > **日期**: 2026-08-29
 > **ADR**: [ADR-0008](../docs/adr/0008-executor-adaptation-config-over-code.md)
