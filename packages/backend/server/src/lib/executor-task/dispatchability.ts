@@ -53,6 +53,17 @@ function runBlockReason(run: QueuedRun): QueuedBlockReason | null {
   return null;
 }
 
+/**
+ * 组队首任务当前是否可派发(泵送选组谓词):
+ *  - 执行器额度冷却中 → 否(票7,冷却结束定时器会再泵送);
+ *  - 目标执行器 running 数 >= maxConcurrency(声明式上限)→ 否(保持 queued,
+ *    等既有任务终态后由完成路径的泵送自动出队);
+ *  - 403 后重新排队(反应式排队)→ 既有同执行器 running 任务未清空 → 否;
+ *    退避窗口未过(外部会话占用)→ 否;
+ *  - per-run 退避窗口(concurrencyRetryAt)未过 → 否(403 退避与瞬时限流退避
+ *    同字段,后者不置 concurrencyBlocked —— 那是并发冲突语义,瞬时限流无需
+ *    等其他 running 任务清空)。
+ */
 export function isRunDispatchable(run: QueuedRun): boolean {
   return runBlockReason(run) === null;
 }
