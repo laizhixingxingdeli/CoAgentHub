@@ -1163,6 +1163,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
             loadTicketTemplate(run.dispatchKind).specInstruction,
           ).join("\n")}\n\n${body}`
         : body;
+      // spawn 紧邻前再查一次 stopped(开头守卫在 pump→runOne 同步段不可达;
+      // 停止指令常落在中间多个 await 窗口)。命中则不再调用 gateway。
+      // 检查本身同步;仅命中分支 await —— 未命中路径不引入新让点。
+      if (run.stopped) {
+        console.log(`[executor] 任务已在 spawn 前被停止: ${taskId}`);
+        clearRunTimers(run);
+        await markTaskCancelled(db, taskId, groupId, run.attempts);
+        return;
+      }
       handle = {
         pid: undefined,
         promise: runA2AExecutor({
@@ -1175,6 +1184,8 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         }),
         kill: () => a2aController.abort(),
       };
+      // R2:拿到 handle 后第一时间登记 kill,消除「请求已发出但 cancel 空操作」窗口。
+      run.kill = handle.kill;
     } else {
       // 并行任务可能同毫秒触发,ticket 路径用 taskId 保证唯一(避免互相覆盖)。
       const ticketPath = `/tmp/coagenthub-ticket-${taskId}.md`;
@@ -1266,6 +1277,15 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
       // R1:登记属主实例(本 server pid)——启动兜底据此区分「本实例的任务」与
       // 「另一个活实例的任务」,不再把同库异端口的实例启动当成生产重启。
       await registerTaskOwnerServer(db, taskId, groupId);
+      // spawn 紧邻前再查一次 stopped(开头守卫在 pump→runOne 同步段不可达;
+      // 停止指令常落在中间多个 await 窗口)。命中则不再 spawn。
+      // 检查本身同步;仅命中分支 await —— 未命中路径不引入新让点。
+      if (run.stopped) {
+        console.log(`[executor] 任务已在 spawn 前被停止: ${taskId}`);
+        clearRunTimers(run);
+        await markTaskCancelled(db, taskId, groupId, run.attempts);
+        return;
+      }
       // ANSI 剥离器:每次执行一个(跨 chunk 转义序列扣尾拼接),输出路径共用。
       const stripAnsiChunk = createAnsiStripper();
       handle = runExecutor({
@@ -1317,6 +1337,9 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
           }
         },
       });
+      // R2:拿到 handle 后第一时间登记 kill(在 stall 定时器与 pid 落库 await 之前),
+      // 消除「进程已跑但 cancelRunningTasks 空操作」窗口。
+      run.kill = handle.kill;
       // 静默超时起点:进程刚 spawn(输出可观察);之后每次输出重排定时器。
       // a2a 无本地进程/增量输出,不设静默检测(完成路径由任务级超时兜底)。
       // detached 任务不设静默/无进展提醒:发送后静默等待 PATCH 是正常态,
@@ -1341,7 +1364,6 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
         .set({ executorPid: handle.pid })
         .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)));
     }
-    run.kill = handle.kill;
     // 第1层:A2A 无进展超时起点——running 起点即置最近活跃时间(进度消息只会
     // 刷新它),随后连续无进展信号超过 a2aSilenceTimeoutMs → 无进展失败。有进度
     // 消息时由 refreshA2AActivity 顺延。detached 任务不设:发送后静默等待执行器
