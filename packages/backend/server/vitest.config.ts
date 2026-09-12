@@ -41,6 +41,8 @@ export default defineConfig({
     hookTimeout: 30_000,
     // setupFiles: "./test/setup.ts",
     setupFiles: ["./test/setup.ts"],
+    // Stale temp-dir sweep once per vitest run (was per-file in setup.ts).
+    globalSetup: ["./test/global-setup.ts"],
     globals: true, // 使测试环境支持 `describe`, `it`, `expect` 等全局函数
     environment: "node", // 使用 Node 环境进行测试
   },

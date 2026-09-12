@@ -1,16 +1,9 @@
 import { spawnSync } from "node:child_process";
-import {
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, vi } from "vitest";
-import { testClient } from "./db";
+import { afterAll, vi } from "vitest";
+import { dbCreated } from "./db-state";
 
 /**
  * Test setup for @laizhixingxingdeli/server.
@@ -23,8 +16,14 @@ import { testClient } from "./db";
  *   snapshots the workspace (createCheckpoint) before every executor spawn, so
  *   executor tests must NOT run git against the real CoAgentHub checkout — that
  *   would stage the working tree and write refs/coagenthub-cp/* into the real repo.
+ *
+ * PGlite + migrations live in test/db.ts module init and only run when a file
+ * (or the lazy vi.mock factory below) imports `./db`. Pure-logic files skip them.
  */
 
+// vi.mock stays at setup.ts top level, before any SUT module load. The factory
+// is lazy: await import("./db") only runs when @server/lib/database is first
+// required by a test file — that is what triggers PGlite + migrations.
 vi.mock("@server/lib/database", async () => {
   const { testClient, testDb } = await import("./db");
   return { default: testDb, client: testClient };
@@ -32,35 +31,6 @@ vi.mock("@server/lib/database", async () => {
 
 // Throwaway dir for the LAN file store; the file route reads FILE_DIR at
 // module load, so it must be set before any route module is imported.
-/**
- * 陈旧临时目录清扫(2026-09-07):afterAll 的清理只在**正常结束**时跑;
- * 测试被中断(Ctrl-C / worker 崩溃 / CI 超时)时留下的目录永远没人收。
- * 实测积累到 **226 个 coagenthub-test-repo-*、267MB**。
- * 启动时扫掉 6 小时前的同名目录:比这更新的可能属于并行跑的另一个 worker,不碰。
- */
-function sweepStaleTestDirs(): void {
-  const prefixes = ["coagenthub-test-repo-", "coagenthub-test-files-"];
-  const cutoff = Date.now() - 6 * 60 * 60 * 1000;
-  let entries: string[];
-  try {
-    entries = readdirSync(tmpdir());
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (!prefixes.some((p) => name.startsWith(p))) continue;
-    const full = path.join(tmpdir(), name);
-    try {
-      if (statSync(full).mtimeMs > cutoff) continue;
-      rmSync(full, { recursive: true, force: true });
-    } catch {
-      // 并行 worker 可能正在用或已删,跳过即可 —— 清扫是尽力而为,不得抛错。
-    }
-  }
-}
-
-sweepStaleTestDirs();
-
 const testFileDir = mkdtempSync(path.join(tmpdir(), "coagenthub-test-files-"));
 process.env.FILE_DIR = testFileDir;
 
@@ -96,61 +66,46 @@ if (gitInit.status === 0) {
   );
 }
 
-beforeAll(async () => {
-  const migrationsDir = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "../../database/drizzle/migrations",
-  );
-  // PGlite cannot run multi-statement SQL through drizzle's prepared query
-  // path ("cannot insert multiple commands into a prepared statement"), so
-  // execute the migration scripts with PGlite's own exec() instead — all
-  // .sql files in order (0000, 0001, ...), mirroring the drizzle migrator.
-  const sqlFiles = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-  for (const file of sqlFiles) {
-    const sql = readFileSync(path.join(migrationsDir, file), "utf-8");
-    await testClient.exec(sql);
-  }
-});
-
 afterAll(async () => {
-  // Message dispatch is intentionally fire-and-forget. Waiting only for the
-  // in-memory queue misses the interval after a run leaves the queue but before
-  // runOne finishes its final DB write; closing PGlite in that interval caused
-  // the flaky suite failure (`PGlite is closed`, often after an earlier Git
-  // index-lock error). Drain the queue and the complete runOne lifecycle before
-  // closing the per-file database.
-  const {
-    activeExecutorTaskCount,
-    currentRunningTask,
-    queuedExecutorTaskCount,
-  } = await import("../src/lib/executor-task");
-  const deadline = Date.now() + 20_000;
-  let idleSince: number | null = null;
-  for (;;) {
-    const inMemoryBusy =
-      activeExecutorTaskCount() > 0 ||
-      currentRunningTask() !== null ||
-      queuedExecutorTaskCount() > 0;
-    if (!inMemoryBusy) {
-      // The route deliberately does not await maybeDispatchExecutorTask. Keep
-      // the worker alive briefly after the first idle observation so its
-      // microtask can enqueue a run before PGlite is closed.
-      idleSince ??= Date.now();
-      if (Date.now() - idleSince >= 1_000) break;
-    } else {
-      idleSince = null;
+  if (dbCreated) {
+    // Message dispatch is intentionally fire-and-forget. Waiting only for the
+    // in-memory queue misses the interval after a run leaves the queue but before
+    // runOne finishes its final DB write; closing PGlite in that interval caused
+    // the flaky suite failure (`PGlite is closed`, often after an earlier Git
+    // index-lock error). Drain the queue and the complete runOne lifecycle before
+    // closing the per-file database.
+    const {
+      activeExecutorTaskCount,
+      currentRunningTask,
+      queuedExecutorTaskCount,
+    } = await import("../src/lib/executor-task");
+    const deadline = Date.now() + 20_000;
+    let idleSince: number | null = null;
+    for (;;) {
+      const inMemoryBusy =
+        activeExecutorTaskCount() > 0 ||
+        currentRunningTask() !== null ||
+        queuedExecutorTaskCount() > 0;
+      if (!inMemoryBusy) {
+        // The route deliberately does not await maybeDispatchExecutorTask. Keep
+        // the worker alive briefly after the first idle observation so its
+        // microtask can enqueue a run before PGlite is closed.
+        idleSince ??= Date.now();
+        if (Date.now() - idleSince >= 1_000) break;
+      } else {
+        idleSince = null;
+      }
+      if (Date.now() >= deadline) {
+        // Do not turn a stuck executor into an unbounded test hang. The bounded
+        // wait still gives normal fire-and-forget work time to finish; the test
+        // runner's worker isolation prevents a later file from reusing this DB.
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (Date.now() >= deadline) {
-      // Do not turn a stuck executor into an unbounded test hang. The bounded
-      // wait still gives normal fire-and-forget work time to finish; the test
-      // runner's worker isolation prevents a later file from reusing this DB.
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { testClient } = await import("./db");
+    await testClient.close();
   }
-  await testClient.close();
   rmSync(testFileDir, { recursive: true, force: true });
   rmSync(testRepoDir, { recursive: true, force: true });
 });

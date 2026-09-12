@@ -1,17 +1,43 @@
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import * as schema from "@laizhixingxingdeli/database/schema";
 import { executorConfig as executorConfigTable } from "@laizhixingxingdeli/database/schema";
 import { invalidateExecutorsCache } from "@server/lib/executors";
 import { drizzle } from "drizzle-orm/pglite";
+import { markDbCreated } from "./db-state";
 
 /**
  * In-memory Postgres (PGlite) used as the test database. The real
  * `@server/lib/database` module is replaced by a mock that re-exports these
  * instances (see test/setup.ts), so routes run against a real SQL engine with
  * the real schema — but no external DATABASE_URL is ever contacted.
+ *
+ * Migrations run at module init (top-level await) so only files that import
+ * `./db` pay for PGlite + schema setup (specs/test-dependency-classification.md T2).
  */
 export const testClient = new PGlite();
 export const testDb = drizzle(testClient, { schema });
+markDbCreated();
+
+{
+  const migrationsDir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../../database/drizzle/migrations",
+  );
+  // PGlite cannot run multi-statement SQL through drizzle's prepared query
+  // path ("cannot insert multiple commands into a prepared statement"), so
+  // execute the migration scripts with PGlite's own exec() instead — all
+  // .sql files in order (0000, 0001, ...), mirroring the drizzle migrator.
+  const sqlFiles = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  for (const file of sqlFiles) {
+    const sql = readFileSync(path.join(migrationsDir, file), "utf-8");
+    await testClient.exec(sql);
+  }
+}
 
 /**
  * 测试内显式插入一条执行器配置 fixture(幂等,ON CONFLICT DO NOTHING)。
