@@ -1,5 +1,5 @@
-import { createAnsiStripper, stripAnsi } from "../src/lib/executor-task/ansi";
 import { describe, expect, it } from "vitest";
+import { createAnsiStripper, stripAnsi } from "../src/lib/executor-task/ansi";
 
 /**
  * ANSI 剥离(票:执行器输出在后端剥离 ANSI):共享正则/单块剥离/流式跨 chunk

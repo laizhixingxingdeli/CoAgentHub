@@ -1,10 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   buildExecutorSpawnOptions,
   runExecutor,
 } from "@server/lib/executor-runner";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 /**

@@ -197,9 +197,7 @@ export function buildExecutorSpawnOptions(input: {
     "pipe",
     "pipe",
   ];
-  const envSpread = input.env
-    ? { env: { ...process.env, ...input.env } }
-    : {};
+  const envSpread = input.env ? { env: { ...process.env, ...input.env } } : {};
   if (platform === "win32") {
     return {
       cwd: input.cwd,

@@ -26,9 +26,9 @@ import {
 } from "./lib/executor-task";
 import { startL3OverdueReminder } from "./lib/l3-overdue-reminder";
 import { assertNoPendingMigrations } from "./lib/migration-health";
+import { createOnError } from "./lib/on-error";
 import { startOrphanReconciler } from "./lib/orphan-task-reconciler";
 import { getLogger } from "./lib/plugins/winston";
-import { createOnError } from "./lib/on-error";
 import { configureRuntimeEntry, logRuntimeStartup } from "./lib/runtime-status";
 import { startServer } from "./lib/server-startup";
 import { acquireSingleServerLock } from "./lib/single-server-lock";

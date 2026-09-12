@@ -1,6 +1,6 @@
+import type { Handler } from "hono";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { Handler } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { createOnError, type OnErrorLogger } from "../src/lib/on-error";
 import { createTestApp } from "./app";

@@ -2,10 +2,7 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
-import {
-  findRepoRoot,
-  pathsReferToSameDir,
-} from "@server/lib/executor-runner";
+import { findRepoRoot, pathsReferToSameDir } from "@server/lib/executor-runner";
 import {
   configureSourceScanRoots,
   resetSourceScanCache,
@@ -187,10 +184,7 @@ describe("结案拒绝陈旧提示按项目范围追加", () => {
   }
 
   /** 三方在场 + 缺 review_request → 稳定触发同一结案拒绝文案。 */
-  async function setupRejectable(
-    suffix: string,
-    projectPath?: string | null,
-  ) {
+  async function setupRejectable(suffix: string, projectPath?: string | null) {
     const coordinator = await register(`sch-coord-${suffix}`);
     const reviewer = await register(`sch-reviewer-${suffix}`);
     const execA = await register(`sch-exec-${suffix}`);

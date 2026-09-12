@@ -60,11 +60,7 @@ describe("writeback-rejection 计数模块", () => {
   });
 
   it("触顶文案含次数与最后一次原文", () => {
-    const text = formatWritebackRejectionTripError(
-      3,
-      3,
-      "缺少 review_request",
-    );
+    const text = formatWritebackRejectionTripError(3, 3, "缺少 review_request");
     expect(text).toContain("3");
     expect(text).toContain("缺少 review_request");
     expect(text).toContain("failed");

@@ -212,9 +212,7 @@ async function forceFailWritebackRejectionLoop(
   const [updated] = await db
     .update(taskTable)
     .set({ status: "failed", diffSummary })
-    .where(
-      and(eq(taskTable.id, task.id), eq(taskTable.groupId, task.groupId)),
-    )
+    .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, task.groupId)))
     .returning();
   if (updated) {
     try {
