@@ -17,8 +17,13 @@ import {
   loadTicketTemplate,
   resolveTicketTemplatesDir,
 } from "@server/lib/executor-task";
+import {
+  __resetSkillsDirForTests,
+  __setSkillsDirForTests,
+} from "@server/lib/skill-digest";
 import { afterEach, describe, expect, it } from "vitest";
 import type { QueuedRun } from "../src/lib/executor-task/types";
+import { createTestApp } from "./app";
 
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const envKey = "COAGENTHUB_TICKET_TEMPLATES_DIR";
@@ -27,6 +32,7 @@ const originalEnv = process.env[envKey];
 afterEach(() => {
   if (originalEnv === undefined) delete process.env[envKey];
   else process.env[envKey] = originalEnv;
+  __resetSkillsDirForTests();
 });
 
 function useTemplatesDir(dir: string): void {
@@ -338,6 +344,92 @@ describe("ticket-template:搬家 diff 为空", () => {
     );
     expect(ticket).toContain("- **文档路径**: specs/x.md");
     expect(ticket).toContain("- **版本哈希**: abc123");
+  });
+});
+
+describe("ticket-template:skill-self-update R1 指纹行", () => {
+  it("任务书 executor 指纹与 GET /api/skills/executor 的 version 逐字相同", async () => {
+    delete process.env[envKey];
+    const ticket = buildTicket(
+      "body",
+      "codebuddy",
+      "/repo",
+      minimalRun({ detached: false }),
+      { roles: ["executor"], prompt: null },
+    );
+    const m = ticket.match(
+      /^COAGENTHUB_SKILL_DIGEST: executor=([0-9a-f]{12})$/m,
+    );
+    expect(m).not.toBeNull();
+    const fromTicket = m?.[1];
+    expect(fromTicket).toBeTruthy();
+
+    // 判据:两边实际取值比对(HTTP 端点 vs 任务书文本),不是「同函数调用」。
+    const app = createTestApp();
+    const res = await app.request("/api/skills/executor");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { version: string };
+    expect(fromTicket).toBe(body.version);
+
+    // 固定位置:落在「执行上下文」平台事实段内(R5 强制插入、模板删不掉)。
+    const ctxIdx = ticket.indexOf(
+      "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
+    );
+    const digestIdx = ticket.indexOf("COAGENTHUB_SKILL_DIGEST: executor=");
+    const nextH2 = ticket.indexOf("\n## ", ctxIdx + 1);
+    expect(ctxIdx).toBeGreaterThanOrEqual(0);
+    expect(digestIdx).toBeGreaterThan(ctxIdx);
+    if (nextH2 >= 0) expect(digestIdx).toBeLessThan(nextH2);
+  });
+
+  it("coordinator 角色输出 coordinator 指纹(非写死 executor)", async () => {
+    delete process.env[envKey];
+    const ticket = buildTicket(
+      "body",
+      "codebuddy",
+      "/repo",
+      minimalRun({ detached: false }),
+      { roles: ["coordinator"], prompt: null },
+    );
+    const m = ticket.match(
+      /^COAGENTHUB_SKILL_DIGEST: coordinator=([0-9a-f]{12})$/m,
+    );
+    expect(m).not.toBeNull();
+    expect(ticket).not.toMatch(/COAGENTHUB_SKILL_DIGEST: executor=/);
+
+    const app = createTestApp();
+    const res = await app.request("/api/skills/coordinator");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { version: string };
+    expect(m?.[1]).toBe(body.version);
+  });
+
+  it("fallback 角色整行不输出 COAGENTHUB_SKILL_DIGEST", () => {
+    delete process.env[envKey];
+    const ticket = buildTicket(
+      "body",
+      "codebuddy",
+      "/repo",
+      minimalRun({ detached: false }),
+      { roles: ["specialist"], prompt: null },
+    );
+    expect(ticket).not.toContain("COAGENTHUB_SKILL_DIGEST");
+  });
+
+  it("skill 读盘失败时 buildTicket 仍成功且整行缺失", () => {
+    delete process.env[envKey];
+    const empty = mkdtempSync(path.join(tmpdir(), "skills-empty-"));
+    __setSkillsDirForTests(empty);
+
+    const ticket = buildTicket(
+      "body",
+      "codebuddy",
+      "/repo",
+      minimalRun({ detached: false }),
+      { roles: ["executor"], prompt: null },
+    );
+    expect(ticket).toContain("## 任务内容");
+    expect(ticket).not.toContain("COAGENTHUB_SKILL_DIGEST");
   });
 });
 

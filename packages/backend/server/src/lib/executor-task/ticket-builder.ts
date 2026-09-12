@@ -1,5 +1,6 @@
 import { serverPort } from "@server/lib/config";
 import type { DataBase } from "@server/lib/database";
+import { skillDigestTicketLine } from "@server/lib/skill-digest";
 import { reviewRequestCarryAllowed } from "./review-request-policy";
 import {
   buildExecutionModeLines,
@@ -115,7 +116,10 @@ export function executionApiBase(): string {
 }
 
 /** 平台事实段:不可被模板覆盖或删除(R1 / R5)。 */
-function buildExecutionContextSection(run: QueuedRun): string[] {
+function buildExecutionContextSection(
+  run: QueuedRun,
+  role: TicketRole,
+): string[] {
   const lines = [
     "## 执行上下文 (用于直接调用 CoAgentHub HTTP API)",
     `- apiBase: ${executionApiBase()}`,
@@ -130,6 +134,11 @@ function buildExecutionContextSection(run: QueuedRun): string[] {
       "- 不回写会使任务保持 running，直到 detachedTimeoutMinutes(默认 1440 分钟)兜底超时，检视者会一直等不到结果。",
     );
   }
+  // skill-self-update R1:平台侧 skill 指纹固定落在「执行上下文」段末尾。
+  // 该段由 R5 强制插入、模板删不掉,故对每个 agent 都是稳定可读位置;
+  // 读盘失败 / fallback 无 skill 时 skillDigestTicketLine 返回 null,整行省略。
+  const digestLine = skillDigestTicketLine(role);
+  if (digestLine) lines.push(digestLine);
   return lines;
 }
 
@@ -184,7 +193,7 @@ export function buildTicket(
     ...buildReportLines(template, role, reportHasReviewer),
   );
   // R5:平台段在模板组装之后强制插入,模板无法删掉 taskId / detached 回写要求。
-  const context = buildExecutionContextSection(run);
+  const context = buildExecutionContextSection(run, role);
   lines.splice(4, 0, ...context);
   // 角色解绑后:成员在本群有分工提示词时,任务书插入「本群分工」段(先角色后
   // 提示词原文);无 prompt 时整段不输出,任务书与解绑前完全一致。
