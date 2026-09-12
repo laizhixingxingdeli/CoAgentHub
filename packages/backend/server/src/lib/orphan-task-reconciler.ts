@@ -10,13 +10,11 @@
  * notifyTaskStatusChanged 出口,与 PATCH 推进状态一致。
  */
 
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import {
   listPeerExecutorNames,
   parseRateLimitRecoveryMs,
 } from "@server/lib/executors";
-import { and, eq } from "drizzle-orm";
 import {
   applyDiffSummaryPatch,
   hasExemptingChildTask,
@@ -24,8 +22,8 @@ import {
   hasPendingResumeEvent,
   isCoordinatorTask,
   isExecutorProcessAlive,
-  notifyTaskStatusChanged,
   taskOutputTail,
+  writeTaskStatus,
 } from "./executor-task";
 import {
   enterCooldown,
@@ -173,15 +171,14 @@ export async function reconcileOrphanTasks(
       ...(outputTail ? { outputTail } : {}),
       ...extra,
     });
-    const [updated] = await db
-      .update(taskTable)
-      .set({
-        status: "failed",
-        diffSummary: next,
-      })
-      // R5:以「仍为 running」为条件更新,并发写回 done 的任务不再匹配。
-      .where(and(eq(taskTable.id, task.id), eq(taskTable.status, "running")))
-      .returning();
+    // R5:以「仍为 running」为条件更新,并发写回 done 的任务不再匹配。
+    // 原路径 where 仅 id + status=running(无 groupId);notify 默认 true。
+    const updated = await writeTaskStatus(db, {
+      taskId: task.id,
+      status: "failed",
+      diffSummary: next,
+      expectedStatuses: ["running"],
+    });
     if (!updated) continue;
     reconciled += 1;
     console.log(
@@ -195,7 +192,6 @@ export async function reconcileOrphanTasks(
         { db, taskId: task.id },
       );
     }
-    await notifyTaskStatusChanged(db, task.id, task.groupId, "failed", updated);
   }
   return reconciled;
 }

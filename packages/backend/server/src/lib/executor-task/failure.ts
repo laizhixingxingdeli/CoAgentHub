@@ -12,7 +12,7 @@ import {
 import { eq } from "drizzle-orm";
 import { endAttempt } from "./attempt-accounting";
 import { applyDiffSummaryPatch, mergeDiffSummary } from "./diff-summary";
-import { notifyTaskStatusChanged, postStatus } from "./notify";
+import { postStatus } from "./notify";
 import { liveTaskOutputTail, releaseTaskOutput } from "./output-buffer";
 import { taskOutputTailLines } from "./report";
 import {
@@ -22,6 +22,7 @@ import {
   type QuotaFailureVerdict,
 } from "./state";
 import { countCommitsAfterCheckpoint, resolveTaskRepo } from "./task-repo";
+import { writeTaskStatus } from "./task-transitions";
 import {
   type QueuedRun,
   sumAttemptTokenUsage,
@@ -58,14 +59,12 @@ export async function failTask(
     columns: { diffSummary: true },
   });
   const diffSummary = applyDiffSummaryPatch(cur?.diffSummary, patch);
-  const [failed] = await db
-    .update(taskTable)
-    .set({ status: "failed", diffSummary })
-    .where(eq(taskTable.id, taskId))
-    .returning();
-  if (failed) {
-    await notifyTaskStatusChanged(db, taskId, failed.groupId, "failed", failed);
-  }
+  // 原路径 where 仅 id(无 groupId);notify 默认 true。
+  await writeTaskStatus(db, {
+    taskId,
+    status: "failed",
+    diffSummary,
+  });
 }
 
 /**

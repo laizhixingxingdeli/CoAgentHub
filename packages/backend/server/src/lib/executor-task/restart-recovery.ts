@@ -4,6 +4,7 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { mergeDiffSummary } from "./diff-summary";
 import { notifyTaskStatusChanged } from "./notify";
 import { isExecutorProcessAlive } from "./state";
+import { writeTaskStatus } from "./task-transitions";
 import { asDiffSummaryRecord, OWNER_SERVER_PID_KEY } from "./types";
 
 /**
@@ -121,11 +122,13 @@ export async function recoverInterruptedTasks(db: DataBase): Promise<number> {
               { error: "server-restart" },
               "terminal",
             );
-            const [u] = await db
-              .update(taskTable)
-              .set({ status: "failed", diffSummary: next })
-              .where(eq(taskTable.id, row.id))
-              .returning();
+            // 原路径 where 仅 id(无 groupId);notify:false —— 批量收集后统一通知。
+            const u = await writeTaskStatus(db, {
+              taskId: row.id,
+              status: "failed",
+              diffSummary: next,
+              notify: false,
+            });
             if (u) updated.push(u as unknown as (typeof candidates)[number]);
           }
           return updated;

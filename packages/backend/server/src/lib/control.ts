@@ -13,7 +13,6 @@
 import {
   participant as participantTable,
   type Task,
-  task as taskTable,
 } from "@laizhixingxingdeli/database/schema";
 import type { DataBase } from "@server/lib/database";
 import {
@@ -28,9 +27,10 @@ import {
   mergeDiffSummary,
   postStatus,
   queuedExecutorTaskCount,
+  writeTaskStatus,
 } from "@server/lib/executor-task";
 import { type ExecutorConfig, effectiveExecutors } from "@server/lib/executors";
-import { and, eq, inArray } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 
 /** 控制门角色门槛(与下发门 DISPATCH_ALLOWED_ROLES 同值但语义分开):
  *  coordinator / human / reviewer 能发停止/回滚指令——human 禁言后,紧急
@@ -268,10 +268,14 @@ async function handleRollback(
       { error: "rollback" },
       "terminal",
     );
-    await db
-      .update(taskTable)
-      .set({ status: "failed", diffSummary: next })
-      .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, groupId)));
+    // 原路径不 notify、where 含 groupId;纯收敛对齐。
+    await writeTaskStatus(db, {
+      taskId: task.id,
+      groupId,
+      status: "failed",
+      diffSummary: next,
+      notify: false,
+    });
   }
   await reply(`✅ 已回滚到快照 ${res.message}`);
 }

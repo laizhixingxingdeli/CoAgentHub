@@ -166,6 +166,7 @@ export {
 } from "./state";
 export { liveStreamText, summaryStreamText } from "./stream-text";
 export { resolveTaskRepo } from "./task-repo";
+export { writeTaskStatus } from "./task-transitions";
 export {
   buildTicket,
   executionApiBase,

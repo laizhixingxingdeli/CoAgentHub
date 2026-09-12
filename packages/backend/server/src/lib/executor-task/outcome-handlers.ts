@@ -11,7 +11,6 @@ import {
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./cooldown-store";
 import { applyDiffSummaryPatch } from "./diff-summary";
 import { handleFailure, isTransientQuota } from "./failure";
-import { notifyTaskStatusChanged } from "./notify";
 import { liveTaskOutputTail, releaseTaskOutput } from "./output-buffer";
 import {
   handleConcurrencyConflict,
@@ -26,6 +25,7 @@ import {
   getDetachedTimeoutMs,
   getRateLimitCooldownMs,
 } from "./state";
+import { writeTaskStatus } from "./task-transitions";
 import {
   handleDetachedTimeout,
   handleUnconfirmed,
@@ -61,23 +61,13 @@ export async function handleStoppedOutcome(run: QueuedRun): Promise<void> {
       ...(tokenUsageReason ? { tokenUsageReason } : {}),
       ...(liveTail ? { liveOutputTail: liveTail } : {}),
     });
-    const [cancelled] = await db
-      .update(taskTable)
-      .set({
-        status: "cancelled",
-        diffSummary: nextCancelled,
-      })
-      .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-      .returning();
-    if (cancelled) {
-      await notifyTaskStatusChanged(
-        db,
-        taskId,
-        groupId,
-        "cancelled",
-        cancelled,
-      );
-    }
+    // 原路径 where 含 groupId;notify 默认 true。
+    await writeTaskStatus(db, {
+      taskId,
+      groupId,
+      status: "cancelled",
+      diffSummary: nextCancelled,
+    });
   }
 }
 

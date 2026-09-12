@@ -10,7 +10,7 @@ import {
 import { EXECUTOR_COOLDOWN_END_MS_FIELD } from "./cooldown-store";
 import { applyDiffSummaryPatch } from "./diff-summary";
 import { failTask, handleFailure, isTransientQuota } from "./failure";
-import { notifyTaskStatusChanged, postStatus } from "./notify";
+import { postStatus } from "./notify";
 import { requestPump } from "./pump-signal";
 import {
   clearRunTimers,
@@ -22,6 +22,7 @@ import {
   trackScheduledPumpTimer,
   untrackScheduledPumpTimer,
 } from "./state";
+import { writeTaskStatus } from "./task-transitions";
 import type { QueuedRun } from "./types";
 
 /** 403 后重试最小退避(ms):无既有 running 任务(外部会话占用)时防空转热循环。 */
@@ -111,25 +112,13 @@ export async function handleTransientQuotaBackoff(
       quotaKind: "transient",
       ...(matchedLine !== null ? { quotaMatchedLine: matchedLine } : {}),
     });
-    const [updated] = await run.db
-      .update(taskTable)
-      .set({
-        status: "queued",
-        diffSummary: transientNext,
-      })
-      .where(
-        and(eq(taskTable.id, run.taskId), eq(taskTable.groupId, run.groupId)),
-      )
-      .returning();
-    if (updated) {
-      await notifyTaskStatusChanged(
-        run.db,
-        run.taskId,
-        run.groupId,
-        "queued",
-        updated,
-      );
-    }
+    // 原路径 where 含 groupId;notify 默认 true。
+    await writeTaskStatus(run.db, {
+      taskId: run.taskId,
+      groupId: run.groupId,
+      status: "queued",
+      diffSummary: transientNext,
+    });
   } catch (e) {
     console.warn(`[executor] 瞬时限流回写 queued 失败(${run.taskId}): ${e}`);
   }
@@ -248,15 +237,13 @@ export async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
   await endAttempt(run, { status: "failed", error: "concurrency-conflict" });
 
   // 保持 queued:回写 DB 状态(运行中曾置 running),并 WS 推送状态变化。
+  // 原路径 where 含 groupId;notify 默认 true。
   try {
-    const [updated] = await db
-      .update(taskTable)
-      .set({ status: "queued" })
-      .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-      .returning();
-    if (updated) {
-      await notifyTaskStatusChanged(db, taskId, groupId, "queued", updated);
-    }
+    await writeTaskStatus(db, {
+      taskId,
+      groupId,
+      status: "queued",
+    });
   } catch (e) {
     console.warn(`[executor] 403 后回写 queued 失败(${taskId}): ${e}`);
   }

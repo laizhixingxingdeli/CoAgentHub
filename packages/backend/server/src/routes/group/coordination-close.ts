@@ -4,7 +4,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { task as taskTable } from "@laizhixingxingdeli/database/schema";
+import type { task as taskTable } from "@laizhixingxingdeli/database/schema";
 import BizError, { BizCodeEnum } from "@laizhixingxingdeli/error/biz";
 import type { DataBase } from "@server/lib/database";
 import { isDetachedTask } from "@server/lib/detached-task-liveness";
@@ -22,10 +22,10 @@ import {
   groupHasReviewerMember,
   isResumeTask,
   isTerminalTaskStatus,
-  notifyTaskStatusChanged,
   registerCloseGuardResume,
   resolveTaskRepo,
   reviewRequestCarryAllowed,
+  writeTaskStatus,
 } from "@server/lib/executor-task";
 import { verifyCommitExists } from "@server/lib/executor-task/claim-verification";
 import { deriveL1Aggregate } from "@server/lib/l1-aggregate";
@@ -36,7 +36,6 @@ import {
   getWritebackRejectionLimit,
   recordWritebackRejection,
 } from "@server/lib/writeback-rejection";
-import { and, eq } from "drizzle-orm";
 import {
   reviewRequestLiteFlag,
   shouldWalkL3,
@@ -134,27 +133,14 @@ export async function forceFailWritebackRejectionLoop(
       },
     },
   });
-  const [updated] = await db
-    .update(taskTable)
-    .set({ status: "failed", diffSummary })
-    .where(and(eq(taskTable.id, task.id), eq(taskTable.groupId, task.groupId)))
-    .returning();
-  if (updated) {
-    try {
-      await notifyTaskStatusChanged(
-        db,
-        updated.id,
-        updated.groupId,
-        "failed",
-        updated,
-      );
-    } catch (notifyErr) {
-      console.warn(
-        `[writeback-rejection] notify failed after trip (${task.id}):`,
-        notifyErr,
-      );
-    }
-  }
+  // 原路径 where 含 groupId;notify 默认 true。
+  // notifyTaskStatusChanged 内部已吞异常;外层 try/catch 原本也捕不到它抛出。
+  await writeTaskStatus(db, {
+    taskId: task.id,
+    groupId: task.groupId,
+    status: "failed",
+    diffSummary,
+  });
 }
 
 export function parseAlreadySatisfiedClaim(

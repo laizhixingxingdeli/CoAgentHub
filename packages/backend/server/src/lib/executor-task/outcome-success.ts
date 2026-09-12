@@ -6,7 +6,7 @@ import { endAttempt } from "./attempt-accounting";
 import { verifyReportedCommit } from "./claim-verification";
 import { applyDiffSummaryPatch } from "./diff-summary";
 import { handleFailure } from "./failure";
-import { notifyTaskStatusChanged, postStatus } from "./notify";
+import { postStatus } from "./notify";
 import { liveTaskOutputTail, releaseTaskOutput } from "./output-buffer";
 import { routeQuotaFailure } from "./quota-failure";
 import {
@@ -21,6 +21,7 @@ import {
   taskOutputTailLines,
 } from "./report";
 import { classifyQuotaFailure } from "./state";
+import { writeTaskStatus } from "./task-transitions";
 import {
   type QueuedRun,
   sumAttemptTokenUsage,
@@ -195,14 +196,13 @@ export async function handleSuccessOutcome(
   });
   const doneSummary = applyDiffSummaryPatch(curDone?.diffSummary, diffSummary);
   releaseTaskOutput(taskId);
-  const [done] = await db
-    .update(taskTable)
-    .set({ status: "done", diffSummary: doneSummary })
-    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-    .returning();
-  if (done) {
-    await notifyTaskStatusChanged(db, taskId, groupId, "done", done);
-  }
+  // 原路径 where 含 groupId;notify 默认 true。
+  await writeTaskStatus(db, {
+    taskId,
+    groupId,
+    status: "done",
+    diffSummary: doneSummary,
+  });
   console.log(
     `[executor] 任务完成: ${taskId}${
       report.hash ? ` hash=${report.hash}` : ""

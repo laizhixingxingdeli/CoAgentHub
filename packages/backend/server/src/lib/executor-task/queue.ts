@@ -104,6 +104,7 @@ import {
 } from "./state";
 import { liveStreamText, summaryStreamText } from "./stream-text";
 import { resolveTaskRepo } from "./task-repo";
+import { writeTaskStatus } from "./task-transitions";
 import {
   buildSpecSection,
   buildTicket,
@@ -813,15 +814,13 @@ async function runOne(run: QueuedRun, group: GroupQueue): Promise<void> {
     run.runningAt = Date.now();
 
     // queued → running(尽力而为;失败不阻塞执行,终态仍会回写)。
+    // 原路径 where 含 groupId;notify 默认 true。
     try {
-      const [updated] = await db
-        .update(taskTable)
-        .set({ status: "running" })
-        .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-        .returning();
-      if (updated) {
-        await notifyTaskStatusChanged(db, taskId, groupId, "running", updated);
-      }
+      await writeTaskStatus(db, {
+        taskId,
+        groupId,
+        status: "running",
+      });
     } catch (e) {
       console.warn(`[executor] 置 running 失败(${taskId}): ${e}`);
     }

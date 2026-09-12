@@ -11,6 +11,7 @@ import { insertGroupMessage } from "@server/lib/services/message-service";
 import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import { applyDiffSummaryPatch } from "./diff-summary";
+import { writeTaskStatus } from "./task-transitions";
 import { sumAttemptTokenUsage, sumAttemptTokenUsageReason } from "./types";
 
 /**
@@ -129,16 +130,11 @@ export async function markTaskCancelled(
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(tokenUsageReason ? { tokenUsageReason } : {}),
   });
-  const [updated] = await db
-    .update(taskTable)
-    .set({
-      status: "cancelled",
-      diffSummary: next,
-    })
-    .where(and(eq(taskTable.id, taskId), eq(taskTable.groupId, groupId)))
-    .returning();
-  if (updated) {
-    await notifyTaskStatusChanged(db, taskId, groupId, "cancelled", updated);
-  }
-  return updated;
+  // 原路径 where 含 groupId;notify 默认 true。
+  return writeTaskStatus(db, {
+    taskId,
+    groupId,
+    status: "cancelled",
+    diffSummary: next,
+  });
 }
