@@ -1,6 +1,6 @@
 # Spec: 瞬时限流退避重排队后任务静默搁浅 —— CI 四次,机制未证
 
-> **状态**: **Open —— 症状与性质已定性(真缺陷,非预算、非 S1 回归);根因未证**
+> **状态**: **两处结构缺陷已修(`8deffa5b` / `9cccf72d`);根因仍未证 —— 见 §9**
 > **版本**: 1.0
 > **日期**: 2026-09-13
 > **来源**: CI 四次同一条红,检视者复核
@@ -143,3 +143,43 @@ group.queue.push(run);        // ← 重新排队,但没有重新 arm claimTimer
 
 按缺陷处理,不按 flake 静音。修复必须附**不修就会红**的回归测试
 (ADR-0011:验收测试必须能失败)。
+
+## 9. 落地(2026-09-13)
+
+| 提交 | 内容 |
+|---|---|
+| `8deffa5b` | **A**:`pumpQueue` 忙时置 `pumpPending`,`do…while(pumpPending)` 有界再 drain,尾窗补一次;`__resetExecutorQueueForTests` 清 `pumping` / `pumpPending` |
+| `9cccf72d` | **B**:抽出 `armClaimTimer`,四个入队点(2 正常 + 2 重排队)共用;delay = `max(claimMs, concurrencyRetryAt + claimMs - now)`,复用 `isRunDispatchable` 的同一事实(ADR-0009),退避窗口内不误杀 |
+
+### 检视者独立复验(不采信执行侧汇报)
+
+| 项 | 结果 |
+|---|---|
+| 变异 A:抽掉 `setPumpPending(true)` | **2 条红**(pending 未置 / 不再跑第二轮) |
+| 变异 B:抽掉两处 `armClaimTimer(run)` | **4 条红**,其中一条是 `expected 'queued' to be 'failed'` —— **精确复现原始症状** |
+| 票面清单 | `transient-quota` + `quota-redispatch` + `retry-rollback-guard` = **39 passed**;`executor-queue` = **33 passed / 2 skipped** |
+| 验收 4 单条 | **1393 ms**(基线 1.3–1.7s 内 ⇒ B 没有制造额外等待) |
+| `tsc --noEmit` / `biome check .` | 均 exit 0 |
+
+⚠️ **A 才可能修掉根因;B 不修根因**,只把「静默挂死 20 秒」变成
+可观测的「任务未认领」失败。**CI 若仍红成「未认领」,那是 B 生效,不是回归。**
+
+## 10. ⚠️ 已知遗留:认领超时的兜底仍会「一次性消失」
+
+`handleClaimTimeout` 的另外两条豁免 **return 之后不重新 arm**:
+
+```ts
+if (isInCooldown(run.ex)) return;        // 不重 arm
+...
+if (workspaceGateBlocked(g)) return;     // 不重 arm
+```
+
+⇒ 这两种情形下定时器烧掉一次就没了,**兜底网从此消失**;
+若随后那一路的唤醒(冷却结束定时器 / 既有任务终态的泵送)也丢了,
+仍会回到「永久静默挂 queued」。
+
+这是**改动前就存在**的结构,不是 `9cccf72d` 引入的,也不在那张票的范围内
+(票面明确禁止顺手重构调度策略)。B 只补了 per-run 退避这一条路径。
+
+**处置**:单独一张票,把「豁免 = 改期」统一成一条口径
+(与 §6.2 同理:豁免只说明「现在不该判它未认领」,不等于「以后也不用看它」)。
