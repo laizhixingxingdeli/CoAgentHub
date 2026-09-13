@@ -23,6 +23,7 @@ import {
   untrackScheduledPumpTimer,
 } from "./state";
 import { writeTaskStatus } from "./task-transitions";
+import { armClaimTimer } from "./timeout-handlers";
 import type { QueuedRun } from "./types";
 
 /** 403 后重试最小退避(ms):无既有 running 任务(外部会话占用)时防空转热循环。 */
@@ -159,6 +160,10 @@ export async function handleTransientQuotaBackoff(
     return;
   }
   group.queue.push(run);
+  // 重排队后重新 arm 认领超时:clearRunTimers 已清掉旧 claimTimer,若只入队
+  // 不重设,唤醒一旦丢失任务会永久静默挂在 queued(lost-wakeup §6.2)。
+  // armClaimTimer 按 concurrencyRetryAt 排期,不会在退避窗口内误杀。
+  armClaimTimer(run);
   await postStatus(
     run.db,
     run.groupId,
@@ -296,6 +301,9 @@ export async function handleConcurrencyConflict(run: QueuedRun): Promise<void> {
     return;
   }
   group.queue.push(run);
+  // 同瞬时路径:重排队必须重 arm 认领超时,否则丢唤醒 = 永久 queued。
+  // concurrencyRetryAt 已写入,armClaimTimer 会排到窗口结束之后。
+  armClaimTimer(run);
   await postStatus(
     db,
     groupId,

@@ -10,11 +10,40 @@ import { releaseTaskOutput } from "./output-buffer";
 import {
   clearRunTimers,
   getA2ASilenceTimeoutMs,
+  getClaimTimeoutMs,
   getStallAlertMs,
   groupQueues,
   isInCooldown,
 } from "./state";
 import type { QueuedRun } from "./types";
+
+/**
+ * 为 queued run 装上认领超时定时器(入队与重排队共用)。
+ *
+ * 延迟 = max(claimTimeoutMs, concurrencyRetryAt + claimTimeoutMs - now):
+ * concurrencyRetryAt 是 isRunDispatchable / runBlockReason 判定「per-run 退避
+ * 窗口未过」的**同一事实**(ADR-0009),不是第二套豁免判据。窗口内任务本来就
+ * 该待在 queued;若只按 claimTimeoutMs 从现在起算,退避(403 的 3s / 瞬时策略
+ * 的 backoffMs)大于认领阈值时会把正常退避误杀成「未认领」。
+ *
+ * 从「可被派发」起算 claim 窗口:退避结束后再给满额 claimTimeoutMs,与首次
+ * 入队(concurrencyRetryAt=0 → delay=claimTimeoutMs)同式。
+ */
+export function armClaimTimer(run: QueuedRun): void {
+  if (run.claimTimer) {
+    clearTimeout(run.claimTimer);
+    run.claimTimer = null;
+  }
+  const claimMs = getClaimTimeoutMs();
+  const delay = Math.max(
+    claimMs,
+    run.concurrencyRetryAt - Date.now() + claimMs,
+  );
+  run.claimTimer = setTimeout(
+    () => handleClaimTimeout(run),
+    Math.max(1, delay),
+  );
+}
 
 /* ---------------- 超时 / 进度处理 ---------------- */
 
@@ -227,6 +256,14 @@ export function handleClaimTimeout(run: QueuedRun): void {
   // 执行器额度冷却中:不按认领超时处理(任务应保持 queued,等冷却结束由
   // enterCooldown 的定时器泵送自动派发,而非被误标「未认领」)。
   if (isInCooldown(run.ex)) return;
+  // per-run 退避窗口未到:与 isRunDispatchable 同源(concurrencyRetryAt,
+  // ADR-0009)。armClaimTimer 已按窗口排期,这里是尾窗/时钟回拨的防御;
+  // 改期到窗口结束 + claimTimeout,不另写「是否该豁免」的第二套判定。
+  const retryInMs = run.concurrencyRetryAt - Date.now();
+  if (retryInMs > 0) {
+    armClaimTimer(run);
+    return;
+  }
   const g = groupQueues.get(run.groupKey);
   if (g) {
     const idx = g.queue.indexOf(run);

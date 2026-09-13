@@ -87,7 +87,6 @@ import {
   cooldownEndMs,
   formatEta,
   getA2ASilenceTimeoutMs,
-  getClaimTimeoutMs,
   getDetachedTimeoutMs,
   getMaxParallelGroups,
   getRedispatchFailureLimit,
@@ -114,8 +113,8 @@ import {
 } from "./ticket-builder";
 import { loadTicketTemplate } from "./ticket-template";
 import {
+  armClaimTimer,
   handleA2ASilence,
-  handleClaimTimeout,
   handleDetachedTimeout,
   handleStall,
   handleStallAlert,
@@ -419,10 +418,7 @@ export async function enqueueTaskRun(
     );
   }
 
-  run.claimTimer = setTimeout(
-    () => handleClaimTimeout(run),
-    getClaimTimeoutMs(),
-  );
+  armClaimTimer(run);
   requestPump();
 }
 
@@ -716,10 +712,8 @@ async function dispatchTask(
 
   // 认领超时定时器:超过 claimTimeoutMs 仍未进入 running → 标 failed。
   // 进入 running 时(runOne)取消;任务出队/停止时同步清理。
-  run.claimTimer = setTimeout(
-    () => handleClaimTimeout(run),
-    getClaimTimeoutMs(),
-  );
+  // 与重排队路径共用 armClaimTimer(见 transient-requeue-lost-wakeup §6.2)。
+  armClaimTimer(run);
   requestPump();
 }
 
