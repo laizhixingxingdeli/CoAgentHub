@@ -96,6 +96,8 @@ describe("路由", () => {
     ).toBeInTheDocument();
   });
 
+  // 本用例与下两条等的是 lazy 主区 chunk;findBy 预算 5s,用例总预算须更高
+  // (vitest 默认 testTimeout 也是 5s,不抬高会被用例超时先杀掉)。
   it("/groups/:id 渲染群组页:主区需求工作区且有设置入口", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
@@ -103,24 +105,30 @@ describe("路由", () => {
     // 主区先就绪(lazy + Suspense);标题栏异步 GET /api/groups/:id。
     // 用 testid 等标题栏出现,再断言 mock 的 title —— 比裸 findByText 更稳
     // (CI 曾因标题还是 fallback「群组消息」而找不到「群组消息流」)。
+    // 这里等的是 lazy + Suspense 的动态 import,不是竞态;1000ms 默认预算在忙机器上不够。
     expect(
-      await screen.findByTestId("requirement-workspace"),
+      await screen.findByTestId("requirement-workspace", undefined, {
+        timeout: 5000,
+      }),
     ).toBeInTheDocument();
     expect(await screen.findByTestId("group-title-bar")).toHaveTextContent(
       "群组消息流",
     );
     expect(screen.getByTestId("open-group-settings")).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("/groups/:id 不再渲染右栏上下文面板", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
     renderWithProviders(<App />, "/groups/group-1");
 
+    // 这里等的是 lazy + Suspense 的动态 import,不是竞态;1000ms 默认预算在忙机器上不够。
     expect(
-      await screen.findByTestId("requirement-workspace"),
+      await screen.findByTestId("requirement-workspace", undefined, {
+        timeout: 5000,
+      }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("context-panel")).toBeNull();
-  });
+  }, 15_000);
 
   it("/groups/:id/settings 以抽屉打开设置且保留底层群页面", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
@@ -129,8 +137,11 @@ describe("路由", () => {
     expect(
       await screen.findByTestId("group-settings-drawer"),
     ).toBeInTheDocument();
+    // 这里等的是 lazy + Suspense 的动态 import,不是竞态;1000ms 默认预算在忙机器上不够。
     expect(
-      await screen.findByTestId("requirement-workspace"),
+      await screen.findByTestId("requirement-workspace", undefined, {
+        timeout: 5000,
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByTestId("group-settings-drawer-content"),
@@ -142,7 +153,7 @@ describe("路由", () => {
       expect(screen.queryByTestId("group-settings-drawer")).toBeNull(),
     );
     expect(screen.getByTestId("requirement-workspace")).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("/groups/:id/members 重定向到设置页", async () => {
     vi.stubGlobal("fetch", routerFetchMock());
