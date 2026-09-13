@@ -96,11 +96,13 @@ import {
   groupQueues,
   isInCooldown,
   pumping,
+  pumpPending,
   registerCoordinatorProcess,
   releaseCoordinatorProcess,
   runningExecutorCount,
   runningGroupCount,
   setPumping,
+  setPumpPending,
 } from "./state";
 import { liveStreamText, summaryStreamText } from "./stream-text";
 import { resolveTaskRepo } from "./task-repo";
@@ -732,36 +734,64 @@ async function dispatchTask(
  * 退化为全局串行(原行为)。完成回调在 finally 里再泵,无需在此 await。
  */
 async function pumpQueue(): Promise<void> {
-  if (pumping) return;
+  // 合并信号(coalescing):忙时记下 pending,本轮结束后再跑 —— 直接 `return`
+  // 会把唤醒丢掉,重排队任务可永久静默挂在 queued
+  // (specs/transient-requeue-lost-wakeup.md §6.1)。不是轮询/定时重试。
+  if (pumping) {
+    setPumpPending(true);
+    return;
+  }
   setPumping(true);
   try {
-    for (;;) {
-      if (runningGroupCount() >= getMaxParallelGroups()) break;
-      // 额度冷却 / 执行器并发上限 / 403 反应式排队中的执行器不派发:组队首
-      // 任务不满足派发条件 → 跳过该组(任务保持 queued;既有 running 任务终态
-      // 或退避定时器会再次泵送自动派发)。
-      const group = [...groupQueues.values()].find(
-        (g) =>
-          runningForWorkspace(g) < workspaceCap(g.key) &&
-          g.queue.length > 0 &&
-          isRunDispatchable(g.queue[0]),
-      );
-      if (!group) break;
-      const run = group.queue.shift();
-      // find 谓词保证 queue 非空,此处不可能为 undefined(防御性判空)。
-      if (!run) break;
-      group.running.push(run);
-      activeRuns.add(run);
-      // T3:登记 runOne 全生命周期(含离队后的终态写入)。runOne finally 里的
-      // requestPump 在 track 的 finally 解除之前同步跑完,子 runOne 先登记
-      // 再解除父项 —— 父子交接无空计数窗口。
-      void trackBackgroundWork(`runOne:${run.taskId}`, () =>
-        runOne(run, group),
-      );
-    }
+    do {
+      setPumpPending(false);
+      // 测试钩子:本轮 drain 开始时回调一次,便于验证「忙时信号 → 再跑一轮」。
+      pumpCycleHookForTests?.();
+      for (;;) {
+        if (runningGroupCount() >= getMaxParallelGroups()) break;
+        // 额度冷却 / 执行器并发上限 / 403 反应式排队中的执行器不派发:组队首
+        // 任务不满足派发条件 → 跳过该组(任务保持 queued;既有 running 任务终态
+        // 或退避定时器会再次泵送自动派发)。
+        const group = [...groupQueues.values()].find(
+          (g) =>
+            runningForWorkspace(g) < workspaceCap(g.key) &&
+            g.queue.length > 0 &&
+            isRunDispatchable(g.queue[0]),
+        );
+        if (!group) break;
+        const run = group.queue.shift();
+        // find 谓词保证 queue 非空,此处不可能为 undefined(防御性判空)。
+        if (!run) break;
+        group.running.push(run);
+        activeRuns.add(run);
+        // T3:登记 runOne 全生命周期(含离队后的终态写入)。runOne finally 里的
+        // requestPump 在 track 的 finally 解除之前同步跑完,子 runOne 先登记
+        // 再解除父项 —— 父子交接无空计数窗口。
+        void trackBackgroundWork(`runOne:${run.taskId}`, () =>
+          runOne(run, group),
+        );
+      }
+      // 有界:本轮结束时 pending 未置位就退出,不空转。
+    } while (pumpPending);
   } finally {
     setPumping(false);
   }
+  // 尾窗竞态:do-while 判定 pending=false 之后、setPumping(false) 之前又来了
+  // 信号 → pending 为 true 但无人再进泵。这里补一次(若已有人进入会再合并)。
+  if (pumpPending) {
+    void pumpQueue();
+  }
+}
+
+/** 测试专用:直接跑一轮(含合并)泵,不经过 requestPump。 */
+export async function __pumpQueueForTests(): Promise<void> {
+  await pumpQueue();
+}
+
+/** 测试专用:每一轮 drain 开始时回调(验证合并信号会再跑一轮)。 */
+let pumpCycleHookForTests: (() => void) | null = null;
+export function __setPumpCycleHookForTests(fn: (() => void) | null): void {
+  pumpCycleHookForTests = fn;
 }
 
 // 模块顶层注册:加载本文件即挂上真正的泵,调用方只发 requestPump 信号。

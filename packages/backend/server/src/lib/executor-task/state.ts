@@ -541,9 +541,21 @@ export function activeExecutorTaskCount(): number {
 /** pumpQueue 重入保护:并行启动多个组时,同一时刻只允许一个泵循环。 */
 export let pumping = false;
 
+/**
+ * 泵送合并信号:pumpQueue 忙时 requestPump 置位,本轮结束后再跑一遍。
+ * 没有它,忙时到来的唤醒被 `if (pumping) return` 直接丢掉 —— 任务可永久
+ * 静默挂在 queued(specs/transient-requeue-lost-wakeup.md §6.1)。
+ */
+export let pumpPending = false;
+
 /** pumpQueue 进入临界区(仅 queue.ts 内部调用)。 */
 export function setPumping(value: boolean): void {
   pumping = value;
+}
+
+/** 合并信号置位/清除(仅 queue.ts 内部调用)。 */
+export function setPumpPending(value: boolean): void {
+  pumpPending = value;
 }
 
 /** 读静默超时阈值(ms)。 */
@@ -695,6 +707,10 @@ export function __resetExecutorQueueForTests(): void {
   scheduledPumpTimers.clear();
   executorCooldowns.clear();
   executorCooldownRecords.clear();
+  // 泵状态必须重置:pumping 若残留 true,后续所有 requestPump 永久静默,
+  // 且旧实现不在重置范围内,测试间互相毒害(transient-requeue-lost-wakeup §6.1)。
+  pumping = false;
+  pumpPending = false;
   const policy = readDispatchPolicy();
   maxParallelGroups = policy.maxParallelGroups;
   maxConcurrentPerWorkspace = policy.maxConcurrentPerWorkspace;
