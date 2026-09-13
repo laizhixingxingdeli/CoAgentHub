@@ -7,6 +7,9 @@
  *
  * 负向对照:去掉 quota-failure 两处 armClaimTimer 调用 → claimTimer 断言变红;
  * 把 armClaimTimer 改成无视 concurrencyRetryAt 只按 claimMs 排 → 退避误杀变红。
+ *
+ * §10 豁免=改期:R1 冷却 / R2 工作树闸 return 之后必须重 arm。负向对照:
+ * 两条豁免改回「return 不重 arm」且排期不算 cooldownEndMs → 下面四条变红。
  */
 import { randomUUID } from "node:crypto";
 import { task as taskTable } from "@laizhixingxingdeli/database/schema";
@@ -18,6 +21,10 @@ import {
   handleConcurrencyConflict,
   handleTransientQuotaBackoff,
 } from "../src/lib/executor-task/quota-failure";
+import {
+  armClaimTimer,
+  handleClaimTimeout,
+} from "../src/lib/executor-task/timeout-handlers";
 import type { QueuedRun } from "../src/lib/executor-task/types";
 import { createTestApp } from "./app";
 import { seedBuiltinExecutorConfigs, testDb } from "./db";
@@ -258,3 +265,102 @@ describe("重排队后认领超时(lost-wakeup B)", () => {
     expect(String(diff?.error ?? "")).toContain("未认领");
   });
 });
+
+describe("认领超时豁免=改期(lost-wakeup §10)", () => {
+  const CLAIM_MS = 50;
+
+  beforeEach(() => {
+    state.__setReliabilityTimeoutsForTests(60_000, CLAIM_MS);
+  });
+
+  it("冷却豁免后 claimTimer 非 null", async () => {
+    const { run } = await seedRunningTask("cool-rearm");
+    const g = ensureGroupQueue(run.groupKey);
+    g.queue.push(run);
+    state.executorCooldowns.set(run.ex.key, Date.now() + 5_000);
+    run.claimTimer = null;
+    handleClaimTimeout(run);
+    expect(run.claimTimer).not.toBeNull();
+  });
+
+  it("冷却结束后故意不泵 → 再过一个 claim 窗口 → 未认领", async () => {
+    const { task, run } = await seedRunningTask("cool-lost-pump");
+    const g = ensureGroupQueue(run.groupKey);
+    g.queue.push(run);
+    // 冷却比 claim 窗口长:若排期不算冷却结束且豁免不重 arm,
+    // 第一次回调在冷却内烧掉定时器,任务永久 queued。不走 enterCooldown,
+    // 因此没有冷却结束定时器去 requestPump —— 故意丢唤醒。
+    state.executorCooldowns.set(run.ex.key, Date.now() + 120);
+    armClaimTimer(run);
+    await sleep(280);
+    const row = await getTask(task.id);
+    expect(row?.status).toBe("failed");
+    const diff = row?.diffSummary as Record<string, unknown> | null;
+    expect(String(diff?.error ?? "")).toContain("未认领");
+  });
+
+  it("闸满豁免后 claimTimer 非 null", async () => {
+    const { run, occupying, wsKey } = await seedGatedPair("gate-rearm");
+    const g = ensureGroupQueue(wsKey);
+    g.running.push(occupying);
+    g.queue.push(run);
+    run.claimTimer = null;
+    handleClaimTimeout(run);
+    expect(run.claimTimer).not.toBeNull();
+  });
+
+  it("闸释放后丢掉终态泵送 → 下一个窗口 failed;对照:正常泵送不误杀", async () => {
+    const { task, run, occupying, wsKey } =
+      await seedGatedPair("gate-lost-pump");
+    const g = ensureGroupQueue(wsKey);
+    g.running.push(occupying);
+    g.queue.push(run);
+    armClaimTimer(run);
+    await sleep(80);
+    // 闸释放但不泵:occupying 离开 running,任务仍在 queue。
+    g.running.splice(g.running.indexOf(occupying), 1);
+    await sleep(200);
+    const lost = await getTask(task.id);
+    expect(lost?.status).toBe("failed");
+    expect(
+      String(
+        (lost?.diffSummary as Record<string, unknown> | null)?.error ?? "",
+      ),
+    ).toContain("未认领");
+
+    // 对照:闸刚释放同拍被泵取走 → idx<0,不得误杀。
+    const ctrl = await seedGatedPair("gate-pump-control");
+    const g2 = ensureGroupQueue(ctrl.wsKey);
+    g2.running.push(ctrl.occupying);
+    g2.queue.push(ctrl.run);
+    armClaimTimer(ctrl.run);
+    await sleep(80);
+    g2.running.splice(g2.running.indexOf(ctrl.occupying), 1);
+    const takenAt = g2.queue.indexOf(ctrl.run);
+    expect(takenAt).toBeGreaterThanOrEqual(0);
+    g2.queue.splice(takenAt, 1);
+    g2.running.push(ctrl.run);
+    await sleep(200);
+    const kept = await getTask(ctrl.task.id);
+    expect(kept?.status).not.toBe("failed");
+  });
+});
+
+async function seedGatedPair(label: string) {
+  const { group, task, run } = await seedRunningTask(label);
+  const wsKey = `C:\\tmp\\claim-gate-${label}-${task.id}`;
+  run.groupKey = wsKey;
+  run.projectPath = wsKey;
+  const occupying = buildRun({
+    groupId: group.id,
+    taskId: randomUUID(),
+    messageId: randomUUID(),
+    participantId: run.participantId,
+    ex: run.ex,
+    summary: `${label}-occupying`,
+  });
+  occupying.groupKey = wsKey;
+  occupying.projectPath = wsKey;
+  occupying.runningAt = Date.now();
+  return { group, task, run, occupying, wsKey };
+}

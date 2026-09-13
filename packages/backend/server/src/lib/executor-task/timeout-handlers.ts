@@ -3,12 +3,13 @@ import { wsHub } from "@server/lib/ws-hub";
 import { and, eq } from "drizzle-orm";
 import { endAttempt } from "./attempt-accounting";
 import { mergeDiffSummary } from "./diff-summary";
-import { workspaceGateBlocked } from "./dispatchability";
+import { isRunDispatchable, workspaceGateBlocked } from "./dispatchability";
 import { failTask } from "./failure";
 import { postStatus } from "./notify";
 import { releaseTaskOutput } from "./output-buffer";
 import {
   clearRunTimers,
+  cooldownEndMs,
   getA2ASilenceTimeoutMs,
   getClaimTimeoutMs,
   getStallAlertMs,
@@ -18,16 +19,30 @@ import {
 import type { QueuedRun } from "./types";
 
 /**
+ * 工作树闸豁免的改期相位(认领超时兜底网,specs/transient-requeue-lost-wakeup.md §10):
+ *  - blocked:上一拍闸仍满,已按 claimMs 周期复检;
+ *  - grace:上一拍发现闸刚释放,再给一个完整 claim 窗口。
+ *
+ * 闸何时释放不可预知,不能像冷却那样一次排到结束时刻。复检撞上「闸刚开、
+ * 终态 requestPump 还没取走」时立刻标未认领会误杀正要被派发的任务 —— 所以
+ * 从 blocked 转到开闸后先进入 grace,只有一个完整窗口内持续「可被派发却仍
+ * 在 queue」才判丢唤醒。从未被闸挡住的任务不进本表,保持原「到点即未认领」。
+ */
+const claimGatePhase = new WeakMap<QueuedRun, "blocked" | "grace">();
+
+/**
  * 为 queued run 装上认领超时定时器(入队与重排队共用)。
  *
- * 延迟 = max(claimTimeoutMs, concurrencyRetryAt + claimTimeoutMs - now):
- * concurrencyRetryAt 是 isRunDispatchable / runBlockReason 判定「per-run 退避
- * 窗口未过」的**同一事实**(ADR-0009),不是第二套豁免判据。窗口内任务本来就
- * 该待在 queued;若只按 claimTimeoutMs 从现在起算,退避(403 的 3s / 瞬时策略
- * 的 backoffMs)大于认领阈值时会把正常退避误杀成「未认领」。
+ * 延迟 = max(claimTimeoutMs, <可被派发时刻> + claimTimeoutMs - now):
+ * 「可被派发时刻」取 concurrencyRetryAt 与 cooldownEndMs 的较晚者 —— 两者都是
+ * isRunDispatchable / runBlockReason 判定的同一事实(ADR-0009),不是第二套
+ * 豁免判据。窗口内任务本来就该待在 queued;若只按 claimTimeoutMs 从现在起算,
+ * 退避(403 的 3s / 瞬时策略的 backoffMs)或额度冷却大于认领阈值时会把正常
+ * 等待误杀成「未认领」。
  *
- * 从「可被派发」起算 claim 窗口:退避结束后再给满额 claimTimeoutMs,与首次
- * 入队(concurrencyRetryAt=0 → delay=claimTimeoutMs)同式。
+ * 从「可被派发」起算 claim 窗口:冷却/退避结束后再给满额 claimTimeoutMs,与
+ * 首次入队(两者均为 0 → delay=claimTimeoutMs)同式。工作树闸没有已知结束
+ * 时刻,本函数在闸改期路径上按 claimTimeoutMs 周期复检。
  */
 export function armClaimTimer(run: QueuedRun): void {
   if (run.claimTimer) {
@@ -35,9 +50,11 @@ export function armClaimTimer(run: QueuedRun): void {
     run.claimTimer = null;
   }
   const claimMs = getClaimTimeoutMs();
+  const now = Date.now();
   const delay = Math.max(
     claimMs,
-    run.concurrencyRetryAt - Date.now() + claimMs,
+    run.concurrencyRetryAt - now + claimMs,
+    cooldownEndMs(run.ex) - now + claimMs,
   );
   run.claimTimer = setTimeout(
     () => handleClaimTimeout(run),
@@ -253,9 +270,13 @@ export function handleDetachedTimeout(run: QueuedRun): void {
  */
 export function handleClaimTimeout(run: QueuedRun): void {
   if (run.stopped) return;
-  // 执行器额度冷却中:不按认领超时处理(任务应保持 queued,等冷却结束由
-  // enterCooldown 的定时器泵送自动派发,而非被误标「未认领」)。
-  if (isInCooldown(run.ex)) return;
+  // 执行器额度冷却中:现在不该判未认领,但豁免是改期不是放弃
+  // (specs/transient-requeue-lost-wakeup.md §10)。armClaimTimer 已把冷却
+  // 结束算进排期;这里是冷却被延长 / 入队后才进冷却的防御。
+  if (isInCooldown(run.ex)) {
+    armClaimTimer(run);
+    return;
+  }
   // per-run 退避窗口未到:与 isRunDispatchable 同源(concurrencyRetryAt,
   // ADR-0009)。armClaimTimer 已按窗口排期,这里是尾窗/时钟回拨的防御;
   // 改期到窗口结束 + claimTimeout,不另写「是否该豁免」的第二套判定。
@@ -267,11 +288,33 @@ export function handleClaimTimeout(run: QueuedRun): void {
   const g = groupQueues.get(run.groupKey);
   if (g) {
     const idx = g.queue.indexOf(run);
-    if (idx < 0) return; // 已被取走开始运行 → 认领完成,放弃。
-    // 工作树闸已满:任务是被泵**合法**跳过的(不是遗弃),豁免认领超时 ——
-    // 保持 queued 等闸释放,由既有任务终态的泵送拉起(R1.1)。判据复用泵的
-    // 闸判定(workspaceGateBlocked),不另写第二套「队列是否阻塞」(ADR-0009)。
-    if (workspaceGateBlocked(g)) return;
+    if (idx < 0) {
+      claimGatePhase.delete(run);
+      return; // 已被取走开始运行 → 认领完成,放弃。
+    }
+    // 工作树闸已满:任务是被泵**合法**跳过的(不是遗弃)—— 现在不该判未认领,
+    // 但闸何时释放不可预知,只能按 claimMs 周期复检。判据复用泵的闸判定
+    // (workspaceGateBlocked),不另写第二套,也不扩大谓词(ADR-0009 / 票面)。
+    if (workspaceGateBlocked(g)) {
+      claimGatePhase.set(run, "blocked");
+      armClaimTimer(run);
+      return;
+    }
+    // 闸已开。若上一拍还是闸满,这一拍可能与终态 requestPump 同拍:任务其实
+    // 正要被派发,立刻标「未认领」会误杀。只有一个完整 claim 窗口内持续
+    // 「闸开着且 isRunDispatchable 却仍在 queue」,才是丢唤醒。
+    // isRunDispatchable 复用 runBlockReason(ADR-0009),不另写「是否可被派发」。
+    const phase = claimGatePhase.get(run);
+    if (phase === "blocked") {
+      claimGatePhase.set(run, "grace");
+      armClaimTimer(run);
+      return;
+    }
+    if (phase === "grace" && !isRunDispatchable(run)) {
+      armClaimTimer(run);
+      return;
+    }
+    claimGatePhase.delete(run);
     g.queue.splice(idx, 1);
   }
   clearRunTimers(run);
