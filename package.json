@@ -1,0 +1,10 @@
+{
+  "name": "coagenthub-v5",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "CoAgentHub v5 — Agent-First 架构基线的实现。",
+  "scripts": {
+    "test": "node --test"
+  }
+}
