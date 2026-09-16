@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/tokens.css" />
 <link rel="modulepreload" href="/projects.js" />
 <link rel="modulepreload" href="/task.js" />
+<link rel="modulepreload" href="/pool.js" />
 <style>
 /* 外壳布局与组件。色彩只从 tokens.css 进来，这里不出现新的色值——
    多一个"顺手调的色"就和观测面分叉一处，而分叉是没人会主动去对齐的。 */
@@ -216,6 +217,24 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
 .escalations .why { color: var(--muted-foreground); margin-top: 4px; word-break: break-word; }
 .escalations .a { margin-top: 4px; word-break: break-word; }
 
+/* ===== 资源池页 =====
+ * 表与卡直接复用 .card / table.tasks / .task-stats，这里只补表单那一行。
+ * 不另起 pool.css：静态服务只认一层扁平文件名，多一个文件就多一个要
+ * modulepreload、要在用例里枚举的名字（与任务页同一取舍）。
+ */
+.pool-form { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: end; }
+.pool-form .field { display: grid; gap: 3px; }
+.pool-form .field > span { font-size: 11px; color: var(--muted-foreground); }
+.pool-form select, .pool-form input {
+  font: inherit; font-size: 13px; padding: 5px 8px; border-radius: calc(var(--radius) - 4px);
+  border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+}
+/* 停用的下拉要看得出停用：能展开、选完却提交不了，比一开始就灰掉更坑。 */
+.pool-form select[disabled], .pool-form input[disabled] {
+  color: var(--muted-foreground); background: var(--muted); cursor: not-allowed;
+}
+.pool-error { color: var(--status-failed); }
+
 .placeholder {
   background: var(--card); border: 1px dashed var(--border);
   border-radius: var(--radius); padding: 28px; text-align: center;
@@ -228,7 +247,7 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
   <nav class="nav" aria-label="主导航">
     <div class="brand">CoAgentHub</div>
     <a class="item" href="#/projects" data-route="projects">项目</a>
-    <a class="item" href="#/resources" data-route="resources">资源池</a>
+    <a class="item" href="#/pool" data-route="pool">资源池</a>
     <div class="spacer"></div>
     <div class="foot">
       <!-- 设置与用户名现在都是占位：设置页属于后续 Mission，

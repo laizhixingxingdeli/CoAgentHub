@@ -125,7 +125,7 @@ describe('外壳的文件形状', () => {
       assert.ok(projects.includes(`#${id}`) && projects.includes(`id="${id}"`), `骨架里缺 #${id}`);
     }
     assert.match(html, /class="item"[^>]*data-route="projects"/);
-    assert.match(html, /class="item"[^>]*data-route="resources"/);
+    assert.match(html, /class="item"[^>]*data-route="pool"/);
   });
 
   test('外壳不靠内置观测面', () => {

@@ -18,6 +18,14 @@ import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/snapshot.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
+import type {
+  AgentPoolAddInput,
+  AgentPoolCandidate,
+  AgentPoolRepository,
+  AgentPoolRow,
+  AgentPoolSnapshot,
+} from './agent-pool.ts';
+import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 
 interface StateFile {
   version: 1;
@@ -26,6 +34,14 @@ interface StateFile {
   events: ActivityEvent[];
   /** id 计数器也要存：不存的话重启后会从 1 重新发号，撞上已有的 id。 */
   idCounters: Record<string, number>;
+  /**
+   * 候选池。存成带上级 role 的扁平数组，而不是 coordinator / executor 两个数组：
+   * 与 PG 那张表同构，换存储不用重排数据，而且 role 只有一个地方能说清楚。
+   *
+   * 不 bump version：#load() 已经是 `{ ...emptyState(), ...parsed }`，旧文件
+   * 缺这个键自然拿到 [] —— bump 只会让所有人的现有状态文件读不了。
+   */
+  agentPool: AgentPoolRow[];
 }
 
 /**
@@ -36,7 +52,14 @@ interface StateFile {
  * Mission 的事件出现在我的 Timeline 里」。
  */
 function emptyState(): StateFile {
-  return { version: 1, projects: [], deliveries: [], events: [], idCounters: {} };
+  return {
+    version: 1,
+    projects: [],
+    deliveries: [],
+    events: [],
+    idCounters: {},
+    agentPool: [],
+  };
 }
 
 /**
@@ -277,5 +300,57 @@ export class PersistentIds implements IdGenerator {
     counters[prefix] = (counters[prefix] ?? 0) + 1;
     this.#store.flush();
     return `${prefix}-${counters[prefix]}`;
+  }
+}
+
+/**
+ * 候选池的文件实现。
+ *
+ * 为什么不并进 ProjectRepository / Platform：候选池是运维配置，不是 Mission
+ * 状态。塞进聚合快照等于让「谁可用」跟着 Mission 历史一起被重写、被版本号
+ * 管并发冲突 —— 改一次配置会把所有在途 Project 的版本顶旧。
+ *
+ * 读路径先 refreshIfChanged()：写配置的可能是另一个进程（run-mission 播种、
+ * API 追加），而观测面是常驻的。不重载就永远看不见对方追加的候选。
+ */
+export class FileAgentPoolRepository implements AgentPoolRepository {
+  #store: FileStateStore;
+
+  constructor(store: FileStateStore) {
+    this.#store = store;
+  }
+
+  async list(): Promise<AgentPoolSnapshot> {
+    this.#store.refreshIfChanged();
+    return agentPoolSnapshot(this.#rows());
+  }
+
+  async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
+    // 校验前先看磁盘上的最新内容：不刷新的话，两个进程都以为自己是某个
+    // profileId 的首个持有者，各自算出 order=0 往回写，后写的把先写的整片盖掉
+    // （文件版是整份 JSON 重写，盖的是整个数组）。
+    this.#store.refreshIfChanged();
+    const rows = this.#rows();
+    const row = validateAgentPoolAdd(input, rows);
+    rows.push(row);
+    this.#store.flush();
+    return toAgentPoolCandidate(row);
+  }
+
+  /**
+   * 拿到磁盘上那份**数组本身**（不是副本）—— add() 要往里 push 后才能被 flush 写回。
+   *
+   * 状态文件是人会手改的东西，所以两个约不到的字段在这归一化：缺 agentPool 给
+   * []，缺 facts 给 []。不归一化的话，组装快照时的 `[...facts]` 会在一个完整的
+   * 配置行上招 TypeError —— 而报错的地方离真正写坏的地方隔着一整个重启。
+   */
+  #rows(): AgentPoolRow[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.agentPool)) state.agentPool = [];
+    for (let index = 0; index < state.agentPool.length; index += 1) {
+      const row = state.agentPool[index];
+      if (!Array.isArray(row?.facts)) state.agentPool[index] = { ...row, facts: [] };
+    }
+    return state.agentPool;
   }
 }

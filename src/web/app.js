@@ -12,6 +12,7 @@
 
 import { renderProjectsPage } from './projects.js';
 import { renderTaskPage } from './task.js';
+import { renderPoolPage } from './pool.js';
 
 /* ===== 主题 =====
  * 暗色令牌挂在 :root[data-theme="dark"] 上（与观测面同一套写法），所以这里
@@ -61,7 +62,10 @@ function parseRoute(hash) {
     }
     return { name: 'mission', missionId };
   }
-  if (raw === '/resources') return { name: 'resources' };
+  // 资源池是静态的一条路由（没有参数），所以匹配落在这里而不是上面那几条正则里。
+  // 不再认原来那个占位地址（resources）：两个地址指同一个页面，而人一旦把旧
+  // 地址发出去，就得永远维护它。未知 hash 统一回 #/projects。
+  if (raw === '/pool') return { name: 'pool' };
   return { name: 'unknown' };
 }
 
@@ -87,14 +91,14 @@ const link = (text, href) => {
 
 function renderChrome(route) {
   // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
-  const active = route.name === 'resources' ? 'resources' : 'projects';
+  const active = route.name === 'pool' ? 'pool' : 'projects';
   for (const el of navItems) {
     if (el.dataset.route === active) el.dataset.active = '1';
     else el.removeAttribute('data-active');
   }
 
   crumbs.replaceChildren();
-  if (route.name === 'resources') {
+  if (route.name === 'pool') {
     crumbs.appendChild(node('资源池', 'here'));
     return;
   }
@@ -132,10 +136,8 @@ function render() {
 
   renderChrome(route);
 
-  if (route.name === 'resources') {
-    // 资源池要看的是候选 agent 的健康度，那是另一个 Mission 的范围。
-    // 先占住这条路由：从导航点进来看到的是"还没做"，而不是空白页。
-    view.replaceChildren(node('资源池页属于后续 Mission。导航与路由已接好，数据还没接。', 'placeholder'));
+  if (route.name === 'pool') {
+    void renderPoolPage(view);
     return;
   }
 

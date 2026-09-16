@@ -12,6 +12,8 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { Platform, PlatformRuleError } from '../application/platform.ts';
+import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
+import type { AgentPoolAddInput, AgentPoolRepository } from '../application/agent-pool.ts';
 import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
@@ -47,6 +49,14 @@ export interface ApiDeps {
   beforeRead?: () => Promise<void> | void;
   /** Web 资源根目录。缺省 src/web/；测试用临时目录，免得几个测试文件互相看见。 */
   webRoot?: string;
+  /**
+   * 候选池仓储。不传就是内存版（进程退了配置就没了）。
+   *
+   * 为什么是可选的：这一堆 createApi 调用点里绝大多数只关心 Mission 流转，
+   * 把候选池做成必填会让十几个测试文件为了一个它们根本不碰的端点改一遍。
+   * 少一个默认实现，比少一类调用点便宜。
+   */
+  agentPool?: AgentPoolRepository;
 }
 
 class HttpError extends Error {
@@ -85,6 +95,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 export function createApi(deps: ApiDeps): Server {
   const { platform, tokens, deliveries, onMutation, beforeRead } = deps;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
+  const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
 
   const requireRun = (req: IncomingMessage): RunContext => {
     const header = req.headers['x-coagent-run'];
@@ -211,6 +222,10 @@ export function createApi(deps: ApiDeps): Server {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
         send(res, 409, { error: error.code, message: error.message });
+      } else if (error instanceof AgentPoolError) {
+        // 与 PlatformRuleError 同构：请求本身合法，是当前候选池容不下它。
+        // 界面要把 message 原样显示出来，所以那里写的就是「下一步该干什么」。
+        send(res, 409, { error: error.code, message: error.message });
       } else if (error instanceof KernelError) {
         send(res, 409, { error: error.code, message: error.message });
       } else {
@@ -257,6 +272,22 @@ export function createApi(deps: ApiDeps): Server {
 
     if (method === 'GET' && path === '/api/projects') {
       return send(res, 200, await platform.listProjects());
+    }
+
+    /* ---- 候选池（资源池页的原料）。只有列与追加两个动作 ---- */
+
+    // 没有 DELETE / PATCH / PUT，也没有播种：这页没有鉴权，而读路径带副作用
+    // 意味着「打开界面看一眼」就能改写别人的配置。
+    if (method === 'GET' && path === '/api/pools') {
+      return send(res, 200, await agentPool.list());
+    }
+
+    if (method === 'POST' && path === '/api/pools') {
+      const body = await readJson(req);
+      const input: AgentPoolAddInput = body as unknown as AgentPoolAddInput;
+      const added = await agentPool.add(input);
+      // add 能返回就说明 role 已过校验，回显它才不会与请求里那个是两个字。
+      return send(res, 201, { role: input.role, ...added });
     }
 
     // 正式 Web 端：src/web/ 下的无构建静态文件（ADR-0001）。

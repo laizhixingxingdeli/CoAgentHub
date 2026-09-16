@@ -18,10 +18,12 @@ import {
   SystemClock,
 } from './application/in-memory.ts';
 import { Platform } from './application/platform.ts';
+import { InMemoryAgentPoolRepository } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import {
   FileActivityLog,
+  FileAgentPoolRepository,
   FileDeliveryRepository,
   FileProjectRepository,
   FileStateStore,
@@ -29,6 +31,7 @@ import {
 } from './application/file-store.ts';
 import {
   PgActivityLog,
+  PgAgentPoolRepository,
   PgDeliveryRepository,
   PgIds,
   PgLiveOutput,
@@ -55,6 +58,7 @@ export function buildPlatform(workspace?: WorkspaceManager) {
     projects,
     deliveries,
     tokens,
+    agentPool: new InMemoryAgentPoolRepository(),
     issuer: makeIssuer(platform, tokens),
     persist: () => {},
   };
@@ -117,6 +121,7 @@ export async function buildPersistentPlatform(
     store,
     reconciled,
     tokens,
+    agentPool: new FileAgentPoolRepository(store),
     issuer: makeIssuer(platform, tokens),
     persist: () => store.flush(),
     releaseLock,
@@ -184,6 +189,7 @@ export async function buildPgPlatform(options?: {
     live,
     reconciled,
     tokens,
+    agentPool: new PgAgentPoolRepository(store),
     issuer: makeIssuer(platform, tokens),
     persist: () => projects.persist(),
     // 读请求前刷新：别的进程写过的东西，这个进程要看得见。
@@ -227,6 +233,7 @@ export async function startServer(port = 3101, statePath = '.coagent-state.json'
     tokens: built.tokens,
     deliveries: built.deliveries,
     onMutation: built.persist,
+    agentPool: built.agentPool,
     live: 'live' in built ? built.live : undefined,
     beforeRead: 'refresh' in built ? built.refresh : undefined,
   });
