@@ -1,0 +1,270 @@
+/**
+ * 失败上限与候选冷却（S07.4 / S07.5 / S14.4）。
+ *
+ * 要防的是一种很具体的浪费：候选池里五个 agent，一张前提就错的工单会把
+ * 五个全烧一遍才停 —— **每一次都产生不了新信息**。上限和冷却都是为了
+ * 让"没戏了"这件事早一点、而且明确地发生。
+ */
+
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
+
+import { createApi } from '../src/api/server.ts';
+import { RunTokenRegistry } from '../src/api/run-tokens.ts';
+import {
+  FixedClock,
+  InMemoryActivityLog,
+  InMemoryProjectRepository,
+  SequentialIds,
+} from '../src/application/in-memory.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import { Orchestrator } from '../src/application/orchestrator.ts';
+import { Platform } from '../src/application/platform.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { makeIssuer } from '../src/main.ts';
+import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import type { ExecutionProfile } from '../src/application/ports.ts';
+
+const CONTRACT = {
+  intent: '修 X',
+  acceptance: ['绿'],
+  constraints: [],
+  nonGoals: [],
+  guardrails: [],
+};
+
+const ORDER = {
+  objective: '改 foo',
+  allowedScope: ['src/foo.ts'],
+  requiredBehaviour: 'foo 返回 1',
+  constraints: [],
+  acceptance: ['foo() === 1'],
+  verification: ['node --test'],
+  doNot: [],
+  contextRefs: [],
+};
+
+const PLAN = {
+  findings: 'f',
+  rejectedHypotheses: [],
+  decisions: [],
+  direction: 'd',
+  risks: [],
+};
+
+const PLAN_AND_DISPATCH = {
+  'coordinator:-:0': {
+    steps: [
+      { tool: 'coagent_update_plan', body: PLAN },
+      { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+      { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
+    ],
+  },
+  'coordinator:-': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+};
+
+const servers: Server[] = [];
+after(() => {
+  for (const server of servers) server.close();
+});
+
+async function harness(
+  executor: ScriptedRuntime,
+  executorPool: { candidates: ExecutionProfile[]; maxAttempts?: number; cooldownMs?: number },
+) {
+  const clock = new FixedClock();
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const platform = new Platform({
+    projects: new InMemoryProjectRepository(),
+    deliveries,
+    workspace: new InPlaceWorkspaceManager(),
+    activity: new InMemoryActivityLog(clock),
+    clock,
+    ids,
+  });
+  const tokens = new RunTokenRegistry();
+  const server = createApi({ platform, tokens, deliveries });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  servers.push(server);
+
+  const orchestrator = new Orchestrator({
+    platform,
+    tokens: makeIssuer(platform, tokens),
+    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    workspace: new InPlaceWorkspaceManager(),
+    coordinator: {
+      runtime: new ScriptedRuntime(PLAN_AND_DISPATCH),
+      candidates: [{ endpoint: 'l', profileId: 'coord' }],
+    },
+    executor: { runtime: executor, ...executorPool },
+  });
+  return { platform, orchestrator };
+}
+
+/** 五个候选，全都上游失败。 */
+function allFailing(): ScriptedRuntime {
+  return new ScriptedRuntime({
+    'executor:W-1': { steps: [], upstreamFailure: '429 限流' },
+  });
+}
+
+const FIVE: ExecutionProfile[] = ['a', 'b', 'c', 'd', 'e'].map((id) => ({
+  endpoint: 'l',
+  profileId: `exec-${id}`,
+}));
+
+describe('尝试上限', () => {
+  test('到上限就停，不会把整个候选池烧完', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), {
+      candidates: FIVE,
+      maxAttempts: 2,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+
+    const result = await orchestrator.runMission('M1', {
+      projectRoot: process.cwd(),
+      maxRounds: 4,
+    });
+
+    const executorHops = orchestrator.hops.filter((h) => h.role === 'executor');
+    assert.equal(executorHops.length, 2, `上限是 2，实际烧了 ${executorHops.length} 个候选`);
+    assert.equal(result.kind, 'waiting');
+    assert.equal((result as { reason: string }).reason, 'attempt_limit_reached');
+    // 报错要说明「继续换没用」，不然人会手动再点一遍。
+    assert.match((result as { detail: string }).detail, /烧配额|不会产生新信息/);
+  });
+
+  test('缺省上限是 3', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), { candidates: FIVE });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 4 });
+    assert.equal(orchestrator.hops.filter((h) => h.role === 'executor').length, 3);
+  });
+});
+
+describe('候选冷却', () => {
+  test('上游失败过的候选进入冷却，可用性看得见', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), {
+      candidates: FIVE,
+      maxAttempts: 2,
+      cooldownMs: 60_000,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 4 });
+
+    const availability = orchestrator.candidateAvailability();
+    const cooling = availability.filter((c) => c.availability === 'cooldown');
+    assert.equal(cooling.length, 2, '烧过的那两个该在冷却');
+    assert.ok(cooling.every((c) => c.until), '冷却要带到期时间，不然不知道什么时候能重试');
+    // 没碰过的还是可用的。
+    assert.ok(availability.some((c) => c.profileId === 'exec-e' && c.availability === 'available'));
+  });
+
+  test('候选全在冷却 = no_available_agent，而且是「在等」不是「失败」', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), {
+      candidates: [FIVE[0]],
+      maxAttempts: 5,
+      cooldownMs: 60_000,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+
+    const result = await orchestrator.runMission('M1', {
+      projectRoot: process.cwd(),
+      maxRounds: 4,
+    });
+    assert.equal(result.kind, 'waiting');
+    assert.equal((result as { reason: string }).reason, 'no_available_agent');
+    assert.match((result as { detail: string }).detail, /冷却/);
+
+    // 停机原因落到 Mission 上，界面才看得见「为什么不动」。
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.waitReason, 'no_available_agent');
+    // **枚举不够**：它只说明"停了"，说不出停在谁身上。那句具体的话是调度器
+    // 算出来的，不跟着状态一起存，常驻界面（另一个进程）就永远拿不到——
+    // 人又得回去翻日志，而分两条轴就是为了免掉这一步。
+    assert.match(view.waitDetail ?? '', /冷却/);
+    assert.match(view.waitDetail ?? '', /exec-a/, '卡在哪个候选上要点名');
+  });
+
+  test('重新跑起来时清掉上次的停机原因', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), {
+      candidates: [FIVE[0]],
+      maxAttempts: 1,
+      cooldownMs: 1,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 3 });
+    assert.ok((await platform.getMissionView('M1')).waitReason);
+
+    await new Promise((done) => setTimeout(done, 20)); // 让冷却过期
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 1 });
+    // 跑起来那一刻就该清掉，否则界面上一直挂着旧原因。
+    const events = await platform.getActivity('M1');
+    assert.ok(
+      events.some((e) => e.kind === 'mission.resumed'),
+      '又动起来了要有一条 resumed，界面据此把旧原因抹掉',
+    );
+  });
+});
+
+describe('平台不可达 ≠ 上游失败', () => {
+  // 这条是实测出来的：整个套件循环跑 8 遍，第 7 遍偶发地红了一次——
+  // 端口抢占导致一次 `fetch failed`，被当成"上游限流"，于是好端端的候选
+  // 被冻进冷却，Mission 停在 no_available_agent。换一个候选照样连不上，
+  // 冷却在这里只有副作用没有作用。
+  const unreachable = () =>
+    new ScriptedRuntime({
+      'executor:W-1': { steps: [], connectionError: 'fetch failed' },
+    });
+
+  test('连不上平台不冷却候选 —— 换一个也连不上，冻它是纯误伤', async () => {
+    const { platform, orchestrator } = await harness(unreachable(), {
+      candidates: FIVE,
+      maxAttempts: 2,
+      cooldownMs: 60_000,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 4 });
+
+    const cooling = orchestrator
+      .candidateAvailability()
+      .filter((c) => c.availability === 'cooldown');
+    assert.deepEqual(cooling, [], '平台侧故障不该记在候选头上');
+  });
+
+  test('只烧一个候选就停 —— 不逐个重试同一个平台', async () => {
+    const { platform, orchestrator } = await harness(unreachable(), {
+      candidates: FIVE,
+      maxAttempts: 5,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const result = await orchestrator.runMission('M1', {
+      projectRoot: process.cwd(),
+      maxRounds: 4,
+    });
+
+    assert.equal(orchestrator.hops.filter((h) => h.role === 'executor').length, 1);
+    assert.equal(result.kind, 'waiting');
+    assert.equal((result as { reason: string }).reason, 'platform_unreachable');
+    // 报错要把人指向平台，不是指向候选池。指错方向就会去手动加候选。
+    assert.match((result as { detail: string }).detail, /平台/);
+  });
+
+  test('对照组：真正的上游失败照旧冷却', async () => {
+    const { platform, orchestrator } = await harness(allFailing(), {
+      candidates: FIVE,
+      maxAttempts: 2,
+      cooldownMs: 60_000,
+    });
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 4 });
+    assert.equal(
+      orchestrator.candidateAvailability().filter((c) => c.availability === 'cooldown').length,
+      2,
+      '这一半不能因为上面那条改动而失效',
+    );
+  });
+});
