@@ -25,7 +25,12 @@ export type WorkItemStatus =
  * 尝试没成，WorkItem 停在 dispatched 可再试。
  */
 const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
-  created: ['dispatched'],
+  // created -> blocked：**还没派发也能作废**。
+  //
+  // 早先只有 dispatched 能进 blocked，于是"契约改了、这张工单已经不算数了"
+  // 这件事，非得等它被派出去之后才能表达——而那时候执行者已经在跑了。
+  // 作废的判据是"这张工单还成不成立"，跟它派没派发无关。
+  created: ['dispatched', 'blocked'],
   dispatched: ['submitted', 'blocked'],
   submitted: ['accepted', 'rejected'],
   // accepted -> dispatched：**L3 打回时重新打开**。

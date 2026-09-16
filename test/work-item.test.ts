@@ -249,3 +249,33 @@ describe('WorkItem: 封装', () => {
     ]);
   });
 });
+
+describe('还没派发也能作废', () => {
+  test('created -> blocked 合法 —— 作废的判据是工单成不成立，与派没派发无关', () => {
+    // 实测撞到的：契约改了，协调者照新契约另拆了一批，旧的那批里有些
+    // 还停在 created。早先 created 只能去 dispatched，于是"这张已经不算数了"
+    // 非得等它被派出去才能表达——而那时执行者已经在跑了。
+    const item = new WorkItem({ id: 'W-1', missionId: 'M1', title: 'W' });
+    item.recordBlocked({
+      attemptId: 'l3',
+      reason: '契约改了，已被新工单取代',
+      whatWasTried: [],
+      needsFromUpstream: '重新判断要不要重做',
+    });
+    assert.equal(item.status, 'blocked');
+    // 作废之后还能重新派发——它不是终态。
+    assert.doesNotThrow(() => item.dispatch());
+  });
+
+  test('不变量 A 不受影响：到达 accepted 的路仍然只有 review(accept)', () => {
+    const item = new WorkItem({ id: 'W-2', missionId: 'M1', title: 'W' });
+    item.recordBlocked({
+      attemptId: 'l3',
+      reason: 'x',
+      whatWasTried: [],
+      needsFromUpstream: 'y',
+    });
+    // blocked 直接去 accepted 必须不行。
+    assert.throws(() => item.review('accept'));
+  });
+});
