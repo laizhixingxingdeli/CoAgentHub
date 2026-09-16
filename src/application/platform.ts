@@ -451,6 +451,7 @@ export class Platform {
           status: mission.status,
           waitReason: mission.waitReason,
           waitDetail: mission.waitDetail,
+          updatedAt: mission.updatedAt,
           paused: mission.isPaused,
           isMutating: mission.isMutating,
           intent: mission.contract?.intent ?? '',
@@ -1203,6 +1204,11 @@ export class Platform {
     workItemId?: string,
     attemptId?: string,
   ): Promise<void> {
+    // 每记一条事件就顺手更新"最后动过"。放在这一个地方，
+    // 而不是散在十几个用例里——散着写一定会漏，而漏掉的那条在界面上
+    // 表现成"这个 Mission 好像停了"。
+    const at = this.#clock.now().toISOString();
+    mission.touch(at);
     await this.#activity.append({
       projectId: mission.projectId,
       missionId: mission.id,
@@ -1243,6 +1249,7 @@ export interface MissionView {
   /** 为什么停着。undefined = 没停。 */
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
   contractRevision: number;
@@ -1277,6 +1284,7 @@ export interface MissionSummary {
   status: string;
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
   intent: string;
@@ -1342,6 +1350,7 @@ function viewOf(mission: Mission): MissionView {
     status: mission.status,
     waitReason: mission.waitReason,
     waitDetail: mission.waitDetail,
+    updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,
     contractRevision: mission.contractRevision,

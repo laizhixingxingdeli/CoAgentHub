@@ -61,6 +61,8 @@ export interface MissionSnapshot {
   finalReview?: unknown;
   waitReason?: string;
   waitDetail?: string;
+  /** 最后一次状态变化的时间。 */
+  updatedAt?: string;
   paused?: boolean;
   workItems: WorkItemSnapshot[];
   coordinatorAttempts: AttemptSnapshot[];

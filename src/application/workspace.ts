@@ -35,7 +35,10 @@ export interface PreparedWorkspace {
   readonly cwd: string;
   /** 分出来时的基线版本。 */
   readonly baseRevision: string;
+  /** 本 Mission 自己的分支。 */
   readonly branch: string;
+  /** 要合回去的那条。和 branch 是两回事。 */
+  readonly targetBranch?: string;
 }
 
 export interface MergeOutcome {
@@ -87,15 +90,30 @@ export class GitWorktreeManager implements WorkspaceManager {
 
     if (existsSync(cwd)) {
       // 续跑同一个 Mission：沿用已有 worktree，不要重开一份。
-      return { cwd, branch, baseRevision: await this.head(cwd) };
+      return {
+        cwd,
+        branch,
+        baseRevision: await this.head(cwd),
+        targetBranch: await this.#currentBranch(repo),
+      };
     }
 
     const baseRevision = (await run('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
     // 分支可能因为上一次异常退出而残留；先清掉再建，失败不致命。
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
     await run('git', ['branch', '-D', branch], { cwd: repo }).catch(() => undefined);
+    // 分叉之前先问清楚要合回哪条分支。之后目标分支被切换也不影响这条记录。
+    const targetBranch = await this.#currentBranch(repo);
     await run('git', ['worktree', 'add', '-b', branch, cwd, baseRevision], { cwd: repo });
-    return { cwd, branch, baseRevision };
+    return { cwd, branch, baseRevision, targetBranch };
+  }
+
+  /** 目标仓库当前 checkout 的分支名。detached HEAD 时返回 undefined。 */
+  async #currentBranch(repo: string): Promise<string | undefined> {
+    const name = (await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repo })
+      .then((r) => r.stdout.trim())
+      .catch(() => ''));
+    return name && name !== 'HEAD' ? name : undefined;
   }
 
   async head(cwd: string): Promise<string> {
@@ -229,7 +247,12 @@ ${dirty}` };
 /** 不隔离，直接在给定目录里干活。只该在测试或明确接受风险时使用。 */
 export class InPlaceWorkspaceManager implements WorkspaceManager {
   async prepare(_missionId: string, projectRoot: string): Promise<PreparedWorkspace> {
-    return { cwd: resolve(projectRoot), branch: '(in-place)', baseRevision: 'unknown' };
+    return {
+      cwd: resolve(projectRoot),
+      branch: '(in-place)',
+      targetBranch: '(in-place)',
+      baseRevision: 'unknown',
+    };
   }
 
   async head(): Promise<string> {

@@ -274,3 +274,49 @@ describe('Envelope 公共语义（S10.3）', () => {
     assert.ok(caused.length >= 3, '这几步都该指回那次协调者尝试');
   });
 });
+
+describe('列表页要的两个字段', () => {
+  test('目标分支和 Mission 自己的分支是两回事', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await platform.recordWorkspace('M1', {
+      projectRoot: '/repo',
+      branch: 'mission/M1',
+      targetBranch: 'main',
+      baseRevision: 'abc',
+    });
+    const view = await platform.getMissionView('M1');
+    // 早先项目页把 branch 当"目标分支"显示，于是每条 Mission 都把自己的
+    // 分支名报成了项目的目标分支——看上去像项目在往 mission/M1 上合。
+    assert.equal(view.workspaceRef?.branch, 'mission/M1');
+    assert.equal(view.workspaceRef?.targetBranch, 'main');
+  });
+
+  test('updatedAt 随每次状态变化推进', async () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    let now = new Date('2026-01-01T00:00:00.000Z');
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock: { now: () => now },
+      ids,
+    });
+
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const created = (await platform.getMissionView('M1')).updatedAt;
+    assert.equal(created, '2026-01-01T00:00:00.000Z');
+
+    now = new Date('2026-01-01T00:05:00.000Z');
+    await platform.startCoordinatorAttempt('M1');
+    const after = (await platform.getMissionView('M1')).updatedAt;
+    assert.equal(after, '2026-01-01T00:05:00.000Z', '动过就要推进');
+
+    // 列表行上也得有 —— 否则「最新更新时间」那一列只能显示 —。
+    const rows = await platform.listMissions();
+    assert.equal(rows[0].updatedAt, after);
+  });
+});

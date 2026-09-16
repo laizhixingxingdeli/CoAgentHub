@@ -202,6 +202,7 @@ export class Orchestrator {
     await this.#platform.recordWorkspace(missionId, {
       projectRoot: options.projectRoot,
       branch: prepared.branch,
+      targetBranch: prepared.targetBranch,
       baseRevision: prepared.baseRevision,
     });
 

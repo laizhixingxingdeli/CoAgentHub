@@ -82,6 +82,7 @@ export class Mission {
   #finalReview: Readonly<FinalReview> | undefined;
   #waitReason: WaitReason | undefined;
   #waitDetail: string | undefined;
+  #updatedAt: string | undefined;
   #paused = false;
 
   constructor(init: MissionInit) {
@@ -246,6 +247,22 @@ export class Mission {
     this.#waitReason = reason;
     // 原因清掉时详情必须一起清，不然界面上会挂着一句过期的解释。
     this.#waitDetail = reason ? detail : undefined;
+  }
+
+  /**
+   * 最后一次状态变化的时间。
+   *
+   * 列表页要按"最近动过"排序、也要显示"多久没动了"。从活动日志里现算的话，
+   * 每渲染一次列表就要把每条 Mission 的全部事件读一遍——那是 O(事件总数)，
+   * 而这只是一列。记在这里是一次写、一次读。
+   */
+  get updatedAt(): string | undefined {
+    return this.#updatedAt;
+  }
+
+  /** 由用例层在每次记事件时调用。时间从外面传，kernel 里不读时钟。 */
+  touch(at: string): void {
+    this.#updatedAt = at;
   }
 
   get finalReview(): Readonly<FinalReview> | undefined {
@@ -435,6 +452,7 @@ export class Mission {
       finalReview: this.#finalReview,
       waitReason: this.#waitReason,
       waitDetail: this.#waitDetail,
+      updatedAt: this.#updatedAt,
       paused: this.#paused,
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
@@ -458,6 +476,7 @@ export class Mission {
     mission.#workspaceRef = snapshot.workspaceRef as Readonly<WorkspaceRef> | undefined;
     mission.#waitReason = snapshot.waitReason as WaitReason | undefined;
     mission.#waitDetail = snapshot.waitDetail;
+    mission.#updatedAt = snapshot.updatedAt;
     mission.#paused = snapshot.paused ?? false;
     mission.#workItems = (snapshot.workItems ?? []).map((item: WorkItemSnapshot) =>
       WorkItem.restore(item),

@@ -209,7 +209,16 @@ export type WaitReason =
 export interface WorkspaceRef {
   /** 项目仓库根目录。落地时要回到这里做合并，所以得记住。 */
   readonly projectRoot?: string;
+  /** 本 Mission 自己的分支。 */
   readonly branch: string;
+  /**
+   * 要合回去的那条分支。
+   *
+   * 和 `branch` 是两回事，界面上尤其容易混：早先项目页把 `branch` 当成
+   * "目标分支"显示，于是每条 Mission 都把自己的分支名报成了项目的目标分支。
+   * 分叉时记下来，之后目标分支被切换也不影响这条记录该是什么。
+   */
+  readonly targetBranch?: string;
   readonly baseRevision: string;
 }
 
