@@ -102,6 +102,124 @@ export function usageLine(usage) {
   );
 }
 
+/* ============================ 环节（任务页进度视图） ============================ */
+
+/**
+ * 环节角色。一个环节 = 同一个 attemptId 下的一组事件，角色由 attemptId
+ * 的形状定（形状写死在内核：`coord-${n}` / `${id}.exec-${n}`）。
+ *
+ * 没有 attemptId 的那一组是 L3 自己动的手（发起任务、改契约、最终检视），
+ * 它们不属于任何一跳，所以只能是检视者。
+ */
+export function roleOfAttempt(attemptId) {
+  const id = text(attemptId);
+  if (!id) return 'reviewer';
+  if (/^coord/.test(id)) return 'coordinator';
+  if (id.includes('.exec-')) return 'executor';
+  // 对不上两种形状的 attemptId 按协调者算：猜成执行者会去查一个不存在的工作项
+  // 标题，而猜成协调者只是组名宽泛一点（见 stageName 的退回）。
+  return 'coordinator';
+}
+
+/** 角色徽章文案。任务页与用量卡共用，所以住在表里而不是散在渲染分支。 */
+export const ROLE_CN = {
+  coordinator: 'L2 协调',
+  executor: 'L1 执行',
+  reviewer: 'L3 检视者',
+};
+
+export function roleBadge(role) {
+  return ROLE_CN[normalizeRole(role)] || 'L2 协调';
+}
+
+/** 只认这三个角色；拿到别的（包括拼错的）一律当协调者，不让徒章空着。 */
+function normalizeRole(role) {
+  const r = text(role);
+  return r === 'executor' || r === 'reviewer' || r === 'coordinator' ? r : 'coordinator';
+}
+
+/**
+ * 环节色 class。与 projects.js 的 stageTone 同一套 `--status-*` 令牌，
+ * 这样同一环节在任务页与项目页是一种颜色。
+ *
+ * 为什么复用阶段色而不是给每个角色配一个色：环节色条要说的是「这一跳在
+ * 流水线的哪个位置」，与项目页那根色条是同一件事；用角色色（--role-*）
+ * 会把「谁在干」和「干到哪」两根轴在一个颜色里混起来，而项目页只有后者。
+ */
+export const ROLE_TONE = {
+  coordinator: 'queued',
+  executor: 'running',
+  reviewer: 'unconfirmed',
+};
+
+export function roleTone(role) {
+  return ROLE_TONE[normalizeRole(role)] || 'queued';
+}
+
+/**
+ * 协调者一个环节里干了哪几件事 → 组名。
+ *
+ * 从组内 kind 推出，而不是按「第一轮规划、第二轮验收、第三轮交卷」那种
+ * 顺序硬编码：协调者第几轮干什么不是平台规定的，实测就有第一轮直接去
+ * 验收（重跑场景）。硬编码顺序会让组名说谎。
+ *
+ * 四个都没命中时退回「协调」，不露 attemptId——人看到的应该是「这一跳在
+ * 干一件什么性质的事」，而不是一个只能拿去 grep 的编号。
+ */
+const COORDINATOR_STAGE_PARTS = [
+  { label: '调查与规划', kinds: ['plan.updated', 'work_item.created'] },
+  { label: '技术验收', kinds: ['review.recorded'] },
+  { label: '派发', kinds: ['work_item.dispatched'] },
+  { label: '交卷', kinds: ['mission_result.submitted'] },
+];
+
+/**
+ * 一组事件 + ctx → 环节名。纯函数，测试能直接 import。
+ *
+ * 调用方保证这一组确实是同一个 attemptId 下的事件（分组在 task.js），
+ * 角色由首条事件的 attemptId 形状定。
+ */
+export function stageName(events, ctx) {
+  const rows = list(events);
+  const role = roleOfAttempt(rows[0] && rows[0].attemptId);
+
+  if (role === 'reviewer') return 'L3 检视者';
+
+  if (role === 'executor') {
+    const carrier = rows.find((e) => e && text(e.workItemId));
+    const id = text(carrier && carrier.workItemId);
+    // titleOf 查不到时回 id；连 id 都没有才说不知道是哪个工作项。
+    return `执行 · ${id ? titleOf(ctx, id) : '（没有关联工作项）'}`;
+  }
+
+  const kinds = new Set(rows.map((e) => text(e && e.kind)).filter(Boolean));
+  const parts = COORDINATOR_STAGE_PARTS
+    .filter((part) => part.kinds.some((k) => kinds.has(k)))
+    .map((part) => part.label);
+  return parts.length > 0 ? parts.join('、') : '协调';
+}
+
+/* ============================ 用量卡文案 ============================ */
+
+/**
+ * 用量卡第二层：按角色拆的一行。
+ *
+ * 占比分母用的是 L2+L1 的加总而不是 view.usage.total：在途的那一跳还没
+ * attempt.ended，total 会比两 role 之和大，拿它当分母算出来的两个百分比
+ * 加起来不等于 100%，看起来像漏了一笔钱。
+ */
+export function roleUsageLine(role, tokens, pct, costText) {
+  const label = roleBadge(role);
+  const pctText = Number.isFinite(Number(pct)) ? `${Math.round(Number(pct))}%` : '—';
+  return `${label} ${num(tokens).toLocaleString('en-US')} tokens（占比 ${pctText}）${costText ? ` · ${costText}` : ''}`;
+}
+
+/** 用量卡第三层：按类型拆（新增 / 缓存命中 + 占比）。 */
+export function usageTypeLine(usage) {
+  const f = formatUsage(usage);
+  return `新增 ${num(f.added).toLocaleString('en-US')} tokens · 缓存命中 ${num(f.cached).toLocaleString('en-US')}（${f.cachePctText}）`;
+}
+
 /* ============================ 内部词 ============================ */
 
 /**
@@ -170,6 +288,7 @@ export const WAIT_REASON = {
   target_changed: '目标分支在检视期间变了',
   base_revision_stale: '分叉基线已过期，需要重新核对',
   cancelled_by_user: '被叫停了',
+  runaway_suspected: '一跳跑太久，已停下来等人看',
 };
 
 /**
@@ -202,9 +321,14 @@ export function endReasonText(endedBy) {
 
 /* ============================ 事件翻译表 ============================ */
 
-const evidenceKind = (kind) =>
-  ({ test: '测试', command: '命令', diff: '改动摘要', typecheck: '类型检查', build: '构建', observation: '观察' })[kind] ||
-  kind;
+/**
+ * 证据类型的人话标签。认不出来时原样回显（写错一个 kind 至少还能看到线索），
+ * 与这张表其余部分同一取舍。详情页与事件表共用，所以导出去。
+ */
+export function evidenceKindLabel(kind) {
+  return ({ test: '测试', command: '命令', diff: '改动摘要', typecheck: '类型检查', build: '构建', observation: '观察' })[kind]
+    || (text(kind) || '证据');
+}
 
 const OUTCOME_CN = { completed: '完成', partial: '部分完成', delivered: '已交付', blocked: '没做出来' };
 
@@ -301,7 +425,7 @@ const EVENT_TABLE = {
     return {
       badge: 'L1',
       action: '提交证据',
-      detail: `${kind ? evidenceKind(kind) + '（' + kind + '）' : '证据'} · 退出码 ${exitCode}`,
+      detail: `${kind ? evidenceKindLabel(kind) + '（' + kind + '）' : '证据'} · 退出码 ${exitCode}`,
     };
   },
 
