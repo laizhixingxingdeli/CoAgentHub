@@ -25,7 +25,7 @@ import type {
   AgentPoolRow,
   AgentPoolSnapshot,
 } from './agent-pool.ts';
-import { agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
+import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 
 interface StateFile {
   version: 1;
@@ -334,15 +334,23 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
     const row = validateAgentPoolAdd(input, rows);
     rows.push(row);
     this.#store.flush();
-    const { role: _role, ...candidate } = row;
-    return candidate;
+    return toAgentPoolCandidate(row);
   }
 
+  /**
+   * 拿到磁盘上那份**数组本身**（不是副本）—— add() 要往里 push 后才能被 flush 写回。
+   *
+   * 状态文件是人会手改的东西，所以两个约不到的字段在这归一化：缺 agentPool 给
+   * []，缺 facts 给 []。不归一化的话，组装快照时的 `[...facts]` 会在一个完整的
+   * 配置行上招 TypeError —— 而报错的地方离真正写坏的地方隔着一整个重启。
+   */
   #rows(): AgentPoolRow[] {
     const state = this.#store.raw();
-    // #load() 已经会补上缺的键，但状态文件是人会手改的东西：删了这一行不
-    // 应该让读路径抛 TypeError。
     if (!Array.isArray(state.agentPool)) state.agentPool = [];
+    for (let index = 0; index < state.agentPool.length; index += 1) {
+      const row = state.agentPool[index];
+      if (!Array.isArray(row?.facts)) state.agentPool[index] = { ...row, facts: [] };
+    }
     return state.agentPool;
   }
 }

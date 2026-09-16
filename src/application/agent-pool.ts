@@ -203,6 +203,14 @@ export function validateAgentPoolAdd(
   };
 }
 
+/** 行 → 候选（剥掉 role、复制 facts）。三种实现返回给调用方的都是这一步的结果。 */
+export function toAgentPoolCandidate(row: AgentPoolRow): AgentPoolCandidate {
+  const { role: _role, ...candidate } = row;
+  // facts 必须复制：否则调用方（或一个不小心的界面代码）push 一下，
+  // 内存里那行配置就被改了 —— 文件版下次 flush 还会把它写下去。
+  return { ...candidate, facts: [...row.facts] };
+}
+
 /** 行集 → 按 role 分组、组内 order 升序的快照。三种实现共用。 */
 export function agentPoolSnapshot(rows: readonly AgentPoolRow[]): AgentPoolSnapshot {
   const ofRole = (role: AgentRole): AgentPoolCandidate[] =>
@@ -212,15 +220,7 @@ export function agentPoolSnapshot(rows: readonly AgentPoolRow[]): AgentPoolSnaps
       // 而候选顺序直接就是 failover 顺序。
       .slice()
       .sort((a, b) => a.order - b.order)
-      // 剥掉 role：落在哪个数组就是哪个 role，多带一份就有两边说不一致的可能。
-      // facts 要复制一层：否则调用方 push 一下就把内存里的行改了。
-      .map(({ profileId, endpoint, runtime, order, facts }) => ({
-        profileId,
-        endpoint,
-        runtime,
-        order,
-        facts: [...facts],
-      }));
+      .map(toAgentPoolCandidate);
   return { coordinator: ofRole('coordinator'), executor: ofRole('executor') };
 }
 
@@ -274,7 +274,6 @@ export class InMemoryAgentPoolRepository implements AgentPoolRepository {
   async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
     const row = validateAgentPoolAdd(input, this.#rows);
     this.#rows.push(row);
-    const { role: _role, ...candidate } = row;
-    return { ...candidate, facts: [...candidate.facts] };
+    return toAgentPoolCandidate(row);
   }
 }
