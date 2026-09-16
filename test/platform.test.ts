@@ -470,3 +470,42 @@ describe('契约中途变更（S14.6）', () => {
     assert.equal(view.contract?.intent, '改了目标');
   });
 });
+
+describe('退回规划之后重新派发', () => {
+  test('阶段要重新推到 executing —— 否则调度器永远不跑那些工单', async () => {
+    // 实测踩到的死锁：改契约把 Mission 退回 planning，协调者重新派发，
+    // 但 dispatchWorkItems 看到"已经占着改动名额"就跳过了 startExecuting()，
+    // 于是阶段停在 planning。而调度器只在 executing 跑执行者——
+    // 工单永远不会被执行，界面上却显示"已派发"，看不出为什么不动。
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord.attemptId, PLAN);
+    const first = await platform.createWorkItem('M1', coord.attemptId, {
+      title: 'W1',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M1', coord.attemptId, [first.workItemId]);
+    assert.equal((await platform.getMissionView('M1')).status, 'executing');
+
+    // L3 改契约 → 退回规划。名额不放（分支上的改动还在）。
+    await platform.reviseContract('M1', { ...CONTRACT, intent: '换个目标' });
+    const back = await platform.getMissionView('M1');
+    assert.equal(back.status, 'planning');
+    assert.equal(back.isMutating, true, '名额不该因为退回就放掉');
+
+    // 协调者按新契约另开一个工作项并派发。
+    const second = await platform.createWorkItem('M1', coord.attemptId, {
+      title: 'W2',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M1', coord.attemptId, [second.workItemId]);
+
+    const after = await platform.getMissionView('M1');
+    assert.equal(after.status, 'executing', '重新派发之后必须回到 executing');
+    assert.equal(
+      after.workItems.find((i) => i.id === second.workItemId)?.status,
+      'dispatched',
+    );
+  });
+});

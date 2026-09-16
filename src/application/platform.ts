@@ -728,6 +728,13 @@ export class Platform {
         }
         throw error;
       }
+    } else if (mission.status !== 'executing') {
+      // 已经占着改动名额、但阶段被退回过（L3 改契约、或 L2 自己退回规划）。
+      //
+      // 名额不用重新占，**阶段却必须重新推到 executing**：调度器只在这个
+      // 阶段跑执行者。少了这一步，重新派发出去的工单永远不会被执行——
+      // 而界面上看它就是"已派发"，看不出为什么不动。实测踩到过一次死锁。
+      mission.startExecuting();
     }
 
     for (const item of items) item.dispatch();
