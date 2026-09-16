@@ -25,6 +25,17 @@ import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository 
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import type { LiveChunk, LiveOutput } from './live.ts';
 import type { TokenUsage } from '../kernel/index.ts';
+import type {
+  AgentPoolAddInput,
+  AgentPoolCandidate,
+  AgentPoolFact,
+  AgentPoolRepository,
+  AgentPoolRow,
+  AgentPoolSnapshot,
+  AgentRole,
+  AgentPoolRuntime,
+} from './agent-pool.ts';
+import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
 
 /** 并发写冲突：有人在你读出来之后改过同一个 Project。 */
 export class WriteConflictError extends Error {
@@ -95,6 +106,23 @@ CREATE TABLE IF NOT EXISTS id_counters (
   prefix text PRIMARY KEY,
   value  bigint NOT NULL
 );
+
+-- 候选池。与 projects 不同，这是一张小小的配置表，不是聚合快照：一行一个候选，
+-- 主键就是「同一个 role 下 profileId 只能有一条」这条规则本身 —— 不靠代码记得先查。
+CREATE TABLE IF NOT EXISTS agent_pool (
+  role        text    NOT NULL,
+  profile_id  text    NOT NULL,
+  endpoint    text    NOT NULL,
+  runtime     text    NOT NULL DEFAULT 'pi',
+  -- 列名用 ord：order 是 SQL 保留字，拿它当列名每条查询都得加引号。
+  ord         integer NOT NULL,
+  -- 不透明键值。平台不解释它，只存只取，所以用 jsonb 而不是拆成列：
+  -- 拆列就等于把适配层的表在这里抄一份，抄的那一刻就开始过期。
+  facts       jsonb   NOT NULL DEFAULT '[]'::jsonb,
+  PRIMARY KEY (role, profile_id)
+);
+-- 已有库的补列。CREATE TABLE IF NOT EXISTS 不会给老表加字段。
+ALTER TABLE agent_pool ADD COLUMN IF NOT EXISTS facts jsonb NOT NULL DEFAULT '[]'::jsonb;
 `;
 
 export interface PgOptions {
@@ -532,6 +560,82 @@ export class PgIds implements IdGenerator {
     if (!existing || existing.next > existing.end || start > existing.end) {
       this.#available.set(prefix, { next: start, end });
     }
+  }
+}
+
+/**
+ * 候选池的 Postgres 实现。
+ *
+ * 每次 list 都真发一条 SELECT，**不走 PgStateStore 的 projects 缓存**：
+ * 那个缓存是为了避免反复反序列化大聚合，而候选池一共就几十行，缓存它买不到
+ * 任何东西，却会把「别的进程刚追加的候选」藏起来 —— 而跨进程可见恰好是这张表
+ * 存在的全部理由。
+ *
+ * 校验与另两种实现共用 `validateAgentPoolAdd`（规则只该有一份）。两个进程可能
+ * 同时算出同一个 order 并各自通过校验，那由主键兑现：23505 转成
+ * DUPLICATE_PROFILE，而不是往调用方抛一个看不懂的数据库错误码。
+ */
+export class PgAgentPoolRepository implements AgentPoolRepository {
+  #store: PgStateStore;
+
+  constructor(store: PgStateStore) {
+    this.#store = store;
+  }
+
+  async list(): Promise<AgentPoolSnapshot> {
+    return agentPoolSnapshot(await this.#rows());
+  }
+
+  async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
+    const row = validateAgentPoolAdd(input, await this.#rows());
+    try {
+      await this.#store.pool.query(
+        `INSERT INTO agent_pool (role, profile_id, endpoint, runtime, ord, facts)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [
+          row.role,
+          row.profileId,
+          row.endpoint,
+          row.runtime,
+          row.order,
+          JSON.stringify(row.facts),
+        ],
+      );
+    } catch (error) {
+      if ((error as { code?: string })?.code === '23505') {
+        throw new AgentPoolError(
+          'DUPLICATE_PROFILE',
+          `候选池 ${row.role} 里已经有 profileId=${row.profileId}：两个进程同时加了同一个候选，` +
+            '以库里已有的那条为准。',
+        );
+      }
+      throw error;
+    }
+    const { role: _role, ...candidate } = row;
+    return candidate;
+  }
+
+  async #rows(): Promise<AgentPoolRow[]> {
+    const { rows } = await this.#store.pool.query<{
+      role: string;
+      profile_id: string;
+      endpoint: string;
+      runtime: string;
+      ord: string | number;
+      facts: unknown;
+    }>(
+      'SELECT role, profile_id, endpoint, runtime, ord, facts FROM agent_pool ORDER BY role, ord',
+    );
+    return rows.map((row) => ({
+      role: row.role as AgentRole,
+      profileId: row.profile_id,
+      endpoint: row.endpoint,
+      runtime: row.runtime as AgentPoolRuntime,
+      order: Number(row.ord),
+      // 驱动已经把 jsonb 解成 JS 值了；不是数组 = 这行被人手改过，按空处理而不是
+      // 把垃圾往下传（适配层宁可选不到身份也不要拿到一个不是数组的 facts）。
+      facts: Array.isArray(row.facts) ? (row.facts as AgentPoolFact[]) : [],
+    }));
   }
 }
 

@@ -11,15 +11,34 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApi } from './api/server.ts';
+import { loadPoolOrSeed } from './application/agent-pool.ts';
+import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { Orchestrator } from './application/orchestrator.ts';
 import { SpawnRuntime } from './runtime/spawn.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
 import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
 import type { MissionContract } from './kernel/index.ts';
+import type { ExecutionProfile } from './application/ports.ts';
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+/**
+ * 候选 → 调度器用的 ExecutionProfile。
+ *
+ * facts 为空时**不写这个键**，而不是写一个空数组：适配层的语义是「不带就走
+ * 它自己那张表」，传空数组是对它说「我指定了，一个都不选」。这两者在适配层
+ * 眼里可以同义，但那要等适配层改了才知道 —— 而播种出来的缺省候选本来就没有
+ * facts，不传就是和今天一模一样。
+ */
+function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
+  return {
+    endpoint: candidate.endpoint,
+    profileId: candidate.profileId,
+    ...(candidate.facts.length > 0 ? { facts: candidate.facts } : {}),
+  };
 }
 
 async function main() {
@@ -56,13 +75,20 @@ async function main() {
     : await buildPersistentPlatform(statePath, {
         exclusive: { what: `跑 Mission ${spec.missionId}` },
       });
-  const { platform, tokens, activity, deliveries, persist, reconciled } = built;
+  const { platform, tokens, activity, deliveries, persist, reconciled, agentPool } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   if (reconciled.interrupted.length > 0) {
     console.log(`启动收敛：${reconciled.interrupted.length} 个上次残留的 attempt 判为 interrupted`);
   }
-  const server = createApi({ platform, tokens, deliveries, onMutation: persist, live });
+  const server = createApi({
+    platform,
+    tokens,
+    deliveries,
+    onMutation: persist,
+    live,
+    agentPool,
+  });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -90,6 +116,11 @@ async function main() {
     stream: true,
   });
 
+  // 候选池。空仓时写进缺省候选（与以前那四条硬编码逐字段一致），下一次跑就用
+  // 改过的配置 —— 换候选不再需要改代码。这播种放在这里而不是 GET 里：只读
+  // 的观测面没立场替别人定默认值。
+  const pool = await loadPoolOrSeed(agentPool);
+
   const orchestrator = new Orchestrator({
     platform,
     // 一边跑一边把输出送进实时通道，观测面那个进程才看得到。
@@ -101,16 +132,12 @@ async function main() {
       : new GitWorktreeManager(arg('--worktrees')),
     coordinator: {
       runtime,
-      candidates: [{ endpoint: 'local', profileId: 'coordinator-grok' }],
+      candidates: pool.coordinator.map(toProfile),
     },
     executor: {
       runtime,
-      // 有序候选池：**只有上游失败**才往后换。
-      candidates: [
-        { endpoint: 'local', profileId: 'exec-qwen-flash' },
-        { endpoint: 'local', profileId: 'exec-hy3' },
-        { endpoint: 'local', profileId: 'exec-mimo' },
-      ],
+      // 有序候选池：**只有上游失败**才往后换。顺序就是仓储里的 order。
+      candidates: pool.executor.map(toProfile),
     },
   });
 
