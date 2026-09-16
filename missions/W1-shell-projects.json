@@ -1,0 +1,35 @@
+{
+  "projectId": "coagenthub-v5",
+  "missionId": "W1",
+  "contract": {
+    "intent": "搭正式 Web 端的外壳与项目页：左侧导航 + 项目列表 + 项目详情 + 任务列表表格。这是三个页面的第一个，后面两个（任务详情、资源池）会复用同一套外壳与样式令牌。",
+    "acceptance": [
+      "新建 src/web/ 目录，至少含 index.html、app.js、tokens.css、projects.js 四个文件；浏览器原生 ES module 直接加载，不引入任何构建步骤、不加 package.json 依赖",
+      "tokens.css 里的色彩令牌从 src/api/web.ts 的 :root / :root[data-theme=dark] 原样搬过来（oklch 值逐字不变），并保留明暗两套",
+      "index.html 左侧是固定导航栏：品牌区 CoAgentHub，两个入口「项目」与「资源池」，底部「设置」与当前用户占位；顶部是面包屑",
+      "项目页左栏渲染 GET /api/projects 的项目列表，可点击切换；右栏渲染选中项目的详情卡（项目 ID、代码仓库、目标分支、变更中任务槽位 n/1）与任务列表表格",
+      "任务列表表格列：任务 ID、标题、阶段、状态、原因、最新更新时间、总 Token；数据来自 GET /api/missions，按项目过滤",
+      "阶段与状态用带底色的 chip 呈现，颜色走 tokens.css 里的 --status-* 令牌",
+      "路由用 location.hash：#/projects 与 #/projects/<projectId>；刷新页面后停留在同一个视图",
+      "新增 test/web-shell.test.ts，断言 src/web/ 下各文件存在、index.html 引用了它们、且 GET / 能拿到这个页面而不是内置观测面",
+      "node --test 全绿（现有 246 条一条都不许红）"
+    ],
+    "constraints": [
+      "**不许改 src/kernel/ 下任何文件。** mockup 里的 investigation / execution / technical_review 只是设计稿字样，与内核的 mission status 取值不一致——以内核为准，页面只做中文标签映射，绝不为了对上字样去改领域取值",
+      "项目的「代码仓库」与「目标分支」平台目前没有单独存：从该项目任一 Mission 的 workspaceRef.projectRoot / branch 推导即可，取不到就显示「—」。**不要为此往内核加字段**",
+      "「变更中任务槽位」用 GET /api/projects 已有的 mutating 字段：有值就是 1/1，没有就是 0/1",
+      "前端只走 /api/* 拿数据，不得读文件、不得引入第三方库、不得内联大段 base64 资源",
+      "src/api/web.ts 那个内置单页观测面保留不动，它是 src/web/ 缺失时的回退"
+    ],
+    "nonGoals": [
+      "不做任务详情页和资源池页（后续 Mission）",
+      "不做写操作：放行/打回/取消一律不在 Web 上做",
+      "不追求像素级还原设计稿，布局与信息层级对上即可"
+    ],
+    "guardrails": [
+      "不改 package.json，不加任何依赖",
+      "不改 src/kernel/",
+      "不动 .coagent/ 下的架构约束"
+    ]
+  }
+}
