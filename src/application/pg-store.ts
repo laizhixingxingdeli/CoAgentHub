@@ -1,0 +1,620 @@
+/**
+ * PostgreSQL 存储。
+ *
+ * 与 FileStateStore 并存，**不是替换它**。两个实现都在，`StateStore` 这个
+ * 端口才是真的——只有一个实现的接口一定会长成那个实现的形状。文件版还负责
+ * 一件事：没装 Postgres 也能跑完整平台和全部测试。
+ *
+ * 相对文件版真正买到的三样东西：
+ *
+ *   1. **活动日志是追加行，不是每次重写整个数组。** 文件版每记一条事件就把
+ *      整份状态重写一遍；一条 Mission 跑下来几十条事件，状态越大越慢。
+ *   2. **发号是原子的。** 文件版的「读-加一-写」在两个进程之间有竞态，会发出
+ *      重复 id；这里是一条 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。
+ *   3. **写冲突会被发现，而不是悄悄覆盖。** 每个 Project 带版本号，flush 时
+ *      带上期望版本；对不上就报错而不是把别人的改动抹掉。
+ *
+ * 快照格式与文件版**逐字段相同**（都是 ProjectSnapshot 的 JSON），所以两边
+ * 可以互相导入导出，也不存在「换存储就得迁移领域模型」。
+ */
+
+import pg from 'pg';
+import { Project } from '../kernel/index.ts';
+import type { ProjectSnapshot } from '../kernel/index.ts';
+import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type { Delivery, DeliveryRepository } from './delivery.ts';
+import type { LiveChunk, LiveOutput } from './live.ts';
+import type { TokenUsage } from '../kernel/index.ts';
+
+/** 并发写冲突：有人在你读出来之后改过同一个 Project。 */
+export class WriteConflictError extends Error {
+  readonly projectId: string;
+
+  constructor(projectId: string) {
+    super(
+      `Project ${projectId} 在本次操作期间被别的进程改过。` +
+        '你手上的版本已经过期——重新读一次再重试，不要覆盖。',
+    );
+    this.name = 'WriteConflictError';
+    this.projectId = projectId;
+  }
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS projects (
+  project_id  text PRIMARY KEY,
+  snapshot    jsonb       NOT NULL,
+  version     bigint      NOT NULL DEFAULT 1,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- 追加表：永不 UPDATE。Timeline 的原料就该是这个形状。
+CREATE TABLE IF NOT EXISTS activity (
+  seq          bigserial PRIMARY KEY,
+  project_id   text        NOT NULL,
+  mission_id   text        NOT NULL,
+  work_item_id text,
+  attempt_id   text,
+  kind         text        NOT NULL,
+  data         jsonb,
+  at           timestamptz NOT NULL,
+  -- Envelope 公共语义（S10.3）。可空：加这几列之前的行没有。
+  protocol_version  text,
+  message_id        text,
+  correlation_id    text,
+  causation_id      text,
+  contract_revision integer,
+  plan_revision     integer
+);
+-- 已有库的补列。CREATE TABLE IF NOT EXISTS 不会给老表加字段。
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS protocol_version  text;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS message_id        text;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS correlation_id    text;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS causation_id      text;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS contract_revision integer;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS plan_revision     integer;
+CREATE INDEX IF NOT EXISTS activity_mission_idx ON activity (mission_id, seq);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+  delivery_id     text PRIMARY KEY,
+  mission_id      text        NOT NULL,
+  project_id      text        NOT NULL,
+  outcome         text        NOT NULL,
+  recipient       text,
+  summary         text        NOT NULL,
+  payload         jsonb,
+  status          text        NOT NULL,
+  created_at      timestamptz NOT NULL,
+  acknowledged_at timestamptz
+);
+-- 同一条 Mission 的同一种结局只投递一次。幂等交给数据库管，不靠调用方记得先查。
+CREATE UNIQUE INDEX IF NOT EXISTS deliveries_mission_outcome_idx
+  ON deliveries (mission_id, outcome);
+
+CREATE TABLE IF NOT EXISTS id_counters (
+  prefix text PRIMARY KEY,
+  value  bigint NOT NULL
+);
+`;
+
+export interface PgOptions {
+  connectionString: string;
+}
+
+/** 从环境变量取连接串；没配就用本机默认库。 */
+export function pgConnectionString(): string {
+  return (
+    process.env.COAGENT_PG ??
+    'postgresql://postgres:postgres@localhost:5432/coagenthub_v5'
+  );
+}
+
+export class PgStateStore {
+  #pool: pg.Pool;
+  #projects = new Map<string, Project>();
+  #versions = new Map<string, number>();
+  /**
+   * 每个 Project 最后一次「已知与库一致」的序列化结果。
+   * flush 拿它和当前状态比，判断到底要不要写——比 dirty 标记可靠，
+   * 因为它不依赖任何人记得打标记。
+   */
+  #persisted = new Map<string, string>();
+  /** flush 的串行队列。见 flush() 里的说明。 */
+  #chain: Promise<void> = Promise.resolve();
+
+  private constructor(pool: pg.Pool) {
+    this.#pool = pool;
+  }
+
+  static async open(options?: PgOptions): Promise<PgStateStore> {
+    const pool = new pg.Pool({
+      connectionString: options?.connectionString ?? pgConnectionString(),
+      // 平台是单写者 + 少量读者，连接开太多只会让 Postgres 那边排队。
+      max: 8,
+    });
+    await pool.query(SCHEMA);
+    const store = new PgStateStore(pool);
+    await store.refresh();
+    return store;
+  }
+
+  get pool(): pg.Pool {
+    return this.#pool;
+  }
+
+  /**
+   * 从库里重新读一遍。
+   *
+   * 文件版靠 mtime 判断要不要重读；这里没有便宜的「变没变」判据，所以由
+   * 调用方在读请求的边界上显式调用。观测面每次轮询调一次，代价是一条
+   * `SELECT`，比重新解析整个状态文件还便宜。
+   */
+  async refresh(): Promise<void> {
+    const { rows } = await this.#pool.query<{
+      project_id: string;
+      snapshot: ProjectSnapshot;
+      version: string;
+    }>('SELECT project_id, snapshot, version FROM projects');
+    this.#projects.clear();
+    this.#versions.clear();
+    this.#persisted.clear();
+    for (const row of rows) {
+      this.#projects.set(row.project_id, Project.restore(row.snapshot));
+      this.#versions.set(row.project_id, Number(row.version));
+      // 存刚读回来的对象重新序列化的结果，而不是库里那份原文：
+      // 两者字段顺序可能不同，拿原文比会让每个 Project 都"看起来改过"。
+      this.#persisted.set(
+        row.project_id,
+        JSON.stringify(Project.restore(row.snapshot).toSnapshot()),
+      );
+    }
+  }
+
+  projectsMap(): Map<string, Project> {
+    return this.#projects;
+  }
+
+  /**
+   * 写回**内容确实变了的** Project。
+   *
+   * 判据是内容而不是一个 dirty 标记：平台的用例直接改活对象，很多路径不会
+   * 显式 save()，靠调用方记得打标记一定会漏。比较序列化结果则不可能漏。
+   *
+   * 为什么不干脆全写一遍：那样一个不相干的过期 Project 会把**后续每一次写**
+   * 都顶成冲突——实测就是这么炸的。没改过的东西不参与写，也就不参与冲突。
+   * 改过又过期的仍然会被挡下，那正是要挡的。
+   */
+  flush(): Promise<void> {
+    // **两个 flush 绝不能重叠。** 重叠时它们捏着同一个期望版本去写：先到的
+    // 成功并把版本推到 6，后到的还拿着 5，UPDATE 命中 0 行，于是报出一个
+    // 纯属自己制造的"并发冲突"。实跑就是这么炸的——API 的 onMutation 是
+    // 即发即忘，两次挨得近的工具调用就够了。
+    //
+    // 排队而不是去重：后一次可能带着更新的内容，丢掉它就是丢数据。
+    const next = this.#chain.then(
+      () => this.#doFlush(),
+      () => this.#doFlush(),
+    );
+    // 链上挂的是"已结束"而不是"成功了"：一次失败不该把后面的写全卡死。
+    this.#chain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  async #doFlush(): Promise<void> {
+    const pending: { projectId: string; snapshot: string; expected: number | undefined }[] = [];
+    for (const [projectId, project] of this.#projects) {
+      const snapshot = JSON.stringify(project.toSnapshot());
+      if (this.#persisted.get(projectId) === snapshot) continue;
+      pending.push({ projectId, snapshot, expected: this.#versions.get(projectId) });
+    }
+    if (pending.length === 0) return;
+
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const { projectId, snapshot, expected } of pending) {
+        if (expected === undefined) {
+          await client.query(
+            'INSERT INTO projects (project_id, snapshot) VALUES ($1, $2::jsonb)',
+            [projectId, snapshot],
+          );
+          this.#versions.set(projectId, 1);
+          this.#persisted.set(projectId, snapshot);
+          continue;
+        }
+        const { rowCount } = await client.query(
+          `UPDATE projects
+              SET snapshot = $2::jsonb, version = version + 1, updated_at = now()
+            WHERE project_id = $1 AND version = $3`,
+          [projectId, snapshot, expected],
+        );
+        if (rowCount === 0) {
+          await client.query('ROLLBACK');
+          throw new WriteConflictError(projectId);
+        }
+        this.#versions.set(projectId, expected + 1);
+        this.#persisted.set(projectId, snapshot);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.#pool.end();
+  }
+}
+
+export class PgProjectRepository implements ProjectRepository {
+  #store: PgStateStore;
+
+  constructor(store: PgStateStore) {
+    this.#store = store;
+  }
+
+  async get(projectId: string): Promise<Project | undefined> {
+    return this.#store.projectsMap().get(projectId);
+  }
+
+  async save(project: Project): Promise<void> {
+    this.#store.projectsMap().set(project.id, project);
+    await this.#store.flush();
+  }
+
+  async list(): Promise<readonly Project[]> {
+    return [...this.#store.projectsMap().values()];
+  }
+
+  async ensure(projectId: string): Promise<Project> {
+    const existing = this.#store.projectsMap().get(projectId);
+    if (existing) return existing;
+    const created = Project.create({ id: projectId });
+    this.#store.projectsMap().set(projectId, created);
+    await this.#store.flush();
+    return created;
+  }
+
+  async persist(): Promise<void> {
+    await this.#store.flush();
+  }
+
+  async refresh(): Promise<void> {
+    await this.#store.refresh();
+  }
+}
+
+export class PgActivityLog implements ActivityLog {
+  #store: PgStateStore;
+  #clock: Clock;
+
+  constructor(store: PgStateStore, clock: Clock) {
+    this.#store = store;
+    this.#clock = clock;
+  }
+
+  async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
+    // 一条 INSERT。文件版在这里要把整份状态重写一遍。
+    await this.#store.pool.query(
+      `INSERT INTO activity
+         (project_id, mission_id, work_item_id, attempt_id, kind, data, at,
+          protocol_version, message_id, correlation_id, causation_id,
+          contract_revision, plan_revision)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)`,
+      [
+        event.projectId,
+        event.missionId,
+        event.workItemId ?? null,
+        event.attemptId ?? null,
+        event.kind,
+        JSON.stringify(event.data ?? null),
+        this.#clock.now().toISOString(),
+        event.protocolVersion ?? null,
+        event.messageId ?? null,
+        event.correlationId ?? null,
+        event.causationId ?? null,
+        event.contractRevision ?? null,
+        event.planRevision ?? null,
+      ],
+    );
+  }
+
+  async list(missionId: string): Promise<readonly ActivityEvent[]> {
+    const { rows } = await this.#store.pool.query<{
+      project_id: string;
+      mission_id: string;
+      work_item_id: string | null;
+      attempt_id: string | null;
+      kind: string;
+      data: unknown;
+      at: Date;
+    }>(
+      `SELECT project_id, mission_id, work_item_id, attempt_id, kind, data, at,
+              protocol_version, message_id, correlation_id, causation_id,
+              contract_revision, plan_revision
+         FROM activity WHERE mission_id = $1 ORDER BY seq`,
+      [missionId],
+    );
+    return rows.map(toEvent);
+  }
+
+  async all(): Promise<readonly ActivityEvent[]> {
+    const { rows } = await this.#store.pool.query(
+      `SELECT project_id, mission_id, work_item_id, attempt_id, kind, data, at,
+              protocol_version, message_id, correlation_id, causation_id,
+              contract_revision, plan_revision
+         FROM activity ORDER BY seq`,
+    );
+    return rows.map(toEvent);
+  }
+}
+
+function toEvent(row: Record<string, unknown>): ActivityEvent {
+  const opt = (key: string) => (row[key] as string | null) ?? undefined;
+  const num = (key: string) => (row[key] as number | null) ?? undefined;
+  return {
+    at: (row.at as Date).toISOString(),
+    projectId: row.project_id as string,
+    missionId: row.mission_id as string,
+    workItemId: opt('work_item_id'),
+    attemptId: opt('attempt_id'),
+    kind: row.kind as string,
+    data: row.data,
+    protocolVersion: opt('protocol_version'),
+    messageId: opt('message_id'),
+    correlationId: opt('correlation_id'),
+    causationId: opt('causation_id'),
+    contractRevision: num('contract_revision'),
+    planRevision: num('plan_revision'),
+  };
+}
+
+export class PgDeliveryRepository implements DeliveryRepository {
+  #store: PgStateStore;
+  #clock: Clock;
+  #ids: IdGenerator;
+
+  constructor(store: PgStateStore, clock: Clock, ids: IdGenerator) {
+    this.#store = store;
+    this.#clock = clock;
+    this.#ids = ids;
+  }
+
+  async create(
+    input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
+  ): Promise<Delivery> {
+    // ON CONFLICT DO NOTHING + 回查：幂等由唯一索引保证，不靠「先 SELECT
+    // 再 INSERT」那种在并发下会双开的写法。
+    const id = this.#ids.next('D');
+    const createdAt = this.#clock.now().toISOString();
+    await this.#store.pool.query(
+      `INSERT INTO deliveries
+         (delivery_id, mission_id, project_id, outcome, recipient, summary, payload, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending',$8)
+       ON CONFLICT (mission_id, outcome) DO NOTHING`,
+      [
+        id,
+        input.missionId,
+        input.projectId,
+        input.outcome,
+        input.recipient ?? null,
+        input.summary,
+        JSON.stringify(input.payload ?? null),
+        createdAt,
+      ],
+    );
+    const { rows } = await this.#store.pool.query(
+      'SELECT * FROM deliveries WHERE mission_id = $1 AND outcome = $2',
+      [input.missionId, input.outcome],
+    );
+    return toDelivery(rows[0]);
+  }
+
+  async pending(recipient?: string): Promise<readonly Delivery[]> {
+    const { rows } = recipient
+      ? await this.#store.pool.query(
+          "SELECT * FROM deliveries WHERE status = 'pending' AND recipient = $1 ORDER BY created_at",
+          [recipient],
+        )
+      : await this.#store.pool.query(
+          "SELECT * FROM deliveries WHERE status = 'pending' ORDER BY created_at",
+        );
+    return rows.map(toDelivery);
+  }
+
+  async acknowledge(deliveryId: string): Promise<Delivery | undefined> {
+    const { rows } = await this.#store.pool.query(
+      `UPDATE deliveries
+          SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, $2)
+        WHERE delivery_id = $1
+        RETURNING *`,
+      [deliveryId, this.#clock.now().toISOString()],
+    );
+    return rows[0] ? toDelivery(rows[0]) : undefined;
+  }
+
+  async get(deliveryId: string): Promise<Delivery | undefined> {
+    const { rows } = await this.#store.pool.query(
+      'SELECT * FROM deliveries WHERE delivery_id = $1',
+      [deliveryId],
+    );
+    return rows[0] ? toDelivery(rows[0]) : undefined;
+  }
+}
+
+function toDelivery(row: Record<string, unknown>): Delivery {
+  return {
+    id: row.delivery_id as string,
+    missionId: row.mission_id as string,
+    projectId: row.project_id as string,
+    outcome: row.outcome as Delivery['outcome'],
+    recipient: (row.recipient as string | null) ?? undefined,
+    summary: row.summary as string,
+    payload: row.payload,
+    status: row.status as Delivery['status'],
+    createdAt: (row.created_at as Date).toISOString(),
+    acknowledgedAt: row.acknowledged_at
+      ? (row.acknowledged_at as Date).toISOString()
+      : undefined,
+  };
+}
+
+/**
+ * 跨进程安全的发号器。
+ *
+ * 文件版的「读-加一-写」在两个进程之间有竞态：两边都读到 3，都发 W-4。
+ * 这里是一条语句，自增与取值在同一个原子操作里。
+ *
+ * 代价：`next()` 必须是异步的，而 IdGenerator 是同步接口。所以本类预取一段
+ * 号段（默认 32 个），用完再取下一段——既保持同步接口，又不会每发一个 id
+ * 就往返一次数据库。号段不连续（重启会跳号）是刻意接受的：id 只要唯一，
+ * 不需要连续。
+ */
+export class PgIds implements IdGenerator {
+  #store: PgStateStore;
+  #blockSize: number;
+  #available = new Map<string, { next: number; end: number }>();
+  #pending = new Map<string, Promise<void>>();
+
+  constructor(store: PgStateStore, blockSize = 32) {
+    this.#store = store;
+    this.#blockSize = blockSize;
+  }
+
+  /** 预热：把要用到的前缀先各取一段，之后 next() 就不会落空。 */
+  async reserve(prefixes: readonly string[] = ['M', 'W', 'D']): Promise<void> {
+    for (const prefix of prefixes) await this.#fetchBlock(prefix);
+  }
+
+  next(prefix: string): string {
+    const block = this.#available.get(prefix);
+    if (!block || block.next > block.end) {
+      // 号段用尽。同步接口没法等——先在后台补，同时抛出可执行的错误，
+      // 而不是发一个可能重复的 id。
+      void this.#ensureBlock(prefix);
+      throw new Error(
+        `id 号段用尽（前缀 ${prefix}）。已在后台补领，重试这次操作即可。` +
+          '要避免的话，启动时调 PgIds.reserve() 预热，或把 blockSize 调大。',
+      );
+    }
+    const value = block.next;
+    block.next += 1;
+    // 快用完了就提前补，别等到真的抛错。
+    if (block.next > block.end - 4) void this.#ensureBlock(prefix);
+    return `${prefix}-${value}`;
+  }
+
+  #ensureBlock(prefix: string): Promise<void> {
+    const inFlight = this.#pending.get(prefix);
+    if (inFlight) return inFlight;
+    const task = this.#fetchBlock(prefix).finally(() => this.#pending.delete(prefix));
+    this.#pending.set(prefix, task);
+    return task;
+  }
+
+  async #fetchBlock(prefix: string): Promise<void> {
+    const { rows } = await this.#store.pool.query<{ value: string }>(
+      `INSERT INTO id_counters (prefix, value) VALUES ($1, $2)
+       ON CONFLICT (prefix) DO UPDATE SET value = id_counters.value + $2
+       RETURNING value`,
+      [prefix, this.#blockSize],
+    );
+    const end = Number(rows[0].value);
+    const start = end - this.#blockSize + 1;
+    const existing = this.#available.get(prefix);
+    // 只在新号段确实更靠后时替换，避免并发补领把还没用完的段换掉。
+    if (!existing || existing.next > existing.end || start > existing.end) {
+      this.#available.set(prefix, { next: start, end });
+    }
+  }
+}
+
+/**
+ * 跨进程的实时输出。
+ *
+ * 这是 LiveOutput 真正会用的那个实现：调度器在一个进程里 append，观测面在
+ * 另一个进程里 since()。内存版跨不过进程边界，而跨进程恰恰是这件事的全部难点。
+ *
+ * 表是纯追加的，读用自增主键当游标。断线重连、刷新页面都能从上次的位置续上——
+ * 换成推送反而要自己处理这些。
+ */
+export class PgLiveOutput implements LiveOutput {
+  #store: PgStateStore;
+
+  constructor(store: PgStateStore) {
+    this.#store = store;
+  }
+
+  static async ensureSchema(store: PgStateStore): Promise<void> {
+    await store.pool.query(`
+      CREATE TABLE IF NOT EXISTS live_output (
+        seq        bigserial PRIMARY KEY,
+        mission_id text        NOT NULL,
+        attempt_id text        NOT NULL,
+        kind       text        NOT NULL,
+        text       text,
+        usage      jsonb,
+        at         timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS live_output_mission_idx ON live_output (mission_id, seq);
+    `);
+  }
+
+  async append(chunk: Omit<LiveChunk, 'seq' | 'at'>): Promise<void> {
+    await this.#store.pool.query(
+      `INSERT INTO live_output (mission_id, attempt_id, kind, text, usage)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [
+        chunk.missionId,
+        chunk.attemptId,
+        chunk.kind,
+        chunk.text ?? null,
+        chunk.usage ? JSON.stringify(chunk.usage) : null,
+      ],
+    );
+  }
+
+  async since(missionId: string, cursor = 0, limit = 500): Promise<readonly LiveChunk[]> {
+    const { rows } = await this.#store.pool.query<{
+      seq: string;
+      mission_id: string;
+      attempt_id: string;
+      kind: string;
+      text: string | null;
+      usage: TokenUsage | null;
+      at: Date;
+    }>(
+      `SELECT seq, mission_id, attempt_id, kind, text, usage, at
+         FROM live_output
+        WHERE mission_id = $1 AND seq > $2
+        ORDER BY seq
+        LIMIT $3`,
+      [missionId, cursor, limit],
+    );
+    return rows.map((row) => ({
+      seq: Number(row.seq),
+      missionId: row.mission_id,
+      attemptId: row.attempt_id,
+      kind: row.kind as LiveChunk['kind'],
+      text: row.text ?? undefined,
+      usage: row.usage ?? undefined,
+      at: row.at.toISOString(),
+    }));
+  }
+
+  /**
+   * 一跳结束就删掉它的实时行。
+   *
+   * 最终输出已经作为 Attempt 的一部分落库了，这里留着就是同一份数据存两遍，
+   * 而且是会无限长的那一遍。
+   */
+  async finish(attemptId: string): Promise<void> {
+    await this.#store.pool.query('DELETE FROM live_output WHERE attempt_id = $1', [attemptId]);
+  }
+}

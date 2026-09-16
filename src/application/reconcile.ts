@@ -1,0 +1,106 @@
+/**
+ * 启动时收敛。
+ *
+ * 平台重启（或崩溃后被拉起）时，磁盘上可能留着若干还是 `in_progress` 的
+ * Attempt。它们跑在已经消失的进程里，**再也不会有人替它们收尾**。
+ *
+ * 不收敛的后果是硬卡死：
+ *   - 协调者侧：不变量 B 认为已经有一个在跑，这个 Mission 永远开不了新的
+ *     协调者尝试；
+ *   - 执行者侧：那个工作项永远开不了下一次尝试；
+ *   - 顺带把用量质量拖成 estimated —— 一条永远不会上报的记录挂在那里。
+ *
+ * 这不是「Recovery Reconciler」那种大机制（那个明确推迟了）。判成
+ * `interrupted` 而不是失败：它没交出任何技术结论，属于可重试的那一类，
+ * 和「跑完却没提交」要分开。
+ *
+ * ## 前提，以及它什么时候不成立
+ *
+ * 原本的判据是「我自己刚起来，所以没有任何 attempt 可能还活着」。**这条
+ * 只在单写者下成立。** 文件版有进程锁，所以成立；换成 Postgres 之后多个
+ * 进程共用一份状态，它就塌了——实测：Mission 正跑着，我重启了一下只读的
+ * 观测面，它开机一收敛就把在途 attempt 判死并写回库，把那条 Mission 搞坏了。
+ *
+ * 所以现在：
+ *   - **只读进程不要调它。** 收敛是写操作，属于推进状态的那个进程。
+ *   - 推进状态的进程要用 `missionId` 限定范围：它只对自己接手的这条
+ *     Mission 有「没有别人在跑」这个认知，对别的 Mission 没有。
+ *
+ * 还没解决的：两个 runner 同时接手**同一条** Mission。那需要租约/心跳
+ * （attempt 上带一个会过期的时间戳），不是这里能补的。目前靠不变量 B
+ * 加写冲突检测挡住大部分，但不是完备的。
+ */
+
+import type { Project } from '../kernel/index.ts';
+import type { ActivityLog } from './ports.ts';
+
+export interface ReconcileResult {
+  readonly interrupted: { missionId: string; attemptId: string; kind: string }[];
+  /** 心跳还新鲜、因而**没被动**的那些。看得见才知道收敛为什么没收它。 */
+  readonly alive: { missionId: string; attemptId: string; owner?: string }[];
+}
+
+/** 心跳多久没来就算没人管了。默认 90 秒 —— 心跳间隔的若干倍，容得下一次卡顿。 */
+export const DEFAULT_LEASE_TOLERANCE_MS = 90_000;
+
+export async function reconcileInterruptedAttempts(
+  projects: readonly Project[],
+  activity?: ActivityLog,
+  options?: {
+    /** 只收敛这一条 Mission。共用存储时**必须**传——理由见文件头。 */
+    missionId?: string;
+    /** "现在"由调用方给，测试才能确定性地跑。 */
+    now?: Date;
+    /** 心跳多久没来算没人管。 */
+    toleranceMs?: number;
+  },
+): Promise<ReconcileResult> {
+  const interrupted: ReconcileResult['interrupted'] = [];
+  const alive: ReconcileResult['alive'] = [];
+  const nowIso = (options?.now ?? new Date()).toISOString();
+  const tolerance = options?.toleranceMs ?? DEFAULT_LEASE_TOLERANCE_MS;
+
+  for (const project of projects) {
+    for (const mission of project.missions) {
+      if (options?.missionId && mission.id !== options.missionId) continue;
+      const all = [
+        ...mission.coordinatorAttempts,
+        ...mission.workItems.flatMap((item) => item.attempts),
+      ];
+      for (const attempt of all) {
+        if (attempt.status !== 'in_progress') continue;
+        // 心跳还新鲜 = 有人正在跑它。判死它就是杀掉一个活着的 Mission——
+        // 这正是加租约要解决的那件事，所以这里必须先问租约再动手。
+        if (!attempt.isAbandoned(nowIso, tolerance)) {
+          alive.push({
+            missionId: mission.id,
+            attemptId: attempt.id,
+            owner: attempt.leaseOwner,
+          });
+          continue;
+        }
+        attempt.recordEndReason('interrupted');
+        attempt.fail('接手时它仍在进行中，跑它的进程已经不在了');
+        interrupted.push({
+          missionId: mission.id,
+          attemptId: attempt.id,
+          kind: attempt.kind,
+        });
+        await activity?.append({
+          projectId: mission.projectId,
+          missionId: mission.id,
+          workItemId: attempt.workItemId,
+          attemptId: attempt.id,
+          kind: 'attempt.ended',
+          data: {
+            endedBy: 'interrupted',
+            failureMessage: '平台重启时它仍在进行中，无人收尾',
+            retriable: true,
+          },
+        });
+      }
+    }
+  }
+
+  return { interrupted, alive };
+}
