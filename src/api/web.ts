@@ -292,6 +292,7 @@ const WAIT_REASON = {
   target_changed: '目标分支在检视期间变了',
   base_revision_stale: '分叉基线已过期，需要重新核对',
   cancelled_by_user: '被叫停了',
+  runaway_suspected: '一跳跑太久，已停下来等人看',
 };
 
 const STATUS_CN = {
