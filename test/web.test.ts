@@ -61,9 +61,15 @@ describe('观测面', () => {
     assert.match(res.headers.get('content-type') ?? '', /text\/html/);
     const html = await res.text();
     assert.match(html, /<!doctype html>/i);
-    assert.match(html, /CoAgentHub v5/);
-    // 页面自己会拉这两个口，拼错了就永远是空白。
-    assert.match(html, /\/api\/missions/);
+    // 原来这两条断言的是 `CoAgentHub v5` 和正文里出现 /api/missions，而那两条
+    // 是内置观测面（WEB_PAGE）的特征。GET / 现在给的是 src/web/index.html：
+    // 正式壳把 /api/* 放在 app.js 引的 projects.js 里，index.html 文本里没这两个串。
+    // 还按老串断言，测到的其实是“回退页赢了”。
+    assert.match(html, /CoAgentHub/);
+    assert.ok(
+      html.includes('app.js') || html.includes('tokens.css'),
+      '正式壳要引到外壳资源',
+    );
   });
 
   test('Mission 列表带够列表页要的字段', async () => {
