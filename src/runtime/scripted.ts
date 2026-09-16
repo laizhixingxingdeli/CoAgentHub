@@ -104,13 +104,23 @@ export class ScriptedRuntime implements AgentRuntime {
     const run = async (): Promise<RuntimeOutcome> => {
       if (script.connectionError) throw new Error(script.connectionError);
       if (script.hangs) {
+        // 先让出一拍再发。`const pending = run()` 是同步启动的，而调用方要拿到
+        // 返回的 AgentRun 之后才能 .on() 订阅——在这之前发的事件没有任何人收。
+        // 真实运行时是靠子进程输出驱动的，天然在订阅之后。
+        await new Promise<void>((tick) => setImmediate(tick));
         emit({ kind: 'output', text: '还在干活…' });
+        // 挂住之前报一次用量 —— pi 在每个工具边界都会报。被杀的进程来不及
+        // 回传结果行，这一次就是账上唯一的凭据。
+        emit({ kind: 'usage', usage: script.usage ?? DEFAULT_USAGE });
         await new Promise<void>((resolve) => {
           killed = resolve;
         });
         return {
           endedBy: 'upstream_failure',
-          usage: script.usage ?? DEFAULT_USAGE,
+          // 被杀的进程**来不及回传结果行**，所以这里必须是全零的 unknown，
+          // 不能顺手给一份漂亮的用量——SpawnRuntime 的 close 分支就是这么补的。
+          // 给了的话，"账上记成 0"这个真实的洞在测试里根本复现不出来。
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, quality: 'unknown' },
           failureMessage: '进程被杀且没有回传结果',
         };
       }

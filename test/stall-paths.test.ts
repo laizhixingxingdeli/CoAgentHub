@@ -355,6 +355,21 @@ describe('一跳跑太久', () => {
     assert.equal(view.waitReason, 'runaway_suspected');
     assert.equal(view.waitDetail, detail, '写回平台的必须是这一句，不是一句泛泛的');
 
+    // **被杀掉的那一跳花的钱要算进账。**
+    //
+    // 进程被杀就没有结果行，运行时补的是一个全零的 UNKNOWN。照抄下去等于宣称
+    // 这一跳没花钱——实测一跳跑了 8 分 50 秒、实时通道里报了几十次用量，
+    // 账上是 0，整条 Mission 的用量因此被标成 estimated 而没人知道为什么。
+    // 兜底用边跑边收到的最后一次，并把 quality 降成 estimated（那是"最后一次
+    // 报告"，不是"跑完的总账"）。
+    // 必须断**执行者那一跳自己**的账。断 Mission 合计会被协调者那一跳的
+    // 用量盖住：加不加兜底，合计都 >0、quality 都是 estimated——A/B 一验就
+    // 发现两边全绿，等于没断。
+    const killed = orchestrator.hops.at(-1)?.attemptId as string;
+    const detailed = await platform.getAttemptDetail('M1', killed);
+    assert.ok(detailed.usage.total > 0, '实时通道里报过用量，这一跳账上不能是 0');
+    assert.equal(detailed.usage.quality, 'estimated', '兜底来的数不许冒充精确数');
+
     // **只跑了一次。** 归成 upstream_failure 的话会冷却候选、回滚工作区、
     // 换下一个候选再跑一遍同样的 30 分钟——三件事全是错的。
     assert.equal(orchestrator.hops.length, 2, '协调者一跳 + 执行者一跳，没有第二个候选');

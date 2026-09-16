@@ -35,10 +35,16 @@ function parseEvent(json: string): RuntimeEvent | undefined {
       t?: string;
       name?: string;
       callId?: string;
+      detail?: string;
       usage?: TokenUsage;
     };
     if (raw.t === 'tool.started' && raw.name) {
-      return { kind: 'tool.started', name: raw.name, callId: raw.callId ?? raw.name };
+      return {
+        kind: 'tool.started',
+        name: raw.name,
+        callId: raw.callId ?? raw.name,
+        detail: raw.detail,
+      };
     }
     if (raw.t === 'tool.completed' && raw.name) {
       return { kind: 'tool.completed', name: raw.name, callId: raw.callId ?? raw.name };
@@ -88,7 +94,9 @@ function killTree(child: ChildProcess): void {
 
 /** 给人看的一行。协议行本身不该直接糊到终端上。 */
 function render(event: RuntimeEvent): string {
-  if (event.kind === 'tool.started') return `\n  · ${event.name}\n`;
+  if (event.kind === 'tool.started') {
+    return `\n  · ${event.name}${event.detail ? ` · ${event.detail}` : ''}\n`;
+  }
   if (event.kind === 'usage') {
     return `  [tok ${event.usage.total}]\n`;
   }

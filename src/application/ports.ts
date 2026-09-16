@@ -131,7 +131,19 @@ export interface AgentRun {
 
 export type RuntimeEvent =
   | { readonly kind: 'output'; readonly text: string }
-  | { readonly kind: 'tool.started'; readonly name: string; readonly callId: string }
+  | {
+      readonly kind: 'tool.started';
+      readonly name: string;
+      readonly callId: string;
+      /**
+       * 这次调用**具体在干什么**（bash 的命令、read 的路径），截断成一行。
+       *
+       * 只记工具名的话，一跳挂住之后留下来的尾巴就是一串 `bash`——看得出它卡在
+       * 某次 bash 上，看不出卡在**哪条命令**上，而那是唯一有用的那半。
+       * 实测踩过：执行者干到一半静默 5 分钟被杀，尾巴里只有工具名。
+       */
+      readonly detail?: string;
+    }
   | { readonly kind: 'tool.completed'; readonly name: string; readonly callId: string }
   | { readonly kind: 'usage'; readonly usage: TokenUsage };
 

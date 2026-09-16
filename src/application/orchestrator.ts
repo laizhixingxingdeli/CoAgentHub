@@ -16,7 +16,7 @@ import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
-import type { WaitReason } from '../kernel/index.ts';
+import type { TokenUsage, WaitReason } from '../kernel/index.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -209,6 +209,24 @@ function coordinatorBody(view: {
     return '平台唤醒你。先 coagent_get_mission 看当前状态，然后决定下一步。';
   }
   return '开始这个 Mission。先 coagent_get_mission。';
+}
+
+/**
+ * 结果行里的用量和实时通道里最后一次报告，取可信的那个。
+ *
+ * 结果行是权威的——它是 agent 自己算完的总账。但进程被杀时根本没有结果行，
+ * 运行时补的是一个全零的 UNKNOWN，直接记下去就等于宣称这一跳没花钱。
+ * 实测一跳跑了 8 分 50 秒、实时通道里报了几十次用量，账上是 0。
+ */
+function usableUsage(
+  reported: TokenUsage | undefined,
+  streamed: TokenUsage | undefined,
+): TokenUsage | undefined {
+  const trustworthy = reported && reported.quality !== 'unknown' && reported.total > 0;
+  if (trustworthy || !streamed) return reported;
+  // 降一级：这是"最后一次报告"，不是"跑完的总账"——后面可能还有几次调用
+  // 没来得及报。标成 estimated，别让它冒充精确数。
+  return { ...streamed, quality: 'estimated' };
 }
 
 /** 一跳的记录，给 Timeline 和排障用。 */
@@ -523,6 +541,15 @@ export class Orchestrator {
       // 到点掐掉之后，close 事件回来的是一个普通的"进程被杀"失败。
       // 不记这个标志就没法把它和真的上游故障分开，而两者处置完全相反。
       let runaway = false;
+      /**
+       * 边跑边收到的最后一次累计用量。
+       *
+       * 被杀掉的进程来不及回传结果行，于是 outcome.usage 是全零的 UNKNOWN。
+       * 实测一跳跑了 8 分 50 秒、在实时通道里报了几十次用量，最后却记成
+       * `input=0 output=0` —— 那笔钱真的花了，只是账上没有，整条 Mission 的
+       * 用量因此被标成 estimated。**花掉的 token 不能因为进程是被杀的就不算。**
+       */
+      let streamedUsage: TokenUsage | undefined;
       try {
         const run = await input.pool.runtime.start({
           role: input.role,
@@ -543,8 +570,15 @@ export class Orchestrator {
           if (event.kind === 'output') {
             void this.#live.append({ ...base, kind: 'text', text: event.text });
           } else if (event.kind === 'tool.started') {
-            void this.#live.append({ ...base, kind: 'tool', text: event.name });
+            void this.#live.append({
+              ...base,
+              kind: 'tool',
+              // 带上具体在干什么。挂住之后这一行是唯一能指认"卡在哪条命令上"
+              // 的东西；适配层没给 detail 时退回只有工具名，行为和以前一样。
+              text: event.detail ? `${event.name} · ${event.detail}` : event.name,
+            });
           } else if (event.kind === 'usage') {
+            streamedUsage = event.usage;
             void this.#live.append({ ...base, kind: 'usage', usage: event.usage });
           }
         });
@@ -588,7 +622,11 @@ export class Orchestrator {
         // 永远开不了下一次尝试。
         await this.#platform.finishAttempt(input.missionId, attemptId, {
           endedBy: outcome?.endedBy ?? 'no_structured_result',
-          usage: outcome?.usage,
+          // 结果行里没带用量（进程被杀、崩了），就用边跑边收到的最后一次。
+          // 它的 quality 降一级标成 estimated：那是"最后一次报告"而不是
+          // "跑完的总账"，中间可能还有几次调用没来得及报。降级但不丢——
+          // **写 0 是在说这一跳没花钱，而它花了。**
+          usage: usableUsage(outcome?.usage, streamedUsage),
           failureMessage: outcome?.failureMessage,
           resumeRef: outcome?.resumeRef,
           output: outcome?.output,
