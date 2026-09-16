@@ -1,0 +1,165 @@
+/**
+ * 用真实 agent 跑一条 Mission。
+ *
+ *   node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <路径>]
+ *
+ * 这是 L3（人或上游会话）的入口：交一份 Contract，平台自己走完
+ * 规划 → 派发 → 执行 → 验收 → 交卷，最后把结果打出来。
+ */
+
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import type { AddressInfo } from 'node:net';
+import { createApi } from './api/server.ts';
+import { Orchestrator } from './application/orchestrator.ts';
+import { SpawnRuntime } from './runtime/spawn.ts';
+import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
+import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import type { MissionContract } from './kernel/index.ts';
+
+function arg(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+async function main() {
+  const missionFile = process.argv[2];
+  if (!missionFile) {
+    console.log(
+      '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]',
+    );
+    return;
+  }
+
+  const spec = JSON.parse(readFileSync(resolve(missionFile), 'utf8')) as {
+    projectId: string;
+    missionId: string;
+    contract: MissionContract;
+  };
+  const cwd = resolve(arg('--cwd') ?? process.cwd());
+  const adapter = resolve(
+    arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts',
+  );
+
+  // 持久化：进程退了结果还得在收件箱里等人来取。
+  //
+  // 存 Postgres 时**不取文件锁**：单写者锁是文件版的补偿手段，数据库那边
+  // 由版本号挡并发写，再加一把进程锁只会挡住合法的并行 Mission。
+  const statePath = resolve(arg('--state') ?? '.coagent-state.json');
+  const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  const built = usePg
+    ? await buildPgPlatform({
+        workspace: new GitWorktreeManager(),
+        // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
+        reconcileMissionId: spec.missionId,
+      })
+    : await buildPersistentPlatform(statePath, {
+        exclusive: { what: `跑 Mission ${spec.missionId}` },
+      });
+  const { platform, tokens, activity, deliveries, persist, reconciled } = built;
+  const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
+  const live = 'live' in built ? built.live : undefined;
+  if (reconciled.interrupted.length > 0) {
+    console.log(`启动收敛：${reconciled.interrupted.length} 个上次残留的 attempt 判为 interrupted`);
+  }
+  const server = createApi({ platform, tokens, deliveries, onMutation: persist, live });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const origin = { clientType: 'cli', conversationRef: arg('--origin') ?? 'local-cli' };
+  const existing = await platform.getMissionView(spec.missionId).catch(() => undefined);
+  if (existing) {
+    console.log(`Mission ${spec.missionId} 已存在（${existing.status}），接着往下跑`);
+  } else {
+    await platform.createMission({ ...spec, origin });
+  }
+  console.log(`Mission ${spec.missionId}；平台监听 ${baseUrl}`);
+  console.log(`状态文件: ${statePath}`);
+  console.log(`worktree: ${cwd}`);
+  console.log(`适配器  : ${adapter}\n`);
+
+  // 20 分钟硬超时：卡住的 agent 要被 kill 掉，而不是拖着整条 Mission。
+  const runtime = new SpawnRuntime({
+    kind: 'pi',
+    command: 'npx',
+    args: ['tsx', adapter],
+    cwd: resolve(adapter, '../..'),
+    timeoutMs: 20 * 60 * 1000,
+    stream: true,
+  });
+
+  const orchestrator = new Orchestrator({
+    platform,
+    // 一边跑一边把输出送进实时通道，观测面那个进程才看得到。
+    live,
+    tokens: makeIssuer(platform, tokens),
+    baseUrl,
+    workspace: process.argv.includes('--in-place')
+      ? new InPlaceWorkspaceManager()
+      : new GitWorktreeManager(arg('--worktrees')),
+    coordinator: {
+      runtime,
+      candidates: [{ endpoint: 'local', profileId: 'coordinator-grok' }],
+    },
+    executor: {
+      runtime,
+      // 有序候选池：**只有上游失败**才往后换。
+      candidates: [
+        { endpoint: 'local', profileId: 'exec-qwen-flash' },
+        { endpoint: 'local', profileId: 'exec-hy3' },
+        { endpoint: 'local', profileId: 'exec-mimo' },
+      ],
+    },
+  });
+
+  const result = await orchestrator.runMission(spec.missionId, { projectRoot: cwd });
+
+  console.log(`\n${'='.repeat(72)}`);
+  const detail =
+    'detail' in result
+      ? ` —— ${result.detail}`
+      : 'reason' in result
+        ? ` —— ${result.reason}`
+        : 'question' in result
+          ? ` —— ${result.question}`
+          : '';
+  console.log(`Mission 结果：${result.kind}${detail}`);
+  console.log(`${'='.repeat(72)}`);
+  for (const hop of orchestrator.hops) {
+    console.log(
+      `  ${hop.role.padEnd(12)}${(hop.workItemId ?? '-').padEnd(6)}${hop.profile.profileId.padEnd(18)}` +
+        `${hop.endedBy}${hop.failureMessage ? ` —— ${hop.failureMessage.slice(0, 80)}` : ''}`,
+    );
+  }
+
+  const view = await platform.getMissionView(spec.missionId);
+  console.log(`\n工作项：`);
+  for (const item of view.workItems) {
+    console.log(`  ${item.id.padEnd(6)}${item.status.padEnd(11)}${item.attempts} 次尝试  ${item.title}`);
+  }
+  const usage = view.usage;
+  console.log(
+    `\n用量（${usage.quality}）：in=${usage.input} out=${usage.output} cacheRead=${usage.cacheRead} ` +
+      `total=${usage.total} cost=$${(usage.cost ?? 0).toFixed(4)}`,
+  );
+  console.log(`事件：${(await activity.list(spec.missionId)).length} 条`);
+  if (orchestrator.workspace) {
+    console.log(
+      `工作区：${orchestrator.workspace.cwd}（分支 ${orchestrator.workspace.branch}，基线 ${orchestrator.workspace.baseRevision.slice(0, 8)}）`,
+    );
+  }
+  const inbox = await deliveries.pending(origin.conversationRef);
+  console.log(`收件箱：${inbox.length} 条待取${inbox.length ? `（${inbox.map((d) => d.id).join(', ')}）` : ''}`);
+  persist();
+  if (view.result) {
+    console.log(`\nMission Result：\n${JSON.stringify(view.result, null, 2)}`);
+  }
+
+  server.close();
+  releaseLock();
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.stack : String(error));
+  process.exit(1);
+});
