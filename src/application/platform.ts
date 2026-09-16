@@ -260,6 +260,39 @@ export class Platform {
   }
 
   /**
+   * L3 作废一个工作项（S14.6 里的 cancel-replace）。
+   *
+   * 场景：契约改了，协调者照新契约另拆了一批工单，旧的那些还挂在 dispatched 上。
+   * 不作废的话调度器会把它们也跑一遍——做的是明确不要的那件事，还要花一次
+   * 执行者的钱。实测撞到过。
+   *
+   * 复用 blocked 而不是新造状态：它的含义本来就是"这张工单不成立，需要有人
+   * 处理"，与这里完全吻合。**不为每种原因新造互斥状态**是 S06.1 的要求，
+   * 区分靠 blocked 记录里写的是谁作废的。
+   */
+  async retireWorkItem(
+    missionId: string,
+    workItemId: string,
+    reason: string,
+  ): Promise<{ status: string }> {
+    const { mission, item } = await this.#locateItem(missionId, workItemId);
+    if (item.status === 'accepted' || item.status === 'blocked') {
+      throw new PlatformRuleError(
+        'NOT_RETIRABLE',
+        `工作项 ${workItemId} 当前是 ${item.status}，不需要作废。`,
+      );
+    }
+    item.recordBlocked({
+      attemptId: 'l3',
+      reason,
+      whatWasTried: [],
+      needsFromUpstream: '由 L3 作废，请按当前契约重新判断要不要重做',
+    });
+    await this.#event(mission, 'work_item.retired', { reason }, workItemId);
+    return { status: item.status };
+  }
+
+  /**
    * 记下 Mission 为什么停着（S06.1 的第二条轴）。
    *
    * 同样是 executing，"正在跑"和"候选全在冷却"是两回事；界面上分不出来，

@@ -194,6 +194,19 @@ async function main() {
     return;
   }
 
+  if (command === 'retire') {
+    if (!target) throw new Error('需要 missionId');
+    const workItemId = arg('--item');
+    if (!workItemId) throw new Error('需要 --item <workItemId>');
+    const reason = arg('--reason');
+    if (!reason) throw new Error('作废必须给 --reason —— 不写清楚，协调者会以为它还该做');
+    const result = await platform.retireWorkItem(target, workItemId, reason);
+    await persist();
+    console.log(`工作项 ${workItemId} → ${result.status}（已作废）`);
+    console.log('协调者下次被唤醒时会看到它，并据此判断要不要重做。');
+    return;
+  }
+
   if (command === 'ack') {
     if (!target) throw new Error('需要 deliveryId');
     const delivery = await deliveries.acknowledge(target);
@@ -213,6 +226,7 @@ async function main() {
   node src/l3.ts cancel <missionId> [--reason] 叫停（终态，释放改动名额）
   node src/l3.ts pause <missionId>            暂停（阶段不变，调度器不碰）
   node src/l3.ts resume <missionId>           恢复
+  node src/l3.ts retire <missionId> --item <W-n> --reason "..."  作废一个工作项
   node src/l3.ts ack <deliveryId>             确认收到
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);

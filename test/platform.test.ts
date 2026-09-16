@@ -509,3 +509,42 @@ describe('退回规划之后重新派发', () => {
     );
   });
 });
+
+describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
+  test('作废之后调度器不会再跑它，理由留给协调者看', async () => {
+    // 场景：契约改了，协调者照新契约另拆了一批工单，旧的还挂在 dispatched 上。
+    // 不作废的话调度器会把它们也跑一遍——做的是明确不要的那件事，
+    // 还要花一次执行者的钱。
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord.attemptId, PLAN);
+    const old = await platform.createWorkItem('M1', coord.attemptId, {
+      title: '按旧契约拆的',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M1', coord.attemptId, [old.workItemId]);
+
+    const result = await platform.retireWorkItem('M1', old.workItemId, '契约改了，已被新工单取代');
+    assert.equal(result.status, 'blocked');
+
+    const view = await platform.getMissionView('M1');
+    const item = view.workItems.find((i) => i.id === old.workItemId);
+    // 离开 dispatched 才是关键：调度器只跑 dispatched 的。
+    assert.equal(item?.status, 'blocked');
+  });
+
+  test('已验收的不让作废 —— 那是在改历史', async () => {
+    const { platform, coord, workItemId } = await upToSubmitted();
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    await assert.rejects(
+      () => platform.retireWorkItem('M1', workItemId, '想反悔'),
+      (error: unknown) => (error as { code?: string }).code === 'NOT_RETIRABLE',
+    );
+  });
+});

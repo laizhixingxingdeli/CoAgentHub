@@ -133,8 +133,9 @@ function coordinatorInstruction(view: {
   }
   if (view.workItems.some((item) => item.status === 'blocked')) {
     return (
-      '执行者报告有工作项不成立（状态 blocked）。先 coagent_get_mission 看它说了什么，' +
-      '把工单改对再重新派发，或者升级给 L3。'
+      '有工作项被标成了不成立（状态 blocked）——可能是执行者报的，也可能是 L3 作废的。' +
+      '先 coagent_get_mission 看它说了什么：确实还要做就把工单改对再重新派发，' +
+      '已经被新工单取代了就别管它，也不要为它另开一个。'
     );
   }
   if (view.workItems.some((item) => item.status === 'submitted')) {
