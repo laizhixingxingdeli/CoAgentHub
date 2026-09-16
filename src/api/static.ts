@@ -41,11 +41,11 @@ export function webRoot(): string {
  *
  * 命中返回 true（已经写完响应），没命中返回 false 交给后面的路由。
  */
-export function serveStatic(path: string, res: ServerResponse): boolean {
+export function serveStatic(path: string, res: ServerResponse, root = webRoot()): boolean {
   const name = path === '/' ? 'index.html' : path.slice(1);
   if (!SAFE_NAME.test(name)) return false;
 
-  const file = join(webRoot(), name);
+  const file = join(root, name);
   if (!existsSync(file)) return false;
 
   const ext = name.slice(name.lastIndexOf('.') + 1);

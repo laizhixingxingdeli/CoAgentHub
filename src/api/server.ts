@@ -44,6 +44,8 @@ export interface ApiDeps {
    * （靠 mtime 修的），换成数据库之后同一个坑还在，只是判据换了。
    */
   beforeRead?: () => Promise<void> | void;
+  /** Web 资源根目录。缺省 src/web/；测试用临时目录，免得几个测试文件互相看见。 */
+  webRoot?: string;
 }
 
 class HttpError extends Error {
@@ -240,7 +242,7 @@ export function createApi(deps: ApiDeps): Server {
 
     // 正式 Web 端：src/web/ 下的无构建静态文件（ADR-0001）。
     // 只读——放行/打回走 src/l3.ts，规则只该有一份实现。
-    if (method === 'GET' && serveStatic(path, res)) return;
+    if (method === 'GET' && serveStatic(path, res, deps.webRoot)) return;
 
     // 回退到内置的单页观测面。
     //

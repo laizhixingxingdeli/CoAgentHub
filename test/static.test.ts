@@ -19,7 +19,7 @@ import type { Server } from 'node:http';
 
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
-import { serveStatic, webRoot } from '../src/api/static.ts';
+import { serveStatic } from '../src/api/static.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import {
   FixedClock,
@@ -48,20 +48,23 @@ function recorder() {
 }
 
 const servers: Server[] = [];
-const made: string[] = [];
 const dirs: string[] = [];
 after(() => {
   for (const s of servers) s.close();
-  for (const f of made) rmSync(f, { force: true });
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
-/** 在真实的 web 根目录里放一个文件，用完删掉。 */
+/**
+ * 资源放**临时目录**，不碰真实的 src/web/。
+ *
+ * 往真实目录里写会被别的测试文件看见——node --test 是多进程并行的，
+ * 而 web.test.ts 断言根路径返回内置观测面。实测就是这么红的。
+ */
+const assets = mkdtempSync(join(tmpdir(), 'coagent-web-'));
+dirs.push(assets);
+
 function putAsset(name: string, content: string): void {
-  mkdirSync(webRoot(), { recursive: true });
-  const path = join(webRoot(), name);
-  writeFileSync(path, content, 'utf8');
-  made.push(path);
+  writeFileSync(join(assets, name), content, 'utf8');
 }
 
 describe('静态资源：路径边界', () => {
@@ -76,7 +79,7 @@ describe('静态资源：路径边界', () => {
       '//evil.com/x.js',
     ]) {
       const { res } = recorder();
-      assert.equal(serveStatic(path, res as never), false, `${path} 不该被当成静态资源`);
+      assert.equal(serveStatic(path, res as never, assets), false, `${path} 不该被当成静态资源`);
     }
   });
 
@@ -87,7 +90,7 @@ describe('静态资源：路径边界', () => {
       assert.equal(serveStatic(path, res as never), false, `${path} 扩展名不在白名单里`);
     }
     const { res, calls } = recorder();
-    assert.equal(serveStatic('/leak.html', res as never), true);
+    assert.equal(serveStatic('/leak.html', res as never, assets), true);
     assert.equal(calls.status, 200);
   });
 
@@ -95,13 +98,13 @@ describe('静态资源：路径边界', () => {
     // 返回 false 而不是自己写 404：`/api/...` 这类路径也会先经过这里，
     // 这里抢着回 404 就把整套 API 盖掉了。
     const { res } = recorder();
-    assert.equal(serveStatic('/没有这个.html', res as never), false);
+    assert.equal(serveStatic('/没有这个.html', res as never, assets), false);
   });
 
   test('按扩展名给 content-type，且不缓存', () => {
     putAsset('probe.css', 'body{}');
     const { res, calls } = recorder();
-    serveStatic('/probe.css', res as never);
+    serveStatic('/probe.css', res as never, assets);
     assert.match(calls.headers?.['content-type'] ?? '', /text\/css/);
     // 无构建意味着改完刷新就该看到；缓存住等于每次都要硬刷新。
     assert.equal(calls.headers?.['cache-control'], 'no-store');
@@ -121,7 +124,12 @@ describe('静态资源：接进 HTTP 面之后', () => {
       clock,
       ids,
     });
-    const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
+    const server = createApi({
+      platform,
+      tokens: new RunTokenRegistry(),
+      deliveries,
+      webRoot: assets,
+    });
     await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
     servers.push(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
