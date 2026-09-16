@@ -18,7 +18,7 @@ import {
   SystemClock,
 } from './application/in-memory.ts';
 import { Platform } from './application/platform.ts';
-import { InMemoryAgentPoolRepository } from './application/agent-pool.ts';
+import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import {

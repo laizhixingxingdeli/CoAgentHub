@@ -33,9 +33,22 @@ export type RuntimeCatalog =
   | { readonly available: true; readonly runtime: string; readonly models: RuntimeModel[] }
   | { readonly available: false; readonly note: string };
 
-/** 适配层所在目录。没配就按同级目录猜一个。 */
+/**
+ * 适配层所在目录。没配就找项目的同级目录。
+ *
+ * 相对**本文件**定位，不是相对进程 cwd。从 Mission 的 worktree 里起服务时
+ * cwd 是 `.coagent-worktrees/<mission>/`，按 cwd 猜会去找
+ * `.coagent-worktrees/coagent-pi` —— 那里当然没有，于是界面上永远显示
+ * "找不到适配层"，而人完全不知道该往哪儿指。
+ */
 export function adapterDir(): string {
-  return resolve(process.env.COAGENT_ADAPTER_DIR ?? '../coagent-pi');
+  if (process.env.COAGENT_ADAPTER_DIR) return resolve(process.env.COAGENT_ADAPTER_DIR);
+  // src/application/ → 上三层是项目根的同级。
+  const fromModule = new URL('../../../coagent-pi/', import.meta.url).pathname.replace(
+    /^\/([A-Za-z]:)/,
+    '$1',
+  );
+  return resolve(fromModule);
 }
 
 export async function listRuntimeModels(dir = adapterDir()): Promise<RuntimeCatalog> {
