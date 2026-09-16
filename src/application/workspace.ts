@@ -90,11 +90,19 @@ export class GitWorktreeManager implements WorkspaceManager {
 
     if (existsSync(cwd)) {
       // 续跑同一个 Mission：沿用已有 worktree，不要重开一份。
+      //
+      // 基线必须是**分叉点**，不是 worktree 当前的 HEAD。执行者一旦提交过，
+      // HEAD 就走到 Mission 自己的提交上；拿它跟目标分支比永远不相等，
+      // 于是每次续跑都被报成"基线过期"——而真正的分叉点可能好好的。
+      const target = await this.#currentBranch(repo);
+      const forkPoint = await run('git', ['merge-base', 'HEAD', target ?? 'HEAD'], { cwd })
+        .then((r) => r.stdout.trim())
+        .catch(() => undefined);
       return {
         cwd,
         branch,
-        baseRevision: await this.head(cwd),
-        targetBranch: await this.#currentBranch(repo),
+        baseRevision: forkPoint ?? (await this.head(cwd)),
+        targetBranch: target,
       };
     }
 
