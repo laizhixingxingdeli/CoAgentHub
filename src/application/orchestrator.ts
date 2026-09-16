@@ -51,6 +51,25 @@ export type CandidateAvailability = 'available' | 'cooldown';
  */
 const HEARTBEAT_MS = 15_000;
 
+/**
+ * 一跳最多跑多久（墙钟）。到点**停下来等人**，不是换个候选再赌一次。
+ *
+ * 和运行时那个静默超时是两条不同的判据，都要有：
+ *   - 静默超时问的是「它还在产出吗」——不产出就是卡死了，杀掉没有损失；
+ *   - 这一条问的是「它产出了这么久，还在做同一件事吗」——一个一直在动的
+ *     agent 永远触发不了前者。实测 W-785 连续产出了 **72 分钟**，做的是一个
+ *     后来被契约改版作废的工单，静默超时一次都没响。
+ *
+ * 为什么是「先问再杀」而不是到点直接砍：曾经有过 20 分钟的硬性总时长上限，
+ * 被实测推翻过——执行者连续干 45 分钟读代码、改文件、跑测试是正常工作。
+ * 所以这里到点只做三件事：收掉进程、把这一跳标成疑似跑飞、**把整条 Mission
+ * 停下来交给人**。不冷却候选、不失败转移——那会把一个需要人判断的情况
+ * 伪装成配额问题，然后拿第二个候选再烧一遍同样的 72 分钟。
+ *
+ * 30 分钟：W1–W4 里最长的一次**正常**执行者跑了 25 分钟，协调者最长 6 分钟。
+ */
+const ATTEMPT_WALL_CLOCK_MS = 30 * 60 * 1000;
+
 export interface OrchestratorDeps {
   platform: Platform;
   tokens: RunTokenIssuer;
@@ -62,6 +81,8 @@ export interface OrchestratorDeps {
   coordinator: RolePool;
   executor: RolePool;
   workspace: WorkspaceManager;
+  /** 单跳墙钟上限。缺省 ATTEMPT_WALL_CLOCK_MS；测试用它把 30 分钟缩成几毫秒。 */
+  attemptWallClockMs?: number;
 }
 
 export interface RunMissionOptions {
@@ -86,12 +107,44 @@ export type MissionRunOutcome =
   | { kind: 'stalled'; reason: string };
 
 /**
+ * 每一跳协调者开头都要说的那句。
+ *
+ * 自从不再续跑会话（见 runMission 里那段注释），每一跳都是**全新的进程、
+ * 空白的上下文**。不明说的话，模型会按"我刚才在做什么"的惯性往下接——
+ * 而它并没有"刚才"。把这件事讲在最前面，它才会先去读平台上的状态，
+ * 而不是凭一段不存在的记忆开工。
+ */
+const FRESH_SESSION_PREFIX =
+  '（这是一次全新的会话：你**不记得**上一跳做过什么。' +
+  '这条 Mission 的全部状态——调查发现、根因、排除过的假设、决策、方向、' +
+  '工作项、验收记录、升级问答——都在平台上，用 coagent_get_mission 读。' +
+  '你自己上一跳写回平台的东西仍然算数，没写回去的已经没了。）';
+
+/**
  * 唤醒协调者时说什么。
  *
  * 不同的唤醒原因要说不同的话：被 L3 打回和执行者交回结果是两件事，
  * 用同一句话叫醒它，它就得自己去猜发生了什么。
  */
 function coordinatorInstruction(view: {
+  status: string;
+  planRevision: number;
+  finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
+  escalationLog: { question: string; answer?: string }[];
+  workItems: { id: string; status: string }[];
+}): string {
+  // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
+  // 以为前面发生过什么。
+  const opening =
+    view.planRevision === 0 &&
+    view.workItems.length === 0 &&
+    view.escalationLog.length === 0 &&
+    !view.finalReview;
+  const body = coordinatorBody(view);
+  return opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
+}
+
+function coordinatorBody(view: {
   status: string;
   planRevision: number;
   finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
@@ -178,6 +231,7 @@ export class Orchestrator {
   #coordinator: RolePool;
   #executor: RolePool;
   #workspace: WorkspaceManager;
+  #wallClockMs: number;
   readonly hops: HopRecord[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
@@ -200,6 +254,7 @@ export class Orchestrator {
     this.#coordinator = deps.coordinator;
     this.#executor = deps.executor;
     this.#workspace = deps.workspace;
+    this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
   }
 
   async runMission(missionId: string, options: RunMissionOptions): Promise<MissionRunOutcome> {
@@ -301,7 +356,7 @@ export class Orchestrator {
           });
           if (!hop || 'exhausted' in hop) {
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
-            const detail = this.#stallDetail(reason, item.id);
+            const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
             return { kind: 'waiting', reason, detail };
           }
@@ -310,13 +365,27 @@ export class Orchestrator {
       }
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
+      //
+      // **不续跑上一跳的会话。** 这里曾经传 view.coordinatorResumeRef，
+      // 让每一跳接着上一跳的对话往下说。听起来是省事，实测是整条 Mission
+      // 最大的一笔开销：两跳之间隔着一次执行者运行（实测 13~40 分钟），
+      // 提示缓存早凉了，于是重放的整段历史按**全价**重新计费。W3 的协调者
+      // 输入逐跳涨 72k→356k→469k→591k→738k→933k，六跳下来它一个人吃掉了
+      // 74% 的 token、$16。轮次是平方项。
+      //
+      // 换掉它不丢信息：协调者需要的东西平台本来就以结构化形式存着——
+      // plan 的 findings / rootCause / rejectedHypotheses / decisions /
+      // direction、工作项、验收记录、升级问答，而且提示词里那句
+      // 「会话可能被压缩或换人接手，只有写回平台的才算数」说的正是这件事。
+      // resume 链是同一份状态的第二份拷贝，而且是会无限长的那一份。
+      //
+      // resumeRef 仍然照常记在 Attempt 上（finishAttempt 那边），排障时
+      // 还能按它找到当时那个会话——只是不再拿它开下一跳。
       const hop = await this.#runHop({
         role: 'coordinator',
         missionId,
         cwd,
         pool: this.#coordinator,
-        // 句柄来自平台，不是局部变量：进程重启/打回重跑都续得上。
-        resumeRef: view.coordinatorResumeRef,
         instruction: coordinatorInstruction(view),
       });
       // **先看停机原因，再判失败。**
@@ -335,7 +404,7 @@ export class Orchestrator {
 
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
-        const detail = this.#stallDetail(reason);
+        const detail = hop?.detail ?? this.#stallDetail(reason);
         await this.#platform.setWaitReason(missionId, reason, detail);
         return { kind: 'waiting', reason, detail };
       }
@@ -389,6 +458,11 @@ export class Orchestrator {
       return `${where}：连不上平台自己（${this.#lastFailure()}）。` +
         '这是平台侧故障，不是候选的问题——先确认平台还活着，再重跑。';
     }
+    if (reason === 'runaway_suspected') {
+      // 这一条的 detail 在掐掉它的那一刻就写进平台了（带着跑了多久、
+      // 改动还在哪）。这里再拼一句泛泛的话只会把那句具体的盖掉。
+      return `${where}：跑太久，已停下来等人看。`;
+    }
     if (reason === 'attempt_limit_reached') {
       return `${where}：尝试次数到上限了，不再往下换候选。最近一次失败：${this.#lastFailure()}。` +
         '继续换只会烧配额，不会产生新信息——先看看是不是工单本身有问题。';
@@ -414,7 +488,12 @@ export class Orchestrator {
     pool: RolePool;
     instruction: string;
     resumeRef?: string;
-  }): Promise<{ endedBy: string; resumeRef?: string } | { exhausted: WaitReason } | undefined> {
+  }): Promise<
+    | { endedBy: string; resumeRef?: string }
+    /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
+    | { exhausted: WaitReason; detail?: string }
+    | undefined
+  > {
     const now = Date.now();
     const usable = this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
@@ -440,6 +519,10 @@ export class Orchestrator {
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
       let unsubscribe: (() => void) | undefined;
       let heartbeat: ReturnType<typeof setInterval> | undefined;
+      let wallClock: ReturnType<typeof setTimeout> | undefined;
+      // 到点掐掉之后，close 事件回来的是一个普通的"进程被杀"失败。
+      // 不记这个标志就没法把它和真的上游故障分开，而两者处置完全相反。
+      let runaway = false;
       try {
         const run = await input.pool.runtime.start({
           role: input.role,
@@ -478,6 +561,12 @@ export class Orchestrator {
         await this.#platform.beatAttempt(input.missionId, attemptId, this.#owner).catch(
           () => undefined,
         );
+        // 墙钟闸。abort 会连子孙进程一起收（Windows 上 shell:true 的子进程
+        // 只 kill 父的话，真正在跑的那个孙子还握着管道，close 永远不来）。
+        wallClock = setTimeout(() => {
+          runaway = true;
+          void run.abort?.();
+        }, this.#wallClockMs);
         outcome = await run.wait();
       } catch (error) {
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
@@ -493,6 +582,7 @@ export class Orchestrator {
         };
       } finally {
         clearInterval(heartbeat);
+        clearTimeout(wallClock);
         unsubscribe?.();
         // 收尾必须在 finally：运行时崩了而 attempt 没收尾，这个工作项就
         // 永远开不了下一次尝试。
@@ -518,6 +608,30 @@ export class Orchestrator {
         endedBy: outcome.endedBy,
         failureMessage: outcome.failureMessage,
       });
+
+      // 墙钟到点 —— **在判上游失败之前拦下来**。
+      //
+      // 被掐掉的进程回来的是一次普通的 "进程被杀" 失败，落进下面那个分支就会：
+      // 冷却这个候选、回滚工作区、换下一个候选再跑一遍。三件事全是错的——
+      // 候选没问题，回滚会把它这 30 分钟做的东西全擦掉（而那正是人要看的），
+      // 换个候选只会把同样的 30 分钟再烧一遍。
+      //
+      // 所以这里什么都不做，只把话说清楚然后停。实时输出的尾巴已经在库里了。
+      if (runaway) {
+        const minutes = Math.round(this.#wallClockMs / 60_000);
+        const where = input.workItemId ? `工作项 ${input.workItemId}` : '协调者';
+        return {
+          exhausted: 'runaway_suspected',
+          // detail 跟着返回，不在这里写平台：调用方那边紧接着就会用
+          // #stallDetail 拼一句泛泛的话覆盖掉它，而这一句里的"跑了多久、
+          // 改动还在哪、哪个尝试"才是人接下来要用的。
+          detail:
+            `${where} 这一跳连续跑了 ${minutes} 分钟还没提交结果，已经停下来等人看。` +
+            '它一直在产出，所以静默超时不会响——这种情况多半是在打转，或者工单太大。' +
+            `改动留在工作区里没有回滚，实时输出的尾部也还在（尝试 ${attemptId}），` +
+            '看完再决定是继续、改工单、还是作废。',
+        };
+      }
 
       if (outcome.endedBy === 'platform_unreachable') {
         // **不冷却候选**：问题在平台自己这边。直接停下来喊人——

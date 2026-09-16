@@ -37,6 +37,13 @@ export interface Script {
    * 不可用"，连不上是"平台自己坏了"，调度器对这两件事的处置相反。
    */
   readonly connectionError?: string;
+  /**
+   * 一直跑不完，直到被 abort 收掉。
+   *
+   * 用来验墙钟闸。要守的性质是"**一直在产出**的 agent 也要被拦下来"——
+   * upstreamFailure 模拟的是立刻失败，那条路径压根走不到闸门。
+   */
+  readonly hangs?: boolean;
   readonly usage?: TokenUsage;
 }
 
@@ -60,6 +67,14 @@ export class ScriptedRuntime implements AgentRuntime {
   readonly transcript: { key: string; tool: string; status: number; json: unknown }[] = [];
   /** 每次被叫起来时收到的话。用于验证「唤醒语要说清楚为什么叫你」。 */
   readonly instructions: string[] = [];
+  /**
+   * 每次被叫起来时拿到的续跑句柄。
+   *
+   * 记下来是为了能断言"**没有**续跑"：协调者不再接着上一跳的会话说，
+   * 而这件事没有任何外部可见的症状——不记录就只能靠读代码确认，
+   * 下一个人顺手把 resumeRef 加回去也不会有测试变红。
+   */
+  readonly resumeRefs: (string | undefined)[] = [];
 
   constructor(scripts: ScriptTable) {
     this.#scripts = scripts;
@@ -71,6 +86,7 @@ export class ScriptedRuntime implements AgentRuntime {
     this.#counts.set(base, seen + 1);
     const key = `${base}:${seen}`;
     this.instructions.push(spec.instruction);
+    this.resumeRefs.push(spec.resumeRef);
     const script = this.#scripts[key] ?? this.#scripts[base];
     if (!script) {
       throw new Error(`ScriptedRuntime: 没有脚本匹配 ${key}（也没有 ${base}）`);
@@ -81,8 +97,23 @@ export class ScriptedRuntime implements AgentRuntime {
       for (const handler of handlers) handler(event);
     };
 
+    // hangs 的脚本靠这个收尾。SpawnRuntime 那边对应的是 killTree 之后
+    // 子进程 close 回来的那次 settle —— 同样是"被杀掉"而不是"跑完了"。
+    let killed: (() => void) | undefined;
+
     const run = async (): Promise<RuntimeOutcome> => {
       if (script.connectionError) throw new Error(script.connectionError);
+      if (script.hangs) {
+        emit({ kind: 'output', text: '还在干活…' });
+        await new Promise<void>((resolve) => {
+          killed = resolve;
+        });
+        return {
+          endedBy: 'upstream_failure',
+          usage: script.usage ?? DEFAULT_USAGE,
+          failureMessage: '进程被杀且没有回传结果',
+        };
+      }
       if (script.upstreamFailure) {
         return {
           endedBy: 'upstream_failure',
@@ -147,7 +178,8 @@ export class ScriptedRuntime implements AgentRuntime {
         };
       },
       async abort() {
-        /* 脚本跑得很快，没有可取消的窗口 */
+        // 普通脚本跑得很快，没有可取消的窗口；hangs 的那种就靠这一下收掉。
+        killed?.();
       },
       wait: () => pending,
     };

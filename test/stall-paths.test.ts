@@ -65,7 +65,11 @@ after(() => {
   for (const server of servers) server.close();
 });
 
-async function harness(coordinator: ScriptedRuntime, executor: ScriptedRuntime) {
+async function harness(
+  coordinator: ScriptedRuntime,
+  executor: ScriptedRuntime,
+  options?: { attemptWallClockMs?: number },
+) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
@@ -91,6 +95,7 @@ async function harness(coordinator: ScriptedRuntime, executor: ScriptedRuntime) 
     workspace: new InPlaceWorkspaceManager(),
     coordinator: { runtime: coordinator, candidates: [{ endpoint: 'l', profileId: 'c' }] },
     executor: { runtime: executor, candidates: [{ endpoint: 'l', profileId: 'e' }] },
+    attemptWallClockMs: options?.attemptWallClockMs,
   });
   return { platform, deliveries, orchestrator };
 }
@@ -300,5 +305,63 @@ describe('多工作项', () => {
     assert.match(wake, /2 个工作项交回了结果/);
     assert.match(wake, /W-1、W-2/);
     assert.match(wake, /全部验收完/);
+
+    // 协调者**不续跑**上一跳的会话。
+    //
+    // 曾经每一跳都传 coordinatorResumeRef 接着上一跳往下说。两跳之间隔着一次
+    // 执行者运行（实测 13~40 分钟），提示缓存全凉，重放的整段历史按全价重算：
+    // W3 的协调者输入逐跳涨 72k→356k→469k→591k→738k→933k，六跳吃掉 74%、$16。
+    //
+    // 这件事**没有任何外部可见的症状**——续不续跑，界面上一模一样。不钉在这里，
+    // 下一个人顺手把 resumeRef 加回去也不会有测试变红。
+    assert.deepEqual(
+      coordinator.resumeRefs,
+      [undefined, undefined],
+      '协调者每一跳都该是全新会话',
+    );
+    // 换来的代价要补偿掉：全新会话必须被告知它不记得上一跳，否则模型会按
+    // 「我刚才在做什么」的惯性往下接，而它并没有"刚才"。
+    assert.match(wake, /全新的会话/);
+    assert.match(wake, /coagent_get_mission/);
+    // 开局那一跳没有"上一跳"，说这句只会让人以为前面发生过什么。
+    assert.doesNotMatch(coordinator.instructions[0], /全新的会话/);
+  });
+});
+
+describe('一跳跑太久', () => {
+  test('墙钟到点：停下来等人，不冷却候选、不回滚、不换人再烧一遍', async () => {
+    // 关键是 hangs 而不是 upstreamFailure：要守的性质是"**一直在产出**的
+    // agent 也要被拦下来"。实测 W-785 连续产出 72 分钟，做的是一个后来被
+    // 作废的工单，运行时那个静默超时一次都没响。
+    const executor = new ScriptedRuntime({ 'executor:W-1': { hangs: true } });
+    const { platform, orchestrator } = await harness(
+      new ScriptedRuntime(PLAN_AND_DISPATCH),
+      executor,
+      { attemptWallClockMs: 30 },
+    );
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+
+    const result = await orchestrator.runMission('M1', { projectRoot: process.cwd() });
+    assert.equal(result.kind, 'waiting');
+    assert.equal((result as { reason: string }).reason, 'runaway_suspected');
+
+    // 停机原因要能让人直接照做：跑了多久、改动在哪、哪个尝试。
+    const detail = (result as { detail: string }).detail;
+    assert.match(detail, /工作项 W-1/);
+    assert.match(detail, /没有回滚/);
+    assert.match(detail, /静默超时不会响/);
+
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.waitReason, 'runaway_suspected');
+    assert.equal(view.waitDetail, detail, '写回平台的必须是这一句，不是一句泛泛的');
+
+    // **只跑了一次。** 归成 upstream_failure 的话会冷却候选、回滚工作区、
+    // 换下一个候选再跑一遍同样的 30 分钟——三件事全是错的。
+    assert.equal(orchestrator.hops.length, 2, '协调者一跳 + 执行者一跳，没有第二个候选');
+    assert.deepEqual(
+      orchestrator.candidateAvailability().map((c) => c.availability),
+      ['available', 'available'],
+      '跑太久不是候选的错，不许把它冻进冷却',
+    );
   });
 });

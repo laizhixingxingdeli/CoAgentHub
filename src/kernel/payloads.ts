@@ -200,7 +200,15 @@ export type WaitReason =
   /** 被人叫停 */
   | 'cancelled_by_user'
   /** agent 连不上平台自己 —— 这是平台侧故障，不是候选的问题 */
-  | 'platform_unreachable';
+  | 'platform_unreachable'
+  /**
+   * 一跳跑得太久，疑似在打转，已经停下来等人看。
+   *
+   * 和 `no_available_agent` / `attempt_limit_reached` 分开，因为处置不同：
+   * 那两个等一等就能重跑，这个**必须有人去看它这段时间在干什么**——
+   * 实测有一跳跑了 72 分钟，做的是一个后来被作废的工单。
+   */
+  | 'runaway_suspected';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。
