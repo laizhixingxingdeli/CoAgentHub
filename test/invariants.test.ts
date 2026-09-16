@@ -151,7 +151,11 @@ describe('不变量 A：执行者路径不能验收', () => {
     // recordBlocked 在 2026-09-15 从"只记载荷"变成了真流转（dispatched ->
     // blocked）：让工作项留在 dispatched 会被调度器当成还在途，立刻再派一个
     // 执行者做同一张不成立的工单。这条守卫当场抓到了那次语义变化。
-    const stateChanging = new Set(['dispatch', 'submit', 'review', 'recordBlocked']);
+    // retire 在 2026-09-16 加进来，也是真流转（任意状态 -> retired）。
+    // 这条守卫同样当场抓到了它——加方法的人必须显式声明"它会改状态"，
+    // 而不是让它悄悄混进只读那一堆里。
+    // 它到不了 accepted：流转表里 accepted 的入边只有 review('accept')。
+    const stateChanging = new Set(['dispatch', 'submit', 'review', 'recordBlocked', 'retire']);
     const args: Record<string, unknown[]> = {
       startAttempt: [],
       toSnapshot: [],

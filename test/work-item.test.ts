@@ -236,12 +236,14 @@ describe('WorkItem: 封装', () => {
     }
   });
 
-  test('公开方法只有 dispatch / startAttempt / submit / review / recordBlocked', () => {
+  test('公开方法只有 dispatch / startAttempt / submit / review / recordBlocked / retire', () => {
     // 没有 accept() / forceAccepted() 之类的后门：只有 review('accept') 能到 accepted。
-    // recordBlocked 会流转，但只流到 blocked（逐项证明见 invariants.test.ts）。
+    // recordBlocked 与 retire 都会流转，但一个只到 blocked、一个只到 retired
+    // （逐项证明见 invariants.test.ts）。
     assert.deepEqual(publicMethodNames(WorkItem), [
       'dispatch',
       'recordBlocked',
+      'retire',
       'review',
       'startAttempt',
       'submit',

@@ -45,7 +45,8 @@ async function main() {
   const missionFile = process.argv[2];
   if (!missionFile) {
     console.log(
-      '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]',
+      '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]\n' +
+        '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]',
     );
     return;
   }
@@ -130,6 +131,10 @@ async function main() {
     workspace: process.argv.includes('--in-place')
       ? new InPlaceWorkspaceManager()
       : new GitWorktreeManager(arg('--worktrees')),
+    // 「我知道基线过期了，照跑」。必须由人显式给：调度器那边原先用一个
+    // 进程内布尔量记这件事，而 CLI 一次运行一个进程，它每次都失忆——
+    // 于是基线一过期，这条 Mission 每跑一次都被同一句话挡回去。
+    acceptStaleBase: process.argv.includes('--accept-stale-base'),
     coordinator: {
       runtime,
       candidates: pool.coordinator.map(toProfile),

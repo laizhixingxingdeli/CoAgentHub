@@ -41,6 +41,8 @@ export interface WorkItemSnapshot {
   submitted: boolean;
   reviews: unknown[];
   blocked?: unknown;
+  /** 被作废时写下的理由。老快照没有这个字段，读出来就是 undefined。 */
+  retired?: unknown;
   attempts: AttemptSnapshot[];
   executorSeq: number;
 }
