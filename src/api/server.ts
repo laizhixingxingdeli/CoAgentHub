@@ -15,6 +15,7 @@ import { Platform, PlatformRuleError } from '../application/platform.ts';
 import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
+import { serveStatic } from './static.ts';
 import { NoLiveOutput } from '../application/live.ts';
 import type { LiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -237,7 +238,14 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.listProjects());
     }
 
-    // 观测面。只读——放行/打回走 src/l3.ts，规则只该有一份实现。
+    // 正式 Web 端：src/web/ 下的无构建静态文件（ADR-0001）。
+    // 只读——放行/打回走 src/l3.ts，规则只该有一份实现。
+    if (method === 'GET' && serveStatic(path, res)) return;
+
+    // 回退到内置的单页观测面。
+    //
+    // 留着它不是懒得删：`src/web/` 还没铺好、或者被谁删了的时候，
+    // 平台至少还能自证还活着。丢了这条路，一个空目录会表现成整个平台挂了。
     if (method === 'GET' && (path === '/' || path === '/index.html')) {
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
