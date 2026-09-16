@@ -9,8 +9,11 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -46,9 +49,11 @@ function recorder() {
 
 const servers: Server[] = [];
 const made: string[] = [];
+const dirs: string[] = [];
 after(() => {
   for (const s of servers) s.close();
   for (const f of made) rmSync(f, { force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
 /** 在真实的 web 根目录里放一个文件，用完删掉。 */
@@ -129,5 +134,58 @@ describe('静态资源：接进 HTTP 面之后', () => {
     const api = await fetch(`${base}/api/version`);
     assert.equal(api.status, 200);
     assert.equal(((await api.json()) as { api: string }).api, 'v1');
+  });
+});
+
+describe('worktree 里要能跑得起来', () => {
+  test('新 worktree 带上 node_modules —— 否则执行者连验证命令都跑不了', async () => {
+    // 实测踩到的：git worktree 只带受版本控制的文件，node_modules 被
+    // .gitignore 挡在外面。执行者一跑 `node --test` 就是
+    // `Cannot find package 'pg'`，而它完全不知道为什么——
+    // 工单里写好的验证命令根本起不来。
+    const root = mkdtempSync(join(tmpdir(), 'coagent-wt-nm-'));
+    dirs.push(root);
+    const repo = mkdtempSync(join(tmpdir(), 'coagent-repo-nm-'));
+    dirs.push(repo);
+
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.name', 'test');
+    git('config', 'user.email', 't@local');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
+    // 假装装过依赖。
+    mkdirSync(join(repo, 'node_modules', 'fake-dep'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', 'fake-dep', 'index.js'), 'export default 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+
+    const workspace = new GitWorktreeManager(root);
+    const prepared = await workspace.prepare('M-nm', repo);
+    assert.ok(
+      existsSync(join(prepared.cwd, 'node_modules', 'fake-dep', 'index.js')),
+      'worktree 里必须够得到依赖',
+    );
+    await workspace.release('M-nm', repo);
+  });
+
+  test('项目根本没有 node_modules 时不报错 —— 纯脚本仓库不需要它', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'coagent-wt-nonm-'));
+    dirs.push(root);
+    const repo = mkdtempSync(join(tmpdir(), 'coagent-repo-nonm-'));
+    dirs.push(repo);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.name', 'test');
+    git('config', 'user.email', 't@local');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+
+    const workspace = new GitWorktreeManager(root);
+    const prepared = await workspace.prepare('M-nonm', repo);
+    assert.ok(existsSync(prepared.cwd));
+    assert.equal(existsSync(join(prepared.cwd, 'node_modules')), false);
+    await workspace.release('M-nonm', repo);
   });
 });
