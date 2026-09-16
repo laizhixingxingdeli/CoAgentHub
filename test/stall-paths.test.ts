@@ -399,7 +399,10 @@ describe('一跳跑太久', () => {
     const { platform, orchestrator } = await harness(
       new ScriptedRuntime(PLAN_AND_DISPATCH),
       executor,
-      { attemptWallClockMs: 40 },
+      // 200ms 而不是 40ms：测试文件是并行进程跑的，40ms 的窗口在整机满载时
+      // 会被调度抖动挤掉——实测全量跑闪红过一次，单独跑绿。时间敏感的判据
+      // 要留出比抖动大一个量级的余量，否则它迟早被当成"又是本地不准"忽略掉。
+      { attemptWallClockMs: 200 },
     );
     await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
 
@@ -410,7 +413,7 @@ describe('一跳跑太久', () => {
     // 最终还是会停——延长只给一次，不是无限期放行。
     assert.equal((result as { reason: string }).reason, 'runaway_suspected');
     // 但必须**撑过第一次到点**。没有延长的话第 40 毫秒就被掐了。
-    assert.ok(elapsed >= 80, `该等满两个窗口（>=80ms），实际 ${elapsed}ms`);
+    assert.ok(elapsed >= 320, `该等满两个窗口（>=320ms），实际 ${elapsed}ms`);
     assert.match(
       (result as { detail: string }).detail,
       /中途交过证据/,

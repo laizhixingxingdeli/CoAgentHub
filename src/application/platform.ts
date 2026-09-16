@@ -276,18 +276,26 @@ export class Platform {
     reason: string,
   ): Promise<{ status: string }> {
     const { mission, item } = await this.#locateItem(missionId, workItemId);
-    if (item.status === 'accepted' || item.status === 'blocked') {
+    // 挡两种：已经作废过的，和**已经验收过的**。
+    //
+    // accepted 不让作废是刻意的：那件事做过、也被验收过了，作废等于抹掉这段
+    // 记录（"想反悔"不是作废的理由）。契约改了让它变得多余的话，诚实的说法
+    // 是"它在旧契约下被验收过"。
+    //
+    // 但 blocked 与 rejected **必须**能作废。早先这两个也被挡着，理由写的是
+    // "不需要作废"——那句话是错的：它们都会拦着 Mission 交卷。实测 W5 撞上过，
+    // 被打回又被新工单取代的那张既不能再验收（没有新结果）也不能作废，卡死。
+    if (item.status === 'retired' || item.status === 'accepted') {
       throw new PlatformRuleError(
         'NOT_RETIRABLE',
-        `工作项 ${workItemId} 当前是 ${item.status}，不需要作废。`,
+        item.status === 'retired'
+          ? `工作项 ${workItemId} 已经作废过了。`
+          : `工作项 ${workItemId} 已经验收通过，不能作废——那是在改历史。`,
       );
     }
-    item.recordBlocked({
-      attemptId: 'l3',
-      reason,
-      whatWasTried: [],
-      needsFromUpstream: '由 L3 作废，请按当前契约重新判断要不要重做',
-    });
+    // 走 retire 而不是 recordBlocked：blocked 的含义是"这张工单不成立、
+    // 需要有人去改"，会拦住交卷；retired 的含义是"不用做了"，不该拦。
+    item.retire(reason);
     await this.#event(mission, 'work_item.retired', { reason }, workItemId);
     return { status: item.status };
   }
@@ -851,12 +859,18 @@ export class Platform {
   ): Promise<void> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     if (body.outcome === 'delivered') {
-      const unfinished = mission.workItems.filter((item) => item.status !== 'accepted');
+      // 作废掉的不算"没做完"——它是被判定为不用做了，拦着交卷没有道理。
+      // 早先只认 accepted，于是任何作废过工作项的 Mission 都永远交不了卷，
+      // 只能改用 outcome=blocked 绕过去——那等于对外宣称任务失败了。
+      const unfinished = mission.workItems.filter(
+        (item) => item.status !== 'accepted' && item.status !== 'retired',
+      );
       if (unfinished.length > 0) {
         throw new PlatformRuleError(
           'WORK_ITEMS_UNFINISHED',
           `还有未验收的工作项：${unfinished.map((i) => `${i.id}(${i.status})`).join(', ')}。` +
-            '全部 accepted 之后才能交卷；确实交不出来就用 outcome=blocked。',
+            '每一张都要么验收通过、要么作废（coagent_retire_work_item）之后才能交卷；' +
+            '确实交不出来就用 outcome=blocked。',
         );
       }
     }

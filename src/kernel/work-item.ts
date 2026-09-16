@@ -15,7 +15,19 @@ export type WorkItemStatus =
   | 'submitted'
   | 'accepted'
   | 'rejected'
-  | 'blocked';
+  | 'blocked'
+  /**
+   * 被上游主动作废：这张工单**不再需要做了**。
+   *
+   * 和 blocked 分开，因为两者对 Mission 的含义相反：
+   *   - blocked = "这张工单本身不成立，**需要有人去改它**" —— Mission 交不了卷；
+   *   - retired = "它已经不算数了，**不用管了**" —— 不该拦着 Mission 交卷。
+   *
+   * 早先两者都落在 blocked 上，于是"被取代的工作项"会把整条 Mission 焊死：
+   * 交卷闸要求全部 accepted，而作废掉的那张永远到不了 accepted。实测 W3
+   * 只能改用 outcome=blocked 交卷绕过去——那等于对外宣称任务失败了。
+   */
+  | 'retired';
 
 /**
  * WorkItem 流转表。
@@ -30,9 +42,13 @@ const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStatus[]> =
   // 早先只有 dispatched 能进 blocked，于是"契约改了、这张工单已经不算数了"
   // 这件事，非得等它被派出去之后才能表达——而那时候执行者已经在跑了。
   // 作废的判据是"这张工单还成不成立"，跟它派没派发无关。
-  created: ['dispatched', 'blocked'],
-  dispatched: ['submitted', 'blocked'],
-  submitted: ['accepted', 'rejected'],
+  // 每一个状态都能进 retired。**作废的判据是"这张工单还成不成立"，
+  // 与它此刻走到哪一步无关** —— 这条判断早先只兑现了一半（created -> blocked），
+  // 结果 rejected 的工单作废不掉：打回之后被新工单取代的那张，既不能再验收
+  // （没有新结果）、也不能作废，把整条 Mission 卡死。实测 W5 撞上过。
+  created: ['dispatched', 'blocked', 'retired'],
+  dispatched: ['submitted', 'blocked', 'retired'],
+  submitted: ['accepted', 'rejected', 'retired'],
   // accepted -> dispatched：**L3 打回时重新打开**。
   //
   // 早先 accepted 是终态，于是协调者被打回后只能为同一条意见另开新工作项——
@@ -40,11 +56,17 @@ const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStatus[]> =
   // 组成它的那些验收本来就是暂时的。
   //
   // 不变量 A 不受影响：**到达** accepted 的路依然只有 review('accept') 一条。
+  // **accepted 不能进 retired。** 那件事做过、也被验收过了，作废等于抹掉
+  // 这段记录。契约改了导致它变得多余，诚实的说法是"它在契约 r1 下被验收过"，
+  // 不是"它从来不用做"。
   accepted: ['dispatched'],
-  rejected: ['dispatched'],
+  rejected: ['dispatched', 'retired'],
   // 上游把工单修好之后可以重新派发。blocked 不是终态——它是"这张工单
   // 本身不成立，需要有人改它"。
-  blocked: ['dispatched'],
+  blocked: ['dispatched', 'retired'],
+  // retired 也不是终态：契约再改回来、或者 L3 判断它其实还要做，
+  // 直接重新派发即可，不用另开一张丢掉历史的新工单。
+  retired: ['dispatched'],
 };
 
 export interface WorkItemInit {
@@ -80,6 +102,7 @@ export class WorkItem {
   #order: Readonly<WorkOrder> | undefined;
   #reviews: Readonly<ReviewRecord>[] = [];
   #blocked: Readonly<BlockedRecord> | undefined;
+  #retired: Readonly<{ reason: string }> | undefined;
   #planRevision: number | undefined;
 
   constructor(init: WorkItemInit) {
@@ -220,6 +243,24 @@ export class WorkItem {
     this.#blocked = freezePayload({ ...record });
   }
 
+  /** 为什么被作废。没被作废过就是 undefined。 */
+  get retired(): Readonly<{ reason: string }> | undefined {
+    return this.#retired;
+  }
+
+  /**
+   * 上游作废这张工单：它不再需要做了。
+   *
+   * 和 recordBlocked 走不同的状态，因为对 Mission 的含义相反——blocked 要
+   * 拦住交卷（有东西没做完），retired 不该拦（那件事已经不用做了）。
+   *
+   * 理由是必填的：下一轮读到它的人得知道它被什么取代了，否则只会以为还要做。
+   */
+  retire(reason: string): void {
+    this.#goto('retired');
+    this.#retired = freezePayload({ reason });
+  }
+
   /* --------------------------- 快照 --------------------------- */
 
   toSnapshot(): WorkItemSnapshot {
@@ -234,6 +275,7 @@ export class WorkItem {
       submitted: this.#submitted,
       reviews: [...this.#reviews],
       blocked: this.#blocked,
+      retired: this.#retired,
       attempts: this.#attempts.map((attempt) => attempt.toSnapshot()),
       executorSeq: this.#executorSeq,
     };
@@ -253,6 +295,7 @@ export class WorkItem {
     item.#submitted = snapshot.submitted;
     item.#reviews = (snapshot.reviews ?? []) as Readonly<ReviewRecord>[];
     item.#blocked = snapshot.blocked as Readonly<BlockedRecord> | undefined;
+    item.#retired = snapshot.retired as Readonly<{ reason: string }> | undefined;
     item.#attempts = (snapshot.attempts ?? []).map((a: AttemptSnapshot) => Attempt.restore(a));
     item.#executorSeq = snapshot.executorSeq ?? 0;
     return item;

@@ -526,12 +526,15 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     await platform.dispatchWorkItems('M1', coord.attemptId, [old.workItemId]);
 
     const result = await platform.retireWorkItem('M1', old.workItemId, '契约改了，已被新工单取代');
-    assert.equal(result.status, 'blocked');
+    // retired 而不是 blocked：两者对交卷的含义相反。blocked 是"这张工单不成立、
+    // 需要有人去改"，要拦住交卷；retired 是"不用做了"，不该拦。早先两者挤在
+    // 同一个状态上，于是作废过工作项的 Mission 永远交不了卷。
+    assert.equal(result.status, 'retired');
 
     const view = await platform.getMissionView('M1');
     const item = view.workItems.find((i) => i.id === old.workItemId);
     // 离开 dispatched 才是关键：调度器只跑 dispatched 的。
-    assert.equal(item?.status, 'blocked');
+    assert.equal(item?.status, 'retired');
   });
 
   test('已验收的不让作废 —— 那是在改历史', async () => {
@@ -546,5 +549,49 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
       () => platform.retireWorkItem('M1', workItemId, '想反悔'),
       (error: unknown) => (error as { code?: string }).code === 'NOT_RETIRABLE',
     );
+  });
+
+  test('被打回的能作废 —— 被新工单取代之后，它既验收不了也不该卡着', async () => {
+    // 实测 W5 卡死在这里：协调者打回 W-1937（DOM 路径是坏的），另拆 W-2001
+    // 修掉并验收。此时 W-1937 没有新结果所以验收不了，而 rejected 又进不了
+    // 任何终态——它既不能往前也不能作废，整条 Mission 交不了卷。
+    const { platform, coord, workItemId } = await upToSubmitted();
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'reject',
+      reasons: ['DOM 路径是坏的'],
+      requiredChanges: ['换个做法'],
+    });
+    const result = await platform.retireWorkItem('M1', workItemId, '已被 W-2 取代');
+    assert.equal(result.status, 'retired');
+  });
+
+  test('作废掉的不算"没做完" —— 否则作废过工作项的 Mission 永远交不了卷', async () => {
+    const { platform, coord, workItemId } = await upToSubmitted();
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    // 再拆一张，直接作废掉：它不该拦着交卷。
+    const extra = await platform.createWorkItem('M1', coord, {
+      title: '后来发现不用做的那张',
+      order: ORDER,
+    });
+    await platform.retireWorkItem('M1', extra.workItemId, '契约改了，不用做了');
+
+    // 交卷闸早先只认 accepted，于是这里必然 WORK_ITEMS_UNFINISHED。
+    // 实测 W3 只能改用 outcome=blocked 绕过去——那等于对外宣称任务失败了。
+    await platform.submitMissionResult('M1', coord, {
+      outcome: 'delivered',
+      summary: '做完了',
+      acceptanceEvidence: ['证据'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.result?.outcome, 'delivered');
   });
 });

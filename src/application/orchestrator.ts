@@ -83,6 +83,13 @@ export interface OrchestratorDeps {
   workspace: WorkspaceManager;
   /** 单跳墙钟上限。缺省 ATTEMPT_WALL_CLOCK_MS；测试用它把 30 分钟缩成几毫秒。 */
   attemptWallClockMs?: number;
+  /**
+   * 人已经知道分叉基线过期了，照跑。
+   *
+   * 这一条只关掉**派发前的早期预警**；落地那道闸照样核对基线，安全性质
+   * 不受影响。见 #staleAcknowledged。
+   */
+  acceptStaleBase?: boolean;
 }
 
 export interface RunMissionOptions {
@@ -184,11 +191,17 @@ function coordinatorBody(view: {
       '先 coagent_get_mission 看当前状态，按这个答复继续。',
     ].join('\n');
   }
-  if (view.workItems.some((item) => item.status === 'blocked')) {
+  const blocked = view.workItems.filter((item) => item.status === 'blocked');
+  if (blocked.length > 0) {
+    // 只提 blocked，**不提 retired**：作废掉的那些已经不用管了，而且现在也
+    // 不再拦着交卷。早先两者同一个状态，这句话只好含糊地说"可能是执行者报的、
+    // 也可能是 L3 作废的"，然后让协调者自己去猜该不该管。
     return (
-      '有工作项被标成了不成立（状态 blocked）——可能是执行者报的，也可能是 L3 作废的。' +
-      '先 coagent_get_mission 看它说了什么：确实还要做就把工单改对再重新派发，' +
-      '已经被新工单取代了就别管它，也不要为它另开一个。'
+      `执行者报了 ${blocked.length} 个工作项不成立（${blocked.map((i) => i.id).join('、')}）。` +
+      '先 coagent_get_mission 看它们说了什么，然后二选一：' +
+      '**确实还要做**就把工单改对再重新派发；' +
+      '**已经不用做了**就 coagent_retire_work_item 作废掉并写清理由。' +
+      '别把它晾在那儿——blocked 会一直拦着这条 Mission 交卷。'
     );
   }
   const submitted = view.workItems.filter((item) => item.status === 'submitted');
@@ -254,12 +267,17 @@ export class Orchestrator {
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
   /**
-   * 基线过期只报一次。
+   * 基线过期已经被人认过了 —— 由调用方在**下一次运行**时显式传进来。
    *
-   * 不设这个标志的话，人重跑一次就又被同一条挡回来——而他重跑本身就
-   * 表示"我知道了，继续"。报一次、说清楚，之后由人决定。
+   * 这里曾经是一个进程内的布尔量，注释写着"报一次，之后重跑就放行"。
+   * **它从来没有兑现过那句话**：CLI 是一次运行一个进程，新进程把它重置回
+   * false，于是同一条 Mission 每跑一次都被同一句话挡回去，永远走不下去。
+   * 没有任何测试会红——挡回去看起来就像"它确实过期了"。
+   *
+   * 改成显式入参之后，"我知道了，继续"这件事有了一个真实的载体：人看到警告，
+   * 加上 --accept-stale-base 再跑。不是隐式状态，也不会自己失忆。
    */
-  #staleAcknowledged = false;
+  #staleAcknowledged: boolean;
   /** 本次运行实际用的工作区，跑完打给调用方看。 */
   workspace: { cwd: string; branch: string; baseRevision: string } | undefined;
 
@@ -273,6 +291,7 @@ export class Orchestrator {
     this.#executor = deps.executor;
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
+    this.#staleAcknowledged = deps.acceptStaleBase ?? false;
   }
 
   async runMission(missionId: string, options: RunMissionOptions): Promise<MissionRunOutcome> {
@@ -346,7 +365,8 @@ export class Orchestrator {
           const detail =
             `分叉基线是 ${view.workspaceRef.baseRevision.slice(0, 8)}，目标分支现在是 ` +
             `${targetNow.slice(0, 8)}。照旧基线干出来的东西合不回去——` +
-            '先让协调者基于新基线重新核对（重开 worktree 或确认改动不受影响）。';
+            '先让协调者基于新基线重新核对（重开 worktree，或把目标分支并进 Mission 分支）。' +
+            '确认过改动不受影响、要照跑的话，重跑时加 --accept-stale-base。';
           await this.#platform.setWaitReason(missionId, 'base_revision_stale', detail);
           return { kind: 'waiting', reason: 'base_revision_stale', detail };
         }

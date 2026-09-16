@@ -99,18 +99,27 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-async function harness(workspace: WorkspaceManager = new InPlaceWorkspaceManager()) {
+/**
+ * options.platform 让调用方**复用同一份状态另起一个 Orchestrator**——
+ * 这正是 CLI 的真实形态：一次运行一个进程，状态在库里，调度器是新的。
+ */
+async function harness(
+  workspace: WorkspaceManager = new InPlaceWorkspaceManager(),
+  options?: { acceptStaleBase?: boolean; platform?: Platform },
+) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
-  const platform = new Platform({
-    projects: new InMemoryProjectRepository(),
-    deliveries,
-    workspace,
-    activity: new InMemoryActivityLog(clock),
-    clock,
-    ids,
-  });
+  const platform =
+    options?.platform ??
+    new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      workspace,
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
   const tokens = new RunTokenRegistry();
   const server = createApi({ platform, tokens, deliveries });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
@@ -122,6 +131,7 @@ async function harness(workspace: WorkspaceManager = new InPlaceWorkspaceManager
     tokens: makeIssuer(platform, tokens),
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     workspace,
+    acceptStaleBase: options?.acceptStaleBase,
     coordinator: { runtime: coordinator, candidates: [{ endpoint: 'l', profileId: 'c' }] },
     executor: { runtime: executor, candidates: [{ endpoint: 'l', profileId: 'e' }] },
   });
@@ -282,5 +292,50 @@ describe('分叉基线过期（S05.3 / S14.7）', () => {
     // 同一个 orchestrator 再跑：已经提醒过了，不再拦。
     const second = await orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 4 });
     assert.notEqual((second as { reason?: string }).reason, 'base_revision_stale');
+  });
+
+  test('换一个进程重跑仍然会被挡 —— 上面那条只在同一个实例里成立', async () => {
+    // 这一条补的是上面那条**没覆盖到**的真实形态。上面复用同一个 orchestrator，
+    // 于是"报过一次"这件事记在实例字段里；而 CLI 是一次运行一个进程，新进程
+    // 把它重置回 false。实测 W5 因此每跑一次都被同一句话挡回去，永远走不下去，
+    // 而没有任何测试会红——挡回去看起来就像"它确实过期了"。
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const workspace = new GitWorktreeManager(worktrees);
+
+    const { platform, orchestrator } = await harness(workspace);
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 1 });
+
+    writeFileSync(join(repo, 'other.txt'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'x');
+
+    assert.equal(
+      ((await orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 4 })) as {
+        reason: string;
+      }).reason,
+      'base_revision_stale',
+    );
+
+    // 新 Orchestrator = 新进程。状态还是那份，但"提醒过了"没了。
+    const next = await harness(workspace, { platform });
+    const blocked = await next.orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 4 });
+    assert.equal(
+      (blocked as { reason: string }).reason,
+      'base_revision_stale',
+      '换进程之后还该挡 —— 否则"提醒"就成了一次性的摆设',
+    );
+    // 停机原因要告诉人下一步怎么办，不能只说"过期了"。
+    assert.match((blocked as { detail: string }).detail, /--accept-stale-base/);
+
+    // 人带着 --accept-stale-base 回来：这才是"我知道了，继续"的真实载体。
+    const accepted = await harness(workspace, { platform, acceptStaleBase: true });
+    const through = await accepted.orchestrator.runMission('M1', {
+      projectRoot: repo,
+      maxRounds: 4,
+    });
+    assert.notEqual((through as { reason?: string }).reason, 'base_revision_stale');
   });
 });
