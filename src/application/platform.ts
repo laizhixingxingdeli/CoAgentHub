@@ -1309,6 +1309,14 @@ export interface MissionView {
     attempts: number;
     attemptIds: string[];
     lastReview?: ReviewRecord;
+    /**
+     * 工单正文。**这是 L2 交给 L1 的那封信**——目标、范围、怎么验证、
+     * 什么算做完。观测面要让人看到 agent 之间到底传了什么，缺了它就只剩
+     * 一个标题，而"为什么它做成了这样"全在这份正文里。
+     */
+    order?: WorkOrder;
+    /** L1 交回的那封信：做完了什么、动了哪些文件、有什么要说的。 */
+    executionResult?: ExecutionResultBody;
   }[];
   result: MissionResultBody | undefined;
   /** 升级次数。调度器据此判断「该停下来等 L3 了」。 */
@@ -1413,6 +1421,10 @@ function viewOf(mission: Mission): MissionView {
       attempts: item.attempts.length,
       attemptIds: item.attempts.map((a) => a.id),
       lastReview: item.reviews.at(-1),
+      // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
+      // 光有 title 和一个 hasResult 布尔量回答不了。
+      order: item.order,
+      executionResult: item.executionResult,
     })),
     result: mission.result,
     escalations: mission.escalations.length,
