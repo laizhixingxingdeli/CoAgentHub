@@ -138,8 +138,19 @@ function coordinatorInstruction(view: {
       '已经被新工单取代了就别管它，也不要为它另开一个。'
     );
   }
-  if (view.workItems.some((item) => item.status === 'submitted')) {
-    return '平台唤醒你：执行者已经交回结果。先 coagent_get_mission 看当前状态，然后逐个做技术验收。';
+  const submitted = view.workItems.filter((item) => item.status === 'submitted');
+  if (submitted.length > 0) {
+    // 数量要说出来。只说"有结果交回来了"的话，验完第一个就交还控制权是完全
+    // 合理的反应——而每交还一次就是一轮全新的协调者会话，把之前的上下文
+    // 重放一遍。实测协调者轮次是整条 Mission 开销的主项（一条走到六轮的，
+    // 协调者一个人占 74%），所以这一句必须把"这一轮要做完几件"钉死。
+    const ids = submitted.map((item) => item.id).join('、');
+    return (
+      `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
+      '先 coagent_get_mission 看当前状态，然后**在这一轮里把它们全部验收完**。\n\n' +
+      '验完之后如果还有下一批要做的，同样**一次派完**——' +
+      'coagent_dispatch_work_item 的 workItemIds 是数组，互不依赖的放在同一次调用里。'
+    );
   }
   if (view.planRevision > 0) {
     return '平台唤醒你。先 coagent_get_mission 看当前状态，然后决定下一步。';

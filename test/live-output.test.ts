@@ -13,7 +13,7 @@ import type { Server } from 'node:http';
 
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
-import { InMemoryLiveOutput, NoLiveOutput } from '../src/application/live.ts';
+import { InMemoryLiveOutput, KEEP_TAIL_ON_FINISH, NoLiveOutput } from '../src/application/live.ts';
 import { PgLiveOutput, PgStateStore } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
@@ -85,12 +85,37 @@ describe('实时输出：游标语义', () => {
     assert.equal(all.at(-1)?.text, '行 49', '留的该是最近的那一段');
   });
 
-  test('一跳结束就清掉它的缓冲 —— 最终输出已经落在 Attempt 上了', async () => {
+  test('一跳结束后行还在 —— 跑完的任务回头也要看得到输出', async () => {
     const live = new InMemoryLiveOutput();
     await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: 'x' });
     await live.append({ missionId: 'M1', attemptId: 'A2', kind: 'text', text: 'y' });
     await live.finish('A1');
-    assert.deepEqual((await live.since('M1')).map((c) => c.attemptId), ['A2']);
+    // 这一条曾经断言的是相反的事（收尾把 A1 删干净）。那个行为把"跑完的任务
+    // 没有历史"当成了设计，而 Attempt.output 实测只有 1.4 KB，补不上。
+    assert.deepEqual(
+      (await live.since('M1')).map((c) => c.attemptId),
+      ['A1', 'A2'],
+      '没超过保留量就一行都不该删',
+    );
+  });
+
+  test('超过保留量才裁，裁掉的部分要留下痕迹', async () => {
+    const live = new InMemoryLiveOutput(10_000);
+    const total = KEEP_TAIL_ON_FINISH + 25;
+    for (let i = 0; i < total; i += 1) {
+      await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: `行 ${i}` });
+    }
+    await live.finish('A1');
+    const kept = await live.since('M1', 0, 10_000);
+
+    const notes = kept.filter((c) => c.kind === 'note');
+    assert.equal(notes.length, 1, '裁剪必须留痕：悄悄截断会让人把残段当全貌');
+    assert.match(String(notes[0].text), /共 525 行/);
+
+    const text = kept.filter((c) => c.kind === 'text');
+    assert.equal(text.length, KEEP_TAIL_ON_FINISH);
+    assert.equal(text.at(-1)?.text, `行 ${total - 1}`, '留的该是尾巴，不是开头');
+    assert.equal(text[0]?.text, '行 25');
   });
 });
 
@@ -186,9 +211,34 @@ describe('实时输出：跨进程（Postgres）', () => {
       assert.equal((await reader.since('M-live', chunks[0].seq)).length, 1);
 
       await writer.finish('A1');
-      assert.deepEqual(await reader.since('M-live'), [], '收尾要把实时行删干净');
+      assert.equal(
+        (await reader.since('M-live')).length,
+        2,
+        '收尾不再删光：没超过保留量就该原样留着，另一个进程也读得到',
+      );
     } finally {
       await readerStore.close();
     }
+  });
+
+  test('超过保留量时，库里裁的是最早的那一段', async (t) => {
+    if (!ok) {
+      t.skip('没有可用的 Postgres');
+      return;
+    }
+    const live = new PgLiveOutput(store as PgStateStore);
+    const total = KEEP_TAIL_ON_FINISH + 12;
+    for (let i = 0; i < total; i += 1) {
+      await live.append({ missionId: 'M-trim', attemptId: 'A-trim', kind: 'text', text: `行 ${i}` });
+    }
+    await live.finish('A-trim');
+
+    // limit 要给足：默认 500 正好等于保留量，取不出那条 note 就断言不到裁剪。
+    const kept = await live.since('M-trim', 0, 10_000);
+    const text = kept.filter((c) => c.kind === 'text');
+    assert.equal(text.length, KEEP_TAIL_ON_FINISH);
+    assert.equal(text[0]?.text, '行 12', 'DELETE … ORDER BY seq DESC OFFSET 删的必须是最早的');
+    assert.equal(text.at(-1)?.text, `行 ${total - 1}`);
+    assert.equal(kept.filter((c) => c.kind === 'note').length, 1);
   });
 });

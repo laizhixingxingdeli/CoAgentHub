@@ -289,5 +289,16 @@ describe('多工作项', () => {
     );
     assert.ok(blockedSubmit, '只验收一半就交卷必须被拦');
     assert.equal((blockedSubmit.json as { error: string }).error, 'WORK_ITEMS_UNFINISHED');
+
+    // 唤醒语必须把这一轮要验收的**全部**点名。
+    //
+    // 只说"执行者已经交回结果"的话，验完第一个就交还控制权是完全合理的反应；
+    // 而每交还一次就是一轮全新的协调者会话，要把之前的上下文重放一遍。实测
+    // 协调者轮次是整条 Mission 开销的主项（走到六轮的那条，协调者占 74%、
+    // $16），所以这句话里的数量与 id 是省钱的杠杆，不是措辞。
+    const wake = coordinator.instructions[1];
+    assert.match(wake, /2 个工作项交回了结果/);
+    assert.match(wake, /W-1、W-2/);
+    assert.match(wake, /全部验收完/);
   });
 });

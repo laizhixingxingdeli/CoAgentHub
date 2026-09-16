@@ -23,6 +23,7 @@ import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
+import { KEEP_TAIL_ON_FINISH, truncationNote } from './live.ts';
 import type { LiveChunk, LiveOutput } from './live.ts';
 import type { TokenUsage } from '../kernel/index.ts';
 import type {
@@ -713,12 +714,42 @@ export class PgLiveOutput implements LiveOutput {
   }
 
   /**
-   * 一跳结束就删掉它的实时行。
+   * 一跳结束时裁剪它的实时行，**只删最早的那些，留下尾巴**。
    *
-   * 最终输出已经作为 Attempt 的一部分落库了，这里留着就是同一份数据存两遍，
-   * 而且是会无限长的那一遍。
+   * 原来这里是 `DELETE … WHERE attempt_id = $1`，一行不留。理由写的是
+   * "最终输出已经作为 Attempt 的一部分落库了"——实测那是 1.4 KB 的摘要，
+   * 不是几万行的过程。跑完的任务因此永远只剩空面板。
+   *
+   * 裁掉多少补一条 note 记下来：悄悄截断会让人把残段当全貌。
    */
   async finish(attemptId: string): Promise<void> {
-    await this.#store.pool.query('DELETE FROM live_output WHERE attempt_id = $1', [attemptId]);
+    const { rows } = await this.#store.pool.query<{ dropped: string }>(
+      `WITH doomed AS (
+         SELECT seq FROM live_output
+          WHERE attempt_id = $1
+          ORDER BY seq DESC
+         OFFSET $2
+       )
+       DELETE FROM live_output
+        WHERE seq IN (SELECT seq FROM doomed)
+       RETURNING seq`,
+      [attemptId, KEEP_TAIL_ON_FINISH],
+    );
+    const dropped = rows.length;
+    if (dropped === 0) return;
+    // missionId 从幸存的行里取：finish 的签名只有 attemptId，而 note 这一行
+    // 必须挂在同一条 Mission 上才看得见。
+    const { rows: survivors } = await this.#store.pool.query<{ mission_id: string }>(
+      'SELECT mission_id FROM live_output WHERE attempt_id = $1 LIMIT 1',
+      [attemptId],
+    );
+    const missionId = survivors[0]?.mission_id;
+    if (!missionId) return;
+    await this.append({
+      missionId,
+      attemptId,
+      kind: 'note',
+      text: truncationNote(dropped, KEEP_TAIL_ON_FINISH),
+    });
   }
 }

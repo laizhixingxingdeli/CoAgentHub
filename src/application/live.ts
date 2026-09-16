@@ -28,12 +28,43 @@ export interface LiveChunk {
   readonly usage?: TokenUsage;
 }
 
+/**
+ * 一跳结束后给它留多少行。
+ *
+ * 曾经是 0 —— `finish()` 把整跳的行全删掉，理由写的是"最终输出已经落在
+ * Attempt 上了"。**那句话是错的**：实测 Attempt.output 只有 1.4 KB
+ * （末尾一小段 + 工具名清单），而一跳真正吐出来的是上万行。于是跑完的任务
+ * 一律只剩一个空面板；反倒是**崩掉的**那些跳因为 finish 没执行，行全留着。
+ * 留存策略正好反了。
+ *
+ * 改成留尾巴。实时输出是**看**的不是存的，全留没意义；但一行不留是在删证据。
+ * 尾部 500 行覆盖了"它最后在干什么、怎么结束的"这个回头最常问的问题，
+ * 按实测每行约 130 字节算，十几跳的 Mission 也就一两 MB。
+ */
+export const KEEP_TAIL_ON_FINISH = 500;
+
 export interface LiveOutput {
   append(chunk: Omit<LiveChunk, 'seq' | 'at'>): Promise<void>;
   /** 取 `cursor` 之后的；不传 cursor 表示从头。 */
   since(missionId: string, cursor?: number, limit?: number): Promise<readonly LiveChunk[]>;
-  /** 一跳结束后把它的实时缓冲清掉——最终输出已经落在 Attempt 上了。 */
+  /**
+   * 一跳结束后裁剪它的实时缓冲，只留尾部若干行。
+   *
+   * 裁掉多少**必须留下痕迹**（补一条 kind='note'）。悄悄截断的日志比没有日志
+   * 更坏：人会把看到的那一段当成全部，然后在一段被裁掉的历史上做判断。
+   */
   finish?(attemptId: string): Promise<void>;
+}
+
+/**
+ * 裁剪痕迹的正文。
+ *
+ * 它排在被留下的行**后面**（append-only 的表没法往前插）。所以它不是正文的
+ * 一部分，界面要把它拎出来挂在终端上方当横幅——混在末尾会被读成
+ * "接下来还有"，而它说的是"前面没了"。
+ */
+export function truncationNote(dropped: number, kept: number): string {
+  return `实时输出已裁剪：本跳共 ${dropped + kept} 行，只保留最后 ${kept} 行。`;
 }
 
 /**
@@ -66,7 +97,16 @@ export class InMemoryLiveOutput implements LiveOutput {
   }
 
   async finish(attemptId: string): Promise<void> {
-    this.#chunks = this.#chunks.filter((c) => c.attemptId !== attemptId);
+    const mine = this.#chunks.filter((c) => c.attemptId === attemptId);
+    if (mine.length <= KEEP_TAIL_ON_FINISH) return;
+    const keep = new Set(mine.slice(-KEEP_TAIL_ON_FINISH).map((c) => c.seq));
+    this.#chunks = this.#chunks.filter((c) => c.attemptId !== attemptId || keep.has(c.seq));
+    await this.append({
+      missionId: mine[0].missionId,
+      attemptId,
+      kind: 'note',
+      text: truncationNote(mine.length - KEEP_TAIL_ON_FINISH, KEEP_TAIL_ON_FINISH),
+    });
   }
 }
 
