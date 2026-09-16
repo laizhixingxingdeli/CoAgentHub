@@ -13,6 +13,9 @@
   modulepreload 只预取不执行，正好。
 -->
 <link rel="stylesheet" href="/tokens.css" />
+<!-- narrate.js 也预取：它是三个页面共用的叙事层，projects.js 与 task.js 都要 import 它。
+     同样**不能**写成会执行的 <script>：app.js 已经通过 import 链带到它了。 -->
+<link rel="modulepreload" href="/narrate.js" />
 <link rel="modulepreload" href="/projects.js" />
 <link rel="modulepreload" href="/task.js" />
 <link rel="modulepreload" href="/pool.js" />
@@ -46,9 +49,13 @@ body {
 }
 .brand { font-weight: 700; letter-spacing: .2px; padding: 2px 8px 12px; color: var(--sidebar-foreground); }
 .nav .item {
-  display: block; padding: 7px 10px; font-size: 13px; text-decoration: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; font-size: 13px; text-decoration: none;
   color: var(--sidebar-foreground); border-radius: calc(var(--radius) - 4px);
 }
+/* 图标跟文字走同一条颜色，不在这一层写死色：
+   导航面已经给定了前景色，图标自己配一个色就会在主题切换时留在旧色上。 */
+.nav .item .ico { width: 14px; height: 14px; flex: none; fill: currentColor; opacity: .9; }
 .nav .item:hover { background: color-mix(in oklch, var(--sidebar-foreground) 12%, transparent); }
 .nav .item[data-active="1"] {
   background: var(--sidebar-accent); color: var(--sidebar);
@@ -71,7 +78,7 @@ body {
 .topbar a:hover { color: var(--accent); }
 .topbar .sep { color: var(--muted-foreground); }
 .topbar .here { color: var(--foreground); }
-.view { padding: 16px; }
+.view { padding: 20px; }
 
 /* ===== 项目页 ===== */
 .page { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; align-items: start; }
@@ -98,7 +105,7 @@ body {
 
 .card {
   background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 12px; margin-bottom: 12px;
+  border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
 }
 .card h2 { margin: 0 0 10px; font-size: 14px; word-break: break-all; }
 .fields { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 10px; font-size: 13px; margin: 0; }
@@ -118,6 +125,18 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tasks tbody tr:last-child td { border-bottom: 0; }
 .cell-title { max-width: 340px; }
 .cell-reason { color: var(--muted-foreground); max-width: 260px; }
+.cell-usage { white-space: nowrap; font-size: 12px; color: var(--muted-foreground); }
+
+/* 行左侧那条色条：颜色与阶段 chip 同源（都经 stageTone），否则「执行中」的
+   chip 是绿的、它的行却是灰的，看起来像两件事。不写死色值，一律走 --status-*。 */
+.tasks tbody tr { --row-tone: var(--border); }
+.tasks tbody tr.row-queued { --row-tone: var(--status-queued); }
+.tasks tbody tr.row-running { --row-tone: var(--status-running); }
+.tasks tbody tr.row-done { --row-tone: var(--status-done); }
+.tasks tbody tr.row-failed { --row-tone: var(--status-failed); }
+.tasks tbody tr.row-cancelled { --row-tone: var(--status-cancelled); }
+.tasks tbody tr.row-unconfirmed { --row-tone: var(--status-unconfirmed); }
+.tasks tbody tr td:first-child { box-shadow: inset 3px 0 0 var(--row-tone); }
 
 /* chip：底色/边色的公式与观测面 .badge 完全一致，只是类名不同。
    同一套 status-* 令牌喂两边，「执行中」在两个界面里才是同一个颜色。 */
@@ -148,6 +167,11 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .task-title { margin: 0; font-size: 16px; word-break: break-all; grid-column: 1; }
 .task-chips { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 1; }
+/* 「现在在干什么」：一屏黑话里最缺的一句，所以给它正文色而不是 muted。 */
+.now-doing { grid-column: 1; color: var(--foreground); font-size: 13px; }
+/* 修订号：名词带版本号（「契约 r2 · 规划 r1」），不是一堆光秃的数字。 */
+.revision-line { grid-column: 1; font-size: 12px; color: var(--muted-foreground); }
+.wait-reason { grid-column: 1; color: var(--status-unconfirmed); font-size: 13px; }
 .task-stats {
   display: flex; gap: 22px; margin: 0; grid-column: 1;
   flex-wrap: wrap; align-items: end;
@@ -155,6 +179,8 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
 .task-stats .stat { display: grid; gap: 2px; }
 .task-stats dt { font-size: 11px; color: var(--muted-foreground); }
 .task-stats dd { margin: 0; font-weight: 600; }
+/* 用量拆项：新增 / 缓存命中（占比）/ 费用 / 高缓存说明，一行里换行不溢出。 */
+.task-stats .usage-breakdown { font-weight: 500; font-size: 12px; max-width: 520px; line-height: 1.5; }
 .stop-btn { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
 
 /* disabled 要看得出 disabled：一个能点但点了没反应的按钮比没按钮更坑。 */
@@ -176,9 +202,17 @@ button[disabled] {
 }
 .evt:hover { border-color: var(--accent); }
 .evt[data-active="1"] { border-color: var(--accent); background: var(--accent-faint); }
-.evt-kind { font-weight: 600; word-break: break-all; }
-.evt-time { font-size: 12px; color: var(--muted-foreground); }
-.evt-refs { font-size: 11px; color: var(--muted-foreground); word-break: break-all; }
+.evt-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 角色流转徽章：一眼看出这一跳是谁交给谁。色只取 --accent 与 --muted-foreground。 */
+.evt-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  background: var(--accent-faint); border: 1px solid var(--border);
+}
+.evt-action { font-weight: 600; font-size: 13px; word-break: break-word; }
+.evt-time { margin-left: auto; font-size: 11px; color: var(--muted-foreground); white-space: nowrap; }
+.evt-detail { margin-top: 4px; font-size: 12px; color: var(--muted-foreground); word-break: break-word; }
+.evt-refs { margin-top: 3px; font-size: 11px; color: var(--muted-foreground); word-break: break-all; }
 
 .detail-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .detail-title { font-size: 14px; font-weight: 600; }
@@ -234,6 +268,8 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
   color: var(--muted-foreground); background: var(--muted); cursor: not-allowed;
 }
 .pool-error { color: var(--status-failed); }
+/* 用量卡：与任务页同一个 .usage-breakdown 形状，只是不放在 .task-stats 里。 */
+.usage-breakdown { font-size: 12px; line-height: 1.5; }
 
 .placeholder {
   background: var(--card); border: 1px dashed var(--border);
@@ -246,8 +282,9 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
 <div class="shell">
   <nav class="nav" aria-label="主导航">
     <div class="brand">CoAgentHub</div>
-    <a class="item" href="#/projects" data-route="projects">项目</a>
-    <a class="item" href="#/pool" data-route="pool">资源池</a>
+    <!-- 图标是内联 SVG 且 fill=currentColor：不额外取网络资源，也不新攏一个色值。 -->
+    <a class="item" href="#/projects" data-route="projects"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M1.6 3.2A1.2 1.2 0 0 1 2.8 2h3.1c.36 0 .7.16.93.43l.87 1.07h6.5A1.2 1.2 0 0 1 15.4 4.7v7.5a1.2 1.2 0 0 1-1.2 1.2H2.8a1.2 1.2 0 0 1-1.2-1.2V3.2Z"/></svg>项目</a>
+    <a class="item" href="#/pool" data-route="pool"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 1.4 14.4 4.6 8 7.8 1.6 4.6 8 1.4Zm5.2 5.7 1.2.6L8 10.9 1.6 7.7l1.2-.6L8 9.6l5.2-2.5ZM8 12.1l5.2-2.5 1.2.6L8 13.4 1.6 10.2l1.2-.6L8 12.1Z"/></svg>资源池</a>
     <div class="spacer"></div>
     <div class="foot">
       <!-- 设置与用户名现在都是占位：设置页属于后续 Mission，

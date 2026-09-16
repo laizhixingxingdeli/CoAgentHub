@@ -101,6 +101,23 @@ describe('外壳的文件形状', () => {
     assert.match(html, /id="crumbs"/);
   });
 
+  test('导航有图标（内联 SVG，fill=currentColor），也不引外链图片', () => {
+    const html = read('index.html');
+    const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
+    assert.ok(nav, '找不到导航');
+    assert.equal((nav[0].match(/<svg/g) || []).length, 2, '「项目」「资源池」各要一个图标');
+    assert.equal((nav[0].match(/fill="currentColor"/g) || []).length, 2, '图标要 fill=currentColor');
+    // 不靠图片资源：这一页零构建、零外链，图标必须内联。
+    assert.equal(/<img/.test(nav[0]), false);
+  });
+
+  test('narrate.js 被 modulepreload，且不是会执行的 script', () => {
+    const html = read('index.html');
+    assert.match(html, /<link rel="modulepreload" href="\/narrate\.js" \/>/);
+    assert.equal(/<script[^>]+src="\/narrate\.js"/.test(html), false, 'narrate.js 被写成会执行的 script');
+    assert.equal((html.match(/<script type="module"/g) || []).length, 1, '外壳只该有一个入口 script');
+  });
+
   test('app.js 用 location.hash 路由，认不出的 hash 落回 #/projects', () => {
     const shell = read('app.js');
     assert.match(shell, /location\.hash/);
@@ -138,6 +155,17 @@ describe('外壳的文件形状', () => {
 });
 
 describe('色彩令牌与观测面同源', () => {
+  test('表格行色条与阶段 chip 同源，且只用 --status-*', () => {
+    const html = read('index.html');
+    for (const tone of ['queued', 'running', 'done', 'failed', 'unconfirmed', 'cancelled']) {
+      const rule = ruleBody(html, new RegExp(`\\.tasks tbody tr\\.row-${tone}\\s*\\{([^}]*)\\}`));
+      assert.ok(rule.includes(`var(--status-${tone})`), `row-${tone} 该用 var(--status-${tone})`);
+    }
+    // 色条本身不写死色值：新摧一个 oklch 就是与观测面分叉一处。
+    const bar = ruleBody(html, /\.tasks tbody tr td:first-child\s*\{([^}]*)\}/);
+    assert.ok(bar.includes('var(--row-tone)'), `色条要走 --row-tone：${bar}`);
+    assert.equal(/oklch\(|#[0-9a-fA-F]{3,6}/.test(bar), false, '色条不该写死颜色');
+  });
   test(':root 两块是从 web.ts 逐字搬过来的', () => {
     const source = WEB_PAGE.replace(/\r\n/g, '\n');
     const from = source.indexOf(':root {');
@@ -185,51 +213,44 @@ describe('色彩令牌与观测面同源', () => {
 });
 
 describe('项目页的文案表', () => {
-  test('阶段中文以内核 MissionStatus 为键，不出现设计稿那几个词', () => {
+  test('阶段中文来自 narrate.js，项目页里不再抄第二份', async () => {
     const page = read('projects.js');
-    const statuses = [
-      'investigating',
-      'planning',
-      'executing',
-      'awaiting_review',
-      'completed',
-      'blocked',
-    ];
-    // 键少了不是报错，是那条任务的 chip 退回默认灰——所以逐个点名。
-    for (const status of statuses) {
-      assert.ok(new RegExp(`${status}:\\s*'`).test(page), `projects.js 少了 ${status} 的阶段文案`);
-    }
-    for (const cn of ['调查中', '规划中', '执行中', '等你检视', '已完成', '已中止']) {
-      assert.ok(page.includes(cn), `缺阶段文案 ${cn}`);
-    }
+    // 中文表只住在 narrate.js。再抄一份，加一个状态就会只改到一处，
+    // 另一处的 chip 静悄悄退回默认灰。
+    assert.match(page, /from '\.\/narrate\.js'/);
+    assert.match(page, /STAGE_CN/);
+    assert.equal(/STAGE_CN\s*=\s*\{/.test(page), false, 'projects.js 里又定义了一份 STAGE_CN');
+    assert.equal(/WAIT_REASON\s*=\s*\{/.test(page), false, 'projects.js 里又定义了一份 WAIT_REASON');
     // 这三个是设计稿里的阶段名，内核里没有。照抄上去就是一个永远配不上的 chip。
     for (const fake of ['investigation', 'execution', 'technical_review']) {
       assert.equal(new RegExp(`\\b${fake}\\b`).test(page), false, `projects.js 不该出现 ${fake}`);
     }
+    const { STAGE_CN } = await import('../src/web/narrate.js');
+    for (const cn of ['调查中', '规划中', '执行中', '等你检视', '已完成', '已中止']) {
+      assert.ok(Object.values(STAGE_CN).includes(cn), `缺阶段文案 ${cn}`);
+    }
+    const { stageChip } = await import('../src/web/projects.js');
+    assert.ok(stageChip('executing').includes(STAGE_CN.executing));
   });
 
-  test('停机原因翻成人话，任务表七列齐', () => {
+  test('停机原因来自 narrate.js；任务表七列齐', async () => {
     const page = read('projects.js');
-    assert.match(page, /WAIT_REASON/, '只贴一个 enum 名字等于没贴');
-    for (const reason of [
-      'no_available_agent',
-      'platform_unreachable',
-      'waiting_l3',
-      'escalated',
-      'project_busy',
-      'attempt_limit_reached',
-      'target_changed',
-      'base_revision_stale',
-      'cancelled_by_user',
-    ]) {
-      assert.ok(new RegExp(`${reason}:\\s*'`).test(page), `缺停机原因文案 ${reason}`);
+    assert.match(page, /reasonText/, '只贴一个 enum 名字等于没贴');
+    const reasons = [
+      'no_available_agent', 'platform_unreachable', 'waiting_l3', 'escalated', 'project_busy',
+      'attempt_limit_reached', 'target_changed', 'base_revision_stale', 'cancelled_by_user',
+    ];
+    for (const reason of reasons) {
+      assert.equal(new RegExp(`${reason}:\\s*'`).test(page), false, `projects.js 里又抄了一份 ${reason}`);
     }
-    for (const column of ['任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', '总 Token']) {
+    const { WAIT_REASON } = await import('../src/web/narrate.js');
+    for (const reason of reasons) assert.ok(reason in WAIT_REASON, `缺停机原因文案 ${reason}`);
+    for (const column of ['任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token']) {
       assert.ok(page.includes(`'${column}'`), `任务表少一列：${column}`);
     }
-    assert.match(page, /usage[\s\S]*total/, '总 Token 读 usage.total');
-    // 左栏与详情卡要的字段。少一个的 symptom 是那一格永远是 —，不报错。
-    for (const field of ['projectId', 'mutating', 'projectRoot', 'branch', 'intent', 'waitDetail']) {
+    assert.match(page, /usageLine/, 'Token 列与任务页同一个 usageLine');
+    // 左栏与详情卡要的字段。少一个的 symptom 是那一格永远空着，不报错。
+    for (const field of ['projectId', 'mutating', 'projectRoot', 'branch', 'intent']) {
       assert.ok(page.includes(field), `projects.js 没读 ${field}`);
     }
     assert.match(page, /\/api\/projects/, '左栏数据来自 GET /api/projects');
@@ -280,17 +301,26 @@ describe('项目页的渲染函数喂真数据', () => {
     }
   });
 
-  test('状态 chip 是第二根轴，且优先级对', async () => {
-    const { stateChip } = await loaded;
+  test('状态 chip 是第二根轴，终态词与阶段不撞，且优先级对', async () => {
+    const { stateChip, stageChip } = await loaded;
     // 暂停 > 停机 > 终态 > 进行中。顺序弄反会把"人叫停了"显示成"进行中"。
-    assert.match(stateChip({ paused: true, status: 'completed' }), /cancelled">已暂停/);
-    assert.match(stateChip({ waitReason: 'project_busy' }), /unconfirmed">等待中/);
-    assert.match(stateChip({ status: 'completed' }), /done">已完成/);
-    assert.match(stateChip({ status: 'blocked' }), /failed">已中止/);
-    assert.match(stateChip({ status: 'executing' }), /running">进行中/);
+    assert.match(stateChip({ paused: true, status: 'completed' }), /cancelled"[^>]*>已暂停/);
+    assert.match(stateChip({ waitReason: 'project_busy' }), /unconfirmed"[^>]*>等待中/);
+    assert.match(stateChip({ status: 'completed' }), /done"[^>]*>已结束/);
+    assert.match(stateChip({ status: 'blocked' }), /failed"[^>]*>已停止/);
+    assert.match(stateChip({ status: 'executing' }), /running"[^>]*>进行中/);
+    // 完成品：阶段说「已完成」/「已中止」，状态说「已结束」/「已停止」。同一个
+    // 词会让「卡住了」和「做完了」在两列里长得一模一样。
+    assert.notEqual(stateChip({ status: 'completed' }), stageChip('completed'));
+    assert.notEqual(stateChip({ status: 'blocked' }), stageChip('blocked'));
+    // 等待中的行，停机原因必须跟得上（title）。
+    assert.match(
+      stateChip({ waitReason: 'project_busy' }),
+      /title="同项目有别的 Mission 占着改动名额"/,
+    );
   });
 
-  test('原因栏：waitDetail 优先，没有才翻 enum，都没有是 —', async () => {
+  test('原因栏：waitDetail 优先，没有才翻 enum，都没有是空串', async () => {
     const { reasonText } = await loaded;
     assert.equal(
       reasonText({ waitReason: 'project_busy', waitDetail: 'M-别的 占着名额' }),
@@ -299,23 +329,33 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.equal(reasonText({ waitReason: 'no_available_agent' }), '候选全在冷却，等一会儿重跑');
     // 内核加了一个前端不认识的 reason：原样显示，不能显示成空白。
     assert.equal(reasonText({ waitReason: 'brand_new_reason' }), 'brand_new_reason');
-    assert.equal(reasonText({}), '—');
+    // 没停机就回空串，不是一个「—」：一个横杠什么信息都没有，还容易被当成
+    // 「原因就是横杠」。空态由页面说清楚（见 taskTableHtml）。
+    assert.equal(reasonText({}), '');
   });
 
-  test('七列齐；空契约有文案；没时间戳就 —', async () => {
+  test('七列齐；空契约有文案；没时间戳是解释句；Token 拆项；行有色条', async () => {
     const { taskTableHtml, TASK_COLUMNS } = await loaded;
     assert.deepEqual([...TASK_COLUMNS], [
-      '任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', '总 Token',
+      '任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token',
     ]);
     const html = taskTableHtml([{ missionId: 'M1', status: 'investigating' }]);
     for (const column of TASK_COLUMNS) {
       assert.ok(html.includes('<th>' + column + '</th>'), `表头缺 ${column}`);
     }
     assert.match(html, /（没有契约）/);
-    assert.ok(html.includes('<td class="muted">—</td>'), '最新更新时间必须是 —');
+    // 列表 API 不返回时间戳：写解释句，不是孤零零一个 —。
+    assert.ok(html.includes('列表接口不提供时间戳'), `没时间戳要解释为什么：${html}`);
+    assert.equal(html.includes('<td class="muted">—</td>'), false, '不再用 — 当唯一内容');
+    // 没停机也不留 —。
+    assert.ok(html.includes('没有停机，正常推进'), html);
+    // Token 拆成新增 + 缓存命中（口径与任务页同一个 usageLine）。
+    assert.ok(html.includes('新增') && html.includes('缓存命中'), html);
+    // 行左侧色条：tone 与阶段 chip 一致，取色留给 CSS 的 .row-* —— 
+    // 测试守的是“行上有这个类”，具体色值在 index.html 里再断言。
+    assert.match(html, /<tr class="row-queued" data-mission-id="M1">/);
     // usage 缺失当 0，而不是把 NaN / undefined 映上屏。
     assert.equal(/NaN|undefined|null/.test(html), false, '上屏了 NaN/undefined 这种字串');
-    assert.match(html, /<td class="mono">0<\/td>/);
   });
 
   test('不守规矩的字段进不了 DOM', async () => {
@@ -329,7 +369,7 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.match(list, /data-active="1"/, '选中的项目要看得出');
     const card = detailCardHtml({ projectId: 'P', mutating: true }, {});
     assert.ok(card.includes('1/1'), 'mutating 有值要显示 1/1');
-    assert.ok(card.includes('—'), '拿不到仓库与分支时显示 —');
+    assert.ok(card.includes('还没读到'), '拿不到仓库与分支时要解释，不是孤零零一个 —');
     assert.equal(esc('a&b<c>d"e'), 'a&amp;b&lt;c&gt;d&quot;e');
   });
 
@@ -483,6 +523,6 @@ describe('真读模型喂真渲染函数', () => {
     assert.equal('mutating' in projects[0]!, false, '没占名额时后端不该塞一个 null 进来');
     const { detailCardHtml } = await import('../src/web/projects.js');
     assert.ok(detailCardHtml(projects[0]!, {}).includes('0/1'), '读不到 mutating 就是 0/1');
-    assert.ok(detailCardHtml(projects[0]!, {}).includes('—'), '拿不到 workspaceRef 时仓库与分支显示 —');
+    assert.ok(detailCardHtml(projects[0]!, {}).includes('还没读到'), '拿不到 workspaceRef 时要解释为什么');
   });
 });

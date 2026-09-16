@@ -19,11 +19,17 @@
  */
 
 import { esc } from './projects.js';
+import { usageLine } from './narrate.js';
 
 const DASH = '—';
 
-/** 四列的列名，顺序就是契约定的那个。表头与用例都对着这一份。 */
-export const POOL_COLUMNS = ['候选名称', 'AgentEndpoint', 'Runtime', 'ExecutionProfile'];
+/**
+ * 四列的列名。单元格取值的顺序不变，变的只是表头——之所以要变，是因为
+ * `ExecutionProfile` / `Runtime` / `AgentEndpoint` 是接口名，不是人话：
+ * 看到 `provider/model` 而不知道那是「这条候选会以什么身份跑」的人，就得
+ * 去读代码。
+ */
+export const POOL_COLUMNS = ['候选名称', '接入点', '适配层', '运行时'];
 
 /* ===================== 纯函数 ===================== */
 
@@ -37,17 +43,17 @@ function factValue(facts, key) {
 }
 
 /**
- * ExecutionProfile 那一格：从 facts 里取 provider 与 model。
+ * 运行时那一格：从 facts 里取 provider 与 model。
  *
  * 刻意**不**退回显示 profileId。这一列是给"这条候选到底会以什么身份跑"看的，
  * 显示一个名字会让人以为身份已经配好了，而派发时交给适配层的其实是空 facts。
- * 缺了就是 —，不是空白：空白看起来像"本来就还没填"，而那是两种不同的状态。
+ * 缺了仍是 —，但带一句 title：一个孤零零的横杠，人分不出是“还没配”还是“读错了”。
  */
 function profileText(row) {
   const provider = factValue(row && row.facts, 'provider');
   const model = factValue(row && row.facts, 'model');
-  if (!provider && !model) return DASH;
-  return (provider || DASH) + ' / ' + (model || DASH);
+  if (!provider && !model) return { text: DASH, title: '还没配模型身份' };
+  return { text: (provider || DASH) + ' / ' + (model || DASH), title: '' };
 }
 
 function rowsHtml(rows) {
@@ -58,13 +64,15 @@ function rowsHtml(rows) {
   return list
     .map((row) => {
       const r = row || {};
+      const profile = profileText(r);
       // profileId 也进 data-pool-row：它是这一行的身份，用下标当键会在
       // 删掉一条之后指到别人身上（候选池现在只增，但下标是会被依赖得最久的形状）。
       return '<tr data-pool-row="' + esc(r.profileId) + '">'
         + '<td class="mono">' + esc(r.profileId) + '</td>'
         + '<td class="mono">' + esc(r.endpoint) + '</td>'
         + '<td class="mono">' + esc(r.runtime || 'pi') + '</td>'
-        + '<td class="mono">' + esc(profileText(r)) + '</td>'
+        + '<td class="mono"' + (profile.title ? ' title="' + esc(profile.title) + '"' : '') + '>'
+        +   esc(profile.text) + '</td>'
         + '</tr>';
     })
     .join('');
@@ -100,6 +108,26 @@ export function countCardsHtml(snapshot) {
 export function tablesHtml(snapshot) {
   const snap = snapshot || {};
   return tableHtml('协调者（L2）', snap.coordinator) + tableHtml('执行者（L1）', snap.executor);
+}
+
+/**
+ * 用量卡：GET /api/usage 的 total。口径与任务页、项目页同一个 usageLine。
+ *
+ * total 有三种状态，三种都要说得出来：
+ *   undefined —— 还没读到（首帧）；null —— 读失败；对象 —— 真数字。
+ * 读失败写「读不到用量」而不是留空白：空白在屏幕上像“本来就是 0”。
+ */
+export function usageCardHtml(total) {
+  const text = total === undefined
+    ? '用量读取中…'
+    : total === null
+      ? '读不到用量'
+      : usageLine(total);
+  const known = total !== null && total !== undefined;
+  return '<div class="card">'
+    + '<div class="pane-title">Token 用量</div>'
+    + '<div class="usage-breakdown' + (known ? '' : ' muted') + '">' + esc(text) + '</div>'
+    + '</div>';
 }
 
 /**
@@ -188,17 +216,19 @@ export function addFormHtml(catalog) {
     +   '<label class="field"><span>候选名称</span>'
     +     '<input data-pool-profile type="text" placeholder="例如 exec-qwen-flash" /></label>'
     // 默认 local：绝大多数候选就跑在本机，默认值该是那个更常对的一个。
-    +   '<label class="field"><span>AgentEndpoint</span>'
+    +   '<label class="field"><span>接入点</span>'
     +     '<input data-pool-endpoint type="text" value="local" /></label>'
     +   '<button type="submit" data-pool-submit' + off + '>添加</button>'
     + '</form>'
     + '</div>';
 }
 
-/** 整页 HTML。snapshot = { coordinator, executor }，catalog = GET /api/runtime/models 的 JSON。 */
-export function poolPageHtml(snapshot, catalog) {
+/** 整页 HTML。snapshot = { coordinator, executor }，catalog = GET /api/runtime/models 的 JSON，
+ *  usage = GET /api/usage 的 total（undefined 还没读到 / null 读失败 / 对象是真数字）。 */
+export function poolPageHtml(snapshot, catalog, usage) {
   return '<div class="pool">'
     + countCardsHtml(snapshot)
+    + usageCardHtml(usage)
     + tablesHtml(snapshot)
     + addFormHtml(catalog)
     + '</div>';
@@ -222,7 +252,7 @@ function paint(st) {
   const head = st.snapshot === null
     ? '<div class="note">读不到候选池：' + esc(st.loadError) + '</div>'
     : '';
-  st.els.root.innerHTML = head + poolPageHtml(snap, st.catalog);
+  st.els.root.innerHTML = head + poolPageHtml(snap, st.catalog, st.usage);
 }
 
 function showError(st, message) {
@@ -234,7 +264,7 @@ function showError(st, message) {
 
 async function load(st) {
   let loadError = '';
-  const [snapshot, catalog] = await Promise.all([
+  const [snapshot, catalog, total] = await Promise.all([
     get('/api/pools').catch((err) => {
       loadError = err && err.message ? err.message : String(err);
       return null;
@@ -242,10 +272,14 @@ async function load(st) {
     // 拿不到模型清单**不是**错误：适配层没装、还没配凭据都是正常状态，
     // 页面把原因显示出来就行（见 addFormHtml）。抛出去会让整页只剩一句报错。
     get('/api/runtime/models').catch(() => undefined),
+    // 用量读失败要写「读不到用量」，所以不能把失败静默成 undefined——
+    // 那看起来和“首帧还没到”一模一样。null 明确代表读失败。
+    get('/api/usage').then((body) => (body && body.total) || null).catch(() => null),
   ]);
   if (st.epoch !== epoch) return;
   st.snapshot = snapshot;
   st.catalog = catalog;
+  st.usage = total;
   st.loadError = loadError;
   paint(st);
 }
@@ -324,6 +358,7 @@ export async function renderPoolPage(container) {
     els: { root: container.querySelector('[data-pool-root]') },
     snapshot: null,
     catalog: undefined,
+    usage: undefined,
     loadError: '',
   };
   mounted = st;

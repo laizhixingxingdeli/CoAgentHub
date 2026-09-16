@@ -12,6 +12,15 @@
  */
 
 import { esc, num, stateChip, stageChip } from './projects.js';
+import {
+  fieldLabel,
+  formatAttemptId,
+  narrateEvent,
+  nowDoing,
+  reasonText,
+  revisionLabel,
+  usageLine,
+} from './narrate.js';
 
 const DASH = '—';
 
@@ -69,7 +78,24 @@ const lastAt = (activity) =>
 const STOP_TITLE = 'API 尚无鉴权，写操作暂不开放';
 
 /**
- * 页头：标题 + 两根 chip + 三格统计 + 停止按钮。
+ * 修订号上屏必须带名词：「规划 r2」而不是一个孤零零的 r2——光看 r2，
+ * 人既不知道那是谁的版本，也看不出它比上一版动了什么。
+ */
+function revisionLine(v) {
+  const parts = [];
+  if (Number.isFinite(Number(v.contractRevision))) {
+    parts.push(revisionLabel('contract', v.contractRevision));
+  }
+  if (Number.isFinite(Number(v.planRevision))) {
+    parts.push(revisionLabel('plan', v.planRevision));
+  }
+  return parts.length
+    ? '<div class="revision-line">' + esc(parts.join(' · ')) + '</div>'
+    : '';
+}
+
+/**
+ * 页头：标题 + 两根 chip + 「现在在干什么」+ 三格统计 + 停止按钮。
  *
  * 创建时间取 activity 按时间顺序的第一条（通常是 mission.created）：
  * MissionView **没有 createdAt**，而为了这一格去改内核/后端不值当——
@@ -78,21 +104,35 @@ const STOP_TITLE = 'API 尚无鉴权，写操作暂不开放';
  * nowIso 由调用方传入，理由见 formatDuration。
  */
 export function headerHtml(view, activity, nowIso) {
-  const intent = (view && view.contract && view.contract.intent) || '（没有契约）';
+  const v = view || {};
+  const intent = (v.contract && v.contract.intent) || '（没有契约）';
   const created = firstAt(activity);
   // 终态的"结束"是它最后一次动过（updatedAt 就是最后一条事件落下的时间），
   // 拿不到才退回末条事件；活着的任务才用"现在"。
-  const ended = isTerminal(view && view.status)
-    ? (view && view.updatedAt) || lastAt(activity)
+  const ended = isTerminal(v.status)
+    ? v.updatedAt || lastAt(activity)
     : nowIso;
+  // 戳在头上的那一句「现在在干什么」：一屏黑话里最缺的就是它。
+  // 状态 chip 只说"走走停停"，这一句说"在等谁、在跑哪一个"。
+  const doing = nowDoing(v);
+  // 停机原因是第二根轴上的具体情形。等待时它必须看得见——只写「等待中」
+  // 等于把「在等什么」留给人自己去猜（或者去翻事件流）。
+  const waiting = Boolean(v.paused || v.waitReason || v.waitDetail);
   return '<h1 class="task-title">' + esc(intent) + '</h1>'
     + '<div class="task-chips">'
-    +   stageChip(view && view.status)
-    +   stateChip(view || {})
+    +   stageChip(v.status)
+    +   stateChip(v)
     + '</div>'
+    + revisionLine(v)
+    + '<div class="now-doing">现在在干什么：' + esc(doing) + '</div>'
+    + (waiting
+      ? '<div class="wait-reason">停机原因：' + esc(reasonText(v) || '（没有写原因）') + '</div>'
+      : '')
     + '<dl class="task-stats">'
-    +   '<div class="stat"><dt>总消耗 tokens</dt><dd class="mono">'
-    +     esc(num(view && view.usage && view.usage.total)) + '</dd></div>'
+    // Token 不再只印一个 total：那个数里绝大部分可能是便宜得多的缓存读，
+    // 不拆开就不知道钱花在哪。口径与项目页、资源池页同一个 usageLine。
+    +   '<div class="stat stat-usage"><dt>Token</dt><dd class="usage-breakdown">'
+    +     esc(usageLine(v.usage)) + '</dd></div>'
     +   '<div class="stat"><dt>运行时长</dt><dd class="mono">'
     +     esc(formatDuration(created, ended)) + '</dd></div>'
     +   '<div class="stat"><dt>创建时间</dt><dd class="mono">'
@@ -109,20 +149,43 @@ export function headerHtml(view, activity, nowIso) {
 /**
  * 事件流。`data-event-key` 是它在数组里的下标。
  *
+ * 每条至少三部分：角色流转徽章（L3 → L2）、动作短语、一行细节。三部分由
+ * narrate.narrateEvent 出——翻译表只住在那儿，这里只负责套壳与转义。
+ * **机器 kind 落不到这一层**：那一行字对人没有任何用，但它不报错也不崩，
+ * 只是没人看得懂（所以也没人当 bug 报）。排障要看 kind 就切「原始数据」tab。
+ *
+ * ctx 是 narrateEvent 的上下文（intent / plan / workItems / result）；缺了
+ * 也只是细节退回一句人话，不会出现 undefined。
+ *
  * 用下标而不是 messageId：历史事件不保证带 messageId（Envelope 那几个字段是
  * 后加的），而下标对 append-only 的 activity 来说是稳定且唯一的键。
  */
-export function eventStreamHtml(events, selectedKey) {
+export function eventStreamHtml(events, selectedKey, ctx) {
   const rows = events || [];
   if (rows.length === 0) return '<li class="empty">还没有事件。这条任务刚开始。</li>';
+  const context = ctx || {};
   return rows
     .map((e, i) => {
-      const refs = [e && e.workItemId, e && e.attemptId].filter(Boolean).join(' · ');
+      const told = narrateEvent(e, context);
+      const refs = [];
+      if (e && e.workItemId) {
+        refs.push(fieldLabel('WorkItem') + ' <span class="mono">' + esc(e.workItemId) + '</span>');
+      }
+      if (e && e.attemptId) {
+        const attempt = formatAttemptId(e.attemptId);
+        // 人话标签在前，原始 id 紧跟在括号里：排障时人要拿它去 grep 日志。
+        refs.push(fieldLabel('attempt') + ' ' + esc(attempt.label)
+          + ' <span class="mono muted">（' + esc(attempt.raw) + '）</span>');
+      }
       return '<li class="evt" data-event-key="' + i + '"'
         + (selectedKey === i ? ' data-active="1"' : '') + '>'
-        + '<div class="evt-kind mono">' + esc((e && e.kind) || DASH) + '</div>'
-        + '<div class="evt-time">' + esc(formatTime(e && e.at)) + '</div>'
-        + (refs ? '<div class="evt-refs mono">' + esc(refs) + '</div>' : '')
+        + '<div class="evt-top">'
+        +   '<span class="evt-badge">' + esc(told.badge) + '</span>'
+        +   '<span class="evt-action">' + esc(told.action) + '</span>'
+        +   '<span class="evt-time">' + esc(formatTime(e && e.at)) + '</span>'
+        + '</div>'
+        + '<div class="evt-detail">' + esc(told.detail) + '</div>'
+        + (refs.length ? '<div class="evt-refs">' + refs.join(' · ') + '</div>' : '')
         + '</li>';
     })
     .join('');
@@ -134,25 +197,37 @@ const field = (label, value, mono) =>
   '<dt>' + esc(label) + '</dt><dd' + (mono ? ' class="mono"' : '') + '>' + esc(value) + '</dd>';
 
 /**
- * 选中事件的详情。没选中 / 没有 causationId 时显示 —，不是空白，
- * 也不是崩在 undefined 上：这两件事在屏幕上必须分得出来。
+ * 选中事件的详情。
+ *
+ * 标签一律走 fieldLabel：causationId / profileId / attempt 这些键名是给写代码的
+ * 人看的，屏幕上该是「由哪一跳引发」「候选」「尝试」——技术 ID 仍原样带出，
+ * 排障时人就是拿它去 grep 的。
+ *
+ * 没选中、没有 causationId、没有尝试，一律给解释句，不给一个孤零零的 —：
+ * 那个横杠在屏幕上和“读不到”长得一样，而“读不到”才是要人去处理的那一种。
  */
 export function eventDetailHtml(event, attempt) {
+  const e = event || null;
+  const told = e ? narrateEvent(e) : null;
   const profile = attempt && attempt.profile;
   const usage = attempt && attempt.usage;
   return '<div class="detail-head">'
     +   '<span class="detail-title">事件详情</span>'
-    +   '<span class="mono">' + esc((event && event.kind) || '没有选中事件') + '</span>'
+    +   (told
+      ? '<span class="evt-badge">' + esc(told.badge) + '</span>'
+        + '<span class="detail-action">' + esc(told.action) + '</span>'
+      : '<span class="muted">没有选中事件</span>')
     + '</div>'
     + '<dl class="fields">'
-    +   field('时间', event && event.at ? formatTime(event.at) : DASH, true)
-    +   field('关联工作项', (event && event.workItemId) || DASH, true)
-    // causationId 就是"这一跳由哪次尝试引发"，也是去取详情的钥匙。
-    +   field('causationId', (event && event.causationId) || DASH, true)
-    +   field('候选 profile', profile
+    +   field('时间', e && e.at ? formatTime(e.at) : '这条事件没有记下时间', true)
+    +   field(fieldLabel('WorkItem'), (e && e.workItemId) || '这条事件没有关联工作项', true)
+    +   field(fieldLabel('causationId'),
+        (e && e.causationId) || '没有上一跳引发它（通常是任务的起点）', true)
+    +   field(fieldLabel('profileId'), profile
         ? profile.profileId + (profile.endpoint ? ' @ ' + profile.endpoint : '')
-        : DASH, true)
-    +   field('用量 total', usage ? num(usage.total) : DASH, true)
+        : '没有选中尝试，读不到候选', true)
+    // 用量走 usageLine（新着 + 缓存命中 + 占比 + 费用），不单印一个 total。
+    +   field('用量', usage ? usageLine(usage) : '这一跳没有上报用量')
     + '</dl>';
 }
 
@@ -178,15 +253,21 @@ export function tabBarHtml(activeTab) {
  *
  * `kind === 'usage'` 的 chunk **不当终端行**：它没有 text，塞进终端会吐出一行
  * `undefined`；它是累计用量，所以单独摆一行数字（见 liveMetaHtml）。
+ *
+ * 空的时候必须有一句说明，而且要看任务还在不在跑：
+ *   - 已经不在跑（终态 / 等待 / 暂停）——这一跳的输出不会再来，说清楚完整输出在哪；
+ *   - 还可能开跑——一句话告诉人这一块不是坏的。
+ * 两种情况都不能留空白：黑空的一块看起来像坏了。
  */
-export function liveLinesHtml(chunks) {
+export function liveLinesHtml(chunks, running) {
   const lines = [];
   for (const c of chunks || []) {
     if (c && c.kind !== 'usage') lines.push(c);
   }
-  // 空的时候必须有一句说明：一个黑空的块看起来像坏了，而它只是还没开跑。
   if (lines.length === 0) {
-    return '<span class="t">还没有实时输出。agent 跑起来时这里会一行行出现。</span>';
+    return running === false
+      ? '<span class="t">这一跳已经结束，完整输出在下面的原始输出里。</span>'
+      : '<span class="t">还没有实时输出。agent 跑起来时这里会一行行出现。</span>';
   }
   return lines
     .map((c) => (c.kind === 'tool'
@@ -210,7 +291,7 @@ export function livePanelHtml(live) {
     +     (live && live.autoScroll === false ? '' : ' checked') + ' /> 自动滚动</label>'
     +   '<span class="live-meta" data-live-meta>' + liveMetaHtml(live) + '</span>'
     + '</div>'
-    + '<pre class="term" data-term>' + liveLinesHtml(live && live.lines) + '</pre>';
+    + '<pre class="term" data-term>' + liveLinesHtml(live && live.lines, !live || live.running !== false) + '</pre>';
 }
 
 /** 文件变更：stat + 文件清单。逐行着色不在这一版（要引 diff 解析，代价大于用处）。 */
@@ -424,8 +505,29 @@ function paintHead(st) {
   st.els.head.innerHTML = headerHtml(st.view, st.activity, new Date().toISOString());
 }
 
+/** narrateEvent 的上下文。四样都在已有的 view 上，不额外取数据。 */
+function eventCtx(st) {
+  const v = st.view || {};
+  return {
+    intent: v.contract && v.contract.intent,
+    plan: v.plan,
+    workItems: v.workItems || [],
+    result: v.result,
+  };
+}
+
+/**
+ * 这一跳还能不能开跑。终态（结束/中止）、等待停机、暂停都不再会来新输出，
+ * 所以终端空着的时候该说“输出在别处”，而不是“还没开始”。
+ */
+function stillRunning(st) {
+  const v = st.view;
+  if (!v) return true;
+  return !(isTerminal(v.status) || v.paused || v.waitReason || v.waitDetail);
+}
+
 function paintEvents(st) {
-  st.els.events.innerHTML = eventStreamHtml(st.activity, st.selectedKey);
+  st.els.events.innerHTML = eventStreamHtml(st.activity, st.selectedKey, eventCtx(st));
 }
 
 function paintDetail(st) {
@@ -448,7 +550,7 @@ function pushLive(st) {
     clientHeight: term.clientHeight,
     scrollHeight: term.scrollHeight,
   });
-  term.innerHTML = liveLinesHtml(st.live.lines);
+  term.innerHTML = liveLinesHtml(st.live.lines, stillRunning(st));
   const meta = st.els.panel.querySelector('[data-live-meta]');
   if (meta) meta.innerHTML = liveMetaHtml(st.live);
   if (follow) term.scrollTop = term.scrollHeight - term.clientHeight;
@@ -460,7 +562,7 @@ function pushLive(st) {
 function paintPanel(st) {
   st.els.tabs.innerHTML = tabBarHtml(st.tab);
   st.els.panel.innerHTML = tabPanelHtml(st.tab, {
-    live: Object.assign({ autoScroll: st.autoScroll }, st.live),
+    live: Object.assign({ autoScroll: st.autoScroll, running: stillRunning(st) }, st.live),
     diff: st.diff,
     evidence: (st.attempt && st.attempt.evidence) || [],
     escalationLog: (st.view && st.view.escalationLog) || [],

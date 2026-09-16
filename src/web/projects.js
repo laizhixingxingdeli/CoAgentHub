@@ -10,24 +10,22 @@
  * （少一个字段只是那一格空着，不报错）。
  */
 
+import { STAGE_CN, WAIT_REASON, reasonText, stateLabel, usageLine , usageCell } from './narrate.js';
+
+/**
+ * 词表只住在 narrate.js（任务页也读同一份）。这里把它们再导出去，是给
+ * 已经从这里取这些名字的调用方留一条不动的路——**不是**第二份实现。
+ * 再抄一份表进来，加一个状态就会只改到一处，另一处静悄悄地退回默认值。
+ */
+export { STAGE_CN, WAIT_REASON, reasonText, stateLabel };
+
 /** 插入 DOM 的字段一律转义：projectId、intent、waitDetail 全是外部输入。 */
 export const esc = (s) =>
   String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-const DASH = '—';
-
-/** 阶段 = 内核 MissionStatus（src/kernel/mission.ts），不是设计稿里的词。 */
-export const STAGE_CN = {
-  investigating: '调查中',
-  planning: '规划中',
-  executing: '执行中',
-  awaiting_review: '等你检视',
-  completed: '已完成',
-  blocked: '已中止',
-};
 /**
  * 取色。逐个对着观测面 .badge 抄（src/api/web.ts）。改一边就得改另一边，
- * 否则同一状态在两个界面里是两种颜色。只经由 stageChip 出去。
+ * 否则同一状态在两个界面里是两种颜色。只经由 stageChip / stageTone 出去。
  */
 const STAGE_TONE = {
   investigating: 'queued',
@@ -38,20 +36,19 @@ const STAGE_TONE = {
   blocked: 'failed',
 };
 
-/** 停机原因翻译成人话。只贴一个 enum 名字等于没贴——那是给写代码的人看的。 */
-export const WAIT_REASON = {
-  no_available_agent: '候选全在冷却，等一会儿重跑',
-  platform_unreachable: '连不上平台自己 —— 平台侧故障，不是候选的问题',
-  waiting_l3: '等你处理',
-  escalated: '执行者升级了问题，等你答复',
-  project_busy: '同项目有别的 Mission 占着改动名额',
-  attempt_limit_reached: '尝试到上限了 —— 继续换候选不会产生新信息',
-  target_changed: '目标分支在检视期间变了',
-  base_revision_stale: '分叉基线已过期，需要重新核对',
-  cancelled_by_user: '被叫停了',
-};
+/**
+ * 阶段 → 色。表格行左侧那条色条也要它：行色与阶段 chip 必须同源，
+ * 否则「执行中」的 chip 是绿的而它的行是灰的，人就会以为那是两件事。
+ */
+export function stageTone(status) {
+  return STAGE_TONE[status] || 'queued';
+}
 
-const chip = (tone, text) => '<span class="chip ' + esc(tone) + '">' + esc(text) + '</span>';
+/** title 是可选的：等待中的 chip 靠它把停机原因带出来。 */
+const chip = (tone, text, title) =>
+  '<span class="chip ' + esc(tone) + '"'
+  + (title ? ' title="' + esc(title) + '"' : '')
+  + '>' + esc(text) + '</span>';
 
 /**
  * 阶段 chip：内核 MissionStatus → 中文 + 取色。
@@ -60,30 +57,30 @@ const chip = (tone, text) => '<span class="chip ' + esc(tone) + '">' + esc(text)
  * 只改到一处，另一处的 chip 静悄悄退回默认灰——那种错没人会当 bug 报。
  */
 export function stageChip(status) {
-  return chip(STAGE_TONE[status] || 'queued', STAGE_CN[status] || status);
+  return chip(stageTone(status), STAGE_CN[status] || status);
 }
 
 /**
  * 状态是第二根轴：阶段说"走到哪了"，这根说"为什么不动"。
- * 合成一个 chip 就只能显示其中一半，而"排着队"和"卡住了"在一张表里
- * 是完全不同的两件事——人就是照这一列决定先看哪条的。
+ *
+ * 词来自 narrate.stateLabel（完成品是「已结束」/「已停止」，与阶段的
+ * 「已完成」/「已中止」刻意不同词）；取色留在这一页。下面这几行的分支顺序
+ * 与 stateLabel 一一对应——对不上就是「等待中」配了「进行中」的颜色，
+ * 而那种错在屏幕上说不出哪里不对。
  */
 export function stateChip(row) {
-  if (row.paused) return chip('cancelled', '已暂停');
-  if (row.waitReason) return chip('unconfirmed', '等待中');
-  if (row.status === 'completed') return chip('done', '已完成');
-  if (row.status === 'blocked') return chip('failed', '已中止');
-  return chip('running', '进行中');
+  const r = row || {};
+  const tone = r.paused ? 'cancelled'
+    : r.waitReason ? 'unconfirmed'
+    : r.status === 'completed' ? 'done'
+    : r.status === 'blocked' ? 'failed'
+    : 'running';
+  // 等待中的行，停机原因挂在 chip 上：只写「等待中」等于没说在等什么，
+  // 人得去横着一个屏幕的原因栏里找。
+  return chip(tone, stateLabel(r), r.paused || r.waitReason ? reasonText(r) : '');
 }
 
-/** waitDetail 优先：那是平台写下的具体情形，比 enum 翻出来的套话有用。 */
-export function reasonText(row) {
-  if (row.waitDetail) return row.waitDetail;
-  if (!row.waitReason) return DASH;
-  return WAIT_REASON[row.waitReason] || row.waitReason;
-}
-
-// 任务详情页也要这个数（总消耗 tokens 那一格），所以是导出的。
+// 任务详情页也要这个数（实时输出的行数、累计用量），所以是导出的。
 export const num = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US') : '0');
 
 export function projectListHtml(projects, selectedId) {
@@ -103,11 +100,14 @@ export function projectListHtml(projects, selectedId) {
 
 export function detailCardHtml(project, workspace) {
   const slot = project.mutating ? '1/1' : '0/1';
+  // 读不到仓库不等于「没有仓库」：拿 — 顶上去，人分不出是后端没给还是本来就没有。
+  const root = workspace.projectRoot || '（还没读到代码路径）';
+  const branch = workspace.branch || '（还没读到目标分支）';
   return '<div class="card"><h2>' + esc(project.projectId) + '</h2>'
     + '<dl class="fields">'
     +   '<dt>项目 ID</dt><dd class="mono">' + esc(project.projectId) + '</dd>'
-    +   '<dt>代码仓库</dt><dd class="mono">' + esc(workspace.projectRoot || DASH) + '</dd>'
-    +   '<dt>目标分支</dt><dd class="mono">' + esc(workspace.branch || DASH) + '</dd>'
+    +   '<dt>代码仓库</dt><dd class="mono">' + esc(root) + '</dd>'
+    +   '<dt>目标分支</dt><dd class="mono">' + esc(branch) + '</dd>'
     // 改动名额是内核那条"同项目同时只放一条改动"的不变量。显示成 n/1，
     // 是为了让人一眼看出下一条派得出去派不出去，而不是去猜。
     +   '<dt>变更中任务</dt><dd>' + chip(project.mutating ? 'unconfirmed' : 'queued', slot)
@@ -115,28 +115,41 @@ export function detailCardHtml(project, workspace) {
     + '</dl></div>';
 }
 
-/** 任务表表头。列名与顺序一起写死，测试照着这七个断言。 */
-export const TASK_COLUMNS = ['任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', '总 Token'];
+/** 任务表表头。列名与顺序一起写死，测试照着这七列断言。 */
+export const TASK_COLUMNS = ['任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token'];
+
+/**
+ * 列表 API 确实不返回时间戳。写一句「列表接口不提供时间戳」而不是一个 —：
+ * 一个孤零零的横杠在屏幕上既像加载失败又像字段名读错了，而真相只是这一列
+ * 本来就没有。也**不**用页面生成时间冒充——那是个会让人据此判断谁卡住了的假数字。
+ */
+const NO_TIMESTAMP = '列表接口不提供时间戳';
+
+/** 没有停机原因不等于「原因未知」：多数任务只是没停过。 */
+const NO_WAIT_REASON = '没有停机，正常推进';
 
 export function taskTableHtml(rows) {
   if (!rows || rows.length === 0) {
-    return '<div class="card"><div class="empty">这个项目还没有任务</div></div>';
+    return '<div class="card"><div class="empty">这个项目还没有任务。新建一条之后这里会一行行出现。</div></div>';
   }
   const head = TASK_COLUMNS.map((t) => '<th>' + esc(t) + '</th>').join('');
   const body = rows
-    .map(
-      (m) => '<tr data-mission-id="' + esc(m.missionId) + '">'
-      + '<td class="mono">' + esc(m.missionId) + '</td>'
-      + '<td class="cell-title">' + esc(m.intent || '（没有契约）') + '</td>'
-      + '<td>' + stageChip(m.status) + '</td>'
-      + '<td>' + stateChip(m) + '</td>'
-      + '<td class="cell-reason">' + esc(reasonText(m)) + '</td>'
-      // 列表 API 不返回时间戳。宁可显示 —，也不要拿"本页生成时间"冒充每条任务的
-      // 更新时间——那是个会让人据此判断"谁卡住了"的假数字。
-      + '<td class="muted">' + DASH + '</td>'
-      + '<td class="mono">' + esc(num(m.usage && m.usage.total)) + '</td>'
-      + '</tr>',
-    )
+    .map((m) => {
+      const reason = reasonText(m);
+      return '<tr class="row-' + esc(stageTone(m.status)) + '" data-mission-id="' + esc(m.missionId) + '">'
+        + '<td class="mono">' + esc(m.missionId) + '</td>'
+        + '<td class="cell-title">' + esc(m.intent || '（没有契约）') + '</td>'
+        + '<td>' + stageChip(m.status) + '</td>'
+        + '<td>' + stateChip(m) + '</td>'
+        + '<td class="cell-reason">'
+        +   (reason ? esc(reason) : '<span class="muted">' + esc(NO_WAIT_REASON) + '</span>')
+        + '</td>'
+        + '<td class="muted">' + esc(NO_TIMESTAMP) + '</td>'
+        // Token 那一列与任务页同一个口径（narrate.usageLine）：只印一个 total
+        // 看不出钱花在哪，而缓存读比新增便宜得多。
+        + '<td class="cell-usage" title="' + esc(usageLine(m.usage)) + '">' + esc(usageCell(m.usage)) + '</td>'
+        + '</tr>';
+    })
     .join('');
   return '<div class="card"><div class="pane-title">任务</div><div class="table-wrap">'
     + '<table class="tasks"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>'
@@ -182,11 +195,20 @@ async function loadWorkspace(projectId) {
   try {
     const view = await get('/api/missions/' + encodeURIComponent(probe.missionId));
     const ref = (view && view.workspaceRef) || {};
-    const found = { projectRoot: ref.projectRoot, branch: ref.branch };
+    // **目标分支要读 targetBranch，不是 branch。** 后者是 Mission 自己的
+    // 工作分支；拿它当目标分支显示，界面上就成了"项目在往 mission/W1 上合"。
+    // 老数据没有这个字段，那就如实显示不知道，不要拿另一个字段顶上。
+    const found = {
+      projectRoot: ref.projectRoot,
+      branch: ref.targetBranch,
+      missionBranch: ref.branch,
+    };
     // 两个字段都拿不到，说的是"这条还没开工作区"，不是"这个项目没有仓库"。
     // 连这个结果一起缓存住的话，Mission 跑起来以后那一栏也会永远是 —，
     // 除非人刷新页面——而他会以为那是后端给错了。
-    if (found.projectRoot || found.branch) workspaceCache.set(projectId, found);
+    if (found.projectRoot || found.branch || found.missionBranch) {
+      workspaceCache.set(projectId, found);
+    }
     return found;
   } catch {
     // 读不到不算错误态：这一栏只是顺带告诉你代码在哪，拿不到就显示 —，
