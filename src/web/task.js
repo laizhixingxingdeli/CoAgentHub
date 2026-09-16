@@ -6,6 +6,11 @@
  * 测试里，而"字段名读错了"这类错在页面上是没有声音的——那一格永远是 —，
  * 页面照样跑。纯函数才能在 node 里把真 JSON 喂进去把它抓出来。
  *
+ * 呈现层的形状：左边一条**按环节折叠**的进度视图（一个环节 = 同一个 attemptId
+ * 下的一跳），右上是这一跳实际传递给下一跳的正文，右下常驻实时输出。
+ * 事件流不再平铺：一条跑完的任务有三十几条事件，摊开之后人找不到
+ * 「现在走到哪一段、这一跳花了多少、上一个 agent 到底说了什么」。
+ *
  * 只读。没有任何写操作：页头上那个「停止任务」是 disabled 的，而且刻意
  * 不绑事件——写操作要等鉴权（见那颗按钮的 title）。界面里再实现一份
  * 「什么时候可以取消」的规则，迟早和平台判的不一样。
@@ -13,13 +18,21 @@
 
 import { esc, num, stateChip, stageChip } from './projects.js';
 import {
+  evidenceKindLabel,
   fieldLabel,
   formatAttemptId,
+  formatUsage,
   narrateEvent,
   nowDoing,
   reasonText,
   revisionLabel,
+  roleBadge,
+  roleOfAttempt,
+  roleTone,
+  roleUsageLine,
+  stageName,
   usageLine,
+  usageTypeLine,
 } from './narrate.js';
 
 const DASH = '—';
@@ -95,11 +108,13 @@ function revisionLine(v) {
 }
 
 /**
- * 页头：标题 + 两根 chip + 「现在在干什么」+ 三格统计 + 停止按钮。
+ * 页头：标题 + 两根 chip + 「现在在干什么」+ 两格时间统计 + 停止按钮。
  *
  * 创建时间取 activity 按时间顺序的第一条（通常是 mission.created）：
  * MissionView **没有 createdAt**，而为了这一格去改内核/后端不值当——
  * 事件流本来就是"这条任务什么时候开始的"的权威来源。
+ *
+ * Token 那一格搬走了（见 usageCardHtml）：按角色拆需要一块自己的地方。
  *
  * nowIso 由调用方传入，理由见 formatDuration。
  */
@@ -129,10 +144,6 @@ export function headerHtml(view, activity, nowIso) {
       ? '<div class="wait-reason">停机原因：' + esc(reasonText(v) || '（没有写原因）') + '</div>'
       : '')
     + '<dl class="task-stats">'
-    // Token 不再只印一个 total：那个数里绝大部分可能是便宜得多的缓存读，
-    // 不拆开就不知道钱花在哪。口径与项目页、资源池页同一个 usageLine。
-    +   '<div class="stat stat-usage"><dt>Token</dt><dd class="usage-breakdown">'
-    +     esc(usageLine(v.usage)) + '</dd></div>'
     +   '<div class="stat"><dt>运行时长</dt><dd class="mono">'
     +     esc(formatDuration(created, ended)) + '</dd></div>'
     +   '<div class="stat"><dt>创建时间</dt><dd class="mono">'
@@ -144,109 +155,491 @@ export function headerHtml(view, activity, nowIso) {
     + '</button>';
 }
 
-/* ===================== 左栏：执行事件流 ===================== */
+/* ===================== 环节分组 ===================== */
 
 /**
- * 事件流。`data-event-key` 是它在数组里的下标。
+ * activity → 环节数组。一个环节 = 同一个 attemptId 下的所有事件。
  *
- * 每条至少三部分：角色流转徽章（L3 → L2）、动作短语、一行细节。三部分由
- * narrate.narrateEvent 出——翻译表只住在那儿，这里只负责套壳与转义。
- * **机器 kind 落不到这一层**：那一行字对人没有任何用，但它不报错也不崩，
- * 只是没人看得懂（所以也没人当 bug 报）。排障要看 kind 就切「原始数据」tab。
+ * **按 attemptId 首次出现顺序成组**，不是「attemptId 一变就新开一组」的连续
+ * 分段。这不是口味问题：activity 是 append-only 的，而没有 attemptId 的事件
+ * （发起任务、最终检视、契约修订）会散落在流的**头和尾**。连续分段会在开头多
+ * 切出一个组，W4 那种形状就从 6 个环节变成 7 个，而多出来的那个「开头的 L3 组」
+ * 和真正收尾的那个 L3 组永远合不到一起——一个人分成两段显示，比少一段更误导。
  *
- * ctx 是 narrateEvent 的上下文（intent / plan / workItems / result）；缺了
- * 也只是细节退回一句人话，不会出现 undefined。
- *
- * 用下标而不是 messageId：历史事件不保证带 messageId（Envelope 那几个字段是
- * 后加的），而下标对 append-only 的 activity 来说是稳定且唯一的键。
+ * 所以：没有 attemptId 的事件全部收成一个组，**放在最后**。
  */
-export function eventStreamHtml(events, selectedKey, ctx) {
+export function groupActivity(activity) {
+  const rows = activity || [];
+  const order = [];
+  const buckets = new Map();
+  const orphans = [];
+  for (const e of rows) {
+    const id = e && e.attemptId ? String(e.attemptId) : '';
+    if (!id) {
+      orphans.push(e);
+      continue;
+    }
+    if (!buckets.has(id)) {
+      buckets.set(id, []);
+      order.push(id);
+    }
+    buckets.get(id).push(e);
+  }
+  const groups = order.map((id) => ({ attemptId: id, events: buckets.get(id) }));
+  if (orphans.length > 0) groups.push({ attemptId: '', events: orphans });
+  return groups;
+}
+
+/** 组内最能代表这一跳的事件：优先非 attempt.started / ended（那两条只是开关门）。 */
+function representativeEvent(events) {
   const rows = events || [];
-  if (rows.length === 0) return '<li class="empty">还没有事件。这条任务刚开始。</li>';
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const kind = rows[i] && rows[i].kind;
+    if (kind && kind !== 'attempt.started' && kind !== 'attempt.ended') return rows[i];
+  }
+  return rows.length > 0 ? rows[rows.length - 1] : null;
+}
+
+/** 这一跳的用量一句话。没有 ended 事件时说的是原因，不是一个孤零零的 —。 */
+function stageUsageLine(events) {
+  const rows = events || [];
+  const ended = rows.find((e) => e && e.kind === 'attempt.ended');
+  const usage = ended && ended.data && ended.data.usage;
+  if (usage) return usageLine(usage);
+  if (ended) return '这一跳没有上报用量';
+  return '这一跳还没结束，用量要等它收尾';
+}
+
+/* ===================== 顶部：独立用量卡 ===================== */
+
+/**
+ * 按角色拆用量。
+ *
+ * 只从 activity 里 `kind === 'attempt.ended'` 且带 `data.usage` 的事件算，
+ * **不**为算用量去逐个拉 `/attempts/<id>`：那会把一次进页变成 N+1 个请求，
+ * 而 ended 事件本来就把这一跳的用量写全了。
+ *
+ * 占比分母用 L2+L1 之和而不是 view.usage.total：在途那一跳还没 ended，
+ * total 会比两 role 之和大，拿 total 当分母算出来的两个百分比加起来不等于
+ * 100%，看起来像漏了一笔钱。
+ */
+export function usageByRole(activity) {
+  const acc = {
+    coordinator: { tokens: 0, cost: 0, costReported: false, attempts: 0 },
+    executor: { tokens: 0, cost: 0, costReported: false, attempts: 0 },
+    reviewer: { tokens: 0, cost: 0, costReported: false, attempts: 0 },
+  };
+  for (const e of activity || []) {
+    if (!e || e.kind !== 'attempt.ended') continue;
+    const usage = e.data && e.data.usage;
+    if (!usage) continue;
+    const bucket = acc[roleOfAttempt(e.attemptId)];
+    bucket.tokens += formatUsage(usage).total;
+    bucket.attempts += 1;
+    if (Number.isFinite(Number(usage.cost))) {
+      bucket.cost += Number(usage.cost);
+      bucket.costReported = true;
+    }
+  }
+  const total = acc.coordinator.tokens + acc.executor.tokens;
+  const withPct = (bucket) => Object.assign({}, bucket, {
+    pct: total > 0 ? (bucket.tokens / total) * 100 : 0,
+    costText: bucket.costReported ? '$' + bucket.cost.toFixed(4) : '',
+  });
+  return {
+    coordinator: withPct(acc.coordinator),
+    executor: withPct(acc.executor),
+    reviewer: withPct(acc.reviewer),
+    total,
+  };
+}
+
+const roleLine = (role, bucket) =>
+  '<li class="usage-role tone-' + esc(roleTone(role)) + '">'
+  +   esc(roleUsageLine(role, bucket.tokens, bucket.pct, bucket.costText))
+  + '</li>';
+
+/**
+ * 顶部独立用量卡：总计 → 按角色 → 按类型，三层。
+ *
+ * 单独一块而不是继续挤在页头那行统计里：按角色拆要看得清 L2/L1 各占多少，
+ * 页头那一行放不下两行也看不清占比，而「钱花在协调还是执行」正是这一页
+ * 最该一眼回答的问题。
+ */
+export function usageCardHtml(view, activity) {
+  const v = view || {};
+  const totals = formatUsage(v.usage);
+  const byRole = usageByRole(activity);
+  // 一次 ended 都没有（任务刚起步，第一跳还没结束）时不能报 0 占比——
+  // 那是「还不知道」，不是「没花钱」。
+  const known = byRole.total > 0;
+  return '<div class="usage-card-head">'
+    +   '<span class="usage-num mono">' + esc(num(totals.total)) + '</span>'
+    +   '<span class="usage-unit">tokens</span>'
+    +   '<span class="usage-cost">' + esc(totals.costText) + '</span>'
+    + '</div>'
+    + '<ul class="usage-roles">'
+    +   (known
+      ? roleLine('coordinator', byRole.coordinator) + roleLine('executor', byRole.executor)
+      : '<li class="usage-pending">还没有结束的一跳，暂时算不出按角色的占比。</li>')
+    + '</ul>'
+    + '<div class="usage-type">' + esc(usageTypeLine(v.usage)) + '</div>';
+}
+
+/* ===================== 左栏：按环节折叠的进度视图 ===================== */
+
+/**
+ * 组内一条事件。仍是 narrateEvent 那三件套（徽章 / 动作 / 细节）。
+ *
+ * `data-event-key` 是它在**整条 activity** 里的下标：选中态与详情都按这个键，
+ * 而下标对 append-only 的 activity 稳定且唯一（历史事件不保证带 messageId）。
+ */
+function eventRowHtml(event, index, selectedKey, ctx) {
+  const told = narrateEvent(event, ctx);
+  const refs = [];
+  if (event && event.workItemId) {
+    refs.push(fieldLabel('WorkItem') + ' <span class="mono">' + esc(event.workItemId) + '</span>');
+  }
+  if (event && event.attemptId) {
+    const attempt = formatAttemptId(event.attemptId);
+    // 人话标签在前，原始 id 紧跟在括号里：排障时人要拿它去 grep 日志。
+    refs.push(fieldLabel('attempt') + ' ' + esc(attempt.label)
+      + ' <span class="mono muted">（' + esc(attempt.raw) + '）</span>');
+  }
+  return '<li class="evt" data-event-key="' + index + '"'
+    + (selectedKey === index ? ' data-active="1"' : '') + '>'
+    + '<div class="evt-top">'
+    +   '<span class="evt-badge">' + esc(told.badge) + '</span>'
+    +   '<span class="evt-action">' + esc(told.action) + '</span>'
+    +   '<span class="evt-time">' + esc(formatTime(event && event.at)) + '</span>'
+    + '</div>'
+    + '<div class="evt-detail">' + esc(told.detail) + '</div>'
+    + (refs.length ? '<div class="evt-refs">' + refs.join(' · ') + '</div>' : '')
+    + '</li>';
+}
+
+/**
+ * 环节列表。每个环节一个 `<details>`，**默认收起**（不写 open 属性）。
+ *
+ * 默认展开等于没折叠：三十几条事件摊开还是三十几条，人照样找不到
+ * 「现在走到哪一段」。
+ *
+ * 环节头那一行自足：环节名 + 角色徽章 + 耗时 + 这一跳的 token 与费用 +
+ * 一句话摘要，不展开也看得懂这一段是什么、跑了多久、花了多少、在干什么。
+ *
+ * 左侧色条、环节头、角色徽章三处同源（都走 roleTone），与 projects.js
+ * stageTone 同一套 `--status-*` 令牌——同一环节在任务页与项目页是一个颜色。
+ *
+ * `expandedIds` 是**用户已经展开过的 attemptId**（数组或 Set）。纯函数读不到
+ * 浏览器的 `<details>.open`，而环节列表是整块重画的：不把展开过的组再写回
+ * open，重画一次就把人刚点开的那一组折回去，组内逐条事件永远看不到。
+ * 不传（首屏）时一个 open 都不写。
+ */
+export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, expandedIds) {
+  const groups = groupActivity(activity);
+  if (groups.length === 0) return '<div class="empty">还没有事件。这条任务刚开始。</div>';
   const context = ctx || {};
-  return rows
-    .map((e, i) => {
-      const told = narrateEvent(e, context);
-      const refs = [];
-      if (e && e.workItemId) {
-        refs.push(fieldLabel('WorkItem') + ' <span class="mono">' + esc(e.workItemId) + '</span>');
-      }
-      if (e && e.attemptId) {
-        const attempt = formatAttemptId(e.attemptId);
-        // 人话标签在前，原始 id 紧跟在括号里：排障时人要拿它去 grep 日志。
-        refs.push(fieldLabel('attempt') + ' ' + esc(attempt.label)
-          + ' <span class="mono muted">（' + esc(attempt.raw) + '）</span>');
-      }
-      return '<li class="evt" data-event-key="' + i + '"'
-        + (selectedKey === i ? ' data-active="1"' : '') + '>'
-        + '<div class="evt-top">'
-        +   '<span class="evt-badge">' + esc(told.badge) + '</span>'
-        +   '<span class="evt-action">' + esc(told.action) + '</span>'
-        +   '<span class="evt-time">' + esc(formatTime(e && e.at)) + '</span>'
-        + '</div>'
-        + '<div class="evt-detail">' + esc(told.detail) + '</div>'
-        + (refs.length ? '<div class="evt-refs">' + refs.join(' · ') + '</div>' : '')
-        + '</li>';
+  const expanded = new Set(expandedIds || []);
+  // 组内那一行用的是整条 activity 的下标，所以先建一张「事件对象 → 下标」的表。
+  const indexOf = new Map();
+  (activity || []).forEach((e, i) => {
+    if (!indexOf.has(e)) indexOf.set(e, i);
+  });
+  return groups
+    .map((g) => {
+      const role = roleOfAttempt(g.attemptId);
+      const tone = roleTone(role);
+      const head = representativeEvent(g.events);
+      const summary = head ? narrateEvent(head, context).action : '';
+      const rows = g.events
+        .map((e) => eventRowHtml(e, indexOf.has(e) ? indexOf.get(e) : -1, selectedKey, context))
+        .join('');
+      const selected = selectedAttemptId !== null && g.attemptId === selectedAttemptId;
+      // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
+      // 一上来就给所有环节加 open 等于没折叠。
+      return '<details class="stage tone-' + esc(tone) + '"'
+        + ' data-attempt-id="' + esc(g.attemptId) + '"'
+        + (selected ? ' data-active="1"' : '')
+        + (expanded.has(g.attemptId) ? ' open' : '') + '>'
+        + '<summary class="stage-head" data-stage-select>'
+        +   '<span class="stage-name">' + esc(stageName(g.events, context)) + '</span>'
+        +   '<span class="chip ' + esc(tone) + '">' + esc(roleBadge(role)) + '</span>'
+        +   '<span class="stage-dur mono">'
+        +     esc(formatDuration(firstAt(g.events), lastAt(g.events))) + '</span>'
+        +   '<span class="stage-usage">' + esc(stageUsageLine(g.events)) + '</span>'
+        +   (summary ? '<span class="stage-summary">' + esc(summary) + '</span>' : '')
+        + '</summary>'
+        + '<ul class="evt-list">' + rows + '</ul>'
+        + '</details>';
     })
     .join('');
 }
 
-/* ===================== 右上：事件详情 ===================== */
+/* ===================== 右上：选中环节的详情（agent 之间传递的正文） ===================== */
 
 const field = (label, value, mono) =>
   '<dt>' + esc(label) + '</dt><dd' + (mono ? ' class="mono"' : '') + '>' + esc(value) + '</dd>';
 
+const section = (title, body) =>
+  '<section class="detail-block"><h3 class="detail-block-title">' + esc(title) + '</h3>'
+  + body + '</section>';
+
+const MISSING = '（这一项没有内容）';
+
+/** 字符串字段：缺了给解释句，不给一个孤零零的 —（那和「读不到」在屏幕上长得一样）。 */
+const txt = (value) =>
+  value === undefined || value === null || String(value).trim() === '' ? MISSING : String(value);
+
+/** 列表字段：空数组也是解释句，不印一个空的 <ul>。 */
+function listField(items) {
+  const rows = Array.isArray(items)
+    ? items.filter((x) => x !== undefined && x !== null && String(x).trim() !== '')
+    : [];
+  if (rows.length === 0) return '<div class="muted">' + esc(MISSING) + '</div>';
+  return '<ul class="detail-list">' + rows.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+}
+
+const workItemOf = (ctx, workItemId) => {
+  const items = (ctx && ctx.workItems) || [];
+  const id = workItemId === undefined || workItemId === null ? '' : String(workItemId);
+  return items.find((it) => it && String(it.id) === id);
+};
+
+/** 协调者调查规划：plan 的五块正文。 */
+function planBlock(plan) {
+  const p = plan || {};
+  return section('调查与规划结论', '<dl class="fields">'
+    + field('发现', txt(p.findings))
+    + field('根因', p.rootCause === undefined || p.rootCause === null ? '没有单独记根因' : p.rootCause)
+    + '</dl>'
+    + '<div class="field-label">排除掉的假设</div>' + listField(p.rejectedHypotheses)
+    + '<div class="field-label">定下的决策</div>' + listField(p.decisions)
+    + '<dl class="fields">' + field('方向', txt(p.direction)) + '</dl>');
+}
+
+/** 派发：被派工作项的工单正文——执行者拿到的就是这一份。 */
+function dispatchBlock(ctx, events) {
+  const ids = [];
+  for (const e of events || []) {
+    const list = e && e.data && e.data.ids;
+    if (Array.isArray(list)) {
+      for (const id of list) if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  if (ids.length === 0) {
+    return section('派发的工单', '<div class="note">这一跳没有写派了哪些工作项。</div>');
+  }
+  return section('派发的工单', ids
+    .map((id) => {
+      const item = workItemOf(ctx, id);
+      const order = item && item.order;
+      if (!order) {
+        return '<div class="order-card"><div class="tech-id mono">' + esc(id) + '</div>'
+          + '<div class="note">读不到这张工单的正文（可能已经被作废）。</div></div>';
+      }
+      return '<div class="order-card">'
+        + '<div class="tech-id mono">' + esc(id) + ' · ' + esc(txt(item.title)) + '</div>'
+        + '<dl class="fields">' + field('目标', txt(order.objective)) + '</dl>'
+        + '<div class="field-label">允许改动的范围</div>' + listField(order.allowedScope)
+        + '<div class="field-label">验证命令</div>' + listField(order.verification)
+        + '<div class="field-label">验收标准</div>' + listField(order.acceptance)
+        + '</div>';
+    })
+    .join(''));
+}
+
 /**
- * 选中事件的详情。
+ * 证据清单。内容从旧的「验证结果」tab 整块搬过来——不许丢掉，只是换个地方。
  *
- * 标签一律走 fieldLabel：causationId / profileId / attempt 这些键名是给写代码的
- * 人看的，屏幕上该是「由哪一跳引发」「候选」「尝试」——技术 ID 仍原样带出，
- * 排障时人就是拿它去 grep 的。
- *
- * 没选中、没有 causationId、没有尝试，一律给解释句，不给一个孤零零的 —：
- * 那个横杠在屏幕上和“读不到”长得一样，而“读不到”才是要人去处理的那一种。
+ * 每条 kind / summary / command / exitCode 都要在：「已修复」必须有可验证证据，
+ * 界面同理。output 也带上，那才是能被复核的东西。
  */
-export function eventDetailHtml(event, attempt) {
-  const e = event || null;
-  const told = e ? narrateEvent(e) : null;
-  const profile = attempt && attempt.profile;
-  const usage = attempt && attempt.usage;
+function evidenceListHtml(evidence) {
+  const rows = evidence || [];
+  if (rows.length === 0) {
+    return '<div class="note">这一跳还没有证据。要么还没提交，要么这一跳不是执行者在干活。</div>';
+  }
+  return '<ul class="evidence">'
+    + rows
+        .map(
+          (e) => '<li>'
+          + '<div class="ev-top">'
+          +   '<span class="chip queued">' + esc(evidenceKindLabel(e && e.kind)) + '</span>'
+          +   '<span>' + esc(txt(e && e.summary)) + '</span>'
+          +   (e && e.exitCode !== undefined && e.exitCode !== null
+              ? '<span class="mono muted">退出码 ' + esc(e.exitCode) + '</span>'
+              : '<span class="mono muted">没有退出码</span>')
+          + '</div>'
+          + (e && e.command ? '<div class="mono muted">' + esc(e.command) + '</div>' : '')
+          + (e && e.output ? '<div class="ev-output mono muted">' + esc(e.output) + '</div>' : '')
+          + '</li>',
+        )
+        .join('')
+    + '</ul>';
+}
+
+/** 执行者：这一跳工作项的 executionResult + 证据清单。 */
+function executorBlock(ctx, events, attempt) {
+  const carrier = (events || []).find((e) => e && e.workItemId);
+  const item = workItemOf(ctx, carrier && carrier.workItemId);
+  const result = item && item.executionResult;
+  const parts = [result
+    ? '<dl class="fields">'
+      +   field('结果', txt(result.summary))
+      +   field('遗留说明', result.notes && String(result.notes).trim() ? result.notes : '没有写遗留问题')
+      + '</dl>'
+      + '<div class="field-label">改动的文件</div>' + listField(result.changedFiles)
+    : '<div class="note">这一跳还没有执行者交回结果。</div>'];
+  parts.push('<div class="field-label">证据</div>' + evidenceListHtml(attempt && attempt.evidence));
+  return section('执行者交回的正文', parts.join(''));
+}
+
+/** 技术验收：对应工作项 lastReview 的结论与要求。 */
+function reviewBlock(ctx, events) {
+  const ids = [];
+  for (const e of events || []) {
+    if (e && e.kind === 'review.recorded' && e.workItemId && !ids.includes(e.workItemId)) {
+      ids.push(e.workItemId);
+    }
+  }
+  if (ids.length === 0) {
+    return section('技术验收', '<div class="note">这一跳没有写验收的是哪个工作项。</div>');
+  }
+  return section('技术验收', ids
+    .map((id) => {
+      const item = workItemOf(ctx, id);
+      const review = item && item.lastReview;
+      if (!review) {
+        return '<div class="review-card"><div class="tech-id mono">' + esc(id) + '</div>'
+          + '<div class="note">读不到这个工作项的验收结论。</div></div>';
+      }
+      return '<div class="review-card">'
+        + '<div class="tech-id mono">' + esc(id) + ' · ' + esc(txt(item.title)) + '</div>'
+        + '<dl class="fields">'
+        +   field('结论', review.verdict === 'accept' ? '通过'
+              : review.verdict === 'reject' ? '打回重做' : txt(review.verdict))
+        + '</dl>'
+        + '<div class="field-label">理由</div>' + listField(review.reasons)
+        + '<div class="field-label">打回时要改什么</div>' + listField(review.requiredChanges)
+        + '</div>';
+    })
+    .join(''));
+}
+
+/**
+ * 升级问答：L2 与 L3 之间那封往来邮件的原文（从旧的「相关消息」tab 搬过来）。
+ *
+ * 按环节的 attemptId 去配 escalationLog；配不上时（答复是 L3 写的、没带同一个
+ * attemptId）宁可把整份问答列出来，也不要在这种一眼能看出「少了什么」的地方
+ * 留一个空块。
+ */
+function escalationBlock(log, attemptId) {
+  const rows = log || [];
+  const mine = attemptId ? rows.filter((x) => x && String(x.attemptId) === String(attemptId)) : [];
+  const shown = mine.length > 0 ? mine : rows;
+  if (shown.length === 0) {
+    return section('升级问答', '<div class="note">这条任务没有升级过问题。</div>');
+  }
+  return section('升级问答', '<ul class="escalations">'
+    + shown
+        .map(
+          (e) => '<li>'
+          + '<div class="q">' + esc(txt(e && e.question)) + '</div>'
+          + '<div class="why">' + esc(e && e.why ? e.why : '（没有说明为什么需要 L3）') + '</div>'
+          + (e && e.optionsConsidered && e.optionsConsidered.length
+            ? '<ul class="options">' + e.optionsConsidered.map((o) => '<li>' + esc(o) + '</li>').join('') + '</ul>'
+            : '')
+          + '<div class="a">'
+          +   (e && e.answer ? esc('答复：' + e.answer) : '<span class="muted">还没有答复 —— 这一条在等人。</span>')
+          + '</div>'
+          + '</li>',
+        )
+        .join('')
+    + '</ul>');
+}
+
+/** L3 最终检视：结论、理由、改动落到哪。 */
+function finalReviewBlock(finalReview) {
+  const r = finalReview;
+  if (!r) {
+    return section('L3 最终检视', '<div class="note">还没有最终检视结论 —— 这条任务正在等你看。</div>');
+  }
+  const verdictCn = r.verdict === 'merge' ? '放行并落地'
+    : r.verdict === 'send_back' ? '打回'
+    : r.verdict === 'abandon' ? '放弃这批改动'
+    : txt(r.verdict);
+  return section('L3 最终检视', '<dl class="fields">'
+    + field('结论', verdictCn)
+    + field('落到哪', r.mergedInto ? r.mergedInto : '还没有落地（打回或还没放行）')
+    + '</dl>'
+    + '<div class="field-label">理由</div>' + listField(r.reasons));
+}
+
+/**
+ * 选中环节的详情。回答的是「这一跳实际传递了什么」：协调者写回的结论、派给
+ * 执行者的工单正文、执行者交回的结果与证据、验收的结论、升级的问答、L3 的判断。
+ *
+ * 旧的事件详情（causationId / profile / 单条事件字段）被它取代——那些解释的是
+ * 「事件之间的连线」，而人打开这一页要问的是「两个 agent 之间到底说了什么」。
+ * 技术 ID 仍留在「技术信息」那一行，只是不再是第一眼。
+ *
+ * 一个环节同时有几类事件就同时渲染几块（例：「技术验收、派发」）。除证据外
+ * 全部读已经取到的 MissionView，不为详情新开接口。
+ */
+export function stageDetailHtml(group, ctx, attempt) {
+  if (!group) {
+    return '<div class="note">左边还没有选中环节。点一个环节头，这里会显示这一跳'
+      + '实际传给下一跳的正文。</div>';
+  }
+  const context = ctx || {};
+  const events = group.events || [];
+  const role = roleOfAttempt(group.attemptId);
+  const kinds = new Set(events.map((e) => (e && e.kind) || ''));
+  const blocks = [];
+
+  if (role === 'reviewer') {
+    // L3 自己动手的那一组：发起任务、改契约、最终检视，以及对升级的答复。
+    blocks.push(finalReviewBlock(context.finalReview));
+    const answered = (context.escalationLog || []).filter((x) => x && x.answer);
+    if (answered.length > 0) blocks.push(escalationBlock(answered, ''));
+  } else {
+    if (kinds.has('plan.updated') || kinds.has('work_item.created')) {
+      blocks.push(planBlock(context.plan));
+    }
+    if (kinds.has('work_item.dispatched')) {
+      blocks.push(dispatchBlock(context, events.filter((e) => e && e.kind === 'work_item.dispatched')));
+    }
+    if (kinds.has('review.recorded')) blocks.push(reviewBlock(context, events));
+    if (role === 'executor') blocks.push(executorBlock(context, events, attempt));
+    if (kinds.has('escalated') || kinds.has('escalation.raised')) {
+      blocks.push(escalationBlock(context.escalationLog, group.attemptId));
+    }
+  }
+
+  const head = representativeEvent(events);
+  const workItemIds = [];
+  for (const e of events) {
+    if (e && e.workItemId && !workItemIds.includes(e.workItemId)) workItemIds.push(e.workItemId);
+  }
+  const causation = (events.find((e) => e && e.causationId) || {}).causationId;
+
   return '<div class="detail-head">'
-    +   '<span class="detail-title">事件详情</span>'
-    +   (told
-      ? '<span class="evt-badge">' + esc(told.badge) + '</span>'
-        + '<span class="detail-action">' + esc(told.action) + '</span>'
-      : '<span class="muted">没有选中事件</span>')
+    +   '<span class="detail-title">' + esc(stageName(events, context)) + '</span>'
+    +   '<span class="chip ' + esc(roleTone(role)) + '">' + esc(roleBadge(role)) + '</span>'
     + '</div>'
-    + '<dl class="fields">'
-    +   field('时间', e && e.at ? formatTime(e.at) : '这条事件没有记下时间', true)
-    +   field(fieldLabel('WorkItem'), (e && e.workItemId) || '这条事件没有关联工作项', true)
-    +   field(fieldLabel('causationId'),
-        (e && e.causationId) || '没有上一跳引发它（通常是任务的起点）', true)
-    +   field(fieldLabel('profileId'), profile
-        ? profile.profileId + (profile.endpoint ? ' @ ' + profile.endpoint : '')
-        : '没有选中尝试，读不到候选', true)
-    // 用量走 usageLine（新着 + 缓存命中 + 占比 + 费用），不单印一个 total。
-    +   field('用量', usage ? usageLine(usage) : '这一跳没有上报用量')
-    + '</dl>';
+    + (head
+      ? '<div class="detail-sub">' + esc(narrateEvent(head, context).detail) + '</div>'
+      : '<div class="detail-sub muted">这一跳还没有能说明白它在干什么的事件。</div>')
+    + '<div class="detail-tech mono muted">'
+    +   esc(fieldLabel('attempt')) + ' '
+    +   esc(group.attemptId || '这一组事件不属于任何一跳（L3 自己动手的）')
+    +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
+    +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
+    + '</div>'
+    + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>');
 }
 
-/* ===================== 右下：五个 tab ===================== */
-
-export const TASK_TABS = ['实时输出', '文件变更', '验证结果', '相关消息', '原始数据'];
-
-const note = (text) => '<div class="note">' + esc(text) + '</div>';
-
-/** tab 条。当前项 data-active="1"，点哪个由调用方的事件委托决定。 */
-export function tabBarHtml(activeTab) {
-  return TASK_TABS
-    .map(
-      (t) =>
-        '<button class="tab" type="button" data-tab="' + esc(t) + '"'
-        + (t === activeTab ? ' data-active="1"' : '') + '>' + esc(t) + '</button>',
-    )
-    .join('');
-}
+/* ===================== 右下：常驻实时输出 ===================== */
 
 /**
  * 终端块里面那一块。
@@ -254,19 +647,24 @@ export function tabBarHtml(activeTab) {
  * `kind === 'usage'` 的 chunk **不当终端行**：它没有 text，塞进终端会吐出一行
  * `undefined`；它是累计用量，所以单独摆一行数字（见 liveMetaHtml）。
  *
+ * `kind === 'note'` 的行也不进正文——那是后端裁剪历史时补的「前面没了」，
+ * 混在正文末尾会被读成「后面还有」，意思正好反过来，所以拎出去挂横幅
+ * （见 liveNoteHtml）。
+ *
  * 空的时候必须有一句说明，而且要看任务还在不在跑：
- *   - 已经不在跑（终态 / 等待 / 暂停）——这一跳的输出不会再来，说清楚完整输出在哪；
- *   - 还可能开跑——一句话告诉人这一块不是坏的。
+ *   - 已经不跑了：输出不会再来，直接说这里没留下行。**不能**再说「完整输出在
+ *     下面的原始输出里」——原始数据 tab 已经删了，那句会把人指向一个空处。
+ *   - 还可能开跑：一句话告诉人这一块不是坏的。
  * 两种情况都不能留空白：黑空的一块看起来像坏了。
  */
 export function liveLinesHtml(chunks, running) {
   const lines = [];
   for (const c of chunks || []) {
-    if (c && c.kind !== 'usage') lines.push(c);
+    if (c && c.kind !== 'usage' && c.kind !== 'note') lines.push(c);
   }
   if (lines.length === 0) {
     return running === false
-      ? '<span class="t">这一跳已经结束，完整输出在下面的原始输出里。</span>'
+      ? '<span class="t">这一跳没有在这里留下输出行。</span>'
       : '<span class="t">还没有实时输出。agent 跑起来时这里会一行行出现。</span>';
   }
   return lines
@@ -276,103 +674,46 @@ export function liveLinesHtml(chunks, running) {
     .join('\n');
 }
 
+/**
+ * 裁剪说明横幅：挂在终端**上方**，不是正文里的一行。
+ *
+ * 后端 finish() 只删最早的、留尾部若干行，然后补一条 kind='note' 排在**末尾**
+ * （append-only 的表没法往前插）。所以那句话必须由界面挪到上面去说，否则它读
+ * 起来像「接下来还有」，而它说的恰好是「前面没了」。
+ */
+export function liveNoteHtml(chunks) {
+  const notes = (chunks || []).filter((c) => c && c.kind === 'note' && c.text);
+  if (notes.length === 0) return '';
+  return '<div class="live-note">'
+    + notes.map((c) => '<div>' + esc(c.text) + '</div>').join('')
+    + '</div>';
+}
+
 /** 终端块右上角那一行元信息（行数与累计用量）。勾选框不在里面，不被每秒重写。 */
 export function liveMetaHtml(live) {
   const lines = (live && live.lines) || [];
-  const count = lines.filter((c) => c && c.kind !== 'usage').length;
+  const count = lines.filter((c) => c && c.kind !== 'usage' && c.kind !== 'note').length;
   return '<span class="muted">' + esc(num(count)) + ' 行</span>'
     + (live && live.usage ? '<span class="mono muted">tokens ' + esc(num(live.usage.total)) + '</span>' : '');
 }
 
-/** 实时输出的外框：勾选框 + 元信息 + 空的终端块。内容逐次只重写 pre 里面。 */
+/**
+ * 实时输出的外框：勾选框 + 元信息 + 裁剪横幅 + 终端块。
+ *
+ * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
+ * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
+ */
 export function livePanelHtml(live) {
+  const lines = (live && live.lines) || [];
   return '<div class="live-bar">'
     +   '<label class="auto-scroll"><input type="checkbox" data-autoscroll'
     +     (live && live.autoScroll === false ? '' : ' checked') + ' /> 自动滚动</label>'
     +   '<span class="live-meta" data-live-meta>' + liveMetaHtml(live) + '</span>'
     + '</div>'
-    + '<pre class="term" data-term>' + liveLinesHtml(live && live.lines, !live || live.running !== false) + '</pre>';
-}
-
-/** 文件变更：stat + 文件清单。逐行着色不在这一版（要引 diff 解析，代价大于用处）。 */
-export function diffPanelHtml(diff) {
-  if (!diff) return note('读取中…');
-  if (diff.error) return note('读不到改动：' + diff.error);
-  const files = diff.files || [];
-  const stat = diff.stat ? String(diff.stat) : '（无改动）';
-  return '<pre class="term">' + esc(stat) + '</pre>'
-    + (files.length === 0
-      ? note('没有文件清单。')
-      : '<ul class="file-list">'
-          + files.map((f) => '<li class="mono">' + esc(f) + '</li>').join('') + '</ul>');
-}
-
-/** 验证结果：选中事件那次尝试的证据。「已修复」必须有可验证证据——界面同理。 */
-export function evidencePanelHtml(evidence) {
-  const rows = evidence || [];
-  if (rows.length === 0) return note('选中的事件没有对应证据：要么没选中，要么那次尝试没提交证据。');
-  return '<ul class="evidence">'
-    + rows
-        .map(
-          (e) => '<li>'
-          + '<div class="ev-top"><span class="chip queued">' + esc((e && e.kind) || DASH) + '</span>'
-          +   '<span>' + esc((e && e.summary) || DASH) + '</span>'
-          +   (e && e.exitCode !== undefined && e.exitCode !== null
-              ? '<span class="mono muted">exit=' + esc(e.exitCode) + '</span>'
-              : '')
-          + '</div>'
-          + (e && e.command ? '<div class="mono muted">' + esc(e.command) + '</div>' : '')
-          + '</li>',
-        )
-        .join('')
-    + '</ul>';
-}
-
-/** 相关消息：升级问答。这一栏是 L3 与平台之间那封往来邮件的原文。 */
-export function escalationPanelHtml(log) {
-  const rows = log || [];
-  if (rows.length === 0) return note('这条任务没有升级过问题（没有 L3 往来消息）。');
-  return '<ul class="escalations">'
-    + rows
-        .map(
-          (e) => '<li>'
-          + '<div class="q">' + esc((e && e.question) || DASH) + '</div>'
-          + '<div class="why">' + esc((e && e.why) || '（没有说明为什么需要 L3）') + '</div>'
-          + ((e && e.optionsConsidered && e.optionsConsidered.length)
-            ? '<ul class="options">'
-                + e.optionsConsidered.map((o) => '<li>' + esc(o) + '</li>').join('')
-                + '</ul>'
-            : '')
-          + '<div class="a">'
-          +   (e && e.answer ? esc('答复：' + e.answer) : '<span class="muted">还没有答复。</span>')
-          + '</div>'
-          + '</li>',
-        )
-        .join('')
-    + '</ul>';
-}
-
-/** 原始数据：选中事件整条 JSON。排查字段名不对时靠它。 */
-export function rawPanelHtml(event) {
-  if (!event) return note('没有选中事件，原始数据是空的。');
-  let text = '';
-  try {
-    text = JSON.stringify(event, null, 2);
-  } catch {
-    return note('这条事件没法序列化成 JSON。');
-  }
-  return '<pre class="term">' + esc(text) + '</pre>';
-}
-
-/** tab 内容分发。切 tab 是纯渲染：activeTab 进、HTML 出，可测。 */
-export function tabPanelHtml(activeTab, data) {
-  const d = data || {};
-  if (activeTab === '实时输出') return livePanelHtml(d.live);
-  if (activeTab === '文件变更') return diffPanelHtml(d.diff);
-  if (activeTab === '验证结果') return evidencePanelHtml(d.evidence);
-  if (activeTab === '相关消息') return escalationPanelHtml(d.escalationLog);
-  if (activeTab === '原始数据') return rawPanelHtml(d.event);
-  return note('不认识的标签：' + (activeTab || '（空）'));
+    + '<div data-live-note>' + liveNoteHtml(lines) + '</div>'
+    + '<pre class="term" data-term>'
+    +   liveLinesHtml(lines, !live || live.running !== false)
+    + '</pre>';
 }
 
 /* ===================== 自动滚动 ===================== */
@@ -427,20 +768,26 @@ let mounted = null;
 /** 一次导航一个代号：await 期间可能又切了页，旧请求的落地必须被丢掉。 */
 let epoch = 0;
 
-/** 骨架。导出来是为了能拿它对一下 renderTaskPage 取的那些 id（拼错一个就是白屏）。 */
+/**
+ * 骨架。导出来是为了能拿它对一下 renderTaskPage 取的那些 id（拼错一个就是白屏）。
+ *
+ * 三个锚点区：页头（含独立用量卡）、左栏环节列表、右栏（上详情 / 下常驻终端）。
+ * 实时输出不再有 tab，所以它的外框**始终在**——每切一次环节都不该把它重建掉。
+ */
 export function skeletonHtml() {
   return '<div class="task">'
+    + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
     + '<header class="card task-head" id="task-head"><div class="note">加载中…</div></header>'
     + '<div class="task-cols">'
     +   '<section class="task-left">'
-    +     '<div class="pane-title">执行事件流</div>'
-    +     '<ul class="evt-list" id="task-events"><li class="empty">加载中…</li></ul>'
+    +     '<div class="pane-title">执行环节</div>'
+    +     '<div class="stage-list" id="task-stages"><div class="empty">加载中…</div></div>'
     +   '</section>'
     +   '<section class="task-right">'
     +     '<div class="card" id="task-detail"><div class="note">加载中…</div></div>'
-    +     '<div class="card">'
-    +       '<div class="tabs" id="task-tabs"></div>'
-    +       '<div id="task-panel"></div>'
+    +     '<div class="card live-card">'
+    +       '<div class="pane-title">实时输出</div>'
+    +       '<div id="task-live"><div class="note">输出读取中…</div></div>'
     +     '</div>'
     +   '</section>'
     + '</div>'
@@ -496,8 +843,11 @@ function setCrumbs(st) {
   bar.replaceChildren(...kids);
 }
 
-const selectedEvent = (st) =>
-  st.selectedKey === null ? undefined : (st.activity || [])[st.selectedKey];
+/** 选中的那个环节。selectedAttemptId 为 null 表示谁都没选。 */
+function selectedGroup(st) {
+  if (st.selectedAttemptId === null) return null;
+  return groupActivity(st.activity).find((g) => g.attemptId === st.selectedAttemptId) || null;
+}
 
 function paintHead(st) {
   if (!st.view) return;
@@ -505,20 +855,67 @@ function paintHead(st) {
   st.els.head.innerHTML = headerHtml(st.view, st.activity, new Date().toISOString());
 }
 
-/** narrateEvent 的上下文。四样都在已有的 view 上，不额外取数据。 */
-function eventCtx(st) {
+function paintUsage(st) {
+  if (!st.view) return;
+  st.els.usage.innerHTML = usageCardHtml(st.view, st.activity);
+}
+
+/**
+ * 详情与环节共用的上下文。
+ *
+ * 全取自已经拉到的 MissionView——详情**不许**为某个字段新开接口，
+ * 证据是唯一的例外（那里本来就没有）。
+ */
+function detailCtx(st) {
   const v = st.view || {};
   return {
     intent: v.contract && v.contract.intent,
     plan: v.plan,
     workItems: v.workItems || [],
     result: v.result,
+    escalationLog: v.escalationLog || [],
+    finalReview: v.finalReview,
   };
 }
 
 /**
+ * 用户展开过的环节（attemptId 集合）。
+ *
+ * 原生 `<details>` 的 open 只活在浏览器里，而环节列表是整块 innerHTML 重画的。
+ * 所以重画之前先把 DOM 里的 open 收进来，重画时再按它写回 open——不收的话，
+ * 人点开一个环节，浏览器刚展开、节点就被换成一份全收起的新表，
+ * 组内逐条事件一次都看不到。
+ */
+function collectExpanded(st) {
+  const ids = new Set();
+  for (const node of st.els.stages.querySelectorAll('details.stage')) {
+    if (node.open) ids.add(String(node.dataset.attemptId || ''));
+  }
+  return ids;
+}
+
+/**
+ * 重画环节列表。
+ *
+ * `expanded` 明确给定时用它；不给就以 DOM 现状为准（原生 toggle 跑完之后
+ * DOM 才是真相）。之所以要能明确给定：点环节头那一刻，浏览器的展开动作**还没**
+ * 落到 DOM 上（点击的默认行为在事件派发之后才跑），此刻从 DOM 收会收到
+ * 「还没展开」，重画反而把刚点开的那一组折回去。
+ */
+function paintStages(st, expanded) {
+  st.expanded = expanded === undefined ? collectExpanded(st) : expanded;
+  st.els.stages.innerHTML = stageListHtml(
+    st.activity, st.selectedAttemptId, st.selectedKey, detailCtx(st), st.expanded,
+  );
+}
+
+function paintDetail(st) {
+  st.els.detail.innerHTML = stageDetailHtml(selectedGroup(st), detailCtx(st), st.attempt);
+}
+
+/**
  * 这一跳还能不能开跑。终态（结束/中止）、等待停机、暂停都不再会来新输出，
- * 所以终端空着的时候该说“输出在别处”，而不是“还没开始”。
+ * 所以终端空着的时候该说「这里没留下输出」，而不是「还没开始」。
  */
 function stillRunning(st) {
   const v = st.view;
@@ -526,24 +923,25 @@ function stillRunning(st) {
   return !(isTerminal(v.status) || v.paused || v.waitReason || v.waitDetail);
 }
 
-function paintEvents(st) {
-  st.els.events.innerHTML = eventStreamHtml(st.activity, st.selectedKey, eventCtx(st));
-}
-
-function paintDetail(st) {
-  st.els.detail.innerHTML = eventDetailHtml(selectedEvent(st), st.attempt);
+/** 首帧建外框。之后每秒只重写里面（见 pushLive）。 */
+function paintLive(st) {
+  st.els.live.innerHTML = livePanelHtml(
+    Object.assign({ autoScroll: st.autoScroll, running: stillRunning(st) }, st.live),
+  );
+  const term = st.els.live.querySelector('[data-term]');
+  if (term) term.scrollTop = term.scrollHeight - term.clientHeight;
 }
 
 /**
- * 追新行。只重写终端块里面与那一行元信息，不重建外框。
+ * 追新行。只重写终端、那一行元信息、以及裁剪横幅里面，不重建外框。
  *
  * 判据必须在写入**之前**量：追加会先抬高 scrollHeight，写完再量会把
  * 「刚才还贴底」误判成「离底很远」。外框也不重建：那会每秒把
  * 「自动滚动」勾选框与它的焦点丢一次，人正要点它时永远点不中。
  */
 function pushLive(st) {
-  const term = st.els.panel.querySelector('[data-term]');
-  if (!term) return; // 不在实时输出那个 tab 上：行已经攒在 st.live 里，切回去再看。
+  const term = st.els.live.querySelector('[data-term]');
+  if (!term) return; // 首帧还没建好：行已经攒在 st.live 里，建的时候一次画全。
   const follow = shouldFollow({
     autoScroll: st.autoScroll,
     scrollTop: term.scrollTop,
@@ -551,35 +949,26 @@ function pushLive(st) {
     scrollHeight: term.scrollHeight,
   });
   term.innerHTML = liveLinesHtml(st.live.lines, stillRunning(st));
-  const meta = st.els.panel.querySelector('[data-live-meta]');
+  const meta = st.els.live.querySelector('[data-live-meta]');
   if (meta) meta.innerHTML = liveMetaHtml(st.live);
+  const banner = st.els.live.querySelector('[data-live-note]');
+  if (banner) banner.innerHTML = liveNoteHtml(st.live.lines);
   if (follow) term.scrollTop = term.scrollHeight - term.clientHeight;
 }
 
 /**
- * 画 tab 条与内容。切 tab、换选中项时走这里（整块重建）。
+ * 取选中环节那一次的证据。
+ *
+ * 钥匙是**环节自己的 attemptId**，不是事件的 causationId：详情页讲的是「这一跳
+ * 传递了什么」，而证据挂在执行者自己那一跳上。
+ *
+ * 没有 attemptId（L3 那一组）就不发这个请求：拿 undefined 去拼 URL 会打到
+ * /attempts/undefined，返回的是 UNKNOWN_ATTEMPT 错误——一次没必要的 500。
+ * 也不在进页时把每个 attempt 挨个拉一遍（N+1）。
  */
-function paintPanel(st) {
-  st.els.tabs.innerHTML = tabBarHtml(st.tab);
-  st.els.panel.innerHTML = tabPanelHtml(st.tab, {
-    live: Object.assign({ autoScroll: st.autoScroll, running: stillRunning(st) }, st.live),
-    diff: st.diff,
-    evidence: (st.attempt && st.attempt.evidence) || [],
-    escalationLog: (st.view && st.view.escalationLog) || [],
-    event: selectedEvent(st),
-  });
-  // 刚重建：滚到最新一行。首帧没有 pre 可量，shouldFollow 把空位当贴底。
-  const term = st.els.panel.querySelector('[data-term]');
-  if (term && st.autoScroll) term.scrollTop = term.scrollHeight - term.clientHeight;
-}
-
-async function loadAttempt(st, key) {
-  const event = (st.activity || [])[key];
-  const causationId = event && event.causationId;
+async function loadAttempt(st, attemptId) {
   st.attempt = null;
-  // 没有 causationId 就不发这个请求：拿 undefined 去拼 URL 会打到
-  // /attempts/undefined，而它返回的是 UNKNOWN_ATTEMPT 错误——一次没必要的 500。
-  if (!causationId) {
+  if (!attemptId) {
     if (st.epoch === epoch) paintDetail(st);
     return;
   }
@@ -587,30 +976,15 @@ async function loadAttempt(st, key) {
   try {
     detail = await get(
       '/api/missions/' + encodeURIComponent(st.missionId)
-        + '/attempts/' + encodeURIComponent(causationId),
+        + '/attempts/' + encodeURIComponent(attemptId),
     );
   } catch (err) {
     detail = { error: err.message };
   }
-  // await 期间人可能又点了别的事件，或者整页都换了一条 Mission。
-  if (st.epoch !== epoch || st.selectedKey !== key) return;
+  // await 期间人可能又点了别的环节，或者整页都换了一条 Mission。
+  if (st.epoch !== epoch || st.selectedAttemptId !== attemptId) return;
   st.attempt = detail && detail.error ? null : detail;
   paintDetail(st);
-  if (st.tab === '验证结果') paintPanel(st);
-}
-
-async function loadDiff(st) {
-  if (st.diffRequested) return;
-  st.diffRequested = true;
-  let got = null;
-  try {
-    got = await get('/api/missions/' + encodeURIComponent(st.missionId) + '/diff');
-  } catch (err) {
-    got = { error: err.message };
-  }
-  if (st.epoch !== epoch) return;
-  st.diff = got;
-  if (st.tab === '文件变更') paintPanel(st);
 }
 
 /** 一轮游标拉取。只取 cursor 之后的，不从头。 */
@@ -636,7 +1010,8 @@ async function pollLive(st) {
     }
     const cursor = Number(body && body.cursor);
     if (Number.isFinite(cursor)) st.live.cursor = cursor;
-    if (chunks.length && st.tab === '实时输出') pushLive(st);
+    // 常驻终端：不再判 tab，有新行就写。
+    if (chunks.length) pushLive(st);
   } catch {
     // 轮询失败不动界面：下一次心跳自然会补上。把它写成一条错误行，
     // 会让"后端重启了一次"看起来像任务挂了。
@@ -645,32 +1020,45 @@ async function pollLive(st) {
   }
 }
 
-function selectTab(st, tab) {
-  st.tab = tab;
-  paintPanel(st);
-  if (tab === '文件变更') void loadDiff(st);
+function selectStage(st, attemptId, expanded) {
+  st.selectedAttemptId = attemptId;
+  st.selectedKey = null;
+  paintStages(st, expanded);
+  void loadAttempt(st, attemptId);
 }
 
 function bind(st) {
-  // 监听挂在常驻容器上：panel 每次切 tab 都整块重写 innerHTML，
-  // 绑在里面那个元素上的话，切一次就丢一次监听（然后页面"点了没反应"）。
-  st.els.events.addEventListener('click', (ev) => {
+  // 监听挂在常驻容器上：环节列表每次选中都整块重写 innerHTML，
+  // 绑在里面某个元素上的话，重画一次就丢一次监听（然后页面"点了没反应"）。
+  st.els.stages.addEventListener('click', (ev) => {
     const row = ev.target && ev.target.closest && ev.target.closest('[data-event-key]');
-    if (!row) return;
-    st.selectedKey = Number(row.dataset.eventKey);
-    paintEvents(st);
-    void loadAttempt(st, st.selectedKey);
-    // 原始数据与验证结果两块都跟着选中项变。
-    if (st.tab === '原始数据' || st.tab === '验证结果') paintPanel(st);
+    if (row) {
+      // 点组内一条事件：选中它，详情仍按**所属环节**的角色正文来，
+      // 证据也仍取该环节的 attemptId。
+      const stage = row.closest('.stage');
+      st.selectedKey = Number(row.dataset.eventKey);
+      st.selectedAttemptId = stage ? String(stage.dataset.attemptId || '') : st.selectedAttemptId;
+      // 这一步之前没人动过 DOM 的 open，以 DOM 为准重画：当前组与其它已经展开的
+      // 组都还在展开集里，点一条事件不会把它们折回去。
+      paintStages(st);
+      void loadAttempt(st, st.selectedAttemptId);
+      return;
+    }
+    const head = ev.target && ev.target.closest && ev.target.closest('[data-stage-select]');
+    if (!head) return;
+    const stage = head.closest('.stage');
+    if (!stage) return;
+    // 点环节头：<details> 仍由浏览器原生展开/折起（不 preventDefault）。但上面
+    // 那句「点击的默认行为还没落到 DOM」在这里生效——不能读 DOM 的 open，
+    // 要按现有展开集反转出点击后该是什么状态，交给重画写回 open。
+    const id = String(stage.dataset.attemptId || '');
+    const expanded = collectExpanded(st);
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+    selectStage(st, id, expanded);
   });
 
-  st.els.tabs.addEventListener('click', (ev) => {
-    const btn = ev.target && ev.target.closest && ev.target.closest('[data-tab]');
-    if (!btn) return;
-    selectTab(st, btn.dataset.tab);
-  });
-
-  st.els.panel.addEventListener('change', (ev) => {
+  st.els.live.addEventListener('change', (ev) => {
     const box = ev.target && ev.target.closest && ev.target.closest('[data-autoscroll]');
     if (!box) return;
     st.autoScroll = box.checked;
@@ -694,15 +1082,16 @@ async function load(st) {
     st.activity = Array.isArray(activity) ? activity : [];
     setCrumbs(st);
     paintHead(st);
-    paintEvents(st);
+    paintUsage(st);
+    paintStages(st);
     paintDetail(st);
-    paintPanel(st);
+    paintLive(st);
     void pollLive(st);
   } catch (err) {
     if (st.epoch !== epoch) return;
     // 一次都没读到就写「还没有任务」是撒谎：那是读不到，不是没有。
     st.els.head.innerHTML = '<div class="note">读不到这条任务：' + esc(err.message) + '</div>';
-    st.els.events.innerHTML = '<li class="empty">刷新一下重试</li>';
+    st.els.stages.innerHTML = '<div class="empty">刷新一下重试</div>';
     setCrumbs(st);
   }
 }
@@ -730,19 +1119,21 @@ export async function renderTaskPage(container, missionId) {
     missionId,
     epoch,
     els: {
+      usage: container.querySelector('#task-usage'),
       head: container.querySelector('#task-head'),
-      events: container.querySelector('#task-events'),
+      stages: container.querySelector('#task-stages'),
       detail: container.querySelector('#task-detail'),
-      tabs: container.querySelector('#task-tabs'),
-      panel: container.querySelector('#task-panel'),
+      live: container.querySelector('#task-live'),
     },
     view: null,
     activity: [],
+    // 环节与事件的选中态分两个键：环节决定详情取哪一份正文、去不去拉证据；
+    // 事件只决定事件流里哪一行高亮。
+    selectedAttemptId: null,
     selectedKey: null,
+    // 用户展开过的环节。首屏是空的：默认全部收起。
+    expanded: new Set(),
     attempt: null,
-    diff: null,
-    diffRequested: false,
-    tab: TASK_TABS[0],
     autoScroll: true,
     live: liveStateOf(missionId),
     polling: false,

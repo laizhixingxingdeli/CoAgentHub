@@ -4,13 +4,18 @@
  * 正式页在这个仓库里**不在测试的浏览器里**：字段名读错一个，界面照样渲染，
  * 只是那一格永远是 —。所以这个文件分三层守：
  *
- *   1. 文件形状 —— 路由、modulepreload、data-mission-id。这些跨文件，写错了
- *      只有运行时才看得见（浏览器里一个 404，或者点了没反应）。
- *   2. 纯渲染函数喂假数据 —— 事件流、tab、页头、转义、跟随判据。
+ *   1. 文件形状 —— 路由、modulepreload、data-mission-id、锚点。这些跨文件，
+ *      写错了只有运行时才看得见（浏览器里一个 404，或者点了没反应）。
+ *   2. 纯函数喂假数据 —— 环节分组、按角色的用量、详情正文、终端、转义、
+ *      跟随判据。
  *   3. 真读模型喂真渲染函数 —— 页面读的字段必须后端真的给
  *      （同 web.test.ts 为观测面补的那个坑）。
  *
- * 第 2 层里的 shouldFollow 看着只是三个数字比大小，但它是这份代码里唯一一个
+ * 第 2 层里最要紧的是「环节分组」：一个环节 = 同一个 attemptId 下的一跳，
+ * 而没有 attemptId 的事件散在流的头和尾。按连续分段切会在开头多出一个组，
+ * 而多出来的那个组在屏幕上就是一个凭空的 L3 环节——不报错，只是骗人。
+ *
+ * shouldFollow 看着只是三个数字比大小，但它是这份代码里唯一一个
  * "判据时机错了就没人报 bug"的地方：在追加之后量，人上滚看历史就会被每一行
  * 新输出拽回底部。四条判据里有三条在钉这个。
  */
@@ -79,7 +84,7 @@ async function serveDefaultWebRoot(): Promise<{
   return { platform, live, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
 
-/** 一条跑起来的任务：契约、事件流、尝试、升级、diff、实时输出各给一份。 */
+/** 一条跑起来的任务：契约、事件流、尝试、升级、实时输出各给一份。 */
 async function seedMission(): Promise<{ platform: Platform; base: string }> {
   const { platform, live, base } = await serveDefaultWebRoot();
   await platform.createMission({
@@ -98,16 +103,16 @@ async function seedMission(): Promise<{ platform: Platform; base: string }> {
     endpoint: 'http://127.0.0.1:9/send',
   });
   await platform.updatePlan('M-task', coord.attemptId, {
-    findings: 'f',
-    rejectedHypotheses: [],
-    decisions: [],
-    direction: 'd',
+    findings: '翻译表散在渲染分支里',
+    rejectedHypotheses: ['在 prompt 里要求模型说人话'],
+    decisions: ['收成一个 narrate.js'],
+    direction: '先落翻译表再改页面',
     risks: [],
   });
   const { workItemId } = await platform.createWorkItem('M-task', coord.attemptId, {
     title: 'W-1',
     order: {
-      objective: 'o',
+      objective: '把任务页改成折叠视图',
       allowedScope: ['src/a.ts'],
       requiredBehaviour: 'b',
       constraints: [],
@@ -133,6 +138,22 @@ async function seedMission(): Promise<{ platform: Platform; base: string }> {
     command: 'node --test',
     exitCode: 0,
   });
+  // 执行者交回结果与 L2 验收：详情页的「执行者交回的正文」与「技术验收」两块
+  // 读的就是这两个字段。不给它们，那两格在页面上永远是解释句，而字段名读错了
+  // 也是同样的表现——所以这里必须把真值灌进去验。
+  await platform.submitExecutionResult('M-task', exec.attemptId, {
+    outcome: 'completed',
+    summary: '环节折叠成 6 组了',
+    changedFiles: ['src/web/task.js'],
+    evidenceIds: ['E-1'],
+    notes: '没动内核',
+  });
+  await platform.reviewExecutionResult('M-task', coord.attemptId, {
+    workItemId,
+    verdict: 'accept',
+    reasons: ['测试跑过了'],
+    requiredChanges: [],
+  });
   await platform.escalateToL3('M-task', coord.attemptId, {
     question: '要不要一起改内核？',
     why: '改了会波及别的 Mission',
@@ -147,6 +168,79 @@ async function seedMission(): Promise<{ platform: Platform; base: string }> {
   });
   return { platform, base };
 }
+
+/**
+ * W4 形状的 activity：真实跑完的一条 Mission 就是这个样子。
+ *
+ * 关键是**没有 attemptId 的事件同时出现在流的头和尾**（mission.created 在
+ * index 0，final_review.merged / contract.revised 在末尾）。按连续分段切的实现
+ * 会在这里多出一个开头的 L3 组，6 个环节变 7 个。
+ */
+function w4Activity(): Record<string, any>[] {
+  const t = (n: number) => `2026-03-04T05:${String(n).padStart(2, '0')}:00.000Z`;
+  const coordUsage = { input: 6000, output: 400, cacheRead: 1000, cacheWrite: 0, total: 7400, cost: 0.74, quality: 'reported' };
+  const execUsage = { input: 2000, output: 300, cacheRead: 300, cacheWrite: 0, total: 2600, cost: 0.26, quality: 'reported' };
+  const execGroup = (attemptId: string, workItemId: string, offset: number) => [
+    { at: t(offset + 1), kind: 'attempt.started', attemptId, workItemId, data: { kind: 'executor' } },
+    { at: t(offset + 2), kind: 'evidence.submitted', attemptId, workItemId, data: { kind: 'test', exitCode: 0 } },
+    { at: t(offset + 3), kind: 'execution_result.submitted', attemptId, workItemId, data: { outcome: 'completed', changedFiles: 2 } },
+    { at: t(offset + 4), kind: 'attempt.ended', attemptId, workItemId, data: { endedBy: 'structured_submit', usage: execUsage } },
+  ];
+  return [
+    { at: t(0), kind: 'mission.created', data: { contractRevision: 1 } },
+    { at: t(1), kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator' } },
+    { at: t(2), kind: 'plan.updated', attemptId: 'coord-1', data: { planRevision: 1 } },
+    { at: t(3), kind: 'work_item.created', attemptId: 'coord-1', workItemId: 'W-1649', data: { title: '接上读模型' } },
+    { at: t(4), kind: 'work_item.dispatched', attemptId: 'coord-1', data: { ids: ['W-1649'] } },
+    { at: t(5), kind: 'attempt.ended', attemptId: 'coord-1', data: { endedBy: 'structured_submit', usage: coordUsage } },
+    ...execGroup('W-1649.exec-1', 'W-1649', 5),
+    { at: t(10), kind: 'attempt.started', attemptId: 'coord-2', data: { kind: 'coordinator' } },
+    { at: t(11), kind: 'review.recorded', attemptId: 'coord-2', workItemId: 'W-1649', data: { verdict: 'accept', reasons: ['测试跑过了'] } },
+    { at: t(12), kind: 'work_item.created', attemptId: 'coord-2', workItemId: 'W-1650', data: { title: '折叠成环节' } },
+    { at: t(13), kind: 'work_item.dispatched', attemptId: 'coord-2', data: { ids: ['W-1650'] } },
+    { at: t(14), kind: 'attempt.ended', attemptId: 'coord-2', data: { endedBy: 'structured_submit' } },
+    ...execGroup('W-1650.exec-1', 'W-1650', 15),
+    { at: t(20), kind: 'attempt.started', attemptId: 'coord-3', data: { kind: 'coordinator' } },
+    { at: t(21), kind: 'mission_result.submitted', attemptId: 'coord-3', data: { outcome: 'delivered' } },
+    { at: t(22), kind: 'attempt.ended', attemptId: 'coord-3', data: { endedBy: 'structured_submit' } },
+    { at: t(23), kind: 'contract.revised', data: { contractRevision: 2 } },
+    { at: t(24), kind: 'final_review.merged', data: { mergedInto: 'main' } },
+  ];
+}
+
+/** W4 那六个环节的期望组名。 */
+const W4_TITLES = [
+  '调查与规划、派发',
+  '执行 · 接上读模型',
+  '调查与规划、技术验收、派发',
+  '执行 · 折叠成环节',
+  '交卷',
+  'L3 检视者',
+];
+
+const W4_CTX = {
+  workItems: [
+    { id: 'W-1649', title: '接上读模型' },
+    { id: 'W-1650', title: '折叠成环节' },
+  ],
+};
+
+/** 与实现无关的本地时间算式：断言"渲染出来的是本地时间"而不是抄实现。 */
+function localStamp(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** 已知机器事件名：第一眼（事件流 / 环节头 / 详情）一个都不许露。 */
+const MACHINE_KINDS = [
+  'mission.created', 'attempt.started', 'plan.updated', 'work_item.created',
+  'work_item.dispatched', 'work_item.retired', 'evidence.submitted',
+  'execution_result.submitted', 'review.recorded', 'escalated', 'escalation.raised',
+  'mission_result.submitted', 'attempt.ended', 'contract.revised',
+  'final_review.merged', 'mission.waiting', 'mission.resumed',
+];
 
 /* ===================== 1. 文件形状 ===================== */
 
@@ -169,7 +263,7 @@ describe('任务页的文件形状', () => {
     const shell = read('app.js');
     assert.match(shell, /from '\.\/task\.js'/);
     assert.match(shell, /renderTaskPage/);
-    assert.ok(shell.includes('/missions/'), 'parseRoute 要认 #/missions/<missionId>');
+    assert.ok(shell.includes('/missions/'), 'parseRoute 要认 #/missions/<id>');
     // 项目页仍在：任务页是加进去的第四种路由，不是替掉项目页。
     assert.match(shell, /from '\.\/projects\.js'/);
     assert.ok(shell.includes("location.hash = '#/projects'"), '空/未知 hash 仍要打回项目页');
@@ -215,7 +309,24 @@ describe('任务页的文件形状', () => {
     assert.match(html, /pre\.term\s*\{[^}]*var\(--terminal-fg\)/s);
     assert.match(html, /\.evt\[data-active="1"\]/, '选中事件要有高亮样式');
     assert.match(html, /button\[disabled\]/, 'disabled 的停止按钮要看得出不可点');
+    assert.match(html, /\.stage\b/, '环节折叠样式要在 index.html 里（不另起文件）');
     assert.equal(existsSync(new URL('../src/web/task.css', import.meta.url)), false, '不另起 task.css');
+  });
+
+  test('环节色只用 --status-* 那三个，不引用 --role-*，也不新写死色值', () => {
+    const html = read('index.html');
+    const src = read('task.js');
+    // 环节 class 只允许这三个色位（与 projects.js stageTone 同一套 token）。
+    for (const tone of ['queued', 'running', 'unconfirmed']) {
+      const rule = ruleBody(html, new RegExp(`\\.stage\\.tone-${tone}\\s*\\{([^}]*)\\}`));
+      assert.ok(rule.includes(`var(--status-${tone})`), `.stage.tone-${tone} 该走 var(--status-${tone})：${rule}`);
+      assert.equal(/--role-/.test(rule), false, `.stage.tone-${tone} 不许引用 --role-*`);
+    }
+    // 任务页源码里出现的环节色 class 只有这三个（外加已有 chip 的 status token）。
+    assert.equal(/tone-(?!queued|running|unconfirmed)[a-z]+/.test(src), false, '环节色 class 超纲');
+    assert.equal(/--role-/.test(src), false, 'task.js 不许引用 --role-*');
+    // index.html 里不新增写死色值：只允许经由令牌与 color-mix。
+    assert.equal(/#[0-9a-fA-F]{3,6}\s*[;}]/.test(html), false, 'index.html 里出现了写死的十六进制色');
   });
 
   test('task.js 取的锚点在它自己的骨架里都在', async () => {
@@ -223,12 +334,17 @@ describe('任务页的文件形状', () => {
     // 只会静静地往 null 上写 innerHTML——整屏白。（同 web-shell 对外壳的断言。）
     const src = read('task.js');
     const ids = [...src.matchAll(/querySelector\('#([^']+)'\)/g)].map((m) => m[1]);
-    assert.ok(ids.length >= 5, '该从骨架里取到五个区域锛点，拿到了：' + ids.join(','));
+    assert.ok(ids.length >= 5, '该从骨架里取到五个区域锚点，拿到了：' + ids.join(','));
     const { skeletonHtml } = await import('../src/web/task.js');
     const skeleton = skeletonHtml();
     for (const id of ids) {
       assert.ok(skeleton.includes(`id="${id}"`), `task.js 取 #${id}，骨架里没有`);
     }
+    // 不再经 tab 切换的那两块必须始终在骨架里：环节列表与常驻终端。
+    assert.ok(skeleton.includes('id="task-stages"'), '环节列表要在骨架里');
+    assert.ok(skeleton.includes('id="task-live"'), '实时输出要常驻骨架，不再经 tab');
+    assert.ok(skeleton.includes('id="task-usage"'), '用量卡要独立在骨架里');
+    assert.equal(skeleton.includes('id="task-tabs"'), false, 'tab 条已经去掉，别为凑数留一个不用的锚点');
   });
 
   test('这一页只读：不发 POST，也不碰写操作', () => {
@@ -238,208 +354,242 @@ describe('任务页的文件形状', () => {
     // cursor 是实时输出的全部要点：不带 cursor 就是每次从头拉。
     assert.match(src, /\/live\?cursor=/);
   });
+
+  test('tab 那一套已经从呈现层拿掉了', () => {
+    const src = read('task.js');
+    for (const gone of [
+      'TASK_TABS', 'tabBarHtml', 'tabPanelHtml', 'diffPanelHtml',
+      'evidencePanelHtml', 'escalationPanelHtml', 'rawPanelHtml', 'loadDiff',
+      'eventDetailHtml',
+    ]) {
+      assert.equal(src.includes(gone), false, `${gone} 还留在 task.js 里：删干净，不留死代码`);
+    }
+  });
 });
 
 /* ===================== 2. 纯函数喂假数据 ===================== */
 
-/** 与实现无关的本地时间算式：断言"渲染出来的是本地时间"而不是抄实现。 */
-function localStamp(iso: string): string {
-  const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
-    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-describe('任务页的纯渲染函数', () => {
+describe('环节分组', () => {
   const loaded = import('../src/web/task.js');
 
-  test('事件流：每条有角色徽章、动作短语、细节，且不出现机器 kind', async () => {
-    const { eventStreamHtml } = await loaded;
-    const events = [
-      { at: '2026-03-04T05:06:07.000Z', kind: 'mission.created', data: {} },
-      {
-        at: '2026-03-04T05:06:08.000Z',
-        kind: 'attempt.started',
-        workItemId: 'W-7',
-        attemptId: 'W-7.exec-1',
-        data: { kind: 'executor' },
-      },
+  test('W4 形状：6 个环节，attemptId 顺序对，L3 组在最后', async () => {
+    const { groupActivity } = await loaded;
+    const groups = groupActivity(w4Activity());
+    assert.deepEqual(groups.map((g: any) => g.attemptId), [
+      'coord-1', 'W-1649.exec-1', 'coord-2', 'W-1650.exec-1', 'coord-3', '',
+    ]);
+    assert.equal(groups.length, 6);
+    // mission.created 排在 activity[0]，但不单独成组——它进最后那个 L3 组。
+    const last = groups[groups.length - 1];
+    assert.deepEqual(last.events.map((e: any) => e.kind), ['mission.created', 'contract.revised', 'final_review.merged']);
+    // 组内保持原有先后。
+    assert.deepEqual(groups[0].events.map((e: any) => e.kind), [
+      'attempt.started', 'plan.updated', 'work_item.created', 'work_item.dispatched', 'attempt.ended',
+    ]);
+  });
+
+  test('按首次出现顺序成组，不是 attemptId 一变就切段的连续分段', async () => {
+    const { groupActivity } = await loaded;
+    // 同 id 不相邻：连续分段会切成 3 组，按首次出现成组是 2 组。
+    const rows = [
+      { kind: 'a', attemptId: 'coord-1' },
+      { kind: 'b', attemptId: 'W-1.exec-1' },
+      { kind: 'c', attemptId: 'coord-1' },
     ];
-    const ctx = { intent: '把任务页做出来', workItems: [{ id: 'W-7', title: '事件流' }] };
-    const html = eventStreamHtml(events, 1, ctx);
+    const groups = groupActivity(rows);
+    assert.deepEqual(groups.map((g: any) => g.attemptId), ['coord-1', 'W-1.exec-1']);
+    assert.deepEqual(groups[0].events.map((e: any) => e.kind), ['a', 'c']);
+  });
+
+  test('六个组名逐字对得上（组名从组内 kind 推，不是硬编码顺序）', async () => {
+    const { groupActivity, stageListHtml } = await loaded;
+    const groups = groupActivity(w4Activity());
+    const { stageName } = await import('../src/web/narrate.js');
+    assert.deepEqual(groups.map((g: any) => stageName(g.events, W4_CTX)), W4_TITLES);
+    // 渲染出来的环节头里这六个名字都在。
+    const html = stageListHtml(w4Activity(), null, null, W4_CTX);
+    for (const name of W4_TITLES) assert.ok(html.includes(name), `环节头少了「${name}」：\n${html}`);
+  });
+
+  test('环节 <details> 默认收起：不出现 open 属性', async () => {
+    const { stageListHtml } = await loaded;
+    const html = stageListHtml(w4Activity(), null, null, W4_CTX);
+    assert.equal((html.match(/<details/g) || []).length, 6);
+    assert.equal(/<details[^>]*\bopen\b/.test(html), false, '默认展开等于没折叠');
+    // 显式选中某个环节也不许顺手加 open。
+    const selected = stageListHtml(w4Activity(), 'coord-1', null, W4_CTX);
+    assert.equal(/<details[^>]*\bopen\b/.test(selected), false);
+    assert.match(selected, /data-attempt-id="coord-1" data-active="1"/, '选中的环节要标出来');
+  });
+
+  test('用户展开过的环节在重画之后仍然展开，其它组不受影响', async () => {
+    const { stageListHtml } = await loaded;
+    /** 哪些组的 <details> 带着 open，按出现顺序。 */
+    const opened = (html: string): string[] =>
+      [...html.matchAll(/<details[^>]*>/g)]
+        .filter((m) => /\bopen\b/.test(m[0]))
+        .map((m) => /data-attempt-id="([^"]*)"/.exec(m[0])![1]);
+
+    // 首屏（不传展开集）：一个 open 都没有——默认收起不变。
+    assert.deepEqual(opened(stageListHtml(w4Activity(), 'coord-1', null, W4_CTX)), []);
+
+    // 人展开了 coord-1。
+    const first = stageListHtml(w4Activity(), null, null, W4_CTX, ['coord-1']);
+    assert.deepEqual(opened(first), ['coord-1']);
+    assert.equal((first.match(/<details/g) || []).length, 6, '重画不该多出/少掉环节');
+
+    // 因选中变化（点环节头、点组内事件都会走到这一步）再画一次：coord-1 必须
+    // 还开着。这是这一跳的回归点：旧实现每次重画都换成一份全收起的新节点，
+    // 浏览器刚展开的节点连同组内逐条事件一起被换掉。
+    const again = stageListHtml(w4Activity(), 'W-1649.exec-1', 3, W4_CTX, ['coord-1']);
+    assert.deepEqual(opened(again), ['coord-1']);
+    // 展开才有东西可看：那一组的组内逐条事件还在表里。
+    assert.match(again, /data-attempt-id="coord-1"[^>]*>[\s\S]*?data-event-key="/);
+
+    // 展开集里每一组都开着：点组内事件不许把别的已展开环节折回去。
+    assert.deepEqual(
+      opened(stageListHtml(w4Activity(), 'coord-1', 1, W4_CTX, ['coord-1', 'W-1650.exec-1'])),
+      ['coord-1', 'W-1650.exec-1'],
+    );
+
+    // 线要接上：纯函数对了而调用方不喂展开集，页面上仍是每次重画全收起。
+    const src = read('task.js');
+    const at = src.indexOf('innerHTML = stageListHtml(');
+    assert.ok(at > 0, '找不到重画环节列表的地方');
+    assert.match(src.slice(at, src.indexOf(');', at)), /expanded/, '重画必须把展开集喂给 stageListHtml');
+    assert.match(src, /node\.open/, '重画之前要先从 DOM 收原生展开状态');
+  });
+
+  test('环节头一行自足：环节名、角色徽章、耗时、token/费用、一句话摘要', async () => {
+    const { stageListHtml } = await loaded;
+    const html = stageListHtml(w4Activity(), null, null, W4_CTX);
+    assert.match(html, /class="stage-name"/);
+    assert.match(html, /class="chip (queued|running|unconfirmed)">L2 协调</);
+    assert.match(html, /L1 执行</);
+    assert.match(html, /L3 检视者</, '角色徽章三种都要有');
+    // 耗时用组内首末事件的时间差（W4 夹具里每一跳跳了一分钟一档）。
+    assert.match(html, /class="stage-dur mono">\d+ 分 \d+ 秒/, '环节头要有耗时');
+    assert.ok(html.includes('class="stage-dur mono">4 分 0 秒'), 'coord-1 该是 4 分 0 秒');
+    // token 与费用走 usageLine（新增 = total - 缓存）。
+    assert.ok(html.includes('新增 6,400 tokens') && html.includes('缓存命中 1,000') && html.includes('$0.7400'), html);
+    assert.match(html, /class="stage-summary"/, '一句话摘要要在环节头');
+    // 机器 kind 不得出现在第一眼。
+    for (const kind of MACHINE_KINDS) {
+      assert.equal(html.includes(kind), false, `环节头漏出机器 kind「${kind}」`);
+    }
+  });
+
+  test('没有 attempt.ended 的环节说清为什么没有用量，不给孤零零的 —', async () => {
+    const { stageListHtml } = await loaded;
+    const rows = [
+      { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'coord-9', data: {} },
+    ];
+    const html = stageListHtml(rows, null, null, W4_CTX);
+    assert.ok(html.includes('这一跳还没结束，用量要等它收尾'), html);
+    assert.equal(html.includes('<span class="stage-usage">—</span>'), false);
+    assert.equal(/undefined|NaN/.test(html), false, html);
+  });
+
+  test('空 activity / 缺参数塌不了，且给的是说明句', async () => {
+    const { stageListHtml, groupActivity } = await loaded;
+    assert.deepEqual(groupActivity([]), []);
+    assert.deepEqual(groupActivity(undefined), []);
+    assert.match(stageListHtml([], null, null, {}), /还没有事件/);
+    assert.match(stageListHtml(undefined, null, null, undefined), /还没有事件/);
+  });
+
+  test('组内逐条事件仍是三件套，未知 kind 标明未翻译', async () => {
+    const { stageListHtml } = await loaded;
+    const rows = [
+      { at: '2026-03-04T05:06:07.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: {} },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'memory.applied', attemptId: 'coord-1', data: {} },
+    ];
+    const html = stageListHtml(rows, 'coord-1', 1, W4_CTX);
+    assert.ok(html.includes('evt-badge') && html.includes('evt-action') && html.includes('evt-detail'));
+    assert.ok(html.includes('未翻译'), html);
+    assert.ok(html.includes('memory.applied'), '未翻译要把 kind 本身带出来');
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')), '时间没按本地时区渲染');
     assert.equal(html.includes('2026-03-04T05:06:07'), false, '直接切了 ISO 字符串：时区会差几小时');
-    // 三件套：角色流转徽章、动作短语、一行细节。少一件就是一条只有时间的卡片。
-    assert.ok(html.includes('evt-badge') && html.includes('evt-action') && html.includes('evt-detail'));
-    assert.ok(html.includes('L3 → L2') && html.includes('发起任务'), '角色徽章与动作短语要上屏');
-    assert.ok(html.includes('L1') && html.includes('执行者开工'));
-    assert.ok(html.includes('把任务页做出来'), '细节行要有内容');
-    // 第一眼不得是机器事件名：那行字不报错、不崩，只是没人看得懂。
-    for (const kind of ['mission.created', 'attempt.started']) {
-      assert.equal(html.includes(kind), false, `事件流漏出了机器 kind「${kind}」`);
-    }
     // 尝试 ID：人话标签在前，原始 id 仍能看到（排障时人要拿它去 grep 日志）。
-    assert.ok(html.includes('执行者第 1 次尝试'), 'attempt 要有人话标签');
-    assert.ok(html.includes('W-7.exec-1'), '原始 attempt id 要看得到');
-    assert.ok(html.includes('工作项 <span class="mono">W-7</span>'), '关联的工作项要显示');
-    assert.match(html, /data-event-key="1" data-active="1"/, '选中项要标出来');
-    assert.equal(html.includes('data-event-key="0" data-active'), false, '只该有一条是选中的');
-    // 没有关联 id 的事件不显示那一行：空的一行看着像坏了。
-    assert.equal(html.split('<div class="evt-refs').length, 2);
+    assert.ok(html.includes('协调者第 1 次尝试') && html.includes('coord-1'));
+    // data-event-key 是整条 activity 的下标，不是组内下标。
+    assert.match(html, /data-event-key="1" data-active="1"/);
+  });
+});
+
+describe('用量卡', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('按角色拆：L2 74% / L1 26%，分母是两者之和', async () => {
+    const { usageByRole } = await loaded;
+    // coord-1 与 exec-1 的 attempt.ended.usage.total 按 74/26 喂。
+    const coord = { at: '', kind: 'attempt.ended', attemptId: 'coord-1', data: { usage: { total: 7400 } } };
+    const exec = { at: '', kind: 'attempt.ended', attemptId: 'W-1649.exec-1', data: { usage: { total: 2600 } } };
+    const two = usageByRole([coord, exec]);
+    assert.equal(two.coordinator.tokens, 7400);
+    assert.equal(two.executor.tokens, 2600);
+    assert.equal(Math.round(two.coordinator.pct), 74);
+    assert.equal(Math.round(two.executor.pct), 26);
+    assert.equal(two.total, 10000);
+    // W4 真实形状：两次执行各 2600 → L1 累计 5200，协调 7400。
+    const w4 = usageByRole(w4Activity());
+    assert.equal(w4.coordinator.tokens, 7400);
+    assert.equal(w4.executor.tokens, 5200);
+    // 一条 ended 都没有时 total 为 0（调用方靠它说「暂时算不出」）。
+    assert.equal(usageByRole([{ at: '', kind: 'attempt.started', attemptId: 'coord-1', data: {} }]).total, 0);
   });
 
-  test('事件流：关联 id 缺省不显示；未知 kind 连同「未翻译」一起显示', async () => {
-    const { eventStreamHtml } = await loaded;
-    assert.match(eventStreamHtml([], null), /还没有事件/);
-    assert.match(eventStreamHtml(undefined, null), /还没有事件/);
-    assert.equal(eventStreamHtml([{ at: '', kind: 'x' }], null).includes('evt-refs'), false);
-    // 兜底：认不出的 kind 显示 kind 本身并标明未翻译——渲染成空白等于把这条吃掉。
-    const unknown = eventStreamHtml([{ at: '', kind: 'memory.applied' }], null);
-    assert.ok(unknown.includes('memory.applied') && unknown.includes('未翻译'), unknown);
-  });
-
-  test('五个 tab 文案齐，active 跟着入参走', async () => {
-    const { tabBarHtml, TASK_TABS } = await loaded;
-    assert.deepEqual([...TASK_TABS], ['实时输出', '文件变更', '验证结果', '相关消息', '原始数据']);
-    for (const tab of TASK_TABS) {
-      const html = tabBarHtml(tab);
-      for (const each of TASK_TABS) assert.ok(html.includes('>' + each + '<'), `少了标签 ${each}`);
-      assert.match(html, new RegExp(`data-tab="${tab}" data-active="1"`), `${tab} 该是选中态`);
-      assert.equal(html.match(/data-active="1"/g)?.length, 1, '选中项只能有一个');
+  test('只从 attempt.ended 算，且不为用量去拉 /attempts/<id>', async () => {
+    const src = read('task.js');
+    // 证据按需取选中环节那一个 attempt，全站只该有一处拼这个 URL。
+    assert.equal((src.match(/'\/attempts\/' \+/g) || []).length, 1, '/attempts/ 只许在一处拼');
+    // usageByRole 本身不许发请求。
+    const a = src.indexOf('export function usageByRole');
+    const b = src.indexOf('const roleLine =', a);
+    assert.ok(a > 0 && b > a, '取不到 usageByRole 函数体');
+    const body = src.slice(a, b);
+    for (const forbidden of ['fetch(', 'get(', '/attempts/', '/api/']) {
+      assert.equal(body.includes(forbidden), false, `用量计算里出现了 ${forbidden}：那是 N+1 的形状`);
     }
+    // 也只认 attempt.ended：别的 kind 带 usage 也不能算进去。
+    assert.match(body, /kind !== 'attempt\.ended'/);
   });
 
-  test('切 tab 是纯函数出 HTML：同一份数据不同 activeTab 出不同内容', async () => {
-    const { tabPanelHtml } = await loaded;
-    const data = {
-      live: { lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '正在读工单' }] },
-      diff: { stat: '2 files changed, 9 insertions(+)', files: ['src/a.ts'] },
-      evidence: [{ kind: 'test', summary: '全绿', command: 'node --test', exitCode: 0 }],
-      escalationLog: [{ question: '要不要改内核？', why: '会波及别人', optionsConsidered: ['只改前端'] }],
-      event: { kind: 'attempt.started', at: '2026-03-04T05:06:07.000Z' },
-    };
-    assert.match(tabPanelHtml('实时输出', data), /正在读工单/);
-    assert.match(tabPanelHtml('文件变更', data), /2 files changed/);
-    assert.match(tabPanelHtml('验证结果', data), /exit=0/);
-    assert.match(tabPanelHtml('相关消息', data), /要不要改内核？/);
-    assert.match(tabPanelHtml('原始数据', data), /attempt\.started/);
-    // 认不出的标签不崩，也不留白。
-    assert.match(tabPanelHtml('没有这个标签', data), /不认识的标签/);
+  test('用量卡独立三层：总计 / 按角色占比 / 按类型', async () => {
+    const { usageCardHtml } = await loaded;
+    const view = { usage: { input: 8000, output: 700, cacheRead: 1300, cacheWrite: 0, total: 10000, cost: 1.0, quality: 'reported' } };
+    // 一次一跳：coord 7400 / exec 2600，占比就是 74% 与 26%。
+    const rows = [
+      { at: '', kind: 'attempt.ended', attemptId: 'coord-1', data: { usage: { total: 7400, cost: 0.74 } } },
+      { at: '', kind: 'attempt.ended', attemptId: 'W-1649.exec-1', data: { usage: { total: 2600, cost: 0.26 } } },
+    ];
+    const html = usageCardHtml(view, rows);
+    // 第一层：总计大字与费用。
+    assert.match(html, /class="usage-num mono">10,000/);
+    assert.ok(html.includes('$1.0000'), html);
+    // 第二层（重点）：按角色，数量与占比都要能断言。
+    assert.ok(html.includes('L2 协调 7,400 tokens（占比 74%）'), html);
+    assert.ok(html.includes('L1 执行 2,600 tokens（占比 26%）'), html);
+    // 第三层：按类型。
+    assert.ok(html.includes('新增 8,700 tokens') && html.includes('缓存命中 1,300（13%）'), html);
+    assert.equal(/undefined|NaN|\[object Object\]/.test(html), false, html);
   });
 
-  test('实时输出：usage chunk 不当终端行；空时有说明句（分在跑与已结束两种）', async () => {
-    const { livePanelHtml } = await loaded;
-    const empty = livePanelHtml({ lines: [] });
-    assert.match(empty, /还没有实时输出/, '黑空一块看起来像坏了');
-    assert.match(empty, /data-autoscroll/, '要能关掉自动滚动');
-    assert.match(empty, /checked/, '默认开着');
-    assert.match(empty, /class="term"/);
-    // 已经不在跑（终态 / 等停机 / 暂停）：输出不会再来，要说清完整输出在哪。
-    const ended = livePanelHtml({ lines: [], running: false });
-    assert.match(ended, /这一跳已经结束/, ended);
-    assert.match(ended, /完整输出/, ended);
-    assert.equal(ended.includes('还没有实时输出'), false, '结束了就不该说「还没有」');
-
-    const withUsage = livePanelHtml({
-      lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' }],
-      usage: { total: 1234 },
-    });
-    assert.ok(withUsage.includes('第一行'));
-    assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
-    assert.match(withUsage, /tokens 1,234/);
-    // tool 行有它自己的形状；默认关滚动时勾选框不该是选中的。
-    assert.match(
-      livePanelHtml({ lines: [{ kind: 'tool', text: 'read a.ts' }], autoScroll: false }),
-      /▸ read a\.ts/,
-    );
-    assert.equal(
-      livePanelHtml({ lines: [], autoScroll: false }).includes(' checked'),
-      false,
-      'autoScroll=false 时勾选框不该是选中的',
-    );
-  });
-
-  test('终端行：usage chunk 不当行拼，时间只到钟点', async () => {
-    const { liveLinesHtml } = await loaded;
-    const html = liveLinesHtml([
-      { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
-      { at: '2026-03-04T05:06:08.000Z', kind: 'usage', usage: { total: 7 } },
-      { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'read src/a.ts' },
+  test('还没结束的一跳不报 0 占比，说的是暂时算不出', async () => {
+    const { usageCardHtml } = await loaded;
+    const html = usageCardHtml({ usage: { total: 0 } }, [
+      { at: '', kind: 'attempt.started', attemptId: 'coord-1', data: {} },
     ]);
-    assert.equal(html.includes('undefined'), false, 'usage chunk 被当终端行拼进去了');
-    assert.equal(html.includes('"total"'), false);
-    assert.ok(html.includes('▸ read src/a.ts'));
-    // 终端里每行前摆个日期太长；到秒就够了。
-    assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z').slice(11)), html);
-    assert.equal(html.includes(localStamp('2026-03-04T05:06:07.000Z')), false, '终端行不该带日期');
+    assert.ok(html.includes('还没有结束的一跳'), html);
+    assert.equal(html.includes('占比 0%'), false, '还没数据 ≠ 没花钱');
   });
 
-  test('文件变更：stat 与文件清单；没有工作区时不空白', async () => {
-    const { diffPanelHtml } = await loaded;
-    const html = diffPanelHtml({ stat: ' src/a.ts | 3 ++-', files: ['src/a.ts', 'src/b.ts'] });
-    assert.ok(html.includes('src/a.ts | 3'));
-    assert.ok(html.includes('<li class="mono">src/b.ts</li>'));
-    assert.match(diffPanelHtml({ stat: '', files: [] }), /（无改动）/);
-    assert.match(diffPanelHtml(null), /读取中/);
-    assert.match(diffPanelHtml({ error: 'HTTP 500' }), /读不到改动/);
-  });
-
-  test('验证结果：kind / summary / command / exitCode 都上屏；没有时是说明', async () => {
-    const { evidencePanelHtml } = await loaded;
-    const html = evidencePanelHtml([
-      { kind: 'test', summary: '274 条全绿', command: 'node --test', exitCode: 0 },
-      { kind: 'observation', summary: '看了日志' },
-    ]);
-    assert.ok(html.includes('274 条全绿') && html.includes('node --test') && html.includes('exit=0'));
-    assert.ok(html.includes('看了日志'));
-    assert.match(evidencePanelHtml([]), /没有对应证据/);
-    assert.match(evidencePanelHtml(undefined), /没有对应证据/);
-  });
-
-  test('相关消息：问答与备选都上屏；没有答复要说明', async () => {
-    const { escalationPanelHtml } = await loaded;
-    const html = escalationPanelHtml([
-      {
-        question: '要不要一起改内核？',
-        why: '改了会波及别的 Mission',
-        optionsConsidered: ['只改前端', '先加读模型'],
-      },
-      {
-        question: '第二问',
-        why: '第二个理由',
-        optionsConsidered: [],
-        answer: '改吧',
-      },
-    ]);
-    assert.ok(html.includes('要不要一起改内核？'));
-    assert.ok(html.includes('改了会波及别的 Mission'));
-    assert.ok(html.includes('只改前端'));
-    assert.ok(html.includes('还没有答复'), '未答复要看得出来——那是"在等你"');
-    assert.ok(html.includes('答复：改吧'));
-    assert.match(escalationPanelHtml([]), /没有升级过问题/);
-  });
-
-  test('原始数据：整条 JSON 等宽显示；没选中时说明', async () => {
-    const { rawPanelHtml } = await loaded;
-    const html = rawPanelHtml({ kind: 'evidence.submitted', data: { exitCode: 0 } });
-    // JSON 里的引号也被 esc 转掉了，所以这里对的是转义后的形。
-    assert.ok(html.includes('&quot;kind&quot;: &quot;evidence.submitted&quot;'), html);
-    assert.match(html, /class="term"/);
-    assert.match(rawPanelHtml(null), /没有选中事件/);
-  });
-
-  test('页头：intent、阶段中文、状态 chip、「现在在干什么」、用量拆项、disabled 停止按钮', async () => {
+  test('页头不再印 Token 那一格（搬进独立用量卡了）', async () => {
     const { headerHtml } = await loaded;
     const view = {
-      projectId: 'p',
-      missionId: 'M1',
-      status: 'executing',
-      paused: false,
-      updatedAt: '2026-03-04T06:00:00.000Z',
-      usage: { total: 12345 },
-      contractRevision: 2,
-      planRevision: 1,
-      contract: { intent: '做任务页' },
+      projectId: 'p', missionId: 'M1', status: 'executing', paused: false,
+      updatedAt: '2026-03-04T06:00:00.000Z', usage: { total: 12345 },
+      contractRevision: 2, planRevision: 1, contract: { intent: '做任务页' },
     };
     const activity = [
       { at: '2026-03-04T05:00:00.000Z', kind: 'mission.created' },
@@ -449,162 +599,296 @@ describe('任务页的纯渲染函数', () => {
     assert.ok(html.includes('做任务页'), '标题是 contract.intent');
     assert.ok(html.includes('执行中'), '阶段 chip 用内核 MissionStatus 的中文');
     assert.ok(html.includes('进行中'), '状态 chip 是第二根轴');
-    assert.ok(html.includes('现在在干什么'), '页头要有「现在在干什么」那一句');
-    // 修订号带名词：光一个 r2 不知道是谁的版本。
-    assert.ok(html.includes('契约 r2') && html.includes('规划 r1'), `修订号要说人话：${html}`);
-    // Token 不再只断言一个 total：拆成新增与缓存，有占比与费用。
-    assert.ok(html.includes('新增 12,345'), `Token 该拆出新增：${html}`);
-    assert.ok(html.includes('缓存命中'), 'Token 要拆出缓存命中');
-    assert.ok(html.includes('%') && html.includes('费用未上报'), '占比与费用都要有');
-    assert.ok(html.includes('3 小时 0 分'), `运行时长该是创建时间到传入的 nowIso，出来是：${html}`);
-    assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')), '创建时间取事件流第一条');
+    assert.ok(html.includes('现在在干什么'));
+    assert.ok(html.includes('契约 r2') && html.includes('规划 r1'), '修订号要说人话');
+    // 时长与创建时间留在页头；Token 不再在这儿。
+    assert.ok(html.includes('3 小时 0 分'), html);
+    assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')));
+    assert.equal(html.includes('Token'), false, '页头不该再有 Token 那一格');
+    assert.equal(html.includes('新增'), false, '用量拆项该在独立卡里，不在 task-stats');
     assert.match(html, /disabled title="API 尚无鉴权，写操作暂不开放"/);
     assert.ok(html.includes('停止任务'));
     assert.equal(html.includes('onclick'), false, '不绑定点击：不发 POST');
   });
 
-  test('页头：等待时停机原因看得见，在跑时说得清在跑哪一个', async () => {
+  test('页头：等待时停机原因看得见，runaway_suspected 是人话', async () => {
     const { headerHtml } = await loaded;
-    const running = headerHtml(
-      {
-        status: 'executing',
-        paused: false,
-        contract: { intent: 'x' },
-        usage: {},
-        workItems: [{ id: 'W-1', title: '读工单', status: 'dispatched' }],
-      },
-      [{ at: '2026-03-04T05:00:00.000Z' }],
-      '2026-03-04T05:10:00.000Z',
-    );
-    assert.ok(running.includes('现在在干什么'));
-    assert.ok(running.includes('读工单'), '在跑哪个工作项要说出来');
-
     const waiting = headerHtml(
       { status: 'executing', paused: false, waitReason: 'project_busy', contract: { intent: 'x' }, usage: {} },
-      [],
-      '2026-03-04T05:10:00.000Z',
+      [], '2026-03-04T05:10:00.000Z',
     );
-    assert.ok(waiting.includes('等待中'), '状态 chip 是等待中');
-    assert.ok(waiting.includes('停机原因'), '等待时要能看到停机原因');
+    assert.ok(waiting.includes('等待中') && waiting.includes('停机原因'));
     assert.ok(waiting.includes('同项目有别的 Mission 占着改动名额'), waiting);
+    const runaway = headerHtml(
+      { status: 'executing', paused: false, waitReason: 'runaway_suspected', contract: { intent: 'x' }, usage: {} },
+      [], '2026-03-04T05:10:00.000Z',
+    );
+    assert.ok(runaway.includes('一跳跑太久，已停下来等人看'), runaway);
+    assert.equal(runaway.includes('runaway_suspected'), false, '停机原因要翻成人话');
   });
 
-  test('页头：创建时间取的是 activity 第一条，不是最后一条', async () => {
+  test('页头：终态时长停在 updatedAt；空契约/缺 usage 塌不了', async () => {
     const { headerHtml } = await loaded;
-    const view = { status: 'executing', contract: { intent: 'x' }, usage: { total: 0 } };
-    const activity = [
-      { at: '2026-03-04T05:00:00.000Z', kind: 'mission.created' },
-      { at: '2026-03-04T09:00:00.000Z', kind: 'attempt.started' },
-    ];
-    const html = headerHtml(view, activity, '2026-03-04T09:30:00.000Z');
-    assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')), '创建时间该是第一条的时间');
-    assert.ok(html.includes('4 小时 30 分'), '活着的任务时长跑到传入的 nowIso');
+    const done = headerHtml(
+      { status: 'completed', paused: false, updatedAt: '2026-03-04T07:00:00.000Z', contract: { intent: 'x' }, usage: { total: 1 } },
+      [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z',
+    );
+    assert.ok(done.includes('2 小时 0 分'), '已完成的任务时长该停在 updatedAt，而不是墙上时钟');
+    assert.ok(done.includes('已完成') && done.includes('等你检视') === false);
+
+    const empty = headerHtml({ status: 'investigating', contract: { intent: '' } }, [], '2026-03-04T05:00:00.000Z');
+    assert.ok(empty.includes('（没有契约）') && empty.includes('调查中'));
+    assert.equal(/NaN|undefined|null/.test(empty), false, `上屏了 NaN/undefined：${empty}`);
+  });
+});
+
+describe('详情页：这一跳实际传递的正文', () => {
+  const loaded = import('../src/web/task.js');
+  const groups = async () => {
+    const { groupActivity } = await loaded;
+    return groupActivity(w4Activity());
+  };
+  const W4_VIEW = {
+    plan: {
+      findings: '翻译表散在渲染分支里',
+      rootCause: '没有单一出口',
+      rejectedHypotheses: ['在 prompt 里要求模型说人话'],
+      decisions: ['收成一个 narrate.js'],
+      direction: '先落翻译表再改页面',
+      risks: [],
+    },
+    workItems: [
+      {
+        id: 'W-1649',
+        title: '接上读模型',
+        order: {
+          objective: '把读接口接上',
+          allowedScope: ['src/web/task.js'],
+          verification: ['node --test'],
+          acceptance: ['环节折叠成 6 组'],
+        },
+        lastReview: { verdict: 'accept', reasons: ['测试跑过了', '没有多余的依赖'], requiredChanges: [] },
+        executionResult: {
+          outcome: 'completed',
+          summary: '接上了，验证全绿',
+          changedFiles: ['src/web/task.js'],
+          notes: '没动内核',
+        },
+      },
+      { id: 'W-1650', title: '折叠成环节', order: null, lastReview: null, executionResult: null },
+    ],
+    escalationLog: [
+      { attemptId: 'coord-1', question: '要不要一起改内核？', why: '改了会波及别的 Mission', optionsConsidered: ['只改前端'], answer: '不要' },
+    ],
+    finalReview: { verdict: 'merge', reasons: ['边界没有漂'], mergedInto: 'main' },
+  };
+
+  test('协调者调查规划环节 → plan 的五块正文', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[0];
+    const html = stageDetailHtml(g, W4_VIEW, null);
+    assert.ok(html.includes('翻译表散在渲染分支里'), html);
+    assert.ok(html.includes('没有单一出口'), 'rootCause 要上屏');
+    assert.ok(html.includes('在 prompt 里要求模型说人话'), '排除掉的假设要上屏');
+    assert.ok(html.includes('收成一个 narrate.js'), '决策要上屏');
+    assert.ok(html.includes('先落翻译表再改页面'), '方向要上屏');
+    assert.match(html, /调查与规划结论/);
   });
 
-  test('页头：终态的时长停在 updatedAt，不是"现在"', async () => {
-    const { headerHtml } = await loaded;
-    const view = {
-      status: 'completed',
-      paused: false,
-      updatedAt: '2026-03-04T07:00:00.000Z',
-      contract: { intent: 'x' },
-      usage: { total: 1 },
-    };
-    const html = headerHtml(view, [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z');
-    assert.ok(html.includes('2 小时 0 分'), '已完成的任务时长该停在 updatedAt，而不是墙上时钟');
-    assert.ok(html.includes('已完成') && html.includes('等你检视') === false);
+  test('派发环节 → 被派工作项的工单正文', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[0];
+    const html = stageDetailHtml(g, W4_VIEW, null);
+    assert.ok(html.includes('把读接口接上'), 'objective 要上屏');
+    assert.ok(html.includes('src/web/task.js'), 'allowedScope 要上屏');
+    assert.ok(html.includes('node --test'), 'verification 要上屏');
+    assert.ok(html.includes('环节折叠成 6 组'), 'acceptance 要上屏');
+    assert.ok(html.includes('W-1649'), '技术 ID 仍要能找到');
   });
 
-  test('页头：空契约、缺 usage、没有事件流都塌不了', async () => {
-    const { headerHtml } = await loaded;
-    const html = headerHtml({ status: 'investigating', contract: { intent: '' } }, [], '2026-03-04T05:00:00.000Z');
-    assert.ok(html.includes('（没有契约）'));
-    assert.ok(html.includes('调查中'));
-    // 缺数据是 —，不是 NaN / undefined——那两个字上屏等于把字段名写错这件事藏起来。
-    assert.equal(/NaN|undefined|null/.test(html), false, `上屏了 NaN/undefined：${html}`);
-    assert.ok(html.includes('—'));
-  });
-
-  test('事件详情：标签说人话、用量拆项，裸键名不上屏', async () => {
-    const { eventDetailHtml } = await loaded;
-    const event = {
-      kind: 'attempt.started',
-      at: '2026-03-04T05:06:07.000Z',
-      workItemId: 'W-7',
-      causationId: 'W-7.exec-1',
-    };
+  test('执行者环节 → executionResult + 这一跳的证据（含 command 与退出码）', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[1];
     const attempt = {
-      profile: { profileId: 'executor-default', endpoint: 'http://127.0.0.1:9/send' },
-      usage: { input: 100, output: 50, cacheRead: 850, cacheWrite: 0, total: 1000, cost: 1.2345 },
+      attemptId: 'W-1649.exec-1',
+      evidence: [
+        { kind: 'test', summary: '274 条全绿', command: 'node --test', exitCode: 0, output: 'pass 274' },
+        { kind: 'observation', summary: '看了日志' },
+      ],
     };
-    const html = eventDetailHtml(event, attempt);
-    // 标签是人话；英文字段名只在「原始数据」tab 的 JSON 里保留。
-    assert.ok(html.includes('由哪一跳引发'), 'causationId 要翻成人话标签');
-    assert.equal(html.includes('causationId'), false, '裸写了 causationId');
-    assert.ok(html.includes('候选'), 'profileId 的标签是「候选」');
-    assert.equal(html.includes('profileId'), false, '裸写了 profileId');
-    assert.equal(html.includes('attempt.started'), false, '事件详情不该露机器 kind');
-    // 技术 ID 与精确数字都还在。
-    assert.ok(html.includes('W-7.exec-1') && html.includes('W-7'));
-    assert.ok(html.includes('executor-default') && html.includes('http://127.0.0.1:9/send'));
-    assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')));
-    // 用量拆成新增/缓存命中/占比/费用，不再是光秃秃一个 total。
-    assert.ok(html.includes('新增 150 tokens'), html);
-    assert.ok(html.includes('缓存命中 850') && html.includes('85%'), html);
-    assert.ok(html.includes('$1.2345'), html);
-    assert.ok(html.includes('缓存部分计费便宜得多'), '高缓存要有便宜说明');
+    const html = stageDetailHtml(g, W4_VIEW, attempt);
+    assert.ok(html.includes('接上了，验证全绿'), 'summary 要上屏');
+    assert.ok(html.includes('没动内核'), 'notes 要上屏');
+    assert.ok(html.includes('src/web/task.js'), 'changedFiles 要上屏');
+    assert.ok(html.includes('node --test'), '证据的 command 要上屏');
+    assert.ok(html.includes('274 条全绿') && html.includes('退出码 0'), html);
+    assert.ok(html.includes('pass 274'), 'output 也要带上，那才是能被复核的东西');
+    assert.ok(html.includes('看了日志'), '没有退出码的那条也不能丢');
+    assert.equal(html.includes('exitCode'), false, '不要露字段名');
   });
 
-  test('事件详情：没选中 / 没有上一跳 / 没有用量，都是解释句而不是孤零零的 —', async () => {
-    const { eventDetailHtml } = await loaded;
-    const none = eventDetailHtml(null, null);
-    assert.equal(/undefined|NaN/.test(none), false);
-    assert.match(none, /没有选中事件/);
-    assert.equal(none.includes('<dd class="mono">—</dd>'), false, '不该只留一个横杠');
-    const created = eventDetailHtml({ kind: 'mission.created', at: '2026-03-04T05:06:07.000Z' }, null);
-    assert.ok(created.includes('没有上一跳引发它'), created);
-    assert.ok(created.includes('没有选中尝试，读不到候选'), created);
-    assert.ok(created.includes('这一跳没有上报用量'), created);
+  test('技术验收环节 → lastReview 的结论/理由/要求', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[2];
+    const html = stageDetailHtml(g, W4_VIEW, null);
+    assert.match(html, /技术验收/);
+    assert.ok(html.includes('通过'), 'verdict 要翻成人话');
+    assert.ok(html.includes('测试跑过了') && html.includes('没有多余的依赖'), html);
+    assert.ok(html.includes('接上读模型'), '验收讲的是哪个工作项要说清');
+    // 这个环节同时有派发，两块正文要一起出现。
+    assert.ok(html.includes('派发的工单'), '同一环节有几类事件就渲染几块');
+    assert.equal(html.includes('accept"'), false, '不露 verdict 机器值');
   });
 
-  test('面包屑三段，前两段是链接', async () => {
-    const { crumbParts } = await loaded;
-    const parts = crumbParts('proj-a', 'M-1');
-    assert.deepEqual(parts, [
-      { text: '项目', href: '#/projects' },
-      { text: 'proj-a', href: '#/projects/proj-a' },
-      { text: '任务 M-1', here: true },
+  test('升级问答 → escalationLog 的 question / why / answer（从旧 tab 搬过来）', async () => {
+    const { stageDetailHtml } = await loaded;
+    const { groupActivity } = await loaded;
+    const rows = [
+      { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: {} },
+      { at: '2026-03-04T05:00:01.000Z', kind: 'escalated', attemptId: 'coord-1', data: { question: '要不要一起改内核？' } },
+    ];
+    const html = stageDetailHtml(groupActivity(rows)[0], W4_VIEW, null);
+    assert.ok(html.includes('要不要一起改内核？'), html);
+    assert.ok(html.includes('改了会波及别的 Mission'), 'why 要上屏');
+    assert.ok(html.includes('只改前端'), 'optionsConsidered 要上屏');
+    assert.ok(html.includes('答复：不要'), 'answer 要上屏');
+  });
+
+  test('L3 环节 → finalReview 的 verdict / reasons / mergedInto', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[5];
+    assert.equal(g.attemptId, '', 'L3 那一组没有 attemptId，不该去拉证据');
+    const html = stageDetailHtml(g, W4_VIEW, null);
+    assert.ok(html.includes('放行并落地'), `verdict 要翻成人话：${html}`);
+    assert.ok(html.includes('main'), 'mergedInto 要上屏');
+    assert.ok(html.includes('边界没有漂'), 'reasons 要上屏');
+    assert.ok(html.includes('L3 检视者'), '环节头是检视者');
+  });
+
+  test('缺数据是解释句，不是 — / undefined / NaN / [object Object]', async () => {
+    const { stageDetailHtml } = await loaded;
+    const g = (await groups())[1];
+    const bare = stageDetailHtml(g, { workItems: [], escalationLog: [] }, null);
+    assert.equal(/undefined|NaN|\[object Object\]/.test(bare), false, bare);
+    assert.ok(bare.includes('这一跳还没有执行者交回结果'), bare);
+    assert.ok(bare.includes('这一跳还没有证据'), '证据没取到要说原因');
+    // 没选中任何环节时也要有一句，不是一块空白。
+    assert.match(stageDetailHtml(null, {}, null), /还没有选中环节|点一个环节/);
+  });
+
+  test('详情里不出现机器事件名', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    for (const g of groupActivity(w4Activity())) {
+      const html = stageDetailHtml(g, W4_VIEW, { evidence: [{ kind: 'test', summary: 's', command: 'c', exitCode: 0 }] });
+      for (const kind of MACHINE_KINDS) {
+        assert.equal(html.includes(kind), false, `环节 ${g.attemptId || '(L3)'} 的详情漏出机器事件名「${kind}」：\n${html}`);
+      }
+      assert.equal(/--role-|tone-(?!queued|running|unconfirmed)/.test(html), false, '环节色 class 超纲');
+    }
+  });
+
+  test('没有 attemptId 的环节不发证据请求', async () => {
+    // 这条守的是形状：loadAttempt 只在拿到非空 attemptId 时才拼 URL。
+    const src = read('task.js');
+    const a = src.indexOf('async function loadAttempt');
+    const body = src.slice(a, src.indexOf('/** 一轮游标拉取', a));
+    assert.match(body, /if \(!attemptId\)/, '空 attemptId 要直接返回，不打 /attempts/undefined');
+    assert.equal(body.includes('causationId'), false, '钥匙是环节自己的 attemptId，不是事件的 causationId');
+  });
+});
+
+describe('实时输出', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('裁剪说明挂横幅，不混进终端正文', async () => {
+    const { livePanelHtml, liveNoteHtml } = await loaded;
+    const chunks = [
+      { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'note', text: '实时输出已裁剪：本跳共 1200 行，只保留最后 500 行。' },
+    ];
+    const html = livePanelHtml({ lines: chunks });
+    const term = /<pre class="term"[^>]*>([\s\S]*?)<\/pre>/.exec(html);
+    assert.ok(term, '终端块要在');
+    assert.equal(term[1].includes('已裁剪'), false, 'note 混在正文里会被读成「后面还有」');
+    assert.ok(html.includes('只保留最后 500 行'), '横幅里要有那句话');
+    // 横幅在 pre 之前。
+    assert.ok(html.indexOf('live-note') < html.indexOf('<pre class="term"'), '横幅要挂在终端上方');
+    assert.equal(liveNoteHtml([]), '', '没有裁剪说明时不留一个空块');
+    // 行数不把 note/usage 算进去。
+    assert.match(html, /1 行/);
+  });
+
+  test('usage chunk 不当终端行；工具行有形状；勾选框默认开着', async () => {
+    const { livePanelHtml, liveLinesHtml } = await loaded;
+    const empty = livePanelHtml({ lines: [] });
+    assert.match(empty, /还没有实时输出/, '黑空一块看起来像坏了');
+    assert.match(empty, /data-autoscroll/, '要能关掉自动滚动');
+    assert.match(empty, /checked/, '默认开着');
+    assert.equal(livePanelHtml({ lines: [], autoScroll: false }).includes(' checked'), false,
+      'autoScroll=false 时勾选框不该是选中的');
+
+    const withUsage = livePanelHtml({
+      lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
+        { at: '2026-03-04T05:06:08.000Z', kind: 'usage', usage: { total: 1234 } }],
+      usage: { total: 1234 },
+    });
+    assert.ok(withUsage.includes('第一行'));
+    assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
+    assert.match(withUsage, /tokens 1,234/);
+    assert.match(liveLinesHtml([{ kind: 'tool', text: 'read a.ts' }]), /▸ read a\.ts/);
+  });
+
+  test('终态且没有输出行：不再说「这一跳已经结束…原始输出里」', async () => {
+    const { liveLinesHtml, livePanelHtml } = await loaded;
+    const ended = liveLinesHtml([], false);
+    assert.equal(ended.includes('这一跳已经结束'), false, '原始数据 tab 已删，那句会指空');
+    assert.equal(ended.includes('还没有实时输出'), false, '结束了就不该说「还没有」');
+    assert.ok(ended.trim().length > 0, '空态也得有一句说明');
+    assert.match(livePanelHtml({ lines: [], running: false }), /没有在这里留下输出行/);
+    // 有正文行就正常显示，不套空态。
+    assert.match(liveLinesHtml([{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '还在滚' }], false), /还在滚/);
+  });
+
+  test('终端行时间只到钟点', async () => {
+    const { liveLinesHtml } = await loaded;
+    const html = liveLinesHtml([
+      { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
+      { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'read src/a.ts' },
     ]);
-    assert.equal(parts[2].href, undefined, '当前页不该是链接');
-    // 带斜杠 / 带百分号的 id 要能编回一条解得开的 hash。
-    const odd = crumbParts('a/b c', 'M-1');
-    assert.equal(odd[1].href, '#/projects/' + encodeURIComponent('a/b c'));
-    // 读不到 view 时中间那段干脆没有，而不是一个指向不存在项目的 —。
-    assert.deepEqual(crumbParts('', 'M-1').map((p) => p.text), ['项目', '任务 M-1']);
+    assert.equal(html.includes('"total"'), false);
+    assert.ok(html.includes('▸ read src/a.ts'));
+    assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z').slice(11)), html);
+    assert.equal(html.includes(localStamp('2026-03-04T05:06:07.000Z')), false, '终端行不该带日期');
   });
+});
 
+describe('转义', () => {
   test('不守规矩的字段进不了 DOM', async () => {
     const {
-      headerHtml, eventStreamHtml, eventDetailHtml, livePanelHtml, diffPanelHtml,
-      evidencePanelHtml, escalationPanelHtml, rawPanelHtml, tabBarHtml,
-    } = await loaded;
+      headerHtml, stageListHtml, stageDetailHtml, usageCardHtml, livePanelHtml, groupActivity,
+    } = await import('../src/web/task.js');
     const evil = '<img src=x onerror="alert(1)">';
+    const group = groupActivity([{ at: '', kind: 'attempt.started', attemptId: evil, workItemId: evil, data: {} }])[0];
+    // 第二项：这一页**应该**把 evil 转义后回显（而不是吞掉或当标签解析）。
     const pages: [string, boolean][] = [
       [headerHtml({ status: evil, contract: { intent: evil }, usage: { total: 1 } }, [], '2026-03-04T05:00:00.000Z'), true],
-      [eventStreamHtml([{ at: '2026-03-04T05:06:07.000Z', kind: evil, attemptId: evil }], 0), true],
-      [eventDetailHtml({ kind: evil, at: '', causationId: evil }, { profile: { profileId: evil }, usage: { total: 1 } }), true],
-      [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }] }), true],
-      [diffPanelHtml({ stat: evil, files: [evil] }), true],
-      [evidencePanelHtml([{ kind: evil, summary: evil, command: evil, exitCode: 1 }]), true],
-      [escalationPanelHtml([{ question: evil, why: evil, optionsConsidered: [evil], answer: evil }]), true],
-      [rawPanelHtml({ kind: evil, nested: { deep: evil } }), true],
-      // tab 条只画已知的那五个词，外部输入进不了它；这里验的是它不会把入参原样回显。
-      [tabBarHtml(evil), false],
+      [stageListHtml([{ at: '', kind: evil, attemptId: evil, workItemId: evil, data: { ids: [evil], title: evil } }], evil, 0, { workItems: [{ id: evil, title: evil }] }), true],
+      [stageDetailHtml(group, {
+        plan: { findings: evil, rootCause: evil, rejectedHypotheses: [evil], decisions: [evil], direction: evil },
+        workItems: [{ id: evil, title: evil, executionResult: { summary: evil, changedFiles: [evil], notes: evil }, order: { objective: evil, allowedScope: [evil], verification: [evil], acceptance: [evil] } }],
+        escalationLog: [{ question: evil, why: evil, optionsConsidered: [evil], answer: evil }],
+        finalReview: { verdict: evil, reasons: [evil], mergedInto: evil },
+      }, { evidence: [{ kind: evil, summary: evil, command: evil, exitCode: 1, output: evil }] }), true],
+      [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }, { kind: 'note', text: evil }] }), true],
+      // 环节名也吃外部输入（工作项标题是 L2 写的）。
+      [stageListHtml([{ at: '', kind: 'attempt.started', attemptId: 'W-x.exec-1', workItemId: evil }], null, null, { workItems: [{ id: evil, title: evil }] }), true],
+      // 用量卡只从 usage 取数字、从 attemptId 取角色，本来就不该回显入参。
+      [usageCardHtml({ usage: { total: 1, cost: 1 } }, [{ at: '', kind: 'attempt.ended', attemptId: evil, data: { usage: { total: 1 } } }]), false],
     ];
     for (const [html, mustShowEscaped] of pages) {
       assert.equal(html.includes('<img'), false, `外部输入被当标签解析了：${html}`);
       if (mustShowEscaped) assert.ok(html.includes('&lt;img'), `该看到转义后的形式：${html}`);
-      else assert.equal(html.includes(evil), false, 'tabBar 不该把入参回显上屏');
+      else assert.equal(html.includes(evil), false, '用量卡不该把入参原样回显上屏');
     }
   });
 });
@@ -647,6 +931,24 @@ describe('自动滚动跟随判据', () => {
   });
 });
 
+describe('面包屑', () => {
+  test('三段，前两段是链接', async () => {
+    const { crumbParts } = await import('../src/web/task.js');
+    const parts = crumbParts('proj-a', 'M-1');
+    assert.deepEqual(parts, [
+      { text: '项目', href: '#/projects' },
+      { text: 'proj-a', href: '#/projects/proj-a' },
+      { text: '任务 M-1', here: true },
+    ]);
+    assert.equal(parts[2].href, undefined, '当前页不该是链接');
+    // 带斜杠 / 带百分号的 id 要能编回一条解得开的 hash。
+    const odd = crumbParts('a/b c', 'M-1');
+    assert.equal(odd[1].href, '#/projects/' + encodeURIComponent('a/b c'));
+    // 读不到 view 时中间那段干脆没有，而不是一个指向不存在项目的 —。
+    assert.deepEqual(crumbParts('', 'M-1').map((p: any) => p.text), ['项目', '任务 M-1']);
+  });
+});
+
 /* ===================== 3. 真读模型喂真渲染函数 ===================== */
 
 describe('真 API 字段喂真渲染函数', () => {
@@ -655,55 +957,48 @@ describe('真 API 字段喂真渲染函数', () => {
     assert.ok(platform);
 
     const view = (await (await fetch(`${base}/api/missions/M-task`)).json()) as Record<string, any>;
-    for (const field of ['contract', 'status', 'paused', 'projectId', 'usage', 'escalationLog', 'updatedAt']) {
-      assert.ok(field in view, `页头/详情读 view.${field}，读模型没给`);
+    // 页头与详情读的字段。finalReview / result 到那里才会出现，现在还没走到那一步，
+    // 所以不在本条里要求（它们缺席时详情页该给解释句，由下面那几条守）。
+    for (const f of [
+      'contract', 'status', 'paused', 'projectId', 'usage', 'escalationLog', 'updatedAt',
+      'plan', 'workItems',
+    ]) {
+      assert.ok(f in view, `页头/详情读 view.${f}，读模型没给`);
     }
     assert.equal(view.contract.intent, '把任务页做出来');
-    assert.equal(view.projectId, 'proj-task');
     assert.equal(typeof view.usage.total, 'number');
-    assert.equal(view.escalationLog.length, 1, '升级问答要传出来，相关消息那一 tab 靠它');
+    assert.equal(view.escalationLog.length, 1, '升级问答要传出来，详情页那一块靠它');
+    // 详情页的正文全在 workItems 上，后端不给就得改后端——这条先钉住不给的后果。
+    const item = view.workItems[0];
+    for (const f of ['id', 'title', 'order', 'executionResult', 'lastReview']) {
+      assert.ok(f in item, `详情读 workItems[].${f}，读模型没给`);
+    }
 
     // MissionView 没有 createdAt —— 页头那格取的是事件流第一条。
     assert.equal('createdAt' in view, false, 'createdAt 不该被当成已有字段来读');
 
     const activity = (await (await fetch(`${base}/api/missions/M-task/activity`)).json()) as Record<
-      string,
-      any[]
+      string, any[]
     >;
-    assert.ok(Array.isArray(activity), 'activity 是数组');
-    assert.ok(activity.length >= 5);
+    assert.ok(Array.isArray(activity) && activity.length >= 5);
     for (const event of activity) {
       assert.equal(typeof event.at, 'string', '每条事件都要有 at');
       assert.equal(typeof event.kind, 'string', '每条事件都要有 kind');
     }
     const startedRows = activity.filter((e) => e.kind === 'attempt.started');
     assert.ok(startedRows.length >= 2, '协调者与执行者各该有一条 attempt.started');
-    for (const row of startedRows) {
-      assert.ok(row.causationId, 'attempt.started 该带 causationId——右上详情去取 attempt 的钥匙');
-      assert.equal(row.causationId, row.attemptId, '这一跳由那次尝试引发');
-    }
-    // 证据只挂在执行者的 attempt 上，所以取带 workItemId 的那一条。
-    const started = startedRows.find((e) => e.workItemId) ?? startedRows[startedRows.length - 1];
-    // mission.created 没有 causationId：JSON 会省略 undefined 键，别照着它断言。
+    // 证据挂在环节自己的 attemptId 上（详情页取证据用的就是这个键）。
+    const execStarted = startedRows.find((e) => e.workItemId);
+    assert.ok(execStarted && execStarted.attemptId, '执行者那一跳要有 attemptId');
+    // mission.created 没有 attemptId / causationId：JSON 会省略 undefined 键。
     const created = activity.find((e) => e.kind === 'mission.created');
     assert.equal('causationId' in (created ?? {}), false, '没有 causationId 时后端不该塞 null 进来');
 
     const attempt = (await (
-      await fetch(`${base}/api/missions/M-task/attempts/${encodeURIComponent(started.causationId)}`)
+      await fetch(`${base}/api/missions/M-task/attempts/${encodeURIComponent(execStarted.attemptId)}`)
     ).json()) as Record<string, any>;
-    for (const field of ['profile', 'usage', 'evidence']) {
-      assert.ok(field in attempt, `事件详情/验证结果读 attempt.${field}，读模型没给`);
-    }
     assert.equal(attempt.evidence.length, 1, '执行者那条 attempt 上要能看到证据');
     assert.equal(attempt.evidence[0].command, 'node --test');
-    assert.equal(attempt.profile.profileId, 'executor-default');
-
-    const diff = (await (await fetch(`${base}/api/missions/M-task/diff`)).json()) as Record<
-      string,
-      unknown
-    >;
-    assert.equal(typeof diff.stat, 'string', '文件变更读 stat');
-    assert.ok(Array.isArray(diff.files), '文件变更读 files');
 
     const live = (await (await fetch(`${base}/api/missions/M-task/live?cursor=0`)).json()) as {
       cursor: number;
@@ -725,49 +1020,43 @@ describe('真 API 字段喂真渲染函数', () => {
     const { base } = await seedMission();
     const view = await (await fetch(`${base}/api/missions/M-task`)).json();
     const activity = await (await fetch(`${base}/api/missions/M-task/activity`)).json();
-    // 证据只挂在执行者那条 attempt 上。
-    const started = activity
-      .filter((e: { kind: string }) => e.kind === 'attempt.started')
-      .find((e: { workItemId?: string }) => e.workItemId);
-    const attempt = await (
-      await fetch(`${base}/api/missions/M-task/attempts/${encodeURIComponent(started.causationId)}`)
-    ).json();
-    const diff = await (await fetch(`${base}/api/missions/M-task/diff`)).json();
-    const live = await (await fetch(`${base}/api/missions/M-task/live?cursor=0`)).json();
-
     const {
-      headerHtml, eventStreamHtml, eventDetailHtml, tabBarHtml, tabPanelHtml, formatTime,
+      headerHtml, stageListHtml, stageDetailHtml, usageCardHtml, livePanelHtml, groupActivity, formatTime,
     } = await import('../src/web/task.js');
 
-    const nowIso = '2026-01-01T00:00:30.000Z';
-    const lines = live.chunks
-      .filter((c: { kind: string }) => c.kind !== 'usage')
-      .map((c: { at: string; kind: string; text: string }) => ({ ...c }));
     const ctx = {
       intent: view.contract && view.contract.intent,
       plan: view.plan,
-      workItems: view.workItems,
+      workItems: view.workItems || [],
       result: view.result,
+      escalationLog: view.escalationLog || [],
+      finalReview: view.finalReview,
     };
+    const groups = groupActivity(activity);
+    const execGroup = groups.find((g: any) => String(g.attemptId).includes('.exec-'));
+    const attempt = await (
+      await fetch(`${base}/api/missions/M-task/attempts/${encodeURIComponent(execGroup.attemptId)}`)
+    ).json();
+    const live = await (await fetch(`${base}/api/missions/M-task/live?cursor=0`)).json();
+    const lines = live.chunks
+      .filter((c: { kind: string }) => c.kind !== 'usage')
+      .map((c: { at: string; kind: string; text: string }) => ({ ...c }));
+
+    const liveHtml = livePanelHtml({ lines, usage: { total: 14 } });
     const rendered = [
-      headerHtml(view, activity, nowIso),
-      eventStreamHtml(activity, 0, ctx),
-      eventDetailHtml(started, attempt),
-      tabBarHtml('实时输出'),
-      tabPanelHtml('实时输出', { live: { lines, usage: { total: 14 } } }),
-      tabPanelHtml('文件变更', { diff }),
-      tabPanelHtml('验证结果', { evidence: attempt.evidence }),
-      tabPanelHtml('相关消息', { escalationLog: view.escalationLog }),
-      tabPanelHtml('原始数据', { event: started }),
+      headerHtml(view, activity, '2026-01-01T00:00:30.000Z'),
+      usageCardHtml(view, activity),
+      stageListHtml(activity, execGroup.attemptId, null, ctx),
+      ...groups.map((g: any) => stageDetailHtml(g, ctx, g === execGroup ? attempt : null)),
+      liveHtml,
     ];
     const all = rendered.join('\n');
 
     assert.ok(all.includes('把任务页做出来'), 'intent 得上屏');
-    assert.ok(all.includes('executor-default'), '右上详情要把真的 profile 亮出来');
-    assert.ok(all.includes('W-1'), '事件流要把关联的工作项亮出来');
     assert.ok(all.includes('正在读工单'), '实时输出的文本行得上屏');
     assert.ok(all.includes('要不要一起改内核？'), '升级问答得上屏');
     assert.ok(all.includes('node --test'), '证据里的命令得上屏');
+    assert.ok(all.includes('W-1'), '技术 ID 仍要能找到');
     assert.ok(all.includes(formatTime(activity[0].at)), '事件流与页头用的是同一个本地时间格式');
     for (const html of rendered) {
       assert.equal(
@@ -776,21 +1065,11 @@ describe('真 API 字段喂真渲染函数', () => {
         `字段名两边不一致时这里不报错，只是屏幕上多了这几个字：${html}`,
       );
     }
-    // 事件流（原始数据 tab 除外）不得出现任何机器事件名。
-    const stream = rendered[1];
-    for (const kind of [
-      'mission.created', 'attempt.started', 'plan.updated', 'work_item.created',
-      'work_item.dispatched', 'work_item.retired', 'evidence.submitted',
-      'execution_result.submitted', 'review.recorded', 'escalation.raised',
-      'mission_result.submitted', 'attempt.ended', 'contract.revised',
-      'final_review.merged', 'mission.waiting', 'mission.resumed',
-    ]) {
-      assert.equal(stream.includes(kind), false, `事件流漏出了机器 kind「${kind}」：\n${stream}`);
+    // 环节视图与详情不得出现任何机器事件名。
+    for (const kind of MACHINE_KINDS) {
+      assert.equal(all.includes(kind), false, `渲染结果漏出了机器事件名「${kind}」：\n${all}`);
     }
-    // 原始数据 tab 里必须还看得到机器 kind（排障靠它）。
-    assert.ok(rendered[8].includes('attempt.started'), '原始数据 tab 要保留机器 kind');
-    // usage chunk 不进终端：它没有 text，拼进去就是一行 undefined。
-    const liveHtml = rendered[4];
+    // 终端里没有 usage chunk 的形状。
     assert.equal(liveHtml.includes('undefined'), false);
     assert.match(liveHtml, /tokens 14/);
   });

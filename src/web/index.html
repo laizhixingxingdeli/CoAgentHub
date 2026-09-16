@@ -179,8 +179,6 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
 .task-stats .stat { display: grid; gap: 2px; }
 .task-stats dt { font-size: 11px; color: var(--muted-foreground); }
 .task-stats dd { margin: 0; font-weight: 600; }
-/* 用量拆项：新增 / 缓存命中（占比）/ 费用 / 高缓存说明，一行里换行不溢出。 */
-.task-stats .usage-breakdown { font-weight: 500; font-size: 12px; max-width: 520px; line-height: 1.5; }
 .stop-btn { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
 
 /* disabled 要看得出 disabled：一个能点但点了没反应的按钮比没按钮更坑。 */
@@ -215,18 +213,81 @@ button[disabled] {
 .evt-refs { margin-top: 3px; font-size: 11px; color: var(--muted-foreground); word-break: break-all; }
 
 .detail-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-.detail-title { font-size: 14px; font-weight: 600; }
+.detail-title { font-size: 14px; font-weight: 600; word-break: break-word; }
 
-.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
-.tab {
-  border: 1px solid transparent; border-bottom: 0; background: none; cursor: pointer;
-  padding: 6px 10px; border-radius: calc(var(--radius) - 4px) calc(var(--radius) - 4px) 0 0;
-  color: var(--muted-foreground); font-size: 13px;
+/* ===== 顶部独立用量卡 =====
+ * 从页头那行统计里搬出来单独一块：按角色拆要看得清 L2/L1 各占多少。
+ * 三层字级：总计大字 → 按角色（带环节色同源的小色点）→ 按类型。
+ */
+.usage-card { display: grid; gap: 8px; }
+.usage-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.usage-num { font-size: 22px; font-weight: 700; }
+.usage-unit { color: var(--muted-foreground); font-size: 12px; }
+.usage-cost { color: var(--muted-foreground); font-size: 13px; }
+.usage-roles { list-style: none; margin: 0; padding: 0; display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+.usage-roles li { display: flex; align-items: center; gap: 6px; }
+/* 小色点与环节色、项目页 stageTone 同一套令牌，不新推一个色值。 */
+.usage-roles li::before {
+  content: ''; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--usage-tone, var(--status-queued));
 }
-.tab:hover { color: var(--foreground); }
-.tab[data-active="1"] {
-  color: var(--accent); background: var(--accent-faint); border-color: var(--border);
-  font-weight: 600;
+.usage-roles .tone-queued { --usage-tone: var(--status-queued); }
+.usage-roles .tone-running { --usage-tone: var(--status-running); }
+.usage-roles .tone-unconfirmed { --usage-tone: var(--status-unconfirmed); }
+.usage-pending { color: var(--muted-foreground); }
+.usage-type { font-size: 12px; color: var(--muted-foreground); line-height: 1.5; }
+
+/* ===== 左栏：按环节折叠的进度视图 =====
+ * 环节色走 --status-*（queued / running / unconfirmed 三个），与 projects.js
+ * stageTone 同源；不引用 --role-*：那一组令牌说的是「谁」，而环节色条
+ * 说的是「干到哪一段」，与项目页那根条是同一件事。
+ */
+.stage-list { display: grid; gap: 7px; max-height: 60vh; overflow-y: auto; }
+.stage {
+  --stage-tone: var(--border);
+  border: 1px solid var(--border); border-left: 3px solid var(--stage-tone);
+  border-radius: var(--radius); background: var(--card); padding: 0 10px;
+}
+.stage.tone-queued { --stage-tone: var(--status-queued); }
+.stage.tone-running { --stage-tone: var(--status-running); }
+.stage.tone-unconfirmed { --stage-tone: var(--status-unconfirmed); }
+.stage[data-active="1"] { border-color: var(--accent); border-left-color: var(--stage-tone); }
+.stage-head {
+  /* 一行自足：不展开也能看懂这一段是什么、跑了多久、花了多少、在干什么。 */
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 2px; cursor: pointer; font-size: 13px;
+}
+.stage-head:hover .stage-name { color: var(--accent); }
+.stage-name { font-weight: 600; word-break: break-word; }
+.stage-dur { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+.stage-usage { color: var(--muted-foreground); font-size: 11px; word-break: break-word; }
+.stage-summary { font-size: 12px; word-break: break-word; }
+/* 组内逐条事件仍走原来的三件套形状，只是缩进到环节里。 */
+.stage .evt-list { padding: 2px 0 8px; max-height: none; overflow: visible; }
+
+/* ===== 右上：这一跳传递的正文 ===== */
+.detail-sub { font-size: 13px; margin-bottom: 6px; word-break: break-word; }
+.detail-tech { font-size: 11px; color: var(--muted-foreground); word-break: break-all; margin-bottom: 10px; }
+.detail-block { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.detail-block-title { margin: 0 0 6px; font-size: 12px; color: var(--muted-foreground); }
+.field-label { font-size: 11px; color: var(--muted-foreground); margin: 8px 0 2px; }
+.detail-list { margin: 0 0 4px; padding-left: 18px; font-size: 13px; word-break: break-word; }
+.detail-list li { margin-bottom: 3px; }
+.order-card, .review-card {
+  border: 1px solid var(--border); border-radius: calc(var(--radius) - 4px);
+  padding: 8px 10px; margin-bottom: 8px;
+}
+.tech-id { font-size: 11px; color: var(--muted-foreground); margin-bottom: 4px; word-break: break-all; }
+.ev-output { white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
+
+/* ===== 右下：常驻实时输出 ===== */
+/* 裁剪说明横幅：在终端**上方**，不进正文行。它说的是「前面没了」，
+   排在正文末尾会被读成「后面还有」，意思正好反过来。 */
+.live-note {
+  font-size: 12px; color: var(--status-unconfirmed);
+  border: 1px solid var(--border); border-left: 3px solid var(--status-unconfirmed);
+  border-radius: calc(var(--radius) - 4px); padding: 5px 8px; margin-bottom: 6px;
+  word-break: break-word;
 }
 
 /* 终端块：明暗两个主题下都是深色——它模拟的是终端，不是页面。 */

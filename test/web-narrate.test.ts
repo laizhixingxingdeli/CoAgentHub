@@ -29,7 +29,12 @@ import {
   narrateEvent,
   nowDoing,
   reasonText,
+  roleBadge,
+  roleOfAttempt,
+  roleTone,
+  roleUsageLine,
   revisionLabel,
+  stageName,
   stateLabel,
   usageLine,
 } from '../src/web/narrate.js';
@@ -291,6 +296,11 @@ describe('叙事模块的加载与文件形状', () => {
       reasonText,
       nowDoing,
       endReasonText,
+      roleOfAttempt,
+      roleBadge,
+      roleTone,
+      stageName,
+      roleUsageLine,
     })) {
       assert.equal(typeof value, 'function', `${name} 要是函数`);
     }
@@ -384,6 +394,116 @@ describe('事件翻译表：逐条对契约', () => {
       assert.ok(!blob.includes(kind), `界面上漏出了机器事件名「${kind}」：\n${blob}`);
     }
     assert.equal(rendered.length, CASES.length);
+  });
+});
+
+/* ============================ 环节名 ============================ */
+
+describe('stageName：一组事件 → 环节名', () => {
+  const wi = [
+    { id: 'W-1649', title: '把观测面接上读模型' },
+    { id: 'W-1650', title: '修好跳库的用例' },
+  ];
+  const ctx = { workItems: wi };
+
+  test('协调者组名从组内 kind 推出，多个用顿号按固定顺序连', () => {
+    // 只有规划+派发。
+    assert.equal(
+      stageName([
+        { attemptId: 'coord-1', kind: 'plan.updated' },
+        { attemptId: 'coord-1', kind: 'work_item.created' },
+        { attemptId: 'coord-1', kind: 'work_item.dispatched' },
+      ], ctx),
+      '调查与规划、派发',
+    );
+    // 验收+派发（调查与规划没参与）——只写验收与派发，不倒回“规划”。
+    assert.equal(
+      stageName([
+        { attemptId: 'coord-2', kind: 'review.recorded' },
+        { attemptId: 'coord-2', kind: 'work_item.dispatched' },
+      ], ctx),
+      '技术验收、派发',
+    );
+    // 四种齐，按固定顺序而不是事件到达顺序。
+    assert.equal(
+      stageName([
+        { attemptId: 'coord-3', kind: 'mission_result.submitted' },
+        { attemptId: 'coord-3', kind: 'work_item.dispatched' },
+        { attemptId: 'coord-3', kind: 'review.recorded' },
+        { attemptId: 'coord-3', kind: 'plan.updated' },
+      ], ctx),
+      '调查与规划、技术验收、派发、交卷',
+    );
+  });
+
+  test('四种 kind 都没有时退回「协调」，不空也不露 attemptId', () => {
+    const out = stageName([{ attemptId: 'coord-9', kind: 'attempt.started' }], ctx);
+    assert.equal(out, '协调');
+    assert.equal(out.includes('coord-9'), false);
+    assert.ok(out.trim().length > 0);
+  });
+
+  test('执行者组 → 执行 · <标题>；查不到标题用 id', () => {
+    assert.equal(
+      stageName([{ attemptId: 'W-1649.exec-1', workItemId: 'W-1649', kind: 'attempt.started' }], ctx),
+      '执行 · 把观测面接上读模型',
+    );
+    assert.equal(
+      stageName([{ attemptId: 'W-9999.exec-1', workItemId: 'W-9999', kind: 'attempt.started' }], ctx),
+      '执行 · W-9999',
+    );
+  });
+
+  test('没有 attemptId 的那一组 → L3 检视者', () => {
+    assert.equal(stageName([{ kind: 'mission.created' }, { kind: 'final_review.merged' }], ctx), 'L3 检视者');
+  });
+
+  test('环节名里不出现机器事件名', () => {
+    const names = [
+      stageName([{ attemptId: 'coord-1', kind: 'plan.updated' }], ctx),
+      stageName([{ attemptId: 'coord-1', kind: 'work_item.dispatched' }], ctx),
+      stageName([{ attemptId: 'coord-1', kind: 'mission_result.submitted' }], ctx),
+      stageName([{ attemptId: 'W-1649.exec-1', workItemId: 'W-1649' }], ctx),
+      stageName([{ kind: 'mission.created' }], ctx),
+    ];
+    for (const n of names) {
+      for (const kind of MACHINE_KINDS) {
+        assert.equal(n.includes(kind), false, `环节名「${n}」里漏出机器事件名 ${kind}`);
+      }
+    }
+  });
+});
+
+describe('环节角色与取色', () => {
+  test('coord → coordinator/L2 协调/queued，.exec- → executor/L1 执行/running，无 id → reviewer/L3/unconfirmed', () => {
+    assert.equal(roleOfAttempt('coord-1'), 'coordinator');
+    assert.equal(roleOfAttempt('W-1649.exec-1'), 'executor');
+    assert.equal(roleOfAttempt(''), 'reviewer');
+    assert.equal(roleOfAttempt(undefined), 'reviewer');
+
+    assert.equal(roleBadge('coordinator'), 'L2 协调');
+    assert.equal(roleBadge('executor'), 'L1 执行');
+    assert.equal(roleBadge('reviewer'), 'L3 检视者');
+
+    // 与 projects.js stageTone 同一套 status token：investigating/planning→queued、
+    // executing→running、awaiting_review→unconfirmed。
+    assert.equal(roleTone('coordinator'), 'queued');
+    assert.equal(roleTone('executor'), 'running');
+    assert.equal(roleTone('reviewer'), 'unconfirmed');
+  });
+
+  test('角色徒章/用量行不露英文角色键、不出现 undefined', () => {
+    for (const role of ['coordinator', 'executor', 'reviewer']) {
+      assert.equal(roleBadge(role).includes(role), false, `${role} 直接上了屏`);
+      const line = roleUsageLine(role, 1000, 74, '$0.1234');
+      assert.ok(line.includes('74%'), line);
+      assert.ok(line.includes('$0.1234'), line);
+      assert.equal(line.includes('undefined'), false, line);
+    }
+    // 零用量也得是一句人话，不能退化成 undefined/NaN。
+    const zero = roleUsageLine('coordinator', 0, 0, '');
+    assert.match(zero, /占比 0%/);
+    assert.equal(zero.includes('undefined') || zero.includes('NaN'), false, zero);
   });
 });
 
@@ -524,6 +644,7 @@ describe('阶段与状态是两根轴', () => {
       'no_available_agent',
       'platform_unreachable',
       'project_busy',
+      'runaway_suspected',
       'target_changed',
       'waiting_l3',
     ]);
@@ -531,6 +652,15 @@ describe('阶段与状态是两根轴', () => {
     assert.equal(reasonText({ waitReason: 'project_busy' }), WAIT_REASON.project_busy);
     assert.equal(reasonText({ waitReason: 'something_new' }), 'something_new');
     assert.equal(reasonText({}), '');
+  });
+
+  test('runaway_suspected 翻成人话，不露英文键', () => {
+    // 漏这一条的形态：界面上停机原因那一栏直接写着 runaway_suspected。
+    const out = reasonText({ waitReason: 'runaway_suspected' });
+    assert.equal(out, '一跳跑太久，已停下来等人看');
+    assert.equal(out.includes('runaway_suspected'), false, out);
+    // nowDoing 也走同一张表，不该在那里漏出机器键。
+    assert.equal(nowDoing({ status: 'executing', waitReason: 'runaway_suspected' }).includes('runaway_suspected'), false);
   });
 
   test('endedBy 中文覆盖六种，未知原样', () => {
