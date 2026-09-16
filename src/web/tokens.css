@@ -1,0 +1,67 @@
+/*
+ * 设计令牌。
+ *
+ * 下面两个 :root 块是从 src/api/web.ts 的 <style> 里**逐字复制**的，一个 oklch 值都没改。
+ * 为什么不许就地调色：观测面和正式页是同一个产品的两个视图，令牌分叉之后
+ * 「执行中」在两边就不是一种颜色了，而没人会把它当成 bug 去修——只会觉得界面在漂。
+ * 改颜色请去改 v4 的 index.css，然后两处一起搬。
+ *
+ * 这个文件只放令牌：静态服务（src/api/static.ts）只认一层扁平文件名，
+ * 没有 styles/ 目录可用，所以外壳的布局样式写在 index.html 的 <style> 里。
+ */
+
+/* ===== 色彩令牌：与 v4 packages/frontend/web/src/index.css 同源 ===== */
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.991 0.001 106.423);
+  --foreground: oklch(0.257 0.017 248.477);
+  --card: oklch(1 0 0);
+  --muted: oklch(0.972 0.002 197.122);
+  --muted-foreground: oklch(0.577 0.027 250.248);
+  --accent: oklch(0.596 0.1 208.085);
+  --accent-foreground: oklch(0.983 0.007 197.036);
+  --accent-faint: oklch(0.96 0.015 202.053);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.929 0.005 228.822);
+
+  --status-queued: oklch(0.659 0.029 246.525);
+  --status-running: oklch(0.596 0.1 208.085);
+  --status-done: oklch(0.579 0.101 159.037);
+  --status-failed: oklch(0.602 0.168 31.205);
+  --status-cancelled: oklch(0.654 0.009 84.583);
+  --status-unconfirmed: oklch(0.651 0.137 64.456);
+
+  --role-coordinator: oklch(0.491 0.128 258.661);
+  --role-reviewer: oklch(0.513 0.134 305.845);
+  --role-executor: oklch(0.45 0.026 250.209);
+
+  /* 终端块在明暗两个主题下都是深色的——它模拟的是终端，不是页面。 */
+  --terminal-bg: oklch(0.201 0.011 242.328);
+  --terminal-fg: oklch(0.956 0.005 228.819);
+  --terminal-dim: oklch(0.667 0.023 248.166);
+}
+:root[data-theme="dark"] {
+  --background: oklch(0.201 0.011 242.328);
+  --foreground: oklch(0.956 0.005 228.819);
+  --card: oklch(0.235 0.013 243.456);
+  --muted: oklch(0.264 0.015 244.246);
+  --muted-foreground: oklch(0.667 0.023 248.166);
+  --accent: oklch(0.75 0.112 205.427);
+  --accent-foreground: oklch(0.208 0.016 210.057);
+  --accent-faint: oklch(0.266 0.034 207.899);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.309 0.02 248.49);
+
+  --status-queued: oklch(0.667 0.023 248.166);
+  --status-running: oklch(0.75 0.112 205.427);
+  --status-done: oklch(0.704 0.113 158.311);
+  --status-failed: oklch(0.683 0.153 31.1);
+  --status-cancelled: oklch(0.674 0.011 81.789);
+  --status-unconfirmed: oklch(0.75 0.131 73.684);
+
+  --role-coordinator: oklch(0.631 0.119 258.408);
+  --role-reviewer: oklch(0.65 0.12 305.732);
+  --role-executor: oklch(0.631 0.026 250.209);
+
+  --terminal-bg: oklch(0.17 0.01 242.328);
+}

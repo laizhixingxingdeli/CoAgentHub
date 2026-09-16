@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CoAgentHub</title>
+<!--
+  无构建：浏览器直接吃这三个文件（ADR-0001）。路径是 /tokens.css 这种一层扁平名，
+  因为静态服务只认那个形状（src/api/static.ts 的 SAFE_NAME），/src/web/... 会被拒。
+
+  projects.js 不写成第二个 <script>：app.js 会 import 它，再写一遍它就执行两遍，
+  路由与列表的监听各注册两次——"点一下项目跳两格"就是这么来的。
+  modulepreload 只预取不执行，正好。
+-->
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="modulepreload" href="/projects.js" />
+<style>
+/* 外壳布局与组件。色彩只从 tokens.css 进来，这里不出现新的色值——
+   多一个"顺手调的色"就和观测面分叉一处，而分叉是没人会主动去对齐的。 */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font: 14px/1.55 "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace; font-size: 12px; }
+.muted { color: var(--muted-foreground); }
+
+.shell { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 100vh; }
+
+/* ===== 左侧固定导航 ===== */
+.nav {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 14px 10px; height: 100vh; position: sticky; top: 0;
+  background: var(--card); border-right: 1px solid var(--border);
+}
+.brand { font-weight: 700; letter-spacing: .2px; padding: 2px 8px 12px; }
+.nav .item {
+  display: block; padding: 7px 10px; font-size: 13px; text-decoration: none;
+  color: var(--foreground); border-radius: calc(var(--radius) - 4px);
+}
+.nav .item:hover { background: var(--muted); }
+.nav .item[data-active="1"] { background: var(--accent-faint); color: var(--accent); font-weight: 600; }
+.nav .spacer { flex: 1; }
+.nav .foot {
+  display: grid; gap: 2px; padding-top: 9px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--muted-foreground);
+}
+
+/* ===== 主区 ===== */
+.main { display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px;
+  font-size: 13px; background: var(--card); border-bottom: 1px solid var(--border);
+}
+.topbar a { color: var(--muted-foreground); text-decoration: none; }
+.topbar a:hover { color: var(--accent); }
+.topbar .sep { color: var(--muted-foreground); }
+.topbar .here { color: var(--foreground); }
+.view { padding: 16px; }
+
+/* ===== 项目页 ===== */
+.page { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 1000px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .nav { height: auto; position: static; }
+  .page { grid-template-columns: minmax(0, 1fr); }
+}
+.pane-title {
+  font-size: 11px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase;
+  color: var(--muted-foreground); margin: 0 0 8px;
+}
+.proj-list { list-style: none; margin: 0; padding: 0; }
+.proj {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card); padding: 10px; margin-bottom: 8px; cursor: pointer;
+}
+.proj:hover { border-color: var(--accent); }
+.proj[data-active="1"] { border-color: var(--accent); background: var(--accent-faint); }
+.proj .name { font-weight: 600; font-size: 13px; word-break: break-all; }
+.proj .meta { margin-top: 3px; font-size: 12px; color: var(--muted-foreground); }
+
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 12px;
+}
+.card h2 { margin: 0 0 10px; font-size: 14px; word-break: break-all; }
+.fields { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 10px; font-size: 13px; margin: 0; }
+.fields dt { color: var(--muted-foreground); }
+.fields dd { margin: 0; word-break: break-all; }
+
+.table-wrap { overflow-x: auto; }
+table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tasks th {
+  text-align: left; white-space: nowrap; padding: 6px 8px;
+  font-size: 11px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase;
+  color: var(--muted-foreground); border-bottom: 1px solid var(--border);
+}
+.tasks td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tasks tbody tr:last-child td { border-bottom: 0; }
+.cell-title { max-width: 340px; }
+.cell-reason { color: var(--muted-foreground); max-width: 260px; }
+
+/* chip：底色/边色的公式与观测面 .badge 完全一致，只是类名不同。
+   同一套 status-* 令牌喂两边，「执行中」在两个界面里才是同一个颜色。 */
+.chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  border: 1px solid transparent;
+  color: var(--s, var(--status-queued));
+  background: color-mix(in oklch, var(--s, var(--status-queued)) 14%, transparent);
+  border-color: color-mix(in oklch, var(--s, var(--status-queued)) 35%, transparent);
+}
+.chip.queued { --s: var(--status-queued); }
+.chip.running { --s: var(--status-running); }
+.chip.done { --s: var(--status-done); }
+.chip.failed { --s: var(--status-failed); }
+.chip.cancelled { --s: var(--status-cancelled); }
+.chip.unconfirmed { --s: var(--status-unconfirmed); }
+
+.empty { color: var(--muted-foreground); text-align: center; padding: 36px 12px; }
+.placeholder {
+  background: var(--card); border: 1px dashed var(--border);
+  border-radius: var(--radius); padding: 28px; text-align: center;
+  color: var(--muted-foreground);
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="nav" aria-label="主导航">
+    <div class="brand">CoAgentHub</div>
+    <a class="item" href="#/projects" data-route="projects">项目</a>
+    <a class="item" href="#/resources" data-route="resources">资源池</a>
+    <div class="spacer"></div>
+    <div class="foot">
+      <!-- 设置与用户名现在都是占位：设置页属于后续 Mission，
+           这里点不出东西比点出一个假弹窗诚实。 -->
+      <div>设置</div>
+      <div>用户</div>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar" id="crumbs" aria-label="面包屑"></div>
+    <div class="view" id="view"></div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

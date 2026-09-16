@@ -1,0 +1,112 @@
+/**
+ * 外壳逻辑：hash 路由、导航高亮、面包屑、主题。
+ *
+ * 路由走 location.hash 而不是 History API：静态服务只认一层扁平文件名
+ * （src/api/static.ts 的 SAFE_NAME），`/projects/<id>` 那种路径它给不出
+ * index.html，要用就得给后端加一条"未知路径回退到 index.html"的路由。
+ * hash 把这件事留在浏览器里。
+ *
+ * 这个文件只管"现在在看哪"，一格数据都不读；数据与渲染在 projects.js。
+ * 分开是为了加任务详情页时外壳不用动。
+ */
+
+import { renderProjectsPage } from './projects.js';
+
+/* ===== 主题 =====
+ * 暗色令牌挂在 :root[data-theme="dark"] 上（与观测面同一套写法），所以这里
+ * 只负责把这个属性写对，一个颜色都不复制。跟随系统而不是默认亮色：
+ * 人已经在暗色环境里了，页面在夜里就该是块黑纸而不是一块白板。
+ */
+const darkScheme = window.matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  document.documentElement.dataset.theme = darkScheme.matches ? 'dark' : 'light';
+}
+applyTheme();
+// 系统中途切主题（macOS 的"日落到日出"）时跟着切，不要求人刷新。
+darkScheme.addEventListener('change', applyTheme);
+
+/* ===== 路由 ===== */
+
+/**
+ * hash → 视图。空 hash 和认不出的写法都交给上层回 #/projects：
+ * 手打的、从旧链接改的、地址栏清空重来的，都该落到一个有内容的地方，
+ * 而不是停在"页面是白的"。
+ */
+function parseRoute(hash) {
+  const raw = String(hash ?? '').replace(/^#/, '');
+  if (raw === '' || raw === '/') return { name: 'home' };
+  const hit = /^\/projects(?:\/(.+))?$/.exec(raw);
+  if (hit) {
+    let projectId = hit[1] || '';
+    try {
+      projectId = decodeURIComponent(projectId);
+    } catch {
+      // 百分号写坏了就用原样：这个 id 可能真的存在，只是人手工改过地址栏。
+      // 为了解码失败把整页打回默认路由，会把"我明明点进来的那条"弄丢。
+    }
+    return { name: 'projects', projectId };
+  }
+  if (raw === '/resources') return { name: 'resources' };
+  return { name: 'unknown' };
+}
+
+const crumbs = document.getElementById('crumbs');
+const view = document.getElementById('view');
+const navItems = [...document.querySelectorAll('.nav [data-route]')];
+
+const node = (text, className) => {
+  const span = document.createElement('span');
+  if (className) span.className = className;
+  // textContent 而不是 innerHTML 拼：面包屑里会出现地址栏来的项目 id，
+  // 而"记得转义"是每加一个字段就可能漏一次的事，不给它机会。
+  span.textContent = text;
+  return span;
+};
+
+function renderChrome(route) {
+  const active = route.name === 'resources' ? 'resources' : 'projects';
+  for (const el of navItems) {
+    if (el.dataset.route === active) el.dataset.active = '1';
+    else el.removeAttribute('data-active');
+  }
+
+  crumbs.replaceChildren();
+  if (route.name === 'resources') {
+    crumbs.appendChild(node('资源池', 'here'));
+    return;
+  }
+  if (!route.projectId) {
+    crumbs.appendChild(node('项目', 'here'));
+    return;
+  }
+  const back = document.createElement('a');
+  back.href = '#/projects';
+  back.textContent = '项目';
+  crumbs.append(back, node('/', 'sep'), node(route.projectId, 'here'));
+}
+
+function render() {
+  const route = parseRoute(location.hash);
+
+  if (route.name === 'home' || route.name === 'unknown') {
+    // 改地址而不是直接渲染项目页：让"地址=视图"这一条是唯一通路。
+    // 绕过去就会出现地址写着 #/abc 而屏幕上是一条别的东西，
+    // 那时链接没法发给别人，刷新也不落在原地。
+    location.hash = '#/projects';
+    return;
+  }
+
+  renderChrome(route);
+
+  if (route.name === 'resources') {
+    // 资源池要看的是候选 agent 的健康度，那是另一个 Mission 的范围。
+    // 先占住这条路由：从导航点进来看到的是"还没做"，而不是空白页。
+    view.replaceChildren(node('资源池页属于后续 Mission。导航与路由已接好，数据还没接。', 'placeholder'));
+    return;
+  }
+
+  void renderProjectsPage(view, route.projectId);
+}
+
+window.addEventListener('hashchange', render);
+render();
