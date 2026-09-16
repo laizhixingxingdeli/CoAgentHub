@@ -136,6 +136,19 @@ export function createApi(deps: ApiDeps): Server {
       });
     },
 
+    async coagent_retire_work_item(run, body) {
+      const { workItemId, reason } = body as unknown as {
+        workItemId: string;
+        reason: string;
+      };
+      // 只有协调者能作废：S14.6 说 cancel-replace 是 L2 的判断。
+      // 执行者要是能作废自己手上的工单，"做不完就把它作废掉"会变成一条捷径。
+      if (run.role !== 'coordinator') {
+        throw new HttpError(409, 'WRONG_ROLE', '只有协调者能作废工作项。');
+      }
+      return platform.retireWorkItem(run.missionId, workItemId, reason);
+    },
+
     async coagent_dispatch_work_item(run, body) {
       const { workItemIds } = body as unknown as { workItemIds: string[] };
       return platform.dispatchWorkItems(run.missionId, run.attemptId, workItemIds ?? []);
