@@ -11,6 +11,7 @@
  */
 
 import { renderProjectsPage } from './projects.js';
+import { renderTaskPage } from './task.js';
 
 /* ===== 主题 =====
  * 暗色令牌挂在 :root[data-theme="dark"] 上（与观测面同一套写法），所以这里
@@ -31,6 +32,9 @@ darkScheme.addEventListener('change', applyTheme);
  * hash → 视图。空 hash 和认不出的写法都交给上层回 #/projects：
  * 手打的、从旧链接改的、地址栏清空重来的，都该落到一个有内容的地方，
  * 而不是停在"页面是白的"。
+ *
+ * 任务页是 `#/missions/<missionId>`（不是 `#/tasks`）：`missionId` 就是
+ * 后端那个 id，路由与 API 用同一个名字，读代码的人不用在脑子里做映射。
  */
 function parseRoute(hash) {
   const raw = String(hash ?? '').replace(/^#/, '');
@@ -45,6 +49,17 @@ function parseRoute(hash) {
       // 为了解码失败把整页打回默认路由，会把"我明明点进来的那条"弄丢。
     }
     return { name: 'projects', projectId };
+  }
+  // 没 id 的 `#/missions` 不匹配（`.+`），落到下面当未知处理：它不指向任何一条任务。
+  const missionHit = /^\/missions\/(.+)$/.exec(raw);
+  if (missionHit) {
+    let missionId = missionHit[1];
+    try {
+      missionId = decodeURIComponent(missionId);
+    } catch {
+      // 与项目 id 同一策略。
+    }
+    return { name: 'mission', missionId };
   }
   if (raw === '/resources') return { name: 'resources' };
   return { name: 'unknown' };
@@ -63,7 +78,15 @@ const node = (text, className) => {
   return span;
 };
 
+const link = (text, href) => {
+  const a = document.createElement('a');
+  a.href = href;
+  a.textContent = text;
+  return a;
+};
+
 function renderChrome(route) {
+  // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
   const active = route.name === 'resources' ? 'resources' : 'projects';
   for (const el of navItems) {
     if (el.dataset.route === active) el.dataset.active = '1';
@@ -75,14 +98,25 @@ function renderChrome(route) {
     crumbs.appendChild(node('资源池', 'here'));
     return;
   }
+  if (route.name === 'mission') {
+    // 三段面包屑的中间那段是 projectId，外壳不读数据、拿不到，
+    // 所以这里只先搭个不骗人的样子，任务页拿到 MissionView 后自己重写。
+    crumbs.append(
+      link('项目', '#/projects'),
+      node('/', 'sep'),
+      node('任务 ' + route.missionId, 'here'),
+    );
+    return;
+  }
   if (!route.projectId) {
     crumbs.appendChild(node('项目', 'here'));
     return;
   }
-  const back = document.createElement('a');
-  back.href = '#/projects';
-  back.textContent = '项目';
-  crumbs.append(back, node('/', 'sep'), node(route.projectId, 'here'));
+  crumbs.append(
+    link('项目', '#/projects'),
+    node('/', 'sep'),
+    node(route.projectId, 'here'),
+  );
 }
 
 function render() {
@@ -102,6 +136,11 @@ function render() {
     // 资源池要看的是候选 agent 的健康度，那是另一个 Mission 的范围。
     // 先占住这条路由：从导航点进来看到的是"还没做"，而不是空白页。
     view.replaceChildren(node('资源池页属于后续 Mission。导航与路由已接好，数据还没接。', 'placeholder'));
+    return;
+  }
+
+  if (route.name === 'mission') {
+    void renderTaskPage(view, route.missionId);
     return;
   }
 

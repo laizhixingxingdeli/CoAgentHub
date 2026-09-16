@@ -65,3 +65,26 @@
 
   --terminal-bg: oklch(0.17 0.01 242.328);
 }
+
+/*
+ * 侧栏在明暗两个主题下都是深色的（设计稿如此，它是导航面不是内容面），
+ * 所以不能复用 --card：亮色主题下 --card 是白的，侧栏会跟着整块翻亮。
+ *
+ * 为什么另起规则块，而不是把这三行塞进上面那两块 :root——那两块要和
+ * src/api/web.ts 的 <style> 逐字比对（见 test/web-shell.test.ts
+ * 「色彩令牌与观测面同源」，整段 includes），多一行属性就红，
+ * 而红出来的信息是「令牌分叉了」，跟侧栏无关，谁来都得愣一下。
+ *
+ * 取值一律借自本文件已有的暗色 oklch，不发明新色相：观测面里没有侧栏，
+ * 新色相等于在这份文件里开了第二个来源，两个界面的颜色迟早开始漂。
+ */
+:root {
+  --sidebar: oklch(0.201 0.011 242.328);
+  --sidebar-foreground: oklch(0.956 0.005 228.819);
+  --sidebar-accent: oklch(0.75 0.112 205.427);
+}
+:root[data-theme="dark"] {
+  --sidebar: oklch(0.17 0.01 242.328);
+  --sidebar-foreground: oklch(0.956 0.005 228.819);
+  --sidebar-accent: oklch(0.75 0.112 205.427);
+}

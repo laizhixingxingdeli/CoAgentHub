@@ -32,7 +32,7 @@
 
 ## Capability 索引
 
-- **web-shell** — 正式 Web 端外壳与项目页
+- **web-shell** — 正式 Web 端外壳、项目页与任务详情
   无构建的浏览器原生 ES module，由 `src/api/static.ts` 按扁平文件名吐出（见 ADR-0001）。
 
 ## 架构决策

@@ -25,7 +25,10 @@ export const STAGE_CN = {
   completed: '已完成',
   blocked: '已中止',
 };
-/** 取色逐个对着观测面 .badge 抄。改一边就得改另一边，否则同一状态两种颜色。 */
+/**
+ * 取色。逐个对着观测面 .badge 抄（src/api/web.ts）。改一边就得改另一边，
+ * 否则同一状态在两个界面里是两种颜色。只经由 stageChip 出去。
+ */
 const STAGE_TONE = {
   investigating: 'queued',
   planning: 'queued',
@@ -51,6 +54,16 @@ export const WAIT_REASON = {
 const chip = (tone, text) => '<span class="chip ' + esc(tone) + '">' + esc(text) + '</span>';
 
 /**
+ * 阶段 chip：内核 MissionStatus → 中文 + 取色。
+ *
+ * 抽出来而不是让任务详情页再抄一份：中文表与取色表一旦有两份，加一个状态就会
+ * 只改到一处，另一处的 chip 静悄悄退回默认灰——那种错没人会当 bug 报。
+ */
+export function stageChip(status) {
+  return chip(STAGE_TONE[status] || 'queued', STAGE_CN[status] || status);
+}
+
+/**
  * 状态是第二根轴：阶段说"走到哪了"，这根说"为什么不动"。
  * 合成一个 chip 就只能显示其中一半，而"排着队"和"卡住了"在一张表里
  * 是完全不同的两件事——人就是照这一列决定先看哪条的。
@@ -70,7 +83,8 @@ export function reasonText(row) {
   return WAIT_REASON[row.waitReason] || row.waitReason;
 }
 
-const num = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US') : '0');
+// 任务详情页也要这个数（总消耗 tokens 那一格），所以是导出的。
+export const num = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US') : '0');
 
 export function projectListHtml(projects, selectedId) {
   if (!projects || projects.length === 0) return '<li class="empty">还没有项目</li>';
@@ -111,10 +125,10 @@ export function taskTableHtml(rows) {
   const head = TASK_COLUMNS.map((t) => '<th>' + esc(t) + '</th>').join('');
   const body = rows
     .map(
-      (m) => '<tr>'
+      (m) => '<tr data-mission-id="' + esc(m.missionId) + '">'
       + '<td class="mono">' + esc(m.missionId) + '</td>'
       + '<td class="cell-title">' + esc(m.intent || '（没有契约）') + '</td>'
-      + '<td>' + chip(STAGE_TONE[m.status] || 'queued', STAGE_CN[m.status] || m.status) + '</td>'
+      + '<td>' + stageChip(m.status) + '</td>'
       + '<td>' + stateChip(m) + '</td>'
       + '<td class="cell-reason">' + esc(reasonText(m)) + '</td>'
       // 列表 API 不返回时间戳。宁可显示 —，也不要拿"本页生成时间"冒充每条任务的
@@ -211,6 +225,13 @@ async function renderDetail() {
   if (selected !== projectId) return;
   const rows = data.missions.filter((m) => m.projectId === projectId);
   box.innerHTML = detailCardHtml(project, workspace) + taskTableHtml(rows);
+  // 行 → 任务详情页。监听写在 DOM 段而不是内联 onclick：内联的话这里能测到形状、
+  // 测不到行为，而行为（点了去哪）才是要紧的那半。
+  for (const tr of box.querySelectorAll('tr[data-mission-id]')) {
+    tr.onclick = () => {
+      location.hash = '#/missions/' + encodeURIComponent(tr.dataset.missionId);
+    };
+  }
 }
 
 function paint(error) {
