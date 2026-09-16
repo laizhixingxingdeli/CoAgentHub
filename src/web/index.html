@@ -5,15 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>CoAgentHub</title>
 <!--
-  无构建：浏览器直接吃这三个文件（ADR-0001）。路径是 /tokens.css 这种一层扁平名，
+  无构建：浏览器直接吃这几个文件（ADR-0001）。路径是 /tokens.css 这种一层扁平名，
   因为静态服务只认那个形状（src/api/static.ts 的 SAFE_NAME），/src/web/... 会被拒。
 
-  projects.js 不写成第二个 <script>：app.js 会 import 它，再写一遍它就执行两遍，
-  路由与列表的监听各注册两次——"点一下项目跳两格"就是这么来的。
+  projects.js / task.js 不写成第二个 <script>：app.js 会 import 它们，再写一遍就
+  执行两遍，路由与列表的监听各注册两次——"点一下项目跳两格"就是这么来的。
   modulepreload 只预取不执行，正好。
 -->
 <link rel="stylesheet" href="/tokens.css" />
 <link rel="modulepreload" href="/projects.js" />
+<link rel="modulepreload" href="/task.js" />
 <style>
 /* 外壳布局与组件。色彩只从 tokens.css 进来，这里不出现新的色值——
    多一个"顺手调的色"就和观测面分叉一处，而分叉是没人会主动去对齐的。 */
@@ -30,23 +31,33 @@ body {
 
 .shell { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 100vh; }
 
-/* ===== 左侧固定导航 ===== */
+/* ===== 左侧固定导航 =====
+ * 侧栏在明暗两个主题下都是深色的：它是导航面，不是内容面。所以不能接
+ * --card（亮色主题下那是白的），也不能接 --foreground（同样会翻亮）。
+ * 令牌值在 tokens.css（--sidebar / --sidebar-foreground / --sidebar-accent），
+ * 这里只引用。正文区域一个 sidebar 令牌都不用——侧栏黑不等于整页黑。
+ */
 .nav {
   display: flex; flex-direction: column; gap: 3px;
   padding: 14px 10px; height: 100vh; position: sticky; top: 0;
-  background: var(--card); border-right: 1px solid var(--border);
+  background: var(--sidebar); border-right: 1px solid var(--sidebar);
+  color: var(--sidebar-foreground);
 }
-.brand { font-weight: 700; letter-spacing: .2px; padding: 2px 8px 12px; }
+.brand { font-weight: 700; letter-spacing: .2px; padding: 2px 8px 12px; color: var(--sidebar-foreground); }
 .nav .item {
   display: block; padding: 7px 10px; font-size: 13px; text-decoration: none;
-  color: var(--foreground); border-radius: calc(var(--radius) - 4px);
+  color: var(--sidebar-foreground); border-radius: calc(var(--radius) - 4px);
 }
-.nav .item:hover { background: var(--muted); }
-.nav .item[data-active="1"] { background: var(--accent-faint); color: var(--accent); font-weight: 600; }
+.nav .item:hover { background: color-mix(in oklch, var(--sidebar-foreground) 12%, transparent); }
+.nav .item[data-active="1"] {
+  background: var(--sidebar-accent); color: var(--sidebar);
+  font-weight: 600;
+}
 .nav .spacer { flex: 1; }
 .nav .foot {
-  display: grid; gap: 2px; padding-top: 9px; border-top: 1px solid var(--border);
-  font-size: 12px; color: var(--muted-foreground);
+  display: grid; gap: 2px; padding-top: 9px;
+  border-top: 1px solid color-mix(in oklch, var(--sidebar-foreground) 22%, transparent);
+  font-size: 12px; color: color-mix(in oklch, var(--sidebar-foreground) 62%, transparent);
 }
 
 /* ===== 主区 ===== */
@@ -67,6 +78,8 @@ body {
   .shell { grid-template-columns: minmax(0, 1fr); }
   .nav { height: auto; position: static; }
   .page { grid-template-columns: minmax(0, 1fr); }
+  .task-cols { grid-template-columns: minmax(0, 1fr); }
+  .evt-list { max-height: none; }
 }
 .pane-title {
   font-size: 11px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase;
@@ -99,6 +112,8 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
   color: var(--muted-foreground); border-bottom: 1px solid var(--border);
 }
 .tasks td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tasks tbody tr { cursor: pointer; }
+.tasks tbody tr:hover td { background: var(--accent-faint); }
 .tasks tbody tr:last-child td { border-bottom: 0; }
 .cell-title { max-width: 340px; }
 .cell-reason { color: var(--muted-foreground); max-width: 260px; }
@@ -121,6 +136,86 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
 .chip.unconfirmed { --s: var(--status-unconfirmed); }
 
 .empty { color: var(--muted-foreground); text-align: center; padding: 36px 12px; }
+/* ===== 任务详情页 =====
+ * 布局写在 `<style>` 里而不是另起 task.css：静态服务只认一层扁平文件名，
+ * 多一个文件就多一个要 modulepreload / 要在测试里枚举的名字（与 W1 同一取舍）。
+ */
+.task { display: grid; gap: 12px; }
+.task-head {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  column-gap: 16px; row-gap: 10px;
+}
+.task-title { margin: 0; font-size: 16px; word-break: break-all; grid-column: 1; }
+.task-chips { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 1; }
+.task-stats {
+  display: flex; gap: 22px; margin: 0; grid-column: 1;
+  flex-wrap: wrap; align-items: end;
+}
+.task-stats .stat { display: grid; gap: 2px; }
+.task-stats dt { font-size: 11px; color: var(--muted-foreground); }
+.task-stats dd { margin: 0; font-weight: 600; }
+.stop-btn { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+
+/* disabled 要看得出 disabled：一个能点但点了没反应的按钮比没按钮更坑。 */
+button {
+  font: inherit; font-size: 13px; padding: 5px 12px; border-radius: calc(var(--radius) - 4px);
+  border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+}
+button[disabled] {
+  color: var(--muted-foreground); background: var(--muted);
+  border-style: dashed; cursor: not-allowed;
+}
+
+.task-cols { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
+.task-left, .task-right { min-width: 0; }
+.evt-list { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow-y: auto; }
+.evt {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+  padding: 8px 10px; margin-bottom: 7px; cursor: pointer;
+}
+.evt:hover { border-color: var(--accent); }
+.evt[data-active="1"] { border-color: var(--accent); background: var(--accent-faint); }
+.evt-kind { font-weight: 600; word-break: break-all; }
+.evt-time { font-size: 12px; color: var(--muted-foreground); }
+.evt-refs { font-size: 11px; color: var(--muted-foreground); word-break: break-all; }
+
+.detail-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.detail-title { font-size: 14px; font-weight: 600; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
+.tab {
+  border: 1px solid transparent; border-bottom: 0; background: none; cursor: pointer;
+  padding: 6px 10px; border-radius: calc(var(--radius) - 4px) calc(var(--radius) - 4px) 0 0;
+  color: var(--muted-foreground); font-size: 13px;
+}
+.tab:hover { color: var(--foreground); }
+.tab[data-active="1"] {
+  color: var(--accent); background: var(--accent-faint); border-color: var(--border);
+  font-weight: 600;
+}
+
+/* 终端块：明暗两个主题下都是深色——它模拟的是终端，不是页面。 */
+pre.term {
+  margin: 0; padding: 10px 12px; max-height: 340px; overflow-y: auto;
+  background: var(--terminal-bg); color: var(--terminal-fg);
+  border-radius: calc(var(--radius) - 4px);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+pre.term .t { color: var(--terminal-dim); }
+pre.term .tool { color: var(--accent); font-weight: 600; }
+.live-bar { display: flex; gap: 14px; align-items: center; font-size: 12px; margin-bottom: 6px; }
+.live-meta { display: flex; gap: 12px; align-items: center; }
+.auto-scroll { display: flex; gap: 5px; align-items: center; cursor: pointer; color: var(--muted-foreground); }
+.note { color: var(--muted-foreground); font-size: 13px; padding: 10px 2px; word-break: break-word; }
+.file-list, .evidence, .escalations, .options { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.evidence li, .escalations li { margin-bottom: 10px; }
+.ev-top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.escalations .q { font-weight: 600; word-break: break-word; }
+.escalations .why { color: var(--muted-foreground); margin-top: 4px; word-break: break-word; }
+.escalations .a { margin-top: 4px; word-break: break-word; }
+
 .placeholder {
   background: var(--card); border: 1px dashed var(--border);
   border-radius: var(--radius); padding: 28px; text-align: center;
