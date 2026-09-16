@@ -422,6 +422,44 @@ describe('环节分组', () => {
     assert.match(selected, /data-attempt-id="coord-1" data-active="1"/, '选中的环节要标出来');
   });
 
+  test('用户展开过的环节在重画之后仍然展开，其它组不受影响', async () => {
+    const { stageListHtml } = await loaded;
+    /** 哪些组的 <details> 带着 open，按出现顺序。 */
+    const opened = (html: string): string[] =>
+      [...html.matchAll(/<details[^>]*>/g)]
+        .filter((m) => /\bopen\b/.test(m[0]))
+        .map((m) => /data-attempt-id="([^"]*)"/.exec(m[0])![1]);
+
+    // 首屏（不传展开集）：一个 open 都没有——默认收起不变。
+    assert.deepEqual(opened(stageListHtml(w4Activity(), 'coord-1', null, W4_CTX)), []);
+
+    // 人展开了 coord-1。
+    const first = stageListHtml(w4Activity(), null, null, W4_CTX, ['coord-1']);
+    assert.deepEqual(opened(first), ['coord-1']);
+    assert.equal((first.match(/<details/g) || []).length, 6, '重画不该多出/少掉环节');
+
+    // 因选中变化（点环节头、点组内事件都会走到这一步）再画一次：coord-1 必须
+    // 还开着。这是这一跳的回归点：旧实现每次重画都换成一份全收起的新节点，
+    // 浏览器刚展开的节点连同组内逐条事件一起被换掉。
+    const again = stageListHtml(w4Activity(), 'W-1649.exec-1', 3, W4_CTX, ['coord-1']);
+    assert.deepEqual(opened(again), ['coord-1']);
+    // 展开才有东西可看：那一组的组内逐条事件还在表里。
+    assert.match(again, /data-attempt-id="coord-1"[^>]*>[\s\S]*?data-event-key="/);
+
+    // 展开集里每一组都开着：点组内事件不许把别的已展开环节折回去。
+    assert.deepEqual(
+      opened(stageListHtml(w4Activity(), 'coord-1', 1, W4_CTX, ['coord-1', 'W-1650.exec-1'])),
+      ['coord-1', 'W-1650.exec-1'],
+    );
+
+    // 线要接上：纯函数对了而调用方不喂展开集，页面上仍是每次重画全收起。
+    const src = read('task.js');
+    const at = src.indexOf('innerHTML = stageListHtml(');
+    assert.ok(at > 0, '找不到重画环节列表的地方');
+    assert.match(src.slice(at, src.indexOf(');', at)), /expanded/, '重画必须把展开集喂给 stageListHtml');
+    assert.match(src, /node\.open/, '重画之前要先从 DOM 收原生展开状态');
+  });
+
   test('环节头一行自足：环节名、角色徽章、耗时、token/费用、一句话摘要', async () => {
     const { stageListHtml } = await loaded;
     const html = stageListHtml(w4Activity(), null, null, W4_CTX);

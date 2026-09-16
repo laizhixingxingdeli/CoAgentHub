@@ -329,11 +329,17 @@ function eventRowHtml(event, index, selectedKey, ctx) {
  *
  * 左侧色条、环节头、角色徽章三处同源（都走 roleTone），与 projects.js
  * stageTone 同一套 `--status-*` 令牌——同一环节在任务页与项目页是一个颜色。
+ *
+ * `expandedIds` 是**用户已经展开过的 attemptId**（数组或 Set）。纯函数读不到
+ * 浏览器的 `<details>.open`，而环节列表是整块重画的：不把展开过的组再写回
+ * open，重画一次就把人刚点开的那一组折回去，组内逐条事件永远看不到。
+ * 不传（首屏）时一个 open 都不写。
  */
-export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx) {
+export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, expandedIds) {
   const groups = groupActivity(activity);
   if (groups.length === 0) return '<div class="empty">还没有事件。这条任务刚开始。</div>';
   const context = ctx || {};
+  const expanded = new Set(expandedIds || []);
   // 组内那一行用的是整条 activity 的下标，所以先建一张「事件对象 → 下标」的表。
   const indexOf = new Map();
   (activity || []).forEach((e, i) => {
@@ -349,10 +355,12 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx) {
         .map((e) => eventRowHtml(e, indexOf.has(e) ? indexOf.get(e) : -1, selectedKey, context))
         .join('');
       const selected = selectedAttemptId !== null && g.attemptId === selectedAttemptId;
-      // 刻意不写 open：默认收起是硬要求，一个 open 就把整个折叠抵消了。
+      // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
+      // 一上来就给所有环节加 open 等于没折叠。
       return '<details class="stage tone-' + esc(tone) + '"'
         + ' data-attempt-id="' + esc(g.attemptId) + '"'
-        + (selected ? ' data-active="1"' : '') + '>'
+        + (selected ? ' data-active="1"' : '')
+        + (expanded.has(g.attemptId) ? ' open' : '') + '>'
         + '<summary class="stage-head" data-stage-select>'
         +   '<span class="stage-name">' + esc(stageName(g.events, context)) + '</span>'
         +   '<span class="chip ' + esc(tone) + '">' + esc(roleBadge(role)) + '</span>'
@@ -870,9 +878,34 @@ function detailCtx(st) {
   };
 }
 
-function paintStages(st) {
+/**
+ * 用户展开过的环节（attemptId 集合）。
+ *
+ * 原生 `<details>` 的 open 只活在浏览器里，而环节列表是整块 innerHTML 重画的。
+ * 所以重画之前先把 DOM 里的 open 收进来，重画时再按它写回 open——不收的话，
+ * 人点开一个环节，浏览器刚展开、节点就被换成一份全收起的新表，
+ * 组内逐条事件一次都看不到。
+ */
+function collectExpanded(st) {
+  const ids = new Set();
+  for (const node of st.els.stages.querySelectorAll('details.stage')) {
+    if (node.open) ids.add(String(node.dataset.attemptId || ''));
+  }
+  return ids;
+}
+
+/**
+ * 重画环节列表。
+ *
+ * `expanded` 明确给定时用它；不给就以 DOM 现状为准（原生 toggle 跑完之后
+ * DOM 才是真相）。之所以要能明确给定：点环节头那一刻，浏览器的展开动作**还没**
+ * 落到 DOM 上（点击的默认行为在事件派发之后才跑），此刻从 DOM 收会收到
+ * 「还没展开」，重画反而把刚点开的那一组折回去。
+ */
+function paintStages(st, expanded) {
+  st.expanded = expanded === undefined ? collectExpanded(st) : expanded;
   st.els.stages.innerHTML = stageListHtml(
-    st.activity, st.selectedAttemptId, st.selectedKey, detailCtx(st),
+    st.activity, st.selectedAttemptId, st.selectedKey, detailCtx(st), st.expanded,
   );
 }
 
@@ -987,10 +1020,10 @@ async function pollLive(st) {
   }
 }
 
-function selectStage(st, attemptId) {
+function selectStage(st, attemptId, expanded) {
   st.selectedAttemptId = attemptId;
   st.selectedKey = null;
-  paintStages(st);
+  paintStages(st, expanded);
   void loadAttempt(st, attemptId);
 }
 
@@ -1005,6 +1038,8 @@ function bind(st) {
       const stage = row.closest('.stage');
       st.selectedKey = Number(row.dataset.eventKey);
       st.selectedAttemptId = stage ? String(stage.dataset.attemptId || '') : st.selectedAttemptId;
+      // 这一步之前没人动过 DOM 的 open，以 DOM 为准重画：当前组与其它已经展开的
+      // 组都还在展开集里，点一条事件不会把它们折回去。
       paintStages(st);
       void loadAttempt(st, st.selectedAttemptId);
       return;
@@ -1013,8 +1048,14 @@ function bind(st) {
     if (!head) return;
     const stage = head.closest('.stage');
     if (!stage) return;
-    // 点环节头：浏览器自己会把 <details> 展开（原生行为），这里只管选中。
-    selectStage(st, String(stage.dataset.attemptId || ''));
+    // 点环节头：<details> 仍由浏览器原生展开/折起（不 preventDefault）。但上面
+    // 那句「点击的默认行为还没落到 DOM」在这里生效——不能读 DOM 的 open，
+    // 要按现有展开集反转出点击后该是什么状态，交给重画写回 open。
+    const id = String(stage.dataset.attemptId || '');
+    const expanded = collectExpanded(st);
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+    selectStage(st, id, expanded);
   });
 
   st.els.live.addEventListener('change', (ev) => {
@@ -1090,6 +1131,8 @@ export async function renderTaskPage(container, missionId) {
     // 事件只决定事件流里哪一行高亮。
     selectedAttemptId: null,
     selectedKey: null,
+    // 用户展开过的环节。首屏是空的：默认全部收起。
+    expanded: new Set(),
     attempt: null,
     autoScroll: true,
     live: liveStateOf(missionId),
