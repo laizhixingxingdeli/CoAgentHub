@@ -1,0 +1,24 @@
+{
+  "projectId": "v5-demo",
+  "missionId": "M-doc",
+  "contract": {
+    "intent": "slidingWindows 现在没有文档注释。给它加一段 JSDoc，说明参数含义、返回值形状和边界行为。",
+    "acceptance": [
+      "src/window.ts 里 slidingWindows 上方有 JSDoc 注释。",
+      "注释说明了 values 与 size 两个参数的含义。",
+      "注释说明了返回值的形状。",
+      "仓库根目录 `node --test` 退出码为 0。"
+    ],
+    "constraints": [
+      "只改 src/window.ts，只加注释，不改任何可执行代码。",
+      "不加依赖，不引入构建步骤。"
+    ],
+    "nonGoals": [
+      "不改实现行为。",
+      "不动测试文件。"
+    ],
+    "guardrails": [
+      "只加注释。任何一行可执行代码被改动都算越界。"
+    ]
+  }
+}

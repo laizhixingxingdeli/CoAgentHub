@@ -6,5 +6,8 @@
   "description": "CoAgentHub v5 — Agent-First 架构基线的实现。",
   "scripts": {
     "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }

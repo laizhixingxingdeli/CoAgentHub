@@ -1,0 +1,24 @@
+{
+  "projectId": "v5-demo",
+  "missionId": "M-s11",
+  "contract": {
+    "intent": "给 src/window.ts 加 clampRange(values, lo, hi)：把每个元素夹到 [lo, hi] 区间内。",
+    "acceptance": [
+      "src/window.ts 导出 clampRange(values: readonly number[], lo: number, hi: number): number[]",
+      "clampRange([1,5,10], 2, 8) === [2,5,8]",
+      "lo > hi 抛 RangeError",
+      "node --test 全绿"
+    ],
+    "constraints": [
+      "只改 src/window.ts 和 test/window.test.ts",
+      "风格与同文件里的 slidingWindows / chunk 保持一致（slice 拷贝、不改入参）"
+    ],
+    "nonGoals": [
+      "不要重构已有函数",
+      "不要引入依赖"
+    ],
+    "guardrails": [
+      "不改 package.json"
+    ]
+  }
+}

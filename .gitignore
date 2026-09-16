@@ -1,1 +1,8 @@
 node_modules/
+
+# 运行时产物，不进仓库。
+.coagent-state*.json
+.coagent-state*.lock/
+.coagent-worktrees/
+.coagent-artifacts/
+.coagent-runs/

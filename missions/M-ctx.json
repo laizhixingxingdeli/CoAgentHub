@@ -1,0 +1,24 @@
+{
+  "projectId": "v5-demo",
+  "missionId": "M-ctx",
+  "contract": {
+    "intent": "给 slidingWindows 加一个姊妹函数 chunk(values, size)：把序列切成互不重叠的定长块，最后不足一块的尾巴原样保留。",
+    "acceptance": [
+      "src/window.ts 导出 chunk(values: readonly number[], size: number): number[][]",
+      "chunk([1,2,3,4,5], 2) === [[1,2],[3,4],[5]]",
+      "size <= 0 抛 RangeError，错误信息与 slidingWindows 一致",
+      "test/window.test.ts 里有覆盖上述行为的用例，node --test 全绿"
+    ],
+    "constraints": [
+      "只改 src/window.ts 和 test/window.test.ts",
+      "chunk 的边界行为与错误信息必须与同文件里的 slidingWindows 保持一致——这是同一个模块的两个函数，不一致会让调用方踩坑"
+    ],
+    "nonGoals": [
+      "不要重构 slidingWindows",
+      "不要引入任何依赖"
+    ],
+    "guardrails": [
+      "不改 package.json"
+    ]
+  }
+}
