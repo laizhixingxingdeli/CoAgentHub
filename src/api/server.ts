@@ -16,6 +16,7 @@ import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
+import { listRuntimeModels } from '../application/runtime-catalog.ts';
 import { NoLiveOutput } from '../application/live.ts';
 import type { LiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -234,6 +235,11 @@ export function createApi(deps: ApiDeps): Server {
           missionId: url.searchParams.get('missionId') ?? undefined,
         }),
       );
+    }
+
+    // 可用模型清单。平台自己不认识模型——这里只是把适配层吐的 JSON 转出去。
+    if (method === 'GET' && path === '/api/runtime/models') {
+      return send(res, 200, await listRuntimeModels());
     }
 
     if (method === 'GET' && path === '/api/projects') {

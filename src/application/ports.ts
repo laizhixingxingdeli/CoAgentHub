@@ -109,6 +109,16 @@ export interface ExecutionProfile {
   readonly endpoint: string;
   readonly profileId: string;
   readonly reasoning?: string;
+  /**
+   * 建这条候选时定下的运行时身份，例如从界面上选的那个模型。
+   *
+   * 键值都是**不透明的**：这一层不认识 provider / model 这些词（S08.3 要求
+   * Kernel 与 Application 不出现它们），只负责原样传给适配层。
+   * 适配层认得这些键——它本来就是唯一知道模型长什么样的地方。
+   *
+   * 不带就走适配层自己那张静态表，行为和以前一样。
+   */
+  readonly facts?: readonly { readonly key: string; readonly value: string }[];
 }
 
 export interface AgentRun {
