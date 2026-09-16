@@ -13,6 +13,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -730,5 +731,255 @@ describe('候选池 API', () => {
     } finally {
       close();
     }
+  });
+});
+
+/* --------------------------- 资源池页（src/web/pool.js） --------------------------- */
+
+/**
+ * 资源池页的渲染。
+ *
+ * 正式页在这个仓库里**不在测试的浏览器里**，所以"字段名读错了"在界面上是
+ * 没有声音的：ExecutionProfile 那一列永远是 —，页面照样跑。纯函数能在 node 里
+ * 把真 JSON 灌进去，把它抓出来（同 test/web-task.test.ts）。
+ *
+ * 另外两条只在源码上钉：
+ *   1. 这一页只有"加一条" —— 一个 DELETE / PATCH / PUT 都不许有。候选池动了
+ *      删除与重排之后，"这一跳用谁"的语义立刻要和正在跑的 attempt 一起想，
+ *      而那不是这次的范围（这一页还没有鉴权）。
+ *   2. 文件形状 —— pool.js 的名字要满足静态服务的 SAFE_NAME，外壳要认 #/pool。
+ *      写错是浏览器里一个 404 或一块白屏，控制台之外没人知道。
+ */
+
+describe('资源池页（src/web/pool.js）', () => {
+  const webRoot = fileURLToPath(new URL('../src/web/', import.meta.url));
+  const readWeb = (name: string): string =>
+    readFileSync(join(webRoot, name), 'utf8').replace(/\r\n/g, '\n');
+
+  const loaded = import('../src/web/pool.js');
+
+  /** GET /api/runtime/models 的形状（src/application/runtime-catalog.ts）。 */
+  const catalog = {
+    available: true,
+    runtime: 'pi',
+    models: [{ provider: 'a', model: 'b', label: 'A / B' }],
+  };
+
+  /** GET /api/pools 的形状：两条 coordinator、一条 executor。 */
+  const snapshot = {
+    coordinator: [
+      {
+        profileId: 'coord-a',
+        endpoint: 'local',
+        runtime: 'pi',
+        order: 0,
+        facts: [
+          { key: 'provider', value: 'p1' },
+          { key: 'model', value: 'm1' },
+        ],
+      },
+      {
+        profileId: 'coord-b',
+        endpoint: 'http://127.0.0.1:9/send',
+        runtime: 'pi',
+        order: 1,
+        facts: [],
+      },
+    ],
+    executor: [
+      {
+        profileId: 'exec-a',
+        endpoint: 'local',
+        runtime: 'pi',
+        order: 0,
+        facts: [
+          { key: 'provider', value: 'p' },
+          { key: 'model', value: 'm' },
+        ],
+      },
+    ],
+  };
+
+  /** 取某一行的四个单元格。用 data-pool-row 定位：下标记行会串到别人身上。 */
+  function cellsOf(html: string, profileId: string): string[] {
+    const hit = new RegExp(`<tr data-pool-row="${profileId}"[^>]*>([\\s\\S]*?)</tr>`).exec(html);
+    assert.ok(hit, `页面里没有 ${profileId} 那一行`);
+    return [...hit[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+  }
+
+  /** option 的 value 是被 esc 过的 JSON，断言前先还原。 */
+  const unesc = (s: string): string =>
+    s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+  test('两条 coordinator、一条 executor：计数 2/1，每行出现 profileId 与 endpoint，Runtime 是 pi', async () => {
+    const { poolPageHtml } = await loaded;
+    const html = poolPageHtml(snapshot, catalog);
+    assert.match(html, /data-count="coordinator">2</);
+    assert.match(html, /data-count="executor">1</);
+    for (const row of [...snapshot.coordinator, ...snapshot.executor]) {
+      const cells = cellsOf(html, row.profileId);
+      assert.equal(cells.length, 4, '四列');
+      assert.equal(cells[0], row.profileId, '第一列是候选名称 = profileId');
+      assert.equal(cells[1], row.endpoint, '第二列是 AgentEndpoint');
+      assert.equal(cells[2], 'pi', '第三列是 Runtime');
+    }
+  });
+
+  test('ExecutionProfile 列显示 facts 里的 provider/model，facts 里没有时是 —', async () => {
+    const { poolPageHtml } = await loaded;
+    const html = poolPageHtml(snapshot, catalog);
+    assert.equal(cellsOf(html, 'exec-a')[3], 'p / m');
+    assert.equal(cellsOf(html, 'coord-a')[3], 'p1 / m1');
+    // facts=[]
+    const empty = cellsOf(html, 'coord-b')[3];
+    assert.equal(empty, '—');
+    // **不要**退回显示 profileId：那一列会让人以为身份已经配好了，
+    // 而派发时交给适配层的其实是空 facts。
+    assert.equal(empty.includes('coord-b'), false, 'ExecutionProfile 列显示了 profileId');
+  });
+
+  test('空仓照样能渲染：两个 0 与表单都在，入参整个缺了也不崩', async () => {
+    const { poolPageHtml } = await loaded;
+    const html = poolPageHtml({ coordinator: [], executor: [] }, catalog);
+    assert.match(html, /data-count="coordinator">0</);
+    assert.match(html, /data-count="executor">0</);
+    assert.ok(html.includes('data-pool-form'), '空仓也要能加第一条');
+    assert.ok(html.includes('还没有候选'));
+    // 首帧还没拉到数据时 snapshot/catalog 都是空：崩在这儿就是一块白屏。
+    assert.ok(poolPageHtml(null, null).length > 0);
+    assert.match(poolPageHtml(null, null), /data-pool-form/);
+  });
+
+  test('外部输入一律转义：profileId 里的 <script> 进不了 DOM', async () => {
+    const { poolPageHtml } = await loaded;
+    const evil = '<script>alert(1)</script>';
+    const html = poolPageHtml(
+      {
+        coordinator: [],
+        executor: [{ profileId: evil, endpoint: evil, runtime: 'pi', order: 0, facts: [] }],
+      },
+      catalog,
+    );
+    assert.equal(html.includes('<script>'), false, 'profileId 被当标签解析了');
+    assert.ok(html.includes('&lt;script&gt;'), '该看到转义后的形式');
+  });
+
+  test('表头四列齐；表单有角色、模型、候选名称、endpoint（默认 local）', async () => {
+    const { poolPageHtml, POOL_COLUMNS } = await loaded;
+    assert.deepEqual(
+      [...POOL_COLUMNS],
+      ['候选名称', 'AgentEndpoint', 'Runtime', 'ExecutionProfile'],
+    );
+    const html = poolPageHtml(snapshot, catalog);
+    for (const name of POOL_COLUMNS) {
+      assert.ok(html.includes('<th>' + name + '</th>'), `表头缺「${name}」`);
+    }
+    assert.match(html, /<select[^>]*data-pool-role[^>]*>/);
+    assert.ok(html.includes('>协调者<') && html.includes('>执行者<'), '角色下拉显示中文');
+    assert.match(html, /<select[^>]*data-pool-model[^>]*>/);
+    assert.match(html, /<input[^>]*data-pool-profile[^>]*>/);
+    assert.match(html, /<input[^>]*data-pool-endpoint[^>]*value="local"/);
+    assert.match(html, /<button[^>]*data-pool-submit/);
+    // 模型名不许手输：输入框只该有两个（候选名称与 endpoint）。
+    const inputs = [...html.matchAll(/<input[^>]*>/g)].map((m) => m[0]);
+    assert.equal(inputs.length, 2, `表单里的输入框该只有两个，实际：${inputs.join(' ')}`);
+    assert.equal(
+      inputs.some((tag) => tag.includes('model')),
+      false,
+      '有一个能手输模型名的输入框',
+    );
+  });
+
+  test('模型下拉的选项来自 catalog.models[].label，value 能还原出 provider/model', async () => {
+    const { poolPageHtml, poolModelValue, factsFromModel } = await loaded;
+    const html = poolPageHtml(snapshot, catalog);
+    const select = /<select[^>]*data-pool-model[^>]*>([\s\S]*?)<\/select>/.exec(html);
+    assert.ok(select, '没有模型下拉');
+    assert.equal(/disabled/.test(select[0]), false, '清单可用时不该停用下拉');
+    const options = [...select[1].matchAll(/<option[^>]*value="([^"]*)"[^>]*>([^<]*)<\/option>/g)];
+    assert.equal(options.length, 1, `下拉该只有清单里那一条，实际 ${options.length} 条`);
+    assert.equal(options[0][2], 'A / B', 'option 上的文字是 label');
+    // 选完不用再手输：value 里带着 provider 与 model，提交时拆得回来。
+    const value = unesc(options[0][1]);
+    assert.equal(value, poolModelValue({ provider: 'a', model: 'b' }));
+    assert.deepEqual(factsFromModel(value), [
+      { key: 'provider', value: 'a' },
+      { key: 'model', value: 'b' },
+    ]);
+  });
+
+  test('catalog.available=false：note 原样出现，模型下拉与提交按钮都停用', async () => {
+    const { poolPageHtml } = await loaded;
+    const html = poolPageHtml(snapshot, { available: false, note: '适配层不在' });
+    assert.ok(html.includes('适配层不在'), 'note 要原样出现');
+    assert.ok(
+      html.indexOf('适配层不在') < html.indexOf('data-pool-form'),
+      'note 要在表单上方 —— 摆在按钮下面等于没提醒',
+    );
+    assert.match(html, /<select[^>]*data-pool-model[^>]*disabled/, '模型下拉要停用');
+    assert.match(html, /<button[^>]*data-pool-submit[^>]*disabled/, '提交按钮要停用');
+    // 停用归停用，两张表照画：这一条不该把整页变成一句 note。
+    assert.match(html, /data-count="coordinator">2</);
+  });
+
+  test('这一页只有"加一条"：不发 DELETE / PATCH / PUT，读接口不缓存', () => {
+    const src = readWeb('pool.js');
+    assert.equal(/DELETE|PATCH|PUT/.test(src), false, '这一页不许出现删除/改/重排');
+    assert.match(src, /method: 'POST'/, '唯一的写操作是加一条');
+    assert.match(src, /cache: 'no-store'/, '读接口不该被缓存住');
+    assert.match(src, /\/api\/pools/);
+    assert.match(src, /\/api\/runtime\/models/);
+  });
+
+  test('提交组装出 provider/model 两个 fact；失败路径读响应 JSON 的 message', async () => {
+    const src = readWeb('pool.js');
+    // 拆 facts 是**界面**的事：平台存的是不透明键值，application 层不该认识模型。
+    assert.match(src, /key: 'provider'/);
+    assert.match(src, /key: 'model'/);
+    assert.match(src, /fetch\('\/api\/pools'/);
+    assert.match(src, /facts/, 'body 里要带 facts');
+
+    const { factsFromModel, errorText } = await loaded;
+    assert.deepEqual(factsFromModel('{"provider":"a","model":"b"}'), [
+      { key: 'provider', value: 'a' },
+      { key: 'model', value: 'b' },
+    ]);
+    // 拆不出来回 null，调用方据此拒绝提交 —— 不兜底成空 facts：
+    // 那种候选存进去像配好了，要到第一次派发失败才说话。
+    assert.equal(factsFromModel(''), null);
+    assert.equal(factsFromModel('{"provider":"a"}'), null);
+    assert.equal(factsFromModel('不是 JSON'), null);
+
+    // message 是后端写给界面看的"下一步该干什么"，原样显示。
+    assert.equal(
+      errorText({ message: 'coordinator 下已经有同名候选：dup' }, 409),
+      'coordinator 下已经有同名候选：dup',
+    );
+    assert.equal(errorText(null, 500), 'HTTP 500', '拿不到 JSON 时也要说得出是哪个状态码');
+  });
+
+  test('文件形状：pool.js 是可服务的扁平小写名，外壳接到 #/pool', () => {
+    assert.ok(existsSync(join(webRoot, 'pool.js')), '缺 src/web/pool.js');
+    assert.match(
+      'pool.js',
+      /^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$/,
+      'SAFE_NAME 不认的名字就是浏览器里一个 404',
+    );
+
+    const html = readWeb('index.html');
+    assert.match(html, /<link rel="modulepreload" href="\/pool\.js" \/>/);
+    // app.js 会 import 它；再写一个会执行的 <script> 就是执行两遍、监听注册两次。
+    assert.equal(/<script[^>]+src="\/pool\.js"/.test(html), false, 'pool.js 被写成会执行的 script');
+    assert.match(html, /href="#\/pool"[^>]*data-route="pool"/);
+    assert.ok(html.includes('>资源池</a>'), '可见文字仍是「资源池」');
+    assert.equal(existsSync(join(webRoot, 'pool.css')), false, '不另起 pool.css');
+
+    const shell = readWeb('app.js');
+    assert.match(shell, /from '\.\/pool\.js'/);
+    assert.match(shell, /renderPoolPage/);
+    assert.ok(shell.includes("'/pool'"), 'parseRoute 要认 #/pool');
+    assert.equal(shell.includes('/resources'), false, '占位路由要删掉：两个地址指同一页，迟早分叉');
+    // 认不出的 hash 仍打回项目页（回归：加路由时别把这条弄丢）。
+    assert.ok(shell.includes("location.hash = '#/projects'"));
   });
 });
