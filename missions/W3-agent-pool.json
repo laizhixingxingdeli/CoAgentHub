@@ -2,25 +2,27 @@
   "projectId": "coagenthub-v5",
   "missionId": "W3",
   "contract": {
-    "intent": "把候选池从 run-mission.ts 的硬编码搬成可持久化的配置，并做资源池页：列出协调者（L2）与执行者（L1）的候选，能添加一个。只需要最简单可用的版本。",
+    "intent": "把候选池从 run-mission.ts 的硬编码搬成可持久化的配置，并做资源池页：列出协调者（L2）与执行者（L1）的候选，能添加一个。添加时**从 pi 报上来的模型清单里选**，不要让人手输模型名。只需要最简单可用的版本。",
     "acceptance": [
       "新增 src/application/agent-pool.ts：定义 AgentPoolRepository 端口（list / add），以及 InMemory 实现；端口放应用层，**不进 src/kernel/** —— 候选池是配置，不是领域状态",
       "文件存储与 Postgres 存储各补一个实现：文件版落在现有状态文件里，PG 版建一张表；两边都要能跨进程读到对方写的",
-      "GET /api/pools 返回 { coordinator: [...], executor: [...] }，每条含 profileId、endpoint、runtime、order",
-      "POST /api/pools 追加一条候选，body 是 { role, profileId, endpoint }；role 只接受 coordinator / executor，别的返回 409 并说明原因；同 role 下 profileId 重复也返回 409",
+      "GET /api/pools 返回 { coordinator: [...], executor: [...] }，每条含 profileId、endpoint、runtime、facts、order",
+      "POST /api/pools 追加一条候选，body 是 { role, profileId, endpoint, facts }；facts 是 [{key,value}] 形式的不透明键值（界面会填 provider/model）；role 只接受 coordinator / executor，别的返回 409 并说明原因；同 role 下 profileId 重复也返回 409",
       "**只支持追加，不做删除与改动。** 这是刻意的：页面没有鉴权，破坏性操作暂不开放",
-      "src/run-mission.ts 从仓储读候选池；仓储为空时用现有的那份硬编码当缺省并写回去（首次启动自动播种），这样行为不变",
-      "新增 src/web/pool.js，hash 路由 #/pool，侧边栏「资源池」能点进来；两张表分别列 L2 与 L1 候选，列：候选名称、AgentEndpoint、Runtime、ExecutionProfile；顶部两个计数卡显示各自数量",
-      "页面底部一个简单的添加表单：角色下拉（协调者/执行者）+ profileId 输入 + endpoint 输入 + 添加按钮；提交后刷新列表；失败时把后端的 message 原样显示出来",
-      "新增 test/agent-pool.test.ts：覆盖端口的两种实现、重复与非法 role 的拒绝、run-mission 的播种逻辑、以及页面纯渲染函数",
+      "src/run-mission.ts 从仓储读候选池，并把每条的 facts 一起传进 ExecutionProfile；仓储为空时用现有的那份硬编码当缺省并写回去（首次启动自动播种），这样行为不变",
+      "新增 src/web/pool.js，hash 路由 #/pool，侧边栏「资源池」能点进来；两张表分别列 L2 与 L1 候选，列：候选名称、AgentEndpoint、Runtime、ExecutionProfile（显示 facts 里的 provider/model）；顶部两个计数卡显示各自数量",
+      "添加表单：角色下拉 + **模型下拉（选项来自 GET /api/runtime/models 的 models[].label）** + 候选名称输入 + endpoint 输入（默认 local）；提交时把选中模型拆成 facts=[{key:\"provider\"},{key:\"model\"}] 一起 POST",
+      "模型清单取不到时（接口返回 available:false），把 note 原样显示在表单上方，并让模型下拉停用——不要让人在一个填不对的表单上瞎试",
+      "新增 test/agent-pool.test.ts：覆盖端口的两种实现、重复与非法 role 的拒绝、run-mission 的播种逻辑、facts 的透传、以及页面纯渲染函数",
       "node --test 全绿（现有 307 条一条都不许红）"
     ],
     "constraints": [
       "**不许改 src/kernel/**，不许加依赖，不许引入构建步骤",
       "Runtime 一栏现在只有 pi 一种，写死成 'pi' 即可，不要为此设计扩展点",
+      "**facts 对平台是不透明的**：应用层与内核里不得出现 provider / model 这些词，只做原样存取。适配层才解释它们",
       "**不做可用性、冷却、当前 Mission/Attempt 这些列。** 那些只活在调度器进程的内存里，要显示得先持久化——这一轮不做，页面上也不要放空列占位",
       "复用 W1/W2 的外壳与 tokens.css，不要另起样式",
-      "POST 之外不得新增任何写端点"
+      "POST /api/pools 之外不得新增任何写端点"
     ],
     "nonGoals": [
       "不做删除、禁用、排序调整",

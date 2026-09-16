@@ -108,9 +108,14 @@ export class Platform {
   ): Promise<{ contractRevision: number }> {
     const { mission } = await this.#locate(missionId);
     const contractRevision = mission.reviseContract(contract);
-    // 契约改了，之前那份交卷就是照着旧契约做的——不能再按它放行。
-    // 退回规划，让协调者拿着新契约重新判断。
-    if (mission.status === 'awaiting_review') {
+    // 契约改了，之前那份交卷、以及**已经派出去的工单**，都是照着旧契约做的。
+    // 一律退回规划，让协调者拿着新契约重新判断（S14.6：compatible / replan /
+    // cancel-replace 是 L2 的判断，不是平台的）。
+    //
+    // 早先只在 awaiting_review 时退回。实测中途改需求时踩到了：Mission 还在
+    // executing，工单已经派出去，调度器照样先跑执行者——等 L2 被叫醒时，
+    // 按旧契约做的东西已经做完了。钱花了，而且做的是明确不要的那件事。
+    if (mission.status === 'executing' || mission.status === 'awaiting_review') {
       mission.sendBackToPlanning({
         verdict: 'send_back',
         reasons: [`Contract 已更新到 r${contractRevision}，需要按新契约重新核对`],

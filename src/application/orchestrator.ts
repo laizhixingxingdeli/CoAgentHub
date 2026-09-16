@@ -268,7 +268,14 @@ export class Orchestrator {
       }
 
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
-      const pending = view.workItems.filter((item) => item.status === 'dispatched');
+      //
+      // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、
+      // 或者 L2 自己）判定当前这批工单需要重新审视；这时候还去跑它们，
+      // 就是明知要重做还先花一遍钱。让协调者先说话。
+      const pending =
+        view.status === 'executing'
+          ? view.workItems.filter((item) => item.status === 'dispatched')
+          : [];
       if (pending.length > 0) {
         for (const item of pending) {
           const hop = await this.#runHop({

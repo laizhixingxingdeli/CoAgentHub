@@ -440,3 +440,33 @@ describe('S05.2：工作项冻结拆它时的规划版本', () => {
     assert.equal(w2?.planRevision, 3);
   });
 });
+
+describe('契约中途变更（S14.6）', () => {
+  test('executing 时改契约 —— 退回规划，已派发的工单不再被执行', async () => {
+    // 实测踩到的：中途改需求时 Mission 还在 executing、工单已经派出去，
+    // 调度器照样先跑执行者。等 L2 被叫醒，按旧契约做的东西已经做完了——
+    // 钱花了，做的还是明确不要的那件事。
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord.attemptId, {
+      title: 'W',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M1')).status, 'executing');
+
+    await platform.reviseContract('M1', { ...CONTRACT, intent: '改了目标' });
+
+    const view = await platform.getMissionView('M1');
+    // 退回规划：接下来该说话的是 L2，不是执行者。
+    assert.equal(view.status, 'planning');
+    assert.equal(view.finalReview?.verdict, 'send_back');
+    assert.match(view.finalReview?.reasons[0] ?? '', /Contract 已更新/);
+    // 工单状态不动——compatible / replan / cancel-replace 是 L2 的判断，
+    // 不是平台替它做。
+    assert.equal(view.workItems[0].status, 'dispatched');
+    assert.equal(view.contract?.intent, '改了目标');
+  });
+});
