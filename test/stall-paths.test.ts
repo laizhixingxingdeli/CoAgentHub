@@ -379,4 +379,42 @@ describe('一跳跑太久', () => {
       '跑太久不是候选的错，不许把它冻进冷却',
     );
   });
+
+  test('交过证据的给一次延长 —— 光看时间分不出"在干活"和"在打转"', async () => {
+    // 这一条是首次真实触发误杀之后补的。当时一跳跑满 30 分钟被掐，而它已经
+    // 452/452 全绿、正在改注释和函数名。单看墙钟分不出这两种情况；能分出来的
+    // 是**平台可见的进展**——被掐那跳是 112 次本地工具调用、零次平台交互。
+    const executor = new ScriptedRuntime({
+      'executor:W-1': {
+        hangsAfterSteps: true,
+        steps: [
+          { tool: 'coagent_get_work_order', body: {} },
+          {
+            tool: 'coagent_submit_evidence',
+            body: { kind: 'test', summary: '跑过了', command: 'node --test', exitCode: 0 },
+          },
+        ],
+      },
+    });
+    const { platform, orchestrator } = await harness(
+      new ScriptedRuntime(PLAN_AND_DISPATCH),
+      executor,
+      { attemptWallClockMs: 40 },
+    );
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+
+    const started = Date.now();
+    const result = await orchestrator.runMission('M1', { projectRoot: process.cwd() });
+    const elapsed = Date.now() - started;
+
+    // 最终还是会停——延长只给一次，不是无限期放行。
+    assert.equal((result as { reason: string }).reason, 'runaway_suspected');
+    // 但必须**撑过第一次到点**。没有延长的话第 40 毫秒就被掐了。
+    assert.ok(elapsed >= 80, `该等满两个窗口（>=80ms），实际 ${elapsed}ms`);
+    assert.match(
+      (result as { detail: string }).detail,
+      /中途交过证据/,
+      '停机原因要说清楚它是"交过东西但没收尾"，还是"什么都没交"——两者处置不同',
+    );
+  });
 });

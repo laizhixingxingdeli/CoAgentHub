@@ -44,6 +44,12 @@ export interface Script {
    * upstreamFailure 模拟的是立刻失败，那条路径压根走不到闸门。
    */
   readonly hangs?: boolean;
+  /**
+   * 先把 steps 跑完（于是平台上留下了证据），**然后**挂住不收尾。
+   *
+   * 守的是和 hangs 相反的那条性质：交过东西的不该在第一次到点就被掐。
+   */
+  readonly hangsAfterSteps?: boolean;
   readonly usage?: TokenUsage;
 }
 
@@ -162,6 +168,20 @@ export class ScriptedRuntime implements AgentRuntime {
         }
         Object.assign(previous, json as Record<string, unknown>);
         if (TERMINAL.has(step.tool)) submitted = true;
+      }
+
+      // 步骤跑完之后再挂住：模拟"交过东西、还在干、但就是不收尾"。
+      // 和 hangs 分开，因为要守的是相反的那条性质——有进展的不该被掐。
+      if (script.hangsAfterSteps) {
+        emit({ kind: 'usage', usage: script.usage ?? DEFAULT_USAGE });
+        await new Promise<void>((resolve) => {
+          killed = resolve;
+        });
+        return {
+          endedBy: 'upstream_failure',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, quality: 'unknown' },
+          failureMessage: '进程被杀且没有回传结果',
+        };
       }
 
       const usage = script.usage ?? DEFAULT_USAGE;

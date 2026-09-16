@@ -447,6 +447,25 @@ export class Orchestrator {
    * upstream_failure，如果只报一句"候选都失败了"，一个真正的程序错误
    * 会被伪装成配额问题，而且完全看不见。
    */
+  /**
+   * 这一跳有没有往平台交过东西（证据 / 执行结果）。
+   *
+   * 墙钟到点时用它区分两种看起来一样的情况：**在干活但慢**，和**在打转**。
+   * 单看时间分不出来——实测一跳跑满 30 分钟被当成打转掐掉，而它已经全绿了。
+   * 交过东西就是有进展，给一次延长；一次都没交的，30 分钟确实该有人来看。
+   *
+   * 读不到就当没有：这一路失败不该把一个正常的运行拖死，而"读不到"本身
+   * 也说明平台这边不正常，停下来让人看是对的。
+   */
+  async #hasSubmittedSomething(missionId: string, attemptId: string): Promise<boolean> {
+    try {
+      const detail = await this.#platform.getAttemptDetail(missionId, attemptId);
+      return detail.evidence.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   /** 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。 */
   #availableCandidates(pool: RolePool, now: number): ExecutionProfile[] {
     return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
@@ -550,6 +569,8 @@ export class Orchestrator {
        * 用量因此被标成 estimated。**花掉的 token 不能因为进程是被杀的就不算。**
        */
       let streamedUsage: TokenUsage | undefined;
+      /** 墙钟延长只给一次。一直不交东西的，第二次到点就停。 */
+      let extendedOnce = false;
       try {
         const run = await input.pool.runtime.start({
           role: input.role,
@@ -597,10 +618,26 @@ export class Orchestrator {
         );
         // 墙钟闸。abort 会连子孙进程一起收（Windows 上 shell:true 的子进程
         // 只 kill 父的话，真正在跑的那个孙子还握着管道，close 永远不来）。
-        wallClock = setTimeout(() => {
-          runaway = true;
-          void run.abort?.();
-        }, this.#wallClockMs);
+        //
+        // **到点先看它有没有在交东西。** 首次真实触发就是一次误杀：一跳跑满
+        // 30 分钟被掐，而它其实早已 452/452 全绿，正在改注释和函数名。光看
+        // 墙钟分不出"打转"和"做完了在收尾"，能分出来的是**平台可见的进展**——
+        // 那一跳 112 次本地工具调用、零次平台交互，是真的什么都没交。
+        // 在交的就给一次延长；再到点还没完就停，那时候确实该有人来看了。
+        const armWallClock = () => {
+          wallClock = setTimeout(() => {
+            void (async () => {
+              if (!extendedOnce && (await this.#hasSubmittedSomething(input.missionId, attemptId))) {
+                extendedOnce = true;
+                armWallClock();
+                return;
+              }
+              runaway = true;
+              void run.abort?.();
+            })();
+          }, this.#wallClockMs);
+        };
+        armWallClock();
         outcome = await run.wait();
       } catch (error) {
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
@@ -664,10 +701,14 @@ export class Orchestrator {
           // #stallDetail 拼一句泛泛的话覆盖掉它，而这一句里的"跑了多久、
           // 改动还在哪、哪个尝试"才是人接下来要用的。
           detail:
-            `${where} 这一跳连续跑了 ${minutes} 分钟还没提交结果，已经停下来等人看。` +
-            '它一直在产出，所以静默超时不会响——这种情况多半是在打转，或者工单太大。' +
+            `${where} 这一跳连续跑了 ${extendedOnce ? minutes * 2 : minutes} 分钟还没提交结果，` +
+            '已经停下来等人看。它一直在产出，所以静默超时不会响——' +
+            (extendedOnce
+              ? '它中途交过证据（所以已经延长过一次），但始终没交出执行结果。'
+              : '而且**一次平台交互都没有**：没提交过任何证据。这通常意味着工单太大，' +
+                '或者它在等一条永远不会返回的命令。') +
             `改动留在工作区里没有回滚，实时输出的尾部也还在（尝试 ${attemptId}），` +
-            '看完再决定是继续、改工单、还是作废。',
+            '看完再决定是继续、拆小工单、还是作废。',
         };
       }
 
