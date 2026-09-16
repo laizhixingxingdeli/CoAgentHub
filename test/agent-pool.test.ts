@@ -811,7 +811,7 @@ describe('资源池页（src/web/pool.js）', () => {
   const unesc = (s: string): string =>
     s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
-  test('两条 coordinator、一条 executor：计数 2/1，每行出现 profileId 与 endpoint，Runtime 是 pi', async () => {
+  test('两条 coordinator、一条 executor：计数 2/1，每行出现 profileId 与 endpoint，适配层是 pi', async () => {
     const { poolPageHtml } = await loaded;
     const html = poolPageHtml(snapshot, catalog);
     assert.match(html, /data-count="coordinator">2</);
@@ -820,22 +820,23 @@ describe('资源池页（src/web/pool.js）', () => {
       const cells = cellsOf(html, row.profileId);
       assert.equal(cells.length, 4, '四列');
       assert.equal(cells[0], row.profileId, '第一列是候选名称 = profileId');
-      assert.equal(cells[1], row.endpoint, '第二列是 AgentEndpoint');
-      assert.equal(cells[2], 'pi', '第三列是 Runtime');
+      assert.equal(cells[1], row.endpoint, '第二列是接入点 = endpoint');
+      assert.equal(cells[2], 'pi', '第三列是适配层（原来的 Runtime）');
     }
   });
 
-  test('ExecutionProfile 列显示 facts 里的 provider/model，facts 里没有时是 —', async () => {
+  test('运行时列显示 facts 里的 provider/model，facts 里没有时是 — 带一句解释', async () => {
     const { poolPageHtml } = await loaded;
     const html = poolPageHtml(snapshot, catalog);
     assert.equal(cellsOf(html, 'exec-a')[3], 'p / m');
     assert.equal(cellsOf(html, 'coord-a')[3], 'p1 / m1');
-    // facts=[]
+    // facts=[]：— 仍可用，但不能是孤零零一个横杠。
     const empty = cellsOf(html, 'coord-b')[3];
     assert.equal(empty, '—');
+    assert.ok(html.includes('title="还没配模型身份"'), '空单元格要解释为什么空');
     // **不要**退回显示 profileId：那一列会让人以为身份已经配好了，
     // 而派发时交给适配层的其实是空 facts。
-    assert.equal(empty.includes('coord-b'), false, 'ExecutionProfile 列显示了 profileId');
+    assert.equal(empty.includes('coord-b'), false, '运行时列显示了 profileId');
   });
 
   test('空仓照样能渲染：两个 0 与表单都在，入参整个缺了也不崩', async () => {
@@ -864,15 +865,19 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.ok(html.includes('&lt;script&gt;'), '该看到转义后的形式');
   });
 
-  test('表头四列齐；表单有角色、模型、候选名称、endpoint（默认 local）', async () => {
+  test('表头四列齐（人话名）；表单有角色、模型、候选名称、接入点（默认 local）', async () => {
     const { poolPageHtml, POOL_COLUMNS } = await loaded;
     assert.deepEqual(
       [...POOL_COLUMNS],
-      ['候选名称', 'AgentEndpoint', 'Runtime', 'ExecutionProfile'],
+      ['候选名称', '接入点', '适配层', '运行时'],
     );
     const html = poolPageHtml(snapshot, catalog);
     for (const name of POOL_COLUMNS) {
       assert.ok(html.includes('<th>' + name + '</th>'), `表头缺「${name}」`);
+    }
+    // 接口名不该当表头：看到 provider/model 而不知道那是「身份」的人得去读代码。
+    for (const raw of ['AgentEndpoint', 'ExecutionProfile']) {
+      assert.equal(html.includes('>' + raw + '<'), false, `表头里还在裸写 ${raw}`);
     }
     assert.match(html, /<select[^>]*data-pool-role[^>]*>/);
     assert.ok(html.includes('>协调者<') && html.includes('>执行者<'), '角色下拉显示中文');
@@ -880,7 +885,7 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /<input[^>]*data-pool-profile[^>]*>/);
     assert.match(html, /<input[^>]*data-pool-endpoint[^>]*value="local"/);
     assert.match(html, /<button[^>]*data-pool-submit/);
-    // 模型名不许手输：输入框只该有两个（候选名称与 endpoint）。
+    // 模型名不许手输：输入框只该有两个（候选名称与接入点）。
     const inputs = [...html.matchAll(/<input[^>]*>/g)].map((m) => m[0]);
     assert.equal(inputs.length, 2, `表单里的输入框该只有两个，实际：${inputs.join(' ')}`);
     assert.equal(
@@ -888,6 +893,22 @@ describe('资源池页（src/web/pool.js）', () => {
       false,
       '有一个能手输模型名的输入框',
     );
+  });
+
+  test('用量卡：走 GET /api/usage 的 total，用同一个 usageLine；读不到要说出来', async () => {
+    const { poolPageHtml, usageCardHtml } = await loaded;
+    const html = poolPageHtml(
+      snapshot,
+      catalog,
+      { input: 100, output: 50, cacheRead: 850, cacheWrite: 0, total: 1000, cost: 1.2345 },
+    );
+    for (const fragment of ['新增 150', '缓存命中 850', '85%', '$1.2345']) {
+      assert.ok(html.includes(fragment), `用量卡里该有「${fragment}」：${html}`);
+    }
+    assert.ok(html.includes('缓存部分计费便宜得多'), '高缓存要有便宜说明');
+    // 读不到、还没读到，两种都不能留空白。
+    assert.ok(usageCardHtml(null).includes('读不到用量'), '读失败要说读不到用量');
+    assert.ok(usageCardHtml(undefined).includes('读取中'), '首帧要有一句读取中');
   });
 
   test('模型下拉的选项来自 catalog.models[].label，value 能还原出 provider/model', async () => {
@@ -929,6 +950,7 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(src, /cache: 'no-store'/, '读接口不该被缓存住');
     assert.match(src, /\/api\/pools/);
     assert.match(src, /\/api\/runtime\/models/);
+    assert.match(src, /\/api\/usage/, '用量卡的数据来自 GET /api/usage');
   });
 
   test('提交组装出 provider/model 两个 fact；失败路径读响应 JSON 的 message', async () => {

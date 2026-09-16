@@ -253,7 +253,7 @@ function localStamp(iso: string): string {
 describe('任务页的纯渲染函数', () => {
   const loaded = import('../src/web/task.js');
 
-  test('事件流：时间本地化、kind、关联 id、选中高亮', async () => {
+  test('事件流：每条有角色徽章、动作短语、细节，且不出现机器 kind', async () => {
     const { eventStreamHtml } = await loaded;
     const events = [
       { at: '2026-03-04T05:06:07.000Z', kind: 'mission.created', data: {} },
@@ -262,25 +262,40 @@ describe('任务页的纯渲染函数', () => {
         kind: 'attempt.started',
         workItemId: 'W-7',
         attemptId: 'W-7.exec-1',
-        data: {},
+        data: { kind: 'executor' },
       },
     ];
-    const html = eventStreamHtml(events, 1);
+    const ctx = { intent: '把任务页做出来', workItems: [{ id: 'W-7', title: '事件流' }] };
+    const html = eventStreamHtml(events, 1, ctx);
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')), '时间没按本地时区渲染');
     assert.equal(html.includes('2026-03-04T05:06:07'), false, '直接切了 ISO 字符串：时区会差几小时');
-    assert.ok(html.includes('attempt.started') && html.includes('mission.created'), 'kind 要上屏');
-    assert.ok(html.includes('W-7 · W-7.exec-1'), '关联的 workItemId / attemptId 要显示');
+    // 三件套：角色流转徽章、动作短语、一行细节。少一件就是一条只有时间的卡片。
+    assert.ok(html.includes('evt-badge') && html.includes('evt-action') && html.includes('evt-detail'));
+    assert.ok(html.includes('L3 → L2') && html.includes('发起任务'), '角色徽章与动作短语要上屏');
+    assert.ok(html.includes('L1') && html.includes('执行者开工'));
+    assert.ok(html.includes('把任务页做出来'), '细节行要有内容');
+    // 第一眼不得是机器事件名：那行字不报错、不崩，只是没人看得懂。
+    for (const kind of ['mission.created', 'attempt.started']) {
+      assert.equal(html.includes(kind), false, `事件流漏出了机器 kind「${kind}」`);
+    }
+    // 尝试 ID：人话标签在前，原始 id 仍能看到（排障时人要拿它去 grep 日志）。
+    assert.ok(html.includes('执行者第 1 次尝试'), 'attempt 要有人话标签');
+    assert.ok(html.includes('W-7.exec-1'), '原始 attempt id 要看得到');
+    assert.ok(html.includes('工作项 <span class="mono">W-7</span>'), '关联的工作项要显示');
     assert.match(html, /data-event-key="1" data-active="1"/, '选中项要标出来');
     assert.equal(html.includes('data-event-key="0" data-active'), false, '只该有一条是选中的');
     // 没有关联 id 的事件不显示那一行：空的一行看着像坏了。
     assert.equal(html.split('<div class="evt-refs').length, 2);
   });
 
-  test('事件流：关联 id 缺省不显示；空事件流有说明句', async () => {
+  test('事件流：关联 id 缺省不显示；未知 kind 连同「未翻译」一起显示', async () => {
     const { eventStreamHtml } = await loaded;
     assert.match(eventStreamHtml([], null), /还没有事件/);
     assert.match(eventStreamHtml(undefined, null), /还没有事件/);
     assert.equal(eventStreamHtml([{ at: '', kind: 'x' }], null).includes('evt-refs'), false);
+    // 兜底：认不出的 kind 显示 kind 本身并标明未翻译——渲染成空白等于把这条吃掉。
+    const unknown = eventStreamHtml([{ at: '', kind: 'memory.applied' }], null);
+    assert.ok(unknown.includes('memory.applied') && unknown.includes('未翻译'), unknown);
   });
 
   test('五个 tab 文案齐，active 跟着入参走', async () => {
@@ -312,13 +327,18 @@ describe('任务页的纯渲染函数', () => {
     assert.match(tabPanelHtml('没有这个标签', data), /不认识的标签/);
   });
 
-  test('实时输出：usage chunk 不当终端行；空时有说明句；有自动滚动勾选', async () => {
+  test('实时输出：usage chunk 不当终端行；空时有说明句（分在跑与已结束两种）', async () => {
     const { livePanelHtml } = await loaded;
     const empty = livePanelHtml({ lines: [] });
     assert.match(empty, /还没有实时输出/, '黑空一块看起来像坏了');
     assert.match(empty, /data-autoscroll/, '要能关掉自动滚动');
     assert.match(empty, /checked/, '默认开着');
     assert.match(empty, /class="term"/);
+    // 已经不在跑（终态 / 等停机 / 暂停）：输出不会再来，要说清完整输出在哪。
+    const ended = livePanelHtml({ lines: [], running: false });
+    assert.match(ended, /这一跳已经结束/, ended);
+    assert.match(ended, /完整输出/, ended);
+    assert.equal(ended.includes('还没有实时输出'), false, '结束了就不该说「还没有」');
 
     const withUsage = livePanelHtml({
       lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' }],
@@ -408,7 +428,7 @@ describe('任务页的纯渲染函数', () => {
     assert.match(rawPanelHtml(null), /没有选中事件/);
   });
 
-  test('页头：intent、阶段中文、状态 chip、三统计格、disabled 的停止按钮', async () => {
+  test('页头：intent、阶段中文、状态 chip、「现在在干什么」、用量拆项、disabled 停止按钮', async () => {
     const { headerHtml } = await loaded;
     const view = {
       projectId: 'p',
@@ -417,6 +437,8 @@ describe('任务页的纯渲染函数', () => {
       paused: false,
       updatedAt: '2026-03-04T06:00:00.000Z',
       usage: { total: 12345 },
+      contractRevision: 2,
+      planRevision: 1,
       contract: { intent: '做任务页' },
     };
     const activity = [
@@ -427,12 +449,44 @@ describe('任务页的纯渲染函数', () => {
     assert.ok(html.includes('做任务页'), '标题是 contract.intent');
     assert.ok(html.includes('执行中'), '阶段 chip 用内核 MissionStatus 的中文');
     assert.ok(html.includes('进行中'), '状态 chip 是第二根轴');
-    assert.ok(html.includes('12,345'), '总消耗读 usage.total 并带千分位');
+    assert.ok(html.includes('现在在干什么'), '页头要有「现在在干什么」那一句');
+    // 修订号带名词：光一个 r2 不知道是谁的版本。
+    assert.ok(html.includes('契约 r2') && html.includes('规划 r1'), `修订号要说人话：${html}`);
+    // Token 不再只断言一个 total：拆成新增与缓存，有占比与费用。
+    assert.ok(html.includes('新增 12,345'), `Token 该拆出新增：${html}`);
+    assert.ok(html.includes('缓存命中'), 'Token 要拆出缓存命中');
+    assert.ok(html.includes('%') && html.includes('费用未上报'), '占比与费用都要有');
     assert.ok(html.includes('3 小时 0 分'), `运行时长该是创建时间到传入的 nowIso，出来是：${html}`);
     assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')), '创建时间取事件流第一条');
     assert.match(html, /disabled title="API 尚无鉴权，写操作暂不开放"/);
     assert.ok(html.includes('停止任务'));
     assert.equal(html.includes('onclick'), false, '不绑定点击：不发 POST');
+  });
+
+  test('页头：等待时停机原因看得见，在跑时说得清在跑哪一个', async () => {
+    const { headerHtml } = await loaded;
+    const running = headerHtml(
+      {
+        status: 'executing',
+        paused: false,
+        contract: { intent: 'x' },
+        usage: {},
+        workItems: [{ id: 'W-1', title: '读工单', status: 'dispatched' }],
+      },
+      [{ at: '2026-03-04T05:00:00.000Z' }],
+      '2026-03-04T05:10:00.000Z',
+    );
+    assert.ok(running.includes('现在在干什么'));
+    assert.ok(running.includes('读工单'), '在跑哪个工作项要说出来');
+
+    const waiting = headerHtml(
+      { status: 'executing', paused: false, waitReason: 'project_busy', contract: { intent: 'x' }, usage: {} },
+      [],
+      '2026-03-04T05:10:00.000Z',
+    );
+    assert.ok(waiting.includes('等待中'), '状态 chip 是等待中');
+    assert.ok(waiting.includes('停机原因'), '等待时要能看到停机原因');
+    assert.ok(waiting.includes('同项目有别的 Mission 占着改动名额'), waiting);
   });
 
   test('页头：创建时间取的是 activity 第一条，不是最后一条', async () => {
@@ -471,7 +525,7 @@ describe('任务页的纯渲染函数', () => {
     assert.ok(html.includes('—'));
   });
 
-  test('事件详情：kind / 时间 / causationId / profile / 用量', async () => {
+  test('事件详情：标签说人话、用量拆项，裸键名不上屏', async () => {
     const { eventDetailHtml } = await loaded;
     const event = {
       kind: 'attempt.started',
@@ -481,26 +535,36 @@ describe('任务页的纯渲染函数', () => {
     };
     const attempt = {
       profile: { profileId: 'executor-default', endpoint: 'http://127.0.0.1:9/send' },
-      usage: { total: 4321 },
+      usage: { input: 100, output: 50, cacheRead: 850, cacheWrite: 0, total: 1000, cost: 1.2345 },
     };
     const html = eventDetailHtml(event, attempt);
-    assert.ok(html.includes('attempt.started') && html.includes('causationId'));
+    // 标签是人话；英文字段名只在「原始数据」tab 的 JSON 里保留。
+    assert.ok(html.includes('由哪一跳引发'), 'causationId 要翻成人话标签');
+    assert.equal(html.includes('causationId'), false, '裸写了 causationId');
+    assert.ok(html.includes('候选'), 'profileId 的标签是「候选」');
+    assert.equal(html.includes('profileId'), false, '裸写了 profileId');
+    assert.equal(html.includes('attempt.started'), false, '事件详情不该露机器 kind');
+    // 技术 ID 与精确数字都还在。
     assert.ok(html.includes('W-7.exec-1') && html.includes('W-7'));
     assert.ok(html.includes('executor-default') && html.includes('http://127.0.0.1:9/send'));
-    assert.ok(html.includes('4,321'));
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')));
+    // 用量拆成新增/缓存命中/占比/费用，不再是光秃秃一个 total。
+    assert.ok(html.includes('新增 150 tokens'), html);
+    assert.ok(html.includes('缓存命中 850') && html.includes('85%'), html);
+    assert.ok(html.includes('$1.2345'), html);
+    assert.ok(html.includes('缓存部分计费便宜得多'), '高缓存要有便宜说明');
   });
 
-  test('事件详情：没选中 / 没有 causationId 时是 —，不是空白也不是崩', async () => {
+  test('事件详情：没选中 / 没有上一跳 / 没有用量，都是解释句而不是孤零零的 —', async () => {
     const { eventDetailHtml } = await loaded;
     const none = eventDetailHtml(null, null);
-    assert.ok(none.includes('—'));
     assert.equal(/undefined|NaN/.test(none), false);
     assert.match(none, /没有选中事件/);
-    // mission.created 没有 causationId（JSON 会省掉这个键），profile/用量才是 —
+    assert.equal(none.includes('<dd class="mono">—</dd>'), false, '不该只留一个横杠');
     const created = eventDetailHtml({ kind: 'mission.created', at: '2026-03-04T05:06:07.000Z' }, null);
-    assert.ok(created.includes('mission.created'));
-    assert.equal(created.includes('executor-default'), false);
+    assert.ok(created.includes('没有上一跳引发它'), created);
+    assert.ok(created.includes('没有选中尝试，读不到候选'), created);
+    assert.ok(created.includes('这一跳没有上报用量'), created);
   });
 
   test('面包屑三段，前两段是链接', async () => {
@@ -679,9 +743,15 @@ describe('真 API 字段喂真渲染函数', () => {
     const lines = live.chunks
       .filter((c: { kind: string }) => c.kind !== 'usage')
       .map((c: { at: string; kind: string; text: string }) => ({ ...c }));
+    const ctx = {
+      intent: view.contract && view.contract.intent,
+      plan: view.plan,
+      workItems: view.workItems,
+      result: view.result,
+    };
     const rendered = [
       headerHtml(view, activity, nowIso),
-      eventStreamHtml(activity, 0),
+      eventStreamHtml(activity, 0, ctx),
       eventDetailHtml(started, attempt),
       tabBarHtml('实时输出'),
       tabPanelHtml('实时输出', { live: { lines, usage: { total: 14 } } }),
@@ -706,6 +776,19 @@ describe('真 API 字段喂真渲染函数', () => {
         `字段名两边不一致时这里不报错，只是屏幕上多了这几个字：${html}`,
       );
     }
+    // 事件流（原始数据 tab 除外）不得出现任何机器事件名。
+    const stream = rendered[1];
+    for (const kind of [
+      'mission.created', 'attempt.started', 'plan.updated', 'work_item.created',
+      'work_item.dispatched', 'work_item.retired', 'evidence.submitted',
+      'execution_result.submitted', 'review.recorded', 'escalation.raised',
+      'mission_result.submitted', 'attempt.ended', 'contract.revised',
+      'final_review.merged', 'mission.waiting', 'mission.resumed',
+    ]) {
+      assert.equal(stream.includes(kind), false, `事件流漏出了机器 kind「${kind}」：\n${stream}`);
+    }
+    // 原始数据 tab 里必须还看得到机器 kind（排障靠它）。
+    assert.ok(rendered[8].includes('attempt.started'), '原始数据 tab 要保留机器 kind');
     // usage chunk 不进终端：它没有 text，拼进去就是一行 undefined。
     const liveHtml = rendered[4];
     assert.equal(liveHtml.includes('undefined'), false);

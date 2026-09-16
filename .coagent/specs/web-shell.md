@@ -9,66 +9,47 @@
 - `index.html` — 外壳 DOM + 布局样式
 - `tokens.css` — 色彩令牌
 - `app.js` — hash 路由、导航高亮、面包屑骨架、主题
-- `projects.js` — 项目页数据与渲染
-- `task.js` — 任务详情页数据与渲染
+- `projects.js` — 项目页
+- `task.js` — 任务详情页
+- `pool.js` — 资源池页
+- `narrate.js` — **唯一可测的人话翻译表**（事件 / 尝试 ID / Token / 内部词 / 阶段与状态 / nowDoing）。三页共用，不拼 HTML、不 esc、不碰 DOM。
 
-后续页面（资源池）复用同一套外壳与令牌，不要另起目录。
+## 叙事层（W4）
+
+界面给人看进度叙述，不给开发者看状态转储。**不改 API、不改内核**。
+
+- 事件流每条三部分：角色流转徽章、动作短语、一行细节，出自 `narrateEvent`。机器 kind（`mission.created` 等）不得出现在事件流第一眼，只留在「原始数据」 tab。未知 kind：标明「未翻译」并显示 kind 本身，不要空白。
+- 平台真实 kind `escalated` 与契约表里的 `escalation.raised` 映同一套文案。
+- `formatAttemptId`：`W-465.exec-1` → 「工作项 W-465 · 执行者第 1 次尝试」；`coord-2` → 「协调者第 2 次尝试」。原始 ID 放括号或 title。
+- `usageLine`：拆「新增」（total-cacheRead）与「缓存命中」，给占比与费用；占比≥50% 加「缓存部分计费便宜得多」。项目表、任务页头、资源池用量卡口径一致。资源池走 `GET /api/usage` 的 `total`。
+- 内部词标签：attempt→尝试，causationId→由哪一跳引发，profileId→候选，ExecutionProfile→运行时，WorkItem→工作项；`revisionLabel` → 「规划 rN」「契约 rN」。技术 ID 仍可见。
+- 阶段 chip 用内核 MissionStatus 中文（调查中/规划中/执行中/等你检视/已完成/已中止）。状态 chip 是第二轴：已暂停/等待中/进行中/已结束/已停止—**不得与阶段显示同一个词**。等待时必须带停机原因。
+- 任务页头「现在在干什么」走 `nowDoing(view)`。
+- 空态必须解释为什么空，不许只显示 —。
+- 视觉：导航项内联 SVG（`fill=currentColor`）；表格行左侧色条走 `--status-*`（`.row-queued` 等）。不新增写死颜色。
+
+文案不要散在各渲染 if 里—散写会漏 kind，漏掉的那条在界面上就是一行机器名。
 
 ## GET /
 
-`serveStatic` 先于内置观测面。有 `src/web/index.html` 就发它；没有则回退 `src/api/web.ts` 的 `WEB_PAGE`。**不要删 WEB_PAGE**—`src/web/` 缺失时平台还得能自证活着。
+`serveStatic` 先于内置观测面。有 `src/web/index.html` 就发它；没有则回退 `src/api/web.ts` 的 `WEB_PAGE`。**不要删 WEB_PAGE**。
 
 ## 令牌
 
-`tokens.css` 的 `:root` / `:root[data-theme="dark"]` 从 `WEB_PAGE` 逐字复制，oklch 值不许就地调。改颜色走 v4 `index.css` 再两处一起搬。chip 底/边公式与观测面 `.badge` 相同：`color-mix(in oklch, var(--status-*) 14%/35%, transparent)`。
-
-侧栏令牌 `--sidebar` / `--sidebar-foreground` / `--sidebar-accent` **另起** `:root` 块写在复制块之后—塞进现有块会打破与 `WEB_PAGE` 的逐字 includes。侧栏在明暗主题下都是深色，不能复用 `--card`（亮色下是白的）。取值从已有暗色 oklch 借，不发明新色相。`.nav` 引用这三个令牌；正文区域（`.main` / `.topbar` / `.view` / `.card` / `.page`）一个 sidebar 令牌都不用。
+`tokens.css` 的 `:root` / `:root[data-theme="dark"]` 从 `WEB_PAGE` 逐字复制。chip 底/边公式与观测面 `.badge` 相同。侧栏 `--sidebar*` 另起 `:root` 块。
 
 ## 路由
 
-`location.hash`，不是 History API（静态层给不出 `/missions/<id>` 的 index.html）。
+`location.hash`：`#/projects` · `#/projects/<projectId>` · `#/missions/<missionId>` · `#/pool`。空/未知 → `#/projects`。
 
-- `#/projects` · `#/projects/<projectId>` — 项目页
-- `#/missions/<missionId>` — 任务详情；`#/missions` 无 id 当未知
-- `#/resources` — 占位（资源池页后续 Mission）
-- 空 / 未知 → `#/projects`
+## 项目页
 
-任务页时导航「项目」保持高亮。点任务表行只写 `location.hash`。
+左栏 `GET /api/projects`；任务表 `GET /api/missions` 按 projectId 过滤，行带 `data-mission-id`。仓库/分支取任一 Mission 的 `workspaceRef`，没有就解释「还没读到」。列表 API 无时间戳，写「列表接口不提供时间戳」而不是 —。
 
-## 项目页数据（只读 /api/*）
+## 任务详情页
 
-| 界面 | 来源 |
-|---|---|
-| 左栏列表 | `GET /api/projects`（`projectId` / `mutating` / `missions`） |
-| 任务表 | `GET /api/missions` 客户端按 `projectId` 过滤；行带 `data-mission-id`，点进 `#/missions/<id>` |
-| 代码仓库 / 目标分支 | 该项目任一 Mission 的 `GET /api/missions/:id` → `workspaceRef.projectRoot` / `branch`；没有就 —。**不要往内核加字段** |
-| 变更中槽位 | `mutating` 有值 1/1，否则 0/1 |
-| 最新更新时间 | 列表 API 无时间戳，显示 — |
+标题=`contract.intent`；两根 chip + nowDoing + Token 拆项。左栏事件流 `GET .../activity`。实时输出 `GET .../live?cursor=N`，游标按 missionId 记。`shouldFollow` 在**追加之前**量（阈值 32px）。写操作不在 Web 上做。
 
-阶段 chip 映射内核 `MissionStatus`（investigating/planning/executing/awaiting_review/completed/blocked），中文：调查中/规划中/执行中/等你检视/已完成/已中止。**不要用设计稿的 investigation / execution / technical_review。** `stageChip` 只在 `projects.js` 里有一份。
+## 资源池页
 
-状态是第二轴（paused / waitReason / 终态），不要和阶段揉成一个 chip。
-
-## 任务详情页（只读）
-
-面包屑：`项目` → `#/projects` / `<projectId>` → `#/projects/<id>` / `任务 <missionId>`（当前页，不是链接）。projectId 从 MissionView 来，外壳不读数据。
-
-| 界面 | 来源 |
-|---|---|
-| 标题 | `GET /api/missions/:id` → `contract.intent` |
-| 阶段 / 状态 chip | 同项目页（`stageChip` / `stateChip`） |
-| 总消耗 tokens | `view.usage.total` |
-| 创建时间 | `GET .../activity` 按序第一条的 `at`。MissionView **没有 createdAt**，不要往内核加 |
-| 运行时长 | 终态用 `updatedAt`（或末条 at）- 创建时间；进行中用传入的 nowIso。纯函数里不许 `new Date()` |
-| 停止任务 | disabled 占位，`title="API 尚无鉴权，写操作暂不开放"`。**不发 POST** |
-| 左栏事件流 | `GET /api/missions/:id/activity`（`at` / `kind` / `workItemId` / `attemptId`） |
-| 事件详情 | 选中事件的 kind / at / causationId；有 causationId 才 `GET .../attempts/<causationId>` 取 profile 与 usage。mission.created 没有 causationId（JSON 省略该键） |
-| 实时输出 | `GET .../live?cursor=N`，不要每次从头拉。无数据显示说明句。游标按 missionId 记住，离开再回来不重置 |
-| 文件变更 | `GET .../diff` → `stat` + `files[]`，不做逐行着色 |
-| 验证结果 | 选中 attempt 的 `evidence[]` |
-| 相关消息 | `view.escalationLog` |
-| 原始数据 | 选中事件 JSON，等宽、转义 |
-
-自动滚动：`shouldFollow({autoScroll, scrollTop, clientHeight, scrollHeight})` 在**追加之前**量（阈值 32px）。勾选且贴底才跟；人手动上滚看历史时不许拽回底部。
-
-写操作（放行/打回/取消）不在 Web 上做—规则只该有一份实现（`src/l3.ts`）。
+表头「候选名称 / 接入点 / 适配层 / 运行时」。只 POST 加一条，不发 DELETE/PATCH/PUT。
