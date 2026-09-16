@@ -78,13 +78,15 @@ async function main() {
   console.log(`worktree: ${cwd}`);
   console.log(`适配器  : ${adapter}\n`);
 
-  // 20 分钟硬超时：卡住的 agent 要被 kill 掉，而不是拖着整条 Mission。
+  // 静默超时：不再产出任何东西才判卡住，然后连同子孙进程一起杀。
   const runtime = new SpawnRuntime({
     kind: 'pi',
     command: 'npx',
     args: ['tsx', adapter],
     cwd: resolve(adapter, '../..'),
-    timeoutMs: 20 * 60 * 1000,
+    // **静默** 5 分钟才算卡住，不是总共只能跑 5 分钟。
+    // 实测一次正常的 Web 端工作连续产出了 45 分钟——按总时长砍就砍错了人。
+    timeoutMs: 5 * 60 * 1000,
     stream: true,
   });
 

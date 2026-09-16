@@ -145,55 +145,41 @@ describe('静态资源：接进 HTTP 面之后', () => {
   });
 });
 
-describe('worktree 里要能跑得起来', () => {
-  test('新 worktree 带上 node_modules —— 否则执行者连验证命令都跑不了', async () => {
-    // 实测踩到的：git worktree 只带受版本控制的文件，node_modules 被
-    // .gitignore 挡在外面。执行者一跑 `node --test` 就是
-    // `Cannot find package 'pg'`，而它完全不知道为什么——
-    // 工单里写好的验证命令根本起不来。
-    const root = mkdtempSync(join(tmpdir(), 'coagent-wt-nm-'));
-    dirs.push(root);
+describe('worktree 里的依赖怎么来的', () => {
+  test('worktree 落在项目内部，Node 沿父目录就找得到依赖 —— 不需要任何链接', async () => {
+    // 这一条的由来是一次**我自己造成的破坏**：先前给 worktree 建了
+    // node_modules 的 junction，结果 `git worktree remove --force`
+    // 顺着链接把项目根真实的依赖树删了。
+    //
+    // 修法不是"删之前先摘链接"，是根本不建——worktree 默认就在项目内部，
+    // Node 的模块解析本来就会向上找到项目根的 node_modules。
     const repo = mkdtempSync(join(tmpdir(), 'coagent-repo-nm-'));
     dirs.push(repo);
-
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
     git('init', '-q');
     git('config', 'user.name', 'test');
     git('config', 'user.email', 't@local');
-    writeFileSync(join(repo, 'a.txt'), 'x\n');
-    writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
-    // 假装装过依赖。
+    const lines = (...items: string[]) => `${items.join('\n')}\n`;
+    writeFileSync(join(repo, '.gitignore'), lines('node_modules/', '.coagent-worktrees/'));
+    writeFileSync(join(repo, 'a.txt'), lines('x'));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
     mkdirSync(join(repo, 'node_modules', 'fake-dep'), { recursive: true });
-    writeFileSync(join(repo, 'node_modules', 'fake-dep', 'index.js'), 'export default 1;\n');
-    git('add', '-A');
-    git('commit', '-q', '-m', 'init');
+    writeFileSync(join(repo, 'node_modules', 'fake-dep', 'index.js'), lines('export default 1;'));
 
-    const workspace = new GitWorktreeManager(root);
+    // worktree 根放在项目内部——这是默认行为。
+    const workspace = new GitWorktreeManager(join(repo, '.coagent-worktrees'));
     const prepared = await workspace.prepare('M-nm', repo);
-    assert.ok(
-      existsSync(join(prepared.cwd, 'node_modules', 'fake-dep', 'index.js')),
-      'worktree 里必须够得到依赖',
-    );
+
+    // worktree 里**没有** node_modules 目录，但从它往上走能找到。
+    assert.equal(existsSync(join(prepared.cwd, 'node_modules')), false, '不该建任何链接');
+    assert.ok(existsSync(join(repo, 'node_modules', 'fake-dep')), '项目根的依赖要原封不动');
+
+    // 回收之后，项目根的依赖必须还在。**这是那次破坏的直接判据。**
     await workspace.release('M-nm', repo);
-  });
-
-  test('项目根本没有 node_modules 时不报错 —— 纯脚本仓库不需要它', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'coagent-wt-nonm-'));
-    dirs.push(root);
-    const repo = mkdtempSync(join(tmpdir(), 'coagent-repo-nonm-'));
-    dirs.push(repo);
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
-    git('init', '-q');
-    git('config', 'user.name', 'test');
-    git('config', 'user.email', 't@local');
-    writeFileSync(join(repo, 'a.txt'), 'x\n');
-    git('add', '-A');
-    git('commit', '-q', '-m', 'init');
-
-    const workspace = new GitWorktreeManager(root);
-    const prepared = await workspace.prepare('M-nonm', repo);
-    assert.ok(existsSync(prepared.cwd));
-    assert.equal(existsSync(join(prepared.cwd, 'node_modules')), false);
-    await workspace.release('M-nonm', repo);
+    assert.ok(
+      existsSync(join(repo, 'node_modules', 'fake-dep', 'index.js')),
+      '回收 worktree 不许碰到项目根的依赖',
+    );
   });
 });

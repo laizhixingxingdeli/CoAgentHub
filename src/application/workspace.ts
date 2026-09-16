@@ -8,10 +8,23 @@
  *
  * Attempt 开始时记 HEAD，上游失败换候选前回到那一点（S06.3）：下一个候选
  * 应该从干净的起点开始，而不是接手半份改到一半的代码。
+ *
+ * ## 依赖怎么来的
+ *
+ * worktree 默认落在 `<项目根>/.coagent-worktrees/<mission>/`，**在项目内部**。
+ * 于是 Node 沿父目录查找时自然就找到了项目根的 node_modules，不需要任何链接。
+ *
+ * 一度在这里给 worktree 建过 node_modules 的 junction，结果
+ * `git worktree remove --force` 顺着链接把**项目根真实的依赖树删了**。
+ * 教训不是"删之前先摘链接"，是**一开始就不该建**——把 worktree 放在项目内
+ * 已经解决了问题，那个链接纯属多余，只是多带了一个破坏性的坑。
+ *
+ * 把 worktree 放到项目外面时，依赖得自己装。那是使用者的选择，不是平台该
+ * 偷偷用文件系统链接替他决定的事。
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, symlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -82,7 +95,6 @@ export class GitWorktreeManager implements WorkspaceManager {
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
     await run('git', ['branch', '-D', branch], { cwd: repo }).catch(() => undefined);
     await run('git', ['worktree', 'add', '-b', branch, cwd, baseRevision], { cwd: repo });
-    linkDependencies(repo, cwd);
     return { cwd, branch, baseRevision };
   }
 
@@ -247,32 +259,3 @@ export class InPlaceWorkspaceManager implements WorkspaceManager {
   }
 }
 
-/**
- * 把项目根的 `node_modules` 接到新 worktree 里。
- *
- * 实测踩到的：git worktree 只带受版本控制的文件，`node_modules` 被 .gitignore
- * 挡在外面。于是执行者一跑 `node --test` 就是
- * `Cannot find package 'pg'`——**而它完全不知道为什么**，工单里说好的
- * 验证命令直接跑不起来。
- *
- * 用链接不用 `npm install`：依赖是派生产物，同一仓库的多个 worktree 本来
- * 就该共用一份。每开一个 Mission 装一遍既慢又可能装出不同的版本，
- * 那样"在我的 worktree 里是绿的"就不可复现了。
- *
- * 装不上不致命：没有 node_modules 的项目（比如纯脚本仓库）本来就不需要它。
- * 失败时静默跳过，让执行者照常跑——它会得到一个真实的报错，
- * 而不是被平台提前判死。
- */
-function linkDependencies(repo: string, worktree: string): void {
-  const source = join(repo, 'node_modules');
-  const target = join(worktree, 'node_modules');
-  if (!existsSync(source) || existsSync(target)) return;
-  try {
-    // Windows 上非管理员建不了目录符号链接，但 junction 可以——
-    // 所以这里显式要 junction，不要让 Node 去猜。
-    symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
-  } catch {
-    // 链接不上就算了。执行者会拿到一个真实的缺包报错，
-    // 那比平台在这里抛一个"准备工作区失败"有用得多。
-  }
-}

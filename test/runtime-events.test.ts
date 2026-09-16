@@ -169,3 +169,81 @@ describe('S11.4 事件映射：跨进程之后还得在', () => {
     );
   });
 });
+
+describe('静默超时：按"多久没动静"判，不按总时长', () => {
+  /** 一个会持续产出、但总时长远超超时值的子进程。 */
+  function chatty(totalMs: number, everyMs: number): string {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-rt-'));
+    dirs.push(dir);
+    const file = join(dir, 'chatty.mjs');
+    writeFileSync(
+      file,
+      [
+        'let raw = "";',
+        'for await (const c of process.stdin) raw += c;',
+        `const end = Date.now() + ${totalMs};`,
+        // 换行用 fromCharCode 拼，别写字面量转义：这段是**生成给子进程的源码**，
+        // 转义被上一层吃掉一次就变成真换行，子脚本直接语法错误——
+        // 症状是"子进程 70 毫秒就没了"，看上去像超时逻辑坏了。
+        'const NL = String.fromCharCode(10);',
+        'while (Date.now() < end) {',
+        '  process.stdout.write("还在干活" + NL);',
+        `  await new Promise((r) => setTimeout(r, ${everyMs}));`,
+        '}',
+        'process.stdout.write("__COAGENT_OUTCOME__ " + JSON.stringify({ endedBy: "structured_submit" }) + NL);',
+      ].join('\n'),
+      'utf8',
+    );
+    return file;
+  }
+
+  /** 收了 spec 就装死：不输出、不退出。 */
+  function silent(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-rt-'));
+    dirs.push(dir);
+    const file = join(dir, 'silent.mjs');
+    writeFileSync(
+      file,
+      ['let raw = "";', 'for await (const c of process.stdin) raw += c;', 'setInterval(() => {}, 1e9);'].join('\n'),
+      'utf8',
+    );
+    return file;
+  }
+
+  async function runWith(entry: string, timeoutMs: number) {
+    const runtime = new SpawnRuntime({
+      kind: 'fake',
+      command: 'node',
+      args: [entry],
+      cwd: process.cwd(),
+      timeoutMs,
+    });
+    const run = await runtime.start({
+      role: 'executor',
+      attemptId: 'A1',
+      missionId: 'M1',
+      workItemId: 'W-1',
+      cwd: process.cwd(),
+      profile: { endpoint: 'local', profileId: 'p' },
+      instruction: 'go',
+      tools: [],
+      endpoint: { baseUrl: 'http://127.0.0.1:1', token: 't' },
+    });
+    return run.wait();
+  }
+
+  test('一直有输出就不杀 —— 总时长超过超时值也不算卡住', async () => {
+    // 这一条是实跑换来的：用平台给自己写 Web 端时，执行者连续产出了 45 分钟，
+    // 全程在读代码、跑测试、改自己写错的断言。那是正常工作。
+    // 旧的"总时长上限"会把它砍在半路，而且砍得毫无道理。
+    const outcome = await runWith(chatty(900, 60), 300);
+    assert.equal(outcome.endedBy, 'structured_submit', '持续产出不该被判超时');
+  });
+
+  test('不再产出就杀，而且报成上游失败（可重试）', async () => {
+    const outcome = await runWith(silent(), 400);
+    assert.equal(outcome.endedBy, 'upstream_failure');
+    // 归类很重要：这不是"跑完了没提交"，换个候选重试是合理的。
+    assert.match(outcome.failureMessage ?? '', /静默|卡住/);
+  });
+});

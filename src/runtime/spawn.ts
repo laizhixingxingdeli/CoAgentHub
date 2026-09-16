@@ -50,6 +50,42 @@ function parseEvent(json: string): RuntimeEvent | undefined {
   }
 }
 
+/**
+ * 连同子孙进程一起杀。
+ *
+ * `child.kill()` 在这里**杀不干净**：Windows 上我们开了 `shell: true`，
+ * spawn 起的是 `cmd.exe`，底下才是 `npx` → `node`。杀掉壳，孙子进程
+ * 照样跑——实测一个本该 20 分钟超时的 attempt 跑了 45 分钟还在输出。
+ * 于是"平台永远可以 kill 掉它"这句话是假的。
+ *
+ * Windows 用 `taskkill /T` 按进程树杀；POSIX 用负 pid 杀整个进程组。
+ */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    // **不要在这里顺手 child.kill()。** taskkill /T 靠父子关系枚举整棵树；
+    // 先把壳杀了它就找不到孙子，于是孙子活下来握着 stdout 管道——
+    // 而 `close` 要等所有 stdio 关闭才触发，结果永远不 settle。
+    // 实测就是这么挂住的：taskkill 单独跑完全正常，加上那句"兜底"反而失效。
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    killer.on('error', () => child.kill('SIGKILL'));
+    // 树杀失败（进程已经没了、或权限不够）才退回单杀。
+    killer.on('exit', (code) => {
+      if (code !== 0) child.kill('SIGKILL');
+    });
+    return;
+  }
+
+  try {
+    // 子进程是进程组长（spawn 时 detached），负 pid 打的是整组。
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // 组没了就单杀。
+    child.kill('SIGKILL');
+  }
+}
+
 /** 给人看的一行。协议行本身不该直接糊到终端上。 */
 function render(event: RuntimeEvent): string {
   if (event.kind === 'tool.started') return `\n  · ${event.name}\n`;
@@ -67,7 +103,12 @@ export interface SpawnRuntimeOptions {
   readonly args: readonly string[];
   /** 子进程工作目录（不是 Mission worktree —— 那个走 spec.cwd）。 */
   readonly cwd?: string;
-  /** 硬超时；到点 kill。 */
+  /**
+   * **静默**超时：多久没有任何输出就判为卡住，连同子孙进程一起杀。
+   *
+   * 不是总时长上限。实测长任务连续产出 45 分钟是正常的——按总时长砍，
+   * 砍掉的正是这种活；而真卡住的特征是不再产出任何东西。
+   */
   readonly timeoutMs?: number;
   /** 把子进程输出转发到平台 stdout。 */
   readonly stream?: boolean;
@@ -105,16 +146,23 @@ export class SpawnRuntime implements AgentRuntime {
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
+      // POSIX 上让子进程自成进程组，这样 kill(-pid) 才收得掉整棵树。
+      // 不加的话负 pid 打不到任何东西，超时照样杀不干净。
+      detached: process.platform !== 'win32',
     });
 
     child.stdin?.end(JSON.stringify(spec));
 
+    /** 收到输出就续一次静默超时。真正的定义在下面 arm() 里。 */
+    let bumpIdle: () => void = () => {};
     let outcomeLine: string | undefined;
     let stderr = '';
     let buffer = '';
 
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
+      // 有动静就说明没卡住。
+      bumpIdle();
       buffer += text;
       let index = buffer.indexOf('\n');
       while (index >= 0) {
@@ -143,9 +191,29 @@ export class SpawnRuntime implements AgentRuntime {
       stderr += chunk.toString('utf8');
     });
 
-    const timer = options.timeoutMs
-      ? setTimeout(() => child.kill('SIGKILL'), options.timeoutMs)
-      : undefined;
+    /**
+     * 静默超时：**多久没动静**就判死，不是总共跑了多久。
+     *
+     * 原先是总时长上限（20 分钟）。实测第一次用平台给自己写 Web 端时，
+     * 执行者连续产出了 45 分钟——读代码、写文件、跑测试、发现自己的断言
+     * 写错了再改回来。那是正常工作，不是卡住。**按总时长砍，砍掉的正是
+     * 这种活。** 而真正卡住的 agent 的特征是"不再产出任何东西"。
+     *
+     * 每来一行输出就续一次。判据换成这个之后，长任务不受影响，
+     * 真死循环仍然在几分钟内被收掉。
+     */
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const arm = () => {
+      if (!options.timeoutMs) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        killTree(child);
+      }, options.timeoutMs);
+    };
+    arm();
+    bumpIdle = arm;
 
     const pending = new Promise<RuntimeOutcome>((resolve) => {
       const settle = (fallback: RuntimeOutcome) => {
@@ -193,8 +261,8 @@ export class SpawnRuntime implements AgentRuntime {
           endedBy: 'upstream_failure',
           usage: UNKNOWN_USAGE,
           failureMessage:
-            signal === 'SIGKILL'
-              ? `子进程超时被杀（${options.timeoutMs} ms）`
+            signal === 'SIGKILL' || timedOut
+              ? `子进程静默超过 ${options.timeoutMs} ms，判为卡住并连同子孙进程一起杀掉`
               : `子进程退出 code=${code} 且没有回传结果。stderr: ${stderr.slice(-500) || '(空)'}`,
         });
       });
@@ -210,7 +278,8 @@ export class SpawnRuntime implements AgentRuntime {
         };
       },
       async abort() {
-        child.kill('SIGKILL');
+        // 同样要连子孙一起杀，理由见 killTree。
+        killTree(child);
       },
       wait: () => pending,
     };
