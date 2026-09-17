@@ -24,8 +24,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -111,10 +111,52 @@ export class GitWorktreeManager implements WorkspaceManager {
     return this.#explicitRoot ?? join(resolve(projectRoot), '.coagent-worktrees');
   }
 
+  /**
+   * 让 git 别把平台自己的 worktree 目录当成项目的改动。
+   *
+   * worktree 落在项目内部之后（见 #rootFor），`.coagent-worktrees/` 就成了一个
+   * 未跟踪目录，于是项目**永远是脏的**——而落地那道闸要求目标工作区干净。
+   * 结果是平台在别人仓库里创建了一个目录，然后因为这个目录拒绝落地。实测
+   * 第一次拿真实新项目试流程就撞上了。
+   *
+   * 写 `.git/info/exclude` 而不是项目的 `.gitignore`：**这是别人的仓库。**
+   * info/exclude 是本地的、不进版本库、不会出现在他的 diff 里——正是为这种
+   * "我这台机器上的工具产生的东西"准备的。往 .gitignore 里塞一行，就成了
+   * 平台擅自改了一个会被提交的文件。
+   *
+   * 用 --git-common-dir 而不是拼 `.git/`：projectRoot 本身也可能是一个
+   * worktree，那时 `.git` 是文件不是目录。
+   */
+  async #excludeSelf(repo: string, root: string): Promise<void> {
+    // 落点在项目外面时不用管：那本来就不会弄脏项目。
+    const inside = resolve(root).startsWith(resolve(repo));
+    if (!inside) return;
+    try {
+      const common = (
+        await run('git', ['rev-parse', '--git-common-dir'], { cwd: repo })
+      ).stdout.trim();
+      const excludeFile = join(resolve(repo, common), 'info', 'exclude');
+      const rel = resolve(root).slice(resolve(repo).length + 1).replace(/\\/g, '/');
+      const line = `/${rel}/`;
+      const current = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
+      if (current.split(/\r?\n/).some((l) => l.trim() === line)) return;
+      mkdirSync(dirname(excludeFile), { recursive: true });
+      appendFileSync(
+        excludeFile,
+        `${current.endsWith('\n') || current === '' ? '' : '\n'}# CoAgentHub 的 Mission 工作区（本地忽略，不进版本库）\n${line}\n`,
+      );
+    } catch {
+      // 忽略失败不致命：最坏的结果是项目看起来是脏的，人能自己处理。
+      // 为这个让整条 Mission 起不来才是真的坏。
+    }
+  }
+
   async prepare(missionId: string, projectRoot: string): Promise<PreparedWorkspace> {
     const repo = resolve(projectRoot);
     const branch = `mission/${missionId}`;
-    const cwd = join(this.#rootFor(projectRoot), missionId);
+    const root = this.#rootFor(projectRoot);
+    const cwd = join(root, missionId);
+    await this.#excludeSelf(repo, root);
 
     if (existsSync(cwd)) {
       // 续跑同一个 Mission：沿用已有 worktree，不要重开一份。

@@ -22,7 +22,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -66,6 +66,31 @@ describe('worktree 跟着项目走，不跟着进程 cwd', () => {
     assert.ok(
       !resolve(prepared.cwd).startsWith(resolve(process.cwd(), '.coagent-worktrees')),
       '绝不能落在进程 cwd 下面',
+    );
+
+    await manager.release('M1', project);
+  });
+
+  test('自己产生的目录不许把项目弄脏 —— 否则落地闸会被自己挡住', async () => {
+    // 这一条是上一条修复**制造出来的**问题，第一次拿真实新项目试流程就撞上了：
+    // worktree 落在项目内部之后，`.coagent-worktrees/` 成了未跟踪目录，项目
+    // 永远是脏的，而落地闸要求目标工作区干净 —— 平台在别人仓库里创建了一个
+    // 目录，然后因为这个目录拒绝落地。
+    const project = tempRepo('coagent-proj-');
+    const manager = new GitWorktreeManager();
+
+    await manager.prepare('M1', project);
+
+    const dirty = git(project, 'status', '--porcelain');
+    assert.equal(dirty, '', `项目必须仍然是干净的，实际还有：\n${dirty}`);
+
+    // 必须写在 .git/info/exclude，**不是**项目的 .gitignore：那是别人的文件，
+    // 会进版本库、会出现在他的 diff 里。
+    const tracked = git(project, 'status', '--porcelain', '--ignored=no');
+    assert.equal(tracked, '');
+    assert.ok(
+      !existsSync(join(project, '.gitignore')),
+      '不许擅自给别人的仓库加 .gitignore',
     );
 
     await manager.release('M1', project);
