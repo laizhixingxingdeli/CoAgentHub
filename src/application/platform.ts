@@ -35,7 +35,12 @@ import type { DeliveryRepository } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
-import { applyMemoryDelta, readProjectMemory, writeVibe } from './project-memory.ts';
+import {
+  applyMemoryDelta,
+  plannedMemoryFiles,
+  readProjectMemory,
+  writeVibe,
+} from './project-memory.ts';
 
 /** 平台规则被违反（区别于领域流转错误）。 */
 export class PlatformRuleError extends Error {
@@ -658,6 +663,16 @@ export class Platform {
     status: string;
     /** 架构红线。两个角色都要——它是项目层面不可协商的东西。 */
     projectRules?: string;
+    /**
+     * 这台机器上会咬人的地方。**平台知道自己跑在什么系统上，agent 不知道。**
+     *
+     * 实测 P1：协调者写探针用了 `cat > /tmp/probe.mjs`，没成，接着 `pwd && ls`
+     * 自己诊断、改用工作区相对路径——处理得很好，但那一个来回是白花的。
+     * Windows 上 Git Bash 的 `/tmp` 和 Node 的 `/tmp` 不是同一个目录。
+     *
+     * 只说**会静默出错**的那几条。环境里的常识不用讲，讲多了就没人读了。
+     */
+    environmentNotes?: readonly string[];
     contract?: Readonly<MissionContract>;
     contractRevision?: number;
     plan?: Readonly<PlanBody>;
@@ -689,6 +704,7 @@ export class Platform {
       missionId: mission.id,
       status: mission.status,
       projectRules,
+      environmentNotes: environmentNotes(),
     };
 
     if (attempt.kind === 'executor') {
@@ -1001,12 +1017,25 @@ export class Platform {
     return { question: answered.question, answer };
   }
 
-  /** 给 L3 看的改动摘要。没有工作区管理或没动过代码时返回空。 */
-  async getMissionDiff(missionId: string): Promise<{ stat: string; files: string[] }> {
+  /**
+   * 给 L3 看的改动摘要。没有工作区管理或没动过代码时返回空。
+   *
+   * `pendingMemory` 是**这份 diff 里看不到、但会跟它同一次提交落地**的文件。
+   * 记忆文件是 merge 那一刻才写进 worktree 的，检视时还不存在；不把它们
+   * 单独报出来，L3 就是在一份不完整的清单上签字。实测 P1 因此落了三个
+   * 没人看过的文件，其中 VIBE.md 连 memoryDelta 里都没有。
+   */
+  async getMissionDiff(
+    missionId: string,
+  ): Promise<{ stat: string; files: string[]; pendingMemory: string[] }> {
     const { mission } = await this.#locate(missionId);
     const ref = mission.workspaceRef;
-    if (!this.#workspace || !ref) return { stat: '（没有工作区信息）', files: [] };
-    return this.#workspace.diff(missionId, ref.baseRevision, ref.projectRoot);
+    const pendingMemory = plannedMemoryFiles(mission.result?.memoryDelta ?? []);
+    if (!this.#workspace || !ref) {
+      return { stat: '（没有工作区信息）', files: [], pendingMemory };
+    }
+    const diff = await this.#workspace.diff(missionId, ref.baseRevision, ref.projectRoot);
+    return { ...diff, pendingMemory };
   }
 
   /**
@@ -1446,6 +1475,26 @@ export interface WorkOrderView {
   missionIntent: string;
   guardrails: readonly string[];
   previousRequiredChanges: readonly string[];
+}
+
+/**
+ * 这台机器上会**静默**咬人的地方。
+ *
+ * 判准只有一条：**出错的时候没有声音**。会报错的东西 agent 自己撞一次就知道了，
+ * 写进简报只是噪音；而下面这些不报错、只是悄悄做了另一件事——那种要提前说。
+ *
+ * 按平台分：在 Linux 上讲 Windows 的坑同样是噪音。
+ */
+function environmentNotes(): string[] {
+  if (process.platform !== 'win32') return [];
+  return [
+    'Windows：bash 的 `/tmp` 和 Node 的 `/tmp` **不是同一个目录**（前者在 ' +
+      '%LOCALAPPDATA%\\Temp，后者是 C:\\tmp）。要落临时文件就用工作区里的相对路径，' +
+      '跨这两者传文件必须用绝对路径——弄错不会报错，只会读到一个旧文件或空文件。',
+    'Windows：Git Bash 里没有 `pgrep`。`if ! pgrep -f x` 这类判据**恒为真**，' +
+      '不会报"命令不存在"，只会让你以为进程已经没了。判进程死活用 tasklist，' +
+      '或者干脆改判产物（文件 mtime、库里的记录）。',
+  ];
 }
 
 /**

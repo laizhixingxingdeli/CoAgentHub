@@ -337,11 +337,27 @@ describe('一跳跑太久', () => {
     const { platform, orchestrator } = await harness(
       new ScriptedRuntime(PLAN_AND_DISPATCH),
       executor,
-      { attemptWallClockMs: 30 },
+      // **窗口必须远大于协调者那一跳的真实耗时。**
+      //
+      // 墙钟闸对每一跳都生效，协调者那一跳要走真实 HTTP（规划、建工作项、
+      // 派发）。窗口太小的话，整机满载时协调者自己先超时被掐，被掐的就不是
+      // 这里故意挂住的执行者了——断言全乱，而且报的错完全指不到真因。
+      //
+      // 这一条从 30ms 加到过 200ms，仍然闪红（全量跑红、单独跑 6 次全绿）。
+      // 加宽只是降低概率、消不掉，所以这次取的是**量级差**：协调者一跳通常
+      // 几十毫秒，2 秒给了两个数量级的余量。用例慢 2 秒，换它不再骗人。
+      { attemptWallClockMs: 2_000 },
     );
     await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
 
     const result = await orchestrator.runMission('M1', { projectRoot: process.cwd() });
+    // 先钉住"被掐的是谁"。不先断这一条的话，一旦窗口被协调者抢先撞上，
+    // 后面每条断言都会以一种指不到真因的方式失败。
+    assert.equal(
+      orchestrator.hops.at(-1)?.role,
+      'executor',
+      '被掐的该是那个故意挂住的执行者；这里出现 coordinator 说明墙钟窗口比协调者真实耗时还短——那是用例的竞态，不是实现的问题',
+    );
     assert.equal(result.kind, 'waiting');
     assert.equal((result as { reason: string }).reason, 'runaway_suspected');
 
@@ -405,10 +421,14 @@ describe('一跳跑太久', () => {
     const { platform, orchestrator } = await harness(
       new ScriptedRuntime(PLAN_AND_DISPATCH),
       executor,
-      // 200ms 而不是 40ms：测试文件是并行进程跑的，40ms 的窗口在整机满载时
-      // 会被调度抖动挤掉——实测全量跑闪红过一次，单独跑绿。时间敏感的判据
-      // 要留出比抖动大一个量级的余量，否则它迟早被当成"又是本地不准"忽略掉。
-      { attemptWallClockMs: 200 },
+      // **窗口必须远大于协调者那一跳的真实耗时。**
+      //
+      // 墙钟闸对每一跳都生效，协调者那一跳要走真实 HTTP（规划、建工作项、
+      // 派发）。窗口太小的话，整机满载时协调者自己先超时被掐，被掐的就不是
+      // 这里故意挂住的执行者了——断言全乱，而且报的错完全指不到真因。
+      //
+      // 这一条要等满**两个**窗口，所以取 800ms（总计约 1.6 秒）。
+      { attemptWallClockMs: 800 },
     );
     await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
 
@@ -418,8 +438,8 @@ describe('一跳跑太久', () => {
 
     // 最终还是会停——延长只给一次，不是无限期放行。
     assert.equal((result as { reason: string }).reason, 'runaway_suspected');
-    // 但必须**撑过第一次到点**。没有延长的话第 40 毫秒就被掐了。
-    assert.ok(elapsed >= 320, `该等满两个窗口（>=320ms），实际 ${elapsed}ms`);
+    // 但必须**撑过第一次到点**。没有延长的话第一个窗口就被掐了。
+    assert.ok(elapsed >= 1_400, `该等满两个窗口（>=1400ms），实际 ${elapsed}ms`);
     assert.match(
       (result as { detail: string }).detail,
       /中途交过证据/,

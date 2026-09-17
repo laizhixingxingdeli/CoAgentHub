@@ -98,6 +98,14 @@ async function main() {
         .map((l) => `  ${l}`)
         .join('\n'),
     );
+    // 上面那份 diff **不含**记忆文件：它们是 merge 那一刻才写进 worktree 的。
+    // 不在这里点破，L3 就会把这份清单当成"将要落地的全部"——实测 P1 因此
+    // 落了三个没人看过的文件。
+    if (diff.pendingMemory.length > 0) {
+      console.log(`\n  ⚠ 另有 ${diff.pendingMemory.length} 个文件会随本次落地一并写入项目：`);
+      for (const file of diff.pendingMemory) console.log(`      ${file}`);
+      console.log('      （正文见下面的「记忆」；VIBE.md 是由它们生成的索引）');
+    }
 
     if (view.result) {
       console.log(`\n【L2 交卷】${view.result.outcome}`);

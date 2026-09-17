@@ -135,6 +135,29 @@ export function initProjectMemory(projectRoot: string, projectName: string): str
 }
 
 /**
+ * 落地时**会写进项目的**那些文件。只算路径，不写盘。
+ *
+ * 给检视面用。记忆文件是在 merge 那一刻才写进 worktree 的，所以检视时
+ * `workspace.diff()` 里根本没有它们 —— L3 读作"将要落地的东西"的那一块，
+ * 系统性地少掉这几份，而且没有任何提示。实测 P1 就这么落了三个我没看过的文件。
+ *
+ * **VIBE.md 必须列进来。** 它不在 memoryDelta 里，是 writeVibe 无条件重写的，
+ * 于是「批准 N 条记忆、落地 N+1 个文件」，那多出来的一个谁都没看过 ——
+ * 而它写在别人仓库的根目录上。
+ */
+export function plannedMemoryFiles(deltas: readonly MemoryDelta[]): string[] {
+  if (deltas.length === 0) return [];
+  return [
+    ...deltas.map((delta) =>
+      delta.kind === 'adr'
+        ? `${DIR}/architecture/decisions/${delta.slug}.md`
+        : `${DIR}/specs/${delta.slug}.md`,
+    ),
+    'VIBE.md',
+  ];
+}
+
+/**
  * 把 L3 批准的 memory 改动写进指定目录（通常是 Mission 的 worktree）。
  *
  * 返回实际写了哪些文件。写在 worktree 里而不是目标分支上，是为了让它们
