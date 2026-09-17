@@ -354,7 +354,20 @@ export class Orchestrator {
       //
       // v1 不做语义 staleness 判定——只比版本号，不同就交回协调者让它自己
       // 重新核对。文档明确推迟了自动判断"这次改动受不受影响"。
-      if (view.workItems.some((item) => item.status === 'dispatched') && view.workspaceRef) {
+      //
+      // **重跑不适用这一条。** 重跑是把起点钉在源头那次的基线上，为的是两次
+      // 可比；它按定义就处在"基线不等于目标分支当前位置"的状态。拿这条闸去拦
+      // 它，等于用对的规则打错的场景：一钉基线就永远跑不起来。实测 P1-single
+      // 派发后当场被停。
+      //
+      // 安全性质不受影响：落地那道闸照常核对基线，重跑想合回去仍然会被拦——
+      // 而重跑本来也不该合，它是拿来读数的。
+      const isRerun = Boolean(view.origin?.rerunOf);
+      if (
+        !isRerun &&
+        view.workItems.some((item) => item.status === 'dispatched') &&
+        view.workspaceRef
+      ) {
         const targetNow = await this.#workspace
           .targetHead(options.projectRoot)
           .catch(() => undefined);

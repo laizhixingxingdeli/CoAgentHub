@@ -1470,6 +1470,12 @@ export interface MissionView {
   /** 未答复的升级。有就说明在等 L3，不该再叫协调者。 */
   openEscalations: EscalationBody[];
   escalationLog: EscalationBody[];
+  /**
+   * 这条 Mission 从哪来。调度器据此认出**重跑**（rerunOf 有值）——重跑的起点
+   * 是钉住的，按定义处在"基线 ≠ 目标分支当前位置"的状态，不该被派发前的
+   * 过期闸拦下。
+   */
+  origin: OriginChannel | undefined;
   coordinatorResumeRef: string | undefined;
   coordinatorAttemptIds: string[];
   finalReview: FinalReview | undefined;
@@ -1618,6 +1624,7 @@ function viewOf(mission: Mission): MissionView {
     escalations: mission.escalations.length,
     openEscalations: [...mission.openEscalations],
     escalationLog: [...mission.escalations],
+    origin: mission.origin,
     coordinatorResumeRef: mission.latestCoordinatorResumeRef(),
     coordinatorAttemptIds: mission.coordinatorAttempts.map((a) => a.id),
     finalReview: mission.finalReview,

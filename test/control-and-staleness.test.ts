@@ -294,6 +294,67 @@ describe('分叉基线过期（S05.3 / S14.7）', () => {
     assert.notEqual((second as { reason?: string }).reason, 'base_revision_stale');
   });
 
+  test('重跑不受过期闸约束 —— 它的起点本来就是钉在旧版本上的', async () => {
+    // 钉基线的重跑**按定义**处在"基线 ≠ 目标分支当前位置"的状态。拿过期闸去
+    // 拦它，等于用对的规则打错的场景：一钉基线就永远跑不起来。实测 P1-single
+    // 派发后当场被停 —— 而它正是为了做对照才钉的基线。
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const workspace = new GitWorktreeManager(worktrees);
+
+    const { platform, orchestrator } = await harness(workspace);
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    await orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 1 });
+
+    writeFileSync(join(repo, 'other.txt'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'x');
+    assert.equal(
+      ((await orchestrator.runMission('M1', { projectRoot: repo, maxRounds: 4 })) as {
+        reason: string;
+      }).reason,
+      'base_revision_stale',
+      '对照组：普通 Mission 在同样的状态下该被拦',
+    );
+
+    // 腾出改动名额 —— 不变量 C 规定一个 Project 同时只让一条 Mission 改代码。
+    await platform.cancelMission('M1', '为对照腾名额');
+
+    const again = await platform.rerunMission('M1');
+    // **直接把它推到「有已派发工作项」这个状态**：过期闸只在这时候才看。
+    // 走协调者脚本的话会先死在别处（脚本里的工作项 id 是写死的，重跑里对不上），
+    // 于是这条用例根本到不了闸门 —— 我第一版就是这么写的，A/B 一验两边全绿，
+    // 等于没断。
+    const attempt = await platform.startCoordinatorAttempt(again.missionId);
+    await platform.updatePlan(again.missionId, attempt.attemptId, PLAN);
+    const item = await platform.createWorkItem(again.missionId, attempt.attemptId, {
+      title: 'W',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems(again.missionId, attempt.attemptId, [item.workItemId]);
+    await platform.finishAttempt(again.missionId, attempt.attemptId, {
+      endedBy: 'structured_submit',
+    });
+
+    const rerun = await harness(workspace, { platform });
+    const outcome = await rerun.orchestrator.runMission(again.missionId, {
+      projectRoot: repo,
+      maxRounds: 2,
+    });
+    assert.notEqual(
+      (outcome as { reason?: string }).reason,
+      'base_revision_stale',
+      '重跑钉了基线还被过期闸拦，就等于钉不了基线',
+    );
+    // **必须真的往下走了。** 只断"不是过期"的话，它因为任何别的原因失败也会绿 ——
+    // 这正是第一版没抓到 bug 的原因。
+    assert.ok(
+      rerun.executor.instructions.length > 0,
+      '闸没拦住之后，执行者该被叫起来了；一次都没叫说明它停在别的地方',
+    );
+  });
+
   test('换一个进程重跑仍然会被挡 —— 上面那条只在同一个实例里成立', async () => {
     // 这一条补的是上面那条**没覆盖到**的真实形态。上面复用同一个 orchestrator，
     // 于是"报过一次"这件事记在实例字段里；而 CLI 是一次运行一个进程，新进程
