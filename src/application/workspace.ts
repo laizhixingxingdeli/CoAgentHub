@@ -262,28 +262,11 @@ ${dirty}` };
     }
 
     // Mission worktree 里的改动可能还没提交，先替它提交到自己的分支上。
-    const missionCwd = join(this.#rootFor(input.projectRoot), input.missionId);
-    if (existsSync(missionCwd)) {
-      const missionDirty = (
-        await run('git', ['status', '--porcelain'], { cwd: missionCwd })
-      ).stdout.trim();
-      if (missionDirty) {
-        await run('git', ['add', '-A'], { cwd: missionCwd });
-        await run(
-          'git',
-          [
-            '-c',
-            'user.name=coagenthub',
-            '-c',
-            'user.email=noreply@local',
-            'commit',
-            '-m',
-            `mission(${input.missionId}): 执行者交付`,
-          ],
-          { cwd: missionCwd },
-        );
-      }
-    }
+    await this.#commitPending(
+      join(this.#rootFor(input.projectRoot), input.missionId),
+      input.missionId,
+      '执行者交付',
+    );
 
     const merge = await run('git', ['merge', '--no-ff', '--no-edit', input.branch], {
       cwd: repo,
@@ -343,10 +326,45 @@ ${dirty}` };
     return join(this.#rootFor(projectRoot), missionId);
   }
 
+  /**
+   * 把 worktree 里还没提交的东西提交到 Mission 自己的分支上。
+   *
+   * 平台只在落地那一刻提交，而**执行者从来不自己提交**。所以在摘掉 worktree
+   * 之前不做这一步，未提交的产出就跟着 `worktree remove --force` 一起没了。
+   *
+   * 实测代价：一条跑完、独立验过（14 条用例绿、命令端到端通）的 Mission 被
+   * 叫停之后，产出整个消失——而 release 的注释还写着"改动是 Mission 的产出，
+   * 要留给 L3 检视"。**那句话当时是假的**：它只保住了已提交的东西，而那是空的。
+   */
+  async #commitPending(cwd: string, missionId: string, what: string): Promise<void> {
+    if (!existsSync(cwd)) return;
+    const dirty = (await run('git', ['status', '--porcelain'], { cwd })
+      .then((r) => r.stdout.trim())
+      .catch(() => ''));
+    if (!dirty) return;
+    await run('git', ['add', '-A'], { cwd }).catch(() => undefined);
+    await run(
+      'git',
+      [
+        '-c',
+        'user.name=coagenthub',
+        '-c',
+        'user.email=noreply@local',
+        'commit',
+        '-m',
+        `mission(${missionId}): ${what}`,
+      ],
+      { cwd },
+    ).catch(() => undefined);
+  }
+
   async release(missionId: string, projectRoot: string): Promise<void> {
     const repo = resolve(projectRoot);
     const cwd = join(this.#rootFor(projectRoot), missionId);
     if (!existsSync(cwd)) return;
+    // **先把未提交的产出落到分支上，再摘目录。** 顺序反了就等于销毁证据：
+    // remove --force 不会问，也不会留下任何痕迹。
+    await this.#commitPending(cwd, missionId, '回收工作区前保存未提交的产出');
     // 只摘掉 worktree，**不删分支**：改动是 Mission 的产出，要留给 L3 检视。
     await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo }).catch(() => undefined);
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);

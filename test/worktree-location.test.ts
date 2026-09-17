@@ -124,6 +124,35 @@ describe('worktree 跟着项目走，不跟着进程 cwd', () => {
     await manager.release('M3', project);
   });
 
+  test('回收工作区之前先把未提交的产出落到分支上', async () => {
+    // release 的注释一直写着"改动是 Mission 的产出，要留给 L3 检视"，
+    // 但**那句话当时是假的**：平台只在落地那一刻提交，执行者从不自己提交，
+    // 于是 `worktree remove --force` 把未提交的产出连同目录一起抹掉，
+    // 分支上是空的。实测代价：一条跑完、独立验过（14 条用例绿、命令端到端通）
+    // 的 Mission 被叫停之后，产出整个消失，事后无法复核。
+    const project = tempRepo('coagent-proj-');
+    const manager = new GitWorktreeManager();
+    const prepared = await manager.prepare('M5', project);
+
+    // 执行者干的活：改一个已跟踪文件 + 新建一个文件。两种都要保住 ——
+    // `git diff` 看不见新建文件，只提交已跟踪的同样会丢一半。
+    writeFileSync(join(prepared.cwd, 'a.txt'), '执行者改过\n');
+    writeFileSync(join(prepared.cwd, 'new.ts'), 'export const x = 1;\n');
+
+    await manager.release('M5', project);
+
+    const onBranch = git(project, 'show', '--name-only', '--format=', 'mission/M5')
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .sort();
+    assert.deepEqual(onBranch, ['a.txt', 'new.ts'], '改的和新建的都要落到分支上');
+    assert.equal(
+      git(project, 'show', 'mission/M5:new.ts').trim(),
+      'export const x = 1;',
+      '内容要是真的，不是空文件',
+    );
+  });
+
   test('基线不存在时明说，不要把 git 的原文甩给人', async () => {
     const project = tempRepo('coagent-proj-');
     await assert.rejects(
