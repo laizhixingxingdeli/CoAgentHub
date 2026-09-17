@@ -661,8 +661,10 @@ export class Platform {
   /* ============================ L2 协调者面 ============================ */
 
   async getMissionView(missionId: string): Promise<MissionView> {
-    const { mission } = await this.#locate(missionId);
-    return viewOf(mission);
+    const { mission, project } = await this.#locate(missionId);
+    // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
+    const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+    return { ...viewOf(mission), blockedByMission: holder?.id };
   }
 
   /**
@@ -1443,6 +1445,15 @@ export interface MissionView {
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
+  /**
+   * 同 Project 里**别的**哪条 Mission 正占着改动名额（不变量 C）。没有就是
+   * undefined；自己占着也是 undefined —— 这一格回答的是"谁挡着我"。
+   *
+   * 有它，调度器才能在**花钱之前**停下来。原先只有 dispatchWorkItems 会撞上
+   * PROJECT_BUSY，而那是在协调者调查完、规划完、拆完工作项之后——实测 P2
+   * 因此花掉 $0.70 才被告知名额被占，而占着它的是一条早就死掉的测量跑。
+   */
+  blockedByMission: string | undefined;
   contractRevision: number;
   contract: MissionContract | undefined;
   planRevision: number;
@@ -1600,6 +1611,10 @@ function viewOf(mission: Mission): MissionView {
     updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,
+    // 只有 getMissionView 那一层算得出来（要看兄弟 Mission）。这里给 undefined
+    // 而不是省略：省略会让类型上是可选的东西在运行时变成"没查过"和"查了没有"
+    // 分不开。
+    blockedByMission: undefined,
     contractRevision: mission.contractRevision,
     contract: mission.contract,
     planRevision: mission.planRevision,

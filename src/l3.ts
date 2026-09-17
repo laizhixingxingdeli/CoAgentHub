@@ -69,7 +69,12 @@ async function main() {
     if (!target) throw new Error('需要 missionId');
     const view = await platform.getMissionView(target);
     console.log(line('='));
-    console.log(`Mission ${view.missionId}   ${view.status}${view.isMutating ? '（占着改动名额）' : ''}`);
+    console.log(
+      `Mission ${view.missionId}   ${view.status}${view.isMutating ? '（占着改动名额）' : ''}` +
+        // 「谁挡着我」。没有这一格时，撞上 project_busy 的人只能挨个 Mission
+        // 去翻谁还没结束 —— 实测挡住 P2 的是一条早就跑死的测量跑。
+        (view.blockedByMission ? `\n           ⚠ ${view.blockedByMission} 正占着本项目的改动名额，这条派发不了` : ''),
+    );
     console.log(line('='));
     console.log(`\n【Contract r${view.contractRevision}】${view.contract?.intent ?? '（无）'}`);
     for (const item of view.contract?.acceptance ?? []) console.log(`  验收 · ${item}`);

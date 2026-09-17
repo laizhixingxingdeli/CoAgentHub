@@ -320,6 +320,18 @@ export class Orchestrator {
     for (let round = 0; round < maxRounds; round += 1) {
       const view = await this.#platform.getMissionView(missionId);
 
+      // 名额被别人占着时**不在这里停**。
+      //
+      // 一度想在开工前就拦下来，理由是"实测 P2 花掉 $0.70 调查完才被告知名额
+      // 被占"。但那个前提是错的：**调查与规划的产出都写回平台了**（plan、
+      // 工作项都在），重跑时协调者读得到，接着派发就行，钱没白花。
+      //
+      // 而在这里停会砍掉一个刻意的设计：**名额只有派发才需要**，调查和规划
+      // 是纯读、不冲突，A 在改代码时 B 照样可以往前推。拿"省钱"去换掉流水线
+      // 并行，是用一个不存在的问题换掉一个真的特性。用例当场拦住了这次改动。
+      //
+      // 真正缺的只是"谁挡着我"看不见 —— 那一格补在 MissionView 上（blockedByMission）。
+
       // 被暂停就不碰。放在循环开头而不是入口：跑到一半被暂停也要停下来。
       if (view.paused) {
         return { kind: 'waiting', reason: 'cancelled_by_user', detail: 'Mission 已被暂停，resume 之后重跑' };
