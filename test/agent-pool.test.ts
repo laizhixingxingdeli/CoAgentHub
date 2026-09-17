@@ -525,8 +525,23 @@ describe('run-mission.ts 改用候选池', () => {
 
   test('调用 loadPoolOrSeed 并把快照交给调度器', () => {
     assert.match(source, /loadPoolOrSeed\(/, '空仓播种必须发生在 run-mission 这一侧');
-    assert.match(source, /pool\.coordinator/, '协调者候选来自快照');
-    assert.match(source, /pool\.executor/, '执行者候选来自快照');
+    // 原先断的是 `pool.coordinator` / `pool.executor` 两个字面量；改成按 role
+    // 动态取之后那个代理失效了 —— 守的性质没变：**候选来自池子，不是代码里
+    // 写死的**（写死的那一面由下一条扫整棵 src 来守）。
+    assert.match(source, /pool\[role\]/, '候选按 role 从快照里取');
+    assert.match(source, /candidates: coordinatorPool\.map/, '协调者候选进调度器');
+    assert.match(source, /candidates: executorPool\.map/, '执行者候选进调度器');
+  });
+
+  test('按次指定候选只能收窄，不能凭空造一个出来', () => {
+    // 「换个配置再跑一遍看是不是更省」要求配置能**按次**指定，否则比较就得在
+    // 两次运行之间改全局池 —— 既容易忘，也说不清当时用的到底是哪个。
+    //
+    // 但过滤必须严：名字打错时若悄悄回退到全池，人会以为在比 A 和 B，实际
+    // 两次都是 B，**而且两份记录看上去都正常**。
+    assert.match(source, /不在\$\{role\}池里/, '打错名字要报错并列出可选项');
+    assert.match(source, /--coordinator/, '协调者可按次指定');
+    assert.match(source, /--executor/, '执行者可按次指定');
   });
 
   test('四条缺省候选的字面量只该出现在 agent-pool.ts', () => {

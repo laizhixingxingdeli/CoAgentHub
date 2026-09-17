@@ -46,7 +46,8 @@ async function main() {
   if (!missionFile) {
     console.log(
       '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]\n' +
-        '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]',
+        '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
+        '     [--coordinator <profileId,...>] [--executor <profileId,...>：这一跑只用这些候选]',
     );
     return;
   }
@@ -122,6 +123,41 @@ async function main() {
   // 的观测面没立场替别人定默认值。
   const pool = await loadPoolOrSeed(agentPool);
 
+  /**
+   * 这一跑只用哪些候选。
+   *
+   * 候选池是全局的，而「换个配置再跑一遍看是不是更省」要求配置能**按次**指定 ——
+   * 不然比较就得在两次运行之间改全局池，既容易忘、也说不清当时到底用的哪个。
+   *
+   * 只做过滤、不新增：名字必须在池子里，打错立刻报错并把可选项列出来。
+   * 悄悄回退到全池会让人以为比的是 A 和 B，实际两次都是 B。
+   */
+  function pick(role: 'coordinator' | 'executor', flag: string): AgentPoolCandidate[] {
+    const wanted = arg(flag);
+    const all = pool[role];
+    if (!wanted) return [...all];
+    const ids = wanted.split(',').map((s) => s.trim()).filter(Boolean);
+    const chosen = ids.map((id) => {
+      const found = all.find((c) => c.profileId === id);
+      if (!found) {
+        throw new Error(
+          `${flag} 指定的候选 ${id} 不在${role}池里。可选：${all.map((c) => c.profileId).join('、')}`,
+        );
+      }
+      return found;
+    });
+    return chosen;
+  }
+
+  const coordinatorPool = pick('coordinator', '--coordinator');
+  const executorPool = pick('executor', '--executor');
+  if (arg('--coordinator') || arg('--executor')) {
+    console.log(
+      `本次候选：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
+        `执行者 ${executorPool.map((c) => c.profileId).join('、')}\n`,
+    );
+  }
+
   const orchestrator = new Orchestrator({
     platform,
     // 一边跑一边把输出送进实时通道，观测面那个进程才看得到。
@@ -137,12 +173,12 @@ async function main() {
     acceptStaleBase: process.argv.includes('--accept-stale-base'),
     coordinator: {
       runtime,
-      candidates: pool.coordinator.map(toProfile),
+      candidates: coordinatorPool.map(toProfile),
     },
     executor: {
       runtime,
       // 有序候选池：**只有上游失败**才往后换。顺序就是仓储里的 order。
-      candidates: pool.executor.map(toProfile),
+      candidates: executorPool.map(toProfile),
     },
   });
 
