@@ -6,7 +6,7 @@
  */
 export { KernelError, IllegalTransitionError, InvariantViolationError } from './errors.ts';
 
-export { Attempt } from './attempt.ts';
+export { Attempt, KILLED_BY_US } from './attempt.ts';
 export type {
   AttemptEndReason,
   AttemptKind,

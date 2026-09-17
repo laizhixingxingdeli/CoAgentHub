@@ -15,6 +15,17 @@
 export interface OriginChannel {
   readonly clientType: string;
   readonly conversationRef?: string;
+  /**
+   * 这是哪条 Mission 的重跑。
+   *
+   * 重跑不是"把原来那条洗一遍再用"，是**另起一条、契约一字不改**。这样每次
+   * 运行都是独立的一份记录（自己的 attempt、用量、耗时、结束原因），能横着比；
+   * 原来那条的历史也一点不动。
+   *
+   * 放在 origin 里而不是 Mission 顶层：它讲的是"这条任务从哪来"，和
+   * clientType/conversationRef 是同一件事的不同来源，不是新的领域概念。
+   */
+  readonly rerunOf?: string;
 }
 
 export interface MissionContract {

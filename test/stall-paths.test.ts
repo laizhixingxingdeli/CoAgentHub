@@ -370,6 +370,12 @@ describe('一跳跑太久', () => {
     assert.ok(detailed.usage.total > 0, '实时通道里报过用量，这一跳账上不能是 0');
     assert.equal(detailed.usage.quality, 'estimated', '兜底来的数不许冒充精确数');
 
+    // **闸门掐的要记成闸门掐的。** 运行时那边只看得到"进程被杀"，分不出是谁掐的，
+    // 会报成 upstream_failure；只有调度器知道真相。不在这里改正的话，事后想问
+    // 「这个配置被闸门掐过几次」，就只能去 failureMessage 里做字符串匹配。
+    assert.equal(detailed.endedBy, 'killed_wall_clock');
+    assert.equal(orchestrator.hops.at(-1)?.endedBy, 'killed_wall_clock', '内存里那份也要一致');
+
     // **只跑了一次。** 归成 upstream_failure 的话会冷却候选、回滚工作区、
     // 换下一个候选再跑一遍同样的 30 分钟——三件事全是错的。
     assert.equal(orchestrator.hops.length, 2, '协调者一跳 + 执行者一跳，没有第二个候选');

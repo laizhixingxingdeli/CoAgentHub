@@ -102,6 +102,83 @@ export class Platform {
     return { missionId };
   }
 
+  /**
+   * 再跑一遍同一个任务。
+   *
+   * **另起一条 Mission，契约一字不改地抄过来**，而不是把原来那条洗干净重用。
+   * 理由是"能比较"：每次运行要有自己那份 attempt、用量、耗时、结束原因，
+   * 横着摆才看得出"换了协调者模型之后便宜了没有"。洗掉重用会把上一次的
+   * 记录抹了，而那正是要比的东西。
+   *
+   * 抄的是**当前生效的契约**（可能已经改到 r2/r3），不是 r1：重跑的意思是
+   * "照现在的要求再来一次"。
+   *
+   * 不碰任何不变量：它就是一次普通的 createMission。同 Project 的改动名额
+   * 仍然一次只给一条——想并行跑多个配置的话，那条限制要单独拆（它现在把
+   * "正在改代码"和"会把改动合回去"混成了一件事），不在这里顺手改。
+   */
+  async rerunMission(
+    missionId: string,
+    options?: { newMissionId?: string },
+  ): Promise<{ missionId: string; rerunOf: string; contractRevision: number }> {
+    const { mission, project } = await this.#locate(missionId);
+    if (!mission.contract) {
+      throw new PlatformRuleError('NO_CONTRACT', `Mission ${missionId} 没有契约，没法重跑。`);
+    }
+    // 源头永远指向**最初那条**，不形成链：#3 是 #1 的重跑，不是 #2 的重跑。
+    // 挂成链的话，"这个任务一共跑过几遍"就得顺着指针爬，而且断一环就散了。
+    const root = mission.origin?.rerunOf ?? missionId;
+    const runs = project.missions.filter(
+      (m) => m.id === root || m.origin?.rerunOf === root,
+    ).length;
+    const newId = options?.newMissionId ?? `${root}#${runs + 1}`;
+    const created = await this.createMission({
+      projectId: mission.projectId,
+      missionId: newId,
+      contract: mission.contract,
+      origin: { ...(mission.origin ?? { clientType: 'cli' }), rerunOf: root },
+    });
+    // 三个字段都自己填齐，别直接把 createMission 的 { missionId } 透传出去：
+    // 返回类型写了三个而实际只回一个，类型剥离不检查，调用方拿到的是 undefined。
+    return { ...created, rerunOf: root, contractRevision: mission.contractRevision };
+  }
+
+  /**
+   * 同一个任务的所有运行，按开始时间排。
+   *
+   * 这是"可比较"的读出口：一次运行一行，带上它花了多少、跑了多久、几跳、
+   * 各跳因为什么结束、最后是什么结果。回答的是「这次改动到底让它变好了没有」——
+   * 而在这之前，这个问题只能靠手写 SQL 去比两条碰巧相似的 Mission。
+   */
+  async listRuns(missionId: string): Promise<RunSummary[]> {
+    const { mission, project } = await this.#locate(missionId);
+    const root = mission.origin?.rerunOf ?? missionId;
+    const runs = project.missions.filter((m) => m.id === root || m.origin?.rerunOf === root);
+    return runs.map((m) => {
+      const attempts = [
+        ...m.coordinatorAttempts,
+        ...m.workItems.flatMap((item) => item.attempts),
+      ];
+      const endedBy: Record<string, number> = {};
+      for (const attempt of attempts) {
+        const key = attempt.endedBy ?? 'in_progress';
+        endedBy[key] = (endedBy[key] ?? 0) + 1;
+      }
+      return {
+        missionId: m.id,
+        isOriginal: m.id === root,
+        status: m.status,
+        outcome: m.result?.outcome,
+        contractRevision: m.contractRevision,
+        coordinatorHops: m.coordinatorAttempts.length,
+        executorHops: m.workItems.reduce((n, item) => n + item.attempts.length, 0),
+        workItems: m.workItems.length,
+        usage: sumUsage(m),
+        endedBy,
+      };
+    });
+  }
+
   async reviseContract(
     missionId: string,
     contract: MissionContract,
@@ -1369,6 +1446,28 @@ export interface WorkOrderView {
   missionIntent: string;
   guardrails: readonly string[];
   previousRequiredChanges: readonly string[];
+}
+
+/**
+ * 同一个任务的一次运行。listRuns 的行。
+ *
+ * 刻意**不含**"哪个模型跑的"：那是候选池的事，一条 Mission 里不同跳可能
+ * 用了不同候选。要按配置归因，看各 attempt 上冻住的 resolvedProfile。
+ */
+export interface RunSummary {
+  missionId: string;
+  /** 是不是最初那一条（其余都是它的重跑）。 */
+  isOriginal: boolean;
+  status: string;
+  /** 交卷结论；还没交卷就是 undefined。 */
+  outcome: string | undefined;
+  contractRevision: number;
+  coordinatorHops: number;
+  executorHops: number;
+  workItems: number;
+  usage: TokenUsage;
+  /** 各跳的结束原因分布。**分类的价值就在这一格**：以前全是 upstream_failure。 */
+  endedBy: Record<string, number>;
 }
 
 /** 聚合用量：**分项相加**，不要只滚一个 total。 */

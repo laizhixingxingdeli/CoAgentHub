@@ -16,7 +16,7 @@ import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
-import type { TokenUsage, WaitReason } from '../kernel/index.ts';
+import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -678,7 +678,10 @@ export class Orchestrator {
         // 收尾必须在 finally：运行时崩了而 attempt 没收尾，这个工作项就
         // 永远开不了下一次尝试。
         await this.#platform.finishAttempt(input.missionId, attemptId, {
-          endedBy: outcome?.endedBy ?? 'no_structured_result',
+          // 被墙钟掐掉的记成 killed_wall_clock，不是 upstream_failure。
+          // 运行时那边只看得到"进程被杀"，分不出是谁掐的——**只有这里知道**。
+          // 不在这儿改正，事后要分辨就只能去 failureMessage 里做字符串匹配。
+          endedBy: runaway ? 'killed_wall_clock' : (outcome?.endedBy ?? 'no_structured_result'),
           // 结果行里没带用量（进程被杀、崩了），就用边跑边收到的最后一次。
           // 它的 quality 降一级标成 estimated：那是"最后一次报告"而不是
           // "跑完的总账"，中间可能还有几次调用没来得及报。降级但不丢——
@@ -695,12 +698,16 @@ export class Orchestrator {
         this.#tokens.revoke(token);
       }
 
+      // 和写回平台的那个值保持一致。两处分叉的话，库里记的和这里判的就是
+      // 两件事，而排障的人会同时看到两者。
+      const endedBy: AttemptEndReason = runaway ? 'killed_wall_clock' : outcome.endedBy;
+
       this.hops.push({
         role: input.role,
         workItemId: input.workItemId,
         attemptId,
         profile,
-        endedBy: outcome.endedBy,
+        endedBy,
         failureMessage: outcome.failureMessage,
       });
 
@@ -732,7 +739,7 @@ export class Orchestrator {
         };
       }
 
-      if (outcome.endedBy === 'platform_unreachable') {
+      if (endedBy === 'platform_unreachable') {
         // **不冷却候选**：问题在平台自己这边。直接停下来喊人——
         // 继续换候选只会把整个池子白白冻掉。
         await this.#platform
@@ -741,8 +748,17 @@ export class Orchestrator {
         return { exhausted: 'platform_unreachable' };
       }
 
-      if (outcome.endedBy === 'upstream_failure') {
-        // 这个候选先放一会儿，别下一跳又撞上同一个限流。
+      // upstream_failure 与 killed_idle **处置相同、记录不同**。
+      //
+      // 处置相同：两者都该回滚（状态不明）、都该换个候选试试。实测这样确实
+      // 产生了新信息——W5 里 ds41 静默卡死、换到 qwen 才暴露出它的模型已经
+      // 没了，两条路都走一遍才把真相凑齐。
+      //
+      // 记录不同：一个是"那个候选挂了"，一个是"我们自己按静默超时掐的"。
+      // 混在一起的话，"这个配置有多容易卡住"这个问题就只能去
+      // failureMessage 里做字符串匹配——而那是一句给人读的话，随时会改。
+      if (endedBy === 'upstream_failure' || endedBy === 'killed_idle') {
+        // 这个候选先放一会儿，别下一跳又撞上同一个限流 / 同一次卡死。
         this.#cooldown.set(
           profile.profileId,
           Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000),
@@ -754,7 +770,7 @@ export class Orchestrator {
         }
         continue; // 换下一个候选
       }
-      return { endedBy: outcome.endedBy, resumeRef: outcome.resumeRef };
+      return { endedBy, resumeRef: outcome.resumeRef };
     }
     return undefined;
   }

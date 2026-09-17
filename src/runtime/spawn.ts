@@ -265,12 +265,18 @@ export class SpawnRuntime implements AgentRuntime {
         // 拿不到 outcome 行就是**上游失败**（进程崩了 / 被 kill），
         // 不是 no_structured_result —— 后者的含义是「模型跑完了但没提交」，
         // 归错类会让调度器拒绝重试一个其实该重试的情况。
+        //
+        // 但**是我们自己按静默超时掐的**，那就不是上游的问题，要如实说。
+        // `timedOut` 是这里唯一知道真相的地方：再往上只剩一个被杀的进程，
+        // 分不出是它崩了还是我们掐的。归错类的代价是好候选被白白冷却。
+        const idleKilled = timedOut;
         settle({
-          endedBy: 'upstream_failure',
+          endedBy: idleKilled ? 'killed_idle' : 'upstream_failure',
           usage: UNKNOWN_USAGE,
-          failureMessage:
-            signal === 'SIGKILL' || timedOut
-              ? `子进程静默超过 ${options.timeoutMs} ms，判为卡住并连同子孙进程一起杀掉`
+          failureMessage: idleKilled
+            ? `子进程静默超过 ${options.timeoutMs} ms，判为卡住并连同子孙进程一起杀掉`
+            : signal === 'SIGKILL'
+              ? `子进程被 ${signal} 杀掉且没有回传结果`
               : `子进程退出 code=${code} 且没有回传结果。stderr: ${stderr.slice(-500) || '(空)'}`,
         });
       });

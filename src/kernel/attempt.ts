@@ -20,14 +20,35 @@ export type AttemptKind = 'coordinator' | 'executor';
  *                           上游失败是"那个候选暂时不可用"，该冷却它；
  *                           这个是"平台坏了"，冷却任何候选都是误伤——
  *                           换一个照样连不上，而且把好候选白白冻起来。
+ * - `killed_idle`           我们自己按静默超时杀的：它不再产出任何东西。
+ * - `killed_wall_clock`     我们自己按单跳墙钟上限杀的：它一直在产出，但太久了。
+ *
+ * ## 为什么后两个要单列
+ *
+ * 它们原先都归在 `upstream_failure` 里，于是"**谁的问题**"这件事丢了：
+ * 模型不存在（上游）、静默卡死（我们的判据）、跑太久（我们的策略）三件事
+ * 挤在同一个值上。实测 W5 的 exec-1/2/3/4 四跳失败，翻记录只能看到四个
+ * `upstream_failure`，要分辨得去 `failureMessage` 里做字符串匹配——而那是
+ * 一句给人读的话，随时会改。
+ *
+ * 加墙钟闸时我甚至不得不把"是不是被闸掐的"记成调度器里一个枚举**外面**的
+ * 布尔量，因为枚举里没有能表达它的值。那就是这个类型缺东西的信号。
+ *
+ * 判准很简单：**这一跳是别人挂了，还是我们自己掐的？** 两者的处置相反——
+ * 前者该换候选，后者该改工单或调策略，换候选只会把同一件事再烧一遍。
  */
 export type AttemptEndReason =
   | 'structured_submit'
   | 'no_structured_result'
   | 'upstream_failure'
   | 'platform_unreachable'
+  | 'killed_idle'
+  | 'killed_wall_clock'
   | 'cancelled'
   | 'interrupted';
+
+/** 我们自己掐掉的那几种。不是候选的错，别冷却它。 */
+export const KILLED_BY_US: readonly AttemptEndReason[] = ['killed_idle', 'killed_wall_clock'];
 
 /** Attempt 流转表：只有 in_progress 有出边。 */
 const ATTEMPT_TRANSITIONS: Record<AttemptStatus, readonly AttemptStatus[]> = {

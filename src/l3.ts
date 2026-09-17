@@ -207,6 +207,47 @@ async function main() {
     return;
   }
 
+  if (command === 'rerun') {
+    if (!target) throw new Error('需要 missionId');
+    const result = await platform.rerunMission(target, { newMissionId: arg('--as') });
+    await persist();
+    console.log(`已另起一条：${result.missionId}（${result.rerunOf} 的重跑，契约 r${result.contractRevision}）`);
+    console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
+    console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
+    console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
+    return;
+  }
+
+  if (command === 'runs') {
+    if (!target) throw new Error('需要 missionId');
+    const runs = await platform.listRuns(target);
+    if (runs.length <= 1) {
+      console.log(`${target} 只跑过一遍，没什么可比的。用 node src/l3.ts rerun ${target} 再跑一次。`);
+    }
+    console.log('运行            状态           结果        跳数(L2/L1) 工作项   token        费用      结束原因');
+    console.log('─'.repeat(108));
+    for (const r of runs) {
+      const hops = `${r.coordinatorHops}/${r.executorHops}`;
+      const reasons = Object.entries(r.endedBy)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${k}×${n}`)
+        .join(' ');
+      console.log(
+        (r.missionId + (r.isOriginal ? ' *' : '')).padEnd(15)
+          + r.status.padEnd(15)
+          + (r.outcome ?? '—').padEnd(12)
+          + hops.padEnd(12)
+          + String(r.workItems).padEnd(9)
+          + r.usage.total.toLocaleString('en-US').padEnd(13)
+          + ('$' + (r.usage.cost ?? 0).toFixed(4)).padEnd(10)
+          + reasons,
+      );
+    }
+    console.log('\n* = 最初那条。结束原因里 killed_idle / killed_wall_clock 是**我们自己掐的**，');
+    console.log('  不是候选挂了 —— 那两种要改工单或调策略，换候选只会把同一件事再烧一遍。');
+    return;
+  }
+
   if (command === 'ack') {
     if (!target) throw new Error('需要 deliveryId');
     const delivery = await deliveries.acknowledge(target);
@@ -227,6 +268,8 @@ async function main() {
   node src/l3.ts pause <missionId>            暂停（阶段不变，调度器不碰）
   node src/l3.ts resume <missionId>           恢复
   node src/l3.ts retire <missionId> --item <W-n> --reason "..."  作废一个工作项
+  node src/l3.ts rerun <missionId> [--as <id>] 照当前契约再跑一遍（另起一条，原来那条不动）
+  node src/l3.ts runs <missionId>             同一任务的历次运行横着比：跳数/用量/费用/结束原因
   node src/l3.ts ack <deliveryId>             确认收到
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);

@@ -240,10 +240,24 @@ describe('静默超时：按"多久没动静"判，不按总时长', () => {
     assert.equal(outcome.endedBy, 'structured_submit', '持续产出不该被判超时');
   });
 
-  test('不再产出就杀，而且报成上游失败（可重试）', async () => {
+  test('不再产出就杀，而且如实说是我们自己掐的', async () => {
     const outcome = await runWith(silent(), 400);
-    assert.equal(outcome.endedBy, 'upstream_failure');
-    // 归类很重要：这不是"跑完了没提交"，换个候选重试是合理的。
+    // 原先这里断言的是 upstream_failure。**那不是上游的问题，是我们的判据。**
+    // 混在一起之后，"这个配置有多容易卡住"只能去 failureMessage 里做字符串
+    // 匹配——而那是一句给人读的话，随时会改。实测 W5 四跳失败翻记录全是
+    // upstream_failure，分不出模型没了、静默卡死、跑太久三件事。
+    //
+    // **这里是唯一知道真相的地方**：再往上只剩一个被杀的进程，分不出是它崩了
+    // 还是我们掐的。
+    assert.equal(outcome.endedBy, 'killed_idle');
     assert.match(outcome.failureMessage ?? '', /静默|卡住/);
+  });
+
+  test('进程自己崩了仍然算上游失败 —— 别把两件事又并回去', async () => {
+    // 分类的意义在于**能分开**。只改一半（什么都记成 killed_idle）同样是混淆，
+    // 只是换了个方向。没到静默阈值就退出的，仍然是上游那边的事。
+    const outcome = await runWith('process.exit(1);', 5_000);
+    assert.equal(outcome.endedBy, 'upstream_failure');
+    assert.doesNotMatch(outcome.failureMessage ?? '', /静默/);
   });
 });
