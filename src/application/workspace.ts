@@ -68,25 +68,53 @@ export interface WorkspaceManager {
     branch: string;
     expectedBaseRevision: string;
   }): Promise<MergeOutcome>;
-  /** 给 L3 看的改动摘要：相对分叉基线的 diff --stat 与文件清单。 */
-  diff(missionId: string, baseRevision: string): Promise<{ stat: string; files: string[] }>;
+  /**
+   * 给 L3 看的改动摘要：相对分叉基线的 diff --stat 与文件清单。
+   *
+   * projectRoot 是必须的：worktree 落在哪由项目决定（见 #rootFor），
+   * 而这个方法常常在**另一个进程**里被调用（`l3 show`），那边没 prepare 过。
+   */
+  diff(
+    missionId: string,
+    baseRevision: string,
+    projectRoot: string,
+  ): Promise<{ stat: string; files: string[] }>;
   release(missionId: string, projectRoot: string): Promise<void>;
   /** Mission worktree 的绝对路径。原地模式没有，返回 undefined。 */
-  worktreePath?(missionId: string): string | undefined;
+  worktreePath?(missionId: string, projectRoot: string): string | undefined;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
-  #root: string;
+  /** 显式指定的落点。不指定就跟着项目走。 */
+  #explicitRoot: string | undefined;
 
-  /** worktree 落在哪。默认放 projectRoot 旁边，不污染仓库内部。 */
   constructor(root?: string) {
-    this.#root = root ? resolve(root) : resolve('.coagent-worktrees');
+    this.#explicitRoot = root ? resolve(root) : undefined;
+  }
+
+  /**
+   * worktree 落在哪。**默认跟着项目走**：`<projectRoot>/.coagent-worktrees/`。
+   *
+   * 早先默认是 `resolve('.coagent-worktrees')` —— 相对**进程 cwd**。在平台
+   * 自己的仓库里跑自己，两者恰好重合，所以一直没露馅；换一个项目就立刻错：
+   * worktree 落在平台仓库下面，而 Node 沿父目录找依赖会找到**平台的**
+   * node_modules。实测 coagent-pi 依赖 pi-coding-agent / typebox / undici，
+   * 平台这边只有 pg —— 执行者在那种 worktree 里根本跑不动目标项目的代码。
+   *
+   * 而且它**不报错**，只是莫名其妙地跑不起来。靠使用者每次记得传
+   * `--worktrees` 是不成立的：忘了没有任何声音。
+   *
+   * 放在项目内部还顺带解决了依赖：父目录查找自然命中项目自己的 node_modules，
+   * 不需要任何链接（那条路踩过，见文件顶部）。
+   */
+  #rootFor(projectRoot: string): string {
+    return this.#explicitRoot ?? join(resolve(projectRoot), '.coagent-worktrees');
   }
 
   async prepare(missionId: string, projectRoot: string): Promise<PreparedWorkspace> {
     const repo = resolve(projectRoot);
     const branch = `mission/${missionId}`;
-    const cwd = join(this.#root, missionId);
+    const cwd = join(this.#rootFor(projectRoot), missionId);
 
     if (existsSync(cwd)) {
       // 续跑同一个 Mission：沿用已有 worktree，不要重开一份。
@@ -165,7 +193,7 @@ ${dirty}` };
     }
 
     // Mission worktree 里的改动可能还没提交，先替它提交到自己的分支上。
-    const missionCwd = join(this.#root, input.missionId);
+    const missionCwd = join(this.#rootFor(input.projectRoot), input.missionId);
     if (existsSync(missionCwd)) {
       const missionDirty = (
         await run('git', ['status', '--porcelain'], { cwd: missionCwd })
@@ -213,8 +241,12 @@ ${dirty}` };
    * 于是 L3 看到的 diff 和实际合进去的东西对不上：检视者会在没看过的
    * 内容上签字。
    */
-  async diff(missionId: string, baseRevision: string): Promise<{ stat: string; files: string[] }> {
-    const cwd = join(this.#root, missionId);
+  async diff(
+    missionId: string,
+    baseRevision: string,
+    projectRoot: string,
+  ): Promise<{ stat: string; files: string[] }> {
+    const cwd = join(this.#rootFor(projectRoot), missionId);
     if (!existsSync(cwd)) return { stat: '（工作区已回收）', files: [] };
 
     const lines = (text: string) =>
@@ -238,13 +270,13 @@ ${dirty}` };
     };
   }
 
-  worktreePath(missionId: string): string {
-    return join(this.#root, missionId);
+  worktreePath(missionId: string, projectRoot: string): string {
+    return join(this.#rootFor(projectRoot), missionId);
   }
 
   async release(missionId: string, projectRoot: string): Promise<void> {
     const repo = resolve(projectRoot);
-    const cwd = join(this.#root, missionId);
+    const cwd = join(this.#rootFor(projectRoot), missionId);
     if (!existsSync(cwd)) return;
     // 只摘掉 worktree，**不删分支**：改动是 Mission 的产出，要留给 L3 检视。
     await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo }).catch(() => undefined);

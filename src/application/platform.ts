@@ -1006,7 +1006,7 @@ export class Platform {
     const { mission } = await this.#locate(missionId);
     const ref = mission.workspaceRef;
     if (!this.#workspace || !ref) return { stat: '（没有工作区信息）', files: [] };
-    return this.#workspace.diff(missionId, ref.baseRevision);
+    return this.#workspace.diff(missionId, ref.baseRevision, ref.projectRoot);
   }
 
   /**
@@ -1072,7 +1072,7 @@ export class Platform {
       // 落地。分两次提交的话，"代码进去了文档没进去"就会发生——而且没人会发现。
       const proposals = mission.result?.memoryDelta ?? [];
       if (proposals.length > 0 && ref.branch !== '(in-place)') {
-        const worktreeRoot = this.#workspace.worktreePath?.(missionId);
+        const worktreeRoot = this.#workspace.worktreePath?.(missionId, ref.projectRoot);
         if (worktreeRoot) {
           const written = applyMemoryDelta(worktreeRoot, proposals);
           // 传 projectId：worktree 的目录名是 Mission ID，
