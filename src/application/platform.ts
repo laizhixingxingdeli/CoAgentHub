@@ -131,6 +131,18 @@ export class Platform {
     contractRevision: number;
     /** 钉住的分叉基线。源头没记过工作区时为 undefined。 */
     baseRevision: string | undefined;
+    /**
+     * 源头那次的产出**已经落地进项目了**。
+     *
+     * 这时候这次重跑不是干净的对照：答案就摆在项目的工作区里，agent 读一眼
+     * 就有。实测 P1-single 正是这么干的——它 read 了主仓库的 profile-audit.ts
+     * 和 .test.ts，还 git show 了那次交付的提交。**它不是在解题，是在抄**，
+     * 而两份记录看上去都完整自洽。
+     *
+     * 隔离做不到（agent 用绝对路径就能越出 worktree），所以至少要**说出来**：
+     * 拿这样一次运行去和源头比成本，比出来的数是假的。
+     */
+    sourceAlreadyLanded: boolean;
   }> {
     const { mission, project } = await this.#locate(missionId);
     if (!mission.contract) {
@@ -166,11 +178,15 @@ export class Platform {
     }
     // 字段都自己填齐，别直接把 createMission 的 { missionId } 透传出去：
     // 返回类型写了几个而实际只回一个，类型剥离不检查，调用方拿到的是 undefined。
+    // 源头的产出落地过没有。看的是**最初那条**，不是链上任意一条：
+    // 答案进没进项目只由它决定。
+    const source = project.missions.find((m) => m.id === root) ?? mission;
     return {
       ...created,
       rerunOf: root,
       contractRevision: mission.contractRevision,
       baseRevision: base,
+      sourceAlreadyLanded: source.finalReview?.verdict === 'merge',
     };
   }
 

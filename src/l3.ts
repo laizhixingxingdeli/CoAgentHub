@@ -229,6 +229,15 @@ async function main() {
     await persist();
     console.log(`已另起一条：${result.missionId}（${result.rerunOf} 的重跑，契约 r${result.contractRevision}）`);
     console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
+    if (result.sourceAlreadyLanded) {
+      // 隔离做不到（agent 用绝对路径就能越出 worktree），所以至少要说出来。
+      console.log(
+        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：\n` +
+          '  答案就摆在项目工作区里，agent 读一眼就有 —— 实测上一次对照就是这么毁的\n' +
+          '  （它 read 了主仓库里的成品文件、还 git show 了那次交付的提交，不是在解题是在抄）。\n' +
+          '  要做对照，用一个**还没合并**的任务，两臂都跑完再决定合哪个。',
+      );
+    }
     if (result.baseRevision) {
       console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
     } else {

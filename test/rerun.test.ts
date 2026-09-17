@@ -30,6 +30,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { KILLED_BY_US } from '../src/kernel/index.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
 
@@ -48,9 +49,86 @@ function makePlatform() {
     projects: new InMemoryProjectRepository(),
     deliveries: new InMemoryDeliveryRepository(clock, ids),
     activity: new InMemoryActivityLog(clock),
+    // 落地那一步要有工作区管理才走得完（"产出进没进项目"这件事只有它知道）。
+    // 原地版不隔离、不真合并，但把状态机推到 completed 是真的。
+    workspace: new InPlaceWorkspaceManager(),
     clock,
     ids,
   });
+}
+
+const ORDER = {
+  objective: '做 X',
+  allowedScope: ['a.ts'],
+  requiredBehaviour: 'X 成立',
+  constraints: [],
+  acceptance: ['X'],
+  verification: ['跑一下'],
+  doNot: [],
+  contextRefs: [],
+};
+
+const PLAN = {
+  findings: 'f',
+  rejectedHypotheses: [],
+  decisions: [],
+  direction: 'd',
+  risks: [],
+};
+
+/**
+ * 把一条 Mission 推到「已落地」。
+ *
+ * 没有更短的路：finalizeMission 要求先走到 awaiting_review，而 finalReview
+ * 是"产出进没进项目"唯一可信的记号。绕过流程直接塞一个 finalReview 进去，
+ * 测的就不是真实状态机了。
+ */
+async function driveToLanded(platform: Platform, missionId: string): Promise<void> {
+  // 动过代码就必须有分支信息，否则落地那一步会拒绝 —— 这条守卫是对的
+  // （不知道改动在哪条分支上就没法合），所以照着满足它，不是绕过它。
+  await platform.recordWorkspace(missionId, {
+    projectRoot: 'C:/repo',
+    branch: `mission/${missionId}`,
+    baseRevision: 'abc1234',
+  });
+  const coord = await platform.startCoordinatorAttempt(missionId);
+  await platform.updatePlan(missionId, coord.attemptId, PLAN);
+  const item = await platform.createWorkItem(missionId, coord.attemptId, {
+    title: 'W',
+    order: ORDER,
+  });
+  await platform.dispatchWorkItems(missionId, coord.attemptId, [item.workItemId]);
+
+  const exec = await platform.startExecutorAttempt(missionId, item.workItemId);
+  await platform.submitEvidence(missionId, exec.attemptId, {
+    kind: 'test',
+    summary: '跑过了',
+    command: 'node --test',
+    exitCode: 0,
+  });
+  await platform.submitExecutionResult(missionId, exec.attemptId, {
+    outcome: 'completed',
+    summary: '做完了',
+    changedFiles: ['a.ts'],
+    evidenceIds: [],
+    notes: '无',
+  });
+  await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
+
+  await platform.reviewExecutionResult(missionId, coord.attemptId, {
+    workItemId: item.workItemId,
+    verdict: 'accept',
+    reasons: ['ok'],
+    requiredChanges: [],
+  });
+  await platform.submitMissionResult(missionId, coord.attemptId, {
+    outcome: 'delivered',
+    summary: '交了',
+    acceptanceEvidence: ['证据'],
+    memoryDelta: [],
+    openRisks: [],
+  });
+  await platform.finalizeMission(missionId, { verdict: 'merge', reasons: ['通过'] });
 }
 
 describe('重跑：另起一条，契约照抄', () => {
@@ -112,6 +190,21 @@ describe('重跑：另起一条，契约照抄', () => {
     const fresh = await platform.getMissionView('W9#2');
     assert.equal(fresh.workspaceRef?.baseRevision, 'abc1234');
     assert.equal(fresh.workspaceRef?.branch, 'mission/W9#2', '分支是自己的，基线才是共用的');
+  });
+
+  test('源头已经落地时要说出来 —— 那样的重跑不是干净的对照', async () => {
+    // 隔离做不到：agent 用绝对路径就能越出 worktree 读到主仓库。实测
+    // P1-single 就是这么毁的 —— 它 read 了主仓库里的成品文件、还 git show 了
+    // 那次交付的提交，**不是在解题是在抄**，而两份记录看上去都完整自洽。
+    // 拦不住就至少要说出来，否则人会拿假数去比成本。
+    const platform = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W9', contract: CONTRACT });
+
+    // 没落地时不该报警 —— 乱报警和不报警一样会被无视。
+    assert.equal((await platform.rerunMission('W9')).sourceAlreadyLanded, false);
+
+    await driveToLanded(platform, 'W9');
+    assert.equal((await platform.rerunMission('W9')).sourceAlreadyLanded, true);
   });
 
   test('源头没记过工作区时如实返回 undefined —— 不许假装钉住了', async () => {
