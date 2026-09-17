@@ -124,8 +124,14 @@ export class Platform {
    */
   async rerunMission(
     missionId: string,
-    options?: { newMissionId?: string },
-  ): Promise<{ missionId: string; rerunOf: string; contractRevision: number }> {
+    options?: { newMissionId?: string; baseRevision?: string },
+  ): Promise<{
+    missionId: string;
+    rerunOf: string;
+    contractRevision: number;
+    /** 钉住的分叉基线。源头没记过工作区时为 undefined。 */
+    baseRevision: string | undefined;
+  }> {
     const { mission, project } = await this.#locate(missionId);
     if (!mission.contract) {
       throw new PlatformRuleError('NO_CONTRACT', `Mission ${missionId} 没有契约，没法重跑。`);
@@ -143,9 +149,29 @@ export class Platform {
       contract: mission.contract,
       origin: { ...(mission.origin ?? { clientType: 'cli' }), rerunOf: root },
     });
-    // 三个字段都自己填齐，别直接把 createMission 的 { missionId } 透传出去：
-    // 返回类型写了三个而实际只回一个，类型剥离不检查，调用方拿到的是 undefined。
-    return { ...created, rerunOf: root, contractRevision: mission.contractRevision };
+
+    // **把起点钉死在源头那次的分叉基线上。**
+    //
+    // 不钉的话，worktree 会从"跑这一次时目标分支的 HEAD"分叉——而源头那次的
+    // 产出多半已经合进去了，第二次一开始活儿就是干完的状态。两次运行起点
+    // 不同，比出来的成本、耗时、跳数全都没有意义，而且**看不出来哪里不对**：
+    // 两条记录都完整、都自洽，只是不可比。
+    const base = options?.baseRevision ?? mission.workspaceRef?.baseRevision;
+    if (base) {
+      await this.recordWorkspace(created.missionId, {
+        projectRoot: mission.workspaceRef?.projectRoot,
+        branch: `mission/${created.missionId}`,
+        baseRevision: base,
+      });
+    }
+    // 字段都自己填齐，别直接把 createMission 的 { missionId } 透传出去：
+    // 返回类型写了几个而实际只回一个，类型剥离不检查，调用方拿到的是 undefined。
+    return {
+      ...created,
+      rerunOf: root,
+      contractRevision: mission.contractRevision,
+      baseRevision: base,
+    };
   }
 
   /**

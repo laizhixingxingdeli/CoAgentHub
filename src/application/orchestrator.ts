@@ -299,7 +299,10 @@ export class Orchestrator {
 
     // 一 Mission 一个隔离工作区。所有 agent 的 cwd 都指到这里，
     // 用户自己的 checkout 从头到尾没被碰过。
-    const prepared = await this.#workspace.prepare(missionId, options.projectRoot);
+    // 平台上已经记着分叉基线，就照它来 —— 重跑靠这个和第一次从同一个版本
+    // 起步。没有的话（正常的第一次）才用目标分支当前的 HEAD。
+    const pinnedBase = (await this.#platform.getMissionView(missionId)).workspaceRef?.baseRevision;
+    const prepared = await this.#workspace.prepare(missionId, options.projectRoot, pinnedBase);
     this.workspace = prepared;
     const cwd = prepared.cwd;
     // 落地时要拿分叉基线核对目标有没有动过，所以这里就记回平台。

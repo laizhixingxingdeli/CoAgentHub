@@ -96,6 +96,33 @@ describe('重跑：另起一条，契约照抄', () => {
     assert.equal(third.missionId, 'W9#3', '编号按这个任务已有的运行数来');
   });
 
+  test('起点钉在源头那次的分叉基线上', async () => {
+    const platform = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W9', contract: CONTRACT });
+    await platform.recordWorkspace('W9', {
+      projectRoot: 'C:/repo',
+      branch: 'mission/W9',
+      baseRevision: 'abc1234',
+    });
+
+    const again = await platform.rerunMission('W9');
+    assert.equal(again.baseRevision, 'abc1234');
+    // 记在新 Mission 上，调度器 prepare 时会照它分叉。不记的话第二次会从
+    // 「跑它时的 HEAD」起步——而源头的产出多半已经合进去了，比较当场失效。
+    const fresh = await platform.getMissionView('W9#2');
+    assert.equal(fresh.workspaceRef?.baseRevision, 'abc1234');
+    assert.equal(fresh.workspaceRef?.branch, 'mission/W9#2', '分支是自己的，基线才是共用的');
+  });
+
+  test('源头没记过工作区时如实返回 undefined —— 不许假装钉住了', async () => {
+    const platform = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W9', contract: CONTRACT });
+    const again = await platform.rerunMission('W9');
+    // CLI 据此打一句"这一跑和源头不是同一个起点，数不能对比"。
+    // 编一个基线出来比说不知道更坏：人会以为比较是成立的。
+    assert.equal(again.baseRevision, undefined);
+  });
+
   test('没有契约就不给重跑 —— 抄不出东西来', async () => {
     const platform = makePlatform();
     await platform.createMission({ projectId: 'P', missionId: 'W9' } as never);

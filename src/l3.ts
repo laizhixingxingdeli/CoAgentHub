@@ -217,10 +217,21 @@ async function main() {
 
   if (command === 'rerun') {
     if (!target) throw new Error('需要 missionId');
-    const result = await platform.rerunMission(target, { newMissionId: arg('--as') });
+    const result = await platform.rerunMission(target, {
+      newMissionId: arg('--as'),
+      baseRevision: arg('--base'),
+    });
     await persist();
     console.log(`已另起一条：${result.missionId}（${result.rerunOf} 的重跑，契约 r${result.contractRevision}）`);
     console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
+    if (result.baseRevision) {
+      console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
+    } else {
+      console.log(
+        '⚠ 源头没记过工作区，起点无法钉住 —— 这一跑会从目标分支当前的 HEAD 分叉，\n' +
+          '  和源头不是同一个起点，**跑出来的数不能和它对比**。要比就用 --base <版本> 指定。',
+      );
+    }
     console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
     console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
     return;

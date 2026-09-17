@@ -96,6 +96,42 @@ describe('worktree 跟着项目走，不跟着进程 cwd', () => {
     await manager.release('M1', project);
   });
 
+  test('钉住的基线要当真 —— 不钉的话两次运行没法比', async () => {
+    // 这是 rerun 的地基。不钉基线时，第二次会从「跑它的时候目标分支的 HEAD」
+    // 分叉——而源头那次的产出多半已经合进去了，第二次一开始活儿就是干完的
+    // 状态。两条记录都完整、都自洽，**只是不可比**，而且看不出哪里不对。
+    const project = tempRepo('coagent-proj-');
+    const first = git(project, 'rev-parse', 'HEAD');
+
+    // 目标分支往前走一步：模拟"第一次的产出已经合进去了"。
+    writeFileSync(join(project, 'b.txt'), '第一次跑出来的东西\n');
+    git(project, 'add', '-A');
+    git(project, 'commit', '-q', '-m', '第一次的产出');
+    assert.notEqual(git(project, 'rev-parse', 'HEAD'), first);
+
+    const manager = new GitWorktreeManager();
+    const pinned = await manager.prepare('M2', project, first);
+    assert.equal(pinned.baseRevision, first, '给了基线就必须从那儿分叉，不是从当前 HEAD');
+    assert.ok(
+      !existsSync(join(pinned.cwd, 'b.txt')),
+      '从旧基线分叉出来的工作区里，不该已经有第一次的产出 —— 有就等于这一跑白比了',
+    );
+    await manager.release('M2', project);
+
+    // 不给基线时仍然跟当前 HEAD 走（正常的第一次运行）。
+    const fresh = await manager.prepare('M3', project);
+    assert.equal(fresh.baseRevision, git(project, 'rev-parse', 'HEAD'));
+    await manager.release('M3', project);
+  });
+
+  test('基线不存在时明说，不要把 git 的原文甩给人', async () => {
+    const project = tempRepo('coagent-proj-');
+    await assert.rejects(
+      () => new GitWorktreeManager().prepare('M4', project, 'deadbeefdeadbeef'),
+      (error: unknown) => /分叉基线.*不存在/.test((error as Error).message),
+    );
+  });
+
   test('显式给了 --worktrees 仍然听显式的', async () => {
     const project = tempRepo('coagent-proj-');
     const elsewhere = mkdtempSync(join(tmpdir(), 'coagent-wt-'));

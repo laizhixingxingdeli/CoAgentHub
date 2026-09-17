@@ -49,7 +49,18 @@ export interface MergeOutcome {
 }
 
 export interface WorkspaceManager {
-  prepare(missionId: string, projectRoot: string): Promise<PreparedWorkspace>;
+  /**
+   * @param pinnedBase 指定从哪个版本分叉。不给就用目标分支当前的 HEAD。
+   *
+   * **给了才谈得上比较。** 重跑一条任务时，若两次运行各自从"当时的 HEAD"
+   * 分叉，起点就不是同一个——第二次可能从"第一次的产出已经合进去之后"开始，
+   * 那时活儿都干完了，比出来的成本毫无意义。
+   */
+  prepare(
+    missionId: string,
+    projectRoot: string,
+    pinnedBase?: string,
+  ): Promise<PreparedWorkspace>;
   head(cwd: string): Promise<string>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
@@ -151,7 +162,11 @@ export class GitWorktreeManager implements WorkspaceManager {
     }
   }
 
-  async prepare(missionId: string, projectRoot: string): Promise<PreparedWorkspace> {
+  async prepare(
+    missionId: string,
+    projectRoot: string,
+    pinnedBase?: string,
+  ): Promise<PreparedWorkspace> {
     const repo = resolve(projectRoot);
     const branch = `mission/${missionId}`;
     const root = this.#rootFor(projectRoot);
@@ -176,7 +191,19 @@ export class GitWorktreeManager implements WorkspaceManager {
       };
     }
 
-    const baseRevision = (await run('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+    // 指定了就用指定的；没指定才用目标分支当前的 HEAD。
+    // 指定的那个要先核一下真的存在——传一个不存在的版本，`worktree add` 会
+    // 用一句 git 的原文报错，而调用方（比如重跑）看不出是自己传错了。
+    const baseRevision = pinnedBase
+      ? (await run('git', ['rev-parse', '--verify', `${pinnedBase}^{commit}`], { cwd: repo })
+          .then((r) => r.stdout.trim())
+          .catch(() => {
+            throw new Error(
+              `指定的分叉基线 ${pinnedBase} 在 ${repo} 里不存在。` +
+                '重跑要求两次运行从同一个版本起步，起点找不到就没法比。',
+            );
+          }))
+      : (await run('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
     // 分支可能因为上一次异常退出而残留；先清掉再建，失败不致命。
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
     await run('git', ['branch', '-D', branch], { cwd: repo }).catch(() => undefined);
