@@ -38,6 +38,7 @@
 ## 架构决策
 
 - **adr-0001-web-not-split** — Web 端不做前后端分离，也不引入构建
+- **adr-0002-decision-provider-boundary** — Decision Engine 是横向信号能力，不是第四层
 
 ## 给 Agent 的规则
 

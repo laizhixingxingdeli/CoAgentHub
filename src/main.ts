@@ -9,6 +9,7 @@
  */
 
 import { resolve } from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { createApi } from './api/server.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -237,15 +238,21 @@ export async function startServer(port = 3101, statePath = '.coagent-state.json'
     live: 'live' in built ? built.live : undefined,
     beforeRead: 'refresh' in built ? built.refresh : undefined,
   });
-  server.listen(port, () => {
-    console.log(`CoAgentHub v5 平台已启动：http://127.0.0.1:${port}`);
-    console.log(usePg ? '存储：PostgreSQL' : `存储：文件 ${('store' in built && 'path' in built.store) ? built.store.path : statePath}`);
-    if (built.reconciled.interrupted.length > 0) {
-      console.log(
-        `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
-      );
-    }
-  });
+  // 显式绑 loopback：观测面/API 不对外网口开放。动态 port=0 时日志必须读
+  // server.address()，不能回显调用方传入的 port（那会打出 :0）。
+  await new Promise<void>((done) => server.listen(port, '127.0.0.1', done));
+  const addr = server.address() as AddressInfo;
+  console.log(`CoAgentHub v5 平台已启动：http://${addr.address}:${addr.port}`);
+  console.log(
+    usePg
+      ? '存储：PostgreSQL'
+      : `存储：文件 ${'store' in built && 'path' in built.store ? built.store.path : statePath}`,
+  );
+  if (built.reconciled.interrupted.length > 0) {
+    console.log(
+      `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
+    );
+  }
   return { server, ...built };
 }
 
