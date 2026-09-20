@@ -265,6 +265,7 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
       /DecisionProvider/,
       /DecisionRequest/,
       /DecisionSignal/,
+      /DecisionAnswerSet/,
       /DecisionHook/,
       /DecisionRecord/,
       /\bJev\b/,

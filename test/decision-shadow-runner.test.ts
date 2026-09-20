@@ -22,6 +22,7 @@ import { NoopDecisionProvider } from '../src/application/noop-decision-provider.
 import type {
   ActivityEvent,
   ActivityLog,
+  DecisionAnswerSet,
   DecisionProvider,
   DecisionRequest,
   DecisionSignal,
@@ -52,24 +53,24 @@ function baseStateInput() {
 }
 
 function capturingProvider(
-  signal: DecisionSignal,
+  answers: Readonly<Record<string, DecisionSignal>>,
   sink: { request?: DecisionRequest },
 ): DecisionProvider {
   return {
     kind: 'capture',
-    async decide(request: DecisionRequest): Promise<DecisionSignal> {
+    async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
       sink.request = request;
-      return signal;
+      return { answers };
     },
   };
 }
 
 describe('runDecisionShadow — 成功路径', () => {
-  test('noop：append decision.shadow，data 含必填字段与 signal', async () => {
+  test('noop provider 空包：append decision.shadow，data 含必填字段与 answers:{}', async () => {
     const clock = new FixedClock(new Date('2026-03-20T12:00:00.000Z'));
     const activity = new InMemoryActivityLog(clock);
     const sink: { request?: DecisionRequest } = {};
-    const provider = capturingProvider({ kind: 'noop' }, sink);
+    const provider = capturingProvider({}, sink);
 
     const outcome = await runDecisionShadow({
       provider,
@@ -106,17 +107,20 @@ describe('runDecisionShadow — 成功路径', () => {
       missionId: 'm-1',
       workItemIds: ['w-a', 'w-b'],
     });
-    assert.ok(data.quality === 'success' && 'signal' in data);
-    assert.deepEqual(data.signal, { kind: 'noop' });
+    assert.ok(data.quality === 'success' && 'answers' in data);
+    assert.deepEqual(data.answers, {});
+    assert.equal('signal' in data, false);
   });
 
-  test('choice：signal 原样写入 data', async () => {
+  test('choice：命名 answers 原样写入 data', async () => {
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
-    const signal: DecisionSignal = { kind: 'choice', option: 'prefer-a' };
+    const answers: Readonly<Record<string, DecisionSignal>> = {
+      'q.route': { kind: 'choice', option: 'prefer-a' },
+    };
     const sink: { request?: DecisionRequest } = {};
 
     const outcome = await runDecisionShadow({
-      provider: capturingProvider(signal, sink),
+      provider: capturingProvider(answers, sink),
       activity,
       stateInput: {
         ...baseStateInput(),
@@ -141,20 +145,22 @@ describe('runDecisionShadow — 成功路径', () => {
     const data = event.data as DecisionShadowEventData;
     assert.equal(data.quality, 'success');
     assert.ok(data.quality === 'success');
-    assert.deepEqual(data.signal, signal);
+    assert.deepEqual(data.answers, answers);
     assert.deepEqual(data.ids.workItemIds, ['w-1']);
     assert.equal(data.ids.workItemId, 'w-1');
   });
 
-  test('score：signal 原样写入 data', async () => {
+  test('score：命名 answers 原样写入 data', async () => {
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
-    const signal: DecisionSignal = { kind: 'score', value: 0.75, scale: 'unit' };
+    const answers: Readonly<Record<string, DecisionSignal>> = {
+      'q.score': { kind: 'score', value: 0.75, scale: 'unit' },
+    };
 
     const outcome = await runDecisionShadow({
       provider: {
         kind: 'scorer',
-        async decide(): Promise<DecisionSignal> {
-          return signal;
+        async decide(): Promise<DecisionAnswerSet> {
+          return { answers };
         },
       },
       activity,
@@ -170,12 +176,32 @@ describe('runDecisionShadow — 成功路径', () => {
     assert.equal(data.providerKind, 'scorer');
     assert.equal(data.quality, 'success');
     assert.ok(data.quality === 'success');
-    assert.deepEqual(data.signal, signal);
+    assert.deepEqual(data.answers, answers);
     assert.equal(data.ids.attemptId, 'a-1');
     assert.deepEqual(data.ids.workItemIds, []);
   });
 
-  test('NoopDecisionProvider 集成：quality=success 且 signal.kind=noop', async () => {
+  test('多命名 answers：一次 decide 保留多个 question id', async () => {
+    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const answers: Readonly<Record<string, DecisionSignal>> = {
+      'q.route': { kind: 'choice', option: 'a' },
+      'q.confidence': { kind: 'score', value: 0.4 },
+      'q.hold': { kind: 'noop' },
+    };
+
+    const outcome = await runDecisionShadow({
+      provider: capturingProvider(answers, {}),
+      activity,
+      stateInput: baseStateInput(),
+      workItemIds: ['w-1'],
+    });
+    assert.deepEqual(outcome, { recorded: true, quality: 'success' });
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.ok(data.quality === 'success');
+    assert.deepEqual(data.answers, answers);
+  });
+
+  test('NoopDecisionProvider 集成：quality=success 且 answers={}', async () => {
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
     const outcome = await runDecisionShadow({
       provider: new NoopDecisionProvider(),
@@ -187,17 +213,17 @@ describe('runDecisionShadow — 成功路径', () => {
     const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
     assert.equal(data.providerKind, 'noop');
     assert.ok(data.quality === 'success');
-    assert.deepEqual(data.signal, { kind: 'noop' });
+    assert.deepEqual(data.answers, {});
   });
 });
 
 describe('runDecisionShadow — 失败吞没', () => {
-  test('provider throw：不向调用方抛；append quality=provider_error；无 signal / 无堆栈', async () => {
+  test('provider throw：不向调用方抛；append quality=provider_error；无 answers / 无堆栈', async () => {
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
     const secret = 'super-secret-token-do-not-log';
     const provider: DecisionProvider = {
       kind: 'boom',
-      async decide(): Promise<DecisionSignal> {
+      async decide(): Promise<DecisionAnswerSet> {
         throw new Error(`provider exploded with ${secret}\nSTACK_LINE_1\nSTACK_LINE_2`);
       },
     };
@@ -226,7 +252,9 @@ describe('runDecisionShadow — 失败吞没', () => {
     assert.equal(data.hook, 'PRE_DISPATCH');
     assert.equal(data.schemaVersion, DECISION_STATE_SCHEMA_VERSION);
     assert.deepEqual(data.ids.workItemIds, ['w-1', 'w-2']);
+    assert.equal('answers' in data, false);
     assert.equal('signal' in data, false);
+    assert.equal('error' in data, false);
 
     const raw = JSON.stringify(events[0]);
     assert.equal(raw.includes(secret), false);
@@ -238,7 +266,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
     const provider: DecisionProvider = {
       kind: 'reject',
-      decide(_request: DecisionRequest): Promise<DecisionSignal> {
+      decide(_request: DecisionRequest): Promise<DecisionAnswerSet> {
         return Promise.reject(new Error('async fail'));
       },
     };
@@ -252,7 +280,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     assert.deepEqual(outcome, { recorded: true, quality: 'provider_error' });
     const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
     assert.equal(data.quality, 'provider_error');
-    assert.equal('signal' in data, false);
+    assert.equal('answers' in data, false);
   });
 
   test('activity.append throw：不向调用方抛；返回 audit 未写入 outcome；不另写持久化', async () => {
@@ -299,7 +327,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     };
     const provider: DecisionProvider = {
       kind: 'boom',
-      async decide(): Promise<DecisionSignal> {
+      async decide(): Promise<DecisionAnswerSet> {
         throw new Error('nope');
       },
     };
@@ -337,7 +365,7 @@ describe('runDecisionShadow — 请求形状与边界', () => {
     const sink: { request?: DecisionRequest } = {};
     const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
     await runDecisionShadow({
-      provider: capturingProvider({ kind: 'noop' }, sink),
+      provider: capturingProvider({}, sink),
       activity,
       stateInput: baseStateInput(),
       workItemIds: ['w-1', 'w-2', 'w-3'],
