@@ -142,12 +142,12 @@ describe('JevDecisionProvider wire request', () => {
     assert.equal(transport.lastRequest!.model, 'jev-custom');
   });
 
-  test('候选 trim + 首次去重 + none；空白与字面 none 丢弃', async () => {
+  test('候选 trim + 首次去重 + none；空白与字面 none 丢弃；wire facts 仅 sanitized candidate', async () => {
     const transport = new CaptureTransport();
     const provider = new JevDecisionProvider({ transport });
     const facts = [
       { key: CANDIDATE_EXECUTOR_FACT_KEY, value: '  exec-a  ' },
-      { key: 'other', value: 'x' },
+      { key: 'opaque_key', value: 'opaque-leak-value' },
       { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-b' },
       { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-a' },
       { key: CANDIDATE_EXECUTOR_FACT_KEY, value: '   ' },
@@ -161,17 +161,53 @@ describe('JevDecisionProvider wire request', () => {
       'exec-b',
       PREFERRED_EXECUTOR_NONE_OPTION,
     ]);
-    // facts 原样进入 state，不修改
-    assert.deepEqual(transport.lastRequest!.state.facts, facts);
+    // remote default-deny: only trimmed candidate_executor_id on wire state
+    assert.deepEqual(transport.lastRequest!.state.facts, [
+      { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-a' },
+      { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-b' },
+      { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-a' },
+      { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'exec-b' },
+    ]);
+    const wireJson = JSON.stringify(transport.lastRequest);
+    assert.equal(wireJson.includes('opaque_key'), false);
+    assert.equal(wireJson.includes('opaque-leak-value'), false);
   });
 
-  test('无候选时 preferred_executor 仅 none', async () => {
+  test('无候选时 preferred_executor 仅 none；unknown facts 不进 wire', async () => {
     const transport = new CaptureTransport();
     const provider = new JevDecisionProvider({ transport });
-    await provider.decide(baseRequest([{ key: 'k', value: 'v' }]));
+    await provider.decide(baseRequest([{ key: 'k', value: 'v-secret-leak' }]));
     assert.deepEqual(Object.keys(transport.lastRequest!.questions.preferred_executor.criteria), [
       PREFERRED_EXECUTOR_NONE_OPTION,
     ]);
+    assert.deepEqual(transport.lastRequest!.state.facts, []);
+    const wireJson = JSON.stringify(transport.lastRequest);
+    assert.equal(wireJson.includes('v-secret-leak'), false);
+    assert.equal(wireJson.includes('"k"'), false);
+  });
+
+  test('secret-like raw candidate 不进 wire state 也不进 preferred criteria', async () => {
+    const transport = new CaptureTransport();
+    const provider = new JevDecisionProvider({ transport });
+    const leak = 'Bearer tok-xyz';
+    await provider.decide(
+      baseRequest([
+        { key: CANDIDATE_EXECUTOR_FACT_KEY, value: leak },
+        { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'safe-exec' },
+        { key: 'note', value: 'api_key=should-not-leak' },
+      ]),
+    );
+    assert.deepEqual(Object.keys(transport.lastRequest!.questions.preferred_executor.criteria), [
+      'safe-exec',
+      PREFERRED_EXECUTOR_NONE_OPTION,
+    ]);
+    assert.deepEqual(transport.lastRequest!.state.facts, [
+      { key: CANDIDATE_EXECUTOR_FACT_KEY, value: 'safe-exec' },
+    ]);
+    const wireJson = JSON.stringify(transport.lastRequest);
+    assert.equal(wireJson.includes(leak), false);
+    assert.equal(wireJson.includes('Bearer'), false);
+    assert.equal(wireJson.includes('api_key=should-not-leak'), false);
   });
 
   test('非 PRE_DISPATCH hook throw', async () => {

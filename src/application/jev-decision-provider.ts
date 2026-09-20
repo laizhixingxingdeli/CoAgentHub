@@ -1,7 +1,7 @@
 /**
  * Jev System One —— DecisionProvider 适配器（PRE_DISPATCH only）。
  *
- * 只做 wire 映射：buildDecisionState → transport.systemOne → DecisionAnswerSet。
+ * 只做 wire 映射：buildDecisionState → sanitize(remote) → transport.systemOne → DecisionAnswerSet。
  * 不发网络请求、不带 auth/retry、不写 kernel。
  */
 
@@ -12,6 +12,7 @@ import {
   TASK_TYPE_OPTIONS,
   type OrderedLevel,
 } from './decision-question-registry.ts';
+import { sanitizeDecisionStateForRemote } from './decision-remote-input.ts';
 import { buildDecisionState, type DecisionState } from './decision-state-builder.ts';
 import type {
   DecisionAnswerSet,
@@ -303,7 +304,7 @@ export class JevDecisionProvider implements DecisionProvider {
       fail(`unsupported hook "${request.hook}"`);
     }
 
-    const state = buildDecisionState({
+    const rawState = buildDecisionState({
       hook: request.hook,
       projectId: request.projectId,
       missionId: request.missionId,
@@ -311,8 +312,10 @@ export class JevDecisionProvider implements DecisionProvider {
       ...(request.attemptId !== undefined ? { attemptId: request.attemptId } : {}),
       facts: request.facts,
     });
+    // Remote default-deny: wire state + preferred_executor criteria only from sanitized facts.
+    const state = sanitizeDecisionStateForRemote(rawState);
 
-    const candidateIds = extractCandidateExecutorIds(request.facts);
+    const candidateIds = extractCandidateExecutorIds(state.facts);
     const preferredAllowed = new Set<string>([
       ...candidateIds,
       PREFERRED_EXECUTOR_NONE_OPTION,
