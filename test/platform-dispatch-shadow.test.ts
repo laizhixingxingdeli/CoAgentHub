@@ -1,6 +1,6 @@
 /**
  * Platform.dispatchWorkItems PRE_DISPATCH shadow 接线：
- * 可选 decisionProvider；信号/失败绝不改变真实 dispatch。
+ * 可选 decisionProvider；named answers / 失败绝不改变真实 dispatch。
  */
 
 import { describe, test } from 'node:test';
@@ -21,6 +21,7 @@ import {
 import type {
   ActivityEvent,
   ActivityLog,
+  DecisionAnswerSet,
   DecisionProvider,
   DecisionRequest,
   DecisionSignal,
@@ -71,15 +72,15 @@ function makePlatform(decisionProvider?: DecisionProvider, activity?: ActivityLo
 }
 
 function capturingProvider(
-  signal: DecisionSignal | (() => DecisionSignal),
+  answers: Readonly<Record<string, DecisionSignal>> | (() => DecisionAnswerSet),
   sink: { calls: number; request?: DecisionRequest },
 ): DecisionProvider {
   return {
     kind: 'capture',
-    async decide(request: DecisionRequest): Promise<DecisionSignal> {
+    async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
       sink.calls += 1;
       sink.request = request;
-      return typeof signal === 'function' ? signal() : signal;
+      return typeof answers === 'function' ? answers() : { answers };
     },
   };
 }
@@ -87,7 +88,7 @@ function capturingProvider(
 function throwingProvider(sink: { calls: number }): DecisionProvider {
   return {
     kind: 'throwing',
-    async decide(): Promise<DecisionSignal> {
+    async decide(): Promise<DecisionAnswerSet> {
       sink.calls += 1;
       throw new Error('provider boom');
     },
@@ -171,7 +172,7 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
 
   test('单 item success：1 decide；request 带 workItemId；shadow + dispatched 都在', async () => {
     const sink = { calls: 0, request: undefined as DecisionRequest | undefined };
-    const provider = capturingProvider({ kind: 'noop' }, sink);
+    const provider = capturingProvider({}, sink);
     const { platform, activity } = makePlatform(provider);
     const { attemptId } = await prepareMission(platform, 'M1');
     const workItemId = await createItem(platform, 'M1', attemptId);
@@ -205,7 +206,7 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
 
   test('多 item success：1 decide；request 不带 workItemId；shadow ids 含整批', async () => {
     const sink = { calls: 0, request: undefined as DecisionRequest | undefined };
-    const provider = capturingProvider({ kind: 'noop' }, sink);
+    const provider = capturingProvider({}, sink);
     const { platform, activity } = makePlatform(provider);
     const { attemptId } = await prepareMission(platform, 'M1');
     const w1 = await createItem(platform, 'M1', attemptId, 'W1');
@@ -236,15 +237,15 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
   });
 
   test('choice / score / noop 信号都不改变 dispatch 结果', async () => {
-    const signals: DecisionSignal[] = [
-      { kind: 'choice', option: 'skip-all' },
-      { kind: 'score', value: 0.01, scale: 'confidence' },
-      { kind: 'noop', reason: 'shadow-only' },
+    const answerPacks: ReadonlyArray<Readonly<Record<string, DecisionSignal>>> = [
+      { task_type: { kind: 'choice', option: 'skip-all' } },
+      { semantic_risk: { kind: 'score', value: 0.01, scale: 'confidence' } },
+      { shadow: { kind: 'noop', reason: 'shadow-only' } },
     ];
 
-    for (const [i, signal] of signals.entries()) {
+    for (const [i, answers] of answerPacks.entries()) {
       const sink = { calls: 0, request: undefined as DecisionRequest | undefined };
-      const { platform, activity } = makePlatform(capturingProvider(signal, sink));
+      const { platform, activity } = makePlatform(capturingProvider(answers, sink));
       const missionId = `M-sig-${i}`;
       const { attemptId } = await prepareMission(platform, missionId);
       const workItemId = await createItem(platform, missionId, attemptId);
@@ -263,7 +264,7 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
       const data = shadowEvents(events)[0]!.data as DecisionShadowEventData;
       assert.equal(data.quality, 'success');
       if (data.quality === 'success') {
-        assert.deepEqual(data.signal, signal);
+        assert.deepEqual(data.answers, answers);
       }
     }
   });
@@ -287,14 +288,14 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
     assert.equal(shadows.length, 1);
     const data = shadows[0]!.data as DecisionShadowEventData;
     assert.equal(data.quality, 'provider_error');
-    assert.equal('signal' in data, false);
+    assert.equal('answers' in data, false);
   });
 
   test('shadow append fail：dispatch 仍成功，其它事件正常', async () => {
     const clock = new FixedClock();
     const activity = new ShadowAppendFailActivityLog(clock);
     const sink = { calls: 0, request: undefined as DecisionRequest | undefined };
-    const { platform } = makePlatform(capturingProvider({ kind: 'noop' }, sink), activity);
+    const { platform } = makePlatform(capturingProvider({}, sink), activity);
     const { attemptId } = await prepareMission(platform, 'M1');
     const workItemId = await createItem(platform, 'M1', attemptId);
 

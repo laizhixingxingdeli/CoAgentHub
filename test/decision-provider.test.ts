@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { NoopDecisionProvider } from '../src/application/noop-decision-provider.ts';
 import type {
+  DecisionAnswerSet,
   DecisionProvider,
   DecisionRequest,
   DecisionSignal,
@@ -39,7 +40,7 @@ describe('NoopDecisionProvider', () => {
     assert.equal(provider.kind, 'noop');
   });
 
-  test('任意合法 request 恒返回 { kind: \"noop\" }，且不含 reason', async () => {
+  test('任意合法 request 恒返回严格 { answers: {} }', async () => {
     const provider = new NoopDecisionProvider();
     const requests: DecisionRequest[] = [
       baseRequest,
@@ -54,8 +55,9 @@ describe('NoopDecisionProvider', () => {
       },
     ];
     for (const request of requests) {
-      const signal = await provider.decide(request);
-      assert.deepEqual(signal, { kind: 'noop' });
+      const result = await provider.decide(request);
+      assert.deepEqual(result, { answers: {} });
+      assert.deepEqual(Object.keys(result.answers), []);
     }
   });
 
@@ -68,39 +70,64 @@ describe('NoopDecisionProvider', () => {
       facts: [{ key: 'x', value: '1' }],
     });
     assert.deepEqual(first, second);
-    assert.deepEqual(first, { kind: 'noop' });
+    assert.deepEqual(first, { answers: {} });
   });
 });
 
 describe('DecisionProvider 可替换性', () => {
-  test('第二个内联 provider 满足同一端口类型', async () => {
-    const choiceProvider: DecisionProvider = {
-      kind: 'inline-choice',
-      async decide(request: DecisionRequest): Promise<DecisionSignal> {
+  test('第二个内联 provider 一次返回多个命名 answers，保持不同 question id', async () => {
+    const multiProvider: DecisionProvider = {
+      kind: 'inline-multi',
+      async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
         if (request.hook === 'PRE_DISPATCH') {
-          return { kind: 'choice', option: 'prefer-a' };
+          const answers: Record<string, DecisionSignal> = {
+            task_type: { kind: 'choice', option: 'prefer-a' },
+            semantic_risk: { kind: 'score', value: 0.9, scale: 'unit' },
+            work_order_ambiguous: { kind: 'score', value: 0.2, scale: 'noul' },
+          };
+          return { answers };
         }
-        return { kind: 'score', value: 0.5, scale: 'unit' };
+        return {
+          answers: {
+            post_check: { kind: 'score', value: 0.5, scale: 'unit' },
+          },
+        };
       },
     };
 
-    assert.equal(choiceProvider.kind, 'inline-choice');
-    assert.deepEqual(await choiceProvider.decide(baseRequest), {
-      kind: 'choice',
-      option: 'prefer-a',
+    assert.equal(multiProvider.kind, 'inline-multi');
+    const pre = await multiProvider.decide(baseRequest);
+    assert.deepEqual(pre.answers.task_type, { kind: 'choice', option: 'prefer-a' });
+    assert.deepEqual(pre.answers.semantic_risk, {
+      kind: 'score',
+      value: 0.9,
+      scale: 'unit',
     });
+    assert.deepEqual(pre.answers.work_order_ambiguous, {
+      kind: 'score',
+      value: 0.2,
+      scale: 'noul',
+    });
+    assert.deepEqual(Object.keys(pre.answers).sort(), [
+      'semantic_risk',
+      'task_type',
+      'work_order_ambiguous',
+    ]);
+
     assert.deepEqual(
-      await choiceProvider.decide({ ...baseRequest, hook: 'POST_EXECUTION' }),
-      { kind: 'score', value: 0.5, scale: 'unit' },
+      await multiProvider.decide({ ...baseRequest, hook: 'POST_EXECUTION' }),
+      {
+        answers: {
+          post_check: { kind: 'score', value: 0.5, scale: 'unit' },
+        },
+      },
     );
 
     // 与 Noop 共用同一静态类型槽位：数组元素类型即 DecisionProvider。
-    const providers: DecisionProvider[] = [new NoopDecisionProvider(), choiceProvider];
-    const signals = await Promise.all(
-      providers.map((p) => p.decide(baseRequest)),
-    );
-    assert.deepEqual(signals[0], { kind: 'noop' });
-    assert.equal(signals[1]?.kind, 'choice');
+    const providers: DecisionProvider[] = [new NoopDecisionProvider(), multiProvider];
+    const results = await Promise.all(providers.map((p) => p.decide(baseRequest)));
+    assert.deepEqual(results[0], { answers: {} });
+    assert.equal(results[1]?.answers.task_type?.kind, 'choice');
   });
 });
 
@@ -111,6 +138,7 @@ describe('Decision 边界守卫', () => {
       /DecisionProvider/,
       /DecisionRequest/,
       /DecisionSignal/,
+      /DecisionAnswerSet/,
       /DecisionHook/,
       /\bJev\b/,
       /PRE_DISPATCH/,

@@ -12,7 +12,7 @@ import {
   toDecisionRequest,
   type DecisionStateInput,
 } from './decision-state-builder.ts';
-import type { ActivityLog, DecisionProvider, DecisionSignal } from './ports.ts';
+import type { ActivityLog, DecisionAnswerSet, DecisionProvider } from './ports.ts';
 
 export const DECISION_SHADOW_EVENT_KIND = 'decision.shadow' as const;
 
@@ -33,7 +33,7 @@ export type DecisionShadowEventData =
       readonly providerKind: string;
       readonly ids: DecisionShadowIds;
       readonly quality: 'success';
-      readonly signal: DecisionSignal;
+      readonly answers: DecisionAnswerSet['answers'];
     }
   | {
       readonly schemaVersion: typeof DECISION_STATE_SCHEMA_VERSION;
@@ -71,13 +71,14 @@ export async function runDecisionShadow(
   const request = toDecisionRequest(state);
 
   let quality: DecisionShadowQuality = 'success';
-  let signal: DecisionSignal | undefined;
+  let answers: DecisionAnswerSet['answers'] | undefined;
 
   try {
-    signal = await provider.decide(request);
+    const result = await provider.decide(request);
+    answers = result.answers;
   } catch {
     quality = 'provider_error';
-    signal = undefined;
+    answers = undefined;
   }
 
   const ids: DecisionShadowIds = {
@@ -89,14 +90,14 @@ export async function runDecisionShadow(
   };
 
   const data: DecisionShadowEventData =
-    quality === 'success' && signal !== undefined
+    quality === 'success' && answers !== undefined
       ? {
           schemaVersion: DECISION_STATE_SCHEMA_VERSION,
           hook: stateInput.hook,
           providerKind: provider.kind,
           ids,
           quality: 'success',
-          signal,
+          answers,
         }
       : {
           schemaVersion: DECISION_STATE_SCHEMA_VERSION,

@@ -198,7 +198,12 @@ export type DecisionSignal =
   | { readonly kind: 'score'; readonly value: number; readonly scale?: string }
   | { readonly kind: 'noop'; readonly reason?: string };
 
+/** 一次 decide 返回的命名 answers 包；key 为 question id，value 仍是 DecisionSignal。 */
+export interface DecisionAnswerSet {
+  readonly answers: Readonly<Record<string, DecisionSignal>>;
+}
+
 export interface DecisionProvider {
   readonly kind: string;
-  decide(request: DecisionRequest): Promise<DecisionSignal>;
+  decide(request: DecisionRequest): Promise<DecisionAnswerSet>;
 }
