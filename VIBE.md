@@ -32,6 +32,8 @@
 
 ## Capability 索引
 
+- **http-control-auth** — HTTP 控制面可选鉴权（SEC-002）
+  `createApi` 可注入 `resolveControlPrincipal`；**不注入**时写路由保持历史匿名可写行为（本地与既有测试零摩擦）。注入后，受保护控制写路径在进入原业务逻辑前按 Principal 角色门禁。
 - **web-shell** — 正式 Web 端外壳、项目页与任务详情
   无构建的浏览器原生 ES module，由 `src/api/static.ts` 按扁平文件名吐出（见 ADR-0001）。
 

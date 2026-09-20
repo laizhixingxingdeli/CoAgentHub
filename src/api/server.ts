@@ -23,6 +23,7 @@ import { NoLiveOutput } from '../application/live.ts';
 import type { LiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
 import type { RunContext } from './run-tokens.ts';
+import type { ControlPrincipalResolver } from './control-auth.ts';
 
 /** 客户端 API 版本。破坏性改动时要加。 */
 export const API_VERSION = 'v1';
@@ -57,6 +58,12 @@ export interface ApiDeps {
    * 少一个默认实现，比少一类调用点便宜。
    */
   agentPool?: AgentPoolRepository;
+  /**
+   * 控制面 Principal 解析。注入后，受保护写/控制路由要求 operator；
+   * 不注入则保持历史行为（本地与既有测试零摩擦）。
+   * 与 /api/agent/* 的 run token 正交，不能互相替代。
+   */
+  resolveControlPrincipal?: ControlPrincipalResolver;
 }
 
 class HttpError extends Error {
@@ -93,7 +100,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 }
 
 export function createApi(deps: ApiDeps): Server {
-  const { platform, tokens, deliveries, onMutation, beforeRead } = deps;
+  const { platform, tokens, deliveries, onMutation, beforeRead, resolveControlPrincipal } = deps;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
   const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
 
@@ -105,6 +112,22 @@ export function createApi(deps: ApiDeps): Server {
       throw new HttpError(401, 'UNKNOWN_RUN_TOKEN', 'x-coagent-run 缺失或已失效');
     }
     return context;
+  };
+
+  /**
+   * 受保护控制写路径：未注入 resolver 直接放行；
+   * 注入后缺失/未知凭据 401，非 operator（如 viewer）403。
+   * 错误体不得带回原始凭据。
+   */
+  const requireControl = async (req: IncomingMessage): Promise<void> => {
+    if (!resolveControlPrincipal) return;
+    const principal = await resolveControlPrincipal(req);
+    if (!principal) {
+      throw new HttpError(401, 'CONTROL_UNAUTHORIZED', '控制面凭据缺失或未知');
+    }
+    if (principal.role !== 'operator') {
+      throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+    }
   };
 
   const requireWorkItem = (run: RunContext): string => {
@@ -283,6 +306,7 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     if (method === 'POST' && path === '/api/pools') {
+      await requireControl(req);
       const body = await readJson(req);
       const input: AgentPoolAddInput = body as unknown as AgentPoolAddInput;
       const added = await agentPool.add(input);
@@ -357,6 +381,7 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     if (method === 'POST' && path === '/api/missions') {
+      await requireControl(req);
       const body = await readJson(req);
       return send(res, 201, await platform.createMission(body as never));
     }
@@ -376,18 +401,21 @@ export function createApi(deps: ApiDeps): Server {
 
     const answerMatch = /^\/api\/missions\/([^/]+)\/escalations\/answer$/.exec(path);
     if (method === 'POST' && answerMatch) {
+      await requireControl(req);
       const body = await readJson(req);
       return send(res, 200, await platform.answerEscalation(answerMatch[1], String(body.answer ?? '')));
     }
 
     const reviseMatch = /^\/api\/missions\/([^/]+)\/contract$/.exec(path);
     if (method === 'POST' && reviseMatch) {
+      await requireControl(req);
       const body = await readJson(req);
       return send(res, 200, await platform.reviseContract(reviseMatch[1], body as never));
     }
 
     const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/.exec(path);
     if (method === 'POST' && controlMatch) {
+      await requireControl(req);
       const [, id, verb] = controlMatch;
       const body = await readJson(req);
       if (verb === 'cancel') return send(res, 200, await platform.cancelMission(id, String(body.reason ?? '')));
@@ -397,6 +425,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const finalizeMatch = /^\/api\/missions\/([^/]+)\/finalize$/.exec(path);
     if (method === 'POST' && finalizeMatch) {
+      await requireControl(req);
       const body = await readJson(req);
       return send(res, 200, await platform.finalizeMission(finalizeMatch[1], body as never));
     }
@@ -419,6 +448,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const coordMatch = /^\/api\/missions\/([^/]+)\/coordinator-attempts$/.exec(path);
     if (method === 'POST' && coordMatch) {
+      await requireControl(req);
       const missionId = coordMatch[1];
       const { attemptId } = await platform.startCoordinatorAttempt(missionId);
       const run = tokens.issue({ missionId, attemptId, role: 'coordinator' });
@@ -427,6 +457,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const execMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/executor-attempts$/.exec(path);
     if (method === 'POST' && execMatch) {
+      await requireControl(req);
       const [, missionId, workItemId] = execMatch;
       const { attemptId } = await platform.startExecutorAttempt(missionId, workItemId);
       const run = tokens.issue({ missionId, attemptId, role: 'executor', workItemId });
@@ -435,6 +466,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const finishMatch = /^\/api\/missions\/([^/]+)\/attempts\/([^/]+)\/finish$/.exec(path);
     if (method === 'POST' && finishMatch) {
+      await requireControl(req);
       const [, missionId, attemptId] = finishMatch;
       const body = await readJson(req);
       await platform.finishAttempt(missionId, attemptId, body as never);
