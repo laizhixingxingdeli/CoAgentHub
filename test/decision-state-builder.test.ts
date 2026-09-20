@@ -306,13 +306,15 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
     }
   });
 
-  test('生产路径除 ports/Noop/StateBuilder/ShadowRunner/platform 外不得出现实际 provider.decide 接线', () => {
+  test('生产路径除 ports/Noop/StateBuilder/ShadowRunner/Jev/platform 外不得出现实际 provider.decide 接线', () => {
     const allowedDecideFiles = new Set([
       'src/application/ports.ts',
       'src/application/noop-decision-provider.ts',
       'src/application/decision-state-builder.ts',
       // HOPT-04-A：与 dispatch 解耦的 shadow 审计原语，可调用 decide。
       'src/application/decision-shadow-runner.ts',
+      // HOPT-05-B2：Jev System One mapper/provider（adapter 内 .decide）。
+      'src/application/jev-decision-provider.ts',
       // HOPT-04-B：唯一允许的生产接线——platform.dispatchWorkItems PRE_DISPATCH shadow。
       'src/application/platform.ts',
     ]);
