@@ -385,14 +385,18 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
     }
   });
 
-  test('全 src 不出现 QuestionRegistry 或 DecisionRecord 持久化 API', () => {
-    const banned = [/QuestionRegistry/, /DecisionRecord/];
+  test('全 src：QuestionRegistry/题集仅允许唯一 registry 文件；DecisionRecord 持久化仍禁止', () => {
+    const registryOnly = 'src/application/decision-question-registry.ts';
     for (const file of walkTs(join(root, 'src'))) {
       const source = readFileSync(file, 'utf8');
       const rel = relPosix(file);
-      for (const re of banned) {
-        assert.doesNotMatch(source, re, `${rel}: 出现 ${re}`);
+      assert.doesNotMatch(source, /DecisionRecord/, `${rel}: 出现 DecisionRecord`);
+      if (rel === registryOnly) {
+        // HOPT-05-B1：唯一允许承载 QuestionRegistry / 题集概念的只读数据文件。
+        continue;
       }
+      assert.doesNotMatch(source, /QuestionRegistry/, `${rel}: QuestionRegistry 仅允许 ${registryOnly}`);
+      assert.doesNotMatch(source, /题集/, `${rel}: 题集概念仅允许 ${registryOnly}`);
     }
   });
 });
