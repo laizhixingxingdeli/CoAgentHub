@@ -519,7 +519,7 @@ export class Platform {
     return {
       available: true,
       projectName: memory.projectName,
-      constitution: memory.constitution,
+      projectProfile: memory.projectProfile,
       // 只给索引，正文按需取——把所有 Spec 全文塞进每一轮对话是纯浪费。
       specs: memory.specs.map((s) => ({ slug: s.slug, title: s.title })),
       decisions: memory.decisions.map((d) => ({ slug: d.slug, title: d.title })),
@@ -744,7 +744,7 @@ export class Platform {
     const root = mission.workspaceRef?.projectRoot;
     if (root) {
       try {
-        projectRules = readProjectMemory(root, mission.projectId).constitution;
+        projectRules = readProjectMemory(root, mission.projectId).projectProfile;
       } catch {
         projectRules = undefined;
       }

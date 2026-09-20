@@ -1,8 +1,5 @@
 # coagenthub-v5
 
-> 本文件由 CoAgentHub 生成，**不要手工编辑** —— 改动会在下次生成时丢失。
-> 内容来自 `.coagent/`，跟代码同一个版本。
-
 ## Purpose
 
 CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追踪、可验证、可恢复的工程执行，而不是一次性对话脚本。
@@ -60,22 +57,3 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 不用 `enum`，不用 constructor parameter properties（同上）。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
 - 注释写**为什么**，不写代码在做什么。特别是写清楚「不这么做会怎样」。
-
-## Capability 索引
-
-- **http-control-auth** — HTTP 控制面可选鉴权（SEC-002）
-  `createApi` 可注入 `resolveControlPrincipal`；**不注入**时写路由保持历史匿名可写行为（本地与既有测试零摩擦）。注入后，受保护控制写路径在进入原业务逻辑前按 Principal 角色门禁。
-- **web-shell** — 正式 Web 端外壳、项目页与任务详情
-  无构建的浏览器原生 ES module，由 `src/api/static.ts` 按扁平文件名吐出（见 ADR-0001）。
-
-## 架构决策
-
-- **adr-0001-web-not-split** — Web 端不做前后端分离，也不引入构建
-- **adr-0002-decision-provider-boundary** — Decision Engine 是横向信号能力，不是第四层
-
-## 给 Agent 的规则
-
-- 实现只是把既有行为修回来 → **不要**动 Living Spec。
-- 新增或改变了可观察行为 → 更新对应 Capability 的 Living Spec。
-- 跨 Mission 的长期技术取舍 → 写一份 ADR，说清楚为什么这么选。
-- 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。

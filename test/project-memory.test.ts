@@ -87,32 +87,78 @@ function tempRepo(withMemory = false): string {
 }
 
 describe('读写 .coagent/', () => {
-  test('init 只建骨架，不预填一堆没人信的模板文字', () => {
+  test('init 只建 project.md 骨架，不建 legacy yaml/constitution', () => {
     const repo = tempRepo();
     const created = initProjectMemory(repo, 'demo');
-    assert.ok(created.includes('.coagent/project.yaml'));
-    assert.ok(created.includes('.coagent/architecture/constitution.md'));
+    assert.ok(created.includes('.coagent/project.md'));
+    assert.ok(!created.includes('.coagent/project.yaml'));
+    assert.ok(!created.includes('.coagent/architecture/constitution.md'));
+    assert.equal(existsSync(join(repo, '.coagent', 'project.yaml')), false);
+    assert.equal(existsSync(join(repo, '.coagent', 'architecture', 'constitution.md')), false);
 
     const memory = readProjectMemory(repo);
     assert.equal(memory.exists, true);
     assert.equal(memory.projectName, 'demo');
+    assert.ok(memory.projectProfile?.startsWith('# demo'));
     assert.deepEqual(memory.specs, [], '刚建好不该有任何 Living Spec');
   });
 
-  test('重复 init 不覆盖已有内容', () => {
+  test('重复 init 不覆盖已有 project.md', () => {
     const repo = tempRepo();
     initProjectMemory(repo, 'demo');
-    const path = join(repo, '.coagent', 'architecture', 'constitution.md');
-    writeFileSync(path, '# 架构约束\n\n我自己写的东西\n', 'utf8');
+    const path = join(repo, '.coagent', 'project.md');
+    writeFileSync(path, '# demo\n\n我自己写的东西\n', 'utf8');
     const second = initProjectMemory(repo, 'demo');
     assert.equal(second.length, 0, '第二次不该再建任何文件');
     assert.match(readFileSync(path, 'utf8'), /我自己写的东西/);
   });
 
-  test('VIBE.md 写明它是生成物 —— 不写的话总有人往里加东西然后丢掉', () => {
+  test('legacy-only 仍可读 name + projectProfile', () => {
+    const repo = tempRepo();
+    mkdirSync(join(repo, '.coagent', 'architecture'), { recursive: true });
+    writeFileSync(join(repo, '.coagent', 'project.yaml'), 'name: legacy-demo\n', 'utf8');
+    writeFileSync(
+      join(repo, '.coagent', 'architecture', 'constitution.md'),
+      '# 架构约束\n\nkernel 零依赖。\n',
+      'utf8',
+    );
+    const memory = readProjectMemory(repo);
+    assert.equal(memory.projectName, 'legacy-demo');
+    assert.ok(memory.projectProfile);
+    assert.match(memory.projectProfile, /^# legacy-demo\n/);
+    assert.match(memory.projectProfile, /kernel 零依赖/);
+    assert.doesNotMatch(memory.projectProfile, /^# 架构约束/m);
+  });
+
+  test('project.md 与 legacy 并存时 project.md 胜出', () => {
+    const repo = tempRepo();
+    mkdirSync(join(repo, '.coagent', 'architecture'), { recursive: true });
+    writeFileSync(join(repo, '.coagent', 'project.yaml'), 'name: yaml-name\n', 'utf8');
+    writeFileSync(
+      join(repo, '.coagent', 'architecture', 'constitution.md'),
+      '# 架构约束\n\nlegacy body\n',
+      'utf8',
+    );
+    writeFileSync(join(repo, '.coagent', 'project.md'), '# canonical\n\nfrom project.md\n', 'utf8');
+    const memory = readProjectMemory(repo);
+    assert.equal(memory.projectName, 'canonical');
+    assert.equal(memory.projectProfile, '# canonical\n\nfrom project.md\n');
+  });
+
+  test('VIBE.md 直插 projectProfile 小节、Capability/ADR 索引与生成物警告', () => {
     const repo = tempRepo(true);
     const vibe = generateVibe(readProjectMemory(repo));
     assert.match(vibe, /不要手工编辑/);
+    assert.doesNotMatch(vibe, /## 项目概览/);
+    assert.match(vibe, /## Purpose/);
+    assert.match(vibe, /## Core Model/);
+    assert.match(vibe, /## Constraints/);
+    const purpose = vibe.indexOf('## Purpose');
+    const core = vibe.indexOf('## Core Model');
+    const constraints = vibe.indexOf('## Constraints');
+    const caps = vibe.indexOf('## Capability 索引');
+    assert.ok(purpose >= 0 && core > purpose && constraints > core && caps > constraints,
+      '## Purpose/Core Model/Constraints 须在 Capability 索引前');
     assert.match(vibe, /scheduling/, 'Capability 索引要在');
     assert.match(vibe, /同一 Project 同时只有一个/, '索引要带一句摘要，不能只有标题');
   });
@@ -130,7 +176,7 @@ describe('读写 .coagent/', () => {
         },
       ],
       decisions: [],
-      constitution: undefined,
+      projectProfile: undefined,
       root: '/tmp/x',
       exists: true,
       projectName: 'demo',
@@ -139,7 +185,7 @@ describe('读写 .coagent/', () => {
     assert.doesNotMatch(vibe, /^\s+## slidingWindows/m, '标题不该被当成摘要印出来');
   });
 
-  test('没有 project.yaml 时用传进来的项目名，不用目录名 —— 实测踩到的', () => {
+  test('没有 project.md/legacy 时用传进来的项目名，不用目录名 —— 实测踩到的', () => {
     // 落地时读的是 Mission 的 worktree，目录名是 Mission ID。靠目录名兜底
     // 会让 VIBE.md 的标题变成「M-ctx」这种 Mission 名，而它是**项目**的门面。
     const worktree = mkdtempSync(join(tmpdir(), 'M-ctx-'));
@@ -147,6 +193,13 @@ describe('读写 .coagent/', () => {
     assert.match(generateVibe(readProjectMemory(worktree, 'v5-demo')), /^# v5-demo$/m);
     // 不传就只能退回目录名——这正是要避免的，所以留个对照。
     assert.doesNotMatch(generateVibe(readProjectMemory(worktree)), /^# v5-demo$/m);
+  });
+
+  test('本仓库已收敛到 project.md，legacy 文件不在', () => {
+    const root = join(import.meta.dirname, '..');
+    assert.equal(existsSync(join(root, '.coagent', 'project.md')), true);
+    assert.equal(existsSync(join(root, '.coagent', 'project.yaml')), false);
+    assert.equal(existsSync(join(root, '.coagent', 'architecture', 'constitution.md')), false);
   });
 });
 
@@ -283,11 +336,13 @@ describe('给 agent 的项目上下文', () => {
     const index = (await platform.getProjectContext('M1')) as {
       available: boolean;
       specs: { slug: string }[];
+      projectProfile?: string;
       constitution?: string;
     };
     assert.equal(index.available, true);
     assert.deepEqual(index.specs.map((s) => s.slug), ['scheduling']);
-    assert.ok(index.constitution, '架构约束是红线，要默认给');
+    assert.ok(index.projectProfile, '项目画像是红线，要默认给');
+    assert.equal('constitution' in index, false);
     assert.ok(
       !JSON.stringify(index).includes('同一 Project 同时只有一个 Mission 在改代码'),
       '默认不该带 Spec 正文——那是纯浪费',

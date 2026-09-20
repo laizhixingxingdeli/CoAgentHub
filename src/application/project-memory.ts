@@ -16,6 +16,10 @@
  *
  * Living Spec 按**稳定的 Capability** 组织，不是每个 Mission 一份。
  * 一年下来 Mission 有几百条，Capability 只有十几个。
+ *
+ * 项目级稳定认知的唯一 Source of Truth 是 `.coagent/project.md`
+ *（`projectProfile`）。legacy `project.yaml` + `architecture/constitution.md`
+ * 仅在 project.md 不存在时可读。
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -37,7 +41,8 @@ export interface ProjectMemory {
   readonly root: string;
   readonly exists: boolean;
   readonly projectName: string;
-  readonly constitution: string | undefined;
+  /** 整个 project.md（含首个 H1）；legacy 路径下合成。 */
+  readonly projectProfile: string | undefined;
   readonly specs: { slug: string; title: string; body: string }[];
   readonly decisions: { slug: string; title: string; body: string }[];
 }
@@ -47,6 +52,10 @@ const DIR = '.coagent';
 function firstHeading(body: string, fallback: string): string {
   const line = body.split(/\r?\n/).find((l) => l.startsWith('# '));
   return line ? line.slice(2).trim() : fallback;
+}
+
+function stripHeading(body: string): string {
+  return body.replace(/^#\s+.*\r?\n/, '');
 }
 
 function readDocs(dir: string): { slug: string; title: string; body: string }[] {
@@ -61,43 +70,75 @@ function readDocs(dir: string): { slug: string; title: string; body: string }[] 
     });
 }
 
+function dirFallbackName(projectRoot: string): string {
+  return resolve(projectRoot).split(/[\\/]/).pop() ?? 'project';
+}
+
+/** legacy：只认 `name:` 这一行。不引 YAML 解析器。 */
+function readLegacyYamlName(root: string): string | undefined {
+  const path = join(root, 'project.yaml');
+  if (!existsSync(path)) return undefined;
+  const line = readFileSync(path, 'utf8')
+    .split(/\r?\n/)
+    .find((l) => l.trim().startsWith('name:'));
+  if (!line) return undefined;
+  const name = line.split(':').slice(1).join(':').trim();
+  return name || undefined;
+}
+
+function readLegacyConstitutionBody(root: string): string | undefined {
+  const path = join(root, 'architecture', 'constitution.md');
+  if (!existsSync(path)) return undefined;
+  return readFileSync(path, 'utf8');
+}
+
 /**
- * @param fallbackName 没有 project.yaml 时用它当项目名。**必须传 projectId**，
+ * @param fallbackName 没有 project.md / legacy name 时用它当项目名。**必须传 projectId**，
  *   不能靠目录名兜底——落地时读的是 Mission 的 worktree，那个目录叫
  *   Mission ID，于是 VIBE.md 的标题会变成「M-ctx」而不是项目名。
  */
 export function readProjectMemory(projectRoot: string, fallbackName?: string): ProjectMemory {
   const root = resolve(projectRoot, DIR);
-  const constitutionPath = join(root, 'architecture', 'constitution.md');
-  return {
+  const projectMdPath = join(root, 'project.md');
+  const specs = readDocs(join(root, 'specs'));
+  const decisions = readDocs(join(root, 'architecture', 'decisions'));
+  const base = {
     root,
     exists: existsSync(root),
-    projectName: readProjectName(root, projectRoot, fallbackName),
-    constitution: existsSync(constitutionPath)
-      ? readFileSync(constitutionPath, 'utf8')
-      : undefined,
-    specs: readDocs(join(root, 'specs')),
-    decisions: readDocs(join(root, 'architecture', 'decisions')),
+    specs,
+    decisions,
   };
-}
 
-function readProjectName(root: string, projectRoot: string, fallbackName?: string): string {
-  const path = join(root, 'project.yaml');
-  if (!existsSync(path)) {
-    return fallbackName ?? resolve(projectRoot).split(/[\\/]/).pop() ?? 'project';
+  // canonical：project.md 存在就绝不再读 legacy
+  if (existsSync(projectMdPath)) {
+    const projectProfile = readFileSync(projectMdPath, 'utf8');
+    return {
+      ...base,
+      projectName: firstHeading(projectProfile, fallbackName ?? dirFallbackName(projectRoot)),
+      projectProfile,
+    };
   }
-  // 只认 `name:` 这一行。引 YAML 解析器不值得——这里只需要一个名字。
-  const line = readFileSync(path, 'utf8')
-    .split(/\r?\n/)
-    .find((l) => l.trim().startsWith('name:'));
-  return line ? line.split(':').slice(1).join(':').trim() : 'project';
+
+  // legacy：yaml name → fallback → 目录名；profile = `# name\n\n` + constitution 去首 H1
+  const legacyName =
+    readLegacyYamlName(root) ?? fallbackName ?? dirFallbackName(projectRoot);
+  const constitution = readLegacyConstitutionBody(root);
+  const projectProfile = constitution
+    ? `# ${legacyName}\n\n${stripHeading(constitution).replace(/^\r?\n/, '')}`
+    : undefined;
+
+  return {
+    ...base,
+    projectName: legacyName,
+    projectProfile,
+  };
 }
 
 /**
  * 在一个还没有 `.coagent/` 的仓库里建出骨架。
  *
- * 刻意只建目录和一份很短的 constitution：**内容该由用它的人写**，
- * 平台预填一堆模板文字只会被原样留在那儿，然后没人相信它。
+ * 只建 `project.md` 和 specs/decisions 占位。内容该由用它的人写；
+ * 平台预填一堆具体项目用途只会被原样留在那儿，然后没人相信它。
  */
 export function initProjectMemory(projectRoot: string, projectName: string): string[] {
   const root = resolve(projectRoot, DIR);
@@ -110,16 +151,23 @@ export function initProjectMemory(projectRoot: string, projectName: string): str
   };
 
   ensure(
-    join(root, 'project.yaml'),
-    ['# 项目长期事实的锚点。跟代码同一个版本。', `name: ${projectName}`, ''].join('\n'),
-  );
-  ensure(
-    join(root, 'architecture', 'constitution.md'),
+    join(root, 'project.md'),
     [
-      '# 架构约束',
+      `# ${projectName}`,
       '',
-      '这里写**不可协商**的东西：分层边界、禁止的依赖方向、必须守住的不变量。',
-      '写进来的每一条都会被当成红线传给协调者和执行者，所以只写真的红线。',
+      '<!-- 项目级稳定认知。写用途、核心模型、不变量与约束；不要写 Mission 历史。 -->',
+      '',
+      '## Purpose',
+      '',
+      '（这个项目是做什么的、为谁服务。）',
+      '',
+      '## Core Model',
+      '',
+      '（稳定的领域对象与关系，不是当前 Sprint 的任务列表。）',
+      '',
+      '## Constraints',
+      '',
+      '（不可协商的红线：分层、依赖、技术选型边界。）',
       '',
     ].join('\n'),
   );
@@ -198,10 +246,8 @@ export function generateVibe(memory: ProjectMemory): string {
   lines.push(`> 内容来自 \`${DIR}/\`，跟代码同一个版本。`);
   lines.push('');
 
-  if (memory.constitution) {
-    lines.push('## 架构约束');
-    lines.push('');
-    lines.push(stripHeading(memory.constitution).trim());
+  if (memory.projectProfile) {
+    lines.push(stripHeading(memory.projectProfile).trim());
     lines.push('');
   }
 
@@ -237,10 +283,6 @@ export function generateVibe(memory: ProjectMemory): string {
   lines.push('- 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。');
   lines.push('');
   return lines.join('\n');
-}
-
-function stripHeading(body: string): string {
-  return body.replace(/^#\s+.*\r?\n/, '');
 }
 
 function firstParagraph(body: string): string {
