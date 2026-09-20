@@ -27,6 +27,7 @@ export type {
   ExecutionResultBody,
   MemoryDeltaProposal,
   MissionContract,
+  MissionExecutionMode,
   MissionResultBody,
   OriginChannel,
   PlanBody,

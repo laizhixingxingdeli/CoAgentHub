@@ -11,6 +11,7 @@ import type {
   WaitReason,
   WorkspaceRef,
   MissionContract,
+  MissionExecutionMode,
   MissionResultBody,
   OriginChannel,
   PlanBody,
@@ -57,6 +58,8 @@ export interface MissionInit {
   contract?: MissionContract;
   /** Mission 从哪个 Host/会话发起；结果最终回到这里。 */
   origin?: OriginChannel;
+  /** 执行保障档位；缺省/非法 -> standard。 */
+  executionMode?: MissionExecutionMode;
 }
 
 /**
@@ -84,11 +87,13 @@ export class Mission {
   #waitDetail: string | undefined;
   #updatedAt: string | undefined;
   #paused = false;
+  #executionMode: MissionExecutionMode;
 
   constructor(init: MissionInit) {
     this.#id = init.id;
     this.#projectId = init.projectId;
     this.#project = init.project;
+    this.#executionMode = Mission.#normalizeExecutionMode(init.executionMode);
     if (init.origin) {
       this.#origin = freezePayload({ ...init.origin });
     }
@@ -108,6 +113,11 @@ export class Mission {
 
   get status(): MissionStatus {
     return this.#status;
+  }
+
+  /** 创建时选定的执行保障档位；只读。 */
+  get executionMode(): MissionExecutionMode {
+    return this.#executionMode;
   }
 
   /**
@@ -454,6 +464,7 @@ export class Mission {
       waitDetail: this.#waitDetail,
       updatedAt: this.#updatedAt,
       paused: this.#paused,
+      executionMode: this.#executionMode,
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
@@ -462,7 +473,12 @@ export class Mission {
 
   /** 直接装配历史状态，不重放动作、不重新校验流转。 */
   static restore(snapshot: MissionSnapshot, project: Project): Mission {
-    const mission = new Mission({ id: snapshot.id, projectId: snapshot.projectId, project });
+    const mission = new Mission({
+      id: snapshot.id,
+      projectId: snapshot.projectId,
+      project,
+      executionMode: Mission.#normalizeExecutionMode(snapshot.executionMode),
+    });
     mission.#status = snapshot.status as MissionStatus;
     mission.#contract = snapshot.contract as Readonly<MissionContract> | undefined;
     mission.#contractRevision = snapshot.contractRevision ?? 0;
@@ -486,6 +502,13 @@ export class Mission {
     );
     mission.#coordinatorSeq = snapshot.coordinatorSeq ?? 0;
     return mission;
+  }
+
+  static #normalizeExecutionMode(value: unknown): MissionExecutionMode {
+    if (value === 'lightweight' || value === 'standard' || value === 'high_assurance') {
+      return value;
+    }
+    return 'standard';
   }
 
   #isTerminal(): boolean {

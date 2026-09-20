@@ -1,6 +1,6 @@
 import { InvariantViolationError } from './errors.ts';
 import { Mission } from './mission.ts';
-import type { MissionContract, OriginChannel } from './payloads.ts';
+import type { MissionContract, MissionExecutionMode, OriginChannel } from './payloads.ts';
 import type { MissionSnapshot, ProjectSnapshot } from './snapshot.ts';
 
 export interface ProjectInit {
@@ -33,7 +33,12 @@ export class Project {
     return [...this.#missions];
   }
 
-  createMission(init: { id: string; contract?: MissionContract; origin?: OriginChannel }): Mission {
+  createMission(init: {
+    id: string;
+    contract?: MissionContract;
+    origin?: OriginChannel;
+    executionMode?: MissionExecutionMode;
+  }): Mission {
     if (this.#missions.some((mission) => mission.id === init.id)) {
       throw new InvariantViolationError(
         'DUPLICATE_ID',
@@ -46,6 +51,7 @@ export class Project {
       project: this,
       contract: init.contract,
       origin: init.origin,
+      executionMode: init.executionMode,
     });
     this.#missions.push(mission);
     return mission;

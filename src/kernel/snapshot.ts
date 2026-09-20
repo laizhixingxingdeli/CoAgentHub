@@ -9,6 +9,8 @@
  * 而历史状态是既成事实，不该被今天的规则重新审一遍。
  */
 
+import type { MissionExecutionMode } from './payloads.ts';
+
 export interface AttemptSnapshot {
   id: string;
   kind: 'coordinator' | 'executor';
@@ -66,6 +68,8 @@ export interface MissionSnapshot {
   /** 最后一次状态变化的时间。 */
   updatedAt?: string;
   paused?: boolean;
+  /** 老快照可能没有；restore 时缺省/非法 -> standard。 */
+  executionMode?: MissionExecutionMode;
   workItems: WorkItemSnapshot[];
   coordinatorAttempts: AttemptSnapshot[];
   coordinatorSeq: number;

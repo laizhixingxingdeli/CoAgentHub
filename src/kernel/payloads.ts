@@ -28,6 +28,9 @@ export interface OriginChannel {
   readonly rerunOf?: string;
 }
 
+/** Mission 执行保障档位：创建时选定，全程只读。 */
+export type MissionExecutionMode = 'lightweight' | 'standard' | 'high_assurance';
+
 export interface MissionContract {
   readonly intent: string;
   readonly acceptance: readonly string[];

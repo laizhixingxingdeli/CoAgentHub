@@ -92,7 +92,15 @@ describe('Project / Mission: 创建', () => {
         `Project.${key}`,
       );
     }
-    for (const key of ['id', 'projectId', 'status', 'isMutating', 'workItems', 'coordinatorAttempts']) {
+    for (const key of [
+      'id',
+      'projectId',
+      'status',
+      'isMutating',
+      'workItems',
+      'coordinatorAttempts',
+      'executionMode',
+    ]) {
       assert.throws(
         () => {
           (mission as unknown as Record<string, unknown>)[key] = 'x';
@@ -100,6 +108,56 @@ describe('Project / Mission: 创建', () => {
         TypeError,
         `Mission.${key}`,
       );
+    }
+  });
+});
+
+describe('Mission: executionMode', () => {
+  test('新建默认 standard，快照写出 concrete standard', () => {
+    const mission = freshMission();
+    assert.equal(mission.executionMode, 'standard');
+    assert.equal(mission.toSnapshot().executionMode, 'standard');
+  });
+
+  test('Project.createMission 各显式档位 getter/snapshot 一致', () => {
+    for (const mode of ['lightweight', 'standard', 'high_assurance'] as const) {
+      const mission = Project.create({ id: `p-em-${mode}` }).createMission({
+        id: `m-${mode}`,
+        executionMode: mode,
+      });
+      assert.equal(mission.executionMode, mode);
+      assert.equal(mission.toSnapshot().executionMode, mode);
+    }
+  });
+
+  test('老快照缺字段 restore -> standard，后续 snapshot 显式 standard', () => {
+    const project = Project.create({ id: 'p-em-old' });
+    const base = project.createMission({ id: 'm-old' });
+    const snap = base.toSnapshot();
+    delete snap.executionMode;
+    const restored = Mission.restore(snap, project);
+    assert.equal(restored.executionMode, 'standard');
+    assert.equal(restored.toSnapshot().executionMode, 'standard');
+  });
+
+  test('lightweight / high_assurance 往返保留', () => {
+    for (const mode of ['lightweight', 'high_assurance'] as const) {
+      const project = Project.create({ id: `p-rt-${mode}` });
+      const mission = project.createMission({ id: `m-rt-${mode}`, executionMode: mode });
+      const restored = Mission.restore(mission.toSnapshot(), project);
+      assert.equal(restored.executionMode, mode);
+      assert.equal(restored.toSnapshot().executionMode, mode);
+    }
+  });
+
+  test("损坏 'nope' 与 null restore -> standard", () => {
+    const project = Project.create({ id: 'p-em-bad' });
+    const base = project.createMission({ id: 'm-bad' });
+    for (const bad of ['nope', null] as const) {
+      const snap = base.toSnapshot();
+      (snap as { executionMode?: unknown }).executionMode = bad as never;
+      const restored = Mission.restore(snap, project);
+      assert.equal(restored.executionMode, 'standard');
     }
   });
 });
