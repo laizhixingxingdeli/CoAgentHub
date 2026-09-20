@@ -305,12 +305,18 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
     }
   });
 
-  test('生产路径除 ports/Noop/StateBuilder 外不得出现实际 provider.decide 接线', () => {
+  test('生产路径除 ports/Noop/StateBuilder/ShadowRunner/platform 外不得出现实际 provider.decide 接线', () => {
     const allowedDecideFiles = new Set([
       'src/application/ports.ts',
       'src/application/noop-decision-provider.ts',
       'src/application/decision-state-builder.ts',
+      // HOPT-04-A：与 dispatch 解耦的 shadow 审计原语，可调用 decide。
+      'src/application/decision-shadow-runner.ts',
+      // HOPT-04-B：唯一允许的生产接线——platform.dispatchWorkItems PRE_DISPATCH shadow。
+      'src/application/platform.ts',
     ]);
+    // platform 可调用 runDecisionShadow，但不得直接 .decide / 装配 Noop / 手建 State。
+    const platformShadowOnly = 'src/application/platform.ts';
     const srcDir = join(root, 'src');
     for (const file of walkTs(srcDir)) {
       const rel = relPosix(file);
@@ -322,6 +328,29 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
           source,
           /\.decide\s*\(/,
           `${rel}: StateBuilder 不得调用 provider.decide`,
+        );
+        continue;
+      }
+      if (rel === platformShadowOnly) {
+        assert.doesNotMatch(
+          source,
+          /\.decide\s*\(/,
+          `${rel}: 只能经 runDecisionShadow，不得直接 provider.decide`,
+        );
+        assert.doesNotMatch(
+          source,
+          /NoopDecisionProvider/,
+          `${rel}: 不得装配 NoopDecisionProvider（composition root 另议）`,
+        );
+        assert.doesNotMatch(
+          source,
+          /buildDecisionState|toDecisionRequest/,
+          `${rel}: 不得直接接线 StateBuilder`,
+        );
+        assert.match(
+          source,
+          /runDecisionShadow/,
+          `${rel}: 必须经 runDecisionShadow 做 PRE_DISPATCH shadow`,
         );
         continue;
       }
@@ -346,6 +375,11 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
         source,
         /DecisionProvider/,
         `${rel}: 不得提前引用 DecisionProvider`,
+      );
+      assert.doesNotMatch(
+        source,
+        /runDecisionShadow|decision-shadow-runner|DECISION_SHADOW_EVENT_KIND/,
+        `${rel}: 不得接线 shadow runner（唯一允许：platform.ts）`,
       );
     }
   });

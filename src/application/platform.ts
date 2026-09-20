@@ -30,7 +30,7 @@ import type {
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
-import type { ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type { ActivityLog, Clock, DecisionProvider, IdGenerator, ProjectRepository } from './ports.ts';
 import type { DeliveryRepository } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
@@ -41,6 +41,7 @@ import {
   readProjectMemory,
   writeVibe,
 } from './project-memory.ts';
+import { runDecisionShadow } from './decision-shadow-runner.ts';
 
 /** 平台规则被违反（区别于领域流转错误）。 */
 export class PlatformRuleError extends Error {
@@ -63,6 +64,11 @@ export interface PlatformDeps {
   activity: ActivityLog;
   clock: Clock;
   ids: IdGenerator;
+  /**
+   * 可选 DecisionProvider。仅用于 PRE_DISPATCH shadow 审计：
+   * 不注入则完全跳过；注入后信号/失败也不影响真实 dispatch。
+   */
+  decisionProvider?: DecisionProvider;
 }
 
 export interface CreateMissionInput {
@@ -81,6 +87,7 @@ export class Platform {
   #workspace: WorkspaceManager | undefined;
   #artifacts: ArtifactStore;
   #clock: Clock;
+  #decisionProvider: DecisionProvider | undefined;
 
   constructor(deps: PlatformDeps) {
     this.#projects = deps.projects;
@@ -90,6 +97,7 @@ export class Platform {
     this.#workspace = deps.workspace;
     this.#artifacts = deps.artifacts ?? new InlineArtifactStore();
     this.#clock = deps.clock;
+    this.#decisionProvider = deps.decisionProvider;
   }
 
   /* =============================== L3 面 =============================== */
@@ -913,6 +921,24 @@ export class Platform {
       // 阶段跑执行者。少了这一步，重新派发出去的工单永远不会被执行——
       // 而界面上看它就是"已派发"，看不出为什么不动。实测踩到过一次死锁。
       mission.startExecuting();
+    }
+
+    // PRE_DISPATCH shadow：确认硬规则全部通过之后、真实 dispatch 之前。
+    // 信号 / provider 失败 / shadow append 失败都不改变后续 item.dispatch。
+    if (this.#decisionProvider) {
+      const soleWorkItemId = workItemIds.length === 1 ? workItemIds[0] : undefined;
+      await runDecisionShadow({
+        provider: this.#decisionProvider,
+        activity: this.#activity,
+        stateInput: {
+          hook: 'PRE_DISPATCH',
+          projectId: mission.projectId,
+          missionId: mission.id,
+          attemptId,
+          ...(soleWorkItemId !== undefined ? { workItemId: soleWorkItemId } : {}),
+        },
+        workItemIds: [...workItemIds],
+      });
     }
 
     for (const item of items) item.dispatch();
