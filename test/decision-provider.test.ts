@@ -57,6 +57,7 @@ describe('NoopDecisionProvider', () => {
     for (const request of requests) {
       const result = await provider.decide(request);
       assert.deepEqual(result, { answers: {} });
+      assert.equal('meta' in result, false);
       assert.deepEqual(Object.keys(result.answers), []);
     }
   });

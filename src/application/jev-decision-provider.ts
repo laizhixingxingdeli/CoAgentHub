@@ -15,6 +15,7 @@ import {
 import { sanitizeDecisionStateForRemote } from './decision-remote-input.ts';
 import { buildDecisionState, type DecisionState } from './decision-state-builder.ts';
 import type {
+  DecisionAnswerMeta,
   DecisionAnswerSet,
   DecisionProvider,
   DecisionRequest,
@@ -286,6 +287,32 @@ function mapAnswers(
   };
 }
 
+function mapMeta(response: JevSystemOneResponse): DecisionAnswerMeta {
+  const model = response.model;
+  if (typeof model !== 'string' || model.trim() === '') {
+    fail('response.model must be a non-empty trimmed string');
+  }
+  const resolvedModel = model.trim();
+
+  const usage = response.usage;
+  if (usage === null || typeof usage !== 'object' || Array.isArray(usage)) {
+    fail('response.usage must be an object');
+  }
+  const inputTokens = (usage as JevSystemOneUsage).input_tokens;
+  const outputTokens = (usage as JevSystemOneUsage).output_tokens;
+  if (!isFiniteNumber(inputTokens) || inputTokens < 0) {
+    fail(`response.usage.input_tokens invalid: ${String(inputTokens)}`);
+  }
+  if (!isFiniteNumber(outputTokens) || outputTokens < 0) {
+    fail(`response.usage.output_tokens invalid: ${String(outputTokens)}`);
+  }
+
+  return {
+    resolvedModel,
+    usage: { inputTokens, outputTokens },
+  };
+}
+
 /* ------------------------------ provider ------------------------------ */
 
 export class JevDecisionProvider implements DecisionProvider {
@@ -342,6 +369,7 @@ export class JevDecisionProvider implements DecisionProvider {
     assertExactAnswerKeys(response.answers);
 
     const answers = mapAnswers(response.answers, questions, preferredAllowed);
-    return { answers };
+    const meta = mapMeta(response);
+    return { answers, meta };
   }
 }

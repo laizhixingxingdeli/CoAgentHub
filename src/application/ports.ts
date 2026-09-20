@@ -198,9 +198,22 @@ export type DecisionSignal =
   | { readonly kind: 'score'; readonly value: number; readonly scale?: string }
   | { readonly kind: 'noop'; readonly reason?: string };
 
+/** Provider 报告的 token 用量（与 kernel TokenUsage 解耦，仅决策侧）。 */
+export interface DecisionUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+/** decide 成功时可选的 provider-neutral 元数据（不含 confidence/probabilities）。 */
+export interface DecisionAnswerMeta {
+  readonly resolvedModel?: string;
+  readonly usage?: DecisionUsage;
+}
+
 /** 一次 decide 返回的命名 answers 包；key 为 question id，value 仍是 DecisionSignal。 */
 export interface DecisionAnswerSet {
   readonly answers: Readonly<Record<string, DecisionSignal>>;
+  readonly meta?: DecisionAnswerMeta;
 }
 
 export interface DecisionProvider {

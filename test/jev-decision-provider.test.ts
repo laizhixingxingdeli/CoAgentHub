@@ -247,9 +247,23 @@ describe('JevDecisionProvider response mapping', () => {
       semantic_risk: { kind: 'score', value: 1.6, scale: 'ordinal4.v1' },
     });
     assert.equal(Object.keys(result.answers).length, 4);
-    // confidence/usage/model 不进入 AnswerSet
+    // wire response.model / usage → meta；confidence 等不进 answers/meta
+    assert.deepEqual(result.meta, {
+      resolvedModel: 'jev-latest',
+      usage: { inputTokens: 1, outputTokens: 2 },
+    });
     assert.equal('usage' in result, false);
     assert.equal('model' in result, false);
+    assert.equal('confidence' in (result.meta ?? {}), false);
+  });
+
+  test('meta.resolvedModel 来自 wire response.model，非请求 model', async () => {
+    const transport = new CaptureTransport();
+    transport.response = { ...validAnswers(), model: 'wire-resolved-v2' };
+    const provider = new JevDecisionProvider({ transport, model: 'request-guess' });
+    const result = await provider.decide(baseRequest());
+    assert.equal(transport.lastRequest!.model, 'request-guess');
+    assert.equal(result.meta?.resolvedModel, 'wire-resolved-v2');
   });
 });
 
@@ -422,6 +436,41 @@ describe('JevDecisionProvider invalid matrix', () => {
     transport.rejectWith = new Error('upstream down');
     const provider = new JevDecisionProvider({ transport });
     await assert.rejects(() => provider.decide(baseRequest()), /transport rejected/);
+  });
+
+  test('empty model', async () => {
+    await expectThrow({ ...validAnswers(), model: '' });
+  });
+
+  test('whitespace-only model', async () => {
+    await expectThrow({ ...validAnswers(), model: '   ' });
+  });
+
+  test('usage input_tokens NaN', async () => {
+    await expectThrow({
+      ...validAnswers(),
+      usage: { input_tokens: Number.NaN, output_tokens: 1 },
+    });
+  });
+
+  test('usage output_tokens Infinity', async () => {
+    await expectThrow({
+      ...validAnswers(),
+      usage: { input_tokens: 1, output_tokens: Number.POSITIVE_INFINITY },
+    });
+  });
+
+  test('usage negative tokens', async () => {
+    await expectThrow({
+      ...validAnswers(),
+      usage: { input_tokens: -1, output_tokens: 2 },
+    });
+  });
+
+  test('missing usage field', async () => {
+    const r = validAnswers();
+    const { usage: _u, ...rest } = r;
+    await expectThrow(rest as JevSystemOneResponse);
   });
 });
 
