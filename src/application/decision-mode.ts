@@ -1,9 +1,8 @@
 /**
  * Decision 运行模式（Phase 2 前最小诚实配置）。
  *
- * 当前 composition root 没有 DecisionProvider factory：
  * - OFF：完全不可见，不调用 provider、不写 decision 事件
- * - SHADOW：仅在显式请求且确有 provider 时合法；否则启动 fail-closed
+ * - SHADOW：显式 mode + factory 注入 provider；否则启动 fail-closed
  */
 
 export type DecisionMode = 'off' | 'shadow';

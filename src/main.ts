@@ -48,14 +48,27 @@ import {
   assertDecisionModeStartup,
   parseDecisionMode,
 } from './application/decision-mode.ts';
+import { createDecisionProvider } from './application/decision-provider-factory.ts';
+import type { DecisionProvider } from './application/ports.ts';
 
-export function buildPlatform(workspace?: WorkspaceManager) {
+export function buildPlatform(
+  workspace?: WorkspaceManager,
+  decisionProvider?: DecisionProvider,
+) {
   const clock = new SystemClock();
   const projects = new InMemoryProjectRepository();
   const activity = new InMemoryActivityLog(clock);
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
-  const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+  const platform = new Platform({
+    projects,
+    deliveries,
+    workspace,
+    activity,
+    clock,
+    ids,
+    ...(decisionProvider ? { decisionProvider } : {}),
+  });
   const tokens = new RunTokenRegistry();
   return {
     platform,
@@ -71,6 +84,7 @@ export function buildPlatform(workspace?: WorkspaceManager) {
 
 export interface PersistentOptions {
   workspace?: WorkspaceManager;
+  decisionProvider?: DecisionProvider;
   /**
    * 是否要排他写锁。
    *
@@ -89,6 +103,7 @@ export async function buildPersistentPlatform(
       ? { workspace: workspaceOrOptions }
       : (workspaceOrOptions ?? {});
   const workspace = options.workspace;
+  const decisionProvider = options.decisionProvider;
   const releaseLock = options.exclusive
     ? acquireLock(statePath, options.exclusive.what)
     : () => {};
@@ -108,6 +123,7 @@ export async function buildPersistentPlatform(
     activity,
     clock,
     ids,
+    ...(decisionProvider ? { decisionProvider } : {}),
   });
   const tokens = new RunTokenRegistry();
 
@@ -143,6 +159,7 @@ export async function buildPgPlatform(options?: {
   connectionString?: string;
   workspace?: WorkspaceManager;
   artifactRoot?: string;
+  decisionProvider?: DecisionProvider;
   /**
    * 接手哪条 Mission —— 传了才做启动收敛，而且只收敛这一条。
    *
@@ -167,6 +184,7 @@ export async function buildPgPlatform(options?: {
   const artifacts = new FileArtifactStore(
     resolve(options?.artifactRoot ?? '.coagent-artifacts'),
   );
+  const decisionProvider = options?.decisionProvider;
   const platform = new Platform({
     projects,
     deliveries,
@@ -175,6 +193,7 @@ export async function buildPgPlatform(options?: {
     activity,
     clock,
     ids,
+    ...(decisionProvider ? { decisionProvider } : {}),
   });
   const tokens = new RunTokenRegistry();
 
@@ -228,16 +247,38 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
  * 存储选哪个由 COAGENT_STORE 决定（pg / file）。缺省仍是文件版——
  * 没装 Postgres 的人 clone 下来就能跑，这条性质不能因为多了一个选项就丢掉。
  */
-export async function startServer(port = 3101, statePath = '.coagent-state.json') {
-  // Decision 模式：在任何持久化 / 锁 / listen 之前诚实校验。
-  // 当前 composition root 未注入 decision provider，故 providerAvailable=false。
-  const decisionMode = parseDecisionMode(process.env.COAGENT_DECISION_MODE);
-  assertDecisionModeStartup({ mode: decisionMode, providerAvailable: false });
+export interface StartServerOptions {
+  /** 可注入 fetch（测试用 fake；生产默认 globalThis.fetch）。 */
+  fetch?: typeof globalThis.fetch;
+  /** 可注入 env（测试用；生产默认 process.env）。 */
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+}
 
-  const usePg = (process.env.COAGENT_STORE ?? 'file') === 'pg';
+export async function startServer(
+  port = 3101,
+  statePath = '.coagent-state.json',
+  options?: StartServerOptions,
+) {
+  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
+  const env = options?.env ?? process.env;
+  const decisionMode = parseDecisionMode(env.COAGENT_DECISION_MODE);
+  const decisionProvider =
+    decisionMode === 'shadow'
+      ? createDecisionProvider({
+          mode: decisionMode,
+          env,
+          fetch: options?.fetch ?? globalThis.fetch,
+        })
+      : undefined;
+  assertDecisionModeStartup({
+    mode: decisionMode,
+    providerAvailable: Boolean(decisionProvider),
+  });
+
+  const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   const built = usePg
-    ? await buildPgPlatform()
-    : await buildPersistentPlatform(statePath);
+    ? await buildPgPlatform({ decisionProvider })
+    : await buildPersistentPlatform(statePath, { decisionProvider });
   const server = createApi({
     platform: built.platform,
     tokens: built.tokens,

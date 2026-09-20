@@ -306,7 +306,7 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
     }
   });
 
-  test('生产路径除 ports/Noop/StateBuilder/ShadowRunner/Jev/platform 外不得出现实际 provider.decide 接线', () => {
+  test('生产路径除 ports/Noop/StateBuilder/ShadowRunner/Jev/factory/platform/main 外不得出现实际 provider.decide 接线', () => {
     const allowedDecideFiles = new Set([
       'src/application/ports.ts',
       'src/application/noop-decision-provider.ts',
@@ -315,8 +315,12 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
       'src/application/decision-shadow-runner.ts',
       // HOPT-05-B2：Jev System One mapper/provider（adapter 内 .decide）。
       'src/application/jev-decision-provider.ts',
+      // HOPT-08-B：SHADOW composition factory（装配 transport+provider，不调用 decide）。
+      'src/application/decision-provider-factory.ts',
       // HOPT-04-B：唯一允许的生产接线——platform.dispatchWorkItems PRE_DISPATCH shadow。
       'src/application/platform.ts',
+      // HOPT-08-B：composition root 注入 optional decisionProvider。
+      'src/main.ts',
     ]);
     // platform 可调用 runDecisionShadow，但不得直接 .decide / 装配 Noop / 手建 State。
     const platformShadowOnly = 'src/application/platform.ts';
@@ -375,6 +379,7 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
         `${rel}: 不得提前接线 StateBuilder`,
       );
       // HOPT-07-A：启动门禁错误文案可点名 DecisionProvider；不得 import/接线。
+      // HOPT-08-B：factory + main 允许类型/装配引用（已在 allowedDecideFiles）。
       if (rel !== 'src/application/decision-mode.ts') {
         assert.doesNotMatch(
           source,
