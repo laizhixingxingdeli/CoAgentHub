@@ -171,3 +171,34 @@ export interface RuntimeOutcome {
     readonly resolved: readonly { readonly key: string; readonly value: string }[];
   };
 }
+
+/* ------------------------------ 决策信号端口 ------------------------------ */
+
+/**
+ * DecisionProvider —— 与 AgentRuntime **并列**的 Application 侧横向信号能力。
+ *
+ * 只产 Choice / Score / No-op 信号；不写 kernel 状态、不降审查、不替代
+ * Orchestrator / Harness 的执行权。钩子语义见 adr-0002；本端口本轮只钉形状，
+ * 不接生产 dispatch / review。
+ */
+export type DecisionHook = 'PRE_DISPATCH' | 'POST_EXECUTION';
+
+export interface DecisionRequest {
+  readonly hook: DecisionHook;
+  readonly projectId: string;
+  readonly missionId: string;
+  readonly workItemId?: string;
+  readonly attemptId?: string;
+  /** 不透明事实键值；本层不解释 key/value 语义。 */
+  readonly facts?: readonly { readonly key: string; readonly value: string }[];
+}
+
+export type DecisionSignal =
+  | { readonly kind: 'choice'; readonly option: string }
+  | { readonly kind: 'score'; readonly value: number; readonly scale?: string }
+  | { readonly kind: 'noop'; readonly reason?: string };
+
+export interface DecisionProvider {
+  readonly kind: string;
+  decide(request: DecisionRequest): Promise<DecisionSignal>;
+}
