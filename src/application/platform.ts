@@ -930,6 +930,7 @@ export class Platform {
       await runDecisionShadow({
         provider: this.#decisionProvider,
         activity: this.#activity,
+        clock: this.#clock,
         stateInput: {
           hook: 'PRE_DISPATCH',
           projectId: mission.projectId,

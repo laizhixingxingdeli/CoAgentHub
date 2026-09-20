@@ -17,11 +17,13 @@ import {
   DECISION_STATE_SCHEMA_VERSION,
   EMPTY_DECISION_STATE_FACTS,
 } from '../src/application/decision-state-builder.ts';
+import { PRE_DISPATCH_V1 } from '../src/application/decision-question-registry.ts';
 import { FixedClock, InMemoryActivityLog } from '../src/application/in-memory.ts';
 import { NoopDecisionProvider } from '../src/application/noop-decision-provider.ts';
 import type {
   ActivityEvent,
   ActivityLog,
+  Clock,
   DecisionAnswerSet,
   DecisionProvider,
   DecisionRequest,
@@ -52,22 +54,51 @@ function baseStateInput() {
   };
 }
 
+function defaultClock(): FixedClock {
+  return new FixedClock(new Date('2026-03-20T12:00:00.000Z'));
+}
+
+/** 每次 now() 弹出队列中下一个时间点（脚本化 latency）。 */
+function scriptedClock(times: readonly Date[]): Clock {
+  let i = 0;
+  return {
+    now(): Date {
+      const t = times[Math.min(i, times.length - 1)]!;
+      i += 1;
+      return t;
+    },
+  };
+}
+
 function capturingProvider(
   answers: Readonly<Record<string, DecisionSignal>>,
   sink: { request?: DecisionRequest },
+  meta?: DecisionAnswerSet['meta'],
 ): DecisionProvider {
   return {
     kind: 'capture',
     async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
       sink.request = request;
-      return { answers };
+      return meta !== undefined ? { answers, meta } : { answers };
     },
   };
 }
 
+function assertShadowCommon(data: DecisionShadowEventData, workItemIds: readonly string[]) {
+  assert.equal(data.mode, 'shadow');
+  assert.equal(data.questionSetId, PRE_DISPATCH_V1.id);
+  assert.equal(typeof data.latencyMs, 'number');
+  assert.ok(Number.isFinite(data.latencyMs));
+  assert.ok(data.latencyMs >= 0);
+  assert.deepEqual(data.baselineAction, { kind: 'dispatch', workItemIds: [...workItemIds] });
+  assert.deepEqual(data.effectiveAction, data.baselineAction);
+  assert.equal('hypotheticalAction' in data, false);
+  assert.deepEqual(data.baselineAction, data.effectiveAction);
+}
+
 describe('runDecisionShadow — 成功路径', () => {
   test('noop provider 空包：append decision.shadow，data 含必填字段与 answers:{}', async () => {
-    const clock = new FixedClock(new Date('2026-03-20T12:00:00.000Z'));
+    const clock = defaultClock();
     const activity = new InMemoryActivityLog(clock);
     const sink: { request?: DecisionRequest } = {};
     const provider = capturingProvider({}, sink);
@@ -75,6 +106,7 @@ describe('runDecisionShadow — 成功路径', () => {
     const outcome = await runDecisionShadow({
       provider,
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds: ['w-a', 'w-b'],
     });
@@ -110,10 +142,14 @@ describe('runDecisionShadow — 成功路径', () => {
     assert.ok(data.quality === 'success' && 'answers' in data);
     assert.deepEqual(data.answers, {});
     assert.equal('signal' in data, false);
+    assertShadowCommon(data, ['w-a', 'w-b']);
+    assert.equal('resolvedModel' in data, false);
+    assert.equal('usage' in data, false);
   });
 
   test('choice：命名 answers 原样写入 data', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const answers: Readonly<Record<string, DecisionSignal>> = {
       'q.route': { kind: 'choice', option: 'prefer-a' },
     };
@@ -122,6 +158,7 @@ describe('runDecisionShadow — 成功路径', () => {
     const outcome = await runDecisionShadow({
       provider: capturingProvider(answers, sink),
       activity,
+      clock,
       stateInput: {
         ...baseStateInput(),
         workItemId: 'w-1',
@@ -148,10 +185,12 @@ describe('runDecisionShadow — 成功路径', () => {
     assert.deepEqual(data.answers, answers);
     assert.deepEqual(data.ids.workItemIds, ['w-1']);
     assert.equal(data.ids.workItemId, 'w-1');
+    assertShadowCommon(data, ['w-1']);
   });
 
   test('score：命名 answers 原样写入 data', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const answers: Readonly<Record<string, DecisionSignal>> = {
       'q.score': { kind: 'score', value: 0.75, scale: 'unit' },
     };
@@ -164,6 +203,7 @@ describe('runDecisionShadow — 成功路径', () => {
         },
       },
       activity,
+      clock,
       stateInput: {
         ...baseStateInput(),
         attemptId: 'a-1',
@@ -179,10 +219,12 @@ describe('runDecisionShadow — 成功路径', () => {
     assert.deepEqual(data.answers, answers);
     assert.equal(data.ids.attemptId, 'a-1');
     assert.deepEqual(data.ids.workItemIds, []);
+    assertShadowCommon(data, []);
   });
 
   test('多命名 answers：一次 decide 保留多个 question id', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const answers: Readonly<Record<string, DecisionSignal>> = {
       'q.route': { kind: 'choice', option: 'a' },
       'q.confidence': { kind: 'score', value: 0.4 },
@@ -192,6 +234,7 @@ describe('runDecisionShadow — 成功路径', () => {
     const outcome = await runDecisionShadow({
       provider: capturingProvider(answers, {}),
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds: ['w-1'],
     });
@@ -202,10 +245,12 @@ describe('runDecisionShadow — 成功路径', () => {
   });
 
   test('NoopDecisionProvider 集成：quality=success 且 answers={}', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const outcome = await runDecisionShadow({
       provider: new NoopDecisionProvider(),
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds: ['w-x'],
     });
@@ -217,9 +262,226 @@ describe('runDecisionShadow — 成功路径', () => {
   });
 });
 
+describe('runDecisionShadow — telemetry (HOPT-09-B)', () => {
+  test('scripted clock success：latencyMs=37；meta model/usage 进入 event', async () => {
+    const t0 = new Date('2026-03-20T12:00:00.100Z');
+    const t1 = new Date('2026-03-20T12:00:00.137Z');
+    const clock = scriptedClock([t0, t1]);
+    const activity = new InMemoryActivityLog(new FixedClock(t0));
+    const usage = { inputTokens: 11, outputTokens: 7 };
+
+    const outcome = await runDecisionShadow({
+      provider: {
+        kind: 'meta-ok',
+        async decide(): Promise<DecisionAnswerSet> {
+          return {
+            answers: { q: { kind: 'noop' } },
+            meta: { resolvedModel: 'model-x', usage },
+          };
+        },
+      },
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds: ['w-1'],
+    });
+
+    assert.deepEqual(outcome, { recorded: true, quality: 'success' });
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.equal(data.quality, 'success');
+    assert.equal(data.latencyMs, 37);
+    assert.ok(data.quality === 'success');
+    assert.equal(data.resolvedModel, 'model-x');
+    assert.deepEqual(data.usage, usage);
+    assertShadowCommon(data, ['w-1']);
+  });
+
+  test('provider throw：latencyMs=45；provider_error 无 answers/model/usage/error', async () => {
+    const t0 = new Date('2026-03-20T12:00:00.200Z');
+    const t1 = new Date('2026-03-20T12:00:00.245Z');
+    const clock = scriptedClock([t0, t1]);
+    const activity = new InMemoryActivityLog(new FixedClock(t0));
+    const secret = 'super-secret-token-do-not-log';
+
+    const outcome = await runDecisionShadow({
+      provider: {
+        kind: 'boom',
+        async decide(): Promise<DecisionAnswerSet> {
+          throw new Error(`provider exploded with ${secret}`);
+        },
+      },
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds: ['w-9'],
+    });
+
+    assert.deepEqual(outcome, { recorded: true, quality: 'provider_error' });
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.equal(data.quality, 'provider_error');
+    assert.equal(data.latencyMs, 45);
+    assert.equal('answers' in data, false);
+    assert.equal('resolvedModel' in data, false);
+    assert.equal('usage' in data, false);
+    assert.equal('error' in data, false);
+    assertShadowCommon(data, ['w-9']);
+    const raw = JSON.stringify(data);
+    assert.equal(raw.includes(secret), false);
+  });
+
+  test('clock 负差钳 0', async () => {
+    const t0 = new Date('2026-03-20T12:00:00.300Z');
+    const t1 = new Date('2026-03-20T12:00:00.250Z');
+    const clock = scriptedClock([t0, t1]);
+    const activity = new InMemoryActivityLog(new FixedClock(t0));
+
+    await runDecisionShadow({
+      provider: new NoopDecisionProvider(),
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds: [],
+    });
+
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.equal(data.latencyMs, 0);
+  });
+
+  test('小数毫秒 round：10.4→10、10.6→11', async () => {
+    // Date 只能存整数 ms；用 getTime 差值模拟 round 规则可达路径
+    const base = Date.parse('2026-03-20T12:00:00.000Z');
+    {
+      const clock = scriptedClock([new Date(base), new Date(base + 10.4)]);
+      // Date constructor truncates sub-ms; force via Object with getTime
+      const clockFrac: Clock = {
+        now(): Date {
+          return clock.now();
+        },
+      };
+      // Use custom clock returning Dates whose getTime is fractional via override
+      let n = 0;
+      const fracClock: Clock = {
+        now(): Date {
+          const ms = n === 0 ? base : base + 10.4;
+          n += 1;
+          return {
+            getTime() {
+              return ms;
+            },
+          } as Date;
+        },
+      };
+      const activity = new InMemoryActivityLog(new FixedClock(new Date(base)));
+      await runDecisionShadow({
+        provider: new NoopDecisionProvider(),
+        activity,
+        clock: fracClock,
+        stateInput: baseStateInput(),
+        workItemIds: [],
+      });
+      const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+      assert.equal(data.latencyMs, Math.round(10.4));
+      void clockFrac;
+    }
+    {
+      let n = 0;
+      const fracClock: Clock = {
+        now(): Date {
+          const ms = n === 0 ? base : base + 10.6;
+          n += 1;
+          return {
+            getTime() {
+              return ms;
+            },
+          } as Date;
+        },
+      };
+      const activity = new InMemoryActivityLog(new FixedClock(new Date(base)));
+      await runDecisionShadow({
+        provider: new NoopDecisionProvider(),
+        activity,
+        clock: fracClock,
+        stateInput: baseStateInput(),
+        workItemIds: [],
+      });
+      const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+      assert.equal(data.latencyMs, Math.round(10.6));
+    }
+  });
+
+  test('调用后 mutate workItemIds：ids 与 action 不变；baseline/effective frozen deepEqual', async () => {
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
+    const workItemIds = ['w-1', 'w-2'];
+    await runDecisionShadow({
+      provider: new NoopDecisionProvider(),
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds,
+    });
+    workItemIds.push('w-mutated');
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.deepEqual(data.ids.workItemIds, ['w-1', 'w-2']);
+    assert.deepEqual(data.baselineAction.workItemIds, ['w-1', 'w-2']);
+    assert.deepEqual(data.effectiveAction.workItemIds, ['w-1', 'w-2']);
+    assert.deepEqual(data.baselineAction, data.effectiveAction);
+    assert.throws(() => {
+      (data.baselineAction as { kind: string }).kind = 'x';
+    });
+    assert.throws(() => {
+      (data.baselineAction.workItemIds as string[]).push('x');
+    });
+    assert.throws(() => {
+      (data.effectiveAction.workItemIds as string[]).push('x');
+    });
+  });
+
+  test('provider 无 meta：省略 resolvedModel/usage keys', async () => {
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
+    await runDecisionShadow({
+      provider: capturingProvider({}, {}),
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds: ['w-1'],
+    });
+    const data = (await activity.list('m-1'))[0]!.data as DecisionShadowEventData;
+    assert.ok(data.quality === 'success');
+    assert.equal('resolvedModel' in data, false);
+    assert.equal('usage' in data, false);
+  });
+
+  test('append fail：recorded=false；quality 仍 success', async () => {
+    const clock = defaultClock();
+    const activity: ActivityLog = {
+      async append(): Promise<void> {
+        throw new Error('disk full');
+      },
+      async list(): Promise<readonly ActivityEvent[]> {
+        return [];
+      },
+    };
+    const outcome = await runDecisionShadow({
+      provider: new NoopDecisionProvider(),
+      activity,
+      clock,
+      stateInput: baseStateInput(),
+      workItemIds: ['w-1'],
+    });
+    assert.deepEqual(outcome, {
+      recorded: false,
+      quality: 'success',
+      reason: 'activity_append_failed',
+    });
+  });
+});
+
 describe('runDecisionShadow — 失败吞没', () => {
   test('provider throw：不向调用方抛；append quality=provider_error；无 answers / 无堆栈', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const secret = 'super-secret-token-do-not-log';
     const provider: DecisionProvider = {
       kind: 'boom',
@@ -234,6 +496,7 @@ describe('runDecisionShadow — 失败吞没', () => {
       outcome = await runDecisionShadow({
         provider,
         activity,
+        clock,
         stateInput: baseStateInput(),
         workItemIds: ['w-1', 'w-2'],
       });
@@ -255,6 +518,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     assert.equal('answers' in data, false);
     assert.equal('signal' in data, false);
     assert.equal('error' in data, false);
+    assert.equal(typeof data.latencyMs, 'number');
 
     const raw = JSON.stringify(events[0]);
     assert.equal(raw.includes(secret), false);
@@ -263,7 +527,8 @@ describe('runDecisionShadow — 失败吞没', () => {
   });
 
   test('provider reject：同样吞没为 provider_error', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const provider: DecisionProvider = {
       kind: 'reject',
       decide(_request: DecisionRequest): Promise<DecisionAnswerSet> {
@@ -274,6 +539,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     const outcome = await runDecisionShadow({
       provider,
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds: [],
     });
@@ -300,6 +566,7 @@ describe('runDecisionShadow — 失败吞没', () => {
       outcome = await runDecisionShadow({
         provider: new NoopDecisionProvider(),
         activity,
+        clock: defaultClock(),
         stateInput: baseStateInput(),
         workItemIds: ['w-1'],
       });
@@ -335,6 +602,7 @@ describe('runDecisionShadow — 失败吞没', () => {
     const outcome = await runDecisionShadow({
       provider,
       activity,
+      clock: defaultClock(),
       stateInput: baseStateInput(),
       workItemIds: [],
     });
@@ -348,11 +616,13 @@ describe('runDecisionShadow — 失败吞没', () => {
 
 describe('runDecisionShadow — 请求形状与边界', () => {
   test('audit workItemIds 是副本：调用方事后改动不影响已写入 data', async () => {
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     const workItemIds = ['w-1', 'w-2'];
     await runDecisionShadow({
       provider: new NoopDecisionProvider(),
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds,
     });
@@ -363,10 +633,12 @@ describe('runDecisionShadow — 请求形状与边界', () => {
 
   test('N>1：state 无 workItemId 时 request 也不带；ids.workItemIds 仍完整', async () => {
     const sink: { request?: DecisionRequest } = {};
-    const activity = new InMemoryActivityLog(new FixedClock(new Date('2026-03-20T12:00:00.000Z')));
+    const clock = defaultClock();
+    const activity = new InMemoryActivityLog(clock);
     await runDecisionShadow({
       provider: capturingProvider({}, sink),
       activity,
+      clock,
       stateInput: baseStateInput(),
       workItemIds: ['w-1', 'w-2', 'w-3'],
     });
@@ -378,11 +650,12 @@ describe('runDecisionShadow — 请求形状与边界', () => {
 });
 
 describe('HOPT-04-A shadow runner 源码边界', () => {
-  test('runner 只依赖 StateBuilder 与 ports；不拉领域实体 / 仓储 / platform', () => {
+  test('runner 只依赖 StateBuilder / registry 与 ports；不拉领域实体 / 仓储 / platform', () => {
     const path = join(root, 'src', 'application', 'decision-shadow-runner.ts');
     const source = readFileSync(path, 'utf8');
     const fromSpecs = [...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((m) => m[1]!);
     assert.deepEqual(fromSpecs.sort(), [
+      './decision-question-registry.ts',
       './decision-state-builder.ts',
       './ports.ts',
     ]);
@@ -397,7 +670,7 @@ describe('HOPT-04-A shadow runner 源码边界', () => {
       assert.doesNotMatch(clause, /\bMission\b/);
       assert.doesNotMatch(clause, /\bWorkItem\b/);
       assert.doesNotMatch(clause, /\bAttempt\b/);
-      assert.doesNotMatch(clause, /DecisionRecord|QuestionRegistry|\bJev\b/);
+      assert.doesNotMatch(clause, /DecisionRecord|\bJev\b/);
     }
   });
 

@@ -495,6 +495,7 @@ describe('JevDecisionProvider + runDecisionShadow', () => {
     const outcome = await runDecisionShadow({
       provider,
       activity,
+      clock: { now: () => new Date('2026-03-20T12:00:00.000Z') },
       stateInput: {
         hook: 'PRE_DISPATCH',
         projectId: 'p-1',
@@ -521,6 +522,7 @@ describe('JevDecisionProvider + runDecisionShadow', () => {
     const outcome = await runDecisionShadow({
       provider,
       activity,
+      clock: { now: () => new Date('2026-03-20T12:00:00.000Z') },
       stateInput: {
         hook: 'PRE_DISPATCH',
         projectId: 'p-1',

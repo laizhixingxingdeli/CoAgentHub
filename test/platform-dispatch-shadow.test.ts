@@ -390,4 +390,47 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
     assert.equal(shadowEvents(await activity.list('M2')).length, 0);
     assert.equal(dispatchedEvents(await activity.list('M2')).length, 0);
   });
+
+  test('shadow telemetry：mode/latency/baseline===effective；meta 不影响 dispatch', async () => {
+    const sink = { calls: 0, request: undefined as DecisionRequest | undefined };
+    const provider: DecisionProvider = {
+      kind: 'meta-rich',
+      async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
+        sink.calls += 1;
+        sink.request = request;
+        return {
+          answers: { task_type: { kind: 'choice', option: 'ignore-me' } },
+          meta: {
+            resolvedModel: 'ghost-model',
+            usage: { inputTokens: 9, outputTokens: 3 },
+          },
+        };
+      },
+    };
+    const { platform, activity } = makePlatform(provider);
+    const { attemptId } = await prepareMission(platform, 'M1');
+    const workItemId = await createItem(platform, 'M1', attemptId);
+
+    const result = await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
+    assert.deepEqual(result, { dispatched: [workItemId] });
+
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.workItems[0]?.status, 'dispatched');
+
+    const data = shadowEvents(await activity.list('M1'))[0]!.data as DecisionShadowEventData;
+    assert.equal(data.mode, 'shadow');
+    assert.equal(data.questionSetId, 'PRE_DISPATCH_V1');
+    assert.equal(typeof data.latencyMs, 'number');
+    assert.ok(data.latencyMs >= 0);
+    assert.deepEqual(data.baselineAction, {
+      kind: 'dispatch',
+      workItemIds: [workItemId],
+    });
+    assert.deepEqual(data.effectiveAction, data.baselineAction);
+    assert.equal(data.quality, 'success');
+    if (data.quality === 'success') {
+      assert.equal(data.resolvedModel, 'ghost-model');
+      assert.deepEqual(data.usage, { inputTokens: 9, outputTokens: 3 });
+    }
+  });
 });

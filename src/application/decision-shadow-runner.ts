@@ -12,7 +12,14 @@ import {
   toDecisionRequest,
   type DecisionStateInput,
 } from './decision-state-builder.ts';
-import type { ActivityLog, DecisionAnswerSet, DecisionProvider } from './ports.ts';
+import { PRE_DISPATCH_V1 } from './decision-question-registry.ts';
+import type {
+  ActivityLog,
+  Clock,
+  DecisionAnswerMeta,
+  DecisionAnswerSet,
+  DecisionProvider,
+} from './ports.ts';
 
 export const DECISION_SHADOW_EVENT_KIND = 'decision.shadow' as const;
 
@@ -26,6 +33,12 @@ export interface DecisionShadowIds {
   readonly attemptId?: string;
 }
 
+/** Shadow 阶段 effective === baseline 的 dispatch 动作（冻结副本）。 */
+export interface DecisionShadowDispatchAction {
+  readonly kind: 'dispatch';
+  readonly workItemIds: readonly string[];
+}
+
 export type DecisionShadowEventData =
   | {
       readonly schemaVersion: typeof DECISION_STATE_SCHEMA_VERSION;
@@ -33,7 +46,14 @@ export type DecisionShadowEventData =
       readonly providerKind: string;
       readonly ids: DecisionShadowIds;
       readonly quality: 'success';
+      readonly mode: 'shadow';
+      readonly questionSetId: typeof PRE_DISPATCH_V1.id;
+      readonly latencyMs: number;
+      readonly baselineAction: DecisionShadowDispatchAction;
+      readonly effectiveAction: DecisionShadowDispatchAction;
       readonly answers: DecisionAnswerSet['answers'];
+      readonly resolvedModel?: string;
+      readonly usage?: DecisionAnswerMeta['usage'];
     }
   | {
       readonly schemaVersion: typeof DECISION_STATE_SCHEMA_VERSION;
@@ -41,6 +61,11 @@ export type DecisionShadowEventData =
       readonly providerKind: string;
       readonly ids: DecisionShadowIds;
       readonly quality: 'provider_error';
+      readonly mode: 'shadow';
+      readonly questionSetId: typeof PRE_DISPATCH_V1.id;
+      readonly latencyMs: number;
+      readonly baselineAction: DecisionShadowDispatchAction;
+      readonly effectiveAction: DecisionShadowDispatchAction;
     };
 
 export type DecisionShadowOutcome =
@@ -54,8 +79,16 @@ export type DecisionShadowOutcome =
 export interface RunDecisionShadowArgs {
   readonly provider: DecisionProvider;
   readonly activity: ActivityLog;
+  readonly clock: Clock;
   readonly stateInput: DecisionStateInput;
   readonly workItemIds: readonly string[];
+}
+
+function freezeDispatchAction(workItemIds: readonly string[]): DecisionShadowDispatchAction {
+  return Object.freeze({
+    kind: 'dispatch' as const,
+    workItemIds: Object.freeze([...workItemIds]) as readonly string[],
+  });
 }
 
 /**
@@ -64,48 +97,75 @@ export interface RunDecisionShadowArgs {
 export async function runDecisionShadow(
   args: RunDecisionShadowArgs,
 ): Promise<DecisionShadowOutcome> {
-  const { provider, activity, stateInput, workItemIds } = args;
+  const { provider, activity, clock, stateInput, workItemIds } = args;
   const workItemIdsCopy = Object.freeze([...workItemIds]) as readonly string[];
+  const baselineAction = freezeDispatchAction(workItemIdsCopy);
+  const effectiveAction = freezeDispatchAction(workItemIdsCopy);
 
   const state = buildDecisionState(stateInput);
   const request = toDecisionRequest(state);
 
   let quality: DecisionShadowQuality = 'success';
   let answers: DecisionAnswerSet['answers'] | undefined;
+  let resolvedModel: string | undefined;
+  let usage: DecisionAnswerMeta['usage'] | undefined;
 
+  const start = clock.now();
   try {
     const result = await provider.decide(request);
     answers = result.answers;
+    if (result.meta?.resolvedModel !== undefined) {
+      resolvedModel = result.meta.resolvedModel;
+    }
+    if (result.meta?.usage !== undefined) {
+      usage = result.meta.usage;
+    }
   } catch {
     quality = 'provider_error';
     answers = undefined;
+    resolvedModel = undefined;
+    usage = undefined;
   }
+  const end = clock.now();
+  const latencyMs = Math.max(0, Math.round(end.getTime() - start.getTime()));
 
-  const ids: DecisionShadowIds = {
+  const ids: DecisionShadowIds = Object.freeze({
     projectId: stateInput.projectId,
     missionId: stateInput.missionId,
     workItemIds: workItemIdsCopy,
     ...(stateInput.workItemId !== undefined ? { workItemId: stateInput.workItemId } : {}),
     ...(stateInput.attemptId !== undefined ? { attemptId: stateInput.attemptId } : {}),
-  };
+  });
 
   const data: DecisionShadowEventData =
     quality === 'success' && answers !== undefined
-      ? {
+      ? Object.freeze({
           schemaVersion: DECISION_STATE_SCHEMA_VERSION,
           hook: stateInput.hook,
           providerKind: provider.kind,
           ids,
-          quality: 'success',
+          quality: 'success' as const,
+          mode: 'shadow' as const,
+          questionSetId: PRE_DISPATCH_V1.id,
+          latencyMs,
+          baselineAction,
+          effectiveAction,
           answers,
-        }
-      : {
+          ...(resolvedModel !== undefined ? { resolvedModel } : {}),
+          ...(usage !== undefined ? { usage } : {}),
+        })
+      : Object.freeze({
           schemaVersion: DECISION_STATE_SCHEMA_VERSION,
           hook: stateInput.hook,
           providerKind: provider.kind,
           ids,
-          quality: 'provider_error',
-        };
+          quality: 'provider_error' as const,
+          mode: 'shadow' as const,
+          questionSetId: PRE_DISPATCH_V1.id,
+          latencyMs,
+          baselineAction,
+          effectiveAction,
+        });
 
   try {
     await activity.append({
