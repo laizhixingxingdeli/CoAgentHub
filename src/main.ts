@@ -40,9 +40,12 @@ import {
   PgStateStore,
 } from './application/pg-store.ts';
 import { acquireLock } from './application/lock.ts';
-import { reconcileInterruptedAttempts } from './application/reconcile.ts';
+import {
+  reconcileInterruptedAttempts,
+  reconcileOrphanedWorktrees,
+} from './application/reconcile.ts';
 import type { RunTokenIssuer } from './application/token-issuer.ts';
-import type { WorkspaceManager } from './application/workspace.ts';
+import type { WorkspaceManager, WorktreeReconcileResult } from './application/workspace.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
 import {
   assertDecisionModeStartup,
@@ -102,7 +105,7 @@ export async function buildPersistentPlatform(
     workspaceOrOptions && 'prepare' in workspaceOrOptions
       ? { workspace: workspaceOrOptions }
       : (workspaceOrOptions ?? {});
-  const workspace = options.workspace;
+  const workspace = options.workspace ?? new GitWorktreeManager();
   const decisionProvider = options.decisionProvider;
   const releaseLock = options.exclusive
     ? acquireLock(statePath, options.exclusive.what)
@@ -119,7 +122,7 @@ export async function buildPersistentPlatform(
     projects,
     deliveries,
     artifacts,
-    workspace: workspace ?? new GitWorktreeManager(),
+    workspace,
     activity,
     clock,
     ids,
@@ -134,6 +137,31 @@ export async function buildPersistentPlatform(
     store.flush();
   }
 
+  // 孤儿 worktree 只在**排他写**路径上做：只读观测面 / 共享 PG 不能全局清目录。
+  // 失败只记 warning，不挡启动。
+  let workspaceReconciled: WorktreeReconcileResult | undefined;
+  if (options.exclusive) {
+    try {
+      workspaceReconciled = await reconcileOrphanedWorktrees(await projects.list(), workspace);
+      if (workspaceReconciled.warnings.length > 0) {
+        for (const w of workspaceReconciled.warnings) {
+          console.warn(`[worktree reconcile] ${w}`);
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[worktree reconcile] 启动收敛失败（不阻断）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      workspaceReconciled = {
+        removed: [],
+        kept: [],
+        warnings: [error instanceof Error ? error.message : String(error)],
+      };
+    }
+  }
+
   return {
     platform,
     activity,
@@ -141,6 +169,7 @@ export async function buildPersistentPlatform(
     deliveries,
     store,
     reconciled,
+    workspaceReconciled,
     tokens,
     agentPool: new FileAgentPoolRepository(store),
     issuer: makeIssuer(platform, tokens),

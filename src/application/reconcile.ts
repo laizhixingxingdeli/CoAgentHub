@@ -31,8 +31,15 @@
  * 加写冲突检测挡住大部分，但不是完备的。
  */
 
-import type { Project } from '../kernel/index.ts';
+import type { MissionStatus, Project } from '../kernel/index.ts';
 import type { ActivityLog } from './ports.ts';
+import type { WorkspaceManager, WorktreeReconcileResult } from './workspace.ts';
+
+/** Mission 终态：与 kernel 流转表一致——completed / blocked 无出边。 */
+const TERMINAL_MISSION_STATUS: ReadonlySet<MissionStatus> = new Set([
+  'completed',
+  'blocked',
+]);
 
 export interface ReconcileResult {
   readonly interrupted: { missionId: string; attemptId: string; kind: string }[];
@@ -103,4 +110,64 @@ export async function reconcileInterruptedAttempts(
   }
 
   return { interrupted, alive };
+}
+
+export interface OrphanWorktreeReconcileResult extends WorktreeReconcileResult {
+  /** 实际调用过 workspace.reconcile 的 projectRoot 数。 */
+  readonly roots: number;
+}
+
+/**
+ * 按各 Mission 的 workspaceRef.projectRoot 收敛孤儿 worktree。
+ *
+ * 同一根下，**非终态** Mission 的 id 作为 protected：它们的目录不能在启动时摘掉。
+ * 终态是 completed / blocked（与 kernel 一致；没有 cancelled）。
+ *
+ * 不发 ActivityEvent——这是磁盘卫生，不是领域事件。
+ */
+export async function reconcileOrphanedWorktrees(
+  projects: readonly Project[],
+  workspace: WorkspaceManager,
+): Promise<OrphanWorktreeReconcileResult> {
+  if (!workspace.reconcile) {
+    return { removed: [], kept: [], warnings: [], roots: 0 };
+  }
+
+  const byRoot = new Map<string, Set<string>>();
+  for (const project of projects) {
+    for (const mission of project.missions) {
+      const root = mission.workspaceRef?.projectRoot;
+      if (!root) continue;
+      const key = root;
+      let protectedIds = byRoot.get(key);
+      if (!protectedIds) {
+        protectedIds = new Set();
+        byRoot.set(key, protectedIds);
+      }
+      if (!TERMINAL_MISSION_STATUS.has(mission.status)) {
+        protectedIds.add(mission.id);
+      }
+    }
+  }
+
+  const removed: WorktreeReconcileResult['removed'][number][] = [];
+  const kept: WorktreeReconcileResult['kept'][number][] = [];
+  const warnings: string[] = [];
+
+  for (const [projectRoot, protectedIds] of byRoot) {
+    try {
+      const result = await workspace.reconcile(projectRoot, protectedIds);
+      removed.push(...result.removed);
+      kept.push(...result.kept);
+      warnings.push(...result.warnings);
+    } catch (error) {
+      warnings.push(
+        `worktree 收敛失败 (${projectRoot})：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  return { removed, kept, warnings, roots: byRoot.size };
 }

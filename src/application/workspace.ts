@@ -25,10 +25,57 @@
 
 import { execFile } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
+
+interface WorktreeListEntry {
+  path: string;
+  head?: string;
+  branch?: string;
+}
+
+/** 解析 `git worktree list --porcelain`。 */
+function parseWorktreePorcelain(text: string): WorktreeListEntry[] {
+  const entries: WorktreeListEntry[] = [];
+  let current: WorktreeListEntry | undefined;
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw === '') {
+      if (current?.path) entries.push(current);
+      current = undefined;
+      continue;
+    }
+    if (raw.startsWith('worktree ')) {
+      if (current?.path) entries.push(current);
+      current = { path: raw.slice('worktree '.length) };
+      continue;
+    }
+    if (!current) continue;
+    if (raw.startsWith('HEAD ')) current.head = raw.slice('HEAD '.length).trim();
+    else if (raw.startsWith('branch ')) current.branch = raw.slice('branch '.length).trim();
+  }
+  if (current?.path) entries.push(current);
+  return entries;
+}
+
+function isDirectChild(root: string, absPath: string): boolean {
+  const parent = resolve(dirname(absPath));
+  const a = resolve(root);
+  // Windows 路径大小写不敏感。
+  if (process.platform === 'win32') {
+    return parent.toLowerCase() === a.toLowerCase();
+  }
+  return parent === a;
+}
+
+function missionIdFromBranch(branch: string | undefined): string | undefined {
+  if (!branch) return undefined;
+  const prefix = 'refs/heads/mission/';
+  if (!branch.startsWith(prefix)) return undefined;
+  const id = branch.slice(prefix.length);
+  return id.includes('/') || id.length === 0 ? undefined : id;
+}
 
 export interface PreparedWorkspace {
   /** agent 的 cwd。 */
@@ -46,6 +93,20 @@ export interface MergeOutcome {
   /** 落到了哪个版本；失败时为 undefined。 */
   readonly mergedInto?: string;
   readonly reason?: string;
+}
+
+/** 启动时清理孤儿 worktree 时，为什么还留着。 */
+export type WorktreeKeepReason =
+  | 'protected'
+  | 'dirty'
+  | 'not_merged'
+  | 'uncertain'
+  | 'remove_failed';
+
+export interface WorktreeReconcileResult {
+  readonly removed: readonly { missionId: string; path: string }[];
+  readonly kept: readonly { missionId: string; path: string; reason: WorktreeKeepReason }[];
+  readonly warnings: readonly string[];
 }
 
 export interface WorkspaceManager {
@@ -93,6 +154,14 @@ export interface WorkspaceManager {
   release(missionId: string, projectRoot: string): Promise<void>;
   /** Mission worktree 的绝对路径。原地模式没有，返回 undefined。 */
   worktreePath?(missionId: string, projectRoot: string): string | undefined;
+  /**
+   * 收敛孤儿 Mission worktree：只动目标根下、分支为 mission/<id> 的直接子目录。
+   * 不删分支、不用 --force。原地模式可不实现。
+   */
+  reconcile?(
+    projectRoot: string,
+    protectedMissionIds: ReadonlySet<string> | readonly string[],
+  ): Promise<WorktreeReconcileResult>;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
@@ -324,6 +393,140 @@ ${dirty}` };
 
   worktreePath(missionId: string, projectRoot: string): string {
     return join(this.#rootFor(projectRoot), missionId);
+  }
+
+  /**
+   * 启动时清掉**已安全合入且无保护**的 Mission worktree 目录。
+   *
+   * 只看 `git worktree list --porcelain` 里、路径是 `#rootFor` **直接子目录**、
+   * 且分支为 `refs/heads/mission/<missionId>` 的条目。主工作区、根外路径、
+   * 非 mission 分支一律不动。不删分支；`worktree remove` **不带** `--force`。
+   */
+  async reconcile(
+    projectRoot: string,
+    protectedMissionIds: ReadonlySet<string> | readonly string[],
+  ): Promise<WorktreeReconcileResult> {
+    const repo = resolve(projectRoot);
+    const targetRoot = resolve(this.#rootFor(projectRoot));
+    const protectedIds =
+      protectedMissionIds instanceof Set
+        ? protectedMissionIds
+        : new Set(protectedMissionIds);
+
+    const removed: { missionId: string; path: string }[] = [];
+    const kept: { missionId: string; path: string; reason: WorktreeKeepReason }[] = [];
+    const warnings: string[] = [];
+
+    let targetHead: string;
+    try {
+      targetHead = (await run('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+    } catch (error) {
+      warnings.push(
+        `无法读取 ${repo} 的 HEAD，跳过 worktree 收敛：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { removed, kept, warnings };
+    }
+
+    let porcelain: string;
+    try {
+      porcelain = (await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo })).stdout;
+    } catch (error) {
+      warnings.push(
+        `无法列出 worktree：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { removed, kept, warnings };
+    }
+
+    for (const entry of parseWorktreePorcelain(porcelain)) {
+      const abs = resolve(entry.path);
+      if (!isDirectChild(targetRoot, abs)) continue;
+      const missionId = missionIdFromBranch(entry.branch);
+      if (!missionId) continue;
+
+      // 目录名与分支 missionId 必须一致，否则身份不确定，绝不删除。
+      const dirName = basename(abs);
+      const nameMatches =
+        process.platform === 'win32'
+          ? dirName.toLowerCase() === missionId.toLowerCase()
+          : dirName === missionId;
+      if (!nameMatches) {
+        warnings.push(
+          `worktree 目录名 ${dirName} 与分支 missionId ${missionId} 不一致，保留`,
+        );
+        kept.push({ missionId, path: abs, reason: 'uncertain' });
+        continue;
+      }
+
+      if (protectedIds.has(missionId)) {
+        kept.push({ missionId, path: abs, reason: 'protected' });
+        continue;
+      }
+
+      let dirty = false;
+      try {
+        const status = (await run('git', ['status', '--porcelain'], { cwd: abs })).stdout.trim();
+        dirty = status.length > 0;
+      } catch (error) {
+        warnings.push(
+          `无法读 ${abs} 的 status，保留 worktree：${error instanceof Error ? error.message : String(error)}`,
+        );
+        kept.push({ missionId, path: abs, reason: 'uncertain' });
+        continue;
+      }
+      if (dirty) {
+        kept.push({ missionId, path: abs, reason: 'dirty' });
+        continue;
+      }
+
+      const worktreeHead = entry.head;
+      if (!worktreeHead) {
+        warnings.push(`worktree ${abs} 缺少 HEAD，保留`);
+        kept.push({ missionId, path: abs, reason: 'uncertain' });
+        continue;
+      }
+
+      let merged: boolean | undefined;
+      try {
+        await run('git', ['merge-base', '--is-ancestor', worktreeHead, targetHead], {
+          cwd: repo,
+        });
+        merged = true;
+      } catch (error: unknown) {
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: number | string }).code
+            : undefined;
+        // git 约定：非祖先时 exit 1；其它码当不确定。
+        if (code === 1 || code === '1') {
+          merged = false;
+        } else {
+          warnings.push(
+            `无法判断 ${missionId} (${worktreeHead.slice(0, 8)}) 是否已合入目标：${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          kept.push({ missionId, path: abs, reason: 'uncertain' });
+          continue;
+        }
+      }
+      if (!merged) {
+        kept.push({ missionId, path: abs, reason: 'not_merged' });
+        continue;
+      }
+
+      try {
+        await run('git', ['worktree', 'remove', abs], { cwd: repo });
+        removed.push({ missionId, path: abs });
+      } catch (error) {
+        warnings.push(
+          `移除 worktree ${abs} 失败（未强制）：${error instanceof Error ? error.message : String(error)}`,
+        );
+        kept.push({ missionId, path: abs, reason: 'remove_failed' });
+      }
+    }
+
+    await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
+    return { removed, kept, warnings };
   }
 
   /**
