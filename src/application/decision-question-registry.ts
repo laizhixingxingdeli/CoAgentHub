@@ -1,5 +1,5 @@
 /**
- * PRE_DISPATCH 题集（只读数据）。
+ * QuestionRegistry 题集（只读数据）：PRE_DISPATCH + POST_EXECUTION。
  *
  * 不建 class / service / store；不绑定任何 provider 实现。
  * 仅描述「问什么」，不描述「怎么答 / 怎么存」。
@@ -13,6 +13,15 @@ export const PRE_DISPATCH_V1_QUESTION_IDS = Object.freeze([
 ] as const);
 
 export type PreDispatchV1QuestionId = (typeof PRE_DISPATCH_V1_QUESTION_IDS)[number];
+
+export const POST_EXECUTION_V1_QUESTION_IDS = Object.freeze([
+  'objective_satisfied',
+  'evidence_sufficient',
+  'scope_deviation',
+  'semantic_risk',
+] as const);
+
+export type PostExecutionV1QuestionId = (typeof POST_EXECUTION_V1_QUESTION_IDS)[number];
 
 /** DecisionRequest.facts 候选输入 key；不是 question id。 */
 export const CANDIDATE_EXECUTOR_FACT_KEY = 'candidate_executor_id' as const;
@@ -50,6 +59,7 @@ export const SEMANTIC_RISK_ORDERED_LEVELS = Object.freeze([
 
 export type SemanticRiskLevel = (typeof SEMANTIC_RISK_ORDERED_LEVELS)[number];
 
+/** PRE 与 POST 的 semantic_risk 共用同一 defs 对象（不复制 rubric）。 */
 const SEMANTIC_RISK_LEVEL_DEFS: readonly OrderedLevel[] = Object.freeze([
   Object.freeze({
     label: 'LOW',
@@ -69,7 +79,7 @@ const SEMANTIC_RISK_LEVEL_DEFS: readonly OrderedLevel[] = Object.freeze([
   }),
 ]);
 
-export type DecisionQuestionSpec =
+export type PreDispatchQuestionSpec =
   | {
       readonly id: 'task_type';
       readonly kind: 'choice';
@@ -94,15 +104,48 @@ export type DecisionQuestionSpec =
       readonly optionSource: PreferredExecutorOptionSource;
     };
 
-export type QuestionRegistry = {
+export type PostExecutionQuestionSpec =
+  | {
+      readonly id: 'objective_satisfied';
+      readonly kind: 'noul';
+      readonly purpose: string;
+    }
+  | {
+      readonly id: 'evidence_sufficient';
+      readonly kind: 'noul';
+      readonly purpose: string;
+    }
+  | {
+      readonly id: 'scope_deviation';
+      readonly kind: 'noul';
+      readonly purpose: string;
+    }
+  | {
+      readonly id: 'semantic_risk';
+      readonly kind: 'score';
+      readonly purpose: string;
+      readonly orderedLevels: readonly OrderedLevel[];
+    };
+
+/** @deprecated 兼容旧名：PRE 题规格 */
+export type DecisionQuestionSpec = PreDispatchQuestionSpec;
+
+export type PreDispatchQuestionRegistry = {
   readonly id: 'PRE_DISPATCH_V1';
-  readonly questions: readonly DecisionQuestionSpec[];
+  readonly questions: readonly PreDispatchQuestionSpec[];
 };
+
+export type PostExecutionQuestionRegistry = {
+  readonly id: 'POST_EXECUTION_V1';
+  readonly questions: readonly PostExecutionQuestionSpec[];
+};
+
+export type QuestionRegistry = PreDispatchQuestionRegistry | PostExecutionQuestionRegistry;
 
 /**
  * 冻结的 PRE_DISPATCH 题集。调用方只读；勿就地改写。
  */
-export const PRE_DISPATCH_V1: QuestionRegistry = Object.freeze({
+export const PRE_DISPATCH_V1: PreDispatchQuestionRegistry = Object.freeze({
   id: 'PRE_DISPATCH_V1',
   questions: Object.freeze([
     Object.freeze({
@@ -129,4 +172,35 @@ export const PRE_DISPATCH_V1: QuestionRegistry = Object.freeze({
       optionSource: 'candidate_set_plus_none',
     }),
   ]),
-}) as QuestionRegistry;
+}) as PreDispatchQuestionRegistry;
+
+/**
+ * 冻结的 POST_EXECUTION 题集。调用方只读；勿就地改写。
+ * semantic_risk.orderedLevels 与 PRE 为同一对象引用。
+ */
+export const POST_EXECUTION_V1: PostExecutionQuestionRegistry = Object.freeze({
+  id: 'POST_EXECUTION_V1',
+  questions: Object.freeze([
+    Object.freeze({
+      id: 'objective_satisfied',
+      kind: 'noul',
+      purpose: '执行结果是否满足工作单目标与验收标准',
+    }),
+    Object.freeze({
+      id: 'evidence_sufficient',
+      kind: 'noul',
+      purpose: '已声明证据是否足以支撑执行结论',
+    }),
+    Object.freeze({
+      id: 'scope_deviation',
+      kind: 'noul',
+      purpose: '文件变更是否偏离声明范围',
+    }),
+    Object.freeze({
+      id: 'semantic_risk',
+      kind: 'score',
+      purpose: '本次执行变更的语义风险等级',
+      orderedLevels: SEMANTIC_RISK_LEVEL_DEFS,
+    }),
+  ]),
+}) as PostExecutionQuestionRegistry;

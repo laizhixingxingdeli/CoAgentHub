@@ -10,12 +10,16 @@ import { fileURLToPath } from 'node:url';
 
 import {
   CANDIDATE_EXECUTOR_FACT_KEY,
+  POST_EXECUTION_V1,
+  POST_EXECUTION_V1_QUESTION_IDS,
   PRE_DISPATCH_V1,
   PRE_DISPATCH_V1_QUESTION_IDS,
   PREFERRED_EXECUTOR_NONE_OPTION,
   TASK_TYPE_OPTIONS,
   type DecisionQuestionSpec,
   type OrderedLevel,
+  type PostExecutionQuestionSpec,
+  type PostExecutionV1QuestionId,
   type PreDispatchV1QuestionId,
 } from '../src/application/decision-question-registry.ts';
 
@@ -175,6 +179,57 @@ describe('PRE_DISPATCH_V1', () => {
     for (const q of PRE_DISPATCH_V1.questions) {
       assert.equal('instructions' in q, false, `${q.id} must not carry instructions`);
       assert.equal('criteria' in q, false, `${q.id} must not carry criteria`);
+    }
+  });
+});
+
+function findPostQuestion(id: PostExecutionV1QuestionId): PostExecutionQuestionSpec {
+  const q = POST_EXECUTION_V1.questions.find((item) => item.id === id);
+  assert.ok(q, `missing post question ${id}`);
+  return q;
+}
+
+describe('POST_EXECUTION_V1', () => {
+  test('id / 四问顺序 / kinds 冻结', () => {
+    assert.equal(POST_EXECUTION_V1.id, 'POST_EXECUTION_V1');
+    const ids = POST_EXECUTION_V1.questions.map((q) => q.id);
+    assert.deepEqual(ids, [
+      'objective_satisfied',
+      'evidence_sufficient',
+      'scope_deviation',
+      'semantic_risk',
+    ]);
+    assert.deepEqual([...POST_EXECUTION_V1_QUESTION_IDS], ids);
+    assert.deepEqual(
+      POST_EXECUTION_V1.questions.map((q) => q.kind),
+      ['noul', 'noul', 'noul', 'score'],
+    );
+    assert.throws(() => {
+      (POST_EXECUTION_V1.questions as PostExecutionQuestionSpec[]).push({
+        id: 'objective_satisfied',
+        kind: 'noul',
+        purpose: 'x',
+      });
+    }, TypeError);
+  });
+
+  test('semantic_risk orderedLevels 与 PRE 同一对象引用', () => {
+    const pre = findQuestion('semantic_risk');
+    const post = findPostQuestion('semantic_risk');
+    assert.ok(pre.kind === 'score' && 'orderedLevels' in pre);
+    assert.ok(post.kind === 'score' && 'orderedLevels' in post);
+    assert.equal(post.orderedLevels, pre.orderedLevels);
+  });
+
+  test('purpose 只描述问题；源与 purpose 无 PASS/RETRY/FAIL', () => {
+    const source = readFileSync(registrySrcPath, 'utf8');
+    assert.doesNotMatch(source, /\bPASS\b/);
+    assert.doesNotMatch(source, /\bRETRY\b/);
+    assert.doesNotMatch(source, /\bFAIL\b/);
+    for (const q of POST_EXECUTION_V1.questions) {
+      assert.equal(typeof q.purpose, 'string');
+      assert.ok(q.purpose.length > 0);
+      assert.doesNotMatch(q.purpose, /\bPASS\b|\bRETRY\b|\bFAIL\b/);
     }
   });
 });
