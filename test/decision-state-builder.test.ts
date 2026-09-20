@@ -374,11 +374,20 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
         /buildDecisionState|toDecisionRequest/,
         `${rel}: 不得提前接线 StateBuilder`,
       );
-      assert.doesNotMatch(
-        source,
-        /DecisionProvider/,
-        `${rel}: 不得提前引用 DecisionProvider`,
-      );
+      // HOPT-07-A：启动门禁错误文案可点名 DecisionProvider；不得 import/接线。
+      if (rel !== 'src/application/decision-mode.ts') {
+        assert.doesNotMatch(
+          source,
+          /DecisionProvider/,
+          `${rel}: 不得提前引用 DecisionProvider`,
+        );
+      } else {
+        assert.doesNotMatch(
+          source,
+          /\bimport\b[^;]*DecisionProvider/,
+          `${rel}: 不得 import DecisionProvider`,
+        );
+      }
       assert.doesNotMatch(
         source,
         /runDecisionShadow|decision-shadow-runner|DECISION_SHADOW_EVENT_KIND/,

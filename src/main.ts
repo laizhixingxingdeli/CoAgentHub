@@ -44,6 +44,10 @@ import { reconcileInterruptedAttempts } from './application/reconcile.ts';
 import type { RunTokenIssuer } from './application/token-issuer.ts';
 import type { WorkspaceManager } from './application/workspace.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
+import {
+  assertDecisionModeStartup,
+  parseDecisionMode,
+} from './application/decision-mode.ts';
 
 export function buildPlatform(workspace?: WorkspaceManager) {
   const clock = new SystemClock();
@@ -225,6 +229,11 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
  * 没装 Postgres 的人 clone 下来就能跑，这条性质不能因为多了一个选项就丢掉。
  */
 export async function startServer(port = 3101, statePath = '.coagent-state.json') {
+  // Decision 模式：在任何持久化 / 锁 / listen 之前诚实校验。
+  // 当前 composition root 未注入 decision provider，故 providerAvailable=false。
+  const decisionMode = parseDecisionMode(process.env.COAGENT_DECISION_MODE);
+  assertDecisionModeStartup({ mode: decisionMode, providerAvailable: false });
+
   const usePg = (process.env.COAGENT_STORE ?? 'file') === 'pg';
   const built = usePg
     ? await buildPgPlatform()
