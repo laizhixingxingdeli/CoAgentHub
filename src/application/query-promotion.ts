@@ -4,12 +4,17 @@
  * 与 runQuery 并列、**互不自动调用**：QueryRun 保持纯只读；只有本服务
  * 才把 needs_mutation 的记录转成可追溯 Mission，并通过 origin.queryRunId
  * 复用已持久化 findings（不把 output 大段抄进 Mission/contract）。
+ *
+ * M3D-3：caller 必须显式提供 Frozen WorkOrder；晋升路径产出
+ * lightweight/mutation Mission + 恰好一个 Frozen WorkItem。禁止从
+ * QueryRun prompt/output/toolCalls/usage 自动生成或复制工单内容。
  */
 
 import type {
   Mission,
   MissionContract,
   OriginChannel,
+  WorkOrder,
 } from '../kernel/index.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
@@ -21,6 +26,12 @@ export interface PromoteQueryRunInput {
   readonly queryRunId: string;
   /** 必须显式传入；禁止从 prompt 自动生成 acceptance/constraints。 */
   readonly contract: MissionContract;
+  /**
+   * 必须显式传入的 Frozen WorkOrder。
+   * TypeScript required 之外，runtime 仍 fail-closed（见 WORK_ORDER_REQUIRED）。
+   * 禁止从 QueryRun prompt/output/toolCalls/usage 自动生成。
+   */
+  readonly workOrder: WorkOrder;
   readonly missionId?: string;
   /** 只认 clientType / conversationRef；queryRunId 由服务强制覆盖。 */
   readonly origin?: Pick<OriginChannel, 'clientType' | 'conversationRef'>;
@@ -52,11 +63,15 @@ export interface QueryPromotionDeps {
 
 /* ------------------------------ 错误码 ------------------------------ */
 
-/** 稳定可测：NOT_FOUND / NOT_PROMOTABLE / PROMOTION_CONFLICT。 */
+/**
+ * 稳定可测：
+ * NOT_FOUND / NOT_PROMOTABLE / PROMOTION_CONFLICT / WORK_ORDER_REQUIRED。
+ */
 export type QueryPromotionErrorCode =
   | 'NOT_FOUND'
   | 'NOT_PROMOTABLE'
-  | 'PROMOTION_CONFLICT';
+  | 'PROMOTION_CONFLICT'
+  | 'WORK_ORDER_REQUIRED';
 
 export class QueryPromotionError extends PlatformRuleError {
   constructor(code: QueryPromotionErrorCode, message: string) {
@@ -83,11 +98,14 @@ export class QueryPromotionService {
   }
 
   /**
-   * 把 needs_mutation 的 QueryRun 晋升为 lightweight/mutation Mission。
+   * 把 needs_mutation 的 QueryRun 晋升为 lightweight/mutation Mission
+   * + 恰好一个显式 Frozen WorkItem。
    *
-   * **不做**的事：改 QueryRun、prepare worktree、启 Coordinator、抄 output。
+   * **不做**的事：改 QueryRun、prepare worktree、启 Coordinator、抄 output、
+   * 从 prompt 自动生成 WorkOrder。
    */
   async promote(input: PromoteQueryRunInput): Promise<PromoteQueryRunResult> {
+    // 1-2) load + promotable check 优先于 workOrder runtime guard
     const record = await this.#queryRuns.get(input.queryRunId);
     if (!record) {
       throw new QueryPromotionError(
@@ -104,6 +122,9 @@ export class QueryPromotionService {
       );
     }
 
+    // 3) workOrder runtime guard 先于任何 Project side effect（ensure / create）
+    const workOrder = requireWorkOrder(input);
+
     const source = summarizeSource(record);
     const project = await this.#projects.ensure(record.projectId);
     const existing = project.missions.find(
@@ -112,21 +133,37 @@ export class QueryPromotionService {
 
     if (existing) {
       assertPromotionCompatible(existing, input);
-      // 全部一致：返回已有，不再写 promotion event。
-      return { mission: existing, created: false, source };
+      return this.#handleExisting(existing, project, record, source, workOrder);
     }
 
+    return this.#createPromoted(project, record, input, source, workOrder);
+  }
+
+  async #createPromoted(
+    project: Awaited<ReturnType<ProjectRepository['ensure']>>,
+    record: QueryRunRecord,
+    input: PromoteQueryRunInput,
+    source: PromotedQueryRunSource,
+    workOrder: WorkOrder,
+  ): Promise<PromoteQueryRunResult> {
     const missionId = input.missionId ?? this.#ids.next('M');
+    const workItemId = this.#ids.next('W');
     const origin = buildTrustedOrigin(record, input.origin);
-    const mission = project.createMission({
+
+    // 只走原子 seed；禁止先 createMission 再 createWorkItem
+    const { mission, workItem } = project.createMissionWithInitialWorkItem({
       id: missionId,
       contract: input.contract,
       origin,
       executionMode: 'lightweight',
       runKind: 'mutation',
+      initialWorkItem: {
+        id: workItemId,
+        title: workOrder.objective,
+        order: workOrder,
+      },
     });
 
-    // 先 touch 再 save：updatedAt 进 snapshot，可追溯。
     const at = this.#clock.now().toISOString();
     mission.touch(at);
     await this.#projects.save(project);
@@ -146,7 +183,90 @@ export class QueryPromotionService {
       planRevision: mission.planRevision,
     });
 
+    await this.#activity.append({
+      projectId: mission.projectId,
+      missionId: mission.id,
+      workItemId: workItem.id,
+      kind: 'work_item.created',
+      data: {
+        title: workOrder.objective,
+        executionMode: 'lightweight',
+        promotedFromQueryRunId: record.id,
+      },
+      correlationId: mission.id,
+      causationId: record.id,
+      contractRevision: mission.contractRevision,
+      planRevision: mission.planRevision,
+    });
+
     return { mission, created: true, source };
+  }
+
+  async #handleExisting(
+    existing: Mission,
+    project: Awaited<ReturnType<ProjectRepository['ensure']>>,
+    record: QueryRunRecord,
+    source: PromotedQueryRunSource,
+    workOrder: WorkOrder,
+  ): Promise<PromoteQueryRunResult> {
+    const items = existing.workItems;
+
+    if (items.length === 0) {
+      // legacy backfill：同 Mission 补一张显式 Frozen WorkOrder，不重建
+      const workItemId = this.#ids.next('W');
+      // invalid WorkOrder → kernel validation error；0 WI 保持，不 save、不 event
+      const workItem = existing.createWorkItem({
+        id: workItemId,
+        title: workOrder.objective,
+        order: workOrder,
+      });
+
+      const at = this.#clock.now().toISOString();
+      existing.touch(at);
+      await this.#projects.save(project);
+
+      await this.#activity.append({
+        projectId: existing.projectId,
+        missionId: existing.id,
+        workItemId: workItem.id,
+        kind: 'work_item.created',
+        data: {
+          title: workOrder.objective,
+          executionMode: 'lightweight',
+          promotedFromQueryRunId: record.id,
+        },
+        correlationId: existing.id,
+        causationId: record.id,
+        contractRevision: existing.contractRevision,
+        planRevision: existing.planRevision,
+      });
+
+      return { mission: existing, created: false, source };
+    }
+
+    if (items.length === 1) {
+      const item = items[0]!;
+      if (
+        item.order === undefined ||
+        !structuralEqual(item.order, workOrder) ||
+        item.title !== workOrder.objective
+      ) {
+        throw new QueryPromotionError(
+          'PROMOTION_CONFLICT',
+          `QueryRun ${record.id} 已有 Mission ${existing.id} 且已有 WorkItem，` +
+            `但 order/title 与本次显式 workOrder 不一致，拒绝覆盖。`,
+        );
+      }
+      // 幂等：不 save、不 event
+      return { mission: existing, created: false, source };
+    }
+
+    // >1 WI：不选其中任何一个
+    throw new QueryPromotionError(
+      'PROMOTION_CONFLICT',
+      `QueryRun ${record.id} 已有 Mission ${existing.id} 且 workItems.length=${items.length}，` +
+        `拒绝覆盖。`,
+    );
   }
 }
 
@@ -191,6 +311,28 @@ function buildTrustedOrigin(
     origin.conversationRef = caller.conversationRef;
   }
   return origin;
+}
+
+/**
+ * Runtime fail-closed：Node 会 strip type，所以 required 不能只靠 TS。
+ * undefined / null / 非普通 object（含数组）→ WORK_ORDER_REQUIRED。
+ * 在任何新建 / backfill 之前调用。
+ */
+function requireWorkOrder(input: PromoteQueryRunInput): WorkOrder {
+  const workOrder = (input as { workOrder?: unknown }).workOrder;
+  if (
+    workOrder === undefined ||
+    workOrder === null ||
+    typeof workOrder !== 'object' ||
+    Array.isArray(workOrder)
+  ) {
+    throw new QueryPromotionError(
+      'WORK_ORDER_REQUIRED',
+      'PromoteQueryRunInput.workOrder is required and must be a plain object；' +
+        '禁止从 QueryRun 自动生成 WorkOrder。',
+    );
+  }
+  return workOrder as WorkOrder;
 }
 
 function structuralEqual(a: unknown, b: unknown): boolean {
@@ -246,4 +388,3 @@ function assertPromotionCompatible(
     );
   }
 }
-
