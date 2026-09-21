@@ -9,7 +9,7 @@ import {
   Project,
   WorkItem,
 } from '../src/kernel/index.ts';
-import type { ComplexityAssessment } from '../src/kernel/index.ts';
+import type { ComplexityAssessment, ExecutionBudget } from '../src/kernel/index.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,7 @@ describe('Project / Mission: 创建', () => {
       'executionMode',
       'runKind',
       'complexityAssessment',
+      'executionBudget',
     ]) {
       assert.throws(
         () => {
@@ -466,6 +467,321 @@ describe('Mission: complexityAssessment', () => {
         `${rel}: 本单 scope 外不得引用 complexityAssessment`,
       );
       // 非 kernel 允许既有 semantic_risk（Decision），但禁止与 complexityAssessment 同现映射。
+    }
+  });
+});
+
+function sampleBudget(overrides: Partial<ExecutionBudget> = {}): ExecutionBudget {
+  return {
+    maxAttempts: 3,
+    maxRounds: 5,
+    maxWallClockMs: 60_000,
+    maxInputTokens: 100_000,
+    maxOutputTokens: 20_000,
+    maxTotalTokens: 120_000,
+    maxCost: 1.25,
+    maxChangedFiles: 12,
+    maxCommands: 40,
+    ...overrides,
+  };
+}
+
+describe('Mission: executionBudget', () => {
+  test('新建默认 undefined，快照不产生默认预算', () => {
+    const mission = freshMission();
+    assert.equal(mission.executionBudget, undefined);
+    assert.equal(mission.toSnapshot().executionBudget, undefined);
+  });
+
+  test('完整合法对象含零值与小数 maxCost：frozen；未知 key 丢弃；snapshot/restore 相等', () => {
+    const raw = {
+      ...sampleBudget({
+        maxAttempts: 0,
+        maxRounds: 0,
+        maxWallClockMs: 0,
+        maxInputTokens: 0,
+        maxOutputTokens: 0,
+        maxTotalTokens: 0,
+        maxCost: 0.5,
+        maxChangedFiles: 0,
+        maxCommands: 0,
+      }),
+      unknownPolicy: 'manual',
+      source: 'classifier',
+    };
+    const mission = Project.create({ id: 'p-eb-ok' }).createMission({
+      id: 'm-eb-ok',
+      executionBudget: raw as ExecutionBudget,
+    });
+
+    const got = mission.executionBudget;
+    assert.ok(got);
+    assert.deepEqual(got, {
+      maxAttempts: 0,
+      maxRounds: 0,
+      maxWallClockMs: 0,
+      maxInputTokens: 0,
+      maxOutputTokens: 0,
+      maxTotalTokens: 0,
+      maxCost: 0.5,
+      maxChangedFiles: 0,
+      maxCommands: 0,
+    });
+    assert.equal('unknownPolicy' in got, false);
+    assert.equal('source' in got, false);
+    assert.ok(Object.isFrozen(got));
+    assert.throws(() => {
+      (got as { maxAttempts: number }).maxAttempts = 9;
+    }, TypeError);
+
+    const snap = mission.toSnapshot().executionBudget;
+    assert.deepEqual(snap, got);
+
+    const restored = Mission.restore(mission.toSnapshot(), Project.create({ id: 'p-eb-ok' }));
+    assert.deepEqual(restored.executionBudget, got);
+    assert.deepEqual(restored.toSnapshot().executionBudget, snap);
+    assert.ok(Object.isFrozen(restored.executionBudget));
+  });
+
+  test('老快照缺字段 / null restore -> undefined，不抛、不填默认', () => {
+    const project = Project.create({ id: 'p-eb-old' });
+    const base = project.createMission({ id: 'm-old' });
+    const snapMissing = base.toSnapshot();
+    delete snapMissing.executionBudget;
+    const restoredMissing = Mission.restore(snapMissing, project);
+    assert.equal(restoredMissing.executionBudget, undefined);
+    assert.equal(restoredMissing.toSnapshot().executionBudget, undefined);
+
+    const snapNull = base.toSnapshot();
+    (snapNull as { executionBudget?: unknown }).executionBudget = null;
+    const restoredNull = Mission.restore(snapNull, project);
+    assert.equal(restoredNull.executionBudget, undefined);
+  });
+
+  test('缺任一 required => 整段 undefined', () => {
+    const project = Project.create({ id: 'p-eb-req' });
+    const base = project.createMission({
+      id: 'm-eb-req',
+      executionBudget: sampleBudget(),
+    });
+    const good = base.toSnapshot();
+
+    for (const key of ['maxAttempts', 'maxRounds', 'maxWallClockMs'] as const) {
+      const snap = structuredClone(good);
+      delete (snap.executionBudget as Record<string, unknown>)[key];
+      const restored = Mission.restore(snap, project);
+      assert.equal(
+        restored.executionBudget,
+        undefined,
+        `missing ${key} should fail-closed`,
+      );
+    }
+  });
+
+  test('optional-only 无 required => undefined', () => {
+    const project = Project.create({ id: 'p-eb-opt' });
+    const base = project.createMission({ id: 'm-eb-opt' });
+    const snap = base.toSnapshot();
+    (snap as { executionBudget?: unknown }).executionBudget = {
+      maxInputTokens: 10,
+      maxCost: 1,
+    };
+    const restored = Mission.restore(snap, project);
+    assert.equal(restored.executionBudget, undefined);
+  });
+
+  test('malformed 表：整段 undefined，不 clamp、不 partial', () => {
+    const project = Project.create({ id: 'p-eb-bad' });
+    const base = project.createMission({
+      id: 'm-eb-bad',
+      executionBudget: sampleBudget(),
+    });
+    const good = base.toSnapshot();
+
+    const cases: Array<{ label: string; apply: (snap: Record<string, unknown>) => void }> = [
+      {
+        label: 'negative maxAttempts',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxAttempts = -1;
+        },
+      },
+      {
+        label: 'NaN maxRounds',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxRounds = Number.NaN;
+        },
+      },
+      {
+        label: 'Infinity maxWallClockMs',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxWallClockMs = Number.POSITIVE_INFINITY;
+        },
+      },
+      {
+        label: 'integer field 1.5',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxCommands = 1.5;
+        },
+      },
+      {
+        label: "string '1'",
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxAttempts = '1';
+        },
+      },
+      {
+        label: 'boolean true',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxRounds = true;
+        },
+      },
+      {
+        label: 'boxed Number',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxWallClockMs = Object(10);
+        },
+      },
+      {
+        label: 'negative maxCost',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxCost = -0.01;
+        },
+      },
+      {
+        label: 'NaN maxCost',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxCost = Number.NaN;
+        },
+      },
+      {
+        label: 'Infinity maxCost',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxCost = Number.POSITIVE_INFINITY;
+        },
+      },
+      {
+        label: 'string maxCost',
+        apply: (s) => {
+          (s.executionBudget as Record<string, unknown>).maxCost = '1.25';
+        },
+      },
+      {
+        label: '非普通对象 array',
+        apply: (s) => {
+          s.executionBudget = [1, 2, 3];
+        },
+      },
+      {
+        label: '非对象 string',
+        apply: (s) => {
+          s.executionBudget = 'nope';
+        },
+      },
+    ];
+
+    for (const { label, apply } of cases) {
+      const snap = structuredClone(good) as unknown as Record<string, unknown>;
+      apply(snap);
+      const restored = Mission.restore(snap as never, project);
+      assert.equal(
+        restored.executionBudget,
+        undefined,
+        `${label} should fail-closed to undefined`,
+      );
+    }
+  });
+
+  test('仅 required 合法、optional 缺席 => omit optional',
+    () => {
+      const mission = Project.create({ id: 'p-eb-min' }).createMission({
+        id: 'm-eb-min',
+        executionBudget: {
+          maxAttempts: 1,
+          maxRounds: 2,
+          maxWallClockMs: 3,
+        },
+      });
+      assert.deepEqual(mission.executionBudget, {
+        maxAttempts: 1,
+        maxRounds: 2,
+        maxWallClockMs: 3,
+      });
+      assert.equal('maxCost' in (mission.executionBudget as object), false);
+      assert.equal('maxInputTokens' in (mission.executionBudget as object), false);
+    },
+  );
+
+  test('executionBudget 只读，无 setter；赋值失败', () => {
+    const mission = Project.create({ id: 'p-eb-ro' }).createMission({
+      id: 'm-eb-ro',
+      executionBudget: sampleBudget({ maxAttempts: 7 }),
+    });
+    assert.throws(() => {
+      (mission as unknown as Record<string, unknown>).executionBudget = undefined;
+    }, TypeError);
+    assert.equal(mission.executionBudget?.maxAttempts, 7);
+  });
+
+  test('executionBudget 不改变 executionMode / runKind / status / isMutating / complexityAssessment', () => {
+    const project = Project.create({ id: 'p-eb-side' });
+    const assessment: ComplexityAssessment = {
+      goalUncertainty: 1,
+      changeScope: 1,
+      operationalRisk: 1,
+      verificationDifficulty: 1,
+      coordinationNeed: 1,
+      recoveryDifficulty: 1,
+      reasons: ['side'],
+      decidedBy: 'rule',
+      assessedAt: '2026-03-21T00:00:00.000Z',
+    };
+    const mission = project.createMission({
+      id: 'm-eb-side',
+      executionBudget: sampleBudget(),
+      complexityAssessment: assessment,
+      executionMode: 'high_assurance',
+      runKind: 'query',
+    });
+    assert.equal(mission.executionMode, 'high_assurance');
+    assert.equal(mission.runKind, 'query');
+    assert.equal(mission.status, 'investigating');
+    assert.equal(mission.isMutating, false);
+    assert.deepEqual(mission.complexityAssessment?.reasons, ['side']);
+    mission.startExecuting();
+    assert.equal(mission.status, 'executing');
+    assert.equal(mission.isMutating, true);
+    assert.ok(mission.executionBudget);
+  });
+
+  test('生产代码无 executionBudget 路由/gating 分支', () => {
+    const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (name.endsWith('.ts')) files.push(full);
+      }
+    };
+    walk(srcRoot);
+
+    for (const full of files) {
+      const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
+      const source = readFileSync(full, 'utf8');
+      if (rel.startsWith('kernel/')) {
+        assert.doesNotMatch(
+          source,
+          /if\s*\([^)]*executionBudget|executionBudget\s*[=!]=|switch\s*\([^)]*executionBudget/,
+          `${rel}: 不得按 executionBudget 路由/gating`,
+        );
+        continue;
+      }
+      // 允许类型名出现在“不实现 ExecutionBudget”类否定注释；禁止字段接入。
+      assert.doesNotMatch(
+        source,
+        /executionBudget/,
+        `${rel}: 本单 scope 外不得引用 executionBudget 字段`,
+      );
     }
   });
 });

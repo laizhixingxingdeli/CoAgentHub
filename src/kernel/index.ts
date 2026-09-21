@@ -23,6 +23,7 @@ export type {
   ContextRefKind,
   EvidenceKind,
   EvidenceRecord,
+  ExecutionBudget,
   ExecutionOutcome,
   FinalReview,
   ExecutionResultBody,

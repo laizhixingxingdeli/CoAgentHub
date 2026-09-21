@@ -56,6 +56,24 @@ export interface ComplexityAssessment {
   readonly assessedAt: string;
 }
 
+/**
+ * Mission 执行预算上限载荷。可选、不可变；本阶段仅合同 + snapshot/restore，
+ * 不实现 BudgetPolicy、不接 classifier/usage gates/promotion。
+ *
+ * 缺省/非法 -> undefined（禁止填默认预算）。不 clamp、不 partial。
+ */
+export interface ExecutionBudget {
+  readonly maxAttempts: number;
+  readonly maxRounds: number;
+  readonly maxWallClockMs: number;
+  readonly maxInputTokens?: number;
+  readonly maxOutputTokens?: number;
+  readonly maxTotalTokens?: number;
+  readonly maxCost?: number;
+  readonly maxChangedFiles?: number;
+  readonly maxCommands?: number;
+}
+
 export interface MissionContract {
   readonly intent: string;
   readonly acceptance: readonly string[];

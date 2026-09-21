@@ -8,6 +8,7 @@ import type { AttemptSnapshot, MissionSnapshot, WorkItemSnapshot } from './snaps
 import type {
   ComplexityAssessment,
   EscalationBody,
+  ExecutionBudget,
   FinalReview,
   WaitReason,
   WorkspaceRef,
@@ -66,6 +67,8 @@ export interface MissionInit {
   runKind?: RunKind;
   /** 可选六维复杂度评估；缺省/非法 -> undefined。无 setter。 */
   complexityAssessment?: ComplexityAssessment;
+  /** 可选执行预算上限；缺省/非法 -> undefined。无 setter、不填默认预算。 */
+  executionBudget?: ExecutionBudget;
 }
 
 /**
@@ -96,6 +99,7 @@ export class Mission {
   #executionMode: MissionExecutionMode;
   #runKind: RunKind;
   #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
+  #executionBudget: Readonly<ExecutionBudget> | undefined;
 
   constructor(init: MissionInit) {
     this.#id = init.id;
@@ -106,6 +110,7 @@ export class Mission {
     this.#complexityAssessment = Mission.#normalizeComplexityAssessment(
       init.complexityAssessment,
     );
+    this.#executionBudget = Mission.#normalizeExecutionBudget(init.executionBudget);
     if (init.origin) {
       this.#origin = freezePayload({ ...init.origin });
     }
@@ -140,6 +145,11 @@ export class Mission {
   /** 可选六维复杂度评估；只读。未评估为 undefined，禁止默认全 0。 */
   get complexityAssessment(): Readonly<ComplexityAssessment> | undefined {
     return this.#complexityAssessment;
+  }
+
+  /** 可选执行预算上限；只读。缺省/非法为 undefined，禁止填默认预算。 */
+  get executionBudget(): Readonly<ExecutionBudget> | undefined {
+    return this.#executionBudget;
   }
 
   /**
@@ -489,6 +499,7 @@ export class Mission {
       executionMode: this.#executionMode,
       runKind: this.#runKind,
       complexityAssessment: this.#complexityAssessment,
+      executionBudget: this.#executionBudget,
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
@@ -506,6 +517,7 @@ export class Mission {
       complexityAssessment: Mission.#normalizeComplexityAssessment(
         snapshot.complexityAssessment,
       ),
+      executionBudget: Mission.#normalizeExecutionBudget(snapshot.executionBudget),
     });
     mission.#status = snapshot.status as MissionStatus;
     mission.#contract = snapshot.contract as Readonly<MissionContract> | undefined;
@@ -592,6 +604,75 @@ export class Mission {
       decidedBy: raw.decidedBy,
       assessedAt: raw.assessedAt,
     });
+  }
+
+  /**
+   * fail-closed：缺/null/undefined -> undefined；任一已知字段非法或缺 required -> 整段 undefined。
+   * 不 clamp、不 partial、不填默认预算。仅重构 known fields；未知 key 丢弃。
+   */
+  static #normalizeExecutionBudget(value: unknown): Readonly<ExecutionBudget> | undefined {
+    if (value == null) return undefined;
+    if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+
+    const maxAttempts = Mission.#asNonNegativeInt(raw.maxAttempts);
+    const maxRounds = Mission.#asNonNegativeInt(raw.maxRounds);
+    const maxWallClockMs = Mission.#asNonNegativeInt(raw.maxWallClockMs);
+    if (maxAttempts === undefined || maxRounds === undefined || maxWallClockMs === undefined) {
+      return undefined;
+    }
+
+    const budget: {
+      maxAttempts: number;
+      maxRounds: number;
+      maxWallClockMs: number;
+      maxInputTokens?: number;
+      maxOutputTokens?: number;
+      maxTotalTokens?: number;
+      maxCost?: number;
+      maxChangedFiles?: number;
+      maxCommands?: number;
+    } = {
+      maxAttempts,
+      maxRounds,
+      maxWallClockMs,
+    };
+
+    const optionalInts = [
+      'maxInputTokens',
+      'maxOutputTokens',
+      'maxTotalTokens',
+      'maxChangedFiles',
+      'maxCommands',
+    ] as const;
+    for (const key of optionalInts) {
+      if (!Object.prototype.hasOwnProperty.call(raw, key) || raw[key] === undefined) continue;
+      const n = Mission.#asNonNegativeInt(raw[key]);
+      if (n === undefined) return undefined;
+      budget[key] = n;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'maxCost') && raw.maxCost !== undefined) {
+      const cost = Mission.#asNonNegativeNumber(raw.maxCost);
+      if (cost === undefined) return undefined;
+      budget.maxCost = cost;
+    }
+
+    return freezePayload(budget);
+  }
+
+  /** finite nonnegative integer（含 0）；否则 undefined。拒绝 boxed Number。 */
+  static #asNonNegativeInt(value: unknown): number | undefined {
+    if (typeof value !== 'number') return undefined;
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) return undefined;
+    return value;
+  }
+
+  /** finite nonnegative number（含 0、允许小数）；否则 undefined。拒绝 boxed Number。 */
+  static #asNonNegativeNumber(value: unknown): number | undefined {
+    if (typeof value !== 'number') return undefined;
+    if (!Number.isFinite(value) || value < 0) return undefined;
+    return value;
   }
 
   #isTerminal(): boolean {
