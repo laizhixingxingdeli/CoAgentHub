@@ -9,6 +9,7 @@ import {
   Project,
   WorkItem,
 } from '../src/kernel/index.ts';
+import type { WorkOrder } from '../src/kernel/index.ts';
 
 function dispatchableWorkItem(): WorkItem {
   const project = Project.create({ id: 'p-wi' });
@@ -343,5 +344,381 @@ describe('还没派发也能作废', () => {
     });
     // blocked 直接去 accepted 必须不行。
     assert.throws(() => item.review('accept'));
+  });
+});
+
+const BASE_ORDER: WorkOrder = {
+  objective: '改 foo',
+  allowedScope: ['src/foo.ts'],
+  requiredBehaviour: 'foo 返回 1',
+  constraints: [],
+  acceptance: ['foo() === 1'],
+  verification: ['node --test'],
+  doNot: [],
+  contextRefs: [],
+};
+
+describe('WorkOrder.validation 合同', () => {
+  test('legacy WorkOrder 无 validation：行为不变', () => {
+    const item = new WorkItem({
+      id: 'W-leg',
+      missionId: 'M1',
+      title: 'legacy',
+      order: { ...BASE_ORDER },
+    });
+    assert.equal(item.order?.objective, BASE_ORDER.objective);
+    assert.equal(item.order?.validation, undefined);
+    assert.equal('validation' in (item.order as object), false);
+  });
+
+  test('合法 validation round-trip；argv/commands/validation 深冻结且 input-mutation-safe', () => {
+    const argv = ['node', '--test'];
+    const commands = [{ argv, timeoutMs: 30_000 }];
+    const validation = { commands };
+    const order: WorkOrder = { ...BASE_ORDER, validation };
+    const item = new WorkItem({
+      id: 'W-val',
+      missionId: 'M1',
+      title: 'with validation',
+      order,
+    });
+
+    assert.deepEqual(item.order?.validation, {
+      commands: [{ argv: ['node', '--test'], timeoutMs: 30_000 }],
+    });
+
+    // 调用方事后改输入不得污染 item.order
+    argv.push('--hack');
+    commands.push({ argv: ['rm', '-rf', '/'], timeoutMs: 1 });
+    (validation as { commands: unknown }).commands = [];
+    assert.deepEqual(item.order?.validation?.commands, [
+      { argv: ['node', '--test'], timeoutMs: 30_000 },
+    ]);
+
+    // 深冻结
+    assert.ok(Object.isFrozen(item.order));
+    assert.ok(Object.isFrozen(item.order!.validation));
+    assert.ok(Object.isFrozen(item.order!.validation!.commands));
+    assert.ok(Object.isFrozen(item.order!.validation!.commands[0]));
+    assert.ok(Object.isFrozen(item.order!.validation!.commands[0].argv));
+    assert.throws(() => {
+      (item.order!.validation!.commands as unknown as unknown[]).push({});
+    }, TypeError);
+    assert.throws(() => {
+      (item.order!.validation!.commands[0].argv as unknown as string[]).push('x');
+    }, TypeError);
+
+    // 空 commands 合法
+    const empty = new WorkItem({
+      id: 'W-empty-cmd',
+      missionId: 'M1',
+      title: 'empty commands',
+      order: { ...BASE_ORDER, validation: { commands: [] } },
+    });
+    assert.deepEqual(empty.order?.validation?.commands, []);
+    assert.ok(Object.isFrozen(empty.order!.validation!.commands));
+  });
+
+  test('cwd / 未知 key / 空 argv / 空字符串 argv / bad timeout 全拒绝且不创建 item', () => {
+    const cases: Array<{ label: string; validation: unknown }> = [
+      {
+        label: 'cwd on command',
+        validation: {
+          commands: [{ argv: ['node', '--test'], timeoutMs: 1000, cwd: '/tmp' }],
+        },
+      },
+      {
+        label: 'unknown key on validation',
+        validation: { commands: [], shell: true },
+      },
+      {
+        label: 'unknown key on command',
+        validation: {
+          commands: [{ argv: ['node'], timeoutMs: 1000, env: {} }],
+        },
+      },
+      {
+        label: 'empty argv',
+        validation: { commands: [{ argv: [], timeoutMs: 1000 }] },
+      },
+      {
+        label: 'empty string in argv',
+        validation: { commands: [{ argv: ['node', ''], timeoutMs: 1000 }] },
+      },
+      {
+        label: 'timeout 0',
+        validation: { commands: [{ argv: ['node'], timeoutMs: 0 }] },
+      },
+      {
+        label: 'timeout negative',
+        validation: { commands: [{ argv: ['node'], timeoutMs: -1 }] },
+      },
+      {
+        label: 'timeout NaN',
+        validation: { commands: [{ argv: ['node'], timeoutMs: Number.NaN }] },
+      },
+      {
+        label: 'timeout Infinity',
+        validation: {
+          commands: [{ argv: ['node'], timeoutMs: Number.POSITIVE_INFINITY }],
+        },
+      },
+      {
+        label: 'timeout decimal',
+        validation: { commands: [{ argv: ['node'], timeoutMs: 1.5 }] },
+      },
+    ];
+
+    for (const c of cases) {
+      assert.throws(
+        () =>
+          new WorkItem({
+            id: `W-bad-${c.label}`,
+            missionId: 'M1',
+            title: c.label,
+            order: { ...BASE_ORDER, validation: c.validation as WorkOrder['validation'] },
+          }),
+        invariant('INVALID_WORK_ORDER_VALIDATION'),
+        c.label,
+      );
+    }
+
+    // Mission.createWorkItem 失败时不得留下污染的 work item
+    const project = Project.create({ id: 'p-val' });
+    const mission = project.createMission({ id: 'm-val' });
+    mission.startExecuting();
+    assert.throws(
+      () =>
+        mission.createWorkItem({
+          id: 'w-bad',
+          title: 'bad',
+          order: {
+            ...BASE_ORDER,
+            validation: {
+              commands: [{ argv: ['node'], timeoutMs: 1, cwd: '.' } as never],
+            },
+          },
+        }),
+      invariant('INVALID_WORK_ORDER_VALIDATION'),
+    );
+    assert.equal(mission.workItems.length, 0);
+  });
+
+  test('restore malformed validation => drop validation，其余 order 保留；legacy 仍恢复', () => {
+    const good = new WorkItem({
+      id: 'W-r1',
+      missionId: 'M1',
+      title: 'r',
+      order: {
+        ...BASE_ORDER,
+        validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 5000 }] },
+      },
+    });
+    good.dispatch();
+    const snap = good.toSnapshot();
+
+    // 合法 validation 重建/冻结
+    const restoredGood = WorkItem.restore(snap);
+    assert.deepEqual(restoredGood.order?.validation, {
+      commands: [{ argv: ['node', '--test'], timeoutMs: 5000 }],
+    });
+    assert.ok(Object.isFrozen(restoredGood.order!.validation!.commands[0].argv));
+
+    // malformed：含 cwd
+    const badSnap = {
+      ...snap,
+      order: {
+        ...BASE_ORDER,
+        objective: 'preserved-objective',
+        validation: {
+          commands: [{ argv: ['node'], timeoutMs: 1000, cwd: '/evil' }],
+        },
+      },
+    };
+    const restoredBad = WorkItem.restore(badSnap as ReturnType<WorkItem['toSnapshot']>);
+    assert.equal(restoredBad.order?.objective, 'preserved-objective');
+    assert.deepEqual(restoredBad.order?.allowedScope, BASE_ORDER.allowedScope);
+    assert.equal(restoredBad.order?.validation, undefined);
+
+    // legacy 无 validation
+    const legacy = WorkItem.restore({
+      ...snap,
+      order: { ...BASE_ORDER },
+    } as ReturnType<WorkItem['toSnapshot']>);
+    assert.equal(legacy.order?.validation, undefined);
+    assert.equal(legacy.order?.objective, BASE_ORDER.objective);
+  });
+});
+
+describe('ReviewRecord 审计语义', () => {
+  function submittedItem(): WorkItem {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    item.submit({ ok: true }, 'w-1.exec-1');
+    return item;
+  }
+
+  test('legacy ReviewRecord {attemptId,...} 写入与 restore 原样', () => {
+    const item = submittedItem();
+    item.review('accept', {
+      attemptId: 'coord-1',
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    const last = item.reviews[0];
+    assert.equal(last.attemptId, 'coord-1');
+    assert.equal(last.submittedAttemptId, undefined);
+    assert.equal(last.authority, undefined);
+    assert.equal(last.verdict, 'accept');
+
+    const restored = WorkItem.restore(item.toSnapshot());
+    assert.deepEqual(restored.reviews[0], last);
+    assert.equal(restored.reviews[0].attemptId, 'coord-1');
+  });
+
+  test('validator review：omit attemptId + submittedAttemptId + authority 可写入/快照/restore，嵌套不可变', () => {
+    const item = submittedItem();
+    const reasons = ['machine pass'];
+    const requiredChanges: string[] = [];
+    const authority = {
+      kind: 'validator' as const,
+      reportId: 'vr-1',
+      policyRevision: 3,
+    };
+    item.review('accept', {
+      submittedAttemptId: 'w-1.exec-1',
+      authority,
+      reasons,
+      requiredChanges,
+    });
+
+    const last = item.reviews[0];
+    assert.equal(last.attemptId, undefined);
+    assert.equal(last.submittedAttemptId, 'w-1.exec-1');
+    assert.deepEqual(last.authority, {
+      kind: 'validator',
+      reportId: 'vr-1',
+      policyRevision: 3,
+    });
+
+    // input mutation safety
+    reasons.push('hack');
+    requiredChanges.push('hack');
+    (authority as { reportId: string }).reportId = 'mutated';
+    assert.deepEqual(last.reasons, ['machine pass']);
+    assert.deepEqual(last.requiredChanges, []);
+    assert.equal(
+      last.authority && last.authority.kind === 'validator' ? last.authority.reportId : '',
+      'vr-1',
+    );
+
+    assert.ok(Object.isFrozen(last));
+    assert.ok(Object.isFrozen(last.reasons));
+    assert.ok(Object.isFrozen(last.requiredChanges));
+    assert.ok(Object.isFrozen(last.authority));
+
+    const restored = WorkItem.restore(item.toSnapshot());
+    assert.equal(restored.reviews[0].attemptId, undefined);
+    assert.equal(restored.reviews[0].submittedAttemptId, 'w-1.exec-1');
+    assert.deepEqual(restored.reviews[0].authority, {
+      kind: 'validator',
+      reportId: 'vr-1',
+      policyRevision: 3,
+    });
+    assert.ok(Object.isFrozen(restored.reviews[0].authority));
+  });
+
+  test('无 attemptId 且无 validator authority => 拒绝；状态/reviews 不污染', () => {
+    const item = submittedItem();
+    assert.throws(
+      () =>
+        item.review('accept', {
+          reasons: ['x'],
+          requiredChanges: [],
+        }),
+      invariant('INVALID_REVIEW_RECORD'),
+    );
+    assert.equal(item.status, 'submitted');
+    assert.equal(item.reviews.length, 0);
+
+    assert.throws(
+      () =>
+        item.review('accept', {
+          authority: { kind: 'coordinator', attemptId: 'c-1' },
+          reasons: ['x'],
+          requiredChanges: [],
+        }),
+      invariant('INVALID_REVIEW_RECORD'),
+    );
+    assert.equal(item.status, 'submitted');
+  });
+
+  test('validator 缺 submittedAttemptId / bad reportId / bad policyRevision => 拒绝', () => {
+    const item = submittedItem();
+
+    assert.throws(
+      () =>
+        item.review('accept', {
+          authority: { kind: 'validator', reportId: 'r1', policyRevision: 1 },
+          reasons: [],
+          requiredChanges: [],
+        }),
+      invariant('INVALID_REVIEW_RECORD'),
+    );
+
+    assert.throws(
+      () =>
+        item.review('accept', {
+          submittedAttemptId: 'w-1.exec-1',
+          authority: { kind: 'validator', reportId: '', policyRevision: 1 },
+          reasons: [],
+          requiredChanges: [],
+        }),
+      invariant('INVALID_REVIEW_RECORD'),
+    );
+
+    for (const policyRevision of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () =>
+          item.review('accept', {
+            submittedAttemptId: 'w-1.exec-1',
+            authority: {
+              kind: 'validator',
+              reportId: 'r1',
+              policyRevision,
+            },
+            reasons: [],
+            requiredChanges: [],
+          }),
+        invariant('INVALID_REVIEW_RECORD'),
+      );
+    }
+
+    assert.equal(item.status, 'submitted');
+    assert.equal(item.reviews.length, 0);
+
+    // policyRevision 0 合法
+    item.review('accept', {
+      submittedAttemptId: 'w-1.exec-1',
+      authority: { kind: 'validator', reportId: 'r0', policyRevision: 0 },
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    assert.equal(item.status, 'accepted');
+    assert.equal(
+      item.reviews[0].authority && item.reviews[0].authority.kind === 'validator'
+        ? item.reviews[0].authority.policyRevision
+        : -1,
+      0,
+    );
+  });
+
+  test('不变量 A：accepted 仍只能经 review(accept)；无 record 的 accept 继续可用', () => {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    item.submit();
+    item.review('accept');
+    assert.equal(item.status, 'accepted');
+    assert.equal(item.reviews.length, 0);
   });
 });

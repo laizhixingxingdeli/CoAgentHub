@@ -1,12 +1,15 @@
 import { IllegalTransitionError, InvariantViolationError } from './errors.ts';
 import { Attempt } from './attempt.ts';
-import { freezePayload } from './payloads.ts';
+import { freezeDeep, freezePayload } from './payloads.ts';
 import type { AttemptSnapshot, WorkItemSnapshot } from './snapshot.ts';
 import type {
   BlockedRecord,
   ExecutionResultBody,
+  ReviewAuthority,
   ReviewRecord,
   WorkOrder,
+  WorkOrderValidationCommand,
+  WorkOrderValidationSpec,
 } from './payloads.ts';
 
 export type WorkItemStatus =
@@ -113,7 +116,7 @@ export class WorkItem {
     this.#title = init.title;
     this.#planRevision = init.planRevision;
     if (init.order) {
-      this.#order = freezePayload({ ...init.order });
+      this.#order = freezeWorkOrder(init.order, 'strict');
     }
   }
 
@@ -217,9 +220,11 @@ export class WorkItem {
     if (verdict !== 'accept' && verdict !== 'reject') {
       throw new IllegalTransitionError('WorkItem', this.#status, String(verdict));
     }
+    // 先规范化 record，再流转：校验失败不得污染 status / reviews。
+    const frozenRecord = record ? freezeReviewRecord(record, verdict) : undefined;
     this.#goto(verdict === 'accept' ? 'accepted' : 'rejected');
-    if (record) {
-      this.#reviews.push(freezePayload({ ...record, verdict }));
+    if (frozenRecord) {
+      this.#reviews.push(frozenRecord);
     }
   }
 
@@ -305,13 +310,20 @@ export class WorkItem {
       title: snapshot.title,
     });
     item.#status = snapshot.status as WorkItemStatus;
-    item.#order = snapshot.order as Readonly<WorkOrder> | undefined;
+    // restore 对 validation 宽松：malformed 只丢 validation，其余 order 原样；不抛。
+    item.#order =
+      snapshot.order == null
+        ? undefined
+        : freezeWorkOrder(snapshot.order as WorkOrder, 'restore');
     item.#planRevision = snapshot.planRevision;
     item.#result = snapshot.result;
     item.#submitted = snapshot.submitted;
     // 老快照缺字段 → undefined。禁止从 attempts 猜 last attempt。
     item.#submittedAttemptId = snapshot.submittedAttemptId;
-    item.#reviews = (snapshot.reviews ?? []) as Readonly<ReviewRecord>[];
+    // reviews 历史原样冻结；不在 restore 上 fail-closed 重校验（避免老快照崩）。
+    item.#reviews = (snapshot.reviews ?? []).map((r) =>
+      freezeDeep(copyReviewRecordShape(r as ReviewRecord)),
+    );
     item.#blocked = snapshot.blocked as Readonly<BlockedRecord> | undefined;
     item.#retired = snapshot.retired as Readonly<{ reason: string }> | undefined;
     item.#attempts = (snapshot.attempts ?? []).map((a: AttemptSnapshot) => Attempt.restore(a));
@@ -329,4 +341,260 @@ export class WorkItem {
     }
     this.#status = to;
   }
+}
+
+/* -------------------- WorkOrder.validation / ReviewRecord 规范化 -------------------- */
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function onlyKeys(raw: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(raw).every((k) => allowed.includes(k));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/** finite positive integer（>0）；拒绝 0/负/NaN/Infinity/小数/boxed。 */
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number') return undefined;
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) return undefined;
+  return value;
+}
+
+/** finite nonnegative integer（含 0）。 */
+function asNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== 'number') return undefined;
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) return undefined;
+  return value;
+}
+
+function invalidWorkOrderValidation(detail: string): never {
+  throw new InvariantViolationError(
+    'INVALID_WORK_ORDER_VALIDATION',
+    `WorkOrder.validation invalid: ${detail}`,
+  );
+}
+
+function invalidReviewRecord(detail: string): never {
+  throw new InvariantViolationError(
+    'INVALID_REVIEW_RECORD',
+    `ReviewRecord invalid: ${detail}`,
+  );
+}
+
+/**
+ * 规范化 WorkOrder.validation。
+ * - strict（新建）：非法/未知 key/cwd → 抛 INVALID_WORK_ORDER_VALIDATION
+ * - restore：非法 → undefined（丢弃 validation，不崩历史恢复）
+ */
+function normalizeValidationSpec(
+  value: unknown,
+  mode: 'strict' | 'restore',
+): Readonly<WorkOrderValidationSpec> | undefined {
+  if (value === undefined) return undefined;
+
+  const fail = (detail: string): undefined => {
+    if (mode === 'strict') invalidWorkOrderValidation(detail);
+    return undefined;
+  };
+
+  if (!isPlainObject(value)) return fail('must be a plain object');
+  if (!onlyKeys(value, ['commands'])) return fail('only key commands is allowed');
+  if (!Object.prototype.hasOwnProperty.call(value, 'commands')) {
+    return fail('commands is required');
+  }
+  if (!Array.isArray(value.commands)) return fail('commands must be an array');
+
+  const commands: WorkOrderValidationCommand[] = [];
+  for (let i = 0; i < value.commands.length; i += 1) {
+    const cmd = value.commands[i];
+    if (!isPlainObject(cmd)) return fail(`commands[${i}] must be a plain object`);
+    if (!onlyKeys(cmd, ['argv', 'timeoutMs'])) {
+      return fail(`commands[${i}] only keys argv,timeoutMs are allowed`);
+    }
+    if (!Array.isArray(cmd.argv)) return fail(`commands[${i}].argv must be a string array`);
+    if (cmd.argv.length === 0) return fail(`commands[${i}].argv must be non-empty`);
+    if (!cmd.argv.every((a) => isNonEmptyString(a))) {
+      return fail(`commands[${i}].argv entries must be non-empty strings`);
+    }
+    const timeoutMs = asPositiveInt(cmd.timeoutMs);
+    if (timeoutMs === undefined) {
+      return fail(`commands[${i}].timeoutMs must be a finite positive integer`);
+    }
+    commands.push({
+      argv: [...cmd.argv],
+      timeoutMs,
+    });
+  }
+
+  return freezeDeep({ commands } satisfies WorkOrderValidationSpec);
+}
+
+/**
+ * 重建 WorkOrder：其余字段浅拷贝 + freezePayload；validation 单独规范化。
+ * restore 模式下 validation 非法则省略，其余 order 保留。
+ */
+function freezeWorkOrder(
+  order: WorkOrder,
+  mode: 'strict' | 'restore',
+): Readonly<WorkOrder> {
+  const raw = order as WorkOrder & Record<string, unknown>;
+  const hasValidation = Object.prototype.hasOwnProperty.call(raw, 'validation');
+  const validation = hasValidation
+    ? normalizeValidationSpec(raw.validation, mode)
+    : undefined;
+
+  // 不整表重写 schema：展开原 order，再按规范化结果覆盖/删除 validation。
+  const copy: Record<string, unknown> = { ...raw };
+  if (validation !== undefined) {
+    copy.validation = validation;
+  } else {
+    delete copy.validation;
+  }
+  return freezePayload(copy as unknown as WorkOrder);
+}
+
+function copyAuthority(authority: ReviewAuthority): ReviewAuthority {
+  if (authority.kind === 'validator') {
+    return {
+      kind: 'validator',
+      reportId: authority.reportId,
+      policyRevision: authority.policyRevision,
+    };
+  }
+  return {
+    kind: 'coordinator',
+    attemptId: authority.attemptId,
+  };
+}
+
+/** restore 用：尽量原样拷贝，不 fail-closed。 */
+function copyReviewRecordShape(record: ReviewRecord): ReviewRecord {
+  const out: {
+    attemptId?: string;
+    submittedAttemptId?: string;
+    authority?: ReviewAuthority;
+    verdict: 'accept' | 'reject';
+    reasons: string[];
+    requiredChanges: string[];
+  } = {
+    verdict: record.verdict,
+    reasons: Array.isArray(record.reasons) ? [...record.reasons] : [],
+    requiredChanges: Array.isArray(record.requiredChanges)
+      ? [...record.requiredChanges]
+      : [],
+  };
+  if (record.attemptId !== undefined) out.attemptId = record.attemptId;
+  if (record.submittedAttemptId !== undefined) {
+    out.submittedAttemptId = record.submittedAttemptId;
+  }
+  if (record.authority !== undefined && isPlainObject(record.authority)) {
+    const a = record.authority as ReviewAuthority & Record<string, unknown>;
+    if (a.kind === 'validator') {
+      out.authority = {
+        kind: 'validator',
+        reportId: String(a.reportId ?? ''),
+        policyRevision: typeof a.policyRevision === 'number' ? a.policyRevision : 0,
+      };
+    } else if (a.kind === 'coordinator') {
+      out.authority = {
+        kind: 'coordinator',
+        attemptId: String(a.attemptId ?? ''),
+      };
+    }
+  }
+  return out;
+}
+
+/**
+ * 写入路径的 ReviewRecord 规范化：复制数组与 authority，deep freeze。
+ * - attemptId 可缺，但仅当 authority.kind==='validator' 且 submittedAttemptId 非空。
+ * - authority.kind==='validator' 时 submittedAttemptId 必有；reportId 非空；
+ *   policyRevision 为 finite nonnegative integer。
+ * - 不查 Attempt 是否属于当前 item（Platform 后续做 trusted linkage）。
+ */
+function freezeReviewRecord(
+  record: Omit<ReviewRecord, 'verdict'>,
+  verdict: ReviewVerdict,
+): Readonly<ReviewRecord> {
+  if (!Array.isArray(record.reasons) || !record.reasons.every((r) => typeof r === 'string')) {
+    invalidReviewRecord('reasons must be a string array');
+  }
+  if (
+    !Array.isArray(record.requiredChanges) ||
+    !record.requiredChanges.every((r) => typeof r === 'string')
+  ) {
+    invalidReviewRecord('requiredChanges must be a string array');
+  }
+
+  const attemptId = record.attemptId;
+  const submittedAttemptId = record.submittedAttemptId;
+  const authority = record.authority;
+
+  if (authority !== undefined) {
+    if (!isPlainObject(authority)) invalidReviewRecord('authority must be a plain object');
+    if (authority.kind === 'validator') {
+      if (!isNonEmptyString(authority.reportId)) {
+        invalidReviewRecord('validator authority.reportId must be a non-empty string');
+      }
+      const rev = asNonNegativeInt(authority.policyRevision);
+      if (rev === undefined) {
+        invalidReviewRecord(
+          'validator authority.policyRevision must be a finite nonnegative integer',
+        );
+      }
+      if (!isNonEmptyString(submittedAttemptId)) {
+        invalidReviewRecord(
+          'validator review requires non-empty submittedAttemptId',
+        );
+      }
+    } else if (authority.kind === 'coordinator') {
+      if (!isNonEmptyString(authority.attemptId)) {
+        invalidReviewRecord('coordinator authority.attemptId must be a non-empty string');
+      }
+    } else {
+      invalidReviewRecord('authority.kind must be coordinator or validator');
+    }
+  }
+
+  // attemptId 缺失：只允许诚实的 validator review。
+  if (attemptId === undefined || attemptId === '') {
+    if (authority?.kind !== 'validator' || !isNonEmptyString(submittedAttemptId)) {
+      invalidReviewRecord(
+        'missing attemptId only allowed with validator authority and submittedAttemptId',
+      );
+    }
+  } else if (typeof attemptId !== 'string') {
+    invalidReviewRecord('attemptId must be a string when provided');
+  }
+
+  if (
+    submittedAttemptId !== undefined &&
+    submittedAttemptId !== '' &&
+    typeof submittedAttemptId !== 'string'
+  ) {
+    invalidReviewRecord('submittedAttemptId must be a string when provided');
+  }
+
+  const out: {
+    attemptId?: string;
+    submittedAttemptId?: string;
+    authority?: ReviewAuthority;
+    verdict: ReviewVerdict;
+    reasons: string[];
+    requiredChanges: string[];
+  } = {
+    verdict,
+    reasons: [...record.reasons],
+    requiredChanges: [...record.requiredChanges],
+  };
+
+  if (isNonEmptyString(attemptId)) out.attemptId = attemptId;
+  if (isNonEmptyString(submittedAttemptId)) out.submittedAttemptId = submittedAttemptId;
+  if (authority !== undefined) out.authority = copyAuthority(authority as ReviewAuthority);
+
+  return freezeDeep(out);
 }

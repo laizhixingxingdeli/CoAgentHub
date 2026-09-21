@@ -147,6 +147,23 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
     );
   });
 
+  test('Standard review 的 lastReview.attemptId 是 Coordinator attempt，不被重解释为 Executor', async () => {
+    const { platform, coord, exec, workItemId } = await upToSubmitted();
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    const view = await platform.getMissionView('M1');
+    const last = view.workItems[0]?.lastReview;
+    assert.ok(last);
+    assert.equal(last.attemptId, coord, 'attemptId = Coordinator reviewer Attempt');
+    assert.notEqual(last.attemptId, exec);
+    assert.equal(last.submittedAttemptId, undefined);
+    assert.equal(last.authority, undefined);
+  });
+
   test('没有执行结果时不能验收', async () => {
     const { platform } = makePlatform();
     await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });

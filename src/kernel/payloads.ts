@@ -102,6 +102,25 @@ export interface PlanBody {
 /**
  * 工单。判据写在应用层：一个没读过上游对话的执行者，只拿这张单就能动手。
  */
+/**
+ * Frozen WorkOrder 上的一条机器验收命令（MODE-003）。
+ *
+ * 只认 argv + timeoutMs；**绝不**接受 caller cwd，也绝不从 verification prose 解析。
+ */
+export interface WorkOrderValidationCommand {
+  readonly argv: readonly string[];
+  readonly timeoutMs: number;
+}
+
+/**
+ * Frozen WorkOrder 可选的结构化 Validator command spec。
+ *
+ * `commands` 允许空数组（表示仅靠后续 changed-paths 等检查；是否足够由 Platform 决定）。
+ */
+export interface WorkOrderValidationSpec {
+  readonly commands: readonly WorkOrderValidationCommand[];
+}
+
 export interface WorkOrder {
   readonly objective: string;
   readonly allowedScope: readonly string[];
@@ -117,6 +136,10 @@ export interface WorkOrder {
    * 新的可以说清楚"这是一份 Living Spec，去 get_project_context 取"。
    */
   readonly contextRefs: readonly (string | ContextRef)[];
+  /**
+   * 可选结构化机器验收命令。缺省 = 旧行为；有则只认 commands，不解析 verification。
+   */
+  readonly validation?: WorkOrderValidationSpec;
 }
 
 export type ExecutionOutcome = 'completed' | 'partial';
@@ -254,8 +277,19 @@ export interface ValidationReport {
   readonly checks: readonly ValidationCheckResult[];
 }
 
+/**
+ * 一次验收记录。
+ *
+ * - `attemptId`：做 review 的 Coordinator reviewer Attempt（Standard 路径继续写）。
+ *   可选是为了未来 validator review 能诚实 omit，而不是伪造 Coordinator Attempt。
+ * - `submittedAttemptId`：被 review 的 Executor Attempt（validator 路径必填）。
+ * - `authority`：独立权威；validator 时必有（reportId 在 authority 内，不另造 validationReportId）。
+ *   legacy / 直接 kernel review 可不带。
+ */
 export interface ReviewRecord {
-  readonly attemptId: string;
+  readonly attemptId?: string;
+  readonly submittedAttemptId?: string;
+  readonly authority?: ReviewAuthority;
   readonly verdict: 'accept' | 'reject';
   readonly reasons: readonly string[];
   readonly requiredChanges: readonly string[];

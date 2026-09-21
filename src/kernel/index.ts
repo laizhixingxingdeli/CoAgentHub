@@ -43,6 +43,8 @@ export type {
   ValidationReport,
   WaitReason,
   WorkOrder,
+  WorkOrderValidationCommand,
+  WorkOrderValidationSpec,
   WorkspaceRef,
 } from './payloads.ts';
 
