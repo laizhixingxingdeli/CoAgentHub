@@ -1,6 +1,6 @@
 import { InvariantViolationError } from './errors.ts';
 import { Mission } from './mission.ts';
-import type { MissionContract, MissionExecutionMode, OriginChannel } from './payloads.ts';
+import type { MissionContract, MissionExecutionMode, OriginChannel, RunKind } from './payloads.ts';
 import type { MissionSnapshot, ProjectSnapshot } from './snapshot.ts';
 
 export interface ProjectInit {
@@ -38,6 +38,7 @@ export class Project {
     contract?: MissionContract;
     origin?: OriginChannel;
     executionMode?: MissionExecutionMode;
+    runKind?: RunKind;
   }): Mission {
     if (this.#missions.some((mission) => mission.id === init.id)) {
       throw new InvariantViolationError(
@@ -52,6 +53,7 @@ export class Project {
       contract: init.contract,
       origin: init.origin,
       executionMode: init.executionMode,
+      runKind: init.runKind,
     });
     this.#missions.push(mission);
     return mission;

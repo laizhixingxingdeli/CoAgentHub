@@ -100,6 +100,7 @@ describe('Project / Mission: 创建', () => {
       'workItems',
       'coordinatorAttempts',
       'executionMode',
+      'runKind',
     ]) {
       assert.throws(
         () => {
@@ -158,6 +159,80 @@ describe('Mission: executionMode', () => {
       (snap as { executionMode?: unknown }).executionMode = bad as never;
       const restored = Mission.restore(snap, project);
       assert.equal(restored.executionMode, 'standard');
+    }
+  });
+});
+
+describe('Mission: runKind', () => {
+  test('新建默认 mutation，快照写出 concrete mutation', () => {
+    const mission = freshMission();
+    assert.equal(mission.runKind, 'mutation');
+    assert.equal(mission.toSnapshot().runKind, 'mutation');
+  });
+
+  test('Project.createMission 各显式种类 getter/snapshot 一致', () => {
+    for (const kind of ['mutation', 'query'] as const) {
+      const mission = Project.create({ id: `p-rk-${kind}` }).createMission({
+        id: `m-${kind}`,
+        runKind: kind,
+      });
+      assert.equal(mission.runKind, kind);
+      assert.equal(mission.toSnapshot().runKind, kind);
+    }
+  });
+
+  test('老快照缺字段 restore -> mutation，后续 snapshot 显式 mutation', () => {
+    const project = Project.create({ id: 'p-rk-old' });
+    const base = project.createMission({ id: 'm-old' });
+    const snap = base.toSnapshot();
+    delete snap.runKind;
+    const restored = Mission.restore(snap, project);
+    assert.equal(restored.runKind, 'mutation');
+    assert.equal(restored.toSnapshot().runKind, 'mutation');
+  });
+
+  test('query 往返保留，且不改变 status / isMutating 行为', () => {
+    const project = Project.create({ id: 'p-rk-rt' });
+    const mission = project.createMission({ id: 'm-rt-query', runKind: 'query' });
+    assert.equal(mission.status, 'investigating');
+    assert.equal(mission.isMutating, false);
+    mission.startPlanning();
+    mission.startExecuting();
+    assert.equal(mission.status, 'executing');
+    assert.equal(mission.isMutating, true);
+    const restored = Mission.restore(mission.toSnapshot(), project);
+    assert.equal(restored.runKind, 'query');
+    assert.equal(restored.toSnapshot().runKind, 'query');
+    assert.equal(restored.status, 'executing');
+    assert.equal(restored.isMutating, true);
+  });
+
+  test('runKind 与 executionMode 任意组合合法且往返保留', () => {
+    for (const mode of ['lightweight', 'standard', 'high_assurance'] as const) {
+      for (const kind of ['mutation', 'query'] as const) {
+        const project = Project.create({ id: `p-rk-x-${mode}-${kind}` });
+        const mission = project.createMission({
+          id: `m-x-${mode}-${kind}`,
+          executionMode: mode,
+          runKind: kind,
+        });
+        assert.equal(mission.executionMode, mode);
+        assert.equal(mission.runKind, kind);
+        const restored = Mission.restore(mission.toSnapshot(), project);
+        assert.equal(restored.executionMode, mode);
+        assert.equal(restored.runKind, kind);
+      }
+    }
+  });
+
+  test("损坏 'nope' 与 null restore -> mutation", () => {
+    const project = Project.create({ id: 'p-rk-bad' });
+    const base = project.createMission({ id: 'm-bad' });
+    for (const bad of ['nope', null] as const) {
+      const snap = base.toSnapshot();
+      (snap as { runKind?: unknown }).runKind = bad as never;
+      const restored = Mission.restore(snap, project);
+      assert.equal(restored.runKind, 'mutation');
     }
   });
 });

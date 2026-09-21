@@ -15,6 +15,7 @@ import type {
   MissionResultBody,
   OriginChannel,
   PlanBody,
+  RunKind,
   WorkOrder,
 } from './payloads.ts';
 
@@ -60,6 +61,8 @@ export interface MissionInit {
   origin?: OriginChannel;
   /** 执行保障档位；缺省/非法 -> standard。 */
   executionMode?: MissionExecutionMode;
+  /** 运行种类；缺省/非法 -> mutation。与 executionMode 正交。 */
+  runKind?: RunKind;
 }
 
 /**
@@ -88,12 +91,14 @@ export class Mission {
   #updatedAt: string | undefined;
   #paused = false;
   #executionMode: MissionExecutionMode;
+  #runKind: RunKind;
 
   constructor(init: MissionInit) {
     this.#id = init.id;
     this.#projectId = init.projectId;
     this.#project = init.project;
     this.#executionMode = Mission.#normalizeExecutionMode(init.executionMode);
+    this.#runKind = Mission.#normalizeRunKind(init.runKind);
     if (init.origin) {
       this.#origin = freezePayload({ ...init.origin });
     }
@@ -118,6 +123,11 @@ export class Mission {
   /** 创建时选定的执行保障档位；只读。 */
   get executionMode(): MissionExecutionMode {
     return this.#executionMode;
+  }
+
+  /** 创建时选定的运行种类；只读。与 executionMode 正交。 */
+  get runKind(): RunKind {
+    return this.#runKind;
   }
 
   /**
@@ -465,6 +475,7 @@ export class Mission {
       updatedAt: this.#updatedAt,
       paused: this.#paused,
       executionMode: this.#executionMode,
+      runKind: this.#runKind,
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
@@ -478,6 +489,7 @@ export class Mission {
       projectId: snapshot.projectId,
       project,
       executionMode: Mission.#normalizeExecutionMode(snapshot.executionMode),
+      runKind: Mission.#normalizeRunKind(snapshot.runKind),
     });
     mission.#status = snapshot.status as MissionStatus;
     mission.#contract = snapshot.contract as Readonly<MissionContract> | undefined;
@@ -509,6 +521,13 @@ export class Mission {
       return value;
     }
     return 'standard';
+  }
+
+  static #normalizeRunKind(value: unknown): RunKind {
+    if (value === 'mutation' || value === 'query') {
+      return value;
+    }
+    return 'mutation';
   }
 
   #isTerminal(): boolean {

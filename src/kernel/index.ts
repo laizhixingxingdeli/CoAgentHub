@@ -30,6 +30,7 @@ export type {
   MissionExecutionMode,
   MissionResultBody,
   OriginChannel,
+  RunKind,
   PlanBody,
   ReviewRecord,
   TokenUsage,

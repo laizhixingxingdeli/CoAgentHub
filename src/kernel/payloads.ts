@@ -31,6 +31,14 @@ export interface OriginChannel {
 /** Mission 执行保障档位：创建时选定，全程只读。 */
 export type MissionExecutionMode = 'lightweight' | 'standard' | 'high_assurance';
 
+/**
+ * Mission 运行种类：与 executionMode 正交的只读轴。
+ *
+ * - mutation：可修改仓库（默认；兼容既有行为）
+ * - query：只读查询类运行（本阶段仅载荷/快照，不改变执行行为）
+ */
+export type RunKind = 'mutation' | 'query';
+
 export interface MissionContract {
   readonly intent: string;
   readonly acceptance: readonly string[];
