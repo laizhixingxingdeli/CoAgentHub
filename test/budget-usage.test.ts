@@ -1,6 +1,7 @@
 /**
- * BUDGET-001-S1/S2: pure authoritative budget snapshot + evaluator +
- * durable orchestration.round.started projection.
+ * BUDGET-001-S1/S2/S3: pure authoritative budget snapshot + evaluator +
+ * durable orchestration.round.started projection +
+ * attempt.started/ended wall-clock projection.
  */
 
 import { describe, test } from 'node:test';
@@ -14,6 +15,7 @@ import {
   buildBudgetUsageSnapshot,
   countAuthoritativeRounds,
   evaluateExecutionBudget,
+  projectAuthoritativeWallClockMs,
   verdictFor,
   type BudgetActivityEventFact,
   type BudgetAttemptFact,
@@ -61,6 +63,7 @@ function snap(
     capturedAt: string;
     attempts: readonly BudgetAttemptFact[];
     roundCount?: number;
+    wallClockMs?: number;
     changedFiles?: readonly string[];
   } = {
     missionId: over.missionId ?? 'm-1',
@@ -69,6 +72,9 @@ function snap(
   };
   if (over.roundCount !== undefined) {
     input.roundCount = over.roundCount;
+  }
+  if (over.wallClockMs !== undefined) {
+    input.wallClockMs = over.wallClockMs;
   }
   if (over.changedFiles !== undefined) {
     input.changedFiles = over.changedFiles;
@@ -80,6 +86,7 @@ type BuildOver = {
   missionId?: string;
   capturedAt?: string;
   roundCount?: number;
+  wallClockMs?: number;
   changedFiles?: readonly string[];
 };
 
@@ -87,13 +94,42 @@ function roundStarted(schemaVersion: unknown = 1): BudgetActivityEventFact {
   return { kind: 'orchestration.round.started', data: { schemaVersion } };
 }
 
-function attemptStarted(): BudgetActivityEventFact {
-  return { kind: 'attempt.started', data: { kind: 'coordinator' } };
+function attemptStarted(attemptId?: string, at?: string): BudgetActivityEventFact {
+  const e: {
+    kind: string;
+    data?: unknown;
+    attemptId?: string;
+    at?: string;
+  } = {
+    kind: 'attempt.started',
+    data: { kind: 'coordinator' },
+  };
+  if (attemptId !== undefined) e.attemptId = attemptId;
+  if (at !== undefined) e.at = at;
+  return e;
 }
 
-function attemptEnded(): BudgetActivityEventFact {
-  return { kind: 'attempt.ended', data: { endedBy: 'structured_submit' } };
+function attemptEnded(attemptId?: string, at?: string): BudgetActivityEventFact {
+  const e: {
+    kind: string;
+    data?: unknown;
+    attemptId?: string;
+    at?: string;
+  } = {
+    kind: 'attempt.ended',
+    data: { endedBy: 'structured_submit' },
+  };
+  if (attemptId !== undefined) e.attemptId = attemptId;
+  if (at !== undefined) e.at = at;
+  return e;
 }
+
+const T0 = '2020-01-01T00:00:00.000Z';
+const T5s = '2020-01-01T00:00:05.000Z';
+const T10s = '2020-01-01T00:00:10.000Z';
+const T15s = '2020-01-01T00:00:15.000Z';
+const T20s = '2020-01-01T00:00:20.000Z';
+const T30s = '2020-01-01T00:00:30.000Z';
 
 describe('buildBudgetUsageSnapshot', () => {
   test('records missionId, capturedAt, exact attemptCount; no invented round/wall/command fields', () => {
@@ -116,6 +152,17 @@ describe('buildBudgetUsageSnapshot', () => {
 
     const n = snap([], { roundCount: 3 });
     assert.equal(n.roundCount, 3);
+  });
+
+  test('wallClockMs only when trusted known projection supplied (incl. honest 0)', () => {
+    const without = snap([{ usage: reported() }]);
+    assert.equal('wallClockMs' in without, false);
+
+    const zero = snap([], { wallClockMs: 0 });
+    assert.equal(zero.wallClockMs, 0);
+
+    const n = snap([], { wallClockMs: 12_345 });
+    assert.equal(n.wallClockMs, 12_345);
   });
 
   test('coordinator + executor shapes both count', () => {
@@ -303,11 +350,17 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(someAttempts, 'attempts').used, 2);
     assert.equal(someAttempts.anyAuthoritativeExceeded, true);
 
-    // rounds/wall still unknown even at zero limit when roundCount absent
+    // rounds still unknown even at zero limit when roundCount absent;
+    // wallClock unknown when wallClockMs absent
     assert.equal(verdictFor(zeroAttempts, 'rounds').status, 'unknown');
     assert.equal(verdictFor(zeroAttempts, 'rounds').limit, 0);
     assert.equal(verdictFor(zeroAttempts, 'wallClockMs').status, 'unknown');
     assert.equal(verdictFor(zeroAttempts, 'wallClockMs').limit, 0);
+
+    const zeroWallKnown = evaluateExecutionBudget(zeroRequired, snap([], { wallClockMs: 0 }));
+    assert.equal(verdictFor(zeroWallKnown, 'wallClockMs').status, 'exceeded');
+    assert.equal(verdictFor(zeroWallKnown, 'wallClockMs').used, 0);
+    assert.equal(verdictFor(zeroWallKnown, 'wallClockMs').limit, 0);
   });
 
   test('attempts ok when used < limit; exceeded when used >= limit', () => {
@@ -492,7 +545,7 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(emptyTrusted, 'changedFiles').used, 0);
   });
 
-  test('rounds unknown without roundCount; wallClockMs / commands still unknown', () => {
+  test('rounds unknown without roundCount; wallClockMs unknown without wallClockMs; commands still unknown', () => {
     const budget = sampleBudget();
     const ev = evaluateExecutionBudget(
       budget,
@@ -504,6 +557,7 @@ describe('evaluateExecutionBudget', () => {
 
     assert.equal(verdictFor(ev, 'wallClockMs').status, 'unknown');
     assert.equal(verdictFor(ev, 'wallClockMs').limit, 60_000);
+    assert.equal('used' in verdictFor(ev, 'wallClockMs'), false);
 
     assert.equal(verdictFor(ev, 'commands').status, 'unknown');
     assert.equal(verdictFor(ev, 'commands').limit, 20);
@@ -539,6 +593,34 @@ describe('evaluateExecutionBudget', () => {
     );
     assert.equal(verdictFor(zeroLimit, 'rounds').status, 'exceeded');
     assert.equal(verdictFor(zeroLimit, 'rounds').used, 0);
+  });
+
+  test('wallClockMs ok/exceeded when snapshot.wallClockMs present (used >= limit => exceeded)', () => {
+    const budget: ExecutionBudget = { maxAttempts: 10, maxRounds: 2, maxWallClockMs: 10_000 };
+
+    const under = evaluateExecutionBudget(budget, snap([], { wallClockMs: 9_999 }));
+    assert.equal(verdictFor(under, 'wallClockMs').status, 'ok');
+    assert.equal(verdictFor(under, 'wallClockMs').used, 9_999);
+    assert.equal(verdictFor(under, 'wallClockMs').limit, 10_000);
+    assert.equal(under.anyAuthoritativeExceeded, false);
+
+    const at = evaluateExecutionBudget(budget, snap([], { wallClockMs: 10_000 }));
+    assert.equal(verdictFor(at, 'wallClockMs').status, 'exceeded');
+    assert.equal(verdictFor(at, 'wallClockMs').used, 10_000);
+    assert.equal(at.anyAuthoritativeExceeded, true);
+
+    const over = evaluateExecutionBudget(budget, snap([], { wallClockMs: 50_000 }));
+    assert.equal(verdictFor(over, 'wallClockMs').status, 'exceeded');
+    assert.equal(verdictFor(over, 'wallClockMs').used, 50_000);
+
+    const zeroLimit = evaluateExecutionBudget(
+      { maxAttempts: 10, maxRounds: 1, maxWallClockMs: 0 },
+      snap([], { wallClockMs: 0 }),
+    );
+    assert.equal(verdictFor(zeroLimit, 'wallClockMs').status, 'exceeded');
+    assert.equal(verdictFor(zeroLimit, 'wallClockMs').used, 0);
+    assert.equal(verdictFor(zeroLimit, 'wallClockMs').limit, 0);
+    assert.equal(zeroLimit.anyAuthoritativeExceeded, true);
   });
 
   test('unknown never contributes to anyAuthoritativeExceeded alone', () => {
@@ -644,13 +726,244 @@ describe('countAuthoritativeRounds', () => {
   });
 });
 
+describe('projectAuthoritativeWallClockMs', () => {
+  test('no attempt events => known 0', () => {
+    assert.deepEqual(projectAuthoritativeWallClockMs([], T0), { status: 'known', ms: 0 });
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          { kind: 'mission.created', data: {} },
+          roundStarted(1),
+          { kind: 'plan.updated', at: T5s, data: {} },
+        ],
+        T30s,
+      ),
+      { status: 'known', ms: 0 },
+    );
+  });
+
+  test('one closed interval', () => {
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T0), attemptEnded('a1', T10s)],
+        T30s,
+      ),
+      { status: 'known', ms: 10_000 },
+    );
+  });
+
+  test('multiple sequential intervals', () => {
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          attemptStarted('a1', T0),
+          attemptEnded('a1', T5s),
+          attemptStarted('a2', T10s),
+          attemptEnded('a2', T20s),
+        ],
+        T30s,
+      ),
+      { status: 'known', ms: 15_000 }, // 5s + 10s
+    );
+  });
+
+  test('overlapping concurrent intervals merge, not double-count', () => {
+    // a1: 0..15, a2: 5..20 => union 0..20 = 20s (not 15+15=30)
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          attemptStarted('a1', T0),
+          attemptStarted('a2', T5s),
+          attemptEnded('a1', T15s),
+          attemptEnded('a2', T20s),
+        ],
+        T30s,
+      ),
+      { status: 'known', ms: 20_000 },
+    );
+  });
+
+  test('open interval uses capturedAt', () => {
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs([attemptStarted('a1', T0)], T10s),
+      { status: 'known', ms: 10_000 },
+    );
+    // one closed + one open
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          attemptStarted('a1', T0),
+          attemptEnded('a1', T5s),
+          attemptStarted('a2', T10s),
+        ],
+        T20s,
+      ),
+      { status: 'known', ms: 15_000 }, // 5s + 10s open
+    );
+  });
+
+  test('gaps between attempts (pause/wait) excluded', () => {
+    // active 0..5 and 20..30; gap 5..20 excluded => 15s
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          attemptStarted('a1', T0),
+          attemptEnded('a1', T5s),
+          // pause/wait gap — non-attempt events ignored
+          { kind: 'mission.waiting', at: T10s, data: { reason: 'no_available_agent' } },
+          attemptStarted('a2', T20s),
+          attemptEnded('a2', T30s),
+        ],
+        T30s,
+      ),
+      { status: 'known', ms: 15_000 },
+    );
+  });
+
+  test('ended-only / duplicate start / duplicate end / end-before-start => unknown', () => {
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs([attemptEnded('a1', T5s)], T30s),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T0), attemptStarted('a1', T5s)],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          attemptStarted('a1', T0),
+          attemptEnded('a1', T5s),
+          attemptEnded('a1', T10s),
+        ],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T10s), attemptEnded('a1', T5s)],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+  });
+
+  test('invalid timestamps => unknown', () => {
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1'), attemptEnded('a1', T5s)],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', 'not-a-date'), attemptEnded('a1', T5s)],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T0), attemptEnded('a1', '')],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+  });
+
+  test('invalid capturedAt matters for open intervals only', () => {
+    // closed-only: capturedAt unused
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T0), attemptEnded('a1', T10s)],
+        'not-a-date',
+      ),
+      { status: 'known', ms: 10_000 },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [attemptStarted('a1', T0), attemptEnded('a1', T10s)],
+        '',
+      ),
+      { status: 'known', ms: 10_000 },
+    );
+
+    // open interval requires parseable capturedAt
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs([attemptStarted('a1', T0)], 'not-a-date'),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs([attemptStarted('a1', T0)], ''),
+      { status: 'unknown' },
+    );
+    // capturedAt before start
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs([attemptStarted('a1', T10s)], T0),
+      { status: 'unknown' },
+    );
+  });
+
+  test('attempt events with missing/empty attemptId => unknown', () => {
+    // started without id
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [{ kind: 'attempt.started', at: T0, data: {} }],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    // ended without id
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [{ kind: 'attempt.ended', at: T10s, data: {} }],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    // empty string attemptId also unknown
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          { kind: 'attempt.started', at: T0, attemptId: '', data: {} },
+          { kind: 'attempt.ended', at: T5s, attemptId: '', data: {} },
+        ],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+    // mixed with valid intervals still fails closed (does not ignore orphan traces)
+    assert.deepEqual(
+      projectAuthoritativeWallClockMs(
+        [
+          { kind: 'attempt.started', at: T0, data: {} },
+          { kind: 'attempt.ended', at: T10s, data: {} },
+          attemptStarted('a1', T0),
+          attemptEnded('a1', T5s),
+        ],
+        T30s,
+      ),
+      { status: 'unknown' },
+    );
+  });
+});
+
 describe('budget-usage source boundaries', () => {
-  test('does not import orchestrator / platform / promotion / wait-reason policy numbers', () => {
+  test('does not import orchestrator / platform / promotion / wait-reason / 30m wall heuristic', () => {
     const body = readFileSync(srcPath, 'utf8');
-    assert.doesNotMatch(body, /from ['\"][^'\"]*orchestrator/i);
-    assert.doesNotMatch(body, /from ['\"][^'\"]*platform/);
+    assert.doesNotMatch(body, /from ['"][^'"]*orchestrator/i);
+    assert.doesNotMatch(body, /from ['"][^'"]*platform/);
     assert.doesNotMatch(body, /RolePool|sumUsage|toolActivity|BudgetPolicy|budget_exceeded/);
     assert.doesNotMatch(body, /WaitReason/);
     assert.doesNotMatch(body, /\bPromotionRecord\b|\bpromoteMission\b/);
+    // S3: must not import/read orchestrator attempt wall-clock default (30m).
+    assert.doesNotMatch(body, /ATTEMPT_WALL_CLOCK_MS/);
+    assert.doesNotMatch(body, /30\s*\*\s*60\s*\*\s*1000/);
+    assert.doesNotMatch(body, /attemptWallClockMs/);
   });
 });
