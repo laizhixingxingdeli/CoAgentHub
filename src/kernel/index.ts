@@ -14,7 +14,7 @@ export type {
   AttemptInit,
 } from './attempt.ts';
 
-export { EMPTY_USAGE, freezePayload } from './payloads.ts';
+export { EMPTY_USAGE, freezeDeep, freezePayload } from './payloads.ts';
 export type {
   BlockedRecord,
   ComplexityAssessment,
@@ -31,11 +31,15 @@ export type {
   MissionExecutionMode,
   MissionResultBody,
   OriginChannel,
+  ReviewAuthority,
   RunKind,
   PlanBody,
   ReviewRecord,
   TokenUsage,
   UsedProfile,
+  ValidationCheckKind,
+  ValidationCheckResult,
+  ValidationReport,
   WaitReason,
   WorkOrder,
   WorkspaceRef,

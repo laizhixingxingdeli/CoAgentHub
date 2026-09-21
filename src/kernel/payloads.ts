@@ -179,6 +179,55 @@ export interface EvidenceRecord {
   readonly output?: string;
 }
 
+/**
+ * 独立验收权威。
+ *
+ * `validator` 来自 ValidationEngine 的机器结论（绑定 reportId + policyRevision），
+ * 与协调者自报权威分开；**没有** executor 分支——执行者不得给自己签发通过。
+ */
+export type ReviewAuthority =
+  | { readonly kind: 'coordinator'; readonly attemptId: string }
+  | { readonly kind: 'validator'; readonly reportId: string; readonly policyRevision: number };
+
+export type ValidationCheckKind = 'command' | 'changed-paths';
+
+export interface ValidationCheckResult {
+  readonly kind: ValidationCheckKind;
+  readonly passed: boolean;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly summary: string;
+  readonly command?: {
+    readonly argv: readonly string[];
+    readonly cwd: string;
+    readonly exitCode: number | null;
+    readonly timedOut: boolean;
+    readonly durationMs: number;
+    readonly outputTail: string;
+  };
+  readonly changedPaths?: {
+    readonly allowedScope: readonly string[];
+    readonly actual: readonly string[];
+    readonly violations: readonly string[];
+    readonly unsupportedScope: readonly string[];
+  };
+}
+
+/**
+ * 机器独立验收报告。不可变、可追溯；与 EvidenceRecord（执行者自报证据）分立。
+ */
+export interface ValidationReport {
+  readonly id: string;
+  readonly policyRevision: number;
+  readonly missionId: string;
+  readonly workItemId?: string;
+  readonly attemptId?: string;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly passed: boolean;
+  readonly checks: readonly ValidationCheckResult[];
+}
+
 export interface ReviewRecord {
   readonly attemptId: string;
   readonly verdict: 'accept' | 'reject';
@@ -327,4 +376,17 @@ export function freezePayload<T extends object>(value: T): Readonly<T> {
     }
   }
   return Object.freeze(value);
+}
+
+/** 深度冻结（ValidationReport 等嵌套结构用）。 */
+export function freezeDeep<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (const item of value) freezeDeep(item);
+    return Object.freeze(value) as T;
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    freezeDeep(v);
+  }
+  return Object.freeze(value as object) as T;
 }
