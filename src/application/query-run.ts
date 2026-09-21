@@ -25,8 +25,8 @@ export type QueryOutcome = 'answered' | 'failed' | 'needs_mutation';
 /**
  * QueryRun 记录。
  *
- * **仅内存仓储**：跨进程不持久化。禁止把 InMemoryQueryRunRepository
- * 伪装成 durable 存储，也禁止在本层接 File/PG 实现（那是后续单的事）。
+ * 仓储可有内存 / File / PG 实现；本模块只定义端口与用例，不绑定存储。
+ * 跨进程可追溯由 FileQueryRunRepository / PgQueryRunRepository 负责。
  */
 export interface QueryRunRecord {
   readonly id: string;

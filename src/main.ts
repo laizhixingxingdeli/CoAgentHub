@@ -30,6 +30,7 @@ import {
   FileAgentPoolRepository,
   FileDeliveryRepository,
   FileProjectRepository,
+  FileQueryRunRepository,
   FileStateStore,
   PersistentIds,
 } from './application/file-store.ts';
@@ -40,6 +41,7 @@ import {
   PgIds,
   PgLiveOutput,
   PgProjectRepository,
+  PgQueryRunRepository,
   PgStateStore,
 } from './application/pg-store.ts';
 import { acquireLock } from './application/lock.ts';
@@ -72,7 +74,7 @@ export function buildPlatform(
   const activity = new InMemoryActivityLog(clock);
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
-  // QueryRun 仅内存：跨进程不持久化（见 InMemoryQueryRunRepository 注释）。
+  // 全内存装法：QueryRun 进程内记忆。Durable 见 buildPersistent / buildPg。
   const queryRuns = new InMemoryQueryRunRepository();
   const platform = new Platform({
     projects,
@@ -117,6 +119,11 @@ export interface PersistentOptions {
    * 它要锁就等于一开着界面就没法干活了。
    */
   exclusive?: { what: string };
+  /**
+   * 可选 query runtime。仅 `supportsQuery === true` 时暴露 queryRunner/runQuery；
+   * 未传或不支持则 undefined（fail-closed）。
+   */
+  queryRuntime?: AgentRuntime;
 }
 
 export async function buildPersistentPlatform(
@@ -138,6 +145,7 @@ export async function buildPersistentPlatform(
   const activity = new FileActivityLog(store, clock);
   const ids = new PersistentIds(store);
   const deliveries = new FileDeliveryRepository(store, clock, ids);
+  const queryRuns = new FileQueryRunRepository(store);
   // 大输出外置到状态文件旁边的 artifacts/ 目录。
   const artifacts = new FileArtifactStore(resolve(statePath, '..', 'artifacts'));
   const platform = new Platform({
@@ -151,6 +159,11 @@ export async function buildPersistentPlatform(
     ...(decisionProvider ? { decisionProvider } : {}),
   });
   const tokens = new RunTokenRegistry();
+  const queryRuntime = options.queryRuntime;
+  const queryRunner =
+    queryRuntime?.supportsQuery === true
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      : undefined;
 
   // 刚起来 = 没有任何 attempt 可能还活着。不收敛的话，上一次崩溃留下的
   // in_progress 会把对应的 Mission / 工作项永久卡死。
@@ -189,6 +202,11 @@ export async function buildPersistentPlatform(
     activity,
     projects,
     deliveries,
+    queryRuns,
+    queryRunner,
+    runQuery: queryRunner
+      ? (input: Parameters<QueryRunner['runQuery']>[0]) => queryRunner.runQuery(input)
+      : undefined,
     store,
     reconciled,
     workspaceReconciled,
@@ -218,6 +236,11 @@ export async function buildPgPlatform(options?: {
    * 不再成立：实测重启一次观测面就把正在跑的 attempt 判死写回库了。
    */
   reconcileMissionId?: string;
+  /**
+   * 可选 query runtime。仅 `supportsQuery === true` 时暴露 queryRunner/runQuery；
+   * 未传或不支持则 undefined（fail-closed）。
+   */
+  queryRuntime?: AgentRuntime;
 }) {
   const clock = new SystemClock();
   const store = await PgStateStore.open(
@@ -229,9 +252,10 @@ export async function buildPgPlatform(options?: {
   const live = new PgLiveOutput(store);
   const ids = new PgIds(store);
   // 预热号段：不预热的话第一次 next() 会撞上"号段用尽"，
-  // 而那对调用方来说只是一次莫名其妙的失败。
+  // 而那对调用方来说只是一次莫名其妙的失败。含 Q（QueryRun）。
   await ids.reserve();
   const deliveries = new PgDeliveryRepository(store, clock, ids);
+  const queryRuns = new PgQueryRunRepository(store);
   const artifacts = new FileArtifactStore(
     resolve(options?.artifactRoot ?? '.coagent-artifacts'),
   );
@@ -247,6 +271,11 @@ export async function buildPgPlatform(options?: {
     ...(decisionProvider ? { decisionProvider } : {}),
   });
   const tokens = new RunTokenRegistry();
+  const queryRuntime = options?.queryRuntime;
+  const queryRunner =
+    queryRuntime?.supportsQuery === true
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      : undefined;
 
   const reconciled = options?.reconcileMissionId
     ? await reconcileInterruptedAttempts(await projects.list(), activity, {
@@ -260,6 +289,11 @@ export async function buildPgPlatform(options?: {
     activity,
     projects,
     deliveries,
+    queryRuns,
+    queryRunner,
+    runQuery: queryRunner
+      ? (input: Parameters<QueryRunner['runQuery']>[0]) => queryRunner.runQuery(input)
+      : undefined,
     store,
     live,
     reconciled,

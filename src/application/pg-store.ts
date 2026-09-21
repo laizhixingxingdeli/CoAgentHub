@@ -37,6 +37,7 @@ import type {
   AgentPoolRuntime,
 } from './agent-pool.ts';
 import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
+import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 
 /** 并发写冲突：有人在你读出来之后改过同一个 Project。 */
 export class WriteConflictError extends Error {
@@ -108,6 +109,15 @@ CREATE TABLE IF NOT EXISTS id_counters (
   value  bigint NOT NULL
 );
 
+-- 独立 QueryRun：不进 activity（mission_id NOT NULL）也不塞 mission snapshot。
+CREATE TABLE IF NOT EXISTS query_runs (
+  query_run_id text PRIMARY KEY,
+  project_id   text        NOT NULL,
+  record       jsonb       NOT NULL,
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS query_runs_project_idx ON query_runs (project_id);
+
 -- 候选池。与 projects 不同，这是一张小小的配置表，不是聚合快照：一行一个候选，
 -- 主键就是「同一个 role 下 profileId 只能有一条」这条规则本身 —— 不靠代码记得先查。
 CREATE TABLE IF NOT EXISTS agent_pool (
@@ -162,6 +172,15 @@ export class PgStateStore {
       max: 8,
     });
     await pool.query(SCHEMA);
+    // 一次性 high-watermark：已有 Q-N 抬高 id_counters，避免新实例 next('Q') 撞号。
+    await pool.query(`
+      INSERT INTO id_counters (prefix, value)
+      SELECT 'Q', COALESCE(MAX(CAST(substring(query_run_id from 3) AS bigint)), 0)
+        FROM query_runs
+       WHERE query_run_id ~ '^Q-[0-9]+$'
+      ON CONFLICT (prefix) DO UPDATE
+        SET value = GREATEST(id_counters.value, EXCLUDED.value)
+    `);
     const store = new PgStateStore(pool);
     await store.refresh();
     return store;
@@ -517,7 +536,7 @@ export class PgIds implements IdGenerator {
   }
 
   /** 预热：把要用到的前缀先各取一段，之后 next() 就不会落空。 */
-  async reserve(prefixes: readonly string[] = ['M', 'W', 'D']): Promise<void> {
+  async reserve(prefixes: readonly string[] = ['M', 'W', 'D', 'Q']): Promise<void> {
     for (const prefix of prefixes) await this.#fetchBlock(prefix);
   }
 
@@ -562,6 +581,60 @@ export class PgIds implements IdGenerator {
       this.#available.set(prefix, { next: start, end });
     }
   }
+}
+
+/**
+ * QueryRun 的 Postgres 仓储。
+ *
+ * 独立表；JSONB 完整 round-trip。同 id upsert，不进 activity / mission snapshot。
+ */
+export class PgQueryRunRepository implements QueryRunRepository {
+  #store: PgStateStore;
+
+  constructor(store: PgStateStore) {
+    this.#store = store;
+  }
+
+  async save(run: QueryRunRecord): Promise<void> {
+    await this.#store.pool.query(
+      `INSERT INTO query_runs (query_run_id, project_id, record)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (query_run_id) DO UPDATE
+         SET project_id = EXCLUDED.project_id,
+             record = EXCLUDED.record,
+             updated_at = now()`,
+      [run.id, run.projectId, JSON.stringify(run)],
+    );
+  }
+
+  async get(id: string): Promise<QueryRunRecord | undefined> {
+    const { rows } = await this.#store.pool.query<{ record: QueryRunRecord }>(
+      'SELECT record FROM query_runs WHERE query_run_id = $1',
+      [id],
+    );
+    return rows[0] ? toQueryRunRecord(rows[0].record) : undefined;
+  }
+
+  async list(projectId?: string): Promise<readonly QueryRunRecord[]> {
+    const { rows } = projectId
+      ? await this.#store.pool.query<{ record: QueryRunRecord }>(
+          'SELECT record FROM query_runs WHERE project_id = $1 ORDER BY query_run_id',
+          [projectId],
+        )
+      : await this.#store.pool.query<{ record: QueryRunRecord }>(
+          'SELECT record FROM query_runs ORDER BY query_run_id',
+        );
+    return rows.map((row) => toQueryRunRecord(row.record));
+  }
+}
+
+function toQueryRunRecord(raw: QueryRunRecord | string): QueryRunRecord {
+  const record = typeof raw === 'string' ? (JSON.parse(raw) as QueryRunRecord) : raw;
+  return {
+    ...record,
+    usage: { ...record.usage },
+    ...(record.toolCalls ? { toolCalls: Object.freeze([...record.toolCalls]) } : {}),
+  };
 }
 
 /**

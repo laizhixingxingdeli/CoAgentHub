@@ -8,12 +8,19 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import {
+  FileQueryRunRepository,
+  FileStateStore,
+  PersistentIds,
+} from '../src/application/file-store.ts';
+import { QueryRunner } from '../src/application/query-run.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
+import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 
 const CONTRACT: MissionContract = {
@@ -231,5 +238,238 @@ describe('文件持久化', () => {
       /状态文件读取失败/,
       '损坏时必须报错——静默重置等于把 Mission 历史一声不吭地抹掉',
     );
+  });
+
+  test('QueryRun 跨进程完整 round-trip（ScriptedRuntime + File repo）', async () => {
+    const statePath = tempState();
+    const runtime = new ScriptedRuntime({
+      'query:-': {
+        steps: [
+          { tool: 'ls', body: {} },
+          { tool: 'read', body: { path: 'README.md' } },
+        ],
+        output: '这是 CoAgentHub。',
+        queryOutcome: 'answered',
+        usage: {
+          input: 11,
+          output: 7,
+          cacheRead: 2,
+          cacheWrite: 0,
+          total: 20,
+          quality: 'reported',
+        },
+      },
+    });
+
+    let queryRunId: string;
+    {
+      const built = await buildPersistentPlatform(statePath, {
+        workspace: new InPlaceWorkspaceManager(),
+        queryRuntime: runtime,
+      });
+      assert.ok(built.runQuery);
+      const result = await built.runQuery!({
+        projectId: 'P-q',
+        prompt: '仓库是干什么的？',
+        cwd: process.cwd(),
+        source: 'persistence-test',
+      });
+      assert.equal(result.outcome, 'answered');
+      queryRunId = result.queryRunId;
+      assert.equal(result.record.status, 'ended');
+      assert.equal(result.record.output, '这是 CoAgentHub。');
+      assert.deepEqual([...(result.record.toolCalls ?? [])].sort(), ['ls', 'read'].sort());
+    }
+
+    // 新 store / platform = 跨进程视角
+    const revived = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    assert.equal(revived.runQuery, undefined, '未注入 query-capable runtime 不得暴露 runQuery');
+    const got = await revived.queryRuns.get(queryRunId);
+    assert.ok(got);
+    assert.equal(got?.id, queryRunId);
+    assert.equal(got?.projectId, 'P-q');
+    assert.equal(got?.source, 'persistence-test');
+    assert.equal(got?.prompt, '仓库是干什么的？');
+    assert.equal(got?.status, 'ended');
+    assert.equal(got?.outcome, 'answered');
+    assert.equal(got?.output, '这是 CoAgentHub。');
+    assert.equal(got?.usage.input, 11);
+    assert.equal(got?.usage.output, 7);
+    assert.equal(got?.usage.cacheRead, 2);
+    assert.equal(got?.usage.total, 20);
+    assert.ok(got?.startedAt);
+    assert.ok(got?.endedAt);
+    assert.deepEqual([...(got?.toolCalls ?? [])].sort(), ['ls', 'read'].sort());
+
+    const listed = await revived.queryRuns.list('P-q');
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.id, queryRunId);
+    assert.equal((await revived.queryRuns.list('P-other')).length, 0);
+  });
+
+  test('QueryRun running 可重开读到；同 id ended 覆盖不重复', async () => {
+    const statePath = tempState();
+    const store1 = new FileStateStore(statePath);
+    const repo1 = new FileQueryRunRepository(store1);
+    await repo1.save({
+      id: 'Q-7',
+      projectId: 'P',
+      source: 't',
+      prompt: 'q',
+      cwd: '/tmp',
+      startedAt: '2026-06-01T00:00:00.000Z',
+      status: 'running',
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+        quality: 'unknown',
+      },
+    });
+
+    const store2 = new FileStateStore(statePath);
+    const repo2 = new FileQueryRunRepository(store2);
+    const running = await repo2.get('Q-7');
+    assert.equal(running?.status, 'running');
+    assert.equal(running?.endedAt, undefined);
+
+    await repo2.save({
+      id: 'Q-7',
+      projectId: 'P',
+      source: 't',
+      prompt: 'q',
+      cwd: '/tmp',
+      startedAt: '2026-06-01T00:00:00.000Z',
+      endedAt: '2026-06-01T00:00:01.000Z',
+      status: 'ended',
+      outcome: 'failed',
+      endedBy: 'upstream_failure',
+      failureMessage: 'boom',
+      usage: {
+        input: 1,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 1,
+        quality: 'estimated',
+      },
+    });
+
+    const store3 = new FileStateStore(statePath);
+    const repo3 = new FileQueryRunRepository(store3);
+    const all = await repo3.list();
+    assert.equal(all.length, 1, '同 id 覆盖不得重复');
+    assert.equal(all[0]?.status, 'ended');
+    assert.equal(all[0]?.outcome, 'failed');
+    assert.equal(all[0]?.failureMessage, 'boom');
+  });
+
+  test('legacy version1 无 queryRuns 仍可读；Q id high-watermark 不撞号', async () => {
+    const statePath = tempState();
+    // 手写一份无 queryRuns 的 legacy 状态，外加已有 Q 记录与偏低计数器。
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          projects: [],
+          deliveries: [],
+          events: [],
+          idCounters: { Q: 1 },
+          agentPool: [],
+          archivedMissions: [],
+          // 故意无 queryRuns 键 —— 兼容缺省 []
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const legacy = new FileStateStore(statePath);
+    assert.deepEqual(legacy.raw().queryRuns, []);
+    const idsLegacy = new PersistentIds(legacy);
+    assert.equal(idsLegacy.next('Q'), 'Q-2');
+
+    // 已有 Q-9 时，即使 idCounters 偏低，也要从 high-watermark 续号
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          projects: [],
+          deliveries: [],
+          events: [],
+          idCounters: {},
+          agentPool: [],
+          archivedMissions: [],
+          queryRuns: [
+            {
+              id: 'Q-9',
+              projectId: 'P',
+              source: 'seed',
+              prompt: 'p',
+              cwd: '/',
+              startedAt: '2026-01-01T00:00:00.000Z',
+              status: 'ended',
+              outcome: 'answered',
+              usage: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+                quality: 'unknown',
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    const seeded = new FileStateStore(statePath);
+    assert.equal(seeded.raw().idCounters.Q, 9);
+    assert.equal(new PersistentIds(seeded).next('Q'), 'Q-10');
+
+    // 损坏 JSON 仍 hard fail（含 queryRuns 场景）
+    writeFileSync(statePath, '{"version":1, queryRuns: [', 'utf8');
+    assert.throws(() => new FileStateStore(statePath), /状态文件读取失败/);
+    // 确认磁盘上仍是损坏内容，未被静默重置
+    assert.match(readFileSync(statePath, 'utf8'), /queryRuns/);
+  });
+
+  test('buildPersistentPlatform 仅 query-capable runtime 暴露 runQuery', async () => {
+    const statePath = tempState();
+    const bare = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    assert.equal(bare.runQuery, undefined);
+    assert.equal(bare.queryRunner, undefined);
+    assert.ok(bare.queryRuns);
+
+    const fake = {
+      kind: 'looks-ok',
+      async start() {
+        throw new Error('不应暴露');
+      },
+    };
+    const closed = await buildPersistentPlatform(statePath, {
+      workspace: new InPlaceWorkspaceManager(),
+      queryRuntime: fake,
+    });
+    assert.equal(closed.runQuery, undefined);
+
+    const runtime = new ScriptedRuntime({
+      'query:-': { steps: [], output: 'x', queryOutcome: 'answered' },
+    });
+    const open = await buildPersistentPlatform(statePath, {
+      workspace: new InPlaceWorkspaceManager(),
+      queryRuntime: runtime,
+    });
+    assert.ok(open.runQuery);
+    assert.ok(open.queryRunner);
+    assert.ok(open.queryRunner instanceof QueryRunner);
   });
 });

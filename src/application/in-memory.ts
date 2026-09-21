@@ -93,8 +93,9 @@ export class SequentialIds implements IdGenerator {
 /**
  * QueryRun 内存仓储。
  *
- * **跨进程不持久化。** 进程一退记录就没了——禁止把它当成 durable 存储，
- * 也禁止在本文件旁再塞一个假装落盘的实现（File/PG 是后续单的事）。
+ * 进程内记忆，跨进程不持久化。Durable 路径用 File / PG 实现；
+ * buildPlatform（全内存）继续挂本类，buildPersistentPlatform / buildPgPlatform
+ * 挂对应 durable adapter。
  */
 export class InMemoryQueryRunRepository implements QueryRunRepository {
   #runs = new Map<string, QueryRunRecord>();

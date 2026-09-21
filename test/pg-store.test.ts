@@ -16,6 +16,7 @@ import {
   PgDeliveryRepository,
   PgIds,
   PgProjectRepository,
+  PgQueryRunRepository,
   PgStateStore,
   WriteConflictError,
 } from '../src/application/pg-store.ts';
@@ -23,7 +24,10 @@ import { ensureTestDatabase } from './helpers/pg.ts';
 import { FixedClock } from '../src/application/in-memory.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { buildPgPlatform } from '../src/main.ts';
+import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
+import type { QueryRunRecord } from '../src/application/query-run.ts';
 
 const CONTRACT: MissionContract = {
   intent: '修 X',
@@ -45,7 +49,7 @@ before(async () => {
     dsn = target;
     store = await PgStateStore.open({ connectionString: dsn });
     // 每次从干净的库开始，免得上一轮的行影响断言。
-    await store.pool.query('TRUNCATE projects, activity, deliveries, id_counters');
+    await store.pool.query('TRUNCATE projects, activity, deliveries, id_counters, query_runs');
     await store.refresh();
     available = true;
   } catch {
@@ -295,5 +299,198 @@ describe('Postgres 存储', () => {
     // 重新载入 = 重启。状态得还在。
     await s.refresh();
     assert.equal((await platform.getMissionView('M4')).workItems.length, 1);
+  });
+
+  test('QueryRun 两独立实例 round-trip；project filter；同 id update 不重复', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const s = store as PgStateStore;
+    const repo = new PgQueryRunRepository(s);
+
+    const base: QueryRunRecord = {
+      id: 'Q-42',
+      projectId: 'P-q1',
+      source: 'pg-test',
+      prompt: 'what?',
+      cwd: '/work',
+      startedAt: '2026-06-01T10:00:00.000Z',
+      status: 'running',
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+        quality: 'unknown',
+      },
+    };
+    await repo.save(base);
+
+    const other = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const otherRepo = new PgQueryRunRepository(other);
+      const running = await otherRepo.get('Q-42');
+      assert.ok(running);
+      assert.equal(running?.status, 'running');
+      assert.equal(running?.source, 'pg-test');
+
+      await otherRepo.save({
+        ...base,
+        status: 'ended',
+        outcome: 'answered',
+        endedAt: '2026-06-01T10:00:05.000Z',
+        output: 'ok',
+        toolCalls: ['ls', 'grep'],
+        usage: {
+          input: 3,
+          output: 4,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 7,
+          quality: 'reported',
+        },
+      });
+
+      await otherRepo.save({
+        id: 'Q-43',
+        projectId: 'P-q2',
+        source: 'pg-test',
+        prompt: 'other',
+        cwd: '/work',
+        startedAt: '2026-06-01T11:00:00.000Z',
+        endedAt: '2026-06-01T11:00:01.000Z',
+        status: 'ended',
+        outcome: 'failed',
+        failureMessage: 'x',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+          quality: 'unknown',
+        },
+      });
+
+      const back = new PgQueryRunRepository(s);
+      const ended = await back.get('Q-42');
+      assert.equal(ended?.status, 'ended');
+      assert.equal(ended?.outcome, 'answered');
+      assert.equal(ended?.output, 'ok');
+      assert.deepEqual([...(ended?.toolCalls ?? [])], ['ls', 'grep']);
+      assert.equal(ended?.usage.total, 7);
+
+      const byProject = await back.list('P-q1');
+      assert.equal(byProject.length, 1);
+      assert.equal(byProject[0]?.id, 'Q-42');
+
+      const all = await back.list();
+      const ids = all.map((r) => r.id).filter((id) => id === 'Q-42' || id === 'Q-43');
+      assert.equal(ids.length, 2);
+      assert.equal(all.filter((r) => r.id === 'Q-42').length, 1, '同 id 不得重复行');
+    } finally {
+      await other.close();
+    }
+  });
+
+  test('QueryRun Q id high-watermark：新实例不碰撞已有 id', async (t) => {
+    if (skipIfNoPg(t)) return;
+    // 直接插入高号 Q，模拟「计数器落后于已有记录」
+    await (store as PgStateStore).pool.query(
+      `INSERT INTO query_runs (query_run_id, project_id, record)
+       VALUES ('Q-77', 'P-hw', $1::jsonb)
+       ON CONFLICT (query_run_id) DO NOTHING`,
+      [
+        JSON.stringify({
+          id: 'Q-77',
+          projectId: 'P-hw',
+          source: 'seed',
+          prompt: 'p',
+          cwd: '/',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          status: 'ended',
+          outcome: 'answered',
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+            quality: 'unknown',
+          },
+        }),
+      ],
+    );
+    // 把计数器压低，逼 open() 的 high-watermark 抬升
+    await (store as PgStateStore).pool.query(
+      `INSERT INTO id_counters (prefix, value) VALUES ('Q', 1)
+       ON CONFLICT (prefix) DO UPDATE SET value = 1`,
+    );
+
+    const fresh = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const ids = new PgIds(fresh, 4);
+      await ids.reserve(['Q']);
+      const next = ids.next('Q');
+      const n = Number(next.slice(2));
+      assert.ok(n > 77, `应高于已有 Q-77，实际 ${next}`);
+    } finally {
+      await fresh.close();
+    }
+  });
+
+  test('buildPgPlatform 装配 durable queryRuns；仅 query-capable 暴露 runQuery', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const bare = await buildPgPlatform({ connectionString: dsn });
+    try {
+      assert.equal(bare.runQuery, undefined);
+      assert.equal(bare.queryRunner, undefined);
+      assert.ok(bare.queryRuns);
+
+      const runtime = new ScriptedRuntime({
+        'query:-': {
+          steps: [{ tool: 'ls', body: {} }],
+          output: 'pg-ok',
+          queryOutcome: 'answered',
+          usage: {
+            input: 2,
+            output: 3,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 5,
+            quality: 'reported',
+          },
+        },
+      });
+      const withQuery = await buildPgPlatform({
+        connectionString: dsn,
+        queryRuntime: runtime,
+      });
+      try {
+        assert.ok(withQuery.runQuery);
+        const result = await withQuery.runQuery!({
+          projectId: 'P-pg-q',
+          prompt: 'hi',
+          cwd: process.cwd(),
+          source: 'pg-platform',
+        });
+        assert.equal(result.outcome, 'answered');
+        assert.equal(result.record.output, 'pg-ok');
+
+        // 另一个实例读得到
+        const again = await buildPgPlatform({ connectionString: dsn });
+        try {
+          const got = await again.queryRuns.get(result.queryRunId);
+          assert.equal(got?.source, 'pg-platform');
+          assert.equal(got?.usage.total, 5);
+          assert.equal(got?.status, 'ended');
+        } finally {
+          await again.close();
+        }
+      } finally {
+        await withQuery.close();
+      }
+    } finally {
+      await bare.close();
+    }
   });
 });

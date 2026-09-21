@@ -39,6 +39,7 @@ import type {
   AgentPoolSnapshot,
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
+import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 
 /** archive 路径段：防目录穿越，也限制文件名长度。 */
 const ARCHIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -79,6 +80,11 @@ interface StateFile {
   agentPool: AgentPoolRow[];
   /** 已归档索引；package 在 `.coagent-archive/missions/...`。旧文件缺键补 []。 */
   archivedMissions: ArchivedMissionRef[];
+  /**
+   * 独立 QueryRun 记录。不进 projects / activity / deliveries。
+   * 旧文件缺键补 []，不 bump StateFile.version。
+   */
+  queryRuns: QueryRunRecord[];
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -135,6 +141,28 @@ function emptyState(): StateFile {
     idCounters: {},
     agentPool: [],
     archivedMissions: [],
+    queryRuns: [],
+  };
+}
+
+/** 从已有 Q-N 抬高 idCounters.Q，避免重启后 next('Q') 撞号。只在 load 时跑一次。 */
+function seedQueryRunIdCounter(state: StateFile): void {
+  let high = state.idCounters.Q ?? 0;
+  for (const run of state.queryRuns) {
+    if (!run || typeof run.id !== 'string') continue;
+    const match = /^Q-(\d+)$/.exec(run.id);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > high) high = n;
+  }
+  if (high > (state.idCounters.Q ?? 0)) state.idCounters.Q = high;
+}
+
+function cloneQueryRunRecord(run: QueryRunRecord): QueryRunRecord {
+  return {
+    ...run,
+    usage: { ...run.usage },
+    ...(run.toolCalls ? { toolCalls: Object.freeze([...run.toolCalls]) } : {}),
   };
 }
 
@@ -316,6 +344,8 @@ export class FileStateStore {
       }
       const state = { ...emptyState(), ...parsed };
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
+      if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
+      seedQueryRunIdCounter(state);
       return state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState();
@@ -719,6 +749,50 @@ export class PersistentIds implements IdGenerator {
     counters[prefix] = (counters[prefix] ?? 0) + 1;
     this.#store.flush();
     return `${prefix}-${counters[prefix]}`;
+  }
+}
+
+/**
+ * QueryRun 的文件仓储。
+ *
+ * 与 deliveries / events 同挂在 StateFile 上，走既有 flush / 原子写；
+ * 同 id replace/upsert，不进 projects / activity / deliveries。
+ */
+export class FileQueryRunRepository implements QueryRunRepository {
+  #store: FileStateStore;
+
+  constructor(store: FileStateStore) {
+    this.#store = store;
+  }
+
+  async save(run: QueryRunRecord): Promise<void> {
+    this.#store.refreshIfChanged();
+    const rows = this.#rows();
+    const copy = cloneQueryRunRecord(run);
+    const index = rows.findIndex((row) => row.id === run.id);
+    if (index >= 0) rows[index] = copy;
+    else rows.push(copy);
+    this.#store.flush();
+  }
+
+  async get(id: string): Promise<QueryRunRecord | undefined> {
+    this.#store.refreshIfChanged();
+    const found = this.#rows().find((row) => row.id === id);
+    return found ? cloneQueryRunRecord(found) : undefined;
+  }
+
+  async list(projectId?: string): Promise<readonly QueryRunRecord[]> {
+    this.#store.refreshIfChanged();
+    const rows = this.#rows();
+    const filtered =
+      projectId === undefined ? rows : rows.filter((row) => row.projectId === projectId);
+    return filtered.map(cloneQueryRunRecord);
+  }
+
+  #rows(): QueryRunRecord[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
+    return state.queryRuns;
   }
 }
 
