@@ -38,6 +38,13 @@ import type {
 } from './agent-pool.ts';
 import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
+import type { ValidationReport } from '../kernel/index.ts';
+import {
+  cloneValidationReport,
+  ValidationReportConflictError,
+  validationReportsEqual,
+  type ValidationReportRepository,
+} from './validation/report-repository.ts';
 
 /** 并发写冲突：有人在你读出来之后改过同一个 Project。 */
 export class WriteConflictError extends Error {
@@ -118,6 +125,13 @@ CREATE TABLE IF NOT EXISTS query_runs (
 );
 CREATE INDEX IF NOT EXISTS query_runs_project_idx ON query_runs (project_id);
 
+-- 独立 ValidationReport：append-only 机器事实；永不 UPDATE report 列。
+CREATE TABLE IF NOT EXISTS validation_reports (
+  report_id  text PRIMARY KEY,
+  report     jsonb       NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- 候选池。与 projects 不同，这是一张小小的配置表，不是聚合快照：一行一个候选，
 -- 主键就是「同一个 role 下 profileId 只能有一条」这条规则本身 —— 不靠代码记得先查。
 CREATE TABLE IF NOT EXISTS agent_pool (
@@ -178,6 +192,15 @@ export class PgStateStore {
       SELECT 'Q', COALESCE(MAX(CAST(substring(query_run_id from 3) AS bigint)), 0)
         FROM query_runs
        WHERE query_run_id ~ '^Q-[0-9]+$'
+      ON CONFLICT (prefix) DO UPDATE
+        SET value = GREATEST(id_counters.value, EXCLUDED.value)
+    `);
+    // 已有 VR-N 抬高 id_counters('VR')，与 Q seed 并存。
+    await pool.query(`
+      INSERT INTO id_counters (prefix, value)
+      SELECT 'VR', COALESCE(MAX(CAST(substring(report_id from 4) AS bigint)), 0)
+        FROM validation_reports
+       WHERE report_id ~ '^VR-[0-9]+$'
       ON CONFLICT (prefix) DO UPDATE
         SET value = GREATEST(id_counters.value, EXCLUDED.value)
     `);
@@ -635,6 +658,59 @@ function toQueryRunRecord(raw: QueryRunRecord | string): QueryRunRecord {
     usage: { ...record.usage },
     ...(record.toolCalls ? { toolCalls: Object.freeze([...record.toolCalls]) } : {}),
   };
+}
+
+/**
+ * ValidationReport 的 Postgres 仓储。
+ *
+ * INSERT ... ON CONFLICT DO NOTHING；已存在则结构相等幂等，不等 conflict。
+ * 绝不 UPDATE report。JSONB 读出后 clone/freeze，不暴露可变引用。
+ */
+export class PgValidationReportRepository implements ValidationReportRepository {
+  #store: PgStateStore;
+
+  constructor(store: PgStateStore) {
+    this.#store = store;
+  }
+
+  async save(report: ValidationReport): Promise<void> {
+    // 先 clone 一份再序列化：不 freeze/mutate caller；存的内容与 caller 解耦。
+    const stored = cloneValidationReport(report);
+    const inserted = await this.#store.pool.query<{ report_id: string }>(
+      `INSERT INTO validation_reports (report_id, report)
+       VALUES ($1, $2::jsonb)
+       ON CONFLICT (report_id) DO NOTHING
+       RETURNING report_id`,
+      [stored.id, JSON.stringify(stored)],
+    );
+    if ((inserted.rowCount ?? 0) > 0) return;
+
+    const { rows } = await this.#store.pool.query<{ report: ValidationReport | string }>(
+      'SELECT report FROM validation_reports WHERE report_id = $1',
+      [report.id],
+    );
+    const existingRaw = rows[0]?.report;
+    if (existingRaw === undefined) {
+      // 竞态：冲突后行又消失——极少见；当作可重试冲突。
+      throw new ValidationReportConflictError(report.id);
+    }
+    const existing = toValidationReport(existingRaw);
+    if (validationReportsEqual(existing, report)) return;
+    throw new ValidationReportConflictError(report.id);
+  }
+
+  async get(reportId: string): Promise<ValidationReport | undefined> {
+    const { rows } = await this.#store.pool.query<{ report: ValidationReport | string }>(
+      'SELECT report FROM validation_reports WHERE report_id = $1',
+      [reportId],
+    );
+    return rows[0] ? toValidationReport(rows[0].report) : undefined;
+  }
+}
+
+function toValidationReport(raw: ValidationReport | string): ValidationReport {
+  const record = typeof raw === 'string' ? (JSON.parse(raw) as ValidationReport) : raw;
+  return cloneValidationReport(record);
 }
 
 /**

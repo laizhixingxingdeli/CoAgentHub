@@ -18,6 +18,7 @@ import {
   PgProjectRepository,
   PgQueryRunRepository,
   PgStateStore,
+  PgValidationReportRepository,
   WriteConflictError,
 } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
@@ -26,8 +27,12 @@ import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { buildPgPlatform } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
-import type { MissionContract } from '../src/kernel/index.ts';
+import type { MissionContract, ValidationReport } from '../src/kernel/index.ts';
 import type { QueryRunRecord } from '../src/application/query-run.ts';
+import {
+  ValidationReportConflictError,
+  validationReportsEqual,
+} from '../src/application/validation/report-repository.ts';
 
 const CONTRACT: MissionContract = {
   intent: '修 X',
@@ -49,7 +54,9 @@ before(async () => {
     dsn = target;
     store = await PgStateStore.open({ connectionString: dsn });
     // 每次从干净的库开始，免得上一轮的行影响断言。
-    await store.pool.query('TRUNCATE projects, activity, deliveries, id_counters, query_runs');
+    await store.pool.query(
+      'TRUNCATE projects, activity, deliveries, id_counters, query_runs, validation_reports',
+    );
     await store.refresh();
     available = true;
   } catch {
@@ -389,6 +396,145 @@ describe('Postgres 存储', () => {
       assert.equal(all.filter((r) => r.id === 'Q-42').length, 1, '同 id 不得重复行');
     } finally {
       await other.close();
+    }
+  });
+
+  test('ValidationReport round-trip + cross-store + append-only', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const s = store as PgStateStore;
+    const repo = new PgValidationReportRepository(s);
+
+    const report: ValidationReport = {
+      id: 'VR-42',
+      policyRevision: 1,
+      missionId: 'M-pg',
+      workItemId: 'WI-pg',
+      attemptId: 'AT-pg',
+      startedAt: '2026-06-01T12:00:00.000Z',
+      endedAt: '2026-06-01T12:00:01.000Z',
+      passed: true,
+      checks: [
+        {
+          kind: 'command',
+          passed: true,
+          startedAt: '2026-06-01T12:00:00.000Z',
+          endedAt: '2026-06-01T12:00:00.500Z',
+          summary: 'command exited 0',
+          command: {
+            argv: ['node', '--test'],
+            cwd: '/proj',
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 11,
+            outputTail: 'pg-ok',
+          },
+        },
+        {
+          kind: 'changed-paths',
+          passed: true,
+          startedAt: '2026-06-01T12:00:00.500Z',
+          endedAt: '2026-06-01T12:00:01.000Z',
+          summary: 'changed-paths: no changes',
+          changedPaths: {
+            allowedScope: ['src/'],
+            actual: [],
+            violations: [],
+            unsupportedScope: [],
+          },
+        },
+      ],
+    };
+
+    await repo.save(report);
+    const got = await repo.get('VR-42');
+    assert.ok(got);
+    assert.ok(validationReportsEqual(got, report));
+    assert.ok(Object.isFrozen(got));
+    assert.ok(Object.isFrozen(got.checks));
+    assert.ok(Object.isFrozen(got.checks[0]!.command!.argv));
+    assert.notEqual(got, report);
+
+    // cross-store read
+    const other = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const back = new PgValidationReportRepository(other);
+      const again = await back.get('VR-42');
+      assert.ok(again);
+      assert.ok(validationReportsEqual(again, report));
+      assert.ok(Object.isFrozen(again));
+
+      // identical 幂等
+      await back.save({ ...report, checks: report.checks.map((c) => ({ ...c })) });
+
+      // different same-id => conflict；旧值不变
+      await assert.rejects(
+        () => back.save({ ...report, passed: false }),
+        (err: unknown) => {
+          assert.ok(err instanceof ValidationReportConflictError);
+          assert.equal(err.code, 'VALIDATION_REPORT_CONFLICT');
+          assert.equal(err.reportId, 'VR-42');
+          return true;
+        },
+      );
+      await assert.rejects(
+        () =>
+          back.save({
+            ...report,
+            checks: [
+              {
+                ...report.checks[0]!,
+                command: {
+                  ...report.checks[0]!.command!,
+                  outputTail: 'DIFFERENT',
+                },
+              },
+              report.checks[1]!,
+            ],
+          }),
+        (err: unknown) => err instanceof ValidationReportConflictError,
+      );
+
+      const still = await back.get('VR-42');
+      assert.ok(still);
+      assert.equal(still.passed, true);
+      assert.equal(still.checks[0]!.command!.outputTail, 'pg-ok');
+    } finally {
+      await other.close();
+    }
+  });
+
+  test('ValidationReport VR id high-watermark：新实例不碰撞已有 id', async (t) => {
+    if (skipIfNoPg(t)) return;
+    await (store as PgStateStore).pool.query(
+      `INSERT INTO validation_reports (report_id, report)
+       VALUES ('VR-77', $1::jsonb)
+       ON CONFLICT (report_id) DO NOTHING`,
+      [
+        JSON.stringify({
+          id: 'VR-77',
+          policyRevision: 1,
+          missionId: 'M-hw',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          passed: true,
+          checks: [],
+        }),
+      ],
+    );
+    await (store as PgStateStore).pool.query(
+      `INSERT INTO id_counters (prefix, value) VALUES ('VR', 1)
+       ON CONFLICT (prefix) DO UPDATE SET value = 1`,
+    );
+
+    const fresh = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const ids = new PgIds(fresh, 4);
+      await ids.reserve(['VR']);
+      const next = ids.next('VR');
+      const n = Number(next.slice(3));
+      assert.ok(n > 77, `应高于已有 VR-77，实际 ${next}`);
+    } finally {
+      await fresh.close();
     }
   });
 

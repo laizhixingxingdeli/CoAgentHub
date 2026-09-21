@@ -28,6 +28,7 @@ import {
 } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
+import type { ValidationReport } from '../kernel/index.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
@@ -40,6 +41,12 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
+import {
+  cloneValidationReport,
+  ValidationReportConflictError,
+  validationReportsEqual,
+  type ValidationReportRepository,
+} from './validation/report-repository.ts';
 
 /** archive 路径段：防目录穿越，也限制文件名长度。 */
 const ARCHIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -85,6 +92,12 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   queryRuns: QueryRunRecord[];
+  /**
+   * 独立 ValidationReport（append-only 机器事实）。
+   * 不进 projects / activity / deliveries / archive package。
+   * 旧文件缺键补 []，不 bump StateFile.version。
+   */
+  validationReports: ValidationReport[];
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -142,6 +155,7 @@ function emptyState(): StateFile {
     agentPool: [],
     archivedMissions: [],
     queryRuns: [],
+    validationReports: [],
   };
 }
 
@@ -156,6 +170,19 @@ function seedQueryRunIdCounter(state: StateFile): void {
     if (Number.isFinite(n) && n > high) high = n;
   }
   if (high > (state.idCounters.Q ?? 0)) state.idCounters.Q = high;
+}
+
+/** 从已有 VR-N 抬高 idCounters.VR，避免重启后 next('VR') 撞号。只在 load 时跑一次。 */
+function seedValidationReportIdCounter(state: StateFile): void {
+  let high = state.idCounters.VR ?? 0;
+  for (const report of state.validationReports) {
+    if (!report || typeof report.id !== 'string') continue;
+    const match = /^VR-(\d+)$/.exec(report.id);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > high) high = n;
+  }
+  if (high > (state.idCounters.VR ?? 0)) state.idCounters.VR = high;
 }
 
 function cloneQueryRunRecord(run: QueryRunRecord): QueryRunRecord {
@@ -345,7 +372,9 @@ export class FileStateStore {
       const state = { ...emptyState(), ...parsed };
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
+      if (!Array.isArray(state.validationReports)) state.validationReports = [];
       seedQueryRunIdCounter(state);
+      seedValidationReportIdCounter(state);
       return state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState();
@@ -793,6 +822,44 @@ export class FileQueryRunRepository implements QueryRunRepository {
     const state = this.#store.raw();
     if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
     return state.queryRuns;
+  }
+}
+
+/**
+ * ValidationReport 的文件仓储。
+ *
+ * append-only：同 id 结构相同幂等；不同则 conflict。不进 archive package。
+ */
+export class FileValidationReportRepository implements ValidationReportRepository {
+  #store: FileStateStore;
+
+  constructor(store: FileStateStore) {
+    this.#store = store;
+  }
+
+  async save(report: ValidationReport): Promise<void> {
+    this.#store.refreshIfChanged();
+    const rows = this.#rows();
+    const existing = rows.find((row) => row.id === report.id);
+    if (existing) {
+      if (validationReportsEqual(existing, report)) return;
+      throw new ValidationReportConflictError(report.id);
+    }
+    // 存 clone；不 freeze/mutate caller 原对象。
+    rows.push(cloneValidationReport(report));
+    this.#store.flush();
+  }
+
+  async get(reportId: string): Promise<ValidationReport | undefined> {
+    this.#store.refreshIfChanged();
+    const found = this.#rows().find((row) => row.id === reportId);
+    return found ? cloneValidationReport(found) : undefined;
+  }
+
+  #rows(): ValidationReport[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.validationReports)) state.validationReports = [];
+    return state.validationReports;
   }
 }
 
