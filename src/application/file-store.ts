@@ -13,7 +13,19 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
@@ -387,6 +399,168 @@ export class FileStateStore {
     }
     return undefined;
   }
+
+  /**
+   * 显式归档单条终态 Mission：package 旁路落盘后从 main working set 裁掉。
+   * 不自动触发；重复调用幂等。
+   */
+  archiveMission(projectId: string, missionId: string): void {
+    this.refreshIfChanged();
+
+    // id 合法性 / 路径 containment 与 A 同一套。
+    const finalPath = archivedMissionPath(this.#path, projectId, missionId);
+    const key = packageKey(projectId, missionId);
+
+    if (
+      this.#state.archivedMissions.some(
+        (ref) => ref.projectId === projectId && ref.missionId === missionId,
+      )
+    ) {
+      return;
+    }
+
+    const project = this.#projects.get(projectId);
+    if (!project) throw new Error(`不可归档：Project 不存在：${projectId}`);
+    const mission = project.missions.find((row) => row.id === missionId);
+    if (!mission) throw new Error(`不可归档：Mission 不存在：${key}`);
+
+    if (mission.isPaused) {
+      throw new Error(`不可归档：Mission 已暂停：${key}`);
+    }
+    if (mission.status !== 'completed' && mission.status !== 'blocked') {
+      throw new Error(`不可归档：Mission 非终态（completed|blocked）：${mission.status}`);
+    }
+
+    const missionSnap = mission.toSnapshot();
+    const attempts = [
+      ...missionSnap.coordinatorAttempts,
+      ...missionSnap.workItems.flatMap((item) => item.attempts),
+    ];
+    if (attempts.some((attempt) => attempt.status === 'in_progress')) {
+      throw new Error(`不可归档：存在进行中的 Attempt：${key}`);
+    }
+
+    if (
+      this.#state.deliveries.some(
+        (row) => row.missionId === missionId && row.status === 'pending',
+      )
+    ) {
+      throw new Error(`不可归档：存在未确认投递：${key}`);
+    }
+
+    const events = this.#state.events.filter((event) => event.missionId === missionId);
+    const deliveries = this.#state.deliveries.filter((row) => row.missionId === missionId);
+
+    const mainStamp = this.#stamp;
+    const stable = {
+      projectId,
+      missionId,
+      mission: missionSnap,
+      events,
+      deliveries,
+    };
+
+    let pkg: ArchivedMissionPackage;
+    let bytes: number;
+    let sha256: string;
+
+    if (existsSync(finalPath)) {
+      const existingBytes = readFileSync(finalPath);
+      let existing: ArchivedMissionPackage;
+      try {
+        existing = JSON.parse(existingBytes.toString('utf8')) as ArchivedMissionPackage;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`COMPACT_PACKAGE_CONFLICT: ${key} —— package JSON 无效：${detail}`);
+      }
+      if (existing.version !== 1) {
+        throw new Error(`COMPACT_PACKAGE_CONFLICT: ${key} —— package 版本不认识`);
+      }
+      const existingStable = {
+        projectId: existing.projectId,
+        missionId: existing.missionId,
+        mission: existing.mission,
+        events: existing.events,
+        deliveries: existing.deliveries,
+      };
+      if (canonicalJson(existingStable) !== canonicalJson(stable)) {
+        throw new Error(`COMPACT_PACKAGE_CONFLICT: ${key}`);
+      }
+      pkg = existing;
+      bytes = existingBytes.byteLength;
+      sha256 = createHash('sha256').update(existingBytes).digest('hex');
+    } else {
+      pkg = {
+        version: 1,
+        projectId,
+        missionId,
+        archivedAt: new Date().toISOString(),
+        mission: missionSnap,
+        events,
+        deliveries,
+      };
+      const body = `${JSON.stringify(pkg)}\n`;
+      const buf = Buffer.from(body, 'utf8');
+      bytes = buf.byteLength;
+      sha256 = createHash('sha256').update(buf).digest('hex');
+      this.#writeArchivedPackageAtomic(finalPath, body);
+    }
+
+    // package 已落盘（或复用）后、改 index/内存前核对 main 未被并发改写。
+    if (this.#mtime() !== mainStamp) {
+      this.#state = this.#load();
+      this.#hydrate();
+      this.#stamp = this.#mtime();
+      throw new Error('COMPACT_RACE');
+    }
+
+    this.#state.archivedMissions.push({
+      projectId,
+      missionId,
+      archivedAt: pkg.archivedAt,
+      bytes,
+      sha256,
+    });
+    this.#archivedPackages.set(key, pkg);
+
+    const baseline = project.toSnapshot().missions.find((row) => row.id === missionId);
+    if (baseline) this.#archivedBaselines.set(key, baseline);
+
+    this.#state.events = this.#state.events.filter((event) => event.missionId !== missionId);
+    this.#state.deliveries = this.#state.deliveries.filter((row) => row.missionId !== missionId);
+
+    try {
+      this.flush();
+    } catch (error) {
+      this.#state = this.#load();
+      this.#hydrate();
+      this.#stamp = this.#mtime();
+      throw error;
+    }
+  }
+
+  /** package：temp write → fsync → rename final；调用方保证 final 尚不存在。 */
+  #writeArchivedPackageAtomic(finalPath: string, body: string): void {
+    mkdirSync(dirname(finalPath), { recursive: true });
+    const temp = `${finalPath}.tmp`;
+    const fd = openSync(temp, 'w');
+    try {
+      writeSync(fd, body, undefined, 'utf8');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    if (existsSync(finalPath)) {
+      try {
+        // 竞态下 final 已出现：不覆盖；留给上层复用/冲突逻辑。清理 temp。
+        unlinkSync(temp);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`COMPACT_PACKAGE_EXISTS: ${finalPath}`);
+    }
+    renameSync(temp, finalPath);
+  }
 }
 
 export class FileProjectRepository implements ProjectRepository {
@@ -446,6 +620,9 @@ export class FileDeliveryRepository implements DeliveryRepository {
   async create(
     input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
   ): Promise<Delivery> {
+    if (this.#store.hasArchivedMission(input.missionId)) {
+      throw new Error(`已归档 Mission 不可新建投递：${input.missionId}`);
+    }
     const rows = this.#store.raw().deliveries;
     const existing = rows.find(
       (row) => row.missionId === input.missionId && row.outcome === input.outcome,
@@ -503,6 +680,9 @@ export class FileActivityLog implements ActivityLog {
   }
 
   async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
+    if (this.#store.hasArchivedMission(event.missionId)) {
+      throw new Error(`已归档 Mission 不可追加事件：${event.missionId}`);
+    }
     this.#store.raw().events.push({ ...event, at: this.#clock.now().toISOString() });
     this.#store.flush();
   }
