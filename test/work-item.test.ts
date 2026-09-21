@@ -108,6 +108,62 @@ describe('WorkItem: 合法流转', () => {
   });
 });
 
+describe('WorkItem: submittedAttemptId provenance', () => {
+  test('默认 undefined；submit 未传 attempt id 仍是 undefined', () => {
+    const item = dispatchableWorkItem();
+    assert.equal(item.submittedAttemptId, undefined);
+    item.dispatch();
+    item.submit({ files: ['a.ts'] });
+    assert.equal(item.submittedAttemptId, undefined);
+    assert.equal(item.toSnapshot().submittedAttemptId, undefined);
+  });
+
+  test('submit(result, attemptId) 后 getter/snapshot 等于该值', () => {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    item.submit({ files: ['a.ts'] }, 'W-1.exec-2');
+    assert.equal(item.submittedAttemptId, 'W-1.exec-2');
+    assert.equal(item.toSnapshot().submittedAttemptId, 'W-1.exec-2');
+  });
+
+  test('reject → redispatch → 第二次 submit 覆盖为新 attempt id', () => {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    item.submit({ v: 1 }, 'w-1.exec-1');
+    assert.equal(item.submittedAttemptId, 'w-1.exec-1');
+    item.review('reject');
+    item.dispatch();
+    item.submit({ v: 2 }, 'w-1.exec-2');
+    assert.equal(item.submittedAttemptId, 'w-1.exec-2');
+    assert.equal(item.toSnapshot().submittedAttemptId, 'w-1.exec-2');
+  });
+
+  test('restore 老 snapshot 无字段 => undefined，不猜 attempts', () => {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    const attempt = item.startAttempt();
+    attempt.succeed();
+    item.submit({ files: ['a.ts'] }, 'should-not-leak-via-attempts');
+    const snap = item.toSnapshot();
+    // 模拟老快照：有 attempts / result，但没有 submittedAttemptId 字段。
+    const { submittedAttemptId: _drop, ...legacy } = snap;
+    assert.equal('submittedAttemptId' in legacy, false);
+    const restored = WorkItem.restore(legacy as typeof snap);
+    assert.equal(restored.submittedAttemptId, undefined);
+    assert.equal(restored.attempts.length, 1, 'attempts 仍在，但 provenance 不从它猜');
+    assert.equal(restored.hasResult, true);
+    assert.equal(restored.toSnapshot().submittedAttemptId, undefined);
+  });
+
+  test('restore 原样恢复已有 submittedAttemptId', () => {
+    const item = dispatchableWorkItem();
+    item.dispatch();
+    item.submit({ ok: true }, 'w-1.exec-3');
+    const restored = WorkItem.restore(item.toSnapshot());
+    assert.equal(restored.submittedAttemptId, 'w-1.exec-3');
+  });
+});
+
 describe('WorkItem: 非法流转', () => {
   test('created 上 submit / review 都非法', () => {
     const item = dispatchableWorkItem();
@@ -223,9 +279,17 @@ describe('WorkItem: 封装', () => {
     assert.equal(item.status, 'dispatched');
   });
 
-  test('id / missionId / title / attempts / result 也不可直接写', () => {
+  test('id / missionId / title / attempts / result / submittedAttemptId 也不可直接写', () => {
     const item = dispatchableWorkItem();
-    for (const key of ['id', 'missionId', 'title', 'attempts', 'result', 'hasResult']) {
+    for (const key of [
+      'id',
+      'missionId',
+      'title',
+      'attempts',
+      'result',
+      'hasResult',
+      'submittedAttemptId',
+    ]) {
       assert.throws(
         () => {
           (item as unknown as Record<string, unknown>)[key] = 'hacked';

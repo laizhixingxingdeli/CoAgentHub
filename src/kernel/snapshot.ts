@@ -41,6 +41,11 @@ export interface WorkItemSnapshot {
   planRevision?: number;
   result?: unknown;
   submitted: boolean;
+  /**
+   * 实际提交 executionResult 的 Executor Attempt id。
+   * 老快照没有这个字段，读出来就是 undefined——禁止从 attempts 猜。
+   */
+  submittedAttemptId?: string;
   reviews: unknown[];
   blocked?: unknown;
   /** 被作废时写下的理由。老快照没有这个字段，读出来就是 undefined。 */

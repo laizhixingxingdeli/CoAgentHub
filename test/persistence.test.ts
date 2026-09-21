@@ -123,7 +123,11 @@ describe('文件持久化', () => {
     }
 
     // ---- 换一个进程（同一个状态文件）----
-    const { platform: revived, deliveries } = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    const {
+      platform: revived,
+      deliveries,
+      projects: revivedProjects,
+    } = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
     const view = await revived.getMissionView('M1');
 
     assert.equal(view.status, 'executing', 'Mission 状态要续得上');
@@ -136,6 +140,20 @@ describe('文件持久化', () => {
     assert.equal(view.workItems.length, 1);
     assert.equal(view.workItems[0].status, 'submitted');
     assert.equal(view.workItems[0].attempts, 1);
+    // VAL-003：submittedAttemptId 跨重启仍绑在实际提交的 executor attempt 上。
+    {
+      const project = (await revivedProjects.list()).find((p) => p.id === 'P');
+      assert.ok(project);
+      const mission = project.missions.find((m) => m.id === 'M1');
+      assert.ok(mission);
+      const item = mission.workItem(view.workItems[0].id);
+      assert.ok(item);
+      assert.equal(
+        item.submittedAttemptId,
+        view.workItems[0].attemptIds[0],
+        'File persistent round-trip 必须保留 submittedAttemptId',
+      );
+    }
     assert.equal(view.usage.cacheRead, 9000, '用量分项要续得上');
     // 上一进程崩在半路，那个协调者 attempt 的用量永远拿不到了。
     // 混了一条没上报的 → estimated 才是诚实的读数，不该谎称 reported。

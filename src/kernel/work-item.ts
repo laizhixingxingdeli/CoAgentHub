@@ -99,6 +99,8 @@ export class WorkItem {
   #executorSeq = 0;
   #result: unknown;
   #submitted = false;
+  /** 实际提交 executionResult 的 Executor Attempt id；未传就是 undefined。 */
+  #submittedAttemptId: string | undefined;
   #order: Readonly<WorkOrder> | undefined;
   #reviews: Readonly<ReviewRecord>[] = [];
   #blocked: Readonly<BlockedRecord> | undefined;
@@ -150,6 +152,14 @@ export class WorkItem {
     return this.#submitted;
   }
 
+  /**
+   * 实际提交 executionResult 的 Executor Attempt id。
+   * 直接 kernel submit 未传、或老快照缺字段时为 undefined——不从 attempts 猜。
+   */
+  get submittedAttemptId(): string | undefined {
+    return this.#submittedAttemptId;
+  }
+
   /** `created` / `rejected` / `blocked` / `accepted`（被 L3 打回后重开）都可以再派发。 */
   dispatch(): void {
     this.#goto('dispatched');
@@ -190,11 +200,16 @@ export class WorkItem {
    * 执行者交付产物。仅 `dispatched` -> `submitted`。
    * 这里绝不进入 accepted（不变量 A），也不要求 Attempt 已经 succeed——
    * 交付判定与尝试判定是解耦的两件事。
+   *
+   * `submittedAttemptId` 是只读 provenance：记录**谁**交的这份结果。
+   * kernel 不验证 attempt 角色/归属（不认识调用上下文），由 Platform 保证；
+   * 未传就是 undefined，禁止从 attempts 反推。
    */
-  submit(result?: unknown): void {
+  submit(result?: unknown, submittedAttemptId?: string): void {
     this.#goto('submitted');
     this.#result = result;
     this.#submitted = true;
+    this.#submittedAttemptId = submittedAttemptId;
   }
 
   /** 验收。仅 `submitted` -> `accepted` / `rejected`；在 dispatched 上调用必须抛错。 */
@@ -273,6 +288,7 @@ export class WorkItem {
       planRevision: this.#planRevision,
       result: this.#result,
       submitted: this.#submitted,
+      submittedAttemptId: this.#submittedAttemptId,
       reviews: [...this.#reviews],
       blocked: this.#blocked,
       retired: this.#retired,
@@ -293,6 +309,8 @@ export class WorkItem {
     item.#planRevision = snapshot.planRevision;
     item.#result = snapshot.result;
     item.#submitted = snapshot.submitted;
+    // 老快照缺字段 → undefined。禁止从 attempts 猜 last attempt。
+    item.#submittedAttemptId = snapshot.submittedAttemptId;
     item.#reviews = (snapshot.reviews ?? []) as Readonly<ReviewRecord>[];
     item.#blocked = snapshot.blocked as Readonly<BlockedRecord> | undefined;
     item.#retired = snapshot.retired as Readonly<{ reason: string }> | undefined;

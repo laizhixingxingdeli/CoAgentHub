@@ -1336,7 +1336,9 @@ export class Platform {
       );
     }
     // 提交只到 submitted。执行者没有任何通向 accepted 的路（不变量 A）。
-    item.submit(body);
+    // 把 executionResult 绑到**实际提交它的** executor attempt（只读 provenance，
+    // 供后续平台内验收报告绑定；本变更不接线、不改 review 面）。
+    item.submit(body, attemptId);
     await this.#event(
       mission,
       'execution_result.submitted',

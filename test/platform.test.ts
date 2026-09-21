@@ -36,7 +36,22 @@ function makePlatform() {
   const projects = new InMemoryProjectRepository();
   const ids = new SequentialIds();
   const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids });
-  return { platform, activity };
+  return { platform, activity, projects };
+}
+
+async function liveWorkItem(
+  projects: InMemoryProjectRepository,
+  projectId: string,
+  missionId: string,
+  workItemId: string,
+) {
+  const project = await projects.get(projectId);
+  assert.ok(project);
+  const mission = project.missions.find((m) => m.id === missionId);
+  assert.ok(mission);
+  const item = mission.workItem(workItemId);
+  assert.ok(item);
+  return item;
 }
 
 /** 跑到「W1 已提交、等待验收」这个状态。 */
@@ -322,6 +337,89 @@ describe('契约与用量质量', () => {
     await platform.startCoordinatorAttempt('M1');
     const view = await platform.getMissionView('M1');
     assert.equal(view.usage.quality, 'estimated');
+  });
+});
+
+describe('VAL-003：executionResult 绑定提交它的 executor attempt', () => {
+  test('submitExecutionResult 后 item.submittedAttemptId === 认证过的 executor attemptId', async () => {
+    const { platform, projects } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M-val3', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M-val3');
+    await platform.updatePlan('M-val3', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M-val3', coord.attemptId, {
+      title: 'W',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M-val3', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M-val3', workItemId);
+    await platform.submitEvidence('M-val3', exec.attemptId, {
+      kind: 'test',
+      summary: '绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M-val3', exec.attemptId, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+
+    const item = await liveWorkItem(projects, 'P', 'M-val3', workItemId);
+    assert.equal(item.submittedAttemptId, exec.attemptId);
+  });
+
+  test('另一个 WorkItem/attempt 不串', async () => {
+    const { platform, projects } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M-val3b', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M-val3b');
+    await platform.updatePlan('M-val3b', coord.attemptId, PLAN);
+    const a = await platform.createWorkItem('M-val3b', coord.attemptId, {
+      title: 'WA',
+      order: ORDER,
+    });
+    const b = await platform.createWorkItem('M-val3b', coord.attemptId, {
+      title: 'WB',
+      order: ORDER,
+    });
+    await platform.dispatchWorkItems('M-val3b', coord.attemptId, [a.workItemId, b.workItemId]);
+
+    const execA = await platform.startExecutorAttempt('M-val3b', a.workItemId);
+    await platform.submitEvidence('M-val3b', execA.attemptId, {
+      kind: 'test',
+      summary: 'A 绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M-val3b', execA.attemptId, {
+      outcome: 'completed',
+      summary: 'A 好了',
+      changedFiles: ['a.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+
+    const execB = await platform.startExecutorAttempt('M-val3b', b.workItemId);
+    await platform.submitEvidence('M-val3b', execB.attemptId, {
+      kind: 'test',
+      summary: 'B 绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M-val3b', execB.attemptId, {
+      outcome: 'completed',
+      summary: 'B 好了',
+      changedFiles: ['b.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+
+    const itemA = await liveWorkItem(projects, 'P', 'M-val3b', a.workItemId);
+    const itemB = await liveWorkItem(projects, 'P', 'M-val3b', b.workItemId);
+    assert.equal(itemA.submittedAttemptId, execA.attemptId);
+    assert.equal(itemB.submittedAttemptId, execB.attemptId);
+    assert.notEqual(itemA.submittedAttemptId, itemB.submittedAttemptId);
   });
 });
 
