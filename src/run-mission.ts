@@ -17,8 +17,13 @@ import { Orchestrator } from './application/orchestrator.ts';
 import { SpawnRuntime } from './runtime/spawn.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
 import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
-import type { MissionContract } from './kernel/index.ts';
+import type {
+  ComplexityAssessment,
+  MissionContract,
+  WorkOrder,
+} from './kernel/index.ts';
 import type { ExecutionProfile } from './application/ports.ts';
+import type { TaskFacts } from './application/task-classifier.ts';
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -47,7 +52,12 @@ async function main() {
     console.log(
       '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]\n' +
         '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
-        '     [--coordinator <profileId,...>] [--executor <profileId,...>：这一跑只用这些候选]',
+        '     [--coordinator <profileId,...>] [--executor <profileId,...>：这一跑只用这些候选]\n' +
+        '\n' +
+        'mission.json：projectId / missionId / contract 必填。\n' +
+        '可选 routing: { facts, assessment?, workOrder? } —— 走 classified intake\n' +
+        '（平台 TaskClassifier 决定 lightweight/standard；禁止顶层 executionMode）。\n' +
+        'routing 缺省则 legacy createMission（Standard）。',
     );
     return;
   }
@@ -56,6 +66,15 @@ async function main() {
     projectId: string;
     missionId: string;
     contract: MissionContract;
+    /**
+     * 可选 classified intake。存在则走 createClassifiedMission（facts→classifier）；
+     * 缺省保持 legacy createMission / Standard。不接受顶层 executionMode。
+     */
+    routing?: {
+      facts: TaskFacts;
+      assessment?: ComplexityAssessment;
+      workOrder?: WorkOrder;
+    };
   };
   const cwd = resolve(arg('--cwd') ?? process.cwd());
   const adapter = resolve(
@@ -103,8 +122,25 @@ async function main() {
   const existing = await platform.getMissionView(spec.missionId).catch(() => undefined);
   if (existing) {
     console.log(`Mission ${spec.missionId} 已存在（${existing.status}），接着往下跑`);
+  } else if (spec.routing) {
+    // classified opt-in：facts/assessment/workOrder → 平台 classifier；不读顶层 mode。
+    await platform.createClassifiedMission({
+      projectId: spec.projectId,
+      missionId: spec.missionId,
+      contract: spec.contract,
+      origin,
+      facts: spec.routing.facts,
+      assessment: spec.routing.assessment,
+      workOrder: spec.routing.workOrder,
+    });
   } else {
-    await platform.createMission({ ...spec, origin });
+    // legacy Standard：只传 createMission 认识的字段，不把 routing 等杂质 spread 进去。
+    await platform.createMission({
+      projectId: spec.projectId,
+      missionId: spec.missionId,
+      contract: spec.contract,
+      origin,
+    });
   }
   console.log(`Mission ${spec.missionId}；平台监听 ${baseUrl}`);
   console.log(`状态文件: ${statePath}`);

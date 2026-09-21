@@ -595,6 +595,16 @@ describe('Mission: complexityAssessment', () => {
     };
     walk(srcRoot);
 
+    // M3D-2：classified intake 可把 assessment 持久到 Mission 载荷；
+    // classifier 消费 assessment 分数。仍禁止 if/switch 直接按字段路由。
+    const ALLOW_PERSIST = new Set([
+      'application/platform.ts',
+      'application/classified-mission-intake.ts',
+      'application/task-classifier.ts',
+    ]);
+    const routeBranch =
+      /if\s*\([^)]*complexityAssessment|complexityAssessment\s*[=!]=|switch\s*\([^)]*complexityAssessment/;
+
     for (const full of files) {
       const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
       const source = readFileSync(full, 'utf8');
@@ -607,8 +617,16 @@ describe('Mission: complexityAssessment', () => {
         );
         assert.doesNotMatch(
           source,
-          /if\s*\([^)]*complexityAssessment|complexityAssessment\s*[=!]=|switch\s*\([^)]*complexityAssessment/,
+          routeBranch,
           `${rel}: 不得按 complexityAssessment 路由`,
+        );
+        continue;
+      }
+      if (ALLOW_PERSIST.has(rel)) {
+        assert.doesNotMatch(
+          source,
+          routeBranch,
+          `${rel}: 不得按 complexityAssessment 字段做 if/switch 路由`,
         );
         continue;
       }

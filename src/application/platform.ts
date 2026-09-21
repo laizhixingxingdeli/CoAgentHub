@@ -46,6 +46,13 @@ import {
   writeVibe,
 } from './project-memory.ts';
 import { runDecisionShadow } from './decision-shadow-runner.ts';
+import {
+  assertNoCallerRouteOverride,
+  ClassifiedMissionInputError,
+  parseComplexityAssessmentStrict,
+  parseTaskFactsStrict,
+} from './classified-mission-intake.ts';
+import { classifyTask, type ClassificationResult } from './task-classifier.ts';
 
 /**
  * Lightweight 机器验收依赖（结构类型，避免 platform 直接耦合 validation 模块路径）。
@@ -117,6 +124,33 @@ export interface CreateMissionInput {
   origin?: OriginChannel;
 }
 
+/**
+ * Classified Mission 入口：facts/assessment + Contract + 可选 explicit WorkOrder。
+ * caller **不得**传 executionMode / runKind / ClassificationResult 等 route override。
+ * 平台内部 strict parse + classifyTask 决定路由。
+ */
+export interface CreateClassifiedMissionInput {
+  projectId: string;
+  missionId?: string;
+  contract: MissionContract;
+  origin?: OriginChannel;
+  /** 结构化 facts；由 strict parser 校验。 */
+  facts: unknown;
+  /** 可选六维评估；缺省不传。 */
+  assessment?: unknown;
+  /**
+   * explicit WorkOrder。lightweight 必填；standard 禁止；
+   * query/HA 路径到不了创建。
+   */
+  workOrder?: WorkOrder;
+}
+
+export interface CreateClassifiedMissionResult {
+  missionId: string;
+  workItemId?: string;
+  classification: ClassificationResult;
+}
+
 export class Platform {
   #projects: ProjectRepository;
   #activity: ActivityLog;
@@ -153,6 +187,143 @@ export class Platform {
     await this.#projects.save(project);
     await this.#event(mission, 'mission.created', { contractRevision: mission.contractRevision });
     return { missionId };
+  }
+
+  /**
+   * Fast Lane / Standard classified 入口。
+   *
+   * 顺序：assert override → strict parse → classify → route guards
+   * （**先于** ensureProject / id 分配，拒绝路径不留空 Project）→ 创建 → 单次 save → 审计。
+   * executionMode / runKind **只**取 classifier.recommended。
+   */
+  async createClassifiedMission(
+    input: CreateClassifiedMissionInput,
+  ): Promise<CreateClassifiedMissionResult> {
+    assertNoCallerRouteOverride(input as unknown);
+
+    const facts = parseTaskFactsStrict(input.facts);
+    const assessment = parseComplexityAssessmentStrict(input.assessment);
+    const classification = classifyTask({
+      facts,
+      ...(assessment !== undefined ? { assessment } : {}),
+    });
+
+    const { recommended } = classification;
+    const hasWorkOrder = input.workOrder !== undefined && input.workOrder !== null;
+
+    // ---- route guards（不建 Mission / 不 ensure Project）----
+    if (recommended.runKind === 'query') {
+      throw new PlatformRuleError(
+        'QUERY_ROUTE_REQUIRED',
+        '分类结果为 query：本入口不创建 Mission；请走 Query 路径（M3D-3）。',
+      );
+    }
+
+    const mode = recommended.executionMode;
+    if (mode === 'high_assurance') {
+      throw new PlatformRuleError(
+        'HIGH_ASSURANCE_NOT_AVAILABLE',
+        '分类结果为 high_assurance：本阶段不可用，不创建 Mission。',
+      );
+    }
+
+    if (mode === 'standard') {
+      if (hasWorkOrder) {
+        throw new PlatformRuleError(
+          'STANDARD_WORK_ORDER_FORBIDDEN',
+          'standard 路由禁止携带 workOrder（避免 Fast Lane 单混入 Standard）。',
+        );
+      }
+    } else if (mode === 'lightweight') {
+      if (!hasWorkOrder) {
+        throw new PlatformRuleError(
+          'LIGHTWEIGHT_WORK_ORDER_REQUIRED',
+          'lightweight 路由必须提供 explicit workOrder。',
+        );
+      }
+    } else {
+      // 防御：classifier 合同外的 mode
+      throw new PlatformRuleError(
+        'UNSUPPORTED_ROUTE',
+        `不支持的 executionMode：${String(mode)}`,
+      );
+    }
+
+    // ---- 通过 guards 后才 ensure / 分配 id / 创建 ----
+    const project = await this.#ensureProject(input.projectId);
+    const missionId = input.missionId ?? this.#ids.next('M');
+
+    let mission: Mission;
+    let workItemId: string | undefined;
+
+    if (mode === 'standard') {
+      mission = project.createMission({
+        id: missionId,
+        contract: input.contract,
+        origin: input.origin,
+        executionMode: 'standard',
+        runKind: 'mutation',
+        ...(assessment !== undefined ? { complexityAssessment: assessment } : {}),
+      });
+    } else {
+      // lightweight：原子 Mission + 唯一 Frozen WorkItem
+      const workOrder = input.workOrder!;
+      const initialId = this.#ids.next('W');
+      const { mission: created, workItem } = project.createMissionWithInitialWorkItem({
+        id: missionId,
+        contract: input.contract,
+        origin: input.origin,
+        executionMode: 'lightweight',
+        runKind: 'mutation',
+        ...(assessment !== undefined ? { complexityAssessment: assessment } : {}),
+        initialWorkItem: {
+          id: initialId,
+          title: workOrder.objective,
+          order: workOrder,
+        },
+      });
+      mission = created;
+      workItemId = workItem.id;
+    }
+
+    await this.#projects.save(project);
+
+    await this.#event(mission, 'mission.created', {
+      contractRevision: mission.contractRevision,
+      executionMode: mission.executionMode,
+      runKind: mission.runKind,
+      classified: true,
+    });
+
+    const routedData: Record<string, unknown> = {
+      recommended: classification.recommended,
+      confidence: classification.confidence,
+      facts: classification.facts,
+      unknowns: classification.unknowns,
+      criticalUnknowns: classification.criticalUnknowns,
+      reasons: classification.reasons,
+    };
+    if (classification.assessmentRef !== undefined) {
+      routedData.assessmentRef = classification.assessmentRef;
+    }
+    await this.#event(mission, 'mission.routed', routedData);
+
+    if (workItemId !== undefined) {
+      const item = mission.workItem(workItemId);
+      await this.#event(
+        mission,
+        'work_item.created',
+        { title: item?.title ?? input.workOrder!.objective, executionMode: 'lightweight' },
+        workItemId,
+        // 无 Coordinator attemptId
+      );
+    }
+
+    return {
+      missionId,
+      ...(workItemId !== undefined ? { workItemId } : {}),
+      classification,
+    };
   }
 
   /**

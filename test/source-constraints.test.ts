@@ -115,4 +115,20 @@ describe('src/ 全树符合 Node 原生类型剥离的限制', () => {
       }
     }
   });
+
+  test('M3D-2：无 agent classified/lightweight tool；legacy missions 不改 mode', () => {
+    const server = sources().find((s) => s.path === 'api/server.ts');
+    assert.ok(server);
+    // classified 只走 control POST /api/missions/classified
+    assert.ok(server.source.includes("/api/missions/classified"));
+    assert.doesNotMatch(server.source, /coagent_[a-z_]*classified/);
+    assert.doesNotMatch(server.source, /\/api\/agent\/[^'\n]*classified/);
+    // legacy createMission 仍是独立分支，不在同 handler 里读 executionMode
+    const legacyBlock = server.source.match(
+      /if \(method === 'POST' && path === '\/api\/missions'\) \{[\s\S]*?return send[^;]+;/,
+    );
+    assert.ok(legacyBlock, 'legacy POST /api/missions block present');
+    assert.doesNotMatch(legacyBlock[0]!, /executionMode/);
+    assert.match(legacyBlock[0]!, /createMission\(body as never\)/);
+  });
 });

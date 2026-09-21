@@ -135,6 +135,60 @@ describe('控制面鉴权骨架', () => {
     assert.equal(ok.status, 201);
   });
 
+  test('POST /api/missions/classified：无/未知 401，viewer 403，operator 可达', async () => {
+    const body = {
+      projectId: 'P-auth',
+      missionId: 'M-cls-gate',
+      contract: CONTRACT,
+      facts: {
+        mutationSideEffect: true,
+        readOnlyProven: false,
+        highAssurance: {
+          productionDeployRelease: false,
+          externalPaidOp: false,
+          destructiveData: false,
+          credentialsPermissionsSecurity: false,
+          schemaPublicApiPersistenceCompat: false,
+          unrecoverableExternalSideEffect: false,
+        },
+        standardFloor: {
+          publicInterface: false,
+          buildSystemOrDependency: false,
+          multipleDomainModules: false,
+          acceptanceNotCheckableUpfront: false,
+          rootCauseOrCompetingDesigns: false,
+        },
+      },
+      assessment: {
+        goalUncertainty: 1,
+        changeScope: 1,
+        operationalRisk: 1,
+        verificationDifficulty: 1,
+        coordinationNeed: 0,
+        recoveryDifficulty: 0,
+        reasons: ['auth'],
+        decidedBy: 'rule',
+        assessedAt: '2026-01-01T00:00:00.000Z',
+      },
+      workOrder: {
+        objective: 'auth classified',
+        allowedScope: ['src/x.ts'],
+        requiredBehaviour: 'ok',
+        constraints: [],
+        acceptance: ['ok'],
+        verification: [],
+        doNot: [],
+        contextRefs: [],
+      },
+    };
+    await assertWriteGate('/api/missions/classified', body);
+
+    const ok = await post('/api/missions/classified', body, control(OP_TOKEN));
+    // auth 放行后业务应成功（201），绝不是 401/403
+    assert.equal(ok.status, 201);
+    assert.equal(ok.json.missionId, 'M-cls-gate');
+  });
+
   test('contract / pause-cancel-resume / finalize / escalation answer 门禁', async () => {
     const created = await post(
       '/api/missions',

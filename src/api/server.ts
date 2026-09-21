@@ -12,6 +12,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { Platform, PlatformRuleError } from '../application/platform.ts';
+import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
 import type { AgentPoolAddInput, AgentPoolRepository } from '../application/agent-pool.ts';
 import { KernelError } from '../kernel/index.ts';
@@ -241,6 +242,8 @@ export function createApi(deps: ApiDeps): Server {
       .catch((error) => {
       if (error instanceof HttpError) {
         send(res, error.status, { error: error.code, message: error.message });
+      } else if (error instanceof ClassifiedMissionInputError) {
+        send(res, 400, { error: error.code, message: error.message });
       } else if (error instanceof PlatformRuleError) {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
@@ -384,6 +387,12 @@ export function createApi(deps: ApiDeps): Server {
       await requireControl(req);
       const body = await readJson(req);
       return send(res, 201, await platform.createMission(body as never));
+    }
+
+    if (method === 'POST' && path === '/api/missions/classified') {
+      await requireControl(req);
+      const body = await readJson(req);
+      return send(res, 201, await platform.createClassifiedMission(body as never));
     }
 
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
