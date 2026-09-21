@@ -22,9 +22,11 @@ import type {
   OriginChannel,
   PlanBody,
   Project,
+  ReviewAuthority,
   ReviewRecord,
   TokenUsage,
   UsedProfile,
+  ValidationReport,
   WaitReason,
   WorkItem,
   WorkOrder,
@@ -42,6 +44,35 @@ import {
   writeVibe,
 } from './project-memory.ts';
 import { runDecisionShadow } from './decision-shadow-runner.ts';
+
+/**
+ * Lightweight 机器验收依赖（结构类型，避免 platform 直接耦合 validation 模块路径）。
+ * engine / reports 由装配层注入；Standard 路径不读这组。
+ */
+export interface PlatformValidationDeps {
+  readonly engine: {
+    readonly validate: (input: {
+      readonly missionId: string;
+      readonly baseRevision: string;
+      readonly projectRoot: string;
+      readonly workItemId?: string;
+      readonly attemptId?: string;
+      readonly allowedScope: readonly string[];
+      readonly commands: readonly {
+        readonly argv: readonly string[];
+        readonly cwd: string;
+        readonly timeoutMs: number;
+      }[];
+    }) => Promise<{
+      readonly report: ValidationReport;
+      readonly authority?: Extract<ReviewAuthority, { kind: 'validator' }>;
+    }>;
+  };
+  readonly reports: {
+    save(report: ValidationReport): Promise<void>;
+    get(reportId: string): Promise<ValidationReport | undefined>;
+  };
+}
 
 /** 平台规则被违反（区别于领域流转错误）。 */
 export class PlatformRuleError extends Error {
@@ -69,6 +100,11 @@ export interface PlatformDeps {
    * 不注入则完全跳过；注入后信号/失败也不影响真实 dispatch。
    */
   decisionProvider?: DecisionProvider;
+  /**
+   * Lightweight 机器验收依赖（成组 optional）。
+   * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
+   */
+  validation?: PlatformValidationDeps;
 }
 
 export interface CreateMissionInput {
@@ -88,6 +124,7 @@ export class Platform {
   #artifacts: ArtifactStore;
   #clock: Clock;
   #decisionProvider: DecisionProvider | undefined;
+  #validation: PlatformValidationDeps | undefined;
 
   constructor(deps: PlatformDeps) {
     this.#projects = deps.projects;
@@ -98,6 +135,7 @@ export class Platform {
     this.#artifacts = deps.artifacts ?? new InlineArtifactStore();
     this.#clock = deps.clock;
     this.#decisionProvider = deps.decisionProvider;
+    this.#validation = deps.validation;
   }
 
   /* =============================== L3 面 =============================== */
@@ -861,6 +899,259 @@ export class Platform {
     return { workItemId };
   }
 
+  /**
+   * Lightweight 进程内：无 Coordinator/Plan 创建恰好一个 frozen WorkItem。
+   * 不 startExecuting、不占 mutation slot、不建 Plan/Coordinator Attempt。
+   * 仅供进程内 Orchestrator 调用；不进 HTTP/tools。
+   * order.validation 可缺省/commands 可空（表示只跑 changed-paths）；规范化交给 WorkItem 构造器。
+   */
+  async createLightweightWorkItem(
+    missionId: string,
+    input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
+  ): Promise<{ workItemId: string }> {
+    const { mission } = await this.#locate(missionId);
+    this.#requireLightweightMutationLane(mission);
+
+    if (mission.status !== 'investigating' && mission.status !== 'planning') {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_BAD_STATUS',
+        `Lightweight create 要求 mission.status=investigating|planning，当前是 ${mission.status}。`,
+      );
+    }
+    if (mission.coordinatorAttempts.length !== 0) {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_COORDINATOR_FORBIDDEN',
+        'Lightweight create 要求 coordinatorAttempts 为空（零 Coordinator）。',
+      );
+    }
+    if (mission.workItems.length !== 0) {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_SINGLE_WORK_ITEM',
+        'Lightweight Mission 恰好只能有一个 WorkItem；已有 WorkItem，拒绝再建。',
+      );
+    }
+
+    const title = input.title ?? input.order.objective;
+    const workItemId = input.workItemId ?? this.#ids.next('W');
+    // WorkItem 构造器 strict normalize/freeze validation；create 不另验 commands 非空。
+    mission.createWorkItem({ id: workItemId, title, order: input.order });
+    await this.#event(
+      mission,
+      'work_item.created',
+      { title, executionMode: 'lightweight' },
+      workItemId,
+      // attemptId 留空：无 Coordinator reviewer。
+    );
+    return { workItemId };
+  }
+
+  /**
+   * Lightweight 进程内：占用 Project mutation slot 并 dispatch 唯一 WorkItem。
+   * 复用 Standard 的 slot 规则；slot 后、dispatch 前 observational PRE_DISPATCH shadow
+   *（无 attemptId，失败不阻断）。
+   */
+  async dispatchLightweightWorkItem(
+    missionId: string,
+    workItemId: string,
+  ): Promise<{ dispatched: string }> {
+    const { mission, project } = await this.#locate(missionId);
+    this.#requireLightweightMutationLane(mission);
+
+    if (mission.coordinatorAttempts.length !== 0) {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_COORDINATOR_FORBIDDEN',
+        'Lightweight dispatch 要求 coordinatorAttempts 仍为空。',
+      );
+    }
+
+    const item = mission.workItem(workItemId);
+    if (!item) {
+      throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
+    }
+    if (mission.workItems.length !== 1 || mission.workItems[0]?.id !== workItemId) {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_SINGLE_WORK_ITEM',
+        'Lightweight dispatch 要求该 WorkItem 是 mission 唯一 WorkItem。',
+      );
+    }
+    if (item.status !== 'created') {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_NOT_DISPATCHABLE',
+        `工作项 ${workItemId} 当前是 ${item.status}，Lightweight 只能从 created 派发。`,
+      );
+    }
+
+    // 与 Standard 相同顺序：mutation-slot → shadow → item.dispatch。
+    await this.#acquireMutationSlotForDispatch(mission, project);
+
+    // PRE_DISPATCH shadow：observational；provider/activity 失败不阻断 dispatch。
+    // attemptId 省略——绝不伪造 Coordinator attempt。
+    if (this.#decisionProvider) {
+      await runDecisionShadow({
+        provider: this.#decisionProvider,
+        activity: this.#activity,
+        clock: this.#clock,
+        stateInput: {
+          hook: 'PRE_DISPATCH',
+          projectId: mission.projectId,
+          missionId: mission.id,
+          workItemId,
+        },
+        workItemIds: [workItemId],
+      });
+    }
+
+    item.dispatch();
+    await this.#event(
+      mission,
+      'work_item.dispatched',
+      { ids: [workItemId], executionMode: 'lightweight' },
+      workItemId,
+      // attemptId 留空
+    );
+    return { dispatched: workItemId };
+  }
+
+  /**
+   * Lightweight 进程内：对 submitted WorkItem 跑注入的 validation.engine，
+   * **先持久化 ValidationReport**，通过且 authority/linkage 一致后再 accept。
+   * cwd 由 trusted WorkspaceManager.prepare() 注入；调用方不得传 report/authority/linkage。
+   * order 必须存在；commands 缺省视为 []（仍跑 changed-paths）。
+   */
+  async validateAndAcceptLightweightWorkItem(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly cwd: string;
+  }): Promise<{ reportId: string; passed: boolean; status: string }> {
+    const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
+    this.#requireLightweightMutationLane(mission);
+
+    if (!this.#validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'Lightweight 验收需要注入 PlatformDeps.validation（engine + reports）。',
+      );
+    }
+
+    if (item.status !== 'submitted') {
+      throw new PlatformRuleError(
+        'VALIDATION_NOT_SUBMITTED',
+        `工作项 ${item.id} 当前是 ${item.status}，只能对 submitted 做机器验收。`,
+      );
+    }
+
+    const submittedAttemptId = item.submittedAttemptId;
+    if (!submittedAttemptId) {
+      throw new PlatformRuleError(
+        'VALIDATION_SUBMITTED_ATTEMPT_REQUIRED',
+        `工作项 ${item.id} 缺少 submittedAttemptId，拒绝机器验收。`,
+      );
+    }
+
+    const order = item.order;
+    if (!order) {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_ORDER_REQUIRED',
+        `工作项 ${item.id} 缺少 order，不跑 engine。`,
+      );
+    }
+    // empty / absent validation.commands 合法：只跑 changed-paths。
+    const commands = order.validation?.commands ?? [];
+
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    const baseRevision = mission.workspaceRef?.baseRevision;
+    if (!projectRoot || !baseRevision) {
+      throw new PlatformRuleError(
+        'VALIDATION_WORKSPACE_REQUIRED',
+        `Mission ${mission.id} 缺少 workspaceRef.projectRoot/baseRevision，不跑 engine。`,
+      );
+    }
+
+    if (typeof input.cwd !== 'string' || input.cwd.trim().length === 0) {
+      throw new PlatformRuleError(
+        'VALIDATION_CWD_REQUIRED',
+        'Lightweight 验收要求非空 cwd（trusted WorkspaceManager.prepare().cwd）。',
+      );
+    }
+    const trustedCwd = input.cwd.trim();
+
+    // ValidationInput 只能由 Platform 绑定；每个 command 的 cwd 强制覆盖成 trusted cwd。
+    const result = await this.#validation.engine.validate({
+      missionId: mission.id,
+      workItemId: item.id,
+      attemptId: submittedAttemptId,
+      projectRoot,
+      baseRevision,
+      allowedScope: [...order.allowedScope],
+      commands: commands.map((c) => ({
+        argv: [...c.argv],
+        timeoutMs: c.timeoutMs,
+        cwd: trustedCwd,
+      })),
+    });
+
+    // append-only：必须先于任何 review / accept。
+    await this.#validation.reports.save(result.report);
+
+    await this.#event(
+      mission,
+      'validation.reported',
+      {
+        reportId: result.report.id,
+        passed: result.report.passed,
+        submittedAttemptId,
+      },
+      item.id,
+      // ActivityEvent.attemptId 不要冒充 reviewer
+    );
+
+    if (result.report.passed === false) {
+      // failed report 已保存；不 accept / reject，item 保持 submitted。
+      return { reportId: result.report.id, passed: false, status: item.status };
+    }
+
+    const authority = result.authority;
+    const report = result.report;
+    const mismatch =
+      !authority ||
+      authority.kind !== 'validator' ||
+      authority.reportId !== report.id ||
+      authority.policyRevision !== report.policyRevision ||
+      report.missionId !== mission.id ||
+      report.workItemId !== item.id ||
+      report.attemptId !== submittedAttemptId;
+
+    if (mismatch) {
+      // 报告保留，item 仍 submitted。
+      throw new PlatformRuleError(
+        'VALIDATION_AUTHORITY_MISMATCH',
+        `ValidationReport ${report.id} 通过，但 authority/linkage 与 WorkItem 不一致，拒绝 accept。`,
+      );
+    }
+
+    item.review('accept', {
+      submittedAttemptId,
+      authority,
+      reasons: [`ValidationReport ${report.id} passed`],
+      requiredChanges: [],
+    });
+
+    await this.#event(
+      mission,
+      'review.recorded',
+      {
+        verdict: 'accept',
+        authority: 'validator',
+        reportId: report.id,
+        reasons: [`ValidationReport ${report.id} passed`],
+      },
+      item.id,
+      // ActivityEvent.attemptId 留空
+    );
+
+    return { reportId: report.id, passed: true, status: item.status };
+  }
+
   async dispatchWorkItems(
     missionId: string,
     attemptId: string,
@@ -885,43 +1176,9 @@ export class Platform {
         );
       }
     }
-    // 派发 = 这个 Mission 要开始改代码了，此刻占用 Project 的改动名额。
-    // 不变量 C 在这里才真正生效：同 Project 的第二个 Mission 走到这一步会被
-    // 挡下，而不是等到两边都改完才发现冲突。放在改 WorkItem 状态之前，
-    // 被拒绝的派发不留下半套流转。
-    if (!mission.isMutating) {
-      try {
-        mission.startExecuting();
-      } catch (error) {
-        if (error instanceof InvariantViolationError && error.code === 'CONCURRENT_MUTATING_MISSION') {
-          // 记下停机原因：这不是"失败"，是排队。调度器据此让这条 Mission
-          // 先歇着去跑别的，而不是当成出错。
-          // 点名占着名额的是谁。只说"忙"的话，人下一步只能挨个 Mission 去翻。
-          const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
-          mission.setWaitReason(
-            'project_busy',
-            holder
-              ? `${holder.id} 正占着 ${mission.projectId} 的改动名额（${holder.status}）。` +
-                '它落地或被放弃之后，这条会自动接上。'
-              : undefined,
-          );
-          await this.#event(mission, 'mission.waiting', { reason: 'project_busy' });
-          throw new PlatformRuleError(
-            'PROJECT_BUSY',
-            `本 Project 已经有别的 Mission 在改代码了。可以继续调查和规划，` +
-              `但要等它结束才能派发实现任务。`,
-          );
-        }
-        throw error;
-      }
-    } else if (mission.status !== 'executing') {
-      // 已经占着改动名额、但阶段被退回过（L3 改契约、或 L2 自己退回规划）。
-      //
-      // 名额不用重新占，**阶段却必须重新推到 executing**：调度器只在这个
-      // 阶段跑执行者。少了这一步，重新派发出去的工单永远不会被执行——
-      // 而界面上看它就是"已派发"，看不出为什么不动。实测踩到过一次死锁。
-      mission.startExecuting();
-    }
+    // Standard 调用顺序保持原样：先 startExecuting/处理 PROJECT_BUSY，
+    // 再 PRE_DISPATCH shadow，再 item.dispatch。
+    await this.#acquireMutationSlotForDispatch(mission, project);
 
     // PRE_DISPATCH shadow：确认硬规则全部通过之后、真实 dispatch 之前。
     // 信号 / provider 失败 / shadow append 失败都不改变后续 item.dispatch。
@@ -1368,6 +1625,66 @@ export class Platform {
   }
 
   /* ================================ 内部 ================================ */
+
+  /**
+   * 派发前占用 Project mutation slot（不变量 C）。
+   * Standard 与 Lightweight 共用；调用方负责其后的 shadow / item.dispatch 顺序。
+   */
+  async #acquireMutationSlotForDispatch(mission: Mission, project: Project): Promise<void> {
+    // 派发 = 这个 Mission 要开始改代码了，此刻占用 Project 的改动名额。
+    // 不变量 C 在这里才真正生效：同 Project 的第二个 Mission 走到这一步会被
+    // 挡下，而不是等到两边都改完才发现冲突。放在改 WorkItem 状态之前，
+    // 被拒绝的派发不留下半套流转。
+    if (!mission.isMutating) {
+      try {
+        mission.startExecuting();
+      } catch (error) {
+        if (error instanceof InvariantViolationError && error.code === 'CONCURRENT_MUTATING_MISSION') {
+          // 记下停机原因：这不是"失败"，是排队。调度器据此让这条 Mission
+          // 先歇着去跑别的，而不是当成出错。
+          // 点名占着名额的是谁。只说"忙"的话，人下一步只能挨个 Mission 去翻。
+          const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+          mission.setWaitReason(
+            'project_busy',
+            holder
+              ? `${holder.id} 正占着 ${mission.projectId} 的改动名额（${holder.status}）。` +
+                '它落地或被放弃之后，这条会自动接上。'
+              : undefined,
+          );
+          await this.#event(mission, 'mission.waiting', { reason: 'project_busy' });
+          throw new PlatformRuleError(
+            'PROJECT_BUSY',
+            `本 Project 已经有别的 Mission 在改代码了。可以继续调查和规划，` +
+              `但要等它结束才能派发实现任务。`,
+          );
+        }
+        throw error;
+      }
+    } else if (mission.status !== 'executing') {
+      // 已经占着改动名额、但阶段被退回过（L3 改契约、或 L2 自己退回规划）。
+      //
+      // 名额不用重新占，**阶段却必须重新推到 executing**：调度器只在这个
+      // 阶段跑执行者。少了这一步，重新派发出去的工单永远不会被执行——
+      // 而界面上看它就是"已派发"，看不出为什么不动。实测踩到过一次死锁。
+      mission.startExecuting();
+    }
+  }
+
+  /** Lightweight mutation lane 共用前置：mode + runKind。 */
+  #requireLightweightMutationLane(mission: Mission): void {
+    if (mission.executionMode !== 'lightweight') {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_MODE_REQUIRED',
+        `需要 executionMode=lightweight，当前是 ${mission.executionMode}。`,
+      );
+    }
+    if (mission.runKind !== 'mutation') {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_RUN_KIND_REQUIRED',
+        `需要 runKind=mutation，当前是 ${mission.runKind}。`,
+      );
+    }
+  }
 
   /**
    * 回收 worktree 目录。**只摘目录，不删分支** —— 改动是 Mission 的产出，
