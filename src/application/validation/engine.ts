@@ -116,6 +116,7 @@ export class ValidationEngine {
         startedAt,
         endedAt,
         summary: argvError,
+        failureCode: 'invalid_argv' as const,
         command: {
           argv: argvCopy,
           cwd,
@@ -218,6 +219,9 @@ export class ValidationEngine {
       startedAt,
       endedAt,
       summary: verdict.summary,
+      ...(verdict.unsupportedScope.length > 0
+        ? { failureCode: 'unsupported_scope' as const }
+        : {}),
       changedPaths: {
         allowedScope: Object.freeze(verdict.allowedScope) as readonly string[],
         actual: Object.freeze(verdict.actual) as readonly string[],
@@ -235,6 +239,7 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
     startedAt: check.startedAt,
     endedAt: check.endedAt,
     summary: check.summary,
+    ...(check.failureCode !== undefined ? { failureCode: check.failureCode } : {}),
   };
   if (check.command) {
     return {

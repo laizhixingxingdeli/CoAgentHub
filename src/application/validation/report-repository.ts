@@ -69,6 +69,7 @@ function cloneCheck(check: ValidationCheckResult): ValidationCheckResult {
     startedAt: check.startedAt,
     endedAt: check.endedAt,
     summary: check.summary,
+    ...(check.failureCode !== undefined ? { failureCode: check.failureCode } : {}),
   };
   if (check.command) {
     return {
@@ -103,6 +104,7 @@ function checksEqual(a: ValidationCheckResult, b: ValidationCheckResult): boolea
   if (a.startedAt !== b.startedAt) return false;
   if (a.endedAt !== b.endedAt) return false;
   if (a.summary !== b.summary) return false;
+  if (a.failureCode !== b.failureCode) return false;
 
   const ac = a.command;
   const bc = b.command;

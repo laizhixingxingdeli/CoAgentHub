@@ -51,6 +51,7 @@ export type {
   ReviewRecord,
   TokenUsage,
   UsedProfile,
+  ValidationCheckFailureCode,
   ValidationCheckKind,
   ValidationCheckResult,
   ValidationReport,

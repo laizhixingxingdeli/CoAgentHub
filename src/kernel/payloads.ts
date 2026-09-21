@@ -353,12 +353,20 @@ export type ReviewAuthority =
 
 export type ValidationCheckKind = 'command' | 'changed-paths';
 
+/**
+ * 机器可证明的结构性验收契约缺陷码。
+ * 仅当 Frozen WorkOrder 本身不可执行/不可支撑时写入；可选以兼容旧报告。
+ */
+export type ValidationCheckFailureCode = 'invalid_argv' | 'unsupported_scope';
+
 export interface ValidationCheckResult {
   readonly kind: ValidationCheckKind;
   readonly passed: boolean;
   readonly startedAt: string;
   readonly endedAt: string;
   readonly summary: string;
+  /** 仅结构性契约缺陷；旧报告无此字段，不得据此触发 unrepairable。 */
+  readonly failureCode?: ValidationCheckFailureCode;
   readonly command?: {
     readonly argv: readonly string[];
     readonly cwd: string;
