@@ -1,9 +1,10 @@
 /**
- * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1).
+ * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1/S2).
  *
- * Application-layer only: consumes ExecutionBudget + attempt usage facts.
+ * Application-layer only: consumes ExecutionBudget + attempt usage facts +
+ * optional durable orchestration.round.started ActivityLog facts (S2).
  * No scheduler enforcement, wait-state coupling, thresholds, upgrade wiring,
- * or default policy numbers. Does not invent round/wall-clock/command usage.
+ * or default policy numbers. Does not invent wall-clock/command usage.
  */
 
 import type { ExecutionBudget, TokenUsage } from '../kernel/index.ts';
@@ -60,14 +61,20 @@ export interface BudgetTokenAggregate {
 /**
  * Authoritative usage facts at a point in time.
  *
- * Intentionally omits roundCount / wallClockMs / commandCount — S1 has no
- * trusted sources for those, and must not fake zeros.
+ * wallClockMs / commandCount remain omitted — no trusted sources yet.
+ * roundCount is optional (S2): only when caller supplies a known projection
+ * from countAuthoritativeRounds; never invent a zero when history is unknown.
  */
 export interface BudgetUsageSnapshot {
   readonly missionId: string;
   readonly capturedAt: string;
   /** Exact number of supplied durable attempts (coordinator + executor). */
   readonly attemptCount: number;
+  /**
+   * Known authoritative orchestration round count (S2).
+   * Absent when projection is unknown (legacy/mixed history) or not supplied.
+   */
+  readonly roundCount?: number;
   /** Only when caller provided a trusted changedFiles list. */
   readonly changedFileCount?: number;
   /** Only when every counted attempt is reported with finite nonnegative tokens. */
@@ -90,11 +97,86 @@ export interface BuildBudgetUsageSnapshotInput {
   readonly capturedAt: string;
   readonly attempts: readonly BudgetAttemptFact[];
   /**
+   * Known authoritative round count from countAuthoritativeRounds.
+   * When provided (including 0), `roundCount` is set on the snapshot.
+   * Omitted => no round fact (evaluator keeps rounds unknown).
+   */
+  readonly roundCount?: number;
+  /**
    * Trusted changed-files list from an authoritative source.
    * When provided (including empty), `changedFileCount` is set to its length.
    * Omitted => no changed-file fact.
    */
   readonly changedFiles?: readonly string[];
+}
+
+/** Minimal activity-log shape for pure round projection (S2). */
+export interface BudgetActivityEventFact {
+  readonly kind: string;
+  readonly data?: unknown;
+}
+
+/**
+ * Result of projecting durable orchestration.round.started facts.
+ *
+ * - known: trusted count (may be 0 when no rounds and no attempt trace)
+ * - unknown: legacy/pre-S2 or mixed history — do not invent a number
+ */
+export type AuthoritativeRoundCount =
+  | { readonly status: 'known'; readonly count: number }
+  | { readonly status: 'unknown' };
+
+const ROUND_STARTED_KIND = 'orchestration.round.started';
+const ATTEMPT_TRACE_KINDS = new Set(['attempt.started', 'attempt.ended']);
+
+function isAuthoritativeRoundStarted(event: BudgetActivityEventFact): boolean {
+  if (event.kind !== ROUND_STARTED_KIND) return false;
+  const data = event.data;
+  if (data == null || typeof data !== 'object' || Array.isArray(data)) return false;
+  return (data as { schemaVersion?: unknown }).schemaVersion === 1;
+}
+
+/**
+ * Pure projection of authoritative orchestration rounds from ActivityLog events.
+ *
+ * Recognizes only orchestration.round.started with data.schemaVersion === 1.
+ * Never infers rounds from timestamps, work items, maxRounds, or attempt counts.
+ */
+export function countAuthoritativeRounds(
+  events: readonly BudgetActivityEventFact[],
+): AuthoritativeRoundCount {
+  let authoritativeCount = 0;
+  let firstAuthoritativeIndex = -1;
+  let firstAttemptTraceIndex = -1;
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]!;
+    if (isAuthoritativeRoundStarted(event)) {
+      if (firstAuthoritativeIndex < 0) firstAuthoritativeIndex = i;
+      authoritativeCount += 1;
+      continue;
+    }
+    if (ATTEMPT_TRACE_KINDS.has(event.kind) && firstAttemptTraceIndex < 0) {
+      firstAttemptTraceIndex = i;
+    }
+  }
+
+  // No authoritative round-start facts.
+  if (firstAuthoritativeIndex < 0) {
+    // Honest zero: empty / pre-work history with no attempt trace.
+    if (firstAttemptTraceIndex < 0) {
+      return Object.freeze({ status: 'known', count: 0 });
+    }
+    // Legacy / pre-S2 history: attempts without round-start facts.
+    return Object.freeze({ status: 'unknown' });
+  }
+
+  // Mixed history: attempt trace appears before the first trusted round-start.
+  if (firstAttemptTraceIndex >= 0 && firstAttemptTraceIndex < firstAuthoritativeIndex) {
+    return Object.freeze({ status: 'unknown' });
+  }
+
+  return Object.freeze({ status: 'known', count: authoritativeCount });
 }
 
 function isFiniteNonNegative(value: unknown): value is number {
@@ -134,6 +216,7 @@ export function buildBudgetUsageSnapshot(
     missionId: string;
     capturedAt: string;
     attemptCount: number;
+    roundCount?: number;
     changedFileCount?: number;
     tokenAggregate?: BudgetTokenAggregate;
     costAggregate?: number;
@@ -142,6 +225,10 @@ export function buildBudgetUsageSnapshot(
     capturedAt: input.capturedAt,
     attemptCount,
   };
+
+  if (Object.prototype.hasOwnProperty.call(input, 'roundCount') && input.roundCount !== undefined) {
+    out.roundCount = input.roundCount;
+  }
 
   if (Object.prototype.hasOwnProperty.call(input, 'changedFiles') && input.changedFiles !== undefined) {
     out.changedFileCount = input.changedFiles.length;
@@ -224,8 +311,9 @@ function optionalLimitVerdict(
  *
  * `budget === undefined` => every dimension `not_in_force`, no exceedances.
  * Required fields (attempts/rounds/wallClockMs) are always in force when budget exists;
- * rounds/wallClockMs remain `unknown` in S1 (no trusted usage yet).
- * `commands` with a limit is always `unknown` in S1.
+ * rounds use snapshot.roundCount when present (S2), else `unknown`;
+ * wallClockMs remain `unknown` (no trusted usage yet).
+ * `commands` with a limit is always `unknown` until a trusted counter exists.
  */
 export function evaluateExecutionBudget(
   budget: ExecutionBudget | undefined,
@@ -242,7 +330,7 @@ export function evaluateExecutionBudget(
   const token = snapshot.tokenAggregate;
   const dimensions: DimensionVerdict[] = [
     compareUsage('attempts', budget.maxAttempts, snapshot.attemptCount),
-    verdict('rounds', 'unknown', budget.maxRounds),
+    optionalLimitVerdict('rounds', budget.maxRounds, snapshot.roundCount),
     verdict('wallClockMs', 'unknown', budget.maxWallClockMs),
     optionalLimitVerdict('inputTokens', budget.maxInputTokens, token?.inputTokens),
     optionalLimitVerdict('outputTokens', budget.maxOutputTokens, token?.outputTokens),

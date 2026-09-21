@@ -1665,6 +1665,19 @@ export class Platform {
   }
 
   /**
+   * Trusted orchestration round-start fact (BUDGET-001-S2).
+   *
+   * Append-only ActivityLog event via the private trusted path. No Mission
+   * snapshot counter, no caller-authored ActivityEvent payload, no HTTP/tool surface.
+   * Orchestrator records this once per runMission loop iteration after preflight
+   * gates and before any Lightweight / Executor / Coordinator hop.
+   */
+  async recordOrchestrationRoundStarted(missionId: string): Promise<void> {
+    const { mission } = await this.#locate(missionId);
+    await this.#event(mission, 'orchestration.round.started', { schemaVersion: 1 });
+  }
+
+  /**
    * L3 答复一条升级。
    *
    * 升级之后调度器是停着的（再叫协调者只会让它再升级一次）。答复落库之后

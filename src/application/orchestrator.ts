@@ -401,24 +401,30 @@ export class Orchestrator {
         }
       }
 
+      // ---- High Assurance fail-closed (preflight; no round fact) ----
+      // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
+      // 不记 orchestration.round.started、不创建 Attempt、不 dispatch。
+      if (view.executionMode === 'high_assurance') {
+        return {
+          kind: 'stalled',
+          reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',
+        };
+      }
+
+      // Durable authoritative round-start fact (BUDGET-001-S2).
+      // After preflight gates; before Lightweight / pending Executor / Coordinator hop.
+      // A successful append counts even if the subsequent hop crashes.
+      // Append failure must not proceed with this round (error propagates).
+      await this.#platform.recordOrchestrationRoundStarted(missionId);
+
       // ---- Lightweight Fast Lane ----
-      // 公共 pause / awaiting_review / completed / blocked / escalation / stale-base
+      // 公共 pause / awaiting_review / completed / blocked / escalation / stale-base / HA
       // 检查之后、Standard pending/coordinator 逻辑之前分流。
       // 绝不进入下面的「没有 pending → coordinator」路径。
       if (view.executionMode === 'lightweight') {
         const lightweight = await this.#runLightweightRound(missionId, view, cwd);
         if (lightweight.kind === 'continue') continue;
         return lightweight.outcome;
-      }
-
-      // ---- High Assurance fail-closed ----
-      // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
-      // 不创建 Coordinator Attempt、不启动 Executor、不 dispatch、不改 Mission status。
-      if (view.executionMode === 'high_assurance') {
-        return {
-          kind: 'stalled',
-          reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',
-        };
       }
 
       // 有已派发但还没交回结果的工作项，就先把它们跑完。

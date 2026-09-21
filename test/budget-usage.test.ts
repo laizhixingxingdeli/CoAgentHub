@@ -1,5 +1,6 @@
 /**
- * BUDGET-001-S1: pure authoritative budget snapshot + evaluator.
+ * BUDGET-001-S1/S2: pure authoritative budget snapshot + evaluator +
+ * durable orchestration.round.started projection.
  */
 
 import { describe, test } from 'node:test';
@@ -11,8 +12,10 @@ import { fileURLToPath } from 'node:url';
 import {
   BUDGET_DIMENSIONS,
   buildBudgetUsageSnapshot,
+  countAuthoritativeRounds,
   evaluateExecutionBudget,
   verdictFor,
+  type BudgetActivityEventFact,
   type BudgetAttemptFact,
   type BudgetUsageSnapshot,
 } from '../src/application/budget-usage.ts';
@@ -57,12 +60,16 @@ function snap(
     missionId: string;
     capturedAt: string;
     attempts: readonly BudgetAttemptFact[];
+    roundCount?: number;
     changedFiles?: readonly string[];
   } = {
     missionId: over.missionId ?? 'm-1',
     capturedAt: over.capturedAt ?? '2020-01-01T00:00:00.000Z',
     attempts,
   };
+  if (over.roundCount !== undefined) {
+    input.roundCount = over.roundCount;
+  }
   if (over.changedFiles !== undefined) {
     input.changedFiles = over.changedFiles;
   }
@@ -72,8 +79,21 @@ function snap(
 type BuildOver = {
   missionId?: string;
   capturedAt?: string;
+  roundCount?: number;
   changedFiles?: readonly string[];
 };
+
+function roundStarted(schemaVersion: unknown = 1): BudgetActivityEventFact {
+  return { kind: 'orchestration.round.started', data: { schemaVersion } };
+}
+
+function attemptStarted(): BudgetActivityEventFact {
+  return { kind: 'attempt.started', data: { kind: 'coordinator' } };
+}
+
+function attemptEnded(): BudgetActivityEventFact {
+  return { kind: 'attempt.ended', data: { endedBy: 'structured_submit' } };
+}
 
 describe('buildBudgetUsageSnapshot', () => {
   test('records missionId, capturedAt, exact attemptCount; no invented round/wall/command fields', () => {
@@ -85,6 +105,17 @@ describe('buildBudgetUsageSnapshot', () => {
     assert.equal('wallClockMs' in s, false);
     assert.equal('commandCount' in s, false);
     assert.equal('changedFileCount' in s, false);
+  });
+
+  test('roundCount only when trusted known count supplied (incl. honest 0)', () => {
+    const without = snap([{ usage: reported() }]);
+    assert.equal('roundCount' in without, false);
+
+    const zero = snap([], { roundCount: 0 });
+    assert.equal(zero.roundCount, 0);
+
+    const n = snap([], { roundCount: 3 });
+    assert.equal(n.roundCount, 3);
   });
 
   test('coordinator + executor shapes both count', () => {
@@ -272,7 +303,7 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(someAttempts, 'attempts').used, 2);
     assert.equal(someAttempts.anyAuthoritativeExceeded, true);
 
-    // rounds/wall still unknown even at zero limit
+    // rounds/wall still unknown even at zero limit when roundCount absent
     assert.equal(verdictFor(zeroAttempts, 'rounds').status, 'unknown');
     assert.equal(verdictFor(zeroAttempts, 'rounds').limit, 0);
     assert.equal(verdictFor(zeroAttempts, 'wallClockMs').status, 'unknown');
@@ -461,7 +492,7 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(emptyTrusted, 'changedFiles').used, 0);
   });
 
-  test('rounds / wallClockMs / commands unknown when their limits are in force', () => {
+  test('rounds unknown without roundCount; wallClockMs / commands still unknown', () => {
     const budget = sampleBudget();
     const ev = evaluateExecutionBudget(
       budget,
@@ -484,6 +515,32 @@ describe('evaluateExecutionBudget', () => {
     assert.equal('commandCount' in s, false);
   });
 
+  test('rounds ok/exceeded when snapshot.roundCount present (used >= limit => exceeded)', () => {
+    const budget: ExecutionBudget = { maxAttempts: 10, maxRounds: 2, maxWallClockMs: 1 };
+
+    const under = evaluateExecutionBudget(budget, snap([], { roundCount: 1 }));
+    assert.equal(verdictFor(under, 'rounds').status, 'ok');
+    assert.equal(verdictFor(under, 'rounds').used, 1);
+    assert.equal(verdictFor(under, 'rounds').limit, 2);
+    assert.equal(under.anyAuthoritativeExceeded, false);
+
+    const at = evaluateExecutionBudget(budget, snap([], { roundCount: 2 }));
+    assert.equal(verdictFor(at, 'rounds').status, 'exceeded');
+    assert.equal(verdictFor(at, 'rounds').used, 2);
+    assert.equal(at.anyAuthoritativeExceeded, true);
+
+    const over = evaluateExecutionBudget(budget, snap([], { roundCount: 5 }));
+    assert.equal(verdictFor(over, 'rounds').status, 'exceeded');
+    assert.equal(verdictFor(over, 'rounds').used, 5);
+
+    const zeroLimit = evaluateExecutionBudget(
+      { maxAttempts: 10, maxRounds: 0, maxWallClockMs: 1 },
+      snap([], { roundCount: 0 }),
+    );
+    assert.equal(verdictFor(zeroLimit, 'rounds').status, 'exceeded');
+    assert.equal(verdictFor(zeroLimit, 'rounds').used, 0);
+  });
+
   test('unknown never contributes to anyAuthoritativeExceeded alone', () => {
     const budget = sampleBudget({
       maxAttempts: 100,
@@ -503,6 +560,87 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(ev, 'commands').status, 'unknown');
     assert.equal(verdictFor(ev, 'rounds').status, 'unknown');
     assert.equal(ev.anyAuthoritativeExceeded, false);
+  });
+});
+
+describe('countAuthoritativeRounds', () => {
+  test('trusted event counting: only schemaVersion===1 round.started', () => {
+    const events: BudgetActivityEventFact[] = [
+      { kind: 'mission.created', data: {} },
+      roundStarted(1),
+      { kind: 'orchestration.round.started', data: { schemaVersion: 2 } },
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'orchestration.round.started', data: null },
+      { kind: 'work_item.created', data: {} },
+      roundStarted(1),
+      attemptStarted(),
+      attemptEnded(),
+    ];
+    assert.deepEqual(countAuthoritativeRounds(events), { status: 'known', count: 2 });
+  });
+
+  test('honest zero when no round-start and no attempt trace', () => {
+    assert.deepEqual(countAuthoritativeRounds([]), { status: 'known', count: 0 });
+    assert.deepEqual(
+      countAuthoritativeRounds([
+        { kind: 'mission.created', data: {} },
+        { kind: 'plan.updated', data: {} },
+      ]),
+      { status: 'known', count: 0 },
+    );
+  });
+
+  test('legacy unknown: attempt.started/ended without any authoritative round-start', () => {
+    assert.deepEqual(
+      countAuthoritativeRounds([attemptStarted(), attemptEnded()]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeRounds([
+        { kind: 'mission.created', data: {} },
+        attemptEnded(),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('mixed-history unknown: attempt trace before first authoritative round-start', () => {
+    assert.deepEqual(
+      countAuthoritativeRounds([attemptStarted(), roundStarted(1), roundStarted(1)]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeRounds([
+        { kind: 'mission.created', data: {} },
+        attemptEnded(),
+        roundStarted(1),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('known count when attempts only after first authoritative round-start', () => {
+    assert.deepEqual(
+      countAuthoritativeRounds([
+        roundStarted(1),
+        attemptStarted(),
+        attemptEnded(),
+        roundStarted(1),
+        attemptStarted(),
+      ]),
+      { status: 'known', count: 2 },
+    );
+  });
+
+  test('never infers rounds from work-item events, maxRounds, or attempt count alone', () => {
+    const noisy: BudgetActivityEventFact[] = [
+      { kind: 'work_item.created', data: { title: 'x' } },
+      { kind: 'work_item.dispatched', data: { ids: ['W1'] } },
+      { kind: 'mission.waiting', data: { reason: 'no_available_agent' } },
+    ];
+    assert.deepEqual(countAuthoritativeRounds(noisy), { status: 'known', count: 0 });
+    // attempt-only still unknown — not inferred as round count === attempt count
+    assert.equal(countAuthoritativeRounds([attemptStarted(), attemptStarted()]).status, 'unknown');
   });
 });
 
