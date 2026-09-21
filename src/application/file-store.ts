@@ -12,10 +12,11 @@
  * 留下半份 JSON。
  */
 
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
-import type { ProjectSnapshot } from '../kernel/snapshot.ts';
+import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import type {
@@ -26,6 +27,28 @@ import type {
   AgentPoolSnapshot,
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
+
+/** archive 路径段：防目录穿越，也限制文件名长度。 */
+const ARCHIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+interface ArchivedMissionRef {
+  projectId: string;
+  missionId: string;
+  archivedAt: string;
+  bytes: number;
+  sha256: string;
+}
+
+/** 旁路 package：mission 快照 + 只属于它的 events/deliveries。 */
+interface ArchivedMissionPackage {
+  version: 1;
+  projectId: string;
+  missionId: string;
+  archivedAt: string;
+  mission: MissionSnapshot;
+  events: ActivityEvent[];
+  deliveries: Delivery[];
+}
 
 interface StateFile {
   version: 1;
@@ -42,6 +65,46 @@ interface StateFile {
    * 缺这个键自然拿到 [] —— bump 只会让所有人的现有状态文件读不了。
    */
   agentPool: AgentPoolRow[];
+  /** 已归档索引；package 在 `.coagent-archive/missions/...`。旧文件缺键补 []。 */
+  archivedMissions: ArchivedMissionRef[];
+}
+
+function packageKey(projectId: string, missionId: string): string {
+  return `${projectId}/${missionId}`;
+}
+
+/** `dirname(state)/.coagent-archive/missions/<projectId>/<missionId>.json` + containment。 */
+function archivedMissionPath(statePath: string, projectId: string, missionId: string): string {
+  if (!ARCHIVE_ID_RE.test(projectId)) throw new Error(`状态损坏：archive project id 非法：${projectId}`);
+  if (!ARCHIVE_ID_RE.test(missionId)) throw new Error(`状态损坏：archive mission id 非法：${missionId}`);
+  const root = resolve(dirname(statePath), '.coagent-archive', 'missions');
+  const file = resolve(root, projectId, `${missionId}.json`);
+  const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (!file.startsWith(prefix)) throw new Error(`状态损坏：archive 路径越界：${projectId}/${missionId}`);
+  return file;
+}
+
+/** 键序归一化后再比，避免同一快照因插入顺序被误判漂移。 */
+function canonicalJson(value: unknown): string {
+  const canon = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canon);
+    if (v !== null && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as object).sort()) out[k] = canon((v as Record<string, unknown>)[k]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(canon(value));
+}
+
+function sortArchiveRefs(refs: readonly ArchivedMissionRef[]): ArchivedMissionRef[] {
+  return refs
+    .map((ref, index) => ({ ref, index }))
+    .sort((a, b) =>
+      a.ref.archivedAt < b.ref.archivedAt ? -1 : a.ref.archivedAt > b.ref.archivedAt ? 1 : a.index - b.index,
+    )
+    .map((row) => row.ref);
 }
 
 /**
@@ -59,6 +122,7 @@ function emptyState(): StateFile {
     events: [],
     idCounters: {},
     agentPool: [],
+    archivedMissions: [],
   };
 }
 
@@ -70,6 +134,10 @@ export class FileStateStore {
   #state: StateFile;
   /** 还原出来的聚合实例。落盘时重新取快照，读的时候直接给活对象。 */
   #projects = new Map<string, Project>();
+  /** 已加载 package；events/deliveries 只活在这里，不进 raw main。 */
+  #archivedPackages = new Map<string, ArchivedMissionPackage>();
+  /** hydrate 时 archived mission 基线（restore→toSnapshot）；flush 前比对防漂移。 */
+  #archivedBaselines = new Map<string, MissionSnapshot>();
   /** 上次读到/写出的文件 mtime，用来判断有没有被别的进程改过。 */
   #stamp = 0;
 
@@ -82,8 +150,123 @@ export class FileStateStore {
 
   #hydrate(): void {
     this.#projects.clear();
+    this.#archivedPackages.clear();
+    this.#archivedBaselines.clear();
+    if (!Array.isArray(this.#state.archivedMissions)) this.#state.archivedMissions = [];
+    const refs = this.#state.archivedMissions;
+    for (const ref of refs) {
+      const key = packageKey(ref.projectId, ref.missionId);
+      if (this.#archivedPackages.has(key)) {
+        throw new Error(`状态损坏：archive index 重复：${key}`);
+      }
+      this.#archivedPackages.set(key, this.#readArchivedPackage(ref));
+    }
+
+    const merged = new Map<string, ProjectSnapshot>();
     for (const snapshot of this.#state.projects) {
-      this.#projects.set(snapshot.id, Project.restore(snapshot));
+      merged.set(snapshot.id, { id: snapshot.id, missions: [...(snapshot.missions ?? [])] });
+    }
+    for (const ref of sortArchiveRefs(refs)) {
+      const key = packageKey(ref.projectId, ref.missionId);
+      const pkg = this.#archivedPackages.get(key)!;
+      let project = merged.get(ref.projectId);
+      if (!project) {
+        project = { id: ref.projectId, missions: [] };
+        merged.set(ref.projectId, project);
+      }
+      if (project.missions.some((m) => m.id === ref.missionId)) {
+        throw new Error(`状态损坏：archived mission 与 working 重复：${key}`);
+      }
+      project.missions.push(pkg.mission);
+    }
+
+    for (const snapshot of merged.values()) {
+      const project = Project.restore(snapshot);
+      this.#projects.set(project.id, project);
+      for (const mission of project.toSnapshot().missions) {
+        const key = packageKey(project.id, mission.id);
+        if (this.#archivedPackages.has(key)) this.#archivedBaselines.set(key, mission);
+      }
+    }
+  }
+
+  #readArchivedPackage(ref: ArchivedMissionRef): ArchivedMissionPackage {
+    const label = `${ref.projectId}/${ref.missionId}`;
+    const path = archivedMissionPath(this.#path, ref.projectId, ref.missionId);
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`状态损坏：archive package 缺失：${label}`);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`状态损坏：archive package 读取失败：${label} —— ${detail}`);
+    }
+    if (bytes.byteLength !== ref.bytes) throw new Error(`状态损坏：archive package bytes 不匹配：${label}`);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (sha256 !== ref.sha256) throw new Error(`状态损坏：archive package hash 不匹配：${label}`);
+    let parsed: ArchivedMissionPackage;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8')) as ArchivedMissionPackage;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`状态损坏：archive package JSON 无效：${label} —— ${detail}`);
+    }
+    if (parsed.version !== 1) {
+      throw new Error(`状态损坏：archive package 版本不认识：${parsed.version}（${label}）`);
+    }
+    if (parsed.projectId !== ref.projectId || parsed.missionId !== ref.missionId) {
+      throw new Error(`状态损坏：archive package id 与 index 不一致：${label}`);
+    }
+    if (parsed.archivedAt !== ref.archivedAt) {
+      throw new Error(`状态损坏：archive package archivedAt 与 index 不一致：${label}`);
+    }
+    if (!parsed.mission || typeof parsed.mission !== 'object') {
+      throw new Error(`状态损坏：archive package mission 无效：${label}`);
+    }
+    if (parsed.mission.id !== ref.missionId) {
+      throw new Error(`状态损坏：archive package mission.id 与 index 不一致：${label}`);
+    }
+    if (
+      'projectId' in parsed.mission &&
+      parsed.mission.projectId !== undefined &&
+      parsed.mission.projectId !== ref.projectId
+    ) {
+      throw new Error(`状态损坏：archive package mission.projectId 与 index 不一致：${label}`);
+    }
+    if (!Array.isArray(parsed.events)) {
+      throw new Error(`状态损坏：archive package events 无效：${label}`);
+    }
+    if (!Array.isArray(parsed.deliveries)) {
+      throw new Error(`状态损坏：archive package deliveries 无效：${label}`);
+    }
+    for (const delivery of parsed.deliveries) {
+      if (delivery.status !== 'acknowledged') {
+        throw new Error(`状态损坏：archive package 含未确认投递：${label}（${delivery.id}）`);
+      }
+    }
+    return parsed;
+  }
+
+  /** 归档体被改过就不能写 main：先 hydrate 回滚，再抛 ARCHIVED_MISSION_MUTATED。 */
+  #assertArchivedUnchanged(): void {
+    try {
+      for (const project of this.#projects.values()) {
+        for (const mission of project.toSnapshot().missions) {
+          const baseline = this.#archivedBaselines.get(packageKey(mission.projectId, mission.id));
+          if (!baseline) continue;
+          if (canonicalJson(mission) !== canonicalJson(baseline)) {
+            throw new Error(`ARCHIVED_MISSION_MUTATED: ${mission.projectId}/${mission.id}`);
+          }
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('ARCHIVED_MISSION_MUTATED')) {
+        this.#state = this.#load();
+        this.#hydrate();
+      }
+      throw error;
     }
   }
 
@@ -119,7 +302,9 @@ export class FileStateStore {
       if (parsed.version !== 1) {
         throw new Error(`状态文件版本不认识：${parsed.version}（本程序只认 1）`);
       }
-      return { ...emptyState(), ...parsed };
+      const state = { ...emptyState(), ...parsed };
+      if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
+      return state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState();
       // 读不动但文件存在 = 数据可能损坏。**不要静默重置**：那会把用户的
@@ -132,7 +317,25 @@ export class FileStateStore {
 
   /** 把当前活对象的快照写回磁盘。 */
   flush(): void {
-    this.#state.projects = [...this.#projects.values()].map((project) => project.toSnapshot());
+    this.#assertArchivedUnchanged();
+
+    const archivedIds = new Map<string, Set<string>>();
+    for (const ref of this.#state.archivedMissions) {
+      const set = archivedIds.get(ref.projectId) ?? new Set<string>();
+      set.add(ref.missionId);
+      archivedIds.set(ref.projectId, set);
+    }
+
+    // 内存含完整史；落 main 时滤掉已索引 archived，不得嵌回。
+    this.#state.projects = [...this.#projects.values()].map((project) => {
+      const snapshot = project.toSnapshot();
+      const drop = archivedIds.get(snapshot.id);
+      return {
+        id: snapshot.id,
+        missions: drop ? snapshot.missions.filter((m) => !drop.has(m.id)) : snapshot.missions,
+      };
+    });
+
     mkdirSync(dirname(this.#path), { recursive: true });
     const temp = `${this.#path}.tmp`;
     writeFileSync(temp, `${JSON.stringify(this.#state, null, 2)}\n`, 'utf8');
@@ -154,6 +357,35 @@ export class FileStateStore {
 
   raw(): StateFile {
     return this.#state;
+  }
+
+  hasArchivedMission(missionId: string): boolean {
+    return this.#state.archivedMissions.some((ref) => ref.missionId === missionId);
+  }
+
+  archivedEvents(missionId: string): readonly ActivityEvent[] {
+    for (const pkg of this.#archivedPackages.values()) {
+      if (pkg.missionId === missionId) return pkg.events;
+    }
+    return [];
+  }
+
+  /** main + package events；package 按 archivedAt/index 稳定接上。 */
+  allEventsMerged(): ActivityEvent[] {
+    const merged = [...this.#state.events];
+    for (const ref of sortArchiveRefs(this.#state.archivedMissions)) {
+      const pkg = this.#archivedPackages.get(packageKey(ref.projectId, ref.missionId));
+      if (pkg) merged.push(...pkg.events);
+    }
+    return merged;
+  }
+
+  findArchivedDelivery(deliveryId: string): Delivery | undefined {
+    for (const pkg of this.#archivedPackages.values()) {
+      const found = pkg.deliveries.find((row) => row.id === deliveryId);
+      if (found) return found;
+    }
+    return undefined;
   }
 }
 
@@ -254,7 +486,10 @@ export class FileDeliveryRepository implements DeliveryRepository {
   }
 
   async get(deliveryId: string): Promise<Delivery | undefined> {
-    return this.#store.raw().deliveries.find((row) => row.id === deliveryId);
+    this.#store.refreshIfChanged();
+    const main = this.#store.raw().deliveries.find((row) => row.id === deliveryId);
+    if (main) return main;
+    return this.#store.findArchivedDelivery(deliveryId);
   }
 }
 
@@ -274,11 +509,15 @@ export class FileActivityLog implements ActivityLog {
 
   async list(missionId: string): Promise<readonly ActivityEvent[]> {
     this.#store.refreshIfChanged();
+    if (this.#store.hasArchivedMission(missionId)) {
+      return this.#store.archivedEvents(missionId);
+    }
     return this.#store.raw().events.filter((event) => event.missionId === missionId);
   }
 
   async all(): Promise<readonly ActivityEvent[]> {
-    return [...this.#store.raw().events];
+    this.#store.refreshIfChanged();
+    return this.#store.allEventsMerged();
   }
 }
 
