@@ -26,6 +26,14 @@ export interface OriginChannel {
    * clientType/conversationRef 是同一件事的不同来源，不是新的领域概念。
    */
   readonly rerunOf?: string;
+  /**
+   * 这是哪条 QueryRun 显式 promote 来的。
+   *
+   * 与 rerunOf 同属来源图：只记可信的 QueryRunRecord.id，不复制 findings。
+   * Findings 权威仍在 QueryRunRepository，下游靠 queryRunId 再 get。
+   * Promotion 路径写入；rerun 路径不写。
+   */
+  readonly queryRunId?: string;
 }
 
 /** Mission 执行保障档位：创建时选定，全程只读。 */
