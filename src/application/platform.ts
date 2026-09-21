@@ -6,7 +6,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { InvariantViolationError } from '../kernel/index.ts';
+import {
+  InvariantViolationError,
+  isPromotionTriggerCode,
+} from '../kernel/index.ts';
 import type {
   Attempt,
   AttemptEndReason,
@@ -23,6 +26,13 @@ import type {
   OriginChannel,
   PlanBody,
   Project,
+  PromotionRecord,
+  PromotionStatus,
+  PromotionTokenUsageSnapshot,
+  PromotionTriggerCode,
+  PromotionUnknownDimension,
+  PromotionUsageSnapshot,
+  PromotionWorkspaceRevision,
   ReviewAuthority,
   ReviewRecord,
   RunKind,
@@ -2015,6 +2025,122 @@ export class Platform {
   }
 
   /**
+   * Lightweight → Standard 可信升级入口（PROMO-001）。
+   *
+   * **仅进程内**：不接受完整 PromotionRecord / evidence / usage / HEAD 等 caller audit JSON；
+   * 全部从 trusted state 构造。产品/API/agent tools 本单不新增 route。
+   */
+  async promoteMissionToStandard(
+    missionId: string,
+    trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    const rule = typeof trigger?.rule === 'string' ? trigger.rule.trim() : '';
+    if (!rule) {
+      throw new PlatformRuleError(
+        'INVALID_PROMOTION_TRIGGER',
+        'promoteMissionToStandard 要求非空 trigger.rule。',
+      );
+    }
+    if (!isPromotionTriggerCode(trigger?.code)) {
+      throw new PlatformRuleError(
+        'INVALID_PROMOTION_TRIGGER',
+        `非法 promotion trigger code：${String(trigger?.code)}`,
+      );
+    }
+    // BUDGET-001 前禁止靠手填 budget_exceeded 冒充权威预算超限。
+    if (trigger.code === 'budget_exceeded') {
+      throw new PlatformRuleError(
+        'BUDGET_PROMOTION_NOT_READY',
+        'budget_exceeded 升级需 BudgetPolicy（BUDGET-001）就绪；本阶段拒绝。',
+      );
+    }
+
+    const { mission, project } = await this.#locate(missionId);
+
+    // 已 standard + 既有 promotion：按 trigger code/rule 幂等匹配，不重采样。
+    if (mission.executionMode === 'standard' && mission.promotions.length === 1) {
+      const existing = mission.promotions[0]!;
+      if (existing.triggerCode === trigger.code && existing.triggerRule === rule) {
+        return { changed: false, promotion: existing };
+      }
+      throw new PlatformRuleError(
+        'PROMOTION_ALREADY_APPLIED',
+        `Mission ${missionId} 已升级为 standard，拒绝不同 trigger。`,
+      );
+    }
+
+    const fromStatus = mission.status as PromotionStatus;
+    const toStatus: 'investigating' | 'planning' =
+      mission.status === 'executing' ? 'planning' : (fromStatus as 'investigating' | 'planning');
+
+    const record: PromotionRecord = {
+      // 审计身份只由 Platform 生成；不接受 caller 自带 id。
+      id: this.#ids.next('promo'),
+      fromMode: 'lightweight',
+      toMode: 'standard',
+      triggerCode: trigger.code,
+      triggerRule: rule,
+      at: this.#clock.now().toISOString(),
+      fromStatus,
+      toStatus,
+      consumedUsage: buildPromotionUsageSnapshot(mission),
+      evidenceIds: collectPromotionEvidenceIds(mission),
+      validationReportIds: await collectPromotionValidationReportIds(
+        mission,
+        this.#activity,
+      ),
+      workspaceRevision: await this.#derivePromotionWorkspaceRevision(mission),
+      workItemIdsSnapshot: mission.workItems.map((item) => item.id),
+    };
+
+    const result = mission.promoteToStandard(record);
+    if (!result.changed) {
+      return result;
+    }
+
+    // promotion snapshot 独立于 API 外层 persist 也要落盘。
+    await this.#projects.save(project);
+    await this.#event(mission, 'mission.promoted', {
+      id: result.promotion.id,
+      oldMode: result.promotion.fromMode,
+      newMode: result.promotion.toMode,
+      triggerCode: result.promotion.triggerCode,
+      triggerRule: result.promotion.triggerRule,
+      consumedUsage: result.promotion.consumedUsage,
+      evidenceIds: result.promotion.evidenceIds,
+      validationReportIds: result.promotion.validationReportIds,
+      workspaceRevision: result.promotion.workspaceRevision,
+      workItemIdsSnapshot: result.promotion.workItemIdsSnapshot,
+      fromStatus: result.promotion.fromStatus,
+      toStatus: result.promotion.toStatus,
+    });
+    return result;
+  }
+
+  /**
+   * 升级瞬间 workspace HEAD 的可信推导。
+   * 禁止用 workspaceRef.baseRevision 冒充 current HEAD。
+   */
+  async #derivePromotionWorkspaceRevision(
+    mission: Mission,
+  ): Promise<PromotionWorkspaceRevision> {
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    if (!this.#workspace || !mission.workspaceRef || !projectRoot) {
+      return { kind: 'unknown' };
+    }
+    const cwd =
+      this.#workspace.worktreePath?.(mission.id, projectRoot) ?? projectRoot;
+    try {
+      const head = await this.#workspace.head(cwd);
+      const revision = typeof head === 'string' ? head.trim() : '';
+      if (!revision) return { kind: 'unknown' };
+      return { kind: 'head', revision };
+    } catch {
+      return { kind: 'unknown' };
+    }
+  }
+
+  /**
    * 回收 worktree 目录。**只摘目录，不删分支** —— 改动是 Mission 的产出，
    * 分支留着才查得到。失败不致命：留个目录比中断收尾好。
    */
@@ -2133,6 +2259,8 @@ export interface MissionView {
   executionMode: MissionExecutionMode;
   /** 创建时选定的运行种类；只读，与 executionMode 正交。 */
   runKind: RunKind;
+  /** Lightweight→Standard 升级历史（只读）；便于观测面显示原模式/当前模式/升级原因。 */
+  promotions: readonly PromotionRecord[];
   /** 为什么停着。undefined = 没停。 */
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
@@ -2295,6 +2423,130 @@ function sumUsage(mission: Mission): TokenUsage {
   };
 }
 
+/** 收集全部 attempts 的 evidence id，去重且保持出现顺序。 */
+function collectPromotionEvidenceIds(mission: Mission): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  for (const item of mission.workItems) attempts.push(...item.attempts);
+  for (const attempt of attempts) {
+    for (const ev of attempt.evidence) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      ids.push(ev.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * 收集 promotion 审计用 validation reportId，去重保序。
+ * 来源（既有可信状态，不另造审计入口）：
+ *   1) WorkItem.reviews 中 validator authority.reportId
+ *   2) activity `validation.reported` 事件 data.reportId
+ *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
+ */
+async function collectPromotionValidationReportIds(
+  mission: Mission,
+  activity: ActivityLog,
+): Promise<string[]> {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (reportId: unknown): void => {
+    if (typeof reportId !== 'string' || reportId.length === 0) return;
+    if (seen.has(reportId)) return;
+    seen.add(reportId);
+    ids.push(reportId);
+  };
+
+  for (const item of mission.workItems) {
+    for (const review of item.reviews) {
+      const authority = review.authority;
+      if (!authority || authority.kind !== 'validator') continue;
+      push(authority.reportId);
+    }
+  }
+
+  const events = await activity.list(mission.id);
+  for (const event of events) {
+    if (event.kind !== 'validation.reported') continue;
+    const data = event.data;
+    if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+    push((data as { reportId?: unknown }).reportId);
+  }
+
+  return ids;
+}
+
+/**
+ * 从 trusted attempts 构造 promotion usage 快照。
+ * 只累加 reported/estimated；unknown 永不贡献假 0。
+ * 任一 attempt token 事实未知 => dimensionsUnknown 含 tokens。
+ * 无任何非 unknown usage => 省略 tokenUsage。
+ */
+function buildPromotionUsageSnapshot(mission: Mission): PromotionUsageSnapshot {
+  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  for (const item of mission.workItems) attempts.push(...item.attempts);
+  const attemptCount = attempts.length;
+
+  const baseUnknown: PromotionUnknownDimension[] = [
+    'cost',
+    'wallClockMs',
+    'rounds',
+    'changedFiles',
+    'commands',
+    'budgetRemaining',
+  ];
+
+  const known = attempts.filter(
+    (a) => a.usage.quality === 'reported' || a.usage.quality === 'estimated',
+  );
+  const hasUnknownTokens =
+    attemptCount === 0 || known.length < attemptCount;
+
+  const dimensionsUnknown: PromotionUnknownDimension[] = hasUnknownTokens
+    ? ['tokens', ...baseUnknown]
+    : [...baseUnknown];
+
+  if (known.length === 0) {
+    return {
+      attemptCount,
+      dimensionsUnknown,
+      budgetAuthoritative: false,
+    };
+  }
+
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let reported = 0;
+  for (const attempt of known) {
+    const u = attempt.usage;
+    input += u.input;
+    output += u.output;
+    cacheRead += u.cacheRead;
+    cacheWrite += u.cacheWrite;
+    if (u.quality === 'reported') reported += 1;
+  }
+  const quality: PromotionTokenUsageSnapshot['quality'] =
+    reported === known.length ? 'reported' : 'estimated';
+  const tokenUsage: PromotionTokenUsageSnapshot = {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    total: input + output + cacheRead + cacheWrite,
+    quality,
+  };
+  return {
+    attemptCount,
+    tokenUsage,
+    dimensionsUnknown,
+    budgetAuthoritative: false,
+  };
+}
+
 function viewOf(mission: Mission): MissionView {
   return {
     missionId: mission.id,
@@ -2302,6 +2554,7 @@ function viewOf(mission: Mission): MissionView {
     status: mission.status,
     executionMode: mission.executionMode,
     runKind: mission.runKind,
+    promotions: mission.promotions,
     waitReason: mission.waitReason,
     waitDetail: mission.waitDetail,
     updatedAt: mission.updatedAt,

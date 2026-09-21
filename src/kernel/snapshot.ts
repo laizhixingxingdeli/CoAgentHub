@@ -13,6 +13,7 @@ import type {
   ComplexityAssessment,
   ExecutionBudget,
   MissionExecutionMode,
+  PromotionRecord,
   RunKind,
 } from './payloads.ts';
 
@@ -86,6 +87,12 @@ export interface MissionSnapshot {
   complexityAssessment?: ComplexityAssessment;
   /** 老快照可能没有；restore 时缺字段/畸形 -> undefined（fail-closed，不填默认预算）。 */
   executionBudget?: ExecutionBudget;
+  /**
+   * Lightweight→Standard 升级历史。老快照可缺；restore 时缺省/非数组 -> []。
+   * 单条 malformed（含缺 id）丢弃；>1 条合法或非 standard 却带 promotions -> []。
+   * 不从 promotions 推断/改写 executionMode。
+   */
+  promotions?: PromotionRecord[];
   workItems: WorkItemSnapshot[];
   coordinatorAttempts: AttemptSnapshot[];
   coordinatorSeq: number;

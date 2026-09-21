@@ -3,7 +3,7 @@ import { Attempt } from './attempt.ts';
 import { WorkItem } from './work-item.ts';
 import type { Project } from './project.ts';
 import type { WorkItemInit } from './work-item.ts';
-import { freezePayload } from './payloads.ts';
+import { freezeDeep, freezePayload, isPromotionTriggerCode } from './payloads.ts';
 import type { AttemptSnapshot, MissionSnapshot, WorkItemSnapshot } from './snapshot.ts';
 import type {
   ComplexityAssessment,
@@ -17,9 +17,31 @@ import type {
   MissionResultBody,
   OriginChannel,
   PlanBody,
+  PromotionRecord,
+  PromotionStatus,
+  PromotionTokenUsageSnapshot,
+  PromotionUnknownDimension,
+  PromotionUsageSnapshot,
+  PromotionWorkspaceRevision,
   RunKind,
   WorkOrder,
 } from './payloads.ts';
+
+const PROMOTION_STATUSES: readonly PromotionStatus[] = [
+  'investigating',
+  'planning',
+  'executing',
+];
+
+const PROMOTION_UNKNOWN_DIMENSIONS: readonly PromotionUnknownDimension[] = [
+  'tokens',
+  'cost',
+  'wallClockMs',
+  'rounds',
+  'changedFiles',
+  'commands',
+  'budgetRemaining',
+];
 
 export type MissionStatus =
   | 'investigating'
@@ -100,6 +122,7 @@ export class Mission {
   #runKind: RunKind;
   #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
   #executionBudget: Readonly<ExecutionBudget> | undefined;
+  #promotions: Readonly<PromotionRecord>[] = [];
 
   constructor(init: MissionInit) {
     this.#id = init.id;
@@ -150,6 +173,11 @@ export class Mission {
   /** 可选执行预算上限；只读。缺省/非法为 undefined，禁止填默认预算。 */
   get executionBudget(): Readonly<ExecutionBudget> | undefined {
     return this.#executionBudget;
+  }
+
+  /** Lightweight→Standard 升级历史；只读副本。本阶段最多一条。 */
+  get promotions(): readonly Readonly<PromotionRecord>[] {
+    return [...this.#promotions];
   }
 
   /**
@@ -318,6 +346,77 @@ export class Mission {
 
   recordWorkspace(ref: WorkspaceRef): void {
     this.#workspaceRef = freezePayload({ ...ref });
+  }
+
+  /**
+   * Lightweight → Standard 可信升级（PROMO-001）。
+   *
+   * 所有 guard 在 mutation 前完成；成功时 deep-copy/freeze 一条 promotion。
+   * 不清 waitReason，不 retire/reject/reset WorkItem，不清 result/evidence/workspace。
+   * executing 升级会 status→planning，但 hasMutated 保留，isMutating 仍为 true。
+   */
+  promoteToStandard(
+    record: PromotionRecord,
+  ): { changed: boolean; promotion: Readonly<PromotionRecord> } {
+    // 幂等：已 standard 且恰好 1 条，身份字段相等 => changed:false。
+    if (
+      this.#executionMode === 'standard' &&
+      this.#promotions.length === 1
+    ) {
+      const existing = this.#promotions[0]!;
+      if (Mission.#promotionIdentityEqual(existing, record)) {
+        return { changed: false, promotion: existing };
+      }
+      throw new InvariantViolationError(
+        'PROMOTION_ALREADY_APPLIED',
+        `Mission ${this.#id} 已从 lightweight 升级为 standard，拒绝不同的 promotion 记录`,
+      );
+    }
+
+    if (this.#executionMode !== 'lightweight') {
+      throw new InvariantViolationError(
+        'PROMOTION_MODE_REQUIRED',
+        `promoteToStandard 要求 executionMode=lightweight，当前是 ${this.#executionMode}`,
+      );
+    }
+    if (this.#runKind !== 'mutation') {
+      throw new InvariantViolationError(
+        'PROMOTION_RUN_KIND_REQUIRED',
+        `promoteToStandard 要求 runKind=mutation，当前是 ${this.#runKind}`,
+      );
+    }
+    if (this.#isTerminal() || this.#status === 'awaiting_review') {
+      throw new IllegalTransitionError('Mission', this.#status, 'promoteToStandard');
+    }
+    if (
+      this.#status !== 'investigating' &&
+      this.#status !== 'planning' &&
+      this.#status !== 'executing'
+    ) {
+      throw new IllegalTransitionError('Mission', this.#status, 'promoteToStandard');
+    }
+    if (this.#promotions.length !== 0) {
+      throw new InvariantViolationError(
+        'PROMOTION_ALREADY_APPLIED',
+        `Mission ${this.#id} 已有 promotion 记录，本阶段最多一次 L→S`,
+      );
+    }
+
+    const normalized = Mission.#normalizePromotionRecordStrict(record, this.#status);
+    if (!normalized) {
+      throw new InvariantViolationError(
+        'INVALID_PROMOTION_RECORD',
+        `Mission ${this.#id} 拒绝非法 PromotionRecord`,
+      );
+    }
+
+    // mutation：executing → planning；executionMode → standard；append 1 条。
+    if (this.#status === 'executing') {
+      this.#status = 'planning';
+    }
+    this.#executionMode = 'standard';
+    this.#promotions.push(normalized);
+    return { changed: true, promotion: normalized };
   }
 
   /**
@@ -500,6 +599,11 @@ export class Mission {
       runKind: this.#runKind,
       complexityAssessment: this.#complexityAssessment,
       executionBudget: this.#executionBudget,
+      // fail-closed：只序列化 normalize 后的可信 promotion；禁止 raw fallback 第二写路径。
+      promotions: this.#promotions.flatMap((p) => {
+        const copied = Mission.#normalizePromotionRecord(p, undefined);
+        return copied ? [copied] : [];
+      }),
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
@@ -541,6 +645,10 @@ export class Mission {
       (attempt: AttemptSnapshot) => Attempt.restore(attempt),
     );
     mission.#coordinatorSeq = snapshot.coordinatorSeq ?? 0;
+    mission.#promotions = Mission.#normalizePromotionsList(
+      snapshot.promotions,
+      mission.#executionMode,
+    );
     return mission;
   }
 
@@ -673,6 +781,203 @@ export class Mission {
     if (typeof value !== 'number') return undefined;
     if (!Number.isFinite(value) || value < 0) return undefined;
     return value;
+  }
+
+  static #isPromotionStatus(value: unknown): value is PromotionStatus {
+    return typeof value === 'string' && (PROMOTION_STATUSES as readonly string[]).includes(value);
+  }
+
+  static #isStringArray(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((item) => typeof item === 'string');
+  }
+
+  /** 幂等身份：Platform 生成的 id + 触发意图，不做递归深比较。 */
+  static #promotionIdentityEqual(
+    a: Readonly<PromotionRecord>,
+    b: Readonly<PromotionRecord>,
+  ): boolean {
+    return (
+      a.id === b.id &&
+      a.triggerCode === b.triggerCode &&
+      a.triggerRule === b.triggerRule
+    );
+  }
+
+  /**
+   * 调用瞬间严格校验 + deep freeze。失败返回 undefined（由 caller 抛 INVALID_PROMOTION_RECORD）。
+   * toStatus 必须等于计算结果：executing→planning，其余保持 fromStatus。
+   */
+  static #normalizePromotionRecordStrict(
+    value: unknown,
+    currentStatus: MissionStatus,
+  ): Readonly<PromotionRecord> | undefined {
+    const expectedToStatus: 'investigating' | 'planning' =
+      currentStatus === 'executing' ? 'planning' : (currentStatus as 'investigating' | 'planning');
+    return Mission.#normalizePromotionRecord(value, {
+      requireFromStatus: currentStatus as PromotionStatus,
+      requireToStatus: expectedToStatus,
+    });
+  }
+
+  /**
+   * restore fail-closed：
+   * - 单条 malformed（含缺/空 id）丢弃
+   * - >1 条合法 => 整表不可信，返回 []
+   * - executionMode !== standard 却带 promotions => 丢 promotions（不改 mode）
+   */
+  static #normalizePromotionsList(
+    value: unknown,
+    executionMode: MissionExecutionMode,
+  ): Readonly<PromotionRecord>[] {
+    if (!Array.isArray(value)) return [];
+    const out: Readonly<PromotionRecord>[] = [];
+    for (const item of value) {
+      const normalized = Mission.#normalizePromotionRecord(item, undefined);
+      if (normalized) out.push(normalized);
+    }
+    if (out.length > 1) return [];
+    if (executionMode !== 'standard' && out.length > 0) return [];
+    return out;
+  }
+
+  static #normalizePromotionRecord(
+    value: unknown,
+    bound:
+      | {
+          readonly requireFromStatus: PromotionStatus;
+          readonly requireToStatus: 'investigating' | 'planning';
+        }
+      | undefined,
+  ): Readonly<PromotionRecord> | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+
+    if (typeof raw.id !== 'string' || raw.id.length === 0) return undefined;
+    if (raw.fromMode !== 'lightweight' || raw.toMode !== 'standard') return undefined;
+    if (!isPromotionTriggerCode(raw.triggerCode)) return undefined;
+    if (typeof raw.triggerRule !== 'string' || raw.triggerRule.length === 0) return undefined;
+    if (typeof raw.at !== 'string' || raw.at.length === 0) return undefined;
+    if (!Mission.#isPromotionStatus(raw.fromStatus)) return undefined;
+    if (raw.toStatus !== 'investigating' && raw.toStatus !== 'planning') return undefined;
+
+    if (bound) {
+      if (raw.fromStatus !== bound.requireFromStatus) return undefined;
+      if (raw.toStatus !== bound.requireToStatus) return undefined;
+    } else {
+      // restore：toStatus 仍须与 fromStatus 规则一致（executing→planning，否则保持）。
+      const expected =
+        raw.fromStatus === 'executing' ? 'planning' : raw.fromStatus;
+      if (raw.toStatus !== expected) return undefined;
+    }
+
+    const consumedUsage = Mission.#normalizePromotionUsageSnapshot(raw.consumedUsage);
+    if (!consumedUsage) return undefined;
+    if (!Mission.#isStringArray(raw.evidenceIds)) return undefined;
+    if (!Mission.#isStringArray(raw.validationReportIds)) return undefined;
+    if (!Mission.#isStringArray(raw.workItemIdsSnapshot)) return undefined;
+
+    const workspaceRevision = Mission.#normalizePromotionWorkspaceRevision(raw.workspaceRevision);
+    if (!workspaceRevision) return undefined;
+
+    return freezeDeep({
+      id: raw.id,
+      fromMode: 'lightweight' as const,
+      toMode: 'standard' as const,
+      triggerCode: raw.triggerCode,
+      triggerRule: raw.triggerRule,
+      at: raw.at,
+      fromStatus: raw.fromStatus,
+      toStatus: raw.toStatus,
+      consumedUsage,
+      evidenceIds: [...raw.evidenceIds],
+      validationReportIds: [...raw.validationReportIds],
+      workspaceRevision,
+      workItemIdsSnapshot: [...raw.workItemIdsSnapshot],
+    } satisfies PromotionRecord);
+  }
+
+  static #normalizePromotionUsageSnapshot(
+    value: unknown,
+  ): PromotionUsageSnapshot | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const attemptCount = Mission.#asNonNegativeInt(raw.attemptCount);
+    if (attemptCount === undefined) return undefined;
+    if (raw.budgetAuthoritative !== false) return undefined;
+    if (!Array.isArray(raw.dimensionsUnknown)) return undefined;
+
+    const dimensionsUnknown: PromotionUnknownDimension[] = [];
+    for (const dim of raw.dimensionsUnknown) {
+      if (
+        typeof dim !== 'string' ||
+        !(PROMOTION_UNKNOWN_DIMENSIONS as readonly string[]).includes(dim)
+      ) {
+        return undefined;
+      }
+      dimensionsUnknown.push(dim as PromotionUnknownDimension);
+    }
+
+    const out: PromotionUsageSnapshot = {
+      attemptCount,
+      dimensionsUnknown: [...dimensionsUnknown],
+      budgetAuthoritative: false,
+    };
+
+    if (Object.prototype.hasOwnProperty.call(raw, 'tokenUsage') && raw.tokenUsage !== undefined) {
+      const tokenUsage = Mission.#normalizePromotionTokenUsage(raw.tokenUsage);
+      if (!tokenUsage) return undefined;
+      (out as { tokenUsage?: PromotionTokenUsageSnapshot }).tokenUsage = tokenUsage;
+    }
+
+    return out;
+  }
+
+  static #normalizePromotionTokenUsage(
+    value: unknown,
+  ): PromotionTokenUsageSnapshot | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const input = Mission.#asNonNegativeNumber(raw.input);
+    const output = Mission.#asNonNegativeNumber(raw.output);
+    const cacheRead = Mission.#asNonNegativeNumber(raw.cacheRead);
+    const cacheWrite = Mission.#asNonNegativeNumber(raw.cacheWrite);
+    const total = Mission.#asNonNegativeNumber(raw.total);
+    if (
+      input === undefined ||
+      output === undefined ||
+      cacheRead === undefined ||
+      cacheWrite === undefined ||
+      total === undefined
+    ) {
+      return undefined;
+    }
+    if (raw.quality !== 'reported' && raw.quality !== 'estimated' && raw.quality !== 'unknown') {
+      return undefined;
+    }
+    // 禁止夹带 cost 等伪精确字段进 promotion token 快照。
+    return {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      total,
+      quality: raw.quality,
+    };
+  }
+
+  static #normalizePromotionWorkspaceRevision(
+    value: unknown,
+  ): PromotionWorkspaceRevision | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    if (raw.kind === 'unknown') {
+      return { kind: 'unknown' };
+    }
+    if (raw.kind === 'head') {
+      if (typeof raw.revision !== 'string' || raw.revision.length === 0) return undefined;
+      return { kind: 'head', revision: raw.revision };
+    }
+    return undefined;
   }
 
   #isTerminal(): boolean {

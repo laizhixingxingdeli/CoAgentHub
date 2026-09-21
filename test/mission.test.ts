@@ -12,6 +12,7 @@ import {
 import type {
   ComplexityAssessment,
   ExecutionBudget,
+  PromotionRecord,
   WorkOrder,
 } from '../src/kernel/index.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -125,6 +126,7 @@ describe('Project / Mission: 创建', () => {
       'runKind',
       'complexityAssessment',
       'executionBudget',
+      'promotions',
     ]) {
       assert.throws(
         () => {
@@ -952,6 +954,572 @@ describe('Mission: executionBudget', () => {
         `${rel}: 本单 scope 外不得引用 executionBudget 字段`,
       );
     }
+  });
+});
+
+function samplePromotion(
+  overrides: Partial<PromotionRecord> = {},
+): PromotionRecord {
+  return {
+    id: 'promo-test-1',
+    fromMode: 'lightweight',
+    toMode: 'standard',
+    triggerCode: 'design_decision',
+    triggerRule: 'needs design review',
+    at: '2026-06-01T12:00:00.000Z',
+    fromStatus: 'investigating',
+    toStatus: 'investigating',
+    consumedUsage: {
+      attemptCount: 0,
+      dimensionsUnknown: [
+        'tokens',
+        'cost',
+        'wallClockMs',
+        'rounds',
+        'changedFiles',
+        'commands',
+        'budgetRemaining',
+      ],
+      budgetAuthoritative: false,
+    },
+    evidenceIds: [],
+    validationReportIds: [],
+    workspaceRevision: { kind: 'unknown' },
+    workItemIdsSnapshot: [],
+    ...overrides,
+  };
+}
+
+describe('Mission: promoteToStandard (PROMO-001)', () => {
+  test('lightweight investigating promote => standard + investigating + 1 promotion；旧状态原样保留', () => {
+    const project = Project.create({ id: 'p-promo-inv' });
+    const mission = project.createMission({
+      id: 'm-promo-inv',
+      executionMode: 'lightweight',
+      runKind: 'mutation',
+    });
+    mission.reviseContract({
+      intent: 'keep me',
+      acceptance: ['a'],
+      constraints: [],
+      nonGoals: [],
+      guardrails: [],
+    });
+    mission.updatePlan({
+      findings: 'f',
+      rejectedHypotheses: [],
+      decisions: [],
+      direction: 'd',
+      risks: [],
+    });
+    const wi = mission.createWorkItem({ id: 'w-1', title: 't', order: ATOMIC_ORDER });
+    wi.dispatch();
+    const attempt = wi.startAttempt();
+    attempt.addEvidence({
+      id: 'E1',
+      attemptId: attempt.id,
+      kind: 'test',
+      summary: 'ok',
+    });
+    attempt.recordUsage({
+      input: 1,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 3,
+      quality: 'reported',
+    });
+    wi.submit(
+      {
+        outcome: 'completed',
+        summary: 'done',
+        changedFiles: ['src/foo.ts'],
+        evidenceIds: ['E1'],
+        notes: 'n',
+      },
+      attempt.id,
+    );
+    mission.recordWorkspace({
+      projectRoot: '/p',
+      branch: 'mission/m',
+      baseRevision: 'base-old',
+    });
+    mission.recordResult({
+      outcome: 'delivered',
+      summary: 's',
+      acceptanceEvidence: ['E1'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+    mission.setWaitReason('waiting_l3', 'detail');
+
+    const before = {
+      workItemIds: mission.workItems.map((i) => i.id),
+      attemptIds: mission.workItems.flatMap((i) => i.attempts.map((a) => a.id)),
+      evidence: attempt.evidence.map((e) => e.id),
+      result: mission.result,
+      workspaceRef: mission.workspaceRef,
+      waitReason: mission.waitReason,
+      waitDetail: mission.waitDetail,
+      planRevision: mission.planRevision,
+      contractRevision: mission.contractRevision,
+      itemStatus: wi.status,
+      executionResult: wi.executionResult,
+    };
+
+    const record = samplePromotion({
+      fromStatus: 'investigating',
+      toStatus: 'investigating',
+      workItemIdsSnapshot: ['w-1'],
+      evidenceIds: ['E1'],
+    });
+    const out = mission.promoteToStandard(record);
+    assert.equal(out.changed, true);
+    assert.equal(mission.executionMode, 'standard');
+    assert.equal(mission.status, 'investigating');
+    assert.equal(mission.promotions.length, 1);
+    assert.equal(mission.promotions[0]!.triggerCode, 'design_decision');
+    assert.equal(out.promotion, mission.promotions[0]);
+
+    assert.deepEqual(
+      mission.workItems.map((i) => i.id),
+      before.workItemIds,
+    );
+    assert.deepEqual(
+      mission.workItems.flatMap((i) => i.attempts.map((a) => a.id)),
+      before.attemptIds,
+    );
+    assert.deepEqual(attempt.evidence.map((e) => e.id), before.evidence);
+    assert.deepEqual(mission.result, before.result);
+    assert.deepEqual(mission.workspaceRef, before.workspaceRef);
+    assert.equal(mission.waitReason, before.waitReason);
+    assert.equal(mission.waitDetail, before.waitDetail);
+    assert.equal(mission.planRevision, before.planRevision);
+    assert.equal(mission.contractRevision, before.contractRevision);
+    assert.equal(wi.status, before.itemStatus);
+    assert.deepEqual(wi.executionResult, before.executionResult);
+  });
+
+  test('lightweight planning promote => planning；executing promote => planning 且 isMutating 仍 true', () => {
+    const p1 = Project.create({ id: 'p-promo-plan' });
+    const m1 = p1.createMission({ id: 'm-plan', executionMode: 'lightweight' });
+    m1.startPlanning();
+    const r1 = samplePromotion({
+      fromStatus: 'planning',
+      toStatus: 'planning',
+    });
+    m1.promoteToStandard(r1);
+    assert.equal(m1.status, 'planning');
+    assert.equal(m1.executionMode, 'standard');
+    assert.equal(m1.isMutating, false);
+
+    const p2 = Project.create({ id: 'p-promo-exec' });
+    const m2 = p2.createMission({ id: 'm-exec', executionMode: 'lightweight' });
+    m2.startExecuting();
+    assert.equal(m2.isMutating, true);
+    const r2 = samplePromotion({
+      fromStatus: 'executing',
+      toStatus: 'planning',
+      triggerCode: 'executor_ambiguity',
+      triggerRule: 'ambiguous',
+    });
+    m2.promoteToStandard(r2);
+    assert.equal(m2.status, 'planning');
+    assert.equal(m2.executionMode, 'standard');
+    assert.equal(m2.isMutating, true, '已有改动名额不能因回 planning 释放');
+    assert.equal(m2.hasMutated, true);
+  });
+
+  test('awaiting_review/completed/blocked/standard/high_assurance/runKind=query 拒绝且零 mutation', () => {
+    const cases: Array<{ label: string; setup: () => Mission }> = [
+      {
+        label: 'awaiting_review',
+        setup: () => {
+          const m = Project.create({ id: 'p-ar' }).createMission({
+            id: 'm-ar',
+            executionMode: 'lightweight',
+          });
+          m.submitForReview();
+          return m;
+        },
+      },
+      {
+        label: 'completed',
+        setup: () => {
+          const m = Project.create({ id: 'p-c' }).createMission({
+            id: 'm-c',
+            executionMode: 'lightweight',
+          });
+          m.submitForReview();
+          m.complete({ verdict: 'merge', reasons: ['ok'] });
+          return m;
+        },
+      },
+      {
+        label: 'blocked',
+        setup: () => {
+          const m = Project.create({ id: 'p-b' }).createMission({
+            id: 'm-b',
+            executionMode: 'lightweight',
+          });
+          m.block();
+          return m;
+        },
+      },
+      {
+        label: 'standard',
+        setup: () =>
+          Project.create({ id: 'p-s' }).createMission({
+            id: 'm-s',
+            executionMode: 'standard',
+          }),
+      },
+      {
+        label: 'high_assurance',
+        setup: () =>
+          Project.create({ id: 'p-ha' }).createMission({
+            id: 'm-ha',
+            executionMode: 'high_assurance',
+          }),
+      },
+      {
+        label: 'query',
+        setup: () =>
+          Project.create({ id: 'p-q' }).createMission({
+            id: 'm-q',
+            executionMode: 'lightweight',
+            runKind: 'query',
+          }),
+      },
+    ];
+
+    for (const { label, setup } of cases) {
+      const mission = setup();
+      const snap = mission.toSnapshot();
+      const record = samplePromotion({
+        fromStatus:
+          mission.status === 'planning' || mission.status === 'executing'
+            ? mission.status
+            : 'investigating',
+        toStatus:
+          mission.status === 'executing'
+            ? 'planning'
+            : mission.status === 'planning'
+              ? 'planning'
+              : 'investigating',
+      });
+      assert.throws(() => mission.promoteToStandard(record), (err: unknown) => {
+        assert.ok(
+          err instanceof InvariantViolationError || err instanceof IllegalTransitionError,
+          `${label}: ${String(err)}`,
+        );
+        return true;
+      });
+      assert.equal(mission.executionMode, snap.executionMode, label);
+      assert.equal(mission.status, snap.status, label);
+      assert.equal(mission.promotions.length, 0, label);
+      assert.deepEqual(mission.toSnapshot().promotions, []);
+    }
+  });
+
+  test('malformed record 拒绝且 mode/status/promotions 不变', () => {
+    const mission = Project.create({ id: 'p-mal' }).createMission({
+      id: 'm-mal',
+      executionMode: 'lightweight',
+    });
+    const good = samplePromotion();
+    const badCases: unknown[] = [
+      { ...good, fromMode: 'standard' },
+      { ...good, toMode: 'lightweight' },
+      { ...good, triggerCode: 'not_a_code' },
+      { ...good, triggerRule: '' },
+      { ...good, at: '' },
+      { ...good, fromStatus: 'completed' },
+      { ...good, fromStatus: 'planning', toStatus: 'investigating' },
+      { ...good, toStatus: 'executing' },
+      {
+        ...good,
+        consumedUsage: { ...good.consumedUsage, attemptCount: -1 },
+      },
+      {
+        ...good,
+        consumedUsage: { ...good.consumedUsage, attemptCount: 1.5 },
+      },
+      {
+        ...good,
+        consumedUsage: { ...good.consumedUsage, budgetAuthoritative: true },
+      },
+      {
+        ...good,
+        consumedUsage: {
+          ...good.consumedUsage,
+          tokenUsage: {
+            input: -1,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+            quality: 'reported',
+          },
+        },
+      },
+      { ...good, evidenceIds: [1] },
+      { ...good, validationReportIds: null },
+      { ...good, workItemIdsSnapshot: 'w' },
+      { ...good, workspaceRevision: { kind: 'head', revision: '' } },
+      { ...good, workspaceRevision: { kind: 'other' } },
+    ];
+
+    for (const bad of badCases) {
+      assert.throws(
+        () => mission.promoteToStandard(bad as PromotionRecord),
+        (err: unknown) => {
+          assert.ok(err instanceof InvariantViolationError);
+          assert.equal(err.code, 'INVALID_PROMOTION_RECORD');
+          return true;
+        },
+      );
+      assert.equal(mission.executionMode, 'lightweight');
+      assert.equal(mission.status, 'investigating');
+      assert.equal(mission.promotions.length, 0);
+    }
+  });
+
+  test('same exact record second call idempotent；different trigger 拒绝', () => {
+    const mission = Project.create({ id: 'p-idemp' }).createMission({
+      id: 'm-idemp',
+      executionMode: 'lightweight',
+    });
+    const record = samplePromotion();
+    const first = mission.promoteToStandard(record);
+    assert.equal(first.changed, true);
+    const second = mission.promoteToStandard(record);
+    assert.equal(second.changed, false);
+    assert.equal(second.promotion, mission.promotions[0]);
+    assert.equal(mission.promotions.length, 1);
+
+    const different = samplePromotion({
+      triggerCode: 'new_dependency',
+      triggerRule: 'package.json changed',
+    });
+    assert.throws(() => mission.promoteToStandard(different), (err: unknown) => {
+      assert.ok(err instanceof InvariantViolationError);
+      assert.equal(err.code, 'PROMOTION_ALREADY_APPLIED');
+      return true;
+    });
+    assert.equal(mission.promotions.length, 1);
+    assert.equal(mission.promotions[0]!.triggerCode, 'design_decision');
+  });
+
+  test('input record/nested arrays 后续 mutation 不污染；promotion deep frozen', () => {
+    const mission = Project.create({ id: 'p-freeze' }).createMission({
+      id: 'm-freeze',
+      executionMode: 'lightweight',
+    });
+    const evidenceIds = ['E-a'];
+    const dimensionsUnknown = [
+      'tokens',
+      'cost',
+      'wallClockMs',
+      'rounds',
+      'changedFiles',
+      'commands',
+      'budgetRemaining',
+    ] as const;
+    const dims = [...dimensionsUnknown];
+    const record: PromotionRecord = {
+      id: 'promo-freeze-1',
+      fromMode: 'lightweight',
+      toMode: 'standard',
+      triggerCode: 'changed_files_gt_3',
+      triggerRule: 'files>3',
+      at: '2026-06-01T12:00:00.000Z',
+      fromStatus: 'investigating',
+      toStatus: 'investigating',
+      consumedUsage: {
+        attemptCount: 1,
+        dimensionsUnknown: dims,
+        budgetAuthoritative: false,
+      },
+      evidenceIds,
+      validationReportIds: [],
+      workspaceRevision: { kind: 'head', revision: 'abc' },
+      workItemIdsSnapshot: ['w'],
+    };
+    const out = mission.promoteToStandard(record);
+    evidenceIds.push('E-mutated');
+    dims.push('tokens');
+    (record as { triggerRule: string }).triggerRule = 'mutated';
+
+    assert.deepEqual(out.promotion.evidenceIds, ['E-a']);
+    assert.equal(out.promotion.triggerRule, 'files>3');
+    assert.equal(out.promotion.consumedUsage.dimensionsUnknown.length, 7);
+    assert.ok(Object.isFrozen(out.promotion));
+    assert.ok(Object.isFrozen(out.promotion.evidenceIds));
+    assert.ok(Object.isFrozen(out.promotion.consumedUsage));
+    assert.ok(Object.isFrozen(out.promotion.consumedUsage.dimensionsUnknown));
+    assert.ok(Object.isFrozen(out.promotion.workspaceRevision));
+    assert.throws(() => {
+      (out.promotion as { triggerRule: string }).triggerRule = 'x';
+    }, TypeError);
+
+    const copy = mission.promotions;
+    (copy as PromotionRecord[]).pop();
+    assert.equal(mission.promotions.length, 1);
+  });
+
+  test('snapshot roundtrip preserves promotion + standard mode；legacy/malformed restore 安全', () => {
+    const project = Project.create({ id: 'p-snap' });
+    const mission = project.createMission({
+      id: 'm-snap',
+      executionMode: 'lightweight',
+    });
+    mission.promoteToStandard(
+      samplePromotion({
+        id: 'promo-snap-1',
+        triggerCode: 'diff_intent_unprovable',
+        triggerRule: 'intent',
+        evidenceIds: ['E1', 'E2'],
+        validationReportIds: ['VR1'],
+        workItemIdsSnapshot: ['w1'],
+        workspaceRevision: { kind: 'head', revision: 'deadbeef' },
+        consumedUsage: {
+          attemptCount: 2,
+          tokenUsage: {
+            input: 10,
+            output: 20,
+            cacheRead: 1,
+            cacheWrite: 2,
+            total: 33,
+            quality: 'estimated',
+          },
+          dimensionsUnknown: [
+            'cost',
+            'wallClockMs',
+            'rounds',
+            'changedFiles',
+            'commands',
+            'budgetRemaining',
+          ],
+          budgetAuthoritative: false,
+        },
+      }),
+    );
+
+    const snapOut = mission.toSnapshot();
+    // toSnapshot fail-closed：只发出 normalize 后的可信记录（无 raw freezeDeep fallback）。
+    assert.equal(snapOut.promotions.length, 1);
+    assert.deepEqual(snapOut.promotions[0], mission.promotions[0]);
+    assert.ok(Object.isFrozen(snapOut.promotions[0]));
+    assert.equal(snapOut.promotions[0]!.id, 'promo-snap-1');
+    assert.deepEqual(snapOut.promotions[0]!.validationReportIds, ['VR1']);
+
+    const restored = Mission.restore(snapOut, Project.create({ id: 'p-snap2' }));
+    assert.equal(restored.executionMode, 'standard');
+    assert.equal(restored.promotions.length, 1);
+    assert.deepEqual(restored.promotions[0], mission.promotions[0]);
+    assert.equal(restored.promotions[0]!.id, 'promo-snap-1');
+    assert.ok(Object.isFrozen(restored.promotions[0]));
+
+    const legacy = mission.toSnapshot();
+    delete legacy.promotions;
+    const fromLegacy = Mission.restore(legacy, Project.create({ id: 'p-leg' }));
+    assert.equal(fromLegacy.executionMode, 'standard');
+    assert.deepEqual(fromLegacy.promotions, []);
+
+    // standard + 1 valid + junk => 仅保留合法一条
+    const malformed = mission.toSnapshot();
+    (malformed as { promotions?: unknown }).promotions = [
+      mission.promotions[0],
+      { fromMode: 'lightweight' },
+      null,
+      'nope',
+      {
+        ...samplePromotion(),
+        triggerCode: 'bogus',
+      },
+      {
+        ...samplePromotion({ id: '' }),
+      },
+    ];
+    const fromMalformed = Mission.restore(malformed, Project.create({ id: 'p-mf' }));
+    assert.equal(fromMalformed.executionMode, 'standard');
+    assert.equal(fromMalformed.promotions.length, 1);
+    assert.equal(fromMalformed.promotions[0]!.triggerCode, 'diff_intent_unprovable');
+    assert.equal(fromMalformed.promotions[0]!.id, 'promo-snap-1');
+
+    // 缺 id / 空 id => 丢弃
+    const noId = mission.toSnapshot();
+    const withoutId = { ...mission.promotions[0]! } as Record<string, unknown>;
+    delete withoutId.id;
+    (noId as { promotions?: unknown }).promotions = [withoutId];
+    const fromNoId = Mission.restore(noId, Project.create({ id: 'p-noid' }));
+    assert.equal(fromNoId.executionMode, 'standard');
+    assert.deepEqual(fromNoId.promotions, []);
+
+    const emptyId = mission.toSnapshot();
+    (emptyId as { promotions?: unknown }).promotions = [
+      { ...mission.promotions[0]!, id: '' },
+    ];
+    const fromEmptyId = Mission.restore(emptyId, Project.create({ id: 'p-eid' }));
+    assert.deepEqual(fromEmptyId.promotions, []);
+
+    // >1 条合法 => 整表不可信
+    const twoValid = mission.toSnapshot();
+    (twoValid as { promotions?: unknown }).promotions = [
+      samplePromotion({ id: 'promo-a' }),
+      samplePromotion({ id: 'promo-b', triggerCode: 'new_dependency', triggerRule: 'dep' }),
+    ];
+    const fromTwo = Mission.restore(twoValid, Project.create({ id: 'p-two' }));
+    assert.equal(fromTwo.executionMode, 'standard');
+    assert.deepEqual(fromTwo.promotions, []);
+
+    // standard + 空/全 malformed list => promotions []，mode 不变
+    const emptyList = mission.toSnapshot();
+    (emptyList as { promotions?: unknown }).promotions = [];
+    const fromEmptyList = Mission.restore(emptyList, Project.create({ id: 'p-el' }));
+    assert.equal(fromEmptyList.executionMode, 'standard');
+    assert.deepEqual(fromEmptyList.promotions, []);
+
+    const allBad = mission.toSnapshot();
+    (allBad as { promotions?: unknown }).promotions = [
+      null,
+      { fromMode: 'lightweight' },
+      samplePromotion({ id: '' }),
+    ];
+    const fromAllBad = Mission.restore(allBad, Project.create({ id: 'p-ab' }));
+    assert.equal(fromAllBad.executionMode, 'standard');
+    assert.deepEqual(fromAllBad.promotions, []);
+
+    // lightweight + nonempty promotions => 丢 promotions，不改 mode
+    const light = Project.create({ id: 'p-light' }).createMission({
+      id: 'm-light',
+      executionMode: 'lightweight',
+    });
+    const lightSnap = light.toSnapshot();
+    (lightSnap as { promotions?: unknown }).promotions = [samplePromotion({ id: 'should-drop' })];
+    const fromLight = Mission.restore(lightSnap, Project.create({ id: 'p-light2' }));
+    assert.equal(fromLight.executionMode, 'lightweight');
+    assert.deepEqual(fromLight.promotions, []);
+  });
+
+  test('malformed missing id rejected on promote', () => {
+    const mission = Project.create({ id: 'p-noid-p' }).createMission({
+      id: 'm-noid-p',
+      executionMode: 'lightweight',
+    });
+    const bad = { ...samplePromotion() } as Record<string, unknown>;
+    delete bad.id;
+    assert.throws(
+      () => mission.promoteToStandard(bad as PromotionRecord),
+      (err: unknown) => {
+        assert.ok(err instanceof InvariantViolationError);
+        assert.equal(err.code, 'INVALID_PROMOTION_RECORD');
+        return true;
+      },
+    );
+    assert.equal(mission.executionMode, 'lightweight');
+    assert.equal(mission.promotions.length, 0);
   });
 });
 

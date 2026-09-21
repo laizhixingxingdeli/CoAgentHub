@@ -14,7 +14,13 @@ export type {
   AttemptInit,
 } from './attempt.ts';
 
-export { EMPTY_USAGE, freezeDeep, freezePayload } from './payloads.ts';
+export {
+  EMPTY_USAGE,
+  freezeDeep,
+  freezePayload,
+  isPromotionTriggerCode,
+  PROMOTION_TRIGGER_CODES,
+} from './payloads.ts';
 export type {
   BlockedRecord,
   ComplexityAssessment,
@@ -32,6 +38,13 @@ export type {
   MissionExecutionMode,
   MissionResultBody,
   OriginChannel,
+  PromotionRecord,
+  PromotionStatus,
+  PromotionTokenUsageSnapshot,
+  PromotionTriggerCode,
+  PromotionUnknownDimension,
+  PromotionUsageSnapshot,
+  PromotionWorkspaceRevision,
   ReviewAuthority,
   RunKind,
   PlanBody,

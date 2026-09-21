@@ -82,6 +82,119 @@ export interface ExecutionBudget {
   readonly maxCommands?: number;
 }
 
+/**
+ * Lightweight → Standard 升级触发码（PROMO-001）。
+ *
+ * 码表先齐；自动检测器后置。本阶段只作可信合同字段，不实现 detectors。
+ */
+export type PromotionTriggerCode =
+  | 'changed_files_gt_3'
+  | 'top_level_modules_gt_2'
+  | 'new_dependency'
+  | 'new_public_interface'
+  | 'persistence_format_change'
+  | 'executor_ambiguity'
+  | 'invalid_premise'
+  | 'design_decision'
+  | 'validator_failure_unrepairable'
+  | 'permission_expansion'
+  | 'budget_exceeded'
+  | 'diff_intent_unprovable';
+
+/** 权威触发码表；kernel / platform 共用，禁止各写一份。 */
+export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
+  'changed_files_gt_3',
+  'top_level_modules_gt_2',
+  'new_dependency',
+  'new_public_interface',
+  'persistence_format_change',
+  'executor_ambiguity',
+  'invalid_premise',
+  'design_decision',
+  'validator_failure_unrepairable',
+  'permission_expansion',
+  'budget_exceeded',
+  'diff_intent_unprovable',
+] as const;
+
+export function isPromotionTriggerCode(value: unknown): value is PromotionTriggerCode {
+  return (
+    typeof value === 'string' &&
+    (PROMOTION_TRIGGER_CODES as readonly string[]).includes(value)
+  );
+}
+
+/** 升级发生时 Mission 所处阶段（fromStatus）。 */
+export type PromotionStatus = 'investigating' | 'planning' | 'executing';
+
+/**
+ * 升级快照里尚无权威计量的维度。
+ *
+ * pre-BUDGET 阶段不得用 0 冒充精确 cost/remaining；未知就显式列出。
+ */
+export type PromotionUnknownDimension =
+  | 'tokens'
+  | 'cost'
+  | 'wallClockMs'
+  | 'rounds'
+  | 'changedFiles'
+  | 'commands'
+  | 'budgetRemaining';
+
+/**
+ * 升级时汇总的 token 用量快照。**不带 cost**——预算权威未就绪时不得伪精确。
+ */
+export interface PromotionTokenUsageSnapshot {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+  readonly total: number;
+  readonly quality: 'reported' | 'estimated' | 'unknown';
+}
+
+/**
+ * 升级时已消耗用量的可信摘要。
+ *
+ * `budgetAuthoritative` 本阶段固定 false：BudgetPolicy 未实现。
+ */
+export interface PromotionUsageSnapshot {
+  readonly attemptCount: number;
+  readonly tokenUsage?: PromotionTokenUsageSnapshot;
+  readonly dimensionsUnknown: readonly PromotionUnknownDimension[];
+  readonly budgetAuthoritative: false;
+}
+
+/**
+ * 升级瞬间的 workspace HEAD。禁止用 workspaceRef.baseRevision 冒充 current HEAD。
+ */
+export type PromotionWorkspaceRevision =
+  | { readonly kind: 'head'; readonly revision: string }
+  | { readonly kind: 'unknown' };
+
+/**
+ * Lightweight → Standard 一次升级记录。
+ *
+ * `id` 由 Platform 生成并持久化；caller 不得自填审计身份。
+ * 本阶段每 Mission 最多一次 L→S。数组 / nested object 必须 deep-freeze、copy-safe。
+ */
+export interface PromotionRecord {
+  /** Platform 生成的稳定身份；restore 时空/缺则丢弃该条。 */
+  readonly id: string;
+  readonly fromMode: 'lightweight';
+  readonly toMode: 'standard';
+  readonly triggerCode: PromotionTriggerCode;
+  readonly triggerRule: string;
+  readonly at: string;
+  readonly fromStatus: PromotionStatus;
+  readonly toStatus: 'investigating' | 'planning';
+  readonly consumedUsage: PromotionUsageSnapshot;
+  readonly evidenceIds: readonly string[];
+  readonly validationReportIds: readonly string[];
+  readonly workspaceRevision: PromotionWorkspaceRevision;
+  readonly workItemIdsSnapshot: readonly string[];
+}
+
 export interface MissionContract {
   readonly intent: string;
   readonly acceptance: readonly string[];
