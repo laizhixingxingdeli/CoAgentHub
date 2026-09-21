@@ -80,26 +80,49 @@ export interface IdGenerator {
  */
 export interface AgentRuntime {
   readonly kind: string;
+  /**
+   * 显式声明可承接独立只读 QueryRun。
+   *
+   * 未声明则 fail-closed：不得构造/暴露 QueryRunner，也不得凭 `kind`
+   * 名称猜测安全性（Spawn/Pi/未知 runtime 默认不支持）。
+   * 仅 `true` 有意义——不要扩成 capabilities 框架。
+   */
+  readonly supportsQuery?: true;
   start(spec: AgentRunSpec): Promise<AgentRun>;
 }
 
 export interface AgentRunSpec {
-  readonly role: 'coordinator' | 'executor';
+  /**
+   * `query`：独立只读问答，不进入 Mission 状态机。
+   * coordinator / executor 仍走原 Mission 路径。
+   */
+  readonly role: 'coordinator' | 'executor' | 'query';
+  /**
+   * 运行身份 id。Mission 路径是 attemptId；query 路径是 queryRunId
+   * （字段名保持兼容，避免每个 runtime 适配器分叉）。
+   */
   readonly attemptId: string;
+  /**
+   * Mission id。query 路径无 Mission，可传空字符串——调用方不得据此
+   * createMission / 发 run token。
+   */
   readonly missionId: string;
   readonly workItemId?: string;
-  /** 工作目录（Mission worktree）。 */
+  /** 工作目录。Mission 是 worktree；query 是调用方现有 checkout（只读上下文）。 */
   readonly cwd: string;
   readonly profile: ExecutionProfile;
   /** 已渲染好的首轮输入。 */
   readonly instruction: string;
-  /** 允许调用的工具名。 */
+  /** 允许调用的工具名。query 路径必须是只读 allowlist，由 application 在 start 前强制。 */
   readonly tools: readonly string[];
   /** 续跑：上一次留下的运行时句柄。平台不解释它的内容。 */
   readonly resumeRef?: string;
   /**
    * 工具端点。运行时（以及跑在里面的 agent）只拿到 token，**不自述身份**——
    * 所以"执行者不得改 Plan"这条不依赖调用方诚实填写自己的角色。
+   *
+   * query 路径不挂 Mission coagent 写工具 endpoint；仍保留字段形状以兼容
+   * 既有 runtime 适配，内容可为空。
    */
   readonly endpoint: { readonly baseUrl: string; readonly token: string };
 }
@@ -170,6 +193,11 @@ export interface RuntimeOutcome {
     readonly revision: string;
     readonly resolved: readonly { readonly key: string; readonly value: string }[];
   };
+  /**
+   * query 角色专用：结构化终态。未填时由 QueryRunner 按 endedBy 推导。
+   * Mission 路径忽略此字段。
+   */
+  readonly queryOutcome?: 'answered' | 'failed' | 'needs_mutation';
 }
 
 /* ------------------------------ 决策信号端口 ------------------------------ */

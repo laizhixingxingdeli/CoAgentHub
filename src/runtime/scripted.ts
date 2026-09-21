@@ -51,6 +51,10 @@ export interface Script {
    */
   readonly hangsAfterSteps?: boolean;
   readonly usage?: TokenUsage;
+  /** query 角色：覆盖默认输出（否则从 tool 步骤拼）。 */
+  readonly output?: string;
+  /** query 角色：结构化终态，透传进 RuntimeOutcome.queryOutcome。 */
+  readonly queryOutcome?: 'answered' | 'failed' | 'needs_mutation';
 }
 
 /** 按 `${role}:${workItemId ?? '-'}:${第几次}` 取脚本。 */
@@ -67,6 +71,8 @@ const DEFAULT_USAGE: TokenUsage = {
 
 export class ScriptedRuntime implements AgentRuntime {
   readonly kind = 'scripted';
+  /** 明确可承接独立只读 QueryRun；其它 runtime 不得凭 kind 仿冒。 */
+  readonly supportsQuery = true;
   #scripts: ScriptTable;
   #counts = new Map<string, number>();
   /** 每一步的实际结果，便于测试断言平台回了什么。 */
@@ -86,6 +92,9 @@ export class ScriptedRuntime implements AgentRuntime {
     this.#scripts = scripts;
   }
 
+  /** 每次 start 收到的完整 spec，便于断言 role/tools 等。 */
+  readonly specs: AgentRunSpec[] = [];
+
   async start(spec: AgentRunSpec): Promise<AgentRun> {
     const base = `${spec.role}:${spec.workItemId ?? '-'}`;
     const seen = this.#counts.get(base) ?? 0;
@@ -93,6 +102,7 @@ export class ScriptedRuntime implements AgentRuntime {
     const key = `${base}:${seen}`;
     this.instructions.push(spec.instruction);
     this.resumeRefs.push(spec.resumeRef);
+    this.specs.push(spec);
     const script = this.#scripts[key] ?? this.#scripts[base];
     if (!script) {
       throw new Error(`ScriptedRuntime: 没有脚本匹配 ${key}（也没有 ${base}）`);
@@ -142,6 +152,16 @@ export class ScriptedRuntime implements AgentRuntime {
       const previous: Record<string, unknown> = {};
       for (const step of script.steps) {
         emit({ kind: 'tool.started', name: step.tool, callId: step.tool });
+
+        // query 路径的只读本地工具：不走 Mission HTTP 面（也没有 run token）。
+        if (spec.role === 'query' && QUERY_LOCAL_TOOLS.has(step.tool)) {
+          const json = { ok: true, tool: step.tool };
+          this.transcript.push({ key, tool: step.tool, status: 200, json });
+          emit({ kind: 'tool.completed', name: step.tool, callId: step.tool });
+          Object.assign(previous, json);
+          continue;
+        }
+
         const body =
           typeof step.body === 'function'
             ? (step.body as (p: Record<string, unknown>) => unknown)(previous)
@@ -186,14 +206,27 @@ export class ScriptedRuntime implements AgentRuntime {
 
       const usage = script.usage ?? DEFAULT_USAGE;
       emit({ kind: 'usage', usage });
-      const endedBy: AttemptEndReason = submitted ? 'structured_submit' : 'no_structured_result';
+      const endedBy: AttemptEndReason =
+        script.queryOutcome === 'failed'
+          ? 'upstream_failure'
+          : submitted
+            ? 'structured_submit'
+            : script.queryOutcome === 'answered' || script.queryOutcome === 'needs_mutation'
+              ? 'structured_submit'
+              : 'no_structured_result';
       return {
         endedBy,
         usage,
         resumeRef: `scripted:${key}`,
         // 给一段假的原始输出，好让 Timeline 第三层也有东西可验。
-        output: script.steps.map((step) => `[tool] ${step.tool}`).join(String.fromCharCode(10)),
+        output:
+          script.output ??
+          script.steps.map((step) => `[tool] ${step.tool}`).join(String.fromCharCode(10)),
         toolCalls: script.steps.map((step) => step.tool),
+        ...(script.queryOutcome ? { queryOutcome: script.queryOutcome } : {}),
+        ...(script.queryOutcome === 'failed'
+          ? { failureMessage: script.upstreamFailure ?? 'query failed' }
+          : {}),
       };
     };
 
@@ -223,3 +256,6 @@ const TERMINAL = new Set([
   'coagent_report_blocked',
   'coagent_escalate_to_l3',
 ]);
+
+/** query 路径只读本地工具：不打 Mission HTTP。 */
+const QUERY_LOCAL_TOOLS = new Set(['read', 'grep', 'find', 'ls']);

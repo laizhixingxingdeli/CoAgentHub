@@ -8,6 +8,7 @@
 
 import { Project } from '../kernel/index.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 
 export class InMemoryProjectRepository implements ProjectRepository {
   #projects = new Map<string, Project>();
@@ -86,5 +87,29 @@ export class SequentialIds implements IdGenerator {
     const n = (this.#counters.get(prefix) ?? 0) + 1;
     this.#counters.set(prefix, n);
     return `${prefix}-${n}`;
+  }
+}
+
+/**
+ * QueryRun 内存仓储。
+ *
+ * **跨进程不持久化。** 进程一退记录就没了——禁止把它当成 durable 存储，
+ * 也禁止在本文件旁再塞一个假装落盘的实现（File/PG 是后续单的事）。
+ */
+export class InMemoryQueryRunRepository implements QueryRunRepository {
+  #runs = new Map<string, QueryRunRecord>();
+
+  async save(run: QueryRunRecord): Promise<void> {
+    this.#runs.set(run.id, Object.freeze({ ...run }));
+  }
+
+  async get(id: string): Promise<QueryRunRecord | undefined> {
+    return this.#runs.get(id);
+  }
+
+  async list(projectId?: string): Promise<readonly QueryRunRecord[]> {
+    const all = [...this.#runs.values()];
+    if (projectId === undefined) return all;
+    return all.filter((run) => run.projectId === projectId);
   }
 }

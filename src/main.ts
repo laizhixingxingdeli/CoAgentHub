@@ -15,10 +15,13 @@ import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
   InMemoryActivityLog,
   InMemoryProjectRepository,
+  InMemoryQueryRunRepository,
   SequentialIds,
   SystemClock,
 } from './application/in-memory.ts';
 import { Platform } from './application/platform.ts';
+import { QueryRunner } from './application/query-run.ts';
+import type { AgentRuntime } from './application/ports.ts';
 import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
@@ -57,12 +60,20 @@ import type { DecisionProvider } from './application/ports.ts';
 export function buildPlatform(
   workspace?: WorkspaceManager,
   decisionProvider?: DecisionProvider,
+  /**
+   * 可选 query runtime。仅当 runtime **显式** `supportsQuery === true`
+   * 时才暴露 `queryRunner` / `runQuery`；未传或不支持则保持 undefined
+   * （fail-closed，不凭 kind 猜测）。
+   */
+  queryRuntime?: AgentRuntime,
 ) {
   const clock = new SystemClock();
   const projects = new InMemoryProjectRepository();
   const activity = new InMemoryActivityLog(clock);
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  // QueryRun 仅内存：跨进程不持久化（见 InMemoryQueryRunRepository 注释）。
+  const queryRuns = new InMemoryQueryRunRepository();
   const platform = new Platform({
     projects,
     deliveries,
@@ -73,11 +84,22 @@ export function buildPlatform(
     ...(decisionProvider ? { decisionProvider } : {}),
   });
   const tokens = new RunTokenRegistry();
+  // 未声明 supportsQuery 的 runtime（含 Spawn/Pi/未知）不得伪装成 read-only query。
+  const queryRunner =
+    queryRuntime?.supportsQuery === true
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      : undefined;
   return {
     platform,
     activity,
     projects,
     deliveries,
+    queryRuns,
+    queryRunner,
+    /** 可编程 query 入口；无 query-capable runtime 时为 undefined。 */
+    runQuery: queryRunner
+      ? (input: Parameters<QueryRunner['runQuery']>[0]) => queryRunner.runQuery(input)
+      : undefined,
     tokens,
     agentPool: new InMemoryAgentPoolRepository(),
     issuer: makeIssuer(platform, tokens),
