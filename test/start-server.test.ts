@@ -5,9 +5,10 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -193,6 +194,145 @@ describe('startServer 绑定与启动日志', () => {
     } finally {
       /* env 通过 options 注入，不污染 process.env */
     }
+  });
+});
+
+describe('startServer queryRuntime 双键 opt-in', () => {
+  test('默认 / 缺配置：runQuery 保持 undefined', async () => {
+    const statePath = tempState();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file' },
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+
+    assert.equal(built.runQuery, undefined);
+    assert.equal(built.queryRunner, undefined);
+
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+  });
+
+  test('仅 enabled 或仅 adapter / 路径不存在：runQuery 仍 undefined', async () => {
+    const statePath = tempState();
+    const missing = join(tmpdir(), 'coagent-missing-query-adapter.ts');
+
+    for (const env of [
+      { COAGENT_STORE: 'file', COAGENT_QUERY_ENABLED: '1' },
+      {
+        COAGENT_STORE: 'file',
+        COAGENT_QUERY_ADAPTER: missing,
+      },
+      {
+        COAGENT_STORE: 'file',
+        COAGENT_QUERY_ENABLED: '1',
+        COAGENT_QUERY_ADAPTER: missing,
+      },
+      {
+        COAGENT_STORE: 'file',
+        COAGENT_QUERY_ENABLED: 'true',
+        COAGENT_QUERY_ADAPTER: missing,
+      },
+    ] as const) {
+      const built = await startServer(0, statePath, { env: { ...env } });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+        releaseFns.push(built.releaseLock);
+      }
+      assert.equal(built.runQuery, undefined, `env=${JSON.stringify(env)}`);
+      await new Promise<void>((done, fail) => {
+        built.server.close((err) => (err ? fail(err) : done()));
+      });
+    }
+  });
+
+  test('双键有效 + 真实 adapter 文件：runQuery 为 function', async () => {
+    const statePath = tempState();
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-start-query-'));
+    dirs.push(dir);
+    const adapter = join(dir, 'query-adapter.ts');
+    writeFileSync(adapter, '// startServer query fixture\n', 'utf8');
+
+    const built = await startServer(0, statePath, {
+      env: {
+        COAGENT_STORE: 'file',
+        COAGENT_QUERY_ENABLED: '1',
+        COAGENT_QUERY_ADAPTER: adapter,
+      },
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+
+    assert.equal(typeof built.runQuery, 'function');
+    assert.ok(built.queryRunner, '应装配 QueryRunner');
+
+    // 仍不开放 HTTP query surface：健康检查在，query 路由不在。
+    const addr = built.server.address() as AddressInfo;
+    const health = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+    assert.equal(health.status, 200);
+    const queryPost = await fetch(`http://${addr.address}:${addr.port}/api/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(queryPost.status, 404);
+
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+  });
+
+  test('options.env 缺 query 键时不回落 process.env', async () => {
+    const statePath = tempState();
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-start-query-fallback-'));
+    dirs.push(dir);
+    const adapter = join(dir, 'query-adapter.ts');
+    writeFileSync(adapter, '// fallback probe\n', 'utf8');
+
+    const prevEnabled = process.env.COAGENT_QUERY_ENABLED;
+    const prevAdapter = process.env.COAGENT_QUERY_ADAPTER;
+    process.env.COAGENT_QUERY_ENABLED = '1';
+    process.env.COAGENT_QUERY_ADAPTER = adapter;
+    try {
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file' },
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+        releaseFns.push(built.releaseLock);
+      }
+      assert.equal(
+        built.runQuery,
+        undefined,
+        '注入 env 未带 query 键时不得读 process.env 开启',
+      );
+      await new Promise<void>((done, fail) => {
+        built.server.close((err) => (err ? fail(err) : done()));
+      });
+    } finally {
+      if (prevEnabled === undefined) delete process.env.COAGENT_QUERY_ENABLED;
+      else process.env.COAGENT_QUERY_ENABLED = prevEnabled;
+      if (prevAdapter === undefined) delete process.env.COAGENT_QUERY_ADAPTER;
+      else process.env.COAGENT_QUERY_ADAPTER = prevAdapter;
+    }
+  });
+});
+
+describe('query surface 源码约束（本单）', () => {
+  test('api/server.ts 无 query route；run-mission.ts 无 supportsQuery', () => {
+    const root = fileURLToPath(new URL('../src/', import.meta.url));
+    const api = readFileSync(join(root, 'api/server.ts'), 'utf8');
+    const mission = readFileSync(join(root, 'run-mission.ts'), 'utf8');
+
+    assert.doesNotMatch(api, /\/api\/query\b/);
+    assert.doesNotMatch(api, /\brunQuery\b/);
+    assert.doesNotMatch(api, /\bqueryRunner\b/);
+    assert.doesNotMatch(mission, /\bsupportsQuery\b/);
   });
 });
 

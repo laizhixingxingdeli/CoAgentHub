@@ -58,6 +58,7 @@ import {
 } from './application/decision-mode.ts';
 import { createDecisionProvider } from './application/decision-provider-factory.ts';
 import type { DecisionProvider } from './application/ports.ts';
+import { createPiQueryRuntime } from './runtime/pi-query.ts';
 
 export function buildPlatform(
   workspace?: WorkspaceManager,
@@ -361,9 +362,12 @@ export async function startServer(
   });
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
+  // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
+  const queryRuntime = createPiQueryRuntime(env);
   const built = usePg
-    ? await buildPgPlatform({ decisionProvider })
-    : await buildPersistentPlatform(statePath, { decisionProvider });
+    ? await buildPgPlatform({ decisionProvider, queryRuntime })
+    : await buildPersistentPlatform(statePath, { decisionProvider, queryRuntime });
   const server = createApi({
     platform: built.platform,
     tokens: built.tokens,
