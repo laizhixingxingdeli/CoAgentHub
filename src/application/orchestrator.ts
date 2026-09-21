@@ -411,6 +411,16 @@ export class Orchestrator {
         return lightweight.outcome;
       }
 
+      // ---- High Assurance fail-closed ----
+      // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
+      // 不创建 Coordinator Attempt、不启动 Executor、不 dispatch、不改 Mission status。
+      if (view.executionMode === 'high_assurance') {
+        return {
+          kind: 'stalled',
+          reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',
+        };
+      }
+
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
       //
       // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、

@@ -9,10 +9,28 @@ import {
   Project,
   WorkItem,
 } from '../src/kernel/index.ts';
-import type { ComplexityAssessment, ExecutionBudget } from '../src/kernel/index.ts';
+import type {
+  ComplexityAssessment,
+  ExecutionBudget,
+  WorkOrder,
+} from '../src/kernel/index.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const ATOMIC_ORDER: WorkOrder = {
+  objective: '改 foo',
+  allowedScope: ['src/foo.ts'],
+  requiredBehaviour: 'foo 返回 1',
+  constraints: [],
+  acceptance: ['foo() === 1'],
+  verification: ['node --test'],
+  doNot: [],
+  contextRefs: [],
+  validation: {
+    commands: [{ argv: ['node', '--test'], timeoutMs: 5000 }],
+  },
+};
 
 function freshMission(): Mission {
   return Project.create({ id: 'p-m' }).createMission({ id: 'm-1' });
@@ -116,6 +134,139 @@ describe('Project / Mission: 创建', () => {
         `Mission.${key}`,
       );
     }
+  });
+});
+
+describe('Project: createMissionWithInitialWorkItem 原子 seed', () => {
+  test('valid atomic seed => 1 Mission + 唯一 frozen WorkItem；caller mutation 不污染', () => {
+    const project = Project.create({ id: 'p-atomic' });
+    const argv = ['node', '--test'];
+    const commands = [{ argv, timeoutMs: 5000 }];
+    const validation = { commands };
+    const order: WorkOrder = { ...ATOMIC_ORDER, validation };
+
+    const { mission, workItem } = project.createMissionWithInitialWorkItem({
+      id: 'm-atomic',
+      executionMode: 'lightweight',
+      runKind: 'mutation',
+      initialWorkItem: { id: 'w-seed', title: 'seed', order },
+    });
+
+    assert.equal(project.missions.length, 1);
+    assert.equal(project.missions[0], mission);
+    assert.equal(mission.id, 'm-atomic');
+    assert.equal(mission.executionMode, 'lightweight');
+    assert.equal(mission.runKind, 'mutation');
+    assert.equal(mission.workItems.length, 1);
+    assert.equal(mission.workItems[0], workItem);
+    assert.equal(workItem.id, 'w-seed');
+    assert.equal(workItem.status, 'created');
+    assert.equal(workItem.planRevision, 0);
+    assert.equal(mission.planRevision, 0);
+
+    assert.deepEqual(workItem.order?.validation, {
+      commands: [{ argv: ['node', '--test'], timeoutMs: 5000 }],
+    });
+    assert.ok(Object.isFrozen(workItem.order));
+    assert.ok(Object.isFrozen(workItem.order!.validation));
+    assert.ok(Object.isFrozen(workItem.order!.validation!.commands));
+    assert.ok(Object.isFrozen(workItem.order!.validation!.commands[0]));
+    assert.ok(Object.isFrozen(workItem.order!.validation!.commands[0].argv));
+
+    argv.push('--hack');
+    commands.push({ argv: ['rm', '-rf', '/'], timeoutMs: 1 });
+    (validation as { commands: unknown }).commands = [];
+    assert.deepEqual(workItem.order?.validation?.commands, [
+      { argv: ['node', '--test'], timeoutMs: 5000 },
+    ]);
+  });
+
+  test('invalid WorkOrder.validation => INVALID_WORK_ORDER_VALIDATION；Project 不残留 Mission',
+    () => {
+      const project = Project.create({ id: 'p-atomic-bad' });
+      const beforeIds = project.missions.map((m) => m.id);
+
+      assert.throws(
+        () =>
+          project.createMissionWithInitialWorkItem({
+            id: 'm-bad-order',
+            initialWorkItem: {
+              id: 'w-bad',
+              title: 'bad',
+              order: {
+                ...ATOMIC_ORDER,
+                validation: {
+                  commands: [
+                    {
+                      argv: ['node', '--test'],
+                      timeoutMs: 1000,
+                      cwd: '/tmp',
+                    } as never,
+                  ],
+                },
+              },
+            },
+          }),
+        invariant('INVALID_WORK_ORDER_VALIDATION'),
+      );
+
+      assert.equal(project.missions.length, beforeIds.length);
+      assert.deepEqual(
+        project.missions.map((m) => m.id),
+        beforeIds,
+      );
+
+      // bad timeout 同样 fail-closed
+      assert.throws(
+        () =>
+          project.createMissionWithInitialWorkItem({
+            id: 'm-bad-timeout',
+            initialWorkItem: {
+              id: 'w-bad-to',
+              title: 'bad timeout',
+              order: {
+                ...ATOMIC_ORDER,
+                validation: { commands: [{ argv: ['node'], timeoutMs: 0 }] },
+              },
+            },
+          }),
+        invariant('INVALID_WORK_ORDER_VALIDATION'),
+      );
+      assert.equal(project.missions.length, 0);
+    },
+  );
+
+  test('duplicate Mission id => DUPLICATE_ID；原 Mission 不变、不多 WorkItem', () => {
+    const project = Project.create({ id: 'p-atomic-dup' });
+    const existing = project.createMission({ id: 'm-dup-atomic' });
+    existing.createWorkItem({ id: 'w-existing', title: 'keep' });
+    const beforeCount = project.missions.length;
+    const beforeWorkItems = existing.workItems.length;
+
+    assert.throws(
+      () =>
+        project.createMissionWithInitialWorkItem({
+          id: 'm-dup-atomic',
+          initialWorkItem: {
+            id: 'w-new',
+            title: 'should not land',
+            order: ATOMIC_ORDER,
+          },
+        }),
+      invariant('DUPLICATE_ID'),
+    );
+
+    assert.equal(project.missions.length, beforeCount);
+    assert.equal(existing.workItems.length, beforeWorkItems);
+    assert.equal(existing.workItems[0]?.id, 'w-existing');
+    assert.equal(project.missions[0], existing);
+  });
+
+  test('createMission 仍可 0 WorkItem', () => {
+    const project = Project.create({ id: 'p-legacy-empty' });
+    const mission = project.createMission({ id: 'm-empty' });
+    assert.deepEqual(mission.workItems, []);
+    assert.equal(project.missions.length, 1);
   });
 });
 

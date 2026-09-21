@@ -226,6 +226,38 @@ describe('MissionView routing axis', () => {
   });
 });
 
+describe('Orchestrator High Assurance fail-closed', () => {
+  test('high_assurance => stalled 尚未启用；零 hop / 零 coordinator；不进入 executing', async () => {
+    const h = await harness();
+    const project = await h.projects.ensure('P');
+    project.createMission({
+      id: 'M-ha',
+      contract: CONTRACT,
+      executionMode: 'high_assurance',
+      runKind: 'mutation',
+      origin: { clientType: 'cli', conversationRef: 'local-cli' },
+    });
+    // 即便已有 Frozen WorkItem，也不得按 Standard 主链跑。
+    const mission = project.missions.find((m) => m.id === 'M-ha')!;
+    mission.createWorkItem({ id: 'W-ha', title: 'ha seed', order: ORDER });
+    await h.projects.save(project);
+
+    const orch = h.makeOrchestrator();
+    const result = await orch.runMission('M-ha', { projectRoot: process.cwd() });
+
+    assert.equal(result.kind, 'stalled');
+    assert.match(
+      (result as { reason: string }).reason,
+      /High Assurance|尚未启用|拒绝按 Standard/,
+    );
+    assert.equal(orch.hops.length, 0);
+    const view = await h.platform.getMissionView('M-ha');
+    assert.deepEqual(view.coordinatorAttemptIds, []);
+    assert.equal(view.status, 'investigating');
+    assert.notEqual(view.status, 'executing');
+  });
+});
+
 describe('Orchestrator Lightweight：WorkItem 数量守卫', () => {
   test('0 WorkItem => stalled，明确缺 Frozen WorkOrder；零 Coordinator', async () => {
     const h = await harness();

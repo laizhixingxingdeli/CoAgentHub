@@ -55,4 +55,8 @@ export { Mission } from './mission.ts';
 export type { MissionInit, MissionStatus } from './mission.ts';
 
 export { Project } from './project.ts';
-export type { ProjectInit } from './project.ts';
+export type {
+  ProjectInit,
+  ProjectMissionInit,
+  InitialWorkItemSeed,
+} from './project.ts';
