@@ -190,6 +190,45 @@ describe('Postgres 存储', () => {
     assert.equal(new Set(issued).size, 4, `发重了：${issued.join(', ')}`);
   });
 
+  test('PgIds.reserve() 默认含 VR：next(VR) 立即可用且不撞已有 report', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const s = store as PgStateStore;
+    // 已有高号 report，high-watermark 应抬升
+    await s.pool.query(
+      `INSERT INTO validation_reports (report_id, report)
+       VALUES ('VR-40', $1::jsonb)
+       ON CONFLICT (report_id) DO NOTHING`,
+      [
+        JSON.stringify({
+          id: 'VR-40',
+          policyRevision: 1,
+          missionId: 'M-vr-def',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          passed: true,
+          checks: [],
+        }),
+      ],
+    );
+    // 压低计数器，逼 open 的 high-watermark / reserve 抬升
+    await s.pool.query(
+      `INSERT INTO id_counters (prefix, value) VALUES ('VR', 1)
+       ON CONFLICT (prefix) DO UPDATE SET value = 1`,
+    );
+
+    const fresh = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const ids = new PgIds(fresh, 4);
+      // 默认 prefixes 含 VR，不必显式传
+      await ids.reserve();
+      const next = ids.next('VR');
+      const n = Number(next.slice(3));
+      assert.ok(n > 40, `默认 reserve 后 next(VR) 应高于已有 VR-40，实际 ${next}`);
+    } finally {
+      await fresh.close();
+    }
+  });
+
   test('同一 Mission 的同一种结局只投递一次 —— 幂等交给唯一索引', async (t) => {
     if (skipIfNoPg(t)) return;
     const s = store as PgStateStore;

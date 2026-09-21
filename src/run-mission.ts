@@ -68,13 +68,18 @@ async function main() {
   // 由版本号挡并发写，再加一把进程锁只会挡住合法的并行 Mission。
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  // Platform validator 与 Orchestrator 必须共享同一个 WorkspaceManager 实例。
+  const missionWorkspace = process.argv.includes('--in-place')
+    ? new InPlaceWorkspaceManager()
+    : new GitWorktreeManager(arg('--worktrees'));
   const built = usePg
     ? await buildPgPlatform({
-        workspace: new GitWorktreeManager(),
+        workspace: missionWorkspace,
         // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
         reconcileMissionId: spec.missionId,
       })
     : await buildPersistentPlatform(statePath, {
+        workspace: missionWorkspace,
         exclusive: { what: `跑 Mission ${spec.missionId}` },
       });
   const { platform, tokens, activity, deliveries, persist, reconciled, agentPool } = built;
@@ -164,9 +169,7 @@ async function main() {
     live,
     tokens: makeIssuer(platform, tokens),
     baseUrl,
-    workspace: process.argv.includes('--in-place')
-      ? new InPlaceWorkspaceManager()
-      : new GitWorktreeManager(arg('--worktrees')),
+    workspace: missionWorkspace,
     // 「我知道基线过期了，照跑」。必须由人显式给：调度器那边原先用一个
     // 进程内布尔量记这件事，而 CLI 一次运行一个进程，它每次都失忆——
     // 于是基线一过期，这条 Mission 每跑一次都被同一句话挡回去。

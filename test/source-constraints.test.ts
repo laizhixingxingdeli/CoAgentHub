@@ -90,4 +90,29 @@ describe('src/ 全树符合 Node 原生类型剥离的限制', () => {
       }
     }
   });
+
+  test('server/tools 没有 lightweight trusted method route', () => {
+    // Lightweight 的 create/dispatch/validate/submit-for-review 仅进程内，
+    // 不得暴露 HTTP 或 agent tool 面。
+    const TRUSTED = [
+      'createLightweightWorkItem',
+      'dispatchLightweightWorkItem',
+      'validateAndAcceptLightweightWorkItem',
+      'submitLightweightMissionForReview',
+    ];
+    const surface = sources().filter(
+      (s) =>
+        s.path === 'api/server.ts' ||
+        s.path.startsWith('api/') ||
+        s.path.includes('tool'),
+    );
+    for (const { path, source } of surface) {
+      for (const name of TRUSTED) {
+        assert.ok(
+          !source.includes(name),
+          `${path}: 不得出现 Lightweight trusted 方法 ${name}`,
+        );
+      }
+    }
+  });
 });

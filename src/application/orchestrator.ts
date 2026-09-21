@@ -11,7 +11,8 @@
  */
 
 import type { AgentRuntime, ExecutionProfile } from './ports.ts';
-import type { Platform } from './platform.ts';
+import type { MissionView, Platform } from './platform.ts';
+import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
@@ -400,6 +401,16 @@ export class Orchestrator {
         }
       }
 
+      // ---- Lightweight Fast Lane ----
+      // 公共 pause / awaiting_review / completed / blocked / escalation / stale-base
+      // 检查之后、Standard pending/coordinator 逻辑之前分流。
+      // 绝不进入下面的「没有 pending → coordinator」路径。
+      if (view.executionMode === 'lightweight') {
+        const lightweight = await this.#runLightweightRound(missionId, view, cwd);
+        if (lightweight.kind === 'continue') continue;
+        return lightweight.outcome;
+      }
+
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
       //
       // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、
@@ -486,6 +497,129 @@ export class Orchestrator {
     }
 
     return { kind: 'stalled', reason: `到达轮次上限 ${maxRounds}` };
+  }
+
+  /**
+   * Lightweight Fast Lane 一轮。
+   *
+   * 只走：唯一 Frozen WorkItem → Executor hop → Validator → submit-for-review。
+   * 任何异常路径都 stalled / waiting，**绝不** Coordinator hop / Attempt / Plan。
+   */
+  async #runLightweightRound(
+    missionId: string,
+    view: MissionView,
+    cwd: string,
+  ): Promise<
+    | { kind: 'continue' }
+    | { kind: 'outcome'; outcome: MissionRunOutcome }
+  > {
+    if (view.runKind !== 'mutation') {
+      return {
+        kind: 'outcome',
+        outcome: {
+          kind: 'stalled',
+          reason: `Lightweight 要求 runKind=mutation，当前是 ${view.runKind}`,
+        },
+      };
+    }
+
+    if (view.workItems.length === 0) {
+      return {
+        kind: 'outcome',
+        outcome: {
+          kind: 'stalled',
+          reason:
+            'Lightweight Mission 缺少 Frozen WorkOrder；须先由 trusted routing 创建唯一 WorkItem',
+        },
+      };
+    }
+    if (view.workItems.length > 1) {
+      return {
+        kind: 'outcome',
+        outcome: {
+          kind: 'stalled',
+          reason: `Lightweight Mission 恰好只能有一个 WorkItem，当前 ${view.workItems.length} 个`,
+        },
+      };
+    }
+
+    const item = view.workItems[0]!;
+
+    if (item.status === 'created') {
+      try {
+        await this.#platform.dispatchLightweightWorkItem(missionId, item.id);
+      } catch (error) {
+        if (error instanceof PlatformRuleError && error.code === 'PROJECT_BUSY') {
+          return {
+            kind: 'outcome',
+            outcome: {
+              kind: 'waiting',
+              reason: 'project_busy',
+              detail:
+                error.message ||
+                '同一 Project 有别的 Mission 正占着改动名额。它落地或放弃之后再跑这条。',
+            },
+          };
+        }
+        throw error;
+      }
+      return { kind: 'continue' };
+    }
+
+    if (item.status === 'dispatched') {
+      const hop = await this.#runHop({
+        role: 'executor',
+        missionId,
+        workItemId: item.id,
+        cwd,
+        pool: this.#executor,
+        instruction:
+          '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+      });
+      if (!hop || 'exhausted' in hop) {
+        const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
+        const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
+        await this.#platform.setWaitReason(missionId, reason, detail);
+        return { kind: 'outcome', outcome: { kind: 'waiting', reason, detail } };
+      }
+      return { kind: 'continue' };
+    }
+
+    if (item.status === 'submitted') {
+      const validated = await this.#platform.validateAndAcceptLightweightWorkItem({
+        missionId,
+        workItemId: item.id,
+        cwd,
+      });
+      if (validated.passed === false) {
+        return {
+          kind: 'outcome',
+          outcome: {
+            kind: 'stalled',
+            reason:
+              `ValidationReport ${validated.reportId} 未通过；Lightweight 自动升级尚未启用`,
+          },
+        };
+      }
+      await this.#platform.submitLightweightMissionForReview(missionId);
+      return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
+    }
+
+    if (item.status === 'accepted') {
+      // crash-recovery seam：validator 已 accept，直接交 L3 门口。
+      await this.#platform.submitLightweightMissionForReview(missionId);
+      return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
+    }
+
+    return {
+      kind: 'outcome',
+      outcome: {
+        kind: 'stalled',
+        reason:
+          `Lightweight WorkItem ${item.id} 状态是 ${item.status}，无法继续；` +
+          '绝不回退 Coordinator',
+      },
+    };
   }
 
   /**

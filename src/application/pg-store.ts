@@ -559,7 +559,7 @@ export class PgIds implements IdGenerator {
   }
 
   /** 预热：把要用到的前缀先各取一段，之后 next() 就不会落空。 */
-  async reserve(prefixes: readonly string[] = ['M', 'W', 'D', 'Q']): Promise<void> {
+  async reserve(prefixes: readonly string[] = ['M', 'W', 'D', 'Q', 'VR']): Promise<void> {
     for (const prefix of prefixes) await this.#fetchBlock(prefix);
   }
 

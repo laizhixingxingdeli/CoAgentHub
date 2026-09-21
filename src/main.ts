@@ -32,6 +32,7 @@ import {
   FileProjectRepository,
   FileQueryRunRepository,
   FileStateStore,
+  FileValidationReportRepository,
   PersistentIds,
 } from './application/file-store.ts';
 import {
@@ -43,6 +44,7 @@ import {
   PgProjectRepository,
   PgQueryRunRepository,
   PgStateStore,
+  PgValidationReportRepository,
 } from './application/pg-store.ts';
 import { acquireLock } from './application/lock.ts';
 import {
@@ -59,6 +61,10 @@ import {
 import { createDecisionProvider } from './application/decision-provider-factory.ts';
 import type { DecisionProvider } from './application/ports.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
+import { ValidationEngine } from './application/validation/engine.ts';
+import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
+import { WorkspaceChangedPathReader } from './application/validation/workspace-changed-path-reader.ts';
+import { InMemoryValidationReportRepository } from './application/validation/report-repository.ts';
 
 export function buildPlatform(
   workspace?: WorkspaceManager,
@@ -77,6 +83,18 @@ export function buildPlatform(
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
   // 全内存装法：QueryRun 进程内记忆。Durable 见 buildPersistent / buildPg。
   const queryRuns = new InMemoryQueryRunRepository();
+  // 仅 workspace 有值时注入 validation；无 workspace 保持缺省 fail-closed。
+  const validation = workspace
+    ? {
+        engine: new ValidationEngine({
+          clock,
+          ids,
+          commandRunner: new ExecFileCommandRunner(),
+          changedPathReader: new WorkspaceChangedPathReader(workspace),
+        }),
+        reports: new InMemoryValidationReportRepository(),
+      }
+    : undefined;
   const platform = new Platform({
     projects,
     deliveries,
@@ -85,6 +103,7 @@ export function buildPlatform(
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    ...(validation ? { validation } : {}),
   });
   const tokens = new RunTokenRegistry();
   // 未声明 supportsQuery 的 runtime（含 Spawn/Pi/未知）不得伪装成 read-only query。
@@ -149,6 +168,16 @@ export async function buildPersistentPlatform(
   const queryRuns = new FileQueryRunRepository(store);
   // 大输出外置到状态文件旁边的 artifacts/ 目录。
   const artifacts = new FileArtifactStore(resolve(statePath, '..', 'artifacts'));
+  // 与 Platform/WorkspaceManager 共用同一个已 resolved workspace。
+  const validation = {
+    engine: new ValidationEngine({
+      clock,
+      ids,
+      commandRunner: new ExecFileCommandRunner(),
+      changedPathReader: new WorkspaceChangedPathReader(workspace),
+    }),
+    reports: new FileValidationReportRepository(store),
+  };
   const platform = new Platform({
     projects,
     deliveries,
@@ -158,6 +187,7 @@ export async function buildPersistentPlatform(
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    validation,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options.queryRuntime;
@@ -253,7 +283,7 @@ export async function buildPgPlatform(options?: {
   const live = new PgLiveOutput(store);
   const ids = new PgIds(store);
   // 预热号段：不预热的话第一次 next() 会撞上"号段用尽"，
-  // 而那对调用方来说只是一次莫名其妙的失败。含 Q（QueryRun）。
+  // 而那对调用方来说只是一次莫名其妙的失败。含 Q / VR。
   await ids.reserve();
   const deliveries = new PgDeliveryRepository(store, clock, ids);
   const queryRuns = new PgQueryRunRepository(store);
@@ -261,15 +291,27 @@ export async function buildPgPlatform(options?: {
     resolve(options?.artifactRoot ?? '.coagent-artifacts'),
   );
   const decisionProvider = options?.decisionProvider;
+  // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
+  const workspace = options?.workspace ?? new GitWorktreeManager();
+  const validation = {
+    engine: new ValidationEngine({
+      clock,
+      ids,
+      commandRunner: new ExecFileCommandRunner(),
+      changedPathReader: new WorkspaceChangedPathReader(workspace),
+    }),
+    reports: new PgValidationReportRepository(store),
+  };
   const platform = new Platform({
     projects,
     deliveries,
     artifacts,
-    workspace: options?.workspace ?? new GitWorktreeManager(),
+    workspace,
     activity,
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    validation,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options?.queryRuntime;
