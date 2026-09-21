@@ -77,6 +77,27 @@ function missionIdFromBranch(branch: string | undefined): string | undefined {
   return id.includes('/') || id.length === 0 ? undefined : id;
 }
 
+/**
+ * DETECT-002 trusted fact：只读 `<revision>:package.json`（仓库根）。
+ * 任意失败 / 缺失 → undefined，调用方不得据此得到 new_dependency=true。
+ */
+async function showRootPackageJsonAt(
+  cwd: string,
+  revision: string,
+): Promise<string | undefined> {
+  if (typeof revision !== 'string' || revision.length === 0) return undefined;
+  try {
+    const { stdout } = await run(
+      'git',
+      ['show', `${revision}:package.json`],
+      { cwd: resolve(cwd), encoding: 'utf8' },
+    );
+    return typeof stdout === 'string' ? stdout : String(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface PreparedWorkspace {
   /** agent 的 cwd。 */
   readonly cwd: string;
@@ -162,6 +183,14 @@ export interface WorkspaceManager {
     projectRoot: string,
     protectedMissionIds: ReadonlySet<string> | readonly string[],
   ): Promise<WorktreeReconcileResult>;
+  /**
+   * DETECT-002：只读仓库根在指定 revision 的 package.json 原文。
+   *
+   * 固定路径 `revision:package.json`，无任意 path、无 lockfile、不读当前工作区文件。
+   * 缺失 / `git show` 非零 → undefined；其它失败同样 undefined（fail closed）。
+   * 不经 HTTP / agent tool 暴露。
+   */
+  showRootPackageJson?(cwd: string, revision: string): Promise<string | undefined>;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
@@ -572,6 +601,13 @@ ${dirty}` };
     await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo }).catch(() => undefined);
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
   }
+
+  /**
+   * 仅 `git show <revision>:package.json`。路径字面量固定，调用方不能选文件。
+   */
+  async showRootPackageJson(cwd: string, revision: string): Promise<string | undefined> {
+    return showRootPackageJsonAt(cwd, revision);
+  }
 }
 
 /** 不隔离，直接在给定目录里干活。只该在测试或明确接受风险时使用。 */
@@ -609,6 +645,11 @@ export class InPlaceWorkspaceManager implements WorkspaceManager {
 
   async release(): Promise<void> {
     /* 无事可做 */
+  }
+
+  /** 与 Git 实现同契约；原地模式同样只允许根 package.json。 */
+  async showRootPackageJson(cwd: string, revision: string): Promise<string | undefined> {
+    return showRootPackageJsonAt(cwd, revision);
   }
 }
 
