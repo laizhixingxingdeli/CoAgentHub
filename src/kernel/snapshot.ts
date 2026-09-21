@@ -9,7 +9,7 @@
  * 而历史状态是既成事实，不该被今天的规则重新审一遍。
  */
 
-import type { MissionExecutionMode, RunKind } from './payloads.ts';
+import type { ComplexityAssessment, MissionExecutionMode, RunKind } from './payloads.ts';
 
 export interface AttemptSnapshot {
   id: string;
@@ -72,6 +72,8 @@ export interface MissionSnapshot {
   executionMode?: MissionExecutionMode;
   /** 老快照可能没有；restore 时缺省/非法 -> mutation。 */
   runKind?: RunKind;
+  /** 老快照可能没有；restore 时缺字段/畸形 -> undefined（fail-closed，不默认全 0）。 */
+  complexityAssessment?: ComplexityAssessment;
   workItems: WorkItemSnapshot[];
   coordinatorAttempts: AttemptSnapshot[];
   coordinatorSeq: number;

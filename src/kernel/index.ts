@@ -17,6 +17,7 @@ export type {
 export { EMPTY_USAGE, freezePayload } from './payloads.ts';
 export type {
   BlockedRecord,
+  ComplexityAssessment,
   EscalationBody,
   ContextRef,
   ContextRefKind,

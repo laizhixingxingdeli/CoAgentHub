@@ -39,6 +39,23 @@ export type MissionExecutionMode = 'lightweight' | 'standard' | 'high_assurance'
  */
 export type RunKind = 'mutation' | 'query';
 
+/**
+ * Mission 六维复杂度评估载荷。可选、只读；不计算总分、不驱动路由。
+ *
+ * 未评估时整段为 undefined（禁止默认全 0）。分数本身只是数据合同。
+ */
+export interface ComplexityAssessment {
+  readonly goalUncertainty: 0 | 1 | 2;
+  readonly changeScope: 0 | 1 | 2;
+  readonly operationalRisk: 0 | 1 | 2;
+  readonly verificationDifficulty: 0 | 1 | 2;
+  readonly coordinationNeed: 0 | 1 | 2;
+  readonly recoveryDifficulty: 0 | 1 | 2;
+  readonly reasons: readonly string[];
+  readonly decidedBy: 'rule' | 'user' | 'coordinator';
+  readonly assessedAt: string;
+}
+
 export interface MissionContract {
   readonly intent: string;
   readonly acceptance: readonly string[];

@@ -6,6 +6,7 @@ import type { WorkItemInit } from './work-item.ts';
 import { freezePayload } from './payloads.ts';
 import type { AttemptSnapshot, MissionSnapshot, WorkItemSnapshot } from './snapshot.ts';
 import type {
+  ComplexityAssessment,
   EscalationBody,
   FinalReview,
   WaitReason,
@@ -63,6 +64,8 @@ export interface MissionInit {
   executionMode?: MissionExecutionMode;
   /** 运行种类；缺省/非法 -> mutation。与 executionMode 正交。 */
   runKind?: RunKind;
+  /** 可选六维复杂度评估；缺省/非法 -> undefined。无 setter。 */
+  complexityAssessment?: ComplexityAssessment;
 }
 
 /**
@@ -92,6 +95,7 @@ export class Mission {
   #paused = false;
   #executionMode: MissionExecutionMode;
   #runKind: RunKind;
+  #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
 
   constructor(init: MissionInit) {
     this.#id = init.id;
@@ -99,6 +103,9 @@ export class Mission {
     this.#project = init.project;
     this.#executionMode = Mission.#normalizeExecutionMode(init.executionMode);
     this.#runKind = Mission.#normalizeRunKind(init.runKind);
+    this.#complexityAssessment = Mission.#normalizeComplexityAssessment(
+      init.complexityAssessment,
+    );
     if (init.origin) {
       this.#origin = freezePayload({ ...init.origin });
     }
@@ -128,6 +135,11 @@ export class Mission {
   /** 创建时选定的运行种类；只读。与 executionMode 正交。 */
   get runKind(): RunKind {
     return this.#runKind;
+  }
+
+  /** 可选六维复杂度评估；只读。未评估为 undefined，禁止默认全 0。 */
+  get complexityAssessment(): Readonly<ComplexityAssessment> | undefined {
+    return this.#complexityAssessment;
   }
 
   /**
@@ -476,6 +488,7 @@ export class Mission {
       paused: this.#paused,
       executionMode: this.#executionMode,
       runKind: this.#runKind,
+      complexityAssessment: this.#complexityAssessment,
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
@@ -490,6 +503,9 @@ export class Mission {
       project,
       executionMode: Mission.#normalizeExecutionMode(snapshot.executionMode),
       runKind: Mission.#normalizeRunKind(snapshot.runKind),
+      complexityAssessment: Mission.#normalizeComplexityAssessment(
+        snapshot.complexityAssessment,
+      ),
     });
     mission.#status = snapshot.status as MissionStatus;
     mission.#contract = snapshot.contract as Readonly<MissionContract> | undefined;
@@ -528,6 +544,54 @@ export class Mission {
       return value;
     }
     return 'mutation';
+  }
+
+  /**
+   * fail-closed：缺/undefined -> undefined；任一字段非法 -> 整段 undefined。
+   * 禁止逐维 clamp、默认 0 或抛错。合法时复制 reasons 再 freeze。
+   */
+  static #normalizeComplexityAssessment(
+    value: unknown,
+  ): Readonly<ComplexityAssessment> | undefined {
+    if (value == null) return undefined;
+    if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const dims = [
+      'goalUncertainty',
+      'changeScope',
+      'operationalRisk',
+      'verificationDifficulty',
+      'coordinationNeed',
+      'recoveryDifficulty',
+    ] as const;
+    const scores: Partial<Record<(typeof dims)[number], 0 | 1 | 2>> = {};
+    for (const key of dims) {
+      const score = raw[key];
+      if (score !== 0 && score !== 1 && score !== 2) return undefined;
+      scores[key] = score;
+    }
+    if (!Array.isArray(raw.reasons) || !raw.reasons.every((r) => typeof r === 'string')) {
+      return undefined;
+    }
+    if (
+      raw.decidedBy !== 'rule' &&
+      raw.decidedBy !== 'user' &&
+      raw.decidedBy !== 'coordinator'
+    ) {
+      return undefined;
+    }
+    if (typeof raw.assessedAt !== 'string') return undefined;
+    return freezePayload({
+      goalUncertainty: scores.goalUncertainty!,
+      changeScope: scores.changeScope!,
+      operationalRisk: scores.operationalRisk!,
+      verificationDifficulty: scores.verificationDifficulty!,
+      coordinationNeed: scores.coordinationNeed!,
+      recoveryDifficulty: scores.recoveryDifficulty!,
+      reasons: [...raw.reasons] as string[],
+      decidedBy: raw.decidedBy,
+      assessedAt: raw.assessedAt,
+    });
   }
 
   #isTerminal(): boolean {

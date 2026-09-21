@@ -9,6 +9,10 @@ import {
   Project,
   WorkItem,
 } from '../src/kernel/index.ts';
+import type { ComplexityAssessment } from '../src/kernel/index.ts';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function freshMission(): Mission {
   return Project.create({ id: 'p-m' }).createMission({ id: 'm-1' });
@@ -101,6 +105,7 @@ describe('Project / Mission: 创建', () => {
       'coordinatorAttempts',
       'executionMode',
       'runKind',
+      'complexityAssessment',
     ]) {
       assert.throws(
         () => {
@@ -233,6 +238,234 @@ describe('Mission: runKind', () => {
       (snap as { runKind?: unknown }).runKind = bad as never;
       const restored = Mission.restore(snap, project);
       assert.equal(restored.runKind, 'mutation');
+    }
+  });
+});
+
+function sampleAssessment(
+  overrides: Partial<ComplexityAssessment> = {},
+): ComplexityAssessment {
+  return {
+    goalUncertainty: 1,
+    changeScope: 2,
+    operationalRisk: 0,
+    verificationDifficulty: 1,
+    coordinationNeed: 2,
+    recoveryDifficulty: 0,
+    reasons: ['scope crosses two modules', 'needs coordinator review'],
+    decidedBy: 'user',
+    assessedAt: '2026-03-21T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('Mission: complexityAssessment', () => {
+  test('新建默认 undefined，快照不产生假评估', () => {
+    const mission = freshMission();
+    assert.equal(mission.complexityAssessment, undefined);
+    assert.equal(mission.toSnapshot().complexityAssessment, undefined);
+  });
+
+  test('显式合法 create：getter/snapshot 完整；reasons 复制且不可变', () => {
+    const reasons = ['a', 'b'];
+    const assessment = sampleAssessment({ reasons });
+    const mission = Project.create({ id: 'p-ca-ok' }).createMission({
+      id: 'm-ca-ok',
+      complexityAssessment: assessment,
+    });
+
+    const got = mission.complexityAssessment;
+    assert.ok(got);
+    assert.equal(got.goalUncertainty, 1);
+    assert.equal(got.changeScope, 2);
+    assert.equal(got.operationalRisk, 0);
+    assert.equal(got.verificationDifficulty, 1);
+    assert.equal(got.coordinationNeed, 2);
+    assert.equal(got.recoveryDifficulty, 0);
+    assert.deepEqual(got.reasons, ['a', 'b']);
+    assert.equal(got.decidedBy, 'user');
+    assert.equal(got.assessedAt, '2026-03-21T12:00:00.000Z');
+
+    reasons.push('caller-mutated');
+    assert.deepEqual(mission.complexityAssessment?.reasons, ['a', 'b']);
+
+    assert.ok(Object.isFrozen(got));
+    assert.ok(Object.isFrozen(got.reasons));
+    assert.throws(() => {
+      (got as { goalUncertainty: number }).goalUncertainty = 0;
+    }, TypeError);
+    assert.throws(() => {
+      (got.reasons as string[]).push('x');
+    }, TypeError);
+
+    const snap = mission.toSnapshot().complexityAssessment;
+    assert.ok(snap);
+    assert.deepEqual(snap, {
+      goalUncertainty: 1,
+      changeScope: 2,
+      operationalRisk: 0,
+      verificationDifficulty: 1,
+      coordinationNeed: 2,
+      recoveryDifficulty: 0,
+      reasons: ['a', 'b'],
+      decidedBy: 'user',
+      assessedAt: '2026-03-21T12:00:00.000Z',
+    });
+  });
+
+  test('老快照缺字段 restore -> undefined，不抛', () => {
+    const project = Project.create({ id: 'p-ca-old' });
+    const base = project.createMission({ id: 'm-old' });
+    const snap = base.toSnapshot();
+    delete snap.complexityAssessment;
+    const restored = Mission.restore(snap, project);
+    assert.equal(restored.complexityAssessment, undefined);
+    assert.equal(restored.toSnapshot().complexityAssessment, undefined);
+  });
+
+  test('合法评估 snapshot round-trip 相等', () => {
+    const project = Project.create({ id: 'p-ca-rt' });
+    const mission = project.createMission({
+      id: 'm-ca-rt',
+      complexityAssessment: sampleAssessment({ decidedBy: 'coordinator' }),
+    });
+    const restored = Mission.restore(mission.toSnapshot(), project);
+    assert.deepEqual(restored.complexityAssessment, mission.complexityAssessment);
+    assert.deepEqual(
+      restored.toSnapshot().complexityAssessment,
+      mission.toSnapshot().complexityAssessment,
+    );
+    assert.ok(Object.isFrozen(restored.complexityAssessment));
+    assert.ok(Object.isFrozen(restored.complexityAssessment?.reasons));
+  });
+
+  test('restore 畸形整段 undefined，不抛、不逐维 clamp', () => {
+    const project = Project.create({ id: 'p-ca-bad' });
+    const base = project.createMission({
+      id: 'm-ca-bad',
+      complexityAssessment: sampleAssessment(),
+    });
+    const good = base.toSnapshot();
+
+    const cases: Array<{ label: string; patch: (ca: Record<string, unknown>) => void }> = [
+      {
+        label: 'score=3',
+        patch: (ca) => {
+          ca.goalUncertainty = 3;
+        },
+      },
+      {
+        label: '缺一个维度',
+        patch: (ca) => {
+          delete ca.recoveryDifficulty;
+        },
+      },
+      {
+        label: '非法 decidedBy',
+        patch: (ca) => {
+          ca.decidedBy = 'agent';
+        },
+      },
+      {
+        label: 'reasons 含非 string',
+        patch: (ca) => {
+          ca.reasons = ['ok', 1];
+        },
+      },
+      {
+        label: 'assessedAt 非 string',
+        patch: (ca) => {
+          ca.assessedAt = 12345;
+        },
+      },
+      {
+        label: '非对象',
+        patch: () => {
+          /* replaced wholesale below */
+        },
+      },
+    ];
+
+    for (const { label, patch } of cases) {
+      const snap = structuredClone(good);
+      if (label === '非对象') {
+        (snap as { complexityAssessment?: unknown }).complexityAssessment = 'nope';
+      } else {
+        patch(snap.complexityAssessment as unknown as Record<string, unknown>);
+      }
+      const restored = Mission.restore(snap, project);
+      assert.equal(
+        restored.complexityAssessment,
+        undefined,
+        `${label} should fail-closed to undefined`,
+      );
+    }
+  });
+
+  test('complexityAssessment 只读，无 setter；赋值失败', () => {
+    const mission = Project.create({ id: 'p-ca-ro' }).createMission({
+      id: 'm-ca-ro',
+      complexityAssessment: sampleAssessment({ decidedBy: 'rule' }),
+    });
+    assert.throws(() => {
+      (mission as unknown as Record<string, unknown>).complexityAssessment = undefined;
+    }, TypeError);
+    assert.equal(mission.complexityAssessment?.decidedBy, 'rule');
+  });
+
+  test('complexityAssessment 不改变 executionMode / runKind / status / isMutating', () => {
+    const project = Project.create({ id: 'p-ca-side' });
+    const mission = project.createMission({
+      id: 'm-ca-side',
+      complexityAssessment: sampleAssessment(),
+      executionMode: 'lightweight',
+      runKind: 'query',
+    });
+    assert.equal(mission.executionMode, 'lightweight');
+    assert.equal(mission.runKind, 'query');
+    assert.equal(mission.status, 'investigating');
+    assert.equal(mission.isMutating, false);
+    mission.startExecuting();
+    assert.equal(mission.status, 'executing');
+    assert.equal(mission.isMutating, true);
+    assert.ok(mission.complexityAssessment);
+  });
+
+  test('生产代码无 complexityAssessment 路由分支、无 semantic_risk 映射', () => {
+    const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (name.endsWith('.ts')) files.push(full);
+      }
+    };
+    walk(srcRoot);
+
+    for (const full of files) {
+      const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
+      const source = readFileSync(full, 'utf8');
+      // kernel 载荷合同允许声明字段；禁止把评估当路由条件或映射 semantic_risk。
+      if (rel.startsWith('kernel/')) {
+        assert.doesNotMatch(
+          source,
+          /semantic_risk/,
+          `${rel}: kernel 不得映射 semantic_risk`,
+        );
+        assert.doesNotMatch(
+          source,
+          /if\s*\([^)]*complexityAssessment|complexityAssessment\s*[=!]=|switch\s*\([^)]*complexityAssessment/,
+          `${rel}: 不得按 complexityAssessment 路由`,
+        );
+        continue;
+      }
+      assert.doesNotMatch(
+        source,
+        /complexityAssessment/,
+        `${rel}: 本单 scope 外不得引用 complexityAssessment`,
+      );
+      // 非 kernel 允许既有 semantic_risk（Decision），但禁止与 complexityAssessment 同现映射。
     }
   });
 });
