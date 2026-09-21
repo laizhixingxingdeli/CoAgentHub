@@ -8,8 +8,11 @@
  *   - 成功/失败均可查询 QueryRun record
  */
 
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   FixedClock,
@@ -33,6 +36,39 @@ import { buildPlatform } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import { SpawnRuntime } from '../src/runtime/spawn.ts';
 import type { AgentRuntime } from '../src/application/ports.ts';
+
+const spawnQueryDirs: string[] = [];
+after(() => {
+  for (const dir of spawnQueryDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/**
+ * 假 child adapter：读 stdin JSON，把 role 写进标记文件，回 __COAGENT_OUTCOME__。
+ * 不真打模型——只验 SpawnRuntime ↔ QueryRunner 的 opt-in 与 queryOutcome 透传。
+ */
+function fakeQueryAdapter(
+  outcome: Record<string, unknown>,
+  roleMarkPath: string,
+): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-spawn-q-'));
+  spawnQueryDirs.push(dir);
+  const file = join(dir, 'query-adapter.mjs');
+  writeFileSync(
+    file,
+    [
+      'import { writeFileSync } from "node:fs";',
+      'let raw = "";',
+      'for await (const c of process.stdin) raw += c;',
+      'const spec = JSON.parse(raw);',
+      `writeFileSync(${JSON.stringify(roleMarkPath)}, String(spec.role ?? ""), "utf8");`,
+      `process.stdout.write("__COAGENT_OUTCOME__ " + ${JSON.stringify(
+        JSON.stringify(outcome),
+      )} + "\\n");`,
+    ].join('\n'),
+    'utf8',
+  );
+  return file;
+}
 
 function spyWorkspace(): WorkspaceManager & { prepareCalls: number } {
   const state = { prepareCalls: 0 };
@@ -421,6 +457,163 @@ describe('query runtime capability gate', () => {
     assert.equal(built.runQuery, undefined);
     assert.equal(built.queryRunner, undefined);
   });
+
+  test('SpawnRuntime 显式 supportsQuery:true 可进入 QueryRunner', () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const queryRuns = new InMemoryQueryRunRepository();
+    const spawn = new SpawnRuntime({
+      kind: 'pi',
+      command: 'node',
+      args: ['-e', 'process.exit(0)'],
+      cwd: process.cwd(),
+      supportsQuery: true,
+    });
+    assert.equal(spawn.supportsQuery, true);
+    assert.doesNotThrow(() => new QueryRunner({ runtime: spawn, queryRuns, clock, ids }));
+  });
+});
+
+describe('SpawnRuntime queryOutcome 透传（假 child，不打模型）', () => {
+  const USAGE = {
+    input: 3,
+    output: 2,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 5,
+    quality: 'reported' as const,
+  };
+
+  test('answered：stdin role=query，record outcome=answered', async () => {
+    const markDir = mkdtempSync(join(tmpdir(), 'coagent-spawn-q-mark-'));
+    spawnQueryDirs.push(markDir);
+    const roleMark = join(markDir, 'role.txt');
+    const adapter = fakeQueryAdapter(
+      {
+        endedBy: 'structured_submit',
+        usage: USAGE,
+        output: 'hub answer',
+        queryOutcome: 'answered',
+      },
+      roleMark,
+    );
+    const runtime = new SpawnRuntime({
+      kind: 'fake-query',
+      command: 'node',
+      args: [adapter],
+      cwd: process.cwd(),
+      supportsQuery: true,
+    });
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const queryRuns = new InMemoryQueryRunRepository();
+    const runner = new QueryRunner({ runtime, queryRuns, clock, ids });
+    const result = await runner.runQuery({
+      projectId: 'P-spawn',
+      prompt: 'what?',
+      cwd: process.cwd(),
+      source: 'test-spawn',
+    });
+
+    assert.equal(result.outcome, 'answered');
+    assert.equal(result.record.outcome, 'answered');
+    assert.equal(result.record.output, 'hub answer');
+    assert.equal(result.record.usage.total, 5);
+    assert.equal(readFileSync(roleMark, 'utf8'), 'query');
+  });
+
+  test('failed：child queryOutcome=failed 原样落 record', async () => {
+    const markDir = mkdtempSync(join(tmpdir(), 'coagent-spawn-q-mark-'));
+    spawnQueryDirs.push(markDir);
+    const roleMark = join(markDir, 'role.txt');
+    const adapter = fakeQueryAdapter(
+      {
+        endedBy: 'upstream_failure',
+        usage: USAGE,
+        failureMessage: 'adapter boom',
+        queryOutcome: 'failed',
+      },
+      roleMark,
+    );
+    const runtime = new SpawnRuntime({
+      kind: 'fake-query',
+      command: 'node',
+      args: [adapter],
+      cwd: process.cwd(),
+      supportsQuery: true,
+    });
+    const runner = new QueryRunner({
+      runtime,
+      queryRuns: new InMemoryQueryRunRepository(),
+      clock: new FixedClock(),
+      ids: new SequentialIds(),
+    });
+    const result = await runner.runQuery({
+      projectId: 'P',
+      prompt: 'x',
+      cwd: process.cwd(),
+      source: 'test',
+    });
+    assert.equal(result.outcome, 'failed');
+    assert.equal(result.record.failureMessage, 'adapter boom');
+  });
+
+  test('透传证明：endedBy=no_structured_result + queryOutcome=needs_mutation → needs_mutation',
+    async () => {
+      // QueryRunner fallback：无 queryOutcome 且 endedBy 非失败类 → answered。
+      // 若 SpawnRuntime 没透传，这里会变成 answered；needs_mutation 即证明透传。
+      const markDir = mkdtempSync(join(tmpdir(), 'coagent-spawn-q-mark-'));
+      spawnQueryDirs.push(markDir);
+      const roleMark = join(markDir, 'role.txt');
+      const adapter = fakeQueryAdapter(
+        {
+          endedBy: 'no_structured_result',
+          usage: USAGE,
+          output: 'would need a write',
+          queryOutcome: 'needs_mutation',
+        },
+        roleMark,
+      );
+      const runtime = new SpawnRuntime({
+        kind: 'fake-query',
+        command: 'node',
+        args: [adapter],
+        cwd: process.cwd(),
+        supportsQuery: true,
+      });
+
+      // 直接 wait，确认 RuntimeOutcome 上就有 queryOutcome（不靠 QueryRunner 猜）
+      const bare = await runtime.start({
+        role: 'query',
+        attemptId: 'Q-bare',
+        missionId: '',
+        cwd: process.cwd(),
+        profile: { endpoint: 'local', profileId: 'p' },
+        instruction: 'mutate?',
+        tools: [...QUERY_READONLY_TOOLS],
+        endpoint: { baseUrl: '', token: '' },
+      });
+      const bareOutcome = await bare.wait();
+      assert.equal(bareOutcome.queryOutcome, 'needs_mutation');
+      assert.equal(bareOutcome.endedBy, 'no_structured_result');
+
+      const runner = new QueryRunner({
+        runtime,
+        queryRuns: new InMemoryQueryRunRepository(),
+        clock: new FixedClock(),
+        ids: new SequentialIds(),
+      });
+      const result = await runner.runQuery({
+        projectId: 'P',
+        prompt: 'fix X',
+        cwd: process.cwd(),
+        source: 'test',
+      });
+      assert.equal(result.outcome, 'needs_mutation');
+      assert.equal(result.record.outcome, 'needs_mutation');
+      assert.equal(result.record.endedBy, 'no_structured_result');
+    },
+  );
 });
 
 describe('buildPlatform 注入 query', () => {

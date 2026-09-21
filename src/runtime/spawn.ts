@@ -120,6 +120,13 @@ export interface SpawnRuntimeOptions {
   readonly timeoutMs?: number;
   /** 把子进程输出转发到平台 stdout。 */
   readonly stream?: boolean;
+  /**
+   * 显式 opt-in：本 SpawnRuntime 实例可承接独立只读 QueryRun。
+   *
+   * 仅 `true` 有意义。默认 fail-closed——不按 kind / 适配器路径猜测，
+   * 也不因 child 是 coagent-pi 就自动开启。生产 Mission 构造不得设此字段。
+   */
+  readonly supportsQuery?: true;
 }
 
 const UNKNOWN_USAGE: TokenUsage = {
@@ -133,11 +140,17 @@ const UNKNOWN_USAGE: TokenUsage = {
 
 export class SpawnRuntime implements AgentRuntime {
   readonly kind: string;
+  /**
+   * 仅 constructor option `supportsQuery === true` 时为 true；
+   * 默认 `undefined`，QueryRunner 构造 fail-closed。
+   */
+  readonly supportsQuery?: true;
   #options: SpawnRuntimeOptions;
 
   constructor(options: SpawnRuntimeOptions) {
     this.kind = options.kind;
     this.#options = options;
+    if (options.supportsQuery === true) this.supportsQuery = true;
   }
 
   async start(spec: AgentRunSpec): Promise<AgentRun> {
@@ -237,8 +250,16 @@ export class SpawnRuntime implements AgentRuntime {
             output?: string;
             toolNames?: string[];
             resolvedProfile?: RuntimeOutcome['resolvedProfile'];
+            /** query 角色：原样透传，不由 endedBy 在此推导。 */
+            queryOutcome?: RuntimeOutcome['queryOutcome'];
           };
           if (parsed.usage) emit({ kind: 'usage', usage: parsed.usage });
+          const queryOutcome =
+            parsed.queryOutcome === 'answered' ||
+            parsed.queryOutcome === 'failed' ||
+            parsed.queryOutcome === 'needs_mutation'
+              ? parsed.queryOutcome
+              : undefined;
           resolve({
             endedBy: parsed.endedBy,
             usage: parsed.usage ?? UNKNOWN_USAGE,
@@ -247,6 +268,7 @@ export class SpawnRuntime implements AgentRuntime {
             output: parsed.output,
             toolCalls: parsed.toolNames,
             resolvedProfile: parsed.resolvedProfile,
+            ...(queryOutcome ? { queryOutcome } : {}),
           });
         } catch {
           resolve(fallback);
