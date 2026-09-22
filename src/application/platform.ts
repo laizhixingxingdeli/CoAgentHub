@@ -19,6 +19,7 @@ import type {
   EvidenceRecord,
   ExecutionResultBody,
   FinalReview,
+  FinalReviewAuthority,
   Mission,
   MissionContract,
   MissionExecutionMode,
@@ -2016,10 +2017,35 @@ export class Platform {
    * 目标 HEAD 变过就**不合**：那意味着底下的代码动了，直接合进去等于拿一份
    * 过时的基线覆盖别人。这时候 Mission 转 blocked，交回协调者重新同步。
    */
+  /**
+   * 公开最终检视入口。**只发人类权威。**
+   *
+   * 机器权威必须来自跑过合并后验证的可信内部路径——同 `promoteMissionToStandard`
+   * 拒绝 `budget_exceeded` 的纪律：能从外面写一个 kind 上去，权威就等于没有。
+   */
   async finalizeMission(
     missionId: string,
-    input: { verdict: 'merge' | 'send_back' | 'abandon'; reasons: readonly string[]; projectRoot?: string },
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      /** 只接受 human；principalId 有就记，没有就记「人，不知道是谁」。 */
+      authority?: { kind: 'human'; principalId?: string };
+    },
   ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    const rawKind = (input as { authority?: { kind?: unknown } }).authority?.kind;
+    if (rawKind !== undefined && rawKind !== 'human') {
+      throw new PlatformRuleError(
+        'FINAL_REVIEW_AUTHORITY_FORBIDDEN',
+        `公开 finalizeMission 只能发 human 权威，收到 ${String(rawKind)}。` +
+          '机器放行必须走跑过合并后验证的内部路径。',
+      );
+    }
+    const authority: FinalReviewAuthority = Object.freeze(
+      input.authority?.principalId !== undefined
+        ? { kind: 'human' as const, principalId: input.authority.principalId }
+        : { kind: 'human' as const },
+    );
     const { mission } = await this.#locate(missionId);
     if (mission.status !== 'awaiting_review') {
       throw new PlatformRuleError(
@@ -2035,13 +2061,13 @@ export class Platform {
     }
 
     if (input.verdict === 'send_back') {
-      mission.sendBackToPlanning({ verdict: 'send_back', reasons: [...input.reasons] });
+      mission.sendBackToPlanning({ verdict: 'send_back', reasons: [...input.reasons], authority });
       await this.#event(mission, 'final_review.send_back', { reasons: input.reasons });
       return { status: mission.status };
     }
 
     if (input.verdict === 'abandon') {
-      mission.block({ verdict: 'abandon', reasons: [...input.reasons] });
+      mission.block({ verdict: 'abandon', reasons: [...input.reasons], authority });
       await this.#event(mission, 'final_review.abandoned', { reasons: input.reasons });
       await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
       return { status: mission.status };
@@ -2087,7 +2113,7 @@ export class Platform {
       });
       if (!outcome.ok) {
         // 落不了地不算完成，也不该假装完成。转 blocked，原因说清楚。
-        mission.block({ verdict: 'merge', reasons: [outcome.reason ?? '合并失败'] });
+        mission.block({ verdict: 'merge', reasons: [outcome.reason ?? '合并失败'], authority });
         await this.#event(mission, 'final_review.merge_failed', { reason: outcome.reason });
         return { status: mission.status, reason: outcome.reason };
       }
@@ -2099,6 +2125,7 @@ export class Platform {
       reasons: [...input.reasons],
       mergedInto,
       mergedAt: new Date().toISOString(),
+      authority,
     });
     await this.#event(mission, 'final_review.merged', { mergedInto, reasons: input.reasons });
     await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);

@@ -292,3 +292,91 @@ describe('给 L3 看的改动摘要', () => {
     assert.equal(git(repo, 'show', 'HEAD:NEW.md'), '全新的文件');
   });
 });
+
+/**
+ * 谁放行的，必须记下来（F1）。
+ *
+ * 由来：无人值守推进时，机器放行的 Mission 早上看起来和人工放行的一模一样。
+ * 不记权威就回答不了「这是谁放的」——而出事后第一个要问的就是这个。
+ */
+describe('最终检视权威', () => {
+  test('merge 记下人类权威', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+
+    await platform.finalizeMission('M1', {
+      verdict: 'merge',
+      reasons: ['ok'],
+      projectRoot: repo,
+    });
+
+    const view = await platform.getMissionView('M1');
+    assert.deepEqual(view.finalReview?.authority, { kind: 'human' });
+  });
+
+  test('有 principalId 就记下是谁', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+
+    await platform.finalizeMission('M1', {
+      verdict: 'merge',
+      reasons: ['ok'],
+      projectRoot: repo,
+      authority: { kind: 'human', principalId: 'echo' },
+    });
+
+    const view = await platform.getMissionView('M1');
+    assert.deepEqual(view.finalReview?.authority, { kind: 'human', principalId: 'echo' });
+  });
+
+  test('send_back 也记权威 —— 打回同样是一次放行判断', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+
+    await platform.finalizeMission('M1', {
+      verdict: 'send_back',
+      reasons: ['再改'],
+      projectRoot: repo,
+    });
+
+    const view = await platform.getMissionView('M1');
+    assert.deepEqual(view.finalReview?.authority, { kind: 'human' });
+  });
+
+  /**
+   * 这一条是整票的要害：能从外面写一个 kind 上去，权威就等于没有。
+   * 同 promoteMissionToStandard 拒绝 budget_exceeded 的纪律。
+   */
+  test('公开入口拒绝机器权威', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+
+    await assert.rejects(
+      () =>
+        platform.finalizeMission('M1', {
+          verdict: 'merge',
+          reasons: ['ok'],
+          projectRoot: repo,
+          authority: {
+            kind: 'machine',
+            integrationReportId: 'VAL-forged',
+            policyRevision: 1,
+          } as never,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError &&
+        error.code === 'FINAL_REVIEW_AUTHORITY_FORBIDDEN',
+    );
+
+    // 被拒之后 Mission 一点没动：不留半套流转。
+    assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+  });
+});

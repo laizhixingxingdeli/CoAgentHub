@@ -550,11 +550,33 @@ export interface WorkspaceRef {
  * L3 看的是 Contract、架构边界和 Project Memory 变化，不是重做一遍 L2 的
  * 技术验收。`mergedInto` 记下改动实际落到了哪。
  */
+/**
+ * 谁做的最终检视。形状照 {@link ReviewAuthority}：判别联合，各自带可追溯凭据。
+ *
+ * **为什么必须记。** 无人值守推进时，一条被机器放行的 Mission 早上看起来和
+ * 人工放行的一模一样。不记权威就回答不了「这是谁放的」——而出事后第一个要问的
+ * 就是这个。
+ *
+ * `human` 的 `principalId` 可缺：`l3.ts` 目前没有身份概念，只有注入
+ * ControlPrincipal 时才知道是谁。**宁可记「人，但不知道是谁」，也不要留空让它
+ * 看起来像没人放行过。**
+ */
+export type FinalReviewAuthority =
+  | { readonly kind: 'human'; readonly principalId?: string }
+  | {
+      /** 机器放行：必须指向一次**合并之后**在集成分支上跑出来的验证报告。 */
+      readonly kind: 'machine';
+      readonly integrationReportId: string;
+      readonly policyRevision: number;
+    };
+
 export interface FinalReview {
   readonly verdict: 'merge' | 'send_back' | 'abandon';
   readonly reasons: readonly string[];
   readonly mergedInto?: string;
   readonly mergedAt?: string;
+  /** 旧快照没有这个字段；恢复时保持 undefined，**不伪造成 human**。 */
+  readonly authority?: FinalReviewAuthority;
 }
 
 export interface EscalationBody {
