@@ -191,6 +191,27 @@ export interface WorkspaceManager {
    * 不经 HTTP / agent tool 暴露。
    */
   showRootPackageJson?(cwd: string, revision: string): Promise<string | undefined>;
+  /**
+   * 项目仓库当前在哪条分支上。detached HEAD → undefined。
+   *
+   * **为什么要暴露。** `prepare` 把「当时 checkout 的那条分支」记成合并目标，有人
+   * 盯着时没问题；无人值守连跑多个 Mission 时就不是——中途要是有别的东西 checkout
+   * 回 master，后续功能会**静默合进 master**，而那正是集成分支要防的事。机器放行
+   * 前必须能自己核对一次，不能只依赖「开跑前是对的」。
+   */
+  currentBranch?(projectRoot: string): Promise<string | undefined>;
+  /**
+   * 把目标分支**硬退**回某个版本。只用于撤销平台自己刚做的那次合并。
+   *
+   * `expectedHead` 是防呆：只有目标分支仍停在我们合出来的那个 commit 上才退。
+   * 不一致说明期间有别的东西提交过——这时 reset 会连别人的提交一起抹掉。
+   * 宁可留一个没验过的合并让人来看，也不要悄悄删别人的东西。
+   */
+  resetTarget?(input: {
+    projectRoot: string;
+    toRevision: string;
+    expectedHead: string;
+  }): Promise<{ ok: boolean; reason?: string }>;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
@@ -317,6 +338,36 @@ export class GitWorktreeManager implements WorkspaceManager {
       .then((r) => r.stdout.trim())
       .catch(() => ''));
     return name && name !== 'HEAD' ? name : undefined;
+  }
+
+  async currentBranch(projectRoot: string): Promise<string | undefined> {
+    return this.#currentBranch(resolve(projectRoot));
+  }
+
+  async resetTarget(input: {
+    projectRoot: string;
+    toRevision: string;
+    expectedHead: string;
+  }): Promise<{ ok: boolean; reason?: string }> {
+    const repo = resolve(input.projectRoot);
+    const head = await this.targetHead(repo).catch(() => undefined);
+    if (head === undefined) {
+      return { ok: false, reason: `读不到 ${repo} 的 HEAD，不退。` };
+    }
+    if (head !== input.expectedHead) {
+      // 期间有别的提交。退回去会把它们一起抹掉。
+      return {
+        ok: false,
+        reason:
+          `目标分支 HEAD 已经是 ${head.slice(0, 12)}，不是我们合出来的 ` +
+          `${input.expectedHead.slice(0, 12)}；期间有别的提交，拒绝 reset。`,
+      };
+    }
+    const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
+    if ((reset as { failed?: boolean }).failed) {
+      return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+    }
+    return { ok: true };
   }
 
   async head(cwd: string): Promise<string> {
