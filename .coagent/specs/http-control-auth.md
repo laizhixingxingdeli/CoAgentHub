@@ -1,41 +1,55 @@
-# HTTP 控制面可选鉴权（SEC-002）
+# HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
 
-`createApi` 可注入 `resolveControlPrincipal`；**不注入**时写路由保持历史匿名可写行为（本地与既有测试零摩擦）。注入后，受保护控制写路径在进入原业务逻辑前按 Principal 角色门禁。
+`createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。
 
-与 `/api/agent/*` 的 `x-coagent-run` Run Token **正交**：控制凭据不能替代 Run Token，Run Token 也不能替代控制面身份。
+与 `/api/agent/*` 和 `/api/run/brief` 的 `x-coagent-run` Run Token **正交**：control 凭据不能替代 Run Token，Run Token 也不能替代控制面身份。
 
-## 注入后的写门禁
+Principal 形状仍为 `{ id, role }`，`role` 为 `operator | viewer`。凭据如何从请求取出、何时过期由调用方 resolver 决定，本能力不拥有 TTL 或凭据时长策略。
 
-受保护写路由调用 `requireControl`：
+resolver 允许三类结果：
+- `undefined`：缺失或未知凭据 → `401 CONTROL_UNAUTHORIZED`。
+- `{ status: 'expired' }`：已识别但过期 → `401 CONTROL_EXPIRED`。
+- `{ id, role }`：已认证 Principal。
 
-| 条件 | HTTP | `error` 码 |
+所有认证错误都不得回显原始控制凭据。
+
+## 权限矩阵
+
+| 路径类别 | viewer | operator |
 | --- | --- | --- |
-| 缺失或未知控制凭据（resolver 返回 `undefined`） | 401 | `CONTROL_UNAUTHORIZED` |
-| 已识别但非 operator（如 `viewer`） | 403 | `CONTROL_FORBIDDEN` |
-| `role === 'operator'` | 进入原业务路径（业务层仍可返回 4xx，但不是本门禁的 401/403） | — |
+| 敏感 GET | 允许 | 允许 |
+| 控制写 / ACK | 403 | 允许 |
+| `/api/health`、`/api/version` | 公开 | 公开 |
+| `/api/agent/*`、`/api/run/brief` | 只看 Run Token | 只看 Run Token |
 
-错误响应体**不得**回显原始控制凭据（token 字符串等）。
+resolver 若返回当前契约之外的角色，服务端 fail-closed 为 `403 CONTROL_FORBIDDEN`。
+## 受保护的敏感读
 
-Principal 形状：`{ id, role }`，`role` 为 `operator | viewer`。凭据如何从请求取出由调用方注入的 resolver 决定（测试常用自定义头）；本切片不绑定具体头名到生产接线。
+注入 resolver 后，下列 GET 要求 viewer 或 operator：
+- `/api/usage`、`/api/runtime/models`、`/api/projects`、`/api/pools`、`/api/missions`。
+- Mission 详情、activity、live、attempt detail、diff。
+- `/api/inbox`。
 
-## 本切片受保护的写路由类别
+这些接口会暴露任务意图、等待原因、用量、运行时资源、事件、输出、证据或投递信息，因此不再作为匿名观测面。
 
-- **Mission create / contract / control / finalize / escalation answer**  
-  例如：`POST /api/missions`、`…/contract`、`…/pause`、`…/resume`、`…/cancel`、`…/finalize`、`…/escalations/answer`
-- **Attempt start / finish**  
-  例如：`POST …/coordinator-attempts`、`…/work-items/:id/executor-attempts`、`…/attempts/:id/finish`
-- **Pool POST**  
-  例如：`POST /api/pools`
+## 受保护的写
 
-## 读路径与 agent 工具
+写路径继续要求 operator：
+- Mission create / classified / contract / pause / resume / cancel / finalize / escalation answer。
+- Coordinator / Executor attempt start 与 attempt finish。
+- Pool POST。
+- `POST /api/deliveries/:id/ack`。
 
-- 本切片**读路径仍匿名**（如 `/api/health`、`/api/version`、`GET /api/missions`、`GET /api/pools` 等），即使已注入 resolver。
-- `/api/agent/*` 仍只认 Run Token；仅带控制凭据、无有效 `x-coagent-run` → `401 UNKNOWN_RUN_TOKEN`。
+Inbox read 与 acknowledge 成对受保护；viewer 可查看 Inbox，但不能确认投递。
 
-## Non-goals（本切片未完成）
+## 公开与 Run Token 路径
 
-- 敏感读路径认证
-- expired control credential（过期控制凭据语义）
-- `startServer` strict auth wiring / Web 端凭据 UX
-- Run Token expiry / scope / audience
-- 完整 PolicyEngine / RBAC、Sandbox、Jev
+- `/api/health`、`/api/version` 保持公开。
+- 静态 Web 资源本身保持公开；其敏感 API 请求受上述门禁。
+- `/api/agent/*` 与 `/api/run/brief` 仍只认 Run Token，不叠加 control auth。
+
+## Non-goals
+
+- `startServer` strict auth wiring / Web 端凭据 UX。
+- Run Token expiry / scope / audience。
+- 完整 PolicyEngine / 通用 RBAC、Sandbox、Jev。

@@ -60,7 +60,7 @@ export interface ApiDeps {
    */
   agentPool?: AgentPoolRepository;
   /**
-   * 控制面 Principal 解析。注入后，受保护写/控制路由要求 operator；
+   * 控制面 Principal 解析。注入后，敏感读允许 viewer/operator，写/控制路由要求 operator；
    * 不注入则保持历史行为（本地与既有测试零摩擦）。
    * 与 /api/agent/* 的 run token 正交，不能互相替代。
    */
@@ -116,17 +116,28 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
-   * 受保护控制写路径：未注入 resolver 直接放行；
-   * 注入后缺失/未知凭据 401，非 operator（如 viewer）403。
+   * 可选控制面门禁：未注入 resolver 直接放行，保持本地/既有调用兼容。
+   * 注入后缺失/未知凭据 401，过期凭据 401；敏感读允许 viewer/operator，
+   * 写操作只允许 operator。异常 resolver 角色 fail-closed 为 403。
    * 错误体不得带回原始凭据。
    */
-  const requireControl = async (req: IncomingMessage): Promise<void> => {
+  const requireControl = async (
+    req: IncomingMessage,
+    access: 'read' | 'write' = 'write',
+  ): Promise<void> => {
     if (!resolveControlPrincipal) return;
-    const principal = await resolveControlPrincipal(req);
-    if (!principal) {
+    const resolved = await resolveControlPrincipal(req);
+    if (!resolved) {
       throw new HttpError(401, 'CONTROL_UNAUTHORIZED', '控制面凭据缺失或未知');
     }
-    if (principal.role !== 'operator') {
+    if ('status' in resolved && resolved.status === 'expired') {
+      throw new HttpError(401, 'CONTROL_EXPIRED', '控制面凭据已过期');
+    }
+    const principal = resolved;
+    if (principal.role !== 'operator' && principal.role !== 'viewer') {
+      throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+    }
+    if (access === 'write' && principal.role !== 'operator') {
       throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
     }
   };
@@ -281,6 +292,7 @@ export function createApi(deps: ApiDeps): Server {
 
     // S11.5：用量报表。projectId / missionId 可选，用来收窄范围。
     if (method === 'GET' && path === '/api/usage') {
+      await requireControl(req, 'read');
       return send(
         res,
         200,
@@ -293,18 +305,21 @@ export function createApi(deps: ApiDeps): Server {
 
     // 可用模型清单。平台自己不认识模型——这里只是把适配层吐的 JSON 转出去。
     if (method === 'GET' && path === '/api/runtime/models') {
+      await requireControl(req, 'read');
       return send(res, 200, await listRuntimeModels());
     }
 
     if (method === 'GET' && path === '/api/projects') {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.listProjects());
     }
 
     /* ---- 候选池（资源池页的原料）。只有列与追加两个动作 ---- */
 
-    // 没有 DELETE / PATCH / PUT，也没有播种：这页没有鉴权，而读路径带副作用
-    // 意味着「打开界面看一眼」就能改写别人的配置。
+    // 没有 DELETE / PATCH / PUT，也没有播种：GET 只读且受 control-read 门禁；
+    // 「打开界面看一眼」不会改写候选池配置。
     if (method === 'GET' && path === '/api/pools') {
+      await requireControl(req, 'read');
       return send(res, 200, await agentPool.list());
     }
 
@@ -335,11 +350,13 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     if (method === 'GET' && path === '/api/missions') {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.listMissions());
     }
 
     const activityMatch = /^\/api\/missions\/([^/]+)\/activity$/.exec(path);
     if (method === 'GET' && activityMatch) {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.getActivity(activityMatch[1]));
     }
 
@@ -351,6 +368,7 @@ export function createApi(deps: ApiDeps): Server {
     // SSE 这些都得自己处理。
     const liveMatch = /^\/api\/missions\/([^/]+)\/live$/.exec(path);
     if (method === 'GET' && liveMatch) {
+      await requireControl(req, 'read');
       const cursor = Number(url.searchParams.get('cursor') ?? 0);
       const chunks = await live.since(liveMatch[1], Number.isFinite(cursor) ? cursor : 0);
       return send(res, 200, {
@@ -363,6 +381,7 @@ export function createApi(deps: ApiDeps): Server {
     // attempt id 里带点（W-1.exec-1），所以尾段用 (.+) 而不是 ([^/]+)。
     const attemptMatch = /^\/api\/missions\/([^/]+)\/attempts\/(.+)$/.exec(path);
     if (method === 'GET' && attemptMatch) {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.getAttemptDetail(attemptMatch[1], attemptMatch[2]));
     }
 
@@ -397,6 +416,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
@@ -404,6 +424,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const diffMatch = /^\/api\/missions\/([^/]+)\/diff$/.exec(path);
     if (method === 'GET' && diffMatch) {
+      await requireControl(req, 'read');
       return send(res, 200, await platform.getMissionDiff(diffMatch[1]));
     }
 
@@ -442,12 +463,14 @@ export function createApi(deps: ApiDeps): Server {
     /* ---- 收件箱：结果回到发起方。Host 离线时结果就在这儿等着 ---- */
 
     if (method === 'GET' && path === '/api/inbox') {
+      await requireControl(req, 'read');
       const recipient = url.searchParams.get('recipient') ?? undefined;
       return send(res, 200, { pending: await deliveries.pending(recipient) });
     }
 
     const ackMatch = /^\/api\/deliveries\/([^/]+)\/ack$/.exec(path);
     if (method === 'POST' && ackMatch) {
+      await requireControl(req);
       const delivery = await deliveries.acknowledge(ackMatch[1]);
       if (!delivery) throw new HttpError(404, 'UNKNOWN_DELIVERY', `没有这条投递：${ackMatch[1]}`);
       return send(res, 200, delivery);

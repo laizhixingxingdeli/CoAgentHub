@@ -16,9 +16,27 @@ export interface ControlPrincipal {
 }
 
 /**
- * 从请求解出控制面身份。返回 undefined = 缺失或未知凭据 → 401。
+ * resolver 已识别凭据、但凭据本身已经失效。
+ *
+ * 过期判定属于凭据提供方；Hub 不拥有 TTL，也不在这里发明任何时长策略。
+ */
+export interface ExpiredControlCredential {
+  readonly status: 'expired';
+}
+
+export type ControlPrincipalResolution =
+  | ControlPrincipal
+  | ExpiredControlCredential
+  | undefined;
+
+/**
+ * 从请求解出控制面身份。
+ * - undefined = 缺失或未知凭据；
+ * - { status: 'expired' } = 已识别但已过期；
+ * - ControlPrincipal = 已认证身份。
+ *
  * 不得把原始 token 写进日志、错误体或 activity。
  */
 export type ControlPrincipalResolver = (
   req: IncomingMessage,
-) => ControlPrincipal | undefined | Promise<ControlPrincipal | undefined>;
+) => ControlPrincipalResolution | Promise<ControlPrincipalResolution>;
