@@ -89,7 +89,7 @@ describe('实时输出：游标语义', () => {
     const live = new InMemoryLiveOutput();
     await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: 'x' });
     await live.append({ missionId: 'M1', attemptId: 'A2', kind: 'text', text: 'y' });
-    await live.finish('A1');
+    await live.finish('M1', 'A1');
     // 这一条曾经断言的是相反的事（收尾把 A1 删干净）。那个行为把"跑完的任务
     // 没有历史"当成了设计，而 Attempt.output 实测只有 1.4 KB，补不上。
     assert.deepEqual(
@@ -105,7 +105,9 @@ describe('实时输出：游标语义', () => {
     for (let i = 0; i < total; i += 1) {
       await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: `行 ${i}` });
     }
-    await live.finish('A1');
+    await live.append({ missionId: 'M2', attemptId: 'A1', kind: 'text', text: 'M2-0' });
+    await live.append({ missionId: 'M2', attemptId: 'A1', kind: 'text', text: 'M2-1' });
+    await live.finish('M1', 'A1');
     const kept = await live.since('M1', 0, 10_000);
 
     const notes = kept.filter((c) => c.kind === 'note');
@@ -116,6 +118,11 @@ describe('实时输出：游标语义', () => {
     assert.equal(text.length, KEEP_TAIL_ON_FINISH);
     assert.equal(text.at(-1)?.text, `行 ${total - 1}`, '留的该是尾巴，不是开头');
     assert.equal(text[0]?.text, '行 25');
+    assert.deepEqual(
+      (await live.since('M2')).map((c) => c.text),
+      ['M2-0', 'M2-1'],
+      '相同 attemptId 的其它 Mission 不得被 finish 误裁剪',
+    );
   });
 });
 
@@ -210,7 +217,7 @@ describe('实时输出：跨进程（Postgres）', () => {
       await writer.append({ missionId: 'M-live', attemptId: 'A1', kind: 'text', text: '第二条' });
       assert.equal((await reader.since('M-live', chunks[0].seq)).length, 1);
 
-      await writer.finish('A1');
+      await writer.finish('M-live', 'A1');
       assert.equal(
         (await reader.since('M-live')).length,
         2,
@@ -231,7 +238,9 @@ describe('实时输出：跨进程（Postgres）', () => {
     for (let i = 0; i < total; i += 1) {
       await live.append({ missionId: 'M-trim', attemptId: 'A-trim', kind: 'text', text: `行 ${i}` });
     }
-    await live.finish('A-trim');
+    await live.append({ missionId: 'M-other', attemptId: 'A-trim', kind: 'text', text: 'other-0' });
+    await live.append({ missionId: 'M-other', attemptId: 'A-trim', kind: 'text', text: 'other-1' });
+    await live.finish('M-trim', 'A-trim');
 
     // limit 要给足：默认 500 正好等于保留量，取不出那条 note 就断言不到裁剪。
     const kept = await live.since('M-trim', 0, 10_000);
@@ -240,5 +249,10 @@ describe('实时输出：跨进程（Postgres）', () => {
     assert.equal(text[0]?.text, '行 12', 'DELETE … ORDER BY seq DESC OFFSET 删的必须是最早的');
     assert.equal(text.at(-1)?.text, `行 ${total - 1}`);
     assert.equal(kept.filter((c) => c.kind === 'note').length, 1);
+    assert.deepEqual(
+      (await live.since('M-other')).map((c) => c.text),
+      ['other-0', 'other-1'],
+      'Postgres 也不能误裁剪相同 attemptId 的其它 Mission',
+    );
   });
 });

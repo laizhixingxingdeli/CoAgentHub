@@ -1043,8 +1043,8 @@ export class Orchestrator {
           toolCalls: outcome?.toolCalls,
           resolvedProfile: outcome?.resolvedProfile,
         });
-        // 最终输出已经落在 Attempt 上了，实时缓冲留着就是同一份数据存两遍。
-        await this.#live.finish?.(attemptId).catch(() => undefined);
+        // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
+        await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
         this.#tokens.revoke(token);
       }
 

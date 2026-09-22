@@ -871,29 +871,21 @@ export class PgLiveOutput implements LiveOutput {
    *
    * 裁掉多少补一条 note 记下来：悄悄截断会让人把残段当全貌。
    */
-  async finish(attemptId: string): Promise<void> {
+  async finish(missionId: string, attemptId: string): Promise<void> {
     const { rows } = await this.#store.pool.query<{ dropped: string }>(
       `WITH doomed AS (
          SELECT seq FROM live_output
-          WHERE attempt_id = $1
+          WHERE mission_id = $1 AND attempt_id = $2
           ORDER BY seq DESC
-         OFFSET $2
+         OFFSET $3
        )
        DELETE FROM live_output
         WHERE seq IN (SELECT seq FROM doomed)
        RETURNING seq`,
-      [attemptId, KEEP_TAIL_ON_FINISH],
+      [missionId, attemptId, KEEP_TAIL_ON_FINISH],
     );
     const dropped = rows.length;
     if (dropped === 0) return;
-    // missionId 从幸存的行里取：finish 的签名只有 attemptId，而 note 这一行
-    // 必须挂在同一条 Mission 上才看得见。
-    const { rows: survivors } = await this.#store.pool.query<{ mission_id: string }>(
-      'SELECT mission_id FROM live_output WHERE attempt_id = $1 LIMIT 1',
-      [attemptId],
-    );
-    const missionId = survivors[0]?.mission_id;
-    if (!missionId) return;
     await this.append({
       missionId,
       attemptId,

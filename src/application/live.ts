@@ -48,12 +48,13 @@ export interface LiveOutput {
   /** 取 `cursor` 之后的；不传 cursor 表示从头。 */
   since(missionId: string, cursor?: number, limit?: number): Promise<readonly LiveChunk[]>;
   /**
-   * 一跳结束后裁剪它的实时缓冲，只留尾部若干行。
+   * 一跳结束后按 missionId + attemptId 裁剪它的实时缓冲，只留尾部若干行。
+   * Attempt ID 只保证 Mission 内唯一，不能单独作为清理键。
    *
    * 裁掉多少**必须留下痕迹**（补一条 kind='note'）。悄悄截断的日志比没有日志
    * 更坏：人会把看到的那一段当成全部，然后在一段被裁掉的历史上做判断。
    */
-  finish?(attemptId: string): Promise<void>;
+  finish?(missionId: string, attemptId: string): Promise<void>;
 }
 
 /**
@@ -96,11 +97,15 @@ export class InMemoryLiveOutput implements LiveOutput {
       .slice(0, limit);
   }
 
-  async finish(attemptId: string): Promise<void> {
-    const mine = this.#chunks.filter((c) => c.attemptId === attemptId);
+  async finish(missionId: string, attemptId: string): Promise<void> {
+    const mine = this.#chunks.filter(
+      (c) => c.missionId === missionId && c.attemptId === attemptId,
+    );
     if (mine.length <= KEEP_TAIL_ON_FINISH) return;
     const keep = new Set(mine.slice(-KEEP_TAIL_ON_FINISH).map((c) => c.seq));
-    this.#chunks = this.#chunks.filter((c) => c.attemptId !== attemptId || keep.has(c.seq));
+    this.#chunks = this.#chunks.filter(
+      (c) => c.missionId !== missionId || c.attemptId !== attemptId || keep.has(c.seq),
+    );
     await this.append({
       missionId: mine[0].missionId,
       attemptId,
