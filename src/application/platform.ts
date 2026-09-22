@@ -40,6 +40,7 @@ import type {
   TokenUsage,
   UsedProfile,
   ValidationReport,
+  ValidationCheckResult,
   WaitReason,
   WorkItem,
   WorkOrder,
@@ -49,6 +50,8 @@ import type { ActivityLog, Clock, DecisionProvider, IdGenerator, ProjectReposito
 import type { DeliveryRepository } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
+import type { CommandRunner } from './validation/ports.ts';
+import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -111,6 +114,15 @@ export interface PlatformValidationDeps {
     save(report: ValidationReport): Promise<void>;
     get(reportId: string): Promise<ValidationReport | undefined>;
   };
+  /**
+   * 跑方案级集成命令用。缺了就没有机器放行——fail-closed，不退化成「不验直接合」。
+   *
+   * 与 `engine` 分开：engine 验的是单条 Mission 自己的 diff（allowedScope /
+   * changed-paths / diff-size），跑在合并**之前**的独立 worktree 里；集成检查只做
+   * 一件事——在合并**之后**的集成分支上跑一组命令，看这个功能有没有打坏别人。
+   * 两者证据来源不同，不能互相顶替。
+   */
+  readonly commandRunner?: CommandRunner;
 }
 
 /** 平台规则被违反（区别于领域流转错误）。 */
@@ -2130,6 +2142,205 @@ export class Platform {
     await this.#event(mission, 'final_review.merged', { mergedInto, reasons: input.reasons });
     await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
     return { status: mission.status, mergedInto };
+  }
+
+  /**
+   * 机器 L3：合进集成分支，**在合并结果上**跑方案级验证，绿才放行。
+   *
+   * 顺序是这一票的全部要害，不能改：
+   *
+   * 1. **钉分支**——核对项目仓现在确实在集成分支上。合并目标取自「当时 checkout
+   *    的分支」，无人值守连跑时要是有别的东西 checkout 回了 master，后续功能会
+   *    静默合进 master。
+   * 2. **先落锚点事件再合**——进程死在「已合并、未验证」之间时，得有东西知道该
+   *    退回哪。握在内存里等于没有。
+   * 3. **验证插在 merge 与 complete 之间**——`completed` 在流转表里没有出边
+   *    （`MISSION_TRANSITIONS.completed = []`）。先 complete 再验，红了就只能退
+   *    git、退不了状态，两边当场分叉。
+   * 4. 红 → 退回锚点，Mission **留在 `awaiting_review`** 等人：机器判不了不等于
+   *    这条完了。
+   *
+   * 不接 HTTP、不进 agent tools：机器权威只能从这里发。
+   */
+  async finalizeMissionByMachine(
+    missionId: string,
+    input: {
+      readonly integrationBranch: string;
+      readonly verification: readonly {
+        readonly argv: readonly string[];
+        readonly timeoutMs: number;
+      }[];
+      readonly projectRoot?: string;
+    },
+  ): Promise<{
+    status: string;
+    mergedInto?: string;
+    reportId?: string;
+    reason?: string;
+    rolledBackTo?: string;
+  }> {
+    const { mission } = await this.#locate(missionId);
+    if (mission.status !== 'awaiting_review') {
+      throw new PlatformRuleError(
+        'NOT_AWAITING_REVIEW',
+        `Mission ${missionId} 现在是 ${mission.status}，没有在等最终检视。`,
+      );
+    }
+    if (input.verification.length === 0) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_NEEDS_VERIFICATION',
+        '机器放行必须有方案级集成命令。空命令表 = 没有新证据，那就只是把 ' +
+          'validator 那份报告又数了一遍。',
+      );
+    }
+    const runner = this.#validation?.commandRunner;
+    const reports = this.#validation?.reports;
+    if (!runner || !reports) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '没注入 commandRunner / reports，机器放行不可用。不退化成不验直接合。',
+      );
+    }
+    const projectRoot = input.projectRoot ?? mission.workspaceRef?.projectRoot;
+    if (!this.#workspace || !projectRoot) {
+      throw new PlatformRuleError('NO_WORKSPACE_MANAGER', '机器放行要知道项目仓库在哪。');
+    }
+    const workspace = this.#workspace;
+    if (!workspace.currentBranch || !workspace.resetTarget) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '工作区管理不支持 currentBranch / resetTarget，机器放行不可用。',
+      );
+    }
+
+    // 1. 钉分支
+    const branch = await workspace.currentBranch(projectRoot);
+    if (branch !== input.integrationBranch) {
+      throw new PlatformRuleError(
+        'INTEGRATION_BRANCH_MISMATCH',
+        `项目仓现在在 ${branch ?? '(detached)'}，不是方案声明的 ${input.integrationBranch}。` +
+          '拒绝合并——合错分支比不合更糟。',
+      );
+    }
+
+    // 2. 锚点先落事件
+    const anchor = await workspace.targetHead(projectRoot);
+    await this.#event(mission, 'final_review.integration_anchor', {
+      integrationBranch: input.integrationBranch,
+      anchor,
+    });
+
+    const ref = mission.workspaceRef;
+    if (!ref) {
+      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
+    }
+    const merged = await workspace.mergeToTarget({
+      missionId,
+      projectRoot,
+      branch: ref.branch,
+      expectedBaseRevision: ref.baseRevision,
+    });
+    if (!merged.ok) {
+      mission.block({
+        verdict: 'merge',
+        reasons: [merged.reason ?? '合并失败'],
+        authority: { kind: 'human' },
+      });
+      await this.#event(mission, 'final_review.merge_failed', { reason: merged.reason });
+      return { status: mission.status, reason: merged.reason };
+    }
+    const mergedInto = merged.mergedInto;
+
+    // 3. 在合并结果上验证
+    const startedAt = this.#clock.now().toISOString();
+    const checks: ValidationCheckResult[] = [];
+    for (const command of input.verification) {
+      const at = this.#clock.now().toISOString();
+      const result = await runner.run({
+        argv: command.argv,
+        cwd: projectRoot,
+        timeoutMs: command.timeoutMs,
+      });
+      checks.push(
+        Object.freeze({
+          kind: 'command' as const,
+          passed: result.exitCode === 0 && !result.timedOut,
+          startedAt: at,
+          endedAt: this.#clock.now().toISOString(),
+          summary: `${command.argv.join(' ')} → ${result.timedOut ? 'timeout' : String(result.exitCode)}`,
+          command: Object.freeze({
+            argv: Object.freeze([...command.argv]),
+            cwd: projectRoot,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: result.durationMs,
+            outputTail: result.output.slice(-2000),
+          }),
+        }),
+      );
+    }
+    const passed = checks.every((check) => check.passed);
+    const report: ValidationReport = Object.freeze({
+      id: this.#ids.next('IVAL'),
+      policyRevision: VALIDATION_POLICY_REVISION,
+      missionId,
+      startedAt,
+      endedAt: this.#clock.now().toISOString(),
+      passed,
+      checks: Object.freeze(checks),
+    });
+    await reports.save(report);
+    await this.#event(mission, 'final_review.integration_verified', {
+      reportId: report.id,
+      passed,
+      mergedInto,
+    });
+
+    // 4. 红就退回锚点，Mission 留在 awaiting_review
+    if (!passed) {
+      const reset = await workspace.resetTarget({
+        projectRoot,
+        toRevision: anchor,
+        expectedHead: mergedInto ?? anchor,
+      });
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证未通过（报告 ${report.id}）；` +
+          (reset.ok
+            ? `已退回 ${anchor.slice(0, 12)}，等人处置。`
+            : `**退回失败**：${reset.reason} 集成分支上留着一个没验过的合并。`),
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: report.id,
+        rolledBack: reset.ok,
+      });
+      return {
+        status: mission.status,
+        reportId: report.id,
+        reason: reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
+        ...(reset.ok ? { rolledBackTo: anchor } : {}),
+      };
+    }
+
+    mission.complete({
+      verdict: 'merge',
+      reasons: [`集成验证通过（报告 ${report.id}）`],
+      mergedInto,
+      mergedAt: this.#clock.now().toISOString(),
+      authority: Object.freeze({
+        kind: 'machine' as const,
+        integrationReportId: report.id,
+        policyRevision: report.policyRevision,
+      }),
+    });
+    await this.#event(mission, 'final_review.merged', {
+      mergedInto,
+      authority: 'machine',
+      reportId: report.id,
+    });
+    await this.#releaseWorkspace(missionId, projectRoot);
+    return { status: mission.status, mergedInto, reportId: report.id };
   }
 
   /* ============================ L1 执行者面 ============================ */
