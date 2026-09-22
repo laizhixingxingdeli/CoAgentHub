@@ -34,4 +34,18 @@ export class RunTokenRegistry {
   revoke(token: string): void {
     this.#byToken.delete(token);
   }
+
+  /**
+   * 按 Attempt 吊销全部凭据。
+   *
+   * HTTP finish 的权威事实是 URL 里的 missionId + attemptId，不该依赖调用方把 token
+   * 再抄进请求体；同一 Attempt 即使意外发过不止一个 token，也一起失效。
+   */
+  revokeAttempt(missionId: string, attemptId: string): void {
+    for (const [token, context] of this.#byToken) {
+      if (context.missionId === missionId && context.attemptId === attemptId) {
+        this.#byToken.delete(token);
+      }
+    }
+  }
 }

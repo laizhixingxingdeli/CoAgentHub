@@ -217,6 +217,7 @@ describe('读写 .coagent/', () => {
       'execution-budget-gates',
       'lightweight-standard-promotion',
       'decision-jev-off-shadow',
+      'run-token-lifecycle',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

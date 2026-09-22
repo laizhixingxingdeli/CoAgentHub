@@ -502,8 +502,9 @@ export function createApi(deps: ApiDeps): Server {
       const [, missionId, attemptId] = finishMatch;
       const body = await readJson(req);
       await platform.finishAttempt(missionId, attemptId, body as never);
-      // 收尾即吊销：迟到的工具调用应该被拒绝，而不是悄悄写进已经结束的 attempt。
-      if (typeof body.token === 'string') tokens.revoke(body.token);
+      // 收尾即按 Attempt 吊销，不信调用方是否把 token 再抄进 body。
+      // 迟到的工具调用应该被拒绝，而不是悄悄写进已经结束的 Attempt。
+      tokens.revokeAttempt(missionId, attemptId);
       return send(res, 200, {});
     }
 

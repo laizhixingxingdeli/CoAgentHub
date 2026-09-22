@@ -176,10 +176,9 @@ describe('HTTP 面', () => {
     await call(`/api/missions/M-api/attempts/${execAttempt}/finish`, {
       endedBy: 'structured_submit',
       usage: { input: 10, output: 5, cacheRead: 900, cacheWrite: 0, total: 915, quality: 'reported' },
-      token: execToken,
     });
 
-    // 吊销之后迟到的调用必须被拒绝。
+    // finish 不需要调用方回传 token；平台按 attemptId 吊销后，迟到调用仍必须被拒绝。
     const late = await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: '迟到' }, execToken);
     assert.equal(late.status, 401);
 
