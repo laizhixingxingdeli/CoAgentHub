@@ -417,9 +417,43 @@ describe('WorkOrder.validation 合同', () => {
     });
     assert.deepEqual(empty.order?.validation?.commands, []);
     assert.ok(Object.isFrozen(empty.order!.validation!.commands));
+
+    // VAL-002：forbiddenPaths / diffSize 冻结拷贝
+    const withExtras = new WorkItem({
+      id: 'W-val002',
+      missionId: 'M1',
+      title: 'val002 freeze',
+      order: {
+        ...BASE_ORDER,
+        validation: {
+          commands: [],
+          forbiddenPaths: ['src/secret/'],
+          diffSize: { maxChangedFiles: 3, maxChangedLines: 100 },
+        },
+      },
+    });
+    assert.deepEqual(withExtras.order?.validation?.forbiddenPaths, ['src/secret/']);
+    assert.deepEqual(withExtras.order?.validation?.diffSize, {
+      maxChangedFiles: 3,
+      maxChangedLines: 100,
+    });
+    assert.ok(Object.isFrozen(withExtras.order!.validation!.forbiddenPaths));
+    assert.ok(Object.isFrozen(withExtras.order!.validation!.diffSize));
+    const denyMut = ['src/secret/'];
+    const item2 = new WorkItem({
+      id: 'W-val002-m',
+      missionId: 'M1',
+      title: 'm',
+      order: {
+        ...BASE_ORDER,
+        validation: { commands: [], forbiddenPaths: denyMut, diffSize: { maxChangedFiles: 1 } },
+      },
+    });
+    denyMut.push('evil');
+    assert.deepEqual(item2.order?.validation?.forbiddenPaths, ['src/secret/']);
   });
 
-  test('cwd / 未知 key / 空 argv / 空字符串 argv / bad timeout 全拒绝且不创建 item', () => {
+  test('cwd / 未知 key / 空 argv / 空字符串 argv / bad timeout / bad VAL-002 全拒绝且不创建 item', () => {
     const cases: Array<{ label: string; validation: unknown }> = [
       {
         label: 'cwd on command',
@@ -430,6 +464,30 @@ describe('WorkOrder.validation 合同', () => {
       {
         label: 'unknown key on validation',
         validation: { commands: [], shell: true },
+      },
+      {
+        label: 'empty forbiddenPaths entry',
+        validation: { commands: [], forbiddenPaths: [''] },
+      },
+      {
+        label: 'forbiddenPaths not array',
+        validation: { commands: [], forbiddenPaths: 'src/x' },
+      },
+      {
+        label: 'diffSize empty object',
+        validation: { commands: [], diffSize: {} },
+      },
+      {
+        label: 'diffSize extra key',
+        validation: { commands: [], diffSize: { maxChangedFiles: 1, maxBytes: 9 } },
+      },
+      {
+        label: 'diffSize negative',
+        validation: { commands: [], diffSize: { maxChangedFiles: -1 } },
+      },
+      {
+        label: 'diffSize decimal',
+        validation: { commands: [], diffSize: { maxChangedLines: 1.5 } },
       },
       {
         label: 'unknown key on command',
@@ -547,6 +605,45 @@ describe('WorkOrder.validation 合同', () => {
     } as ReturnType<WorkItem['toSnapshot']>);
     assert.equal(legacy.order?.validation, undefined);
     assert.equal(legacy.order?.objective, BASE_ORDER.objective);
+
+    // VAL-002 合法 extras 可 restore
+    const withExtras = new WorkItem({
+      id: 'W-r2',
+      missionId: 'M1',
+      title: 'r2',
+      order: {
+        ...BASE_ORDER,
+        validation: {
+          commands: [],
+          forbiddenPaths: ['docs/'],
+          diffSize: { maxChangedLines: 50 },
+        },
+      },
+    });
+    const restoredExtras = WorkItem.restore(withExtras.toSnapshot());
+    assert.deepEqual(restoredExtras.order?.validation, {
+      commands: [],
+      forbiddenPaths: ['docs/'],
+      diffSize: { maxChangedLines: 50 },
+    });
+
+    // restore 快照含未知 validation key → 丢整个 validation
+    const unknownKeySnap = {
+      ...snap,
+      order: {
+        ...BASE_ORDER,
+        objective: 'keep-me',
+        validation: {
+          commands: [],
+          mystery: true,
+        },
+      },
+    };
+    const restoredUnknown = WorkItem.restore(
+      unknownKeySnap as ReturnType<WorkItem['toSnapshot']>,
+    );
+    assert.equal(restoredUnknown.order?.objective, 'keep-me');
+    assert.equal(restoredUnknown.order?.validation, undefined);
   });
 });
 

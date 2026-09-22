@@ -581,11 +581,13 @@ describe('DETECT-003 static isolation', () => {
   test('engine 仅在 invalidArgv / unsupportedScope 写 failureCode', () => {
     const eng = readFileSync(join(srcRoot, 'application/validation/engine.ts'), 'utf8');
     const matches = eng.match(/failureCode/g) ?? [];
-    // copyCheck 透传 + invalid_argv 写入 + unsupported_scope 写入
-    assert.ok(matches.length >= 3);
+    // copyCheck 透传 + invalid_argv + unsupported_scope(changed-paths) + unsupported_scope(forbidden-paths)
+    assert.ok(matches.length >= 4);
     assert.match(eng, /failureCode:\s*'invalid_argv'/);
     assert.match(eng, /failureCode:\s*'unsupported_scope'/);
-    // 不得在 timeout/runner catch 路径旁出现额外字面量
-    assert.equal((eng.match(/failureCode:\s*'/g) ?? []).length, 2);
+    // 字面量只允许 invalid_argv×1 + unsupported_scope×2；不得在 timeout/runner/deny-hit/size 路径旁出现
+    assert.equal((eng.match(/failureCode:\s*'/g) ?? []).length, 3);
+    assert.equal((eng.match(/failureCode:\s*'invalid_argv'/g) ?? []).length, 1);
+    assert.equal((eng.match(/failureCode:\s*'unsupported_scope'/g) ?? []).length, 2);
   });
 });

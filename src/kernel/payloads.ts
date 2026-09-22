@@ -226,12 +226,26 @@ export interface WorkOrderValidationCommand {
 }
 
 /**
+ * Frozen WorkOrder 上可选的 diff 体积上限（VAL-002）。
+ *
+ * 至少一项；缺省 = 该检查不在 force。**不得**从 ExecutionBudget / promotion 抄默认值。
+ */
+export interface WorkOrderValidationDiffSize {
+  readonly maxChangedFiles?: number;
+  readonly maxChangedLines?: number;
+}
+
+/**
  * Frozen WorkOrder 可选的结构化 Validator command spec。
  *
  * `commands` 允许空数组（表示仅靠后续 changed-paths 等检查；是否足够由 Platform 决定）。
+ * `forbiddenPaths` / `diffSize` 缺省 = 对应检查不在 force（VAL-001 路径不变）。
  */
 export interface WorkOrderValidationSpec {
   readonly commands: readonly WorkOrderValidationCommand[];
+  /** 显式 denylist；`[]` 仍算在 force（无 forbidden → pass）。 */
+  readonly forbiddenPaths?: readonly string[];
+  readonly diffSize?: WorkOrderValidationDiffSize;
 }
 
 export interface WorkOrder {
@@ -351,13 +365,20 @@ export type ReviewAuthority =
   | { readonly kind: 'coordinator'; readonly attemptId: string }
   | { readonly kind: 'validator'; readonly reportId: string; readonly policyRevision: number };
 
-export type ValidationCheckKind = 'command' | 'changed-paths';
+export type ValidationCheckKind =
+  | 'command'
+  | 'changed-paths'
+  | 'forbidden-paths'
+  | 'diff-size';
 
 /**
  * 机器可证明的结构性验收契约缺陷码。
  * 仅当 Frozen WorkOrder 本身不可执行/不可支撑时写入；可选以兼容旧报告。
  */
 export type ValidationCheckFailureCode = 'invalid_argv' | 'unsupported_scope';
+
+/** diff-size 检查中无法计量的维度（in-force 时 fail-closed）。 */
+export type ValidationDiffSizeUnknownDimension = 'changedFiles' | 'changedLines';
 
 export interface ValidationCheckResult {
   readonly kind: ValidationCheckKind;
@@ -380,6 +401,23 @@ export interface ValidationCheckResult {
     readonly actual: readonly string[];
     readonly violations: readonly string[];
     readonly unsupportedScope: readonly string[];
+  };
+  readonly forbiddenPaths?: {
+    readonly forbiddenScope: readonly string[];
+    readonly actual: readonly string[];
+    readonly violations: readonly string[];
+    readonly unsupportedScope: readonly string[];
+  };
+  readonly diffSize?: {
+    readonly limits: {
+      readonly maxChangedFiles?: number;
+      readonly maxChangedLines?: number;
+    };
+    readonly used: {
+      readonly changedFiles?: number;
+      readonly changedLines?: number;
+    };
+    readonly unknown: readonly ValidationDiffSizeUnknownDimension[];
   };
 }
 

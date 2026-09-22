@@ -1,7 +1,8 @@
 /**
  * ValidationEngine — 独立于 Executor 自报的确定性验收最小竖切。
  *
- * 只做 command + changed-paths；产出不可变 ValidationReport。
+ * 跑 command* + changed-paths；当 Frozen WorkOrder.validation 携带配置时
+ * 追加 forbidden-paths / diff-size（VAL-002）。产出不可变 ValidationReport。
  * 全部通过时返回 validator ReviewAuthority；失败不签发权威。
  * 不接 WorkItem 状态机 / Platform / Orchestrator，不自动 accept。
  */
@@ -10,10 +11,12 @@ import { freezeDeep } from '../../kernel/index.ts';
 import type {
   ReviewAuthority,
   ValidationCheckResult,
+  ValidationDiffSizeUnknownDimension,
   ValidationReport,
+  WorkOrderValidationDiffSize,
 } from '../../kernel/index.ts';
 import type { Clock, IdGenerator } from '../ports.ts';
-import type { ChangedPathReader, CommandRunner } from './ports.ts';
+import type { ChangedPathReader, CommandRunner, DiffFactReader } from './ports.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -41,6 +44,10 @@ export interface ValidationInput {
   readonly attemptId?: string;
   readonly allowedScope: readonly string[];
   readonly commands: readonly ValidationCommand[];
+  /** 显式 denylist；`undefined` = 检查不在 force；`[]` = 在 force 且无 forbidden。 */
+  readonly forbiddenPaths?: readonly string[];
+  /** 显式体积上限；`undefined` = 检查不在 force。 */
+  readonly diffSize?: WorkOrderValidationDiffSize;
 }
 
 export interface ValidationEngineResult {
@@ -53,17 +60,21 @@ export class ValidationEngine {
   #ids: IdGenerator;
   #runner: CommandRunner;
   #paths: ChangedPathReader;
+  #diffFacts: DiffFactReader | undefined;
 
   constructor(deps: {
     clock: Clock;
     ids: IdGenerator;
     commandRunner: CommandRunner;
     changedPathReader: ChangedPathReader;
+    /** maxChangedLines 在 force 且缺省 reader → 该维 unknown → fail。 */
+    diffFactReader?: DiffFactReader;
   }) {
     this.#clock = deps.clock;
     this.#ids = deps.ids;
     this.#runner = deps.commandRunner;
     this.#paths = deps.changedPathReader;
+    this.#diffFacts = deps.diffFactReader;
   }
 
   async validate(input: ValidationInput): Promise<ValidationEngineResult> {
@@ -74,6 +85,13 @@ export class ValidationEngine {
       checks.push(await this.#runCommandCheck(command));
     }
     checks.push(await this.#runChangedPathsCheck(input));
+
+    if (input.forbiddenPaths !== undefined) {
+      checks.push(await this.#runForbiddenPathsCheck(input));
+    }
+    if (input.diffSize !== undefined) {
+      checks.push(await this.#runDiffSizeCheck(input));
+    }
 
     const endedAt = this.#clock.now().toISOString();
     const passed = checks.every((c) => c.passed);
@@ -230,6 +248,162 @@ export class ValidationEngine {
       },
     });
   }
+
+  async #runForbiddenPathsCheck(input: ValidationInput): Promise<ValidationCheckResult> {
+    const startedAt = this.#clock.now().toISOString();
+    const forbiddenRaw = [...(input.forbiddenPaths ?? [])];
+
+    let actualRaw: string[] = [];
+    let readError: string | undefined;
+    try {
+      actualRaw = [...(await this.#paths.listChanged({
+        missionId: input.missionId,
+        baseRevision: input.baseRevision,
+        projectRoot: input.projectRoot,
+      }))];
+    } catch (err) {
+      readError = err instanceof Error ? err.message : String(err);
+    }
+
+    const endedAt = this.#clock.now().toISOString();
+
+    if (readError) {
+      return freezeDeep({
+        kind: 'forbidden-paths' as const,
+        passed: false,
+        startedAt,
+        endedAt,
+        summary: `forbidden-paths read failed: ${readError}`,
+        forbiddenPaths: {
+          forbiddenScope: Object.freeze(forbiddenRaw.map(normalizePath)) as readonly string[],
+          actual: Object.freeze([]) as readonly string[],
+          violations: Object.freeze([]) as readonly string[],
+          unsupportedScope: Object.freeze([]) as readonly string[],
+        },
+      });
+    }
+
+    const verdict = evaluateForbiddenPaths(forbiddenRaw, actualRaw);
+    return freezeDeep({
+      kind: 'forbidden-paths' as const,
+      passed: verdict.passed,
+      startedAt,
+      endedAt,
+      summary: verdict.summary,
+      ...(verdict.unsupportedScope.length > 0
+        ? { failureCode: 'unsupported_scope' as const }
+        : {}),
+      forbiddenPaths: {
+        forbiddenScope: Object.freeze(verdict.forbiddenScope) as readonly string[],
+        actual: Object.freeze(verdict.actual) as readonly string[],
+        violations: Object.freeze(verdict.violations) as readonly string[],
+        unsupportedScope: Object.freeze(verdict.unsupportedScope) as readonly string[],
+      },
+    });
+  }
+
+  async #runDiffSizeCheck(input: ValidationInput): Promise<ValidationCheckResult> {
+    const startedAt = this.#clock.now().toISOString();
+    const limitsRaw = input.diffSize!;
+    const limits: {
+      maxChangedFiles?: number;
+      maxChangedLines?: number;
+    } = {};
+    if (limitsRaw.maxChangedFiles !== undefined) {
+      limits.maxChangedFiles = limitsRaw.maxChangedFiles;
+    }
+    if (limitsRaw.maxChangedLines !== undefined) {
+      limits.maxChangedLines = limitsRaw.maxChangedLines;
+    }
+
+    const used: { changedFiles?: number; changedLines?: number } = {};
+    const unknown: ValidationDiffSizeUnknownDimension[] = [];
+
+    if (limits.maxChangedFiles !== undefined) {
+      try {
+        const files = await this.#paths.listChanged({
+          missionId: input.missionId,
+          baseRevision: input.baseRevision,
+          projectRoot: input.projectRoot,
+        });
+        used.changedFiles = files.length;
+      } catch {
+        unknown.push('changedFiles');
+      }
+    }
+
+    if (limits.maxChangedLines !== undefined) {
+      if (!this.#diffFacts) {
+        unknown.push('changedLines');
+      } else {
+        try {
+          const facts = await this.#diffFacts.measureLines({
+            missionId: input.missionId,
+            baseRevision: input.baseRevision,
+            projectRoot: input.projectRoot,
+          });
+          if (
+            facts.changedLines === undefined ||
+            facts.unknown.includes('changedLines')
+          ) {
+            unknown.push('changedLines');
+          } else {
+            used.changedLines = facts.changedLines;
+          }
+        } catch {
+          unknown.push('changedLines');
+        }
+      }
+    }
+
+    const endedAt = this.#clock.now().toISOString();
+
+    const over: string[] = [];
+    if (
+      limits.maxChangedFiles !== undefined &&
+      used.changedFiles !== undefined &&
+      used.changedFiles >= limits.maxChangedFiles
+    ) {
+      over.push(
+        `changedFiles ${used.changedFiles} >= maxChangedFiles ${limits.maxChangedFiles}`,
+      );
+    }
+    if (
+      limits.maxChangedLines !== undefined &&
+      used.changedLines !== undefined &&
+      used.changedLines >= limits.maxChangedLines
+    ) {
+      over.push(
+        `changedLines ${used.changedLines} >= maxChangedLines ${limits.maxChangedLines}`,
+      );
+    }
+
+    const passed = unknown.length === 0 && over.length === 0;
+    let summary: string;
+    if (unknown.length > 0) {
+      summary = `diff-size unknown measurement: ${unknown.join(', ')}`;
+    } else if (over.length > 0) {
+      summary = `diff-size exceeded: ${over.join('; ')}`;
+    } else {
+      const bits: string[] = [];
+      if (used.changedFiles !== undefined) bits.push(`files=${used.changedFiles}`);
+      if (used.changedLines !== undefined) bits.push(`lines=${used.changedLines}`);
+      summary = bits.length > 0 ? `diff-size within limits (${bits.join(', ')})` : 'diff-size ok';
+    }
+
+    return freezeDeep({
+      kind: 'diff-size' as const,
+      passed,
+      startedAt,
+      endedAt,
+      summary,
+      diffSize: {
+        limits: Object.freeze({ ...limits }),
+        used: Object.freeze({ ...used }),
+        unknown: Object.freeze([...unknown]) as readonly ValidationDiffSizeUnknownDimension[],
+      },
+    });
+  }
 }
 
 function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
@@ -264,6 +438,33 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
         unsupportedScope: Object.freeze([
           ...check.changedPaths.unsupportedScope,
         ]) as readonly string[],
+      },
+    };
+  }
+  if (check.forbiddenPaths) {
+    return {
+      ...base,
+      forbiddenPaths: {
+        forbiddenScope: Object.freeze([
+          ...check.forbiddenPaths.forbiddenScope,
+        ]) as readonly string[],
+        actual: Object.freeze([...check.forbiddenPaths.actual]) as readonly string[],
+        violations: Object.freeze([...check.forbiddenPaths.violations]) as readonly string[],
+        unsupportedScope: Object.freeze([
+          ...check.forbiddenPaths.unsupportedScope,
+        ]) as readonly string[],
+      },
+    };
+  }
+  if (check.diffSize) {
+    return {
+      ...base,
+      diffSize: {
+        limits: Object.freeze({ ...check.diffSize.limits }),
+        used: Object.freeze({ ...check.diffSize.used }),
+        unknown: Object.freeze([
+          ...check.diffSize.unknown,
+        ]) as readonly ValidationDiffSizeUnknownDimension[],
       },
     };
   }
@@ -392,6 +593,66 @@ function evaluateChangedPaths(
     passed,
     summary,
     allowedScope,
+    actual,
+    violations,
+    unsupportedScope: [],
+  };
+}
+
+function evaluateForbiddenPaths(
+  forbiddenRaw: readonly string[],
+  actualRaw: readonly string[],
+): {
+  passed: boolean;
+  summary: string;
+  forbiddenScope: string[];
+  actual: string[];
+  violations: string[];
+  unsupportedScope: string[];
+} {
+  const forbiddenScope = forbiddenRaw.map(normalizePath);
+  const actual = dedupeStable(actualRaw.map(normalizePath));
+
+  const unsupportedScope: string[] = [];
+  for (const a of forbiddenScope) {
+    if (hasGlobMeta(a) || isEscapePath(a) || a === '') {
+      unsupportedScope.push(a);
+    }
+  }
+
+  if (unsupportedScope.length > 0) {
+    return {
+      passed: false,
+      summary: `forbidden-paths unsupported scope: ${unsupportedScope.join(', ')}`,
+      forbiddenScope,
+      actual,
+      violations: [],
+      unsupportedScope: dedupeStable(unsupportedScope),
+    };
+  }
+
+  const violations: string[] = [];
+  for (const path of actual) {
+    // 逃逸 actual 对任何 denylist 都算命中（与 changed-paths 一致：不得蒙混）。
+    if (isEscapePath(path) || path === '') {
+      violations.push(path);
+      continue;
+    }
+    const hit = forbiddenScope.some((scope) => scopeMatches(scope, path));
+    if (hit) violations.push(path);
+  }
+
+  const passed = violations.length === 0;
+  const summary = passed
+    ? actual.length === 0
+      ? 'forbidden-paths: no changes'
+      : `forbidden-paths: ${actual.length} path(s) clear of denylist`
+    : `forbidden-paths violations: ${violations.join(', ')}`;
+
+  return {
+    passed,
+    summary,
+    forbiddenScope,
     actual,
     violations,
     unsupportedScope: [],

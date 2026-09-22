@@ -4,11 +4,13 @@
  * 守住：独立观测、不可变报告、validator authority、不接状态机/自动 accept。
  */
 
-import { describe, test } from 'node:test';
+import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 import type { ReviewAuthority, ValidationReport } from '../src/kernel/index.ts';
 import { FixedClock, SequentialIds } from '../src/application/in-memory.ts';
@@ -18,9 +20,18 @@ import {
   ValidationEngine,
   type ValidationInput,
 } from '../src/application/validation/engine.ts';
-import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
+import type {
+  ChangedPathReader,
+  CommandRunner,
+  DiffFactReader,
+  DiffLineFacts,
+} from '../src/application/validation/ports.ts';
 import { ExecFileCommandRunner } from '../src/application/validation/exec-file-command-runner.ts';
 import { WorkspaceChangedPathReader } from '../src/application/validation/workspace-changed-path-reader.ts';
+import {
+  countTextLines,
+  WorkspaceDiffFactReader,
+} from '../src/application/validation/workspace-diff-fact-reader.ts';
 
 const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
 
@@ -63,9 +74,23 @@ function fakePaths(
   };
 }
 
+function fakeDiffFacts(
+  facts: DiffLineFacts | (() => Promise<DiffLineFacts> | DiffLineFacts),
+): DiffFactReader & { calls: unknown[] } {
+  const calls: unknown[] = [];
+  return {
+    calls,
+    async measureLines(input) {
+      calls.push(input);
+      return typeof facts === 'function' ? await facts() : facts;
+    },
+  };
+}
+
 function engine(opts: {
   runner?: CommandRunner;
   paths?: ChangedPathReader;
+  diffFacts?: DiffFactReader;
   clock?: FixedClock;
   ids?: SequentialIds;
 } = {}) {
@@ -81,6 +106,7 @@ function engine(opts: {
         output: '',
       })),
     changedPathReader: opts.paths ?? fakePaths([]),
+    ...(opts.diffFacts ? { diffFactReader: opts.diffFacts } : {}),
   });
 }
 
@@ -341,22 +367,22 @@ describe('WorkspaceChangedPathReader', () => {
 });
 
 describe('ValidationEngine — report shape, authority, immutability', () => {
-  test('12. Engine 接口无 executor changedFiles/evidence 输入', async () => {
+  test('12. Engine 接口无 executor self-report / Evidence 输入', async () => {
     const engSrc = stripComments(
       readFileSync(join(srcRoot, 'application/validation/engine.ts'), 'utf8'),
     );
     const portsSrc = stripComments(
       readFileSync(join(srcRoot, 'application/validation/ports.ts'), 'utf8'),
     );
-    assert.doesNotMatch(engSrc, /changedFiles/);
     assert.doesNotMatch(engSrc, /EvidenceRecord/);
-    assert.doesNotMatch(portsSrc, /changedFiles/);
+    assert.doesNotMatch(engSrc, /ExecutionResult/);
     assert.doesNotMatch(portsSrc, /EvidenceRecord/);
-    // ValidationInput 形参字段钉死（无执行者自报通道）
+    assert.doesNotMatch(portsSrc, /ExecutionResult/);
+    // ValidationInput 形参字段钉死（无执行者自报通道；diff-size 的 used.changedFiles 是计量维度名）
     assert.match(engSrc, /interface ValidationInput/);
-    assert.doesNotMatch(engSrc, /changedFiles\s*:/);
     assert.doesNotMatch(engSrc, /evidence\s*:/);
     assert.doesNotMatch(engSrc, /evidenceIds\s*:/);
+    assert.doesNotMatch(engSrc, /readonly changedFiles\s*:/);
   });
 
   test('13. report id VR-1、policyRevision=1、check order command→changed-paths、authority 引用 report id', async () => {
@@ -509,7 +535,7 @@ describe('static isolation', () => {
     assert.doesNotMatch(plat, /application\/validation/);
   });
 
-  test('engine 无 ExecutionResult.changedFiles / EvidenceRecord pass dependency', () => {
+  test('engine 无 ExecutionResult / EvidenceRecord pass dependency', () => {
     const eng = stripComments(
       readFileSync(join(srcRoot, 'application/validation/engine.ts'), 'utf8'),
     );
@@ -520,12 +546,424 @@ describe('static isolation', () => {
       ),
     );
     assert.doesNotMatch(eng, /ExecutionResult/);
-    assert.doesNotMatch(eng, /changedFiles/);
     assert.doesNotMatch(eng, /EvidenceRecord/);
-    assert.doesNotMatch(reader, /changedFiles/);
     assert.doesNotMatch(reader, /EvidenceRecord/);
+    assert.doesNotMatch(reader, /ExecutionResult/);
     assert.match(reader, /\.diff\(/);
     assert.match(reader, /\.files/);
+  });
+});
+
+describe('ValidationEngine — forbidden-paths (VAL-002)', () => {
+  test('omitted → no forbidden-paths check; empty allow + empty actual still authority', async () => {
+    const { report, authority } = await engine({ paths: fakePaths([]) }).validate(baseInput());
+    assert.equal(report.passed, true);
+    assert.ok(authority);
+    assert.deepEqual(
+      report.checks.map((c) => c.kind),
+      ['changed-paths'],
+    );
+  });
+
+  test('[] in force + dirty tree → pass (if allow ok)', async () => {
+    const { report, authority } = await engine({
+      paths: fakePaths(['src/a.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/a.ts'],
+        forbiddenPaths: [],
+      }),
+    );
+    assert.equal(report.passed, true);
+    assert.ok(authority);
+    assert.equal(report.checks.map((c) => c.kind).includes('forbidden-paths'), true);
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.equal(fp.passed, true);
+    assert.deepEqual(fp.forbiddenPaths?.violations, []);
+  });
+
+  test('exact deny hit → fail, violation listed, no authority', async () => {
+    const { report, authority } = await engine({
+      paths: fakePaths(['src/a.ts', 'src/secret.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/'],
+        forbiddenPaths: ['src/secret.ts'],
+      }),
+    );
+    assert.equal(report.passed, false);
+    assert.equal(authority, undefined);
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.equal(fp.passed, false);
+    assert.deepEqual(fp.forbiddenPaths?.violations, ['src/secret.ts']);
+    assert.equal(fp.failureCode, undefined);
+  });
+
+  test('prefix src/secret/ denies descendants; src/secret does not deny src/secret/a.ts', async () => {
+    const dirHit = await engine({
+      paths: fakePaths(['src/secret/a.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/'],
+        forbiddenPaths: ['src/secret/'],
+      }),
+    );
+    assert.equal(dirHit.report.passed, false);
+    assert.deepEqual(
+      dirHit.report.checks.find((c) => c.kind === 'forbidden-paths')!.forbiddenPaths?.violations,
+      ['src/secret/a.ts'],
+    );
+
+    const exactMiss = await engine({
+      paths: fakePaths(['src/secret/a.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/'],
+        forbiddenPaths: ['src/secret'],
+      }),
+    );
+    assert.equal(exactMiss.report.passed, true);
+    assert.ok(exactMiss.authority);
+  });
+
+  test('deny ∩ allow → forbidden fails (deny wins)', async () => {
+    const { report, authority } = await engine({
+      paths: fakePaths(['src/a.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/a.ts'],
+        forbiddenPaths: ['src/a.ts'],
+      }),
+    );
+    const cp = report.checks.find((c) => c.kind === 'changed-paths')!;
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.equal(cp.passed, true);
+    assert.equal(fp.passed, false);
+    assert.equal(report.passed, false);
+    assert.equal(authority, undefined);
+  });
+
+  test('glob / escape / empty string in denylist → unsupported_scope fail-closed', async () => {
+    for (const bad of ['src/**', '../x', ''] as const) {
+      // '' cannot arrive via freeze; engine still handles raw input
+      const forbiddenPaths = bad === '' ? [''] : [bad];
+      const { report, authority } = await engine({
+        paths: fakePaths(['src/a.ts']),
+      }).validate(
+        baseInput({
+          allowedScope: ['src/'],
+          forbiddenPaths,
+        }),
+      );
+      assert.equal(report.passed, false, bad);
+      assert.equal(authority, undefined, bad);
+      const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+      assert.equal(fp.failureCode, 'unsupported_scope', bad);
+      assert.ok(fp.forbiddenPaths!.unsupportedScope.length > 0, bad);
+    }
+  });
+
+  test('escape actual vs deny → violation', async () => {
+    const { report } = await engine({
+      paths: fakePaths(['../secret']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/'],
+        forbiddenPaths: ['src/x.ts'],
+      }),
+    );
+    // changed-paths also fails; forbidden still lists escape as violation
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.equal(fp.passed, false);
+    assert.ok(fp.forbiddenPaths?.violations.includes('../secret'));
+  });
+
+  test('reader throw → fail-closed', async () => {
+    const paths = fakePaths(() => {
+      throw new Error('deny-diff-down');
+    });
+    const { report, authority } = await engine({ paths }).validate(
+      baseInput({ forbiddenPaths: ['src/x.ts'] }),
+    );
+    assert.equal(report.passed, false);
+    assert.equal(authority, undefined);
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.equal(fp.passed, false);
+    assert.match(fp.summary, /deny-diff-down|read failed/);
+    assert.deepEqual(fp.forbiddenPaths?.actual, []);
+  });
+
+  test('normalize \\ / ./ , stable dedupe; input mutation does not leak', async () => {
+    const forbiddenPaths = ['.\\src\\secret.ts', './src/secret.ts'];
+    const { report } = await engine({
+      paths: fakePaths(['src/secret.ts', '.\\src\\secret.ts']),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/'],
+        forbiddenPaths,
+      }),
+    );
+    const fp = report.checks.find((c) => c.kind === 'forbidden-paths')!;
+    assert.deepEqual(fp.forbiddenPaths?.actual, ['src/secret.ts']);
+    assert.deepEqual(fp.forbiddenPaths?.forbiddenScope, ['src/secret.ts', 'src/secret.ts']);
+    assert.deepEqual(fp.forbiddenPaths?.violations, ['src/secret.ts']);
+    assertFrozen(fp);
+    assertFrozen(fp.forbiddenPaths!);
+    assertFrozen(fp.forbiddenPaths!.violations);
+    forbiddenPaths.push('evil');
+    assert.equal(fp.forbiddenPaths!.forbiddenScope.includes('evil'), false);
+  });
+
+  test('check order command → changed-paths → forbidden-paths', async () => {
+    const { report } = await engine({
+      paths: fakePaths([]),
+    }).validate(
+      baseInput({
+        commands: [{ argv: ['t'], cwd: '.', timeoutMs: 1 }],
+        forbiddenPaths: [],
+      }),
+    );
+    assert.deepEqual(
+      report.checks.map((c) => c.kind),
+      ['command', 'changed-paths', 'forbidden-paths'],
+    );
+  });
+});
+
+describe('ValidationEngine — diff-size (VAL-002)', () => {
+  test('omitted → no diff-size check; VAL-001 pass unchanged', async () => {
+    const { report, authority } = await engine({ paths: fakePaths([]) }).validate(baseInput());
+    assert.equal(report.passed, true);
+    assert.ok(authority);
+    assert.equal(report.checks.some((c) => c.kind === 'diff-size'), false);
+  });
+
+  test('maxChangedFiles: 2 with 1 file pass; 2 files fail (>=)', async () => {
+    const pass = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({ allowedScope: ['a.ts'], diffSize: { maxChangedFiles: 2 } }),
+    );
+    assert.equal(pass.report.passed, true);
+    assert.ok(pass.authority);
+    const dsPass = pass.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsPass.diffSize?.used.changedFiles, 1);
+
+    const fail = await engine({ paths: fakePaths(['a.ts', 'b.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts', 'b.ts'],
+        diffSize: { maxChangedFiles: 2 },
+      }),
+    );
+    assert.equal(fail.report.passed, false);
+    assert.equal(fail.authority, undefined);
+    const dsFail = fail.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsFail.passed, false);
+    assert.equal(dsFail.failureCode, undefined);
+    assert.equal(dsFail.diffSize?.used.changedFiles, 2);
+  });
+
+  test('maxChangedFiles: 0 + empty actual → fail (0 >= 0)', async () => {
+    const { report, authority } = await engine({ paths: fakePaths([]) }).validate(
+      baseInput({ diffSize: { maxChangedFiles: 0 } }),
+    );
+    assert.equal(report.passed, false);
+    assert.equal(authority, undefined);
+    const ds = report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(ds.diffSize?.used.changedFiles, 0);
+    assert.deepEqual(ds.diffSize?.unknown, []);
+  });
+
+  test('maxChangedLines known under/at/over', async () => {
+    const under = await engine({
+      paths: fakePaths(['a.ts']),
+      diffFacts: fakeDiffFacts({ changedLines: 3, unknown: [] }),
+    }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 5 },
+      }),
+    );
+    assert.equal(under.report.passed, true);
+
+    const at = await engine({
+      paths: fakePaths(['a.ts']),
+      diffFacts: fakeDiffFacts({ changedLines: 5, unknown: [] }),
+    }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 5 },
+      }),
+    );
+    assert.equal(at.report.passed, false, '5 >= 5 fails');
+
+    const over = await engine({
+      paths: fakePaths(['a.ts']),
+      diffFacts: fakeDiffFacts({ changedLines: 9, unknown: [] }),
+    }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 5 },
+      }),
+    );
+    assert.equal(over.report.passed, false);
+  });
+
+  test('line limit in force + missing reader / unknown facts → fail', async () => {
+    const noReader = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 10 },
+      }),
+    );
+    assert.equal(noReader.report.passed, false);
+    const ds1 = noReader.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(ds1.diffSize?.used.changedLines, undefined);
+    assert.deepEqual(ds1.diffSize?.unknown, ['changedLines']);
+
+    const unknownFacts = await engine({
+      paths: fakePaths(['a.ts']),
+      diffFacts: fakeDiffFacts({ unknown: ['changedLines'] }),
+    }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 10 },
+      }),
+    );
+    assert.equal(unknownFacts.report.passed, false);
+    const ds2 = unknownFacts.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(ds2.diffSize?.used.changedLines, undefined);
+    assert.deepEqual(ds2.diffSize?.unknown, ['changedLines']);
+  });
+
+  test('untracked included in file count; check order ends with diff-size', async () => {
+    const { report } = await engine({
+      paths: fakePaths(['tracked.ts', 'new-untracked.ts']),
+      diffFacts: fakeDiffFacts({ changedLines: 2, unknown: [] }),
+    }).validate(
+      baseInput({
+        allowedScope: ['tracked.ts', 'new-untracked.ts'],
+        commands: [{ argv: ['t'], cwd: '.', timeoutMs: 1 }],
+        forbiddenPaths: [],
+        diffSize: { maxChangedFiles: 10, maxChangedLines: 10 },
+      }),
+    );
+    assert.deepEqual(
+      report.checks.map((c) => c.kind),
+      ['command', 'changed-paths', 'forbidden-paths', 'diff-size'],
+    );
+    const ds = report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(ds.diffSize?.used.changedFiles, 2);
+    assert.equal(report.passed, true);
+  });
+
+  test('nested freeze; input mutation does not leak into report', async () => {
+    const diffSize = { maxChangedFiles: 5, maxChangedLines: 100 };
+    const { report } = await engine({
+      paths: fakePaths(['a.ts']),
+      diffFacts: fakeDiffFacts({ changedLines: 1, unknown: [] }),
+    }).validate(baseInput({ allowedScope: ['a.ts'], diffSize }));
+    const ds = report.checks.find((c) => c.kind === 'diff-size')!;
+    assertFrozen(ds);
+    assertFrozen(ds.diffSize!);
+    assertFrozen(ds.diffSize!.limits);
+    assertFrozen(ds.diffSize!.used);
+    assertFrozen(ds.diffSize!.unknown);
+    (diffSize as { maxChangedFiles: number }).maxChangedFiles = 0;
+    assert.equal(ds.diffSize!.limits.maxChangedFiles, 5);
+  });
+});
+
+describe('WorkspaceDiffFactReader — trusted line facts', () => {
+  const dirs: string[] = [];
+
+  after(() => {
+    for (const dir of dirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  function tempGit(): { root: string; base: string; wt: string; missionId: string } {
+    const root = mkdtempSync(join(tmpdir(), 'coagent-diff-fact-'));
+    dirs.push(root);
+    execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: root, stdio: 'ignore' });
+    writeFileSync(join(root, 'keep.txt'), 'line1\n');
+    execFileSync('git', ['add', 'keep.txt'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: root, stdio: 'ignore' });
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
+
+    const missionId = 'M-diff';
+    const wtRoot = join(root, '.coagent-worktrees');
+    const wt = join(wtRoot, missionId);
+    mkdirSync(wtRoot, { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', `mission/${missionId}`, wt, base], {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    return { root, base, wt, missionId };
+  }
+
+  test('tracked numstat + untracked text lines; binary numstat → unknown', async () => {
+    const { root, base, wt, missionId } = tempGit();
+    writeFileSync(join(wt, 'keep.txt'), 'line1\nline2\nline3\n');
+    writeFileSync(join(wt, 'new.txt'), 'a\nb\n');
+    // binary-ish tracked change via numstat "-"
+    writeFileSync(join(wt, 'pic.bin'), Buffer.from([0, 1, 2, 3, 0, 5]));
+    execFileSync('git', ['add', 'pic.bin'], { cwd: wt, stdio: 'ignore' });
+    // keep uncommitted so diff sees it; adding binary may show as numstat -
+
+    const workspace = {
+      worktreePath(m: string, projectRoot: string) {
+        assert.equal(m, missionId);
+        assert.equal(projectRoot, root);
+        return wt;
+      },
+    } as unknown as WorkspaceManager;
+
+    const reader = new WorkspaceDiffFactReader(workspace);
+
+    // Without binary: only text changes
+    execFileSync('git', ['reset', 'HEAD', 'pic.bin'], { cwd: wt, stdio: 'ignore' });
+    rmSync(join(wt, 'pic.bin'), { force: true });
+
+    const textFacts = await reader.measureLines({
+      missionId,
+      baseRevision: base,
+      projectRoot: root,
+    });
+    assert.deepEqual(textFacts.unknown, []);
+    // keep.txt: +2 lines (was 1 line "line1\n", now 3 lines); new.txt untracked 2 lines
+    assert.equal(textFacts.changedLines, 2 + 2);
+
+    // Binary untracked → unknown
+    writeFileSync(join(wt, 'blob.bin'), Buffer.from([0, 1, 2, 0]));
+    const binFacts = await reader.measureLines({
+      missionId,
+      baseRevision: base,
+      projectRoot: root,
+    });
+    assert.deepEqual(binFacts.unknown, ['changedLines']);
+    assert.equal(binFacts.changedLines, undefined);
+
+    assert.equal(countTextLines(''), 0);
+    assert.equal(countTextLines('a'), 1);
+    assert.equal(countTextLines('a\nb\n'), 2);
+  });
+
+  test('missing worktree → unknown', async () => {
+    const reader = new WorkspaceDiffFactReader({
+      worktreePath: () => join(tmpdir(), 'no-such-wt-val002'),
+    } as unknown as WorkspaceManager);
+    const facts = await reader.measureLines({
+      missionId: 'x',
+      baseRevision: 'abc',
+      projectRoot: '/p',
+    });
+    assert.deepEqual(facts.unknown, ['changedLines']);
   });
 });
 

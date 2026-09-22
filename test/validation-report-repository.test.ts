@@ -104,7 +104,55 @@ function assertFrozenReport(report: ValidationReport): void {
       assert.ok(Object.isFrozen(check.changedPaths.violations));
       assert.ok(Object.isFrozen(check.changedPaths.unsupportedScope));
     }
+    if (check.forbiddenPaths) {
+      assert.ok(Object.isFrozen(check.forbiddenPaths));
+      assert.ok(Object.isFrozen(check.forbiddenPaths.forbiddenScope));
+      assert.ok(Object.isFrozen(check.forbiddenPaths.actual));
+      assert.ok(Object.isFrozen(check.forbiddenPaths.violations));
+      assert.ok(Object.isFrozen(check.forbiddenPaths.unsupportedScope));
+    }
+    if (check.diffSize) {
+      assert.ok(Object.isFrozen(check.diffSize));
+      assert.ok(Object.isFrozen(check.diffSize.limits));
+      assert.ok(Object.isFrozen(check.diffSize.used));
+      assert.ok(Object.isFrozen(check.diffSize.unknown));
+    }
   }
+}
+
+function sampleReportVal002(over: Partial<ValidationReport> = {}): ValidationReport {
+  return sampleReport({
+    id: 'VR-val002',
+    checks: [
+      ...sampleReport().checks,
+      {
+        kind: 'forbidden-paths',
+        passed: true,
+        startedAt: '2026-06-01T12:00:01.000Z',
+        endedAt: '2026-06-01T12:00:01.100Z',
+        summary: 'forbidden-paths: clear',
+        forbiddenPaths: {
+          forbiddenScope: ['src/secret/'],
+          actual: ['src/a.ts'],
+          violations: [],
+          unsupportedScope: [],
+        },
+      },
+      {
+        kind: 'diff-size',
+        passed: true,
+        startedAt: '2026-06-01T12:00:01.100Z',
+        endedAt: '2026-06-01T12:00:01.200Z',
+        summary: 'diff-size within limits',
+        diffSize: {
+          limits: { maxChangedFiles: 5, maxChangedLines: 100 },
+          used: { changedFiles: 1, changedLines: 12 },
+          unknown: [],
+        },
+      },
+    ],
+    ...over,
+  });
 }
 
 async function assertRoundTrip(repo: ValidationReportRepository): Promise<void> {
@@ -216,6 +264,58 @@ describe('InMemoryValidationReportRepository', () => {
 
   test('identical 幂等；不同字段 conflict 且旧值不变', async () => {
     await assertIdempotentAndConflict(new InMemoryValidationReportRepository());
+  });
+
+  test('VAL-002 forbidden-paths / diff-size clone + equal + freeze', async () => {
+    const repo = new InMemoryValidationReportRepository();
+    const original = sampleReportVal002();
+    const deny = original.checks[2]!.forbiddenPaths!.forbiddenScope as string[];
+    const unknown = original.checks[3]!.diffSize!.unknown as string[];
+
+    await repo.save(original);
+    deny.push('evil/');
+    unknown.push('changedFiles');
+    (original.checks[3]!.diffSize!.used as { changedFiles?: number }).changedFiles = 99;
+
+    const got = await repo.get('VR-val002');
+    assert.ok(got);
+    assert.deepEqual(got.checks[2]!.forbiddenPaths!.forbiddenScope, ['src/secret/']);
+    assert.deepEqual(got.checks[3]!.diffSize!.used, { changedFiles: 1, changedLines: 12 });
+    assert.deepEqual(got.checks[3]!.diffSize!.unknown, []);
+    assertFrozenReport(got);
+    assert.ok(validationReportsEqual(got, sampleReportVal002()));
+
+    const a = await repo.get('VR-val002');
+    const b = await repo.get('VR-val002');
+    assert.ok(a && b);
+    assert.notEqual(a.checks[2]!.forbiddenPaths!.actual, b.checks[2]!.forbiddenPaths!.actual);
+    assert.notEqual(a.checks[3]!.diffSize!.unknown, b.checks[3]!.diffSize!.unknown);
+
+    await assert.rejects(
+      () =>
+        repo.save(
+          sampleReportVal002({
+            checks: [
+              ...sampleReport().checks,
+              {
+                kind: 'forbidden-paths',
+                passed: false,
+                startedAt: '2026-06-01T12:00:01.000Z',
+                endedAt: '2026-06-01T12:00:01.100Z',
+                summary: 'hit',
+                forbiddenPaths: {
+                  forbiddenScope: ['src/secret/'],
+                  actual: ['src/secret/x.ts'],
+                  violations: ['src/secret/x.ts'],
+                  unsupportedScope: [],
+                },
+              },
+              sampleReportVal002().checks[3]!,
+            ],
+          }),
+        ),
+      (err: unknown) => err instanceof ValidationReportConflictError,
+    );
   });
 });
 

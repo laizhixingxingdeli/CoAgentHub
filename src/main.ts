@@ -64,6 +64,7 @@ import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import { ValidationEngine } from './application/validation/engine.ts';
 import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
 import { WorkspaceChangedPathReader } from './application/validation/workspace-changed-path-reader.ts';
+import { WorkspaceDiffFactReader } from './application/validation/workspace-diff-fact-reader.ts';
 import { InMemoryValidationReportRepository } from './application/validation/report-repository.ts';
 
 export function buildPlatform(
@@ -91,6 +92,7 @@ export function buildPlatform(
           ids,
           commandRunner: new ExecFileCommandRunner(),
           changedPathReader: new WorkspaceChangedPathReader(workspace),
+          diffFactReader: new WorkspaceDiffFactReader(workspace),
         }),
         reports: new InMemoryValidationReportRepository(),
       }
@@ -175,6 +177,7 @@ export async function buildPersistentPlatform(
       ids,
       commandRunner: new ExecFileCommandRunner(),
       changedPathReader: new WorkspaceChangedPathReader(workspace),
+      diffFactReader: new WorkspaceDiffFactReader(workspace),
     }),
     reports: new FileValidationReportRepository(store),
   };
@@ -299,6 +302,7 @@ export async function buildPgPlatform(options?: {
       ids,
       commandRunner: new ExecFileCommandRunner(),
       changedPathReader: new WorkspaceChangedPathReader(workspace),
+      diffFactReader: new WorkspaceDiffFactReader(workspace),
     }),
     reports: new PgValidationReportRepository(store),
   };

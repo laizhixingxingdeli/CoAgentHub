@@ -32,7 +32,11 @@ import {
   ValidationReportConflictError,
   type ValidationReportRepository,
 } from '../src/application/validation/report-repository.ts';
-import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
+import type {
+  ChangedPathReader,
+  CommandRunner,
+  DiffFactReader,
+} from '../src/application/validation/ports.ts';
 import type {
   DecisionAnswerSet,
   DecisionProvider,
@@ -132,6 +136,7 @@ function spyReports(
 function makeEngine(opts?: {
   runner?: CommandRunner;
   paths?: ChangedPathReader;
+  diffFacts?: DiffFactReader;
   clock?: FixedClock;
   ids?: SequentialIds;
 }): ValidationEngine {
@@ -140,6 +145,7 @@ function makeEngine(opts?: {
     ids: opts?.ids ?? new SequentialIds(),
     commandRunner: opts?.runner ?? fakeRunner(),
     changedPathReader: opts?.paths ?? fakePaths([]),
+    ...(opts?.diffFacts ? { diffFactReader: opts.diffFacts } : {}),
   });
 }
 
@@ -151,6 +157,7 @@ function harness(opts?: {
   decisionProvider?: DecisionProvider;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
+  diffFacts?: DiffFactReader;
   withRealValidation?: boolean;
 }) {
   const clock = new FixedClock('2026-06-01T12:00:00.000Z');
@@ -160,7 +167,13 @@ function harness(opts?: {
   const reports = spyReports();
   const runner = opts?.runner ?? fakeRunner();
   const paths = opts?.paths ?? fakePaths([]);
-  const engine = makeEngine({ runner, paths, clock, ids: new SequentialIds() });
+  const engine = makeEngine({
+    runner,
+    paths,
+    diffFacts: opts?.diffFacts,
+    clock,
+    ids: new SequentialIds(),
+  });
 
   const validation =
     opts?.validation ??
@@ -706,6 +719,86 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
     assert.equal(events.filter((e) => e.kind === 'review.recorded').length, 0);
     assert.equal(events.filter((e) => e.kind === 'validation.reported').length, 1);
     assert.equal(events.filter((e) => e.kind === 'validation.completed').length, 0);
+  });
+
+  test('VAL-002：Platform 从 frozen order 拷贝 forbiddenPaths；命中 deny 保持 submitted', async () => {
+    const h = harness({
+      runner: fakeRunner(),
+      paths: fakePaths(['src/foo.ts']),
+    });
+    const order: WorkOrder = {
+      ...ORDER_BASE,
+      validation: {
+        commands: [],
+        forbiddenPaths: ['src/foo.ts'],
+      },
+    };
+    const { missionId, projectId, workItemId } = await upToSubmittedLightweight(h, { order });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId,
+      workItemId,
+      cwd: '/trusted/cwd',
+    });
+    assert.equal(out.passed, false);
+    assert.equal(out.status, 'submitted');
+    const stored = await h.validation!.reports.get(out.reportId);
+    assert.ok(stored);
+    assert.equal(stored.passed, false);
+    const fp = stored.checks.find((c) => c.kind === 'forbidden-paths');
+    assert.ok(fp);
+    assert.deepEqual(fp!.forbiddenPaths?.violations, ['src/foo.ts']);
+    const { item } = await liveItem(h.projects, projectId, missionId, workItemId);
+    assert.equal(item.status, 'submitted');
+    assert.equal(item.reviews.length, 0);
+  });
+
+  test('VAL-002：diffSize 超限 fail；omit 新字段仍走旧路径 accept', async () => {
+    const over = harness({
+      runner: fakeRunner(),
+      paths: fakePaths(['src/foo.ts', 'src/bar.ts']),
+      diffFacts: {
+        async measureLines() {
+          return { changedLines: 1, unknown: [] };
+        },
+      },
+    });
+    const orderOver: WorkOrder = {
+      ...ORDER_BASE,
+      allowedScope: ['src/foo.ts', 'src/bar.ts'],
+      validation: {
+        commands: [],
+        diffSize: { maxChangedFiles: 1 },
+      },
+    };
+    const submittedOver = await upToSubmittedLightweight(over, { order: orderOver });
+    const failOut = await over.platform.validateAndAcceptLightweightWorkItem({
+      missionId: submittedOver.missionId,
+      workItemId: submittedOver.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(failOut.passed, false);
+    assert.equal(failOut.status, 'submitted');
+    const failReport = await over.validation!.reports.get(failOut.reportId);
+    assert.ok(failReport?.checks.some((c) => c.kind === 'diff-size' && c.passed === false));
+
+    // omit → 旧路径：仅 changed-paths，可通过
+    const legacy = harness({
+      runner: fakeRunner(),
+      paths: fakePaths(['src/foo.ts']),
+    });
+    const submittedLegacy = await upToSubmittedLightweight(legacy, {
+      order: { ...ORDER_BASE, validation: { commands: [] } },
+    });
+    const ok = await legacy.platform.validateAndAcceptLightweightWorkItem({
+      missionId: submittedLegacy.missionId,
+      workItemId: submittedLegacy.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(ok.passed, true);
+    assert.equal(ok.status, 'accepted');
+    const okReport = await legacy.validation!.reports.get(ok.reportId);
+    assert.equal(okReport?.checks.some((c) => c.kind === 'forbidden-paths'), false);
+    assert.equal(okReport?.checks.some((c) => c.kind === 'diff-size'), false);
   });
 
   test('missing/empty validation.commands：只跑 changed-paths 可通过', async () => {

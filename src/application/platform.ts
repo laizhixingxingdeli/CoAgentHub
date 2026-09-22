@@ -95,6 +95,12 @@ export interface PlatformValidationDeps {
         readonly cwd: string;
         readonly timeoutMs: number;
       }[];
+      /** 仅从 frozen WorkOrder.validation 拷贝；缺省 = 检查不在 force。 */
+      readonly forbiddenPaths?: readonly string[];
+      readonly diffSize?: {
+        readonly maxChangedFiles?: number;
+        readonly maxChangedLines?: number;
+      };
     }) => Promise<{
       readonly report: ValidationReport;
       readonly authority?: Extract<ReviewAuthority, { kind: 'validator' }>;
@@ -1253,6 +1259,10 @@ export class Platform {
     }
     // empty / absent validation.commands 合法：只跑 changed-paths。
     const commands = order.validation?.commands ?? [];
+    // VAL-002：forbiddenPaths / diffSize 仅从 frozen order 拷贝；缺省 = 不在 force。
+    // 不得从 ExecutionBudget / promotion / prose 填默认值。
+    const forbiddenPaths = order.validation?.forbiddenPaths;
+    const diffSize = order.validation?.diffSize;
 
     const projectRoot = mission.workspaceRef?.projectRoot;
     const baseRevision = mission.workspaceRef?.baseRevision;
@@ -1284,6 +1294,19 @@ export class Platform {
         timeoutMs: c.timeoutMs,
         cwd: trustedCwd,
       })),
+      ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
+      ...(diffSize !== undefined
+        ? {
+            diffSize: {
+              ...(diffSize.maxChangedFiles !== undefined
+                ? { maxChangedFiles: diffSize.maxChangedFiles }
+                : {}),
+              ...(diffSize.maxChangedLines !== undefined
+                ? { maxChangedLines: diffSize.maxChangedLines }
+                : {}),
+            },
+          }
+        : {}),
     });
 
     // append-only：必须先于任何 review / accept。

@@ -95,6 +95,27 @@ function cloneCheck(check: ValidationCheckResult): ValidationCheckResult {
       },
     };
   }
+  if (check.forbiddenPaths) {
+    return {
+      ...base,
+      forbiddenPaths: {
+        forbiddenScope: [...check.forbiddenPaths.forbiddenScope],
+        actual: [...check.forbiddenPaths.actual],
+        violations: [...check.forbiddenPaths.violations],
+        unsupportedScope: [...check.forbiddenPaths.unsupportedScope],
+      },
+    };
+  }
+  if (check.diffSize) {
+    return {
+      ...base,
+      diffSize: {
+        limits: { ...check.diffSize.limits },
+        used: { ...check.diffSize.used },
+        unknown: [...check.diffSize.unknown],
+      },
+    };
+  }
   return base;
 }
 
@@ -126,6 +147,27 @@ function checksEqual(a: ValidationCheckResult, b: ValidationCheckResult): boolea
     if (!stringArraysEqual(ap.actual, bp.actual)) return false;
     if (!stringArraysEqual(ap.violations, bp.violations)) return false;
     if (!stringArraysEqual(ap.unsupportedScope, bp.unsupportedScope)) return false;
+  }
+
+  const af = a.forbiddenPaths;
+  const bf = b.forbiddenPaths;
+  if ((af === undefined) !== (bf === undefined)) return false;
+  if (af && bf) {
+    if (!stringArraysEqual(af.forbiddenScope, bf.forbiddenScope)) return false;
+    if (!stringArraysEqual(af.actual, bf.actual)) return false;
+    if (!stringArraysEqual(af.violations, bf.violations)) return false;
+    if (!stringArraysEqual(af.unsupportedScope, bf.unsupportedScope)) return false;
+  }
+
+  const ad = a.diffSize;
+  const bd = b.diffSize;
+  if ((ad === undefined) !== (bd === undefined)) return false;
+  if (ad && bd) {
+    if (ad.limits.maxChangedFiles !== bd.limits.maxChangedFiles) return false;
+    if (ad.limits.maxChangedLines !== bd.limits.maxChangedLines) return false;
+    if (ad.used.changedFiles !== bd.used.changedFiles) return false;
+    if (ad.used.changedLines !== bd.used.changedLines) return false;
+    if (!stringArraysEqual(ad.unknown, bd.unknown)) return false;
   }
   return true;
 }

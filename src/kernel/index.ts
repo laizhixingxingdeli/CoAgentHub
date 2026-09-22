@@ -54,10 +54,12 @@ export type {
   ValidationCheckFailureCode,
   ValidationCheckKind,
   ValidationCheckResult,
+  ValidationDiffSizeUnknownDimension,
   ValidationReport,
   WaitReason,
   WorkOrder,
   WorkOrderValidationCommand,
+  WorkOrderValidationDiffSize,
   WorkOrderValidationSpec,
   WorkspaceRef,
 } from './payloads.ts';

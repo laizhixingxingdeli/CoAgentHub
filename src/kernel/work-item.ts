@@ -9,6 +9,7 @@ import type {
   ReviewRecord,
   WorkOrder,
   WorkOrderValidationCommand,
+  WorkOrderValidationDiffSize,
   WorkOrderValidationSpec,
 } from './payloads.ts';
 
@@ -402,7 +403,9 @@ function normalizeValidationSpec(
   };
 
   if (!isPlainObject(value)) return fail('must be a plain object');
-  if (!onlyKeys(value, ['commands'])) return fail('only key commands is allowed');
+  if (!onlyKeys(value, ['commands', 'forbiddenPaths', 'diffSize'])) {
+    return fail('only keys commands,forbiddenPaths,diffSize are allowed');
+  }
   if (!Object.prototype.hasOwnProperty.call(value, 'commands')) {
     return fail('commands is required');
   }
@@ -430,7 +433,58 @@ function normalizeValidationSpec(
     });
   }
 
-  return freezeDeep({ commands } satisfies WorkOrderValidationSpec);
+  const out: {
+    commands: WorkOrderValidationCommand[];
+    forbiddenPaths?: string[];
+    diffSize?: WorkOrderValidationDiffSize;
+  } = { commands };
+
+  if (Object.prototype.hasOwnProperty.call(value, 'forbiddenPaths')) {
+    if (!Array.isArray(value.forbiddenPaths)) {
+      return fail('forbiddenPaths must be a string array');
+    }
+    if (!value.forbiddenPaths.every((p) => isNonEmptyString(p))) {
+      return fail('forbiddenPaths entries must be non-empty strings');
+    }
+    out.forbiddenPaths = [...value.forbiddenPaths];
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, 'diffSize')) {
+    const ds = normalizeDiffSize(value.diffSize, fail);
+    if (ds === undefined) return undefined;
+    out.diffSize = ds;
+  }
+
+  return freezeDeep(out satisfies WorkOrderValidationSpec);
+}
+
+function normalizeDiffSize(
+  value: unknown,
+  fail: (detail: string) => undefined,
+): WorkOrderValidationDiffSize | undefined {
+  if (!isPlainObject(value)) return fail('diffSize must be a plain object');
+  if (!onlyKeys(value, ['maxChangedFiles', 'maxChangedLines'])) {
+    return fail('diffSize only keys maxChangedFiles,maxChangedLines are allowed');
+  }
+  const out: { maxChangedFiles?: number; maxChangedLines?: number } = {};
+  if (Object.prototype.hasOwnProperty.call(value, 'maxChangedFiles')) {
+    const n = asNonNegativeInt(value.maxChangedFiles);
+    if (n === undefined) {
+      return fail('diffSize.maxChangedFiles must be a finite nonnegative integer');
+    }
+    out.maxChangedFiles = n;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'maxChangedLines')) {
+    const n = asNonNegativeInt(value.maxChangedLines);
+    if (n === undefined) {
+      return fail('diffSize.maxChangedLines must be a finite nonnegative integer');
+    }
+    out.maxChangedLines = n;
+  }
+  if (out.maxChangedFiles === undefined && out.maxChangedLines === undefined) {
+    return fail('diffSize requires at least one of maxChangedFiles,maxChangedLines');
+  }
+  return out;
 }
 
 /**
