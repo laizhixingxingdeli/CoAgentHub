@@ -60,6 +60,7 @@ async function runAndCollect(
     command: 'node',
     args: [fakeAdapter(lines, outcome)],
     cwd: process.cwd(),
+    envPassthrough: [],
   });
   const run = await runtime.start({
     role: 'executor',
@@ -313,6 +314,7 @@ describe('静默超时：按"多久没动静"判，不按总时长', () => {
       args: [entry],
       cwd: process.cwd(),
       timeoutMs,
+      envPassthrough: [],
     });
     const run = await runtime.start({
       role: 'executor',

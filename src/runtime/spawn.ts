@@ -123,6 +123,86 @@ function render(event: RuntimeEvent): string {
   return '';
 }
 
+/**
+ * 子进程环境基线：OS 启动 + 代理。缺任一项会把失败伪装成「adapter/模型挂了」。
+ * 不含任何宿主凭证名；额外名必须由部署方经 COAGENT_AGENT_ENV_PASSTHROUGH 显式声明。
+ */
+export const SPAWN_ENV_BASE_ALLOWLIST: readonly string[] = Object.freeze([
+  'PATH',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'WINDIR',
+  'SYSTEMDRIVE',
+  'COMSPEC',
+  'TEMP',
+  'TMP',
+  'TMPDIR',
+  'HOME',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY',
+]);
+
+/** 部署方声明「额外透传哪些宿主环境变量名」的 env 键。值是逗号分隔的名字，不是值本身。 */
+export const SPAWN_ENV_PASSTHROUGH_VAR = 'COAGENT_AGENT_ENV_PASSTHROUGH';
+
+/**
+ * 未声明透传列表时的拒绝文案。构造/接线共用同一句，避免「这里 throw、那里 warn」两套说法。
+ * 不提任何厂商凭证名：名单由部署方自己填，Hub 不预设。
+ */
+export const SPAWN_ENV_UNDECLARED_MESSAGE =
+  'SpawnRuntime 拒绝启动：未声明子进程环境变量透传列表。请设置 `COAGENT_AGENT_ENV_PASSTHROUGH` 为逗号分隔的变量名（部署方声明要交给 agent 子进程的额外变量）。空字符串表示不透传任何额外变量，仅保留 OS/代理基线。未声明时不得把完整 `process.env` 交给子进程。';
+
+/**
+ * 解析部署方声明的额外透传名单。
+ *
+ * - 键缺失 / `undefined` → 未声明（fail-closed）
+ * - `''` 或纯空白 → 已声明空名单（只留基线）
+ * - 逗号分隔 → trim 后丢掉空 token；`*` 只是字面量，不展开成「全部」
+ *
+ * SpawnRuntime 自己不读这个 env 键（和 supportsQuery 不读 COAGENT_QUERY_ENABLED 同理）；
+ * 解析发生在接线层，数组再显式传进来。
+ */
+export function parseAgentEnvPassthrough(
+  raw: string | undefined,
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  return raw
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+/**
+ * 按「基线 ∪ 透传名单」过滤子进程 env。
+ *
+ * 匹配永远大小写不敏感，但**保留源里的原始键名**：Windows 上是 `Path` 不是 `PATH`，
+ * POSIX 上 `http_proxy` 与 `HTTP_PROXY` 可能同时存在且都要留下。源里没有的名字直接跳过，
+ * 不造空字符串——空值有时比缺键更糟（覆盖掉工具自己的默认查找）。
+ */
+export function filterSpawnEnv(
+  source: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  passthrough: readonly string[],
+): Record<string, string> {
+  const allowed = new Set([
+    ...SPAWN_ENV_BASE_ALLOWLIST.map((name) => name.toUpperCase()),
+    ...passthrough.map((name) => name.toUpperCase()),
+  ]);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (!allowed.has(key.toUpperCase())) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 export interface SpawnRuntimeOptions {
   readonly kind: string;
   /** 可执行文件，例如 npx。 */
@@ -147,6 +227,19 @@ export interface SpawnRuntimeOptions {
    * 也不因 child 是 coagent-pi 就自动开启。生产 Mission 构造不得设此字段。
    */
   readonly supportsQuery?: true;
+  /**
+   * 额外允许透传的宿主环境变量名（加到 SPAWN_ENV_BASE_ALLOWLIST 之上）。
+   *
+   * **运行时必填**：类型在 strip-only 下不存在，权威是 `Array.isArray`。
+   * 省略 / `undefined` / 非数组 → 构造即抛，杜绝「忘了声明就整份 process.env 漏下去」。
+   * 空数组是合法的封锁声明（只要 OS/代理基线）。
+   */
+  readonly envPassthrough?: readonly string[];
+  /**
+   * 过滤用的源 env。测试可注入；生产省略，start() 时读当时的 process.env。
+   * 在 start() 快照而不是 construct——construct 到 start 之间宿主 env 仍可能被接线层改。
+   */
+  readonly env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
 }
 
 const UNKNOWN_USAGE: TokenUsage = {
@@ -171,6 +264,11 @@ export class SpawnRuntime implements AgentRuntime {
     this.kind = options.kind;
     this.#options = options;
     if (options.supportsQuery === true) this.supportsQuery = true;
+    // 类型注解在 Node strip-only 下不存在：不在这里拦，忘声明的调用方会把整份
+    // process.env（含宿主凭证）漏进 agent 子进程。空数组是合法声明，undefined 不是。
+    if (!Array.isArray(options.envPassthrough)) {
+      throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
+    }
   }
 
   async start(spec: AgentRunSpec): Promise<AgentRun> {
@@ -180,11 +278,22 @@ export class SpawnRuntime implements AgentRuntime {
       for (const handler of handlers) handler(event);
     };
 
+    // envPassthrough 构造期已是数组；这里再读一次只为满足类型窄化，并作为漏斗
+    // 最后一道：哪怕以后有人绕过构造检查，也绝不能把宿主环境整份下发。
+    const envPassthrough = options.envPassthrough;
+    if (!Array.isArray(envPassthrough)) {
+      throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
+    }
+    // 源 env 先收进局部再过滤，禁止 spawn 选项里直接挂宿主环境整份引用
+    //（源码锁 / 评审都靠「不再出现整份下发」形态识别回退）。测试可经 options.env 注入。
+    const envSource = options.env !== undefined ? options.env : process.env;
+
     const child: ChildProcess = spawn(options.command, [...options.args], {
       cwd: options.cwd,
-      // 代理变量必须传下去：子进程拿不到代理，就会直连超时，
-      // 而且症状会伪装成「模型什么都没干」。
-      env: process.env,
+      // 只下发「OS/代理基线 ∪ 部署方声明的额外名」。整份宿主环境会把
+      // 凭证泄漏给 agent；而代理（见 SPAWN_ENV_BASE_ALLOWLIST）若不传，子进程
+      // 直连超时，症状会伪装成「模型什么都没干」。
+      env: filterSpawnEnv(envSource, envPassthrough),
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
       // POSIX 上让子进程自成进程组，这样 kill(-pid) 才收得掉整棵树。

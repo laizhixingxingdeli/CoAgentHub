@@ -443,6 +443,7 @@ describe('query runtime capability gate', () => {
       command: 'node',
       args: ['-e', 'process.exit(0)'],
       cwd: process.cwd(),
+      envPassthrough: [],
     });
     assert.notEqual(spawn.supportsQuery, true);
 
@@ -468,6 +469,7 @@ describe('query runtime capability gate', () => {
       args: ['-e', 'process.exit(0)'],
       cwd: process.cwd(),
       supportsQuery: true,
+      envPassthrough: [],
     });
     assert.equal(spawn.supportsQuery, true);
     assert.doesNotThrow(() => new QueryRunner({ runtime: spawn, queryRuns, clock, ids }));
@@ -503,6 +505,7 @@ describe('SpawnRuntime queryOutcome 透传（假 child，不打模型）', () =>
       args: [adapter],
       cwd: process.cwd(),
       supportsQuery: true,
+      envPassthrough: [],
     });
     const clock = new FixedClock();
     const ids = new SequentialIds();
@@ -541,6 +544,7 @@ describe('SpawnRuntime queryOutcome 透传（假 child，不打模型）', () =>
       args: [adapter],
       cwd: process.cwd(),
       supportsQuery: true,
+      envPassthrough: [],
     });
     const runner = new QueryRunner({
       runtime,
@@ -580,6 +584,7 @@ describe('SpawnRuntime queryOutcome 透传（假 child，不打模型）', () =>
         args: [adapter],
         cwd: process.cwd(),
         supportsQuery: true,
+        envPassthrough: [],
       });
 
       // 直接 wait，确认 RuntimeOutcome 上就有 queryOutcome（不靠 QueryRunner 猜）

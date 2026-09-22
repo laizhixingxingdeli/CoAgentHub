@@ -14,7 +14,11 @@ import { createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { Orchestrator } from './application/orchestrator.ts';
-import { SpawnRuntime } from './runtime/spawn.ts';
+import {
+  parseAgentEnvPassthrough,
+  SPAWN_ENV_UNDECLARED_MESSAGE,
+  SpawnRuntime,
+} from './runtime/spawn.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
 import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
 import type {
@@ -80,6 +84,15 @@ async function main() {
   const adapter = resolve(
     arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts',
   );
+
+  // 在 createMission / listen 之前就确认透传名单：名单未声明时不应留下「半截
+  // Mission + 已监听端口」——失败必须发生在任何副作用之前。空字符串是合法封锁。
+  const envPassthrough = parseAgentEnvPassthrough(
+    process.env.COAGENT_AGENT_ENV_PASSTHROUGH,
+  );
+  if (envPassthrough === undefined) {
+    throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
+  }
 
   // 持久化：进程退了结果还得在收件箱里等人来取。
   //
@@ -157,6 +170,8 @@ async function main() {
     // 实测一次正常的 Web 端工作连续产出了 45 分钟——按总时长砍就砍错了人。
     timeoutMs: 5 * 60 * 1000,
     stream: true,
+    envPassthrough,
+    // 不传 env：child 源保持真实 process.env，再由 SpawnRuntime 按名单过滤。
   });
 
   // 候选池。空仓时写进缺省候选（与以前那四条硬编码逐字段一致），下一次跑就用

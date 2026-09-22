@@ -220,6 +220,7 @@ describe('读写 .coagent/', () => {
       'run-token-lifecycle',
       'fast-lane-ab-metrics',
       'startup-reconciliation',
+      'spawn-env-filter',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

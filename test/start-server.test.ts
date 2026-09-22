@@ -261,6 +261,8 @@ describe('startServer queryRuntime 双键 opt-in', () => {
         COAGENT_STORE: 'file',
         COAGENT_QUERY_ENABLED: '1',
         COAGENT_QUERY_ADAPTER: adapter,
+        // query 子进程同样走 SpawnRuntime 过滤；未声明会在 startServer 装配期抛。
+        COAGENT_AGENT_ENV_PASSTHROUGH: '',
       },
     });
     servers.push(built.server);
