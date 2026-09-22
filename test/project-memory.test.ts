@@ -219,6 +219,7 @@ describe('读写 .coagent/', () => {
       'decision-jev-off-shadow',
       'run-token-lifecycle',
       'fast-lane-ab-metrics',
+      'startup-reconciliation',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

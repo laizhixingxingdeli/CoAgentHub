@@ -32,6 +32,7 @@
  */
 
 import type { MissionStatus, Project } from '../kernel/index.ts';
+import type { LiveOutput } from './live.ts';
 import type { ActivityLog } from './ports.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './workspace.ts';
 
@@ -45,6 +46,13 @@ export interface ReconcileResult {
   readonly interrupted: { missionId: string; attemptId: string; kind: string }[];
   /** 心跳还新鲜、因而**没被动**的那些。看得见才知道收敛为什么没收它。 */
   readonly alive: { missionId: string; attemptId: string; owner?: string }[];
+  /** 收敛时补裁了实时输出的那些跳。没传 live 就恒为空。 */
+  readonly liveTrimmed: { missionId: string; attemptId: string }[];
+  /**
+   * 裁剪失败的那些。**不吞掉**：裁不动意味着那一跳的行还在无限留着，
+   * 是个要人看的事实，不是可以静默的细节。
+   */
+  readonly liveTrimFailed: { missionId: string; attemptId: string; message: string }[];
 }
 
 /** 心跳多久没来就算没人管了。默认 90 秒 —— 心跳间隔的若干倍，容得下一次卡顿。 */
@@ -60,10 +68,23 @@ export async function reconcileInterruptedAttempts(
     now?: Date;
     /** 心跳多久没来算没人管。 */
     toleranceMs?: number;
+    /**
+     * 补裁实时输出用。
+     *
+     * 正常收尾走 Orchestrator 的 `finally`，那里已经裁过了。**跑不到 finally
+     * 的只有一种情况：编排进程自己死了**——而那恰好就是这里正在收的这些跳。
+     * 于是留存策略又反了一次：正常结束的留 500 行尾巴，被进程猝死带走的反而
+     * 整跳几万行全留着，且再也没人来收。
+     *
+     * 只读进程不传它——和不传 activity 同理，收敛是写操作。
+     */
+    live?: LiveOutput;
   },
 ): Promise<ReconcileResult> {
   const interrupted: ReconcileResult['interrupted'] = [];
   const alive: ReconcileResult['alive'] = [];
+  const liveTrimmed: ReconcileResult['liveTrimmed'] = [];
+  const liveTrimFailed: ReconcileResult['liveTrimFailed'] = [];
   const nowIso = (options?.now ?? new Date()).toISOString();
   const tolerance = options?.toleranceMs ?? DEFAULT_LEASE_TOLERANCE_MS;
 
@@ -105,11 +126,26 @@ export async function reconcileInterruptedAttempts(
             retriable: true,
           },
         });
+
+        // 裁剪放在状态与事件之后：收敛的本职是把卡死的 Mission 解开，裁不动
+        // 实时输出不该让这件事失败。但失败要记下来，不能静默。
+        if (options?.live?.finish) {
+          try {
+            await options.live.finish(mission.id, attempt.id);
+            liveTrimmed.push({ missionId: mission.id, attemptId: attempt.id });
+          } catch (error) {
+            liveTrimFailed.push({
+              missionId: mission.id,
+              attemptId: attempt.id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       }
     }
   }
 
-  return { interrupted, alive };
+  return { interrupted, alive, liveTrimmed, liveTrimFailed };
 }
 
 export interface OrphanWorktreeReconcileResult extends WorktreeReconcileResult {

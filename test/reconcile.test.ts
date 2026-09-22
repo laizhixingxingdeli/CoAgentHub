@@ -14,6 +14,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { reconcileInterruptedAttempts } from '../src/application/reconcile.ts';
+import { InMemoryLiveOutput, KEEP_TAIL_ON_FINISH } from '../src/application/live.ts';
 import { InMemoryProjectRepository } from '../src/application/in-memory.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 
@@ -160,5 +161,136 @@ describe('启动收敛的范围', () => {
     assert.equal(attempt?.endedBy, 'interrupted');
     // 收敛完必须能重新开一个，否则不变量 B 会把这条 Mission 永久卡死。
     assert.doesNotThrow(() => mine?.startCoordinatorAttempt());
+  });
+});
+
+/**
+ * 收敛时补裁实时输出（RECON-002B）。
+ *
+ * 由来：正常收尾走 Orchestrator 的 `finally`，那里已经裁过。跑不到 finally 的
+ * **只有编排进程自己死掉**这一种情况——而那恰好就是这里收的这些跳。于是留存
+ * 策略又反了：正常结束的留 500 行尾巴，被进程猝死带走的整跳几万行全留着，
+ * 且再也没有第二个人来收。
+ */
+describe('启动收敛补裁实时输出', () => {
+  /** 只记调用、不做事。用来断"裁了哪些跳"，不受 500 行阈值干扰。 */
+  function spyLive() {
+    const calls: { missionId: string; attemptId: string }[] = [];
+    return {
+      calls,
+      async append() {},
+      async since() {
+        return [];
+      },
+      async finish(missionId: string, attemptId: string) {
+        calls.push({ missionId, attemptId });
+      },
+    };
+  }
+
+  test('判死的跳会被裁；心跳还新鲜的**一行都不许动**', async () => {
+    const { projects } = await twoRunningMissions();
+    const mine = findMission(projects, 'M-mine');
+    const coordinator = mine?.coordinatorAttempts[0];
+    const executor = mine?.workItems[0].attempts[0];
+    // 执行者心跳新鲜 = 有人正在看它的实时输出。裁它就是当着人的面删证据。
+    executor?.beat('2026-01-01T00:09:30.000Z', 'pid-1');
+
+    const live = spyLive();
+    const result = await reconcileInterruptedAttempts(projects, undefined, {
+      missionId: 'M-mine',
+      now: new Date('2026-01-01T00:10:00.000Z'),
+      toleranceMs: 90_000,
+      live,
+    });
+
+    assert.deepEqual(
+      live.calls,
+      [{ missionId: 'M-mine', attemptId: coordinator!.id }],
+      '只裁被判死的那一跳',
+    );
+    assert.equal(result.liveTrimmed.length, 1);
+    assert.equal(result.liveTrimFailed.length, 0);
+    assert.ok(
+      result.alive.some((a) => a.attemptId === executor!.id),
+      '心跳新鲜的那跳仍在 alive 里，没被收也没被裁',
+    );
+  });
+
+  test('限定 missionId 时不碰别人的实时输出', async () => {
+    const { projects } = await twoRunningMissions();
+    const live = spyLive();
+    await reconcileInterruptedAttempts(projects, undefined, {
+      missionId: 'M-mine',
+      live,
+    });
+    assert.ok(live.calls.length > 0, '自己这条要裁');
+    assert.ok(
+      live.calls.every((c) => c.missionId === 'M-mine'),
+      '别人那条一次都不能碰',
+    );
+  });
+
+  test('不传 live 时行为与接入前一致', async () => {
+    const { projects } = await twoRunningMissions();
+    const result = await reconcileInterruptedAttempts(projects, undefined, {
+      missionId: 'M-mine',
+    });
+    assert.equal(result.interrupted.length, 2);
+    assert.deepEqual(result.liveTrimmed, []);
+    assert.deepEqual(result.liveTrimFailed, []);
+  });
+
+  test('裁剪失败不打断收敛，但必须留下痕迹', async () => {
+    const { projects } = await twoRunningMissions();
+    const result = await reconcileInterruptedAttempts(projects, undefined, {
+      missionId: 'M-mine',
+      live: {
+        async append() {},
+        async since() {
+          return [];
+        },
+        async finish() {
+          throw new Error('live_output 不可写');
+        },
+      },
+    });
+
+    // 收敛的本职必须完成：卡死的 Mission 要解开。
+    assert.equal(result.interrupted.length, 2);
+    const mine = findMission(projects, 'M-mine');
+    assert.doesNotThrow(() => mine?.startCoordinatorAttempt());
+    // 但裁不动不能静默——那一跳的行还在无限留着。
+    assert.equal(result.liveTrimmed.length, 0);
+    assert.equal(result.liveTrimFailed.length, 2);
+    assert.match(result.liveTrimFailed[0].message, /live_output 不可写/);
+  });
+
+  test('端到端：真的只剩尾部 500 行加一条裁剪说明', async () => {
+    const { projects } = await twoRunningMissions();
+    const mine = findMission(projects, 'M-mine');
+    const coordinator = mine!.coordinatorAttempts[0];
+    const live = new InMemoryLiveOutput(10_000);
+    for (let i = 0; i < 600; i += 1) {
+      await live.append({
+        missionId: 'M-mine',
+        attemptId: coordinator.id,
+        kind: 'text',
+        text: `line ${i}`,
+      });
+    }
+    assert.equal((await live.since('M-mine', 0, 10_000)).length, 600);
+
+    await reconcileInterruptedAttempts(projects, undefined, {
+      missionId: 'M-mine',
+      live,
+    });
+
+    const rest = await live.since('M-mine', 0, 10_000);
+    assert.equal(rest.length, KEEP_TAIL_ON_FINISH + 1, '500 行尾巴 + 1 条裁剪说明');
+    // 留的是**尾巴**不是头：被裁掉的是最早那些。
+    assert.equal(rest[0].text, 'line 100');
+    assert.equal(rest.at(-1)!.kind, 'note');
+    assert.match(rest.at(-1)!.text!, /只保留最后 500 行/);
   });
 });

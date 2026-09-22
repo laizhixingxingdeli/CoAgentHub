@@ -324,11 +324,15 @@ export async function buildPgPlatform(options?: {
       ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
       : undefined;
 
+  // 传 live：收敛判死的那些跳正是**没跑到 Orchestrator finally** 的那些，
+  // 它们的实时输出至今没被裁过。只在限定 missionId 的写路径上做——只读观测面
+  // 根本不调这里。
   const reconciled = options?.reconcileMissionId
     ? await reconcileInterruptedAttempts(await projects.list(), activity, {
         missionId: options.reconcileMissionId,
+        live,
       })
-    : { interrupted: [] };
+    : { interrupted: [], alive: [], liveTrimmed: [], liveTrimFailed: [] };
   if (reconciled.interrupted.length > 0) await store.flush();
 
   return {
@@ -436,6 +440,13 @@ export async function startServer(
   if (built.reconciled.interrupted.length > 0) {
     console.log(
       `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
+    );
+  }
+  // 裁不动要说出来：那一跳的实时行还在无限留着，而收敛已经过去了，
+  // 不说就再没有第二次提醒。
+  for (const failed of built.reconciled.liveTrimFailed ?? []) {
+    console.warn(
+      `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
     );
   }
   return { server, ...built };
