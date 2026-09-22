@@ -18,6 +18,7 @@ import type { WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
+import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -404,6 +405,7 @@ export class Orchestrator {
       // ---- High Assurance fail-closed (preflight; no round fact) ----
       // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
       // 不记 orchestration.round.started、不创建 Attempt、不 dispatch。
+      // HA 也不进入 budget 路径（保持 fail-closed 现状）。
       if (view.executionMode === 'high_assurance') {
         return {
           kind: 'stalled',
@@ -411,8 +413,18 @@ export class Orchestrator {
         };
       }
 
+      // ---- Authoritative budget GATE-PRE (BUDGET-001-S5) ----
+      // After HA, before orchestration.round.started / any hop.
+      // Hard exceeded: LW promote+continue, Standard wait. Soft: events only.
+      // Evaluated before heuristic pool/round/30m stalls so budget wins the label.
+      {
+        const gate = await this.#enforceAuthoritativeBudget(missionId);
+        if (gate.kind === 'stop') return gate.outcome;
+        if (gate.kind === 'continue') continue;
+      }
+
       // Durable authoritative round-start fact (BUDGET-001-S2).
-      // After preflight gates; before Lightweight / pending Executor / Coordinator hop.
+      // After preflight gates + budget PRE; before Lightweight / pending / Coordinator hop.
       // A successful append counts even if the subsequent hop crashes.
       // Append failure must not proceed with this round (error propagates).
       await this.#platform.recordOrchestrationRoundStarted(missionId);
@@ -423,7 +435,12 @@ export class Orchestrator {
       // 绝不进入下面的「没有 pending → coordinator」路径。
       if (view.executionMode === 'lightweight') {
         const lightweight = await this.#runLightweightRound(missionId, view, cwd);
-        if (lightweight.kind === 'continue') continue;
+        if (lightweight.kind === 'continue') {
+          const gate = await this.#enforceAuthoritativeBudget(missionId);
+          if (gate.kind === 'stop') return gate.outcome;
+          if (gate.kind === 'continue') continue;
+          continue;
+        }
         return lightweight.outcome;
       }
 
@@ -453,6 +470,10 @@ export class Orchestrator {
             await this.#platform.setWaitReason(missionId, reason, detail);
             return { kind: 'waiting', reason, detail };
           }
+          // GATE-POST after each successful hop (tokens/commands/wall accumulate here).
+          const gate = await this.#enforceAuthoritativeBudget(missionId);
+          if (gate.kind === 'stop') return gate.outcome;
+          if (gate.kind === 'continue') break;
         }
         continue;
       }
@@ -500,6 +521,13 @@ export class Orchestrator {
         const detail = hop?.detail ?? this.#stallDetail(reason);
         await this.#platform.setWaitReason(missionId, reason, detail);
         return { kind: 'waiting', reason, detail };
+      }
+
+      // GATE-POST after coordinator hop.
+      {
+        const gate = await this.#enforceAuthoritativeBudget(missionId);
+        if (gate.kind === 'stop') return gate.outcome;
+        if (gate.kind === 'continue') continue;
       }
 
       // 跑完一轮却什么都没提交：算失败，**不换模型再赌一次**——那只会
@@ -681,6 +709,53 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * BUDGET-001-S5 authoritative budget gate (PRE/POST).
+   *
+   * - no executionBudget → no-op (heuristics unchanged)
+   * - emit durable 70/90/100 once per dim/threshold
+   * - hard exceeded + lightweight → Platform self-checked promote, continue
+   * - hard exceeded + standard (or promote fail) → waiting/execution_budget_exceeded
+   * - soft exceeded → events only, keep going
+   * - unknown dimensions never gate
+   */
+  async #enforceAuthoritativeBudget(
+    missionId: string,
+  ): Promise<
+    | { kind: 'ok' }
+    | { kind: 'continue' }
+    | { kind: 'stop'; outcome: MissionRunOutcome }
+  > {
+    const { budgetPresent, evaluation } =
+      await this.#platform.evaluateMissionBudget(missionId);
+    if (!budgetPresent) return { kind: 'ok' };
+
+    await this.#platform.recordBudgetThresholdEvents(missionId, evaluation);
+
+    if (!anyHardAuthoritativeExceeded(evaluation)) {
+      return { kind: 'ok' };
+    }
+
+    const view = await this.#platform.getMissionView(missionId);
+    if (view.executionMode === 'lightweight') {
+      try {
+        await this.#platform.promoteLightweightForBudgetExceeded(missionId);
+        // Successful promotion: clear any prior wait and let Standard take over.
+        await this.#platform.setWaitReason(missionId, undefined);
+        return { kind: 'continue' };
+      } catch {
+        // Fall through to Standard-style wait (promotion failed / not eligible).
+      }
+    }
+
+    const detail = this.#platform.formatExecutionBudgetExceededDetail(evaluation);
+    await this.#platform.setWaitReason(missionId, 'execution_budget_exceeded', detail);
+    return {
+      kind: 'stop',
+      outcome: { kind: 'waiting', reason: 'execution_budget_exceeded', detail },
+    };
+  }
+
   /** 把停机原因翻译成人能直接照做的一句话。 */
   #stallDetail(reason: WaitReason, workItemId?: string): string {
     const where = workItemId ? `工作项 ${workItemId}` : '协调者';
@@ -701,6 +776,9 @@ export class Orchestrator {
     if (reason === 'attempt_limit_reached') {
       return `${where}：尝试次数到上限了，不再往下换候选。最近一次失败：${this.#lastFailure()}。` +
         '继续换只会烧配额，不会产生新信息——先看看是不是工单本身有问题。';
+    }
+    if (reason === 'execution_budget_exceeded') {
+      return `${where}：权威执行预算硬上限已耗尽。`;
     }
     return `${where}：${this.#lastFailure()}`;
   }

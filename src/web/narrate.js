@@ -276,7 +276,7 @@ export function stateLabel(row) {
 
 /**
  * 停机原因翻译成人话。只贴一个 enum 名字等于没贴——那是给写代码的人看的。
- * 9 条与 projects.js 逐字一致：两个界面里同一个原因必须说同一句话。
+ * 与 projects.js 共用本表：两个界面里同一个原因必须说同一句话。
  */
 export const WAIT_REASON = {
   no_available_agent: '候选全在冷却，等一会儿重跑',
@@ -289,6 +289,7 @@ export const WAIT_REASON = {
   base_revision_stale: '分叉基线已过期，需要重新核对',
   cancelled_by_user: '被叫停了',
   runaway_suspected: '一跳跑太久，已停下来等人看',
+  execution_budget_exceeded: '执行预算硬上限已耗尽',
 };
 
 /**

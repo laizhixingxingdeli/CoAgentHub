@@ -63,6 +63,19 @@ import {
   parseTaskFactsStrict,
 } from './classified-mission-intake.ts';
 import { classifyTask, type ClassificationResult } from './task-classifier.ts';
+import {
+  anyHardAuthoritativeExceeded,
+  budgetThresholdCrossings,
+  buildBudgetUsageSnapshot,
+  countAuthoritativeCommands,
+  countAuthoritativeRounds,
+  evaluateExecutionBudget,
+  formatHardBudgetExceededDetail,
+  hardExceededVerdicts,
+  projectAuthoritativeWallClockMs,
+  type BudgetEvaluation,
+  type BudgetUsageSnapshot,
+} from './budget-usage.ts';
 
 /**
  * Lightweight 机器验收依赖（结构类型，避免 platform 直接耦合 validation 模块路径）。
@@ -1678,6 +1691,155 @@ export class Platform {
   }
 
   /**
+   * Authoritative Mission budget evaluation (BUDGET-001-S5).
+   *
+   * Assembles usage from durable attempts + activity projections only.
+   * Does not invent zeros for unknown rounds/wall/commands; does not supply
+   * changedFiles unless a trusted diff list is passed (Orchestrator leaves it
+   * omitted when Workspace.diff is not wired into the loop).
+   */
+  async evaluateMissionBudget(
+    missionId: string,
+    opts?: { readonly changedFiles?: readonly string[] },
+  ): Promise<{
+    readonly budgetPresent: boolean;
+    readonly snapshot: BudgetUsageSnapshot;
+    readonly evaluation: BudgetEvaluation;
+  }> {
+    const { mission } = await this.#locate(missionId);
+    const capturedAt = this.#clock.now().toISOString();
+    const attempts = [
+      ...mission.coordinatorAttempts,
+      ...mission.workItems.flatMap((item) => item.attempts),
+    ];
+    const activity = await this.#activity.list(missionId);
+
+    const snapInput: {
+      missionId: string;
+      capturedAt: string;
+      attempts: typeof attempts;
+      roundCount?: number;
+      wallClockMs?: number;
+      commandCount?: number;
+      changedFiles?: readonly string[];
+    } = {
+      missionId,
+      capturedAt,
+      attempts,
+    };
+
+    const rounds = countAuthoritativeRounds(activity);
+    if (rounds.status === 'known') snapInput.roundCount = rounds.count;
+
+    const wall = projectAuthoritativeWallClockMs(activity, capturedAt);
+    if (wall.status === 'known') snapInput.wallClockMs = wall.ms;
+
+    const commands = countAuthoritativeCommands(activity);
+    if (commands.status === 'known') snapInput.commandCount = commands.count;
+
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'changedFiles') && opts.changedFiles !== undefined) {
+      snapInput.changedFiles = opts.changedFiles;
+    }
+
+    const snapshot = buildBudgetUsageSnapshot(snapInput);
+    const evaluation = evaluateExecutionBudget(mission.executionBudget, snapshot);
+    return Object.freeze({
+      budgetPresent: mission.executionBudget !== undefined,
+      snapshot,
+      evaluation,
+    });
+  }
+
+  /**
+   * Durable once-per-dimension/threshold budget warnings (BUDGET-001-S5).
+   *
+   * Scans activity for existing `mission.budget.threshold` v1 rows so reruns
+   * do not re-emit. unknown / not_in_force dimensions never emit.
+   */
+  async recordBudgetThresholdEvents(
+    missionId: string,
+    evaluation: BudgetEvaluation,
+  ): Promise<void> {
+    const { mission } = await this.#locate(missionId);
+    const activity = await this.#activity.list(missionId);
+    const seen = new Set<string>();
+    for (const event of activity) {
+      if (event.kind !== 'mission.budget.threshold') continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as {
+        schemaVersion?: unknown;
+        dimension?: unknown;
+        threshold?: unknown;
+      };
+      if (row.schemaVersion !== 1) continue;
+      if (typeof row.dimension !== 'string' || typeof row.threshold !== 'number') continue;
+      seen.add(`${row.dimension}:${row.threshold}`);
+    }
+
+    for (const crossing of budgetThresholdCrossings(evaluation)) {
+      const key = `${crossing.dimension}:${crossing.threshold}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      await this.#event(mission, 'mission.budget.threshold', {
+        schemaVersion: 1,
+        dimension: crossing.dimension,
+        threshold: crossing.threshold,
+        limit: crossing.limit,
+        used: crossing.used,
+        class: crossing.class,
+      });
+    }
+  }
+
+  /**
+   * Platform-internal LW→Standard promotion after *this* process re-evaluates
+   * authoritative hard budget exceedance (BUDGET-001-S5).
+   *
+   * Not a public caller-authored `budget_exceeded` path — see
+   * {@link promoteMissionToStandard}, which still rejects that code.
+   */
+  async promoteLightweightForBudgetExceeded(
+    missionId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    const { mission } = await this.#locate(missionId);
+
+    if (mission.executionMode === 'standard' && mission.promotions.length === 1) {
+      const existing = mission.promotions[0]!;
+      if (existing.triggerCode === 'budget_exceeded') {
+        return { changed: false, promotion: existing };
+      }
+    }
+
+    if (mission.executionMode !== 'lightweight') {
+      throw new PlatformRuleError(
+        'LIGHTWEIGHT_MODE_REQUIRED',
+        `promoteLightweightForBudgetExceeded 需要 executionMode=lightweight，当前是 ${mission.executionMode}。`,
+      );
+    }
+
+    const { evaluation } = await this.evaluateMissionBudget(missionId);
+    if (!anyHardAuthoritativeExceeded(evaluation)) {
+      throw new PlatformRuleError(
+        'BUDGET_NOT_AUTHORITATIVELY_EXCEEDED',
+        '权威硬预算未 exceeded，拒绝 budget_exceeded promotion。',
+      );
+    }
+
+    const dims = hardExceededVerdicts(evaluation).map((d) => d.dimension);
+    const rule = `hard:${dims.join(',')}`;
+    return this.#commitPromotionToStandard(missionId, {
+      code: 'budget_exceeded',
+      rule,
+    });
+  }
+
+  /** Detail string for Standard hard-budget wait (hard exceeded dims only). */
+  formatExecutionBudgetExceededDetail(evaluation: BudgetEvaluation): string {
+    return formatHardBudgetExceededDetail(evaluation);
+  }
+
+  /**
    * Trusted command-tracking cover (BUDGET-001-S4).
    *
    * Recorded when a Mission attempt receives runtime.capabilities v1 before any
@@ -2094,6 +2256,9 @@ export class Platform {
    *
    * **仅进程内**：不接受完整 PromotionRecord / evidence / usage / HEAD 等 caller audit JSON；
    * 全部从 trusted state 构造。产品/API/agent tools 本单不新增 route。
+   *
+   * `budget_exceeded` 仍拒绝 caller 手填——权威硬耗尽只能走
+   * {@link promoteLightweightForBudgetExceeded}（Platform 自检求值后发放）。
    */
   async promoteMissionToStandard(
     missionId: string,
@@ -2112,14 +2277,29 @@ export class Platform {
         `非法 promotion trigger code：${String(trigger?.code)}`,
       );
     }
-    // BUDGET-001 前禁止靠手填 budget_exceeded 冒充权威预算超限。
+    // 公开入口永不接受 caller 自拟 budget_exceeded（BUDGET-001-S5）。
     if (trigger.code === 'budget_exceeded') {
       throw new PlatformRuleError(
         'BUDGET_PROMOTION_NOT_READY',
-        'budget_exceeded 升级需 BudgetPolicy（BUDGET-001）就绪；本阶段拒绝。',
+        'budget_exceeded 不得由调用方手填；仅 Platform 在权威硬超限自检后内部发放。',
       );
     }
 
+    return this.#commitPromotionToStandard(missionId, {
+      code: trigger.code,
+      rule,
+    });
+  }
+
+  /**
+   * Shared LW→Standard commit after trigger validation.
+   * Used by public non-budget triggers and internal budget hard-exceed path.
+   */
+  async #commitPromotionToStandard(
+    missionId: string,
+    trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    const rule = trigger.rule.trim();
     const { mission, project } = await this.#locate(missionId);
 
     // 已 standard + 既有 promotion：按 trigger code/rule 幂等匹配，不重采样。

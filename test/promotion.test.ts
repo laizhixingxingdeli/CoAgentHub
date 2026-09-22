@@ -4,7 +4,7 @@
  * 守住：
  *   - Platform 仅进程内入口；caller 只传 trigger code/rule
  *   - usage / evidence / validation / HEAD 全部从 trusted state 采样
- *   - budget_exceeded 在 BUDGET-001 前拒绝
+ *   - 公开 promoteMissionToStandard 手填 budget_exceeded 仍拒绝（S5 仅内部入口）
  *   - 成功 save + 恰好一条 mission.promoted；幂等不重发
  *   - 不丢 WorkItems / Attempts / evidence / workspace
  */
@@ -430,7 +430,7 @@ describe('Platform.promoteMissionToStandard', () => {
     }
   });
 
-  test('budget_exceeded pre-BUDGET rejected before mutation/event', async () => {
+  test('public caller-authored budget_exceeded still rejected before mutation/event', async () => {
     const h = harness();
     const { missionId, projectId } = await createLightweight(h.projects);
     await assert.rejects(

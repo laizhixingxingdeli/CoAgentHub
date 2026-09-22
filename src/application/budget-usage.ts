@@ -1,13 +1,15 @@
 /**
- * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1/S2/S3/S4).
+ * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1..S5).
  *
  * Application-layer only: consumes ExecutionBudget + attempt usage facts +
  * optional durable orchestration.round.started ActivityLog facts (S2) +
  * optional attempt.started/ended wall-clock projection (S3) +
  * optional runtime.command_tracking / runtime.command.started facts (S4).
- * No scheduler enforcement, wait-state coupling, thresholds, upgrade wiring,
- * or default policy numbers. Does not invent command usage from tool names
- * or Mission-age timers. Hub never classifies commands by tool name.
+ * S5 adds pure hard/soft classification + 70/90/100 threshold crossings
+ * (no invented defaults). Scheduler enforcement, wait-state coupling, and
+ * promotion live in Platform + Orchestrator. Does not invent command usage
+ * from tool names or Mission-age timers. Hub never classifies commands by
+ * tool name.
  */
 
 import type { ExecutionBudget, TokenUsage } from '../kernel/index.ts';
@@ -691,4 +693,124 @@ export function verdictFor(
     throw new Error(`missing dimension verdict: ${dimension}`);
   }
   return found;
+}
+
+/** Hard dimensions: may stop Standard scheduling or trigger LW budget promotion. */
+export const HARD_BUDGET_DIMENSIONS = [
+  'attempts',
+  'rounds',
+  'wallClockMs',
+  'changedFiles',
+  'commands',
+] as const satisfies readonly BudgetDimension[];
+
+/** Soft dimensions: 70/90/100 events only — never stall or promote. */
+export const SOFT_BUDGET_DIMENSIONS = [
+  'inputTokens',
+  'outputTokens',
+  'totalTokens',
+  'cost',
+] as const satisfies readonly BudgetDimension[];
+
+export type HardBudgetDimension = (typeof HARD_BUDGET_DIMENSIONS)[number];
+export type SoftBudgetDimension = (typeof SOFT_BUDGET_DIMENSIONS)[number];
+
+export const BUDGET_THRESHOLDS = [70, 90, 100] as const;
+export type BudgetThreshold = (typeof BUDGET_THRESHOLDS)[number];
+export type BudgetDimensionClass = 'hard' | 'soft';
+
+const HARD_SET = new Set<string>(HARD_BUDGET_DIMENSIONS);
+
+export function isHardBudgetDimension(dimension: BudgetDimension): boolean {
+  return HARD_SET.has(dimension);
+}
+
+export function budgetDimensionClass(dimension: BudgetDimension): BudgetDimensionClass {
+  return isHardBudgetDimension(dimension) ? 'hard' : 'soft';
+}
+
+/** Authoritative hard-dimension exceeded verdicts only. */
+export function hardExceededVerdicts(
+  evaluation: BudgetEvaluation,
+): readonly DimensionVerdict[] {
+  return Object.freeze(
+    evaluation.dimensions.filter(
+      (d) => d.status === 'exceeded' && isHardBudgetDimension(d.dimension),
+    ),
+  );
+}
+
+export function anyHardAuthoritativeExceeded(evaluation: BudgetEvaluation): boolean {
+  return hardExceededVerdicts(evaluation).length > 0;
+}
+
+export interface BudgetThresholdCrossing {
+  readonly dimension: BudgetDimension;
+  readonly threshold: BudgetThreshold;
+  readonly limit: number;
+  readonly used: number;
+  readonly class: BudgetDimensionClass;
+}
+
+/**
+ * 70/90/100 crossings for dimensions with known used + in-force limit.
+ *
+ * - limit === 0 and used >= 0 → only 100% (no 70/90 narrative)
+ * - limit > 0 → pct = used / limit; emit each crossed band once per call
+ * - not_in_force / unknown → no crossings
+ */
+export function budgetThresholdCrossings(
+  evaluation: BudgetEvaluation,
+): readonly BudgetThresholdCrossing[] {
+  const out: BudgetThresholdCrossing[] = [];
+  for (const d of evaluation.dimensions) {
+    if (d.status !== 'ok' && d.status !== 'exceeded') continue;
+    if (d.limit === undefined || d.used === undefined) continue;
+    const limit = d.limit;
+    const used = d.used;
+    const cls = budgetDimensionClass(d.dimension);
+
+    if (limit === 0) {
+      if (used >= 0) {
+        out.push(
+          Object.freeze({
+            dimension: d.dimension,
+            threshold: 100 as BudgetThreshold,
+            limit,
+            used,
+            class: cls,
+          }),
+        );
+      }
+      continue;
+    }
+
+    const pct = used / limit;
+    for (const threshold of BUDGET_THRESHOLDS) {
+      if (pct + Number.EPSILON >= threshold / 100) {
+        out.push(
+          Object.freeze({
+            dimension: d.dimension,
+            threshold,
+            limit,
+            used,
+            class: cls,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze(out);
+}
+
+/** Human-readable detail listing only authoritative hard exceedances. */
+export function formatHardBudgetExceededDetail(evaluation: BudgetEvaluation): string {
+  const hard = hardExceededVerdicts(evaluation);
+  if (hard.length === 0) return '权威硬预算已耗尽';
+  const parts = hard.map((d) => {
+    const used = d.used === undefined ? '?' : String(d.used);
+    const limit = d.limit === undefined ? '?' : String(d.limit);
+    return `${d.dimension} ${used}/${limit}`;
+  });
+  return `权威硬预算已耗尽：${parts.join('；')}`;
 }

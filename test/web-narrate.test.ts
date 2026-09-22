@@ -641,6 +641,7 @@ describe('阶段与状态是两根轴', () => {
       'base_revision_stale',
       'cancelled_by_user',
       'escalated',
+      'execution_budget_exceeded',
       'no_available_agent',
       'platform_unreachable',
       'project_busy',

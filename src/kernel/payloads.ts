@@ -477,7 +477,14 @@ export type WaitReason =
    * 那两个等一等就能重跑，这个**必须有人去看它这段时间在干什么**——
    * 实测有一跳跑了 72 分钟，做的是一个后来被作废的工单。
    */
-  | 'runaway_suspected';
+  | 'runaway_suspected'
+  /**
+   * 权威 ExecutionBudget 硬维已耗尽（BUDGET-001-S5）。
+   *
+   * 与 pool `attempt_limit_reached` / 启发式轮次上限分开：这是 Mission 上
+   * persist 的 budget 经可信用量求值后的硬闸，不是候选池或 for 循环默认。
+   */
+  | 'execution_budget_exceeded';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。

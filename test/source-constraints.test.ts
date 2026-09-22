@@ -100,6 +100,9 @@ describe('src/ 全树符合 Node 原生类型剥离的限制', () => {
       'validateAndAcceptLightweightWorkItem',
       'submitLightweightMissionForReview',
       'promoteMissionToStandard',
+      'promoteLightweightForBudgetExceeded',
+      'evaluateMissionBudget',
+      'recordBudgetThresholdEvents',
     ];
     const surface = sources().filter(
       (s) =>

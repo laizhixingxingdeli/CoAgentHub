@@ -293,6 +293,7 @@ const WAIT_REASON = {
   base_revision_stale: '分叉基线已过期，需要重新核对',
   cancelled_by_user: '被叫停了',
   runaway_suspected: '一跳跑太久，已停下来等人看',
+  execution_budget_exceeded: '执行预算硬上限已耗尽',
 };
 
 const STATUS_CN = {

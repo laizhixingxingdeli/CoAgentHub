@@ -924,7 +924,7 @@ describe('Mission: executionBudget', () => {
     assert.ok(mission.executionBudget);
   });
 
-  test('生产代码无 executionBudget 路由/gating 分支', () => {
+  test('executionBudget 仅 kernel 持有 + budget/platform/orchestrator 权威消费；其它 src 不接入', () => {
     const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
     const files: string[] = [];
     const walk = (dir: string) => {
@@ -936,10 +936,27 @@ describe('Mission: executionBudget', () => {
     };
     walk(srcRoot);
 
+    // BUDGET-001-S5: Platform + Orchestrator may consume Mission.executionBudget
+    // via evaluateMissionBudget. Kernel still must not branch on it for routing.
+    const allowedField = new Set([
+      'kernel/mission.ts',
+      'kernel/project.ts',
+      'kernel/snapshot.ts',
+      'kernel/payloads.ts',
+      'kernel/index.ts',
+      'application/budget-usage.ts',
+      'application/platform.ts',
+      'application/orchestrator.ts',
+    ]);
+
     for (const full of files) {
       const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
       const source = readFileSync(full, 'utf8');
       if (rel.startsWith('kernel/')) {
+        // Mission holds the field; no kernel-level routing/gating on it.
+        if (rel === 'kernel/mission.ts' || rel === 'kernel/project.ts' || rel === 'kernel/snapshot.ts') {
+          continue;
+        }
         assert.doesNotMatch(
           source,
           /if\s*\([^)]*executionBudget|executionBudget\s*[=!]=|switch\s*\([^)]*executionBudget/,
@@ -947,11 +964,11 @@ describe('Mission: executionBudget', () => {
         );
         continue;
       }
-      // 允许类型名出现在“不实现 ExecutionBudget”类否定注释；禁止字段接入。
+      if (allowedField.has(rel)) continue;
       assert.doesNotMatch(
         source,
         /executionBudget/,
-        `${rel}: 本单 scope 外不得引用 executionBudget 字段`,
+        `${rel}: 不得引用 executionBudget 字段（权威消费仅 budget-usage/platform/orchestrator）`,
       );
     }
   });
