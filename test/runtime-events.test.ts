@@ -11,9 +11,10 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { SpawnRuntime } from '../src/runtime/spawn.ts';
 import type { RuntimeEvent } from '../src/application/ports.ts';
@@ -167,6 +168,101 @@ describe('S11.4 事件映射：跨进程之后还得在', () => {
       outcome.resolvedProfile?.resolved.map((f) => `${f.key}=${f.value}`),
       ['provider=acme', 'model=acme-1'],
     );
+  });
+});
+
+describe('BUDGET-001-S4 runtime protocol: capabilities + activityClass', () => {
+  test('runtime.capabilities v1 becomes RuntimeEvent, not output', async () => {
+    const { events } = await runAndCollect(
+      ['__COAGENT_EVENT__ {"t":"runtime.capabilities","commandActivityClassification":"v1"}'],
+      { endedBy: 'structured_submit', usage: USAGE },
+    );
+    assert.deepEqual(
+      events.filter((e) => e.kind === 'runtime.capabilities'),
+      [{ kind: 'runtime.capabilities', commandActivityClassification: 'v1' }],
+    );
+    assert.equal(events.filter((e) => e.kind === 'output').length, 0);
+  });
+
+  test('unknown/invalid capabilities classification is dropped', async () => {
+    const { events } = await runAndCollect(
+      [
+        '__COAGENT_EVENT__ {"t":"runtime.capabilities","commandActivityClassification":"v0"}',
+        '__COAGENT_EVENT__ {"t":"runtime.capabilities"}',
+        '__COAGENT_EVENT__ {"t":"runtime.capabilities","commandActivityClassification":"V1"}',
+      ],
+      { endedBy: 'structured_submit', usage: USAGE },
+    );
+    assert.equal(events.filter((e) => e.kind === 'runtime.capabilities').length, 0);
+    assert.equal(events.filter((e) => e.kind === 'output').length, 0);
+  });
+
+  test('tool.started preserves activityClass command/other plus name/detail', async () => {
+    const { events } = await runAndCollect(
+      [
+        '__COAGENT_EVENT__ {"t":"tool.started","name":"read","callId":"c1","detail":"src/a.ts","activityClass":"other"}',
+        '__COAGENT_EVENT__ {"t":"tool.started","name":"run","callId":"c2","detail":"ls -la","activityClass":"command"}',
+      ],
+      { endedBy: 'structured_submit', usage: USAGE },
+    );
+    const tools = events.filter((e) => e.kind === 'tool.started');
+    assert.equal(tools.length, 2);
+    assert.deepEqual(tools[0], {
+      kind: 'tool.started',
+      name: 'read',
+      callId: 'c1',
+      detail: 'src/a.ts',
+      activityClass: 'other',
+    });
+    assert.deepEqual(tools[1], {
+      kind: 'tool.started',
+      name: 'run',
+      callId: 'c2',
+      detail: 'ls -la',
+      activityClass: 'command',
+    });
+  });
+
+  test('tool.started without activityClass still parses (legacy)', async () => {
+    const { events } = await runAndCollect(
+      ['__COAGENT_EVENT__ {"t":"tool.started","name":"read","callId":"c1"}'],
+      { endedBy: 'structured_submit', usage: USAGE },
+    );
+    const started = events.find((e) => e.kind === 'tool.started');
+    assert.deepEqual(started, {
+      kind: 'tool.started',
+      name: 'read',
+      callId: 'c1',
+      detail: undefined,
+    });
+    assert.equal(started && 'activityClass' in started, false);
+  });
+
+  test('illegal activityClass is omitted — Hub does not infer from name', async () => {
+    const { events } = await runAndCollect(
+      [
+        '__COAGENT_EVENT__ {"t":"tool.started","name":"bash","callId":"c1","activityClass":"shell"}',
+        '__COAGENT_EVENT__ {"t":"tool.started","name":"powershell","callId":"c2","activityClass":true}',
+        '__COAGENT_EVENT__ {"t":"tool.started","name":"bash","callId":"c3","activityClass":"COMMAND"}',
+      ],
+      { endedBy: 'structured_submit', usage: USAGE },
+    );
+    const tools = events.filter((e) => e.kind === 'tool.started');
+    assert.equal(tools.length, 3);
+    for (const t of tools) {
+      assert.equal('activityClass' in t, false, 'illegal class must not be coerced or inferred');
+    }
+  });
+
+  test('spawn.ts has no bash/powershell classification policy', () => {
+    const root = fileURLToPath(new URL('..', import.meta.url));
+    const body = readFileSync(join(root, 'src', 'runtime', 'spawn.ts'), 'utf8');
+    // May mention bash only in human comments about detail examples — forbid classification branches.
+    assert.doesNotMatch(body, /activityClass\s*=\s*.*bash|name\s*===\s*['"]bash['"]/);
+    assert.doesNotMatch(body, /name\s*===\s*['"]powershell['"]|activityClass.*powershell/);
+    // parseEvent must not map tool names to activityClass
+    assert.doesNotMatch(body, /activityClass:\s*raw\.name/);
+    assert.doesNotMatch(body, /bash.*activityClass|powershell.*activityClass/);
   });
 });
 

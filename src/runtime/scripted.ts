@@ -24,6 +24,13 @@ export interface ScriptStep {
   readonly body: unknown | ((previous: Record<string, unknown>) => unknown);
   /** 期待这一步失败（用来验平台守卫）。默认期待成功。 */
   readonly expectFailure?: boolean;
+  /**
+   * Explicit activityClass for BUDGET-001-S4 fixtures only.
+   * Never inferred from `tool` name — omit for legacy scripted hops.
+   */
+  readonly activityClass?: 'command' | 'other';
+  /** Optional stable callId when activityClass is set; defaults to tool name. */
+  readonly callId?: string;
 }
 
 export interface Script {
@@ -55,6 +62,12 @@ export interface Script {
   readonly output?: string;
   /** query 角色：结构化终态，透传进 RuntimeOutcome.queryOutcome。 */
   readonly queryOutcome?: 'answered' | 'failed' | 'needs_mutation';
+  /**
+   * Explicit v1 command-activity classification for budget fixtures (BUDGET-001-S4).
+   * Default omitted so existing scripted hops stay legacy/uncovered.
+   * Never inferred from tool names.
+   */
+  readonly commandActivityClassification?: 'v1';
 }
 
 /** 按 `${role}:${workItemId ?? '-'}:${第几次}` 取脚本。 */
@@ -150,14 +163,31 @@ export class ScriptedRuntime implements AgentRuntime {
 
       let submitted = false;
       const previous: Record<string, unknown> = {};
+      // Yield so the caller can .on() before the first emit (same race hangs already documents).
+      // Without this, runtime.capabilities and the first tool.started are lost to an empty handler list.
+      await new Promise<void>((tick) => setImmediate(tick));
+      // BUDGET-001-S4: only when a fixture opts in explicitly — never inferred.
+      if (script.commandActivityClassification === 'v1') {
+        emit({ kind: 'runtime.capabilities', commandActivityClassification: 'v1' });
+      }
       for (const step of script.steps) {
-        emit({ kind: 'tool.started', name: step.tool, callId: step.tool });
+        const callId = step.callId ?? step.tool;
+        const started: {
+          kind: 'tool.started';
+          name: string;
+          callId: string;
+          activityClass?: 'command' | 'other';
+        } = { kind: 'tool.started', name: step.tool, callId };
+        if (step.activityClass === 'command' || step.activityClass === 'other') {
+          started.activityClass = step.activityClass;
+        }
+        emit(started);
 
         // query 路径的只读本地工具：不走 Mission HTTP 面（也没有 run token）。
         if (spec.role === 'query' && QUERY_LOCAL_TOOLS.has(step.tool)) {
           const json = { ok: true, tool: step.tool };
           this.transcript.push({ key, tool: step.tool, status: 200, json });
-          emit({ kind: 'tool.completed', name: step.tool, callId: step.tool });
+          emit({ kind: 'tool.completed', name: step.tool, callId });
           Object.assign(previous, json);
           continue;
         }
@@ -176,7 +206,7 @@ export class ScriptedRuntime implements AgentRuntime {
         });
         const json: unknown = await res.json().catch(() => null);
         this.transcript.push({ key, tool: step.tool, status: res.status, json });
-        emit({ kind: 'tool.completed', name: step.tool, callId: step.tool });
+        emit({ kind: 'tool.completed', name: step.tool, callId });
 
         if (step.expectFailure) {
           if (res.ok) throw new Error(`ScriptedRuntime: ${step.tool} 本该被平台拒绝，却成功了`);

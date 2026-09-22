@@ -155,6 +155,14 @@ export interface AgentRun {
 export type RuntimeEvent =
   | { readonly kind: 'output'; readonly text: string }
   | {
+      /**
+       * Adapter-declared command-activity classification protocol (BUDGET-001-S4).
+       * Hub never infers classification from tool names.
+       */
+      readonly kind: 'runtime.capabilities';
+      readonly commandActivityClassification: 'v1';
+    }
+  | {
       readonly kind: 'tool.started';
       readonly name: string;
       readonly callId: string;
@@ -166,6 +174,11 @@ export type RuntimeEvent =
        * 实测踩过：执行者干到一半静默 5 分钟被杀，尾巴里只有工具名。
        */
       readonly detail?: string;
+      /**
+       * Adapter-classified activity (BUDGET-001-S4). Optional so legacy adapters
+       * still type-check. Hub must not infer this from `name`.
+       */
+      readonly activityClass?: 'command' | 'other';
     }
   | { readonly kind: 'tool.completed'; readonly name: string; readonly callId: string }
   | { readonly kind: 'usage'; readonly usage: TokenUsage };

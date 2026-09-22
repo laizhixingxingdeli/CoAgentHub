@@ -1,11 +1,13 @@
 /**
- * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1/S2/S3).
+ * Pure authoritative budget usage snapshot + evaluation (BUDGET-001-S1/S2/S3/S4).
  *
  * Application-layer only: consumes ExecutionBudget + attempt usage facts +
  * optional durable orchestration.round.started ActivityLog facts (S2) +
- * optional attempt.started/ended wall-clock projection (S3).
+ * optional attempt.started/ended wall-clock projection (S3) +
+ * optional runtime.command_tracking / runtime.command.started facts (S4).
  * No scheduler enforcement, wait-state coupling, thresholds, upgrade wiring,
- * or default policy numbers. Does not invent command usage or Mission-age timers.
+ * or default policy numbers. Does not invent command usage from tool names
+ * or Mission-age timers. Hub never classifies commands by tool name.
  */
 
 import type { ExecutionBudget, TokenUsage } from '../kernel/index.ts';
@@ -62,7 +64,9 @@ export interface BudgetTokenAggregate {
 /**
  * Authoritative usage facts at a point in time.
  *
- * commandCount remains omitted — no trusted source yet.
+ * commandCount is optional (S4): only when caller supplies a known projection
+ * from countAuthoritativeCommands (including honest 0); never invent a zero
+ * when history is unknown.
  * roundCount is optional (S2): only when caller supplies a known projection
  * from countAuthoritativeRounds; never invent a zero when history is unknown.
  * wallClockMs is optional (S3): only when caller supplies a known projection
@@ -83,6 +87,11 @@ export interface BudgetUsageSnapshot {
    * Absent when projection is unknown or not supplied.
    */
   readonly wallClockMs?: number;
+  /**
+   * Known authoritative command-start count (S4) — distinct (attemptId, callId).
+   * Absent when projection is unknown or not supplied.
+   */
+  readonly commandCount?: number;
   /** Only when caller provided a trusted changedFiles list. */
   readonly changedFileCount?: number;
   /** Only when every counted attempt is reported with finite nonnegative tokens. */
@@ -117,6 +126,12 @@ export interface BuildBudgetUsageSnapshotInput {
    */
   readonly wallClockMs?: number;
   /**
+   * Known authoritative command count from countAuthoritativeCommands.
+   * When provided (including 0), `commandCount` is set on the snapshot.
+   * Omitted => no command fact (evaluator keeps commands unknown).
+   */
+  readonly commandCount?: number;
+  /**
    * Trusted changed-files list from an authoritative source.
    * When provided (including empty), `changedFileCount` is set to its length.
    * Omitted => no changed-file fact.
@@ -124,13 +139,13 @@ export interface BuildBudgetUsageSnapshotInput {
   readonly changedFiles?: readonly string[];
 }
 
-/** Minimal activity-log shape for pure round / wall-clock projection (S2/S3). */
+/** Minimal activity-log shape for pure round / wall-clock / command projection (S2/S3/S4). */
 export interface BudgetActivityEventFact {
   readonly kind: string;
   readonly data?: unknown;
   /** ISO timestamp when present on durable ActivityLog events (S3 wall-clock). */
   readonly at?: string;
-  /** Attempt correlation id when present (S3 wall-clock). */
+  /** Attempt correlation id when present (S3 wall-clock / S4 commands). */
   readonly attemptId?: string;
 }
 
@@ -154,10 +169,28 @@ export type AuthoritativeWallClockMs =
   | { readonly status: 'known'; readonly ms: number }
   | { readonly status: 'unknown' };
 
+/**
+ * Result of projecting durable runtime.command_* facts (BUDGET-001-S4).
+ *
+ * - known: trusted distinct (attemptId, callId) count (may be 0)
+ * - unknown: legacy/mixed/invalid/orphan/malformed — do not invent a number
+ */
+export type AuthoritativeCommandCount =
+  | { readonly status: 'known'; readonly count: number }
+  | { readonly status: 'unknown' };
+
 const ROUND_STARTED_KIND = 'orchestration.round.started';
 const ATTEMPT_STARTED_KIND = 'attempt.started';
 const ATTEMPT_ENDED_KIND = 'attempt.ended';
 const ATTEMPT_TRACE_KINDS = new Set([ATTEMPT_STARTED_KIND, ATTEMPT_ENDED_KIND]);
+const COMMAND_TRACKING_ENABLED_KIND = 'runtime.command_tracking.enabled';
+const COMMAND_STARTED_KIND = 'runtime.command.started';
+const COMMAND_TRACKING_INVALID_KIND = 'runtime.command_tracking.invalid';
+const COMMAND_TRACKING_KINDS = new Set([
+  COMMAND_TRACKING_ENABLED_KIND,
+  COMMAND_STARTED_KIND,
+  COMMAND_TRACKING_INVALID_KIND,
+]);
 
 function isAuthoritativeRoundStarted(event: BudgetActivityEventFact): boolean {
   if (event.kind !== ROUND_STARTED_KIND) return false;
@@ -207,6 +240,133 @@ export function countAuthoritativeRounds(
   }
 
   return Object.freeze({ status: 'known', count: authoritativeCount });
+}
+
+function isSchemaV1Data(data: unknown): data is Record<string, unknown> {
+  if (data == null || typeof data !== 'object' || Array.isArray(data)) return false;
+  return (data as { schemaVersion?: unknown }).schemaVersion === 1;
+}
+
+/**
+ * Pure projection of authoritative command starts from ActivityLog events.
+ *
+ * Recognizes only runtime.command_tracking.enabled / runtime.command.started /
+ * runtime.command_tracking.invalid with data.schemaVersion === 1 and non-empty
+ * attemptId (plus non-empty data.callId for started). Counts Mission
+ * attempt.started attemptIds only. Never infers from tool names, truncated
+ * activity tails, end-of-hop tool call lists, or every tool.started.
+ *
+ * Tracking history is applied in log order per attempt: a command.started that
+ * appears before that attempt has valid enabled cover fails closed to unknown.
+ * A later enabled must never retro-cover earlier starts.
+ */
+export function countAuthoritativeCommands(
+  events: readonly BudgetActivityEventFact[],
+): AuthoritativeCommandCount {
+  const attemptIds = new Set<string>();
+  let sawAttemptStartedWithoutId = false;
+
+  for (const event of events) {
+    if (event.kind !== ATTEMPT_STARTED_KIND) continue;
+    const id = nonEmptyAttemptId(event.attemptId);
+    if (id === undefined) {
+      sawAttemptStartedWithoutId = true;
+      continue;
+    }
+    attemptIds.add(id);
+  }
+
+  type AttemptCmdState = {
+    enabled: boolean;
+    invalid: boolean;
+    /** started observed before this attempt had valid enabled cover. */
+    startedBeforeEnabled: boolean;
+    callIds: Set<string>;
+  };
+  const byAttempt = new Map<string, AttemptCmdState>();
+  const ensure = (id: string): AttemptCmdState => {
+    let state = byAttempt.get(id);
+    if (!state) {
+      state = {
+        enabled: false,
+        invalid: false,
+        startedBeforeEnabled: false,
+        callIds: new Set(),
+      };
+      byAttempt.set(id, state);
+    }
+    return state;
+  };
+
+  let sawAnyTrackingFact = false;
+  let malformedOrOrphan = false;
+
+  // Process tracking facts in log order so enabled cannot retro-cover starts.
+  for (const event of events) {
+    if (!COMMAND_TRACKING_KINDS.has(event.kind)) continue;
+    sawAnyTrackingFact = true;
+
+    const id = nonEmptyAttemptId(event.attemptId);
+    if (id === undefined || !attemptIds.has(id)) {
+      malformedOrOrphan = true;
+      continue;
+    }
+
+    if (!isSchemaV1Data(event.data)) {
+      malformedOrOrphan = true;
+      continue;
+    }
+
+    const state = ensure(id);
+    if (event.kind === COMMAND_TRACKING_ENABLED_KIND) {
+      state.enabled = true;
+      continue;
+    }
+    if (event.kind === COMMAND_TRACKING_INVALID_KIND) {
+      state.invalid = true;
+      continue;
+    }
+
+    // runtime.command.started — only counts when this attempt already has valid cover.
+    const callId = nonEmptyAttemptId(event.data.callId);
+    if (callId === undefined) {
+      malformedOrOrphan = true;
+      continue;
+    }
+    if (!state.enabled || state.invalid || state.startedBeforeEnabled) {
+      // No valid enabled yet (or already broken/invalid): fail closed; later
+      // enabled must not retroactively make this start authoritative.
+      state.startedBeforeEnabled = true;
+      continue;
+    }
+    state.callIds.add(callId);
+  }
+
+  // Honest zero: no attempts and no command-tracking facts.
+  if (attemptIds.size === 0 && !sawAnyTrackingFact && !sawAttemptStartedWithoutId) {
+    return Object.freeze({ status: 'known', count: 0 });
+  }
+
+  if (sawAttemptStartedWithoutId || malformedOrOrphan) {
+    return Object.freeze({ status: 'unknown' });
+  }
+
+  let total = 0;
+  for (const attemptId of attemptIds) {
+    const state = byAttempt.get(attemptId);
+    // Every counted attempt must have valid enabled cover in order, with no invalid.
+    if (
+      !state ||
+      !state.enabled ||
+      state.invalid ||
+      state.startedBeforeEnabled
+    ) {
+      return Object.freeze({ status: 'unknown' });
+    }
+    total += state.callIds.size;
+  }
+
+  return Object.freeze({ status: 'known', count: total });
 }
 
 function parseEventTimeMs(value: unknown): number | undefined {
@@ -380,6 +540,7 @@ export function buildBudgetUsageSnapshot(
     attemptCount: number;
     roundCount?: number;
     wallClockMs?: number;
+    commandCount?: number;
     changedFileCount?: number;
     tokenAggregate?: BudgetTokenAggregate;
     costAggregate?: number;
@@ -395,6 +556,10 @@ export function buildBudgetUsageSnapshot(
 
   if (Object.prototype.hasOwnProperty.call(input, 'wallClockMs') && input.wallClockMs !== undefined) {
     out.wallClockMs = input.wallClockMs;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'commandCount') && input.commandCount !== undefined) {
+    out.commandCount = input.commandCount;
   }
 
   if (Object.prototype.hasOwnProperty.call(input, 'changedFiles') && input.changedFiles !== undefined) {
@@ -480,7 +645,8 @@ function optionalLimitVerdict(
  * Required fields (attempts/rounds/wallClockMs) are always in force when budget exists;
  * rounds use snapshot.roundCount when present (S2), else `unknown`;
  * wallClockMs use snapshot.wallClockMs when present (S3), else `unknown`.
- * `commands` with a limit is always `unknown` until a trusted counter exists.
+ * commands use snapshot.commandCount when present (S4), else `unknown` when limited.
+ * No fake zero/default numeric policy for commands.
  */
 export function evaluateExecutionBudget(
   budget: ExecutionBudget | undefined,
@@ -504,10 +670,7 @@ export function evaluateExecutionBudget(
     optionalLimitVerdict('totalTokens', budget.maxTotalTokens, token?.totalTokens),
     optionalLimitVerdict('cost', budget.maxCost, snapshot.costAggregate),
     optionalLimitVerdict('changedFiles', budget.maxChangedFiles, snapshot.changedFileCount),
-    // S1: no trusted command counter — limit in force still yields unknown.
-    budget.maxCommands === undefined
-      ? verdict('commands', 'not_in_force')
-      : verdict('commands', 'unknown', budget.maxCommands),
+    optionalLimitVerdict('commands', budget.maxCommands, snapshot.commandCount),
   ];
 
   const anyAuthoritativeExceeded = dimensions.some((d) => d.status === 'exceeded');

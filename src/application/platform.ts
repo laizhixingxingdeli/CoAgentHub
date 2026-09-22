@@ -1678,6 +1678,58 @@ export class Platform {
   }
 
   /**
+   * Trusted command-tracking cover (BUDGET-001-S4).
+   *
+   * Recorded when a Mission attempt receives runtime.capabilities v1 before any
+   * tool.started. Envelope carries attemptId. No caller-authored payload.
+   */
+  async recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
+    const { mission } = await this.#locate(missionId);
+    await this.#event(
+      mission,
+      'runtime.command_tracking.enabled',
+      { schemaVersion: 1 },
+      undefined,
+      attemptId,
+    );
+  }
+
+  /**
+   * Trusted command-start fact (BUDGET-001-S4).
+   *
+   * Adapter-classified activityClass === 'command' with a stable callId.
+   * Hub never classifies by tool name. Envelope carries attemptId.
+   */
+  async recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
+    const { mission } = await this.#locate(missionId);
+    await this.#event(
+      mission,
+      'runtime.command.started',
+      { schemaVersion: 1, callId },
+      undefined,
+      attemptId,
+    );
+  }
+
+  /**
+   * Trusted command-tracking breach (BUDGET-001-S4).
+   *
+   * Written when an attempt already covered by v1 later sees a missing/illegal
+   * activityClass or an empty command callId — so projection fails closed to
+   * unknown instead of undercounting.
+   */
+  async recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
+    const { mission } = await this.#locate(missionId);
+    await this.#event(
+      mission,
+      'runtime.command_tracking.invalid',
+      { schemaVersion: 1 },
+      undefined,
+      attemptId,
+    );
+  }
+
+  /**
    * L3 答复一条升级。
    *
    * 升级之后调度器是停着的（再叫协调者只会让它再升级一次）。答复落库之后

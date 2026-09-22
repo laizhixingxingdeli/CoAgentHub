@@ -1,7 +1,8 @@
 /**
- * BUDGET-001-S1/S2/S3: pure authoritative budget snapshot + evaluator +
+ * BUDGET-001-S1/S2/S3/S4: pure authoritative budget snapshot + evaluator +
  * durable orchestration.round.started projection +
- * attempt.started/ended wall-clock projection.
+ * attempt.started/ended wall-clock projection +
+ * runtime.command_* authoritative command projection.
  */
 
 import { describe, test } from 'node:test';
@@ -13,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUDGET_DIMENSIONS,
   buildBudgetUsageSnapshot,
+  countAuthoritativeCommands,
   countAuthoritativeRounds,
   evaluateExecutionBudget,
   projectAuthoritativeWallClockMs,
@@ -64,6 +66,7 @@ function snap(
     attempts: readonly BudgetAttemptFact[];
     roundCount?: number;
     wallClockMs?: number;
+    commandCount?: number;
     changedFiles?: readonly string[];
   } = {
     missionId: over.missionId ?? 'm-1',
@@ -76,6 +79,9 @@ function snap(
   if (over.wallClockMs !== undefined) {
     input.wallClockMs = over.wallClockMs;
   }
+  if (over.commandCount !== undefined) {
+    input.commandCount = over.commandCount;
+  }
   if (over.changedFiles !== undefined) {
     input.changedFiles = over.changedFiles;
   }
@@ -87,8 +93,37 @@ type BuildOver = {
   capturedAt?: string;
   roundCount?: number;
   wallClockMs?: number;
+  commandCount?: number;
   changedFiles?: readonly string[];
 };
+
+function cmdEnabled(attemptId: string, schemaVersion: unknown = 1): BudgetActivityEventFact {
+  return {
+    kind: 'runtime.command_tracking.enabled',
+    attemptId,
+    data: { schemaVersion },
+  };
+}
+
+function cmdStarted(
+  attemptId: string,
+  callId: string,
+  schemaVersion: unknown = 1,
+): BudgetActivityEventFact {
+  return {
+    kind: 'runtime.command.started',
+    attemptId,
+    data: { schemaVersion, callId },
+  };
+}
+
+function cmdInvalid(attemptId: string, schemaVersion: unknown = 1): BudgetActivityEventFact {
+  return {
+    kind: 'runtime.command_tracking.invalid',
+    attemptId,
+    data: { schemaVersion },
+  };
+}
 
 function roundStarted(schemaVersion: unknown = 1): BudgetActivityEventFact {
   return { kind: 'orchestration.round.started', data: { schemaVersion } };
@@ -595,6 +630,53 @@ describe('evaluateExecutionBudget', () => {
     assert.equal(verdictFor(zeroLimit, 'rounds').used, 0);
   });
 
+  test('commands ok/exceeded when snapshot.commandCount present (used >= limit => exceeded)', () => {
+    const budget = sampleBudget({ maxCommands: 2 });
+
+    const under = evaluateExecutionBudget(budget, snap([], { commandCount: 1 }));
+    assert.equal(verdictFor(under, 'commands').status, 'ok');
+    assert.equal(verdictFor(under, 'commands').used, 1);
+    assert.equal(verdictFor(under, 'commands').limit, 2);
+    assert.equal(under.anyAuthoritativeExceeded, false);
+
+    const at = evaluateExecutionBudget(budget, snap([], { commandCount: 2 }));
+    assert.equal(verdictFor(at, 'commands').status, 'exceeded');
+    assert.equal(verdictFor(at, 'commands').used, 2);
+    assert.equal(at.anyAuthoritativeExceeded, true);
+
+    const over = evaluateExecutionBudget(budget, snap([], { commandCount: 5 }));
+    assert.equal(verdictFor(over, 'commands').status, 'exceeded');
+    assert.equal(verdictFor(over, 'commands').used, 5);
+
+    const zeroLimit = evaluateExecutionBudget(
+      sampleBudget({ maxCommands: 0 }),
+      snap([], { commandCount: 0 }),
+    );
+    assert.equal(verdictFor(zeroLimit, 'commands').status, 'exceeded');
+    assert.equal(verdictFor(zeroLimit, 'commands').used, 0);
+    assert.equal(verdictFor(zeroLimit, 'commands').limit, 0);
+    assert.equal(zeroLimit.anyAuthoritativeExceeded, true);
+
+    // omitted commandCount still unknown when limit in force
+    const omitted = evaluateExecutionBudget(budget, snap([]));
+    assert.equal(verdictFor(omitted, 'commands').status, 'unknown');
+    assert.equal(verdictFor(omitted, 'commands').limit, 2);
+    assert.equal('used' in verdictFor(omitted, 'commands'), false);
+    assert.equal(omitted.anyAuthoritativeExceeded, false);
+  });
+
+  test('commandCount only when trusted known count supplied (incl. honest 0)', () => {
+    const without = snap([{ usage: reported() }]);
+    assert.equal('commandCount' in without, false);
+
+    const zero = snap([], { commandCount: 0 });
+    assert.equal(zero.commandCount, 0);
+    assert.equal('commandCount' in zero, true);
+
+    const n = snap([], { commandCount: 4 });
+    assert.equal(n.commandCount, 4);
+  });
+
   test('wallClockMs ok/exceeded when snapshot.wallClockMs present (used >= limit => exceeded)', () => {
     const budget: ExecutionBudget = { maxAttempts: 10, maxRounds: 2, maxWallClockMs: 10_000 };
 
@@ -953,6 +1035,207 @@ describe('projectAuthoritativeWallClockMs', () => {
   });
 });
 
+describe('countAuthoritativeCommands', () => {
+  test('honest known 0: no attempts and no tracking facts', () => {
+    assert.deepEqual(countAuthoritativeCommands([]), { status: 'known', count: 0 });
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        { kind: 'mission.created', data: {} },
+        roundStarted(1),
+      ]),
+      { status: 'known', count: 0 },
+    );
+  });
+
+  test('v1 enabled, zero command.started => known 0', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([attemptStarted('a1'), cmdEnabled('a1')]),
+      { status: 'known', count: 0 },
+    );
+  });
+
+  test('command + other: only command.started rows count', () => {
+    // 'other' is never persisted; only started facts appear in the log.
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'c1'),
+        cmdStarted('a1', 'c2'),
+      ]),
+      { status: 'known', count: 2 },
+    );
+  });
+
+  test('same callId twice => distinct count 1', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'c1'),
+        cmdStarted('a1', 'c1'),
+      ]),
+      { status: 'known', count: 1 },
+    );
+  });
+
+  test('two attempts both enabled: counts sum', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'c1'),
+        attemptStarted('a2'),
+        cmdEnabled('a2'),
+        cmdStarted('a2', 'c1'),
+        cmdStarted('a2', 'c9'),
+      ]),
+      { status: 'known', count: 3 },
+    );
+  });
+
+  test('attempt.started without enabled => unknown (legacy)', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([attemptStarted('a1')]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdStarted('a1', 'c1'), // started-without-enabled
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('started-before-enabled in log order => unknown (no retro-cover)', () => {
+    // Adversarial: attempt.started, command.started, then enabled later.
+    // Enabled must never retro-cover earlier starts.
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdStarted('a1', 'c1'),
+        cmdEnabled('a1'),
+      ]),
+      { status: 'unknown' },
+    );
+    // Mixed: early start before enable, then a later start after enable — still unknown.
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdStarted('a1', 'early'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'late'),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('enabled-before-started in log order => known', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'c1'),
+      ]),
+      { status: 'known', count: 1 },
+    );
+  });
+
+  test('enabled then invalid => unknown', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('a1', 'c1'),
+        cmdInvalid('a1'),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('tool-before-cap (no enabled) => unknown', () => {
+    // Attempt ran tools but never received v1 cover.
+    assert.deepEqual(
+      countAuthoritativeCommands([attemptStarted('a1'), attemptEnded('a1')]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('mixed legacy + covered => unknown (no undercount)', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('legacy'),
+        attemptStarted('v1'),
+        cmdEnabled('v1'),
+        cmdStarted('v1', 'c1'),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('orphan tracking facts (attemptId not in attempt.started set) => unknown', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([cmdEnabled('ghost'), cmdStarted('ghost', 'c1')]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        cmdStarted('orphan', 'c1'),
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('malformed tracking facts => unknown', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1', 2),
+        cmdStarted('a1', 'c1'),
+      ]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        { kind: 'runtime.command.started', attemptId: 'a1', data: { schemaVersion: 1 } },
+      ]),
+      { status: 'unknown' },
+    );
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 } }, // missing attemptId
+      ]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('attempt.started without attemptId => unknown', () => {
+    assert.deepEqual(
+      countAuthoritativeCommands([{ kind: 'attempt.started', data: {} }]),
+      { status: 'unknown' },
+    );
+  });
+
+  test('never uses tool names / toolActivity / toolCalls', () => {
+    // No command facts — noisy tool-ish kinds do not invent a count.
+    assert.deepEqual(
+      countAuthoritativeCommands([
+        attemptStarted('a1'),
+        cmdEnabled('a1'),
+        { kind: 'tool.started', data: { name: 'bash' } },
+        { kind: 'toolActivity', data: { name: 'powershell' } },
+      ]),
+      { status: 'known', count: 0 },
+    );
+  });
+});
+
 describe('budget-usage source boundaries', () => {
   test('does not import orchestrator / platform / promotion / wait-reason / 30m wall heuristic', () => {
     const body = readFileSync(srcPath, 'utf8');
@@ -965,5 +1248,7 @@ describe('budget-usage source boundaries', () => {
     assert.doesNotMatch(body, /ATTEMPT_WALL_CLOCK_MS/);
     assert.doesNotMatch(body, /30\s*\*\s*60\s*\*\s*1000/);
     assert.doesNotMatch(body, /attemptWallClockMs/);
+    // S4: Hub never classifies commands by tool name.
+    assert.doesNotMatch(body, /\bbash\b|\bpowershell\b/);
   });
 });

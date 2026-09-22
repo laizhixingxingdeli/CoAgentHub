@@ -36,15 +36,35 @@ function parseEvent(json: string): RuntimeEvent | undefined {
       name?: string;
       callId?: string;
       detail?: string;
+      activityClass?: unknown;
+      commandActivityClassification?: unknown;
       usage?: TokenUsage;
     };
+    // BUDGET-001-S4: accept only exact v1 classification capability. Anything else drops.
+    if (raw.t === 'runtime.capabilities') {
+      if (raw.commandActivityClassification === 'v1') {
+        return { kind: 'runtime.capabilities', commandActivityClassification: 'v1' };
+      }
+      return undefined;
+    }
     if (raw.t === 'tool.started' && raw.name) {
-      return {
+      const event: {
+        kind: 'tool.started';
+        name: string;
+        callId: string;
+        detail?: string;
+        activityClass?: 'command' | 'other';
+      } = {
         kind: 'tool.started',
         name: raw.name,
         callId: raw.callId ?? raw.name,
         detail: raw.detail,
       };
+      // Preserve only exact adapter classifications. Never coerce from tool name.
+      if (raw.activityClass === 'command' || raw.activityClass === 'other') {
+        event.activityClass = raw.activityClass;
+      }
+      return event;
     }
     if (raw.t === 'tool.completed' && raw.name) {
       return { kind: 'tool.completed', name: raw.name, callId: raw.callId ?? raw.name };

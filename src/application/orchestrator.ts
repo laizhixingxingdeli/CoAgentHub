@@ -769,6 +769,43 @@ export class Orchestrator {
       let streamedUsage: TokenUsage | undefined;
       /** 墙钟延长只给一次。一直不交东西的，第二次到点就停。 */
       let extendedOnce = false;
+      // BUDGET-001-S4: per-hop command-tracking ingest (projection only; no gate).
+      // Hub never classifies by tool name — only adapter activityClass after v1 cover.
+      let sawToolStarted = false;
+      let commandTracking: 'none' | 'enabled' | 'invalid' = 'none';
+      const seenCommandCallIds = new Set<string>();
+      // BUDGET-001-S4: per-hop SERIAL durable append queue.
+      // Array-of-started-promises lets PG INSERT completion reorder vs runtime events.
+      // Chain so each record* begins only after the prior queued append settles successfully.
+      // Runtime callback stays non-blocking: enqueue sync, never await inside on().
+      let commandDurableTail: Promise<void> = Promise.resolve();
+      /** True only after runtime.command_tracking.enabled append completed for this attempt. */
+      let enabledPersisted = false;
+      const enqueueCommandDurable = (write: () => Promise<void>): void => {
+        // Keep rejection on the tail for flushCommandDurable; detach a void catch so a
+        // mid-hop write failure before await does not surface as unhandledRejection.
+        const next = commandDurableTail.then(write);
+        void next.catch(() => undefined);
+        commandDurableTail = next;
+      };
+      const flushCommandDurable = async (): Promise<void> => {
+        try {
+          await commandDurableTail;
+        } catch (writeError) {
+          // Fail closed: if authoritative enabled landed but a later started/invalid
+          // write failed, best-effort invalid so projection cannot stay "known" short.
+          // Do not re-enter the rejected chain — call Platform directly.
+          // enabled itself failing needs no recovery (attempt.started without enabled ⇒ unknown).
+          if (enabledPersisted) {
+            try {
+              await this.#platform.recordCommandTrackingInvalid(input.missionId, attemptId);
+            } catch {
+              // Recovery failed — keep original write failure; do not pretend coverage.
+            }
+          }
+          throw writeError;
+        }
+      };
       try {
         const run = await input.pool.runtime.start({
           role: input.role,
@@ -786,9 +823,27 @@ export class Orchestrator {
         // 人分不出它在干活还是卡住了，而这正是最想知道的时候。
         unsubscribe = run.on((event) => {
           const base = { missionId: input.missionId, attemptId };
+          if (event.kind === 'runtime.capabilities') {
+            // Valid v1 before any tool.started enables tracking; duplicate is idempotent;
+            // capability after a tool never enables this attempt.
+            if (
+              event.commandActivityClassification === 'v1' &&
+              commandTracking === 'none' &&
+              !sawToolStarted
+            ) {
+              commandTracking = 'enabled';
+              enqueueCommandDurable(async () => {
+                await this.#platform.recordCommandTrackingEnabled(input.missionId, attemptId);
+                enabledPersisted = true;
+              });
+            }
+            return;
+          }
           if (event.kind === 'output') {
             void this.#live.append({ ...base, kind: 'text', text: event.text });
           } else if (event.kind === 'tool.started') {
+            // Mark before classification — order is the contract.
+            sawToolStarted = true;
             void this.#live.append({
               ...base,
               kind: 'tool',
@@ -796,6 +851,30 @@ export class Orchestrator {
               // 的东西；适配层没给 detail 时退回只有工具名，行为和以前一样。
               text: event.detail ? `${event.name} · ${event.detail}` : event.name,
             });
+            if (commandTracking === 'enabled') {
+              const activityClass = event.activityClass;
+              if (activityClass !== 'command' && activityClass !== 'other') {
+                // Enabled cover + unclassified start must not yield a short count.
+                commandTracking = 'invalid';
+                enqueueCommandDurable(() =>
+                  this.#platform.recordCommandTrackingInvalid(input.missionId, attemptId),
+                );
+              } else if (activityClass === 'command') {
+                const callId = event.callId;
+                if (typeof callId !== 'string' || callId.length === 0) {
+                  commandTracking = 'invalid';
+                  enqueueCommandDurable(() =>
+                    this.#platform.recordCommandTrackingInvalid(input.missionId, attemptId),
+                  );
+                } else if (!seenCommandCallIds.has(callId)) {
+                  seenCommandCallIds.add(callId);
+                  enqueueCommandDurable(() =>
+                    this.#platform.recordCommandStarted(input.missionId, attemptId, callId),
+                  );
+                }
+              }
+              // activityClass === 'other' → no command-start fact
+            }
           } else if (event.kind === 'usage') {
             streamedUsage = event.usage;
             void this.#live.append({ ...base, kind: 'usage', usage: event.usage });
@@ -836,7 +915,22 @@ export class Orchestrator {
           }, this.#wallClockMs);
         };
         armWallClock();
-        outcome = await run.wait();
+        // Flush durable command facts even when wait() throws after events were received.
+        // Preserve the original runtime failure; do not let a secondary write error replace it.
+        // If only the write fails, surface that so we never falsely claim authoritative coverage.
+        let waitError: unknown;
+        try {
+          outcome = await run.wait();
+        } catch (error) {
+          waitError = error;
+        } finally {
+          try {
+            await flushCommandDurable();
+          } catch (writeError) {
+            if (waitError === undefined) waitError = writeError;
+          }
+        }
+        if (waitError !== undefined) throw waitError;
       } catch (error) {
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
         // 平台一抖，好端端的候选被冻进冷却，而换一个照样连不上。
