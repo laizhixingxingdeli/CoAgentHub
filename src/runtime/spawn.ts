@@ -156,15 +156,26 @@ export const SPAWN_ENV_PASSTHROUGH_VAR = 'COAGENT_AGENT_ENV_PASSTHROUGH';
  * 未声明透传列表时的拒绝文案。构造/接线共用同一句，避免「这里 throw、那里 warn」两套说法。
  * 不提任何厂商凭证名：名单由部署方自己填，Hub 不预设。
  */
+export const SPAWN_ENV_PASSTHROUGH_NONE = '-';
+
 export const SPAWN_ENV_UNDECLARED_MESSAGE =
-  'SpawnRuntime 拒绝启动：未声明子进程环境变量透传列表。请设置 `COAGENT_AGENT_ENV_PASSTHROUGH` 为逗号分隔的变量名（部署方声明要交给 agent 子进程的额外变量）。空字符串表示不透传任何额外变量，仅保留 OS/代理基线。未声明时不得把完整 `process.env` 交给子进程。';
+  'SpawnRuntime 拒绝启动：未声明子进程环境变量透传列表。请把 `COAGENT_AGENT_ENV_PASSTHROUGH` 设为逗号分隔的变量名（部署方声明要交给 agent 子进程的额外变量）；确实一个都不透传就设为 `-`，只保留 OS/代理基线。未声明时不得把完整 `process.env` 交给子进程。';
 
 /**
  * 解析部署方声明的额外透传名单。
  *
- * - 键缺失 / `undefined` → 未声明（fail-closed）
- * - `''` 或纯空白 → 已声明空名单（只留基线）
+ * - 键缺失 / `undefined` / 空串 / 纯空白 → 未声明（fail-closed）
+ * - `-`（`SPAWN_ENV_PASSTHROUGH_NONE`）→ 已声明「一个都不透传」
  * - 逗号分隔 → trim 后丢掉空 token；`*` 只是字面量，不展开成「全部」
+ *
+ * **为什么空串不算已声明。** 原先空串表示「声明了，但名单为空」，与未声明区分开。
+ * 那个区分在 PowerShell 里表达不出来：`$env:VAR = ""` 会**删掉**变量，Node 侧拿到的
+ * 是 `undefined`。于是「我明明声明了空」和「我忘了声明」在用户的 shell 里是同一个动作，
+ * 却被给了不同语义——实跑时就是这么撞上的：照文档设了空串，仍然被 fail-closed 拦下，
+ * 而报错说的是「未声明」，看起来像平台有 bug。
+ *
+ * 所以空串归到「忘了」那一侧，要表达「真的不透传」必须显式写 `-`。每个 shell 都造得出
+ * 这个值，且忘记与声明不再可能混淆。
  *
  * SpawnRuntime 自己不读这个 env 键（和 supportsQuery 不读 COAGENT_QUERY_ENABLED 同理）；
  * 解析发生在接线层，数组再显式传进来。
@@ -173,6 +184,9 @@ export function parseAgentEnvPassthrough(
   raw: string | undefined,
 ): string[] | undefined {
   if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === '') return undefined;
+  if (trimmed === SPAWN_ENV_PASSTHROUGH_NONE) return [];
   return raw
     .split(',')
     .map((token) => token.trim())

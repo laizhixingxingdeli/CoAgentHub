@@ -86,7 +86,7 @@ describe('createPiQueryRuntime env matrix', () => {
       COAGENT_QUERY_ENABLED: '1',
       COAGENT_QUERY_ADAPTER: adapter,
       // 空串 = 已声明「只要基线」；假名亦可。
-      COAGENT_AGENT_ENV_PASSTHROUGH: '',
+      COAGENT_AGENT_ENV_PASSTHROUGH: '-',
     });
     assert.ok(runtime, '应构造 SpawnRuntime');
     assert.equal(runtime.kind, 'pi');
@@ -110,7 +110,7 @@ describe('createPiQueryRuntime env matrix', () => {
     const runtime = createPiQueryRuntime({
       COAGENT_QUERY_ENABLED: '1',
       COAGENT_QUERY_ADAPTER: adapter,
-      COAGENT_AGENT_ENV_PASSTHROUGH: '',
+      COAGENT_AGENT_ENV_PASSTHROUGH: '-',
     });
     assert.ok(runtime);
   });
@@ -157,7 +157,7 @@ describe('createPiQueryRuntime env matrix', () => {
   test('注入 env 缺透传键时不回落 process.env 上的声明', () => {
     const adapter = tempAdapter();
     const prevPass = process.env.COAGENT_AGENT_ENV_PASSTHROUGH;
-    process.env.COAGENT_AGENT_ENV_PASSTHROUGH = '';
+    process.env.COAGENT_AGENT_ENV_PASSTHROUGH = '-';
     try {
       // 注入 env 齐备 query 键但无透传键：即便宿主 process.env 已声明，也必须 throw。
       assert.throws(

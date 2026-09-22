@@ -66,12 +66,32 @@ describe('parseAgentEnvPassthrough', () => {
     assert.equal(parseAgentEnvPassthrough(undefined), undefined);
   });
 
-  test('空串 → 已声明空名单', () => {
-    assert.deepEqual(parseAgentEnvPassthrough(''), []);
+  /**
+   * 空串必须算「未声明」。
+   *
+   * 由来：PowerShell 的 `$env:VAR = ""` 会**删掉**变量，Node 侧看到的是 undefined。
+   * 于是「声明了空名单」和「忘了声明」在用户的 shell 里是同一个动作。给它们不同语义，
+   * 结果就是照文档设了空串、仍被拦下、而报错说「未声明」——实跑时就是这么撞上的，
+   * 看起来像平台有 bug。
+   */
+  test('空串 → 未声明（PowerShell 造不出真空串）', () => {
+    assert.equal(parseAgentEnvPassthrough(''), undefined);
   });
 
-  test('纯空白 → 已声明空名单', () => {
-    assert.deepEqual(parseAgentEnvPassthrough('   \t  '), []);
+  test('纯空白 → 未声明', () => {
+    assert.equal(parseAgentEnvPassthrough('   \t  '), undefined);
+  });
+
+  test('`-` → 已声明「一个都不透传」', () => {
+    assert.deepEqual(parseAgentEnvPassthrough('-'), []);
+  });
+
+  test('`-` 两侧留白仍算声明空', () => {
+    assert.deepEqual(parseAgentEnvPassthrough('  -  '), []);
+  });
+
+  test('`-` 混在名单里只是普通 token，不代表空', () => {
+    assert.deepEqual(parseAgentEnvPassthrough('A,-,B'), ['A', '-', 'B']);
   });
 
   test('逗号分隔 + trim', () => {
