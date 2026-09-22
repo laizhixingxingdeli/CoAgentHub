@@ -201,6 +201,64 @@ describe('读写 .coagent/', () => {
     assert.equal(existsSync(join(root, '.coagent', 'project.yaml')), false);
     assert.equal(existsSync(join(root, '.coagent', 'architecture', 'constitution.md')), false);
   });
+
+  test('本仓库 Project Truth 钉住已交付能力 Spec 与耐久 ADR（SPEC-OBS-001A）', () => {
+    // 新 agent 只靠 .coagent/ 恢复现场：缺一份 Living Spec / ADR 等于能力失忆。
+    // 只钉路径与「非空 + 有 H1」，不把正文当快照——避免文档微润色刷红测试。
+    const root = join(import.meta.dirname, '..');
+    const specsDir = join(root, '.coagent', 'specs');
+    const adrDir = join(root, '.coagent', 'architecture', 'decisions');
+    const requiredSpecs = [
+      'http-control-auth',
+      'web-shell',
+      'query-run',
+      'classified-intake-lightweight',
+      'validation-review-authority',
+      'execution-budget-gates',
+      'lightweight-standard-promotion',
+      'decision-jev-off-shadow',
+    ];
+    const requiredAdrs = [
+      'adr-0001-web-not-split',
+      'adr-0002-decision-provider-boundary',
+      'adr-0003-query-run-not-mission',
+      'adr-0004-fast-lane-does-not-bypass-l3',
+      'adr-0005-execution-budget-authority',
+    ];
+    for (const slug of requiredSpecs) {
+      const body = readFileSync(join(specsDir, `${slug}.md`), 'utf8');
+      assert.match(body, /^# /m, `spec ${slug} 需要 H1`);
+      assert.ok(body.trim().length > 80, `spec ${slug} 不应是空壳`);
+    }
+    for (const slug of requiredAdrs) {
+      const body = readFileSync(join(adrDir, `${slug}.md`), 'utf8');
+      assert.match(body, /^# /m, `adr ${slug} 需要 H1`);
+      assert.ok(body.trim().length > 80, `adr ${slug} 不应是空壳`);
+    }
+    const adr0002 = readFileSync(join(adrDir, 'adr-0002-decision-provider-boundary.md'), 'utf8');
+    assert.match(adr0002, /SHADOW 明确非权威|非权威/, 'ADR-0002 须明示 SHADOW 非权威');
+
+    const memory = readProjectMemory(root);
+    assert.deepEqual(
+      memory.specs.map((s) => s.slug).sort(),
+      [...requiredSpecs].sort(),
+    );
+    assert.deepEqual(
+      memory.decisions.map((d) => d.slug).sort(),
+      [...requiredAdrs].sort(),
+    );
+
+    const profile = memory.projectProfile ?? '';
+    assert.match(profile, /query-run/);
+    assert.match(profile, /specs\//);
+    assert.match(profile, /不要.*project\.yaml|project\.yaml.*constitution/s);
+    assert.equal(existsSync(join(root, '.coagent', 'project.yaml')), false);
+
+    const vibe = generateVibe(memory);
+    assert.match(vibe, /不要手工编辑/);
+    for (const slug of requiredSpecs) assert.match(vibe, new RegExp(slug));
+    for (const slug of requiredAdrs) assert.match(vibe, new RegExp(slug));
+  });
 });
 
 describe('落地时把知识跟代码一起合进去', () => {
