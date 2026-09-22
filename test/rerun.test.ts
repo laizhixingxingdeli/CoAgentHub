@@ -57,6 +57,22 @@ function makePlatform() {
   });
 }
 
+function makeMetricHarness() {
+  const clock = new FixedClock('2026-01-01T00:00:00.000Z');
+  const ids = new SequentialIds();
+  const projects = new InMemoryProjectRepository();
+  const activity = new InMemoryActivityLog(clock);
+  const platform = new Platform({
+    projects,
+    deliveries: new InMemoryDeliveryRepository(clock, ids),
+    activity,
+    workspace: new InPlaceWorkspaceManager(),
+    clock,
+    ids,
+  });
+  return { platform, projects, activity, clock };
+}
+
 const ORDER = {
   objective: '做 X',
   allowedScope: ['a.ts'],
@@ -256,6 +272,90 @@ describe('listRuns：把历次运行摆在一起', () => {
     // 以前这两跳都会是 upstream_failure，这一格永远只有一个数。
     assert.deepEqual(run.endedBy, { killed_wall_clock: 1, upstream_failure: 1 });
     assert.equal(run.coordinatorHops, 2);
+  });
+
+  test('Fast Lane A/B：只从持久事件投影时延、打回和 validator 失败', async () => {
+    const h = makeMetricHarness();
+    await h.platform.createMission({ projectId: 'P', missionId: 'M-metrics', contract: CONTRACT });
+
+    h.clock.advance(1_200);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-metrics',
+      kind: 'execution_result.submitted',
+      data: { outcome: 'completed' },
+    });
+    h.clock.advance(300);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-metrics',
+      kind: 'review.recorded',
+      data: { verdict: 'reject' },
+    });
+    h.clock.advance(100);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-metrics',
+      kind: 'validation.reported',
+      data: { reportId: 'VAL-1', passed: false },
+    });
+    h.clock.advance(100);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-metrics',
+      kind: 'final_review.send_back',
+      data: { reasons: ['fix'] },
+    });
+    h.clock.advance(3_300);
+    await h.platform.cancelMission('M-metrics', 'done');
+
+    const [run] = await h.platform.listRuns('M-metrics');
+    assert.equal(run.entryMode, 'standard');
+    assert.equal(run.currentMode, 'standard');
+    assert.equal(run.firstExecutionResultMs, 1_200);
+    assert.equal(run.totalDurationMs, 5_000);
+    assert.equal(run.l2Reviews, 1);
+    assert.equal(run.l2Rejects, 1);
+    assert.equal(run.l3Reviews, 1);
+    assert.equal(run.l3SendBacks, 1);
+    assert.equal(run.validatorRuns, 1);
+    assert.equal(run.validatorFailures, 1);
+    assert.equal(run.promotionTrigger, undefined);
+  });
+
+  test('Fast Lane A/B：升级后的 Standard 仍保留 lightweight 起始 lane 与 trigger', async () => {
+    const h = makeMetricHarness();
+    const project = await h.projects.ensure('P');
+    project.createMission({
+      id: 'M-promoted',
+      contract: CONTRACT,
+      executionMode: 'lightweight',
+      runKind: 'mutation',
+    });
+    await h.projects.save(project);
+
+    await h.platform.promoteMissionToStandard('M-promoted', {
+      code: 'design_decision',
+      rule: 'trusted test trigger',
+    });
+
+    const [run] = await h.platform.listRuns('M-promoted');
+    assert.equal(run.entryMode, 'lightweight');
+    assert.equal(run.currentMode, 'standard');
+    assert.equal(run.promotionTrigger, 'design_decision');
+  });
+
+  test('Fast Lane A/B：历史缺 mission.created 时长保持 unknown，不伪造 0', async () => {
+    const h = makeMetricHarness();
+    const project = await h.projects.ensure('P');
+    project.createMission({ id: 'M-legacy', contract: CONTRACT });
+    await h.projects.save(project);
+    h.clock.advance(2_000);
+    await h.platform.cancelMission('M-legacy', 'legacy');
+
+    const [run] = await h.platform.listRuns('M-legacy');
+    assert.equal(run.firstExecutionResultMs, undefined);
+    assert.equal(run.totalDurationMs, undefined);
   });
 
   test('「我们自己掐的」是一个能查的集合，不是散在各处的字符串比较', () => {

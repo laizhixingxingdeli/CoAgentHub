@@ -257,27 +257,54 @@ async function main() {
     if (runs.length <= 1) {
       console.log(`${target} 只跑过一遍，没什么可比的。用 node src/l3.ts rerun ${target} 再跑一次。`);
     }
-    console.log('运行            状态           结果        跳数(L2/L1) 工作项   token        费用      结束原因');
-    console.log('─'.repeat(108));
+    const duration = (ms: number | undefined) =>
+      ms === undefined ? '—' : `${(ms / 1000).toFixed(1)}s`;
+    const ratio = (n: number, total: number) => total === 0 ? '—' : `${n}/${total}`;
+    console.log('运行            lane                 状态           跳数(L2/L1) token       首结果    总耗时    L2拒绝  L3打回  Val失败  升级');
+    console.log('─'.repeat(142));
     for (const r of runs) {
       const hops = `${r.coordinatorHops}/${r.executorHops}`;
-      const reasons = Object.entries(r.endedBy)
-        .sort((a, b) => b[1] - a[1])
-        .map(([k, n]) => `${k}×${n}`)
-        .join(' ');
+      const lane = r.entryMode === r.currentMode
+        ? r.entryMode
+        : `${r.entryMode}→${r.currentMode}`;
       console.log(
         (r.missionId + (r.isOriginal ? ' *' : '')).padEnd(15)
+          + lane.padEnd(21)
           + r.status.padEnd(15)
-          + (r.outcome ?? '—').padEnd(12)
-          + hops.padEnd(12)
-          + String(r.workItems).padEnd(9)
-          + r.usage.total.toLocaleString('en-US').padEnd(13)
-          + ('$' + (r.usage.cost ?? 0).toFixed(4)).padEnd(10)
-          + reasons,
+          + hops.padEnd(13)
+          + r.usage.total.toLocaleString('en-US').padEnd(12)
+          + duration(r.firstExecutionResultMs).padEnd(10)
+          + duration(r.totalDurationMs).padEnd(10)
+          + ratio(r.l2Rejects, r.l2Reviews).padEnd(8)
+          + ratio(r.l3SendBacks, r.l3Reviews).padEnd(8)
+          + ratio(r.validatorFailures, r.validatorRuns).padEnd(9)
+          + (r.promotionTrigger ?? '—'),
       );
     }
-    console.log('\n* = 最初那条。结束原因里 killed_idle / killed_wall_clock 是**我们自己掐的**，');
-    console.log('  不是候选挂了 —— 那两种要改工单或调策略，换候选只会把同一件事再烧一遍。');
+    const bases = new Set(runs.map((r) => r.baseRevision).filter((v): v is string => Boolean(v)));
+    const missingBase = runs.some((r) => !r.baseRevision);
+    console.log('\n* = 最初那条。比例列是「次数/总次数」，不是自动判定好坏。');
+    if (missingBase) {
+      console.log('⚠ 至少一条运行没有 baseRevision；这些运行不能证明是同一起点。');
+    }
+    if (bases.size > 1) {
+      console.log('⚠ 这些运行存在多个 baseRevision；起点不同，不能把差异直接归因给 Fast Lane。');
+    }
+    // A/B 表没有「结束原因」列，但自掐和候选挂掉读法完全不同：前者要改工单或调
+    // 策略，换候选只会把同一件事再烧一遍。所以只在真的发生过自掐时才提示，并带上
+    // 是哪几条——否则这行就是在解释一个不存在的列。
+    const selfKilled = runs
+      .map((r) => ({
+        missionId: r.missionId,
+        n: (r.endedBy.killed_idle ?? 0) + (r.endedBy.killed_wall_clock ?? 0),
+      }))
+      .filter((r) => r.n > 0);
+    if (selfKilled.length > 0) {
+      console.log(
+        '⚠ killed_idle / killed_wall_clock 是**我们自己掐的**，不是候选挂了：'
+          + selfKilled.map((r) => `${r.missionId}×${r.n}`).join(' '),
+      );
+    }
     return;
   }
 
@@ -302,7 +329,7 @@ async function main() {
   node src/l3.ts resume <missionId>           恢复
   node src/l3.ts retire <missionId> --item <W-n> --reason "..."  作废一个工作项
   node src/l3.ts rerun <missionId> [--as <id>] 照当前契约再跑一遍（另起一条，原来那条不动）
-  node src/l3.ts runs <missionId>             同一任务的历次运行横着比：跳数/用量/费用/结束原因
+  node src/l3.ts runs <missionId>             同一任务的历次运行横着比：lane/token/时延/打回/升级
   node src/l3.ts ack <deliveryId>             确认收到
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);

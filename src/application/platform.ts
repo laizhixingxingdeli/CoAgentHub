@@ -449,7 +449,7 @@ export class Platform {
     const { mission, project } = await this.#locate(missionId);
     const root = mission.origin?.rerunOf ?? missionId;
     const runs = project.missions.filter((m) => m.id === root || m.origin?.rerunOf === root);
-    return runs.map((m) => {
+    return Promise.all(runs.map(async (m) => {
       const attempts = [
         ...m.coordinatorAttempts,
         ...m.workItems.flatMap((item) => item.attempts),
@@ -459,19 +459,71 @@ export class Platform {
         const key = attempt.endedBy ?? 'in_progress';
         endedBy[key] = (endedBy[key] ?? 0) + 1;
       }
+
+      const events = await this.#activity.list(m.id);
+      const createdAt = events.find((event) => event.kind === 'mission.created')?.at;
+      const firstExecutionResultAt = events.find(
+        (event) => event.kind === 'execution_result.submitted',
+      )?.at;
+
+      let l2Reviews = 0;
+      let l2Rejects = 0;
+      let l3Reviews = 0;
+      let l3SendBacks = 0;
+      let validatorRuns = 0;
+      let validatorFailures = 0;
+      for (const event of events) {
+        const data =
+          event.data != null && typeof event.data === 'object' && !Array.isArray(event.data)
+            ? event.data as Record<string, unknown>
+            : undefined;
+        if (event.kind === 'review.recorded' && data?.authority !== 'validator') {
+          l2Reviews += 1;
+          if (data?.verdict === 'reject') l2Rejects += 1;
+        }
+        if (
+          event.kind === 'final_review.send_back' ||
+          event.kind === 'final_review.merged' ||
+          event.kind === 'final_review.abandoned'
+        ) {
+          l3Reviews += 1;
+          if (event.kind === 'final_review.send_back') l3SendBacks += 1;
+        }
+        if (event.kind === 'validation.reported' && typeof data?.passed === 'boolean') {
+          validatorRuns += 1;
+          if (data.passed === false) validatorFailures += 1;
+        }
+      }
+
+      const promotion = m.promotions[0];
       return {
         missionId: m.id,
         isOriginal: m.id === root,
         status: m.status,
         outcome: m.result?.outcome,
         contractRevision: m.contractRevision,
+        entryMode: promotion?.fromMode ?? m.executionMode,
+        currentMode: m.executionMode,
+        promotionTrigger: promotion?.triggerCode,
+        baseRevision: m.workspaceRef?.baseRevision,
+        firstExecutionResultMs: elapsedMs(createdAt, firstExecutionResultAt),
+        totalDurationMs:
+          m.status === 'completed' || m.status === 'blocked'
+            ? elapsedMs(createdAt, m.updatedAt)
+            : undefined,
+        l2Reviews,
+        l2Rejects,
+        l3Reviews,
+        l3SendBacks,
+        validatorRuns,
+        validatorFailures,
         coordinatorHops: m.coordinatorAttempts.length,
         executorHops: m.workItems.reduce((n, item) => n + item.attempts.length, 0),
         workItems: m.workItems.length,
         usage: sumUsage(m),
         endedBy,
       };
-    });
+    }));
   }
 
   async reviseContract(
@@ -2644,12 +2696,42 @@ export interface RunSummary {
   /** 交卷结论；还没交卷就是 undefined。 */
   outcome: string | undefined;
   contractRevision: number;
+  /** 进入本次运行时的 lane；晋升后仍保留 lightweight，避免被当前 standard 覆盖。 */
+  entryMode: MissionExecutionMode;
+  /** 当前 lane。发生过 lightweight → standard 晋升时与 entryMode 不同。 */
+  currentMode: MissionExecutionMode;
+  /** 可信 PromotionRecord 的触发原因；没有晋升就是 undefined。 */
+  promotionTrigger: PromotionTriggerCode | undefined;
+  /** 用于判断两次运行是否同一 Git 起点；历史没记录就 unknown。 */
+  baseRevision: string | undefined;
+  /** mission.created → 第一条 execution_result.submitted；缺任一可信时间即 unknown。 */
+  firstExecutionResultMs: number | undefined;
+  /** 仅终态：mission.created → 最后状态事件时间；历史缺时间即 unknown。 */
+  totalDurationMs: number | undefined;
+  /** Standard L2 review 计数；validator authority 不混进来。 */
+  l2Reviews: number;
+  l2Rejects: number;
+  /** L3 最终检视决策计数与 send_back 次数。 */
+  l3Reviews: number;
+  l3SendBacks: number;
+  /** 机器 Validator 的真实 report 次数/失败次数。 */
+  validatorRuns: number;
+  validatorFailures: number;
   coordinatorHops: number;
   executorHops: number;
   workItems: number;
   usage: TokenUsage;
   /** 各跳的结束原因分布。**分类的价值就在这一格**：以前全是 upstream_failure。 */
   endedBy: Record<string, number>;
+}
+
+/** 两个 ISO 时间的非负差；缺失、非法、倒序都保持 unknown，不 clamp 成 0。 */
+function elapsedMs(start: string | undefined, end: string | undefined): number | undefined {
+  if (!start || !end) return undefined;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return undefined;
+  return endMs - startMs;
 }
 
 /** 聚合用量：**分项相加**，不要只滚一个 total。 */
