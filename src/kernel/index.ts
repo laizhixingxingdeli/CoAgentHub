@@ -32,6 +32,7 @@ export type {
   ExecutionBudget,
   ExecutionOutcome,
   FinalReview,
+  FinalReviewAuthority,
   ExecutionResultBody,
   MemoryDeltaProposal,
   MissionContract,
