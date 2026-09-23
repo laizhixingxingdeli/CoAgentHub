@@ -47,6 +47,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   - `lightweight-standard-promotion` — LW→Standard 与 Query 晋升
   - `decision-jev-off-shadow` — Decision/Jev OFF+SHADOW
   - `spawn-env-filter` — agent 子进程环境过滤（fail-closed 透传名单）
+  - `plan-run` — 方案运行：夜间升级握手（跨进程、只能选动作）与停止条件
 - **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0005）。
 - 不要把 Mission 历史、临时计划或一次性排障笔记写进上述长期文件。
 - 根目录 `VIBE.md` **只**由 `generateVibe` / 落地时重写；手改会丢。

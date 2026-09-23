@@ -64,6 +64,10 @@ export function acquireLock(statePath: string, what: string): () => void {
   const release = () => {
     if (released) return;
     released = true;
+    // 放锁时把下面那个 exit 兜底一起摘掉。不摘的话，常驻进程每拿一次锁就在
+    // process 上多挂一个监听——方案运行记录一晚上要拿几十次，过了 10 个 Node
+    // 就开始报泄漏告警，而且这些闭包到进程退出才释放。
+    process.removeListener('exit', release);
     rmSync(lockPath, { recursive: true, force: true });
   };
 

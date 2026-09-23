@@ -221,6 +221,7 @@ describe('读写 .coagent/', () => {
       'fast-lane-ab-metrics',
       'startup-reconciliation',
       'spawn-env-filter',
+      'plan-run',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

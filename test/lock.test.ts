@@ -128,4 +128,11 @@ describe('单写者锁', () => {
     release();
     assert.ok(!existsSync(lockPath));
   });
+
+  test('反复拿放不在 process 上堆 exit 监听：常驻进程一晚上要拿几十次', () => {
+    const statePath = tempState();
+    const before = process.listenerCount('exit');
+    for (let i = 0; i < 20; i += 1) acquireLock(statePath, `第 ${i} 次`)();
+    assert.equal(process.listenerCount('exit'), before);
+  });
 });
