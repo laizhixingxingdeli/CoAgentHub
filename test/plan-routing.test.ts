@@ -67,6 +67,9 @@ const SMALL = {
   assessedAt: '2026-09-23T15:00:00.000Z',
 };
 
+/** 平台时钟给的时间：故意和 SMALL 里模型自报的那个不一样。 */
+const STAMP = '2026-09-23T09:26:02.785Z';
+
 const ORDER = {
   objective: '加 plan 子命令',
   allowedScope: ['src/l3.ts'],
@@ -84,7 +87,7 @@ function output(body: unknown, prose = '看完了，结论如下。'): string {
 }
 
 function parsed(body: unknown) {
-  const result = parseRoutingProposal(output(body));
+  const result = parseRoutingProposal(output(body), STAMP);
   assert.equal(result.ok, true, result.ok ? '' : result.reason);
   return result.ok ? result.proposal : undefined;
 }
@@ -94,7 +97,7 @@ describe('解析只读协调者的输出', () => {
     const text =
       output({ facts: 'example' }, '格式举例：') +
       output({ facts: QUIET_FACTS, assessment: SMALL, workOrder: ORDER });
-    const result = parseRoutingProposal(text);
+    const result = parseRoutingProposal(text, STAMP);
     assert.equal(result.ok, true);
     assert.deepEqual(result.ok && result.proposal.workOrder?.allowedScope, ['src/l3.ts']);
   });
@@ -107,14 +110,31 @@ describe('解析只读协调者的输出', () => {
       [output({ facts: { ...QUIET_FACTS, mutationSideEffect: 'maybe' } }), /mutationSideEffect/],
     ];
     for (const [text, why] of cases) {
-      const result = parseRoutingProposal(text);
+      const result = parseRoutingProposal(text, STAMP);
       assert.equal(result.ok, false, text);
       assert.match(result.ok ? '' : result.reason, why);
     }
   });
 
+  test('评估时间盖平台的：模型自报的被覆盖，没报也补上而不是整份拒收', () => {
+    // E2 实测 7/7 的 assessedAt 都是模型编的整点，有一条比实际晚 11 小时。
+    const reported = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: SMALL }), STAMP);
+    assert.equal(reported.ok, true, reported.ok ? '' : reported.reason);
+    assert.equal(reported.ok && reported.proposal.assessment?.assessedAt, STAMP);
+
+    const { assessedAt: _dropped, ...withoutTime } = SMALL;
+    const omitted = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: withoutTime }), STAMP);
+    assert.equal(omitted.ok, true, omitted.ok ? '' : omitted.reason);
+    assert.equal(omitted.ok && omitted.proposal.assessment?.assessedAt, STAMP);
+    assert.equal(omitted.ok && omitted.proposal.assessment?.changeScope, 1);
+  });
+
+  test('提示里不再向模型要时间', () => {
+    assert.doesNotMatch(buildRoutingPrompt(PLAN, FEATURE), /assessedAt/);
+  });
+
   test('评估必须署名 coordinator：只读协调者冒充 user 的评估不收', () => {
-    const result = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: { ...SMALL, decidedBy: 'user' } }));
+    const result = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: { ...SMALL, decidedBy: 'user' } }), STAMP);
     assert.equal(result.ok, false);
     assert.match(result.ok ? '' : result.reason, /coordinator/);
   });
