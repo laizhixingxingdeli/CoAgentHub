@@ -222,7 +222,7 @@ describe('多工作项', () => {
           // 只验收一个就想交卷 —— 平台必须拦下来。
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-1', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-1', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           {
             tool: 'coagent_submit_mission_result',
@@ -237,7 +237,7 @@ describe('多工作项', () => {
           },
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-2', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-2', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           {
             tool: 'coagent_submit_mission_result',

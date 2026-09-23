@@ -160,7 +160,7 @@ describe('改动名额：同一 Project 同时只有一个 Mission 在改代码'
     await platform.finishAttempt('M1', exec.attemptId, { endedBy: 'structured_submit' });
     await platform.reviewExecutionResult('M1', first.attemptId, {
       workItemId: first.workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['复跑过'],
       requiredChanges: [],
     });

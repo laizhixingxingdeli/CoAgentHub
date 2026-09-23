@@ -390,7 +390,7 @@ describe('Orchestrator Lightweight：验收没过 → 自动升级 Standard（§
           tool: 'coagent_review_execution_result',
           body: {
             workItemId: 'W-1',
-            verdict: 'accept',
+            verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
             reasons: ['对照报告复核：失败的是验收命令的环境，改动本身符合工单'],
             requiredChanges: [],
           },
@@ -782,7 +782,7 @@ describe('Platform.submitLightweightMissionForReview guards', () => {
       const wi = snap.workItems.find((w) => w.id === workItemId)!;
       wi.reviews = [
         {
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           submittedAttemptId: exec,
           authority: {
             kind: 'validator',

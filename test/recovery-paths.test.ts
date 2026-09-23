@@ -146,7 +146,7 @@ describe('L2 打回 L1：重发的工单带上「这次要避开什么」', () =
             tool: 'coagent_review_execution_result',
             body: {
               workItemId: 'W-1',
-              verdict: 'reject',
+              verdict: 'reject', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
               reasons: ['证据里没有退出码，测试没真跑'],
               requiredChanges: ['把 verification 里的命令实际执行，并交上未接管道的退出码'],
             },
@@ -160,7 +160,7 @@ describe('L2 打回 L1：重发的工单带上「这次要避开什么」', () =
           { tool: 'coagent_get_mission', body: {} },
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-1', verdict: 'accept', reasons: ['这次有退出码了'], requiredChanges: [] },
+            body: { workItemId: 'W-1', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['这次有退出码了'], requiredChanges: [] },
           },
           { tool: 'coagent_submit_mission_result', body: DELIVER },
         ],
@@ -222,7 +222,7 @@ describe('L3 打回 L2：重跑时协调者知道自己为什么被打回', () =
           { tool: 'coagent_get_mission', body: {} },
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-1', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-1', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           { tool: 'coagent_submit_mission_result', body: DELIVER },
         ],
@@ -396,7 +396,7 @@ describe('落地之后回收工作区', () => {
           { tool: 'coagent_get_mission', body: {} },
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-1', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-1', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           { tool: 'coagent_submit_mission_result', body: DELIVER },
         ],

@@ -7,10 +7,12 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  ACCEPTANCE_STATUSES,
   InvariantViolationError,
   isPromotionTriggerCode,
 } from '../kernel/index.ts';
 import type {
+  AcceptanceResult,
   Attempt,
   AttemptEndReason,
   AttemptKind,
@@ -1678,6 +1680,8 @@ export class Platform {
       verdict: 'accept' | 'reject';
       reasons: readonly string[];
       requiredChanges: readonly string[];
+      /** 工单 acceptance 逐条的结论（方案 §11）；工单有验收标准时必填。 */
+      acceptanceResults?: readonly AcceptanceResult[];
     },
   ): Promise<{ status: string }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
@@ -1698,16 +1702,34 @@ export class Platform {
         'reject 必须给出 requiredChanges，否则重发的工单与上一次没有可见差异。',
       );
     }
+    const acceptanceResults = checkAcceptanceResults(item.id, item.order?.acceptance ?? [], input.acceptanceResults);
+    if (input.verdict === 'accept' && acceptanceResults?.some((r) => r.status === 'fail')) {
+      // 内核也挡这一条；在这里先挡是为了给协调者一句能照做的话。
+      throw new PlatformRuleError(
+        'ACCEPT_WITH_FAILED_CRITERION',
+        '有验收标准判为 fail 却给了 accept：没过的那条要么改判，要么 reject 并在 requiredChanges 里写清要改什么。',
+      );
+    }
     const record: Omit<ReviewRecord, 'verdict'> = {
       attemptId,
       reasons: [...input.reasons],
       requiredChanges: [...input.requiredChanges],
+      ...(acceptanceResults ? { acceptanceResults } : {}),
     };
     item.review(input.verdict, record);
     await this.#event(
       mission,
       'review.recorded',
-      { verdict: input.verdict, reasons: record.reasons },
+      {
+        verdict: input.verdict,
+        reasons: record.reasons,
+        ...(acceptanceResults
+          ? {
+              acceptance: tallyAcceptance(acceptanceResults),
+              unverified: acceptanceResults.filter((r) => r.status === 'unverified').map((r) => r.criterion),
+            }
+          : {}),
+      },
       input.workItemId,
       attemptId,
     );
@@ -3190,6 +3212,64 @@ function collectPromotionEvidenceIds(mission: Mission): string[] {
  *   2) activity `validation.reported` 事件 data.reportId
  *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
  */
+/**
+ * 协调者评审的逐条结果（方案 §11）：工单有验收标准时必须一条对一条、照抄原文。
+ *
+ * 为什么强制：一句总结里「都过了」和「三条过了、第四条没法验」看起来一样，
+ * 而后者正是 L3 最需要看到的。报错写成协调者能照做的话——它下一步就是按这句改。
+ * 没有验收标准的旧工作项不要求；给了就得是空的，不然对不上。
+ */
+function checkAcceptanceResults(
+  workItemId: string,
+  acceptance: readonly string[],
+  raw: unknown,
+): AcceptanceResult[] | undefined {
+  if (acceptance.length === 0) {
+    if (raw === undefined || (Array.isArray(raw) && raw.length === 0)) return undefined;
+    throw new PlatformRuleError('ACCEPTANCE_RESULTS_MISMATCH', `工作项 ${workItemId} 的工单没有验收标准，acceptanceResults 应为空数组。`);
+  }
+  if (!Array.isArray(raw)) {
+    throw new PlatformRuleError(
+      'ACCEPTANCE_RESULTS_REQUIRED',
+      `工作项 ${workItemId} 有 ${acceptance.length} 条验收标准，评审必须逐条给出 acceptanceResults：` +
+        'criterion 照抄原文，status 为 pass / fail / unverified / not_applicable。只写一句总结不收。',
+    );
+  }
+  if (raw.length !== acceptance.length) {
+    throw new PlatformRuleError(
+      'ACCEPTANCE_RESULTS_MISMATCH',
+      `逐条结果 ${raw.length} 条、验收标准 ${acceptance.length} 条：要一条对一条、顺序一致。`,
+    );
+  }
+  return raw.map((entry, i) => {
+    const r = (entry ?? {}) as Partial<AcceptanceResult>;
+    if (r.criterion !== acceptance[i]) {
+      throw new PlatformRuleError('ACCEPTANCE_RESULTS_MISMATCH', `第 ${i + 1} 条的 criterion 要照抄验收原文：「${acceptance[i]}」。`);
+    }
+    if (!(ACCEPTANCE_STATUSES as readonly unknown[]).includes(r.status)) {
+      throw new PlatformRuleError('ACCEPTANCE_RESULT_INVALID', `第 ${i + 1} 条的 status 只能是 pass / fail / unverified / not_applicable。`);
+    }
+    if (r.status === 'pass' && !(typeof r.evidence === 'string' && r.evidence.trim())) {
+      throw new PlatformRuleError('ACCEPTANCE_EVIDENCE_REQUIRED', `第 ${i + 1} 条判 pass 要写出证据（命令 + 退出码、diff 的位置……）。`);
+    }
+    if ((r.status === 'unverified' || r.status === 'not_applicable') && !(typeof r.note === 'string' && r.note.trim())) {
+      throw new PlatformRuleError('ACCEPTANCE_NOTE_REQUIRED', `第 ${i + 1} 条判 ${r.status} 要写明原因。`);
+    }
+    return {
+      criterion: r.criterion,
+      status: r.status as AcceptanceResult['status'],
+      ...(typeof r.evidence === 'string' && r.evidence.trim() ? { evidence: r.evidence } : {}),
+      ...(typeof r.note === 'string' && r.note.trim() ? { note: r.note } : {}),
+    };
+  });
+}
+
+function tallyAcceptance(results: readonly AcceptanceResult[]): Record<AcceptanceResult['status'], number> {
+  const tally = { pass: 0, fail: 0, unverified: 0, not_applicable: 0 };
+  for (const r of results) tally[r.status] += 1;
+  return tally;
+}
+
 async function collectPromotionValidationReportIds(
   mission: Mission,
   activity: ActivityLog,

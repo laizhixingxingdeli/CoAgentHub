@@ -83,7 +83,7 @@ const COORDINATOR_HAPPY: ScriptTable = {
         tool: 'coagent_review_execution_result',
         body: {
           workItemId: 'W-1',
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['ok'],
           requiredChanges: [],
         },
@@ -158,7 +158,7 @@ const COORDINATOR_V1: ScriptTable = {
         tool: 'coagent_review_execution_result',
         body: {
           workItemId: 'W-1',
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['ok'],
           requiredChanges: [],
         },

@@ -133,7 +133,7 @@ async function driveToLanded(platform: Platform, missionId: string): Promise<voi
 
   await platform.reviewExecutionResult(missionId, coord.attemptId, {
     workItemId: item.workItemId,
-    verdict: 'accept',
+    verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
     reasons: ['ok'],
     requiredChanges: [],
   });

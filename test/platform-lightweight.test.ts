@@ -1302,7 +1302,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
       () =>
         h.platform.reviewExecutionResult('M1', exec, {
           workItemId,
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER_BASE.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['no'],
           requiredChanges: [],
         }),
@@ -1311,7 +1311,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
 
     await h.platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER_BASE.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });

@@ -139,7 +139,7 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
       () =>
         platform.reviewExecutionResult('M1', coord, {
           workItemId,
-          verdict: 'reject',
+          verdict: 'reject', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
           reasons: ['不行'],
           requiredChanges: [],
         }),
@@ -151,7 +151,7 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
     const { platform, coord, exec, workItemId } = await upToSubmitted();
     await platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });
@@ -181,7 +181,7 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
       () =>
         platform.reviewExecutionResult('M1', coord, {
           workItemId,
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: [],
           requiredChanges: [],
         }),
@@ -212,7 +212,7 @@ describe('身份校验：工具面之外再挡一道', () => {
       () =>
         platform.reviewExecutionResult('M1', exec, {
           workItemId,
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['我觉得挺好'],
           requiredChanges: [],
         }),
@@ -281,7 +281,7 @@ describe('打回重做', () => {
     await platform.finishAttempt('M1', exec, { endedBy: 'structured_submit' });
     await platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'reject',
+      verdict: 'reject', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
       reasons: ['测试没真跑'],
       requiredChanges: ['把 verification 里的命令实际执行并交退出码'],
     });
@@ -656,7 +656,7 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     const { platform, coord, workItemId } = await upToSubmitted();
     await platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });
@@ -673,7 +673,7 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     const { platform, coord, workItemId } = await upToSubmitted();
     await platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'reject',
+      verdict: 'reject', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
       reasons: ['DOM 路径是坏的'],
       requiredChanges: ['换个做法'],
     });
@@ -685,7 +685,7 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     const { platform, coord, workItemId } = await upToSubmitted();
     await platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });

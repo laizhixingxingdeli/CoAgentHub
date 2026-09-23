@@ -156,7 +156,7 @@ async function readyForReview(
   await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
   await platform.reviewExecutionResult(missionId, coord.attemptId, {
     workItemId,
-    verdict: 'accept',
+    verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
     reasons: ['复跑过'],
     requiredChanges: [],
   });
