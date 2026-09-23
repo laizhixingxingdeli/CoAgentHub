@@ -96,13 +96,15 @@ async function readyForReview(
   worktreeRoot: string,
   missionId: string,
   runner: ReturnType<typeof scriptedRunner>,
+  options?: { executionMode?: 'high_assurance' },
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
   const workspace = new GitWorktreeManager(worktreeRoot);
   const reports = new InMemoryValidationReportRepository();
+  const projects = new InMemoryProjectRepository();
   const platform = new Platform({
-    projects: new InMemoryProjectRepository(),
+    projects,
     deliveries: new InMemoryDeliveryRepository(clock, ids),
     workspace,
     activity: new InMemoryActivityLog(clock),
@@ -115,7 +117,15 @@ async function readyForReview(
     },
   });
 
-  await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+  if (options?.executionMode) {
+    // 公开入口建不出 high_assurance（分类到它就拒绝建），只能从仓储直接放一条进去
+    // ——要验的正是「万一有一条走到了机器 L3 门口」。
+    const project = await projects.ensure('P');
+    project.createMission({ id: missionId, contract: CONTRACT, executionMode: options.executionMode });
+    await projects.save(project);
+  } else {
+    await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+  }
   const prepared = await workspace.prepare(missionId, repo);
   await platform.recordWorkspace(missionId, {
     branch: prepared.branch,
@@ -294,5 +304,137 @@ describe('机器 L3 放行', () => {
         }),
       (error: unknown) => error instanceof PlatformRuleError,
     );
+  });
+});
+
+describe('机器 L3 的边界', () => {
+  test('合并失败 → 留在 awaiting_review 等人，不冒签任何权威，也不跑验证', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const runner = scriptedRunner([0]);
+    const { platform } = await readyForReview(repo, wt, 'M1', runner);
+    // 分叉之后集成分支上又落了别的提交：合并那道闸按基线拒绝。
+    writeFileSync(join(repo, 'b.txt'), 'other\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'someone else');
+    const head = git(repo, 'rev-parse', 'HEAD');
+
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+
+    assert.equal(result.status, 'awaiting_review', '机器合不进去不等于这条完了');
+    assert.match(result.reason ?? '', /HEAD 变了/);
+    const view = await platform.getMissionView('M1');
+    // 以前这里记的是 { kind: 'human' }：机器路径冒签了人的权威。
+    assert.equal(view.finalReview, undefined);
+    assert.equal(view.waitReason, 'waiting_l3');
+    assert.match(view.waitDetail ?? '', /合并失败/);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), head, '集成分支没动');
+    assert.deepEqual(runner.seen, [], '合不进去就不该跑验证');
+  });
+
+  test('high_assurance 永远要人：机器 L3 直接拒绝，什么都不合', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const runner = scriptedRunner([0]);
+    const { platform } = await readyForReview(repo, wt, 'M-HA', runner, {
+      executionMode: 'high_assurance',
+    });
+    const before = git(repo, 'rev-parse', 'HEAD');
+
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByMachine('M-HA', {
+          integrationBranch: 'auto/plan-x',
+          verification: VERIFY,
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_NEEDS_HUMAN',
+    );
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
+    assert.deepEqual(runner.seen, []);
+    assert.equal((await platform.getMissionView('M-HA')).status, 'awaiting_review');
+  });
+});
+
+describe('方案放弃失败的 Mission', () => {
+  const ABANDON = { planRunId: 'R1', escalationId: 'E-1', reasons: ['检视者跳过：夹具冲突'] };
+
+  test('放掉改动名额、分支留着、权威记 plan 并指向升级单', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([1]));
+
+    // M1 动过代码、没终结：它占着名额，下一个功能派发不了——方案就卡死在这。
+    await platform.createMission({ projectId: 'P', missionId: 'M2', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M2');
+    await platform.updatePlan('M2', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M2', coord.attemptId, {
+      title: 'W2',
+      order: ORDER,
+    });
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M2', coord.attemptId, [workItemId]),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'PROJECT_BUSY',
+    );
+
+    const result = await platform.abandonMissionForPlan('M1', { ...ABANDON, projectRoot: repo });
+
+    assert.equal(result.status, 'blocked');
+    const view = await platform.getMissionView('M1');
+    assert.deepEqual(view.finalReview, {
+      verdict: 'abandon',
+      reasons: ['检视者跳过：夹具冲突'],
+      authority: { kind: 'plan', planRunId: 'R1', escalationId: 'E-1' },
+    });
+    assert.equal(git(repo, 'show', 'mission/M1:a.txt'), 'mission', '改动留在分支上给人看');
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base', '集成分支没动');
+    await platform.dispatchWorkItems('M2', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M2')).status, 'executing', '名额腾出来了');
+  });
+
+  test('必须指向方案运行与升级单并写理由；已终结的不再放弃', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([0]));
+    const invalid = (error: unknown) =>
+      error instanceof PlatformRuleError && error.code === 'PLAN_ABANDON_INVALID';
+
+    await assert.rejects(() => platform.abandonMissionForPlan('M1', { ...ABANDON, planRunId: '' }), invalid);
+    await assert.rejects(() => platform.abandonMissionForPlan('M1', { ...ABANDON, escalationId: ' ' }), invalid);
+    await assert.rejects(() => platform.abandonMissionForPlan('M1', { ...ABANDON, reasons: [] }), invalid);
+    assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+
+    await platform.abandonMissionForPlan('M1', ABANDON);
+    await assert.rejects(
+      () => platform.abandonMissionForPlan('M1', ABANDON),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'MISSION_ALREADY_TERMINAL',
+    );
+  });
+
+  test('公开 finalizeMission 发不出 plan 权威', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([0]));
+    await assert.rejects(
+      () =>
+        platform.finalizeMission('M1', {
+          verdict: 'abandon',
+          reasons: ['x'],
+          authority: { kind: 'plan', planRunId: 'R1', escalationId: 'E-1' } as never,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'FINAL_REVIEW_AUTHORITY_FORBIDDEN',
+    );
+    assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
   });
 });

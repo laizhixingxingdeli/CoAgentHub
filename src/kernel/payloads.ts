@@ -568,6 +568,17 @@ export type FinalReviewAuthority =
       readonly kind: 'machine';
       readonly integrationReportId: string;
       readonly policyRevision: number;
+    }
+  | {
+      /**
+       * 无人值守的方案运行放弃了这条 Mission——只用于 abandon，永远不放行。
+       *
+       * 失败的 Mission 占着项目的改动名额，不放掉的话后面的功能一个都派发不了。
+       * 是检视者选的动作还是升级单等过了期，记在那张升级单上；这里只指向它。
+       */
+      readonly kind: 'plan';
+      readonly planRunId: string;
+      readonly escalationId: string;
     };
 
 export interface FinalReview {
