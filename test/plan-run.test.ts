@@ -1,0 +1,505 @@
+/**
+ * 方案运行（PlanRun）的规则：升级握手与停止条件。
+ *
+ * 这里只验纯规则——时间一律从外面传，不碰文件、不起进程。跨进程那一半
+ * （另一个进程读到升级单、写回决定）在 plan-run-store.test.ts。
+ */
+
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { PlanRun } from '../src/application/plan-run.ts';
+import { PlatformRuleError } from '../src/application/platform.ts';
+
+const T0 = '2026-09-23T14:00:00.000Z';
+const MIN = 60_000;
+
+function at(minutes: number): string {
+  return new Date(Date.parse(T0) + minutes * MIN).toISOString();
+}
+
+function startRun() {
+  return PlanRun.start({
+    id: 'R1',
+    planId: 'PLAN-x',
+    projectId: 'p',
+    integrationBranch: 'auto/x',
+    reviewer: 'claude',
+    stopConditions: {
+      unresolvedEscalations: 2,
+      wallClockMs: 8 * 60 * MIN,
+      escalationTimeoutMs: 20 * MIN,
+    },
+    featureIds: ['F1', 'F2', 'F3'],
+    startedAt: T0,
+  });
+}
+
+/** F1 在跑，失败了，开了一张升级单（第 10 分钟）。 */
+function withEscalation() {
+  const run = startRun();
+  run.startFeature('F1', 'M-F1');
+  const escalation = run.openEscalation(
+    {
+      featureId: 'F1',
+      missionId: 'M-F1',
+      failure: '集成验证红：node --test → 1',
+      question: 'F1 合进去之后全量测试红了：跳过它，还是隔离重跑？',
+    },
+    at(10),
+  );
+  return { run, escalation };
+}
+
+function rule(code: string) {
+  return (error: unknown) => {
+    assert.ok(error instanceof PlatformRuleError, `应是 PlatformRuleError，实际 ${String(error)}`);
+    assert.equal(error.code, code);
+    return true;
+  };
+}
+
+describe('升级握手', () => {
+  test('开单：截止 = 开单时刻 + escalationTimeoutMs，单子开着等决定', () => {
+    const { run, escalation } = withEscalation();
+    assert.equal(escalation.openedAt, at(10));
+    assert.equal(escalation.deadline, at(30));
+    assert.equal(escalation.resolution, undefined);
+    assert.equal(run.currentEscalation?.id, escalation.id);
+  });
+
+  test('检视者截止前选「跳过」：决定落账，功能记 ⊘，并写明要人定什么', () => {
+    const { run, escalation } = withEscalation();
+    run.decide(
+      escalation.id,
+      { action: 'skip', reason: 'F1 的测试夹具与 F2 冲突，今晚不值得再烧', decidedBy: 'claude' },
+      at(25),
+    );
+    const decided = run.escalations.find((e) => e.id === escalation.id);
+    assert.deepEqual(decided?.resolution, {
+      kind: 'decided',
+      action: 'skip',
+      reason: 'F1 的测试夹具与 F2 冲突，今晚不值得再烧',
+      decidedBy: 'claude',
+      decidedAt: at(25),
+    });
+    assert.equal(run.currentEscalation, undefined);
+    const f1 = run.feature('F1');
+    assert.equal(f1?.status, 'skipped');
+    // 只写「哪里错了」不够：⊘ 的人早上要知道自己该定什么。
+    assert.match(f1?.needsDecision ?? '', /要你定/);
+    assert.match(f1?.needsDecision ?? '', /今晚不值得再烧/);
+  });
+
+  test('截止一到（含）就不再收决定：迟到的决定不能悄悄生效', () => {
+    const { run, escalation } = withEscalation();
+    assert.throws(
+      () =>
+        run.decide(escalation.id, { action: 'skip', reason: '晚了', decidedBy: 'claude' }, at(30)),
+      rule('ESCALATION_DEADLINE_PASSED'),
+    );
+    // 被拒的决定一个字都没落下。
+    assert.equal(run.currentEscalation?.id, escalation.id);
+    assert.equal(run.feature('F1')?.status, 'running');
+  });
+
+  test('只有本次运行指定的检视者的决定作数', () => {
+    const { run, escalation } = withEscalation();
+    assert.throws(
+      () =>
+        run.decide(escalation.id, { action: 'skip', reason: '我觉得', decidedBy: 'someone-else' }, at(12)),
+      rule('NOT_DESIGNATED_REVIEWER'),
+    );
+    assert.equal(run.currentEscalation?.id, escalation.id);
+  });
+
+  test('动作表里没有「通过」和「合并」：检视者永不宣布通过、永不自己发合并', () => {
+    const { run, escalation } = withEscalation();
+    for (const action of ['merge', 'pass', 'approve', 'accept']) {
+      assert.throws(
+        () => run.decide(escalation.id, { action, reason: '看着没问题', decidedBy: 'claude' }, at(12)),
+        rule('REVIEWER_ACTION_FORBIDDEN'),
+      );
+    }
+    assert.equal(run.currentEscalation?.id, escalation.id);
+    assert.equal(run.feature('F1')?.status, 'running');
+  });
+
+  test('决定必须带理由：不说清楚，早上的人只能再猜一遍', () => {
+    const { run, escalation } = withEscalation();
+    assert.throws(
+      () => run.decide(escalation.id, { action: 'skip', reason: '  ', decidedBy: 'claude' }, at(12)),
+      rule('DECISION_REASON_REQUIRED'),
+    );
+  });
+
+  test('一张单子只能定一次', () => {
+    const { run, escalation } = withEscalation();
+    run.decide(escalation.id, { action: 'skip', reason: '先放一放', decidedBy: 'claude' }, at(12));
+    assert.throws(
+      () => run.decide(escalation.id, { action: 'stop', reason: '改主意了', decidedBy: 'claude' }, at(13)),
+      rule('ESCALATION_ALREADY_RESOLVED'),
+    );
+    const resolution = run.escalations[0].resolution;
+    assert.equal(resolution?.kind === 'decided' ? resolution.action : undefined, 'skip');
+  });
+});
+
+describe('超时与未解决', () => {
+  test('截止前不能判过期：检视者还在它的窗口里', () => {
+    const { run, escalation } = withEscalation();
+    assert.throws(() => run.expire(escalation.id, at(29)), rule('ESCALATION_NOT_DUE'));
+    assert.equal(run.unresolvedCount, 0);
+    assert.equal(run.currentEscalation?.id, escalation.id);
+  });
+
+  test('截止一到判过期：记一次未解决，功能挂起并写明要人定什么', () => {
+    const { run, escalation } = withEscalation();
+    run.expire(escalation.id, at(30));
+    assert.deepEqual(run.escalations[0].resolution, { kind: 'expired', expiredAt: at(30) });
+    assert.equal(run.unresolvedCount, 1);
+    assert.equal(run.currentEscalation, undefined);
+    const f1 = run.feature('F1');
+    assert.equal(f1?.status, 'suspended');
+    assert.match(f1?.needsDecision ?? '', /要你定/);
+    // 要定的就是当初问检视者的那件事，原样交给人。
+    assert.match(f1?.needsDecision ?? '', /跳过它，还是隔离重跑/);
+    assert.equal(run.stopped, undefined);
+  });
+
+  test('判过期与决定互斥：谁先落账谁作数，后到的被明确拒绝', () => {
+    const expiredFirst = withEscalation();
+    expiredFirst.run.expire(expiredFirst.escalation.id, at(30));
+    assert.throws(
+      () =>
+        expiredFirst.run.decide(
+          expiredFirst.escalation.id,
+          { action: 'skip', reason: '刚醒', decidedBy: 'claude' },
+          at(31),
+        ),
+      rule('ESCALATION_ALREADY_RESOLVED'),
+    );
+    assert.equal(expiredFirst.run.escalations[0].resolution?.kind, 'expired');
+
+    const decidedFirst = withEscalation();
+    decidedFirst.run.decide(
+      decidedFirst.escalation.id,
+      { action: 'skip', reason: '先放一放', decidedBy: 'claude' },
+      at(29),
+    );
+    assert.throws(
+      () => decidedFirst.run.expire(decidedFirst.escalation.id, at(30)),
+      rule('ESCALATION_ALREADY_RESOLVED'),
+    );
+    assert.equal(decidedFirst.run.escalations[0].resolution?.kind, 'decided');
+    assert.equal(decidedFirst.run.unresolvedCount, 0);
+  });
+
+  test('未解决累计到阈值（≥）就停，并写明原因；停了之后什么都不再收', () => {
+    const { run, escalation } = withEscalation();
+    run.expire(escalation.id, at(30));
+    assert.equal(run.stopped, undefined, '1 < 阈值 2，不该停');
+
+    run.startFeature('F2', 'M-F2');
+    const second = run.openEscalation(
+      { featureId: 'F2', missionId: 'M-F2', failure: '协调者连续两轮没有结构化提交', question: 'F2 要不要重划？' },
+      at(40),
+    );
+    run.expire(second.id, at(60));
+
+    assert.equal(run.unresolvedCount, 2);
+    assert.equal(run.stopped?.reason, 'unresolved_escalations');
+    assert.equal(run.stopped?.at, at(60));
+    assert.match(run.stopped?.detail ?? '', /2/);
+
+    assert.throws(() => run.startFeature('F3', 'M-F3'), rule('PLAN_RUN_STOPPED'));
+    assert.throws(
+      () => run.openEscalation({ featureId: 'F3', failure: 'x', question: 'y' }, at(61)),
+      rule('PLAN_RUN_STOPPED'),
+    );
+    assert.equal(run.feature('F3')?.status, 'pending', '没轮到的保持 ○');
+  });
+});
+
+describe('墙钟', () => {
+  test('没到点不停；到点（含）就停，写明原因，跑着的功能挂起交给人', () => {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    assert.equal(run.checkStop(at(8 * 60 - 1)), undefined);
+    assert.equal(run.stopped, undefined);
+
+    const stop = run.checkStop(at(8 * 60));
+    assert.equal(stop?.reason, 'wall_clock');
+    assert.equal(run.stopped?.reason, 'wall_clock');
+    const f1 = run.feature('F1');
+    assert.equal(f1?.status, 'suspended');
+    assert.match(f1?.needsDecision ?? '', /要你定/);
+    assert.equal(run.feature('F2')?.status, 'pending');
+  });
+
+  test('先到者停：已经因未解决停了，墙钟再到也不改原因', () => {
+    const { run, escalation } = withEscalation();
+    // 阈值 2：连着两张单子等不到就停在第 60 分钟。
+    run.expire(escalation.id, at(30));
+    run.startFeature('F2', 'M-F2');
+    const second = run.openEscalation({ featureId: 'F2', failure: 'x', question: 'y？' }, at(40));
+    run.expire(second.id, at(60));
+    const later = run.checkStop(at(9 * 60));
+    assert.equal(later?.reason, 'unresolved_escalations');
+    assert.equal(run.stopped?.at, at(60));
+  });
+});
+
+describe('检视者的其余三个动作', () => {
+  test('重划剩余范围：只能删还没轮到的，当前功能一并 ⊘，各自写明依赖谁', () => {
+    const { run, escalation } = withEscalation();
+    run.decide(
+      escalation.id,
+      { action: 'rescope', reason: 'F3 用到 F1 新加的字段', decidedBy: 'claude', dropFeatures: ['F3'] },
+      at(12),
+    );
+    assert.equal(run.feature('F1')?.status, 'skipped');
+    const f3 = run.feature('F3');
+    assert.equal(f3?.status, 'skipped');
+    assert.match(f3?.needsDecision ?? '', /F1/);
+    assert.match(f3?.needsDecision ?? '', /要你定/);
+    assert.equal(run.feature('F2')?.status, 'pending', '没点名的不动');
+    const resolution = run.escalations[0].resolution;
+    assert.deepEqual(resolution?.kind === 'decided' ? resolution.dropFeatures : undefined, ['F3']);
+  });
+
+  test('重划剩余范围不能删已经走完的、正在跑的或不存在的，也不能空手重划', () => {
+    const { run, escalation } = withEscalation();
+    for (const dropFeatures of [['F1'], ['F9'], [], undefined]) {
+      assert.throws(
+        () =>
+          run.decide(
+            escalation.id,
+            { action: 'rescope', reason: '重划', decidedBy: 'claude', dropFeatures },
+            at(12),
+          ),
+        rule('RESCOPE_TARGET_INVALID'),
+      );
+    }
+    assert.equal(run.currentEscalation?.id, escalation.id, '被拒的重划一个字都没落下');
+    assert.equal(run.feature('F3')?.status, 'pending');
+  });
+
+  test('只有重划带删除名单：跳过 / 停 / 重跑夹带名单会被拒，而不是悄悄忽略', () => {
+    const { run, escalation } = withEscalation();
+    for (const action of ['skip', 'stop', 'rerun_isolated']) {
+      assert.throws(
+        () =>
+          run.decide(
+            escalation.id,
+            { action, reason: '顺手', decidedBy: 'claude', dropFeatures: ['F3'] },
+            at(12),
+          ),
+        rule('RESCOPE_TARGET_INVALID'),
+      );
+    }
+    assert.equal(run.feature('F3')?.status, 'pending');
+  });
+
+  test('停：方案停下，当前功能挂起交给人，没轮到的保持 ○', () => {
+    const { run, escalation } = withEscalation();
+    run.decide(
+      escalation.id,
+      { action: 'stop', reason: '集成分支上的测试夹具整体坏了，再跑只会一路红', decidedBy: 'claude' },
+      at(12),
+    );
+    assert.equal(run.stopped?.reason, 'reviewer_stop');
+    assert.match(run.stopped?.detail ?? '', /测试夹具整体坏了/);
+    const f1 = run.feature('F1');
+    assert.equal(f1?.status, 'suspended');
+    assert.match(f1?.needsDecision ?? '', /要你定/);
+    assert.equal(run.feature('F2')?.status, 'pending');
+    assert.equal(run.unresolvedCount, 0, '检视者定了就不算未解决');
+  });
+
+  test('隔离重跑：功能退回待跑，下一个该跑的还是它，Mission 记录累加', () => {
+    const { run, escalation } = withEscalation();
+    run.decide(
+      escalation.id,
+      { action: 'rerun_isolated', reason: '像是 flake：同一条用例隔离复跑三次全绿', decidedBy: 'claude' },
+      at(12),
+    );
+    assert.equal(run.feature('F1')?.status, 'pending');
+    assert.equal(run.nextPending()?.featureId, 'F1');
+    run.startFeature('F1', 'M-F1-r2');
+    assert.deepEqual(run.feature('F1')?.missionIds, ['M-F1', 'M-F1-r2']);
+  });
+});
+
+describe('功能点的流转', () => {
+  test('同一时刻只跑一个；只有待跑的能开跑', () => {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    assert.throws(() => run.startFeature('F2', 'M-F2'), rule('PLAN_FEATURE_BUSY'));
+    run.markMerged('F1');
+    assert.throws(() => run.startFeature('F1', 'M-F1-again'), rule('PLAN_FEATURE_NOT_PENDING'));
+    assert.throws(() => run.startFeature('F9', 'M-F9'), rule('UNKNOWN_PLAN_FEATURE'));
+    run.startFeature('F2', 'M-F2');
+    assert.equal(run.feature('F2')?.status, 'running');
+  });
+
+  test('升级单只能开给正在跑的功能，且同一时刻只开一张', () => {
+    const run = startRun();
+    assert.throws(
+      () => run.openEscalation({ featureId: 'F1', failure: 'x', question: 'y？' }, at(1)),
+      rule('PLAN_FEATURE_NOT_RUNNING'),
+    );
+    run.startFeature('F1', 'M-F1');
+    run.openEscalation({ featureId: 'F1', failure: 'x', question: 'y？' }, at(1));
+    assert.throws(
+      () => run.openEscalation({ featureId: 'F1', failure: 'x2', question: 'y2？' }, at(2)),
+      rule('ESCALATION_ALREADY_OPEN'),
+    );
+  });
+
+  test('等着决定的功能不能被合入或挂起：先把单子了结', () => {
+    const { run } = withEscalation();
+    assert.throws(() => run.markMerged('F1'), rule('ESCALATION_ALREADY_OPEN'));
+    assert.throws(() => run.suspendFeature('F1', '要你定：x'), rule('ESCALATION_ALREADY_OPEN'));
+  });
+
+  test('合入：跑着的 → ✓', () => {
+    const run = startRun();
+    assert.throws(() => run.markMerged('F1'), rule('PLAN_FEATURE_NOT_RUNNING'));
+    run.startFeature('F1', 'M-F1');
+    run.markMerged('F1');
+    assert.equal(run.feature('F1')?.status, 'merged');
+    assert.equal(run.feature('F1')?.needsDecision, undefined);
+  });
+
+  test('不经升级直接挂起（如判成 high_assurance）：必须写要你定什么', () => {
+    const run = startRun();
+    assert.throws(() => run.suspendFeature('F1', '  '), rule('NEEDS_DECISION_REQUIRED'));
+    run.suspendFeature('F1', '分类为 high_assurance，按规定要人放行。要你定：今晚之后亲自跑它吗？');
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.equal(run.nextPending()?.featureId, 'F2');
+  });
+
+  test('走完：还有待跑或在跑的就不算走完；走完了停在 finished', () => {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    run.markMerged('F1');
+    assert.throws(() => run.finish(at(5)), rule('PLAN_RUN_NOT_FINISHED'));
+    run.suspendFeature('F2', '要你定：x');
+    run.startFeature('F3', 'M-F3');
+    assert.throws(() => run.finish(at(6)), rule('PLAN_RUN_NOT_FINISHED'));
+    run.markMerged('F3');
+    run.finish(at(7));
+    assert.equal(run.stopped?.reason, 'finished');
+  });
+
+  test('驱动方主动停（集成分支不安全 / 自己崩了）：写明原因，跑着的挂起', () => {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    run.halt('unsafe', '集成验证红且回滚失败：集成分支上留着一个没验过的合并', at(9));
+    assert.equal(run.stopped?.reason, 'unsafe');
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.match(run.feature('F1')?.needsDecision ?? '', /没验过的合并/);
+    assert.throws(() => run.halt('crashed', '又停一次', at(10)), rule('PLAN_RUN_STOPPED'));
+  });
+});
+
+describe('开跑参数', () => {
+  const base = {
+    id: 'R1',
+    planId: 'PLAN-x',
+    projectId: 'p',
+    integrationBranch: 'auto/x',
+    reviewer: 'claude',
+    stopConditions: { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1 },
+    featureIds: ['F1'],
+    startedAt: T0,
+  };
+
+  test('停止条件必须是正整数：0 或缺省等于没有这道闸', () => {
+    for (const stopConditions of [
+      { unresolvedEscalations: 0, wallClockMs: 1, escalationTimeoutMs: 1 },
+      { unresolvedEscalations: 5, wallClockMs: -1, escalationTimeoutMs: 1 },
+      { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1.5 },
+      { unresolvedEscalations: 5, wallClockMs: 1 },
+    ]) {
+      assert.throws(
+        () => PlanRun.start({ ...base, stopConditions: stopConditions as never }),
+        rule('PLAN_RUN_INVALID'),
+      );
+    }
+  });
+
+  test('必须指定检视者、至少一个功能、功能不重名', () => {
+    assert.throws(() => PlanRun.start({ ...base, reviewer: ' ' }), rule('PLAN_RUN_INVALID'));
+    assert.throws(() => PlanRun.start({ ...base, featureIds: [] }), rule('PLAN_RUN_INVALID'));
+    assert.throws(() => PlanRun.start({ ...base, featureIds: ['F1', 'F1'] }), rule('PLAN_RUN_INVALID'));
+  });
+});
+
+describe('快照', () => {
+  /** 各种状态都走一遍：✓ ⊘ ⏸ ○、一张过期、一张开着。 */
+  function busyRun() {
+    const run = PlanRun.start({
+      id: 'R2',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['F1', 'F2', 'F3', 'F4', 'F5'],
+      startedAt: T0,
+    });
+    run.startFeature('F1', 'M-F1');
+    run.markMerged('F1');
+    run.startFeature('F2', 'M-F2');
+    const e1 = run.openEscalation({ featureId: 'F2', missionId: 'M-F2', failure: '红', question: '跳不跳？' }, at(10));
+    run.decide(e1.id, { action: 'rescope', reason: 'F4 依赖 F2', decidedBy: 'claude', dropFeatures: ['F4'] }, at(15));
+    run.startFeature('F3', 'M-F3');
+    const e2 = run.openEscalation({ featureId: 'F3', failure: '卡住', question: '重跑吗？' }, at(20));
+    run.expire(e2.id, at(40));
+    run.startFeature('F5', 'M-F5');
+    run.openEscalation({ featureId: 'F5', missionId: 'M-F5', failure: '合并冲突', question: '停吗？' }, at(50));
+    return run;
+  }
+
+  test('经 JSON 往返后原样恢复，规则照常生效', () => {
+    const original = busyRun();
+    const restored = PlanRun.restore(JSON.parse(JSON.stringify(original.toSnapshot())));
+    assert.deepEqual(restored.toSnapshot(), original.toSnapshot());
+    assert.equal(restored.unresolvedCount, 1);
+    assert.equal(restored.currentEscalation?.featureId, 'F5');
+    // 恢复出来的仍认得指定检视者和截止时间。
+    assert.throws(
+      () => restored.decide('E-3', { action: 'stop', reason: 'x', decidedBy: 'mallory' }, at(55)),
+      rule('NOT_DESIGNATED_REVIEWER'),
+    );
+    assert.throws(
+      () => restored.decide('E-3', { action: 'stop', reason: 'x', decidedBy: 'claude' }, at(70)),
+      rule('ESCALATION_DEADLINE_PASSED'),
+    );
+    restored.decide('E-3', { action: 'stop', reason: '冲突要人看', decidedBy: 'claude' }, at(55));
+    assert.equal(restored.stopped?.reason, 'reviewer_stop');
+  });
+
+  test('读不懂的记录拒绝恢复，不静默重置、不猜', () => {
+    const good = busyRun().toSnapshot() as unknown as Record<string, unknown>;
+    const corrupt = (patch: (s: Record<string, any>) => void) => {
+      const copy = JSON.parse(JSON.stringify(good));
+      patch(copy);
+      return copy;
+    };
+    for (const snapshot of [
+      null,
+      corrupt((s) => { s.version = 2; }),
+      corrupt((s) => { delete s.reviewer; }),
+      corrupt((s) => { s.features[0].status = 'done'; }),
+      corrupt((s) => { s.escalations[0].resolution.action = 'merge'; }),
+      corrupt((s) => { s.escalations[1].resolution.kind = 'maybe'; }),
+      corrupt((s) => { s.stopConditions.unresolvedEscalations = 0; }),
+      corrupt((s) => { s.escalations[2].deadline = 'soon'; }),
+    ]) {
+      assert.throws(() => PlanRun.restore(snapshot), rule('PLAN_RUN_CORRUPT'));
+    }
+  });
+});
