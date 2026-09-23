@@ -158,6 +158,14 @@ async function runFeature(
     await deps.store.update((r) => r.halt('unsafe', landing.detail, deps.now()));
     return;
   }
+  // 墙钟已经到了（多半正是它被暂停了）：今晚没人会定这张单，不开。停下，
+  // 跑着的功能由 checkStop 挂起并写明要人定什么。
+  const afterRun = deps.now();
+  if (wallClockReached(run, afterRun)) {
+    deps.log(`${feature.id} ⏸ 墙钟到点：${landing.failure}`);
+    await deps.store.update((r) => r.checkStop(afterRun));
+    return;
+  }
 
   const question =
     `${feature.id}「${feature.title}」没能合进集成分支：${landing.failure} ` +
@@ -328,4 +336,29 @@ function tolerate(code: string) {
     if (error instanceof PlatformRuleError && error.code === code) return undefined;
     throw error;
   };
+}
+
+/**
+ * 跑一件事，到点（`msUntilDeadline` 毫秒后）调一次 `onDeadline`，但不打断它。
+ *
+ * 给在途 Mission 用：墙钟只在两个功能之间看的话，一条跑了四小时的 Mission 会
+ * 把「八小时硬墙钟」拖成十二小时。到点把它暂停，编排器在下一轮开头停下——
+ * 不直接杀：正在写的那一跳半途而废，比多跑几分钟更难收拾。跑完了定时器必须
+ * 清掉，否则进程要白等到那个时刻才退出。
+ */
+export async function runWithDeadline<T>(
+  task: () => Promise<T>,
+  msUntilDeadline: number,
+  onDeadline: () => Promise<void>,
+): Promise<T> {
+  let fired: Promise<void> | undefined;
+  const timer = setTimeout(() => {
+    fired = onDeadline().catch(() => undefined);
+  }, Math.max(0, msUntilDeadline));
+  try {
+    return await task();
+  } finally {
+    clearTimeout(timer);
+    await fired;
+  }
 }

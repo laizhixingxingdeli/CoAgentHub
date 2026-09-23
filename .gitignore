@@ -1,8 +1,18 @@
 node_modules/
 
 # 运行时产物，不进仓库。
+#
+# 状态文件放在仓库根时，平台会在它旁边生出下面这些。任何一项没被忽略，机器 L3
+# 合并前的 `git status --porcelain` 就非空，每一次合并都被拒——夜跑整晚白跑。
 .coagent-state*.json
-.coagent-state*.lock/
+# 单写者锁目录，名字是 `.lock-<状态文件名>`（见 application/lock.ts）。
+.lock-*/
+# 方案运行记录（run-plan / l3 plan 握手用）。
+.coagent-plans/
+# 已归档 Mission 的旁路包。
+.coagent-archive/
+# 文件存储把大输出外置到状态文件旁边的 artifacts/。
+/artifacts/
 .coagent-worktrees/
 .coagent-artifacts/
 .coagent-runs/

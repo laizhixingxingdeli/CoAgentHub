@@ -380,6 +380,26 @@ describe('驱动方自己停', () => {
     assert.equal(h.store.read()!.feature('F2')?.status, 'pending');
   });
 
+  test('跑着跑着到了墙钟（在途的被暂停）：不为它开单，直接停，功能挂起写明要你定什么', async () => {
+    const h = harness({
+      wallClockMs: 25 * MIN,
+      runs: {
+        'R1-F1': {
+          outcome: { kind: 'waiting', reason: 'cancelled_by_user', detail: 'Mission 已被暂停，resume 之后重跑' },
+          status: 'executing',
+        },
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'wall_clock');
+    const run = h.store.read()!;
+    assert.equal(run.escalations.length, 0, '到点了，没人会在今晚定这张单');
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.match(run.feature('F1')?.needsDecision ?? '', /要你定/);
+    assert.ok(!h.calls.some((c) => c.startsWith('abandon')), '停了就原样留给人');
+  });
+
   test('没料到的错：记下原因停在 crashed，再往外抛', async () => {
     const h = harness({ runs: { 'R1-F1': new Error('适配器进程起不来') } });
     await h.start();

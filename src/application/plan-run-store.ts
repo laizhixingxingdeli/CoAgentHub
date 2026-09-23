@@ -117,6 +117,9 @@ export class FilePlanRunStore {
   }
 
   async #withLock<T>(what: string, body: () => T): Promise<T> {
+    // 锁目录建在记录文件旁边；记录目录还不存在时（run-plan 第一次跑）mkdir
+    // 锁会直接 ENOENT，被当成一次崩溃。
+    mkdirSync(dirname(this.#path), { recursive: true });
     const deadline = Date.now() + this.#lockWaitMs;
     for (;;) {
       let release: () => void;

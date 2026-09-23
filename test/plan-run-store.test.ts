@@ -221,6 +221,25 @@ describe('记录本身', () => {
     assert.equal(readFileSync(path, 'utf8'), before);
   });
 
+  test('记录目录还不存在时也建得出来：run-plan 第一次跑就是这样', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
+    dirs.push(dir);
+    const store = new FilePlanRunStore(join(dir, '.coagent-plans', 'R9.json'));
+    await store.create(
+      PlanRun.start({
+        id: 'R9',
+        planId: 'PLAN-x',
+        projectId: 'p',
+        integrationBranch: 'auto/x',
+        reviewer: 'claude',
+        stopConditions: { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1 },
+        featureIds: ['F1'],
+        startedAt: T0,
+      }),
+    );
+    assert.equal(store.read()?.id, 'R9');
+  });
+
   test('没有记录时 read 给 undefined；update 明确报错', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
     dirs.push(dir);
