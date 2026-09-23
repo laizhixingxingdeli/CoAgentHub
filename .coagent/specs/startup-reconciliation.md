@@ -6,6 +6,8 @@
 
 收敛是**写操作**。只读进程（观测面）不得调用——共用 Postgres 时它会把别人正在跑的 attempt 判死。推进状态的进程必须用 `missionId` 限定范围：它只对自己接手的那条 Mission 有「没有别人在跑」这个认知。
 
+文件存储同理：`buildPersistentPlatform(…, { reconcile: false })` 不收敛。`l3.ts` 的只读命令（`inbox` / `show` / `plan`，含 `plan decide`——它只写方案运行记录那份独立文件）一律这样起。理由不是理论上的：写者刚开一跳时 attempt 已经落盘、spawn 还没回来、第一次心跳还没打，这几秒里它就是「从没心跳过」；只读命令在这时起来收敛，会把它判死并**整份写回状态文件**，而写者正握着锁在写——两个写者，后写的盖掉先写的，悄无声息。夜跑时检视者每 20 分钟就要 `l3.ts plan` 一次，这不是小概率。缺省（不传）仍收敛，推进状态的入口行为不变。
+
 ## Attempt
 
 - `in_progress` 且租约过期（默认 `DEFAULT_LEASE_TOLERANCE_MS` = 90s）→ `interrupted`，写 `attempt.ended`。

@@ -215,7 +215,7 @@ describe('记录本身', () => {
     const { path, store } = await storeWithEscalation();
     const before = readFileSync(path, 'utf8');
     await assert.rejects(
-      store.update((run) => run.decide('E-1', { action: 'merge', reason: 'x', decidedBy: 'claude' }, at(12))),
+      store.update((run) => run.choose('E-1', { action: 'merge', reason: 'x', decidedBy: 'claude' }, at(12))),
       (error: unknown) => error instanceof PlatformRuleError && error.code === 'REVIEWER_ACTION_FORBIDDEN',
     );
     assert.equal(readFileSync(path, 'utf8'), before);

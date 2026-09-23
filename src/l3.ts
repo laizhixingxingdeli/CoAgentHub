@@ -7,14 +7,19 @@
  *   node src/l3.ts send-back <missionId> --reason "..."
  *   node src/l3.ts abandon <missionId> --reason "..."
  *   node src/l3.ts ack <deliveryId>
+ *   node src/l3.ts plan [--run <方案运行记录>]
+ *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
  *
  * 直接操作状态文件，不经过 HTTP —— `run-mission` 的服务器是一次性的，
  * 跑完就退，所以平时没有常驻进程。**别在服务器开着的时候用它**：
  * 两个进程各写各的整份状态，后写的会盖掉先写的。
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { renderPlanHandoff, type HandoffCosts } from './application/plan-handoff.ts';
+import type { PlanRun } from './application/plan-run.ts';
+import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { buildPersistentPlatform, buildPgPlatform } from './main.ts';
 
 function arg(name: string): string | undefined {
@@ -29,8 +34,9 @@ function line(char = '─', n = 72): string {
 async function main() {
   const [, , command, target] = process.argv;
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
-  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show 是常态。
-  const readOnly = command === 'inbox' || command === 'show' || command === undefined;
+  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show 是常态。plan（含 decide）只写方案
+  // 运行记录那份独立文件，主状态同样只读——run-plan 整夜握着主状态锁。
+  const readOnly = command === 'inbox' || command === 'show' || command === 'plan' || command === undefined;
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   const built = usePg
     ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
@@ -38,6 +44,8 @@ async function main() {
       await buildPgPlatform()
     : await buildPersistentPlatform(statePath, {
         exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
+        // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
+        reconcile: !readOnly,
       });
   const { platform, deliveries, persist } = built;
   const reconciled = 'reconciled' in built ? built.reconciled : { interrupted: [] };
@@ -316,6 +324,52 @@ async function main() {
     return;
   }
 
+  if (command === 'plan') {
+    const runPath =
+      arg('--run') ?? latestPlanRun(resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans')));
+    if (!runPath) throw new Error('没有方案运行记录（先 node src/run-plan.ts 开跑，或用 --run 指定）。');
+    const store = new FilePlanRunStore(runPath);
+
+    if (target === 'decide') {
+      const escalationId = process.argv[4];
+      if (!escalationId || escalationId.startsWith('--')) throw new Error('要指定升级单：plan decide <E-n> ...');
+      const decidedBy = arg('--as');
+      // 只有本次运行指定的检视者作数；不写你是谁，规则就没法核对。
+      if (!decidedBy) throw new Error('要写明你是谁（--as <检视者>）：只有本次运行指定的检视者的决定作数。');
+      const drop = arg('--drop');
+      const decided = await store.update((run) =>
+        run.choose(
+          escalationId,
+          {
+            action: arg('--action'),
+            reason: arg('--reason') ?? '',
+            decidedBy,
+            // 没给就是没给：别的动作夹带一个空名单也会被拒。
+            ...(drop !== undefined
+              ? { dropFeatures: drop.split(',').map((id) => id.trim()).filter(Boolean) }
+              : {}),
+          },
+          new Date().toISOString(),
+        ),
+      );
+      const resolution = decided.resolution;
+      console.log(
+        `已定 ${decided.id}（${decided.featureId}）：` +
+          (resolution?.kind === 'decided' ? `${resolution.action} —— ${resolution.reason}` : '?'),
+      );
+      console.log('驱动方下次读记录（最多 15 秒）就会照办。');
+      return;
+    }
+
+    const run = store.read();
+    if (!run) throw new Error(`读不到方案运行记录：${runPath}`);
+    const costs = await planCosts(run, platform, built.queryRuns);
+    for (const text of renderPlanHandoff(run, { now: new Date().toISOString(), costs, recordPath: store.path })) {
+      console.log(text);
+    }
+    return;
+  }
+
   console.log(`用法：
   node src/l3.ts inbox [--recipient X]        列出待取的结果
   node src/l3.ts show <missionId>             看契约、计划、工作项、改动、交卷内容
@@ -331,8 +385,63 @@ async function main() {
   node src/l3.ts rerun <missionId> [--as <id>] 照当前契约再跑一遍（另起一条，原来那条不动）
   node src/l3.ts runs <missionId>             同一任务的历次运行横着比：lane/token/时延/打回/升级
   node src/l3.ts ack <deliveryId>             确认收到
+  node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
+  node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);
+}
+
+/** 状态文件旁 .coagent-plans/ 里最新的那份记录（按修改时间）。 */
+function latestPlanRun(dir: string): string | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  // 以点开头的是写入时的临时文件与锁目录，不是记录。
+  const records = names.filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+  let newest: { path: string; mtime: number } | undefined;
+  for (const name of records) {
+    const path = join(dir, name);
+    const mtime = statSync(path).mtimeMs;
+    if (!newest || mtime > newest.mtime) newest = { path, mtime };
+  }
+  return newest?.path;
+}
+
+/**
+ * 这一晚花了多少：各条 Mission 报上来的，加上现做分类的只读会话。
+ *
+ * 没报的**不当 0**：单独计数，交接面上写「另有 N 条没报」——把未知当 0，
+ * 用户拿首行去校准阈值时就会低估。
+ */
+async function planCosts(
+  run: PlanRun,
+  platform: { getMissionView(missionId: string): Promise<{ usage: { cost?: number; quality: string } }> },
+  queryRuns: { list(projectId?: string): Promise<readonly { source: string; usage: { cost?: number; quality: string } }[]> },
+): Promise<HandoffCosts> {
+  let missions = 0;
+  let routing = 0;
+  let unknownRuns = 0;
+  const tally = (usage: { cost?: number; quality: string }) => {
+    if (usage.quality !== 'reported') unknownRuns += 1;
+    return usage.quality === 'unknown' ? 0 : (usage.cost ?? 0);
+  };
+  for (const feature of run.features) {
+    for (const missionId of feature.missionIds) {
+      const view = await platform.getMissionView(missionId).catch(() => undefined);
+      if (!view) {
+        unknownRuns += 1;
+        continue;
+      }
+      missions += tally(view.usage);
+    }
+  }
+  for (const query of await queryRuns.list(run.projectId)) {
+    if (query.source.startsWith(`plan-run:${run.id}:`)) routing += tally(query.usage);
+  }
+  return { missions, routing, unknownRuns };
 }
 
 main().catch((error) => {

@@ -185,7 +185,7 @@ function reviewerDecides(action: string, extra?: { dropFeatures?: string[]; afte
     if (!open) return;
     if (Date.parse(now) - Date.parse(open.openedAt) < (extra?.after ?? 5 * MIN)) return;
     await store.update((run) =>
-      run.decide(
+      run.choose(
         open.id,
         {
           action,
@@ -444,7 +444,7 @@ describe('审查补上的边界', () => {
         if (!open || Date.parse(now) < Date.parse(open.deadline)) return;
         const justBefore = new Date(Date.parse(open.deadline) - 1).toISOString();
         await store.update((run) =>
-          run.decide(open.id, { action: 'stop', reason: '集成分支整体坏了', decidedBy: 'claude' }, justBefore),
+          run.choose(open.id, { action: 'stop', reason: '集成分支整体坏了', decidedBy: 'claude' }, justBefore),
         );
       },
     });

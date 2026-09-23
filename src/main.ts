@@ -150,6 +150,16 @@ export interface PersistentOptions {
    * 未传或不支持则 undefined（fail-closed）。
    */
   queryRuntime?: AgentRuntime;
+  /**
+   * 启动时收不收敛残留的 attempt。缺省收。
+   *
+   * **只看结果的命令传 false。** 它没有立场判定别的进程死了：run-plan 刚开一跳时
+   * attempt 已经落盘、spawn 还没回来、第一次心跳还没打——这几秒里它就是「从没
+   * 心跳过」。只读命令在这时起来收敛，会把它判死并**整份写回状态文件**，而写者
+   * 正握着锁在写：两个写者，后写的盖掉先写的，悄无声息。PG 那边 l3 早就不收敛了，
+   * 文件版补上同一条规矩。
+   */
+  reconcile?: boolean;
 }
 
 export async function buildPersistentPlatform(
@@ -208,7 +218,10 @@ export async function buildPersistentPlatform(
 
   // 刚起来 = 没有任何 attempt 可能还活着。不收敛的话，上一次崩溃留下的
   // in_progress 会把对应的 Mission / 工作项永久卡死。
-  const reconciled = await reconcileInterruptedAttempts(await projects.list(), activity);
+  const reconciled =
+    options.reconcile === false
+      ? { interrupted: [], alive: [], liveTrimmed: [], liveTrimFailed: [] }
+      : await reconcileInterruptedAttempts(await projects.list(), activity);
   if (reconciled.interrupted.length > 0) {
     store.flush();
   }

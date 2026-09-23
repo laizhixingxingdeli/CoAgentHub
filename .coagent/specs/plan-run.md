@@ -18,6 +18,18 @@
 - **崩溃**：记下原因停在 `crashed` 再往外抛，不猜着续跑。
 - **被人中断**（Ctrl+C / SIGTERM）：记下原因停在 `crashed`、落盘、放锁再退；在途 Mission 原样留给人。检视者的「停」恰好撞上驱动方判过期，照常停下，不当崩溃。
 
+## 交接面与检视者（l3 plan）
+
+- `node src/l3.ts plan [--run <记录>]`：一屏看完。不给 `--run` 就取状态文件旁 `.coagent-plans/` 里**最新**的一份（按修改时间；以点开头的临时文件与锁目录不算）。
+  - **首行**：运行 id、停止原因与细节（或「还在跑」）、用时（算到停下那一刻）/ 墙钟、总花销（Mission + 现做分类，**没报的单独计数，不当 0**）、未解决 N/上限——用户拿它校准阈值。
+  - 图例一行，之后每个功能一行，记号：`✓` 已合入 / `⏸` 挂起等你 / `⊘` 检视者跳过 / `○` 没轮到（`▶` 在跑）。同一行只有一个记号。
+  - **每个非成功项都写「要你定什么」**：⏸ / ⊘ 照抄记录里的 `needsDecision`；方案停了时 ○ 也写（下一轮接着跑它吗）。已合入的不写。
+  - 有开着的升级单时多两行：单号、截止时间、失败；以及给检视者照抄就能用的 `plan decide` 命令（带 `--as <指定检视者>` 与 `--run`）。
+  - 开跑时把功能标题抄进记录：早上看不用回头翻方案文件（它到早上可能已经改了）；旧记录缺标题照样读。
+- `node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "…" [--drop F7,F8] --as <检视者>`：写回决定，规则全在 `PlanRun.choose`（方法不叫 decide：`src/` 里的 `.decide(` 是 Decision provider 的接线，由 ADR-0002 的边界守卫盯着，撞名会让守卫要么误报、要么被迫放宽）。必须 `--as`（不写你是谁就核对不了指定检视者）；只有给了 `--drop` 才带删除名单。规则拒绝的非零退出并说清原因，记录一字不动。
+- 两条命令**都不拿主状态锁、不写主状态文件、不做启动收敛**（run-plan 整夜握着主状态锁在写；见 `startup-reconciliation`）。
+- run-plan 结束时打印的是同一张交接面（不含花销）。
+
 ## 记录与握手
 
 - **记录位置**：一份独立 JSON 文件（路径由驱动方定），**不在主状态文件里**。驱动方跑 Mission 时整夜握着主状态的单写者锁；检视者写回决定只碰这份文件，不需要那把锁。
@@ -46,5 +58,5 @@
 
 ## 权威源 / 测试
 
-- 源：`src/run-plan.ts`（接线）、`src/application/plan-driver.ts`（驱动）、`src/application/plan-routing.ts`（现做分类）、`src/application/plan-spec.ts`（方案文件与契约）、`src/application/plan-preflight.ts`（开跑前检查）、`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）、`.gitignore`（状态文件旁的运行时产物）
-- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`、`test/run-plan-wiring.test.ts`（真平台 + 真 git 跑一份方案）、`test/lock.test.ts`
+- 源：`src/run-plan.ts`（接线）、`src/l3.ts`（`plan` / `plan decide`）、`src/application/plan-handoff.ts`（交接面）、`src/application/plan-driver.ts`（驱动）、`src/application/plan-routing.ts`（现做分类）、`src/application/plan-spec.ts`（方案文件与契约）、`src/application/plan-preflight.ts`（开跑前检查）、`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）、`.gitignore`（状态文件旁的运行时产物）
+- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`、`test/run-plan-wiring.test.ts`（真平台 + 真 git 跑一份方案）、`test/plan-handoff.test.ts`、`test/l3-plan.test.ts`（**真子进程**跑 l3，含「锁被占着照样能定」「只读不写主状态」）、`test/lock.test.ts`
