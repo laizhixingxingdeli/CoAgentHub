@@ -56,10 +56,11 @@ import type { WorkspaceManager, WorktreeReconcileResult } from './application/wo
 import { GitWorktreeManager } from './application/workspace.ts';
 import {
   assertDecisionModeStartup,
+  parseDecisionHooks,
   parseDecisionMode,
 } from './application/decision-mode.ts';
 import { createDecisionProvider } from './application/decision-provider-factory.ts';
-import type { DecisionProvider } from './application/ports.ts';
+import type { DecisionHook, DecisionProvider } from './application/ports.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import { ValidationEngine } from './application/validation/engine.ts';
 import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
@@ -76,6 +77,8 @@ export function buildPlatform(
    * （fail-closed，不凭 kind 猜测）。
    */
   queryRuntime?: AgentRuntime,
+  /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
+  decisionHooks?: ReadonlySet<DecisionHook>,
 ) {
   const clock = new SystemClock();
   const projects = new InMemoryProjectRepository();
@@ -109,6 +112,7 @@ export function buildPlatform(
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    ...(decisionHooks ? { decisionHooks } : {}),
     ...(validation ? { validation } : {}),
   });
   const tokens = new RunTokenRegistry();
@@ -138,6 +142,8 @@ export function buildPlatform(
 export interface PersistentOptions {
   workspace?: WorkspaceManager;
   decisionProvider?: DecisionProvider;
+  /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
+  decisionHooks?: ReadonlySet<DecisionHook>;
   /**
    * 是否要排他写锁。
    *
@@ -172,6 +178,7 @@ export async function buildPersistentPlatform(
       : (workspaceOrOptions ?? {});
   const workspace = options.workspace ?? new GitWorktreeManager();
   const decisionProvider = options.decisionProvider;
+  const decisionHooks = options.decisionHooks;
   const releaseLock = options.exclusive
     ? acquireLock(statePath, options.exclusive.what)
     : () => {};
@@ -207,6 +214,7 @@ export async function buildPersistentPlatform(
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    ...(decisionHooks ? { decisionHooks } : {}),
     validation,
   });
   const tokens = new RunTokenRegistry();
@@ -283,6 +291,7 @@ export async function buildPgPlatform(options?: {
   workspace?: WorkspaceManager;
   artifactRoot?: string;
   decisionProvider?: DecisionProvider;
+  decisionHooks?: ReadonlySet<DecisionHook>;
   /**
    * 接手哪条 Mission —— 传了才做启动收敛，而且只收敛这一条。
    *
@@ -314,6 +323,7 @@ export async function buildPgPlatform(options?: {
     resolve(options?.artifactRoot ?? '.coagent-artifacts'),
   );
   const decisionProvider = options?.decisionProvider;
+  const decisionHooks = options?.decisionHooks;
   // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
   const workspace = options?.workspace ?? new GitWorktreeManager();
   const commandRunner = new ExecFileCommandRunner();
@@ -338,6 +348,7 @@ export async function buildPgPlatform(options?: {
     clock,
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
+    ...(decisionHooks ? { decisionHooks } : {}),
     validation,
   });
   const tokens = new RunTokenRegistry();
@@ -433,14 +444,17 @@ export async function startServer(
     mode: decisionMode,
     providerAvailable: Boolean(decisionProvider),
   });
+  // 只在 shadow 下读：OFF 模式不碰任何 decision 相关 env（规格要求）。
+  const decisionHooks =
+    decisionMode === 'shadow' ? parseDecisionHooks(env.COAGENT_DECISION_HOOKS) : undefined;
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
   // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
   const queryRuntime = createPiQueryRuntime(env);
   const built = usePg
-    ? await buildPgPlatform({ decisionProvider, queryRuntime })
-    : await buildPersistentPlatform(statePath, { decisionProvider, queryRuntime });
+    ? await buildPgPlatform({ decisionProvider, decisionHooks, queryRuntime })
+    : await buildPersistentPlatform(statePath, { decisionProvider, decisionHooks, queryRuntime });
   const server = createApi({
     platform: built.platform,
     tokens: built.tokens,

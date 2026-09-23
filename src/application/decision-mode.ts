@@ -5,6 +5,8 @@
  * - SHADOW：显式 mode + factory 注入 provider；否则启动 fail-closed
  */
 
+import type { DecisionHook } from './ports.ts';
+
 export type DecisionMode = 'off' | 'shadow';
 
 /**
@@ -17,6 +19,26 @@ export function parseDecisionMode(raw: string | undefined | null): DecisionMode 
   if (normalized === '' || normalized === 'off') return 'off';
   if (normalized === 'shadow') return 'shadow';
   return 'off';
+}
+
+/**
+ * 哪些钩子跑 shadow（`COAGENT_DECISION_HOOKS`，逗号分隔）。**只在 shadow 模式下读。**
+ *
+ * 缺省只含 POST_EXECUTION：E3 实测，PRE_DISPATCH 在远端默认拒绝（只发 ID）下答案是常数，
+ * 三道题都比「全猜多数类」还差——每次派发多等几百毫秒换一个常数。要看 PRE 就显式写上。
+ * 认识：pre_dispatch / pre-dispatch / pre，post_execution / post-execution / post；
+ * `none` 或全是不认识的词 = 一个都不跑。不认识的词忽略，与 parseDecisionMode 未知值按 off
+ * 处理一致：配置写错时宁可少调，不多调。
+ */
+export function parseDecisionHooks(raw: string | undefined | null): ReadonlySet<DecisionHook> {
+  if (raw == null || String(raw).trim() === '') return new Set<DecisionHook>(['POST_EXECUTION']);
+  const hooks = new Set<DecisionHook>();
+  for (const token of String(raw).split(',')) {
+    const word = token.trim().toLowerCase().replace(/-/g, '_');
+    if (word === 'pre_dispatch' || word === 'pre') hooks.add('PRE_DISPATCH');
+    else if (word === 'post_execution' || word === 'post') hooks.add('POST_EXECUTION');
+  }
+  return hooks;
 }
 
 /**

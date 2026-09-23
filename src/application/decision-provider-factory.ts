@@ -10,7 +10,10 @@ import type { DecisionProvider } from './ports.ts';
 import { JevDecisionProvider } from './jev-decision-provider.ts';
 import { createJevSystemOneHttpTransport } from './jev-system-one-http-transport.ts';
 
-const DEFAULT_TIMEOUT_MS = 800;
+// E3 实测（2026-09-23）：热连接约 300ms，进程里第一次调用 733–1342ms、闲置 20 秒后 729ms。
+// 生产里一条 Mission 一个进程、两次派发隔几分钟，调用几乎都是冷的——800ms 会把大部分 shadow
+// 调用误杀成超时。1500 盖住实测最坏的 1342ms；代价是 shadow 在派发路径上最坏多等这么久。
+const DEFAULT_TIMEOUT_MS = 1500;
 const DEFAULT_MAX_BODY_BYTES = 65_536;
 const DEFAULT_MODEL = 'jev-latest';
 const MAX_TIMEOUT_MS = 60_000;

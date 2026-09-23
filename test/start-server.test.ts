@@ -159,6 +159,34 @@ describe('startServer 绑定与启动日志', () => {
     void beforeHandles;
   });
 
+  test('COAGENT_DECISION_HOOKS 只在 shadow 下读；off 模式一次都不碰（J1）', async () => {
+    for (const mode of ['off', 'shadow'] as const) {
+      const touched: string[] = [];
+      const raw: Record<string, string | undefined> = {
+        COAGENT_STORE: 'file',
+        COAGENT_DECISION_MODE: mode,
+        COAGENT_DECISION_HOOKS: 'pre_dispatch',
+        TYPESAFE_API_KEY: 'test-shadow-key',
+      };
+      const env = new Proxy(raw, {
+        get(target, key) {
+          if (typeof key === 'string') touched.push(key);
+          return target[key as string];
+        },
+      });
+      const built = await startServer(0, tempState(), {
+        env,
+        fetch: async () => {
+          throw new Error('boot 不得调用 decision fetch');
+        },
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      await new Promise<void>((done, fail) => built.server.close((err) => (err ? fail(err) : done())));
+      assert.equal(touched.includes('COAGENT_DECISION_HOOKS'), mode === 'shadow', `${mode}：读过 ${touched.join(',')}`);
+    }
+  });
+
   test('COAGENT_DECISION_MODE=shadow + key + fake fetch：可启动，不真实联网', async () => {
     const statePath = tempState();
     let fetchCalls = 0;
@@ -356,7 +384,8 @@ describe('buildPlatform decisionProvider 透传', () => {
         };
       },
     };
-    const built = buildPlatform(undefined, provider);
+    // J1 之后 PRE 默认关：这条测的是透传，所以显式开 PRE。
+    const built = buildPlatform(undefined, provider, undefined, new Set(['PRE_DISPATCH'] as const));
     const { platform, activity } = built;
 
     const CONTRACT = {

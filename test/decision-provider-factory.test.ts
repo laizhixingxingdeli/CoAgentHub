@@ -112,6 +112,24 @@ describe('createDecisionProvider OFF', () => {
 });
 
 describe('createDecisionProvider SHADOW', () => {
+  test('默认超时 1500ms：上游 1 秒才回照样成功（E3：冷调用 730–1342ms，800 会误杀）', async () => {
+    const fetch: typeof globalThis.fetch = async (_url, init) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(
+          () => resolve(new Response(validJevBody(), { status: 200, headers: { 'content-type': 'application/json' } })),
+          1000,
+        );
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    const provider = createDecisionProvider({ mode: 'shadow', env: { TYPESAFE_API_KEY: 'k' }, fetch });
+    assert.ok(provider);
+    const result = await provider.decide(baseRequest());
+    assert.ok(result.answers.task_type, '1 秒回来的答案不该被默认超时掐掉');
+  });
+
   test('缺 TYPESAFE_API_KEY：throw，不 fetch', () => {
     let fetchCalls = 0;
     const fetch: typeof globalThis.fetch = async () => {

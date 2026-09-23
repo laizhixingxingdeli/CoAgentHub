@@ -12,10 +12,18 @@ Decision 是 Application 侧横向信号，不是第四层。当前只有 `off` 
 - 解析：`parseDecisionMode(COAGENT_DECISION_MODE)`（`decision-mode.ts`）。未知值 → `off`（不抛）。
 - 启动：`assertDecisionModeStartup` — `shadow` 且无 provider → 抛错；须在 store/lock/listen **之前**（`main.ts` `startServer`）。
 
+## 钩子（2026-09-23）
+
+- `COAGENT_DECISION_HOOKS`：逗号分隔，`parseDecisionHooks` 解析；**只在 shadow 模式下读**（off 仍零 decision env 触碰）。认 `pre_dispatch` / `pre-dispatch` / `pre`、`post_execution` / `post-execution` / `post`；`none` 或全是不认识的词 = 一个都不跑（写错时宁可少调）。
+- **缺省只有 POST_EXECUTION，PRE_DISPATCH 默认关**，要显式写上。依据 E3 实测：远端默认拒绝（只发 ID）下 PRE 的答案是常数（风险 18/18 答 MEDIUM），三道题都比「全猜多数类」还差——每次派发付几百毫秒换一个常数。
+- 平台依赖 `decisionHooks`（缺省同上）；Standard 与 Lightweight 两个派发点都要 provider **且** 钩子含 PRE_DISPATCH 才调用。
+- POST_EXECUTION 的生产接线在 J2；在那之前，shadow 模式按缺省配置**实际什么都不调**。
+
 ## Provider 工厂
 
 - `createDecisionProvider`（`decision-provider-factory.ts`）：`mode !== shadow` → 立即 `undefined`，**零** decision env 触碰。
 - SHADOW：要求 `TYPESAFE_API_KEY`；可选 timeout/body/model env；`JevSystemOneHttpTransport` + `JevDecisionProvider`。Jev 无工具、无任务状态机。
+- 默认超时 **1500ms**（`COAGENT_DECISION_TIMEOUT_MS` 覆盖，上限 60s）。依据 E3：热连接约 300ms，进程里第一次调用 733–1342ms、闲置 20 秒后 729ms；生产里一条 Mission 一个进程、派发间隔几分钟，调用几乎都是冷的，原来的 800ms 会误杀大部分调用。代价：shadow 在派发路径上最坏多等这么久。
 
 ## Shadow 运行时
 
