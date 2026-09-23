@@ -494,10 +494,14 @@ export class Platform {
           l2Reviews += 1;
           if (data?.verdict === 'reject') l2Rejects += 1;
         }
+        // 与上面 L2 排除 validator 同理：机器 L3 放行、方案放弃不是人的检视。
+        // 算进来的话，夜跑的每一条都让「L3 打回」的分母多一，A/B 表就混了人和机器。
         if (
-          event.kind === 'final_review.send_back' ||
-          event.kind === 'final_review.merged' ||
-          event.kind === 'final_review.abandoned'
+          (event.kind === 'final_review.send_back' ||
+            event.kind === 'final_review.merged' ||
+            event.kind === 'final_review.abandoned') &&
+          data?.authority !== 'machine' &&
+          data?.authority !== 'plan'
         ) {
           l3Reviews += 1;
           if (event.kind === 'final_review.send_back') l3SendBacks += 1;
@@ -2103,19 +2107,7 @@ export class Platform {
           '要落地改动必须知道项目仓库在哪，且平台要配了工作区管理。',
         );
       }
-      // 批准的长期知识写进 **Mission 自己的 worktree**，跟代码同一次 merge
-      // 落地。分两次提交的话，"代码进去了文档没进去"就会发生——而且没人会发现。
-      const proposals = mission.result?.memoryDelta ?? [];
-      if (proposals.length > 0 && ref.branch !== '(in-place)') {
-        const worktreeRoot = this.#workspace.worktreePath?.(missionId, ref.projectRoot);
-        if (worktreeRoot) {
-          const written = applyMemoryDelta(worktreeRoot, proposals);
-          // 传 projectId：worktree 的目录名是 Mission ID，
-          // 靠它兜底会让 VIBE.md 的标题变成 Mission 名。
-          const vibe = writeVibe(worktreeRoot, mission.projectId);
-          await this.#event(mission, 'memory.applied', { written: [...written, vibe] });
-        }
-      }
+      await this.#landMemory(mission);
 
       const outcome = await this.#workspace.mergeToTarget({
         missionId,
@@ -2186,6 +2178,14 @@ export class Platform {
         `Mission ${missionId} 现在是 ${mission.status}，没有在等最终检视。`,
       );
     }
+    // 自动合的范围只有 lightweight + standard。高保证路径的合并必须由人放行——
+    // 今天建不出这种 Mission，但门口的规则不能靠「上游恰好建不出来」来守。
+    if (mission.executionMode === 'high_assurance') {
+      throw new PlatformRuleError(
+        'HIGH_ASSURANCE_NEEDS_HUMAN',
+        `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+      );
+    }
     if (input.verification.length === 0) {
       throw new PlatformRuleError(
         'MACHINE_FINALIZE_NEEDS_VERIFICATION',
@@ -2234,6 +2234,10 @@ export class Platform {
     if (!ref) {
       throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
     }
+    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。原先这里直接
+    // 合并，提议被悄悄丢掉——夜跑里每一次 Living Spec 更新都没了，而且没人会发现。
+    // 集成验证照样跑在带着这些文件的合并结果上（比如 specs 清单的严格用例）。
+    await this.#landMemory(mission);
     const merged = await workspace.mergeToTarget({
       missionId,
       projectRoot,
@@ -2241,12 +2245,19 @@ export class Platform {
       expectedBaseRevision: ref.baseRevision,
     });
     if (!merged.ok) {
-      mission.block({
-        verdict: 'merge',
-        reasons: [merged.reason ?? '合并失败'],
-        authority: { kind: 'human' },
+      // 合不进去和验证红了是一回事：机器判不了，不等于这条完了。留在
+      // awaiting_review 等人（或方案的检视者）处置。原先这里转 blocked 并记
+      // { kind: 'human' }——一条机器路径冒签了人的权威，而且 blocked 是终态，
+      // 人第二天想看一眼再合都没门。
+      mission.setWaitReason(
+        'waiting_l3',
+        `机器合并失败：${merged.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
+      );
+      await this.#event(mission, 'final_review.merge_failed', {
+        reason: merged.reason,
+        authority: 'machine',
       });
-      await this.#event(mission, 'final_review.merge_failed', { reason: merged.reason });
+      await this.#event(mission, 'mission.waiting', { reason: 'waiting_l3' });
       return { status: mission.status, reason: merged.reason };
     }
     const mergedInto = merged.mergedInto;
@@ -2341,6 +2352,61 @@ export class Platform {
     });
     await this.#releaseWorkspace(missionId, projectRoot);
     return { status: mission.status, mergedInto, reportId: report.id };
+  }
+
+  /**
+   * 无人值守的方案运行放弃一条失败的 Mission：放掉改动名额，分支留给人看。
+   *
+   * **为什么非放不可。** 名额的判据是「动过代码且没到终态」。验证红了、合并失败
+   * 了、协调者卡住了——这些 Mission 都停在非终态，于是一直占着名额，方案里后面
+   * 的功能一个都派发不了：一次失败就钉死整晚。
+   *
+   * 只发 abandon，永远不放行；权威记 `plan` 并指向那张升级单——是检视者选的
+   * 动作还是等过了期，记在升级单上。不接 HTTP、不进 agent tools。
+   */
+  async abandonMissionForPlan(
+    missionId: string,
+    input: {
+      readonly planRunId: string;
+      readonly escalationId: string;
+      readonly reasons: readonly string[];
+      readonly projectRoot?: string;
+    },
+  ): Promise<{ status: string }> {
+    const text = (value: unknown) => typeof value === 'string' && value.trim() !== '';
+    if (!text(input.planRunId) || !text(input.escalationId)) {
+      throw new PlatformRuleError(
+        'PLAN_ABANDON_INVALID',
+        '方案放弃必须指向方案运行与那张升级单——否则早上查不到为什么放弃。',
+      );
+    }
+    if (!Array.isArray(input.reasons) || !input.reasons.some(text)) {
+      throw new PlatformRuleError('PLAN_ABANDON_INVALID', '方案放弃必须写理由。');
+    }
+    const { mission } = await this.#locate(missionId);
+    if (mission.status === 'completed' || mission.status === 'blocked') {
+      throw new PlatformRuleError(
+        'MISSION_ALREADY_TERMINAL',
+        `Mission ${missionId} 已经是 ${mission.status}，没什么可放弃的。`,
+      );
+    }
+    mission.block({
+      verdict: 'abandon',
+      reasons: [...input.reasons],
+      authority: Object.freeze({
+        kind: 'plan' as const,
+        planRunId: input.planRunId,
+        escalationId: input.escalationId,
+      }),
+    });
+    await this.#event(mission, 'final_review.abandoned', {
+      reasons: input.reasons,
+      authority: 'plan',
+      planRunId: input.planRunId,
+      escalationId: input.escalationId,
+    });
+    await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
+    return { status: mission.status };
   }
 
   /* ============================ L1 执行者面 ============================ */
@@ -2702,6 +2768,24 @@ export class Platform {
    * 回收 worktree 目录。**只摘目录，不删分支** —— 改动是 Mission 的产出，
    * 分支留着才查得到。失败不致命：留个目录比中断收尾好。
    */
+  /**
+   * 批准的长期知识写进 **Mission 自己的 worktree**，跟代码同一次 merge 落地。
+   * 分两次提交的话，"代码进去了文档没进去"就会发生——而且没人会发现。
+   * 人工放行与机器放行共用这一步。
+   */
+  async #landMemory(mission: Mission): Promise<void> {
+    const ref = mission.workspaceRef;
+    const proposals = mission.result?.memoryDelta ?? [];
+    if (!ref || proposals.length === 0 || ref.branch === '(in-place)') return;
+    const worktreeRoot = this.#workspace?.worktreePath?.(mission.id, ref.projectRoot);
+    if (!worktreeRoot) return;
+    const written = applyMemoryDelta(worktreeRoot, proposals);
+    // 传 projectId：worktree 的目录名是 Mission ID，
+    // 靠它兜底会让 VIBE.md 的标题变成 Mission 名。
+    const vibe = writeVibe(worktreeRoot, mission.projectId);
+    await this.#event(mission, 'memory.applied', { written: [...written, vibe] });
+  }
+
   async #releaseWorkspace(missionId: string, projectRoot?: string): Promise<void> {
     if (!this.#workspace || !projectRoot) return;
     await this.#workspace.release(missionId, projectRoot).catch(() => undefined);

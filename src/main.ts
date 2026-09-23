@@ -85,16 +85,20 @@ export function buildPlatform(
   // 全内存装法：QueryRun 进程内记忆。Durable 见 buildPersistent / buildPg。
   const queryRuns = new InMemoryQueryRunRepository();
   // 仅 workspace 有值时注入 validation；无 workspace 保持缺省 fail-closed。
+  const commandRunner = new ExecFileCommandRunner();
   const validation = workspace
     ? {
         engine: new ValidationEngine({
           clock,
           ids,
-          commandRunner: new ExecFileCommandRunner(),
+          commandRunner,
           changedPathReader: new WorkspaceChangedPathReader(workspace),
           diffFactReader: new WorkspaceDiffFactReader(workspace),
         }),
         reports: new InMemoryValidationReportRepository(),
+        // 机器 L3 在合并结果上跑方案级命令用。不给就 fail-closed（MACHINE_FINALIZE_UNAVAILABLE）
+        // ——F2 只在注入了替身的测试里跑通过，真实装配一直没给。
+        commandRunner,
       }
     : undefined;
   const platform = new Platform({
@@ -171,15 +175,18 @@ export async function buildPersistentPlatform(
   // 大输出外置到状态文件旁边的 artifacts/ 目录。
   const artifacts = new FileArtifactStore(resolve(statePath, '..', 'artifacts'));
   // 与 Platform/WorkspaceManager 共用同一个已 resolved workspace。
+  const commandRunner = new ExecFileCommandRunner();
   const validation = {
     engine: new ValidationEngine({
       clock,
       ids,
-      commandRunner: new ExecFileCommandRunner(),
+      commandRunner,
       changedPathReader: new WorkspaceChangedPathReader(workspace),
       diffFactReader: new WorkspaceDiffFactReader(workspace),
     }),
     reports: new FileValidationReportRepository(store),
+    // 机器 L3 用；见 buildPlatform 里同一处。
+    commandRunner,
   };
   const platform = new Platform({
     projects,
@@ -296,15 +303,18 @@ export async function buildPgPlatform(options?: {
   const decisionProvider = options?.decisionProvider;
   // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
   const workspace = options?.workspace ?? new GitWorktreeManager();
+  const commandRunner = new ExecFileCommandRunner();
   const validation = {
     engine: new ValidationEngine({
       clock,
       ids,
-      commandRunner: new ExecFileCommandRunner(),
+      commandRunner,
       changedPathReader: new WorkspaceChangedPathReader(workspace),
       diffFactReader: new WorkspaceDiffFactReader(workspace),
     }),
     reports: new PgValidationReportRepository(store),
+    // 机器 L3 用；见 buildPlatform 里同一处。
+    commandRunner,
   };
   const platform = new Platform({
     projects,

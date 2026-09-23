@@ -1,0 +1,207 @@
+/**
+ * 方案功能点的「现做分类」：只读协调者给事实，平台分类器定路由。
+ *
+ * 这里验的是那道翻译：协调者的一段自由文本输出，怎么变成一次确定性的路由——
+ * 以及任何一处读不懂、越界、自相矛盾时，都安全地回落到 Standard，而不是
+ * 被一段话骗进 Fast Lane。
+ */
+
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  buildRoutingPrompt,
+  decideRoute,
+  parseRoutingProposal,
+} from '../src/application/plan-routing.ts';
+import type { PlanFeatureSpec, PlanSpec } from '../src/application/plan-spec.ts';
+
+const FEATURE: PlanFeatureSpec = {
+  id: 'F6',
+  title: 'l3.ts plan 交接面',
+  why: '早上要一屏看完。',
+  allowedScope: ['src/l3.ts', 'src/web/'],
+  acceptance: ['四种状态各有记号且可区分。'],
+};
+
+const PLAN: PlanSpec = {
+  planId: 'PLAN-x',
+  projectId: 'p',
+  intent: '让平台能按方案无人值守推进。',
+  integrationBranch: 'auto/plan-x',
+  reviewer: 'claude',
+  stopConditions: { unresolvedEscalations: 5, wallClockMs: 28_800_000, escalationTimeoutMs: 1_200_000 },
+  integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 900_000 }],
+  features: [FEATURE],
+};
+
+const QUIET_FACTS = {
+  mutationSideEffect: true,
+  readOnlyProven: false,
+  highAssurance: {
+    productionDeployRelease: false,
+    externalPaidOp: false,
+    destructiveData: false,
+    credentialsPermissionsSecurity: false,
+    schemaPublicApiPersistenceCompat: false,
+    unrecoverableExternalSideEffect: false,
+  },
+  standardFloor: {
+    publicInterface: false,
+    buildSystemOrDependency: false,
+    multipleDomainModules: false,
+    acceptanceNotCheckableUpfront: false,
+    rootCauseOrCompetingDesigns: false,
+  },
+};
+
+const SMALL = {
+  goalUncertainty: 0,
+  changeScope: 1,
+  operationalRisk: 1,
+  verificationDifficulty: 1,
+  coordinationNeed: 0,
+  recoveryDifficulty: 0,
+  reasons: ['单文件，验收是一条命令'],
+  decidedBy: 'coordinator',
+  assessedAt: '2026-09-23T15:00:00.000Z',
+};
+
+const ORDER = {
+  objective: '加 plan 子命令',
+  allowedScope: ['src/l3.ts'],
+  requiredBehaviour: 'node src/l3.ts plan 打一屏交接面',
+  constraints: [],
+  acceptance: ['四种记号可区分'],
+  verification: ['node --test test/l3-plan.test.ts'],
+  doNot: [],
+  contextRefs: [],
+  validation: { commands: [{ argv: ['node', '--test', 'test/l3-plan.test.ts'], timeoutMs: 120_000 }] },
+};
+
+function output(body: unknown, prose = '看完了，结论如下。'): string {
+  return `${prose}\n\n\`\`\`json\n${JSON.stringify(body, null, 2)}\n\`\`\`\n`;
+}
+
+function parsed(body: unknown) {
+  const result = parseRoutingProposal(output(body));
+  assert.equal(result.ok, true, result.ok ? '' : result.reason);
+  return result.ok ? result.proposal : undefined;
+}
+
+describe('解析只读协调者的输出', () => {
+  test('取最后一个 json 块：前面举的例子不算数', () => {
+    const text =
+      output({ facts: 'example' }, '格式举例：') +
+      output({ facts: QUIET_FACTS, assessment: SMALL, workOrder: ORDER });
+    const result = parseRoutingProposal(text);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok && result.proposal.workOrder?.allowedScope, ['src/l3.ts']);
+  });
+
+  test('读不懂的一律拒绝并说清为什么：没有 json 块 / 不是 JSON / 多键 / 事实不合法', () => {
+    const cases: [string, RegExp][] = [
+      ['我觉得是 lightweight。', /json/i],
+      ['```json\n{ facts: 1 \n```', /JSON/],
+      [output({ facts: QUIET_FACTS, route: 'lightweight' }), /route/],
+      [output({ facts: { ...QUIET_FACTS, mutationSideEffect: 'maybe' } }), /mutationSideEffect/],
+    ];
+    for (const [text, why] of cases) {
+      const result = parseRoutingProposal(text);
+      assert.equal(result.ok, false, text);
+      assert.match(result.ok ? '' : result.reason, why);
+    }
+  });
+
+  test('评估必须署名 coordinator：只读协调者冒充 user 的评估不收', () => {
+    const result = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: { ...SMALL, decidedBy: 'user' } }));
+    assert.equal(result.ok, false);
+    assert.match(result.ok ? '' : result.reason, /coordinator/);
+  });
+});
+
+describe('定路由', () => {
+  test('事实干净、分数小、工单在范围内 → Fast Lane，带着工单', () => {
+    const route = decideRoute(parsed({ facts: QUIET_FACTS, assessment: SMALL, workOrder: ORDER }), FEATURE);
+    assert.equal(route.kind, 'classified');
+    assert.equal(route.kind === 'classified' && route.classification.recommended.executionMode, 'lightweight');
+    assert.deepEqual(route.kind === 'classified' && route.workOrder?.allowedScope, ['src/l3.ts']);
+  });
+
+  test('工单范围越出方案声明 → 回落 Standard，并点名越界的路径', () => {
+    const route = decideRoute(
+      parsed({ facts: QUIET_FACTS, assessment: SMALL, workOrder: { ...ORDER, allowedScope: ['src/l3.ts', 'src/main.ts'] } }),
+      FEATURE,
+    );
+    assert.equal(route.kind, 'standard_fallback');
+    assert.match(route.kind === 'standard_fallback' ? route.reason : '', /src\/main\.ts/);
+  });
+
+  test('范围按 validator 的语义比：目录以 / 结尾含子孙；逃逸路径与更宽的目录都算越界', () => {
+    const within = (allowedScope: string[]) =>
+      decideRoute(parsed({ facts: QUIET_FACTS, assessment: SMALL, workOrder: { ...ORDER, allowedScope } }), FEATURE)
+        .kind === 'classified';
+    assert.equal(within(['src/web/app.js']), true);
+    assert.equal(within(['src/web/parts/']), true);
+    assert.equal(within(['./src/l3.ts']), true);
+    assert.equal(within(['src/']), false);
+    assert.equal(within(['src/web/../main.ts']), false);
+    assert.equal(within(['src/l3.ts.bak']), false);
+  });
+
+  test('判成 Fast Lane 却没给工单 → 回落 Standard', () => {
+    const route = decideRoute(parsed({ facts: QUIET_FACTS, assessment: SMALL }), FEATURE);
+    assert.equal(route.kind, 'standard_fallback');
+  });
+
+  test('事实判到 Standard → 按 Standard 建，夹带的工单丢掉（平台禁止 Standard 带工单）', () => {
+    const facts = { ...QUIET_FACTS, standardFloor: { ...QUIET_FACTS.standardFloor, publicInterface: true } };
+    const route = decideRoute(parsed({ facts, assessment: SMALL, workOrder: ORDER }), FEATURE);
+    assert.equal(route.kind, 'classified');
+    assert.equal(route.kind === 'classified' && route.classification.recommended.executionMode, 'standard');
+    assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
+  });
+
+  test('事实判到 high_assurance → 挂起等人，写明要你定什么；不回落、不问检视者', () => {
+    const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, schemaPublicApiPersistenceCompat: true } };
+    const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
+    assert.equal(route.kind, 'needs_human');
+    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /要你定/);
+    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /schemaPublicApiPersistenceCompat/);
+  });
+
+  test('判成只读 query，或者根本没读懂 → 回落 Standard，交给协调者完整核实', () => {
+    const facts = { ...QUIET_FACTS, mutationSideEffect: false, readOnlyProven: true };
+    // 带上一张范围内的工单：只断言「回落了」会被别的分支碰巧满足（没工单也回落），
+    // 要断的是它因为「判成只读」而回落。
+    const query = decideRoute(parsed({ facts, assessment: SMALL, workOrder: ORDER }), FEATURE);
+    assert.equal(query.kind, 'standard_fallback');
+    assert.match(query.kind === 'standard_fallback' ? query.reason : '', /不用改代码/);
+    const unread = decideRoute(undefined, FEATURE, '输出里没有 json 块');
+    assert.equal(unread.kind, 'standard_fallback');
+    assert.match(unread.kind === 'standard_fallback' ? unread.reason : '', /没有 json 块/);
+  });
+});
+
+describe('给只读协调者的话', () => {
+  test('说清是哪个功能、范围、验收、只读、以及要交回的确切形状', () => {
+    const prompt = buildRoutingPrompt(PLAN, FEATURE);
+    for (const needle of [
+      'F6',
+      'l3.ts plan 交接面',
+      '早上要一屏看完。',
+      'src/l3.ts',
+      'src/web/',
+      '四种状态各有记号且可区分。',
+      'auto/plan-x',
+      '只读',
+      '"facts"',
+      '"standardFloor"',
+      '"workOrder"',
+      '"decidedBy": "coordinator"',
+      'unknown',
+    ]) {
+      assert.ok(prompt.includes(needle), `提示里缺 ${needle}`);
+    }
+  });
+});
