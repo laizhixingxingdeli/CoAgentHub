@@ -223,7 +223,8 @@ export class QueryRunner {
       });
       outcome = await run.wait();
     } catch (error) {
-      const failureMessage = error instanceof Error ? error.message : String(error);
+      // 这条出口同样落盘：上游 401 之类的错误原文里可能带着 key（A6 第一轮 L2 抓到的漏口）。
+      const failureMessage = redactSecrets(error instanceof Error ? error.message : String(error));
       const failed = endRecord(running, {
         endedAt: this.#clock.now().toISOString(),
         outcome: 'failed',

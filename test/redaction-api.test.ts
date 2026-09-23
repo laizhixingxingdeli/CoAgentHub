@@ -184,6 +184,22 @@ describe('凭据脱敏的落点', () => {
     assert.match(result.record.output ?? '', /\[REDACTED:E2E_REDACTION_API_KEY\]/);
   });
 
+  test('QueryRun 运行时抛错那条出口：落盘的失败原文里也没有 key', async () => {
+    const runtime = new ScriptedRuntime({
+      'query:-': { steps: [], connectionError: `401 Unauthorized: key ${KNOWN} rejected` },
+    });
+    const runner = new QueryRunner({
+      runtime,
+      queryRuns: new InMemoryQueryRunRepository(),
+      clock: new FixedClock(),
+      ids: new SequentialIds(),
+    });
+    const result = await runner.runQuery({ projectId: 'P', prompt: '问', cwd: process.cwd(), source: 'test' });
+    assert.equal(result.outcome, 'failed');
+    assertClean(result.record, 'failed query record');
+    assert.match(result.record.failureMessage ?? '', /\[REDACTED:E2E_REDACTION_API_KEY\]/);
+  });
+
   test('实时输出：文本块与工具行里的命令详情落盘前抹掉', async () => {
     // 自造运行时：订阅之后发一段带 key 的文本、一条带 Authorization 头的命令，然后结束这一跳。
     const probe: AgentRuntime = {
