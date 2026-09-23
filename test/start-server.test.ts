@@ -430,3 +430,40 @@ describe('buildPlatform decisionProvider 透传', () => {
     );
   });
 });
+
+describe('buildPersistentPlatform decisionHooks 透传（J1）', () => {
+  // 生产装配链上的那一段：startServer 读到的钩子要经持久化构建器进到 Platform。
+  // 构建器漏传的话 PRE 在生产里永远开不了，而平台层的测试照样全绿。
+  test('开 PRE：派发时 provider 调一次；不传钩子：零次', async () => {
+    const { buildPersistentPlatform } = await import('../src/main.ts');
+    const { InPlaceWorkspaceManager } = await import('../src/application/workspace.ts');
+    const contract = { intent: 'i', acceptance: ['a'], constraints: [] as string[], nonGoals: [] as string[], guardrails: [] as string[] };
+    const order = {
+      objective: 'o', allowedScope: ['src/x.ts'], requiredBehaviour: 'r', constraints: [] as string[],
+      acceptance: ['ok'], verification: ['t'], doNot: [] as string[], contextRefs: [] as string[],
+    };
+    const plan = { findings: 'f', rejectedHypotheses: [] as string[], decisions: [] as string[], direction: 'd', risks: [] as string[] };
+    for (const [hooks, expected] of [[new Set(['PRE_DISPATCH'] as const), 1], [undefined, 0]] as const) {
+      const sink = { calls: 0 };
+      const built = await buildPersistentPlatform(tempState(), {
+        workspace: new InPlaceWorkspaceManager(),
+        decisionProvider: {
+          kind: 'count',
+          async decide() {
+            sink.calls += 1;
+            return { answers: {} };
+          },
+        },
+        ...(hooks ? { decisionHooks: hooks } : {}),
+      });
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const { platform } = built;
+      await platform.createMission({ projectId: 'P', missionId: 'M1', contract });
+      const { attemptId } = await platform.startCoordinatorAttempt('M1');
+      await platform.updatePlan('M1', attemptId, plan);
+      const { workItemId } = await platform.createWorkItem('M1', attemptId, { title: 'w', order });
+      await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
+      assert.equal(sink.calls, expected, hooks ? '开了 PRE 应调一次' : '不传钩子应零次');
+    }
+  });
+});
