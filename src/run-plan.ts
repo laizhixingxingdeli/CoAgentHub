@@ -259,7 +259,7 @@ async function main() {
         if (result.outcome !== 'answered') {
           return { ok: false, reason: `分类员没答上来（${result.outcome}，QueryRun ${result.queryRunId}）。` };
         }
-        const parsed = parseRoutingProposal(result.record.output ?? '');
+        const parsed = parseRoutingProposal(result.record.output ?? '', new Date().toISOString());
         return parsed.ok ? parsed : { ok: false, reason: `${parsed.reason}（QueryRun ${result.queryRunId}）` };
       },
       runMission: async (missionId, { wallClockDeadline }) => {

@@ -48,8 +48,22 @@ function lastJsonBlock(output: string): string | undefined {
   return blocks.at(-1)?.[1];
 }
 
+/**
+ * 评估的时间盖平台的，不用模型的。
+ *
+ * 让模型填 `assessedAt`，它就编一个：E2 实测 7/7 全是编的整点，有半年前的，也有比实际晚
+ * 11 小时的——审计链上「这条路由什么时候定的」就成了假的。模型给了照样覆盖；没给也补上，
+ * 否则严格解析会因为缺这个字段把整份评估拒掉，白白退回 Standard。
+ */
+function stampAssessedAt(raw: unknown, assessedAt: string): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  return { ...(raw as Record<string, unknown>), assessedAt };
+}
+
+/** @param assessedAt 平台时钟给的时间（ISO），拿到分类员回答的那一刻。 */
 export function parseRoutingProposal(
   output: string,
+  assessedAt: string,
 ): { ok: true; proposal: RoutingProposal } | { ok: false; reason: string } {
   const block = lastJsonBlock(output);
   if (block === undefined) return { ok: false, reason: '输出里没有 ```json 块。' };
@@ -73,7 +87,7 @@ export function parseRoutingProposal(
   const body = raw as { facts?: unknown; assessment?: unknown; workOrder?: unknown };
   try {
     const facts = parseTaskFactsStrict(body.facts);
-    const assessment = parseComplexityAssessmentStrict(body.assessment);
+    const assessment = parseComplexityAssessmentStrict(stampAssessedAt(body.assessment, assessedAt));
     if (assessment && assessment.decidedBy !== 'coordinator') {
       return {
         ok: false,
@@ -233,8 +247,7 @@ verificationDifficulty 验证难度、coordinationNeed 协调依赖、recoveryDi
     "goalUncertainty": 0, "changeScope": 1, "operationalRisk": 1,
     "verificationDifficulty": 1, "coordinationNeed": 0, "recoveryDifficulty": 0,
     "reasons": ["每一维为什么这么判，一句话"],
-    "decidedBy": "coordinator",
-    "assessedAt": "<ISO 时间>"
+    "decidedBy": "coordinator"
   },
   "workOrder": {
     "objective": "…", "allowedScope": ["…"], "requiredBehaviour": "…",
