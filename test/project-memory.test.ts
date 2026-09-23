@@ -321,7 +321,7 @@ describe('落地时把知识跟代码一起合进去', () => {
     await platform.finishAttempt('M1', exec.attemptId, { endedBy: 'structured_submit' });
     await platform.reviewExecutionResult('M1', coord.attemptId, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });

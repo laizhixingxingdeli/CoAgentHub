@@ -168,7 +168,7 @@ describe('文件持久化', () => {
     const coord2 = await revived.startCoordinatorAttempt('M1');
     await revived.reviewExecutionResult('M1', coord2.attemptId, {
       workItemId: view.workItems[0].id,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['复跑过'],
       requiredChanges: [],
     });

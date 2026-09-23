@@ -15,6 +15,7 @@ export type {
 } from './attempt.ts';
 
 export {
+  ACCEPTANCE_STATUSES,
   EMPTY_USAGE,
   freezeDeep,
   freezePayload,
@@ -22,6 +23,8 @@ export {
   PROMOTION_TRIGGER_CODES,
 } from './payloads.ts';
 export type {
+  AcceptanceResult,
+  AcceptanceStatus,
   BlockedRecord,
   ComplexityAssessment,
   EscalationBody,

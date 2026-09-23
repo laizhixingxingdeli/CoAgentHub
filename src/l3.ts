@@ -100,6 +100,16 @@ async function main() {
       console.log(`  ${item.id.padEnd(6)}${item.status.padEnd(11)}${item.attempts} 次尝试  ${item.title}`);
       if (item.lastReview) {
         console.log(`      L2 验收：${item.lastReview.verdict} —— ${item.lastReview.reasons[0] ?? ''}`);
+        // 方案 §11：没验证的那几条要摆到 L3 眼前，一句总结里看不出来。
+        const results = item.lastReview.acceptanceResults ?? [];
+        if (results.length > 0) {
+          const passed = results.filter((r) => r.status === 'pass').length;
+          console.log(`      逐条：${passed}/${results.length} pass`);
+          for (const r of results.filter((x) => x.status !== 'pass')) {
+            const mark = r.status === 'fail' ? '✗ 未过' : r.status === 'unverified' ? '⚠ 未验证' : '— 不适用';
+            console.log(`        ${mark} ${r.criterion}${r.note ? ` —— ${r.note}` : ''}`);
+          }
+        }
       }
     }
 

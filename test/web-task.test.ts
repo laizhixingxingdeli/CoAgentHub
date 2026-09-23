@@ -153,6 +153,7 @@ async function seedMission(): Promise<{ platform: Platform; base: string }> {
     verdict: 'accept',
     reasons: ['测试跑过了'],
     requiredChanges: [],
+    acceptanceResults: [{ criterion: 'a', status: 'pass', evidence: '测试替身：逐条核过' }],
   });
   await platform.escalateToL3('M-task', coord.attemptId, {
     question: '要不要一起改内核？',

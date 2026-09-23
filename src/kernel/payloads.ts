@@ -445,6 +445,32 @@ export interface ValidationReport {
  * - `authority`：独立权威；validator 时必有（reportId 在 authority 内，不另造 validationReportId）。
  *   legacy / 直接 kernel review 可不带。
  */
+/** L2 对一条验收标准的结论（方案 §11）。 */
+export type AcceptanceStatus = 'pass' | 'fail' | 'unverified' | 'not_applicable';
+
+export const ACCEPTANCE_STATUSES: readonly AcceptanceStatus[] = Object.freeze([
+  'pass',
+  'fail',
+  'unverified',
+  'not_applicable',
+]);
+
+/**
+ * 评审对工单里一条验收标准的交代。
+ *
+ * 为什么要逐条：一句总结里「都过了」和「三条过了、第四条没法验」看起来一样，
+ * 而后者正是 L3 最需要看到的。
+ */
+export interface AcceptanceResult {
+  /** 工单 acceptance 原文。 */
+  readonly criterion: string;
+  readonly status: AcceptanceStatus;
+  /** pass 时的证据。 */
+  readonly evidence?: string;
+  /** unverified / not_applicable 时的原因。 */
+  readonly note?: string;
+}
+
 export interface ReviewRecord {
   readonly attemptId?: string;
   readonly submittedAttemptId?: string;
@@ -452,6 +478,8 @@ export interface ReviewRecord {
   readonly verdict: 'accept' | 'reject';
   readonly reasons: readonly string[];
   readonly requiredChanges: readonly string[];
+  /** 协调者评审的逐条结果；机器评审与旧快照没有。 */
+  readonly acceptanceResults?: readonly AcceptanceResult[];
 }
 
 export interface BlockedRecord {

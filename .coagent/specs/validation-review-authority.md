@@ -60,3 +60,13 @@ deny ∩ allow：changed-paths 可通过，forbidden-paths 仍 fail（deny wins�
 - 源：`kernel/payloads.ts`（类型）、`validation/engine.ts`、`validation/ports.ts`（含 `DiffFactReader`）、`validation/workspace-diff-fact-reader.ts`、`validation/report-repository.ts`、`platform.ts`（validate/submit-for-review）
 - 测试：`validation-engine.test.ts`、`validation-report-repository.test.ts`、`work-item.test.ts`、`platform-lightweight.test.ts`、`builder-validation.test.ts`、`orchestrator-lightweight.test.ts`、`final-review.test.ts`
 - 取舍：ADR-0004（Fast Lane 不绕过 L3 / review authority）；ADR-0005（budget unknown **不**硬闸 — 与 validator fail-closed 不同轴）
+
+## L2 逐条验收（优化方案 §11，2026-09-23）
+
+一句总结里「都过了」和「三条过了、第四条没法验」看起来一样，而后者正是 L3 最需要看到的。
+
+- **协调者评审**（`reviewExecutionResult` / 工具 `coagent_review_execution_result`）：工作项的工单有 `acceptance` 时必须带 `acceptanceResults`——一条对一条、顺序一致、`criterion` 照抄原文；`status` ∈ `pass` / `fail` / `unverified` / `not_applicable`；`pass` 要 `evidence`；`unverified` / `not_applicable` 要 `note`。错误码：`ACCEPTANCE_RESULTS_REQUIRED` / `ACCEPTANCE_RESULTS_MISMATCH` / `ACCEPTANCE_RESULT_INVALID` / `ACCEPTANCE_EVIDENCE_REQUIRED` / `ACCEPTANCE_NOTE_REQUIRED` / `ACCEPT_WITH_FAILED_CRITERION`。报错写成协调者能照做的话。
+- **内核不变式**：`ReviewRecord` 带逐条结果时，`accept` 不得含 `fail`（`ACCEPT_WITH_FAILED_CRITERION`），不管从哪条路进来；形状非法 → `INVALID_REVIEW_RECORD`。
+- **不受约束**：机器（validator）评审；工单没有 `acceptance` 的旧工作项（给了非空结果反而 `MISMATCH`）。旧快照没有这个字段照常恢复，不补、不猜。
+- **露出**：`review.recorded` 事件带 `acceptance` 计数与 `unverified` 清单；`l3 show` 列「逐条：x/y pass」与每条非 pass 项（✗ 未过 / ⚠ 未验证 / — 不适用 + 原因）。
+- **发布耦合**：pi 侧工具（coagent-pi 的 A5a）要同时发 `acceptanceResults`。集成分支上的平台配 master 上的 pi 会拒掉评审——两边的集成分支要一起合 master。

@@ -184,7 +184,7 @@ describe('HTTP 面', () => {
 
     const reviewed = await call(
       '/api/agent/coagent_review_execution_result',
-      { workItemId, verdict: 'accept', reasons: ['自己跑过 node --test'], requiredChanges: [] },
+      { workItemId, verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['自己跑过 node --test'], requiredChanges: [] },
       coordToken,
     );
     assert.equal(reviewed.status, 200);
