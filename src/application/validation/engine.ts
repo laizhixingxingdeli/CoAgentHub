@@ -17,6 +17,7 @@ import type {
 } from '../../kernel/index.ts';
 import type { Clock, IdGenerator } from '../ports.ts';
 import type { ChangedPathReader, CommandRunner, DiffFactReader } from './ports.ts';
+import { redactSecrets } from '../redact.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -154,7 +155,8 @@ export class ValidationEngine {
       });
       const endedAt = this.#clock.now().toISOString();
       const passed = result.exitCode === 0 && !result.timedOut;
-      const outputTail = tail(result.output, OUTPUT_TAIL_MAX_CHARS);
+      // 先脱敏再截尾：截断点切在一个 key 中间时，剩下的半截对不上任何形状，就漏了。
+      const outputTail = tail(redactSecrets(result.output), OUTPUT_TAIL_MAX_CHARS);
       const summary = passed
         ? `command exited 0`
         : result.timedOut

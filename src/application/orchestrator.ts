@@ -19,6 +19,7 @@ import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
+import { redactSecrets } from './redact.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -937,7 +938,9 @@ export class Orchestrator {
             return;
           }
           if (event.kind === 'output') {
-            void this.#live.append({ ...base, kind: 'text', text: event.text });
+            // 流式文本是一小段一小段来的：一个 key 被切在两段之间时逐段脱敏抓不到，这里只能尽力。
+            // 大段带出凭据的是工具输出，那条路经 API 以证据形式进来，在入口整段脱敏。
+            void this.#live.append({ ...base, kind: 'text', text: redactSecrets(event.text) });
           } else if (event.kind === 'tool.started') {
             // Mark before classification — order is the contract.
             sawToolStarted = true;
@@ -946,7 +949,7 @@ export class Orchestrator {
               kind: 'tool',
               // 带上具体在干什么。挂住之后这一行是唯一能指认"卡在哪条命令上"
               // 的东西；适配层没给 detail 时退回只有工具名，行为和以前一样。
-              text: event.detail ? `${event.name} · ${event.detail}` : event.name,
+              text: event.detail ? `${event.name} · ${redactSecrets(event.detail)}` : event.name,
             });
             if (commandTracking === 'enabled') {
               const activityClass = event.activityClass;

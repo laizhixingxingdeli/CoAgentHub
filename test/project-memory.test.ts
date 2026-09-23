@@ -223,6 +223,7 @@ describe('读写 .coagent/', () => {
       'spawn-env-filter',
       'plan-run',
       'machine-final-review',
+      'credential-redaction',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

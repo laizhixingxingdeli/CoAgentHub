@@ -9,6 +9,7 @@
 import { EMPTY_USAGE } from '../kernel/index.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
 import { PlatformRuleError } from './platform.ts';
+import { redactSecrets } from './redact.ts';
 import type {
   AgentRuntime,
   Clock,
@@ -222,7 +223,8 @@ export class QueryRunner {
       });
       outcome = await run.wait();
     } catch (error) {
-      const failureMessage = error instanceof Error ? error.message : String(error);
+      // 这条出口同样落盘：上游 401 之类的错误原文里可能带着 key（A6 第一轮 L2 抓到的漏口）。
+      const failureMessage = redactSecrets(error instanceof Error ? error.message : String(error));
       const failed = endRecord(running, {
         endedAt: this.#clock.now().toISOString(),
         outcome: 'failed',
@@ -239,9 +241,10 @@ export class QueryRunner {
       endedAt: this.#clock.now().toISOString(),
       outcome: queryOutcome,
       endedBy: outcome.endedBy,
-      failureMessage: outcome.failureMessage,
+      // 查询的回答原文会落盘、被检视者翻看：同样先脱敏。
+      failureMessage: outcome.failureMessage === undefined ? undefined : redactSecrets(outcome.failureMessage),
       usage: outcome.usage ?? EMPTY_USAGE,
-      output: outcome.output,
+      output: outcome.output === undefined ? undefined : redactSecrets(outcome.output),
       toolCalls: outcome.toolCalls,
     });
     await this.#queryRuns.save(ended);

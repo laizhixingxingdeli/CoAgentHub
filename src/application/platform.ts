@@ -53,6 +53,7 @@ import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
+import { redactSecrets } from './redact.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -643,6 +644,12 @@ export class Platform {
       };
     },
   ): Promise<void> {
+    // 失败原文与输出尾部都会落盘、进界面：agent 打过 `env` 的话，本机的 key 就在里面。
+    outcome = {
+      ...outcome,
+      ...(outcome.failureMessage !== undefined ? { failureMessage: redactSecrets(outcome.failureMessage) } : {}),
+      ...(outcome.output !== undefined ? { output: redactSecrets(outcome.output) } : {}),
+    };
     const { mission } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
     if (!attempt) {
@@ -2301,7 +2308,8 @@ export class Platform {
             exitCode: result.exitCode,
             timedOut: result.timedOut,
             durationMs: result.durationMs,
-            outputTail: result.output.slice(-2000),
+            // 先脱敏再截尾：截断点正好切在一个 key 中间时，剩下的半截对不上任何形状。
+            outputTail: redactSecrets(result.output).slice(-2000),
           }),
         }),
       );

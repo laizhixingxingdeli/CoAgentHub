@@ -25,6 +25,7 @@ import type { LiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
+import { redactSecretsDeep } from '../application/redact.ts';
 
 /** 客户端 API 版本。破坏性改动时要加。 */
 export const API_VERSION = 'v1';
@@ -398,7 +399,9 @@ export function createApi(deps: ApiDeps): Server {
       const handler = agentTools[tool];
       if (!handler) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       const run = requireRun(req);
-      const body = await readJson(req);
+      // agent 交进来的一切（证据、结果、评审、交卷、工单）都从这一个口进来，在这里整体脱敏一次：
+      // 它跑过 `env` 或 `cat .env` 的话，输出就在证据里。
+      const body = redactSecretsDeep(await readJson(req));
       return send(res, 200, await handler(run, body as Record<string, never>));
     }
 
