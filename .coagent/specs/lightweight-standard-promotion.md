@@ -29,6 +29,19 @@
 - `promotion/new-dependency-detector.ts`
 - `promotion/validator-failure-unrepairable-detector.ts`
 
+## 交卷后的自动升级（接线，2026-09-23）
+
+Lightweight 工作项交卷后，平台跑机器验收；**没有被机器 accept 就升级到 Standard**，不再停在 stalled 等人（E1 实测停过 870 秒：执行者改对了，一条验收配置判失败，车道没有出口）。
+
+- 触发由纯函数 `promotion/lightweight-gate.ts` 的 `lightweightGateTrigger(report)` 从**一份 trusted ValidationReport** 复算，顺序固定：
+  1. `changed_files_gt_3` / `top_level_modules_gt_2`——实际改动清单取自报告里 changed-paths 检查的 `actual`。规模超了，**验收通过也要升级**。
+  2. `validator_failure_unrepairable`——报告未通过。`invalid_argv` / `unsupported_scope` 写成「验收配置本身跑不起来，要重写工单」；其余普通失败写成「Lightweight 没有返工通道，交协调者对照报告做 L2」。不另设「让执行者照报告再修一次」的循环：E1 那次是工单配错、改动本身是对的。
+- `validateAndAcceptLightweightWorkItem`：通过但规模超了 → **不 accept**，返回 `held: <code>`，工作项留在 submitted（一旦 accept，升级后 L2 就无从审起）。
+- `promoteLightweightAfterValidation(missionId, reportId)`（进程内）：调用方只能指名报告，不能自带理由。报告须存在且属于该 Mission（`PROMOTION_REPORT_MISMATCH`），须是该工作项**当前这次提交**的（`PROMOTION_REPORT_STALE`），须推得出触发（`NO_PROMOTION_TRIGGER`）；之后走 `#commitPromotionToStandard`。
+- Orchestrator：工作项 submitted 且未被 accept → 调上面的入口 → 清掉等待原因 → 继续（Standard：协调者被唤醒做 L2，指令开头写明「从 Lightweight 升级上来的，原因：<triggerRule>」）。升级本身失败才 stalled，原因同时写出验收结果与升级失败的缘由。
+
+**尚未接线**：`new_dependency`（需要可信地读工作区里**未提交**的 package.json；`showRootPackageJson` 刻意只读已提交 revision）；`executor_ambiguity` / `invalid_premise` / `design_decision` / `permission_expansion` / `new_public_interface` / `persistence_format_change` / `diff_intent_unprovable`（还没有可信的信号来源）。
+
 ## 权威源 / 测试
 
 - 源：`platform.ts`（promote* / `#commitPromotionToStandard`）、`kernel/payloads.ts`（码表与 `PromotionRecord`）、`application/promotion/*`

@@ -6,7 +6,7 @@
  *   - 0 / >1 WorkItem stalled，零 Coordinator hop
  *   - happy Fast Lane：dispatch → 唯一 executor hop → validator → awaiting_review
  *   - L3 finalize 后才 completed
- *   - validation fail stalled（含 reportId），不 auto-promote
+ *   - validation fail → 凭报告自动升级 Standard，协调者接手 L2；升级不成才 stalled
  *   - accepted crash-recovery seam
  *   - PROJECT_BUSY → waiting，零 Coordinator
  */
@@ -115,6 +115,8 @@ after(() => {
 
 async function harness(opts?: {
   executor?: ScriptedRuntime;
+  /** 缺省是空脚本：Lightweight 一旦叫起协调者就报错。升级场景要给它脚本。 */
+  coordinator?: ScriptedRuntime;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
   /** 不注入 validation（fail-closed 场景） */
@@ -153,8 +155,8 @@ async function harness(opts?: {
   servers.push(server);
 
   const executorRuntime = opts?.executor ?? new ScriptedRuntime(EXECUTOR_HAPPY);
-  // Coordinator 脚本故意为空：Lightweight 不得触发它。
-  const coordinatorRuntime = new ScriptedRuntime({});
+  // Coordinator 脚本缺省为空：Lightweight 不得触发它。
+  const coordinatorRuntime = opts?.coordinator ?? new ScriptedRuntime({});
 
   return {
     platform,
@@ -375,42 +377,88 @@ describe('Orchestrator Lightweight：happy Fast Lane', () => {
   });
 });
 
-describe('Orchestrator Lightweight：validation fail', () => {
-  test('report 已保存、item submitted、Mission executing、stalled 含 reportId；无 coordinator', async () => {
-    const h = await harness({
-      runner: fakeRunner(async () => ({
-        exitCode: 1,
-        timedOut: false,
-        durationMs: 1,
-        output: 'FAIL',
-      })),
-    });
+describe('Orchestrator Lightweight：验收没过 → 自动升级 Standard（§4.3）', () => {
+  // E1 实测：执行者改对了、机器验收因一条配置判失败，旧行为停在 stalled 等了 870 秒。
+  const failing = () =>
+    fakeRunner(async () => ({ exitCode: 1, timedOut: false, durationMs: 1, output: 'FAIL' }));
+
+  const COORDINATOR_L2: ScriptTable = {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_review_execution_result',
+          body: {
+            workItemId: 'W-1',
+            verdict: 'accept',
+            reasons: ['对照报告复核：失败的是验收命令的环境，改动本身符合工单'],
+            requiredChanges: [],
+          },
+        },
+        {
+          tool: 'coagent_submit_mission_result',
+          body: {
+            outcome: 'delivered',
+            summary: '升级后由协调者验收',
+            acceptanceEvidence: ['L2 复核通过'],
+            memoryDelta: [],
+            openRisks: [],
+          },
+        },
+      ],
+    },
+  };
+
+  test('报告存下 → 凭它升级 → 协调者带着原因接手做 L2 → 交卷等 L3', async () => {
+    const coordinator = new ScriptedRuntime(COORDINATOR_L2);
+    const h = await harness({ runner: failing(), coordinator });
     const { missionId } = await seedLightweight(h.projects, { missionId: 'M-fail' });
-    await h.platform.createLightweightWorkItem(missionId, {
-      order: ORDER,
-      workItemId: 'W-1',
-    });
+    await h.platform.createLightweightWorkItem(missionId, { order: ORDER, workItemId: 'W-1' });
+
+    const orch = h.makeOrchestrator();
+    const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
+
+    assert.equal(result.kind, 'awaiting_l3_review');
+    const view = await h.platform.getMissionView(missionId);
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.promotions.length, 1);
+    const promotion = view.promotions[0]!;
+    assert.equal(promotion.triggerCode, 'validator_failure_unrepairable');
+    const reportId = promotion.triggerRule.match(/VR-\d+/)?.[0];
+    assert.ok(reportId, promotion.triggerRule);
+    assert.equal((await h.reports.get(reportId!))?.passed, false);
+
+    // 执行者一跳、协调者一跳；协调者被告知这是升级上来的、凭哪份报告。
+    assert.equal(orch.hops.filter((x) => x.role === 'executor').length, 1);
+    assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 1);
+    assert.match(coordinator.instructions[0]!, /从 Lightweight 升级上来的/);
+    assert.ok(coordinator.instructions[0]!.includes(reportId!));
+    // L2 是协调者做的，不是机器。
+    assert.equal(view.workItems[0]!.status, 'accepted');
+  });
+
+  test('升级不成（报告对不上当前这次提交）才停下，并把两件事都说出来', async () => {
+    const h = await harness({ runner: failing() });
+    const { missionId } = await seedLightweight(h.projects, { missionId: 'M-fail2' });
+    await h.platform.createLightweightWorkItem(missionId, { order: ORDER, workItemId: 'W-1' });
+    // 升级时平台读回的报告被改成另一次提交的：平台必须拒绝，编排器必须停下说清楚，不能硬升。
+    const realGet = h.reports.get.bind(h.reports);
+    h.reports.get = async (id: string) => {
+      const report = await realGet(id);
+      return report ? { ...report, attemptId: 'W-1.exec-0' } : report;
+    };
 
     const orch = h.makeOrchestrator();
     const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
 
     assert.equal(result.kind, 'stalled');
-    assert.match((result as { reason: string }).reason, /ValidationReport VR-/);
-    assert.match((result as { reason: string }).reason, /未通过/);
-    assert.match((result as { reason: string }).reason, /自动升级尚未启用/);
-
+    const reason = (result as { reason: string }).reason;
+    assert.match(reason, /ValidationReport VR-\d+ 未通过，升级到 Standard 也失败了/);
+    assert.match(reason, /不是工作项 W-1 当前这次提交的报告/);
     const view = await h.platform.getMissionView(missionId);
-    assert.equal(view.status, 'executing');
-    assert.equal(view.workItems[0]!.status, 'submitted');
-    assert.equal(view.result, undefined);
-    assert.deepEqual(view.coordinatorAttemptIds, []);
+    assert.equal(view.executionMode, 'lightweight');
     assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 0);
-
-    const reportId = ((result as { reason: string }).reason.match(/VR-\d+/) ?? [])[0];
-    assert.ok(reportId);
-    const stored = await h.reports.get(reportId);
-    assert.ok(stored);
-    assert.equal(stored!.passed, false);
   });
 });
 

@@ -141,6 +141,7 @@ function coordinatorInstruction(view: {
   finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
+  promotions?: readonly { triggerRule: string }[];
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -159,6 +160,7 @@ function coordinatorBody(view: {
   finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
+  promotions?: readonly { triggerRule: string }[];
 }): string {
   const answered = view.escalationLog.filter((item) => item.answer).at(-1);
   if (view.finalReview?.verdict === 'send_back') {
@@ -213,7 +215,13 @@ function coordinatorBody(view: {
     // 重放一遍。实测协调者轮次是整条 Mission 开销的主项（一条走到六轮的，
     // 协调者一个人占 74%），所以这一句必须把"这一轮要做完几件"钉死。
     const ids = submitted.map((item) => item.id).join('、');
+    // 从 Lightweight 升级上来的：协调者此前没参与过，不说的话它不知道机器验收已经判过一轮、为什么没放行。
+    const promoted = view.promotions?.at(-1);
+    const origin = promoted
+      ? `这条 Mission 是从 Lightweight 升级上来的，原因：${promoted.triggerRule}\n\n`
+      : '';
     return (
+      origin +
       `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
       '先 coagent_get_mission 看当前状态，然后**在这一轮里把它们全部验收完**。\n\n' +
       '验完之后如果还有下一批要做的，同样**一次派完**——' +
@@ -635,15 +643,26 @@ export class Orchestrator {
         workItemId: item.id,
         cwd,
       });
-      if (validated.passed === false) {
-        return {
-          kind: 'outcome',
-          outcome: {
-            kind: 'stalled',
-            reason:
-              `ValidationReport ${validated.reportId} 未通过；Lightweight 自动升级尚未启用`,
-          },
-        };
+      if (validated.status !== 'accepted') {
+        // 验收没过，或改动超出轻量规模被扣下：升级给协调者，而不是停下等人。
+        // E1 实测停过一次——执行者改对了、一条配置判失败，Mission 在 stalled 里等了 870 秒。
+        // 凭据是平台存下的那份报告；升级失败才停，并把两件事都说出来。
+        try {
+          await this.#platform.promoteLightweightAfterValidation(missionId, validated.reportId);
+        } catch (error) {
+          const what = validated.passed ? '通过但改动超出轻量规模' : '未通过';
+          return {
+            kind: 'outcome',
+            outcome: {
+              kind: 'stalled',
+              reason:
+                `ValidationReport ${validated.reportId} ${what}，升级到 Standard 也失败了：` +
+                (error instanceof Error ? error.message : String(error)),
+            },
+          };
+        }
+        await this.#platform.setWaitReason(missionId, undefined);
+        return { kind: 'continue' };
       }
       await this.#platform.submitLightweightMissionForReview(missionId);
       return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
