@@ -8,6 +8,7 @@
 - **钉分支**：项目仓当前分支必须等于调用方声明的集成分支，否则 `INTEGRATION_BRANCH_MISMATCH`，不合、不跑验证。合并目标取自「当时 checkout 的分支」，不核对的话，中途有东西切回 master，后续功能会静默合进 master。**master 全程不动。**
 - **锚点先落事件**：合并前把集成分支 HEAD 写成 `final_review.integration_anchor` 事件——进程死在「已合并、未验证」之间时，得有东西知道退回哪。
 - **合并**沿用落地闸：目标 HEAD 必须等于 Mission 的分叉基线，目标工作区必须干净（**未跟踪文件也算**）。合不进去 → Mission **留在 `awaiting_review`**，`waitReason = waiting_l3`，事件 `final_review.merge_failed`（authority machine）；不写 FinalReview、不跑验证、集成分支不动。
+- **项目记忆跟代码同一次合进去**：合并前把协调者交卷里的 `memoryDelta`（Living Spec / ADR 提议）写进 Mission 的 worktree 并重生成 VIBE.md，与人工放行同一步（事件 `memory.applied`）。集成验证跑在带着这些文件的合并结果上。
 - **验证夹在 merge 与 complete 之间**：在合并结果（项目仓）上逐条跑集成命令，产出 durable `ValidationReport`（id 前缀 `IVAL`），事件 `final_review.integration_verified`。`completed` 没有出边，先 complete 再验，红了就只能退 git、退不了状态。
 - **绿** → `completed`，`FinalReview.authority = { kind: 'machine', integrationReportId, policyRevision }`，回收工作区。
 - **红** → 退回锚点：只在集成分支仍停在我们合出来的那个 commit 上时才 `reset --hard`，否则拒绝退——宁可留一个没验过的合并让人看，也不悄悄抹掉别人的提交。Mission **留在 `awaiting_review`**（机器判不了不等于这条完了）；退回成功时返回 `rolledBackTo`，退回失败时只有 `reportId` 没有 `rolledBackTo`（调用方据此判「集成分支不安全」）。

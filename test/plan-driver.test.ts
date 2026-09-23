@@ -59,6 +59,15 @@ function harness(options?: {
   finalize?: Record<string, Finalize | Error>;
   routes?: Record<string, Awaited<ReturnType<PlanDriverDeps['proposeRoute']>>>;
   onSleep?: Hook;
+  /** 每次写方案运行记录之前先跑它：用来在驱动方读与写之间插进检视者的一笔。 */
+  beforeUpdate?: Hook;
+  /** 分类员：抛错 / 花多久。 */
+  proposeThrows?: Error;
+  routeTakesMs?: number;
+  /** 建分类 Mission 时平台拒绝。 */
+  classifiedRejects?: Error;
+  /** 每个功能开跑前核对项目仓；按功能给出问题清单。 */
+  repoProblems?: Record<string, string[]>;
   unresolvedEscalations?: number;
   wallClockMs?: number;
 }) {
@@ -94,7 +103,17 @@ function harness(options?: {
   const status = new Map<string, string>();
 
   const deps: PlanDriverDeps = {
-    store,
+    store: {
+      read: () => store.read(),
+      update: async (mutate) => {
+        await options?.beforeUpdate?.({ now: now(), store });
+        return store.update(mutate);
+      },
+    },
+    checkRepo: async () => {
+      const next = store.read()?.nextPending()?.featureId ?? '';
+      return options?.repoProblems?.[next] ?? [];
+    },
     projectRoot: 'C:/repo',
     now,
     log: () => {},
@@ -102,8 +121,11 @@ function harness(options?: {
       clock += ms;
       await options?.onSleep?.({ now: now(), store });
     },
-    proposeRoute: async (feature) =>
-      options?.routes?.[feature.id] ?? { ok: false, reason: '测试里不分类' },
+    proposeRoute: async (feature) => {
+      clock += options?.routeTakesMs ?? 0;
+      if (options?.proposeThrows) throw options.proposeThrows;
+      return options?.routes?.[feature.id] ?? { ok: false, reason: '测试里不分类' };
+    },
     runMission: async (missionId) => {
       calls.push(`run ${missionId}`);
       clock += 30 * MIN;
@@ -119,6 +141,7 @@ function harness(options?: {
         return { missionId: input.missionId };
       },
       createClassifiedMission: async (input) => {
+        if (options?.classifiedRejects) throw options.classifiedRejects;
         calls.push(`create-classified ${input.missionId} ${input.workOrder ? 'lightweight' : 'standard'}`);
         status.set(input.missionId!, 'investigating');
         return { missionId: input.missionId!, classification: undefined as never };
@@ -407,5 +430,100 @@ describe('驱动方自己停', () => {
     const run = h.store.read()!;
     assert.equal(run.stopped?.reason, 'crashed');
     assert.match(run.stopped?.detail ?? '', /适配器进程起不来/);
+  });
+});
+
+describe('审查补上的边界', () => {
+  test('检视者选「停」恰好撞上驱动方判过期：干净停下，不当崩溃往外抛', async () => {
+    // 造出交错：驱动方读到单子还开着、到点去判过期的那一刻，检视者抢先在截止前
+    // 1 毫秒写下了「停」。判过期会撞上 PLAN_RUN_STOPPED。
+    const h = harness({
+      finalize: { 'R1-F1': RED },
+      beforeUpdate: async ({ now, store }) => {
+        const open = store.read()?.currentEscalation;
+        if (!open || Date.parse(now) < Date.parse(open.deadline)) return;
+        const justBefore = new Date(Date.parse(open.deadline) - 1).toISOString();
+        await store.update((run) =>
+          run.decide(open.id, { action: 'stop', reason: '集成分支整体坏了', decidedBy: 'claude' }, justBefore),
+        );
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'reviewer_stop');
+    assert.equal(h.store.read()!.unresolvedCount, 0);
+  });
+
+  test('等决定期间墙钟到点：直接停，不判过期、不放弃，功能挂起交给人', async () => {
+    // Mission 跑 30 分钟后开单（第 50 分钟截止）；墙钟 40 分钟，等的时候就到了。
+    const h = harness({ wallClockMs: 40 * MIN, finalize: { 'R1-F1': RED } });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'wall_clock');
+    const run = h.store.read()!;
+    assert.equal(run.unresolvedCount, 0, '墙钟到了不算检视者没来');
+    assert.equal(run.escalations[0].resolution, undefined);
+    assert.ok(!h.calls.some((c) => c.startsWith('abandon')));
+    assert.match(run.feature('F1')?.needsDecision ?? '', /没人定/);
+  });
+
+  test('分类本身跑过了墙钟：不再建 Mission，功能保持没轮到', async () => {
+    const h = harness({ wallClockMs: 10 * MIN, routeTakesMs: 12 * MIN });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'wall_clock');
+    assert.deepEqual(h.calls, [], '一条 Mission 都不该建');
+    assert.equal(h.store.read()!.feature('F1')?.status, 'pending');
+  });
+
+  test('分类员自己出错：回落 Standard 接着跑，不拖垮整晚', async () => {
+    const h = harness({ proposeThrows: new Error('QueryRun 落盘 EPERM') });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.ok(h.calls.includes('create R1-F1'));
+  });
+
+  test('按分类建单被平台拒（工单不合法）：回落 Standard；别的错照抛', async () => {
+    const { InvariantViolationError } = await import('../src/kernel/index.ts');
+    const small = {
+      goalUncertainty: 0, changeScope: 0, operationalRisk: 0, verificationDifficulty: 0,
+      coordinationNeed: 0, recoveryDifficulty: 0, reasons: ['小'], decidedBy: 'coordinator' as const,
+      assessedAt: T0,
+    };
+    const lightweight = {
+      ok: true as const,
+      proposal: {
+        facts: QUIET_FACTS,
+        assessment: small,
+        workOrder: {
+          objective: 'x', allowedScope: ['src/F1.ts'], requiredBehaviour: 'x', constraints: [],
+          acceptance: ['x'], verification: ['x'], doNot: [], contextRefs: [],
+        },
+      },
+    };
+    const rejected = harness({
+      features: ['F1'],
+      routes: { F1: lightweight },
+      classifiedRejects: new InvariantViolationError('INVALID_WORK_ORDER_VALIDATION', '工单不合法'),
+    });
+    await rejected.start();
+    assert.equal((await drivePlan(rejected.plan, rejected.deps)).reason, 'finished');
+    assert.ok(rejected.calls.includes('create R1-F1'), '回落老路建了 Standard');
+
+    const broken = harness({ features: ['F1'], routes: { F1: lightweight }, classifiedRejects: new Error('磁盘满了') });
+    await broken.start();
+    await assert.rejects(() => drivePlan(broken.plan, broken.deps), /磁盘满了/);
+    assert.equal(broken.store.read()!.stopped?.reason, 'crashed');
+  });
+
+  test('开跑前再核一次项目仓：分支被切走就停在 unsafe，不先花一整条 Mission 的钱', async () => {
+    const h = harness({ repoProblems: { F2: ['项目仓现在在 master，不是 auto/plan-x。'] } });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'unsafe');
+    assert.match(stop.detail, /master/);
+    assert.ok(!h.calls.includes('create R1-F2'));
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
   });
 });

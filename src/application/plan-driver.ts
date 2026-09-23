@@ -71,6 +71,12 @@ export interface PlanDriverDeps {
   readonly proposeRoute: (
     feature: PlanFeatureSpec,
   ) => Promise<{ ok: true; proposal: RoutingProposal } | { ok: false; reason: string }>;
+  /**
+   * 每个功能开跑前再核一次项目仓（还在集成分支上、工作区干净）。开跑前检查只在
+   * 启动时做一次；夜里有东西把仓库切回 master 的话，下一条 Mission 会从 master
+   * 分叉，要等它整条跑完、机器 L3 去合时才被拦下——那一条的钱就白花了。
+   */
+  readonly checkRepo?: () => Promise<readonly string[]>;
   readonly projectRoot: string;
   readonly now: () => string;
   readonly sleep: (ms: number) => Promise<void>;
@@ -127,12 +133,32 @@ async function runFeature(
   deps: PlanDriverDeps,
 ): Promise<void> {
   const missionId = attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`;
-  const proposal = await deps.proposeRoute(feature);
+  // 分类是尽力而为：有安全的回落（Standard），它自己出错不该拖垮整晚。
+  const proposal = await deps.proposeRoute(feature).catch((error: unknown) => ({
+    ok: false as const,
+    reason: `分类员出错：${error instanceof Error ? error.message : String(error)}`,
+  }));
+  // 分类本身是一整次只读会话，可能跑过墙钟：到点了就不再建 Mission。功能还没
+  // 开跑，checkStop 不会动它，它保持「没轮到」。
+  const afterRoute = deps.now();
+  if (wallClockReached(run, afterRoute)) {
+    await deps.store.update((r) => r.checkStop(afterRoute));
+    return;
+  }
   const route = decideRoute(
     proposal.ok ? proposal.proposal : undefined,
     feature,
     proposal.ok ? undefined : proposal.reason,
   );
+  if (route.kind !== 'needs_human') {
+    const problems = (await deps.checkRepo?.()) ?? [];
+    if (problems.length > 0) {
+      const detail = `开跑 ${feature.id} 前核对项目仓没过：${problems.join('；')}`;
+      deps.log(`${feature.id} ✗ ${detail}`);
+      await deps.store.update((r) => r.halt('unsafe', detail, deps.now()));
+      return;
+    }
+  }
   if (route.kind === 'needs_human') {
     deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。`);
     await deps.store.update((r) => r.suspendFeature(feature.id, route.needsDecision));
@@ -286,7 +312,12 @@ async function waitForResolution(escalationId: string, deps: PlanDriverDeps): Pr
     if (run.stopped || escalation.resolution) return;
     const now = deps.now();
     if (Date.parse(now) >= Date.parse(escalation.deadline)) {
-      await deps.store.update((r) => r.expire(escalationId, now)).catch(tolerate('ESCALATION_ALREADY_RESOLVED'));
+      // 检视者可能恰好在这一刻写下了决定：定的是跳过之类 → 已了结；定的是「停」
+      // → 方案已停，expire 先撞上的是 PLAN_RUN_STOPPED。两种都是正常结局，回到
+      // 循环开头重读即可。
+      await deps.store
+        .update((r) => r.expire(escalationId, now))
+        .catch(tolerate('ESCALATION_ALREADY_RESOLVED', 'PLAN_RUN_STOPPED'));
       continue;
     }
     if (wallClockReached(run, now)) {
@@ -331,9 +362,9 @@ function requireRun(deps: PlanDriverDeps): PlanRun {
 }
 
 /** 撞车是正常的（检视者恰好同时定了）；别的错照抛。 */
-function tolerate(code: string) {
+function tolerate(...codes: string[]) {
   return (error: unknown) => {
-    if (error instanceof PlatformRuleError && error.code === code) return undefined;
+    if (error instanceof PlatformRuleError && codes.includes(error.code)) return undefined;
     throw error;
   };
 }

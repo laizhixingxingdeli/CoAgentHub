@@ -157,11 +157,11 @@ function formatHours(ms: number): string {
   return (ms / 3_600_000).toFixed(1).replace(/\.0$/, '');
 }
 
-function isPositiveInt(value: unknown): value is number {
+export function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
-function isText(value: unknown): value is string {
+export function isText(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
 }
 
@@ -173,7 +173,8 @@ function isStringList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-function isStopConditions(value: unknown): value is PlanStopConditions {
+/** 方案文件与方案运行记录共用同一把尺子：两处各写一份，收紧一边另一边就会放过。 */
+export function isStopConditions(value: unknown): value is PlanStopConditions {
   if (value === null || typeof value !== 'object') return false;
   const raw = value as Record<string, unknown>;
   return (

@@ -21,7 +21,7 @@ import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { Orchestrator } from './application/orchestrator.ts';
 import { drivePlan, runWithDeadline } from './application/plan-driver.ts';
-import { preflightPlanRepo } from './application/plan-preflight.ts';
+import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
 import { buildRoutingPrompt, parseRoutingProposal } from './application/plan-routing.ts';
 import { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
@@ -126,6 +126,13 @@ async function main() {
       process.exitCode = 2;
       return;
     }
+    // 上一晚停下时原样留给人的 Mission 还占着名额的话，今晚一个都派发不了。
+    const holders = slotHolders(await platform.listMissions(), plan.projectId);
+    if (holders.length > 0) {
+      console.error(`开跑前检查没过，一个功能都没跑：\n${holders.map((h) => `  ✗ ${h}`).join('\n')}`);
+      process.exitCode = 2;
+      return;
+    }
 
     const started = new Date();
     const runId = `${plan.planId}-${stamp(started)}`;
@@ -184,32 +191,55 @@ async function main() {
         `node src/l3.ts plan --run "${store.path}"\n`,
     );
 
+    // Ctrl+C / 被杀：信号结束的进程不发 exit 事件，锁目录会留下，后面每次写都被挡；
+    // 方案运行记录也会停在「还在跑」。先记下原因、落盘、放锁再退。在途 Mission 原样
+    // 留给人（它可能占着名额，下一晚开跑前检查会点名它）。
+    let interrupted = false;
+    const onSignal = (signal: string) => {
+      if (interrupted) return;
+      interrupted = true;
+      console.error(`\n收到 ${signal}：记下原因后退出。在途的 Mission 原样留给人。`);
+      void store
+        .update((r) => {
+          if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
+        })
+        .catch(() => undefined)
+        .then(async () => {
+          await Promise.resolve(persist()).catch(() => undefined);
+          releaseLock();
+          process.exit(130);
+        });
+    };
+    process.once('SIGINT', () => onSignal('SIGINT'));
+    process.once('SIGTERM', () => onSignal('SIGTERM'));
+
     const stop = await drivePlan(plan, {
       store,
       projectRoot,
+      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
       now: () => new Date().toISOString(),
       sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
       log: (line) => console.log(`[${new Date().toLocaleTimeString()}] ${line}`),
       platform: {
         createMission: async (input) => {
           const created = await platform.createMission(input);
-          persist();
+          await persist();
           return created;
         },
         createClassifiedMission: async (input) => {
           const created = await platform.createClassifiedMission(input);
-          persist();
+          await persist();
           return created;
         },
         getMissionView: (missionId) => platform.getMissionView(missionId),
         finalizeMissionByMachine: async (missionId, input) => {
           const result = await platform.finalizeMissionByMachine(missionId, input);
-          persist();
+          await persist();
           return result;
         },
         abandonMissionForPlan: async (missionId, input) => {
           const result = await platform.abandonMissionForPlan(missionId, input);
-          persist();
+          await persist();
           return result;
         },
       },
@@ -222,7 +252,7 @@ async function main() {
           cwd: projectRoot,
           ...(coordinators[0] ? { profile: coordinators[0] } : {}),
         });
-        persist();
+        await persist();
         if (result.outcome !== 'answered') {
           return { ok: false, reason: `分类员没答上来（${result.outcome}，QueryRun ${result.queryRunId}）。` };
         }
@@ -247,11 +277,11 @@ async function main() {
             async () => {
               console.log(`[${new Date().toLocaleTimeString()}] 墙钟到点：暂停在途的 ${missionId}，下一轮开头停下。`);
               await platform.pauseMission(missionId);
-              persist();
+              await persist();
             },
           );
         } finally {
-          persist();
+          await persist();
         }
       },
     });
@@ -266,7 +296,7 @@ async function main() {
     console.log(`\n早上看：node src/l3.ts plan --run "${store.path}"`);
     server.close();
   } finally {
-    persist();
+    await persist();
     releaseLock();
   }
 }

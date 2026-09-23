@@ -30,7 +30,7 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
-import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import type { MemoryDeltaProposal, MissionContract, WorkOrder } from '../src/kernel/index.ts';
 
 const dirs: string[] = [];
 after(() => {
@@ -96,7 +96,7 @@ async function readyForReview(
   worktreeRoot: string,
   missionId: string,
   runner: ReturnType<typeof scriptedRunner>,
-  options?: { executionMode?: 'high_assurance' },
+  options?: { executionMode?: 'high_assurance'; memoryDelta?: MemoryDeltaProposal[] },
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
@@ -164,7 +164,7 @@ async function readyForReview(
     outcome: 'delivered',
     summary: '交付',
     acceptanceEvidence: [],
-    memoryDelta: [],
+    memoryDelta: options?.memoryDelta ?? [],
     openRisks: [],
   });
   await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
@@ -436,5 +436,67 @@ describe('方案放弃失败的 Mission', () => {
         error instanceof PlatformRuleError && error.code === 'FINAL_REVIEW_AUTHORITY_FORBIDDEN',
     );
     assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+  });
+});
+
+describe('机器 L3 与项目记忆', () => {
+  test('协调者提议的 Living Spec 跟代码同一次合进集成分支——人工放行怎么落，机器放行也怎么落', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([0]), {
+      memoryDelta: [{ kind: 'living_spec', slug: 'demo-capability', title: 'Demo', body: '# Demo\n\n机器放行也要落这份。' }],
+    });
+
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+
+    assert.equal(result.status, 'completed');
+    // 以前只合了代码：这份提议被悄悄丢掉，没有事件、没有提示。
+    assert.match(git(repo, 'show', 'HEAD:.coagent/specs/demo-capability.md'), /机器放行也要落这份/);
+    assert.match(git(repo, 'show', 'HEAD:VIBE.md'), /demo-capability/);
+  });
+});
+
+describe('A/B 表里的 L3 只数人', () => {
+  test('机器放行与方案放弃不算 L3 检视：不稀释「L3 打回」的分母', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const merged = await readyForReview(repo, wt, 'M1', scriptedRunner([0]));
+    await merged.platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+    const [machineRun] = await merged.platform.listRuns('M1');
+    assert.equal(machineRun.status, 'completed');
+    assert.equal(machineRun.l3Reviews, 0, '机器合并不是 L3 的人工检视');
+
+    const repo2 = tempRepoOnIntegration('auto/plan-x');
+    const wt2 = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt2);
+    const abandoned = await readyForReview(repo2, wt2, 'M2', scriptedRunner([0]));
+    await abandoned.platform.abandonMissionForPlan('M2', {
+      planRunId: 'R1',
+      escalationId: 'E-1',
+      reasons: ['超时没人定'],
+      projectRoot: repo2,
+    });
+    const [planRun] = await abandoned.platform.listRuns('M2');
+    assert.equal(planRun.l3Reviews, 0, '方案放弃也不是');
+
+    // 人工的照数：打回一次算一次检视、一次打回。
+    const repo3 = tempRepoOnIntegration('auto/plan-x');
+    const wt3 = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt3);
+    const human = await readyForReview(repo3, wt3, 'M3', scriptedRunner([0]));
+    await human.platform.finalizeMission('M3', { verdict: 'send_back', reasons: ['重做'] });
+    const [humanRun] = await human.platform.listRuns('M3');
+    assert.equal(humanRun.l3Reviews, 1);
+    assert.equal(humanRun.l3SendBacks, 1);
   });
 });

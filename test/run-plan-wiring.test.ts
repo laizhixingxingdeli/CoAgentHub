@@ -366,3 +366,26 @@ describe('真平台 + 真 git 跑一份方案', () => {
     assert.equal((await platform.getMissionView('R1-F2')).finalReview?.authority?.kind, 'machine');
   });
 });
+
+describe('开跑前：项目的改动名额被谁占着', () => {
+  /**
+   * 方案停下时，失败或在途的那条 Mission 是故意原样留给人的——它动过代码、没到
+   * 终态，一直占着名额。第二晚不先处理它就开跑，每个功能的协调者都会调查规划
+   * 一遍、派发时撞上 PROJECT_BUSY，一整晚白烧。
+   */
+  test('本项目里有动过代码、没到终态的 Mission → 点名它和处置办法；别的项目、已终结的不算', async () => {
+    const { slotHolders } = await import('../src/application/plan-preflight.ts');
+    const rows = [
+      { missionId: 'R0-F2', projectId: 'P', status: 'awaiting_review', isMutating: true },
+      { missionId: 'R0-F1', projectId: 'P', status: 'completed', isMutating: false },
+      { missionId: 'X-1', projectId: 'other', status: 'executing', isMutating: true },
+      { missionId: 'R0-F3', projectId: 'P', status: 'planning', isMutating: false },
+    ];
+    const problems = slotHolders(rows, 'P');
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /R0-F2/);
+    assert.match(problems[0], /awaiting_review/);
+    assert.match(problems[0], /l3\.ts/);
+    assert.deepEqual(slotHolders(rows.filter((r) => r.missionId !== 'R0-F2'), 'P'), []);
+  });
+});

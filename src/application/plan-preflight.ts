@@ -44,3 +44,25 @@ export async function preflightPlanRepo(projectRoot: string, integrationBranch: 
   }
   return problems;
 }
+
+/**
+ * 项目的改动名额被谁占着。返回问题清单（空 = 名额是空的）。
+ *
+ * 方案停下时（叫停 / 未解决到顶 / 墙钟 / 集成分支不安全 / 崩溃），失败或在途的
+ * 那条 Mission 是**故意原样留给人的**——它动过代码、没到终态，一直占着名额。
+ * 不先处理它就开下一晚，每个功能的协调者都会先调查规划一遍、派发时撞上
+ * PROJECT_BUSY，然后开单、等过期、再换下一个——一整晚白烧。
+ */
+export function slotHolders(
+  missions: readonly { missionId: string; projectId: string; status: string; isMutating: boolean }[],
+  projectId: string,
+): string[] {
+  return missions
+    .filter((mission) => mission.projectId === projectId && mission.isMutating)
+    .map(
+      (mission) =>
+        `Mission ${mission.missionId}（${mission.status}）正占着项目 ${projectId} 的改动名额：` +
+        `先处理它（node src/l3.ts show ${mission.missionId}，再 merge 或 abandon），` +
+        '否则今晚每个功能都派发不了。',
+    );
+}

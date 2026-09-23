@@ -8,6 +8,7 @@
  */
 
 import type { MissionContract } from '../kernel/index.ts';
+import { isPositiveInt, isStopConditions, isText } from './plan-run.ts';
 import type { PlanStopConditions } from './plan-run.ts';
 import { PlatformRuleError } from './platform.ts';
 
@@ -40,16 +41,8 @@ export interface PlanSpec {
   readonly features: readonly PlanFeatureSpec[];
 }
 
-function text(value: unknown): value is string {
-  return typeof value === 'string' && value.trim() !== '';
-}
-
 function textList(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every(text);
-}
-
-function positiveInt(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+  return Array.isArray(value) && value.length > 0 && value.every(isText);
 }
 
 /**
@@ -64,20 +57,13 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw bad('不是对象。');
   const plan = raw as Record<string, unknown>;
   for (const key of ['planId', 'projectId', 'integrationBranch', 'intent'] as const) {
-    if (!text(plan[key])) throw bad(`${key} 缺失。`);
+    if (!isText(plan[key])) throw bad(`${key} 缺失。`);
   }
   const reviewer = options?.reviewer ?? plan.reviewer;
-  if (!text(reviewer)) throw bad('没有指定检视者（文件里的 reviewer 或命令行 --reviewer）。');
+  if (!isText(reviewer)) throw bad('没有指定检视者（文件里的 reviewer 或命令行 --reviewer）。');
 
-  const stop = plan.stopConditions as Record<string, unknown> | undefined;
-  if (
-    !stop ||
-    !positiveInt(stop.unresolvedEscalations) ||
-    !positiveInt(stop.wallClockMs) ||
-    !positiveInt(stop.escalationTimeoutMs)
-  ) {
-    throw bad('stopConditions 的三项都必须是正整数。');
-  }
+  const stop = plan.stopConditions;
+  if (!isStopConditions(stop)) throw bad('stopConditions 的三项都必须是正整数。');
 
   const verification = plan.integrationVerification;
   if (
@@ -85,7 +71,7 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
     verification.length === 0 ||
     !verification.every(
       (c) => c !== null && typeof c === 'object' && textList((c as { argv?: unknown }).argv) &&
-        positiveInt((c as { timeoutMs?: unknown }).timeoutMs),
+        isPositiveInt((c as { timeoutMs?: unknown }).timeoutMs),
     )
   ) {
     // 没有集成验证，机器 L3 就没有新证据可凭——那只是把 validator 的报告又数一遍。
@@ -96,7 +82,7 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
   const features = plan.features.map((value, index): PlanFeatureSpec => {
     const f = (value ?? {}) as Record<string, unknown>;
     for (const key of ['id', 'title', 'why'] as const) {
-      if (!text(f[key])) throw bad(`features[${index}].${key} 缺失。`);
+      if (!isText(f[key])) throw bad(`features[${index}].${key} 缺失。`);
     }
     if (!textList(f.allowedScope)) throw bad(`features[${index}].allowedScope 必须非空。`);
     if (!textList(f.acceptance)) throw bad(`features[${index}].acceptance 必须非空。`);
@@ -121,9 +107,9 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
     integrationBranch: plan.integrationBranch as string,
     reviewer,
     stopConditions: Object.freeze({
-      unresolvedEscalations: stop.unresolvedEscalations as number,
-      wallClockMs: stop.wallClockMs as number,
-      escalationTimeoutMs: stop.escalationTimeoutMs as number,
+      unresolvedEscalations: stop.unresolvedEscalations,
+      wallClockMs: stop.wallClockMs,
+      escalationTimeoutMs: stop.escalationTimeoutMs,
     }),
     integrationVerification: Object.freeze(
       (verification as { argv: string[]; timeoutMs: number }[]).map((c) =>
