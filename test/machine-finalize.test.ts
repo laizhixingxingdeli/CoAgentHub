@@ -204,6 +204,30 @@ describe('机器 L3 放行', () => {
     assert.deepEqual(runner.seen, [['node', '--test']]);
   });
 
+  test('集成验证的输出尾部先脱敏再截尾：key 被截尾点切开也不留半截', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const key = 'sk-proj-abcdefghijklmnopqrstuv';
+    // key、换行、再跟 2000-9 个 y：先截尾（2000）的话，留下的是 key 的最后 8 个字符。
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string; timeoutMs: number }) {
+        runner.seen.push([...input.argv]);
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: `${key}\n${'y'.repeat(2000 - 9)}` };
+      },
+    };
+    const { platform, reports } = await readyForReview(repo, wt, 'M1', runner);
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+    const tail = (await reports.get(result.reportId!))!.checks[0]!.command!.outputTail;
+    assert.equal(tail.length, 2000);
+    assert.ok(!tail.includes(key.slice(-8)), `半截 key 漏出来了：${tail.slice(0, 20)}`);
+  });
+
   /**
    * 这条是整票的要害：验证红了，集成分支必须**逐字**回到合并前。
    */
