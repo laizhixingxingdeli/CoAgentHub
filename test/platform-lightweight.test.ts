@@ -801,6 +801,38 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
     assert.equal(okReport?.checks.some((c) => c.kind === 'diff-size'), false);
   });
 
+  test('VAL-002：恰好到上限（1 个文件 / 5 行，上限 1 / 5）→ accept', async () => {
+    // E1 的 CANARY-LW-2：执行者只改了允许的那一个文件，旧语义把「最多 1 个」读成「一个都不许改」，
+    // 机器验收判超限，Lightweight 没有升级出口，Mission 就停在 stalled。
+    const h = harness({
+      runner: fakeRunner(),
+      paths: fakePaths(['src/foo.ts']),
+      diffFacts: {
+        async measureLines() {
+          return { changedLines: 5, unknown: [] };
+        },
+      },
+    });
+    const submitted = await upToSubmittedLightweight(h, {
+      order: {
+        ...ORDER_BASE,
+        allowedScope: ['src/foo.ts'],
+        validation: { commands: [], diffSize: { maxChangedFiles: 1, maxChangedLines: 5 } },
+      },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: submitted.missionId,
+      workItemId: submitted.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, true);
+    assert.equal(out.status, 'accepted');
+    const report = await h.validation!.reports.get(out.reportId);
+    const ds = report?.checks.find((c) => c.kind === 'diff-size');
+    assert.equal(ds?.passed, true);
+    assert.deepEqual(ds?.diffSize?.used, { changedFiles: 1, changedLines: 5 });
+  });
+
   test('missing/empty validation.commands：只跑 changed-paths 可通过', async () => {
     const runner = fakeRunner();
     const paths = fakePaths(['src/foo.ts']);

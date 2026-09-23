@@ -358,23 +358,30 @@ export class ValidationEngine {
 
     const endedAt = this.#clock.now().toISOString();
 
+    // 上限按字面「最多」：恰好到上限算通过，超过才失败。
+    //
+    // 以前是 `used >= max` 失败，于是 `maxChangedFiles: 1` 实际意思是「一个文件都不许改」——
+    // 写工单的人（人或协调者）没有谁会这么读。E1 实测踩中：单文件金丝雀的执行者改对了，
+    // 却在这一项上被判超限，Lightweight 又没有升级出口，Mission 就停住等人。
+    // 预算（budget-usage 的 compareUsage）仍是 `>=`：那是「下一步动作前」的闸，用满额度就不该
+    // 再开新的一跳；这里是对已经产出的结果做事后检查，两者语义本来就不同。
     const over: string[] = [];
     if (
       limits.maxChangedFiles !== undefined &&
       used.changedFiles !== undefined &&
-      used.changedFiles >= limits.maxChangedFiles
+      used.changedFiles > limits.maxChangedFiles
     ) {
       over.push(
-        `changedFiles ${used.changedFiles} >= maxChangedFiles ${limits.maxChangedFiles}`,
+        `changedFiles ${used.changedFiles} > maxChangedFiles ${limits.maxChangedFiles}`,
       );
     }
     if (
       limits.maxChangedLines !== undefined &&
       used.changedLines !== undefined &&
-      used.changedLines >= limits.maxChangedLines
+      used.changedLines > limits.maxChangedLines
     ) {
       over.push(
-        `changedLines ${used.changedLines} >= maxChangedLines ${limits.maxChangedLines}`,
+        `changedLines ${used.changedLines} > maxChangedLines ${limits.maxChangedLines}`,
       );
     }
 
