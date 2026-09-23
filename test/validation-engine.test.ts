@@ -738,38 +738,51 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     assert.equal(report.checks.some((c) => c.kind === 'diff-size'), false);
   });
 
-  test('maxChangedFiles: 2 with 1 file pass; 2 files fail (>=)', async () => {
-    const pass = await engine({ paths: fakePaths(['a.ts']) }).validate(
-      baseInput({ allowedScope: ['a.ts'], diffSize: { maxChangedFiles: 2 } }),
+  test('maxChangedFiles 按「最多」：恰好到上限通过，多一个就失败', async () => {
+    // E1 实测的形状：单文件金丝雀 maxChangedFiles: 1、改了 1 个文件，旧语义（>=）判它超限。
+    const atLimit = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({ allowedScope: ['a.ts'], diffSize: { maxChangedFiles: 1 } }),
     );
-    assert.equal(pass.report.passed, true);
-    assert.ok(pass.authority);
-    const dsPass = pass.report.checks.find((c) => c.kind === 'diff-size')!;
-    assert.equal(dsPass.diffSize?.used.changedFiles, 1);
+    assert.equal(atLimit.report.passed, true);
+    assert.ok(atLimit.authority);
+    const dsAt = atLimit.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsAt.passed, true);
+    assert.equal(dsAt.diffSize?.used.changedFiles, 1);
 
-    const fail = await engine({ paths: fakePaths(['a.ts', 'b.ts']) }).validate(
+    const over = await engine({ paths: fakePaths(['a.ts', 'b.ts']) }).validate(
       baseInput({
         allowedScope: ['a.ts', 'b.ts'],
-        diffSize: { maxChangedFiles: 2 },
+        diffSize: { maxChangedFiles: 1 },
       }),
     );
-    assert.equal(fail.report.passed, false);
-    assert.equal(fail.authority, undefined);
-    const dsFail = fail.report.checks.find((c) => c.kind === 'diff-size')!;
-    assert.equal(dsFail.passed, false);
-    assert.equal(dsFail.failureCode, undefined);
-    assert.equal(dsFail.diffSize?.used.changedFiles, 2);
+    assert.equal(over.report.passed, false);
+    assert.equal(over.authority, undefined);
+    const dsOver = over.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsOver.passed, false);
+    assert.equal(dsOver.failureCode, undefined);
+    assert.equal(dsOver.diffSize?.used.changedFiles, 2);
+    assert.equal(dsOver.summary, 'diff-size exceeded: changedFiles 2 > maxChangedFiles 1');
   });
 
-  test('maxChangedFiles: 0 + empty actual → fail (0 >= 0)', async () => {
-    const { report, authority } = await engine({ paths: fakePaths([]) }).validate(
+  test('maxChangedFiles: 0 就是一个都不许改：零改动通过，改一个就失败', async () => {
+    const none = await engine({ paths: fakePaths([]) }).validate(
       baseInput({ diffSize: { maxChangedFiles: 0 } }),
     );
-    assert.equal(report.passed, false);
-    assert.equal(authority, undefined);
-    const ds = report.checks.find((c) => c.kind === 'diff-size')!;
-    assert.equal(ds.diffSize?.used.changedFiles, 0);
-    assert.deepEqual(ds.diffSize?.unknown, []);
+    assert.equal(none.report.passed, true);
+    assert.ok(none.authority);
+    const dsNone = none.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsNone.passed, true);
+    assert.equal(dsNone.diffSize?.used.changedFiles, 0);
+    assert.deepEqual(dsNone.diffSize?.unknown, []);
+
+    const one = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({ allowedScope: ['a.ts'], diffSize: { maxChangedFiles: 0 } }),
+    );
+    assert.equal(one.report.passed, false);
+    assert.equal(one.authority, undefined);
+    const dsOne = one.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsOne.passed, false);
+    assert.equal(dsOne.diffSize?.used.changedFiles, 1);
   });
 
   test('maxChangedLines known under/at/over', async () => {
@@ -793,18 +806,20 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
         diffSize: { maxChangedLines: 5 },
       }),
     );
-    assert.equal(at.report.passed, false, '5 >= 5 fails');
+    assert.equal(at.report.passed, true, '恰好 5 行、上限 5：最多 5 行，通过');
 
     const over = await engine({
       paths: fakePaths(['a.ts']),
-      diffFacts: fakeDiffFacts({ changedLines: 9, unknown: [] }),
+      diffFacts: fakeDiffFacts({ changedLines: 6, unknown: [] }),
     }).validate(
       baseInput({
         allowedScope: ['a.ts'],
         diffSize: { maxChangedLines: 5 },
       }),
     );
-    assert.equal(over.report.passed, false);
+    assert.equal(over.report.passed, false, '多一行就失败');
+    const dsOver = over.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsOver.summary, 'diff-size exceeded: changedLines 6 > maxChangedLines 5');
   });
 
   test('line limit in force + missing reader / unknown facts → fail', async () => {
