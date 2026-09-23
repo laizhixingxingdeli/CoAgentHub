@@ -1,8 +1,21 @@
-# 方案运行（PlanRun）：升级握手与停止条件
+# 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
 
-按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点时，方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份**独立的方案运行记录**里。它与 Mission 并列，不在 Mission 里；与 Mission 内协调者写的 `PlanBody` 无关。
+按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份**独立的方案运行记录**里。它与 Mission 并列，不在 Mission 里；与 Mission 内协调者写的 `PlanBody` 无关。
 
-## 可观察边界
+**权限分得很死**：检视者只能在四个动作里选；合进集成分支只凭机器 L3 的确定性证据（见 `machine-final-review`）；high_assurance 永远要人。驱动方自己不做判断，只把各方的结论按规则串起来。
+
+## 驱动（run-plan）
+
+- **开跑前，任何副作用之前**：透传名单已声明；方案文件严格可读（缺检视者、缺集成验证、停止条件不是正整数、功能重名、范围或验收为空 → `PLAN_SPEC_INVALID`；备注类的额外键照留）；项目仓在方案的集成分支上且工作区干净（未跟踪文件也算，被忽略的不算）。拿到主状态锁之后再查一次——锁目录自己也可能落在仓库里。任何一项不过就一个功能都不跑。
+- 只跑方案里没标 `done` 的功能，按方案顺序，同一时刻一个。Mission id 为 `<runId>-<featureId>`，隔离重跑依次 `-r2`、`-r3`；origin 的 clientType 为 `plan-run`。功能点转成契约时，范围写成约束、其余功能点写成非目标、合并归平台。
+- **现做分类**：开跑前用只读 QueryRun（工具表 read / grep / find / ls，由 QueryRunner 强制）读集成分支现状，交回**事实**（不交路由）；`classifyTask` 按事实定路由。Fast Lane 必须附冻结工单，且工单范围落在方案声明内（语义同 validator 的 changed-paths）；分到 Standard 丢掉工单；分到 high_assurance **不建 Mission**，直接 ⏸ 写明要你定什么；判成只读、读不懂、越界、缺工单一律回落 Standard。解析取最后一个 json 块，多键（尤其 route / executionMode）拒绝，评估必须署名 coordinator。每次分类留一条 QueryRun，source 为 `plan-run:<runId>:<featureId>`。
+- **落地**：交卷了走机器 L3。绿 → ✓。红且已退回、合并失败、编排器的其余结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，失败写明卡在哪，问题带上四个动作。**红且回滚失败、项目仓被切离集成分支 → 立刻停在 `unsafe`，不开单**：检视者修不了 git 状态，再往上叠只会越错越多。
+- **等决定**：每 15 秒读一次记录；截止到点判过期；墙钟到点就停。
+- **收尾失败的 Mission**：方案还要往下跑 → 方案放弃（放名额、留分支）；方案停了（叫停 / 未解决到顶 / 墙钟）→ 原样留给人，第二天还能看一眼再合；已终结的不重复放弃。
+- **墙钟**：开跑前与等决定时都看；在途 Mission 到点即暂停（编排器在下一轮开头停下，不打断正在写的那一跳，所以实际停下会晚最多一跳）；到点后失败的不再开单，直接停、挂起写明要你定什么。
+- **崩溃**：记下原因停在 `crashed` 再往外抛，不猜着续跑。
+
+## 记录与握手
 
 - **记录位置**：一份独立 JSON 文件（路径由驱动方定），**不在主状态文件里**。驱动方跑 Mission 时整夜握着主状态的单写者锁；检视者写回决定只碰这份文件，不需要那把锁。
 - **读不加锁**：写入一律「临时文件 + rename」，读到的永远是某次完整写出的内容。读不懂（非 JSON、版本不认识、字段缺失或越界、动作不在闭集里）→ `PLAN_RUN_CORRUPT`，不静默重置、不猜。
@@ -23,12 +36,12 @@
 
 ## 非目标
 
-- 不驱动 Mission、不做路由分类、不收尾失败的 Mission（放名额、留分支）——那是驱动方 `run-plan` 的事。
-- 不渲染早上的交接面。
 - 不给检视者任何放行或合并权；不接 HTTP / agent tools。
-- Postgres 存储下这份记录仍是文件。
+- 不做依赖声明：依赖由检视者夜里读剩余功能自己判（体现为重划剩余范围）。
+- 不做崩溃后续跑；不做费用上限（首行花销是给人校准阈值用的，不是闸）。
+- Postgres 存储下方案运行记录仍是文件。
 
 ## 权威源 / 测试
 
-- 源：`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）
-- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/lock.test.ts`
+- 源：`src/run-plan.ts`（接线）、`src/application/plan-driver.ts`（驱动）、`src/application/plan-routing.ts`（现做分类）、`src/application/plan-spec.ts`（方案文件与契约）、`src/application/plan-preflight.ts`（开跑前检查）、`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）、`.gitignore`（状态文件旁的运行时产物）
+- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`、`test/run-plan-wiring.test.ts`（真平台 + 真 git 跑一份方案）、`test/lock.test.ts`
