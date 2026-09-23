@@ -39,6 +39,7 @@ import type {
 } from '../src/application/validation/ports.ts';
 import type {
   DecisionAnswerSet,
+  DecisionHook,
   DecisionProvider,
   DecisionRequest,
 } from '../src/application/ports.ts';
@@ -155,6 +156,8 @@ function harness(opts?: {
     reports: ValidationReportRepository;
   };
   decisionProvider?: DecisionProvider;
+  /** 注入 provider 时跑哪些钩子。这组测的就是 PRE shadow，缺省显式开 PRE（J1 之后平台缺省不开）。 */
+  decisionHooks?: ReadonlySet<DecisionHook>;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
   diffFacts?: DiffFactReader;
@@ -187,7 +190,12 @@ function harness(opts?: {
     activity,
     clock,
     ids,
-    ...(opts?.decisionProvider ? { decisionProvider: opts.decisionProvider } : {}),
+    ...(opts?.decisionProvider
+      ? {
+          decisionProvider: opts.decisionProvider,
+          decisionHooks: opts.decisionHooks ?? new Set<DecisionHook>(['PRE_DISPATCH']),
+        }
+      : {}),
     ...(validation ? { validation } : {}),
   });
 
@@ -477,6 +485,27 @@ describe('Platform.dispatchLightweightWorkItem', () => {
     const dispatched = events.filter((e) => e.kind === 'work_item.dispatched');
     assert.equal(dispatched.length, 1);
     assert.equal(dispatched[0]?.attemptId, undefined);
+  });
+
+  test('PRE 没开（J1 缺省）：Lightweight 派发照常，0 次 decide、0 条 decision.shadow', async () => {
+    const sink = { calls: 0 };
+    const provider: DecisionProvider = {
+      kind: 'count',
+      async decide(): Promise<DecisionAnswerSet> {
+        sink.calls += 1;
+        return { answers: {} };
+      },
+    };
+    const h = harness({
+      decisionProvider: provider,
+      decisionHooks: new Set<DecisionHook>(['POST_EXECUTION']),
+      withRealValidation: false,
+    });
+    const { missionId } = await createLightweightMission(h.projects);
+    const { workItemId } = await h.platform.createLightweightWorkItem(missionId, { order: ORDER_WITH_VALIDATION });
+    assert.deepEqual(await h.platform.dispatchLightweightWorkItem(missionId, workItemId), { dispatched: workItemId });
+    assert.equal(sink.calls, 0);
+    assert.equal((await h.activity.list(missionId)).filter((e) => e.kind === 'decision.shadow').length, 0);
   });
 
   test('provider 失败仍 dispatch；不创建 Coordinator Attempt', async () => {

@@ -46,7 +46,7 @@ import type {
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
-import type { ActivityLog, Clock, DecisionProvider, IdGenerator, ProjectRepository } from './ports.ts';
+import type { ActivityLog, Clock, DecisionHook, DecisionProvider, IdGenerator, ProjectRepository } from './ports.ts';
 import type { DeliveryRepository } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
@@ -148,10 +148,15 @@ export interface PlatformDeps {
   clock: Clock;
   ids: IdGenerator;
   /**
-   * 可选 DecisionProvider。仅用于 PRE_DISPATCH shadow 审计：
+   * 可选 DecisionProvider。仅用于 shadow 审计（跑哪些钩子见 decisionHooks）：
    * 不注入则完全跳过；注入后信号/失败也不影响真实 dispatch。
    */
   decisionProvider?: DecisionProvider;
+  /**
+   * 注入了 provider 时哪些钩子跑 shadow。缺省只有 POST_EXECUTION（见 parseDecisionHooks）：
+   * PRE_DISPATCH 只给 ID 时答案是常数，要显式开。
+   */
+  decisionHooks?: ReadonlySet<DecisionHook>;
   /**
    * Lightweight 机器验收依赖（成组 optional）。
    * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
@@ -203,6 +208,7 @@ export class Platform {
   #artifacts: ArtifactStore;
   #clock: Clock;
   #decisionProvider: DecisionProvider | undefined;
+  #decisionHooks: ReadonlySet<DecisionHook>;
   #validation: PlatformValidationDeps | undefined;
 
   constructor(deps: PlatformDeps) {
@@ -214,6 +220,7 @@ export class Platform {
     this.#artifacts = deps.artifacts ?? new InlineArtifactStore();
     this.#clock = deps.clock;
     this.#decisionProvider = deps.decisionProvider;
+    this.#decisionHooks = deps.decisionHooks ?? new Set<DecisionHook>(['POST_EXECUTION']);
     this.#validation = deps.validation;
   }
 
@@ -1258,7 +1265,7 @@ export class Platform {
 
     // PRE_DISPATCH shadow：observational；provider/activity 失败不阻断 dispatch。
     // attemptId 省略——绝不伪造 Coordinator attempt。
-    if (this.#decisionProvider) {
+    if (this.#decisionProvider && this.#decisionHooks.has('PRE_DISPATCH')) {
       await runDecisionShadow({
         provider: this.#decisionProvider,
         activity: this.#activity,
@@ -1634,7 +1641,7 @@ export class Platform {
 
     // PRE_DISPATCH shadow：确认硬规则全部通过之后、真实 dispatch 之前。
     // 信号 / provider 失败 / shadow append 失败都不改变后续 item.dispatch。
-    if (this.#decisionProvider) {
+    if (this.#decisionProvider && this.#decisionHooks.has('PRE_DISPATCH')) {
       const soleWorkItemId = workItemIds.length === 1 ? workItemIds[0] : undefined;
       await runDecisionShadow({
         provider: this.#decisionProvider,

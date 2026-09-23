@@ -159,6 +159,34 @@ describe('startServer 绑定与启动日志', () => {
     void beforeHandles;
   });
 
+  test('COAGENT_DECISION_HOOKS 只在 shadow 下读；off 模式一次都不碰（J1）', async () => {
+    for (const mode of ['off', 'shadow'] as const) {
+      const touched: string[] = [];
+      const raw: Record<string, string | undefined> = {
+        COAGENT_STORE: 'file',
+        COAGENT_DECISION_MODE: mode,
+        COAGENT_DECISION_HOOKS: 'pre_dispatch',
+        TYPESAFE_API_KEY: 'test-shadow-key',
+      };
+      const env = new Proxy(raw, {
+        get(target, key) {
+          if (typeof key === 'string') touched.push(key);
+          return target[key as string];
+        },
+      });
+      const built = await startServer(0, tempState(), {
+        env,
+        fetch: async () => {
+          throw new Error('boot 不得调用 decision fetch');
+        },
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      await new Promise<void>((done, fail) => built.server.close((err) => (err ? fail(err) : done())));
+      assert.equal(touched.includes('COAGENT_DECISION_HOOKS'), mode === 'shadow', `${mode}：读过 ${touched.join(',')}`);
+    }
+  });
+
   test('COAGENT_DECISION_MODE=shadow + key + fake fetch：可启动，不真实联网', async () => {
     const statePath = tempState();
     let fetchCalls = 0;
@@ -356,7 +384,8 @@ describe('buildPlatform decisionProvider 透传', () => {
         };
       },
     };
-    const built = buildPlatform(undefined, provider);
+    // J1 之后 PRE 默认关：这条测的是透传，所以显式开 PRE。
+    const built = buildPlatform(undefined, provider, undefined, new Set(['PRE_DISPATCH'] as const));
     const { platform, activity } = built;
 
     const CONTRACT = {
@@ -399,5 +428,42 @@ describe('buildPlatform decisionProvider 透传', () => {
       events.some((e) => e.kind === DECISION_SHADOW_EVENT_KIND),
       '应有 decision.shadow 事件',
     );
+  });
+});
+
+describe('buildPersistentPlatform decisionHooks 透传（J1）', () => {
+  // 生产装配链上的那一段：startServer 读到的钩子要经持久化构建器进到 Platform。
+  // 构建器漏传的话 PRE 在生产里永远开不了，而平台层的测试照样全绿。
+  test('开 PRE：派发时 provider 调一次；不传钩子：零次', async () => {
+    const { buildPersistentPlatform } = await import('../src/main.ts');
+    const { InPlaceWorkspaceManager } = await import('../src/application/workspace.ts');
+    const contract = { intent: 'i', acceptance: ['a'], constraints: [] as string[], nonGoals: [] as string[], guardrails: [] as string[] };
+    const order = {
+      objective: 'o', allowedScope: ['src/x.ts'], requiredBehaviour: 'r', constraints: [] as string[],
+      acceptance: ['ok'], verification: ['t'], doNot: [] as string[], contextRefs: [] as string[],
+    };
+    const plan = { findings: 'f', rejectedHypotheses: [] as string[], decisions: [] as string[], direction: 'd', risks: [] as string[] };
+    for (const [hooks, expected] of [[new Set(['PRE_DISPATCH'] as const), 1], [undefined, 0]] as const) {
+      const sink = { calls: 0 };
+      const built = await buildPersistentPlatform(tempState(), {
+        workspace: new InPlaceWorkspaceManager(),
+        decisionProvider: {
+          kind: 'count',
+          async decide() {
+            sink.calls += 1;
+            return { answers: {} };
+          },
+        },
+        ...(hooks ? { decisionHooks: hooks } : {}),
+      });
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const { platform } = built;
+      await platform.createMission({ projectId: 'P', missionId: 'M1', contract });
+      const { attemptId } = await platform.startCoordinatorAttempt('M1');
+      await platform.updatePlan('M1', attemptId, plan);
+      const { workItemId } = await platform.createWorkItem('M1', attemptId, { title: 'w', order });
+      await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
+      assert.equal(sink.calls, expected, hooks ? '开了 PRE 应调一次' : '不传钩子应零次');
+    }
   });
 });
