@@ -52,6 +52,7 @@ import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
+import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -1293,7 +1294,7 @@ export class Platform {
     readonly missionId: string;
     readonly workItemId: string;
     readonly cwd: string;
-  }): Promise<{ reportId: string; passed: boolean; status: string }> {
+  }): Promise<{ reportId: string; passed: boolean; status: string; held?: PromotionTriggerCode }> {
     const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
     this.#requireLightweightMutationLane(mission);
 
@@ -1396,6 +1397,14 @@ export class Platform {
     if (result.report.passed === false) {
       // failed report 已保存；不 accept / reject，item 保持 submitted。
       return { reportId: result.report.id, passed: false, status: item.status };
+    }
+
+    // §4.3：实际改动超出 Lightweight 的规模（>3 文件 / >2 顶层目录）时，机器验收过了也不放行。
+    // 一旦 accept，升级到 Standard 之后 L2 就没东西可审了——大改动会绕过评审。
+    // 留在 submitted，由 promoteLightweightAfterValidation 凭这份报告升级。
+    const held = lightweightGateTrigger(result.report);
+    if (held) {
+      return { reportId: result.report.id, passed: true, status: item.status, held: held.code };
     }
 
     const authority = result.authority;
@@ -2628,6 +2637,54 @@ export class Platform {
         `需要 runKind=mutation，当前是 ${mission.runKind}。`,
       );
     }
+  }
+
+  /**
+   * Lightweight 交卷后的自动升级（§4.3 接线）：验收没过、或实际改动超出轻量规模时，交给 Standard。
+   *
+   * 触发只从平台自己保存的那份 ValidationReport 复算（{@link lightweightGateTrigger}），
+   * 调用方只能指名是哪份报告，不能自带理由——和 budget_exceeded 只能由平台自检发放是同一条纪律。
+   * 报告必须属于这条 Mission、且正是当前这次提交的那一份：拿一份旧报告来升级，
+   * 等于用上一次的失败给这一次定罪。
+   *
+   * 为什么不停下等人：E1 实测，执行者改对了、机器验收因一条配置判失败，Lightweight 没有出口，
+   * Mission 停了 870 秒直到有人叫停。升级后协调者接手，已有产出、证据、报告全部复用。
+   */
+  async promoteLightweightAfterValidation(
+    missionId: string,
+    reportId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    const { mission } = await this.#locate(missionId);
+    this.#requireLightweightMutationLane(mission);
+    if (!this.#validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'Lightweight 自动升级要读验收报告，需要注入 PlatformDeps.validation（engine + reports）。',
+      );
+    }
+    const report = await this.#validation.reports.get(reportId);
+    if (!report || report.missionId !== mission.id) {
+      throw new PlatformRuleError(
+        'PROMOTION_REPORT_MISMATCH',
+        `ValidationReport ${reportId} 不存在或不属于 Mission ${mission.id}。`,
+      );
+    }
+    const item = mission.workItem(report.workItemId);
+    if (!item || item.status !== 'submitted' || item.submittedAttemptId !== report.attemptId) {
+      throw new PlatformRuleError(
+        'PROMOTION_REPORT_STALE',
+        `ValidationReport ${reportId} 不是工作项 ${report.workItemId} 当前这次提交的报告` +
+          `（工作项 ${item?.status ?? '不存在'}，当前提交 ${item?.submittedAttemptId ?? '无'}，报告 ${report.attemptId}）。`,
+      );
+    }
+    const trigger = lightweightGateTrigger(report);
+    if (!trigger) {
+      throw new PlatformRuleError(
+        'NO_PROMOTION_TRIGGER',
+        `ValidationReport ${reportId} 通过且改动在轻量规模内，没有升级的理由。`,
+      );
+    }
+    return this.#commitPromotionToStandard(mission.id, trigger);
   }
 
   /**

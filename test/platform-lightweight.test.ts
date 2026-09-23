@@ -1314,3 +1314,115 @@ describe('Standard 回归：Lightweight 不放宽', () => {
     assert.equal(sink.calls, 1);
   });
 });
+
+describe('Platform.promoteLightweightAfterValidation（§4.3 接线）', () => {
+  const failingRunner = () =>
+    fakeRunner(async () => ({ exitCode: 1, timedOut: false, durationMs: 1, output: 'FAIL' }));
+
+  async function failedSubmission() {
+    const h = harness({ runner: failingRunner(), paths: fakePaths(['src/foo.ts']) });
+    const s = await upToSubmittedLightweight(h);
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, false);
+    return { h, s, out };
+  }
+
+  test('验收没过 → 凭当前这份报告升级 Standard，工作项留给协调者做 L2', async () => {
+    const { h, s, out } = await failedSubmission();
+    const { changed, promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(changed, true);
+    assert.equal(promotion.triggerCode, 'validator_failure_unrepairable');
+    assert.match(promotion.triggerRule, new RegExp(`${out.reportId} 未通过：command：`));
+    assert.ok(promotion.validationReportIds.includes(out.reportId), '升级记录要能指回那份报告');
+
+    const view = await h.platform.getMissionView(s.missionId);
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.status, 'planning');
+    assert.equal(view.workItems[0]!.status, 'submitted');
+    const { item } = await liveItem(h.projects, s.projectId, s.missionId, s.workItemId);
+    assert.equal(item.reviews.length, 0, '机器没有替协调者下结论');
+  });
+
+  test('改动超过 3 个文件：验收过了也不放行（held），凭报告升级 changed_files_gt_3', async () => {
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'];
+    const h = harness({ paths: fakePaths(files) });
+    const s = await upToSubmittedLightweight(h, {
+      order: { ...ORDER_WITH_VALIDATION, allowedScope: ['src/'] },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, true);
+    assert.equal(out.status, 'submitted');
+    assert.equal(out.held, 'changed_files_gt_3');
+    const { item } = await liveItem(h.projects, s.projectId, s.missionId, s.workItemId);
+    assert.equal(item.reviews.length, 0, '规模超了就不该有 validator accept');
+
+    const { promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(promotion.triggerCode, 'changed_files_gt_3');
+    assert.match(promotion.triggerRule, /实际改动 4 个文件/);
+  });
+
+  test('跨 3 个顶层目录：held 并升级 top_level_modules_gt_2', async () => {
+    const h = harness({ paths: fakePaths(['a/x.ts', 'b/y.ts', 'c/z.ts']) });
+    const s = await upToSubmittedLightweight(h, {
+      order: { ...ORDER_WITH_VALIDATION, allowedScope: ['a/', 'b/', 'c/'] },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.held, 'top_level_modules_gt_2');
+    const { promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(promotion.triggerCode, 'top_level_modules_gt_2');
+  });
+
+  test('规模内且通过：照旧由 validator accept，不带 held', async () => {
+    const h = harness({ paths: fakePaths(['src/foo.ts']) });
+    const s = await upToSubmittedLightweight(h);
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.status, 'accepted');
+    assert.equal(out.held, undefined);
+  });
+
+  test('拒收：报告不存在 / 不属于这条 Mission / 不是当前这次提交 / 没有升级理由；拒收后仍是 lightweight', async () => {
+    const { h, s, out } = await failedSubmission();
+    const stored = (await h.reports.get(out.reportId))!;
+    await h.reports.save({ ...stored, id: 'VR-foreign', missionId: 'M-other' });
+    await h.reports.save({ ...stored, id: 'VR-old', attemptId: 'W-1.exec-0' });
+    await h.reports.save({
+      ...stored,
+      id: 'VR-clean',
+      passed: true,
+      checks: stored.checks.map((check) => ({ ...check, passed: true })),
+    });
+
+    const cases: [string, string][] = [
+      ['VR-404', 'PROMOTION_REPORT_MISMATCH'],
+      ['VR-foreign', 'PROMOTION_REPORT_MISMATCH'],
+      ['VR-old', 'PROMOTION_REPORT_STALE'],
+      ['VR-clean', 'NO_PROMOTION_TRIGGER'],
+    ];
+    for (const [reportId, code] of cases) {
+      await assert.rejects(
+        h.platform.promoteLightweightAfterValidation(s.missionId, reportId),
+        (e: unknown) => codeOf(e) === code,
+        `${reportId} 应被拒为 ${code}`,
+      );
+    }
+    const view = await h.platform.getMissionView(s.missionId);
+    assert.equal(view.executionMode, 'lightweight');
+    assert.equal(view.promotions.length, 0);
+  });
+});
