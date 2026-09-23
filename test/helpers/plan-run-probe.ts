@@ -43,7 +43,7 @@ try {
         // 忙等：拿着锁不放，逼另一边真的去等。
       }
     }
-    run.decide(
+    run.choose(
       args.escalationId,
       {
         action: args.action,

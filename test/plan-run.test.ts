@@ -70,7 +70,7 @@ describe('升级握手', () => {
 
   test('检视者截止前选「跳过」：决定落账，功能记 ⊘，并写明要人定什么', () => {
     const { run, escalation } = withEscalation();
-    run.decide(
+    run.choose(
       escalation.id,
       { action: 'skip', reason: 'F1 的测试夹具与 F2 冲突，今晚不值得再烧', decidedBy: 'claude' },
       at(25),
@@ -95,7 +95,7 @@ describe('升级握手', () => {
     const { run, escalation } = withEscalation();
     assert.throws(
       () =>
-        run.decide(escalation.id, { action: 'skip', reason: '晚了', decidedBy: 'claude' }, at(30)),
+        run.choose(escalation.id, { action: 'skip', reason: '晚了', decidedBy: 'claude' }, at(30)),
       rule('ESCALATION_DEADLINE_PASSED'),
     );
     // 被拒的决定一个字都没落下。
@@ -107,7 +107,7 @@ describe('升级握手', () => {
     const { run, escalation } = withEscalation();
     assert.throws(
       () =>
-        run.decide(escalation.id, { action: 'skip', reason: '我觉得', decidedBy: 'someone-else' }, at(12)),
+        run.choose(escalation.id, { action: 'skip', reason: '我觉得', decidedBy: 'someone-else' }, at(12)),
       rule('NOT_DESIGNATED_REVIEWER'),
     );
     assert.equal(run.currentEscalation?.id, escalation.id);
@@ -117,7 +117,7 @@ describe('升级握手', () => {
     const { run, escalation } = withEscalation();
     for (const action of ['merge', 'pass', 'approve', 'accept']) {
       assert.throws(
-        () => run.decide(escalation.id, { action, reason: '看着没问题', decidedBy: 'claude' }, at(12)),
+        () => run.choose(escalation.id, { action, reason: '看着没问题', decidedBy: 'claude' }, at(12)),
         rule('REVIEWER_ACTION_FORBIDDEN'),
       );
     }
@@ -128,16 +128,16 @@ describe('升级握手', () => {
   test('决定必须带理由：不说清楚，早上的人只能再猜一遍', () => {
     const { run, escalation } = withEscalation();
     assert.throws(
-      () => run.decide(escalation.id, { action: 'skip', reason: '  ', decidedBy: 'claude' }, at(12)),
+      () => run.choose(escalation.id, { action: 'skip', reason: '  ', decidedBy: 'claude' }, at(12)),
       rule('DECISION_REASON_REQUIRED'),
     );
   });
 
   test('一张单子只能定一次', () => {
     const { run, escalation } = withEscalation();
-    run.decide(escalation.id, { action: 'skip', reason: '先放一放', decidedBy: 'claude' }, at(12));
+    run.choose(escalation.id, { action: 'skip', reason: '先放一放', decidedBy: 'claude' }, at(12));
     assert.throws(
-      () => run.decide(escalation.id, { action: 'stop', reason: '改主意了', decidedBy: 'claude' }, at(13)),
+      () => run.choose(escalation.id, { action: 'stop', reason: '改主意了', decidedBy: 'claude' }, at(13)),
       rule('ESCALATION_ALREADY_RESOLVED'),
     );
     const resolution = run.escalations[0].resolution;
@@ -172,7 +172,7 @@ describe('超时与未解决', () => {
     expiredFirst.run.expire(expiredFirst.escalation.id, at(30));
     assert.throws(
       () =>
-        expiredFirst.run.decide(
+        expiredFirst.run.choose(
           expiredFirst.escalation.id,
           { action: 'skip', reason: '刚醒', decidedBy: 'claude' },
           at(31),
@@ -182,7 +182,7 @@ describe('超时与未解决', () => {
     assert.equal(expiredFirst.run.escalations[0].resolution?.kind, 'expired');
 
     const decidedFirst = withEscalation();
-    decidedFirst.run.decide(
+    decidedFirst.run.choose(
       decidedFirst.escalation.id,
       { action: 'skip', reason: '先放一放', decidedBy: 'claude' },
       at(29),
@@ -253,7 +253,7 @@ describe('墙钟', () => {
 describe('检视者的其余三个动作', () => {
   test('重划剩余范围：只能删还没轮到的，当前功能一并 ⊘，各自写明依赖谁', () => {
     const { run, escalation } = withEscalation();
-    run.decide(
+    run.choose(
       escalation.id,
       { action: 'rescope', reason: 'F3 用到 F1 新加的字段', decidedBy: 'claude', dropFeatures: ['F3'] },
       at(12),
@@ -273,7 +273,7 @@ describe('检视者的其余三个动作', () => {
     for (const dropFeatures of [['F1'], ['F9'], [], undefined]) {
       assert.throws(
         () =>
-          run.decide(
+          run.choose(
             escalation.id,
             { action: 'rescope', reason: '重划', decidedBy: 'claude', dropFeatures },
             at(12),
@@ -290,7 +290,7 @@ describe('检视者的其余三个动作', () => {
     for (const action of ['skip', 'stop', 'rerun_isolated']) {
       assert.throws(
         () =>
-          run.decide(
+          run.choose(
             escalation.id,
             { action, reason: '顺手', decidedBy: 'claude', dropFeatures: ['F3'] },
             at(12),
@@ -303,7 +303,7 @@ describe('检视者的其余三个动作', () => {
 
   test('停：方案停下，当前功能挂起交给人，没轮到的保持 ○', () => {
     const { run, escalation } = withEscalation();
-    run.decide(
+    run.choose(
       escalation.id,
       { action: 'stop', reason: '集成分支上的测试夹具整体坏了，再跑只会一路红', decidedBy: 'claude' },
       at(12),
@@ -319,7 +319,7 @@ describe('检视者的其余三个动作', () => {
 
   test('隔离重跑：功能退回待跑，下一个该跑的还是它，Mission 记录累加', () => {
     const { run, escalation } = withEscalation();
-    run.decide(
+    run.choose(
       escalation.id,
       { action: 'rerun_isolated', reason: '像是 flake：同一条用例隔离复跑三次全绿', decidedBy: 'claude' },
       at(12),
@@ -454,7 +454,7 @@ describe('快照', () => {
     run.markMerged('F1');
     run.startFeature('F2', 'M-F2');
     const e1 = run.openEscalation({ featureId: 'F2', missionId: 'M-F2', failure: '红', question: '跳不跳？' }, at(10));
-    run.decide(e1.id, { action: 'rescope', reason: 'F4 依赖 F2', decidedBy: 'claude', dropFeatures: ['F4'] }, at(15));
+    run.choose(e1.id, { action: 'rescope', reason: 'F4 依赖 F2', decidedBy: 'claude', dropFeatures: ['F4'] }, at(15));
     run.startFeature('F3', 'M-F3');
     const e2 = run.openEscalation({ featureId: 'F3', failure: '卡住', question: '重跑吗？' }, at(20));
     run.expire(e2.id, at(40));
@@ -471,14 +471,14 @@ describe('快照', () => {
     assert.equal(restored.currentEscalation?.featureId, 'F5');
     // 恢复出来的仍认得指定检视者和截止时间。
     assert.throws(
-      () => restored.decide('E-3', { action: 'stop', reason: 'x', decidedBy: 'mallory' }, at(55)),
+      () => restored.choose('E-3', { action: 'stop', reason: 'x', decidedBy: 'mallory' }, at(55)),
       rule('NOT_DESIGNATED_REVIEWER'),
     );
     assert.throws(
-      () => restored.decide('E-3', { action: 'stop', reason: 'x', decidedBy: 'claude' }, at(70)),
+      () => restored.choose('E-3', { action: 'stop', reason: 'x', decidedBy: 'claude' }, at(70)),
       rule('ESCALATION_DEADLINE_PASSED'),
     );
-    restored.decide('E-3', { action: 'stop', reason: '冲突要人看', decidedBy: 'claude' }, at(55));
+    restored.choose('E-3', { action: 'stop', reason: '冲突要人看', decidedBy: 'claude' }, at(55));
     assert.equal(restored.stopped?.reason, 'reviewer_stop');
   });
 
@@ -501,5 +501,33 @@ describe('快照', () => {
     ]) {
       assert.throws(() => PlanRun.restore(snapshot), rule('PLAN_RUN_CORRUPT'));
     }
+  });
+});
+
+describe('功能标题', () => {
+  test('开跑时记下标题：早上看交接面不用回头翻方案文件（它到早上可能已经改了）', () => {
+    const run = PlanRun.start({
+      id: 'R3',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1 },
+      featureIds: ['F1', 'F2'],
+      titles: { F1: 'run-plan.ts 驱动' },
+      startedAt: T0,
+    });
+    assert.equal(run.feature('F1')?.title, 'run-plan.ts 驱动');
+    assert.equal(run.feature('F2')?.title, undefined, '没给就没有，不编');
+    const restored = PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot())));
+    assert.equal(restored.feature('F1')?.title, 'run-plan.ts 驱动');
+  });
+
+  test('没有标题的旧记录照样读；标题不是字符串就算读不懂', () => {
+    const old = startRun().toSnapshot() as unknown as { features: Record<string, unknown>[] };
+    assert.equal(PlanRun.restore(JSON.parse(JSON.stringify(old))).feature('F1')?.title, undefined);
+    const bad = JSON.parse(JSON.stringify(old));
+    bad.features[0].title = 42;
+    assert.throws(() => PlanRun.restore(bad), rule('PLAN_RUN_CORRUPT'));
   });
 });

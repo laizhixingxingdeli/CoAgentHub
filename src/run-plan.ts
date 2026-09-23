@@ -23,6 +23,7 @@ import { Orchestrator } from './application/orchestrator.ts';
 import { drivePlan, runWithDeadline } from './application/plan-driver.ts';
 import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
 import { buildRoutingPrompt, parseRoutingProposal } from './application/plan-routing.ts';
+import { renderPlanHandoff } from './application/plan-handoff.ts';
 import { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { parsePlanSpec } from './application/plan-spec.ts';
@@ -147,6 +148,8 @@ async function main() {
         reviewer: plan.reviewer,
         stopConditions: plan.stopConditions,
         featureIds: remaining.map((feature) => feature.id),
+        // 标题抄进记录：早上看交接面不用回头翻方案文件（它到早上可能已经改了）。
+        titles: Object.fromEntries(remaining.map((feature) => [feature.id, feature.title])),
         startedAt: started.toISOString(),
       }),
     );
@@ -290,10 +293,10 @@ async function main() {
     console.log(`\n${'='.repeat(72)}`);
     console.log(`方案 ${plan.planId} 停了：${stop.reason} —— ${stop.detail}`);
     console.log('='.repeat(72));
-    for (const feature of run?.features ?? []) {
-      console.log(`  ${feature.featureId.padEnd(6)}${feature.status.padEnd(11)}${feature.needsDecision ?? ''}`);
-    }
-    console.log(`\n早上看：node src/l3.ts plan --run "${store.path}"`);
+    // 与早上 l3 plan 看到的是同一张交接面。这里不算花销：要读全部 Mission 的用量，
+    // 交给 l3 plan 去算。
+    if (run) for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) console.log(text);
+    console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
   } finally {
     await persist();

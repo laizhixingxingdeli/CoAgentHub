@@ -46,6 +46,8 @@ export interface PlanStopConditions {
 
 export interface PlanFeatureRecord {
   readonly featureId: string;
+  /** 开跑时从方案文件抄下的标题。早上看交接面不用回头翻方案文件——它到早上可能已经改了。 */
+  readonly title?: string;
   readonly status: PlanFeatureStatus;
   /** 为这个功能开过的全部 Mission，按先后。隔离重跑会追加一条。 */
   readonly missionIds: readonly string[];
@@ -118,6 +120,8 @@ export interface PlanRunInit {
   readonly stopConditions: PlanStopConditions;
   /** 方案里的功能点，按执行顺序。 */
   readonly featureIds: readonly string[];
+  /** 功能标题，按 id。可缺：没给就没有，不编。 */
+  readonly titles?: Readonly<Record<string, string>>;
   readonly startedAt: string;
 }
 
@@ -192,8 +196,10 @@ function readFeature(value: unknown): PlanFeatureRecord | undefined {
   if (!(FEATURE_STATUSES as readonly unknown[]).includes(raw.status)) return undefined;
   if (!isStringList(raw.missionIds)) return undefined;
   if (raw.needsDecision !== undefined && typeof raw.needsDecision !== 'string') return undefined;
+  if (raw.title !== undefined && typeof raw.title !== 'string') return undefined;
   return freezeFeature({
     featureId: raw.featureId,
+    title: raw.title as string | undefined,
     status: raw.status as PlanFeatureStatus,
     missionIds: raw.missionIds,
     needsDecision: raw.needsDecision as string | undefined,
@@ -256,12 +262,14 @@ function readStop(value: unknown): PlanRunStop | undefined | false {
 /** 冻结一条功能记录；needsDecision 没有就不写这个键，免得快照里挂着 undefined。 */
 function freezeFeature(feature: {
   featureId: string;
+  title?: string;
   status: PlanFeatureStatus;
   missionIds: readonly string[];
   needsDecision?: string;
 }): PlanFeatureRecord {
   return Object.freeze({
     featureId: feature.featureId,
+    ...(feature.title !== undefined ? { title: feature.title } : {}),
     status: feature.status,
     missionIds: Object.freeze([...feature.missionIds]),
     ...(feature.needsDecision !== undefined ? { needsDecision: feature.needsDecision } : {}),
@@ -289,7 +297,7 @@ export class PlanRun {
     this.#stopConditions = Object.freeze({ ...init.stopConditions });
     this.#startedAt = init.startedAt;
     this.#features = init.featureIds.map((featureId) =>
-      freezeFeature({ featureId, status: 'pending', missionIds: [] }),
+      freezeFeature({ featureId, title: init.titles?.[featureId], status: 'pending', missionIds: [] }),
     );
   }
 
@@ -308,6 +316,9 @@ export class PlanRun {
     }
     if (!init.featureIds.every(isText) || new Set(init.featureIds).size !== init.featureIds.length) {
       throw invalid('功能点 id 必须非空且不重名。');
+    }
+    if (init.titles !== undefined && !Object.values(init.titles).every((t) => typeof t === 'string')) {
+      throw invalid('功能标题必须是字符串。');
     }
     return new PlanRun(init);
   }
@@ -554,7 +565,7 @@ export class PlanRun {
    *
    * 失败那条 Mission 怎么收（放名额、留分支）是驱动方的事，这里只记方案层的事实。
    */
-  decide(
+  choose(
     escalationId: string,
     input: { action: unknown; reason: string; decidedBy: string; dropFeatures?: unknown },
     at: string,
