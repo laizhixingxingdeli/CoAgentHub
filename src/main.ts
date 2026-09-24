@@ -59,8 +59,15 @@ import {
   parseDecisionHooks,
   parseDecisionMode,
 } from './application/decision-mode.ts';
-import { createDecisionProvider } from './application/decision-provider-factory.ts';
-import type { DecisionHook, DecisionProvider } from './application/ports.ts';
+import {
+  createDecisionProvider,
+  createPostExecutionEvaluator,
+} from './application/decision-provider-factory.ts';
+import type {
+  DecisionHook,
+  DecisionProvider,
+  PostExecutionEvaluator,
+} from './application/ports.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import { ValidationEngine } from './application/validation/engine.ts';
 import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
@@ -79,6 +86,8 @@ export function buildPlatform(
   queryRuntime?: AgentRuntime,
   /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
   decisionHooks?: ReadonlySet<DecisionHook>,
+  /** 可选 POST_EXECUTION shadow 评估器（J2）；跑不跑还要看 decisionHooks。 */
+  postExecutionEvaluator?: PostExecutionEvaluator,
 ) {
   const clock = new SystemClock();
   const projects = new InMemoryProjectRepository();
@@ -113,6 +122,7 @@ export function buildPlatform(
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
     ...(decisionHooks ? { decisionHooks } : {}),
+    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     ...(validation ? { validation } : {}),
   });
   const tokens = new RunTokenRegistry();
@@ -144,6 +154,8 @@ export interface PersistentOptions {
   decisionProvider?: DecisionProvider;
   /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
   decisionHooks?: ReadonlySet<DecisionHook>;
+  /** 可选 POST_EXECUTION shadow 评估器（J2）；跑不跑还要看 decisionHooks。 */
+  postExecutionEvaluator?: PostExecutionEvaluator;
   /**
    * 是否要排他写锁。
    *
@@ -179,6 +191,7 @@ export async function buildPersistentPlatform(
   const workspace = options.workspace ?? new GitWorktreeManager();
   const decisionProvider = options.decisionProvider;
   const decisionHooks = options.decisionHooks;
+  const postExecutionEvaluator = options.postExecutionEvaluator;
   const releaseLock = options.exclusive
     ? acquireLock(statePath, options.exclusive.what)
     : () => {};
@@ -215,6 +228,7 @@ export async function buildPersistentPlatform(
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
     ...(decisionHooks ? { decisionHooks } : {}),
+    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
   });
   const tokens = new RunTokenRegistry();
@@ -292,6 +306,7 @@ export async function buildPgPlatform(options?: {
   artifactRoot?: string;
   decisionProvider?: DecisionProvider;
   decisionHooks?: ReadonlySet<DecisionHook>;
+  postExecutionEvaluator?: PostExecutionEvaluator;
   /**
    * 接手哪条 Mission —— 传了才做启动收敛，而且只收敛这一条。
    *
@@ -324,6 +339,7 @@ export async function buildPgPlatform(options?: {
   );
   const decisionProvider = options?.decisionProvider;
   const decisionHooks = options?.decisionHooks;
+  const postExecutionEvaluator = options?.postExecutionEvaluator;
   // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
   const workspace = options?.workspace ?? new GitWorktreeManager();
   const commandRunner = new ExecFileCommandRunner();
@@ -349,6 +365,7 @@ export async function buildPgPlatform(options?: {
     ids,
     ...(decisionProvider ? { decisionProvider } : {}),
     ...(decisionHooks ? { decisionHooks } : {}),
+    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
   });
   const tokens = new RunTokenRegistry();
@@ -411,6 +428,39 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
   };
 }
 
+/** 按 env 组装出来、原样交给各个构建器的决策依赖。off 模式下是空对象。 */
+export interface DecisionDeps {
+  decisionProvider?: DecisionProvider;
+  decisionHooks?: ReadonlySet<DecisionHook>;
+  postExecutionEvaluator?: PostExecutionEvaluator;
+}
+
+/**
+ * 按 COAGENT_DECISION_MODE 组装决策依赖。startServer、run-mission、run-plan 共用这一个入口
+ * ——原先只有 startServer 接了 provider，CLI 跑的任务永远不会触发 shadow（J2 发现）。
+ *
+ * 必须在打开状态 / 拿锁 / 监听之前调用：shadow 缺 key 在这里就失败，不留半截状态。
+ * off：除了 COAGENT_DECISION_MODE 本身，不读任何 decision 相关 env（规格要求）。
+ */
+export function buildDecisionDeps(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): DecisionDeps {
+  const mode = parseDecisionMode(env.COAGENT_DECISION_MODE);
+  if (mode !== 'shadow') {
+    assertDecisionModeStartup({ mode, providerAvailable: false });
+    return {};
+  }
+  const decisionProvider = createDecisionProvider({ mode, env, fetch: fetchImpl });
+  assertDecisionModeStartup({ mode, providerAvailable: Boolean(decisionProvider) });
+  const postExecutionEvaluator = createPostExecutionEvaluator({ mode, env, fetch: fetchImpl });
+  return {
+    ...(decisionProvider ? { decisionProvider } : {}),
+    decisionHooks: parseDecisionHooks(env.COAGENT_DECISION_HOOKS),
+    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
+  };
+}
+
 /**
  * 起观测面 / API。
  *
@@ -431,30 +481,15 @@ export async function startServer(
 ) {
   // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
   const env = options?.env ?? process.env;
-  const decisionMode = parseDecisionMode(env.COAGENT_DECISION_MODE);
-  const decisionProvider =
-    decisionMode === 'shadow'
-      ? createDecisionProvider({
-          mode: decisionMode,
-          env,
-          fetch: options?.fetch ?? globalThis.fetch,
-        })
-      : undefined;
-  assertDecisionModeStartup({
-    mode: decisionMode,
-    providerAvailable: Boolean(decisionProvider),
-  });
-  // 只在 shadow 下读：OFF 模式不碰任何 decision 相关 env（规格要求）。
-  const decisionHooks =
-    decisionMode === 'shadow' ? parseDecisionHooks(env.COAGENT_DECISION_HOOKS) : undefined;
+  const decision = buildDecisionDeps(env, options?.fetch ?? globalThis.fetch);
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
   // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
   const queryRuntime = createPiQueryRuntime(env);
   const built = usePg
-    ? await buildPgPlatform({ decisionProvider, decisionHooks, queryRuntime })
-    : await buildPersistentPlatform(statePath, { decisionProvider, decisionHooks, queryRuntime });
+    ? await buildPgPlatform({ ...decision, queryRuntime })
+    : await buildPersistentPlatform(statePath, { ...decision, queryRuntime });
   const server = createApi({
     platform: built.platform,
     tokens: built.tokens,

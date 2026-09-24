@@ -479,6 +479,9 @@ export class Orchestrator {
             await this.#platform.setWaitReason(missionId, reason, detail);
             return { kind: 'waiting', reason, detail };
           }
+          // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
+          // 没交卷（这一跳没 structured submit）时平台自己会跳过。
+          await this.#platform.runPostExecutionShadow(missionId, item.id);
           // GATE-POST after each successful hop (tokens/commands/wall accumulate here).
           const gate = await this.#enforceAuthoritativeBudget(missionId);
           if (gate.kind === 'stop') return gate.outcome;
@@ -644,6 +647,11 @@ export class Orchestrator {
         workItemId: item.id,
         cwd,
       });
+      if (validated.passed) {
+        // POST_EXECUTION shadow（J2）：确定性验收过了才问（含因规模被扣下的）；硬失败不问——
+        // 设计 §9.1：Jev 无权推翻确定性结果，问了也不该用。
+        await this.#platform.runPostExecutionShadow(missionId, item.id);
+      }
       if (validated.status !== 'accepted') {
         // 验收没过，或改动超出轻量规模被扣下：升级给协调者，而不是停下等人。
         // E1 实测停过一次——执行者改对了、一条配置判失败，Mission 在 stalled 里等了 870 秒。

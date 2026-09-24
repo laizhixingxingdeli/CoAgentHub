@@ -29,7 +29,7 @@ import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { parsePlanSpec } from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
-import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import { buildDecisionDeps, buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_UNDECLARED_MESSAGE,
@@ -72,6 +72,9 @@ async function main() {
     return;
   }
 
+  // 决策依赖在读任何输入之前组装：shadow 缺 key 就在这里失败，不留半截 Mission / 状态 / 锁。
+  const decision = buildDecisionDeps(process.env);
+
   const envPassthrough = parseAgentEnvPassthrough(process.env.COAGENT_AGENT_ENV_PASSTHROUGH);
   if (envPassthrough === undefined) throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
 
@@ -107,8 +110,9 @@ async function main() {
     envPassthrough,
   });
   const built = usePg
-    ? await buildPgPlatform({ workspace, queryRuntime })
+    ? await buildPgPlatform({ ...decision, workspace, queryRuntime })
     : await buildPersistentPlatform(statePath, {
+        ...decision,
         workspace,
         queryRuntime,
         exclusive: { what: `run-plan ${plan.planId}` },
