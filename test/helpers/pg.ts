@@ -16,10 +16,15 @@ import pg from 'pg';
 const ADMIN =
   process.env.COAGENT_PG_ADMIN ?? 'postgresql://postgres:postgres@localhost:5432/postgres';
 
-export function testConnectionString(): string {
+/**
+ * @param isolated 另起一个库（`coagenthub_v5_test_<isolated>`）：要改表结构的用例（迁移测试）用，
+ *   免得和并行跑的 pg-store 测试在同一个库里互相 TRUNCATE / ALTER。
+ */
+export function testConnectionString(isolated?: string): string {
+  const base = ADMIN.slice(0, ADMIN.lastIndexOf('/'));
+  if (isolated) return `${base}/coagenthub_v5_test_${isolated}`;
   if (process.env.COAGENT_PG_TEST) return process.env.COAGENT_PG_TEST;
   const name = 'coagenthub_v5_test';
-  const base = ADMIN.slice(0, ADMIN.lastIndexOf('/'));
   return `${base}/${name}`;
 }
 
@@ -29,8 +34,8 @@ export function testConnectionString(): string {
  * `CREATE DATABASE` 不能在事务里跑，也没有 IF NOT EXISTS，所以这里用
  * "先查后建 + 吞掉 42P04（已存在）"——并发建库时两边都能拿到可用的库。
  */
-export async function ensureTestDatabase(): Promise<string | undefined> {
-  const target = testConnectionString();
+export async function ensureTestDatabase(isolated?: string): Promise<string | undefined> {
+  const target = testConnectionString(isolated);
   const name = target.slice(target.lastIndexOf('/') + 1);
   let admin: pg.Client | undefined;
   try {

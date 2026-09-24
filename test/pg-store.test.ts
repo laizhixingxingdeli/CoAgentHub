@@ -229,7 +229,7 @@ describe('Postgres 存储', () => {
     }
   });
 
-  test('同一 Mission 的同一种结局只投递一次 —— 幂等交给唯一索引', async (t) => {
+  test('同一 Mission 的同一个业务键只投递一次 —— 幂等交给唯一索引（C1）', async (t) => {
     if (skipIfNoPg(t)) return;
     const s = store as PgStateStore;
     const ids = new PgIds(s);
@@ -239,6 +239,7 @@ describe('Postgres 存储', () => {
       missionId: 'M3',
       projectId: 'P3',
       outcome: 'delivered' as const,
+      idempotencyKey: 'result:M3.coord-0',
       recipient: 'cli',
       summary: '第一次',
       payload: null,
@@ -247,6 +248,7 @@ describe('Postgres 存储', () => {
     const second = await repo.create({ ...input, summary: '第二次' });
     assert.equal(second.id, first.id, '重复投递该拿回同一条');
     assert.equal(second.summary, '第一次', '第一条才算数');
+    assert.equal(first.idempotencyKey, 'result:M3.coord-0');
     assert.equal((await repo.pending('cli')).length, 1);
 
     await repo.acknowledge(first.id);
