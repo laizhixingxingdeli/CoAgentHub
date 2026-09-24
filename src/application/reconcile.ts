@@ -667,3 +667,92 @@ function isArchivedWriteError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes('已归档 Mission');
 }
+
+/* ------------------------------ 周期投递修复调度 ------------------------------ */
+
+/** 未设 COAGENT_RECONCILE_INTERVAL_MS 时的间隔。0 才是关闭。 */
+export const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * 解析周期间隔。必须在开状态 / 拿锁 / listen / 建 worktree 之前调用：
+ * 非法值要失败在副作用前，不留半截进程。
+ *
+ * 未设 → 60000；`0` → 关闭；其余必须是正整数（禁止符号、小数、前导零）。
+ */
+export function parseReconcileIntervalMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_RECONCILE_INTERVAL_MS;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+export interface StartPeriodicReconcileInput {
+  readonly intervalMs: number;
+  readonly tick: () => Promise<void>;
+  readonly warn: (message: string, error?: unknown) => void;
+}
+
+export interface PeriodicReconcileHandle {
+  stop(): Promise<void>;
+}
+
+/**
+ * 按间隔、不重叠地跑 tick。用 setTimeout 链而不是 setInterval：上一轮没结束
+ * 下一轮不开始。stop() 会等在途那一轮结束，之后不再排下一轮。
+ *
+ * intervalMs <= 0 视为关闭，连第一轮都不排。单次 tick 抛错只 warn，后续照跑。
+ */
+export function startPeriodicReconcile(input: StartPeriodicReconcileInput): PeriodicReconcileHandle {
+  const { intervalMs, tick, warn } = input;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let wake: (() => void) | undefined;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      wake = resolve;
+      timer = setTimeout(() => {
+        timer = undefined;
+        wake = undefined;
+        resolve();
+      }, ms);
+    });
+
+  const loop = (async () => {
+    if (intervalMs <= 0) return;
+    while (!stopped) {
+      await sleep(intervalMs);
+      if (stopped) return;
+      try {
+        await tick();
+      } catch (error) {
+        warn(
+          `周期投递修复失败：${error instanceof Error ? error.message : String(error)}`,
+          error,
+        );
+      }
+    }
+  })();
+
+  return {
+    async stop() {
+      stopped = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      wake?.();
+      wake = undefined;
+      await loop;
+    },
+  };
+}

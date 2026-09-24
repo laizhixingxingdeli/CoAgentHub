@@ -29,7 +29,20 @@ import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { parsePlanSpec } from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
-import { buildDecisionDeps, buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import type { FileStateStore } from './application/file-store.ts';
+import {
+  parseReconcileIntervalMs,
+  startPeriodicReconcile,
+  type PeriodicReconcileHandle,
+} from './application/reconcile.ts';
+import {
+  buildDecisionDeps,
+  buildPersistentPlatform,
+  buildPgPlatform,
+  makeIssuer,
+  runHeldFileDeliveryRepair,
+  runPgDeliveryRepairTick,
+} from './main.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_UNDECLARED_MESSAGE,
@@ -72,6 +85,8 @@ async function main() {
     return;
   }
 
+  // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
+  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
   // 决策依赖在读任何输入之前组装：shadow 缺 key 就在这里失败，不留半截 Mission / 状态 / 锁。
   const decision = buildDecisionDeps(process.env);
 
@@ -121,6 +136,19 @@ async function main() {
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   const runQuery = built.runQuery;
+  const warnRepair = (message: string) => {
+    console.warn(message);
+  };
+  const periodic: PeriodicReconcileHandle | undefined =
+    reconcileIntervalMs === 0
+      ? undefined
+      : startPeriodicReconcile({
+          intervalMs: reconcileIntervalMs,
+          warn: warnRepair,
+          tick: usePg
+            ? () => runPgDeliveryRepairTick({ warn: warnRepair })
+            : () => runHeldFileDeliveryRepair(built.store as FileStateStore),
+        });
 
   try {
     // 状态文件、锁目录落在项目仓里却没被忽略的话，机器 L3 每一次合并都会拒绝。
@@ -212,6 +240,7 @@ async function main() {
         })
         .catch(() => undefined)
         .then(async () => {
+          if (periodic) await periodic.stop().catch(() => undefined);
           await Promise.resolve(persist()).catch(() => undefined);
           releaseLock();
           process.exit(130);
@@ -303,6 +332,7 @@ async function main() {
     console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
   } finally {
+    if (periodic) await periodic.stop();
     await persist();
     releaseLock();
   }

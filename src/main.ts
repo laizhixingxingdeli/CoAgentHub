@@ -45,11 +45,19 @@ import {
   PgQueryRunRepository,
   PgStateStore,
   PgValidationReportRepository,
+  PERIODIC_RECONCILE_LOCK_KEY1,
+  PERIODIC_RECONCILE_LOCK_KEY2,
+  tryPgAdvisoryLock,
 } from './application/pg-store.ts';
-import { acquireLock } from './application/lock.ts';
+import { acquireLock, LockBusyError } from './application/lock.ts';
 import {
+  parseReconcileIntervalMs,
   reconcileInterruptedAttempts,
   reconcileOrphanedWorktrees,
+  repairMissingDeliveries,
+  startPeriodicReconcile,
+  type PeriodicReconcileHandle,
+  type RepairMissingDeliveriesDeps,
 } from './application/reconcile.ts';
 import type { RunTokenIssuer } from './application/token-issuer.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './application/workspace.ts';
@@ -465,6 +473,102 @@ export function buildDecisionDeps(
   };
 }
 
+/** 文件版生产装配：必须注入 hasArchivedMission，否则归档 Mission 无待建项可能不报 skipped。 */
+export function buildFileDeliveryRepairDeps(store: FileStateStore): RepairMissingDeliveriesDeps {
+  const clock = new SystemClock();
+  return {
+    projects: new FileProjectRepository(store),
+    activity: new FileActivityLog(store, clock),
+    deliveries: new FileDeliveryRepository(store, clock, new PersistentIds(store)),
+    transaction: store,
+    clock,
+    isArchivedMission: (missionId) => store.hasArchivedMission(missionId),
+  };
+}
+
+export interface DeliveryRepairWarn {
+  (message: string, error?: unknown): void;
+}
+
+/**
+ * 文件版观测面的一轮修复：短借写锁，新开一份 FileStateStore，不复用观测面活对象。
+ * 锁忙只 warn、不写。
+ */
+export async function runFileObserverDeliveryRepairTick(
+  statePath: string,
+  warn: DeliveryRepairWarn,
+): Promise<void> {
+  let release = () => {};
+  try {
+    release = acquireLock(statePath, '周期投递修复');
+  } catch (error) {
+    if (error instanceof LockBusyError) {
+      warn('周期投递修复：文件锁忙，本轮跳过');
+      return;
+    }
+    throw error;
+  }
+  try {
+    const store = new FileStateStore(statePath);
+    await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+  } finally {
+    release();
+  }
+}
+
+/** run-plan 已持文件排他锁：用现有装配修，不再取锁。 */
+export async function runHeldFileDeliveryRepair(store: FileStateStore): Promise<void> {
+  await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+}
+
+export interface PgDeliveryRepairTickInput {
+  readonly connectionString?: string;
+  readonly warn: DeliveryRepairWarn;
+}
+
+/**
+ * PG 周期修复：每轮新开独立 store，不 refresh / 不改写 Runner 正在用的那份。
+ * 跨进程 advisory lock 拿不到就跳过。
+ */
+export async function runPgDeliveryRepairTick(input: PgDeliveryRepairTickInput): Promise<void> {
+  const store = await PgStateStore.open(
+    input.connectionString ? { connectionString: input.connectionString } : undefined,
+  );
+  try {
+    const lock = await tryPgAdvisoryLock(
+      store.pool,
+      PERIODIC_RECONCILE_LOCK_KEY1,
+      PERIODIC_RECONCILE_LOCK_KEY2,
+    );
+    try {
+      if (!lock.held) {
+        input.warn('周期投递修复：未能取得跨进程互斥，本轮跳过');
+        return;
+      }
+      await store.refresh();
+      const clock = new SystemClock();
+      const ids = new PgIds(store);
+      await ids.reserve(['D']);
+      await repairMissingDeliveries({
+        projects: new PgProjectRepository(store),
+        activity: new PgActivityLog(store, clock),
+        deliveries: new PgDeliveryRepository(store, clock, ids),
+        transaction: store,
+        clock,
+      });
+    } finally {
+      await lock.release();
+    }
+  } finally {
+    await store.close();
+  }
+}
+
+function warnPeriodicRepair(message: string, error?: unknown): void {
+  void error;
+  console.warn(message);
+}
+
 /**
  * 起观测面 / API。
  *
@@ -483,8 +587,10 @@ export async function startServer(
   statePath = '.coagent-state.json',
   options?: StartServerOptions,
 ) {
-  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
+  // 间隔非法要失败在任何持久化 / 锁 / listen 之前。
   const env = options?.env ?? process.env;
+  const reconcileIntervalMs = parseReconcileIntervalMs(env.COAGENT_RECONCILE_INTERVAL_MS);
+  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
   const decision = buildDecisionDeps(env, options?.fetch ?? globalThis.fetch);
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
@@ -525,7 +631,29 @@ export async function startServer(
       `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
     );
   }
-  return { server, ...built };
+  // 观测面不握长锁：文件版每轮短借；PG 用独立 store + 跨进程互斥。只补投递。
+  const periodic: PeriodicReconcileHandle | undefined =
+    reconcileIntervalMs === 0
+      ? undefined
+      : startPeriodicReconcile({
+          intervalMs: reconcileIntervalMs,
+          warn: warnPeriodicRepair,
+          tick: usePg
+            ? () =>
+                runPgDeliveryRepairTick({
+                  connectionString: env.COAGENT_PG,
+                  warn: warnPeriodicRepair,
+                })
+            : () => runFileObserverDeliveryRepairTick(statePath, warnPeriodicRepair),
+        });
+  server.on('close', () => {
+    void periodic?.stop();
+  });
+  return {
+    server,
+    ...built,
+    stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
+  };
 }
 
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。

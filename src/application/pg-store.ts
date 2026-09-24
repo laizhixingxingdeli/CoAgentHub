@@ -180,6 +180,59 @@ export function pgConnectionString(): string {
 }
 
 /**
+ * 周期投递修复的跨进程 advisory lock 键。
+ *
+ * 不用表行：周期实例互斥跟业务数据无关，两个 int 键即可。
+ * 必须在**同一条专用连接**上 try / unlock——会话级锁跟连接走，换连接等于没锁。
+ */
+export const PERIODIC_RECONCILE_LOCK_KEY1 = 0x43414754; // CAGT
+export const PERIODIC_RECONCILE_LOCK_KEY2 = 0x5245434e; // RECN
+
+export interface PgAdvisoryLock {
+  readonly held: boolean;
+  release(): Promise<void>;
+}
+
+/**
+ * 在一条专用连接上试拿会话级 advisory lock。
+ * 拿不到立刻返回 held: false（连接已放回池）；拿到则一直握着这条连接直到 release。
+ */
+export async function tryPgAdvisoryLock(
+  pool: pg.Pool,
+  key1: number,
+  key2: number,
+): Promise<PgAdvisoryLock> {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query<{ locked: boolean | string }>(
+      'SELECT pg_try_advisory_lock($1::int, $2::int) AS locked',
+      [key1, key2],
+    );
+    const held = rows[0]?.locked === true || rows[0]?.locked === 't';
+    if (!held) {
+      client.release();
+      return { held: false, async release() {} };
+    }
+    let released = false;
+    return {
+      held: true,
+      async release() {
+        if (released) return;
+        released = true;
+        try {
+          await client.query('SELECT pg_advisory_unlock($1::int, $2::int)', [key1, key2]);
+        } finally {
+          client.release();
+        }
+      },
+    };
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+}
+
+/**
  * 开着的 PG 命令事务（C3）：暂存要一起提交的写，和回滚要回到的样子。
  *
  * 覆盖快照、事件、投递、验收报告。查询、候选池、实时输出各有各的表，仍是即时写。
