@@ -230,6 +230,8 @@ export async function buildPersistentPlatform(
     ...(decisionHooks ? { decisionHooks } : {}),
     ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
+    // 单事务命令（C2）：交卷与升级的状态、事件、投递一次写完。
+    transaction: store,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options.queryRuntime;

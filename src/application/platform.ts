@@ -51,6 +51,7 @@ import type {
 import type {
   ActivityLog,
   Clock,
+  CommandTransaction,
   DecisionHook,
   DecisionProvider,
   IdGenerator,
@@ -180,6 +181,11 @@ export interface PlatformDeps {
    */
   postExecutionEvaluator?: PostExecutionEvaluator;
   /**
+   * 命令事务（C2）。注入了，交卷与升级这几条命令的状态改动、事件、投递一起提交，或者一个都不落；
+   * 缺省（内存版、PG 暂未接）直接跑，行为与之前相同。
+   */
+  transaction?: CommandTransaction;
+  /**
    * Lightweight 机器验收依赖（成组 optional）。
    * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
    */
@@ -232,6 +238,7 @@ export class Platform {
   #decisionProvider: DecisionProvider | undefined;
   #decisionHooks: ReadonlySet<DecisionHook>;
   #postExecutionEvaluator: PostExecutionEvaluator | undefined;
+  #transaction: CommandTransaction | undefined;
   #validation: PlatformValidationDeps | undefined;
 
   constructor(deps: PlatformDeps) {
@@ -245,6 +252,7 @@ export class Platform {
     this.#decisionProvider = deps.decisionProvider;
     this.#decisionHooks = deps.decisionHooks ?? new Set<DecisionHook>(['POST_EXECUTION']);
     this.#postExecutionEvaluator = deps.postExecutionEvaluator;
+    this.#transaction = deps.transaction;
     this.#validation = deps.validation;
   }
 
@@ -1494,6 +1502,13 @@ export class Platform {
   async submitLightweightMissionForReview(
     missionId: string,
   ): Promise<{ status: 'awaiting_review'; reportId: string }> {
+    // 单事务命令（C2）：改状态、记 mission_result.submitted、建投递、记 delivery.created 一起提交。
+    return this.#tx(() => this.#submitLightweightMissionForReview(missionId));
+  }
+
+  async #submitLightweightMissionForReview(
+    missionId: string,
+  ): Promise<{ status: 'awaiting_review'; reportId: string }> {
     const { mission } = await this.#locate(missionId);
     // Guard 顺序：先校验后 mutation。
     this.#requireLightweightMutationLane(mission);
@@ -1764,6 +1779,15 @@ export class Platform {
     attemptId: string,
     body: Omit<EscalationBody, 'attemptId'>,
   ): Promise<void> {
+    // 单事务命令（C2）：记下升级、记 escalated、建投递、记 delivery.created 一起提交。
+    return this.#tx(() => this.#escalateToL3(missionId, attemptId, body));
+  }
+
+  async #escalateToL3(
+    missionId: string,
+    attemptId: string,
+    body: Omit<EscalationBody, 'attemptId'>,
+  ): Promise<void> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     mission.recordEscalation({ ...body, attemptId });
     // 第几次升级：每一次都要进收件箱，重建同一次的投递不会多一条。
@@ -1788,6 +1812,15 @@ export class Platform {
    * 只有一个工作项时不会出事，多个时协调者可能在还没验完就交卷。
    */
   async submitMissionResult(
+    missionId: string,
+    attemptId: string,
+    body: MissionResultBody,
+  ): Promise<void> {
+    // 单事务命令（C2）：改状态、记 mission_result.submitted、建投递、记 delivery.created 一起提交。
+    return this.#tx(() => this.#submitMissionResult(missionId, attemptId, body));
+  }
+
+  async #submitMissionResult(
     missionId: string,
     attemptId: string,
     body: MissionResultBody,
@@ -2702,6 +2735,11 @@ export class Platform {
         `需要 runKind=mutation，当前是 ${mission.runKind}。`,
       );
     }
+  }
+
+  /** 命令事务（C2）：注入了就让 fn 里的写一起提交；缺省直接跑。 */
+  #tx<T>(fn: () => Promise<T>): Promise<T> {
+    return this.#transaction ? this.#transaction.run(fn) : fn();
   }
 
   /**
