@@ -11,7 +11,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -387,5 +387,46 @@ describe('开跑前：项目的改动名额被谁占着', () => {
     assert.match(problems[0], /awaiting_review/);
     assert.match(problems[0], /l3\.ts/);
     assert.deepEqual(slotHolders(rows.filter((r) => r.missionId !== 'R0-F2'), 'P'), []);
+  });
+});
+
+describe('run-plan 周期投递修复接线', () => {
+  test('在副作用之前解析间隔，finally 里 stop，文件版注入 hasArchivedMission', () => {
+    const root = join(import.meta.dirname, '..', 'src');
+    const runPlan = readFileSync(join(root, 'run-plan.ts'), 'utf8');
+    const main = readFileSync(join(root, 'main.ts'), 'utf8');
+
+    const parseAt = runPlan.indexOf('parseReconcileIntervalMs');
+    const worktreeAt = runPlan.indexOf('new GitWorktreeManager');
+    const platformAt = runPlan.indexOf('buildPersistentPlatform');
+    assert.ok(parseAt >= 0, 'run-plan 应解析 COAGENT_RECONCILE_INTERVAL_MS');
+    assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
+
+    assert.match(runPlan, /startPeriodicReconcile/);
+    assert.match(runPlan, /runHeldFileDeliveryRepair/);
+    assert.match(runPlan, /runPgDeliveryRepairTick/);
+    assert.match(runPlan, /finally \{[\s\S]*runIndependentCleanup/);
+    assert.match(runPlan, /periodic\.stop\(\)/);
+    assert.match(runPlan, /name: 'persist'/);
+    assert.match(runPlan, /name: 'releaseLock'/);
+    assert.match(runPlan, /primary = \{ error \}/);
+    assert.match(runPlan, /runIndependentCleanup\(\{[\s\S]*primary/);
+    assert.match(runPlan, /cleanupAfterSignal/);
+    assert.match(runPlan, /formatErrorForLog/);
+    assert.doesNotMatch(runPlan, /catch\(\(\) => undefined\)/);
+    assert.doesNotMatch(runPlan, /reconcileInterruptedAttempts/);
+    assert.doesNotMatch(runPlan, /reconcileOrphanedWorktrees/);
+
+    assert.match(main, /hasArchivedMission/);
+    assert.match(main, /runFileObserverDeliveryRepairTick/);
+    assert.match(main, /bindServerCloseToPeriodicStop\(server,/);
+    assert.match(main, /periodic\?\.stop\(\)/);
+    assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
+    assert.match(main, /warnDeliveryRepairErrors/);
+    assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
+    assert.doesNotMatch(
+      main.slice(main.indexOf('export async function startServer')),
+      /exclusive:\s*\{/
+    );
   });
 });

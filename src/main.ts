@@ -10,6 +10,7 @@
 
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import { createApi } from './api/server.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -45,11 +46,20 @@ import {
   PgQueryRunRepository,
   PgStateStore,
   PgValidationReportRepository,
+  PERIODIC_RECONCILE_LOCK_KEY1,
+  PERIODIC_RECONCILE_LOCK_KEY2,
+  tryPgAdvisoryLock,
 } from './application/pg-store.ts';
-import { acquireLock } from './application/lock.ts';
+import { acquireLock, LockBusyError } from './application/lock.ts';
 import {
+  parseReconcileIntervalMs,
   reconcileInterruptedAttempts,
   reconcileOrphanedWorktrees,
+  repairMissingDeliveries,
+  startPeriodicReconcile,
+  type PeriodicReconcileHandle,
+  type RepairMissingDeliveriesDeps,
+  type RepairMissingDeliveriesResult,
 } from './application/reconcile.ts';
 import type { RunTokenIssuer } from './application/token-issuer.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './application/workspace.ts';
@@ -465,6 +475,204 @@ export function buildDecisionDeps(
   };
 }
 
+/** 文件版生产装配：必须注入 hasArchivedMission，否则归档 Mission 无待建项可能不报 skipped。 */
+export function buildFileDeliveryRepairDeps(store: FileStateStore): RepairMissingDeliveriesDeps {
+  const clock = new SystemClock();
+  return {
+    projects: new FileProjectRepository(store),
+    activity: new FileActivityLog(store, clock),
+    deliveries: new FileDeliveryRepository(store, clock, new PersistentIds(store)),
+    transaction: store,
+    clock,
+    isArchivedMission: (missionId) => store.hasArchivedMission(missionId),
+  };
+}
+
+export interface DeliveryRepairWarn {
+  (message: string, error?: unknown): void;
+}
+
+/**
+ * 逐 Mission 的读取/补建异常被收进 result.errors 而不抛。
+ * 周期 tick 必须把它们当故障告警，否则调用方会以为本轮成功。
+ * uncertain / skipped 不是故障，不当 warning 刷屏。
+ */
+function warnDeliveryRepairErrors(
+  result: RepairMissingDeliveriesResult,
+  warn: DeliveryRepairWarn,
+): void {
+  for (const item of result.errors) {
+    warn(`周期投递修复：Mission ${item.missionId} 补建失败：${item.message}`);
+  }
+}
+
+/**
+ * 文件版观测面的一轮修复：短借写锁，新开一份 FileStateStore，不复用观测面活对象。
+ * 锁忙只 warn、不写。
+ */
+export async function runFileObserverDeliveryRepairTick(
+  statePath: string,
+  warn: DeliveryRepairWarn,
+): Promise<void> {
+  let release = () => {};
+  try {
+    release = acquireLock(statePath, '周期投递修复');
+  } catch (error) {
+    if (error instanceof LockBusyError) {
+      warn('周期投递修复：文件锁忙，本轮跳过');
+      return;
+    }
+    throw error;
+  }
+  try {
+    const store = new FileStateStore(statePath);
+    const result = await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+    warnDeliveryRepairErrors(result, warn);
+  } finally {
+    release();
+  }
+}
+
+/** run-plan 已持文件排他锁：用现有装配修，不再取锁。 */
+export async function runHeldFileDeliveryRepair(
+  store: FileStateStore,
+  warn: DeliveryRepairWarn,
+): Promise<void> {
+  const result = await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+  warnDeliveryRepairErrors(result, warn);
+}
+
+export interface PgDeliveryRepairTickInput {
+  readonly connectionString?: string;
+  readonly warn: DeliveryRepairWarn;
+}
+
+/**
+ * PG 周期修复：每轮新开独立 store，不 refresh / 不改写 Runner 正在用的那份。
+ * 跨进程 advisory lock 拿不到就跳过。
+ */
+export async function runPgDeliveryRepairTick(input: PgDeliveryRepairTickInput): Promise<void> {
+  const store = await PgStateStore.open(
+    input.connectionString ? { connectionString: input.connectionString } : undefined,
+  );
+  try {
+    const lock = await tryPgAdvisoryLock(
+      store.pool,
+      PERIODIC_RECONCILE_LOCK_KEY1,
+      PERIODIC_RECONCILE_LOCK_KEY2,
+    );
+    try {
+      if (!lock.held) {
+        input.warn('周期投递修复：未能取得跨进程互斥，本轮跳过');
+        return;
+      }
+      await store.refresh();
+      const clock = new SystemClock();
+      const ids = new PgIds(store);
+      await ids.reserve(['D']);
+      const result = await repairMissingDeliveries({
+        projects: new PgProjectRepository(store),
+        activity: new PgActivityLog(store, clock),
+        deliveries: new PgDeliveryRepository(store, clock, ids),
+        transaction: store,
+        clock,
+      });
+      warnDeliveryRepairErrors(result, input.warn);
+    } finally {
+      await lock.release();
+    }
+  } finally {
+    await store.close();
+  }
+}
+
+function warnPeriodicRepair(message: string, error?: unknown): void {
+  void error;
+  console.warn(message);
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * 把算出的关闭结果交付一次。callback / error 监听器自己抛错只记下来，
+ * 不能再交回同一条路径——否则会再调 callback 或变成未处理拒绝。
+ */
+function deliverServerCloseOutcome(
+  server: Server,
+  error: Error | undefined,
+  callback?: (err?: Error) => void,
+): void {
+  try {
+    if (error) {
+      if (callback) {
+        callback(error);
+        return;
+      }
+      // 无 callback 不能静默。有 error 监听器才 emit——没人听的 emit('error')
+      // 会变成未捕获异常把进程打挂，比静默更糟；没监听器就 console.error。
+      if (server.listenerCount('error') > 0) {
+        server.emit('error', error);
+        return;
+      }
+      console.error(error);
+      return;
+    }
+    callback?.();
+  } catch (thrown) {
+    console.error(thrown);
+  }
+}
+
+/**
+ * 调用方只调 server.close 也必须先停周期调度。无论 stop 成败都关 HTTP，
+ * 两个错误都保留：丢掉任何一个，文件锁 / 独立 PG 连接或监听端口就会
+ * 看起来「关了」其实没关完。closeHttp 同步抛错也接住，避免包在没人 await
+ * 的 async 里变成未处理拒绝。
+ */
+export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promise<void>): void {
+  const closeHttp = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    const run = async (): Promise<Error | undefined> => {
+      let stopErr: Error | undefined;
+      try {
+        await stop();
+      } catch (error) {
+        stopErr = asError(error);
+      }
+      let closeErr: Error | undefined;
+      try {
+        closeErr = await new Promise<Error | undefined>((resolve) => {
+          try {
+            closeHttp((err?: Error) => resolve(err));
+          } catch (error) {
+            resolve(asError(error));
+          }
+        });
+      } catch (error) {
+        closeErr = asError(error);
+      }
+      return stopErr && closeErr
+        ? new AggregateError([stopErr, closeErr], `${stopErr.message}; ${closeErr.message}`)
+        : (stopErr ?? closeErr);
+    };
+    // 算出错误与交付分开，交付只做一次。外层再接一次，防止漏网拒绝。
+    void (async () => {
+      let merged: Error | undefined;
+      try {
+        merged = await run();
+      } catch (error) {
+        merged = asError(error);
+      }
+      deliverServerCloseOutcome(server, merged, callback);
+    })().catch((error) => {
+      console.error(error);
+    });
+    return server;
+  }) as typeof server.close;
+}
+
 /**
  * 起观测面 / API。
  *
@@ -476,6 +684,11 @@ export interface StartServerOptions {
   fetch?: typeof globalThis.fetch;
   /** 可注入 env（测试用；生产默认 process.env）。 */
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  /**
+   * 测试用：替换周期 tick，用来造「在途慢 tick」验证 close 会等锁与连接释放。
+   * 生产不传——默认文件短借锁 / PG 独立 store。
+   */
+  periodicTick?: () => Promise<void>;
 }
 
 export async function startServer(
@@ -483,8 +696,10 @@ export async function startServer(
   statePath = '.coagent-state.json',
   options?: StartServerOptions,
 ) {
-  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
+  // 间隔非法要失败在任何持久化 / 锁 / listen 之前。
   const env = options?.env ?? process.env;
+  const reconcileIntervalMs = parseReconcileIntervalMs(env.COAGENT_RECONCILE_INTERVAL_MS);
+  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
   const decision = buildDecisionDeps(env, options?.fetch ?? globalThis.fetch);
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
@@ -525,7 +740,31 @@ export async function startServer(
       `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
     );
   }
-  return { server, ...built };
+  // 观测面不握长锁：文件版每轮短借；PG 用独立 store + 跨进程互斥。只补投递。
+  const periodic: PeriodicReconcileHandle | undefined =
+    reconcileIntervalMs === 0
+      ? undefined
+      : startPeriodicReconcile({
+          intervalMs: reconcileIntervalMs,
+          warn: warnPeriodicRepair,
+          tick:
+            options?.periodicTick ??
+            (usePg
+              ? () =>
+                  runPgDeliveryRepairTick({
+                    connectionString: env.COAGENT_PG,
+                    warn: warnPeriodicRepair,
+                  })
+              : () => runFileObserverDeliveryRepairTick(statePath, warnPeriodicRepair)),
+        });
+  // 调用方只使用 server.close 也必须等到在途 tick 完成并释放文件锁 / 独立 PG 连接。
+  // Node 的 close 回调只表示 HTTP 连接断完，不会等我们的 stop，所以先 stop 再关 HTTP。
+  bindServerCloseToPeriodicStop(server, () => periodic?.stop() ?? Promise.resolve());
+  return {
+    server,
+    ...built,
+    stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
+  };
 }
 
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。

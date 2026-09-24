@@ -10,9 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 
-import { startServer } from '../src/main.ts';
+import { acquireLock, LockBusyError } from '../src/application/lock.ts';
+import { bindServerCloseToPeriodicStop, startServer } from '../src/main.ts';
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -20,6 +21,8 @@ const releaseFns: Array<() => void> = [];
 
 after(() => {
   for (const server of servers) {
+    // 已关闭的再 close，包装后的 close 无 callback 时会把 ERR_SERVER_NOT_RUNNING 打到 stderr。
+    if (!server.listening) continue;
     try {
       server.close();
     } catch {
@@ -464,6 +467,342 @@ describe('buildPersistentPlatform decisionHooks 透传（J1）', () => {
       const { workItemId } = await platform.createWorkItem('M1', attemptId, { title: 'w', order });
       await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
       assert.equal(sink.calls, expected, hooks ? '开了 PRE 应调一次' : '不传钩子应零次');
+    }
+  });
+});
+
+describe('startServer 周期投递修复配置', () => {
+  test('非法 COAGENT_RECONCILE_INTERVAL_MS 在 listen 之前 reject，不残留 server', async () => {
+    for (const raw of ['-1', '1.5', 'abc', '', '01']) {
+      const statePath = tempState();
+      await assert.rejects(
+        () =>
+          startServer(0, statePath, {
+            env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: raw },
+          }),
+        /COAGENT_RECONCILE_INTERVAL_MS/,
+      );
+    }
+    assert.equal(
+      servers.filter((s) => s.listening).length,
+      0,
+      '非法间隔 reject 后不得残留 listening server',
+    );
+  });
+
+  test('间隔 0 即使等待也不跑；close 后不再排 tick', async () => {
+    const statePath = tempState();
+    const release = acquireLock(statePath, '测试占锁');
+    releaseFns.push(release);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(' '));
+    };
+    try {
+      const off = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      });
+      servers.push(off.server);
+      await new Promise((done) => setTimeout(done, 70));
+      assert.equal(
+        warns.filter((row) => row.includes('周期投递修复')).length,
+        0,
+      );
+      await new Promise<void>((done, fail) => {
+        off.server.close((err) => (err ? fail(err) : done()));
+      });
+
+      const on = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '40' },
+      });
+      servers.push(on.server);
+      const deadline = Date.now() + 200;
+      while (
+        warns.filter((row) => row.includes('锁忙')).length < 1 &&
+        Date.now() < deadline
+      ) {
+        await new Promise((done) => setTimeout(done, 15));
+      }
+      assert.ok(warns.some((row) => row.includes('锁忙')), '启用后锁忙应跳过');
+      const health = await fetch(
+        `http://${(on.server.address() as AddressInfo).address}:${(on.server.address() as AddressInfo).port}/api/health`,
+      );
+      assert.equal(health.status, 200);
+      await new Promise<void>((done, fail) => {
+        on.server.close((err) => (err ? fail(err) : done()));
+      });
+      const mid = warns.filter((row) => row.includes('锁忙')).length;
+      await new Promise((done) => setTimeout(done, 100));
+      assert.equal(warns.filter((row) => row.includes('锁忙')).length, mid);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test('close 等待在途慢 tick 释放锁后才完成，且不再排下一轮', async () => {
+    const statePath = tempState();
+    let tickCount = 0;
+    let holding = false;
+    let heldRelease: (() => void) | undefined;
+    let finishTick = () => {};
+    const gate = new Promise<void>((resolve) => {
+      finishTick = resolve;
+    });
+
+    const on = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '20' },
+      periodicTick: async () => {
+        tickCount += 1;
+        if (tickCount !== 1) return;
+        heldRelease = acquireLock(statePath, '在途 tick 持锁');
+        holding = true;
+        try {
+          await gate;
+        } finally {
+          holding = false;
+          heldRelease?.();
+          heldRelease = undefined;
+        }
+      },
+    });
+    servers.push(on.server);
+
+    try {
+      const deadline = Date.now() + 400;
+      while (!holding && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 5));
+      }
+      assert.equal(holding, true, 'tick 应已持锁');
+      assert.throws(() => acquireLock(statePath, 'probe-during'), LockBusyError);
+
+      const addr = on.server.address() as AddressInfo;
+      const health = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+      assert.equal(health.status, 200);
+
+      let closed = false;
+      const closing = new Promise<void>((done, fail) => {
+        on.server.close((err) => {
+          closed = true;
+          err ? fail(err) : done();
+        });
+      });
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(closed, false, '在途 tick 未结束时 close 不得完成');
+      assert.throws(() => acquireLock(statePath, 'probe-still'), LockBusyError);
+
+      finishTick();
+      await closing;
+      assert.equal(closed, true);
+
+      const probe = acquireLock(statePath, 'probe-after');
+      probe();
+
+      const afterTicks = tickCount;
+      await new Promise((done) => setTimeout(done, 80));
+      assert.equal(tickCount, afterTicks, 'close 完成后不得再跑 tick');
+    } finally {
+      finishTick();
+    }
+  });
+
+  test('对已关闭的 server 再 close，HTTP 关闭错误交给 callback', async () => {
+    const built = await startServer(0, tempState(), {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+    });
+    servers.push(built.server);
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+    const err = await new Promise<Error | undefined>((done) => {
+      built.server.close((e) => done(e));
+    });
+    assert.ok(err, '第二次 close 应报告 HTTP 已关闭');
+    assert.equal((err as NodeJS.ErrnoException).code, 'ERR_SERVER_NOT_RUNNING');
+  });
+});
+
+describe('server.close 异常路径', () => {
+  test('stop 失败时 HTTP 仍被关闭，callback 能诊断 stop 错误', async () => {
+    const server = createServer();
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    servers.push(server);
+    bindServerCloseToPeriodicStop(server, async () => {
+      throw new Error('stop-boom');
+    });
+    const err = await new Promise<Error | undefined>((done) => {
+      server.close((e) => done(e));
+    });
+    assert.ok(err);
+    assert.match(err.message, /stop-boom/);
+    assert.equal(server.listening, false);
+  });
+
+  test('HTTP close 失败时错误被报告', async () => {
+    const server = createServer();
+    bindServerCloseToPeriodicStop(server, async () => {});
+    const err = await new Promise<Error | undefined>((done) => {
+      server.close((e) => done(e));
+    });
+    assert.ok(err);
+    assert.equal((err as NodeJS.ErrnoException).code, 'ERR_SERVER_NOT_RUNNING');
+  });
+
+  test('stop 与 HTTP close 都失败时 callback 两个错误都在', async () => {
+    const server = createServer();
+    bindServerCloseToPeriodicStop(server, async () => {
+      throw new Error('stop-boom');
+    });
+    const err = await new Promise<Error | undefined>((done) => {
+      server.close((e) => done(e));
+    });
+    assert.ok(err instanceof AggregateError);
+    const nested = err.errors;
+    assert.ok(nested.some((row) => row instanceof Error && row.message.includes('stop-boom')));
+    assert.ok(
+      nested.some((row) => (row as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING'),
+    );
+  });
+
+  test('无 callback 时 emit error，且没有未处理拒绝', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const server = createServer();
+      const seen: Error[] = [];
+      server.on('error', (e) => {
+        seen.push(e);
+      });
+      bindServerCloseToPeriodicStop(server, async () => {
+        throw new Error('stop-boom');
+      });
+      server.close();
+      const deadline = Date.now() + 200;
+      while (seen.length === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      assert.equal(rejections.length, 0, '不得留下未处理拒绝');
+      assert.ok(seen.some((row) => String(row.message).includes('stop-boom')));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('callback 自己抛错只调用一次，没有未处理拒绝', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
+    try {
+      const server = createServer();
+      await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+      servers.push(server);
+      bindServerCloseToPeriodicStop(server, async () => {
+        throw new Error('stop-boom');
+      });
+      let calls = 0;
+      server.close(() => {
+        calls += 1;
+        throw new Error('callback-boom');
+      });
+      const deadline = Date.now() + 200;
+      while (calls === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(calls, 1, 'callback 最多调用一次');
+      assert.equal(rejections.length, 0, '不得留下未处理拒绝');
+      assert.ok(
+        logged.some((row) => row instanceof Error && String(row.message).includes('callback-boom')),
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      console.error = original;
+    }
+  });
+
+  test('error 监听器自己抛错不重复交付，没有未处理拒绝', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
+    try {
+      const server = createServer();
+      bindServerCloseToPeriodicStop(server, async () => {
+        throw new Error('stop-boom');
+      });
+      let calls = 0;
+      server.on('error', () => {
+        calls += 1;
+        throw new Error('listener-boom');
+      });
+      server.close();
+      const deadline = Date.now() + 200;
+      while (calls === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(calls, 1, '监听器最多触发一次');
+      assert.equal(rejections.length, 0, '不得留下未处理拒绝');
+      assert.ok(
+        logged.some((row) => row instanceof Error && String(row.message).includes('listener-boom')),
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      console.error = original;
+    }
+  });
+
+  test('无 callback 且无 error 监听器时 console.error，closeHttp 同步抛错也被接住', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
+    try {
+      const fake = {
+        close: () => {
+          throw new Error('sync-close');
+        },
+        emit: () => false,
+        listenerCount: () => 0,
+      };
+      bindServerCloseToPeriodicStop(fake as unknown as Server, async () => {
+        throw new Error('stop-boom');
+      });
+      fake.close();
+      const deadline = Date.now() + 200;
+      while (logged.length === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      assert.equal(rejections.length, 0, '同步抛错不得变成未处理拒绝');
+      const first = logged[0];
+      assert.ok(first instanceof AggregateError);
+      assert.ok(first.errors.some((row) => row instanceof Error && row.message.includes('stop-boom')));
+      assert.ok(first.errors.some((row) => row instanceof Error && row.message.includes('sync-close')));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      console.error = original;
     }
   });
 });

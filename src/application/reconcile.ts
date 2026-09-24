@@ -667,3 +667,226 @@ function isArchivedWriteError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes('已归档 Mission');
 }
+
+/* ------------------------------ 周期投递修复调度 ------------------------------ */
+
+/** 未设 COAGENT_RECONCILE_INTERVAL_MS 时的间隔。0 才是关闭。 */
+export const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * 解析周期间隔。必须在开状态 / 拿锁 / listen / 建 worktree 之前调用：
+ * 非法值要失败在副作用前，不留半截进程。
+ *
+ * 未设 → 60000；`0` → 关闭；其余必须是正整数（禁止符号、小数、前导零）。
+ */
+export function parseReconcileIntervalMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_RECONCILE_INTERVAL_MS;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+export interface StartPeriodicReconcileInput {
+  readonly intervalMs: number;
+  readonly tick: () => Promise<void>;
+  readonly warn: (message: string, error?: unknown) => void;
+}
+
+export interface PeriodicReconcileHandle {
+  stop(): Promise<void>;
+}
+
+/**
+ * 按间隔、不重叠地跑 tick。用 setTimeout 链而不是 setInterval：上一轮没结束
+ * 下一轮不开始。stop() 会等在途那一轮结束，之后不再排下一轮。
+ *
+ * intervalMs <= 0 视为关闭，连第一轮都不排。单次 tick 抛错只 warn，后续照跑。
+ * warn 自己抛错也接住：告警通道不该拖垮调度，否则 stop() 会拒绝、在途 tick 的
+ * 锁和独立连接就收不回来。
+ */
+export function startPeriodicReconcile(input: StartPeriodicReconcileInput): PeriodicReconcileHandle {
+  const { intervalMs, tick, warn } = input;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let wake: (() => void) | undefined;
+
+  const notify = (message: string, error?: unknown) => {
+    try {
+      warn(message, error);
+    } catch (warnError) {
+      // 告警通道出错不该变成未处理拒绝：退回 console.warn，循环继续。
+      console.warn(message, error);
+      console.warn(
+        `周期投递修复 warn 回调失败：${warnError instanceof Error ? warnError.message : String(warnError)}`,
+        warnError,
+      );
+    }
+  };
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      wake = resolve;
+      timer = setTimeout(() => {
+        timer = undefined;
+        wake = undefined;
+        resolve();
+      }, ms);
+    });
+
+  const loop = (async () => {
+    if (intervalMs <= 0) return;
+    while (!stopped) {
+      await sleep(intervalMs);
+      if (stopped) return;
+      try {
+        await tick();
+      } catch (error) {
+        notify(
+          `周期投递修复失败：${error instanceof Error ? error.message : String(error)}`,
+          error,
+        );
+      }
+    }
+  })();
+
+  return {
+    async stop() {
+      stopped = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      wake?.();
+      wake = undefined;
+      await loop;
+    },
+  };
+}
+
+export interface IndependentCleanupStep {
+  readonly name: string;
+  readonly run: () => void | Promise<void>;
+}
+
+/**
+ * 退出清理每一步独立尝试。stop 失败如果直接 await，persist 和 releaseLock
+ * 都跑不到，排他锁就留在盘上；所以一步失败只记下来，后面的照跑，全部结束
+ * 再把失败抛出去（多个用 AggregateError）。
+ *
+ * `primary` 包一层对象，是因为 JS 可以 `throw undefined`，不能拿
+ * `error === undefined` 判断「没有主流程错误」。有主流程错误时必须再抛出，
+ * 否则 catch 里只记下、finally 里清理全成功，错误就被吞了。
+ */
+export async function runIndependentCleanup(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+  primary?: { error: unknown };
+}): Promise<void> {
+  const failures: Error[] = [];
+  for (const step of input.steps) {
+    try {
+      await step.run();
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      failures.push(err);
+      const message = `退出清理失败（${step.name}）：${err.message}`;
+      try {
+        input.report(message, error);
+      } catch {
+        // report 自己抛也不该跳过后续步骤（尤其是释锁）。
+        console.error(message, error);
+      }
+    }
+  }
+  const primary = input.primary;
+  if (primary) {
+    if (failures.length === 0) {
+      throw primary.error;
+    }
+    const primaryMessage =
+      primary.error instanceof Error ? primary.error.message : String(primary.error);
+    throw new AggregateError(
+      [primary.error, ...failures],
+      `主流程失败（${primaryMessage}），另有 ${failures.length} 步清理失败`,
+    );
+  }
+  if (failures.length === 1) {
+    const only = failures[0];
+    if (only) throw only;
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `退出清理有 ${failures.length} 步失败`);
+  }
+}
+
+/**
+ * 给顶层 catch 用：AggregateError.stack 不含 errors / cause，只打 stack
+ * 会把主流程错误盖掉。有深度上限并防循环，避免日志阶段自己卡死。
+ */
+export function formatErrorForLog(error: unknown): string {
+  const maxDepth = 8;
+  const seen = new WeakSet<object>();
+  const walk = (value: unknown, depth: number): string => {
+    if (depth > maxDepth) return '[超过展开深度]';
+    if (value !== null && typeof value === 'object') {
+      if (seen.has(value)) return '[循环引用]';
+      seen.add(value);
+    }
+    if (value instanceof AggregateError) {
+      const lines = [value.stack ?? `${value.name}: ${value.message}`];
+      value.errors.forEach((inner, i) => {
+        lines.push(`[${i}] ${walk(inner, depth + 1)}`);
+      });
+      if (value.cause !== undefined) {
+        lines.push(`[cause] ${walk(value.cause, depth + 1)}`);
+      }
+      return lines.join('\n');
+    }
+    if (value instanceof Error) {
+      const base = value.stack ?? `${value.name}: ${value.message}`;
+      if (value.cause === undefined) return base;
+      return `${base}\n[cause] ${walk(value.cause, depth + 1)}`;
+    }
+    return String(value);
+  };
+  return walk(error, 0);
+}
+
+/**
+ * 信号退出：每步独立尝试、失败必记、一定 exit(130)。永不拒绝——releaseLock
+ * 抛错也不能挡住退出，更不能留下未处理拒绝。退出码保持 130（被中断）；
+ * 清理失败靠 stderr 诊断，不另开退出码，以免和「被人中断」混淆。
+ */
+export async function cleanupAfterSignal(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+  exit: (code: number) => void;
+}): Promise<void> {
+  try {
+    await runIndependentCleanup({ steps: input.steps, report: input.report });
+  } catch {
+    // 每步失败已经 report。这里吞掉是为了后面一定 exit(130)。
+  }
+  try {
+    input.exit(130);
+  } catch (error) {
+    // 测试替身可能抛；生产 process.exit 通常不再返回。都不能变成未处理拒绝。
+    try {
+      input.report(
+        `信号退出未能生效：${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    } catch {
+      console.error(error);
+    }
+  }
+}

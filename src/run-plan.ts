@@ -29,7 +29,23 @@ import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { parsePlanSpec } from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
-import { buildDecisionDeps, buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import type { FileStateStore } from './application/file-store.ts';
+import {
+  cleanupAfterSignal,
+  formatErrorForLog,
+  parseReconcileIntervalMs,
+  runIndependentCleanup,
+  startPeriodicReconcile,
+  type PeriodicReconcileHandle,
+} from './application/reconcile.ts';
+import {
+  buildDecisionDeps,
+  buildPersistentPlatform,
+  buildPgPlatform,
+  makeIssuer,
+  runHeldFileDeliveryRepair,
+  runPgDeliveryRepairTick,
+} from './main.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_UNDECLARED_MESSAGE,
@@ -72,6 +88,8 @@ async function main() {
     return;
   }
 
+  // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
+  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
   // 决策依赖在读任何输入之前组装：shadow 缺 key 就在这里失败，不留半截 Mission / 状态 / 锁。
   const decision = buildDecisionDeps(process.env);
 
@@ -121,7 +139,21 @@ async function main() {
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   const runQuery = built.runQuery;
+  const warnRepair = (message: string) => {
+    console.warn(message);
+  };
+  const periodic: PeriodicReconcileHandle | undefined =
+    reconcileIntervalMs === 0
+      ? undefined
+      : startPeriodicReconcile({
+          intervalMs: reconcileIntervalMs,
+          warn: warnRepair,
+          tick: usePg
+            ? () => runPgDeliveryRepairTick({ warn: warnRepair })
+            : () => runHeldFileDeliveryRepair(built.store as FileStateStore, warnRepair),
+        });
 
+  let primary: { error: unknown } | undefined;
   try {
     // 状态文件、锁目录落在项目仓里却没被忽略的话，机器 L3 每一次合并都会拒绝。
     // 拿锁之后再看一次，才看得见这把锁自己。
@@ -206,16 +238,30 @@ async function main() {
       if (interrupted) return;
       interrupted = true;
       console.error(`\n收到 ${signal}：记下原因后退出。在途的 Mission 原样留给人。`);
-      void store
-        .update((r) => {
-          if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
-        })
-        .catch(() => undefined)
-        .then(async () => {
-          await Promise.resolve(persist()).catch(() => undefined);
-          releaseLock();
-          process.exit(130);
-        });
+      void cleanupAfterSignal({
+        steps: [
+          {
+            name: 'halt',
+            run: () =>
+              store.update((r) => {
+                if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
+              }),
+          },
+          {
+            name: 'periodic.stop',
+            run: async () => {
+              if (periodic) await periodic.stop();
+            },
+          },
+          { name: 'persist', run: persist },
+          { name: 'releaseLock', run: () => releaseLock() },
+        ],
+        report: (message, error) => {
+          console.error(message);
+          if (error !== undefined) console.error(error);
+        },
+        exit: (code) => process.exit(code),
+      });
     };
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
@@ -302,13 +348,33 @@ async function main() {
     if (run) for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) console.log(text);
     console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
+  } catch (error) {
+    // 先记下，交给 finally 里的清理一起报；在这里直接 throw 的话，清理失败时会被盖掉。
+    primary = { error };
   } finally {
-    await persist();
-    releaseLock();
+    // stop 失败不能跳过 persist / 释锁：排他锁留在盘上，下一晚开跑会一直锁忙。
+    await runIndependentCleanup({
+      primary,
+      steps: [
+        {
+          name: 'periodic.stop',
+          run: async () => {
+            if (periodic) await periodic.stop();
+          },
+        },
+        { name: 'persist', run: persist },
+        { name: 'releaseLock', run: () => releaseLock() },
+      ],
+      report: (message, error) => {
+        console.error(message);
+        if (error !== undefined) console.error(error);
+      },
+    });
   }
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
+  // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
+  console.error(formatErrorForLog(error));
   process.exit(1);
 });

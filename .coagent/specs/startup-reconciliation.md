@@ -29,12 +29,43 @@
 
 ## Non-goals
 
-- 常驻/周期 Reconciler；当前只在启动跑一次。
+- 把 Attempt 判死、孤儿 worktree、实时输出补裁改成周期任务。这些仍只在启动跑一次、且范围限定不变。
 - 多 Runner 租约 / fencing token；那属于 DurableScheduler 范围。
 - Artifact 回收：`FileArtifactStore` 目前只有 `put` / `get`，没有枚举与删除，不在本能力内。
 - Outbox / Saga / exactly-once。
+- DurableScheduler、fencing、Dispatcher、L3 merge 重试、公开 HTTP 修复接口。
+- token 发放 / 吊销、live 输出、正在跑的 Attempt / Runner 状态——周期路径一律不碰。
+
+## 周期投递修复（与启动收敛的边界）
+
+启动收敛收的是**无人收尾的 Attempt** 和 **孤儿 worktree**。周期任务只跑 `repairMissingDeliveries`：补可从现存状态核实的缺失投递（全部升级，以及当前结果对应的最后一次可核实交卷）。不改 Mission / Attempt 状态，不重放交卷或升级命令。归档 Mission、对不上的交卷身份、缺事件的缺口进 skipped / uncertain，不强补。
+
+两件事不要混：
+
+- **启动时**：`reconcileInterruptedAttempts` / `reconcileOrphanedWorktrees` 仍按原规则，只跑一次。只读观测面不调 Attempt 收敛；推进状态的进程用 `missionId` 限定。
+- **运行中**：`startServer` 与 `run-plan` 按间隔补投递。不周期调用上面两个启动收敛函数。
+
+### 配置
+
+`COAGENT_RECONCILE_INTERVAL_MS`：未设 = 60000 毫秒；`0` = 关闭；其余必须是正整数。非法值在开状态、拿锁、listen、建 worktree 之前拒绝。
+
+### 锁与活对象
+
+- 文件版 `startServer` 是只读观测面，**不握长锁**。每轮 `acquireLock`；锁忙 warn 并跳过，不写文件。拿到锁后新开 `FileStateStore`（注入 `hasArchivedMission`），跑完释放。
+- 文件版 `run-plan` 已持排他锁，用现有装配修，不再取锁。
+- PG：每轮新开独立 `PgStateStore`，在专用连接上 `pg_try_advisory_lock` 做跨进程互斥；拿不到就跳过。刷新并修复这份独立 store，不 `refresh`、不改写 Runner / HTTP 正在用的活 Platform。结束时解锁并关掉独立连接。
+
+### 失败策略
+
+单次 tick 抛错只记 warning，HTTP 健康检查与 `run-plan` 主循环继续，下一轮照跑。上一轮没结束不排下一轮。`repairMissingDeliveries` 把单项读取或补建异常收进 `result.errors` 而不抛：周期 tick 逐项记含 Mission 标识和原因的 warning，不阻断后续 tick；`uncertain` / `skipped` 不是故障，不当 warning。调度的 `warn` 自己抛错时接住并退回 `console.warn`，循环继续，`stop()` 正常完成——告警通道不该拖垮调度。`server.close` 与 `run-plan` 正常 / 异常退出都 `stop`：不再排下一轮，等在途那一轮结束，释放文件锁和独立 PG 连接。调用方只调 `server.close` 也必须等到这一步完成。
+
+关闭与清理的异常路径同样要走完：
+
+- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。stop 与关闭的错误都保留（两个都有时用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。callback / error 监听器自身抛错只记录（`console.error`），不重复交付，也不变成未处理拒绝。
+- `run-plan` 退出：`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`runIndependentCleanup`），一步失败不跳过后面的，锁必须释放。失败经 `console.error` 留下可诊断信息。主流程错误与清理错误都保留：清理全成功时原样抛出主流程错误；两边都失败时抛 `AggregateError`（主流程错误在前），并用 `formatErrorForLog` 展开内部错误再打印。
+- 信号退出：记中断原因、`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`cleanupAfterSignal`），一步失败仍继续、每步失败都记录，最后一定尝试释锁并以退出码 130 退出（清理失败靠 stderr 诊断，不另开退出码）。该路径永不留下未处理拒绝。
 
 ## Source / tests
 
-- 源：`application/reconcile.ts`、`application/live.ts`、`main.ts`（接线与 warning）
-- 测：`reconcile.test.ts`、`worktree-reconcile.test.ts`、`recovery-paths.test.ts`
+- 源：`application/reconcile.ts`、`application/live.ts`、`application/pg-store.ts`（advisory lock）、`main.ts`（接线与 warning）、`run-plan.ts`
+- 测：`reconcile.test.ts`、`worktree-reconcile.test.ts`、`recovery-paths.test.ts`、`reconcile-periodic.test.ts`、`start-server.test.ts`、`run-plan-wiring.test.ts`
