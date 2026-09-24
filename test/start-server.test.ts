@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
-import { acquireLock } from '../src/application/lock.ts';
+import { acquireLock, LockBusyError } from '../src/application/lock.ts';
 import { startServer } from '../src/main.ts';
 
 const servers: Server[] = [];
@@ -530,14 +530,77 @@ describe('startServer 周期投递修复配置', () => {
       await new Promise<void>((done, fail) => {
         on.server.close((err) => (err ? fail(err) : done()));
       });
-      if ('stopPeriodicReconcile' in on && typeof on.stopPeriodicReconcile === 'function') {
-        await on.stopPeriodicReconcile();
-      }
       const mid = warns.filter((row) => row.includes('锁忙')).length;
       await new Promise((done) => setTimeout(done, 100));
       assert.equal(warns.filter((row) => row.includes('锁忙')).length, mid);
     } finally {
       console.warn = originalWarn;
+    }
+  });
+
+  test('close 等待在途慢 tick 释放锁后才完成，且不再排下一轮', async () => {
+    const statePath = tempState();
+    let tickCount = 0;
+    let holding = false;
+    let heldRelease: (() => void) | undefined;
+    let finishTick = () => {};
+    const gate = new Promise<void>((resolve) => {
+      finishTick = resolve;
+    });
+
+    const on = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '20' },
+      periodicTick: async () => {
+        tickCount += 1;
+        if (tickCount !== 1) return;
+        heldRelease = acquireLock(statePath, '在途 tick 持锁');
+        holding = true;
+        try {
+          await gate;
+        } finally {
+          holding = false;
+          heldRelease?.();
+          heldRelease = undefined;
+        }
+      },
+    });
+    servers.push(on.server);
+
+    try {
+      const deadline = Date.now() + 400;
+      while (!holding && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 5));
+      }
+      assert.equal(holding, true, 'tick 应已持锁');
+      assert.throws(() => acquireLock(statePath, 'probe-during'), LockBusyError);
+
+      const addr = on.server.address() as AddressInfo;
+      const health = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+      assert.equal(health.status, 200);
+
+      let closed = false;
+      const closing = new Promise<void>((done, fail) => {
+        on.server.close((err) => {
+          closed = true;
+          err ? fail(err) : done();
+        });
+      });
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(closed, false, '在途 tick 未结束时 close 不得完成');
+      assert.throws(() => acquireLock(statePath, 'probe-still'), LockBusyError);
+
+      finishTick();
+      await closing;
+      assert.equal(closed, true);
+
+      const probe = acquireLock(statePath, 'probe-after');
+      probe();
+
+      const afterTicks = tickCount;
+      await new Promise((done) => setTimeout(done, 80));
+      assert.equal(tickCount, afterTicks, 'close 完成后不得再跑 tick');
+    } finally {
+      finishTick();
     }
   });
 });

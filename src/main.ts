@@ -58,6 +58,7 @@ import {
   startPeriodicReconcile,
   type PeriodicReconcileHandle,
   type RepairMissingDeliveriesDeps,
+  type RepairMissingDeliveriesResult,
 } from './application/reconcile.ts';
 import type { RunTokenIssuer } from './application/token-issuer.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './application/workspace.ts';
@@ -491,6 +492,20 @@ export interface DeliveryRepairWarn {
 }
 
 /**
+ * 逐 Mission 的读取/补建异常被收进 result.errors 而不抛。
+ * 周期 tick 必须把它们当故障告警，否则调用方会以为本轮成功。
+ * uncertain / skipped 不是故障，不当 warning 刷屏。
+ */
+function warnDeliveryRepairErrors(
+  result: RepairMissingDeliveriesResult,
+  warn: DeliveryRepairWarn,
+): void {
+  for (const item of result.errors) {
+    warn(`周期投递修复：Mission ${item.missionId} 补建失败：${item.message}`);
+  }
+}
+
+/**
  * 文件版观测面的一轮修复：短借写锁，新开一份 FileStateStore，不复用观测面活对象。
  * 锁忙只 warn、不写。
  */
@@ -510,15 +525,20 @@ export async function runFileObserverDeliveryRepairTick(
   }
   try {
     const store = new FileStateStore(statePath);
-    await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+    const result = await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+    warnDeliveryRepairErrors(result, warn);
   } finally {
     release();
   }
 }
 
 /** run-plan 已持文件排他锁：用现有装配修，不再取锁。 */
-export async function runHeldFileDeliveryRepair(store: FileStateStore): Promise<void> {
-  await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+export async function runHeldFileDeliveryRepair(
+  store: FileStateStore,
+  warn: DeliveryRepairWarn,
+): Promise<void> {
+  const result = await repairMissingDeliveries(buildFileDeliveryRepairDeps(store));
+  warnDeliveryRepairErrors(result, warn);
 }
 
 export interface PgDeliveryRepairTickInput {
@@ -549,13 +569,14 @@ export async function runPgDeliveryRepairTick(input: PgDeliveryRepairTickInput):
       const clock = new SystemClock();
       const ids = new PgIds(store);
       await ids.reserve(['D']);
-      await repairMissingDeliveries({
+      const result = await repairMissingDeliveries({
         projects: new PgProjectRepository(store),
         activity: new PgActivityLog(store, clock),
         deliveries: new PgDeliveryRepository(store, clock, ids),
         transaction: store,
         clock,
       });
+      warnDeliveryRepairErrors(result, input.warn);
     } finally {
       await lock.release();
     }
@@ -580,6 +601,11 @@ export interface StartServerOptions {
   fetch?: typeof globalThis.fetch;
   /** 可注入 env（测试用；生产默认 process.env）。 */
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  /**
+   * 测试用：替换周期 tick，用来造「在途慢 tick」验证 close 会等锁与连接释放。
+   * 生产不传——默认文件短借锁 / PG 独立 store。
+   */
+  periodicTick?: () => Promise<void>;
 }
 
 export async function startServer(
@@ -638,17 +664,34 @@ export async function startServer(
       : startPeriodicReconcile({
           intervalMs: reconcileIntervalMs,
           warn: warnPeriodicRepair,
-          tick: usePg
-            ? () =>
-                runPgDeliveryRepairTick({
-                  connectionString: env.COAGENT_PG,
-                  warn: warnPeriodicRepair,
-                })
-            : () => runFileObserverDeliveryRepairTick(statePath, warnPeriodicRepair),
+          tick:
+            options?.periodicTick ??
+            (usePg
+              ? () =>
+                  runPgDeliveryRepairTick({
+                    connectionString: env.COAGENT_PG,
+                    warn: warnPeriodicRepair,
+                  })
+              : () => runFileObserverDeliveryRepairTick(statePath, warnPeriodicRepair)),
         });
-  server.on('close', () => {
-    void periodic?.stop();
-  });
+  // 调用方只使用 server.close 也必须等到在途 tick 完成并释放文件锁 / 独立 PG 连接。
+  // Node 的 close 回调只表示 HTTP 连接断完，不会等我们的 stop，所以先 stop 再关 HTTP。
+  const closeHttp = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    void (async () => {
+      try {
+        if (periodic) await periodic.stop();
+      } catch (error) {
+        closeHttp((closeErr?: Error) => {
+          void closeErr;
+          callback?.(error instanceof Error ? error : new Error(String(error)));
+        });
+        return;
+      }
+      closeHttp(callback);
+    })();
+    return server;
+  }) as typeof server.close;
   return {
     server,
     ...built,

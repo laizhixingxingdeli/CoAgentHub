@@ -411,7 +411,9 @@ describe('run-plan 周期投递修复接线', () => {
 
     assert.match(main, /hasArchivedMission/);
     assert.match(main, /runFileObserverDeliveryRepairTick/);
-    assert.match(main, /server\.on\('close'/);
+    assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
+    assert.match(main, /await periodic\.stop\(\)/);
+    assert.match(main, /warnDeliveryRepairErrors/);
     assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
     assert.doesNotMatch(
       main.slice(main.indexOf('export async function startServer')),

@@ -57,7 +57,7 @@
 
 ### 失败策略
 
-单次 tick 抛错只记 warning，HTTP 健康检查与 `run-plan` 主循环继续，下一轮照跑。上一轮没结束不排下一轮。`server.close` 与 `run-plan` 正常 / 异常退出都 `stop`：不再排下一轮，等在途那一轮结束，释放文件锁和独立 PG 连接。
+单次 tick 抛错只记 warning，HTTP 健康检查与 `run-plan` 主循环继续，下一轮照跑。上一轮没结束不排下一轮。`repairMissingDeliveries` 把单项读取或补建异常收进 `result.errors` 而不抛：周期 tick 逐项记含 Mission 标识和原因的 warning，不阻断后续 tick；`uncertain` / `skipped` 不是故障，不当 warning。`server.close` 与 `run-plan` 正常 / 异常退出都 `stop`：不再排下一轮，等在途那一轮结束，释放文件锁和独立 PG 连接。调用方只调 `server.close` 也必须等到这一步完成。
 
 ## Source / tests
 

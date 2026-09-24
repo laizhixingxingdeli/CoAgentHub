@@ -239,8 +239,40 @@ describe('文件版 tick', () => {
     });
     assert.equal(skipped.created.length, 0);
     assert.ok(skipped.skipped.some((row) => row.reason.includes('归档')));
-    await runHeldFileDeliveryRepair(store);
+    await runHeldFileDeliveryRepair(store, () => {});
     assert.equal((await fileDeliveries(statePath, 'M-gap')).length, 1);
+  });
+
+  test('补建单项失败记 warning，不阻断下一轮恢复', async () => {
+    const statePath = tempState();
+    await seedFileGap(statePath);
+    const original = FileDeliveryRepository.prototype.create;
+    let failOnce = true;
+    FileDeliveryRepository.prototype.create = async function (input) {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('模拟投递写入失败');
+      }
+      return original.call(this, input);
+    };
+    const warns: string[] = [];
+    try {
+      await runFileObserverDeliveryRepairTick(statePath, (message) => warns.push(message));
+      assert.ok(
+        warns.some((row) => row.includes('M-gap') && row.includes('模拟投递写入失败')),
+        `应告警 Mission 与原因，实际 ${warns.join(' | ')}`,
+      );
+      assert.equal((await fileDeliveries(statePath, 'M-gap')).length, 0);
+      await runFileObserverDeliveryRepairTick(statePath, (message) => warns.push(message));
+      assert.equal((await fileDeliveries(statePath, 'M-gap')).length, 1);
+      assert.equal(
+        warns.filter((row) => row.includes('补建失败')).length,
+        1,
+        '第二轮成功不应再刷故障 warning',
+      );
+    } finally {
+      FileDeliveryRepository.prototype.create = original;
+    }
   });
 });
 
@@ -384,6 +416,45 @@ describe('PG tick', () => {
       assert.equal(leftover.rows[0]?.n, 0);
     } finally {
       await live.close();
+    }
+  });
+
+  test('补建单项失败记 warning，不阻断下一轮恢复', async (t) => {
+    if (skipIfNoPg(t)) return;
+    await reset();
+    await seedPgGap();
+    const original = PgDeliveryRepository.prototype.create;
+    let failOnce = true;
+    PgDeliveryRepository.prototype.create = async function (input) {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('模拟投递写入失败');
+      }
+      return original.call(this, input);
+    };
+    const warns: string[] = [];
+    try {
+      await runPgDeliveryRepairTick({
+        connectionString: dsn,
+        warn: (message) => warns.push(message),
+      });
+      assert.ok(
+        warns.some((row) => row.includes('M-gap') && row.includes('模拟投递写入失败')),
+        `应告警 Mission 与原因，实际 ${warns.join(' | ')}`,
+      );
+      assert.equal((await pgDeliveries('M-gap')).length, 0);
+      await runPgDeliveryRepairTick({
+        connectionString: dsn,
+        warn: (message) => warns.push(message),
+      });
+      assert.equal((await pgDeliveries('M-gap')).length, 1);
+      assert.equal(
+        warns.filter((row) => row.includes('补建失败')).length,
+        1,
+        '第二轮成功不应再刷故障 warning',
+      );
+    } finally {
+      PgDeliveryRepository.prototype.create = original;
     }
   });
 });

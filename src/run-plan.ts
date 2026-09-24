@@ -147,7 +147,7 @@ async function main() {
           warn: warnRepair,
           tick: usePg
             ? () => runPgDeliveryRepairTick({ warn: warnRepair })
-            : () => runHeldFileDeliveryRepair(built.store as FileStateStore),
+            : () => runHeldFileDeliveryRepair(built.store as FileStateStore, warnRepair),
         });
 
   try {
