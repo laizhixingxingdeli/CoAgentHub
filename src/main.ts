@@ -369,6 +369,8 @@ export async function buildPgPlatform(options?: {
     ...(decisionHooks ? { decisionHooks } : {}),
     ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
+    // 单事务命令（C3）：交卷与升级的快照、事件、投递同一个数据库事务写下。
+    transaction: store,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options?.queryRuntime;

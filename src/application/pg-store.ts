@@ -18,10 +18,18 @@
  * 可以互相导入导出，也不存在「换存储就得迁移领域模型」。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
-import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type {
+  ActivityEvent,
+  ActivityLog,
+  Clock,
+  CommandTransaction,
+  IdGenerator,
+  ProjectRepository,
+} from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { KEEP_TAIL_ON_FINISH, truncationNote } from './live.ts';
 import type { LiveChunk, LiveOutput } from './live.ts';
@@ -171,7 +179,81 @@ export function pgConnectionString(): string {
   );
 }
 
-export class PgStateStore {
+/**
+ * 开着的 PG 命令事务（C3）：暂存要一起提交的写，和回滚要回到的样子。
+ *
+ * 只覆盖快照、事件、投递（设计 §8.1 的 aggregate + events + outbox）；查询、验收报告、
+ * 候选池、实时输出各有各的表，仍是即时写。
+ */
+export interface PgOpenTransaction {
+  /** 开事务时各 Project 的快照：回滚就回到这里。 */
+  readonly projects: Map<string, ProjectSnapshot>;
+  /** 暂存的事件（at 已按记下时的时钟定好），提交时按顺序 INSERT。 */
+  readonly events: ActivityEvent[];
+  /** 暂存的新投递（id / createdAt / status 已定），提交时 ON CONFLICT DO NOTHING。 */
+  readonly deliveries: Delivery[];
+  /** 暂存的确认：deliveryId → 确认时间。 */
+  readonly acknowledgements: Map<string, string>;
+  /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
+  readonly done: Promise<void>;
+  readonly finish: () => void;
+}
+
+const INSERT_ACTIVITY = `INSERT INTO activity
+         (project_id, mission_id, work_item_id, attempt_id, kind, data, at,
+          protocol_version, message_id, correlation_id, causation_id,
+          contract_revision, plan_revision)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)`;
+
+function activityParams(event: ActivityEvent): unknown[] {
+  return [
+    event.projectId,
+    event.missionId,
+    event.workItemId ?? null,
+    event.attemptId ?? null,
+    event.kind,
+    JSON.stringify(event.data ?? null),
+    event.at,
+    event.protocolVersion ?? null,
+    event.messageId ?? null,
+    event.correlationId ?? null,
+    event.causationId ?? null,
+    event.contractRevision ?? null,
+    event.planRevision ?? null,
+  ];
+}
+
+const INSERT_DELIVERY = `INSERT INTO deliveries
+         (delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary, payload, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'pending',$9)
+       ON CONFLICT (mission_id, idempotency_key) DO NOTHING`;
+
+function deliveryParams(delivery: Delivery): unknown[] {
+  return [
+    delivery.id,
+    delivery.missionId,
+    delivery.projectId,
+    delivery.outcome,
+    delivery.idempotencyKey,
+    delivery.recipient ?? null,
+    delivery.summary,
+    JSON.stringify((delivery as { payload?: unknown }).payload ?? null),
+    delivery.createdAt,
+  ];
+}
+
+const ACKNOWLEDGE_DELIVERY = `UPDATE deliveries
+          SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, $2)
+        WHERE delivery_id = $1
+        RETURNING *`;
+
+/**
+ * **单事务命令（C3）。** `run(fn)` 里的事件与投递先暂存、快照不落盘；fn 结束后一个数据库事务写下
+ * 变了的快照（版本号检查）、事件、投递、确认。fn 抛错或提交失败（含版本冲突），数据库回滚，
+ * 改过的活对象回到开事务时，暂存丢弃；版本号与「已落库」记账只在提交成功后前移。
+ * 事务外的写先等开着的事务结束；从库重读也等——否则会换掉事务正在改的活对象。
+ */
+export class PgStateStore implements CommandTransaction {
   #pool: pg.Pool;
   #projects = new Map<string, Project>();
   #versions = new Map<string, number>();
@@ -183,6 +265,14 @@ export class PgStateStore {
   #persisted = new Map<string, string>();
   /** flush 的串行队列。见 flush() 里的说明。 */
   #chain: Promise<void> = Promise.resolve();
+  /** 开着的命令事务；同一时刻至多一个。 */
+  #tx: PgOpenTransaction | undefined;
+  /** 事务里的调用链带着它：据此分清「事务里的写」和「事务开着时别处的写」。 */
+  #txContext = new AsyncLocalStorage<PgOpenTransaction>();
+  /** 事务串行：后一个等前一个结束。 */
+  #txQueue: Promise<void> = Promise.resolve();
+  /** 在途的重读：开事务前要等它读完，免得它在事务中途换掉活对象。 */
+  #refreshing: Promise<void> = Promise.resolve();
 
   private constructor(pool: pg.Pool) {
     this.#pool = pool;
@@ -228,8 +318,18 @@ export class PgStateStore {
    * 文件版靠 mtime 判断要不要重读；这里没有便宜的「变没变」判据，所以由
    * 调用方在读请求的边界上显式调用。观测面每次轮询调一次，代价是一条
    * `SELECT`，比重新解析整个状态文件还便宜。
+   *
+   * 事务里不重读；事务外先等开着的事务结束——重读会换掉事务正在改的活对象。
    */
   async refresh(): Promise<void> {
+    if (this.currentTransaction()) return;
+    await this.settle();
+    const run = this.#doRefresh();
+    this.#refreshing = run.catch(() => undefined);
+    return run;
+  }
+
+  async #doRefresh(): Promise<void> {
     const { rows } = await this.#pool.query<{
       project_id: string;
       snapshot: ProjectSnapshot;
@@ -254,6 +354,160 @@ export class PgStateStore {
     return this.#projects;
   }
 
+  /** 当前调用链所在的命令事务；事务外为 undefined。 */
+  currentTransaction(): PgOpenTransaction | undefined {
+    const tx = this.#tx;
+    return tx && this.#txContext.getStore() === tx ? tx : undefined;
+  }
+
+  /** 事务外的写先等开着的事务结束：写进一个开着的事务，它回滚时会被一起抹掉。事务里的调用直接过。 */
+  async settle(): Promise<void> {
+    while (this.#tx && this.#txContext.getStore() !== this.#tx) await this.#tx.done;
+  }
+
+  /** 命令事务（C3）。嵌套调用并进外层事务；事务之间串行。 */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.currentTransaction()) return fn();
+    const previous = this.#txQueue;
+    let release!: () => void;
+    this.#txQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    // 在途的快照写与重读先排空：提交时不能和它捏着同一个期望版本去写，重读也不能在事务中途换掉活对象。
+    await this.#chain;
+    await this.#refreshing;
+    const tx = this.#begin();
+    this.#tx = tx;
+    try {
+      let result: T;
+      try {
+        result = await this.#txContext.run(tx, fn);
+      } catch (error) {
+        this.#abort(tx);
+        throw error;
+      }
+      try {
+        await this.#commit(tx);
+      } catch (error) {
+        // 数据库那边已经回滚；内存也回去。
+        this.#abort(tx);
+        throw error;
+      }
+      return result;
+    } finally {
+      this.#tx = undefined;
+      tx.finish();
+      release();
+    }
+  }
+
+  #begin(): PgOpenTransaction {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return {
+      projects: new Map([...this.#projects].map(([id, project]) => [id, project.toSnapshot()])),
+      events: [],
+      deliveries: [],
+      acknowledgements: new Map(),
+      done,
+      finish,
+    };
+  }
+
+  /** 回到开事务时的样子。只换掉改过的活对象：没动过的实例原样留着，别处手里的引用照样有效。 */
+  #abort(tx: PgOpenTransaction): void {
+    for (const [id, project] of [...this.#projects]) {
+      const before = tx.projects.get(id);
+      if (!before) {
+        this.#projects.delete(id);
+        continue;
+      }
+      if (JSON.stringify(project.toSnapshot()) !== JSON.stringify(before)) {
+        this.#projects.set(id, Project.restore(before));
+      }
+    }
+    for (const [id, before] of tx.projects) {
+      if (!this.#projects.has(id)) this.#projects.set(id, Project.restore(before));
+    }
+  }
+
+  /** 一个数据库事务：变了的快照（版本检查）→ 事件 → 投递 → 确认。提交成功后才前移记账。 */
+  async #commit(tx: PgOpenTransaction): Promise<void> {
+    const pending = this.#changedProjects();
+    if (
+      pending.length === 0 &&
+      tx.events.length === 0 &&
+      tx.deliveries.length === 0 &&
+      tx.acknowledgements.size === 0
+    ) {
+      return;
+    }
+    const client = await this.#pool.connect();
+    let written: { projectId: string; snapshot: string; version: number }[];
+    try {
+      await client.query('BEGIN');
+      written = await this.#writeProjects(client, pending);
+      for (const event of tx.events) await client.query(INSERT_ACTIVITY, activityParams(event));
+      for (const delivery of tx.deliveries) await client.query(INSERT_DELIVERY, deliveryParams(delivery));
+      for (const [deliveryId, at] of tx.acknowledgements) await client.query(ACKNOWLEDGE_DELIVERY, [deliveryId, at]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    this.#markPersisted(written);
+  }
+
+  #changedProjects(): { projectId: string; snapshot: string; expected: number | undefined }[] {
+    const pending: { projectId: string; snapshot: string; expected: number | undefined }[] = [];
+    for (const [projectId, project] of this.#projects) {
+      const snapshot = JSON.stringify(project.toSnapshot());
+      if (this.#persisted.get(projectId) === snapshot) continue;
+      pending.push({ projectId, snapshot, expected: this.#versions.get(projectId) });
+    }
+    return pending;
+  }
+
+  /** 在给定的数据库事务里写快照；版本对不上抛 WriteConflictError（调用方回滚）。不碰记账。 */
+  async #writeProjects(
+    client: pg.PoolClient,
+    pending: readonly { projectId: string; snapshot: string; expected: number | undefined }[],
+  ): Promise<{ projectId: string; snapshot: string; version: number }[]> {
+    const written: { projectId: string; snapshot: string; version: number }[] = [];
+    for (const { projectId, snapshot, expected } of pending) {
+      if (expected === undefined) {
+        await client.query('INSERT INTO projects (project_id, snapshot) VALUES ($1, $2::jsonb)', [
+          projectId,
+          snapshot,
+        ]);
+        written.push({ projectId, snapshot, version: 1 });
+        continue;
+      }
+      const { rowCount } = await client.query(
+        `UPDATE projects
+            SET snapshot = $2::jsonb, version = version + 1, updated_at = now()
+          WHERE project_id = $1 AND version = $3`,
+        [projectId, snapshot, expected],
+      );
+      if (rowCount === 0) throw new WriteConflictError(projectId);
+      written.push({ projectId, snapshot, version: expected + 1 });
+    }
+    return written;
+  }
+
+  /** 只在 COMMIT 成功之后调：早先边写边前移，回滚了记账却没退，之后每次写都顶成冲突。 */
+  #markPersisted(written: readonly { projectId: string; snapshot: string; version: number }[]): void {
+    for (const { projectId, snapshot, version } of written) {
+      this.#versions.set(projectId, version);
+      this.#persisted.set(projectId, snapshot);
+    }
+  }
+
   /**
    * 写回**内容确实变了的** Project。
    *
@@ -263,8 +517,15 @@ export class PgStateStore {
    * 为什么不干脆全写一遍：那样一个不相干的过期 Project 会把**后续每一次写**
    * 都顶成冲突——实测就是这么炸的。没改过的东西不参与写，也就不参与冲突。
    * 改过又过期的仍然会被挡下，那正是要挡的。
+   *
+   * 命令事务开着时：事务里的 flush 不写（提交时一起写）；事务外的等事务结束再写。
    */
   flush(): Promise<void> {
+    const tx = this.#tx;
+    if (tx) {
+      if (this.#txContext.getStore() === tx) return Promise.resolve();
+      return tx.done.then(() => this.flush());
+    }
     // **两个 flush 绝不能重叠。** 重叠时它们捏着同一个期望版本去写：先到的
     // 成功并把版本推到 6，后到的还拿着 5，UPDATE 命中 0 行，于是报出一个
     // 纯属自己制造的"并发冲突"。实跑就是这么炸的——API 的 onMutation 是
@@ -284,40 +545,14 @@ export class PgStateStore {
   }
 
   async #doFlush(): Promise<void> {
-    const pending: { projectId: string; snapshot: string; expected: number | undefined }[] = [];
-    for (const [projectId, project] of this.#projects) {
-      const snapshot = JSON.stringify(project.toSnapshot());
-      if (this.#persisted.get(projectId) === snapshot) continue;
-      pending.push({ projectId, snapshot, expected: this.#versions.get(projectId) });
-    }
+    const pending = this.#changedProjects();
     if (pending.length === 0) return;
 
     const client = await this.#pool.connect();
+    let written: { projectId: string; snapshot: string; version: number }[];
     try {
       await client.query('BEGIN');
-      for (const { projectId, snapshot, expected } of pending) {
-        if (expected === undefined) {
-          await client.query(
-            'INSERT INTO projects (project_id, snapshot) VALUES ($1, $2::jsonb)',
-            [projectId, snapshot],
-          );
-          this.#versions.set(projectId, 1);
-          this.#persisted.set(projectId, snapshot);
-          continue;
-        }
-        const { rowCount } = await client.query(
-          `UPDATE projects
-              SET snapshot = $2::jsonb, version = version + 1, updated_at = now()
-            WHERE project_id = $1 AND version = $3`,
-          [projectId, snapshot, expected],
-        );
-        if (rowCount === 0) {
-          await client.query('ROLLBACK');
-          throw new WriteConflictError(projectId);
-        }
-        this.#versions.set(projectId, expected + 1);
-        this.#persisted.set(projectId, snapshot);
-      }
+      written = await this.#writeProjects(client, pending);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -325,6 +560,7 @@ export class PgStateStore {
     } finally {
       client.release();
     }
+    this.#markPersisted(written);
   }
 
   async close(): Promise<void> {
@@ -344,6 +580,7 @@ export class PgProjectRepository implements ProjectRepository {
   }
 
   async save(project: Project): Promise<void> {
+    await this.#store.settle();
     this.#store.projectsMap().set(project.id, project);
     await this.#store.flush();
   }
@@ -353,6 +590,7 @@ export class PgProjectRepository implements ProjectRepository {
   }
 
   async ensure(projectId: string): Promise<Project> {
+    await this.#store.settle();
     const existing = this.#store.projectsMap().get(projectId);
     if (existing) return existing;
     const created = Project.create({ id: projectId });
@@ -380,29 +618,16 @@ export class PgActivityLog implements ActivityLog {
   }
 
   async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
+    const row: ActivityEvent = { ...event, at: this.#clock.now().toISOString() };
+    // 命令事务里：暂存，提交时与快照、投递同一个数据库事务写下（C3）。
+    const tx = this.#store.currentTransaction();
+    if (tx) {
+      tx.events.push(row);
+      return;
+    }
+    await this.#store.settle();
     // 一条 INSERT。文件版在这里要把整份状态重写一遍。
-    await this.#store.pool.query(
-      `INSERT INTO activity
-         (project_id, mission_id, work_item_id, attempt_id, kind, data, at,
-          protocol_version, message_id, correlation_id, causation_id,
-          contract_revision, plan_revision)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)`,
-      [
-        event.projectId,
-        event.missionId,
-        event.workItemId ?? null,
-        event.attemptId ?? null,
-        event.kind,
-        JSON.stringify(event.data ?? null),
-        this.#clock.now().toISOString(),
-        event.protocolVersion ?? null,
-        event.messageId ?? null,
-        event.correlationId ?? null,
-        event.causationId ?? null,
-        event.contractRevision ?? null,
-        event.planRevision ?? null,
-      ],
-    );
+    await this.#store.pool.query(INSERT_ACTIVITY, activityParams(row));
   }
 
   async list(missionId: string): Promise<readonly ActivityEvent[]> {
@@ -421,7 +646,9 @@ export class PgActivityLog implements ActivityLog {
          FROM activity WHERE mission_id = $1 ORDER BY seq`,
       [missionId],
     );
-    return rows.map(toEvent);
+    // 事务里读得到自己暂存的事件。
+    const staged = this.#store.currentTransaction()?.events.filter((e) => e.missionId === missionId) ?? [];
+    return [...rows.map(toEvent), ...staged];
   }
 
   async all(): Promise<readonly ActivityEvent[]> {
@@ -431,7 +658,7 @@ export class PgActivityLog implements ActivityLog {
               contract_revision, plan_revision
          FROM activity ORDER BY seq`,
     );
-    return rows.map(toEvent);
+    return [...rows.map(toEvent), ...(this.#store.currentTransaction()?.events ?? [])];
   }
 }
 
@@ -469,32 +696,56 @@ export class PgDeliveryRepository implements DeliveryRepository {
   async create(
     input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
   ): Promise<Delivery> {
+    const tx = this.#store.currentTransaction();
+    if (tx) return this.#stage(tx, input);
+    await this.#store.settle();
     // ON CONFLICT DO NOTHING + 回查：幂等由唯一索引保证，不靠「先 SELECT
     // 再 INSERT」那种在并发下会双开的写法。
-    const id = this.#ids.next('D');
-    const createdAt = this.#clock.now().toISOString();
-    await this.#store.pool.query(
-      `INSERT INTO deliveries
-         (delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary, payload, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'pending',$9)
-       ON CONFLICT (mission_id, idempotency_key) DO NOTHING`,
-      [
-        id,
-        input.missionId,
-        input.projectId,
-        input.outcome,
-        input.idempotencyKey,
-        input.recipient ?? null,
-        input.summary,
-        JSON.stringify(input.payload ?? null),
-        createdAt,
-      ],
-    );
+    const delivery = this.#newDelivery(input);
+    await this.#store.pool.query(INSERT_DELIVERY, deliveryParams(delivery));
     const { rows } = await this.#store.pool.query(
       'SELECT * FROM deliveries WHERE mission_id = $1 AND idempotency_key = $2',
       [input.missionId, input.idempotencyKey],
     );
     return toDelivery(rows[0]);
+  }
+
+  /**
+   * 命令事务里：暂存，提交时 ON CONFLICT DO NOTHING（唯一约束仍是最终保证）。先看暂存与库里有没有
+   * 同键的，只为返回对的那一条——库里已有的原样拿回。
+   */
+  async #stage(
+    tx: PgOpenTransaction,
+    input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
+  ): Promise<Delivery> {
+    const staged = tx.deliveries.find(
+      (row) => row.missionId === input.missionId && row.idempotencyKey === input.idempotencyKey,
+    );
+    if (staged) return staged;
+    const { rows } = await this.#store.pool.query(
+      'SELECT * FROM deliveries WHERE mission_id = $1 AND idempotency_key = $2',
+      [input.missionId, input.idempotencyKey],
+    );
+    if (rows[0]) return this.#withStagedAck(tx, toDelivery(rows[0]));
+    const delivery = this.#newDelivery(input);
+    tx.deliveries.push(delivery);
+    return delivery;
+  }
+
+  #newDelivery(input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>): Delivery {
+    return {
+      ...input,
+      id: this.#ids.next('D'),
+      createdAt: this.#clock.now().toISOString(),
+      status: 'pending',
+    };
+  }
+
+  /** 事务里暂存了确认的，读出来按已确认给。 */
+  #withStagedAck(tx: PgOpenTransaction | undefined, row: Delivery): Delivery {
+    const at = tx?.acknowledgements.get(row.id);
+    if (!at || row.status === 'acknowledged') return row;
+    return { ...row, status: 'acknowledged', acknowledgedAt: at };
   }
 
   async pending(recipient?: string): Promise<readonly Delivery[]> {
@@ -506,26 +757,41 @@ export class PgDeliveryRepository implements DeliveryRepository {
       : await this.#store.pool.query(
           "SELECT * FROM deliveries WHERE status = 'pending' ORDER BY created_at",
         );
-    return rows.map(toDelivery);
+    const tx = this.#store.currentTransaction();
+    const fromDb = rows.map(toDelivery).filter((row) => !tx?.acknowledgements.has(row.id));
+    const staged = (tx?.deliveries ?? []).filter(
+      (row) => !tx?.acknowledgements.has(row.id) && (!recipient || row.recipient === recipient),
+    );
+    return [...fromDb, ...staged];
   }
 
   async acknowledge(deliveryId: string): Promise<Delivery | undefined> {
-    const { rows } = await this.#store.pool.query(
-      `UPDATE deliveries
-          SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, $2)
-        WHERE delivery_id = $1
-        RETURNING *`,
-      [deliveryId, this.#clock.now().toISOString()],
-    );
+    const tx = this.#store.currentTransaction();
+    if (tx) {
+      const current = await this.get(deliveryId);
+      if (!current) return undefined;
+      if (current.status === 'acknowledged') return current;
+      const at = this.#clock.now().toISOString();
+      tx.acknowledgements.set(deliveryId, at);
+      return { ...current, status: 'acknowledged', acknowledgedAt: at };
+    }
+    await this.#store.settle();
+    const { rows } = await this.#store.pool.query(ACKNOWLEDGE_DELIVERY, [
+      deliveryId,
+      this.#clock.now().toISOString(),
+    ]);
     return rows[0] ? toDelivery(rows[0]) : undefined;
   }
 
   async get(deliveryId: string): Promise<Delivery | undefined> {
+    const tx = this.#store.currentTransaction();
+    const staged = tx?.deliveries.find((row) => row.id === deliveryId);
+    if (staged) return this.#withStagedAck(tx, staged);
     const { rows } = await this.#store.pool.query(
       'SELECT * FROM deliveries WHERE delivery_id = $1',
       [deliveryId],
     );
-    return rows[0] ? toDelivery(rows[0]) : undefined;
+    return rows[0] ? this.#withStagedAck(tx, toDelivery(rows[0])) : undefined;
   }
 }
 
