@@ -182,8 +182,9 @@ export function pgConnectionString(): string {
 /**
  * 开着的 PG 命令事务（C3）：暂存要一起提交的写，和回滚要回到的样子。
  *
- * 只覆盖快照、事件、投递（设计 §8.1 的 aggregate + events + outbox）；查询、验收报告、
- * 候选池、实时输出各有各的表，仍是即时写。
+ * 覆盖快照、事件、投递、验收报告。查询、候选池、实时输出各有各的表，仍是即时写。
+ * 机器验收的报告必须与 validation.reported、validator accept 同生共死——崩在中间
+ * 不能留下孤儿报告（L3 维持验收原文）。
  */
 export interface PgOpenTransaction {
   /** 开事务时各 Project 的快照：回滚就回到这里。 */
@@ -194,6 +195,8 @@ export interface PgOpenTransaction {
   readonly deliveries: Delivery[];
   /** 暂存的确认：deliveryId → 确认时间。 */
   readonly acknowledgements: Map<string, string>;
+  /** 暂存的验收报告，提交时与事件同一个数据库事务 INSERT。 */
+  readonly validationReports: ValidationReport[];
   /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
   readonly done: Promise<void>;
   readonly finish: () => void;
@@ -248,10 +251,10 @@ const ACKNOWLEDGE_DELIVERY = `UPDATE deliveries
         RETURNING *`;
 
 /**
- * **单事务命令（C3）。** `run(fn)` 里的事件与投递先暂存、快照不落盘；fn 结束后一个数据库事务写下
- * 变了的快照（版本号检查）、事件、投递、确认。fn 抛错或提交失败（含版本冲突），数据库回滚，
- * 改过的活对象回到开事务时，暂存丢弃；版本号与「已落库」记账只在提交成功后前移。
- * 事务外的写先等开着的事务结束；从库重读也等——否则会换掉事务正在改的活对象。
+ * **单事务命令（C3 / C4）。** `run(fn)` 里的事件、投递、验收报告先暂存、快照不落盘；fn 结束后一个
+ * 数据库事务写下变了的快照（版本号检查）、事件、投递、确认、验收报告。fn 抛错或提交失败（含版本
+ * 冲突），数据库回滚，改过的活对象回到开事务时，暂存丢弃——包括未提交的报告，崩溃后不留孤儿。
+ * 版本号与「已落库」记账只在提交成功后前移。事务外的写先等开着的事务结束；从库重读也等。
  */
 export class PgStateStore implements CommandTransaction {
   #pool: pg.Pool;
@@ -412,6 +415,7 @@ export class PgStateStore implements CommandTransaction {
       events: [],
       deliveries: [],
       acknowledgements: new Map(),
+      validationReports: [],
       done,
       finish,
     };
@@ -434,14 +438,15 @@ export class PgStateStore implements CommandTransaction {
     }
   }
 
-  /** 一个数据库事务：变了的快照（版本检查）→ 事件 → 投递 → 确认。提交成功后才前移记账。 */
+  /** 一个数据库事务：变了的快照（版本检查）→ 事件 → 投递 → 确认 → 验收报告。提交成功后才前移记账。 */
   async #commit(tx: PgOpenTransaction): Promise<void> {
     const pending = this.#changedProjects();
     if (
       pending.length === 0 &&
       tx.events.length === 0 &&
       tx.deliveries.length === 0 &&
-      tx.acknowledgements.size === 0
+      tx.acknowledgements.size === 0 &&
+      tx.validationReports.length === 0
     ) {
       return;
     }
@@ -453,6 +458,26 @@ export class PgStateStore implements CommandTransaction {
       for (const event of tx.events) await client.query(INSERT_ACTIVITY, activityParams(event));
       for (const delivery of tx.deliveries) await client.query(INSERT_DELIVERY, deliveryParams(delivery));
       for (const [deliveryId, at] of tx.acknowledgements) await client.query(ACKNOWLEDGE_DELIVERY, [deliveryId, at]);
+      // 报告与 validation.reported / accept 同生共死：插不进去且内容不同就抛，让整个事务回滚。
+      for (const report of tx.validationReports) {
+        const inserted = await client.query<{ report_id: string }>(
+          `INSERT INTO validation_reports (report_id, report)
+           VALUES ($1, $2::jsonb)
+           ON CONFLICT (report_id) DO NOTHING
+           RETURNING report_id`,
+          [report.id, JSON.stringify(report)],
+        );
+        if ((inserted.rowCount ?? 0) > 0) continue;
+        const { rows } = await client.query<{ report: ValidationReport | string }>(
+          'SELECT report FROM validation_reports WHERE report_id = $1',
+          [report.id],
+        );
+        const existingRaw = rows[0]?.report;
+        if (existingRaw === undefined) throw new ValidationReportConflictError(report.id);
+        if (!validationReportsEqual(toValidationReport(existingRaw), report)) {
+          throw new ValidationReportConflictError(report.id);
+        }
+      }
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -940,8 +965,9 @@ function toQueryRunRecord(raw: QueryRunRecord | string): QueryRunRecord {
 /**
  * ValidationReport 的 Postgres 仓储。
  *
- * INSERT ... ON CONFLICT DO NOTHING；已存在则结构相等幂等，不等 conflict。
- * 绝不 UPDATE report。JSONB 读出后 clone/freeze，不暴露可变引用。
+ * 命令事务里先暂存，提交时与 validation.reported / accept 同一个数据库事务落下——
+ * 机器验收崩在中间不能留下孤儿报告。事务外仍是 INSERT ... ON CONFLICT DO NOTHING；
+ * 已存在则结构相等幂等，不等 conflict。绝不 UPDATE report。
  */
 export class PgValidationReportRepository implements ValidationReportRepository {
   #store: PgStateStore;
@@ -951,6 +977,27 @@ export class PgValidationReportRepository implements ValidationReportRepository 
   }
 
   async save(report: ValidationReport): Promise<void> {
+    const tx = this.#store.currentTransaction();
+    if (tx) {
+      const staged = tx.validationReports.find((row) => row.id === report.id);
+      if (staged) {
+        if (validationReportsEqual(staged, report)) return;
+        throw new ValidationReportConflictError(report.id);
+      }
+      const { rows } = await this.#store.pool.query<{ report: ValidationReport | string }>(
+        'SELECT report FROM validation_reports WHERE report_id = $1',
+        [report.id],
+      );
+      const existingRaw = rows[0]?.report;
+      if (existingRaw !== undefined) {
+        if (validationReportsEqual(toValidationReport(existingRaw), report)) return;
+        throw new ValidationReportConflictError(report.id);
+      }
+      // clone 再暂存：不 freeze/mutate caller；回滚时数组一起丢，库里不会有半份。
+      tx.validationReports.push(cloneValidationReport(report));
+      return;
+    }
+    await this.#store.settle();
     // 先 clone 一份再序列化：不 freeze/mutate caller；存的内容与 caller 解耦。
     const stored = cloneValidationReport(report);
     const inserted = await this.#store.pool.query<{ report_id: string }>(
@@ -977,6 +1024,9 @@ export class PgValidationReportRepository implements ValidationReportRepository 
   }
 
   async get(reportId: string): Promise<ValidationReport | undefined> {
+    const tx = this.#store.currentTransaction();
+    const staged = tx?.validationReports.find((row) => row.id === reportId);
+    if (staged) return cloneValidationReport(staged);
     const { rows } = await this.#store.pool.query<{ report: ValidationReport | string }>(
       'SELECT report FROM validation_reports WHERE report_id = $1',
       [reportId],

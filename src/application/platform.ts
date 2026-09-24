@@ -259,6 +259,11 @@ export class Platform {
   /* =============================== L3 面 =============================== */
 
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createMission(input));
+  }
+
+  async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
     const project = await this.#ensureProject(input.projectId);
     const missionId = input.missionId ?? this.#ids.next('M');
     const mission = project.createMission({
@@ -279,6 +284,13 @@ export class Platform {
    * executionMode / runKind **只**取 classifier.recommended。
    */
   async createClassifiedMission(
+    input: CreateClassifiedMissionInput,
+  ): Promise<CreateClassifiedMissionResult> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createClassifiedMission(input));
+  }
+
+  async #createClassifiedMission(
     input: CreateClassifiedMissionInput,
   ): Promise<CreateClassifiedMissionResult> {
     assertNoCallerRouteOverride(input as unknown);
@@ -445,6 +457,32 @@ export class Platform {
      */
     sourceAlreadyLanded: boolean;
   }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#rerunMission(missionId, options));
+  }
+
+  async #rerunMission(
+    missionId: string,
+    options?: { newMissionId?: string; baseRevision?: string },
+  ): Promise<{
+    missionId: string;
+    rerunOf: string;
+    contractRevision: number;
+    /** 钉住的分叉基线。源头没记过工作区时为 undefined。 */
+    baseRevision: string | undefined;
+    /**
+     * 源头那次的产出**已经落地进项目了**。
+     *
+     * 这时候这次重跑不是干净的对照：答案就摆在项目的工作区里，agent 读一眼
+     * 就有。实测 P1-single 正是这么干的——它 read 了主仓库的 profile-audit.ts
+     * 和 .test.ts，还 git show 了那次交付的提交。**它不是在解题，是在抄**，
+     * 而两份记录看上去都完整自洽。
+     *
+     * 隔离做不到（agent 用绝对路径就能越出 worktree），所以至少要**说出来**：
+     * 拿这样一次运行去和源头比成本，比出来的数是假的。
+     */
+    sourceAlreadyLanded: boolean;
+  }> {
     const { mission, project } = await this.#locate(missionId);
     if (!mission.contract) {
       throw new PlatformRuleError('NO_CONTRACT', `Mission ${missionId} 没有契约，没法重跑。`);
@@ -587,6 +625,14 @@ export class Platform {
     missionId: string,
     contract: MissionContract,
   ): Promise<{ contractRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#reviseContract(missionId, contract));
+  }
+
+  async #reviseContract(
+    missionId: string,
+    contract: MissionContract,
+  ): Promise<{ contractRevision: number }> {
     const { mission } = await this.#locate(missionId);
     const contractRevision = mission.reviseContract(contract);
     // 契约改了，之前那份交卷、以及**已经派出去的工单**，都是照着旧契约做的。
@@ -612,6 +658,14 @@ export class Platform {
     missionId: string,
     profile?: UsedProfile,
   ): Promise<{ attemptId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#startCoordinatorAttempt(missionId, profile));
+  }
+
+  async #startCoordinatorAttempt(
+    missionId: string,
+    profile?: UsedProfile,
+  ): Promise<{ attemptId: string }> {
     const { mission } = await this.#locate(missionId);
     const attempt = mission.startCoordinatorAttempt();
     if (profile) attempt.recordProfile(profile);
@@ -620,6 +674,15 @@ export class Platform {
   }
 
   async startExecutorAttempt(
+    missionId: string,
+    workItemId: string,
+    profile?: UsedProfile,
+  ): Promise<{ attemptId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#startExecutorAttempt(missionId, workItemId, profile));
+  }
+
+  async #startExecutorAttempt(
     missionId: string,
     workItemId: string,
     profile?: UsedProfile,
@@ -656,6 +719,30 @@ export class Platform {
    * 烧配额，不产生新信息。调度器据此分流。
    */
   async finishAttempt(
+    missionId: string,
+    attemptId: string,
+    outcome: {
+      endedBy: AttemptEndReason;
+      usage?: TokenUsage;
+      failureMessage?: string;
+      /** 运行时留下的续跑句柄。落库才能跨进程续上。 */
+      resumeRef?: string;
+      /** 这一跳的原始输出（尾部）。Timeline 第三层用。 */
+      output?: string;
+      /** 这一跳调过的工具名序列。Timeline 第二层用。 */
+      toolCalls?: readonly string[];
+      /** 运行时实际解析到的身份（S13.3）。 */
+      resolvedProfile?: {
+        readonly revision: string;
+        readonly resolved: readonly { readonly key: string; readonly value: string }[];
+      };
+    },
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#finishAttempt(missionId, attemptId, outcome));
+  }
+
+  async #finishAttempt(
     missionId: string,
     attemptId: string,
     outcome: {
@@ -737,6 +824,11 @@ export class Platform {
    * 不该让一次收尾竞态把整跳搞失败。
    */
   async beatAttempt(missionId: string, attemptId: string, owner?: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#beatAttempt(missionId, attemptId, owner));
+  }
+
+  async #beatAttempt(missionId: string, attemptId: string, owner?: string): Promise<void> {
     const { mission, project } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
     if (!attempt || attempt.status !== 'in_progress') return;
@@ -758,6 +850,15 @@ export class Platform {
    * 区分靠 blocked 记录里写的是谁作废的。
    */
   async retireWorkItem(
+    missionId: string,
+    workItemId: string,
+    reason: string,
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#retireWorkItem(missionId, workItemId, reason));
+  }
+
+  async #retireWorkItem(
     missionId: string,
     workItemId: string,
     reason: string,
@@ -798,6 +899,15 @@ export class Platform {
     reason: WaitReason | undefined,
     detail?: string,
   ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#setWaitReason(missionId, reason, detail));
+  }
+
+  async #setWaitReason(
+    missionId: string,
+    reason: WaitReason | undefined,
+    detail?: string,
+  ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     // detail 变了也要写：同一个 no_available_agent，"卡在 exec-a" 和
     // "卡在 exec-d" 对排障的人是两条不同的信息。
@@ -819,6 +929,11 @@ export class Platform {
    * 文档已经明确推迟。真撞上了的后果是多跑完一跳，不会破坏状态。
    */
   async cancelMission(missionId: string, reason?: string): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#cancelMission(missionId, reason));
+  }
+
+  async #cancelMission(missionId: string, reason?: string): Promise<{ status: string }> {
     const { mission } = await this.#locate(missionId);
     mission.cancel();
     await this.#event(mission, 'mission.cancelled', { reason });
@@ -828,6 +943,11 @@ export class Platform {
 
   /** 暂停：调度器不再碰它，但阶段保持原样。 */
   async pauseMission(missionId: string): Promise<{ paused: boolean }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#pauseMission(missionId));
+  }
+
+  async #pauseMission(missionId: string): Promise<{ paused: boolean }> {
     const { mission } = await this.#locate(missionId);
     mission.pause();
     await this.#event(mission, 'mission.paused', {});
@@ -835,6 +955,11 @@ export class Platform {
   }
 
   async resumeMission(missionId: string): Promise<{ paused: boolean }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#resumeMission(missionId));
+  }
+
+  async #resumeMission(missionId: string): Promise<{ paused: boolean }> {
     const { mission } = await this.#locate(missionId);
     mission.resume();
     await this.#event(mission, 'mission.resumed_from_pause', {});
@@ -1163,6 +1288,16 @@ export class Platform {
     findings: string,
     rejectedHypotheses?: readonly string[],
   ): Promise<{ planRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#updateFindings(missionId, attemptId, findings, rejectedHypotheses));
+  }
+
+  async #updateFindings(
+    missionId: string,
+    attemptId: string,
+    findings: string,
+    rejectedHypotheses?: readonly string[],
+  ): Promise<{ planRevision: number }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const previous = mission.plan;
     const planRevision = mission.updatePlan({
@@ -1188,6 +1323,15 @@ export class Platform {
     attemptId: string,
     plan: PlanBody,
   ): Promise<{ planRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#updatePlan(missionId, attemptId, plan));
+  }
+
+  async #updatePlan(
+    missionId: string,
+    attemptId: string,
+    plan: PlanBody,
+  ): Promise<{ planRevision: number }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const planRevision = mission.updatePlan(plan);
     await this.#event(mission, 'plan.updated', { planRevision }, undefined, attemptId);
@@ -1199,6 +1343,15 @@ export class Platform {
    * 只有写回平台的结论才是权威。这条用工具层强制，不靠提示。
    */
   async createWorkItem(
+    missionId: string,
+    attemptId: string,
+    input: { title: string; order: WorkOrder; workItemId?: string },
+  ): Promise<{ workItemId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createWorkItem(missionId, attemptId, input));
+  }
+
+  async #createWorkItem(
     missionId: string,
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
@@ -1223,6 +1376,14 @@ export class Platform {
    * order.validation 可缺省/commands 可空（表示只跑 changed-paths）；规范化交给 WorkItem 构造器。
    */
   async createLightweightWorkItem(
+    missionId: string,
+    input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
+  ): Promise<{ workItemId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createLightweightWorkItem(missionId, input));
+  }
+
+  async #createLightweightWorkItem(
     missionId: string,
     input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
   ): Promise<{ workItemId: string }> {
@@ -1268,6 +1429,14 @@ export class Platform {
    *（无 attemptId，失败不阻断）。
    */
   async dispatchLightweightWorkItem(
+    missionId: string,
+    workItemId: string,
+  ): Promise<{ dispatched: string }> {
+    // 单事务命令（C4）：占名额、PRE shadow、派发一起提交。PRE shadow 缺省不开；开了事务最多多占一个超时。
+    return this.#tx(() => this.#dispatchLightweightWorkItem(missionId, workItemId));
+  }
+
+  async #dispatchLightweightWorkItem(
     missionId: string,
     workItemId: string,
   ): Promise<{ dispatched: string }> {
@@ -1424,74 +1593,95 @@ export class Platform {
         : {}),
     });
 
-    // append-only：必须先于任何 review / accept。
-    await this.#validation.reports.save(result.report);
+    // 跑完验收命令之后才开事务（C4）：跑命令可能要几分钟，不能占着事务。
+    // 报告、validation.reported、validator accept 一起提交；报告是 append-only 事实，authority 对不上时
+    // 照旧保留——拒绝在事务里只做标记，提交之后再抛。
+    const validation = this.#validation;
+    const committed = await this.#tx(async () => {
+      // 事务里重取：跑命令那几分钟里，活对象可能已经被别处换过。
+      const { mission: live, item: liveItem } = await this.#locateItem(input.missionId, input.workItemId);
 
-    await this.#event(
-      mission,
-      'validation.reported',
-      {
-        reportId: result.report.id,
-        passed: result.report.passed,
+      // append-only：必须先于任何 review / accept。
+      await validation.reports.save(result.report);
+
+      await this.#event(
+        live,
+        'validation.reported',
+        {
+          reportId: result.report.id,
+          passed: result.report.passed,
+          submittedAttemptId,
+        },
+        liveItem.id,
+        // ActivityEvent.attemptId 不要冒充 reviewer
+      );
+
+      if (result.report.passed === false) {
+        // failed report 已保存；不 accept / reject，item 保持 submitted。
+        return { kind: 'failed' as const, status: liveItem.status };
+      }
+
+      // §4.3：实际改动超出 Lightweight 的规模（>3 文件 / >2 顶层目录）时，机器验收过了也不放行。
+      // 一旦 accept，升级到 Standard 之后 L2 就没东西可审了——大改动会绕过评审。
+      // 留在 submitted，由 promoteLightweightAfterValidation 凭这份报告升级。
+      const held = lightweightGateTrigger(result.report);
+      if (held) {
+        return { kind: 'held' as const, status: liveItem.status, held: held.code };
+      }
+
+      const authority = result.authority;
+      const report = result.report;
+      const mismatch =
+        !authority ||
+        authority.kind !== 'validator' ||
+        authority.reportId !== report.id ||
+        authority.policyRevision !== report.policyRevision ||
+        report.missionId !== live.id ||
+        report.workItemId !== liveItem.id ||
+        report.attemptId !== submittedAttemptId;
+
+      if (mismatch) {
+        // 报告保留，item 仍 submitted：提交之后再抛。
+        return { kind: 'mismatch' as const, status: liveItem.status };
+      }
+
+      liveItem.review('accept', {
         submittedAttemptId,
-      },
-      item.id,
-      // ActivityEvent.attemptId 不要冒充 reviewer
-    );
+        authority,
+        reasons: [`ValidationReport ${report.id} passed`],
+        requiredChanges: [],
+      });
 
-    if (result.report.passed === false) {
-      // failed report 已保存；不 accept / reject，item 保持 submitted。
-      return { reportId: result.report.id, passed: false, status: item.status };
+      await this.#event(
+        live,
+        'review.recorded',
+        {
+          verdict: 'accept',
+          authority: 'validator',
+          reportId: report.id,
+          reasons: [`ValidationReport ${report.id} passed`],
+        },
+        liveItem.id,
+        // ActivityEvent.attemptId 留空
+      );
+
+      return { kind: 'accepted' as const, status: liveItem.status };
+    });
+
+    if (committed.kind === 'failed') {
+      return { reportId: result.report.id, passed: false, status: committed.status };
     }
-
-    // §4.3：实际改动超出 Lightweight 的规模（>3 文件 / >2 顶层目录）时，机器验收过了也不放行。
-    // 一旦 accept，升级到 Standard 之后 L2 就没东西可审了——大改动会绕过评审。
-    // 留在 submitted，由 promoteLightweightAfterValidation 凭这份报告升级。
-    const held = lightweightGateTrigger(result.report);
-    if (held) {
-      return { reportId: result.report.id, passed: true, status: item.status, held: held.code };
+    if (committed.kind === 'held') {
+      return { reportId: result.report.id, passed: true, status: committed.status, held: committed.held };
     }
-
-    const authority = result.authority;
-    const report = result.report;
-    const mismatch =
-      !authority ||
-      authority.kind !== 'validator' ||
-      authority.reportId !== report.id ||
-      authority.policyRevision !== report.policyRevision ||
-      report.missionId !== mission.id ||
-      report.workItemId !== item.id ||
-      report.attemptId !== submittedAttemptId;
-
-    if (mismatch) {
-      // 报告保留，item 仍 submitted。
+    if (committed.kind === 'mismatch') {
       throw new PlatformRuleError(
         'VALIDATION_AUTHORITY_MISMATCH',
-        `ValidationReport ${report.id} 通过，但 authority/linkage 与 WorkItem 不一致，拒绝 accept。`,
+        `ValidationReport ${result.report.id} 通过，但 authority/linkage 与 WorkItem 不一致，拒绝 accept。`,
       );
     }
 
-    item.review('accept', {
-      submittedAttemptId,
-      authority,
-      reasons: [`ValidationReport ${report.id} passed`],
-      requiredChanges: [],
-    });
-
-    await this.#event(
-      mission,
-      'review.recorded',
-      {
-        verdict: 'accept',
-        authority: 'validator',
-        reportId: report.id,
-        reasons: [`ValidationReport ${report.id} passed`],
-      },
-      item.id,
-      // ActivityEvent.attemptId 留空
-    );
-
-    return { reportId: report.id, passed: true, status: item.status };
+    return { reportId: result.report.id, passed: true, status: committed.status };
   }
 
   /**
@@ -1663,6 +1853,15 @@ export class Platform {
     attemptId: string,
     workItemIds: readonly string[],
   ): Promise<{ dispatched: readonly string[] }> {
+    // 单事务命令（C4）：占名额、PRE shadow、派发一起提交。PRE shadow 缺省不开；开了事务最多多占一个超时。
+    return this.#tx(() => this.#dispatchWorkItems(missionId, attemptId, workItemIds));
+  }
+
+  async #dispatchWorkItems(
+    missionId: string,
+    attemptId: string,
+    workItemIds: readonly string[],
+  ): Promise<{ dispatched: readonly string[] }> {
     const { mission, project } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     if (workItemIds.length === 0) {
       throw new PlatformRuleError('EMPTY_DISPATCH', '没有指定任何工作项。');
@@ -1711,6 +1910,22 @@ export class Platform {
   }
 
   async reviewExecutionResult(
+    missionId: string,
+    attemptId: string,
+    input: {
+      workItemId: string;
+      verdict: 'accept' | 'reject';
+      reasons: readonly string[];
+      requiredChanges: readonly string[];
+      /** 工单 acceptance 逐条的结论（方案 §11）；工单有验收标准时必填。 */
+      acceptanceResults?: readonly AcceptanceResult[];
+    },
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#reviewExecutionResult(missionId, attemptId, input));
+  }
+
+  async #reviewExecutionResult(
     missionId: string,
     attemptId: string,
     input: {
@@ -1871,6 +2086,14 @@ export class Platform {
     missionId: string,
     ref: { projectRoot?: string; branch: string; baseRevision: string },
   ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordWorkspace(missionId, ref));
+  }
+
+  async #recordWorkspace(
+    missionId: string,
+    ref: { projectRoot?: string; branch: string; baseRevision: string },
+  ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     mission.recordWorkspace(ref);
   }
@@ -1884,6 +2107,11 @@ export class Platform {
    * gates and before any Lightweight / Executor / Coordinator hop.
    */
   async recordOrchestrationRoundStarted(missionId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordOrchestrationRoundStarted(missionId));
+  }
+
+  async #recordOrchestrationRoundStarted(missionId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(mission, 'orchestration.round.started', { schemaVersion: 1 });
   }
@@ -1958,6 +2186,14 @@ export class Platform {
     missionId: string,
     evaluation: BudgetEvaluation,
   ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordBudgetThresholdEvents(missionId, evaluation));
+  }
+
+  async #recordBudgetThresholdEvents(
+    missionId: string,
+    evaluation: BudgetEvaluation,
+  ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     const activity = await this.#activity.list(missionId);
     const seen = new Set<string>();
@@ -1998,6 +2234,13 @@ export class Platform {
    * {@link promoteMissionToStandard}, which still rejects that code.
    */
   async promoteLightweightForBudgetExceeded(
+    missionId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteLightweightForBudgetExceeded(missionId));
+  }
+
+  async #promoteLightweightForBudgetExceeded(
     missionId: string,
   ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
     const { mission } = await this.#locate(missionId);
@@ -2044,6 +2287,11 @@ export class Platform {
    * tool.started. Envelope carries attemptId. No caller-authored payload.
    */
   async recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandTrackingEnabled(missionId, attemptId));
+  }
+
+  async #recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -2061,6 +2309,11 @@ export class Platform {
    * Hub never classifies by tool name. Envelope carries attemptId.
    */
   async recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandStarted(missionId, attemptId, callId));
+  }
+
+  async #recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -2079,6 +2332,11 @@ export class Platform {
    * unknown instead of undercounting.
    */
   async recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandTrackingInvalid(missionId, attemptId));
+  }
+
+  async #recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -2096,6 +2354,14 @@ export class Platform {
    * 协调者下一轮就能在 coagent_get_mission 里看到它，据此继续。
    */
   async answerEscalation(
+    missionId: string,
+    answer: string,
+  ): Promise<{ question: string; answer: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#answerEscalation(missionId, answer));
+  }
+
+  async #answerEscalation(
     missionId: string,
     answer: string,
   ): Promise<{ question: string; answer: string }> {
@@ -2146,6 +2412,22 @@ export class Platform {
    * 拒绝 `budget_exceeded` 的纪律：能从外面写一个 kind 上去，权威就等于没有。
    */
   async finalizeMission(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      /** 只接受 human；principalId 有就记，没有就记「人，不知道是谁」。 */
+      authority?: { kind: 'human'; principalId?: string };
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    // L3（C4）：send_back / abandon 是短命令，状态与事件一起提交。merge 带 git 合并这一外部副作用，不包：
+    // 合并成功后提交丢了，重放会因为目标分支已前移判合并失败——要可重入的合并检测（见规格）。
+    if (input.verdict === 'merge') return this.#finalizeMission(missionId, input);
+    return this.#tx(() => this.#finalizeMission(missionId, input));
+  }
+
+  async #finalizeMission(
     missionId: string,
     input: {
       verdict: 'merge' | 'send_back' | 'abandon';
@@ -2480,6 +2762,19 @@ export class Platform {
       readonly projectRoot?: string;
     },
   ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#abandonMissionForPlan(missionId, input));
+  }
+
+  async #abandonMissionForPlan(
+    missionId: string,
+    input: {
+      readonly planRunId: string;
+      readonly escalationId: string;
+      readonly reasons: readonly string[];
+      readonly projectRoot?: string;
+    },
+  ): Promise<{ status: string }> {
     const text = (value: unknown) => typeof value === 'string' && value.trim() !== '';
     if (!text(input.planRunId) || !text(input.escalationId)) {
       throw new PlatformRuleError(
@@ -2600,6 +2895,15 @@ export class Platform {
     attemptId: string,
     evidence: Omit<EvidenceRecord, 'id' | 'attemptId'>,
   ): Promise<{ evidenceId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#submitEvidence(missionId, attemptId, evidence));
+  }
+
+  async #submitEvidence(
+    missionId: string,
+    attemptId: string,
+    evidence: Omit<EvidenceRecord, 'id' | 'attemptId'>,
+  ): Promise<{ evidenceId: string }> {
     const { mission, attempt } = await this.#requireAttempt(missionId, attemptId, 'executor');
     const evidenceId = this.#ids.next('E');
     attempt.addEvidence({ ...evidence, id: evidenceId, attemptId });
@@ -2614,6 +2918,15 @@ export class Platform {
   }
 
   async submitExecutionResult(
+    missionId: string,
+    attemptId: string,
+    body: ExecutionResultBody,
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#submitExecutionResult(missionId, attemptId, body));
+  }
+
+  async #submitExecutionResult(
     missionId: string,
     attemptId: string,
     body: ExecutionResultBody,
@@ -2658,6 +2971,15 @@ export class Platform {
   }
 
   async reportBlocked(
+    missionId: string,
+    attemptId: string,
+    body: Omit<BlockedRecord, 'attemptId'>,
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#reportBlocked(missionId, attemptId, body));
+  }
+
+  async #reportBlocked(
     missionId: string,
     attemptId: string,
     body: Omit<BlockedRecord, 'attemptId'>,
@@ -2809,6 +3131,14 @@ export class Platform {
     missionId: string,
     reportId: string,
   ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteLightweightAfterValidation(missionId, reportId));
+  }
+
+  async #promoteLightweightAfterValidation(
+    missionId: string,
+    reportId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
     const { mission } = await this.#locate(missionId);
     this.#requireLightweightMutationLane(mission);
     if (!this.#validation) {
@@ -2852,6 +3182,14 @@ export class Platform {
    * {@link promoteLightweightForBudgetExceeded}（Platform 自检求值后发放）。
    */
   async promoteMissionToStandard(
+    missionId: string,
+    trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteMissionToStandard(missionId, trigger));
+  }
+
+  async #promoteMissionToStandard(
     missionId: string,
     trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
   ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
