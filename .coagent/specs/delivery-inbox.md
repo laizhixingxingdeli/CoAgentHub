@@ -55,13 +55,20 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 - 只包短命令：事务之间串行，长等待（L3 合并、机器验收）不能包进来（C4 按提交段切）。
 - 已知代价：事务开着时别处直接改了同一个活对象却不 `save`（如心跳），回滚时会被一起恢复——心跳尽力而为，下一次再打。
 
+**PG 版**（`PgStateStore` 实现，`buildPgPlatform` 注入；C3）：
+
+- 事务里的事件与投递（含投递确认）先暂存，快照 flush 不写；`fn` 结束后**一个数据库事务**：变了的 Project 快照（`WHERE version = 期望版本`）→ 事件 → 投递 `ON CONFLICT (mission_id, idempotency_key) DO NOTHING` → 确认 → `COMMIT`。事务里读得到自己暂存的事件与投递（`list` / `all` / `get` / `pending`）；同键重复建拿回暂存那条，库里已有的原样拿回。
+- `fn` 抛错或提交失败——包括**提交时版本冲突**（别的进程抢先改了同一个 Project）——数据库回滚，改过的活对象回到开事务时，暂存丢弃。版本号与「已落库」记账只在 `COMMIT` 成功后前移（普通快照 flush 同样修正：早先边写边前移，回滚后记账不退，之后每次写都顶成冲突）。
+- 事务外：快照 flush（含 API 的 `persist`）推迟到事务结束；`save` / `ensure` / `append` / `create` / `acknowledge` 先等；从库重读（`refresh`）事务里跳过、事务外先等——重读会换掉事务正在改的活对象。开事务前先等在途的快照 flush 与重读排空。
+- 范围：只覆盖快照、事件、投递（设计 §8.1 的 aggregate + events + outbox）。查询、验收报告、候选池、实时输出各有各的表，仍是即时写。
+- 已知限制：另一个进程恰好同时新建同一个投递键时，本事务暂存的投递 id 在库里不存在（`ON CONFLICT` 什么都没写），`delivery.created` 里的 id 对不上——单写者下几乎不可能。
+
 ## 没做的
 
-- PG 的单事务提交（C3）：PG 版现在仍是事件、投递即时 INSERT，快照等下一次 flush。
 - 其余「改状态 + 记事件」命令接事务（C4）；终态却没有投递的补建（C5）。
 - 同一次工具调用被重发（agent 超时重试）会记成两次升级、两条投递——那是请求级幂等，不在这里。
 
 ## 权威源 / 测试
 
-- 源：`delivery.ts`、`file-store.ts`（含 `run` 事务）、`pg-store.ts`、`platform.ts`（三处建投递、`#tx`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
-- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）
+- 源：`delivery.ts`、`file-store.ts`（含 `run` 事务）、`pg-store.ts`（含 `run` 事务）、`platform.ts`（三处建投递、`#tx`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
+- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）、`pg-command-transaction.test.ts`（真库、独立库：同一套语义；崩溃点含提交时版本冲突；新开 store 读库全有或全无）
