@@ -32,6 +32,7 @@ import type { ValidationReport } from '../kernel/index.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
+import { withDeliveryKey } from './delivery.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -373,6 +374,8 @@ export class FileStateStore {
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
+      // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
+      state.deliveries = state.deliveries.map(withDeliveryKey);
       seedQueryRunIdCounter(state);
       seedValidationReportIdCounter(state);
       return state;
@@ -454,7 +457,8 @@ export class FileStateStore {
   findArchivedDelivery(deliveryId: string): Delivery | undefined {
     for (const pkg of this.#archivedPackages.values()) {
       const found = pkg.deliveries.find((row) => row.id === deliveryId);
-      if (found) return found;
+      // 归档包有 sha256 钉着，不改盘上内容；读出来的副本补键。
+      if (found) return withDeliveryKey(found);
     }
     return undefined;
   }
@@ -540,7 +544,8 @@ export class FileStateStore {
         missionId: existing.missionId,
         mission: existing.mission,
         events: existing.events,
-        deliveries: existing.deliveries,
+        // 加键之前写下的包：主状态那边的同一批投递已在读入时补键，这边按同一规则补了再比。
+        deliveries: Array.isArray(existing.deliveries) ? existing.deliveries.map(withDeliveryKey) : existing.deliveries,
       };
       if (canonicalJson(existingStable) !== canonicalJson(stable)) {
         throw new Error(`COMPACT_PACKAGE_CONFLICT: ${key}`);
@@ -684,7 +689,7 @@ export class FileDeliveryRepository implements DeliveryRepository {
     }
     const rows = this.#store.raw().deliveries;
     const existing = rows.find(
-      (row) => row.missionId === input.missionId && row.outcome === input.outcome,
+      (row) => row.missionId === input.missionId && withDeliveryKey(row).idempotencyKey === input.idempotencyKey,
     );
     if (existing) return existing;
     const delivery: Delivery = {

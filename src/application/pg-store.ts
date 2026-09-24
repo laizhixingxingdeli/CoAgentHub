@@ -107,9 +107,18 @@ CREATE TABLE IF NOT EXISTS deliveries (
   created_at      timestamptz NOT NULL,
   acknowledged_at timestamptz
 );
--- 同一条 Mission 的同一种结局只投递一次。幂等交给数据库管，不靠调用方记得先查。
-CREATE UNIQUE INDEX IF NOT EXISTS deliveries_mission_outcome_idx
-  ON deliveries (mission_id, outcome);
+-- 幂等按业务键：同一条 Mission 的同一个键只投递一次，交给数据库管，不靠调用方记得先查（C1）。
+-- 早先按 (mission_id, outcome) 去重：第二次升级、L3 打回后的重新交卷都被吞掉。
+-- 迁移全部可重复执行：旧行按旧规则回填键（升级那行只可能是第一次升级），先回填再建新索引，
+-- 最后才删旧索引——任何时刻都有一条唯一约束在。
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS idempotency_key text;
+UPDATE deliveries
+   SET idempotency_key = CASE outcome WHEN 'escalated' THEN 'escalated:0' ELSE 'result:legacy:' || outcome END
+ WHERE idempotency_key IS NULL;
+ALTER TABLE deliveries ALTER COLUMN idempotency_key SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS deliveries_mission_key_idx
+  ON deliveries (mission_id, idempotency_key);
+DROP INDEX IF EXISTS deliveries_mission_outcome_idx;
 
 CREATE TABLE IF NOT EXISTS id_counters (
   prefix text PRIMARY KEY,
@@ -466,14 +475,15 @@ export class PgDeliveryRepository implements DeliveryRepository {
     const createdAt = this.#clock.now().toISOString();
     await this.#store.pool.query(
       `INSERT INTO deliveries
-         (delivery_id, mission_id, project_id, outcome, recipient, summary, payload, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending',$8)
-       ON CONFLICT (mission_id, outcome) DO NOTHING`,
+         (delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary, payload, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'pending',$9)
+       ON CONFLICT (mission_id, idempotency_key) DO NOTHING`,
       [
         id,
         input.missionId,
         input.projectId,
         input.outcome,
+        input.idempotencyKey,
         input.recipient ?? null,
         input.summary,
         JSON.stringify(input.payload ?? null),
@@ -481,8 +491,8 @@ export class PgDeliveryRepository implements DeliveryRepository {
       ],
     );
     const { rows } = await this.#store.pool.query(
-      'SELECT * FROM deliveries WHERE mission_id = $1 AND outcome = $2',
-      [input.missionId, input.outcome],
+      'SELECT * FROM deliveries WHERE mission_id = $1 AND idempotency_key = $2',
+      [input.missionId, input.idempotencyKey],
     );
     return toDelivery(rows[0]);
   }
@@ -525,6 +535,7 @@ function toDelivery(row: Record<string, unknown>): Delivery {
     missionId: row.mission_id as string,
     projectId: row.project_id as string,
     outcome: row.outcome as Delivery['outcome'],
+    idempotencyKey: row.idempotency_key as string,
     recipient: (row.recipient as string | null) ?? undefined,
     summary: row.summary as string,
     payload: row.payload,

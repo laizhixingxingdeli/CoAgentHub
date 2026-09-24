@@ -224,6 +224,7 @@ describe('读写 .coagent/', () => {
       'plan-run',
       'machine-final-review',
       'credential-redaction',
+      'delivery-inbox',
     ];
     const requiredAdrs = [
       'adr-0001-web-not-split',

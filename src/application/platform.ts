@@ -63,6 +63,7 @@ import {
   recordPostExecutionShadow,
 } from './post-execution-shadow.ts';
 import type { DeliveryRepository } from './delivery.ts';
+import { escalationDeliveryKey, resultDeliveryKey } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
@@ -1628,6 +1629,8 @@ export class Platform {
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: 'delivered',
+      // 没有协调者：这一次交卷由那份验收报告唯一确定。
+      idempotencyKey: resultDeliveryKey(report.id),
       summary: body.summary,
     });
     await this.#event(
@@ -1763,6 +1766,8 @@ export class Platform {
   ): Promise<void> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     mission.recordEscalation({ ...body, attemptId });
+    // 第几次升级：每一次都要进收件箱，重建同一次的投递不会多一条。
+    const escalationIndex = mission.escalations.length - 1;
     await this.#event(mission, 'escalated', { question: body.question }, undefined, attemptId);
     // 升级只写进平台是不够的：L3 不盯着数据库看。进收件箱才叫升级。
     const delivery = await this.#deliveries.create({
@@ -1770,6 +1775,7 @@ export class Platform {
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: 'escalated',
+      idempotencyKey: escalationDeliveryKey(escalationIndex),
       summary: `${body.question}
 
 为什么需要 L3：${body.why}`,
@@ -1820,6 +1826,8 @@ export class Platform {
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: body.outcome,
+      // 这一次交卷由提交它的协调者 attempt 唯一确定：L3 打回后重新交卷是另一次，照投。
+      idempotencyKey: resultDeliveryKey(attemptId),
       summary: body.summary,
     });
     await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, attemptId);

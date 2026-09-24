@@ -51,6 +51,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   - `plan-run` — 方案运行：无人值守驱动（run-plan）、夜间升级握手（跨进程、只能选动作）与停止条件
   - `machine-final-review` — 机器 L3：合进集成分支、在合并结果上验证、红则回滚；方案放弃失败的 Mission
   - `credential-redaction` — 凭据脱敏：agent 产出与运行输出落盘前抹掉本机凭据值与常见 key 形状
+  - `delivery-inbox` — 投递收件箱：结果与升级回到发起方；按业务幂等键去重（每次升级、每次交卷各一条）
 - **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0005）。
 - 不要把 Mission 历史、临时计划或一次性排障笔记写进上述长期文件。
 - 根目录 `VIBE.md` **只**由 `generateVibe` / 落地时重写；手改会丢。
