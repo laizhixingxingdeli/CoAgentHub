@@ -818,6 +818,21 @@ export class PgDeliveryRepository implements DeliveryRepository {
     );
     return rows[0] ? this.#withStagedAck(tx, toDelivery(rows[0])) : undefined;
   }
+
+  async listForMission(missionId: string): Promise<readonly Delivery[]> {
+    const { rows } = await this.#store.pool.query(
+      'SELECT * FROM deliveries WHERE mission_id = $1 ORDER BY created_at',
+      [missionId],
+    );
+    const tx = this.#store.currentTransaction();
+    const fromDb = rows.map((row) => this.#withStagedAck(tx, toDelivery(row)));
+    const seen = new Set(fromDb.map((row) => row.idempotencyKey));
+    // 命令事务里要把暂存的投递算进来，否则补建在同一事务里会看成「还没有」。
+    const staged = (tx?.deliveries ?? [])
+      .filter((row) => row.missionId === missionId && !seen.has(row.idempotencyKey))
+      .map((row) => this.#withStagedAck(tx, row));
+    return [...fromDb, ...staged];
+  }
 }
 
 function toDelivery(row: Record<string, unknown>): Delivery {
