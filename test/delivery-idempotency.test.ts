@@ -148,9 +148,14 @@ describe('平台：每一次升级、每一次交卷都进收件箱', () => {
     });
     const { attemptId: first } = await platform.startCoordinatorAttempt('M');
     await platform.submitMissionResult('M', first, result('第一版'));
+    // 同一次交卷重复提交（同一个协调者 attempt）：状态机拒也好、放也好，收件箱里只能有一条。
+    await platform.submitMissionResult('M', first, result('第一版重发')).catch(() => undefined);
     await platform.finishAttempt('M', first, { endedBy: 'structured_submit' });
-    const [firstDelivery] = await deliveries.pending('me');
+    const firstRound = await deliveries.pending('me');
+    assert.equal(firstRound.length, 1, '同一次交卷只投一条');
+    const [firstDelivery] = firstRound;
     assert.equal(firstDelivery?.idempotencyKey, `result:${first}`);
+    assert.equal(firstDelivery?.summary, '第一版');
     await deliveries.acknowledge(firstDelivery!.id);
 
     await platform.finalizeMission('M', { verdict: 'send_back', reasons: ['边界说明不够'] });
@@ -266,6 +271,13 @@ describe('文件版旧数据：读入补键，去重接得上', () => {
       ['D-1=escalated:0', 'D-2=result:legacy:delivered', 'D-3=escalated:1'],
       '下一次落盘把补上的键一起写下',
     );
+
+    // 「重启」：新开一个 store 读同一个文件，重建同一次升级的投递拿回原来那条。
+    const reopened = new FileStateStore(path);
+    const again = new FileDeliveryRepository(reopened, new FixedClock(), new PersistentIds(reopened));
+    assert.equal((await again.create(input('M-old', 'escalated:1'))).id, 'D-3');
+    assert.equal((await again.create(input('M-old', 'escalated:0'))).id, 'D-1');
+    assert.equal((await again.pending('me')).filter((d) => d.missionId === 'M-old').length, 2);
   });
 });
 

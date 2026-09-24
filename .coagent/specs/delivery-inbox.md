@@ -25,6 +25,21 @@ Mission 的结果与升级要回到发起方：发起的会话可能已经关了
 - **PG**：唯一索引 `deliveries_mission_key_idx (mission_id, idempotency_key)`，`INSERT … ON CONFLICT DO NOTHING` 再回查，不靠「先查再写」。打开库时的迁移可重复执行：加列 → 按上面的规则回填旧行 → 设 NOT NULL → 建新唯一索引 → 最后才删旧的 `deliveries_mission_outcome_idx`，任何时刻都有一条唯一约束在。
 - `Delivery.idempotencyKey` 是对外字段（只增不改）。
 
+### PG 迁移是单向的
+
+迁移后的库不能再给 C1 之前的代码用：旧代码写投递用的是 `ON CONFLICT (mission_id, outcome)`，旧索引删掉之后这条语句直接报错（找不到匹配的唯一约束）。文件版没有这个问题——旧代码不认识多出来的字段，照旧按结局去重。
+
+真要退回旧代码，先手工把库退回旧约束（**会丢掉**同一 Mission 同一结局的第二条及以后的投递——那正是旧规则吞掉的东西）：
+
+```sql
+DELETE FROM deliveries d USING deliveries e
+ WHERE d.mission_id = e.mission_id AND d.outcome = e.outcome
+   AND (d.created_at, d.delivery_id) > (e.created_at, e.delivery_id);
+CREATE UNIQUE INDEX IF NOT EXISTS deliveries_mission_outcome_idx ON deliveries (mission_id, outcome);
+DROP INDEX IF EXISTS deliveries_mission_key_idx;
+ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
+```
+
 ## 没做的
 
 - 投递与状态、事件同一事务提交（C2 / C3）；终态却没有投递的补建（C5）。
