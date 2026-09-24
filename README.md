@@ -34,6 +34,7 @@ COAGENT_STORE=pg node src/main.ts
 
 周期投递修复由 `COAGENT_RECONCILE_INTERVAL_MS` 控制（缺省 60000 毫秒；`0` 关闭）。
 只补可核实的缺失投递，不把启动时的 Attempt / worktree 收敛改成周期任务。
+`server.close` 与 `run-plan` 退出会先停周期任务再释锁；stop 或关 HTTP 失败不会丢掉另一个错误，告警回调抛错也不会让调度停住。
 
 **文件版不会被删掉。** 它守着一条性质：clone 下来什么都不装就能跑通全部测试。
 第三方依赖只允许出现在 `src/application/pg-store.ts`，`test/source-constraints.test.ts`

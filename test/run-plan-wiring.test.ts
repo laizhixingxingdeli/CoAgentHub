@@ -405,14 +405,18 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /startPeriodicReconcile/);
     assert.match(runPlan, /runHeldFileDeliveryRepair/);
     assert.match(runPlan, /runPgDeliveryRepairTick/);
-    assert.match(runPlan, /finally \{[\s\S]*periodic\.stop\(\)/);
+    assert.match(runPlan, /finally \{[\s\S]*runIndependentCleanup/);
+    assert.match(runPlan, /periodic\.stop\(\)/);
+    assert.match(runPlan, /name: 'persist'/);
+    assert.match(runPlan, /name: 'releaseLock'/);
     assert.doesNotMatch(runPlan, /reconcileInterruptedAttempts/);
     assert.doesNotMatch(runPlan, /reconcileOrphanedWorktrees/);
 
     assert.match(main, /hasArchivedMission/);
     assert.match(main, /runFileObserverDeliveryRepairTick/);
+    assert.match(main, /bindServerCloseToPeriodicStop\(server,/);
+    assert.match(main, /periodic\?\.stop\(\)/);
     assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
-    assert.match(main, /await periodic\.stop\(\)/);
     assert.match(main, /warnDeliveryRepairErrors/);
     assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
     assert.doesNotMatch(

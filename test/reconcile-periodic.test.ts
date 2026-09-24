@@ -32,6 +32,7 @@ import {
 import {
   parseReconcileIntervalMs,
   repairMissingDeliveries,
+  runIndependentCleanup,
   startPeriodicReconcile,
 } from '../src/application/reconcile.ts';
 import {
@@ -182,6 +183,33 @@ describe('startPeriodicReconcile 调度', () => {
     assert.ok(warns.some((row) => row.includes('boom')));
   });
 
+  test('warn 抛错时调度继续，stop 正常完成', async () => {
+    let n = 0;
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      const handle = startPeriodicReconcile({
+        intervalMs: 20,
+        tick: async () => {
+          n += 1;
+          if (n === 1) throw new Error('tick-boom');
+        },
+        warn: () => {
+          throw new Error('warn-boom');
+        },
+      });
+      await sleep(70);
+      await handle.stop();
+      assert.ok(n >= 2, `warn 抛错后应继续，实际 ${n}`);
+      assert.ok(lines.some((row) => row.includes('tick-boom')));
+    } finally {
+      console.warn = original;
+    }
+  });
+
   test('stop 等待在途 tick，之后不再跑', async () => {
     let inTick = false;
     let finished = false;
@@ -206,6 +234,45 @@ describe('startPeriodicReconcile 调度', () => {
     const after = n;
     await sleep(60);
     assert.equal(n, after);
+  });
+});
+
+describe('runIndependentCleanup', () => {
+  test('stop 拒绝时 persist 与 release 仍被调用，错误被记录', async () => {
+    const calls: string[] = [];
+    const reports: string[] = [];
+    await assert.rejects(
+      () =>
+        runIndependentCleanup({
+          steps: [
+            {
+              name: 'periodic.stop',
+              run: async () => {
+                calls.push('stop');
+                throw new Error('stop-boom');
+              },
+            },
+            {
+              name: 'persist',
+              run: async () => {
+                calls.push('persist');
+              },
+            },
+            {
+              name: 'releaseLock',
+              run: () => {
+                calls.push('release');
+              },
+            },
+          ],
+          report: (message) => {
+            reports.push(message);
+          },
+        }),
+      /stop-boom/,
+    );
+    assert.deepEqual(calls, ['stop', 'persist', 'release']);
+    assert.ok(reports.some((row) => row.includes('periodic.stop') && row.includes('stop-boom')));
   });
 });
 

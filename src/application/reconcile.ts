@@ -710,12 +710,27 @@ export interface PeriodicReconcileHandle {
  * 下一轮不开始。stop() 会等在途那一轮结束，之后不再排下一轮。
  *
  * intervalMs <= 0 视为关闭，连第一轮都不排。单次 tick 抛错只 warn，后续照跑。
+ * warn 自己抛错也接住：告警通道不该拖垮调度，否则 stop() 会拒绝、在途 tick 的
+ * 锁和独立连接就收不回来。
  */
 export function startPeriodicReconcile(input: StartPeriodicReconcileInput): PeriodicReconcileHandle {
   const { intervalMs, tick, warn } = input;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let wake: (() => void) | undefined;
+
+  const notify = (message: string, error?: unknown) => {
+    try {
+      warn(message, error);
+    } catch (warnError) {
+      // 告警通道出错不该变成未处理拒绝：退回 console.warn，循环继续。
+      console.warn(message, error);
+      console.warn(
+        `周期投递修复 warn 回调失败：${warnError instanceof Error ? warnError.message : String(warnError)}`,
+        warnError,
+      );
+    }
+  };
 
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => {
@@ -735,7 +750,7 @@ export function startPeriodicReconcile(input: StartPeriodicReconcileInput): Peri
       try {
         await tick();
       } catch (error) {
-        warn(
+        notify(
           `周期投递修复失败：${error instanceof Error ? error.message : String(error)}`,
           error,
         );
@@ -755,4 +770,43 @@ export function startPeriodicReconcile(input: StartPeriodicReconcileInput): Peri
       await loop;
     },
   };
+}
+
+export interface IndependentCleanupStep {
+  readonly name: string;
+  readonly run: () => void | Promise<void>;
+}
+
+/**
+ * 退出清理每一步独立尝试。stop 失败如果直接 await，persist 和 releaseLock
+ * 都跑不到，排他锁就留在盘上；所以一步失败只记下来，后面的照跑，全部结束
+ * 再把失败抛出去（多个用 AggregateError）。
+ */
+export async function runIndependentCleanup(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+}): Promise<void> {
+  const failures: Error[] = [];
+  for (const step of input.steps) {
+    try {
+      await step.run();
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      failures.push(err);
+      const message = `退出清理失败（${step.name}）：${err.message}`;
+      try {
+        input.report(message, error);
+      } catch {
+        // report 自己抛也不该跳过后续步骤（尤其是释锁）。
+        console.error(message, error);
+      }
+    }
+  }
+  if (failures.length === 1) {
+    const only = failures[0];
+    if (only) throw only;
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `退出清理有 ${failures.length} 步失败`);
+  }
 }

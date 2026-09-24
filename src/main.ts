@@ -10,6 +10,7 @@
 
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import { createApi } from './api/server.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -590,6 +591,70 @@ function warnPeriodicRepair(message: string, error?: unknown): void {
   console.warn(message);
 }
 
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function reportServerCloseError(
+  server: Server,
+  error: Error,
+  callback?: (err?: Error) => void,
+): void {
+  if (callback) {
+    callback(error);
+    return;
+  }
+  // 无 callback 不能静默。有 error 监听器才 emit——没人听的 emit('error')
+  // 会变成未捕获异常把进程打挂，比静默更糟；没监听器就 console.error。
+  if (server.listenerCount('error') > 0) {
+    server.emit('error', error);
+    return;
+  }
+  console.error(error);
+}
+
+/**
+ * 调用方只调 server.close 也必须先停周期调度。无论 stop 成败都关 HTTP，
+ * 两个错误都保留：丢掉任何一个，文件锁 / 独立 PG 连接或监听端口就会
+ * 看起来「关了」其实没关完。closeHttp 同步抛错也接住，避免包在没人 await
+ * 的 async 里变成未处理拒绝。
+ */
+export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promise<void>): void {
+  const closeHttp = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    const run = async () => {
+      let stopErr: Error | undefined;
+      try {
+        await stop();
+      } catch (error) {
+        stopErr = asError(error);
+      }
+      let closeErr: Error | undefined;
+      try {
+        closeErr = await new Promise<Error | undefined>((resolve) => {
+          try {
+            closeHttp((err?: Error) => resolve(err));
+          } catch (error) {
+            resolve(asError(error));
+          }
+        });
+      } catch (error) {
+        closeErr = asError(error);
+      }
+      const merged =
+        stopErr && closeErr
+          ? new AggregateError([stopErr, closeErr], `${stopErr.message}; ${closeErr.message}`)
+          : (stopErr ?? closeErr);
+      if (merged) reportServerCloseError(server, merged, callback);
+      else callback?.();
+    };
+    void run().catch((error) => {
+      reportServerCloseError(server, asError(error), callback);
+    });
+    return server;
+  }) as typeof server.close;
+}
+
 /**
  * 起观测面 / API。
  *
@@ -676,22 +741,7 @@ export async function startServer(
         });
   // 调用方只使用 server.close 也必须等到在途 tick 完成并释放文件锁 / 独立 PG 连接。
   // Node 的 close 回调只表示 HTTP 连接断完，不会等我们的 stop，所以先 stop 再关 HTTP。
-  const closeHttp = server.close.bind(server);
-  server.close = ((callback?: (err?: Error) => void) => {
-    void (async () => {
-      try {
-        if (periodic) await periodic.stop();
-      } catch (error) {
-        closeHttp((closeErr?: Error) => {
-          void closeErr;
-          callback?.(error instanceof Error ? error : new Error(String(error)));
-        });
-        return;
-      }
-      closeHttp(callback);
-    })();
-    return server;
-  }) as typeof server.close;
+  bindServerCloseToPeriodicStop(server, () => periodic?.stop() ?? Promise.resolve());
   return {
     server,
     ...built,

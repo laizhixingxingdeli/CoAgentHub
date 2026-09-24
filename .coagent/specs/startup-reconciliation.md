@@ -57,7 +57,12 @@
 
 ### 失败策略
 
-单次 tick 抛错只记 warning，HTTP 健康检查与 `run-plan` 主循环继续，下一轮照跑。上一轮没结束不排下一轮。`repairMissingDeliveries` 把单项读取或补建异常收进 `result.errors` 而不抛：周期 tick 逐项记含 Mission 标识和原因的 warning，不阻断后续 tick；`uncertain` / `skipped` 不是故障，不当 warning。`server.close` 与 `run-plan` 正常 / 异常退出都 `stop`：不再排下一轮，等在途那一轮结束，释放文件锁和独立 PG 连接。调用方只调 `server.close` 也必须等到这一步完成。
+单次 tick 抛错只记 warning，HTTP 健康检查与 `run-plan` 主循环继续，下一轮照跑。上一轮没结束不排下一轮。`repairMissingDeliveries` 把单项读取或补建异常收进 `result.errors` 而不抛：周期 tick 逐项记含 Mission 标识和原因的 warning，不阻断后续 tick；`uncertain` / `skipped` 不是故障，不当 warning。调度的 `warn` 自己抛错时接住并退回 `console.warn`，循环继续，`stop()` 正常完成——告警通道不该拖垮调度。`server.close` 与 `run-plan` 正常 / 异常退出都 `stop`：不再排下一轮，等在途那一轮结束，释放文件锁和独立 PG 连接。调用方只调 `server.close` 也必须等到这一步完成。
+
+关闭与清理的异常路径同样要走完：
+
+- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。stop 与关闭的错误都保留（两个都有时用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。
+- `run-plan` 退出：`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`runIndependentCleanup`），一步失败不跳过后面的，锁必须释放。失败经 `console.error` 留下可诊断信息；全部跑完后若有失败再抛出。
 
 ## Source / tests
 

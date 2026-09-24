@@ -32,6 +32,7 @@ import { GitWorktreeManager } from './application/workspace.ts';
 import type { FileStateStore } from './application/file-store.ts';
 import {
   parseReconcileIntervalMs,
+  runIndependentCleanup,
   startPeriodicReconcile,
   type PeriodicReconcileHandle,
 } from './application/reconcile.ts';
@@ -332,9 +333,23 @@ async function main() {
     console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
   } finally {
-    if (periodic) await periodic.stop();
-    await persist();
-    releaseLock();
+    // stop 失败不能跳过 persist / 释锁：排他锁留在盘上，下一晚开跑会一直锁忙。
+    await runIndependentCleanup({
+      steps: [
+        {
+          name: 'periodic.stop',
+          run: async () => {
+            if (periodic) await periodic.stop();
+          },
+        },
+        { name: 'persist', run: persist },
+        { name: 'releaseLock', run: () => releaseLock() },
+      ],
+      report: (message, error) => {
+        console.error(message);
+        if (error !== undefined) console.error(error);
+      },
+    });
   }
 }
 
