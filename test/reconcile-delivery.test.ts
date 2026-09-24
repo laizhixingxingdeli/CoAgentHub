@@ -74,6 +74,7 @@ function deps(ctx: ReturnType<typeof openFile>) {
     deliveries: ctx.deliveries,
     transaction: ctx.store,
     clock: ctx.clock,
+    isArchivedMission: (missionId: string) => ctx.store.hasArchivedMission(missionId),
   };
 }
 
@@ -368,6 +369,92 @@ describe('验收 2：文件版补当前交卷，不可核实只报告 uncertain'
       '不得杜撰较早交卷的投递',
     );
   });
+
+  test('身份字段冲突：同时有 attemptId 与 reportId 时 uncertain、不补投', async () => {
+    const path = tempState();
+    const ctx = openFile(path);
+
+    const std = await seedMission(ctx, 'M-both-std');
+    std.recordResult(RESULT);
+    std.submitForReview();
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-both-std',
+      attemptId: 'coord-9',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'delivered', missionStatus: 'awaiting_review', reportId: 'VR-9' },
+    });
+
+    const lw = await seedMission(ctx, 'M-both-lw', { executionMode: 'lightweight' });
+    lw.recordResult(RESULT);
+    lw.submitForReview();
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-both-lw',
+      attemptId: 'coord-8',
+      kind: 'mission_result.submitted',
+      data: {
+        outcome: 'delivered',
+        missionStatus: 'awaiting_review',
+        executionMode: 'lightweight',
+        reportId: 'VR-8',
+      },
+    });
+    await ctx.projects.save((await ctx.projects.get('P'))!);
+
+    const report = await repairMissingDeliveries(deps(ctx));
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-both-std' && row.reason.includes('冲突')),
+    );
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-both-lw' && row.reason.includes('冲突')),
+    );
+    assert.equal(report.created.length, 0);
+    assert.equal((await ctx.deliveries.listForMission('M-both-std')).length, 0);
+    assert.equal((await ctx.deliveries.listForMission('M-both-lw')).length, 0);
+  });
+
+  test('错误来源：交卷身份形状与当前模式不符时 uncertain、不补投', async () => {
+    const path = tempState();
+    const ctx = openFile(path);
+
+    const std = await seedMission(ctx, 'M-src-std');
+    std.recordResult(RESULT);
+    std.submitForReview();
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-src-std',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'delivered', missionStatus: 'awaiting_review', reportId: 'VR-std' },
+    });
+
+    const lw = await seedMission(ctx, 'M-src-lw', { executionMode: 'lightweight' });
+    lw.recordResult(RESULT);
+    lw.submitForReview();
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-src-lw',
+      attemptId: 'coord-lw',
+      kind: 'mission_result.submitted',
+      data: {
+        outcome: 'delivered',
+        missionStatus: 'awaiting_review',
+        executionMode: 'lightweight',
+      },
+    });
+    await ctx.projects.save((await ctx.projects.get('P'))!);
+
+    const report = await repairMissingDeliveries(deps(ctx));
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-src-std' && row.reason.includes('来源')),
+    );
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-src-lw' && row.reason.includes('来源')),
+    );
+    assert.equal(report.created.length, 0);
+    assert.equal((await ctx.deliveries.listForMission('M-src-std')).length, 0);
+    assert.equal((await ctx.deliveries.listForMission('M-src-lw')).length, 0);
+  });
 });
 
 describe('验收 3：旧 result:legacy 归属与归档跳过', () => {
@@ -477,6 +564,88 @@ describe('验收 3：旧 result:legacy 归属与归档跳过', () => {
     assert.equal((await ctx.deliveries.listForMission('M-uniq')).length, 1);
   });
 
+  test('不同 outcome 多次提交且无可信关联时 uncertain、不补投', async () => {
+    const path = tempState();
+    const ctx = openFile(path);
+    const mission = await seedMission(ctx, 'M-multi-out');
+    mission.recordResult(RESULT);
+    mission.submitForReview();
+    await ctx.projects.save((await ctx.projects.get('P'))!);
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-multi-out',
+      attemptId: 'coord-a',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'blocked', missionStatus: 'awaiting_review' },
+    });
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-multi-out',
+      attemptId: 'coord-b',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'delivered', missionStatus: 'awaiting_review' },
+    });
+    await ctx.deliveries.create({
+      missionId: 'M-multi-out',
+      projectId: 'P',
+      recipient: 'me',
+      outcome: 'delivered',
+      idempotencyKey: 'result:legacy:delivered',
+      summary: '不知属于哪一次',
+    });
+
+    const report = await repairMissingDeliveries(deps(ctx));
+    assert.equal(report.created.length, 0);
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-multi-out' && row.reason.includes('无法归属')),
+    );
+    assert.equal((await ctx.deliveries.listForMission('M-multi-out')).length, 1);
+  });
+
+  test('delivery.created 关联提交的 outcome 与 legacy 行不符时 uncertain、不补投', async () => {
+    const path = tempState();
+    const ctx = openFile(path);
+    const mission = await seedMission(ctx, 'M-leg-mis');
+    mission.recordResult(RESULT);
+    mission.submitForReview();
+    await ctx.projects.save((await ctx.projects.get('P'))!);
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-leg-mis',
+      attemptId: 'coord-old',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'blocked', missionStatus: 'awaiting_review' },
+    });
+    const legacy = await ctx.deliveries.create({
+      missionId: 'M-leg-mis',
+      projectId: 'P',
+      recipient: 'me',
+      outcome: 'delivered',
+      idempotencyKey: 'result:legacy:delivered',
+      summary: '旧行',
+    });
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-leg-mis',
+      kind: 'delivery.created',
+      data: { deliveryId: legacy.id },
+    });
+    await ctx.activity.append({
+      projectId: 'P',
+      missionId: 'M-leg-mis',
+      attemptId: 'coord-new',
+      kind: 'mission_result.submitted',
+      data: { outcome: 'delivered', missionStatus: 'awaiting_review' },
+    });
+
+    const report = await repairMissingDeliveries(deps(ctx));
+    assert.equal(report.created.length, 0);
+    assert.ok(
+      report.uncertain.some((row) => row.missionId === 'M-leg-mis' && row.reason.includes('无法归属')),
+    );
+    assert.equal((await ctx.deliveries.listForMission('M-leg-mis')).length, 1);
+  });
+
   test('无法归属时报告 uncertain、不重复通知', async () => {
     const path = tempState();
     const ctx = openFile(path);
@@ -540,6 +709,41 @@ describe('验收 3：旧 result:legacy 归属与归档跳过', () => {
     assert.equal(createHash('sha256').update(readFileSync(pkg)).digest('hex'), before);
     assert.equal(readFileSync(path, 'utf8'), diskBefore);
     assert.equal((await ctx.deliveries.listForMission('M-arch')).length, 0);
+  });
+
+  test('归档包已有全部投递、无需补建时仍 skipped 且主状态文件/package/hash 不变', async () => {
+    const path = tempState();
+    const ctx = openFile(path);
+    const mission = await seedMission(ctx, 'M-arch-full');
+    mission.recordResult(RESULT);
+    mission.submitForReview();
+    mission.complete({ verdict: 'merge', reasons: ['ok'] });
+    await ctx.projects.save((await ctx.projects.get('P'))!);
+    const row = await ctx.deliveries.create({
+      missionId: 'M-arch-full',
+      projectId: 'P',
+      recipient: 'me',
+      outcome: 'delivered',
+      idempotencyKey: 'result:coord-full',
+      summary: '改好了',
+    });
+    await ctx.deliveries.acknowledge(row.id);
+    ctx.store.archiveMission('P', 'M-arch-full');
+
+    const pkg = join(dirname(path), '.coagent-archive', 'missions', 'P', 'M-arch-full.json');
+    assert.equal(existsSync(pkg), true);
+    const before = createHash('sha256').update(readFileSync(pkg)).digest('hex');
+    const diskBefore = readFileSync(path, 'utf8');
+
+    const report = await repairMissingDeliveries(deps(ctx));
+    assert.ok(report.skipped.some((item) => item.missionId === 'M-arch-full'));
+    assert.equal(report.created.length, 0);
+    assert.equal(
+      report.uncertain.some((item) => item.missionId === 'M-arch-full'),
+      false,
+    );
+    assert.equal(createHash('sha256').update(readFileSync(pkg)).digest('hex'), before);
+    assert.equal(readFileSync(path, 'utf8'), diskBefore);
   });
 });
 

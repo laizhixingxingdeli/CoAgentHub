@@ -229,6 +229,11 @@ export interface RepairMissingDeliveriesDeps {
   readonly deliveries: DeliveryRepository;
   readonly transaction: CommandTransaction;
   readonly clock: Clock;
+  /**
+   * 文件版才有归档。不传（PG / 内存）就不当归档处理。
+   * 必须在读投递/事件之前判断：归档包有 hash 钉着，不能等写失败再靠文案跳过。
+   */
+  readonly isArchivedMission?: (missionId: string) => boolean;
 }
 
 export interface RepairMissingDeliveriesOptions {
@@ -265,10 +270,13 @@ export interface RepairMissingDeliveriesResult {
   readonly errors: readonly DeliveryRepairError[];
 }
 
+type SubmissionIdentityIssue = 'ok' | 'missing' | 'conflict' | 'wrong_source';
+
 interface ResultSubmission {
   readonly event: ActivityEvent;
   readonly identity: string | undefined;
   readonly outcome: unknown;
+  readonly identityIssue: SubmissionIdentityIssue;
 }
 
 interface PlannedCreate {
@@ -299,6 +307,10 @@ export async function repairMissingDeliveries(
   for (const project of projects) {
     for (const mission of project.missions) {
       if (options?.missionId && mission.id !== options.missionId) continue;
+      if (deps.isArchivedMission?.(mission.id)) {
+        skipped.push({ missionId: mission.id, reason: '已归档，跳过补建' });
+        continue;
+      }
       try {
         const outcome = await repairOneMission(deps, mission);
         created.push(...outcome.created);
@@ -411,7 +423,7 @@ function planCurrentResultRepair(
     return { existing, uncertain };
   }
 
-  const submissions = listResultSubmissions(events);
+  const submissions = listResultSubmissions(events, mission.executionMode);
   if (submissions.length === 0) {
     uncertain.push({ missionId: mission.id, reason: '没有可核实的交卷事件' });
     return { existing, uncertain };
@@ -429,8 +441,16 @@ function planCurrentResultRepair(
     });
   }
 
-  if (!last.identity) {
-    uncertain.push({ missionId: mission.id, reason: '最后一次交卷缺少身份' });
+  if (last.identityIssue !== 'ok' || !last.identity) {
+    uncertain.push({
+      missionId: mission.id,
+      reason:
+        last.identityIssue === 'conflict'
+          ? '最后一次交卷身份字段冲突，无法核实'
+          : last.identityIssue === 'wrong_source'
+            ? '最后一次交卷身份来源与当前交卷模式不符'
+            : '最后一次交卷缺少身份',
+    });
     return { existing, uncertain };
   }
   if (last.outcome !== currentOutcome) {
@@ -452,7 +472,7 @@ function planCurrentResultRepair(
   const legacyKey = `result:legacy:${currentOutcome}`;
   const legacy = byKey.get(legacyKey);
   if (legacy) {
-    const attributed = attributeLegacyResult(legacy, events, submissions, currentOutcome);
+    const attributed = attributeLegacyResult(legacy, events, submissions);
     if (!attributed) {
       uncertain.push({
         missionId: mission.id,
@@ -486,20 +506,49 @@ function planCurrentResultRepair(
   };
 }
 
-function listResultSubmissions(events: readonly ActivityEvent[]): ResultSubmission[] {
+function listResultSubmissions(
+  events: readonly ActivityEvent[],
+  executionMode: Mission['executionMode'],
+): ResultSubmission[] {
   const rows: ResultSubmission[] = [];
   for (const event of events) {
     if (event.kind !== 'mission_result.submitted') continue;
     const data = eventData(event);
-    const fromAttempt = typeof event.attemptId === 'string' && event.attemptId !== '' ? event.attemptId : undefined;
-    const fromReport = typeof data.reportId === 'string' && data.reportId !== '' ? data.reportId : undefined;
+    const fromAttempt =
+      typeof event.attemptId === 'string' && event.attemptId !== '' ? event.attemptId : undefined;
+    const fromReport =
+      typeof data.reportId === 'string' && data.reportId !== '' ? data.reportId : undefined;
+    const resolved = resolveSubmissionIdentity(executionMode, fromAttempt, fromReport);
     rows.push({
       event,
-      identity: fromAttempt ?? fromReport,
+      identity: resolved.identity,
       outcome: data.outcome,
+      identityIssue: resolved.identityIssue,
     });
   }
   return rows;
+}
+
+/**
+ * 按 Mission 当前交卷模式取身份。混用 attemptId / reportId 会把 Lightweight
+ * 的报告当成 Standard 的 attempt；升级后的 Mission 尤其会猜错。
+ */
+function resolveSubmissionIdentity(
+  executionMode: Mission['executionMode'],
+  fromAttempt: string | undefined,
+  fromReport: string | undefined,
+): { identity: string | undefined; identityIssue: SubmissionIdentityIssue } {
+  if (executionMode === 'lightweight') {
+    if (fromAttempt && fromReport) return { identity: undefined, identityIssue: 'conflict' };
+    if (fromAttempt && !fromReport) return { identity: undefined, identityIssue: 'wrong_source' };
+    if (!fromReport) return { identity: undefined, identityIssue: 'missing' };
+    return { identity: fromReport, identityIssue: 'ok' };
+  }
+  // standard / high_assurance：身份只能是协调者 attemptId
+  if (fromAttempt && fromReport) return { identity: undefined, identityIssue: 'conflict' };
+  if (fromReport && !fromAttempt) return { identity: undefined, identityIssue: 'wrong_source' };
+  if (!fromAttempt) return { identity: undefined, identityIssue: 'missing' };
+  return { identity: fromAttempt, identityIssue: 'ok' };
 }
 
 function submissionAlreadyDelivered(
@@ -512,7 +561,7 @@ function submissionAlreadyDelivered(
   if (submission.identity && byKey.get(resultDeliveryKey(submission.identity))) return true;
   const legacy = byKey.get(`result:legacy:${submission.outcome === currentOutcome ? currentOutcome : String(submission.outcome)}`);
   if (!legacy) return false;
-  const attributed = attributeLegacyResult(legacy, events, submissions, currentOutcome);
+  const attributed = attributeLegacyResult(legacy, events, submissions);
   return attributed?.event === submission.event;
 }
 
@@ -520,7 +569,6 @@ function attributeLegacyResult(
   legacy: Delivery,
   events: readonly ActivityEvent[],
   submissions: readonly ResultSubmission[],
-  currentOutcome: string,
 ): ResultSubmission | undefined {
   const createdIndex = events.findIndex((event) => {
     if (event.kind !== 'delivery.created') return false;
@@ -530,13 +578,19 @@ function attributeLegacyResult(
     for (let i = createdIndex - 1; i >= 0; i -= 1) {
       const prior = events[i]!;
       if (prior.kind === 'mission_result.submitted') {
-        return submissions.find((row) => row.event === prior);
+        const found = submissions.find((row) => row.event === prior);
+        // 有 delivery.created 只说明「这条投递当时为某次提交而建」，还要 outcome 对得上。
+        if (!found || found.outcome !== legacy.outcome) return undefined;
+        return found;
       }
     }
+    // 有 delivery.created 但前面没有交卷：不能退回「唯一提交」猜测。
+    return undefined;
   }
-  // 没有可信的 delivery.created 链时：只有唯一一次同 outcome 的交卷才能无歧义归属。
-  const same = submissions.filter((row) => row.outcome === currentOutcome);
-  return same.length === 1 ? same[0] : undefined;
+  // 没有可信链时不能在多次提交里挑：必须全局只交过一次，且 outcome 与 legacy 行相同。
+  if (submissions.length !== 1) return undefined;
+  const only = submissions[0]!;
+  return only.outcome === legacy.outcome ? only : undefined;
 }
 
 async function applyMissingDelivery(
