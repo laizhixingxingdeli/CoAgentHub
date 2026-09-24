@@ -454,6 +454,32 @@ describe('Platform.runPostExecutionShadow', () => {
     assert.equal(dataOf(shadowEvents(await other.activity.list('M'))[0]!).filesSource, 'executor_claim');
   });
 
+  test('证据只取交卷的那个 attempt：前一次没交卷的尝试留下的失败证据不混进来', async () => {
+    const { evaluator, seen } = recordingEvaluator();
+    const { platform } = standardPlatform({ evaluator });
+    await platform.createMission({ projectId: 'P', missionId: 'M', contract: CONTRACT });
+    const { attemptId: coordinator } = await platform.startCoordinatorAttempt('M');
+    await platform.updatePlan('M', coordinator, PLAN);
+    const { workItemId } = await platform.createWorkItem('M', coordinator, { title: 'w', order: ORDER });
+    await platform.dispatchWorkItems('M', coordinator, [workItemId]);
+    await platform.finishAttempt('M', coordinator, { endedBy: 'structured_submit' });
+    // 第一次：跑挂了，只留下一条失败的测试证据。
+    const { attemptId: first } = await platform.startExecutorAttempt('M', workItemId);
+    await platform.submitEvidence('M', first, { kind: 'test', summary: '红了', command: 'node --test', exitCode: 1 });
+    await platform.finishAttempt('M', first, { endedBy: 'upstream_failure', failureMessage: '403' });
+    // 第二次：交卷。
+    const { attemptId: second } = await platform.startExecutorAttempt('M', workItemId);
+    const { evidenceId } = await platform.submitEvidence('M', second, { kind: 'test', summary: '绿了', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M', second, { ...RESULT, evidenceIds: [evidenceId] });
+    await platform.finishAttempt('M', second, { endedBy: 'structured_submit' });
+
+    await platform.runPostExecutionShadow('M', workItemId);
+    const state = seen[0]!;
+    assert.equal(state.verification.tests.status, 'passed', JSON.stringify(state.verification.tests));
+    assert.deepEqual(state.verification.tests.failedChecks, []);
+    assert.deepEqual(state.executorResult.claimedEvidence.evidenceIds, [evidenceId]);
+  });
+
   test('工具记录记满 200 条：toolCount 标为拿不到，而不是报 200', async () => {
     const { evaluator, seen } = recordingEvaluator();
     const { platform } = standardPlatform({ evaluator });
@@ -694,6 +720,26 @@ describe('编排器接线：什么时候问', () => {
     const events = await h.activity.list('M-std');
     const submit = events.find((e) => e.kind === 'execution_result.submitted')!;
     assert.equal(dataOf(shadowEvents(events)[0]!).ids.submittedAttemptId, submit.attemptId);
+  });
+
+  test('评估器出错：主流程照走，结局与没有 shadow 时一样', async () => {
+    const { evaluator, seen } = recordingEvaluator(async () => {
+      throw new Error('socket hang up');
+    });
+    const h = await orchestrated({ coordinator: COORDINATOR_STANDARD, evaluator });
+    await h.platform.createMission({ projectId: 'P', missionId: 'M-err', contract: CONTRACT });
+
+    const result = await h.orchestrator.runMission('M-err', { projectRoot: process.cwd() });
+
+    assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+    assert.deepEqual(
+      h.orchestrator.hops.map((x) => `${x.role}:${x.endedBy}`),
+      ['coordinator:structured_submit', 'executor:structured_submit', 'coordinator:structured_submit'],
+    );
+    const view = await h.platform.getMissionView('M-err');
+    assert.equal(view.workItems[0]!.status, 'accepted');
+    assert.equal(seen.length, 1);
+    assert.equal(dataOf(shadowEvents(await h.activity.list('M-err'))[0]!).quality, 'provider_error');
   });
 
   test('Lightweight 验收通过：机器验收之后问一次', async () => {
