@@ -68,6 +68,12 @@ export interface DeliveryRepository {
   pending(recipient?: string): Promise<readonly Delivery[]>;
   acknowledge(deliveryId: string): Promise<Delivery | undefined>;
   get(deliveryId: string): Promise<Delivery | undefined>;
+  /**
+   * 按 Mission 枚举全部投递（含 acknowledged）。
+   * 补建必须看见已确认行，否则会把已经投过的再投一次。
+   * pending / acknowledge 语义不变。
+   */
+  listForMission(missionId: string): Promise<readonly Delivery[]>;
 }
 
 export class InMemoryDeliveryRepository implements DeliveryRepository {
@@ -121,5 +127,9 @@ export class InMemoryDeliveryRepository implements DeliveryRepository {
 
   async get(deliveryId: string): Promise<Delivery | undefined> {
     return this.#rows.get(deliveryId);
+  }
+
+  async listForMission(missionId: string): Promise<readonly Delivery[]> {
+    return [...this.#rows.values()].filter((row) => row.missionId === missionId);
   }
 }

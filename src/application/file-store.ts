@@ -887,6 +887,15 @@ export class FileDeliveryRepository implements DeliveryRepository {
     if (main) return main;
     return this.#store.findArchivedDelivery(deliveryId);
   }
+
+  async listForMission(missionId: string): Promise<readonly Delivery[]> {
+    this.#store.refreshIfChanged();
+    // 只看工作集：归档包有 hash 钉着，补建不得靠读包来「已存在」而漏掉跳过。
+    return this.#store
+      .raw()
+      .deliveries.filter((row) => row.missionId === missionId)
+      .map(withDeliveryKey);
+  }
 }
 
 export class FileActivityLog implements ActivityLog {
