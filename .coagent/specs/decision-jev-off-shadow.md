@@ -66,6 +66,28 @@ Decision 是 Application 侧横向信号，不是第四层。当前只有 `off` 
 - `baselineAction` / `effectiveAction` 均为既定 workItemIds 的 dispatch 副本；本期不做信号驱动的路径改写。
 - Phase2 退出评估（`phase2-shadow-exit-evaluator.ts`）只**离线**消费 `decision.shadow` 流，不接生产 dispatch。
 
+## Phase 2 退出判据
+
+`evaluatePhase2ShadowExit(events, criteria, { costModel?, labels? })`：七条判据，无默认阈值；没配的判据 `not_evaluated`。任一 `fail` → gate `fail`；无 fail 但有 `not_evaluated` → `insufficient_evidence`；七条全 `pass` 才 `pass`。
+
+| 判据 | 看什么 |
+| --- | --- |
+| minSamples / minSuccessRate / maxP95LatencyMs | 样本数、成功率、P95 延迟（成功 + provider_error 都计延迟） |
+| requireDataIntegrity / requireNoBehaviorChange | 事件结构完整；effectiveAction 恒等于 baselineAction |
+| maxEstimatedCostUsd | 按 costModel 估花销（缺 costModel 判 fail） |
+| **answerQuality**（J3） | 答案对不对：对照人工标注的逐题准确率、相对「全猜多数类」的提升 |
+
+前六条只看管线。E3 实测：远端默认拒绝（只给 ID）下三道题都比全猜多数类差，照样能全过——「过了 Phase 2」说明不了 Jev 有用，所以补第七条。
+
+**answerQuality**：
+
+- 阈值 `{ minAccuracy?, minLiftOverMajority?, questions?, minLabeledSamples? }`，前两个至少给一个（都没有 → `invalid_criteria`）；每道要评的题都得达到。`questions` 缺省 = 标注里出现过的题；`minLabeledSamples` 缺省 1。
+- 标注从 `options.labels` 传入（离线人工标注，这里不读任何存储），按 `missionId` + `workItemIds`（顺序无关）对上**成功**的 shadow 事件；provider_error 不参与（可用性由成功率管）。
+- 判对：choice 题比选项；`semantic_risk` 四舍五入到最近的档（标注写下标 0..3 或档名，大小写不论）；`work_order_ambiguous` 以 0.5 为界比是非；标了却没答、答 noop、题型对不上都算错。量法与 E3 一致。
+- **没有标注判不满足、不跳过**：配了阈值但没传标注 → `fail no_labels`；一条都对不上成功样本 → `fail no_labeled_samples`；某题样本不够 → `fail insufficient_labeled_samples`；标注本身不合法（未知题、值与题型不符、同一派发标了两份）→ `fail invalid_labels`，整批不用，不悄悄丢掉坏的那条。
+- 报告 `metrics.answerQuality`：对上标注的样本数，逐题 `labeled / correct / accuracy / majorityLabel / majorityBaseline / lift`。
+- 已知局限：歧义题 E3 实测刻度整体偏高、0.5 不合适，这条判据会如实判它不过；要用得改题面或按实测给该题单独阈值（未做）。
+
 ## Source / tests
 
 - 源：`decision-mode.ts`、`decision-provider-factory.ts`、`decision-shadow-runner.ts`、`jev-decision-provider.ts`、`jev-post-execution-evaluator.ts`、`post-execution-shadow.ts`、`platform.ts`（dispatch 钩子、`runPostExecutionShadow`）、`orchestrator.ts`、`main.ts`（`buildDecisionDeps`）、`run-mission.ts`、`run-plan.ts`
