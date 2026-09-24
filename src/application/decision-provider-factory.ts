@@ -6,7 +6,8 @@
  */
 
 import type { DecisionMode } from './decision-mode.ts';
-import type { DecisionProvider } from './ports.ts';
+import type { DecisionProvider, PostExecutionEvaluator } from './ports.ts';
+import { JevPostExecutionEvaluator } from './jev-post-execution-evaluator.ts';
 import { JevDecisionProvider } from './jev-decision-provider.ts';
 import { createJevSystemOneHttpTransport } from './jev-system-one-http-transport.ts';
 
@@ -49,16 +50,13 @@ function parsePositiveIntEnv(
 }
 
 /**
- * 按 mode 构造可选 DecisionProvider。
- * mode !== shadow 时立即 undefined，不触碰任何 decision 相关 env。
+ * shadow 模式下 PRE 与 POST 共用的那一份配置与传输：同一把 key、同一个超时、同一个模型。
+ * 只在 shadow 时被调用——off 模式不碰任何 decision 相关 env 的性质由两个入口各自先挡。
  */
-export function createDecisionProvider(
-  options: DecisionProviderFactoryOptions,
-): DecisionProvider | undefined {
-  if (options.mode !== 'shadow') {
-    return undefined;
-  }
-
+function shadowTransport(options: DecisionProviderFactoryOptions): {
+  transport: ReturnType<typeof createJevSystemOneHttpTransport>;
+  model: string;
+} {
   const env = options.env;
   const apiKeyRaw = env.TYPESAFE_API_KEY;
   const apiKey = apiKeyRaw == null ? '' : String(apiKeyRaw).trim();
@@ -93,6 +91,33 @@ export function createDecisionProvider(
     timeoutMs,
     maxBodyBytes,
   });
+  return { transport, model };
+}
 
+/**
+ * 按 mode 构造可选 DecisionProvider（PRE_DISPATCH）。
+ * mode !== shadow 时立即 undefined，不触碰任何 decision 相关 env。
+ */
+export function createDecisionProvider(
+  options: DecisionProviderFactoryOptions,
+): DecisionProvider | undefined {
+  if (options.mode !== 'shadow') {
+    return undefined;
+  }
+  const { transport, model } = shadowTransport(options);
   return new JevDecisionProvider({ transport, model });
+}
+
+/**
+ * 按 mode 构造可选 POST_EXECUTION 评估器（J2）。
+ * 与 createDecisionProvider 同一套 env 与传输；mode !== shadow 时立即 undefined，不触碰任何 env。
+ */
+export function createPostExecutionEvaluator(
+  options: DecisionProviderFactoryOptions,
+): PostExecutionEvaluator | undefined {
+  if (options.mode !== 'shadow') {
+    return undefined;
+  }
+  const { transport, model } = shadowTransport(options);
+  return new JevPostExecutionEvaluator({ transport, model });
 }

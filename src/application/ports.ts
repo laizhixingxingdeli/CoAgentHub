@@ -7,6 +7,7 @@
  */
 
 import type { Project } from '../kernel/index.ts';
+import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
 
 export interface ProjectRepository {
@@ -260,4 +261,14 @@ export interface DecisionAnswerSet {
 export interface DecisionProvider {
   readonly kind: string;
   decide(request: DecisionRequest): Promise<DecisionAnswerSet>;
+}
+
+/**
+ * POST_EXECUTION 评估（Jev 设计 §9）。与 DecisionProvider 分开：PRE 只拿 ID 与 facts（远端默认拒绝），
+ * POST 拿的是按预算投影过的执行摘要——两者放出去的数据不同，端口也分开，免得一个口子上两套放行规则。
+ * 同样只产信号、不具执行权威（ADR-0002）。
+ */
+export interface PostExecutionEvaluator {
+  readonly kind: string;
+  evaluate(state: PostExecutionRemoteState): Promise<DecisionAnswerSet>;
 }

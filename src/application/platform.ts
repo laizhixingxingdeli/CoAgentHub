@@ -48,7 +48,20 @@ import type {
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
-import type { ActivityLog, Clock, DecisionHook, DecisionProvider, IdGenerator, ProjectRepository } from './ports.ts';
+import type {
+  ActivityLog,
+  Clock,
+  DecisionHook,
+  DecisionProvider,
+  IdGenerator,
+  PostExecutionEvaluator,
+  ProjectRepository,
+} from './ports.ts';
+import {
+  POST_EXECUTION_SHADOW_EVENT_KIND,
+  postExecutionInputFrom,
+  recordPostExecutionShadow,
+} from './post-execution-shadow.ts';
 import type { DeliveryRepository } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
@@ -161,6 +174,11 @@ export interface PlatformDeps {
    */
   decisionHooks?: ReadonlySet<DecisionHook>;
   /**
+   * POST_EXECUTION 评估器（J2）。注入且钩子含 POST_EXECUTION 时，编排器在交卷 + 确定性验收之后
+   * 调 runPostExecutionShadow；不注入则完全跳过。
+   */
+  postExecutionEvaluator?: PostExecutionEvaluator;
+  /**
    * Lightweight 机器验收依赖（成组 optional）。
    * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
    */
@@ -212,6 +230,7 @@ export class Platform {
   #clock: Clock;
   #decisionProvider: DecisionProvider | undefined;
   #decisionHooks: ReadonlySet<DecisionHook>;
+  #postExecutionEvaluator: PostExecutionEvaluator | undefined;
   #validation: PlatformValidationDeps | undefined;
 
   constructor(deps: PlatformDeps) {
@@ -224,6 +243,7 @@ export class Platform {
     this.#clock = deps.clock;
     this.#decisionProvider = deps.decisionProvider;
     this.#decisionHooks = deps.decisionHooks ?? new Set<DecisionHook>(['POST_EXECUTION']);
+    this.#postExecutionEvaluator = deps.postExecutionEvaluator;
     this.#validation = deps.validation;
   }
 
@@ -2677,6 +2697,58 @@ export class Platform {
   }
 
   /**
+   * POST_EXECUTION shadow（Jev 设计 §9，J2）：编排器在「执行者交卷 + 确定性验收」之后调用。
+   *
+   * 非权威、从不抛：评估器没注入、钩子没开、工作项不在交卷状态，都直接返回；取数或调用出任何错也只进事件。
+   * 输入只取平台自己存的：工单、当前那次提交、那个 attempt 的证据，改动清单优先用平台算的 diff。
+   */
+  async runPostExecutionShadow(missionId: string, workItemId: string): Promise<void> {
+    const evaluator = this.#postExecutionEvaluator;
+    if (!evaluator || !this.#decisionHooks.has('POST_EXECUTION')) return;
+    try {
+      const { mission } = await this.#locate(missionId);
+      const item = mission.workItem(workItemId);
+      const submittedAttemptId = item?.submittedAttemptId;
+      const order = item?.order;
+      const result = item?.executionResult;
+      if (!item || (item.status !== 'submitted' && item.status !== 'accepted') || !submittedAttemptId || !order || !result) return;
+      // 一次交卷只问一次：崩溃后接着跑会把同一次提交再验一遍，这时不再多花一次付费调用。
+      const events = await this.#activity.list(missionId);
+      if (events.some((e) => e.kind === POST_EXECUTION_SHADOW_EVENT_KIND && shadowAttemptOf(e.data) === submittedAttemptId)) return;
+      const attempt = item.attempts.find((a) => a.id === submittedAttemptId);
+      const trustedFiles = await this.#trustedChangedFiles(mission);
+      const { input, filesSource } = postExecutionInputFrom({
+        order,
+        result,
+        evidence: attempt?.evidence ?? [],
+        ...(trustedFiles ? { trustedFiles } : {}),
+        ...(attempt ? { toolActivityCount: attempt.toolActivity.length } : {}),
+      });
+      await recordPostExecutionShadow(
+        { evaluator, activity: this.#activity, clock: this.#clock },
+        { projectId: mission.projectId, missionId, workItemId, submittedAttemptId, input, filesSource },
+      );
+    } catch {
+      // shadow 从不影响主流程。
+    }
+  }
+
+  /**
+   * 平台自己算的改动清单。只在真有隔离工作区时可信：原地模式的 diff 永远是空的，
+   * 分不清「没改」和「没隔离」，这时返回 undefined，让调用方照实退回执行者自报。
+   */
+  async #trustedChangedFiles(mission: Mission): Promise<readonly string[] | undefined> {
+    const ref = mission.workspaceRef;
+    if (!this.#workspace || typeof this.#workspace.worktreePath !== 'function') return undefined;
+    if (!ref?.projectRoot || !ref.baseRevision) return undefined;
+    try {
+      return (await this.#workspace.diff(mission.id, ref.baseRevision, ref.projectRoot)).files;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Lightweight 交卷后的自动升级（§4.3 接线）：验收没过、或实际改动超出轻量规模时，交给 Standard。
    *
    * 触发只从平台自己保存的那份 ValidationReport 复算（{@link lightweightGateTrigger}），
@@ -3491,4 +3563,13 @@ export interface UsageReport {
   byRole: UsageBucket[];
   /** 按运行时报回来的事实分组。适配层填 provider / model，所以这一项覆盖了两者。 */
   byFact: { key: string; value: string; attempts: number; usage: TokenUsage }[];
+}
+
+/** decision.post_execution 事件问的是哪一次提交；读不出来就当不是（宁可多问一次，不漏问）。 */
+function shadowAttemptOf(data: unknown): string | undefined {
+  if (data === null || typeof data !== 'object') return undefined;
+  const ids = (data as { ids?: unknown }).ids;
+  if (ids === null || typeof ids !== 'object') return undefined;
+  const id = (ids as { submittedAttemptId?: unknown }).submittedAttemptId;
+  return typeof id === 'string' ? id : undefined;
 }
