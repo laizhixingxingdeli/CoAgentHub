@@ -21,6 +21,8 @@ const releaseFns: Array<() => void> = [];
 
 after(() => {
   for (const server of servers) {
+    // 已关闭的再 close，包装后的 close 无 callback 时会把 ERR_SERVER_NOT_RUNNING 打到 stderr。
+    if (!server.listening) continue;
     try {
       server.close();
     } catch {
@@ -686,6 +688,83 @@ describe('server.close 异常路径', () => {
       assert.ok(seen.some((row) => String(row.message).includes('stop-boom')));
     } finally {
       process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('callback 自己抛错只调用一次，没有未处理拒绝', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
+    try {
+      const server = createServer();
+      await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+      servers.push(server);
+      bindServerCloseToPeriodicStop(server, async () => {
+        throw new Error('stop-boom');
+      });
+      let calls = 0;
+      server.close(() => {
+        calls += 1;
+        throw new Error('callback-boom');
+      });
+      const deadline = Date.now() + 200;
+      while (calls === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(calls, 1, 'callback 最多调用一次');
+      assert.equal(rejections.length, 0, '不得留下未处理拒绝');
+      assert.ok(
+        logged.some((row) => row instanceof Error && String(row.message).includes('callback-boom')),
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      console.error = original;
+    }
+  });
+
+  test('error 监听器自己抛错不重复交付，没有未处理拒绝', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args[0]);
+    };
+    try {
+      const server = createServer();
+      bindServerCloseToPeriodicStop(server, async () => {
+        throw new Error('stop-boom');
+      });
+      let calls = 0;
+      server.on('error', () => {
+        calls += 1;
+        throw new Error('listener-boom');
+      });
+      server.close();
+      const deadline = Date.now() + 200;
+      while (calls === 0 && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      await new Promise((done) => setTimeout(done, 40));
+      assert.equal(calls, 1, '监听器最多触发一次');
+      assert.equal(rejections.length, 0, '不得留下未处理拒绝');
+      assert.ok(
+        logged.some((row) => row instanceof Error && String(row.message).includes('listener-boom')),
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      console.error = original;
     }
   });
 

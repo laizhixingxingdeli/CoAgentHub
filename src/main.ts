@@ -595,22 +595,34 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function reportServerCloseError(
+/**
+ * 把算出的关闭结果交付一次。callback / error 监听器自己抛错只记下来，
+ * 不能再交回同一条路径——否则会再调 callback 或变成未处理拒绝。
+ */
+function deliverServerCloseOutcome(
   server: Server,
-  error: Error,
+  error: Error | undefined,
   callback?: (err?: Error) => void,
 ): void {
-  if (callback) {
-    callback(error);
-    return;
+  try {
+    if (error) {
+      if (callback) {
+        callback(error);
+        return;
+      }
+      // 无 callback 不能静默。有 error 监听器才 emit——没人听的 emit('error')
+      // 会变成未捕获异常把进程打挂，比静默更糟；没监听器就 console.error。
+      if (server.listenerCount('error') > 0) {
+        server.emit('error', error);
+        return;
+      }
+      console.error(error);
+      return;
+    }
+    callback?.();
+  } catch (thrown) {
+    console.error(thrown);
   }
-  // 无 callback 不能静默。有 error 监听器才 emit——没人听的 emit('error')
-  // 会变成未捕获异常把进程打挂，比静默更糟；没监听器就 console.error。
-  if (server.listenerCount('error') > 0) {
-    server.emit('error', error);
-    return;
-  }
-  console.error(error);
 }
 
 /**
@@ -622,7 +634,7 @@ function reportServerCloseError(
 export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promise<void>): void {
   const closeHttp = server.close.bind(server);
   server.close = ((callback?: (err?: Error) => void) => {
-    const run = async () => {
+    const run = async (): Promise<Error | undefined> => {
       let stopErr: Error | undefined;
       try {
         await stop();
@@ -641,15 +653,21 @@ export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promis
       } catch (error) {
         closeErr = asError(error);
       }
-      const merged =
-        stopErr && closeErr
-          ? new AggregateError([stopErr, closeErr], `${stopErr.message}; ${closeErr.message}`)
-          : (stopErr ?? closeErr);
-      if (merged) reportServerCloseError(server, merged, callback);
-      else callback?.();
+      return stopErr && closeErr
+        ? new AggregateError([stopErr, closeErr], `${stopErr.message}; ${closeErr.message}`)
+        : (stopErr ?? closeErr);
     };
-    void run().catch((error) => {
-      reportServerCloseError(server, asError(error), callback);
+    // 算出错误与交付分开，交付只做一次。外层再接一次，防止漏网拒绝。
+    void (async () => {
+      let merged: Error | undefined;
+      try {
+        merged = await run();
+      } catch (error) {
+        merged = asError(error);
+      }
+      deliverServerCloseOutcome(server, merged, callback);
+    })().catch((error) => {
+      console.error(error);
     });
     return server;
   }) as typeof server.close;

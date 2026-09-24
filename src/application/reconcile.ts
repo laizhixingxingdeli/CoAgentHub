@@ -781,10 +781,15 @@ export interface IndependentCleanupStep {
  * 退出清理每一步独立尝试。stop 失败如果直接 await，persist 和 releaseLock
  * 都跑不到，排他锁就留在盘上；所以一步失败只记下来，后面的照跑，全部结束
  * 再把失败抛出去（多个用 AggregateError）。
+ *
+ * `primary` 包一层对象，是因为 JS 可以 `throw undefined`，不能拿
+ * `error === undefined` 判断「没有主流程错误」。有主流程错误时必须再抛出，
+ * 否则 catch 里只记下、finally 里清理全成功，错误就被吞了。
  */
 export async function runIndependentCleanup(input: {
   steps: IndependentCleanupStep[];
   report: (message: string, error?: unknown) => void;
+  primary?: { error: unknown };
 }): Promise<void> {
   const failures: Error[] = [];
   for (const step of input.steps) {
@@ -802,11 +807,86 @@ export async function runIndependentCleanup(input: {
       }
     }
   }
+  const primary = input.primary;
+  if (primary) {
+    if (failures.length === 0) {
+      throw primary.error;
+    }
+    const primaryMessage =
+      primary.error instanceof Error ? primary.error.message : String(primary.error);
+    throw new AggregateError(
+      [primary.error, ...failures],
+      `主流程失败（${primaryMessage}），另有 ${failures.length} 步清理失败`,
+    );
+  }
   if (failures.length === 1) {
     const only = failures[0];
     if (only) throw only;
   }
   if (failures.length > 1) {
     throw new AggregateError(failures, `退出清理有 ${failures.length} 步失败`);
+  }
+}
+
+/**
+ * 给顶层 catch 用：AggregateError.stack 不含 errors / cause，只打 stack
+ * 会把主流程错误盖掉。有深度上限并防循环，避免日志阶段自己卡死。
+ */
+export function formatErrorForLog(error: unknown): string {
+  const maxDepth = 8;
+  const seen = new WeakSet<object>();
+  const walk = (value: unknown, depth: number): string => {
+    if (depth > maxDepth) return '[超过展开深度]';
+    if (value !== null && typeof value === 'object') {
+      if (seen.has(value)) return '[循环引用]';
+      seen.add(value);
+    }
+    if (value instanceof AggregateError) {
+      const lines = [value.stack ?? `${value.name}: ${value.message}`];
+      value.errors.forEach((inner, i) => {
+        lines.push(`[${i}] ${walk(inner, depth + 1)}`);
+      });
+      if (value.cause !== undefined) {
+        lines.push(`[cause] ${walk(value.cause, depth + 1)}`);
+      }
+      return lines.join('\n');
+    }
+    if (value instanceof Error) {
+      const base = value.stack ?? `${value.name}: ${value.message}`;
+      if (value.cause === undefined) return base;
+      return `${base}\n[cause] ${walk(value.cause, depth + 1)}`;
+    }
+    return String(value);
+  };
+  return walk(error, 0);
+}
+
+/**
+ * 信号退出：每步独立尝试、失败必记、一定 exit(130)。永不拒绝——releaseLock
+ * 抛错也不能挡住退出，更不能留下未处理拒绝。退出码保持 130（被中断）；
+ * 清理失败靠 stderr 诊断，不另开退出码，以免和「被人中断」混淆。
+ */
+export async function cleanupAfterSignal(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+  exit: (code: number) => void;
+}): Promise<void> {
+  try {
+    await runIndependentCleanup({ steps: input.steps, report: input.report });
+  } catch {
+    // 每步失败已经 report。这里吞掉是为了后面一定 exit(130)。
+  }
+  try {
+    input.exit(130);
+  } catch (error) {
+    // 测试替身可能抛；生产 process.exit 通常不再返回。都不能变成未处理拒绝。
+    try {
+      input.report(
+        `信号退出未能生效：${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    } catch {
+      console.error(error);
+    }
   }
 }

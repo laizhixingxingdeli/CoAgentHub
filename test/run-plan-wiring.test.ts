@@ -409,6 +409,11 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /periodic\.stop\(\)/);
     assert.match(runPlan, /name: 'persist'/);
     assert.match(runPlan, /name: 'releaseLock'/);
+    assert.match(runPlan, /primary = \{ error \}/);
+    assert.match(runPlan, /runIndependentCleanup\(\{[\s\S]*primary/);
+    assert.match(runPlan, /cleanupAfterSignal/);
+    assert.match(runPlan, /formatErrorForLog/);
+    assert.doesNotMatch(runPlan, /catch\(\(\) => undefined\)/);
     assert.doesNotMatch(runPlan, /reconcileInterruptedAttempts/);
     assert.doesNotMatch(runPlan, /reconcileOrphanedWorktrees/);
 

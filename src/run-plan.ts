@@ -31,6 +31,8 @@ import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
 import type { FileStateStore } from './application/file-store.ts';
 import {
+  cleanupAfterSignal,
+  formatErrorForLog,
   parseReconcileIntervalMs,
   runIndependentCleanup,
   startPeriodicReconcile,
@@ -151,6 +153,7 @@ async function main() {
             : () => runHeldFileDeliveryRepair(built.store as FileStateStore, warnRepair),
         });
 
+  let primary: { error: unknown } | undefined;
   try {
     // 状态文件、锁目录落在项目仓里却没被忽略的话，机器 L3 每一次合并都会拒绝。
     // 拿锁之后再看一次，才看得见这把锁自己。
@@ -235,17 +238,30 @@ async function main() {
       if (interrupted) return;
       interrupted = true;
       console.error(`\n收到 ${signal}：记下原因后退出。在途的 Mission 原样留给人。`);
-      void store
-        .update((r) => {
-          if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
-        })
-        .catch(() => undefined)
-        .then(async () => {
-          if (periodic) await periodic.stop().catch(() => undefined);
-          await Promise.resolve(persist()).catch(() => undefined);
-          releaseLock();
-          process.exit(130);
-        });
+      void cleanupAfterSignal({
+        steps: [
+          {
+            name: 'halt',
+            run: () =>
+              store.update((r) => {
+                if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
+              }),
+          },
+          {
+            name: 'periodic.stop',
+            run: async () => {
+              if (periodic) await periodic.stop();
+            },
+          },
+          { name: 'persist', run: persist },
+          { name: 'releaseLock', run: () => releaseLock() },
+        ],
+        report: (message, error) => {
+          console.error(message);
+          if (error !== undefined) console.error(error);
+        },
+        exit: (code) => process.exit(code),
+      });
     };
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
@@ -332,9 +348,13 @@ async function main() {
     if (run) for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) console.log(text);
     console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
+  } catch (error) {
+    // 先记下，交给 finally 里的清理一起报；在这里直接 throw 的话，清理失败时会被盖掉。
+    primary = { error };
   } finally {
     // stop 失败不能跳过 persist / 释锁：排他锁留在盘上，下一晚开跑会一直锁忙。
     await runIndependentCleanup({
+      primary,
       steps: [
         {
           name: 'periodic.stop',
@@ -354,6 +374,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
+  // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
+  console.error(formatErrorForLog(error));
   process.exit(1);
 });

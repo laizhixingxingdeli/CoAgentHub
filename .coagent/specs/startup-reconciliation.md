@@ -61,8 +61,9 @@
 
 关闭与清理的异常路径同样要走完：
 
-- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。stop 与关闭的错误都保留（两个都有时用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。
-- `run-plan` 退出：`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`runIndependentCleanup`），一步失败不跳过后面的，锁必须释放。失败经 `console.error` 留下可诊断信息；全部跑完后若有失败再抛出。
+- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。stop 与关闭的错误都保留（两个都有时用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。callback / error 监听器自身抛错只记录（`console.error`），不重复交付，也不变成未处理拒绝。
+- `run-plan` 退出：`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`runIndependentCleanup`），一步失败不跳过后面的，锁必须释放。失败经 `console.error` 留下可诊断信息。主流程错误与清理错误都保留：清理全成功时原样抛出主流程错误；两边都失败时抛 `AggregateError`（主流程错误在前），并用 `formatErrorForLog` 展开内部错误再打印。
+- 信号退出：记中断原因、`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`cleanupAfterSignal`），一步失败仍继续、每步失败都记录，最后一定尝试释锁并以退出码 130 退出（清理失败靠 stderr 诊断，不另开退出码）。该路径永不留下未处理拒绝。
 
 ## Source / tests
 

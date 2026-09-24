@@ -30,6 +30,8 @@ import {
   tryPgAdvisoryLock,
 } from '../src/application/pg-store.ts';
 import {
+  cleanupAfterSignal,
+  formatErrorForLog,
   parseReconcileIntervalMs,
   repairMissingDeliveries,
   runIndependentCleanup,
@@ -273,6 +275,254 @@ describe('runIndependentCleanup', () => {
     );
     assert.deepEqual(calls, ['stop', 'persist', 'release']);
     assert.ok(reports.some((row) => row.includes('periodic.stop') && row.includes('stop-boom')));
+  });
+
+  test('主流程错误与 stop、persist 都失败：锁仍释放，每个错误可诊断', async () => {
+    const calls: string[] = [];
+    const reports: string[] = [];
+    const primaryErr = new Error('primary-boom');
+    const stopErr = new Error('stop-boom');
+    const persistErr = new Error('persist-boom');
+    await assert.rejects(
+      () =>
+        runIndependentCleanup({
+          primary: { error: primaryErr },
+          steps: [
+            {
+              name: 'periodic.stop',
+              run: async () => {
+                calls.push('stop');
+                throw stopErr;
+              },
+            },
+            {
+              name: 'persist',
+              run: async () => {
+                calls.push('persist');
+                throw persistErr;
+              },
+            },
+            {
+              name: 'releaseLock',
+              run: () => {
+                calls.push('release');
+              },
+            },
+          ],
+          report: (message) => {
+            reports.push(message);
+          },
+        }),
+      (err: unknown) => {
+        if (!(err instanceof AggregateError)) {
+          assert.fail('应为 AggregateError');
+        }
+        assert.equal(err.errors[0], primaryErr);
+        assert.ok(err.errors.includes(stopErr));
+        assert.ok(err.errors.includes(persistErr));
+        assert.match(err.message, /主流程失败/);
+        assert.match(err.message, /2/);
+        assert.match(err.message, /primary-boom/);
+        const text = formatErrorForLog(err);
+        assert.match(text, /primary-boom/);
+        assert.match(text, /stop-boom/);
+        assert.match(text, /persist-boom/);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ['stop', 'persist', 'release']);
+    assert.ok(reports.some((row) => row.includes('periodic.stop') && row.includes('stop-boom')));
+    assert.ok(reports.some((row) => row.includes('persist') && row.includes('persist-boom')));
+  });
+
+  test('只有主流程错误、清理全成功：原样抛出，不包装', async () => {
+    const calls: string[] = [];
+    const primaryErr = new Error('primary-only');
+    await assert.rejects(
+      () =>
+        runIndependentCleanup({
+          primary: { error: primaryErr },
+          steps: [
+            {
+              name: 'periodic.stop',
+              run: async () => {
+                calls.push('stop');
+              },
+            },
+            {
+              name: 'persist',
+              run: async () => {
+                calls.push('persist');
+              },
+            },
+            {
+              name: 'releaseLock',
+              run: () => {
+                calls.push('release');
+              },
+            },
+          ],
+          report: () => {},
+        }),
+      (err: unknown) => {
+        assert.equal(err, primaryErr);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ['stop', 'persist', 'release']);
+  });
+
+  test('没有主流程错误、清理全成功：正常返回', async () => {
+    const calls: string[] = [];
+    await runIndependentCleanup({
+      steps: [
+        {
+          name: 'periodic.stop',
+          run: async () => {
+            calls.push('stop');
+          },
+        },
+        {
+          name: 'persist',
+          run: () => {
+            calls.push('persist');
+          },
+        },
+        {
+          name: 'releaseLock',
+          run: () => {
+            calls.push('release');
+          },
+        },
+      ],
+      report: () => {
+        throw new Error('不应 report');
+      },
+    });
+    assert.deepEqual(calls, ['stop', 'persist', 'release']);
+  });
+});
+
+describe('cleanupAfterSignal', () => {
+  test('记中断原因、stop、persist 都抛错：仍释锁、exit(130)、函数 resolve', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const calls: string[] = [];
+      const reports: string[] = [];
+      const exits: number[] = [];
+      await cleanupAfterSignal({
+        steps: [
+          {
+            name: 'halt',
+            run: async () => {
+              calls.push('halt');
+              throw new Error('halt-boom');
+            },
+          },
+          {
+            name: 'periodic.stop',
+            run: async () => {
+              calls.push('stop');
+              throw new Error('stop-boom');
+            },
+          },
+          {
+            name: 'persist',
+            run: async () => {
+              calls.push('persist');
+              throw new Error('persist-boom');
+            },
+          },
+          {
+            name: 'releaseLock',
+            run: () => {
+              calls.push('release');
+            },
+          },
+        ],
+        report: (message) => {
+          reports.push(message);
+        },
+        exit: (code) => {
+          exits.push(code);
+        },
+      });
+      await new Promise((done) => setTimeout(done, 20));
+      assert.deepEqual(calls, ['halt', 'stop', 'persist', 'release']);
+      assert.ok(reports.some((row) => row.includes('halt') && row.includes('halt-boom')));
+      assert.ok(reports.some((row) => row.includes('periodic.stop') && row.includes('stop-boom')));
+      assert.ok(reports.some((row) => row.includes('persist') && row.includes('persist-boom')));
+      assert.deepEqual(exits, [130]);
+      assert.equal(rejections.length, 0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('releaseLock 自己抛错：仍 exit(130)，错误被 report', async () => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const reports: string[] = [];
+      const exits: number[] = [];
+      await cleanupAfterSignal({
+        steps: [
+          { name: 'halt', run: async () => {} },
+          { name: 'periodic.stop', run: async () => {} },
+          { name: 'persist', run: async () => {} },
+          {
+            name: 'releaseLock',
+            run: () => {
+              throw new Error('lock-boom');
+            },
+          },
+        ],
+        report: (message) => {
+          reports.push(message);
+        },
+        exit: (code) => {
+          exits.push(code);
+        },
+      });
+      await new Promise((done) => setTimeout(done, 20));
+      assert.ok(reports.some((row) => row.includes('releaseLock') && row.includes('lock-boom')));
+      assert.deepEqual(exits, [130]);
+      assert.equal(rejections.length, 0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});
+
+describe('formatErrorForLog', () => {
+  test('展开嵌套 AggregateError 与 cause，循环引用不死循环', () => {
+    const leaf = new Error('leaf');
+    const nested = new AggregateError([leaf], 'inner');
+    Object.defineProperty(nested, 'cause', { value: new Error('cause-msg') });
+    const outer = new AggregateError([nested], 'outer');
+    const text = formatErrorForLog(outer);
+    assert.match(text, /outer/);
+    assert.match(text, /inner/);
+    assert.match(text, /leaf/);
+    assert.match(text, /cause-msg/);
+
+    const cycle = new Error('cycle-root');
+    Object.defineProperty(cycle, 'cause', { value: cycle });
+    const cycled = formatErrorForLog(cycle);
+    assert.match(cycled, /cycle-root/);
+    assert.match(cycled, /循环引用/);
+
+    const agg = new AggregateError([], 'agg-cycle');
+    agg.errors.push(agg);
+    const looped = formatErrorForLog(agg);
+    assert.match(looped, /循环引用/);
   });
 });
 
