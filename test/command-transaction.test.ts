@@ -126,6 +126,62 @@ describe('FileStateStore.run：一次原子写，失败整体回滚', () => {
     assert.deepEqual(onDisk(path).deliveries, []);
   });
 
+  test('事务里写下的各记录（查询 / 验收报告 / 候选池 / 投递确认）随回滚一起撤掉', async () => {
+    const path = tempState();
+    const store = new FileStateStore(path);
+    const clock = new FixedClock();
+    const ids = new PersistentIds(store);
+    const deliveries = new FileDeliveryRepository(store, clock, ids);
+    const { FileQueryRunRepository, FileAgentPoolRepository } = await import('../src/application/file-store.ts');
+    const queryRuns = new FileQueryRunRepository(store);
+    const reports = new FileValidationReportRepository(store);
+    const pool = new FileAgentPoolRepository(store);
+    const pending = await deliveries.create({
+      missionId: 'M',
+      projectId: 'P',
+      recipient: 'me',
+      outcome: 'delivered',
+      idempotencyKey: 'result:a',
+      summary: 's',
+    });
+    const diskBefore = readFileSync(path, 'utf8');
+
+    await assert.rejects(
+      store.run(async () => {
+        await queryRuns.save({
+          id: 'Q-1',
+          projectId: 'P',
+          source: 'test',
+          prompt: 'p',
+          cwd: '/',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          status: 'running',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, quality: 'unknown' },
+        });
+        await reports.save({
+          id: 'VR-1',
+          policyRevision: 'p',
+          missionId: 'M',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          passed: true,
+          checks: [],
+        } as never);
+        await pool.add({ role: 'executor', profileId: 'exec-x', endpoint: 'local' });
+        await deliveries.acknowledge(pending.id);
+        throw new Error('回滚');
+      }),
+      /回滚/,
+    );
+
+    const raw = store.raw();
+    assert.deepEqual(raw.queryRuns, [], 'query run 撤掉');
+    assert.deepEqual(raw.validationReports, [], '验收报告撤掉');
+    assert.deepEqual(raw.agentPool, [], '候选池撤掉');
+    assert.equal((await deliveries.get(pending.id))?.status, 'pending', '投递确认撤掉');
+    assert.equal(readFileSync(path, 'utf8'), diskBefore);
+  });
+
   test('提交写失败（临时文件写不下去）：盘上不变、内存回滚；障碍去掉后照常写', async () => {
     const path = tempState();
     const store = new FileStateStore(path);
