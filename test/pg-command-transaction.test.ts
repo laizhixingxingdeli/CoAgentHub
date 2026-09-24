@@ -216,11 +216,12 @@ describe('PgStateStore.run（真库）', () => {
     assert.equal((await r.projects.get('P'))!.missions.length, 0, '活对象回滚');
   });
 
-  test('事务外的写（事件 / 投递 / 快照）等事务结束，且熬过它的回滚', async (t) => {
+  test('事务外的写（事件 / 投递 / 确认 / 快照 / 新建项目）等事务结束，且熬过它的回滚', async (t) => {
     if (skip(t)) return;
     const store = await open();
     const r = await repos(store);
     const outsider = await r.projects.ensure('P-out');
+    const toAck = await r.deliveries.create(deliveryInput('M-ack', 'escalated:0'));
     let releaseTx!: () => void;
     const gate = new Promise<void>((resolve) => {
       releaseTx = resolve;
@@ -237,13 +238,18 @@ describe('PgStateStore.run（真库）', () => {
     const outside = Promise.all([
       r.activity.append({ projectId: 'P', missionId: 'M-out', kind: 'outside', data: {} }),
       r.deliveries.create(deliveryInput('M-out', 'escalated:0')),
+      r.deliveries.acknowledge(toAck.id),
       r.projects.save(outsider),
+      r.projects.ensure('P-new'),
     ]).then(() => {
       settled = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(settled, false, '事务开着时事务外的写在等');
-    assert.equal(await count('activity', 'M-out'), 0);
+    assert.equal(await count('activity', 'M-out'), 0, '事件没抢在事务结束前写');
+    assert.equal(await count('deliveries', 'M-out'), 0, '投递没抢在事务结束前写');
+    const [{ status: ackDuring }] = await sql<{ status: string }>('SELECT status FROM deliveries WHERE delivery_id = $1', [toAck.id]);
+    assert.equal(ackDuring, 'pending', '确认没抢在事务结束前写');
     releaseTx();
     await assert.rejects(tx, /回滚/);
     await outside;
@@ -253,6 +259,9 @@ describe('PgStateStore.run（真库）', () => {
     assert.equal(await count('deliveries', 'M-out'), 1);
     const [{ snapshot }] = await sql<{ snapshot: { missions: { id: string }[] } }>("SELECT snapshot FROM projects WHERE project_id = 'P-out'");
     assert.deepEqual(snapshot.missions.map((m) => m.id), ['M-saved']);
+    const [{ status: ackAfter }] = await sql<{ status: string }>('SELECT status FROM deliveries WHERE delivery_id = $1', [toAck.id]);
+    assert.equal(ackAfter, 'acknowledged');
+    assert.equal((await sql("SELECT 1 FROM projects WHERE project_id = 'P-new'")).length, 1, '事务开着时新建的项目没被它的回滚删掉');
   });
 
   test('嵌套：内层并进外层，一起提交', async (t) => {
