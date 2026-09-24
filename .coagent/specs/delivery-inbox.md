@@ -46,6 +46,17 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 
 平台依赖 `transaction?: CommandTransaction`（`ports.ts`，`run(fn)`）；不注入就直接跑（内存版）。
 
+**覆盖哪些命令**（C4 起）：平台所有「改状态 + 记事件」的命令都是单事务命令——建 / 分类建 / 重跑 Mission、改契约、开始 / 结束 / 续租 attempt、作废工作项、等待原因、取消 / 暂停 / 恢复、发现与方案、建工作项（含 Lightweight）、两种派发、评审、记工作区、轮次 / 预算 / 命令计数事实、升级与答复、交卷（两种）、方案放弃、证据、执行结果、报告受阻、各种升级 Standard、L3 的 send_back / abandon。写法统一：公开方法 → `this.#tx(() => this.#私有实现(...))`，方法体不动；嵌套调用并进外层。
+
+例外与切段：
+
+- **Lightweight 机器验收**：跑验收命令（可能几分钟）在事务外；之后一个事务重取工作项，报告、`validation.reported`、validator accept 一起提交。authority 对不上时照旧保留报告——事务里只做标记，提交之后再抛。验收引擎在事务外发报告号，崩掉时这个号跳过（发号单调，跳号无害）。
+- **派发**：PRE shadow 在事务里（缺省不开；开了事务最多多占一个超时）。
+- **不包**：L3 merge 与机器 L3（git 合并是外部副作用：合并成功后提交丢了，重放会因为目标分支已前移判合并失败——要可重入的合并检测，留给外部副作用受控 Adapter）；POST shadow（Jev 调用，只记一条事件）。
+- 事务之间串行，事务里不能有长等待。
+
+**崩溃注入（C4）**：一份确定性脚本覆盖上面的命令（每一步恰好一条平台命令）；参考运行记下每一步结束时的持久化内容；然后对第 k 次记事件（取遍全部）分别在 append 之前、之后抛错——重开后（文件版整份状态文件；PG 新开 store 读快照、事件、投递）必须恰好等于上一条命令结束时。任何一条命令漏包事务，都会有检查点对不上。
+
 **文件版**（`FileStateStore` 实现，`buildPersistentPlatform` 注入；C2）：
 
 - 事务里的写（活对象、事件、投递、各记录数组、发号）不单独落盘，`fn` 结束后一次原子写（临时文件 + rename）。
@@ -65,10 +76,10 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 
 ## 没做的
 
-- 其余「改状态 + 记事件」命令接事务（C4）；终态却没有投递的补建（C5）。
+- 终态却没有投递的补建（C5）；L3 merge / 机器 L3 的可重入合并检测。
 - 同一次工具调用被重发（agent 超时重试）会记成两次升级、两条投递——那是请求级幂等，不在这里。
 
 ## 权威源 / 测试
 
 - 源：`delivery.ts`、`file-store.ts`（含 `run` 事务）、`pg-store.ts`（含 `run` 事务）、`platform.ts`（三处建投递、`#tx`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
-- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）、`pg-command-transaction.test.ts`（真库、独立库：同一套语义；崩溃点含提交时版本冲突；新开 store 读库全有或全无）
+- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）、`pg-command-transaction.test.ts`（真库、独立库：同一套语义；崩溃点含提交时版本冲突；新开 store 读库全有或全无）、`command-transaction-checkpoints.test.ts`（全命令脚本 × 每一次记事件前后崩溃 × 两种存储的检查点比对；机器验收 authority 对不上时报告落盘）
