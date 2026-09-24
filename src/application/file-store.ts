@@ -12,6 +12,7 @@
  * 留下半份 JSON。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -30,7 +31,14 @@ import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
 import type { ValidationReport } from '../kernel/index.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
-import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type {
+  ActivityEvent,
+  ActivityLog,
+  Clock,
+  CommandTransaction,
+  IdGenerator,
+  ProjectRepository,
+} from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { withDeliveryKey } from './delivery.ts';
 import type {
@@ -195,9 +203,32 @@ function cloneQueryRunRecord(run: QueryRunRecord): QueryRunRecord {
 }
 
 /**
- * 整份状态的持有者。三个仓储都挂在它上面，任何一个写完都触发一次落盘。
+ * 开事务那一刻的样子：回滚就回到这里（C2）。
+ *
+ * 发号计数不在内：单调递增，跳号无害；回滚反而会让已经发出去的号被重发。
  */
-export class FileStateStore {
+interface OpenTransaction {
+  readonly projects: Map<string, ProjectSnapshot>;
+  readonly events: ActivityEvent[];
+  readonly deliveries: Delivery[];
+  readonly queryRuns: QueryRunRecord[];
+  readonly validationReports: ValidationReport[];
+  readonly agentPool: AgentPoolRow[];
+  readonly archivedMissions: ArchivedMissionRef[];
+  /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
+  readonly done: Promise<void>;
+  readonly finish: () => void;
+}
+
+/**
+ * 整份状态的持有者。三个仓储都挂在它上面，任何一个写完都触发一次落盘。
+ *
+ * **单事务命令（C2）。** `run(fn)` 里的写（活对象、事件、投递、各记录、发号）不单独落盘，
+ * fn 结束后一次原子写（临时文件 + rename）；fn 抛错或这次写失败，内存回到开事务时的样子、
+ * 盘上还是之前的文件。事务外的异步写先等开着的事务结束（`settle`），同步落盘推迟到它结束——
+ * 否则别处的一次落盘会把事务的半截改动带下去，或者被它的回滚一起抹掉。
+ */
+export class FileStateStore implements CommandTransaction {
   #path: string;
   #state: StateFile;
   /** 还原出来的聚合实例。落盘时重新取快照，读的时候直接给活对象。 */
@@ -208,6 +239,14 @@ export class FileStateStore {
   #archivedBaselines = new Map<string, MissionSnapshot>();
   /** 上次读到/写出的文件 mtime，用来判断有没有被别的进程改过。 */
   #stamp = 0;
+  /** 开着的命令事务；同一时刻至多一个。 */
+  #tx: OpenTransaction | undefined;
+  /** 事务里的调用链带着它：据此分清「事务里的写」和「事务开着时别处的写」。 */
+  #txContext = new AsyncLocalStorage<OpenTransaction>();
+  /** 事务串行：后一个等前一个结束。 */
+  #txQueue: Promise<void> = Promise.resolve();
+  /** 事务开着时别处要落盘：推迟到事务结束一起写。 */
+  #deferredFlush = false;
 
   constructor(path: string) {
     this.#path = resolve(path);
@@ -357,6 +396,8 @@ export class FileStateStore {
    * 改动当成外部改动再读回来。
    */
   refreshIfChanged(): void {
+    // 事务开着时不重读：重读会换掉事务正在改的活对象，提交时写下去的就不是这个事务了。
+    if (this.#tx) return;
     const mtime = this.#mtime();
     if (mtime === this.#stamp) return;
     this.#state = this.#load();
@@ -389,8 +430,117 @@ export class FileStateStore {
     }
   }
 
-  /** 把当前活对象的快照写回磁盘。 */
+  /**
+   * 把当前活对象的快照写回磁盘。
+   *
+   * 事务开着时不写：事务里的写等提交时一起落盘；事务外的写推迟到事务结束（提交或回滚之后）。
+   */
   flush(): void {
+    if (this.#tx) {
+      if (this.#txContext.getStore() !== this.#tx) this.#deferredFlush = true;
+      return;
+    }
+    this.#write();
+  }
+
+  /**
+   * 命令事务（C2）。嵌套调用并进外层事务；事务之间串行。
+   */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#tx && this.#txContext.getStore() === this.#tx) return fn();
+    const previous = this.#txQueue;
+    let release!: () => void;
+    this.#txQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    const tx = this.#begin();
+    this.#tx = tx;
+    try {
+      let result: T;
+      try {
+        result = await this.#txContext.run(tx, fn);
+      } catch (error) {
+        this.#abort(tx);
+        throw error;
+      }
+      this.#tx = undefined;
+      try {
+        this.#write();
+      } catch (error) {
+        // 提交写失败：临时文件没写成或没 rename，盘上还是之前的文件；内存也回去。
+        this.#abort(tx);
+        throw error;
+      }
+      return result;
+    } finally {
+      this.#tx = undefined;
+      this.#deferredFlush = false;
+      tx.finish();
+      release();
+    }
+  }
+
+  /**
+   * 事务外的写先等开着的事务结束：写进一个开着的事务，它回滚时会被一起抹掉。事务里的调用直接过。
+   */
+  async settle(): Promise<void> {
+    while (this.#tx && this.#txContext.getStore() !== this.#tx) await this.#tx.done;
+  }
+
+  #begin(): OpenTransaction {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const s = this.#state;
+    return {
+      projects: new Map([...this.#projects].map(([id, project]) => [id, project.toSnapshot()])),
+      events: [...s.events],
+      deliveries: [...s.deliveries],
+      queryRuns: [...s.queryRuns],
+      validationReports: [...s.validationReports],
+      agentPool: [...s.agentPool],
+      archivedMissions: [...s.archivedMissions],
+      done,
+      finish,
+    };
+  }
+
+  /** 回到开事务时的样子。只换掉改过的活对象：没动过的实例原样留着，别处手里的引用照样有效。 */
+  #abort(tx: OpenTransaction): void {
+    for (const [id, project] of [...this.#projects]) {
+      const before = tx.projects.get(id);
+      if (!before) {
+        this.#projects.delete(id);
+        continue;
+      }
+      if (JSON.stringify(project.toSnapshot()) !== JSON.stringify(before)) {
+        this.#projects.set(id, Project.restore(before));
+      }
+    }
+    for (const [id, before] of tx.projects) {
+      if (!this.#projects.has(id)) this.#projects.set(id, Project.restore(before));
+    }
+    const s = this.#state;
+    s.events = tx.events;
+    s.deliveries = tx.deliveries;
+    s.queryRuns = tx.queryRuns;
+    s.validationReports = tx.validationReports;
+    s.agentPool = tx.agentPool;
+    s.archivedMissions = tx.archivedMissions;
+    this.#tx = undefined;
+    if (this.#deferredFlush) {
+      this.#deferredFlush = false;
+      try {
+        this.#write();
+      } catch {
+        // 别处推迟的那次写：内存里的状态是对的，下一次落盘会带上。
+      }
+    }
+  }
+
+  #write(): void {
     this.#assertArchivedUnchanged();
 
     const archivedIds = new Map<string, Set<string>>();
@@ -468,6 +618,7 @@ export class FileStateStore {
    * 不自动触发；重复调用幂等。
    */
   archiveMission(projectId: string, missionId: string): void {
+    if (this.#tx) throw new Error('命令事务进行中，不能归档');
     this.refreshIfChanged();
 
     // id 合法性 / 路径 containment 与 A 同一套。
@@ -640,6 +791,7 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   async save(project: Project): Promise<void> {
+    await this.#store.settle();
     this.#store.projectsMap().set(project.id, project);
     this.#store.flush();
   }
@@ -650,6 +802,7 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   async ensure(projectId: string): Promise<Project> {
+    await this.#store.settle();
     const existing = this.#store.projectsMap().get(projectId);
     if (existing) return existing;
     const created = Project.create({ id: projectId });
@@ -684,6 +837,7 @@ export class FileDeliveryRepository implements DeliveryRepository {
   async create(
     input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
   ): Promise<Delivery> {
+    await this.#store.settle();
     if (this.#store.hasArchivedMission(input.missionId)) {
       throw new Error(`已归档 Mission 不可新建投递：${input.missionId}`);
     }
@@ -713,6 +867,7 @@ export class FileDeliveryRepository implements DeliveryRepository {
   }
 
   async acknowledge(deliveryId: string): Promise<Delivery | undefined> {
+    await this.#store.settle();
     const rows = this.#store.raw().deliveries;
     const index = rows.findIndex((row) => row.id === deliveryId);
     if (index < 0) return undefined;
@@ -744,6 +899,7 @@ export class FileActivityLog implements ActivityLog {
   }
 
   async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
+    await this.#store.settle();
     if (this.#store.hasArchivedMission(event.missionId)) {
       throw new Error(`已归档 Mission 不可追加事件：${event.missionId}`);
     }
@@ -800,6 +956,7 @@ export class FileQueryRunRepository implements QueryRunRepository {
   }
 
   async save(run: QueryRunRecord): Promise<void> {
+    await this.#store.settle();
     this.#store.refreshIfChanged();
     const rows = this.#rows();
     const copy = cloneQueryRunRecord(run);
@@ -843,6 +1000,7 @@ export class FileValidationReportRepository implements ValidationReportRepositor
   }
 
   async save(report: ValidationReport): Promise<void> {
+    await this.#store.settle();
     this.#store.refreshIfChanged();
     const rows = this.#rows();
     const existing = rows.find((row) => row.id === report.id);
@@ -891,6 +1049,7 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
   }
 
   async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
+    await this.#store.settle();
     // 校验前先看磁盘上的最新内容：不刷新的话，两个进程都以为自己是某个
     // profileId 的首个持有者，各自算出 order=0 往回写，后写的把先写的整片盖掉
     // （文件版是整份 JSON 重写，盖的是整个数组）。

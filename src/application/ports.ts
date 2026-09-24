@@ -272,3 +272,13 @@ export interface PostExecutionEvaluator {
   readonly kind: string;
   evaluate(state: PostExecutionRemoteState): Promise<DecisionAnswerSet>;
 }
+
+/**
+ * 单事务命令（设计 §8.1，C2）：run 里对状态、事件、投递的写一起提交，或者一个都不落。
+ *
+ * 实现方保证：fn 抛错或提交失败时，存储回到 run 开始时的样子——内存与盘上都是——之后
+ * 别处的写不会把半截改动带下去。嵌套调用并进外层事务。只包短命令：事务之间串行。
+ */
+export interface CommandTransaction {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+}

@@ -40,12 +40,28 @@ DROP INDEX IF EXISTS deliveries_mission_key_idx;
 ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 ```
 
+## 与状态、事件一起提交（单事务命令）
+
+交卷（Standard / Lightweight）与升级是**单事务命令**（设计 §8.1）：改状态、记终态事件、建投递、记 `delivery.created` 要么一起落下，要么一个都不落。崩在中间重启后，不会出现「状态说已交卷、收件箱里没有」或「收件箱里有、状态还在执行」；重放命令恰好得到一条终态事件、一条投递。
+
+平台依赖 `transaction?: CommandTransaction`（`ports.ts`，`run(fn)`）；不注入就直接跑（内存版）。
+
+**文件版**（`FileStateStore` 实现，`buildPersistentPlatform` 注入；C2）：
+
+- 事务里的写（活对象、事件、投递、各记录数组、发号）不单独落盘，`fn` 结束后一次原子写（临时文件 + rename）。
+- `fn` 抛错或那一次写失败：活对象（只换改过的）与各数组回到开事务时，盘上还是之前的文件；之后别处的写不会把半截改动带下去。发号计数不回滚——单调递增，跳号无害，回滚反而会重发已发出去的号。
+- 事务外的写不混进开着的事务：异步写（`save` / `ensure` / `append` / `create` / `acknowledge` / 查询、验收报告、候选池）先等它结束；同步落盘（发号、`persist`）推迟到它结束——回滚了也照样补写。
+- 事务串行，嵌套并进外层；事务开着时不重读状态文件，也不能归档。
+- 只包短命令：事务之间串行，长等待（L3 合并、机器验收）不能包进来（C4 按提交段切）。
+- 已知代价：事务开着时别处直接改了同一个活对象却不 `save`（如心跳），回滚时会被一起恢复——心跳尽力而为，下一次再打。
+
 ## 没做的
 
-- 投递与状态、事件同一事务提交（C2 / C3）；终态却没有投递的补建（C5）。
+- PG 的单事务提交（C3）：PG 版现在仍是事件、投递即时 INSERT，快照等下一次 flush。
+- 其余「改状态 + 记事件」命令接事务（C4）；终态却没有投递的补建（C5）。
 - 同一次工具调用被重发（agent 超时重试）会记成两次升级、两条投递——那是请求级幂等，不在这里。
 
 ## 权威源 / 测试
 
-- 源：`delivery.ts`、`file-store.ts`、`pg-store.ts`、`platform.ts`（三处建投递）
-- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`
+- 源：`delivery.ts`、`file-store.ts`（含 `run` 事务）、`pg-store.ts`、`platform.ts`（三处建投递、`#tx`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
+- 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）
