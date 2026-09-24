@@ -7,7 +7,7 @@
  * 脚本停在抛错的那条命令，重开存储——持久化内容必须恰好等于参考运行里「上一条命令结束时」。
  *
  * 哪条命令忘了包事务，它的中间状态就会被落下来，与任何一个检查点都对不上。
- * 文件版比对整份状态文件；PG 版（真库、独立库）比对快照、事件、投递。
+ * 文件版比对整份状态文件；PG 版（真库、独立库）新开 store 比对快照、事件、投递、验收报告。
  */
 
 import { after, before, describe, test } from 'node:test';
@@ -40,6 +40,7 @@ import type { ValidationReportRepository } from '../src/application/validation/r
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
+import type { BudgetEvaluation } from '../src/application/budget-usage.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 
@@ -103,7 +104,22 @@ const ASSESSMENT = {
   assessedAt: '2026-09-24T00:00:00.000Z',
 };
 
-type Ctx = Record<string, string>;
+interface Ctx {
+  evaluation?: BudgetEvaluation;
+  evaluationM7?: BudgetEvaluation;
+  a1?: string;
+  a2?: string;
+  w1?: string;
+  w2?: string;
+  w3?: string;
+  w5?: string;
+  e1?: string;
+  e2?: string;
+  e3?: string;
+  e5?: string;
+  ev1?: string;
+  r5?: string;
+}
 interface Step {
   readonly name: string;
   run(platform: Platform, ctx: Ctx, projects: ProjectRepository): Promise<void>;
@@ -134,6 +150,7 @@ const SCRIPT: Step[] = [
   { name: 'beatAttempt e1', run: async (p, c) => void (await p.beatAttempt('M1', c.e1!, 'runner-1')) },
   { name: 'recordCommandTrackingEnabled', run: async (p, c) => void (await p.recordCommandTrackingEnabled('M1', c.e1!)) },
   { name: 'recordCommandStarted', run: async (p, c) => void (await p.recordCommandStarted('M1', c.e1!, 'call-1')) },
+  { name: 'recordCommandTrackingInvalid e1', run: async (p, c) => void (await p.recordCommandTrackingInvalid('M1', c.e1!)) },
   { name: 'submitEvidence', run: async (p, c) => void (c.ev1 = (await p.submitEvidence('M1', c.e1!, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 })).evidenceId) },
   {
     name: 'submitExecutionResult',
@@ -164,18 +181,19 @@ const SCRIPT: Step[] = [
   { name: 'finalizeMission send_back', run: async (p) => void (await p.finalizeMission('M1', { verdict: 'send_back', reasons: ['边界不够'] })) },
   { name: 'setWaitReason M1', run: async (p) => void (await p.setWaitReason('M1', 'no_available_agent', '卡在 exec-a')) },
   {
-    name: 'recordBudgetThresholdEvents',
-    run: async (p) => {
-      const { evaluation } = await p.evaluateMissionBudget('M1');
-      await p.recordBudgetThresholdEvents('M1', evaluation);
+    name: 'evaluateMissionBudget M1',
+    run: async (p, c) => {
+      c.evaluation = (await p.evaluateMissionBudget('M1')).evaluation;
     },
   },
+  { name: 'recordBudgetThresholdEvents', run: async (p, c) => void (await p.recordBudgetThresholdEvents('M1', c.evaluation!)) },
   // ---- 生命周期 ----
   { name: 'createMission M2', run: async (p) => void (await p.createMission({ projectId: 'P', missionId: 'M2', contract: CONTRACT, origin })) },
   { name: 'pauseMission M2', run: async (p) => void (await p.pauseMission('M2')) },
   { name: 'resumeMission M2', run: async (p) => void (await p.resumeMission('M2')) },
   { name: 'reviseContract M2', run: async (p) => void (await p.reviseContract('M2', { ...CONTRACT, intent: '换个说法' })) },
   { name: 'cancelMission M2', run: async (p) => void (await p.cancelMission('M2', '不做了')) },
+  { name: 'rerunMission M2', run: async (p) => void (await p.rerunMission('M2', { newMissionId: 'M2#2' })) },
   { name: 'createMission M6', run: async (p) => void (await p.createMission({ projectId: 'P', missionId: 'M6', contract: CONTRACT, origin })) },
   {
     name: 'abandonMissionForPlan M6',
@@ -210,6 +228,7 @@ const SCRIPT: Step[] = [
   { name: 'finishAttempt e3', run: async (p, c) => void (await p.finishAttempt('M3', c.e3!, { endedBy: 'structured_submit' })) },
   { name: 'validateAndAccept M3', run: async (p, c) => void (await p.validateAndAcceptLightweightWorkItem({ missionId: 'M3', workItemId: c.w3!, cwd: '/proj' })) },
   { name: 'submitLightweightMissionForReview M3', run: async (p) => void (await p.submitLightweightMissionForReview('M3')) },
+  { name: 'finalizeMission abandon M3', run: async (p) => void (await p.finalizeMission('M3', { verdict: 'abandon', reasons: ['不做了'] })) },
   // ---- Lightweight：验收失败 → 升级 Standard ----
   {
     // 按内核建一条 Lightweight Mission（不是平台命令、不记事件：不会在这一步崩）。
@@ -233,7 +252,97 @@ const SCRIPT: Step[] = [
   { name: 'finishAttempt e5', run: async (p, c) => void (await p.finishAttempt('M5', c.e5!, { endedBy: 'structured_submit' })) },
   { name: 'validateAndAccept M5（失败）', run: async (p, c) => void (c.r5 = (await p.validateAndAcceptLightweightWorkItem({ missionId: 'M5', workItemId: c.w5!, cwd: '/proj' })).reportId) },
   { name: 'promoteLightweightAfterValidation M5', run: async (p, c) => void (await p.promoteLightweightAfterValidation('M5', c.r5!)) },
+  {
+    // 硬预算上限为 0：0 次 attempt 已达上限（used >= limit），不必真跑到超限。
+    // 另起 Project，避免占别人的改动名额。不记事件。
+    name: 'seed M7（硬预算 0）',
+    run: async (_p, _c, projects) => {
+      const project = await projects.ensure('P7');
+      project.createMission({
+        id: 'M7',
+        contract: CONTRACT,
+        executionMode: 'lightweight',
+        runKind: 'mutation',
+        origin,
+        executionBudget: { maxAttempts: 0, maxRounds: 0, maxWallClockMs: 0 },
+      });
+      await projects.save(project);
+    },
+  },
+  {
+    name: 'evaluateMissionBudget M7',
+    run: async (p, c) => {
+      c.evaluationM7 = (await p.evaluateMissionBudget('M7')).evaluation;
+    },
+  },
+  { name: 'recordBudgetThresholdEvents M7', run: async (p, c) => void (await p.recordBudgetThresholdEvents('M7', c.evaluationM7!)) },
+  { name: 'promoteLightweightForBudgetExceeded M7', run: async (p) => void (await p.promoteLightweightForBudgetExceeded('M7')) },
+  {
+    name: 'seed M8（Lightweight）',
+    run: async (_p, _c, projects) => {
+      const project = await projects.ensure('P8');
+      project.createMission({
+        id: 'M8',
+        contract: CONTRACT,
+        executionMode: 'lightweight',
+        runKind: 'mutation',
+        origin,
+      });
+      await projects.save(project);
+    },
+  },
+  {
+    name: 'promoteMissionToStandard M8',
+    run: async (p) => void (await p.promoteMissionToStandard('M8', { code: 'executor_ambiguity', rule: '执行者说不清' })),
+  },
 ];
+
+/**
+ * 验收第 1 条里会记事件的短命令：脚本必须各有一步，且文件/PG 崩溃注入都要崩到。
+ * recordWorkspace / beatAttempt / 只读求值 / 按内核建数据 不记事件，不算。
+ */
+const REQUIRED_EVENT_STEPS = [
+  'createMission M1',
+  'createClassifiedMission M3（lightweight，带工单）',
+  'rerunMission M2',
+  'reviseContract M2',
+  'startCoordinatorAttempt a1',
+  'startExecutorAttempt e1',
+  'finishAttempt a1',
+  'retireWorkItem w2',
+  'setWaitReason M1',
+  'cancelMission M2',
+  'pauseMission M2',
+  'resumeMission M2',
+  'updateFindings',
+  'updatePlan',
+  'createWorkItem w1',
+  'createLightweightWorkItem M5',
+  'dispatchWorkItems',
+  'dispatchLightweightWorkItem M3',
+  'reviewExecutionResult',
+  'recordOrchestrationRoundStarted',
+  'recordBudgetThresholdEvents M7',
+  'recordCommandTrackingEnabled',
+  'recordCommandStarted',
+  'recordCommandTrackingInvalid e1',
+  'answerEscalation',
+  'abandonMissionForPlan M6',
+  'submitEvidence',
+  'submitExecutionResult',
+  'reportBlocked',
+  'promoteLightweightAfterValidation M5',
+  'promoteMissionToStandard M8',
+  'promoteLightweightForBudgetExceeded M7',
+  'finalizeMission abandon M3',
+] as const;
+
+function assertCrashCoverage(covered: Set<string>, eventSteps: Set<string>, label: string): void {
+  for (const name of REQUIRED_EVENT_STEPS) {
+    assert.ok(eventSteps.has(name), `${label} 参考运行里「${name}」没有记事件（脚本步骤写错或前置不够）`);
+    assert.ok(covered.has(name), `${label} 目标步骤「${name}」从未被崩到`);
+  }
+}
 
 /** 平台装配：activity 包一层，第 crashAt 次 append 抛错。 */
 function assemble(parts: {
@@ -362,7 +471,12 @@ describe('崩溃注入 · 文件版：第 k 次记事件时崩，重开后恰好
     const reference = fileParts(referencePath);
     const checkpoints: string[] = [];
     const counters: Record<string, number>[] = [];
-    await runScript(reference.platform, reference.projects, async () => {
+    const eventSteps = new Set<string>();
+    let lastAppends = 0;
+    await runScript(reference.platform, reference.projects, async (index) => {
+      const now = reference.appends();
+      if (now > lastAppends) eventSteps.add(SCRIPT[index]!.name);
+      lastAppends = now;
       checkpoints.push(fileSnapshot(referencePath));
       counters.push(idCounters(referencePath));
     });
@@ -388,8 +502,7 @@ describe('崩溃注入 · 文件版：第 k 次记事件时崩，重开后恰好
       }
       covered.add(SCRIPT[crashedAt!]!.name);
     }
-    // 每一条记过事件的命令都被崩过至少一次。
-    assert.ok(covered.size >= 40, `被崩过的命令：${covered.size}`);
+    assertCrashCoverage(covered, eventSteps, '文件版');
   });
 });
 
@@ -445,22 +558,37 @@ describe('崩溃注入 · PG：第 k 次记事件时崩，新开 store 读库恰
   }
 
   /**
-   * 库里的持久化内容：快照、事件（去掉 message_id）、投递。验收报告不比——PG 事务的范围只到快照、
-   * 事件、投递，报告是即时写的 append-only 事实（C3 规格），崩在机器验收里会多一份孤儿报告。
+   * 每次新开一个 PG store 读库：快照、事件（去掉 messageId）、投递、验收报告。
+   * 参考运行与崩溃运行必须走同一套读法，否则比不齐。
    */
   async function pgSnapshot(): Promise<string> {
-    const projects = await sql('SELECT project_id, snapshot FROM projects ORDER BY project_id');
-    const activity = await sql(
-      `SELECT project_id, mission_id, work_item_id, attempt_id, kind, data, at, protocol_version,
-              correlation_id, causation_id, contract_revision, plan_revision
-         FROM activity ORDER BY seq`,
-    );
-    const deliveries = await sql(
-      `SELECT delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary,
-              status, created_at, acknowledged_at
-         FROM deliveries ORDER BY delivery_id`,
-    );
-    return JSON.stringify({ projects, activity, deliveries }, (key, value) => (key === 'answeredAt' ? 'T' : value));
+    const store = await PgStateStore.open({ connectionString: dsn! });
+    try {
+      const projects = [...store.projectsMap().values()]
+        .map((project) => ({ project_id: project.id, snapshot: project.toSnapshot() }))
+        .sort((a, b) => a.project_id.localeCompare(b.project_id));
+      const activity = (await new PgActivityLog(store, new FixedClock('2026-09-24T00:00:00.000Z')).all()).map(
+        (event) => {
+          const { messageId: _messageId, ...rest } = event;
+          return rest;
+        },
+      );
+      const deliveries = (
+        await store.pool.query(
+          `SELECT delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary,
+                  payload, status, created_at, acknowledged_at
+             FROM deliveries ORDER BY delivery_id`,
+        )
+      ).rows;
+      const reports = (
+        await store.pool.query('SELECT report_id, report FROM validation_reports ORDER BY report_id')
+      ).rows;
+      return JSON.stringify({ projects, activity, deliveries, reports }, (key, value) =>
+        key === 'answeredAt' ? 'T' : value,
+      );
+    } finally {
+      await store.close();
+    }
   }
 
   test('脚本里的每一次记事件', async (t) => {
@@ -471,15 +599,21 @@ describe('崩溃注入 · PG：第 k 次记事件时崩，新开 store 读库恰
     await reset();
     const reference = await pgParts();
     const checkpoints: string[] = [];
+    const eventSteps = new Set<string>();
+    let lastAppends = 0;
     // 参考运行里不额外 persist：检查点只能是命令自己提交下去的东西，否则没包事务的命令会被它掩盖。
-    await runScript(reference.platform, reference.projects, async () => {
+    await runScript(reference.platform, reference.projects, async (index) => {
+      const now = reference.appends();
+      if (now > lastAppends) eventSteps.add(SCRIPT[index]!.name);
+      lastAppends = now;
       checkpoints.push(await pgSnapshot());
     });
     const totalAppends = reference.appends();
     await reference.store.close();
     stores.splice(stores.indexOf(reference.store), 1);
-    const empty = JSON.stringify({ projects: [], activity: [], deliveries: [] });
+    const empty = JSON.stringify({ projects: [], activity: [], deliveries: [], reports: [] });
 
+    const covered = new Set<string>();
     for (let k = 1; k <= totalAppends; k += 1) for (const when of ['before', 'after'] as const) {
       await reset();
       const run = await pgParts(k, when);
@@ -493,7 +627,9 @@ describe('崩溃注入 · PG：第 k 次记事件时崩，新开 store 读库恰
         expected,
         `k=${k}（${when}）崩在第 ${crashedAt} 步（${SCRIPT[crashedAt!]!.name}）：库里应等于上一步结束时`,
       );
+      covered.add(SCRIPT[crashedAt!]!.name);
     }
+    assertCrashCoverage(covered, eventSteps, 'PG 版');
   });
 });
 

@@ -55,7 +55,7 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 - **不包**：L3 merge 与机器 L3（git 合并是外部副作用：合并成功后提交丢了，重放会因为目标分支已前移判合并失败——要可重入的合并检测，留给外部副作用受控 Adapter）；POST shadow（Jev 调用，只记一条事件）。
 - 事务之间串行，事务里不能有长等待。
 
-**崩溃注入（C4）**：一份确定性脚本覆盖上面的命令（每一步恰好一条平台命令）；参考运行记下每一步结束时的持久化内容；然后对第 k 次记事件（取遍全部）分别在 append 之前、之后抛错——重开后（文件版整份状态文件；PG 新开 store 读快照、事件、投递）必须恰好等于上一条命令结束时。任何一条命令漏包事务，都会有检查点对不上。
+**崩溃注入（C4）**：一份确定性脚本覆盖上面的命令（每一步恰好一条平台命令）；参考运行记下每一步结束时的持久化内容；然后对第 k 次记事件（取遍全部）分别在 append 之前、之后抛错——重开后（文件版整份状态文件；PG 新开 store 读快照、事件、投递、验收报告）必须恰好等于上一条命令结束时。任何一条命令漏包事务，都会有检查点对不上。
 
 **文件版**（`FileStateStore` 实现，`buildPersistentPlatform` 注入；C2）：
 
@@ -66,12 +66,12 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 - 只包短命令：事务之间串行，长等待（L3 合并、机器验收）不能包进来（C4 按提交段切）。
 - 已知代价：事务开着时别处直接改了同一个活对象却不 `save`（如心跳），回滚时会被一起恢复——心跳尽力而为，下一次再打。
 
-**PG 版**（`PgStateStore` 实现，`buildPgPlatform` 注入；C3）：
+**PG 版**（`PgStateStore` 实现，`buildPgPlatform` 注入；C3 / C4）：
 
-- 事务里的事件与投递（含投递确认）先暂存，快照 flush 不写；`fn` 结束后**一个数据库事务**：变了的 Project 快照（`WHERE version = 期望版本`）→ 事件 → 投递 `ON CONFLICT (mission_id, idempotency_key) DO NOTHING` → 确认 → `COMMIT`。事务里读得到自己暂存的事件与投递（`list` / `all` / `get` / `pending`）；同键重复建拿回暂存那条，库里已有的原样拿回。
-- `fn` 抛错或提交失败——包括**提交时版本冲突**（别的进程抢先改了同一个 Project）——数据库回滚，改过的活对象回到开事务时，暂存丢弃。版本号与「已落库」记账只在 `COMMIT` 成功后前移（普通快照 flush 同样修正：早先边写边前移，回滚后记账不退，之后每次写都顶成冲突）。
-- 事务外：快照 flush（含 API 的 `persist`）推迟到事务结束；`save` / `ensure` / `append` / `create` / `acknowledge` 先等；从库重读（`refresh`）事务里跳过、事务外先等——重读会换掉事务正在改的活对象。开事务前先等在途的快照 flush 与重读排空。
-- 范围：只覆盖快照、事件、投递（设计 §8.1 的 aggregate + events + outbox）。查询、验收报告、候选池、实时输出各有各的表，仍是即时写。
+- 事务里的事件、投递（含投递确认）、验收报告先暂存，快照 flush 不写；`fn` 结束后**一个数据库事务**：变了的 Project 快照（`WHERE version = 期望版本`）→ 事件 → 投递 `ON CONFLICT (mission_id, idempotency_key) DO NOTHING` → 确认 → 验收报告 `ON CONFLICT (report_id) DO NOTHING`（没插进去则读回比对，不同就抛 `ValidationReportConflictError` 让整个事务回滚）→ `COMMIT`。事务里读得到自己暂存的事件、投递与验收报告（`list` / `all` / `get` / `pending`）；同键重复建拿回暂存那条，库里已有的原样拿回。
+- `fn` 抛错或提交失败——包括**提交时版本冲突**（别的进程抢先改了同一个 Project）——数据库回滚，改过的活对象回到开事务时，暂存丢弃（报告也不落库，崩溃后不留孤儿）。版本号与「已落库」记账只在 `COMMIT` 成功后前移（普通快照 flush 同样修正：早先边写边前移，回滚后记账不退，之后每次写都顶成冲突）。
+- 事务外：快照 flush（含 API 的 `persist`）推迟到事务结束；`save` / `ensure` / `append` / `create` / `acknowledge` 先等；从库重读（`refresh`）事务里跳过、事务外先等——重读会换掉事务正在改的活对象。开事务前先等在途的快照 flush 与重读排空。验收报告在事务外仍是即时写（先等开着的事务结束）。
+- 范围：快照、事件、投递、验收报告。查询、候选池、实时输出各有各的表，仍是即时写。机器验收的报告要与 `validation.reported`、validator accept 同生共死。
 - 已知限制：另一个进程恰好同时新建同一个投递键时，本事务暂存的投递 id 在库里不存在（`ON CONFLICT` 什么都没写），`delivery.created` 里的 id 对不上——单写者下几乎不可能。
 
 ## 没做的
