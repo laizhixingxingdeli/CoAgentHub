@@ -83,7 +83,7 @@ describe('读方案文件', () => {
     }
   });
 
-  test('未知 status 报出条目 id；范围验收类型错误整份拒绝', () => {
+  test('未知 status 报出条目 id；why、范围、验收类型错误整份拒绝', () => {
     assert.throws(
       () => planOf([{ id: 'Wx', title: 'x', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'mystery' }]),
       (error: unknown) => {
@@ -97,6 +97,14 @@ describe('读方案文件', () => {
       () => planOf([{ id: 'T', title: 'x', why: 'w', allowedScope: 'a.ts', acceptance: ['x'] }]),
       invalid,
     );
+    // why 可以缺（历史条目），但写了就得是字符串：写错类型是手误，不能悄悄当成「缺」。
+    for (const why of [42, ['w'], { text: 'w' }, null]) {
+      assert.throws(
+        () => planOf([{ id: 'Wt', title: 'x', why, allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' }]),
+        invalid,
+        JSON.stringify(why),
+      );
+    }
   });
 });
 
@@ -216,6 +224,8 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
       { id: 'PendEmpty', title: '空', why: 'w', allowedScope: [], acceptance: ['y'], status: 'pending' },
       { id: 'PendMiss', title: '缺', why: 'w', status: 'pending' },
       { id: 'PendNoWhy', title: '无目标说明', allowedScope: ['d.ts'], acceptance: ['q'], status: 'pending' },
+      { id: 'PendAccEmpty', title: '验收空', why: 'w', allowedScope: ['e.ts'], acceptance: [], status: 'pending' },
+      { id: 'PendAccMiss', title: '缺验收', why: 'w', allowedScope: ['e.ts'], status: 'pending' },
       { id: 'DoneNoWhy', title: '历史', allowedScope: ['d.ts'], acceptance: ['q'], status: 'done' },
       { id: 'Planned', title: '规划', why: 'w', allowedScope: ['c.ts'], acceptance: ['z'], status: 'planned' },
       { id: 'Impl', title: '实现', why: 'w', allowedScope: ['c.ts'], acceptance: ['z'], status: 'implementing' },
@@ -234,6 +244,9 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
     assert.equal(reason('PendMiss'), PLAN_ELIGIBILITY_REASONS.missingContract);
     // 候选缺 why 同缺范围 / 验收：建不了像样的契约，不入选；历史 done 缺 why 只是照常不入选。
     assert.equal(reason('PendNoWhy'), PLAN_ELIGIBILITY_REASONS.missingContract);
+    // 其余契约齐全、只有验收空或只缺验收：同样建不了可验收的 Mission。
+    assert.equal(reason('PendAccEmpty'), PLAN_ELIGIBILITY_REASONS.missingContract);
+    assert.equal(reason('PendAccMiss'), PLAN_ELIGIBILITY_REASONS.missingContract);
     assert.equal(reason('DoneNoWhy'), PLAN_ELIGIBILITY_REASONS.done);
     assert.equal(reason('Planned'), PLAN_ELIGIBILITY_REASONS.planned);
     assert.equal(reason('Impl'), PLAN_ELIGIBILITY_REASONS.implementing);
