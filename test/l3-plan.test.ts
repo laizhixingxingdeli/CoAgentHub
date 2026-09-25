@@ -85,6 +85,30 @@ describe('l3 plan：看', () => {
     assert.match(out, /plan decide E-1 --action/);
   });
 
+  test('l3 plan 另列源方案未纳入；不把源 skipped 显示成检视者跳过', async () => {
+    const { statePath, store } = await nightInProgress();
+    const snap = store.read()!.toSnapshot();
+    const withExclusions = {
+      ...snap,
+      sourceExclusions: [
+        {
+          featureId: 'A4',
+          title: '软预算',
+          sourceStatus: 'skipped',
+          reason: '本次未纳入：源方案标 skipped；查看 skipReason，重新开工须由 L3 修订。',
+        },
+      ],
+    };
+    writeFileSync(store.path, JSON.stringify(withExclusions, null, 2));
+    const { status, out } = l3(statePath, 'plan');
+    assert.equal(status, 0, out);
+    assert.match(out, /本次未纳入（源方案，不是本次运行的检视者跳过）/);
+    assert.match(out, /A4 源状态 skipped/);
+    const a4 = out.split(/\r?\n/).find((l) => l.includes('A4')) ?? '';
+    assert.doesNotMatch(a4, /⊘/);
+    assert.match(out, /▶ F1/);
+  });
+
   test('只读命令不写主状态文件：刚开、还没打第一次心跳的 attempt 不能被它判死', async () => {
     const { statePath } = await nightInProgress();
     // 另一个进程（run-plan）刚开了一跳：attempt 已落盘，spawn 还没回来，没心跳。

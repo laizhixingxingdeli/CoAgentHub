@@ -91,6 +91,8 @@ type Landing =
   | { readonly kind: 'unsafe'; readonly detail: string };
 
 export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<PlanRunStop> {
+  // 入选名单在进驱动之前已经筛过（selectPlanCandidates）；这里只跑记录里的功能，
+  // 不再看源 status / dependsOn——否则筛选口径会有两份，检查说不可跑正式启动却派活。
   const specs = new Map(plan.features.map((feature) => [feature.id, feature]));
   try {
     for (;;) {

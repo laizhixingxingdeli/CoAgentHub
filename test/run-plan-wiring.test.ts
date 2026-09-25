@@ -10,10 +10,11 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { buildPersistentPlatform } from '../src/main.ts';
 import { preflightPlanRepo } from '../src/application/plan-preflight.ts';
@@ -396,11 +397,19 @@ describe('run-plan 周期投递修复接线', () => {
     const runPlan = readFileSync(join(root, 'run-plan.ts'), 'utf8');
     const main = readFileSync(join(root, 'main.ts'), 'utf8');
 
-    const parseAt = runPlan.indexOf('parseReconcileIntervalMs');
-    const worktreeAt = runPlan.indexOf('new GitWorktreeManager');
-    const platformAt = runPlan.indexOf('buildPersistentPlatform');
-    assert.ok(parseAt >= 0, 'run-plan 应解析 COAGENT_RECONCILE_INTERVAL_MS');
+    // 一律取调用点，不取名字第一次出现的位置：import 列表在文件最前，按名字 indexOf
+    // 会先撞上 import 行，顺序断言就成了「比两个 import 谁在前」，失去意义。
+    const parseAt = runPlan.indexOf('parseReconcileIntervalMs(process.env');
+    const worktreeAt = runPlan.indexOf('new GitWorktreeManager(');
+    const platformAt = runPlan.indexOf('await buildPersistentPlatform(');
+    assert.ok(parseAt >= 0 && worktreeAt >= 0 && platformAt >= 0, '三个调用点都应能找到');
     assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
+    const checkAt = runPlan.indexOf("if (process.argv.includes('--check'))");
+    const selectAt = runPlan.indexOf('selectPlanCandidates(plan');
+    const createAt = runPlan.indexOf('store.create(');
+    assert.ok(checkAt >= 0 && checkAt < platformAt, '--check 只读路径必须在装配平台之前');
+    assert.ok(selectAt >= 0 && selectAt < createAt, '资格筛选必须在建运行记录之前');
+    assert.match(runPlan, /process\.argv\.includes\('--check'\)/);
 
     assert.match(runPlan, /startPeriodicReconcile/);
     assert.match(runPlan, /runHeldFileDeliveryRepair/);
@@ -428,5 +437,145 @@ describe('run-plan 周期投递修复接线', () => {
       main.slice(main.indexOf('export async function startServer')),
       /exclusive:\s*\{/
     );
+  });
+});
+
+const RUN_PLAN = fileURLToPath(new URL('../src/run-plan.ts', import.meta.url));
+
+function snapshotTree(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (root: string, prefix: string) => {
+    for (const name of readdirSync(root).sort()) {
+      const rel = prefix ? `${prefix}/${name}` : name;
+      const path = join(root, name);
+      const st = statSync(path);
+      if (st.isDirectory()) {
+        out.push(`${rel}/`);
+        walk(path, rel);
+      } else {
+        out.push(`${rel}:${st.size}`);
+      }
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+function samplePlan(features: unknown[]) {
+  return {
+    planId: 'PLAN-check',
+    projectId: 'p',
+    integrationBranch: 'auto/plan-x',
+    intent: '只读检查',
+    stopConditions: { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1 },
+    integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 1 }],
+    features,
+  };
+}
+
+describe('run-plan --check 只读、零副作用', () => {
+  function runCheck(planPath: string, cwd: string, extra: string[] = [], env?: NodeJS.ProcessEnv) {
+    const isolated = temp('coagent-check-cwd-');
+    return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude', '--check'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      cwd: isolated,
+      env: env ?? { ...process.env },
+    });
+  }
+
+  test('--plan --check 打印入选与未纳入原因；不改方案、不建状态/锁/运行记录/worktree', () => {
+    const home = temp('coagent-check-');
+    const repo = repoOn('auto/plan-x');
+    const planPath = join(home, 'PLAN.json');
+    const plan = samplePlan([
+      { id: 'Done', title: '已合', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' },
+      { id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' },
+    ]);
+    writeFileSync(planPath, JSON.stringify(plan, null, 2));
+    const beforePlan = readFileSync(planPath);
+    const beforeHome = snapshotTree(home);
+    const beforeRepo = snapshotTree(repo);
+
+    const result = runCheck(planPath, repo);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, out);
+    assert.match(out, /只读检查/);
+    assert.match(out, /Ok 待跑/);
+    assert.match(out, /候选：待跑/);
+    assert.match(out, /Done 已合/);
+    assert.match(out, /源方案标 done/);
+    assert.match(out, /未开跑/);
+    assert.equal(readFileSync(planPath).equals(beforePlan), true);
+    assert.deepEqual(snapshotTree(home), beforeHome);
+    assert.deepEqual(snapshotTree(repo), beforeRepo);
+    assert.equal(existsSync(join(repo, '.coagent-state.json')), false);
+    assert.equal(existsSync(join(repo, '.coagent-plans')), false);
+    assert.ok(!readdirSync(repo).some((name) => name.startsWith('.lock-')));
+  });
+
+  test('位置参数旧写法仍可用于 --check；缺 --cwd 或 --reviewer 非零退出', () => {
+    const home = temp('coagent-check-pos-');
+    const repo = repoOn('auto/plan-x');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'] }]),
+        null,
+        2,
+      ),
+    );
+    const isolated = temp('coagent-check-pos-cwd-');
+    const positional = spawnSync(
+      process.execPath,
+      [RUN_PLAN, planPath, '--cwd', repo, '--reviewer', 'claude', '--check'],
+      { encoding: 'utf8', timeout: 15_000, cwd: isolated, env: { ...process.env } },
+    );
+    const posOut = `${positional.stdout}${positional.stderr}`;
+    assert.equal(positional.status, 0, posOut);
+    assert.match(posOut, /候选：旧格式待跑/);
+
+    const missing = spawnSync(process.execPath, [RUN_PLAN, '--plan', planPath, '--check'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      cwd: isolated,
+      env: { ...process.env },
+    });
+    assert.notEqual(missing.status, 0);
+    assert.match(`${missing.stdout}${missing.stderr}`, /--cwd/);
+  });
+
+  test('有候选且仓库预检不过 → 非零；没有候选 → 退出 0 且明说没有可跑的', () => {
+    const dirty = repoOn('auto/plan-x');
+    writeFileSync(join(dirty, 'stray.json'), '{}');
+    const home = temp('coagent-check-pre-');
+    const dirtyPlan = join(home, 'dirty.json');
+    writeFileSync(
+      dirtyPlan,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    const failed = runCheck(dirtyPlan, dirty);
+    assert.notEqual(failed.status, 0, `${failed.stdout}${failed.stderr}`);
+    assert.match(`${failed.stdout}${failed.stderr}`, /stray\.json/);
+    assert.doesNotMatch(`${failed.stdout}${failed.stderr}`, /未开跑/);
+
+    const emptyPlan = join(home, 'empty.json');
+    writeFileSync(
+      emptyPlan,
+      JSON.stringify(
+        samplePlan([{ id: 'Done', title: '已合', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' }]),
+        null,
+        2,
+      ),
+    );
+    const none = runCheck(emptyPlan, dirty);
+    const noneOut = `${none.stdout}${none.stderr}`;
+    assert.equal(none.status, 0, noneOut);
+    assert.match(noneOut, /没有可跑的候选/);
   });
 });

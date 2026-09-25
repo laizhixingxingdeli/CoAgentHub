@@ -96,5 +96,14 @@ export function renderPlanHandoff(
         (context.recordPath ? ` --run "${context.recordPath}"` : ''),
     );
   }
+  const excluded = run.sourceExclusions;
+  if (excluded && excluded.length > 0) {
+    // 单独一段：源 skipped 不是本次运行的检视者跳过，不能用 ⊘。
+    lines.push('  本次未纳入（源方案，不是本次运行的检视者跳过）：');
+    for (const ex of excluded) {
+      const source = ex.sourceStatus ?? '旧格式';
+      lines.push(`  · ${ex.featureId} 源状态 ${source}  ${ex.reason}`);
+    }
+  }
   return lines;
 }

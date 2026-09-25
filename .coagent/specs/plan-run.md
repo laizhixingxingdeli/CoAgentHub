@@ -6,9 +6,11 @@
 
 ## 驱动（run-plan）
 
-- **开跑前，任何副作用之前**：透传名单已声明；方案文件严格可读（缺检视者、缺集成验证、停止条件不是正整数、功能重名、范围或验收为空 → `PLAN_SPEC_INVALID`；备注类的额外键照留）；项目仓在方案的集成分支上且工作区干净（未跟踪文件也算，被忽略的不算）。拿到主状态锁之后再查一次——锁目录自己也可能落在仓库里。任何一项不过就一个功能都不跑。
+- **开跑前，任何副作用之前**：透传名单已声明；方案文件严格可读（缺检视者、缺集成验证、停止条件不是正整数、功能重名、未知或类型错误的 `status` → `PLAN_SPEC_INVALID`；备注类的额外键照留）。**资格筛选**在分类、建 Mission、建运行记录之前完成，按源文件顺序只纳入：无 `status` 的旧写法或显式 `pending`，且有非空的 `why`，且 `allowedScope` / `acceptance` 均为非空字符串列表，且 `dependsOn` 每一项在源方案里明确标 `done`，且未声明 `repo` 或 `repo` resolve 后的绝对路径与 `--cwd` 相同（Windows 上大小写不敏感）。未知依赖、未完成依赖（含 skipped / split / 本次待跑）、split 父项、人工流程中的 planned / implementing / review / rework、非本仓或仓库归属不能确认的条目均不建 Mission。不从 `routing` / `workOrder` / `childrenDone` 决定资格或路由。历史非候选可以缺 `why`、范围和验收（手动流程记下的 done 条目就有缺 `why` 的）；`why` 写了就必须是字符串。项目仓在方案的集成分支上且工作区干净（未跟踪文件也算，被忽略的不算）。拿到主状态锁之后再查一次——锁目录自己也可能落在仓库里。任何一项不过就一个功能都不跑。
 - 同样在开跑前：本项目里有没有动过代码、没到终态的 Mission 占着改动名额——上一晚停下时原样留给人的那条就是这种。有就点名它、一个功能都不跑：否则每个功能都会先调查规划一遍再撞上 PROJECT_BUSY。
-- 只跑方案里没标 `done` 的功能，按方案顺序，同一时刻一个。Mission id 为 `<runId>-<featureId>`，隔离重跑依次 `-r2`、`-r3`；origin 的 clientType 为 `plan-run`。功能点转成契约时，范围写成约束、其余功能点写成非目标、合并归平台。
+- 只跑资格筛选后的候选，按方案顺序，同一时刻一个。`done` 不重跑。Mission id 为 `<runId>-<featureId>`，隔离重跑依次 `-r2`、`-r3`；origin 的 clientType 为 `plan-run`。功能点转成契约时，范围写成约束、其余功能点写成非目标、合并归平台。
+- **源状态与交接说法**（未知状态整份 `PLAN_SPEC_INVALID`）：`done` 不入选「源方案标 done（已合入）」；`skipped` 不入选「源方案标 skipped；查看 skipReason…」；`split` 父项不入选；`pending` / 无 status 可入选但仍须过范围、验收、仓库、依赖；`planned` / `implementing` / `review` / `rework` 不接管；候选缺 `why`、范围或验收，依赖未明确 done、显式 repo 不是本次 `--cwd` 或无法确认 → 不入选并写明原因。
+- **只读检查**：`node src/run-plan.ts --plan <方案文件> --cwd <项目仓> --reviewer <检视者> --check`（`--plan` 是位置参数的别名；旧写法 `node src/run-plan.ts <方案文件> …` 仍可用）。`--check` 必须同时给 `--cwd` 和 `--reviewer`，缺了非零退出。它只做解析 + 资格筛选 + 适用的仓库预检（只读 git），打印入选条目及逐项未纳入原因；**不**拿主状态锁、不打开或创建状态文件、不建 PlanRun、不起 HTTP 监听、不建 worktree、不跑分类、不派 agent。有入选条目且预检通过 → 退出 0，并写明未开跑。预检不过 → 非零退出，不把失败说成可以开跑。**没有任何入选条目时退出 0**，并写明「没有可跑的候选」——那是筛选结果不是预检失败，也不跑仓库预检。
 - **现做分类**：开跑前用只读 QueryRun（工具表 read / grep / find / ls，由 QueryRunner 强制）读集成分支现状，交回**事实**（不交路由）；`classifyTask` 按事实定路由。Fast Lane 必须附冻结工单，且工单范围落在方案声明内（语义同 validator 的 changed-paths）；分到 Standard 丢掉工单；分到 high_assurance **不建 Mission**，直接 ⏸ 写明要你定什么；判成只读、读不懂、越界、缺工单一律回落 Standard。解析取最后一个 json 块，多键（尤其 route / executionMode）拒绝，评估必须署名 coordinator。每次分类留一条 QueryRun，source 为 `plan-run:<runId>:<featureId>`。
 - **每个功能开跑前**：分类出错不拖垮整晚（回落 Standard）；分类本身跑过墙钟就不再建 Mission（功能保持没轮到）；再核一次项目仓——分支被切走或工作区变脏就停在 `unsafe`，不先花一整条 Mission 的钱。
 - **落地**：交卷了走机器 L3。绿 → ✓。红且已退回、合并失败、编排器的其余结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，失败写明卡在哪，问题带上四个动作。**红且回滚失败、项目仓被切离集成分支 → 立刻停在 `unsafe`，不开单**：检视者修不了 git 状态，再往上叠只会越错越多。
@@ -26,6 +28,7 @@
   - **每个非成功项都写「要你定什么」**：⏸ / ⊘ 照抄记录里的 `needsDecision`；方案停了时 ○ 也写（下一轮接着跑它吗）。已合入的不写。
   - 有开着的升级单时多两行：单号、截止时间、失败；以及给检视者照抄就能用的 `plan decide` 命令（带 `--as <指定检视者>` 与 `--run`）。
   - 开跑时把功能标题抄进记录：早上看不用回头翻方案文件（它到早上可能已经改了）；旧记录缺标题照样读。
+  - 运行记录可带可选的 `sourceExclusions`（源方案本次未纳入及原因）。旧记录没有它照常读、照常显示。交接面另列「本次未纳入（源方案，不是本次运行的检视者跳过）」；源 `skipped` 不得伪装成运行中的 ⊘。方案源文件字节不变。
 - `node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "…" [--drop F7,F8] --as <检视者>`：写回决定，规则全在 `PlanRun.choose`（方法不叫 decide：`src/` 里的 `.decide(` 是 Decision provider 的接线，由 ADR-0002 的边界守卫盯着，撞名会让守卫要么误报、要么被迫放宽）。必须 `--as`（不写你是谁就核对不了指定检视者）；只有给了 `--drop` 才带删除名单。规则拒绝的非零退出并说清原因，记录一字不动。
 - 两条命令**都不拿主状态锁、不写主状态文件、不做启动收敛**（run-plan 整夜握着主状态锁在写；见 `startup-reconciliation`）。
 - run-plan 结束时打印的是同一张交接面（不含花销）。
@@ -52,9 +55,10 @@
 ## 非目标
 
 - 不给检视者任何放行或合并权；不接 HTTP / agent tools。
-- 不做依赖声明：依赖由检视者夜里读剩余功能自己判（体现为重划剩余范围）。
+- 开跑前按源方案 `dependsOn` 是否明确 `done` 筛选；运行中仍由检视者重划剩余范围。不把 `childrenDone` 等叙述当完成证明，不在运行中改写源方案的 done。
 - 不做崩溃后续跑；不做费用上限（首行花销是给人校准阈值用的，不是闸）。
 - Postgres 存储下方案运行记录仍是文件。
+- 不替 L3 给 pending 条目补范围和验收；不接管 planned / implementing / review / rework。
 
 ## 权威源 / 测试
 

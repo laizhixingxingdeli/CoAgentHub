@@ -111,4 +111,50 @@ describe('交接面', () => {
     const lines = renderPlanHandoff(night(), { now: at(200) });
     assert.ok(lines.length <= 11, `一共 ${lines.length} 行`);
   });
+
+  test('源方案未纳入另列一段；源 skipped 不用 ⊘；旧记录缺清单照常读', () => {
+    const old = PlanRun.start({
+      id: 'R-old',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['F1'],
+      startedAt: T0,
+    });
+    const snap = old.toSnapshot();
+    assert.equal('sourceExclusions' in snap, false);
+    const restored = PlanRun.restore(JSON.parse(JSON.stringify(snap)));
+    assert.equal(restored.sourceExclusions, undefined);
+    const oldText = renderPlanHandoff(restored, { now: at(1) }).join('\n');
+    assert.doesNotMatch(oldText, /源方案/);
+
+    const run = PlanRun.start({
+      id: 'R-ex',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['Ok'],
+      titles: { Ok: '可跑' },
+      startedAt: T0,
+      sourceExclusions: [
+        {
+          featureId: 'A4',
+          title: '软预算',
+          sourceStatus: 'skipped',
+          reason: '本次未纳入：源方案标 skipped；查看 skipReason，重新开工须由 L3 修订。',
+        },
+      ],
+    });
+    const text = renderPlanHandoff(run, { now: at(1) }).join('\n');
+    assert.match(text, /本次未纳入（源方案，不是本次运行的检视者跳过）/);
+    assert.match(text, /A4 源状态 skipped/);
+    assert.match(text, /源方案标 skipped/);
+    const a4 = text.split('\n').find((l) => l.includes('A4')) ?? '';
+    assert.doesNotMatch(a4, /⊘/, '源 skipped 不得伪装成检视者跳过');
+    assert.deepEqual(PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot()))).sourceExclusions, run.sourceExclusions);
+  });
 });
