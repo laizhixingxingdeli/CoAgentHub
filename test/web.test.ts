@@ -18,6 +18,7 @@ import type { Server } from 'node:http';
 import { createApi } from '../src/api/server.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT = {
   intent: '修 X',
@@ -48,7 +49,7 @@ async function serve(statePath: string) {
     deliveries: built.deliveries,
     onMutation: built.persist,
   });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return { ...built, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }

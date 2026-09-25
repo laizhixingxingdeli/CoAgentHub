@@ -29,6 +29,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 /** 只记录调用，不真写响应——这一组验的是"认不认"，不是"发得对不对"。 */
 function recorder() {
@@ -130,7 +131,7 @@ describe('静态资源：接进 HTTP 面之后', () => {
       deliveries,
       webRoot: assets,
     });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    await listenLoopback(server, 0);
     servers.push(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 

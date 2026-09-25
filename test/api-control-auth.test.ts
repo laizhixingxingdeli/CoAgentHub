@@ -20,6 +20,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
 import { Platform } from '../src/application/platform.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const OPERATOR: ControlPrincipal = { id: 'op-1', role: 'operator' };
 const VIEWER: ControlPrincipal = { id: 'vw-1', role: 'viewer' };
@@ -72,7 +73,7 @@ before(async () => {
     agentPool: new InMemoryAgentPoolRepository(),
     resolveControlPrincipal: resolveFromHeader,
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
@@ -438,7 +439,7 @@ describe('默认不注入 resolver', () => {
       tokens: new RunTokenRegistry(),
       deliveries,
     });
-    await new Promise<void>((resolve) => plain.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(plain, 0);
     const plainBase = `http://127.0.0.1:${(plain.address() as AddressInfo).port}`;
     try {
       const res = await fetch(`${plainBase}/api/missions`, {

@@ -14,6 +14,7 @@ import { createServer, type Server } from 'node:http';
 
 import { acquireLock, LockBusyError } from '../src/application/lock.ts';
 import { bindServerCloseToPeriodicStop, startServer } from '../src/main.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -625,7 +626,7 @@ describe('startServer 周期投递修复配置', () => {
 describe('server.close 异常路径', () => {
   test('stop 失败时 HTTP 仍被关闭，callback 能诊断 stop 错误', async () => {
     const server = createServer();
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    await listenLoopback(server, 0);
     servers.push(server);
     bindServerCloseToPeriodicStop(server, async () => {
       throw new Error('stop-boom');
@@ -704,7 +705,7 @@ describe('server.close 异常路径', () => {
     };
     try {
       const server = createServer();
-      await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+      await listenLoopback(server, 0);
       servers.push(server);
       bindServerCloseToPeriodicStop(server, async () => {
         throw new Error('stop-boom');

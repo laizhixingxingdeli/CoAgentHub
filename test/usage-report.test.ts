@@ -27,6 +27,7 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { MissionContract, TokenUsage, WorkOrder } from '../src/kernel/index.ts';
 import { PROTOCOL_VERSION } from '../src/application/platform.ts';
 import type { UsageReport } from '../src/application/platform.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT: MissionContract = {
   intent: '修 X',
@@ -199,7 +200,7 @@ describe('用量报表（S11.5）', () => {
     const { platform, deliveries } = makePlatform();
     await seed(platform);
     const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    await listenLoopback(server, 0);
     servers.push(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 

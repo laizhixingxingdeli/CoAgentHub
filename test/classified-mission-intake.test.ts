@@ -40,6 +40,7 @@ import { InvariantViolationError } from '../src/kernel/index.ts';
 import { createApi } from '../src/api/server.ts';
 import type { ControlPrincipal, ControlPrincipalResolver } from '../src/api/control-auth.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const FALSE: Tri = false;
 const TRUE: Tri = true;
@@ -559,7 +560,7 @@ describe('POST /api/missions/classified control API', () => {
       agentPool: new InMemoryAgentPoolRepository(),
       resolveControlPrincipal: resolveFromHeader,
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server, 0);
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 

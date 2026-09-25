@@ -26,6 +26,7 @@ import {
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { LiveOutput } from '../src/application/live.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const servers: Server[] = [];
 after(() => {
@@ -45,7 +46,7 @@ async function serve(live: LiveOutput) {
     ids,
   });
   const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries, live });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }

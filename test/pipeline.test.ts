@@ -26,6 +26,7 @@ import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT = {
   intent: '修 X',
@@ -73,7 +74,7 @@ async function harness() {
   });
   const tokens = new RunTokenRegistry();
   const server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 

@@ -31,6 +31,7 @@ import {
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { WEB_PAGE } from '../src/api/web.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 // 读进来就归一化行尾：这份仓库在 Windows 上 checkout 出来是 CRLF（core.autocrlf），
 // 而比对的源 WEB_PAGE 是模板字符串里的 LF。不归一的话，逐字比对会因为行尾而红，
@@ -68,7 +69,7 @@ async function serveDefaultWebRoot(): Promise<{ platform: Platform; base: string
     ids,
   });
   const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return { platform, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }

@@ -42,6 +42,7 @@ import {
 } from '../src/application/validation/engine.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -199,7 +200,7 @@ async function harness(opts?: {
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   servers.push(server);
 

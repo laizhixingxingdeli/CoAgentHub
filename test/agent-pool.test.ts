@@ -40,6 +40,7 @@ import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { createApi } from '../src/api/server.ts';
 import { buildPlatform } from '../src/main.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 /** 缺省那四条。字面量在这里出现是刻意的：断言的就是「与原来那四条一致」。 */
 const DEFAULT_COORDINATOR = 'coordinator-grok';
@@ -575,7 +576,7 @@ describe('候选池 API', () => {
       deliveries: built.deliveries,
       ...(agentPool ? { agentPool } : {}),
     });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    await listenLoopback(server, 0);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     return { base, close: () => server.close() };
   }

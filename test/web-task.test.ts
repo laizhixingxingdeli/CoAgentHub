@@ -39,6 +39,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 // 读进来就归一化行尾：仓库在 Windows 上 checkout 出来是 CRLF（core.autocrlf）。
 const read = (name: string): string =>
@@ -79,7 +80,7 @@ async function serveDefaultWebRoot(): Promise<{
     ids,
   });
   const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries, live });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return { platform, live, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
