@@ -12,8 +12,12 @@
 import type { AddressInfo, Server } from 'node:net';
 
 /**
- * Fetch 标准的屏蔽端口，与 Node 24 自带 undici（7.18.2）实测拒绝的 82 个端口一致。
- * test/loopback-listen.test.ts 逐个对照实际的 fetch 行为：Node 升级改了这张表，测试会红。
+ * Fetch 标准的屏蔽端口，82 个。来源：在本机 Node v24.13.0（自带 undici 7.18.2）上对 1–15000
+ * 每个端口实测 fetch 127.0.0.1，被以 bad port 拒绝的正好是这 82 个；与 undici 8.10.2 源码里的
+ * badPorts 表逐项相同。
+ *
+ * test/loopback-listen.test.ts 逐项核对表内端口确实被 fetch 拒绝——Node 把某个端口移出屏蔽表时
+ * 测试会红；表外只抽查几个端口，Node 新增的屏蔽端口不一定查得出来。
  */
 export const FETCH_BLOCKED_PORTS: ReadonlySet<number> = new Set([
   1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104,

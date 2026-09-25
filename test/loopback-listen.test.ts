@@ -58,13 +58,16 @@ describe('listenLoopback', () => {
     const server = okServer();
     const seen: number[] = [];
     const port = await listenLoopback(server, 0, {
+      // 第一次一律当作被屏蔽，逼出一次重绑；之后仍按真实的屏蔽表判——否则第二次恰好分到
+      // 真的屏蔽端口时，下面的 fetch 会以 bad port 失败，这条测试自己就成了它要消除的那种假红。
       isBlocked: (candidate) => {
         seen.push(candidate);
-        return seen.length === 1;
+        return seen.length === 1 || FETCH_BLOCKED_PORTS.has(candidate);
       },
     });
-    assert.equal(seen.length, 2, '第一次分到的端口算被屏蔽，应重绑一次');
-    assert.equal(seen[1], port);
+    assert.ok(seen.length >= 2, `第一次分到的端口算被屏蔽，应至少重绑一次，实际判定 ${seen.length} 次`);
+    assert.equal(seen.at(-1), port);
+    assert.equal(FETCH_BLOCKED_PORTS.has(port), false);
     assert.equal(server.listening, true);
     const res = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(await res.text(), 'ok');
