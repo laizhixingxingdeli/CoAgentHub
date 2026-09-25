@@ -38,6 +38,7 @@ import {
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -150,7 +151,7 @@ async function harness(opts?: {
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   servers.push(server);
 

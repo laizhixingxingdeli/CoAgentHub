@@ -19,6 +19,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform } from '../src/application/platform.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -54,7 +55,7 @@ before(async () => {
     ids,
   });
   server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 

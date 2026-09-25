@@ -28,6 +28,7 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { AgentRuntime, RuntimeEvent, RuntimeOutcome } from '../src/application/ports.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const KNOWN = 'e2e-known-secret-7c1f9a2b';
 process.env.E2E_REDACTION_API_KEY = KNOWN;
@@ -61,7 +62,7 @@ before(async () => {
     ids,
   });
   server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
@@ -241,7 +242,7 @@ describe('凭据脱敏的落点', () => {
     });
     const tokens = new RunTokenRegistry();
     const liveServer = createApi({ platform: livePlatform, tokens, deliveries });
-    await new Promise<void>((resolve) => liveServer.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(liveServer, 0);
     try {
       const live = new InMemoryLiveOutput();
       await livePlatform.createMission({ projectId: 'P', missionId: 'M-live', contract: CONTRACT });

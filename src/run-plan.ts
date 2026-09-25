@@ -29,6 +29,7 @@ import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { parsePlanSpec } from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
+import { listenLoopback } from './application/loopback-listen.ts';
 import type { FileStateStore } from './application/file-store.ts';
 import {
   cleanupAfterSignal,
@@ -191,7 +192,8 @@ async function main() {
     );
 
     const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    // 派出去的 agent 用 fetch 连回这个口：分到 fetch 屏蔽的端口，它们会以 bad port 连不上平台。
+    await listenLoopback(server, 0);
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
     const runtime = new SpawnRuntime({

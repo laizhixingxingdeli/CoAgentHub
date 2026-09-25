@@ -27,6 +27,7 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT: MissionContract = {
   intent: '修 X',
@@ -575,9 +576,7 @@ describe('公开终审入口仍只发 human', () => {
       deliveries,
     });
     servers.push(server);
-    await new Promise<void>((resolve) => {
-      server.listen(0, '127.0.0.1', resolve);
-    });
+    await listenLoopback(server, 0);
     const port = (server.address() as AddressInfo).port;
     const forgeries = [
       { kind: 'reviewer', reviewerId: 'r', confirmedBy: 'c', confirmedAt: '2026-01-01T00:00:00.000Z' },
