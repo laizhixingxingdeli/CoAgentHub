@@ -491,3 +491,136 @@ describe('文件持久化', () => {
     assert.ok(open.queryRunner instanceof QueryRunner);
   });
 });
+
+async function awaitingReview(platform: {
+  createMission: (input: { projectId: string; missionId: string; contract: MissionContract }) => Promise<unknown>;
+  recordWorkspace: (missionId: string, ref: { branch: string; baseRevision: string }) => Promise<unknown>;
+  startCoordinatorAttempt: (missionId: string) => Promise<{ attemptId: string }>;
+  updatePlan: (missionId: string, attemptId: string, plan: typeof PLAN) => Promise<unknown>;
+  createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
+  dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
+  startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
+  submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
+  submitExecutionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
+  finishAttempt: (missionId: string, attemptId: string, input: { endedBy: string }) => Promise<unknown>;
+  reviewExecutionResult: (missionId: string, attemptId: string, review: object) => Promise<unknown>;
+  submitMissionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
+}, missionId: string) {
+  await platform.createMission({ projectId: 'P-rev', missionId, contract: CONTRACT });
+  await platform.recordWorkspace(missionId, { branch: `mission/${missionId}`, baseRevision: 'base0' });
+  const coord = await platform.startCoordinatorAttempt(missionId);
+  await platform.updatePlan(missionId, coord.attemptId, PLAN);
+  const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, {
+    title: 'W',
+    order: ORDER,
+  });
+  await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
+  const exec = await platform.startExecutorAttempt(missionId, workItemId);
+  await platform.submitEvidence(missionId, exec.attemptId, {
+    kind: 'test',
+    summary: '绿',
+    command: 'node --test',
+    exitCode: 0,
+  });
+  await platform.submitExecutionResult(missionId, exec.attemptId, {
+    outcome: 'completed',
+    summary: '改好了',
+    changedFiles: ['src/foo.ts'],
+    evidenceIds: ['E-1'],
+    notes: '无',
+  });
+  await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
+  await platform.reviewExecutionResult(missionId, coord.attemptId, {
+    workItemId,
+    verdict: 'accept',
+    acceptanceResults: ORDER.acceptance.map((criterion) => ({
+      criterion,
+      status: 'pass' as const,
+      evidence: '测试替身：逐条核过',
+    })),
+    reasons: ['复跑过'],
+    requiredChanges: [],
+  });
+  await platform.submitMissionResult(missionId, coord.attemptId, {
+    outcome: 'delivered',
+    summary: '交付',
+    acceptanceEvidence: ['node --test 退出码 0'],
+    memoryDelta: [],
+    openRisks: [],
+  });
+  await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
+}
+
+describe('文件持久化：检视者终审签名', () => {
+  test('写入后重建平台能读回 reviewer 签名与时间', async () => {
+    const statePath = tempState();
+    {
+      const { platform } = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+      await awaitingReview(platform, 'M-rev');
+      await platform.finalizeMissionByReviewer('M-rev', {
+        verdict: 'merge',
+        reasons: ['ok'],
+        projectRoot: process.cwd(),
+        reviewerId: '  claude  ',
+        confirmedBy: '  echo  ',
+      });
+    }
+    const revived = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    const view = await revived.platform.getMissionView('M-rev');
+    assert.equal(view.status, 'completed');
+    const authority = view.finalReview?.authority;
+    assert.equal(authority?.kind, 'reviewer');
+    if (authority?.kind === 'reviewer') {
+      assert.equal(authority.reviewerId, 'claude');
+      assert.equal(authority.confirmedBy, 'echo');
+      assert.match(authority.confirmedAt, /^\d{4}-\d{2}-\d{2}T.+/);
+    }
+  });
+
+  test('没有 authority 的旧状态仍可读写，不推断为 human', async () => {
+    const statePath = tempState();
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            id: 'P-old',
+            missions: [
+              {
+                id: 'M-old',
+                projectId: 'P-old',
+                status: 'completed',
+                contractRevision: 1,
+                planRevision: 0,
+                escalations: [],
+                finalReview: { verdict: 'merge', reasons: ['旧放行'] },
+                workItems: [],
+                coordinatorAttempts: [],
+                coordinatorSeq: 0,
+              },
+            ],
+          },
+        ],
+        deliveries: [],
+        events: [],
+        idCounters: {},
+        agentPool: [],
+        archivedMissions: [],
+        queryRuns: [],
+        validationReports: [],
+      }),
+      'utf8',
+    );
+    const first = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    const view = await first.platform.getMissionView('M-old');
+    assert.equal(view.status, 'completed');
+    assert.deepEqual(view.finalReview, { verdict: 'merge', reasons: ['旧放行'] });
+    assert.equal(view.finalReview?.authority, undefined);
+    first.persist();
+    const second = await buildPersistentPlatform(statePath, new InPlaceWorkspaceManager());
+    const again = await second.platform.getMissionView('M-old');
+    assert.equal(again.finalReview?.authority, undefined);
+    assert.equal(again.finalReview?.verdict, 'merge');
+  });
+});

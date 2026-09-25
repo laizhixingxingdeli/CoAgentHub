@@ -10,7 +10,7 @@
 - `totalDurationMs` 只在 Mission 为 `completed | blocked` 时计算：`mission.created` 到终态 `updatedAt`。
 - 任一时间缺失、非法或倒序时返回 `undefined`，不得伪造为 0。
 - L2 打回只统计非 validator 的 `review.recorded`；L3 打回只统计 `final_review.send_back`。
-- L3 检视次数（打回率的分母）只数人：机器 L3 放行（`authority: machine`）与方案放弃（`authority: plan`）不计——夜跑的每一条都算进来的话，A/B 表就把人和机器混在一列里。
+- L3 检视次数 / 打回率只数人：计入 `authority` 为 human 的事件，以及旧的、没标 `authority` 的历史人类事件。不计 `reviewer`、`machine`、`plan`——检视者代签不是人亲签，夜跑的机器放行 / 方案放弃也不能混进人类统计。
 - Validator 运行/失败只统计 `validation.reported` 且 `passed` 为布尔值的事件。
 - `baseRevision` 原样暴露用于判断两次运行是否同一起点；缺失或不同只提示不可直接归因。
 

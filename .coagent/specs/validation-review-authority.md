@@ -11,6 +11,7 @@
 
 - 无 `executor` 分支（`src/kernel/payloads.ts`）。
 - Standard 路径继续由 Coordinator Attempt 做 `review`；Lightweight 机器验收只认 `validator`。
+- **这是工作项 L2 的轴，不是 Mission 终审的轴。** `FinalReviewAuthority`（human / machine / plan / reviewer）只出现在 L3 最终检视上；本文件的 ReviewAuthority 不给 executor 增加终审权，也不因为多了检视者代签就把终审下放到执行者。
 
 ## ValidationReport
 

@@ -585,9 +585,8 @@ export interface WorkspaceRef {
  * 人工放行的一模一样。不记权威就回答不了「这是谁放的」——而出事后第一个要问的
  * 就是这个。
  *
- * `human` 的 `principalId` 可缺：`l3.ts` 目前没有身份概念，只有注入
- * ControlPrincipal 时才知道是谁。**宁可记「人，但不知道是谁」，也不要留空让它
- * 看起来像没人放行过。**
+ * `human` 的 `principalId` 可缺：公开入口仍然可以只记「人」。**宁可记「人，但不知道是谁」，也不要留空让它看起来像没人放行过。**
+ * 检视者代签走 `reviewer`，不伪装成 human。
  */
 export type FinalReviewAuthority =
   | { readonly kind: 'human'; readonly principalId?: string }
@@ -607,6 +606,16 @@ export type FinalReviewAuthority =
       readonly kind: 'plan';
       readonly planRunId: string;
       readonly escalationId: string;
+    }
+  | {
+      /**
+       * 用户确认之后由检视者代签。确认人是调用方声明的，平台没有身份名册、
+       * 不宣称已经核对过那一次点击。确认时刻用平台时钟，不接受调用方传入的时间。
+       */
+      readonly kind: 'reviewer';
+      readonly reviewerId: string;
+      readonly confirmedBy: string;
+      readonly confirmedAt: string;
     };
 
 export interface FinalReview {

@@ -572,14 +572,16 @@ export class Platform {
           l2Reviews += 1;
           if (data?.verdict === 'reject') l2Rejects += 1;
         }
-        // 与上面 L2 排除 validator 同理：机器 L3 放行、方案放弃不是人的检视。
+        // 与上面 L2 排除 validator 同理：机器 L3 放行、方案放弃、检视者代签都不是人亲签。
         // 算进来的话，夜跑的每一条都让「L3 打回」的分母多一，A/B 表就混了人和机器。
+        // 旧的、没标 authority 的人类事件仍计入——不能把历史空白推断成「不是人」。
         if (
           (event.kind === 'final_review.send_back' ||
             event.kind === 'final_review.merged' ||
             event.kind === 'final_review.abandoned') &&
           data?.authority !== 'machine' &&
-          data?.authority !== 'plan'
+          data?.authority !== 'plan' &&
+          data?.authority !== 'reviewer'
         ) {
           l3Reviews += 1;
           if (event.kind === 'final_review.send_back') l3SendBacks += 1;
@@ -2427,6 +2429,57 @@ export class Platform {
     return this.#tx(() => this.#finalizeMission(missionId, input));
   }
 
+  /**
+   * 检视者终审：用户确认之后签检视者的名字。只给命令行进程内调用，不挂公开入口。
+   *
+   * confirmedAt 取平台时钟，不接受调用方传入的时间——否则记录可以回拨。
+   * 两个身份都 trim，trim 后各 1..128 字符。平台没有身份名册，这里记下的是
+   * 调用方声明，不宣称已经核对过那一次点击。
+   */
+  async finalizeMissionByReviewer(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      reviewerId: string;
+      confirmedBy: string;
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    const authority = this.#reviewerAuthority(input.reviewerId, input.confirmedBy);
+    const body = {
+      verdict: input.verdict,
+      reasons: input.reasons,
+      projectRoot: input.projectRoot,
+      authority,
+    };
+    if (input.verdict === 'merge') return this.#applyFinalReview(missionId, body);
+    return this.#tx(() => this.#applyFinalReview(missionId, body));
+  }
+
+  #reviewerAuthority(
+    reviewerId: unknown,
+    confirmedBy: unknown,
+  ): Extract<FinalReviewAuthority, { kind: 'reviewer' }> {
+    return Object.freeze({
+      kind: 'reviewer' as const,
+      reviewerId: this.#requireReviewerIdentity(reviewerId, 'reviewerId'),
+      confirmedBy: this.#requireReviewerIdentity(confirmedBy, 'confirmedBy'),
+      confirmedAt: this.#clock.now().toISOString(),
+    });
+  }
+
+  #requireReviewerIdentity(value: unknown, field: string): string {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (trimmed.length < 1 || trimmed.length > 128) {
+      throw new PlatformRuleError(
+        'REVIEWER_IDENTITY_INVALID',
+        `${field} 经 trim 后必须是 1 到 128 个字符。`,
+      );
+    }
+    return trimmed;
+  }
+
   async #finalizeMission(
     missionId: string,
     input: {
@@ -2450,6 +2503,30 @@ export class Platform {
         ? { kind: 'human' as const, principalId: input.authority.principalId }
         : { kind: 'human' as const },
     );
+    return this.#applyFinalReview(missionId, {
+      verdict: input.verdict,
+      reasons: input.reasons,
+      projectRoot: input.projectRoot,
+      authority,
+    });
+  }
+
+  /**
+   * 人类入口与检视者入口共用的终审流转。三种 verdict、合并闸、失败行为必须一致。
+   * 权威已在入口处定好：这里不再改 kind。
+   */
+  async #applyFinalReview(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      authority: FinalReviewAuthority;
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    const authority = input.authority;
+    const tag = (data: Record<string, unknown>) =>
+      authority.kind === 'reviewer' ? { ...data, authority: 'reviewer' as const } : data;
     const { mission } = await this.#locate(missionId);
     if (mission.status !== 'awaiting_review') {
       throw new PlatformRuleError(
@@ -2466,13 +2543,13 @@ export class Platform {
 
     if (input.verdict === 'send_back') {
       mission.sendBackToPlanning({ verdict: 'send_back', reasons: [...input.reasons], authority });
-      await this.#event(mission, 'final_review.send_back', { reasons: input.reasons });
+      await this.#event(mission, 'final_review.send_back', tag({ reasons: input.reasons }));
       return { status: mission.status };
     }
 
     if (input.verdict === 'abandon') {
       mission.block({ verdict: 'abandon', reasons: [...input.reasons], authority });
-      await this.#event(mission, 'final_review.abandoned', { reasons: input.reasons });
+      await this.#event(mission, 'final_review.abandoned', tag({ reasons: input.reasons }));
       await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
       return { status: mission.status };
     }
@@ -2506,7 +2583,7 @@ export class Platform {
       if (!outcome.ok) {
         // 落不了地不算完成，也不该假装完成。转 blocked，原因说清楚。
         mission.block({ verdict: 'merge', reasons: [outcome.reason ?? '合并失败'], authority });
-        await this.#event(mission, 'final_review.merge_failed', { reason: outcome.reason });
+        await this.#event(mission, 'final_review.merge_failed', tag({ reason: outcome.reason }));
         return { status: mission.status, reason: outcome.reason };
       }
       mergedInto = outcome.mergedInto;
@@ -2519,7 +2596,7 @@ export class Platform {
       mergedAt: new Date().toISOString(),
       authority,
     });
-    await this.#event(mission, 'final_review.merged', { mergedInto, reasons: input.reasons });
+    await this.#event(mission, 'final_review.merged', tag({ mergedInto, reasons: input.reasons }));
     await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
     return { status: mission.status, mergedInto };
   }

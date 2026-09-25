@@ -27,7 +27,7 @@ import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { buildPgPlatform } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
-import type { MissionContract, ValidationReport } from '../src/kernel/index.ts';
+import { Project, type MissionContract, type ValidationReport } from '../src/kernel/index.ts';
 import type { QueryRunRecord } from '../src/application/query-run.ts';
 import {
   ValidationReportConflictError,
@@ -678,6 +678,139 @@ describe('Postgres 存储', () => {
       }
     } finally {
       await bare.close();
+    }
+  });
+
+  test('检视者签名经持久化及新连接读回同一形状', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const s = store as PgStateStore;
+    const clock = new FixedClock('2026-09-25T12:00:00.000Z');
+    const ids = new PgIds(s);
+    await ids.reserve(['D', 'W', 'VR', 'M', 'E']);
+    const projects = new PgProjectRepository(s);
+    const platform = new Platform({
+      projects,
+      deliveries: new PgDeliveryRepository(s, clock, ids),
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new PgActivityLog(s, clock),
+      clock,
+      ids,
+    });
+    const order = {
+      objective: '改 foo',
+      allowedScope: ['src/foo.ts'],
+      requiredBehaviour: 'foo 返回 1',
+      constraints: [],
+      acceptance: ['foo() === 1'],
+      verification: ['node --test'],
+      doNot: [],
+      contextRefs: [],
+    };
+    await platform.createMission({ projectId: 'P-r0b', missionId: 'M-r0b', contract: CONTRACT });
+    await platform.recordWorkspace('M-r0b', { branch: 'mission/M-r0b', baseRevision: 'base0' });
+    const coord = await platform.startCoordinatorAttempt('M-r0b');
+    await platform.updatePlan('M-r0b', coord.attemptId, {
+      findings: 'f',
+      rejectedHypotheses: [],
+      decisions: [],
+      direction: 'd',
+      risks: [],
+    });
+    const { workItemId } = await platform.createWorkItem('M-r0b', coord.attemptId, {
+      title: 'W',
+      order,
+    });
+    await platform.dispatchWorkItems('M-r0b', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M-r0b', workItemId);
+    await platform.submitEvidence('M-r0b', exec.attemptId, {
+      kind: 'test',
+      summary: '绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M-r0b', exec.attemptId, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M-r0b', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M-r0b', coord.attemptId, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: order.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass' as const,
+        evidence: '测试替身：逐条核过',
+      })),
+      reasons: ['复跑过'],
+      requiredChanges: [],
+    });
+    await platform.submitMissionResult('M-r0b', coord.attemptId, {
+      outcome: 'delivered',
+      summary: '交付',
+      acceptanceEvidence: ['绿'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+    await platform.finishAttempt('M-r0b', coord.attemptId, { endedBy: 'structured_submit' });
+    await platform.finalizeMissionByReviewer('M-r0b', {
+      verdict: 'merge',
+      reasons: ['ok'],
+      projectRoot: process.cwd(),
+      reviewerId: '  claude  ',
+      confirmedBy: '  echo  ',
+    });
+    await projects.persist();
+
+    const other = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const read = await new PgProjectRepository(other).get('P-r0b');
+      const authority = read?.missions.find((mission) => mission.id === 'M-r0b')?.finalReview?.authority;
+      assert.deepEqual(authority, {
+        kind: 'reviewer',
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+        confirmedAt: '2026-09-25T12:00:00.000Z',
+      });
+    } finally {
+      await other.close();
+    }
+  });
+
+  test('没有 authority 的旧 PG 状态仍可读写', async (t) => {
+    if (skipIfNoPg(t)) return;
+    const s = store as PgStateStore;
+    const repo = new PgProjectRepository(s);
+    const project = Project.restore({
+      id: 'P-r0b-old',
+      missions: [
+        {
+          id: 'M-r0b-old',
+          projectId: 'P-r0b-old',
+          status: 'completed',
+          contractRevision: 1,
+          planRevision: 0,
+          escalations: [],
+          finalReview: { verdict: 'merge', reasons: ['旧放行'] },
+          workItems: [],
+          coordinatorAttempts: [],
+          coordinatorSeq: 0,
+        },
+      ],
+    });
+    await repo.save(project);
+    await repo.persist();
+
+    const other = await PgStateStore.open({ connectionString: dsn });
+    try {
+      const read = await new PgProjectRepository(other).get('P-r0b-old');
+      const review = read?.missions.find((mission) => mission.id === 'M-r0b-old')?.finalReview;
+      assert.equal(review?.verdict, 'merge');
+      assert.equal(review?.authority, undefined);
+    } finally {
+      await other.close();
     }
   });
 });
