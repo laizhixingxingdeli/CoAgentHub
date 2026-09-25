@@ -4,6 +4,10 @@
  *   node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]
  *        [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]
  *        [--coordinator <profileId,...>] [--executor <profileId,...>]
+ *   node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check
+ *
+ * `--plan` 是位置参数的别名。`--check` 只解析、筛选资格、做只读 git 预检，不拿锁、
+ * 不建状态、不派 agent。缺 --cwd / --reviewer 直接退出。
  *
  * 与 run-mission 并列：run-mission 跑完一条就退；这里一个功能点一条 Mission，
  * 交卷了走机器 L3 合进集成分支，没合进去就开升级单等检视者（另一个会话，定时
@@ -26,7 +30,13 @@ import { buildRoutingPrompt, parseRoutingProposal } from './application/plan-rou
 import { renderPlanHandoff } from './application/plan-handoff.ts';
 import { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
-import { parsePlanSpec } from './application/plan-spec.ts';
+import {
+  candidateHandoffText,
+  parsePlanSpec,
+  selectPlanCandidates,
+  type PlanCandidateSelection,
+  type PlanSpec,
+} from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
 import { listenLoopback } from './application/loopback-listen.ts';
@@ -58,6 +68,112 @@ function arg(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+/** 下一个若是另一面旗，就当没给值——`--check --cwd` 不能把 --cwd 当成仓库路径。 */
+function flagValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const next = process.argv[index + 1];
+  if (next === undefined || next.startsWith('--')) return undefined;
+  return next;
+}
+
+const VALUE_FLAGS = Object.freeze([
+  '--plan',
+  '--cwd',
+  '--reviewer',
+  '--adapter',
+  '--state',
+  '--run-dir',
+  '--store',
+  '--coordinator',
+  '--executor',
+  '--worktrees',
+]);
+
+function positionalPlanFile(): string | undefined {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i];
+    if (token === '--check') continue;
+    if (token.startsWith('--')) {
+      if ((VALUE_FLAGS as readonly string[]).includes(token)) i += 1;
+      continue;
+    }
+    return token;
+  }
+  return undefined;
+}
+
+function planFileArg(): string | undefined {
+  return flagValue('--plan') ?? positionalPlanFile();
+}
+
+function usage(): string {
+  return (
+    '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
+      '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
+      '     [--coordinator <profileId,...>] [--executor <profileId,...>]\n' +
+      '     node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check\n' +
+      '\n' +
+      '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
+      '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>\n' +
+      '--check 只读：解析 + 资格筛选 + 仓库预检，不建运行记录、不派发。没有可跑候选时以 0 退出。'
+  );
+}
+
+function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): void {
+  console.log(`方案 ${plan.planId} 入选 ${selection.candidates.length} 项，未纳入 ${selection.exclusions.length} 项。`);
+  console.log('入选：');
+  if (selection.candidates.length === 0) {
+    console.log('  （无）');
+  } else {
+    for (const feature of selection.candidates) {
+      console.log(`  ${feature.id} ${feature.title}  ${candidateHandoffText(feature)}`);
+    }
+  }
+  console.log('本次未纳入：');
+  if (selection.exclusions.length === 0) {
+    console.log('  （无）');
+  } else {
+    for (const ex of selection.exclusions) {
+      console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
+    }
+  }
+}
+
+/**
+ * 真正只读的开跑前检查。不拿主状态锁、不打开状态文件、不建 PlanRun、
+ * 不起 HTTP、不建 worktree、不分类、不派 agent。
+ *
+ * 没有任何入选条目时以 0 退出并写明「没有可跑的候选」——那是筛选结果，不是预检失败。
+ * 有候选才跑仓库预检；预检不过非零退出，且不把失败说成可以开跑。
+ */
+async function checkPlanOnly(planFile: string): Promise<void> {
+  const cwd = flagValue('--cwd');
+  const reviewer = flagValue('--reviewer');
+  if (!cwd || !reviewer) {
+    console.error('--check 必须同时给 --cwd <项目仓> 和 --reviewer <检视者>。');
+    process.exitCode = 2;
+    return;
+  }
+  const plan = parsePlanSpec(JSON.parse(readFileSync(resolve(planFile), 'utf8')), { reviewer });
+  const projectRoot = resolve(cwd);
+  const selection = selectPlanCandidates(plan, { projectRoot });
+  console.log(`方案 ${plan.planId} 只读检查（--check，不开跑）`);
+  printEligibility(plan, selection);
+  if (selection.candidates.length === 0) {
+    console.log('没有可跑的候选。');
+    return;
+  }
+  const problems = await preflightPlanRepo(projectRoot, plan.integrationBranch);
+  if (problems.length > 0) {
+    console.error(`开跑前检查没过：\n${problems.map((p) => `  ✗ ${p}`).join('\n')}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log('仓库预检通过。以上为只读检查，未开跑。');
+}
+
 function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
   return {
     endpoint: candidate.endpoint,
@@ -76,16 +192,13 @@ function stamp(date: Date): string {
 }
 
 async function main() {
-  const planFile = process.argv[2];
-  if (!planFile || planFile.startsWith('--')) {
-    console.log(
-      '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
-        '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
-        '     [--coordinator <profileId,...>] [--executor <profileId,...>]\n' +
-        '\n' +
-        '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
-        '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>',
-    );
+  const planFile = planFileArg();
+  if (!planFile) {
+    console.log(usage());
+    return;
+  }
+  if (process.argv.includes('--check')) {
+    await checkPlanOnly(planFile);
     return;
   }
 
@@ -101,9 +214,11 @@ async function main() {
     reviewer: arg('--reviewer'),
   });
   const projectRoot = resolve(arg('--cwd') ?? process.cwd());
-  const remaining = plan.features.filter((feature) => feature.status !== 'done');
+  const selection = selectPlanCandidates(plan, { projectRoot });
+  printEligibility(plan, selection);
+  const remaining = selection.candidates;
   if (remaining.length === 0) {
-    console.log(`方案 ${plan.planId} 的功能点都已合入，没什么可跑的。`);
+    console.log(`方案 ${plan.planId} 没有可跑的候选。`);
     return;
   }
   const problems = await preflightPlanRepo(projectRoot, plan.integrationBranch);
@@ -188,6 +303,7 @@ async function main() {
         // 标题抄进记录：早上看交接面不用回头翻方案文件（它到早上可能已经改了）。
         titles: Object.fromEntries(remaining.map((feature) => [feature.id, feature.title])),
         startedAt: started.toISOString(),
+        ...(selection.exclusions.length > 0 ? { sourceExclusions: selection.exclusions } : {}),
       }),
     );
 

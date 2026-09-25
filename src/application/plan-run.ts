@@ -44,6 +44,18 @@ export interface PlanStopConditions {
   readonly escalationTimeoutMs: number;
 }
 
+/**
+ * 源方案里本次没入选的条目。可选：旧记录没有它照常读。
+ * 不要把它写成功能点的 skipped——那是检视者在本次运行里选的跳过。
+ */
+export interface PlanSourceExclusion {
+  readonly featureId: string;
+  readonly title: string;
+  readonly reason: string;
+  /** 源方案 status；旧格式无 status 则缺这个键。 */
+  readonly sourceStatus?: string;
+}
+
 export interface PlanFeatureRecord {
   readonly featureId: string;
   /** 开跑时从方案文件抄下的标题。早上看交接面不用回头翻方案文件——它到早上可能已经改了。 */
@@ -123,6 +135,8 @@ export interface PlanRunInit {
   /** 功能标题，按 id。可缺：没给就没有，不编。 */
   readonly titles?: Readonly<Record<string, string>>;
   readonly startedAt: string;
+  /** 源方案未纳入本次运行的条目。缺省 = 旧记录，交接面不列这段。 */
+  readonly sourceExclusions?: readonly PlanSourceExclusion[];
 }
 
 /** 落盘形状。纯数据，能直接 JSON 化；存到哪是存储层的事。 */
@@ -138,6 +152,7 @@ export interface PlanRunSnapshot {
   readonly features: readonly PlanFeatureRecord[];
   readonly escalations: readonly PlanEscalation[];
   readonly stopped?: PlanRunStop;
+  readonly sourceExclusions?: readonly PlanSourceExclusion[];
 }
 
 const FEATURE_STATUSES: readonly PlanFeatureStatus[] = [
@@ -259,6 +274,28 @@ function readStop(value: unknown): PlanRunStop | undefined | false {
   return Object.freeze({ at: raw.at, reason: raw.reason as PlanStopReason, detail: raw.detail });
 }
 
+function freezeSourceExclusion(ex: PlanSourceExclusion): PlanSourceExclusion {
+  return Object.freeze({
+    featureId: ex.featureId,
+    title: ex.title,
+    reason: ex.reason,
+    ...(ex.sourceStatus !== undefined ? { sourceStatus: ex.sourceStatus } : {}),
+  });
+}
+
+function readSourceExclusion(value: unknown): PlanSourceExclusion | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (!isText(raw.featureId) || !isText(raw.title) || !isText(raw.reason)) return undefined;
+  if (raw.sourceStatus !== undefined && typeof raw.sourceStatus !== 'string') return undefined;
+  return freezeSourceExclusion({
+    featureId: raw.featureId,
+    title: raw.title,
+    reason: raw.reason,
+    ...(raw.sourceStatus !== undefined ? { sourceStatus: raw.sourceStatus } : {}),
+  });
+}
+
 /** 冻结一条功能记录；needsDecision 没有就不写这个键，免得快照里挂着 undefined。 */
 function freezeFeature(feature: {
   featureId: string;
@@ -287,6 +324,7 @@ export class PlanRun {
   #features: PlanFeatureRecord[];
   #escalations: PlanEscalation[] = [];
   #stopped: PlanRunStop | undefined;
+  #sourceExclusions: readonly PlanSourceExclusion[] | undefined;
 
   private constructor(init: PlanRunInit) {
     this.#id = init.id;
@@ -299,6 +337,10 @@ export class PlanRun {
     this.#features = init.featureIds.map((featureId) =>
       freezeFeature({ featureId, title: init.titles?.[featureId], status: 'pending', missionIds: [] }),
     );
+    this.#sourceExclusions =
+      init.sourceExclusions !== undefined
+        ? Object.freeze(init.sourceExclusions.map(freezeSourceExclusion))
+        : undefined;
   }
 
   static start(init: PlanRunInit): PlanRun {
@@ -319,6 +361,19 @@ export class PlanRun {
     }
     if (init.titles !== undefined && !Object.values(init.titles).every((t) => typeof t === 'string')) {
       throw invalid('功能标题必须是字符串。');
+    }
+    if (init.sourceExclusions !== undefined) {
+      if (!Array.isArray(init.sourceExclusions) || init.sourceExclusions.length === 0) {
+        throw invalid('sourceExclusions 若出现必须是非空列表。');
+      }
+      for (const ex of init.sourceExclusions) {
+        if (!isText(ex.featureId) || !isText(ex.title) || !isText(ex.reason)) {
+          throw invalid('sourceExclusions 每条必须有 featureId / title / reason。');
+        }
+        if (ex.sourceStatus !== undefined && typeof ex.sourceStatus !== 'string') {
+          throw invalid('sourceExclusions.sourceStatus 必须是字符串。');
+        }
+      }
     }
     return new PlanRun(init);
   }
@@ -349,6 +404,15 @@ export class PlanRun {
     if (escalations.some((e) => e === undefined)) throw corrupt('有升级单读不懂。');
     const stopped = readStop(raw.stopped);
     if (stopped === false) throw corrupt('stopped 读不懂。');
+    let sourceExclusions: readonly PlanSourceExclusion[] | undefined;
+    if (raw.sourceExclusions !== undefined) {
+      if (!Array.isArray(raw.sourceExclusions) || raw.sourceExclusions.length === 0) {
+        throw corrupt('sourceExclusions 读不懂。');
+      }
+      const parsed = raw.sourceExclusions.map(readSourceExclusion);
+      if (parsed.some((ex) => ex === undefined)) throw corrupt('有源方案未纳入记录读不懂。');
+      sourceExclusions = parsed as PlanSourceExclusion[];
+    }
 
     const run = new PlanRun({
       id: raw.id as string,
@@ -359,6 +423,7 @@ export class PlanRun {
       stopConditions: raw.stopConditions,
       featureIds: [],
       startedAt: raw.startedAt as string,
+      ...(sourceExclusions ? { sourceExclusions } : {}),
     });
     run.#features = features as PlanFeatureRecord[];
     run.#escalations = escalations as PlanEscalation[];
@@ -379,6 +444,7 @@ export class PlanRun {
       features: this.#features.map((f) => freezeFeature(f)),
       escalations: [...this.#escalations],
       ...(this.#stopped ? { stopped: this.#stopped } : {}),
+      ...(this.#sourceExclusions ? { sourceExclusions: this.#sourceExclusions.map(freezeSourceExclusion) } : {}),
     };
   }
 
@@ -435,6 +501,11 @@ export class PlanRun {
   /** 停了就是停了：终态，之后什么都不再收。 */
   get stopped(): PlanRunStop | undefined {
     return this.#stopped;
+  }
+
+  /** 源方案未纳入本次运行的条目。旧记录没有这段。 */
+  get sourceExclusions(): readonly PlanSourceExclusion[] | undefined {
+    return this.#sourceExclusions ? [...this.#sourceExclusions] : undefined;
   }
 
   /**

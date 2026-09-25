@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { drivePlan, type PlanDriverDeps } from '../src/application/plan-driver.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
-import { parsePlanSpec } from '../src/application/plan-spec.ts';
+import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 import type { MissionRunOutcome } from '../src/application/orchestrator.ts';
 
@@ -525,5 +525,77 @@ describe('审查补上的边界', () => {
     assert.match(stop.detail, /master/);
     assert.ok(!h.calls.includes('create R1-F2'));
     assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+  });
+});
+
+describe('资格筛选先于分类和建 Mission', () => {
+  test('只把本仓、契约完整、依赖已 done 的候选交给驱动；排除项零次分类、零次建单', async () => {
+    const plan = parsePlanSpec(
+      {
+        planId: 'PLAN-x',
+        projectId: 'p',
+        integrationBranch: 'auto/plan-x',
+        intent: '无人值守推进',
+        stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+        integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 60_000 }],
+        features: [
+          { id: 'Done', title: '已合', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'Skip', title: '跳', why: 'w', status: 'skipped' },
+          { id: 'Split', title: '父', why: 'w', status: 'split', childrenDone: '不据此完成' },
+          {
+            id: 'Ok',
+            title: '可跑',
+            why: 'w',
+            allowedScope: ['src/Ok.ts'],
+            acceptance: ['绿'],
+            status: 'pending',
+            dependsOn: ['Done'],
+            routing: { ignore: true },
+            workOrder: { objective: '不该决定资格' },
+          },
+          {
+            id: 'NeedSplit',
+            title: '等父',
+            why: 'w',
+            allowedScope: ['src/N.ts'],
+            acceptance: ['绿'],
+            status: 'pending',
+            dependsOn: ['Split'],
+          },
+        ],
+      },
+      { reviewer: 'claude' },
+    );
+    const selection = selectPlanCandidates(plan, { projectRoot: 'C:/repo' });
+    assert.deepEqual(selection.candidates.map((c) => c.id), ['Ok']);
+    assert.ok(selection.exclusions.some((e) => e.featureId === 'NeedSplit' && /Split/.test(e.reason)));
+
+    const h = harness({ features: selection.candidates.map((c) => c.id) });
+    const proposeIds: string[] = [];
+    const orig = h.deps.proposeRoute;
+    h.deps.proposeRoute = async (feature) => {
+      proposeIds.push(feature.id);
+      return orig(feature);
+    };
+    await h.store.create(
+      PlanRun.start({
+        id: 'R1',
+        planId: plan.planId,
+        projectId: plan.projectId,
+        integrationBranch: plan.integrationBranch,
+        reviewer: plan.reviewer,
+        stopConditions: plan.stopConditions,
+        featureIds: selection.candidates.map((c) => c.id),
+        startedAt: T0,
+        sourceExclusions: selection.exclusions,
+      }),
+    );
+    const stop = await drivePlan(plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(proposeIds, ['Ok']);
+    assert.equal(h.calls.filter((c) => c.startsWith('create')).length, 1);
+    assert.ok(h.calls.includes('create R1-Ok'));
+    assert.ok(!h.calls.some((c) => /Done|Skip|Split|NeedSplit/.test(c)));
+    assert.equal(h.store.read()!.sourceExclusions?.length, selection.exclusions.length);
   });
 });
