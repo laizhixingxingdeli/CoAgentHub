@@ -604,57 +604,87 @@ describe('公开终审入口仍只发 human', () => {
 });
 
 describe('listRuns：检视者终审不计入人类 L3', () => {
-  test('reviewer 三种事件不计；human 与无 authority 的历史事件仍计', async () => {
+  test('reviewer 三种 verdict 经真实入口不计且事件标 authority reviewer', async () => {
+    const cases: Array<'merge' | 'send_back' | 'abandon'> = ['merge', 'send_back', 'abandon'];
+    for (const verdict of cases) {
+      const repo = tempRepo();
+      const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+      dirs.push(worktrees);
+      const missionId = `M-rev-${verdict}`;
+      const { platform } = await missionReadyForReview(repo, worktrees, missionId);
+      await platform.finalizeMissionByReviewer(missionId, {
+        verdict,
+        reasons: verdict === 'merge' ? ['ok'] : ['检视者打回'],
+        projectRoot: repo,
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+      });
+      const kind =
+        verdict === 'merge'
+          ? 'final_review.merged'
+          : verdict === 'send_back'
+            ? 'final_review.send_back'
+            : 'final_review.abandoned';
+      const events = await platform.getActivity(missionId);
+      const reviewEvent = events.find((event) => event.kind === kind);
+      assert.equal((reviewEvent?.data as { authority?: string } | undefined)?.authority, 'reviewer');
+      const [run] = await platform.listRuns(missionId);
+      assert.equal(run.l3Reviews, 0, `${verdict} 检视者终审不得计入 l3Reviews`);
+      assert.equal(run.l3SendBacks, 0, `${verdict} 检视者终审不得计入 l3SendBacks`);
+    }
+  });
+
+  test('finalizeMission 的 human 与无 authority 历史事件仍计；未知 authority 不计', async () => {
     const repo = tempRepo();
     const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(worktrees);
-    const { platform, activity } = await missionReadyForReview(repo, worktrees, 'M-count');
-    await platform.finalizeMissionByReviewer('M-count', {
+    const { platform, activity } = await missionReadyForReview(repo, worktrees, 'M-human');
+    await platform.finalizeMission('M-human', {
       verdict: 'send_back',
-      reasons: ['检视者打回'],
+      reasons: ['人打回'],
       projectRoot: repo,
-      reviewerId: 'claude',
-      confirmedBy: 'echo',
     });
+
+    let [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 1, '公开 finalizeMission 写出的 human 终审要计次数');
+    assert.equal(run.l3SendBacks, 1, '公开 finalizeMission 的 send_back 要计打回');
+
     await activity.append({
       projectId: 'P',
-      missionId: 'M-count',
+      missionId: 'M-human',
       kind: 'final_review.merged',
-      data: { authority: 'reviewer' },
+      data: { reasons: ['旧人类放行'] },
     });
     await activity.append({
       projectId: 'P',
-      missionId: 'M-count',
-      kind: 'final_review.abandoned',
-      data: { authority: 'reviewer' },
+      missionId: 'M-human',
+      kind: 'final_review.send_back',
+      data: { authority: 'human', reasons: ['显式 human 打回'] },
+    });
+    [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 3, '无标记历史事件与显式 authority:human 都要计');
+    assert.equal(run.l3SendBacks, 2);
+
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.send_back',
+      data: { authority: 'unknown', reasons: ['未知权威'] },
     });
     await activity.append({
       projectId: 'P',
-      missionId: 'M-count',
+      missionId: 'M-human',
       kind: 'final_review.merged',
       data: { authority: 'machine' },
     });
     await activity.append({
       projectId: 'P',
-      missionId: 'M-count',
+      missionId: 'M-human',
       kind: 'final_review.abandoned',
       data: { authority: 'plan' },
     });
-    await activity.append({
-      projectId: 'P',
-      missionId: 'M-count',
-      kind: 'final_review.send_back',
-      data: { reasons: ['旧人类打回'] },
-    });
-    await activity.append({
-      projectId: 'P',
-      missionId: 'M-count',
-      kind: 'final_review.merged',
-      data: { reasons: ['人放行'] },
-    });
-
-    const [run] = await platform.listRuns('M-count');
-    assert.equal(run.l3Reviews, 2, '只数无 authority 的两条人类事件');
-    assert.equal(run.l3SendBacks, 1);
+    [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 3, 'unknown / machine / plan 不得计入');
+    assert.equal(run.l3SendBacks, 2);
   });
 });

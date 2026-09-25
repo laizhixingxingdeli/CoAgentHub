@@ -572,16 +572,15 @@ export class Platform {
           l2Reviews += 1;
           if (data?.verdict === 'reject') l2Rejects += 1;
         }
-        // 与上面 L2 排除 validator 同理：机器 L3 放行、方案放弃、检视者代签都不是人亲签。
-        // 算进来的话，夜跑的每一条都让「L3 打回」的分母多一，A/B 表就混了人和机器。
-        // 旧的、没标 authority 的人类事件仍计入——不能把历史空白推断成「不是人」。
+        // 白名单：只数人亲签。authority === 'human'，或旧记录没标 authority（undefined）。
+        // 不能用「不等于 machine/plan/reviewer」的黑名单——authority:'unknown' 也会混进人类分母。
+        // 检视者代签、夜跑机器放行、方案放弃都不是人亲签。
+        const l3Authority = data?.authority;
         if (
           (event.kind === 'final_review.send_back' ||
             event.kind === 'final_review.merged' ||
             event.kind === 'final_review.abandoned') &&
-          data?.authority !== 'machine' &&
-          data?.authority !== 'plan' &&
-          data?.authority !== 'reviewer'
+          (l3Authority === 'human' || l3Authority === undefined)
         ) {
           l3Reviews += 1;
           if (event.kind === 'final_review.send_back') l3SendBacks += 1;
