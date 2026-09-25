@@ -77,6 +77,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// 等条件成立，而不是固定睡一段再断言：机器一忙计时器就会延后，固定睡几十毫秒就断言
+// 「至少跑了两轮」会整轮假红。上限给足 5 秒，条件一满足立刻返回，不拖慢正常情况。
+// 只用于「应当发生」的断言；「不应发生」的断言仍用固定睡眠。
+async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) await sleep(5);
+}
+
 async function seedFileGap(statePath: string, missionId = 'M-gap'): Promise<void> {
   const store = new FileStateStore(statePath);
   const clock = new SystemClock();
@@ -131,7 +139,7 @@ describe('startPeriodicReconcile 调度', () => {
       },
       warn: () => {},
     });
-    await sleep(80);
+    await waitFor(() => n >= 2);
     await running.stop();
     assert.ok(n >= 2, `应至少跑两轮，实际 ${n}`);
 
@@ -151,9 +159,11 @@ describe('startPeriodicReconcile 调度', () => {
   test('慢 tick 不重叠', async () => {
     let concurrent = 0;
     let max = 0;
+    let started = 0;
     const handle = startPeriodicReconcile({
       intervalMs: 15,
       tick: async () => {
+        started += 1;
         concurrent += 1;
         max = Math.max(max, concurrent);
         await sleep(50);
@@ -161,8 +171,11 @@ describe('startPeriodicReconcile 调度', () => {
       },
       warn: () => {},
     });
-    await sleep(140);
+    // 至少两轮开始过，「不重叠」才有意义；固定睡 140 毫秒时机器一忙可能一轮都没开始，
+    // max 为 0 反而假红，只跑一轮时又什么都没证明。
+    await waitFor(() => started >= 2);
     await handle.stop();
+    assert.ok(started >= 2, `应至少开始两轮，实际 ${started}`);
     assert.equal(max, 1);
   });
 
@@ -179,7 +192,7 @@ describe('startPeriodicReconcile 调度', () => {
         warns.push(message);
       },
     });
-    await sleep(70);
+    await waitFor(() => n >= 2);
     await handle.stop();
     assert.ok(n >= 2, `失败后应继续，实际 ${n}`);
     assert.ok(warns.some((row) => row.includes('boom')));
@@ -203,7 +216,7 @@ describe('startPeriodicReconcile 调度', () => {
           throw new Error('warn-boom');
         },
       });
-      await sleep(70);
+      await waitFor(() => n >= 2);
       await handle.stop();
       assert.ok(n >= 2, `warn 抛错后应继续，实际 ${n}`);
       assert.ok(lines.some((row) => row.includes('tick-boom')));
@@ -226,8 +239,7 @@ describe('startPeriodicReconcile 调度', () => {
       },
       warn: () => {},
     });
-    const deadline = Date.now() + 200;
-    while (!inTick && Date.now() < deadline) await sleep(5);
+    await waitFor(() => inTick);
     assert.equal(inTick, true);
     const stopping = handle.stop();
     assert.equal(finished, false);

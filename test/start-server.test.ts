@@ -518,7 +518,8 @@ describe('startServer 周期投递修复配置', () => {
         env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '40' },
       });
       servers.push(on.server);
-      const deadline = Date.now() + 200;
+      // 上限给足：40 毫秒间隔在机器忙时会延后，200 毫秒的上限曾让这里假红。条件满足即返回。
+      const deadline = Date.now() + 5000;
       while (
         warns.filter((row) => row.includes('锁忙')).length < 1 &&
         Date.now() < deadline
@@ -570,7 +571,8 @@ describe('startServer 周期投递修复配置', () => {
     servers.push(on.server);
 
     try {
-      const deadline = Date.now() + 400;
+      // 上限给足：机器忙时第一轮 tick 会延后；条件满足即返回，不拖慢正常情况。
+      const deadline = Date.now() + 5000;
       while (!holding && Date.now() < deadline) {
         await new Promise((done) => setTimeout(done, 5));
       }
