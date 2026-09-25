@@ -3,9 +3,9 @@
  *
  *   node src/l3.ts inbox [--recipient X]
  *   node src/l3.ts show <missionId>
- *   node src/l3.ts merge <missionId> --reason "..."
- *   node src/l3.ts send-back <missionId> --reason "..."
- *   node src/l3.ts abandon <missionId> --reason "..."
+ *   node src/l3.ts merge <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
+ *   node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
+ *   node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
  *   node src/l3.ts ack <deliveryId>
  *   node src/l3.ts plan [--run <方案运行记录>]
  *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
@@ -27,6 +27,56 @@ function arg(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+type ReviewerSignature =
+  | { readonly mode: 'human' }
+  | { readonly mode: 'reviewer'; readonly reviewerId: string; readonly confirmedBy: string };
+
+/**
+ * 终审三命令专用：下一个是另一个 `--` 开头的参数也算缺值。
+ * 别的命令继续用 `arg()`——`rerun --as` 与 `plan decide --as` 的原义不能动。
+ */
+function reviewFlag(name: string): { present: boolean; value?: string } {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return { present: false };
+  const next = process.argv[index + 1];
+  if (next === undefined || next.startsWith('--')) return { present: true };
+  return { present: true, value: next };
+}
+
+function parseReviewerSignature(): ReviewerSignature {
+  const asFlag = reviewFlag('--as');
+  const confirmed = reviewFlag('--confirmed-by');
+  if (!asFlag.present && !confirmed.present) return { mode: 'human' };
+  if (asFlag.present !== confirmed.present) {
+    throw new Error(
+      asFlag.present
+        ? '给了 --as 就必须同时给 --confirmed-by：检视者签名要记下是谁确认的。'
+        : '给了 --confirmed-by 就必须同时给 --as：确认记录要签检视者的名字。',
+    );
+  }
+  if (asFlag.value === undefined) {
+    throw new Error('--as 缺参数值：要写成 --as <检视者>。');
+  }
+  if (confirmed.value === undefined) {
+    throw new Error('--confirmed-by 缺参数值：要写成 --confirmed-by <确认人>。');
+  }
+  const reviewerId = asFlag.value.trim();
+  const confirmedBy = confirmed.value.trim();
+  if (reviewerId.length === 0) {
+    throw new Error('--as 的值不能只是空白。');
+  }
+  if (confirmedBy.length === 0) {
+    throw new Error('--confirmed-by 的值不能只是空白。');
+  }
+  if (reviewerId.length > 128) {
+    throw new Error('--as 经 trim 后不能超过 128 字符。');
+  }
+  if (confirmedBy.length > 128) {
+    throw new Error('--confirmed-by 经 trim 后不能超过 128 字符。');
+  }
+  return { mode: 'reviewer', reviewerId, confirmedBy };
+}
+
 function line(char = '─', n = 72): string {
   return char.repeat(n);
 }
@@ -38,6 +88,12 @@ async function main() {
   // 运行记录那份独立文件，主状态同样只读——run-plan 整夜握着主状态锁。
   const readOnly = command === 'inbox' || command === 'show' || command === 'plan' || command === undefined;
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  // 终审三命令的 --as / --confirmed-by 必须在构建平台之前成对校验：
+  // 构建会拿排他锁并跑启动收敛，可能改状态文件。校验失败时状态字节不能动。
+  const reviewerSignature =
+    command === 'merge' || command === 'send-back' || command === 'abandon'
+      ? parseReviewerSignature()
+      : undefined;
   const built = usePg
     ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
       // 一个只看结果的命令没有立场判定别的进程死了。
@@ -150,6 +206,31 @@ async function main() {
         `cacheRead=${usage.cacheRead} cost=$${(usage.cost ?? 0).toFixed(4)}`,
     );
 
+    if (view.finalReview) {
+      console.log(`\n【最终检视】${view.finalReview.verdict}`);
+      for (const reason of view.finalReview.reasons) console.log(`  理由 · ${reason}`);
+      const authority = view.finalReview.authority;
+      // 旧记录没有 authority 就写「未记录」，不推断成 human。
+      if (!authority) {
+        console.log('  权威：未记录');
+      } else if (authority.kind === 'human') {
+        console.log('  权威：人');
+        if (authority.principalId) console.log(`  主体：${authority.principalId}`);
+      } else if (authority.kind === 'machine') {
+        console.log('  权威：机器');
+        console.log(`  集成报告：${authority.integrationReportId}`);
+      } else if (authority.kind === 'plan') {
+        console.log('  权威：方案');
+        console.log(`  方案运行：${authority.planRunId}`);
+        console.log(`  升级单：${authority.escalationId}`);
+      } else if (authority.kind === 'reviewer') {
+        console.log('  权威：检视者');
+        console.log(`  检视者：${authority.reviewerId}`);
+        console.log(`  确认人：${authority.confirmedBy}`);
+        console.log(`  确认于：${authority.confirmedAt}`);
+      }
+    }
+
     if (view.status === 'awaiting_review') {
       console.log(`\n下一步：merge / send-back / abandon`);
     }
@@ -163,11 +244,19 @@ async function main() {
       throw new Error('打回/放弃必须给 --reason —— 不说清楚，协调者只会原样再交一次');
     }
     const verdict = command === 'send-back' ? 'send_back' : command;
-    const result = await platform.finalizeMission(target, {
+    const review = {
       verdict: verdict as 'merge' | 'send_back' | 'abandon',
       reasons: reason ? [reason] : [],
       projectRoot: arg('--repo'),
-    });
+    };
+    const result =
+      reviewerSignature?.mode === 'reviewer'
+        ? await platform.finalizeMissionByReviewer(target, {
+            ...review,
+            reviewerId: reviewerSignature.reviewerId,
+            confirmedBy: reviewerSignature.confirmedBy,
+          })
+        : await platform.finalizeMission(target, review);
     await persist();
 
     console.log(`Mission ${target} → ${result.status}`);
@@ -383,9 +472,9 @@ async function main() {
   console.log(`用法：
   node src/l3.ts inbox [--recipient X]        列出待取的结果
   node src/l3.ts show <missionId>             看契约、计划、工作项、改动、交卷内容
-  node src/l3.ts merge <missionId> [--reason] 放行并落地到目标分支
-  node src/l3.ts send-back <missionId> --reason "..."   打回给协调者重做
-  node src/l3.ts abandon <missionId> --reason "..."     放弃
+  node src/l3.ts merge <missionId> [--reason] [--as <检视者> --confirmed-by <确认人>] 放行并落地到目标分支
+  node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]  打回给协调者重做
+  node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]    放弃
   node src/l3.ts answer <missionId> --answer "..."     答复协调者的升级
   node src/l3.ts revise <missionId> --contract <file>  发布新契约（在等检视的会退回规划）
   node src/l3.ts cancel <missionId> [--reason] 叫停（终态，释放改动名额）
