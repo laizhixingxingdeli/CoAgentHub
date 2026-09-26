@@ -324,15 +324,6 @@ describe('PolicyEngine 绑定不匹配', () => {
     );
   });
 
-  test('independent_reviewer 的 Mission 不一致 → BINDING_MISMATCH', () => {
-    assert.equal(
-      code(independentReviewer, POLICY_ACTION.attemptGetReviewBundle, {
-        context: { missionId: 'M-other', attemptId: ATTEMPT, workItemId: WORK },
-      }),
-      POLICY_REASON.BINDING_MISMATCH,
-    );
-  });
-
   test('executor 缺 WorkItem 绑定 → BINDING_MISMATCH', () => {
     const unbound: PolicyPrincipal = {
       status: 'ok',

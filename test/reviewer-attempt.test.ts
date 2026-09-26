@@ -109,6 +109,8 @@ function seedDeliveredHa(
     execProfile?: UsedProfile | null;
     reportId?: string;
     projectRoot: string;
+    /** 缺省完整 L2；负例用来造缺 review / 缺逐条 / 错 reviewAttemptId。 */
+    l2?: 'complete' | 'missing_review' | 'missing_acceptance' | 'wrong_review_attempt';
   },
 ) {
   const missionId = opts.missionId ?? 'M-ha';
@@ -140,22 +142,55 @@ function seedDeliveredHa(
     },
     exec.id,
   );
-  item.review('accept', {
-    attemptId: coord.id,
-    submittedAttemptId: exec.id,
-    reasons: ['ok'],
-    requiredChanges: [],
-    acceptanceResults: ORDER.acceptance.map((criterion) => ({
-      criterion,
-      status: 'pass',
-      evidence: 'node --test 退出码 0',
-    })),
-    authority: {
-      kind: 'validator',
-      reportId: opts.reportId ?? 'VR-1',
-      policyRevision: 1,
-    },
-  });
+  if (opts.l2 === 'missing_review') {
+    item.review('accept');
+  } else if (opts.l2 === 'missing_acceptance') {
+    item.review('accept', {
+      attemptId: coord.id,
+      submittedAttemptId: exec.id,
+      reasons: ['ok'],
+      requiredChanges: [],
+      authority: {
+        kind: 'validator',
+        reportId: opts.reportId ?? 'VR-1',
+        policyRevision: 1,
+      },
+    });
+  } else if (opts.l2 === 'wrong_review_attempt') {
+    item.review('accept', {
+      attemptId: 'review-wrong',
+      submittedAttemptId: exec.id,
+      reasons: ['ok'],
+      requiredChanges: [],
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass',
+        evidence: 'node --test 退出码 0',
+      })),
+      authority: {
+        kind: 'validator',
+        reportId: opts.reportId ?? 'VR-1',
+        policyRevision: 1,
+      },
+    });
+  } else {
+    item.review('accept', {
+      attemptId: coord.id,
+      submittedAttemptId: exec.id,
+      reasons: ['ok'],
+      requiredChanges: [],
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass',
+        evidence: 'node --test 退出码 0',
+      })),
+      authority: {
+        kind: 'validator',
+        reportId: opts.reportId ?? 'VR-1',
+        policyRevision: 1,
+      },
+    });
+  }
   mission.recordResult({
     outcome: 'delivered',
     summary: '交付',
@@ -317,6 +352,60 @@ describe('独立检视结论', () => {
         }),
       (err: unknown) =>
         err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_REPORT_MISSING',
+    );
+  });
+
+  test('验收4：缺 ReviewRecord 时拒收 pass', async () => {
+    const { platform, project, reports, root } = await harness();
+    seedDeliveredHa(project, { projectRoot: root, l2: 'missing_review' });
+    await reports.save({ ...REPORT, missionId: 'M-ha' });
+    const opened = await platform.startIndependentReviewerAttempt('M-ha', [
+      { profileId: 'ir-a', endpoint: 'local' },
+    ]);
+    await assert.rejects(
+      () =>
+        platform.submitIndependentReview('M-ha', opened.attemptId, {
+          verdict: 'pass',
+          reasons: ['没有真实 L2 review 也想 pass'],
+        }),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_L2_MISSING',
+    );
+  });
+
+  test('验收4：缺逐条 acceptanceResults 时拒收 pass', async () => {
+    const { platform, project, reports, root } = await harness();
+    seedDeliveredHa(project, { projectRoot: root, l2: 'missing_acceptance' });
+    await reports.save({ ...REPORT, missionId: 'M-ha' });
+    const opened = await platform.startIndependentReviewerAttempt('M-ha', [
+      { profileId: 'ir-a', endpoint: 'local' },
+    ]);
+    await assert.rejects(
+      () =>
+        platform.submitIndependentReview('M-ha', opened.attemptId, {
+          verdict: 'pass',
+          reasons: ['缺逐条结果也想 pass'],
+        }),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_L2_MISSING',
+    );
+  });
+
+  test('验收4：错 reviewAttemptId 时拒收 pass', async () => {
+    const { platform, project, reports, root } = await harness();
+    seedDeliveredHa(project, { projectRoot: root, l2: 'wrong_review_attempt' });
+    await reports.save({ ...REPORT, missionId: 'M-ha' });
+    const opened = await platform.startIndependentReviewerAttempt('M-ha', [
+      { profileId: 'ir-a', endpoint: 'local' },
+    ]);
+    await assert.rejects(
+      () =>
+        platform.submitIndependentReview('M-ha', opened.attemptId, {
+          verdict: 'pass',
+          reasons: ['reviewAttemptId 对不上也想 pass'],
+        }),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_L2_MISSING',
     );
   });
 

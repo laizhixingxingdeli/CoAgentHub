@@ -743,19 +743,28 @@ export class Platform {
     missionId: string,
     candidates: readonly UsedProfile[],
   ): Promise<{ attemptId: string; profileId: string }> {
-    return this.#tx(() => this.#startIndependentReviewerAttempt(missionId, candidates));
+    // 挡下来的原因必须先作为一次成功提交落库，再把拒绝抛给调用方。
+    // 若在同一事务里抛错，文件/PG 都会回滚，待检视原因查询不到。
+    const result = await this.#tx(() => this.#startIndependentReviewerAttempt(missionId, candidates));
+    if (!result.ok) {
+      throw new PlatformRuleError(result.code, result.detail);
+    }
+    return { attemptId: result.attemptId, profileId: result.profileId };
   }
 
   async #startIndependentReviewerAttempt(
     missionId: string,
     candidates: readonly UsedProfile[],
-  ): Promise<{ attemptId: string; profileId: string }> {
+  ): Promise<
+    | { ok: true; attemptId: string; profileId: string }
+    | { ok: false; code: string; detail: string }
+  > {
     const { mission } = await this.#locate(missionId);
     const blocked = this.#independentReviewOpenBlock(mission, candidates);
     if (blocked) {
       mission.recordIndependentReviewBlock(blocked.reason, blocked.detail);
       await this.#event(mission, 'independent_review.blocked', blocked);
-      throw new PlatformRuleError(blocked.code, blocked.detail);
+      return { ok: false, code: blocked.code, detail: blocked.detail };
     }
 
     const excluded = this.#participantProfileIds(mission);
@@ -767,7 +776,7 @@ export class Platform {
         reason: 'history_missing_profile',
         detail,
       });
-      throw new PlatformRuleError('INDEPENDENT_REVIEW_HISTORY_MISSING_PROFILE', detail);
+      return { ok: false, code: 'INDEPENDENT_REVIEW_HISTORY_MISSING_PROFILE', detail };
     }
 
     const picked = candidates.find(
@@ -781,10 +790,11 @@ export class Platform {
         : '候选池没有 independent_reviewer 候选，拒绝开检视。';
       mission.recordIndependentReviewBlock(reason, detail);
       await this.#event(mission, 'independent_review.blocked', { reason, detail });
-      throw new PlatformRuleError(
-        hasAny ? 'INDEPENDENT_REVIEW_ALL_CONFLICT' : 'INDEPENDENT_REVIEW_NO_CANDIDATES',
+      return {
+        ok: false,
+        code: hasAny ? 'INDEPENDENT_REVIEW_ALL_CONFLICT' : 'INDEPENDENT_REVIEW_NO_CANDIDATES',
         detail,
-      );
+      };
     }
 
     let reviewedCommit: string;
@@ -800,7 +810,7 @@ export class Platform {
         reason: 'reviewed_commit_unavailable',
         detail,
       });
-      throw new PlatformRuleError('REVIEWED_COMMIT_UNAVAILABLE', detail);
+      return { ok: false, code: 'REVIEWED_COMMIT_UNAVAILABLE', detail };
     }
     const l2 = this.#l2ReviewSnapshot(mission);
     const attempt = mission.startIndependentReviewerAttempt({
@@ -818,7 +828,7 @@ export class Platform {
       undefined,
       attempt.id,
     );
-    return { attemptId: attempt.id, profileId: picked.profileId };
+    return { ok: true, attemptId: attempt.id, profileId: picked.profileId };
   }
 
   async getMissionReviewBundle(
@@ -1162,14 +1172,48 @@ export class Platform {
   }
 
   #l2RefsBelongToMission(mission: Mission, refs: readonly IndependentReviewL2Ref[]): boolean {
-    for (const ref of refs) {
-      const item = mission.workItem(ref.workItemId);
-      if (!item) return false;
+    // pass 必须能指回真实 L2：每个非 retired WorkItem 都要有 ReviewRecord、
+    // 属于本项/本 Mission 的 submitted 与 review Attempt、以及覆盖工单每条验收的结果。
+    // 只查 WorkItem 存在会让缺 review / 缺逐条 / 错 reviewAttemptId 的 pass 混过去。
+    const active = mission.workItems.filter((item) => item.status !== 'retired');
+    if (refs.length !== active.length) return false;
+    for (const item of active) {
+      const ref = refs.find((row) => row.workItemId === item.id);
+      if (!ref) return false;
+      const last = item.reviews.at(-1);
+      if (!last) return false;
+
+      const submittedAttemptId = item.submittedAttemptId;
+      if (!submittedAttemptId || ref.submittedAttemptId !== submittedAttemptId) return false;
+      if (last.submittedAttemptId !== undefined && last.submittedAttemptId !== submittedAttemptId) {
+        return false;
+      }
+      const submitted = item.attempts.find((row) => row.id === submittedAttemptId);
       if (
-        ref.submittedAttemptId !== undefined &&
-        item.submittedAttemptId !== ref.submittedAttemptId
+        !submitted ||
+        submitted.kind !== 'executor' ||
+        submitted.workItemId !== item.id ||
+        (submitted.missionId !== undefined && submitted.missionId !== mission.id)
       ) {
         return false;
+      }
+
+      const reviewAttemptId = last.attemptId;
+      if (!reviewAttemptId || ref.reviewAttemptId !== reviewAttemptId) return false;
+      const reviewAttempt = mission.coordinatorAttempts.find((row) => row.id === reviewAttemptId);
+      if (
+        !reviewAttempt ||
+        reviewAttempt.kind !== 'coordinator' ||
+        (reviewAttempt.missionId !== undefined && reviewAttempt.missionId !== mission.id)
+      ) {
+        return false;
+      }
+
+      const required = item.order?.acceptance ?? [];
+      const results = last.acceptanceResults;
+      if (!Array.isArray(results)) return false;
+      for (const criterion of required) {
+        if (!results.some((row) => row.criterion === criterion)) return false;
       }
     }
     return true;
