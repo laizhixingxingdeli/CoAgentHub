@@ -46,7 +46,6 @@ import {
   formatErrorForLog,
   parseReconcileIntervalMs,
   runIndependentCleanup,
-  startPeriodicReconcile,
   type PeriodicReconcileHandle,
 } from './application/reconcile.ts';
 import {
@@ -54,8 +53,7 @@ import {
   buildPersistentPlatform,
   buildPgPlatform,
   makeIssuer,
-  runHeldFileDeliveryRepair,
-  runPgDeliveryRepairTick,
+  startPeriodicDeliveryRepair,
 } from './main.ts';
 import {
   parseAgentEnvPassthrough,
@@ -277,16 +275,14 @@ async function main() {
   const warnRepair = (message: string) => {
     console.warn(message);
   };
-  const periodic: PeriodicReconcileHandle | undefined =
-    reconcileIntervalMs === 0
-      ? undefined
-      : startPeriodicReconcile({
-          intervalMs: reconcileIntervalMs,
-          warn: warnRepair,
-          tick: usePg
-            ? () => runPgDeliveryRepairTick({ warn: warnRepair })
-            : () => runHeldFileDeliveryRepair(built.store as FileStateStore, warnRepair),
-        });
+  // 与 startServer 同一处装配：文件版已持锁不再取锁，PG 独立 store。不得在这里再选 tick。
+  const periodic: PeriodicReconcileHandle | undefined = startPeriodicDeliveryRepair({
+    intervalMs: reconcileIntervalMs,
+    warn: warnRepair,
+    mode: usePg
+      ? { kind: 'pg' }
+      : { kind: 'file-held', store: built.store as FileStateStore },
+  });
 
   let primary: { error: unknown } | undefined;
   try {

@@ -43,17 +43,17 @@
 两件事不要混：
 
 - **启动时**：`reconcileInterruptedAttempts` / `reconcileOrphanedWorktrees` 仍按原规则，只跑一次。只读观测面不调 Attempt 收敛；推进状态的进程用 `missionId` 限定。
-- **运行中**：`startServer` 与 `run-plan` 按间隔补投递。不周期调用上面两个启动收敛函数。
+- **运行中**：`startServer` 与 `run-plan` 按间隔补投递，两入口共用 `main.ts` 的 `startPeriodicDeliveryRepair` 装配（底层复用 `startPeriodicReconcile`），按 mode 选择文件版短借锁、文件版已持锁或 PG 独立 store。不得各自另选 tick。不周期调用上面两个启动收敛函数，也不切换写者。
 
 ### 配置
 
-`COAGENT_RECONCILE_INTERVAL_MS`：未设 = 60000 毫秒；`0` = 关闭；其余必须是正整数。非法值在开状态、拿锁、listen、建 worktree 之前拒绝。
+`COAGENT_RECONCILE_INTERVAL_MS`：未设 = 60000 毫秒；`0` = 关闭；其余必须是正整数。非法值在开状态、拿锁、listen、建 worktree 之前由入口拒绝。`0` 不排 tick。
 
 ### 锁与活对象
 
-- 文件版 `startServer` 是只读观测面，**不握长锁**。每轮 `acquireLock`；锁忙 warn 并跳过，不写文件。拿到锁后新开 `FileStateStore`（注入 `hasArchivedMission`），跑完释放。
-- 文件版 `run-plan` 已持排他锁，用现有装配修，不再取锁。
-- PG：每轮新开独立 `PgStateStore`，在专用连接上 `pg_try_advisory_lock` 做跨进程互斥；拿不到就跳过。刷新并修复这份独立 store，不 `refresh`、不改写 Runner / HTTP 正在用的活 Platform。结束时解锁并关掉独立连接。
+- 文件版 `startServer` 是只读观测面，使用共用装配的 `file-observer` mode，**不握长锁**。每轮 `acquireLock`；锁忙 warn 并跳过，不写文件。拿到锁后新开 `FileStateStore`（注入 `hasArchivedMission`），跑完释放。
+- 文件版 `run-plan` 使用共用装配的 `file-held` mode，已持排他锁，用现有装配修，不再取锁。
+- PG：两入口均使用共用装配的 `pg` mode；每轮新开独立 `PgStateStore`，在专用连接上 `pg_try_advisory_lock` 做跨进程互斥；拿不到就跳过。刷新并修复这份独立 store，不 `refresh`、不改写 Runner / HTTP 正在用的活 Platform。结束时解锁并关掉独立连接。
 
 ### 失败策略
 
@@ -67,5 +67,5 @@
 
 ## Source / tests
 
-- 源：`application/reconcile.ts`、`application/live.ts`、`application/pg-store.ts`（advisory lock）、`main.ts`（接线与 warning）、`run-plan.ts`
+- 源：`application/reconcile.ts`、`application/live.ts`、`application/pg-store.ts`（advisory lock）、`main.ts`（共用周期装配、接线与 warning）、`run-plan.ts`
 - 测：`reconcile.test.ts`、`worktree-reconcile.test.ts`、`recovery-paths.test.ts`、`reconcile-periodic.test.ts`、`start-server.test.ts`、`run-plan-wiring.test.ts`

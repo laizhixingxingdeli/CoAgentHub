@@ -587,6 +587,61 @@ export async function runPgDeliveryRepairTick(input: PgDeliveryRepairTickInput):
   }
 }
 
+/**
+ * 周期投递修复的写者策略。两入口共用装配时按这个选 tick，
+ * 而不是各自 if (usePg) —— 分叉一次就会再出现两套锁/store 接线。
+ */
+export type PeriodicDeliveryRepairMode =
+  | { readonly kind: 'file-observer'; readonly statePath: string }
+  | { readonly kind: 'file-held'; readonly store: FileStateStore }
+  | { readonly kind: 'pg'; readonly connectionString?: string };
+
+export interface StartPeriodicDeliveryRepairInput {
+  readonly intervalMs: number;
+  readonly mode: PeriodicDeliveryRepairMode;
+  readonly warn: DeliveryRepairWarn;
+  /**
+   * 测试用：替换周期 tick（例如造在途慢 tick）。生产不传。
+   * 传入时仍要给 mode：调用方不得在「测调度」时把锁策略也抹掉。
+   */
+  readonly tick?: () => Promise<void>;
+}
+
+function tickForPeriodicDeliveryRepair(
+  mode: PeriodicDeliveryRepairMode,
+  warn: DeliveryRepairWarn,
+): () => Promise<void> {
+  if (mode.kind === 'pg') {
+    return () =>
+      runPgDeliveryRepairTick({
+        connectionString: mode.connectionString,
+        warn,
+      });
+  }
+  if (mode.kind === 'file-held') {
+    return () => runHeldFileDeliveryRepair(mode.store, warn);
+  }
+  return () => runFileObserverDeliveryRepairTick(mode.statePath, warn);
+}
+
+/**
+ * startServer 与 run-plan 共用的周期投递修复装配。
+ *
+ * 0 关闭、不排第一轮。锁与 store 策略按 mode 选，不在这里切换写者。
+ * 两入口若再各自 startPeriodicReconcile，文件短借锁 / 已持锁 / PG 独立
+ * store 会再次分叉。
+ */
+export function startPeriodicDeliveryRepair(
+  input: StartPeriodicDeliveryRepairInput,
+): PeriodicReconcileHandle | undefined {
+  if (input.intervalMs === 0) return undefined;
+  return startPeriodicReconcile({
+    intervalMs: input.intervalMs,
+    warn: input.warn,
+    tick: input.tick ?? tickForPeriodicDeliveryRepair(input.mode, input.warn),
+  });
+}
+
 function warnPeriodicRepair(message: string, error?: unknown): void {
   void error;
   console.warn(message);
@@ -743,22 +798,15 @@ export async function startServer(
     );
   }
   // 观测面不握长锁：文件版每轮短借；PG 用独立 store + 跨进程互斥。只补投递。
-  const periodic: PeriodicReconcileHandle | undefined =
-    reconcileIntervalMs === 0
-      ? undefined
-      : startPeriodicReconcile({
-          intervalMs: reconcileIntervalMs,
-          warn: warnPeriodicRepair,
-          tick:
-            options?.periodicTick ??
-            (usePg
-              ? () =>
-                  runPgDeliveryRepairTick({
-                    connectionString: env.COAGENT_PG,
-                    warn: warnPeriodicRepair,
-                  })
-              : () => runFileObserverDeliveryRepairTick(statePath, warnPeriodicRepair)),
-        });
+  // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
+  const periodic = startPeriodicDeliveryRepair({
+    intervalMs: reconcileIntervalMs,
+    warn: warnPeriodicRepair,
+    ...(options?.periodicTick ? { tick: options.periodicTick } : {}),
+    mode: usePg
+      ? { kind: 'pg', connectionString: env.COAGENT_PG }
+      : { kind: 'file-observer', statePath },
+  });
   // 调用方只使用 server.close 也必须等到在途 tick 完成并释放文件锁 / 独立 PG 连接。
   // Node 的 close 回调只表示 HTTP 连接断完，不会等我们的 stop，所以先 stop 再关 HTTP。
   bindServerCloseToPeriodicStop(server, () => periodic?.stop() ?? Promise.resolve());
