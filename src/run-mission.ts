@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { Orchestrator } from './application/orchestrator.ts';
+import { MissionRunner } from './application/mission-runner.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_UNDECLARED_MESSAGE,
@@ -221,7 +221,7 @@ async function main() {
     );
   }
 
-  const orchestrator = new Orchestrator({
+  const runner = new MissionRunner({
     platform,
     // 一边跑一边把输出送进实时通道，观测面那个进程才看得到。
     live,
@@ -243,7 +243,8 @@ async function main() {
     },
   });
 
-  const result = await orchestrator.runMission(spec.missionId, { projectRoot: cwd });
+  const ran = await runner.run(spec.missionId, { projectRoot: cwd });
+  const result = ran.outcome;
 
   console.log(`\n${'='.repeat(72)}`);
   const detail =
@@ -256,7 +257,7 @@ async function main() {
           : '';
   console.log(`Mission 结果：${result.kind}${detail}`);
   console.log(`${'='.repeat(72)}`);
-  for (const hop of orchestrator.hops) {
+  for (const hop of ran.hops) {
     console.log(
       `  ${hop.role.padEnd(12)}${(hop.workItemId ?? '-').padEnd(6)}${hop.profile.profileId.padEnd(18)}` +
         `${hop.endedBy}${hop.failureMessage ? ` —— ${hop.failureMessage.slice(0, 80)}` : ''}`,
@@ -274,9 +275,9 @@ async function main() {
       `total=${usage.total} cost=$${(usage.cost ?? 0).toFixed(4)}`,
   );
   console.log(`事件：${(await activity.list(spec.missionId)).length} 条`);
-  if (orchestrator.workspace) {
+  if (ran.workspace) {
     console.log(
-      `工作区：${orchestrator.workspace.cwd}（分支 ${orchestrator.workspace.branch}，基线 ${orchestrator.workspace.baseRevision.slice(0, 8)}）`,
+      `工作区：${ran.workspace.cwd}（分支 ${ran.workspace.branch}，基线 ${ran.workspace.baseRevision.slice(0, 8)}）`,
     );
   }
   const inbox = await deliveries.pending(origin.conversationRef);
