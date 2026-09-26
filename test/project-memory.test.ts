@@ -57,6 +57,66 @@ const PLAN = {
   risks: [],
 };
 
+const REQUIRED_SPECS = [
+  'http-control-auth',
+  'web-shell',
+  'query-run',
+  'classified-intake-lightweight',
+  'validation-review-authority',
+  'execution-budget-gates',
+  'lightweight-standard-promotion',
+  'decision-jev-off-shadow',
+  'run-token-lifecycle',
+  'fast-lane-ab-metrics',
+  'startup-reconciliation',
+  'spawn-env-filter',
+  'plan-run',
+  'machine-final-review',
+  'credential-redaction',
+  'delivery-inbox',
+];
+
+const REQUIRED_ADRS = [
+  'adr-0001-web-not-split',
+  'adr-0002-decision-provider-boundary',
+  'adr-0003-query-run-not-mission',
+  'adr-0004-fast-lane-does-not-bypass-l3',
+  'adr-0005-execution-budget-authority',
+  'adr-0006-ha-release-authority',
+];
+
+/** 下限：已交付的必须在；多出来的不红。缺哪份就点哪份，避免「集合不相等」让人去对两份名单。 */
+function assertContainsRequired(
+  actual: readonly string[],
+  required: readonly string[],
+  kind: string,
+): void {
+  for (const slug of required) {
+    assert.ok(actual.includes(slug), `missing required ${kind} ${slug}`);
+  }
+}
+
+function seedRequiredDocs(
+  repo: string,
+  options: { omitSpec?: string; omitAdr?: string } = {},
+): void {
+  const specsDir = join(repo, '.coagent', 'specs');
+  const adrDir = join(repo, '.coagent', 'architecture', 'decisions');
+  mkdirSync(specsDir, { recursive: true });
+  mkdirSync(adrDir, { recursive: true });
+  // 长度过 80，跟本仓库钉住的「非空壳」同一条线；不这么写的话临时项目测不到读盘路径。
+  const stub = (slug: string) =>
+    `# ${slug}\n\n${slug} living document placeholder for subset checks.\n${'word '.repeat(20)}\n`;
+  for (const slug of REQUIRED_SPECS) {
+    if (slug === options.omitSpec) continue;
+    writeFileSync(join(specsDir, `${slug}.md`), stub(slug), 'utf8');
+  }
+  for (const slug of REQUIRED_ADRS) {
+    if (slug === options.omitAdr) continue;
+    writeFileSync(join(adrDir, `${slug}.md`), stub(slug), 'utf8');
+  }
+}
+
 const dirs: string[] = [];
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -208,38 +268,12 @@ describe('读写 .coagent/', () => {
     const root = join(import.meta.dirname, '..');
     const specsDir = join(root, '.coagent', 'specs');
     const adrDir = join(root, '.coagent', 'architecture', 'decisions');
-    const requiredSpecs = [
-      'http-control-auth',
-      'web-shell',
-      'query-run',
-      'classified-intake-lightweight',
-      'validation-review-authority',
-      'execution-budget-gates',
-      'lightweight-standard-promotion',
-      'decision-jev-off-shadow',
-      'run-token-lifecycle',
-      'fast-lane-ab-metrics',
-      'startup-reconciliation',
-      'spawn-env-filter',
-      'plan-run',
-      'machine-final-review',
-      'credential-redaction',
-      'delivery-inbox',
-    ];
-    const requiredAdrs = [
-      'adr-0001-web-not-split',
-      'adr-0002-decision-provider-boundary',
-      'adr-0003-query-run-not-mission',
-      'adr-0004-fast-lane-does-not-bypass-l3',
-      'adr-0005-execution-budget-authority',
-      'adr-0006-ha-release-authority',
-    ];
-    for (const slug of requiredSpecs) {
+    for (const slug of REQUIRED_SPECS) {
       const body = readFileSync(join(specsDir, `${slug}.md`), 'utf8');
       assert.match(body, /^# /m, `spec ${slug} 需要 H1`);
       assert.ok(body.trim().length > 80, `spec ${slug} 不应是空壳`);
     }
-    for (const slug of requiredAdrs) {
+    for (const slug of REQUIRED_ADRS) {
       const body = readFileSync(join(adrDir, `${slug}.md`), 'utf8');
       assert.match(body, /^# /m, `adr ${slug} 需要 H1`);
       assert.ok(body.trim().length > 80, `adr ${slug} 不应是空壳`);
@@ -248,13 +282,15 @@ describe('读写 .coagent/', () => {
     assert.match(adr0002, /SHADOW 明确非权威|非权威/, 'ADR-0002 须明示 SHADOW 非权威');
 
     const memory = readProjectMemory(root);
-    assert.deepEqual(
-      memory.specs.map((s) => s.slug).sort(),
-      [...requiredSpecs].sort(),
+    assertContainsRequired(
+      memory.specs.map((s) => s.slug),
+      REQUIRED_SPECS,
+      'spec',
     );
-    assert.deepEqual(
-      memory.decisions.map((d) => d.slug).sort(),
-      [...requiredAdrs].sort(),
+    assertContainsRequired(
+      memory.decisions.map((d) => d.slug),
+      REQUIRED_ADRS,
+      'adr',
     );
 
     const profile = memory.projectProfile ?? '';
@@ -265,8 +301,54 @@ describe('读写 .coagent/', () => {
 
     const vibe = generateVibe(memory);
     assert.match(vibe, /不要手工编辑/);
-    for (const slug of requiredSpecs) assert.match(vibe, new RegExp(slug));
-    for (const slug of requiredAdrs) assert.match(vibe, new RegExp(slug));
+    for (const slug of REQUIRED_SPECS) assert.match(vibe, new RegExp(slug));
+    for (const slug of REQUIRED_ADRS) assert.match(vibe, new RegExp(slug));
+  });
+
+  test('临时项目增加名单外 Spec 或 ADR 时下限检查仍通过', () => {
+    const repo = tempRepo();
+    initProjectMemory(repo, 'demo');
+    seedRequiredDocs(repo);
+    writeFileSync(
+      join(repo, '.coagent', 'specs', 'bonus-capability.md'),
+      '# bonus-capability\n\nextra living spec beyond the delivered floor.\n' +
+        'word '.repeat(20),
+      'utf8',
+    );
+    writeFileSync(
+      join(repo, '.coagent', 'architecture', 'decisions', 'adr-9999-extra.md'),
+      '# adr-9999-extra\n\nextra adr beyond the delivered floor.\n' + 'word '.repeat(20),
+      'utf8',
+    );
+    const memory = readProjectMemory(repo);
+    assertContainsRequired(
+      memory.specs.map((s) => s.slug),
+      REQUIRED_SPECS,
+      'spec',
+    );
+    assertContainsRequired(
+      memory.decisions.map((d) => d.slug),
+      REQUIRED_ADRS,
+      'adr',
+    );
+    assert.ok(memory.specs.some((s) => s.slug === 'bonus-capability'));
+    assert.ok(memory.decisions.some((d) => d.slug === 'adr-9999-extra'));
+  });
+
+  test('缺少名单内任一项时检查失败且错误信息包含缺失项', () => {
+    const repo = tempRepo();
+    initProjectMemory(repo, 'demo');
+    seedRequiredDocs(repo, { omitSpec: 'query-run' });
+    const memory = readProjectMemory(repo);
+    assert.throws(
+      () =>
+        assertContainsRequired(
+          memory.specs.map((s) => s.slug),
+          REQUIRED_SPECS,
+          'spec',
+        ),
+      /query-run/,
+    );
   });
 });
 
