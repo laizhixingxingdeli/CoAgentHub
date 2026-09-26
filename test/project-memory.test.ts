@@ -232,6 +232,7 @@ describe('读写 .coagent/', () => {
       'adr-0003-query-run-not-mission',
       'adr-0004-fast-lane-does-not-bypass-l3',
       'adr-0005-execution-budget-authority',
+      'adr-0006-ha-release-authority',
     ];
     for (const slug of requiredSpecs) {
       const body = readFileSync(join(specsDir, `${slug}.md`), 'utf8');

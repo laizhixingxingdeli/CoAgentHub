@@ -15,6 +15,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - **L3 Reviewer** 拥有最终落地权（merge / 驳回）；未经 L3 不得把 Mission 标成 completed。Lightweight（Fast Lane）缩短协调，**不**绕过 L3 / validator 权威（ADR-0004）。
   无人值守按方案推进时，**机器 L3** 可凭合并后在**集成分支**上跑出的方案级验证放行（只限 lightweight + standard，master 仍要人放行；ADR-0004 修订）。
+  high_assurance 合进集成分支由**人或显式配置的高保证 Principal**放行（ADR-0006）；当前该 Principal 是按用户常设授权登记的检视者签名。master 一律由用户放行。Jev 只列未来移交。
 - **L2 Coordinator** 负责规划、拆 WorkItem、验收执行结果；可以改 plan / contract 修订，修订对后续执行有约束力。Lightweight 路径零 Coordinator，机器验收走 validator。
 - **L1 Executor** 只执行冻结的 WorkOrder，不能自验收、不能重新定义目标。
 
@@ -52,7 +53,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   - `machine-final-review` — 机器 L3：合进集成分支、在合并结果上验证、红则回滚；方案放弃失败的 Mission
   - `credential-redaction` — 凭据脱敏：agent 产出与运行输出落盘前抹掉本机凭据值与常见 key 形状
   - `delivery-inbox` — 投递收件箱：结果与升级回到发起方；按业务幂等键去重（每次升级、每次交卷各一条）
-- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0005）。
+- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0006）。
 - 不要把 Mission 历史、临时计划或一次性排障笔记写进上述长期文件。
 - 根目录 `VIBE.md` **只**由 `generateVibe` / 落地时重写；手改会丢。
 

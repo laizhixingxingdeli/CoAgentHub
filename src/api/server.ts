@@ -26,6 +26,15 @@ import type { DeliveryRepository } from '../application/delivery.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
 import { redactSecretsDeep } from '../application/redact.ts';
+import {
+  AGENT_TOOL_ACTION,
+  evaluatePolicy,
+  POLICY_ACTION,
+  POLICY_REASON,
+  principalFromControl,
+  principalFromRun,
+  type PolicyAction,
+} from '../application/policy-engine.ts';
 
 /** 客户端 API 版本。破坏性改动时要加。 */
 export const API_VERSION = 'v1';
@@ -118,29 +127,54 @@ export function createApi(deps: ApiDeps): Server {
 
   /**
    * 可选控制面门禁：未注入 resolver 直接放行，保持本地/既有调用兼容。
-   * 注入后缺失/未知凭据 401，过期凭据 401；敏感读允许 viewer/operator，
-   * 写操作只允许 operator。异常 resolver 角色 fail-closed 为 403。
-   * 错误体不得带回原始凭据。
+   * 注入后先解析身份再求 PolicyEngine：缺失/未知 401，过期 401，其余拒绝 403。
+   * HTTP 状态码与文案与接线前一致。错误体不得带回原始凭据。
    */
-  const requireControl = async (
-    req: IncomingMessage,
-    access: 'read' | 'write' = 'write',
-  ): Promise<void> => {
+  const requireControl = async (req: IncomingMessage, action: PolicyAction): Promise<void> => {
     if (!resolveControlPrincipal) return;
     const resolved = await resolveControlPrincipal(req);
-    if (!resolved) {
+    const verdict = evaluatePolicy({
+      principal: principalFromControl(resolved),
+      action,
+    });
+    if (verdict.decision === 'allow') return;
+    if (verdict.reason.code === POLICY_REASON.PRINCIPAL_MISSING) {
       throw new HttpError(401, 'CONTROL_UNAUTHORIZED', '控制面凭据缺失或未知');
     }
-    if ('status' in resolved && resolved.status === 'expired') {
+    if (verdict.reason.code === POLICY_REASON.PRINCIPAL_EXPIRED) {
       throw new HttpError(401, 'CONTROL_EXPIRED', '控制面凭据已过期');
     }
-    const principal = resolved;
-    if (principal.role !== 'operator' && principal.role !== 'viewer') {
-      throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+    throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+  };
+
+  /**
+   * agent 工具在 Run Token 解析之后求策略。角色对错仍让 Platform 抛出原
+   * WRONG_ROLE 文案（除作废工单这条本来就在 HTTP 层）。绑定不匹配在这里挡。
+   */
+  const enforceAgentPolicy = (run: RunContext, action: PolicyAction): void => {
+    const verdict = evaluatePolicy({
+      principal: principalFromRun(run),
+      action,
+      context: {
+        missionId: run.missionId,
+        attemptId: run.attemptId,
+        ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
+      },
+    });
+    if (verdict.decision === 'allow') return;
+    if (verdict.reason.code === POLICY_REASON.ACTION_DENIED) {
+      if (action.scope === 'workItem' && action.name === 'retire') {
+        throw new HttpError(409, 'WRONG_ROLE', '只有协调者能作废工作项。');
+      }
+      return;
     }
-    if (access === 'write' && principal.role !== 'operator') {
-      throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+    if (verdict.reason.code === POLICY_REASON.BINDING_MISMATCH) {
+      if (!run.workItemId && action.scope === 'workItem' && action.name === 'getOrder') {
+        throw new HttpError(409, 'ATTEMPT_NOT_BOUND', '本次运行没有绑定工作项');
+      }
+      throw new HttpError(409, 'WRONG_ROLE', '本次运行绑定的 Mission / Attempt / WorkItem 与动作不一致');
     }
+    throw new HttpError(409, 'WRONG_ROLE', verdict.reason.detail);
   };
 
   const requireWorkItem = (run: RunContext): string => {
@@ -190,9 +224,7 @@ export function createApi(deps: ApiDeps): Server {
       };
       // 只有协调者能作废：S14.6 说 cancel-replace 是 L2 的判断。
       // 执行者要是能作废自己手上的工单，"做不完就把它作废掉"会变成一条捷径。
-      if (run.role !== 'coordinator') {
-        throw new HttpError(409, 'WRONG_ROLE', '只有协调者能作废工作项。');
-      }
+      // 角色闸在入口 PolicyEngine（WRONG_ROLE 文案与原来一致）。
       return platform.retireWorkItem(run.missionId, workItemId, reason);
     },
 
@@ -293,7 +325,7 @@ export function createApi(deps: ApiDeps): Server {
 
     // S11.5：用量报表。projectId / missionId 可选，用来收窄范围。
     if (method === 'GET' && path === '/api/usage') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(
         res,
         200,
@@ -306,12 +338,12 @@ export function createApi(deps: ApiDeps): Server {
 
     // 可用模型清单。平台自己不认识模型——这里只是把适配层吐的 JSON 转出去。
     if (method === 'GET' && path === '/api/runtime/models') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await listRuntimeModels());
     }
 
     if (method === 'GET' && path === '/api/projects') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.listProjects());
     }
 
@@ -320,12 +352,12 @@ export function createApi(deps: ApiDeps): Server {
     // 没有 DELETE / PATCH / PUT，也没有播种：GET 只读且受 control-read 门禁；
     // 「打开界面看一眼」不会改写候选池配置。
     if (method === 'GET' && path === '/api/pools') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.poolList);
       return send(res, 200, await agentPool.list());
     }
 
     if (method === 'POST' && path === '/api/pools') {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.poolAdd);
       const body = await readJson(req);
       const input: AgentPoolAddInput = body as unknown as AgentPoolAddInput;
       const added = await agentPool.add(input);
@@ -351,13 +383,13 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     if (method === 'GET' && path === '/api/missions') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.listMissions());
     }
 
     const activityMatch = /^\/api\/missions\/([^/]+)\/activity$/.exec(path);
     if (method === 'GET' && activityMatch) {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.getActivity(activityMatch[1]));
     }
 
@@ -369,7 +401,7 @@ export function createApi(deps: ApiDeps): Server {
     // SSE 这些都得自己处理。
     const liveMatch = /^\/api\/missions\/([^/]+)\/live$/.exec(path);
     if (method === 'GET' && liveMatch) {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       const cursor = Number(url.searchParams.get('cursor') ?? 0);
       const chunks = await live.since(liveMatch[1], Number.isFinite(cursor) ? cursor : 0);
       return send(res, 200, {
@@ -382,7 +414,7 @@ export function createApi(deps: ApiDeps): Server {
     // attempt id 里带点（W-1.exec-1），所以尾段用 (.+) 而不是 ([^/]+)。
     const attemptMatch = /^\/api\/missions\/([^/]+)\/attempts\/(.+)$/.exec(path);
     if (method === 'GET' && attemptMatch) {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.attemptGetDetail);
       return send(res, 200, await platform.getAttemptDetail(attemptMatch[1], attemptMatch[2]));
     }
 
@@ -390,6 +422,7 @@ export function createApi(deps: ApiDeps): Server {
     // 模型不该有"要不要看架构红线"这个选择。身份同样来自 run token。
     if (method === 'GET' && path === '/api/run/brief') {
       const run = requireRun(req);
+      enforceAgentPolicy(run, POLICY_ACTION.attemptGetBrief);
       return send(res, 200, await platform.getStartupBrief(run.missionId, run.attemptId));
     }
 
@@ -399,6 +432,9 @@ export function createApi(deps: ApiDeps): Server {
       const handler = agentTools[tool];
       if (!handler) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       const run = requireRun(req);
+      const action = AGENT_TOOL_ACTION[tool];
+      if (!action) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
+      enforceAgentPolicy(run, action);
       // agent 交进来的一切（证据、结果、评审、交卷、工单）都从这一个口进来，在这里整体脱敏一次：
       // 它跑过 `env` 或 `cat .env` 的话，输出就在证据里。
       const body = redactSecretsDeep(await readJson(req));
@@ -406,20 +442,20 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     if (method === 'POST' && path === '/api/missions') {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.missionCreate);
       const body = await readJson(req);
       return send(res, 201, await platform.createMission(body as never));
     }
 
     if (method === 'POST' && path === '/api/missions/classified') {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.missionCreateClassified);
       const body = await readJson(req);
       return send(res, 201, await platform.createClassifiedMission(body as never));
     }
 
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
@@ -427,29 +463,35 @@ export function createApi(deps: ApiDeps): Server {
 
     const diffMatch = /^\/api\/missions\/([^/]+)\/diff$/.exec(path);
     if (method === 'GET' && diffMatch) {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.getMissionDiff(diffMatch[1]));
     }
 
 
     const answerMatch = /^\/api\/missions\/([^/]+)\/escalations\/answer$/.exec(path);
     if (method === 'POST' && answerMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.missionAnswerEscalation);
       const body = await readJson(req);
       return send(res, 200, await platform.answerEscalation(answerMatch[1], String(body.answer ?? '')));
     }
 
     const reviseMatch = /^\/api\/missions\/([^/]+)\/contract$/.exec(path);
     if (method === 'POST' && reviseMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.missionRevise);
       const body = await readJson(req);
       return send(res, 200, await platform.reviseContract(reviseMatch[1], body as never));
     }
 
     const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/.exec(path);
     if (method === 'POST' && controlMatch) {
-      await requireControl(req);
       const [, id, verb] = controlMatch;
+      const controlAction =
+        verb === 'cancel'
+          ? POLICY_ACTION.missionCancel
+          : verb === 'pause'
+            ? POLICY_ACTION.missionPause
+            : POLICY_ACTION.missionResume;
+      await requireControl(req, controlAction);
       const body = await readJson(req);
       if (verb === 'cancel') return send(res, 200, await platform.cancelMission(id, String(body.reason ?? '')));
       if (verb === 'pause') return send(res, 200, await platform.pauseMission(id));
@@ -458,7 +500,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const finalizeMatch = /^\/api\/missions\/([^/]+)\/finalize$/.exec(path);
     if (method === 'POST' && finalizeMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.finalizeHuman);
       const body = await readJson(req);
       return send(res, 200, await platform.finalizeMission(finalizeMatch[1], body as never));
     }
@@ -466,14 +508,14 @@ export function createApi(deps: ApiDeps): Server {
     /* ---- 收件箱：结果回到发起方。Host 离线时结果就在这儿等着 ---- */
 
     if (method === 'GET' && path === '/api/inbox') {
-      await requireControl(req, 'read');
+      await requireControl(req, POLICY_ACTION.inboxRead);
       const recipient = url.searchParams.get('recipient') ?? undefined;
       return send(res, 200, { pending: await deliveries.pending(recipient) });
     }
 
     const ackMatch = /^\/api\/deliveries\/([^/]+)\/ack$/.exec(path);
     if (method === 'POST' && ackMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.inboxAck);
       const delivery = await deliveries.acknowledge(ackMatch[1]);
       if (!delivery) throw new HttpError(404, 'UNKNOWN_DELIVERY', `没有这条投递：${ackMatch[1]}`);
       return send(res, 200, delivery);
@@ -483,7 +525,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const coordMatch = /^\/api\/missions\/([^/]+)\/coordinator-attempts$/.exec(path);
     if (method === 'POST' && coordMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.attemptStartCoordinator);
       const missionId = coordMatch[1];
       const { attemptId } = await platform.startCoordinatorAttempt(missionId);
       const run = tokens.issue({ missionId, attemptId, role: 'coordinator' });
@@ -492,7 +534,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const execMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/executor-attempts$/.exec(path);
     if (method === 'POST' && execMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.attemptStartExecutor);
       const [, missionId, workItemId] = execMatch;
       const { attemptId } = await platform.startExecutorAttempt(missionId, workItemId);
       const run = tokens.issue({ missionId, attemptId, role: 'executor', workItemId });
@@ -501,7 +543,7 @@ export function createApi(deps: ApiDeps): Server {
 
     const finishMatch = /^\/api\/missions\/([^/]+)\/attempts\/([^/]+)\/finish$/.exec(path);
     if (method === 'POST' && finishMatch) {
-      await requireControl(req);
+      await requireControl(req, POLICY_ACTION.attemptFinish);
       const [, missionId, attemptId] = finishMatch;
       const body = await readJson(req);
       await platform.finishAttempt(missionId, attemptId, body as never);
