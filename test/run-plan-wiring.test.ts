@@ -15,11 +15,20 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 
-import { buildPersistentPlatform } from '../src/main.ts';
-import { preflightPlanRepo } from '../src/application/plan-preflight.ts';
+import { createApi } from '../src/api/server.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
+import { MissionRunner } from '../src/application/mission-runner.ts';
+import { preflightPlanRepo, slotHolders } from '../src/application/plan-preflight.ts';
 import { runWithDeadline } from '../src/application/plan-driver.ts';
+import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
+import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
+import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
+import { buildPersistentPlatform, makeIssuer } from '../src/main.ts';
+import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 
 const dirs: string[] = [];
@@ -406,10 +415,35 @@ describe('run-plan 周期投递修复接线', () => {
     assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
     const checkAt = runPlan.indexOf("if (process.argv.includes('--check'))");
     const selectAt = runPlan.indexOf('selectPlanCandidates(plan');
-    const createAt = runPlan.indexOf('store.create(');
+    const runAt = runPlan.indexOf('runPlanOnPlatform(');
+    const apiAt = runPlan.indexOf('createApi(');
+    const runnerAt = runPlan.indexOf('new MissionRunner(');
+    const slotAt = runPlan.indexOf('slotHolders(');
+    const afterLockAt = runPlan.indexOf('拿到状态锁之后项目仓变脏了');
+    const sigAt = runPlan.indexOf("process.once('SIGINT'");
     assert.ok(checkAt >= 0 && checkAt < platformAt, '--check 只读路径必须在装配平台之前');
-    assert.ok(selectAt >= 0 && selectAt < createAt, '资格筛选必须在建运行记录之前');
+    assert.ok(selectAt >= 0 && selectAt < platformAt, '资格筛选必须在装配平台之前');
+    assert.ok(runAt >= 0 && selectAt < runAt, '资格筛选必须在内部入口建运行记录之前');
+    assert.ok(afterLockAt >= 0 && platformAt < afterLockAt, '二次预检必须在拿锁之后');
+    assert.ok(slotAt >= 0 && afterLockAt < slotAt && slotAt < runAt, '名额复检在锁后、建记录之前');
+    assert.ok(apiAt >= 0 && runnerAt >= 0 && apiAt < runnerAt && runnerAt < runAt, 'API 与 MissionRunner 在内部入口之前');
+    assert.ok(sigAt >= 0 && sigAt < runAt, '信号停记必须在内部入口建记录之前挂上');
     assert.match(runPlan, /process\.argv\.includes\('--check'\)/);
+    assert.match(runPlan, /from '\.\/application\/plan-runtime\.ts'/);
+    assert.match(runPlan, /from '\.\/application\/mission-runner\.ts'/);
+    assert.match(runPlan, /runner\.run\(/);
+    assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/buildPgPlatform\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/new MissionRunner\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/runPlanOnPlatform\(/g)].length, 1);
+    assert.doesNotMatch(runPlan, /new Orchestrator/);
+    assert.doesNotMatch(runPlan, /drivePlan\(/);
+    assert.doesNotMatch(runPlan, /runWithDeadline/);
+    assert.doesNotMatch(runPlan, /startServer\s*\(/);
+    assert.doesNotMatch(runPlan, /from '\.\/application\/orchestrator\.ts'/);
+    assert.doesNotMatch(runPlan, /from '\.\/application\/plan-driver\.ts'/);
 
     assert.match(runPlan, /startPeriodicDeliveryRepair\(/);
     assert.match(runPlan, /kind: 'file-held'/);
@@ -601,5 +635,229 @@ describe('run-plan --check 只读、零副作用', () => {
     const noneOut = `${none.stdout}${none.stderr}`;
     assert.equal(none.status, 0, noneOut);
     assert.match(noneOut, /没有可跑的候选/);
+  });
+});
+
+function runOpen(planPath: string, cwd: string, extra: string[] = []) {
+  const isolated = temp('coagent-open-cwd-');
+  return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude'], {
+    encoding: 'utf8',
+    timeout: 20_000,
+    cwd: isolated,
+    env: {
+      ...process.env,
+      COAGENT_AGENT_ENV_PASSTHROUGH: '-',
+      COAGENT_RECONCILE_INTERVAL_MS: '0',
+      COAGENT_STORE: 'file',
+    },
+  });
+}
+
+function hasLockDir(dir: string): boolean {
+  return readdirSync(dir).some((name) => name.startsWith('.lock-'));
+}
+
+describe('run-plan 开跑路径真实副作用次序', () => {
+  test('首次预检失败：不拿锁、不建状态/PlanRun，源方案不变', () => {
+    const dirty = repoOn('auto/plan-x');
+    writeFileSync(join(dirty, 'stray.json'), '{}');
+    const home = temp('coagent-open-pre-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    const beforePlan = readFileSync(planPath);
+    const beforeHome = snapshotTree(home);
+    const beforeRepo = snapshotTree(dirty);
+    const result = runOpen(planPath, dirty, ['--state', join(home, 'state.json'), '--run-dir', join(home, 'plans')]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /stray\.json/);
+    assert.doesNotMatch(out, /开跑：/);
+    assert.equal(readFileSync(planPath).equals(beforePlan), true);
+    assert.deepEqual(snapshotTree(home), beforeHome);
+    assert.deepEqual(snapshotTree(dirty), beforeRepo);
+    assert.equal(existsSync(join(home, 'state.json')), false);
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(hasLockDir(home), false);
+    assert.equal(hasLockDir(dirty), false);
+  });
+
+  test('没有候选：不拿锁、不建状态，源方案不变', () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-open-none-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Done', title: '已合', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' }]),
+        null,
+        2,
+      ),
+    );
+    const beforePlan = readFileSync(planPath);
+    const result = runOpen(planPath, repo, ['--state', join(home, 'state.json'), '--run-dir', join(home, 'plans')]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, out);
+    assert.match(out, /没有可跑的候选/);
+    assert.equal(readFileSync(planPath).equals(beforePlan), true);
+    assert.equal(existsSync(join(home, 'state.json')), false);
+    assert.equal(hasLockDir(home), false);
+  });
+
+  test('锁后二次预检失败：已拿锁并释放，不建 PlanRun / 不起 API 开跑', () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-open-lock-');
+    const planPath = join(home, 'PLAN.json');
+    const statePath = join(repo, 'state.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    const beforePlan = readFileSync(planPath);
+    const result = runOpen(planPath, repo, [
+      '--state',
+      statePath,
+      '--run-dir',
+      join(home, 'plans'),
+      '--worktrees',
+      join(home, 'wt'),
+    ]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /拿到状态锁之后项目仓变脏了/);
+    assert.doesNotMatch(out, /开跑：/);
+    assert.equal(readFileSync(planPath).equals(beforePlan), true);
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(hasLockDir(repo), false);
+    assert.equal(hasLockDir(home), false);
+    assert.ok(existsSync(statePath), '首次预检过后才开状态；二次预检失败仍会留下状态文件');
+  });
+});
+
+describe('CLI 同序装配：既有平台 + API + MissionRunner + 内部入口 + 清理', () => {
+  const servers: Server[] = [];
+  after(() => {
+    for (const server of servers) {
+      if (server.listening) server.close();
+    }
+  });
+
+  test('副作用次序：筛选 → 首次预检 → 锁 → 二次预检/名额 → API → PlanRun → 清理；不另建平台/API', async () => {
+    const events: string[] = [];
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-wire-');
+    const plan = parsePlanSpec(
+      samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+      { reviewer: 'claude' },
+    );
+    events.push('select');
+    const selection = selectPlanCandidates(plan, { projectRoot: repo });
+    assert.equal(selection.candidates.length, 1);
+    assert.equal(selection.candidates[0]?.id, 'Ok');
+
+    events.push('preflight');
+    assert.deepEqual(await preflightPlanRepo(repo, plan.integrationBranch), []);
+
+    const statePath = join(home, 'state.json');
+    const workspace = new GitWorktreeManager(join(home, 'wt'));
+    const built = await buildPersistentPlatform(statePath, {
+      workspace,
+      exclusive: { what: 'run-plan wiring' },
+    });
+    events.push('lock');
+    assert.equal(hasLockDir(home), true);
+
+    let server: Server | undefined;
+    try {
+      events.push('preflight-after-lock');
+      assert.deepEqual(await preflightPlanRepo(repo, plan.integrationBranch), []);
+      events.push('slots');
+      assert.deepEqual(slotHolders(await built.platform.listMissions(), plan.projectId), []);
+
+      const listeningBefore = { count: 0 };
+      server = createApi({
+        platform: built.platform,
+        tokens: built.tokens,
+        deliveries: built.deliveries,
+        onMutation: built.persist,
+        agentPool: built.agentPool,
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      listeningBefore.count = 1;
+      events.push('api');
+      const portBefore = (server.address() as AddressInfo).port;
+      assert.ok(portBefore > 0);
+      assert.equal(server.listening, true);
+
+      const store = new FilePlanRunStore(join(home, 'plans', 'R-wire.json'));
+      const runner = new MissionRunner({
+        platform: built.platform,
+        tokens: makeIssuer(built.platform, built.tokens),
+        baseUrl: `http://127.0.0.1:${portBefore}`,
+        workspace,
+        coordinator: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [{ endpoint: 'local', profileId: 'c' }],
+        },
+        executor: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [{ endpoint: 'local', profileId: 'e' }],
+        },
+      });
+      let ran = 0;
+      const stop = await runPlanOnPlatform(plan, selection, {
+        store,
+        projectRoot: repo,
+        platform: built.platform,
+        runMission: (missionId, options) => {
+          ran += 1;
+          return runner.run(missionId, options);
+        },
+        persist: built.persist,
+        pauseInFlight: async (missionId) => {
+          await built.platform.pauseMission(missionId);
+        },
+        now: () => new Date().toISOString(),
+        sleep: async () => {},
+        log: () => {},
+        runId: 'R-wire',
+        startedAt: '2020-01-01T00:00:00.000Z',
+        checkRepo: () => preflightPlanRepo(repo, plan.integrationBranch),
+      });
+      events.push('plan-run');
+      assert.equal(stop.reason, 'wall_clock');
+      assert.equal(ran, 0, '墙钟已过不应派 Mission');
+      assert.ok(store.read()?.stopped);
+      assert.equal(server.listening, true);
+      assert.equal((server.address() as AddressInfo).port, portBefore);
+      assert.equal(listeningBefore.count, 1);
+    } finally {
+      if (server?.listening) server.close();
+      await built.persist();
+      built.releaseLock();
+      events.push('cleanup');
+    }
+    assert.equal(hasLockDir(home), false);
+    assert.deepEqual(events, [
+      'select',
+      'preflight',
+      'lock',
+      'preflight-after-lock',
+      'slots',
+      'api',
+      'plan-run',
+      'cleanup',
+    ]);
   });
 });
