@@ -482,6 +482,59 @@ export interface ReviewRecord {
   readonly acceptanceResults?: readonly AcceptanceResult[];
 }
 
+/**
+ * 独立检视结论（Mission 级，追加式）。
+ *
+ * 为什么不进 WorkItem.ReviewRecord：那是 L2/validator 对单张工单的验收，
+ * 既不绑定契约 revision / 被审 HEAD，也不代表与协调者、执行者独立的检视。
+ * 混进去之后读取方分不清「工单过了」和「独立检视过了」。
+ */
+export type IndependentReviewVerdict = 'pass' | 'send_back';
+
+export type IndependentReviewBlockReason =
+  | 'no_candidates'
+  | 'all_candidates_conflict'
+  | 'history_missing_profile'
+  | 'not_awaiting_review'
+  | 'not_delivered'
+  | 'concurrent_attempt'
+  | 'reviewed_commit_unavailable'
+  | 'work_items_unfinished';
+
+export interface IndependentReviewL2Ref {
+  readonly workItemId: string;
+  readonly submittedAttemptId?: string;
+  readonly reviewAttemptId?: string;
+}
+
+export interface IndependentReviewRecord {
+  readonly missionId: string;
+  readonly reviewerAttemptId: string;
+  readonly reviewerProfileId: string;
+  readonly contractRevision: number;
+  readonly reviewedCommit: string;
+  readonly l2ReviewRefs: readonly IndependentReviewL2Ref[];
+  readonly validationReportId?: string;
+  /**
+   * 开审时冻住的 L2 逐条结果指纹。平台生成、kernel 不解释。
+   * 证据一变，读取方用它判断旧 pass 是否还有效。
+   */
+  readonly l2Fingerprint: string;
+  readonly verdict: IndependentReviewVerdict;
+  readonly reasons: readonly string[];
+  readonly recordedAt: string;
+}
+
+/** 开独立检视 Attempt 时冻住的对照物；交结论时再核一次。 */
+export interface IndependentReviewOpen {
+  readonly attemptId: string;
+  readonly contractRevision: number;
+  readonly reviewedCommit: string;
+  readonly l2Fingerprint: string;
+  readonly l2ReviewRefs: readonly IndependentReviewL2Ref[];
+  readonly validationReportId?: string;
+}
+
 export interface BlockedRecord {
   readonly attemptId: string;
   readonly reason: string;

@@ -4,7 +4,7 @@ import type { AttemptSnapshot } from './snapshot.ts';
 import type { EvidenceRecord, TokenUsage, UsedProfile } from './payloads.ts';
 
 export type AttemptStatus = 'in_progress' | 'succeeded' | 'failed';
-export type AttemptKind = 'coordinator' | 'executor';
+export type AttemptKind = 'coordinator' | 'executor' | 'independent_reviewer';
 
 /**
  * 一次尝试的结束原因。

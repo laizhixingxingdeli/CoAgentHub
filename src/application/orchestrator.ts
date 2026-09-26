@@ -416,6 +416,7 @@ export class Orchestrator {
       // 不记 orchestration.round.started、不创建 Attempt、不 dispatch。
       // HA 也不进入 budget 路径（保持 fail-closed 现状）。
       if (view.executionMode === 'high_assurance') {
+        // E2 的独立检视是显式入口，不从 runMission 自动调用。
         return {
           kind: 'stalled',
           reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',

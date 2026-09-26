@@ -1,5 +1,5 @@
 /**
- * PolicyEngine 矩阵：五类 Principal × 六类动作范围。
+ * PolicyEngine 矩阵：六类 Principal × 六类动作范围。
  * 只断言稳定理由码；不读时钟、不碰存储。
  */
 
@@ -49,6 +49,13 @@ const executor: PolicyPrincipal = {
   attemptId: ATTEMPT,
   workItemId: WORK,
 };
+const independentReviewer: PolicyPrincipal = {
+  status: 'ok',
+  kind: 'independent_reviewer',
+  id: ATTEMPT,
+  missionId: MISSION,
+  attemptId: ATTEMPT,
+};
 
 const bound = { missionId: MISSION, attemptId: ATTEMPT, workItemId: WORK };
 
@@ -79,7 +86,12 @@ function decision(
 }
 
 function needsBind(principal: PolicyPrincipal): boolean {
-  return principal.status === 'ok' && (principal.kind === 'coordinator' || principal.kind === 'executor');
+  return (
+    principal.status === 'ok' &&
+    (principal.kind === 'coordinator' ||
+      principal.kind === 'executor' ||
+      principal.kind === 'independent_reviewer')
+  );
 }
 
 describe('PolicyEngine 允许矩阵', () => {
@@ -95,6 +107,7 @@ describe('PolicyEngine 允许矩阵', () => {
       POLICY_ACTION.missionAnswerEscalation,
       POLICY_ACTION.attemptStartCoordinator,
       POLICY_ACTION.attemptStartExecutor,
+      POLICY_ACTION.attemptStartIndependentReviewer,
       POLICY_ACTION.attemptFinish,
       POLICY_ACTION.attemptGetDetail,
       POLICY_ACTION.poolList,
@@ -146,6 +159,16 @@ describe('PolicyEngine 允许矩阵', () => {
     ]) {
       assert.equal(decision(coordinator, action), 'allow', `${action.scope}.${action.name}`);
     }
+  });
+
+  test('independent_reviewer 只允许读证据包与交检视结论', () => {
+    assert.equal(decision(independentReviewer, POLICY_ACTION.attemptGetReviewBundle), 'allow');
+    assert.equal(decision(independentReviewer, POLICY_ACTION.attemptSubmitIndependentReview), 'allow');
+    assert.equal(code(independentReviewer, POLICY_ACTION.missionRead), POLICY_REASON.ACTION_DENIED);
+    assert.equal(code(independentReviewer, POLICY_ACTION.finalizeReviewer), POLICY_REASON.ACTION_DENIED);
+    assert.equal(code(independentReviewer, POLICY_ACTION.finalizeHuman), POLICY_REASON.ACTION_DENIED);
+    assert.equal(code(independentReviewer, POLICY_ACTION.attemptUpdatePlan), POLICY_REASON.ACTION_DENIED);
+    assert.equal(code(independentReviewer, POLICY_ACTION.workItemGetOrder), POLICY_REASON.ACTION_DENIED);
   });
 
   test('executor 允许自己 WorkItem 上的执行提交', () => {
@@ -311,6 +334,21 @@ describe('PolicyEngine 绑定不匹配', () => {
     };
     assert.equal(code(unbound, POLICY_ACTION.workItemGetOrder), POLICY_REASON.BINDING_MISMATCH);
   });
+
+  test('independent_reviewer 的 Mission / Attempt 不一致 → BINDING_MISMATCH', () => {
+    assert.equal(
+      code(independentReviewer, POLICY_ACTION.attemptGetReviewBundle, {
+        context: { missionId: 'M-other', attemptId: ATTEMPT, workItemId: WORK },
+      }),
+      POLICY_REASON.BINDING_MISMATCH,
+    );
+    assert.equal(
+      code(independentReviewer, POLICY_ACTION.attemptSubmitIndependentReview, {
+        context: { missionId: MISSION, attemptId: 'A-other', workItemId: WORK },
+      }),
+      POLICY_REASON.BINDING_MISMATCH,
+    );
+  });
 });
 
 describe('PolicyEngine HA 与副作用', () => {
@@ -380,9 +418,24 @@ describe('PolicyEngine 不声称 Run Token TTL / audience', () => {
       assert.equal('token' in principal, false);
     }
   });
+
+  test('principalFromRun 认 independent_reviewer，不与终审 reviewer 混用', () => {
+    const principal = principalFromRun({
+      role: 'independent_reviewer',
+      missionId: MISSION,
+      attemptId: ATTEMPT,
+    });
+    assert.equal(principal.status, 'ok');
+    if (principal.status === 'ok') {
+      assert.equal(principal.kind, 'independent_reviewer');
+      assert.equal(principal.id, ATTEMPT);
+      assert.equal(principal.missionId, MISSION);
+      assert.equal(principal.attemptId, ATTEMPT);
+    }
+  });
 });
 
-describe('PolicyEngine 五类 × 六类范围：逐格固定预期', () => {
+describe('PolicyEngine 六类 × 六类范围：逐格固定预期', () => {
   // 预期是手写的，不从 ALLOWED 矩阵推导——推导出来的预期改矩阵时跟着变，测不出越权。
   // 每格一个真实存在的代表动作：该 Principal 在这个范围里有允许的动作就取它（证明允许），
   // 没有就取一个它不该做的（证明错误角色被拒）。coordinator / executor 带自己的绑定。
@@ -423,6 +476,12 @@ describe('PolicyEngine 五类 × 六类范围：逐格固定预期', () => {
     ['executor × pool：list', executor, POLICY_ACTION.poolList, WRONG_ROLE],
     ['executor × inbox：ack', executor, POLICY_ACTION.inboxAck, WRONG_ROLE],
     ['executor × finalize：machine', executor, POLICY_ACTION.finalizeMachine, WRONG_ROLE],
+    ['independent_reviewer × mission：read', independentReviewer, POLICY_ACTION.missionRead, WRONG_ROLE],
+    ['independent_reviewer × workItem：review', independentReviewer, POLICY_ACTION.workItemReview, WRONG_ROLE],
+    ['independent_reviewer × attempt：getReviewBundle', independentReviewer, POLICY_ACTION.attemptGetReviewBundle, ALLOW],
+    ['independent_reviewer × pool：add', independentReviewer, POLICY_ACTION.poolAdd, WRONG_ROLE],
+    ['independent_reviewer × inbox：read', independentReviewer, POLICY_ACTION.inboxRead, WRONG_ROLE],
+    ['independent_reviewer × finalize：reviewer', independentReviewer, POLICY_ACTION.finalizeReviewer, WRONG_ROLE],
   ];
 
   function check(principal: PolicyPrincipal, action: PolicyAction, expected: Expected, label: string): void {
@@ -435,15 +494,15 @@ describe('PolicyEngine 五类 × 六类范围：逐格固定预期', () => {
     assert.equal(verdict.reason.code, expected.code, `${label}：reason.code`);
   }
 
-  test('表本身覆盖五类 Principal × 六类范围，恰好 30 格', () => {
+  test('表本身覆盖六类 Principal × 六类范围，恰好 36 格', () => {
     const seen = new Set(
       cells.map(([, principal, action]) => {
         const kind = principal.status === 'ok' ? principal.kind : principal.status;
         return `${kind}|${action.scope}`;
       }),
     );
-    assert.equal(cells.length, 30);
-    assert.equal(seen.size, 30);
+    assert.equal(cells.length, 36);
+    assert.equal(seen.size, 36);
   });
 
   for (const [label, principal, action, expected] of cells) {

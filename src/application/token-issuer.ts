@@ -15,5 +15,13 @@ export interface RunTokenIssuer {
     workItemId: string,
     profile?: { profileId: string; endpoint: string; reasoning?: string },
   ): Promise<{ attemptId: string; token: string }>;
+  /**
+   * E2 不经编排器派独立检视：HTTP 控制面用 RunTokenRegistry 发牌。
+   * 这里不强制实现，免得装配根为一项尚未接入 runMission 的角色改签名。
+   */
+  startIndependentReviewer?(
+    missionId: string,
+    profile?: { profileId: string; endpoint: string; reasoning?: string },
+  ): Promise<{ attemptId: string; token: string }>;
   revoke(token: string): void;
 }

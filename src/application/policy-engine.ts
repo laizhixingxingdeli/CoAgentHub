@@ -30,7 +30,13 @@ export interface PolicyVerdict {
   readonly reason: PolicyReason;
 }
 
-export type PrincipalKind = 'user' | 'reviewer' | 'runner' | 'coordinator' | 'executor';
+export type PrincipalKind =
+  | 'user'
+  | 'reviewer'
+  | 'runner'
+  | 'coordinator'
+  | 'executor'
+  | 'independent_reviewer';
 
 export type PolicyPrincipal =
   | { readonly status: 'missing' }
@@ -96,6 +102,7 @@ export const POLICY_ACTION = {
   workItemGetOrder: { scope: 'workItem', name: 'getOrder' },
   attemptStartCoordinator: { scope: 'attempt', name: 'startCoordinator' },
   attemptStartExecutor: { scope: 'attempt', name: 'startExecutor' },
+  attemptStartIndependentReviewer: { scope: 'attempt', name: 'startIndependentReviewer' },
   attemptFinish: { scope: 'attempt', name: 'finish' },
   attemptGetBrief: { scope: 'attempt', name: 'getBrief' },
   attemptGetDetail: { scope: 'attempt', name: 'getDetail' },
@@ -107,6 +114,8 @@ export const POLICY_ACTION = {
   attemptSubmitEvidence: { scope: 'attempt', name: 'submitEvidence' },
   attemptSubmitExecutionResult: { scope: 'attempt', name: 'submitExecutionResult' },
   attemptReportBlocked: { scope: 'attempt', name: 'reportBlocked' },
+  attemptGetReviewBundle: { scope: 'attempt', name: 'getReviewBundle' },
+  attemptSubmitIndependentReview: { scope: 'attempt', name: 'submitIndependentReview' },
   poolList: { scope: 'pool', name: 'list' },
   poolAdd: { scope: 'pool', name: 'add' },
   inboxRead: { scope: 'inbox', name: 'read' },
@@ -127,7 +136,8 @@ type RoleKey =
   | 'reviewer'
   | 'runner'
   | 'coordinator'
-  | 'executor';
+  | 'executor'
+  | 'independent_reviewer';
 
 const PRINCIPAL_KINDS = new Set<string>([
   'user',
@@ -135,6 +145,7 @@ const PRINCIPAL_KINDS = new Set<string>([
   'runner',
   'coordinator',
   'executor',
+  'independent_reviewer',
 ]);
 
 /**
@@ -153,6 +164,7 @@ const ALLOWED: ReadonlySet<string> = new Set([
   cell('user:operator', POLICY_ACTION.missionAnswerEscalation),
   cell('user:operator', POLICY_ACTION.attemptStartCoordinator),
   cell('user:operator', POLICY_ACTION.attemptStartExecutor),
+  cell('user:operator', POLICY_ACTION.attemptStartIndependentReviewer),
   cell('user:operator', POLICY_ACTION.attemptFinish),
   cell('user:operator', POLICY_ACTION.attemptGetDetail),
   cell('user:operator', POLICY_ACTION.poolList),
@@ -190,6 +202,9 @@ const ALLOWED: ReadonlySet<string> = new Set([
   cell('executor', POLICY_ACTION.attemptSubmitEvidence),
   cell('executor', POLICY_ACTION.attemptSubmitExecutionResult),
   cell('executor', POLICY_ACTION.attemptReportBlocked),
+  // —— independent_reviewer：Run Token 绑定的 Mission / Attempt；与终审 reviewer 分开 ——
+  cell('independent_reviewer', POLICY_ACTION.attemptGetReviewBundle),
+  cell('independent_reviewer', POLICY_ACTION.attemptSubmitIndependentReview),
 ]);
 
 const HA_SIDE_EFFECT_FLAGS = [
@@ -217,6 +232,8 @@ export const AGENT_TOOL_ACTION: Readonly<Record<string, PolicyAction>> = {
   coagent_submit_evidence: POLICY_ACTION.attemptSubmitEvidence,
   coagent_submit_execution_result: POLICY_ACTION.attemptSubmitExecutionResult,
   coagent_report_blocked: POLICY_ACTION.attemptReportBlocked,
+  coagent_get_mission_review_bundle: POLICY_ACTION.attemptGetReviewBundle,
+  coagent_submit_independent_review: POLICY_ACTION.attemptSubmitIndependentReview,
 };
 
 export function evaluatePolicy(input: PolicyInput): PolicyVerdict {
@@ -267,7 +284,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyVerdict {
 
   const role = roleKey(principal);
   if (!role) {
-    return deny(POLICY_REASON.PRINCIPAL_UNKNOWN_ROLE, '无法归入五类 Principal，默认拒绝。');
+    return deny(POLICY_REASON.PRINCIPAL_UNKNOWN_ROLE, '无法归入已知 Principal，默认拒绝。');
   }
   if (!ALLOWED.has(cell(role, input.action))) {
     return deny(
@@ -295,7 +312,7 @@ export function principalFromControl(
 }
 
 export function principalFromRun(run: {
-  readonly role: 'coordinator' | 'executor';
+  readonly role: 'coordinator' | 'executor' | 'independent_reviewer';
   readonly missionId: string;
   readonly attemptId: string;
   readonly workItemId?: string;
@@ -338,7 +355,8 @@ function roleKey(principal: Extract<PolicyPrincipal, { status: 'ok' }>): RoleKey
     principal.kind === 'reviewer' ||
     principal.kind === 'runner' ||
     principal.kind === 'coordinator' ||
-    principal.kind === 'executor'
+    principal.kind === 'executor' ||
+    principal.kind === 'independent_reviewer'
   ) {
     return principal.kind;
   }
@@ -360,7 +378,13 @@ function bindingMismatch(
   action: PolicyAction,
   context: PolicyContext | undefined,
 ): boolean {
-  if (principal.kind !== 'coordinator' && principal.kind !== 'executor') return false;
+  if (
+    principal.kind !== 'coordinator' &&
+    principal.kind !== 'executor' &&
+    principal.kind !== 'independent_reviewer'
+  ) {
+    return false;
+  }
   if (!needsResourceBinding(action)) return false;
   const ctx = context ?? {};
   if (mismatch(principal.missionId, ctx.missionId)) return true;

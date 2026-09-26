@@ -12,7 +12,7 @@ export interface RunContext {
   readonly token: string;
   readonly missionId: string;
   readonly attemptId: string;
-  readonly role: 'coordinator' | 'executor';
+  readonly role: 'coordinator' | 'executor' | 'independent_reviewer';
   readonly workItemId?: string;
 }
 
