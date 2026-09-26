@@ -182,4 +182,69 @@ describe('l3 plan decide：写回决定', () => {
     }
     assert.equal(JSON.stringify(store.read()?.toSnapshot()), before);
   });
+
+  test('超额 rerun_isolated：非零退出，输出含功能 id / 已用 / 上限，记录文件字节不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const store = new FilePlanRunStore(join(dir, '.coagent-plans', 'PLAN-x.json'));
+    const now = new Date();
+    const iso = now.toISOString();
+    await store.create(
+      PlanRun.start({
+        id: 'PLAN-x-cap',
+        planId: 'PLAN-x',
+        projectId: 'P',
+        integrationBranch: 'auto/plan-x',
+        reviewer: 'claude',
+        stopConditions: {
+          unresolvedEscalations: 5,
+          wallClockMs: 8 * 60 * MIN,
+          escalationTimeoutMs: 20 * MIN,
+          maxRerunsPerFeature: 1,
+        },
+        featureIds: ['F1'],
+        titles: { F1: '升级握手' },
+        startedAt: iso,
+      }),
+    );
+    await store.update((run) => {
+      run.startFeature('F1', 'M-F1');
+      run.openEscalation(
+        { featureId: 'F1', missionId: 'M-F1', failure: '红', question: '重跑吗？' },
+        iso,
+      );
+    });
+    const first = l3(
+      statePath,
+      'plan', 'decide', 'E-1', '--action', 'rerun_isolated', '--reason', '再来', '--as', 'claude',
+    );
+    assert.equal(first.status, 0, first.out);
+    await store.update((run) => {
+      run.startFeature('F1', 'M-F1-r2');
+      run.openEscalation(
+        { featureId: 'F1', missionId: 'M-F1-r2', failure: '又红', question: '还重跑吗？' },
+        new Date().toISOString(),
+      );
+    });
+    const before = readFileSync(store.path);
+    const second = l3(
+      statePath,
+      'plan', 'decide', 'E-2', '--action', 'rerun_isolated', '--reason', '还来', '--as', 'claude',
+    );
+    assert.notEqual(second.status, 0, second.out);
+    assert.match(second.out, /F1/);
+    assert.match(second.out, /1/);
+    assert.equal(readFileSync(store.path).equals(before), true);
+  });
+});
+
+describe('l3 plan：额度展示', () => {
+  test('l3 plan 显示升级单已开数/上限，开着的功能显示重跑已用/上限', async () => {
+    const { statePath } = await nightInProgress();
+    const { status, out } = l3(statePath, 'plan');
+    assert.equal(status, 0, out);
+    assert.match(out, /升级单 1\/5/);
+    assert.match(out, /重跑 0\/1/);
+  });
 });

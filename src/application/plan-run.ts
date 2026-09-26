@@ -35,13 +35,29 @@ export type ReviewerAction = (typeof REVIEWER_ACTIONS)[number];
  */
 export type PlanFeatureStatus = 'pending' | 'running' | 'merged' | 'suspended' | 'skipped';
 
-export interface PlanStopConditions {
+export const DEFAULT_MAX_ESCALATIONS = 5;
+export const DEFAULT_MAX_RERUNS_PER_FEATURE = 1;
+
+/** 方案文件 / 开跑参数里可以不写两道新闸；出现了就必须是正整数。 */
+export interface PlanStopConditionsInput {
   /** 未解决升级累计到这个数就停（≥，不是 >）。 */
   readonly unresolvedEscalations: number;
   /** 方案级硬墙钟，从开跑算起。 */
   readonly wallClockMs: number;
   /** 一张升级单等决定的最长时间；与检视者定时醒来的间隔对齐。 */
   readonly escalationTimeoutMs: number;
+  /** 一次运行最多开这么多张升级单。缺省见 DEFAULT_MAX_ESCALATIONS。 */
+  readonly maxEscalations?: number;
+  /** 每个功能最多接受这么多次 rerun_isolated。缺省见 DEFAULT_MAX_RERUNS_PER_FEATURE。 */
+  readonly maxRerunsPerFeature?: number;
+}
+
+export interface PlanStopConditions {
+  readonly unresolvedEscalations: number;
+  readonly wallClockMs: number;
+  readonly escalationTimeoutMs: number;
+  readonly maxEscalations: number;
+  readonly maxRerunsPerFeature: number;
 }
 
 /**
@@ -106,7 +122,8 @@ export interface PlanEscalation {
  * - `reviewer_stop`：检视者选了「停」；
  * - `finished`：功能点都走完了（不等于全合了）；
  * - `unsafe`：集成分支处在不能再往上叠东西的状态（如回滚失败、分支被切走）；
- * - `crashed`：驱动方自己出了未预料的错。
+ * - `crashed`：驱动方自己出了未预料的错；
+ * - `escalation_limit`：已开升级单到上限，这一次失败不再开单。
  */
 export type PlanStopReason =
   | 'unresolved_escalations'
@@ -114,7 +131,8 @@ export type PlanStopReason =
   | 'reviewer_stop'
   | 'finished'
   | 'unsafe'
-  | 'crashed';
+  | 'crashed'
+  | 'escalation_limit';
 
 export interface PlanRunStop {
   readonly at: string;
@@ -129,7 +147,7 @@ export interface PlanRunInit {
   readonly integrationBranch: string;
   /** 本次运行指定的检视者。只有它的决定作数。 */
   readonly reviewer: string;
-  readonly stopConditions: PlanStopConditions;
+  readonly stopConditions: PlanStopConditionsInput;
   /** 方案里的功能点，按执行顺序。 */
   readonly featureIds: readonly string[];
   /** 功能标题，按 id。可缺：没给就没有，不编。 */
@@ -170,6 +188,7 @@ const STOP_REASONS: readonly PlanStopReason[] = [
   'finished',
   'unsafe',
   'crashed',
+  'escalation_limit',
 ];
 
 function formatHours(ms: number): string {
@@ -192,15 +211,34 @@ function isStringList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-/** 方案文件与方案运行记录共用同一把尺子：两处各写一份，收紧一边另一边就会放过。 */
-export function isStopConditions(value: unknown): value is PlanStopConditions {
+/**
+ * 方案文件与方案运行记录共用同一把尺子：两处各写一份，收紧一边另一边就会放过。
+ * 三项原闸必须是正整数；两道新闸缺了按缺省，写了就必须是正整数——0 等于没有这道闸。
+ */
+export function isStopConditions(value: unknown): value is PlanStopConditionsInput {
   if (value === null || typeof value !== 'object') return false;
   const raw = value as Record<string, unknown>;
-  return (
-    isPositiveInt(raw.unresolvedEscalations) &&
-    isPositiveInt(raw.wallClockMs) &&
-    isPositiveInt(raw.escalationTimeoutMs)
-  );
+  if (
+    !isPositiveInt(raw.unresolvedEscalations) ||
+    !isPositiveInt(raw.wallClockMs) ||
+    !isPositiveInt(raw.escalationTimeoutMs)
+  ) {
+    return false;
+  }
+  if (raw.maxEscalations !== undefined && !isPositiveInt(raw.maxEscalations)) return false;
+  if (raw.maxRerunsPerFeature !== undefined && !isPositiveInt(raw.maxRerunsPerFeature)) return false;
+  return true;
+}
+
+/** parsePlanSpec / start / restore 都走这里：内存和快照里永远带着生效上限。 */
+export function fillStopConditions(raw: PlanStopConditionsInput): PlanStopConditions {
+  return Object.freeze({
+    unresolvedEscalations: raw.unresolvedEscalations,
+    wallClockMs: raw.wallClockMs,
+    escalationTimeoutMs: raw.escalationTimeoutMs,
+    maxEscalations: raw.maxEscalations ?? DEFAULT_MAX_ESCALATIONS,
+    maxRerunsPerFeature: raw.maxRerunsPerFeature ?? DEFAULT_MAX_RERUNS_PER_FEATURE,
+  });
 }
 
 /** 从落盘数据里挑出认识的字段；任何一处读不懂就整条拒绝（返回 undefined）。 */
@@ -332,7 +370,7 @@ export class PlanRun {
     this.#projectId = init.projectId;
     this.#integrationBranch = init.integrationBranch;
     this.#reviewer = init.reviewer;
-    this.#stopConditions = Object.freeze({ ...init.stopConditions });
+    this.#stopConditions = fillStopConditions(init.stopConditions);
     this.#startedAt = init.startedAt;
     this.#features = init.featureIds.map((featureId) =>
       freezeFeature({ featureId, title: init.titles?.[featureId], status: 'pending', missionIds: [] }),
@@ -350,7 +388,10 @@ export class PlanRun {
     }
     // 0 / 缺省 / 小数都等于没有这道闸——夜里没人看着，缺一道闸就是一路跑到天亮。
     if (!isStopConditions(init.stopConditions)) {
-      throw invalid('stopConditions 的 unresolvedEscalations / wallClockMs / escalationTimeoutMs 必须都是正整数。');
+      throw invalid(
+        'stopConditions 的 unresolvedEscalations / wallClockMs / escalationTimeoutMs 必须都是正整数；' +
+          'maxEscalations / maxRerunsPerFeature 缺省放行，出现了也必须是正整数。',
+      );
     }
     if (!isInstant(init.startedAt)) throw invalid('startedAt 不是时间。');
     if (!Array.isArray(init.featureIds) || init.featureIds.length === 0) {
@@ -484,6 +525,21 @@ export class PlanRun {
     return [...this.#escalations];
   }
 
+  /** 本次已开的全部升级单数，不论尚未决定、已决定或已过期。 */
+  get escalationsOpened(): number {
+    return this.#escalations.length;
+  }
+
+  /** 该功能已接受的 rerun_isolated 次数。首次 Mission 不算。 */
+  rerunsUsed(featureId: string): number {
+    return this.#escalations.filter(
+      (e) =>
+        e.featureId === featureId &&
+        e.resolution?.kind === 'decided' &&
+        e.resolution.action === 'rerun_isolated',
+    ).length;
+  }
+
   /** 正开着等决定的那张升级单。同一时刻最多一张。 */
   get currentEscalation(): PlanEscalation | undefined {
     return this.#escalations.find((e) => e.resolution === undefined);
@@ -597,10 +653,15 @@ export class PlanRun {
     this.#stop(reason, detail, at);
   }
 
+  /**
+   * 开升级单。已开满上限则**不开单**，同一次变更里把该功能挂起并以 escalation_limit 停。
+   * 先开再停会留下一张方案已停、choose 一律被拒、没人能定的单子。
+   * 开了单返回该单；到上限返回 undefined，驱动方据此停下、不等待、不放弃失败的 Mission。
+   */
   openEscalation(
     input: { featureId: string; missionId?: string; failure: string; question: string },
     at: string,
-  ): PlanEscalation {
+  ): PlanEscalation | undefined {
     this.#assertRunning();
     this.#requireFeature(input.featureId);
     // 同一时刻只开一张：驱动方就在等这一张，第二张不会有人等。
@@ -612,6 +673,20 @@ export class PlanRun {
       );
     }
     this.#requireStatus(input.featureId, 'running');
+    const limit = this.#stopConditions.maxEscalations;
+    if (this.escalationsOpened >= limit) {
+      const mission = input.missionId ?? '（未记）';
+      this.#setFeature(input.featureId, {
+        status: 'suspended',
+        needsDecision: `${input.failure}（Mission ${mission}）。要你定：${input.question}`,
+      });
+      this.#stop(
+        'escalation_limit',
+        `已开 ${this.escalationsOpened} 张升级单，到了上限 ${limit}；${input.featureId} 这次失败没开单。`,
+        at,
+      );
+      return undefined;
+    }
     const escalation: PlanEscalation = Object.freeze({
       id: `E-${this.#escalations.length + 1}`,
       featureId: input.featureId,
@@ -668,6 +743,17 @@ export class PlanRun {
       throw new PlatformRuleError('DECISION_REASON_REQUIRED', '决定必须写理由。');
     }
     const action = input.action as ReviewerAction;
+    // 放在截止 / 身份 / 动作 / 理由之后：额度错误不能盖掉原有校验的先后。
+    if (action === 'rerun_isolated') {
+      const used = this.rerunsUsed(escalation.featureId);
+      const rerunLimit = this.#stopConditions.maxRerunsPerFeature;
+      if (used >= rerunLimit) {
+        throw new PlatformRuleError(
+          'RERUN_LIMIT_REACHED',
+          `${escalation.featureId} 已隔离重跑 ${used} 次，到了上限 ${rerunLimit}。请改选 skip / rescope / stop。`,
+        );
+      }
+    }
     const dropFeatures = this.#dropTargets(action, input.dropFeatures);
     const decided: PlanEscalation = Object.freeze({
       ...escalation,

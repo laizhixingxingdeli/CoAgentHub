@@ -13,6 +13,10 @@ import {
   parsePlanSpec,
   selectPlanCandidates,
 } from '../src/application/plan-spec.ts';
+import {
+  DEFAULT_MAX_ESCALATIONS,
+  DEFAULT_MAX_RERUNS_PER_FEATURE,
+} from '../src/application/plan-run.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 
 const ROOT = resolve('C:/repo/this-project');
@@ -335,4 +339,51 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
       assert.deepEqual(selectPlanCandidates(cased, { projectRoot: ROOT }).candidates.map((c) => c.id), ['Case']);
     }
   });
+});
+
+describe('两道夜跑闸（stopConditions 新字段）', () => {
+  test('缺字段时补缺省；显式值原样保留',
+    () => {
+      const missing = parsePlanSpec(RAW, { reviewer: 'claude' });
+      assert.equal(missing.stopConditions.maxEscalations, DEFAULT_MAX_ESCALATIONS);
+      assert.equal(missing.stopConditions.maxRerunsPerFeature, DEFAULT_MAX_RERUNS_PER_FEATURE);
+
+      const explicit = parsePlanSpec(
+        { ...RAW, stopConditions: { ...RAW.stopConditions, maxEscalations: 3, maxRerunsPerFeature: 2 } },
+        { reviewer: 'claude' },
+      );
+      assert.equal(explicit.stopConditions.maxEscalations, 3);
+      assert.equal(explicit.stopConditions.maxRerunsPerFeature, 2);
+      assert.equal(explicit.stopConditions.unresolvedEscalations, 5);
+    });
+
+  test('非法显式值（0、-1、1.5、字符串、null）整份 PLAN_SPEC_INVALID', () => {
+    for (const value of [0, -1, 1.5, '3', null]) {
+      assert.throws(
+        () =>
+          parsePlanSpec(
+            { ...RAW, stopConditions: { ...RAW.stopConditions, maxEscalations: value } },
+            { reviewer: 'claude' },
+          ),
+        invalid,
+        `maxEscalations=${String(value)}`,
+      );
+      assert.throws(
+        () =>
+          parsePlanSpec(
+            { ...RAW, stopConditions: { ...RAW.stopConditions, maxRerunsPerFeature: value } },
+            { reviewer: 'claude' },
+          ),
+        invalid,
+        `maxRerunsPerFeature=${String(value)}`,
+      );
+    }
+  });
+
+  test('旧方案夹具缺这两个字段照常解析',
+    () => {
+      const plan = parsePlanSpec(HARNESS_REMAINING_TRIMMED, { reviewer: 'claude' });
+      assert.equal(plan.stopConditions.maxEscalations, DEFAULT_MAX_ESCALATIONS);
+      assert.equal(plan.stopConditions.maxRerunsPerFeature, DEFAULT_MAX_RERUNS_PER_FEATURE);
+    });
 });

@@ -506,6 +506,10 @@ describe('run-plan --check 只读、零副作用', () => {
     assert.match(out, /Done 已合/);
     assert.match(out, /源方案标 done/);
     assert.match(out, /未开跑/);
+    assert.match(out, /两道闸/);
+    assert.match(out, /升级单总数上限 5（缺省）/);
+    assert.match(out, /每功能重跑上限 1（缺省）/);
+    assert.match(out, /停止条件：未解决升级上限 5/);
     assert.equal(readFileSync(planPath).equals(beforePlan), true);
     assert.deepEqual(snapshotTree(home), beforeHome);
     assert.deepEqual(snapshotTree(repo), beforeRepo);
@@ -518,10 +522,20 @@ describe('run-plan --check 只读、零副作用', () => {
     const home = temp('coagent-check-pos-');
     const repo = repoOn('auto/plan-x');
     const planPath = join(home, 'PLAN.json');
+    // 这份方案显式写了两道闸：--check 照原值展示，不标「缺省」（另一条用例覆盖缺省的情形）。
     writeFileSync(
       planPath,
       JSON.stringify(
-        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'] }]),
+        {
+          ...samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'] }]),
+          stopConditions: {
+            unresolvedEscalations: 5,
+            wallClockMs: 1,
+            escalationTimeoutMs: 1,
+            maxEscalations: 3,
+            maxRerunsPerFeature: 2,
+          },
+        },
         null,
         2,
       ),
@@ -535,6 +549,8 @@ describe('run-plan --check 只读、零副作用', () => {
     const posOut = `${positional.stdout}${positional.stderr}`;
     assert.equal(positional.status, 0, posOut);
     assert.match(posOut, /候选：旧格式待跑/);
+    assert.match(posOut, /两道闸：升级单总数上限 3；每功能重跑上限 2\r?\n/);
+    assert.doesNotMatch(posOut, /（缺省）/);
 
     const missing = spawnSync(process.execPath, [RUN_PLAN, '--plan', planPath, '--check'], {
       encoding: 'utf8',

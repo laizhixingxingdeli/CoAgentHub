@@ -28,6 +28,7 @@ const STOP_LABELS: Record<PlanStopReason, string> = {
   finished: '走完了',
   unsafe: '集成分支不安全',
   crashed: '驱动方出错',
+  escalation_limit: '升级单到上限',
 };
 
 export interface HandoffCosts {
@@ -80,18 +81,27 @@ export function renderPlanHandoff(
   const status = stop ? `停了：${STOP_LABELS[stop.reason]}——${stop.detail}` : '还在跑';
   const lines = [
     `方案 ${run.planId}（${run.id}）  ${status}  用时 ${elapsed} / 墙钟 ${duration(run.stopConditions.wallClockMs)}  ` +
-      `${costText(context.costs)}  未解决 ${run.unresolvedCount}/${run.stopConditions.unresolvedEscalations}`,
+      `${costText(context.costs)}  未解决 ${run.unresolvedCount}/${run.stopConditions.unresolvedEscalations}` +
+      `  升级单 ${run.escalationsOpened}/${run.stopConditions.maxEscalations}`,
     `  ${PLAN_MARKS.merged} 已合入  ${PLAN_MARKS.suspended} 挂起等你  ${PLAN_MARKS.skipped} 检视者跳过  ${PLAN_MARKS.pending} 没轮到`,
   ];
+  const open = run.currentEscalation;
   for (const feature of run.features) {
     const title = feature.title ? `${feature.title}  ` : '';
-    lines.push(`  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}${featureTail(feature, Boolean(stop))}`);
+    const used = run.rerunsUsed(feature.featureId);
+    // 没重跑过、也没开着单的功能不占这一列，免得六个都绿的晚上刷一排 0/1。
+    const rerun =
+      used > 0 || open?.featureId === feature.featureId
+        ? `  重跑 ${used}/${run.stopConditions.maxRerunsPerFeature}`
+        : '';
+    lines.push(`  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}${featureTail(feature, Boolean(stop))}${rerun}`);
   }
-  const open = run.currentEscalation;
   if (open && !stop) {
     lines.push(`  ⚑ 升级单 ${open.id}（${open.featureId}，${open.deadline} 截止）：${open.failure}`);
+    const rerunLeft = run.rerunsUsed(open.featureId) < run.stopConditions.maxRerunsPerFeature;
+    const actions = rerunLeft ? '<rerun_isolated|skip|rescope|stop>' : '<skip|rescope|stop>';
     lines.push(
-      `    检视者：node src/l3.ts plan decide ${open.id} --action <rerun_isolated|skip|rescope|stop> ` +
+      `    检视者：node src/l3.ts plan decide ${open.id} --action ${actions} ` +
         `--reason "…" [--drop F7,F8] --as ${run.reviewer}` +
         (context.recordPath ? ` --run "${context.recordPath}"` : ''),
     );
