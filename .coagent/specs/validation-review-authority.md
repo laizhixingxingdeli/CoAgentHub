@@ -13,6 +13,16 @@
 - Standard 路径继续由 Coordinator Attempt 做 `review`；Lightweight 机器验收只认 `validator`。
 - **这是工作项 L2 的轴，不是 Mission 终审的轴。** `FinalReviewAuthority`（human / machine / plan / reviewer）只出现在 L3 最终检视上；本文件的 ReviewAuthority 不给 executor 增加终审权，也不因为多了检视者代签就把终审下放到执行者。
 
+## 独立检视（independent_reviewer，E2）
+
+Mission 级追加记录，**不是** WorkItem `ReviewRecord`，也**不是** `FinalReview`。
+
+- 角色字面量是 `independent_reviewer`，不复用终审签名人 `reviewer`。
+- 结论 `pass` / `send_back` 绑定：missionId、reviewerAttemptId、reviewerProfileId、契约 revision、被审 HEAD、L2 逐条结果引用、ValidationReport 引用、理由、平台时间。
+- `send_back` 不改任何 L2 逐条结果，也不流转 planning / finalize / merge。
+- `pass` 不是用户确认，也不签 `FinalReview`。契约 revision、被审 HEAD 或被引用证据任一变化后，读取方不得把旧 pass 当成当前有效结论。
+- 缺 ValidationReport、引用不属本 Mission、非 awaiting_review、交卷非 delivered：不得 pass。
+
 ## ValidationReport
 
 - 不可变、可追溯机器事实；与 `EvidenceRecord`（执行者自报）分立。

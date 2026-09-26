@@ -25,6 +25,11 @@ import type {
   PromotionWorkspaceRevision,
   RunKind,
   WorkOrder,
+  IndependentReviewBlockReason,
+  IndependentReviewL2Ref,
+  IndependentReviewOpen,
+  IndependentReviewRecord,
+  IndependentReviewVerdict,
 } from './payloads.ts';
 
 const PROMOTION_STATUSES: readonly PromotionStatus[] = [
@@ -104,6 +109,12 @@ export class Mission {
   #workItems: WorkItem[] = [];
   #coordinatorAttempts: Attempt[] = [];
   #coordinatorSeq = 0;
+  #independentReviewerAttempts: Attempt[] = [];
+  #independentReviewerSeq = 0;
+  #independentReviews: Readonly<IndependentReviewRecord>[] = [];
+  #independentReviewBlockReason: IndependentReviewBlockReason | undefined;
+  #independentReviewBlockDetail: string | undefined;
+  #independentReviewOpen: Readonly<IndependentReviewOpen> | undefined;
   #contract: Readonly<MissionContract> | undefined;
   #contractRevision = 0;
   #plan: Readonly<PlanBody> | undefined;
@@ -203,6 +214,26 @@ export class Mission {
 
   get coordinatorAttempts(): readonly Attempt[] {
     return [...this.#coordinatorAttempts];
+  }
+
+  get independentReviewerAttempts(): readonly Attempt[] {
+    return [...this.#independentReviewerAttempts];
+  }
+
+  get independentReviews(): readonly Readonly<IndependentReviewRecord>[] {
+    return [...this.#independentReviews];
+  }
+
+  get independentReviewBlockReason(): IndependentReviewBlockReason | undefined {
+    return this.#independentReviewBlockReason;
+  }
+
+  get independentReviewBlockDetail(): string | undefined {
+    return this.#independentReviewBlockDetail;
+  }
+
+  get independentReviewOpen(): Readonly<IndependentReviewOpen> | undefined {
+    return this.#independentReviewOpen;
   }
 
   startPlanning(): void {
@@ -443,6 +474,131 @@ export class Mission {
     return attempt;
   }
 
+  /**
+   * 开一次独立检视 Attempt。
+   *
+   * 只在 awaiting_review 且交卷 delivered 时允许：更早开等于在审一份还不存在的交卷，
+   * 更晚会变成给终态补章。同一时刻只能有一个 in_progress——并发两张牌会写出两份
+   * 互相覆盖的结论，而读取方无法证明哪份是权威。
+   */
+  startIndependentReviewerAttempt(open: Omit<IndependentReviewOpen, 'attemptId'>): Attempt {
+    if (this.#status !== 'awaiting_review') {
+      throw new IllegalTransitionError('Mission', this.#status, 'startIndependentReviewerAttempt');
+    }
+    if (this.#result?.outcome !== 'delivered') {
+      throw new InvariantViolationError(
+        'INDEPENDENT_REVIEW_NOT_DELIVERED',
+        `Mission ${this.#id} 交卷不是 delivered，不能开独立检视`,
+      );
+    }
+    if (this.#hasInProgressIndependentReviewerAttempt()) {
+      throw new InvariantViolationError(
+        'CONCURRENT_INDEPENDENT_REVIEWER_ATTEMPT',
+        `Mission ${this.#id} already has an in_progress independent_reviewer attempt`,
+      );
+    }
+    this.#independentReviewerSeq += 1;
+    const attempt = new Attempt({
+      id: `indrev-${this.#independentReviewerSeq}`,
+      kind: 'independent_reviewer',
+      missionId: this.#id,
+    });
+    this.#independentReviewerAttempts.push(attempt);
+    this.#independentReviewOpen = freezePayload({
+      attemptId: attempt.id,
+      contractRevision: open.contractRevision,
+      reviewedCommit: open.reviewedCommit,
+      l2Fingerprint: open.l2Fingerprint,
+      l2ReviewRefs: open.l2ReviewRefs.map((ref) => ({ ...ref })),
+      ...(open.validationReportId !== undefined
+        ? { validationReportId: open.validationReportId }
+        : {}),
+    });
+    this.#independentReviewBlockReason = undefined;
+    this.#independentReviewBlockDetail = undefined;
+    return attempt;
+  }
+
+  /**
+   * 记下为什么没开出独立检视。Mission 停在 awaiting_review，绝不回落协调者自审。
+   * 原因必须跟着状态走，否则只有算出它的那个进程知道。
+   */
+  recordIndependentReviewBlock(reason: IndependentReviewBlockReason, detail: string): void {
+    this.#independentReviewBlockReason = reason;
+    this.#independentReviewBlockDetail = detail;
+  }
+
+  /**
+   * 收一份独立检视结论。每个 Attempt 只收一次，追加不覆盖。
+   * 不改 WorkItem.reviews，也不流转 Mission——打回不是 E2 的编排职责。
+   */
+  recordIndependentReview(
+    attemptId: string,
+    input: {
+      reviewerProfileId: string;
+      contractRevision: number;
+      reviewedCommit: string;
+      l2ReviewRefs: readonly IndependentReviewL2Ref[];
+      l2Fingerprint: string;
+      validationReportId?: string;
+      verdict: IndependentReviewVerdict;
+      reasons: readonly string[];
+      recordedAt: string;
+    },
+  ): Readonly<IndependentReviewRecord> {
+    if (this.#status !== 'awaiting_review') {
+      throw new IllegalTransitionError('Mission', this.#status, 'recordIndependentReview');
+    }
+    const attempt = this.#independentReviewerAttempts.find((a) => a.id === attemptId);
+    if (!attempt || attempt.kind !== 'independent_reviewer') {
+      throw new InvariantViolationError(
+        'UNKNOWN_INDEPENDENT_REVIEWER_ATTEMPT',
+        `Mission ${this.#id} 没有 independent_reviewer attempt ${attemptId}`,
+      );
+    }
+    if (attempt.status !== 'in_progress') {
+      throw new InvariantViolationError(
+        'INDEPENDENT_REVIEW_ATTEMPT_NOT_ACTIVE',
+        `attempt ${attemptId} 已经是 ${attempt.status}，不能再交检视结论`,
+      );
+    }
+    if (this.#independentReviews.some((row) => row.reviewerAttemptId === attemptId)) {
+      throw new InvariantViolationError(
+        'INDEPENDENT_REVIEW_ALREADY_RECORDED',
+        `attempt ${attemptId} 已经交过独立检视结论，拒绝覆盖`,
+      );
+    }
+    if (input.verdict !== 'pass' && input.verdict !== 'send_back') {
+      throw new InvariantViolationError(
+        'INVALID_INDEPENDENT_REVIEW',
+        `独立检视结论只能是 pass 或 send_back，收到 ${String(input.verdict)}`,
+      );
+    }
+    if (!Array.isArray(input.reasons) || input.reasons.length === 0 || input.reasons.some((r) => typeof r !== 'string' || r.trim() === '')) {
+      throw new InvariantViolationError(
+        'INVALID_INDEPENDENT_REVIEW',
+        '独立检视必须给出非空理由',
+      );
+    }
+    const record = freezePayload({
+      missionId: this.#id,
+      reviewerAttemptId: attemptId,
+      reviewerProfileId: input.reviewerProfileId,
+      contractRevision: input.contractRevision,
+      reviewedCommit: input.reviewedCommit,
+      l2ReviewRefs: input.l2ReviewRefs.map((ref) => ({ ...ref })),
+      l2Fingerprint: input.l2Fingerprint,
+      verdict: input.verdict,
+      reasons: [...input.reasons],
+      recordedAt: input.recordedAt,
+      ...(input.validationReportId !== undefined
+        ? { validationReportId: input.validationReportId }
+        : {}),
+    }) as IndependentReviewRecord;
+    this.#independentReviews.push(record);
+    return record;
+  }
+
   /** 在本 Mission 下建 WorkItem；终态上拒绝，id 在本 Mission 内必须唯一。 */
   createWorkItem(
     init: Pick<WorkItemInit, 'id' | 'title'> & { order?: WorkOrder },
@@ -563,10 +719,12 @@ export class Mission {
     return this.#workItems.find((item) => item.id === id);
   }
 
-  /** 找 Attempt（协调者的或任一 WorkItem 下执行者的）。 */
+  /** 找 Attempt（协调者、独立检视者、或任一 WorkItem 下执行者的）。 */
   attempt(id: string): Attempt | undefined {
     const own = this.#coordinatorAttempts.find((a) => a.id === id);
     if (own) return own;
+    const review = this.#independentReviewerAttempts.find((a) => a.id === id);
+    if (review) return review;
     for (const item of this.#workItems) {
       const found = item.attempts.find((a) => a.id === id);
       if (found) return found;
@@ -607,6 +765,19 @@ export class Mission {
       workItems: this.#workItems.map((item) => item.toSnapshot()),
       coordinatorAttempts: this.#coordinatorAttempts.map((attempt) => attempt.toSnapshot()),
       coordinatorSeq: this.#coordinatorSeq,
+      independentReviewerAttempts: this.#independentReviewerAttempts.map((attempt) =>
+        attempt.toSnapshot(),
+      ),
+      independentReviewerSeq: this.#independentReviewerSeq,
+      independentReviews: this.#independentReviews.map((row) => ({ ...row, l2ReviewRefs: [...row.l2ReviewRefs], reasons: [...row.reasons] })),
+      independentReviewBlockReason: this.#independentReviewBlockReason,
+      independentReviewBlockDetail: this.#independentReviewBlockDetail,
+      independentReviewOpen: this.#independentReviewOpen
+        ? {
+            ...this.#independentReviewOpen,
+            l2ReviewRefs: [...this.#independentReviewOpen.l2ReviewRefs],
+          }
+        : undefined,
     };
   }
 
@@ -645,6 +816,24 @@ export class Mission {
       (attempt: AttemptSnapshot) => Attempt.restore(attempt),
     );
     mission.#coordinatorSeq = snapshot.coordinatorSeq ?? 0;
+    mission.#independentReviewerAttempts = (snapshot.independentReviewerAttempts ?? [])
+      .filter((attempt: AttemptSnapshot) => attempt.kind === 'independent_reviewer')
+      .map((attempt: AttemptSnapshot) => Attempt.restore(attempt));
+    mission.#independentReviewerSeq = snapshot.independentReviewerSeq ?? 0;
+    mission.#independentReviews = Mission.#normalizeIndependentReviews(
+      snapshot.independentReviews,
+      snapshot.id,
+    );
+    mission.#independentReviewBlockReason = Mission.#normalizeIndependentReviewBlockReason(
+      snapshot.independentReviewBlockReason,
+    );
+    mission.#independentReviewBlockDetail =
+      typeof snapshot.independentReviewBlockDetail === 'string'
+        ? snapshot.independentReviewBlockDetail
+        : undefined;
+    mission.#independentReviewOpen = Mission.#normalizeIndependentReviewOpen(
+      snapshot.independentReviewOpen,
+    );
     mission.#promotions = Mission.#normalizePromotionsList(
       snapshot.promotions,
       mission.#executionMode,
@@ -988,6 +1177,126 @@ export class Mission {
     return this.#coordinatorAttempts.some(
       (attempt) => attempt.status === 'in_progress',
     );
+  }
+
+  #hasInProgressIndependentReviewerAttempt(): boolean {
+    return this.#independentReviewerAttempts.some(
+      (attempt) => attempt.status === 'in_progress',
+    );
+  }
+
+  static #normalizeIndependentReviewBlockReason(
+    value: unknown,
+  ): IndependentReviewBlockReason | undefined {
+    if (
+      value === 'no_candidates' ||
+      value === 'all_candidates_conflict' ||
+      value === 'history_missing_profile' ||
+      value === 'not_awaiting_review' ||
+      value === 'not_delivered' ||
+      value === 'concurrent_attempt' ||
+      value === 'reviewed_commit_unavailable' ||
+      value === 'work_items_unfinished'
+    ) {
+      return value;
+    }
+    return undefined;
+  }
+
+  static #normalizeIndependentReviewOpen(value: unknown): Readonly<IndependentReviewOpen> | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    if (typeof raw.attemptId !== 'string' || raw.attemptId.trim() === '') return undefined;
+    if (typeof raw.contractRevision !== 'number' || !Number.isFinite(raw.contractRevision)) {
+      return undefined;
+    }
+    if (typeof raw.reviewedCommit !== 'string' || raw.reviewedCommit.trim() === '') return undefined;
+    if (typeof raw.l2Fingerprint !== 'string') return undefined;
+    const refs = Mission.#normalizeL2Refs(raw.l2ReviewRefs);
+    if (!refs) return undefined;
+    return freezePayload({
+      attemptId: raw.attemptId,
+      contractRevision: raw.contractRevision,
+      reviewedCommit: raw.reviewedCommit,
+      l2Fingerprint: raw.l2Fingerprint,
+      l2ReviewRefs: refs,
+      ...(typeof raw.validationReportId === 'string' && raw.validationReportId.trim() !== ''
+        ? { validationReportId: raw.validationReportId }
+        : {}),
+    });
+  }
+
+  static #normalizeIndependentReviews(
+    value: unknown,
+    missionId: string,
+  ): Readonly<IndependentReviewRecord>[] {
+    if (!Array.isArray(value)) return [];
+    const out: Readonly<IndependentReviewRecord>[] = [];
+    for (const row of value) {
+      const normalized = Mission.#normalizeIndependentReviewRecord(row, missionId);
+      if (normalized) out.push(normalized);
+    }
+    return out;
+  }
+
+  static #normalizeIndependentReviewRecord(
+    value: unknown,
+    missionId: string,
+  ): Readonly<IndependentReviewRecord> | undefined {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    if (raw.missionId !== missionId) return undefined;
+    if (typeof raw.reviewerAttemptId !== 'string' || raw.reviewerAttemptId.trim() === '') {
+      return undefined;
+    }
+    if (typeof raw.reviewerProfileId !== 'string' || raw.reviewerProfileId.trim() === '') {
+      return undefined;
+    }
+    if (typeof raw.contractRevision !== 'number' || !Number.isFinite(raw.contractRevision)) {
+      return undefined;
+    }
+    if (typeof raw.reviewedCommit !== 'string' || raw.reviewedCommit.trim() === '') return undefined;
+    if (typeof raw.l2Fingerprint !== 'string') return undefined;
+    if (raw.verdict !== 'pass' && raw.verdict !== 'send_back') return undefined;
+    if (!Array.isArray(raw.reasons) || raw.reasons.length === 0 || raw.reasons.some((r) => typeof r !== 'string' || r.trim() === '')) {
+      return undefined;
+    }
+    if (typeof raw.recordedAt !== 'string') return undefined;
+    const refs = Mission.#normalizeL2Refs(raw.l2ReviewRefs);
+    if (!refs) return undefined;
+    return freezePayload({
+      missionId,
+      reviewerAttemptId: raw.reviewerAttemptId,
+      reviewerProfileId: raw.reviewerProfileId,
+      contractRevision: raw.contractRevision,
+      reviewedCommit: raw.reviewedCommit,
+      l2ReviewRefs: refs,
+      l2Fingerprint: raw.l2Fingerprint,
+      verdict: raw.verdict,
+      reasons: [...raw.reasons] as string[],
+      recordedAt: raw.recordedAt,
+      ...(typeof raw.validationReportId === 'string' && raw.validationReportId.trim() !== ''
+        ? { validationReportId: raw.validationReportId }
+        : {}),
+    });
+  }
+
+  static #normalizeL2Refs(value: unknown): IndependentReviewL2Ref[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const out: IndependentReviewL2Ref[] = [];
+    for (const row of value) {
+      if (row == null || typeof row !== 'object' || Array.isArray(row)) return undefined;
+      const raw = row as Record<string, unknown>;
+      if (typeof raw.workItemId !== 'string' || raw.workItemId.trim() === '') return undefined;
+      out.push({
+        workItemId: raw.workItemId,
+        ...(typeof raw.submittedAttemptId === 'string'
+          ? { submittedAttemptId: raw.submittedAttemptId }
+          : {}),
+        ...(typeof raw.reviewAttemptId === 'string' ? { reviewAttemptId: raw.reviewAttemptId } : {}),
+      });
+    }
+    return out;
   }
 
   #assertCanGoTo(to: MissionStatus): void {

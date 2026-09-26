@@ -22,6 +22,10 @@ import type {
   ExecutionResultBody,
   FinalReview,
   FinalReviewAuthority,
+  IndependentReviewBlockReason,
+  IndependentReviewL2Ref,
+  IndependentReviewRecord,
+  IndependentReviewVerdict,
   Mission,
   MissionContract,
   MissionExecutionMode,
@@ -730,6 +734,448 @@ export class Platform {
   }
 
   /**
+   * 从独立检视候选里开一张 independent_reviewer Attempt。
+   *
+   * 不开时 Mission 停在 awaiting_review，并把原因写进可查询字段；
+   * 绝不拿协调者自己的 profile 顶上。E2 不从 runMission 自动调用。
+   */
+  async startIndependentReviewerAttempt(
+    missionId: string,
+    candidates: readonly UsedProfile[],
+  ): Promise<{ attemptId: string; profileId: string }> {
+    return this.#tx(() => this.#startIndependentReviewerAttempt(missionId, candidates));
+  }
+
+  async #startIndependentReviewerAttempt(
+    missionId: string,
+    candidates: readonly UsedProfile[],
+  ): Promise<{ attemptId: string; profileId: string }> {
+    const { mission } = await this.#locate(missionId);
+    const blocked = this.#independentReviewOpenBlock(mission, candidates);
+    if (blocked) {
+      mission.recordIndependentReviewBlock(blocked.reason, blocked.detail);
+      await this.#event(mission, 'independent_review.blocked', blocked);
+      throw new PlatformRuleError(blocked.code, blocked.detail);
+    }
+
+    const excluded = this.#participantProfileIds(mission);
+    if (!excluded) {
+      const detail =
+        '本 Mission 有历史协调者或执行者 Attempt 缺 profileId，无法证明独立，拒绝开检视。';
+      mission.recordIndependentReviewBlock('history_missing_profile', detail);
+      await this.#event(mission, 'independent_review.blocked', {
+        reason: 'history_missing_profile',
+        detail,
+      });
+      throw new PlatformRuleError('INDEPENDENT_REVIEW_HISTORY_MISSING_PROFILE', detail);
+    }
+
+    const picked = candidates.find(
+      (row) => row.profileId && !excluded.has(row.profileId),
+    );
+    if (!picked) {
+      const hasAny = candidates.some((row) => typeof row.profileId === 'string' && row.profileId.trim() !== '');
+      const reason: IndependentReviewBlockReason = hasAny ? 'all_candidates_conflict' : 'no_candidates';
+      const detail = hasAny
+        ? '独立检视候选全部与本 Mission 历史协调者或执行者 profileId 冲突，拒绝自审。'
+        : '候选池没有 independent_reviewer 候选，拒绝开检视。';
+      mission.recordIndependentReviewBlock(reason, detail);
+      await this.#event(mission, 'independent_review.blocked', { reason, detail });
+      throw new PlatformRuleError(
+        hasAny ? 'INDEPENDENT_REVIEW_ALL_CONFLICT' : 'INDEPENDENT_REVIEW_NO_CANDIDATES',
+        detail,
+      );
+    }
+
+    let reviewedCommit: string;
+    try {
+      reviewedCommit = await this.#missionReviewedCommit(mission);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : '读不到 Mission worktree 的 HEAD，拒绝开检视。';
+      mission.recordIndependentReviewBlock('reviewed_commit_unavailable', detail);
+      await this.#event(mission, 'independent_review.blocked', {
+        reason: 'reviewed_commit_unavailable',
+        detail,
+      });
+      throw new PlatformRuleError('REVIEWED_COMMIT_UNAVAILABLE', detail);
+    }
+    const l2 = this.#l2ReviewSnapshot(mission);
+    const attempt = mission.startIndependentReviewerAttempt({
+      contractRevision: mission.contractRevision,
+      reviewedCommit,
+      l2Fingerprint: l2.fingerprint,
+      l2ReviewRefs: l2.refs,
+      ...(l2.validationReportId !== undefined ? { validationReportId: l2.validationReportId } : {}),
+    });
+    attempt.recordProfile(picked);
+    await this.#event(
+      mission,
+      'attempt.started',
+      { kind: 'independent_reviewer', profile: picked },
+      undefined,
+      attempt.id,
+    );
+    return { attemptId: attempt.id, profileId: picked.profileId };
+  }
+
+  async getMissionReviewBundle(
+    missionId: string,
+    attemptId: string,
+  ): Promise<{
+    missionId: string;
+    contractRevision: number;
+    reviewedCommit: string;
+    l2ItemResults: readonly {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[];
+    validationReportRefs: readonly { id: string }[];
+  }> {
+    const { mission } = await this.#requireAttempt(missionId, attemptId, 'independent_reviewer');
+    const l2 = this.#l2ReviewSnapshot(mission);
+    const reviewedCommit =
+      mission.independentReviewOpen?.attemptId === attemptId
+        ? mission.independentReviewOpen.reviewedCommit
+        : await this.#missionReviewedCommit(mission);
+    const reportIds = new Set<string>();
+    if (l2.validationReportId) reportIds.add(l2.validationReportId);
+    if (mission.independentReviewOpen?.validationReportId) {
+      reportIds.add(mission.independentReviewOpen.validationReportId);
+    }
+    return {
+      missionId: mission.id,
+      contractRevision: mission.contractRevision,
+      reviewedCommit,
+      l2ItemResults: l2.items,
+      validationReportRefs: [...reportIds].map((id) => ({ id })),
+    };
+  }
+
+  async submitIndependentReview(
+    missionId: string,
+    attemptId: string,
+    input: { readonly verdict: unknown; readonly reasons: unknown },
+  ): Promise<{ recorded: IndependentReviewRecord }> {
+    return this.#tx(() => this.#submitIndependentReview(missionId, attemptId, input));
+  }
+
+  async #submitIndependentReview(
+    missionId: string,
+    attemptId: string,
+    input: { readonly verdict: unknown; readonly reasons: unknown },
+  ): Promise<{ recorded: IndependentReviewRecord }> {
+    const { mission, attempt } = await this.#requireAttempt(
+      missionId,
+      attemptId,
+      'independent_reviewer',
+    );
+    if (input.verdict !== 'pass' && input.verdict !== 'send_back') {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_INVALID',
+        'verdict 必须是 pass 或 send_back。',
+      );
+    }
+    if (
+      !Array.isArray(input.reasons) ||
+      input.reasons.length === 0 ||
+      input.reasons.some((r) => typeof r !== 'string' || r.trim() === '')
+    ) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_INVALID',
+        'reasons 必须是非空字符串数组。',
+      );
+    }
+    const verdict = input.verdict as IndependentReviewVerdict;
+    const reasons = input.reasons as readonly string[];
+    const open = mission.independentReviewOpen;
+    if (!open || open.attemptId !== attemptId) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_OPEN_MISSING',
+        '没有与本次 Attempt 对应的开审对照，拒绝收结论。',
+      );
+    }
+
+    const headNow = await this.#missionReviewedCommit(mission);
+    const l2Now = this.#l2ReviewSnapshot(mission);
+    const profileId = attempt.profile?.profileId;
+    if (!profileId) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_PROFILE_REQUIRED',
+        '本次检视 Attempt 缺 profileId，无法记下独立结论。',
+      );
+    }
+
+    if (verdict === 'pass') {
+      if (mission.contractRevision !== open.contractRevision) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_REVISION_CHANGED',
+          `契约已从 r${open.contractRevision} 变到 r${mission.contractRevision}，旧对照不能 pass。`,
+        );
+      }
+      if (headNow !== open.reviewedCommit) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_HEAD_CHANGED',
+          '被审 HEAD 已变化，拒绝记录 pass。',
+        );
+      }
+      if (l2Now.fingerprint !== open.l2Fingerprint) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_EVIDENCE_CHANGED',
+          '被引用的 L2 逐条结果已变化，拒绝记录 pass。',
+        );
+      }
+      if (!this.#l2RefsBelongToMission(mission, open.l2ReviewRefs) || open.l2ReviewRefs.length === 0) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_L2_MISSING',
+          'L2 逐条结果引用缺失或不属本 Mission，拒绝 pass。',
+        );
+      }
+      const reportId = open.validationReportId ?? l2Now.validationReportId;
+      if (!reportId) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_REPORT_MISSING',
+          '缺 ValidationReport，不能 pass。',
+        );
+      }
+      const report = await this.#validation?.reports.get(reportId);
+      if (!report || report.missionId !== mission.id) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_REPORT_MISSING',
+          'ValidationReport 不存在或不属本 Mission，不能 pass。',
+        );
+      }
+    }
+
+    const recorded = mission.recordIndependentReview(attemptId, {
+      reviewerProfileId: profileId,
+      contractRevision: open.contractRevision,
+      reviewedCommit: open.reviewedCommit,
+      l2ReviewRefs: open.l2ReviewRefs,
+      l2Fingerprint: open.l2Fingerprint,
+      verdict,
+      reasons,
+      recordedAt: this.#clock.now().toISOString(),
+      ...(open.validationReportId !== undefined
+        ? { validationReportId: open.validationReportId }
+        : {}),
+    });
+    await this.#event(
+      mission,
+      'independent_review.recorded',
+      {
+        verdict: recorded.verdict,
+        reviewerAttemptId: recorded.reviewerAttemptId,
+        contractRevision: recorded.contractRevision,
+        reviewedCommit: recorded.reviewedCommit,
+      },
+      undefined,
+      attemptId,
+    );
+    return { recorded };
+  }
+
+  /**
+   * 读取方判断「当前有效的 pass」：revision / HEAD / L2 指纹任一变化即失效。
+   * send_back 从来不是有效 pass。E2 不据此流转 planning / finalize / merge。
+   */
+  async effectiveIndependentReviewPass(
+    missionId: string,
+  ): Promise<IndependentReviewRecord | undefined> {
+    const { mission } = await this.#locate(missionId);
+    let head: string;
+    try {
+      head = await this.#missionReviewedCommit(mission);
+    } catch {
+      return undefined;
+    }
+    const fingerprint = this.#l2ReviewSnapshot(mission).fingerprint;
+    for (let i = mission.independentReviews.length - 1; i >= 0; i -= 1) {
+      const row = mission.independentReviews[i]!;
+      if (row.verdict !== 'pass') continue;
+      if (row.contractRevision !== mission.contractRevision) continue;
+      if (row.reviewedCommit !== head) continue;
+      if (row.l2Fingerprint !== fingerprint) continue;
+      if (!row.validationReportId) continue;
+      const report = await this.#validation?.reports.get(row.validationReportId);
+      if (!report || report.missionId !== mission.id) continue;
+      return row;
+    }
+    return undefined;
+  }
+
+  #independentReviewOpenBlock(
+    mission: Mission,
+    _candidates: readonly UsedProfile[],
+  ): { reason: IndependentReviewBlockReason; code: string; detail: string } | undefined {
+    if (mission.status !== 'awaiting_review') {
+      return {
+        reason: 'not_awaiting_review',
+        code: 'INDEPENDENT_REVIEW_NOT_AWAITING',
+        detail: `Mission ${mission.id} 现在是 ${mission.status}，只能在 awaiting_review 开独立检视。`,
+      };
+    }
+    if (mission.result?.outcome !== 'delivered') {
+      return {
+        reason: 'not_delivered',
+        code: 'INDEPENDENT_REVIEW_NOT_DELIVERED',
+        detail: `Mission ${mission.id} 交卷不是 delivered，不能开独立检视。`,
+      };
+    }
+    const unfinished = mission.workItems.filter(
+      (item) => item.status !== 'accepted' && item.status !== 'retired',
+    );
+    if (unfinished.length > 0) {
+      return {
+        reason: 'work_items_unfinished',
+        code: 'INDEPENDENT_REVIEW_WORK_ITEMS_UNFINISHED',
+        detail: `还有未验收的工作项：${unfinished.map((i) => i.id).join(', ')}。`,
+      };
+    }
+    if (mission.independentReviewerAttempts.some((a) => a.status === 'in_progress')) {
+      return {
+        reason: 'concurrent_attempt',
+        code: 'INDEPENDENT_REVIEW_CONCURRENT',
+        detail: `Mission ${mission.id} 已有 in_progress 的 independent_reviewer Attempt。`,
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * 历史参与者的 profileId 集合。任一缺 profile 则无法证明独立，返回 undefined。
+   */
+  #participantProfileIds(mission: Mission): Set<string> | undefined {
+    const ids = new Set<string>();
+    const attempts: Attempt[] = [...mission.coordinatorAttempts];
+    for (const item of mission.workItems) attempts.push(...item.attempts);
+    for (const attempt of attempts) {
+      const profileId = attempt.profile?.profileId;
+      if (typeof profileId !== 'string' || profileId.trim() === '') return undefined;
+      ids.add(profileId);
+    }
+    return ids;
+  }
+
+  async #missionReviewedCommit(mission: Mission): Promise<string> {
+    if (!this.#workspace) {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        '没有工作区管理，无法核对被审 HEAD。',
+      );
+    }
+    const root = mission.workspaceRef?.projectRoot;
+    const viaTree =
+      root && this.#workspace.worktreePath
+        ? this.#workspace.worktreePath(mission.id, root)
+        : undefined;
+    const cwd = viaTree ?? root;
+    if (!cwd) {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        'Mission 没有 projectRoot，无法核对被审 HEAD。',
+      );
+    }
+    const head = await this.#workspace.head(cwd);
+    if (typeof head !== 'string' || head.trim() === '') {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        '读不到 Mission worktree 的 HEAD。',
+      );
+    }
+    return head;
+  }
+
+  #l2ReviewSnapshot(mission: Mission): {
+    fingerprint: string;
+    refs: IndependentReviewL2Ref[];
+    validationReportId?: string;
+    items: {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[];
+  } {
+    const refs: IndependentReviewL2Ref[] = [];
+    const items: {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[] = [];
+    let validationReportId: string | undefined;
+    const canonical: unknown[] = [];
+    for (const item of mission.workItems) {
+      if (item.status === 'retired') continue;
+      const last = item.reviews.at(-1);
+      const ref: IndependentReviewL2Ref = {
+        workItemId: item.id,
+        ...(item.submittedAttemptId !== undefined
+          ? { submittedAttemptId: item.submittedAttemptId }
+          : {}),
+        ...(last?.attemptId !== undefined ? { reviewAttemptId: last.attemptId } : {}),
+      };
+      refs.push(ref);
+      items.push({
+        workItemId: item.id,
+        ...(item.submittedAttemptId !== undefined
+          ? { submittedAttemptId: item.submittedAttemptId }
+          : {}),
+        ...(last?.attemptId !== undefined ? { reviewAttemptId: last.attemptId } : {}),
+        ...(last?.verdict !== undefined ? { verdict: last.verdict } : {}),
+        ...(last?.acceptanceResults !== undefined
+          ? { acceptanceResults: last.acceptanceResults }
+          : {}),
+      });
+      canonical.push({
+        id: item.id,
+        status: item.status,
+        submittedAttemptId: item.submittedAttemptId ?? null,
+        reviews: item.reviews.map((r) => ({
+          attemptId: r.attemptId ?? null,
+          submittedAttemptId: r.submittedAttemptId ?? null,
+          verdict: r.verdict,
+          reasons: r.reasons,
+          acceptanceResults: r.acceptanceResults ?? null,
+          authority: r.authority ?? null,
+        })),
+      });
+      const authority = last?.authority;
+      if (authority && authority.kind === 'validator' && !validationReportId) {
+        validationReportId = authority.reportId;
+      }
+    }
+    return {
+      fingerprint: JSON.stringify(canonical),
+      refs,
+      items,
+      ...(validationReportId !== undefined ? { validationReportId } : {}),
+    };
+  }
+
+  #l2RefsBelongToMission(mission: Mission, refs: readonly IndependentReviewL2Ref[]): boolean {
+    for (const ref of refs) {
+      const item = mission.workItem(ref.workItemId);
+      if (!item) return false;
+      if (
+        ref.submittedAttemptId !== undefined &&
+        item.submittedAttemptId !== ref.submittedAttemptId
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * 结束一次尝试。
    *
    * `no_structured_result` 与 `upstream_failure` 都记为失败，但**分别记原因**：
@@ -1040,6 +1486,7 @@ export class Platform {
         usage: combine(
           project.missions.flatMap((m) => [
             ...m.coordinatorAttempts,
+            ...m.independentReviewerAttempts,
             ...m.workItems.flatMap((w) => w.attempts),
           ]).map((a) => a.usage),
         ),
@@ -1074,6 +1521,7 @@ export class Platform {
         if (filter?.missionId && mission.id !== filter.missionId) continue;
         const attempts: Attempt[] = [
           ...mission.coordinatorAttempts,
+          ...mission.independentReviewerAttempts,
           ...mission.workItems.flatMap((item) => item.attempts),
         ];
         for (const attempt of attempts) {
@@ -3629,6 +4077,10 @@ export interface MissionView {
   origin: OriginChannel | undefined;
   coordinatorResumeRef: string | undefined;
   coordinatorAttemptIds: string[];
+  independentReviewerAttemptIds: string[];
+  independentReviews: readonly IndependentReviewRecord[];
+  independentReviewBlockReason: IndependentReviewBlockReason | undefined;
+  independentReviewBlockDetail: string | undefined;
   finalReview: FinalReview | undefined;
   workspaceRef: WorkspaceRef | undefined;
   usage: TokenUsage;
@@ -3734,7 +4186,10 @@ function elapsedMs(start: string | undefined, end: string | undefined): number |
 
 /** 聚合用量：**分项相加**，不要只滚一个 total。 */
 function sumUsage(mission: Mission): TokenUsage {
-  const all: Attempt[] = [...mission.coordinatorAttempts];
+  const all: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) all.push(...item.attempts);
   let input = 0;
   let output = 0;
@@ -3775,7 +4230,10 @@ function sumUsage(mission: Mission): TokenUsage {
 function collectPromotionEvidenceIds(mission: Mission): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
-  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  const attempts: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) attempts.push(...item.attempts);
   for (const attempt of attempts) {
     for (const ev of attempt.evidence) {
@@ -3891,7 +4349,10 @@ async function collectPromotionValidationReportIds(
  * 无任何非 unknown usage => 省略 tokenUsage。
  */
 function buildPromotionUsageSnapshot(mission: Mission): PromotionUsageSnapshot {
-  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  const attempts: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) attempts.push(...item.attempts);
   const attemptCount = attempts.length;
 
@@ -3997,6 +4458,10 @@ function viewOf(mission: Mission): MissionView {
     origin: mission.origin,
     coordinatorResumeRef: mission.latestCoordinatorResumeRef(),
     coordinatorAttemptIds: mission.coordinatorAttempts.map((a) => a.id),
+    independentReviewerAttemptIds: mission.independentReviewerAttempts.map((a) => a.id),
+    independentReviews: mission.independentReviews,
+    independentReviewBlockReason: mission.independentReviewBlockReason,
+    independentReviewBlockDetail: mission.independentReviewBlockDetail,
     finalReview: mission.finalReview,
     workspaceRef: mission.workspaceRef,
     usage: sumUsage(mission),

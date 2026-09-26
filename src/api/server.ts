@@ -166,6 +166,11 @@ export function createApi(deps: ApiDeps): Server {
       if (action.scope === 'workItem' && action.name === 'retire') {
         throw new HttpError(409, 'WRONG_ROLE', '只有协调者能作废工作项。');
       }
+      // 协调者 / 执行者保留「让 Platform 抛 WRONG_ROLE」的旧错误码。
+      // 新身份不能走这条兼容回退，否则 ACTION_DENIED 会被当成放行。
+      if (run.role === 'independent_reviewer') {
+        throw new HttpError(403, 'ACTION_DENIED', verdict.reason.detail);
+      }
       return;
     }
     if (verdict.reason.code === POLICY_REASON.BINDING_MISMATCH) {
@@ -272,6 +277,21 @@ export function createApi(deps: ApiDeps): Server {
     async coagent_report_blocked(run, body) {
       await platform.reportBlocked(run.missionId, run.attemptId, body as never);
       return {};
+    },
+
+    async coagent_get_mission_review_bundle(run) {
+      return platform.getMissionReviewBundle(run.missionId, run.attemptId);
+    },
+
+    async coagent_submit_independent_review(run, body) {
+      const { verdict, reasons } = body as unknown as {
+        verdict: unknown;
+        reasons: unknown;
+      };
+      return platform.submitIndependentReview(run.missionId, run.attemptId, {
+        verdict,
+        reasons,
+      });
     },
   };
 
@@ -500,6 +520,12 @@ export function createApi(deps: ApiDeps): Server {
 
     const finalizeMatch = /^\/api\/missions\/([^/]+)\/finalize$/.exec(path);
     if (method === 'POST' && finalizeMatch) {
+      const runHeader = req.headers['x-coagent-run'];
+      const runToken = Array.isArray(runHeader) ? runHeader[0] : runHeader;
+      const run = tokens.resolve(runToken);
+      if (run?.role === 'independent_reviewer') {
+        throw new HttpError(403, 'ACTION_DENIED', 'independent_reviewer 不能终审。');
+      }
       await requireControl(req, POLICY_ACTION.finalizeHuman);
       const body = await readJson(req);
       return send(res, 200, await platform.finalizeMission(finalizeMatch[1], body as never));
@@ -530,6 +556,26 @@ export function createApi(deps: ApiDeps): Server {
       const { attemptId } = await platform.startCoordinatorAttempt(missionId);
       const run = tokens.issue({ missionId, attemptId, role: 'coordinator' });
       return send(res, 201, { attemptId, token: run.token });
+    }
+
+    const reviewMatch = /^\/api\/missions\/([^/]+)\/independent-reviewer-attempts$/.exec(path);
+    if (method === 'POST' && reviewMatch) {
+      await requireControl(req, POLICY_ACTION.attemptStartIndependentReviewer);
+      const missionId = reviewMatch[1];
+      const pool = await agentPool.list();
+      const { attemptId, profileId } = await platform.startIndependentReviewerAttempt(
+        missionId,
+        pool.independent_reviewer.map((row) => ({
+          profileId: row.profileId,
+          endpoint: row.endpoint,
+        })),
+      );
+      const run = tokens.issue({
+        missionId,
+        attemptId,
+        role: 'independent_reviewer',
+      });
+      return send(res, 201, { attemptId, token: run.token, profileId });
     }
 
     const execMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/executor-attempts$/.exec(path);

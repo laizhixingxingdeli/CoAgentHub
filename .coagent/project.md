@@ -18,6 +18,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   high_assurance 合进集成分支由**人或显式配置的高保证 Principal**放行（ADR-0006）；当前该 Principal 是按用户常设授权登记的检视者签名。master 一律由用户放行。Jev 只列未来移交。
 - **L2 Coordinator** 负责规划、拆 WorkItem、验收执行结果；可以改 plan / contract 修订，修订对后续执行有约束力。Lightweight 路径零 Coordinator，机器验收走 validator。
 - **L1 Executor** 只执行冻结的 WorkOrder，不能自验收、不能重新定义目标。
+- **Independent Reviewer**（`independent_reviewer`）是 HA 合并前的独立检视角色，与终审签名人 `reviewer` 不是同一个身份：须与本 Mission 历史协调者、执行者 profile 全部不同；只读证据包并提交 `pass` / `send_back`，不签 FinalReview，也不改 L2 逐条结果。
 
 ## Architecture
 
