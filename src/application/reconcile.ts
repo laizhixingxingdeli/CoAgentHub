@@ -712,6 +712,9 @@ export interface PeriodicReconcileHandle {
  * intervalMs <= 0 视为关闭，连第一轮都不排。单次 tick 抛错只 warn，后续照跑。
  * warn 自己抛错也接住：告警通道不该拖垮调度，否则 stop() 会拒绝、在途 tick 的
  * 锁和独立连接就收不回来。
+ *
+ * 入口不要各自选 tick：startServer / run-plan 必须走 `startPeriodicDeliveryRepair`
+ *（main.ts）。两处再各写一套，文件短借锁 / 已持锁 / PG 独立 store 会再次分叉。
  */
 export function startPeriodicReconcile(input: StartPeriodicReconcileInput): PeriodicReconcileHandle {
   const { intervalMs, tick, warn } = input;

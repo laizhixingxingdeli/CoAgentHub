@@ -17,6 +17,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 ## Roles and Flow
 
 - **L3 Reviewer** 拥有最终落地权（merge / 驳回）；未经 L3 不得把 Mission 标成 completed。Lightweight（Fast Lane）缩短协调，**不**绕过 L3 / validator 权威（ADR-0004）。
+  无人值守按方案推进时，**机器 L3** 可凭合并后在**集成分支**上跑出的方案级验证放行（只限 lightweight + standard，master 仍要人放行；ADR-0004 修订）。
+  high_assurance 合进集成分支由**人或显式配置的高保证 Principal**放行（ADR-0006）；当前该 Principal 是按用户常设授权登记的检视者签名。master 一律由用户放行。Jev 只列未来移交。
 - **L2 Coordinator** 负责规划、拆 WorkItem、验收执行结果；可以改 plan / contract 修订，修订对后续执行有约束力。Lightweight 路径零 Coordinator，机器验收走 validator。
 - **L1 Executor** 只执行冻结的 WorkOrder，不能自验收、不能重新定义目标。
 
@@ -49,7 +51,12 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   - `execution-budget-gates` — 权威预算门禁
   - `lightweight-standard-promotion` — LW→Standard 与 Query 晋升
   - `decision-jev-off-shadow` — Decision/Jev OFF+SHADOW
-- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0005）。
+  - `spawn-env-filter` — agent 子进程环境过滤（fail-closed 透传名单）
+  - `plan-run` — 方案运行：无人值守驱动（run-plan）、夜间升级握手（跨进程、只能选动作）与停止条件
+  - `machine-final-review` — 机器 L3：合进集成分支、在合并结果上验证、红则回滚；方案放弃失败的 Mission
+  - `credential-redaction` — 凭据脱敏：agent 产出与运行输出落盘前抹掉本机凭据值与常见 key 形状
+  - `delivery-inbox` — 投递收件箱：结果与升级回到发起方；按业务幂等键去重（每次升级、每次交卷各一条）
+- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0006）。
 - 不要把 Mission 历史、临时计划或一次性排障笔记写进上述长期文件。
 - 根目录 `VIBE.md` **只**由 `generateVibe` / 落地时重写；手改会丢。
 
@@ -74,20 +81,46 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
 - 注释写**为什么**，不写代码在做什么。特别是写清楚「不这么做会怎样」。
 
+### 仓库与协作
+
+- 换行：提交进仓库的内容（blob）一律是 LF；本机 `core.autocrlf=true`，检出的工作副本是 CRLF。同一个文件里不要混用 LF 和 CRLF。否则会出现整文件的伪改动，看不清真实改了什么。
+- 只按显式路径 `git add` / commit，不用 `git add -A`、`git add .`。否则会把用户的未跟踪文件（IDE 配置、本地方案文件、实验输出）卷进提交。
+- 不碰 `.idea/`（用户的 IDE 配置）。否则会改坏或提交用户本地的设置。
+- 不读凭据文件（例如 `~/.pi/agent/auth.json`、`typesafe.env`），不在输出、日志、提交里打印 key，给子进程的环境不额外塞凭据（透传名单见 `specs/spawn-env-filter`）。否则凭据会随日志、产物或提交泄露。
+- 测试用 `node --test`。要改表结构或 TRUNCATE 的 PG 测试，用 `test/helpers/pg.ts` 的 `ensureTestDatabase('<独立名字>')` 另建隔离库；PG 不可用时这类测试跳过，跳过不算验证通过。否则测试之间互相踩数据，或者把「没跑」当成「通过」。
+- `src/` 里除 `src/application/decision-question-registry.ts` 外不出现「题集」一词。否则 `test/decision-state-builder.test.ts` 的全 `src` 扫描会红。
+- 验证在独立 worktree（`.coagent-worktrees/` 下）里跑，不在用户的主工作区里跑。否则主工作区里用户开着的 IDE、未跟踪文件会被算进改动，或被验证过程改坏。
+
 ## Capability 索引
 
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
+- **credential-redaction** — 凭据脱敏（credential-redaction）
+  agent 产出、要落盘或给人看的文本，进门先过一遍脱敏（优化方案 §7 P0.3 末条、Phase 1 第 4 条）。起因：agent 一句 `env` 或 `cat .env`，本机的 key 就进了证据、失败原文、实时输出，落盘后在 
 - **decision-jev-off-shadow** — Decision / Jev：OFF 与 SHADOW
   Decision 是 Application 侧横向信号，不是第四层。当前只有 `off` / `shadow`；SHADOW 只记录建议，永远不改变实际 dispatch。
+- **delivery-inbox** — 投递收件箱（delivery-inbox）
+  Mission 的结果与升级要回到发起方：发起的会话可能已经关了，所以投递**留在收件箱里等**，Host 恢复后自己来取（`pending`）、取完确认（`acknowledge`）。只写进平台状态不算数——「进收件箱才叫升级」。
 - **execution-budget-gates** — 权威执行预算门禁（BUDGET-001）
   Mission 可挂 `executionBudget`。用法快照与求值在 application 纯函数层；**调度强制**在 Orchestrator PRE/POST gate，经 Platform 记事件 / 升级 / 等待。
-- **http-control-auth** — HTTP 控制面可选鉴权（SEC-002）
-  `createApi` 可注入 `resolveControlPrincipal`；**不注入**时写路由保持历史匿名可写行为（本地与既有测试零摩擦）。注入后，受保护控制写路径在进入原业务逻辑前按 Principal 角色门禁。
+- **fast-lane-ab-metrics** — Fast Lane A/B 指标（FASTLANE-METRICS）
+  `Platform.listRuns(missionId)` 是同一任务多次运行的只读对照出口；`src/l3.ts runs` 直接展示这些事实。
+- **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
+  `createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。
 - **lightweight-standard-promotion** — Lightweight → Standard 晋升（PROMO-001）
   可信升级把 Lightweight mutation Mission 转为 Standard，并留下 `PromotionRecord`；入口只在进程内。
+- **machine-final-review** — 机器 L3：合进集成分支，在合并结果上验证，红则回滚
+  `Platform.finalizeMissionByMachine` 是**机器放行**的唯一入口；`Platform.abandonMissionForPlan` 是**方案运行放弃失败 Mission** 的唯一入口；`Platfor
+- **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
+  按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
+- **run-token-lifecycle** — Run Token 生命周期（RECON-002A）
+  Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 获得 mission / attempt / role / workItem 上下文，不接受请求体自述身份。
+- **spawn-env-filter** — 子进程环境过滤（Spawn env filter）
+  `SpawnRuntime` 拉起的 agent / query 子进程**不得**继承整份宿主 `process.env`。未声明透传名单时 fail-closed；显式声明「一个都不透传」时只留 OS/代理基线。
+- **startup-reconciliation** — 启动收敛（RECON-002B）
+  平台接手时把上一次残留的在途状态收干净：判死无人收尾的 Attempt、回收孤儿 worktree、补裁它们的实时输出。
 - **validation-review-authority** — ValidationReport 与 ReviewAuthority
   机器独立验收与协调者自报权威分立。执行者**不得**给自己签发通过。
 - **web-shell** — 正式 Web 端外壳、项目页与任务详情
@@ -100,6 +133,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - **adr-0003-query-run-not-mission** — QueryRun 不是 Mission
 - **adr-0004-fast-lane-does-not-bypass-l3** — Fast Lane（Lightweight）不绕过 L3 / 审查权威
 - **adr-0005-execution-budget-authority** — 执行预算：权威求值与 hard/soft 语义
+- **adr-0006-ha-release-authority** — HA 放行权威：人或显式配置的高保证 Principal
 
 ## 给 Agent 的规则
 

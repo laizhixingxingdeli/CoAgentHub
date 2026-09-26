@@ -411,9 +411,12 @@ describe('run-plan 周期投递修复接线', () => {
     assert.ok(selectAt >= 0 && selectAt < createAt, '资格筛选必须在建运行记录之前');
     assert.match(runPlan, /process\.argv\.includes\('--check'\)/);
 
-    assert.match(runPlan, /startPeriodicReconcile/);
-    assert.match(runPlan, /runHeldFileDeliveryRepair/);
-    assert.match(runPlan, /runPgDeliveryRepairTick/);
+    assert.match(runPlan, /startPeriodicDeliveryRepair\(/);
+    assert.match(runPlan, /kind: 'file-held'/);
+    assert.match(runPlan, /kind: 'pg'/);
+    assert.doesNotMatch(runPlan, /startPeriodicReconcile/);
+    assert.doesNotMatch(runPlan, /runHeldFileDeliveryRepair/);
+    assert.doesNotMatch(runPlan, /runPgDeliveryRepairTick/);
     assert.match(runPlan, /finally \{[\s\S]*runIndependentCleanup/);
     assert.match(runPlan, /periodic\.stop\(\)/);
     assert.match(runPlan, /name: 'persist'/);
@@ -427,16 +430,21 @@ describe('run-plan 周期投递修复接线', () => {
     assert.doesNotMatch(runPlan, /reconcileOrphanedWorktrees/);
 
     assert.match(main, /hasArchivedMission/);
+    assert.match(main, /export function startPeriodicDeliveryRepair/);
     assert.match(main, /runFileObserverDeliveryRepairTick/);
     assert.match(main, /bindServerCloseToPeriodicStop\(server,/);
     assert.match(main, /periodic\?\.stop\(\)/);
     assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
     assert.match(main, /warnDeliveryRepairErrors/);
     assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
-    assert.doesNotMatch(
-      main.slice(main.indexOf('export async function startServer')),
-      /exclusive:\s*\{/
-    );
+    const startServerSrc = main.slice(main.indexOf('export async function startServer'));
+    assert.match(startServerSrc, /startPeriodicDeliveryRepair\(/);
+    assert.match(startServerSrc, /kind: 'file-observer'/);
+    assert.match(startServerSrc, /kind: 'pg'/);
+    assert.doesNotMatch(startServerSrc, /startPeriodicReconcile/);
+    assert.doesNotMatch(startServerSrc, /runFileObserverDeliveryRepairTick/);
+    assert.doesNotMatch(startServerSrc, /runPgDeliveryRepairTick/);
+    assert.doesNotMatch(startServerSrc, /exclusive:\s*\{/);
   });
 });
 

@@ -42,6 +42,7 @@ import {
   runFileObserverDeliveryRepairTick,
   runHeldFileDeliveryRepair,
   runPgDeliveryRepairTick,
+  startPeriodicDeliveryRepair,
 } from '../src/main.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
@@ -248,6 +249,62 @@ describe('startPeriodicReconcile 调度', () => {
     const after = n;
     await sleep(60);
     assert.equal(n, after);
+  });
+});
+
+describe('startPeriodicDeliveryRepair 共用装配', () => {
+  test('间隔 0 不启动，连传入的 tick 都不跑', async () => {
+    let n = 0;
+    const handle = startPeriodicDeliveryRepair({
+      intervalMs: 0,
+      warn: () => {},
+      mode: { kind: 'file-observer', statePath: tempState() },
+      tick: async () => {
+        n += 1;
+      },
+    });
+    assert.equal(handle, undefined);
+    await sleep(40);
+    assert.equal(n, 0);
+  });
+
+  test('正间隔走同一调度：传入 tick 会跑，stop 后不再排', async () => {
+    let n = 0;
+    const handle = startPeriodicDeliveryRepair({
+      intervalMs: 20,
+      warn: () => {},
+      mode: { kind: 'file-observer', statePath: tempState() },
+      tick: async () => {
+        n += 1;
+      },
+    });
+    assert.ok(handle, '正间隔应返回可 stop 的句柄');
+    await waitFor(() => n >= 1);
+    await handle.stop();
+    const after = n;
+    await sleep(50);
+    assert.equal(n, after);
+  });
+
+  test('未覆盖 tick 时文件已持锁 mode 仍补可核实投递', async () => {
+    const statePath = tempState();
+    await seedFileGap(statePath);
+    const store = new FileStateStore(statePath);
+    const handle = startPeriodicDeliveryRepair({
+      intervalMs: 20,
+      warn: () => {},
+      mode: { kind: 'file-held', store },
+    });
+    assert.ok(handle);
+    try {
+      const deadline = Date.now() + 5000;
+      while ((await fileDeliveries(statePath, 'M-gap')).length !== 1 && Date.now() < deadline) {
+        await sleep(10);
+      }
+      assert.equal((await fileDeliveries(statePath, 'M-gap')).length, 1);
+    } finally {
+      await handle.stop();
+    }
   });
 });
 
