@@ -14,7 +14,7 @@
 
 import { resolve } from 'node:path';
 import type { MissionContract } from '../kernel/index.ts';
-import { isPositiveInt, isStopConditions, isText } from './plan-run.ts';
+import { fillStopConditions, isPositiveInt, isStopConditions, isText } from './plan-run.ts';
 import type { PlanSourceExclusion, PlanStopConditions } from './plan-run.ts';
 import { PlatformRuleError } from './platform.ts';
 
@@ -227,7 +227,12 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
   if (!isText(reviewer)) throw bad('没有指定检视者（文件里的 reviewer 或命令行 --reviewer）。');
 
   const stop = plan.stopConditions;
-  if (!isStopConditions(stop)) throw bad('stopConditions 的三项都必须是正整数。');
+  if (!isStopConditions(stop)) {
+    throw bad(
+      'stopConditions 的 unresolvedEscalations / wallClockMs / escalationTimeoutMs 必须都是正整数；' +
+        'maxEscalations / maxRerunsPerFeature 缺省放行，出现了也必须是正整数。',
+    );
+  }
 
   const verification = plan.integrationVerification;
   if (
@@ -280,11 +285,7 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
     intent: plan.intent as string,
     integrationBranch: plan.integrationBranch as string,
     reviewer,
-    stopConditions: Object.freeze({
-      unresolvedEscalations: stop.unresolvedEscalations,
-      wallClockMs: stop.wallClockMs,
-      escalationTimeoutMs: stop.escalationTimeoutMs,
-    }),
+    stopConditions: fillStopConditions(stop),
     integrationVerification: Object.freeze(
       (verification as { argv: string[]; timeoutMs: number }[]).map((c) =>
         Object.freeze({ argv: Object.freeze([...c.argv]), timeoutMs: c.timeoutMs }),

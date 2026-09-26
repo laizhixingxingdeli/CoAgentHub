@@ -3,7 +3,7 @@
  *
  * 每个功能点：现做分类 → 建 Mission → 跑到它停下 → 交卷了就走机器 L3（合进集成
  * 分支、在合并结果上验证、红则回滚）→ 没合进去就开一张升级单等检视者 → 照决定
- * 处置 → 下一个。撞到停止条件（未解决累计、墙钟、检视者叫停、集成分支不安全）
+ * 处置 → 下一个。撞到停止条件（未解决累计、墙钟、检视者叫停、集成分支不安全、升级单到上限）
  * 就停，并把原因写进方案运行记录。
  *
  * **权限分得很死。** 检视者只能在四个动作里选；合进集成分支只凭机器 L3 的
@@ -201,6 +201,11 @@ async function runFeature(
   const escalation = await deps.store.update((r) =>
     r.openEscalation({ featureId: feature.id, missionId, failure: landing.failure, question }, deps.now()),
   );
+  // 到上限：规则已挂起并停下。再 wait / settle 会空等或把失败 Mission 放弃掉。
+  if (!escalation) {
+    deps.log(`${feature.id} ✗ 升级单到上限：${landing.failure}`);
+    return;
+  }
   deps.log(`${feature.id} ⚑ 升级单 ${escalation.id}（${escalation.deadline} 截止）：${landing.failure}`);
   await waitForResolution(escalation.id, deps);
   await settle(missionId, escalation.id, deps);
@@ -335,7 +340,7 @@ async function waitForResolution(escalationId: string, deps: PlanDriverDeps): Pr
 /** 照结论收尾失败的那条 Mission。 */
 async function settle(missionId: string, escalationId: string, deps: PlanDriverDeps): Promise<void> {
   const run = requireRun(deps);
-  // 方案停了（叫停 / 未解决到顶 / 墙钟）：原样留给人，第二天还能看一眼再合。
+  // 方案停了（叫停 / 未解决到顶 / 墙钟 / 升级单到上限）：原样留给人，第二天还能看一眼再合。
   if (run.stopped) return;
   const view = await deps.platform.getMissionView(missionId);
   if (view.status === 'completed' || view.status === 'blocked') return;

@@ -75,6 +75,7 @@ describe('交接面', () => {
     assert.match(head, /检视者叫停/);
     assert.match(head, /测试夹具整体坏了/);
     assert.match(head, /未解决 1\/5/);
+    assert.match(head, /升级单 3\/5/);
   });
 
   test('花销不全就说不全，不把未知当 0', () => {
@@ -156,5 +157,107 @@ describe('交接面', () => {
     const a4 = text.split('\n').find((l) => l.includes('A4')) ?? '';
     assert.doesNotMatch(a4, /⊘/, '源 skipped 不得伪装成检视者跳过');
     assert.deepEqual(PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot()))).sourceExclusions, run.sourceExclusions);
+  });
+
+  test('有过隔离重跑或正开着升级单的功能显示重跑 k/M', () => {
+    const run = PlanRun.start({
+      id: 'R-rerun',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: {
+        unresolvedEscalations: 5,
+        wallClockMs: 8 * 60 * MIN,
+        escalationTimeoutMs: 20 * MIN,
+        maxRerunsPerFeature: 2,
+      },
+      featureIds: ['F1', 'F2'],
+      startedAt: T0,
+    });
+    run.startFeature('F1', 'R-F1');
+    const e1 = run.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1', failure: '红', question: '怎么办？' },
+      at(10),
+    )!;
+    run.choose(e1.id, { action: 'rerun_isolated', reason: 'flake', decidedBy: 'claude' }, at(12));
+    run.startFeature('F1', 'R-F1-r2');
+    run.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1-r2', failure: '又红', question: '再选？' },
+      at(40),
+    );
+    const text = renderPlanHandoff(run, { now: at(45) }).join('\n');
+    assert.match(text, /升级单 2\/5/);
+    const f1 = text.split('\n').find((l) => /\sF1\s/.test(l)) ?? '';
+    assert.match(f1, /重跑 1\/2/);
+    const f2 = text.split('\n').find((l) => /\sF2\s/.test(l)) ?? '';
+    assert.doesNotMatch(f2, /重跑/);
+  });
+
+  test('重跑额度用完时 decide 模板不含 rerun_isolated', () => {
+    const run = PlanRun.start({
+      id: 'R-spent',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: {
+        unresolvedEscalations: 5,
+        wallClockMs: 8 * 60 * MIN,
+        escalationTimeoutMs: 20 * MIN,
+        maxRerunsPerFeature: 1,
+      },
+      featureIds: ['F1'],
+      startedAt: T0,
+    });
+    run.startFeature('F1', 'R-F1');
+    const e1 = run.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1', failure: '红', question: '怎么办？' },
+      at(10),
+    )!;
+    run.choose(e1.id, { action: 'rerun_isolated', reason: '再来', decidedBy: 'claude' }, at(12));
+    run.startFeature('F1', 'R-F1-r2');
+    run.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1-r2', failure: '又红', question: '再选？' },
+      at(40),
+    );
+    const text = renderPlanHandoff(run, { now: at(45) }).join('\n');
+    assert.match(text, /--action <skip\|rescope\|stop>/);
+    assert.doesNotMatch(text, /rerun_isolated/);
+  });
+
+  test('escalation_limit 停止时给出标签，不出 decide 命令', () => {
+    const run = PlanRun.start({
+      id: 'R-cap',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: {
+        unresolvedEscalations: 5,
+        wallClockMs: 8 * 60 * MIN,
+        escalationTimeoutMs: 20 * MIN,
+        maxEscalations: 1,
+      },
+      featureIds: ['F1', 'F2'],
+      startedAt: T0,
+    });
+    run.startFeature('F1', 'R-F1');
+    const e1 = run.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1', failure: '红', question: 'F1 怎么办？' },
+      at(10),
+    )!;
+    run.choose(e1.id, { action: 'skip', reason: '过', decidedBy: 'claude' }, at(12));
+    run.startFeature('F2', 'R-F2');
+    run.openEscalation(
+      { featureId: 'F2', missionId: 'R-F2', failure: '也红', question: 'F2 怎么办？' },
+      at(20),
+    );
+    const lines = renderPlanHandoff(run, { now: at(25) });
+    const text = lines.join('\n');
+    assert.match(text, /升级单到上限/);
+    assert.match(text, /也红/);
+    assert.match(text, /R-F2/);
+    assert.doesNotMatch(text, /plan decide/);
   });
 });

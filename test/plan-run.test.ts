@@ -8,7 +8,11 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PlanRun } from '../src/application/plan-run.ts';
+import {
+  DEFAULT_MAX_ESCALATIONS,
+  DEFAULT_MAX_RERUNS_PER_FEATURE,
+  PlanRun,
+} from '../src/application/plan-run.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 
 const T0 = '2026-09-23T14:00:00.000Z';
@@ -422,6 +426,8 @@ describe('开跑参数', () => {
       { unresolvedEscalations: 5, wallClockMs: -1, escalationTimeoutMs: 1 },
       { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1.5 },
       { unresolvedEscalations: 5, wallClockMs: 1 },
+      { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1, maxEscalations: 0 },
+      { unresolvedEscalations: 5, wallClockMs: 1, escalationTimeoutMs: 1, maxRerunsPerFeature: -1 },
     ]) {
       assert.throws(
         () => PlanRun.start({ ...base, stopConditions: stopConditions as never }),
@@ -531,3 +537,194 @@ describe('功能标题', () => {
     assert.throws(() => PlanRun.restore(bad), rule('PLAN_RUN_CORRUPT'));
   });
 });
+
+function gatedRun(extra?: {
+  maxEscalations?: number;
+  maxRerunsPerFeature?: number;
+  featureIds?: string[];
+}) {
+  return PlanRun.start({
+    id: 'R1',
+    planId: 'PLAN-x',
+    projectId: 'p',
+    integrationBranch: 'auto/x',
+    reviewer: 'claude',
+    stopConditions: {
+      unresolvedEscalations: 9,
+      wallClockMs: 8 * 60 * MIN,
+      escalationTimeoutMs: 20 * MIN,
+      ...(extra?.maxEscalations !== undefined ? { maxEscalations: extra.maxEscalations } : {}),
+      ...(extra?.maxRerunsPerFeature !== undefined ? { maxRerunsPerFeature: extra.maxRerunsPerFeature } : {}),
+    },
+    featureIds: extra?.featureIds ?? ['F1', 'F2', 'F3'],
+    startedAt: T0,
+  });
+}
+
+function failOpen(
+  run: PlanRun,
+  featureId: string,
+  missionId: string,
+  minutes: number,
+  failure = `${featureId} 红了`,
+) {
+  run.startFeature(featureId, missionId);
+  return run.openEscalation(
+    {
+      featureId,
+      missionId,
+      failure,
+      question: `${featureId} 选隔离重跑、跳过、重划还是停？`,
+    },
+    at(minutes),
+  );
+}
+
+describe('升级单总数上限',
+  () => {
+    test('maxEscalations = 2：第 1、2 张照常开；已决定、已过期、开着都计入已开张数',
+      () => {
+        const run = gatedRun({ maxEscalations: 2 });
+        const e1 = failOpen(run, 'F1', 'M-F1', 10);
+        assert.ok(e1);
+        assert.equal(run.escalationsOpened, 1, '开着的也算');
+        run.choose(e1.id, { action: 'skip', reason: '今晚不跑', decidedBy: 'claude' }, at(12));
+        assert.equal(run.escalationsOpened, 1, '已决定的仍算');
+
+        const e2 = failOpen(run, 'F2', 'M-F2', 20);
+        assert.ok(e2);
+        assert.equal(run.escalationsOpened, 2);
+        run.expire(e2.id, at(40));
+        assert.equal(run.escalationsOpened, 2, '已过期的仍算');
+        assert.equal(run.stopped, undefined, '未解决阈值是 9，过期一张不停');
+
+        const third = failOpen(run, 'F3', 'M-F3', 50, '第三次失败');
+        assert.equal(third, undefined, '第 3 次失败不开单');
+        assert.equal(run.escalations.length, 2);
+        const f3 = run.feature('F3');
+        assert.equal(f3?.status, 'suspended');
+        assert.match(f3?.needsDecision ?? '', /第三次失败/);
+        assert.match(f3?.needsDecision ?? '', /M-F3/);
+        assert.match(f3?.needsDecision ?? '', /要你定/);
+        assert.equal(run.stopped?.reason, 'escalation_limit');
+        assert.match(run.stopped?.detail ?? '', /已开 2/);
+        assert.match(run.stopped?.detail ?? '', /F3/);
+      });
+
+    test('到上限停下之后任何动作都被拒；失败的功能保持挂起',
+      () => {
+        const run = gatedRun({ maxEscalations: 1, featureIds: ['F1', 'F2'] });
+        assert.ok(failOpen(run, 'F1', 'M-F1', 10));
+        run.choose('E-1', { action: 'skip', reason: '先过', decidedBy: 'claude' }, at(12));
+        assert.equal(failOpen(run, 'F2', 'M-F2', 20), undefined);
+        assert.throws(() => run.startFeature('F2', 'M-F2-x'), rule('PLAN_RUN_STOPPED'));
+        assert.throws(
+          () => run.openEscalation({ featureId: 'F2', failure: 'x', question: 'y' }, at(21)),
+          rule('PLAN_RUN_STOPPED'),
+        );
+        assert.equal(run.feature('F2')?.status, 'suspended');
+      });
+  });
+
+describe('每功能重跑上限',
+  () => {
+    test('上限 1：第一次 rerun 接受；再选被拒且记录不变；同单可改 skip；另一功能不受影响',
+      () => {
+        const run = gatedRun({ maxRerunsPerFeature: 1 });
+        const e1 = failOpen(run, 'F1', 'M-F1', 10);
+        assert.ok(e1);
+        run.choose(e1.id, { action: 'rerun_isolated', reason: '像 flake', decidedBy: 'claude' }, at(12));
+        assert.equal(run.rerunsUsed('F1'), 1);
+
+        const e2 = failOpen(run, 'F1', 'M-F1-r2', 20);
+        assert.ok(e2);
+        const before = JSON.stringify(run.toSnapshot());
+        assert.throws(
+          () => run.choose(e2.id, { action: 'rerun_isolated', reason: '再试', decidedBy: 'claude' }, at(22)),
+          (error: unknown) => {
+            rule('RERUN_LIMIT_REACHED')(error);
+            assert.match((error as Error).message, /F1/);
+            assert.match((error as Error).message, /1/);
+            return true;
+          },
+        );
+        assert.equal(JSON.stringify(run.toSnapshot()), before);
+        assert.equal(run.feature('F1')?.status, 'running');
+        assert.equal(run.currentEscalation?.id, e2.id);
+
+        run.choose(e2.id, { action: 'skip', reason: '改选跳过', decidedBy: 'claude' }, at(23));
+        assert.equal(run.feature('F1')?.status, 'skipped');
+
+        const e3 = failOpen(run, 'F2', 'M-F2', 30);
+        assert.ok(e3);
+        run.choose(e3.id, { action: 'rerun_isolated', reason: 'F2 第一次重跑', decidedBy: 'claude' }, at(32));
+        assert.equal(run.feature('F2')?.status, 'pending');
+        assert.equal(run.rerunsUsed('F2'), 1);
+      });
+  });
+
+describe('两道闸的快照兼容',
+  () => {
+    test('缺新字段的旧快照按缺省恢复；toSnapshot 写出生效值',
+      () => {
+        const snap = startRun().toSnapshot() as unknown as Record<string, unknown>;
+        const stop = { ...(snap.stopConditions as Record<string, unknown>) };
+        delete stop.maxEscalations;
+        delete stop.maxRerunsPerFeature;
+        snap.stopConditions = stop;
+        const restored = PlanRun.restore(snap);
+        assert.equal(restored.stopConditions.maxEscalations, DEFAULT_MAX_ESCALATIONS);
+        assert.equal(restored.stopConditions.maxRerunsPerFeature, DEFAULT_MAX_RERUNS_PER_FEATURE);
+        assert.equal(restored.toSnapshot().stopConditions.maxEscalations, DEFAULT_MAX_ESCALATIONS);
+        assert.equal(startRun().toSnapshot().stopConditions.maxRerunsPerFeature, DEFAULT_MAX_RERUNS_PER_FEATURE);
+      });
+
+    test('超额的旧快照照常恢复，不重审已发生的决定；之后新动作受生效上限约束', () => {
+      const run = gatedRun({ maxEscalations: 20, maxRerunsPerFeature: 10, featureIds: ['F1', 'F2'] });
+      for (let i = 0; i < 7; i += 1) {
+        const opened = failOpen(run, 'F1', `M-F1-${i}`, 10 + i * 30, `红${i}`);
+        assert.ok(opened);
+        run.choose(
+          opened.id,
+          { action: 'rerun_isolated', reason: `第${i}次重跑`, decidedBy: 'claude' },
+          at(11 + i * 30),
+        );
+      }
+      assert.equal(run.escalationsOpened, 7);
+      assert.equal(run.rerunsUsed('F1'), 7);
+      const snap = run.toSnapshot() as unknown as Record<string, unknown>;
+      const stop = { ...(snap.stopConditions as Record<string, unknown>) };
+      delete stop.maxEscalations;
+      delete stop.maxRerunsPerFeature;
+      snap.stopConditions = stop;
+      const restored = PlanRun.restore(JSON.parse(JSON.stringify(snap)));
+      assert.equal(restored.escalationsOpened, 7);
+      assert.equal(restored.rerunsUsed('F1'), 7);
+      assert.equal(restored.stopConditions.maxEscalations, DEFAULT_MAX_ESCALATIONS);
+      assert.equal(restored.escalations[0].resolution?.kind, 'decided');
+      assert.equal(restored.stopped, undefined);
+
+      const next = failOpen(restored, 'F2', 'M-F2', 400, 'F2 也红');
+      assert.equal(next, undefined);
+      assert.equal(restored.escalations.length, 7, '不再开第 8 张');
+      assert.equal(restored.stopped?.reason, 'escalation_limit');
+    });
+
+    test('非法的新字段 → PLAN_RUN_CORRUPT；escalation_limit 能往返', () => {
+      const good = startRun().toSnapshot() as unknown as Record<string, unknown>;
+      for (const value of [0, -1, 1.5, '3', null]) {
+        const copy = JSON.parse(JSON.stringify(good));
+        copy.stopConditions.maxEscalations = value;
+        assert.throws(() => PlanRun.restore(copy), rule('PLAN_RUN_CORRUPT'), String(value));
+      }
+
+      const hit = gatedRun({ maxEscalations: 1, featureIds: ['F1', 'F2'] });
+      assert.ok(failOpen(hit, 'F1', 'M-F1', 10));
+      hit.choose('E-1', { action: 'skip', reason: '过', decidedBy: 'claude' }, at(12));
+      assert.equal(failOpen(hit, 'F2', 'M-F2', 20), undefined);
+      assert.equal(hit.stopped?.reason, 'escalation_limit');
+      const restored = PlanRun.restore(JSON.parse(JSON.stringify(hit.toSnapshot())));
+      assert.deepEqual(restored.toSnapshot(), hit.toSnapshot());
+      assert.equal(restored.stopped?.reason, 'escalation_limit');
+    });
+  });

@@ -221,6 +221,55 @@ describe('记录本身', () => {
     assert.equal(readFileSync(path, 'utf8'), before);
   });
 
+  test('超额 rerun 的 update 抛错，文件字节不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
+    dirs.push(dir);
+    const path = join(dir, 'R1.json');
+    const store = new FilePlanRunStore(path);
+    await store.create(
+      PlanRun.start({
+        id: 'R1',
+        planId: 'PLAN-x',
+        projectId: 'p',
+        integrationBranch: 'auto/x',
+        reviewer: 'claude',
+        stopConditions: {
+          unresolvedEscalations: 5,
+          wallClockMs: 8 * 60 * MIN,
+          escalationTimeoutMs: 20 * MIN,
+          maxRerunsPerFeature: 1,
+        },
+        featureIds: ['F1'],
+        startedAt: T0,
+      }),
+    );
+    await store.update((run) => {
+      run.startFeature('F1', 'M-F1');
+      run.openEscalation(
+        { featureId: 'F1', missionId: 'M-F1', failure: '红', question: '重跑吗？' },
+        at(10),
+      );
+    });
+    await store.update((run) =>
+      run.choose('E-1', { action: 'rerun_isolated', reason: '再来', decidedBy: 'claude' }, at(12)),
+    );
+    await store.update((run) => {
+      run.startFeature('F1', 'M-F1-r2');
+      run.openEscalation(
+        { featureId: 'F1', missionId: 'M-F1-r2', failure: '又红', question: '还重跑吗？' },
+        at(40),
+      );
+    });
+    const before = readFileSync(path, 'utf8');
+    await assert.rejects(
+      store.update((run) =>
+        run.choose('E-2', { action: 'rerun_isolated', reason: '还来', decidedBy: 'claude' }, at(42)),
+      ),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'RERUN_LIMIT_REACHED',
+    );
+    assert.equal(readFileSync(path, 'utf8'), before);
+  });
+
   test('记录目录还不存在时也建得出来：run-plan 第一次跑就是这样', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
     dirs.push(dir);

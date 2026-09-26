@@ -70,6 +70,8 @@ function harness(options?: {
   repoProblems?: Record<string, string[]>;
   unresolvedEscalations?: number;
   wallClockMs?: number;
+  maxEscalations?: number;
+  maxRerunsPerFeature?: number;
 }) {
   const ids = options?.features ?? ['F1', 'F2'];
   const plan = parsePlanSpec(
@@ -82,6 +84,8 @@ function harness(options?: {
         unresolvedEscalations: options?.unresolvedEscalations ?? 5,
         wallClockMs: options?.wallClockMs ?? 8 * 60 * MIN,
         escalationTimeoutMs: 20 * MIN,
+        ...(options?.maxEscalations !== undefined ? { maxEscalations: options.maxEscalations } : {}),
+        ...(options?.maxRerunsPerFeature !== undefined ? { maxRerunsPerFeature: options.maxRerunsPerFeature } : {}),
       },
       integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 60_000 }],
       features: ids.map((id) => ({
@@ -599,3 +603,80 @@ describe('资格筛选先于分类和建 Mission', () => {
     assert.equal(h.store.read()!.sourceExclusions?.length, selection.exclusions.length);
   });
 });
+
+describe('两道夜跑闸',
+  () => {
+    test('maxEscalations = 1：第二个失败不开单、不等待、不放弃；后面的功能不开跑',
+      async () => {
+        const h = harness({
+          maxEscalations: 1,
+          features: ['F1', 'F2', 'F3'],
+          finalize: { 'R1-F1': RED, 'R1-F2': RED },
+        });
+        const origSleep = h.deps.sleep;
+        let f2Ran = false;
+        let sleptAfterF2 = false;
+        const origRun = h.deps.runMission;
+        h.deps.runMission = async (missionId, ctx) => {
+          if (missionId.includes('F2')) f2Ran = true;
+          return origRun(missionId, ctx);
+        };
+        h.deps.sleep = async (ms) => {
+          if (f2Ran) sleptAfterF2 = true;
+          return origSleep(ms);
+        };
+        await h.start();
+        const stop = await drivePlan(h.plan, h.deps);
+        assert.equal(stop.reason, 'escalation_limit');
+        const run = h.store.read()!;
+        assert.equal(run.escalations.length, 1);
+        assert.equal(run.feature('F2')?.status, 'suspended');
+        assert.match(run.feature('F2')?.needsDecision ?? '', /R1-F2/);
+        assert.equal(run.feature('F3')?.status, 'pending');
+        assert.ok(!h.calls.includes('abandon R1-F2 E-2'));
+        assert.ok(!h.calls.some((c) => c.includes('R1-F3')));
+        assert.equal(sleptAfterF2, false, '第二个失败后不等待决定');
+        assert.equal(h.status.get('R1-F2'), 'awaiting_review', '失败 Mission 原样保留');
+      });
+
+    test('重跑额度用完后驱动方不替检视者改选',
+      async () => {
+        let rejected = 0;
+        const h = harness({
+          maxRerunsPerFeature: 1,
+          features: ['F1'],
+          finalize: { 'R1-F1': RED, 'R1-F1-r2': RED },
+          onSleep: async ({ now, store }) => {
+            const open = store.read()?.currentEscalation;
+            if (!open) return;
+            if (Date.parse(now) - Date.parse(open.openedAt) < 5 * MIN) return;
+            // 真检视者到了截止就不再写决定：最后一次睡醒恰好落在截止时刻，那时再选只会撞上截止。
+            if (Date.parse(now) >= Date.parse(open.deadline)) return;
+            try {
+              await store.update((run) =>
+                run.choose(
+                  open.id,
+                  { action: 'rerun_isolated', reason: '再试一次', decidedBy: 'claude' },
+                  now,
+                ),
+              );
+            } catch (error) {
+              if (error instanceof PlatformRuleError && error.code === 'RERUN_LIMIT_REACHED') {
+                rejected += 1;
+                return;
+              }
+              throw error;
+            }
+          },
+        });
+        await h.start();
+        const stop = await drivePlan(h.plan, h.deps);
+        assert.equal(stop.reason, 'finished');
+        assert.ok(rejected > 0, '第二张单上确实选过 rerun 并被额度拒绝');
+        const run = h.store.read()!;
+        assert.equal(run.rerunsUsed('F1'), 1);
+        assert.equal(run.escalations.length, 2);
+        assert.equal(run.escalations[1].resolution?.kind, 'expired', '额度用尽后驱动方不改选，等到过期');
+        assert.equal(run.feature('F1')?.status, 'suspended');
+      });
+  });

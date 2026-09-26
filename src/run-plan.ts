@@ -121,6 +121,23 @@ function usage(): string {
   );
 }
 
+function gateValue(raw: unknown, key: string, value: number): string {
+  const present =
+    raw !== null && typeof raw === 'object' && !Array.isArray(raw) && key in (raw as object);
+  return present ? String(value) : `${value}（缺省）`;
+}
+
+/** --check 只读展示生效上限，对照原始 JSON 标出是否取缺省。 */
+function printStopGates(rawStop: unknown, effective: PlanSpec['stopConditions']): void {
+  console.log(
+    `停止条件：未解决升级上限 ${effective.unresolvedEscalations}；墙钟 ${effective.wallClockMs}ms；升级单等待 ${effective.escalationTimeoutMs}ms`,
+  );
+  console.log(
+    `两道闸：升级单总数上限 ${gateValue(rawStop, 'maxEscalations', effective.maxEscalations)}；` +
+      `每功能重跑上限 ${gateValue(rawStop, 'maxRerunsPerFeature', effective.maxRerunsPerFeature)}`,
+  );
+}
+
 function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): void {
   console.log(`方案 ${plan.planId} 入选 ${selection.candidates.length} 项，未纳入 ${selection.exclusions.length} 项。`);
   console.log('入选：');
@@ -156,10 +173,12 @@ async function checkPlanOnly(planFile: string): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  const plan = parsePlanSpec(JSON.parse(readFileSync(resolve(planFile), 'utf8')), { reviewer });
+  const raw = JSON.parse(readFileSync(resolve(planFile), 'utf8')) as Record<string, unknown>;
+  const plan = parsePlanSpec(raw, { reviewer });
   const projectRoot = resolve(cwd);
   const selection = selectPlanCandidates(plan, { projectRoot });
   console.log(`方案 ${plan.planId} 只读检查（--check，不开跑）`);
+  printStopGates(raw.stopConditions, plan.stopConditions);
   printEligibility(plan, selection);
   if (selection.candidates.length === 0) {
     console.log('没有可跑的候选。');
