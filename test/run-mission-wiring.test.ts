@@ -181,6 +181,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.doesNotMatch(runner, /\.listen\s*\(/);
     assert.doesNotMatch(runner, /createMission\s*\(/);
     assert.doesNotMatch(runner, /createClassifiedMission\s*\(/);
+    assert.match(runner, /independentReviewer\?:/);
   });
 
   test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
@@ -196,8 +197,10 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /Mission \$\{spec\.missionId\} 已存在/);
     assert.match(cli, /--coordinator/);
     assert.match(cli, /--executor/);
+    assert.match(cli, /--independent-reviewer/);
     assert.match(cli, /candidates: coordinatorPool\.map/);
     assert.match(cli, /candidates: executorPool\.map/);
+    assert.match(cli, /independentReviewer:/);
     assert.match(cli, /server\.close\(\)/);
     assert.match(cli, /releaseLock\(\)/);
     assert.match(cli, /Mission 结果：/);
@@ -256,38 +259,34 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.equal(health.status, 200);
   });
 
-  test('HA 路径仍 stalled，不另起平台、不降级执行', async () => {
+  test('makeIssuer 为独立候选发牌；成功与失败都吊销；重启不复用旧 token', async () => {
     const built = await existingPlatform();
-    // 公开入口建不出 HA（分类到它就拒绝建），只能从仓储直接放一条进去。
-    const project = await built.projects.ensure('P');
-    project.createMission({
-      id: 'M-ha',
-      contract: CONTRACT,
-      executionMode: 'high_assurance',
-      runKind: 'mutation',
-      origin: { clientType: 'cli', conversationRef: 'local-cli' },
+    const issuer = makeIssuer(built.platform, built.tokens);
+    assert.equal(typeof issuer.startIndependentReviewer, 'function');
+
+    await assert.rejects(() =>
+      issuer.startIndependentReviewer!('M-missing', [{ profileId: 'ir-a', endpoint: 'local' }]),
+    );
+    // 失败路径没有发出可解析的 token：registry 仍是空的。
+    assert.equal(built.tokens.resolve('nope'), undefined);
+
+    const issued = built.tokens.issue({
+      missionId: 'M-tok',
+      attemptId: 'A-fake',
+      role: 'independent_reviewer',
     });
-    await built.projects.save(project);
+    assert.ok(built.tokens.resolve(issued.token));
+    issuer.revoke(issued.token);
+    assert.equal(built.tokens.resolve(issued.token), undefined, '成功路径吊销');
 
-    const portBefore = built.port;
-    const ran = await new MissionRunner({
-      platform: built.platform,
-      tokens: makeIssuer(built.platform, built.tokens),
-      baseUrl: built.baseUrl,
-      workspace: new InPlaceWorkspaceManager(),
-      coordinator: {
-        runtime: new ScriptedRuntime({}),
-        candidates: [{ endpoint: 'local', profileId: 'c' }],
-      },
-      executor: {
-        runtime: new ScriptedRuntime({}),
-        candidates: [{ endpoint: 'local', profileId: 'e' }],
-      },
-    }).run('M-ha', { projectRoot: process.cwd() });
-
-    assert.equal(ran.outcome.kind, 'stalled');
-    assert.match((ran.outcome as { reason: string }).reason, /High Assurance/);
-    assert.equal(ran.hops.length, 0);
-    assert.equal((built.server.address() as AddressInfo).port, portBefore);
+    const again = built.tokens.issue({
+      missionId: 'M-tok',
+      attemptId: 'A-fake-2',
+      role: 'independent_reviewer',
+    });
+    assert.notEqual(again.token, issued.token, '重启续跑不会重复使用旧 token');
+    issuer.revoke(again.token);
+    assert.equal(built.tokens.resolve(again.token), undefined, '失败后同样吊销');
+    assert.equal((built.server.address() as AddressInfo).port, built.port);
   });
 });

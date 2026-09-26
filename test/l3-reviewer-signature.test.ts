@@ -289,10 +289,14 @@ describe('l3 终审：校验在构建平台之前', () => {
 });
 
 describe('l3 终审：HA Mission', () => {
-  test('带两个身份的检视者 merge 可完成终审', async () => {
+  // E3a 起 HA 的放行只走受控终审（E3b：外置常设授权 + 当前有效的独立检视 pass + 合并后验证）。
+  // 在那之前，带两个身份的旧 reviewer merge 也不能合 HA——两个 CLI 字符串证明不了授权。
+  test('带两个身份的检视者 merge 对 HA 也被拒，状态与 HEAD 不变', async () => {
     const { repo, statePath, missionId } = await fixtureAwaitingReview('M-HA', {
       executionMode: 'high_assurance',
     });
+    const beforeState = readFileSync(statePath);
+    const beforeHead = git(repo, 'rev-parse', 'HEAD');
     const { status, out } = l3(
       statePath,
       'merge',
@@ -304,12 +308,14 @@ describe('l3 终审：HA Mission', () => {
       '--repo',
       repo,
     );
-    assert.equal(status, 0, out);
+    assert.notEqual(status, 0, out);
+    assert.match(out, /high_assurance/);
+    assert.equal(readFileSync(statePath).equals(beforeState), true);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), beforeHead);
     const revived = await buildPersistentPlatform(statePath, { reconcile: false });
     const view = await revived.platform.getMissionView(missionId);
-    assert.equal(view.status, 'completed');
-    assert.equal(view.finalReview?.authority?.kind, 'reviewer');
-    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
   });
 
   test('不带确认人被拒且不改变状态', async () => {
@@ -376,5 +382,33 @@ describe('l3 show：四类权威与未记录', () => {
     const legacy = l3(statePath, 'show', missionId);
     assert.match(legacy.out, /权威：未记录/);
     assert.doesNotMatch(legacy.out, /权威：人/);
+  });
+});
+
+describe('l3 show：HA 子态与阻塞原因', () => {
+  test('show 看得到待派发、waitDetail、独立检视阻塞原因与细节', async () => {
+    const { statePath, missionId } = await fixtureAwaitingReview('M-HA-show', {
+      executionMode: 'high_assurance',
+    });
+    const pending = l3(statePath, 'show', missionId);
+    assert.equal(pending.status, 0, pending.out);
+    assert.match(pending.out, /待派发/);
+
+    const revived = await buildPersistentPlatform(statePath, { reconcile: false });
+    await assert.rejects(() => revived.platform.startIndependentReviewerAttempt(missionId, []));
+    await revived.platform.setWaitReason(
+      missionId,
+      'waiting_l3',
+      'HA 独立检视故障：没有独立检视候选',
+    );
+    revived.persist();
+
+    const fault = l3(statePath, 'show', missionId);
+    assert.equal(fault.status, 0, fault.out);
+    assert.match(fault.out, /故障/);
+    assert.match(fault.out, /HA 独立检视故障：没有独立检视候选/);
+    // 夹具的历史 Attempt 没记 profileId：独立性先卡在「无法证明」，阻塞原因是它而不是缺候选。
+    assert.match(fault.out, /history_missing_profile/);
+    assert.match(fault.out, /缺 profileId/);
   });
 });

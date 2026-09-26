@@ -20,8 +20,10 @@ Mission 级追加记录，**不是** WorkItem `ReviewRecord`，也**不是** `Fi
 - 角色字面量是 `independent_reviewer`，不复用终审签名人 `reviewer`。
 - 结论 `pass` / `send_back` 绑定：missionId、reviewerAttemptId、reviewerProfileId、契约 revision、被审 HEAD、L2 逐条结果引用、ValidationReport 引用、理由、平台时间。
 - `send_back` 不改任何 L2 逐条结果，也不流转 planning / finalize / merge。
-- `pass` 不是用户确认，也不签 `FinalReview`。契约 revision、被审 HEAD 或被引用证据任一变化后，读取方不得把旧 pass 当成当前有效结论。
+- `pass` 不是用户确认，也不签 `FinalReview`。契约 revision、被审 HEAD、被引用 L2 或 ValidationReport 任一变化后，读取方不得把旧 pass 当成当前有效结论。
+- 同一组证据下若最新结论是 `send_back`，不得回退到更早的 `pass`。
 - 缺 ValidationReport、引用不属本 Mission、非 awaiting_review、交卷非 delivered：不得 pass。
+- **HA 确定性验证（E3a）**：合规 HA 在协调者逐条 L2 之后、独立检视之前，由平台在 Mission 工作区**当前 HEAD** 上，用各活跃（非 retired）工作项冻结工单的 `validation` 命令跑 `ValidationEngine`，落盘可追溯报告，覆盖全部活跃工作项。不得用协调者 accept 或执行者自报代替。验证失败、缺失或证据已变，都不能产生有效 pass。有效 pass 只表示待授权，Mission 仍停在 `awaiting_review`，不记 `FinalReview`，本项不开放 HA 合并。
 
 ## ValidationReport
 

@@ -83,6 +83,8 @@ export interface OrchestratorDeps {
   owner?: string;
   coordinator: RolePool;
   executor: RolePool;
+  /** 独立检视专用池；缺了就停在故障，不得改用协调者候选。 */
+  independentReviewer?: RolePool;
   workspace: WorkspaceManager;
   /** 单跳墙钟上限。缺省 ATTEMPT_WALL_CLOCK_MS；测试用它把 30 分钟缩成几毫秒。 */
   attemptWallClockMs?: number;
@@ -255,7 +257,7 @@ function usableUsage(
 
 /** 一跳的记录，给 Timeline 和排障用。 */
 export interface HopRecord {
-  role: 'coordinator' | 'executor';
+  role: 'coordinator' | 'executor' | 'independent_reviewer';
   workItemId?: string;
   attemptId: string;
   profile: ExecutionProfile;
@@ -272,6 +274,7 @@ export class Orchestrator {
   #owner: string;
   #coordinator: RolePool;
   #executor: RolePool;
+  #independentReviewer: RolePool | undefined;
   #workspace: WorkspaceManager;
   #wallClockMs: number;
   readonly hops: HopRecord[] = [];
@@ -300,6 +303,7 @@ export class Orchestrator {
     this.#owner = deps.owner ?? `pid-${process.pid}`;
     this.#coordinator = deps.coordinator;
     this.#executor = deps.executor;
+    this.#independentReviewer = deps.independentReviewer;
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
@@ -348,9 +352,15 @@ export class Orchestrator {
         return { kind: 'waiting', reason: 'cancelled_by_user', detail: 'Mission 已被暂停，resume 之后重跑' };
       }
 
-      // 协调者交卷了 —— 调度器这一程到此为止，剩下的归 L3。
-      // **不要把 awaiting_review 当成完成**：改动还没落地。
+      // 协调者交卷了 —— 改动还没落地。HA 在这里接确定性验证与独立检视，
+      // 仍停在 awaiting_review；不得当成 completed，也不得改用协调者自审。
       if (view.status === 'awaiting_review') {
+        if (
+          view.executionMode === 'high_assurance' &&
+          view.result?.outcome === 'delivered'
+        ) {
+          return await this.#runHaIndependentReview(missionId, cwd);
+        }
         return view.result?.outcome === 'delivered'
           ? { kind: 'awaiting_l3_review' }
           : { kind: 'blocked', reason: view.result?.summary ?? '协调者交了 blocked' };
@@ -411,17 +421,7 @@ export class Orchestrator {
         }
       }
 
-      // ---- High Assurance fail-closed (preflight; no round fact) ----
-      // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
-      // 不记 orchestration.round.started、不创建 Attempt、不 dispatch。
-      // HA 也不进入 budget 路径（保持 fail-closed 现状）。
-      if (view.executionMode === 'high_assurance') {
-        // E2 的独立检视是显式入口，不从 runMission 自动调用。
-        return {
-          kind: 'stalled',
-          reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',
-        };
-      }
+      // HA 走 Standard 式 Contract→协调者→执行者→L2；独立检视在 awaiting_review 分支。
 
       // ---- Authoritative budget GATE-PRE (BUDGET-001-S5) ----
       // After HA, before orchestration.round.started / any hop.
@@ -554,6 +554,154 @@ export class Orchestrator {
     }
 
     return { kind: 'stalled', reason: `到达轮次上限 ${maxRounds}` };
+  }
+
+  /**
+   * HA：确定性验证 → 独立检视。始终停在 awaiting_review。
+   * 缺候选 / 历史 profile 不全 / 冲突 / 适配器失败记可见原因，不改用协调者。
+   */
+  async #runHaIndependentReview(missionId: string, cwd: string): Promise<MissionRunOutcome> {
+    const pass = await this.#platform.effectiveIndependentReviewPass(missionId);
+    if (pass) {
+      await this.#platform.setWaitReason(
+        missionId,
+        'waiting_l3',
+        'HA 独立检视已通过，待授权放行',
+      );
+      return { kind: 'awaiting_l3_review' };
+    }
+
+    let validation;
+    try {
+      validation = await this.#platform.runHaDeterministicValidation(missionId, cwd);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : `HA 确定性验证失败：${error instanceof Error ? error.message : String(error)}`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 确定性验证：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+    if (!validation.passed) {
+      const view = await this.#platform.getMissionView(missionId);
+      const detail = view.waitDetail ?? `HA 确定性验证未通过（报告 ${validation.reportId}）`;
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    const pool = this.#independentReviewer;
+    const candidates = pool?.candidates ?? [];
+    const startReviewer = this.#tokens.startIndependentReviewer;
+    if (!startReviewer || !pool) {
+      try {
+        await this.#platform.startIndependentReviewerAttempt(missionId, candidates);
+      } catch (error) {
+        const detail =
+          error instanceof PlatformRuleError
+            ? error.message
+            : 'HA 独立检视故障：没有独立检视发牌口或候选池。';
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+        return { kind: 'waiting', reason: 'waiting_l3', detail };
+      }
+      const detail = 'HA 独立检视故障：没有独立检视发牌口或候选池。';
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    let started: { attemptId: string; token: string; profileId: string };
+    try {
+      started = await startReviewer(missionId, candidates);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : `HA 独立检视故障：${error instanceof Error ? error.message : String(error)}`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    const profile =
+      candidates.find((row) => row.profileId === started.profileId) ?? {
+        endpoint: 'local',
+        profileId: started.profileId,
+      };
+    await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视进行中');
+
+    const { attemptId, token } = started;
+    let outcome: { endedBy: AttemptEndReason; failureMessage?: string; usage?: TokenUsage } | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    try {
+      const run = await pool!.runtime.start({
+        role: 'independent_reviewer',
+        attemptId,
+        missionId,
+        cwd,
+        profile,
+        instruction:
+          '你是独立检视者，不是协调者或执行者。先 coagent_get_mission_review_bundle 读证据包，再 coagent_submit_independent_review 提交 pass 或 send_back。不得自述身份，不得终审合并。',
+        tools: [],
+        endpoint: { baseUrl: this.#baseUrl, token },
+      });
+      unsubscribe = run.on((event) => {
+        if (event.kind === 'output') {
+          void this.#live.append({
+            missionId,
+            attemptId,
+            kind: 'text',
+            text: redactSecrets(event.text),
+          });
+        }
+      });
+      heartbeat = setInterval(() => {
+        void this.#platform.beatAttempt(missionId, attemptId, this.#owner).catch(() => undefined);
+      }, HEARTBEAT_MS);
+      await this.#platform.beatAttempt(missionId, attemptId, this.#owner).catch(() => undefined);
+      outcome = await run.wait();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const unreachable = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EPIPE/i.test(
+        message,
+      );
+      outcome = {
+        endedBy: unreachable ? 'platform_unreachable' : 'upstream_failure',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, quality: 'unknown' },
+        failureMessage: message,
+      };
+    } finally {
+      clearInterval(heartbeat);
+      unsubscribe?.();
+      await this.#platform.finishAttempt(missionId, attemptId, {
+        endedBy: outcome?.endedBy ?? 'no_structured_result',
+        usage: outcome?.usage,
+        failureMessage: outcome?.failureMessage,
+      });
+      await this.#live.finish?.(missionId, attemptId).catch(() => undefined);
+      this.#tokens.revoke(token);
+    }
+
+    this.hops.push({
+      role: 'independent_reviewer',
+      attemptId,
+      profile,
+      endedBy: outcome.endedBy,
+      failureMessage: outcome.failureMessage,
+    });
+
+    if (outcome.endedBy === 'platform_unreachable' || outcome.endedBy === 'upstream_failure') {
+      const reason: WaitReason =
+        outcome.endedBy === 'platform_unreachable' ? 'platform_unreachable' : 'no_available_agent';
+      const detail = `HA 独立检视故障：${outcome.failureMessage ?? outcome.endedBy}`;
+      await this.#platform.setWaitReason(missionId, reason, detail);
+      return { kind: 'waiting', reason, detail };
+    }
+
+    const after = await this.#platform.effectiveIndependentReviewPass(missionId);
+    await this.#platform.setWaitReason(
+      missionId,
+      'waiting_l3',
+      after ? 'HA 独立检视已通过，待授权放行' : 'HA 独立检视已记录，仍待放行',
+    );
+    return { kind: 'awaiting_l3_review' };
   }
 
   /**
@@ -729,7 +877,11 @@ export class Orchestrator {
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
   candidateAvailability(): { profileId: string; availability: CandidateAvailability; until?: string }[] {
     const now = Date.now();
-    const all = [...this.#coordinator.candidates, ...this.#executor.candidates];
+    const all = [
+      ...this.#coordinator.candidates,
+      ...this.#executor.candidates,
+      ...(this.#independentReviewer?.candidates ?? []),
+    ];
     return all.map((profile) => {
       const until = this.#cooldown.get(profile.profileId) ?? 0;
       return until > now

@@ -14,7 +14,7 @@
 | classifier 推荐 | 行为 |
 | --- | --- |
 | `runKind=query` | `QUERY_ROUTE_REQUIRED`，不建 Mission；走 Query 路径 |
-| `executionMode=high_assurance` | `HIGH_ASSURANCE_NOT_AVAILABLE`，不建 Mission |
+| `executionMode=high_assurance` | 四种禁止副作用（`productionDeployRelease` / `externalPaidOp` / `unrecoverableExternalSideEffect` / `destructiveData`）须**显式为 false**。任一为 true，或为 `unknown` / 无法证明，建单前 `HA_SIDE_EFFECT_DENIED`，不建 Mission、不留空 Project。合规 HA 建 Standard 式工作链（零初始 WorkItem）；**禁止**带 Lightweight `workOrder`（`HIGH_ASSURANCE_WORK_ORDER_FORBIDDEN`）。这是流程保证，不是沙箱隔离。 |
 | `standard` | 建 Standard Mission；**禁止**带 `workOrder` |
 | `lightweight` | 原子 Mission + 恰好一个 Frozen WorkItem；**必须**显式 `workOrder` |
 

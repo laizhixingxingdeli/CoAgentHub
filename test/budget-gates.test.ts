@@ -773,8 +773,13 @@ describe('BUDGET-001-S5 gates', () => {
     assert.deepEqual(result, { kind: 'awaiting_l3_review' });
   });
 
-  test('HA still fail-closed without budget path / round facts', async () => {
+  // 旧不变式：HA 调度前 stalled、不进预算路径、不记 round。E3a 删了那段，HA 与 Standard 同走预算闸。
+  test('HA 与 Standard 走同一预算路径：maxAttempts:0 同样 waiting，不晋升', async () => {
     const h = await harness();
+    const stdId = await seedStandard(h.projects, {
+      missionId: 'M-std-b0',
+      budget: sampleBudget({ maxAttempts: 0 }),
+    });
     const project = await h.projects.ensure('P');
     project.createMission({
       id: 'M-ha-b',
@@ -785,14 +790,37 @@ describe('BUDGET-001-S5 gates', () => {
       executionBudget: sampleBudget({ maxAttempts: 0 }),
     });
     await h.projects.save(project);
-    const orch = h.makeOrchestrator();
-    const result = await orch.runMission('M-ha-b', { projectRoot: process.cwd() });
-    assert.equal(result.kind, 'stalled');
-    assert.match((result as { reason: string }).reason, /High Assurance/);
-    const events = await h.activity.list('M-ha-b');
-    assert.equal(events.filter((e) => e.kind === 'orchestration.round.started').length, 0);
-    assert.equal(thresholdEvents(events).length, 0);
-    assert.equal(promotedEvents(events).length, 0);
+
+    const stdOrch = h.makeOrchestrator();
+    const stdResult = await stdOrch.runMission(stdId, { projectRoot: process.cwd() });
+    const haOrch = h.makeOrchestrator();
+    const haResult = await haOrch.runMission('M-ha-b', { projectRoot: process.cwd() });
+
+    assert.equal(stdResult.kind, 'waiting');
+    assert.equal((stdResult as { reason: string }).reason, 'execution_budget_exceeded');
+    assert.equal(haResult.kind, stdResult.kind);
+    assert.equal(
+      (haResult as { reason: string }).reason,
+      (stdResult as { reason: string }).reason,
+    );
+    assert.equal(stdOrch.hops.length, 0);
+    assert.equal(haOrch.hops.length, 0);
+
+    const stdEvents = await h.activity.list(stdId);
+    const haEvents = await h.activity.list('M-ha-b');
+    assert.equal(
+      haEvents.filter((e) => e.kind === 'orchestration.round.started').length,
+      stdEvents.filter((e) => e.kind === 'orchestration.round.started').length,
+    );
+    assert.equal(thresholdEvents(haEvents).length, thresholdEvents(stdEvents).length);
+    assert.equal(promotedEvents(haEvents).length, promotedEvents(stdEvents).length);
+    assert.equal(promotedEvents(haEvents).length, 0);
+
+    const stdView = await h.platform.getMissionView(stdId);
+    const haView = await h.platform.getMissionView('M-ha-b');
+    assert.equal(haView.waitReason, stdView.waitReason);
+    assert.equal(stdView.executionMode, 'standard');
+    assert.equal(haView.executionMode, 'high_assurance');
   });
 });
 

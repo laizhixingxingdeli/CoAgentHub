@@ -504,7 +504,8 @@ describe('检视者终审签名', () => {
     assert.equal(view.finalReview?.authority?.kind, 'reviewer');
   });
 
-  test('HA：检视者 merge 可终审；机器 L3 仍 HIGH_ASSURANCE_NEEDS_HUMAN', async () => {
+  // 旧不变式：检视者 merge 可终审 HA。E3a 起合并入口全关，E3b 之前 reviewer 对 HA 抛 HIGH_ASSURANCE_MERGE_NOT_AVAILABLE。
+  test('HA：检视者 merge 被拒；机器 L3 仍 HIGH_ASSURANCE_NEEDS_HUMAN', async () => {
     const repo = tempRepo();
     const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(worktrees);
@@ -525,16 +526,24 @@ describe('检视者终审签名', () => {
     assert.equal((await platform.getMissionView('M-HA')).status, 'awaiting_review');
     assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
 
-    const result = await platform.finalizeMissionByReviewer('M-HA', {
-      verdict: 'merge',
-      reasons: ['用户确认过'],
-      projectRoot: repo,
-      reviewerId: 'claude',
-      confirmedBy: 'echo',
-    });
-    assert.equal(result.status, 'completed');
-    assert.equal((await platform.getMissionView('M-HA')).finalReview?.authority?.kind, 'reviewer');
-    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M-HA', {
+          verdict: 'merge',
+          reasons: ['用户确认过'],
+          projectRoot: repo,
+          reviewerId: 'claude',
+          confirmedBy: 'echo',
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError &&
+        error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+    const view = await platform.getMissionView('M-HA');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base');
   });
 });
 

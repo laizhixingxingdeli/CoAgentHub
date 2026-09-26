@@ -57,7 +57,7 @@ async function main() {
     console.log(
       '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]\n' +
         '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
-        '     [--coordinator <profileId,...>] [--executor <profileId,...>：这一跑只用这些候选]\n' +
+        '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>]\n' +
         '\n' +
         'mission.json：projectId / missionId / contract 必填。\n' +
         '可选 routing: { facts, assessment?, workOrder? } —— 走 classified intake\n' +
@@ -195,7 +195,10 @@ async function main() {
    * 只做过滤、不新增：名字必须在池子里，打错立刻报错并把可选项列出来。
    * 悄悄回退到全池会让人以为比的是 A 和 B，实际两次都是 B。
    */
-  function pick(role: 'coordinator' | 'executor', flag: string): AgentPoolCandidate[] {
+  function pick(
+    role: 'coordinator' | 'executor' | 'independent_reviewer',
+    flag: string,
+  ): AgentPoolCandidate[] {
     const wanted = arg(flag);
     const all = pool[role];
     if (!wanted) return [...all];
@@ -214,10 +217,12 @@ async function main() {
 
   const coordinatorPool = pick('coordinator', '--coordinator');
   const executorPool = pick('executor', '--executor');
-  if (arg('--coordinator') || arg('--executor')) {
+  const independentReviewerPool = pick('independent_reviewer', '--independent-reviewer');
+  if (arg('--coordinator') || arg('--executor') || arg('--independent-reviewer')) {
     console.log(
       `本次候选：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
-        `执行者 ${executorPool.map((c) => c.profileId).join('、')}\n`,
+        `执行者 ${executorPool.map((c) => c.profileId).join('、')} / ` +
+        `独立检视 ${independentReviewerPool.map((c) => c.profileId).join('、') || '（无）'}\n`,
     );
   }
 
@@ -240,6 +245,10 @@ async function main() {
       runtime,
       // 有序候选池：**只有上游失败**才往后换。顺序就是仓储里的 order。
       candidates: executorPool.map(toProfile),
+    },
+    independentReviewer: {
+      runtime,
+      candidates: independentReviewerPool.map(toProfile),
     },
   });
 
