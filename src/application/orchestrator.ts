@@ -592,16 +592,7 @@ export class Orchestrator {
     const candidates = pool?.candidates ?? [];
     const startReviewer = this.#tokens.startIndependentReviewer;
     if (!startReviewer || !pool) {
-      try {
-        await this.#platform.startIndependentReviewerAttempt(missionId, candidates);
-      } catch (error) {
-        const detail =
-          error instanceof PlatformRuleError
-            ? error.message
-            : 'HA 独立检视故障：没有独立检视发牌口或候选池。';
-        await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
-        return { kind: 'waiting', reason: 'waiting_l3', detail };
-      }
+      // 缺发牌口时先建 Attempt 会留下无 token 的 in_progress，下次开审被 concurrent_attempt 挡住。
       const detail = 'HA 独立检视故障：没有独立检视发牌口或候选池。';
       await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
       return { kind: 'waiting', reason: 'waiting_l3', detail };
@@ -670,13 +661,24 @@ export class Orchestrator {
     } finally {
       clearInterval(heartbeat);
       unsubscribe?.();
-      await this.#platform.finishAttempt(missionId, attemptId, {
-        endedBy: outcome?.endedBy ?? 'no_structured_result',
-        usage: outcome?.usage,
-        failureMessage: outcome?.failureMessage,
-      });
-      await this.#live.finish?.(missionId, attemptId).catch(() => undefined);
-      this.#tokens.revoke(token);
+      try {
+        try {
+          await this.#platform.finishAttempt(missionId, attemptId, {
+            endedBy: outcome?.endedBy ?? 'no_structured_result',
+            usage: outcome?.usage,
+            failureMessage: outcome?.failureMessage,
+          });
+        } catch {
+          // 收尾失败不能跳过吊销：迟到的工具调用必须被拒绝。
+        }
+        try {
+          await this.#live.finish?.(missionId, attemptId);
+        } catch {
+          // live.finish 失败同样不得跳过吊销。
+        }
+      } finally {
+        this.#tokens.revoke(token);
+      }
     }
 
     this.hops.push({

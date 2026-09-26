@@ -114,10 +114,13 @@ function seedDeliveredHa(
   },
 ) {
   const missionId = opts.missionId ?? 'M-ha';
+  // 这里测的是 E2 的检视机制（独立性、记录绑定、打回、HEAD 复核），用 L2 的 validator 报告作引用。
+  // E3a 起 HA 开审只认当前 HEAD 上的 HA 确定性报告、不回退 L2 报告，那条路径由
+  // test/independent-reviewer.test.ts 覆盖；这里改用 standard，机制照测，不和 HA 的新闸打架。
   const mission = project.createMission({
     id: missionId,
     contract: CONTRACT,
-    executionMode: 'high_assurance',
+    executionMode: 'standard',
   });
   mission.startExecuting();
   const coord = mission.startCoordinatorAttempt();

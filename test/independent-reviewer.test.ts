@@ -404,20 +404,18 @@ describe('E3a 独立检视主链与有效 pass', () => {
   test('缺报告不能记录有效 pass', async () => {
     const h = await harness();
     await seedReviewed(h);
-    const started = await h.platform.startIndependentReviewerAttempt('M-ha', [
-      { profileId: 'ir-a', endpoint: 'local' },
-    ]);
     await assert.rejects(
       () =>
-        h.platform.submitIndependentReview('M-ha', started.attemptId, {
-          verdict: 'pass',
-          reasons: ['没有报告也想过'],
-        }),
+        h.platform.startIndependentReviewerAttempt('M-ha', [
+          { profileId: 'ir-a', endpoint: 'local' },
+        ]),
       (err: unknown) =>
-        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_REPORT_MISSING',
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_HA_REPORT_MISSING',
     );
+    const view = await h.platform.getMissionView('M-ha');
+    assert.equal(view.independentReviewerAttemptIds.length, 0);
     assert.equal(await h.platform.effectiveIndependentReviewPass('M-ha'), undefined);
-    assert.equal((await h.platform.getMissionView('M-ha')).status, 'awaiting_review');
+    assert.equal(view.status, 'awaiting_review');
   });
 
   test('没有完整 L2 不能记录有效 pass', async () => {
@@ -623,5 +621,130 @@ describe('E3a 独立检视主链与有效 pass', () => {
     assert.equal(view.finalReview, undefined);
     assert.equal(view.haReviewHold, 'pending_release');
     assert.equal((await h.platform.effectiveIndependentReviewPass('M-ha'))?.verdict, 'pass');
+  });
+
+  test('没有 HA 确定性事件时不得用 L2 报告开审或认 pass', async () => {
+    const h = await harness();
+    await seedReviewed(h);
+    const extra = await h.validation.engine.validate({ missionId: 'M-ha' });
+    await h.validation.reports.save(extra.report);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-ha',
+      kind: 'validation.reported',
+      data: {
+        reportId: extra.report.id,
+        passed: true,
+        purpose: 'validator',
+      },
+    });
+    await assert.rejects(
+      () =>
+        h.platform.startIndependentReviewerAttempt('M-ha', [
+          { profileId: 'ir-a', endpoint: 'local' },
+        ]),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_HA_REPORT_MISSING',
+    );
+    assert.equal(
+      (await h.platform.getMissionView('M-ha')).independentReviewerAttemptIds.length,
+      0,
+    );
+    assert.equal(await h.platform.effectiveIndependentReviewPass('M-ha'), undefined);
+  });
+
+  test('确定性验证期间 HEAD 变化则拒绝，不产出有效 HA 报告', async () => {
+    const h = await harness();
+    await seedReviewed(h);
+    const original = h.validation.engine.validate.bind(h.validation.engine);
+    h.validation.engine.validate = async (input) => {
+      h.workspace.setHead('commit-during');
+      return original(input);
+    };
+    await assert.rejects(
+      () => h.platform.runHaDeterministicValidation('M-ha', h.root),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'HA_VALIDATION_HEAD_CHANGED',
+    );
+    const events = await h.activity.list('M-ha');
+    assert.equal(
+      events.filter(
+        (event) =>
+          event.kind === 'validation.reported' &&
+          (event.data as { purpose?: string } | undefined)?.purpose === 'ha_deterministic',
+      ).length,
+      0,
+    );
+    assert.equal(await h.platform.effectiveIndependentReviewPass('M-ha'), undefined);
+  });
+
+  test('复用 HA 报告时工作项覆盖或冻结命令不匹配则拒绝', async () => {
+    const h = await harness();
+    await seedReviewed(h);
+    await h.platform.runHaDeterministicValidation('M-ha', h.root);
+    const events = await h.activity.list('M-ha');
+    const ha = [...events].reverse().find(
+      (event) =>
+        event.kind === 'validation.reported' &&
+        (event.data as { purpose?: string } | undefined)?.purpose === 'ha_deterministic',
+    );
+    assert.ok(ha);
+    const data = ha!.data as {
+      reportId: string;
+      passed: boolean;
+      purpose: string;
+      reviewedCommit: string;
+      l2Fingerprint: string;
+      contractRevision: number;
+      workItemIds: string[];
+      commands: { argv: string[]; timeoutMs: number }[];
+    };
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-ha',
+      kind: 'validation.reported',
+      data: {
+        ...data,
+        workItemIds: ['W-not-active'],
+      },
+    });
+    await assert.rejects(
+      () => h.platform.runHaDeterministicValidation('M-ha', h.root),
+      (err: unknown) => err instanceof PlatformRuleError && err.code === 'HA_VALIDATION_STALE',
+    );
+
+    const h2 = await harness();
+    await seedReviewed(h2);
+    await h2.platform.runHaDeterministicValidation('M-ha', h2.root);
+    const events2 = await h2.activity.list('M-ha');
+    const ha2 = [...events2].reverse().find(
+      (event) =>
+        event.kind === 'validation.reported' &&
+        (event.data as { purpose?: string } | undefined)?.purpose === 'ha_deterministic',
+    );
+    assert.ok(ha2);
+    const data2 = ha2!.data as {
+      reportId: string;
+      passed: boolean;
+      purpose: string;
+      reviewedCommit: string;
+      l2Fingerprint: string;
+      contractRevision: number;
+      workItemIds: string[];
+      commands: { argv: string[]; timeoutMs: number }[];
+    };
+    await h2.activity.append({
+      projectId: 'P',
+      missionId: 'M-ha',
+      kind: 'validation.reported',
+      data: {
+        ...data2,
+        commands: [{ argv: ['echo', 'tampered'], timeoutMs: 1 }],
+      },
+    });
+    await assert.rejects(
+      () => h2.platform.runHaDeterministicValidation('M-ha', h2.root),
+      (err: unknown) => err instanceof PlatformRuleError && err.code === 'HA_VALIDATION_STALE',
+    );
   });
 });

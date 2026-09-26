@@ -830,7 +830,13 @@ export class Platform {
         l2.fingerprint,
         mission.contractRevision,
       );
-      if (fromHa?.passed) validationReportId = fromHa.id;
+      // 开审不得回退 L2 validator 报告：没有当前 HA 报告就 fail-closed，不建 Attempt。
+      if (!fromHa || !fromHa.passed) {
+        const detail =
+          '当前 HEAD、契约与 L2 没有通过的 HA 确定性验证报告，拒绝开检视。';
+        return { ok: false, code: 'INDEPENDENT_REVIEW_HA_REPORT_MISSING', detail };
+      }
+      validationReportId = fromHa.id;
     }
     const attempt = mission.startIndependentReviewerAttempt({
       contractRevision: mission.contractRevision,
@@ -965,19 +971,42 @@ export class Platform {
           'L2 逐条结果引用缺失或不属本 Mission，拒绝 pass。',
         );
       }
-      const reportId = open.validationReportId ?? l2Now.validationReportId;
-      if (!reportId) {
-        throw new PlatformRuleError(
-          'INDEPENDENT_REVIEW_REPORT_MISSING',
-          '缺 ValidationReport，不能 pass。',
+      if (mission.executionMode === 'high_assurance') {
+        const ha = await this.#currentHaValidationReport(
+          mission.id,
+          headNow,
+          l2Now.fingerprint,
+          mission.contractRevision,
         );
-      }
-      const report = await this.#validation?.reports.get(reportId);
-      if (!report || report.missionId !== mission.id) {
-        throw new PlatformRuleError(
-          'INDEPENDENT_REVIEW_REPORT_MISSING',
-          'ValidationReport 不存在或不属本 Mission，不能 pass。',
-        );
+        // 收 pass 同样只认当前 HA 报告，避免开审后改用 L2 validator 报告凑。
+        if (!ha || !ha.passed || open.validationReportId !== ha.id) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            '当前没有通过且属于本提交的 HA 确定性验证报告，不能 pass。',
+          );
+        }
+        const report = await this.#validation?.reports.get(ha.id);
+        if (!report || report.missionId !== mission.id || report.passed !== true) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            'HA 确定性验证报告不存在、不属本 Mission 或未通过，不能 pass。',
+          );
+        }
+      } else {
+        const reportId = open.validationReportId ?? l2Now.validationReportId;
+        if (!reportId) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            '缺 ValidationReport，不能 pass。',
+          );
+        }
+        const report = await this.#validation?.reports.get(reportId);
+        if (!report || report.missionId !== mission.id) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            'ValidationReport 不存在或不属本 Mission，不能 pass。',
+          );
+        }
       }
     }
 
@@ -1030,6 +1059,10 @@ export class Platform {
       fingerprint,
       mission.contractRevision,
     );
+    // HA：没有当前证据下 passed 的 HA 报告就不能认 pass，不能拿别的已通过报告凑。
+    if (mission.executionMode === 'high_assurance' && (!currentReport || !currentReport.passed)) {
+      return undefined;
+    }
     for (let i = mission.independentReviews.length - 1; i >= 0; i -= 1) {
       const row = mission.independentReviews[i]!;
       if (row.contractRevision !== mission.contractRevision) continue;
@@ -1038,7 +1071,9 @@ export class Platform {
       if (row.verdict === 'send_back') return undefined;
       if (row.verdict !== 'pass') continue;
       if (!row.validationReportId) return undefined;
-      if (currentReport && (!currentReport.passed || row.validationReportId !== currentReport.id)) {
+      if (mission.executionMode === 'high_assurance') {
+        if (!currentReport?.passed || row.validationReportId !== currentReport.id) return undefined;
+      } else if (currentReport && (!currentReport.passed || row.validationReportId !== currentReport.id)) {
         return undefined;
       }
       const report = await this.#validation?.reports.get(row.validationReportId);
@@ -1053,7 +1088,15 @@ export class Platform {
     head: string,
     fingerprint: string,
     contractRevision: number,
-  ): Promise<{ id: string; passed: boolean } | undefined> {
+  ): Promise<
+    | {
+        id: string;
+        passed: boolean;
+        workItemIds?: readonly string[];
+        commands?: readonly { argv: readonly string[]; timeoutMs: number }[];
+      }
+    | undefined
+  > {
     const events = await this.#activity.list(missionId);
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const event = events[i]!;
@@ -1067,15 +1110,102 @@ export class Platform {
         reviewedCommit?: unknown;
         l2Fingerprint?: unknown;
         contractRevision?: unknown;
+        workItemIds?: unknown;
+        commands?: unknown;
       };
       if (row.purpose !== 'ha_deterministic') continue;
       if (row.reviewedCommit !== head) continue;
       if (row.l2Fingerprint !== fingerprint) continue;
       if (row.contractRevision !== contractRevision) continue;
       if (typeof row.reportId !== 'string') return undefined;
-      return { id: row.reportId, passed: row.passed === true };
+      const report = await this.#validation?.reports.get(row.reportId);
+      // 事件对得上但仓储里没有这份报告，不能拿事件自己的 passed 凑。
+      if (!report || report.missionId !== missionId) return undefined;
+      const workItemIds = this.#parseHaWorkItemIds(row.workItemIds);
+      const commands = this.#parseHaCommands(row.commands);
+      return {
+        id: row.reportId,
+        passed: report.passed === true,
+        ...(workItemIds ? { workItemIds } : {}),
+        ...(commands ? { commands } : {}),
+      };
     }
     return undefined;
+  }
+
+  #parseHaWorkItemIds(value: unknown): readonly string[] | undefined {
+    if (!Array.isArray(value) || value.length === 0) return undefined;
+    if (value.some((id) => typeof id !== 'string' || id.trim() === '')) return undefined;
+    return value as string[];
+  }
+
+  #parseHaCommands(
+    value: unknown,
+  ): readonly { argv: readonly string[]; timeoutMs: number }[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const rows: { argv: readonly string[]; timeoutMs: number }[] = [];
+    for (const item of value) {
+      if (item == null || typeof item !== 'object' || Array.isArray(item)) return undefined;
+      const row = item as { argv?: unknown; timeoutMs?: unknown };
+      if (!Array.isArray(row.argv) || row.argv.some((part) => typeof part !== 'string')) {
+        return undefined;
+      }
+      if (typeof row.timeoutMs !== 'number' || !Number.isFinite(row.timeoutMs)) return undefined;
+      rows.push({ argv: row.argv as string[], timeoutMs: row.timeoutMs });
+    }
+    return rows;
+  }
+
+  #frozenHaCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
+    return mission.workItems
+      .filter((item) => item.status !== 'retired')
+      .flatMap((item) =>
+        (item.order?.validation?.commands ?? []).map((command) => ({
+          argv: [...command.argv],
+          timeoutMs: command.timeoutMs,
+        })),
+      );
+  }
+
+  #sameHaCommands(
+    left: readonly { argv: readonly string[]; timeoutMs: number }[],
+    right: readonly { argv: readonly string[]; timeoutMs: number }[],
+  ): boolean {
+    if (left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i += 1) {
+      const a = left[i]!;
+      const b = right[i]!;
+      if (a.timeoutMs !== b.timeoutMs || a.argv.length !== b.argv.length) return false;
+      if (a.argv.some((part, j) => part !== b.argv[j])) return false;
+    }
+    return true;
+  }
+
+  #haReuseMatches(
+    meta: {
+      workItemIds?: readonly string[];
+      commands?: readonly { argv: readonly string[]; timeoutMs: number }[];
+    },
+    report: ValidationReport,
+    activeIds: readonly string[],
+    frozen: readonly { argv: readonly string[]; timeoutMs: number }[],
+  ): boolean {
+    // 复用旧报告时必须核覆盖集合与冻结命令；缺字段视为无法证明，拒绝复用。
+    if (!meta.workItemIds || !meta.commands) return false;
+    if (meta.workItemIds.length !== activeIds.length) return false;
+    const covered = new Set(meta.workItemIds);
+    if (covered.size !== activeIds.length) return false;
+    if (!activeIds.every((id) => covered.has(id))) return false;
+    if (!this.#sameHaCommands(meta.commands, frozen)) return false;
+    const reported = report.checks.filter((check) => check.kind === 'command');
+    if (reported.length !== frozen.length) return false;
+    for (let i = 0; i < frozen.length; i += 1) {
+      const argv = reported[i]?.command?.argv;
+      const expected = frozen[i]!.argv;
+      if (!argv || argv.length !== expected.length) return false;
+      if (argv.some((part, j) => part !== expected[j])) return false;
+    }
+    return true;
   }
 
   #independentReviewOpenBlock(
@@ -1131,6 +1261,14 @@ export class Platform {
     return ids;
   }
 
+  #missionWorkspaceCwd(mission: Mission): string | undefined {
+    const root = mission.workspaceRef?.projectRoot;
+    if (typeof root !== 'string' || root.trim() === '') return undefined;
+    const viaTree = this.#workspace?.worktreePath?.(mission.id, root);
+    const cwd = viaTree ?? root;
+    return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : undefined;
+  }
+
   async #missionReviewedCommit(mission: Mission): Promise<string> {
     if (!this.#workspace) {
       throw new PlatformRuleError(
@@ -1138,12 +1276,7 @@ export class Platform {
         '没有工作区管理，无法核对被审 HEAD。',
       );
     }
-    const root = mission.workspaceRef?.projectRoot;
-    const viaTree =
-      root && this.#workspace.worktreePath
-        ? this.#workspace.worktreePath(mission.id, root)
-        : undefined;
-    const cwd = viaTree ?? root;
+    const cwd = this.#missionWorkspaceCwd(mission);
     if (!cwd) {
       throw new PlatformRuleError(
         'REVIEWED_COMMIT_UNAVAILABLE',
@@ -1777,7 +1910,7 @@ export class Platform {
    */
   async runHaDeterministicValidation(
     missionId: string,
-    cwd: string,
+    _cwd: string,
   ): Promise<{ reportId: string; passed: boolean; reviewedCommit: string }> {
     const { mission } = await this.#locate(missionId);
     if (mission.executionMode !== 'high_assurance') {
@@ -1799,12 +1932,20 @@ export class Platform {
         'HA 确定性验证需要注入 validation.engine 与 reports。',
       );
     }
-    const trustedCwd = cwd.trim();
-    if (!trustedCwd) {
-      throw new PlatformRuleError('VALIDATION_CWD_REQUIRED', 'HA 确定性验证要求非空 cwd。');
+    // 不信调用方 cwd：命令必须跑在从 workspaceRef / worktree 解析出的 Mission 工作区。
+    const trustedCwd = this.#missionWorkspaceCwd(mission);
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    const baseRevision = mission.workspaceRef?.baseRevision;
+    if (!trustedCwd || !projectRoot || !baseRevision) {
+      throw new PlatformRuleError(
+        'VALIDATION_WORKSPACE_REQUIRED',
+        `Mission ${mission.id} 缺少可核实的工作区（workspaceRef/worktree），不跑 engine。`,
+      );
     }
     const reviewedCommit = await this.#missionReviewedCommit(mission);
     const l2 = this.#l2ReviewSnapshot(mission);
+    const active = mission.workItems.filter((item) => item.status !== 'retired');
+    const frozenCommands = this.#frozenHaCommands(mission);
     const existingMeta = await this.#currentHaValidationReport(
       mission.id,
       reviewedCommit,
@@ -1814,17 +1955,21 @@ export class Platform {
     if (existingMeta) {
       const existing = await validation.reports.get(existingMeta.id);
       if (existing && existing.missionId === mission.id) {
+        if (
+          !this.#haReuseMatches(
+            existingMeta,
+            existing,
+            active.map((item) => item.id),
+            frozenCommands,
+          )
+        ) {
+          throw new PlatformRuleError(
+            'HA_VALIDATION_STALE',
+            '已有 HA 报告的工作项覆盖或冻结命令与当前不符，拒绝复用。',
+          );
+        }
         return { reportId: existing.id, passed: existing.passed, reviewedCommit };
       }
-    }
-    const active = mission.workItems.filter((item) => item.status !== 'retired');
-    const projectRoot = mission.workspaceRef?.projectRoot;
-    const baseRevision = mission.workspaceRef?.baseRevision;
-    if (!projectRoot || !baseRevision) {
-      throw new PlatformRuleError(
-        'VALIDATION_WORKSPACE_REQUIRED',
-        `Mission ${mission.id} 缺少 workspaceRef.projectRoot/baseRevision，不跑 engine。`,
-      );
     }
     const allowedScope = [...new Set(active.flatMap((item) => [...(item.order?.allowedScope ?? [])]))];
     const commands = active.flatMap((item) =>
@@ -1865,6 +2010,13 @@ export class Platform {
       ...(forbiddenPaths !== undefined ? { forbiddenPaths } : {}),
       ...(diffSize !== undefined ? { diffSize } : {}),
     });
+    const headAfter = await this.#missionReviewedCommit(mission);
+    if (headAfter !== reviewedCommit) {
+      throw new PlatformRuleError(
+        'HA_VALIDATION_HEAD_CHANGED',
+        '确定性验证运行期间工作区 HEAD 已变化，不产出有效报告。',
+      );
+    }
     await this.#tx(async () => {
       const { mission: live } = await this.#locate(missionId);
       await validation.reports.save(result.report);
@@ -1879,6 +2031,7 @@ export class Platform {
           l2Fingerprint: l2.fingerprint,
           contractRevision: live.contractRevision,
           workItemIds: active.map((item) => item.id),
+          commands: frozenCommands,
         },
       );
     });

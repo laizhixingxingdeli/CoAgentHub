@@ -8,7 +8,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 
+import { createApi } from '../src/api/server.ts';
 import {
   FixedClock,
   InMemoryActivityLog,
@@ -19,8 +22,10 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
@@ -54,9 +59,23 @@ const PLAN = {
   risks: [],
 };
 
+const IR_PASS: ScriptTable = {
+  'independent_reviewer:-': {
+    steps: [
+      { tool: 'coagent_get_mission_review_bundle', body: {} },
+      {
+        tool: 'coagent_submit_independent_review',
+        body: { verdict: 'pass', reasons: ['L2 与报告齐，当前 HEAD 可放行'] },
+      },
+    ],
+  },
+};
+
 const temps: string[] = [];
+const servers: Server[] = [];
 after(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+  for (const server of servers) server.close();
 });
 
 function stubWorkspace(head = 'commit-a'): WorkspaceManager & { setHead(next: string): void } {
@@ -144,9 +163,10 @@ async function seedHaReviewed(opts: {
   const ids = new SequentialIds();
   const workspace = stubWorkspace(opts.head ?? 'commit-a');
   const validation = await passingEngine(ids);
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
   const platform = new Platform({
     projects,
-    deliveries: new InMemoryDeliveryRepository(clock, ids),
+    deliveries,
     activity: new InMemoryActivityLog(clock),
     clock,
     ids,
@@ -219,7 +239,15 @@ async function seedHaReviewed(opts: {
     openRisks: [],
   });
   await platform.finishAttempt('M-ha', coord.attemptId, { endedBy: 'structured_submit' });
-  return { platform, workspace, projects, tokens: new RunTokenRegistry(), root, validation };
+  return {
+    platform,
+    workspace,
+    projects,
+    tokens: new RunTokenRegistry(),
+    root,
+    validation,
+    deliveries,
+  };
 }
 
 describe('E3a HA 独立检视故障停法', () => {
@@ -358,6 +386,76 @@ describe('E3a HA 独立检视故障停法', () => {
       orch.hops.filter((h) => h.role === 'coordinator').length,
       0,
     );
+  });
+
+  test('候选非空但发牌口缺失：可见故障、无悬空 Attempt，补发牌口后续跑可开审', async () => {
+    const seeded = await seedHaReviewed({});
+    const { platform, tokens, root, workspace, deliveries } = seeded;
+    const full = makeIssuer(platform, tokens);
+    const withoutIr = {
+      startCoordinator: full.startCoordinator.bind(full),
+      startExecutor: full.startExecutor.bind(full),
+      revoke: full.revoke.bind(full),
+    };
+    const orch = new Orchestrator({
+      platform,
+      tokens: withoutIr,
+      baseUrl: 'http://127.0.0.1:9',
+      workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const outcome = await orch.runMission('M-ha', { projectRoot: root });
+    assert.equal(outcome.kind, 'waiting');
+    const view = await platform.getMissionView('M-ha');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.haReviewHold, 'fault');
+    assert.match(view.waitDetail ?? '', /发牌口|独立检视故障/);
+    assert.equal(view.independentReviewerAttemptIds.length, 0);
+    assert.equal(
+      orch.hops.filter((h) => h.role === 'coordinator').length,
+      0,
+      '待检视阶段不得再派协调者',
+    );
+
+    const server: Server = createApi({ platform, tokens, deliveries });
+    await listenLoopback(server, 0);
+    servers.push(server);
+    const addr = server.address() as AddressInfo;
+    const orch2 = new Orchestrator({
+      platform,
+      tokens: full,
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime(IR_PASS),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const outcome2 = await orch2.runMission('M-ha', { projectRoot: root });
+    assert.equal(outcome2.kind, 'awaiting_l3_review');
+    const view2 = await platform.getMissionView('M-ha');
+    assert.ok(view2.independentReviewerAttemptIds.length > 0);
+    assert.equal(view2.haReviewHold, 'pending_release');
+    assert.equal((await platform.effectiveIndependentReviewPass('M-ha'))?.verdict, 'pass');
   });
 
   test('机器 HA 放行仍 HIGH_ASSURANCE_NEEDS_HUMAN', async () => {

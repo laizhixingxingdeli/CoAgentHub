@@ -7,7 +7,8 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -26,9 +27,13 @@ import { MissionRunner } from '../src/application/mission-runner.ts';
 import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
+import type { LiveOutput } from '../src/application/live.ts';
+import type { RunTokenIssuer } from '../src/application/token-issuer.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -124,8 +129,10 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 const servers: Server[] = [];
+const temps: string[] = [];
 after(() => {
   for (const server of servers) server.close();
+  for (const dir of temps) rmSync(dir, { recursive: true, force: true });
 });
 
 const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
@@ -288,5 +295,340 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     issuer.revoke(again.token);
     assert.equal(built.tokens.resolve(again.token), undefined, '失败后同样吊销');
     assert.equal((built.server.address() as AddressInfo).port, built.port);
+  });
+});
+
+const HA_ORDER = {
+  ...ORDER,
+  validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] },
+};
+
+const IR_PASS: ScriptTable = {
+  'independent_reviewer:-': {
+    steps: [
+      { tool: 'coagent_get_mission_review_bundle', body: {} },
+      {
+        tool: 'coagent_submit_independent_review',
+        body: { verdict: 'pass', reasons: ['齐'] },
+      },
+    ],
+  },
+};
+
+function stubHaWorkspace(head = 'commit-a'): WorkspaceManager {
+  let current = head;
+  return {
+    async prepare(_missionId, projectRoot) {
+      return {
+        cwd: projectRoot,
+        branch: 'mission/M',
+        targetBranch: 'master',
+        baseRevision: current,
+      };
+    },
+    async head() {
+      return current;
+    },
+    async targetHead() {
+      return current;
+    },
+    worktreePath(_missionId, projectRoot) {
+      return projectRoot;
+    },
+    async rollback() {},
+    async mergeToTarget() {
+      return { ok: true, mergedInto: current };
+    },
+    async diff() {
+      return { stat: '', files: [] };
+    },
+    async release() {},
+  };
+}
+
+function capturingIssuer(
+  platform: Platform,
+  tokens: RunTokenRegistry,
+): { issuer: RunTokenIssuer; issued: string[] } {
+  const inner = makeIssuer(platform, tokens);
+  const issued: string[] = [];
+  return {
+    issued,
+    issuer: {
+      startCoordinator: (missionId, profile) => inner.startCoordinator(missionId, profile),
+      startExecutor: (missionId, workItemId, profile) =>
+        inner.startExecutor(missionId, workItemId, profile),
+      async startIndependentReviewer(missionId, candidates = []) {
+        const started = await inner.startIndependentReviewer!(missionId, candidates);
+        issued.push(started.token);
+        return started;
+      },
+      revoke(token) {
+        inner.revoke(token);
+      },
+    },
+  };
+}
+
+async function seedHaForRunner() {
+  const clock = new FixedClock();
+  const activity = new InMemoryActivityLog(clock);
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const projects = new InMemoryProjectRepository();
+  const workspace = stubHaWorkspace();
+  const reports = new InMemoryValidationReportRepository();
+  const validation = {
+    reports,
+    engine: {
+      async validate(input: { missionId: string }) {
+        const id = ids.next('VR');
+        const report = {
+          id,
+          policyRevision: 1,
+          missionId: input.missionId,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          passed: true,
+          checks: [
+            {
+              kind: 'command' as const,
+              passed: true,
+              startedAt: '2026-01-01T00:00:00.000Z',
+              endedAt: '2026-01-01T00:00:01.000Z',
+              summary: 'node --test → 0',
+              command: {
+                argv: ['node', '--test'],
+                cwd: '/tmp',
+                exitCode: 0,
+                timedOut: false,
+                durationMs: 1,
+                outputTail: 'ok',
+              },
+            },
+          ],
+        };
+        return {
+          report,
+          authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 },
+        };
+      },
+    },
+  };
+  const platform = new Platform({
+    projects,
+    deliveries,
+    workspace,
+    activity,
+    clock,
+    ids,
+    validation,
+  });
+  const tokens = new RunTokenRegistry();
+  const server: Server = createApi({ platform, tokens, deliveries });
+  await listenLoopback(server, 0);
+  servers.push(server);
+  const addr = server.address() as AddressInfo;
+  const project = await projects.ensure('P');
+  project.createMission({
+    id: 'M-ha',
+    contract: CONTRACT,
+    executionMode: 'high_assurance',
+  });
+  await projects.save(project);
+  const root = mkdtempSync(join(tmpdir(), 'coagent-e3a-runner-'));
+  temps.push(root);
+  const prepared = await workspace.prepare('M-ha', root);
+  await platform.recordWorkspace('M-ha', {
+    projectRoot: root,
+    branch: prepared.branch,
+    baseRevision: prepared.baseRevision,
+  });
+  const coord = await platform.startCoordinatorAttempt('M-ha', {
+    profileId: 'coord-a',
+    endpoint: 'local',
+  });
+  await platform.updatePlan('M-ha', coord.attemptId, PLAN);
+  const { workItemId } = await platform.createWorkItem('M-ha', coord.attemptId, {
+    title: '改 foo',
+    order: HA_ORDER,
+  });
+  await platform.dispatchWorkItems('M-ha', coord.attemptId, [workItemId]);
+  const exec = await platform.startExecutorAttempt('M-ha', workItemId, {
+    profileId: 'exec-a',
+    endpoint: 'local',
+  });
+  await platform.submitEvidence('M-ha', exec.attemptId, {
+    kind: 'test',
+    summary: '绿',
+    command: 'node --test',
+    exitCode: 0,
+  });
+  await platform.submitExecutionResult('M-ha', exec.attemptId, {
+    outcome: 'completed',
+    summary: '改好了',
+    changedFiles: ['src/foo.ts'],
+    evidenceIds: [],
+    notes: '无',
+  });
+  await platform.finishAttempt('M-ha', exec.attemptId, { endedBy: 'structured_submit' });
+  await platform.reviewExecutionResult('M-ha', coord.attemptId, {
+    workItemId,
+    verdict: 'accept',
+    acceptanceResults: HA_ORDER.acceptance.map((criterion) => ({
+      criterion,
+      status: 'pass' as const,
+      evidence: '测试替身：逐条核过',
+    })),
+    reasons: ['复跑过'],
+    requiredChanges: [],
+  });
+  await platform.submitMissionResult('M-ha', coord.attemptId, {
+    outcome: 'delivered',
+    summary: '交付',
+    acceptanceEvidence: [],
+    memoryDelta: [],
+    openRisks: [],
+  });
+  await platform.finishAttempt('M-ha', coord.attemptId, { endedBy: 'structured_submit' });
+  return {
+    platform,
+    tokens,
+    workspace,
+    root,
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+  };
+}
+
+describe('E3a MissionRunner 独立检视 token 生命周期', () => {
+  test('成功路径吊销；新建 registry 后旧 token 不可用', async () => {
+    const seeded = await seedHaForRunner();
+    const { issuer, issued } = capturingIssuer(seeded.platform, seeded.tokens);
+    const runner = new MissionRunner({
+      platform: seeded.platform,
+      tokens: issuer,
+      baseUrl: seeded.baseUrl,
+      workspace: seeded.workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime(IR_PASS),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const ran = await runner.run('M-ha', { projectRoot: seeded.root });
+    assert.equal(ran.outcome.kind, 'awaiting_l3_review');
+    assert.equal(issued.length, 1);
+    assert.equal(seeded.tokens.resolve(issued[0]!), undefined, '成功后吊销');
+    const restarted = new RunTokenRegistry();
+    assert.equal(restarted.resolve(issued[0]!), undefined, '重启后旧 token 不可用');
+  });
+
+  test('运行时失败也吊销', async () => {
+    const seeded = await seedHaForRunner();
+    const { issuer, issued } = capturingIssuer(seeded.platform, seeded.tokens);
+    const runner = new MissionRunner({
+      platform: seeded.platform,
+      tokens: issuer,
+      baseUrl: seeded.baseUrl,
+      workspace: seeded.workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime({
+          'independent_reviewer:-': { upstreamFailure: '检视适配器挂了' },
+        }),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const ran = await runner.run('M-ha', { projectRoot: seeded.root });
+    assert.equal(ran.outcome.kind, 'waiting');
+    assert.equal(issued.length, 1);
+    assert.equal(seeded.tokens.resolve(issued[0]!), undefined, '运行时失败后吊销');
+  });
+
+  test('finishAttempt 抛错仍吊销', async () => {
+    const seeded = await seedHaForRunner();
+    const original = seeded.platform.finishAttempt.bind(seeded.platform);
+    seeded.platform.finishAttempt = (async (missionId, attemptId, outcome) => {
+      await original(missionId, attemptId, outcome);
+      throw new Error('finishAttempt 失败');
+    }) as Platform['finishAttempt'];
+    const { issuer, issued } = capturingIssuer(seeded.platform, seeded.tokens);
+    const runner = new MissionRunner({
+      platform: seeded.platform,
+      tokens: issuer,
+      baseUrl: seeded.baseUrl,
+      workspace: seeded.workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime({
+          'independent_reviewer:-': { upstreamFailure: '检视适配器挂了' },
+        }),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const ran = await runner.run('M-ha', { projectRoot: seeded.root });
+    assert.equal(ran.outcome.kind, 'waiting');
+    assert.equal(issued.length, 1);
+    assert.equal(seeded.tokens.resolve(issued[0]!), undefined, '收尾失败后仍吊销');
+  });
+
+  test('live.finish 抛错仍吊销', async () => {
+    const seeded = await seedHaForRunner();
+    const live: LiveOutput = {
+      async append() {},
+      async since() {
+        return [];
+      },
+      async finish() {
+        throw new Error('live.finish 失败');
+      },
+    };
+    const { issuer, issued } = capturingIssuer(seeded.platform, seeded.tokens);
+    const runner = new MissionRunner({
+      platform: seeded.platform,
+      tokens: issuer,
+      live,
+      baseUrl: seeded.baseUrl,
+      workspace: seeded.workspace,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+      independentReviewer: {
+        runtime: new ScriptedRuntime({
+          'independent_reviewer:-': { upstreamFailure: '检视适配器挂了' },
+        }),
+        candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+      },
+    });
+    const ran = await runner.run('M-ha', { projectRoot: seeded.root });
+    assert.equal(ran.outcome.kind, 'waiting');
+    assert.equal(issued.length, 1);
+    assert.equal(seeded.tokens.resolve(issued[0]!), undefined, 'live.finish 失败后仍吊销');
   });
 });
