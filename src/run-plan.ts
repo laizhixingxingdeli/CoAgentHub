@@ -23,12 +23,10 @@ import type { AddressInfo } from 'node:net';
 import { createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { Orchestrator } from './application/orchestrator.ts';
-import { drivePlan, runWithDeadline } from './application/plan-driver.ts';
+import { MissionRunner } from './application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
-import { buildRoutingPrompt, parseRoutingProposal } from './application/plan-routing.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
-import { PlanRun } from './application/plan-run.ts';
+import { runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import {
   candidateHandoffText,
@@ -306,21 +304,6 @@ async function main() {
     const runId = `${plan.planId}-${stamp(started)}`;
     const runDir = resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
     const store = new FilePlanRunStore(join(runDir, `${runId}.json`));
-    await store.create(
-      PlanRun.start({
-        id: runId,
-        planId: plan.planId,
-        projectId: plan.projectId,
-        integrationBranch: plan.integrationBranch,
-        reviewer: plan.reviewer,
-        stopConditions: plan.stopConditions,
-        featureIds: remaining.map((feature) => feature.id),
-        // 标题抄进记录：早上看交接面不用回头翻方案文件（它到早上可能已经改了）。
-        titles: Object.fromEntries(remaining.map((feature) => [feature.id, feature.title])),
-        startedAt: started.toISOString(),
-        ...(selection.exclusions.length > 0 ? { sourceExclusions: selection.exclusions } : {}),
-      }),
-    );
 
     const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });
     // 派出去的 agent 用 fetch 连回这个口：分到 fetch 屏蔽的端口，它们会以 bad port 连不上平台。
@@ -366,6 +349,7 @@ async function main() {
     // Ctrl+C / 被杀：信号结束的进程不发 exit 事件，锁目录会留下，后面每次写都被挡；
     // 方案运行记录也会停在「还在跑」。先记下原因、落盘、放锁再退。在途 Mission 原样
     // 留给人（它可能占着名额，下一晚开跑前检查会点名它）。
+    // 记录改由内部入口创建：信号必须在那之前挂上，否则刚落盘就被杀会停在「还在跑」。
     let interrupted = false;
     const onSignal = (signal: string) => {
       if (interrupted) return;
@@ -375,10 +359,12 @@ async function main() {
         steps: [
           {
             name: 'halt',
-            run: () =>
-              store.update((r) => {
+            run: async () => {
+              if (!store.read()) return;
+              await store.update((r) => {
                 if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
-              }),
+              });
+            },
           },
           {
             name: 'periodic.stop',
@@ -399,77 +385,32 @@ async function main() {
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
 
-    const stop = await drivePlan(plan, {
+    const runner = new MissionRunner({
+      platform,
+      live,
+      tokens: makeIssuer(platform, tokens),
+      baseUrl,
+      workspace,
+      coordinator: { runtime, candidates: coordinators },
+      executor: { runtime, candidates: executors },
+    });
+    const stop = await runPlanOnPlatform(plan, selection, {
       store,
       projectRoot,
-      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
+      platform,
+      runMission: (missionId, options) => runner.run(missionId, options),
+      ...(runQuery ? { runQuery } : {}),
+      ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
+      persist,
+      pauseInFlight: async (missionId) => {
+        await platform.pauseMission(missionId);
+      },
       now: () => new Date().toISOString(),
       sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
       log: (line) => console.log(`[${new Date().toLocaleTimeString()}] ${line}`),
-      platform: {
-        createMission: async (input) => {
-          const created = await platform.createMission(input);
-          await persist();
-          return created;
-        },
-        createClassifiedMission: async (input) => {
-          const created = await platform.createClassifiedMission(input);
-          await persist();
-          return created;
-        },
-        getMissionView: (missionId) => platform.getMissionView(missionId),
-        finalizeMissionByMachine: async (missionId, input) => {
-          const result = await platform.finalizeMissionByMachine(missionId, input);
-          await persist();
-          return result;
-        },
-        abandonMissionForPlan: async (missionId, input) => {
-          const result = await platform.abandonMissionForPlan(missionId, input);
-          await persist();
-          return result;
-        },
-      },
-      proposeRoute: async (feature) => {
-        if (!runQuery) return { ok: false, reason: '分类员不可用（query runtime 没装上）。' };
-        const result = await runQuery({
-          projectId: plan.projectId,
-          source: `plan-run:${runId}:${feature.id}`,
-          prompt: buildRoutingPrompt(plan, feature),
-          cwd: projectRoot,
-          ...(coordinators[0] ? { profile: coordinators[0] } : {}),
-        });
-        await persist();
-        if (result.outcome !== 'answered') {
-          return { ok: false, reason: `分类员没答上来（${result.outcome}，QueryRun ${result.queryRunId}）。` };
-        }
-        const parsed = parseRoutingProposal(result.record.output ?? '', new Date().toISOString());
-        return parsed.ok ? parsed : { ok: false, reason: `${parsed.reason}（QueryRun ${result.queryRunId}）` };
-      },
-      runMission: async (missionId, { wallClockDeadline }) => {
-        // 一条 Mission 一个编排器：它按「上一跳」判连续无提交，跨 Mission 复用会误判。
-        const orchestrator = new Orchestrator({
-          platform,
-          live,
-          tokens: makeIssuer(platform, tokens),
-          baseUrl,
-          workspace,
-          coordinator: { runtime, candidates: coordinators },
-          executor: { runtime, candidates: executors },
-        });
-        try {
-          return await runWithDeadline(
-            () => orchestrator.runMission(missionId, { projectRoot }),
-            Date.parse(wallClockDeadline) - Date.now(),
-            async () => {
-              console.log(`[${new Date().toLocaleTimeString()}] 墙钟到点：暂停在途的 ${missionId}，下一轮开头停下。`);
-              await platform.pauseMission(missionId);
-              await persist();
-            },
-          );
-        } finally {
-          await persist();
-        }
-      },
+      runId,
+      startedAt: started.toISOString(),
+      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
     });
 
     const run = store.read();

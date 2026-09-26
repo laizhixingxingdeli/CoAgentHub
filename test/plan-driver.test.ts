@@ -9,16 +9,18 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { drivePlan, type PlanDriverDeps } from '../src/application/plan-driver.ts';
+import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 import type { MissionRunOutcome } from '../src/application/orchestrator.ts';
+import type { RunQueryResult } from '../src/application/query-run.ts';
 
 const T0 = '2026-09-23T22:00:00.000Z';
 const MIN = 60_000;
@@ -680,3 +682,228 @@ describe('两道夜跑闸',
         assert.equal(run.feature('F1')?.status, 'suspended');
       });
   });
+
+describe('注入式方案运行入口', () => {
+  function mixedPlan(wallClockMs = 8 * 60 * MIN) {
+    return parsePlanSpec(
+      {
+        planId: 'PLAN-x',
+        projectId: 'p',
+        integrationBranch: 'auto/plan-x',
+        intent: '无人值守推进',
+        stopConditions: { unresolvedEscalations: 5, wallClockMs, escalationTimeoutMs: 20 * MIN },
+        integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 60_000 }],
+        features: [
+          { id: 'Done', title: '已合', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'Skip', title: '跳', why: 'w', status: 'skipped' },
+          {
+            id: 'Beta',
+            title: '先跑的候选',
+            why: 'w',
+            allowedScope: ['src/Beta.ts'],
+            acceptance: ['绿'],
+            status: 'pending',
+          },
+          {
+            id: 'Alpha',
+            title: '后跑的候选',
+            why: 'w',
+            allowedScope: ['src/Alpha.ts'],
+            acceptance: ['绿'],
+            status: 'pending',
+          },
+        ],
+      },
+      { reviewer: 'claude' },
+    );
+  }
+
+  function injected(options?: {
+    runQuery?: PlanRuntimeQuery;
+    outcomes?: Record<string, MissionRunOutcome>;
+    wallClockMs?: number;
+    now?: () => string;
+    startedAt?: string;
+    sleep?: (ms: number) => Promise<void>;
+    runMissionDelayMs?: number;
+  }) {
+    const plan = mixedPlan(options?.wallClockMs);
+    const selection = selectPlanCandidates(plan, { projectRoot: 'C:/repo' });
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-runtime-'));
+    dirs.push(dir);
+    const store = new FilePlanRunStore(join(dir, 'R1.json'));
+    let clock = Date.parse(T0);
+    const now = options?.now ?? (() => new Date(clock).toISOString());
+    const calls: string[] = [];
+    const events: string[] = [];
+    const querySources: string[] = [];
+    const runnerIds: string[] = [];
+    const runnerRoots: string[] = [];
+    const logs: string[] = [];
+    const status = new Map<string, string>();
+
+    const platform: PlanDriverDeps['platform'] = {
+      createMission: async (input) => {
+        calls.push(`create ${input.missionId}`);
+        status.set(input.missionId, 'investigating');
+        return { missionId: input.missionId };
+      },
+      createClassifiedMission: async (input) => {
+        calls.push(`create-classified ${input.missionId}`);
+        status.set(input.missionId!, 'investigating');
+        return { missionId: input.missionId!, classification: undefined as never };
+      },
+      getMissionView: async (missionId) => ({ status: status.get(missionId) ?? 'unknown' }),
+      finalizeMissionByMachine: async (missionId, input) => {
+        calls.push(`finalize ${missionId} → ${input.integrationBranch}`);
+        status.set(missionId, 'completed');
+        return { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
+      },
+      abandonMissionForPlan: async (missionId, input) => {
+        calls.push(`abandon ${missionId} ${input.escalationId}`);
+        status.set(missionId, 'blocked');
+        return { status: 'blocked' };
+      },
+    };
+
+    return {
+      plan,
+      selection,
+      store,
+      calls,
+      events,
+      querySources,
+      runnerIds,
+      logs,
+      run: () =>
+        runPlanOnPlatform(plan, selection, {
+          store,
+          projectRoot: 'C:/repo',
+          platform,
+          runId: 'R1',
+          startedAt: options?.startedAt ?? T0,
+          now,
+          sleep: options?.sleep ?? (async (ms) => {
+            clock += ms;
+          }),
+          log: (line) => logs.push(line),
+          persist: async () => {
+            events.push('persist');
+          },
+          pauseInFlight: async (missionId) => {
+            events.push(`pause ${missionId}`);
+          },
+          ...(options?.runQuery !== undefined ? { runQuery: options.runQuery } : {}),
+          runMission: async (missionId, opts) => {
+            runnerIds.push(missionId);
+            runnerRoots.push(opts.projectRoot);
+            events.push(`run-start ${missionId}`);
+            if (options?.runMissionDelayMs) {
+              await new Promise((done) => setTimeout(done, options.runMissionDelayMs));
+            }
+            events.push(`run-end ${missionId}`);
+            const outcome =
+              options?.outcomes?.[missionId] ?? ({ kind: 'awaiting_l3_review' } satisfies MissionRunOutcome);
+            return { outcome, hops: [], workspace: undefined as never };
+          },
+        }),
+    };
+  }
+
+  type PlanRuntimeQuery = (input: {
+    projectId: string;
+    source: string;
+    prompt: string;
+    cwd: string;
+  }) => Promise<RunQueryResult>;
+
+  function failedQuery(sources: string[]): PlanRuntimeQuery {
+    return async (input) => {
+      sources.push(input.source);
+      return {
+        queryRunId: 'Q-fail',
+        outcome: 'failed',
+        record: { output: '', id: 'Q-fail' } as RunQueryResult['record'],
+      };
+    };
+  }
+
+  test('记录含候选源顺序/标题/排除项；非候选不分类不建 Mission；候选经 runner.run 并用其 outcome',
+    async () => {
+      const querySources: string[] = [];
+      const h = injected({
+        runQuery: failedQuery(querySources),
+        outcomes: {
+          'R1-Beta': { kind: 'awaiting_l3_review' },
+          'R1-Alpha': { kind: 'stalled', reason: '注入的卡住' },
+        },
+      });
+      const stop = await h.run();
+      assert.equal(stop.reason, 'finished');
+      const run = h.store.read()!;
+      assert.deepEqual(
+        run.features.map((f) => `${f.featureId}:${f.title}:${f.status}`),
+        ['Beta:先跑的候选:merged', 'Alpha:后跑的候选:suspended'],
+      );
+      assert.ok(run.sourceExclusions?.some((e) => e.featureId === 'Done'));
+      assert.ok(run.sourceExclusions?.some((e) => e.featureId === 'Skip'));
+      assert.equal(run.sourceExclusions?.length, 2);
+      assert.deepEqual(querySources, ['plan-run:R1:Beta', 'plan-run:R1:Alpha']);
+      assert.deepEqual(h.runnerIds, ['R1-Beta', 'R1-Alpha']);
+      assert.ok(h.calls.includes('create R1-Beta'));
+      assert.ok(h.calls.includes('create R1-Alpha'));
+      assert.ok(h.calls.includes('finalize R1-Beta → auto/plan-x'));
+      assert.ok(!h.calls.some((c) => c.includes('finalize R1-Alpha')), 'stalled 的 outcome 不走机器终审');
+      assert.ok(!h.calls.some((c) => /Done|Skip/.test(c)));
+      assert.ok(!h.calls.some((c) => c.startsWith('create-classified')));
+      assert.match(h.logs.join('\n'), /分类员没答上来/);
+    });
+
+  test('分类员不可用按原语义回落 Standard，不另建平台/锁/API',
+    async () => {
+      const h = injected();
+      const stop = await h.run();
+      assert.equal(stop.reason, 'finished');
+      assert.ok(h.calls.includes('create R1-Beta'));
+      assert.ok(h.calls.includes('create R1-Alpha'));
+      assert.ok(!h.calls.some((c) => c.startsWith('create-classified')));
+      assert.match(h.logs.join('\n'), /分类员不可用/);
+      const src = readFileSync(join(import.meta.dirname, '..', 'src', 'application', 'plan-runtime.ts'), 'utf8');
+      assert.match(src, /export async function runPlanOnPlatform/);
+      assert.match(src, /drivePlan\(/);
+      assert.match(src, /runWithDeadline/);
+      assert.match(src, /buildRoutingPrompt/);
+      assert.match(src, /parseRoutingProposal/);
+      assert.doesNotMatch(src, /new Orchestrator/);
+      assert.doesNotMatch(src, /createApi\s*\(/);
+      assert.doesNotMatch(src, /listenLoopback/);
+      assert.doesNotMatch(src, /acquireLock/);
+      assert.doesNotMatch(src, /buildPersistentPlatform/);
+      assert.doesNotMatch(src, /buildPgPlatform/);
+    });
+
+  test('到点调用暂停并持久化，run 后仍持久化',
+    async () => {
+      const startedAt = new Date().toISOString();
+      const h = injected({
+        startedAt,
+        now: () => new Date().toISOString(),
+        wallClockMs: 80,
+        runMissionDelayMs: 250,
+        outcomes: {
+          'R1-Beta': { kind: 'waiting', reason: 'cancelled_by_user', detail: 'Mission 已被暂停，resume 之后重跑' },
+        },
+        sleep: async () => {},
+      });
+      const stop = await h.run();
+      assert.equal(stop.reason, 'wall_clock');
+      assert.ok(h.events.includes('pause R1-Beta'));
+      const pauseAt = h.events.indexOf('pause R1-Beta');
+      const runStart = h.events.indexOf('run-start R1-Beta');
+      const runEnd = h.events.indexOf('run-end R1-Beta');
+      assert.ok(runStart >= 0 && pauseAt > runStart, '到点发生在 Mission 在途');
+      assert.ok(h.events.slice(pauseAt + 1).includes('persist'), '到点后持久化');
+      assert.ok(h.events.lastIndexOf('persist') > runEnd, 'run 后仍持久化');
+      assert.equal(h.runnerIds[0], 'R1-Beta');
+    });
+});

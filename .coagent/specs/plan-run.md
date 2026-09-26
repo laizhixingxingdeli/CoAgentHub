@@ -19,6 +19,7 @@
 - **墙钟**：开跑前与等决定时都看；在途 Mission 到点即暂停（编排器在下一轮开头停下，不打断正在写的那一跳，所以实际停下会晚最多一跳）；到点后失败的不再开单，直接停、挂起写明要你定什么。
 - **崩溃**：记下原因停在 `crashed` 再往外抛，不猜着续跑。
 - **被人中断**（Ctrl+C / SIGTERM）：记下原因停在 `crashed`、落盘、放锁再退；在途 Mission 原样留给人。检视者的「停」恰好撞上驱动方判过期，照常停下，不当崩溃。
+- **内部入口与旧 CLI 生命周期**：`src/application/plan-runtime.ts` 导出 `runPlanOnPlatform(plan, selection, deps)`，由**调用方已经握着的**平台实例跑一份已筛选方案：内部按原字段建 PlanRun 再 `drivePlan`。它不建第二份平台、不 listen、不拿主状态锁。常驻 `startServer` **不会**自动跑方案，也不因此改生产归属——无人值守驱动仍是 `node src/run-plan.ts`。旧 CLI 只做装配与生命周期：仅用 `selectPlanCandidates` 筛选 → 首次预检（平台 / 记录创建之前）→ 原 file/PG 装配/锁与周期修复 → 锁后二次预检与名额复检 → 回环 API 与 runner → 入口建记录/驱动（建 `MissionRunner({ platform, live, tokens: issuer, baseUrl, workspace, coordinator, executor })`，把绑定的 `run` 交给内部入口，每条 Mission 用 `runner.run` 的 outcome）→ 信号停记与 finally 停周期 / persist / 放锁。主状态只有这一份 file/PG 平台实例，无额外锁与 API。记录改由内部入口创建，CLI 在调用前挂上信号，避免刚落盘就被杀却停在「还在跑」。
 
 ## 交接面与检视者（l3 plan）
 
@@ -62,5 +63,5 @@
 
 ## 权威源 / 测试
 
-- 源：`src/run-plan.ts`（接线）、`src/l3.ts`（`plan` / `plan decide`）、`src/application/plan-handoff.ts`（交接面）、`src/application/plan-driver.ts`（驱动）、`src/application/plan-routing.ts`（现做分类）、`src/application/plan-spec.ts`（方案文件与契约）、`src/application/plan-preflight.ts`（开跑前检查）、`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）、`.gitignore`（状态文件旁的运行时产物）
-- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`、`test/run-plan-wiring.test.ts`（真平台 + 真 git 跑一份方案）、`test/plan-handoff.test.ts`、`test/l3-plan.test.ts`（**真子进程**跑 l3，含「锁被占着照样能定」「只读不写主状态」）、`test/lock.test.ts`
+- 源：`src/run-plan.ts`（旧 CLI 接线与生命周期）、`src/application/plan-runtime.ts`（内部可注入入口）、`src/application/mission-runner.ts`（单条 Mission 内部编排）、`src/l3.ts`（`plan` / `plan decide`）、`src/application/plan-handoff.ts`（交接面）、`src/application/plan-driver.ts`（驱动）、`src/application/plan-routing.ts`（现做分类）、`src/application/plan-spec.ts`（方案文件与契约）、`src/application/plan-preflight.ts`（开跑前检查）、`src/application/plan-run.ts`（规则）、`src/application/plan-run-store.ts`（文件存储）、`src/application/lock.ts`（放锁时摘掉 exit 兜底）、`.gitignore`（状态文件旁的运行时产物）
+- 测试：`test/plan-run.test.ts`（纯规则，时间外传）、`test/plan-run-store.test.ts`（**真子进程**：`test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`（含内部入口注入）、`test/run-plan-wiring.test.ts`（真平台 + 真 git；CLI 副作用次序与 `--check`）、`test/plan-handoff.test.ts`、`test/l3-plan.test.ts`（**真子进程**跑 l3，含「锁被占着照样能定」「只读不写主状态」）、`test/lock.test.ts`
