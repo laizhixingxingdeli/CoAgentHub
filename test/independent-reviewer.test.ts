@@ -653,6 +653,50 @@ describe('E3a 独立检视主链与有效 pass', () => {
     assert.equal(await h.platform.effectiveIndependentReviewPass('M-ha'), undefined);
   });
 
+  test('开审后 HA 事件不可见：收 pass 拒收且无有效 pass，不回退仍可用的 L2 validator 报告', async () => {
+    const h = await harness();
+    await seedReviewed(h);
+    await h.platform.runHaDeterministicValidation('M-ha', h.root);
+    const started = await h.platform.startIndependentReviewerAttempt('M-ha', [
+      { profileId: 'ir-a', endpoint: 'local' },
+    ]);
+    // 留一份可用的 L2 validator 报告：收 pass 这一处也不许退回去用它。
+    const extra = await h.validation.engine.validate({ missionId: 'M-ha' });
+    await h.validation.reports.save(extra.report);
+    await h.activity.append({
+      projectId: 'P',
+      missionId: 'M-ha',
+      kind: 'validation.reported',
+      data: { reportId: extra.report.id, passed: true, purpose: 'validator' },
+    });
+    // 开审之后当前 HA 事件不可见（丢失、被截断或被换掉）：收 pass 必须重新找到它，找不到就拒。
+    const listAll = h.activity.list.bind(h.activity);
+    h.activity.list = async (missionId: string) =>
+      (await listAll(missionId)).filter(
+        (event) =>
+          !(
+            event.kind === 'validation.reported' &&
+            (event.data as { purpose?: string } | undefined)?.purpose === 'ha_deterministic'
+          ),
+      );
+    await assert.rejects(
+      () =>
+        h.platform.submitIndependentReview('M-ha', started.attemptId, {
+          verdict: 'pass',
+          reasons: ['齐'],
+        }),
+      (err: unknown) =>
+        err instanceof PlatformRuleError && err.code === 'INDEPENDENT_REVIEW_REPORT_MISSING',
+    );
+    assert.equal(await h.platform.effectiveIndependentReviewPass('M-ha'), undefined);
+    assert.equal(
+      (await h.platform.getMissionView('M-ha')).independentReviews?.filter(
+        (review: { verdict: string }) => review.verdict === 'pass',
+      ).length ?? 0,
+      0,
+    );
+  });
+
   test('确定性验证期间 HEAD 变化则拒绝，不产出有效 HA 报告', async () => {
     const h = await harness();
     await seedReviewed(h);
