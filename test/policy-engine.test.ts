@@ -382,35 +382,113 @@ describe('PolicyEngine 不声称 Run Token TTL / audience', () => {
   });
 });
 
-describe('PolicyEngine 五类 × 六类范围抽样（每格都有判定）', () => {
-  const principals: { name: string; principal: PolicyPrincipal }[] = [
-    { name: 'user', principal: operator },
-    { name: 'reviewer', principal: reviewer },
-    { name: 'runner', principal: runner },
-    { name: 'coordinator', principal: coordinator },
-    { name: 'executor', principal: executor },
-  ];
-  const scopes: { scope: PolicyAction['scope']; action: PolicyAction }[] = [
-    { scope: 'mission', action: POLICY_ACTION.missionRead },
-    { scope: 'workItem', action: POLICY_ACTION.workItemCreate },
-    { scope: 'attempt', action: POLICY_ACTION.attemptGetBrief },
-    { scope: 'pool', action: POLICY_ACTION.poolAdd },
-    { scope: 'inbox', action: POLICY_ACTION.inboxAck },
-    { scope: 'finalize', action: POLICY_ACTION.finalizeHuman },
+describe('PolicyEngine 五类 × 六类范围：逐格固定预期', () => {
+  // 预期是手写的，不从 ALLOWED 矩阵推导——推导出来的预期改矩阵时跟着变，测不出越权。
+  // 每格一个真实存在的代表动作：该 Principal 在这个范围里有允许的动作就取它（证明允许），
+  // 没有就取一个它不该做的（证明错误角色被拒）。coordinator / executor 带自己的绑定。
+  type Expected = { readonly decision: 'allow' | 'deny'; readonly code: string };
+  const ALLOW: Expected = { decision: 'allow', code: POLICY_REASON.ALLOWED };
+  const WRONG_ROLE: Expected = { decision: 'deny', code: POLICY_REASON.ACTION_DENIED };
+  const MISSING: Expected = { decision: 'deny', code: POLICY_REASON.PRINCIPAL_MISSING };
+  const EXPIRED: Expected = { decision: 'deny', code: POLICY_REASON.PRINCIPAL_EXPIRED };
+
+  const cells: [string, PolicyPrincipal, PolicyAction, Expected][] = [
+    ['user(operator) × mission：pause', operator, POLICY_ACTION.missionPause, ALLOW],
+    ['user(operator) × workItem：create', operator, POLICY_ACTION.workItemCreate, WRONG_ROLE],
+    ['user(operator) × attempt：finish', operator, POLICY_ACTION.attemptFinish, ALLOW],
+    ['user(operator) × pool：add', operator, POLICY_ACTION.poolAdd, ALLOW],
+    ['user(operator) × inbox：ack', operator, POLICY_ACTION.inboxAck, ALLOW],
+    ['user(operator) × finalize：human', operator, POLICY_ACTION.finalizeHuman, ALLOW],
+    ['reviewer × mission：read', reviewer, POLICY_ACTION.missionRead, WRONG_ROLE],
+    ['reviewer × workItem：review', reviewer, POLICY_ACTION.workItemReview, WRONG_ROLE],
+    ['reviewer × attempt：getBrief', reviewer, POLICY_ACTION.attemptGetBrief, WRONG_ROLE],
+    ['reviewer × pool：add', reviewer, POLICY_ACTION.poolAdd, WRONG_ROLE],
+    ['reviewer × inbox：read', reviewer, POLICY_ACTION.inboxRead, WRONG_ROLE],
+    ['reviewer × finalize：reviewer', reviewer, POLICY_ACTION.finalizeReviewer, ALLOW],
+    ['runner × mission：cancel', runner, POLICY_ACTION.missionCancel, WRONG_ROLE],
+    ['runner × workItem：dispatch', runner, POLICY_ACTION.workItemDispatch, WRONG_ROLE],
+    ['runner × attempt：finish', runner, POLICY_ACTION.attemptFinish, WRONG_ROLE],
+    ['runner × pool：list', runner, POLICY_ACTION.poolList, WRONG_ROLE],
+    ['runner × inbox：ack', runner, POLICY_ACTION.inboxAck, WRONG_ROLE],
+    ['runner × finalize：machine（非 HA）', runner, POLICY_ACTION.finalizeMachine, ALLOW],
+    ['coordinator × mission：read', coordinator, POLICY_ACTION.missionRead, ALLOW],
+    ['coordinator × workItem：retire', coordinator, POLICY_ACTION.workItemRetire, ALLOW],
+    ['coordinator × attempt：escalate', coordinator, POLICY_ACTION.attemptEscalate, ALLOW],
+    ['coordinator × pool：add', coordinator, POLICY_ACTION.poolAdd, WRONG_ROLE],
+    ['coordinator × inbox：read', coordinator, POLICY_ACTION.inboxRead, WRONG_ROLE],
+    ['coordinator × finalize：human', coordinator, POLICY_ACTION.finalizeHuman, WRONG_ROLE],
+    ['executor × mission：read', executor, POLICY_ACTION.missionRead, ALLOW],
+    ['executor × workItem：getOrder', executor, POLICY_ACTION.workItemGetOrder, ALLOW],
+    ['executor × attempt：submitEvidence', executor, POLICY_ACTION.attemptSubmitEvidence, ALLOW],
+    ['executor × pool：list', executor, POLICY_ACTION.poolList, WRONG_ROLE],
+    ['executor × inbox：ack', executor, POLICY_ACTION.inboxAck, WRONG_ROLE],
+    ['executor × finalize：machine', executor, POLICY_ACTION.finalizeMachine, WRONG_ROLE],
   ];
 
-  for (const { name, principal } of principals) {
-    for (const { scope, action } of scopes) {
-      test(`${name} × ${scope} 有明确 allow 或 deny`, () => {
-        const verdict = evaluatePolicy({
-          principal,
-          action,
-          context: needsBind(principal) ? bound : undefined,
-        });
-        assert.ok(verdict.decision === 'allow' || verdict.decision === 'deny');
-        assert.equal(typeof verdict.reason.code, 'string');
-        assert.ok(verdict.reason.detail.length > 0);
-      });
-    }
+  function check(principal: PolicyPrincipal, action: PolicyAction, expected: Expected, label: string): void {
+    const verdict = evaluatePolicy({
+      principal,
+      action,
+      context: needsBind(principal) ? bound : undefined,
+    });
+    assert.equal(verdict.decision, expected.decision, `${label}：decision`);
+    assert.equal(verdict.reason.code, expected.code, `${label}：reason.code`);
   }
+
+  test('表本身覆盖五类 Principal × 六类范围，恰好 30 格', () => {
+    const seen = new Set(
+      cells.map(([, principal, action]) => {
+        const kind = principal.status === 'ok' ? principal.kind : principal.status;
+        return `${kind}|${action.scope}`;
+      }),
+    );
+    assert.equal(cells.length, 30);
+    assert.equal(seen.size, 30);
+  });
+
+  for (const [label, principal, action, expected] of cells) {
+    test(label, () => check(principal, action, expected, label));
+  }
+
+  test('user(viewer) 同一批范围：读允许、写与确认一律错误角色', () => {
+    const rows: [string, PolicyAction, Expected][] = [
+      ['mission：read', POLICY_ACTION.missionRead, ALLOW],
+      ['mission：pause', POLICY_ACTION.missionPause, WRONG_ROLE],
+      ['workItem：create', POLICY_ACTION.workItemCreate, WRONG_ROLE],
+      ['attempt：getDetail', POLICY_ACTION.attemptGetDetail, ALLOW],
+      ['attempt：finish', POLICY_ACTION.attemptFinish, WRONG_ROLE],
+      ['pool：list', POLICY_ACTION.poolList, ALLOW],
+      ['pool：add', POLICY_ACTION.poolAdd, WRONG_ROLE],
+      ['inbox：read', POLICY_ACTION.inboxRead, ALLOW],
+      ['inbox：ack', POLICY_ACTION.inboxAck, WRONG_ROLE],
+      ['finalize：human', POLICY_ACTION.finalizeHuman, WRONG_ROLE],
+    ];
+    for (const [label, action, expected] of rows) check(viewer, action, expected, `viewer × ${label}`);
+  });
+
+  test('缺身份：六类范围各一格，一律 deny + PRINCIPAL_MISSING', () => {
+    const missing: PolicyPrincipal = { status: 'missing' };
+    const rows: [string, PolicyAction][] = [
+      ['mission：pause', POLICY_ACTION.missionPause],
+      ['workItem：create', POLICY_ACTION.workItemCreate],
+      ['attempt：finish', POLICY_ACTION.attemptFinish],
+      ['pool：add', POLICY_ACTION.poolAdd],
+      ['inbox：ack', POLICY_ACTION.inboxAck],
+      ['finalize：human', POLICY_ACTION.finalizeHuman],
+    ];
+    for (const [label, action] of rows) check(missing, action, MISSING, `missing × ${label}`);
+  });
+
+  test('过期身份：六类范围各一格，一律 deny + PRINCIPAL_EXPIRED', () => {
+    const expired: PolicyPrincipal = { status: 'expired' };
+    const rows: [string, PolicyAction][] = [
+      ['mission：read', POLICY_ACTION.missionRead],
+      ['workItem：review', POLICY_ACTION.workItemReview],
+      ['attempt：getDetail', POLICY_ACTION.attemptGetDetail],
+      ['pool：list', POLICY_ACTION.poolList],
+      ['inbox：read', POLICY_ACTION.inboxRead],
+      ['finalize：reviewer', POLICY_ACTION.finalizeReviewer],
+    ];
+    for (const [label, action] of rows) check(expired, action, EXPIRED, `expired × ${label}`);
+  });
 });
