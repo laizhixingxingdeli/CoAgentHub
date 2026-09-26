@@ -16,12 +16,12 @@ export interface RunTokenIssuer {
     profile?: { profileId: string; endpoint: string; reasoning?: string },
   ): Promise<{ attemptId: string; token: string }>;
   /**
-   * E2 不经编排器派独立检视：HTTP 控制面用 RunTokenRegistry 发牌。
-   * 这里不强制实现，免得装配根为一项尚未接入 runMission 的角色改签名。
+   * 按 E2 独立性规则从独立候选里开 Attempt 并发牌。
+   * 不强制：未实现时编排器把 HA 检视记成故障，不得改用协调者 token。
    */
   startIndependentReviewer?(
     missionId: string,
-    profile?: { profileId: string; endpoint: string; reasoning?: string },
-  ): Promise<{ attemptId: string; token: string }>;
+    candidates?: readonly { profileId: string; endpoint: string; reasoning?: string }[],
+  ): Promise<{ attemptId: string; token: string; profileId: string }>;
   revoke(token: string): void;
 }

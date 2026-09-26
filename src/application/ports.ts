@@ -95,9 +95,9 @@ export interface AgentRuntime {
 export interface AgentRunSpec {
   /**
    * `query`：独立只读问答，不进入 Mission 状态机。
-   * coordinator / executor 仍走原 Mission 路径。
+   * coordinator / executor / independent_reviewer 走 Mission 路径。
    */
-  readonly role: 'coordinator' | 'executor' | 'query';
+  readonly role: 'coordinator' | 'executor' | 'independent_reviewer' | 'query';
   /**
    * 运行身份 id。Mission 路径是 attemptId；query 路径是 queryRunId
    * （字段名保持兼容，避免每个 runtime 适配器分叉）。

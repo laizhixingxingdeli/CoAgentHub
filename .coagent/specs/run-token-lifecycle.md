@@ -4,7 +4,7 @@ Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 
 
 ## 发放与解析
 
-- Coordinator / Executor Attempt 启动后才发 token。independent_reviewer Attempt 由控制面 `POST /api/missions/:missionId/independent-reviewer-attempts` 开出后发牌；E2 不经 Orchestrator / `RunTokenIssuer` 派发。
+- Coordinator / Executor Attempt 启动后才发 token。independent_reviewer Attempt 由控制面 `POST /api/missions/:missionId/independent-reviewer-attempts` 或生产 `RunTokenIssuer.startIndependentReviewer`（Orchestrator / MissionRunner / run-mission 装配的独立候选池）开出后发牌；不得复用 coordinator/executor 的 token 或候选，不接受请求体自述身份。
 - registry 以 token 解析出冻结的 RunContext。
 - 解析结果映射为 PolicyEngine 的 Principal：`role: coordinator` → `kind: coordinator`，`role: executor` → `kind: executor`，`role: independent_reviewer` → `kind: independent_reviewer`（与终审签名的 `reviewer` Principal **不是同一种**）；绑定 `missionId` / `attemptId` / 执行者另绑 `workItemId`。身份 id 用 attemptId，不用原始 token。
 - independent_reviewer token 只绑定该 Mission 与 Attempt，只允许 `coagent_get_mission_review_bundle` 与 `coagent_submit_independent_review`。

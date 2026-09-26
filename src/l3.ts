@@ -206,6 +206,28 @@ async function main() {
         `cacheRead=${usage.cacheRead} cost=$${(usage.cost ?? 0).toFixed(4)}`,
     );
 
+    if (view.haReviewHold || view.waitDetail || view.independentReviewBlockReason) {
+      const holdLabel =
+        view.haReviewHold === 'pending_dispatch'
+          ? '待派发'
+          : view.haReviewHold === 'in_review'
+            ? '在审'
+            : view.haReviewHold === 'pending_release'
+              ? '待放行'
+              : view.haReviewHold === 'fault'
+                ? '故障'
+                : undefined;
+      if (holdLabel) console.log(`\n【HA 检视】${holdLabel}`);
+      else console.log('');
+      if (view.waitDetail) console.log(`  等待：${view.waitDetail}`);
+      if (view.independentReviewBlockReason) {
+        console.log(`  阻塞：${view.independentReviewBlockReason}`);
+        if (view.independentReviewBlockDetail) {
+          console.log(`  细节：${view.independentReviewBlockDetail}`);
+        }
+      }
+    }
+
     if (view.finalReview) {
       console.log(`\n【最终检视】${view.finalReview.verdict}`);
       for (const reason of view.finalReview.reasons) console.log(`  理由 · ${reason}`);

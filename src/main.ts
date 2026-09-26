@@ -437,6 +437,14 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
       const run = tokens.issue({ missionId, attemptId, role: 'executor', workItemId });
       return { attemptId, token: run.token };
     },
+    async startIndependentReviewer(missionId, candidates = []) {
+      const { attemptId, profileId } = await platform.startIndependentReviewerAttempt(
+        missionId,
+        candidates,
+      );
+      const run = tokens.issue({ missionId, attemptId, role: 'independent_reviewer' });
+      return { attemptId, token: run.token, profileId };
+    },
     revoke(token) {
       tokens.revoke(token);
     },

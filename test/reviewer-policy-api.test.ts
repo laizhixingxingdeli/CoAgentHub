@@ -116,10 +116,13 @@ async function setup() {
 
   const seed = async (missionId: string, projectId: string) => {
     const project = await projects.ensure(projectId);
+    // 这里测的是独立检视 token 的 HTTP 权限面（只读证据包、交结论、越权被拒、伪造身份、吊销）。
+    // E3a 起 HA 开审只认 HA 确定性报告，由 test/independent-reviewer.test.ts 覆盖；
+    // 这里用 standard 走 L2 报告的开审路径，权限面照测。
     const mission = project.createMission({
       id: missionId,
       contract: CONTRACT,
-      executionMode: 'high_assurance',
+      executionMode: 'standard',
     });
     mission.startExecuting();
     const coord = mission.startCoordinatorAttempt();

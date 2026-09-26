@@ -485,6 +485,56 @@ describe('机器 L3 与项目记忆', () => {
   });
 });
 
+describe('E3a：HA 合并入口全部关闭', () => {
+  test('机器、公开 human、现有 reviewer 三条路径都不能合并 HA', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M-ha', scriptedRunner([0]), {
+      executionMode: 'high_assurance',
+    });
+    const before = git(repo, 'rev-parse', 'HEAD');
+
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByMachine('M-ha', {
+          integrationBranch: 'auto/plan-x',
+          verification: VERIFY,
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_NEEDS_HUMAN',
+    );
+    await assert.rejects(
+      () =>
+        platform.finalizeMission('M-ha', {
+          verdict: 'merge',
+          reasons: ['人想合'],
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M-ha', {
+          verdict: 'merge',
+          reasons: ['检视者想合'],
+          projectRoot: repo,
+          reviewerId: 'rv-1',
+          confirmedBy: 'human-1',
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before, '集成分支没动');
+    const view = await platform.getMissionView('M-ha');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
+  });
+});
+
 describe('A/B 表里的 L3 只数人', () => {
   test('机器放行与方案放弃不算 L3 检视：不稀释「L3 打回」的分母', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');

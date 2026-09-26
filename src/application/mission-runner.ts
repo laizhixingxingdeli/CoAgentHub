@@ -27,6 +27,7 @@ export interface MissionRunnerDeps {
   readonly workspace: WorkspaceManager;
   readonly coordinator: RolePool;
   readonly executor: RolePool;
+  readonly independentReviewer?: RolePool;
   readonly live?: LiveOutput;
   readonly acceptStaleBase?: boolean;
   readonly attemptWallClockMs?: number;
