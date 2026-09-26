@@ -413,6 +413,33 @@ describe('控制面鉴权骨架', () => {
     assert.notEqual(operator.json.error, 'CONTROL_FORBIDDEN');
   });
 
+  test('请求体自述 operator 不能代替控制头；错误体不回显凭据', async () => {
+    const missing = await post('/api/missions', {
+      projectId: 'P-auth',
+      missionId: 'M-spoof-body',
+      contract: CONTRACT,
+      role: 'operator',
+      id: 'op-1',
+    });
+    assert.equal(missing.status, 401);
+    assert.equal(missing.json.error, 'CONTROL_UNAUTHORIZED');
+    assertNoCredentialEcho(missing.text);
+
+    const viewerSpoof = await post(
+      '/api/missions',
+      {
+        projectId: 'P-auth',
+        missionId: 'M-spoof-viewer',
+        contract: CONTRACT,
+        role: 'operator',
+      },
+      control(VW_TOKEN),
+    );
+    assert.equal(viewerSpoof.status, 403);
+    assert.equal(viewerSpoof.json.error, 'CONTROL_FORBIDDEN');
+    assertNoCredentialEcho(viewerSpoof.text);
+  });
+
   test('health/version 保持公开，不因注入 control resolver 改变', async () => {
     const health = await fetch(`${base}/api/health`);
     assert.equal(health.status, 200);

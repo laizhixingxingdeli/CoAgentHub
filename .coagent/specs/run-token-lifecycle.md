@@ -6,6 +6,8 @@ Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 
 
 - Coordinator / Executor Attempt 启动后才发 token。
 - registry 以 token 解析出冻结的 RunContext。
+- 解析结果映射为 PolicyEngine 的 Principal：`role: coordinator` → `kind: coordinator`，`role: executor` → `kind: executor`；绑定 `missionId` / `attemptId` / `workItemId`。身份 id 用 attemptId，不用原始 token。
+- 入口先解析 Run Token，再求策略；与控制面 Principal **不能互换**。控制头不能当 Run Token，请求体里的 `role` / `attemptId` 也不采信。
 - control-plane Principal 与 Run Token 正交，不能互相替代。
 
 ## 收尾吊销
@@ -21,7 +23,7 @@ Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 
 
 ## Non-goals
 
-- TTL / expiry 时间策略。
-- scope / audience 扩展。
+- TTL / expiry 时间策略。**尚未实现，规格与 PolicyEngine 都不得声称已强制执行。** 过期身份只接受调用方已经认定的输入（控制面 resolver 的 `{ status: 'expired' }`）；Run Token 没有这项输入。
+- scope / audience 扩展。尚未实现，不得写成已强制。
 - 持久化 token registry。
 - 多 Runner 租约/fencing；那属于 DurableScheduler / recovery 范围。

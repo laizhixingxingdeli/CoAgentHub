@@ -243,4 +243,40 @@ describe('HTTP 面', () => {
     assert.equal(stolen.status, 409);
     assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
   });
+
+  test('agent 请求体自述身份不被采信，错误体不回显 run token', async () => {
+    await call('/api/missions', { projectId: 'P3', missionId: 'M-spoof', contract: CONTRACT });
+    const coord = await call('/api/missions/M-spoof/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(`/api/missions/M-spoof/work-items/${workItemId}/executor-attempts`, {});
+    const execToken = (exec.json as { token: string }).token;
+
+    const stolen = await call(
+      '/api/agent/coagent_update_plan',
+      {
+        role: 'coordinator',
+        attemptId: (coord.json as { attemptId: string }).attemptId,
+        missionId: 'M-spoof',
+        findings: '自述协调者',
+        rejectedHypotheses: [],
+        decisions: [],
+        direction: 'x',
+        risks: [],
+      },
+      execToken,
+    );
+    assert.equal(stolen.status, 409);
+    assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
+    const echoed = JSON.stringify(stolen.json);
+    assert.equal(echoed.includes(execToken), false);
+    assert.equal(echoed.includes(coordToken), false);
+  });
 });

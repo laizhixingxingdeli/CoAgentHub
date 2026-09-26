@@ -71,6 +71,7 @@ import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import { redactSecrets } from './redact.ts';
+import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -153,6 +154,22 @@ export class PlatformRuleError extends Error {
     this.name = 'PlatformRuleError';
     this.code = code;
   }
+}
+
+/**
+ * 终审入口求一次策略。结论必须与现网相同：HA 机器终审仍是
+ * HIGH_ASSURANCE_NEEDS_HUMAN，其它允许路径不改对外错误码。
+ */
+function assertFinalizePolicy(
+  input: Parameters<typeof evaluatePolicy>[0],
+  haHumanMessage: string,
+): void {
+  const verdict = evaluatePolicy(input);
+  if (verdict.decision === 'allow') return;
+  if (verdict.reason.code === POLICY_REASON.HA_MACHINE_FINALIZE_DENIED) {
+    throw new PlatformRuleError('HIGH_ASSURANCE_NEEDS_HUMAN', haHumanMessage);
+  }
+  throw new PlatformRuleError('POLICY_DENIED', verdict.reason.detail);
 }
 
 export interface PlatformDeps {
@@ -2422,6 +2439,19 @@ export class Platform {
       authority?: { kind: 'human'; principalId?: string };
     },
   ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    assertFinalizePolicy(
+      {
+        principal: {
+          status: 'ok',
+          kind: 'user',
+          id: input.authority?.principalId ?? 'human',
+          role: 'operator',
+        },
+        action: POLICY_ACTION.finalizeHuman,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
     // L3（C4）：send_back / abandon 是短命令，状态与事件一起提交。merge 带 git 合并这一外部副作用，不包：
     // 合并成功后提交丢了，重放会因为目标分支已前移判合并失败——要可重入的合并检测（见规格）。
     if (input.verdict === 'merge') return this.#finalizeMission(missionId, input);
@@ -2446,6 +2476,14 @@ export class Platform {
     },
   ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
     const authority = this.#reviewerAuthority(input.reviewerId, input.confirmedBy);
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'reviewer', id: authority.reviewerId },
+        action: POLICY_ACTION.finalizeReviewer,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
     const body = {
       verdict: input.verdict,
       reasons: input.reasons,
@@ -2644,12 +2682,16 @@ export class Platform {
     }
     // 自动合的范围只有 lightweight + standard。高保证路径的合并必须由人放行——
     // 今天建不出这种 Mission，但门口的规则不能靠「上游恰好建不出来」来守。
-    if (mission.executionMode === 'high_assurance') {
-      throw new PlatformRuleError(
-        'HIGH_ASSURANCE_NEEDS_HUMAN',
-        `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
-      );
-    }
+    // 判定收拢到 PolicyEngine，错误码仍是 HIGH_ASSURANCE_NEEDS_HUMAN。
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'runner', id: 'platform' },
+        action: POLICY_ACTION.finalizeMachine,
+        context: { missionId },
+        state: { executionMode: mission.executionMode },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
     if (input.verification.length === 0) {
       throw new PlatformRuleError(
         'MACHINE_FINALIZE_NEEDS_VERIFICATION',
@@ -2838,6 +2880,14 @@ export class Platform {
       readonly projectRoot?: string;
     },
   ): Promise<{ status: string }> {
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'runner', id: 'platform' },
+        action: POLICY_ACTION.finalizePlan,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#abandonMissionForPlan(missionId, input));
   }

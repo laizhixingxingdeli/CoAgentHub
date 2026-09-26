@@ -17,9 +17,9 @@ Lightweight 缩短 **L2 规划与协调者自验**，不缩短 **机器验收权
 1. **只合进方案声明的集成分支**，合并前现场核对项目仓确实在它上面；master 全程不动。集成分支 → master 仍由人放行。
 2. **证据是合并之后在集成分支上跑出来的方案级验证**，不是 Mission 自己那份 validator 报告。validator 管「这个功能对不对」，集成验证管「有没有打坏别人」；两者来源不同，不能互相顶替。空命令表拒绝。
 3. **验证夹在 merge 与 complete 之间**，红则退回合并前并留在 `awaiting_review`；Mission 只在验证通过后 `completed`。
-4. **范围只有 lightweight + standard**；high_assurance 不得由机器 L3 放行，须用户确认后由检视者签名，或由人经既有入口放行。
+4. **范围只有 lightweight + standard**；high_assurance 不得由机器 L3 放行，须用户确认后由检视者签名，或由人经既有入口放行。**已由 ADR-0006 修订：人或显式配置的高保证 Principal**（当前配置为按用户常设授权登记的检视者签名）；机器 L3 仍不得放行 HA。
 5. **权威记名**：`FinalReview.authority` 四类分得清——人工放行（`human`）、机器放行（`machine`，指向那份集成验证报告）、方案放弃（`plan`）、用户确认后的检视者代签（`reviewer`，含 reviewerId / confirmedBy / 平台时钟 confirmedAt）。早上看记录，能分出每一条是谁放的。检视者代签不是人亲签，不得记成 `human`。
-6. **概率判断只选路，不开门**：夜间检视者只能在隔离重跑 / 跳过 / 重划剩余范围 / 停之间选，永不宣布通过、永不自己发合并；路由分类用的是只读协调者交回的事实。开门只凭第 2 条的确定性证据。**没有用户确认的（夜间）概率判断不能开门。** 与 ADR-0002 对 Decision 的定位同源。
+6. **概率判断只选路，不开门**：夜间检视者只能在隔离重跑 / 跳过 / 重划剩余范围 / 停之间选，永不宣布通过、永不自己发合并；路由分类用的是只读协调者交回的事实。开门只凭第 2 条的确定性证据。**没有用户确认的（夜间）概率判断不能开门。** 与 ADR-0002 对 Decision 的定位同源。本条仍适用于分类和 Jev SHADOW（ADR-0006 未改这条）。
 
 入口：`Platform.finalizeMissionByMachine`（见 Living Spec `machine-final-review`），只由进程内的方案驱动调用，不接 HTTP / agent tools。检视者代签入口是 `Platform.finalizeMissionByReviewer`，只给 `l3` 终审三命令进程内调用，同样不接 HTTP / agent tools。
 
