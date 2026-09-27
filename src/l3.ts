@@ -271,14 +271,27 @@ async function main() {
       reasons: reason ? [reason] : [],
       projectRoot: arg('--repo'),
     };
-    const result =
-      reviewerSignature?.mode === 'reviewer'
-        ? await platform.finalizeMissionByReviewer(target, {
-            ...review,
-            reviewerId: reviewerSignature.reviewerId,
-            confirmedBy: reviewerSignature.confirmedBy,
-          })
-        : await platform.finalizeMission(target, review);
+    let result: { status: string; mergedInto?: string; reason?: string };
+    if (reviewerSignature?.mode === 'reviewer') {
+      // HA merge 只声明身份；授权以每次现读的外置配置为准，不走旧 reviewer 入口。
+      const view =
+        command === 'merge' ? await platform.getMissionView(target) : undefined;
+      result =
+        command === 'merge' && view?.executionMode === 'high_assurance'
+          ? await platform.finalizeMissionByHaAuthority(target, {
+              reviewerId: reviewerSignature.reviewerId,
+              confirmedBy: reviewerSignature.confirmedBy,
+              projectRoot: review.projectRoot,
+              reasons: review.reasons,
+            })
+          : await platform.finalizeMissionByReviewer(target, {
+              ...review,
+              reviewerId: reviewerSignature.reviewerId,
+              confirmedBy: reviewerSignature.confirmedBy,
+            });
+    } else {
+      result = await platform.finalizeMission(target, review);
+    }
     await persist();
 
     console.log(`Mission ${target} → ${result.status}`);

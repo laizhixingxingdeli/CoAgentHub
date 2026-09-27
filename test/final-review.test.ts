@@ -504,7 +504,7 @@ describe('检视者终审签名', () => {
     assert.equal(view.finalReview?.authority?.kind, 'reviewer');
   });
 
-  // 旧不变式：检视者 merge 可终审 HA。E3a 起合并入口全关，E3b 之前 reviewer 对 HA 抛 HIGH_ASSURANCE_MERGE_NOT_AVAILABLE。
+  // 旧 reviewer / 机器入口对 HA merge 仍拒；受控放行走 finalizeMissionByHaAuthority。
   test('HA：检视者 merge 被拒；机器 L3 仍 HIGH_ASSURANCE_NEEDS_HUMAN', async () => {
     const repo = tempRepo();
     const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));

@@ -23,7 +23,8 @@ Mission 级追加记录，**不是** WorkItem `ReviewRecord`，也**不是** `Fi
 - `pass` 不是用户确认，也不签 `FinalReview`。契约 revision、被审 HEAD、被引用 L2 或 ValidationReport 任一变化后，读取方不得把旧 pass 当成当前有效结论。
 - 同一组证据下若最新结论是 `send_back`，不得回退到更早的 `pass`。
 - 缺 ValidationReport、引用不属本 Mission、非 awaiting_review、交卷非 delivered：不得 pass。
-- **HA 确定性验证（E3a）**：合规 HA 在协调者逐条 L2 之后、独立检视之前，由平台在 Mission 工作区**当前 HEAD** 上，用各活跃（非 retired）工作项冻结工单的 `validation` 命令跑 `ValidationEngine`，落盘可追溯报告，覆盖全部活跃工作项。不得用协调者 accept 或执行者自报代替。验证失败、缺失或证据已变，都不能产生有效 pass。有效 pass 只表示待授权，Mission 仍停在 `awaiting_review`，不记 `FinalReview`，本项不开放 HA 合并。
+- **HA 确定性验证（E3a）**：合规 HA 在协调者逐条 L2 之后、独立检视之前，由平台在 Mission 工作区**当前 HEAD** 上，用各活跃（非 retired）工作项冻结工单的 `validation` 命令跑 `ValidationEngine`，落盘可追溯报告，覆盖全部活跃工作项。不得用协调者 accept 或执行者自报代替。验证失败、缺失或证据已变，都不能产生有效 pass。有效 pass 只表示待授权，Mission 仍停在 `awaiting_review`，不记 `FinalReview`。
+- **HA 受控放行（E3b）**：仅当存在当前有效独立检视 pass，且外置常设授权（`COAGENT_HA_AUTHORITY_FILE`，仓库及全部 worktree 外、每次现读）核准登记检视者、确认主体与集成分支时，`l3 merge --as --confirmed-by` 才走 `finalizeMissionByHaAuthority`。方案级命令取全部非 retired 工作项冻结 `validation.commands` 的有序去重集合，在合并结果上重跑。成功记 `FinalReview.authority.kind=reviewer`；授权出处与集成 ValidationReport ID 用持久事件关联。公开 human、旧 reviewer、机器入口仍拒 HA merge。已合未记、回滚失败或第三方推进落持久 unsafe 闸，禁止自动重合。
 
 ## ValidationReport
 

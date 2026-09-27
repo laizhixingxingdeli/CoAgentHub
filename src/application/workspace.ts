@@ -212,6 +212,19 @@ export interface WorkspaceManager {
     toRevision: string;
     expectedHead: string;
   }): Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 本仓库已登记的全部 worktree 路径（含主工作区）。
+   * 枚举失败必须抛错：HA 授权文件越界判定不能在名单不完整时放行。
+   */
+  listWorktreePaths?(projectRoot: string): Promise<readonly string[]>;
+  /**
+   * ancestorRef 是否为 descendantRef 的祖先。无法判定时抛错，由调用方 fail-closed。
+   */
+  revisionIsAncestor?(
+    projectRoot: string,
+    ancestorRef: string,
+    descendantRef?: string,
+  ): Promise<boolean>;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
@@ -363,11 +376,18 @@ export class GitWorktreeManager implements WorkspaceManager {
           `${input.expectedHead.slice(0, 12)}；期间有别的提交，拒绝 reset。`,
       };
     }
-    const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
-    if ((reset as { failed?: boolean }).failed) {
-      return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+    try {
+      const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
+      if ((reset as { failed?: boolean }).failed) {
+        return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+      }
+      return { ok: true };
+    } catch (error) {
+      // promisify(execFile) 在 git 非 0 时抛错，不会带 {failed}。抛出去的话
+      // 平台当次写不进 ha_unsafe，重建后再放行会再走一遍自动合并。
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `reset 失败：${detail}` };
     }
-    return { ok: true };
   }
 
   async head(cwd: string): Promise<string> {
@@ -658,6 +678,40 @@ ${dirty}` };
    */
   async showRootPackageJson(cwd: string, revision: string): Promise<string | undefined> {
     return showRootPackageJsonAt(cwd, revision);
+  }
+
+  async listWorktreePaths(projectRoot: string): Promise<readonly string[]> {
+    const repo = resolve(projectRoot);
+    let porcelain: string;
+    try {
+      porcelain = (await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo })).stdout;
+    } catch (error) {
+      throw new Error(
+        `无法列出 worktree：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const paths = parseWorktreePorcelain(porcelain)
+      .map((entry) => entry.path)
+      .filter((path) => typeof path === 'string' && path.trim() !== '')
+      .map((path) => resolve(path));
+    if (paths.length === 0) {
+      throw new Error(`git worktree list 没有返回任何路径：${repo}`);
+    }
+    return paths;
+  }
+
+  async revisionIsAncestor(
+    projectRoot: string,
+    ancestorRef: string,
+    descendantRef = 'HEAD',
+  ): Promise<boolean> {
+    const repo = resolve(projectRoot);
+    try {
+      await run('git', ['merge-base', '--is-ancestor', ancestorRef, descendantRef], { cwd: repo });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

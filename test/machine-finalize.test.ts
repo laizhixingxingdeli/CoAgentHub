@@ -255,6 +255,33 @@ describe('机器 L3 放行', () => {
     assert.equal(view.finalReview, undefined, '没放行就不该有 finalReview');
   });
 
+  test('验证绿后 runner 期间切换 checkout → 不得 completed，不签 FinalReview', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string }) {
+        runner.seen.push([...input.argv]);
+        git(input.cwd, 'checkout', '-q', '-b', 'diverted');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const { platform } = await readyForReview(repo, wt, 'M1', runner as ReturnType<typeof scriptedRunner>);
+
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /未放行/);
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.finalReview, undefined);
+    assert.equal(view.waitReason, 'waiting_l3');
+  });
+
   test('项目仓不在集成分支上 → 拒绝，什么都不合', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
@@ -485,7 +512,7 @@ describe('机器 L3 与项目记忆', () => {
   });
 });
 
-describe('E3a：HA 合并入口全部关闭', () => {
+describe('E3b：旧 HA 合并入口仍关闭', () => {
   test('机器、公开 human、现有 reviewer 三条路径都不能合并 HA', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
