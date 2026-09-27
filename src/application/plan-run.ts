@@ -767,8 +767,7 @@ export class PlanRun {
   }
 
   /**
-   * 不经升级直接挂起交给人——比如分类判成 high_assurance：那条路永远要人放行，
-   * 问检视者也没用，它没有放行权。
+   * 不经升级直接挂起交给人——比如现做分类需要人工处理，今晚不建 Mission。
    */
   suspendFeature(featureId: string, needsDecision: string): void {
     this.#assertRunning();
@@ -979,15 +978,32 @@ export class PlanRun {
       if (feature.status !== 'running') continue;
       this.#setFeature(feature.featureId, {
         status: 'suspended',
-        needsDecision:
-          open?.featureId === feature.featureId
-            ? `墙钟到点时这张升级单还没人定。要你定：${open.question}`
-            : `墙钟到点时它还在跑（Mission ${feature.missionIds.at(-1) ?? '?'}）。` +
-              '要你定：看它停在哪，续跑、重跑还是放弃。',
+        needsDecision: this.#wallClockNeedsDecision(feature, open),
       });
     }
     this.#stop('wall_clock', `方案级墙钟 ${formatHours(wallClockMs)} 小时到了。`, now);
     return this.#stopped;
+  }
+
+  #wallClockNeedsDecision(feature: PlanFeatureRecord, open: PlanEscalation | undefined): string {
+    if (open?.featureId === feature.featureId) {
+      return `墙钟到点时这张升级单还没人定。要你定：${open.question}`;
+    }
+    const missionId = feature.missionIds.at(-1) ?? '?';
+    const release = this.#haReleases.find(
+      (item) => item.featureId === feature.featureId && item.missionId === missionId,
+    );
+    if (release && !release.decision) {
+      return `墙钟到点时 HA 待放行还没定（Mission ${release.missionId}，所审提交 ${release.reviewedCommit}，截止 ${release.deadline}）。` +
+        '方案已停，PlanRun 里的放行 / 打回命令不再生效。要你定：亲自核对后按 HA 流程放行，还是打回重做。';
+    }
+    if (release?.decision) {
+      return `墙钟到点前 HA 待放行已有结论 ${release.decision.kind}` +
+        `${release.decision.reason ? `（${release.decision.reason}）` : ''}，时间 ${release.decision.at}；` +
+        `方案来不及处理，没有合并，也没开升级单（Mission ${missionId}，所审提交 ${release.reviewedCommit}）。` +
+        '方案已停，PlanRun 里的命令不再生效。要你定：亲自核对后按 HA 流程放行，还是打回重做。';
+    }
+    return `墙钟到点时它还在跑（Mission ${missionId}）。要你定：看它停在哪，续跑、重跑还是放弃。`;
   }
 
   #dropTargets(action: ReviewerAction, raw: unknown): readonly string[] | undefined {

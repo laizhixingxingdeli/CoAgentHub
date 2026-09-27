@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
@@ -33,9 +33,11 @@ import { preflightPlanRepo, slotHolders } from '../src/application/plan-prefligh
 import { runWithDeadline } from '../src/application/plan-driver.ts';
 import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
+import type { HaRelease } from '../src/application/plan-run.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
+import { ExecFileCommandRunner } from '../src/application/validation/exec-file-command-runner.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { buildPersistentPlatform, makeIssuer } from '../src/main.ts';
@@ -914,7 +916,7 @@ const HA_WORK_ORDER: WorkOrder = {
   validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] },
 };
 
-function haCoordinatorScript(): ScriptTable {
+function haCoordinatorScript(workItemId = 'W-1'): ScriptTable {
   return {
     'coordinator:-:0': {
       steps: [
@@ -942,7 +944,7 @@ function haCoordinatorScript(): ScriptTable {
         {
           tool: 'coagent_review_execution_result',
           body: {
-            workItemId: 'W-1',
+            workItemId,
             verdict: 'accept',
             acceptanceResults: ORDER.acceptance.map((criterion) => ({
               criterion,
@@ -968,9 +970,9 @@ function haCoordinatorScript(): ScriptTable {
   };
 }
 
-function haExecutorScript(): ScriptTable {
+function haExecutorScript(workItemId = 'W-1'): ScriptTable {
   return {
-    'executor:W-1': {
+    [`executor:${workItemId}`]: {
       steps: [
         { tool: 'coagent_get_work_order', body: {} },
         {
@@ -1003,7 +1005,7 @@ function haReviewerScript(): ScriptTable {
   };
 }
 
-function stubHaWorkspace(head = 'commit-ha'): WorkspaceManager {
+function stubHaWorkspace(head = 'commit-ha', machineFinalize = false): WorkspaceManager {
   return {
     async prepare(_missionId, projectRoot) {
       return {
@@ -1030,8 +1032,479 @@ function stubHaWorkspace(head = 'commit-ha'): WorkspaceManager {
       return { stat: '', files: [] };
     },
     async release() {},
+    ...(machineFinalize
+      ? {
+          async currentBranch() { return 'auto/plan-x'; },
+          async resetTarget() { return { ok: true }; },
+        }
+      : {}),
   };
 }
+
+function writePlanHaAuthority(): string {
+  const dir = temp('coagent-plan-ha-authority-');
+  const file = join(dir, 'ha-authority.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1,
+    source: 'test-only authority fixture',
+    reviewers: [{ reviewerId: 'claude', confirmedBy: 'test-human', integrationBranches: ['auto/plan-x'] }],
+  }));
+  return resolve(file);
+}
+
+function planHaPassingEngine(ids: SequentialIds) {
+  return {
+    async validate(input: { missionId: string; projectRoot: string }) {
+      const id = ids.next('VR');
+      const report = {
+        id,
+        policyRevision: 1,
+        missionId: input.missionId,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: '2026-01-01T00:00:01.000Z',
+        passed: true,
+        checks: [{
+          kind: 'command' as const,
+          passed: true,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          summary: 'ok',
+          command: {
+            argv: [process.execPath, '-e', 'process.exit(0)'],
+            cwd: input.projectRoot,
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 1,
+            outputTail: 'ok',
+          },
+        }],
+      };
+      return { report, authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 } };
+    },
+  };
+}
+
+const PLAN_HA_WORK_ITEM_ARGV = [
+  process.execPath,
+  '-e',
+  "process.exit(require('fs').readFileSync('a.txt','utf8').trim()==='mission'?0:1)",
+];
+
+async function advancePlanHaMission(
+  missionId: string,
+  platform: Platform,
+  workspace: WorkspaceManager,
+  repo: string,
+) {
+  const prepared = await workspace.prepare(missionId, repo);
+  await platform.recordWorkspace(missionId, {
+    projectRoot: repo,
+    branch: prepared.branch,
+    baseRevision: prepared.baseRevision,
+    targetBranch: prepared.targetBranch,
+  });
+  const coord = await platform.startCoordinatorAttempt(missionId, { profileId: 'coord-a', endpoint: 'local' });
+  await platform.updatePlan(missionId, coord.attemptId, {
+    findings: '改 a.txt', rejectedHypotheses: [], decisions: ['直接改'], direction: '改 a.txt', risks: [],
+  });
+  const order: WorkOrder = {
+    objective: '改 a.txt',
+    allowedScope: ['a.txt'],
+    requiredBehaviour: 'a.txt 变成 mission',
+    constraints: [],
+    acceptance: ['内容是 mission'],
+    verification: ['确定性验证已通过'],
+    doNot: [],
+    contextRefs: [],
+    validation: { commands: [{ argv: PLAN_HA_WORK_ITEM_ARGV, timeoutMs: 30_000 }] },
+  };
+  const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, { title: '改 a.txt', order });
+  await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
+  writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
+  const executor = await platform.startExecutorAttempt(missionId, workItemId, { profileId: 'exec-a', endpoint: 'local' });
+  await platform.submitEvidence(missionId, executor.attemptId, {
+    kind: 'test', summary: '改动已验证', command: 'test fixture', exitCode: 0,
+  });
+  await platform.submitExecutionResult(missionId, executor.attemptId, {
+    outcome: 'completed', summary: '已改好', changedFiles: ['a.txt'], evidenceIds: [], notes: '测试夹具',
+  });
+  await platform.finishAttempt(missionId, executor.attemptId, { endedBy: 'structured_submit' });
+  await platform.reviewExecutionResult(missionId, coord.attemptId, {
+    workItemId,
+    verdict: 'accept',
+    acceptanceResults: order.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '真实 worktree 内容已核对' })),
+    reasons: ['验收通过'],
+    requiredChanges: [],
+  });
+  await platform.submitMissionResult(missionId, coord.attemptId, {
+    outcome: 'delivered', summary: '已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+  });
+  await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
+  await platform.runHaDeterministicValidation(missionId, prepared.cwd);
+  const reviewer = await platform.startIndependentReviewerAttempt(missionId, [{ profileId: 'ir-a', endpoint: 'local' }]);
+  await platform.submitIndependentReview(missionId, reviewer.attemptId, { verdict: 'pass', reasons: ['独立检视通过'] });
+  await platform.finishAttempt(missionId, reviewer.attemptId, { endedBy: 'structured_submit' });
+  return { prepared, workItemId, coordinatorAttemptId: coord.attemptId, reviewerAttemptId: reviewer.attemptId };
+}
+
+describe('真 Git HA 可复用夹具', () => {
+  test('真 Git HA 夹具：有效独立 pass 停在 pending_release，目标未合并', async () => {
+    const repo = repoOn('auto/plan-x');
+    const anchor = git(repo, 'rev-parse', 'HEAD');
+    const worktreeRoot = temp('coagent-plan-ha-worktrees-');
+    const workspace = new GitWorktreeManager(worktreeRoot);
+    const authorityFile = writePlanHaAuthority();
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const projects = new InMemoryProjectRepository();
+    const reports = new InMemoryValidationReportRepository();
+    const activity = new InMemoryActivityLog(clock);
+    const platform = new Platform({
+      projects,
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      workspace,
+      activity,
+      clock,
+      ids,
+      validation: {
+        engine: planHaPassingEngine(ids),
+        reports,
+        commandRunner: new ExecFileCommandRunner(),
+      },
+      haAuthorityFile: authorityFile,
+    });
+    let machineFinalizes = 0;
+    let haFinalizes = 0;
+    const machineFinalize = platform.finalizeMissionByMachine.bind(platform);
+    const haFinalize = platform.finalizeMissionByHaAuthority.bind(platform);
+    platform.finalizeMissionByMachine = async (...args) => {
+      machineFinalizes += 1;
+      return machineFinalize(...args);
+    };
+    platform.finalizeMissionByHaAuthority = async (...args) => {
+      haFinalizes += 1;
+      return haFinalize(...args);
+    };
+
+    const missionId = 'M-plan-ha-fixture';
+    await platform.createClassifiedMission({
+      projectId: 'P',
+      missionId,
+      contract: CONTRACT,
+      facts: HA_PLAN_FACTS,
+      assessment: { ...HA_ASSESSMENT, assessedAt: new Date().toISOString() },
+    });
+    const { prepared, reviewerAttemptId } = await advancePlanHaMission(missionId, platform, workspace, repo);
+    const pass = await platform.effectiveIndependentReviewPass(missionId);
+    const view = await platform.getMissionView(missionId);
+
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.haReviewHold, 'pending_release');
+    assert.equal(view.workspaceRef?.targetBranch, 'auto/plan-x');
+    assert.equal(view.finalReview, undefined);
+    assert.equal(pass?.verdict, 'pass');
+    assert.ok(pass?.validationReportId);
+    assert.equal((await reports.get(pass.validationReportId))?.passed, true);
+    assert.ok(pass?.reviewedCommit);
+    assert.ok(pass?.reviewerAttemptId);
+    assert.equal(pass?.reviewerAttemptId, reviewerAttemptId);
+    const independent = view.independentReviews.find((item) => item.reviewerAttemptId === reviewerAttemptId);
+    assert.ok(independent);
+    assert.equal(pass?.reviewedCommit, independent.reviewedCommit);
+    assert.equal(pass?.validationReportId, independent.validationReportId);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), anchor);
+    assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'base\n');
+    assert.equal(readFileSync(join(prepared.cwd, 'a.txt'), 'utf8'), 'mission\n');
+    assert.notEqual(prepared.cwd, repo);
+    assert.equal(machineFinalizes, 0);
+    assert.equal(haFinalizes, 0);
+    assert.equal(git(repo, 'status', '--porcelain'), '');
+    assert.equal(authorityFile.startsWith(repo), false);
+    assert.equal(authorityFile.startsWith(worktreeRoot), false);
+  });
+
+  test('真 Git：方案 HA approve 受控合入，释放名额后 F2 合入', async () => {
+    const repo = repoOn('auto/plan-x');
+    writeFileSync(join(repo, 'b.txt'), 'base\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'add b');
+    const anchor = git(repo, 'rev-parse', 'HEAD');
+    const worktreeRoot = temp('coagent-plan-ha-approve-worktrees-');
+    const stateDir = temp('coagent-plan-ha-approve-state-');
+    const workspace = new GitWorktreeManager(worktreeRoot);
+    const authorityFile = writePlanHaAuthority();
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const projects = new InMemoryProjectRepository();
+    const reports = new InMemoryValidationReportRepository();
+    const activity = new InMemoryActivityLog(clock);
+    const realRunner = new ExecFileCommandRunner();
+    const commandCalls: { argv: string[]; cwd: string }[] = [];
+    const commandRunner = {
+      async run(input: { argv: readonly string[]; cwd: string; timeoutMs: number }) {
+        commandCalls.push({ argv: [...input.argv], cwd: input.cwd });
+        return realRunner.run(input);
+      },
+    };
+    const platform = new Platform({
+      projects,
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      workspace,
+      activity,
+      clock,
+      ids,
+      validation: { engine: planHaPassingEngine(ids), reports, commandRunner },
+      haAuthorityFile: authorityFile,
+    });
+    let haMergedInto: string | undefined;
+    const events: string[] = [];
+    const originalHaFinalize = platform.finalizeMissionByHaAuthority.bind(platform);
+    platform.finalizeMissionByHaAuthority = async (...args) => {
+      const result = await originalHaFinalize(...args);
+      if (result.status === 'completed') {
+        haMergedInto = result.mergedInto;
+        events.push('ha-merged');
+      }
+      return result;
+    };
+    const originalMachineFinalize = platform.finalizeMissionByMachine.bind(platform);
+    const machineFinalized: string[] = [];
+    platform.finalizeMissionByMachine = async (...args) => {
+      machineFinalized.push(args[0]);
+      return originalMachineFinalize(...args);
+    };
+    const originalDispatch = platform.dispatchWorkItems.bind(platform);
+    platform.dispatchWorkItems = async (...args) => {
+      const result = await originalDispatch(...args);
+      if (args[0] === 'R-ha-approve-F2') events.push('f2-dispatched');
+      return result;
+    };
+
+    const planVerificationArgv = [
+      process.execPath,
+      '-e',
+      "const fs=require('fs');const cp=require('child_process');process.exit(fs.readFileSync('a.txt','utf8').trim()==='mission'&&cp.execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()==='auto/plan-x'?0:1)",
+    ];
+    const standardFacts = {
+      ...HA_PLAN_FACTS,
+      highAssurance: {
+        productionDeployRelease: false,
+        externalPaidOp: false,
+        destructiveData: false,
+        credentialsPermissionsSecurity: false,
+        schemaPublicApiPersistenceCompat: false,
+        unrecoverableExternalSideEffect: false,
+      },
+      standardFloor: { ...HA_PLAN_FACTS.standardFloor, publicInterface: true },
+    };
+    const standardAssessment = {
+      ...HA_ASSESSMENT,
+      goalUncertainty: 0, changeScope: 0, operationalRisk: 0,
+      verificationDifficulty: 0, coordinationNeed: 0, recoveryDifficulty: 0,
+    };
+    const outputFor = (facts: unknown, assessment: unknown) =>
+      '分类完成。\n```json\n' + JSON.stringify({ facts, assessment }) + '\n```\n';
+    const plan = parsePlanSpec({
+      planId: 'PLAN-ha-approve',
+      projectId: 'P',
+      integrationBranch: 'auto/plan-x',
+      intent: '真实 Git HA 放行后推进 F2',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 3_600_000, escalationTimeoutMs: 1_200_000 },
+      integrationVerification: [{ argv: planVerificationArgv, timeoutMs: 30_000 }],
+      features: [
+        { id: 'Ha1', title: 'HA 修改 a', why: '先受控放行', allowedScope: ['a.txt'], acceptance: ['a.txt 为 mission'] },
+        { id: 'F2', title: '标准修改 b', why: '随后推进', allowedScope: ['b.txt'], acceptance: ['b.txt 为 good'] },
+      ],
+    }, { reviewer: 'claude' });
+    const selection = selectPlanCandidates(plan, { projectRoot: repo });
+    const store = new FilePlanRunStore(join(stateDir, 'R-ha-approve.json'));
+    const queryCounts = { Ha1: 0, F2: 0 };
+    let waitingSnapshot: {
+      head: string;
+      haStatus: string;
+      haFeatureStatus: string | undefined;
+      haHold: string | undefined;
+      haFinalReview: unknown;
+      f2Status: string | undefined;
+      f2Classifications: number;
+      f2MissionExists: boolean;
+      release: HaRelease | undefined;
+      pass: Awaited<ReturnType<typeof platform.effectiveIndependentReviewPass>>;
+    } | undefined;
+    const runId = 'R-ha-approve';
+    const haMissionId = `${runId}-Ha1`;
+    const f2MissionId = `${runId}-F2`;
+    const stop = await runPlanOnPlatform(plan, selection, {
+      store,
+      projectRoot: repo,
+      platform,
+      runId,
+      startedAt: new Date().toISOString(),
+      now: () => new Date().toISOString(),
+      sleep: async () => {
+        const now = new Date().toISOString();
+        const run = store.read();
+        const release = run?.haReleases.find((item) => item.featureId === 'Ha1' && !item.decision);
+        if (!waitingSnapshot && run && release) {
+          const view = await platform.getMissionView(haMissionId);
+          const project = await projects.get('P');
+          assert.ok(project);
+          const pass = await platform.effectiveIndependentReviewPass(haMissionId);
+          waitingSnapshot = {
+            head: git(repo, 'rev-parse', 'HEAD'),
+            haStatus: view.status,
+            haFeatureStatus: run.feature('Ha1')?.status,
+            haHold: view.haReviewHold,
+            haFinalReview: view.finalReview,
+            f2Status: run.feature('F2')?.status,
+            f2Classifications: queryCounts.F2,
+            f2MissionExists: project.missions.some((mission) => mission.id === f2MissionId),
+            release,
+            pass,
+          };
+          await store.update((current) => current.decideHaRelease({
+            featureId: release.featureId,
+            missionId: release.missionId,
+            reviewedCommit: release.reviewedCommit,
+            attemptId: release.attemptId,
+            validationReportId: release.validationReportId,
+            target: release.integrationBranch,
+            as: 'claude',
+            confirmedBy: 'test-human',
+            action: 'approve',
+          }, now));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      },
+      log: () => {},
+      persist: async () => {},
+      pauseInFlight: async (missionId) => platform.pauseMission(missionId),
+      runQuery: async ({ source }) => {
+        const factsAndAssessment = source.endsWith(':Ha1')
+          ? (queryCounts.Ha1 += 1, [HA_PLAN_FACTS, HA_ASSESSMENT])
+          : source.endsWith(':F2')
+            ? (queryCounts.F2 += 1, [standardFacts, standardAssessment])
+            : undefined;
+        if (!factsAndAssessment) throw new Error(`未知分类 source：${source}`);
+        if (source.endsWith(':F2')) events.push('f2-classified');
+        return {
+          queryRunId: `Q-${source.split(':').at(-1)}`,
+          outcome: 'answered',
+          record: { output: outputFor(factsAndAssessment[0], factsAndAssessment[1]), id: source },
+        } as never;
+      },
+      runMission: async (missionId) => {
+        if (missionId === haMissionId) {
+          await advancePlanHaMission(missionId, platform, workspace, repo);
+          return { outcome: { kind: 'awaiting_l3_review' }, hops: [], workspace: undefined as never };
+        }
+        if (missionId !== f2MissionId) throw new Error(`未知 Mission：${missionId}`);
+        const prepared = await workspace.prepare(missionId, repo);
+        await platform.recordWorkspace(missionId, {
+          projectRoot: repo,
+          branch: prepared.branch,
+          baseRevision: prepared.baseRevision,
+          targetBranch: prepared.targetBranch,
+        });
+        const coord = await platform.startCoordinatorAttempt(missionId, { profileId: 'coord-f2', endpoint: 'local' });
+        await platform.updatePlan(missionId, coord.attemptId, {
+          findings: '改 b.txt', rejectedHypotheses: [], decisions: ['写入 good'], direction: '改 b.txt', risks: [],
+        });
+        const order: WorkOrder = {
+          objective: '改 b.txt',
+          allowedScope: ['b.txt'],
+          requiredBehaviour: 'b.txt 内容为 good',
+          constraints: [],
+          acceptance: ['b.txt 为 good'],
+          verification: ['脚本验收'],
+          doNot: [],
+          contextRefs: [],
+          validation: { commands: [{ argv: [process.execPath, '-e', "process.exit(require('fs').readFileSync('b.txt','utf8').trim()==='good'?0:1)"], timeoutMs: 30_000 }] },
+        };
+        const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, { title: '改 b.txt', order });
+        await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
+        writeFileSync(join(prepared.cwd, 'b.txt'), 'good\n');
+        const executor = await platform.startExecutorAttempt(missionId, workItemId, { profileId: 'exec-f2', endpoint: 'local' });
+        await platform.submitEvidence(missionId, executor.attemptId, { kind: 'test', summary: 'b.txt 为 good', command: 'fixture', exitCode: 0 });
+        await platform.submitExecutionResult(missionId, executor.attemptId, {
+          outcome: 'completed', summary: 'b.txt 已写入 good', changedFiles: ['b.txt'], evidenceIds: [], notes: '测试推进',
+        });
+        await platform.finishAttempt(missionId, executor.attemptId, { endedBy: 'structured_submit' });
+        await platform.reviewExecutionResult(missionId, coord.attemptId, {
+          workItemId,
+          verdict: 'accept',
+          acceptanceResults: order.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: 'b.txt 已写为 good' })),
+          reasons: ['验收通过'],
+          requiredChanges: [],
+        });
+        await platform.submitMissionResult(missionId, coord.attemptId, {
+          outcome: 'delivered', summary: 'F2 已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+        });
+        await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
+        return { outcome: { kind: 'awaiting_l3_review' }, hops: [], workspace: undefined as never };
+      },
+    });
+
+    assert.ok(waitingSnapshot);
+    assert.equal(waitingSnapshot.head, anchor);
+    assert.equal(waitingSnapshot.haStatus, 'awaiting_review');
+    assert.equal(waitingSnapshot.haFeatureStatus, 'running');
+    assert.equal(waitingSnapshot.haHold, 'pending_release');
+    assert.equal(waitingSnapshot.haFinalReview, undefined);
+    assert.equal(waitingSnapshot.f2Status, 'pending');
+    assert.equal(waitingSnapshot.f2Classifications, 0);
+    assert.equal(waitingSnapshot.f2MissionExists, false);
+    assert.ok(waitingSnapshot.release);
+    assert.ok(waitingSnapshot.pass);
+    assert.equal(waitingSnapshot.pass.verdict, 'pass');
+    assert.equal(waitingSnapshot.release.reviewedCommit, waitingSnapshot.pass.reviewedCommit);
+    assert.equal(waitingSnapshot.release.attemptId, waitingSnapshot.pass.reviewerAttemptId);
+    assert.equal(waitingSnapshot.release.validationReportId, waitingSnapshot.pass.validationReportId);
+
+    assert.equal(stop.reason, 'finished');
+    const run = store.read()!;
+    const haView = await platform.getMissionView(haMissionId);
+    const f2View = await platform.getMissionView(f2MissionId);
+    assert.equal(haView.status, 'completed');
+    assert.equal(haView.finalReview?.authority?.kind, 'reviewer');
+    assert.ok(haMergedInto);
+    assert.equal(haView.finalReview?.mergedInto, haMergedInto);
+    assert.equal(run.feature('Ha1')?.status, 'merged');
+    assert.ok(!machineFinalized.includes(haMissionId));
+    assert.ok(machineFinalized.includes(f2MissionId));
+    assert.equal(run.escalationsOpened, 0);
+    assert.equal(commandCalls.length, 2);
+    for (const call of commandCalls) {
+      assert.deepEqual(call.argv, plan.integrationVerification[0]!.argv);
+      assert.equal(call.cwd, repo);
+      assert.notDeepEqual(call.argv, PLAN_HA_WORK_ITEM_ARGV);
+    }
+    assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8').trim(), 'mission');
+    assert.equal(f2View.status, 'completed');
+    assert.equal(f2View.finalReview?.authority?.kind, 'machine');
+    assert.equal(run.feature('F2')?.status, 'merged');
+    assert.equal(queryCounts.Ha1, 1);
+    assert.equal(queryCounts.F2, 1);
+    assert.equal(readFileSync(join(repo, 'b.txt'), 'utf8').trim(), 'good');
+    assert.notEqual(git(repo, 'rev-parse', 'HEAD'), anchor);
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
+    assert.equal(git(repo, 'show', 'HEAD:b.txt'), 'good');
+    assert.equal(git(repo, 'status', '--porcelain'), '');
+    assert.equal(run.escalations.length, 0);
+    assert.equal(authorityFile.startsWith(repo), false);
+    assert.equal(authorityFile.startsWith(worktreeRoot), false);
+    assert.equal(store.path.startsWith(repo), false);
+    assert.equal(store.path.startsWith(worktreeRoot), false);
+    const mergedAt = events.indexOf('ha-merged');
+    const f2ClassifiedAt = events.indexOf('f2-classified');
+    const f2DispatchAt = events.indexOf('f2-dispatched');
+    assert.ok(mergedAt >= 0);
+    assert.ok(f2ClassifiedAt >= 0);
+    assert.ok(f2DispatchAt >= 0);
+    assert.ok(mergedAt < f2ClassifiedAt);
+    assert.ok(f2ClassifiedAt < f2DispatchAt);
+  });
+});
 
 describe('合格 HA 跑到 pending_release',
   () => {
@@ -1042,7 +1515,7 @@ describe('合格 HA 跑到 pending_release',
       }
     });
 
-    test('真实平台接线：合格 HA 到 pending_release 后挂起，Mission 未合并',
+    test('真实平台接线：合格 HA 等待决定，stop 保留 Mission',
       async () => {
         const clock = new FixedClock();
         const activity = new InMemoryActivityLog(clock);
@@ -1118,6 +1591,14 @@ describe('合格 HA 跑到 pending_release',
         );
         const selection = selectPlanCandidates(plan, { projectRoot: home });
         const store = new FilePlanRunStore(join(home, 'R-ha.json'));
+        let waitingSnapshot: {
+          featureStatus: string | undefined;
+          releaseCount: number;
+          releaseDecision: unknown;
+          missionStatus: string;
+          haReviewHold: string | undefined;
+          finalReview: unknown;
+        } | undefined;
         const output =
           '看完了。\n\n```json\n' +
           JSON.stringify({ facts: HA_PLAN_FACTS, assessment: HA_ASSESSMENT }) +
@@ -1127,14 +1608,45 @@ describe('合格 HA 跑到 pending_release',
           projectRoot: home,
           platform,
           runId: 'R-ha',
-          // 墙钟截止由运行时拿真 Date.now() 算：开跑时间写死在过去，一开跑就判到点、
-          // 暂停 Mission；驱动的 now 固定又使升级等待永远不到期，sleep 立即返回就把
-          // 事件循环饿死。这里跟真时间走，sleep 一被调用就报错——合格 HA 到待放行
-          // 应当立即挂起，不该进入任何等待。
+          // 墙钟与驱动共用真时间，短暂让出事件循环，避免等待循环饿死平台接线测试。
           startedAt: new Date().toISOString(),
           now: () => new Date().toISOString(),
           sleep: async () => {
-            throw new Error('合格 HA 到待放行应立即挂起，驱动不该进入等待');
+            const now = new Date().toISOString();
+            const current = store.read();
+            const pending = current?.haReleases.find((item) => item.featureId === 'Ha1' && !item.decision);
+            if (!waitingSnapshot && current && pending) {
+              const feature = current.feature('Ha1');
+              const view = await platform.getMissionView('R-ha-Ha1');
+              waitingSnapshot = {
+                featureStatus: feature?.status,
+                releaseCount: current.haReleases.filter((item) => item.featureId === 'Ha1' && !item.decision).length,
+                releaseDecision: pending.decision,
+                missionStatus: view.status,
+                haReviewHold: view.haReviewHold,
+                finalReview: view.finalReview,
+              };
+              await store.update((run) => run.decideHaRelease({
+                featureId: pending.featureId,
+                missionId: pending.missionId,
+                reviewedCommit: pending.reviewedCommit,
+                attemptId: pending.attemptId,
+                validationReportId: pending.validationReportId,
+                target: pending.integrationBranch,
+                as: 'claude',
+                confirmedBy: 'test-human',
+                action: 'send_back',
+                reason: '测试中打回',
+              }, now));
+            } else {
+              const open = current?.currentEscalation;
+              if (open && !open.resolution) {
+                await store.update((run) => run.choose(open.id, {
+                  action: 'stop', reason: '测试结束前叫停', decidedBy: 'claude',
+                }, now));
+              }
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
           },
           log: () => {},
           persist: async () => {},
@@ -1169,19 +1681,255 @@ describe('合格 HA 跑到 pending_release',
             return runner.run(missionId, options);
           },
         });
-        assert.equal(stop.reason, 'finished');
+        assert.equal(stop.reason, 'reviewer_stop');
+        assert.equal(waitingSnapshot?.featureStatus, 'running');
+        assert.equal(waitingSnapshot?.releaseCount, 1);
+        assert.equal(waitingSnapshot?.releaseDecision, undefined);
+        assert.equal(waitingSnapshot?.missionStatus, 'awaiting_review');
+        assert.equal(waitingSnapshot?.haReviewHold, 'pending_release');
+        assert.equal(waitingSnapshot?.finalReview, undefined);
         const run = store.read()!;
         const feature = run.feature('Ha1');
         assert.equal(feature?.status, 'suspended');
-        assert.match(feature?.needsDecision ?? '', /HA 待放行/);
-        assert.match(feature?.needsDecision ?? '', /R-ha-Ha1/);
-        assert.match(feature?.needsDecision ?? '', /需人工决定/);
+        assert.equal(run.haReleases[0]?.decision?.kind, 'send_back');
         const view = await platform.getMissionView('R-ha-Ha1');
         assert.equal(view.status, 'awaiting_review');
-        assert.equal(view.haReviewHold, 'pending_release');
         assert.equal(view.finalReview, undefined);
         assert.notEqual(view.status, 'completed');
+        assert.notEqual(view.status, 'blocked');
       });
+
+    test('真平台：HA 待放行时 F2 无分类、会话或派发；skip 后释放名额再推进', async () => {
+      const runId = 'R-ha-slot';
+      const haMissionId = `${runId}-Ha1`;
+      const f2MissionId = `${runId}-F2`;
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const workspace = stubHaWorkspace('commit-ha', true);
+      const reports = new InMemoryValidationReportRepository();
+      const validation = {
+        reports,
+        engine: {
+          async validate(input: { missionId: string }) {
+            const id = ids.next('VR');
+            const report = {
+              id, policyRevision: 1, missionId: input.missionId,
+              startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:00:01.000Z',
+              passed: true,
+              checks: [{ kind: 'command' as const, passed: true, startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:00:01.000Z', summary: 'ok', command: { argv: ['node', '--test'], cwd: '/tmp', exitCode: 0, timedOut: false, durationMs: 1, outputTail: 'ok' } }],
+            };
+            return { report, authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 } };
+          },
+        },
+        commandRunner: {
+          async run() { return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' }; },
+        },
+      };
+      const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids, validation });
+      const originalAbandon = platform.abandonMissionForPlan.bind(platform);
+      const events: string[] = [];
+      platform.abandonMissionForPlan = async (...args) => {
+        const result = await originalAbandon(...args);
+        if (args[0] === haMissionId) events.push('ha-abandon');
+        return result;
+      };
+      const tokens = new RunTokenRegistry();
+      const server: Server = createApi({ platform, tokens, deliveries });
+      await listenLoopback(server, 0);
+      haServers.push(server);
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const home = temp('coagent-ha-slot-');
+      const stateDir = temp('coagent-ha-slot-state-');
+      const standardFacts = {
+        ...HA_PLAN_FACTS,
+        highAssurance: {
+          ...HA_PLAN_FACTS.highAssurance,
+          credentialsPermissionsSecurity: false,
+          schemaPublicApiPersistenceCompat: false,
+        },
+        standardFloor: { ...HA_PLAN_FACTS.standardFloor, publicInterface: true },
+      };
+      const standardAssessment = {
+        ...HA_ASSESSMENT,
+        goalUncertainty: 0, changeScope: 0, operationalRisk: 0,
+        verificationDifficulty: 0, coordinationNeed: 0, recoveryDifficulty: 0,
+      };
+      const outputFor = (facts: unknown, assessment: unknown) =>
+        '分类完成。\n```json\n' + JSON.stringify({ facts, assessment }) + '\n```\n';
+      const plan = parsePlanSpec({
+        planId: 'PLAN-ha-slot', projectId: 'P', integrationBranch: 'auto/plan-x', intent: '验证 HA 占名额',
+        stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 3_600_000, escalationTimeoutMs: 1_200_000 },
+        integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 30_000 }],
+        features: [
+          { id: 'Ha1', title: '合格 HA', why: '先审查', allowedScope: ['a.txt'], acceptance: ['绿'] },
+          { id: 'F2', title: '后续标准功能', why: '等待名额', allowedScope: ['a.txt'], acceptance: ['绿'] },
+        ],
+      }, { reviewer: 'claude' });
+      const selection = selectPlanCandidates(plan, { projectRoot: home });
+      const store = new FilePlanRunStore(join(stateDir, `${runId}.json`));
+      const queryCounts = { Ha1: 0, F2: 0 };
+      const counters = { f2CoordinatorSessions: 0, f2WorkItemCreates: 0, f2Dispatches: 0, f2ExecutorSessions: 0 };
+      let waitingSnapshot: {
+        featureStatus: string | undefined;
+        f2Status: string | undefined;
+        f2MissionExists: boolean;
+        f2Classifications: number;
+        f2CoordinatorSessions: number;
+        f2WorkItemCreates: number;
+        f2Dispatches: number;
+        escalationsOpened: number;
+        haAbandoned: boolean;
+        haStatus: string;
+        haHold: string | undefined;
+        haFinalReview: unknown;
+      } | undefined;
+      const stop = await runPlanOnPlatform(plan, selection, {
+        store, projectRoot: home, platform, runId,
+        startedAt: new Date().toISOString(), now: () => new Date().toISOString(),
+        sleep: async () => {
+          const now = new Date().toISOString();
+          const run = store.read();
+          const pending = run?.haReleases.find((release) => release.featureId === 'Ha1' && !release.decision);
+          if (!waitingSnapshot && run && pending) {
+            const haView = await platform.getMissionView(haMissionId);
+            const project = await projects.get('P');
+            assert.ok(project, 'HA 首条 Mission 已创建项目');
+            waitingSnapshot = {
+              featureStatus: run.feature('Ha1')?.status,
+              f2Status: run.feature('F2')?.status,
+              f2MissionExists: project.missions.some((mission) => mission.id === f2MissionId),
+              f2Classifications: queryCounts.F2,
+              f2CoordinatorSessions: counters.f2CoordinatorSessions,
+              f2WorkItemCreates: counters.f2WorkItemCreates,
+              f2Dispatches: counters.f2Dispatches,
+              escalationsOpened: run.escalationsOpened,
+              haAbandoned: events.includes('ha-abandon'),
+              haStatus: haView.status,
+              haHold: haView.haReviewHold,
+              haFinalReview: haView.finalReview,
+            };
+            await store.update((current) => current.decideHaRelease({
+              featureId: pending.featureId, missionId: pending.missionId,
+              reviewedCommit: pending.reviewedCommit, attemptId: pending.attemptId,
+              validationReportId: pending.validationReportId, target: pending.integrationBranch,
+              as: 'claude', confirmedBy: 'test-human', action: 'send_back', reason: '先放弃再重跑',
+            }, now));
+          } else {
+            const open = run?.currentEscalation;
+            if (open && !open.resolution) {
+              await store.update((current) => current.choose(open.id, {
+                action: 'skip', reason: '释放项目名额', decidedBy: 'claude',
+              }, now));
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        },
+        log: () => {}, persist: async () => {}, pauseInFlight: async (missionId) => platform.pauseMission(missionId),
+        runQuery: async ({ source }) => {
+          const isF2 = source.endsWith(':F2');
+          const featureId = isF2 ? 'F2' : 'Ha1';
+          queryCounts[featureId] += 1;
+          if (isF2) events.push('f2-classification');
+          return {
+            queryRunId: `Q-${featureId}`, outcome: 'answered',
+            record: { output: outputFor(isF2 ? standardFacts : HA_PLAN_FACTS, isF2 ? standardAssessment : HA_ASSESSMENT), id: `Q-${featureId}` },
+          } as never;
+        },
+        runMission: async (missionId, options) => {
+          const workItemId = missionId === f2MissionId ? 'W-2' : 'W-1';
+          const coordinatorScript = new ScriptedRuntime(haCoordinatorScript(workItemId));
+          const executorScript = new ScriptedRuntime(haExecutorScript(workItemId));
+          const coordinatorRuntime = {
+            kind: coordinatorScript.kind,
+            supportsQuery: coordinatorScript.supportsQuery,
+            start: async (spec: Parameters<typeof coordinatorScript.start>[0]) => {
+              if (missionId === f2MissionId && spec.role === 'coordinator') {
+                counters.f2CoordinatorSessions += 1;
+                events.push('f2-coordinator');
+              }
+              const agentRun = await coordinatorScript.start(spec);
+              agentRun.on((event) => {
+                if (missionId !== f2MissionId || event.kind !== 'tool.started') return;
+                if (event.name === 'coagent_create_work_item') {
+                  counters.f2WorkItemCreates += 1;
+                  events.push('f2-work-item');
+                }
+                if (event.name === 'coagent_dispatch_work_item') {
+                  counters.f2Dispatches += 1;
+                  events.push('f2-dispatch');
+                }
+              });
+              return agentRun;
+            },
+          };
+          const executorRuntime = {
+            kind: executorScript.kind,
+            supportsQuery: executorScript.supportsQuery,
+            start: async (spec: Parameters<typeof executorScript.start>[0]) => {
+              if (missionId === f2MissionId && spec.role === 'executor') counters.f2ExecutorSessions += 1;
+              return executorScript.start(spec);
+            },
+          };
+          const runner = new MissionRunner({
+            platform, tokens: makeIssuer(platform, tokens), baseUrl, workspace,
+            coordinator: { runtime: coordinatorRuntime, candidates: [{ endpoint: 'local', profileId: 'coord-a' }] },
+            executor: { runtime: executorRuntime, candidates: [{ endpoint: 'local', profileId: 'exec-a' }] },
+            independentReviewer: { runtime: new ScriptedRuntime(haReviewerScript()), candidates: [{ endpoint: 'local', profileId: 'ir-a' }] },
+          });
+          return runner.run(missionId, options);
+        },
+      });
+      assert.equal(waitingSnapshot?.featureStatus, 'running');
+      assert.equal(waitingSnapshot?.f2Status, 'pending');
+      assert.equal(waitingSnapshot?.f2MissionExists, false);
+      assert.equal(waitingSnapshot?.f2Classifications, 0);
+      assert.equal(waitingSnapshot?.f2CoordinatorSessions, 0);
+      assert.equal(waitingSnapshot?.f2WorkItemCreates, 0);
+      assert.equal(waitingSnapshot?.f2Dispatches, 0);
+      assert.equal(waitingSnapshot?.escalationsOpened, 0);
+      assert.equal(waitingSnapshot?.haAbandoned, false);
+      assert.equal(waitingSnapshot?.haStatus, 'awaiting_review');
+      assert.equal(waitingSnapshot?.haHold, 'pending_release');
+      assert.equal(waitingSnapshot?.haFinalReview, undefined);
+      const run = store.read()!;
+      assert.equal(stop.reason, 'finished');
+      assert.equal(run.haReleases[0]?.decision?.kind, 'send_back');
+      assert.equal(run.escalationsOpened, 1);
+      assert.equal(run.escalations[0]?.resolution?.kind, 'decided');
+      assert.equal(run.escalations[0]?.resolution?.action, 'skip');
+      assert.equal(run.feature('F2')?.status, 'merged');
+      // F2 协调分两跳：规划 / 派发，以及评审 / 交卷。
+      assert.equal(counters.f2CoordinatorSessions, 2);
+      assert.equal(counters.f2WorkItemCreates, 1);
+      assert.equal(counters.f2Dispatches, 1);
+      assert.equal(counters.f2ExecutorSessions, 1);
+      const abandonAt = events.indexOf('ha-abandon');
+      const classifyAt = events.indexOf('f2-classification');
+      const coordinatorAt = events.indexOf('f2-coordinator');
+      const dispatchAt = events.indexOf('f2-dispatch');
+      assert.ok(abandonAt >= 0);
+      assert.ok(classifyAt >= 0);
+      assert.ok(coordinatorAt >= 0);
+      assert.ok(dispatchAt >= 0);
+      assert.ok(abandonAt < classifyAt);
+      assert.ok(classifyAt < coordinatorAt);
+      assert.ok(coordinatorAt < dispatchAt);
+      assert.ok(!run.escalations.some((escalation) => escalation.featureId === 'F2' && /PROJECT_BUSY/.test(escalation.failure)));
+      assert.ok(!run.escalations.some((escalation) => escalation.featureId === 'F2'));
+      assert.equal(queryCounts.Ha1, 1);
+      assert.equal(queryCounts.F2, 1);
+      const abandonedHa = await platform.getMissionView(haMissionId);
+      assert.equal(abandonedHa.status, 'blocked');
+      const abandonAuthority = abandonedHa.finalReview?.authority;
+      assert.equal(abandonAuthority?.kind, 'plan');
+      if (abandonAuthority?.kind === 'plan') {
+        assert.equal(abandonAuthority.planRunId, runId);
+        assert.equal(abandonAuthority.escalationId, 'E-1');
+      }
+    });
 
     test('禁止副作用字段缺失时挂起，建单前不创建 Mission', async () => {
       const clock = new FixedClock();

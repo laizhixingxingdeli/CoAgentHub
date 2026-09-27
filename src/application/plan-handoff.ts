@@ -54,13 +54,19 @@ function costText(costs: HandoffCosts | undefined): string {
   );
 }
 
-function featureTail(feature: PlanFeatureRecord, stopped: boolean): string {
+function featureTail(
+  feature: PlanFeatureRecord,
+  stopped: boolean,
+  pendingRelease?: { missionId: string; deadline: string },
+): string {
   const last = feature.missionIds.at(-1);
   switch (feature.status) {
     case 'merged':
       return `合入（${last ?? '?'}）`;
     case 'running':
-      return `在跑（${last ?? '?'}）`;
+      return pendingRelease
+        ? `HA 待放行，等检视者决定（Mission ${pendingRelease.missionId}，截止 ${pendingRelease.deadline}）`
+        : `在跑（${last ?? '?'}）`;
     case 'pending':
       return stopped
         ? '没轮到。要你定：下一轮接着跑它吗（run-plan 只跑没标 done 的）？'
@@ -95,7 +101,33 @@ export function renderPlanHandoff(
       used > 0 || open?.featureId === feature.featureId
         ? `  重跑 ${used}/${run.stopConditions.maxRerunsPerFeature}`
         : '';
-    lines.push(`  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}${featureTail(feature, Boolean(stop))}${rerun}`);
+    const currentMission = feature.missionIds.at(-1);
+    const pendingForFeature = run.haReleases.find(
+      (item) => item.featureId === feature.featureId && item.missionId === currentMission && !item.decision,
+    );
+    lines.push(
+      `  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}` +
+        `${featureTail(feature, Boolean(stop), pendingForFeature)}${rerun}`,
+    );
+  }
+  for (const record of run.haReleases) {
+    const decision = record.decision;
+    if (!decision) continue;
+    const feature = run.feature(record.featureId);
+    const by = decision.by ? `${decision.by} 经 ${decision.confirmedBy ?? '确认人未知'} 确认` : '';
+    const reason = decision.reason ? `；理由：${decision.reason}` : '';
+    const result =
+      decision.kind !== 'approve'
+        ? ''
+        : feature?.status === 'merged'
+          ? '；已合入'
+          : feature?.status === 'running'
+            ? '；受控合入进行中'
+            : '；未合并（原因见该功能那一行）';
+    lines.push(
+      `  ⚑ HA 放行记录 ${record.featureId} / Mission ${record.missionId}：${decision.kind}（${decision.at}）` +
+        `${by ? `；${by}` : ''}${reason}${result}`,
+    );
   }
   if (release && !release.decision && !stop && Date.parse(context.now) < Date.parse(release.deadline)) {
     lines.push(`  ⚑ HA 待放行 ${release.featureId}：Mission ${release.missionId}，提交 ${release.reviewedCommit}，检视 ${release.attemptId}，报告 ${release.validationReportId}，截止 ${release.deadline}`);
