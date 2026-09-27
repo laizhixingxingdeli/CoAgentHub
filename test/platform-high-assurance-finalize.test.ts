@@ -298,12 +298,17 @@ function release(
   platform: Platform,
   missionId: string,
   repo: string,
-  over: { reviewerId?: string; confirmedBy?: string } = {},
+  over: {
+    reviewerId?: string;
+    confirmedBy?: string;
+    verification?: readonly { argv: readonly string[]; timeoutMs: number }[];
+  } = {},
 ) {
   return platform.finalizeMissionByHaAuthority(missionId, {
     reviewerId: over.reviewerId ?? 'rv-1',
     confirmedBy: over.confirmedBy ?? 'human-1',
     projectRoot: repo,
+    ...(over.verification === undefined ? {} : { verification: over.verification }),
   });
 }
 
@@ -500,6 +505,115 @@ describe('HA 受控放行：分支与 pass', () => {
       () => release(back.platform, back.missionId, back.repo),
       (error: unknown) => error instanceof PlatformRuleError && error.code === 'HA_NO_EFFECTIVE_PASS',
     );
+  });
+});
+
+describe('HA 受控放行：显式方案验证', () => {
+  test('显式命令保序运行并取代工作项命令', async () => {
+    const fx = await haReady();
+    const commands = [
+      { argv: ['node', '-e', 'first'], timeoutMs: 1000 },
+      { argv: ['node', '-e', 'second'], timeoutMs: 2000 },
+    ];
+    const result = await release(fx.platform, fx.missionId, fx.repo, { verification: commands });
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(fx.runner.seen, commands.map((command) => [...command.argv]));
+    assert.equal(git(fx.repo, 'show', 'HEAD:a.txt'), 'mission');
+  });
+
+  test('空命令、畸形 argv 与非法 timeout 在合并前拒绝', async () => {
+    const cases: unknown[] = [[], [{ argv: [], timeoutMs: 1 }], [{ argv: [''], timeoutMs: 1 }],
+      [{ argv: ['node', 3], timeoutMs: 1 }], ...[0, -1, 1.5, '1'].map((timeoutMs) => [{ argv: ['node'], timeoutMs }])];
+    for (const verification of cases) {
+      const fx = await haReady();
+      const head = git(fx.repo, 'rev-parse', 'HEAD');
+      await assert.rejects(() => release(fx.platform, fx.missionId, fx.repo, {
+        verification: verification as { argv: readonly string[]; timeoutMs: number }[],
+      }), (error: unknown) => error instanceof PlatformRuleError && error.code === 'HA_VERIFICATION_REQUIRED');
+      assert.equal(git(fx.repo, 'rev-parse', 'HEAD'), head);
+      assert.equal((await fx.platform.getMissionView(fx.missionId)).status, 'awaiting_review');
+    }
+  });
+
+  test('显式验证红：回滚到锚点且仍 awaiting_review', async () => {
+    const explicit = ['node', '-e', 'explicit-fail'];
+    const fx = await haReady({ runner: scriptedRunner([1]) });
+    const anchor = git(fx.repo, 'rev-parse', 'HEAD');
+    const result = await release(fx.platform, fx.missionId, fx.repo, {
+      verification: [{ argv: explicit, timeoutMs: 1000 }],
+    });
+    assert.equal(result.status, 'awaiting_review');
+    assert.equal(result.rolledBackTo, anchor);
+    assert.equal(git(fx.repo, 'rev-parse', 'HEAD'), anchor);
+    assert.equal((await fx.platform.getMissionView(fx.missionId)).finalReview, undefined);
+    assert.deepEqual(fx.runner.seen, [explicit]);
+  });
+
+  test('显式验证红且回滚失败：unsafe 持久并禁止再次放行', async () => {
+    const explicit = ['node', '-e', 'explicit-fail'];
+    const fx = await haReady({ runner: scriptedRunner([1]) });
+    fx.workspace.resetTarget = async () => { throw new Error('simulated reset failure'); };
+    const result = await release(fx.platform, fx.missionId, fx.repo, {
+      verification: [{ argv: explicit, timeoutMs: 1000 }],
+    });
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /禁止自动重合/);
+    const events = await fx.platform.getActivity(fx.missionId);
+    assert.equal((events.find((event) => event.kind === 'final_review.ha_unsafe')?.data as { reason?: string } | undefined)?.reason, 'rollback_failed');
+    assert.deepEqual(fx.runner.seen, [explicit]);
+    const again = await release(rebuildPlatform(fx), fx.missionId, fx.repo, {
+      verification: [{ argv: explicit, timeoutMs: 1000 }],
+    });
+    assert.match(again.reason ?? '', /禁止自动重合/);
+    assert.deepEqual(fx.runner.seen, [explicit]);
+  });
+
+  test('显式验证期间目标推进：unsafe 且不完成', async () => {
+    const explicit = ['node', '-e', 'explicit-advance'];
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string }) {
+        runner.seen.push([...input.argv]);
+        writeFileSync(join(input.cwd, 'explicit-during.txt'), 'x\\n');
+        git(input.cwd, 'add', '-A');
+        git(input.cwd, 'commit', '-q', '-m', 'advance during explicit verify');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const fx = await haReady({ runner: runner as ReturnType<typeof scriptedRunner> });
+    const result = await release(fx.platform, fx.missionId, fx.repo, {
+      verification: [{ argv: explicit, timeoutMs: 1000 }],
+    });
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /禁止自动重合/);
+    assert.equal((await fx.platform.getMissionView(fx.missionId)).finalReview, undefined);
+    assert.deepEqual(runner.seen, [explicit]);
+    const events = await fx.platform.getActivity(fx.missionId);
+    assert.equal((events.find((event) => event.kind === 'final_review.ha_unsafe')?.data as { reason?: string } | undefined)?.reason, 'advanced_during_verify');
+  });
+
+  test('显式命令下三道闸仍在合并前拒绝且状态不变', async () => {
+    const explicit = [{ argv: ['node', '-e', 'must-not-run'], timeoutMs: 1000 }];
+    // 临时仓库 init 后本来就有 master，不能再以 master 为集成分支新建；照「master 拒绝」
+    // 用例的造法：夹具照常建好再 checkout master，目标不一致或 master 禁令任一拦下都算。
+    const onMaster = await haReady();
+    git(onMaster.repo, 'checkout', '-q', 'master');
+    const cases = [
+      { fx: await haReady(), over: { reviewerId: 'unregistered' }, codes: ['HA_AUTHORITY_REVIEWER_UNREGISTERED'] },
+      { fx: await haReady({ skipPass: true }), over: {}, codes: ['HA_NO_EFFECTIVE_PASS'] },
+      { fx: onMaster, over: {}, codes: ['HA_TARGET_MISMATCH', 'HA_AUTHORITY_MASTER_FORBIDDEN'] },
+    ];
+    for (const item of cases) {
+      const head = git(item.fx.repo, 'rev-parse', 'HEAD');
+      await assert.rejects(() => release(item.fx.platform, item.fx.missionId, item.fx.repo, {
+        ...item.over, verification: explicit,
+      }), (error: unknown) => error instanceof PlatformRuleError && item.codes.includes(error.code));
+      assert.equal(git(item.fx.repo, 'rev-parse', 'HEAD'), head);
+      const view = await item.fx.platform.getMissionView(item.fx.missionId);
+      assert.equal(view.status, 'awaiting_review');
+      assert.equal(view.finalReview, undefined);
+      assert.deepEqual(item.fx.runner.seen, []);
+    }
   });
 });
 
