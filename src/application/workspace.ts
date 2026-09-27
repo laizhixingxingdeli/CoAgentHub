@@ -376,11 +376,18 @@ export class GitWorktreeManager implements WorkspaceManager {
           `${input.expectedHead.slice(0, 12)}；期间有别的提交，拒绝 reset。`,
       };
     }
-    const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
-    if ((reset as { failed?: boolean }).failed) {
-      return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+    try {
+      const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
+      if ((reset as { failed?: boolean }).failed) {
+        return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+      }
+      return { ok: true };
+    } catch (error) {
+      // promisify(execFile) 在 git 非 0 时抛错，不会带 {failed}。抛出去的话
+      // 平台当次写不进 ha_unsafe，重建后再放行会再走一遍自动合并。
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `reset 失败：${detail}` };
     }
-    return { ok: true };
   }
 
   async head(cwd: string): Promise<string> {

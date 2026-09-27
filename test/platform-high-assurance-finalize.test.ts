@@ -5,7 +5,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -171,11 +171,12 @@ async function haReady(options?: {
   const engineBundle = passingEngine(ids, reports);
   const authorityFile = options?.authorityFile ?? writeAuthority({ branches: [branch] });
   const innerProjects = new InMemoryProjectRepository();
+  const activity = new InMemoryActivityLog(clock);
   const platform2 = new Platform({
     projects: innerProjects,
     deliveries: new InMemoryDeliveryRepository(clock, ids),
     workspace,
-    activity: new InMemoryActivityLog(clock),
+    activity,
     clock,
     ids,
     validation: {
@@ -270,7 +271,27 @@ async function haReady(options?: {
     prepared,
     reports,
     clock,
+    ids,
+    projects: innerProjects,
+    activity,
   };
+}
+
+function rebuildPlatform(fx: Awaited<ReturnType<typeof haReady>>): Platform {
+  return new Platform({
+    projects: fx.projects,
+    deliveries: new InMemoryDeliveryRepository(fx.clock, fx.ids),
+    workspace: fx.workspace,
+    activity: fx.activity,
+    clock: fx.clock,
+    ids: fx.ids,
+    validation: {
+      engine: passingEngine(fx.ids, fx.reports),
+      reports: fx.reports,
+      commandRunner: fx.runner,
+    },
+    haAuthorityFile: fx.authorityFile,
+  });
 }
 
 function release(
@@ -305,6 +326,41 @@ describe('HA 受控放行：配置拒绝', () => {
     );
     assert.equal(git(fx.repo, 'rev-parse', 'HEAD'), before);
     const view = await fx.platform.getMissionView(fx.missionId);
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
+  });
+
+  test('仓库内符号链接指向仓库外：拒绝且 HEAD/状态/FinalReview 不变', async (t) => {
+    const fx = await haReady();
+    const link = join(fx.repo, 'ha-inside-link.json');
+    try {
+      symlinkSync(fx.authorityFile, link);
+    } catch {
+      t.skip('未验证：本机无权创建符号链接');
+      return;
+    }
+    const before = git(fx.repo, 'rev-parse', 'HEAD');
+    const platform = new Platform({
+      projects: fx.projects,
+      deliveries: new InMemoryDeliveryRepository(fx.clock, fx.ids),
+      workspace: fx.workspace,
+      activity: fx.activity,
+      clock: fx.clock,
+      ids: fx.ids,
+      validation: {
+        engine: passingEngine(fx.ids, fx.reports),
+        reports: fx.reports,
+        commandRunner: fx.runner,
+      },
+      haAuthorityFile: link,
+    });
+    await assert.rejects(
+      () => release(platform, fx.missionId, fx.repo),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HA_AUTHORITY_PATH_IN_REPO',
+    );
+    assert.equal(git(fx.repo, 'rev-parse', 'HEAD'), before);
+    const view = await platform.getMissionView(fx.missionId);
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.finalReview, undefined);
   });
@@ -535,5 +591,78 @@ describe('HA 受控放行：绿 / 红 / 重复 / unsafe', () => {
     assert.equal(second.mergedInto, first.mergedInto);
     assert.equal(fx.runner.seen.length, seen);
     assert.equal((await fx.platform.getActivity(fx.missionId)).length, events);
+  });
+
+  test('runner 期间推进目标：验证绿也不得 completed，unsafe 禁止再合', async () => {
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string }) {
+        runner.seen.push([...input.argv]);
+        writeFileSync(join(input.cwd, 'during.txt'), 'x\n');
+        git(input.cwd, 'add', '-A');
+        git(input.cwd, 'commit', '-q', '-m', 'advance during verify');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const fx = await haReady({ runner: runner as ReturnType<typeof scriptedRunner> });
+    const result = await release(fx.platform, fx.missionId, fx.repo);
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /禁止自动重合/);
+    const view = await fx.platform.getMissionView(fx.missionId);
+    assert.equal(view.finalReview, undefined);
+    const events = await fx.platform.getActivity(fx.missionId);
+    const unsafe = events.find((event) => event.kind === 'final_review.ha_unsafe');
+    assert.equal((unsafe?.data as { reason?: string } | undefined)?.reason, 'advanced_during_verify');
+    const head = git(fx.repo, 'rev-parse', 'HEAD');
+    const again = await release(fx.platform, fx.missionId, fx.repo);
+    assert.equal(again.status, 'awaiting_review');
+    assert.match(again.reason ?? '', /禁止自动重合/);
+    assert.equal(git(fx.repo, 'rev-parse', 'HEAD'), head);
+    assert.equal(runner.seen.length, 1, '第二次不得再跑验证或合并');
+  });
+
+  test('runner 期间切换 checkout：验证绿也不得 completed，unsafe 禁止再合', async () => {
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string }) {
+        runner.seen.push([...input.argv]);
+        git(input.cwd, 'checkout', '-q', '-b', 'diverted');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const fx = await haReady({ runner: runner as ReturnType<typeof scriptedRunner> });
+    const result = await release(fx.platform, fx.missionId, fx.repo);
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /禁止自动重合/);
+    const view = await fx.platform.getMissionView(fx.missionId);
+    assert.equal(view.finalReview, undefined);
+    const events = await fx.platform.getActivity(fx.missionId);
+    const unsafe = events.find((event) => event.kind === 'final_review.ha_unsafe');
+    assert.equal((unsafe?.data as { reason?: string } | undefined)?.reason, 'advanced_during_verify');
+    git(fx.repo, 'checkout', '-q', 'auto/plan-x');
+    const again = await release(fx.platform, fx.missionId, fx.repo);
+    assert.equal(again.status, 'awaiting_review');
+    assert.match(again.reason ?? '', /禁止自动重合/);
+    assert.equal(runner.seen.length, 1, '第二次不得再跑验证或合并');
+  });
+
+  test('git reset 抛错后重建平台再次放行仍被禁止', async () => {
+    const fx = await haReady({ runner: scriptedRunner([1]) });
+    fx.workspace.resetTarget = async () => {
+      throw new Error('simulated git reset failure');
+    };
+    const first = await release(fx.platform, fx.missionId, fx.repo);
+    assert.equal(first.status, 'awaiting_review');
+    assert.match(first.reason ?? '', /禁止自动重合/);
+    const view = await fx.platform.getMissionView(fx.missionId);
+    assert.equal(view.finalReview, undefined);
+    const events = await fx.platform.getActivity(fx.missionId);
+    const unsafe = events.find((event) => event.kind === 'final_review.ha_unsafe');
+    assert.equal((unsafe?.data as { reason?: string } | undefined)?.reason, 'rollback_failed');
+    const rebuilt = rebuildPlatform(fx);
+    const again = await release(rebuilt, fx.missionId, fx.repo);
+    assert.equal(again.status, 'awaiting_review');
+    assert.match(again.reason ?? '', /禁止自动重合/);
+    assert.equal(fx.runner.seen.length, 1, '重建后不得再跑验证或合并');
   });
 });

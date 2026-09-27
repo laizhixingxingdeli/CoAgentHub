@@ -3750,6 +3750,27 @@ export class Platform {
         ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
       };
     }
+    if (outcome.kind === 'advanced_during_verify') {
+      await this.#markHaUnsafe(mission, 'advanced_during_verify', {
+        head: outcome.head,
+        anchor: outcome.anchor,
+        reportId: outcome.report.id,
+      });
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证期间目标被推进或 checkout 被切换（报告 ${outcome.report.id}）；未签字。请人工核对锚点、当前 HEAD 与集成报告。`,
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        advancedDuringVerify: true,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: this.#haUnsafeHint('advanced_during_verify'),
+      };
+    }
 
     const reasons =
       input.reasons && input.reasons.length > 0
@@ -3914,6 +3935,24 @@ export class Platform {
         reportId: outcome.report.id,
         reason: outcome.reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
         ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
+      };
+    }
+    if (outcome.kind === 'advanced_during_verify') {
+      // 与 HA 共用复核：绿之后 checkout / HEAD 已不是本次合并结果时，不能记 completed。
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证期间目标被推进或 checkout 被切换（报告 ${outcome.report.id}）；未签字。` +
+          '不能把这次验证当成仍对着受授权的合并结果。',
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        advancedDuringVerify: true,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: '集成验证期间目标被推进或 checkout 被切换，未放行',
       };
     }
 
@@ -4538,6 +4577,14 @@ export class Platform {
         reset: { ok: boolean; reason?: string };
       }
     | { kind: 'verified'; mergedInto: string; report: ValidationReport; anchor: string }
+    | {
+        kind: 'advanced_during_verify';
+        mergedInto: string;
+        report: ValidationReport;
+        anchor: string;
+        checkout?: string;
+        head: string;
+      }
   > {
     const workspace = this.#workspace;
     const runner = this.#validation?.commandRunner;
@@ -4620,12 +4667,39 @@ export class Platform {
       mergedInto,
     });
     if (!passed) {
-      const reset = await workspace.resetTarget({
-        projectRoot,
-        toRevision: anchor,
-        expectedHead: mergedInto,
-      });
+      let reset: { ok: boolean; reason?: string };
+      try {
+        reset = await workspace.resetTarget({
+          projectRoot,
+          toRevision: anchor,
+          expectedHead: mergedInto,
+        });
+      } catch (error) {
+        // git reset 抛错不能当未处理异常溜走：当次必须留下可持久识别的
+        // rollback_failed，重建平台后再放行才能继续拦住。
+        reset = {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
       return { kind: 'verify_failed', mergedInto, report, anchor, reset };
+    }
+    // 验证绿了还不能签字：runner 期间第三方可能已推进目标或切走 checkout。
+    // checkout 仍是目标分支、HEAD 仍是本次合并提交（合并结果未被替换），缺一不签 FinalReview。
+    const checkoutNow =
+      typeof workspace.currentBranch === 'function'
+        ? await workspace.currentBranch(projectRoot)
+        : undefined;
+    const headNow = await workspace.targetHead(projectRoot);
+    if (checkoutNow !== integrationBranch || headNow !== mergedInto) {
+      return {
+        kind: 'advanced_during_verify',
+        mergedInto,
+        report,
+        anchor,
+        checkout: checkoutNow,
+        head: headNow,
+      };
     }
     return { kind: 'verified', mergedInto, report, anchor };
   }
@@ -4719,7 +4793,7 @@ export class Platform {
 
   async #markHaUnsafe(
     mission: Mission,
-    reason: 'merged_unrecorded' | 'rollback_failed' | 'third_party_advanced',
+    reason: 'merged_unrecorded' | 'rollback_failed' | 'third_party_advanced' | 'advanced_during_verify',
     extra: { head?: string; anchor?: string; reportId?: string },
   ): Promise<void> {
     await this.#event(mission, 'final_review.ha_unsafe', {
@@ -4739,6 +4813,12 @@ export class Platform {
     if (reason === 'third_party_advanced') {
       return (
         '集成分支在验证期间被第三方推进，未回滚。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    if (reason === 'advanced_during_verify') {
+      return (
+        '集成验证期间目标分支被推进或 checkout 被切换，未签字。' +
         '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
       );
     }

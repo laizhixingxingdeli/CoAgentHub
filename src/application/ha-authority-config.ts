@@ -127,17 +127,22 @@ export async function loadHaAuthorityConfig(input: {
     );
   }
 
+  // 词法路径和真实路径都要查。只查真实路径时，仓库内指向仓外的符号链接
+  // 会因 physical 在外面而被接受，等于允许把名册放进仓库。仓外链接指进
+  // 仓库仍由上面的 SYMLINK_ESCAPE 挡住。
   // git worktree list 把主工作区（仓库根）也列成一条 worktree。先判仓库根，
   // 并从附加 worktree 集合里去掉与仓库根同一路径的条目，否则仓库内文件会被
   // 错报成 HA_AUTHORITY_PATH_IN_WORKTREE，两个拒绝码就分不开了。
-  if (pathContainedBy(repoReal, physical)) {
+  if (pathContainedBy(repoReal, physical) || pathContainedBy(repoReal, lexical)) {
     throw new HaAuthorityError(
       HA_AUTHORITY_CODE.PATH_IN_REPO,
       'HA 放行拒绝（HA_AUTHORITY_PATH_IN_REPO）：授权文件不能放在仓库内。',
     );
   }
   const additionalWorktrees = worktreeReals.filter((root) => !sameNormalizedPath(root, repoReal));
-  const worktreeHit = additionalWorktrees.find((root) => pathContainedBy(root, physical));
+  const worktreeHit = additionalWorktrees.find(
+    (root) => pathContainedBy(root, physical) || pathContainedBy(root, lexical),
+  );
   if (worktreeHit) {
     throw new HaAuthorityError(
       HA_AUTHORITY_CODE.PATH_IN_WORKTREE,

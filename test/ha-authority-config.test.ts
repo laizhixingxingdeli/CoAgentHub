@@ -248,6 +248,58 @@ describe('loadHaAuthorityConfig 路径与文件', () => {
     );
   });
 
+  test('仓库内符号链接指向仓库外', async (t) => {
+    const repo = tempDir('coagent-ha-git-');
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'test');
+    git(repo, 'config', 'user.email', 'test@local');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'init');
+    const { file } = outsideFile(repo);
+    const link = join(repo, 'ha-link.json');
+    try {
+      symlinkSync(file, link);
+    } catch {
+      t.skip('未验证：本机无权创建符号链接');
+      return;
+    }
+    await assert.rejects(
+      () => loadHaAuthorityConfig({ filePath: link, repoRoot: repo, worktreePaths: [repo] }),
+      (error: unknown) => {
+        assertCode(error, HA_AUTHORITY_CODE.PATH_IN_REPO);
+        return true;
+      },
+    );
+  });
+
+  test('附加 worktree 内符号链接指向仓库外', async (t) => {
+    const repo = tempDir('coagent-ha-git-');
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'test');
+    git(repo, 'config', 'user.email', 'test@local');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'init');
+    const wt = join(tempDir('coagent-ha-wt-'), 'tree');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'wt-ha-link');
+    const { file } = outsideFile(repo);
+    const link = join(wt, 'ha-link.json');
+    try {
+      symlinkSync(file, link);
+    } catch {
+      t.skip('未验证：本机无权创建符号链接');
+      return;
+    }
+    await assert.rejects(
+      () => loadHaAuthorityConfig({ filePath: link, repoRoot: repo, worktreePaths: [repo, wt] }),
+      (error: unknown) => {
+        assertCode(error, HA_AUTHORITY_CODE.PATH_IN_WORKTREE);
+        return true;
+      },
+    );
+  });
+
   test('缺失文件', async () => {
     const repo = tempDir('coagent-ha-repo-');
     const missing = join(tempDir('coagent-ha-out-'), 'no-such.json');
