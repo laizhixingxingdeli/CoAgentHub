@@ -124,6 +124,8 @@ export const POLICY_ACTION = {
   finalizeMachine: { scope: 'finalize', name: 'machine' },
   finalizePlan: { scope: 'finalize', name: 'plan' },
   finalizeReviewer: { scope: 'finalize', name: 'reviewer' },
+  /** HA 受控放行：仍是 reviewer Principal，与旧 reviewer 入口分开，避免旧入口被当成已授权。 */
+  finalizeHaReviewer: { scope: 'finalize', name: 'haReviewer' },
 } as const satisfies Record<string, PolicyAction>;
 
 const KNOWN_ACTIONS = new Set(
@@ -177,8 +179,9 @@ const ALLOWED: ReadonlySet<string> = new Set([
   cell('user:viewer', POLICY_ACTION.attemptGetDetail),
   cell('user:viewer', POLICY_ACTION.poolList),
   cell('user:viewer', POLICY_ACTION.inboxRead),
-  // —— reviewer：本阶段只出现在已有检视者签名终审 ——
+  // —— reviewer：旧签名终审 + HA 受控放行（授权仍由外置配置在入口核对） ——
   cell('reviewer', POLICY_ACTION.finalizeReviewer),
+  cell('reviewer', POLICY_ACTION.finalizeHaReviewer),
   // —— runner：编排自身（机器终审、方案放弃） ——
   cell('runner', POLICY_ACTION.finalizeMachine),
   cell('runner', POLICY_ACTION.finalizePlan),

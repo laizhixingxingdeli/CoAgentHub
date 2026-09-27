@@ -76,6 +76,14 @@ import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import { redactSecrets } from './redact.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
+import {
+  HA_AUTHORITY_CODE,
+  HA_AUTHORITY_ENV,
+  HaAuthorityError,
+  loadHaAuthorityConfig,
+  matchHaRelease,
+  type HaAuthorityConfig,
+} from './ha-authority-config.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -211,6 +219,10 @@ export interface PlatformDeps {
    * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
    */
   validation?: PlatformValidationDeps;
+  /**
+   * 测试注入 HA 授权文件绝对路径。生产只读 COAGENT_HA_AUTHORITY_FILE，每次现读。
+   */
+  haAuthorityFile?: string;
 }
 
 export interface CreateMissionInput {
@@ -261,6 +273,7 @@ export class Platform {
   #postExecutionEvaluator: PostExecutionEvaluator | undefined;
   #transaction: CommandTransaction | undefined;
   #validation: PlatformValidationDeps | undefined;
+  #haAuthorityFile: string | undefined;
 
   constructor(deps: PlatformDeps) {
     this.#projects = deps.projects;
@@ -275,6 +288,7 @@ export class Platform {
     this.#postExecutionEvaluator = deps.postExecutionEvaluator;
     this.#transaction = deps.transaction;
     this.#validation = deps.validation;
+    this.#haAuthorityFile = deps.haAuthorityFile;
   }
 
   /* =============================== L3 面 =============================== */
@@ -1040,7 +1054,7 @@ export class Platform {
 
   /**
    * 读取方判断「当前有效的 pass」：revision / HEAD / L2 / 报告任一变化即失效。
-   * 同一证据下最新若是 send_back，不得回退到更早的 pass。E3a 不据此 finalize / merge。
+   * 同一证据下最新若是 send_back，不得回退到更早的 pass。HA 受控放行在合并前核对这一份。
    */
   async effectiveIndependentReviewPass(
     missionId: string,
@@ -2958,7 +2972,12 @@ export class Platform {
   /** 记录本 Mission 的分支与基线。调度器开好工作区之后调一次。 */
   async recordWorkspace(
     missionId: string,
-    ref: { projectRoot?: string; branch: string; baseRevision: string },
+    ref: {
+      projectRoot?: string;
+      branch: string;
+      baseRevision: string;
+      targetBranch?: string;
+    },
   ): Promise<void> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#recordWorkspace(missionId, ref));
@@ -2966,7 +2985,12 @@ export class Platform {
 
   async #recordWorkspace(
     missionId: string,
-    ref: { projectRoot?: string; branch: string; baseRevision: string },
+    ref: {
+      projectRoot?: string;
+      branch: string;
+      baseRevision: string;
+      targetBranch?: string;
+    },
   ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     mission.recordWorkspace(ref);
@@ -3501,6 +3525,265 @@ export class Platform {
   }
 
   /**
+   * HA 受控放行：外置常设授权 + 当前有效独立检视 pass + 方案级命令，
+   * 再走与机器终审共用的锚点→合并→验证→条件回滚。不接 HTTP、不进 agent tools。
+   */
+  async finalizeMissionByHaAuthority(
+    missionId: string,
+    input: {
+      readonly reviewerId: string;
+      readonly confirmedBy: string;
+      readonly projectRoot?: string;
+      readonly reasons?: readonly string[];
+    },
+  ): Promise<{
+    status: string;
+    mergedInto?: string;
+    reportId?: string;
+    reason?: string;
+    rolledBackTo?: string;
+  }> {
+    const { mission } = await this.#locate(missionId);
+    if (mission.executionMode !== 'high_assurance') {
+      throw new PlatformRuleError(
+        'HA_RELEASE_MODE_REQUIRED',
+        `Mission ${missionId} 不是 high_assurance，不能走受控放行。`,
+      );
+    }
+    if (mission.status === 'completed') {
+      // 已完成的重复调用不得再验、再写报告，也不二次合并。
+      return {
+        status: mission.status,
+        mergedInto: mission.finalReview?.mergedInto,
+      };
+    }
+    if (mission.status !== 'awaiting_review') {
+      throw new PlatformRuleError(
+        'NOT_AWAITING_REVIEW',
+        `Mission ${missionId} 现在是 ${mission.status}，没有在等最终检视。`,
+      );
+    }
+
+    const authority = this.#reviewerAuthority(input.reviewerId, input.confirmedBy);
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'reviewer', id: authority.reviewerId },
+        action: POLICY_ACTION.finalizeHaReviewer,
+        context: { missionId },
+        state: { executionMode: mission.executionMode },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
+
+    const projectRoot = input.projectRoot ?? mission.workspaceRef?.projectRoot;
+    if (!this.#workspace || !projectRoot) {
+      throw new PlatformRuleError('NO_WORKSPACE_MANAGER', 'HA 放行要知道项目仓库在哪。');
+    }
+    const workspace = this.#workspace;
+    if (!workspace.currentBranch || !workspace.resetTarget || !workspace.listWorktreePaths) {
+      throw new PlatformRuleError(
+        'HA_RELEASE_UNAVAILABLE',
+        '工作区管理不支持 currentBranch / resetTarget / listWorktreePaths，HA 放行不可用。',
+      );
+    }
+
+    const worktreePaths = await this.#haWorktreePaths(workspace, projectRoot);
+    const config = await this.#loadHaAuthority(projectRoot, worktreePaths);
+    const registered = config.reviewers.find((row) => row.reviewerId === authority.reviewerId);
+    if (!registered) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.REVIEWER_UNREGISTERED,
+        'HA 放行拒绝（HA_AUTHORITY_REVIEWER_UNREGISTERED）：检视者未登记。',
+      );
+    }
+    if (registered.confirmedBy !== authority.confirmedBy) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.CONFIRMED_BY_MISMATCH,
+        'HA 放行拒绝（HA_AUTHORITY_CONFIRMED_BY_MISMATCH）：确认主体与登记值不一致。',
+      );
+    }
+
+    const checkout = await workspace.currentBranch(projectRoot);
+    if (!checkout) {
+      throw new PlatformRuleError(
+        'HA_DETACHED_HEAD',
+        `Mission ${missionId} 项目仓是 detached HEAD，拒绝合并。`,
+      );
+    }
+    const persistedTarget = mission.workspaceRef?.targetBranch;
+    if (typeof persistedTarget !== 'string' || persistedTarget.trim() === '') {
+      throw new PlatformRuleError(
+        'HA_TARGET_MISSING',
+        `Mission ${missionId} 没有可信的历史目标分支，拒绝用当前 checkout 倒填。`,
+      );
+    }
+    if (this.#isForbiddenMaster(checkout) || this.#isForbiddenMaster(persistedTarget)) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.MASTER_FORBIDDEN,
+        'HA 放行拒绝（HA_AUTHORITY_MASTER_FORBIDDEN）：master 不能作为常设代行目标。',
+      );
+    }
+    if (checkout !== persistedTarget) {
+      throw new PlatformRuleError(
+        'HA_TARGET_MISMATCH',
+        `当前 checkout（${checkout}）与 Mission 目标（${persistedTarget}）不一致，拒绝合并。`,
+      );
+    }
+    try {
+      matchHaRelease(config, {
+        reviewerId: authority.reviewerId,
+        confirmedBy: authority.confirmedBy,
+        branch: persistedTarget,
+      });
+    } catch (error) {
+      throw this.#wrapHaAuthorityError(error);
+    }
+
+    const unsafe = await this.#haUnsafe(missionId);
+    if (unsafe) {
+      return {
+        status: mission.status,
+        reason: this.#haUnsafeHint(unsafe.reason),
+      };
+    }
+
+    const ref = mission.workspaceRef;
+    if (!ref) {
+      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
+    }
+    const headNow = await workspace.targetHead(projectRoot);
+    if (headNow !== ref.baseRevision) {
+      // revisionIsAncestor(ancestor, descendant) ↔ git merge-base --is-ancestor，
+      // 不能把参数反了。「已合未记」要求 Mission 分支尖已在目标 HEAD 里，
+      // 且那个尖不能还停在分叉基线——执行者改动常常还在 worktree
+      // 未提交，分支仍等于基线；目标独自前进时基线仍是 HEAD 的祖先，
+      // 那是旧基线，不是已合。git 失败时函数返 false，走旧基线拒绝（fail-closed），
+      // 不会进合并。
+      const alreadyMerged = await this.#haMissionAlreadyInHead(
+        workspace,
+        projectRoot,
+        ref.branch,
+        ref.baseRevision,
+        headNow,
+      );
+      if (alreadyMerged) {
+        await this.#markHaUnsafe(mission, 'merged_unrecorded', {
+          head: headNow,
+          anchor: ref.baseRevision,
+        });
+        return {
+          status: mission.status,
+          reason: this.#haUnsafeHint('merged_unrecorded'),
+        };
+      }
+      throw new PlatformRuleError(
+        'HA_STALE_BASELINE',
+        `Mission ${missionId} 的分叉基线已过期，拒绝在任何 Git 合并前放行。`,
+      );
+    }
+
+    const pass = await this.effectiveIndependentReviewPass(missionId);
+    if (!pass) {
+      throw new PlatformRuleError(
+        'HA_NO_EFFECTIVE_PASS',
+        `Mission ${missionId} 没有当前有效的独立检视 pass，拒绝合并。`,
+      );
+    }
+
+    const verification = this.#planLevelCommands(mission);
+    const runner = this.#validation?.commandRunner;
+    const reports = this.#validation?.reports;
+    if (!runner || !reports) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '没注入 commandRunner / reports，HA 放行不可用。不退化成不验直接合。',
+      );
+    }
+
+    const outcome = await this.#runIntegrationMergeVerify({
+      mission,
+      projectRoot,
+      integrationBranch: persistedTarget,
+      verification,
+    });
+    if (outcome.kind === 'merge_failed') {
+      mission.setWaitReason(
+        'waiting_l3',
+        `HA 合并失败：${outcome.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
+      );
+      await this.#event(mission, 'final_review.merge_failed', {
+        reason: outcome.reason,
+        authority: 'reviewer',
+      });
+      await this.#event(mission, 'mission.waiting', { reason: 'waiting_l3' });
+      return { status: mission.status, reason: outcome.reason };
+    }
+    if (outcome.kind === 'verify_failed') {
+      if (!outcome.reset.ok) {
+        const thirdParty = outcome.reset.reason?.includes('期间有别的提交');
+        await this.#markHaUnsafe(mission, thirdParty ? 'third_party_advanced' : 'rollback_failed', {
+          head: outcome.mergedInto,
+          anchor: outcome.anchor,
+          reportId: outcome.report.id,
+        });
+      }
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证未通过（报告 ${outcome.report.id}）；` +
+          (outcome.reset.ok
+            ? `已退回 ${outcome.anchor.slice(0, 12)}，等人处置。`
+            : `**退回失败**：${outcome.reset.reason} 集成分支上留着一个没验过的合并。`),
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        rolledBack: outcome.reset.ok,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: outcome.reset.ok
+          ? '集成验证未通过，已回滚'
+          : this.#haUnsafeHint(outcome.reset.reason?.includes('期间有别的提交')
+              ? 'third_party_advanced'
+              : 'rollback_failed'),
+        ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
+      };
+    }
+
+    const reasons =
+      input.reasons && input.reasons.length > 0
+        ? [...input.reasons]
+        : [`HA 受控放行验证通过（报告 ${outcome.report.id}）`];
+    mission.complete({
+      verdict: 'merge',
+      reasons,
+      mergedInto: outcome.mergedInto,
+      mergedAt: this.#clock.now().toISOString(),
+      authority,
+    });
+    await this.#event(mission, 'final_review.merged', {
+      mergedInto: outcome.mergedInto,
+      authority: 'reviewer',
+      reportId: outcome.report.id,
+    });
+    await this.#event(mission, 'final_review.ha_authorized', {
+      source: config.source,
+      integrationReportId: outcome.report.id,
+      reviewerId: registered.reviewerId,
+      confirmedBy: registered.confirmedBy,
+      integrationBranch: persistedTarget,
+      mergedInto: outcome.mergedInto,
+    });
+    await this.#releaseWorkspace(missionId, projectRoot);
+    return {
+      status: mission.status,
+      mergedInto: outcome.mergedInto,
+      reportId: outcome.report.id,
+    };
+  }
+
+  /**
    * 机器 L3：合进集成分支，**在合并结果上**跑方案级验证，绿才放行。
    *
    * 顺序是这一票的全部要害，不能改：
@@ -3591,136 +3874,67 @@ export class Platform {
       );
     }
 
-    // 2. 锚点先落事件
-    const anchor = await workspace.targetHead(projectRoot);
-    await this.#event(mission, 'final_review.integration_anchor', {
-      integrationBranch: input.integrationBranch,
-      anchor,
-    });
-
-    const ref = mission.workspaceRef;
-    if (!ref) {
-      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
-    }
-    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。原先这里直接
-    // 合并，提议被悄悄丢掉——夜跑里每一次 Living Spec 更新都没了，而且没人会发现。
-    // 集成验证照样跑在带着这些文件的合并结果上（比如 specs 清单的严格用例）。
-    await this.#landMemory(mission);
-    const merged = await workspace.mergeToTarget({
-      missionId,
+    const outcome = await this.#runIntegrationMergeVerify({
+      mission,
       projectRoot,
-      branch: ref.branch,
-      expectedBaseRevision: ref.baseRevision,
+      integrationBranch: input.integrationBranch,
+      verification: input.verification,
     });
-    if (!merged.ok) {
+    if (outcome.kind === 'merge_failed') {
       // 合不进去和验证红了是一回事：机器判不了，不等于这条完了。留在
       // awaiting_review 等人（或方案的检视者）处置。原先这里转 blocked 并记
       // { kind: 'human' }——一条机器路径冒签了人的权威，而且 blocked 是终态，
       // 人第二天想看一眼再合都没门。
       mission.setWaitReason(
         'waiting_l3',
-        `机器合并失败：${merged.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
+        `机器合并失败：${outcome.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
       );
       await this.#event(mission, 'final_review.merge_failed', {
-        reason: merged.reason,
+        reason: outcome.reason,
         authority: 'machine',
       });
       await this.#event(mission, 'mission.waiting', { reason: 'waiting_l3' });
-      return { status: mission.status, reason: merged.reason };
+      return { status: mission.status, reason: outcome.reason };
     }
-    const mergedInto = merged.mergedInto;
-
-    // 3. 在合并结果上验证
-    const startedAt = this.#clock.now().toISOString();
-    const checks: ValidationCheckResult[] = [];
-    for (const command of input.verification) {
-      const at = this.#clock.now().toISOString();
-      const result = await runner.run({
-        argv: command.argv,
-        cwd: projectRoot,
-        timeoutMs: command.timeoutMs,
-      });
-      checks.push(
-        Object.freeze({
-          kind: 'command' as const,
-          passed: result.exitCode === 0 && !result.timedOut,
-          startedAt: at,
-          endedAt: this.#clock.now().toISOString(),
-          summary: `${command.argv.join(' ')} → ${result.timedOut ? 'timeout' : String(result.exitCode)}`,
-          command: Object.freeze({
-            argv: Object.freeze([...command.argv]),
-            cwd: projectRoot,
-            exitCode: result.exitCode,
-            timedOut: result.timedOut,
-            durationMs: result.durationMs,
-            // 先脱敏再截尾：截断点正好切在一个 key 中间时，剩下的半截对不上任何形状。
-            outputTail: redactSecrets(result.output).slice(-2000),
-          }),
-        }),
-      );
-    }
-    const passed = checks.every((check) => check.passed);
-    const report: ValidationReport = Object.freeze({
-      id: this.#ids.next('IVAL'),
-      policyRevision: VALIDATION_POLICY_REVISION,
-      missionId,
-      startedAt,
-      endedAt: this.#clock.now().toISOString(),
-      passed,
-      checks: Object.freeze(checks),
-    });
-    await reports.save(report);
-    await this.#event(mission, 'final_review.integration_verified', {
-      reportId: report.id,
-      passed,
-      mergedInto,
-    });
-
-    // 4. 红就退回锚点，Mission 留在 awaiting_review
-    if (!passed) {
-      const reset = await workspace.resetTarget({
-        projectRoot,
-        toRevision: anchor,
-        expectedHead: mergedInto ?? anchor,
-      });
+    if (outcome.kind === 'verify_failed') {
       mission.setWaitReason(
         'waiting_l3',
-        `集成验证未通过（报告 ${report.id}）；` +
-          (reset.ok
-            ? `已退回 ${anchor.slice(0, 12)}，等人处置。`
-            : `**退回失败**：${reset.reason} 集成分支上留着一个没验过的合并。`),
+        `集成验证未通过（报告 ${outcome.report.id}）；` +
+          (outcome.reset.ok
+            ? `已退回 ${outcome.anchor.slice(0, 12)}，等人处置。`
+            : `**退回失败**：${outcome.reset.reason} 集成分支上留着一个没验过的合并。`),
       );
       await this.#event(mission, 'mission.waiting', {
         reason: 'waiting_l3',
-        reportId: report.id,
-        rolledBack: reset.ok,
+        reportId: outcome.report.id,
+        rolledBack: outcome.reset.ok,
       });
       return {
         status: mission.status,
-        reportId: report.id,
-        reason: reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
-        ...(reset.ok ? { rolledBackTo: anchor } : {}),
+        reportId: outcome.report.id,
+        reason: outcome.reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
+        ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
       };
     }
 
     mission.complete({
       verdict: 'merge',
-      reasons: [`集成验证通过（报告 ${report.id}）`],
-      mergedInto,
+      reasons: [`集成验证通过（报告 ${outcome.report.id}）`],
+      mergedInto: outcome.mergedInto,
       mergedAt: this.#clock.now().toISOString(),
       authority: Object.freeze({
         kind: 'machine' as const,
-        integrationReportId: report.id,
-        policyRevision: report.policyRevision,
+        integrationReportId: outcome.report.id,
+        policyRevision: outcome.report.policyRevision,
       }),
     });
     await this.#event(mission, 'final_review.merged', {
-      mergedInto,
+      mergedInto: outcome.mergedInto,
       authority: 'machine',
-      reportId: report.id,
+      reportId: outcome.report.id,
     });
     await this.#releaseWorkspace(missionId, projectRoot);
-    return { status: mission.status, mergedInto, reportId: report.id };
+    return { status: mission.status, mergedInto: outcome.mergedInto, reportId: outcome.report.id };
   }
 
   /**
@@ -4306,6 +4520,277 @@ export class Platform {
    * 回收 worktree 目录。**只摘目录，不删分支** —— 改动是 Mission 的产出，
    * 分支留着才查得到。失败不致命：留个目录比中断收尾好。
    */
+  /**
+   * 共用：锚点 → 合并 → 在合并结果上验证 → 条件回滚。入口自己决定门禁与权威。
+   */
+  async #runIntegrationMergeVerify(input: {
+    readonly mission: Mission;
+    readonly projectRoot: string;
+    readonly integrationBranch: string;
+    readonly verification: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[];
+  }): Promise<
+    | { kind: 'merge_failed'; reason?: string; anchor: string }
+    | {
+        kind: 'verify_failed';
+        mergedInto: string;
+        report: ValidationReport;
+        anchor: string;
+        reset: { ok: boolean; reason?: string };
+      }
+    | { kind: 'verified'; mergedInto: string; report: ValidationReport; anchor: string }
+  > {
+    const workspace = this.#workspace;
+    const runner = this.#validation?.commandRunner;
+    const reports = this.#validation?.reports;
+    if (!workspace?.resetTarget || !runner || !reports) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '没注入 commandRunner / reports / resetTarget，不能做合并结果验证。',
+      );
+    }
+    const { mission, projectRoot, integrationBranch, verification } = input;
+    const anchor = await workspace.targetHead(projectRoot);
+    await this.#event(mission, 'final_review.integration_anchor', {
+      integrationBranch,
+      anchor,
+    });
+    const ref = mission.workspaceRef;
+    if (!ref) {
+      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${mission.id} 没记下分支信息。`);
+    }
+    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。
+    await this.#landMemory(mission);
+    const merged = await workspace.mergeToTarget({
+      missionId: mission.id,
+      projectRoot,
+      branch: ref.branch,
+      expectedBaseRevision: ref.baseRevision,
+    });
+    if (!merged.ok) {
+      return { kind: 'merge_failed', reason: merged.reason, anchor };
+    }
+    const mergedInto = merged.mergedInto ?? (await workspace.targetHead(projectRoot));
+    await this.#event(mission, 'final_review.merge_applied', {
+      integrationBranch,
+      mergedInto,
+      anchor,
+    });
+
+    const startedAt = this.#clock.now().toISOString();
+    const checks: ValidationCheckResult[] = [];
+    for (const command of verification) {
+      const at = this.#clock.now().toISOString();
+      const result = await runner.run({
+        argv: command.argv,
+        cwd: projectRoot,
+        timeoutMs: command.timeoutMs,
+      });
+      checks.push(
+        Object.freeze({
+          kind: 'command' as const,
+          passed: result.exitCode === 0 && !result.timedOut,
+          startedAt: at,
+          endedAt: this.#clock.now().toISOString(),
+          summary: `${command.argv.join(' ')} → ${result.timedOut ? 'timeout' : String(result.exitCode)}`,
+          command: Object.freeze({
+            argv: Object.freeze([...command.argv]),
+            cwd: projectRoot,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: result.durationMs,
+            outputTail: redactSecrets(result.output).slice(-2000),
+          }),
+        }),
+      );
+    }
+    const passed = checks.every((check) => check.passed);
+    const report: ValidationReport = Object.freeze({
+      id: this.#ids.next('IVAL'),
+      policyRevision: VALIDATION_POLICY_REVISION,
+      missionId: mission.id,
+      startedAt,
+      endedAt: this.#clock.now().toISOString(),
+      passed,
+      checks: Object.freeze(checks),
+    });
+    await reports.save(report);
+    await this.#event(mission, 'final_review.integration_verified', {
+      reportId: report.id,
+      passed,
+      mergedInto,
+    });
+    if (!passed) {
+      const reset = await workspace.resetTarget({
+        projectRoot,
+        toRevision: anchor,
+        expectedHead: mergedInto,
+      });
+      return { kind: 'verify_failed', mergedInto, report, anchor, reset };
+    }
+    return { kind: 'verified', mergedInto, report, anchor };
+  }
+
+  async #loadHaAuthority(
+    repoRoot: string,
+    worktreePaths: readonly string[],
+  ): Promise<HaAuthorityConfig> {
+    try {
+      return await loadHaAuthorityConfig({
+        filePath: this.#haAuthorityFile ?? process.env[HA_AUTHORITY_ENV],
+        repoRoot,
+        worktreePaths,
+      });
+    } catch (error) {
+      throw this.#wrapHaAuthorityError(error);
+    }
+  }
+
+  /**
+   * 目标 HEAD 是否已经包含 Mission 分支上的提交（已合未记）。
+   * 分支仍等于分叉基线时不算：那只说明目标自己前进了。
+   */
+  async #haMissionAlreadyInHead(
+    workspace: WorkspaceManager,
+    projectRoot: string,
+    missionBranch: string,
+    baseRevision: string,
+    headNow: string,
+  ): Promise<boolean> {
+    if (typeof workspace.revisionIsAncestor !== 'function') return false;
+    const isAncestor = workspace.revisionIsAncestor.bind(workspace);
+    const contained = await isAncestor(projectRoot, missionBranch, headNow);
+    if (!contained) return false;
+    const stillAtBaseline =
+      (await isAncestor(projectRoot, missionBranch, baseRevision)) &&
+      (await isAncestor(projectRoot, baseRevision, missionBranch));
+    return !stillAtBaseline;
+  }
+
+  async #haWorktreePaths(
+    workspace: WorkspaceManager,
+    projectRoot: string,
+  ): Promise<readonly string[]> {
+    if (typeof workspace.listWorktreePaths !== 'function') {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
+        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法枚举 worktree。',
+      );
+    }
+    try {
+      const listed = await workspace.listWorktreePaths(projectRoot);
+      if (!listed || listed.length === 0) {
+        throw new Error('empty');
+      }
+      return listed;
+    } catch {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
+        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法可靠枚举 worktree。',
+      );
+    }
+  }
+
+  #wrapHaAuthorityError(error: unknown): PlatformRuleError {
+    if (error instanceof HaAuthorityError) {
+      return new PlatformRuleError(error.code, error.message);
+    }
+    if (error instanceof PlatformRuleError) return error;
+    return new PlatformRuleError(
+      HA_AUTHORITY_CODE.INVALID_FIELDS,
+      'HA 放行拒绝（HA_AUTHORITY_INVALID_FIELDS）：授权配置不可用。',
+    );
+  }
+
+  async #haUnsafe(
+    missionId: string,
+  ): Promise<{ reason: string } | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== 'final_review.ha_unsafe') continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const reason = (data as { reason?: unknown }).reason;
+      if (typeof reason === 'string' && reason.trim() !== '') return { reason };
+      return { reason: 'unsafe' };
+    }
+    return undefined;
+  }
+
+  async #markHaUnsafe(
+    mission: Mission,
+    reason: 'merged_unrecorded' | 'rollback_failed' | 'third_party_advanced',
+    extra: { head?: string; anchor?: string; reportId?: string },
+  ): Promise<void> {
+    await this.#event(mission, 'final_review.ha_unsafe', {
+      reason,
+      ...extra,
+      hint: this.#haUnsafeHint(reason),
+    });
+  }
+
+  #haUnsafeHint(reason: string): string {
+    if (reason === 'merged_unrecorded') {
+      return (
+        'HA 合并已落到目标分支但 Mission 未记完成。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    if (reason === 'third_party_advanced') {
+      return (
+        '集成分支在验证期间被第三方推进，未回滚。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    return (
+      'HA 验证未通过且回滚失败，集成分支可能不安全。' +
+      '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+    );
+  }
+
+  #planLevelCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
+    const out: { argv: string[]; timeoutMs: number }[] = [];
+    const seen = new Set<string>();
+    for (const item of mission.workItems) {
+      if (item.status === 'retired') continue;
+      for (const command of item.order?.validation?.commands ?? []) {
+        if (
+          !Array.isArray(command.argv) ||
+          command.argv.length === 0 ||
+          command.argv.some((part) => typeof part !== 'string' || part.trim() === '')
+        ) {
+          throw new PlatformRuleError(
+            'HA_VERIFICATION_REQUIRED',
+            `Mission ${mission.id} 的冻结验证命令非法，拒绝合并。`,
+          );
+        }
+        if (typeof command.timeoutMs !== 'number' || !Number.isFinite(command.timeoutMs) || command.timeoutMs <= 0) {
+          throw new PlatformRuleError(
+            'HA_VERIFICATION_REQUIRED',
+            `Mission ${mission.id} 的冻结验证命令 timeoutMs 非法，拒绝合并。`,
+          );
+        }
+        const argv = [...command.argv];
+        const key = JSON.stringify([argv, command.timeoutMs]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ argv, timeoutMs: command.timeoutMs });
+      }
+    }
+    if (out.length === 0) {
+      throw new PlatformRuleError(
+        'HA_VERIFICATION_REQUIRED',
+        `Mission ${mission.id} 没有非空方案级验证命令，拒绝合并。`,
+      );
+    }
+    return out;
+  }
+
+  #isForbiddenMaster(branch: string): boolean {
+    const trimmed = branch.trim();
+    return trimmed === 'master' || trimmed === 'refs/heads/master';
+  }
+
   /**
    * 批准的长期知识写进 **Mission 自己的 worktree**，跟代码同一次 merge 落地。
    * 分两次提交的话，"代码进去了文档没进去"就会发生——而且没人会发现。

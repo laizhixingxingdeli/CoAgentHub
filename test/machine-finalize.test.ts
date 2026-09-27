@@ -485,7 +485,7 @@ describe('机器 L3 与项目记忆', () => {
   });
 });
 
-describe('E3a：HA 合并入口全部关闭', () => {
+describe('E3b：旧 HA 合并入口仍关闭', () => {
   test('机器、公开 human、现有 reviewer 三条路径都不能合并 HA', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));

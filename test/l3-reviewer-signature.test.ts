@@ -68,7 +68,21 @@ function tempRepo(): string {
 }
 
 function l3(statePath: string, ...args: string[]) {
-  const result = spawnSync(process.execPath, [L3, ...args, '--state', statePath], { encoding: 'utf8' });
+  const env = { ...process.env };
+  delete env.COAGENT_HA_AUTHORITY_FILE;
+  const result = spawnSync(process.execPath, [L3, ...args, '--state', statePath], {
+    encoding: 'utf8',
+    env,
+  });
+  return { status: result.status, out: `${result.stdout}${result.stderr}` };
+}
+
+function l3WithAuth(statePath: string, authFile: string, ...args: string[]) {
+  const env = { ...process.env, COAGENT_HA_AUTHORITY_FILE: authFile };
+  const result = spawnSync(process.execPath, [L3, ...args, '--state', statePath], {
+    encoding: 'utf8',
+    env,
+  });
   return { status: result.status, out: `${result.stdout}${result.stderr}` };
 }
 
@@ -289,9 +303,7 @@ describe('l3 终审：校验在构建平台之前', () => {
 });
 
 describe('l3 终审：HA Mission', () => {
-  // E3a 起 HA 的放行只走受控终审（E3b：外置常设授权 + 当前有效的独立检视 pass + 合并后验证）。
-  // 在那之前，带两个身份的旧 reviewer merge 也不能合 HA——两个 CLI 字符串证明不了授权。
-  test('带两个身份的检视者 merge 对 HA 也被拒，状态与 HEAD 不变', async () => {
+  test('缺授权配置时 HA merge --as --confirmed-by 被拒，状态与 HEAD 不变', async () => {
     const { repo, statePath, missionId } = await fixtureAwaitingReview('M-HA', {
       executionMode: 'high_assurance',
     });
@@ -309,13 +321,131 @@ describe('l3 终审：HA Mission', () => {
       repo,
     );
     assert.notEqual(status, 0, out);
-    assert.match(out, /high_assurance/);
+    assert.match(out, /HA_AUTHORITY_ENV_MISSING|未配置授权文件/);
     assert.equal(readFileSync(statePath).equals(beforeState), true);
     assert.equal(git(repo, 'rev-parse', 'HEAD'), beforeHead);
     const revived = await buildPersistentPlatform(statePath, { reconcile: false });
     const view = await revived.platform.getMissionView(missionId);
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.finalReview, undefined);
+  });
+
+  test('配置齐且有当前 pass 时 HA merge --as --confirmed-by 能合', async () => {
+    const repo = tempRepo();
+    git(repo, 'checkout', '-q', '-b', 'auto/plan-x');
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-ha-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const authDir = mkdtempSync(join(tmpdir(), 'coagent-l3-ha-auth-'));
+    dirs.push(authDir);
+    const authFile = join(authDir, 'ha.json');
+    writeFileSync(
+      authFile,
+      JSON.stringify({
+        version: 1,
+        source: 'test-source',
+        reviewers: [
+          {
+            reviewerId: 'claude',
+            confirmedBy: 'echo',
+            integrationBranches: ['auto/plan-x'],
+          },
+        ],
+      }),
+    );
+    const haOrder: WorkOrder = {
+      ...ORDER,
+      validation: { commands: [{ argv: ['node', '-e', 'process.exit(0)'], timeoutMs: 10_000 }] },
+    };
+    const workspace = new GitWorktreeManager();
+    const built = await buildPersistentPlatform(statePath, { workspace, reconcile: false });
+    const project = await built.projects.ensure('P');
+    project.createMission({ id: 'M-HA-ok', contract: CONTRACT, executionMode: 'high_assurance' });
+    await built.projects.save(project);
+    const prepared = await workspace.prepare('M-HA-ok', repo);
+    await built.platform.recordWorkspace('M-HA-ok', {
+      projectRoot: repo,
+      branch: prepared.branch,
+      baseRevision: prepared.baseRevision,
+      targetBranch: prepared.targetBranch,
+    });
+    const coord = await built.platform.startCoordinatorAttempt('M-HA-ok', {
+      profileId: 'coord-a',
+      endpoint: 'local',
+    });
+    await built.platform.updatePlan('M-HA-ok', coord.attemptId, PLAN);
+    const { workItemId } = await built.platform.createWorkItem('M-HA-ok', coord.attemptId, {
+      title: 'W',
+      order: haOrder,
+    });
+    await built.platform.dispatchWorkItems('M-HA-ok', coord.attemptId, [workItemId]);
+    writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n'.replace('\\n', '\n'));
+    const exec = await built.platform.startExecutorAttempt('M-HA-ok', workItemId, {
+      profileId: 'exec-a',
+      endpoint: 'local',
+    });
+    await built.platform.submitEvidence('M-HA-ok', exec.attemptId, {
+      kind: 'test',
+      summary: 'node --test 全绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await built.platform.submitExecutionResult('M-HA-ok', exec.attemptId, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['a.txt'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await built.platform.finishAttempt('M-HA-ok', exec.attemptId, { endedBy: 'structured_submit' });
+    await built.platform.reviewExecutionResult('M-HA-ok', coord.attemptId, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: haOrder.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass' as const,
+        evidence: '测试替身：逐条核过',
+      })),
+      reasons: ['复跑过'],
+      requiredChanges: [],
+    });
+    await built.platform.submitMissionResult('M-HA-ok', coord.attemptId, {
+      outcome: 'delivered',
+      summary: '交付',
+      acceptanceEvidence: [],
+      memoryDelta: [],
+      openRisks: [],
+    });
+    await built.platform.finishAttempt('M-HA-ok', coord.attemptId, { endedBy: 'structured_submit' });
+    await built.platform.runHaDeterministicValidation('M-HA-ok', prepared.cwd);
+    const ir = await built.platform.startIndependentReviewerAttempt('M-HA-ok', [
+      { profileId: 'ir-a', endpoint: 'local' },
+    ]);
+    await built.platform.submitIndependentReview('M-HA-ok', ir.attemptId, {
+      verdict: 'pass',
+      reasons: ['可放行'],
+    });
+    await built.platform.finishAttempt('M-HA-ok', ir.attemptId, { endedBy: 'structured_submit' });
+    built.persist();
+
+    const { status, out } = l3WithAuth(
+      statePath,
+      authFile,
+      'merge',
+      'M-HA-ok',
+      '--as',
+      'claude',
+      '--confirmed-by',
+      'echo',
+      '--repo',
+      repo,
+    );
+    assert.equal(status, 0, out);
+    const revived = await buildPersistentPlatform(statePath, { reconcile: false });
+    const view = await revived.platform.getMissionView('M-HA-ok');
+    assert.equal(view.status, 'completed');
+    assert.equal(view.finalReview?.authority?.kind, 'reviewer');
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
   });
 
   test('不带确认人被拒且不改变状态', async () => {

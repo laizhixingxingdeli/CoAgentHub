@@ -4,7 +4,7 @@
 
 ## 可观察边界
 
-- **前置（任一不满足就拒绝，什么都不合）**：Mission 在 `awaiting_review`（`NOT_AWAITING_REVIEW`）；不是 `high_assurance`——机器 L3 不放行（`HIGH_ASSURANCE_NEEDS_HUMAN`），HA 须用户确认后由检视者签名，或由人经既有公开入口放行；集成命令表非空，没有新证据的放行只是把 validator 那份又数一遍（`MACHINE_FINALIZE_NEEDS_VERIFICATION`）；注入了 `commandRunner` 与 `reports`，缺了 fail-closed 而不是退化成不验直接合（`MACHINE_FINALIZE_UNAVAILABLE`）。三种装配（`buildPlatform` 带 workspace、`buildPersistentPlatform`、`buildPgPlatform`）都注入 `commandRunner`。
+- **前置（任一不满足就拒绝，什么都不合）**：Mission 在 `awaiting_review`（`NOT_AWAITING_REVIEW`）；不是 `high_assurance`——机器 L3 不放行（`HIGH_ASSURANCE_NEEDS_HUMAN`）。HA 合进集成分支不靠逐次确认框，也不走旧 `finalizeMissionByReviewer`：公开 human 与旧 reviewer 入口对 HA merge 仍拒（`HIGH_ASSURANCE_MERGE_NOT_AVAILABLE`）。HA merge 只经 `l3 merge --as --confirmed-by` 分流到 `finalizeMissionByHaAuthority`（ADR-0006 常设授权，每次现读外置配置）。集成命令表非空，没有新证据的放行只是把 validator 那份又数一遍（`MACHINE_FINALIZE_NEEDS_VERIFICATION`）；注入了 `commandRunner` 与 `reports`，缺了 fail-closed 而不是退化成不验直接合（`MACHINE_FINALIZE_UNAVAILABLE`）。三种装配（`buildPlatform` 带 workspace、`buildPersistentPlatform`、`buildPgPlatform`）都注入 `commandRunner`。
 - **钉分支**：项目仓当前分支必须等于调用方声明的集成分支，否则 `INTEGRATION_BRANCH_MISMATCH`，不合、不跑验证。合并目标取自「当时 checkout 的分支」，不核对的话，中途有东西切回 master，后续功能会静默合进 master。**master 全程不动。**
 - **锚点先落事件**：合并前把集成分支 HEAD 写成 `final_review.integration_anchor` 事件——进程死在「已合并、未验证」之间时，得有东西知道退回哪。
 - **合并**沿用落地闸：目标 HEAD 必须等于 Mission 的分叉基线，目标工作区必须干净（**未跟踪文件也算**）。合不进去 → Mission **留在 `awaiting_review`**，`waitReason = waiting_l3`，事件 `final_review.merge_failed`（authority machine）；不写 FinalReview、不跑验证、集成分支不动。
@@ -18,7 +18,7 @@
   - `human`：只由公开 `finalizeMission`（含 HTTP `POST /api/missions/:id/finalize`）发放，`principalId` 可缺。
   - `machine`：只由 `finalizeMissionByMachine` 在集成验证通过后发放。
   - `plan`：只由 `abandonMissionForPlan` 用于方案放弃，永不放行。
-  - `reviewer`：只由 `finalizeMissionByReviewer` 发放（`l3 merge|send-back|abandon --as --confirmed-by`）。身份 trim 后各 1..128 字符；`confirmedAt` 取平台时钟，不接受调用方传入的时间。用户确认的真实性由确认框负责，平台只记录收到的确认人声明。检视者代签不是人亲签，不得记成 `human`。
+  - `reviewer`：非 HA 由 `finalizeMissionByReviewer` 发放（`l3 merge|send-back|abandon --as --confirmed-by`）。HA merge 只由 `finalizeMissionByHaAuthority` 发放：CLI 两个身份参数只是声明，放行以每次现读的外置常设授权为准；`confirmedAt` 取平台时钟。授权出处与集成 ValidationReport ID 用持久事件关联 FinalReview，不给 authority 加字段。检视者代签不是人亲签，不得记成 `human`。
   - 公开入口收到非 human（含伪造的 reviewer / machine / plan）一律 `FINAL_REVIEW_AUTHORITY_FORBIDDEN`，状态不变。
 
 ## 非目标
@@ -26,9 +26,9 @@
 - 不决定**何时**放行、放弃——那是方案驱动（`plan-run`）的事。
 - 不向 master 或任何非集成分支合并；集成分支 → master 仍由人放行（ADR-0004）。
 - 不重试红的验证：红就是红，flake 要在测试侧修。
-- 不处理 high_assurance（机器路径）。HA 的用户确认后检视者签名走 `finalizeMissionByReviewer`，不走机器 L3。
+- 不处理 high_assurance（机器路径）。HA 受控放行走 `finalizeMissionByHaAuthority`，机器 L3 / 公开 human / 旧 reviewer 入口仍拒 HA merge。
 
 ## 权威源 / 测试
 
-- 源：`src/application/platform.ts`（`finalizeMissionByMachine` / `abandonMissionForPlan` / `finalizeMission` / `finalizeMissionByReviewer`）、`src/l3.ts`（终审三命令成对 flag）、`src/application/workspace.ts`（`currentBranch` / `resetTarget` / `mergeToTarget`）、`src/kernel/payloads.ts`（`FinalReviewAuthority`）、`src/main.ts`（`commandRunner` 接线）
-- 测试：`test/machine-finalize.test.ts`、`test/final-review.test.ts`、`test/l3-reviewer-signature.test.ts`、`test/run-plan-wiring.test.ts`
+- 源：`src/application/platform.ts`（`finalizeMissionByMachine` / `finalizeMissionByHaAuthority` / `abandonMissionForPlan` / `finalizeMission` / `finalizeMissionByReviewer`）、`src/application/ha-authority-config.ts`、`src/l3.ts`（终审三命令成对 flag；HA merge 分流）、`src/application/workspace.ts`（`currentBranch` / `resetTarget` / `mergeToTarget` / `listWorktreePaths`）、`src/kernel/payloads.ts`（`FinalReviewAuthority`）、`src/main.ts`（`commandRunner` 接线）
+- 测试：`test/machine-finalize.test.ts`、`test/final-review.test.ts`、`test/l3-reviewer-signature.test.ts`、`test/ha-authority-config.test.ts`、`test/platform-high-assurance-finalize.test.ts`、`test/run-plan-wiring.test.ts`
