@@ -50,6 +50,15 @@ const QUIET_FACTS = {
   },
 } as const;
 
+const HA_FACTS = {
+  ...QUIET_FACTS,
+  highAssurance: {
+    ...QUIET_FACTS.highAssurance,
+    credentialsPermissionsSecurity: true,
+    schemaPublicApiPersistenceCompat: true,
+  },
+} as const;
+
 type Finalize = { status: string; mergedInto?: string; reportId?: string; reason?: string; rolledBackTo?: string };
 /** 这条 Mission 跑完停在哪：编排器的结论 + Mission 此时的状态。 */
 type Ran = { outcome: MissionRunOutcome; status: string };
@@ -68,6 +77,18 @@ function harness(options?: {
   routeTakesMs?: number;
   /** 建分类 Mission 时平台拒绝。 */
   classifiedRejects?: Error;
+  /** getMissionView 额外字段（HA 待放行等）。 */
+  views?: Record<string, {
+    executionMode?: string;
+    haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
+    waitDetail?: string;
+    independentReviews?: readonly {
+      readonly reviewedCommit: string;
+      readonly verdict: string;
+      readonly reviewerAttemptId: string;
+      readonly validationReportId?: string;
+    }[];
+  }>;
   /** 每个功能开跑前核对项目仓；按功能给出问题清单。 */
   repoProblems?: Record<string, string[]>;
   unresolvedEscalations?: number;
@@ -106,6 +127,7 @@ function harness(options?: {
   let clock = Date.parse(T0);
   const now = () => new Date(clock).toISOString();
   const calls: string[] = [];
+  const classifiedFacts: unknown[] = [];
   const status = new Map<string, string>();
 
   const deps: PlanDriverDeps = {
@@ -147,12 +169,19 @@ function harness(options?: {
         return { missionId: input.missionId };
       },
       createClassifiedMission: async (input) => {
+        classifiedFacts.push(input.facts);
         if (options?.classifiedRejects) throw options.classifiedRejects;
-        calls.push(`create-classified ${input.missionId} ${input.workOrder ? 'lightweight' : 'standard'}`);
+        const ha = (input.facts as { highAssurance?: Record<string, unknown> } | undefined)?.highAssurance;
+        const haHit = Boolean(ha && Object.values(ha).some((value) => value === true));
+        const lane = input.workOrder ? 'lightweight' : haHit ? 'high_assurance' : 'standard';
+        calls.push(`create-classified ${input.missionId} ${lane}`);
         status.set(input.missionId!, 'investigating');
         return { missionId: input.missionId!, classification: undefined as never };
       },
-      getMissionView: async (missionId) => ({ status: status.get(missionId) ?? 'unknown' }),
+      getMissionView: async (missionId) => ({
+        status: status.get(missionId) ?? 'unknown',
+        ...(options?.views?.[missionId] ?? {}),
+      }),
       finalizeMissionByMachine: async (missionId, input) => {
         calls.push(`finalize ${missionId} → ${input.integrationBranch} [${input.verification[0].argv.join(' ')}]`);
         const result = options?.finalize?.[missionId] ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
@@ -181,7 +210,7 @@ function harness(options?: {
         startedAt: T0,
       }),
     );
-  return { plan, deps, store, calls, status, start };
+  return { plan, deps, store, calls, classifiedFacts, status, start };
 }
 
 /** 检视者：看到开着的升级单就按给定动作定（只定一次）。 */
@@ -262,12 +291,133 @@ describe('现做分类', () => {
     assert.equal(stop.reason, 'finished');
     assert.ok(h.calls.includes('create-classified R1-F1 lightweight'));
     assert.ok(h.calls.includes('create-classified R1-F2 standard'));
-    assert.ok(!h.calls.some((c) => c.includes('R1-F3')), 'high_assurance 不建 Mission、不跑');
+    assert.ok(!h.calls.some((c) => c.includes('R1-F3')), '禁止副作用的 HA 不建 Mission、不跑');
     assert.ok(h.calls.includes('create R1-F4'), '读不懂的回落老路');
     const f3 = h.store.read()!.feature('F3');
     assert.equal(f3?.status, 'suspended');
     assert.match(f3?.needsDecision ?? '', /要你定/);
+    assert.match(f3?.needsDecision ?? '', /destructiveData/);
   });
+});
+
+describe('E4a HA 合格建单、待放行与拒绝回落', () => {
+  const small = {
+    goalUncertainty: 0, changeScope: 0, operationalRisk: 0, verificationDifficulty: 0,
+    coordinationNeed: 0, recoveryDifficulty: 0, reasons: ['小'], decidedBy: 'coordinator' as const,
+    assessedAt: T0,
+  };
+  const haRoute = { ok: true as const, proposal: { facts: HA_FACTS, assessment: small } };
+
+  test('四项禁止副作用全 false 的 HA 用原始 facts 调 createClassifiedMission',
+    async () => {
+      const h = harness({
+        features: ['F1'],
+        routes: { F1: haRoute },
+        views: {
+          'R1-F1': {
+            executionMode: 'high_assurance',
+            haReviewHold: 'pending_release',
+            independentReviews: [{
+              reviewedCommit: 'abc123def',
+              verdict: 'pass',
+              reviewerAttemptId: 'IR-1',
+              validationReportId: 'VR-9',
+            }],
+          },
+        },
+      });
+      await h.start();
+      const stop = await drivePlan(h.plan, h.deps);
+      assert.equal(stop.reason, 'finished');
+      assert.ok(h.calls.includes('create-classified R1-F1 high_assurance'));
+      assert.deepEqual(h.classifiedFacts[0], HA_FACTS);
+      assert.ok(!h.calls.includes('create R1-F1'));
+    });
+
+  test('HA 建单被平台拒绝时不回落 Standard，挂起并写明原因',
+    async () => {
+      const h = harness({
+        features: ['F1', 'F2'],
+        routes: { F1: haRoute },
+        classifiedRejects: new PlatformRuleError('HA_SIDE_EFFECT_DENIED', '带外部副作用的 HA 一律拒绝'),
+      });
+      await h.start();
+      const stop = await drivePlan(h.plan, h.deps);
+      assert.equal(stop.reason, 'finished');
+      assert.deepEqual(h.classifiedFacts[0], HA_FACTS);
+      assert.ok(!h.calls.includes('create R1-F1'), '不得回落普通 Standard');
+      assert.ok(!h.calls.includes('run R1-F1'));
+      const f1 = h.store.read()!.feature('F1');
+      assert.equal(f1?.status, 'suspended');
+      assert.match(f1?.needsDecision ?? '', /不回落 Standard/);
+      assert.match(f1?.needsDecision ?? '', /HA_SIDE_EFFECT_DENIED|外部副作用/);
+      assert.ok(h.calls.includes('create R1-F2'), '挂起不阻塞后续');
+    });
+
+  test('Mission 到 pending_release：功能挂起、needsDecision 含 Mission 与提交、未调终审',
+    async () => {
+      const h = harness({
+        features: ['F1', 'F2'],
+        routes: { F1: haRoute },
+        views: {
+          'R1-F1': {
+            executionMode: 'high_assurance',
+            haReviewHold: 'pending_release',
+            independentReviews: [{
+              reviewedCommit: 'deadbeef01',
+              verdict: 'pass',
+              reviewerAttemptId: 'IR-7',
+              validationReportId: 'VR-ha',
+            }],
+          },
+        },
+      });
+      await h.start();
+      const stop = await drivePlan(h.plan, h.deps);
+      assert.equal(stop.reason, 'finished');
+      assert.ok(!h.calls.some((c) => c.startsWith('finalize R1-F1')), '待放行不调终审');
+      assert.ok(!h.calls.includes('abandon R1-F1 E-1'));
+      const run = h.store.read()!;
+      assert.equal(run.feature('F1')?.status, 'suspended');
+      assert.match(run.feature('F1')?.needsDecision ?? '', /HA 待放行/);
+      assert.match(run.feature('F1')?.needsDecision ?? '', /R1-F1/);
+      assert.match(run.feature('F1')?.needsDecision ?? '', /deadbeef01/);
+      assert.match(run.feature('F1')?.needsDecision ?? '', /IR-7/);
+      assert.equal(h.status.get('R1-F1'), 'awaiting_review');
+      assert.equal(run.escalations.length, 0);
+      assert.equal(run.feature('F2')?.status, 'merged');
+    });
+
+  test('HA fault：开升级单，计入 P1 总额',
+    async () => {
+      const h = harness({
+        maxEscalations: 1,
+        features: ['F1', 'F2', 'F3'],
+        routes: { F1: haRoute },
+        runs: {
+          'R1-F1': {
+            outcome: {
+              kind: 'waiting',
+              reason: 'waiting_l3',
+              detail: 'HA 独立检视故障：没有独立检视发牌口或候选池。',
+            },
+            status: 'awaiting_review',
+          },
+        },
+        finalize: { 'R1-F2': RED },
+      });
+      await h.start();
+      const stop = await drivePlan(h.plan, h.deps);
+      assert.equal(stop.reason, 'escalation_limit');
+      const run = h.store.read()!;
+      assert.equal(run.escalations.length, 1, 'HA 故障占用一张升级单，第二次失败到上限');
+      assert.equal(run.escalations[0]?.missionId, 'R1-F1');
+      assert.match(run.escalations[0]?.failure ?? '', /HA 独立检视故障/);
+      assert.ok(!h.calls.some((c) => c.startsWith('finalize R1-F1')));
+      assert.equal(run.feature('F2')?.status, 'suspended');
+      assert.equal(run.feature('F3')?.status, 'pending');
+      assert.equal(h.status.get('R1-F1'), 'blocked');
+    });
 });
 
 describe('失败了开升级单等检视者', () => {
@@ -382,10 +532,32 @@ describe('驱动方自己停', () => {
     const stop = await drivePlan(h.plan, h.deps);
     assert.equal(stop.reason, 'unsafe');
     assert.match(stop.detail, /IVAL-3/);
+    assert.match(stop.detail, /验证红|回滚失败/);
     assert.equal(h.store.read()!.escalations.length, 0);
     assert.equal(h.store.read()!.feature('F1')?.status, 'suspended');
     assert.ok(!h.calls.includes('create R1-F2'));
   });
+
+  test('机器终审验证绿但目标被推进：报目标变更 unsafe，不误报验证红',
+    async () => {
+      const h = harness({
+        finalize: {
+          'R1-F1': {
+            status: 'awaiting_review',
+            reportId: 'IVAL-adv',
+            reason: '集成验证期间目标被推进或 checkout 被切换，未放行',
+          },
+        },
+      });
+      await h.start();
+      const stop = await drivePlan(h.plan, h.deps);
+      assert.equal(stop.reason, 'unsafe');
+      assert.match(stop.detail, /IVAL-adv/);
+      assert.match(stop.detail, /被推进|被切走/);
+      assert.doesNotMatch(stop.detail, /验证红/);
+      assert.doesNotMatch(stop.detail, /回滚失败/);
+      assert.equal(h.store.read()!.escalations.length, 0);
+    });
 
   test('项目仓被切离集成分支 → 不安全，停', async () => {
     const h = harness({

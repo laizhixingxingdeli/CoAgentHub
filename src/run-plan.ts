@@ -83,6 +83,7 @@ const VALUE_FLAGS = Object.freeze([
   '--store',
   '--coordinator',
   '--executor',
+  '--independent-reviewer',
   '--worktrees',
 ]);
 
@@ -108,7 +109,7 @@ function usage(): string {
   return (
     '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
       '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
-      '     [--coordinator <profileId,...>] [--executor <profileId,...>]\n' +
+      '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>]\n' +
       '     node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check\n' +
       '\n' +
       '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
@@ -320,7 +321,7 @@ async function main() {
       envPassthrough,
     });
     const pool = await loadPoolOrSeed(agentPool);
-    const pick = (role: 'coordinator' | 'executor', flag: string): AgentPoolCandidate[] => {
+    const pick = (role: 'coordinator' | 'executor' | 'independent_reviewer', flag: string): AgentPoolCandidate[] => {
       const wanted = arg(flag);
       if (!wanted) return [...pool[role]];
       return wanted
@@ -337,6 +338,8 @@ async function main() {
     };
     const coordinators = pick('coordinator', '--coordinator').map(toProfile);
     const executors = pick('executor', '--executor').map(toProfile);
+    // 空池也原样交给 MissionRunner：不得拿 coordinator 候选顶替独立检视。
+    const independentReviewers = pick('independent_reviewer', '--independent-reviewer').map(toProfile);
 
     console.log(`方案 ${plan.planId} 开跑：${remaining.map((f) => f.id).join(' → ')}`);
     console.log(`集成分支 ${plan.integrationBranch}，项目仓 ${projectRoot}`);
@@ -393,6 +396,7 @@ async function main() {
       workspace,
       coordinator: { runtime, candidates: coordinators },
       executor: { runtime, candidates: executors },
+      independentReviewer: { runtime, candidates: independentReviewers },
     });
     const stop = await runPlanOnPlatform(plan, selection, {
       store,

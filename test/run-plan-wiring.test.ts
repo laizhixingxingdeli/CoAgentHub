@@ -19,16 +19,28 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
 import { createApi } from '../src/api/server.ts';
+import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import {
+  FixedClock,
+  InMemoryActivityLog,
+  InMemoryProjectRepository,
+  SequentialIds,
+} from '../src/application/in-memory.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from '../src/application/plan-preflight.ts';
 import { runWithDeadline } from '../src/application/plan-driver.ts';
 import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
+import { Platform } from '../src/application/platform.ts';
+import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { buildPersistentPlatform, makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import type { ScriptTable } from '../src/runtime/scripted.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 
 const dirs: string[] = [];
@@ -438,6 +450,9 @@ describe('run-plan 周期投递修复接线', () => {
     assert.equal([...runPlan.matchAll(/buildPgPlatform\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/new MissionRunner\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/runPlanOnPlatform\(/g)].length, 1);
+    assert.match(runPlan, /pick\('independent_reviewer'/);
+    assert.match(runPlan, /independentReviewer:\s*\{\s*runtime,\s*candidates: independentReviewers/);
+    assert.doesNotMatch(runPlan, /independentReviewer:[\s\S]{0,120}candidates:\s*coordinators/);
     assert.doesNotMatch(runPlan, /new Orchestrator/);
     assert.doesNotMatch(runPlan, /drivePlan\(/);
     assert.doesNotMatch(runPlan, /runWithDeadline/);
@@ -861,3 +876,318 @@ describe('CLI 同序装配：既有平台 + API + MissionRunner + 内部入口 +
     ]);
   });
 });
+
+const HA_PLAN_FACTS = {
+  mutationSideEffect: true,
+  readOnlyProven: false,
+  highAssurance: {
+    productionDeployRelease: false,
+    externalPaidOp: false,
+    destructiveData: false,
+    credentialsPermissionsSecurity: true,
+    schemaPublicApiPersistenceCompat: true,
+    unrecoverableExternalSideEffect: false,
+  },
+  standardFloor: {
+    publicInterface: false,
+    buildSystemOrDependency: false,
+    multipleDomainModules: false,
+    acceptanceNotCheckableUpfront: false,
+    rootCauseOrCompetingDesigns: false,
+  },
+};
+
+const HA_ASSESSMENT = {
+  goalUncertainty: 1,
+  changeScope: 2,
+  operationalRisk: 2,
+  verificationDifficulty: 2,
+  coordinationNeed: 1,
+  recoveryDifficulty: 1,
+  reasons: ['HA 合格路径'],
+  decidedBy: 'coordinator',
+};
+
+const HA_WORK_ORDER: WorkOrder = {
+  ...ORDER,
+  allowedScope: ['a.txt'],
+  validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] },
+};
+
+function haCoordinatorScript(): ScriptTable {
+  return {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_update_plan',
+          body: {
+            findings: '要改 a.txt',
+            rejectedHypotheses: [],
+            decisions: ['直接改'],
+            direction: '改 a.txt',
+            risks: [],
+          },
+        },
+        { tool: 'coagent_create_work_item', body: { title: 'W', ...HA_WORK_ORDER } },
+        {
+          tool: 'coagent_dispatch_work_item',
+          body: (previous) => ({ workItemIds: [previous.workItemId] }),
+        },
+      ],
+    },
+    'coordinator:-:1': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_review_execution_result',
+          body: {
+            workItemId: 'W-1',
+            verdict: 'accept',
+            acceptanceResults: ORDER.acceptance.map((criterion) => ({
+              criterion,
+              status: 'pass' as const,
+              evidence: '测试替身：逐条核过',
+            })),
+            reasons: ['复跑过'],
+            requiredChanges: [],
+          },
+        },
+        {
+          tool: 'coagent_submit_mission_result',
+          body: {
+            outcome: 'delivered',
+            summary: '交付',
+            acceptanceEvidence: [],
+            memoryDelta: [],
+            openRisks: [],
+          },
+        },
+      ],
+    },
+  };
+}
+
+function haExecutorScript(): ScriptTable {
+  return {
+    'executor:W-1': {
+      steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        {
+          tool: 'coagent_submit_evidence',
+          body: { kind: 'test', summary: '绿', command: 'x', exitCode: 0 },
+        },
+        {
+          tool: 'coagent_submit_execution_result',
+          body: (previous) => ({
+            outcome: 'completed',
+            summary: '改好了',
+            changedFiles: ['a.txt'],
+            evidenceIds: [previous.evidenceId],
+            notes: '无',
+          }),
+        },
+      ],
+    },
+  };
+}
+
+function haReviewerScript(): ScriptTable {
+  return {
+    'independent_reviewer:-': {
+      steps: [
+        { tool: 'coagent_get_mission_review_bundle', body: {} },
+        { tool: 'coagent_submit_independent_review', body: { verdict: 'pass', reasons: ['齐'] } },
+      ],
+    },
+  };
+}
+
+function stubHaWorkspace(head = 'commit-ha'): WorkspaceManager {
+  return {
+    async prepare(_missionId, projectRoot) {
+      return {
+        cwd: projectRoot,
+        branch: 'mission/M',
+        targetBranch: 'auto/plan-x',
+        baseRevision: head,
+      };
+    },
+    async head() {
+      return head;
+    },
+    async targetHead() {
+      return head;
+    },
+    worktreePath(_missionId, projectRoot) {
+      return projectRoot;
+    },
+    async rollback() {},
+    async mergeToTarget() {
+      return { ok: true, mergedInto: head };
+    },
+    async diff() {
+      return { stat: '', files: [] };
+    },
+    async release() {},
+  };
+}
+
+describe('合格 HA 跑到 pending_release',
+  () => {
+    const haServers: Server[] = [];
+    after(() => {
+      for (const server of haServers) {
+        if (server.listening) server.close();
+      }
+    });
+
+    test('真实平台接线：合格 HA 到 pending_release 后挂起，Mission 未合并',
+      async () => {
+        const clock = new FixedClock();
+        const activity = new InMemoryActivityLog(clock);
+        const ids = new SequentialIds();
+        const deliveries = new InMemoryDeliveryRepository(clock, ids);
+        const projects = new InMemoryProjectRepository();
+        const workspace = stubHaWorkspace();
+        const reports = new InMemoryValidationReportRepository();
+        const validation = {
+          reports,
+          engine: {
+            async validate(input: { missionId: string }) {
+              const id = ids.next('VR');
+              const report = {
+                id,
+                policyRevision: 1,
+                missionId: input.missionId,
+                startedAt: '2026-01-01T00:00:00.000Z',
+                endedAt: '2026-01-01T00:00:01.000Z',
+                passed: true,
+                checks: [
+                  {
+                    kind: 'command' as const,
+                    passed: true,
+                    startedAt: '2026-01-01T00:00:00.000Z',
+                    endedAt: '2026-01-01T00:00:01.000Z',
+                    summary: 'ok',
+                    command: {
+                      argv: ['node', '--test'],
+                      cwd: '/tmp',
+                      exitCode: 0,
+                      timedOut: false,
+                      durationMs: 1,
+                      outputTail: 'ok',
+                    },
+                  },
+                ],
+              };
+              return {
+                report,
+                authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 },
+              };
+            },
+          },
+        };
+        const platform = new Platform({
+          projects,
+          deliveries,
+          workspace,
+          activity,
+          clock,
+          ids,
+          validation,
+        });
+        const tokens = new RunTokenRegistry();
+        const server: Server = createApi({ platform, tokens, deliveries });
+        await listenLoopback(server, 0);
+        haServers.push(server);
+        const port = (server.address() as AddressInfo).port;
+        const baseUrl = `http://127.0.0.1:${port}`;
+        const home = temp('coagent-ha-plan-');
+        const plan = parsePlanSpec(
+          {
+            planId: 'PLAN-ha',
+            projectId: 'P',
+            integrationBranch: 'auto/plan-x',
+            intent: 'HA 停靠',
+            stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 3_600_000, escalationTimeoutMs: 1_200_000 },
+            integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 30_000 }],
+            features: [{ id: 'Ha1', title: '合格 HA', why: 'w', allowedScope: ['a.txt'], acceptance: ['绿'] }],
+          },
+          { reviewer: 'claude' },
+        );
+        const selection = selectPlanCandidates(plan, { projectRoot: home });
+        const store = new FilePlanRunStore(join(home, 'R-ha.json'));
+        const output =
+          '看完了。\n\n```json\n' +
+          JSON.stringify({ facts: HA_PLAN_FACTS, assessment: HA_ASSESSMENT }) +
+          '\n```\n';
+        const stop = await runPlanOnPlatform(plan, selection, {
+          store,
+          projectRoot: home,
+          platform,
+          runId: 'R-ha',
+          // 墙钟截止由运行时拿真 Date.now() 算：开跑时间写死在过去，一开跑就判到点、
+          // 暂停 Mission；驱动的 now 固定又使升级等待永远不到期，sleep 立即返回就把
+          // 事件循环饿死。这里跟真时间走，sleep 一被调用就报错——合格 HA 到待放行
+          // 应当立即挂起，不该进入任何等待。
+          startedAt: new Date().toISOString(),
+          now: () => new Date().toISOString(),
+          sleep: async () => {
+            throw new Error('合格 HA 到待放行应立即挂起，驱动不该进入等待');
+          },
+          log: () => {},
+          persist: async () => {},
+          pauseInFlight: async (missionId) => {
+            await platform.pauseMission(missionId);
+          },
+          runQuery: async () =>
+            ({
+              queryRunId: 'Q-ha',
+              outcome: 'answered',
+              record: { output, id: 'Q-ha' },
+            }) as never,
+          runMission: async (missionId, options) => {
+            const runner = new MissionRunner({
+              platform,
+              tokens: makeIssuer(platform, tokens),
+              baseUrl,
+              workspace,
+              coordinator: {
+                runtime: new ScriptedRuntime(haCoordinatorScript()),
+                candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+              },
+              executor: {
+                runtime: new ScriptedRuntime(haExecutorScript()),
+                candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+              },
+              independentReviewer: {
+                runtime: new ScriptedRuntime(haReviewerScript()),
+                candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+              },
+            });
+            return runner.run(missionId, options);
+          },
+        });
+        assert.equal(stop.reason, 'finished');
+        const run = store.read()!;
+        const feature = run.feature('Ha1');
+        assert.equal(feature?.status, 'suspended');
+        assert.match(feature?.needsDecision ?? '', /HA 待放行/);
+        assert.match(feature?.needsDecision ?? '', /R-ha-Ha1/);
+        assert.match(feature?.needsDecision ?? '', /需人工决定/);
+        const view = await platform.getMissionView('R-ha-Ha1');
+        assert.equal(view.status, 'awaiting_review');
+        assert.equal(view.haReviewHold, 'pending_release');
+        assert.equal(view.finalReview, undefined);
+        assert.notEqual(view.status, 'completed');
+      });
+
+    test('独立检视池为空时不以 coordinator 自审代替',
+      () => {
+        const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
+        assert.match(src, /candidates: independentReviewers/);
+        assert.doesNotMatch(src, /independentReviewer:[\s\S]{0,160}candidates:\s*coordinators/);
+        assert.match(src, /空池也原样交给 MissionRunner/);
+      });
+  });

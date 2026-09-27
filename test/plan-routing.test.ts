@@ -182,12 +182,46 @@ describe('定路由', () => {
     assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
   });
 
-  test('事实判到 high_assurance → 挂起等人，写明要你定什么；不回落、不问检视者', () => {
+  test('事实判到 high_assurance 且禁止副作用全 false → 按 HA 建 classified，不带工单', () => {
     const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, schemaPublicApiPersistenceCompat: true } };
-    const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
-    assert.equal(route.kind, 'needs_human');
-    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /要你定/);
-    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /schemaPublicApiPersistenceCompat/);
+    const route = decideRoute(parsed({ facts, assessment: SMALL, workOrder: ORDER }), FEATURE);
+    assert.equal(route.kind, 'classified');
+    assert.equal(route.kind === 'classified' && route.classification.recommended.executionMode, 'high_assurance');
+    assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
+    assert.deepEqual(route.kind === 'classified' ? route.facts : undefined, facts);
+  });
+
+  test('HA 四项禁止副作用逐项 true：不建 Mission，原因含字段名', () => {
+    const keys = [
+      'productionDeployRelease',
+      'externalPaidOp',
+      'destructiveData',
+      'unrecoverableExternalSideEffect',
+    ] as const;
+    for (const key of keys) {
+      const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, [key]: true } };
+      const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
+      assert.equal(route.kind, 'needs_human', key);
+      assert.match(route.kind === 'needs_human' ? route.reason : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /不建 Mission/);
+    }
+  });
+
+  test('HA 四项禁止副作用逐项 unknown：不建 Mission，原因含字段名', () => {
+    const keys = [
+      'productionDeployRelease',
+      'externalPaidOp',
+      'destructiveData',
+      'unrecoverableExternalSideEffect',
+    ] as const;
+    for (const key of keys) {
+      const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, [key]: 'unknown' } };
+      const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
+      assert.equal(route.kind, 'needs_human', key);
+      assert.match(route.kind === 'needs_human' ? route.reason : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', new RegExp(key));
+    }
   });
 
   test('判成只读 query，或者根本没读懂 → 回落 Standard，交给协调者完整核实', () => {

@@ -37,7 +37,7 @@ export type RoutingDecision =
     }
   /** 不分类，按老路建 Standard Mission，协调者从头调查规划。 */
   | { readonly kind: 'standard_fallback'; readonly reason: string }
-  /** high_assurance：永远要人。检视者没有放行权，问它也没用，直接挂起。 */
+  /** 禁止副作用未证明安全，或其它必须停下来问人的路由；不建 Mission。 */
   | { readonly kind: 'needs_human'; readonly reason: string; readonly needsDecision: string };
 
 const PROPOSAL_KEYS = new Set(['facts', 'assessment', 'workOrder']);
@@ -121,6 +121,19 @@ export function parseRoutingProposal(
   }
 }
 
+/** 与平台 HA 建单闸同一组字段；true / unknown / 缺失都算未证明安全。 */
+const HA_FORBIDDEN_SIDE_EFFECTS = [
+  'productionDeployRelease',
+  'externalPaidOp',
+  'destructiveData',
+  'unrecoverableExternalSideEffect',
+] as const;
+
+function unprovenHaForbiddenSideEffects(facts: TaskFacts): string[] {
+  const ha = facts.highAssurance;
+  return HA_FORBIDDEN_SIDE_EFFECTS.filter((key) => ha[key] !== false);
+}
+
 /**
  * 工单的每一条范围都得落在方案声明的范围里。语义与 validator 的 changed-paths
  * 一致：文件精确匹配，目录以 `/` 结尾含子孙。工单里的目录只能落进方案里的目录。
@@ -157,18 +170,20 @@ export function decideRoute(
       reason: '只读协调者判它不用改代码。方案里的功能点不该是只读的，交给协调者完整核实。',
     };
   }
-  if (recommended.executionMode === 'high_assurance') {
-    const why = classification.reasons.filter((r) => r.startsWith('highAssurance true')).join('；');
+  // 分类器把 HA 字段 unknown 抬成 Standard；禁止副作用仍必须在建单前停。
+  const forbidden = unprovenHaForbiddenSideEffects(proposal.facts);
+  if (forbidden.length > 0) {
+    const fields = forbidden.join('、');
     return {
       kind: 'needs_human',
-      reason: why || 'high_assurance',
+      reason: `high_assurance 禁止副作用未证明为 false：${fields}`,
       needsDecision:
-        `分类为 high_assurance（${why || classification.reasons.join('；')}）：按规定合并要人放行，` +
-        `夜里不跑。要你定：亲自主导 ${feature.id}，还是拆小之后重排进方案？`,
+        `分类触及禁止副作用（${fields}）：不建 Mission。` +
+        `要你定：亲自主导 ${feature.id}，还是去掉这些副作用后重排进方案？`,
     };
   }
-  if (recommended.executionMode === 'standard') {
-    // 平台禁止 Standard 带工单：那会把一张 Fast Lane 的单子混进 Standard。
+  if (recommended.executionMode === 'high_assurance' || recommended.executionMode === 'standard') {
+    // HA / Standard 都禁止带 Lightweight 工单；合格 HA 把原始 facts 交给 createClassifiedMission。
     return { kind: 'classified', ...base };
   }
   const workOrder = proposal.workOrder;
