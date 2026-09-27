@@ -43,6 +43,32 @@ function night() {
 }
 
 describe('交接面', () => {
+  test('HA 待决展示证据和两条完整命令；各终态不展示可执行命令', () => {
+    const makeRun = () => {
+      const run = PlanRun.start({ id: 'R-ha', planId: 'P', projectId: 'p', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 100000, escalationTimeoutMs: 1000 }, featureIds: ['F1'], startedAt: T0 });
+      run.startFeature('F1', 'M-F1');
+      run.openHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A1', validationReportId: 'VR1', reviewerId: 'claude', integrationBranch: 'main', openedAt: at(1), deadline: at(20), verification: [{ command: 'npm test', timeoutMs: 1000 }] });
+      return run;
+    };
+    const pending = makeRun();
+    const text = renderPlanHandoff(pending, { now: at(2), recordPath: 'C:/R-ha.json' }).join('\n');
+    for (const evidence of ['M-F1', 'sha1', 'A1', 'VR1', 'main', at(20)]) assert.ok(text.includes(evidence));
+    assert.match(text, /plan approve M-F1 .*--run/);
+    assert.match(text, /plan send-back M-F1 .*--run/);
+    assert.ok(text.includes('--run "C:/R-ha.json"'));
+    const terminals = [
+      (() => { const run = makeRun(); run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A1', validationReportId: 'VR1', target: 'main', as: 'claude', confirmedBy: 'human', action: 'approve' }, at(10)); return run; })(),
+      (() => { const run = makeRun(); run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A1', validationReportId: 'VR1', target: 'main', as: 'claude', confirmedBy: 'human', action: 'send_back', reason: '补证' }, at(10)); return run; })(),
+      (() => { const run = makeRun(); run.expireHaRelease('F1', at(20)); return run; })(),
+      (() => { const run = makeRun(); run.invalidateHaRelease('F1', '证据变化', at(10)); return run; })(),
+      (() => { const run = makeRun(); run.halt('crashed', '中止', at(5)); return run; })(),
+    ];
+    for (const run of terminals) {
+      const output = renderPlanHandoff(run, { now: at(2), recordPath: 'C:/R-ha.json' }).join('\n');
+      assert.doesNotMatch(output, /plan approve/);
+      assert.doesNotMatch(output, /plan send-back/);
+    }
+  });
   test('四种状态各有记号且各就各位；每个非成功项都写要你定什么', () => {
     const lines = renderPlanHandoff(night(), { now: at(200) });
     const row = (id: string) => lines.find((l) => new RegExp(`\\s${id}\\s`).test(l)) ?? '';

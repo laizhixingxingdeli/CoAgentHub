@@ -459,11 +459,35 @@ async function main() {
   }
 
   if (command === 'plan') {
+    const releaseAction = target === 'approve' || target === 'send-back' ? target : undefined;
+    const explicitRun = arg('--run');
+    if (releaseAction && !explicitRun) throw new Error('plan approve/send-back 必须指定 --run <记录>。');
     const runPath =
-      arg('--run') ?? latestPlanRun(resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans')));
+      explicitRun ?? latestPlanRun(resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans')));
     if (!runPath) throw new Error('没有方案运行记录（先 node src/run-plan.ts 开跑，或用 --run 指定）。');
     const store = new FilePlanRunStore(runPath);
 
+    if (releaseAction) {
+      const values = ['--feature', '--commit', '--review', '--report', '--target'];
+      const parsed = Object.fromEntries(values.map((key) => [key, reviewFlag(key)])) as Record<string, { present: boolean; value?: string }>;
+      for (const key of values) if (!parsed[key].value?.trim()) throw new Error(`${key} 必填且不能为空。`);
+      const signature = parseReviewerSignature();
+      if (signature.mode !== 'reviewer') throw new Error('--as 与 --confirmed-by 必填。');
+      const reason = arg('--reason');
+      if (releaseAction === 'send-back' && !reason?.trim()) throw new Error('send-back 必须提供非空 --reason。');
+      const feature = parsed['--feature'].value!;
+      // CLI 只核对 PlanRun 已冻结的绑定；实时 Mission 与 Git 证据由后续驱动复核。
+      const missionId = process.argv[4];
+      if (!missionId || missionId.startsWith('--')) throw new Error('要指定 Mission id：plan approve/send-back <missionId> ...');
+      await store.update((run) => run.decideHaRelease({
+        featureId: feature, missionId, reviewedCommit: parsed['--commit'].value!, attemptId: parsed['--review'].value!,
+        validationReportId: parsed['--report'].value!, target: parsed['--target'].value!, as: signature.reviewerId,
+        confirmedBy: signature.confirmedBy, action: releaseAction === 'send-back' ? 'send_back' : 'approve',
+        ...(releaseAction === 'send-back' ? { reason: reason! } : {}),
+      }, new Date().toISOString()));
+      console.log(`HA ${releaseAction} 已记录（仅为签字声明，非逐次点击认证）。`);
+      return;
+    }
     if (target === 'decide') {
       const escalationId = process.argv[4];
       if (!escalationId || escalationId.startsWith('--')) throw new Error('要指定升级单：plan decide <E-n> ...');
