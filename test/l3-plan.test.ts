@@ -200,19 +200,31 @@ describe('l3 plan HA 签字：子进程', () => {
       { name: '缺 --confirmed-by', why: /--confirmed-by/, args: (p) => haArgs(p).filter((x, i, a) => x !== '--confirmed-by' && a[i - 1] !== '--confirmed-by') },
       { name: '缺 --run', why: /--run/, args: (p) => haArgs(p).filter((x, i, a) => x !== '--run' && a[i - 1] !== '--run') },
       { name: '缺 Mission id', why: /Mission id/, args: (p) => { const a = haArgs(p); a.splice(2, 1); return a; } },
+      { name: '错 run', why: /HA_RELEASE_REJECTED|没有该功能的待决记录/ },
+      { name: '非法 --as', why: /--as 的值不能只是空白/, args: (p) => replaceFlag(haArgs(p), '--as', '   ') },
+      { name: '非法 --confirmed-by', why: /--confirmed-by 的值不能只是空白/, args: (p) => replaceFlag(haArgs(p), '--confirmed-by', '   ') },
       { name: '过期', why: /HA_RELEASE_REJECTED|截止/, options: { deadline: new Date(Date.now() - 60_000).toISOString() } },
       { name: '已停运行', why: /PLAN_RUN_STOPPED|停止/, options: { stopped: true } },
       { name: 'send-back 缺理由', why: /reason|理由/, args: (p) => { const a = haArgs(p); a[1] = 'send-back'; return a; } },
     ];
     for (const item of cases) {
-      const { statePath, recordPath } = await haReleaseRun(item.options);
+      const { dir, statePath, recordPath } = await haReleaseRun(item.options);
       const before = readFileSync(recordPath);
-      const args = item.args?.(recordPath) ?? haArgs(recordPath);
+      let otherRunPath: string | undefined;
+      let otherRunBefore: Buffer | undefined;
+      if (item.name === '错 run') {
+        otherRunPath = join(dir, 'other-run.json');
+        const otherStore = new FilePlanRunStore(otherRunPath);
+        await otherStore.create(PlanRun.start({ id: 'OTHER-RUN', planId: 'P', projectId: 'P', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 8 * MIN, escalationTimeoutMs: 20 * MIN }, featureIds: ['F1'], startedAt: new Date().toISOString() }));
+        otherRunBefore = readFileSync(otherRunPath);
+      }
+      const args = item.args?.(recordPath) ?? (otherRunPath ? replaceFlag(haArgs(recordPath), '--run', otherRunPath) : haArgs(recordPath));
       const result = l3(statePath, ...args);
       assert.notEqual(result.status, 0, `${item.name}: ${result.out}`);
       assert.ok(result.out.length > 0, `${item.name}: 应说明拒绝原因`);
       assert.match(result.out, item.why, `${item.name}: 输出应指出拒绝缘由`);
-      assert.deepEqual(readFileSync(recordPath), before, `${item.name}: 拒绝不得写文件`);
+      assert.deepEqual(readFileSync(recordPath), before, `${item.name}: 拒绝不得写原记录`);
+      if (otherRunPath && otherRunBefore) assert.deepEqual(readFileSync(otherRunPath), otherRunBefore, `${item.name}: 拒绝不得写目标记录`);
     }
   });
 

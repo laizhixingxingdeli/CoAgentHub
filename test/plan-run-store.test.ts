@@ -239,6 +239,8 @@ describe('HA 待放行记录存储', () => {
       (s) => { s.haReleases[0].missionId = 'foreign'; },
       (s) => { s.haReleases[0].runId = 'foreign'; },
       (s) => { s.haReleases[0].integrationBranch = 'foreign'; },
+      (s) => { s.haReleases[0].reviewerId = 'someone-else'; },
+      (s) => { s.haReleases[0].decision = null; },
     ];
     for (const mutate of cases) {
       const { path, store } = await storeWithHa();

@@ -477,11 +477,13 @@ export class PlanRun {
         const feature = features.find((item) => item?.featureId === r.featureId);
         if (!isText(r.missionId) || !feature?.missionIds.includes(r.missionId)) return false;
         if (!isText(r.reviewedCommit) || !isText(r.attemptId) || !isText(r.validationReportId)) return false;
-        if (!isText(r.reviewerId) || !isText(r.integrationBranch) || r.integrationBranch !== raw.integrationBranch) return false;
+        if (!isText(r.reviewerId) || r.reviewerId !== raw.reviewer) return false;
+        if (!isText(r.integrationBranch) || r.integrationBranch !== raw.integrationBranch) return false;
         if (!isInstant(r.openedAt) || !isInstant(r.deadline) || Date.parse(r.deadline) <= Date.parse(r.openedAt)) return false;
         if (!Array.isArray(r.verification) || r.verification.length === 0) return false;
         if (!r.verification.every((v) => v && isText(v.command) && isPositiveInt(v.timeoutMs))) return false;
-        if (!r.decision) return true;
+        if (!Object.hasOwn(r, 'decision')) return true;
+        if (r.decision === null || typeof r.decision !== 'object') return false;
         const d = r.decision;
         if (!['approve', 'send_back', 'expired', 'invalidated'].includes(d.kind) || !isInstant(d.at)) return false;
         if (Date.parse(d.at) < Date.parse(r.openedAt)) return false;
