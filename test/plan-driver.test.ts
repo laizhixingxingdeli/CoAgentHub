@@ -256,6 +256,19 @@ describe('一路顺利', () => {
 });
 
 describe('现做分类', () => {
+  test('不完整禁止副作用信号挂起且建单前不检查仓库', async () => {
+    const h = harness({
+      routes: { F1: { ok: false, reason: 'facts 不合法', haForbiddenUnproven: ['externalPaidOp'] } },
+      repoProblems: { F1: ['仓库状态异常'] },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.notEqual(stop.reason, 'unsafe');
+    const feature = h.store.read()!.feature('F1');
+    assert.equal(feature?.status, 'suspended');
+    assert.match(feature?.needsDecision ?? '', /externalPaidOp/);
+    assert.ok(!h.calls.some((c) => c.includes('R1-F1')));
+  });
   test('Fast Lane 带工单、Standard 不带、high_assurance 不建 Mission 直接挂起、读不懂回落老路', async () => {
     const order = {
       objective: 'x',

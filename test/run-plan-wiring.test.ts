@@ -1183,6 +1183,48 @@ describe('合格 HA 跑到 pending_release',
         assert.notEqual(view.status, 'completed');
       });
 
+    test('禁止副作用字段缺失时挂起，建单前不创建 Mission', async () => {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const workspace = stubHaWorkspace();
+      const projects = new InMemoryProjectRepository();
+      const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+      const home = temp('coagent-ha-unproven-');
+      const plan = parsePlanSpec(
+        {
+          planId: 'PLAN-ha-unproven', projectId: 'P', integrationBranch: 'auto/plan-x', intent: '缺失字段挂起',
+          stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 3_600_000, escalationTimeoutMs: 1_200_000 },
+          integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 30_000 }],
+          features: [{ id: 'HaMissing', title: '禁止副作用未证明', why: 'w', allowedScope: ['a.txt'], acceptance: ['绿'] }],
+        },
+        { reviewer: 'claude' },
+      );
+      const selection = selectPlanCandidates(plan, { projectRoot: home });
+      const store = new FilePlanRunStore(join(home, 'R-ha-unproven.json'));
+      const incompleteFacts = {
+        ...HA_PLAN_FACTS,
+        highAssurance: { ...HA_PLAN_FACTS.highAssurance, externalPaidOp: undefined },
+      };
+      const output = '分类结果。\n```json\n' + JSON.stringify({ facts: incompleteFacts, assessment: HA_ASSESSMENT }) + '\n```\n';
+      // 真时间避免墙钟伪过期；任何等待都说明流程错误，立即失败。
+      const stop = await runPlanOnPlatform(plan, selection, {
+        store, projectRoot: home, platform, runId: 'R-ha-unproven',
+        startedAt: new Date().toISOString(), now: () => new Date().toISOString(),
+        sleep: async () => { throw new Error('禁止副作用未证明不应等待'); },
+        log: () => {}, persist: async () => {}, pauseInFlight: async () => {},
+        runQuery: async () => ({ queryRunId: 'Q-unproven', outcome: 'answered', record: { output, id: 'Q-unproven' } }) as never,
+        runMission: async () => { throw new Error('不完整禁止副作用信号不得运行 Mission'); },
+      });
+      assert.equal(stop.reason, 'finished');
+      const feature = store.read()!.feature('HaMissing');
+      assert.equal(feature?.status, 'suspended');
+      assert.match(feature?.needsDecision ?? '', /externalPaidOp/);
+      const missions = await platform.listMissions();
+      assert.ok(!missions.some((mission) => mission.missionId === 'R-ha-unproven-HaMissing'));
+    });
+
     test('独立检视池为空时不以 coordinator 自审代替',
       () => {
         const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');

@@ -81,7 +81,10 @@ export interface PlanDriverDeps {
   /** 只读协调者现做分类。读不懂就说为什么，驱动方回落 Standard。 */
   readonly proposeRoute: (
     feature: PlanFeatureSpec,
-  ) => Promise<{ ok: true; proposal: RoutingProposal } | { ok: false; reason: string }>;
+  ) => Promise<
+    | { ok: true; proposal: RoutingProposal }
+    | { ok: false; reason: string; haForbiddenUnproven?: readonly string[] }
+  >;
   /**
    * 每个功能开跑前再核一次项目仓（还在集成分支上、工作区干净）。开跑前检查只在
    * 启动时做一次；夜里有东西把仓库切回 master 的话，下一条 Mission 会从 master
@@ -163,6 +166,7 @@ async function runFeature(
     proposal.ok ? proposal.proposal : undefined,
     feature,
     proposal.ok ? undefined : proposal.reason,
+    proposal.ok ? [] : proposal.haForbiddenUnproven,
   );
   if (route.kind !== 'needs_human') {
     const problems = (await deps.checkRepo?.()) ?? [];
