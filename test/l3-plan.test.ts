@@ -12,7 +12,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -134,6 +134,144 @@ describe('l3 plan：看', () => {
     const attempt = onDisk.projects[0].missions[0].coordinatorAttempts[0];
     assert.equal(attempt.status, 'in_progress');
     assert.equal(attempt.endedBy, undefined);
+  });
+});
+
+async function haReleaseRun(options?: { deadline?: string; stopped?: boolean }) {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-ha-'));
+  dirs.push(dir);
+  const statePath = join(dir, 'state.json');
+  const recordPath = join(dir, 'run.json');
+  const store = new FilePlanRunStore(recordPath);
+  const now = new Date().toISOString();
+  const run = PlanRun.start({ id: 'R-HA', planId: 'P', projectId: 'P', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 8 * MIN, escalationTimeoutMs: 20 * MIN }, featureIds: ['F1', 'F2'], startedAt: now });
+  run.startFeature('F1', 'M-F1');
+  run.suspendFeature('F1', 'HA 等待');
+  run.startFeature('F2', 'M-F2');
+  run.suspendFeature('F2', 'HA 等待');
+  const release = (featureId: string, missionId: string) => ({ featureId, missionId, reviewedCommit: 'sha1', attemptId: `A-${featureId}`, validationReportId: `VR-${featureId}`, reviewerId: 'claude', integrationBranch: 'main', openedAt: options?.deadline ? new Date(Date.parse(options.deadline) - MIN).toISOString() : now, deadline: options?.deadline ?? new Date(Date.now() + 60 * MIN).toISOString(), verification: [{ command: 'node --test', timeoutMs: 10_000 }] });
+  run.openHaRelease(release('F1', 'M-F1'));
+  run.openHaRelease(release('F2', 'M-F2'));
+  await store.create(run);
+  if (options?.stopped) {
+    const snapshot = run.toSnapshot();
+    writeFileSync(recordPath, JSON.stringify({ ...snapshot, stopped: { at: now, reason: 'crashed', detail: 'test' } }));
+  }
+  return { dir, statePath, recordPath, store };
+}
+
+function haArgs(recordPath: string, ...extra: string[]) {
+  return ['plan', 'approve', 'M-F1', '--feature', 'F1', '--commit', 'sha1', '--review', 'A-F1', '--report', 'VR-F1', '--target', 'main', '--as', 'claude', '--confirmed-by', 'human', '--run', recordPath, ...extra];
+}
+
+function replaceFlag(args: string[], flag: string, value: string): string[] {
+  const index = args.indexOf(flag);
+  args[index + 1] = value;
+  return args;
+}
+
+describe('l3 plan HA 签字：子进程', () => {
+  test('approve 与 send-back 成功记录唯一决定及签字声明', async () => {
+    for (const action of ['approve', 'send-back'] as const) {
+      const { statePath, recordPath, store } = await haReleaseRun();
+      const args = haArgs(recordPath);
+      if (action === 'send-back') args.splice(1, 1, 'send-back');
+      if (action === 'send-back') args.push('--reason', '补齐证据');
+      const result = l3(statePath, ...args);
+      assert.equal(result.status, 0, result.out);
+      const decision = store.read()?.haReleases.find((r) => r.featureId === 'F1')?.decision;
+      assert.equal(decision?.kind, action === 'approve' ? 'approve' : 'send_back');
+      assert.equal(decision?.by, 'claude');
+      assert.equal(decision?.confirmedBy, 'human');
+      if (action === 'send-back') assert.equal(decision?.reason, '补齐证据');
+    }
+  });
+
+  test('每类拒绝均非零退出且记录字节不变', async () => {
+    const cases: Array<{ name: string; why: RegExp; args?: (path: string) => string[]; options?: { deadline?: string; stopped?: boolean } }> = [
+      { name: '错 feature', why: /没有该功能的待决记录/, args: (p) => replaceFlag(haArgs(p), '--feature', 'NO') },
+      { name: '错 Mission', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => ['plan','approve','WRONG', ...haArgs(p).slice(3)] },
+      { name: '错提交', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => replaceFlag(haArgs(p), '--commit', 'wrong') },
+      { name: '错检视', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => replaceFlag(haArgs(p), '--review', 'wrong') },
+      { name: '错报告', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => replaceFlag(haArgs(p), '--report', 'wrong') },
+      { name: '错目标', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => replaceFlag(haArgs(p), '--target', 'other') },
+      { name: '非指定检视者', why: /HA_RELEASE_REJECTED|待放行绑定/, args: (p) => replaceFlag(haArgs(p), '--as', 'other') },
+      { name: '缺 --as', why: /--as/, args: (p) => haArgs(p).filter((x, i, a) => x !== '--as' && a[i - 1] !== '--as') },
+      { name: '缺 --confirmed-by', why: /--confirmed-by/, args: (p) => haArgs(p).filter((x, i, a) => x !== '--confirmed-by' && a[i - 1] !== '--confirmed-by') },
+      { name: '缺 --run', why: /--run/, args: (p) => haArgs(p).filter((x, i, a) => x !== '--run' && a[i - 1] !== '--run') },
+      { name: '缺 Mission id', why: /Mission id/, args: (p) => { const a = haArgs(p); a.splice(2, 1); return a; } },
+      { name: '错 run', why: /HA_RELEASE_REJECTED|没有该功能的待决记录/ },
+      { name: '非法 --as', why: /--as 的值不能只是空白/, args: (p) => replaceFlag(haArgs(p), '--as', '   ') },
+      { name: '非法 --confirmed-by', why: /--confirmed-by 的值不能只是空白/, args: (p) => replaceFlag(haArgs(p), '--confirmed-by', '   ') },
+      { name: '过期', why: /HA_RELEASE_REJECTED|截止/, options: { deadline: new Date(Date.now() - 60_000).toISOString() } },
+      { name: '已停运行', why: /PLAN_RUN_STOPPED|停止/, options: { stopped: true } },
+      { name: 'send-back 缺理由', why: /reason|理由/, args: (p) => { const a = haArgs(p); a[1] = 'send-back'; return a; } },
+    ];
+    for (const item of cases) {
+      const { dir, statePath, recordPath } = await haReleaseRun(item.options);
+      const before = readFileSync(recordPath);
+      let otherRunPath: string | undefined;
+      let otherRunBefore: Buffer | undefined;
+      if (item.name === '错 run') {
+        otherRunPath = join(dir, 'other-run.json');
+        const otherStore = new FilePlanRunStore(otherRunPath);
+        await otherStore.create(PlanRun.start({ id: 'OTHER-RUN', planId: 'P', projectId: 'P', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 8 * MIN, escalationTimeoutMs: 20 * MIN }, featureIds: ['F1'], startedAt: new Date().toISOString() }));
+        otherRunBefore = readFileSync(otherRunPath);
+      }
+      const args = item.args?.(recordPath) ?? (otherRunPath ? replaceFlag(haArgs(recordPath), '--run', otherRunPath) : haArgs(recordPath));
+      const result = l3(statePath, ...args);
+      assert.notEqual(result.status, 0, `${item.name}: ${result.out}`);
+      assert.ok(result.out.length > 0, `${item.name}: 应说明拒绝原因`);
+      assert.match(result.out, item.why, `${item.name}: 输出应指出拒绝缘由`);
+      assert.deepEqual(readFileSync(recordPath), before, `${item.name}: 拒绝不得写原记录`);
+      if (otherRunPath && otherRunBefore) assert.deepEqual(readFileSync(otherRunPath), otherRunBefore, `${item.name}: 拒绝不得写目标记录`);
+    }
+  });
+
+  test('重复签拒绝；主状态锁被占仍能签，平台状态和 Git HEAD 不变', async () => {
+    const { dir, statePath, recordPath, store } = await haReleaseRun();
+    const platform = await buildPersistentPlatform(statePath, { workspace: new InPlaceWorkspaceManager() });
+    await platform.persist();
+    const stateBefore = readFileSync(statePath);
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    execFileSync('git', ['init', repo]);
+    execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']);
+    execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    writeFileSync(join(repo, 'file'), 'x');
+    execFileSync('git', ['-C', repo, 'add', 'file']);
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'init']);
+    const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const releaseLock = acquireLock(statePath, 'run-plan');
+    let first;
+    try { first = l3(statePath, ...haArgs(recordPath)); } finally { releaseLock(); }
+    assert.equal(first!.status, 0, first!.out);
+    assert.deepEqual(readFileSync(statePath), stateBefore);
+    assert.equal(execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }), head);
+    const before = readFileSync(recordPath);
+    const second = l3(statePath, ...haArgs(recordPath));
+    assert.notEqual(second.status, 0, second.out);
+    assert.deepEqual(readFileSync(recordPath), before);
+    assert.equal(store.read()?.haReleases.find((r) => r.featureId === 'F1')?.decision?.kind, 'approve');
+  });
+
+  test('决定与过期按两个确定顺序争锁，败方拒绝且不覆盖终结值', async () => {
+    const { statePath, recordPath, store } = await haReleaseRun();
+    const afterDeadline = new Date(Date.now() + 90 * MIN).toISOString();
+    await store.update((run) => run.expireHaRelease('F1', afterDeadline));
+    const before = readFileSync(recordPath);
+    const late = l3(statePath, ...haArgs(recordPath));
+    assert.notEqual(late.status, 0, late.out);
+    assert.deepEqual(readFileSync(recordPath), before);
+    assert.equal(store.read()?.haReleases.find((r) => r.featureId === 'F1')?.decision?.kind, 'expired');
+
+    const second = await haReleaseRun();
+    const signed = l3(second.statePath, ...haArgs(second.recordPath));
+    assert.equal(signed.status, 0, signed.out);
+    const signedBytes = readFileSync(second.recordPath);
+    await assert.rejects(second.store.update((run) => run.expireHaRelease('F1', afterDeadline)));
+    assert.deepEqual(readFileSync(second.recordPath), signedBytes);
+    assert.equal(second.store.read()?.haReleases.find((r) => r.featureId === 'F1')?.decision?.kind, 'approve');
   });
 });
 

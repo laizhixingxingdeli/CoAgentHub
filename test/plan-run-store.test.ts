@@ -9,7 +9,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -187,6 +187,75 @@ describe('同时写', () => {
     await other.done;
     const onDisk = JSON.parse(readFileSync(path, 'utf8')) as { features: { featureId: string; status: string }[] };
     assert.equal(onDisk.features.find((f) => f.featureId === 'F2')?.status, 'pending');
+  });
+});
+
+async function storeWithHa() {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-ha-'));
+  dirs.push(dir);
+  const path = join(dir, 'R-ha.json');
+  const store = new FilePlanRunStore(path);
+  const run = PlanRun.start({ id: 'R-ha', planId: 'P', projectId: 'p', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 100_000, escalationTimeoutMs: 1000 }, featureIds: ['F1', 'F2'], startedAt: T0 });
+  run.startFeature('F1', 'M-F1');
+  run.suspendFeature('F1', 'HA 待放行');
+  run.startFeature('F2', 'M-F2');
+  await store.create(run);
+  const make = (featureId: string, missionId: string) => ({ featureId, missionId, reviewedCommit: 'sha1', attemptId: `A-${featureId}`, validationReportId: `VR-${featureId}`, reviewerId: 'claude', integrationBranch: 'main', openedAt: at(1), deadline: at(20), verification: [{ command: 'npm test', timeoutMs: 5000 }, { command: 'npm run lint', timeoutMs: 7000 }] });
+  const opened: ReturnType<typeof run.openHaRelease>[] = [];
+  await store.update((r) => {
+    opened.push(r.openHaRelease(make('F1', 'M-F1')));
+    opened.push(r.openHaRelease(make('F2', 'M-F2')));
+  });
+  return { path, store, make, opened };
+}
+
+describe('HA 待放行记录存储', () => {
+  test('旧 version 1 快照缺少 haReleases 仍可恢复', async () => {
+    const { path, store } = await storeWithEscalation();
+    const snapshot = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    delete snapshot.haReleases;
+    writeFileSync(path, JSON.stringify(snapshot));
+    assert.deepEqual(store.read()?.haReleases, []);
+  });
+
+  test('已决定与待决记录 round-trip 保持值和顺序', async () => {
+    const { path, store, opened } = await storeWithHa();
+    const decided = await store.update((run) => run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A-F1', validationReportId: 'VR-F1', target: 'main', as: 'claude', confirmedBy: 'human', action: 'approve' }, at(10)));
+    const expected = [decided, opened[1]];
+    const restored = new FilePlanRunStore(path).read()?.haReleases;
+    assert.deepEqual(restored, expected);
+    assert.equal(expected[0].decision?.kind, 'approve');
+    assert.equal(expected[1].decision, undefined);
+    assert.deepEqual(expected[0].verification.map((v) => v.command), ['npm test', 'npm run lint']);
+  });
+
+  test('畸形 HA 快照统一 fail-closed', async () => {
+    const cases: Array<(snapshot: Record<string, any>) => void> = [
+      (s) => { s.haReleases = {}; },
+      (s) => { delete s.haReleases[0].reviewedCommit; },
+      (s) => { s.haReleases[0].decision = { kind: 'send-back', at: at(10) }; },
+      (s) => { s.haReleases[0].decision = { kind: 'approve', at: at(10), confirmedBy: 'human' }; },
+      (s) => { s.haReleases.push({ ...s.haReleases[0] }); },
+      (s) => { s.haReleases[0].missionId = 'foreign'; },
+      (s) => { s.haReleases[0].runId = 'foreign'; },
+      (s) => { s.haReleases[0].integrationBranch = 'foreign'; },
+      (s) => { s.haReleases[0].reviewerId = 'someone-else'; },
+      (s) => { s.haReleases[0].decision = null; },
+    ];
+    for (const mutate of cases) {
+      const { path, store } = await storeWithHa();
+      const snapshot = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+      mutate(snapshot);
+      writeFileSync(path, JSON.stringify(snapshot));
+      assert.throws(() => store.read(), (error: unknown) => error instanceof PlatformRuleError && error.code === 'PLAN_RUN_CORRUPT');
+    }
+  });
+
+  test('规则拒绝的 HA 签字不改变文件字节', async () => {
+    const { path, store } = await storeWithHa();
+    const before = readFileSync(path);
+    await assert.rejects(store.update((run) => run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'wrong', attemptId: 'A-F1', validationReportId: 'VR-F1', target: 'main', as: 'claude', confirmedBy: 'human', action: 'approve' }, at(10))), (error: unknown) => error instanceof PlatformRuleError && error.code === 'HA_RELEASE_REJECTED');
+    assert.deepEqual(readFileSync(path), before);
   });
 });
 

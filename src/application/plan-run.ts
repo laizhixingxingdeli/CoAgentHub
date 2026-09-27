@@ -158,6 +158,29 @@ export interface PlanRunInit {
 }
 
 /** 落盘形状。纯数据，能直接 JSON 化；存到哪是存储层的事。 */
+export type HaReleaseDecision = {
+  readonly kind: 'approve' | 'send_back' | 'expired' | 'invalidated';
+  readonly at: string;
+  readonly by?: string;
+  readonly confirmedBy?: string;
+  readonly reason?: string;
+};
+
+export interface HaRelease {
+  readonly runId: string;
+  readonly featureId: string;
+  readonly missionId: string;
+  readonly reviewedCommit: string;
+  readonly attemptId: string;
+  readonly validationReportId: string;
+  readonly reviewerId: string;
+  readonly integrationBranch: string;
+  readonly openedAt: string;
+  readonly deadline: string;
+  readonly verification: readonly { readonly command: string; readonly timeoutMs: number }[];
+  readonly decision?: HaReleaseDecision;
+}
+
 export interface PlanRunSnapshot {
   readonly version: 1;
   readonly id: string;
@@ -169,6 +192,7 @@ export interface PlanRunSnapshot {
   readonly startedAt: string;
   readonly features: readonly PlanFeatureRecord[];
   readonly escalations: readonly PlanEscalation[];
+  readonly haReleases?: readonly HaRelease[];
   readonly stopped?: PlanRunStop;
   readonly sourceExclusions?: readonly PlanSourceExclusion[];
 }
@@ -361,6 +385,7 @@ export class PlanRun {
   #startedAt: string;
   #features: PlanFeatureRecord[];
   #escalations: PlanEscalation[] = [];
+  #haReleases: HaRelease[] = [];
   #stopped: PlanRunStop | undefined;
   #sourceExclusions: readonly PlanSourceExclusion[] | undefined;
 
@@ -443,6 +468,34 @@ export class PlanRun {
     if (!Array.isArray(raw.escalations)) throw corrupt('escalations 缺失。');
     const escalations = raw.escalations.map((e) => readEscalation(e, featureIds));
     if (escalations.some((e) => e === undefined)) throw corrupt('有升级单读不懂。');
+    let haReleases: HaRelease[] | undefined;
+    if (raw.haReleases !== undefined) {
+      if (!Array.isArray(raw.haReleases)) throw corrupt('haReleases 不是列表。');
+      haReleases = raw.haReleases as HaRelease[];
+      const valid = haReleases.every((r) => {
+        if (!r || !isText(r.runId) || r.runId !== raw.id || !featureIds.has(r.featureId)) return false;
+        const feature = features.find((item) => item?.featureId === r.featureId);
+        if (!isText(r.missionId) || !feature?.missionIds.includes(r.missionId)) return false;
+        if (!isText(r.reviewedCommit) || !isText(r.attemptId) || !isText(r.validationReportId)) return false;
+        if (!isText(r.reviewerId) || r.reviewerId !== raw.reviewer) return false;
+        if (!isText(r.integrationBranch) || r.integrationBranch !== raw.integrationBranch) return false;
+        if (!isInstant(r.openedAt) || !isInstant(r.deadline) || Date.parse(r.deadline) <= Date.parse(r.openedAt)) return false;
+        if (!Array.isArray(r.verification) || r.verification.length === 0) return false;
+        if (!r.verification.every((v) => v && isText(v.command) && isPositiveInt(v.timeoutMs))) return false;
+        if (!Object.hasOwn(r, 'decision')) return true;
+        if (r.decision === null || typeof r.decision !== 'object') return false;
+        const d = r.decision;
+        if (!['approve', 'send_back', 'expired', 'invalidated'].includes(d.kind) || !isInstant(d.at)) return false;
+        if (Date.parse(d.at) < Date.parse(r.openedAt)) return false;
+        if ((d.kind === 'approve' || d.kind === 'send_back') && Date.parse(d.at) >= Date.parse(r.deadline)) return false;
+        if (d.kind === 'expired' && Date.parse(d.at) < Date.parse(r.deadline)) return false;
+        if ((d.kind === 'approve' || d.kind === 'send_back') && (!isText(d.by) || d.by !== r.reviewerId || !isText(d.confirmedBy))) return false;
+        if (d.kind === 'send_back' && !isText(d.reason)) return false;
+        if (d.kind === 'invalidated' && !isText(d.reason)) return false;
+        return true;
+      });
+      if (!valid || new Set(haReleases.filter((r) => !r.decision).map((r) => r.featureId)).size !== haReleases.filter((r) => !r.decision).length) throw corrupt('haReleases 畸形或绑定冲突。');
+    }
     const stopped = readStop(raw.stopped);
     if (stopped === false) throw corrupt('stopped 读不懂。');
     let sourceExclusions: readonly PlanSourceExclusion[] | undefined;
@@ -468,6 +521,7 @@ export class PlanRun {
     });
     run.#features = features as PlanFeatureRecord[];
     run.#escalations = escalations as PlanEscalation[];
+    run.#haReleases = haReleases ?? [];
     run.#stopped = stopped;
     return run;
   }
@@ -484,6 +538,7 @@ export class PlanRun {
       startedAt: this.#startedAt,
       features: this.#features.map((f) => freezeFeature(f)),
       escalations: [...this.#escalations],
+      ...(this.#haReleases.length ? { haReleases: [...this.#haReleases] } : {}),
       ...(this.#stopped ? { stopped: this.#stopped } : {}),
       ...(this.#sourceExclusions ? { sourceExclusions: this.#sourceExclusions.map(freezeSourceExclusion) } : {}),
     };
@@ -538,6 +593,116 @@ export class PlanRun {
         e.resolution?.kind === 'decided' &&
         e.resolution.action === 'rerun_isolated',
     ).length;
+  }
+
+  get haReleases(): readonly HaRelease[] { return [...this.#haReleases]; }
+
+  openHaRelease(input: Omit<HaRelease, 'runId' | 'decision'>): HaRelease {
+    this.#assertRunning();
+    const feature = this.feature(input.featureId);
+    if (!feature || !feature.missionIds.includes(input.missionId)) throw new PlatformRuleError('HA_RELEASE_INVALID', '功能或 Mission 绑定无效。');
+    // 同一功能仅保留一条待决记录，避免两份签字竞争同一份 HA 证据。
+    if (this.#haReleases.some((r) => r.featureId === input.featureId && !r.decision)) {
+      throw new PlatformRuleError('HA_RELEASE_ALREADY_OPEN', '该功能已有待决记录。');
+    }
+    if (input.integrationBranch !== this.#integrationBranch || input.reviewerId !== this.#reviewer) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '目标或指定检视者不匹配。');
+    }
+    if (!isText(input.reviewedCommit) || !isText(input.attemptId) || !isText(input.validationReportId)) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '检视证据缺失。');
+    }
+    if (!isInstant(input.openedAt) || !isInstant(input.deadline) || Date.parse(input.deadline) <= Date.parse(input.openedAt)) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '截止必须晚于开立时间。');
+    }
+    if (
+      !Array.isArray(input.verification) ||
+      input.verification.length === 0 ||
+      input.verification.some((v) => !isText(v.command) || !isPositiveInt(v.timeoutMs))
+    ) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '验证摘要必须非空且有效。');
+    }
+    const record = Object.freeze({ ...input, runId: this.#id, verification: Object.freeze([...input.verification]) });
+    this.#haReleases.push(record);
+    return record;
+  }
+
+  decideHaRelease(
+    input: {
+      featureId: string;
+      missionId: string;
+      reviewedCommit: string;
+      attemptId: string;
+      validationReportId: string;
+      target: string;
+      as: string;
+      confirmedBy: string;
+      action: 'approve' | 'send_back';
+      reason?: string;
+    },
+    now: string,
+  ): HaRelease {
+    this.#assertRunning();
+    if (input.action !== 'approve' && input.action !== 'send_back') {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '决定动作无效。');
+    }
+    if (input.action === 'send_back' && !isText(input.reason)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '打回理由必填。');
+    }
+    const index = this.#haReleases.findIndex((item) => item.featureId === input.featureId && !item.decision);
+    const release = this.#haReleases[index];
+    if (!release) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '没有该功能的待决记录。');
+    }
+    const bindingMatches =
+      release.missionId === input.missionId &&
+      release.reviewedCommit === input.reviewedCommit &&
+      release.attemptId === input.attemptId &&
+      release.validationReportId === input.validationReportId &&
+      release.integrationBranch === input.target &&
+      release.reviewerId === input.as;
+    if (!bindingMatches || !isText(input.confirmedBy) || !isInstant(now)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行绑定、签字或截止校验失败。');
+    }
+    // 截止时刻本身拒签，避免超时签字与过期判定各自认为自己生效。
+    if (Date.parse(now) >= Date.parse(release.deadline)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行已到截止时间，不能签字。');
+    }
+    const done = Object.freeze({
+      ...release,
+      decision: Object.freeze({
+        kind: input.action,
+        at: now,
+        by: input.as,
+        confirmedBy: input.confirmedBy,
+        ...(input.reason ? { reason: input.reason } : {}),
+      }),
+    });
+    this.#haReleases[index] = done;
+    return done;
+  }
+
+  expireHaRelease(featureId: string, now: string): HaRelease {
+    return this.#finishHaRelease(featureId, { kind: 'expired', at: now }, true);
+  }
+
+  invalidateHaRelease(featureId: string, reason: string, now: string): HaRelease {
+    if (!isText(reason)) throw new PlatformRuleError('HA_RELEASE_INVALID', '失效原因必填。');
+    return this.#finishHaRelease(featureId, { kind: 'invalidated', at: now, reason }, false);
+  }
+
+  #finishHaRelease(featureId: string, decision: HaReleaseDecision, due: boolean): HaRelease {
+    this.#assertRunning();
+    const index = this.#haReleases.findIndex((item) => item.featureId === featureId && !item.decision);
+    const release = this.#haReleases[index];
+    if (!release || !isInstant(decision.at)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行不可终结。');
+    }
+    if (due && Date.parse(decision.at) < Date.parse(release.deadline)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行尚未到截止时间。');
+    }
+    const done = Object.freeze({ ...release, decision });
+    this.#haReleases[index] = done;
+    return done;
   }
 
   /** 正开着等决定的那张升级单。同一时刻最多一张。 */

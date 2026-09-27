@@ -85,6 +85,7 @@ export function renderPlanHandoff(
       `  升级单 ${run.escalationsOpened}/${run.stopConditions.maxEscalations}`,
     `  ${PLAN_MARKS.merged} 已合入  ${PLAN_MARKS.suspended} 挂起等你  ${PLAN_MARKS.skipped} 检视者跳过  ${PLAN_MARKS.pending} 没轮到`,
   ];
+  const release = run.haReleases.find((item) => !item.decision);
   const open = run.currentEscalation;
   for (const feature of run.features) {
     const title = feature.title ? `${feature.title}  ` : '';
@@ -95,6 +96,12 @@ export function renderPlanHandoff(
         ? `  重跑 ${used}/${run.stopConditions.maxRerunsPerFeature}`
         : '';
     lines.push(`  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}${featureTail(feature, Boolean(stop))}${rerun}`);
+  }
+  if (release && !release.decision && !stop && Date.parse(context.now) < Date.parse(release.deadline)) {
+    lines.push(`  ⚑ HA 待放行 ${release.featureId}：Mission ${release.missionId}，提交 ${release.reviewedCommit}，检视 ${release.attemptId}，报告 ${release.validationReportId}，截止 ${release.deadline}`);
+    const common = `--feature ${release.featureId} --commit ${release.reviewedCommit} --review ${release.attemptId} --report ${release.validationReportId} --target ${release.integrationBranch} --as ${release.reviewerId} --confirmed-by <确认人> --run "${context.recordPath ?? '<记录路径>'}"`;
+    lines.push(`    node src/l3.ts plan approve ${release.missionId} ${common}`);
+    lines.push(`    node src/l3.ts plan send-back ${release.missionId} ${common} --reason "…"`);
   }
   if (open && !stop) {
     lines.push(`  ⚑ 升级单 ${open.id}（${open.featureId}，${open.deadline} 截止）：${open.failure}`);

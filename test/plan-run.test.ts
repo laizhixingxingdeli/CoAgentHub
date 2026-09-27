@@ -63,6 +63,42 @@ function rule(code: string) {
   };
 }
 
+describe('HA 待放行', () => {
+  function openRelease() {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    const record = run.openHaRelease({
+      featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'abc123', attemptId: 'A1',
+      validationReportId: 'VR1', reviewerId: 'claude', integrationBranch: 'auto/x',
+      openedAt: at(1), deadline: at(20), verification: [{ command: 'node --test', timeoutMs: 1000 }],
+    });
+    return { run, record };
+  }
+
+  test('open 绑定已记录 Mission，重复待决拒绝，故障计数不变', () => {
+    const { run, record } = openRelease();
+    assert.equal(record.runId, run.id);
+    assert.equal(run.escalationsOpened, 0);
+    assert.equal(run.rerunsUsed('F1'), 0);
+    assert.throws(() => run.openHaRelease({ ...record, runId: undefined as never }), rule('HA_RELEASE_ALREADY_OPEN'));
+  });
+
+  test('approve 与 send_back 是唯一终结，截止时刻拒签', () => {
+    const { run, record } = openRelease();
+    assert.throws(() => run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'abc123', attemptId: 'A1', validationReportId: 'VR1', target: 'auto/x', as: 'claude', confirmedBy: 'human', action: 'approve' }, record.deadline), rule('HA_RELEASE_REJECTED'));
+    run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'abc123', attemptId: 'A1', validationReportId: 'VR1', target: 'auto/x', as: 'claude', confirmedBy: 'human', action: 'send_back', reason: '需补证' }, at(10));
+    assert.equal(run.haReleases[0].decision?.kind, 'send_back');
+    assert.throws(() => run.expireHaRelease('F1', at(30)), rule('HA_RELEASE_REJECTED'));
+  });
+
+  test('过期与失效记录终结理由', () => {
+    const { run } = openRelease();
+    assert.throws(() => run.expireHaRelease('F1', at(19)), rule('HA_RELEASE_REJECTED'));
+    run.expireHaRelease('F1', at(20));
+    assert.equal(run.haReleases[0].decision?.kind, 'expired');
+  });
+});
+
 describe('升级握手', () => {
   test('开单：截止 = 开单时刻 + escalationTimeoutMs，单子开着等决定', () => {
     const { run, escalation } = withEscalation();
