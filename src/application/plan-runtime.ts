@@ -110,7 +110,11 @@ export async function runPlanOnPlatform(
         return { ok: false, reason: `分类员没答上来（${result.outcome}，QueryRun ${result.queryRunId}）。` };
       }
       const parsed = parseRoutingProposal(result.record.output ?? '', new Date().toISOString());
-      return parsed.ok ? parsed : { ok: false, reason: `${parsed.reason}（QueryRun ${result.queryRunId}）` };
+      return parsed.ok ? parsed : {
+        ok: false,
+        reason: `${parsed.reason}（QueryRun ${result.queryRunId}）`,
+        ...(parsed.haForbiddenUnproven ? { haForbiddenUnproven: parsed.haForbiddenUnproven } : {}),
+      };
     },
     runMission: async (missionId, { wallClockDeadline }) => {
       try {

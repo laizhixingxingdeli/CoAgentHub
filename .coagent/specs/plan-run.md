@@ -2,7 +2,7 @@
 
 按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份**独立的方案运行记录**里。它与 Mission 并列，不在 Mission 里；与 Mission 内协调者写的 `PlanBody` 无关。
 
-**权限分得很死**：检视者只能在四个动作里选；合进集成分支只凭机器 L3 的确定性证据（见 `machine-final-review`）；high_assurance 永远要人。驱动方自己不做判断，只把各方的结论按规则串起来。
+**权限分得很死**：检视者只能在四个动作里选；合进集成分支只凭机器 L3 的确定性证据（见 `machine-final-review`）；high_assurance 合进集成分支永远要人。E4a 让合格 HA 建单并跑到独立检视后的 `pending_release`，然后安全挂起——**本项不开放方案级放行 / approve**。驱动方自己不做判断，只把各方的结论按规则串起来。
 
 ## 驱动（run-plan）
 
@@ -11,15 +11,15 @@
 - 只跑资格筛选后的候选，按方案顺序，同一时刻一个。`done` 不重跑。Mission id 为 `<runId>-<featureId>`，隔离重跑依次 `-r2`、`-r3`；origin 的 clientType 为 `plan-run`。功能点转成契约时，范围写成约束、其余功能点写成非目标、合并归平台。
 - **源状态与交接说法**（未知状态整份 `PLAN_SPEC_INVALID`）：`done` 不入选「源方案标 done（已合入）」；`skipped` 不入选「源方案标 skipped；查看 skipReason…」；`split` 父项不入选；`pending` / 无 status 可入选但仍须过范围、验收、仓库、依赖；`planned` / `implementing` / `review` / `rework` 不接管；候选缺 `why`、范围或验收，依赖未明确 done、显式 repo 不是本次 `--cwd` 或无法确认 → 不入选并写明原因。
 - **只读检查**：`node src/run-plan.ts --plan <方案文件> --cwd <项目仓> --reviewer <检视者> --check`（`--plan` 是位置参数的别名；旧写法 `node src/run-plan.ts <方案文件> …` 仍可用）。`--check` 必须同时给 `--cwd` 和 `--reviewer`，缺了非零退出。它只做解析 + 资格筛选 + 适用的仓库预检（只读 git），打印入选条目及逐项未纳入原因，并列出三项停止条件与两道夜跑闸的生效值（缺字段标「缺省」）；**不**拿主状态锁、不打开或创建状态文件、不建 PlanRun、不起 HTTP 监听、不建 worktree、不跑分类、不派 agent。有入选条目且预检通过 → 退出 0，并写明未开跑。预检不过 → 非零退出，不把失败说成可以开跑。**没有任何入选条目时退出 0**，并写明「没有可跑的候选」——那是筛选结果不是预检失败，也不跑仓库预检。
-- **现做分类**：开跑前用只读 QueryRun（工具表 read / grep / find / ls，由 QueryRunner 强制）读集成分支现状，交回**事实**（不交路由）；`classifyTask` 按事实定路由。Fast Lane 必须附冻结工单，且工单范围落在方案声明内（语义同 validator 的 changed-paths）；分到 Standard 丢掉工单；分到 high_assurance **不建 Mission**，直接 ⏸ 写明要你定什么；判成只读、读不懂、越界、缺工单一律回落 Standard。解析取最后一个 json 块，多键（尤其 route / executionMode）拒绝，评估必须署名 coordinator。每次分类留一条 QueryRun，source 为 `plan-run:<runId>:<featureId>`。
+- **现做分类**：开跑前用只读 QueryRun（工具表 read / grep / find / ls，由 QueryRunner 强制）读集成分支现状，交回**事实**（不交路由）；`classifyTask` 按事实定路由。Fast Lane 必须附冻结工单，且工单范围落在方案声明内（语义同 validator 的 changed-paths）；分到 Standard 丢掉工单。四类禁止副作用（`productionDeployRelease` / `externalPaidOp` / `destructiveData` / `unrecoverableExternalSideEffect`）任一不是严格的 `false`（包括缺失、null、非布尔、true 或 unknown）→ **不建 Mission**；只要最后一个 ```json 块能解析为对象，无论对象别处是否合法都要检查这些字段；没有可用结构化对象（无块、坏 JSON、非对象、分类员不可用/未答/抛错）才回落 Standard，⏸ 并列明命中字段与要你定什么。四项都是 `false` 的 high_assurance 以**原始** facts、assessment 走 `createClassifiedMission`（不带 Lightweight 工单）；平台拒绝时**不得**回落普通 Standard。判成只读、读不懂、越界、缺工单一律回落 Standard。解析取最后一个 json 块，多键（尤其 route / executionMode）拒绝，评估必须署名 coordinator。每次分类留一条 QueryRun，source 为 `plan-run:<runId>:<featureId>`。
 - **每个功能开跑前**：分类出错不拖垮整晚（回落 Standard）；分类本身跑过墙钟就不再建 Mission（功能保持没轮到）；再核一次项目仓——分支被切走或工作区变脏就停在 `unsafe`，不先花一整条 Mission 的钱。
-- **落地**：交卷了走机器 L3。绿 → ✓。红且已退回、合并失败、编排器的其余结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，失败写明卡在哪，问题带上四个动作。**红且回滚失败、项目仓被切离集成分支 → 立刻停在 `unsafe`，不开单**：检视者修不了 git 状态，再往上叠只会越错越多。
+- **落地**：lightweight / standard 交卷了走机器 L3。绿 → ✓。红且已退回、合并失败、编排器的其余结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，失败写明卡在哪，问题带上四个动作。**红且回滚失败、项目仓被切离集成分支、验证绿但目标被推进 / checkout 被切换 → 立刻停在 `unsafe`，不开单**：后一种不得误报成验证红。检视者修不了 git 状态，再往上叠只会越错越多。合格 HA 跑完独立检视、`haReviewHold === pending_release` 时功能 ⏸，`needsDecision` 写明「HA 待放行：需人工决定（E4b 起可在 PlanRun 里放行 / 打回）」并带 Mission id、所审提交、检视结论引用；**不开升级单、不合并、不调任何终审**。E4a 只停在待放行。HA 检视 `fault` 与其它失败进入原故障升级路径，计入 P1 总额。挂起的功能不阻塞后续功能点。
 - **等决定**：每 15 秒读一次记录；截止到点判过期；墙钟到点就停。
 - **收尾失败的 Mission**：方案还要往下跑 → 方案放弃（放名额、留分支）；方案停了（叫停 / 未解决到顶 / 墙钟 / 升级单到上限）→ 原样留给人，第二天还能看一眼再合；已终结的不重复放弃。
 - **墙钟**：开跑前与等决定时都看；在途 Mission 到点即暂停（编排器在下一轮开头停下，不打断正在写的那一跳，所以实际停下会晚最多一跳）；到点后失败的不再开单，直接停、挂起写明要你定什么。
 - **崩溃**：记下原因停在 `crashed` 再往外抛，不猜着续跑。
 - **被人中断**（Ctrl+C / SIGTERM）：记下原因停在 `crashed`、落盘、放锁再退；在途 Mission 原样留给人。检视者的「停」恰好撞上驱动方判过期，照常停下，不当崩溃。
-- **内部入口与旧 CLI 生命周期**：`src/application/plan-runtime.ts` 导出 `runPlanOnPlatform(plan, selection, deps)`，由**调用方已经握着的**平台实例跑一份已筛选方案：内部按原字段建 PlanRun 再 `drivePlan`。它不建第二份平台、不 listen、不拿主状态锁。常驻 `startServer` **不会**自动跑方案，也不因此改生产归属——无人值守驱动仍是 `node src/run-plan.ts`。旧 CLI 只做装配与生命周期：仅用 `selectPlanCandidates` 筛选 → 首次预检（平台 / 记录创建之前）→ 原 file/PG 装配/锁与周期修复 → 锁后二次预检与名额复检 → 回环 API 与 runner → 入口建记录/驱动（建 `MissionRunner({ platform, live, tokens: issuer, baseUrl, workspace, coordinator, executor })`，把绑定的 `run` 交给内部入口，每条 Mission 用 `runner.run` 的 outcome）→ 信号停记与 finally 停周期 / persist / 放锁。主状态只有这一份 file/PG 平台实例，无额外锁与 API。记录改由内部入口创建，CLI 在调用前挂上信号，避免刚落盘就被杀却停在「还在跑」。
+- **内部入口与旧 CLI 生命周期**：`src/application/plan-runtime.ts` 导出 `runPlanOnPlatform(plan, selection, deps)`，由**调用方已经握着的**平台实例跑一份已筛选方案：内部按原字段建 PlanRun 再 `drivePlan`。它不建第二份平台、不 listen、不拿主状态锁。常驻 `startServer` **不会**自动跑方案，也不因此改生产归属——无人值守驱动仍是 `node src/run-plan.ts`。旧 CLI 只做装配与生命周期：仅用 `selectPlanCandidates` 筛选 → 首次预检（平台 / 记录创建之前）→ 原 file/PG 装配/锁与周期修复 → 锁后二次预检与名额复检 → 回环 API 与 runner → 入口建记录/驱动（建 `MissionRunner({ platform, live, tokens: issuer, baseUrl, workspace, coordinator, executor, independentReviewer })`（独立检视候选取 `independent_reviewer` 池，空池不得用 coordinator 顶替），把绑定的 `run` 交给内部入口，每条 Mission 用 `runner.run` 的 outcome）→ 信号停记与 finally 停周期 / persist / 放锁。主状态只有这一份 file/PG 平台实例，无额外锁与 API。记录改由内部入口创建，CLI 在调用前挂上信号，避免刚落盘就被杀却停在「还在跑」。
 
 ## 交接面与检视者（l3 plan）
 
@@ -55,7 +55,7 @@
 
 ## 非目标
 
-- 不给检视者任何放行或合并权；不接 HTTP / agent tools。
+- 不给检视者任何放行或合并权；E4a 单独合并后 HA 仍无方案级 approve 命令。不接 HTTP / agent tools。
 - 开跑前按源方案 `dependsOn` 是否明确 `done` 筛选；运行中仍由检视者重划剩余范围。不把 `childrenDone` 等叙述当完成证明，不在运行中改写源方案的 done。
 - 不做崩溃后续跑；不做费用上限（首行花销是给人校准阈值用的，不是闸）。
 - Postgres 存储下方案运行记录仍是文件。

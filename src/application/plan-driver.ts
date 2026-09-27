@@ -7,8 +7,8 @@
  * 就停，并把原因写进方案运行记录。
  *
  * **权限分得很死。** 检视者只能在四个动作里选；合进集成分支只凭机器 L3 的
- * 确定性证据；high_assurance 永远要人。这个驱动方自己不做任何判断——它只把
- * 各方的结论按规则串起来。
+ * 确定性证据；HA 禁止副作用未证明安全时不建单，合格 HA 跑到待放行后挂起，
+ * 本项不放行。这个驱动方自己不做任何判断——它只把各方的结论按规则串起来。
  *
  * 失败的 Mission 怎么收：方案还要往下跑，就放弃它（放名额、留分支）——不放的话
  * 它一直占着项目的改动名额，后面的功能一个都派发不了；方案停了就原样留着，
@@ -45,7 +45,18 @@ export interface PlanDriverDeps {
       assessment?: unknown;
       workOrder?: WorkOrder;
     }): Promise<{ missionId: string }>;
-    getMissionView(missionId: string): Promise<{ status: string }>;
+    getMissionView(missionId: string): Promise<{
+      status: string;
+      executionMode?: string;
+      haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
+      waitDetail?: string;
+      independentReviews?: readonly {
+        readonly reviewedCommit: string;
+        readonly verdict: string;
+        readonly reviewerAttemptId: string;
+        readonly validationReportId?: string;
+      }[];
+    }>;
     finalizeMissionByMachine(
       missionId: string,
       input: {
@@ -70,7 +81,10 @@ export interface PlanDriverDeps {
   /** 只读协调者现做分类。读不懂就说为什么，驱动方回落 Standard。 */
   readonly proposeRoute: (
     feature: PlanFeatureSpec,
-  ) => Promise<{ ok: true; proposal: RoutingProposal } | { ok: false; reason: string }>;
+  ) => Promise<
+    | { ok: true; proposal: RoutingProposal }
+    | { ok: false; reason: string; haForbiddenUnproven?: readonly string[] }
+  >;
   /**
    * 每个功能开跑前再核一次项目仓（还在集成分支上、工作区干净）。开跑前检查只在
    * 启动时做一次；夜里有东西把仓库切回 master 的话，下一条 Mission 会从 master
@@ -88,7 +102,8 @@ export interface PlanDriverDeps {
 type Landing =
   | { readonly kind: 'merged' }
   | { readonly kind: 'failed'; readonly failure: string }
-  | { readonly kind: 'unsafe'; readonly detail: string };
+  | { readonly kind: 'unsafe'; readonly detail: string }
+  | { readonly kind: 'ha_hold'; readonly needsDecision: string };
 
 export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<PlanRunStop> {
   // 入选名单在进驱动之前已经筛过（selectPlanCandidates）；这里只跑记录里的功能，
@@ -151,6 +166,7 @@ async function runFeature(
     proposal.ok ? proposal.proposal : undefined,
     feature,
     proposal.ok ? undefined : proposal.reason,
+    proposal.ok ? [] : proposal.haForbiddenUnproven,
   );
   if (route.kind !== 'needs_human') {
     const problems = (await deps.checkRepo?.()) ?? [];
@@ -166,7 +182,12 @@ async function runFeature(
     await deps.store.update((r) => r.suspendFeature(feature.id, route.needsDecision));
     return;
   }
-  await createMission(plan, run, feature, missionId, route, deps);
+  const created = await createMission(plan, run, feature, missionId, route, deps);
+  if (created.kind === 'ha_denied') {
+    deps.log(`${feature.id} ⏸ HA 建单被拒：${created.reason}；不回落 Standard。`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, created.needsDecision));
+    return;
+  }
   await deps.store.update((r) => r.startFeature(feature.id, missionId));
   deps.log(`${feature.id} ▶ ${missionId}`);
 
@@ -176,6 +197,11 @@ async function runFeature(
   const outcome = await deps.runMission(missionId, { wallClockDeadline });
   const landing = await land(plan, missionId, outcome, deps);
 
+  if (landing.kind === 'ha_hold') {
+    deps.log(`${feature.id} ⏸ ${landing.needsDecision}`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, landing.needsDecision));
+    return;
+  }
   if (landing.kind === 'merged') {
     deps.log(`${feature.id} ✓ 合入 ${plan.integrationBranch}`);
     await deps.store.update((r) => r.markMerged(feature.id));
@@ -218,7 +244,7 @@ async function createMission(
   missionId: string,
   route: Exclude<RoutingDecision, { kind: 'needs_human' }>,
   deps: PlanDriverDeps,
-): Promise<void> {
+): Promise<{ readonly kind: 'created' } | { readonly kind: 'ha_denied'; readonly reason: string; readonly needsDecision: string }> {
   const contract = featureContract(plan, feature);
   const origin: OriginChannel = { clientType: 'plan-run', conversationRef: `plan-run:${run.id}` };
   if (route.kind === 'classified') {
@@ -233,10 +259,11 @@ async function createMission(
         ...(route.workOrder ? { workOrder: route.workOrder } : {}),
       });
       deps.log(`${feature.id} 分类为 ${route.classification.recommended.executionMode ?? 'query'}`);
-      return;
+      return { kind: 'created' };
     } catch (error) {
       // 同一份事实，平台分类器与这里的结论不会不同；会被拒的是工单本身的形状
       // （kernel 严格校验）。被拒的建单不留半截，照老路建 Standard 即可。
+      // HA 安全拒绝绝不能走这条回落：普通 createMission 会绕开 HA 闸。
       if (
         !(error instanceof PlatformRuleError) &&
         !(error instanceof ClassifiedMissionInputError) &&
@@ -244,12 +271,48 @@ async function createMission(
       ) {
         throw error;
       }
+      if (route.classification.recommended.executionMode === 'high_assurance') {
+        return {
+          kind: 'ha_denied',
+          reason: error.message,
+          needsDecision:
+            `平台拒绝 HA 建单（${error.message}）：不回落 Standard。` +
+            `要你定：亲自主导 ${feature.id}，还是改事实后重排进方案？`,
+        };
+      }
       deps.log(`${feature.id} 按分类建单被拒（${error.message}），回落 Standard。`);
     }
   } else {
     deps.log(`${feature.id} 回落 Standard：${route.reason}`);
   }
   await deps.platform.createMission({ projectId: plan.projectId, missionId, contract, origin });
+  return { kind: 'created' };
+}
+
+function isIntegrationTargetMoved(reason: string | undefined): boolean {
+  return typeof reason === 'string' && /目标被推进|checkout 被切换|被切走/.test(reason);
+}
+
+function haPendingReleaseNeedsDecision(
+  missionId: string,
+  view: {
+    independentReviews?: readonly {
+      readonly reviewedCommit: string;
+      readonly verdict: string;
+      readonly reviewerAttemptId: string;
+      readonly validationReportId?: string;
+    }[];
+  },
+): string {
+  const pass = [...(view.independentReviews ?? [])].reverse().find((row) => row.verdict === 'pass');
+  const commit = pass?.reviewedCommit ?? '（未记录所审提交）';
+  const reviewRef = pass
+    ? `${pass.reviewerAttemptId}/${pass.verdict}${pass.validationReportId ? `，报告 ${pass.validationReportId}` : ''}`
+    : '（未记录检视结论）';
+  return (
+    `HA 待放行：需人工决定（E4b 起可在 PlanRun 里放行 / 打回）。` +
+    `Mission ${missionId}，所审提交 ${commit}，检视结论 ${reviewRef}。本项不开放方案级放行。`
+  );
 }
 
 /** 这条 Mission 停下之后，能不能合进集成分支；合不进去是为什么。 */
@@ -275,6 +338,19 @@ async function land(
       return { kind: 'failed', failure: `Mission 卡住了：${outcome.reason}` };
   }
 
+  const view = await deps.platform.getMissionView(missionId);
+  if (view.executionMode === 'high_assurance' || view.haReviewHold) {
+    if (view.haReviewHold === 'pending_release') {
+      return { kind: 'ha_hold', needsDecision: haPendingReleaseNeedsDecision(missionId, view) };
+    }
+    return {
+      kind: 'failed',
+      failure:
+        view.waitDetail ??
+        `HA 独立检视未到待放行（${view.haReviewHold ?? view.status}）`,
+    };
+  }
+
   let result: Awaited<ReturnType<PlanDriverDeps['platform']['finalizeMissionByMachine']>>;
   try {
     result = await deps.platform.finalizeMissionByMachine(missionId, {
@@ -291,6 +367,14 @@ async function land(
   }
   if (result.status === 'completed') return { kind: 'merged' };
   if (result.reportId && !result.rolledBackTo) {
+    if (isIntegrationTargetMoved(result.reason)) {
+      return {
+        kind: 'unsafe',
+        detail:
+          `验证通过后集成分支被推进 / 被切走，已停（报告 ${result.reportId}）。` +
+          `不能再往上叠。${result.reason ?? ''}`,
+      };
+    }
     return {
       kind: 'unsafe',
       detail:
