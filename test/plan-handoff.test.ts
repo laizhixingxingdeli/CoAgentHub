@@ -53,6 +53,12 @@ describe('交接面', () => {
     const pending = makeRun();
     const text = renderPlanHandoff(pending, { now: at(2), recordPath: 'C:/R-ha.json' }).join('\n');
     for (const evidence of ['M-F1', 'sha1', 'A1', 'VR1', 'main', at(20)]) assert.ok(text.includes(evidence));
+    const featureRow = text.split('\n').find((line) => /\sF1\s/.test(line)) ?? '';
+    assert.match(featureRow, /HA 待放行/);
+    assert.match(featureRow, /等检视者决定/);
+    assert.match(featureRow, /M-F1/);
+    assert.match(featureRow, new RegExp(at(20)));
+    assert.doesNotMatch(featureRow, /在跑\(/);
     assert.match(text, /plan approve M-F1 .*--run/);
     assert.match(text, /plan send-back M-F1 .*--run/);
     assert.ok(text.includes('--run "C:/R-ha.json"'));
@@ -69,6 +75,28 @@ describe('交接面', () => {
       assert.doesNotMatch(output, /plan send-back/);
     }
   });
+  test('已决审批记录摘要包含理由、确认人与合入状态', () => {
+    const make = (action: 'approve' | 'send_back', final: 'merged' | 'suspended' | 'running') => {
+      const run = PlanRun.start({ id: `R-${action}-${final}`, planId: 'P', projectId: 'p', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 100000, escalationTimeoutMs: 1000 }, featureIds: ['F1'], startedAt: T0 });
+      run.startFeature('F1', 'M-F1');
+      run.openHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A1', validationReportId: 'VR1', reviewerId: 'claude', integrationBranch: 'main', openedAt: at(1), deadline: at(20), verification: [{ command: 'npm test', timeoutMs: 1000 }] });
+      run.decideHaRelease({ featureId: 'F1', missionId: 'M-F1', reviewedCommit: 'sha1', attemptId: 'A1', validationReportId: 'VR1', target: 'main', as: 'claude', confirmedBy: 'human', action, ...(action === 'send_back' ? { reason: '补充证据' } : {}) }, at(10));
+      if (final === 'merged') run.markMerged('F1');
+      if (final === 'suspended') run.suspendFeature('F1', '墙钟到点，等待人工核对');
+      return run;
+    };
+    const sendBack = renderPlanHandoff(make('send_back', 'running'), { now: at(11) }).join('\n').split('\n').find((line) => line.includes('HA 放行记录')) ?? '';
+    assert.match(sendBack, /send_back/);
+    assert.match(sendBack, /补充证据/);
+    assert.match(sendBack, /claude 经 human 确认/);
+    const merged = renderPlanHandoff(make('approve', 'merged'), { now: at(11) }).join('\n').split('\n').find((line) => line.includes('HA 放行记录')) ?? '';
+    assert.match(merged, /approve/);
+    assert.match(merged, /已合入/);
+    const suspended = renderPlanHandoff(make('approve', 'suspended'), { now: at(11) }).join('\n').split('\n').find((line) => line.includes('HA 放行记录')) ?? '';
+    assert.match(suspended, /approve/);
+    assert.match(suspended, /未合并/);
+  });
+
   test('四种状态各有记号且各就各位；每个非成功项都写要你定什么', () => {
     const lines = renderPlanHandoff(night(), { now: at(200) });
     const row = (id: string) => lines.find((l) => new RegExp(`\\s${id}\\s`).test(l)) ?? '';

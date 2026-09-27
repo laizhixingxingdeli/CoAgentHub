@@ -64,6 +64,47 @@ function rule(code: string) {
 }
 
 describe('HA 待放行', () => {
+  test('checkStop 为升级单、HA 待决、HA 已决定及普通运行分别交接且不改 HA 记录', () => {
+    const start = (featureId: string) => PlanRun.start({
+      id: `R-${featureId}`, planId: 'PLAN-x', projectId: 'p', integrationBranch: 'auto/x', reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 2, wallClockMs: 30 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: [featureId], startedAt: T0,
+    });
+    const open = (run: PlanRun, featureId: string, missionId: string) => run.openHaRelease({
+      featureId, missionId, reviewedCommit: `commit-${featureId}`, attemptId: `A-${featureId}`,
+      validationReportId: `VR-${featureId}`, reviewerId: 'claude', integrationBranch: 'auto/x',
+      openedAt: at(1), deadline: at(20), verification: [{ command: 'node --test', timeoutMs: 1000 }],
+    });
+
+    const escalated = start('E');
+    escalated.startFeature('E', 'M-E');
+    escalated.openEscalation({ featureId: 'E', missionId: 'M-E', failure: '失败', question: '定动作' }, at(1));
+    escalated.checkStop(at(30));
+    assert.match(escalated.feature('E')?.needsDecision ?? '', /升级单还没人定/);
+
+    const pending = start('P');
+    pending.startFeature('P', 'M-P');
+    open(pending, 'P', 'M-P');
+    const pendingBefore = pending.haReleases;
+    pending.checkStop(at(30));
+    assert.match(pending.feature('P')?.needsDecision ?? '', /HA 待放行还没定.*M-P/);
+    assert.deepEqual(pending.haReleases, pendingBefore);
+
+    const decided = start('D');
+    decided.startFeature('D', 'M-D');
+    open(decided, 'D', 'M-D');
+    decided.decideHaRelease({ featureId: 'D', missionId: 'M-D', reviewedCommit: 'commit-D', attemptId: 'A-D', validationReportId: 'VR-D', target: 'auto/x', as: 'claude', confirmedBy: 'human', action: 'send_back', reason: '需重做' }, at(10));
+    const decidedBefore = decided.haReleases;
+    decided.checkStop(at(30));
+    assert.match(decided.feature('D')?.needsDecision ?? '', /已有结论 send_back.*需重做.*没有合并，也没开升级单.*M-D/);
+    assert.deepEqual(decided.haReleases, decidedBefore);
+
+    const ordinary = start('N');
+    ordinary.startFeature('N', 'M-N');
+    ordinary.checkStop(at(30));
+    assert.match(ordinary.feature('N')?.needsDecision ?? '', /它还在跑.*M-N/);
+  });
+
   function openRelease() {
     const run = startRun();
     run.startFeature('F1', 'M-F1');

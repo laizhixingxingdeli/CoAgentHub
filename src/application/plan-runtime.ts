@@ -91,6 +91,9 @@ export async function runPlanOnPlatform(
       createClassifiedMission: (input) =>
         persistAfter(deps.persist, deps.platform.createClassifiedMission(input)),
       getMissionView: (missionId) => deps.platform.getMissionView(missionId),
+      effectiveIndependentReviewPass: (missionId) => deps.platform.effectiveIndependentReviewPass(missionId),
+      finalizeMissionByHaAuthority: (missionId, input) =>
+        persistAfter(deps.persist, deps.platform.finalizeMissionByHaAuthority(missionId, input)),
       finalizeMissionByMachine: (missionId, input) =>
         persistAfter(deps.persist, deps.platform.finalizeMissionByMachine(missionId, input)),
       abandonMissionForPlan: (missionId, input) =>

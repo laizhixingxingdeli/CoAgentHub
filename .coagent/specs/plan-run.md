@@ -2,7 +2,7 @@
 
 按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份**独立的方案运行记录**里。它与 Mission 并列，不在 Mission 里；与 Mission 内协调者写的 `PlanBody` 无关。
 
-**权限分得很死**：检视者只能在四个动作里选；合进集成分支只凭机器 L3 的确定性证据（见 `machine-final-review`）；high_assurance 合进集成分支永远要人。E4a 让合格 HA 建单并跑到独立检视后的 `pending_release`，然后安全挂起；E4b1 提供独立 PlanRun 待放行记录与短锁签字命令（声明不代表逐次点击已认证），驱动消费决定由 E4b3 实现。驱动方自己不做判断，只把各方的结论按规则串起来。
+**权限分得很死**：普通 Mission 由机器 L3 终审；失败后检视者只能在 `rerun_isolated` / `skip` / `rescope` / `stop` 四个升级动作中选择。HA 的 `approve` / `send-back` 是独立的待放行决定，不属于这四个动作，也不代替独立检视：受控合入必须同时具备有效的独立 pass、指定检视者的签名与确认声明，以及平台执行时现读的外置常设授权。签字 CLI 只记录声明，不证明逐次点击认证，也不直接合并；只有驱动在复核绑定后调用平台 HA 受控终审才可能合入。
 
 ## 驱动（run-plan）
 
@@ -13,11 +13,15 @@
 - **只读检查**：`node src/run-plan.ts --plan <方案文件> --cwd <项目仓> --reviewer <检视者> --check`（`--plan` 是位置参数的别名；旧写法 `node src/run-plan.ts <方案文件> …` 仍可用）。`--check` 必须同时给 `--cwd` 和 `--reviewer`，缺了非零退出。它只做解析 + 资格筛选 + 适用的仓库预检（只读 git），打印入选条目及逐项未纳入原因，并列出三项停止条件与两道夜跑闸的生效值（缺字段标「缺省」）；**不**拿主状态锁、不打开或创建状态文件、不建 PlanRun、不起 HTTP 监听、不建 worktree、不跑分类、不派 agent。有入选条目且预检通过 → 退出 0，并写明未开跑。预检不过 → 非零退出，不把失败说成可以开跑。**没有任何入选条目时退出 0**，并写明「没有可跑的候选」——那是筛选结果不是预检失败，也不跑仓库预检。
 - **现做分类**：开跑前用只读 QueryRun（工具表 read / grep / find / ls，由 QueryRunner 强制）读集成分支现状，交回**事实**（不交路由）；`classifyTask` 按事实定路由。Fast Lane 必须附冻结工单，且工单范围落在方案声明内（语义同 validator 的 changed-paths）；分到 Standard 丢掉工单。四类禁止副作用（`productionDeployRelease` / `externalPaidOp` / `destructiveData` / `unrecoverableExternalSideEffect`）任一不是严格的 `false`（包括缺失、null、非布尔、true 或 unknown）→ **不建 Mission**；只要最后一个 ```json 块能解析为对象，无论对象别处是否合法都要检查这些字段；没有可用结构化对象（无块、坏 JSON、非对象、分类员不可用/未答/抛错）才回落 Standard，⏸ 并列明命中字段与要你定什么。四项都是 `false` 的 high_assurance 以**原始** facts、assessment 走 `createClassifiedMission`（不带 Lightweight 工单）；平台拒绝时**不得**回落普通 Standard。判成只读、读不懂、越界、缺工单一律回落 Standard。解析取最后一个 json 块，多键（尤其 route / executionMode）拒绝，评估必须署名 coordinator。每次分类留一条 QueryRun，source 为 `plan-run:<runId>:<featureId>`。
 - **每个功能开跑前**：分类出错不拖垮整晚（回落 Standard）；分类本身跑过墙钟就不再建 Mission（功能保持没轮到）；再核一次项目仓——分支被切走或工作区变脏就停在 `unsafe`，不先花一整条 Mission 的钱。
-- **落地**：lightweight / standard 交卷了走机器 L3。绿 → ✓。红且已退回、合并失败、编排器的其余结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，失败写明卡在哪，问题带上四个动作。**红且回滚失败、项目仓被切离集成分支、验证绿但目标被推进 / checkout 被切换 → 立刻停在 `unsafe`，不开单**：后一种不得误报成验证红。检视者修不了 git 状态，再往上叠只会越错越多。合格 HA 跑完独立检视、`haReviewHold === pending_release` 时功能 ⏸，`needsDecision` 写明「HA 待放行：需人工决定（E4b 起可在 PlanRun 里放行 / 打回）」并带 Mission id、所审提交、检视结论引用；**不开升级单、不合并、不调任何终审**。E4a 只停在待放行。HA 检视 `fault` 与其它失败进入原故障升级路径，计入 P1 总额。挂起的功能不阻塞后续功能点；PlanRun 签字决定的消费在 E4b3。
-- **等决定**：每 15 秒读一次记录；截止到点判过期；墙钟到点就停。
-- **收尾失败的 Mission**：方案还要往下跑 → 方案放弃（放名额、留分支）；方案停了（叫停 / 未解决到顶 / 墙钟 / 升级单到上限）→ 原样留给人，第二天还能看一眼再合；已终结的不重复放弃。
-- **墙钟**：开跑前与等决定时都看；在途 Mission 到点即暂停（编排器在下一轮开头停下，不打断正在写的那一跳，所以实际停下会晚最多一跳）；到点后失败的不再开单，直接停、挂起写明要你定什么。
-- **崩溃**：记下原因停在 `crashed` 再往外抛，不猜着续跑。
+- **落地**：lightweight / standard 交卷后走机器 L3；绿 → ✓。红且已回滚、合并失败或编排器的其余失败结局（卡住 / 等人 / 协调者升级 / blocked）→ 开升级单，写明失败与四个动作。**红且回滚失败、项目仓被切离集成分支、验证绿但目标被推进 / checkout 被切换 → `unsafe` 停止，不开单**：不得把目标推进误报成验证红。
+- **HA 待放行**：合格 HA 到 `pending_release` 后，先读取当前有效的独立 pass；只有 verdict 为 `pass` 且带验证报告，才开立独立 HA 记录，绑定 PlanRun、feature、Mission、所审提交、检视 attempt、验证报告、指定检视者、集成目标、方案验证摘要和审批截止。读不到有效 pass 或缺报告时不开记录，按原故障路径尝试开升级单，并受方案墙钟与升级额上限约束。记录开立后，功能保持 `running`、Mission 保持非终态；等待期间不进入下一功能的分类、协调或派发。HA `fault` 与其它失败走原故障升级路径。
+- **等升级单决定**：按轮询间隔读记录（缺省 15 秒）；升级单截止到点判过期；方案墙钟到点则停止。检视者只能使用四个升级动作。
+- **等 HA 决定**：每轮先检查方案停止状态与墙钟，再读 HA 记录。记录仍未决定且已到审批截止时，判为 `expired`，不会自动放行；审批截止只限制签字，截止前签下的 `approve` 即使到截止时刻或之后才被消费，仍可继续受控放行。墙钟先于审批处理：到点停止，已签决定不再执行。
+- **HA 受控放行**：消费前再检查方案墙钟；确认该 feature 仍为 `running`，最后一条 Mission、审批记录所钉 Mission 与当前 Mission 相同。随后复核 Mission 未完成、仍为 `awaiting_review` / `high_assurance` / `pending_release`、目标分支正确，并重取有效 pass，核对其提交、检视 attempt 与报告都和审批记录一致。受控终审只调用 `finalizeMissionByHaAuthority`，显式传入启动时解析的非空 `plan.integrationVerification`，不调用机器终审。只有平台报告 `completed` 且 `mergedInto` 非空，并且复读 Mission 的完成状态、`finalReview.mergedInto` 与目标均匹配，才标 `merged` 并推进下一功能。
+- **收尾失败的 Mission**：HA `send_back`、`expired`、非 unsafe 的失效、验证红且已成功回滚，以及其它可升级失败走同一四动作升级路径。HA 记录本身不计 P1；只有实际开出的升级单计数。只有接受 `rerun_isolated` 才计重跑。方案继续时，`skip` / `rescope` / `rerun_isolated` 在推进前放弃非终态失败 Mission；选 `stop`、方案墙钟到点、升级额满或未解决阈值停止时保留 Mission，停止后不补开迟到升级单。
+- **停止类别**：回滚失败、验证后目标推进、持久 HA unsafe、合入后状态或记录写入结果不明 → `unsafe`，人工核对并禁止自动重合。功能与 Mission 绑定不变式异常 → `crashed`，不得放行；驱动记录原因、停止并向外抛，不自动续跑。
+- **墙钟**：开跑前、等待升级单 / HA 决定时、HA 受控放行前都检查方案墙钟；在途 Mission 到点即暂停（编排器在下一轮开头停下，不打断正在写的那一跳，所以实际停下会晚最多一跳）。到点后不执行待处理决定，也不为失败补开升级单；跑着的功能挂起并写明要你定什么。
+- **崩溃**：未预料错误（包括 HA 放行绑定不变式异常）记下原因停在 `crashed` 再往外抛，不猜着续跑；绑定异常不转成普通升级或 `unsafe`。
 - **被人中断**（Ctrl+C / SIGTERM）：记下原因停在 `crashed`、落盘、放锁再退；在途 Mission 原样留给人。检视者的「停」恰好撞上驱动方判过期，照常停下，不当崩溃。
 - **内部入口与旧 CLI 生命周期**：`src/application/plan-runtime.ts` 导出 `runPlanOnPlatform(plan, selection, deps)`，由**调用方已经握着的**平台实例跑一份已筛选方案：内部按原字段建 PlanRun 再 `drivePlan`。它不建第二份平台、不 listen、不拿主状态锁。常驻 `startServer` **不会**自动跑方案，也不因此改生产归属——无人值守驱动仍是 `node src/run-plan.ts`。旧 CLI 只做装配与生命周期：仅用 `selectPlanCandidates` 筛选 → 首次预检（平台 / 记录创建之前）→ 原 file/PG 装配/锁与周期修复 → 锁后二次预检与名额复检 → 回环 API 与 runner → 入口建记录/驱动（建 `MissionRunner({ platform, live, tokens: issuer, baseUrl, workspace, coordinator, executor, independentReviewer })`（独立检视候选取 `independent_reviewer` 池，空池不得用 coordinator 顶替），把绑定的 `run` 交给内部入口，每条 Mission 用 `runner.run` 的 outcome）→ 信号停记与 finally 停周期 / persist / 放锁。主状态只有这一份 file/PG 平台实例，无额外锁与 API。记录改由内部入口创建，CLI 在调用前挂上信号，避免刚落盘就被杀却停在「还在跑」。
 
@@ -28,16 +32,17 @@
   - 图例一行，之后每个功能一行，记号：`✓` 已合入 / `⏸` 挂起等你 / `⊘` 检视者跳过 / `○` 没轮到（`▶` 在跑）。同一行只有一个记号。
   - **每个非成功项都写「要你定什么」**：⏸ / ⊘ 照抄记录里的 `needsDecision`；方案停了时 ○ 也写（下一轮接着跑它吗）。已合入的不写。
   - 有开着的升级单时多两行：单号、截止时间、失败；以及给检视者照抄就能用的 `plan decide` 命令（带 `--as <指定检视者>` 与 `--run`）。
+  - HA 待决行列出 Mission、所审提交、检视 attempt、报告和截止，并给出含 `--run` 的 `plan approve` / `plan send-back` 命令；已决记录另列决定时间、签字人与确认声明、理由及合入摘要。
   - 开跑时把功能标题抄进记录：早上看不用回头翻方案文件（它到早上可能已经改了）；旧记录缺标题照样读。
   - 运行记录可带可选的 `sourceExclusions`（源方案本次未纳入及原因）。旧记录没有它照常读、照常显示。交接面另列「本次未纳入（源方案，不是本次运行的检视者跳过）」；源 `skipped` 不得伪装成运行中的 ⊘。方案源文件字节不变。
 - `node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "…" [--drop F7,F8] --as <检视者>`：写回决定，规则全在 `PlanRun.choose`（方法不叫 decide：`src/` 里的 `.decide(` 是 Decision provider 的接线，由 ADR-0002 的边界守卫盯着，撞名会让守卫要么误报、要么被迫放宽）。必须 `--as`（不写你是谁就核对不了指定检视者）；只有给了 `--drop` 才带删除名单。规则拒绝的非零退出并说清原因，记录一字不动。
-- 两条命令**都不拿主状态锁、不写主状态文件、不做启动收敛**（run-plan 整夜握着主状态锁在写；见 `startup-reconciliation`）。
+- 两条命令**都不拿主状态锁、不写主状态文件、不做启动收敛**（run-plan 整夜握着主状态锁在写；见 `startup-reconciliation`）。HA 签字 CLI 只在 PlanRun 短锁内写入带绑定字段的决定声明，不拿主状态锁、不直接写平台或 Git。
 - run-plan 结束时打印的是同一张交接面（不含花销）。
 
 ## 记录与握手
 
-- **记录位置**：一份独立 JSON 文件（路径由驱动方定），**不在主状态文件里**。驱动方跑 Mission 时整夜握着主状态的单写者锁；检视者写回决定只碰这份文件，不需要那把锁。
-- **读不加锁**：写入一律「临时文件 + rename」，读到的永远是某次完整写出的内容。读不懂（非 JSON、版本不认识、字段缺失或越界、动作不在闭集里）→ `PLAN_RUN_CORRUPT`，不静默重置、不猜。
+- **记录位置**：一份独立 JSON 文件（路径由驱动方定），**不在主状态文件里**。驱动方跑 Mission 时整夜握着主状态的单写者锁；检视者写回决定只碰这份文件，不需要那把锁。HA 记录绑定 run / feature / Mission、所审提交、检视 attempt、报告、检视者、目标、方案验证摘要与截止；决定额外记下签字、确认声明与时间。
+- **读不加锁**：写入一律「临时文件 + rename」，读到的永远是某次完整写出的内容。读不懂（非 JSON、版本不认识、字段缺失或越界、动作不在闭集里、畸形 HA 记录）→ `PLAN_RUN_CORRUPT`，不静默重置、不猜。旧快照没有 HA 记录列表仍可恢复为空列表；出现的新记录必须完整且绑定有效，否则 fail-closed。
 - **写 = 锁内读-改-写**：先拿短锁、再读最新、改、写、放锁。锁被别的进程拿着时等（缺省 10 秒）；等不到 → `LockBusyError`，**一个字都不写**。规则拒绝的改动不落盘。同一路径已有记录时拒绝再建（`PLAN_RUN_EXISTS`）。
 - **开跑参数**：检视者、至少一个功能点（不重名）、三项停止条件都必须给；停止条件必须是正整数——0、缺省、小数都等于没有这道闸（`PLAN_RUN_INVALID`）。方案文件 `stopConditions` 可选 `maxEscalations`（一次运行最多开这么多张升级单，缺省 5）与 `maxRerunsPerFeature`（每个功能最多接受这么多次 `rerun_isolated`，缺省 1）。缺字段照常解析并按缺省计；**出现了就必须是正整数**（0、负数、小数、字符串、null 都拒绝）。方案文件写错 → `PLAN_SPEC_INVALID`；运行记录写错 → `PLAN_RUN_CORRUPT`。`parsePlanSpec`、`PlanRun.start`、`PlanRun.restore` 用同一把尺子校验、同一个函数补缺省；内存与新建快照都带着两个生效值。旧快照缺这两个字段仍可恢复，按缺省计，不重审、不改写已发生的决定或停止原因；恢复后若还在跑，新动作受生效上限约束。
 - **功能点**：同一时刻只跑一个（`PLAN_FEATURE_BUSY`）；只有待跑的能开跑；隔离重跑时 Mission 记录累加。状态与交接面记号：`merged ✓` / `suspended ⏸` / `skipped ⊘` / `pending ○`（`running` 只在跑着时出现）。**进 ⏸ / ⊘ 的每条路径都必须带 `needsDecision`（要人定什么）**，不经升级直接挂起时不给就拒绝（`NEEDS_DECISION_REQUIRED`）。
@@ -55,7 +60,7 @@
 
 ## 非目标
 
-- PlanRun 的 HA approve / send-back 只记录签字声明，不直接合并；驱动消费决定在 E4b3。不接 HTTP / agent tools。
+- 不接 HTTP / agent tools；不做逐次点击确认界面；不把签字声明当作独立检视或平台授权，也不由 CLI 直接合并。
 - 开跑前按源方案 `dependsOn` 是否明确 `done` 筛选；运行中仍由检视者重划剩余范围。不把 `childrenDone` 等叙述当完成证明，不在运行中改写源方案的 done。
 - 不做崩溃后续跑；不做费用上限（首行花销是给人校准阈值用的，不是闸）。
 - Postgres 存储下方案运行记录仍是文件。
