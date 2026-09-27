@@ -3535,6 +3535,7 @@ export class Platform {
       readonly confirmedBy: string;
       readonly projectRoot?: string;
       readonly reasons?: readonly string[];
+      readonly verification?: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[];
     },
   ): Promise<{
     status: string;
@@ -3690,7 +3691,9 @@ export class Platform {
       );
     }
 
-    const verification = this.#planLevelCommands(mission);
+    const verification = input.verification === undefined
+      ? this.#planLevelCommands(mission)
+      : this.#explicitHaCommands(mission.id, input.verification);
     const runner = this.#validation?.commandRunner;
     const reports = this.#validation?.reports;
     if (!runner || !reports) {
@@ -4826,6 +4829,25 @@ export class Platform {
       'HA 验证未通过且回滚失败，集成分支可能不安全。' +
       '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
     );
+  }
+
+  #explicitHaCommands(
+    missionId: string,
+    commands: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[],
+  ): { argv: string[]; timeoutMs: number }[] {
+    const invalid = (): never => {
+      throw new PlatformRuleError(
+        'HA_VERIFICATION_REQUIRED',
+        `Mission ${missionId} 的显式验证命令非法，拒绝合并。`,
+      );
+    };
+    if (!Array.isArray(commands) || commands.length === 0) invalid();
+    return commands.map((command) => {
+      if (!command || !Array.isArray(command.argv) || command.argv.length === 0 ||
+          command.argv.some((part) => typeof part !== 'string' || part.trim() === '') ||
+          !Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0) invalid();
+      return { argv: [...command.argv], timeoutMs: command.timeoutMs };
+    });
   }
 
   #planLevelCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
