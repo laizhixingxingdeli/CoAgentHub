@@ -80,6 +80,26 @@ export function completeHop(hop: QueuedHop, owner: string, generation: number, n
   return { ...hop, status: 'completed', updatedAt: now };
 }
 
+/** Inputs for in-transaction claim fencing; PG reuses the same shape. */
+export interface ClaimFence {
+  readonly id: string;
+  readonly owner: string;
+  readonly claimGeneration: number;
+  readonly now: string;
+}
+
+/**
+ * Live claimed hop owned by this fence: matching owner and generation, now strictly before leaseUntil.
+ * Missing, queued/completed, expired, or identity mismatch is false — callers must reject and roll back.
+ */
+export function holdsCurrentClaim(hop: QueuedHop | undefined, fence: ClaimFence): boolean {
+  if (!hop || hop.id !== fence.id || hop.status !== 'claimed') return false;
+  if (hop.owner !== fence.owner || hop.claimGeneration !== fence.claimGeneration) return false;
+  if (typeof hop.leaseUntil !== 'string' || !Number.isFinite(Date.parse(hop.leaseUntil))) return false;
+  if (!Number.isFinite(Date.parse(fence.now))) return false;
+  return Date.parse(fence.now) < Date.parse(hop.leaseUntil);
+}
+
 function leaseDuration(leaseMs: number): void {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive safe integer');
 }

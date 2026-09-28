@@ -9,7 +9,7 @@
 import type { Project } from '../kernel/index.ts';
 import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
-import type { QueuedHop } from './durable-scheduler.ts';
+import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 
 export interface ProjectRepository {
@@ -305,4 +305,16 @@ export interface PostExecutionEvaluator {
  */
 export interface CommandTransaction {
   run<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * 测试可调用的领取 fencing 命令事务。与 {@link CommandTransaction.run} 分开，生产 Agent API 不走这里。
+ *
+ * 实现方必须在**同一**命令/数据库事务内核对 `id/owner/claimGeneration/now`（见 {@link holdsCurrentClaim}），
+ * 通过后才让回调里的状态写入提交；不存在、过期或身份不合则拒绝并回滚。
+ * 不得在入口或回调前单独 get 当作成功 fencing。嵌套进已有 `run` 时并进外层事务，
+ * 核对失败必须抛出——内部 catch 会让外层把半截写入当成功提交。
+ */
+export interface FencedCommandTransaction {
+  runFenced<T>(fence: ClaimFence, fn: () => Promise<T>): Promise<T>;
 }

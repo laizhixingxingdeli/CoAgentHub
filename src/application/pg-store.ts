@@ -22,14 +22,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
-import { claimHop, completeHop, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { QueuedHop } from './durable-scheduler.ts';
+import { claimHop, completeHop, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
+import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
   ActivityLog,
   CandidateCircuitRepository,
   Clock,
   CommandTransaction,
+  FencedCommandTransaction,
   IdGenerator,
   ProjectRepository,
 } from './ports.ts';
@@ -278,6 +279,11 @@ export interface PgOpenTransaction {
   readonly acknowledgements: Map<string, string>;
   /** 暂存的验收报告，提交时与事件同一个数据库事务 INSERT。 */
   readonly validationReports: ValidationReport[];
+  /**
+   * 本事务提交前要锁行核对的领取 fencing。挂在事务上而不是入口先查：
+   * run 在 fn 返回后才 BEGIN，回调期间队列可被接管；入口 SELECT 会放过失租写。
+   */
+  readonly fences: ClaimFence[];
   /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
   readonly done: Promise<void>;
   readonly finish: () => void;
@@ -337,7 +343,7 @@ const ACKNOWLEDGE_DELIVERY = `UPDATE deliveries
  * 冲突），数据库回滚，改过的活对象回到开事务时，暂存丢弃——包括未提交的报告，崩溃后不留孤儿。
  * 版本号与「已落库」记账只在提交成功后前移。事务外的写先等开着的事务结束；从库重读也等。
  */
-export class PgStateStore implements CommandTransaction {
+export class PgStateStore implements CommandTransaction, FencedCommandTransaction {
   #pool: pg.Pool;
   #projects = new Map<string, Project>();
   #versions = new Map<string, number>();
@@ -449,6 +455,20 @@ export class PgStateStore implements CommandTransaction {
     while (this.#tx && this.#txContext.getStore() !== this.#tx) await this.#tx.done;
   }
 
+  /**
+   * 同一命令事务提交时锁队列行核对领取。失败抛错，走 run 的回滚；不要在这里 catch，
+   * 嵌套进外层 run 时吞掉错误会让外层把半截写入提交掉。核对放在 #commit 的 BEGIN 里，
+   * 不在 fn 里另开 SELECT：否则锁不在写快照那条连接上，回调期间失租仍能落盘。
+   */
+  async runFenced<T>(fence: ClaimFence, fn: () => Promise<T>): Promise<T> {
+    return this.run(async () => {
+      const tx = this.currentTransaction();
+      if (!tx) throw new Error('claim fence rejected');
+      tx.fences.push(fence);
+      return fn();
+    });
+  }
+
   /** 命令事务（C3）。嵌套调用并进外层事务；事务之间串行。 */
   async run<T>(fn: () => Promise<T>): Promise<T> {
     if (this.currentTransaction()) return fn();
@@ -497,6 +517,7 @@ export class PgStateStore implements CommandTransaction {
       deliveries: [],
       acknowledgements: new Map(),
       validationReports: [],
+      fences: [],
       done,
       finish,
     };
@@ -519,7 +540,7 @@ export class PgStateStore implements CommandTransaction {
     }
   }
 
-  /** 一个数据库事务：变了的快照（版本检查）→ 事件 → 投递 → 确认 → 验收报告。提交成功后才前移记账。 */
+  /** 一个数据库事务：领取行锁核对 → 变了的快照（版本检查）→ 事件 → 投递 → 确认 → 验收报告。提交成功后才前移记账。 */
   async #commit(tx: PgOpenTransaction): Promise<void> {
     const pending = this.#changedProjects();
     if (
@@ -527,7 +548,8 @@ export class PgStateStore implements CommandTransaction {
       tx.events.length === 0 &&
       tx.deliveries.length === 0 &&
       tx.acknowledgements.size === 0 &&
-      tx.validationReports.length === 0
+      tx.validationReports.length === 0 &&
+      tx.fences.length === 0
     ) {
       return;
     }
@@ -535,6 +557,9 @@ export class PgStateStore implements CommandTransaction {
     let written: { projectId: string; snapshot: string; version: number }[];
     try {
       await client.query('BEGIN');
+      // 先锁队列行再写快照，且必须用这个 client：另开连接核对会在 COMMIT 前把行锁放掉，失租命令仍能提交。
+      // 没有 pending 写也不能跳过——空回调的陈旧代次否则会当成成功。
+      await this.#assertClaimFences(client, tx.fences);
       written = await this.#writeProjects(client, pending);
       for (const event of tx.events) await client.query(INSERT_ACTIVITY, activityParams(event));
       for (const delivery of tx.deliveries) await client.query(INSERT_DELIVERY, deliveryParams(delivery));
@@ -577,6 +602,18 @@ export class PgStateStore implements CommandTransaction {
       pending.push({ projectId, snapshot, expected: this.#versions.get(projectId) });
     }
     return pending;
+  }
+
+  async #assertClaimFences(client: pg.PoolClient, fences: readonly ClaimFence[]): Promise<void> {
+    for (const fence of fences) {
+      const selected = await client.query<{ hop: QueuedHop }>(
+        'SELECT hop FROM queued_hops WHERE hop_id = $1 FOR UPDATE',
+        [fence.id],
+      );
+      if (!holdsCurrentClaim(selected.rows[0]?.hop, fence)) {
+        throw new Error('claim fence rejected');
+      }
+    }
   }
 
   /** 在给定的数据库事务里写快照；版本对不上抛 WriteConflictError（调用方回滚）。不碰记账。 */

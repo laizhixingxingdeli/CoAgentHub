@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileStateStore, FileQueuedHopRepository } from '../src/application/file-store.ts';
 import type { QueuedHop } from '../src/application/durable-scheduler.ts';
-import { PgStateStore, PgQueuedHopRepository } from '../src/application/pg-store.ts';
+import { PgProjectRepository, PgStateStore, PgQueuedHopRepository } from '../src/application/pg-store.ts';
+import { Project } from '../src/kernel/index.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 
 test('file queue is idempotent, durable, cloned, old snapshots compatible and transactional', async () => {
@@ -191,5 +192,175 @@ test('Postgres queue lease transitions serialize claims and persist ownership', 
     assert.equal(await repo.complete('pg-lease', 'late', 1, '2025-01-01T00:00:01.600Z'), undefined);
     assert.deepEqual(await repo.get('pg-lease'), beforeStaleReject);
     assert.equal(await repo.claim('pg-lease', 'third', '2025-01-01T00:00:02Z', '2025-01-01T00:00:03Z'), undefined);
+  } finally { await reopened.close(); }
+});
+
+const FENCE_NOW = '2025-01-01T00:00:00Z';
+const FENCE_LEASE = '2025-01-01T00:00:10Z';
+const FENCE_LATER = '2025-01-01T00:00:20Z';
+const FENCE_CONTRACT = { intent: 'x', acceptance: ['a'], constraints: [], nonGoals: [], guardrails: [] };
+
+function fenceHop(overrides: Partial<QueuedHop> = {}): QueuedHop {
+  return {
+    id: 'pg-fence', projectId: 'p', missionId: 'm', workItemId: 'w', role: 'executor', priority: 1,
+    availableAt: FENCE_NOW, attemptCount: 0, maxAttempts: 2, idempotencyKey: 'pg-fence-key',
+    status: 'queued', createdAt: FENCE_NOW, updatedAt: FENCE_NOW, ...overrides,
+  };
+}
+
+async function openFenceStore(): Promise<{ connectionString: string; store: PgStateStore } | undefined> {
+  const connectionString = await ensureTestDatabase('durable_scheduler_fencing');
+  if (!connectionString) return undefined;
+  const store = await PgStateStore.open({ connectionString });
+  await store.pool.query('TRUNCATE queued_hops, projects');
+  return { connectionString, store };
+}
+
+test('Postgres fenced command commits live claim writes and rejects stale fences without mutation', async (t) => {
+  const opened = await openFenceStore();
+  if (!opened) { t.skip('Postgres unavailable; PG claim fencing not verified'); return; }
+  const { connectionString, store } = opened;
+  try {
+    const repo = new PgQueuedHopRepository(store);
+    const projects = new PgProjectRepository(store);
+    await repo.enqueue(fenceHop());
+    const claimed = await repo.claim('pg-fence', 'owner', FENCE_NOW, FENCE_LEASE);
+    assert.equal(claimed?.claimGeneration, 1);
+    const seed = Project.create({ id: 'P-seed' });
+    await projects.save(seed);
+    const queueBefore = structuredClone(await repo.get('pg-fence'));
+    const projectBefore = JSON.stringify((await projects.get('P-seed'))!.toSnapshot());
+
+    await store.runFenced({ id: 'pg-fence', owner: 'owner', claimGeneration: 1, now: FENCE_NOW }, async () => {
+      await projects.save(Project.create({ id: 'P-fence' }));
+    });
+    assert.equal((await projects.get('P-fence'))?.id, 'P-fence');
+    assert.deepEqual(await repo.get('pg-fence'), queueBefore);
+
+    const writeInCallback = async () => {
+      (await projects.get('P-seed'))!.createMission({
+        id: 'M-no',
+        contract: FENCE_CONTRACT,
+      });
+      await projects.save((await projects.get('P-seed'))!);
+      await projects.save(Project.create({ id: 'P-rejected' }));
+    };
+    const rejects = [
+      { id: 'pg-fence', owner: 'owner', claimGeneration: 0, now: FENCE_NOW },
+      { id: 'pg-fence', owner: 'intruder', claimGeneration: 1, now: FENCE_NOW },
+      { id: 'pg-fence', owner: 'owner', claimGeneration: 1, now: FENCE_LEASE },
+      { id: 'missing', owner: 'owner', claimGeneration: 1, now: FENCE_NOW },
+    ] as const;
+    for (const fence of rejects) {
+      await assert.rejects(store.runFenced(fence, writeInCallback), /claim fence rejected/);
+      assert.deepEqual(await repo.get('pg-fence'), queueBefore);
+      assert.equal(JSON.stringify((await projects.get('P-seed'))!.toSnapshot()), projectBefore);
+      assert.equal(await projects.get('P-rejected'), undefined);
+    }
+
+    await assert.rejects(
+      store.runFenced({ id: 'missing', owner: 'owner', claimGeneration: 1, now: FENCE_NOW }, async () => undefined),
+      /claim fence rejected/,
+    );
+    assert.deepEqual(await repo.get('pg-fence'), queueBefore);
+    assert.equal((await projects.get('P-fence'))?.id, 'P-fence');
+  } finally { await store.close(); }
+  const reopened = await PgStateStore.open({ connectionString });
+  try {
+    const projects = new PgProjectRepository(reopened);
+    const repo = new PgQueuedHopRepository(reopened);
+    assert.equal((await projects.get('P-fence'))?.id, 'P-fence');
+    assert.equal(await projects.get('P-rejected'), undefined);
+    assert.equal((await projects.get('P-seed'))!.missions.length, 0);
+    assert.equal((await repo.get('pg-fence'))?.claimGeneration, 1);
+    assert.equal((await repo.get('pg-fence'))?.owner, 'owner');
+  } finally { await reopened.close(); }
+});
+
+test('Postgres fenced command loses the race when Q is taken over after the callback starts', async (t) => {
+  const opened = await openFenceStore();
+  if (!opened) { t.skip('Postgres unavailable; PG claim fencing race not verified'); return; }
+  const { connectionString, store } = opened;
+  try {
+    const repo = new PgQueuedHopRepository(store);
+    const projects = new PgProjectRepository(store);
+    await repo.enqueue(fenceHop());
+    assert.equal((await repo.claim('pg-fence', 'owner', FENCE_NOW, FENCE_LEASE))?.claimGeneration, 1);
+
+    await assert.rejects(
+      store.runFenced({ id: 'pg-fence', owner: 'owner', claimGeneration: 1, now: FENCE_NOW }, async () => {
+        await projects.save(Project.create({ id: 'P-lost' }));
+        // 回调已开始、#commit 尚未 BEGIN：此时接管必须能完成。若实现在 fn 里锁行，claim 会卡住直到陈旧写提交。
+        const taken = await Promise.race([
+          repo.claim('pg-fence', 'next', FENCE_LEASE, FENCE_LATER),
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+        ]);
+        assert.ok(taken, 'takeover must proceed during the callback; a row lock held across fn would block claim until after commit');
+        assert.equal(taken.claimGeneration, 2);
+        assert.equal(taken.owner, 'next');
+      }),
+      /claim fence rejected/,
+    );
+    assert.equal(await projects.get('P-lost'), undefined);
+    const hop = await repo.get('pg-fence');
+    assert.equal(hop?.owner, 'next');
+    assert.equal(hop?.claimGeneration, 2);
+  } finally { await store.close(); }
+  const reopened = await PgStateStore.open({ connectionString });
+  try {
+    assert.equal(await new PgProjectRepository(reopened).get('P-lost'), undefined);
+    const hop = await new PgQueuedHopRepository(reopened).get('pg-fence');
+    assert.equal(hop?.owner, 'next');
+    assert.equal(hop?.claimGeneration, 2);
+  } finally { await reopened.close(); }
+});
+
+test('Postgres reclaim after expiry strictly increases generation; reopen still rejects the old generation', async (t) => {
+  const opened = await openFenceStore();
+  if (!opened) { t.skip('Postgres unavailable; PG reclaim fencing not verified'); return; }
+  const { connectionString, store } = opened;
+  try {
+    const repo = new PgQueuedHopRepository(store);
+    const projects = new PgProjectRepository(store);
+    await repo.enqueue(fenceHop());
+    const first = await repo.claim('pg-fence', 'owner', FENCE_NOW, FENCE_LEASE);
+    assert.equal(first?.claimGeneration, 1);
+    const taken = await repo.claim('pg-fence', 'next', FENCE_LEASE, FENCE_LATER);
+    assert.equal(taken?.claimGeneration, 2);
+    assert.ok((taken?.claimGeneration ?? 0) > (first?.claimGeneration ?? 0));
+
+    await assert.rejects(
+      store.runFenced({ id: 'pg-fence', owner: 'owner', claimGeneration: 1, now: FENCE_LEASE }, async () => {
+        await projects.save(Project.create({ id: 'P-stale' }));
+      }),
+      /claim fence rejected/,
+    );
+    assert.equal(await projects.get('P-stale'), undefined);
+    assert.equal((await repo.get('pg-fence'))?.claimGeneration, 2);
+
+    await store.runFenced({ id: 'pg-fence', owner: 'next', claimGeneration: 2, now: FENCE_LEASE }, async () => {
+      await projects.save(Project.create({ id: 'P-live' }));
+    });
+    assert.equal((await projects.get('P-live'))?.id, 'P-live');
+  } finally { await store.close(); }
+
+  const reopened = await PgStateStore.open({ connectionString });
+  try {
+    const repo = new PgQueuedHopRepository(reopened);
+    const projects = new PgProjectRepository(reopened);
+    assert.equal((await repo.get('pg-fence'))?.claimGeneration, 2);
+    assert.ok(((await repo.get('pg-fence'))?.claimGeneration ?? 0) > 1);
+    await assert.rejects(
+      reopened.runFenced({ id: 'pg-fence', owner: 'next', claimGeneration: 1, now: FENCE_LEASE }, async () => {
+        await projects.save(Project.create({ id: 'P-old-gen' }));
+      }),
+      /claim fence rejected/,
+    );
+    assert.equal(await projects.get('P-old-gen'), undefined);
+    await reopened.runFenced({ id: 'pg-fence', owner: 'next', claimGeneration: 2, now: FENCE_LEASE }, async () => {
+      await projects.save(Project.create({ id: 'P-reopen' }));
+    });
+    assert.equal((await projects.get('P-reopen'))?.id, 'P-reopen');
+    assert.equal((await projects.get('P-live'))?.id, 'P-live');
   } finally { await reopened.close(); }
 });
