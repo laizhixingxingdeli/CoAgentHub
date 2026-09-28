@@ -158,6 +158,22 @@ describe('filterSpawnEnv', () => {
     assert.equal(filtered.HUB_TEST_SECRET, undefined);
   });
 
+  test('Windows 程序目录基线大小写无关、保留源键且缺键不造值', () => {
+    const filtered = filterSpawnEnv(
+      {
+        programfiles: 'C:\\Synthetic\\PF',
+        'PROGRAMFILES(X86)': 'C:\\Synthetic\\PF86',
+        OTHER: 'drop',
+      },
+      [],
+    );
+    assert.deepEqual(filtered, {
+      programfiles: 'C:\\Synthetic\\PF',
+      'PROGRAMFILES(X86)': 'C:\\Synthetic\\PF86',
+    });
+    assert.equal(Object.hasOwn(filtered, 'ProgramW6432'), false);
+  });
+
   test('源中 undefined 值不写入（不造空串）', () => {
     const filtered = filterSpawnEnv({ PATH: undefined, TEMP: '/tmp' }, []);
     assert.equal(Object.keys(filtered).includes('PATH'), false);
@@ -166,7 +182,7 @@ describe('filterSpawnEnv', () => {
 });
 
 describe('SPAWN_ENV_BASE_ALLOWLIST 冻结名单', () => {
-  test('恰好 19 个 OS/代理名（排序后比对；加厂商形名必须改本断言）', () => {
+  test('恰好 22 个 OS/代理名（排序后比对；加名必须改本断言）', () => {
     const expected = [
       'ALL_PROXY',
       'APPDATA',
@@ -180,6 +196,9 @@ describe('SPAWN_ENV_BASE_ALLOWLIST 冻结名单', () => {
       'NO_PROXY',
       'PATH',
       'PATHEXT',
+      'ProgramFiles',
+      'ProgramFiles(x86)',
+      'ProgramW6432',
       'SYSTEMDRIVE',
       'SYSTEMROOT',
       'TEMP',
@@ -191,7 +210,7 @@ describe('SPAWN_ENV_BASE_ALLOWLIST 冻结名单', () => {
     // locale 字典序：纯 code-point 下 'S' < '_'，HTTPS_PROXY 会排到 HTTP_PROXY 前。
     const sorted = [...SPAWN_ENV_BASE_ALLOWLIST].sort((a, b) => a.localeCompare(b, 'en'));
     assert.deepEqual(sorted, expected);
-    assert.equal(SPAWN_ENV_BASE_ALLOWLIST.length, 19);
+    assert.equal(SPAWN_ENV_BASE_ALLOWLIST.length, 22);
   });
 });
 
@@ -228,17 +247,31 @@ describe('真实 spawn：金丝雀不泄漏 / 透传可见', () => {
     const token = 'HUB_TEST_TOKEN';
     const prevSecret = process.env[canary];
     const prevToken = process.env[token];
+    const programKeys = ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432'];
+    const previousProgramValues = programKeys.map((key) => process.env[key]);
+    const programValues = ['C:\\Synthetic\\ProgramDirectory', 'C:\\Synthetic\\ProgramDirectory', 'C:\\Synthetic\\ProgramDirectory'];
     process.env[canary] = 'canary-value-must-not-leak';
+    programKeys.forEach((key, index) => { process.env[key] = programValues[index]!; });
     process.env[token] = 'token-value-for-passthrough';
 
     try {
+      const emptyPassthrough = parseAgentEnvPassthrough('-');
+      assert.deepEqual(emptyPassthrough, []);
       const locked = new SpawnRuntime({
         kind: 'env-probe',
         // 不用 process.execPath：win32 shell:true 下含空格路径会炸（见 runtime-events）。
         command: 'node',
         args: [script],
         cwd: dir,
-        envPassthrough: [],
+        envPassthrough: emptyPassthrough!,
+        env: {
+          PATH: process.env.PATH ?? process.env.Path,
+          HUB_TEST_SECRET: 'canary-value-must-not-leak',
+          HUB_TEST_TOKEN: 'token-value-for-passthrough',
+          ProgramFiles: programValues[0],
+          'ProgramFiles(x86)': programValues[1],
+          ProgramW6432: programValues[2],
+        },
       });
       const run = await locked.start({
         role: 'executor',
@@ -257,6 +290,9 @@ describe('真实 spawn：金丝雀不泄漏 / 透传可见', () => {
       assert.equal(childEnv[canary], undefined, '金丝雀密钥不得出现在子进程 env');
       const pathLike = Object.keys(childEnv).some((k) => k.toUpperCase() === 'PATH');
       assert.ok(pathLike, 'PATH/Path 基线必须保留，否则 child 会 command not found');
+      for (let index = 0; index < programKeys.length; index++) {
+        assert.equal(childEnv[programKeys[index]], programValues[index]);
+      }
 
       // 第二次：声明透传假名后应可见。
       const open = new SpawnRuntime({
@@ -265,6 +301,11 @@ describe('真实 spawn：金丝雀不泄漏 / 透传可见', () => {
         args: [script],
         cwd: dir,
         envPassthrough: [token],
+        env: {
+          PATH: process.env.PATH ?? process.env.Path,
+          HUB_TEST_SECRET: 'canary-value-must-not-leak',
+          HUB_TEST_TOKEN: 'token-value-for-passthrough',
+        },
       });
       const run2 = await open.start({
         role: 'executor',
@@ -286,6 +327,11 @@ describe('真实 spawn：金丝雀不泄漏 / 透传可见', () => {
       else process.env[canary] = prevSecret;
       if (prevToken === undefined) delete process.env[token];
       else process.env[token] = prevToken;
+      programKeys.forEach((key, index) => {
+        const previous = previousProgramValues[index];
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      });
       rmSync(dir, { recursive: true, force: true });
     }
   });

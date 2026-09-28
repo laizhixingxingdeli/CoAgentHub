@@ -147,6 +147,9 @@ export const SPAWN_ENV_BASE_ALLOWLIST: readonly string[] = Object.freeze([
   'HTTPS_PROXY',
   'NO_PROXY',
   'ALL_PROXY',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'ProgramW6432',
 ]);
 
 /** 部署方声明「额外透传哪些宿主环境变量名」的 env 键。值是逗号分隔的名字，不是值本身。 */
