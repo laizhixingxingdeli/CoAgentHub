@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "missionId": "M-arch",
+      "attemptId": "A-arch-coord",
+      "role": "coordinator",
+      "status": "succeeded",
+      "usage": {
+        "input": 80,
+        "output": 16,
+        "cacheRead": 2,
+        "cacheWrite": 1,
+        "total": 99,
+        "quality": "reported"
+      },
+      "usageCoverage": "complete",
+      "toolCounts": [
+        {
+          "name": "bash",
+          "count": 1
+        },
+        {
+          "name": "read",
+          "count": 2
+        }
+      ],
+      "toolCoverage": "complete",
+      "truncation": {
+        "budget": 16000,
+        "estimatedBefore": 18000,
+        "estimatedAfter": 15000
+      },
+      "truncationCoverage": "complete",
+      "reasons": []
+    },
+    {
+      "missionId": "M-arch",
+      "attemptId": "A-arch-exec",
+      "role": "executor",
+      "status": "failed",
+      "usage": {
+        "input": 7,
+        "output": 1,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 8,
+        "quality": "estimated"
+      },
+      "usageCoverage": "complete",
+      "toolCounts": [],
+      "toolCoverage": "unknown",
+      "truncationCoverage": "unknown",
+      "reasons": [
+        "tool_activity_missing",
+        "truncation_audit_absent"
+      ]
+    },
+    {
+      "missionId": "M-live",
+      "attemptId": "A-coord-estimated",
+      "role": "coordinator",
+      "status": "succeeded",
+      "usage": {
+        "input": 50,
+        "output": 10,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 60,
+        "quality": "estimated"
+      },
+      "usageCoverage": "complete",
+      "toolCounts": [],
+      "toolCoverage": "unknown",
+      "truncationCoverage": "unknown",
+      "reasons": [
+        "tool_activity_missing",
+        "no_attributable_events",
+        "truncation_audit_absent"
+      ]
+    },
+    {
+      "missionId": "M-live",
+      "attemptId": "A-coord-reported",
+      "role": "coordinator",
+      "status": "succeeded",
+      "usage": {
+        "input": 100,
+        "output": 20,
+        "cacheRead": 5,
+        "cacheWrite": 3,
+        "total": 128,
+        "quality": "reported"
+      },
+      "usageCoverage": "complete",
+      "toolCounts": [
+        {
+          "name": "grep",
+          "count": 1
+        },
+        {
+          "name": "read",
+          "count": 1
+        }
+      ],
+      "toolCoverage": "complete",
+      "truncation": {
+        "budget": 8000,
+        "estimatedBefore": 12000,
+        "estimatedAfter": 7500
+      },
+      "truncationCoverage": "complete",
+      "reasons": []
+    },
+    {
+      "missionId": "M-live",
+      "attemptId": "A-exec-nousage",
+      "role": "executor",
+      "status": "failed",
+      "usageCoverage": "unknown",
+      "toolCounts": [
+        {
+          "name": "read",
+          "count": 200
+        }
+      ],
+      "toolCoverage": "partial",
+      "truncationCoverage": "unknown",
+      "reasons": [
+        "usage_missing",
+        "tool_activity_tail_capped",
+        "truncation_audit_absent"
+      ]
+    },
+    {
+      "missionId": "M-live",
+      "attemptId": "A-exec-truncated",
+      "role": "executor",
+      "status": "in_progress",
+      "usage": {
+        "input": 12,
+        "output": 4,
+        "cacheRead": 1,
+        "cacheWrite": 0,
+        "total": 17,
+        "quality": "reported"
+      },
+      "usageCoverage": "complete",
+      "toolCounts": [
+        {
+          "name": "read",
+          "count": 1
+        },
+        {
+          "name": "untrusted",
+          "count": 1
+        }
+      ],
+      "toolCoverage": "complete",
+      "truncation": {
+        "budget": 4000,
+        "estimatedBefore": 5000,
+        "estimatedAfter": 3900
+      },
+      "truncationCoverage": "complete",
+      "reasons": []
+    }
+  ],
+  "liveCoverage": "complete",
+  "archiveCoverage": "complete",
+  "reasons": []
+}
