@@ -24,7 +24,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
-import { Platform } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { FileCandidateCircuitRepository, FileStateStore } from '../src/application/file-store.ts';
@@ -41,6 +41,7 @@ import {
   hopCapacityLimits,
   hopIdempotencyKey,
   renewHop,
+  reportHopFailure,
   type HopCapacityLimits,
   type QueuedHop,
 } from '../src/application/durable-scheduler.ts';
@@ -764,6 +765,17 @@ function memoryCapacityRepo(rows: QueuedHop[]): QueuedHopCapacityRepository {
       if (updated) rows[index] = updated;
       return updated ? { ...updated } : undefined;
     },
+    async reportFailure(input) {
+      const index = rows.findIndex((row) => row.id === input.id);
+      if (index < 0) return undefined;
+      const current = rows[index]!;
+      const updated = reportHopFailure(current, input);
+      if (!updated) return undefined;
+      if (updated !== current) rows[index] = updated;
+      return updated.lastFailure
+        ? { ...updated, lastFailure: { ...updated.lastFailure } }
+        : { ...updated };
+    },
     async claimAvailable(input) {
       const decision = decideCapacityClaim(rows, input.now, input.limits, input.eligible);
       if (decision.kind !== 'select') return decision;
@@ -886,12 +898,14 @@ async function capacityHarness(opts: {
   executor: AgentRuntime;
   coordinatorCandidates?: { endpoint: 'local'; profileId: string }[];
   executorCandidates?: { endpoint: 'local'; profileId: string }[];
+  executorMaxAttempts?: number;
   independentReviewer?: { runtime: AgentRuntime; candidates: { endpoint: 'local'; profileId: string }[] };
   queuedHops: QueuedHopCapacityRepository;
   hopClock: FixedClock;
   hopLeaseMs?: number;
   hopCapacityLimits?: HopCapacityLimits;
   owner?: string;
+  candidateCircuits?: CandidateCircuitRepository;
 }) {
   const clock = new FixedClock(CAP_NOW);
   const activity = new InMemoryActivityLog(clock);
@@ -925,6 +939,7 @@ async function capacityHarness(opts: {
         { endpoint: 'local' as const, profileId: 'exec-a' },
         { endpoint: 'local' as const, profileId: 'exec-b' },
       ],
+      maxAttempts: opts.executorMaxAttempts,
     },
     independentReviewer: opts.independentReviewer,
     queuedHops: opts.queuedHops,
@@ -932,6 +947,7 @@ async function capacityHarness(opts: {
     hopLeaseMs: opts.hopLeaseMs ?? 60_000,
     hopCapacityLimits: opts.hopCapacityLimits,
     owner: opts.owner ?? 'runner-cap',
+    candidateCircuits: opts.candidateCircuits,
   };
   return {
     platform,
@@ -1154,20 +1170,23 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
           contract: CONTRACT,
         });
         const result = await env.makeOrchestrator().runMission('M-fail', { projectRoot: process.cwd() });
-        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        assert.equal(result.kind, 'waiting');
+        if (result.kind === 'waiting') {
+          assert.equal(result.reason, 'project_busy');
+          assert.match(result.detail, /退避/);
+        }
         const execStarts = starts.filter((row) => row.role === 'executor');
         assert.deepEqual(
           execStarts.map((row) => row.profileId),
-          ['exec-a', 'exec-b'],
+          ['exec-a'],
         );
         const execHops = (await queuedHops.list()).filter(
           (row) => row.missionId === 'M-fail' && row.role === 'executor',
         );
-        assert.equal(execHops.length, 2);
+        assert.equal(execHops.length, 1, '失败不得另开槽启动 B');
         assert.equal(execHops[0]?.profileId, 'exec-a');
-        assert.equal(execHops[0]?.status, 'completed');
-        assert.equal(execHops[1]?.profileId, 'exec-b');
-        assert.equal(execHops[1]?.status, 'completed');
+        assert.equal(execHops[0]?.status, 'retry_wait');
+        assert.equal(execHops[0]?.attemptCount, 1);
       });
 
     test('项目名额：协调者可入，executor 平台闸门仍是 PROJECT_BUSY',
@@ -1465,25 +1484,7 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
                 assert.equal(live[0]?.profileId, 'exec-a');
                 throw new Error('403 需要充值');
               }
-              const live = (await queuedHops.list()).filter(
-                (row) =>
-                  row.missionId === spec.missionId &&
-                  row.role === 'executor' &&
-                  row.status === 'claimed',
-              );
-              assert.ok(live.length > 0, 'B 启动前必须另领持久租约');
-              for (const hop of live) {
-                assert.equal(hop.profileId, spec.profile.profileId);
-                assert.notEqual(hop.profileId, 'exec-a');
-              }
-              const completedA = (await queuedHops.list()).find(
-                (row) =>
-                  row.missionId === spec.missionId &&
-                  row.role === 'executor' &&
-                  row.profileId === 'exec-a',
-              );
-              assert.equal(completedA?.status, 'completed');
-              return happy.start(spec);
+              throw new Error(`不得启动另一候选 ${spec.profile.profileId}`);
             },
           },
           queuedHops,
@@ -1498,21 +1499,20 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
         const result = await env.makeOrchestrator().runMission('M-throw', {
           projectRoot: process.cwd(),
         });
-        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        assert.equal(result.kind, 'waiting');
         assert.equal(aStartCalls, 1, '抛错不得反复替换同一候选');
         const execStarts = starts.filter((row) => row.role === 'executor');
         assert.deepEqual(
           execStarts.map((row) => row.profileId),
-          ['exec-a', 'exec-b'],
+          ['exec-a'],
         );
         const execHops = (await queuedHops.list()).filter(
           (row) => row.missionId === 'M-throw' && row.role === 'executor',
         );
-        assert.equal(execHops.length, 2, '完成 A 后只另开 B，不得无限换票');
+        assert.equal(execHops.length, 1, '失败不得另开槽，不得无限换票');
         assert.equal(execHops[0]?.profileId, 'exec-a');
-        assert.equal(execHops[0]?.status, 'completed');
-        assert.equal(execHops[1]?.profileId, 'exec-b');
-        assert.equal(execHops[1]?.status, 'completed');
+        assert.equal(execHops[0]?.status, 'retry_wait');
+        assert.equal(execHops[0]?.attemptCount, 1);
       });
 
     test('优先级与同级 FIFO 按 H→A→B 实际领取启动，阻塞 A→B→A 释放后继续',
@@ -1840,3 +1840,205 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
         assert.equal(fillRows.find((row) => row.owner === 'runner-fill'), undefined);
       });
   });
+
+describe('调度器：失败 Attempt 持久退避与死信', () => {
+  const failingExecutor = () =>
+    new ScriptedRuntime({
+      'executor:W-1': { steps: [], upstreamFailure: 'HTTP 503 Service Unavailable' },
+    });
+
+  test('一次可重试失败进入 retry_wait；提前重入无新 Attempt；到期同槽再领后第二次死信',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const hopClock = new FixedClock(CAP_NOW);
+      const starts: { role: string; profileId: string }[] = [];
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(failingExecutor(), starts),
+        executorMaxAttempts: 2,
+        queuedHops,
+        hopClock,
+        hopCapacityLimits: capLimits(),
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-retry', contract: CONTRACT });
+      const first = await env.makeOrchestrator().runMission('M-retry', { projectRoot: process.cwd() });
+      assert.equal(first.kind, 'waiting');
+      if (first.kind === 'waiting') {
+        assert.equal(first.reason, 'project_busy');
+        assert.match(first.detail, /退避/);
+      }
+      const afterFirst = (await queuedHops.list()).filter((row) => row.role === 'executor');
+      assert.equal(afterFirst.length, 1);
+      const hop = afterFirst[0]!;
+      assert.equal(hop.status, 'retry_wait');
+      assert.equal(hop.attemptCount, 1);
+      assert.ok(Date.parse(hop.availableAt) > Date.parse(hop.lastFailure!.at));
+      assert.equal(hop.lastFailure?.classification, 'upstream_5xx');
+      const view1 = await env.platform.getMissionView('M-retry');
+      assert.notEqual(view1.status, 'completed');
+      assert.equal(view1.workItems[0]?.attempts, 1);
+      const execStarts1 = starts.filter((row) => row.role === 'executor').length;
+
+      const early = await env.makeOrchestrator().runMission('M-retry', { projectRoot: process.cwd() });
+      assert.equal(early.kind, 'waiting');
+      if (early.kind === 'waiting') {
+        assert.equal(early.reason, 'project_busy');
+        assert.match(early.detail, /退避/);
+      }
+      assert.equal((await queuedHops.list()).filter((row) => row.role === 'executor').length, 1);
+      assert.equal((await queuedHops.list()).find((row) => row.role === 'executor')?.attemptCount, 1);
+      assert.equal(starts.filter((row) => row.role === 'executor').length, execStarts1);
+      assert.equal((await env.platform.getMissionView('M-retry')).workItems[0]?.attempts, 1);
+
+      hopClock.advance(Date.parse(hop.availableAt) - Date.parse(CAP_NOW));
+      const second = await env.makeOrchestrator().runMission('M-retry', { projectRoot: process.cwd() });
+      assert.equal(second.kind, 'waiting');
+      if (second.kind === 'waiting') {
+        assert.equal(second.reason, 'attempt_limit_reached');
+        assert.match(second.detail, /死信/);
+      }
+      const afterSecond = (await queuedHops.list()).filter((row) => row.role === 'executor');
+      assert.equal(afterSecond.length, 1);
+      assert.equal(afterSecond[0]?.status, 'dead_letter');
+      assert.equal(afterSecond[0]?.attemptCount, 2);
+      assert.equal((await queuedHops.get(afterSecond[0]!.id))?.status, 'dead_letter');
+      assert.equal(starts.filter((row) => row.role === 'executor').length, execStarts1 + 1);
+      assert.notEqual((await env.platform.getMissionView('M-retry')).status, 'completed');
+
+      const cooled = env.makeOrchestrator();
+      const again = await cooled.runMission('M-retry', { projectRoot: process.cwd() });
+      assert.equal(again.kind, 'waiting');
+      if (again.kind === 'waiting') {
+        assert.equal(again.reason, 'attempt_limit_reached');
+        assert.notEqual(again.reason, 'no_available_agent');
+      }
+      assert.equal((await queuedHops.list()).filter((row) => row.role === 'executor').length, 1);
+      assert.equal(starts.filter((row) => row.role === 'executor').length, execStarts1 + 1);
+    });
+
+  test('候选冷却不能掩盖退避等待；同一失败重入不多计数', async () => {
+    const rows: QueuedHop[] = [];
+    const queuedHops = memoryCapacityRepo(rows);
+    const hopClock = new FixedClock(CAP_NOW);
+    const starts: { role: string; profileId: string }[] = [];
+    const env = await capacityHarness({
+      coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+      executor: trackingStarts(failingExecutor(), starts),
+      executorCandidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+      executorMaxAttempts: 2,
+      queuedHops,
+      hopClock,
+      hopCapacityLimits: capLimits(),
+    });
+    await env.platform.createMission({ projectId: 'P', missionId: 'M-cool', contract: CONTRACT });
+    const orch = env.makeOrchestrator();
+    const first = await orch.runMission('M-cool', { projectRoot: process.cwd() });
+    assert.equal(first.kind, 'waiting');
+    if (first.kind === 'waiting') assert.match(first.detail, /退避/);
+    assert.equal((await queuedHops.list()).find((row) => row.role === 'executor')?.attemptCount, 1);
+    const reentry = await orch.runMission('M-cool', { projectRoot: process.cwd() });
+    assert.equal(reentry.kind, 'waiting');
+    if (reentry.kind === 'waiting') {
+      assert.equal(reentry.reason, 'project_busy');
+      assert.notEqual(reentry.reason, 'no_available_agent');
+      assert.match(reentry.detail, /退避/);
+    }
+    const exec = (await queuedHops.list()).filter((row) => row.role === 'executor');
+    assert.equal(exec.length, 1);
+    assert.equal(exec[0]?.attemptCount, 1);
+    assert.equal(exec[0]?.status, 'retry_wait');
+    assert.equal(starts.filter((row) => row.role === 'executor').length, 1);
+  });
+
+  test('规则错误无自动重试；platform_unreachable 不报告且等待原因不同', async () => {
+    const ruleRows: QueuedHop[] = [];
+    const ruleQueue = memoryCapacityRepo(ruleRows);
+    const hopClock = new FixedClock(CAP_NOW);
+    const happy = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const ruleEnv = await capacityHarness({
+      coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+      executor: {
+        kind: happy.kind,
+        start: async (spec) => {
+          if (spec.role === 'executor') {
+            throw new PlatformRuleError('PLAN_REQUIRED', '没 Plan 不能建工作项');
+          }
+          return happy.start(spec);
+        },
+      },
+      executorMaxAttempts: 3,
+      queuedHops: ruleQueue,
+      hopClock,
+      hopCapacityLimits: capLimits(),
+    });
+    await ruleEnv.platform.createMission({ projectId: 'P', missionId: 'M-rule', contract: CONTRACT });
+    const ruleOutcome = await ruleEnv.makeOrchestrator().runMission('M-rule', { projectRoot: process.cwd() });
+    assert.equal(ruleOutcome.kind, 'waiting');
+    if (ruleOutcome.kind === 'waiting') {
+      assert.equal(ruleOutcome.reason, 'attempt_limit_reached');
+      assert.match(ruleOutcome.detail, /死信/);
+    }
+    const ruleHop = (await ruleQueue.list()).find((row) => row.role === 'executor');
+    assert.equal(ruleHop?.status, 'dead_letter');
+    assert.equal(ruleHop?.attemptCount, 1);
+    assert.equal(ruleHop?.lastFailure?.retryable, false);
+    assert.equal(ruleHop?.lastFailure?.classification, 'rule');
+    assert.notEqual((await ruleEnv.platform.getMissionView('M-rule')).status, 'completed');
+
+    const unreachableRows: QueuedHop[] = [];
+    const inner = memoryCapacityRepo(unreachableRows);
+    let reports = 0;
+    const unreachableQueue: QueuedHopCapacityRepository = {
+      enqueue: (hop) => inner.enqueue(hop),
+      get: (id) => inner.get(id),
+      list: () => inner.list(),
+      claim: (id, owner, now, until) => inner.claim(id, owner, now, until),
+      renew: (id, owner, generation, now, until) => inner.renew(id, owner, generation, now, until),
+      complete: (id, owner, generation, now) => inner.complete(id, owner, generation, now),
+      reportFailure: async (input) => {
+        reports += 1;
+        return inner.reportFailure!(input);
+      },
+      claimAvailable: (input) => inner.claimAvailable(input),
+    };
+    const scripted = new ScriptedRuntime({ 'executor:W-1': { steps: [] } });
+    const unreachableEnv = await capacityHarness({
+      coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+      executor: {
+        kind: scripted.kind,
+        start: async (spec) => {
+          const run = await scripted.start(spec);
+          if (spec.role !== 'executor') return run;
+          return {
+            resumeRef: run.resumeRef,
+            on: (handler) => run.on(handler),
+            abort: (reason) => run.abort(reason),
+            wait: async () => ({ ...await run.wait(), endedBy: 'platform_unreachable' as const }),
+          };
+        },
+      },
+      queuedHops: unreachableQueue,
+      hopClock: new FixedClock(CAP_NOW),
+      hopCapacityLimits: capLimits(),
+    });
+    await unreachableEnv.platform.createMission({
+      projectId: 'P',
+      missionId: 'M-unreach',
+      contract: CONTRACT,
+    });
+    const unreachableOutcome = await unreachableEnv.makeOrchestrator().runMission('M-unreach', {
+      projectRoot: process.cwd(),
+    });
+    assert.equal(unreachableOutcome.kind, 'waiting');
+    if (unreachableOutcome.kind === 'waiting') {
+      assert.equal(unreachableOutcome.reason, 'platform_unreachable');
+    }
+    assert.equal(reports, 0);
+    const unreachHop = (await unreachableQueue.list()).find((row) => row.role === 'executor');
+    assert.notEqual(unreachHop?.status, 'retry_wait');
+    assert.notEqual(unreachHop?.status, 'dead_letter');
+    assert.notEqual((await unreachableEnv.platform.getMissionView('M-unreach')).status, 'completed');
+    assert.notEqual(ruleOutcome.kind === 'waiting' ? ruleOutcome.reason : '', 'platform_unreachable');
+  });
+});

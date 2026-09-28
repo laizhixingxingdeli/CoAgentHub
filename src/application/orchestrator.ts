@@ -39,6 +39,7 @@ import {
   hopCapacityLimits,
   hopIdempotencyKey,
   nextLogicalHopCycle,
+  parkedQueuedHopWait,
   queuedHopWaitDetail,
   type EligibleHopClaim,
   type HopCapacityLimits,
@@ -1159,11 +1160,18 @@ export class Orchestrator {
     | { alreadyCompleted: true }
     | undefined
   > {
+    const parked = await this.#queuedHopPark({
+      role: input.role,
+      missionId: input.missionId,
+      workItemId: input.workItemId,
+    });
+    if (parked) return parked;
+
     const now = Date.now();
     const usable = await this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
-      // 前者要人看，后者等一会儿就好。
+      // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
       return { exhausted: 'no_available_agent' };
     }
 
@@ -1244,6 +1252,7 @@ export class Orchestrator {
       // 不记这个标志就没法把它和真的上游故障分开，而两者处置完全相反。
       let runaway = false;
       let thrownRuntimeException = false;
+      let thrownRuleError = false;
       /**
        * 边跑边收到的最后一次累计用量。
        *
@@ -1431,6 +1440,7 @@ export class Orchestrator {
         if (waitError !== undefined) throw waitError;
       } catch (error) {
         thrownRuntimeException = true;
+        thrownRuleError = error instanceof PlatformRuleError;
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
         // 平台一抖，好端端的候选被冻进冷却，而换一个照样连不上。
         const message = error instanceof Error ? error.message : String(error);
@@ -1562,6 +1572,44 @@ export class Orchestrator {
       const shouldFailover = this.#candidateCircuits
         ? classification?.failover === true
         : endedBy === 'upstream_failure' || endedBy === 'killed_idle' || endedBy === 'quota' || endedBy === 'auth' || endedBy === 'upstream_5xx';
+      const reportableFailure = thrownRuleError || shouldFailover || durableCandidateFailure;
+      if (
+        reportableFailure &&
+        claimedHop &&
+        hopRan &&
+        !hopLeaseLost &&
+        this.#hopScheduler &&
+        claimedHop.claimGeneration !== undefined
+      ) {
+        // 有界重试钉在同一逻辑槽上。complete 会放开 idempotency key，下一跳
+        // 另开一行就把 attemptCount 清零；同轮换候选也会占着容量去启动 B。
+        if (shouldFailover) {
+          this.#cooldown.set(
+            profile.profileId,
+            Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000),
+          );
+          if (input.role === 'executor' && startRevision) {
+            await this.#workspace.rollback(input.cwd, startRevision).catch(() => undefined);
+          }
+        }
+        const reported = await this.#reportClaimedHopFailure({
+          hop: claimedHop,
+          attemptId,
+          classification: thrownRuleError ? 'rule' : failureClass,
+          disposition: thrownRuleError ? 'do_not_retry' : 'retry_then_dead_letter',
+          retryable: !thrownRuleError,
+        });
+        if (reported.status === 'dead_letter') {
+          return {
+            exhausted: 'attempt_limit_reached',
+            detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'dead_letter' }),
+          };
+        }
+        return {
+          exhausted: 'project_busy',
+          detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'available_at' }),
+        };
+      }
       if (shouldFailover) {
         // 这个候选先放一会儿，别下一跳又撞上同一个限流 / 同一次卡死。
         this.#cooldown.set(
@@ -1668,7 +1716,7 @@ export class Orchestrator {
     if (acquired.kind === 'waiting') {
       return {
         kind: 'waiting',
-        reason: 'project_busy',
+        reason: acquired.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
         detail: queuedHopWaitDetail(acquired),
         wait: acquired.wait,
       };
@@ -1738,6 +1786,8 @@ export class Orchestrator {
   > {
     const hop = await this.#hopScheduler!.enqueue(input);
     if (hop.status === 'completed') return { kind: 'completed', hop };
+    const parked = parkedQueuedHopWait(hop, nowIso);
+    if (parked) return parked;
     if (!candidate) {
       // 没有候选身份就领取会留下未标记租约，后续启动谁都算占着它。
       return { kind: 'waiting', hop, wait: 'capacity' };
@@ -1776,9 +1826,8 @@ export class Orchestrator {
     if (result.kind === 'waiting') return result;
     const latest = (await this.#queuedHops!.get(hop.id)) ?? hop;
     if (latest.status === 'completed') return { kind: 'completed', hop: latest };
-    if (Date.parse(latest.availableAt) > Date.parse(nowIso)) {
-      return { kind: 'waiting', hop: latest, wait: 'available_at' };
-    }
+    const parkedLatest = parkedQueuedHopWait(latest, nowIso);
+    if (parkedLatest) return parkedLatest;
     return { kind: 'waiting', hop: latest, wait: 'lease' };
   }
 
@@ -1845,6 +1894,65 @@ export class Orchestrator {
         onLost();
       }
     }
+  }
+
+  /**
+   * 重入时先认本逻辑槽的死信/退避。若先看候选可用性，熔断冷却会把
+   * attempt_limit_reached 伪装成 no_available_agent，人会空等而不是去看死信。
+   */
+  async #queuedHopPark(input: {
+    role: HopRole;
+    missionId: string;
+    workItemId?: string;
+  }): Promise<{ exhausted: WaitReason; detail: string } | undefined> {
+    if (!this.#queuedHops) return undefined;
+    const view = await this.#platform.getMissionView(input.missionId);
+    const workItemId = input.workItemId ?? '-';
+    const rows = await this.#queuedHops.list();
+    const attemptCycle = nextLogicalHopCycle(rows, {
+      missionId: input.missionId,
+      role: input.role,
+      workItemId,
+      contractRevision: view.contractRevision,
+    });
+    const existing = rows.find(
+      (row) =>
+        row.idempotencyKey ===
+        hopIdempotencyKey({
+          missionId: input.missionId,
+          role: input.role,
+          workItemId,
+          contractRevision: view.contractRevision,
+          attemptCycle,
+        }),
+    );
+    if (!existing) return undefined;
+    const parked = parkedQueuedHopWait(existing, this.#hopClock.now().toISOString());
+    if (!parked) return undefined;
+    return {
+      exhausted: parked.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+      detail: queuedHopWaitDetail(parked),
+    };
+  }
+
+  async #reportClaimedHopFailure(input: {
+    hop: QueuedHop;
+    attemptId: string;
+    classification: string;
+    disposition: string;
+    retryable: boolean;
+  }): Promise<QueuedHop> {
+    // 报告失败不得 catch 后假装成功：仓储缺方法或围栏拒写都必须冒出来，
+    // 否则会走回 complete / 换槽，把同一失败再计一次或把 hop 放掉。
+    return this.#hopScheduler!.reportFailure({
+      id: input.hop.id,
+      claimGeneration: input.hop.claimGeneration!,
+      attemptId: input.attemptId,
+      failedAt: this.#hopClock.now().toISOString(),
+      classification: input.classification,
+      disposition: input.disposition,
+      retryable: input.retryable,
+    });
   }
 
   async #completeHopLease(hop: QueuedHop | undefined): Promise<void> {

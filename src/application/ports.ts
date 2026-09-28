@@ -9,7 +9,7 @@
 import type { Project } from '../kernel/index.ts';
 import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
-import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
 import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 
 export interface ProjectRepository {
@@ -67,6 +67,12 @@ export interface QueuedHopRepository {
   claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
   renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
   complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined>;
+  /**
+   * Fenced failure with persistent (id, claimGeneration, attemptId) dedupe.
+   * Optional so existing test stubs and single-id adapters keep compiling;
+   * File/PG implement it. Missing is not success — DurableScheduler rejects.
+   */
+  reportFailure?(input: ReportHopFailureInput): Promise<QueuedHop | undefined>;
 }
 
 /**

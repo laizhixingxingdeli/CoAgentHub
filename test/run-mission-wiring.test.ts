@@ -395,6 +395,172 @@ test('文件版第二进程拿不到状态排他锁时不领取 Hop、不启动 
   first.releaseLock();
 });
 
+function countingTerminalReview(platform: Platform) {
+  const counts = { machine: 0, abandon: 0 };
+  const machine = platform.finalizeMissionByMachine.bind(platform);
+  const abandon = platform.abandonMissionForPlan.bind(platform);
+  platform.finalizeMissionByMachine = (async (...args: Parameters<Platform['finalizeMissionByMachine']>) => {
+    counts.machine += 1;
+    return machine(...args);
+  }) as Platform['finalizeMissionByMachine'];
+  platform.abandonMissionForPlan = (async (...args: Parameters<Platform['abandonMissionForPlan']>) => {
+    counts.abandon += 1;
+    return abandon(...args);
+  }) as Platform['abandonMissionForPlan'];
+  return counts;
+}
+
+async function executorQueueRow(queuedHops: { get(id: string): Promise<QueuedHop | undefined>; list(): Promise<readonly QueuedHop[]> }) {
+  const listed = (await queuedHops.list()).filter((row) => row.role === 'executor');
+  assert.equal(listed.length, 1);
+  const got = await queuedHops.get(listed[0]!.id);
+  assert.ok(got);
+  assert.deepEqual(got, listed[0]);
+  return got!;
+}
+
+test('文件平台注入真实 MissionRunner：上游失败进持久退避，到期再失败死信，重入不多计', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-fail-queue-'));
+  temps.push(dir);
+  const statePath = join(dir, 'state.json');
+  const hopNow = '2026-01-01T00:00:00.000Z';
+  const hopClock = new FixedClock(hopNow);
+  const built = await buildPersistentPlatform(statePath, {
+    workspace: new InPlaceWorkspaceManager(),
+  });
+  try {
+    assert.ok(built.queuedHops instanceof FileQueuedHopRepository);
+    await built.platform.createMission({
+      projectId: 'P',
+      missionId: 'M-fail-queue',
+      contract: CONTRACT,
+    });
+    const tokens = built.tokens;
+    const server: Server = createApi({
+      platform: built.platform,
+      tokens,
+      deliveries: built.deliveries,
+    });
+    await listenLoopback(server, 0);
+    servers.push(server);
+    const address = server.address() as AddressInfo;
+    const terminal = countingTerminalReview(built.platform);
+    const coordinatorRuntime = new ScriptedRuntime(COORDINATOR_HAPPY);
+    const executorRuntime = new ScriptedRuntime({
+      'executor:W-1': { steps: [], upstreamFailure: 'HTTP 503 Service Unavailable' },
+    });
+    // 与 src/run-mission.ts 相同注入 built.queuedHops / candidateCircuits。
+    // 队列退避 1s，默认候选熔断 5min：若不把池冷却压到可行，到期重领会被伪装成 no_available_agent。
+    const runner = new MissionRunner({
+      platform: built.platform,
+      tokens: makeIssuer(built.platform, tokens),
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      workspace: new InPlaceWorkspaceManager(),
+      candidateCircuits: built.candidateCircuits,
+      queuedHops: built.queuedHops,
+      hopClock,
+      coordinator: {
+        runtime: coordinatorRuntime,
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        cooldownMs: 0,
+      },
+      executor: {
+        runtime: executorRuntime,
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+        maxAttempts: 2,
+        cooldownMs: 0,
+      },
+    });
+    const projectRoot = dir;
+
+    const first = await runner.run('M-fail-queue', { projectRoot });
+    assert.equal(first.outcome.kind, 'waiting');
+    if (first.outcome.kind === 'waiting') {
+      assert.equal(first.outcome.reason, 'project_busy');
+      assert.match(first.outcome.detail, /退避/);
+    }
+    const hop = await executorQueueRow(built.queuedHops);
+    assert.equal(hop.status, 'retry_wait');
+    assert.equal(hop.attemptCount, 1);
+    assert.ok(hop.lastFailure);
+    assert.ok(Date.parse(hop.availableAt) > Date.parse(hop.lastFailure.at));
+    assert.equal(hop.lastFailure.classification, 'upstream_5xx');
+    assert.equal(hop.lastFailure.disposition, 'retry_then_dead_letter');
+    assert.equal(hop.lastFailure.retryable, true);
+    built.persist();
+    const throughStore = new FileQueuedHopRepository(built.store);
+    assert.deepEqual(await throughStore.get(hop.id), hop);
+    const view1 = await built.platform.getMissionView('M-fail-queue');
+    assert.notEqual(view1.status, 'completed');
+    assert.equal(view1.workItems[0]?.attempts, 1);
+    const execStarts1 = executorRuntime.specs.length;
+    assert.equal(execStarts1, 1);
+    const firstFailure = { ...hop.lastFailure };
+    const firstAvailableAt = hop.availableAt;
+    assert.equal(terminal.machine, 0);
+    assert.equal(terminal.abandon, 0);
+
+    const early = await runner.run('M-fail-queue', { projectRoot });
+    assert.equal(early.outcome.kind, 'waiting');
+    if (early.outcome.kind === 'waiting') {
+      assert.equal(early.outcome.reason, 'project_busy');
+      assert.match(early.outcome.detail, /退避/);
+    }
+    const duringBackoff = await executorQueueRow(built.queuedHops);
+    assert.equal(duringBackoff.id, hop.id);
+    assert.equal(duringBackoff.status, 'retry_wait');
+    assert.equal(duringBackoff.attemptCount, 1);
+    assert.equal(duringBackoff.availableAt, firstAvailableAt);
+    assert.equal(duringBackoff.lastFailure?.attemptId, firstFailure.attemptId);
+    assert.equal(duringBackoff.lastFailure?.claimGeneration, firstFailure.claimGeneration);
+    assert.equal(duringBackoff.lastFailure?.at, firstFailure.at);
+    assert.equal(duringBackoff.lastFailure?.classification, firstFailure.classification);
+    assert.equal(duringBackoff.lastFailure?.disposition, firstFailure.disposition);
+    assert.equal(duringBackoff.lastFailure?.retryable, firstFailure.retryable);
+    assert.deepEqual(duringBackoff.lastFailure, firstFailure);
+    assert.equal(executorRuntime.specs.length, execStarts1, '退避期间不得启动新 Agent');
+    assert.equal((await built.platform.getMissionView('M-fail-queue')).workItems[0]?.attempts, 1);
+    assert.equal(terminal.machine, 0);
+    assert.equal(terminal.abandon, 0);
+
+    hopClock.advance(Date.parse(hop.availableAt) - Date.parse(hopNow));
+    const second = await runner.run('M-fail-queue', { projectRoot });
+    assert.equal(second.outcome.kind, 'waiting');
+    if (second.outcome.kind === 'waiting') {
+      assert.equal(second.outcome.reason, 'attempt_limit_reached');
+      assert.match(second.outcome.detail, /死信/);
+    }
+    const dead = await executorQueueRow(built.queuedHops);
+    assert.equal(dead.id, hop.id);
+    assert.equal(dead.status, 'dead_letter');
+    assert.equal(dead.attemptCount, 2);
+    assert.equal(executorRuntime.specs.length, execStarts1 + 1);
+    assert.notEqual((await built.platform.getMissionView('M-fail-queue')).status, 'completed');
+    built.persist();
+    assert.equal((await throughStore.get(dead.id))?.status, 'dead_letter');
+    assert.equal(terminal.machine, 0);
+    assert.equal(terminal.abandon, 0);
+
+    const again = await runner.run('M-fail-queue', { projectRoot });
+    assert.equal(again.outcome.kind, 'waiting');
+    if (again.outcome.kind === 'waiting') {
+      assert.equal(again.outcome.reason, 'attempt_limit_reached');
+      assert.notEqual(again.outcome.reason, 'no_available_agent');
+      assert.match(again.outcome.detail, /死信/);
+    }
+    const stillDead = await executorQueueRow(built.queuedHops);
+    assert.equal(stillDead.id, hop.id);
+    assert.equal(stillDead.status, 'dead_letter');
+    assert.equal(stillDead.attemptCount, 2);
+    assert.equal(executorRuntime.specs.length, execStarts1 + 1, '死信后不得再启动 Agent');
+    assert.notEqual((await built.platform.getMissionView('M-fail-queue')).status, 'completed');
+    assert.equal(terminal.machine, 0, '受控失败不得调用机器终审');
+    assert.equal(terminal.abandon, 0, '受控失败不得自动放弃 Mission');
+  } finally {
+    built.releaseLock();
+  }
+});
+
 describe('内部入口：注入既有依赖即可跑，不另建平台或监听', () => {
   test('源码：入口不创建平台、不 listen、不拿锁', () => {
     const runner = src('application/mission-runner.ts');
