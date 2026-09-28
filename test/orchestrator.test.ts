@@ -2303,6 +2303,57 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     });
 });
 
+describe('平台 getStartupBrief 显式预算裁剪', () => {
+  test('无预算不写审计；实际裁剪按 Attempt 去重一条 context.truncated',
+    async () => {
+      const env = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      });
+      await env.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-brief-budget',
+        contract: CONTRACT,
+      });
+      const { attemptId } = await env.platform.startCoordinatorAttempt('M-brief-budget');
+      await env.platform.updatePlan('M-brief-budget', attemptId, PLAN);
+      const none = await env.platform.getStartupBrief('M-brief-budget', attemptId);
+      const N = none.contextBundle.entries.reduce((sum, entry) => sum + entry.estimatedTokens, 0);
+      assert.equal(none.contextBundle.budgetReport, undefined);
+      assert.equal(
+        (await env.activity.list('M-brief-budget')).filter((e) => e.kind === 'context.truncated')
+          .length,
+        0,
+      );
+
+      const exact = await env.platform.getStartupBrief('M-brief-budget', attemptId, N);
+      assert.deepEqual(exact.contextBundle.budgetReport?.omittedSources, []);
+      assert.equal(
+        (await env.activity.list('M-brief-budget')).filter((e) => e.kind === 'context.truncated')
+          .length,
+        0,
+      );
+
+      const trimmed = await env.platform.getStartupBrief('M-brief-budget', attemptId, N - 1);
+      assert.ok((trimmed.contextBundle.budgetReport?.omittedSources.length ?? 0) > 0);
+      assert.equal(trimmed.contract?.intent, CONTRACT.intent);
+      await env.platform.getStartupBrief('M-brief-budget', attemptId, N - 1);
+      const trunc = (await env.activity.list('M-brief-budget')).filter(
+        (e) => e.kind === 'context.truncated',
+      );
+      assert.equal(trunc.length, 1);
+      assert.equal(trunc[0]?.attemptId, attemptId);
+      assert.equal(trunc[0]?.missionId, 'M-brief-budget');
+      assert.equal(trunc[0]?.correlationId, 'M-brief-budget');
+      assert.equal(trunc[0]?.causationId, attemptId);
+      const data = trunc[0]?.data as Record<string, unknown>;
+      assert.equal(data.role, 'coordinator');
+      assert.equal(JSON.stringify(data).includes(CONTRACT.intent), false);
+      assert.equal(JSON.stringify(data).includes(PLAN.direction), false);
+    },
+  );
+});
+
 async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
   const rows: QueuedHop[] = [];
   const queuedHops = memoryCapacityRepo(rows);

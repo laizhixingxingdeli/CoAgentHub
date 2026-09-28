@@ -100,6 +100,22 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   }
 }
 
+/**
+ * 显式 Bundle 预算。缺省 = 不裁；只接受十进制非负安全整数。
+ * 1e2 / 01 / -1 若被 Number() 吞掉，调用方分不清「没裁」和「裁过」。
+ */
+function parseBriefBudget(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    throw new HttpError(400, 'INVALID_BUDGET', 'budget 必须是非负安全整数');
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    throw new HttpError(400, 'INVALID_BUDGET', 'budget 必须是非负安全整数');
+  }
+  return n;
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body ?? {});
   res.writeHead(status, {
@@ -459,7 +475,13 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/run/brief') {
       const run = requireRun(req);
       enforceAgentPolicy(run, POLICY_ACTION.attemptGetBrief);
-      return send(res, 200, await platform.getStartupBrief(run.missionId, run.attemptId));
+      // 未提供不裁剪；非法值在这里 400，否则构造器抛 Error 会变成 500 INTERNAL。
+      const budget = parseBriefBudget(url.searchParams.get('budget'));
+      return send(
+        res,
+        200,
+        await platform.getStartupBrief(run.missionId, run.attemptId, budget, run.claim),
+      );
     }
 
     if (path.startsWith('/api/agent/')) {

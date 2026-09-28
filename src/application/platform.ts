@@ -2154,6 +2154,8 @@ export class Platform {
   async getStartupBrief(
     missionId: string,
     attemptId: string,
+    budget?: number,
+    claim?: QueueClaimIdentity,
   ): Promise<{
     role: AttemptKind;
     projectId: string;
@@ -2198,24 +2200,46 @@ export class Platform {
       }
     }
 
+    if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0)) {
+      throw new PlatformRuleError('INVALID_BUDGET', 'budget 必须是非负安全整数');
+    }
+
     const item =
       attempt.kind === 'executor' && attempt.workItemId
         ? mission.workItem(attempt.workItemId)
         : undefined;
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
-    const contextBundle = buildContextBundle({
-      role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
-      projectRules,
-      environmentNotes: environmentNotes(),
-      contract: mission.contract,
-      contractRevision: mission.contractRevision,
-      plan: mission.plan,
-      planRevision: mission.planRevision,
-      workItem: item
-        ? { id: item.id, title: item.title, order: item.order }
-        : undefined,
-      finalReview: mission.finalReview,
-    });
+    const contextBundle = buildContextBundle(
+      {
+        role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
+        projectRules,
+        environmentNotes: environmentNotes(),
+        contract: mission.contract,
+        contractRevision: mission.contractRevision,
+        plan: mission.plan,
+        planRevision: mission.planRevision,
+        workItem: item
+          ? { id: item.id, title: item.title, order: item.order }
+          : undefined,
+        finalReview: mission.finalReview,
+      },
+      budget,
+    );
+
+    const report = contextBundle.budgetReport;
+    // 只有 omittedSources 非空才是实际裁剪。恰好放下或没给预算时写事件，
+    // 审计会把「没裁」说成「裁过」，后续同 Attempt 去重也锁死在假记录上。
+    if (report && report.omittedSources.length > 0) {
+      await this.#recordContextTruncated(missionId, attemptId, claim, {
+        role: contextBundle.role,
+        budget: report.budget,
+        estimatedBefore: report.estimatedBefore,
+        estimatedAfter: report.estimatedAfter,
+        omittedSources: report.omittedSources,
+        overflow: report.overflow,
+        remainingOverBudget: report.remainingOverBudget,
+      });
+    }
 
     return {
       role: attempt.kind,
@@ -2225,6 +2249,36 @@ export class Platform {
       ...projectStartupBriefFields(contextBundle),
       contextBundle,
     };
+  }
+
+  /**
+   * 裁剪审计必须走队列写门禁：不经 #attemptWrite 的话，队列 Attempt 在丢牌后
+   * 仍能记一条「已审计」，而控制面其它写已经被 fence 挡住。
+   * 落盘失败要抛出去——调用方拿到裁剪简报却没有事件，等于声称已审计。
+   */
+  async #recordContextTruncated(
+    missionId: string,
+    attemptId: string,
+    claim: QueueClaimIdentity | undefined,
+    data: {
+      readonly role: string;
+      readonly budget: number;
+      readonly estimatedBefore: number;
+      readonly estimatedAfter: number;
+      readonly omittedSources: readonly string[];
+      readonly overflow: boolean;
+      readonly remainingOverBudget: number;
+    },
+  ): Promise<void> {
+    await this.#attemptWrite(missionId, attemptId, claim, async () => {
+      const { mission } = await this.#locate(missionId);
+      const events = await this.#activity.list(missionId);
+      const already = events.some(
+        (event) => event.kind === 'context.truncated' && event.attemptId === attemptId,
+      );
+      if (already) return;
+      await this.#event(mission, 'context.truncated', data, undefined, attemptId);
+    });
   }
 
   /**

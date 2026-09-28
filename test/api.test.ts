@@ -1173,3 +1173,420 @@ describe('HTTP 简报与按需引用权限',
     );
   },
 );
+
+type BriefEntry = {
+  source: string;
+  estimatedTokens?: number;
+  content?: unknown;
+};
+type BriefBudgetReport = {
+  budget?: number;
+  estimatedBefore?: number;
+  estimatedAfter?: number;
+  omittedSources?: string[];
+  overflow?: boolean;
+  remainingOverBudget?: number;
+};
+type BriefBody = {
+  role?: string;
+  projectRules?: string;
+  environmentNotes?: unknown;
+  contract?: { intent?: string };
+  contractRevision?: number;
+  plan?: { direction?: string; findings?: string };
+  planRevision?: number;
+  workItem?: { id?: string; order?: { contextRefs?: unknown } };
+  finalReview?: unknown;
+  contextBundle?: {
+    role?: string;
+    entries?: BriefEntry[];
+    budgetReport?: BriefBudgetReport;
+  };
+};
+type ActivityRow = {
+  kind?: string;
+  missionId?: string;
+  attemptId?: string;
+  workItemId?: string;
+  correlationId?: string;
+  causationId?: string;
+  data?: Record<string, unknown>;
+};
+
+function briefTokenTotal(brief: BriefBody): number {
+  return (brief.contextBundle?.entries ?? []).reduce(
+    (sum, entry) => sum + (entry.estimatedTokens ?? 0),
+    0,
+  );
+}
+
+function truncatedEvents(rows: unknown): ActivityRow[] {
+  return (rows as ActivityRow[]).filter((row) => row.kind === 'context.truncated');
+}
+
+function assertSafeTruncationData(data: Record<string, unknown> | undefined, forbidden: string[]): void {
+  assert.ok(data);
+  const keys = Object.keys(data).sort();
+  assert.deepEqual(
+    keys.filter((key) => key !== 'remainingOverBudget'),
+    ['budget', 'estimatedAfter', 'estimatedBefore', 'omittedSources', 'overflow', 'role'].sort(),
+  );
+  const dumped = JSON.stringify(data);
+  for (const needle of forbidden) {
+    assert.equal(dumped.includes(needle), false, `审计 data 不得含正文：${needle}`);
+  }
+}
+
+async function startCoordWithPlan(
+  base: string,
+  platform: Platform,
+  missionId: string,
+): Promise<string> {
+  const coord = await postJson(base, `/api/missions/${missionId}/coordinator-attempts`, {});
+  assert.equal(coord.status, 201);
+  const token = (coord.json as { token?: string }).token;
+  assert.equal(typeof token, 'string');
+  const planned = await postJson(
+    base,
+    '/api/agent/coagent_update_plan',
+    BRIEF_PLAN,
+    token,
+  );
+  assert.equal(planned.status, 200);
+  await platform.reviseContract(missionId, BRIEF_CONTRACT_R2);
+  return token;
+}
+
+describe('HTTP 简报显式预算与事务化裁剪审计', () => {
+  test('恰好预算与无预算全留且零审计；N-1 保留顺序/必需字段；同 Attempt 去重、异 Attempt 各一条',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'http-brief-budget-'));
+      mkdirSync(join(dir, '.coagent'), { recursive: true });
+      writeFileSync(join(dir, '.coagent', 'project.md'), BRIEF_RULES, 'utf8');
+      const store = new FileStateStore(join(dir, 'state.json'));
+      const clock = new FixedClock();
+      const ids = new PersistentIds(store);
+      const projects = new FileProjectRepository(store);
+      const activity = new FileActivityLog(store, clock);
+      const deliveries = new FileDeliveryRepository(store, clock, ids);
+      const platform = new Platform({
+        projects,
+        deliveries,
+        activity,
+        clock,
+        ids,
+        transaction: store,
+      });
+      const tokens = new RunTokenRegistry();
+      const server = createApi({ platform, tokens, deliveries });
+      try {
+        await listenLoopback(server, 0);
+        const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        const created = await postJson(base, '/api/missions', {
+          projectId: 'P-budget',
+          missionId: 'M-budget',
+          contract: CONTRACT,
+        });
+        assert.equal(created.status, 201);
+        await platform.recordWorkspace('M-budget', {
+          projectRoot: dir,
+          branch: 'b',
+          baseRevision: 'x',
+        });
+        const coordToken = await startCoordWithPlan(base, platform, 'M-budget');
+        const coordAttemptId = tokens.resolve(coordToken)?.attemptId;
+        assert.equal(typeof coordAttemptId, 'string');
+
+        const noneRes = await getJson(base, '/api/run/brief', coordToken);
+        assert.equal(noneRes.status, 200);
+        const none = noneRes.json as BriefBody;
+        const N = briefTokenTotal(none);
+        assert.ok(N >= 2);
+        assert.equal(none.contextBundle?.budgetReport, undefined);
+        assert.deepEqual(
+          none.contextBundle?.entries?.map((e) => e.source),
+          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+        );
+        assert.equal(none.contract?.intent, BRIEF_CONTRACT_R2.intent);
+        assert.equal(none.plan?.direction, BRIEF_PLAN.direction);
+        assert.equal(none.projectRules, BRIEF_RULES);
+
+        const exactRes = await getJson(base, `/api/run/brief?budget=${N}`, coordToken);
+        assert.equal(exactRes.status, 200);
+        const exact = exactRes.json as BriefBody;
+        assert.deepEqual(
+          exact.contextBundle?.entries?.map((e) => e.source),
+          none.contextBundle?.entries?.map((e) => e.source),
+        );
+        assert.deepEqual(exact.contextBundle?.budgetReport?.omittedSources, []);
+        assert.equal(exact.contextBundle?.budgetReport?.budget, N);
+        assert.equal(exact.contextBundle?.budgetReport?.overflow, false);
+        assert.equal(exact.plan?.direction, BRIEF_PLAN.direction);
+
+        const activityNone = await getJson(base, '/api/missions/M-budget/activity');
+        assert.equal(activityNone.status, 200);
+        assert.equal(truncatedEvents(activityNone.json).length, 0);
+
+        const planTokens =
+          none.contextBundle?.entries?.find((e) => e.source === 'plan')?.estimatedTokens ?? 0;
+        assert.ok(planTokens >= 1);
+        const cutRes = await getJson(base, `/api/run/brief?budget=${N - 1}`, coordToken);
+        assert.equal(cutRes.status, 200);
+        const cut = cutRes.json as BriefBody;
+        assert.deepEqual(cut.contextBundle?.entries?.map((e) => e.source), [
+          'project_rules',
+          'environment_notes',
+          'contract',
+          'final_review',
+        ]);
+        assert.deepEqual(cut.contextBundle?.budgetReport?.omittedSources, ['plan']);
+        assert.equal(cut.contextBundle?.budgetReport?.estimatedBefore, N);
+        assert.equal(cut.contextBundle?.budgetReport?.estimatedAfter, N - planTokens);
+        assert.equal(cut.contextBundle?.budgetReport?.estimatedAfter, briefTokenTotal(cut));
+        assert.equal(cut.contextBundle?.budgetReport?.overflow, false);
+        assert.equal(cut.contract?.intent, BRIEF_CONTRACT_R2.intent);
+        assert.equal(cut.contractRevision, 2);
+        assert.equal(cut.projectRules, BRIEF_RULES);
+        assert.equal(cut.plan, undefined);
+        assert.equal(cut.planRevision, undefined);
+
+        const again = await getJson(base, `/api/run/brief?budget=${N - 1}`, coordToken);
+        assert.equal(again.status, 200);
+
+        const wi = await postJson(
+          base,
+          '/api/agent/coagent_create_work_item',
+          { title: 'W1', ...BRIEF_ORDER },
+          coordToken,
+        );
+        assert.equal(wi.status, 200);
+        const workItemId = (wi.json as { workItemId?: string }).workItemId;
+        const dispatched = await postJson(
+          base,
+          '/api/agent/coagent_dispatch_work_item',
+          { workItemIds: [workItemId] },
+          coordToken,
+        );
+        assert.equal(dispatched.status, 200);
+        const exec = await postJson(
+          base,
+          `/api/missions/M-budget/work-items/${workItemId}/executor-attempts`,
+          {},
+        );
+        assert.equal(exec.status, 201);
+        const execToken = (exec.json as { token?: string }).token;
+        assert.equal(typeof execToken, 'string');
+        const execAttemptId = tokens.resolve(execToken)?.attemptId;
+        assert.equal(typeof execAttemptId, 'string');
+
+        const execFullRes = await getJson(base, '/api/run/brief', execToken);
+        assert.equal(execFullRes.status, 200);
+        const execFull = execFullRes.json as BriefBody;
+        const execN = briefTokenTotal(execFull);
+        const execNotes =
+          execFull.contextBundle?.entries?.find((e) => e.source === 'environment_notes')
+            ?.estimatedTokens ?? 0;
+        assert.ok(execNotes >= 1);
+        const execCutRes = await getJson(
+          base,
+          `/api/run/brief?budget=${execN - execNotes}`,
+          execToken,
+        );
+        assert.equal(execCutRes.status, 200);
+        const execCut = execCutRes.json as BriefBody;
+        assert.deepEqual(execCut.contextBundle?.budgetReport?.omittedSources, [
+          'environment_notes',
+        ]);
+        assert.equal(execCut.projectRules, BRIEF_RULES);
+        assert.deepEqual(execCut.workItem?.order?.contextRefs, BRIEF_REFS);
+        assert.equal(execCut.environmentNotes, undefined);
+
+        const overflowRes = await getJson(base, '/api/run/brief?budget=0', coordToken);
+        assert.equal(overflowRes.status, 200);
+        const overflow = overflowRes.json as BriefBody;
+        assert.equal(overflow.contextBundle?.budgetReport?.overflow, true);
+        assert.equal(
+          overflow.contextBundle?.budgetReport?.remainingOverBudget,
+          briefTokenTotal(overflow),
+        );
+        assert.equal(overflow.contract?.intent, BRIEF_CONTRACT_R2.intent);
+        assert.equal(overflow.projectRules, BRIEF_RULES);
+        assert.deepEqual(overflow.contextBundle?.budgetReport?.omittedSources, [
+          'plan',
+          'environment_notes',
+        ]);
+
+        for (const bad of ['-1', '1.5', 'abc', '01', '1e2', '', '+1']) {
+          const rejected = await getJson(base, `/api/run/brief?budget=${bad}`, coordToken);
+          assert.equal(rejected.status, 400, bad);
+          assert.equal(rejected.json.error, 'INVALID_BUDGET', bad);
+        }
+
+        const activityCut = await getJson(base, '/api/missions/M-budget/activity');
+        assert.equal(activityCut.status, 200);
+        const trunc = truncatedEvents(activityCut.json);
+        assert.equal(trunc.length, 2);
+        const coordEvt = trunc.find((row) => row.attemptId === coordAttemptId);
+        const execEvt = trunc.find((row) => row.attemptId === execAttemptId);
+        assert.ok(coordEvt);
+        assert.ok(execEvt);
+        assert.equal(coordEvt.missionId, 'M-budget');
+        assert.equal(coordEvt.correlationId, 'M-budget');
+        assert.equal(coordEvt.causationId, coordAttemptId);
+        assert.equal(coordEvt.workItemId, undefined);
+        assertSafeTruncationData(coordEvt.data, [
+          BRIEF_RULES,
+          BRIEF_CONTRACT_R2.intent,
+          BRIEF_PLAN.direction,
+          BRIEF_PLAN.findings,
+          'SPEC-BODY-MUST-NOT-PREFETCH',
+        ]);
+        assert.equal(coordEvt.data?.role, 'coordinator');
+        assert.equal(coordEvt.data?.omittedSources?.[0], 'plan');
+        assert.equal(execEvt.missionId, 'M-budget');
+        assert.equal(execEvt.correlationId, 'M-budget');
+        assert.equal(execEvt.causationId, execAttemptId);
+        assertSafeTruncationData(execEvt.data, [BRIEF_RULES, BRIEF_CONTRACT_R2.intent]);
+        assert.equal(execEvt.data?.role, 'executor');
+      } finally {
+        await closeServer(server);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('FileStateStore 事务路径：事件写入失败不返回裁剪简报；成功可重启后读到',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'http-brief-budget-fail-'));
+      mkdirSync(join(dir, '.coagent'), { recursive: true });
+      writeFileSync(join(dir, '.coagent', 'project.md'), BRIEF_RULES, 'utf8');
+      const statePath = join(dir, 'state.json');
+      const store = new FileStateStore(statePath);
+      const clock = new FixedClock();
+      const ids = new PersistentIds(store);
+      const projects = new FileProjectRepository(store);
+      const innerActivity = new FileActivityLog(store, clock);
+      const injected = {
+        fail: true,
+        async append(event: { kind: string }): Promise<void> {
+          if (this.fail && event.kind === 'context.truncated') {
+            throw new Error('injected context.truncated persist failure');
+          }
+          await innerActivity.append(event as Parameters<FileActivityLog['append']>[0]);
+        },
+        list: (missionId: string) => innerActivity.list(missionId),
+      };
+      const deliveries = new FileDeliveryRepository(store, clock, ids);
+      const platform = new Platform({
+        projects,
+        deliveries,
+        activity: injected,
+        clock,
+        ids,
+        transaction: store,
+      });
+      const tokens = new RunTokenRegistry();
+      const server = createApi({ platform, tokens, deliveries });
+      try {
+        await listenLoopback(server, 0);
+        const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        const created = await postJson(base, '/api/missions', {
+          projectId: 'P-fail',
+          missionId: 'M-fail',
+          contract: CONTRACT,
+        });
+        assert.equal(created.status, 201);
+        await platform.recordWorkspace('M-fail', {
+          projectRoot: dir,
+          branch: 'b',
+          baseRevision: 'x',
+        });
+        const coordToken = await startCoordWithPlan(base, platform, 'M-fail');
+        const none = (await getJson(base, '/api/run/brief', coordToken)).json as BriefBody;
+        const N = briefTokenTotal(none);
+        const failed = await getJson(base, `/api/run/brief?budget=${N - 1}`, coordToken);
+        assert.notEqual(failed.status, 200);
+        assert.equal(failed.json.error, 'INTERNAL');
+        const liveEvents = truncatedEvents(await innerActivity.list('M-fail'));
+        assert.equal(liveEvents.length, 0);
+
+        const reopenAfterFail = new FileStateStore(statePath);
+        const persistedFail = new FileActivityLog(reopenAfterFail, clock);
+        assert.equal(truncatedEvents(await persistedFail.list('M-fail')).length, 0);
+
+        injected.fail = false;
+        const ok = await getJson(base, `/api/run/brief?budget=${N - 1}`, coordToken);
+        assert.equal(ok.status, 200);
+        const cut = ok.json as BriefBody;
+        assert.deepEqual(cut.contextBundle?.budgetReport?.omittedSources, ['plan']);
+        assert.equal(truncatedEvents(await innerActivity.list('M-fail')).length, 1);
+      } finally {
+        await closeServer(server);
+      }
+
+      const restarted = new FileStateStore(statePath);
+      const restartedActivity = new FileActivityLog(restarted, clock);
+      const persisted = truncatedEvents(await restartedActivity.list('M-fail'));
+      assert.equal(persisted.length, 1);
+      assert.equal(persisted[0]?.missionId, 'M-fail');
+      assert.equal(persisted[0]?.correlationId, 'M-fail');
+      assert.equal(typeof persisted[0]?.attemptId, 'string');
+      assert.equal(persisted[0]?.causationId, persisted[0]?.attemptId);
+      assertSafeTruncationData(persisted[0]?.data, [BRIEF_RULES, BRIEF_CONTRACT_R2.intent, BRIEF_PLAN.direction]);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  );
+
+  test('队列 Attempt 裁剪写入必须带 claim，不得绕过 #attemptWrite',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'http-brief-budget-queue-'));
+      try {
+        const store = new FileStateStore(join(dir, 'state.json'));
+        const clock = new FixedClock(QUEUE_NOW);
+        const ids = new PersistentIds(store);
+        const projects = new FileProjectRepository(store);
+        const activity = new FileActivityLog(store, clock);
+        const deliveries = new FileDeliveryRepository(store, clock, ids);
+        const hops = new FileQueuedHopRepository(store);
+        const platform = new Platform({
+          projects,
+          deliveries,
+          activity,
+          clock,
+          ids,
+          transaction: store,
+        });
+        await platform.createMission({
+          projectId: 'P',
+          missionId: 'M',
+          contract: CONTRACT,
+          origin: QUEUE_ORIGIN,
+        });
+        const live = await enqueueAndClaim(hops);
+        const queued = await platform.startCoordinatorAttempt('M', undefined, live);
+        await platform.updatePlan('M', queued.attemptId, QUEUE_PLAN, live);
+        const full = await platform.getStartupBrief('M', queued.attemptId);
+        const N = briefTokenTotal(full);
+        assert.ok(N >= 2);
+        await assert.rejects(
+          () => platform.getStartupBrief('M', queued.attemptId, N - 1),
+          (error: unknown) =>
+            error instanceof PlatformRuleError && error.code === 'QUEUE_CLAIM_REQUIRED',
+        );
+        assert.equal(
+          (await activity.list('M')).filter((event) => event.kind === 'context.truncated').length,
+          0,
+        );
+        const trimmed = await platform.getStartupBrief('M', queued.attemptId, N - 1, live);
+        assert.ok((trimmed.contextBundle.budgetReport?.omittedSources.length ?? 0) > 0);
+        await platform.getStartupBrief('M', queued.attemptId, N - 1, live);
+        const trunc = (await activity.list('M')).filter((event) => event.kind === 'context.truncated');
+        assert.equal(trunc.length, 1);
+        assert.equal(trunc[0]?.attemptId, queued.attemptId);
+        assert.equal(trunc[0]?.missionId, 'M');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
