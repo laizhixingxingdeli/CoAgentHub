@@ -22,6 +22,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
+import { validateEnqueueHop } from './durable-scheduler.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
   ActivityLog,
@@ -143,6 +145,12 @@ CREATE TABLE IF NOT EXISTS query_runs (
 CREATE INDEX IF NOT EXISTS query_runs_project_idx ON query_runs (project_id);
 
 -- 独立 ValidationReport：append-only 机器事实；永不 UPDATE report 列。
+CREATE TABLE IF NOT EXISTS queued_hops (
+  hop_id text PRIMARY KEY,
+  idempotency_key text NOT NULL UNIQUE,
+  hop jsonb NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS validation_reports (
   report_id  text PRIMARY KEY,
   report     jsonb       NOT NULL,
@@ -1028,6 +1036,44 @@ function toQueryRunRecord(raw: QueryRunRecord | string): QueryRunRecord {
     usage: { ...record.usage },
     ...(record.toolCalls ? { toolCalls: Object.freeze([...record.toolCalls]) } : {}),
   };
+}
+
+/**
+ * 持久化 queued Hop；幂等键的唯一约束由数据库保证跨进程并发时也只保留一项。
+ */
+export class PgQueuedHopRepository {
+  #pool: pg.Pool;
+
+  constructor(store: PgStateStore) { this.#pool = store.pool; }
+
+  async enqueue(hop: QueuedHop): Promise<QueuedHop> {
+    validateEnqueueHop(hop);
+    if (typeof hop.id !== 'string' || hop.id.trim().length === 0 || hop.status !== 'queued' ||
+        typeof hop.createdAt !== 'string' || !Number.isFinite(Date.parse(hop.createdAt)) ||
+        typeof hop.updatedAt !== 'string' || !Number.isFinite(Date.parse(hop.updatedAt))) {
+      throw new Error('queued hop record is invalid');
+    }
+    const { rows } = await this.#pool.query<{ hop: QueuedHop }>(
+      `INSERT INTO queued_hops (hop_id, idempotency_key, hop) VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (idempotency_key) DO NOTHING RETURNING hop`,
+      [hop.id, hop.idempotencyKey, JSON.stringify(hop)],
+    );
+    if (rows[0]) return { ...rows[0].hop };
+    const existing = await this.#pool.query<{ hop: QueuedHop }>(
+      'SELECT hop FROM queued_hops WHERE idempotency_key = $1', [hop.idempotencyKey]);
+    if (existing.rows[0]) return { ...existing.rows[0].hop };
+    throw new Error('queued hop insert conflict without existing idempotency key');
+  }
+
+  async get(id: string): Promise<QueuedHop | undefined> {
+    const { rows } = await this.#pool.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops WHERE hop_id = $1', [id]);
+    return rows[0] ? { ...rows[0].hop } : undefined;
+  }
+
+  async list(): Promise<readonly QueuedHop[]> {
+    const { rows } = await this.#pool.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops ORDER BY hop_id');
+    return rows.map(({ hop }) => ({ ...hop }));
+  }
 }
 
 /**
