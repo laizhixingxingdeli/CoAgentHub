@@ -853,7 +853,7 @@ describe('E4b3 HA 等待限时决定', () => {
     assert.ok(!h.calls.includes('create R1-F2'));
   });
 
-  test('打回后隔离重跑，第二条放行合入', async () => {
+  test('打回后隔离重跑，第二条放行合入', { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
     const v = structuredClone(views);
     v['R1-F1-r2'] = {
       executionMode: 'high_assurance',
@@ -1146,8 +1146,20 @@ describe('E4b3 HA 等待限时决定', () => {
 
 describe('E4a HA 合格建单、待放行与拒绝回落', () => {
 
+  test('HA 分类经 Standard 路径由机器终审合入且不开审批记录', async () => {
+    const h = harness({ features: ['F1'], routes: { F1: haRoute } });
+    await h.start();
+    await drivePlan(h.plan, h.deps);
+    assert.ok(h.calls.includes('create R1-F1'));
+    assert.ok(!h.calls.includes('create-classified R1-F1 high_assurance'));
+    assert.ok(h.calls.includes('finalize R1-F1 → auto/plan-x [node --test]'));
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+    assert.equal(h.store.read()!.haReleases.length, 0);
+    assert.equal(h.store.read()!.escalationsOpened, 0);
+  });
+
   test('四项禁止副作用全 false 的 HA 用原始 facts 调 createClassifiedMission',
-    async () => {
+    { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
       const h = harness({
         features: ['F1'],
         routes: { F1: haRoute },
@@ -1173,7 +1185,7 @@ describe('E4a HA 合格建单、待放行与拒绝回落', () => {
     });
 
   test('HA 建单被平台拒绝时不回落 Standard，挂起并写明原因',
-    async () => {
+    { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
       const h = harness({
         features: ['F1', 'F2'],
         routes: { F1: haRoute },

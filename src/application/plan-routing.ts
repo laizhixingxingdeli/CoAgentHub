@@ -200,8 +200,12 @@ export function decideRoute(
       reason: '只读协调者判它不用改代码。方案里的功能点不该是只读的，交给协调者完整核实。',
     };
   }
-  if (recommended.executionMode === 'high_assurance' || recommended.executionMode === 'standard') {
-    // HA / Standard 都禁止带 Lightweight 工单；合格 HA 把原始 facts 交给 createClassifiedMission。
+  // HAOFF1：2026-09-28 用户决定先跑通功能、鉴权以后再加。恢复时删除此分支，并放回下方条件中的 HA 判断。
+  if (recommended.executionMode === 'high_assurance') {
+    return { kind: 'standard_fallback', reason: 'HA 路暂时关闭（先把功能跑通，鉴权以后再加）：按普通 Standard 建单。' };
+  }
+  if (/* recommended.executionMode === 'high_assurance' || */ recommended.executionMode === 'standard') {
+    // HA / Standard 都禁止带 Lightweight 工单；恢复 HA 路由后，合格 HA 把原始 facts 交给 createClassifiedMission。
     return { kind: 'classified', ...base };
   }
   const workOrder = proposal.workOrder;
