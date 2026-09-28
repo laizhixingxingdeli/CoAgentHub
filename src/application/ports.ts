@@ -229,6 +229,58 @@ export type RuntimeEvent =
   | { readonly kind: 'tool.completed'; readonly name: string; readonly callId: string }
   | { readonly kind: 'usage'; readonly usage: TokenUsage };
 
+/** 简报来源白名单，与 ContextBundle 固定六源对齐。 */
+export const CONTEXT_METRICS_BRIEF_SOURCES = [
+  'project_rules',
+  'environment_notes',
+  'contract',
+  'plan',
+  'final_review',
+  'work_order',
+] as const;
+export type ContextMetricsBriefSource = (typeof CONTEXT_METRICS_BRIEF_SOURCES)[number];
+
+/** 工具桶固定类别。任意字符串会变成「调了什么都可以写」，所以闭集。 */
+export const CONTEXT_METRICS_TOOL_KINDS = ['read', 'grep', 'find', 'ls', 'bash'] as const;
+export type ContextMetricsToolKind = (typeof CONTEXT_METRICS_TOOL_KINDS)[number];
+
+export type ContextMetricsCoverage = 'complete' | 'partial' | 'unknown';
+
+export interface ContextMetricsBriefSourceEntry {
+  readonly source: ContextMetricsBriefSource;
+  readonly estimatedTokens?: number;
+  readonly truncated: boolean;
+}
+
+export interface ContextMetricsBriefV1 {
+  readonly renderedUtf8Bytes: number;
+  readonly sources: readonly ContextMetricsBriefSourceEntry[];
+}
+
+export interface ContextMetricsToolBucketV1 {
+  readonly kind: ContextMetricsToolKind;
+  readonly calls: number;
+  readonly returnedUtf8Bytes: number;
+}
+
+export interface ContextMetricsReadBucketV1 {
+  readonly pathDigest: string;
+  readonly contentDigest: string;
+  readonly repeats: number;
+}
+
+/**
+ * Attempt 级上下文采集摘要 v1。只含观测事实：桶、非负整数、SHA-256 摘要。
+ * 不含路径、正文、missionId/attemptId（后两者走事件 envelope）。
+ */
+export interface ContextMetricsV1 {
+  readonly version: 1;
+  readonly coverage: ContextMetricsCoverage;
+  readonly brief?: ContextMetricsBriefV1;
+  readonly tools?: readonly ContextMetricsToolBucketV1[];
+  readonly reads?: readonly ContextMetricsReadBucketV1[];
+}
+
 export interface RuntimeOutcome {
   /**
    * 这一程是怎么结束的。上游失败与"没做结构化提交"必须分开——
@@ -257,6 +309,11 @@ export interface RuntimeOutcome {
    * Mission 路径忽略此字段。
    */
   readonly queryOutcome?: 'answered' | 'failed' | 'needs_mutation';
+  /**
+   * 本跳上下文采集摘要。调用方/运行时都不可信：平台 finishAttempt 再校验，
+   * 未通过则整段丢弃，不得原样 spread 进 Activity。
+   */
+  readonly contextMetrics?: unknown;
 }
 
 /* ------------------------------ 决策信号端口 ------------------------------ */
