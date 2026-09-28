@@ -39,6 +39,7 @@ import {
 } from '../src/application/durable-scheduler.ts';
 import type { AgentRuntime, QueuedHopRepository } from '../src/application/ports.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import { createMemoryFencedTransaction } from './helpers/fenced-transaction.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
@@ -253,6 +254,9 @@ async function harness(opts: {
     activity,
     clock,
     ids,
+    ...(opts.queuedHops
+      ? { transaction: createMemoryFencedTransaction(opts.queuedHops) }
+      : {}),
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });

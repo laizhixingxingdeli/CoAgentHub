@@ -7,7 +7,11 @@
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
@@ -18,8 +22,26 @@ import {
   SequentialIds,
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
-import { Platform } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import {
+  FileActivityLog,
+  FileDeliveryRepository,
+  FileProjectRepository,
+  FileQueuedHopRepository,
+  FileStateStore,
+  PersistentIds,
+} from '../src/application/file-store.ts';
+import type { ClaimFence } from '../src/application/durable-scheduler.ts';
+import {
+  PgActivityLog,
+  PgDeliveryRepository,
+  PgIds,
+  PgProjectRepository,
+  PgQueuedHopRepository,
+  PgStateStore,
+} from '../src/application/pg-store.ts';
+import { ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -278,5 +300,494 @@ describe('HTTP 面', () => {
     const echoed = JSON.stringify(stolen.json);
     assert.equal(echoed.includes(execToken), false);
     assert.equal(echoed.includes(coordToken), false);
+  });
+});
+
+const QUEUE_NOW = '2025-01-01T00:00:00Z';
+const QUEUE_LEASE = '2025-01-01T00:00:10Z';
+const QUEUE_LATER = '2025-01-01T00:00:20Z';
+const QUEUE_ORIGIN = { clientType: 'cli' as const, conversationRef: 'me' };
+
+const AGENT_QUEUE_WRITES: readonly { tool: string; body: Record<string, unknown> }[] = [
+  { tool: 'coagent_update_findings', body: { findings: 'stale' } },
+  {
+    tool: 'coagent_update_plan',
+    body: { findings: 'stale', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+  },
+  { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+  { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['nope'] } },
+  {
+    tool: 'coagent_review_execution_result',
+    body: { workItemId: 'nope', verdict: 'accept', reasons: ['x'], requiredChanges: [], acceptanceResults: [] },
+  },
+  { tool: 'coagent_escalate_to_l3', body: { question: 'q', why: 'w', optionsConsidered: ['a'] } },
+  {
+    tool: 'coagent_submit_mission_result',
+    body: { outcome: 'blocked', summary: 's', acceptanceEvidence: [], memoryDelta: [], openRisks: [] },
+  },
+  { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 's', command: 'x', exitCode: 0 } },
+  {
+    tool: 'coagent_submit_execution_result',
+    body: { outcome: 'partial', summary: 's', changedFiles: [], evidenceIds: [], notes: '' },
+  },
+  {
+    tool: 'coagent_report_blocked',
+    body: { reason: '工单前提不成立', whatWasTried: [], needsFromUpstream: 'x' },
+  },
+  { tool: 'coagent_submit_independent_review', body: { verdict: 'send_back', reasons: ['r'] } },
+];
+
+async function postJson(
+  base: string,
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<{ status: number; json: { error?: string } }> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { 'x-coagent-run': token } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: res.status, json: (await res.json()) as { error?: string } };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function snapshotMission(
+  projects: FileProjectRepository | PgProjectRepository,
+  activity: FileActivityLog | PgActivityLog,
+  deliveries: FileDeliveryRepository | PgDeliveryRepository,
+) {
+  return {
+    project: JSON.stringify((await projects.get('P'))?.toSnapshot()),
+    events: (await activity.list('M')).length,
+    deliveries: (await deliveries.listForMission('M')).length,
+  };
+}
+
+async function enqueueAndClaim(
+  hops: FileQueuedHopRepository | PgQueuedHopRepository,
+  id = 'h1',
+): Promise<QueueClaimIdentity> {
+  await hops.enqueue({
+    id,
+    projectId: 'P',
+    missionId: 'M',
+    workItemId: 'w',
+    role: 'coordinator',
+    priority: 1,
+    availableAt: QUEUE_NOW,
+    attemptCount: 0,
+    maxAttempts: 2,
+    idempotencyKey: `http-fence-${id}`,
+    status: 'queued',
+    createdAt: QUEUE_NOW,
+    updatedAt: QUEUE_NOW,
+  });
+  const claimed = await hops.claim(id, 'owner', QUEUE_NOW, QUEUE_LEASE);
+  assert.equal(claimed?.claimGeneration, 1);
+  return { id, owner: 'owner', claimGeneration: 1 };
+}
+
+const QUEUE_PLAN = {
+  findings: '查到了',
+  rejectedHypotheses: [] as string[],
+  decisions: [] as string[],
+  direction: '这么改',
+  risks: [] as string[],
+};
+
+describe('HTTP 队列 Attempt 身份', () => {
+  test('三类 start 与 attempt.started 同事务写入按 attemptId 可查的队列标记；非队列不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'http-queue-mark-'));
+    try {
+      const store = new FileStateStore(join(dir, 'state.json'));
+      const clock = new FixedClock(QUEUE_NOW);
+      const ids = new PersistentIds(store);
+      const projects = new FileProjectRepository(store);
+      const activity = new FileActivityLog(store, clock);
+      const deliveries = new FileDeliveryRepository(store, clock, ids);
+      const hops = new FileQueuedHopRepository(store);
+      const platform = new Platform({
+        projects,
+        deliveries,
+        activity,
+        clock,
+        ids,
+        transaction: store,
+      });
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const live = await enqueueAndClaim(hops);
+      const unmarked = await platform.startCoordinatorAttempt('M');
+      assert.equal(await platform.attemptRequiresQueueClaim('M', unmarked.attemptId), false);
+      await platform.finishAttempt('M', unmarked.attemptId, { endedBy: 'structured_submit' });
+
+      const queued = await platform.startCoordinatorAttempt('M', undefined, live);
+      assert.equal(await platform.attemptRequiresQueueClaim('M', queued.attemptId), true);
+      const started = (await activity.list('M')).filter(
+        (event) => event.kind === 'attempt.started' && event.attemptId === queued.attemptId,
+      );
+      assert.equal(started.length, 1);
+      assert.equal((started[0]!.data as { queue?: unknown }).queue, true);
+
+      await assert.rejects(
+        () => platform.updateFindings('M', queued.attemptId, 'no-claim'),
+        (error: unknown) => error instanceof PlatformRuleError && error.code === 'QUEUE_CLAIM_REQUIRED',
+      );
+      await platform.updateFindings('M', queued.attemptId, 'queued-ok', undefined, live);
+      await platform.updatePlan('M', queued.attemptId, QUEUE_PLAN, live);
+      const { workItemId } = await platform.createWorkItem(
+        'M',
+        queued.attemptId,
+        { title: 'W', order: ORDER, workItemId: 'W1' },
+        live,
+      );
+      await platform.dispatchWorkItems('M', queued.attemptId, [workItemId], live);
+      const exec = await platform.startExecutorAttempt('M', workItemId, undefined, live);
+      assert.equal(await platform.attemptRequiresQueueClaim('M', exec.attemptId), true);
+
+      await assert.rejects(
+        () => platform.startIndependentReviewerAttempt('M', [], live),
+        (error: unknown) => error instanceof PlatformRuleError && error.code !== 'CLAIM_FENCE_UNAVAILABLE',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('真实 HTTP：旧代次 11 个写 handler 非 2xx 且快照不变，请求体伪造身份无效，当前代次仍可写', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'http-queue-writes-'));
+    const store = new FileStateStore(join(dir, 'state.json'));
+    const clock = new FixedClock(QUEUE_NOW);
+    const ids = new PersistentIds(store);
+    const projects = new FileProjectRepository(store);
+    const activity = new FileActivityLog(store, clock);
+    const deliveries = new FileDeliveryRepository(store, clock, ids);
+    const hops = new FileQueuedHopRepository(store);
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      transaction: store,
+    });
+    const tokens = new RunTokenRegistry();
+    const server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const live = await enqueueAndClaim(hops);
+      const { attemptId } = await platform.startCoordinatorAttempt('M', undefined, live);
+      const stale = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: live });
+      await platform.updateFindings('M', attemptId, 'live', undefined, live);
+
+      const taken = await hops.claim(live.id, 'next', QUEUE_LEASE, QUEUE_LATER);
+      assert.equal(taken?.claimGeneration, 2);
+      const current: QueueClaimIdentity = { id: live.id, owner: 'next', claimGeneration: 2 };
+      const fresh = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: current });
+      const before = await snapshotMission(projects, activity, deliveries);
+      assert.equal(AGENT_QUEUE_WRITES.length, 11);
+
+      for (const row of AGENT_QUEUE_WRITES) {
+        const spoofed = {
+          ...row.body,
+          role: 'coordinator',
+          owner: 'next',
+          claimGeneration: 2,
+          id: live.id,
+        };
+        const res = await postJson(base, `/api/agent/${row.tool}`, spoofed, stale.token);
+        assert.notEqual(res.status, 200, `${row.tool} stale token must not succeed`);
+        assert.ok(res.status >= 400, `${row.tool} must be non-2xx`);
+        assert.equal(res.json.error, 'CLAIM_FENCE_REJECTED', row.tool);
+        assert.equal(JSON.stringify(res.json).includes(stale.token), false);
+        assert.deepEqual(await snapshotMission(projects, activity, deliveries), before);
+      }
+
+      const ok = await postJson(
+        base,
+        '/api/agent/coagent_update_findings',
+        { findings: 'current-gen' },
+        fresh.token,
+      );
+      assert.equal(ok.status, 200);
+      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'current-gen');
+      assert.equal(tokens.resolve(fresh.token)?.attemptId, attemptId);
+    } finally {
+      await closeServer(server);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('真实 HTTP：入口解析后写事务前接管，事务内核对拒绝旧代次', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'http-queue-race-'));
+    const store = new FileStateStore(join(dir, 'state.json'));
+    const clock = new FixedClock(QUEUE_NOW);
+    const ids = new PersistentIds(store);
+    const projects = new FileProjectRepository(store);
+    const activity = new FileActivityLog(store, clock);
+    const deliveries = new FileDeliveryRepository(store, clock, ids);
+    const hops = new FileQueuedHopRepository(store);
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      transaction: store,
+    });
+    const tokens = new RunTokenRegistry();
+    const server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const live = await enqueueAndClaim(hops);
+      const { attemptId } = await platform.startCoordinatorAttempt('M', undefined, live);
+      const run = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: live });
+      await platform.updateFindings('M', attemptId, 'before-race', undefined, live);
+
+      const orig = store.runFenced.bind(store);
+      let hijacked = false;
+      store.runFenced = ((fence: ClaimFence, fn: () => Promise<unknown>) => {
+        hijacked = true;
+        return hops.claim(live.id, 'next', QUEUE_LEASE, QUEUE_LATER).then((taken) => {
+          assert.equal(taken?.claimGeneration, 2);
+          return orig(fence, fn);
+        });
+      }) as typeof store.runFenced;
+
+      const before = await snapshotMission(projects, activity, deliveries);
+      const res = await postJson(
+        base,
+        '/api/agent/coagent_update_findings',
+        { findings: 'should-not-land' },
+        run.token,
+      );
+      assert.equal(hijacked, true);
+      assert.notEqual(res.status, 200);
+      assert.equal(res.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.deepEqual(await snapshotMission(projects, activity, deliveries), before);
+      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'before-race');
+      assert.equal((await hops.get(live.id))?.claimGeneration, 2);
+      assert.equal(tokens.resolve(run.token)?.token, run.token);
+    } finally {
+      await closeServer(server);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('队列 HTTP finish：旧代次、失租、重启缺牌拒绝且不收尾不吊销；当前代次可收尾；非队列旧路径不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'http-queue-finish-'));
+    const store = new FileStateStore(join(dir, 'state.json'));
+    const clock = new FixedClock(QUEUE_NOW);
+    const ids = new PersistentIds(store);
+    const projects = new FileProjectRepository(store);
+    const activity = new FileActivityLog(store, clock);
+    const deliveries = new FileDeliveryRepository(store, clock, ids);
+    const hops = new FileQueuedHopRepository(store);
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      transaction: store,
+    });
+    const tokens = new RunTokenRegistry();
+    let server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      let base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const live = await enqueueAndClaim(hops);
+      const { attemptId } = await platform.startCoordinatorAttempt('M', undefined, live);
+      const stale = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: live });
+
+      const taken = await hops.claim(live.id, 'next', QUEUE_LEASE, QUEUE_LATER);
+      assert.equal(taken?.claimGeneration, 2);
+      const gen2: QueueClaimIdentity = { id: live.id, owner: 'next', claimGeneration: 2 };
+      const current = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: gen2 });
+
+      const staleFinish = await postJson(
+        base,
+        `/api/missions/M/attempts/${attemptId}/finish`,
+        { endedBy: 'structured_submit', owner: 'next', claimGeneration: 2 },
+        stale.token,
+      );
+      assert.notEqual(staleFinish.status, 200);
+      assert.equal(staleFinish.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.equal((await projects.get('P'))!.missions[0]!.coordinatorAttempts[0]!.status, 'in_progress');
+      assert.equal(tokens.resolve(current.token)?.attemptId, attemptId);
+
+      clock.advance(Date.parse(QUEUE_LATER) - Date.parse(QUEUE_NOW));
+      const expiredFinish = await postJson(
+        base,
+        `/api/missions/M/attempts/${attemptId}/finish`,
+        { endedBy: 'structured_submit' },
+        current.token,
+      );
+      assert.notEqual(expiredFinish.status, 200);
+      assert.equal(expiredFinish.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.equal((await projects.get('P'))!.missions[0]!.coordinatorAttempts[0]!.status, 'in_progress');
+      assert.equal(tokens.resolve(current.token)?.attemptId, attemptId);
+
+      await closeServer(server);
+      const restarted = new RunTokenRegistry();
+      server = createApi({ platform, tokens: restarted, deliveries });
+      await listenLoopback(server, 0);
+      base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const missing = await postJson(base, `/api/missions/M/attempts/${attemptId}/finish`, {
+        endedBy: 'structured_submit',
+      });
+      assert.equal(missing.status, 401);
+      assert.equal(missing.json.error, 'UNKNOWN_RUN_TOKEN');
+      assert.equal((await projects.get('P'))!.missions[0]!.coordinatorAttempts[0]!.status, 'in_progress');
+
+      const reclaimed = await hops.claim(live.id, 'third', QUEUE_LATER, '2025-01-01T00:00:30Z');
+      assert.equal(reclaimed?.claimGeneration, 3);
+      const gen3: QueueClaimIdentity = { id: live.id, owner: 'third', claimGeneration: 3 };
+      const liveToken = restarted.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: gen3 });
+      const ok = await postJson(
+        base,
+        `/api/missions/M/attempts/${attemptId}/finish`,
+        { endedBy: 'structured_submit' },
+        liveToken.token,
+      );
+      assert.equal(ok.status, 200);
+      assert.notEqual((await projects.get('P'))!.missions[0]!.coordinatorAttempts[0]!.status, 'in_progress');
+      assert.equal(restarted.resolve(liveToken.token), undefined);
+
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M-nq',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const nq = await postJson(base, '/api/missions/M-nq/coordinator-attempts', {});
+      assert.equal(nq.status, 201);
+      const nqAttempt = (nq.json as { attemptId?: string }).attemptId;
+      assert.ok(nqAttempt);
+      const nqFinish = await postJson(base, `/api/missions/M-nq/attempts/${nqAttempt}/finish`, {
+        endedBy: 'structured_submit',
+      });
+      assert.equal(nqFinish.status, 200);
+    } finally {
+      await closeServer(server);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('Postgres 可用时真实 HTTP 解析后接管竞态在事务内拒绝', async (t) => {
+    const connectionString = await ensureTestDatabase('http_queue_fence');
+    if (!connectionString) {
+      t.skip('Postgres unavailable; PG HTTP claim-fence race not verified');
+      return;
+    }
+    const store = await PgStateStore.open({ connectionString });
+    await store.pool.query('TRUNCATE queued_hops, projects, activity, deliveries, id_counters');
+    await store.refresh();
+    const clock = new FixedClock(QUEUE_NOW);
+    const ids = new PgIds(store);
+    await ids.reserve(['D', 'W', 'M', 'E']);
+    const projects = new PgProjectRepository(store);
+    const activity = new PgActivityLog(store, clock);
+    const deliveries = new PgDeliveryRepository(store, clock, ids);
+    const hops = new PgQueuedHopRepository(store);
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      transaction: store,
+    });
+    const tokens = new RunTokenRegistry();
+    const server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      await hops.enqueue({
+        id: 'h1',
+        projectId: 'P',
+        missionId: 'M',
+        workItemId: 'w',
+        role: 'coordinator',
+        priority: 1,
+        availableAt: QUEUE_NOW,
+        attemptCount: 0,
+        maxAttempts: 2,
+        idempotencyKey: 'http-pg-fence',
+        status: 'queued',
+        createdAt: QUEUE_NOW,
+        updatedAt: QUEUE_NOW,
+      });
+      assert.equal((await hops.claim('h1', 'owner', QUEUE_NOW, QUEUE_LEASE))?.claimGeneration, 1);
+      const live: QueueClaimIdentity = { id: 'h1', owner: 'owner', claimGeneration: 1 };
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M',
+        contract: CONTRACT,
+        origin: QUEUE_ORIGIN,
+      });
+      const { attemptId } = await platform.startCoordinatorAttempt('M', undefined, live);
+      const run = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: live });
+      await platform.updateFindings('M', attemptId, 'pg-before', undefined, live);
+
+      const orig = store.runFenced.bind(store);
+      let hijacked = false;
+      store.runFenced = ((fence: ClaimFence, fn: () => Promise<unknown>) => {
+        hijacked = true;
+        return hops.claim('h1', 'next', QUEUE_LEASE, QUEUE_LATER).then((taken) => {
+          assert.equal(taken?.claimGeneration, 2);
+          return orig(fence, fn);
+        });
+      }) as typeof store.runFenced;
+
+      const before = await snapshotMission(projects, activity, deliveries);
+      const res = await postJson(
+        base,
+        '/api/agent/coagent_update_findings',
+        { findings: 'pg-stale', owner: 'next', claimGeneration: 2 },
+        run.token,
+      );
+      assert.equal(hijacked, true);
+      assert.notEqual(res.status, 200);
+      assert.equal(res.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.deepEqual(await snapshotMission(projects, activity, deliveries), before);
+      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'pg-before');
+    } finally {
+      await closeServer(server);
+      await store.close();
+    }
   });
 });

@@ -20,7 +20,7 @@ import type {
   QueuedHopCapacityRepository,
   QueuedHopRepository,
 } from './ports.ts';
-import type { MissionView, Platform } from './platform.ts';
+import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -755,9 +755,10 @@ export class Orchestrator {
       }
     }
 
+    const claim = queued.kind === 'claimed' ? this.#trustedQueueClaim(queued.hop) : undefined;
     let started: { attemptId: string; token: string; profileId: string };
     try {
-      started = await startReviewer(missionId, reviewerCandidates);
+      started = await startReviewer(missionId, reviewerCandidates, claim);
     } catch (error) {
       const detail =
         error instanceof PlatformRuleError
@@ -844,7 +845,7 @@ export class Orchestrator {
             endedBy: outcome?.endedBy ?? 'no_structured_result',
             usage: outcome?.usage,
             failureMessage: outcome?.failureMessage,
-          });
+          }, claim);
         } catch {
           // 收尾失败不能跳过吊销：迟到的工具调用必须被拒绝。
         }
@@ -1266,10 +1267,11 @@ export class Orchestrator {
       }
       used += 1;
 
+      const claim = this.#trustedQueueClaim(claimedHop);
       const { attemptId, token } =
         input.role === 'coordinator'
-          ? await this.#tokens.startCoordinator(input.missionId, profile)
-          : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile);
+          ? await this.#tokens.startCoordinator(input.missionId, profile, claim)
+          : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile, claim);
 
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
       let unsubscribe: (() => void) | undefined;
@@ -1500,7 +1502,7 @@ export class Orchestrator {
           output: outcome?.output,
           toolCalls: outcome?.toolCalls,
           resolvedProfile: outcome?.resolvedProfile,
-        });
+        }, claim);
         // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
         await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
         this.#tokens.revoke(token);
@@ -2017,6 +2019,17 @@ export class Orchestrator {
       disposition: input.disposition,
       retryable: input.retryable,
     });
+  }
+
+  /**
+   * 只从已领取 hop 抄 id/owner/代次。把 now 塞进 claim 等于把租约时钟交给 Runner，
+   * 失租的迟到收尾就能把时间拨回去继续写。
+   */
+  #trustedQueueClaim(hop: QueuedHop | undefined): QueueClaimIdentity | undefined {
+    if (hop === undefined || hop.owner === undefined || hop.claimGeneration === undefined) {
+      return undefined;
+    }
+    return { id: hop.id, owner: hop.owner, claimGeneration: hop.claimGeneration };
   }
 
   async #completeHopLease(hop: QueuedHop | undefined): Promise<void> {

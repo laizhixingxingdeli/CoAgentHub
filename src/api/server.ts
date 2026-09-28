@@ -207,19 +207,30 @@ export function createApi(deps: ApiDeps): Server {
         findings: string;
         rejectedHypotheses?: string[];
       };
-      return platform.updateFindings(run.missionId, run.attemptId, findings, rejectedHypotheses);
+      return platform.updateFindings(
+        run.missionId,
+        run.attemptId,
+        findings,
+        rejectedHypotheses,
+        run.claim,
+      );
     },
 
     async coagent_update_plan(run, body) {
-      return platform.updatePlan(run.missionId, run.attemptId, body as never);
+      return platform.updatePlan(run.missionId, run.attemptId, body as never, run.claim);
     },
 
     async coagent_create_work_item(run, body) {
       const { title, ...order } = body as unknown as { title: string };
-      return platform.createWorkItem(run.missionId, run.attemptId, {
-        title,
-        order: order as never,
-      });
+      return platform.createWorkItem(
+        run.missionId,
+        run.attemptId,
+        {
+          title,
+          order: order as never,
+        },
+        run.claim,
+      );
     },
 
     async coagent_retire_work_item(run, body) {
@@ -235,20 +246,20 @@ export function createApi(deps: ApiDeps): Server {
 
     async coagent_dispatch_work_item(run, body) {
       const { workItemIds } = body as unknown as { workItemIds: string[] };
-      return platform.dispatchWorkItems(run.missionId, run.attemptId, workItemIds ?? []);
+      return platform.dispatchWorkItems(run.missionId, run.attemptId, workItemIds ?? [], run.claim);
     },
 
     async coagent_review_execution_result(run, body) {
-      return platform.reviewExecutionResult(run.missionId, run.attemptId, body as never);
+      return platform.reviewExecutionResult(run.missionId, run.attemptId, body as never, run.claim);
     },
 
     async coagent_escalate_to_l3(run, body) {
-      await platform.escalateToL3(run.missionId, run.attemptId, body as never);
+      await platform.escalateToL3(run.missionId, run.attemptId, body as never, run.claim);
       return {};
     },
 
     async coagent_submit_mission_result(run, body) {
-      await platform.submitMissionResult(run.missionId, run.attemptId, body as never);
+      await platform.submitMissionResult(run.missionId, run.attemptId, body as never, run.claim);
       return {};
     },
 
@@ -267,15 +278,15 @@ export function createApi(deps: ApiDeps): Server {
     },
 
     async coagent_submit_evidence(run, body) {
-      return platform.submitEvidence(run.missionId, run.attemptId, body as never);
+      return platform.submitEvidence(run.missionId, run.attemptId, body as never, run.claim);
     },
 
     async coagent_submit_execution_result(run, body) {
-      return platform.submitExecutionResult(run.missionId, run.attemptId, body as never);
+      return platform.submitExecutionResult(run.missionId, run.attemptId, body as never, run.claim);
     },
 
     async coagent_report_blocked(run, body) {
-      await platform.reportBlocked(run.missionId, run.attemptId, body as never);
+      await platform.reportBlocked(run.missionId, run.attemptId, body as never, run.claim);
       return {};
     },
 
@@ -288,10 +299,15 @@ export function createApi(deps: ApiDeps): Server {
         verdict: unknown;
         reasons: unknown;
       };
-      return platform.submitIndependentReview(run.missionId, run.attemptId, {
-        verdict,
-        reasons,
-      });
+      return platform.submitIndependentReview(
+        run.missionId,
+        run.attemptId,
+        {
+          verdict,
+          reasons,
+        },
+        run.claim,
+      );
     },
   };
 
@@ -592,9 +608,26 @@ export function createApi(deps: ApiDeps): Server {
       await requireControl(req, POLICY_ACTION.attemptFinish);
       const [, missionId, attemptId] = finishMatch;
       const body = await readJson(req);
-      await platform.finishAttempt(missionId, attemptId, body as never);
-      // 收尾即按 Attempt 吊销，不信调用方是否把 token 再抄进 body。
-      // 迟到的工具调用应该被拒绝，而不是悄悄写进已经结束的 Attempt。
+      // 队列标记在 attempt.started 上，不在内存 token 表。重启丢牌后仍必须当队列拒绝。
+      // 身份只从已解析 header token 取，不信 body 里的 owner/代次。
+      const queued = await platform.attemptRequiresQueueClaim(missionId, attemptId);
+      if (queued) {
+        const run = requireRun(req);
+        if (run.missionId !== missionId || run.attemptId !== attemptId) {
+          throw new HttpError(409, 'WRONG_ROLE', '本次运行绑定的 Mission / Attempt 与收尾目标不一致');
+        }
+        if (!run.claim) {
+          throw new HttpError(
+            409,
+            'QUEUE_CLAIM_REQUIRED',
+            '队列 Attempt 收尾必须使用带领取身份的 Run Token',
+          );
+        }
+        await platform.finishAttempt(missionId, attemptId, body as never, run.claim);
+      } else {
+        await platform.finishAttempt(missionId, attemptId, body as never);
+      }
+      // 只在成功收尾后吊销。拒绝时当前代次的有效 token 必须还能用。
       tokens.revokeAttempt(missionId, attemptId);
       return send(res, 200, {});
     }

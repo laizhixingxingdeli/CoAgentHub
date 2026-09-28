@@ -35,10 +35,10 @@ import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import type { HaRelease } from '../src/application/plan-run.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
-import { Platform } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import { ExecFileCommandRunner } from '../src/application/validation/exec-file-command-runner.ts';
-import { GitWorktreeManager } from '../src/application/workspace.ts';
+import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from '../src/main.ts';
 import { FileQueuedHopRepository } from '../src/application/file-store.ts';
@@ -2304,7 +2304,7 @@ describe('run-plan 方案驱动：真实 MissionRunner 失败停靠队列',
           await listenLoopback(server, 0);
           servers.push(server);
           const port = (server.address() as AddressInfo).port;
-          const hopNow = '2026-01-01T00:00:00.000Z';
+          const hopNow = new Date().toISOString();
           const hopClock = new FixedClock(hopNow);
           const terminal = countingTerminalReview(built.platform);
           const coordinatorRuntime = new ScriptedRuntime({
@@ -2481,3 +2481,255 @@ describe('run-plan 方案驱动：真实 MissionRunner 失败停靠队列',
         }
       });
   });
+
+async function postAgentJson(
+  base: string,
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<{ status: number; json: { error?: string } }> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { 'x-coagent-run': token } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: res.status, json: (await res.json()) as { error?: string } };
+}
+
+describe('生产入口 makeIssuer 队列领取身份', () => {
+  const servers: Server[] = [];
+  after(() => {
+    for (const server of servers) {
+      if (server.listening) server.close();
+    }
+  });
+
+  test('源码：run-plan 经共用 makeIssuer 发牌', () => {
+    const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
+    assert.match(src, /tokens:\s*makeIssuer\(platform,\s*tokens\)/);
+  });
+
+  test('三类 start 把真实领取身份交给 Platform 并冻结进 token；失租 finish 拒绝；请求体不能自述身份；非队列不变', async () => {
+    const home = temp('coagent-plan-claim-');
+    const built = await buildPersistentPlatform(join(home, 'state.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const server: Server = createApi({
+      platform: built.platform,
+      tokens: built.tokens,
+      deliveries: built.deliveries,
+    });
+    await listenLoopback(server, 0);
+    servers.push(server);
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const hops = built.queuedHops;
+      assert.ok(hops instanceof FileQueuedHopRepository);
+      const now = new Date().toISOString();
+      const lease = new Date(Date.now() + 60_000).toISOString();
+      await hops.enqueue({
+        id: 'h-plan-claim',
+        projectId: 'P',
+        missionId: 'M-claim',
+        workItemId: '-',
+        role: 'coordinator',
+        priority: 1,
+        availableAt: now,
+        attemptCount: 0,
+        maxAttempts: 2,
+        idempotencyKey: 'run-plan-claim',
+        status: 'queued',
+        createdAt: now,
+        updatedAt: now,
+      });
+      const claimed = await hops.claim('h-plan-claim', 'owner', now, lease);
+      assert.equal(claimed?.claimGeneration, 1);
+      const live: QueueClaimIdentity = { id: 'h-plan-claim', owner: 'owner', claimGeneration: 1 };
+
+      await built.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-claim',
+        contract: CONTRACT,
+      });
+      await built.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-nq',
+        contract: CONTRACT,
+      });
+
+      const startClaims: Array<{ role: string; claim: QueueClaimIdentity | undefined }> = [];
+      const origCoord = built.platform.startCoordinatorAttempt.bind(built.platform);
+      built.platform.startCoordinatorAttempt = (async (missionId, profile, claim) => {
+        startClaims.push({ role: 'coordinator', claim });
+        return origCoord(missionId, profile, claim);
+      }) as Platform['startCoordinatorAttempt'];
+      const origExec = built.platform.startExecutorAttempt.bind(built.platform);
+      built.platform.startExecutorAttempt = (async (missionId, workItemId, profile, claim) => {
+        startClaims.push({ role: 'executor', claim });
+        return origExec(missionId, workItemId, profile, claim);
+      }) as Platform['startExecutorAttempt'];
+      const origIr = built.platform.startIndependentReviewerAttempt.bind(built.platform);
+      built.platform.startIndependentReviewerAttempt = (async (missionId, candidates, claim) => {
+        startClaims.push({ role: 'independent_reviewer', claim });
+        return origIr(missionId, candidates, claim);
+      }) as Platform['startIndependentReviewerAttempt'];
+
+      const issuer = makeIssuer(built.platform, built.tokens);
+      const profile = { endpoint: 'local' as const, profileId: 'coord-a' };
+      const queued = await issuer.startCoordinator('M-claim', profile, live);
+      const frozen = built.tokens.resolve(queued.token);
+      assert.deepEqual(frozen?.claim, live);
+      assert.equal(Object.isFrozen(frozen?.claim), true);
+      assert.equal(await built.platform.attemptRequiresQueueClaim('M-claim', queued.attemptId), true);
+      assert.deepEqual(
+        startClaims.find((row) => row.role === 'coordinator' && row.claim !== undefined)?.claim,
+        live,
+      );
+
+      const unmarked = await issuer.startCoordinator('M-nq', profile);
+      assert.equal(built.tokens.resolve(unmarked.token)?.claim, undefined);
+      assert.equal(await built.platform.attemptRequiresQueueClaim('M-nq', unmarked.attemptId), false);
+
+      await assert.rejects(() => issuer.startExecutor('M-claim', 'W-missing', profile, live));
+      await assert.rejects(() =>
+        issuer.startIndependentReviewer!('M-claim', [{ profileId: 'ir-a', endpoint: 'local' }], live),
+      );
+      assert.deepEqual(startClaims.find((row) => row.role === 'executor')?.claim, live);
+      assert.deepEqual(startClaims.find((row) => row.role === 'independent_reviewer')?.claim, live);
+
+      const later = new Date(Date.now() + 120_000).toISOString();
+      const taken = await hops.claim(live.id, 'next', lease, later);
+      assert.equal(taken?.claimGeneration, 2);
+      await assert.rejects(
+        () => built.platform.finishAttempt('M-claim', queued.attemptId, { endedBy: 'structured_submit' }, live),
+        (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
+      );
+      assert.equal(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-claim')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+
+      const spoofed = await postAgentJson(
+        baseUrl,
+        `/api/missions/M-claim/attempts/${queued.attemptId}/finish`,
+        { endedBy: 'structured_submit', owner: 'next', claimGeneration: 2, id: live.id },
+        queued.token,
+      );
+      assert.notEqual(spoofed.status, 200);
+      assert.equal(spoofed.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.equal(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-claim')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+
+      await built.platform.finishAttempt('M-nq', unmarked.attemptId, { endedBy: 'structured_submit' });
+      assert.notEqual(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-nq')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+    } finally {
+      built.releaseLock();
+    }
+  });
+
+  test('MissionRunner 队列 hop 开牌与 finally finish 带同一领取身份；非队列不带 claim', async () => {
+    const home = temp('coagent-plan-orch-claim-');
+    const queuedBuilt = await buildPersistentPlatform(join(home, 'state-q.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const plainBuilt = await buildPersistentPlatform(join(home, 'state-nq.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const qServer: Server = createApi({
+      platform: queuedBuilt.platform,
+      tokens: queuedBuilt.tokens,
+      deliveries: queuedBuilt.deliveries,
+    });
+    const nqServer: Server = createApi({
+      platform: plainBuilt.platform,
+      tokens: plainBuilt.tokens,
+      deliveries: plainBuilt.deliveries,
+    });
+    await listenLoopback(qServer, 0);
+    await listenLoopback(nqServer, 0);
+    servers.push(qServer, nqServer);
+    try {
+      const finishes: Array<QueueClaimIdentity | undefined> = [];
+      const origFinish = queuedBuilt.platform.finishAttempt.bind(queuedBuilt.platform);
+      queuedBuilt.platform.finishAttempt = (async (missionId, attemptId, outcome, claim) => {
+        finishes.push(claim);
+        return origFinish(missionId, attemptId, outcome, claim);
+      }) as Platform['finishAttempt'];
+
+      await queuedBuilt.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-orch',
+        contract: CONTRACT,
+      });
+      const qRunner = new MissionRunner({
+        platform: queuedBuilt.platform,
+        tokens: makeIssuer(queuedBuilt.platform, queuedBuilt.tokens),
+        baseUrl: `http://127.0.0.1:${(qServer.address() as AddressInfo).port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        queuedHops: queuedBuilt.queuedHops,
+        owner: 'runner-claim',
+        coordinator: {
+          runtime: new ScriptedRuntime({
+            'coordinator:-:0': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+          }),
+          candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        },
+        executor: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [],
+        },
+      });
+      await qRunner.run('M-orch', { projectRoot: home, maxRounds: 1 });
+      const queuedFinishes = finishes.filter((row): row is QueueClaimIdentity => row !== undefined);
+      assert.ok(queuedFinishes.length >= 1);
+      assert.ok(
+        queuedFinishes.every(
+          (row) => row.owner === 'runner-claim' && row.claimGeneration === 1 && row.id.length > 0,
+        ),
+      );
+
+      const nqFinishes: Array<QueueClaimIdentity | undefined> = [];
+      const origNq = plainBuilt.platform.finishAttempt.bind(plainBuilt.platform);
+      plainBuilt.platform.finishAttempt = (async (missionId, attemptId, outcome, claim) => {
+        nqFinishes.push(claim);
+        return origNq(missionId, attemptId, outcome, claim);
+      }) as Platform['finishAttempt'];
+      await plainBuilt.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-plain',
+        contract: CONTRACT,
+      });
+      const nqRunner = new MissionRunner({
+        platform: plainBuilt.platform,
+        tokens: makeIssuer(plainBuilt.platform, plainBuilt.tokens),
+        baseUrl: `http://127.0.0.1:${(nqServer.address() as AddressInfo).port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        owner: 'runner-claim',
+        coordinator: {
+          runtime: new ScriptedRuntime({
+            'coordinator:-:0': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+          }),
+          candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        },
+        executor: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [],
+        },
+      });
+      await nqRunner.run('M-plain', { projectRoot: home, maxRounds: 1 });
+      assert.ok(nqFinishes.length >= 1);
+      assert.ok(nqFinishes.every((row) => row === undefined));
+    } finally {
+      queuedBuilt.releaseLock();
+      plainBuilt.releaseLock();
+    }
+  });
+});

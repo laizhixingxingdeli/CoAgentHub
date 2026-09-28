@@ -28,7 +28,7 @@ import { MissionRunner } from '../src/application/mission-runner.ts';
 import { inRunBackoffWaitMs } from '../src/application/orchestrator.ts';
 import { missionRunOptions } from '../src/run-mission.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
-import { Platform } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { FileQueuedHopRepository } from '../src/application/file-store.ts';
 import { LockBusyError } from '../src/application/lock.ts';
@@ -447,7 +447,7 @@ test('文件平台注入真实 MissionRunner：上游失败进持久退避，到
   const dir = mkdtempSync(join(tmpdir(), 'run-mission-fail-queue-'));
   temps.push(dir);
   const statePath = join(dir, 'state.json');
-  const hopNow = '2026-01-01T00:00:00.000Z';
+  const hopNow = new Date().toISOString();
   const hopClock = new FixedClock(hopNow);
   const built = await buildPersistentPlatform(statePath, {
     workspace: new InPlaceWorkspaceManager(),
@@ -821,11 +821,11 @@ function capturingIssuer(
   return {
     issued,
     issuer: {
-      startCoordinator: (missionId, profile) => inner.startCoordinator(missionId, profile),
-      startExecutor: (missionId, workItemId, profile) =>
-        inner.startExecutor(missionId, workItemId, profile),
-      async startIndependentReviewer(missionId, candidates = []) {
-        const started = await inner.startIndependentReviewer!(missionId, candidates);
+      startCoordinator: (missionId, profile, claim) => inner.startCoordinator(missionId, profile, claim),
+      startExecutor: (missionId, workItemId, profile, claim) =>
+        inner.startExecutor(missionId, workItemId, profile, claim),
+      async startIndependentReviewer(missionId, candidates = [], claim) {
+        const started = await inner.startIndependentReviewer!(missionId, candidates, claim);
         issued.push(started.token);
         return started;
       },
@@ -1096,5 +1096,258 @@ describe('E3a MissionRunner 独立检视 token 生命周期', () => {
     assert.equal(ran.outcome.kind, 'waiting');
     assert.equal(issued.length, 1);
     assert.equal(seeded.tokens.resolve(issued[0]!), undefined, 'live.finish 失败后仍吊销');
+  });
+});
+
+async function postAgentJson(
+  base: string,
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<{ status: number; json: { error?: string } }> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { 'x-coagent-run': token } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: res.status, json: (await res.json()) as { error?: string } };
+}
+
+describe('生产入口 makeIssuer 队列领取身份', () => {
+  test('源码：run-mission 经共用 makeIssuer 发牌', () => {
+    assert.match(src('run-mission.ts'), /tokens:\s*makeIssuer\(platform,\s*tokens\)/);
+  });
+
+  test('三类 start 把真实领取身份交给 Platform 并冻结进 token；失租 finish 拒绝；请求体不能自述身份；非队列不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-mission-claim-'));
+    temps.push(dir);
+    const built = await buildPersistentPlatform(join(dir, 'state.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const server: Server = createApi({
+      platform: built.platform,
+      tokens: built.tokens,
+      deliveries: built.deliveries,
+    });
+    await listenLoopback(server, 0);
+    servers.push(server);
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const hops = built.queuedHops;
+      assert.ok(hops instanceof FileQueuedHopRepository);
+      const now = new Date().toISOString();
+      const lease = new Date(Date.now() + 60_000).toISOString();
+      await hops.enqueue({
+        id: 'h-claim',
+        projectId: 'P',
+        missionId: 'M-claim',
+        workItemId: '-',
+        role: 'coordinator',
+        priority: 1,
+        availableAt: now,
+        attemptCount: 0,
+        maxAttempts: 2,
+        idempotencyKey: 'run-mission-claim',
+        status: 'queued',
+        createdAt: now,
+        updatedAt: now,
+      });
+      const claimed = await hops.claim('h-claim', 'owner', now, lease);
+      assert.equal(claimed?.claimGeneration, 1);
+      const live: QueueClaimIdentity = { id: 'h-claim', owner: 'owner', claimGeneration: 1 };
+
+      await built.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-claim',
+        contract: CONTRACT,
+      });
+      await built.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-nq',
+        contract: CONTRACT,
+      });
+
+      const startClaims: Array<{ role: string; claim: QueueClaimIdentity | undefined }> = [];
+      const origCoord = built.platform.startCoordinatorAttempt.bind(built.platform);
+      built.platform.startCoordinatorAttempt = (async (missionId, profile, claim) => {
+        startClaims.push({ role: 'coordinator', claim });
+        return origCoord(missionId, profile, claim);
+      }) as Platform['startCoordinatorAttempt'];
+      const origExec = built.platform.startExecutorAttempt.bind(built.platform);
+      built.platform.startExecutorAttempt = (async (missionId, workItemId, profile, claim) => {
+        startClaims.push({ role: 'executor', claim });
+        return origExec(missionId, workItemId, profile, claim);
+      }) as Platform['startExecutorAttempt'];
+      const origIr = built.platform.startIndependentReviewerAttempt.bind(built.platform);
+      built.platform.startIndependentReviewerAttempt = (async (missionId, candidates, claim) => {
+        startClaims.push({ role: 'independent_reviewer', claim });
+        return origIr(missionId, candidates, claim);
+      }) as Platform['startIndependentReviewerAttempt'];
+
+      const issuer = makeIssuer(built.platform, built.tokens);
+      const profile = { endpoint: 'local' as const, profileId: 'coord-a' };
+      const queued = await issuer.startCoordinator('M-claim', profile, live);
+      const frozen = built.tokens.resolve(queued.token);
+      assert.deepEqual(frozen?.claim, live);
+      assert.equal(Object.isFrozen(frozen?.claim), true);
+      assert.equal(await built.platform.attemptRequiresQueueClaim('M-claim', queued.attemptId), true);
+      assert.deepEqual(
+        startClaims.find((row) => row.role === 'coordinator' && row.claim !== undefined)?.claim,
+        live,
+      );
+
+      const unmarked = await issuer.startCoordinator('M-nq', profile);
+      assert.equal(built.tokens.resolve(unmarked.token)?.claim, undefined);
+      assert.equal(await built.platform.attemptRequiresQueueClaim('M-nq', unmarked.attemptId), false);
+
+      await assert.rejects(() => issuer.startExecutor('M-claim', 'W-missing', profile, live));
+      await assert.rejects(() =>
+        issuer.startIndependentReviewer!('M-claim', [{ profileId: 'ir-a', endpoint: 'local' }], live),
+      );
+      assert.deepEqual(
+        startClaims.find((row) => row.role === 'executor')?.claim,
+        live,
+      );
+      assert.deepEqual(
+        startClaims.find((row) => row.role === 'independent_reviewer')?.claim,
+        live,
+      );
+
+      const later = new Date(Date.now() + 120_000).toISOString();
+      const taken = await hops.claim(live.id, 'next', lease, later);
+      assert.equal(taken?.claimGeneration, 2);
+      await assert.rejects(
+        () => built.platform.finishAttempt('M-claim', queued.attemptId, { endedBy: 'structured_submit' }, live),
+        (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
+      );
+      assert.equal(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-claim')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+      assert.equal(built.tokens.resolve(queued.token)?.attemptId, queued.attemptId);
+
+      const spoofed = await postAgentJson(
+        baseUrl,
+        `/api/missions/M-claim/attempts/${queued.attemptId}/finish`,
+        { endedBy: 'structured_submit', owner: 'next', claimGeneration: 2, id: live.id },
+        queued.token,
+      );
+      assert.notEqual(spoofed.status, 200);
+      assert.equal(spoofed.json.error, 'CLAIM_FENCE_REJECTED');
+      assert.equal(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-claim')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+
+      await built.platform.finishAttempt('M-nq', unmarked.attemptId, { endedBy: 'structured_submit' });
+      assert.notEqual(
+        (await built.projects.get('P'))!.missions.find((m) => m.id === 'M-nq')!.coordinatorAttempts[0]!.status,
+        'in_progress',
+      );
+    } finally {
+      built.releaseLock();
+    }
+  });
+
+  test('MissionRunner 队列 hop 开牌与 finally finish 带同一领取身份；非队列不带 claim', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-mission-orch-claim-'));
+    temps.push(dir);
+    const queuedBuilt = await buildPersistentPlatform(join(dir, 'state-q.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const plainBuilt = await buildPersistentPlatform(join(dir, 'state-nq.json'), {
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    const qServer: Server = createApi({
+      platform: queuedBuilt.platform,
+      tokens: queuedBuilt.tokens,
+      deliveries: queuedBuilt.deliveries,
+    });
+    const nqServer: Server = createApi({
+      platform: plainBuilt.platform,
+      tokens: plainBuilt.tokens,
+      deliveries: plainBuilt.deliveries,
+    });
+    await listenLoopback(qServer, 0);
+    await listenLoopback(nqServer, 0);
+    servers.push(qServer, nqServer);
+    try {
+      const finishes: Array<QueueClaimIdentity | undefined> = [];
+      const origFinish = queuedBuilt.platform.finishAttempt.bind(queuedBuilt.platform);
+      queuedBuilt.platform.finishAttempt = (async (missionId, attemptId, outcome, claim) => {
+        finishes.push(claim);
+        return origFinish(missionId, attemptId, outcome, claim);
+      }) as Platform['finishAttempt'];
+
+      await queuedBuilt.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-orch',
+        contract: CONTRACT,
+      });
+      const qRunner = new MissionRunner({
+        platform: queuedBuilt.platform,
+        tokens: makeIssuer(queuedBuilt.platform, queuedBuilt.tokens),
+        baseUrl: `http://127.0.0.1:${(qServer.address() as AddressInfo).port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        queuedHops: queuedBuilt.queuedHops,
+        owner: 'runner-claim',
+        coordinator: {
+          runtime: new ScriptedRuntime({
+            'coordinator:-:0': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+          }),
+          candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        },
+        executor: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [],
+        },
+      });
+      await qRunner.run('M-orch', { projectRoot: dir, maxRounds: 1 });
+      const queuedFinishes = finishes.filter((row): row is QueueClaimIdentity => row !== undefined);
+      assert.ok(queuedFinishes.length >= 1);
+      assert.ok(
+        queuedFinishes.every(
+          (row) => row.owner === 'runner-claim' && row.claimGeneration === 1 && row.id.length > 0,
+        ),
+      );
+
+      const nqFinishes: Array<QueueClaimIdentity | undefined> = [];
+      const origNq = plainBuilt.platform.finishAttempt.bind(plainBuilt.platform);
+      plainBuilt.platform.finishAttempt = (async (missionId, attemptId, outcome, claim) => {
+        nqFinishes.push(claim);
+        return origNq(missionId, attemptId, outcome, claim);
+      }) as Platform['finishAttempt'];
+      await plainBuilt.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-plain',
+        contract: CONTRACT,
+      });
+      const nqRunner = new MissionRunner({
+        platform: plainBuilt.platform,
+        tokens: makeIssuer(plainBuilt.platform, plainBuilt.tokens),
+        baseUrl: `http://127.0.0.1:${(nqServer.address() as AddressInfo).port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        owner: 'runner-claim',
+        coordinator: {
+          runtime: new ScriptedRuntime({
+            'coordinator:-:0': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+          }),
+          candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        },
+        executor: {
+          runtime: new ScriptedRuntime({}),
+          candidates: [],
+        },
+      });
+      await nqRunner.run('M-plain', { projectRoot: dir, maxRounds: 1 });
+      assert.ok(nqFinishes.length >= 1);
+      assert.ok(nqFinishes.every((row) => row === undefined));
+    } finally {
+      queuedBuilt.releaseLock();
+      plainBuilt.releaseLock();
+    }
   });
 });

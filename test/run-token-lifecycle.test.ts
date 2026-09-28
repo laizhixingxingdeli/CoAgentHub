@@ -25,4 +25,21 @@ describe('Run Token 生命周期', () => {
     tokens.revoke(run.token);
     assert.equal(tokens.resolve(run.token), undefined);
   });
+
+  test('issue 冻结 claim，调用方事后改对象不影响已发卡', () => {
+    const tokens = new RunTokenRegistry();
+    const mutable = { id: 'h1', owner: 'owner', claimGeneration: 1 };
+    const run = tokens.issue({
+      missionId: 'M1',
+      attemptId: 'A1',
+      role: 'coordinator',
+      claim: mutable,
+    });
+    mutable.owner = 'intruder';
+    mutable.claimGeneration = 99;
+    const resolved = tokens.resolve(run.token);
+    assert.deepEqual(resolved?.claim, { id: 'h1', owner: 'owner', claimGeneration: 1 });
+    assert.equal(Object.isFrozen(resolved?.claim), true);
+    assert.equal(tokens.issue({ missionId: 'M1', attemptId: 'A2', role: 'executor', workItemId: 'W' }).claim, undefined);
+  });
 });
