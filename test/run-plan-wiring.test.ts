@@ -41,7 +41,9 @@ import { ExecFileCommandRunner } from '../src/application/validation/exec-file-c
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from '../src/main.ts';
-import { PgCandidateCircuitRepository } from '../src/application/pg-store.ts';
+import { FileQueuedHopRepository } from '../src/application/file-store.ts';
+import { PgCandidateCircuitRepository, PgQueuedHopRepository } from '../src/application/pg-store.ts';
+import type { QueuedHop } from '../src/application/durable-scheduler.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
@@ -157,6 +159,7 @@ describe('持久化装配里机器 L3 可用', () => {
             platform: second.platform, tokens: makeIssuer(second.platform, second.tokens),
             baseUrl: `http://127.0.0.1:${address.port}`, workspace,
             candidateCircuits: second.candidateCircuits,
+            queuedHops: second.queuedHops,
             coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
             executor: { runtime: new ScriptedRuntime({}), candidates: [] },
           });
@@ -165,6 +168,47 @@ describe('持久化装配里机器 L3 可用', () => {
         } finally {
           if (server.listening) await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
         }
+      } finally {
+        await second.close();
+      }
+    } finally {
+      await first.close();
+    }
+  });
+  test('buildPgPlatform 暴露与自身 store 对应的 queuedHops 仓储', async (t) => {
+    const connectionString = await ensureTestDatabase('run_plan_queued_hops_wiring');
+    if (!connectionString) {
+      t.skip('Postgres unavailable; buildPgPlatform queuedHops wiring not verified');
+      return;
+    }
+    const first = await buildPgPlatform({ connectionString });
+    try {
+      assert.equal(first.queuedHops.constructor.name, 'PgQueuedHopRepository');
+      assert.ok(first.queuedHops instanceof PgQueuedHopRepository);
+      await first.store.pool.query('TRUNCATE queued_hops');
+      const hop: QueuedHop = {
+        id: 'pg-wire-h1',
+        projectId: 'P',
+        missionId: 'M-pg-queue',
+        workItemId: 'W-1',
+        role: 'executor',
+        priority: 1,
+        availableAt: '2020-01-01T00:00:00.000Z',
+        attemptCount: 0,
+        maxAttempts: 2,
+        idempotencyKey: 'pg-wire-key',
+        status: 'queued',
+        createdAt: '2020-01-01T00:00:00.000Z',
+        updatedAt: '2020-01-01T00:00:00.000Z',
+      };
+      const stored = await first.queuedHops.enqueue(hop);
+      const second = await buildPgPlatform({ connectionString });
+      try {
+        assert.ok(second.queuedHops instanceof PgQueuedHopRepository);
+        assert.deepEqual(await second.queuedHops.get(hop.id), stored);
+        const throughStore = new PgQueuedHopRepository(second.store);
+        assert.deepEqual(await throughStore.get(hop.id), await second.queuedHops.get(hop.id));
+        assert.equal((await second.queuedHops.list())[0]?.status, 'queued');
       } finally {
         await second.close();
       }
@@ -198,6 +242,7 @@ describe('持久化装配里机器 L3 可用', () => {
         baseUrl: `http://127.0.0.1:${address.port}`,
         workspace,
         candidateCircuits: rebuilt.candidateCircuits,
+        queuedHops: rebuilt.queuedHops,
         coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
         executor: { runtime: new ScriptedRuntime({}), candidates: [] },
       });
@@ -218,6 +263,8 @@ describe('持久化装配里机器 L3 可用', () => {
     const built = await buildPersistentPlatform(statePath, { workspace });
     const { platform } = built;
     assert.equal(built.candidateCircuits.constructor.name, 'FileCandidateCircuitRepository');
+    assert.equal(built.queuedHops.constructor.name, 'FileQueuedHopRepository');
+    assert.ok(built.queuedHops instanceof FileQueuedHopRepository);
     await built.candidateCircuits.open({ profileId: 'circuit-persist', failureClass: 'upstream', openUntil: '2030-01-01T00:00:00.000Z' });
     const rebuilt = await buildPersistentPlatform(statePath, { workspace, reconcile: false });
     assert.deepEqual(await rebuilt.candidateCircuits.get('circuit-persist'), {
@@ -511,6 +558,71 @@ describe('开跑前：项目的改动名额被谁占着', () => {
     assert.match(problems[0], /l3\.ts/);
     assert.deepEqual(slotHolders(rows.filter((r) => r.missionId !== 'R0-F2'), 'P'), []);
   });
+
+  test('遗留 Mission 占项目名额时拒绝开跑且不领取旧 Hop、不建 PlanRun', async () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-slot-queue-');
+    const statePath = join(home, 'state.json');
+    const runDir = join(home, 'plans');
+    const workspace = new GitWorktreeManager(temp('coagent-slot-wt-'));
+    const seeded = await buildPersistentPlatform(statePath, {
+      workspace,
+      exclusive: { what: 'seed leftover' },
+    });
+    try {
+      await seeded.platform.createMission({ projectId: 'p', missionId: 'R0-F2', contract: CONTRACT });
+      const coord = await seeded.platform.startCoordinatorAttempt('R0-F2');
+      await seeded.platform.updatePlan('R0-F2', coord.attemptId, { summary: 'p', steps: ['s'], risks: [] } as never);
+      const { workItemId } = await seeded.platform.createWorkItem('R0-F2', coord.attemptId, { title: 'W', order: ORDER });
+      await seeded.platform.dispatchWorkItems('R0-F2', coord.attemptId, [workItemId]);
+      assert.equal((await seeded.platform.getMissionView('R0-F2')).isMutating, true);
+      const hop: QueuedHop = {
+        id: 'old-hop',
+        projectId: 'p',
+        missionId: 'R0-F2',
+        workItemId,
+        role: 'executor',
+        priority: 1,
+        availableAt: '2020-01-01T00:00:00.000Z',
+        attemptCount: 0,
+        maxAttempts: 2,
+        idempotencyKey: 'old-hop-key',
+        status: 'queued',
+        createdAt: '2020-01-01T00:00:00.000Z',
+        updatedAt: '2020-01-01T00:00:00.000Z',
+      };
+      await seeded.queuedHops.enqueue(hop);
+      await seeded.persist();
+    } finally {
+      seeded.releaseLock();
+    }
+
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    const result = runOpen(planPath, repo, ['--state', statePath, '--run-dir', runDir, '--worktrees', join(home, 'wt')]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /R0-F2/);
+    assert.match(out, /占着/);
+    assert.doesNotMatch(out, /开跑：/);
+    assert.equal(existsSync(runDir), false, '名额拒绝不得新建 PlanRun');
+
+    const after = await buildPersistentPlatform(statePath, { workspace, exclusive: { what: 'inspect' }, reconcile: false });
+    try {
+      const leftover = await after.queuedHops.get('old-hop');
+      assert.equal(leftover?.status, 'queued');
+      assert.ok(after.queuedHops instanceof FileQueuedHopRepository);
+    } finally {
+      after.releaseLock();
+    }
+  });
 });
 
 describe('run-plan 周期投递修复接线', () => {
@@ -549,6 +661,12 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /return maxRounds === undefined \? options : \{ \.\.\.options, maxRounds \}/);
     assert.match(runPlan, /parseMaxRounds\(flagValue\('--max-rounds'\), process\.argv\.includes\('--max-rounds'\)\)/);
     assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
+    assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
+    assert.match(runPlan, /candidateCircuits, queuedHops \} = built/);
+    const planStoreAt = runPlan.indexOf('new FilePlanRunStore(');
+    assert.ok(planStoreAt >= 0 && slotAt < planStoreAt && planStoreAt < runnerAt, '名额拒绝必须发生在新建 PlanRun 与构造 Runner 之前');
+    assert.match(runPlan, /const runId = `\$\{plan\.planId\}-\$\{stamp\(started\)\}`/);
+    assert.doesNotMatch(runPlan, /restore.*PlanRun|resumePlanRun|existingPlanRun/);
     assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 1);
@@ -966,6 +1084,7 @@ describe('CLI 同序装配：既有平台 + API + MissionRunner + 内部入口 +
         tokens: makeIssuer(built.platform, built.tokens),
         baseUrl: `http://127.0.0.1:${portBefore}`,
         workspace,
+        queuedHops: built.queuedHops,
         coordinator: {
           runtime: new ScriptedRuntime({}),
           candidates: [{ endpoint: 'local', profileId: 'c' }],

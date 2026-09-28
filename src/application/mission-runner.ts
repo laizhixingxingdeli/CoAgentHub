@@ -15,7 +15,7 @@ import {
   type RolePool,
   type RunMissionOptions,
 } from './orchestrator.ts';
-import type { CandidateCircuitRepository } from './ports.ts';
+import type { CandidateCircuitRepository, Clock, IdGenerator, QueuedHopRepository } from './ports.ts';
 import type { Platform } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -47,6 +47,11 @@ export interface MissionRunnerDeps {
   readonly attemptWallClockMs?: number;
   readonly owner?: string;
   readonly candidateCircuits?: CandidateCircuitRepository;
+  /** Production wiring uses this name; omit to keep pre-queue behaviour. */
+  readonly queuedHops?: QueuedHopRepository;
+  readonly hopClock?: Clock;
+  readonly hopLeaseMs?: number;
+  readonly hopIds?: IdGenerator;
 }
 
 export interface MissionRunnerResult {

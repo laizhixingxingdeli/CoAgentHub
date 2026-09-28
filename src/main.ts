@@ -33,6 +33,7 @@ import {
   FileDeliveryRepository,
   FileProjectRepository,
   FileQueryRunRepository,
+  FileQueuedHopRepository,
   FileStateStore,
   FileValidationReportRepository,
   PersistentIds,
@@ -46,6 +47,7 @@ import {
   PgLiveOutput,
   PgProjectRepository,
   PgQueryRunRepository,
+  PgQueuedHopRepository,
   PgStateStore,
   PgValidationReportRepository,
   PERIODIC_RECONCILE_LOCK_KEY1,
@@ -211,6 +213,7 @@ export async function buildPersistentPlatform(
   const clock = new SystemClock();
   const store = new FileStateStore(statePath);
   const candidateCircuits = new FileCandidateCircuitRepository(store);
+  const queuedHops = new FileQueuedHopRepository(store);
   const projects = new FileProjectRepository(store);
   const activity = new FileActivityLog(store, clock);
   const ids = new PersistentIds(store);
@@ -301,6 +304,7 @@ export async function buildPersistentPlatform(
       : undefined,
     store,
     candidateCircuits,
+    queuedHops,
     reconciled,
     workspaceReconciled,
     tokens,
@@ -343,6 +347,7 @@ export async function buildPgPlatform(options?: {
   );
   await PgLiveOutput.ensureSchema(store);
   const candidateCircuits = new PgCandidateCircuitRepository(store);
+  const queuedHops = new PgQueuedHopRepository(store);
   const projects = new PgProjectRepository(store);
   const activity = new PgActivityLog(store, clock);
   const live = new PgLiveOutput(store);
@@ -418,6 +423,7 @@ export async function buildPgPlatform(options?: {
       : undefined,
     store,
     candidateCircuits,
+    queuedHops,
     live,
     reconciled,
     tokens,
