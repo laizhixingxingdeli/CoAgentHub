@@ -27,6 +27,7 @@ import type { QueuedHop } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
   ActivityLog,
+  CandidateCircuitRepository,
   Clock,
   CommandTransaction,
   IdGenerator,
@@ -48,6 +49,16 @@ import type {
 } from './agent-pool.ts';
 import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
+import {
+  closedCandidateCircuit,
+  openCandidateCircuit,
+  validateClaimCandidateProbe,
+  validateResolveCandidateProbe,
+  type CandidateCircuit,
+  type ClaimCandidateProbeInput,
+  type OpenCandidateCircuitInput,
+  type ResolveCandidateProbeInput,
+} from './candidate-circuit.ts';
 import type { ValidationReport } from '../kernel/index.ts';
 import {
   cloneValidationReport,
@@ -149,6 +160,15 @@ CREATE TABLE IF NOT EXISTS queued_hops (
   hop_id text PRIMARY KEY,
   idempotency_key text NOT NULL UNIQUE,
   hop jsonb NOT NULL
+);
+
+-- Per-profile durable circuit state; the primary key also arbitrates cross-instance probe claims.
+CREATE TABLE IF NOT EXISTS candidate_circuits (
+  profile_id text PRIMARY KEY,
+  state text NOT NULL CHECK (state IN ('closed', 'open', 'half_open')),
+  failure_class text,
+  open_until timestamptz,
+  probe_claimed boolean NOT NULL DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS validation_reports (
@@ -1036,6 +1056,64 @@ function toQueryRunRecord(raw: QueryRunRecord | string): QueryRunRecord {
     usage: { ...record.usage },
     ...(record.toolCalls ? { toolCalls: Object.freeze([...record.toolCalls]) } : {}),
   };
+}
+
+/** Persistent profile circuit state; conditional writes make probe ownership global to the database. */
+export class PgCandidateCircuitRepository implements CandidateCircuitRepository {
+  #pool: pg.Pool;
+
+  constructor(store: PgStateStore) { this.#pool = store.pool; }
+
+  async get(profileId: string): Promise<CandidateCircuit> {
+    const { rows } = await this.#pool.query<{
+      state: string; failure_class: string | null; open_until: Date | string | null; probe_claimed: boolean;
+    }>('SELECT state, failure_class, open_until, probe_claimed FROM candidate_circuits WHERE profile_id = $1', [profileId]);
+    const row = rows[0];
+    if (!row || row.state === 'closed') return closedCandidateCircuit(profileId);
+    const openUntil = row.open_until instanceof Date ? row.open_until.toISOString() : new Date(row.open_until!).toISOString();
+    if (row.state === 'half_open' && row.probe_claimed) {
+      return { profileId, state: 'half_open', failureClass: row.failure_class!, openUntil, probeClaimed: true };
+    }
+    return { profileId, state: 'open', failureClass: row.failure_class!, openUntil };
+  }
+
+  async open(input: OpenCandidateCircuitInput): Promise<CandidateCircuit> {
+    const circuit = openCandidateCircuit(input);
+    await this.#pool.query(
+      `INSERT INTO candidate_circuits (profile_id, state, failure_class, open_until, probe_claimed)
+       VALUES ($1, 'open', $2, $3::timestamptz, false)
+       ON CONFLICT (profile_id) DO UPDATE SET state = 'open', failure_class = EXCLUDED.failure_class,
+         open_until = EXCLUDED.open_until, probe_claimed = false`,
+      [circuit.profileId, circuit.failureClass, circuit.openUntil],
+    );
+    return circuit;
+  }
+
+  async tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean> {
+    validateClaimCandidateProbe(input);
+    const { rows } = await this.#pool.query(
+      `UPDATE candidate_circuits SET state = 'half_open', probe_claimed = true
+       WHERE profile_id = $1 AND state = 'open' AND open_until <= $2::timestamptz
+       RETURNING profile_id`, [input.profileId, input.now],
+    );
+    return rows.length === 1;
+  }
+
+  async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {
+    validateResolveCandidateProbe(input);
+    const { rows } = input.succeeded
+      ? await this.#pool.query(
+          `UPDATE candidate_circuits SET state = 'closed', failure_class = NULL, open_until = NULL, probe_claimed = false
+           WHERE profile_id = $1 AND state = 'half_open' AND probe_claimed = true RETURNING profile_id`, [input.profileId])
+      : await this.#pool.query(
+          `UPDATE candidate_circuits SET state = 'open', failure_class = $2, open_until = $3::timestamptz, probe_claimed = false
+           WHERE profile_id = $1 AND state = 'half_open' AND probe_claimed = true RETURNING profile_id`,
+          [input.profileId, input.failureClass, input.openUntil]);
+    if (rows.length !== 1) throw new Error('candidate probe is not claimed');
+    return input.succeeded ? closedCandidateCircuit(input.profileId) : openCandidateCircuit({
+      profileId: input.profileId, failureClass: input.failureClass!, openUntil: input.openUntil!,
+    });
+  }
 }
 
 /**

@@ -10,6 +10,7 @@ import type { Project } from '../kernel/index.ts';
 import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
 import type { QueuedHop } from './durable-scheduler.ts';
+import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 
 export interface ProjectRepository {
   get(projectId: string): Promise<Project | undefined>;
@@ -62,6 +63,18 @@ export interface QueuedHopRepository {
   enqueue(hop: QueuedHop): Promise<QueuedHop>;
   get(id: string): Promise<QueuedHop | undefined>;
   list(): Promise<readonly QueuedHop[]>;
+}
+
+/** Persistent per-profile circuit. tryClaimProbe must be an atomic conditional transition. */
+export interface CandidateCircuitRepository {
+  /** Missing records are observed as closed without requiring a stored row. */
+  get(profileId: string): Promise<CandidateCircuit>;
+  /** Opens/reopens a circuit, including from closed or half_open. */
+  open(input: OpenCandidateCircuitInput): Promise<CandidateCircuit>;
+  /** Returns true only when this call changed eligible open to claimed half_open. */
+  tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean>;
+  /** Only a claimed half_open probe may resolve; invalid/repeated resolution rejects without mutation. */
+  resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit>;
 }
 
 export interface Clock {
