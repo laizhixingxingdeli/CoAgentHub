@@ -20,9 +20,10 @@ import {
   InMemoryActivityLog,
   InMemoryProjectRepository,
   SequentialIds,
+  SystemClock,
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
-import { Orchestrator } from '../src/application/orchestrator.ts';
+import { Orchestrator, inRunBackoffWaitMs } from '../src/application/orchestrator.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
@@ -901,9 +902,11 @@ async function capacityHarness(opts: {
   executorMaxAttempts?: number;
   independentReviewer?: { runtime: AgentRuntime; candidates: { endpoint: 'local'; profileId: string }[] };
   queuedHops: QueuedHopCapacityRepository;
-  hopClock: FixedClock;
+  hopClock: { now(): Date };
   hopLeaseMs?: number;
   hopCapacityLimits?: HopCapacityLimits;
+  inRunBackoffWaitMs?: number;
+  attemptWallClockMs?: number;
   owner?: string;
   candidateCircuits?: CandidateCircuitRepository;
 }) {
@@ -946,6 +949,8 @@ async function capacityHarness(opts: {
     hopClock: opts.hopClock,
     hopLeaseMs: opts.hopLeaseMs ?? 60_000,
     hopCapacityLimits: opts.hopCapacityLimits,
+    inRunBackoffWaitMs: opts.inRunBackoffWaitMs,
+    attemptWallClockMs: opts.attemptWallClockMs,
     owner: opts.owner ?? 'runner-cap',
     candidateCircuits: opts.candidateCircuits,
   };
@@ -2041,4 +2046,322 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     assert.notEqual((await unreachableEnv.platform.getMissionView('M-unreach')).status, 'completed');
     assert.notEqual(ruleOutcome.kind === 'waiting' ? ruleOutcome.reason : '', 'platform_unreachable');
   });
+
+  test('运行内退避上限构造校验：缺省 0，非法值抛错', () => {
+    assert.equal(inRunBackoffWaitMs(), 0);
+    assert.equal(inRunBackoffWaitMs(undefined), 0);
+    assert.equal(inRunBackoffWaitMs(0), 0);
+    assert.equal(inRunBackoffWaitMs(120_000), 120_000);
+    for (const value of [-1, 1.5, Number.NaN, Infinity, -Infinity]) {
+      assert.throws(() => inRunBackoffWaitMs(value), /non-negative safe integer/);
+    }
+  });
+
+  test('killed_idle：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
+    async () => {
+      await assertSameRunSwap('killed_idle');
+    });
+
+  test('quota：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
+    async () => {
+      await assertSameRunSwap('quota');
+    });
+
+  test('unknown 不启动 Q；仍记队列失败',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const executor = new ScriptedRuntime({
+        'executor:W-1:0': { steps: [], upstreamFailure: 'upstream unavailable' },
+        'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+      });
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(executor, starts),
+        queuedHops,
+        hopClock: new SystemClock(),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 120_000,
+        candidateCircuits: candidateCircuitRepository(),
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-unknown-wait', contract: CONTRACT });
+      const outcome = await env.makeOrchestrator().runMission('M-unknown-wait', { projectRoot: process.cwd() });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'project_busy');
+        assert.match(outcome.detail, /退避/);
+      }
+      const execStarts = starts.filter((row) => row.role === 'executor');
+      assert.deepEqual(execStarts.map((row) => row.profileId), ['exec-a']);
+      const execHops = (await queuedHops.list()).filter((row) => row.role === 'executor');
+      assert.equal(execHops.length, 1);
+      assert.equal(execHops[0]?.status, 'retry_wait');
+      assert.equal(execHops[0]?.attemptCount, 1);
+      assert.equal(execHops[0]?.lastFailure?.classification, 'unknown');
+    });
+
+  test('退避超过上限时返回 waiting，不启动 Q',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const executor = new ScriptedRuntime({
+        'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
+        'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+      });
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(executor, starts),
+        queuedHops,
+        hopClock: new FixedClock(CAP_NOW),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 500,
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-cap', contract: CONTRACT });
+      const outcome = await env.makeOrchestrator().runMission('M-cap', { projectRoot: process.cwd() });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'project_busy');
+        assert.match(outcome.detail, /退避/);
+      }
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        ['exec-a'],
+      );
+      const hop = (await queuedHops.list()).find((row) => row.role === 'executor');
+      assert.equal(hop?.status, 'retry_wait');
+      assert.equal(hop?.attemptCount, 1);
+    });
+
+  test('退避越过 Mission 墙钟截止时返回 waiting，不启动 Q',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const executor = new ScriptedRuntime({
+        'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
+        'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+      });
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(executor, starts),
+        queuedHops,
+        hopClock: new FixedClock(CAP_NOW),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 120_000,
+        attemptWallClockMs: 800,
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-wall', contract: CONTRACT });
+      const outcome = await env.makeOrchestrator().runMission('M-wall', { projectRoot: process.cwd() });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'project_busy');
+        assert.match(outcome.detail, /退避/);
+      }
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        ['exec-a'],
+      );
+      const hop = (await queuedHops.list()).find((row) => row.role === 'executor');
+      assert.equal(hop?.status, 'retry_wait');
+      assert.equal(hop?.attemptCount, 1);
+    });
+
+  test('maxRounds=1：P 失败等待后同次运行不启动 Q，attemptCount 不清零',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const executor = new ScriptedRuntime({
+        'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
+        'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+      });
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(executor, starts),
+        queuedHops,
+        hopClock: new SystemClock(),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 120_000,
+        candidateCircuits: candidateCircuitRepository(),
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-rounds', contract: CONTRACT });
+      const orch = env.makeOrchestrator();
+      const dispatched = await orch.runMission('M-rounds', {
+        projectRoot: process.cwd(),
+        maxRounds: 1,
+      });
+      assert.equal(dispatched.kind, 'stalled');
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        [],
+      );
+      const began = Date.now();
+      const outcome = await orch.runMission('M-rounds', {
+        projectRoot: process.cwd(),
+        maxRounds: 1,
+      });
+      assert.ok(Date.now() - began >= 1_000, '必须真实等到退避到期');
+      assert.notEqual(outcome.kind, 'awaiting_l3_review');
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        ['exec-a'],
+      );
+      const execHops = (await queuedHops.list()).filter((row) => row.role === 'executor');
+      assert.equal(execHops.length, 1);
+      assert.equal(execHops[0]?.status, 'retry_wait');
+      assert.equal(execHops[0]?.attemptCount, 1);
+      assert.equal(execHops[0]?.lastFailure?.classification, 'quota');
+    });
+
+  test('inRunBackoffWaitMs>0：死信返回 attempt_limit_reached，不启动 Q',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(
+          new ScriptedRuntime({
+            'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
+            'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+          }),
+          starts,
+        ),
+        executorMaxAttempts: 1,
+        queuedHops,
+        hopClock: new SystemClock(),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 120_000,
+        candidateCircuits: candidateCircuitRepository(),
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-dead', contract: CONTRACT });
+      const outcome = await env.makeOrchestrator().runMission('M-dead', { projectRoot: process.cwd() });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'attempt_limit_reached');
+        assert.match(outcome.detail, /死信/);
+      }
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        ['exec-a'],
+      );
+      const hop = (await queuedHops.list()).find((row) => row.role === 'executor');
+      assert.equal(hop?.status, 'dead_letter');
+      assert.equal(hop?.attemptCount, 1);
+      assert.equal(hop?.lastFailure?.retryable, true);
+    });
+
+  test('inRunBackoffWaitMs>0：规则错误保持 do_not_retry，不启动 Q',
+    async () => {
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const happy = new ScriptedRuntime(EXECUTOR_HAPPY);
+      const env = await capacityHarness({
+        coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+        executor: trackingStarts(
+          {
+            kind: happy.kind,
+            start: async (spec) => {
+              if (spec.role === 'executor') {
+                throw new PlatformRuleError('PLAN_REQUIRED', '没 Plan 不能建工作项');
+              }
+              return happy.start(spec);
+            },
+          },
+          starts,
+        ),
+        executorMaxAttempts: 3,
+        queuedHops,
+        hopClock: new SystemClock(),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 120_000,
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-rule-wait', contract: CONTRACT });
+      const outcome = await env.makeOrchestrator().runMission('M-rule-wait', { projectRoot: process.cwd() });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'attempt_limit_reached');
+        assert.match(outcome.detail, /死信/);
+      }
+      assert.deepEqual(
+        starts.filter((row) => row.role === 'executor').map((row) => row.profileId),
+        ['exec-a'],
+      );
+      const hop = (await queuedHops.list()).find((row) => row.role === 'executor');
+      assert.equal(hop?.status, 'dead_letter');
+      assert.equal(hop?.attemptCount, 1);
+      assert.equal(hop?.lastFailure?.retryable, false);
+      assert.equal(hop?.lastFailure?.classification, 'rule');
+      assert.equal(hop?.lastFailure?.disposition, 'do_not_retry');
+      assert.notEqual((await env.platform.getMissionView('M-rule-wait')).status, 'completed');
+    });
 });
+
+async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
+  const rows: QueuedHop[] = [];
+  const queuedHops = memoryCapacityRepo(rows);
+  const starts: { role: string; profileId: string }[] = [];
+  const failing =
+    kind === 'quota'
+      ? { steps: [], upstreamFailure: '403 需要充值' }
+      : { steps: [] };
+  const inner = new ScriptedRuntime({
+    'executor:W-1:0': failing,
+    'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+  });
+  const executor: AgentRuntime =
+    kind === 'killed_idle'
+      ? {
+          kind: inner.kind,
+          start: async (spec) => {
+            const run = await inner.start(spec);
+            if (spec.role !== 'executor' || spec.profile.profileId !== 'exec-a') return run;
+            return {
+              resumeRef: run.resumeRef,
+              on: (handler) => run.on(handler),
+              abort: (reason) => run.abort(reason),
+              wait: async () => ({ ...await run.wait(), endedBy: 'killed_idle' as const }),
+            };
+          },
+        }
+      : inner;
+  const env = await capacityHarness({
+    coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+    executor: trackingStarts(executor, starts),
+    queuedHops,
+    hopClock: new SystemClock(),
+    hopCapacityLimits: capLimits(),
+    inRunBackoffWaitMs: 120_000,
+    candidateCircuits: candidateCircuitRepository(),
+  });
+  await env.platform.createMission({
+    projectId: 'P',
+    missionId: `M-swap-${kind}`,
+    contract: CONTRACT,
+  });
+  const began = Date.now();
+  const orch = env.makeOrchestrator();
+  const result = await orch.runMission(`M-swap-${kind}`, { projectRoot: process.cwd() });
+  assert.ok(Date.now() - began >= 1_000, '必须真实等到退避到期，不能用固定 now 配立即返回的 sleep');
+  assert.equal(result.kind, 'awaiting_l3_review');
+  await env.platform.finalizeMission(`M-swap-${kind}`, {
+    verdict: 'merge',
+    reasons: ['ok'],
+    projectRoot: process.cwd(),
+  });
+  assert.equal((await env.platform.getMissionView(`M-swap-${kind}`)).status, 'completed');
+  const execStarts = starts.filter((row) => row.role === 'executor');
+  assert.deepEqual(execStarts.map((row) => row.profileId), ['exec-a', 'exec-b']);
+  const execHops = (await queuedHops.list()).filter((row) => row.role === 'executor');
+  assert.equal(execHops.length, 1, '必须同键重领，不得另开槽');
+  assert.equal(execHops[0]?.status, 'completed');
+  assert.equal(execHops[0]?.attemptCount, 1, 'attemptCount 不得因换候选清零');
+  assert.equal(execHops[0]?.lastFailure?.classification, kind === 'quota' ? 'quota' : 'killed_idle');
+  const executorRecords = orch.hops.filter((hop) => hop.role === 'executor');
+  assert.equal(executorRecords.length, 2);
+  assert.equal(executorRecords[0]?.profile.profileId, 'exec-a');
+  assert.equal(executorRecords[1]?.profile.profileId, 'exec-b');
+}

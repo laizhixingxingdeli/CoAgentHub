@@ -404,6 +404,7 @@ async function main() {
       workspace,
       candidateCircuits,
       queuedHops,
+      inRunBackoffWaitMs: 120_000,
       coordinator: { runtime, candidates: coordinators },
       executor: { runtime, candidates: executors },
       independentReviewer: { runtime, candidates: independentReviewers },

@@ -137,6 +137,19 @@ export interface OrchestratorDeps {
    * 与 MissionRunner 同名，生产注入 QueuedHopCapacityRepository 时才按此上限 claimAvailable。
    */
   hopCapacityLimits?: HopCapacityLimits;
+  /**
+   * 可换候选失败后，同一次 runMission 最多睡多久等队列退避到期再重领同一槽。
+   * 缺省 0：立刻 waiting，保持 D7。生产 CLI 传 120000，让首次 1s 退避不必结束运行。
+   */
+  inRunBackoffWaitMs?: number;
+}
+
+/** 运行内退避等待上限：非负安全整数，缺省 0。非法值必须在构造时抛，不能拖到第一跳失败。 */
+export function inRunBackoffWaitMs(value: unknown = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('inRunBackoffWaitMs must be a non-negative safe integer');
+  }
+  return value;
 }
 
 export interface RunMissionOptions {
@@ -325,6 +338,9 @@ export class Orchestrator {
   #hopClock: Clock;
   #hopLeaseMs: number;
   #hopLimits: HopCapacityLimits;
+  #inRunBackoffWaitMs: number;
+  /** hopClock 上的本次 runMission 墙钟截止；越过则不再睡退避。 */
+  #missionDeadlineAt: number | undefined;
   readonly hops: HopRecord[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
@@ -361,6 +377,7 @@ export class Orchestrator {
     this.#hopLeaseMs = deps.hopLeaseMs ?? DEFAULT_HOP_LEASE_MS;
     // 坏上限在第一跳领取前就必须拒绝。默认走代码上限，避免漏配变成「不限」。
     this.#hopLimits = hopCapacityLimits(deps.hopCapacityLimits);
+    this.#inRunBackoffWaitMs = inRunBackoffWaitMs(deps.inRunBackoffWaitMs);
     this.#hopScheduler = deps.queuedHops
       ? new DurableScheduler(
           deps.queuedHops,
@@ -373,6 +390,8 @@ export class Orchestrator {
 
   async runMission(missionId: string, options: RunMissionOptions): Promise<MissionRunOutcome> {
     const maxRounds = options.maxRounds ?? 12;
+    // 用 hopClock：队列 availableAt 也按它算。混用 Date.now 会让固定时钟测试误睡、或把已到期当成未到期。
+    this.#missionDeadlineAt = this.#hopClock.now().getTime() + this.#wallClockMs;
 
     // 一 Mission 一个隔离工作区。所有 agent 的 cwd 都指到这里，
     // 用户自己的 checkout 从头到尾没被碰过。
@@ -541,6 +560,10 @@ export class Orchestrator {
               '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
           });
           if (hop && 'alreadyCompleted' in hop) continue;
+          if (hop && 'retrySameSlot' in hop) {
+            // 退避已等到：把领取交给下一轮。同一跳里换 Q 会绕过 maxRounds。
+            break;
+          }
           if (!hop || 'exhausted' in hop) {
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
@@ -588,6 +611,7 @@ export class Orchestrator {
         instruction: coordinatorInstruction(view),
       });
       if (hop && 'alreadyCompleted' in hop) continue;
+      if (hop && 'retrySameSlot' in hop) continue;
       // **先看停机原因，再判失败。**
       //
       // 派发撞上"同项目有别的 Mission 在改代码"时，工具会回 409，运行时
@@ -941,6 +965,7 @@ export class Orchestrator {
           '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
       });
       if (hop && 'alreadyCompleted' in hop) return { kind: 'continue' };
+      if (hop && 'retrySameSlot' in hop) return { kind: 'continue' };
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
@@ -1158,6 +1183,8 @@ export class Orchestrator {
     /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
     | { exhausted: WaitReason; detail?: string }
     | { alreadyCompleted: true }
+    /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
+    | { retrySameSlot: true }
     | undefined
   > {
     const parked = await this.#queuedHopPark({
@@ -1605,6 +1632,12 @@ export class Orchestrator {
             detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'dead_letter' }),
           };
         }
+        if (await this.#waitInRunForRetry(reported, shouldFailover)) {
+          // 失败已记账且等到了 availableAt。交回下一轮走 #acquireHopForStart，
+          // 才会换到 Q。这里 continue 下一候选会在同一轮启动 Q，maxRounds=1
+          // 也拦不住；complete 再入队则会把 attemptCount 清零。
+          return { retrySameSlot: true };
+        }
         return {
           exhausted: 'project_busy',
           detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'available_at' }),
@@ -1933,6 +1966,37 @@ export class Orchestrator {
       exhausted: parked.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
       detail: queuedHopWaitDetail(parked),
     };
+  }
+
+  /**
+   * 可换候选的 retry_wait 在上限内等到 availableAt，好让同一次运行重领同一槽。
+   * unknown / 规则错误 / 超上限 / 越过墙钟都不睡——那些必须把 waiting 交回去。
+   * 时钟若在 sleep 后仍停着（固定 now），立刻放弃：假装等到了会在领取时再失败一次。
+   */
+  async #waitInRunForRetry(hop: QueuedHop, swappable: boolean): Promise<boolean> {
+    if (!swappable || hop.status !== 'retry_wait' || this.#inRunBackoffWaitMs <= 0) return false;
+    const available = Date.parse(hop.availableAt);
+    if (!Number.isFinite(available)) return false;
+    const before = this.#hopClock.now().getTime();
+    const waitMs = available - before;
+    if (waitMs > this.#inRunBackoffWaitMs) return false;
+    if (this.#missionDeadlineAt !== undefined && available > this.#missionDeadlineAt) return false;
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, waitMs);
+      });
+    }
+    const after = this.#hopClock.now().getTime();
+    if (waitMs > 0 && after <= before) return false;
+    if (after < available) {
+      const remain = available - after;
+      if (remain > this.#inRunBackoffWaitMs) return false;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, remain);
+      });
+      if (this.#hopClock.now().getTime() <= after) return false;
+    }
+    return this.#hopClock.now().getTime() >= available;
   }
 
   async #reportClaimedHopFailure(input: {
