@@ -39,6 +39,7 @@ import type {
   CommandTransaction,
   IdGenerator,
   ProjectRepository,
+  CandidateCircuitRepository,
 } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { withDeliveryKey } from './delivery.ts';
@@ -53,6 +54,8 @@ import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from '.
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 import { validateEnqueueHop } from './durable-scheduler.ts';
 import type { QueuedHop } from './durable-scheduler.ts';
+import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
+import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
 import {
   cloneValidationReport,
   ValidationReportConflictError,
@@ -111,6 +114,7 @@ interface StateFile {
    */
   validationReports: ValidationReport[];
   queuedHops: QueuedHop[];
+  candidateCircuits: CandidateCircuit[];
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -170,6 +174,7 @@ function emptyState(): StateFile {
     queryRuns: [],
     validationReports: [],
     queuedHops: [],
+    candidateCircuits: [],
   };
 }
 
@@ -221,6 +226,7 @@ interface OpenTransaction {
   readonly agentPool: AgentPoolRow[];
   readonly archivedMissions: ArchivedMissionRef[];
   readonly queuedHops: QueuedHop[];
+  readonly candidateCircuits: CandidateCircuit[];
   /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
   readonly done: Promise<void>;
   readonly finish: () => void;
@@ -422,6 +428,7 @@ export class FileStateStore implements CommandTransaction {
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
       if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
+      if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
       // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
       state.deliveries = state.deliveries.map(withDeliveryKey);
       seedQueryRunIdCounter(state);
@@ -510,6 +517,7 @@ export class FileStateStore implements CommandTransaction {
       agentPool: [...s.agentPool],
       archivedMissions: [...s.archivedMissions],
       queuedHops: [...s.queuedHops],
+      candidateCircuits: [...s.candidateCircuits],
       done,
       finish,
     };
@@ -538,6 +546,7 @@ export class FileStateStore implements CommandTransaction {
     s.agentPool = tx.agentPool;
     s.archivedMissions = tx.archivedMissions;
     s.queuedHops = tx.queuedHops;
+    s.candidateCircuits = tx.candidateCircuits;
     this.#tx = undefined;
     if (this.#deferredFlush) {
       this.#deferredFlush = false;
@@ -1134,5 +1143,67 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
       if (!Array.isArray(row?.facts)) state.agentPool[index] = { ...row, facts: [] };
     }
     return state.agentPool;
+  }
+}
+
+/** File-backed per-profile circuit; serialized by FileStateStore's single-writer transaction discipline. */
+export class FileCandidateCircuitRepository implements CandidateCircuitRepository {
+  #store: FileStateStore;
+  constructor(store: FileStateStore) { this.#store = store; }
+
+  async get(profileId: string): Promise<CandidateCircuit> {
+    this.#store.refreshIfChanged();
+    const row = this.#rows().find((item) => item.profileId === profileId);
+    return row ? { ...row } : closedCandidateCircuit(profileId);
+  }
+
+  async open(input: OpenCandidateCircuitInput): Promise<CandidateCircuit> {
+    validateOpenCandidateCircuit(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const row = openCandidateCircuit(input);
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      if (index < 0) rows.push(row); else rows[index] = row;
+      this.#store.flush();
+      return { ...row };
+    });
+  }
+
+  async tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean> {
+    validateClaimCandidateProbe(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      if (index < 0) return false;
+      const claimed = claimCandidateProbe(rows[index] as Extract<CandidateCircuit, { state: 'open' | 'half_open' }>, input.now);
+      if (!claimed) return false;
+      rows[index] = claimed;
+      this.#store.flush();
+      return true;
+    });
+  }
+
+  async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {
+    validateResolveCandidateProbe(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      const result = resolveCandidateProbe(index < 0 ? undefined : rows[index], input);
+      if (index < 0) rows.push(result); else rows[index] = result;
+      this.#store.flush();
+      return { ...result };
+    });
+  }
+
+  #rows(): CandidateCircuit[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
+    return state.candidateCircuits;
   }
 }
