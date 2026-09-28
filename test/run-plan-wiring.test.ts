@@ -40,7 +40,9 @@ import { InMemoryValidationReportRepository } from '../src/application/validatio
 import { ExecFileCommandRunner } from '../src/application/validation/exec-file-command-runner.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
-import { buildPersistentPlatform, makeIssuer } from '../src/main.ts';
+import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from '../src/main.ts';
+import { PgCandidateCircuitRepository } from '../src/application/pg-store.ts';
+import { ensureTestDatabase } from './helpers/pg.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
@@ -118,12 +120,109 @@ const ORDER: WorkOrder = {
 };
 
 describe('持久化装配里机器 L3 可用', () => {
+  test('buildPgPlatform 将熔断仓储绑定到自身 PgStateStore，重建后读到记录', async (t) => {
+    const connectionString = await ensureTestDatabase('run_plan_circuit_wiring');
+    if (!connectionString) {
+      t.skip('Postgres unavailable; buildPgPlatform circuit wiring not verified');
+      return;
+    }
+    const first = await buildPgPlatform({ connectionString });
+    try {
+      assert.equal(first.candidateCircuits.constructor.name, 'PgCandidateCircuitRepository');
+      // The repository and this store must share the same pool; constructing another repository
+      // from the platform store must observe the same transaction-backed database.
+      assert.ok(first.store instanceof Object);
+      assert.ok(first.candidateCircuits instanceof PgCandidateCircuitRepository);
+      await first.store.pool.query('TRUNCATE candidate_circuits');
+      const projectRoot = repoOn('main');
+      const workspace = new GitWorktreeManager(temp('coagent-pg-circuit-wt-'));
+      const missionId = `M-pg-circuit-${Date.now()}`;
+      await first.platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+      const openUntil = new Date(Date.now() + 60_000).toISOString();
+      await first.candidateCircuits.open({ profileId: 'pg-platform-circuit', failureClass: 'upstream', openUntil: '2030-01-01T00:00:00.000Z' });
+      await first.candidateCircuits.open({ profileId: 'P', failureClass: 'upstream', now: new Date().toISOString(), openUntil });
+      const second = await buildPgPlatform({ connectionString });
+      try {
+        assert.deepEqual(await second.candidateCircuits.get('pg-platform-circuit'), {
+          profileId: 'pg-platform-circuit', state: 'open', failureClass: 'upstream', openUntil: '2030-01-01T00:00:00.000Z',
+        });
+        const throughPlatformStore = new PgCandidateCircuitRepository(second.store);
+        assert.deepEqual(await throughPlatformStore.get('pg-platform-circuit'), await second.candidateCircuits.get('pg-platform-circuit'));
+        const server = createApi({ platform: second.platform, tokens: second.tokens, deliveries: second.deliveries });
+        try {
+          await listenLoopback(server, 0);
+          const address = server.address() as AddressInfo;
+          const runtime = new ScriptedRuntime({});
+          const runner = new MissionRunner({
+            platform: second.platform, tokens: makeIssuer(second.platform, second.tokens),
+            baseUrl: `http://127.0.0.1:${address.port}`, workspace,
+            candidateCircuits: second.candidateCircuits,
+            coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
+            executor: { runtime: new ScriptedRuntime({}), candidates: [] },
+          });
+          await runner.run(missionId, { projectRoot });
+          assert.equal(runtime.specs.length, 0, 'PG 重建后未到期 open 候选未启动 Agent');
+        } finally {
+          if (server.listening) await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
+        }
+      } finally {
+        await second.close();
+      }
+    } finally {
+      await first.close();
+    }
+  });
+  test('buildPersistentPlatform 重建后的 Runner 尊重未到期 open 候选', async () => {
+    const statePath = join(temp('coagent-circuit-state-'), 'state.json');
+    const projectRoot = repoOn('main');
+    const workspace = new GitWorktreeManager(temp('coagent-circuit-wt-'));
+    const first = await buildPersistentPlatform(statePath, { workspace });
+    await first.platform.createMission({ projectId: 'P', missionId: 'M-circuit-rebuilt', contract: CONTRACT });
+    const openUntil = new Date(Date.now() + 60_000).toISOString();
+    await first.candidateCircuits.open({
+      profileId: 'P', failureClass: 'rate_limit', now: new Date().toISOString(), openUntil,
+    });
+    first.persist();
+
+    const rebuilt = await buildPersistentPlatform(statePath, { workspace, reconcile: false });
+    const persisted = await rebuilt.candidateCircuits.get('P');
+    assert.equal(persisted?.state, 'open');
+    const server = createApi({ platform: rebuilt.platform, tokens: rebuilt.tokens, deliveries: rebuilt.deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const address = server.address() as AddressInfo;
+      const runtime = new ScriptedRuntime({});
+      const runner = new MissionRunner({
+        platform: rebuilt.platform,
+        tokens: makeIssuer(rebuilt.platform, rebuilt.tokens),
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        workspace,
+        candidateCircuits: rebuilt.candidateCircuits,
+        coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
+        executor: { runtime: new ScriptedRuntime({}), candidates: [] },
+      });
+      await runner.run('M-circuit-rebuilt', { projectRoot });
+      assert.equal(runtime.specs.length, 0, '未到期 open 候选未启动 Agent');
+      assert.deepEqual(await rebuilt.candidateCircuits.get('P'), persisted);
+    } finally {
+      if (server.listening) await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
+      rebuilt.releaseLock();
+    }
+  });
+
   test('buildPersistentPlatform 给了真的 commandRunner：合并、在合并结果上跑命令、放行', async () => {
     const repo = repoOn('auto/plan-x');
     const wt = temp('coagent-wt-');
     const workspace = new GitWorktreeManager(wt);
-    const built = await buildPersistentPlatform(join(temp('coagent-state-'), 'state.json'), { workspace });
+    const statePath = join(temp('coagent-state-'), 'state.json');
+    const built = await buildPersistentPlatform(statePath, { workspace });
     const { platform } = built;
+    assert.equal(built.candidateCircuits.constructor.name, 'FileCandidateCircuitRepository');
+    await built.candidateCircuits.open({ profileId: 'circuit-persist', failureClass: 'upstream', openUntil: '2030-01-01T00:00:00.000Z' });
+    const rebuilt = await buildPersistentPlatform(statePath, { workspace, reconcile: false });
+    assert.deepEqual(await rebuilt.candidateCircuits.get('circuit-persist'), {
+      profileId: 'circuit-persist', state: 'open', failureClass: 'upstream', openUntil: '2030-01-01T00:00:00.000Z',
+    });
 
     await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
     const prepared = await workspace.prepare('M1', repo);
@@ -449,6 +548,7 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /runner\.run\(missionId, missionRunOptions\(options, maxRounds\)\)/);
     assert.match(runPlan, /return maxRounds === undefined \? options : \{ \.\.\.options, maxRounds \}/);
     assert.match(runPlan, /parseMaxRounds\(flagValue\('--max-rounds'\), process\.argv\.includes\('--max-rounds'\)\)/);
+    assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
     assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 1);

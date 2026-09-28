@@ -26,6 +26,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
 import { missionRunOptions } from '../src/run-mission.ts';
+import { buildPersistentPlatform } from '../src/main.ts';
 import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
@@ -172,6 +173,43 @@ async function existingPlatform() {
   };
 }
 
+test('文件平台重建后，持久 open 熔断阻止未到期协调者候选启动', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-circuit-'));
+  temps.push(dir);
+  const statePath = join(dir, 'state.json');
+  const first = await buildPersistentPlatform(statePath, { workspace: new InPlaceWorkspaceManager() });
+  await first.platform.createMission({ projectId: 'P', missionId: 'M-circuit', contract: CONTRACT });
+  const openUntil = new Date(Date.now() + 60_000).toISOString();
+  const opened = await first.candidateCircuits.open({
+    profileId: 'P', failureClass: 'rate_limit', now: new Date().toISOString(), openUntil,
+  });
+  assert.equal(opened.state, 'open');
+  first.persist();
+
+  const rebuilt = await buildPersistentPlatform(statePath, { workspace: new InPlaceWorkspaceManager() });
+  const persisted = await rebuilt.candidateCircuits.get('P');
+  assert.deepEqual(persisted, opened, '重建仓储读到原 open 记录');
+  const tokens = rebuilt.tokens;
+  const server: Server = createApi({ platform: rebuilt.platform, tokens, deliveries: rebuilt.deliveries });
+  await listenLoopback(server, 0);
+  servers.push(server);
+  const address = server.address() as AddressInfo;
+  const runtime = new ScriptedRuntime({});
+  const runner = new MissionRunner({
+    platform: rebuilt.platform,
+    tokens: makeIssuer(rebuilt.platform, tokens),
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    workspace: new InPlaceWorkspaceManager(),
+    candidateCircuits: rebuilt.candidateCircuits,
+    coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
+    executor: { runtime: new ScriptedRuntime({}), candidates: [] },
+  });
+  await runner.run('M-circuit', { projectRoot: dir });
+  assert.equal(runtime.specs.length, 0, '未到期 open 候选未启动 Agent');
+  assert.deepEqual(await rebuilt.candidateCircuits.get('P'), persisted);
+  rebuilt.releaseLock();
+});
+
 describe('内部入口：注入既有依赖即可跑，不另建平台或监听', () => {
   test('源码：入口不创建平台、不 listen、不拿锁', () => {
     const runner = src('application/mission-runner.ts');
@@ -196,6 +234,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
   test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
     const cli = src('run-mission.ts');
     assert.match(cli, /new MissionRunner\(/);
+    assert.match(cli, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
     assert.match(cli, /runner\.run\(/);
     assert.match(cli, /createApi\(/);
     assert.match(cli, /listenLoopback\(/);

@@ -135,7 +135,7 @@ async function main() {
         workspace: missionWorkspace,
         exclusive: { what: `跑 Mission ${spec.missionId}` },
       });
-  const { platform, tokens, activity, deliveries, persist, reconciled, agentPool } = built;
+  const { platform, tokens, activity, deliveries, persist, reconciled, agentPool, candidateCircuits } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   if (reconciled.interrupted.length > 0) {
@@ -248,6 +248,7 @@ async function main() {
     tokens: makeIssuer(platform, tokens),
     baseUrl,
     workspace: missionWorkspace,
+    candidateCircuits,
     // 「我知道基线过期了，照跑」。必须由人显式给：调度器那边原先用一个
     // 进程内布尔量记这件事，而 CLI 一次运行一个进程，它每次都失忆——
     // 于是基线一过期，这条 Mission 每跑一次都被同一句话挡回去。
