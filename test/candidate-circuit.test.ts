@@ -29,6 +29,25 @@ test('candidate failures are classified conservatively with explicit failover de
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'request failed', true), { failureClass: 'unknown', failover: false });
 });
 
+test('upstream billing and credit signals classify as quota; 403 or forbidden alone do not', () => {
+  const quota = { failureClass: 'quota', failover: true };
+  const unknown = { failureClass: 'unknown', failover: false };
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'xai API error (403): You have run out of credits or need a Grok subscription'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'CREDITS exhausted'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'Need a Subscription'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'BILLING hold'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'spending limit reached'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'usage limit exceeded'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'usage_limit exceeded'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'insufficient balance'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'insufficient_quota'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '余额不足'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '欠费'), quota);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '403'), unknown);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'forbidden'), unknown);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 403 Forbidden'), unknown);
+});
+
 test('missing circuit is represented as closed', () => {
   const missing: CandidateCircuit = closedCandidateCircuit('p1');
   assert.equal(missing.state, 'closed');
