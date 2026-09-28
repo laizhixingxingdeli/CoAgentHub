@@ -43,6 +43,8 @@ export interface PlanFeatureSpec {
   /** 方案声明的改动范围：文件写路径，目录以 `/` 结尾。Fast Lane 工单不得越出。 */
   readonly allowedScope: readonly string[];
   readonly acceptance: readonly string[];
+  readonly constraints?: readonly string[];
+  readonly nonGoals?: readonly string[];
   /** 源方案状态。缺省 = 旧格式待跑。 */
   readonly status?: PlanFeatureSourceStatus;
   /** 必须全部在源方案里明确标 done；不从 childrenDone 等叙述推断。 */
@@ -263,6 +265,9 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
     const allowedScope = readStringList(f.allowedScope, `features[${index}].allowedScope`, bad);
     const acceptance = readStringList(f.acceptance, `features[${index}].acceptance`, bad);
     const dependsOn = readStringList(f.dependsOn, `features[${index}].dependsOn`, bad);
+    const itemLabel = `features[${index}]（${String(f.id)}）`;
+    const constraints = readStringList(f.constraints, `${itemLabel}.constraints`, bad);
+    const nonGoals = readStringList(f.nonGoals, `${itemLabel}.nonGoals`, bad);
     if (f.repo !== undefined && typeof f.repo !== 'string') {
       throw bad(`features[${index}].repo 必须是字符串。`);
     }
@@ -272,6 +277,8 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
       ...(isText(f.why) ? { why: f.why as string } : {}),
       allowedScope: Object.freeze([...allowedScope]),
       acceptance: Object.freeze([...acceptance]),
+      ...(f.constraints !== undefined ? { constraints: Object.freeze([...constraints]) } : {}),
+      ...(f.nonGoals !== undefined ? { nonGoals: Object.freeze([...nonGoals]) } : {}),
       ...(f.status !== undefined ? { status: f.status } : {}),
       ...(dependsOn.length > 0 ? { dependsOn: Object.freeze([...dependsOn]) } : {}),
       ...(typeof f.repo === 'string' ? { repo: f.repo } : {}),
@@ -308,12 +315,16 @@ export function featureContract(plan: PlanSpec, feature: PlanFeatureSpec): Missi
     // 只有候选会走到这里，候选一定有 why；万一没有也不拼出「标题：」这种半句。
     intent: feature.why ? `${feature.title}：${feature.why}` : feature.title,
     acceptance: Object.freeze([...feature.acceptance]),
-    constraints: Object.freeze([`只改方案为它声明的范围：${feature.allowedScope.join('、')}。`]),
-    nonGoals: Object.freeze(
-      others.length > 0
+    constraints: Object.freeze([
+      `只改方案为它声明的范围：${feature.allowedScope.join('、')}。`,
+      ...(feature.constraints ?? []),
+    ]),
+    nonGoals: Object.freeze([
+      ...(feature.nonGoals ?? []),
+      ...(others.length > 0
         ? [`方案 ${plan.planId} 里的其他功能点（${others.join('、')}）不在本 Mission 范围内。`]
-        : [],
-    ),
+        : []),
+    ]),
     guardrails: Object.freeze([
       `这是方案 ${plan.planId} 的无人值守运行：合并由平台在集成分支 ${plan.integrationBranch} 上` +
         '验证后放行。不要自己合并、不要切换分支。',
