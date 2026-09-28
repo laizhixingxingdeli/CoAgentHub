@@ -1,4 +1,4 @@
-import type { Clock, IdGenerator, QueuedHopRepository } from './ports.ts';
+import type { Clock, IdGenerator, QueuedHopCapacityRepository, QueuedHopRepository } from './ports.ts';
 
 export type HopRole = 'coordinator' | 'executor' | 'independent_reviewer';
 export type HopPriority = number;
@@ -19,11 +19,17 @@ export interface QueuedHop {
   readonly leaseUntil?: string;
   /** Missing on legacy queued rows; interpreted as zero before the first claim. */
   readonly claimGeneration?: number;
+  /**
+   * Candidate that actually holds this lease. Absent on legacy rows, which occupy
+   * global/project/role only — otherwise old snapshots would be unreadable.
+   */
+  readonly runtimeKind?: string;
+  readonly profileId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
-export type EnqueueHopInput = Omit<QueuedHop, 'id' | 'status' | 'owner' | 'leaseUntil' | 'claimGeneration' | 'createdAt' | 'updatedAt'>;
+export type EnqueueHopInput = Omit<QueuedHop, 'id' | 'status' | 'owner' | 'leaseUntil' | 'claimGeneration' | 'createdAt' | 'updatedAt' | 'runtimeKind' | 'profileId'>;
 
 function identity(value: unknown, name: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${name} must be non-empty`);
@@ -37,7 +43,7 @@ function timestamp(value: unknown, name: string): asserts value is string {
 
 export function validateEnqueueHop(input: EnqueueHopInput): void {
   const runtimeInput = input as EnqueueHopInput & Record<string, unknown>;
-  for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration']) {
+  for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration', 'runtimeKind', 'profileId']) {
     if (Object.hasOwn(runtimeInput, field)) throw new Error(`${field} cannot be set when enqueueing`);
   }
   identity(input.projectId, 'projectId');
@@ -107,6 +113,239 @@ function leaseDuration(leaseMs: number): void {
 /** Shared by Orchestrator and MissionRunner; matches attempt-lease tolerance. */
 export const DEFAULT_HOP_LEASE_MS = 90_000;
 
+const CAPACITY_DIMENSIONS = ['global', 'project', 'role', 'runtime', 'profile'] as const;
+export type HopCapacityDimension = (typeof CAPACITY_DIMENSIONS)[number];
+
+/** Positive safe-integer caps on concurrent *active* leases. */
+export interface HopCapacityLimits {
+  readonly global: number;
+  readonly project: number;
+  readonly role: number;
+  readonly runtime: number;
+  readonly profile: number;
+}
+
+/**
+ * Explicit fail-closed defaults. Unlimited (MAX_SAFE_INTEGER) would make the
+ * gate a no-op; zero is rejected as an invalid construct.
+ */
+export const DEFAULT_HOP_CAPACITY_LIMITS: HopCapacityLimits = Object.freeze({
+  global: 8,
+  project: 2,
+  role: 4,
+  runtime: 4,
+  profile: 2,
+});
+
+/** Runtime/profile of the candidate that will actually start after this claim. */
+export interface HopCapacityCandidate {
+  readonly runtimeKind: string;
+  readonly profileId: string;
+}
+
+/**
+ * One hop this caller may start, bound to the runtime/profile that will occupy
+ * capacity if that hop is claimed. Storage must not invent a hop, claim an id
+ * missing from this list, or stamp another entry's identity onto this hopId.
+ */
+export interface EligibleHopClaim extends HopCapacityCandidate {
+  readonly hopId: string;
+}
+
+export type QueuedHopWait = 'available_at' | 'lease' | 'capacity';
+
+/** Snapshot decision; `select` is not yet written — storage claims that row. */
+export type CapacityClaimDecision =
+  | { readonly kind: 'select'; readonly hop: QueuedHop; readonly candidate: HopCapacityCandidate }
+  | { readonly kind: 'waiting'; readonly hop: QueuedHop; readonly wait: QueuedHopWait }
+  | { readonly kind: 'empty' };
+
+export type CapacityClaimResult =
+  | { readonly kind: 'claimed'; readonly hop: QueuedHop }
+  | { readonly kind: 'waiting'; readonly hop: QueuedHop; readonly wait: QueuedHopWait }
+  | { readonly kind: 'empty' };
+
+/** Inputs for the atomic cross-row capacity claim implemented by storage. */
+export interface ClaimAvailableHopInput {
+  readonly owner: string;
+  readonly now: string;
+  readonly leaseUntil: string;
+  readonly limits: HopCapacityLimits;
+  readonly eligible: readonly EligibleHopClaim[];
+}
+
+function positiveSafeInteger(value: unknown, name: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive safe integer`);
+  }
+}
+
+export function validateHopCapacityLimits(limits: unknown): asserts limits is HopCapacityLimits {
+  if (limits === null || typeof limits !== 'object' || Array.isArray(limits)) {
+    throw new Error('capacity limits must be an object');
+  }
+  const record = limits as Record<string, unknown>;
+  for (const dim of CAPACITY_DIMENSIONS) {
+    positiveSafeInteger(record[dim], `capacity.${dim}`);
+  }
+}
+
+export function hopCapacityLimits(limits: unknown = DEFAULT_HOP_CAPACITY_LIMITS): HopCapacityLimits {
+  validateHopCapacityLimits(limits);
+  return {
+    global: limits.global,
+    project: limits.project,
+    role: limits.role,
+    runtime: limits.runtime,
+    profile: limits.profile,
+  };
+}
+
+export function validateHopCapacityCandidate(candidate: unknown): asserts candidate is HopCapacityCandidate {
+  if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    throw new Error('capacity candidate must be an object');
+  }
+  const record = candidate as Record<string, unknown>;
+  identity(record.runtimeKind, 'runtimeKind');
+  identity(record.profileId, 'profileId');
+}
+
+export function validateEligibleHopClaims(eligible: unknown): asserts eligible is readonly EligibleHopClaim[] {
+  if (!Array.isArray(eligible)) throw new Error('eligible hops must be an array');
+  const seen = new Set<string>();
+  for (const item of eligible) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('eligible hop must be an object');
+    }
+    const record = item as Record<string, unknown>;
+    identity(record.hopId, 'hopId');
+    identity(record.runtimeKind, 'runtimeKind');
+    identity(record.profileId, 'profileId');
+    const hopId = record.hopId;
+    if (seen.has(hopId)) throw new Error(`eligible hop ${hopId} is duplicated`);
+    seen.add(hopId);
+  }
+}
+
+function eligibleIdentities(eligible: readonly EligibleHopClaim[]): Map<string, HopCapacityCandidate> {
+  validateEligibleHopClaims(eligible);
+  const identities = new Map<string, HopCapacityCandidate>();
+  for (const row of eligible) {
+    identities.set(row.hopId, { runtimeKind: row.runtimeKind, profileId: row.profileId });
+  }
+  return identities;
+}
+
+/**
+ * Occupying lease: claimed and leaseUntil strictly later than `now`.
+ * Equality does not occupy — same boundary as reclaim (`canClaimHop`).
+ */
+export function isActiveHopLease(hop: QueuedHop, now: string): boolean {
+  if (hop.status !== 'claimed') return false;
+  if (typeof hop.leaseUntil !== 'string' || !Number.isFinite(Date.parse(hop.leaseUntil))) return false;
+  if (!Number.isFinite(Date.parse(now))) return false;
+  return Date.parse(hop.leaseUntil) > Date.parse(now);
+}
+
+/**
+ * Higher numeric priority first; same priority is createdAt FIFO; id is a stable
+ * tie-break so two stores cannot pick different heads from the same snapshot.
+ */
+export function compareHopFairness(a: QueuedHop, b: QueuedHop): number {
+  if (a.priority !== b.priority) return b.priority - a.priority;
+  const created = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+  if (created !== 0) return created;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
+function occupancyWouldExceed(
+  hops: readonly QueuedHop[],
+  hop: QueuedHop,
+  now: string,
+  limits: HopCapacityLimits,
+  candidate: HopCapacityCandidate,
+): boolean {
+  let global = 0;
+  let project = 0;
+  let role = 0;
+  let runtime = 0;
+  let profile = 0;
+  for (const row of hops) {
+    if (row.id === hop.id || !isActiveHopLease(row, now)) continue;
+    global += 1;
+    if (row.projectId === hop.projectId) project += 1;
+    if (row.role === hop.role) role += 1;
+    if (row.runtimeKind === candidate.runtimeKind) runtime += 1;
+    if (row.profileId === candidate.profileId) profile += 1;
+  }
+  return global >= limits.global
+    || project >= limits.project
+    || role >= limits.role
+    || runtime >= limits.runtime
+    || profile >= limits.profile;
+}
+
+export function hopFitsCapacity(
+  hops: readonly QueuedHop[],
+  hop: QueuedHop,
+  now: string,
+  limits: HopCapacityLimits,
+  candidate: HopCapacityCandidate,
+): boolean {
+  validateHopCapacityLimits(limits);
+  validateHopCapacityCandidate(candidate);
+  return !occupancyWouldExceed(hops, hop, now, limits, candidate);
+}
+
+/**
+ * Pure fair selection over a snapshot. Storage must run this inside the same
+ * transaction that writes the claim — occupancy is only durable leases, never
+ * an in-process counter.
+ */
+export function decideCapacityClaim(
+  hops: readonly QueuedHop[],
+  now: string,
+  limits: HopCapacityLimits,
+  eligible: readonly EligibleHopClaim[],
+): CapacityClaimDecision {
+  validateHopCapacityLimits(limits);
+  const identities = eligibleIdentities(eligible);
+  const claimable = hops.filter((hop) => identities.has(hop.id) && canClaimHop(hop, now)).sort(compareHopFairness);
+  let blocked: QueuedHop | undefined;
+  for (const hop of claimable) {
+    const candidate = identities.get(hop.id)!;
+    if (occupancyWouldExceed(hops, hop, now, limits, candidate)) {
+      blocked ??= hop;
+      continue;
+    }
+    return { kind: 'select', hop, candidate };
+  }
+  if (blocked) return { kind: 'waiting', hop: blocked, wait: 'capacity' };
+  const considered = hops.filter((hop) => identities.has(hop.id));
+  const leased = considered.filter((hop) => isActiveHopLease(hop, now)).sort(compareHopFairness)[0];
+  if (leased) return { kind: 'waiting', hop: leased, wait: 'lease' };
+  const delayed = considered
+    .filter((hop) => hop.status !== 'completed' && Date.parse(hop.availableAt) > Date.parse(now))
+    .sort(compareHopFairness)[0];
+  if (delayed) return { kind: 'waiting', hop: delayed, wait: 'available_at' };
+  return { kind: 'empty' };
+}
+
+/** Stamp the starting candidate so later occupancy can count runtime/profile. */
+export function claimHopWithCandidate(
+  hop: QueuedHop,
+  owner: string,
+  now: string,
+  leaseUntil: string,
+  candidate: HopCapacityCandidate,
+): QueuedHop | undefined {
+  validateHopCapacityCandidate(candidate);
+  const claimed = claimHop(hop, owner, now, leaseUntil);
+  if (!claimed) return undefined;
+  return { ...claimed, runtimeKind: candidate.runtimeKind, profileId: candidate.profileId };
+}
+
 export function hopIdempotencyKey(input: {
   readonly missionId: string;
   readonly role: HopRole;
@@ -167,7 +406,7 @@ export function nextLogicalHopCycle(
 export type QueuedHopAcquireResult =
   | { readonly kind: 'claimed'; readonly hop: QueuedHop }
   | { readonly kind: 'completed'; readonly hop: QueuedHop }
-  | { readonly kind: 'waiting'; readonly hop: QueuedHop; readonly wait: 'available_at' | 'lease' };
+  | { readonly kind: 'waiting'; readonly hop: QueuedHop; readonly wait: QueuedHopWait };
 
 /**
  * Enqueue then claim the hop that is about to run.
@@ -200,6 +439,9 @@ export function queuedHopWaitDetail(result: Extract<QueuedHopAcquireResult, { ki
   if (result.wait === 'available_at') {
     return `队列 Hop ${result.hop.id} 尚未到达 availableAt=${result.hop.availableAt}，不能启动 Agent`;
   }
+  if (result.wait === 'capacity') {
+    return `队列 Hop ${result.hop.id} 受并发容量限制，不能启动 Agent`;
+  }
   const owner = result.hop.owner ?? '(unknown)';
   const until = result.hop.leaseUntil ?? '(none)';
   return `队列 Hop ${result.hop.id} 仍有有效租约（持有者 ${owner}，到期 ${until}），等待接管，不能启动 Agent`;
@@ -209,17 +451,46 @@ export class DurableScheduler {
   readonly #repository: QueuedHopRepository;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
+  readonly #limits: HopCapacityLimits;
 
-  constructor(repository: QueuedHopRepository, clock: Clock, ids: IdGenerator) {
+  constructor(
+    repository: QueuedHopRepository,
+    clock: Clock,
+    ids: IdGenerator,
+    limits: HopCapacityLimits = DEFAULT_HOP_CAPACITY_LIMITS,
+  ) {
     this.#repository = repository;
     this.#clock = clock;
     this.#ids = ids;
+    // Reject bad caps before enqueue/claim can touch storage.
+    this.#limits = hopCapacityLimits(limits);
   }
 
   async claim(id: string, owner: string, leaseMs: number): Promise<QueuedHop | undefined> {
     leaseDuration(leaseMs);
     const now = this.#clock.now();
     return this.#repository.claim(id, owner, now.toISOString(), new Date(now.getTime() + leaseMs).toISOString());
+  }
+
+  /**
+   * Fair capacity claim. Storage must evaluate occupancy and skip inside one
+   * transaction; this entry only supplies clock, lease, and already-validated limits.
+   */
+  async claimAvailable(owner: string, leaseMs: number, eligible: readonly EligibleHopClaim[]): Promise<CapacityClaimResult> {
+    leaseDuration(leaseMs);
+    validateEligibleHopClaims(eligible);
+    const repo = this.#repository as QueuedHopCapacityRepository;
+    if (typeof repo.claimAvailable !== 'function') {
+      throw new Error('queued hop repository does not support capacity claim');
+    }
+    const now = this.#clock.now();
+    return repo.claimAvailable({
+      owner,
+      now: now.toISOString(),
+      leaseUntil: new Date(now.getTime() + leaseMs).toISOString(),
+      limits: this.#limits,
+      eligible,
+    });
   }
 
   async renew(id: string, owner: string, claimGeneration: number, leaseMs: number): Promise<QueuedHop> {

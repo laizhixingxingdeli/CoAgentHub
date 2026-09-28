@@ -17,6 +17,7 @@ import type {
   Clock,
   ExecutionProfile,
   IdGenerator,
+  QueuedHopCapacityRepository,
   QueuedHopRepository,
 } from './ports.ts';
 import type { MissionView, Platform } from './platform.ts';
@@ -31,13 +32,19 @@ import { redactSecrets } from './redact.ts';
 import { classifyCandidateFailure } from './candidate-circuit.ts';
 import {
   acquireQueuedHop,
+  compareHopFairness,
+  decideCapacityClaim,
   DEFAULT_HOP_LEASE_MS,
   DurableScheduler,
+  hopCapacityLimits,
   hopIdempotencyKey,
   nextLogicalHopCycle,
   queuedHopWaitDetail,
+  type EligibleHopClaim,
+  type HopCapacityLimits,
   type HopRole,
   type QueuedHop,
+  type QueuedHopWait,
 } from './durable-scheduler.ts';
 
 export interface RolePool {
@@ -123,6 +130,12 @@ export interface OrchestratorDeps {
   hopClock?: Clock;
   hopLeaseMs?: number;
   hopIds?: IdGenerator;
+  /**
+   * 五维并发上限。省略则用 durable-scheduler 代码默认值。
+   * 必须在构造时归一化：坏值若拖到领取才抛，队列可能已被领取、Agent 已经启动。
+   * 与 MissionRunner 同名，生产注入 QueuedHopCapacityRepository 时才按此上限 claimAvailable。
+   */
+  hopCapacityLimits?: HopCapacityLimits;
 }
 
 export interface RunMissionOptions {
@@ -310,6 +323,7 @@ export class Orchestrator {
   #hopScheduler: DurableScheduler | undefined;
   #hopClock: Clock;
   #hopLeaseMs: number;
+  #hopLimits: HopCapacityLimits;
   readonly hops: HopRecord[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
@@ -344,11 +358,14 @@ export class Orchestrator {
     this.#queuedHops = deps.queuedHops;
     this.#hopClock = deps.hopClock ?? { now: () => new Date() };
     this.#hopLeaseMs = deps.hopLeaseMs ?? DEFAULT_HOP_LEASE_MS;
+    // 坏上限在第一跳领取前就必须拒绝。默认走代码上限，避免漏配变成「不限」。
+    this.#hopLimits = hopCapacityLimits(deps.hopCapacityLimits);
     this.#hopScheduler = deps.queuedHops
       ? new DurableScheduler(
           deps.queuedHops,
           this.#hopClock,
           deps.hopIds ?? { next: (prefix) => `${prefix}-${randomUUID()}` },
+          this.#hopLimits,
         )
       : undefined;
   }
@@ -653,23 +670,69 @@ export class Orchestrator {
       return { kind: 'waiting', reason: 'waiting_l3', detail };
     }
 
-    const queued = await this.#acquireHopForStart({
-      role: 'independent_reviewer',
-      missionId,
-      maxAttempts: pool.maxAttempts ?? 3,
-    });
-    if (queued.kind === 'waiting') {
-      await this.#platform.setWaitReason(missionId, queued.reason, queued.detail);
-      return { kind: 'waiting', reason: queued.reason, detail: queued.detail };
-    }
-    if (queued.kind === 'completed') {
-      await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视队列项已完成，仍待放行');
-      return { kind: 'awaiting_l3_review' };
+    // 容量路径必须先选定候选身份再占租约、再开 token。把整池交给 startReviewer
+    // 可能挑 B，而租约仍是 A —— 独立检视就会拿 A 的名额启动 B。
+    let reviewerCandidates = candidates;
+    let queued:
+      | { kind: 'bypass' }
+      | { kind: 'claimed'; hop: QueuedHop }
+      | { kind: 'completed'; hop: QueuedHop }
+      | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait } = { kind: 'bypass' };
+    if (this.#supportsCapacityClaim() && candidates.length > 0) {
+      let capacityWait: Extract<typeof queued, { kind: 'waiting' }> | undefined;
+      let selected: (typeof candidates)[number] | undefined;
+      for (const candidate of candidates) {
+        const attempt = await this.#acquireHopForStart({
+          role: 'independent_reviewer',
+          missionId,
+          maxAttempts: pool.maxAttempts ?? 3,
+          candidate: { runtimeKind: pool.runtime.kind, profileId: candidate.profileId },
+        });
+        if (attempt.kind === 'waiting') {
+          if (attempt.wait === 'capacity') {
+            capacityWait = attempt;
+            continue;
+          }
+          await this.#platform.setWaitReason(missionId, attempt.reason, attempt.detail);
+          return { kind: 'waiting', reason: attempt.reason, detail: attempt.detail };
+        }
+        if (attempt.kind === 'completed') {
+          await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视队列项已完成，仍待放行');
+          return { kind: 'awaiting_l3_review' };
+        }
+        queued = attempt;
+        selected = candidate;
+        break;
+      }
+      if (!selected) {
+        if (capacityWait) {
+          await this.#platform.setWaitReason(missionId, capacityWait.reason, capacityWait.detail);
+          return { kind: 'waiting', reason: capacityWait.reason, detail: capacityWait.detail };
+        }
+        const detail = 'HA 独立检视故障：没有独立检视候选。';
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+        return { kind: 'waiting', reason: 'waiting_l3', detail };
+      }
+      reviewerCandidates = [selected];
+    } else {
+      queued = await this.#acquireHopForStart({
+        role: 'independent_reviewer',
+        missionId,
+        maxAttempts: pool.maxAttempts ?? 3,
+      });
+      if (queued.kind === 'waiting') {
+        await this.#platform.setWaitReason(missionId, queued.reason, queued.detail);
+        return { kind: 'waiting', reason: queued.reason, detail: queued.detail };
+      }
+      if (queued.kind === 'completed') {
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视队列项已完成，仍待放行');
+        return { kind: 'awaiting_l3_review' };
+      }
     }
 
     let started: { attemptId: string; token: string; profileId: string };
     try {
-      started = await startReviewer(missionId, candidates);
+      started = await startReviewer(missionId, reviewerCandidates);
     } catch (error) {
       const detail =
         error instanceof PlatformRuleError
@@ -679,8 +742,19 @@ export class Orchestrator {
       return { kind: 'waiting', reason: 'waiting_l3', detail };
     }
 
+    if (
+      queued.kind === 'claimed' &&
+      queued.hop.profileId !== undefined &&
+      started.profileId !== queued.hop.profileId
+    ) {
+      const detail =
+        `HA 独立检视候选 ${started.profileId} 与队列租约 ${queued.hop.profileId} 不一致，不启动 Agent`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
     const profile =
-      candidates.find((row) => row.profileId === started.profileId) ?? {
+      reviewerCandidates.find((row) => row.profileId === started.profileId) ?? {
         endpoint: 'local',
         profileId: started.profileId,
       };
@@ -1093,17 +1167,11 @@ export class Orchestrator {
       return { exhausted: 'no_available_agent' };
     }
 
-    const queued = await this.#acquireHopForStart({
-      role: input.role,
-      missionId: input.missionId,
-      workItemId: input.workItemId,
-      maxAttempts: input.pool.maxAttempts ?? 3,
-    });
-    if (queued.kind === 'waiting') return { exhausted: queued.reason, detail: queued.detail };
-    if (queued.kind === 'completed') return { alreadyCompleted: true };
-    const claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
+    // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
+    let claimedHop: QueuedHop | undefined;
     let hopRan = false;
     let hopLeaseLost = false;
+    let capacityBlocked: { reason: WaitReason; detail: string } | undefined;
 
     const limit = input.pool.maxAttempts ?? 3;
     let used = 0;
@@ -1131,6 +1199,35 @@ export class Orchestrator {
           });
         }
         return { exhausted: 'attempt_limit_reached' };
+      }
+      const identity = { runtimeKind: input.pool.runtime.kind, profileId: profile.profileId };
+      if (claimedHop && this.#leaseIdentityMismatch(claimedHop, identity)) {
+        // 仍握着 A 的租约时不得启动 B；未跑完的 hop 不能 complete，只能跳过。
+        continue;
+      }
+      if (!claimedHop) {
+        const queued = await this.#acquireHopForStart({
+          role: input.role,
+          missionId: input.missionId,
+          workItemId: input.workItemId,
+          maxAttempts: limit,
+          candidate: identity,
+        });
+        if (queued.kind === 'waiting') {
+          if (queued.wait === 'capacity') {
+            capacityBlocked = { reason: queued.reason, detail: queued.detail };
+            if (claimedProbe) {
+              const circuit = await this.#candidateCircuits!.get(profile.profileId);
+              if (circuit.state === 'half_open') await this.#candidateCircuits!.resolveProbe({
+                profileId: profile.profileId, succeeded: false, failureClass: circuit.failureClass, openUntil: circuit.openUntil,
+              });
+            }
+            continue;
+          }
+          return { exhausted: queued.reason, detail: queued.detail };
+        }
+        if (queued.kind === 'completed') return { alreadyCompleted: true };
+        claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
       }
       used += 1;
 
@@ -1196,6 +1293,10 @@ export class Orchestrator {
         }
       };
       try {
+        // Attempt 已开：start 抛错也算消耗了这一跳。不置位的话 failover 会握着 A
+        // 的租约跳过 B；进程若在 start 返回前崩溃，hopRan 本来就不会落盘，
+        // 未 complete 的租约仍可供恢复夹具接管。
+        hopRan = true;
         const run = await input.pool.runtime.start({
           role: input.role,
           attemptId,
@@ -1208,7 +1309,6 @@ export class Orchestrator {
           resumeRef: input.resumeRef,
           endpoint: { baseUrl: this.#baseUrl, token },
         });
-        hopRan = true;
         // 一边跑一边往实时通道里送。不送的话，界面在这一跳的两三分钟里是死的——
         // 人分不出它在干活还是卡住了，而这正是最想知道的时候。
         unsubscribe = run.on((event) => {
@@ -1473,6 +1573,15 @@ export class Orchestrator {
         if (input.role === 'executor' && startRevision) {
           await this.#workspace.rollback(input.cwd, startRevision).catch(() => undefined);
         }
+        // 容量路径必须先释放 A 的持久租约再领 B。不 complete 的话下一跳会带着 A 的
+        // runtime/profile 占位去启动 B，五维上限就被绕开。未真正跑过的 hop 不能
+        // complete（恢复夹具要靠它接管），只能跳过后续身份不同的候选。
+        if (this.#supportsCapacityClaim() && hopRan && !hopLeaseLost) {
+          await this.#completeHopLease(claimedHop);
+          claimedHop = undefined;
+          hopRan = false;
+          hopLeaseLost = false;
+        }
         continue; // 换下一个候选
       }
       if (hopRan && !hopLeaseLost) await this.#completeHopLease(claimedHop);
@@ -1481,6 +1590,9 @@ export class Orchestrator {
         resumeRef: outcome.resumeRef,
         persistentUnknown: Boolean(this.#candidateCircuits && failureClass === 'unknown' && durableCandidateFailure),
       };
+    }
+    if (capacityBlocked && used === 0) {
+      return { exhausted: capacityBlocked.reason, detail: capacityBlocked.detail };
     }
     return undefined;
   }
@@ -1494,11 +1606,12 @@ export class Orchestrator {
     missionId: string;
     workItemId?: string;
     maxAttempts: number;
+    candidate?: { runtimeKind: string; profileId: string };
   }): Promise<
     | { kind: 'bypass' }
     | { kind: 'claimed'; hop: QueuedHop }
     | { kind: 'completed'; hop: QueuedHop }
-    | { kind: 'waiting'; reason: WaitReason; detail: string }
+    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait }
   > {
     if (!this.#hopScheduler || !this.#queuedHops) return { kind: 'bypass' };
     const view = await this.#platform.getMissionView(input.missionId);
@@ -1531,29 +1644,33 @@ export class Orchestrator {
       attemptCycle,
     });
     const nowIso = this.#hopClock.now().toISOString();
-    const acquired = await acquireQueuedHop({
-      scheduler: this.#hopScheduler,
-      repository: this.#queuedHops,
-      owner: this.#owner,
-      leaseMs: this.#hopLeaseMs,
-      nowIso,
-      input: {
-        projectId: view.projectId,
-        missionId: input.missionId,
-        workItemId,
-        role: input.role,
-        priority: input.role === 'coordinator' ? 0 : input.role === 'executor' ? 10 : 20,
-        availableAt: nowIso,
-        attemptCount: 0,
-        maxAttempts: Math.max(input.maxAttempts, 1),
-        idempotencyKey,
-      },
-    });
+    const enqueueInput = {
+      projectId: view.projectId,
+      missionId: input.missionId,
+      workItemId,
+      role: input.role,
+      priority: input.role === 'coordinator' ? 0 : input.role === 'executor' ? 10 : 20,
+      availableAt: nowIso,
+      attemptCount: 0,
+      maxAttempts: Math.max(input.maxAttempts, 1),
+      idempotencyKey,
+    };
+    const acquired = this.#supportsCapacityClaim()
+      ? await this.#claimEnqueuedHopWithCapacity(enqueueInput, nowIso, input.candidate)
+      : await acquireQueuedHop({
+          scheduler: this.#hopScheduler,
+          repository: this.#queuedHops,
+          owner: this.#owner,
+          leaseMs: this.#hopLeaseMs,
+          nowIso,
+          input: enqueueInput,
+        });
     if (acquired.kind === 'waiting') {
       return {
         kind: 'waiting',
         reason: 'project_busy',
         detail: queuedHopWaitDetail(acquired),
+        wait: acquired.wait,
       };
     }
     if (acquired.kind === 'completed') return acquired;
@@ -1581,6 +1698,131 @@ export class Orchestrator {
       };
     }
     return acquired;
+  }
+
+  #supportsCapacityClaim(): boolean {
+    return typeof (this.#queuedHops as QueuedHopCapacityRepository | undefined)?.claimAvailable === 'function';
+  }
+
+  /** 未盖身份的旧行不算错配——D3 简易仓储没有 runtime/profile。 */
+  #leaseIdentityMismatch(
+    hop: QueuedHop,
+    identity: { runtimeKind: string; profileId: string },
+  ): boolean {
+    if (hop.runtimeKind === undefined && hop.profileId === undefined) return false;
+    return hop.runtimeKind !== identity.runtimeKind || hop.profileId !== identity.profileId;
+  }
+
+  /**
+   * 生产容量领取：enqueue 之后只把本 Mission 当前逻辑 Hop + 即将启动的候选交给
+   * claimAvailable。不得退回单 id claim，否则会 silently 绕过五维上限。
+   */
+  async #claimEnqueuedHopWithCapacity(
+    input: {
+      projectId: string;
+      missionId: string;
+      workItemId: string;
+      role: HopRole;
+      priority: number;
+      availableAt: string;
+      attemptCount: number;
+      maxAttempts: number;
+      idempotencyKey: string;
+    },
+    nowIso: string,
+    candidate: { runtimeKind: string; profileId: string } | undefined,
+  ): Promise<
+    | { kind: 'claimed'; hop: QueuedHop }
+    | { kind: 'completed'; hop: QueuedHop }
+    | { kind: 'waiting'; hop: QueuedHop; wait: QueuedHopWait }
+  > {
+    const hop = await this.#hopScheduler!.enqueue(input);
+    if (hop.status === 'completed') return { kind: 'completed', hop };
+    if (!candidate) {
+      // 没有候选身份就领取会留下未标记租约，后续启动谁都算占着它。
+      return { kind: 'waiting', hop, wait: 'capacity' };
+    }
+    const rows = await this.#queuedHops!.list();
+    // 公平预检看全队列：未占用时更优者能跑则等待，避免后到 runner 插队。
+    // claimAvailable 的 eligible 只能是本 hop——把别人放进去，list 与领取之间
+    // 占用一变就会原子领走外 hop。那既不能 complete（丢别人的工作），也不能
+    // 启动（错 Mission），只会留下 stranded 租约。
+    const fairnessEligible = this.#capacityEligible(rows, hop, candidate);
+    for (const row of rows) {
+      if (row.id === hop.id || row.status !== 'queued') continue;
+      if (row.runtimeKind !== undefined && row.profileId !== undefined) continue;
+      if (compareHopFairness(row, hop) < 0) {
+        return { kind: 'waiting', hop, wait: 'lease' };
+      }
+    }
+    const snapshot = decideCapacityClaim(rows, nowIso, this.#hopLimits, fairnessEligible);
+    if (snapshot.kind === 'select' && snapshot.hop.id !== hop.id) {
+      // 更优 hop 能跑：等待，不得领走别人，也不得自己插队。
+      return { kind: 'waiting', hop, wait: 'lease' };
+    }
+    if (snapshot.kind === 'waiting' && snapshot.hop.id !== hop.id && snapshot.wait !== 'capacity') {
+      return snapshot;
+    }
+    if (snapshot.kind === 'waiting' && snapshot.hop.id === hop.id) return snapshot;
+    const ownEligible: EligibleHopClaim[] = [
+      { hopId: hop.id, runtimeKind: candidate.runtimeKind, profileId: candidate.profileId },
+    ];
+    const result = await this.#hopScheduler!.claimAvailable(this.#owner, this.#hopLeaseMs, ownEligible);
+    if (result.kind === 'claimed' && result.hop.id !== hop.id) {
+      // 仓储不得把非 eligible 行领走。若仍发生，不得 complete（会丢掉别人的工作）。
+      return { kind: 'waiting', hop, wait: 'lease' };
+    }
+    if (result.kind === 'claimed') return result;
+    if (result.kind === 'waiting') return result;
+    const latest = (await this.#queuedHops!.get(hop.id)) ?? hop;
+    if (latest.status === 'completed') return { kind: 'completed', hop: latest };
+    if (Date.parse(latest.availableAt) > Date.parse(nowIso)) {
+      return { kind: 'waiting', hop: latest, wait: 'available_at' };
+    }
+    return { kind: 'waiting', hop: latest, wait: 'lease' };
+  }
+
+  /**
+   * 公平预检用的领取集合：已有身份的未完成行 + 本 hop 即将启动的候选。
+   * 只用于 decideCapacityClaim 快照，不交给 claimAvailable。
+   * 不把它们放进预检的话，容量仍空时后到 runner 会以为自己是队头。
+   */
+  #capacityEligible(
+    rows: readonly QueuedHop[],
+    hop: QueuedHop,
+    candidate: { runtimeKind: string; profileId: string },
+  ): EligibleHopClaim[] {
+    const eligible: EligibleHopClaim[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (row.status === 'completed' || seen.has(row.id)) continue;
+      if (row.id === hop.id) {
+        eligible.push({
+          hopId: hop.id,
+          runtimeKind: candidate.runtimeKind,
+          profileId: candidate.profileId,
+        });
+        seen.add(row.id);
+        continue;
+      }
+      if (row.status !== 'queued' || row.runtimeKind === undefined || row.profileId === undefined) {
+        continue;
+      }
+      eligible.push({
+        hopId: row.id,
+        runtimeKind: row.runtimeKind,
+        profileId: row.profileId,
+      });
+      seen.add(row.id);
+    }
+    if (!seen.has(hop.id)) {
+      eligible.push({
+        hopId: hop.id,
+        runtimeKind: candidate.runtimeKind,
+        profileId: candidate.profileId,
+      });
+    }
+    return eligible;
   }
 
   async #renewHopLease(hop: QueuedHop | undefined, onLost: () => void): Promise<void> {

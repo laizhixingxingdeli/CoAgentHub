@@ -31,7 +31,12 @@ import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { FileQueuedHopRepository } from '../src/application/file-store.ts';
 import { LockBusyError } from '../src/application/lock.ts';
-import type { QueuedHop } from '../src/application/durable-scheduler.ts';
+import {
+  DEFAULT_HOP_CAPACITY_LIMITS,
+  type HopCapacityLimits,
+  type QueuedHop,
+} from '../src/application/durable-scheduler.ts';
+import type { QueuedHopRepository } from '../src/application/ports.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
@@ -146,6 +151,89 @@ const srcRoot = fileURLToPath(new URL('../src/', import.meta.url));
 function src(rel: string): string {
   return readFileSync(join(srcRoot, rel), 'utf8');
 }
+
+function countingQueuedHops(rows: QueuedHop[] = []): QueuedHopRepository & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async enqueue(hop) {
+      calls.push('enqueue');
+      rows.push(hop);
+      return hop;
+    },
+    async get(id) {
+      calls.push('get');
+      return rows.find((row) => row.id === id);
+    },
+    async list() {
+      calls.push('list');
+      return [...rows];
+    },
+    async claim() {
+      calls.push('claim');
+      return undefined;
+    },
+    async renew() {
+      calls.push('renew');
+      return undefined;
+    },
+    async complete() {
+      calls.push('complete');
+      return undefined;
+    },
+  };
+}
+
+function capacityRunnerDeps(
+  runtime: ScriptedRuntime,
+  queuedHops: QueuedHopRepository,
+  hopCapacityLimits?: HopCapacityLimits,
+) {
+  return {
+    platform: {} as Platform,
+    tokens: { revoke() {} } as unknown as RunTokenIssuer,
+    baseUrl: 'http://127.0.0.1:9',
+    workspace: new InPlaceWorkspaceManager(),
+    queuedHops,
+    coordinator: { runtime, candidates: [] },
+    executor: { runtime, candidates: [] },
+    ...(hopCapacityLimits ? { hopCapacityLimits } : {}),
+  };
+}
+
+describe('MissionRunner 五维 hopCapacityLimits 构造校验', () => {
+  test('省略时构造成功，缺省值交给编排器',
+    () => {
+      const runtime = new ScriptedRuntime({});
+      const queuedHops = countingQueuedHops();
+      assert.doesNotThrow(() => new MissionRunner(capacityRunnerDeps(runtime, queuedHops)));
+      assert.doesNotThrow(
+        () => new MissionRunner(capacityRunnerDeps(runtime, queuedHops, DEFAULT_HOP_CAPACITY_LIMITS)),
+      );
+      assert.equal(queuedHops.calls.length, 0);
+      assert.equal(runtime.specs.length, 0);
+    },
+  );
+
+  test('每维 0、负数、小数、NaN、Infinity 在构造时抛，不改队列、不调 runtime.start', () => {
+    const invalid = [0, -1, 1.5, Number.NaN, Infinity];
+    const dimensions = ['global', 'project', 'role', 'runtime', 'profile'] as const;
+    for (const dim of dimensions) {
+      for (const value of invalid) {
+        const runtime = new ScriptedRuntime({});
+        const hop = sampleQueuedHop({ id: `h-${dim}-${String(value)}` });
+        const queuedHops = countingQueuedHops([hop]);
+        const limits = { ...DEFAULT_HOP_CAPACITY_LIMITS, [dim]: value };
+        assert.throws(
+          () => new MissionRunner(capacityRunnerDeps(runtime, queuedHops, limits)),
+          /positive safe integer/,
+        );
+        assert.deepEqual(queuedHops.calls, [], `${dim}=${String(value)} 不得访问队列`);
+        assert.equal(runtime.specs.length, 0, `${dim}=${String(value)} 不得调用 runtime.start`);
+      }
+    }
+  });
+});
 
 async function existingPlatform() {
   const clock = new FixedClock();
@@ -327,6 +415,12 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.doesNotMatch(runner, /createClassifiedMission\s*\(/);
     assert.match(runner, /independentReviewer\?:/);
     assert.match(runner, /queuedHops\?:/);
+    assert.match(runner, /hopCapacityLimits\?:/);
+    assert.match(runner, /hopCapacityLimits\(deps\.hopCapacityLimits\)/);
+    const ctorAt = runner.indexOf('constructor(deps: MissionRunnerDeps)');
+    const hopCapAt = runner.indexOf('hopCapacityLimits(deps.hopCapacityLimits)');
+    const orchAt = runner.indexOf('new Orchestrator(this.#deps)');
+    assert.ok(ctorAt >= 0 && hopCapAt > ctorAt && hopCapAt < orchAt, '容量归一化必须在构造时、交给编排器之前');
   });
 
   test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
@@ -335,6 +429,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
     assert.match(cli, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
     assert.match(cli, /candidateCircuits, queuedHops \} = built/);
+    assert.doesNotMatch(cli, /--hop-capacity|--capacity-global|--capacity-project|--capacity-role|--capacity-runtime|--capacity-profile/);
     assert.match(cli, /runner\.run\(/);
     assert.match(cli, /createApi\(/);
     assert.match(cli, /listenLoopback\(/);

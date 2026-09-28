@@ -28,11 +28,24 @@ import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { FileCandidateCircuitRepository, FileStateStore } from '../src/application/file-store.ts';
-import type { AgentRuntime, CandidateCircuitRepository } from '../src/application/ports.ts';
+import type { AgentRuntime, CandidateCircuitRepository, QueuedHopCapacityRepository } from '../src/application/ports.ts';
 import type { CandidateCircuit } from '../src/application/candidate-circuit.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import {
+  claimHop,
+  claimHopWithCandidate,
+  completeHop,
+  decideCapacityClaim,
+  hopCapacityLimits,
+  hopIdempotencyKey,
+  renewHop,
+  type HopCapacityLimits,
+  type QueuedHop,
+} from '../src/application/durable-scheduler.ts';
+import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -708,3 +721,1122 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal((rejected.json as { error: string }).error, 'PLAN_REQUIRED');
   });
 });
+
+const CAP_NOW = '2026-01-01T00:00:00.000Z';
+
+function capLimits(overrides: Partial<HopCapacityLimits> = {}): HopCapacityLimits {
+  return hopCapacityLimits({ global: 8, project: 8, role: 8, runtime: 8, profile: 8, ...overrides });
+}
+
+function memoryCapacityRepo(rows: QueuedHop[]): QueuedHopCapacityRepository {
+  return {
+    async enqueue(hop) {
+      const existing = rows.find((row) => row.idempotencyKey === hop.idempotencyKey);
+      if (existing) return { ...existing };
+      rows.push({ ...hop });
+      return { ...hop };
+    },
+    async get(id) {
+      const row = rows.find((item) => item.id === id);
+      return row ? { ...row } : undefined;
+    },
+    async list() {
+      return rows.map((row) => ({ ...row }));
+    },
+    async claim(id, owner, now, until) {
+      const index = rows.findIndex((row) => row.id === id);
+      if (index < 0) return undefined;
+      const updated = claimHop(rows[index]!, owner, now, until);
+      if (updated) rows[index] = updated;
+      return updated ? { ...updated } : undefined;
+    },
+    async renew(id, owner, generation, now, until) {
+      const index = rows.findIndex((row) => row.id === id);
+      if (index < 0) return undefined;
+      const updated = renewHop(rows[index]!, owner, generation, now, until);
+      if (updated) rows[index] = updated;
+      return updated ? { ...updated } : undefined;
+    },
+    async complete(id, owner, generation, now) {
+      const index = rows.findIndex((row) => row.id === id);
+      if (index < 0) return undefined;
+      const updated = completeHop(rows[index]!, owner, generation, now);
+      if (updated) rows[index] = updated;
+      return updated ? { ...updated } : undefined;
+    },
+    async claimAvailable(input) {
+      const decision = decideCapacityClaim(rows, input.now, input.limits, input.eligible);
+      if (decision.kind !== 'select') return decision;
+      const updated = claimHopWithCandidate(
+        decision.hop,
+        input.owner,
+        input.now,
+        input.leaseUntil,
+        decision.candidate,
+      );
+      if (!updated) return { kind: 'empty' as const };
+      const index = rows.findIndex((row) => row.id === updated.id);
+      if (index >= 0) rows[index] = updated;
+      return { kind: 'claimed' as const, hop: { ...updated } };
+    },
+  };
+}
+
+function queuedCompetitor(overrides: Partial<QueuedHop> & Pick<QueuedHop, 'id'>): QueuedHop {
+  return {
+    projectId: 'P',
+    missionId: 'M-ahead',
+    workItemId: '-',
+    role: 'coordinator',
+    priority: 0,
+    availableAt: CAP_NOW,
+    attemptCount: 0,
+    maxAttempts: 3,
+    idempotencyKey: overrides.id,
+    status: 'queued',
+    runtimeKind: 'scripted',
+    profileId: 'coordinator-a',
+    createdAt: '2025-12-01T00:00:00.000Z',
+    updatedAt: '2025-12-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function occupyingLease(overrides: Partial<QueuedHop> & Pick<QueuedHop, 'id'>): QueuedHop {
+  return {
+    projectId: 'P',
+    missionId: 'M-hold',
+    workItemId: '-',
+    role: 'executor',
+    priority: 1,
+    availableAt: CAP_NOW,
+    attemptCount: 0,
+    maxAttempts: 3,
+    idempotencyKey: overrides.id,
+    status: 'claimed',
+    owner: 'holder',
+    leaseUntil: '2026-01-01T01:00:00.000Z',
+    claimGeneration: 1,
+    runtimeKind: 'scripted',
+    profileId: 'qwen',
+    createdAt: CAP_NOW,
+    updatedAt: CAP_NOW,
+    ...overrides,
+  };
+}
+
+function trackingStarts(
+  inner: AgentRuntime,
+  log: { role: string; profileId: string; missionId?: string }[],
+): AgentRuntime {
+  return {
+    kind: inner.kind,
+    start: async (spec) => {
+      log.push({ role: spec.role, profileId: spec.profile.profileId, missionId: spec.missionId });
+      return inner.start(spec);
+    },
+  };
+}
+
+const COORDINATOR_TOUCH: ScriptTable = {
+  'coordinator:-:0': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+};
+
+function attachCapacityOrchestrator(
+  env: Awaited<ReturnType<typeof capacityHarness>>,
+  opts: {
+    queuedHops: QueuedHopCapacityRepository;
+    hopClock: FixedClock;
+    hopCapacityLimits?: HopCapacityLimits;
+    owner: string;
+    starts: { role: string; profileId: string; missionId?: string }[];
+    coordinatorCandidates?: { endpoint: 'local'; profileId: string }[];
+    coordinatorScript?: ScriptTable;
+  },
+) {
+  return new Orchestrator({
+    platform: env.platform,
+    tokens: makeIssuer(env.platform, env.tokens),
+    baseUrl: env.baseUrl,
+    workspace: new InPlaceWorkspaceManager(),
+    coordinator: {
+      runtime: trackingStarts(
+        new ScriptedRuntime(opts.coordinatorScript ?? COORDINATOR_TOUCH),
+        opts.starts,
+      ),
+      candidates: opts.coordinatorCandidates ?? [{ endpoint: 'local', profileId: 'coordinator-a' }],
+    },
+    executor: {
+      runtime: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), opts.starts),
+      candidates: [
+        { endpoint: 'local', profileId: 'exec-a' },
+        { endpoint: 'local', profileId: 'exec-b' },
+      ],
+    },
+    queuedHops: opts.queuedHops,
+    hopClock: opts.hopClock,
+    hopLeaseMs: 60_000,
+    hopCapacityLimits: opts.hopCapacityLimits,
+    owner: opts.owner,
+  });
+}
+
+async function capacityHarness(opts: {
+  coordinator: AgentRuntime;
+  executor: AgentRuntime;
+  coordinatorCandidates?: { endpoint: 'local'; profileId: string }[];
+  executorCandidates?: { endpoint: 'local'; profileId: string }[];
+  independentReviewer?: { runtime: AgentRuntime; candidates: { endpoint: 'local'; profileId: string }[] };
+  queuedHops: QueuedHopCapacityRepository;
+  hopClock: FixedClock;
+  hopLeaseMs?: number;
+  hopCapacityLimits?: HopCapacityLimits;
+  owner?: string;
+}) {
+  const clock = new FixedClock(CAP_NOW);
+  const activity = new InMemoryActivityLog(clock);
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const platform = new Platform({
+    projects: new InMemoryProjectRepository(),
+    deliveries,
+    workspace: new InPlaceWorkspaceManager(),
+    activity,
+    clock,
+    ids,
+  });
+  const tokens = new RunTokenRegistry();
+  const server: Server = createApi({ platform, tokens, deliveries });
+  await listenLoopback(server, 0);
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  servers.push(server);
+  const deps = {
+    platform,
+    tokens: makeIssuer(platform, tokens),
+    baseUrl,
+    workspace: new InPlaceWorkspaceManager(),
+    coordinator: {
+      runtime: opts.coordinator,
+      candidates: opts.coordinatorCandidates ?? [{ endpoint: 'local' as const, profileId: 'coordinator-a' }],
+    },
+    executor: {
+      runtime: opts.executor,
+      candidates: opts.executorCandidates ?? [
+        { endpoint: 'local' as const, profileId: 'exec-a' },
+        { endpoint: 'local' as const, profileId: 'exec-b' },
+      ],
+    },
+    independentReviewer: opts.independentReviewer,
+    queuedHops: opts.queuedHops,
+    hopClock: opts.hopClock,
+    hopLeaseMs: opts.hopLeaseMs ?? 60_000,
+    hopCapacityLimits: opts.hopCapacityLimits,
+    owner: opts.owner ?? 'runner-cap',
+  };
+  return {
+    platform,
+    tokens,
+    baseUrl,
+    makeOrchestrator: () => new Orchestrator(deps),
+  };
+}
+
+describe('调度器：持久五维容量租约守住 Agent 启动',
+  () => {
+    test('构造时拒绝非法上限，缺队列夹具不碰容量仓储',
+      () => {
+        const base = {
+          platform: {} as Platform,
+          tokens: {
+            startCoordinator: async () => ({ attemptId: 'a', token: 't' }),
+            startExecutor: async () => ({ attemptId: 'a', token: 't' }),
+            revoke() {},
+          },
+          baseUrl: 'http://127.0.0.1:9',
+          workspace: new InPlaceWorkspaceManager(),
+          coordinator: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local' as const, profileId: 'c' }],
+          },
+          executor: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local' as const, profileId: 'e' }],
+          },
+        };
+        assert.throws(
+          () =>
+            new Orchestrator({
+              ...base,
+              hopCapacityLimits: { global: 0, project: 2, role: 4, runtime: 4, profile: 2 },
+            }),
+          /positive safe integer/,
+        );
+        const orch = new Orchestrator(base);
+        assert.ok(orch);
+      });
+
+    test('五维 runtime 满额不启动，完成或过期后可继续',
+      async () => {
+        const rows: QueuedHop[] = [
+          occupyingLease({ id: 'hold-rt', runtimeKind: 'scripted', profileId: 'other' }),
+        ];
+        const queuedHops = memoryCapacityRepo(rows);
+        const hopClock = new FixedClock(CAP_NOW);
+        const starts: { role: string; profileId: string }[] = [];
+        const env = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), starts),
+          queuedHops,
+          hopClock,
+          hopCapacityLimits: capLimits({ runtime: 1 }),
+        });
+        await env.platform.createMission({ projectId: 'P', missionId: 'M-rt', contract: CONTRACT });
+        const blocked = await env.makeOrchestrator().runMission('M-rt', { projectRoot: process.cwd() });
+        assert.equal(blocked.kind, 'waiting');
+        assert.equal((blocked as { reason: string }).reason, 'project_busy');
+        assert.match((blocked as { detail: string }).detail, /容量/);
+        assert.equal(starts.length, 0);
+        const ours = (await queuedHops.list()).find((row) => row.missionId === 'M-rt');
+        assert.equal(ours?.status, 'queued');
+        assert.equal(ours?.runtimeKind, undefined);
+        assert.equal(rows.find((row) => row.id === 'hold-rt')?.status, 'claimed');
+
+        const finished = completeHop(
+          rows.find((row) => row.id === 'hold-rt')!,
+          'holder',
+          1,
+          CAP_NOW,
+        );
+        assert.ok(finished);
+        const holdIndex = rows.findIndex((row) => row.id === 'hold-rt');
+        rows[holdIndex] = finished!;
+
+        starts.length = 0;
+        const afterComplete = await env.makeOrchestrator().runMission('M-rt', {
+          projectRoot: process.cwd(),
+        });
+        assert.deepEqual(afterComplete, { kind: 'awaiting_l3_review' });
+        assert.ok(starts.some((row) => row.role === 'coordinator'));
+        assert.ok(starts.some((row) => row.role === 'executor'));
+
+        const expRows: QueuedHop[] = [
+          occupyingLease({
+            id: 'hold-exp',
+            runtimeKind: 'scripted',
+            profileId: 'other',
+            leaseUntil: '2026-01-01T00:00:01.000Z',
+          }),
+        ];
+        const expRepo = memoryCapacityRepo(expRows);
+        const expClock = new FixedClock(CAP_NOW);
+        const expStarts: { role: string; profileId: string }[] = [];
+        const expEnv = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), expStarts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), expStarts),
+          queuedHops: expRepo,
+          hopClock: expClock,
+          hopCapacityLimits: capLimits({ runtime: 1 }),
+        });
+        await expEnv.platform.createMission({ projectId: 'P', missionId: 'M-exp', contract: CONTRACT });
+        const stillBlocked = await expEnv.makeOrchestrator().runMission('M-exp', {
+          projectRoot: process.cwd(),
+        });
+        assert.equal(stillBlocked.kind, 'waiting');
+        assert.equal(expStarts.length, 0);
+        expClock.advance(2000);
+        const afterExpire = await expEnv.makeOrchestrator().runMission('M-exp', {
+          projectRoot: process.cwd(),
+        });
+        assert.deepEqual(afterExpire, { kind: 'awaiting_l3_review' });
+        assert.ok(expStarts.length > 0);
+      });
+
+    test('公平跳过满额候选；阻塞者仍 queued 且 runtime.start 未调用',
+      async () => {
+        const rows: QueuedHop[] = [
+          occupyingLease({
+            id: 'hold-a',
+            role: 'executor',
+            runtimeKind: 'scripted',
+            profileId: 'exec-a',
+          }),
+        ];
+        const queuedHops = memoryCapacityRepo(rows);
+        const starts: { role: string; profileId: string }[] = [];
+        const env = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), starts),
+          queuedHops,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits({ profile: 1 }),
+        });
+        await env.platform.createMission({ projectId: 'P', missionId: 'M-skip', contract: CONTRACT });
+        const result = await env.makeOrchestrator().runMission('M-skip', { projectRoot: process.cwd() });
+        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        assert.equal(
+          starts.filter((row) => row.role === 'executor' && row.profileId === 'exec-a').length,
+          0,
+        );
+        assert.ok(starts.some((row) => row.role === 'executor' && row.profileId === 'exec-b'));
+        const execHop = (await queuedHops.list()).find(
+          (row) => row.missionId === 'M-skip' && row.role === 'executor',
+        );
+        assert.equal(execHop?.profileId, 'exec-b');
+        assert.equal(execHop?.runtimeKind, 'scripted');
+        assert.equal(rows.find((row) => row.id === 'hold-a')?.status, 'claimed');
+        assert.equal(rows.find((row) => row.id === 'hold-a')?.profileId, 'exec-a');
+
+        const waitRows: QueuedHop[] = [
+          occupyingLease({ id: 'hold-all', runtimeKind: 'scripted', profileId: 'coordinator-a' }),
+        ];
+        const waitRepo = memoryCapacityRepo(waitRows);
+        const waitStarts: { role: string; profileId: string }[] = [];
+        const waitEnv = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), waitStarts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), waitStarts),
+          queuedHops: waitRepo,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits({ profile: 1 }),
+        });
+        await waitEnv.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-wait',
+          contract: CONTRACT,
+        });
+        const waiting = await waitEnv.makeOrchestrator().runMission('M-wait', {
+          projectRoot: process.cwd(),
+        });
+        assert.equal(waiting.kind, 'waiting');
+        assert.match((waiting as { detail: string }).detail, /容量/);
+        assert.equal(waitStarts.length, 0);
+        const blocked = (await waitRepo.list()).find((row) => row.missionId === 'M-wait');
+        assert.equal(blocked?.status, 'queued');
+      });
+
+    test('失败换候选不得拿 A 的租约启动 B',
+      async () => {
+        const rows: QueuedHop[] = [];
+        const queuedHops = memoryCapacityRepo(rows);
+        const executor = new ScriptedRuntime({
+          'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
+          'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+        });
+        const starts: { role: string; profileId: string }[] = [];
+        const env = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+          executor: {
+            kind: executor.kind,
+            start: async (spec) => {
+              starts.push({ role: spec.role, profileId: spec.profile.profileId });
+              if (spec.role === 'executor') {
+                const live = (await queuedHops.list()).filter(
+                  (row) =>
+                    row.missionId === spec.missionId &&
+                    row.role === 'executor' &&
+                    row.status === 'claimed',
+                );
+                assert.ok(live.length > 0, '启动前必须有持久租约');
+                for (const hop of live) {
+                  assert.equal(hop.profileId, spec.profile.profileId, '不得用 A 的租约启动 B');
+                  assert.equal(hop.runtimeKind, 'scripted');
+                }
+              }
+              return executor.start(spec);
+            },
+          },
+          queuedHops,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits(),
+        });
+        await env.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-fail',
+          contract: CONTRACT,
+        });
+        const result = await env.makeOrchestrator().runMission('M-fail', { projectRoot: process.cwd() });
+        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        const execStarts = starts.filter((row) => row.role === 'executor');
+        assert.deepEqual(
+          execStarts.map((row) => row.profileId),
+          ['exec-a', 'exec-b'],
+        );
+        const execHops = (await queuedHops.list()).filter(
+          (row) => row.missionId === 'M-fail' && row.role === 'executor',
+        );
+        assert.equal(execHops.length, 2);
+        assert.equal(execHops[0]?.profileId, 'exec-a');
+        assert.equal(execHops[0]?.status, 'completed');
+        assert.equal(execHops[1]?.profileId, 'exec-b');
+        assert.equal(execHops[1]?.status, 'completed');
+      });
+
+    test('项目名额：协调者可入，executor 平台闸门仍是 PROJECT_BUSY',
+      async () => {
+        const rows: QueuedHop[] = [];
+        const queuedHops = memoryCapacityRepo(rows);
+        const hopClock = new FixedClock(CAP_NOW);
+        const planAndDispatch: ScriptTable = {
+          'coordinator:-:0': {
+            steps: [
+              { tool: 'coagent_get_mission', body: {} },
+              { tool: 'coagent_update_plan', body: PLAN },
+              { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+              {
+                tool: 'coagent_dispatch_work_item',
+                body: (previous) => ({ workItemIds: [previous.workItemId] }),
+              },
+            ],
+          },
+        };
+        const env = await capacityHarness({
+          coordinator: new ScriptedRuntime(planAndDispatch),
+          executor: new ScriptedRuntime({}),
+          queuedHops,
+          hopClock,
+          hopCapacityLimits: capLimits(),
+        });
+        await env.platform.createMission({ projectId: 'P', missionId: 'A', contract: CONTRACT });
+        await env.platform.createMission({ projectId: 'P', missionId: 'B', contract: CONTRACT });
+        await env.makeOrchestrator().runMission('A', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.equal((await env.platform.getMissionView('A')).isMutating, true);
+
+        const bStarts: { role: string; profileId: string }[] = [];
+        const bOrch = new Orchestrator({
+          platform: env.platform,
+          tokens: makeIssuer(env.platform, env.tokens),
+          baseUrl: env.baseUrl,
+          workspace: new InPlaceWorkspaceManager(),
+          coordinator: {
+            runtime: trackingStarts(new ScriptedRuntime(planAndDispatch), bStarts),
+            candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }],
+          },
+          executor: {
+            runtime: trackingStarts(new ScriptedRuntime({}), bStarts),
+            candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+          },
+          queuedHops,
+          hopClock,
+          hopCapacityLimits: capLimits(),
+          owner: 'runner-b',
+        });
+        const outcome = await bOrch.runMission('B', { projectRoot: process.cwd(), maxRounds: 2 });
+        assert.equal(outcome.kind, 'waiting');
+        assert.equal((outcome as { reason: string }).reason, 'project_busy');
+        assert.doesNotMatch((outcome as { detail: string }).detail, /容量/);
+        assert.ok(bStarts.some((row) => row.role === 'coordinator'));
+        assert.equal(bStarts.filter((row) => row.role === 'executor').length, 0);
+        const bView = await env.platform.getMissionView('B');
+        assert.equal(bView.planRevision, 1);
+        assert.equal(bView.isMutating, false);
+        assert.equal(bView.workItems[0]?.status, 'created');
+        assert.equal(bView.waitReason, 'project_busy');
+        assert.match(bView.waitDetail ?? '', /A/);
+        assert.doesNotMatch(bView.waitDetail ?? '', /容量/);
+      });
+
+    test('HA 独立检视占位与 startIndependentReviewer 返回的候选一致',
+      async () => {
+        const hopClock = new FixedClock(CAP_NOW);
+        const rows: QueuedHop[] = [
+          occupyingLease({
+            id: 'hold-ir',
+            role: 'independent_reviewer',
+            runtimeKind: 'scripted',
+            profileId: 'ir-a',
+          }),
+        ];
+        const queuedHops = memoryCapacityRepo(rows);
+        const clock = new FixedClock(CAP_NOW);
+        const projects = new InMemoryProjectRepository();
+        const ids = new SequentialIds();
+        const reports = new InMemoryValidationReportRepository();
+        const workspace: WorkspaceManager = {
+          async prepare(_missionId, projectRoot) {
+            return {
+              cwd: projectRoot,
+              branch: 'mission/M-ha',
+              targetBranch: 'master',
+              baseRevision: 'commit-a',
+            };
+          },
+          async head() { return 'commit-a'; },
+          async targetHead() { return 'commit-a'; },
+          worktreePath(_missionId, projectRoot) { return projectRoot; },
+          async rollback() {},
+          async mergeToTarget() { return { ok: true, mergedInto: 'commit-a' }; },
+          async diff() { return { stat: '', files: [] }; },
+          async release() {},
+        };
+        const validation = {
+          reports,
+          engine: {
+            async validate(input: { missionId: string }) {
+              const id = ids.next('VR');
+              const report = {
+                id,
+                policyRevision: 1,
+                missionId: input.missionId,
+                startedAt: CAP_NOW,
+                endedAt: CAP_NOW,
+                passed: true,
+                checks: [
+                  {
+                    kind: 'command' as const,
+                    passed: true,
+                    startedAt: CAP_NOW,
+                    endedAt: CAP_NOW,
+                    summary: 'ok',
+                    command: {
+                      argv: ['node', '--test'],
+                      cwd: '/tmp',
+                      exitCode: 0,
+                      timedOut: false,
+                      durationMs: 1,
+                      outputTail: 'ok',
+                    },
+                  },
+                ],
+              };
+              return {
+                report,
+                authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 },
+              };
+            },
+          },
+        };
+        const deliveries = new InMemoryDeliveryRepository(clock, ids);
+        const platform = new Platform({
+          projects,
+          deliveries,
+          activity: new InMemoryActivityLog(clock),
+          clock,
+          ids,
+          workspace,
+          validation,
+        });
+        const project = await projects.ensure('P');
+        project.createMission({
+          id: 'M-ha',
+          contract: {
+            ...CONTRACT,
+            acceptance: ['foo() === 1'],
+          },
+          executionMode: 'high_assurance',
+        });
+        await projects.save(project);
+        const root = mkdtempSync(join(tmpdir(), 'coagent-w59-ha-'));
+        const prepared = await workspace.prepare('M-ha', root);
+        await platform.recordWorkspace('M-ha', {
+          projectRoot: root,
+          branch: prepared.branch,
+          baseRevision: prepared.baseRevision,
+        });
+        const haOrder = {
+          ...ORDER,
+          validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] },
+        };
+        const coord = await platform.startCoordinatorAttempt('M-ha', {
+          profileId: 'coord-a',
+          endpoint: 'local',
+        });
+        await platform.updatePlan('M-ha', coord.attemptId, PLAN);
+        const { workItemId } = await platform.createWorkItem('M-ha', coord.attemptId, {
+          title: '修 foo',
+          order: haOrder,
+        });
+        await platform.dispatchWorkItems('M-ha', coord.attemptId, [workItemId]);
+        const exec = await platform.startExecutorAttempt('M-ha', workItemId, {
+          profileId: 'exec-a',
+          endpoint: 'local',
+        });
+        await platform.submitEvidence('M-ha', exec.attemptId, {
+          kind: 'test',
+          summary: '绿',
+          command: 'node --test',
+          exitCode: 0,
+        });
+        await platform.submitExecutionResult('M-ha', exec.attemptId, {
+          outcome: 'completed',
+          summary: '改好了',
+          changedFiles: ['src/foo.ts'],
+          evidenceIds: [],
+          notes: '无',
+        });
+        await platform.finishAttempt('M-ha', exec.attemptId, { endedBy: 'structured_submit' });
+        await platform.reviewExecutionResult('M-ha', coord.attemptId, {
+          workItemId,
+          verdict: 'accept',
+          acceptanceResults: haOrder.acceptance.map((criterion) => ({
+            criterion,
+            status: 'pass' as const,
+            evidence: '测试替身：逐条核过',
+          })),
+          reasons: ['复跑过'],
+          requiredChanges: [],
+        });
+        await platform.submitMissionResult('M-ha', coord.attemptId, {
+          outcome: 'delivered',
+          summary: '交付',
+          acceptanceEvidence: [],
+          memoryDelta: [],
+          openRisks: [],
+        });
+        await platform.finishAttempt('M-ha', coord.attemptId, { endedBy: 'structured_submit' });
+
+        const tokens = new RunTokenRegistry();
+        const server: Server = createApi({ platform, tokens, deliveries });
+        await listenLoopback(server, 0);
+        servers.push(server);
+        const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        const irStarts: { role: string; profileId: string }[] = [];
+        const irRuntime = trackingStarts(
+          new ScriptedRuntime({
+            'independent_reviewer:-': {
+              steps: [
+                { tool: 'coagent_get_mission_review_bundle', body: {} },
+                {
+                  tool: 'coagent_submit_independent_review',
+                  body: { verdict: 'pass', reasons: ['齐'] },
+                },
+              ],
+            },
+          }),
+          irStarts,
+        );
+        const orch = new Orchestrator({
+          platform,
+          tokens: makeIssuer(platform, tokens),
+          baseUrl,
+          workspace,
+          coordinator: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+          },
+          executor: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+          },
+          independentReviewer: {
+            runtime: irRuntime,
+            candidates: [
+              { endpoint: 'local', profileId: 'ir-a' },
+              { endpoint: 'local', profileId: 'ir-b' },
+            ],
+          },
+          queuedHops,
+          hopClock,
+          hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-ha',
+        });
+        const outcome = await orch.runMission('M-ha', { projectRoot: root });
+        assert.equal(outcome.kind, 'awaiting_l3_review');
+        assert.deepEqual(irStarts, [{ role: 'independent_reviewer', profileId: 'ir-b', missionId: 'M-ha' }]);
+        const irHop = (await queuedHops.list()).find(
+          (row) => row.missionId === 'M-ha' && row.role === 'independent_reviewer',
+        );
+        assert.equal(irHop?.profileId, 'ir-b');
+        assert.equal(irHop?.runtimeKind, 'scripted');
+        assert.notEqual(irHop?.profileId, 'ir-a');
+        rmSync(root, { recursive: true, force: true });
+      });
+
+    test('runtime.start 抛错后须释放 A 的租约再按 B 的身份领取，且不得无限换票',
+      async () => {
+        const rows: QueuedHop[] = [];
+        const queuedHops = memoryCapacityRepo(rows);
+        const happy = new ScriptedRuntime(EXECUTOR_HAPPY);
+        const starts: { role: string; profileId: string }[] = [];
+        let aStartCalls = 0;
+        const env = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+          executor: {
+            kind: happy.kind,
+            start: async (spec) => {
+              starts.push({ role: spec.role, profileId: spec.profile.profileId });
+              if (spec.role === 'executor' && spec.profile.profileId === 'exec-a') {
+                aStartCalls += 1;
+                const live = (await queuedHops.list()).filter(
+                  (row) =>
+                    row.missionId === spec.missionId &&
+                    row.role === 'executor' &&
+                    row.status === 'claimed',
+                );
+                assert.equal(live.length, 1);
+                assert.equal(live[0]?.profileId, 'exec-a');
+                throw new Error('403 需要充值');
+              }
+              const live = (await queuedHops.list()).filter(
+                (row) =>
+                  row.missionId === spec.missionId &&
+                  row.role === 'executor' &&
+                  row.status === 'claimed',
+              );
+              assert.ok(live.length > 0, 'B 启动前必须另领持久租约');
+              for (const hop of live) {
+                assert.equal(hop.profileId, spec.profile.profileId);
+                assert.notEqual(hop.profileId, 'exec-a');
+              }
+              const completedA = (await queuedHops.list()).find(
+                (row) =>
+                  row.missionId === spec.missionId &&
+                  row.role === 'executor' &&
+                  row.profileId === 'exec-a',
+              );
+              assert.equal(completedA?.status, 'completed');
+              return happy.start(spec);
+            },
+          },
+          queuedHops,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits(),
+        });
+        await env.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-throw',
+          contract: CONTRACT,
+        });
+        const result = await env.makeOrchestrator().runMission('M-throw', {
+          projectRoot: process.cwd(),
+        });
+        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        assert.equal(aStartCalls, 1, '抛错不得反复替换同一候选');
+        const execStarts = starts.filter((row) => row.role === 'executor');
+        assert.deepEqual(
+          execStarts.map((row) => row.profileId),
+          ['exec-a', 'exec-b'],
+        );
+        const execHops = (await queuedHops.list()).filter(
+          (row) => row.missionId === 'M-throw' && row.role === 'executor',
+        );
+        assert.equal(execHops.length, 2, '完成 A 后只另开 B，不得无限换票');
+        assert.equal(execHops[0]?.profileId, 'exec-a');
+        assert.equal(execHops[0]?.status, 'completed');
+        assert.equal(execHops[1]?.profileId, 'exec-b');
+        assert.equal(execHops[1]?.status, 'completed');
+      });
+
+    test('优先级与同级 FIFO 按 H→A→B 实际领取启动，阻塞 A→B→A 释放后继续',
+      async () => {
+        const coordKey = (missionId: string) =>
+          hopIdempotencyKey({
+            missionId,
+            role: 'coordinator',
+            workItemId: '-',
+            contractRevision: 1,
+            attemptCycle: 0,
+          });
+        const fifoRows: QueuedHop[] = [
+          queuedCompetitor({
+            id: 'H',
+            missionId: 'M-H',
+            priority: 50,
+            createdAt: '2025-12-01T00:00:00.000Z',
+            idempotencyKey: coordKey('M-H'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+          queuedCompetitor({
+            id: 'A',
+            missionId: 'M-A',
+            priority: 0,
+            createdAt: '2025-12-15T00:00:00.000Z',
+            idempotencyKey: coordKey('M-A'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+          queuedCompetitor({
+            id: 'B',
+            missionId: 'M-B',
+            priority: 0,
+            createdAt: '2025-12-31T00:00:00.000Z',
+            idempotencyKey: coordKey('M-B'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+        ];
+        const fifoRepo = memoryCapacityRepo(fifoRows);
+        const hopClock = new FixedClock(CAP_NOW);
+        const fifoEnv = await capacityHarness({
+          coordinator: new ScriptedRuntime(COORDINATOR_TOUCH),
+          executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+          queuedHops: fifoRepo,
+          hopClock,
+          hopCapacityLimits: capLimits(),
+          owner: 'runner-seq',
+        });
+        for (const missionId of ['M-H', 'M-A', 'M-B'] as const) {
+          await fifoEnv.platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+        }
+        const startsH: { role: string; profileId: string; missionId?: string }[] = [];
+        const startsA: { role: string; profileId: string; missionId?: string }[] = [];
+        const startsB: { role: string; profileId: string; missionId?: string }[] = [];
+        const orchH = attachCapacityOrchestrator(fifoEnv, {
+          queuedHops: fifoRepo, hopClock, hopCapacityLimits: capLimits(), owner: 'runner-H', starts: startsH,
+        });
+        const orchA = attachCapacityOrchestrator(fifoEnv, {
+          queuedHops: fifoRepo, hopClock, hopCapacityLimits: capLimits(), owner: 'runner-A', starts: startsA,
+        });
+        const orchB = attachCapacityOrchestrator(fifoEnv, {
+          queuedHops: fifoRepo, hopClock, hopCapacityLimits: capLimits(), owner: 'runner-B', starts: startsB,
+        });
+        const firstB = await orchB.runMission('M-B', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.equal(firstB.kind, 'waiting');
+        assert.equal(startsB.length, 0);
+        assert.equal(fifoRows.find((row) => row.id === 'H')?.status, 'queued');
+        assert.equal(fifoRows.find((row) => row.id === 'A')?.status, 'queued');
+        assert.equal(fifoRows.find((row) => row.id === 'B')?.status, 'queued');
+
+        await orchH.runMission('M-H', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.deepEqual(
+          startsH.filter((row) => row.role === 'coordinator').map((row) => row.missionId),
+          ['M-H'],
+        );
+        assert.equal(fifoRows.find((row) => row.id === 'H')?.status, 'completed');
+        assert.equal(fifoRows.find((row) => row.id === 'A')?.status, 'queued');
+        assert.equal(fifoRows.find((row) => row.id === 'B')?.status, 'queued');
+
+        await orchA.runMission('M-A', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.deepEqual(
+          startsA.filter((row) => row.role === 'coordinator').map((row) => row.missionId),
+          ['M-A'],
+        );
+        assert.equal(fifoRows.find((row) => row.id === 'A')?.status, 'completed');
+        assert.equal(fifoRows.find((row) => row.id === 'B')?.status, 'queued');
+
+        await orchB.runMission('M-B', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.deepEqual(
+          startsB.filter((row) => row.role === 'coordinator').map((row) => row.missionId),
+          ['M-B'],
+        );
+        assert.equal(fifoRows.find((row) => row.id === 'B')?.status, 'completed');
+
+        const skipRows: QueuedHop[] = [
+          occupyingLease({
+            id: 'hold-a',
+            role: 'coordinator',
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+          queuedCompetitor({
+            id: 'A-blocked',
+            missionId: 'M-block-A',
+            role: 'coordinator',
+            priority: 0,
+            createdAt: '2025-12-01T00:00:00.000Z',
+            idempotencyKey: coordKey('M-block-A'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+        ];
+        const skipRepo = memoryCapacityRepo(skipRows);
+        const blockClock = new FixedClock(CAP_NOW);
+        const skipEnv = await capacityHarness({
+          coordinator: new ScriptedRuntime(COORDINATOR_TOUCH),
+          executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+          queuedHops: skipRepo,
+          hopClock: blockClock,
+          hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-block',
+        });
+        await skipEnv.platform.createMission({ projectId: 'P', missionId: 'M-block-A', contract: CONTRACT });
+        await skipEnv.platform.createMission({ projectId: 'P', missionId: 'M-block-B', contract: CONTRACT });
+        const blockStartsA: { role: string; profileId: string; missionId?: string }[] = [];
+        const blockStartsB: { role: string; profileId: string; missionId?: string }[] = [];
+        const orchBlockA = attachCapacityOrchestrator(skipEnv, {
+          queuedHops: skipRepo, hopClock: blockClock, hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-block-A', starts: blockStartsA,
+        });
+        const orchBlockB = attachCapacityOrchestrator(skipEnv, {
+          queuedHops: skipRepo, hopClock: blockClock, hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-block-B', starts: blockStartsB,
+          coordinatorCandidates: [{ endpoint: 'local', profileId: 'coordinator-b' }],
+        });
+        const blockedA = await orchBlockA.runMission('M-block-A', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.equal(blockedA.kind, 'waiting');
+        assert.equal(blockStartsA.length, 0);
+        assert.equal(skipRows.find((row) => row.id === 'A-blocked')?.status, 'queued');
+
+        await orchBlockB.runMission('M-block-B', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.deepEqual(
+          blockStartsB.filter((row) => row.role === 'coordinator').map((row) => row.missionId),
+          ['M-block-B'],
+        );
+        assert.equal(blockStartsB[0]?.profileId, 'coordinator-b');
+        assert.equal(skipRows.find((row) => row.id === 'A-blocked')?.status, 'queued');
+        assert.equal(skipRows.find((row) => row.id === 'hold-a')?.status, 'claimed');
+
+        const holdIdx = skipRows.findIndex((row) => row.id === 'hold-a');
+        const released = completeHop(skipRows[holdIdx]!, 'holder', 1, CAP_NOW);
+        assert.ok(released);
+        skipRows[holdIdx] = released!;
+        await orchBlockA.runMission('M-block-A', { projectRoot: process.cwd(), maxRounds: 1 });
+        assert.deepEqual(
+          blockStartsA.filter((row) => row.role === 'coordinator').map((row) => row.missionId),
+          ['M-block-A'],
+        );
+        assert.equal(skipRows.find((row) => row.id === 'A-blocked')?.status, 'completed');
+
+        const lowRows: QueuedHop[] = [
+          queuedCompetitor({
+            id: 'H-high',
+            missionId: 'M-high',
+            priority: 50,
+            createdAt: '2025-12-01T00:00:00.000Z',
+            runtimeKind: 'scripted',
+            profileId: 'other',
+          }),
+        ];
+        const lowRepo = memoryCapacityRepo(lowRows);
+        const lowStarts: { role: string; profileId: string }[] = [];
+        const lowEnv = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), lowStarts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), lowStarts),
+          queuedHops: lowRepo,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits(),
+          owner: 'runner-low',
+        });
+        await lowEnv.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-low',
+          contract: CONTRACT,
+        });
+        const lowOutcome = await lowEnv.makeOrchestrator().runMission('M-low', {
+          projectRoot: process.cwd(),
+        });
+        assert.equal(lowOutcome.kind, 'waiting');
+        assert.equal(lowStarts.length, 0);
+        assert.equal((await lowRepo.list()).find((row) => row.missionId === 'M-low')?.status, 'queued');
+        assert.equal(lowRows.find((row) => row.id === 'H-high')?.status, 'queued');
+      });
+
+    test('list 与 claimAvailable 之间占用变化不得领走外 hop、不得留下 stranded 租约',
+      async () => {
+        const coordKey = (missionId: string) =>
+          hopIdempotencyKey({
+            missionId,
+            role: 'coordinator',
+            workItemId: '-',
+            contractRevision: 1,
+            attemptCycle: 0,
+          });
+        const rows: QueuedHop[] = [
+          queuedCompetitor({
+            id: 'F-foreign',
+            missionId: 'M-foreign',
+            priority: 50,
+            createdAt: '2025-12-01T00:00:00.000Z',
+            idempotencyKey: coordKey('M-foreign'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+          occupyingLease({
+            id: 'hold-race',
+            role: 'coordinator',
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+        ];
+        const inner = memoryCapacityRepo(rows);
+        let flipped = false;
+        const queuedHops: QueuedHopCapacityRepository = {
+          enqueue: (hop) => inner.enqueue(hop),
+          get: (id) => inner.get(id),
+          list: () => inner.list(),
+          claim: (id, owner, now, until) => inner.claim(id, owner, now, until),
+          renew: (id, owner, generation, now, until) => inner.renew(id, owner, generation, now, until),
+          complete: (id, owner, generation, now) => inner.complete(id, owner, generation, now),
+          async claimAvailable(input) {
+            if (!flipped) {
+              flipped = true;
+              const idx = rows.findIndex((row) => row.id === 'hold-race');
+              const finished = completeHop(rows[idx]!, 'holder', 1, CAP_NOW);
+              assert.ok(finished);
+              rows[idx] = finished!;
+            }
+            return inner.claimAvailable(input);
+          },
+        };
+        const starts: { role: string; profileId: string; missionId?: string }[] = [];
+        const env = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_TOUCH), starts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), starts),
+          coordinatorCandidates: [{ endpoint: 'local', profileId: 'coordinator-b' }],
+          queuedHops,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-race',
+        });
+        await env.platform.createMission({ projectId: 'P', missionId: 'M-race', contract: CONTRACT });
+        await env.makeOrchestrator().runMission('M-race', { projectRoot: process.cwd(), maxRounds: 1 });
+        const foreign = rows.find((row) => row.id === 'F-foreign');
+        assert.equal(foreign?.status, 'queued');
+        assert.equal(foreign?.owner, undefined);
+        assert.ok(!starts.some((row) => row.missionId === 'M-foreign'));
+        const ours = (await queuedHops.list()).find((row) => row.missionId === 'M-race');
+        assert.notEqual(ours?.id, 'F-foreign');
+        assert.equal(
+          rows.filter((row) => row.owner === 'runner-race' && row.id === 'F-foreign').length,
+          0,
+        );
+
+        const fillRows: QueuedHop[] = [
+          queuedCompetitor({
+            id: 'F-low',
+            missionId: 'M-low-foreign',
+            priority: 0,
+            createdAt: '2026-06-01T00:00:00.000Z',
+            idempotencyKey: coordKey('M-low-foreign'),
+            runtimeKind: 'scripted',
+            profileId: 'coordinator-a',
+          }),
+        ];
+        const fillInner = memoryCapacityRepo(fillRows);
+        let filled = false;
+        const fillRepo: QueuedHopCapacityRepository = {
+          enqueue: (hop) => fillInner.enqueue(hop),
+          get: (id) => fillInner.get(id),
+          list: () => fillInner.list(),
+          claim: (id, owner, now, until) => fillInner.claim(id, owner, now, until),
+          renew: (id, owner, generation, now, until) => fillInner.renew(id, owner, generation, now, until),
+          complete: (id, owner, generation, now) => fillInner.complete(id, owner, generation, now),
+          async claimAvailable(input) {
+            if (!filled) {
+              filled = true;
+              fillRows.push(
+                occupyingLease({
+                  id: 'hold-fill',
+                  role: 'coordinator',
+                  runtimeKind: 'scripted',
+                  profileId: 'coordinator-a',
+                }),
+              );
+            }
+            return fillInner.claimAvailable(input);
+          },
+        };
+        const fillStarts: { role: string; profileId: string; missionId?: string }[] = [];
+        const fillEnv = await capacityHarness({
+          coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_TOUCH), fillStarts),
+          executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), fillStarts),
+          queuedHops: fillRepo,
+          hopClock: new FixedClock(CAP_NOW),
+          hopCapacityLimits: capLimits({ profile: 1 }),
+          owner: 'runner-fill',
+        });
+        await fillEnv.platform.createMission({ projectId: 'P', missionId: 'M-fill', contract: CONTRACT });
+        const fillOutcome = await fillEnv.makeOrchestrator().runMission('M-fill', {
+          projectRoot: process.cwd(),
+          maxRounds: 1,
+        });
+        assert.equal(fillOutcome.kind, 'waiting');
+        assert.equal(fillStarts.length, 0);
+        assert.equal(fillRows.find((row) => row.id === 'F-low')?.status, 'queued');
+        assert.equal(fillRows.find((row) => row.id === 'F-low')?.owner, undefined);
+        const fillOurs = (await fillRepo.list()).find((row) => row.missionId === 'M-fill');
+        assert.equal(fillOurs?.status, 'queued');
+        assert.equal(fillOurs?.owner, undefined);
+        assert.equal(fillRows.find((row) => row.id === 'hold-fill')?.status, 'claimed');
+        assert.equal(fillRows.find((row) => row.owner === 'runner-fill'), undefined);
+      });
+  });

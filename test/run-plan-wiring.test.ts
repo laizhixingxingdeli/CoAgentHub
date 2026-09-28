@@ -663,6 +663,7 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
     assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
     assert.match(runPlan, /candidateCircuits, queuedHops \} = built/);
+    assert.doesNotMatch(runPlan, /--hop-capacity|--capacity-global|--capacity-project|--capacity-role|--capacity-runtime|--capacity-profile/);
     const planStoreAt = runPlan.indexOf('new FilePlanRunStore(');
     assert.ok(planStoreAt >= 0 && slotAt < planStoreAt && planStoreAt < runnerAt, '名额拒绝必须发生在新建 PlanRun 与构造 Runner 之前');
     assert.match(runPlan, /const runId = `\$\{plan\.planId\}-\$\{stamp\(started\)\}`/);

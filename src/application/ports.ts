@@ -9,7 +9,7 @@
 import type { Project } from '../kernel/index.ts';
 import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
-import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 
 export interface ProjectRepository {
@@ -67,6 +67,21 @@ export interface QueuedHopRepository {
   claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
   renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
   complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined>;
+}
+
+/**
+ * Capacity-aware claim. File/PG implement this in a later ticket; old single-id
+ * claim/renew/complete stay on {@link QueuedHopRepository} and remain required.
+ *
+ * `claimAvailable` MUST, in one transaction (single-writer section / DB tx):
+ * consider only `input.eligible` hop ids; apply priority/FIFO across those rows;
+ * check five-dimension occupancy against durable active leases using each hop's
+ * own runtime/profile; persist that hop's identity on the claimed row only.
+ * Never claim, return, or relabel a hop that is not eligible. Skipped rows stay
+ * queued. Legacy rows without runtime/profile remain readable.
+ */
+export interface QueuedHopCapacityRepository extends QueuedHopRepository {
+  claimAvailable(input: ClaimAvailableHopInput): Promise<CapacityClaimResult>;
 }
 
 /** Persistent per-profile circuit. tryClaimProbe must be an atomic conditional transition. */

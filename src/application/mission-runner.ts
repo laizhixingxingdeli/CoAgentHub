@@ -15,6 +15,7 @@ import {
   type RolePool,
   type RunMissionOptions,
 } from './orchestrator.ts';
+import { hopCapacityLimits, type HopCapacityLimits } from './durable-scheduler.ts';
 import type { CandidateCircuitRepository, Clock, IdGenerator, QueuedHopRepository } from './ports.ts';
 import type { Platform } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
@@ -52,6 +53,11 @@ export interface MissionRunnerDeps {
   readonly hopClock?: Clock;
   readonly hopLeaseMs?: number;
   readonly hopIds?: IdGenerator;
+  /**
+   * 五维并发上限。省略则用代码默认值。必须在构造时归一化：坏值若拖到
+   * run() 才抛，队列可能已被领取、Agent 已经启动。
+   */
+  readonly hopCapacityLimits?: HopCapacityLimits;
 }
 
 export interface MissionRunnerResult {
@@ -64,7 +70,12 @@ export class MissionRunner {
   readonly #deps: MissionRunnerDeps;
 
   constructor(deps: MissionRunnerDeps) {
-    this.#deps = deps;
+    // 同步校验并写入归一化副本，再交给 Orchestrator。未指定用 hopCapacityLimits()
+    // 的默认值。不这么做的话，非法上限会活到第一跳领取。
+    this.#deps = {
+      ...deps,
+      hopCapacityLimits: hopCapacityLimits(deps.hopCapacityLimits),
+    };
   }
 
   async run(missionId: string, options: RunMissionOptions): Promise<MissionRunnerResult> {
