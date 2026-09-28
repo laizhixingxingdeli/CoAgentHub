@@ -94,6 +94,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 ## Capability 索引
 
+- **candidate-circuit** — 候选熔断持久状态
+  候选熔断按 `profileId` 隔离。查询无记录返回 `closed`；`open` 保存失败分类 `failureClass` 和 ISO `openUntil`。显式非探测失败可从任何状态重新打开并覆写分类与截止。
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
 - **context-replay-baseline** — 离线 Attempt 用量基线
