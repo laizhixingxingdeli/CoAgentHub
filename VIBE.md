@@ -98,6 +98,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   候选熔断按 `profileId` 隔离。查询无记录返回 `closed`；`open` 保存失败分类 `failureClass` 和 ISO `openUntil`。显式非探测失败可从任何状态重新打开并覆写分类与截止。
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
+- **context-attribution-report** — 离线只读上下文归因报告
+  在启用任何默认简报裁剪前，先从已持久化的文件状态量出可归因的逐 Attempt 信号及历史缺口。运行 `node src/context-attribution-report.ts --input <state.json> [--archi
 - **context-builder** — 角色 Context Bundle 与开跑简报来源
   平台在 `src/application/platform.ts` 的 `getStartupBrief` 原有读取路径上收集项目红线、环境注记和 Mission/Attempt 所需的现有值，将它们交给 `src/application/
 - **context-replay-baseline** — 离线 Attempt 用量基线
