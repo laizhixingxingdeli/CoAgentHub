@@ -1,0 +1,2 @@
+# Fixtures must check out byte-for-byte; autocrlf CRLF would fail archive integrity by size.
+test/fixtures/** -text
