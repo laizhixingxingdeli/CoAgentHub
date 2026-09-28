@@ -35,6 +35,7 @@ import type {
   ActivityEvent,
   ActivityLog,
   Clock,
+  QueuedHopRepository,
   CommandTransaction,
   IdGenerator,
   ProjectRepository,
@@ -50,6 +51,8 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
+import { validateEnqueueHop } from './durable-scheduler.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import {
   cloneValidationReport,
   ValidationReportConflictError,
@@ -107,6 +110,7 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   validationReports: ValidationReport[];
+  queuedHops: QueuedHop[];
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -165,6 +169,7 @@ function emptyState(): StateFile {
     archivedMissions: [],
     queryRuns: [],
     validationReports: [],
+    queuedHops: [],
   };
 }
 
@@ -215,6 +220,7 @@ interface OpenTransaction {
   readonly validationReports: ValidationReport[];
   readonly agentPool: AgentPoolRow[];
   readonly archivedMissions: ArchivedMissionRef[];
+  readonly queuedHops: QueuedHop[];
   /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
   readonly done: Promise<void>;
   readonly finish: () => void;
@@ -415,6 +421,7 @@ export class FileStateStore implements CommandTransaction {
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
+      if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
       // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
       state.deliveries = state.deliveries.map(withDeliveryKey);
       seedQueryRunIdCounter(state);
@@ -502,6 +509,7 @@ export class FileStateStore implements CommandTransaction {
       validationReports: [...s.validationReports],
       agentPool: [...s.agentPool],
       archivedMissions: [...s.archivedMissions],
+      queuedHops: [...s.queuedHops],
       done,
       finish,
     };
@@ -529,6 +537,7 @@ export class FileStateStore implements CommandTransaction {
     s.validationReports = tx.validationReports;
     s.agentPool = tx.agentPool;
     s.archivedMissions = tx.archivedMissions;
+    s.queuedHops = tx.queuedHops;
     this.#tx = undefined;
     if (this.#deferredFlush) {
       this.#deferredFlush = false;
@@ -1001,6 +1010,46 @@ export class FileQueryRunRepository implements QueryRunRepository {
  *
  * append-only：同 id 结构相同幂等；不同则 conflict。不进 archive package。
  */
+export class FileQueuedHopRepository implements QueuedHopRepository {
+  #store: FileStateStore;
+  constructor(store: FileStateStore) { this.#store = store; }
+
+  async enqueue(hop: QueuedHop): Promise<QueuedHop> {
+    validateEnqueueHop(hop);
+    if (typeof hop.id !== 'string' || hop.id.trim().length === 0 || hop.status !== 'queued' ||
+        typeof hop.createdAt !== 'string' || !Number.isFinite(Date.parse(hop.createdAt)) ||
+        typeof hop.updatedAt !== 'string' || !Number.isFinite(Date.parse(hop.updatedAt))) {
+      throw new Error('queued hop record is invalid');
+    }
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    const rows = this.#rows();
+    const existing = rows.find((row) => row.idempotencyKey === hop.idempotencyKey);
+    if (existing) return { ...existing };
+    const copy = { ...hop };
+    rows.push(copy);
+    this.#store.flush();
+    return { ...copy };
+  }
+
+  async get(id: string): Promise<QueuedHop | undefined> {
+    this.#store.refreshIfChanged();
+    const row = this.#rows().find((item) => item.id === id);
+    return row ? { ...row } : undefined;
+  }
+
+  async list(): Promise<readonly QueuedHop[]> {
+    this.#store.refreshIfChanged();
+    return this.#rows().map((row) => ({ ...row }));
+  }
+
+  #rows(): QueuedHop[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
+    return state.queuedHops;
+  }
+}
+
 export class FileValidationReportRepository implements ValidationReportRepository {
   #store: FileStateStore;
 

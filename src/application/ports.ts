@@ -9,6 +9,7 @@
 import type { Project } from '../kernel/index.ts';
 import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 
 export interface ProjectRepository {
   get(projectId: string): Promise<Project | undefined>;
@@ -55,6 +56,12 @@ export interface ActivityEvent {
 export interface ActivityLog {
   append(event: Omit<ActivityEvent, 'at'>): Promise<void>;
   list(missionId: string): Promise<readonly ActivityEvent[]>;
+}
+
+export interface QueuedHopRepository {
+  enqueue(hop: QueuedHop): Promise<QueuedHop>;
+  get(id: string): Promise<QueuedHop | undefined>;
+  list(): Promise<readonly QueuedHop[]>;
 }
 
 export interface Clock {
