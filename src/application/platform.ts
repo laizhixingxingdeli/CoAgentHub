@@ -58,10 +58,12 @@ import type {
   CommandTransaction,
   DecisionHook,
   DecisionProvider,
+  FencedCommandTransaction,
   IdGenerator,
   PostExecutionEvaluator,
   ProjectRepository,
 } from './ports.ts';
+import type { ClaimFence } from './durable-scheduler.ts';
 import {
   POST_EXECUTION_SHADOW_EVENT_KIND,
   postExecutionInputFrom,
@@ -166,6 +168,53 @@ export class PlatformRuleError extends Error {
     this.name = 'PlatformRuleError';
     this.code = code;
   }
+}
+
+/**
+ * 生产 API / Orchestrator 传入的可信队列领取身份。
+ *
+ * 只含存储层能对上的 id/owner/代次；**不含 now**——调用方填 now 等于把租约时钟交给客户端，
+ * 过期 Runner 可以把时间拨回去继续写。now 由平台 clock 在写事务启动时填进 ClaimFence。
+ * 不要从 request body 构造这份身份。
+ */
+export interface QueueClaimIdentity {
+  readonly id: string;
+  readonly owner: string;
+  readonly claimGeneration: number;
+}
+
+const ATTEMPT_STARTED_KIND = 'attempt.started';
+
+function queuedAttemptStartedData<T extends { readonly kind: string }>(
+  base: T,
+  claim?: QueueClaimIdentity,
+): T | (T & { readonly queue: true }) {
+  return claim ? { ...base, queue: true } : base;
+}
+
+function eventMarksQueuedAttempt(
+  event: { readonly kind: string; readonly attemptId?: string; readonly data: unknown },
+  attemptId: string,
+): boolean {
+  if (event.kind !== ATTEMPT_STARTED_KIND || event.attemptId !== attemptId) return false;
+  if (event.data === null || typeof event.data !== 'object') return false;
+  return (event.data as { queue?: unknown }).queue === true;
+}
+
+function isFencedCommandTransaction(
+  tx: CommandTransaction | undefined,
+): tx is FencedCommandTransaction {
+  return typeof (tx as FencedCommandTransaction | undefined)?.runFenced === 'function';
+}
+
+function mapClaimFenceError(error: unknown): never {
+  if (error instanceof Error && error.message === 'claim fence rejected') {
+    throw new PlatformRuleError(
+      'CLAIM_FENCE_REJECTED',
+      '队列租约已失效或代次不匹配，拒绝写入。',
+    );
+  }
+  throw error;
 }
 
 /**
@@ -702,19 +751,27 @@ export class Platform {
   async startCoordinatorAttempt(
     missionId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
-    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#startCoordinatorAttempt(missionId, profile));
+    // 队列领取与 attempt.started 必须同事务：标记按 attemptId 可查，重启后仍能认出队列 Attempt。
+    return this.#txFenced(claim, () => this.#startCoordinatorAttempt(missionId, profile, claim));
   }
 
   async #startCoordinatorAttempt(
     missionId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
     const { mission } = await this.#locate(missionId);
     const attempt = mission.startCoordinatorAttempt();
     if (profile) attempt.recordProfile(profile);
-    await this.#event(mission, 'attempt.started', { kind: 'coordinator', profile }, undefined, attempt.id);
+    await this.#event(
+      mission,
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'coordinator', profile }, claim),
+      undefined,
+      attempt.id,
+    );
     return { attemptId: attempt.id };
   }
 
@@ -722,15 +779,17 @@ export class Platform {
     missionId: string,
     workItemId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
-    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#startExecutorAttempt(missionId, workItemId, profile));
+    // 队列领取与 attempt.started 必须同事务：标记按 attemptId 可查，重启后仍能认出队列 Attempt。
+    return this.#txFenced(claim, () => this.#startExecutorAttempt(missionId, workItemId, profile, claim));
   }
 
   async #startExecutorAttempt(
     missionId: string,
     workItemId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
     const { mission, item } = await this.#locateItem(missionId, workItemId);
     // 提交结果 ≠ 尝试结束。调度器必须在 finally 里 finishAttempt，否则运行时
@@ -748,8 +807,8 @@ export class Platform {
     if (profile) attempt.recordProfile(profile);
     await this.#event(
       mission,
-      'attempt.started',
-      { kind: 'executor', profile },
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'executor', profile }, claim),
       workItemId,
       attempt.id,
     );
@@ -765,10 +824,13 @@ export class Platform {
   async startIndependentReviewerAttempt(
     missionId: string,
     candidates: readonly UsedProfile[],
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string; profileId: string }> {
     // 挡下来的原因必须先作为一次成功提交落库，再把拒绝抛给调用方。
     // 若在同一事务里抛错，文件/PG 都会回滚，待检视原因查询不到。
-    const result = await this.#tx(() => this.#startIndependentReviewerAttempt(missionId, candidates));
+    const result = await this.#txFenced(claim, () =>
+      this.#startIndependentReviewerAttempt(missionId, candidates, claim),
+    );
     if (!result.ok) {
       throw new PlatformRuleError(result.code, result.detail);
     }
@@ -778,6 +840,7 @@ export class Platform {
   async #startIndependentReviewerAttempt(
     missionId: string,
     candidates: readonly UsedProfile[],
+    claim?: QueueClaimIdentity,
   ): Promise<
     | { ok: true; attemptId: string; profileId: string }
     | { ok: false; code: string; detail: string }
@@ -862,8 +925,8 @@ export class Platform {
     attempt.recordProfile(picked);
     await this.#event(
       mission,
-      'attempt.started',
-      { kind: 'independent_reviewer', profile: picked },
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'independent_reviewer', profile: picked }, claim),
       undefined,
       attempt.id,
     );
@@ -906,12 +969,21 @@ export class Platform {
     };
   }
 
+  /**
+   * 该 Attempt 是否在 attempt.started 上带有持久队列标记。
+   * HTTP finish 必须据此区分：队列不得在丢牌后走无 claim 旧路径。
+   */
+  async attemptRequiresQueueClaim(missionId: string, attemptId: string): Promise<boolean> {
+    return this.#attemptHasQueueMark(missionId, attemptId);
+  }
+
   async submitIndependentReview(
     missionId: string,
     attemptId: string,
     input: { readonly verdict: unknown; readonly reasons: unknown },
+    claim?: QueueClaimIdentity,
   ): Promise<{ recorded: IndependentReviewRecord }> {
-    return this.#tx(() => this.#submitIndependentReview(missionId, attemptId, input));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitIndependentReview(missionId, attemptId, input));
   }
 
   async #submitIndependentReview(
@@ -1451,9 +1523,10 @@ export class Platform {
         readonly resolved: readonly { readonly key: string; readonly value: string }[];
       };
     },
+    claim?: QueueClaimIdentity,
   ): Promise<void> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#finishAttempt(missionId, attemptId, outcome));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#finishAttempt(missionId, attemptId, outcome));
   }
 
   async #finishAttempt(
@@ -2175,9 +2248,10 @@ export class Platform {
     attemptId: string,
     findings: string,
     rejectedHypotheses?: readonly string[],
+    claim?: QueueClaimIdentity,
   ): Promise<{ planRevision: number }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#updateFindings(missionId, attemptId, findings, rejectedHypotheses));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#updateFindings(missionId, attemptId, findings, rejectedHypotheses));
   }
 
   async #updateFindings(
@@ -2210,9 +2284,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     plan: PlanBody,
+    claim?: QueueClaimIdentity,
   ): Promise<{ planRevision: number }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#updatePlan(missionId, attemptId, plan));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#updatePlan(missionId, attemptId, plan));
   }
 
   async #updatePlan(
@@ -2234,9 +2309,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
+    claim?: QueueClaimIdentity,
   ): Promise<{ workItemId: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#createWorkItem(missionId, attemptId, input));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#createWorkItem(missionId, attemptId, input));
   }
 
   async #createWorkItem(
@@ -2740,9 +2816,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     workItemIds: readonly string[],
+    claim?: QueueClaimIdentity,
   ): Promise<{ dispatched: readonly string[] }> {
     // 单事务命令（C4）：占名额、PRE shadow、派发一起提交。PRE shadow 缺省不开；开了事务最多多占一个超时。
-    return this.#tx(() => this.#dispatchWorkItems(missionId, attemptId, workItemIds));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#dispatchWorkItems(missionId, attemptId, workItemIds));
   }
 
   async #dispatchWorkItems(
@@ -2808,9 +2885,10 @@ export class Platform {
       /** 工单 acceptance 逐条的结论（方案 §11）；工单有验收标准时必填。 */
       acceptanceResults?: readonly AcceptanceResult[];
     },
+    claim?: QueueClaimIdentity,
   ): Promise<{ status: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#reviewExecutionResult(missionId, attemptId, input));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#reviewExecutionResult(missionId, attemptId, input));
   }
 
   async #reviewExecutionResult(
@@ -2881,9 +2959,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: Omit<EscalationBody, 'attemptId'>,
+    claim?: QueueClaimIdentity,
   ): Promise<void> {
     // 单事务命令（C2）：记下升级、记 escalated、建投递、记 delivery.created 一起提交。
-    return this.#tx(() => this.#escalateToL3(missionId, attemptId, body));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#escalateToL3(missionId, attemptId, body));
   }
 
   async #escalateToL3(
@@ -2918,9 +2997,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: MissionResultBody,
+    claim?: QueueClaimIdentity,
   ): Promise<void> {
     // 单事务命令（C2）：改状态、记 mission_result.submitted、建投递、记 delivery.created 一起提交。
-    return this.#tx(() => this.#submitMissionResult(missionId, attemptId, body));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitMissionResult(missionId, attemptId, body));
   }
 
   async #submitMissionResult(
@@ -4138,9 +4218,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     evidence: Omit<EvidenceRecord, 'id' | 'attemptId'>,
+    claim?: QueueClaimIdentity,
   ): Promise<{ evidenceId: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#submitEvidence(missionId, attemptId, evidence));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitEvidence(missionId, attemptId, evidence));
   }
 
   async #submitEvidence(
@@ -4165,9 +4246,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: ExecutionResultBody,
+    claim?: QueueClaimIdentity,
   ): Promise<{ status: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#submitExecutionResult(missionId, attemptId, body));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitExecutionResult(missionId, attemptId, body));
   }
 
   async #submitExecutionResult(
@@ -4218,9 +4300,10 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: Omit<BlockedRecord, 'attemptId'>,
+    claim?: QueueClaimIdentity,
   ): Promise<void> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#reportBlocked(missionId, attemptId, body));
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#reportBlocked(missionId, attemptId, body));
   }
 
   async #reportBlocked(
@@ -4306,6 +4389,56 @@ export class Platform {
   /** 命令事务（C2）：注入了就让 fn 里的写一起提交；缺省直接跑。 */
   #tx<T>(fn: () => Promise<T>): Promise<T> {
     return this.#transaction ? this.#transaction.run(fn) : fn();
+  }
+
+  /**
+   * 队列身份写：核对与状态/事件/投递必须在同一 runFenced 事务里。
+   * 事务外 get 预检会在核对和提交之间被接管，旧 Runner 仍能迟到落盘。
+   * 没注入 FencedCommandTransaction 时 fail-closed，避免内存平台把领取身份当成已授权。
+   * 无领取身份走既有 #tx，原调用方不用改。
+   */
+  #txFenced<T>(claim: QueueClaimIdentity | undefined, fn: () => Promise<T>): Promise<T> {
+    if (!claim) return this.#tx(fn);
+    if (!isFencedCommandTransaction(this.#transaction)) {
+      throw new PlatformRuleError(
+        'CLAIM_FENCE_UNAVAILABLE',
+        '携带队列领取身份的写请求需要同一事务内的租约核对，但当前平台没有 FencedCommandTransaction。',
+      );
+    }
+    const fence: ClaimFence = {
+      id: claim.id,
+      owner: claim.owner,
+      claimGeneration: claim.claimGeneration,
+      now: this.#clock.now().toISOString(),
+    };
+    return this.#transaction.runFenced(fence, fn).catch(mapClaimFenceError);
+  }
+
+  async #attemptHasQueueMark(missionId: string, attemptId: string): Promise<boolean> {
+    const events = await this.#activity.list(missionId);
+    return events.some((event) => eventMarksQueuedAttempt(event, attemptId));
+  }
+
+  /**
+   * 队列 Attempt 即使调用方没带内存 claim 也不得走无 fence 写入。
+   * 只靠 HTTP 记得传 claim 的话，重启丢牌后控制面 finish 会把队列误判成非队列。
+   */
+  #attemptWrite<T>(
+    missionId: string,
+    attemptId: string,
+    claim: QueueClaimIdentity | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (claim) return this.#txFenced(claim, fn);
+    return this.#tx(async () => {
+      if (await this.#attemptHasQueueMark(missionId, attemptId)) {
+        throw new PlatformRuleError(
+          'QUEUE_CLAIM_REQUIRED',
+          '该 Attempt 由队列领取启动，写入必须携带当前租约身份。',
+        );
+      }
+      return fn();
+    });
   }
 
   /**

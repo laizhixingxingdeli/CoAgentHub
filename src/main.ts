@@ -439,22 +439,39 @@ export async function buildPgPlatform(options?: {
 /** 把「开 attempt」和「发 token」这两件事粘起来，交给调度器用。 */
 export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTokenIssuer {
   return {
-    async startCoordinator(missionId, profile) {
-      const { attemptId } = await platform.startCoordinatorAttempt(missionId, profile);
-      const run = tokens.issue({ missionId, attemptId, role: 'coordinator' });
+    async startCoordinator(missionId, profile, claim) {
+      const { attemptId } = await platform.startCoordinatorAttempt(missionId, profile, claim);
+      const run = tokens.issue({
+        missionId,
+        attemptId,
+        role: 'coordinator',
+        ...(claim ? { claim } : {}),
+      });
       return { attemptId, token: run.token };
     },
-    async startExecutor(missionId, workItemId, profile) {
-      const { attemptId } = await platform.startExecutorAttempt(missionId, workItemId, profile);
-      const run = tokens.issue({ missionId, attemptId, role: 'executor', workItemId });
+    async startExecutor(missionId, workItemId, profile, claim) {
+      const { attemptId } = await platform.startExecutorAttempt(missionId, workItemId, profile, claim);
+      const run = tokens.issue({
+        missionId,
+        attemptId,
+        role: 'executor',
+        workItemId,
+        ...(claim ? { claim } : {}),
+      });
       return { attemptId, token: run.token };
     },
-    async startIndependentReviewer(missionId, candidates = []) {
+    async startIndependentReviewer(missionId, candidates = [], claim) {
       const { attemptId, profileId } = await platform.startIndependentReviewerAttempt(
         missionId,
         candidates,
+        claim,
       );
-      const run = tokens.issue({ missionId, attemptId, role: 'independent_reviewer' });
+      const run = tokens.issue({
+        missionId,
+        attemptId,
+        role: 'independent_reviewer',
+        ...(claim ? { claim } : {}),
+      });
       return { attemptId, token: run.token, profileId };
     },
     revoke(token) {
