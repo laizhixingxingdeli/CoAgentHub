@@ -22,8 +22,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
-import { claimHop, completeHop, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import { claimHop, claimHopWithCandidate, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
   ActivityLog,
@@ -33,6 +33,7 @@ import type {
   FencedCommandTransaction,
   IdGenerator,
   ProjectRepository,
+  QueuedHopCapacityRepository,
 } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { KEEP_TAIL_ON_FINISH, truncationNote } from './live.ts';
@@ -1156,7 +1157,7 @@ export class PgCandidateCircuitRepository implements CandidateCircuitRepository 
 /**
  * 持久化 queued Hop；幂等键的唯一约束由数据库保证跨进程并发时也只保留一项。
  */
-export class PgQueuedHopRepository {
+export class PgQueuedHopRepository implements QueuedHopCapacityRepository {
   #pool: pg.Pool;
 
   constructor(store: PgStateStore) { this.#pool = store.pool; }
@@ -1183,6 +1184,57 @@ export class PgQueuedHopRepository {
 
   async claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
     return this.#transition(id, (hop) => claimHop(hop, owner, now, leaseUntil));
+  }
+
+  /**
+   * 容量占用只认库里尚未过期的租约。必须在同一事务里锁住整张队列再决策写回：
+   * 只 FOR UPDATE 目标 hop 看不见另一行刚领取的占位（幻读/写偏斜），两个不同 hop
+   * 会同时通过五维检查把上限打穿。等待或空队列回滚、不改任何行，避免把候选 B
+   * 的 runtime/profile 写到候选 A 上。进程内互斥挡不住第二个 PG 实例。
+   */
+  async claimAvailable(input: ClaimAvailableHopInput): Promise<CapacityClaimResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      // SHARE ROW EXCLUSIVE 与自身及 INSERT/UPDATE 互斥，空表也串行化写者。
+      await client.query('LOCK TABLE queued_hops IN SHARE ROW EXCLUSIVE MODE');
+      const selected = await client.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops');
+      const hops = selected.rows.map(({ hop }) => hop);
+      const decision = decideCapacityClaim(hops, input.now, input.limits, input.eligible);
+      if (decision.kind !== 'select') {
+        await client.query('ROLLBACK');
+        if (decision.kind === 'waiting') {
+          return { kind: 'waiting' as const, hop: { ...decision.hop }, wait: decision.wait };
+        }
+        return { kind: 'empty' as const };
+      }
+      const updated = claimHopWithCandidate(
+        decision.hop,
+        input.owner,
+        input.now,
+        input.leaseUntil,
+        decision.candidate,
+      );
+      if (!updated) {
+        await client.query('ROLLBACK');
+        return { kind: 'empty' as const };
+      }
+      const written = await client.query(
+        'UPDATE queued_hops SET hop = $2::jsonb WHERE hop_id = $1 AND hop = $3::jsonb',
+        [updated.id, JSON.stringify(updated), JSON.stringify(decision.hop)],
+      );
+      if (written.rowCount !== 1) {
+        await client.query('ROLLBACK');
+        return { kind: 'empty' as const };
+      }
+      await client.query('COMMIT');
+      return { kind: 'claimed' as const, hop: { ...updated } };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {

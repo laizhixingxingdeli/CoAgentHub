@@ -35,7 +35,7 @@ import type {
   ActivityEvent,
   ActivityLog,
   Clock,
-  QueuedHopRepository,
+  QueuedHopCapacityRepository,
   CommandTransaction,
   FencedCommandTransaction,
   IdGenerator,
@@ -53,8 +53,8 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
-import { claimHop, completeHop, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import { claimHop, claimHopWithCandidate, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
 import {
@@ -1033,7 +1033,7 @@ export class FileQueryRunRepository implements QueryRunRepository {
  *
  * append-only：同 id 结构相同幂等；不同则 conflict。不进 archive package。
  */
-export class FileQueuedHopRepository implements QueuedHopRepository {
+export class FileQueuedHopRepository implements QueuedHopCapacityRepository {
   #store: FileStateStore;
   constructor(store: FileStateStore) { this.#store = store; }
 
@@ -1057,6 +1057,36 @@ export class FileQueuedHopRepository implements QueuedHopRepository {
 
   async claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
     return this.#transition(id, (row) => claimHop(row, owner, now, leaseUntil));
+  }
+
+  /**
+   * 容量占用只认盘上有效租约。必须在同一单写者临界段里读完整队列再写回选中项：
+   * 先 list 再 claim 会让两个领取都看见同一个空位，把五维上限打穿。
+   * 等待或空队列不改任何行，避免把候选 B 的 runtime/profile 写到候选 A 上。
+   */
+  async claimAvailable(input: ClaimAvailableHopInput): Promise<CapacityClaimResult> {
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const decision = decideCapacityClaim(rows, input.now, input.limits, input.eligible);
+      if (decision.kind !== 'select') {
+        if (decision.kind === 'waiting') {
+          return { kind: 'waiting' as const, hop: { ...decision.hop }, wait: decision.wait };
+        }
+        return { kind: 'empty' as const };
+      }
+      const updated = claimHopWithCandidate(
+        decision.hop,
+        input.owner,
+        input.now,
+        input.leaseUntil,
+        decision.candidate,
+      );
+      if (!updated) return { kind: 'empty' as const };
+      const index = rows.findIndex((row) => row.id === updated.id);
+      if (index < 0) return { kind: 'empty' as const };
+      rows[index] = updated;
+      return { kind: 'claimed' as const, hop: { ...updated } };
+    });
   }
 
   async renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
