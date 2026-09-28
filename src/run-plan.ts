@@ -20,10 +20,11 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { MissionRunner } from './application/mission-runner.ts';
+import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
 import { runPlanOnPlatform } from './application/plan-runtime.ts';
@@ -83,6 +84,7 @@ const VALUE_FLAGS = Object.freeze([
   '--store',
   '--coordinator',
   '--executor',
+  '--max-rounds',
   '--independent-reviewer',
   '--worktrees',
 ]);
@@ -105,11 +107,15 @@ function planFileArg(): string | undefined {
   return flagValue('--plan') ?? positionalPlanFile();
 }
 
+export function missionRunOptions<T extends { readonly projectRoot: string }>(options: T, maxRounds: number | undefined): T | (T & { readonly maxRounds: number }) {
+  return maxRounds === undefined ? options : { ...options, maxRounds };
+}
+
 function usage(): string {
   return (
     '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
       '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
-      '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>]\n' +
+      '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>] [--max-rounds <1-100>]\n' +
       '     node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check\n' +
       '\n' +
       '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
@@ -162,7 +168,7 @@ function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): vo
  * 没有任何入选条目时以 0 退出并写明「没有可跑的候选」——那是筛选结果，不是预检失败。
  * 有候选才跑仓库预检；预检不过非零退出，且不把失败说成可以开跑。
  */
-async function checkPlanOnly(planFile: string): Promise<void> {
+async function checkPlanOnly(planFile: string, maxRounds: number | undefined): Promise<void> {
   const cwd = flagValue('--cwd');
   const reviewer = flagValue('--reviewer');
   if (!cwd || !reviewer) {
@@ -176,6 +182,7 @@ async function checkPlanOnly(planFile: string): Promise<void> {
   const selection = selectPlanCandidates(plan, { projectRoot });
   console.log(`方案 ${plan.planId} 只读检查（--check，不开跑）`);
   printStopGates(raw.stopConditions, plan.stopConditions);
+  console.log(`轮次上限：${maxRounds ?? 12}${maxRounds === undefined ? '（缺省）' : ''}`);
   printEligibility(plan, selection);
   if (selection.candidates.length === 0) {
     console.log('没有可跑的候选。');
@@ -208,13 +215,14 @@ function stamp(date: Date): string {
 }
 
 async function main() {
+  const maxRounds = parseMaxRounds(flagValue('--max-rounds'), process.argv.includes('--max-rounds'));
   const planFile = planFileArg();
   if (!planFile) {
     console.log(usage());
     return;
   }
   if (process.argv.includes('--check')) {
-    await checkPlanOnly(planFile);
+    await checkPlanOnly(planFile, maxRounds);
     return;
   }
 
@@ -402,7 +410,7 @@ async function main() {
       store,
       projectRoot,
       platform,
-      runMission: (missionId, options) => runner.run(missionId, options),
+      runMission: (missionId, options) => runner.run(missionId, missionRunOptions(options, maxRounds)),
       ...(runQuery ? { runQuery } : {}),
       ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
       persist,
@@ -451,8 +459,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
-  console.error(formatErrorForLog(error));
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
+    console.error(formatErrorForLog(error));
+    process.exit(1);
+  });
+}

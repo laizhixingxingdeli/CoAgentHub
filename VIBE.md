@@ -118,6 +118,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   可信升级把 Lightweight mutation Mission 转为 Standard，并留下 `PromotionRecord`；入口只在进程内。
 - **machine-final-review** — 机器 L3：合进集成分支，在合并结果上验证，红则回滚
   `Platform.finalizeMissionByMachine` 是**机器放行**的唯一入口；`Platform.abandonMissionForPlan` 是**方案运行放弃失败 Mission** 的唯一入口；`Platfor
+- **mission-round-limit** — Mission 单次运行轮次上限
+  `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
   按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份
 - **query-run** — 独立 QueryRun（只读问答）

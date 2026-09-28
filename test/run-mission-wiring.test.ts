@@ -7,7 +7,8 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +25,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
+import { missionRunOptions } from '../src/run-mission.ts';
 import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
@@ -216,6 +218,19 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /--adapter/);
     assert.match(cli, /--in-place/);
     assert.match(cli, /--accept-stale-base/);
+    assert.match(cli, /--max-rounds <1-100>/);
+    assert.match(cli, /parseMaxRounds\(/);
+    assert.match(cli, /maxRounds/);
+  });
+
+  test('max-rounds 选项组装：显式值传递，缺省不覆盖 orchestrator 默认值', () => {
+    assert.deepEqual(missionRunOptions('/work/project', 30), {
+      projectRoot: '/work/project',
+      maxRounds: 30,
+    });
+    assert.deepEqual(missionRunOptions('/work/project', undefined), {
+      projectRoot: '/work/project',
+    });
   });
 
   test('注入既有 Platform / issuer / 回环 baseUrl / workspace / 候选，同一实例上跑完一条', async () => {
@@ -296,6 +311,27 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.equal(built.tokens.resolve(again.token), undefined, '失败后同样吊销');
     assert.equal((built.server.address() as AddressInfo).port, built.port);
   });
+});
+
+test('非法 max-rounds 在读取 mission 与创建状态/锁前失败', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-rounds-'));
+  const mission = join(dir, 'mission.json');
+  const state = join(dir, 'state.json');
+  writeFileSync(mission, '{"projectId":"P","missionId":"M","contract":{}}');
+  try {
+    for (const flagArgs of [['--max-rounds', '0'], ['--max-rounds']]) {
+      const result = spawnSync(process.execPath, [
+        '--experimental-strip-types', 'src/run-mission.ts', mission, '--state', state, ...flagArgs,
+      ], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /--max-rounds/);
+      assert.match(result.stderr, /1–100/);
+      assert.equal(existsSync(state), false);
+      assert.equal(existsSync(join(dir, '.lock-state.json')), false);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 const HA_ORDER = {

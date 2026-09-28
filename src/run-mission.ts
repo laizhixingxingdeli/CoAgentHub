@@ -9,11 +9,12 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { MissionRunner } from './application/mission-runner.ts';
+import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_UNDECLARED_MESSAGE,
@@ -29,6 +30,13 @@ import type {
 } from './kernel/index.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import type { TaskFacts } from './application/task-classifier.ts';
+
+export function missionRunOptions(projectRoot: string, maxRounds: number | undefined) {
+  return {
+    projectRoot,
+    ...(maxRounds === undefined ? {} : { maxRounds }),
+  };
+}
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -52,10 +60,17 @@ function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
 }
 
 async function main() {
+  const maxRoundsFlagIndex = process.argv.indexOf('--max-rounds');
+  const maxRounds = parseMaxRounds(
+    maxRoundsFlagIndex < 0 || process.argv[maxRoundsFlagIndex + 1]?.startsWith('--')
+      ? undefined
+      : process.argv[maxRoundsFlagIndex + 1],
+    maxRoundsFlagIndex >= 0,
+  );
   const missionFile = process.argv[2];
   if (!missionFile) {
     console.log(
-      '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>]\n' +
+      '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>] [--max-rounds <1-100>]\n' +
         '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
         '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>]\n' +
         '\n' +
@@ -252,7 +267,7 @@ async function main() {
     },
   });
 
-  const ran = await runner.run(spec.missionId, { projectRoot: cwd });
+  const ran = await runner.run(spec.missionId, missionRunOptions(cwd, maxRounds));
   const result = ran.outcome;
 
   console.log(`\n${'='.repeat(72)}`);
@@ -300,7 +315,9 @@ async function main() {
   releaseLock();
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exit(1);
+  });
+}
