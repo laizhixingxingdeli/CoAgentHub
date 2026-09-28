@@ -68,9 +68,20 @@ export interface ContextBundleEntry {
   readonly content: unknown;
 }
 
+export interface ContextBundleBudgetReport {
+  readonly budget: number;
+  readonly estimatedBefore: number;
+  readonly estimatedAfter: number;
+  readonly omittedSources: readonly ContextBundleSource[];
+  readonly overflow: boolean;
+  readonly remainingOverBudget: number;
+}
+
 export interface ContextBundle {
   readonly role: ContextBundleRole;
   readonly entries: readonly ContextBundleEntry[];
+  /** 仅在调用方传入预算时出现；后续平台工单靠 omittedSources / overflow 判断是否真裁过。 */
+  readonly budgetReport?: ContextBundleBudgetReport;
 }
 
 export interface StartupBriefProjection {
@@ -129,7 +140,51 @@ function sha256(payload: string): string {
 function estimateTokens(content: unknown): number {
   if (content === undefined) return 0;
   const text = typeof content === 'string' ? content : canonicalJson(content);
-  return Math.ceil(text.length / 4);
+  // JS 的 string.length 把非 ASCII 算成 1；按 UTF-8 字节才和落盘/传输一致，否则中文会被低估。
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 4);
+}
+
+function totalEstimatedTokens(entries: readonly ContextBundleEntry[]): number {
+  let total = 0;
+  for (const entry of entries) total += entry.estimatedTokens;
+  return total;
+}
+
+/** 超预算时整条去掉的可选来源，plan 先于 environment_notes。不截断、不把内容挪进必需来源。 */
+const OPTIONAL_DROP_ORDER = ['plan', 'environment_notes'] as const;
+
+function applyBudget(
+  entries: readonly ContextBundleEntry[],
+  budget: number,
+): { entries: ContextBundleEntry[]; report: ContextBundleBudgetReport } {
+  const estimatedBefore = totalEstimatedTokens(entries);
+  const omittedSources: ContextBundleSource[] = [];
+  let remaining = entries as ContextBundleEntry[];
+  let estimatedAfter = estimatedBefore;
+
+  if (estimatedBefore > budget) {
+    for (const source of OPTIONAL_DROP_ORDER) {
+      if (estimatedAfter <= budget) break;
+      const hit = remaining.find((entry) => entry.source === source);
+      if (!hit) continue;
+      omittedSources.push(source);
+      remaining = remaining.filter((entry) => entry.source !== source);
+      estimatedAfter -= hit.estimatedTokens;
+    }
+  }
+
+  const overflow = estimatedAfter > budget;
+  return {
+    entries: remaining,
+    report: {
+      budget,
+      estimatedBefore,
+      estimatedAfter,
+      omittedSources,
+      overflow,
+      remainingOverBudget: overflow ? estimatedAfter - budget : 0,
+    },
+  };
 }
 
 function hashedEntry(source: ContextBundleSource, content: unknown): ContextBundleEntry {
@@ -163,7 +218,11 @@ function revisionEntry(
  * 协调者始终是红线/环境/契约/规划/打回，执行者始终是红线/环境/工单。
  * 不占位的话「缺省」和「没这个来源」会混成同一种形状。
  */
-export function buildContextBundle(input: ContextBuilderInput): ContextBundle {
+export function buildContextBundle(input: ContextBuilderInput, budget?: number): ContextBundle {
+  if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0)) {
+    throw new Error('budget must be a non-negative safe integer');
+  }
+
   const entries: ContextBundleEntry[] =
     input.role === 'executor'
       ? [
@@ -179,7 +238,12 @@ export function buildContextBundle(input: ContextBuilderInput): ContextBundle {
           hashedEntry('final_review', input.finalReview),
         ];
 
-  return { role: input.role, entries };
+  if (budget === undefined) {
+    return { role: input.role, entries };
+  }
+
+  const trimmed = applyBudget(entries, budget);
+  return { role: input.role, entries: trimmed.entries, budgetReport: trimmed.report };
 }
 
 /**

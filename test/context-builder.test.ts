@@ -313,6 +313,156 @@ describe('projectStartupBriefFields', () => {
   });
 });
 
+function utf8Tokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 4);
+}
+
+function bundleTotal(bundle: ReturnType<typeof buildContextBundle>): number {
+  return bundle.entries.reduce((sum, entry) => sum + entry.estimatedTokens, 0);
+}
+
+describe('buildContextBundle 预算裁剪', () => {
+  const RULES = '架构红线：内核禁止第三方依赖。';
+  const ENV = ['环境：工作区路径含中文「临时」。'];
+
+  test('非 ASCII 固定文本按 UTF-8 字节 / 4 上取整；恰等于 N 全留，N-1 先去掉 plan', () => {
+    const input = coordinatorInput({ projectRules: RULES, environmentNotes: ENV });
+    const full = buildContextBundle(input);
+    const rules = full.entries.find((e) => e.source === 'project_rules');
+    const notes = full.entries.find((e) => e.source === 'environment_notes');
+    assert.equal(rules?.estimatedTokens, utf8Tokens(RULES));
+    assert.notEqual(utf8Tokens(RULES), Math.ceil(RULES.length / 4));
+    assert.equal(notes?.estimatedTokens, utf8Tokens(JSON.stringify(ENV)));
+    assert.notEqual(utf8Tokens(JSON.stringify(ENV)), Math.ceil(JSON.stringify(ENV).length / 4));
+
+    const N = bundleTotal(full);
+    const atBudget = buildContextBundle(input, N);
+    assert.deepEqual(
+      atBudget.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+    assert.deepEqual(atBudget.entries, full.entries);
+    assert.deepEqual(atBudget.budgetReport?.omittedSources, []);
+    assert.equal(atBudget.budgetReport?.budget, N);
+    assert.equal(atBudget.budgetReport?.estimatedBefore, N);
+    assert.equal(atBudget.budgetReport?.estimatedAfter, N);
+    assert.equal(atBudget.budgetReport?.overflow, false);
+    assert.equal(atBudget.budgetReport?.remainingOverBudget, 0);
+
+    const planTokens = full.entries.find((e) => e.source === 'plan')?.estimatedTokens ?? 0;
+    assert.ok(planTokens >= 1);
+    const trimmed = buildContextBundle(input, N - 1);
+    assert.deepEqual(trimmed.entries.map((e) => e.source), [
+      'project_rules',
+      'environment_notes',
+      'contract',
+      'final_review',
+    ]);
+    assert.deepEqual(trimmed.budgetReport?.omittedSources, ['plan']);
+    assert.equal(trimmed.budgetReport?.estimatedBefore, N);
+    assert.equal(trimmed.budgetReport?.estimatedAfter, N - planTokens);
+    assert.equal(trimmed.budgetReport?.estimatedAfter, bundleTotal(trimmed));
+    assert.equal(trimmed.budgetReport?.overflow, false);
+    assert.equal(trimmed.budgetReport?.remainingOverBudget, 0);
+  });
+
+  test('超预算时不丢不截协调者契约/红线/打回与执行者工单/contextRefs/红线', () => {
+    const coordInput = coordinatorInput({ projectRules: RULES, environmentNotes: ENV });
+    const coordFull = buildContextBundle(coordInput);
+    const planTokens =
+      coordFull.entries.find((e) => e.source === 'plan')?.estimatedTokens ?? 0;
+    const notesTokens =
+      coordFull.entries.find((e) => e.source === 'environment_notes')?.estimatedTokens ?? 0;
+    const requiredBudget = bundleTotal(coordFull) - planTokens - notesTokens;
+    const coord = buildContextBundle(coordInput, Math.max(0, requiredBudget - 1));
+
+    assert.deepEqual(coord.budgetReport?.omittedSources, ['plan', 'environment_notes']);
+    assert.deepEqual(coord.entries.map((e) => e.source), [
+      'project_rules',
+      'contract',
+      'final_review',
+    ]);
+    assert.equal(coord.entries.find((e) => e.source === 'project_rules')?.content, RULES);
+    assert.deepEqual(coord.entries.find((e) => e.source === 'contract')?.content, CONTRACT);
+    assert.deepEqual(coord.entries.find((e) => e.source === 'final_review')?.content, REVIEW);
+    const contract = coord.entries.find((e) => e.source === 'contract')?.content as MissionContract;
+    assert.equal(contract.intent, CONTRACT.intent);
+    assert.deepEqual(contract.acceptance, CONTRACT.acceptance);
+    assert.deepEqual(contract.constraints, CONTRACT.constraints);
+    assert.deepEqual(contract.guardrails, CONTRACT.guardrails);
+    assert.deepEqual(contract.nonGoals, CONTRACT.nonGoals);
+
+    const coordProjected = projectStartupBriefFields(coord);
+    assert.equal(coordProjected.projectRules, RULES);
+    assert.deepEqual(coordProjected.contract, CONTRACT);
+    assert.deepEqual(coordProjected.finalReview, REVIEW);
+    assert.equal(coordProjected.plan, undefined);
+    assert.equal(coordProjected.environmentNotes, undefined);
+
+    const execInput = executorInput({ projectRules: RULES, environmentNotes: ENV });
+    const execFull = buildContextBundle(execInput);
+    const execNotes =
+      execFull.entries.find((e) => e.source === 'environment_notes')?.estimatedTokens ?? 0;
+    const exec = buildContextBundle(execInput, bundleTotal(execFull) - execNotes);
+    assert.deepEqual(exec.budgetReport?.omittedSources, ['environment_notes']);
+    assert.deepEqual(exec.entries.map((e) => e.source), ['project_rules', 'work_order']);
+    assert.equal(exec.entries.find((e) => e.source === 'project_rules')?.content, RULES);
+    const work = exec.entries.find((e) => e.source === 'work_order')?.content as typeof WORK_ITEM;
+    assert.deepEqual(work, WORK_ITEM);
+    assert.deepEqual(work.order.contextRefs, W1_REFS);
+    const execProjected = projectStartupBriefFields(exec);
+    assert.equal(execProjected.projectRules, RULES);
+    assert.deepEqual(execProjected.workItem, WORK_ITEM);
+    assert.equal(execProjected.environmentNotes, undefined);
+  });
+
+  test('只有必需内容仍超预算时完整返回 overflow，未配置预算无裁剪报告', () => {
+    const input = coordinatorInput({ projectRules: RULES, environmentNotes: ENV });
+    const full = buildContextBundle(input);
+    assert.equal('budgetReport' in full, false);
+    assert.deepEqual(
+      full.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+    const projected = projectStartupBriefFields(full);
+    assert.equal(projected.projectRules, RULES);
+    assert.deepEqual(projected.environmentNotes, ENV);
+    assert.deepEqual(projected.contract, CONTRACT);
+    assert.deepEqual(projected.plan, PLAN);
+    assert.deepEqual(projected.finalReview, REVIEW);
+
+    const requiredOnly = buildContextBundle(input, 0);
+    const estimatedAfter = bundleTotal(requiredOnly);
+    assert.ok(estimatedAfter > 0);
+    assert.equal(requiredOnly.budgetReport?.budget, 0);
+    assert.equal(requiredOnly.budgetReport?.estimatedBefore, bundleTotal(full));
+    assert.equal(requiredOnly.budgetReport?.estimatedAfter, estimatedAfter);
+    assert.equal(requiredOnly.budgetReport?.overflow, true);
+    assert.equal(requiredOnly.budgetReport?.remainingOverBudget, estimatedAfter - 0);
+    assert.deepEqual(requiredOnly.budgetReport?.omittedSources, ['plan', 'environment_notes']);
+    assert.deepEqual(requiredOnly.entries.find((e) => e.source === 'contract')?.content, CONTRACT);
+    assert.equal(requiredOnly.entries.find((e) => e.source === 'project_rules')?.content, RULES);
+    assert.deepEqual(requiredOnly.entries.find((e) => e.source === 'final_review')?.content, REVIEW);
+
+    const execFull = buildContextBundle(executorInput({ projectRules: RULES, environmentNotes: ENV }));
+    assert.equal('budgetReport' in execFull, false);
+    assert.deepEqual(
+      execFull.entries.map((e) => e.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+    const execOverflow = buildContextBundle(
+      executorInput({ projectRules: RULES, environmentNotes: ENV }),
+      0,
+    );
+    assert.equal(execOverflow.budgetReport?.overflow, true);
+    assert.equal(
+      execOverflow.budgetReport?.remainingOverBudget,
+      bundleTotal(execOverflow) - 0,
+    );
+    assert.deepEqual(execOverflow.entries.find((e) => e.source === 'work_order')?.content, WORK_ITEM);
+  });
+});
+
 describe('getStartupBrief 从 Bundle 投影旧字段', () => {
   test('协调者和执行者旧字段逐字段不变，并带上 contextBundle', async () => {
     const platform = makePlatform();
