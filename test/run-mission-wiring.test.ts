@@ -25,6 +25,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
+import { inRunBackoffWaitMs } from '../src/application/orchestrator.ts';
 import { missionRunOptions } from '../src/run-mission.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
 import { Platform } from '../src/application/platform.ts';
@@ -214,6 +215,29 @@ describe('MissionRunner 五维 hopCapacityLimits 构造校验', () => {
       assert.equal(runtime.specs.length, 0);
     },
   );
+
+  test('inRunBackoffWaitMs 省略为 0；负数、小数、NaN、Infinity 在构造时抛', () => {
+    const runtime = new ScriptedRuntime({});
+    const queuedHops = countingQueuedHops();
+    assert.equal(inRunBackoffWaitMs(), 0);
+    assert.doesNotThrow(() => new MissionRunner(capacityRunnerDeps(runtime, queuedHops)));
+    assert.doesNotThrow(
+      () => new MissionRunner({ ...capacityRunnerDeps(runtime, queuedHops), inRunBackoffWaitMs: 0 }),
+    );
+    assert.doesNotThrow(
+      () => new MissionRunner({ ...capacityRunnerDeps(runtime, queuedHops), inRunBackoffWaitMs: 120_000 }),
+    );
+    for (const value of [-1, 1.5, Number.NaN, Infinity]) {
+      const hops = countingQueuedHops();
+      const agent = new ScriptedRuntime({});
+      assert.throws(
+        () => new MissionRunner({ ...capacityRunnerDeps(agent, hops), inRunBackoffWaitMs: value }),
+        /non-negative safe integer/,
+      );
+      assert.deepEqual(hops.calls, []);
+      assert.equal(agent.specs.length, 0);
+    }
+  });
 
   test('每维 0、负数、小数、NaN、Infinity 在构造时抛，不改队列、不调 runtime.start', () => {
     const invalid = [0, -1, 1.5, Number.NaN, Infinity];
@@ -583,10 +607,14 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(runner, /queuedHops\?:/);
     assert.match(runner, /hopCapacityLimits\?:/);
     assert.match(runner, /hopCapacityLimits\(deps\.hopCapacityLimits\)/);
+    assert.match(runner, /inRunBackoffWaitMs\?:/);
+    assert.match(runner, /inRunBackoffWaitMs\(deps\.inRunBackoffWaitMs\)/);
     const ctorAt = runner.indexOf('constructor(deps: MissionRunnerDeps)');
     const hopCapAt = runner.indexOf('hopCapacityLimits(deps.hopCapacityLimits)');
+    const waitAt = runner.indexOf('inRunBackoffWaitMs(deps.inRunBackoffWaitMs)');
     const orchAt = runner.indexOf('new Orchestrator(this.#deps)');
     assert.ok(ctorAt >= 0 && hopCapAt > ctorAt && hopCapAt < orchAt, '容量归一化必须在构造时、交给编排器之前');
+    assert.ok(waitAt > ctorAt && waitAt < orchAt, '运行内退避上限必须在构造时校验');
   });
 
   test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
@@ -594,6 +622,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /new MissionRunner\(/);
     assert.match(cli, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
     assert.match(cli, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
+    assert.match(cli, /new MissionRunner\(\{[\s\S]*?inRunBackoffWaitMs:\s*120_000/);
     assert.match(cli, /candidateCircuits, queuedHops \} = built/);
     assert.doesNotMatch(cli, /--hop-capacity|--capacity-global|--capacity-project|--capacity-role|--capacity-runtime|--capacity-profile/);
     assert.match(cli, /runner\.run\(/);

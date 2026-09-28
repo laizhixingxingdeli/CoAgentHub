@@ -10,6 +10,7 @@
 import type { LiveOutput } from './live.ts';
 import {
   Orchestrator,
+  inRunBackoffWaitMs,
   type HopRecord,
   type MissionRunOutcome,
   type RolePool,
@@ -58,6 +59,11 @@ export interface MissionRunnerDeps {
    * run() 才抛，队列可能已被领取、Agent 已经启动。
    */
   readonly hopCapacityLimits?: HopCapacityLimits;
+  /**
+   * 可换候选失败后同一次运行内等待退避的上限。缺省 0。
+   * 与编排器同名，构造时校验，避免非法值活到第一跳失败。
+   */
+  readonly inRunBackoffWaitMs?: number;
 }
 
 export interface MissionRunnerResult {
@@ -75,6 +81,7 @@ export class MissionRunner {
     this.#deps = {
       ...deps,
       hopCapacityLimits: hopCapacityLimits(deps.hopCapacityLimits),
+      inRunBackoffWaitMs: inRunBackoffWaitMs(deps.inRunBackoffWaitMs),
     };
   }
 

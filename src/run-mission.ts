@@ -250,6 +250,7 @@ async function main() {
     workspace: missionWorkspace,
     candidateCircuits,
     queuedHops,
+    inRunBackoffWaitMs: 120_000,
     // 「我知道基线过期了，照跑」。必须由人显式给：调度器那边原先用一个
     // 进程内布尔量记这件事，而 CLI 一次运行一个进程，它每次都失忆——
     // 于是基线一过期，这条 Mission 每跑一次都被同一句话挡回去。

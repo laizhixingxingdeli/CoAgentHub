@@ -2243,6 +2243,12 @@ describe('合格 HA 跑到 pending_release',
         assert.doesNotMatch(src, /independentReviewer:[\s\S]{0,160}candidates:\s*coordinators/);
         assert.match(src, /空池也原样交给 MissionRunner/);
       });
+
+    test('CLI 把运行内退避等待上限 120000 交给 MissionRunner',
+      () => {
+        const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
+        assert.match(src, /new MissionRunner\(\{[\s\S]*?inRunBackoffWaitMs:\s*120_000/);
+      });
   });
 
 describe('run-plan 方案驱动：真实 MissionRunner 失败停靠队列',
