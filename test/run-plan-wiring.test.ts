@@ -1223,7 +1223,7 @@ describe('真 Git HA 可复用夹具', () => {
     assert.equal(authorityFile.startsWith(worktreeRoot), false);
   });
 
-  test('真 Git：方案 HA approve 受控合入，释放名额后 F2 合入', async () => {
+  test('真 Git：方案 HA approve 受控合入，释放名额后 F2 合入', { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
     const repo = repoOn('auto/plan-x');
     writeFileSync(join(repo, 'b.txt'), 'base\n');
     git(repo, 'add', '-A');
@@ -1516,7 +1516,7 @@ describe('合格 HA 跑到 pending_release',
     });
 
     test('真实平台接线：合格 HA 等待决定，stop 保留 Mission',
-      async () => {
+      { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
         const clock = new FixedClock();
         const activity = new InMemoryActivityLog(clock);
         const ids = new SequentialIds();
@@ -1699,7 +1699,7 @@ describe('合格 HA 跑到 pending_release',
         assert.notEqual(view.status, 'blocked');
       });
 
-    test('真平台：HA 待放行时 F2 无分类、会话或派发；skip 后释放名额再推进', async () => {
+    test('真平台：HA 待放行时 F2 无分类、会话或派发；skip 后释放名额再推进', { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, async () => {
       const runId = 'R-ha-slot';
       const haMissionId = `${runId}-Ha1`;
       const f2MissionId = `${runId}-F2`;

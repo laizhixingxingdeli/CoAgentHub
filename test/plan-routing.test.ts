@@ -206,13 +206,22 @@ describe('定路由', () => {
     assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
   });
 
-  test('事实判到 high_assurance 且禁止副作用全 false → 按 HA 建 classified，不带工单', () => {
+  test('事实判到 high_assurance 且禁止副作用全 false → 按 HA 建 classified，不带工单', { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, () => {
     const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, schemaPublicApiPersistenceCompat: true } };
     const route = decideRoute(parsed({ facts, assessment: SMALL, workOrder: ORDER }), FEATURE);
     assert.equal(route.kind, 'classified');
     assert.equal(route.kind === 'classified' && route.classification.recommended.executionMode, 'high_assurance');
     assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
     assert.deepEqual(route.kind === 'classified' ? route.facts : undefined, facts);
+  });
+
+  test('合格 HA 分类回落 Standard，禁止副作用未证明仍需人工且不建单', () => {
+    const haFacts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, credentialsPermissionsSecurity: true } };
+    const route = decideRoute(parsed({ facts: haFacts, assessment: SMALL }), FEATURE);
+    assert.equal(route.kind, 'standard_fallback');
+    assert.match(route.kind === 'standard_fallback' ? route.reason : '', /HA 路暂时关闭/);
+    const unsafe = { ...haFacts, highAssurance: { ...haFacts.highAssurance, externalPaidOp: 'unknown' as const } };
+    assert.equal(decideRoute(parsed({ facts: unsafe, assessment: SMALL }), FEATURE).kind, 'needs_human');
   });
 
   test('HA 四项禁止副作用逐项 true：不建 Mission，原因含字段名', () => {
