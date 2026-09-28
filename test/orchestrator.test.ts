@@ -48,6 +48,7 @@ import {
 } from '../src/application/durable-scheduler.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
+import { createMemoryFencedTransaction } from './helpers/fenced-transaction.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -921,6 +922,7 @@ async function capacityHarness(opts: {
     activity,
     clock,
     ids,
+    transaction: createMemoryFencedTransaction(opts.queuedHops),
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });
@@ -1337,6 +1339,7 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
           ids,
           workspace,
           validation,
+          transaction: createMemoryFencedTransaction(queuedHops),
         });
         const project = await projects.ensure('P');
         project.createMission({
