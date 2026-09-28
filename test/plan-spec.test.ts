@@ -87,6 +87,31 @@ describe('读方案文件', () => {
     }
   });
 
+  test('constraints、nonGoals 缺省或按字符串列表读取；非法值报告条目 id 与字段名', () => {
+    const defaults = planOf([{ id: 'Bounds', title: '边界', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'] }]);
+    assert.equal(defaults.features[0].constraints, undefined);
+    assert.equal(defaults.features[0].nonGoals, undefined);
+    const parsed = planOf([{
+      id: 'Bounds', title: '边界', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'],
+      constraints: ['先一', '再二'], nonGoals: ['不做一', '不做二'],
+    }]);
+    assert.deepEqual(parsed.features[0].constraints, ['先一', '再二']);
+    assert.deepEqual(parsed.features[0].nonGoals, ['不做一', '不做二']);
+    for (const field of ['constraints', 'nonGoals']) {
+      for (const value of ['not-array', ['  '], ['valid', 1]]) {
+        assert.throws(
+          () => planOf([{ id: 'Bounds', title: '边界', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], [field]: value }]),
+          (error: unknown) => {
+            invalid(error);
+            assert.match((error as Error).message, /Bounds/);
+            assert.match((error as Error).message, new RegExp(field));
+            return true;
+          },
+        );
+      }
+    }
+  });
+
   test('未知 status 报出条目 id；why、范围、验收类型错误整份拒绝', () => {
     assert.throws(
       () => planOf([{ id: 'Wx', title: 'x', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'mystery' }]),
@@ -119,9 +144,25 @@ describe('功能点 → Mission 契约', () => {
     assert.match(contract.intent, /要跑的/);
     assert.match(contract.intent, /因为/);
     assert.deepEqual(contract.acceptance, ['可区分']);
-    assert.ok(contract.constraints.some((c) => c.includes('src/l3.ts') && c.includes('src/web/')));
-    assert.ok(contract.nonGoals.some((c) => c.includes('F3')));
+    assert.deepEqual(contract.constraints, ['只改方案为它声明的范围：src/l3.ts、src/web/。']);
+    assert.deepEqual(contract.nonGoals, ['方案 PLAN-x 里的其他功能点（F1「已合的」、F3「也要跑」）不在本 Mission 范围内。']);
     assert.ok(contract.guardrails.some((c) => c.includes('auto/plan-x') && /不要自己合并/.test(c)));
+  });
+
+  test('逐字段将条目边界按顺序并入契约；无其他功能点时仅保留条目 nonGoals', () => {
+    const plan = planOf([
+      {
+        id: 'Only', title: '唯一', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'],
+        constraints: ['条目约束一', '条目约束二'], nonGoals: ['条目非目标一', '条目非目标二'],
+      },
+    ]);
+    const contract = featureContract(plan, plan.features[0]);
+    assert.deepEqual(contract.constraints, ['只改方案为它声明的范围：a.ts。', '条目约束一', '条目约束二']);
+    assert.deepEqual(contract.nonGoals, ['条目非目标一', '条目非目标二']);
+    const defaults = planOf([{ id: 'Only', title: '唯一', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'] }]);
+    const defaultContract = featureContract(defaults, defaults.features[0]);
+    assert.deepEqual(defaultContract.constraints, ['只改方案为它声明的范围：a.ts。']);
+    assert.deepEqual(defaultContract.nonGoals, []);
   });
 });
 
