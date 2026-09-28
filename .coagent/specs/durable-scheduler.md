@@ -1,9 +1,13 @@
 # Durable Scheduler
 
-持久待执行 Hop 队列提供入队、读取、领取、续租与完成的事实；当前不从 Orchestrator 自动入队、领取或启动 Agent，CLI 行为不变。重试、死信、并发上限与运行时派发不属于当前能力。
+持久待执行 Hop 队列提供入队、读取、领取、续租与完成的事实。`run-mission` 与 `run-plan` 构造的 MissionRunner 注入与现有文件/PG 平台同源的队列仓储；旧夹具未注入仓储时仍按非队列路径执行。队列门禁用于 Standard 协调者/执行者、Lightweight 执行者及 HA 独立检视者的实际 Agent Hop：在发 token、建 Attempt 和 `runtime.start` 前入队并领取。它不是常驻派发器；重试、死信、并发上限与恢复同一 PlanRun 尚未实现。
 
 `DurableScheduler.enqueue` 使用时钟与 ID 生成器建立状态为 `queued` 的记录，包含 `id`、`projectId`、`missionId`、`workItemId`、`role`、`priority`、`availableAt`、`attemptCount`、`maxAttempts`、`idempotencyKey`、`createdAt`、`updatedAt`。入队前校验非空身份/幂等键、合法角色、非负安全整数优先级和尝试次数、正整数尝试上限且次数不超过上限，以及有效时间；入队者不得设置状态、owner、leaseUntil 或领取代次。仓储直连入队还校验记录 ID、queued 状态和时间戳。
 
-文件与 PostgreSQL 仓储提供 enqueue/get/list：同一业务幂等键重复入队返回已有项，不覆盖原项（即使原项已经 claimed/completed）；不同键分别保留；读取返回副本。文件仓储随状态快照落盘，重开可读；旧快照没有 `queuedHops` 时按空队列恢复，旧版仅含 queued Hop 且无领取代次时可读取并领取，首领代次为 1。文件版遵守单写者约束，不声称跨进程并发原子幂等；PG 使用 `queued_hops` 表的唯一 `idempotency_key` 约束处理并发同键冲突。
+文件与 PostgreSQL 仓储提供 enqueue/get/list：同一业务幂等键重复入队返回已有项，不覆盖原项（即使原项已经 claimed/completed）；不同键分别保留；读取返回副本。业务键区分 Mission、角色、工作项、契约 revision 与逻辑 Hop 槽。未完成队列项重入复用其槽，不能用 Attempt 数量推导槽（领取后创建 Attempt 再崩溃会导致重复入队并绕过有效租约）；完成项释放后续独立 Hop 的下一槽。文件仓储随状态快照落盘，重开可读；旧快照没有 `queuedHops` 时按空队列恢复，旧版仅含 queued Hop 且无领取代次时可读取并领取，首领代次为 1。文件版遵守单写者约束，不声称跨进程并发原子幂等；PG 使用 `queued_hops` 表的唯一 `idempotency_key` 约束处理并发同键冲突。
 
-`claim(id, owner, leaseMs)` 仅在 queued 且 availableAt 不晚于当前时钟，或已领取且当前时钟到达/越过 leaseUntil 时成功；返回 claimed 状态、owner、leaseUntil、持久且逐次递增的正整数 claimGeneration。不可用时间、未到期租约或已 completed 返回无项。`renew(id, owner, claimGeneration, leaseMs)` 仅当前 owner 和代次且租约尚未到期时可以把 leaseUntil 推进到更晚，`complete(id, owner, claimGeneration)` 同样须当前有效 owner、代次与租约，成功后状态 completed，不能再次领取。错误 owner、错误代次和过期续租/完成被拒，保留原记录不变；接管后旧代次不能续租或完成。文件仓储通过单写者事务串行执行条件转移；PG 在数据库事务中行锁读取，并以原 JSONB 行值作为 UPDATE 条件兑现写入。重开后状态、owner、leaseUntil 和代次仍保留；竞争领取同一项最多一个成功。
+`claim(id, owner, leaseMs)` 仅在 queued 且 availableAt 不晚于当前时钟，或已领取且当前时钟到达/越过 leaseUntil 时成功；返回 claimed 状态、owner、leaseUntil、持久且逐次递增的正整数 claimGeneration。不可用时间、未到期租约或已 completed 返回无项。无法领取时 Runner 不启动 Agent，返回 waiting 并在 Mission 保存可查询的 reason/detail（区分 availableAt 和租约）；暂停、取消、终态、契约改版的旧项不启动 Agent。领取后的运行中续租，正常完成后标记 completed；已 completed 的同一 Hop 不重复启动。`renew(id, owner, claimGeneration, leaseMs)` 仅当前 owner 和代次且租约尚未到期时可以把 leaseUntil 推进到更晚，`complete(id, owner, claimGeneration)` 同样须当前有效 owner、代次与租约，成功后状态 completed，不能再次领取。错误 owner、错误代次和过期续租/完成被拒，保留原记录不变；接管后旧代次不能续租或完成。文件仓储通过单写者事务串行执行条件转移；PG 在数据库事务中行锁读取，并以原 JSONB 行值作为 UPDATE 条件兑现写入。重开后状态、owner、leaseUntil 和代次仍保留；竞争领取同一项最多一个成功。
+
+文件版重新执行同一 Mission 时，若旧 Hop 已领取并留下 Attempt，启动收敛后未到期租约不接管、过期租约可增加领取代次并继续 Mission；文件主状态锁拿不到时第二进程不领取也不启动。run-plan 每次仍新建 PlanRun，遗留非终态 Mission 占项目名额时拒绝启动，不恢复旧 PlanRun。代次只约束队列续租与完成：**尚未实现 D4 对旧 Runner 迟到工具写入的 fencing**。
+
+权威实现与测试：`src/application/durable-scheduler.ts`、`src/application/orchestrator.ts`、`src/application/mission-runner.ts`、`src/main.ts`、`src/run-mission.ts`、`src/run-plan.ts`；`test/durable-scheduler-recovery.test.ts`、`test/orchestrator.test.ts`、`test/run-mission-wiring.test.ts`、`test/run-plan-wiring.test.ts`。

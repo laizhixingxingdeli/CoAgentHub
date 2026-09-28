@@ -107,7 +107,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - **delivery-inbox** — 投递收件箱（delivery-inbox）
   Mission 的结果与升级要回到发起方：发起的会话可能已经关了，所以投递**留在收件箱里等**，Host 恢复后自己来取（`pending`）、取完确认（`acknowledge`）。只写进平台状态不算数——「进收件箱才叫升级」。
 - **durable-scheduler** — Durable Scheduler
-  持久待执行 Hop 队列提供入队、读取、领取、续租与完成的事实；当前不从 Orchestrator 自动入队、领取或启动 Agent，CLI 行为不变。重试、死信、并发上限与运行时派发不属于当前能力。
+  持久待执行 Hop 队列提供入队、读取、领取、续租与完成的事实。`run-mission` 与 `run-plan` 构造的 MissionRunner 注入与现有文件/PG 平台同源的队列仓储；旧夹具未注入仓储时仍按非队列路径执行。队列门
 - **execution-budget-gates** — 权威执行预算门禁（BUDGET-001）
   Mission 可挂 `executionBudget`。用法快照与求值在 application 纯函数层；**调度强制**在 Orchestrator PRE/POST gate，经 Platform 记事件 / 升级 / 等待。
 - **fast-lane-ab-metrics** — Fast Lane A/B 指标（FASTLANE-METRICS）

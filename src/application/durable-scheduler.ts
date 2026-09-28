@@ -84,6 +84,107 @@ function leaseDuration(leaseMs: number): void {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive safe integer');
 }
 
+/** Shared by Orchestrator and MissionRunner; matches attempt-lease tolerance. */
+export const DEFAULT_HOP_LEASE_MS = 90_000;
+
+export function hopIdempotencyKey(input: {
+  readonly missionId: string;
+  readonly role: HopRole;
+  readonly workItemId: string;
+  readonly contractRevision: number;
+  readonly attemptCycle: number;
+}): string {
+  return `${input.missionId}:${input.role}:${input.workItemId}:r${input.contractRevision}:n${input.attemptCycle}`;
+}
+
+function hopKeyPrefix(input: {
+  readonly missionId: string;
+  readonly role: HopRole;
+  readonly workItemId: string;
+  readonly contractRevision: number;
+}): string {
+  return `${input.missionId}:${input.role}:${input.workItemId}:r${input.contractRevision}:n`;
+}
+
+/**
+ * Slot for the hop that is about to run.
+ *
+ * Must NOT track Attempt count: a crash after startAttempt leaves an extra
+ * in_progress (or later interrupted) Attempt, and bumping the key would enqueue
+ * a sibling instead of finding the live claimed/queued row. Unfinished logical
+ * hops reuse the open row; only completed rows free the next slot so a later
+ * independent hop is not blocked by the old key.
+ */
+export function nextLogicalHopCycle(
+  rows: readonly QueuedHop[],
+  input: {
+    readonly missionId: string;
+    readonly role: HopRole;
+    readonly workItemId: string;
+    readonly contractRevision: number;
+  },
+): number {
+  const prefix = hopKeyPrefix(input);
+  const cycleOf = (key: string): number | undefined => {
+    if (!key.startsWith(prefix)) return undefined;
+    const n = Number(key.slice(prefix.length));
+    return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+  };
+  for (const row of rows) {
+    if (row.status === 'completed') continue;
+    const cycle = cycleOf(row.idempotencyKey);
+    if (cycle !== undefined) return cycle;
+  }
+  let next = 0;
+  for (const row of rows) {
+    if (row.status !== 'completed') continue;
+    const cycle = cycleOf(row.idempotencyKey);
+    if (cycle !== undefined && cycle + 1 > next) next = cycle + 1;
+  }
+  return next;
+}
+
+export type QueuedHopAcquireResult =
+  | { readonly kind: 'claimed'; readonly hop: QueuedHop }
+  | { readonly kind: 'completed'; readonly hop: QueuedHop }
+  | { readonly kind: 'waiting'; readonly hop: QueuedHop; readonly wait: 'available_at' | 'lease' };
+
+/**
+ * Enqueue then claim the hop that is about to run.
+ *
+ * Done before issuing a run token / opening an Attempt: otherwise a crash leaves
+ * an in_progress Attempt with no hop lease, and a second runner can neither take
+ * over this hop nor start a new Attempt (invariant B).
+ */
+export async function acquireQueuedHop(params: {
+  readonly scheduler: DurableScheduler;
+  readonly repository: QueuedHopRepository;
+  readonly input: EnqueueHopInput;
+  readonly owner: string;
+  readonly leaseMs: number;
+  readonly nowIso: string;
+}): Promise<QueuedHopAcquireResult> {
+  const hop = await params.scheduler.enqueue(params.input);
+  if (hop.status === 'completed') return { kind: 'completed', hop };
+  const claimed = await params.scheduler.claim(hop.id, params.owner, params.leaseMs);
+  if (claimed) return { kind: 'claimed', hop: claimed };
+  const latest = (await params.repository.get(hop.id)) ?? hop;
+  if (latest.status === 'completed') return { kind: 'completed', hop: latest };
+  if (Date.parse(latest.availableAt) > Date.parse(params.nowIso)) {
+    return { kind: 'waiting', hop: latest, wait: 'available_at' };
+  }
+  return { kind: 'waiting', hop: latest, wait: 'lease' };
+}
+
+export function queuedHopWaitDetail(result: Extract<QueuedHopAcquireResult, { kind: 'waiting' }>): string {
+  if (result.wait === 'available_at') {
+    return `队列 Hop ${result.hop.id} 尚未到达 availableAt=${result.hop.availableAt}，不能启动 Agent`;
+  }
+  const owner = result.hop.owner ?? '(unknown)';
+  const until = result.hop.leaseUntil ?? '(none)';
+  return `队列 Hop ${result.hop.id} 仍有有效租约（持有者 ${owner}，到期 ${until}），等待接管，不能启动 Agent`;
+}
+
 export class DurableScheduler {
   readonly #repository: QueuedHopRepository;
   readonly #clock: Clock;

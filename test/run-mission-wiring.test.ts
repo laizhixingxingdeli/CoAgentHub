@@ -29,6 +29,9 @@ import { missionRunOptions } from '../src/run-mission.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
 import { Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
+import { FileQueuedHopRepository } from '../src/application/file-store.ts';
+import { LockBusyError } from '../src/application/lock.ts';
+import type { QueuedHop } from '../src/application/durable-scheduler.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
@@ -201,6 +204,7 @@ test('文件平台重建后，持久 open 熔断阻止未到期协调者候选�
     baseUrl: `http://127.0.0.1:${address.port}`,
     workspace: new InPlaceWorkspaceManager(),
     candidateCircuits: rebuilt.candidateCircuits,
+    queuedHops: rebuilt.queuedHops,
     coordinator: { runtime, candidates: [{ endpoint: 'local', profileId: 'P' }] },
     executor: { runtime: new ScriptedRuntime({}), candidates: [] },
   });
@@ -208,6 +212,99 @@ test('文件平台重建后，持久 open 熔断阻止未到期协调者候选�
   assert.equal(runtime.specs.length, 0, '未到期 open 候选未启动 Agent');
   assert.deepEqual(await rebuilt.candidateCircuits.get('P'), persisted);
   rebuilt.releaseLock();
+});
+
+function sampleQueuedHop(overrides: Partial<QueuedHop> = {}): QueuedHop {
+  return {
+    id: 'h-persist',
+    projectId: 'P',
+    missionId: 'M-queue',
+    workItemId: 'W-1',
+    role: 'executor',
+    priority: 1,
+    availableAt: '2020-01-01T00:00:00.000Z',
+    attemptCount: 0,
+    maxAttempts: 2,
+    idempotencyKey: 'key-persist',
+    status: 'queued',
+    createdAt: '2020-01-01T00:00:00.000Z',
+    updatedAt: '2020-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('文件平台 queuedHops 与 store 同源，重建后仍在', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-queue-'));
+  temps.push(dir);
+  const statePath = join(dir, 'state.json');
+  const first = await buildPersistentPlatform(statePath, { workspace: new InPlaceWorkspaceManager() });
+  assert.equal(first.queuedHops.constructor.name, 'FileQueuedHopRepository');
+  assert.ok(first.queuedHops instanceof FileQueuedHopRepository);
+  const hop = await first.queuedHops.enqueue(sampleQueuedHop());
+  first.persist();
+  const throughStore = new FileQueuedHopRepository(first.store);
+  assert.deepEqual(await throughStore.get(hop.id), hop);
+
+  const rebuilt = await buildPersistentPlatform(statePath, {
+    workspace: new InPlaceWorkspaceManager(),
+    reconcile: false,
+  });
+  assert.ok(rebuilt.queuedHops instanceof FileQueuedHopRepository);
+  assert.deepEqual(await rebuilt.queuedHops.get(hop.id), hop);
+  assert.equal((await rebuilt.queuedHops.list())[0]?.status, 'queued');
+  first.releaseLock();
+  rebuilt.releaseLock();
+});
+
+test('文件版第二进程拿不到状态排他锁时不领取 Hop、不启动 Agent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-lock-'));
+  temps.push(dir);
+  const statePath = join(dir, 'state.json');
+  const first = await buildPersistentPlatform(statePath, {
+    workspace: new InPlaceWorkspaceManager(),
+    exclusive: { what: 'holder' },
+  });
+  await first.platform.createMission({ projectId: 'P', missionId: 'M-lock', contract: CONTRACT });
+  const hop = await first.queuedHops.enqueue(sampleQueuedHop({ id: 'h-lock', missionId: 'M-lock', idempotencyKey: 'key-lock' }));
+  first.persist();
+
+  const runtime = new ScriptedRuntime({});
+  await assert.rejects(
+    () => buildPersistentPlatform(statePath, {
+      workspace: new InPlaceWorkspaceManager(),
+      exclusive: { what: 'second' },
+    }),
+    (error: unknown) => error instanceof LockBusyError,
+  );
+  assert.equal((await first.queuedHops.get(hop.id))?.status, 'queued');
+  assert.equal(runtime.specs.length, 0, '拿不到锁时未构造 Runner，不启动 Agent');
+
+  const mission = join(dir, 'mission.json');
+  writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-lock', contract: CONTRACT }));
+  const spawned = spawnSync(
+    process.execPath,
+    [
+      '--experimental-strip-types',
+      'src/run-mission.ts',
+      mission,
+      '--cwd',
+      dir,
+      '--state',
+      statePath,
+      '--in-place',
+    ],
+    {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      encoding: 'utf8',
+      env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+      timeout: 20_000,
+    },
+  );
+  assert.notEqual(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
+  assert.match(`${spawned.stdout}${spawned.stderr}`, /平台正被另一个进程占用/);
+  assert.equal((await first.queuedHops.get(hop.id))?.status, 'queued');
+  assert.equal(runtime.specs.length, 0);
+  first.releaseLock();
 });
 
 describe('内部入口：注入既有依赖即可跑，不另建平台或监听', () => {
@@ -229,12 +326,15 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.doesNotMatch(runner, /createMission\s*\(/);
     assert.doesNotMatch(runner, /createClassifiedMission\s*\(/);
     assert.match(runner, /independentReviewer\?:/);
+    assert.match(runner, /queuedHops\?:/);
   });
 
   test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
     const cli = src('run-mission.ts');
     assert.match(cli, /new MissionRunner\(/);
     assert.match(cli, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
+    assert.match(cli, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
+    assert.match(cli, /candidateCircuits, queuedHops \} = built/);
     assert.match(cli, /runner\.run\(/);
     assert.match(cli, /createApi\(/);
     assert.match(cli, /listenLoopback\(/);
@@ -284,6 +384,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
       contract: CONTRACT,
     });
 
+    // 非队列化夹具不注入 queuedHops：接线不得改变原行为。
     const runner = new MissionRunner({
       platform: built.platform,
       tokens: makeIssuer(built.platform, built.tokens),
