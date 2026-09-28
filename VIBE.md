@@ -96,6 +96,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
+- **context-replay-baseline** — 离线 Attempt 用量基线
+  `scripts/context-replay-report.mjs` 只读显式指定的 version:1 状态 JSON，接受 `--input E1 <path>` / `--input main <path>`（可多次）及可选 `--
 - **credential-redaction** — 凭据脱敏（credential-redaction）
   agent 产出、要落盘或给人看的文本，进门先过一遍脱敏（优化方案 §7 P0.3 末条、Phase 1 第 4 条）。起因：agent 一句 `env` 或 `cat .env`，本机的 key 就进了证据、失败原文、实时输出，落盘后在 
 - **decision-jev-off-shadow** — Decision / Jev：OFF 与 SHADOW
