@@ -47,6 +47,54 @@ test('file queue is idempotent, durable, cloned, old snapshots compatible and tr
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('file queue lease transitions enforce ownership, boundaries, rollback, and reopen', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'queued-lease-'));
+  try {
+    const path = join(dir, 'state.json');
+    const store = new FileStateStore(path);
+    const repo = new FileQueuedHopRepository(store);
+    const hop: QueuedHop = { id: 'lease', projectId: 'p', missionId: 'm', workItemId: 'w', role: 'executor', priority: 1,
+      availableAt: '2025-01-01T00:00:00Z', attemptCount: 0, maxAttempts: 2, idempotencyKey: 'lease-key', status: 'queued',
+      createdAt: '2025-01-01T00:00:00Z', updatedAt: '2025-01-01T00:00:00Z' };
+    await repo.enqueue(hop);
+    const later = '2025-01-01T00:00:01Z';
+    assert.equal(await repo.claim('lease', 'early', '2024-12-31T23:59:59Z', later), undefined);
+    const claimed = await repo.claim('lease', 'owner', '2025-01-01T00:00:00Z', later);
+    assert.equal(claimed?.claimGeneration, 1);
+    assert.deepEqual(await repo.enqueue({ ...hop, id: 'duplicate', updatedAt: later }), claimed);
+    const renewedUntil = '2025-01-01T00:00:02Z';
+    const renewed = await repo.renew('lease', 'owner', 1, '2025-01-01T00:00:00.500Z', renewedUntil);
+    assert.equal(renewed?.leaseUntil, renewedUntil);
+    assert.ok(Date.parse(renewed!.leaseUntil!) > Date.parse(claimed!.leaseUntil!));
+    assert.equal(await repo.claim('lease', 'intruder', later, '2025-01-01T00:00:03Z'), undefined);
+    const beforeReject = readFileSync(path);
+    assert.equal(await repo.renew('lease', 'wrong', 1, '2025-01-01T00:00:00.500Z', '2025-01-01T00:00:02Z'), undefined);
+    assert.deepEqual(readFileSync(path), beforeReject);
+    assert.equal(await repo.complete('lease', 'owner', 0, '2025-01-01T00:00:00.500Z'), undefined);
+    assert.deepEqual(readFileSync(path), beforeReject);
+    assert.equal(await repo.renew('lease', 'owner', 1, later, '2025-01-01T00:00:02Z'), undefined);
+    assert.deepEqual(readFileSync(path), beforeReject);
+    assert.equal(await repo.renew('lease', 'owner', 0, later, '2025-01-01T00:00:03Z'), undefined);
+    assert.deepEqual(readFileSync(path), beforeReject);
+    const renewedReopen = new FileQueuedHopRepository(new FileStateStore(path));
+    assert.deepEqual(await renewedReopen.get('lease'), renewed);
+    const taken = await repo.claim('lease', 'next', renewedUntil, '2025-01-01T00:00:03Z');
+    assert.equal(taken?.claimGeneration, 2);
+    assert.equal(await repo.complete('lease', 'owner', 1, later), undefined);
+    assert.ok(await repo.complete('lease', 'next', 2, '2025-01-01T00:00:02Z'));
+    assert.equal(await repo.claim('lease', 'third', '2025-01-01T00:00:03Z', '2025-01-01T00:00:04Z'), undefined);
+    assert.deepEqual(await repo.enqueue({ ...hop, id: 'duplicate', updatedAt: later }), await repo.get('lease'));
+    const reopened = new FileQueuedHopRepository(new FileStateStore(path));
+    assert.deepEqual(await reopened.get('lease'), await repo.get('lease'));
+
+    writeFileSync(path, JSON.stringify({ version: 1, projects: [], deliveries: [], events: [], idCounters: {}, queuedHops: [{ ...hop, claimGeneration: undefined }] }));
+    const oldRepo = new FileQueuedHopRepository(new FileStateStore(path));
+    assert.equal((await oldRepo.claim('lease', 'legacy', '2025-01-01T00:00:00Z', later))?.claimGeneration, 1);
+    const race = await Promise.all([oldRepo.claim('lease', 'a', later, '2025-01-01T00:00:02Z'), oldRepo.claim('lease', 'b', later, '2025-01-01T00:00:02Z')]);
+    assert.equal(race.filter(Boolean).length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Postgres queue persists and deduplicates queued hops', async (t) => {
   const connectionString = await ensureTestDatabase('durable_scheduler');
   if (!connectionString) { t.skip('Postgres unavailable; PG queue not verified'); return; }
@@ -80,4 +128,68 @@ test('Postgres queue persists and deduplicates queued hops', async (t) => {
   const reopened = await PgStateStore.open({ connectionString });
   try { assert.equal((await new PgQueuedHopRepository(reopened).list()).length, 3); }
   finally { await reopened.close(); }
+});
+
+test('Postgres queue lease transitions serialize claims and persist ownership', async (t) => {
+  const connectionString = await ensureTestDatabase('durable_scheduler');
+  if (!connectionString) { t.skip('Postgres unavailable; PG lease behavior not verified'); return; }
+  const store = await PgStateStore.open({ connectionString });
+  try {
+    await store.pool.query('TRUNCATE queued_hops');
+    const repo = new PgQueuedHopRepository(store);
+    const hop: QueuedHop = { id: 'pg-lease', projectId: 'p', missionId: 'm', workItemId: 'w', role: 'executor', priority: 1,
+      availableAt: '2025-01-01T00:00:00Z', attemptCount: 0, maxAttempts: 2, idempotencyKey: 'pg-lease-key', status: 'queued',
+      createdAt: '2025-01-01T00:00:00Z', updatedAt: '2025-01-01T00:00:00Z' };
+    await repo.enqueue(hop);
+    const future = { ...hop, id: 'pg-future', idempotencyKey: 'pg-future-key', availableAt: '2025-01-01T00:00:02Z' };
+    await repo.enqueue(future);
+    const futureBefore = await repo.get(future.id);
+    assert.equal(await repo.claim(future.id, 'early', hop.availableAt, '2025-01-01T00:00:01Z'), undefined);
+    assert.deepEqual(await repo.get(future.id), futureBefore);
+    const claims = await Promise.all([repo.claim(hop.id, 'a', hop.availableAt, '2025-01-01T00:00:01Z'),
+      repo.claim(hop.id, 'b', hop.availableAt, '2025-01-01T00:00:01Z')]);
+    assert.equal(claims.filter(Boolean).length, 1);
+    const winner = claims.find(Boolean)!;
+    assert.equal(winner.claimGeneration, 1);
+    assert.deepEqual(await repo.enqueue({ ...hop, id: 'duplicate' }), winner);
+    const snapshot = await repo.get(hop.id);
+    assert.equal(await repo.renew(hop.id, 'wrong', 1, '2025-01-01T00:00:00.500Z', '2025-01-01T00:00:02Z'), undefined);
+    assert.deepEqual(await repo.get(hop.id), snapshot);
+    const renewedUntil = '2025-01-01T00:00:02Z';
+    const renewed = await repo.renew(hop.id, winner.owner!, 1, '2025-01-01T00:00:00.500Z', renewedUntil);
+    assert.equal(renewed?.leaseUntil, renewedUntil);
+    assert.ok(Date.parse(renewed!.leaseUntil!) > Date.parse(winner.leaseUntil!));
+    assert.equal(await repo.claim(hop.id, 'late', winner.leaseUntil!, '2025-01-01T00:00:03Z'), undefined);
+    const beforeExpiredRenew = await repo.get(hop.id);
+    assert.equal(await repo.renew(hop.id, winner.owner!, 1, renewedUntil, '2025-01-01T00:00:04Z'), undefined);
+    assert.deepEqual(await repo.get(hop.id), beforeExpiredRenew);
+    const takeover = await repo.claim(hop.id, 'late', renewedUntil, '2025-01-01T00:00:03Z');
+    assert.equal(takeover?.claimGeneration, 2);
+    const beforeStale = await repo.get(hop.id);
+    assert.equal(await repo.complete(hop.id, winner.owner!, 1, '2025-01-01T00:00:01Z'), undefined);
+    assert.deepEqual(await repo.get(hop.id), beforeStale);
+    assert.equal(await repo.renew(hop.id, winner.owner!, 1, '2025-01-01T00:00:01Z', '2025-01-01T00:00:04Z'), undefined);
+    assert.deepEqual(await repo.get(hop.id), beforeStale);
+    assert.equal(await repo.renew(hop.id, winner.owner!, 1, renewedUntil, '2025-01-01T00:00:04Z'), undefined);
+    assert.deepEqual(await repo.get(hop.id), beforeStale);
+    assert.ok(await repo.complete(hop.id, 'late', 2, '2025-01-01T00:00:01.500Z'));
+    assert.deepEqual(await repo.enqueue({ ...hop, id: 'duplicate' }), await repo.get(hop.id));
+  } finally { await store.close(); }
+  const reopened = await PgStateStore.open({ connectionString });
+  try {
+    const repo = new PgQueuedHopRepository(reopened);
+    const persisted = await repo.get('pg-lease');
+    assert.equal(persisted?.status, 'completed');
+    assert.equal(persisted?.claimGeneration, 2);
+    assert.equal(persisted?.owner, 'late');
+    assert.equal(persisted?.availableAt, '2025-01-01T00:00:00Z');
+    assert.equal(persisted?.leaseUntil, '2025-01-01T00:00:03Z');
+    assert.equal(persisted?.updatedAt, '2025-01-01T00:00:01.500Z');
+    const beforeStaleReject = await repo.get('pg-lease');
+    assert.equal(await repo.renew('pg-lease', 'late', 1, '2025-01-01T00:00:01.600Z', '2025-01-01T00:00:04Z'), undefined);
+    assert.deepEqual(await repo.get('pg-lease'), beforeStaleReject);
+    assert.equal(await repo.complete('pg-lease', 'late', 1, '2025-01-01T00:00:01.600Z'), undefined);
+    assert.deepEqual(await repo.get('pg-lease'), beforeStaleReject);
+    assert.equal(await repo.claim('pg-lease', 'third', '2025-01-01T00:00:02Z', '2025-01-01T00:00:03Z'), undefined);
+  } finally { await reopened.close(); }
 });

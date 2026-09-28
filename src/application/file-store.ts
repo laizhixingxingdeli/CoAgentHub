@@ -52,7 +52,7 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
-import { validateEnqueueHop } from './durable-scheduler.ts';
+import { claimHop, completeHop, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
 import type { QueuedHop } from './durable-scheduler.ts';
 import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
@@ -1024,21 +1024,45 @@ export class FileQueuedHopRepository implements QueuedHopRepository {
   constructor(store: FileStateStore) { this.#store = store; }
 
   async enqueue(hop: QueuedHop): Promise<QueuedHop> {
-    validateEnqueueHop(hop);
+    const { status: _status, owner: _owner, leaseUntil: _leaseUntil, claimGeneration: _generation, ...input } = hop;
+    validateEnqueueHop(input);
     if (typeof hop.id !== 'string' || hop.id.trim().length === 0 || hop.status !== 'queued' ||
         typeof hop.createdAt !== 'string' || !Number.isFinite(Date.parse(hop.createdAt)) ||
         typeof hop.updatedAt !== 'string' || !Number.isFinite(Date.parse(hop.updatedAt))) {
       throw new Error('queued hop record is invalid');
     }
-    await this.#store.settle();
-    this.#store.refreshIfChanged();
-    const rows = this.#rows();
-    const existing = rows.find((row) => row.idempotencyKey === hop.idempotencyKey);
-    if (existing) return { ...existing };
-    const copy = { ...hop };
-    rows.push(copy);
-    this.#store.flush();
-    return { ...copy };
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const existing = rows.find((row) => row.idempotencyKey === hop.idempotencyKey);
+      if (existing) return { ...existing };
+      const copy = { ...hop };
+      rows.push(copy);
+      return { ...copy };
+    });
+  }
+
+  async claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => claimHop(row, owner, now, leaseUntil));
+  }
+
+  async renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => renewHop(row, owner, claimGeneration, now, leaseUntil));
+  }
+
+  async complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => completeHop(row, owner, claimGeneration, now));
+  }
+
+  async #transition(id: string, transition: (row: QueuedHop) => QueuedHop | undefined): Promise<QueuedHop | undefined> {
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((row) => row.id === id);
+      if (index < 0) return undefined;
+      const updated = transition(rows[index]!);
+      if (!updated) return undefined;
+      rows[index] = updated;
+      return { ...updated };
+    });
   }
 
   async get(id: string): Promise<QueuedHop | undefined> {

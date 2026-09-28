@@ -63,6 +63,10 @@ export interface QueuedHopRepository {
   enqueue(hop: QueuedHop): Promise<QueuedHop>;
   get(id: string): Promise<QueuedHop | undefined>;
   list(): Promise<readonly QueuedHop[]>;
+  /** Atomic conditional transitions; undefined means rejected without mutation. */
+  claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
+  renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
+  complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined>;
 }
 
 /** Persistent per-profile circuit. tryClaimProbe must be an atomic conditional transition. */

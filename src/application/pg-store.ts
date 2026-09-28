@@ -22,7 +22,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
-import { validateEnqueueHop } from './durable-scheduler.ts';
+import { claimHop, completeHop, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
 import type { QueuedHop } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
@@ -1125,7 +1125,8 @@ export class PgQueuedHopRepository {
   constructor(store: PgStateStore) { this.#pool = store.pool; }
 
   async enqueue(hop: QueuedHop): Promise<QueuedHop> {
-    validateEnqueueHop(hop);
+    const { status: _status, owner: _owner, leaseUntil: _leaseUntil, claimGeneration: _generation, ...input } = hop;
+    validateEnqueueHop(input);
     if (typeof hop.id !== 'string' || hop.id.trim().length === 0 || hop.status !== 'queued' ||
         typeof hop.createdAt !== 'string' || !Number.isFinite(Date.parse(hop.createdAt)) ||
         typeof hop.updatedAt !== 'string' || !Number.isFinite(Date.parse(hop.updatedAt))) {
@@ -1141,6 +1142,38 @@ export class PgQueuedHopRepository {
       'SELECT hop FROM queued_hops WHERE idempotency_key = $1', [hop.idempotencyKey]);
     if (existing.rows[0]) return { ...existing.rows[0].hop };
     throw new Error('queued hop insert conflict without existing idempotency key');
+  }
+
+  async claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (hop) => claimHop(hop, owner, now, leaseUntil));
+  }
+
+  async renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (hop) => renewHop(hop, owner, claimGeneration, now, leaseUntil));
+  }
+
+  async complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (hop) => completeHop(hop, owner, claimGeneration, now));
+  }
+
+  async #transition(id: string, transition: (hop: QueuedHop) => QueuedHop | undefined): Promise<QueuedHop | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops WHERE hop_id = $1 FOR UPDATE', [id]);
+      const current = selected.rows[0]?.hop;
+      if (!current) { await client.query('COMMIT'); return undefined; }
+      const updated = transition(current);
+      if (!updated) { await client.query('ROLLBACK'); return undefined; }
+      const written = await client.query('UPDATE queued_hops SET hop = $2::jsonb WHERE hop_id = $1 AND hop = $3::jsonb',
+        [id, JSON.stringify(updated), JSON.stringify(current)]);
+      if (written.rowCount !== 1) { await client.query('ROLLBACK'); return undefined; }
+      await client.query('COMMIT');
+      return { ...updated };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
   }
 
   async get(id: string): Promise<QueuedHop | undefined> {
