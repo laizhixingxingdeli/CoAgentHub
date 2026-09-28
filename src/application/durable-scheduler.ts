@@ -14,11 +14,13 @@ export interface QueuedHop {
   readonly attemptCount: number;
   readonly maxAttempts: number;
   readonly idempotencyKey: string;
-  readonly status: 'queued' | 'claimed' | 'completed';
+  readonly status: 'queued' | 'claimed' | 'completed' | 'retry_wait' | 'dead_letter';
   readonly owner?: string;
   readonly leaseUntil?: string;
   /** Missing on legacy queued rows; interpreted as zero before the first claim. */
   readonly claimGeneration?: number;
+  /** Last accepted failure; missing on hops that have never failed. */
+  readonly lastFailure?: HopLastFailure;
   /**
    * Candidate that actually holds this lease. Absent on legacy rows, which occupy
    * global/project/role only — otherwise old snapshots would be unreadable.
@@ -29,7 +31,26 @@ export interface QueuedHop {
   readonly updatedAt: string;
 }
 
-export type EnqueueHopInput = Omit<QueuedHop, 'id' | 'status' | 'owner' | 'leaseUntil' | 'claimGeneration' | 'createdAt' | 'updatedAt' | 'runtimeKind' | 'profileId'>;
+export type EnqueueHopInput = Omit<QueuedHop, 'id' | 'status' | 'owner' | 'leaseUntil' | 'claimGeneration' | 'createdAt' | 'updatedAt' | 'runtimeKind' | 'profileId' | 'lastFailure'>;
+
+export interface HopLastFailure {
+  readonly attemptId: string;
+  readonly claimGeneration: number;
+  readonly at: string;
+  readonly classification: string;
+  readonly disposition: string;
+  readonly retryable: boolean;
+}
+
+export interface ReportHopFailureInput {
+  readonly id: string;
+  readonly claimGeneration: number;
+  readonly attemptId: string;
+  readonly failedAt: string;
+  readonly classification: string;
+  readonly disposition: string;
+  readonly retryable: boolean;
+}
 
 function identity(value: unknown, name: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${name} must be non-empty`);
@@ -43,7 +64,7 @@ function timestamp(value: unknown, name: string): asserts value is string {
 
 export function validateEnqueueHop(input: EnqueueHopInput): void {
   const runtimeInput = input as EnqueueHopInput & Record<string, unknown>;
-  for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration', 'runtimeKind', 'profileId']) {
+  for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration', 'runtimeKind', 'profileId', 'lastFailure']) {
     if (Object.hasOwn(runtimeInput, field)) throw new Error(`${field} cannot be set when enqueueing`);
   }
   identity(input.projectId, 'projectId');
@@ -62,8 +83,11 @@ export function validateEnqueueHop(input: EnqueueHopInput): void {
 export type ClaimableHop = QueuedHop & { readonly status: 'queued' | 'claimed' };
 
 export function canClaimHop(hop: QueuedHop, now: string): boolean {
-  if (Date.parse(hop.availableAt) > Date.parse(now) || hop.status === 'completed') return false;
-  return hop.status === 'queued' || Date.parse(hop.leaseUntil!) <= Date.parse(now);
+  if (hop.status === 'completed' || hop.status === 'dead_letter') return false;
+  if (Date.parse(hop.availableAt) > Date.parse(now)) return false;
+  if (hop.status === 'queued' || hop.status === 'retry_wait') return true;
+  if (hop.status !== 'claimed') return false;
+  return Date.parse(hop.leaseUntil!) <= Date.parse(now);
 }
 
 export function claimHop(hop: QueuedHop, owner: string, now: string, leaseUntil: string): QueuedHop | undefined {
@@ -84,6 +108,92 @@ export function completeHop(hop: QueuedHop, owner: string, generation: number, n
   if (hop.status !== 'claimed' || hop.owner !== owner || hop.claimGeneration !== generation ||
       Date.parse(now) >= Date.parse(hop.leaseUntil!)) return undefined;
   return { ...hop, status: 'completed', updatedAt: now };
+}
+
+/** 1s · 2^{n-1}, capped at 10 minutes. Callers cannot pick the delay. */
+export const HOP_FAILURE_BACKOFF_BASE_MS = 1_000;
+export const HOP_FAILURE_BACKOFF_CAP_MS = 600_000;
+
+export function hopFailureBackoffMs(attemptCount: number): number {
+  if (!Number.isSafeInteger(attemptCount) || attemptCount < 1) {
+    throw new Error('attemptCount must be a positive safe integer');
+  }
+  const exp = Math.min(attemptCount - 1, 16);
+  return Math.min(HOP_FAILURE_BACKOFF_CAP_MS, HOP_FAILURE_BACKOFF_BASE_MS * (2 ** exp));
+}
+
+export function validateReportHopFailure(input: unknown): asserts input is ReportHopFailureInput {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('failure report must be an object');
+  }
+  const record = input as Record<string, unknown>;
+  for (const field of ['attemptCount', 'availableAt', 'maxAttempts', 'status']) {
+    if (Object.hasOwn(record, field)) throw new Error(`${field} cannot be set when reporting failure`);
+  }
+  identity(record.id, 'id');
+  identity(record.attemptId, 'attemptId');
+  identity(record.classification, 'classification');
+  identity(record.disposition, 'disposition');
+  timestamp(record.failedAt, 'failedAt');
+  if (!Number.isSafeInteger(record.claimGeneration) || (record.claimGeneration as number) < 0) {
+    throw new Error('claimGeneration is invalid');
+  }
+  if (typeof record.retryable !== 'boolean') throw new Error('retryable must be a boolean');
+}
+
+function sameFailureTriple(hop: QueuedHop, input: ReportHopFailureInput): boolean {
+  const last = hop.lastFailure;
+  return last !== undefined
+    && last.claimGeneration === input.claimGeneration
+    && last.attemptId === input.attemptId;
+}
+
+/**
+ * Apply one fenced failure. Same (id, claimGeneration, attemptId) replay returns
+ * the same object so storage can skip the write; stale generation / non-claim
+ * returns undefined. Next count and availableAt are computed here, never taken
+ * from the caller — otherwise a replay could inflate attemptCount.
+ */
+export function reportHopFailure(hop: QueuedHop, input: ReportHopFailureInput): QueuedHop | undefined {
+  validateReportHopFailure(input);
+  if (hop.id !== input.id) return undefined;
+  if (sameFailureTriple(hop, input)) return hop;
+  if (hop.status !== 'claimed' || hop.claimGeneration !== input.claimGeneration) return undefined;
+  const attemptCount = hop.attemptCount + 1;
+  const lastFailure: HopLastFailure = {
+    attemptId: input.attemptId,
+    claimGeneration: input.claimGeneration,
+    at: input.failedAt,
+    classification: input.classification,
+    disposition: input.disposition,
+    retryable: input.retryable,
+  };
+  const { owner: _owner, leaseUntil: _lease, ...rest } = hop;
+  if (!input.retryable || attemptCount >= hop.maxAttempts) {
+    return {
+      ...rest,
+      status: 'dead_letter',
+      attemptCount,
+      lastFailure,
+      updatedAt: input.failedAt,
+    };
+  }
+  const availableAt = new Date(Date.parse(input.failedAt) + hopFailureBackoffMs(attemptCount)).toISOString();
+  if (!(Date.parse(availableAt) > Date.parse(input.failedAt))) {
+    throw new Error('backoff must be strictly later than the failure time');
+  }
+  return {
+    ...rest,
+    status: 'retry_wait',
+    attemptCount,
+    availableAt,
+    lastFailure,
+    updatedAt: input.failedAt,
+  };
+}
+
+export function cloneQueuedHop(hop: QueuedHop): QueuedHop {
+  return hop.lastFailure ? { ...hop, lastFailure: { ...hop.lastFailure } } : { ...hop };
 }
 
 /** Inputs for in-transaction claim fencing; PG reuses the same shape. */
@@ -152,7 +262,7 @@ export interface EligibleHopClaim extends HopCapacityCandidate {
   readonly hopId: string;
 }
 
-export type QueuedHopWait = 'available_at' | 'lease' | 'capacity';
+export type QueuedHopWait = 'available_at' | 'lease' | 'capacity' | 'dead_letter';
 
 /** Snapshot decision; `select` is not yet written — storage claims that row. */
 export type CapacityClaimDecision =
@@ -326,7 +436,8 @@ export function decideCapacityClaim(
   const leased = considered.filter((hop) => isActiveHopLease(hop, now)).sort(compareHopFairness)[0];
   if (leased) return { kind: 'waiting', hop: leased, wait: 'lease' };
   const delayed = considered
-    .filter((hop) => hop.status !== 'completed' && Date.parse(hop.availableAt) > Date.parse(now))
+    .filter((hop) => hop.status !== 'completed' && hop.status !== 'dead_letter'
+      && Date.parse(hop.availableAt) > Date.parse(now))
     .sort(compareHopFairness)[0];
   if (delayed) return { kind: 'waiting', hop: delayed, wait: 'available_at' };
   return { kind: 'empty' };
@@ -390,6 +501,7 @@ export function nextLogicalHopCycle(
     return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
   };
   for (const row of rows) {
+    // retry_wait / dead_letter keep the slot so a sibling hop cannot sneak in.
     if (row.status === 'completed') continue;
     const cycle = cycleOf(row.idempotencyKey);
     if (cycle !== undefined) return cycle;
@@ -415,6 +527,23 @@ export type QueuedHopAcquireResult =
  * an in_progress Attempt with no hop lease, and a second runner can neither take
  * over this hop nor start a new Attempt (invariant B).
  */
+/**
+ * Dead-letter and not-yet-due backoff must surface as waits, never as a live
+ * lease. Mislabeling them `lease` lets capacity/single-id callers retry or skip
+ * the slot as if someone still held it.
+ */
+export function parkedQueuedHopWait(
+  hop: QueuedHop,
+  nowIso: string,
+): Extract<QueuedHopAcquireResult, { kind: 'waiting' }> | undefined {
+  if (hop.status === 'dead_letter') return { kind: 'waiting', hop, wait: 'dead_letter' };
+  if (hop.status === 'completed') return undefined;
+  if (Date.parse(hop.availableAt) > Date.parse(nowIso)) {
+    return { kind: 'waiting', hop, wait: 'available_at' };
+  }
+  return undefined;
+}
+
 export async function acquireQueuedHop(params: {
   readonly scheduler: DurableScheduler;
   readonly repository: QueuedHopRepository;
@@ -425,18 +554,29 @@ export async function acquireQueuedHop(params: {
 }): Promise<QueuedHopAcquireResult> {
   const hop = await params.scheduler.enqueue(params.input);
   if (hop.status === 'completed') return { kind: 'completed', hop };
+  const parked = parkedQueuedHopWait(hop, params.nowIso);
+  if (parked) return parked;
   const claimed = await params.scheduler.claim(hop.id, params.owner, params.leaseMs);
   if (claimed) return { kind: 'claimed', hop: claimed };
   const latest = (await params.repository.get(hop.id)) ?? hop;
   if (latest.status === 'completed') return { kind: 'completed', hop: latest };
-  if (Date.parse(latest.availableAt) > Date.parse(params.nowIso)) {
-    return { kind: 'waiting', hop: latest, wait: 'available_at' };
-  }
+  const parkedLatest = parkedQueuedHopWait(latest, params.nowIso);
+  if (parkedLatest) return parkedLatest;
   return { kind: 'waiting', hop: latest, wait: 'lease' };
 }
 
 export function queuedHopWaitDetail(result: Extract<QueuedHopAcquireResult, { kind: 'waiting' }>): string {
+  if (result.wait === 'dead_letter') {
+    const last = result.hop.lastFailure;
+    const why = last
+      ? `分类 ${last.classification}，处置 ${last.disposition}，尝试 ${last.attemptId}`
+      : '无失败记录';
+    return `队列 Hop ${result.hop.id} 已死信（${why}，count=${result.hop.attemptCount}/${result.hop.maxAttempts}），不能启动 Agent`;
+  }
   if (result.wait === 'available_at') {
+    if (result.hop.status === 'retry_wait') {
+      return `队列 Hop ${result.hop.id} 失败后退避中，availableAt=${result.hop.availableAt}，count=${result.hop.attemptCount}/${result.hop.maxAttempts}，不能启动 Agent`;
+    }
     return `队列 Hop ${result.hop.id} 尚未到达 availableAt=${result.hop.availableAt}，不能启动 Agent`;
   }
   if (result.wait === 'capacity') {
@@ -504,6 +644,17 @@ export class DurableScheduler {
   async complete(id: string, owner: string, claimGeneration: number): Promise<QueuedHop> {
     const result = await this.#repository.complete(id, owner, claimGeneration, this.#clock.now().toISOString());
     if (!result) throw new Error('claim cannot be completed');
+    return result;
+  }
+
+  async reportFailure(input: ReportHopFailureInput): Promise<QueuedHop> {
+    validateReportHopFailure(input);
+    const repo = this.#repository;
+    if (typeof repo.reportFailure !== 'function') {
+      throw new Error('queued hop repository does not support failure reporting');
+    }
+    const result = await repo.reportFailure(input);
+    if (!result) throw new Error('failure cannot be reported');
     return result;
   }
 

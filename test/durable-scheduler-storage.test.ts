@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import { FileStateStore, FileQueuedHopRepository } from '../src/application/file-store.ts';
 import {
   hopCapacityLimits,
+  hopFailureBackoffMs,
   type EligibleHopClaim,
   type HopCapacityCandidate,
   type HopCapacityLimits,
   type QueuedHop,
+  type ReportHopFailureInput,
 } from '../src/application/durable-scheduler.ts';
 import type { QueuedHopCapacityRepository, QueuedHopRepository } from '../src/application/ports.ts';
 import { PgProjectRepository, PgStateStore, PgQueuedHopRepository } from '../src/application/pg-store.ts';
@@ -673,4 +675,171 @@ test('Postgres claimAvailable serializes different hops across instances so one 
     await other.close();
     await store.close();
   }
+});
+
+const FAIL_NOW = '2025-01-01T00:00:00.000Z';
+const FAIL_LEASE = '2025-01-01T00:01:00.000Z';
+const FAIL_AT = '2025-01-01T00:00:30.000Z';
+
+function failHop(overrides: Partial<QueuedHop> = {}): QueuedHop {
+  return {
+    id: 'fail-h1', projectId: 'p', missionId: 'm', workItemId: 'w', role: 'executor', priority: 1,
+    availableAt: FAIL_NOW, attemptCount: 0, maxAttempts: 2, idempotencyKey: 'fail-key', status: 'queued',
+    createdAt: FAIL_NOW, updatedAt: FAIL_NOW, ...overrides,
+  };
+}
+
+function failReport(overrides: Partial<ReportHopFailureInput> = {}): ReportHopFailureInput {
+  return {
+    id: 'fail-h1', claimGeneration: 1, attemptId: 'A-1', failedAt: FAIL_AT,
+    classification: 'upstream_5xx', disposition: 'backoff', retryable: true, ...overrides,
+  };
+}
+
+async function claimThenFail(
+  repo: FileQueuedHopRepository | PgQueuedHopRepository,
+  hop: QueuedHop,
+  input: ReportHopFailureInput,
+) {
+  await repo.enqueue(hop);
+  const claimed = await repo.claim(hop.id, 'owner', FAIL_NOW, FAIL_LEASE);
+  assert.equal(claimed?.claimGeneration, 1);
+  return repo.reportFailure(input);
+}
+
+test('file queue retry_wait then dead_letter; replay and stale generation do not recount', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'queued-fail-'));
+  try {
+    const path = join(dir, 'state.json');
+    const store = new FileStateStore(path);
+    const repo = new FileQueuedHopRepository(store);
+    const first = await claimThenFail(repo, failHop(), failReport());
+    assert.equal(first?.status, 'retry_wait');
+    assert.equal(first?.attemptCount, 1);
+    assert.ok(Date.parse(first!.availableAt) > Date.parse(FAIL_AT));
+    assert.equal(Date.parse(first!.availableAt), Date.parse(FAIL_AT) + hopFailureBackoffMs(1));
+    assert.equal(await repo.claim('fail-h1', 'owner', FAIL_AT, '2025-01-01T00:02:00.000Z'), undefined);
+    const due = first!.availableAt;
+    const reclaimed = await repo.claim('fail-h1', 'owner', due, '2025-01-01T00:03:00.000Z');
+    assert.equal(reclaimed?.claimGeneration, 2);
+    assert.equal(reclaimed?.status, 'claimed');
+    const second = await repo.reportFailure(failReport({ claimGeneration: 2, attemptId: 'A-2', failedAt: due }));
+    assert.equal(second?.status, 'dead_letter');
+    assert.equal(second?.attemptCount, 2);
+    assert.equal(await repo.claim('fail-h1', 'later', due, '2025-01-01T00:04:00.000Z'), undefined);
+    const snapshot = structuredClone(await repo.get('fail-h1'));
+    const deadLetters = (await repo.list()).filter((row) => row.status === 'dead_letter');
+    assert.equal(deadLetters.length, 1);
+    const beforeReplay = readFileSync(path);
+    const replay = await repo.reportFailure(failReport({ claimGeneration: 2, attemptId: 'A-2', failedAt: due }));
+    assert.deepEqual(replay, snapshot);
+    assert.deepEqual(await repo.get('fail-h1'), snapshot);
+    assert.equal((await repo.list()).filter((row) => row.status === 'dead_letter').length, 1);
+    assert.deepEqual(readFileSync(path), beforeReplay);
+    const late = await repo.reportFailure(failReport({ claimGeneration: 1, attemptId: 'A-1' }));
+    assert.equal(late, undefined);
+    assert.deepEqual(await repo.get('fail-h1'), snapshot);
+    assert.deepEqual(readFileSync(path), beforeReplay);
+    const listed = await repo.list();
+    assert.equal(listed[0]?.missionId, 'm');
+    assert.equal(listed[0]?.id, 'fail-h1');
+    assert.equal(listed[0]?.lastFailure?.at, due);
+    assert.equal(listed[0]?.lastFailure?.classification, 'upstream_5xx');
+    assert.equal(listed[0]?.lastFailure?.disposition, 'backoff');
+    const reopened = new FileQueuedHopRepository(new FileStateStore(path));
+    assert.deepEqual(await reopened.get('fail-h1'), snapshot);
+    assert.deepEqual(await reopened.list(), listed);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('file queue non-retryable failure dead-letters without a future availableAt; rollback leaves no row change', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'queued-fail-rule-'));
+  try {
+    const path = join(dir, 'state.json');
+    const store = new FileStateStore(path);
+    const repo = new FileQueuedHopRepository(store);
+    await repo.enqueue(failHop({ id: 'rule', idempotencyKey: 'rule-key' }));
+    await repo.claim('rule', 'owner', FAIL_NOW, FAIL_LEASE);
+    const dead = await repo.reportFailure(failReport({
+      id: 'rule', retryable: false, classification: 'rule', disposition: 'do_not_retry',
+    }));
+    assert.equal(dead?.status, 'dead_letter');
+    assert.equal(dead?.attemptCount, 1);
+    assert.equal(dead?.availableAt, FAIL_NOW);
+    assert.equal(await repo.claim('rule', 'owner', '2099-01-01T00:00:00.000Z', '2099-01-01T00:01:00.000Z'), undefined);
+    const got = await repo.get('rule');
+    assert.equal(got?.lastFailure?.classification, 'rule');
+    assert.equal(got?.lastFailure?.disposition, 'do_not_retry');
+    assert.equal(got?.missionId, 'm');
+    const reopened = new FileQueuedHopRepository(new FileStateStore(path));
+    assert.deepEqual(await reopened.get('rule'), got);
+
+    await repo.enqueue(failHop({ id: 'tx', idempotencyKey: 'tx-key' }));
+    await repo.claim('tx', 'owner', FAIL_NOW, FAIL_LEASE);
+    const before = await repo.get('tx');
+    await assert.rejects(store.run(async () => {
+      await repo.reportFailure(failReport({ id: 'tx' }));
+      throw new Error('rollback');
+    }));
+    assert.deepEqual(await repo.get('tx'), before);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).queuedHops.find((row: QueuedHop) => row.id === 'tx').status, 'claimed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Postgres queue failure backoff, dead letter, idempotency, and reopen match file semantics', async (t) => {
+  const connectionString = await ensureTestDatabase('durable_scheduler_dead_letter');
+  if (!connectionString) { t.skip('Postgres unavailable; PG dead letter not verified'); return; }
+  const store = await PgStateStore.open({ connectionString });
+  try {
+    await store.pool.query('TRUNCATE queued_hops');
+    const repo = new PgQueuedHopRepository(store);
+    const first = await claimThenFail(repo, failHop(), failReport());
+    assert.equal(first?.status, 'retry_wait');
+    assert.equal(first?.attemptCount, 1);
+    assert.ok(Date.parse(first!.availableAt) > Date.parse(FAIL_AT));
+    assert.equal(await repo.claim('fail-h1', 'owner', FAIL_AT, '2025-01-01T00:02:00.000Z'), undefined);
+    const due = first!.availableAt;
+    const reclaimed = await repo.claim('fail-h1', 'owner', due, '2025-01-01T00:03:00.000Z');
+    assert.equal(reclaimed?.claimGeneration, 2);
+    const second = await repo.reportFailure(failReport({ claimGeneration: 2, attemptId: 'A-2', failedAt: due }));
+    assert.equal(second?.status, 'dead_letter');
+    assert.equal(second?.attemptCount, 2);
+    assert.equal(await repo.claim('fail-h1', 'later', due, '2025-01-01T00:04:00.000Z'), undefined);
+    const snapshot = structuredClone(await repo.get('fail-h1'));
+    assert.equal((await repo.list()).filter((row) => row.status === 'dead_letter').length, 1);
+    const replay = await repo.reportFailure(failReport({ claimGeneration: 2, attemptId: 'A-2', failedAt: due }));
+    assert.deepEqual(replay, snapshot);
+    assert.deepEqual(await repo.get('fail-h1'), snapshot);
+    const late = await repo.reportFailure(failReport({ claimGeneration: 1, attemptId: 'A-1' }));
+    assert.equal(late, undefined);
+    assert.deepEqual(await repo.get('fail-h1'), snapshot);
+    await repo.enqueue(failHop({ id: 'rule', idempotencyKey: 'rule-key' }));
+    await repo.claim('rule', 'owner', FAIL_NOW, FAIL_LEASE);
+    const dead = await repo.reportFailure(failReport({
+      id: 'rule', retryable: false, classification: 'rule', disposition: 'do_not_retry',
+    }));
+    assert.equal(dead?.status, 'dead_letter');
+    assert.equal(dead?.availableAt, FAIL_NOW);
+    assert.equal(dead?.lastFailure?.classification, 'rule');
+    assert.equal(dead?.lastFailure?.disposition, 'do_not_retry');
+    const listed = await repo.list();
+    assert.ok(listed.every((row) => row.missionId === 'm'));
+    assert.equal(listed.filter((row) => row.status === 'dead_letter').length, 2);
+  } finally { await store.close(); }
+  const reopened = await PgStateStore.open({ connectionString });
+  try {
+    const repo = new PgQueuedHopRepository(reopened);
+    const persisted = await repo.get('fail-h1');
+    assert.equal(persisted?.status, 'dead_letter');
+    assert.equal(persisted?.attemptCount, 2);
+    assert.equal(persisted?.lastFailure?.attemptId, 'A-2');
+    assert.equal(persisted?.missionId, 'm');
+    const rule = await repo.get('rule');
+    assert.equal(rule?.status, 'dead_letter');
+    assert.equal(rule?.lastFailure?.classification, 'rule');
+    assert.equal((await repo.list()).filter((row) => row.status === 'dead_letter').length, 2);
+    const before = structuredClone(persisted);
+    assert.equal(await repo.reportFailure(failReport({ claimGeneration: 1, attemptId: 'A-late' })), undefined);
+    assert.deepEqual(await repo.get('fail-h1'), before);
+  } finally { await reopened.close(); }
 });

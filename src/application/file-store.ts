@@ -53,8 +53,8 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
-import { claimHop, claimHopWithCandidate, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
 import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
 import {
@@ -1097,27 +1097,33 @@ export class FileQueuedHopRepository implements QueuedHopCapacityRepository {
     return this.#transition(id, (row) => completeHop(row, owner, claimGeneration, now));
   }
 
+  async reportFailure(input: ReportHopFailureInput): Promise<QueuedHop | undefined> {
+    return this.#transition(input.id, (row) => reportHopFailure(row, input));
+  }
+
   async #transition(id: string, transition: (row: QueuedHop) => QueuedHop | undefined): Promise<QueuedHop | undefined> {
     return this.#store.run(async () => {
       const rows = this.#rows();
       const index = rows.findIndex((row) => row.id === id);
       if (index < 0) return undefined;
-      const updated = transition(rows[index]!);
+      const current = rows[index]!;
+      const updated = transition(current);
       if (!updated) return undefined;
-      rows[index] = updated;
-      return { ...updated };
+      // Same reference = idempotent/no-op: writing would still be a new snapshot.
+      if (updated !== current) rows[index] = updated;
+      return cloneQueuedHop(updated);
     });
   }
 
   async get(id: string): Promise<QueuedHop | undefined> {
     this.#store.refreshIfChanged();
     const row = this.#rows().find((item) => item.id === id);
-    return row ? { ...row } : undefined;
+    return row ? cloneQueuedHop(row) : undefined;
   }
 
   async list(): Promise<readonly QueuedHop[]> {
     this.#store.refreshIfChanged();
-    return this.#rows().map((row) => ({ ...row }));
+    return this.#rows().map((row) => cloneQueuedHop(row));
   }
 
   #rows(): QueuedHop[] {

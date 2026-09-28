@@ -26,11 +26,15 @@ import { Platform } from '../src/application/platform.ts';
 import { buildPersistentPlatform, makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import {
+  acquireQueuedHop,
   claimHop,
   completeHop,
+  DurableScheduler,
   hopIdempotencyKey,
   nextLogicalHopCycle,
+  queuedHopWaitDetail,
   renewHop,
+  reportHopFailure,
   type QueuedHop,
 } from '../src/application/durable-scheduler.ts';
 import type { AgentRuntime, QueuedHopRepository } from '../src/application/ports.ts';
@@ -169,6 +173,16 @@ function memoryQueuedHops(): QueuedHopRepository {
       if (updated) rows.set(id, updated);
       return updated ? { ...updated } : undefined;
     },
+    async reportFailure(input) {
+      const row = rows.get(input.id);
+      if (!row) return undefined;
+      const updated = reportHopFailure(row, input);
+      if (!updated) return undefined;
+      if (updated !== row) rows.set(input.id, updated);
+      return updated.lastFailure
+        ? { ...updated, lastFailure: { ...updated.lastFailure } }
+        : { ...updated };
+    },
   };
 }
 
@@ -192,6 +206,12 @@ function trackingQueue(
       log.push('complete');
       return inner.complete(id, owner, generation, now);
     },
+    reportFailure: inner.reportFailure
+      ? async (input) => {
+          log.push('reportFailure');
+          return inner.reportFailure!(input);
+        }
+      : undefined,
   };
 }
 
@@ -219,6 +239,8 @@ async function harness(opts: {
   queuedHops?: QueuedHopRepository;
   owner?: string;
   hopIds?: SequentialIds;
+  hopClock?: FixedClock;
+  executorMaxAttempts?: number;
 }) {
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
@@ -249,10 +271,12 @@ async function harness(opts: {
     executor: {
       runtime: opts.executor,
       candidates: [{ endpoint: 'local' as const, profileId: 'exec-a' }],
+      maxAttempts: opts.executorMaxAttempts,
     },
     queuedHops: opts.queuedHops,
     owner: opts.owner,
     hopIds: opts.hopIds,
+    hopClock: opts.hopClock,
   };
   return {
     platform,
@@ -732,3 +756,132 @@ test('file store: same Mission crash after claim+attempt; expired takeover vs li
   assert.equal(liveView.waitReason, 'project_busy');
   assert.match(liveView.waitDetail ?? '', /有效租约/);
 });
+
+test('acquireQueuedHop parks dead_letter instead of misreporting a lease wait', async () => {
+  const repo = memoryQueuedHops();
+  const clock = new FixedClock('2020-01-01T00:00:00.000Z');
+  const hop = await repo.enqueue(queuedRow({
+    id: 'h-dead',
+    missionId: 'M-dead',
+    idempotencyKey: coordinatorKey('M-dead'),
+  }));
+  const claimed = await repo.claim(
+    hop.id,
+    'runner',
+    '2020-01-01T00:00:00.000Z',
+    '2020-01-01T00:01:00.000Z',
+  );
+  assert.equal(claimed?.claimGeneration, 1);
+  const dead = await repo.reportFailure!({
+    id: hop.id,
+    claimGeneration: 1,
+    attemptId: 'A-1',
+    failedAt: '2020-01-01T00:00:30.000Z',
+    classification: 'rule',
+    disposition: 'do_not_retry',
+    retryable: false,
+  });
+  assert.equal(dead?.status, 'dead_letter');
+  const scheduler = new DurableScheduler(repo, clock, { next: (prefix) => `${prefix}-x` });
+  const acquired = await acquireQueuedHop({
+    scheduler,
+    repository: repo,
+    owner: 'runner-b',
+    leaseMs: 60_000,
+    nowIso: clock.now().toISOString(),
+    input: {
+      projectId: 'P',
+      missionId: 'M-dead',
+      workItemId: '-',
+      role: 'coordinator',
+      priority: 0,
+      availableAt: clock.now().toISOString(),
+      attemptCount: 0,
+      maxAttempts: 3,
+      idempotencyKey: coordinatorKey('M-dead'),
+    },
+  });
+  assert.equal(acquired.kind, 'waiting');
+  if (acquired.kind === 'waiting') {
+    assert.equal(acquired.wait, 'dead_letter');
+    assert.match(queuedHopWaitDetail(acquired), /死信/);
+  }
+  assert.equal((await repo.get(hop.id))?.status, 'dead_letter');
+});
+
+test('single-id queue: retryable failure waits, due reclaim dead-letters, missing reporter does not complete',
+  async () => {
+    const hopClock = new FixedClock('2026-01-01T00:00:00.000Z');
+    const starts = { count: 0 };
+    const queuedHops = memoryQueuedHops();
+    const env = await harness({
+      coordinator: trackingRuntime(new ScriptedRuntime(COORDINATOR_HAPPY), [], starts),
+      executor: trackingRuntime(new ScriptedRuntime({
+        'executor:W-1': { steps: [], upstreamFailure: 'HTTP 503 Service Unavailable' },
+      }), [], starts),
+      queuedHops,
+      owner: 'runner-fail',
+      hopClock,
+      executorMaxAttempts: 2,
+    });
+    await env.platform.createMission({ projectId: 'P', missionId: 'M-sid', contract: CONTRACT });
+    const first = await env.makeOrchestrator().runMission('M-sid', { projectRoot: process.cwd() });
+    assert.equal(first.kind, 'waiting');
+    if (first.kind === 'waiting') {
+      assert.equal(first.reason, 'project_busy');
+      assert.match(first.detail, /退避/);
+    }
+    const exec1 = (await queuedHops.list()).filter((row) => row.role === 'executor');
+    assert.equal(exec1.length, 1);
+    assert.equal(exec1[0]?.status, 'retry_wait');
+    assert.equal(exec1[0]?.attemptCount, 1);
+    const startsAfterFirst = starts.count;
+
+    const early = await env.makeOrchestrator().runMission('M-sid', { projectRoot: process.cwd() });
+    assert.equal(early.kind, 'waiting');
+    assert.equal(starts.count, startsAfterFirst);
+    assert.equal((await queuedHops.list()).find((row) => row.role === 'executor')?.attemptCount, 1);
+
+    hopClock.advance(Date.parse(exec1[0]!.availableAt) - Date.parse('2026-01-01T00:00:00.000Z'));
+    const second = await env.makeOrchestrator().runMission('M-sid', { projectRoot: process.cwd() });
+    assert.equal(second.kind, 'waiting');
+    if (second.kind === 'waiting') {
+      assert.equal(second.reason, 'attempt_limit_reached');
+      assert.match(second.detail, /死信/);
+    }
+    const exec2 = (await queuedHops.list()).filter((row) => row.role === 'executor');
+    assert.equal(exec2.length, 1);
+    assert.equal(exec2[0]?.status, 'dead_letter');
+    assert.equal(exec2[0]?.attemptCount, 2);
+    assert.notEqual((await env.platform.getMissionView('M-sid')).status, 'completed');
+
+    const bare = memoryQueuedHops();
+    const unsupported: QueuedHopRepository = {
+      enqueue: (hop) => bare.enqueue(hop),
+      get: (id) => bare.get(id),
+      list: () => bare.list(),
+      claim: (id, owner, now, until) => bare.claim(id, owner, now, until),
+      renew: (id, owner, generation, now, until) => bare.renew(id, owner, generation, now, until),
+      complete: (id, owner, generation, now) => bare.complete(id, owner, generation, now),
+    };
+    const boom: AgentRuntime = {
+      kind: 'boom',
+      start: async () => {
+        throw new Error('adapter exploded');
+      },
+    };
+    const missing = await harness({
+      coordinator: boom,
+      executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      queuedHops: unsupported,
+      owner: 'runner-missing',
+    });
+    await missing.platform.createMission({ projectId: 'P', missionId: 'M-missing', contract: CONTRACT });
+    await assert.rejects(
+      missing.makeOrchestrator().runMission('M-missing', { projectRoot: process.cwd() }),
+      /does not support failure reporting/,
+    );
+    const leftover = await unsupported.list();
+    assert.equal(leftover.length, 1);
+    assert.notEqual(leftover[0]?.status, 'completed');
+  });

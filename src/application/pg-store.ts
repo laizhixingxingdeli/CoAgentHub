@@ -22,8 +22,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
-import { claimHop, claimHopWithCandidate, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop } from './durable-scheduler.ts';
+import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
 import type {
   ActivityEvent,
   ActivityLog,
@@ -1245,6 +1245,10 @@ export class PgQueuedHopRepository implements QueuedHopCapacityRepository {
     return this.#transition(id, (hop) => completeHop(hop, owner, claimGeneration, now));
   }
 
+  async reportFailure(input: ReportHopFailureInput): Promise<QueuedHop | undefined> {
+    return this.#transition(input.id, (hop) => reportHopFailure(hop, input));
+  }
+
   async #transition(id: string, transition: (hop: QueuedHop) => QueuedHop | undefined): Promise<QueuedHop | undefined> {
     const client = await this.#pool.connect();
     try {
@@ -1254,11 +1258,15 @@ export class PgQueuedHopRepository implements QueuedHopCapacityRepository {
       if (!current) { await client.query('COMMIT'); return undefined; }
       const updated = transition(current);
       if (!updated) { await client.query('ROLLBACK'); return undefined; }
+      if (updated === current) {
+        await client.query('COMMIT');
+        return cloneQueuedHop(updated);
+      }
       const written = await client.query('UPDATE queued_hops SET hop = $2::jsonb WHERE hop_id = $1 AND hop = $3::jsonb',
         [id, JSON.stringify(updated), JSON.stringify(current)]);
       if (written.rowCount !== 1) { await client.query('ROLLBACK'); return undefined; }
       await client.query('COMMIT');
-      return { ...updated };
+      return cloneQueuedHop(updated);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -1267,12 +1275,12 @@ export class PgQueuedHopRepository implements QueuedHopCapacityRepository {
 
   async get(id: string): Promise<QueuedHop | undefined> {
     const { rows } = await this.#pool.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops WHERE hop_id = $1', [id]);
-    return rows[0] ? { ...rows[0].hop } : undefined;
+    return rows[0] ? cloneQueuedHop(rows[0].hop) : undefined;
   }
 
   async list(): Promise<readonly QueuedHop[]> {
     const { rows } = await this.#pool.query<{ hop: QueuedHop }>('SELECT hop FROM queued_hops ORDER BY hop_id');
-    return rows.map(({ hop }) => ({ ...hop }));
+    return rows.map(({ hop }) => cloneQueuedHop(hop));
   }
 }
 
