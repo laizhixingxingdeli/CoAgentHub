@@ -7,7 +7,7 @@
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -791,3 +791,385 @@ describe('HTTP 队列 Attempt 身份', () => {
     }
   });
 });
+
+const BRIEF_SHA256 = /^[0-9a-f]{64}$/;
+const BRIEF_RULES = '# 架构约束\n\nkernel 不得依赖任何第三方包。\n';
+const BRIEF_SPEC_BODY = '# HTTP brief spec\n\nSPEC-BODY-MUST-NOT-PREFETCH\n';
+const BRIEF_CONTRACT_R2 = {
+  ...CONTRACT,
+  intent: '把 X 修好（r2）',
+};
+const BRIEF_PLAN = {
+  findings: '第三次规划',
+  rejectedHypotheses: [] as string[],
+  decisions: [] as string[],
+  direction: '按 r3 改',
+  risks: [] as string[],
+};
+const BRIEF_REFS = [
+  'src/does-not-exist-w1.ts',
+  { kind: 'living_spec' as const, ref: 'http-brief', why: '规格在这儿' },
+  { kind: 'contract' as const, ref: 'contract', why: '验收标准在这儿' },
+  { kind: 'previous_result' as const, ref: 'W-prev', why: '上一工单结果' },
+];
+const BRIEF_ORDER = {
+  ...ORDER,
+  contextRefs: BRIEF_REFS,
+};
+const EXPECTED_ENV_NOTES =
+  process.platform === 'win32'
+    ? [
+        'Windows：bash 的 `/tmp` 和 Node 的 `/tmp` **不是同一个目录**（前者在 ' +
+          '%LOCALAPPDATA%\\Temp，后者是 C:\\tmp）。要落临时文件就用工作区里的相对路径，' +
+          '跨这两者传文件必须用绝对路径——弄错不会报错，只会读到一个旧文件或空文件。',
+        'Windows：Git Bash 里没有 `pgrep`。`if ! pgrep -f x` 这类判据**恒为真**，' +
+          '不会报"命令不存在"，只会让你以为进程已经没了。判进程死活用 tasklist，' +
+          '或者干脆改判产物（文件 mtime、库里的记录）。',
+      ]
+    : [];
+
+async function getJson(
+  base: string,
+  path: string,
+  token?: string,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'GET',
+    headers: token ? { 'x-coagent-run': token } : {},
+  });
+  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+}
+
+describe('HTTP 简报与按需引用权限',
+  () => {
+    test('同一 Mission：角色 Bundle、旧简报字段、get_work_order/get_context 形状与权限',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'http-brief-bundle-'));
+        mkdirSync(join(dir, '.coagent', 'specs'), { recursive: true });
+        writeFileSync(join(dir, '.coagent', 'project.md'), BRIEF_RULES, 'utf8');
+        writeFileSync(join(dir, '.coagent', 'specs', 'http-brief.md'), BRIEF_SPEC_BODY, 'utf8');
+
+        const clock = new FixedClock();
+        const ids = new SequentialIds();
+        const deliveries = new InMemoryDeliveryRepository(clock, ids);
+        const platform = new Platform({
+          projects: new InMemoryProjectRepository(),
+          deliveries,
+          activity: new InMemoryActivityLog(clock),
+          clock,
+          ids,
+        });
+        const tokens = new RunTokenRegistry();
+        const server = createApi({ platform, tokens, deliveries });
+        try {
+          await listenLoopback(server, 0);
+          const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+          const created = await postJson(base, '/api/missions', {
+            projectId: 'P-brief',
+            missionId: 'M-brief',
+            contract: CONTRACT,
+          });
+          assert.equal(created.status, 201);
+          await platform.recordWorkspace('M-brief', {
+            projectRoot: dir,
+            branch: 'b',
+            baseRevision: 'x',
+          });
+
+          const coord = await postJson(base, '/api/missions/M-brief/coordinator-attempts', {});
+          assert.equal(coord.status, 201);
+          const coordToken = (coord.json as { token?: string }).token;
+          assert.equal(typeof coordToken, 'string');
+
+          for (const findings of ['r1', 'r2', '第三次规划']) {
+            const planned = await postJson(
+              base,
+              '/api/agent/coagent_update_plan',
+              { ...BRIEF_PLAN, findings },
+              coordToken,
+            );
+            assert.equal(planned.status, 200);
+          }
+
+          const wi = await postJson(
+            base,
+            '/api/agent/coagent_create_work_item',
+            { title: 'W1', ...BRIEF_ORDER },
+            coordToken,
+          );
+          assert.equal(wi.status, 200);
+          const workItemId = (wi.json as { workItemId?: string }).workItemId;
+          assert.equal(typeof workItemId, 'string');
+
+          const dispatched = await postJson(
+            base,
+            '/api/agent/coagent_dispatch_work_item',
+            { workItemIds: [workItemId] },
+            coordToken,
+          );
+          assert.equal(dispatched.status, 200);
+
+          const exec = await postJson(
+            base,
+            `/api/missions/M-brief/work-items/${workItemId}/executor-attempts`,
+            {},
+          );
+          assert.equal(exec.status, 201);
+          const execToken = (exec.json as { token?: string }).token;
+          assert.equal(typeof execToken, 'string');
+
+          const revised = await platform.reviseContract('M-brief', BRIEF_CONTRACT_R2);
+          assert.equal(revised.contractRevision, 2);
+
+          const coordBriefRes = await getJson(base, '/api/run/brief', coordToken);
+          const execBriefRes = await getJson(base, '/api/run/brief', execToken);
+          assert.equal(coordBriefRes.status, 200);
+          assert.equal(execBriefRes.status, 200);
+
+          type BundleEntry = {
+            source: string;
+            revision?: number;
+            hash?: string;
+            reason?: string;
+            estimatedTokens?: number;
+            content?: unknown;
+          };
+          type Brief = {
+            role?: string;
+            projectRules?: string;
+            environmentNotes?: unknown;
+            contract?: { intent?: string };
+            contractRevision?: number;
+            plan?: { direction?: string; findings?: string };
+            planRevision?: number;
+            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown } };
+            finalReview?: { verdict?: string; reasons?: string[] };
+            contextBundle?: { role?: string; entries?: BundleEntry[] };
+          };
+          const coordBrief = coordBriefRes.json as Brief;
+          const execBrief = execBriefRes.json as Brief;
+
+          assert.equal(coordBrief.role, 'coordinator');
+          assert.equal(coordBrief.contract?.intent, BRIEF_CONTRACT_R2.intent);
+          assert.equal(coordBrief.contractRevision, 2);
+          assert.equal(coordBrief.plan?.direction, BRIEF_PLAN.direction);
+          assert.equal(coordBrief.plan?.findings, '第三次规划');
+          assert.equal(coordBrief.planRevision, 3);
+          assert.equal(coordBrief.workItem, undefined);
+          assert.equal(coordBrief.finalReview?.verdict, 'send_back');
+          assert.match(coordBrief.finalReview?.reasons?.[0] ?? '', /Contract 已更新到 r2/);
+          assert.equal(coordBrief.projectRules, BRIEF_RULES);
+          assert.deepEqual(coordBrief.environmentNotes, EXPECTED_ENV_NOTES);
+          assert.equal(coordBrief.contextBundle?.role, 'coordinator');
+          assert.deepEqual(
+            coordBrief.contextBundle?.entries?.map((e) => e.source),
+            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+          );
+          const coordContract = coordBrief.contextBundle?.entries?.find((e) => e.source === 'contract');
+          const coordPlan = coordBrief.contextBundle?.entries?.find((e) => e.source === 'plan');
+          assert.equal(coordContract?.revision, 2);
+          assert.equal(coordContract?.hash, undefined);
+          assert.equal(coordPlan?.revision, 3);
+          assert.equal(coordPlan?.hash, undefined);
+          const coordRules = coordBrief.contextBundle?.entries?.find((e) => e.source === 'project_rules');
+          assert.equal(coordRules?.revision, undefined);
+          assert.match(coordRules?.hash ?? '', BRIEF_SHA256);
+
+          assert.equal(execBrief.role, 'executor');
+          assert.equal(execBrief.workItem?.id, workItemId);
+          assert.equal(execBrief.workItem?.title, 'W1');
+          assert.deepEqual(execBrief.workItem?.order?.contextRefs, BRIEF_REFS);
+          assert.equal(execBrief.contract, undefined);
+          assert.equal(execBrief.plan, undefined);
+          assert.equal(execBrief.finalReview, undefined);
+          assert.equal(execBrief.contractRevision, undefined);
+          assert.equal(execBrief.planRevision, undefined);
+          assert.equal(execBrief.projectRules, BRIEF_RULES);
+          assert.deepEqual(execBrief.environmentNotes, EXPECTED_ENV_NOTES);
+          assert.equal(execBrief.contextBundle?.role, 'executor');
+          assert.deepEqual(
+            execBrief.contextBundle?.entries?.map((e) => e.source),
+            ['project_rules', 'environment_notes', 'work_order'],
+          );
+          const execDumped = JSON.stringify(execBrief);
+          assert.equal(execDumped.includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
+          assert.equal(execDumped.includes(BRIEF_CONTRACT_R2.intent), false);
+          assert.equal(execDumped.includes('executionResult'), false);
+          assert.equal(JSON.stringify(execBrief.workItem).includes('"body"'), false);
+
+          const order = await postJson(base, '/api/agent/coagent_get_work_order', {}, execToken);
+          assert.equal(order.status, 200);
+          const orderJson = order.json as {
+            workItemId?: string;
+            title?: string;
+            status?: string;
+            order?: { contextRefs?: unknown; objective?: string };
+            missionIntent?: string;
+            guardrails?: unknown;
+            previousRequiredChanges?: unknown;
+          };
+          assert.deepEqual(Object.keys(order.json).sort(), [
+            'guardrails',
+            'missionIntent',
+            'order',
+            'previousRequiredChanges',
+            'status',
+            'title',
+            'workItemId',
+          ]);
+          assert.equal(orderJson.workItemId, workItemId);
+          assert.equal(orderJson.title, 'W1');
+          assert.equal(orderJson.order?.objective, BRIEF_ORDER.objective);
+          assert.deepEqual(orderJson.order?.contextRefs, BRIEF_REFS);
+          assert.equal(orderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
+          assert.deepEqual(orderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
+          assert.deepEqual(orderJson.previousRequiredChanges, []);
+          assert.equal(JSON.stringify(orderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
+
+          const coordOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, coordToken);
+          assert.equal(coordOrder.status, 409);
+          assert.equal(coordOrder.json.error, 'ATTEMPT_NOT_BOUND');
+
+          const undeclared = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'src/not-in-order.ts' },
+            execToken,
+          );
+          assert.equal(undeclared.status, 200);
+          assert.equal((undeclared.json as { found?: boolean }).found, false);
+          assert.equal((undeclared.json as { body?: string }).body, undefined);
+          assert.match(String((undeclared.json as { note?: string }).note ?? ''), /没有声明/);
+
+          const fileRef = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'src/does-not-exist-w1.ts' },
+            execToken,
+          );
+          assert.equal(fileRef.status, 200);
+          assert.equal((fileRef.json as { found?: boolean }).found, true);
+          assert.equal((fileRef.json as { kind?: string }).kind, 'file');
+          assert.equal((fileRef.json as { body?: string }).body, undefined);
+          assert.match(String((fileRef.json as { note?: string }).note ?? ''), /file/);
+
+          const specRef = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'http-brief' },
+            execToken,
+          );
+          assert.equal(specRef.status, 200);
+          assert.equal((specRef.json as { found?: boolean }).found, true);
+          assert.equal((specRef.json as { kind?: string }).kind, 'living_spec');
+          assert.match(String((specRef.json as { body?: string }).body ?? ''), /SPEC-BODY-MUST-NOT-PREFETCH/);
+
+          const contractRef = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'contract' },
+            execToken,
+          );
+          assert.equal(contractRef.status, 200);
+          assert.equal((contractRef.json as { found?: boolean }).found, true);
+          assert.equal((contractRef.json as { kind?: string }).kind, 'contract');
+          assert.match(String((contractRef.json as { body?: string }).body ?? ''), /把 X 修好（r2）/);
+
+          const prevRef = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'W-prev' },
+            execToken,
+          );
+          assert.equal(prevRef.status, 200);
+          assert.equal((prevRef.json as { found?: boolean }).found, false);
+          assert.equal((prevRef.json as { body?: string }).body, undefined);
+          assert.match(String((prevRef.json as { note?: string }).note ?? ''), /还没有执行结果/);
+
+          const coordCtx = await postJson(
+            base,
+            '/api/agent/coagent_get_context',
+            { ref: 'contract' },
+            coordToken,
+          );
+          assert.equal(coordCtx.status, 409);
+          assert.equal(coordCtx.json.error, 'WRONG_ROLE');
+
+          const coordMission = await postJson(base, '/api/agent/coagent_get_mission', {}, coordToken);
+          const execMission = await postJson(base, '/api/agent/coagent_get_mission', {}, execToken);
+          assert.equal(coordMission.status, 200);
+          assert.equal(execMission.status, 200);
+          assert.equal((coordMission.json as { contractRevision?: number }).contractRevision, 2);
+          assert.equal((coordMission.json as { planRevision?: number }).planRevision, 3);
+          assert.equal((execMission.json as { contractRevision?: number }).contractRevision, 2);
+
+          const coordContractTool = await postJson(
+            base,
+            '/api/agent/coagent_get_contract',
+            {},
+            coordToken,
+          );
+          const execContractTool = await postJson(
+            base,
+            '/api/agent/coagent_get_contract',
+            {},
+            execToken,
+          );
+          assert.equal(coordContractTool.status, 200);
+          assert.equal(execContractTool.status, 200);
+          assert.deepEqual(Object.keys(coordContractTool.json).sort(), [
+            'contract',
+            'contractRevision',
+          ]);
+          assert.equal(
+            (coordContractTool.json as { contractRevision?: number }).contractRevision,
+            2,
+          );
+          assert.equal(
+            (coordContractTool.json as { contract?: { intent?: string } }).contract?.intent,
+            BRIEF_CONTRACT_R2.intent,
+          );
+          assert.equal(
+            (execContractTool.json as { contractRevision?: number }).contractRevision,
+            2,
+          );
+
+          const coordProject = await postJson(
+            base,
+            '/api/agent/coagent_get_project_context',
+            {},
+            coordToken,
+          );
+          const execProject = await postJson(
+            base,
+            '/api/agent/coagent_get_project_context',
+            {},
+            execToken,
+          );
+          assert.equal(coordProject.status, 200);
+          assert.equal(execProject.status, 200);
+          assert.equal((coordProject.json as { available?: boolean }).available, true);
+          assert.equal((coordProject.json as { projectProfile?: string }).projectProfile, BRIEF_RULES);
+          const specIndex = (coordProject.json as { specs?: { slug: string }[] }).specs ?? [];
+          assert.equal(specIndex.some((s) => s.slug === 'http-brief'), true);
+          assert.equal(JSON.stringify(coordProject.json).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
+          assert.equal((execProject.json as { available?: boolean }).available, true);
+
+          const specDoc = await postJson(
+            base,
+            '/api/agent/coagent_get_project_context',
+            { slug: 'http-brief' },
+            coordToken,
+          );
+          assert.equal(specDoc.status, 200);
+          assert.equal((specDoc.json as { available?: boolean }).available, true);
+          assert.match(String((specDoc.json as { body?: string }).body ?? ''), /SPEC-BODY-MUST-NOT-PREFETCH/);
+        } finally {
+          await closeServer(server);
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+  },
+);

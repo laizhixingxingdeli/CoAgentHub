@@ -102,6 +102,11 @@ import {
 } from './classified-mission-intake.ts';
 import { classifyTask, type ClassificationResult } from './task-classifier.ts';
 import {
+  buildContextBundle,
+  projectStartupBriefFields,
+  type ContextBundle,
+} from './context-builder.ts';
+import {
   anyHardAuthoritativeExceeded,
   budgetThresholdCrossings,
   buildBudgetUsageSnapshot,
@@ -2173,6 +2178,8 @@ export class Platform {
     workItem?: { id: string; title: string; order?: Readonly<WorkOrder> };
     /** L3 打回的理由。被打回之后重跑时，这是最该先看到的东西。 */
     finalReview?: Readonly<FinalReview>;
+    /** 可追溯的角色视图；旧字段从这里投影，缺省语义保持不变。 */
+    contextBundle: ContextBundle;
   }> {
     const { mission } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
@@ -2191,33 +2198,32 @@ export class Platform {
       }
     }
 
-    const base = {
-      role: attempt.kind,
-      projectId: mission.projectId,
-      missionId: mission.id,
-      status: mission.status,
+    const item =
+      attempt.kind === 'executor' && attempt.workItemId
+        ? mission.workItem(attempt.workItemId)
+        : undefined;
+    // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
+    const contextBundle = buildContextBundle({
+      role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
       projectRules,
       environmentNotes: environmentNotes(),
-    };
-
-    if (attempt.kind === 'executor') {
-      const item = attempt.workItemId ? mission.workItem(attempt.workItemId) : undefined;
-      // 执行者只给工单，不给契约——它不能重新定义目标，给了只会诱导它去改。
-      return {
-        ...base,
-        workItem: item
-          ? { id: item.id, title: item.title, order: item.order }
-          : undefined,
-      };
-    }
-
-    return {
-      ...base,
       contract: mission.contract,
       contractRevision: mission.contractRevision,
       plan: mission.plan,
       planRevision: mission.planRevision,
+      workItem: item
+        ? { id: item.id, title: item.title, order: item.order }
+        : undefined,
       finalReview: mission.finalReview,
+    });
+
+    return {
+      role: attempt.kind,
+      projectId: mission.projectId,
+      missionId: mission.id,
+      status: mission.status,
+      ...projectStartupBriefFields(contextBundle),
+      contextBundle,
     };
   }
 

@@ -1,0 +1,422 @@
+/**
+ * 角色 Context Bundle：确定性、按角色、来源可追溯；投影不得改旧简报语义。
+ */
+
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  COORDINATOR_SOURCE_ORDER,
+  EXECUTOR_SOURCE_ORDER,
+  buildContextBundle,
+  projectStartupBriefFields,
+} from '../src/application/context-builder.ts';
+import {
+  FixedClock,
+  InMemoryActivityLog,
+  InMemoryProjectRepository,
+  SequentialIds,
+} from '../src/application/in-memory.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import { Platform } from '../src/application/platform.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { FinalReview, MissionContract, PlanBody, WorkOrder } from '../src/kernel/index.ts';
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+const CONTRACT: MissionContract = {
+  intent: '修 X',
+  acceptance: ['绿'],
+  constraints: [],
+  nonGoals: [],
+  guardrails: [],
+};
+
+const PLAN: PlanBody = {
+  findings: 'f',
+  rejectedHypotheses: [],
+  decisions: [],
+  direction: 'd',
+  risks: [],
+};
+
+const W1_REFS: WorkOrder['contextRefs'] = [
+  'src/does-not-exist-w1.ts',
+  { kind: 'living_spec', ref: 'missing-spec', why: '规格在这儿' },
+  { kind: 'contract', ref: 'contract', why: '验收标准在这儿' },
+  { kind: 'previous_result', ref: 'W-prev', why: '上一工单结果' },
+];
+
+const ORDER: WorkOrder = {
+  objective: '改 foo',
+  allowedScope: ['src/foo.ts'],
+  requiredBehaviour: 'foo 返回 1',
+  constraints: [],
+  acceptance: ['foo() === 1'],
+  verification: ['node --test'],
+  doNot: [],
+  contextRefs: W1_REFS,
+};
+
+const WORK_ITEM = { id: 'W1', title: 'W', order: ORDER };
+
+const REVIEW: FinalReview = {
+  verdict: 'send_back',
+  reasons: ['Contract 已更新，需要重新规划'],
+};
+
+const NOTES = ['Windows：bash 的 `/tmp` 和 Node 的 `/tmp` 不是同一个目录。'];
+
+function identities(bundle: ReturnType<typeof buildContextBundle>) {
+  return bundle.entries.map((entry) => ({
+    source: entry.source,
+    revision: entry.revision,
+    hash: entry.hash,
+  }));
+}
+
+function coordinatorInput(overrides: Partial<Parameters<typeof buildContextBundle>[0]> = {}) {
+  return {
+    role: 'coordinator' as const,
+    projectRules: 'kernel 不得依赖任何第三方包。',
+    environmentNotes: NOTES,
+    contract: CONTRACT,
+    contractRevision: 1,
+    plan: PLAN,
+    planRevision: 1,
+    finalReview: REVIEW,
+    workItem: WORK_ITEM,
+    ...overrides,
+  };
+}
+
+function executorInput(overrides: Partial<Parameters<typeof buildContextBundle>[0]> = {}) {
+  return {
+    role: 'executor' as const,
+    projectRules: 'kernel 不得依赖任何第三方包。',
+    environmentNotes: NOTES,
+    contract: CONTRACT,
+    contractRevision: 1,
+    plan: PLAN,
+    planRevision: 1,
+    finalReview: REVIEW,
+    workItem: WORK_ITEM,
+    ...overrides,
+  };
+}
+
+function makePlatform() {
+  const clock = new FixedClock();
+  const ids = new SequentialIds();
+  const platform = new Platform({
+    projects: new InMemoryProjectRepository(),
+    deliveries: new InMemoryDeliveryRepository(clock, ids),
+    workspace: new InPlaceWorkspaceManager(),
+    activity: new InMemoryActivityLog(clock),
+    clock,
+    ids,
+  });
+  return platform;
+}
+
+function repoWithRules(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-ctx-rules-'));
+  mkdirSync(join(dir, '.coagent'), { recursive: true });
+  writeFileSync(
+    join(dir, '.coagent', 'project.md'),
+    '# 架构约束\n\nkernel 不得依赖任何第三方包。\n',
+    'utf8',
+  );
+  return dir;
+}
+
+async function upTo(platform: Platform, root: string) {
+  await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+  await platform.recordWorkspace('M1', { projectRoot: root, branch: 'b', baseRevision: 'x' });
+  const coord = await platform.startCoordinatorAttempt('M1');
+  await platform.updatePlan('M1', coord.attemptId, PLAN);
+  const { workItemId } = await platform.createWorkItem('M1', coord.attemptId, {
+    title: 'W',
+    order: ORDER,
+  });
+  await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
+  const exec = await platform.startExecutorAttempt('M1', workItemId);
+  return { coordId: coord.attemptId, execId: exec.attemptId, workItemId };
+}
+
+describe('buildContextBundle', () => {
+  test('相同输入重复构造深度相等', () => {
+    const input = coordinatorInput();
+    assert.deepEqual(buildContextBundle(input), buildContextBundle(input));
+    const exec = executorInput();
+    assert.deepEqual(buildContextBundle(exec), buildContextBundle(exec));
+  });
+
+  test('两个角色来源固定顺序，多喂的字段按角色丢掉', () => {
+    const coord = buildContextBundle(coordinatorInput());
+    const exec = buildContextBundle(executorInput());
+    assert.deepEqual(
+      coord.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+    assert.deepEqual(
+      exec.entries.map((e) => e.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+    assert.equal(coord.entries.some((e) => e.source === 'work_order'), false);
+    assert.equal(exec.entries.some((e) => e.source === 'contract'), false);
+    assert.equal(exec.entries.some((e) => e.source === 'plan'), false);
+    assert.equal(exec.entries.some((e) => e.source === 'final_review'), false);
+  });
+
+  test('每条含 source、revision 或 SHA-256 hash、reason、estimatedTokens', () => {
+    const bundle = buildContextBundle(coordinatorInput());
+    for (const entry of bundle.entries) {
+      assert.equal(typeof entry.source, 'string');
+      assert.equal(typeof entry.reason, 'string');
+      assert.ok(entry.reason.length > 0);
+      assert.equal(typeof entry.estimatedTokens, 'number');
+      assert.ok(Number.isInteger(entry.estimatedTokens));
+      assert.ok(entry.estimatedTokens >= 0);
+      const hasRevision = typeof entry.revision === 'number';
+      const hasHash = typeof entry.hash === 'string';
+      assert.equal(hasRevision || hasHash, true, `${entry.source} 要有 revision 或 hash`);
+      assert.equal(hasRevision && hasHash, false, `${entry.source} 不能两个标识一起用`);
+      if (hasHash) assert.match(entry.hash as string, SHA256_HEX);
+    }
+    const contract = bundle.entries.find((e) => e.source === 'contract');
+    const plan = bundle.entries.find((e) => e.source === 'plan');
+    const rules = bundle.entries.find((e) => e.source === 'project_rules');
+    assert.equal(contract?.revision, 1);
+    assert.equal(plan?.revision, 1);
+    assert.equal(contract?.hash, undefined);
+    assert.equal(rules?.revision, undefined);
+    assert.match(rules?.hash ?? '', SHA256_HEX);
+  });
+
+  test('改契约只动契约来源标识，改红线只动红线 hash', () => {
+    const base = coordinatorInput();
+    const orig = buildContextBundle(base);
+    const afterContract = buildContextBundle(
+      coordinatorInput({
+        contract: { ...CONTRACT, intent: '改了目标' },
+        contractRevision: 2,
+      }),
+    );
+    const afterRules = buildContextBundle(
+      coordinatorInput({ projectRules: 'kernel 仍然零依赖，但红线换了措辞。' }),
+    );
+
+    const origIds = identities(orig);
+    const contractIds = identities(afterContract);
+    const rulesIds = identities(afterRules);
+
+    assert.notEqual(
+      contractIds.find((i) => i.source === 'contract')?.revision,
+      origIds.find((i) => i.source === 'contract')?.revision,
+    );
+    for (const source of ['project_rules', 'environment_notes', 'plan', 'final_review'] as const) {
+      assert.deepEqual(
+        contractIds.find((i) => i.source === source),
+        origIds.find((i) => i.source === source),
+        `改契约不应改 ${source} 的标识`,
+      );
+    }
+
+    assert.notEqual(
+      rulesIds.find((i) => i.source === 'project_rules')?.hash,
+      origIds.find((i) => i.source === 'project_rules')?.hash,
+    );
+    for (const source of ['environment_notes', 'contract', 'plan', 'final_review'] as const) {
+      assert.deepEqual(
+        rulesIds.find((i) => i.source === source),
+        origIds.find((i) => i.source === source),
+        `改红线不应改 ${source} 的标识`,
+      );
+    }
+  });
+
+  test('来源标识不暴露原文、Mission/Attempt id 或凭据形状', () => {
+    const leak = 'sk-ant-testvalue1234567890';
+    const bundle = buildContextBundle(
+      coordinatorInput({
+        projectRules: `红线含凭据 ${leak} 以及 M-LEAK 与 A-LEAK`,
+        contract: { ...CONTRACT, intent: `目标 M-LEAK ${leak}` },
+        workItem: { id: 'W-LEAK', title: 'M-LEAK', order: ORDER },
+      }),
+    );
+    for (const entry of bundle.entries) {
+      const meta = `${entry.source}\n${entry.revision ?? ''}\n${entry.hash ?? ''}`;
+      assert.equal(meta.includes(leak), false, '凭据不得出现在标识里');
+      assert.equal(meta.includes('M-LEAK'), false);
+      assert.equal(meta.includes('A-LEAK'), false);
+      assert.equal(meta.includes('W-LEAK'), false);
+      assert.equal(meta.includes('红线含凭据'), false);
+      assert.equal(meta.includes(CONTRACT.intent), false);
+    }
+  });
+
+  test('无记忆时仍可构造，红线内容缺省', () => {
+    const bundle = buildContextBundle(
+      coordinatorInput({ projectRules: undefined, finalReview: undefined }),
+    );
+    const projected = projectStartupBriefFields(bundle);
+    assert.equal(projected.projectRules, undefined);
+    assert.deepEqual(projected.environmentNotes, NOTES);
+    assert.deepEqual(projected.contract, CONTRACT);
+    assert.equal(projected.finalReview, undefined);
+    const rules = bundle.entries.find((e) => e.source === 'project_rules');
+    assert.equal(rules?.content, undefined);
+    assert.match(rules?.hash ?? '', SHA256_HEX);
+  });
+
+  test('执行者工单保留四种 contextRefs 原样，不预取正文', () => {
+    const bundle = buildContextBundle(executorInput());
+    const work = bundle.entries.find((e) => e.source === 'work_order');
+    const bound = work?.content as { id: string; title: string; order: WorkOrder };
+    assert.deepEqual(bound.order.contextRefs, W1_REFS);
+    const dumped = JSON.stringify(work?.content);
+    assert.equal(dumped.includes('"body"'), false);
+    assert.equal(dumped.includes('kernel 不得依赖'), false);
+    // 构造器自己不读盘：引用指向不存在的文件也不会炸。
+    assert.equal(bound.order.contextRefs[0], 'src/does-not-exist-w1.ts');
+  });
+
+  test('红线 hash 等于内容 SHA-256，不等于原文', () => {
+    const rules = 'kernel 不得依赖任何第三方包。';
+    const bundle = buildContextBundle(coordinatorInput({ projectRules: rules }));
+    const entry = bundle.entries.find((e) => e.source === 'project_rules');
+    assert.equal(entry?.hash, createHash('sha256').update(rules, 'utf8').digest('hex'));
+    assert.notEqual(entry?.hash, rules);
+  });
+});
+
+describe('projectStartupBriefFields', () => {
+  test('协调者投影契约/规划/打回，执行者投影工单', () => {
+    const coord = projectStartupBriefFields(buildContextBundle(coordinatorInput()));
+    const exec = projectStartupBriefFields(buildContextBundle(executorInput()));
+    assert.equal(coord.contract?.intent, CONTRACT.intent);
+    assert.equal(coord.contractRevision, 1);
+    assert.equal(coord.plan?.direction, PLAN.direction);
+    assert.equal(coord.planRevision, 1);
+    assert.equal(coord.finalReview?.verdict, 'send_back');
+    assert.equal(coord.workItem, undefined);
+    assert.equal(exec.workItem?.id, 'W1');
+    assert.equal(exec.contract, undefined);
+    assert.equal(exec.plan, undefined);
+    assert.equal(exec.finalReview, undefined);
+    assert.equal(exec.contractRevision, undefined);
+  });
+});
+
+describe('getStartupBrief 从 Bundle 投影旧字段', () => {
+  test('协调者和执行者旧字段逐字段不变，并带上 contextBundle', async () => {
+    const platform = makePlatform();
+    const root = repoWithRules();
+    const { coordId, execId, workItemId } = await upTo(platform, root);
+
+    const exec = await platform.getStartupBrief('M1', execId);
+    const coord = await platform.getStartupBrief('M1', coordId);
+
+    assert.equal(exec.role, 'executor');
+    assert.equal(exec.workItem?.id, workItemId);
+    assert.equal(exec.workItem?.order?.objective, ORDER.objective);
+    assert.match(exec.projectRules ?? '', /kernel 不得依赖任何第三方包/);
+    assert.equal(exec.contract, undefined);
+    assert.equal(exec.plan, undefined);
+    assert.deepEqual(exec.workItem?.order?.contextRefs, W1_REFS);
+    assert.equal(exec.contextBundle.role, 'executor');
+    assert.deepEqual(
+      exec.contextBundle.entries.map((e) => e.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+
+    assert.equal(coord.role, 'coordinator');
+    assert.equal(coord.contract?.intent, CONTRACT.intent);
+    assert.equal(coord.contractRevision, 1);
+    assert.equal(coord.plan?.direction, PLAN.direction);
+    assert.equal(coord.workItem, undefined);
+    assert.match(coord.projectRules ?? '', /kernel 不得依赖/);
+    assert.equal(coord.contextBundle.role, 'coordinator');
+    assert.deepEqual(
+      coord.contextBundle.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+
+    const execProjected = projectStartupBriefFields(exec.contextBundle);
+    assert.equal(execProjected.projectRules, exec.projectRules);
+    assert.deepEqual(execProjected.environmentNotes, exec.environmentNotes);
+    assert.deepEqual(execProjected.workItem, exec.workItem);
+
+    const coordProjected = projectStartupBriefFields(coord.contextBundle);
+    assert.equal(coordProjected.projectRules, coord.projectRules);
+    assert.deepEqual(coordProjected.environmentNotes, coord.environmentNotes);
+    assert.deepEqual(coordProjected.contract, coord.contract);
+    assert.equal(coordProjected.contractRevision, coord.contractRevision);
+    assert.deepEqual(coordProjected.plan, coord.plan);
+    assert.equal(coordProjected.planRevision, coord.planRevision);
+    assert.deepEqual(coordProjected.finalReview, coord.finalReview);
+  });
+
+  test('没有架构红线时不报错，projectRules 缺省，其余照给', async () => {
+    const platform = makePlatform();
+    const empty = mkdtempSync(join(tmpdir(), 'coagent-ctx-norules-'));
+    const { coordId } = await upTo(platform, empty);
+    const brief = await platform.getStartupBrief('M1', coordId);
+    assert.equal(brief.projectRules, undefined);
+    assert.equal(brief.contract?.intent, CONTRACT.intent);
+    assert.equal(brief.contextBundle.entries.find((e) => e.source === 'project_rules')?.content, undefined);
+  });
+
+  test('执行者简报不预取 contextRefs 正文，getContext 仍按需取', async () => {
+    const platform = makePlatform();
+    const root = repoWithRules();
+    const { execId } = await upTo(platform, root);
+    const brief = await platform.getStartupBrief('M1', execId);
+    const dumped = JSON.stringify(brief.workItem);
+    assert.equal(dumped.includes('"body"'), false);
+    assert.deepEqual(brief.workItem?.order?.contextRefs, W1_REFS);
+    // 四种引用只作为 order 引用留下；契约正文和上一工单结果都不预取。
+    assert.equal(dumped.includes('修 X'), false);
+    assert.equal(dumped.includes('executionResult'), false);
+
+    const file = await platform.getContext('M1', execId, 'src/does-not-exist-w1.ts');
+    assert.equal(file.found, true);
+    assert.equal(file.kind, 'file');
+    assert.equal(file.body, undefined);
+    assert.match(file.note ?? '', /file/);
+
+    const spec = await platform.getContext('M1', execId, 'missing-spec');
+    assert.equal(spec.found, false);
+    assert.equal(spec.body, undefined);
+    assert.match(spec.note ?? '', /没有 missing-spec/);
+
+    const contract = await platform.getContext('M1', execId, 'contract');
+    assert.equal(contract.found, true);
+    assert.equal(contract.kind, 'contract');
+    assert.match(contract.body ?? '', /修 X/);
+
+    const prev = await platform.getContext('M1', execId, 'W-prev');
+    assert.equal(prev.found, false);
+    assert.equal(prev.body, undefined);
+    assert.match(prev.note ?? '', /还没有执行结果/);
+
+    const undeclared = await platform.getContext('M1', execId, 'src/not-in-order.ts');
+    assert.equal(undeclared.found, false);
+    assert.equal(undeclared.body, undefined);
+    assert.match(undeclared.note ?? '', /没有声明/);
+  });
+});
+
+describe('构造器自己不读工作区', () => {
+  test('源文件不 import fs / path / platform', () => {
+    const source = readFileSync(new URL('../src/application/context-builder.ts', import.meta.url), 'utf8');
+    assert.equal(/from ['"]node:fs['"]/.test(source), false);
+    assert.equal(/from ['"]node:path['"]/.test(source), false);
+    assert.equal(/from ['"]\.\/platform\.ts['"]/.test(source), false);
+  });
+});
