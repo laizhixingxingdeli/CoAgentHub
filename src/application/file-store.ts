@@ -37,6 +37,7 @@ import type {
   Clock,
   QueuedHopRepository,
   CommandTransaction,
+  FencedCommandTransaction,
   IdGenerator,
   ProjectRepository,
   CandidateCircuitRepository,
@@ -52,8 +53,8 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
-import { claimHop, completeHop, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
-import type { QueuedHop } from './durable-scheduler.ts';
+import { claimHop, completeHop, holdsCurrentClaim, renewHop, validateEnqueueHop } from './durable-scheduler.ts';
+import type { ClaimFence, QueuedHop } from './durable-scheduler.ts';
 import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
 import {
@@ -240,7 +241,7 @@ interface OpenTransaction {
  * 盘上还是之前的文件。事务外的异步写先等开着的事务结束（`settle`），同步落盘推迟到它结束——
  * 否则别处的一次落盘会把事务的半截改动带下去，或者被它的回滚一起抹掉。
  */
-export class FileStateStore implements CommandTransaction {
+export class FileStateStore implements CommandTransaction, FencedCommandTransaction {
   #path: string;
   #state: StateFile;
   /** 还原出来的聚合实例。落盘时重新取快照，读的时候直接给活对象。 */
@@ -493,6 +494,19 @@ export class FileStateStore implements CommandTransaction {
       tx.finish();
       release();
     }
+  }
+
+  /**
+   * 同一命令事务内核对领取后再跑 fn。失败抛错，走 run 的回滚；不要在这里 catch，
+   * 嵌套进外层 run 时吞掉错误会让外层把半截写入提交掉。
+   */
+  async runFenced<T>(fence: ClaimFence, fn: () => Promise<T>): Promise<T> {
+    return this.run(async () => {
+      const rows = this.#state.queuedHops;
+      const hop = Array.isArray(rows) ? rows.find((row) => row.id === fence.id) : undefined;
+      if (!holdsCurrentClaim(hop, fence)) throw new Error('claim fence rejected');
+      return fn();
+    });
   }
 
   /**
