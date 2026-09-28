@@ -118,7 +118,8 @@ export function classifyCandidateFailure(
   if (fromRuntimeException && localAdapterSignal) {
     return { failureClass: 'local_adapter_error', failover: false };
   }
-  if (/\b429\b|too many requests|rate.?limit|quota|需要充值|配额|额度/i.test(message)) {
+  // 403 / forbidden alone is not quota; only these billing/credit phrases (plus existing 429/rate-limit/quota/配额) failover.
+  if (/\b429\b|too many requests|rate.?limit|quota|需要充值|配额|额度|credits|subscription|billing|spending limit|usage[ _]limit|insufficient balance|insufficient_quota|余额不足|欠费/i.test(message)) {
     return { failureClass: 'quota', failover: true };
   }
   if (/\b401\b|unauthori[sz]ed|authentication|鉴权|认证/i.test(message)) {
