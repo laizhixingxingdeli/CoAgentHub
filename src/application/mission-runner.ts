@@ -15,6 +15,7 @@ import {
   type RolePool,
   type RunMissionOptions,
 } from './orchestrator.ts';
+import type { CandidateCircuitRepository } from './ports.ts';
 import type { Platform } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -45,6 +46,7 @@ export interface MissionRunnerDeps {
   readonly acceptStaleBase?: boolean;
   readonly attemptWallClockMs?: number;
   readonly owner?: string;
+  readonly candidateCircuits?: CandidateCircuitRepository;
 }
 
 export interface MissionRunnerResult {

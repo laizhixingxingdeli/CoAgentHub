@@ -1,8 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimCandidateProbe, closedCandidateCircuit, openCandidateCircuit, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
+import { claimCandidateProbe, classifyCandidateFailure, closedCandidateCircuit, openCandidateCircuit, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
 
 const opened: CandidateCircuit = { profileId: 'p1', state: 'open', failureClass: 'timeout', openUntil: '2030-01-01T00:00:00.000Z' };
+
+test('candidate failures are classified conservatively with explicit failover decisions', () => {
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 429 quota exceeded'), { failureClass: 'quota', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '401 Unauthorized'), { failureClass: 'auth', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 503 Service Unavailable'), { failureClass: 'upstream_5xx', failover: true });
+  assert.deepEqual(classifyCandidateFailure('killed_idle'), { failureClass: 'killed_idle', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'adapter connection reset', true), { failureClass: 'local_adapter_error', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 429 quota exceeded', true), { failureClass: 'quota', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '401 Unauthorized', true), { failureClass: 'auth', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 503 Service Unavailable', true), { failureClass: 'upstream_5xx', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'adapter connection reset; HTTP 503 Service Unavailable', true), { failureClass: 'local_adapter_error', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', '403 需要充值'), { failureClass: 'quota', failover: true });
+
+  assert.equal(classifyCandidateFailure('structured_submit'), undefined);
+  assert.equal(classifyCandidateFailure('no_structured_result'), undefined);
+  assert.equal(classifyCandidateFailure('platform_unreachable', 'HTTP 429 quota'), undefined);
+  assert.equal(classifyCandidateFailure('platform_unreachable', 'HTTP 503'), undefined);
+  assert.equal(classifyCandidateFailure('killed_wall_clock'), undefined);
+  assert.equal(classifyCandidateFailure('cancelled'), undefined);
+  assert.equal(classifyCandidateFailure('interrupted'), undefined);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure'), { failureClass: 'unknown', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'ordinary execution failed'), { failureClass: 'unknown', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'unrecognized runtime exception', true), { failureClass: 'unknown', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'request failed', true), { failureClass: 'unknown', failover: false });
+});
 
 test('missing circuit is represented as closed', () => {
   const missing: CandidateCircuit = closedCandidateCircuit('p1');

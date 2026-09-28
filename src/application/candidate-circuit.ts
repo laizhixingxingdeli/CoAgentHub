@@ -1,3 +1,5 @@
+import type { AttemptEndReason } from '../kernel/index.ts';
+
 export type CandidateCircuitState = 'closed' | 'open' | 'half_open';
 
 export interface ClosedCandidateCircuit {
@@ -96,4 +98,34 @@ export function resolveCandidateProbe(record: CandidateCircuit | undefined, inpu
   }
   if (input.succeeded) return { profileId: input.profileId, state: 'closed' };
   return { profileId: input.profileId, state: 'open', failureClass: input.failureClass!, openUntil: input.openUntil! };
+}
+
+export type CandidateFailureClassification = {
+  failureClass: 'quota' | 'auth' | 'upstream_5xx' | 'killed_idle' | 'local_adapter_error' | 'unknown';
+  failover: boolean;
+};
+
+export function classifyCandidateFailure(
+  endedBy: AttemptEndReason,
+  failureMessage?: string,
+  fromRuntimeException = false,
+): CandidateFailureClassification | undefined {
+  if (endedBy === 'killed_idle') return { failureClass: 'killed_idle', failover: true };
+  if (endedBy !== 'upstream_failure') return undefined;
+
+  const message = failureMessage ?? '';
+  const localAdapterSignal = /adapter|econnrefused|enotfound|eai_again|fetch failed|socket|connection reset/i.test(message);
+  if (fromRuntimeException && localAdapterSignal) {
+    return { failureClass: 'local_adapter_error', failover: false };
+  }
+  if (/\b429\b|too many requests|rate.?limit|quota|需要充值|配额|额度/i.test(message)) {
+    return { failureClass: 'quota', failover: true };
+  }
+  if (/\b401\b|unauthori[sz]ed|authentication|鉴权|认证/i.test(message)) {
+    return { failureClass: 'auth', failover: true };
+  }
+  if (/\b5\d\d\b|internal server error|bad gateway|service unavailable|gateway timeout/i.test(message)) {
+    return { failureClass: 'upstream_5xx', failover: true };
+  }
+  return { failureClass: 'unknown', failover: false };
 }

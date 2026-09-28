@@ -10,7 +10,7 @@
  * 它**不**判断技术对错——那是 L2 的事；也不判断需求对错——那是 L3 的事。
  */
 
-import type { AgentRuntime, ExecutionProfile } from './ports.ts';
+import type { AgentRuntime, CandidateCircuitRepository, ExecutionProfile } from './ports.ts';
 import type { MissionView, Platform } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
@@ -20,6 +20,7 @@ import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
+import { classifyCandidateFailure } from './candidate-circuit.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -95,6 +96,7 @@ export interface OrchestratorDeps {
    * 不受影响。见 #staleAcknowledged。
    */
   acceptStaleBase?: boolean;
+  candidateCircuits?: CandidateCircuitRepository;
 }
 
 export interface RunMissionOptions {
@@ -277,6 +279,7 @@ export class Orchestrator {
   #independentReviewer: RolePool | undefined;
   #workspace: WorkspaceManager;
   #wallClockMs: number;
+  #candidateCircuits: CandidateCircuitRepository | undefined;
   readonly hops: HopRecord[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
@@ -306,6 +309,7 @@ export class Orchestrator {
     this.#independentReviewer = deps.independentReviewer;
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
+    this.#candidateCircuits = deps.candidateCircuits;
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
   }
 
@@ -479,6 +483,11 @@ export class Orchestrator {
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
             return { kind: 'waiting', reason, detail };
+          }
+          if ('persistentUnknown' in hop && hop.persistentUnknown) {
+            const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
+            await this.#platform.setWaitReason(missionId, 'no_available_agent', detail);
+            return { kind: 'waiting', reason: 'no_available_agent', detail };
           }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
           // 没交卷（这一跳没 structured submit）时平台自己会跳过。
@@ -872,8 +881,19 @@ export class Orchestrator {
   }
 
   /** 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。 */
-  #availableCandidates(pool: RolePool, now: number): ExecutionProfile[] {
-    return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
+  async #availableCandidates(pool: RolePool, now: number): Promise<ExecutionProfile[]> {
+    if (!this.#candidateCircuits) {
+      return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
+    }
+    const available: ExecutionProfile[] = [];
+    for (const profile of pool.candidates) {
+      const circuit = await this.#candidateCircuits.get(profile.profileId);
+      if (circuit.state === 'closed') available.push(profile);
+      else if (circuit.state === 'open' && Date.parse(circuit.openUntil) <= now) {
+        available.push(profile);
+      }
+    }
+    return available;
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
@@ -985,13 +1005,13 @@ export class Orchestrator {
     instruction: string;
     resumeRef?: string;
   }): Promise<
-    | { endedBy: string; resumeRef?: string }
+    | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
     /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
     | { exhausted: WaitReason; detail?: string }
     | undefined
   > {
     const now = Date.now();
-    const usable = this.#availableCandidates(input.pool, now);
+    const usable = await this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。
@@ -1001,11 +1021,31 @@ export class Orchestrator {
     const limit = input.pool.maxAttempts ?? 3;
     let used = 0;
     for (const profile of usable) {
-      if (used >= limit) return { exhausted: 'attempt_limit_reached' };
-      used += 1;
       // Attempt 起点。换候选之前要回到这里：下一个候选应该从干净的起点
       // 开始，而不是接手上一个改到一半的代码（S06.3）。
       const startRevision = await this.#workspace.head(input.cwd).catch(() => undefined);
+      let claimedProbe = false;
+      if (this.#candidateCircuits) {
+        const circuit = await this.#candidateCircuits.get(profile.profileId);
+        if (circuit.state === 'open') {
+          claimedProbe = await this.#candidateCircuits.tryClaimProbe({
+            profileId: profile.profileId, now: new Date().toISOString(),
+          });
+          if (!claimedProbe) continue;
+        } else if (circuit.state === 'half_open') {
+          continue;
+        }
+      }
+      if (used >= limit) {
+        if (claimedProbe) {
+          const circuit = await this.#candidateCircuits!.get(profile.profileId);
+          if (circuit.state === 'half_open') await this.#candidateCircuits!.resolveProbe({
+            profileId: profile.profileId, succeeded: false, failureClass: circuit.failureClass, openUntil: circuit.openUntil,
+          });
+        }
+        return { exhausted: 'attempt_limit_reached' };
+      }
+      used += 1;
 
       const { attemptId, token } =
         input.role === 'coordinator'
@@ -1019,6 +1059,7 @@ export class Orchestrator {
       // 到点掐掉之后，close 事件回来的是一个普通的"进程被杀"失败。
       // 不记这个标志就没法把它和真的上游故障分开，而两者处置完全相反。
       let runaway = false;
+      let thrownRuntimeException = false;
       /**
        * 边跑边收到的最后一次累计用量。
        *
@@ -1195,6 +1236,7 @@ export class Orchestrator {
         }
         if (waitError !== undefined) throw waitError;
       } catch (error) {
+        thrownRuntimeException = true;
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
         // 平台一抖，好端端的候选被冻进冷却，而换一个照样连不上。
         const message = error instanceof Error ? error.message : String(error);
@@ -1236,6 +1278,37 @@ export class Orchestrator {
       // 和写回平台的那个值保持一致。两处分叉的话，库里记的和这里判的就是
       // 两件事，而排障的人会同时看到两者。
       const endedBy: AttemptEndReason = runaway ? 'killed_wall_clock' : outcome.endedBy;
+      const message = outcome.failureMessage ?? '';
+      const classification = classifyCandidateFailure(endedBy, message, thrownRuntimeException);
+      const failureClass = classification?.failureClass ?? 'unknown';
+      const durableCandidateFailure =
+        endedBy === 'upstream_failure' || endedBy === 'killed_idle' ||
+        classification?.failureClass === 'local_adapter_error';
+      if (this.#candidateCircuits) {
+        const openUntil = new Date(Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
+        if (endedBy === 'platform_unreachable') {
+          // A platform outage is not a candidate outcome; keep a claimed probe from
+          // remaining stuck without changing the existing circuit row.
+          if (claimedProbe) {
+            const original = await this.#candidateCircuits.get(profile.profileId);
+            if (original.state === 'half_open') await this.#candidateCircuits.resolveProbe({
+              profileId: profile.profileId, succeeded: false, failureClass: original.failureClass, openUntil: original.openUntil,
+            });
+          }
+        } else if (claimedProbe) {
+          if (durableCandidateFailure) await this.#candidateCircuits.resolveProbe({ profileId: profile.profileId, succeeded: false, failureClass, openUntil });
+          else if (endedBy === 'structured_submit') await this.#candidateCircuits.resolveProbe({ profileId: profile.profileId, succeeded: true });
+          else {
+            // Non-candidate execution failures do not prove the probe healthy.
+            const original = await this.#candidateCircuits.get(profile.profileId);
+            if (original.state === 'half_open') await this.#candidateCircuits.resolveProbe({
+              profileId: profile.profileId, succeeded: false, failureClass: original.failureClass, openUntil: original.openUntil,
+            });
+          }
+        } else if (durableCandidateFailure) {
+          await this.#candidateCircuits.open({ profileId: profile.profileId, failureClass, openUntil });
+        }
+      }
 
       this.hops.push({
         role: input.role,
@@ -1292,7 +1365,10 @@ export class Orchestrator {
       // 记录不同：一个是"那个候选挂了"，一个是"我们自己按静默超时掐的"。
       // 混在一起的话，"这个配置有多容易卡住"这个问题就只能去
       // failureMessage 里做字符串匹配——而那是一句给人读的话，随时会改。
-      if (endedBy === 'upstream_failure' || endedBy === 'killed_idle') {
+      const shouldFailover = this.#candidateCircuits
+        ? classification?.failover === true
+        : endedBy === 'upstream_failure' || endedBy === 'killed_idle' || endedBy === 'quota' || endedBy === 'auth' || endedBy === 'upstream_5xx';
+      if (shouldFailover) {
         // 这个候选先放一会儿，别下一跳又撞上同一个限流 / 同一次卡死。
         this.#cooldown.set(
           profile.profileId,
@@ -1305,7 +1381,11 @@ export class Orchestrator {
         }
         continue; // 换下一个候选
       }
-      return { endedBy, resumeRef: outcome.resumeRef };
+      return {
+        endedBy,
+        resumeRef: outcome.resumeRef,
+        persistentUnknown: Boolean(this.#candidateCircuits && failureClass === 'unknown' && durableCandidateFailure),
+      };
     }
     return undefined;
   }

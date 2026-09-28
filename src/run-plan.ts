@@ -275,7 +275,7 @@ async function main() {
         queryRuntime,
         exclusive: { what: `run-plan ${plan.planId}` },
       });
-  const { platform, tokens, deliveries, persist, agentPool } = built;
+  const { platform, tokens, deliveries, persist, agentPool, candidateCircuits } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   const runQuery = built.runQuery;
@@ -402,6 +402,7 @@ async function main() {
       tokens: makeIssuer(platform, tokens),
       baseUrl,
       workspace,
+      candidateCircuits,
       coordinator: { runtime, candidates: coordinators },
       executor: { runtime, candidates: executors },
       independentReviewer: { runtime, candidates: independentReviewers },
