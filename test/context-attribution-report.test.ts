@@ -36,6 +36,83 @@ const SENTINELS = [
   'msg-arch-trunc-1',
 ];
 
+const PATH_DIGEST = 'ab'.repeat(32);
+const CONTENT_DIGEST = 'cd'.repeat(32);
+const METRICS_LEAKS = [
+  PATH_DIGEST,
+  CONTENT_DIGEST,
+  'pathDigest',
+  'contentDigest',
+  'Authorization',
+  'x-api-key',
+  'Bearer fake',
+];
+
+const CONTEXT_METRICS_ABSENT = 'context_metrics_absent';
+const CONTEXT_METRICS_UNTRUSTED = 'context_metrics_untrusted';
+
+const VALID_COMPLETE_METRICS = {
+  version: 1 as const,
+  coverage: 'complete' as const,
+  brief: {
+    renderedUtf8Bytes: 1200,
+    sources: [
+      { source: 'project_rules', estimatedTokens: 40, truncated: false },
+      { source: 'work_order', truncated: true },
+    ],
+  },
+  tools: [
+    { kind: 'read', calls: 2, returnedUtf8Bytes: 80 },
+    { kind: 'grep', calls: 1, returnedUtf8Bytes: 12 },
+    { kind: 'find', calls: 1, returnedUtf8Bytes: 0 },
+    { kind: 'ls', calls: 3, returnedUtf8Bytes: 40 },
+    { kind: 'bash', calls: 1, returnedUtf8Bytes: 9 },
+  ],
+  reads: [{ pathDigest: PATH_DIGEST, contentDigest: CONTENT_DIGEST, repeats: 2 }],
+};
+
+type ReportShape = {
+  version: unknown;
+  liveCoverage: unknown;
+  archiveCoverage: unknown;
+  reasons: unknown;
+  rows: Array<Record<string, unknown> & {
+    missionId: string;
+    attemptId: string;
+    contextMetricsCoverage?: string;
+    contextMetrics?: unknown;
+    reasons: string[];
+  }>;
+};
+
+function stripNewMetricsFields(report: ReportShape) {
+  return {
+    version: report.version,
+    rows: report.rows.map((row) => {
+      const rest = { ...row };
+      delete rest.contextMetrics;
+      delete rest.contextMetricsCoverage;
+      return {
+        ...rest,
+        reasons: row.reasons.filter(
+          (reason) => reason !== CONTEXT_METRICS_ABSENT && reason !== CONTEXT_METRICS_UNTRUSTED,
+        ),
+      };
+    }),
+    liveCoverage: report.liveCoverage,
+    archiveCoverage: report.archiveCoverage,
+    reasons: report.reasons,
+  };
+}
+
+function assertLegacyUnknownMetrics(report: ReportShape) {
+  for (const row of report.rows) {
+    assert.equal(row.contextMetricsCoverage, 'unknown');
+    assert.equal('contextMetrics' in row, false);
+    assert.equal(row.reasons.includes(CONTEXT_METRICS_ABSENT), true);
+  }
+}
+
 function runCli(args: readonly string[]) {
   return spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
@@ -81,7 +158,9 @@ describe('context-attribution-report CLI', () => {
     const beforeArchive = await readFile(archivePath);
     const run = runCli(['--input', mainStatePath, '--archive', archivePath]);
     assert.equal(run.status, 0, run.stderr);
-    assert.deepStrictEqual(JSON.parse(run.stdout), expected);
+    const report = JSON.parse(run.stdout) as ReportShape;
+    assertLegacyUnknownMetrics(report);
+    assert.deepStrictEqual(stripNewMetricsFields(report), expected);
     assert.deepStrictEqual(await readFile(mainStatePath), beforeMain);
     assert.deepStrictEqual(await readFile(archivePath), beforeArchive);
     const leakExtra = [fixtures, mainStatePath, archivePath, repoRoot];
@@ -99,7 +178,9 @@ describe('context-attribution-report CLI', () => {
     const run = runCli(['--input', mainStatePath]);
     assert.equal(run.status, 0, run.stderr);
     assert.deepStrictEqual(await readFile(mainStatePath), beforeMain);
-    assert.deepStrictEqual(JSON.parse(run.stdout), {
+    const report = JSON.parse(run.stdout) as ReportShape;
+    assertLegacyUnknownMetrics(report);
+    assert.deepStrictEqual(stripNewMetricsFields(report), {
       version: 1,
       rows: expectedHappy.rows.filter((row) => (row as { missionId: string }).missionId === 'M-live'),
       liveCoverage: 'complete',
@@ -123,7 +204,9 @@ describe('context-attribution-report CLI', () => {
       assert.equal(run.status, 0, run.stderr);
       assert.deepStrictEqual(await readFile(mainStatePath), beforeMain);
       assert.deepStrictEqual(await readFile(tampered), beforeTampered);
-      assert.deepStrictEqual(JSON.parse(run.stdout), {
+      const report = JSON.parse(run.stdout) as ReportShape;
+      assertLegacyUnknownMetrics(report);
+      assert.deepStrictEqual(stripNewMetricsFields(report), {
         ...expectedHappy,
         archiveCoverage: 'partial',
         reasons: ['archive_integrity_unverified'],
@@ -282,6 +365,56 @@ describe('context-attribution-report CLI', () => {
   });
 });
 
+function synthState(events: unknown[], extraAttempt?: Record<string, unknown>): {
+  version: 1;
+  projects: unknown[];
+  events: unknown[];
+} {
+  return {
+    version: 1,
+    projects: [
+      {
+        id: 'P-synth',
+        missions: [
+          {
+            id: 'M-live',
+            coordinatorAttempts: [
+              {
+                id: 'A-coord',
+                kind: 'coordinator',
+                status: 'succeeded',
+                usage: {
+                  input: 1,
+                  output: 1,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  total: 2,
+                  quality: 'reported',
+                },
+                ...extraAttempt,
+              },
+            ],
+            workItems: [],
+          },
+        ],
+      },
+    ],
+    events,
+  };
+}
+
+function endedEvent(data: unknown, attemptId = 'A-coord', extra: Record<string, unknown> = {}) {
+  return {
+    at: '2026-01-01T00:00:00.000Z',
+    projectId: 'P-synth',
+    missionId: 'M-live',
+    attemptId,
+    kind: 'attempt.ended',
+    data,
+    ...extra,
+  };
+}
+
 describe('context-attribution-report projection', () => {
   test('纯投影无原始字节时 archiveCoverage 不应 complete', async () => {
     const expectedHappy = (await loadJson(expectedHappyPath)) as {
@@ -291,13 +424,174 @@ describe('context-attribution-report projection', () => {
     };
     const state = await loadJson(mainStatePath);
     const pkg = await loadJson(archivePath);
-    const report = buildContextAttributionReport(state, [pkg]);
-    assert.deepStrictEqual(report, {
+    const report = buildContextAttributionReport(state, [pkg]) as unknown as ReportShape;
+    assertLegacyUnknownMetrics(report);
+    assert.deepStrictEqual(stripNewMetricsFields(report), {
       version: 1,
       rows: expectedHappy.rows,
       liveCoverage: 'complete',
       archiveCoverage: 'partial',
       reasons: ['archive_integrity_unverified'],
     });
+  });
+
+  test('合成 v1 attempt.ended 只投影白名单摘要与 read 重复聚合', () => {
+    const report = buildContextAttributionReport(
+      synthState([endedEvent({ contextMetrics: VALID_COMPLETE_METRICS })]),
+    );
+    assert.equal(report.version, 1);
+    assert.equal(report.rows.length, 1);
+    const row = report.rows[0]!;
+    assert.equal(row.contextMetricsCoverage, 'complete');
+    assert.deepStrictEqual(row.contextMetrics, {
+      brief: {
+        renderedUtf8Bytes: 1200,
+        sources: [
+          { source: 'project_rules', estimatedTokens: 40, truncated: false },
+          { source: 'work_order', truncated: true },
+        ],
+      },
+      tools: [
+        { kind: 'bash', calls: 1, returnedUtf8Bytes: 9 },
+        { kind: 'find', calls: 1, returnedUtf8Bytes: 0 },
+        { kind: 'grep', calls: 1, returnedUtf8Bytes: 12 },
+        { kind: 'ls', calls: 3, returnedUtf8Bytes: 40 },
+        { kind: 'read', calls: 2, returnedUtf8Bytes: 80 },
+      ],
+      reads: { totalRepeats: 2, bucketCount: 1 },
+    });
+    assert.equal(row.reasons.includes(CONTEXT_METRICS_ABSENT), false);
+    const dumped = JSON.stringify(report);
+    assertSafeOutput(dumped, METRICS_LEAKS);
+  });
+
+  test('未见 v1 事件时 coverage 为 unknown，不捏造零摘要', () => {
+    const report = buildContextAttributionReport(synthState([]));
+    const row = report.rows[0]!;
+    assert.equal(row.contextMetricsCoverage, 'unknown');
+    assert.equal('contextMetrics' in row, false);
+    assert.equal(row.reasons.includes(CONTEXT_METRICS_ABSENT), true);
+  });
+
+  test('自称 complete 但缺 reads 不可冒充 complete', () => {
+    const { reads: _reads, ...partial } = VALID_COMPLETE_METRICS;
+    const report = buildContextAttributionReport(
+      synthState([endedEvent({ contextMetrics: { ...partial, coverage: 'complete' } })]),
+    );
+    const row = report.rows[0]!;
+    assert.equal(row.contextMetricsCoverage, 'unknown');
+    assert.equal('contextMetrics' in row, false);
+    assert.equal(row.reasons.includes(CONTEXT_METRICS_UNTRUSTED), true);
+  });
+
+  test('多余字段与敏感哨兵不得进入报告', () => {
+    const report = buildContextAttributionReport(
+      synthState([
+        endedEvent({
+          output: 'FAKE-TOOL-STDOUT-BODY',
+          Authorization: 'Bearer fake',
+          contextMetrics: {
+            ...VALID_COMPLETE_METRICS,
+            path: '/var/secret/synth/auth.json',
+            secret: 'sk-ant-fake-not-a-real-key',
+          },
+        }),
+      ]),
+    );
+    const row = report.rows[0]!;
+    assert.equal(row.contextMetricsCoverage, 'unknown');
+    assert.equal('contextMetrics' in row, false);
+    const dumped = JSON.stringify(report);
+    assertSafeOutput(dumped, METRICS_LEAKS);
+    assertSafeOutput(dumped, SENTINELS);
+  });
+
+  test('同 Attempt 多条事件不累计 read 重复', () => {
+    const second = {
+      ...VALID_COMPLETE_METRICS,
+      reads: [
+        { pathDigest: PATH_DIGEST, contentDigest: CONTENT_DIGEST, repeats: 9 },
+        {
+          pathDigest: 'ef'.repeat(32),
+          contentDigest: '11'.repeat(32),
+          repeats: 4,
+        },
+      ],
+    };
+    const report = buildContextAttributionReport(
+      synthState([
+        endedEvent({ contextMetrics: VALID_COMPLETE_METRICS }, 'A-coord', { messageId: 'm-1' }),
+        endedEvent({ contextMetrics: second }, 'A-coord', { messageId: 'm-2' }),
+      ]),
+    );
+    const row = report.rows[0]!;
+    assert.equal(row.contextMetricsCoverage, 'complete');
+    assert.deepStrictEqual(row.contextMetrics?.reads, { totalRepeats: 2, bucketCount: 1 });
+    const dumped = JSON.stringify(report);
+    assertSafeOutput(dumped, ['ef'.repeat(32), '11'.repeat(32), ...METRICS_LEAKS]);
+  });
+
+  test('live 事件流不完整时不得把见到的 complete 当全量', () => {
+    const state = synthState([endedEvent({ contextMetrics: VALID_COMPLETE_METRICS })]);
+    state.projects.push('not-a-project');
+    const report = buildContextAttributionReport(state);
+    const row = report.rows[0]!;
+    assert.equal(report.liveCoverage, 'partial');
+    assert.equal(row.contextMetricsCoverage, 'partial');
+    assert.equal(row.contextMetrics?.reads?.totalRepeats, 2);
+    assert.equal(row.reasons.includes('live_data_incomplete'), true);
+    assert.equal(row.reasons.includes(CONTEXT_METRICS_ABSENT), false);
+  });
+
+  test('read 桶内多余键或非哈希摘要视为不可信', () => {
+    const poisoned = {
+      ...VALID_COMPLETE_METRICS,
+      reads: [
+        {
+          pathDigest: PATH_DIGEST,
+          contentDigest: CONTENT_DIGEST,
+          repeats: 2,
+          path: '/var/secret/synth/auth.json',
+        },
+      ],
+    };
+    const badDigest = {
+      ...VALID_COMPLETE_METRICS,
+      reads: [{ pathDigest: '../../secret', contentDigest: CONTENT_DIGEST, repeats: 1 }],
+    };
+    for (const payload of [poisoned, badDigest]) {
+      const report = buildContextAttributionReport(synthState([endedEvent({ contextMetrics: payload })]));
+      const row = report.rows[0]!;
+      assert.equal(row.contextMetricsCoverage, 'unknown');
+      assert.equal('contextMetrics' in row, false);
+      assertSafeOutput(JSON.stringify(report), METRICS_LEAKS);
+    }
+  });
+});
+
+describe('context-attribution-report CLI contextMetrics', () => {
+  test('CLI 合成 v1 摘要保持只读且不泄露哈希或路径', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ctx-attr-metrics-'));
+    try {
+      const input = join(dir, 'state.json');
+      await writeFile(
+        input,
+        `${JSON.stringify(synthState([endedEvent({ contextMetrics: VALID_COMPLETE_METRICS })]))}\n`,
+      );
+      const before = await readFile(input);
+      const run = runCli(['--input', input]);
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepStrictEqual(await readFile(input), before);
+      const report = JSON.parse(run.stdout) as ReportShape;
+      assert.equal(report.rows[0]!.contextMetricsCoverage, 'complete');
+      assert.deepStrictEqual((report.rows[0]!.contextMetrics as { reads: unknown }).reads, {
+        totalRepeats: 2,
+        bucketCount: 1,
+      });
+      assertSafeOutput(run.stdout, [...METRICS_LEAKS, dir, input]);
+      assertSafeOutput(run.stderr, [...METRICS_LEAKS, dir, input]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

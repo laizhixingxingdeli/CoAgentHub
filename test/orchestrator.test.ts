@@ -2419,3 +2419,401 @@ async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
   assert.equal(executorRecords[0]?.profile.profileId, 'exec-a');
   assert.equal(executorRecords[1]?.profile.profileId, 'exec-b');
 }
+
+const CONTEXT_METRICS_PATH_DIGEST = 'ab'.repeat(32);
+const CONTEXT_METRICS_CONTENT_DIGEST = 'cd'.repeat(32);
+const VALID_CONTEXT_METRICS = {
+  version: 1 as const,
+  coverage: 'complete' as const,
+  brief: {
+    renderedUtf8Bytes: 1200,
+    sources: [
+      { source: 'project_rules' as const, estimatedTokens: 40, truncated: false },
+      { source: 'work_order' as const, truncated: true },
+    ],
+  },
+  tools: [
+    { kind: 'read' as const, calls: 2, returnedUtf8Bytes: 80 },
+    { kind: 'grep' as const, calls: 1, returnedUtf8Bytes: 12 },
+    { kind: 'find' as const, calls: 1, returnedUtf8Bytes: 0 },
+    { kind: 'ls' as const, calls: 3, returnedUtf8Bytes: 40 },
+    { kind: 'bash' as const, calls: 1, returnedUtf8Bytes: 9 },
+  ],
+  reads: [
+    {
+      pathDigest: CONTEXT_METRICS_PATH_DIGEST,
+      contentDigest: CONTEXT_METRICS_CONTENT_DIGEST,
+      repeats: 2,
+    },
+  ],
+};
+
+function injectContextMetrics(inner: AgentRuntime, metrics: unknown): AgentRuntime {
+  return {
+    kind: inner.kind,
+    start: async (spec) => {
+      const run = await inner.start(spec);
+      return {
+        resumeRef: run.resumeRef,
+        on: (handler) => run.on(handler),
+        abort: (reason) => run.abort?.(reason),
+        wait: async () => ({ ...(await run.wait()), contextMetrics: metrics }),
+      };
+    },
+  };
+}
+
+function endedMetrics(
+  events: readonly { kind: string; attemptId?: string; data: unknown }[],
+  attemptId: string,
+): { event: { kind: string; missionId?: string; attemptId?: string; data: unknown }; metrics: unknown } | undefined {
+  const event = events.find((row) => row.kind === 'attempt.ended' && row.attemptId === attemptId);
+  if (!event) return undefined;
+  const data = event.data;
+  const metrics =
+    typeof data === 'object' && data !== null && Object.prototype.hasOwnProperty.call(data, 'contextMetrics')
+      ? (data as { contextMetrics: unknown }).contextMetrics
+      : undefined;
+  return { event, metrics };
+}
+
+describe('调度器：运行时 contextMetrics 透传到平台收尾',
+  () => {
+    test('ScriptedRuntime 可选指标经终态写入 attempt.ended，归属 mission/attempt',
+      async () => {
+        const executor = new ScriptedRuntime({
+          'executor:W-1': {
+            ...EXECUTOR_HAPPY['executor:W-1']!,
+            contextMetrics: VALID_CONTEXT_METRICS,
+          },
+        });
+        current = await harness({
+          coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+          executor,
+        });
+        await current.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-cm-ok',
+          contract: CONTRACT,
+        });
+        const orchestrator = current.makeOrchestrator();
+        const result = await orchestrator.runMission('M-cm-ok', { projectRoot: process.cwd() });
+        assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+        const execHop = orchestrator.hops.find((hop) => hop.role === 'executor');
+        assert.ok(execHop);
+        const hit = endedMetrics(await current.activity.list('M-cm-ok'), execHop.attemptId);
+        assert.ok(hit);
+        assert.equal(hit.event.missionId, 'M-cm-ok');
+        assert.equal(hit.event.attemptId, execHop.attemptId);
+        assert.deepEqual(hit.metrics, VALID_CONTEXT_METRICS);
+        const raw = JSON.stringify(hit.event.data);
+        assert.equal(raw.includes('missionId'), false);
+        assert.equal(raw.includes('attemptId'), false);
+      });
+
+    test('旧脚本无字段不产生伪零；畸形摘要被平台拒绝且不泄露哨兵',
+      async () => {
+        current = await harness({
+          coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+          executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+        });
+        await current.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-cm-old',
+          contract: CONTRACT,
+        });
+        const orchOld = current.makeOrchestrator();
+        await orchOld.runMission('M-cm-old', { projectRoot: process.cwd() });
+        for (const hop of orchOld.hops) {
+          const hit = endedMetrics(await current.activity.list('M-cm-old'), hop.attemptId);
+          assert.ok(hit);
+          assert.equal(hit.metrics, undefined);
+          assert.equal(
+            Object.prototype.hasOwnProperty.call(hit.event.data as object, 'contextMetrics'),
+            false,
+          );
+        }
+
+        const dirty = {
+          ...VALID_CONTEXT_METRICS,
+          path: '/etc/passwd',
+          body: 'SECRET_SENTINEL_BODY',
+        };
+        const dirtyEnv = await harness({
+          coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+          executor: new ScriptedRuntime({
+            'executor:W-1': {
+              ...EXECUTOR_HAPPY['executor:W-1']!,
+              contextMetrics: dirty,
+            },
+          }),
+        });
+        await dirtyEnv.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-cm-bad',
+          contract: CONTRACT,
+        });
+        const orchBad = dirtyEnv.makeOrchestrator();
+        await orchBad.runMission('M-cm-bad', { projectRoot: process.cwd() });
+        const execHop = orchBad.hops.find((hop) => hop.role === 'executor');
+        assert.ok(execHop);
+        const events = await dirtyEnv.activity.list('M-cm-bad');
+        const hit = endedMetrics(events, execHop.attemptId);
+        assert.ok(hit);
+        assert.equal(hit.metrics, undefined);
+        const dumped = JSON.stringify(events);
+        assert.equal(dumped.includes('SECRET_SENTINEL_BODY'), false);
+        assert.equal(dumped.includes('/etc/passwd'), false);
+        assert.equal((hit.event.data as { endedBy: string }).endedBy, 'structured_submit');
+      });
+
+    test('墙钟强杀即使 wait 带回 complete 摘要也不落盘；抛错路径不虚报 complete',
+      async () => {
+        const hanging = injectContextMetrics(
+          new ScriptedRuntime({ 'executor:W-1': { hangs: true } }),
+          VALID_CONTEXT_METRICS,
+        );
+        current = await harness(
+          {
+            coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+            executor: hanging,
+          },
+          undefined,
+          2_000,
+        );
+        await current.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-cm-wall',
+          contract: CONTRACT,
+        });
+        const orch = current.makeOrchestrator();
+        const result = await orch.runMission('M-cm-wall', { projectRoot: process.cwd() });
+        assert.equal(result.kind, 'waiting');
+        assert.equal((result as { reason: string }).reason, 'runaway_suspected');
+        const execHop = orch.hops.find((hop) => hop.role === 'executor');
+        assert.ok(execHop);
+        assert.equal(execHop.endedBy, 'killed_wall_clock');
+        const hit = endedMetrics(await current.activity.list('M-cm-wall'), execHop.attemptId);
+        assert.ok(hit);
+        assert.equal(hit.metrics, undefined);
+        assert.equal((hit.event.data as { endedBy: string }).endedBy, 'killed_wall_clock');
+
+        const throwing: AgentRuntime = {
+          kind: 'scripted',
+          start: async () => {
+            throw new Error('fetch failed');
+          },
+        };
+        const throwEnv = await harness({
+          coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+          executor: throwing,
+        });
+        await throwEnv.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-cm-throw',
+          contract: CONTRACT,
+        });
+        const orchThrow = throwEnv.makeOrchestrator();
+        await orchThrow.runMission('M-cm-throw', { projectRoot: process.cwd() });
+        const failed = orchThrow.hops.find((hop) => hop.role === 'executor');
+        assert.ok(failed);
+        const failHit = endedMetrics(await throwEnv.activity.list('M-cm-throw'), failed.attemptId);
+        assert.ok(failHit);
+        assert.equal(failHit.metrics, undefined);
+        assert.notEqual((failHit.event.data as { endedBy: string }).endedBy, 'structured_submit');
+      });
+
+    test('独立检视收尾同样透传已获得的可选指标',
+      async () => {
+        const clock = new FixedClock();
+        const activity = new InMemoryActivityLog(clock);
+        const projects = new InMemoryProjectRepository();
+        const ids = new SequentialIds();
+        const reports = new InMemoryValidationReportRepository();
+        const workspace: WorkspaceManager = {
+          async prepare(_missionId, projectRoot) {
+            return {
+              cwd: projectRoot,
+              branch: 'mission/M-cm-ir',
+              targetBranch: 'master',
+              baseRevision: 'commit-a',
+            };
+          },
+          async head() {
+            return 'commit-a';
+          },
+          async targetHead() {
+            return 'commit-a';
+          },
+          worktreePath(_missionId, projectRoot) {
+            return projectRoot;
+          },
+          async rollback() {},
+          async mergeToTarget() {
+            return { ok: true, mergedInto: 'commit-a' };
+          },
+          async diff() {
+            return { stat: '', files: [] };
+          },
+          async release() {},
+        };
+        const validation = {
+          reports,
+          engine: {
+            async validate(input: { missionId: string }) {
+              const id = ids.next('VR');
+              const now = '2026-01-01T00:00:00.000Z';
+              const report = {
+                id,
+                policyRevision: 1,
+                missionId: input.missionId,
+                startedAt: now,
+                endedAt: now,
+                passed: true,
+                checks: [
+                  {
+                    kind: 'command' as const,
+                    passed: true,
+                    startedAt: now,
+                    endedAt: now,
+                    summary: 'ok',
+                    command: {
+                      argv: ['node', '--test'],
+                      cwd: '/tmp',
+                      exitCode: 0,
+                      timedOut: false,
+                      durationMs: 1,
+                      outputTail: 'ok',
+                    },
+                  },
+                ],
+              };
+              return {
+                report,
+                authority: { kind: 'validator' as const, reportId: id, policyRevision: 1 },
+              };
+            },
+          },
+        };
+        const deliveries = new InMemoryDeliveryRepository(clock, ids);
+        const platform = new Platform({
+          projects,
+          deliveries,
+          activity,
+          clock,
+          ids,
+          workspace,
+          validation,
+        });
+        const project = await projects.ensure('P');
+        project.createMission({
+          id: 'M-cm-ir',
+          contract: { ...CONTRACT, acceptance: ['foo() === 1'] },
+          executionMode: 'high_assurance',
+        });
+        await projects.save(project);
+        const root = mkdtempSync(join(tmpdir(), 'coagent-cm-ir-'));
+        circuitDirectories.push(root);
+        const prepared = await workspace.prepare('M-cm-ir', root);
+        await platform.recordWorkspace('M-cm-ir', {
+          projectRoot: root,
+          branch: prepared.branch,
+          baseRevision: prepared.baseRevision,
+        });
+        const haOrder = {
+          ...ORDER,
+          validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] },
+        };
+        const coord = await platform.startCoordinatorAttempt('M-cm-ir', {
+          profileId: 'coord-a',
+          endpoint: 'local',
+        });
+        await platform.updatePlan('M-cm-ir', coord.attemptId, PLAN);
+        const { workItemId } = await platform.createWorkItem('M-cm-ir', coord.attemptId, {
+          title: '修 foo',
+          order: haOrder,
+        });
+        await platform.dispatchWorkItems('M-cm-ir', coord.attemptId, [workItemId]);
+        const exec = await platform.startExecutorAttempt('M-cm-ir', workItemId, {
+          profileId: 'exec-a',
+          endpoint: 'local',
+        });
+        await platform.submitEvidence('M-cm-ir', exec.attemptId, {
+          kind: 'test',
+          summary: '绿',
+          command: 'node --test',
+          exitCode: 0,
+        });
+        await platform.submitExecutionResult('M-cm-ir', exec.attemptId, {
+          outcome: 'completed',
+          summary: '改好了',
+          changedFiles: ['src/foo.ts'],
+          evidenceIds: [],
+          notes: '无',
+        });
+        await platform.finishAttempt('M-cm-ir', exec.attemptId, { endedBy: 'structured_submit' });
+        await platform.reviewExecutionResult('M-cm-ir', coord.attemptId, {
+          workItemId,
+          verdict: 'accept',
+          acceptanceResults: haOrder.acceptance.map((criterion) => ({
+            criterion,
+            status: 'pass' as const,
+            evidence: '测试替身：逐条核过',
+          })),
+          reasons: ['复跑过'],
+          requiredChanges: [],
+        });
+        await platform.submitMissionResult('M-cm-ir', coord.attemptId, {
+          outcome: 'delivered',
+          summary: '交付',
+          acceptanceEvidence: [],
+          memoryDelta: [],
+          openRisks: [],
+        });
+        await platform.finishAttempt('M-cm-ir', coord.attemptId, { endedBy: 'structured_submit' });
+
+        const tokens = new RunTokenRegistry();
+        const server: Server = createApi({ platform, tokens, deliveries });
+        await listenLoopback(server, 0);
+        servers.push(server);
+        const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        const orch = new Orchestrator({
+          platform,
+          tokens: makeIssuer(platform, tokens),
+          baseUrl,
+          workspace,
+          coordinator: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+          },
+          executor: {
+            runtime: new ScriptedRuntime({}),
+            candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+          },
+          independentReviewer: {
+            runtime: new ScriptedRuntime({
+              'independent_reviewer:-': {
+                steps: [
+                  { tool: 'coagent_get_mission_review_bundle', body: {} },
+                  {
+                    tool: 'coagent_submit_independent_review',
+                    body: { verdict: 'pass', reasons: ['齐'] },
+                  },
+                ],
+                contextMetrics: VALID_CONTEXT_METRICS,
+              },
+            }),
+            candidates: [{ endpoint: 'local', profileId: 'ir-a' }],
+          },
+        });
+        const outcome = await orch.runMission('M-cm-ir', { projectRoot: root });
+        assert.equal(outcome.kind, 'awaiting_l3_review');
+        const irHop = orch.hops.find((hop) => hop.role === 'independent_reviewer');
+        assert.ok(irHop);
+        const hit = endedMetrics(await activity.list('M-cm-ir'), irHop.attemptId);
+        assert.ok(hit);
+        assert.equal(hit.event.missionId, 'M-cm-ir');
+        assert.equal(hit.event.attemptId, irHop.attemptId);
+        assert.deepEqual(hit.metrics, VALID_CONTEXT_METRICS);
+      });
+  });

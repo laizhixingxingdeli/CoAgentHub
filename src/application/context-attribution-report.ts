@@ -24,6 +24,10 @@ export const CONTEXT_ATTRIBUTION_REASONS = Object.freeze({
   ARCHIVE_PACKAGE_MISSING: 'archive_package_missing',
   ARCHIVE_INTEGRITY_UNVERIFIED: 'archive_integrity_unverified',
   ARCHIVE_INDEX_MISMATCH: 'archive_index_mismatch',
+  /** 该 Attempt 没有任何带 contextMetrics 的 attempt.ended。 */
+  CONTEXT_METRICS_ABSENT: 'context_metrics_absent',
+  /** 见到了字段但独立再验证失败；不能信 payload 自称的 complete。 */
+  CONTEXT_METRICS_UNTRUSTED: 'context_metrics_untrusted',
 });
 
 export type ContextAttributionReason =
@@ -59,6 +63,50 @@ export interface ContextAttributionTruncation {
   readonly estimatedAfter: number;
 }
 
+/** 与 W-80 冻结的简报六源对齐；任意字符串会把路径/标题漏出去。 */
+export const CONTEXT_ATTRIBUTION_BRIEF_SOURCES = [
+  'project_rules',
+  'environment_notes',
+  'contract',
+  'plan',
+  'final_review',
+  'work_order',
+] as const;
+export type ContextAttributionBriefSource = (typeof CONTEXT_ATTRIBUTION_BRIEF_SOURCES)[number];
+
+/** 工具桶闭集。不闭的话 kind 就能夹带任意命令名。 */
+export const CONTEXT_ATTRIBUTION_TOOL_KINDS = ['read', 'grep', 'find', 'ls', 'bash'] as const;
+export type ContextAttributionToolKind = (typeof CONTEXT_ATTRIBUTION_TOOL_KINDS)[number];
+
+export interface ContextAttributionBriefSourceEntry {
+  readonly source: ContextAttributionBriefSource;
+  readonly estimatedTokens?: number;
+  readonly truncated: boolean;
+}
+
+export interface ContextAttributionBrief {
+  readonly renderedUtf8Bytes: number;
+  readonly sources: readonly ContextAttributionBriefSourceEntry[];
+}
+
+export interface ContextAttributionToolBucket {
+  readonly kind: ContextAttributionToolKind;
+  readonly calls: number;
+  readonly returnedUtf8Bytes: number;
+}
+
+/** 只暴露重复次数聚合。pathDigest/contentDigest 是工作区指纹，发出去等于枚举文件。 */
+export interface ContextAttributionReadRepeats {
+  readonly totalRepeats: number;
+  readonly bucketCount: number;
+}
+
+export interface ContextAttributionContextMetrics {
+  readonly brief?: ContextAttributionBrief;
+  readonly tools?: readonly ContextAttributionToolBucket[];
+  readonly reads?: ContextAttributionReadRepeats;
+}
+
 export interface ContextAttributionRow {
   readonly missionId: string;
   readonly attemptId: string;
@@ -70,6 +118,8 @@ export interface ContextAttributionRow {
   readonly toolCoverage: SignalCoverage;
   readonly truncation?: ContextAttributionTruncation;
   readonly truncationCoverage: SignalCoverage;
+  readonly contextMetrics?: ContextAttributionContextMetrics;
+  readonly contextMetricsCoverage: SignalCoverage;
   readonly reasons: readonly ContextAttributionReason[];
 }
 
@@ -98,10 +148,27 @@ const ROLES = new Set<ContextAttributionRole>([
 const STATUSES = new Set<ContextAttributionStatus>(['in_progress', 'succeeded', 'failed']);
 const USAGE_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const;
 const CONTEXT_TRUNCATED_KIND = 'context.truncated';
+const ATTEMPT_ENDED_KIND = 'attempt.ended';
 /** 与 file-store 归档 id 同形：过不了的当夹带，整行丢掉而不是原样吐出去。 */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const UNTRUSTED_TOOL_NAME = 'untrusted';
+
+/** 再大就不是摘要——把正文塞进 event.data 会打穿白名单。 */
+const CONTEXT_METRICS_MAX_JSON_BYTES = 32 * 1024;
+const CONTEXT_METRICS_MAX_SOURCE_BUCKETS = CONTEXT_ATTRIBUTION_BRIEF_SOURCES.length;
+const CONTEXT_METRICS_MAX_TOOL_BUCKETS = CONTEXT_ATTRIBUTION_TOOL_KINDS.length;
+const CONTEXT_METRICS_MAX_READ_BUCKETS = 64;
+const CONTEXT_METRICS_MAX_INT = 1_000_000_000;
+const CONTEXT_METRICS_DIGEST_RE = /^[0-9a-f]{64}$/;
+const CONTEXT_METRICS_COVERAGE = new Set<string>(['complete', 'partial', 'unknown']);
+const CONTEXT_METRICS_BRIEF_SOURCE_SET: ReadonlySet<string> = new Set(CONTEXT_ATTRIBUTION_BRIEF_SOURCES);
+const CONTEXT_METRICS_TOOL_KIND_SET: ReadonlySet<string> = new Set(CONTEXT_ATTRIBUTION_TOOL_KINDS);
+const CONTEXT_METRICS_ROOT_KEYS = new Set(['version', 'coverage', 'brief', 'tools', 'reads']);
+const CONTEXT_METRICS_BRIEF_KEYS = new Set(['renderedUtf8Bytes', 'sources']);
+const CONTEXT_METRICS_SOURCE_KEYS = new Set(['source', 'estimatedTokens', 'truncated']);
+const CONTEXT_METRICS_TOOL_KEYS = new Set(['kind', 'calls', 'returnedUtf8Bytes']);
+const CONTEXT_METRICS_READ_KEYS = new Set(['pathDigest', 'contentDigest', 'repeats']);
 
 /** CLI 对原始 package 字节算出来的完整性；纯投影没有字节时不要传，覆盖只能 partial。 */
 export interface ContextAttributionArchiveIntegrity {
@@ -166,10 +233,13 @@ export function buildContextAttributionReport(
 
   const events = dedupeEvents([...live.events, ...packages.flatMap((pkg) => pkg.events)]);
   const truncByAttempt = collectTruncation(events);
+  const metricsByAttempt = collectContextMetrics(events);
   const eventAttempts = new Set(events.map((event) => attemptKey(event.missionId, event.attemptId)));
 
   const rows = attempts
-    .map((attempt) => projectRow(attempt, truncByAttempt, eventAttempts, live.incomplete))
+    .map((attempt) =>
+      projectRow(attempt, truncByAttempt, metricsByAttempt, eventAttempts, live.incomplete),
+    )
     .sort(compareRows);
 
   const reportReasons: ContextAttributionReason[] = [];
@@ -341,9 +411,18 @@ function collectAttempts(
   }
 }
 
+type MetricsHit =
+  | { readonly status: 'untrusted' }
+  | {
+      readonly status: 'ok';
+      readonly coverage: SignalCoverage;
+      readonly metrics: ContextAttributionContextMetrics | undefined;
+    };
+
 function projectRow(
   attempt: NormalizedAttempt,
   truncByAttempt: ReadonlyMap<string, TruncationAudit>,
+  metricsByAttempt: ReadonlyMap<string, MetricsHit>,
   eventAttempts: ReadonlySet<string>,
   liveIncomplete: boolean,
 ): ContextAttributionRow {
@@ -367,7 +446,8 @@ function projectRow(
   const attributed = eventAttempts.has(attemptKey(attempt.missionId, attempt.attemptId));
   if (!attributed) reasons.push(CONTEXT_ATTRIBUTION_REASONS.NO_ATTRIBUTABLE_EVENTS);
 
-  const truncation = truncByAttempt.get(attemptKey(attempt.missionId, attempt.attemptId));
+  const key = attemptKey(attempt.missionId, attempt.attemptId);
+  const truncation = truncByAttempt.get(key);
   // live 事件流不完整时不能把见到的那条 context.truncated 当成全量审计。
   const liveEventsUnproven = liveIncomplete && attempt.source === 'live';
   let truncationCoverage: SignalCoverage;
@@ -383,6 +463,29 @@ function projectRow(
     truncationCoverage = 'complete';
   }
 
+  const metricsHit = metricsByAttempt.get(key);
+  let contextMetrics: ContextAttributionContextMetrics | undefined;
+  let contextMetricsCoverage: SignalCoverage;
+  if (!metricsHit) {
+    contextMetricsCoverage = 'unknown';
+    reasons.push(CONTEXT_ATTRIBUTION_REASONS.CONTEXT_METRICS_ABSENT);
+    if (liveEventsUnproven) reasons.push(CONTEXT_ATTRIBUTION_REASONS.LIVE_DATA_INCOMPLETE);
+  } else if (metricsHit.status === 'untrusted') {
+    contextMetricsCoverage = 'unknown';
+    reasons.push(CONTEXT_ATTRIBUTION_REASONS.CONTEXT_METRICS_UNTRUSTED);
+    if (liveEventsUnproven) reasons.push(CONTEXT_ATTRIBUTION_REASONS.LIVE_DATA_INCOMPLETE);
+  } else {
+    contextMetrics = metricsHit.metrics;
+    if (liveEventsUnproven && metricsHit.coverage === 'complete') {
+      // 流不完整时不能把自称 complete 当成全量；partial/unknown 已经是缺口。
+      contextMetricsCoverage = 'partial';
+      reasons.push(CONTEXT_ATTRIBUTION_REASONS.LIVE_DATA_INCOMPLETE);
+    } else {
+      contextMetricsCoverage = metricsHit.coverage;
+      if (liveEventsUnproven) reasons.push(CONTEXT_ATTRIBUTION_REASONS.LIVE_DATA_INCOMPLETE);
+    }
+  }
+
   const row: ContextAttributionRow = {
     missionId: attempt.missionId,
     attemptId: attempt.attemptId,
@@ -394,6 +497,8 @@ function projectRow(
     toolCoverage,
     ...(truncation ? { truncation } : {}),
     truncationCoverage,
+    ...(contextMetrics ? { contextMetrics } : {}),
+    contextMetricsCoverage,
     reasons: Object.freeze(uniqReasons(reasons)),
   };
   return Object.freeze(row);
@@ -459,6 +564,195 @@ function parseTruncation(data: unknown): TruncationAudit | undefined {
     return undefined;
   }
   return Object.freeze({ budget, estimatedBefore, estimatedAfter });
+}
+
+function collectContextMetrics(events: readonly DedupedEvent[]): Map<string, MetricsHit> {
+  const out = new Map<string, MetricsHit>();
+  for (const event of events) {
+    if (event.kind !== ATTEMPT_ENDED_KIND) continue;
+    const key = attemptKey(event.missionId, event.attemptId);
+    if (out.has(key)) continue;
+    const hit = parseAttemptEndedMetrics(event.data);
+    if (!hit) continue;
+    out.set(key, hit);
+  }
+  return out;
+}
+
+function parseAttemptEndedMetrics(data: unknown): MetricsHit | undefined {
+  if (!isPlainObject(data) || !Object.prototype.hasOwnProperty.call(data, 'contextMetrics')) {
+    return undefined;
+  }
+  const trusted = sanitizeContextMetrics(data.contextMetrics);
+  if (!trusted) return { status: 'untrusted' };
+  return { status: 'ok', coverage: trusted.coverage, metrics: projectSafeMetrics(trusted) };
+}
+
+interface TrustedContextMetrics {
+  readonly coverage: SignalCoverage;
+  readonly brief?: ContextAttributionBrief;
+  readonly tools?: readonly ContextAttributionToolBucket[];
+  readonly reads?: readonly { readonly repeats: number }[];
+}
+
+/**
+ * 独立再验证。不能信事件里自称的 complete：落盘侧可能被旁路，
+ * 多一个未知键就可能把路径/正文/哈希带进报告。
+ */
+function sanitizeContextMetrics(input: unknown): TrustedContextMetrics | undefined {
+  const rawBytes = utf8JsonBytes(input);
+  if (rawBytes === undefined || rawBytes > CONTEXT_METRICS_MAX_JSON_BYTES) return undefined;
+  if (!isPlainObject(input) || !objectKeysAre(input, CONTEXT_METRICS_ROOT_KEYS)) return undefined;
+  if (input.version !== 1) return undefined;
+  if (typeof input.coverage !== 'string' || !CONTEXT_METRICS_COVERAGE.has(input.coverage)) return undefined;
+  const coverage = input.coverage as SignalCoverage;
+
+  let brief: ContextAttributionBrief | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'brief')) {
+    brief = sanitizeBrief(input.brief);
+    if (!brief) return undefined;
+  }
+  let tools: ContextAttributionToolBucket[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'tools')) {
+    tools = sanitizeTools(input.tools);
+    if (!tools) return undefined;
+  }
+  let reads: { repeats: number }[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'reads')) {
+    reads = sanitizeReads(input.reads);
+    if (!reads) return undefined;
+  }
+
+  // 缺一块还自称 complete = 不可信，整段丢弃，避免报告把残缺当全量。
+  if (coverage === 'complete' && (brief === undefined || tools === undefined || reads === undefined)) {
+    return undefined;
+  }
+
+  const trusted: TrustedContextMetrics = { coverage, ...(brief ? { brief } : {}), ...(tools ? { tools } : {}), ...(reads ? { reads } : {}) };
+  const trustedBytes = utf8JsonBytes({
+    version: 1,
+    coverage,
+    ...(brief ? { brief } : {}),
+    ...(tools ? { tools } : {}),
+    ...(reads ? { reads } : {}),
+  });
+  if (trustedBytes === undefined || trustedBytes > CONTEXT_METRICS_MAX_JSON_BYTES) return undefined;
+  return trusted;
+}
+
+function sanitizeBrief(value: unknown): ContextAttributionBrief | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, CONTEXT_METRICS_BRIEF_KEYS)) return undefined;
+  const renderedUtf8Bytes = boundedNonNegativeInt(value.renderedUtf8Bytes);
+  if (renderedUtf8Bytes === undefined || !Array.isArray(value.sources)) return undefined;
+  if (value.sources.length > CONTEXT_METRICS_MAX_SOURCE_BUCKETS) return undefined;
+  const sources: ContextAttributionBriefSourceEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of value.sources) {
+    const entry = sanitizeBriefSource(item);
+    if (!entry || seen.has(entry.source)) return undefined;
+    seen.add(entry.source);
+    sources.push(entry);
+  }
+  return Object.freeze({ renderedUtf8Bytes, sources: Object.freeze(sources) });
+}
+
+function sanitizeBriefSource(value: unknown): ContextAttributionBriefSourceEntry | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, CONTEXT_METRICS_SOURCE_KEYS)) return undefined;
+  const source = value.source;
+  if (typeof source !== 'string' || !CONTEXT_METRICS_BRIEF_SOURCE_SET.has(source)) return undefined;
+  if (typeof value.truncated !== 'boolean') return undefined;
+  const entry: {
+    source: ContextAttributionBriefSource;
+    truncated: boolean;
+    estimatedTokens?: number;
+  } = { source: source as ContextAttributionBriefSource, truncated: value.truncated };
+  if (Object.prototype.hasOwnProperty.call(value, 'estimatedTokens')) {
+    const tokens = boundedNonNegativeInt(value.estimatedTokens);
+    if (tokens === undefined) return undefined;
+    entry.estimatedTokens = tokens;
+  }
+  return Object.freeze(entry);
+}
+
+function sanitizeTools(value: unknown): ContextAttributionToolBucket[] | undefined {
+  if (!Array.isArray(value) || value.length > CONTEXT_METRICS_MAX_TOOL_BUCKETS) return undefined;
+  const tools: ContextAttributionToolBucket[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!isPlainObject(item) || !objectKeysAre(item, CONTEXT_METRICS_TOOL_KEYS)) return undefined;
+    const kind = item.kind;
+    if (typeof kind !== 'string' || !CONTEXT_METRICS_TOOL_KIND_SET.has(kind)) return undefined;
+    if (seen.has(kind)) return undefined;
+    seen.add(kind);
+    const calls = boundedNonNegativeInt(item.calls);
+    const returnedUtf8Bytes = boundedNonNegativeInt(item.returnedUtf8Bytes);
+    if (calls === undefined || returnedUtf8Bytes === undefined) return undefined;
+    tools.push(Object.freeze({ kind: kind as ContextAttributionToolKind, calls, returnedUtf8Bytes }));
+  }
+  tools.sort((a, b) => compareString(a.kind, b.kind));
+  return Object.freeze(tools) as ContextAttributionToolBucket[];
+}
+
+function sanitizeReads(value: unknown): { repeats: number }[] | undefined {
+  if (!Array.isArray(value) || value.length > CONTEXT_METRICS_MAX_READ_BUCKETS) return undefined;
+  const reads: { repeats: number }[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!isPlainObject(item) || !objectKeysAre(item, CONTEXT_METRICS_READ_KEYS)) return undefined;
+    const pathDigest = sha256Hex(item.pathDigest);
+    const contentDigest = sha256Hex(item.contentDigest);
+    const repeats = boundedNonNegativeInt(item.repeats);
+    if (!pathDigest || !contentDigest || repeats === undefined) return undefined;
+    const digestKey = `${pathDigest}:${contentDigest}`;
+    if (seen.has(digestKey)) return undefined;
+    seen.add(digestKey);
+    // 只留下次数。摘要值只用于去重，不得进入报告。
+    reads.push({ repeats });
+  }
+  return reads;
+}
+
+function projectSafeMetrics(trusted: TrustedContextMetrics): ContextAttributionContextMetrics | undefined {
+  const out: {
+    brief?: ContextAttributionBrief;
+    tools?: readonly ContextAttributionToolBucket[];
+    reads?: ContextAttributionReadRepeats;
+  } = {};
+  if (trusted.brief) out.brief = trusted.brief;
+  if (trusted.tools) out.tools = trusted.tools;
+  if (trusted.reads) {
+    let totalRepeats = 0;
+    for (const bucket of trusted.reads) totalRepeats += bucket.repeats;
+    out.reads = Object.freeze({ totalRepeats, bucketCount: trusted.reads.length });
+  }
+  if (!out.brief && !out.tools && !out.reads) return undefined;
+  return Object.freeze(out);
+}
+
+function objectKeysAre(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return false;
+  }
+  return true;
+}
+
+function boundedNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > CONTEXT_METRICS_MAX_INT) {
+    return undefined;
+  }
+  return value;
+}
+
+function sha256Hex(value: unknown): string | undefined {
+  return typeof value === 'string' && CONTEXT_METRICS_DIGEST_RE.test(value) ? value : undefined;
+}
+
+function utf8JsonBytes(value: unknown): number | undefined {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return undefined;
+  }
 }
 
 function dedupeEvents(raw: readonly unknown[]): DedupedEvent[] {

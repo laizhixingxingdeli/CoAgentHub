@@ -19,6 +19,7 @@ import type {
   IdGenerator,
   QueuedHopCapacityRepository,
   QueuedHopRepository,
+  RuntimeOutcome,
 } from './ports.ts';
 import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
@@ -787,7 +788,7 @@ export class Orchestrator {
     await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视进行中');
 
     const { attemptId, token } = started;
-    let outcome: { endedBy: AttemptEndReason; failureMessage?: string; usage?: TokenUsage } | undefined;
+    let outcome: RuntimeOutcome | undefined;
     let unsubscribe: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let hopRan = false;
@@ -845,6 +846,10 @@ export class Orchestrator {
             endedBy: outcome?.endedBy ?? 'no_structured_result',
             usage: outcome?.usage,
             failureMessage: outcome?.failureMessage,
+            // 有 outcome 才透传；adapter 未校验，平台 finishAttempt 再收口。
+            ...(outcome?.contextMetrics !== undefined
+              ? { contextMetrics: outcome.contextMetrics }
+              : {}),
           }, claim);
         } catch {
           // 收尾失败不能跳过吊销：迟到的工具调用必须被拒绝。
@@ -1502,6 +1507,11 @@ export class Orchestrator {
           output: outcome?.output,
           toolCalls: outcome?.toolCalls,
           resolvedProfile: outcome?.resolvedProfile,
+          // 墙钟强杀或根本没有 outcome 时不得把采集摘要标成 complete。
+          // wait() 竞态里可能仍带回一份自称完整的摘要，这里必须丢掉。
+          ...(!runaway && outcome?.contextMetrics !== undefined
+            ? { contextMetrics: outcome.contextMetrics }
+            : {}),
         }, claim);
         // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
         await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
