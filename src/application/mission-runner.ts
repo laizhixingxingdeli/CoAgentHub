@@ -19,6 +19,19 @@ import type { Platform } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
 
+/** Parse the optional CLI value while keeping omission distinct from a missing value. */
+export function parseMaxRounds(raw: string | undefined, supplied: boolean): number | undefined {
+  if (!supplied) return undefined;
+  if (raw === undefined || raw.startsWith('--') || !/^\d+$/.test(raw)) {
+    throw new Error('--max-rounds must be an integer in the range 1–100');
+  }
+  const value = Number(raw);
+  if (value < 1 || value > 100) {
+    throw new Error('--max-rounds must be an integer in the range 1–100');
+  }
+  return value;
+}
+
 export interface MissionRunnerDeps {
   readonly platform: Platform;
   readonly tokens: RunTokenIssuer;

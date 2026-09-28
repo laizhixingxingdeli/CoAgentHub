@@ -446,6 +446,9 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(runPlan, /from '\.\/application\/plan-runtime\.ts'/);
     assert.match(runPlan, /from '\.\/application\/mission-runner\.ts'/);
     assert.match(runPlan, /runner\.run\(/);
+    assert.match(runPlan, /runner\.run\(missionId, missionRunOptions\(options, maxRounds\)\)/);
+    assert.match(runPlan, /return maxRounds === undefined \? options : \{ \.\.\.options, maxRounds \}/);
+    assert.match(runPlan, /parseMaxRounds\(flagValue\('--max-rounds'\), process\.argv\.includes\('--max-rounds'\)\)/);
     assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 1);
@@ -532,6 +535,15 @@ function samplePlan(features: unknown[]) {
   };
 }
 
+describe('run-plan 轮次选项接线', () => {
+  test('仅配置时追加 maxRounds，原 projectRoot 和其他 options 保留；省略时原样传递', async () => {
+    const { missionRunOptions } = await import('../src/run-plan.ts');
+    const options = { projectRoot: '/plan-runtime-root', attemptWallClockMs: 1234 };
+    assert.deepEqual(missionRunOptions(options, 30), { ...options, maxRounds: 30 });
+    assert.equal(missionRunOptions(options, undefined), options);
+  });
+});
+
 describe('run-plan --check 只读、零副作用', () => {
   function runCheck(planPath: string, cwd: string, extra: string[] = [], env?: NodeJS.ProcessEnv) {
     const isolated = temp('coagent-check-cwd-');
@@ -566,6 +578,7 @@ describe('run-plan --check 只读、零副作用', () => {
     assert.match(out, /源方案标 done/);
     assert.match(out, /未开跑/);
     assert.match(out, /两道闸/);
+    assert.match(out, /轮次上限：12（缺省）/);
     assert.match(out, /升级单总数上限 5（缺省）/);
     assert.match(out, /每功能重跑上限 1（缺省）/);
     assert.match(out, /停止条件：未解决升级上限 5/);
@@ -608,8 +621,9 @@ describe('run-plan --check 只读、零副作用', () => {
     const posOut = `${positional.stdout}${positional.stderr}`;
     assert.equal(positional.status, 0, posOut);
     assert.match(posOut, /候选：旧格式待跑/);
+    assert.match(posOut, /轮次上限：12（缺省）/);
     assert.match(posOut, /两道闸：升级单总数上限 3；每功能重跑上限 2\r?\n/);
-    assert.doesNotMatch(posOut, /（缺省）/);
+    assert.doesNotMatch(posOut, /两道闸：[^\r\n]*（缺省）/);
 
     const missing = spawnSync(process.execPath, [RUN_PLAN, '--plan', planPath, '--check'], {
       encoding: 'utf8',
@@ -619,6 +633,35 @@ describe('run-plan --check 只读、零副作用', () => {
     });
     assert.notEqual(missing.status, 0);
     assert.match(`${missing.stdout}${missing.stderr}`, /--cwd/);
+
+    const configured = spawnSync(
+      process.execPath,
+      [RUN_PLAN, '--max-rounds', '30', planPath, '--cwd', repo, '--reviewer', 'claude', '--check'],
+      { encoding: 'utf8', timeout: 15_000, cwd: isolated, env: { ...process.env } },
+    );
+    const configuredOut = `${configured.stdout}${configured.stderr}`;
+    assert.equal(configured.status, 0, configuredOut);
+    assert.match(configuredOut, /轮次上限：30/);
+  });
+
+  test('非法 --max-rounds 在读取方案和创建状态/锁之前失败', () => {
+    const home = temp('coagent-check-invalid-rounds-');
+    const repo = repoOn('auto/plan-x');
+    const missingPlan = join(home, 'does-not-exist.json');
+    const isolated = temp('coagent-check-invalid-rounds-cwd-');
+    const result = spawnSync(
+      process.execPath,
+      [RUN_PLAN, '--max-rounds', '101', missingPlan, '--cwd', repo, '--reviewer', 'claude', '--check', '--state', join(home, 'state.json')],
+      { encoding: 'utf8', timeout: 15_000, cwd: isolated, env: { ...process.env } },
+    );
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /--max-rounds/);
+    assert.match(out, /1–100/);
+    assert.doesNotMatch(out, /ENOENT|does-not-exist/);
+    assert.equal(existsSync(join(home, 'state.json')), false);
+    assert.equal(hasLockDir(home), false);
+    assert.equal(hasLockDir(repo), false);
   });
 
   test('有候选且仓库预检不过 → 非零；没有候选 → 退出 0 且明说没有可跑的', () => {
