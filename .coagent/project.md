@@ -37,6 +37,10 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 权威执行预算：hard 可停/内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005）。
 - Decision/Jev 在 OFF/SHADOW 下不具执行权威；SHADOW 仅审计（ADR-0002）。
 
+## Web 约定
+
+- 网页上的列表一律按时间倒序，最新的在最上面：任务表、方案运行列表、最近完成、待办、死信等都一样（用户 2026-09-29）。同一任务内的进度环节是流程，仍按发生顺序从上到下。
+
 ## Memory Model
 
 - **`project.md`**：项目级稳定上下文（本文件）。**不要**再引入 `project.yaml` / `constitution.md` 或第二份项目级记忆入口。
