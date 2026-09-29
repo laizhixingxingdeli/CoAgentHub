@@ -24,6 +24,7 @@ import {
   bindServerCloseToPeriodicStop,
   createSigintHandler,
   defaultStatePathFromMainModule,
+  formatHostedRunSnapshots,
   isDirectMainEntry,
   resolveDirectMainStatePath,
   startServer,
@@ -1358,6 +1359,25 @@ async function liveTarget(statePath: string) {
 
 describe('startServer hosted 接线与排空',
   () => {
+    test('首次 SIGINT 在途清单格式器：真实字段生成停止命令且缺字段不伪造', () => {
+      const output = formatHostedRunSnapshots([
+        { kind: 'plan', id: 'P-1', status: 'waiting', missionId: 'M-2', escalationId: 'E-3', deadline: '2030-01-02T03:04:05Z', runPath: '/runs/actual.json', reviewer: 'reviewer-1' },
+        { kind: 'mission', id: 'M-2', status: 'running' },
+      ]);
+      assert.match(output, /P-1/);
+      assert.match(output, /waiting/);
+      assert.match(output, /M-2/);
+      assert.match(output, /E-3/);
+      assert.match(output, /2030-01-02T03:04:05Z/);
+      assert.match(output, /node src\/l3\.ts plan decide E-3 --action stop --reason "服务退出" --run "\/runs\/actual\.json" --as "reviewer-1"/);
+      const incomplete = formatHostedRunSnapshots([
+        { kind: 'plan', id: 'P-4', status: 'waiting', escalationId: 'E-4', runPath: '/runs/actual.json' },
+      ]);
+      assert.match(incomplete, /无法给出停止命令/);
+      assert.doesNotMatch(incomplete, /node src\/l3\.ts plan decide/);
+      assert.match(formatHostedRunSnapshots([]), /无在途/);
+    });
+
     test('双次 SIGINT：只关闭一次并单独处理第二次', () => {
       let closes = 0;
       let secondSignals = 0;

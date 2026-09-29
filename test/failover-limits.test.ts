@@ -71,6 +71,21 @@ const PLAN_AND_DISPATCH = {
   'coordinator:-': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
 };
 
+const PLAN_AND_DISPATCH_AB = {
+  'coordinator:-:0': {
+    steps: [
+      { tool: 'coagent_update_plan', body: PLAN },
+      { tool: 'coagent_create_work_item', body: { title: 'W-1', ...ORDER } },
+      {
+        tool: 'coagent_create_work_item',
+        body: { title: 'W-2', ...ORDER, allowedScope: ['src/bar.ts'] },
+      },
+      { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1', 'W-2'] } },
+    ],
+  },
+  'coordinator:-': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+};
+
 const servers: Server[] = [];
 after(() => {
   for (const server of servers) server.close();
@@ -80,6 +95,7 @@ async function harness(
   executor: ScriptedRuntime,
   executorPool: { candidates: ExecutionProfile[]; maxAttempts?: number; cooldownMs?: number },
   workspace: WorkspaceManager = new InPlaceWorkspaceManager(),
+  coordinatorScript = PLAN_AND_DISPATCH,
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
@@ -104,7 +120,7 @@ async function harness(
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     workspace: workspaceManager,
     coordinator: {
-      runtime: new ScriptedRuntime(PLAN_AND_DISPATCH),
+      runtime: new ScriptedRuntime(coordinatorScript),
       candidates: [{ endpoint: 'l', profileId: 'coord' }],
     },
     executor: { runtime: executor, ...executorPool },

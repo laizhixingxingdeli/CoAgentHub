@@ -1130,6 +1130,34 @@ export function resolveDirectMainStatePath(
   return { ok: true, path };
 }
 
+export type HostedRunSnapshot = Readonly<{
+  kind: 'plan' | 'mission';
+  id: string;
+  status: string;
+  missionId?: string;
+  runPath?: string;
+  reviewer?: string;
+  escalationId?: string;
+  deadline?: string;
+}>;
+
+export function formatHostedRunSnapshots(snapshots: readonly HostedRunSnapshot[]): string {
+  if (snapshots.length === 0) return '无在途 PlanRun 或 Mission。';
+  return snapshots.map((snapshot) => {
+    const lines = [`${snapshot.kind === 'plan' ? 'PlanRun' : 'Mission'} ${snapshot.id}：${snapshot.status}`];
+    if (snapshot.missionId) lines.push(`  关联 Mission：${snapshot.missionId}`);
+    if (snapshot.kind === 'plan' && snapshot.escalationId) {
+      lines.push(`  升级单：${snapshot.escalationId}${snapshot.deadline ? `；截止：${snapshot.deadline}` : ''}`);
+      if (snapshot.runPath && snapshot.reviewer && snapshot.deadline) {
+        lines.push(`  停止命令：node src/l3.ts plan decide ${snapshot.escalationId} --action stop --reason "服务退出" --run "${snapshot.runPath}" --as "${snapshot.reviewer}"`);
+      } else {
+        lines.push('  无法给出停止命令：缺少 runPath、reviewer 或 deadline。');
+      }
+    }
+    return lines.join('\n');
+  }).join('\n');
+}
+
 export function createSigintHandler(close: () => void, onSecondSignal: () => void): () => void {
   let received = false;
   return () => {
