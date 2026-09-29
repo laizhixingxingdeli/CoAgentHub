@@ -2151,7 +2151,7 @@ describe('startServer 方案记录目录与托管 live', () => {
     const adapter = join(dir, 'adapter.ts');
     writeFileSync(adapter, '// hosted adapter\\n');
     const runDir = join(dir, 'runs');
-    const repo = cleanPlanRepo('auto/double-signal');
+    const repo = cleanPlanRepo('auto/hosted');
     const gated = gatedRuntime();
     const built = await startServer(0, statePath, {
       env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
@@ -2176,10 +2176,10 @@ describe('startServer 方案记录目录与托管 live', () => {
       }
       assert.equal(snapshots.length, 1, 'hosted PlanRun 未在有界时间内登记');
       const plan = snapshots[0]!;
+      await gated.started;
       assert.ok(plan.runPath?.startsWith(runDir));
       const store = new FilePlanRunStore(plan.runPath!);
-      const lockBefore = acquireLock(statePath);
-      lockBefore.release();
+      assert.throws(() => acquireLock(statePath), LockBusyError);
       let closeDone = false;
       const handler = createSigintHandler(
         () => built.server.close(() => { closeDone = true; }),
@@ -2188,6 +2188,7 @@ describe('startServer 方案记录目录与托管 live', () => {
       );
       handler();
       assert.equal(built.server.listening, false);
+      assert.equal(closeDone, false, '首次 close 应等待真实 PlanRun 请求排空');
       assert.throws(() => acquireLock(statePath), LockBusyError);
       handler();
       const closeDeadline = Date.now() + 4_000;
