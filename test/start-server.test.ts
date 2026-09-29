@@ -22,6 +22,7 @@ import type { AgentRuntime } from '../src/application/ports.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import {
   bindServerCloseToPeriodicStop,
+  createHostedRunTracker,
   createSigintHandler,
   defaultStatePathFromMainModule,
   formatHostedRunSnapshots,
@@ -1359,6 +1360,26 @@ async function liveTarget(statePath: string) {
 
 describe('startServer hosted 接线与排空',
   () => {
+    test('注入式在途登记器：更新、完成清理与副本隔离', () => {
+      const tracker = createHostedRunTracker();
+      const plan = { kind: 'plan' as const, id: 'P-injected', status: 'waiting', escalationId: 'E-injected', deadline: '2030-01-02T03:04:05Z' };
+      const mission = { kind: 'mission' as const, id: 'M-injected', status: 'running' };
+      tracker.register('plan-token', plan);
+      tracker.register('mission-token', mission);
+      plan.status = 'externally changed';
+      const observed = tracker.snapshot();
+      observed[0]!.status = 'snapshot changed';
+      assert.match(formatHostedRunSnapshots(tracker.snapshot()), /P-injected：waiting/);
+      tracker.update('plan-token', { kind: 'plan', id: 'P-injected', status: 'escalated', escalationId: 'E-injected', deadline: '2030-02-03T04:05:06Z' });
+      const updated = formatHostedRunSnapshots(tracker.snapshot());
+      assert.match(updated, /P-injected：escalated/);
+      assert.match(updated, /E-injected；截止：2030-02-03T04:05:06Z/);
+      tracker.finish('plan-token');
+      assert.deepEqual(tracker.snapshot().map(({ id }) => id), ['M-injected']);
+      tracker.finish('mission-token');
+      assert.deepEqual(tracker.snapshot(), []);
+    });
+
     test('首次 SIGINT 在途清单格式器：真实字段生成停止命令且缺字段不伪造', () => {
       const output = formatHostedRunSnapshots([
         { kind: 'plan', id: 'P-1', status: 'waiting', missionId: 'M-2', escalationId: 'E-3', deadline: '2030-01-02T03:04:05Z', runPath: '/runs/actual.json', reviewer: 'reviewer-1' },

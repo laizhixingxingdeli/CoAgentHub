@@ -1141,6 +1141,25 @@ export type HostedRunSnapshot = Readonly<{
   deadline?: string;
 }>;
 
+export function createHostedRunTracker() {
+  const runs = new Map<string, HostedRunSnapshot>();
+  const copy = (snapshot: HostedRunSnapshot): HostedRunSnapshot => ({ ...snapshot });
+  return {
+    register(token: string, snapshot: HostedRunSnapshot): void {
+      runs.set(token, copy(snapshot));
+    },
+    update(token: string, snapshot: HostedRunSnapshot): void {
+      if (runs.has(token)) runs.set(token, copy(snapshot));
+    },
+    finish(token: string): void {
+      runs.delete(token);
+    },
+    snapshot(): HostedRunSnapshot[] {
+      return [...runs.values()].map(copy);
+    },
+  };
+}
+
 export function formatHostedRunSnapshots(snapshots: readonly HostedRunSnapshot[]): string {
   if (snapshots.length === 0) return '无在途 PlanRun 或 Mission。';
   return snapshots.map((snapshot) => {
