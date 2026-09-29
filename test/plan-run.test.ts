@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_MAX_ESCALATIONS,
   DEFAULT_MAX_RERUNS_PER_FEATURE,
+  ESCALATION_TEXT_LIMIT,
   PlanRun,
+  REVIEWER_ACTIONS,
 } from '../src/application/plan-run.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 
@@ -804,4 +806,318 @@ describe('两道闸的快照兼容',
       assert.deepEqual(restored.toSnapshot(), hit.toSnapshot());
       assert.equal(restored.stopped?.reason, 'escalation_limit');
     });
+  });
+
+function withAnswerable(question = '契约里的 missionId 是不是写错了？') {
+  const run = startRun();
+  run.startFeature('F1', 'M-F1');
+  const escalation = run.openEscalation(
+    {
+      featureId: 'F1',
+      missionId: 'M-F1',
+      failure: '协调者提问',
+      question,
+      answerable: true,
+    },
+    at(10),
+  );
+  assert.ok(escalation);
+  return { run, escalation };
+}
+
+describe('可答复升级单',
+  () => {
+    test('REVIEWER_ACTIONS 仍是原四个动作，不含 answer',
+      () => {
+        assert.deepEqual([...REVIEWER_ACTIONS], ['rerun_isolated', 'skip', 'rescope', 'stop']);
+      });
+
+    test('answerable 单记下 trim 后的原问；超长截断并在 4000 内注明；必须有合法 missionId',
+      () => {
+        const { run, escalation } = withAnswerable('  原问要 trim  ');
+        assert.equal(escalation.answerable, true);
+        assert.equal(escalation.question, '原问要 trim');
+        assert.equal(escalation.missionId, 'M-F1');
+        assert.equal(run.feature('F1')?.status, 'running');
+
+        const long = startRun();
+        long.startFeature('F1', 'M-F1');
+        const huge = `前缀${'问'.repeat(ESCALATION_TEXT_LIMIT)}`;
+        const clipped = long.openEscalation(
+          {
+            featureId: 'F1',
+            missionId: 'M-F1',
+            failure: '问太长',
+            question: huge,
+            answerable: true,
+          },
+          at(10),
+        );
+        assert.ok(clipped);
+        assert.equal(clipped.question.length, ESCALATION_TEXT_LIMIT);
+        assert.match(clipped.question, /已截断/);
+        assert.equal(clipped.question.endsWith('…（已截断）'), true);
+
+        const missing = startRun();
+        missing.startFeature('F1', 'M-F1');
+        assert.throws(
+          () =>
+            missing.openEscalation(
+              { featureId: 'F1', failure: 'x', question: 'y', answerable: true },
+              at(10),
+            ),
+          rule('ANSWERABLE_MISSION_REQUIRED'),
+        );
+        assert.throws(
+          () =>
+            missing.openEscalation(
+              { featureId: 'F1', missionId: '  ', failure: 'x', question: 'y', answerable: true },
+              at(10),
+            ),
+          rule('ANSWERABLE_MISSION_REQUIRED'),
+        );
+        assert.equal(missing.escalations.length, 0);
+        assert.equal(missing.feature('F1')?.status, 'running');
+
+        const blankQ = startRun();
+        blankQ.startFeature('F1', 'M-F1');
+        const beforeBlank = JSON.stringify(blankQ.toSnapshot());
+        assert.throws(
+          () =>
+            blankQ.openEscalation(
+              {
+                featureId: 'F1',
+                missionId: 'M-F1',
+                failure: 'x',
+                question: '   ',
+                answerable: true,
+              },
+              at(10),
+            ),
+          rule('ANSWERABLE_QUESTION_REQUIRED'),
+        );
+        assert.throws(
+          () =>
+            blankQ.openEscalation(
+              {
+                featureId: 'F1',
+                missionId: 'M-F1',
+                failure: 'x',
+                question: '',
+                answerable: true,
+              },
+              at(10),
+            ),
+          rule('ANSWERABLE_QUESTION_REQUIRED'),
+        );
+        assert.equal(JSON.stringify(blankQ.toSnapshot()), beforeBlank);
+        assert.equal(blankQ.escalations.length, 0);
+        assert.equal(blankQ.feature('F1')?.status, 'running');
+      });
+
+    test('answer 决定逐字段往返：功能仍 running，重跑次数不增加，理由可省',
+      () => {
+        const { run, escalation } = withAnswerable();
+        const beforeReruns = run.rerunsUsed('F1');
+        const decided = run.choose(
+          escalation.id,
+          { action: 'answer', answer: '  用 M-F1，不要改 id  ', decidedBy: 'claude' },
+          at(12),
+        );
+        assert.deepEqual(decided.resolution, {
+          kind: 'decided',
+          action: 'answer',
+          answer: '用 M-F1，不要改 id',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        });
+        assert.equal(run.feature('F1')?.status, 'running');
+        assert.equal(run.rerunsUsed('F1'), beforeReruns);
+        assert.equal(run.currentEscalation, undefined);
+        assert.equal(run.stopped, undefined);
+
+        const restored = PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot())));
+        assert.deepEqual(restored.toSnapshot(), run.toSnapshot());
+        assert.deepEqual(restored.escalations[0].resolution, decided.resolution);
+        assert.equal(restored.escalations[0].answerable, true);
+        assert.equal(restored.feature('F1')?.status, 'running');
+        assert.equal(restored.rerunsUsed('F1'), 0);
+
+        const withReason = startRun();
+        withReason.startFeature('F2', 'M-F2');
+        const e2 = withReason.openEscalation(
+          {
+            featureId: 'F2',
+            missionId: 'M-F2',
+            failure: '问',
+            question: '继续吗？',
+            answerable: true,
+          },
+          at(10),
+        );
+        assert.ok(e2);
+        withReason.choose(
+          e2.id,
+          { action: 'answer', answer: '继续', reason: '现场还能跑', decidedBy: 'claude' },
+          at(11),
+        );
+        assert.deepEqual(withReason.escalations[0].resolution, {
+          kind: 'decided',
+          action: 'answer',
+          answer: '继续',
+          reason: '现场还能跑',
+          decidedBy: 'claude',
+          decidedAt: at(11),
+        });
+        assert.equal(withReason.feature('F2')?.status, 'running');
+      });
+
+    test('非可答复单不能 answer；空白/超长答复、身份不符、到期、已决定都拒绝且快照不变',
+      () => {
+        const { run, escalation } = withEscalation();
+        const before = JSON.stringify(run.toSnapshot());
+        assert.throws(
+          () =>
+            run.choose(
+              escalation.id,
+              { action: 'answer', answer: '不行', decidedBy: 'claude' },
+              at(12),
+            ),
+          rule('ESCALATION_NOT_ANSWERABLE'),
+        );
+        assert.equal(JSON.stringify(run.toSnapshot()), before);
+
+        const { run: ans, escalation: open } = withAnswerable();
+        const snap = () => JSON.stringify(ans.toSnapshot());
+
+        const blank = snap();
+        assert.throws(
+          () => ans.choose(open.id, { action: 'answer', answer: '   ', decidedBy: 'claude' }, at(12)),
+          rule('DECISION_ANSWER_INVALID'),
+        );
+        assert.throws(
+          () => ans.choose(open.id, { action: 'answer', decidedBy: 'claude' }, at(12)),
+          rule('DECISION_ANSWER_INVALID'),
+        );
+        assert.equal(snap(), blank);
+
+        const tooLong = snap();
+        assert.throws(
+          () =>
+            ans.choose(
+              open.id,
+              { action: 'answer', answer: 'x'.repeat(ESCALATION_TEXT_LIMIT + 1), decidedBy: 'claude' },
+              at(12),
+            ),
+          rule('DECISION_ANSWER_INVALID'),
+        );
+        assert.equal(snap(), tooLong);
+
+        const identity = snap();
+        assert.throws(
+          () =>
+            ans.choose(
+              open.id,
+              { action: 'answer', answer: '可以', decidedBy: 'someone-else' },
+              at(12),
+            ),
+          rule('NOT_DESIGNATED_REVIEWER'),
+        );
+        assert.equal(snap(), identity);
+
+        const late = snap();
+        assert.throws(
+          () => ans.choose(open.id, { action: 'answer', answer: '可以', decidedBy: 'claude' }, at(30)),
+          rule('ESCALATION_DEADLINE_PASSED'),
+        );
+        assert.equal(snap(), late);
+        assert.equal(ans.feature('F1')?.status, 'running');
+        assert.equal(ans.currentEscalation?.id, open.id);
+
+        ans.choose(open.id, { action: 'answer', answer: '可以', decidedBy: 'claude' }, at(12));
+        const decided = snap();
+        assert.throws(
+          () => ans.choose(open.id, { action: 'answer', answer: '改口', decidedBy: 'claude' }, at(13)),
+          rule('ESCALATION_ALREADY_RESOLVED'),
+        );
+        assert.equal(snap(), decided);
+      });
+
+    test('旧四动作和理由要求未变：空白理由仍拒，skip 仍把功能标 skipped',
+      () => {
+        const { run, escalation } = withAnswerable();
+        assert.throws(
+          () => run.choose(escalation.id, { action: 'skip', reason: '  ', decidedBy: 'claude' }, at(12)),
+          rule('DECISION_REASON_REQUIRED'),
+        );
+        assert.throws(
+          () => run.choose(escalation.id, { action: 'skip', decidedBy: 'claude' }, at(12)),
+          rule('DECISION_REASON_REQUIRED'),
+        );
+        run.choose(escalation.id, { action: 'skip', reason: '今晚不答了', decidedBy: 'claude' }, at(12));
+        assert.equal(run.feature('F1')?.status, 'skipped');
+        const resolution = run.escalations[0].resolution;
+        assert.equal(resolution?.kind === 'decided' ? resolution.action : undefined, 'skip');
+      });
+
+    test('restore：旧无新字段可读；非法 answer 结论拒为 PLAN_RUN_CORRUPT',
+      () => {
+        const old = withEscalation().run.toSnapshot() as unknown as Record<string, any>;
+        assert.equal(old.escalations[0].answerable, undefined);
+        const restoredOld = PlanRun.restore(JSON.parse(JSON.stringify(old)));
+        assert.equal(restoredOld.escalations[0].answerable, undefined);
+        assert.equal(restoredOld.currentEscalation?.id, 'E-1');
+
+        const good = JSON.parse(JSON.stringify(withAnswerable().run.toSnapshot())) as Record<string, any>;
+        good.escalations[0].resolution = {
+          kind: 'decided',
+          action: 'answer',
+          answer: '记下',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        };
+        const answered = PlanRun.restore(JSON.parse(JSON.stringify(good)));
+        assert.equal(answered.escalations[0].resolution?.kind, 'decided');
+        assert.equal(
+          answered.escalations[0].resolution?.kind === 'decided'
+            ? answered.escalations[0].resolution.action
+            : undefined,
+          'answer',
+        );
+
+        const missingAnswer = JSON.parse(JSON.stringify(good));
+        missingAnswer.escalations[0].resolution = {
+          kind: 'decided',
+          action: 'answer',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        };
+        assert.throws(() => PlanRun.restore(missingAnswer), rule('PLAN_RUN_CORRUPT'));
+
+        const blankAnswer = JSON.parse(JSON.stringify(good));
+        blankAnswer.escalations[0].resolution = {
+          kind: 'decided',
+          action: 'answer',
+          answer: '  ',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        };
+        assert.throws(() => PlanRun.restore(blankAnswer), rule('PLAN_RUN_CORRUPT'));
+
+        const onOld = JSON.parse(JSON.stringify(old));
+        onOld.escalations[0].resolution = {
+          kind: 'decided',
+          action: 'answer',
+          answer: '不该出现',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        };
+        assert.throws(() => PlanRun.restore(onOld), rule('PLAN_RUN_CORRUPT'));
+
+        const blankQuestion = JSON.parse(JSON.stringify(withAnswerable().run.toSnapshot()));
+        blankQuestion.escalations[0].question = '   ';
+        assert.throws(() => PlanRun.restore(blankQuestion), rule('PLAN_RUN_CORRUPT'));
+        blankQuestion.escalations[0].question = '';
+        assert.throws(() => PlanRun.restore(blankQuestion), rule('PLAN_RUN_CORRUPT'));
+      });
   });

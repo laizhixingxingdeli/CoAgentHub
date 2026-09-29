@@ -138,6 +138,51 @@ describe('交接面', () => {
     assert.match(head, /2 条没报/);
   });
 
+  test('可答复单列原问与答复命令；其它失败仍只有四动作', () => {
+    const start = (id: string) =>
+      PlanRun.start({
+        id,
+        planId: 'PLAN-x',
+        projectId: 'p',
+        integrationBranch: 'auto/plan-x',
+        reviewer: 'claude',
+        stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+        featureIds: ['F1'],
+        startedAt: T0,
+      });
+    const answerable = start('R-ans');
+    answerable.startFeature('F1', 'R-F1');
+    answerable.openEscalation(
+      {
+        featureId: 'F1',
+        missionId: 'R-F1',
+        failure: '协调者提问',
+        question: '这个 missionId 对不对？',
+        answerable: true,
+      },
+      at(30),
+    );
+    const answerText = renderPlanHandoff(answerable, { now: at(35), recordPath: 'C:/x/R-ans.json' }).join('\n');
+    assert.match(answerText, /原问：这个 missionId 对不对？/);
+    assert.match(answerText, /plan decide E-1 --action <rerun_isolated\|skip\|rescope\|stop>/);
+    assert.match(
+      answerText,
+      /node src\/l3\.ts plan decide E-1 --action answer --answer "…" --as claude --run "C:\/x\/R-ans\.json"/,
+    );
+
+    const other = start('R-fail');
+    other.startFeature('F1', 'R-F1');
+    other.openEscalation(
+      { featureId: 'F1', missionId: 'R-F1', failure: '集成验证红（报告 IVAL-3）', question: 'F1 怎么办？' },
+      at(30),
+    );
+    const otherText = renderPlanHandoff(other, { now: at(35), recordPath: 'C:/x/R-fail.json' }).join('\n');
+    assert.doesNotMatch(otherText, /原问/);
+    assert.doesNotMatch(otherText, /--action answer/);
+    assert.doesNotMatch(otherText, /答复：/);
+    assert.match(otherText, /plan decide E-1 --action <rerun_isolated\|skip\|rescope\|stop>/);
+  });
+
   test('还在跑且有开着的升级单：点出截止时间，并给检视者一行照抄就能用的命令', () => {
     const run = PlanRun.start({
       id: 'R-live',

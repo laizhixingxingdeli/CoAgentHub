@@ -80,7 +80,7 @@ type HarnessView = {
 
 function harness(options?: {
   features?: string[];
-  runs?: Record<string, Ran | Error>;
+  runs?: Record<string, Ran | Error | (Ran | Error)[]>;
   finalize?: Record<string, Finalize | Error>;
   haFinalize?: Record<string, Finalize | Error>;
   onHaFinalize?: (missionId: string) => void;
@@ -141,6 +141,7 @@ function harness(options?: {
   const classifiedFacts: unknown[] = [];
   const status = new Map<string, string>();
   const finalReview = new Map<string, string>();
+  const runIndex = new Map<string, number>();
   let passIndex = 0;
 
   const deps: PlanDriverDeps = {
@@ -172,7 +173,16 @@ function harness(options?: {
     runMission: async (missionId) => {
       calls.push(`run ${missionId}`);
       clock += 30 * MIN;
-      const ran = options?.runs?.[missionId] ?? { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' };
+      const configured = options?.runs?.[missionId];
+      let ran: Ran | Error;
+      if (Array.isArray(configured)) {
+        const i = runIndex.get(missionId) ?? 0;
+        runIndex.set(missionId, i + 1);
+        ran = configured[i];
+        if (ran === undefined) throw new Error(`unexpected extra run of ${missionId}`);
+      } else {
+        ran = configured ?? { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' };
+      }
       if (ran instanceof Error) throw ran;
       status.set(missionId, ran.status);
       return ran.outcome;
@@ -229,6 +239,10 @@ function harness(options?: {
         status.set(missionId, 'blocked');
         return { status: 'blocked' };
       },
+      answerEscalation: async (missionId, answer) => {
+        calls.push(`answer ${missionId} ${answer}`);
+        return { question: 'recorded', answer };
+      },
     },
   };
 
@@ -249,7 +263,7 @@ function harness(options?: {
 }
 
 /** 检视者：看到开着的升级单就按给定动作定（只定一次）。 */
-function reviewerDecides(action: string, extra?: { dropFeatures?: string[]; after?: number }): Hook {
+function reviewerDecides(action: string, extra?: { dropFeatures?: string[]; after?: number; answer?: string }): Hook {
   return async ({ now, store }) => {
     const open = store.read()?.currentEscalation;
     if (!open) return;
@@ -262,6 +276,7 @@ function reviewerDecides(action: string, extra?: { dropFeatures?: string[]; afte
           reason: `检视者选 ${action}`,
           decidedBy: 'claude',
           ...(extra?.dropFeatures ? { dropFeatures: extra.dropFeatures } : {}),
+          ...(extra?.answer !== undefined ? { answer: extra.answer } : {}),
         },
         now,
       ),
@@ -551,6 +566,7 @@ describe('E4b3 HA 等待限时决定', () => {
     assert.ok(!h.calls.some((call) => call.startsWith('ha-finalize R1-F1')));
     assert.ok(!h.calls.some((call) => call.startsWith('finalize R1-F1')));
     assert.match(run.escalations[0]!.failure, /未合并/);
+    assert.equal(run.escalations[0]!.answerable, undefined);
     assert.match(run.escalations[0]!.failure, /deadbeef01/);
     assert.match(run.escalations[0]!.failure, /feedface02/);
     assert.equal(run.haReleases[0]?.decision?.kind, 'approve');
@@ -1301,6 +1317,7 @@ describe('失败了开升级单等检视者', () => {
     assert.equal(e1.missionId, 'R1-F1');
     assert.match(e1.failure, /IVAL-2/);
     assert.match(e1.question, /隔离重跑/);
+    assert.equal(e1.answerable, undefined);
     assert.equal(run.feature('F1')?.status, 'skipped');
     assert.equal(run.feature('F2')?.status, 'merged');
     // 名额必须在开下一个之前放掉，否则下一个派发不了。
@@ -1385,10 +1402,155 @@ describe('失败了开升级单等检视者', () => {
     await drivePlan(h.plan, h.deps);
     const run = h.store.read()!;
     assert.match(run.escalations[0].failure, /结构化提交/);
+    assert.equal(run.escalations[0].answerable, undefined);
     assert.match(run.escalations[1].failure, /要不要改公共接口/);
+    assert.equal(run.escalations[1].answerable, true);
+    assert.equal(run.escalations[1].question, '要不要改公共接口？');
+    assert.equal(run.escalations[2].answerable, undefined);
     assert.ok(h.calls.includes('abandon R1-F1 E-1'));
+    assert.ok(h.calls.includes('abandon R1-F2 E-2'), '可答复单选旧动作仍放弃');
     assert.ok(!h.calls.includes('abandon R1-F3 E-3'), '已经终结的不用再放弃');
+    assert.ok(!h.calls.some((c) => c.startsWith('answer')), '旧动作不走 answerEscalation');
     assert.ok(!h.calls.some((c) => c.startsWith('finalize')), '没交卷的不走机器 L3');
+  });
+});
+
+describe('协调者提问可答复续跑', () => {
+  const QUESTION = '要不要改公共接口？';
+  const ANSWER = '用现有接口，不要新 Mission';
+  const ask = { outcome: { kind: 'awaiting_l3' as const, question: QUESTION }, status: 'planning' };
+  const delivered = { outcome: { kind: 'awaiting_l3_review' as const }, status: 'awaiting_review' };
+
+  test('首次 awaiting_l3 → E-1 可答复保存原问 → answerEscalation 恰好一次 → 同 missionId 续跑合入', async () => {
+    const h = harness({
+      features: ['F1'],
+      runs: { 'R1-F1': [ask, delivered] },
+      onSleep: reviewerDecides('answer', { answer: ANSWER }),
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    const run = h.store.read()!;
+    const e1 = run.escalations[0];
+    assert.equal(e1.id, 'E-1');
+    assert.equal(e1.answerable, true);
+    assert.equal(e1.question, QUESTION);
+    assert.equal(e1.resolution?.kind, 'decided');
+    if (e1.resolution?.kind === 'decided') assert.equal(e1.resolution.action, 'answer');
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('answer ')),
+      [`answer R1-F1 ${ANSWER}`],
+    );
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('run ')),
+      ['run R1-F1', 'run R1-F1'],
+    );
+    assert.ok(h.calls.includes('finalize R1-F1 → auto/plan-x [node --test]'));
+    assert.ok(!h.calls.some((c) => c.startsWith('abandon')));
+    assert.ok(!h.calls.some((c) => c.includes('R1-F1-r2')));
+    assert.deepEqual(run.feature('F1')?.missionIds, ['R1-F1']);
+    assert.equal(run.rerunsUsed('F1'), 0);
+    assert.equal(run.feature('F1')?.status, 'merged');
+    const answerAt = h.calls.indexOf(`answer R1-F1 ${ANSWER}`);
+    const firstRun = h.calls.indexOf('run R1-F1');
+    const secondRun = h.calls.indexOf('run R1-F1', firstRun + 1);
+    assert.ok(firstRun < answerAt && answerAt < secondRun);
+  });
+
+  test('第二次提问开 E-2 可答复并计入上限；到上限停、不放弃', async () => {
+    const h = harness({
+      features: ['F1'],
+      maxEscalations: 1,
+      runs: { 'R1-F1': [ask, { outcome: { kind: 'awaiting_l3', question: '第二问：边界呢？' }, status: 'planning' }] },
+      onSleep: reviewerDecides('answer', { answer: ANSWER }),
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'escalation_limit');
+    const run = h.store.read()!;
+    assert.equal(run.escalations.length, 1);
+    assert.equal(run.escalations[0].answerable, true);
+    assert.equal(run.escalations[0].question, QUESTION);
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('run ')),
+      ['run R1-F1', 'run R1-F1'],
+    );
+    assert.equal(h.calls.filter((c) => c.startsWith('answer ')).length, 1);
+    assert.ok(!h.calls.some((c) => c.startsWith('abandon')));
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.deepEqual(run.feature('F1')?.missionIds, ['R1-F1']);
+    assert.equal(run.rerunsUsed('F1'), 0);
+  });
+
+  test('第二次提问编号递增；墙钟到后不再 runMission 也不答复', async () => {
+    const h = harness({
+      features: ['F1'],
+      runs: {
+        'R1-F1': [
+          ask,
+          { outcome: { kind: 'awaiting_l3', question: '第二问：边界呢？' }, status: 'planning' },
+          delivered,
+        ],
+      },
+      onSleep: reviewerDecides('answer', { answer: ANSWER }),
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    const run = h.store.read()!;
+    assert.equal(run.escalations.length, 2);
+    assert.equal(run.escalations[0].id, 'E-1');
+    assert.equal(run.escalations[1].id, 'E-2');
+    assert.equal(run.escalations[0].answerable, true);
+    assert.equal(run.escalations[1].answerable, true);
+    assert.equal(run.escalations[1].question, '第二问：边界呢？');
+    assert.equal(h.calls.filter((c) => c.startsWith('answer ')).length, 2);
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('run ')),
+      ['run R1-F1', 'run R1-F1', 'run R1-F1'],
+    );
+    assert.equal(run.feature('F1')?.status, 'merged');
+    assert.deepEqual(run.feature('F1')?.missionIds, ['R1-F1']);
+
+    const clocked = harness({
+      features: ['F1'],
+      wallClockMs: 30 * MIN + 10_000,
+      pollMs: 15_000,
+      runs: { 'R1-F1': [ask, delivered] },
+      onSleep: reviewerDecides('answer', { answer: ANSWER, after: 0 }),
+    });
+    await clocked.start();
+    const clockStop = await drivePlan(clocked.plan, clocked.deps);
+    assert.equal(clockStop.reason, 'wall_clock');
+    assert.deepEqual(
+      clocked.calls.filter((c) => c.startsWith('run ')),
+      ['run R1-F1'],
+    );
+    assert.equal(clocked.calls.filter((c) => c.startsWith('answer ')).length, 0);
+    assert.ok(!clocked.calls.some((c) => c.startsWith('abandon')));
+  });
+
+  test('可答复单过期仍 settle 放弃；合并验证失败不能答复', async () => {
+    const expired = harness({
+      features: ['F1', 'F2'],
+      runs: { 'R1-F1': ask },
+    });
+    await expired.start();
+    const stop = await drivePlan(expired.plan, expired.deps);
+    assert.equal(stop.reason, 'finished');
+    const run = expired.store.read()!;
+    assert.equal(run.escalations[0].answerable, true);
+    assert.equal(run.escalations[0].resolution?.kind, 'expired');
+    assert.ok(expired.calls.includes('abandon R1-F1 E-1'));
+    assert.ok(!expired.calls.some((c) => c.startsWith('answer')));
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.equal(run.feature('F2')?.status, 'merged');
+
+    const red = harness({ finalize: { 'R1-F1': RED }, onSleep: reviewerDecides('skip') });
+    await red.start();
+    await drivePlan(red.plan, red.deps);
+    assert.equal(red.store.read()!.escalations[0].answerable, undefined);
+    assert.ok(!red.calls.some((c) => c.startsWith('answer')));
   });
 });
 
@@ -1805,6 +1967,12 @@ describe('注入式方案运行入口', () => {
         status.set(missionId, 'blocked');
         return { status: 'blocked' };
       },
+      answerEscalation: async (missionId, answer) => {
+        calls.push(`answer ${missionId} ${answer}`);
+        return { question: 'recorded', answer };
+      },
+      effectiveIndependentReviewPass: async () => undefined,
+      finalizeMissionByHaAuthority: async () => ({ status: 'awaiting_review' }),
     };
 
     return {
@@ -1921,6 +2089,10 @@ describe('注入式方案运行入口', () => {
       assert.doesNotMatch(src, /acquireLock/);
       assert.doesNotMatch(src, /buildPersistentPlatform/);
       assert.doesNotMatch(src, /buildPgPlatform/);
+      assert.match(
+        src,
+        /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
+      );
     });
 
   test('到点调用暂停并持久化，run 后仍持久化',

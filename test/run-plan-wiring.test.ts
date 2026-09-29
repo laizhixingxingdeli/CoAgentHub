@@ -109,6 +109,16 @@ describe('开跑前检查项目仓', () => {
   });
 });
 
+describe('方案运行入口接线 answerEscalation', () => {
+  test('runtime adapter 用 persistAfter 包住 platform.answerEscalation', () => {
+    const src = readFileSync(join(import.meta.dirname, '..', 'src', 'application', 'plan-runtime.ts'), 'utf8');
+    assert.match(
+      src,
+      /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
+    );
+  });
+});
+
 const CONTRACT: MissionContract = { intent: '改 a.txt', acceptance: ['绿'], constraints: [], nonGoals: [], guardrails: [] };
 const ORDER: WorkOrder = {
   objective: '改 a.txt',

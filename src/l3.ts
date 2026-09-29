@@ -9,6 +9,7 @@
  *   node src/l3.ts ack <deliveryId>
  *   node src/l3.ts plan [--run <方案运行记录>]
  *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
+ *   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."]
  *
  * 直接操作状态文件，不经过 HTTP —— `run-mission` 的服务器是一次性的，
  * 跑完就退，所以平时没有常驻进程。**别在服务器开着的时候用它**：
@@ -495,6 +496,7 @@ async function main() {
       // 只有本次运行指定的检视者作数；不写你是谁，规则就没法核对。
       if (!decidedBy) throw new Error('要写明你是谁（--as <检视者>）：只有本次运行指定的检视者的决定作数。');
       const drop = arg('--drop');
+      const answer = arg('--answer');
       const decided = await store.update((run) =>
         run.choose(
           escalationId,
@@ -506,15 +508,20 @@ async function main() {
             ...(drop !== undefined
               ? { dropFeatures: drop.split(',').map((id) => id.trim()).filter(Boolean) }
               : {}),
+            // 交给 choose 校验：空白/过长/不可答复都在规则里拒，这里不预判。
+            ...(answer !== undefined ? { answer } : {}),
           },
           new Date().toISOString(),
         ),
       );
       const resolution = decided.resolution;
-      console.log(
-        `已定 ${decided.id}（${decided.featureId}）：` +
-          (resolution?.kind === 'decided' ? `${resolution.action} —— ${resolution.reason}` : '?'),
-      );
+      const summary =
+        resolution?.kind !== 'decided'
+          ? '?'
+          : resolution.action === 'answer'
+            ? `answer —— ${resolution.answer}`
+            : `${resolution.action} —— ${resolution.reason}`;
+      console.log(`已定 ${decided.id}（${decided.featureId}）：${summary}`);
       console.log('驱动方下次读记录（最多 15 秒）就会照办。');
       return;
     }
@@ -545,6 +552,7 @@ async function main() {
   node src/l3.ts ack <deliveryId>             确认收到
   node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
   node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
+  node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."] [--run <记录>]
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);
 }

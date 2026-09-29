@@ -125,7 +125,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
-  按一份方案（`missions/PLAN-*.json`）无人值守地逐个推进功能点。`node src/run-plan.ts` 是驱动方（睡前启动）；方案这一层的事实——哪个功能走到哪、夜里升级了什么、检视者怎么定的、为什么停——记在一份
+  按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
 - **run-token-lifecycle** — Run Token 生命周期（RECON-002A）

@@ -369,3 +369,199 @@ describe('记录本身', () => {
     );
   });
 });
+
+async function storeWithAnswerable() {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
+  dirs.push(dir);
+  const path = join(dir, 'R1.json');
+  const store = new FilePlanRunStore(path);
+  await store.create(
+    PlanRun.start({
+      id: 'R1',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['F1', 'F2'],
+      startedAt: T0,
+    }),
+  );
+  await store.update((run) => {
+    run.startFeature('F1', 'M-F1');
+    run.openEscalation(
+      {
+        featureId: 'F1',
+        missionId: 'M-F1',
+        failure: '协调者提问',
+        question: '  原问  ',
+        answerable: true,
+      },
+      at(10),
+    );
+  });
+  return { path, store };
+}
+
+describe('可答复升级单存储',
+  () => {
+    test('含答复结论的落盘重读逐字段一致',
+      async () => {
+        const { path, store } = await storeWithAnswerable();
+        const decided = await store.update((run) =>
+          run.choose(
+            'E-1',
+            { action: 'answer', answer: '  用这个 id  ', reason: '现场还在跑', decidedBy: 'claude' },
+            at(12),
+          ),
+        );
+        const reread = new FilePlanRunStore(path).read();
+        assert.ok(reread);
+        assert.deepEqual(reread.escalations[0].resolution, decided.resolution);
+        assert.deepEqual(reread.escalations[0].resolution, {
+          kind: 'decided',
+          action: 'answer',
+          answer: '用这个 id',
+          reason: '现场还在跑',
+          decidedBy: 'claude',
+          decidedAt: at(12),
+        });
+        assert.equal(reread.escalations[0].answerable, true);
+        assert.equal(reread.escalations[0].question, '原问');
+        assert.equal(reread.feature('F1')?.status, 'running');
+        assert.equal(reread.rerunsUsed('F1'), 0);
+        assert.deepEqual(reread.toSnapshot(), store.read()?.toSnapshot());
+      });
+
+    test('旧无新字段记录可读',
+      async () => {
+        const { path, store } = await storeWithEscalation();
+        const snapshot = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+        delete snapshot.escalations[0].answerable;
+        writeFileSync(path, JSON.stringify(snapshot));
+        const run = store.read();
+        assert.equal(run?.escalations[0].answerable, undefined);
+        assert.equal(run?.escalations[0].question, 'F1 跳过还是隔离重跑？');
+        assert.equal(run?.currentEscalation?.id, 'E-1');
+      });
+
+    test('坏的 answer 记录（缺 answer 或不可答复）拒读',
+      async () => {
+        const cases: Array<(snapshot: Record<string, any>) => void> = [
+          (s) => {
+            s.escalations[0].resolution = {
+              kind: 'decided',
+              action: 'answer',
+              decidedBy: 'claude',
+              decidedAt: at(12),
+            };
+          },
+          (s) => {
+            s.escalations[0].answerable = true;
+            s.escalations[0].resolution = {
+              kind: 'decided',
+              action: 'answer',
+              decidedBy: 'claude',
+              decidedAt: at(12),
+            };
+          },
+          (s) => {
+            s.escalations[0].resolution = {
+              kind: 'decided',
+              action: 'answer',
+              answer: '不该出现在旧单上',
+              decidedBy: 'claude',
+              decidedAt: at(12),
+            };
+          },
+          (s) => {
+            s.escalations[0].answerable = true;
+            s.escalations[0].missionId = 'M-F1';
+            s.escalations[0].question = '   ';
+          },
+          (s) => {
+            s.escalations[0].answerable = true;
+            s.escalations[0].missionId = 'M-F1';
+            s.escalations[0].question = '';
+          },
+        ];
+        for (const mutate of cases) {
+          const { path, store } = await storeWithEscalation();
+          const snapshot = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+          mutate(snapshot);
+          writeFileSync(path, JSON.stringify(snapshot));
+          assert.throws(
+            () => store.read(),
+            (error: unknown) => error instanceof PlatformRuleError && error.code === 'PLAN_RUN_CORRUPT',
+          );
+        }
+      });
+
+    test('规则拒绝的 answer 不落盘',
+      async () => {
+        const { path, store } = await storeWithEscalation();
+        const before = readFileSync(path, 'utf8');
+        await assert.rejects(
+          store.update((run) =>
+            run.choose('E-1', { action: 'answer', answer: '不行', decidedBy: 'claude' }, at(12)),
+          ),
+          (error: unknown) => error instanceof PlatformRuleError && error.code === 'ESCALATION_NOT_ANSWERABLE',
+        );
+        assert.equal(readFileSync(path, 'utf8'), before);
+
+        const answerable = await storeWithAnswerable();
+        const beforeAnswer = readFileSync(answerable.path, 'utf8');
+        await assert.rejects(
+          answerable.store.update((run) =>
+            run.choose('E-1', { action: 'answer', answer: '   ', decidedBy: 'claude' }, at(12)),
+          ),
+          (error: unknown) => error instanceof PlatformRuleError && error.code === 'DECISION_ANSWER_INVALID',
+        );
+        assert.equal(readFileSync(answerable.path, 'utf8'), beforeAnswer);
+      });
+
+    test('空白原问的可答复开单拒绝写入',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-run-'));
+        dirs.push(dir);
+        const path = join(dir, 'R1.json');
+        const store = new FilePlanRunStore(path);
+        await store.create(
+          PlanRun.start({
+            id: 'R1',
+            planId: 'PLAN-x',
+            projectId: 'p',
+            integrationBranch: 'auto/x',
+            reviewer: 'claude',
+            stopConditions: {
+              unresolvedEscalations: 5,
+              wallClockMs: 8 * 60 * MIN,
+              escalationTimeoutMs: 20 * MIN,
+            },
+            featureIds: ['F1'],
+            startedAt: T0,
+          }),
+        );
+        await store.update((run) => {
+          run.startFeature('F1', 'M-F1');
+        });
+        const before = readFileSync(path, 'utf8');
+        await assert.rejects(
+          store.update((run) =>
+            run.openEscalation(
+              {
+                featureId: 'F1',
+                missionId: 'M-F1',
+                failure: '协调者提问',
+                question: '   ',
+                answerable: true,
+              },
+              at(10),
+            ),
+          ),
+          (error: unknown) =>
+            error instanceof PlatformRuleError && error.code === 'ANSWERABLE_QUESTION_REQUIRED',
+        );
+        assert.equal(readFileSync(path, 'utf8'), before);
+      });
+  });

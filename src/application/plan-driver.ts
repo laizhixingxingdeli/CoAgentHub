@@ -6,7 +6,7 @@
  * 处置 → 下一个。撞到停止条件（未解决累计、墙钟、检视者叫停、集成分支不安全、升级单到上限）
  * 就停，并把原因写进方案运行记录。
  *
- * **权限分得很死。** 检视者只能在四个动作里选；合进集成分支只凭机器 L3 的
+ * **权限分得很死。** 检视者只能在四个动作里选（可答复单另可 answer）；合进集成分支只凭机器 L3 的
  * 确定性证据；HA 禁止副作用未证明安全时不建单，合格 HA 跑到待放行后挂起，
  * 本项不放行。这个驱动方自己不做任何判断——它只把各方的结论按规则串起来。
  *
@@ -85,6 +85,11 @@ export interface PlanDriverDeps {
       missionId: string,
       input: { planRunId: string; escalationId: string; reasons: readonly string[]; projectRoot?: string },
     ): Promise<{ status: string }>;
+    /** 持锁答复协调者提问；对接平台原方法，不另开一条 Mission。 */
+    answerEscalation(
+      missionId: string,
+      answer: string,
+    ): Promise<{ question: string; answer: string }>;
   };
   /**
    * 跑一条 Mission 直到它停下（交卷 / 卡住 / 等人）。`wallClockDeadline` 是方案
@@ -119,7 +124,8 @@ type Landing =
   | { readonly kind: 'merged' }
   | { readonly kind: 'failed'; readonly failure: string }
   | { readonly kind: 'unsafe'; readonly detail: string }
-  | { readonly kind: 'ha_pending' };
+  | { readonly kind: 'ha_pending' }
+  | { readonly kind: 'awaiting_answer'; readonly question: string };
 
 export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<PlanRunStop> {
   // 入选名单在进驱动之前已经筛过（selectPlanCandidates）；这里只跑记录里的功能，
@@ -210,6 +216,8 @@ async function runFeature(
   const wallClockDeadline = new Date(
     Date.parse(run.startedAt) + run.stopConditions.wallClockMs,
   ).toISOString();
+  // 协调者提问可当场答复：answer 后续跑同一条，不能退回 drivePlan 另开 -rN。
+  for (;;) {
   const outcome = await deps.runMission(missionId, { wallClockDeadline });
   const landing = await land(plan, missionId, outcome, deps);
 
@@ -289,7 +297,14 @@ async function runFeature(
     await deps.store.update((r) => r.halt('unsafe', landing.detail, deps.now()));
     return;
   }
+  if (landing.kind === 'awaiting_answer') {
+    const next = await handleAwaitingAnswer(feature, missionId, landing.question, run, deps);
+    if (next === 'continue') continue;
+    return;
+  }
   await failAndEscalate(feature, missionId, landing.failure, run, deps);
+  return;
+  }
 }
 
 type ApprovedReleaseResult =
@@ -509,7 +524,7 @@ async function land(
     case 'blocked':
       return { kind: 'failed', failure: `Mission 走不下去了：${outcome.reason}` };
     case 'awaiting_l3':
-      return { kind: 'failed', failure: `协调者升级给 L3 的问题夜里没人答：${outcome.question}` };
+      return { kind: 'awaiting_answer', question: outcome.question };
     case 'waiting':
       return { kind: 'failed', failure: `Mission 停在 ${outcome.reason}：${outcome.detail}` };
     case 'stalled':
@@ -569,6 +584,54 @@ async function land(
     };
   }
   return { kind: 'failed', failure: `机器合并失败：${result.reason ?? '（没给原因）'}` };
+}
+
+/**
+ * 仅 awaiting_l3 开可答复单。answer：不放弃、不新 Mission、不占 rerun，
+ * 墙钟检查后再答复一次并续跑同一条；其余动作/过期走原 settle。
+ */
+async function handleAwaitingAnswer(
+  feature: PlanFeatureSpec,
+  missionId: string,
+  question: string,
+  run: PlanRun,
+  deps: PlanDriverDeps,
+): Promise<'continue' | 'done'> {
+  const afterRun = deps.now();
+  if (wallClockReached(run, afterRun)) {
+    deps.log(`${feature.id} ⏸ 墙钟到点：协调者提问未答复：${question}`);
+    await deps.store.update((r) => r.checkStop(afterRun));
+    return 'done';
+  }
+  const failure = `协调者升级给 L3 的问题夜里没人答：${question}`;
+  const escalation = await deps.store.update((r) =>
+    r.openEscalation(
+      { featureId: feature.id, missionId, failure, question, answerable: true },
+      deps.now(),
+    ),
+  );
+  if (!escalation) {
+    deps.log(`${feature.id} ✗ 升级单到上限：${failure}`);
+    return 'done';
+  }
+  deps.log(`${feature.id} ⚑ 升级单 ${escalation.id}（${escalation.deadline} 截止）：${failure}`);
+  await waitForResolution(escalation.id, deps);
+  const current = requireRun(deps);
+  if (current.stopped) return 'done';
+  const resolved = current.escalations.find((item) => item.id === escalation.id);
+  const resolution = resolved?.resolution;
+  if (resolution?.kind === 'decided' && resolution.action === 'answer') {
+    const now = deps.now();
+    if (wallClockReached(current, now)) {
+      await deps.store.update((r) => r.checkStop(now));
+      return 'done';
+    }
+    await deps.platform.answerEscalation(missionId, resolution.answer);
+    deps.log(`${feature.id} ↩ 检视者答复了 ${escalation.id}，续跑 ${missionId}`);
+    return 'continue';
+  }
+  await settle(missionId, escalation.id, deps);
+  return 'done';
 }
 
 /** 所有失败共用原升级尾巴，避免 HA 与普通失败的开单和收尾语义分叉。 */
