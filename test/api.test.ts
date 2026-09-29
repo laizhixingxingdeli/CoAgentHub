@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
-import { createApi } from '../src/api/server.ts';
+import { API_VERSION, createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import {
   FixedClock,
@@ -1589,4 +1589,392 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
       }
     },
   );
+});
+
+async function request(
+  base: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; json: Record<string, unknown>; headers: Headers }> {
+  const res = await fetch(`${base}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return {
+    status: res.status,
+    json: (await res.json()) as Record<string, unknown>,
+    headers: res.headers,
+  };
+}
+
+function tapPlatform(
+  platform: Platform,
+  method: 'finalizeMission' | 'finalizeMissionByReviewer' | 'finalizeMissionByHaAuthority',
+): unknown[][] {
+  const calls: unknown[][] = [];
+  const orig = platform[method].bind(platform) as (...args: unknown[]) => unknown;
+  (platform as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+    calls.push(args);
+    return orig(...args);
+  };
+  return calls;
+}
+
+async function openApi(options?: {
+  onMutation?: () => void | Promise<void>;
+  identity?: { instanceId: string; stateId: string };
+}): Promise<{
+  server: Server;
+  base: string;
+  platform: Platform;
+  projects: InMemoryProjectRepository;
+}> {
+  const clock = new FixedClock();
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const projects = new InMemoryProjectRepository();
+  const platform = new Platform({
+    projects,
+    deliveries,
+    activity: new InMemoryActivityLog(clock),
+    clock,
+    ids,
+  });
+  const server = createApi({
+    platform,
+    tokens: new RunTokenRegistry(),
+    deliveries,
+    ...(options?.onMutation ? { onMutation: options.onMutation } : {}),
+    ...(options?.identity ? { identity: options.identity } : {}),
+  });
+  await listenLoopback(server, 0);
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return { server, base, platform, projects };
+}
+
+async function seedAwaitingReview(base: string, missionId: string, projectId = 'P'): Promise<string> {
+  const created = await request(base, '/api/missions', {
+    projectId,
+    missionId,
+    contract: CONTRACT,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  const coord = await request(base, `/api/missions/${missionId}/coordinator-attempts`, {});
+  assert.equal(coord.status, 201, JSON.stringify(coord.json));
+  const coordToken = coord.json.token as string;
+  const planned = await postJson(base, '/api/agent/coagent_update_plan', {
+    findings: 'f',
+    rejectedHypotheses: [],
+    decisions: [],
+    direction: 'd',
+    risks: [],
+  }, coordToken);
+  assert.equal(planned.status, 200, JSON.stringify(planned.json));
+  const wi = await postJson(base, '/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+  assert.equal(wi.status, 200, JSON.stringify(wi.json));
+  const workItemId = (wi.json as { workItemId?: string }).workItemId as string;
+  const dispatched = await postJson(base, '/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+  assert.equal(dispatched.status, 200, JSON.stringify(dispatched.json));
+  const exec = await request(base, `/api/missions/${missionId}/work-items/${workItemId}/executor-attempts`, {});
+  assert.equal(exec.status, 201, JSON.stringify(exec.json));
+  const execToken = exec.json.token as string;
+  const evidence = await postJson(
+    base,
+    '/api/agent/coagent_submit_evidence',
+    { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 },
+    execToken,
+  );
+  assert.equal(evidence.status, 200, JSON.stringify(evidence.json));
+  const submitted = await postJson(
+    base,
+    '/api/agent/coagent_submit_execution_result',
+    {
+      outcome: 'completed',
+      summary: 'ok',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [(evidence.json as { evidenceId?: string }).evidenceId],
+      notes: '无',
+    },
+    execToken,
+  );
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+  const finished = await request(base, `/api/missions/${missionId}/attempts/${exec.json.attemptId as string}/finish`, {
+    endedBy: 'structured_submit',
+  });
+  assert.equal(finished.status, 200, JSON.stringify(finished.json));
+  const reviewed = await postJson(
+    base,
+    '/api/agent/coagent_review_execution_result',
+    {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass',
+        evidence: '测过',
+      })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    },
+    coordToken,
+  );
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.json));
+  const delivered = await postJson(
+    base,
+    '/api/agent/coagent_submit_mission_result',
+    {
+      outcome: 'delivered',
+      summary: '交付',
+      acceptanceEvidence: ['ok'],
+      memoryDelta: [],
+      openRisks: [],
+    },
+    coordToken,
+  );
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.json));
+  const view = await request(base, `/api/missions/${missionId}`);
+  assert.equal(view.json.status, 'awaiting_review', JSON.stringify(view.json));
+  return workItemId;
+}
+
+describe('L3 写路由与落盘后应答', () => {
+  test('人签名 / reviewer / HA reviewer merge 分别打到对应 Platform 入口', async () => {
+    const { server, base, platform, projects } = await openApi();
+    try {
+      const humanCalls = tapPlatform(platform, 'finalizeMission');
+      const reviewerCalls = tapPlatform(platform, 'finalizeMissionByReviewer');
+      const haCalls = tapPlatform(platform, 'finalizeMissionByHaAuthority');
+
+      await seedAwaitingReview(base, 'M-human', 'P-human');
+      const human = await request(base, '/api/missions/M-human/finalize', {
+        verdict: 'send_back',
+        reasons: ['边界不够'],
+      });
+      assert.equal(human.status, 200);
+      assert.equal(human.json.status, 'planning');
+      assert.equal(humanCalls.length, 1);
+      assert.equal(reviewerCalls.length, 0);
+      assert.equal(haCalls.length, 0);
+
+      await seedAwaitingReview(base, 'M-reviewer', 'P-reviewer');
+      const reviewer = await request(base, '/api/missions/M-reviewer/finalize/reviewer', {
+        verdict: 'send_back',
+        reasons: ['检视者打回'],
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+      });
+      assert.equal(reviewer.status, 200, JSON.stringify(reviewer.json));
+      assert.equal(reviewer.json.status, 'planning');
+      assert.equal(reviewerCalls.length, 1);
+      assert.equal(haCalls.length, 0);
+
+      const project = await projects.ensure('P');
+      project.createMission({
+        id: 'M-ha',
+        contract: CONTRACT,
+        executionMode: 'high_assurance',
+      });
+      await projects.save(project);
+      const ha = await request(base, '/api/missions/M-ha/finalize/reviewer', {
+        verdict: 'merge',
+        reasons: ['ok'],
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+      });
+      assert.notEqual(ha.status, 200);
+      assert.equal(haCalls.length, 1);
+      assert.equal((haCalls[0] as unknown[])[0], 'M-ha');
+      assert.equal(reviewerCalls.length, 1, 'HA merge 不得再走普通 reviewer 入口');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('retire / rerun / answer / revise / control / ack 成功与规则拒绝', async () => {
+    const { server, base } = await openApi();
+    try {
+      const created = await request(base, '/api/missions', {
+        projectId: 'P',
+        missionId: 'M-l3',
+        contract: CONTRACT,
+      });
+      assert.equal(created.status, 201);
+
+      const coord = await request(base, '/api/missions/M-l3/coordinator-attempts', {});
+      const coordToken = coord.json.token as string;
+      await postJson(
+        base,
+        '/api/agent/coagent_update_plan',
+        { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+        coordToken,
+      );
+      const wi = await postJson(
+        base,
+        '/api/agent/coagent_create_work_item',
+        { title: 'W', ...ORDER },
+        coordToken,
+      );
+      const workItemId = (wi.json as { workItemId?: string }).workItemId as string;
+
+      const retired = await request(base, `/api/missions/M-l3/work-items/${workItemId}/retire`, {
+        reason: '契约改了，不用做了',
+      });
+      assert.equal(retired.status, 200, JSON.stringify(retired.json));
+      assert.equal(retired.json.status, 'retired');
+      const retiredAgain = await request(base, `/api/missions/M-l3/work-items/${workItemId}/retire`, {
+        reason: '再作废一次',
+      });
+      assert.equal(retiredAgain.status, 409);
+      assert.equal(retiredAgain.json.error, 'NOT_RETIRABLE');
+
+      const rerun = await request(base, '/api/missions/M-l3/rerun', { newMissionId: 'M-l3-b' });
+      assert.equal(rerun.status, 200, JSON.stringify(rerun.json));
+      assert.equal(rerun.json.missionId, 'M-l3-b');
+      const rerunMissing = await request(base, '/api/missions/no-such/rerun', {});
+      assert.notEqual(rerunMissing.status, 200);
+      assert.equal(typeof rerunMissing.json.error, 'string');
+
+      const noEscalation = await request(base, '/api/missions/M-l3/escalations/answer', {
+        answer: '先答',
+      });
+      assert.equal(noEscalation.status, 409);
+      assert.equal(noEscalation.json.error, 'NO_OPEN_ESCALATION');
+      await postJson(
+        base,
+        '/api/agent/coagent_escalate_to_l3',
+        {
+          question: '边界是什么',
+          why: '范围不清楚',
+          optionsConsidered: ['只改 foo', '全盘重做'],
+        },
+        coordToken,
+      );
+      const answered = await request(base, '/api/missions/M-l3/escalations/answer', {
+        answer: '只改 foo',
+      });
+      assert.equal(answered.status, 200, JSON.stringify(answered.json));
+      assert.equal(answered.json.answer, '只改 foo');
+
+      const revised = await request(base, '/api/missions/M-l3/contract', {
+        intent: '改过的意图',
+        acceptance: ['测试全绿'],
+        constraints: [],
+        nonGoals: [],
+        guardrails: ['不得改 Contract'],
+      });
+      assert.equal(revised.status, 200, JSON.stringify(revised.json));
+      assert.equal(revised.json.contractRevision, 2);
+
+      const paused = await request(base, '/api/missions/M-l3/pause', {});
+      assert.equal(paused.status, 200);
+      assert.equal(paused.json.paused, true);
+      const resumed = await request(base, '/api/missions/M-l3/resume', {});
+      assert.equal(resumed.status, 200);
+      assert.equal(resumed.json.paused, false);
+      const cancelled = await request(base, '/api/missions/M-l3/cancel', { reason: '停' });
+      assert.equal(cancelled.status, 200);
+      assert.equal(cancelled.json.status, 'blocked');
+      const cancelAgain = await request(base, '/api/missions/M-l3/cancel', { reason: '再停' });
+      assert.notEqual(cancelAgain.status, 200);
+
+      const inbox = await request(base, '/api/inbox');
+      assert.equal(inbox.status, 200);
+      const pending = inbox.json.pending as Array<{ id: string }>;
+      assert.ok(pending.length >= 1);
+      const acked = await request(base, `/api/deliveries/${pending[0].id}/ack`, {});
+      assert.equal(acked.status, 200);
+      const ackMissing = await request(base, '/api/deliveries/no-such/ack', {});
+      assert.equal(ackMissing.status, 404);
+      assert.equal(ackMissing.json.error, 'UNKNOWN_DELIVERY');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('onMutation 拒绝时 POST 不得 2xx；成功落盘后可被读到', async () => {
+    const rejecting = await openApi({
+      onMutation: () => {
+        throw new Error('disk full');
+      },
+    });
+    try {
+      const failed = await request(rejecting.base, '/api/missions', {
+        projectId: 'P',
+        missionId: 'M-persist-fail',
+        contract: CONTRACT,
+      });
+      assert.notEqual(failed.status, 200);
+      assert.ok(failed.status < 200 || failed.status >= 300);
+      assert.equal(failed.json.error, 'PERSIST_FAILED');
+      assert.match(String(failed.json.message), /结果不确定/);
+    } finally {
+      await closeServer(rejecting.server);
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), 'http-l3-persist-'));
+    const statePath = join(dir, 'state.json');
+    const store = new FileStateStore(statePath);
+    const clock = new FixedClock();
+    const ids = new PersistentIds(store);
+    const projects = new FileProjectRepository(store);
+    const deliveries = new FileDeliveryRepository(store, clock, ids);
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity: new FileActivityLog(store, clock),
+      clock,
+      ids,
+      transaction: store,
+    });
+    const server = createApi({
+      platform,
+      tokens: new RunTokenRegistry(),
+      deliveries,
+      onMutation: () => store.flush(),
+    });
+    try {
+      await listenLoopback(server, 0);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const created = await request(base, '/api/missions', {
+        projectId: 'P-file',
+        missionId: 'M-file',
+        contract: CONTRACT,
+      });
+      assert.equal(created.status, 201);
+      const restarted = new FileStateStore(statePath);
+      const names = (await new FileProjectRepository(restarted).list()).flatMap((project) =>
+        project.missions.map((mission) => mission.id),
+      );
+      assert.ok(names.includes('M-file'));
+    } finally {
+      await closeServer(server);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('错误带 api 版本及与 health 一致的 instance/state', async () => {
+    const identity = { instanceId: '11111111-1111-4111-8111-111111111111', stateId: 'state-l3' };
+    const { server, base } = await openApi({ identity });
+    try {
+      const health = await request(base, '/api/health');
+      assert.equal(health.status, 200);
+      assert.equal(health.headers.get('x-coagent-api'), API_VERSION);
+      assert.equal(health.headers.get('x-coagent-instance'), identity.instanceId);
+      assert.equal(health.headers.get('x-coagent-state-id'), identity.stateId);
+
+      const missing = await request(base, '/api/missions/no-such/finalize', {
+        verdict: 'merge',
+        reasons: [],
+      });
+      assert.notEqual(missing.status, 200);
+      assert.equal(missing.headers.get('x-coagent-api'), API_VERSION);
+      assert.equal(missing.headers.get('x-coagent-instance'), health.headers.get('x-coagent-instance'));
+      assert.equal(missing.headers.get('x-coagent-state-id'), health.headers.get('x-coagent-state-id'));
+      assert.equal(typeof missing.json.error, 'string');
+      assert.equal(typeof missing.json.message, 'string');
+    } finally {
+      await closeServer(server);
+    }
+  });
 });

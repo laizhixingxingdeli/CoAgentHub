@@ -12,23 +12,72 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { acquireLock } from '../src/application/lock.ts';
+import { API_VERSION } from '../src/api/server.ts';
+import {
+  acquireLock,
+  publishLockPort,
+  stateIdFor,
+} from '../src/application/lock.ts';
+import {
+  LoopbackIdentityError,
+  loopbackControlRequest,
+} from '../src/application/loopback-control-client.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
-import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
 
 const L3 = fileURLToPath(new URL('../src/l3.ts', import.meta.url));
+const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const MIN = 60_000;
 
+const WRITE_CONTRACT: MissionContract = {
+  intent: '修 X',
+  acceptance: ['绿'],
+  constraints: [],
+  nonGoals: [],
+  guardrails: [],
+};
+
+const WRITE_ORDER: WorkOrder = {
+  objective: '改 a.txt',
+  allowedScope: ['a.txt'],
+  requiredBehaviour: 'a.txt 内容变成 mission',
+  constraints: [],
+  acceptance: ['内容是 mission'],
+  verification: ['cat a.txt'],
+  doNot: [],
+  contextRefs: [],
+};
+
+const WRITE_PLAN = {
+  findings: 'f',
+  rejectedHypotheses: [],
+  decisions: [],
+  direction: 'd',
+  risks: [],
+};
+
 const dirs: string[] = [];
+const liveServers: Server[] = [];
 after(() => {
+  for (const server of liveServers) {
+    if (!server.listening) continue;
+    try {
+      server.close();
+    } catch {
+      /* already closed */
+    }
+  }
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -104,6 +153,21 @@ function l3(statePath: string, ...args: string[]) {
   return { status: result.status, out: `${result.stdout}${result.stderr}` };
 }
 
+/** 本进程在听 HTTP 时不能 spawnSync：会堵住事件循环，探活超时。 */
+function l3Async(statePath: string, ...args: string[]) {
+  return new Promise<{ status: number | null; out: string }>((resolve) => {
+    const child = spawn(process.execPath, [L3, ...args, '--state', statePath]);
+    let out = '';
+    child.stdout?.on('data', (chunk) => {
+      out += String(chunk);
+    });
+    child.stderr?.on('data', (chunk) => {
+      out += String(chunk);
+    });
+    child.on('close', (status) => resolve({ status, out }));
+  });
+}
+
 describe('l3 plan：看', () => {
   test('不给 --run 就取状态文件旁最新的那份；开着的单子连同照抄就能用的命令一起给出', async () => {
     const { dir, statePath, store } = await nightInProgress();
@@ -177,7 +241,7 @@ describe('l3 plan：看', () => {
     writer.persist();
     const before = readFileSync(statePath, 'utf8');
 
-    for (const args of [['plan'], ['show', 'PLAN-x-20260923-2200-F1'], ['inbox']]) {
+    for (const args of [['plan'], ['show', 'PLAN-x-20260923-2200-F1'], ['inbox'], ['runs', 'PLAN-x-20260923-2200-F1']]) {
       const { status, out } = l3(statePath, ...args);
       assert.equal(status, 0, out);
       assert.equal(readFileSync(statePath, 'utf8'), before, `l3 ${args[0]} 改写了主状态文件`);
@@ -552,3 +616,729 @@ describe('l3 plan：额度展示', () => {
     assert.match(out, /重跑 0\/1/);
   });
 });
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function tempRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-write-repo-'));
+  dirs.push(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.name', 'test');
+  git(dir, 'config', 'user.email', 'test@local');
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'init');
+  return dir;
+}
+
+function lockDirOf(statePath: string): string {
+  const id = stateIdFor(statePath);
+  return join(dirname(id), `.lock-${basename(id)}`);
+}
+
+async function driveToReview(
+  platform: {
+    recordWorkspace: (missionId: string, ref: { projectRoot?: string; branch: string; baseRevision: string }) => Promise<unknown>;
+    startCoordinatorAttempt: (missionId: string) => Promise<{ attemptId: string }>;
+    updatePlan: (missionId: string, attemptId: string, plan: typeof WRITE_PLAN) => Promise<unknown>;
+    createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
+    dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
+    startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
+    submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
+    submitExecutionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
+    finishAttempt: (missionId: string, attemptId: string, input: { endedBy: string }) => Promise<unknown>;
+    reviewExecutionResult: (missionId: string, attemptId: string, review: object) => Promise<unknown>;
+    submitMissionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
+  },
+  workspace: GitWorktreeManager,
+  repo: string,
+  missionId: string,
+) {
+  const prepared = await workspace.prepare(missionId, repo);
+  await platform.recordWorkspace(missionId, {
+    projectRoot: repo,
+    branch: prepared.branch,
+    baseRevision: prepared.baseRevision,
+  });
+  const coord = await platform.startCoordinatorAttempt(missionId);
+  await platform.updatePlan(missionId, coord.attemptId, WRITE_PLAN);
+  const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, {
+    title: 'W',
+    order: WRITE_ORDER,
+  });
+  await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
+  writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
+  const exec = await platform.startExecutorAttempt(missionId, workItemId);
+  await platform.submitEvidence(missionId, exec.attemptId, {
+    kind: 'test',
+    summary: 'node --test 全绿',
+    command: 'node --test',
+    exitCode: 0,
+  });
+  await platform.submitExecutionResult(missionId, exec.attemptId, {
+    outcome: 'completed',
+    summary: '改好了',
+    changedFiles: ['a.txt'],
+    evidenceIds: [],
+    notes: '无',
+  });
+  await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
+  await platform.reviewExecutionResult(missionId, coord.attemptId, {
+    workItemId,
+    verdict: 'accept',
+    acceptanceResults: WRITE_ORDER.acceptance.map((criterion) => ({
+      criterion,
+      status: 'pass' as const,
+      evidence: '测试替身：逐条核过',
+    })),
+    reasons: ['复跑过'],
+    requiredChanges: [],
+  });
+  await platform.submitMissionResult(missionId, coord.attemptId, {
+    outcome: 'delivered',
+    summary: '交付',
+    acceptanceEvidence: [],
+    memoryDelta: [],
+    openRisks: [],
+  });
+  await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
+}
+
+async function seedMainWrites() {
+  const repo = tempRepo();
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-writes-'));
+  dirs.push(dir);
+  const statePath = join(dir, 'state.json');
+  const workspace = new GitWorktreeManager();
+  const built = await buildPersistentPlatform(statePath, {
+    workspace,
+    reconcile: false,
+    exclusive: { what: 'seed-writes' },
+  });
+  try {
+    for (const id of ['M-merge', 'M-back', 'M-abandon'] as const) {
+      // 各占一个 Project：awaiting_review 占着改动名额，同项目塞不下三条。
+      await built.platform.createMission({ projectId: `P-${id}`, missionId: id, contract: WRITE_CONTRACT });
+      await driveToReview(built.platform, workspace, repo, id);
+    }
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-answer', contract: WRITE_CONTRACT });
+    const answerCoord = await built.platform.startCoordinatorAttempt('M-answer');
+    await built.platform.escalateToL3('M-answer', answerCoord.attemptId, {
+      question: '要不要继续？',
+      why: '不确定',
+      optionsConsidered: ['继续', '停'],
+    });
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-revise', contract: WRITE_CONTRACT });
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-cancel', contract: WRITE_CONTRACT });
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-pause', contract: WRITE_CONTRACT });
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-resume', contract: WRITE_CONTRACT });
+    await built.platform.pauseMission('M-resume');
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-retire', contract: WRITE_CONTRACT });
+    const retireCoord = await built.platform.startCoordinatorAttempt('M-retire');
+    await built.platform.updatePlan('M-retire', retireCoord.attemptId, WRITE_PLAN);
+    const retired = await built.platform.createWorkItem('M-retire', retireCoord.attemptId, {
+      title: 'W',
+      order: WRITE_ORDER,
+    });
+    await built.platform.createMission({ projectId: 'P-misc', missionId: 'M-rerun', contract: WRITE_CONTRACT });
+    built.persist();
+    const pending = await built.deliveries.pending();
+    const deliveryId = pending[0]?.id;
+    assert.ok(deliveryId, '升级应进收件箱');
+    return {
+      dir,
+      repo,
+      statePath,
+      workItemId: retired.workItemId,
+      deliveryId,
+      contractFile: join(dir, 'new-contract.json'),
+    };
+  } finally {
+    built.releaseLock();
+  }
+}
+
+async function startLiveChild(statePath: string): Promise<{ stop: () => Promise<void> }> {
+  // 服务必须在独立进程：父进程 spawnSync CLI 会堵住事件循环，同进程 HTTP 探活会超时。
+  const child = spawn(process.execPath, [MAIN], {
+    env: {
+      ...process.env,
+      COAGENT_STORE: 'file',
+      COAGENT_STATE: statePath,
+      PORT: '0',
+      COAGENT_RECONCILE_INTERVAL_MS: '0',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+  await new Promise<void>((resolve, reject) => {
+    let started = false;
+    const timer = setTimeout(() => {
+      if (started) return;
+      child.kill();
+      reject(new Error(`常驻服务启动超时：${stderr}`));
+    }, 20_000);
+    child.stdout?.on('data', (chunk) => {
+      if (started) return;
+      if (String(chunk).includes('平台已启动')) {
+        started = true;
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.once('error', (error) => {
+      if (started) return;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      if (started) return;
+      clearTimeout(timer);
+      reject(new Error(`常驻服务提前退出 ${String(code)}：${stderr}`));
+    });
+  });
+  return {
+    stop: () =>
+      new Promise((resolve) => {
+        const done = () => resolve();
+        child.once('exit', done);
+        child.kill();
+        setTimeout(() => {
+          child.kill('SIGKILL');
+          done();
+        }, 3000);
+      }),
+  };
+}
+
+async function withWriter(
+  statePath: string,
+  mode: 'live' | 'exclusive',
+  fn: () => void | Promise<void>,
+): Promise<void> {
+  if (mode === 'exclusive') {
+    await fn();
+    return;
+  }
+  const live = await startLiveChild(statePath);
+  try {
+    await fn();
+  } finally {
+    await live.stop();
+  }
+}
+
+describe('l3 主写：探测与回环转发', () => {
+  test('持锁常驻服务及无服务：11 个写命令成功', async () => {
+    for (const mode of ['exclusive', 'live'] as const) {
+      const fx = await seedMainWrites();
+      writeFileSync(
+        fx.contractFile,
+        JSON.stringify({
+          contract: {
+            intent: '新契约',
+            acceptance: ['绿'],
+            constraints: [],
+            nonGoals: [],
+            guardrails: [],
+          },
+        }),
+      );
+      await withWriter(fx.statePath, mode, () => {
+        const cases: Array<{ name: string; args: string[]; why: RegExp }> = [
+          { name: 'merge', args: ['merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo], why: /Mission M-merge → completed/ },
+          { name: 'send-back', args: ['send-back', 'M-back', '--reason', '再改'], why: /Mission M-back → planning/ },
+          { name: 'abandon', args: ['abandon', 'M-abandon', '--reason', '不做了'], why: /Mission M-abandon → blocked/ },
+          { name: 'answer', args: ['answer', 'M-answer', '--answer', '继续'], why: /已答复 M-answer/ },
+          { name: 'revise', args: ['revise', 'M-revise', '--contract', fx.contractFile], why: /Contract → r2/ },
+          { name: 'cancel', args: ['cancel', 'M-cancel', '--reason', '停'], why: /已叫停/ },
+          { name: 'pause', args: ['pause', 'M-pause'], why: /已暂停/ },
+          { name: 'resume', args: ['resume', 'M-resume'], why: /已恢复/ },
+          { name: 'retire', args: ['retire', 'M-retire', '--item', fx.workItemId, '--reason', '不做'], why: /已作废/ },
+          { name: 'rerun', args: ['rerun', 'M-rerun', '--as', 'M-rerun-2'], why: /已另起一条：M-rerun-2/ },
+          { name: 'ack', args: ['ack', fx.deliveryId], why: new RegExp(`${fx.deliveryId} 已确认`) },
+        ];
+        for (const item of cases) {
+          const result = l3(fx.statePath, ...item.args);
+          assert.equal(result.status, 0, `${mode} ${item.name}: ${result.out}`);
+          assert.match(result.out, item.why, `${mode} ${item.name}`);
+        }
+      });
+    }
+  });
+
+  test('持锁常驻服务及无服务：规则拒绝非零且错误可见；reviewer 不降级', async () => {
+    for (const mode of ['exclusive', 'live'] as const) {
+      const fx = await seedMainWrites();
+      await withWriter(fx.statePath, mode, async () => {
+        const before = readFileSync(fx.statePath);
+        const prior: Array<{ name: string; args: string[]; why: RegExp }> = [
+          { name: 'send-back 缺理由', args: ['send-back', 'M-back'], why: /--reason/ },
+          { name: 'revise 缺文件', args: ['revise', 'M-revise'], why: /--contract/ },
+          { name: 'retire 缺理由', args: ['retire', 'M-retire', '--item', fx.workItemId], why: /--reason/ },
+        ];
+        for (const item of prior) {
+          const result = l3(fx.statePath, ...item.args);
+          assert.notEqual(result.status, 0, `${mode} ${item.name} 应失败：${result.out}`);
+          assert.match(result.out, item.why, `${mode} ${item.name}: ${result.out}`);
+          assert.equal(readFileSync(fx.statePath).equals(before), true, `${mode} ${item.name} 改了状态`);
+        }
+        const afterAssembly: Array<{ name: string; args: string[]; why: RegExp }> = [
+          { name: 'merge 未知', args: ['merge', 'NO-SUCH'], why: /不存在|UNKNOWN_MISSION/ },
+          { name: 'answer 无升级', args: ['answer', 'M-revise', '--answer', 'x'], why: /没有待答复|NO_OPEN_ESCALATION/ },
+          { name: 'cancel 未知', args: ['cancel', 'NO-SUCH'], why: /不存在|UNKNOWN_MISSION/ },
+        ];
+        for (const item of afterAssembly) {
+          const result = l3(fx.statePath, ...item.args);
+          assert.notEqual(result.status, 0, `${mode} ${item.name} 应失败：${result.out}`);
+          assert.match(result.out, item.why, `${mode} ${item.name}: ${result.out}`);
+          if (mode === 'live') {
+            assert.equal(readFileSync(fx.statePath).equals(before), true, `${mode} ${item.name} 改了状态`);
+          }
+        }
+        const signed = l3(
+          fx.statePath,
+          'merge',
+          'M-merge',
+          '--as',
+          'claude',
+          '--confirmed-by',
+          'echo',
+          '--repo',
+          fx.repo,
+        );
+        assert.equal(signed.status, 0, `${mode} reviewer merge: ${signed.out}`);
+        const revived = await buildPersistentPlatform(fx.statePath, { reconcile: false });
+        const view = await revived.platform.getMissionView('M-merge');
+        assert.equal(view.finalReview?.authority?.kind, 'reviewer');
+        revived.releaseLock();
+      });
+    }
+  });
+
+  test('HA merge --as 不降级为普通 finalize', async () => {
+    const repo = tempRepo();
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-ha-fwd-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const workspace = new GitWorktreeManager();
+    const built = await buildPersistentPlatform(statePath, {
+      workspace,
+      reconcile: false,
+      exclusive: { what: 'seed-ha' },
+    });
+    const project = await built.projects.ensure('P');
+    project.createMission({ id: 'M-HA', contract: WRITE_CONTRACT, executionMode: 'high_assurance' });
+    await built.projects.save(project);
+    await driveToReview(built.platform, workspace, repo, 'M-HA');
+    built.persist();
+    built.releaseLock();
+    const before = readFileSync(statePath);
+    await withWriter(statePath, 'live', () => {
+      const result = l3(
+        statePath,
+        'merge',
+        'M-HA',
+        '--as',
+        'claude',
+        '--confirmed-by',
+        'echo',
+        '--repo',
+        repo,
+      );
+      assert.notEqual(result.status, 0, result.out);
+      assert.match(result.out, /HA_AUTHORITY|未配置授权/);
+      assert.doesNotMatch(result.out, /本项不开放合并/);
+      assert.equal(readFileSync(statePath).equals(before), true);
+    });
+  });
+
+  test('残锁、活 PID 非匹配、端口不可达、身份不符：CLI 非零且主状态不变', async () => {
+    const fx = await seedMainWrites();
+    const before = readFileSync(fx.statePath);
+    const mergeArgs = ['merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo];
+
+    mkdirSync(lockDirOf(fx.statePath));
+    const residual = l3(fx.statePath, ...mergeArgs);
+    assert.notEqual(residual.status, 0, residual.out);
+    assert.match(residual.out, /无法安全转发|占用|缺失|损坏/);
+    assert.equal(readFileSync(fx.statePath).equals(before), true);
+    rmSync(lockDirOf(fx.statePath), { recursive: true, force: true });
+
+    const instanceId = 'inst-mismatch';
+    const release = acquireLock(fx.statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    try {
+      const { server, port } = await listenHealth({
+        instanceId: 'inst-other',
+        stateId: stateIdFor(fx.statePath),
+        api: API_VERSION,
+      });
+      publishLockPort(fx.statePath, instanceId, port);
+      const mismatch = await l3Async(fx.statePath, ...mergeArgs);
+      assert.notEqual(mismatch.status, 0, mismatch.out);
+      assert.match(mismatch.out, /无法安全转发|实例/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+      server.close();
+
+      const closed = createServer();
+      liveServers.push(closed);
+      const closedPort = await new Promise<number>((resolve, reject) => {
+        closed.once('error', reject);
+        closed.listen(0, '127.0.0.1', () => resolve((closed.address() as AddressInfo).port));
+      });
+      await new Promise<void>((done, fail) => closed.close((err) => (err ? fail(err) : done())));
+      publishLockPort(fx.statePath, instanceId, closedPort);
+      const unreachable = l3(fx.statePath, ...mergeArgs);
+      assert.notEqual(unreachable.status, 0, unreachable.out);
+      assert.match(unreachable.out, /无法安全转发|连接不可达|断线/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+    } finally {
+      release();
+    }
+  });
+
+  test('probe live 但写应答身份不符：非零且不离线回退', async () => {
+    const fx = await seedMainWrites();
+    const before = readFileSync(fx.statePath);
+    const instanceId = 'inst-live-ok';
+    const stateId = stateIdFor(fx.statePath);
+    const release = acquireLock(fx.statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    try {
+      const server = createServer((req, res) => {
+        const path = String(req.url ?? '/').split('?')[0];
+        if (req.method === 'GET' && path === '/api/health') {
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'x-coagent-api': API_VERSION,
+            'x-coagent-instance': instanceId,
+            'x-coagent-state-id': stateId,
+          });
+          res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-coagent-api': API_VERSION,
+          'x-coagent-instance': 'inst-drifted',
+          'x-coagent-state-id': stateId,
+        });
+        res.end(JSON.stringify({ status: 'completed' }));
+      });
+      liveServers.push(server);
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+      });
+      publishLockPort(fx.statePath, instanceId, port);
+      const result = await l3Async(fx.statePath, 'merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo);
+      assert.notEqual(result.status, 0, result.out);
+      assert.match(result.out, /实例漂移/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+    } finally {
+      release();
+    }
+  });
+
+  test('假 health 的 stateId/API 版本不匹配：CLI 非零且主状态不变', async () => {
+    const fx = await seedMainWrites();
+    const before = readFileSync(fx.statePath);
+    const mergeArgs = ['merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo];
+    const instanceId = 'inst-health-mismatch';
+    const canonical = stateIdFor(fx.statePath);
+    const release = acquireLock(fx.statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    try {
+      const { server: stateServer, port: statePort } = await listenHealth({
+        instanceId,
+        stateId: canonical + '-other',
+        api: API_VERSION,
+      });
+      publishLockPort(fx.statePath, instanceId, statePort);
+      const stateMismatch = await l3Async(fx.statePath, ...mergeArgs);
+      assert.notEqual(stateMismatch.status, 0, stateMismatch.out);
+      assert.match(stateMismatch.out, /无法安全转发|状态/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+      stateServer.close();
+
+      const { server: apiServer, port: apiPort } = await listenHealth({
+        instanceId,
+        stateId: canonical,
+        api: `${API_VERSION}-other`,
+      });
+      publishLockPort(fx.statePath, instanceId, apiPort);
+      const apiMismatch = await l3Async(fx.statePath, ...mergeArgs);
+      assert.notEqual(apiMismatch.status, 0, apiMismatch.out);
+      assert.match(apiMismatch.out, /无法安全转发|API 版本/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+      apiServer.close();
+    } finally {
+      release();
+    }
+  });
+
+  test('probe live 但写应答 API 版本不符：非零且不离线回退', async () => {
+    const fx = await seedMainWrites();
+    const before = readFileSync(fx.statePath);
+    const instanceId = 'inst-live-api';
+    const stateId = stateIdFor(fx.statePath);
+    const release = acquireLock(fx.statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    try {
+      const server = createServer((req, res) => {
+        const path = String(req.url ?? '/').split('?')[0];
+        if (req.method === 'GET' && path === '/api/health') {
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'x-coagent-api': API_VERSION,
+            'x-coagent-instance': instanceId,
+            'x-coagent-state-id': stateId,
+          });
+          res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-coagent-api': `${API_VERSION}-other`,
+          'x-coagent-instance': instanceId,
+          'x-coagent-state-id': stateId,
+        });
+        res.end(JSON.stringify({ status: 'completed' }));
+      });
+      liveServers.push(server);
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+      });
+      publishLockPort(fx.statePath, instanceId, port);
+      const result = await l3Async(fx.statePath, 'merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo);
+      assert.notEqual(result.status, 0, result.out);
+      assert.match(result.out, /错误版本/);
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+    } finally {
+      release();
+    }
+  });
+
+  test('probe live→回环写：同一状态大小写 Windows 接受、非 Windows 拒绝；错误实例/版本一律拒', async () => {
+    const fx = await seedMainWrites();
+    const before = readFileSync(fx.statePath);
+    const instanceId = 'inst-case-write';
+    const canonical = stateIdFor(fx.statePath);
+    const folded = flipAsciiCase(canonical);
+    assert.notEqual(folded, canonical);
+    const release = acquireLock(fx.statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    try {
+      const server = createServer((req, res) => {
+        const path = String(req.url ?? '/').split('?')[0];
+        if (req.method === 'GET' && path === '/api/health') {
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'x-coagent-api': API_VERSION,
+            'x-coagent-instance': instanceId,
+            'x-coagent-state-id': canonical,
+          });
+          res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-coagent-api': queryParam(req.url, 'api') ?? API_VERSION,
+          'x-coagent-instance': queryParam(req.url, 'instance') ?? instanceId,
+          'x-coagent-state-id': queryParam(req.url, 'state') ?? folded,
+        });
+        res.end(JSON.stringify({ status: 'completed' }));
+      });
+      liveServers.push(server);
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+      });
+      publishLockPort(fx.statePath, instanceId, port);
+
+      const cli = await l3Async(fx.statePath, 'merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo);
+      if (process.platform === 'win32') {
+        assert.equal(cli.status, 0, cli.out);
+        assert.match(cli.out, /Mission M-merge → completed/);
+      } else {
+        assert.notEqual(cli.status, 0, cli.out);
+        assert.match(cli.out, /状态身份不符/);
+      }
+      assert.equal(readFileSync(fx.statePath).equals(before), true);
+
+      const target = {
+        port,
+        instanceId,
+        stateId: canonical,
+        apiVersion: API_VERSION,
+      };
+      const asWin = await loopbackControlRequest(
+        target,
+        { method: 'POST', path: '/api/missions/M-merge/finalize', body: { verdict: 'merge', reasons: ['ok'] } },
+        { treatStateIdAsWindows: true },
+      );
+      assert.deepEqual(asWin, { status: 'completed' });
+
+      await assert.rejects(
+        () =>
+          loopbackControlRequest(
+            target,
+            { method: 'POST', path: '/api/missions/M-merge/finalize', body: { verdict: 'merge', reasons: ['ok'] } },
+            { treatStateIdAsWindows: false },
+          ),
+        (error: unknown) => error instanceof LoopbackIdentityError && /状态身份不符/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          loopbackControlRequest(
+            target,
+            {
+              method: 'POST',
+              path: '/api/missions/M-merge/finalize?state=' + encodeURIComponent(canonical + '-other'),
+              body: { verdict: 'merge', reasons: ['ok'] },
+            },
+            { treatStateIdAsWindows: true },
+          ),
+        (error: unknown) => error instanceof LoopbackIdentityError && /状态身份不符/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          loopbackControlRequest(
+            target,
+            {
+              method: 'POST',
+              path: '/api/missions/M-merge/finalize?instance=inst-other',
+              body: { verdict: 'merge', reasons: ['ok'] },
+            },
+            { treatStateIdAsWindows: true },
+          ),
+        (error: unknown) => error instanceof LoopbackIdentityError && /实例漂移/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          loopbackControlRequest(
+            target,
+            {
+              method: 'POST',
+              path: `/api/missions/M-merge/finalize?api=${encodeURIComponent(API_VERSION + '-other')}`,
+              body: { verdict: 'merge', reasons: ['ok'] },
+            },
+            { treatStateIdAsWindows: true },
+          ),
+        (error: unknown) => error instanceof LoopbackIdentityError && /错误版本/.test(error.message),
+      );
+    } finally {
+      release();
+    }
+  });
+
+  test('空锁启动竞争不产生无锁第二写者', async () => {
+    const fx = await seedMainWrites();
+    const spawnOnce = (args: string[]) =>
+      new Promise<{ status: number | null; out: string }>((resolve) => {
+        const child = spawn(process.execPath, [L3, ...args, '--state', fx.statePath]);
+        let out = '';
+        child.stdout?.on('data', (chunk) => {
+          out += String(chunk);
+        });
+        child.stderr?.on('data', (chunk) => {
+          out += String(chunk);
+        });
+        child.on('close', (status) => resolve({ status, out }));
+      });
+    const [a, b] = await Promise.all([
+      spawnOnce(['merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo]),
+      spawnOnce(['merge', 'M-merge', '--reason', 'ok', '--repo', fx.repo]),
+    ]);
+    const oks = [a, b].filter((row) => row.status === 0);
+    const fails = [a, b].filter((row) => row.status !== 0);
+    assert.equal(oks.length, 1, `${a.out}\n---\n${b.out}`);
+    assert.equal(fails.length, 1);
+    const revived = await buildPersistentPlatform(fx.statePath, { reconcile: false });
+    const view = await revived.platform.getMissionView('M-merge');
+    assert.equal(view.status, 'completed');
+    revived.releaseLock();
+  });
+
+  test('plan decide/approve 与 inbox/show/runs 不被主锁阻塞；帮助说明 AQ1', async () => {
+    const { statePath, store } = await nightInProgress();
+    const ha = await haReleaseRun();
+    const residualDir = lockDirOf(statePath);
+    mkdirSync(residualDir);
+    const inbox = l3(statePath, 'inbox');
+    assert.equal(inbox.status, 0, inbox.out);
+    assert.doesNotMatch(inbox.out, /无法安全转发/);
+    const shown = l3(statePath, 'show', 'NOPE');
+    assert.doesNotMatch(shown.out, /无法安全转发/);
+    const plan = l3(statePath, 'plan');
+    assert.equal(plan.status, 0, plan.out);
+    assert.doesNotMatch(plan.out, /无法安全转发/);
+    const runs = l3(statePath, 'runs', 'NOPE');
+    assert.doesNotMatch(runs.out, /无法安全转发/);
+    assert.notEqual(runs.status, 0);
+    const decide = l3(
+      statePath,
+      'plan',
+      'decide',
+      'E-1',
+      '--action',
+      'skip',
+      '--reason',
+      '夹具',
+      '--as',
+      'claude',
+    );
+    assert.equal(decide.status, 0, decide.out);
+    assert.equal(store.read()?.feature('F1')?.status, 'skipped');
+    const approve = l3(ha.statePath, ...haArgs(ha.recordPath));
+    assert.equal(approve.status, 0, approve.out);
+    const help = l3(statePath);
+    assert.equal(help.status, 0, help.out);
+    assert.match(help.out, /AQ1/);
+    assert.match(help.out, /plan decide --action answer/);
+    assert.match(help.out, /HTTP 不复制续跑/);
+    rmSync(residualDir, { recursive: true, force: true });
+  });
+});
+
+function flipAsciiCase(value: string): string {
+  return value.replace(/[A-Za-z]/g, (ch) =>
+    ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase(),
+  );
+}
+
+function queryParam(url: string | undefined, name: string): string | undefined {
+  if (!url || !url.includes('?')) return undefined;
+  return new URLSearchParams(url.slice(url.indexOf('?') + 1)).get(name) ?? undefined;
+}
+
+function listenHealth(headers: {
+  instanceId: string;
+  stateId: string;
+  api: string;
+}): Promise<{ server: Server; port: number }> {
+  const server = createServer((req, res) => {
+    const path = (req.url ?? '/').split('?')[0];
+    if (req.method === 'GET' && path === '/api/health') {
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'x-coagent-instance': headers.instanceId,
+        'x-coagent-state-id': headers.stateId,
+      });
+      res.end(JSON.stringify({ ok: true, api: headers.api }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  liveServers.push(server);
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as AddressInfo).port }));
+  });
+}

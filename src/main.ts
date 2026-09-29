@@ -873,6 +873,9 @@ export async function startServer(
     if ('releaseLock' in built && typeof built.releaseLock === 'function') {
       releaseMainLock = built.releaseLock;
     }
+    const fileIdentity = usePg
+      ? undefined
+      : { instanceId, stateId: stateIdFor(statePath) };
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,
@@ -884,12 +887,10 @@ export async function startServer(
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
+      ...(fileIdentity ? { identity: fileIdentity } : {}),
     });
-    if (!usePg) {
-      attachLoopbackWriterIdentity(server, {
-        instanceId,
-        stateId: stateIdFor(statePath),
-      });
+    if (fileIdentity) {
+      attachLoopbackWriterIdentity(server, fileIdentity);
     }
     // 显式绑 loopback：观测面/API 不对外网口开放。动态 port=0 时日志必须读
     // server.address()，不能回显调用方传入的 port（那会打出 :0）。

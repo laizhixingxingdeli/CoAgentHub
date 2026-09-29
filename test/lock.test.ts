@@ -66,6 +66,12 @@ function readHolderFile(statePath: string): LockInfo {
   return JSON.parse(readFileSync(join(lockDirOf(statePath), 'holder.json'), 'utf8')) as LockInfo;
 }
 
+function flipAsciiCase(value: string): string {
+  return value.replace(/[A-Za-z]/g, (ch) =>
+    ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase(),
+  );
+}
+
 function listenHealth(headers: {
   instanceId: string;
   stateId: string;
@@ -465,6 +471,73 @@ describe('常驻写者身份与本机探测', () => {
       const runProbe = await probeLocalWriter(statePath);
       assert.equal(runProbe.status, 'occupied');
       if (runProbe.status === 'occupied') assert.match(runProbe.reason, /实例/);
+      assert.ok(existsSync(lockDirOf(statePath)));
+    } finally {
+      release();
+    }
+  });
+
+  test('probe：同一状态文件大小写不同时 Windows 为 live，非 Windows 仍 occupied', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const instanceId = 'inst-case';
+    const apiVersion = 'v-case';
+    const canonical = stateIdFor(statePath);
+    const folded = flipAsciiCase(canonical);
+    assert.notEqual(folded, canonical);
+
+    const release = acquireLock(statePath, '常驻', { instanceId, apiVersion });
+    try {
+      const { port } = await listenHealth({
+        instanceId,
+        stateId: folded,
+        api: apiVersion,
+      });
+      publishLockPort(statePath, instanceId, port);
+
+      const asWin = await probeLocalWriter(statePath, { treatStateIdAsWindows: true });
+      assert.equal(asWin.status, 'live');
+      if (asWin.status === 'live') {
+        assert.equal(asWin.holder.instanceId, instanceId);
+        assert.equal(asWin.holder.port, port);
+      }
+
+      const asPosix = await probeLocalWriter(statePath, { treatStateIdAsWindows: false });
+      assert.equal(asPosix.status, 'occupied');
+      if (asPosix.status === 'occupied') assert.match(asPosix.reason, /状态/);
+      assert.ok(existsSync(lockDirOf(statePath)));
+
+      const native = await probeLocalWriter(statePath);
+      if (process.platform === 'win32') {
+        assert.equal(native.status, 'live');
+        const viaFoldedPath = await probeLocalWriter(folded);
+        assert.equal(viaFoldedPath.status, 'live');
+      } else {
+        assert.equal(native.status, 'occupied');
+        if (native.status === 'occupied') assert.match(native.reason, /状态/);
+      }
+    } finally {
+      release();
+    }
+  });
+
+  test('probe：Windows 规则下不同状态身份仍 occupied，不删锁', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const instanceId = 'inst-case-other';
+    const apiVersion = 'v-case-other';
+    const canonical = stateIdFor(statePath);
+    const release = acquireLock(statePath, '常驻', { instanceId, apiVersion });
+    try {
+      const { port } = await listenHealth({
+        instanceId,
+        stateId: canonical + '-other',
+        api: apiVersion,
+      });
+      publishLockPort(statePath, instanceId, port);
+      const probed = await probeLocalWriter(statePath, { treatStateIdAsWindows: true });
+      assert.equal(probed.status, 'occupied');
+      if (probed.status === 'occupied') assert.match(probed.reason, /状态/);
       assert.ok(existsSync(lockDirOf(statePath)));
     } finally {
       release();
