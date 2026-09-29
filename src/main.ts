@@ -1232,7 +1232,11 @@ export function formatHostedRunSnapshots(snapshots: readonly HostedRunSnapshot[]
   }).join('\n');
 }
 
-export function createSigintHandler(close: () => void, onSecondSignal: () => void): () => void {
+export function createSigintHandler(
+  close: () => void,
+  onSecondSignal: () => void,
+  onFirstSignal?: () => void,
+): () => void {
   let received = false;
   return () => {
     if (received) {
@@ -1240,7 +1244,11 @@ export function createSigintHandler(close: () => void, onSecondSignal: () => voi
       return;
     }
     received = true;
-    close();
+    try {
+      onFirstSignal?.();
+    } finally {
+      close();
+    }
   };
 }
 
@@ -1263,6 +1271,12 @@ if (isDirectMainEntry()) {
       const onInterrupt = createSigintHandler(onSignal, () => {
         console.warn('Second SIGINT received; controlled pause is not available yet.');
         process.exitCode = 1;
+      }, () => {
+        try {
+          console.log(formatHostedRunSnapshots(built.hostedRunSnapshots()));
+        } catch (error) {
+          console.error(`无法读取在途 PlanRun/Mission 清单：${error instanceof Error ? error.message : String(error)}`);
+        }
       });
       process.on('SIGINT', onInterrupt);
       process.once('SIGTERM', onSignal);

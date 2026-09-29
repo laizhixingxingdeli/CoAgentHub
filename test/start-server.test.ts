@@ -1400,17 +1400,31 @@ describe('startServer hosted 接线与排空',
       assert.match(formatHostedRunSnapshots([]), /无在途/);
     });
 
-    test('双次 SIGINT：只关闭一次并单独处理第二次', () => {
+    test('首次 SIGINT 先报告注入的在途清单再关闭，第二次不重复报告', () => {
+      const events: string[] = [];
+      let reports = 0;
       let closes = 0;
       let secondSignals = 0;
+      const snapshots = [{ kind: 'plan' as const, id: 'P-real', status: '升级中', missionId: 'M-real', escalationId: 'E-real', deadline: '2030-01-02T03:04:05Z', runPath: '/real/run.json', reviewer: 'reviewer-real' }];
       const handler = createSigintHandler(
-        () => { closes += 1; },
+        () => { closes += 1; events.push('close'); },
         () => { secondSignals += 1; },
+        () => { reports += 1; events.push(formatHostedRunSnapshots(snapshots)); },
       );
       handler();
       handler();
       assert.equal(closes, 1);
+      assert.equal(reports, 1);
       assert.equal(secondSignals, 1);
+      assert.equal(events[0], formatHostedRunSnapshots(snapshots));
+      assert.equal(events[1], 'close');
+      assert.match(events[0]!, /P-real.*升级中/);
+      assert.match(events[0]!, /M-real/);
+      assert.match(events[0]!, /E-real.*2030-01-02T03:04:05Z/);
+      assert.match(events[0]!, /node src\/l3\.ts plan decide E-real --action stop --reason "服务退出" --run "\/real\/run\.json" --as "reviewer-real"/);
+      let failureClosed = 0;
+      assert.throws(() => createSigintHandler(() => { failureClosed += 1; }, () => {}, () => { throw new Error('snapshot failure'); })());
+      assert.equal(failureClosed, 1);
     });
     test('源码：两种 hosted 回调交给同一 createApi；close 先 drain 再停 tick/persist',
       () => {
@@ -1437,6 +1451,8 @@ describe('startServer hosted 接线与排空',
         assert.match(startServerSrc, /baseUrl: loopback\.baseUrl/);
         assert.match(main, /process\.on\('SIGINT'/);
         assert.match(main, /process\.once\('SIGTERM'/);
+        assert.match(main, /formatHostedRunSnapshots\(built\.hostedRunSnapshots\(\)\)/);
+        assert.match(main, /无法读取在途 PlanRun\/Mission 清单/);
       },
     );
 
