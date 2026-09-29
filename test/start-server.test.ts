@@ -2103,6 +2103,8 @@ describe('startServer 方案记录目录与托管 live', () => {
     if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
     const target = await liveTarget(statePath);
     const base = hostedPlanBody(repo, adapter, statePath, runDir);
+    base.plan.stopConditions.wallClockMs = 500;
+    base.plan.stopConditions.escalationTimeoutMs = 500;
     let running: Promise<number> | undefined;
     try {
       running = loopbackRunRequest(target, { path: '/api/control/run-plan', body: base }, () => {});
