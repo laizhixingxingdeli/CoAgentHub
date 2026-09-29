@@ -27,6 +27,7 @@ import {
   createSigintHandler,
   defaultStatePathFromMainModule,
   formatHostedRunSnapshots,
+  shutdownHostedPlan,
   isDirectMainEntry,
   resolveDirectMainStatePath,
   startServer,
@@ -68,6 +69,48 @@ function tempState(): string {
   dirs.push(dir);
   return join(dir, 'state.json');
 }
+
+test('shutdownHostedPlan pauses deduplicated missions and persists service stop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-shutdown-plan-'));
+  dirs.push(dir);
+  const runPath = join(dir, 'R-shutdown.json');
+  const run = PlanRun.start({
+    id: 'R-shutdown', planId: 'PLAN-shutdown', projectId: 'P-shutdown',
+    integrationBranch: 'auto/test', reviewer: 'reviewer',
+    stopConditions: { unresolvedEscalations: 1, wallClockMs: 60_000, escalationTimeoutMs: 60_000 },
+    featureIds: ['F1'], startedAt: '2026-09-29T00:00:00.000Z',
+  });
+  run.startFeature('F1', 'M1');
+  await new FilePlanRunStore(runPath).create(run);
+  const paused: string[] = [];
+  let persisted = false;
+  const result = await shutdownHostedPlan({
+    runPath, hostedMissionId: 'M1', platform: { pauseMission: async (id) => { paused.push(id); return { paused: true }; } },
+    persist: async () => { persisted = true; }, now: () => '2026-09-29T00:01:00.000Z',
+  });
+  assert.deepEqual(paused, ['M1']);
+  assert.equal(persisted, true);
+  const stored = new FilePlanRunStore(runPath).read()!;
+  assert.equal(stored.stopped?.reason, 'service_shutdown');
+  assert.equal(stored.stopped?.detail.includes('M1'), true);
+});
+
+test('shutdownHostedPlan preserves stopped records and rejects missing records', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-shutdown-stopped-'));
+  dirs.push(dir);
+  const runPath = join(dir, 'R-stopped.json');
+  const run = PlanRun.start({
+    id: 'R-stopped', planId: 'PLAN-stopped', projectId: 'P-stopped',
+    integrationBranch: 'auto/test', reviewer: 'reviewer',
+    stopConditions: { unresolvedEscalations: 1, wallClockMs: 60_000, escalationTimeoutMs: 60_000 },
+    featureIds: ['F1'], startedAt: '2026-09-29T00:00:00.000Z',
+  });
+  run.halt('service_shutdown', 'old reason', '2026-09-29T00:01:00.000Z');
+  await new FilePlanRunStore(runPath).create(run);
+  await shutdownHostedPlan({ runPath, platform: { pauseMission: async () => ({ paused: true }) }, persist: async () => { throw new Error('must not persist'); } });
+  assert.equal(new FilePlanRunStore(runPath).read()?.stopped?.detail, 'old reason');
+  await assert.rejects(shutdownHostedPlan({ runPath: join(dir, 'missing.json'), platform: { pauseMission: async () => ({ paused: true }) }, persist: async () => {} }), /尚未创建/);
+});
 
 const WRITE_CONTRACT = {
   intent: '本机写入口',

@@ -102,6 +102,39 @@ import { WorkspaceChangedPathReader } from './application/validation/workspace-c
 import { WorkspaceDiffFactReader } from './application/validation/workspace-diff-fact-reader.ts';
 import { InMemoryValidationReportRepository } from './application/validation/report-repository.ts';
 
+export async function shutdownHostedPlan(input: {
+  readonly runPath: string;
+  readonly hostedMissionId?: string;
+  readonly platform: Pick<Platform, 'pauseMission'>;
+  readonly persist: () => Promise<void>;
+  readonly now?: () => string;
+  readonly waitForCreateMs?: number;
+}): Promise<{ readonly pausedMissionIds: readonly string[]; readonly stopped: boolean }> {
+  const store = new FilePlanRunStore(input.runPath);
+  const deadline = Date.now() + (input.waitForCreateMs ?? 1_000);
+  let run = store.read();
+  while (!run && Date.now() < deadline) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    run = store.read();
+  }
+  if (!run) throw new Error(`不能安全关闭：PlanRun 记录尚未创建：${input.runPath}`);
+  if (run.stopped) return { pausedMissionIds: [], stopped: false };
+
+  const missionIds = new Set<string>();
+  for (const feature of run.features) {
+    if (feature.status === 'running') for (const id of feature.missionIds) missionIds.add(id);
+  }
+  if (input.hostedMissionId) missionIds.add(input.hostedMissionId);
+  for (const missionId of missionIds) await input.platform.pauseMission(missionId);
+  await input.persist();
+  await store.update((latest) => {
+    if (!latest.stopped) {
+      latest.halt('service_shutdown', `服务受控关闭；已暂停 Mission：${[...missionIds].join(', ') || '无'}`, (input.now ?? (() => new Date().toISOString()))());
+    }
+  });
+  return { pausedMissionIds: [...missionIds], stopped: true };
+}
+
 export function buildPlatform(
   workspace?: WorkspaceManager,
   decisionProvider?: DecisionProvider,
