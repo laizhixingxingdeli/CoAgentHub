@@ -443,6 +443,59 @@ describe('资源池页：首屏不阻塞模型', { concurrency: false }, () => {
     const idle = addFormHtml(undefined, { open: false, modelsStatus: 'idle' });
     assert.equal(idle.includes('适配层没上线'), false, '还没拉清单时不该告诉人适配层没上线');
     assert.match(idle, /<details\b/);
+    assert.match(html, /还没读到健康/, '没有 health 对象时要说出来，不能空着像没这列');
+  });
+
+  test('健康格：熔断、七日、失败、无运行时原因；缺字段与注入', async () => {
+    const { poolPageHtml, healthCellHtml } = await loaded;
+    const html = poolPageHtml({
+      coordinator: [],
+      executor: [
+        {
+          profileId: '<x>',
+          endpoint: 'local',
+          runtime: 'pi',
+          health: {
+            circuit: { state: 'open', failureClass: 'quota"' },
+            lastFailure: { failureClass: 'quota', at: '2026-01-01T00:00:00.000Z', source: 'attempt.ended' },
+            window7d: { attempts: 1, successes: 0, reportedCost: 1.25 },
+            runtime: { running: false, reason: 'no_active_lease' },
+          },
+        },
+      ],
+    }, catalog, usageTotal);
+    assert.match(html, /data-health-circuit/);
+    assert.match(html, /chip failed/);
+    assert.match(html, />open</);
+    assert.match(html, /近七日：尝试 1 · 成功 0 · \$1\.2500/);
+    assert.match(html, /最近失败：quota/);
+    assert.match(html, /未在跑 · no_active_lease/);
+    assert.equal(html.includes('<x>'), false, 'profileId 没转义');
+    assert.equal(html.includes('quota"'), false);
+
+    const missing = healthCellHtml(undefined);
+    assert.match(missing, /还没读到健康/);
+    const idle = healthCellHtml({
+      circuit: { state: 'closed' },
+      lastFailure: { failureClass: 'unknown', at: null },
+      window7d: { attempts: 0, successes: 0, reportedCost: null },
+      runtime: { running: false, reason: 'queued_hops_unavailable' },
+    });
+    assert.match(idle, /chip done/);
+    assert.match(idle, /没有失败记录/);
+    assert.match(idle, /费用未上报/);
+    assert.match(idle, /queued_hops_unavailable/);
+    const evil = healthCellHtml({
+      circuit: { state: 'unknown', reason: '<img src=x>' },
+      lastFailure: { failureClass: '<b>', at: null, source: '<i>' },
+      window7d: { attempts: 'x', successes: undefined, reportedCost: 'nope' },
+      runtime: { running: false, reason: '<script>' },
+    });
+    assert.equal(evil.includes('<img'), false);
+    assert.equal(evil.includes('<script>'), false);
+    assert.equal(evil.includes('<b>'), false);
+    assert.match(evil, /&lt;img/);
+    assert.match(evil, /近七日：尝试 0 · 成功 0 · 费用未上报/);
   });
 
   test('首屏只拉 pools 与 usage，不发也不等 models', async () => {

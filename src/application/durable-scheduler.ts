@@ -357,6 +357,133 @@ export function isActiveHopLease(hop: QueuedHop, now: string): boolean {
   return Date.parse(hop.leaseUntil) > Date.parse(now);
 }
 
+export const QUEUED_HOP_STATUSES = ['queued', 'claimed', 'completed', 'retry_wait', 'dead_letter'] as const;
+
+export type QueuedHopStatusCounts = Record<(typeof QUEUED_HOP_STATUSES)[number], number>;
+
+/** Count by persisted status. Expired claimed rows still count as claimed. */
+export function countQueuedHopStatuses(hops: readonly QueuedHop[]): QueuedHopStatusCounts {
+  const counts: QueuedHopStatusCounts = {
+    queued: 0,
+    claimed: 0,
+    completed: 0,
+    retry_wait: 0,
+    dead_letter: 0,
+  };
+  for (const hop of hops) {
+    if (hop.status in counts) counts[hop.status] += 1;
+  }
+  return counts;
+}
+
+export interface DeadLetterSummary {
+  readonly hopId: string;
+  readonly missionId: string;
+  readonly workItemId: string;
+  readonly role: HopRole;
+  readonly at: string;
+  readonly classification: string;
+  readonly disposition?: string;
+  readonly attemptId?: string;
+}
+
+/**
+ * Newest-first dead-letter reasons. Missing lastFailure is classified unknown
+ * rather than guessed from hop fields.
+ */
+export function summarizeDeadLetters(hops: readonly QueuedHop[]): DeadLetterSummary[] {
+  const rows: DeadLetterSummary[] = [];
+  for (const hop of hops) {
+    if (hop.status !== 'dead_letter') continue;
+    const last = hop.lastFailure;
+    const at = last?.at ?? hop.updatedAt;
+    rows.push({
+      hopId: hop.id,
+      missionId: hop.missionId,
+      workItemId: hop.workItemId,
+      role: hop.role,
+      at,
+      classification: last?.classification ?? 'unknown',
+      ...(last?.disposition !== undefined ? { disposition: last.disposition } : {}),
+      ...(last?.attemptId !== undefined ? { attemptId: last.attemptId } : {}),
+    });
+  }
+  rows.sort((a, b) => {
+    const delta = Date.parse(b.at) - Date.parse(a.at);
+    if (Number.isFinite(delta) && delta !== 0) return delta;
+    return a.hopId < b.hopId ? -1 : a.hopId > b.hopId ? 1 : 0;
+  });
+  return rows;
+}
+
+export interface HopOccupancySnapshot {
+  readonly now: string;
+  readonly limits: HopCapacityLimits;
+  readonly activeLeases: number;
+  readonly global: number;
+  readonly project: Readonly<Record<string, number>>;
+  readonly role: Readonly<Record<string, number>>;
+  readonly runtime: Readonly<Record<string, number>>;
+  readonly profile: Readonly<Record<string, number>>;
+  /** Active leases that omit runtimeKind — not invented as a runtime bucket. */
+  readonly runtimeUnattributed: number;
+  /** Active leases that omit profileId — not invented as a profile bucket. */
+  readonly profileUnattributed: number;
+}
+
+function bumpCount(map: Record<string, number>, key: string): void {
+  map[key] = (map[key] ?? 0) + 1;
+}
+
+/**
+ * Five-dimension occupancy of durable active leases. Expired claimed rows do
+ * not occupy. Legacy rows without runtime/profile only fill global/project/role.
+ */
+export function activeHopOccupancy(
+  hops: readonly QueuedHop[],
+  now: string,
+  limits: HopCapacityLimits = DEFAULT_HOP_CAPACITY_LIMITS,
+): HopOccupancySnapshot {
+  validateHopCapacityLimits(limits);
+  const project: Record<string, number> = {};
+  const role: Record<string, number> = {};
+  const runtime: Record<string, number> = {};
+  const profile: Record<string, number> = {};
+  let global = 0;
+  let runtimeUnattributed = 0;
+  let profileUnattributed = 0;
+  for (const hop of hops) {
+    if (!isActiveHopLease(hop, now)) continue;
+    global += 1;
+    bumpCount(project, hop.projectId);
+    bumpCount(role, hop.role);
+    if (typeof hop.runtimeKind === 'string' && hop.runtimeKind.length > 0) bumpCount(runtime, hop.runtimeKind);
+    else runtimeUnattributed += 1;
+    if (typeof hop.profileId === 'string' && hop.profileId.length > 0) bumpCount(profile, hop.profileId);
+    else profileUnattributed += 1;
+  }
+  return {
+    now,
+    limits: hopCapacityLimits(limits),
+    activeLeases: global,
+    global,
+    project,
+    role,
+    runtime,
+    profile,
+    runtimeUnattributed,
+    profileUnattributed,
+  };
+}
+
+export function activeLeaseForProfile(
+  hops: readonly QueuedHop[],
+  profileId: string,
+  now: string,
+): QueuedHop | undefined {
+  return hops.find((hop) => hop.profileId === profileId && isActiveHopLease(hop, now));
+}
+
 /**
  * Higher numeric priority first; same priority is createdAt FIFO; id is a stable
  * tie-break so two stores cannot pick different heads from the same snapshot.

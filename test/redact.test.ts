@@ -9,6 +9,16 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createRedactor } from '../src/application/redact.ts';
+import { InMemoryLiveOutput } from '../src/application/live.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import {
+  FixedClock,
+  InMemoryActivityLog,
+  InMemoryProjectRepository,
+  SequentialIds,
+} from '../src/application/in-memory.ts';
+import { Platform } from '../src/application/platform.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 
 const ENV = {
   PATH: 'C:\\Windows\\system32;C:\\Program Files\\nodejs',
@@ -113,3 +123,52 @@ describe('脱敏：深拷贝', () => {
     assert.deepEqual(input, snapshot, '入参不能被改');
   });
 });
+
+describe('脱敏：Attempt 实时尾部落盘前',
+  () => {
+    test('sk- 与 Bearer 假密钥在 finishAttempt 写入之前被抹掉', async () => {
+      const live = new InMemoryLiveOutput();
+      const clock = new FixedClock();
+      const ids = new SequentialIds();
+      const platform = new Platform({
+        projects: new InMemoryProjectRepository(),
+        deliveries: new InMemoryDeliveryRepository(clock, ids),
+        workspace: new InPlaceWorkspaceManager(),
+        activity: new InMemoryActivityLog(clock),
+        clock,
+        ids,
+        live,
+      });
+      await platform.createMission({
+        projectId: 'P',
+        missionId: 'M-redact-live',
+        contract: {
+          intent: '脱敏',
+          acceptance: ['抹掉'],
+          constraints: [],
+          nonGoals: [],
+          guardrails: [],
+        },
+      });
+      const { attemptId } = await platform.startCoordinatorAttempt('M-redact-live');
+      const fakeSk = 'sk-proj-abcdefghijklmnopqrstuv';
+      const fakeBearer = 'Bearer abcdEFGH1234.xyz';
+      await live.append({
+        missionId: 'M-redact-live',
+        attemptId,
+        kind: 'text',
+        text: `token ${fakeSk}\nAuthorization: ${fakeBearer}\nok`,
+      });
+      await platform.finishAttempt('M-redact-live', attemptId, {
+        endedBy: 'no_structured_result',
+      });
+      const detail = await platform.getAttemptDetail('M-redact-live', attemptId);
+      const stored = String(detail.output);
+      assert.equal(stored.includes(fakeSk), false);
+      assert.equal(stored.includes('abcdEFGH1234.xyz'), false);
+      assert.match(stored, /\[REDACTED\]/);
+      assert.match(stored, /Bearer \[REDACTED\]/);
+      assert.match(stored, /\nok$/);
+    });
+  },
+);

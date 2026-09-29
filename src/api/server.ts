@@ -22,7 +22,12 @@ import {
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
-import type { AgentPoolAddInput, AgentPoolRepository } from '../application/agent-pool.ts';
+import type {
+  AgentPoolAddInput,
+  AgentPoolCandidate,
+  AgentPoolCandidateHealth,
+  AgentPoolRepository,
+} from '../application/agent-pool.ts';
 import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
@@ -34,6 +39,24 @@ import type { DeliveryRepository } from '../application/delivery.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
 import { redactSecretsDeep } from '../application/redact.ts';
+import type { CandidateCircuitRepository, QueuedHopRepository } from '../application/ports.ts';
+import {
+  activeHopOccupancy,
+  activeLeaseForProfile,
+  countQueuedHopStatuses,
+  DEFAULT_HOP_CAPACITY_LIMITS,
+  summarizeDeadLetters,
+  type HopCapacityLimits,
+  type QueuedHop,
+} from '../application/durable-scheduler.ts';
+import {
+  classifyCandidateFailure,
+  closedCandidateCircuit,
+  resolveCandidateLastFailure,
+  type CandidateCircuit,
+  type CandidateFailureHint,
+} from '../application/candidate-circuit.ts';
+import type { AttemptEndReason } from '../kernel/index.ts';
 import {
   AGENT_TOOL_ACTION,
   evaluatePolicy,
@@ -109,6 +132,32 @@ export interface ApiDeps {
    * 少一个默认实现，比少一类调用点便宜。
    */
   agentPool?: AgentPoolRepository;
+  /**
+   * 持久队列。注入后平台状态报五态/死信/占用，资源池用有效租约判断是否在跑。
+   * 不注入就标明不适用 / 无运行时原因，不编造空队列或 0 占用。
+   */
+  queuedHops?: QueuedHopRepository;
+  /**
+   * 候选熔断仓储。注入后 GET /api/pools 带 circuit；不注入则 health.circuit 说明原因。
+   */
+  candidateCircuits?: CandidateCircuitRepository;
+  /**
+   * 常驻装配给出的身份与只读 env 观测。不注入则文件锁/路径/env 标不适用，不虚构。
+   */
+  platformStatus?: {
+    readonly store: 'file' | 'pg' | 'memory';
+    readonly startedAt: string;
+    readonly instanceId?: string;
+    readonly statePath?: string;
+    readonly holdsMainLock?: boolean;
+    readonly agentEnv?: {
+      readonly passthroughDeclared: boolean;
+      readonly baselineFiltered: boolean;
+      readonly extraPassthroughCount: number;
+    };
+    readonly defaultAdapter?: string;
+    readonly capacityLimits?: HopCapacityLimits;
+  };
   /**
    * 控制面 Principal 解析。注入后，敏感读允许 viewer/operator，写/控制路由要求 operator；
    * 不注入则保持历史行为（本地与既有测试零摩擦）。
@@ -322,6 +371,213 @@ function planLiveResponse(
     body.reason = PLAN_LIVE_EMPTY_REASON;
   }
   return body;
+}
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+function inapplicable(reason: string): { readonly inapplicable: true; readonly reason: string } {
+  return { inapplicable: true, reason };
+}
+
+function listenObservation(server: Server): { address: string; port: number } | { inapplicable: true; reason: string } {
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') return inapplicable('listen_address_unavailable');
+  return { address: addr.address, port: addr.port };
+}
+
+function assembledOrInapplicable<T>(value: T | undefined, reason: string): T | { inapplicable: true; reason: string } {
+  return value !== undefined ? value : inapplicable(reason);
+}
+
+function circuitHealth(circuit: CandidateCircuit): Exclude<AgentPoolCandidateHealth['circuit'], { state: 'unknown' }> {
+  if (circuit.state === 'closed') return { state: 'closed' };
+  if (circuit.state === 'open') {
+    return { state: 'open', failureClass: circuit.failureClass, openUntil: circuit.openUntil };
+  }
+  return {
+    state: 'half_open',
+    failureClass: circuit.failureClass,
+    openUntil: circuit.openUntil,
+    probeClaimed: true,
+  };
+}
+
+function runtimeHealth(lease: QueuedHop | undefined): AgentPoolCandidateHealth['runtime'] {
+  if (!lease) return { running: false, reason: 'no_active_lease' };
+  if (typeof lease.runtimeKind !== 'string' || lease.runtimeKind.length === 0) {
+    return { running: false, reason: 'active_lease_missing_runtime_kind' };
+  }
+  return { running: true, hopId: lease.id, runtimeKind: lease.runtimeKind };
+}
+
+function attemptIdsFromMissionView(view: {
+  readonly coordinatorAttemptIds?: readonly string[];
+  readonly independentReviewerAttemptIds?: readonly string[];
+  readonly workItems?: readonly { readonly attemptIds?: readonly string[] }[];
+}): string[] {
+  const ids = [
+    ...(view.coordinatorAttemptIds ?? []),
+    ...(view.independentReviewerAttemptIds ?? []),
+  ];
+  for (const item of view.workItems ?? []) {
+    if (item.attemptIds) ids.push(...item.attemptIds);
+  }
+  return ids;
+}
+
+interface CandidateUsageAcc {
+  attempts: number;
+  successes: number;
+  reportedCost: number | null;
+}
+
+async function collectCandidateObservations(
+  platform: Platform,
+  hops: readonly QueuedHop[],
+  nowMs: number,
+): Promise<{
+  hints: Map<string, CandidateFailureHint[]>;
+  usage: Map<string, CandidateUsageAcc>;
+}> {
+  const hints = new Map<string, CandidateFailureHint[]>();
+  const usage = new Map<string, CandidateUsageAcc>();
+  const pushHint = (profileId: string, hint: CandidateFailureHint): void => {
+    const list = hints.get(profileId) ?? [];
+    list.push(hint);
+    hints.set(profileId, list);
+  };
+  for (const hop of hops) {
+    if (typeof hop.profileId !== 'string' || hop.profileId.length === 0) continue;
+    const last = hop.lastFailure;
+    if (!last) continue;
+    pushHint(hop.profileId, {
+      failureClass: last.classification,
+      at: last.at,
+      source: 'queue',
+    });
+  }
+  let missions: Awaited<ReturnType<Platform['listMissions']>>;
+  try {
+    missions = await platform.listMissions();
+  } catch {
+    return { hints, usage };
+  }
+  const windowStart = nowMs - SEVEN_DAYS_MS;
+  for (const row of missions) {
+    let view: Awaited<ReturnType<Platform['getMissionView']>>;
+    let events: Awaited<ReturnType<Platform['getActivity']>>;
+    try {
+      view = await platform.getMissionView(row.missionId);
+      events = await platform.getActivity(row.missionId);
+    } catch {
+      continue;
+    }
+    const atByAttempt = new Map<string, number>();
+    for (const event of events) {
+      if (typeof event.attemptId !== 'string' || event.attemptId.length === 0) continue;
+      const ts = Date.parse(event.at);
+      if (!Number.isFinite(ts)) continue;
+      if (event.kind === 'attempt.started' || event.kind === 'attempt.ended') {
+        const prev = atByAttempt.get(event.attemptId);
+        if (prev === undefined || ts > prev) atByAttempt.set(event.attemptId, ts);
+      }
+    }
+    for (const attemptId of attemptIdsFromMissionView(view)) {
+      let detail: Awaited<ReturnType<Platform['getAttemptDetail']>>;
+      try {
+        detail = await platform.getAttemptDetail(row.missionId, attemptId);
+      } catch {
+        continue;
+      }
+      const profileId = detail.profile?.profileId;
+      if (typeof profileId !== 'string' || profileId.length === 0) continue;
+      const ended = events.find((event) => event.kind === 'attempt.ended' && event.attemptId === attemptId);
+      if (ended) {
+        const data = ended.data;
+        const endedBy =
+          data !== null && typeof data === 'object' && !Array.isArray(data)
+            ? (data as { endedBy?: unknown }).endedBy
+            : undefined;
+        const failureMessage =
+          data !== null && typeof data === 'object' && !Array.isArray(data)
+            ? (data as { failureMessage?: unknown }).failureMessage
+            : undefined;
+        if (typeof endedBy === 'string') {
+          const classified = classifyCandidateFailure(
+            endedBy as AttemptEndReason,
+            typeof failureMessage === 'string' ? failureMessage : undefined,
+          );
+          if (classified) {
+            pushHint(profileId, {
+              failureClass: classified.failureClass,
+              at: ended.at,
+              source: 'attempt.ended',
+            });
+          }
+        }
+      }
+      const at = atByAttempt.get(attemptId);
+      if (at === undefined || at < windowStart || at > nowMs) continue;
+      const acc = usage.get(profileId) ?? { attempts: 0, successes: 0, reportedCost: null };
+      acc.attempts += 1;
+      if (detail.status === 'succeeded') acc.successes += 1;
+      const cost = detail.usage?.cost;
+      if (detail.usage?.quality === 'reported' && typeof cost === 'number' && Number.isFinite(cost)) {
+        acc.reportedCost = (acc.reportedCost ?? 0) + cost;
+      }
+      usage.set(profileId, acc);
+    }
+  }
+  return { hints, usage };
+}
+
+function emptyUsage(): CandidateUsageAcc {
+  return { attempts: 0, successes: 0, reportedCost: null };
+}
+
+async function buildPoolsHealth(
+  platform: Platform,
+  snapshot: Awaited<ReturnType<AgentPoolRepository['list']>>,
+  queuedHops: QueuedHopRepository | undefined,
+  candidateCircuits: CandidateCircuitRepository | undefined,
+  nowMsValue: number,
+) {
+  const hops = queuedHops ? await queuedHops.list() : [];
+  const nowIso = new Date(nowMsValue).toISOString();
+  const observed = await collectCandidateObservations(platform, hops, nowMsValue);
+  const healthOf = async (candidate: AgentPoolCandidate): Promise<AgentPoolCandidateHealth> => {
+    const lease = activeLeaseForProfile(hops, candidate.profileId, nowIso);
+    const hints = observed.hints.get(candidate.profileId) ?? [];
+    const window7d = observed.usage.get(candidate.profileId) ?? emptyUsage();
+    const runtime = queuedHops
+      ? runtimeHealth(lease)
+      : { running: false as const, reason: 'queued_hops_unavailable' };
+    if (!candidateCircuits) {
+      return {
+        circuit: { state: 'unknown', reason: 'candidate_circuits_unavailable' },
+        lastFailure: resolveCandidateLastFailure(closedCandidateCircuit(candidate.profileId), hints),
+        window7d,
+        runtime,
+      };
+    }
+    const circuit = await candidateCircuits.get(candidate.profileId);
+    return {
+      circuit: circuitHealth(circuit),
+      lastFailure: resolveCandidateLastFailure(circuit, hints),
+      window7d,
+      runtime,
+    };
+  };
+  const attach = async (rows: readonly AgentPoolCandidate[]) => {
+    const out = [];
+    for (const row of rows) out.push({ ...row, health: await healthOf(row) });
+    return out;
+  };
+  return {
+    coordinator: await attach(snapshot.coordinator),
+    executor: await attach(snapshot.executor),
+    independent_reviewer: await attach(snapshot.independent_reviewer),
+  };
 }
 
 export function createApi(deps: ApiDeps): Server {
@@ -703,6 +959,58 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, { api: API_VERSION });
     }
 
+    if (method === 'GET' && path === '/api/platform/status') {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const assembled = deps.platformStatus;
+      const nowIso = new Date(nowMs()).toISOString();
+      let queue: unknown = inapplicable('queued_hops_unavailable');
+      let occupancy: unknown = inapplicable('queued_hops_unavailable');
+      if (deps.queuedHops) {
+        const hops = await deps.queuedHops.list();
+        queue = {
+          counts: countQueuedHopStatuses(hops),
+          deadLetters: summarizeDeadLetters(hops),
+        };
+        occupancy = activeHopOccupancy(
+          hops,
+          nowIso,
+          assembled?.capacityLimits ?? DEFAULT_HOP_CAPACITY_LIMITS,
+        );
+      }
+      const httpServer = (req.socket as { server?: Server }).server;
+      const listen = httpServer ? listenObservation(httpServer) : inapplicable('listen_address_unavailable');
+      return send(
+        res,
+        200,
+        redactSecretsDeep({
+          api: API_VERSION,
+          pid: process.pid,
+          startedAt: assembledOrInapplicable(assembled?.startedAt, 'started_at_not_assembled'),
+          listen,
+          store: assembledOrInapplicable(assembled?.store, 'store_not_assembled'),
+          instanceId: assembledOrInapplicable(assembled?.instanceId, assembled?.store === 'pg'
+            ? 'pg_has_no_file_instance_lock'
+            : assembled?.store === 'memory'
+              ? 'memory_has_no_file_instance_lock'
+              : 'instance_id_not_assembled'),
+          statePath: assembledOrInapplicable(assembled?.statePath, assembled?.store === 'pg'
+            ? 'pg_has_no_state_file'
+            : assembled?.store === 'memory'
+              ? 'memory_has_no_state_file'
+              : 'state_path_not_assembled'),
+          holdsMainLock: assembledOrInapplicable(assembled?.holdsMainLock, assembled?.store === 'pg'
+            ? 'pg_has_no_file_main_lock'
+            : assembled?.store === 'memory'
+              ? 'memory_has_no_file_main_lock'
+              : 'main_lock_not_assembled'),
+          queue,
+          occupancy,
+          agentEnv: assembledOrInapplicable(assembled?.agentEnv, 'agent_env_not_assembled'),
+          defaultAdapter: assembledOrInapplicable(assembled?.defaultAdapter, 'default_adapter_not_assembled'),
+        }),
+      );
+    }
+
     // S11.5：用量报表。projectId / missionId 可选，用来收窄范围。
     if (method === 'GET' && path === '/api/usage') {
       await requireControl(req, POLICY_ACTION.missionRead);
@@ -741,7 +1049,20 @@ export function createApi(deps: ApiDeps): Server {
     // 「打开界面看一眼」不会改写候选池配置。
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
-      return send(res, 200, await agentPool.list());
+      const snapshot = await agentPool.list();
+      return send(
+        res,
+        200,
+        redactSecretsDeep(
+          await buildPoolsHealth(
+            platform,
+            snapshot,
+            deps.queuedHops,
+            deps.candidateCircuits,
+            nowMs(),
+          ),
+        ),
+      );
     }
 
     if (method === 'POST' && path === '/api/pools') {

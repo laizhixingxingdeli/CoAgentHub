@@ -91,6 +91,10 @@ import type {
 import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
+import {
+  parseAgentEnvPassthrough,
+  SPAWN_ENV_PASSTHROUGH_VAR,
+} from './runtime/spawn.ts';
 import { ValidationEngine } from './application/validation/engine.ts';
 import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
 import { WorkspaceChangedPathReader } from './application/validation/workspace-changed-path-reader.ts';
@@ -248,6 +252,10 @@ export async function buildPersistentPlatform(
     // 机器 L3 用；见 buildPlatform 里同一处。
     commandRunner,
   };
+  // 文件版调度器和观测面同进程，内存通道即可。不写入状态文件：实时输出是
+  // 看的不是存的，落盘会把海量行和凭据形状带进备份。PG 仍用跨进程表。
+  // 必须在 new Platform 之前建好：finishAttempt 要在落地前取本跳尾部。
+  const live = new InMemoryLiveOutput();
   const platform = new Platform({
     projects,
     deliveries,
@@ -262,6 +270,7 @@ export async function buildPersistentPlatform(
     validation,
     // 单事务命令（C2）：交卷与升级的状态、事件、投递一次写完。
     transaction: store,
+    live,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options.queryRuntime;
@@ -269,9 +278,6 @@ export async function buildPersistentPlatform(
     queryRuntime?.supportsQuery === true
       ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
       : undefined;
-  // 文件版调度器和观测面同进程，内存通道即可。不写入状态文件：实时输出是
-  // 看的不是存的，落盘会把海量行和凭据形状带进备份。PG 仍用跨进程表。
-  const live = new InMemoryLiveOutput();
 
   // 刚起来 = 没有任何 attempt 可能还活着。不收敛的话，上一次崩溃留下的
   // in_progress 会把对应的 Mission / 工作项永久卡死。
@@ -414,6 +420,7 @@ export async function buildPgPlatform(options?: {
     validation,
     // 单事务命令（C3）：交卷与升级的快照、事件、投递同一个数据库事务写下。
     transaction: store,
+    live,
   });
   const tokens = new RunTokenRegistry();
   const queryRuntime = options?.queryRuntime;
@@ -937,12 +944,30 @@ export async function startServer(
     // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
     const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
     const planLive = new InMemoryPlanRunLiveOutput();
+    const startedAt = new Date().toISOString();
+    const passthroughRaw = env[SPAWN_ENV_PASSTHROUGH_VAR];
+    const passthrough = parseAgentEnvPassthrough(
+      typeof passthroughRaw === 'string' ? passthroughRaw : undefined,
+    );
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,
       deliveries: built.deliveries,
       onMutation: built.persist,
       agentPool: built.agentPool,
+      queuedHops: built.queuedHops,
+      candidateCircuits: built.candidateCircuits,
+      platformStatus: {
+        store: usePg ? 'pg' : 'file',
+        startedAt,
+        ...(usePg ? {} : { instanceId, statePath, holdsMainLock: true }),
+        agentEnv: {
+          passthroughDeclared: passthrough !== undefined,
+          baselineFiltered: passthrough !== undefined,
+          extraPassthroughCount: passthrough?.length ?? 0,
+        },
+        defaultAdapter: options?.runtime?.kind ?? 'pi',
+      },
       live: 'live' in built ? built.live : undefined,
       beforeRead: 'refresh' in built ? built.refresh : undefined,
       planRunDirs: () => [...knownPlanRunDirs],

@@ -132,3 +132,62 @@ export function classifyCandidateFailure(
   }
   return { failureClass: 'unknown', failover: false };
 }
+
+export type CandidateFailureSource = 'circuit' | 'queue' | 'attempt.ended' | 'unknown';
+
+export interface CandidateFailureHint {
+  readonly failureClass: string;
+  readonly at: string;
+  readonly source: 'queue' | 'attempt.ended';
+}
+
+export interface CandidateLastFailureObservation {
+  readonly failureClass: string;
+  readonly at: string | null;
+  readonly source: CandidateFailureSource;
+  readonly unknownReason?: string;
+}
+
+function newestFailureHint(hints: readonly CandidateFailureHint[]): CandidateFailureHint | undefined {
+  const dated = hints.filter((hint) => Number.isFinite(Date.parse(hint.at)));
+  dated.sort((a, b) => {
+    const delta = Date.parse(b.at) - Date.parse(a.at);
+    if (delta !== 0) return delta;
+    return a.source < b.source ? -1 : a.source > b.source ? 1 : 0;
+  });
+  return dated[0];
+}
+
+/**
+ * Last failure class/time for a candidate. Open circuits have a class but no
+ * stored time — look at queue lastFailure / attempt.ended. Closed circuits
+ * with no hints are unknown, never a fabricated class or timestamp.
+ */
+export function resolveCandidateLastFailure(
+  circuit: CandidateCircuit,
+  hints: readonly CandidateFailureHint[],
+): CandidateLastFailureObservation {
+  const latest = newestFailureHint(hints);
+  if (circuit.state !== 'closed') {
+    const matching = newestFailureHint(hints.filter((hint) => hint.failureClass === circuit.failureClass));
+    const timed = matching ?? latest;
+    if (timed) {
+      return { failureClass: circuit.failureClass, at: timed.at, source: timed.source };
+    }
+    return {
+      failureClass: circuit.failureClass,
+      at: null,
+      source: 'circuit',
+      unknownReason: 'circuit_open_without_failure_time',
+    };
+  }
+  if (latest) {
+    return { failureClass: latest.failureClass, at: latest.at, source: latest.source };
+  }
+  return {
+    failureClass: 'unknown',
+    at: null,
+    source: 'unknown',
+    unknownReason: 'no_circuit_or_attempt_failure',
+  };
+}

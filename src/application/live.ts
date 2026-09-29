@@ -69,6 +69,85 @@ export function truncationNote(dropped: number, kept: number): string {
 }
 
 /**
+ * 写入 Attempt.output 的实时尾部行数。
+ *
+ * 比 KEEP_TAIL_ON_FINISH 短：内存/PG 缓冲还要给观测面继续看，Attempt 只给人
+ * 回头扫一眼。按**行**计——一个 text chunk 里可以夹着换行，当成 1 条会少裁。
+ * 不把全文塞进 Attempt：那会撑爆状态文件。
+ */
+export const PERSIST_OUTPUT_TAIL_LINES = 200;
+
+/** since() 一页上限。必须有界，否则 PG 一次把整份 Mission 历史打进内存。 */
+const LIVE_TAIL_SCAN_PAGE = 200;
+
+function linesOfChunk(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (normalized.length === 0) return [];
+  const parts = normalized.split('\n');
+  // 末尾换行不另算空行：那是「这一行写完了」，不是多出来的一行。
+  if (parts.at(-1) === '') parts.pop();
+  return parts;
+}
+
+function pushTailLines(ring: string[], lines: readonly string[], maxLines: number): void {
+  for (const line of lines) ring.push(line);
+  if (ring.length > maxLines) ring.splice(0, ring.length - maxLines);
+}
+
+/**
+ * 当前 mission+attempt 的文本/工具输出末尾，最多 maxLines 行。
+ *
+ * 只认 kind=text|tool：usage/note 混进去会把「最后在干什么」冲掉。
+ * Attempt ID 只在 Mission 内唯一，必须两个键一起过滤。
+ * 按 chunk **内部**的换行计行，不跨 chunk 粘：工具行没有换行，粘上去会和后续
+ * 文本合成一句假话。PG 的 since 只有 mission 范围，所以分页扫、只把本跳的
+ * 行留在 ring 里——总行内存有界，不把全量历史搬上来。
+ */
+export async function collectAttemptLiveTail(
+  live: Pick<LiveOutput, 'since'>,
+  missionId: string,
+  attemptId: string,
+  maxLines = PERSIST_OUTPUT_TAIL_LINES,
+): Promise<string | undefined> {
+  if (maxLines <= 0) return undefined;
+  let cursor = 0;
+  const ring: string[] = [];
+  for (;;) {
+    const page = await live.since(missionId, cursor, LIVE_TAIL_SCAN_PAGE);
+    if (page.length === 0) break;
+    const lastSeq = page[page.length - 1]!.seq;
+    if (lastSeq <= cursor) break;
+    for (const chunk of page) {
+      if (chunk.attemptId !== attemptId) continue;
+      if (chunk.kind !== 'text' && chunk.kind !== 'tool') continue;
+      pushTailLines(ring, linesOfChunk(chunk.text ?? ''), maxLines);
+    }
+    cursor = lastSeq;
+    if (page.length < LIVE_TAIL_SCAN_PAGE) break;
+  }
+  if (ring.length === 0) return undefined;
+  return ring.join('\n');
+}
+
+/**
+ * 实时尾部优先；outcome.output 在没有实时行、或它已经覆盖/被覆盖时保留。
+ * 两边相同只留一份，避免 finishAttempt 被叫两次时尾巴无限变长。
+ */
+export function mergeAttemptOutput(
+  outcomeOutput: string | undefined,
+  liveTail: string | undefined,
+): string | undefined {
+  if (liveTail === undefined || liveTail.length === 0) {
+    return outcomeOutput;
+  }
+  if (outcomeOutput === undefined || outcomeOutput.length === 0) return liveTail;
+  if (outcomeOutput === liveTail) return liveTail;
+  if (liveTail.includes(outcomeOutput)) return liveTail;
+  if (outcomeOutput.includes(liveTail)) return outcomeOutput;
+  return liveTail;
+}
+
+/**
  * 同进程版。测试与「调度器和界面在一个进程里」的场景用。
  *
  * 带上限：实时输出是**看**的，不是存的。一跳能吐几十万字符，全留着就是

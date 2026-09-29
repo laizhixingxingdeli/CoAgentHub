@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimCandidateProbe, classifyCandidateFailure, closedCandidateCircuit, openCandidateCircuit, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
+import { claimCandidateProbe, classifyCandidateFailure, closedCandidateCircuit, openCandidateCircuit, resolveCandidateLastFailure, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
 
 const opened: CandidateCircuit = { profileId: 'p1', state: 'open', failureClass: 'timeout', openUntil: '2030-01-01T00:00:00.000Z' };
 
@@ -137,3 +137,39 @@ test('invalid inputs and unclaimed/repeated resolutions are rejected without cha
   assert.throws(() => resolveCandidateProbe({ profileId: 'p1', state: 'closed' }, { profileId: 'p1', succeeded: true }));
   assert.deepEqual(claimed, { profileId: 'p1', state: 'half_open', failureClass: 'timeout', openUntil: opened.openUntil, probeClaimed: true });
 });
+
+test('closed circuit without hints is unknown; open circuit without time stays class-only',
+  () => {
+    assert.deepEqual(resolveCandidateLastFailure(closedCandidateCircuit('p1'), []), {
+      failureClass: 'unknown',
+      at: null,
+      source: 'unknown',
+      unknownReason: 'no_circuit_or_attempt_failure',
+    });
+    const open = openCandidateCircuit({
+      profileId: 'p1',
+      failureClass: 'quota',
+      openUntil: '2030-01-01T00:00:00.000Z',
+    });
+    assert.deepEqual(resolveCandidateLastFailure(open, []), {
+      failureClass: 'quota',
+      at: null,
+      source: 'circuit',
+      unknownReason: 'circuit_open_without_failure_time',
+    });
+    assert.deepEqual(
+      resolveCandidateLastFailure(open, [
+        { failureClass: 'quota', at: '2026-01-02T00:00:00.000Z', source: 'queue' },
+        { failureClass: 'auth', at: '2026-01-03T00:00:00.000Z', source: 'attempt.ended' },
+      ]),
+      { failureClass: 'quota', at: '2026-01-02T00:00:00.000Z', source: 'queue' },
+    );
+    assert.deepEqual(
+      resolveCandidateLastFailure(closedCandidateCircuit('p1'), [
+        { failureClass: 'upstream_5xx', at: '2026-01-01T00:00:00.000Z', source: 'attempt.ended' },
+        { failureClass: 'quota', at: '2026-01-04T00:00:00.000Z', source: 'queue' },
+      ]),
+      { failureClass: 'quota', at: '2026-01-04T00:00:00.000Z', source: 'queue' },
+    );
+  },
+);

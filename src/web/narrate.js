@@ -969,3 +969,105 @@ export function planCostText(usages) {
   if (missing > 0) return `${head}（另有 ${missing} 条未上报，未计入）`;
   return head;
 }
+
+/* ============================ 上下文指标 / 任务改动 / 输出末尾 ============================ */
+
+/**
+ * 上下文采集分类。key 与 attempt.ended.contextMetrics 的桶对齐：
+ * brief 是简报字节；工具桶 kind 是闭集（read/grep/find/ls/bash）。
+ * 认不出的 key 原样回显：编一个「其它」会把唯一可查的线索抹掉。
+ */
+export const CONTEXT_METRIC_LABEL = {
+  brief: '简报',
+  read: '读文件',
+  grep: '搜索',
+  find: '查找',
+  ls: '目录',
+  bash: '命令输出',
+};
+
+export function contextMetricLabel(key) {
+  const k = text(key);
+  return CONTEXT_METRIC_LABEL[k] || k || '（没有分类）';
+}
+
+/** 缺整份指标时的说明。不能写成「0 字节」——没上报不是没采集。 */
+export function contextMetricsMissingText() {
+  return '这一跳没有上报上下文指标';
+}
+
+export function contextMetricsTitle() {
+  return '上下文采集';
+}
+
+export function bytesText(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '（没有字节数）';
+  return `${v.toLocaleString('en-US')} 字节`;
+}
+
+export function contextMetricLegendLine(key, bytes) {
+  return `${contextMetricLabel(key)} ${bytesText(bytes)}`;
+}
+
+export function outputTailTitle() {
+  return '输出末尾（已脱敏）';
+}
+
+export function changesTitle() {
+  return '任务改动';
+}
+
+export function changesLoadingText() {
+  return '改动读取中…';
+}
+
+export function changesEmptyText() {
+  return '没有改动';
+}
+
+/** 读失败。message 是接口/网络给的，调用方负责转义。 */
+export function changesErrorText(message) {
+  const m = text(message);
+  return m ? `读不到改动：${m}` : '读不到改动';
+}
+
+export function changesFileCountText(count) {
+  const n = Math.max(0, Math.floor(num(count)));
+  return `${n} 个文件`;
+}
+
+/**
+ * 增删行。null/undefined 表示没上报，不说 0 行——git --stat 摘要缺失时
+ * 写成 +0/-0 看起来像「对过了，就是零」。
+ */
+export function changesLineDeltaText(added, deleted) {
+  const a = added === undefined || added === null || added === '' ? null : Number(added);
+  const d = deleted === undefined || deleted === null || deleted === '' ? null : Number(deleted);
+  const aOk = a !== null && Number.isFinite(a);
+  const dOk = d !== null && Number.isFinite(d);
+  if (!aOk && !dOk) return '';
+  const plus = aOk ? `新增 ${a.toLocaleString('en-US')} 行` : '新增行数未上报';
+  const minus = dOk ? `删除 ${d.toLocaleString('en-US')} 行` : '删除行数未上报';
+  return `${plus} · ${minus}`;
+}
+
+export function changesFileLinesText(changed) {
+  const n = Number(changed);
+  if (!Number.isFinite(n)) return '';
+  return `${n.toLocaleString('en-US')} 行`;
+}
+
+export function newFileLabel() {
+  return '新建';
+}
+
+export function diffSummaryLabel() {
+  return '差异摘要';
+}
+
+export function pendingMemoryNote(count) {
+  const n = Math.max(0, Math.floor(num(count)));
+  if (n === 0) return '';
+  return `另有 ${n} 个文件会随本次落地一并写入`;
+}

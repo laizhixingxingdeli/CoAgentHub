@@ -186,6 +186,111 @@ describe('startServer 绑定与启动日志', () => {
     });
   });
 
+  test('真实装配：平台状态含文件身份/锁/回环/空队列占用，池接口只读健康', async () => {
+    const statePath = tempState();
+    const built = await startServer(0, statePath, {
+      env: {
+        COAGENT_STORE: 'file',
+        COAGENT_AGENT_ENV_PASSTHROUGH: '-',
+      },
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+    const addr = built.server.address() as AddressInfo;
+    assert.equal(addr.address, '127.0.0.1');
+    const base = `http://${addr.address}:${addr.port}`;
+    const health = await fetch(`${base}/api/health`);
+    assert.equal(health.status, 200);
+    const instance = health.headers.get('x-coagent-instance');
+    assert.ok(instance);
+
+    const statusRes = await fetch(`${base}/api/platform/status`);
+    assert.equal(statusRes.status, 200);
+    const status = (await statusRes.json()) as {
+      api: string;
+      pid: number;
+      store: string;
+      instanceId: string;
+      statePath: string;
+      holdsMainLock: boolean;
+      listen: { address: string; port: number };
+      queue: { counts: Record<string, number>; deadLetters: unknown[] };
+      occupancy: { activeLeases: number; global: number; limits: Record<string, number> };
+      agentEnv: { passthroughDeclared: boolean; baselineFiltered: boolean; extraPassthroughCount: number };
+      defaultAdapter: string;
+    };
+    assert.equal(status.api, API_VERSION);
+    assert.equal(status.pid, process.pid);
+    assert.equal(status.store, 'file');
+    assert.equal(status.instanceId, instance);
+    assert.equal(status.statePath, statePath);
+    assert.equal(status.holdsMainLock, true);
+    assert.equal(status.listen.address, '127.0.0.1');
+    assert.equal(status.listen.port, addr.port);
+    assert.deepEqual(status.queue.counts, {
+      queued: 0,
+      claimed: 0,
+      completed: 0,
+      retry_wait: 0,
+      dead_letter: 0,
+    });
+    assert.deepEqual(status.queue.deadLetters, []);
+    assert.equal(status.occupancy.activeLeases, 0);
+    assert.equal(status.occupancy.global, 0);
+    assert.equal(status.occupancy.limits.global, 8);
+    assert.equal(status.agentEnv.passthroughDeclared, true);
+    assert.equal(status.agentEnv.baselineFiltered, true);
+    assert.equal(status.agentEnv.extraPassthroughCount, 0);
+    assert.equal(status.defaultAdapter, 'pi');
+    const dumped = JSON.stringify(status);
+    assert.equal(dumped.includes('TYPESAFE_API_KEY'), false);
+    assert.equal(Object.hasOwn(status, 'env'), false);
+
+    const emptyPools = await fetch(`${base}/api/pools`);
+    assert.equal(emptyPools.status, 200);
+    const emptyJson = (await emptyPools.json()) as {
+      coordinator: unknown[];
+      executor: unknown[];
+      independent_reviewer: unknown[];
+    };
+    assert.deepEqual(emptyJson, { coordinator: [], executor: [], independent_reviewer: [] });
+
+    const added = await fetch(`${base}/api/pools`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'executor', profileId: 'exec-live', endpoint: 'local' }),
+    });
+    assert.equal(added.status, 201);
+    const listed = await fetch(`${base}/api/pools`);
+    const snapshot = (await listed.json()) as {
+      executor: Array<{
+        profileId: string;
+        runtime: string;
+        health: {
+          circuit: { state: string };
+          lastFailure: { failureClass: string; at: null | string };
+          window7d: { attempts: number; reportedCost: number | null };
+          runtime: { running: boolean; reason?: string };
+        };
+      }>;
+    };
+    assert.equal(snapshot.executor[0]?.profileId, 'exec-live');
+    assert.equal(snapshot.executor[0]?.runtime, 'pi');
+    assert.equal(snapshot.executor[0]?.health.circuit.state, 'closed');
+    assert.equal(snapshot.executor[0]?.health.lastFailure.failureClass, 'unknown');
+    assert.equal(snapshot.executor[0]?.health.lastFailure.at, null);
+    assert.equal(snapshot.executor[0]?.health.window7d.attempts, 0);
+    assert.equal(snapshot.executor[0]?.health.window7d.reportedCost, null);
+    assert.equal(snapshot.executor[0]?.health.runtime.running, false);
+    assert.equal(snapshot.executor[0]?.health.runtime.reason, 'no_active_lease');
+
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+  });
+
   test('COAGENT_DECISION_MODE=off / 非法：健康检查与 loopback 不回归', async () => {
     for (const mode of ['off', 'ENFORCED', '']) {
       const statePath = tempState();
@@ -1964,3 +2069,31 @@ describe('startServer 方案记录目录与托管 live', () => {
     },
   );
 });
+
+describe('生产装配把 live 注入 Platform',
+  () => {
+    test('文件/PG 的 new Platform 带 live；hosted MissionRunner 用同一通道', () => {
+      const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
+      const persistent = main.slice(
+        main.indexOf('export async function buildPersistentPlatform'),
+        main.indexOf('export async function buildPgPlatform'),
+      );
+      const persistentPlat = persistent.slice(
+        persistent.indexOf('const platform = new Platform'),
+        persistent.indexOf('const tokens'),
+      );
+      assert.match(persistentPlat, /\blive,/);
+      const pg = main.slice(main.indexOf('export async function buildPgPlatform'));
+      const pgPlat = pg.slice(
+        pg.indexOf('const platform = new Platform'),
+        pg.indexOf('const tokens'),
+      );
+      assert.match(pgPlat, /\blive,/);
+      const runner = readFileSync(
+        fileURLToPath(new URL('../src/application/mission-runner.ts', import.meta.url)),
+        'utf8',
+      );
+      assert.match(runner, /new MissionRunner\(\{[\s\S]*\blive,/);
+    });
+  },
+);

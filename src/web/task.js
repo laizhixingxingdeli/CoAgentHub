@@ -18,8 +18,19 @@
 
 import { esc, nextRefresh, num, stateChip, stageChip } from './projects.js';
 import {
+  changesEmptyText,
+  changesErrorText,
+  changesFileCountText,
+  changesFileLinesText,
+  changesLineDeltaText,
+  changesLoadingText,
+  changesTitle,
   commandCountLabel,
   commandDetail,
+  contextMetricLegendLine,
+  contextMetricsMissingText,
+  contextMetricsTitle,
+  diffSummaryLabel,
   evidenceKindLabel,
   fieldLabel,
   finalReviewSummary,
@@ -27,7 +38,10 @@ import {
   formatUsage,
   isRuntimeCommand,
   narrateEvent,
+  newFileLabel,
   nowDoing,
+  outputTailTitle,
+  pendingMemoryNote,
   PLATFORM_ROLE_LABEL,
   reasonText,
   revisionLabel,
@@ -504,6 +518,7 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
           ? '<span class="stage-cmds">' + esc('跑了 ' + commandCountLabel(cmds.length)) + '</span>'
           : '')
         +   (summary ? '<span class="stage-summary">' + esc(summary) + '</span>' : '')
+        +   contextMetricsCompactHtml(g.events)
         + '</summary>'
         + '<ul class="evt-list">' + rows + '</ul>'
         + commandFoldHtml(g.events)
@@ -801,7 +816,222 @@ export function stageDetailHtml(group, ctx, attempt) {
     +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
     +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
     + '</div>'
+    + contextMetricsBlockHtml(events)
     + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>');
+}
+
+/* ===================== 上下文采集（attempt.ended.contextMetrics） ===================== */
+
+/**
+ * 一组事件里最后一次 attempt.ended 的 contextMetrics。
+ *
+ * 没这个键就是没上报：返回 null，调用方必须说「没有上报」，
+ * **不能**拿 0 字节顶上——0 看起来像「采集了，结果是空的」。
+ */
+export function contextMetricsFromEvents(events) {
+  let seen = false;
+  let metrics = null;
+  for (const e of events || []) {
+    if (!e || e.kind !== 'attempt.ended') continue;
+    const data = e.data;
+    if (!data || typeof data !== 'object'
+      || !Object.prototype.hasOwnProperty.call(data, 'contextMetrics')) {
+      seen = false;
+      metrics = null;
+      continue;
+    }
+    seen = true;
+    metrics = data.contextMetrics;
+  }
+  if (!seen) return null;
+  if (!metrics || typeof metrics !== 'object') return null;
+  return metrics;
+}
+
+function reportedNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 已上报的分类字节。某一类没出现在 payload 里就不进数组——缺席不是 0。
+ * 返回 null 表示整份都没上报（或上报了但没有任何可显示的数字）。
+ */
+export function contextMetricSegments(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const cats = [];
+  const briefBytes = metrics.brief ? reportedNumber(metrics.brief.renderedUtf8Bytes) : null;
+  if (briefBytes !== null) cats.push({ key: 'brief', bytes: briefBytes });
+  const tools = Array.isArray(metrics.tools) ? metrics.tools : [];
+  const order = ['read', 'grep', 'find', 'ls', 'bash'];
+  const seen = new Set();
+  for (const kind of order) {
+    let reported = false;
+    let sum = 0;
+    for (const t of tools) {
+      if (!t || t.kind !== kind) continue;
+      const n = reportedNumber(t.returnedUtf8Bytes);
+      if (n === null) continue;
+      sum += n;
+      reported = true;
+    }
+    if (reported) {
+      cats.push({ key: kind, bytes: sum });
+      seen.add(kind);
+    }
+  }
+  for (const t of tools) {
+    const kind = t && t.kind;
+    if (!kind || seen.has(kind) || order.includes(kind)) continue;
+    const n = reportedNumber(t.returnedUtf8Bytes);
+    if (n === null) continue;
+    cats.push({ key: String(kind), bytes: n });
+    seen.add(kind);
+  }
+  return cats.length > 0 ? cats : null;
+}
+
+function metricColor(key) {
+  return ({
+    brief: 'var(--status-queued)',
+    read: 'var(--status-running)',
+    grep: 'var(--status-unconfirmed)',
+    find: 'var(--status-done)',
+    ls: 'var(--accent)',
+    bash: 'var(--status-failed)',
+  })[key] || 'var(--muted-foreground)';
+}
+
+function contextMetricsBarHtml(cats) {
+  const rows = cats || [];
+  if (rows.length === 0) return '';
+  const total = rows.reduce((s, c) => s + (c.bytes > 0 ? c.bytes : 0), 0);
+  return '<div style="display:flex;height:8px;width:100%;background:var(--muted);border-radius:999px;overflow:hidden;margin:6px 0">'
+    + rows.map((c) => {
+      const flex = total > 0 ? Math.max(0, c.bytes) : 0;
+      return '<span style="flex:' + String(flex) + ';background:' + metricColor(c.key) + '"></span>';
+    }).join('')
+    + '</div>';
+}
+
+function contextMetricsLegendHtml(cats) {
+  const rows = cats || [];
+  if (rows.length === 0) return '';
+  return '<ul class="detail-list">'
+    + rows.map((c) => '<li>' + esc(contextMetricLegendLine(c.key, c.bytes)) + '</li>').join('')
+    + '</ul>';
+}
+
+export function contextMetricsBlockHtml(events) {
+  const cats = contextMetricSegments(contextMetricsFromEvents(events));
+  const body = cats
+    ? contextMetricsBarHtml(cats) + contextMetricsLegendHtml(cats)
+    : '<div class="note">' + esc(contextMetricsMissingText()) + '</div>';
+  return '<section class="detail-block">'
+    + '<h3 class="detail-block-title">' + esc(contextMetricsTitle()) + '</h3>'
+    + body
+    + '</section>';
+}
+
+function contextMetricsCompactHtml(events) {
+  const cats = contextMetricSegments(contextMetricsFromEvents(events));
+  const line = cats
+    ? cats.map((c) => contextMetricLegendLine(c.key, c.bytes)).join(' · ')
+    : contextMetricsMissingText();
+  return '<span class="stage-usage">' + esc(line) + '</span>';
+}
+
+/* ===================== 任务改动（GET /api/missions/:id/diff） ===================== */
+
+/**
+ * 拆 git diff --stat 文本。数字只在这一行真的写了才认；
+ * 没有 summary 行就让 added/deleted 留空，不补 0。
+ */
+export function parseDiffStat(stat) {
+  const files = [];
+  let added = null;
+  let deleted = null;
+  const raw = stat == null ? '' : String(stat);
+  for (const line of raw.split(/\r?\n/)) {
+    const summary = /(\d+)\s+files?\s+changed(?:.*?(\d+)\s+insertions?\(\+\))?(?:.*?(\d+)\s+deletions?\(-\))?/.exec(line);
+    if (summary && line.indexOf('|') === -1) {
+      added = summary[2] != null ? Number(summary[2]) : 0;
+      deleted = summary[3] != null ? Number(summary[3]) : 0;
+      continue;
+    }
+    const pipe = /^(.*?)\s+\|\s+(.*)$/.exec(line);
+    if (!pipe) continue;
+    const path = pipe[1].trim();
+    const right = pipe[2].trim();
+    if (right === '新建') {
+      files.push({ path, created: true, changed: null, raw: line });
+      continue;
+    }
+    const count = /^(\d+)\b/.exec(right);
+    files.push({
+      path,
+      created: false,
+      changed: count ? Number(count[1]) : null,
+      raw: line,
+    });
+  }
+  return { files, added, deleted };
+}
+
+/**
+ * 任务改动卡。空结果和失败都给解释句，不画一套空文件假装有改动。
+ * payload.error 是加载失败；files 空则信 stat 上的空态原文。
+ */
+export function changesCardHtml(payload) {
+  if (!payload) {
+    return '<div class="note">' + esc(changesLoadingText()) + '</div>';
+  }
+  if (payload.error) {
+    return '<div class="note">' + esc(changesErrorText(payload.error)) + '</div>';
+  }
+  const files = Array.isArray(payload.files) ? payload.files.map((x) => String(x)) : [];
+  const pending = Array.isArray(payload.pendingMemory) ? payload.pendingMemory.map((x) => String(x)) : [];
+  const stat = payload.stat == null ? '' : String(payload.stat);
+  const parsed = parseDiffStat(stat);
+  const byPath = new Map(parsed.files.map((f) => [f.path, f]));
+  if (files.length === 0 && pending.length === 0) {
+    const msg = stat.trim() ? stat.trim() : changesEmptyText();
+    return '<div class="detail-block-title">' + esc(changesTitle()) + '</div>'
+      + '<div class="note">' + esc(msg) + '</div>';
+  }
+  const delta = changesLineDeltaText(parsed.added, parsed.deleted);
+  const head = [changesFileCountText(files.length), delta].filter(Boolean).join(' · ');
+  const items = files.map((path) => {
+    const hit = byPath.get(path);
+    const bits = [path];
+    if (hit && hit.created) bits.push(newFileLabel());
+    else if (hit && hit.changed !== null && hit.changed !== undefined) {
+      const lines = changesFileLinesText(hit.changed);
+      if (lines) bits.push(lines);
+    }
+    const inner = hit && hit.raw
+      ? '<pre class="term">' + esc(hit.raw) + '</pre>'
+      : '<div class="note">' + esc(path) + '</div>';
+    return '<li><details class="order-card">'
+      + '<summary class="mono">' + esc(bits.join(' · ')) + '</summary>'
+      + inner
+      + '</details></li>';
+  }).join('');
+  const pendingNote = pendingMemoryNote(pending.length);
+  const pendingList = pending.length
+    ? '<div class="field-label">' + esc(pendingNote) + '</div>'
+      + '<ul class="detail-list">' + pending.map((p) => '<li class="mono">' + esc(p) + '</li>').join('') + '</ul>'
+    : '';
+  const fullStat = stat.trim()
+    ? '<details class="order-card"><summary>' + esc(diffSummaryLabel()) + '</summary>'
+      + '<pre class="term">' + esc(stat) + '</pre></details>'
+    : '';
+  return '<div class="detail-block-title">' + esc(changesTitle()) + '</div>'
+    + (head ? '<div class="detail-sub">' + esc(head) + '</div>' : '')
+    + (items ? '<ul class="file-list">' + items + '</ul>' : '')
+    + pendingList
+    + fullStat;
 }
 
 /* ===================== 右下：常驻实时输出 ===================== */
@@ -868,16 +1098,41 @@ export function liveMetaHtml(live) {
  * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
  * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
  */
+function liveTextLines(chunks) {
+  const lines = [];
+  for (const c of chunks || []) {
+    if (c && c.kind !== 'usage' && c.kind !== 'note') lines.push(c);
+  }
+  return lines;
+}
+
+function historicalOutputText(live) {
+  if (!live) return '';
+  const raw = live.historicalOutput;
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw);
+  return s.trim() === '' ? '' : s;
+}
+
 export function livePanelHtml(live) {
   const lines = (live && live.lines) || [];
+  const hasLive = liveTextLines(lines).length > 0;
+  // 有实时行就只画实时：旧跳的 output 不是当前在途输出，塞进终端会让人以为还在跑。
+  const historical = hasLive ? '' : historicalOutputText(live);
+  const note = historical
+    ? '<div class="live-note"><div>' + esc(outputTailTitle()) + '</div></div>'
+    : liveNoteHtml(lines);
+  const term = historical
+    ? esc(historical)
+    : liveLinesHtml(lines, !live || live.running !== false);
   return '<div class="live-bar">'
     +   '<label class="auto-scroll"><input type="checkbox" data-autoscroll'
     +     (live && live.autoScroll === false ? '' : ' checked') + ' /> 自动滚动</label>'
     +   '<span class="live-meta" data-live-meta>' + liveMetaHtml(live) + '</span>'
     + '</div>'
-    + '<div data-live-note>' + liveNoteHtml(lines) + '</div>'
+    + '<div data-live-note>' + note + '</div>'
     + '<pre class="term" data-term>'
-    +   liveLinesHtml(lines, !live || live.running !== false)
+    +   term
     + '</pre>';
 }
 
@@ -943,6 +1198,7 @@ export function skeletonHtml() {
   return '<div class="task">'
     + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
     + '<header class="card task-head" id="task-head"><div class="note">加载中…</div></header>'
+    + '<section class="card" id="task-changes"><div class="note">' + esc(changesLoadingText()) + '</div></section>'
     + '<div class="task-cols">'
     +   '<section class="task-left">'
     +     '<div class="pane-title">执行环节</div>'
@@ -1097,6 +1353,42 @@ function paintDetail(st) {
   st.els.detail.innerHTML = stageDetailHtml(selectedGroup(st), detailCtx(st), st.attempt);
 }
 
+function paintChanges(st) {
+  if (!st.els.changes) return;
+  st.els.changes.innerHTML = changesCardHtml(st.changes);
+}
+
+/**
+ * 任务改动单独拉：不能跟 view/activity 绑在同一条 Promise.all 里——
+ * diff 失败不该把已经画出来的页头刷成「读不到这条任务」。
+ */
+function pullMissionChanges(st) {
+  if (st.changesInflight) return st.changesInflight;
+  const started = st.epoch;
+  st.changesInflight = get(
+    '/api/missions/' + encodeURIComponent(st.missionId) + '/diff',
+  ).then((body) => {
+    if (st.epoch !== started || !writable(st)) return;
+    st.changes = body && typeof body === 'object' ? body : { files: [], stat: '', pendingMemory: [] };
+    paintChanges(st);
+  }).catch((err) => {
+    if (st.epoch !== started || !writable(st)) return;
+    st.changes = { error: err && err.message ? String(err.message) : '' };
+    paintChanges(st);
+  }).finally(() => {
+    if (st.epoch === started) st.changesInflight = null;
+  });
+  return st.changesInflight;
+}
+
+function attemptOutputText(attempt) {
+  if (!attempt) return '';
+  const raw = attempt.output;
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw);
+  return s.trim() === '' ? '' : s;
+}
+
 /**
  * 这一跳还能不能开跑。终态（结束/中止）、等待停机、暂停都不再会来新输出，
  * 所以终端空着的时候该说「这里没留下输出」，而不是「还没开始」。
@@ -1110,7 +1402,13 @@ function stillRunning(st) {
 /** 首帧建外框。之后每秒只重写里面（见 pushLive）。 */
 function paintLive(st) {
   st.els.live.innerHTML = livePanelHtml(
-    Object.assign({ autoScroll: st.autoScroll, running: stillRunning(st) }, st.live),
+    Object.assign({
+      autoScroll: st.autoScroll,
+      running: stillRunning(st),
+      historicalOutput: liveTextLines(st.live && st.live.lines).length
+        ? ''
+        : attemptOutputText(st.attempt),
+    }, st.live),
   );
   const term = st.els.live.querySelector('[data-term]');
   if (term) term.scrollTop = term.scrollHeight - term.clientHeight;
@@ -1169,6 +1467,8 @@ async function loadAttempt(st, attemptId) {
   if (st.epoch !== epoch || st.selectedAttemptId !== attemptId) return;
   st.attempt = detail && detail.error ? null : detail;
   paintDetail(st);
+  // 实时还在滚就别重建终端外框（勾选框焦点会丢）；只有空着时才用这一跳的脱敏尾部填。
+  if (liveTextLines(st.live && st.live.lines).length === 0) paintLive(st);
 }
 
 function isPageVisible() {
@@ -1323,6 +1623,8 @@ function pullView(st) {
       paintStages(st);
       paintDetail(st);
       paintLive(st);
+      paintChanges(st);
+      void pullMissionChanges(st);
       // 首屏成功且已终态：nextRefresh 不含 live，这里就不会拉。
       if (nextRefresh('mission', missionStatus(st), true).paths.includes('live')) {
         void pollLive(st);
@@ -1334,6 +1636,7 @@ function pullView(st) {
       paintUsage(st);
       paintStages(st, expanded);
       paintDetail(st);
+      void pullMissionChanges(st);
     }
     syncRefresh(st);
   }).catch((err) => {
@@ -1438,9 +1741,12 @@ export async function renderTaskPage(container, missionId) {
       stages: container.querySelector('#task-stages'),
       detail: container.querySelector('#task-detail'),
       live: container.querySelector('#task-live'),
+      changes: container.querySelector('#task-changes'),
     },
     view: null,
     activity: [],
+    changes: null,
+    changesInflight: null,
     // 环节与事件的选中态分两个键：环节决定详情取哪一份正文、去不去拉证据；
     // 事件只决定事件流里哪一行高亮。
     selectedAttemptId: null,
