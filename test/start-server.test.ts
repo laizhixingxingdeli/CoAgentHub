@@ -1652,6 +1652,7 @@ describe('startServer hosted 接线与排空',
         path: '/api/control/run-mission',
         body: hostedMissionBody(dir, adapter, statePath, 'M-snapshot-real'),
       }, () => {});
+      const realGetMissionView = built.platform.getMissionView;
       try {
         await gated.started;
         const snapshots = built.hostedRunSnapshots();
@@ -1659,9 +1660,21 @@ describe('startServer hosted 接线与排空',
         assert.equal(snapshots[0]?.id, 'M-snapshot-real');
         assert.equal(snapshots[0]?.kind, 'mission');
         assert.equal(snapshots[0]?.status, '运行中/状态暂不可读');
-        const missionView = await built.platform.getMissionView('M-snapshot-real');
+        const missionView = await realGetMissionView.call(built.platform, 'M-snapshot-real');
         assert.equal(missionView.status, 'investigating');
+        let state = 'S1';
+        built.platform.getMissionView = ((id: string) => {
+          assert.equal(id, 'M-snapshot-real');
+          return { status: state };
+        }) as typeof built.platform.getMissionView;
+        assert.equal(built.hostedRunSnapshots()[0]?.id, 'M-snapshot-real');
+        assert.equal(built.hostedRunSnapshots()[0]?.status, 'S1');
+        state = 'S2';
+        assert.equal(built.hostedRunSnapshots()[0]?.id, 'M-snapshot-real');
+        assert.equal(built.hostedRunSnapshots()[0]?.status, 'S2');
+        built.platform.getMissionView = (() => Promise.reject(new Error('temporarily unreadable'))) as typeof built.platform.getMissionView;
         assert.equal(built.hostedRunSnapshots()[0]?.status, '运行中/状态暂不可读');
+        await new Promise<void>((resolve) => setImmediate(resolve));
         const invalidCode = await loopbackRunRequest(target, {
           path: '/api/control/run-mission',
           body: hostedMissionBody(dir, adapter, join(dir, 'other-state.json'), 'M-invalid-snapshot'),
@@ -1669,6 +1682,7 @@ describe('startServer hosted 接线与排空',
         assert.equal(invalidCode, 1);
         assert.equal(built.hostedRunSnapshots().length, 1);
       } finally {
+        built.platform.getMissionView = realGetMissionView;
         gated.release();
         await running;
       }
