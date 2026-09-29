@@ -179,9 +179,32 @@ export function publishLockPort(statePath: string, instanceId: string, port: num
 }
 
 /**
+ * 状态文件身份是否同一真实文件。
+ *
+ * Windows 上盘符与路径不区分大小写，而 `realpathSync` 又不会改写入时的大小写，
+ * CLI 传入 `c:\x`、持锁者记下 `C:\x` 时直比会误判 occupied，调用方就会再拉起一个写者。
+ * 非 Windows 上大小写不同就是两个路径，合并会把两个状态文件当成同一个。
+ *
+ * `windows` 可注入，便于在非 Windows 上锁住这条规则；生产调用走 `process.platform`。
+ */
+function sameStateIdentity(left: string, right: string, windows: boolean): boolean {
+  if (left === right) return true;
+  if (!windows) return false;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+export type ProbeLocalWriterOptions = {
+  /** 测试注入：覆盖是否按 Windows 规则比较状态路径。 */
+  treatStateIdAsWindows?: boolean;
+};
+
+/**
  * 本机写者探测。empty **仅**锁目录不存在；其余失败一律 occupied，且不删锁。
  */
-export async function probeLocalWriter(statePath: string): Promise<LocalWriterProbe> {
+export async function probeLocalWriter(
+  statePath: string,
+  options?: ProbeLocalWriterOptions,
+): Promise<LocalWriterProbe> {
   const lockPath = lockPathFor(statePath);
   try {
     statSync(lockPath);
@@ -215,10 +238,12 @@ export async function probeLocalWriter(statePath: string): Promise<LocalWriterPr
   if (!holder.instanceId || health.instanceId !== holder.instanceId) {
     return { status: 'occupied', holder, reason: '实例身份不符' };
   }
+  const windowsStateId = options?.treatStateIdAsWindows ?? process.platform === 'win32';
   if (
     !holder.stateId ||
-    health.stateId !== holder.stateId ||
-    health.stateId !== canonicalStateId
+    typeof health.stateId !== 'string' ||
+    !sameStateIdentity(holder.stateId, health.stateId, windowsStateId) ||
+    !sameStateIdentity(health.stateId, canonicalStateId, windowsStateId)
   ) {
     return { status: 'occupied', holder, reason: '状态身份不符' };
   }

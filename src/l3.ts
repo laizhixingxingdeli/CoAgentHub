@@ -11,17 +11,37 @@
  *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
  *   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."]
  *
- * 直接操作状态文件，不经过 HTTP —— `run-mission` 的服务器是一次性的，
- * 跑完就退，所以平时没有常驻进程。**别在服务器开着的时候用它**：
- * 两个进程各写各的整份状态，后写的会盖掉先写的。
+ * 文件模式主状态写命令先探测本机写者：活着的同状态服务持锁时回环转发给
+ * 唯一写者；无锁时沿用独占装配。其他锁状态 fail-closed，不离线再写一份。
+ * PG 不走文件锁探测。plan decide/approve 只写方案运行记录，不碰主锁。
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { API_VERSION } from './api/server.ts';
+import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import {
+  LoopbackHttpError,
+  loopbackControlRequest,
+} from './application/loopback-control-client.ts';
 import { renderPlanHandoff, type HandoffCosts } from './application/plan-handoff.ts';
 import type { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { buildPersistentPlatform, buildPgPlatform } from './main.ts';
+
+const MAIN_STATE_WRITES = new Set([
+  'merge',
+  'send-back',
+  'abandon',
+  'answer',
+  'revise',
+  'cancel',
+  'pause',
+  'resume',
+  'retire',
+  'rerun',
+  'ack',
+]);
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -82,12 +102,230 @@ function line(char = '─', n = 72): string {
   return char.repeat(n);
 }
 
+function occupiedMessage(reason: string): string {
+  return `无法安全转发到本机写者：${reason}。主状态未改。`;
+}
+
+function requireLiveIdentity(holder: LockInfo): {
+  port: number;
+  instanceId: string;
+  stateId: string;
+  apiVersion: string;
+} {
+  if (
+    holder.port === undefined ||
+    holder.instanceId === undefined ||
+    holder.stateId === undefined ||
+    holder.apiVersion === undefined
+  ) {
+    throw new Error('活着的写者元数据不完整，拒绝转发。主状态未改。');
+  }
+  if (holder.apiVersion !== API_VERSION) {
+    throw new Error('API 版本不符，拒绝转发。主状态未改。');
+  }
+  return {
+    port: holder.port,
+    instanceId: holder.instanceId,
+    stateId: holder.stateId,
+    apiVersion: holder.apiVersion,
+  };
+}
+
+/** 先验失败时不得探测、不得装配。校验顺序与旧命令一致：终审先成对签名。 */
+function assertWriteArgs(command: string, target: string | undefined): void {
+  if (command === 'merge' || command === 'send-back' || command === 'abandon') {
+    if (!target) throw new Error('需要 missionId');
+    const reason = arg('--reason');
+    if (!reason && command !== 'merge') {
+      throw new Error('打回/放弃必须给 --reason —— 不说清楚，协调者只会原样再交一次');
+    }
+    return;
+  }
+  if (command === 'answer') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--answer')) throw new Error('需要 --answer "..."');
+    return;
+  }
+  if (command === 'revise') {
+    if (!target) throw new Error('需要 missionId');
+    const file = arg('--contract');
+    if (!file) throw new Error('需要 --contract <mission.json>');
+    JSON.parse(readFileSync(resolve(file), 'utf8'));
+    return;
+  }
+  if (command === 'cancel' || command === 'pause' || command === 'resume') {
+    if (!target) throw new Error('需要 missionId');
+    return;
+  }
+  if (command === 'retire') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--item')) throw new Error('需要 --item <workItemId>');
+    if (!arg('--reason')) throw new Error('作废必须给 --reason —— 不写清楚，协调者会以为它还该做');
+    return;
+  }
+  if (command === 'rerun') {
+    if (!target) throw new Error('需要 missionId');
+    return;
+  }
+  if (command === 'ack') {
+    if (!target) throw new Error('需要 deliveryId');
+  }
+}
+
+async function forwardWriteCommand(holder: LockInfo, command: string, target: string): Promise<void> {
+  const identity = requireLiveIdentity(holder);
+  const post = (path: string, body: unknown) =>
+    loopbackControlRequest(identity, { method: 'POST', path, body });
+  const get = (path: string) => loopbackControlRequest(identity, { method: 'GET', path });
+
+  if (command === 'merge' || command === 'send-back' || command === 'abandon') {
+    const reason = arg('--reason');
+    const signature = parseReviewerSignature();
+    const verdict = command === 'send-back' ? 'send_back' : command;
+    const review: Record<string, unknown> = {
+      verdict,
+      reasons: reason ? [reason] : [],
+    };
+    const projectRoot = arg('--repo');
+    if (projectRoot !== undefined) review.projectRoot = projectRoot;
+    // HA 合入必须走 /finalize/reviewer，服务端再升到 HA 权威。降到普通 finalize 会拒 HA merge。
+    const path =
+      signature.mode === 'reviewer'
+        ? `/api/missions/${encodeURIComponent(target)}/finalize/reviewer`
+        : `/api/missions/${encodeURIComponent(target)}/finalize`;
+    const body =
+      signature.mode === 'reviewer'
+        ? { ...review, reviewerId: signature.reviewerId, confirmedBy: signature.confirmedBy }
+        : review;
+    const result = (await post(path, body)) as {
+      status: string;
+      mergedInto?: string;
+      reason?: string;
+    };
+    console.log(`Mission ${target} → ${result.status}`);
+    if (result.mergedInto) console.log(`已落地到 ${result.mergedInto.slice(0, 12)}`);
+    if (result.reason) console.log(`⚠ ${result.reason}`);
+    return;
+  }
+
+  if (command === 'answer') {
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/escalations/answer`, {
+      answer: arg('--answer'),
+    })) as { question: string; answer: string };
+    console.log(`已答复 ${target} 的升级：`);
+    console.log(`  问题：${result.question}`);
+    console.log(`  答复：${result.answer}`);
+    console.log('\n下一步：重新跑 run-mission，协调者会看到这条答复。');
+    return;
+  }
+
+  if (command === 'revise') {
+    const file = arg('--contract')!;
+    const spec = JSON.parse(readFileSync(resolve(file), 'utf8')) as { contract: unknown };
+    const result = (await post(
+      `/api/missions/${encodeURIComponent(target)}/contract`,
+      spec.contract,
+    )) as { contractRevision: number };
+    const view = (await get(`/api/missions/${encodeURIComponent(target)}`)) as {
+      status: string;
+      finalReview?: { verdict?: string };
+    };
+    console.log(`Contract → r${result.contractRevision}，Mission 现在是 ${view.status}`);
+    if (view.finalReview?.verdict === 'send_back') {
+      console.log('（原先在等检视，已按新契约退回规划——旧的那份交卷是照着旧契约做的）');
+    }
+    return;
+  }
+
+  if (command === 'cancel') {
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/cancel`, {
+      reason: arg('--reason') ?? '',
+    })) as { status: string };
+    console.log(`Mission ${target} → ${result.status}（已叫停）`);
+    console.log('在途的那一跳会正常收尾，之后不再调度。');
+    return;
+  }
+
+  if (command === 'pause') {
+    await post(`/api/missions/${encodeURIComponent(target)}/pause`, {});
+    console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
+    return;
+  }
+
+  if (command === 'resume') {
+    await post(`/api/missions/${encodeURIComponent(target)}/resume`, {});
+    console.log(`Mission ${target} 已恢复。重跑 run-mission 继续。`);
+    return;
+  }
+
+  if (command === 'retire') {
+    const workItemId = arg('--item')!;
+    const result = (await post(
+      `/api/missions/${encodeURIComponent(target)}/work-items/${encodeURIComponent(workItemId)}/retire`,
+      { reason: arg('--reason') },
+    )) as { status: string };
+    console.log(`工作项 ${workItemId} → ${result.status}（已作废）`);
+    console.log('协调者下次被唤醒时会看到它，并据此判断要不要重做。');
+    return;
+  }
+
+  if (command === 'rerun') {
+    const body: { newMissionId?: string; baseRevision?: string } = {};
+    const as = arg('--as');
+    const base = arg('--base');
+    if (as !== undefined) body.newMissionId = as;
+    if (base !== undefined) body.baseRevision = base;
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/rerun`, body)) as {
+      missionId: string;
+      rerunOf: string;
+      contractRevision: number;
+      sourceAlreadyLanded?: boolean;
+      baseRevision?: string;
+    };
+    console.log(`已另起一条：${result.missionId}（${result.rerunOf} 的重跑，契约 r${result.contractRevision}）`);
+    console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
+    if (result.sourceAlreadyLanded) {
+      console.log(
+        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：\n` +
+          '  答案就摆在项目工作区里，agent 读一眼就有 —— 实测上一次对照就是这么毁的\n' +
+          '  （它 read 了主仓库里的成品文件、还 git show 了那次交付的提交，不是在解题是在抄）。\n' +
+          '  要做对照，用一个**还没合并**的任务，两臂都跑完再决定合哪个。',
+      );
+    }
+    if (result.baseRevision) {
+      console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
+    } else {
+      console.log(
+        '⚠ 源头没记过工作区，起点无法钉住 —— 这一跑会从目标分支当前的 HEAD 分叉，\n' +
+          '  和源头不是同一个起点，**跑出来的数不能和它对比**。要比就用 --base <版本> 指定。',
+      );
+    }
+    console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
+    console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
+    return;
+  }
+
+  if (command === 'ack') {
+    try {
+      await post(`/api/deliveries/${encodeURIComponent(target)}/ack`, {});
+      console.log(`${target} 已确认`);
+    } catch (error) {
+      if (error instanceof LoopbackHttpError && error.status === 404) {
+        console.log(`没有这条投递：${target}`);
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
 async function main() {
   const [, , command, target] = process.argv;
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
-  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show 是常态。plan（含 decide）只写方案
+  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show/runs 是常态。plan（含 decide）只写方案
   // 运行记录那份独立文件，主状态同样只读——run-plan 整夜握着主状态锁。
-  const readOnly = command === 'inbox' || command === 'show' || command === 'plan' || command === undefined;
+  const isMainStateWrite = MAIN_STATE_WRITES.has(command ?? '');
+  const readOnly = !isMainStateWrite;
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // 终审三命令的 --as / --confirmed-by 必须在构建平台之前成对校验：
   // 构建会拿排他锁并跑启动收敛，可能改状态文件。校验失败时状态字节不能动。
@@ -95,15 +333,45 @@ async function main() {
     command === 'merge' || command === 'send-back' || command === 'abandon'
       ? parseReviewerSignature()
       : undefined;
-  const built = usePg
-    ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
-      // 一个只看结果的命令没有立场判定别的进程死了。
-      await buildPgPlatform()
-    : await buildPersistentPlatform(statePath, {
-        exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
-        // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
-        reconcile: !readOnly,
-      });
+  if (isMainStateWrite) assertWriteArgs(command!, target);
+
+  if (!usePg && isMainStateWrite) {
+    const probe = await probeLocalWriter(statePath);
+    if (probe.status === 'live') {
+      await forwardWriteCommand(probe.holder, command!, target!);
+      return;
+    }
+    if (probe.status === 'occupied') {
+      throw new Error(occupiedMessage(probe.reason));
+    }
+  }
+
+  let built;
+  try {
+    built = usePg
+      ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
+        // 一个只看结果的命令没有立场判定别的进程死了。PG 不走文件锁假探测。
+        await buildPgPlatform()
+      : await buildPersistentPlatform(statePath, {
+          exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
+          // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
+          reconcile: !readOnly,
+        });
+  } catch (error) {
+    if (!usePg && isMainStateWrite && error instanceof LockBusyError) {
+      const again = await probeLocalWriter(statePath);
+      if (again.status === 'live') {
+        await forwardWriteCommand(again.holder, command!, target!);
+        return;
+      }
+      throw new Error(
+        again.status === 'occupied'
+          ? occupiedMessage(again.reason)
+          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
+      );
+    }
+    throw error;
+  }
   const { platform, deliveries, persist } = built;
   const reconciled = 'reconciled' in built ? built.reconciled : { interrupted: [] };
   if (reconciled.interrupted.length > 0) {
@@ -124,7 +392,9 @@ async function main() {
     }
     const escalated = pending.filter((item) => item.outcome === 'escalated');
     if (escalated.length > 0) {
-      console.log(`其中 ${escalated.length} 条是升级，需要你答复：node src/l3.ts answer <missionId> --answer "..."`);
+      console.log(
+        `其中 ${escalated.length} 条是升级。方案运行中的升级用 node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者>（AQ1 答复唯一路径；HTTP 不复制续跑）；方案运行之外才用 node src/l3.ts answer <missionId> --answer "..."`,
+      );
     }
     console.log('下一步：node src/l3.ts show <missionId>');
     return;
@@ -541,7 +811,7 @@ async function main() {
   node src/l3.ts merge <missionId> [--reason] [--as <检视者> --confirmed-by <确认人>] 放行并落地到目标分支
   node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]  打回给协调者重做
   node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]    放弃
-  node src/l3.ts answer <missionId> --answer "..."     答复协调者的升级
+  node src/l3.ts answer <missionId> --answer "..."     答复协调者的升级（仅方案运行之外；方案中的升级是 AQ1 唯一路径：plan decide --action answer。HTTP 不复制续跑）
   node src/l3.ts revise <missionId> --contract <file>  发布新契约（在等检视的会退回规划）
   node src/l3.ts cancel <missionId> [--reason] 叫停（终态，释放改动名额）
   node src/l3.ts pause <missionId>            暂停（阶段不变，调度器不碰）

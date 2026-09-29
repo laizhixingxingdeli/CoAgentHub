@@ -62,6 +62,12 @@ export interface ApiDeps {
   /** Web 资源根目录。缺省 src/web/；测试用临时目录，免得几个测试文件互相看见。 */
   webRoot?: string;
   /**
+   * 文件回环写者身份。注入后所有 JSON 应答（含错误）带
+   * x-coagent-instance / x-coagent-state-id，与 /api/health 一致。
+   * 不注入则不加这两头：内存测试与 PG 没有文件锁身份。
+   */
+  identity?: { readonly instanceId: string; readonly stateId: string };
+  /**
    * 候选池仓储。不传就是内存版（进程退了配置就没了）。
    *
    * 为什么是可选的：这一堆 createApi 调用点里绝大多数只关心 Mission 流转，
@@ -116,14 +122,39 @@ function parseBriefBudget(raw: string | null): number | undefined {
   return n;
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+/**
+ * 成功 JSON 先记在这里，等 onMutation 完成再 writeHead。
+ * 若 send() 当时就写头，落盘失败时客户端已经拿到 2xx，无法改口。
+ */
+const deferredJson = new WeakMap<ServerResponse, { status: number; body: unknown }>();
+
+function writeJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  identity?: { readonly instanceId: string; readonly stateId: string },
+): void {
+  if (res.headersSent || res.writableEnded) {
+    // 头已经出去就不要假装还能改状态码：拆掉连接，让调用方把结果当成不确定。
+    res.destroy();
+    return;
+  }
   const payload = JSON.stringify(body ?? {});
-  res.writeHead(status, {
+  const headers: Record<string, number | string> = {
     'x-coagent-api': API_VERSION,
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
-  });
+  };
+  if (identity) {
+    headers['x-coagent-instance'] = identity.instanceId;
+    headers['x-coagent-state-id'] = identity.stateId;
+  }
+  res.writeHead(status, headers);
   res.end(payload);
+}
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  deferredJson.set(res, { status, body });
 }
 
 export function createApi(deps: ApiDeps): Server {
@@ -327,34 +358,59 @@ export function createApi(deps: ApiDeps): Server {
     },
   };
 
+  const identity = deps.identity;
+
   return createServer((req, res) => {
     void handle(req, res)
       .then(async () => {
-        // **要 await**：落盘失败必须能变成这次请求的错误。即发即忘的话，
-        // 一个写冲突会以 unhandledRejection 的形式把整个进程带走，
-        // 而调用方只看到连接断了。
-        if (req.method === 'POST' && onMutation) await onMutation();
+        // 成功应答必须在 onMutation 完成之后才 writeHead。先写头再 persist，
+        // 落盘失败时客户端已经拿到 2xx，无法改成非 2xx。
+        // **要 await**：即发即忘的话写冲突会变成 unhandledRejection，调用方只看到断连。
+        if (req.method === 'POST' && onMutation && deferredJson.has(res)) {
+          try {
+            await onMutation();
+          } catch (error) {
+            deferredJson.delete(res);
+            throw new HttpError(
+              500,
+              'PERSIST_FAILED',
+              error instanceof Error
+                ? `落盘失败，本次写入结果不确定：${error.message}`
+                : '落盘失败，本次写入结果不确定',
+            );
+          }
+        }
+        const pending = deferredJson.get(res);
+        if (pending) {
+          deferredJson.delete(res);
+          writeJson(res, pending.status, pending.body, identity);
+        }
       })
       .catch((error) => {
       if (error instanceof HttpError) {
-        send(res, error.status, { error: error.code, message: error.message });
+        writeJson(res, error.status, { error: error.code, message: error.message }, identity);
       } else if (error instanceof ClassifiedMissionInputError) {
-        send(res, 400, { error: error.code, message: error.message });
+        writeJson(res, 400, { error: error.code, message: error.message }, identity);
       } else if (error instanceof PlatformRuleError) {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
-        send(res, 409, { error: error.code, message: error.message });
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else if (error instanceof AgentPoolError) {
         // 与 PlatformRuleError 同构：请求本身合法，是当前候选池容不下它。
         // 界面要把 message 原样显示出来，所以那里写的就是「下一步该干什么」。
-        send(res, 409, { error: error.code, message: error.message });
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else if (error instanceof KernelError) {
-        send(res, 409, { error: error.code, message: error.message });
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else {
-        send(res, 500, {
-          error: 'INTERNAL',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        writeJson(
+          res,
+          500,
+          {
+            error: 'INTERNAL',
+            message: error instanceof Error ? error.message : String(error),
+          },
+          identity,
+        );
       }
       });
   });
@@ -556,17 +612,89 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.resumeMission(id));
     }
 
-    const finalizeMatch = /^\/api\/missions\/([^/]+)\/finalize$/.exec(path);
-    if (method === 'POST' && finalizeMatch) {
+    const rejectIndependentFinalReview = (req: IncomingMessage): void => {
       const runHeader = req.headers['x-coagent-run'];
       const runToken = Array.isArray(runHeader) ? runHeader[0] : runHeader;
       const run = tokens.resolve(runToken);
       if (run?.role === 'independent_reviewer') {
         throw new HttpError(403, 'ACTION_DENIED', 'independent_reviewer 不能终审。');
       }
+    };
+
+    const reviewerFinalizeMatch = /^\/api\/missions\/([^/]+)\/finalize\/reviewer$/.exec(path);
+    if (method === 'POST' && reviewerFinalizeMatch) {
+      rejectIndependentFinalReview(req);
+      // 控制面仍是 operator 门禁；reviewer / HA 权威由 Platform 入口判定，不在这里伪造。
+      await requireControl(req, POLICY_ACTION.finalizeHuman);
+      const body = await readJson(req);
+      const missionId = reviewerFinalizeMatch[1];
+      const verdict = body.verdict as 'merge' | 'send_back' | 'abandon';
+      const reasons = Array.isArray(body.reasons) ? body.reasons.map((row) => String(row)) : [];
+      const projectRoot = typeof body.projectRoot === 'string' ? body.projectRoot : undefined;
+      const reviewerId = String(body.reviewerId ?? '');
+      const confirmedBy = String(body.confirmedBy ?? '');
+      if (verdict === 'merge') {
+        const view = await platform.getMissionView(missionId);
+        if (view.executionMode === 'high_assurance') {
+          return send(
+            res,
+            200,
+            await platform.finalizeMissionByHaAuthority(missionId, {
+              reviewerId,
+              confirmedBy,
+              ...(projectRoot !== undefined ? { projectRoot } : {}),
+              reasons,
+            }),
+          );
+        }
+      }
+      return send(
+        res,
+        200,
+        await platform.finalizeMissionByReviewer(missionId, {
+          verdict,
+          reasons,
+          ...(projectRoot !== undefined ? { projectRoot } : {}),
+          reviewerId,
+          confirmedBy,
+        }),
+      );
+    }
+
+    const finalizeMatch = /^\/api\/missions\/([^/]+)\/finalize$/.exec(path);
+    if (method === 'POST' && finalizeMatch) {
+      rejectIndependentFinalReview(req);
       await requireControl(req, POLICY_ACTION.finalizeHuman);
       const body = await readJson(req);
       return send(res, 200, await platform.finalizeMission(finalizeMatch[1], body as never));
+    }
+
+    const retireMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/retire$/.exec(path);
+    if (method === 'POST' && retireMatch) {
+      // 控制面 L3 作废：有 resolver 时与其它 L3 写口一样要 operator。权威规则在 Platform。
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      return send(
+        res,
+        200,
+        await platform.retireWorkItem(retireMatch[1], retireMatch[2], String(body.reason ?? '')),
+      );
+    }
+
+    const rerunMatch = /^\/api\/missions\/([^/]+)\/rerun$/.exec(path);
+    if (method === 'POST' && rerunMatch) {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      const body = await readJson(req);
+      const newMissionId = typeof body.newMissionId === 'string' ? body.newMissionId : undefined;
+      const baseRevision = typeof body.baseRevision === 'string' ? body.baseRevision : undefined;
+      return send(
+        res,
+        200,
+        await platform.rerunMission(rerunMatch[1], {
+          ...(newMissionId !== undefined ? { newMissionId } : {}),
+          ...(baseRevision !== undefined ? { baseRevision } : {}),
+        }),
+      );
     }
 
     /* ---- 收件箱：结果回到发起方。Host 离线时结果就在这儿等着 ---- */

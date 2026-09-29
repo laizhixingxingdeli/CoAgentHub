@@ -8,7 +8,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1348,6 +1348,104 @@ describe('生产入口 makeIssuer 队列领取身份', () => {
     } finally {
       queuedBuilt.releaseLock();
       plainBuilt.releaseLock();
+    }
+  });
+});
+
+describe('L3 主写在持锁常驻服务时转发', () => {
+  test('startServer 持锁时 l3 pause 成功，run-mission 仍拿不到锁', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'l3-loopback-wire-'));
+    temps.push(dir);
+    const statePath = join(dir, 'state.json');
+    const seeded = await buildPersistentPlatform(statePath, {
+      workspace: new InPlaceWorkspaceManager(),
+      reconcile: false,
+      exclusive: { what: 'seed' },
+    });
+    await seeded.platform.createMission({
+      projectId: 'P',
+      missionId: 'M-pause',
+      contract: CONTRACT,
+    });
+    seeded.persist();
+    seeded.releaseLock();
+
+    const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+    const live = spawn(process.execPath, [MAIN], {
+      env: {
+        ...process.env,
+        COAGENT_STORE: 'file',
+        COAGENT_STATE: statePath,
+        PORT: '0',
+        COAGENT_RECONCILE_INTERVAL_MS: '0',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let liveErr = '';
+    live.stderr?.on('data', (chunk) => {
+      liveErr += String(chunk);
+    });
+    await new Promise<void>((resolve, reject) => {
+      let started = false;
+      const timer = setTimeout(() => {
+        if (!started) reject(new Error(`常驻服务启动超时：${liveErr}`));
+      }, 20_000);
+      live.stdout?.on('data', (chunk) => {
+        if (started) return;
+        if (String(chunk).includes('平台已启动')) {
+          started = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      live.once('exit', (code) => {
+        if (!started) {
+          clearTimeout(timer);
+          reject(new Error(`常驻服务提前退出 ${String(code)}：${liveErr}`));
+        }
+      });
+    });
+    try {
+      const L3 = fileURLToPath(new URL('../src/l3.ts', import.meta.url));
+      const paused = spawnSync(process.execPath, [L3, 'pause', 'M-pause', '--state', statePath], {
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      assert.equal(paused.status, 0, `${paused.stdout}${paused.stderr}`);
+      assert.match(`${paused.stdout}${paused.stderr}`, /已暂停/);
+
+      const mission = join(dir, 'mission.json');
+      writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-pause', contract: CONTRACT }));
+      const spawned = spawnSync(
+        process.execPath,
+        [
+          '--experimental-strip-types',
+          'src/run-mission.ts',
+          mission,
+          '--cwd',
+          dir,
+          '--state',
+          statePath,
+          '--in-place',
+        ],
+        {
+          cwd: fileURLToPath(new URL('..', import.meta.url)),
+          encoding: 'utf8',
+          env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+          timeout: 20_000,
+        },
+      );
+      assert.notEqual(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
+      assert.match(`${spawned.stdout}${spawned.stderr}`, /平台正被另一个进程占用/);
+    } finally {
+      await new Promise<void>((done) => {
+        live.once('exit', () => done());
+        live.kill();
+        setTimeout(() => {
+          live.kill('SIGKILL');
+          done();
+        }, 3000);
+      });
     }
   });
 });
