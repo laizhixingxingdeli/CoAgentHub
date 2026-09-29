@@ -1117,8 +1117,31 @@ export async function startServer(
       },
       usePg ? undefined : () => releaseMainLock(),
     );
+    let safeShutdown: Promise<void> | undefined;
+    const requestSafeShutdown = (): Promise<void> => {
+      if (safeShutdown) return safeShutdown;
+      safeShutdown = (async () => {
+        const snapshots = hostedRuns.snapshot();
+        const missionIds = new Set(snapshots.filter((item) => item.kind === 'mission').map((item) => item.id));
+        for (const snapshot of snapshots) {
+          if (snapshot.kind !== 'plan') continue;
+          if (!snapshot.runPath) throw new Error(`不能安全关闭：PlanRun 缺少真实 runPath：${snapshot.id}`);
+          const stopped = await shutdownHostedPlan({
+            runPath: snapshot.runPath,
+            hostedMissionId: undefined,
+            platform: built.platform,
+            persist: built.persist,
+          });
+          for (const id of stopped.pausedMissionIds) missionIds.add(id);
+        }
+        for (const id of missionIds) await built.platform.pauseMission(id);
+        if (missionIds.size > 0) await built.persist();
+      })();
+      return safeShutdown;
+    };
     return {
       server,
+      requestSafeShutdown,
       ...built,
       stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
       hostedRunSnapshots: () => hostedRuns.snapshot().map((snapshot) => {
@@ -1302,8 +1325,10 @@ if (isDirectMainEntry()) {
         });
       };
       const onInterrupt = createSigintHandler(onSignal, () => {
-        console.warn('Second SIGINT received; controlled pause is not available yet.');
         process.exitCode = 1;
+        void built.requestSafeShutdown().catch((error) => {
+          console.error(`受控暂停失败，服务仍按 drain 路径关闭：${error instanceof Error ? error.message : String(error)}`);
+        });
       }, () => {
         try {
           console.log(formatHostedRunSnapshots(built.hostedRunSnapshots()));

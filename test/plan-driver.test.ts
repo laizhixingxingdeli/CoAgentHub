@@ -88,6 +88,7 @@ function harness(options?: {
   pollMs?: number;
   routes?: Record<string, Awaited<ReturnType<PlanDriverDeps['proposeRoute']>>>;
   onSleep?: Hook;
+  onMissionReturn?: Hook;
   /** 每次写方案运行记录之前先跑它：用来在驱动方读与写之间插进检视者的一笔。 */
   beforeUpdate?: Hook;
   /** 分类员：抛错 / 花多久。 */
@@ -186,6 +187,7 @@ function harness(options?: {
       }
       if (ran instanceof Error) throw ran;
       status.set(missionId, ran.status);
+      await options?.onMissionReturn?.({ now: now(), store });
       return ran.outcome;
     },
     platform: {
@@ -381,6 +383,51 @@ describe('现做分类', () => {
     assert.match(suspendLog, /不删除、不改写、不迁移数据/);
     assert.match(suspendLog, /HAOFF1 当前关闭/);
     assert.match(suspendLog, /node src\/l3\.ts plan approve <真实missionId>/);
+  });
+});
+
+describe('service_shutdown 驱动边界', () => {
+  test('升级等待期间持久停靠后短时返回并保留原始原因', async () => {
+    const detail = '服务正在关闭';
+    const h = harness({
+      features: ['F1', 'F2'],
+      finalize: { 'R1-F1': RED },
+      pollMs: 60_000,
+      onSleep: async ({ now, store }) => {
+        if (store.read()?.currentEscalation) {
+          await store.update((run) => run.halt('service_shutdown', detail, now));
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'service_shutdown');
+    assert.equal(stop.detail, detail);
+    assert.equal(h.store.read()?.stopped?.reason, 'service_shutdown');
+    assert.equal(h.store.read()?.stopped?.detail, detail);
+    assert.equal(h.store.read()?.escalationsOpened, 1);
+    assert.ok(!h.calls.some((call) => call.startsWith('abandon R1-F1')));
+    assert.ok(!h.calls.includes('create R1-F2'));
+  });
+
+  test('Mission 返回前持久停靠后不终审、放弃或派发后续', async () => {
+    const detail = 'Mission 收尾停靠';
+    const h = harness({
+      features: ['F1', 'F2'],
+      onMissionReturn: async ({ now, store }) => {
+        await store.update((run) => run.halt('service_shutdown', detail, now));
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'service_shutdown');
+    assert.equal(stop.detail, detail);
+    assert.equal(h.store.read()?.stopped?.reason, 'service_shutdown');
+    assert.equal(h.store.read()?.stopped?.detail, detail);
+    assert.ok(!h.calls.some((call) => call.startsWith('finalize R1-F1')));
+    assert.ok(!h.calls.some((call) => call.startsWith('ha-finalize')));
+    assert.ok(!h.calls.some((call) => call.startsWith('abandon')));
+    assert.ok(!h.calls.includes('create R1-F2'));
   });
 });
 
