@@ -117,7 +117,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - **fast-lane-ab-metrics** — Fast Lane A/B 指标（FASTLANE-METRICS）
   `Platform.listRuns(missionId)` 是同一任务多次运行的只读对照出口；`src/l3.ts runs` 直接展示这些事实。
 - **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
-  `createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。
+  `createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。**当前 `startSer
 - **lightweight-standard-promotion** — Lightweight → Standard 晋升（PROMO-001）
   可信升级把 Lightweight mutation Mission 转为 Standard，并留下 `PromotionRecord`；入口只在进程内。
 - **machine-final-review** — 机器 L3：合进集成分支，在合并结果上验证，红则回滚

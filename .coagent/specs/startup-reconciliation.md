@@ -4,7 +4,7 @@
 
 ## 前提
 
-收敛是**写操作**。只读进程（观测面）不得调用——共用 Postgres 时它会把别人正在跑的 attempt 判死。推进状态的进程必须用 `missionId` 限定范围：它只对自己接手的那条 Mission 有「没有别人在跑」这个认知。
+收敛是**写操作**。只读进程不得调用——共用 Postgres 时它会把别人正在跑的 attempt 判死。推进状态的进程必须用 `missionId` 限定范围：它只对自己接手的那条 Mission 有「没有别人在跑」这个认知。文件版常驻 `startServer` 在可写装配和启动收敛前取得主锁，不能在无锁时运行这些写操作。
 
 文件存储同理：`buildPersistentPlatform(…, { reconcile: false })` 不收敛。`l3.ts` 的只读命令（`inbox` / `show` / `plan`，含 `plan decide`——它只写方案运行记录那份独立文件）一律这样起。理由不是理论上的：写者刚开一跳时 attempt 已经落盘、spawn 还没回来、第一次心跳还没打，这几秒里它就是「从没心跳过」；只读命令在这时起来收敛，会把它判死并**整份写回状态文件**，而写者正握着锁在写——两个写者，后写的盖掉先写的，悄无声息。夜跑时检视者每 20 分钟就要 `l3.ts plan` 一次，这不是小概率。缺省（不传）仍收敛，推进状态的入口行为不变。
 
@@ -42,7 +42,7 @@
 
 两件事不要混：
 
-- **启动时**：`reconcileInterruptedAttempts` / `reconcileOrphanedWorktrees` 仍按原规则，只跑一次。只读观测面不调 Attempt 收敛；推进状态的进程用 `missionId` 限定。
+- **启动时**：`reconcileInterruptedAttempts` / `reconcileOrphanedWorktrees` 仍按原规则，只跑一次。只读入口不调 Attempt 收敛；推进状态的进程用 `missionId` 限定。文件版 `startServer` 在持主锁后装配及收敛。
 - **运行中**：`startServer` 与 `run-plan` 按间隔补投递，两入口共用 `main.ts` 的 `startPeriodicDeliveryRepair` 装配（底层复用 `startPeriodicReconcile`），按 mode 选择文件版短借锁、文件版已持锁或 PG 独立 store。不得各自另选 tick。不周期调用上面两个启动收敛函数，也不切换写者。
 
 ### 配置
@@ -51,9 +51,11 @@
 
 ### 锁与活对象
 
-- 文件版 `startServer` 是只读观测面，使用共用装配的 `file-observer` mode，**不握长锁**。每轮 `acquireLock`；锁忙 warn 并跳过，不写文件。拿到锁后新开 `FileStateStore`（注入 `hasArchivedMission`），跑完释放。
+- 文件版 `startServer` 是持锁的常驻写者：可写平台装配与启动收敛之前拿主锁，成功 listen 后向锁目录发布实际回环端口（包括请求 port=0 时），在关闭周期调度与 HTTP 之后才释放。周期修复使用共用装配的 `file-held` mode 和已持锁 `FileStateStore`，不使用 `file-observer` 短借自己的锁。同 statePath 的其他写者拿不到锁，端口也不启动；失败清理 HTTP 与自己的锁，不自动抢占陈旧锁。
 - 文件版 `run-plan` 使用共用装配的 `file-held` mode，已持排他锁，用现有装配修，不再取锁。
 - PG：两入口均使用共用装配的 `pg` mode；每轮新开独立 `PgStateStore`，在专用连接上 `pg_try_advisory_lock` 做跨进程互斥；拿不到就跳过。刷新并修复这份独立 store，不 `refresh`、不改写 Runner / HTTP 正在用的活 Platform。结束时解锁并关掉独立连接。
+
+文件锁元数据包含 PID、规范化 stateId、不可复用 instanceId、API 版本与公布后的真实端口。`probeLocalWriter` 只有目录确实不存在才返回 empty；占锁但未发布端口、进程已死、元数据损坏、回环服务不可达或 `/api/health` 返回的 `x-coagent-instance`、`x-coagent-state-id`、API 版本不匹配都返回 occupied，不自动清残锁。匹配才返回 live。它只证明同机文件版所有权，不是 PG 跨主机 fencing。**当前控制写未鉴权，仅绑定 127.0.0.1**；Run Token `x-coagent-run` 不作为控制身份，D1d 尚未实施。
 
 ### 失败策略
 
@@ -61,7 +63,7 @@
 
 关闭与清理的异常路径同样要走完：
 
-- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。stop 与关闭的错误都保留（两个都有时用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。callback / error 监听器自身抛错只记录（`console.error`），不重复交付，也不变成未处理拒绝。
+- `server.close`：无论 `periodic.stop` 成败都关 HTTP；`closeHttp` 同步抛错当作关闭错误接住。文件版在 HTTP close 回调后释放主锁，所有关闭步骤的错误都保留（多个错误用 `AggregateError`）。有 callback 就交给 callback；没有 callback 时，server 上有 `error` 监听器则 `emit('error')`，否则 `console.error`——不得静默，也不得留下未处理的 Promise 拒绝。callback / error 监听器自身抛错只记录（`console.error`），不重复交付，也不变成未处理拒绝。
 - `run-plan` 退出：`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`runIndependentCleanup`），一步失败不跳过后面的，锁必须释放。失败经 `console.error` 留下可诊断信息。主流程错误与清理错误都保留：清理全成功时原样抛出主流程错误；两边都失败时抛 `AggregateError`（主流程错误在前），并用 `formatErrorForLog` 展开内部错误再打印。
 - 信号退出：记中断原因、`periodic.stop`、`persist`、`releaseLock` 各自独立尝试（`cleanupAfterSignal`），一步失败仍继续、每步失败都记录，最后一定尝试释锁并以退出码 130 退出（清理失败靠 stderr 诊断，不另开退出码）。该路径永不留下未处理拒绝。
 

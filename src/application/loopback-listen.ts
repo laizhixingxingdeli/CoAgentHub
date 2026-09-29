@@ -9,6 +9,7 @@
  * 整个 Mission 便宜得多。
  */
 
+import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import type { AddressInfo, Server } from 'node:net';
 
 /**
@@ -67,6 +68,41 @@ export async function listenLoopback(
       );
     }
   }
+}
+
+/**
+ * 给健康检查补上回环写者身份。必须在请求处理之前包 writeHead：createApi 的
+ * send() 一次性 writeHead，后挂的 request 监听器已经来不及改头。
+ * 不改 api/server.ts——身份是锁/探测的事，不是 API 契约本身。
+ */
+export function attachLoopbackWriterIdentity(
+  server: HttpServer,
+  identity: { readonly instanceId: string; readonly stateId: string },
+): void {
+  const origEmit = server.emit.bind(server);
+  server.emit = ((event: string, ...args: unknown[]) => {
+    if (event === 'request') {
+      const req = args[0] as IncomingMessage;
+      const res = args[1] as ServerResponse;
+      const path = String(req.url ?? '/').split('?')[0];
+      if ((req.method ?? 'GET') === 'GET' && path === '/api/health') {
+        const origWriteHead = res.writeHead.bind(res);
+        res.writeHead = ((statusCode: number, ...rest: unknown[]) => {
+          res.setHeader('x-coagent-instance', identity.instanceId);
+          res.setHeader('x-coagent-state-id', identity.stateId);
+          if (typeof rest[0] === 'string') {
+            return origWriteHead(
+              statusCode,
+              rest[0],
+              rest[1] as Parameters<ServerResponse['writeHead']>[2],
+            );
+          }
+          return origWriteHead(statusCode, rest[0] as Parameters<ServerResponse['writeHead']>[1]);
+        }) as ServerResponse['writeHead'];
+      }
+    }
+    return origEmit(event, ...args);
+  }) as HttpServer['emit'];
 }
 
 function listenOnce(server: Server, port: number, host: string): Promise<void> {
