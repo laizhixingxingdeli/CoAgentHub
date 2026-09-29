@@ -39,16 +39,37 @@ export type LocalWriterProbe =
 /** 回环探测超时。太长会卡住 CLI；太短会把慢启动误判成 occupied。 */
 const HEALTH_PROBE_TIMEOUT_MS = 800;
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function lockBusyMessage(path: string, holder: LockInfo | undefined): string {
+  const lines = ['平台正被另一个进程占用；不会自动抢占或删除锁。', `锁目录：${path}`];
+  if (holder) {
+    lines.push(
+      `持有者：pid=${holder.pid}，instanceId=${holder.instanceId ?? '（无）'}，port=${holder.port ?? '（无）'}，since=${holder.since}，what=${holder.what}`,
+      `核实进程仍活着（POSIX）：kill -0 ${holder.pid} && echo alive || echo not-alive`,
+      `核实进程仍活着（Windows PowerShell）：Get-Process -Id ${holder.pid} -ErrorAction SilentlyContinue`,
+    );
+  } else {
+    lines.push('持有者元数据缺失或损坏，无法确定 PID；请先人工检查锁目录内容及系统中可能运行的平台写者。不要仅凭元数据缺失判断进程已死。');
+  }
+  lines.push(
+    `仅在确认持有者进程已死亡、且无其他写者运行后，手动清理（POSIX）：rm -rf -- ${shellQuote(path)}`,
+    `仅在确认持有者进程已死亡、且无其他写者运行后，手动清理（Windows PowerShell）：Remove-Item -LiteralPath ${powershellQuote(path)} -Recurse -Force`,
+  );
+  return lines.join('\n');
+}
+
 export class LockBusyError extends Error {
   readonly holder: LockInfo | undefined;
 
   constructor(path: string, holder: LockInfo | undefined) {
-    super(
-      holder
-        ? `平台正被另一个进程占用（pid ${holder.pid}，自 ${holder.since} 起，${holder.what}）。` +
-            `等它结束再操作；确认那个进程已经死了的话，删掉 ${path}。`
-        : `平台正被另一个进程占用。等它结束再操作；确认没有别的进程的话，删掉 ${path}。`,
-    );
+    super(lockBusyMessage(path, holder));
     this.name = 'LockBusyError';
     this.holder = holder;
   }

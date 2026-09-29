@@ -366,6 +366,8 @@ describe('现做分类', () => {
     assert.equal(f3?.status, 'suspended');
     assert.match(f3?.needsDecision ?? '', /要你定/);
     assert.match(f3?.needsDecision ?? '', /destructiveData/);
+    assert.match(f3?.needsDecision ?? '', /不删除、不改写数据/);
+    assert.match(f3?.needsDecision ?? '', /coagent l3 plan-release --feature F3 --mission <mission-id> --action approve/);
   });
 });
 

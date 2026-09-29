@@ -200,8 +200,19 @@ async function runFeature(
     }
   }
   if (route.kind === 'needs_human') {
-    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。`);
-    await deps.store.update((r) => r.suspendFeature(feature.id, route.needsDecision));
+    const forbidden = route.reason.startsWith('high_assurance 禁止副作用未证明为 false：');
+    const explanation = forbidden
+      ? `触发字段：${route.reason.slice('high_assurance 禁止副作用未证明为 false：'.length)}。依据：${[
+          ...(feature.why ? [`why: ${feature.why}`] : []),
+          ...(feature.constraints?.length ? [`constraints: ${feature.constraints.join('；')}`] : []),
+        ].join('；') || '方案未提供 why/constraints 原文。'}`
+      : '';
+    const guidance = forbidden
+      ? `${explanation}。请修改契约，明确不删除、不改写数据后重跑；或走 HA 流程人工放行：coagent l3 plan-release --feature ${feature.id} --mission <mission-id> --action approve --confirmed-by <principal>。`
+      : '';
+    const needsDecision = guidance ? `${route.needsDecision} ${guidance}` : route.needsDecision;
+    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。${guidance ? ` ${guidance}` : ''}`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, needsDecision));
     return;
   }
   const created = await createMission(plan, run, feature, missionId, route, deps);
@@ -603,7 +614,7 @@ async function handleAwaitingAnswer(
     await deps.store.update((r) => r.checkStop(afterRun));
     return 'done';
   }
-  const failure = `协调者升级给 L3 的问题夜里没人答：${question}`;
+  const failure = `协调者向 L3 提问：${question}`;
   const escalation = await deps.store.update((r) =>
     r.openEscalation(
       { featureId: feature.id, missionId, failure, question, answerable: true },
