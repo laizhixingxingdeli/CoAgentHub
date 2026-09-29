@@ -2176,9 +2176,16 @@ describe('startServer 方案记录目录与托管 live', () => {
       }
       assert.equal(snapshots.length, 1, 'hosted PlanRun 未在有界时间内登记');
       const plan = snapshots[0]!;
-      await gated.started;
       assert.ok(plan.runPath?.startsWith(runDir));
       const store = new FilePlanRunStore(plan.runPath!);
+      const storeDeadline = Date.now() + 1_000;
+      let stored = store.read();
+      while (!stored && Date.now() < storeDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        stored = store.read();
+      }
+      assert.ok(stored, 'hosted PlanRun store 未在有界时间内创建');
+      assert.equal(stored.stopped, undefined, '注入信号前 PlanRun 不应已结束');
       assert.throws(() => acquireLock(statePath), LockBusyError);
       let closeDone = false;
       const handler = createSigintHandler(
