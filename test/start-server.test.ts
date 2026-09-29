@@ -2106,9 +2106,13 @@ describe('startServer 方案记录目录与托管 live', () => {
     let running: Promise<number> | undefined;
     try {
       running = loopbackRunRequest(target, { path: '/api/control/run-plan', body: base }, () => {});
-      await gated.started;
-      const plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
-      assert.equal(plans.length, 1);
+      const deadline = Date.now() + 3_000;
+      let plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      while (plans.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      }
+      assert.equal(plans.length, 1, '真实 run-plan 在有界等待内未登记 hosted plan 快照');
       const plan = plans[0]!;
       assert.match(plan.id, /^PLAN-hosted-/);
       assert.notEqual(plan.id, base.plan.planId);
