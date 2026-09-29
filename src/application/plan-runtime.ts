@@ -98,6 +98,8 @@ export async function runPlanOnPlatform(
         persistAfter(deps.persist, deps.platform.finalizeMissionByMachine(missionId, input)),
       abandonMissionForPlan: (missionId, input) =>
         persistAfter(deps.persist, deps.platform.abandonMissionForPlan(missionId, input)),
+      answerEscalation: (missionId, answer) =>
+        persistAfter(deps.persist, deps.platform.answerEscalation(missionId, answer)),
     },
     proposeRoute: async (feature) => {
       if (!deps.runQuery) return { ok: false, reason: '分类员不可用（query runtime 没装上）。' };

@@ -137,6 +137,10 @@ export function renderPlanHandoff(
   }
   if (open && !stop) {
     lines.push(`  ⚑ 升级单 ${open.id}（${open.featureId}，${open.deadline} 截止）：${open.failure}`);
+    if (open.answerable === true) {
+      // 可答复单才列原问：旧四动作单的 question 是动作提示，不是协调者原话。
+      lines.push(`    原问：${open.question}`);
+    }
     const rerunLeft = run.rerunsUsed(open.featureId) < run.stopConditions.maxRerunsPerFeature;
     const actions = rerunLeft ? '<rerun_isolated|skip|rescope|stop>' : '<skip|rescope|stop>';
     lines.push(
@@ -144,6 +148,12 @@ export function renderPlanHandoff(
         `--reason "…" [--drop F7,F8] --as ${run.reviewer}` +
         (context.recordPath ? ` --run "${context.recordPath}"` : ''),
     );
+    if (open.answerable === true) {
+      lines.push(
+        `    答复：node src/l3.ts plan decide ${open.id} --action answer --answer "…" ` +
+          `--as ${run.reviewer} --run "${context.recordPath ?? '<记录>'}"`,
+      );
+    }
   }
   const excluded = run.sourceExclusions;
   if (excluded && excluded.length > 0) {

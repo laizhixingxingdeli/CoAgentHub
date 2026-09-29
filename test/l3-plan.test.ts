@@ -62,6 +62,43 @@ async function nightInProgress() {
   return { dir, statePath, store };
 }
 
+/** 可答复升级单：协调者原问绑在 E-1 上。 */
+async function nightAnswerable(options?: { openedAgoMin?: number }) {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-'));
+  dirs.push(dir);
+  const statePath = join(dir, 'state.json');
+  const store = new FilePlanRunStore(join(dir, '.coagent-plans', 'PLAN-x-20260923-2200.json'));
+  const openedAt = new Date(Date.now() - (options?.openedAgoMin ?? 0) * MIN).toISOString();
+  const startedAt = new Date(Date.parse(openedAt) - MIN).toISOString();
+  await store.create(
+    PlanRun.start({
+      id: 'PLAN-x-20260923-2200',
+      planId: 'PLAN-x',
+      projectId: 'P',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['F1', 'F2', 'F3'],
+      titles: { F1: '升级握手', F2: '驱动', F3: '交接面' },
+      startedAt,
+    }),
+  );
+  await store.update((run) => {
+    run.startFeature('F1', 'PLAN-x-20260923-2200-F1');
+    run.openEscalation(
+      {
+        featureId: 'F1',
+        missionId: 'PLAN-x-20260923-2200-F1',
+        failure: '协调者提问',
+        question: '这个 missionId 对不对？',
+        answerable: true,
+      },
+      openedAt,
+    );
+  });
+  return { dir, statePath, store };
+}
+
 function l3(statePath: string, ...args: string[]) {
   const result = spawnSync(process.execPath, [L3, ...args, '--state', statePath], { encoding: 'utf8' });
   return { status: result.status, out: `${result.stdout}${result.stderr}` };
@@ -83,6 +120,24 @@ describe('l3 plan：看', () => {
     assert.match(out, /⚑ 升级单 E-1/);
     assert.match(out, /IVAL-7/);
     assert.match(out, /plan decide E-1 --action/);
+    assert.doesNotMatch(out, /--action answer/);
+    assert.doesNotMatch(out, /原问/);
+  });
+
+  test('可答复单给出原问和答复命令；其它失败仍只有四动作', async () => {
+    const answerable = await nightAnswerable();
+    const shown = l3(answerable.statePath, 'plan');
+    assert.equal(shown.status, 0, shown.out);
+    assert.match(shown.out, /原问：这个 missionId 对不对？/);
+    assert.match(shown.out, /plan decide E-1 --action <rerun_isolated\|skip\|rescope\|stop>/);
+    assert.match(shown.out, /plan decide E-1 --action answer --answer "…" --as claude --run /);
+
+    const { statePath } = await nightInProgress();
+    const other = l3(statePath, 'plan');
+    assert.equal(other.status, 0, other.out);
+    assert.doesNotMatch(other.out, /原问/);
+    assert.doesNotMatch(other.out, /--action answer/);
+    assert.match(other.out, /plan decide E-1 --action/);
   });
 
   test('l3 plan 另列源方案未纳入；不把源 skipped 显示成检视者跳过', async () => {
@@ -374,6 +429,117 @@ describe('l3 plan decide：写回决定', () => {
     assert.match(second.out, /F1/);
     assert.match(second.out, /1/);
     assert.equal(readFileSync(store.path).equals(before), true);
+  });
+
+  test('answer 可省 reason：结论写入记录，主状态不变，功能仍 running', async () => {
+    const first = await nightAnswerable();
+    const platform = await buildPersistentPlatform(first.statePath, { workspace: new InPlaceWorkspaceManager() });
+    await platform.persist();
+    const stateBefore = readFileSync(first.statePath);
+    const release = acquireLock(first.statePath, 'run-plan PLAN-x');
+    try {
+      const { status, out } = l3(
+        first.statePath,
+        'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '  用这个 id  ', '--as', 'claude',
+      );
+      assert.equal(status, 0, out);
+      assert.match(out, /answer —— 用这个 id/);
+    } finally {
+      release();
+    }
+    const resolution = first.store.read()?.escalations[0].resolution;
+    assert.equal(resolution?.kind, 'decided');
+    assert.equal(resolution?.kind === 'decided' && resolution.action === 'answer' ? resolution.answer : '', '用这个 id');
+    assert.equal(resolution?.kind === 'decided' && resolution.action === 'answer' ? resolution.reason : 'x', undefined);
+    assert.equal(first.store.read()?.feature('F1')?.status, 'running');
+    assert.deepEqual(readFileSync(first.statePath), stateBefore);
+
+    const second = await nightAnswerable();
+    const withReason = l3(
+      second.statePath,
+      'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '否', '--reason', '现场还在跑', '--as', 'claude',
+    );
+    assert.equal(withReason.status, 0, withReason.out);
+    const r2 = second.store.read()?.escalations[0].resolution;
+    assert.equal(r2?.kind === 'decided' && r2.action === 'answer' ? r2.reason : '', '现场还在跑');
+    assert.equal(r2?.kind === 'decided' && r2.action === 'answer' ? r2.answer : '', '否');
+  });
+
+  test('answer 拒绝：非法单、已决/到期、空白/过长、错误 reviewer 均非零且记录字节不变', async () => {
+    {
+      const { statePath, store } = await nightInProgress();
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '不行', '--as', 'claude',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /不是可答复单/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable();
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-9', '--action', 'answer', '--answer', 'x', '--as', 'claude',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /没有升级单/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable();
+      const first = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '先定', '--as', 'claude',
+      );
+      assert.equal(first.status, 0, first.out);
+      const before = readFileSync(store.path);
+      const second = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '再定', '--as', 'claude',
+      );
+      assert.notEqual(second.status, 0, second.out);
+      assert.match(second.out, /定过了/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable({ openedAgoMin: 21 });
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '晚了', '--as', 'claude',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /截止/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable();
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', '   ', '--as', 'claude',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /答复必须是/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable();
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', 'x'.repeat(4001), '--as', 'claude',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /答复必须是/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
+    {
+      const { statePath, store } = await nightAnswerable();
+      const before = readFileSync(store.path);
+      const { status, out } = l3(
+        statePath, 'plan', 'decide', 'E-1', '--action', 'answer', '--answer', 'x', '--as', 'mallory',
+      );
+      assert.notEqual(status, 0, out);
+      assert.match(out, /指定的检视者是 claude/);
+      assert.deepEqual(readFileSync(store.path), before);
+    }
   });
 });
 
