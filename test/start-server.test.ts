@@ -5,7 +5,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
@@ -29,6 +29,9 @@ import {
 } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { API_VERSION } from '../src/api/server.ts';
+import { PLAN_LIVE_EMPTY_REASON } from '../src/application/live.ts';
+import { PlanRun } from '../src/application/plan-run.ts';
+import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 
@@ -1259,6 +1262,10 @@ describe('startServer hosted 接线与排空',
         assert.match(startServerSrc, /runPlan:/);
         assert.match(startServerSrc, /runHostedMission\(/);
         assert.match(startServerSrc, /runHostedPlan\(/);
+        assert.match(startServerSrc, /planRunDirs:/);
+        assert.match(startServerSrc, /planLive/);
+        assert.match(startServerSrc, /registerPlanRunDir/);
+        assert.match(startServerSrc, /\.coagent-plans/);
         assert.match(startServerSrc, /heldState/);
         assert.match(startServerSrc, /hostedHeldState\(/);
         assert.match(main, /kind: 'unsupported'/);
@@ -1777,4 +1784,183 @@ if (isDirectMainEntry(process.argv[1], import.meta.url)) {
     });
     assert.equal(existsSync(statePath), true);
   });
+});
+
+function git(cwd: string, ...args: string[]): void {
+  execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+function cleanPlanRepo(branch: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-repo-'));
+  dirs.push(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.name', 'test');
+  git(dir, 'config', 'user.email', 'test@local');
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  git(dir, 'add', 'a.txt');
+  git(dir, 'commit', '-qm', 'init');
+  git(dir, 'checkout', '-qb', branch);
+  return dir;
+}
+
+describe('startServer 方案记录目录与托管 live', () => {
+  test('缺省目录在 statePath 同级 .coagent-plans；圈外 CLI 目录读不到；未托管有 reason', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-dirs-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const plantedDir = join(dir, '.coagent-plans');
+    const outsider = mkdtempSync(join(tmpdir(), 'coagent-plan-outsider-'));
+    dirs.push(outsider);
+    const stop = {
+      unresolvedEscalations: 1,
+      wallClockMs: 60_000,
+      escalationTimeoutMs: 60_000,
+    };
+    await new FilePlanRunStore(join(plantedDir, 'R-planted.json')).create(
+      PlanRun.start({
+        id: 'R-planted',
+        planId: 'PLAN-planted',
+        projectId: 'P-hosted',
+        integrationBranch: 'auto/hosted',
+        reviewer: 'claude',
+        stopConditions: stop,
+        featureIds: ['F1'],
+        startedAt: '2026-09-29T00:00:00.000Z',
+      }),
+    );
+    await new FilePlanRunStore(join(outsider, 'R-outside.json')).create(
+      PlanRun.start({
+        id: 'R-outside',
+        planId: 'PLAN-out',
+        projectId: 'P-hosted',
+        integrationBranch: 'auto/hosted',
+        reviewer: 'claude',
+        stopConditions: stop,
+        featureIds: ['F9'],
+        startedAt: '2026-09-29T01:00:00.000Z',
+      }),
+    );
+
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+    const addr = built.server.address() as AddressInfo;
+    const listed = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs`);
+    assert.equal(listed.status, 200);
+    const rows = (await listed.json()) as Array<{ id?: string }>;
+    assert.ok(rows.some((row) => row.id === 'R-planted'));
+    assert.equal(rows.some((row) => row.id === 'R-outside'), false);
+
+    const liveRes = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs/R-planted/live`);
+    assert.equal(liveRes.status, 200);
+    const live = (await liveRes.json()) as { chunks: unknown[]; reason?: string };
+    assert.deepEqual(live.chunks, []);
+    assert.equal(live.reason, PLAN_LIVE_EMPTY_REASON);
+
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+  });
+
+  test(
+    '托管自定义 runDir 进列表/详情；CLI 行按 runId 可读且不丢不重',
+    { timeout: 30_000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'coagent-plan-live-'));
+      dirs.push(home);
+      const statePath = join(home, 'state.json');
+      const adapter = join(home, 'adapter.ts');
+      writeFileSync(adapter, '// plan live adapter\n');
+      const runDir = join(home, 'custom-plans');
+      const repo = cleanPlanRepo('auto/hosted');
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+        releaseFns.push(built.releaseLock);
+      }
+      const target = await liveTarget(statePath);
+      const ndjson: { channel: string; line: string }[] = [];
+      const baseBody = hostedPlanBody(repo, adapter, statePath, runDir);
+      // 墙钟/升级截止压到极短：本单只核接线，不能在默认 15s poll 上空等升级。
+      const body = {
+        ...baseBody,
+        plan: {
+          ...baseBody.plan,
+          stopConditions: {
+            unresolvedEscalations: 1,
+            wallClockMs: 30,
+            escalationTimeoutMs: 30,
+          },
+        },
+      };
+      const code = await loopbackRunRequest(
+        target,
+        {
+          path: '/api/control/run-plan',
+          body,
+        },
+        (channel, line) => {
+          ndjson.push({ channel, line });
+        },
+      );
+      assert.equal(code, 0, ndjson.map((row) => row.line).join('\n'));
+      const cliLines = ndjson.filter((row) => row.channel === 'stdout' || row.channel === 'stderr');
+      assert.ok(
+        cliLines.some((row) => /开跑：/.test(row.line)),
+        cliLines.map((row) => row.line).join('\n'),
+      );
+
+      const addr = built.server.address() as AddressInfo;
+      const listed = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs`);
+      assert.equal(listed.status, 200);
+      const rows = (await listed.json()) as Array<{ id?: string }>;
+      const hosted = rows.find((row) => typeof row.id === 'string' && row.id.startsWith('PLAN-hosted-'));
+      assert.ok(hosted?.id, JSON.stringify(rows));
+      const detail = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}`);
+      assert.equal(detail.status, 200);
+
+      const liveRes = await fetch(
+        `http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}/live?cursor=0`,
+      );
+      assert.equal(liveRes.status, 200);
+      const live = (await liveRes.json()) as {
+        cursor: number;
+        chunks: { seq: number; channel: string; line: string }[];
+        reason?: string;
+      };
+      assert.equal(live.reason, undefined);
+      assert.equal(live.chunks.length, cliLines.length);
+      assert.deepEqual(
+        live.chunks.map((c) => ({ channel: c.channel, line: c.line })),
+        cliLines,
+      );
+
+      const caughtUp = (await (
+        await fetch(
+          `http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}/live?cursor=${live.cursor}`,
+        )
+      ).json()) as { cursor: number; chunks: unknown[] };
+      assert.deepEqual(caughtUp.chunks, []);
+      assert.equal(caughtUp.cursor, live.cursor);
+
+      const mixed = (await (
+        await fetch(`http://${addr.address}:${addr.port}/api/plan-runs/R-planted/live`)
+      ).json()) as { chunks: unknown[]; reason?: string };
+      assert.deepEqual(mixed.chunks, []);
+      assert.equal(mixed.reason, PLAN_LIVE_EMPTY_REASON);
+
+      await new Promise<void>((done, fail) => {
+        built.server.close((err) => (err ? fail(err) : done()));
+      });
+    },
+  );
 });

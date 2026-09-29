@@ -29,7 +29,7 @@ import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
-import { InMemoryLiveOutput } from './application/live.ts';
+import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import {
   FileActivityLog,
@@ -933,6 +933,10 @@ export async function startServer(
     };
     const hostedRuntime = options?.runtime ? { runtime: options.runtime } : {};
     const heldState = hostedHeldState(usePg, statePath);
+    // 只认本服务状态文件旁的缺省目录，加上本次成功托管登记的 runDir。
+    // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
+    const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
+    const planLive = new InMemoryPlanRunLiveOutput();
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,
@@ -941,6 +945,8 @@ export async function startServer(
       agentPool: built.agentPool,
       live: 'live' in built ? built.live : undefined,
       beforeRead: 'refresh' in built ? built.refresh : undefined,
+      planRunDirs: () => [...knownPlanRunDirs],
+      planLive,
       runMission: (body, emit) =>
         runHostedMission(
           body,
@@ -965,6 +971,10 @@ export async function startServer(
             ...hostedRuntime,
             ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
             heldState,
+            planLive,
+            registerPlanRunDir: (runDir) => {
+              knownPlanRunDirs.add(resolve(runDir));
+            },
           },
           emit,
         ),

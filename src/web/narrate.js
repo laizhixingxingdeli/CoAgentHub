@@ -865,3 +865,107 @@ export function nowDoing(view) {
       return '还没有动作';
   }
 }
+
+/* ============================ 方案运行（供方案页与后续项目页共用） ============================ */
+
+/**
+ * 方案运行里一张票的状态。词必须和 Mission 的 STAGE_CN 不一样：
+ * 「已完成」是一条任务走完，这里说的是方案里这张票合没合进去。
+ */
+export const PLAN_FEATURE_CN = {
+  pending: '没轮到',
+  running: '在跑',
+  merged: '已合入',
+  suspended: '挂起等你',
+  skipped: '检视者跳过',
+};
+
+/** 方案为什么停。只贴 enum 名字等于没贴——交接面和网页必须说同一句话。 */
+export const PLAN_STOP_CN = {
+  unresolved_escalations: '未解决升级到上限',
+  wall_clock: '墙钟到点',
+  reviewer_stop: '检视者叫停',
+  finished: '走完了',
+  unsafe: '集成分支不安全',
+  crashed: '驱动方出错',
+  escalation_limit: '升级单到上限',
+};
+
+/** 夜间检视者能选的动作。网页只读展示，不把动作做成按钮。 */
+export const PLAN_ACTION_CN = {
+  rerun_isolated: '隔离重跑',
+  skip: '跳过',
+  rescope: '重划剩余范围',
+  stop: '停',
+  answer: '答复',
+};
+
+export const PLAN_HA_CN = {
+  approve: '受控放行',
+  send_back: '打回',
+  expired: '审批过期',
+  invalidated: '已失效',
+};
+
+/** 一张票现在处在方案里的哪一格。认不出的原样回显，空白会把线索吃掉。 */
+export function planFeatureText(status) {
+  const key = text(status);
+  return PLAN_FEATURE_CN[key] || key || '（没有票状态）';
+}
+
+/**
+ * 停止原因 + 细节。没有 stopped 回空串而不是「—」：还在跑和「原因就是横杠」
+ * 必须分得开；空态由页面自己说「还在跑」。
+ */
+export function planStopText(stopped) {
+  if (!stopped) return '';
+  const reason = text(stopped.reason);
+  const label = PLAN_STOP_CN[reason] || reason || '（没有写停止原因）';
+  const detail = text(stopped.detail);
+  return detail ? `${label}——${detail}` : label;
+}
+
+/** 方案运行还在不在跑。stopped 在就说停了，细节走 planStopText。 */
+export function planStatusText(run) {
+  const stop = planStopText(run && run.stopped);
+  return stop ? `停了：${stop}` : '还在跑';
+}
+
+/** 检视者动作的人话。未知动作原样回显。 */
+export function planActionText(action) {
+  const key = text(action);
+  return PLAN_ACTION_CN[key] || key || '（没有动作）';
+}
+
+/** HA 决定的人话。没有决定回空串：空着由页面说「还没有 HA 决定」。 */
+export function planHaDecisionText(decision) {
+  if (!decision) return '';
+  const key = text(decision.kind);
+  return PLAN_HA_CN[key] || key || '（没有 HA 结论）';
+}
+
+/**
+ * 一次方案运行的花费：把各 Mission 的 usage.cost 加起来。
+ *
+ * **没上报的不能显示成 $0**：那看起来像「这次不要钱」。一条都没报就直说未上报；
+ * 报了几条、漏了几条，把漏的数出来——漏的不当 0 加进去。
+ */
+export function planCostText(usages) {
+  const list = Array.isArray(usages) ? usages : [];
+  let sum = 0;
+  let reported = 0;
+  let missing = 0;
+  for (const usage of list) {
+    const cost = usage && usage.cost;
+    if (cost !== undefined && cost !== null && Number.isFinite(Number(cost))) {
+      sum += Number(cost);
+      reported += 1;
+    } else {
+      missing += 1;
+    }
+  }
+  if (reported === 0) return '费用未上报';
+  const head = `$${sum.toFixed(4)}`;
+  if (missing > 0) return `${head}（另有 ${missing} 条未上报，未计入）`;
+  return head;
+}

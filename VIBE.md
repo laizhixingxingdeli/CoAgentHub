@@ -132,6 +132,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   `Platform.finalizeMissionByMachine` 是**机器放行**的唯一入口；`Platform.abandonMissionForPlan` 是**方案运行放弃失败 Mission** 的唯一入口；`Platfor
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
+- **plan-run-web-observability** — 方案运行只读观测面（HTTP 与 Web）
+  本能力只投影已有 PlanRun/Mission 和服务内存输出，不改变 `plan-run` 的记录格式、驱动资格、升级决定、停止或合并语义。Web 是无构建的浏览器原生 ES module，只经 `/api/*` 读，不提供启动方案或作
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
   按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
 - **query-run** — 独立 QueryRun（只读问答）

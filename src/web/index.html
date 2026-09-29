@@ -19,6 +19,7 @@
 <link rel="modulepreload" href="/projects.js" />
 <link rel="modulepreload" href="/task.js" />
 <link rel="modulepreload" href="/pool.js" />
+<link rel="modulepreload" href="/plan-run.js" />
 <style>
 /* 外壳布局与组件。色彩只从 tokens.css 进来，这里不出现新的色值——
    多一个"顺手调的色"就和观测面分叉一处，而分叉是没人会主动去对齐的。 */
@@ -337,6 +338,33 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
   border-radius: var(--radius); padding: 28px; text-align: center;
   color: var(--muted-foreground);
 }
+
+/* ===== 方案运行页 =====
+ * 色只走已有 --status-* / --border / --card，不另起 plan-run.css：
+ * 静态服务只认一层扁平文件名（与任务页同一取舍）。
+ */
+.plan-run { display: grid; gap: 12px; }
+.plan-head { display: grid; gap: 8px; }
+.plan-title { margin: 0; font-size: 16px; word-break: break-all; }
+.plan-feature { margin-top: 12px; }
+.plan-feature-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+.plan-chain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.plan-ring {
+  --ring-tone: var(--border);
+  border: 1px solid var(--border); border-left: 3px solid var(--ring-tone);
+  border-radius: var(--radius); padding: 8px 10px; background: var(--card);
+}
+.plan-ring.tone-queued { --ring-tone: var(--status-queued); }
+.plan-ring.tone-running { --ring-tone: var(--status-running); }
+.plan-ring.tone-done { --ring-tone: var(--status-done); }
+.plan-ring.tone-failed { --ring-tone: var(--status-failed); }
+.plan-ring.tone-cancelled { --ring-tone: var(--status-cancelled); }
+.plan-ring.tone-unconfirmed { --ring-tone: var(--status-unconfirmed); }
+.plan-esc {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 10px; margin-bottom: 8px; background: var(--card);
+}
+.plan-list .tasks tbody tr[data-plan-run-id] { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -345,6 +373,7 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
     <div class="brand">CoAgentHub</div>
     <!-- 图标是内联 SVG 且 fill=currentColor：不额外取网络资源，也不新攏一个色值。 -->
     <a class="item" href="#/projects" data-route="projects"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M1.6 3.2A1.2 1.2 0 0 1 2.8 2h3.1c.36 0 .7.16.93.43l.87 1.07h6.5A1.2 1.2 0 0 1 15.4 4.7v7.5a1.2 1.2 0 0 1-1.2 1.2H2.8a1.2 1.2 0 0 1-1.2-1.2V3.2Z"/></svg>项目</a>
+    <a class="item" href="#/plan-runs" data-route="plan-runs"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.2 2.2h11.6c.44 0 .8.36.8.8v2.2c0 .44-.36.8-.8.8H2.2A.8.8 0 0 1 1.4 5.2V3c0-.44.36-.8.8-.8Zm0 5.4h11.6c.44 0 .8.36.8.8v2.2c0 .44-.36.8-.8.8H2.2a.8.8 0 0 1-.8-.8V8.4c0-.44.36-.8.8-.8Zm0 5.4h7.4c.44 0 .8.36.8.8v.2c0 .44-.36.8-.8.8H2.2a.8.8 0 0 1-.8-.8v-.2c0-.44.36-.8.8-.8Z"/></svg>方案运行</a>
     <a class="item" href="#/pool" data-route="pool"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 1.4 14.4 4.6 8 7.8 1.6 4.6 8 1.4Zm5.2 5.7 1.2.6L8 10.9 1.6 7.7l1.2-.6L8 9.6l5.2-2.5ZM8 12.1l5.2-2.5 1.2.6L8 13.4 1.6 10.2l1.2-.6L8 12.1Z"/></svg>资源池</a>
     <div class="spacer"></div>
     <div class="foot">

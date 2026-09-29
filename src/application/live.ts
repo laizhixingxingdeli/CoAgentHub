@@ -122,3 +122,70 @@ export class NoLiveOutput implements LiveOutput {
     return [];
   }
 }
+
+/** 托管方案 CLI 行的内存上限，与 InMemoryLiveOutput 缺省同量级。 */
+export const PLAN_LIVE_LIMIT = 5_000;
+
+/**
+ * 缓冲为空时给观测面的原因。记录文件可能还在：实时行只活在本进程，
+ * 重启或从未由本服务托管都会变成空；不写 reason 的话终端会像「还没开始」。
+ */
+export const PLAN_LIVE_EMPTY_REASON =
+  '没有服务托管记录，或服务重启后实时输出已清空';
+
+export type PlanLiveChannel = 'stdout' | 'stderr';
+
+export interface PlanLiveChunk {
+  /** 单调自增，用作游标。 */
+  readonly seq: number;
+  readonly runId: string;
+  readonly at: string;
+  readonly channel: PlanLiveChannel;
+  readonly line: string;
+}
+
+/**
+ * 托管 run-plan 的 CLI 行。与任务 LiveOutput 分开：任务通道按 mission/attempt，
+ * 这里按 runId + stdout/stderr；混进同一张表会让任务页读到方案行，或反过来。
+ * 不落盘——重启即空，空响应必须带 reason，不能装成还没开跑。
+ */
+export interface PlanRunLiveOutput {
+  append(chunk: { runId: string; channel: PlanLiveChannel; line: string }): void;
+  since(runId: string, cursor?: number, limit?: number): readonly PlanLiveChunk[];
+  /** 本进程是否为该 runId 写过托管行。重启后全否。 */
+  hosted(runId: string): boolean;
+}
+
+export class InMemoryPlanRunLiveOutput implements PlanRunLiveOutput {
+  #chunks: PlanLiveChunk[] = [];
+  #seq = 0;
+  #limit: number;
+  #hosted = new Set<string>();
+
+  constructor(limit = PLAN_LIVE_LIMIT) {
+    this.#limit = limit;
+  }
+
+  append(chunk: { runId: string; channel: PlanLiveChannel; line: string }): void {
+    this.#seq += 1;
+    this.#hosted.add(chunk.runId);
+    this.#chunks.push({
+      seq: this.#seq,
+      runId: chunk.runId,
+      at: new Date().toISOString(),
+      channel: chunk.channel,
+      line: chunk.line,
+    });
+    if (this.#chunks.length > this.#limit) {
+      this.#chunks.splice(0, this.#chunks.length - this.#limit);
+    }
+  }
+
+  since(runId: string, cursor = 0, limit = 500): readonly PlanLiveChunk[] {
+    return this.#chunks.filter((c) => c.runId === runId && c.seq > cursor).slice(0, limit);
+  }
+
+  hosted(runId: string): boolean {
+    return this.#hosted.has(runId);
+  }
+}

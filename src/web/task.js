@@ -962,18 +962,36 @@ export function skeletonHtml() {
 /**
  * 面包屑要哪几段。抽成纯函数是因为这一格全凭一个字符串拼错就错，
  * 而合同（项目 / <projectId> / 任务 <missionId>）是能被验收的。
+ * 方案跑出来的 Mission 多一段可点的方案运行：只认 origin.clientType==='plan-run'
+ * 且 conversationRef 为 `plan-run:<id>`——其它形状一律当普通任务，
+ * 猜一段链到不存在的 #/plan-runs/ 比少一段更误导。
  *
  * 末段不带 href：它是当前页。给它一个指回自己的链接，看着就像还能往下点。
  * projectId 为空（后端挂了、读不到 view）时中间那段干脆没有——拿 — 当项目名
  * 链到一个不存在的项目页，比少一段更误导人。
  */
-export function crumbParts(projectId, missionId) {
+export function crumbParts(projectId, missionId, origin) {
   const parts = [{ text: '项目', href: '#/projects' }];
   if (projectId) {
     parts.push({ text: String(projectId), href: '#/projects/' + encodeURIComponent(projectId) });
   }
+  const planRunId = planRunIdFromOrigin(origin);
+  if (planRunId) {
+    parts.push({
+      text: '方案运行',
+      href: '#/plan-runs/' + encodeURIComponent(planRunId),
+    });
+  }
   parts.push({ text: '任务 ' + (missionId ?? ''), here: true });
   return parts;
+}
+
+function planRunIdFromOrigin(origin) {
+  if (!origin || origin.clientType !== 'plan-run') return '';
+  const ref = origin.conversationRef;
+  if (typeof ref !== 'string' || !ref.startsWith('plan-run:')) return '';
+  const id = ref.slice('plan-run:'.length);
+  return id ? id : '';
 }
 
 /**
@@ -986,7 +1004,7 @@ export function crumbParts(projectId, missionId) {
 function setCrumbs(st) {
   const bar = document.getElementById('crumbs');
   if (!bar) return;
-  const nodes = crumbParts(st.view && st.view.projectId, st.missionId).map((part) => {
+  const nodes = crumbParts(st.view && st.view.projectId, st.missionId, st.view && st.view.origin).map((part) => {
     const el = document.createElement(part.here ? 'span' : 'a');
     if (part.href) el.href = part.href;
     if (part.here) el.className = 'here';

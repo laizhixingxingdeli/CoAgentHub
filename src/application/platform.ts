@@ -2124,6 +2124,7 @@ export class Platform {
           accepted: mission.workItems.filter((item) => item.status === 'accepted').length,
           openEscalations: mission.openEscalations.length,
           usage: sumUsage(mission),
+          ...planRunListFields(mission),
         });
       }
     }
@@ -5555,6 +5556,33 @@ export interface MissionSummary {
   accepted: number;
   openEscalations: number;
   usage: TokenUsage;
+  /** 仅 origin 可准确确认为 plan-run 时出现；普通 Mission 不带这两个键。 */
+  planRunId?: string;
+  featureId?: string;
+}
+
+/**
+ * 列表投影：origin.conversationRef 给出 runId，Mission id 必须是
+ * `<runId>-<featureId>[-rN]`。对不上就不写——猜错的关联比没有更糟。
+ * 功能 id 含 `-rN` 的消歧由 HTTP 层用已知 PlanRun.features.missionIds 覆盖。
+ */
+function planRunListFields(mission: Mission): { planRunId: string; featureId: string } | Record<string, never> {
+  const origin = mission.origin;
+  if (!origin || origin.clientType !== 'plan-run') return {};
+  const ref = origin.conversationRef;
+  if (typeof ref !== 'string' || !ref.startsWith('plan-run:')) return {};
+  const planRunId = ref.slice('plan-run:'.length);
+  if (planRunId === '' || planRunId.includes('/') || planRunId.includes('\\') || planRunId.includes(':')) {
+    return {};
+  }
+  const prefix = `${planRunId}-`;
+  if (!mission.id.startsWith(prefix)) return {};
+  const rest = mission.id.slice(prefix.length);
+  if (rest === '') return {};
+  const rerun = /^(.*)-r([1-9]\d*)$/.exec(rest);
+  const featureId = rerun && rerun[1] !== '' ? rerun[1] : rest;
+  if (featureId === '') return {};
+  return { planRunId, featureId };
 }
 
 export interface WorkOrderView {

@@ -16,11 +16,12 @@
  * 不会出现两边各以为自己赢了。
  */
 
-import { readFileSync, renameSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { LockBusyError, acquireLock } from './lock.ts';
 import { PlanRun } from './plan-run.ts';
+import type { PlanRunSnapshot, PlanRunStop } from './plan-run.ts';
 import { PlatformRuleError } from './platform.ts';
 
 /**
@@ -137,4 +138,194 @@ export class FilePlanRunStore {
       }
     }
   }
+}
+
+/** 单段安全 id：只能当文件名，不能当路径。否则 `../secret` 会读出目录外的任意文件。 */
+export function isSafePlanRunId(id: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id);
+}
+
+export type PlanRunFeatureSummary = {
+  readonly featureId: string;
+  readonly title?: string;
+  readonly status: string;
+  readonly missionIds: readonly string[];
+};
+
+export type PlanRunListOk = {
+  readonly id: string;
+  readonly planId: string;
+  readonly projectId: string;
+  readonly integrationBranch: string;
+  readonly startedAt: string;
+  readonly stopped?: PlanRunStop;
+  readonly features: readonly PlanRunFeatureSummary[];
+  readonly escalationCount: number;
+};
+
+export type PlanRunListError = {
+  readonly id: string;
+  readonly error: string;
+};
+
+export type PlanRunListItem = PlanRunListOk | PlanRunListError;
+
+export type PlanRunReadResult =
+  | { readonly status: 'ok'; readonly snapshot: PlanRunSnapshot }
+  | { readonly status: 'missing' }
+  | { readonly status: 'corrupt'; readonly error: string };
+
+function isListError(item: PlanRunListItem): item is PlanRunListError {
+  return Object.hasOwn(item, 'error');
+}
+
+function planRunFileInDir(dir: string, id: string): string | undefined {
+  if (!isSafePlanRunId(id)) return undefined;
+  const root = resolve(dir);
+  const file = resolve(root, `${id}.json`);
+  // resolve 会把 `a/../b` 收掉；收完必须还在这个目录里，否则就是越目录。
+  if (dirname(file) !== root) return undefined;
+  return file;
+}
+
+function uniqueResolvedDirs(dirs: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    const root = resolve(dir);
+    if (seen.has(root)) continue;
+    seen.add(root);
+    out.push(root);
+  }
+  return out;
+}
+
+function listSafeJsonIds(dir: string): string[] {
+  let entries: readonly { name: string; isFile(): boolean }[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    // 目录不存在或不可读：当成没有记录，不能把整份列表打成 500。
+    return [];
+  }
+  const ids: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const id = entry.name.slice(0, -'.json'.length);
+    if (!isSafePlanRunId(id)) continue;
+    if (planRunFileInDir(dir, id) === undefined) continue;
+    ids.push(id);
+  }
+  ids.sort();
+  return ids;
+}
+
+function publicCorruptMessage(error: unknown, file: string): string {
+  if (!(error instanceof PlatformRuleError) || error.code !== 'PLAN_RUN_CORRUPT') {
+    return '方案运行记录损坏';
+  }
+  // read() 的 JSON 错会带绝对路径；restore() 的错没有路径。对外一律不回文件位置。
+  if (error.message.includes(file)) return '方案运行记录不是合法 JSON';
+  return error.message;
+}
+
+function readRunAt(file: string): { readonly run: PlanRun } | { readonly error: string } {
+  try {
+    const run = new FilePlanRunStore(file).read();
+    if (!run) return { error: '方案运行记录不存在' };
+    return { run };
+  } catch (error) {
+    return { error: publicCorruptMessage(error, file) };
+  }
+}
+
+function summarizeRun(run: PlanRun): PlanRunListOk {
+  return {
+    id: run.id,
+    planId: run.planId,
+    projectId: run.projectId,
+    integrationBranch: run.integrationBranch,
+    startedAt: run.startedAt,
+    ...(run.stopped ? { stopped: run.stopped } : {}),
+    features: run.features.map((feature) => ({
+      featureId: feature.featureId,
+      ...(feature.title !== undefined ? { title: feature.title } : {}),
+      status: feature.status,
+      missionIds: feature.missionIds,
+    })),
+    escalationCount: run.escalationsOpened,
+  };
+}
+
+function compareListItems(a: PlanRunListItem, b: PlanRunListItem): number {
+  const aBad = isListError(a);
+  const bBad = isListError(b);
+  if (aBad !== bBad) return aBad ? 1 : -1;
+  if (!aBad && !bBad) {
+    const byTime = Date.parse(b.startedAt) - Date.parse(a.startedAt);
+    if (byTime !== 0) return byTime;
+    if (a.id < b.id) return -1;
+    if (a.id > b.id) return 1;
+    return 0;
+  }
+  const left = a as PlanRunListError;
+  const right = b as PlanRunListError;
+  if (left.id !== right.id) return left.id < right.id ? -1 : 1;
+  if (left.error !== right.error) return left.error < right.error ? -1 : 1;
+  return 0;
+}
+
+/**
+ * 按目录枚举方案运行记录。坏文件变成 `{id,error}`，不拖垮其它项。
+ * 同 id 先扫到的目录赢；后来的记一条重复错误——后写覆盖会让详情跟列表对不上。
+ */
+export function listPlanRuns(dirs: readonly string[], project?: string): PlanRunListItem[] {
+  const items: PlanRunListItem[] = [];
+  const claimed = new Set<string>();
+  for (const dir of uniqueResolvedDirs(dirs)) {
+    for (const id of listSafeJsonIds(dir)) {
+      if (claimed.has(id)) {
+        items.push({ id, error: '重复的方案运行记录 id' });
+        continue;
+      }
+      claimed.add(id);
+      const file = planRunFileInDir(dir, id);
+      if (file === undefined) {
+        items.push({ id, error: '方案运行记录路径不安全' });
+        continue;
+      }
+      const read = readRunAt(file);
+      if ('error' in read) {
+        items.push({ id, error: read.error });
+        continue;
+      }
+      if (read.run.id !== id) {
+        items.push({ id, error: '记录 id 与文件名不一致' });
+        continue;
+      }
+      items.push(summarizeRun(read.run));
+    }
+  }
+  const filtered =
+    project === undefined
+      ? items
+      : items.filter((item) => isListError(item) || item.projectId === project);
+  return filtered.sort(compareListItems);
+}
+
+/**
+ * 按安全 id 读一份完整快照。只在给定目录里找 `${id}.json`，找不到就是 missing。
+ * 同 id 多目录时与 listPlanRuns 一样：先出现的目录赢。
+ */
+export function readPlanRunById(dirs: readonly string[], id: string): PlanRunReadResult {
+  if (!isSafePlanRunId(id)) return { status: 'missing' };
+  for (const dir of uniqueResolvedDirs(dirs)) {
+    const file = planRunFileInDir(dir, id);
+    if (file === undefined || !existsSync(file)) continue;
+    const read = readRunAt(file);
+    if ('error' in read) return { status: 'corrupt', error: read.error };
+    if (read.run.id !== id) return { status: 'corrupt', error: '记录 id 与文件名不一致' };
+    return { status: 'ok', snapshot: read.run.toSnapshot() };
+  }
+  return { status: 'missing' };
 }
