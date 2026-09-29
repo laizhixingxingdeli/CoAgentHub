@@ -7,7 +7,7 @@
  */
 
 import { after, describe, test } from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -126,15 +126,15 @@ const FIVE: ExecutionProfile[] = ['a', 'b', 'c', 'd', 'e'].map((id) => ({
 
 test('真实 Orchestrator 成功交回 A 后按冻结授权创建 Git 检查点', async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'failover-orchestrator-checkpoint-'));
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: tempRoot, encoding: 'utf8' }).trim();
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
   const worktreeRoot = join(tempRoot, '.coagent-worktrees');
   try {
-    git('init', '-q');
-    git('config', 'user.name', 'test');
-    git('config', 'user.email', 'test@example.invalid');
+    git(tempRoot, 'init', '-q');
+    git(tempRoot, 'config', 'user.name', 'test');
+    git(tempRoot, 'config', 'user.email', 'test@example.invalid');
     writeFileSync(join(tempRoot, 'seed.txt'), 'base');
-    git('add', 'seed.txt');
-    git('commit', '-qm', 'initial');
+    git(tempRoot, 'add', 'seed.txt');
+    git(tempRoot, 'commit', '-qm', 'initial');
 
     const executor = new ScriptedRuntime({
       'executor:W-1': {
@@ -169,9 +169,15 @@ test('真实 Orchestrator 成功交回 A 后按冻结授权创建 Git 检查点'
     await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
     const result = await orchestrator.runMission(missionId, { projectRoot: tempRoot, maxRounds: 2 });
 
-    assert.ok(['waiting', 'stalled', 'awaiting_l3_review'].includes(result.kind));
-    assert.equal(git('log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
-    assert.equal(git('show', 'HEAD:src/foo.ts'), 'export const foo = 1;');
+    const missionWorktree = join(worktreeRoot, missionId);
+    const executorHop = orchestrator.hops.find((hop) => hop.role === 'executor');
+    assert.ok(
+      executorHop?.endedBy === 'structured_submit',
+      `expected executor:structured_submit; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`,
+    );
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
+    assert.equal(git(tempRoot, 'log', '-1', '--format=%s'), 'initial');
     assert.deepEqual(ORDER.allowedScope, ['src/foo.ts']);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });

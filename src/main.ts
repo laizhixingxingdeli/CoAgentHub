@@ -1154,7 +1154,8 @@ if (isDirectMainEntry()) {
       const onSignal = () => {
         built.server.close((error) => {
           if (error) console.error(error);
-          process.exitCode = error ? 1 : 0;
+          if (error) process.exitCode = 1;
+          else if (process.exitCode !== 1) process.exitCode = 0;
         });
       };
       const onInterrupt = createSigintHandler(onSignal, () => {
