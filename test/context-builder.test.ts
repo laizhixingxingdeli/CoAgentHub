@@ -14,6 +14,7 @@ import {
   EXECUTOR_SOURCE_ORDER,
   buildContextBundle,
   projectStartupBriefFields,
+  type BoundWorkItem,
 } from '../src/application/context-builder.ts';
 import {
   FixedClock,
@@ -559,6 +560,123 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(undeclared.found, false);
     assert.equal(undeclared.body, undefined);
     assert.match(undeclared.note ?? '', /没有声明/);
+  });
+});
+
+describe('执行者工单持久问答', () => {
+  test('已答问答进入 work_order 内容；未答不泄漏；不改冻结 order 与来源顺序', () => {
+    const answered: BoundWorkItem = {
+      ...WORK_ITEM,
+      question: '真正的路径是哪个？',
+      answer: 'src/foo.ts',
+      answeredAt: '2026-01-01T00:00:00.000Z',
+    };
+    const bundle = buildContextBundle(executorInput({ workItem: answered }));
+    assert.deepEqual(
+      bundle.entries.map((entry) => entry.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+    const content = bundle.entries.find((entry) => entry.source === 'work_order')?.content as BoundWorkItem;
+    assert.equal(content.question, '真正的路径是哪个？');
+    assert.equal(content.answer, 'src/foo.ts');
+    assert.equal(content.answeredAt, '2026-01-01T00:00:00.000Z');
+    assert.deepEqual(content.order, ORDER);
+    assert.equal('question' in (content.order as object), false);
+
+    const unanswered = buildContextBundle(executorInput());
+    const raw = unanswered.entries.find((entry) => entry.source === 'work_order')?.content as BoundWorkItem;
+    assert.equal('question' in raw, false);
+    assert.equal('answer' in raw, false);
+    assert.equal('answeredAt' in raw, false);
+    assert.deepEqual(raw.order, ORDER);
+    assert.deepEqual(
+      unanswered.entries.map((entry) => entry.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+  });
+
+  test('新执行者 getWorkOrder 与 getStartupBrief 都带已答原文，未答不泄漏，冻结 order 不变', async () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const projects = new InMemoryProjectRepository();
+    const platform = new Platform({
+      projects,
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    const project = await projects.ensure('P');
+    project.createMission({
+      id: 'M-lw',
+      contract: CONTRACT,
+      executionMode: 'lightweight',
+      runKind: 'mutation',
+      origin: { clientType: 'cli', conversationRef: 'me' },
+    });
+    await projects.save(project);
+    const { workItemId } = await platform.createLightweightWorkItem('M-lw', {
+      title: 'W',
+      order: ORDER,
+    });
+    await platform.dispatchLightweightWorkItem('M-lw', workItemId);
+    const first = await platform.startExecutorAttempt('M-lw', workItemId);
+    const question = '真正的路径是哪个？';
+    const answer = '就改 src/foo.ts，不要动别的。';
+    await platform.reportBlocked('M-lw', first.attemptId, {
+      reason: '工单里的路径对不上',
+      whatWasTried: ['ls src/', '选 A 改 bar', '选 B 改 foo'],
+      needsFromUpstream: question,
+    });
+
+    const blockedOrder = await platform.getWorkOrder('M-lw', workItemId);
+    assert.equal('question' in blockedOrder, false);
+    assert.equal('answer' in blockedOrder, false);
+    assert.equal('answeredAt' in blockedOrder, false);
+    assert.deepEqual(blockedOrder.order.contextRefs, W1_REFS);
+    assert.equal(blockedOrder.order.objective, ORDER.objective);
+
+    const blockedBrief = await platform.getStartupBrief('M-lw', first.attemptId);
+    assert.equal('question' in (blockedBrief.workItem ?? {}), false);
+    assert.equal('answer' in (blockedBrief.workItem ?? {}), false);
+    assert.deepEqual(
+      blockedBrief.contextBundle.entries.map((entry) => entry.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+    const blockedWork = blockedBrief.contextBundle.entries.find((entry) => entry.source === 'work_order');
+    const blockedDump = JSON.stringify(blockedWork?.content);
+    assert.equal(blockedDump.includes(question), false);
+    assert.equal(blockedDump.includes(answer), false);
+
+    await platform.finishAttempt('M-lw', first.attemptId, { endedBy: 'no_structured_result' });
+    await platform.answerEscalation('M-lw', answer);
+    const second = await platform.startExecutorAttempt('M-lw', workItemId);
+
+    const orderView = await platform.getWorkOrder('M-lw', workItemId);
+    assert.equal(orderView.question, question);
+    assert.equal(orderView.answer, answer);
+    assert.equal(typeof orderView.answeredAt, 'string');
+    assert.match(orderView.answeredAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+    assert.deepEqual(orderView.order.contextRefs, W1_REFS);
+    assert.equal(orderView.order.objective, ORDER.objective);
+    assert.equal('question' in (orderView.order as object), false);
+
+    const brief = await platform.getStartupBrief('M-lw', second.attemptId);
+    assert.equal(brief.workItem?.question, question);
+    assert.equal(brief.workItem?.answer, answer);
+    assert.equal(brief.workItem?.answeredAt, orderView.answeredAt);
+    assert.deepEqual(brief.workItem?.order?.contextRefs, W1_REFS);
+    assert.deepEqual(
+      brief.contextBundle.entries.map((entry) => entry.source),
+      [...EXECUTOR_SOURCE_ORDER],
+    );
+    const workEntry = brief.contextBundle.entries.find((entry) => entry.source === 'work_order');
+    const content = workEntry?.content as BoundWorkItem;
+    assert.equal(content.question, question);
+    assert.equal(content.answer, answer);
+    assert.equal(content.answeredAt, orderView.answeredAt);
+    assert.deepEqual(content.order, brief.workItem?.order);
   });
 });
 

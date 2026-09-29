@@ -40,6 +40,10 @@ export interface BoundWorkItem {
   readonly id: string;
   readonly title: string;
   readonly order?: Readonly<WorkOrder>;
+  /** 此工作项已答的升级原文。未答时缺省，避免把未决提问泄漏进工单视图。 */
+  readonly question?: string;
+  readonly answer?: string;
+  readonly answeredAt?: string;
 }
 
 /**

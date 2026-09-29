@@ -897,7 +897,9 @@ export class Orchestrator {
    * Lightweight Fast Lane 一轮。
    *
    * 只走：唯一 Frozen WorkItem → Executor hop → Validator → submit-for-review。
-   * 任何异常路径都 stalled / waiting，**绝不** Coordinator hop / Attempt / Plan。
+   * 执行者提问（blocked + 非空 needsFromUpstream）走**已有 Mission** 的升级通道，
+   * 停在 awaiting_l3；答复后同一张工单再派执行者。Lightweight 没有协调者可问，
+   * 也不能因此 promote 到 Standard。其它异常路径 stalled / waiting，**绝不** Coordinator hop / Attempt / Plan。
    */
   async #runLightweightRound(
     missionId: string,
@@ -978,6 +980,33 @@ export class Orchestrator {
         await this.#platform.setWaitReason(missionId, reason, detail);
         return { kind: 'outcome', outcome: { kind: 'waiting', reason, detail } };
       }
+      // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
+      // 下一轮主循环才会看到 openEscalations——中间那一轮只是空转。
+      // 空白需求没有升级，必须用原来的 stalled 原文停下：若 continue 再走一遍，
+      // 意思一样，但不能误 promote / 叫协调者。
+      const afterHop = await this.#platform.getMissionView(missionId);
+      if (afterHop.openEscalations.length > 0) {
+        return {
+          kind: 'outcome',
+          outcome: {
+            kind: 'awaiting_l3',
+            question: afterHop.openEscalations[0]!.question,
+          },
+        };
+      }
+      const afterItem =
+        afterHop.workItems.find((row) => row.id === item.id) ?? afterHop.workItems[0];
+      if (afterItem?.status === 'blocked') {
+        return {
+          kind: 'outcome',
+          outcome: {
+            kind: 'stalled',
+            reason:
+              `Lightweight WorkItem ${afterItem.id} 状态是 ${afterItem.status}，无法继续；` +
+              '绝不回退 Coordinator',
+          },
+        };
+      }
       return { kind: 'continue' };
     }
 
@@ -1023,6 +1052,8 @@ export class Orchestrator {
       return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
     }
 
+    // blocked 且没有未答升级才会落到这里（空白需求，或提问已答过却没重派）。
+    // 有未答升级时主循环开头已 awaiting_l3。这句 stalled 原文不能改：空白路径靠字节等价钉住。
     return {
       kind: 'outcome',
       outcome: {

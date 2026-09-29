@@ -115,6 +115,7 @@ import { classifyTask, type ClassificationResult } from './task-classifier.ts';
 import {
   buildContextBundle,
   projectStartupBriefFields,
+  type BoundWorkItem,
   type ContextBundle,
 } from './context-builder.ts';
 import {
@@ -2389,7 +2390,7 @@ export class Platform {
     contractRevision?: number;
     plan?: Readonly<PlanBody>;
     planRevision?: number;
-    workItem?: { id: string; title: string; order?: Readonly<WorkOrder> };
+    workItem?: BoundWorkItem;
     /** L3 打回的理由。被打回之后重跑时，这是最该先看到的东西。 */
     finalReview?: Readonly<FinalReview>;
     /** 可追溯的角色视图；旧字段从这里投影，缺省语义保持不变。 */
@@ -2430,9 +2431,7 @@ export class Platform {
         contractRevision: mission.contractRevision,
         plan: mission.plan,
         planRevision: mission.planRevision,
-        workItem: item
-          ? { id: item.id, title: item.title, order: item.order }
-          : undefined,
+        workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
         finalReview: mission.finalReview,
       },
       budget,
@@ -3243,10 +3242,18 @@ export class Platform {
     body: Omit<EscalationBody, 'attemptId'>,
   ): Promise<void> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
-    mission.recordEscalation({ ...body, attemptId });
+    await this.#recordEscalationAndDeliver(mission, { ...body, attemptId });
+  }
+
+  /**
+   * 记一条 Mission 升级并投递一次。协调者 escalateToL3 与轻量 reportBlocked 共用：
+   * 分开写会变成两次升级/两封信，L3 对同一提问会看到两张单。
+   */
+  async #recordEscalationAndDeliver(mission: Mission, body: EscalationBody): Promise<void> {
+    mission.recordEscalation(body);
     // 第几次升级：每一次都要进收件箱，重建同一次的投递不会多一条。
     const escalationIndex = mission.escalations.length - 1;
-    await this.#event(mission, 'escalated', { question: body.question }, undefined, attemptId);
+    await this.#event(mission, 'escalated', { question: body.question }, undefined, body.attemptId);
     // 升级只写进平台是不够的：L3 不盯着数据库看。进收件箱才叫升级。
     const delivery = await this.#deliveries.create({
       missionId: mission.id,
@@ -3258,7 +3265,7 @@ export class Platform {
 
 为什么需要 L3：${body.why}`,
     });
-    await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, attemptId);
+    await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, body.attemptId);
   }
 
   /**
@@ -3621,7 +3628,33 @@ export class Platform {
     }
     const answered = mission.answerEscalation(answer, new Date().toISOString());
     await this.#event(mission, 'escalation.answered', { question: answered.question, answer });
+    await this.#redispatchLightweightBlockedAfterAnswer(mission, answered);
     return { question: answered.question, answer };
+  }
+
+  /**
+   * 轻量没有协调者可重派：只能在本事务里把「这条升级对应的」blocked 工单 dispatch。
+   * 不能走 dispatchWorkItems（会要 coordinator attempt），也不能走 dispatchLightweightWorkItem
+   * （只接受 created）。Standard 或对不上 attemptId 的项一律不动，避免误派。
+   */
+  async #redispatchLightweightBlockedAfterAnswer(
+    mission: Mission,
+    answered: Readonly<EscalationBody>,
+  ): Promise<void> {
+    if (mission.executionMode !== 'lightweight') return;
+    const attempt = mission.attempt(answered.attemptId);
+    const workItemId = attempt?.workItemId;
+    if (!workItemId) return;
+    const item = mission.workItem(workItemId);
+    if (!item || item.status !== 'blocked') return;
+    item.dispatch();
+    await this.#event(
+      mission,
+      'work_item.redispatched',
+      { ids: [workItemId], reason: 'escalation_answered' },
+      workItemId,
+      answered.attemptId,
+    );
   }
 
   /**
@@ -4415,6 +4448,7 @@ export class Platform {
       throw new PlatformRuleError('NO_WORK_ORDER', `工作项 ${workItemId} 没有工单正文。`);
     }
     const contract = mission.contract;
+    const answered = answeredQaForWorkItem(mission, item);
     return {
       workItemId: item.id,
       title: item.title,
@@ -4424,6 +4458,8 @@ export class Platform {
       guardrails: contract?.guardrails ?? [],
       /** 被打回重做时，上一次的 requiredChanges 必须带下去。 */
       previousRequiredChanges: item.reviews.at(-1)?.requiredChanges ?? [],
+      // 问答是事后补的，不能写进冻结 order；未答不带键，以免泄漏未决提问。
+      ...(answered ?? {}),
     };
   }
 
@@ -4594,6 +4630,17 @@ export class Platform {
     }
     item.recordBlocked({ ...body, attemptId });
     await this.#event(mission, 'blocked.reported', { reason: body.reason }, workItemId, attemptId);
+    // Lightweight 没有协调者：执行者提问只能走 Mission 升级，否则 L3 看不到。
+    // Standard 和空白需求不是提问，保持只记 blocked。
+    const needs = typeof body.needsFromUpstream === 'string' ? body.needsFromUpstream : '';
+    if (mission.executionMode === 'lightweight' && needs.trim() !== '') {
+      await this.#recordEscalationAndDeliver(mission, {
+        attemptId,
+        question: body.needsFromUpstream,
+        why: body.reason,
+        optionsConsidered: [...(body.whatWasTried ?? [])],
+      });
+    }
   }
 
   /* ================================ 内部 ================================ */
@@ -5518,6 +5565,9 @@ export interface WorkOrderView {
   missionIntent: string;
   guardrails: readonly string[];
   previousRequiredChanges: readonly string[];
+  question?: string;
+  answer?: string;
+  answeredAt?: string;
 }
 
 /**
@@ -5836,6 +5886,35 @@ function buildPromotionUsageSnapshot(mission: Mission): PromotionUsageSnapshot {
     tokenUsage,
     dimensionsUnknown,
     budgetAuthoritative: false,
+  };
+}
+
+function answeredQaForWorkItem(
+  mission: Mission,
+  item: WorkItem,
+): { question: string; answer: string; answeredAt: string } | undefined {
+  const attemptIds = new Set(item.attempts.map((attempt) => attempt.id));
+  let latest: Readonly<EscalationBody> | undefined;
+  for (const escalation of mission.escalations) {
+    if (escalation.answer && escalation.answeredAt && attemptIds.has(escalation.attemptId)) {
+      latest = escalation;
+    }
+  }
+  if (!latest?.answer || !latest.answeredAt) return undefined;
+  return {
+    question: latest.question,
+    answer: latest.answer,
+    answeredAt: latest.answeredAt,
+  };
+}
+
+function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
+  const answered = answeredQaForWorkItem(mission, item);
+  return {
+    id: item.id,
+    title: item.title,
+    order: item.order,
+    ...(answered ?? {}),
   };
 }
 

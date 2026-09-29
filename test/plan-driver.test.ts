@@ -1554,6 +1554,75 @@ describe('协调者提问可答复续跑', () => {
   });
 });
 
+describe('轻量 feature awaiting_l3 复用 AQ1 续跑', () => {
+  test('带 workOrder 的 Fast Lane 提问、可答复升级、answer 决定、answerEscalation 恰好一次、同 missionId 交卷合入', async () => {
+    const QUESTION = '快速通道执行者卡住：选 A 还是 B？';
+    const ANSWER = '选 A：用现有接口，不要新 Mission';
+    const ask = { outcome: { kind: 'awaiting_l3' as const, question: QUESTION }, status: 'planning' };
+    const delivered = { outcome: { kind: 'awaiting_l3_review' as const }, status: 'awaiting_review' };
+    const small = {
+      goalUncertainty: 0, changeScope: 0, operationalRisk: 0, verificationDifficulty: 0,
+      coordinationNeed: 0, recoveryDifficulty: 0, reasons: ['小'], decidedBy: 'coordinator' as const,
+      assessedAt: T0,
+    };
+    const order = {
+      objective: 'x',
+      allowedScope: ['src/F1.ts'],
+      requiredBehaviour: 'x',
+      constraints: [],
+      acceptance: ['x'],
+      verification: ['x'],
+      doNot: [],
+      contextRefs: [],
+    };
+    const h = harness({
+      features: ['F1'],
+      routes: {
+        F1: { ok: true, proposal: { facts: QUIET_FACTS, assessment: small, workOrder: order } },
+      },
+      runs: { 'R1-F1': [ask, delivered] },
+      onSleep: reviewerDecides('answer', { answer: ANSWER }),
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    const run = h.store.read()!;
+    const e1 = run.escalations[0];
+    assert.equal(e1.id, 'E-1');
+    assert.equal(e1.answerable, true);
+    assert.equal(e1.question, QUESTION);
+    assert.equal(e1.resolution?.kind, 'decided');
+    if (e1.resolution?.kind === 'decided') {
+      assert.equal(e1.resolution.action, 'answer');
+      assert.equal(e1.resolution.answer, ANSWER);
+    }
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('create')),
+      ['create-classified R1-F1 lightweight'],
+    );
+    assert.ok(!h.calls.some((c) => c === 'create R1-F1'), '不回落 Standard / Coordinator 路由');
+    assert.ok(!h.calls.some((c) => c.includes('create-classified R1-F1 standard')));
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('answer ')),
+      [`answer R1-F1 ${ANSWER}`],
+    );
+    assert.deepEqual(
+      h.calls.filter((c) => c.startsWith('run ')),
+      ['run R1-F1', 'run R1-F1'],
+    );
+    assert.ok(h.calls.includes('finalize R1-F1 → auto/plan-x [node --test]'));
+    assert.ok(!h.calls.some((c) => c.startsWith('abandon')));
+    assert.ok(!h.calls.some((c) => c.includes('R1-F1-r2')), '没有新 rerun mission');
+    assert.deepEqual(run.feature('F1')?.missionIds, ['R1-F1']);
+    assert.equal(run.rerunsUsed('F1'), 0);
+    assert.equal(run.feature('F1')?.status, 'merged');
+    const answerAt = h.calls.indexOf(`answer R1-F1 ${ANSWER}`);
+    const firstRun = h.calls.indexOf('run R1-F1');
+    const secondRun = h.calls.indexOf('run R1-F1', firstRun + 1);
+    assert.ok(firstRun < answerAt && answerAt < secondRun);
+  });
+});
+
 describe('驱动方自己停', () => {
   test('验证红且回滚失败 → 集成分支不安全，立刻停，不开单', async () => {
     const h = harness({
