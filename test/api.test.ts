@@ -40,12 +40,16 @@ import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import {
   FileActivityLog,
+  FileAgentPoolRepository,
+  FileCandidateCircuitRepository,
   FileDeliveryRepository,
   FileProjectRepository,
   FileQueuedHopRepository,
   FileStateStore,
   PersistentIds,
 } from '../src/application/file-store.ts';
+import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
+import type { ControlPrincipal, ControlPrincipalResolver } from '../src/api/control-auth.ts';
 import type { ClaimFence } from '../src/application/durable-scheduler.ts';
 import {
   PgActivityLog,
@@ -1641,6 +1645,12 @@ async function openApi(options?: {
   runMission?: HostedRunHandler;
   runPlan?: HostedRunHandler;
   planRunDirs?: () => readonly string[];
+  resolveControlPrincipal?: ControlPrincipalResolver;
+  agentPool?: import('../src/application/agent-pool.ts').AgentPoolRepository;
+  platformStatus?: import('../src/api/server.ts').ApiDeps['platformStatus'];
+  queuedHops?: import('../src/application/ports.ts').QueuedHopRepository;
+  candidateCircuits?: import('../src/application/ports.ts').CandidateCircuitRepository;
+  now?: () => number;
 }): Promise<{
   server: Server;
   base: string;
@@ -1667,6 +1677,14 @@ async function openApi(options?: {
     ...(options?.runMission ? { runMission: options.runMission } : {}),
     ...(options?.runPlan ? { runPlan: options.runPlan } : {}),
     ...(options?.planRunDirs ? { planRunDirs: options.planRunDirs } : {}),
+    ...(options?.resolveControlPrincipal
+      ? { resolveControlPrincipal: options.resolveControlPrincipal }
+      : {}),
+    ...(options?.agentPool ? { agentPool: options.agentPool } : {}),
+    ...(options?.platformStatus ? { platformStatus: options.platformStatus } : {}),
+    ...(options?.queuedHops ? { queuedHops: options.queuedHops } : {}),
+    ...(options?.candidateCircuits ? { candidateCircuits: options.candidateCircuits } : {}),
+    ...(options?.now ? { now: options.now } : {}),
   });
   await listenLoopback(server, 0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -2892,3 +2910,411 @@ describe('方案运行只读 API 与 Mission 来源投影', () => {
     }
   });
 });
+
+describe('只读平台状态与候选健康',
+  () => {
+    const T0 = '2026-01-01T00:00:00.000Z';
+    const T_LEASE = '2026-01-01T01:00:00.000Z';
+    const T_EXPIRED = '2026-01-01T00:00:30.000Z';
+    const T_NOW = '2026-01-01T00:30:00.000Z';
+
+    test('未装配时身份/队列/占用标不适用，listen 为回环，接口只读',
+      async () => {
+        const { server, base } = await openApi({
+          platformStatus: {
+            store: 'memory',
+            startedAt: T0,
+          },
+        });
+        try {
+          const status = await request(base, '/api/platform/status');
+          assert.equal(status.status, 200);
+          assert.equal(status.json.api, API_VERSION);
+          assert.equal(status.json.pid, process.pid);
+          assert.equal(status.json.store, 'memory');
+          assert.equal(status.json.startedAt, T0);
+          const listen = status.json.listen as { address: string; port: number };
+          assert.equal(listen.address, '127.0.0.1');
+          assert.ok(listen.port > 0);
+          assert.equal((status.json.instanceId as { reason: string }).reason, 'memory_has_no_file_instance_lock');
+          assert.equal((status.json.statePath as { reason: string }).reason, 'memory_has_no_state_file');
+          assert.equal((status.json.holdsMainLock as { reason: string }).reason, 'memory_has_no_file_main_lock');
+          assert.equal((status.json.queue as { reason: string }).reason, 'queued_hops_unavailable');
+          assert.equal((status.json.occupancy as { reason: string }).reason, 'queued_hops_unavailable');
+          assert.equal((status.json.agentEnv as { inapplicable: boolean }).inapplicable, true);
+          assert.equal((status.json.defaultAdapter as { inapplicable: boolean }).inapplicable, true);
+          const dumped = JSON.stringify(status.json);
+          assert.equal(dumped.includes('COAGENT_AGENT_ENV_PASSTHROUGH'), false);
+          assert.equal(Object.hasOwn(status.json, 'token'), false);
+
+          const post = await fetch(`${base}/api/platform/status`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+          assert.ok(post.status === 404 || post.status === 405);
+        } finally {
+          await closeServer(server);
+        }
+      },
+    );
+
+    test('PG 装配字段不虚构文件锁身份',
+      async () => {
+        const { server, base } = await openApi({
+          platformStatus: { store: 'pg', startedAt: T0, defaultAdapter: 'pi' },
+        });
+        try {
+          const status = await request(base, '/api/platform/status');
+          assert.equal(status.status, 200);
+          assert.equal(status.json.store, 'pg');
+          assert.equal((status.json.instanceId as { reason: string }).reason, 'pg_has_no_file_instance_lock');
+          assert.equal((status.json.statePath as { reason: string }).reason, 'pg_has_no_state_file');
+          assert.equal((status.json.holdsMainLock as { reason: string }).reason, 'pg_has_no_file_main_lock');
+          assert.equal(status.json.defaultAdapter, 'pi');
+        } finally {
+          await closeServer(server);
+        }
+      },
+    );
+
+    test('状态与池接口在注入 resolver 时走只读鉴权',
+      async () => {
+        const operator: ControlPrincipal = { id: 'op', role: 'operator' };
+        const viewer: ControlPrincipal = { id: 'vw', role: 'viewer' };
+        const resolveControlPrincipal: ControlPrincipalResolver = (req) => {
+          const raw = req.headers['x-coagent-control'];
+          const token = Array.isArray(raw) ? raw[0] : raw;
+          if (token === 'op') return operator;
+          if (token === 'vw') return viewer;
+          if (token === 'expired') return { status: 'expired' };
+          return undefined;
+        };
+        const { server, base } = await openApi({
+          resolveControlPrincipal,
+          agentPool: new InMemoryAgentPoolRepository(),
+          platformStatus: { store: 'memory', startedAt: T0 },
+        });
+        const gated = async (path: string) => {
+          const missing = await fetch(`${base}${path}`);
+          assert.equal(missing.status, 401, path);
+          const viewerRes = await fetch(`${base}${path}`, { headers: { 'x-coagent-control': 'vw' } });
+          assert.equal(viewerRes.status, 200, path);
+          const opRes = await fetch(`${base}${path}`, { headers: { 'x-coagent-control': 'op' } });
+          assert.equal(opRes.status, 200, path);
+        };
+        try {
+          await gated('/api/platform/status');
+          await gated('/api/pools');
+        } finally {
+          await closeServer(server);
+        }
+      },
+    );
+
+    test('文件队列：空仓、过期租约不占位、死信倒序、五维占用',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'http-platform-status-'));
+        try {
+          const store = new FileStateStore(join(dir, 'state.json'));
+          const clock = new FixedClock(T0);
+          const ids = new PersistentIds(store);
+          const projects = new FileProjectRepository(store);
+          const activity = new FileActivityLog(store, clock);
+          const deliveries = new FileDeliveryRepository(store, clock, ids);
+          const hops = new FileQueuedHopRepository(store);
+          const platform = new Platform({
+            projects,
+            deliveries,
+            activity,
+            clock,
+            ids,
+            transaction: store,
+          });
+          const server = createApi({
+            platform,
+            tokens: new RunTokenRegistry(),
+            deliveries,
+            queuedHops: hops,
+            now: () => Date.parse(T_NOW),
+            platformStatus: {
+              store: 'file',
+              startedAt: T0,
+              instanceId: 'inst-file',
+              statePath: join(dir, 'state.json'),
+              holdsMainLock: true,
+              agentEnv: {
+                passthroughDeclared: true,
+                baselineFiltered: true,
+                extraPassthroughCount: 0,
+              },
+              defaultAdapter: 'pi',
+            },
+          });
+          try {
+            await listenLoopback(server, 0);
+            const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+            const empty = await request(base, '/api/platform/status');
+            assert.equal(empty.status, 200);
+            assert.equal(empty.json.instanceId, 'inst-file');
+            assert.equal(empty.json.statePath, join(dir, 'state.json'));
+            assert.equal(empty.json.holdsMainLock, true);
+            assert.deepEqual(empty.json.queue, {
+              counts: { queued: 0, claimed: 0, completed: 0, retry_wait: 0, dead_letter: 0 },
+              deadLetters: [],
+            });
+            const emptyOcc = empty.json.occupancy as { activeLeases: number; global: number };
+            assert.equal(emptyOcc.activeLeases, 0);
+            assert.equal(emptyOcc.global, 0);
+
+            await hops.enqueue({
+              id: 'h-expired',
+              projectId: 'P',
+              missionId: 'M',
+              workItemId: 'w',
+              role: 'executor',
+              priority: 1,
+              availableAt: T0,
+              attemptCount: 0,
+              maxAttempts: 3,
+              idempotencyKey: 'expired',
+              status: 'queued',
+              createdAt: T0,
+              updatedAt: T0,
+            });
+            const expired = await hops.claim('h-expired', 'owner', T0, T_EXPIRED);
+            assert.equal(expired?.status, 'claimed');
+
+            await hops.enqueue({
+              id: 'h-live',
+              projectId: 'P1',
+              missionId: 'M1',
+              workItemId: 'w1',
+              role: 'executor',
+              priority: 1,
+              availableAt: T0,
+              attemptCount: 0,
+              maxAttempts: 3,
+              idempotencyKey: 'live',
+              status: 'queued',
+              createdAt: T0,
+              updatedAt: T0,
+            });
+            const live = await hops.claimAvailable({
+              owner: 'runner',
+              now: T0,
+              leaseUntil: T_LEASE,
+              limits: {
+                global: 8,
+                project: 2,
+                role: 4,
+                runtime: 4,
+                profile: 2,
+              },
+              eligible: [{ hopId: 'h-live', runtimeKind: 'pi', profileId: 'exec-qwen' }],
+            });
+            assert.equal(live.kind, 'claimed');
+
+            await hops.enqueue({
+              id: 'h-dead-old',
+              projectId: 'P',
+              missionId: 'M-old',
+              workItemId: 'w',
+              role: 'executor',
+              priority: 1,
+              availableAt: T0,
+              attemptCount: 0,
+              maxAttempts: 1,
+              idempotencyKey: 'dead-old',
+              status: 'queued',
+              createdAt: T0,
+              updatedAt: T0,
+            });
+            await hops.claim('h-dead-old', 'owner', T0, T_LEASE);
+            await hops.reportFailure?.({
+              id: 'h-dead-old',
+              claimGeneration: 1,
+              attemptId: 'a-old',
+              failedAt: '2026-01-01T00:10:00.000Z',
+              classification: 'auth',
+              disposition: 'dead',
+              retryable: false,
+            });
+
+            await hops.enqueue({
+              id: 'h-dead-new',
+              projectId: 'P',
+              missionId: 'M-new',
+              workItemId: 'w',
+              role: 'coordinator',
+              priority: 1,
+              availableAt: T0,
+              attemptCount: 0,
+              maxAttempts: 1,
+              idempotencyKey: 'dead-new',
+              status: 'queued',
+              createdAt: T0,
+              updatedAt: T0,
+            });
+            await hops.claim('h-dead-new', 'owner', T0, T_LEASE);
+            await hops.reportFailure?.({
+              id: 'h-dead-new',
+              claimGeneration: 1,
+              attemptId: 'a-new',
+              failedAt: '2026-01-01T00:20:00.000Z',
+              classification: 'quota',
+              disposition: 'dead',
+              retryable: false,
+            });
+
+            const filled = await request(base, '/api/platform/status');
+            assert.equal(filled.status, 200);
+            const counts = (filled.json.queue as { counts: Record<string, number> }).counts;
+            assert.equal(counts.claimed, 2, JSON.stringify(counts));
+            assert.equal(counts.dead_letter, 2);
+            const dead = (filled.json.queue as { deadLetters: Array<{ hopId: string; classification: string }> }).deadLetters;
+            assert.deepEqual(dead.map((row) => row.hopId), ['h-dead-new', 'h-dead-old']);
+            assert.equal(dead[0]?.classification, 'quota');
+            const occ = filled.json.occupancy as {
+              activeLeases: number;
+              global: number;
+              project: Record<string, number>;
+              role: Record<string, number>;
+              runtime: Record<string, number>;
+              profile: Record<string, number>;
+            };
+            assert.equal(occ.activeLeases, 1);
+            assert.equal(occ.global, 1);
+            assert.equal(occ.project.P1, 1);
+            assert.equal(occ.role.executor, 1);
+            assert.equal(occ.runtime.pi, 1);
+            assert.equal(occ.profile['exec-qwen'], 1);
+            assert.equal(occ.project.P, undefined, 'expired lease must not occupy');
+          } finally {
+            await closeServer(server);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    test('资源池每个候选带熔断、失败口径与七日用量；POST 语义不变',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'http-pool-health-'));
+        try {
+          const store = new FileStateStore(join(dir, 'state.json'));
+          const clock = new FixedClock(T0);
+          const ids = new PersistentIds(store);
+          const projects = new FileProjectRepository(store);
+          const activity = new FileActivityLog(store, clock);
+          const deliveries = new FileDeliveryRepository(store, clock, ids);
+          const hops = new FileQueuedHopRepository(store);
+          const circuits = new FileCandidateCircuitRepository(store);
+          const agentPool = new FileAgentPoolRepository(store);
+          const platform = new Platform({
+            projects,
+            deliveries,
+            activity,
+            clock,
+            ids,
+            transaction: store,
+          });
+          await agentPool.add({ role: 'executor', profileId: 'exec-qwen', endpoint: 'local' });
+          await agentPool.add({ role: 'executor', profileId: 'exec-idle', endpoint: 'local' });
+          await circuits.open({
+            profileId: 'exec-qwen',
+            failureClass: 'quota',
+            openUntil: '2026-01-02T00:00:00.000Z',
+          });
+          await platform.createMission({
+            projectId: 'P',
+            missionId: 'M-usage',
+            contract: CONTRACT,
+          });
+          const started = await platform.startCoordinatorAttempt('M-usage', {
+            profileId: 'exec-qwen',
+            endpoint: 'local',
+          });
+          await platform.finishAttempt('M-usage', started.attemptId, {
+            endedBy: 'upstream_failure',
+            failureMessage: 'HTTP 429 quota exceeded',
+            usage: {
+              input: 10,
+              output: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 12,
+              cost: 1.25,
+              quality: 'reported',
+            },
+          });
+          const server = createApi({
+            platform,
+            tokens: new RunTokenRegistry(),
+            deliveries,
+            agentPool,
+            queuedHops: hops,
+            candidateCircuits: circuits,
+            now: () => Date.parse('2026-01-02T00:00:00.000Z'),
+          });
+          try {
+            await listenLoopback(server, 0);
+            const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+            const list = await request(base, '/api/pools');
+            assert.equal(list.status, 200);
+            const snapshot = list.json as {
+              executor: Array<{
+                profileId: string;
+                endpoint: string;
+                runtime: string;
+                order: number;
+                facts: unknown[];
+                role?: string;
+                health: {
+                  circuit: { state: string; failureClass?: string; openUntil?: string };
+                  lastFailure: { failureClass: string; at: string | null; source: string };
+                  window7d: { attempts: number; successes: number; reportedCost: number | null };
+                  runtime: { running: boolean; reason?: string };
+                };
+              }>;
+            };
+            const qwen = snapshot.executor.find((row) => row.profileId === 'exec-qwen');
+            const idle = snapshot.executor.find((row) => row.profileId === 'exec-idle');
+            assert.ok(qwen);
+            assert.ok(idle);
+            assert.equal(qwen.role, undefined);
+            assert.equal(qwen.runtime, 'pi');
+            assert.equal(qwen.health.circuit.state, 'open');
+            assert.equal(qwen.health.circuit.failureClass, 'quota');
+            assert.equal(qwen.health.lastFailure.failureClass, 'quota');
+            assert.equal(qwen.health.lastFailure.source, 'attempt.ended');
+            assert.equal(qwen.health.window7d.attempts, 1);
+            assert.equal(qwen.health.window7d.successes, 0);
+            assert.equal(qwen.health.window7d.reportedCost, 1.25);
+            assert.equal(qwen.health.runtime.running, false);
+            assert.equal(qwen.health.runtime.reason, 'no_active_lease');
+            assert.equal(idle.health.circuit.state, 'closed');
+            assert.equal(idle.health.lastFailure.failureClass, 'unknown');
+            assert.equal(idle.health.lastFailure.at, null);
+            assert.equal(idle.health.window7d.attempts, 0);
+            assert.equal(idle.health.window7d.reportedCost, null);
+            assert.equal(idle.health.runtime.reason, 'no_active_lease');
+
+            const created = await request(base, '/api/pools', {
+              role: 'coordinator',
+              profileId: 'coord-new',
+              endpoint: 'local',
+            });
+            assert.equal(created.status, 201);
+            assert.equal(created.json.role, 'coordinator');
+            assert.equal(created.json.profileId, 'coord-new');
+            assert.equal(created.json.runtime, 'pi');
+            assert.equal(created.json.order, 0);
+          } finally {
+            await closeServer(server);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+  },
+);

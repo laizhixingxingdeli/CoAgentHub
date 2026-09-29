@@ -18,10 +18,13 @@ import type { Server } from 'node:http';
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import {
+  collectAttemptLiveTail,
   InMemoryLiveOutput,
   InMemoryPlanRunLiveOutput,
   KEEP_TAIL_ON_FINISH,
+  mergeAttemptOutput,
   NoLiveOutput,
+  PERSIST_OUTPUT_TAIL_LINES,
   PLAN_LIVE_EMPTY_REASON,
   PLAN_LIVE_LIMIT,
 } from '../src/application/live.ts';
@@ -306,8 +309,18 @@ describe('文件版 buildPersistentPlatform 接通 live',
         assert.match(persistent, /new InMemoryLiveOutput/);
         assert.match(persistent, /\blive,/);
         assert.doesNotMatch(persistent, /PgLiveOutput/);
+        const persistentPlat = persistent.slice(
+          persistent.indexOf('const platform = new Platform'),
+          persistent.indexOf('const tokens'),
+        );
+        assert.match(persistentPlat, /\blive,/);
         const pg = main.slice(main.indexOf('export async function buildPgPlatform'));
         assert.match(pg, /new PgLiveOutput/);
+        const pgPlat = pg.slice(
+          pg.indexOf('const platform = new Platform'),
+          pg.indexOf('const tokens'),
+        );
+        assert.match(pgPlat, /\blive,/);
 
         const runPlan = readFileSync(fileURLToPath(new URL('../src/run-plan.ts', import.meta.url)), 'utf8');
         const runMission = readFileSync(
@@ -448,6 +461,238 @@ describe('托管方案实时输出：HTTP 面',
       assert.equal(String(payload.message ?? '').includes('secret'), false);
       const mixed = await fetch(`${base}/api/plan-runs/R-safe%2F../R-safe/live`);
       assert.notEqual(mixed.status, 200);
+    });
+  },
+);
+
+const TAIL_CONTRACT = {
+  intent: '尾部持久化',
+  acceptance: ['能读到'],
+  constraints: [] as string[],
+  nonGoals: [] as string[],
+  guardrails: [] as string[],
+};
+
+function tailPlatform(live?: InMemoryLiveOutput) {
+  const clock = new FixedClock();
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const platform = new Platform({
+    projects: new InMemoryProjectRepository(),
+    deliveries,
+    workspace: new InPlaceWorkspaceManager(),
+    activity: new InMemoryActivityLog(clock),
+    clock,
+    ids,
+    ...(live ? { live } : {}),
+  });
+  return { platform, deliveries, live };
+}
+
+async function openAttempt(platform: Platform, missionId: string) {
+  await platform.createMission({ projectId: 'P', missionId, contract: TAIL_CONTRACT });
+  return platform.startCoordinatorAttempt(missionId);
+}
+
+describe('实时尾部落入 Attempt.output',
+  () => {
+    const tailDirs: string[] = [];
+    after(() => {
+      for (const dir of tailDirs) rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('collectAttemptLiveTail：按行计、丢掉 usage/note/别的 attempt',
+      async () => {
+        const live = new InMemoryLiveOutput(10_000);
+        await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: 'hello\nworld\n' });
+        await live.append({
+          missionId: 'M1',
+          attemptId: 'A1',
+          kind: 'tool',
+          text: 'bash · ls',
+        });
+        await live.append({
+          missionId: 'M1',
+          attemptId: 'A1',
+          kind: 'usage',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2, quality: 'reported' },
+        });
+        await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'note', text: '裁剪痕迹' });
+        await live.append({ missionId: 'M1', attemptId: 'A2', kind: 'text', text: '别的跳' });
+        await live.append({ missionId: 'M2', attemptId: 'A1', kind: 'text', text: '别的任务' });
+        const tail = await collectAttemptLiveTail(live, 'M1', 'A1');
+        assert.equal(tail, 'hello\nworld\nbash · ls');
+        assert.equal(PERSIST_OUTPUT_TAIL_LINES, 200);
+        assert.equal(mergeAttemptOutput('摘要', undefined), '摘要');
+        assert.equal(mergeAttemptOutput(undefined, '尾'), '尾');
+        assert.equal(mergeAttemptOutput('尾', '尾'), '尾');
+      },
+    );
+
+    test('>200 行且含多行 chunk 时只留最后 200 行', async () => {
+      const live = new InMemoryLiveOutput(10_000);
+      for (let i = 0; i < 180; i += 1) {
+        await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: `L${i}` });
+      }
+      const block = Array.from({ length: 50 }, (_, i) => `B${i}`).join('\n');
+      await live.append({ missionId: 'M1', attemptId: 'A1', kind: 'text', text: `${block}\n` });
+      const tail = await collectAttemptLiveTail(live, 'M1', 'A1');
+      const lines = tail!.split('\n');
+      assert.equal(lines.length, 200);
+      assert.equal(lines[0], 'L30');
+      assert.equal(lines.at(-1), 'B49');
+    });
+
+    test('finishAttempt 后 detail 只有本跳尾部；旧跳/usage/note 不混入；重复收尾不叠加',
+      async () => {
+        const live = new InMemoryLiveOutput();
+        const { platform } = tailPlatform(live);
+        const a1 = await openAttempt(platform, 'M-iso');
+        await live.append({
+          missionId: 'M-iso',
+          attemptId: a1.attemptId,
+          kind: 'text',
+          text: '第一跳\n',
+        });
+        await live.append({
+          missionId: 'M-iso',
+          attemptId: a1.attemptId,
+          kind: 'usage',
+          usage: { input: 9, output: 0, cacheRead: 0, cacheWrite: 0, total: 9, quality: 'reported' },
+        });
+        await live.append({
+          missionId: 'M-iso',
+          attemptId: a1.attemptId,
+          kind: 'note',
+          text: '不该进 Attempt',
+        });
+        await platform.finishAttempt('M-iso', a1.attemptId, { endedBy: 'no_structured_result' });
+        await platform.finishAttempt('M-iso', a1.attemptId, { endedBy: 'no_structured_result' });
+        const a2 = await platform.startCoordinatorAttempt('M-iso');
+        await live.append({
+          missionId: 'M-iso',
+          attemptId: a2.attemptId,
+          kind: 'text',
+          text: '第二跳活着',
+        });
+        await platform.finishAttempt('M-iso', a2.attemptId, { endedBy: 'no_structured_result' });
+        const first = await platform.getAttemptDetail('M-iso', a1.attemptId);
+        const second = await platform.getAttemptDetail('M-iso', a2.attemptId);
+        assert.equal(first.output, '第一跳');
+        assert.equal(second.output, '第二跳活着');
+        assert.equal(String(first.output).includes('第二跳'), false);
+        assert.equal(String(second.output).includes('第一跳'), false);
+        assert.equal(String(first.output).includes('不该进 Attempt'), false);
+        assert.equal((String(first.output).match(/第一跳/g) ?? []).length, 1);
+      },
+    );
+
+    test('无实时通道时 outcome.output 原样保留', async () => {
+      const { platform } = tailPlatform();
+      const { attemptId } = await openAttempt(platform, 'M-none');
+      await platform.finishAttempt('M-none', attemptId, {
+        endedBy: 'structured_submit',
+        output: '只有摘要',
+      });
+      assert.equal((await platform.getAttemptDetail('M-none', attemptId)).output, '只有摘要');
+    });
+
+    test('重启后文件状态仍能读到脱敏尾部；HTTP 详情一致',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-live-tail-'));
+        tailDirs.push(dir);
+        const statePath = join(dir, 'state.json');
+        const fakeKey = 'sk-ant-abcdefghijklmnopqrstuvwxyz';
+        const fakeBearer = 'Bearer abcdEFGH1234.xyz';
+        const built = await buildPersistentPlatform(statePath, {
+          workspace: new InPlaceWorkspaceManager(),
+        });
+        await built.platform.createMission({
+          projectId: 'P',
+          missionId: 'M-persist',
+          contract: TAIL_CONTRACT,
+        });
+        const { attemptId } = await built.platform.startCoordinatorAttempt('M-persist');
+        await built.live.append({
+          missionId: 'M-persist',
+          attemptId,
+          kind: 'text',
+          text: `key=${fakeKey}\nauth=${fakeBearer}\nvisible-line`,
+        });
+        await built.platform.finishAttempt('M-persist', attemptId, {
+          endedBy: 'no_structured_result',
+        });
+        built.persist();
+
+        const dumped = readFileSync(statePath, 'utf8');
+        assert.doesNotMatch(dumped, /sk-ant-abcdefghijklmnopqrstuvwxyz/);
+        assert.doesNotMatch(dumped, /abcdEFGH1234\.xyz/);
+        assert.match(dumped, /visible-line/);
+
+        const restarted = await buildPersistentPlatform(statePath, {
+          workspace: new InPlaceWorkspaceManager(),
+        });
+        const detail = await restarted.platform.getAttemptDetail('M-persist', attemptId);
+        assert.equal(String(detail.output).includes(fakeKey), false);
+        assert.equal(String(detail.output).includes('abcdEFGH1234.xyz'), false);
+        assert.match(String(detail.output), /visible-line/);
+        assert.match(String(detail.output), /\[REDACTED\]/);
+
+        const server = createApi({
+          platform: restarted.platform,
+          tokens: new RunTokenRegistry(),
+          deliveries: restarted.deliveries,
+        });
+        await listenLoopback(server, 0);
+        servers.push(server);
+        const http = (await (
+          await fetch(
+            `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/missions/M-persist/attempts/${attemptId}`,
+          )
+        ).json()) as { output?: string };
+        assert.equal(http.output, detail.output);
+        assert.equal(String(http.output).includes(fakeKey), false);
+      },
+    );
+  },
+);
+
+describe('实时尾部：Postgres since 有界分页',
+  () => {
+    test('PG 通道按行取本跳尾部，不改 pg-store', async (t) => {
+      const target = await ensureTestDatabase();
+      if (!target) {
+        t.skip('没有可用的 Postgres');
+        return;
+      }
+      const store = await PgStateStore.open({ connectionString: target });
+      try {
+        await PgLiveOutput.ensureSchema(store);
+        const live = new PgLiveOutput(store);
+        const missionId = `M-pg-tail-${Date.now()}`;
+        for (let i = 0; i < 210; i += 1) {
+          await live.append({
+            missionId,
+            attemptId: 'A-other',
+            kind: 'text',
+            text: `other-${i}`,
+          });
+        }
+        await live.append({
+          missionId,
+          attemptId: 'A-mine',
+          kind: 'text',
+          text: Array.from({ length: 30 }, (_, i) => `mine-${i}`).join('\n') + '\n',
+        });
+        const tail = await collectAttemptLiveTail(live, missionId, 'A-mine');
+        const lines = tail!.split('\n');
+        assert.equal(lines.length, 30);
+        assert.equal(lines[0], 'mine-0');
+        assert.equal(lines.at(-1), 'mine-29');
+        assert.equal(lines.some((line) => line.startsWith('other-')), false);
+      } finally {
+        await store.close();
+      }
     });
   },
 );

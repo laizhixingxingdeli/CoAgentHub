@@ -469,6 +469,8 @@ export async function runHostedMission(
 
   const runner = new MissionRunner({
     platform,
+    // 同一条通道：编排器流式 append；Platform.finishAttempt 在落地前取本跳 200 行尾。
+    // 漏传的话任务页「输出末尾」重启后仍是空的——hosted 不能另开一套 live。
     live,
     tokens,
     baseUrl: ctx.baseUrl,

@@ -88,6 +88,7 @@ import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import { redactSecrets } from './redact.ts';
+import { collectAttemptLiveTail, mergeAttemptOutput, type LiveOutput } from './live.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
 import {
   HA_AUTHORITY_CODE,
@@ -469,6 +470,11 @@ export interface PlatformDeps {
    * 测试注入 HA 授权文件绝对路径。生产只读 COAGENT_HA_AUTHORITY_FILE，每次现读。
    */
   haAuthorityFile?: string;
+  /**
+   * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
+   * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。
+   */
+  live?: LiveOutput;
 }
 
 export interface CreateMissionInput {
@@ -520,6 +526,7 @@ export class Platform {
   #transaction: CommandTransaction | undefined;
   #validation: PlatformValidationDeps | undefined;
   #haAuthorityFile: string | undefined;
+  #live: LiveOutput | undefined;
 
   constructor(deps: PlatformDeps) {
     this.#projects = deps.projects;
@@ -535,6 +542,7 @@ export class Platform {
     this.#transaction = deps.transaction;
     this.#validation = deps.validation;
     this.#haAuthorityFile = deps.haAuthorityFile;
+    this.#live = deps.live;
   }
 
   /* =============================== L3 面 =============================== */
@@ -1752,7 +1760,6 @@ export class Platform {
     // 失败原文与输出尾部都会落盘、进界面：agent 打过 `env` 的话，本机的 key 就在里面。
     const failureMessage =
       outcome.failureMessage !== undefined ? redactSecrets(outcome.failureMessage) : undefined;
-    const output = outcome.output !== undefined ? redactSecrets(outcome.output) : undefined;
     const { mission } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
     if (!attempt) {
@@ -1760,6 +1767,18 @@ export class Platform {
     }
     // 已终态再收尾仍走旧副作用（用量/输出），但不得再写一份采集成功事实。
     const alreadyTerminal = attempt.status !== 'in_progress';
+    // 必须在 live.finish 之前取（编排器先 finishAttempt 再裁剪缓冲）。
+    // 已终态不再取尾：否则重复收尾会把同一段 appendOutput 无限接上。
+    let liveTail: string | undefined;
+    if (this.#live && !alreadyTerminal) {
+      try {
+        liveTail = await collectAttemptLiveTail(this.#live, missionId, attemptId);
+      } catch {
+        // 实时通道读失败不能挡收尾，否则 attempt 卡在 in_progress。
+      }
+    }
+    const merged = mergeAttemptOutput(outcome.output, liveTail);
+    const output = merged !== undefined ? redactSecrets(merged) : undefined;
     if (outcome.usage) attempt.recordUsage(outcome.usage);
     if (outcome.resumeRef) attempt.recordResumeRef(outcome.resumeRef);
     // 把运行时报回来的实际身份并进开跑时记的那份（S13.3）。

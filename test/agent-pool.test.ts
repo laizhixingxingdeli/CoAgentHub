@@ -700,6 +700,37 @@ describe('候选池 API', () => {
     }
   });
 
+  test('GET /api/pools 在无运行时仓储时仍列出候选并说明原因', async () => {
+    const { base, close } = await withApi(new InMemoryAgentPoolRepository());
+    try {
+      await post(base, '/api/pools', { role: 'executor', profileId: 'lonely', endpoint: 'local' });
+      const list = await get(base, '/api/pools');
+      assert.equal(list.status, 200);
+      const snapshot = list.json as unknown as AgentPoolSnapshot & {
+        executor: Array<{
+          profileId: string;
+          health: {
+            circuit: { state: string; reason?: string };
+            lastFailure: { failureClass: string; at: string | null };
+            window7d: { attempts: number; successes: number; reportedCost: number | null };
+            runtime: { running: boolean; reason?: string };
+          };
+        }>;
+      };
+      assert.equal(snapshot.executor[0]?.profileId, 'lonely');
+      assert.equal(snapshot.executor[0]?.health.circuit.state, 'unknown');
+      assert.equal(snapshot.executor[0]?.health.circuit.reason, 'candidate_circuits_unavailable');
+      assert.equal(snapshot.executor[0]?.health.lastFailure.failureClass, 'unknown');
+      assert.equal(snapshot.executor[0]?.health.lastFailure.at, null);
+      assert.equal(snapshot.executor[0]?.health.window7d.attempts, 0);
+      assert.equal(snapshot.executor[0]?.health.window7d.reportedCost, null);
+      assert.equal(snapshot.executor[0]?.health.runtime.running, false);
+      assert.equal(snapshot.executor[0]?.health.runtime.reason, 'queued_hops_unavailable');
+    } finally {
+      close();
+    }
+  });
+
   test('GET /api/pools 不播种 —— 只读路径不能带副作用', async () => {
     const { base, close } = await withApi(new InMemoryAgentPoolRepository());
     try {
@@ -843,7 +874,7 @@ describe('资源池页（src/web/pool.js）', () => {
     ],
   };
 
-  /** 取某一行的四个单元格。用 data-pool-row 定位：下标记行会串到别人身上。 */
+  /** 取某一行的五个单元格。用 data-pool-row 定位：下标记行会串到别人身上。 */
   function cellsOf(html: string, profileId: string): string[] {
     const hit = new RegExp(`<tr data-pool-row="${profileId}"[^>]*>([\\s\\S]*?)</tr>`).exec(html);
     assert.ok(hit, `页面里没有 ${profileId} 那一行`);
@@ -861,10 +892,15 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /data-count="executor">1</);
     for (const row of [...snapshot.coordinator, ...snapshot.executor]) {
       const cells = cellsOf(html, row.profileId);
-      assert.equal(cells.length, 4, '四列');
+      assert.equal(cells.length, 5, '五列，含健康');
       assert.equal(cells[0], row.profileId, '第一列是候选名称 = profileId');
       assert.equal(cells[1], row.endpoint, '第二列是接入点 = endpoint');
       assert.equal(cells[2], 'pi', '第三列是适配层（原来的 Runtime）');
+      // snapshot 未带 health：第五列仍必须在，并说清还没读到，不能空成少一列。
+      assert.ok(
+        String(cells[4]).includes('还没读到健康'),
+        `第五列是健康，缺对象时要说出来，实际：${cells[4]}`,
+      );
     }
   });
 
@@ -908,11 +944,11 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.ok(html.includes('&lt;script&gt;'), '该看到转义后的形式');
   });
 
-  test('表头四列齐（人话名）；表单有角色、模型、候选名称、接入点（默认 local）', async () => {
+  test('表头五列齐（人话名，含健康）；表单有角色、模型、候选名称、接入点（默认 local）', async () => {
     const { poolPageHtml, POOL_COLUMNS } = await loaded;
     assert.deepEqual(
       [...POOL_COLUMNS],
-      ['候选名称', '接入点', '适配层', '运行时'],
+      ['候选名称', '接入点', '适配层', '运行时', '健康'],
     );
     const html = poolPageHtml(snapshot, catalog);
     for (const name of POOL_COLUMNS) {
