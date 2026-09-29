@@ -260,6 +260,45 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
+  test('成功 executor 使用冻结 WorkOrder.allowedScope 检查点', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-'));
+    const checkpoints: Array<{ cwd: string; missionId: string; workItemId: string; allowedPaths: readonly string[] }> = [];
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async (cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]) => {
+        checkpoints.push({ cwd, missionId, workItemId, allowedPaths });
+      },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-checkpoint',
+        contract: CONTRACT,
+      });
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-checkpoint', { projectRoot });
+
+      assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+      assert.equal(checkpoints.length, 1);
+      assert.deepEqual(checkpoints[0], {
+        cwd: projectRoot,
+        missionId: 'M-checkpoint',
+        workItemId: 'W-1',
+        allowedPaths: ORDER.allowedScope,
+      });
+      assert.deepEqual(
+        orchestrator.hops.map((hop) => `${hop.role}:${hop.endedBy}`),
+        ['coordinator:structured_submit', 'executor:structured_submit', 'coordinator:structured_submit'],
+      );
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('正常主链：规划 → 派发 → 执行 → 验收 → 交卷', async () => {
     current = await harness({
       coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
