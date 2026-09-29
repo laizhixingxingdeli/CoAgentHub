@@ -1106,10 +1106,129 @@ describe('实时输出', () => {
   });
 });
 
+describe('上下文采集指标', () => {
+  const loaded = import('../src/web/task.js');
+
+  const ended = (metrics?: unknown) => ({
+    at: '2026-03-04T05:00:00.000Z',
+    kind: 'attempt.ended',
+    attemptId: 'coord-1',
+    data: metrics === undefined ? { endedBy: 'structured_submit' } : { endedBy: 'structured_submit', contextMetrics: metrics },
+  });
+
+  test('有上报时按类别画分段条和图例，字节数是真的', async () => {
+    const { contextMetricsBlockHtml, contextMetricSegments, stageDetailHtml, groupActivity } = await loaded;
+    const metrics = {
+      version: 1,
+      coverage: 'complete',
+      brief: { renderedUtf8Bytes: 1200, sources: [] },
+      tools: [
+        { kind: 'read', calls: 2, returnedUtf8Bytes: 80 },
+        { kind: 'bash', calls: 1, returnedUtf8Bytes: 9 },
+      ],
+    };
+    const segs = contextMetricSegments(metrics);
+    assert.deepEqual(segs, [
+      { key: 'brief', bytes: 1200 },
+      { key: 'read', bytes: 80 },
+      { key: 'bash', bytes: 9 },
+    ]);
+    const html = contextMetricsBlockHtml([ended(metrics)]);
+    assert.ok(html.includes('简报 1,200 字节'), html);
+    assert.ok(html.includes('读文件 80 字节'), html);
+    assert.ok(html.includes('命令输出 9 字节'), html);
+    assert.match(html, /flex:1200/);
+    assert.match(html, /flex:80/);
+    assert.match(html, /var\(--status-queued\)/);
+    assert.equal(html.includes('搜索'), false, '没上报的 grep 不该出现');
+    assert.equal(/简报 0\b/.test(html), false, html);
+    assert.equal(html.includes('没有上报'), false, html);
+    const detail = stageDetailHtml(groupActivity([ended(metrics)])[0], {}, null);
+    assert.ok(detail.includes('简报 1,200 字节'), detail);
+  });
+
+  test('没上报明确说没有指标，不把缺失当零', async () => {
+    const { contextMetricsFromEvents, contextMetricSegments, contextMetricsBlockHtml, stageListHtml } = await loaded;
+    assert.equal(contextMetricsFromEvents([ended()]), null);
+    assert.equal(contextMetricSegments(null), null);
+    assert.equal(contextMetricSegments({ version: 1, coverage: 'unknown' }), null);
+    const html = contextMetricsBlockHtml([ended()]);
+    assert.ok(html.includes('这一跳没有上报上下文指标'), html);
+    assert.equal(html.includes('0 字节'), false, html);
+    assert.equal(html.includes('简报'), false, html);
+    const list = stageListHtml([ended()], null, null, {});
+    assert.ok(list.includes('这一跳没有上报上下文指标'), list);
+    assert.equal(list.includes('简报 0'), false, list);
+  });
+});
+
+describe('任务改动卡', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('文件、增删行数、可展开差异；空结果不假装有改动', async () => {
+    const { changesCardHtml, parseDiffStat } = await loaded;
+    const stat = [
+      ' src/web/task.js | 12 ++++----',
+      ' src/web/narrate.js | 40 +++++++++++++++++',
+      ' 2 files changed, 48 insertions(+), 4 deletions(-)',
+    ].join('\n');
+    const parsed = parseDiffStat(stat);
+    assert.equal(parsed.added, 48);
+    assert.equal(parsed.deleted, 4);
+    const html = changesCardHtml({
+      stat,
+      files: ['src/web/task.js', 'src/web/narrate.js'],
+      pendingMemory: ['VIBE.md'],
+    });
+    assert.ok(html.includes('任务改动'), html);
+    assert.ok(html.includes('2 个文件'), html);
+    assert.ok(html.includes('新增 48 行') && html.includes('删除 4 行'), html);
+    assert.ok(html.includes('<details'), '每条文件要能展开');
+    assert.ok(html.includes('src/web/task.js'), html);
+    assert.ok(html.includes('12 行'), html);
+    assert.ok(html.includes('差异摘要'), html);
+    assert.ok(html.includes('另有 1 个文件会随本次落地一并写入'), html);
+    assert.ok(html.includes('VIBE.md'), html);
+
+    const empty = changesCardHtml({ stat: '（无改动）', files: [], pendingMemory: [] });
+    assert.ok(empty.includes('（无改动）'), empty);
+    assert.equal(empty.includes('<details'), false, '空结果不该画出可展开的假文件');
+    const none = changesCardHtml({ stat: '', files: [], pendingMemory: [] });
+    assert.ok(none.includes('没有改动'), none);
+    const fail = changesCardHtml({ error: 'HTTP 500' });
+    assert.ok(fail.includes('读不到改动：HTTP 500'), fail);
+    assert.equal(fail.includes('个文件'), false, fail);
+  });
+});
+
+describe('输出末尾退路', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('没有实时行时用 attempt.output；有实时行不把旧跳当当前输出', async () => {
+    const { livePanelHtml } = await loaded;
+    const hist = livePanelHtml({
+      lines: [],
+      running: false,
+      historicalOutput: '脱敏后的尾巴\n第二行',
+    });
+    assert.ok(hist.includes('输出末尾（已脱敏）'), hist);
+    assert.ok(hist.includes('脱敏后的尾巴'), hist);
+    assert.equal(hist.includes('还没有实时输出'), false, hist);
+    const live = livePanelHtml({
+      lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '正在滚' }],
+      historicalOutput: '旧跳不该出现',
+    });
+    assert.ok(live.includes('正在滚'), live);
+    assert.equal(live.includes('旧跳不该出现'), false, live);
+    assert.equal(live.includes('输出末尾（已脱敏）'), false, live);
+  });
+});
+
 describe('转义', () => {
   test('不守规矩的字段进不了 DOM', async () => {
     const {
       headerHtml, stageListHtml, stageDetailHtml, usageCardHtml, livePanelHtml, groupActivity,
+      changesCardHtml, contextMetricsBlockHtml,
     } = await import('../src/web/task.js');
     const evil = '<img src=x onerror="alert(1)">';
     const group = groupActivity([{ at: '', kind: 'attempt.started', attemptId: evil, workItemId: evil, data: {} }])[0];
@@ -1124,6 +1243,10 @@ describe('转义', () => {
         finalReview: { verdict: evil, reasons: [evil], mergedInto: evil },
       }, { evidence: [{ kind: evil, summary: evil, command: evil, exitCode: 1, output: evil }] }), true],
       [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }, { kind: 'note', text: evil }] }), true],
+      [livePanelHtml({ lines: [], running: false, historicalOutput: evil }), true],
+      [changesCardHtml({ stat: evil, files: [evil], pendingMemory: [evil] }), true],
+      [changesCardHtml({ error: evil }), true],
+      [contextMetricsBlockHtml([{ kind: 'attempt.ended', data: { contextMetrics: { brief: { renderedUtf8Bytes: 1 }, tools: [{ kind: evil, returnedUtf8Bytes: 3 }] } } }]), true],
       // 环节名也吃外部输入（工作项标题是 L2 写的）。
       [stageListHtml([{ at: '', kind: 'attempt.started', attemptId: 'W-x.exec-1', workItemId: evil }], null, null, { workItems: [{ id: evil, title: evil }] }), true],
       // 用量卡只从 usage 取数字、从 attemptId 取角色，本来就不该回显入参。
@@ -1407,6 +1530,22 @@ describe('真 API 字段喂真渲染函数', () => {
     assert.equal(typeof live.cursor, 'number', '实时输出是游标轮询，必须回 cursor');
     assert.ok(Array.isArray(live.chunks) && live.chunks.length === 2);
     assert.equal(live.cursor, live.chunks.at(-1)?.seq, 'cursor 要能续上，否则第二次拉会重复');
+
+    const diff = (await (await fetch(`${base}/api/missions/M-task/diff`)).json()) as {
+      stat: string;
+      files: string[];
+      pendingMemory: string[];
+    };
+    assert.ok(Array.isArray(diff.files), '改动卡读 diff.files');
+    assert.equal(typeof diff.stat, 'string', '改动卡读 diff.stat');
+    assert.ok(Array.isArray(diff.pendingMemory), '改动卡读 diff.pendingMemory');
+    const { changesCardHtml } = await import('../src/web/task.js');
+    const diffHtml = changesCardHtml(diff);
+    assert.equal(/undefined|NaN|\[object Object\]/.test(diffHtml), false, diffHtml);
+    // 原地模式没有隔离工作区：空结果必须说清楚，不许画一套假文件。
+    if (diff.files.length === 0) {
+      assert.equal(diffHtml.includes('<details'), false, diffHtml);
+    }
   });
 
   test('GET /task.js 取得到（浏览器那边不是 404）', async () => {
