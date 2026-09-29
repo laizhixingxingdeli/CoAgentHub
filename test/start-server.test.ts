@@ -1658,7 +1658,10 @@ describe('startServer hosted 接线与排空',
         assert.equal(snapshots.length, 1);
         assert.equal(snapshots[0]?.id, 'M-snapshot-real');
         assert.equal(snapshots[0]?.kind, 'mission');
-        assert.ok(snapshots[0]?.status);
+        assert.equal(snapshots[0]?.status, '运行中/状态暂不可读');
+        const missionView = await built.platform.getMissionView('M-snapshot-real');
+        assert.equal(missionView.status, 'investigating');
+        assert.equal(built.hostedRunSnapshots()[0]?.status, '运行中/状态暂不可读');
         const invalidCode = await loopbackRunRequest(target, {
           path: '/api/control/run-mission',
           body: hostedMissionBody(dir, adapter, join(dir, 'other-state.json'), 'M-invalid-snapshot'),

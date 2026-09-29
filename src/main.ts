@@ -986,21 +986,9 @@ export async function startServer(
               ...hostedRuntime,
               heldState,
               onStarted: (id) => {
-                const view = built.platform.getMissionView(id);
-                const snapshot: HostedRunSnapshot = {
-                  kind: 'mission', id, status: '运行中/状态暂不可读',
-                };
-                hostedRuns.register(token, snapshot);
-                if (view && typeof (view as Promise<unknown>).then === 'function') {
-                  void Promise.resolve(view).then((mission) => {
-                    if (mission?.status) hostedRuns.update(token, { ...snapshot, status: mission.status });
-                  }, () => {});
-                } else if ((view as { status?: string } | undefined)?.status) {
-                  hostedRuns.update(token, {
-                    ...snapshot,
-                    status: (view as { status: string }).status,
-                  });
-                }
+                // Asynchronous views cannot be synchronously observed in this API; never cache
+                // a result that may become stale while the hosted run remains active.
+                hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
               },
             },
             emit,
@@ -1087,7 +1075,20 @@ export async function startServer(
       server,
       ...built,
       stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
-      hostedRunSnapshots: () => hostedRuns.snapshot(),
+      hostedRunSnapshots: () => hostedRuns.snapshot().map((snapshot) => {
+        if (snapshot.kind !== 'mission') return snapshot;
+        try {
+          const view = built.platform.getMissionView(snapshot.id);
+          if (view && typeof (view as Promise<unknown>).then === 'function') {
+            void Promise.resolve(view).catch(() => {});
+            return { ...snapshot, status: '运行中/状态暂不可读' };
+          }
+          const status = (view as { status?: string } | undefined)?.status;
+          return { ...snapshot, status: status ?? '运行中/状态暂不可读' };
+        } catch {
+          return { ...snapshot, status: '运行中/状态暂不可读' };
+        }
+      }),
     };
   } catch (error) {
     await abortStartedServer(server, releaseMainLock, error);
