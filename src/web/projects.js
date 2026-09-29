@@ -10,7 +10,7 @@
  * （少一个字段只是那一格空着，不报错）。
  */
 
-import { STAGE_CN, WAIT_REASON, reasonText, stateLabel, usageLine , usageCell } from './narrate.js';
+import { STAGE_CN, WAIT_REASON, reasonText, stateLabel, usageLine , usageCell, planStatusText, planStopText, planFeatureText, planCostText } from './narrate.js';
 
 /**
  * 词表只住在 narrate.js（任务页也读同一份）。这里把它们再导出去，是给
@@ -152,6 +152,258 @@ function updatedAtMs(row) {
   return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
 }
 
+/**
+ * 方案运行行的花费：只加各 Mission 已上报的 usage.cost。
+ * 缺的不当 0——那会把「没上报」显示成「这次不要钱」。
+ * 列表里还没出现的 missionId 也算一条未上报，不能假装这笔不存在。
+ */
+function usagesForPlanRun(run, missions) {
+  const byId = new Map();
+  for (const row of Array.isArray(missions) ? missions : []) {
+    if (row && row.missionId != null) byId.set(String(row.missionId), row.usage);
+  }
+  const ids = [];
+  const seen = new Set();
+  const pushId = (id) => {
+    const key = String(id ?? '');
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    ids.push(key);
+  };
+  for (const feature of Array.isArray(run && run.features) ? run.features : []) {
+    for (const id of Array.isArray(feature && feature.missionIds) ? feature.missionIds : []) {
+      pushId(id);
+    }
+  }
+  for (const row of Array.isArray(missions) ? missions : []) {
+    if (row && row.planRunId === run.id) pushId(row.missionId);
+  }
+  return ids.map((id) => byId.get(id));
+}
+
+/** 票数及结局。词走 planFeatureText，不在这一页再列一张票状态表。 */
+function ticketOutcomeText(features) {
+  const rows = Array.isArray(features) ? features : [];
+  const counts = new Map();
+  const order = [];
+  for (const feature of rows) {
+    const label = planFeatureText(feature && feature.status);
+    if (!counts.has(label)) order.push(label);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  const parts = [rows.length + ' 张票'];
+  for (const label of order) {
+    const n = counts.get(label);
+    if (n) parts.push(label + ' ' + n);
+  }
+  return parts.join(' · ');
+}
+
+function startedAtMs(row) {
+  const t = Date.parse(String(row && row.startedAt != null ? row.startedAt : ''));
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+}
+
+function isPlanRunError(row) {
+  return Boolean(row && row.error != null && row.error !== '');
+}
+
+/**
+ * 方案运行表。按开跑时间倒序；坏记录 {id,error} 沉底，不拿假字段填一行。
+ * 入参数组不原地排序：调用方还拿着同一份列表做别的事。
+ */
+export function planRunsTableHtml(runs, missions) {
+  const rows = (Array.isArray(runs) ? runs : []).slice().sort((a, b) => {
+    const aBad = isPlanRunError(a);
+    const bBad = isPlanRunError(b);
+    if (aBad !== bBad) return aBad ? 1 : -1;
+    return startedAtMs(b) - startedAtMs(a);
+  });
+  if (rows.length === 0) {
+    return '<div class="card"><div class="pane-title">方案运行</div>'
+      + '<div class="empty">这个项目还没有方案运行。</div></div>';
+  }
+  const head = ['开跑时间', '方案', '票', '升级', '花费']
+    .map((t) => '<th>' + esc(t) + '</th>').join('');
+  const body = rows.map((row) => {
+    const r = row || {};
+    if (isPlanRunError(r)) {
+      return '<tr class="row-failed" data-plan-run-error="' + esc(r.id) + '">'
+        + '<td class="mono">' + esc(r.id) + '</td>'
+        + '<td colspan="4" class="cell-reason">' + esc(r.error) + '</td>'
+        + '</tr>';
+    }
+    const when = formatUpdatedAt(r.startedAt);
+    const cost = planCostText(usagesForPlanRun(r, missions));
+    const href = '#/plan-runs/' + encodeURIComponent(r.id);
+    const stop = planStopText(r.stopped);
+    return '<tr class="row-' + (r.stopped ? 'cancelled' : 'running') + '" data-plan-run-id="' + esc(r.id) + '">'
+      + '<td class="muted"'
+      +   (when.title ? ' title="' + esc(when.title) + '"' : '')
+      + '>' + esc(when.text) + '</td>'
+      + '<td><a class="mono" href="' + esc(href) + '">' + esc(r.id) + '</a>'
+      +   '<div>' + esc(r.planId || r.id) + '</div>'
+      +   '<div class="muted">' + esc(planStatusText(r)) + (stop ? ' · ' + stop : '') + '</div></td>'
+      + '<td>' + esc(ticketOutcomeText(r.features)) + '</td>'
+      + '<td>' + esc(num(r.escalationCount)) + '</td>'
+      + '<td class="cell-usage">' + esc(cost) + '</td>'
+      + '</tr>';
+  }).join('');
+  return '<div class="card"><div class="pane-title">方案运行</div><div class="table-wrap">'
+    + '<table class="tasks"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>'
+    + '</div></div>';
+}
+
+/**
+ * 筛选四态。需处理 = 等人（检视 / 升级 / 暂停），不是所有 waitReason：
+ * project_busy 那种是平台在排队，归进行中。终态优先于需处理，
+ * 否则一条已完成却还挂着旧 waitReason 的行会永远停在「需处理」里。
+ */
+export function missionFilterKey(row) {
+  const r = row || {};
+  if (r.status === 'completed') return 'completed';
+  if (r.status === 'blocked') return 'blocked';
+  if (r.status === 'awaiting_review' || r.paused || r.waitReason === 'waiting_l3' || r.waitReason === 'escalated') {
+    return 'needs';
+  }
+  return 'active';
+}
+
+/**
+ * 按 featureId 折多次 Mission。没有 featureId 的各自成组——空串当钥匙会把
+ * 所有普通任务揉成一坨，看起来像同票历史，比不分组更误导。
+ * 组与组内行都按最新 updatedAt 倒序；不改入参数组。
+ */
+export function groupMissionsByFeature(rows) {
+  const groups = [];
+  const byFeature = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const fid = row && row.featureId != null && String(row.featureId) !== '' ? String(row.featureId) : '';
+    if (fid) {
+      let group = byFeature.get(fid);
+      if (!group) {
+        group = { featureId: fid, missions: [] };
+        byFeature.set(fid, group);
+        groups.push(group);
+      }
+      group.missions.push(row);
+    } else {
+      groups.push({ featureId: '', missions: [row] });
+    }
+  }
+  for (const group of groups) {
+    group.missions = group.missions.slice().sort((a, b) => updatedAtMs(b) - updatedAtMs(a));
+  }
+  groups.sort((a, b) => updatedAtMs(b.missions[0]) - updatedAtMs(a.missions[0]));
+  return groups;
+}
+
+export function filterMissionGroups(groups, filter) {
+  if (!filter) return groups;
+  return (groups || []).filter((group) => missionFilterKey(group.missions[0]) === filter);
+}
+
+function featureTitleOf(group, planRuns) {
+  const fid = group && group.featureId;
+  if (fid) {
+    for (const run of Array.isArray(planRuns) ? planRuns : []) {
+      for (const feature of Array.isArray(run && run.features) ? run.features : []) {
+        if (feature && String(feature.featureId) === fid && feature.title) return feature.title;
+      }
+    }
+  }
+  const head = group && group.missions && group.missions[0];
+  return (head && head.intent) || fid || '（没有契约）';
+}
+
+function missionHistoryHtml(missions) {
+  return '<ul class="detail-list">' + missions.map((m) => {
+    const when = formatUpdatedAt(m && m.updatedAt);
+    const href = '#/missions/' + encodeURIComponent(m && m.missionId);
+    return '<li data-mission-id="' + esc(m && m.missionId) + '">'
+      + '<a class="mono" href="' + esc(href) + '">' + esc(m && m.missionId) + '</a>'
+      + ' ' + stageChip(m && m.status)
+      + ' ' + stateChip(m)
+      + ' <span class="muted"'
+      +   (when.title ? ' title="' + esc(when.title) + '"' : '')
+      + '>' + esc(when.text) + '</span>'
+      + ' <span class="muted">' + esc(usageCell(m && m.usage)) + '</span>'
+      + '<div class="cell-title">' + esc((m && m.intent) || '（没有契约）') + '</div>'
+      + '</li>';
+  }).join('') + '</ul>';
+}
+
+export function missionGroupsHtml(rows, filter, openGroups, planRuns) {
+  const groups = filterMissionGroups(groupMissionsByFeature(rows), filter);
+  if (!rows || rows.length === 0) {
+    return '<div class="card"><div class="empty">这个项目还没有任务。新建一条之后这里会一行行出现。</div></div>';
+  }
+  if (groups.length === 0) {
+    return '<div class="card"><div class="empty">没有符合筛选的任务。</div></div>';
+  }
+  const open = openGroups instanceof Set ? openGroups : new Set(Array.isArray(openGroups) ? openGroups : []);
+  return groups.map((group) => {
+    const head = group.missions[0];
+    const gid = group.featureId ? 'feature:' + group.featureId : 'solo:' + (head && head.missionId);
+    const title = featureTitleOf(group, planRuns);
+    const label = group.featureId ? group.featureId : (head && head.missionId);
+    const when = formatUpdatedAt(head && head.updatedAt);
+    return '<details class="card" data-group-id="' + esc(gid) + '"'
+      + (open.has(gid) ? ' open' : '') + '>'
+      + '<summary class="plan-feature-head">'
+      +   '<span class="mono">' + esc(label) + '</span> '
+      +   esc(title) + ' '
+      +   stageChip(head && head.status) + ' ' + stateChip(head)
+      +   ' <span class="muted">' + esc(when.text) + '</span>'
+      +   (group.missions.length > 1 ? ' <span class="muted">' + esc(String(group.missions.length) + ' 次') + '</span>' : '')
+      + '</summary>'
+      + missionHistoryHtml(group.missions)
+      + '</details>';
+  }).join('');
+}
+
+function tabButton(id, label, current) {
+  const on = id === current;
+  return '<button type="button" class="chip ' + (on ? 'running' : 'queued') + '" data-tab="' + esc(id) + '"'
+    + (on ? ' data-active="1"' : '') + '>' + esc(label) + '</button>';
+}
+
+function filterButton(id, label, current) {
+  const on = id === current;
+  return '<button type="button" class="chip ' + (on ? 'running' : 'queued') + '" data-filter="' + esc(id) + '"'
+    + (on ? ' data-active="1"' : '') + '>' + esc(label) + '</button>';
+}
+
+/**
+ * 项目详情下半：默认方案运行标签，可切到按票分组的全部任务。
+ * tab 缺省是 plan-runs——合同要的就是进来先看方案，而不是平铺 Mission。
+ */
+export function projectWorkbenchHtml(opts) {
+  const o = opts || {};
+  const tab = o.tab === 'missions' ? 'missions' : 'plan-runs';
+  const filter = o.filter || '';
+  const tabs = '<div class="task-chips" data-project-tabs>'
+    + tabButton('plan-runs', '方案运行', tab)
+    + tabButton('missions', '全部任务', tab)
+    + '</div>';
+  if (tab === 'missions') {
+    const filters = '<div class="task-chips" data-mission-filters>'
+      + filterButton('active', '进行中', filter)
+      + filterButton('needs', '需处理', filter)
+      + filterButton('completed', '已完成', filter)
+      + filterButton('blocked', '已中止', filter)
+      + '</div>';
+    return '<div data-workbench>' + tabs + filters + missionGroupsHtml(o.missions, filter, o.openGroups, o.planRuns) + '</div>';
+  }
+  const error = o.planRunsError
+    ? '<div class="empty">读不到方案运行：' + esc(o.planRunsError) + '</div>'
+    : '';
+  const table = o.planRunsLoading && !(o.planRuns && o.planRuns.length)
+    ? '<div class="card"><div class="empty">正在读方案运行…</div></div>'
+    : planRunsTableHtml(o.planRuns, o.missions);
+  return '<div data-workbench>' + tabs + error + table + '</div>';
+}
+
 export function taskTableHtml(rows) {
   if (!rows || rows.length === 0) {
     return '<div class="card"><div class="empty">这个项目还没有任务。新建一条之后这里会一行行出现。</div></div>';
@@ -233,6 +485,11 @@ let data = null;
 let selected = '';
 /** 每个项目的仓库/分支要另拉一次 Mission 详情，拉过就不再拉。 */
 const workspaceCache = new Map();
+/**
+ * 详情下半的浏览态。不进 hash：合同没要求标签可分享，写进地址会让「项目页」
+ * 和「方案运行页」两条路由抢 #/plan-runs。切项目仍保留，避免扫任务时每点一次左栏就弹回默认标签。
+ */
+const workbench = { tab: 'plan-runs', filter: '', openGroups: new Set(), planRunsError: '', loading: false };
 /**
  * 导航世代。离开项目页或重建骨架时加一，让还在飞的响应把 data 写进去、
  * 把详情盖掉——人已经在看别的页了，那次结果不该再碰屏幕。
@@ -317,15 +574,113 @@ async function renderDetail() {
   // 这一代导航上的那个，否则先发出的请求后回来，会把新画面盖成旧项目的。
   if (started !== epoch || selected !== projectId) return;
   if (!mounted || !mounted.list.isConnected) return;
-  const rows = data.missions.filter((m) => m.projectId === projectId);
-  box.innerHTML = detailCardHtml(project, workspace) + taskTableHtml(rows);
-  // 行 → 任务详情页。监听写在 DOM 段而不是内联 onclick：内联的话这里能测到形状、
-  // 测不到行为，而行为（点了去哪）才是要紧的那半。
-  for (const tr of box.querySelectorAll('tr[data-mission-id]')) {
-    tr.onclick = () => {
-      location.hash = '#/missions/' + encodeURIComponent(tr.dataset.missionId);
+  box.innerHTML = detailCardHtml(project, workspace) + '<div id="proj-workbench"></div>';
+  paintWorkbench();
+  void loadPlanRuns(projectId);
+}
+
+function projectRows() {
+  return ((data && data.missions) || []).filter((m) => m.projectId === selected);
+}
+
+function projectPlanRuns() {
+  const by = data && data.planRunsByProject;
+  return (by && by[selected]) || [];
+}
+
+function paintWorkbench() {
+  if (!mounted || !mounted.detail.isConnected) return;
+  let host = mounted.detail.querySelector('#proj-workbench');
+  if (!host) {
+    // 详情卡刚写进去时一定有这个节点；没有就是已经换成错误空态，别往卡片外塞表。
+    return;
+  }
+  const html = projectWorkbenchHtml({
+    tab: workbench.tab,
+    filter: workbench.filter,
+    planRuns: projectPlanRuns(),
+    missions: projectRows(),
+    openGroups: workbench.openGroups,
+    planRunsError: workbench.planRunsError,
+    planRunsLoading: workbench.loading && !projectPlanRuns().length,
+  });
+  host.outerHTML = html;
+  host = mounted.detail.querySelector('[data-workbench]');
+  if (host) host.id = 'proj-workbench';
+  bindWorkbench(mounted.detail);
+}
+
+function bindWorkbench(box) {
+  for (const el of box.querySelectorAll('[data-tab]')) {
+    el.onclick = () => {
+      const tab = el.dataset.tab === 'missions' ? 'missions' : 'plan-runs';
+      if (tab === workbench.tab) return;
+      workbench.tab = tab;
+      paintWorkbench();
     };
   }
+  for (const el of box.querySelectorAll('[data-filter]')) {
+    el.onclick = () => {
+      const next = el.dataset.filter || '';
+      workbench.filter = workbench.filter === next ? '' : next;
+      paintWorkbench();
+    };
+  }
+  for (const tr of box.querySelectorAll('tr[data-plan-run-id]')) {
+    tr.onclick = (ev) => {
+      if (ev && ev.target && ev.target.closest && ev.target.closest('a')) return;
+      location.hash = '#/plan-runs/' + encodeURIComponent(tr.dataset.planRunId);
+    };
+  }
+  // 行 → 任务详情页。监听写在 DOM 段而不是内联 onclick：内联的话这里能测到形状、
+  // 测不到行为，而行为（点了去哪）才是要紧的那半。
+  for (const el of box.querySelectorAll('[data-mission-id]')) {
+    el.onclick = (ev) => {
+      if (ev && ev.target && ev.target.closest && ev.target.closest('a')) return;
+      const id = el.dataset.missionId;
+      if (!id) return;
+      location.hash = '#/missions/' + encodeURIComponent(id);
+    };
+  }
+  for (const d of box.querySelectorAll('details[data-group-id]')) {
+    d.ontoggle = () => {
+      const id = d.dataset.groupId;
+      if (!id) return;
+      if (d.open) workbench.openGroups.add(id);
+      else workbench.openGroups.delete(id);
+    };
+  }
+}
+
+let planRunsInflight = null;
+let planRunsInflightKey = '';
+
+function loadPlanRuns(projectId) {
+  const started = epoch;
+  const key = started + ':' + projectId;
+  if (planRunsInflight && planRunsInflightKey === key) return planRunsInflight;
+  planRunsInflightKey = key;
+  workbench.loading = true;
+  workbench.planRunsError = '';
+  planRunsInflight = get('/api/plan-runs?project=' + encodeURIComponent(projectId))
+    .then((runs) => {
+      if (started !== epoch || selected !== projectId) return;
+      if (!data) return;
+      data.planRunsByProject = { ...(data.planRunsByProject || {}), [projectId]: Array.isArray(runs) ? runs : [] };
+      workbench.planRunsError = '';
+      workbench.loading = false;
+      paintWorkbench();
+    })
+    .catch((err) => {
+      if (started !== epoch || selected !== projectId) return;
+      workbench.loading = false;
+      workbench.planRunsError = err && err.message ? err.message : String(err);
+      paintWorkbench();
+    })
+    .finally(() => {
+      if (planRunsInflightKey === key) planRunsInflight = null;
+    });
+  return planRunsInflight;
 }
 
 function paint(error) {
@@ -360,7 +715,8 @@ function load() {
   inflight = Promise.all([get('/api/projects'), get('/api/missions')])
     .then(([projects, missions]) => {
       if (started !== epoch) return null;
-      data = { projects, missions };
+      // 方案运行按项目另拉，不能在刷两个列表时把缓存清掉——否则每 5 秒表格会闪成空的。
+      data = { projects, missions, planRunsByProject: (data && data.planRunsByProject) || {} };
       return null;
     })
     .catch((err) => (started !== epoch ? null : err))
@@ -454,6 +810,11 @@ export async function renderProjectsPage(container, projectId) {
       detail: container.querySelector('#proj-detail'),
     };
     startPolling();
+  }
+  if (selected !== projectId) {
+    // 展开态是按组 id 记的；换项目不清会把上个项目的 feature:F1 误开到这个项目的 F1。
+    workbench.openGroups = new Set();
+    workbench.planRunsError = '';
   }
   selected = projectId;
 

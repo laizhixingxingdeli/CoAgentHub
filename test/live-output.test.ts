@@ -17,7 +17,14 @@ import type { Server } from 'node:http';
 
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
-import { InMemoryLiveOutput, KEEP_TAIL_ON_FINISH, NoLiveOutput } from '../src/application/live.ts';
+import {
+  InMemoryLiveOutput,
+  InMemoryPlanRunLiveOutput,
+  KEEP_TAIL_ON_FINISH,
+  NoLiveOutput,
+  PLAN_LIVE_EMPTY_REASON,
+  PLAN_LIVE_LIMIT,
+} from '../src/application/live.ts';
 import { PgLiveOutput, PgStateStore } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
@@ -311,5 +318,136 @@ describe('文件版 buildPersistentPlatform 接通 live',
         assert.match(runMission, /const live = 'live' in built \? built\.live : undefined/);
       },
     );
+  },
+);
+
+async function servePlanLive(planLive?: InMemoryPlanRunLiveOutput) {
+  const clock = new FixedClock();
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const platform = new Platform({
+    projects: new InMemoryProjectRepository(),
+    deliveries,
+    workspace: new InPlaceWorkspaceManager(),
+    activity: new InMemoryActivityLog(clock),
+    clock,
+    ids,
+  });
+  const server = createApi({
+    platform,
+    tokens: new RunTokenRegistry(),
+    deliveries,
+    ...(planLive ? { planLive } : {}),
+  });
+  await listenLoopback(server, 0);
+  servers.push(server);
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+describe('托管方案实时输出：游标语义',
+  () => {
+    test('只取游标之后的，不重复也不遗漏', () => {
+      const live = new InMemoryPlanRunLiveOutput();
+      live.append({ runId: 'R1', channel: 'stdout', line: '第一行' });
+      live.append({ runId: 'R1', channel: 'stderr', line: '第二行' });
+      live.append({ runId: 'R1', channel: 'stdout', line: '第三行' });
+
+      const first = live.since('R1');
+      assert.deepEqual(first.map((c) => c.line), ['第一行', '第二行', '第三行']);
+      assert.deepEqual(first.map((c) => c.channel), ['stdout', 'stderr', 'stdout']);
+      assert.equal(live.since('R1', first.at(-1)?.seq).length, 0);
+
+      live.append({ runId: 'R1', channel: 'stdout', line: '第四行' });
+      assert.deepEqual(
+        live.since('R1', first.at(-1)?.seq).map((c) => c.line),
+        ['第四行'],
+      );
+    });
+
+    test('按 runId 隔离 —— 别的方案输出不能串进来', () => {
+      const live = new InMemoryPlanRunLiveOutput();
+      live.append({ runId: 'R1', channel: 'stdout', line: 'R1 的' });
+      live.append({ runId: 'R2', channel: 'stdout', line: 'R2 的' });
+      assert.deepEqual(live.since('R1').map((c) => c.line), ['R1 的']);
+      assert.equal(live.hosted('R1'), true);
+      assert.equal(live.hosted('R-missing'), false);
+    });
+
+    test('有上限 —— 与任务 live 同量级，这是用来看的不是存的', () => {
+      const live = new InMemoryPlanRunLiveOutput(10);
+      for (let i = 0; i < 50; i += 1) {
+        live.append({ runId: 'R1', channel: 'stdout', line: `行 ${i}` });
+      }
+      const all = live.since('R1');
+      assert.equal(all.length, 10);
+      assert.equal(all.at(-1)?.line, '行 49');
+      assert.equal(PLAN_LIVE_LIMIT, 5_000);
+    });
+  },
+);
+
+describe('托管方案实时输出：HTTP 面',
+  () => {
+    test('带游标取；没有新内容时游标原样回来；跨方案不串', async () => {
+      const live = new InMemoryPlanRunLiveOutput();
+      const base = await servePlanLive(live);
+      live.append({ runId: 'R1', channel: 'stdout', line: 'hello' });
+      live.append({ runId: 'R1', channel: 'stderr', line: 'warn' });
+      live.append({ runId: 'R2', channel: 'stdout', line: 'other' });
+
+      const first = (await (await fetch(`${base}/api/plan-runs/R1/live?cursor=0`)).json()) as {
+        cursor: number;
+        chunks: { seq: number; at: string; channel: string; line: string }[];
+        reason?: string;
+      };
+      assert.equal(first.chunks.length, 2);
+      assert.deepEqual(first.chunks.map((c) => c.channel), ['stdout', 'stderr']);
+      assert.deepEqual(first.chunks.map((c) => c.line), ['hello', 'warn']);
+      assert.equal('runId' in first.chunks[0]!, false);
+      assert.equal(first.reason, undefined);
+
+      const second = (await (
+        await fetch(`${base}/api/plan-runs/R1/live?cursor=${first.cursor}`)
+      ).json()) as { cursor: number; chunks: unknown[]; reason?: string };
+      assert.deepEqual(second.chunks, []);
+      assert.equal(second.cursor, first.cursor);
+      assert.equal(second.reason, undefined);
+
+      const other = (await (await fetch(`${base}/api/plan-runs/R2/live`)).json()) as {
+        chunks: { line: string }[];
+      };
+      assert.deepEqual(other.chunks.map((c) => c.line), ['other']);
+    });
+
+    test('没装托管缓冲时是空的且说明原因，不是 404', async () => {
+      const base = await servePlanLive();
+      const res = await fetch(`${base}/api/plan-runs/R-any/live`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { cursor: number; chunks: unknown[]; reason?: string };
+      assert.deepEqual(body.chunks, []);
+      assert.equal(body.reason, PLAN_LIVE_EMPTY_REASON);
+    });
+
+    test('记录存在但本进程没写过：空缓冲仍带 reason', async () => {
+      const live = new InMemoryPlanRunLiveOutput();
+      const base = await servePlanLive(live);
+      const res = await fetch(`${base}/api/plan-runs/R-disk-only/live?cursor=0`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { chunks: unknown[]; reason?: string };
+      assert.deepEqual(body.chunks, []);
+      assert.equal(body.reason, PLAN_LIVE_EMPTY_REASON);
+    });
+
+    test('非法 id 404，不把路径段回给客户端', async () => {
+      const live = new InMemoryPlanRunLiveOutput();
+      live.append({ runId: 'R-safe', channel: 'stdout', line: 'secret-line' });
+      const base = await servePlanLive(live);
+      const traversal = await fetch(`${base}/api/plan-runs/${encodeURIComponent('../secret')}/live`);
+      assert.equal(traversal.status, 404);
+      const payload = (await traversal.json()) as { message?: string };
+      assert.equal(String(payload.message ?? '').includes('secret'), false);
+      const mixed = await fetch(`${base}/api/plan-runs/R-safe%2F../R-safe/live`);
+      assert.notEqual(mixed.status, 200);
+    });
   },
 );

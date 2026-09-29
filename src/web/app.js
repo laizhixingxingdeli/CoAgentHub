@@ -13,6 +13,7 @@
 import { renderProjectsPage } from './projects.js';
 import { renderTaskPage } from './task.js';
 import { renderPoolPage } from './pool.js';
+import { renderPlanRunListPage, renderPlanRunPage } from './plan-run.js';
 
 /* ===== 主题 =====
  * 暗色令牌挂在 :root[data-theme="dark"] 上（与观测面同一套写法），所以这里
@@ -66,6 +67,19 @@ function parseRoute(hash) {
   // 不再认原来那个占位地址（resources）：两个地址指同一个页面，而人一旦把旧
   // 地址发出去，就得永远维护它。未知 hash 统一回 #/projects。
   if (raw === '/pool') return { name: 'pool' };
+  // 没 id 的 `#/plan-runs` 是列表（侧栏入口）；带 id 才是详情。
+  // 空的 `#/plan-runs/` 不匹配，落到未知再回项目页——它不指向任何一次运行。
+  if (raw === '/plan-runs') return { name: 'plan-runs' };
+  const planHit = /^\/plan-runs\/(.+)$/.exec(raw);
+  if (planHit) {
+    let planRunId = planHit[1];
+    try {
+      planRunId = decodeURIComponent(planRunId);
+    } catch {
+      // 与项目 id 同一策略。
+    }
+    return { name: 'plan-run', planRunId };
+  }
   return { name: 'unknown' };
 }
 
@@ -91,7 +105,9 @@ const link = (text, href) => {
 
 function renderChrome(route) {
   // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
-  const active = route.name === 'pool' ? 'pool' : 'projects';
+  const active = route.name === 'pool' ? 'pool'
+    : (route.name === 'plan-runs' || route.name === 'plan-run') ? 'plan-runs'
+    : 'projects';
   for (const el of navItems) {
     if (el.dataset.route === active) el.dataset.active = '1';
     else el.removeAttribute('data-active');
@@ -100,6 +116,19 @@ function renderChrome(route) {
   crumbs.replaceChildren();
   if (route.name === 'pool') {
     crumbs.appendChild(node('资源池', 'here'));
+    return;
+  }
+  if (route.name === 'plan-runs') {
+    crumbs.appendChild(node('方案运行', 'here'));
+    return;
+  }
+  if (route.name === 'plan-run') {
+    // 详情页拿到快照后还是这个面包屑：运行 id 已经在地址栏里，不必等接口。
+    crumbs.append(
+      link('方案运行', '#/plan-runs'),
+      node('/', 'sep'),
+      node(route.planRunId, 'here'),
+    );
     return;
   }
   if (route.name === 'mission') {
@@ -138,6 +167,16 @@ function render() {
 
   if (route.name === 'pool') {
     void renderPoolPage(view);
+    return;
+  }
+
+  if (route.name === 'plan-runs') {
+    void renderPlanRunListPage(view);
+    return;
+  }
+
+  if (route.name === 'plan-run') {
+    void renderPlanRunPage(view, route.planRunId);
     return;
   }
 

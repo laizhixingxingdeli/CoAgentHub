@@ -1191,6 +1191,162 @@ describe('面包屑', () => {
     // 读不到 view 时中间那段干脆没有，而不是一个指向不存在项目的 —。
     assert.deepEqual(crumbParts('', 'M-1').map((p: any) => p.text), ['项目', '任务 M-1']);
   });
+
+  test('方案运行来源多一段可点的方案运行，普通任务仍是三段', async () => {
+    const { crumbParts } = await import('../src/web/task.js');
+    const fromPlan = crumbParts('proj-a', 'R1-F1', {
+      clientType: 'plan-run',
+      conversationRef: 'plan-run:R1',
+    });
+    assert.deepEqual(fromPlan, [
+      { text: '项目', href: '#/projects' },
+      { text: 'proj-a', href: '#/projects/proj-a' },
+      { text: '方案运行', href: '#/plan-runs/R1' },
+      { text: '任务 R1-F1', here: true },
+    ]);
+    const odd = crumbParts('proj-a', 'M-1', {
+      clientType: 'plan-run',
+      conversationRef: 'plan-run:a/b c',
+    });
+    assert.equal(odd[2].href, '#/plan-runs/' + encodeURIComponent('a/b c'));
+    // clientType 或 conversationRef 对不上就当普通任务：猜一段链到不存在的运行更糟。
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'cli', conversationRef: 'plan-run:R1' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'plan-run', conversationRef: 'R1' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'plan-run', conversationRef: 'plan-run:' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+  });
+});
+
+/* ===================== 项目页：方案标签与按票分组 ===================== */
+
+describe('项目页方案运行标签与按票分组', () => {
+  const loaded = import('../src/web/projects.js');
+
+  test('默认方案标签；按开跑时间倒序；票/升级/真实花费；坏记录不冒充一行方案', async () => {
+    const { projectWorkbenchHtml, planRunsTableHtml } = await loaded;
+    const workbench = projectWorkbenchHtml({
+      missions: [{ missionId: 'M1', status: 'executing' }],
+      planRuns: [],
+    });
+    assert.match(workbench, /data-tab="plan-runs"[^>]*data-active="1"|data-active="1"[^>]*data-tab="plan-runs"/);
+    assert.match(workbench, /全部任务/);
+    assert.equal(workbench.includes('data-tab="missions" data-active="1"'), false);
+
+    const runs = [
+      {
+        id: 'R-old',
+        planId: 'PLAN-old',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        features: [{ featureId: 'F1', title: '旧', status: 'merged', missionIds: ['R-old-F1'] }],
+        escalationCount: 2,
+      },
+      {
+        id: 'R-new',
+        planId: 'PLAN-new',
+        startedAt: '2026-09-29T08:00:00.000Z',
+        features: [
+          { featureId: 'A', status: 'running', missionIds: ['R-new-A'] },
+          { featureId: 'B', status: 'pending', missionIds: [] },
+        ],
+        escalationCount: 0,
+      },
+      { id: 'R-bad', error: '方案运行记录不是合法 JSON' },
+    ];
+    const missions = [
+      { missionId: 'R-old-F1', planRunId: 'R-old', usage: { cost: 1.25 } },
+      { missionId: 'R-new-A', planRunId: 'R-new', usage: { total: 9 } },
+    ];
+    const html = planRunsTableHtml(runs, missions);
+    const pos = (id: string) => {
+      const i = html.indexOf('data-plan-run-id="' + id + '"');
+      assert.ok(i >= 0, `缺行 ${id}: ${html}`);
+      return i;
+    };
+    assert.ok(pos('R-new') < pos('R-old'), html);
+    assert.ok(html.indexOf('data-plan-run-error="R-bad"') > pos('R-old'), '坏记录应沉底');
+    assert.match(html, /href="#\/plan-runs\/R-new"/);
+    assert.match(html, /2 张票/);
+    assert.match(html, /已合入 1/);
+    assert.ok(html.includes('$1.2500'), html);
+    assert.match(html, /费用未上报/);
+    assert.equal(html.includes('$0.0000'), false, `缺费用不能画成零：${html}`);
+    assert.equal(runs[0]?.id, 'R-old', '不能原地排序调用方的数组');
+    const evil = planRunsTableHtml(
+      [{ id: '<img>', error: '<script>x</script>' }],
+      [],
+    );
+    assert.equal(evil.includes('<img'), false);
+    assert.equal(evil.includes('<script'), false);
+  });
+
+  test('全部任务按 featureId 分组，无票任务保持独立，更新时间倒序，四态筛选', async () => {
+    const { groupMissionsByFeature, filterMissionGroups, missionFilterKey, missionGroupsHtml, projectWorkbenchHtml } =
+      await loaded;
+    const rows = [
+      { missionId: 'solo-new', status: 'executing', updatedAt: '2026-09-29T10:00:00.000Z', intent: '独立新' },
+      { missionId: 'F1-old', featureId: 'F1', status: 'blocked', updatedAt: '2026-09-01T00:00:00.000Z', intent: '旧尝试' },
+      { missionId: 'F1-new', featureId: 'F1', status: 'completed', updatedAt: '2026-09-28T00:00:00.000Z', intent: '新尝试' },
+      { missionId: 'solo-old', status: 'investigating', updatedAt: '2026-08-01T00:00:00.000Z', intent: '独立旧' },
+      { missionId: 'need', featureId: 'N1', status: 'awaiting_review', updatedAt: '2026-09-20T00:00:00.000Z' },
+    ];
+    const groups = groupMissionsByFeature(rows);
+    assert.equal(groups.length, 4);
+    assert.equal(groups[0]?.missions[0]?.missionId, 'solo-new');
+    assert.equal(groups[1]?.featureId, 'F1');
+    assert.deepEqual(groups[1]?.missions.map((m: { missionId: string }) => m.missionId), ['F1-new', 'F1-old']);
+    assert.equal(groups[2]?.featureId, 'N1');
+    assert.equal(groups[3]?.missions[0]?.missionId, 'solo-old');
+    const solos = groups.filter((g: { featureId: string }) => !g.featureId);
+    assert.equal(solos.length, 2, '两个无票任务不能揉成一组');
+    assert.equal(rows[0]?.missionId, 'solo-new', '不能原地改入参');
+
+    assert.equal(missionFilterKey({ status: 'executing' }), 'active');
+    assert.equal(missionFilterKey({ status: 'awaiting_review' }), 'needs');
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'escalated' }), 'needs');
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'project_busy' }), 'active');
+    assert.equal(missionFilterKey({ status: 'completed' }), 'completed');
+    assert.equal(missionFilterKey({ status: 'blocked' }), 'blocked');
+
+    const completed = filterMissionGroups(groups, 'completed');
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0]?.featureId, 'F1');
+    const active = filterMissionGroups(groups, 'active');
+    assert.deepEqual(active.map((g: { missions: { missionId: string }[] }) => g.missions[0].missionId), ['solo-new', 'solo-old']);
+    const needs = filterMissionGroups(groups, 'needs');
+    assert.equal(needs[0]?.featureId, 'N1');
+
+    const html = missionGroupsHtml(rows, '', [], []);
+    assert.match(html, /data-group-id="feature:F1"/);
+    assert.match(html, /href="#\/missions\/F1-old"/);
+    assert.match(html, /href="#\/missions\/solo-new"/);
+    assert.ok(html.indexOf('solo-new') < html.indexOf('F1-new'), html);
+
+    const filtered = projectWorkbenchHtml({ tab: 'missions', filter: 'blocked', missions: rows, planRuns: [] });
+    assert.match(filtered, /没有符合筛选的任务/);
+    const missionsTab = projectWorkbenchHtml({ tab: 'missions', missions: rows, planRuns: [] });
+    assert.match(missionsTab, /进行中/);
+    assert.match(missionsTab, /需处理/);
+    assert.match(missionsTab, /已完成/);
+    assert.match(missionsTab, /已中止/);
+    assert.match(missionsTab, /data-tab="missions"[^>]*data-active="1"|data-active="1"[^>]*data-tab="missions"/);
+
+    const evil = missionGroupsHtml(
+      [{ missionId: '<img>', featureId: '<x>', status: 'executing', intent: '<script>' }],
+      '',
+      [],
+      [],
+    );
+    assert.equal(evil.includes('<img'), false);
+    assert.equal(evil.includes('<script'), false);
+  });
 });
 
 /* ===================== 3. 真读模型喂真渲染函数 ===================== */

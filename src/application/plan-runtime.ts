@@ -15,7 +15,7 @@ import {
   type AgentPoolRepository,
 } from './agent-pool.ts';
 import { InMemoryQueryRunRepository, SequentialIds, SystemClock } from './in-memory.ts';
-import type { LiveOutput } from './live.ts';
+import type { LiveOutput, PlanRunLiveOutput } from './live.ts';
 import {
   assertHostedHeldState,
   MissionRunner,
@@ -239,6 +239,16 @@ export interface HostedPlanContext {
    * startServer 必须注入；不能从 body.state 回填。
    */
   readonly heldState?: HostedHeldState;
+  /**
+   * 托管 CLI 行的内存游标。缺省不写——直调 / 测试不必为观测面装配缓冲。
+   * 只在 runId 确定之后包装 emit，预检失败的行不能挂到一个还不存在的 id 上。
+   */
+  readonly planLive?: PlanRunLiveOutput;
+  /**
+   * 成功托管并算出 runId 之后登记本次 runDir。自定义 --run-dir 才能进列表/详情；
+   * 预检失败或独立 CLI 的任意目录不要从这里扩进去。
+   */
+  readonly registerPlanRunDir?: (runDir: string) => void;
 }
 
 function hostedIssuer(built: HostedPlanBuilt): RunTokenIssuer {
@@ -494,6 +504,11 @@ export async function runHostedPlan(
   const started = new Date();
   const runId = `${parsed.plan.planId}-${stamp(started)}`;
   const store = new FilePlanRunStore(join(parsed.runDir, `${runId}.json`));
+  ctx.registerPlanRunDir?.(parsed.runDir);
+  const emitLive: HostedPlanEmit = (channel, line) => {
+    emit(channel, line);
+    ctx.planLive?.append({ runId, channel, line });
+  };
 
   const runtime =
     ctx.runtime ??
@@ -523,10 +538,10 @@ export async function runHostedPlan(
           ...(ctx.env ? { env: ctx.env } : {}),
         }));
 
-  emit('stdout', `方案 ${parsed.plan.planId} 开跑：${remaining.map((f) => f.id).join(' → ')}`);
-  emit('stdout', `集成分支 ${parsed.plan.integrationBranch}，项目仓 ${parsed.cwd}`);
-  emit('stdout', `方案运行记录：${store.path}`);
-  emit(
+  emitLive('stdout', `方案 ${parsed.plan.planId} 开跑：${remaining.map((f) => f.id).join(' → ')}`);
+  emitLive('stdout', `集成分支 ${parsed.plan.integrationBranch}，项目仓 ${parsed.cwd}`);
+  emitLive('stdout', `方案运行记录：${store.path}`);
+  emitLive(
     'stdout',
     `检视者 ${parsed.plan.reviewer} 每 ${Math.round(parsed.plan.stopConditions.escalationTimeoutMs / 60_000)} 分钟醒一次：` +
       `node src/l3.ts plan --run "${store.path}"`,
@@ -545,7 +560,7 @@ export async function runHostedPlan(
 
   const runner = new MissionRunner({
     platform,
-    live: wrapLiveForEmit(ctx.built.live, emit),
+    live: wrapLiveForEmit(ctx.built.live, emitLive),
     tokens,
     baseUrl: ctx.baseUrl,
     workspace: ctx.workspace,
@@ -572,22 +587,22 @@ export async function runHostedPlan(
     },
     now: () => new Date().toISOString(),
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
-    log: (line) => emit('stdout', `[${new Date().toLocaleTimeString()}] ${line}`),
+    log: (line) => emitLive('stdout', `[${new Date().toLocaleTimeString()}] ${line}`),
     runId,
     startedAt: started.toISOString(),
     checkRepo: () => preflightPlanRepo(parsed.cwd, parsed.plan.integrationBranch),
   });
 
   const run = store.read();
-  emit('stdout', '');
-  emit('stdout', `${'='.repeat(72)}`);
-  emit('stdout', `方案 ${parsed.plan.planId} 停了：${stop.reason} —— ${stop.detail}`);
-  emit('stdout', '='.repeat(72));
+  emitLive('stdout', '');
+  emitLive('stdout', `${'='.repeat(72)}`);
+  emitLive('stdout', `方案 ${parsed.plan.planId} 停了：${stop.reason} —— ${stop.detail}`);
+  emitLive('stdout', '='.repeat(72));
   if (run) {
-    for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) emit('stdout', text);
+    for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) emitLive('stdout', text);
   }
-  emit('stdout', '');
-  emit('stdout', `早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
+  emitLive('stdout', '');
+  emitLive('stdout', `早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
   await persist();
   return 0;
 }

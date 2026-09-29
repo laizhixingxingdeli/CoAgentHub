@@ -35,6 +35,8 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
+import { PlanRun } from '../src/application/plan-run.ts';
+import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import {
   FileActivityLog,
@@ -1638,6 +1640,7 @@ async function openApi(options?: {
   identity?: { instanceId: string; stateId: string };
   runMission?: HostedRunHandler;
   runPlan?: HostedRunHandler;
+  planRunDirs?: () => readonly string[];
 }): Promise<{
   server: Server;
   base: string;
@@ -1663,6 +1666,7 @@ async function openApi(options?: {
     ...(options?.identity ? { identity: options.identity } : {}),
     ...(options?.runMission ? { runMission: options.runMission } : {}),
     ...(options?.runPlan ? { runPlan: options.runPlan } : {}),
+    ...(options?.planRunDirs ? { planRunDirs: options.planRunDirs } : {}),
   });
   await listenLoopback(server, 0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -2692,5 +2696,199 @@ describe('轻量报卡升级、答复重派与执行者问答视图', () => {
     assert.equal(after.workItems.find((item) => item.id === second.workItemId)?.status, 'dispatched');
     const stdEvents = await std.activity.list('M-std');
     assert.equal(stdEvents.filter((event) => event.kind === 'work_item.redispatched').length, 0);
+  });
+});
+
+describe('方案运行只读 API 与 Mission 来源投影', () => {
+  const T0 = '2026-09-23T14:00:00.000Z';
+  const MIN = 60_000;
+  const at = (minutes: number) => new Date(Date.parse(T0) + minutes * MIN).toISOString();
+  const STOP = {
+    unresolvedEscalations: 5,
+    wallClockMs: 8 * 60 * MIN,
+    escalationTimeoutMs: 20 * MIN,
+  };
+
+  test('列表摘要倒序、project 筛选、坏文件不拖垮；详情含升级决定；恶意 id 404', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-plan-runs-'));
+    try {
+      const older = new FilePlanRunStore(join(dir, 'R-old.json'));
+      await older.create(
+        PlanRun.start({
+          id: 'R-old',
+          planId: 'PLAN-old',
+          projectId: 'p-a',
+          integrationBranch: 'auto/a',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F1'],
+          titles: { F1: '旧功能' },
+          startedAt: at(0),
+        }),
+      );
+      await older.update((run) => {
+        run.startFeature('F1', 'R-old-F1');
+        run.openEscalation(
+          { featureId: 'F1', missionId: 'R-old-F1', failure: '红', question: '跳过还是重跑？' },
+          at(10),
+        );
+      });
+      await older.update((run) => {
+        run.choose(
+          'E-1',
+          { action: 'skip', reason: '今晚不值得', decidedBy: 'claude' },
+          at(12),
+        );
+      });
+
+      const newer = new FilePlanRunStore(join(dir, 'R-new.json'));
+      await newer.create(
+        PlanRun.start({
+          id: 'R-new',
+          planId: 'PLAN-new',
+          projectId: 'p-b',
+          integrationBranch: 'auto/b',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F9'],
+          startedAt: at(40),
+        }),
+      );
+      writeFileSync(join(dir, 'R-bad.json'), '{not-json', 'utf8');
+
+      const { server, base } = await openApi({ planRunDirs: () => [dir] });
+      try {
+        const listed = await request(base, '/api/plan-runs');
+        assert.equal(listed.status, 200);
+        const rows = listed.json as unknown as Array<Record<string, unknown>>;
+        assert.ok(Array.isArray(rows));
+        assert.equal(rows[0]?.id, 'R-new');
+        assert.equal(rows[1]?.id, 'R-old');
+        assert.equal(rows[2]?.id, 'R-bad');
+        assert.equal(typeof rows[2]?.error, 'string');
+        assert.equal(String(rows[2]?.error).includes(dir), false);
+        assert.equal(rows[1]?.planId, 'PLAN-old');
+        assert.equal(rows[1]?.projectId, 'p-a');
+        assert.equal(rows[1]?.integrationBranch, 'auto/a');
+        assert.equal(rows[1]?.startedAt, at(0));
+        assert.equal(rows[1]?.escalationCount, 1);
+        const features = rows[1]?.features as Array<Record<string, unknown>>;
+        assert.equal(features[0]?.featureId, 'F1');
+        assert.equal(features[0]?.title, '旧功能');
+        assert.equal(features[0]?.status, 'skipped');
+
+        const filtered = await request(base, '/api/plan-runs?project=p-a');
+        assert.equal(filtered.status, 200);
+        const filteredRows = filtered.json as unknown as Array<Record<string, unknown>>;
+        assert.ok(filteredRows.some((row) => row.id === 'R-old' && row.projectId === 'p-a'));
+        assert.equal(filteredRows.some((row) => row.id === 'R-new' && !row.error), false);
+        assert.ok(filteredRows.some((row) => row.id === 'R-bad' && row.error));
+
+        const detail = await request(base, '/api/plan-runs/R-old');
+        assert.equal(detail.status, 200);
+        const snap = detail.json as {
+          id: string;
+          escalations: Array<Record<string, unknown>>;
+        };
+        assert.equal(snap.id, 'R-old');
+        assert.equal(snap.escalations.length, 1);
+        assert.equal(snap.escalations[0]?.question, '跳过还是重跑？');
+        const resolution = snap.escalations[0]?.resolution as Record<string, unknown>;
+        assert.equal(resolution.kind, 'decided');
+        assert.equal(resolution.action, 'skip');
+        assert.equal(resolution.reason, '今晚不值得');
+        assert.equal(resolution.decidedBy, 'claude');
+        assert.equal(resolution.decidedAt, at(12));
+
+        const missing = await request(base, '/api/plan-runs/no-such');
+        assert.equal(missing.status, 404);
+        assert.equal(missing.json.error, 'PLAN_RUN_NOT_FOUND');
+
+        const corrupt = await request(base, '/api/plan-runs/R-bad');
+        assert.equal(corrupt.status, 409);
+        assert.equal(corrupt.json.error, 'PLAN_RUN_CORRUPT');
+        assert.equal(String(corrupt.json.message).includes(dir), false);
+
+        const traversal = await request(base, '/api/plan-runs/..%2Fsecret');
+        assert.equal(traversal.status, 404);
+        assert.equal(String(traversal.json.message ?? '').includes('secret'), false);
+        const slash = await request(base, '/api/plan-runs/R-old%2F../R-new');
+        assert.notEqual(slash.status, 200);
+      } finally {
+        await closeServer(server);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('plan-run Mission 带可证实的 planRunId/featureId，普通行其它字段不变', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-plan-origin-'));
+    try {
+      const store = new FilePlanRunStore(join(dir, 'R1.json'));
+      await store.create(
+        PlanRun.start({
+          id: 'R1',
+          planId: 'PLAN-x',
+          projectId: 'P-origin',
+          integrationBranch: 'auto/x',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F1', 'foo-r2'],
+          titles: { F1: '一', 'foo-r2': '易混' },
+          startedAt: T0,
+        }),
+      );
+      await store.update((run) => {
+        run.startFeature('foo-r2', 'R1-foo-r2');
+      });
+
+      const { server, base } = await openApi({ planRunDirs: () => [dir] });
+      try {
+        const plain = await request(base, '/api/missions', {
+          projectId: 'P-origin',
+          missionId: 'M-plain',
+          contract: CONTRACT,
+        });
+        assert.equal(plain.status, 201, JSON.stringify(plain.json));
+        const fromPlan = await request(base, '/api/missions', {
+          projectId: 'P-origin',
+          missionId: 'R1-foo-r2',
+          contract: CONTRACT,
+          origin: { clientType: 'plan-run', conversationRef: 'plan-run:R1' },
+        });
+        assert.equal(fromPlan.status, 201, JSON.stringify(fromPlan.json));
+
+        const listed = await request(base, '/api/missions');
+        assert.equal(listed.status, 200);
+        const rows = listed.json as unknown as Array<Record<string, unknown>>;
+        const ordinary = rows.find((row) => row.missionId === 'M-plain');
+        const sourced = rows.find((row) => row.missionId === 'R1-foo-r2');
+        assert.ok(ordinary);
+        assert.ok(sourced);
+        assert.equal('planRunId' in ordinary, false);
+        assert.equal('featureId' in ordinary, false);
+        assert.equal(sourced.planRunId, 'R1');
+        assert.equal(sourced.featureId, 'foo-r2');
+
+        const ordinaryKeys = Object.keys(ordinary).sort();
+        const sourcedRest = { ...sourced };
+        delete sourcedRest.planRunId;
+        delete sourcedRest.featureId;
+        assert.deepEqual(Object.keys(sourcedRest).sort(), ordinaryKeys);
+        assert.equal(ordinary.projectId, sourced.projectId);
+        assert.equal(ordinary.status, sourced.status);
+        assert.equal(ordinary.intent, sourced.intent);
+        assert.equal(ordinary.workItems, sourced.workItems);
+        assert.equal(ordinary.accepted, sourced.accepted);
+        assert.equal(ordinary.openEscalations, sourced.openEscalations);
+        assert.equal(ordinary.paused, sourced.paused);
+        assert.equal(ordinary.isMutating, sourced.isMutating);
+      } finally {
+        await closeServer(server);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -11,7 +11,15 @@
 
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { resolve } from 'node:path';
 import { Platform, PlatformRuleError } from '../application/platform.ts';
+import type { MissionSummary } from '../application/platform.ts';
+import {
+  isSafePlanRunId,
+  listPlanRuns,
+  readPlanRunById,
+  type PlanRunListItem,
+} from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
 import type { AgentPoolAddInput, AgentPoolRepository } from '../application/agent-pool.ts';
@@ -20,8 +28,8 @@ import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
 import { listRuntimeModels, type RuntimeCatalog } from '../application/runtime-catalog.ts';
-import { NoLiveOutput } from '../application/live.ts';
-import type { LiveOutput } from '../application/live.ts';
+import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
+import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
@@ -128,6 +136,17 @@ export interface ApiDeps {
    * 和领域时间无关；测试要把有效期拨过 10 分钟而不拨业务时钟。
    */
   now?: () => number;
+  /**
+   * 方案运行记录目录。缺省 `resolve('.coagent-plans')`，给独立 createApi 实例用。
+   * 常驻服务的状态文件旁目录与 hosted `--run-dir` 由装配方注入；这里不猜 main 的路径，
+   * 否则独立实例和测试会去读装配环境的目录。
+   */
+  planRunDirs?: () => readonly string[];
+  /**
+   * 托管方案 CLI 行的内存游标。不注入则 GET live 仍 200，chunks 空并带 reason——
+   * 独立 createApi / 无 hosted 回调的测试不能因此 404 把观测面打崩。
+   */
+  planLive?: PlanRunLiveOutput;
 }
 
 class HttpError extends Error {
@@ -250,8 +269,65 @@ export function drainApi(server: Server): Promise<void> {
   return gate.drain();
 }
 
+/**
+ * 用已读到的 PlanRun.features.missionIds 消歧 featureId。
+ * 不改其它字段；对不上就保持 Platform 按 id 前缀投影的结果。
+ */
+function refineMissionPlanOrigin(rows: MissionSummary[], runs: readonly PlanRunListItem[]): MissionSummary[] {
+  const byId = new Map<string, Extract<PlanRunListItem, { planId: string }>>();
+  for (const item of runs) {
+    if (Object.hasOwn(item, 'error')) continue;
+    byId.set(item.id, item as Extract<PlanRunListItem, { planId: string }>);
+  }
+  return rows.map((row) => {
+    if (row.planRunId === undefined) return row;
+    const run = byId.get(row.planRunId);
+    if (!run) return row;
+    const hits = run.features.filter((feature) => feature.missionIds.includes(row.missionId));
+    if (hits.length !== 1) return row;
+    const featureId = hits[0]?.featureId;
+    if (featureId === undefined || featureId === row.featureId) return row;
+    return { ...row, featureId };
+  });
+}
+
+function publicPlanLiveChunk(chunk: PlanLiveChunk): {
+  readonly seq: number;
+  readonly at: string;
+  readonly channel: PlanLiveChunk['channel'];
+  readonly line: string;
+} {
+  return { seq: chunk.seq, at: chunk.at, channel: chunk.channel, line: chunk.line };
+}
+
+/**
+ * 方案 live 只读体。空必须说明原因：记录文件在、缓冲空（未托管 / 重启）时
+ * 客户端不能把空白终端当成「还没吐第一行」。
+ */
+function planLiveResponse(
+  planLive: PlanRunLiveOutput | undefined,
+  runId: string,
+  cursor: number,
+): { cursor: number; chunks: ReturnType<typeof publicPlanLiveChunk>[]; reason?: string } {
+  const chunks = planLive ? planLive.since(runId, cursor).map(publicPlanLiveChunk) : [];
+  const body: {
+    cursor: number;
+    chunks: ReturnType<typeof publicPlanLiveChunk>[];
+    reason?: string;
+  } = {
+    cursor: chunks.at(-1)?.seq ?? cursor,
+    chunks,
+  };
+  if (chunks.length === 0 && (!planLive || !planLive.hosted(runId))) {
+    body.reason = PLAN_LIVE_EMPTY_REASON;
+  }
+  return body;
+}
+
 export function createApi(deps: ApiDeps): Server {
   const { platform, tokens, deliveries, onMutation, beforeRead, resolveControlPrincipal } = deps;
+  const planRunDirs = deps.planRunDirs ?? (() => [resolve('.coagent-plans')]);
+  const planLive = deps.planLive;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
   const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
   const listModels = deps.listRuntimeModels ?? listRuntimeModels;
@@ -694,9 +770,45 @@ export function createApi(deps: ApiDeps): Server {
       return;
     }
 
+    if (method === 'GET' && path === '/api/plan-runs') {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const project = url.searchParams.get('project');
+      return send(res, 200, listPlanRuns(planRunDirs(), project === null ? undefined : project));
+    }
+
+    const planRunMatch = /^\/api\/plan-runs\/([^/]+)$/.exec(path);
+    if (method === 'GET' && planRunMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const id = planRunMatch[1];
+      const result = readPlanRunById(planRunDirs(), id);
+      if (result.status === 'missing') {
+        throw new HttpError(
+          404,
+          'PLAN_RUN_NOT_FOUND',
+          isSafePlanRunId(id) ? `没有方案运行记录：${id}` : '没有方案运行记录',
+        );
+      }
+      if (result.status === 'corrupt') {
+        throw new HttpError(409, 'PLAN_RUN_CORRUPT', result.error);
+      }
+      return send(res, 200, result.snapshot);
+    }
+
+    const planRunLiveMatch = /^\/api\/plan-runs\/([^/]+)\/live$/.exec(path);
+    if (method === 'GET' && planRunLiveMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const id = planRunLiveMatch[1];
+      if (!isSafePlanRunId(id)) {
+        throw new HttpError(404, 'PLAN_RUN_NOT_FOUND', '没有方案运行记录');
+      }
+      const cursor = Number(url.searchParams.get('cursor') ?? 0);
+      return send(res, 200, planLiveResponse(planLive, id, Number.isFinite(cursor) ? cursor : 0));
+    }
+
     if (method === 'GET' && path === '/api/missions') {
       await requireControl(req, POLICY_ACTION.missionRead);
-      return send(res, 200, await platform.listMissions());
+      const rows = await platform.listMissions();
+      return send(res, 200, refineMissionPlanOrigin(rows, listPlanRuns(planRunDirs())));
     }
 
     const activityMatch = /^\/api\/missions\/([^/]+)\/activity$/.exec(path);

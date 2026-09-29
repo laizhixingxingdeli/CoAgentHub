@@ -9,13 +9,18 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PlanRun } from '../src/application/plan-run.ts';
-import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
+import {
+  FilePlanRunStore,
+  isSafePlanRunId,
+  listPlanRuns,
+  readPlanRunById,
+} from '../src/application/plan-run-store.ts';
 import { LockBusyError } from '../src/application/lock.ts';
 import { PlatformRuleError } from '../src/application/platform.ts';
 
@@ -565,3 +570,159 @@ describe('可答复升级单存储',
         assert.equal(readFileSync(path, 'utf8'), before);
       });
   });
+
+const STOP = {
+  unresolvedEscalations: 5,
+  wallClockMs: 8 * 60 * MIN,
+  escalationTimeoutMs: 20 * MIN,
+};
+
+async function seedRun(
+  dir: string,
+  input: {
+    id: string;
+    projectId: string;
+    startedAt: string;
+    titles?: Record<string, string>;
+    halt?: boolean;
+  },
+) {
+  const store = new FilePlanRunStore(join(dir, `${input.id}.json`));
+  await store.create(
+    PlanRun.start({
+      id: input.id,
+      planId: `PLAN-${input.id}`,
+      projectId: input.projectId,
+      integrationBranch: 'auto/x',
+      reviewer: 'claude',
+      stopConditions: STOP,
+      featureIds: ['F1', 'F2'],
+      titles: input.titles ?? { F1: '一', F2: '二' },
+      startedAt: input.startedAt,
+    }),
+  );
+  await store.update((run) => {
+    run.startFeature('F1', `${input.id}-F1`);
+    if (input.halt) run.halt('unsafe', '停', at(1));
+  });
+  return store;
+}
+
+describe('方案运行记录只读枚举', () => {
+  test('安全 id：拒绝路径段与越目录形状', () => {
+    assert.equal(isSafePlanRunId('R1'), true);
+    assert.equal(isSafePlanRunId('PLAN-x-20260929'), true);
+    assert.equal(isSafePlanRunId('../secret'), false);
+    assert.equal(isSafePlanRunId('a/b'), false);
+    assert.equal(isSafePlanRunId('a\\b'), false);
+    assert.equal(isSafePlanRunId(''), false);
+    assert.equal(isSafePlanRunId('.hidden'), false);
+  });
+
+  test('列表按 startedAt 降序，坏文件单独成行，不拖垮其它记录', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-list-'));
+    dirs.push(dir);
+    await seedRun(dir, { id: 'R-old', projectId: 'p-a', startedAt: at(0), halt: true });
+    await seedRun(dir, { id: 'R-new', projectId: 'p-b', startedAt: at(30) });
+    writeFileSync(join(dir, 'R-bad.json'), '{not-json', 'utf8');
+    writeFileSync(join(dir, 'ignore.txt'), 'nope', 'utf8');
+    mkdirSync(join(dir, 'nested'));
+    writeFileSync(join(dir, 'nested', 'R-nested.json'), '{"version":1}', 'utf8');
+
+    const listed = listPlanRuns([dir]);
+    assert.equal(listed[0] && !('error' in listed[0]) && listed[0].id, 'R-new');
+    assert.equal(listed[1] && !('error' in listed[1]) && listed[1].id, 'R-old');
+    const bad = listed.find((item) => 'error' in item && item.id === 'R-bad');
+    assert.ok(bad && 'error' in bad);
+    assert.equal(bad.error, '方案运行记录不是合法 JSON');
+    assert.equal(listed.some((item) => item.id === 'R-nested'), false);
+    assert.equal(listed.some((item) => item.id === 'ignore'), false);
+
+    const older = listed[1];
+    assert.ok(older && !('error' in older));
+    assert.equal(older.planId, 'PLAN-R-old');
+    assert.equal(older.projectId, 'p-a');
+    assert.equal(older.integrationBranch, 'auto/x');
+    assert.equal(older.startedAt, at(0));
+    assert.equal(older.stopped?.reason, 'unsafe');
+    assert.equal(older.escalationCount, 0);
+    assert.deepEqual(
+      older.features.map((f) => ({ featureId: f.featureId, title: f.title, status: f.status, missionIds: f.missionIds })),
+      [
+        { featureId: 'F1', title: '一', status: 'suspended', missionIds: ['R-old-F1'] },
+        { featureId: 'F2', title: '二', status: 'pending', missionIds: [] },
+      ],
+    );
+  });
+
+  test('?project 只筛有效记录；重复 id 先到的目录赢', async () => {
+    const first = mkdtempSync(join(tmpdir(), 'coagent-plan-a-'));
+    const second = mkdtempSync(join(tmpdir(), 'coagent-plan-b-'));
+    dirs.push(first, second);
+    await seedRun(first, { id: 'R1', projectId: 'p-a', startedAt: at(0) });
+    await seedRun(second, { id: 'R1', projectId: 'p-other', startedAt: at(40) });
+    await seedRun(second, { id: 'R2', projectId: 'p-b', startedAt: at(10) });
+    writeFileSync(join(second, 'R-bad.json'), '{', 'utf8');
+
+    const all = listPlanRuns([first, second]);
+    const r1 = all.filter((item) => item.id === 'R1');
+    assert.equal(r1.length, 2);
+    assert.ok(r1[0] && !('error' in r1[0]));
+    assert.equal(r1[0].projectId, 'p-a');
+    assert.ok(r1[1] && 'error' in r1[1]);
+    assert.equal(r1[1].error, '重复的方案运行记录 id');
+
+    const filtered = listPlanRuns([first, second], 'p-a');
+    assert.ok(filtered.some((item) => !('error' in item) && item.id === 'R1' && item.projectId === 'p-a'));
+    assert.equal(filtered.some((item) => !('error' in item) && item.id === 'R2'), false);
+    assert.ok(filtered.some((item) => 'error' in item && item.id === 'R-bad'));
+    assert.ok(filtered.some((item) => 'error' in item && item.id === 'R1'));
+  });
+
+  test('按 id 读完整快照；缺失 missing；损坏不带路径；恶意 id 不越目录', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-read-'));
+    dirs.push(dir);
+    const store = await seedRun(dir, { id: 'R1', projectId: 'p', startedAt: T0 });
+    await store.update((run) => {
+      run.openEscalation(
+        { featureId: 'F1', missionId: 'R1-F1', failure: '红', question: '怎么办？' },
+        at(10),
+      );
+    });
+    const ok = readPlanRunById([dir], 'R1');
+    assert.equal(ok.status, 'ok');
+    if (ok.status !== 'ok') return;
+    assert.equal(ok.snapshot.id, 'R1');
+    assert.equal(ok.snapshot.escalations.length, 1);
+    assert.equal(ok.snapshot.escalations[0]?.question, '怎么办？');
+    assert.equal(ok.snapshot.escalations[0]?.openedAt, at(10));
+    assert.equal(ok.snapshot.features[0]?.missionIds[0], 'R1-F1');
+
+    assert.equal(readPlanRunById([dir], 'nope').status, 'missing');
+    assert.equal(readPlanRunById([dir], '../R1').status, 'missing');
+    assert.equal(readPlanRunById([dir], 'R1/../../etc/passwd').status, 'missing');
+
+    writeFileSync(join(dir, 'R-bad.json'), '{', 'utf8');
+    const bad = readPlanRunById([dir], 'R-bad');
+    assert.equal(bad.status, 'corrupt');
+    if (bad.status === 'corrupt') {
+      assert.equal(bad.error.includes(dir), false);
+      assert.equal(bad.error, '方案运行记录不是合法 JSON');
+    }
+
+    const mismatch = PlanRun.start({
+      id: 'R-real',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/x',
+      reviewer: 'claude',
+      stopConditions: STOP,
+      featureIds: ['F1'],
+      startedAt: T0,
+    });
+    writeFileSync(join(dir, 'R-name.json'), `${JSON.stringify(mismatch.toSnapshot(), null, 2)}\n`, 'utf8');
+    const named = readPlanRunById([dir], 'R-name');
+    assert.equal(named.status, 'corrupt');
+    if (named.status === 'corrupt') assert.equal(named.error, '记录 id 与文件名不一致');
+  });
+});
