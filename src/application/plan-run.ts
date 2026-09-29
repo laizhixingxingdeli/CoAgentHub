@@ -136,6 +136,7 @@ export interface PlanEscalation {
  * - `finished`：功能点都走完了（不等于全合了）；
  * - `unsafe`：集成分支处在不能再往上叠东西的状态（如回滚失败、分支被切走）；
  * - `crashed`：驱动方自己出了未预料的错；
+ * - `service_shutdown`：服务受控关闭；
  * - `escalation_limit`：已开升级单到上限，这一次失败不再开单。
  */
 export type PlanStopReason =
@@ -145,6 +146,7 @@ export type PlanStopReason =
   | 'finished'
   | 'unsafe'
   | 'crashed'
+  | 'service_shutdown'
   | 'escalation_limit';
 
 export interface PlanRunStop {
@@ -225,6 +227,7 @@ const STOP_REASONS: readonly PlanStopReason[] = [
   'finished',
   'unsafe',
   'crashed',
+  'service_shutdown',
   'escalation_limit',
 ];
 
@@ -847,10 +850,10 @@ export class PlanRun {
   }
 
   /**
-   * 驱动方主动停：集成分支不能再往上叠东西了（`unsafe`），或者驱动方自己出了
-   * 未预料的错（`crashed`）。跑着的功能挂起，原因原样交给人。
+   * 驱动方主动停：集成分支不安全（`unsafe`）、驱动方崩溃（`crashed`）或服务受控关闭
+   *（`service_shutdown`）。跑着的功能挂起，原因原样交给人。
    */
-  halt(reason: 'unsafe' | 'crashed', detail: string, at: string): void {
+  halt(reason: 'unsafe' | 'crashed' | 'service_shutdown', detail: string, at: string): void {
     this.#assertRunning();
     const open = this.currentEscalation;
     for (const feature of this.#features) {

@@ -75,6 +75,25 @@ describe('交接面', () => {
       assert.doesNotMatch(output, /plan send-back/);
     }
   });
+  test('服务受控退出的停止记录显示准确标签', () => {
+    const run = PlanRun.start({
+      id: 'R-shutdown',
+      planId: 'PLAN-x',
+      projectId: 'p',
+      integrationBranch: 'auto/plan-x',
+      reviewer: 'claude',
+      stopConditions: { unresolvedEscalations: 5, wallClockMs: 8 * 60 * MIN, escalationTimeoutMs: 20 * MIN },
+      featureIds: ['F1'],
+      startedAt: T0,
+    });
+    run.halt('service_shutdown', '服务正在受控关闭', at(5));
+
+    const [head] = renderPlanHandoff(run, { now: at(6) });
+    assert.match(head, /服务受控退出/);
+    assert.match(head, /服务正在受控关闭/);
+    assert.doesNotMatch(head, /crashed|reviewer_stop/);
+  });
+
   test('已决审批记录摘要包含理由、确认人与合入状态', () => {
     const make = (action: 'approve' | 'send_back', final: 'merged' | 'suspended' | 'running') => {
       const run = PlanRun.start({ id: `R-${action}-${final}`, planId: 'P', projectId: 'p', integrationBranch: 'main', reviewer: 'claude', stopConditions: { unresolvedEscalations: 2, wallClockMs: 100000, escalationTimeoutMs: 1000 }, featureIds: ['F1'], startedAt: T0 });
