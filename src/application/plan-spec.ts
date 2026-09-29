@@ -87,11 +87,16 @@ export const PLAN_ELIGIBILITY_REASONS = Object.freeze({
   missingContract: '本次未纳入：缺目标说明（why）、非空改动范围或逐条验收；请 L3 补冻结契约。',
   unmetDependency: (id: string) => `本次未纳入：依赖 ${id} 尚未在源方案明确标 done；请先完成或修订依赖。`,
   otherRepo: '本次未纳入：条目属其他仓库或仓库归属未能确认；请在目标仓库另行规划。',
+  projectTruth:
+    '本次未纳入：allowedScope 含 .coagent/ 或 VIBE.md；L1 不得改 Project Truth，规格应走交卷 memoryDelta。',
+  unsafeScopePath: '本次未纳入：allowedScope 含绝对路径（盘符或以 / 开头）或 .. 段。',
 });
 
 export interface PlanCandidateSelection {
   readonly candidates: readonly PlanFeatureSpec[];
   readonly exclusions: readonly PlanSourceExclusion[];
+  /** 验收路径启发式：只提示，不当排除理由——否则夜里会把能跑的条目挡掉。 */
+  readonly warnings: readonly string[];
 }
 
 function textList(value: unknown): value is string[] {
@@ -149,6 +154,107 @@ function candidateReason(feature: PlanFeatureSpec): string {
   return feature.status === 'pending' ? PLAN_ELIGIBILITY_REASONS.pendingCandidate : PLAN_ELIGIBILITY_REASONS.legacyCandidate;
 }
 
+function posixPath(value: string): string {
+  return value.replaceAll('\\', '/');
+}
+
+function pathBaseName(value: string): string | undefined {
+  const segments = posixPath(value).split('/').filter((segment) => segment !== '');
+  return segments.at(-1);
+}
+
+/** Project Truth 在 Git 的 .coagent/；VIBE.md 是生成物。写进工单范围会让 L1 一开跑就升级。 */
+function isProjectTruthScope(scope: string): boolean {
+  const path = posixPath(scope);
+  if (path.startsWith('.coagent/')) return true;
+  return pathBaseName(path) === 'VIBE.md';
+}
+
+/**
+ * 绝对路径和 .. 在 worktree 里对不上相对范围；normalize 会把 src/../x 收成 x，
+ * 看起来像仓内文件，所以只按段检查，不先 normalize。
+ */
+function isUnsafeScopePath(scope: string): boolean {
+  const path = posixPath(scope);
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return true;
+  return path.split('/').includes('..');
+}
+
+function forbiddenScopeReason(allowedScope: readonly string[]): string | undefined {
+  if (allowedScope.some(isProjectTruthScope)) return PLAN_ELIGIBILITY_REASONS.projectTruth;
+  if (allowedScope.some(isUnsafeScopePath)) return PLAN_ELIGIBILITY_REASONS.unsafeScopePath;
+  return undefined;
+}
+
+function scopeCovers(allowedScope: readonly string[], filePath: string): boolean {
+  const file = posixPath(filePath);
+  for (const raw of allowedScope) {
+    const scope = posixPath(raw);
+    if (scope.endsWith('/')) {
+      if (file.startsWith(scope)) return true;
+    } else if (file === scope) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 验收里只认这四类仓内目录。用「有斜杠或像文件名」会把 vendor/a.ts、根 a.ts
+ * 当成路径，夜里刷出假警告，把真正漏范围的条目淹没。
+ */
+const IN_REPO_DIR_PREFIXES = Object.freeze(['src/', 'test/', 'docs/', 'scripts/']);
+
+function isRepoRootDotfile(path: string): boolean {
+  // .gitattributes / .gitignore：无斜杠的根点文件。`.env.local` 也算。
+  return /^\.[A-Za-z0-9._-]+$/.test(path);
+}
+
+function looksLikeInRepoFile(path: string): boolean {
+  if (path === '' || /\s/.test(path) || path.includes('://')) return false;
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return false;
+  if (path.split('/').includes('..')) return false;
+  if (IN_REPO_DIR_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
+  return isRepoRootDotfile(path);
+}
+
+function stripAcceptanceToken(raw: string): string {
+  let token = posixPath(raw).trim().replace(/^\.\//, '');
+  // 先剥包裹再剥句末标点，最后才去 :12：否则 `src/a.ts:12。` 对不上文件覆盖。
+  token = token.replace(/^[`'"(（【[]+/, '').replace(/[`'")）】\]]+$/g, '');
+  token = token.replace(/[.,;!?。，；、]+$/g, '');
+  token = token.replace(/:\d+$/, '');
+  return token;
+}
+
+function extractInRepoPaths(text: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const consider = (raw: string) => {
+    const token = stripAcceptanceToken(raw);
+    if (!looksLikeInRepoFile(token) || seen.has(token)) return;
+    seen.add(token);
+    found.push(token);
+  };
+  consider(text.trim());
+  for (const part of text.split(/[\s,;]+/)) {
+    consider(part);
+  }
+  return found;
+}
+
+function uncoveredAcceptanceWarnings(feature: PlanFeatureSpec): string[] {
+  const warnings: string[] = [];
+  for (const item of feature.acceptance) {
+    for (const filePath of extractInRepoPaths(item)) {
+      if (!scopeCovers(feature.allowedScope, filePath)) {
+        warnings.push(`${feature.id}：验收路径 ${filePath} 未被范围覆盖`);
+      }
+    }
+  }
+  return warnings;
+}
+
 function statusExclusionReason(status: PlanFeatureSourceStatus): string | undefined {
   switch (status) {
     case 'done':
@@ -178,6 +284,7 @@ export function selectPlanCandidates(plan: PlanSpec, options: { projectRoot: str
   const byId = new Map(plan.features.map((feature) => [feature.id, feature]));
   const candidates: PlanFeatureSpec[] = [];
   const exclusions: PlanSourceExclusion[] = [];
+  const warnings: string[] = [];
 
   for (const feature of plan.features) {
     if (feature.status !== undefined && feature.status !== 'pending') {
@@ -198,12 +305,20 @@ export function selectPlanCandidates(plan: PlanSpec, options: { projectRoot: str
       exclusions.push(exclusion(feature, PLAN_ELIGIBILITY_REASONS.unmetDependency(unmet)));
       continue;
     }
+    // 只检查过了现有资格门的条目：done/缺契约再跑一遍会多出排除，把真实原因盖掉。
+    const scopeReason = forbiddenScopeReason(feature.allowedScope);
+    if (scopeReason) {
+      exclusions.push(exclusion(feature, scopeReason));
+      continue;
+    }
+    warnings.push(...uncoveredAcceptanceWarnings(feature));
     candidates.push(feature);
   }
 
   return Object.freeze({
     candidates: Object.freeze(candidates),
     exclusions: Object.freeze(exclusions),
+    warnings: Object.freeze(warnings),
   });
 }
 

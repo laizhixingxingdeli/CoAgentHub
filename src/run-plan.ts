@@ -159,6 +159,13 @@ function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): vo
       console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
     }
   }
+  // --check 与正式开跑共用这一段：警告在资格筛选里就算好，这里只展示。无警告不印标题，免得像还有事。
+  if (selection.warnings.length > 0) {
+    console.log('警告：');
+    for (const warning of selection.warnings) {
+      console.log(`  ${warning}`);
+    }
+  }
 }
 
 /**

@@ -811,6 +811,7 @@ describe('run-plan --check 只读、零副作用', () => {
     assert.match(out, /升级单总数上限 5（缺省）/);
     assert.match(out, /每功能重跑上限 1（缺省）/);
     assert.match(out, /停止条件：未解决升级上限 5/);
+    assert.doesNotMatch(out, /警告：/);
     assert.equal(readFileSync(planPath).equals(beforePlan), true);
     assert.deepEqual(snapshotTree(home), beforeHome);
     assert.deepEqual(snapshotTree(repo), beforeRepo);
@@ -924,6 +925,42 @@ describe('run-plan --check 只读、零副作用', () => {
     const noneOut = `${none.stdout}${none.stderr}`;
     assert.equal(none.status, 0, noneOut);
     assert.match(noneOut, /没有可跑的候选/);
+    assert.doesNotMatch(noneOut, /警告：/);
+  });
+
+  test('入选与未纳入之后展示契约警告；排除项仍按现有格式列入未纳入；无警告不展示警告段', () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-check-warn-');
+    const warnPlan = join(home, 'warn.json');
+    writeFileSync(
+      warnPlan,
+      JSON.stringify(
+        samplePlan([
+          {
+            id: 'Truth', title: '规格', why: 'w',
+            allowedScope: ['.coagent/specs/x.md'], acceptance: ['x'], status: 'pending',
+          },
+          {
+            id: 'Warn', title: '待跑', why: 'w',
+            allowedScope: ['a.txt'], acceptance: ['src/miss.ts 也要'], status: 'pending',
+          },
+        ]),
+        null,
+        2,
+      ),
+    );
+    const warned = runCheck(warnPlan, repo);
+    const warnedOut = `${warned.stdout}${warned.stderr}`;
+    assert.equal(warned.status, 0, warnedOut);
+    assert.match(warnedOut, /Warn 待跑/);
+    assert.match(warnedOut, /Truth 规格\s+本次未纳入：allowedScope 含 \.coagent\/ 或 VIBE\.md/);
+    assert.match(warnedOut, /未开跑/);
+    const warnAt = warnedOut.search(/^警告：/m);
+    const selectedAt = warnedOut.search(/入选：/);
+    const excludedAt = warnedOut.search(/本次未纳入：/);
+    assert.ok(selectedAt >= 0 && excludedAt > selectedAt && warnAt > excludedAt, warnedOut);
+    assert.match(warnedOut, /Warn：验收路径 src\/miss\.ts 未被范围覆盖/);
+    assert.doesNotMatch(warnedOut, /没有可跑的候选/);
   });
 });
 
@@ -994,9 +1031,85 @@ describe('run-plan 开跑路径真实副作用次序', () => {
     const out = `${result.stdout}${result.stderr}`;
     assert.equal(result.status, 0, out);
     assert.match(out, /没有可跑的候选/);
+    assert.doesNotMatch(out, /警告：/);
     assert.equal(readFileSync(planPath).equals(beforePlan), true);
     assert.equal(existsSync(join(home, 'state.json')), false);
     assert.equal(hasLockDir(home), false);
+  });
+
+  test('正式开跑展示与 --check 同一批警告，不因警告停止；排除项列入未纳入', () => {
+    const dirty = repoOn('auto/plan-x');
+    writeFileSync(join(dirty, 'stray.json'), '{}');
+    const home = temp('coagent-open-warn-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([
+          {
+            id: 'Truth', title: '规格', why: 'w',
+            allowedScope: ['.coagent/specs/x.md'], acceptance: ['x'], status: 'pending',
+          },
+          {
+            id: 'Warn', title: '待跑', why: 'w',
+            allowedScope: ['a.txt'], acceptance: ['src/miss.ts 也要'], status: 'pending',
+          },
+        ]),
+        null,
+        2,
+      ),
+    );
+    const result = runOpen(planPath, dirty, ['--state', join(home, 'state.json'), '--run-dir', join(home, 'plans')]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /Warn 待跑/);
+    assert.match(out, /Truth 规格\s+本次未纳入：allowedScope 含 \.coagent\/ 或 VIBE\.md/);
+    const warnAt = out.search(/^警告：/m);
+    const excludedAt = out.search(/本次未纳入：/);
+    assert.ok(warnAt > excludedAt, out);
+    assert.match(out, /Warn：验收路径 src\/miss\.ts 未被范围覆盖/);
+    assert.match(out, /stray\.json/);
+    assert.doesNotMatch(out, /开跑：/);
+    assert.equal(existsSync(join(home, 'state.json')), false, '警告不得挡住后续预检，也不得当排除');
+  });
+
+  test('有警告时正式开跑可继续：首次预检通过后仍拿锁（状态文件使二次预检失败）', () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-open-warn-continue-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([
+          {
+            id: 'Warn', title: '待跑', why: 'w',
+            allowedScope: ['a.txt'], acceptance: ['src/miss.ts 也要'], status: 'pending',
+          },
+        ]),
+        null,
+        2,
+      ),
+    );
+    const statePath = join(repo, 'state.json');
+    const result = runOpen(planPath, repo, [
+      '--state',
+      statePath,
+      '--run-dir',
+      join(home, 'plans'),
+      '--worktrees',
+      join(home, 'wt'),
+    ]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /Warn 待跑/);
+    assert.match(out, /Warn：验收路径 src\/miss\.ts 未被范围覆盖/);
+    const warnAt = out.search(/^警告：/m);
+    const lockAt = out.search(/拿到状态锁之后项目仓变脏了/);
+    assert.ok(warnAt >= 0 && lockAt > warnAt, out);
+    assert.doesNotMatch(out, /开跑：/);
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(hasLockDir(repo), false);
+    assert.ok(existsSync(statePath), '警告之后仍开状态拿锁，证明未因警告停止');
   });
 
   test('锁后二次预检失败：已拿锁并释放，不建 PlanRun / 不起 API 开跑', () => {
