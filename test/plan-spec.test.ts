@@ -2,9 +2,11 @@
  * 方案文件：读进来的每一项都是夜里没人看着时的依据，读不懂就在开跑前停下。
  */
 
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import {
   PLAN_ELIGIBILITY_REASONS,
@@ -685,6 +687,139 @@ describe('资格筛选：条目契约检查', () => {
     assert.equal(exclusions.find((e) => e.featureId === 'Done')?.reason, PLAN_ELIGIBILITY_REASONS.done);
     assert.equal(exclusions.find((e) => e.featureId === 'Skip')?.reason, PLAN_ELIGIBILITY_REASONS.skipped);
     assert.equal(exclusions.find((e) => e.featureId === 'PendMiss')?.reason, PLAN_ELIGIBILITY_REASONS.missingContract);
+  });
+});
+
+describe('验收路径告警忽略仓库 gitignore 运行期路径', () => {
+  const dirs: string[] = [];
+  after(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function tempRepo(gitignore: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-spec-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, '.gitignore'), gitignore);
+    return dir;
+  }
+
+  // 空 allowedScope 会先按缺契约排除，启发式根本不会跑；用无关占位表示「范围不覆盖」。
+  const uncoveredScope = ['README.md'];
+  const web2Acceptance = [
+    '与 run-plan 写记录同一个目录（缺省 .coagent-plans）',
+    '状态文件 .coagent-state.json 不进仓',
+  ];
+
+  test('WEB2 风格验收 + allowedScope: []：按既有缺契约规则排除，warnings 为空',
+    () => {
+      const root = tempRepo([
+        '# 运行时产物，不进仓库。',
+        '.coagent-state*.json',
+        '.coagent-plans/',
+        '',
+      ].join('\n'));
+      const plan = planOf([
+        {
+          id: 'WEB2',
+          title: '记录目录',
+          why: 'w',
+          allowedScope: [],
+          acceptance: web2Acceptance,
+          status: 'pending',
+        },
+      ]);
+      const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: root });
+      assert.deepEqual(candidates.map((c) => c.id), []);
+      assert.equal(
+        exclusions.find((e) => e.featureId === 'WEB2')?.reason,
+        PLAN_ELIGIBILITY_REASONS.missingContract,
+      );
+      assert.deepEqual(warnings, []);
+    });
+
+  test('WEB2 风格验收配占位范围：gitignore 过滤后无路径警告（证明启发式确实跑过）', () => {
+    const root = tempRepo([
+      '# 运行时产物，不进仓库。',
+      '.coagent-state*.json',
+      '.coagent-plans/',
+      '',
+    ].join('\n'));
+    const plan = planOf([
+      {
+        id: 'WEB2',
+        title: '记录目录',
+        why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: web2Acceptance,
+        status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: root });
+    assert.deepEqual(candidates.map((c) => c.id), ['WEB2']);
+    assert.equal(exclusions.length, 0);
+    assert.deepEqual(warnings, []);
+  });
+
+  test('ignored dir 路径无论带尾斜线与否都识别；目录规则也挡下层文件', () => {
+    const root = tempRepo('.coagent-plans/\nsrc/generated/\n');
+    const plan = planOf([
+      {
+        id: 'Slash', title: '斜线', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['目录 .coagent-plans 与 .coagent-plans/', 'src/generated/a.ts'],
+        status: 'pending',
+      },
+    ]);
+    const { candidates, warnings } = selectPlanCandidates(plan, { projectRoot: root });
+    assert.deepEqual(candidates.map((c) => c.id), ['Slash']);
+    assert.deepEqual(warnings, []);
+  });
+
+  test('相同输入含 src/example.ts 或实际未忽略路径仍产生未覆盖警告；合法候选不变', () => {
+    const root = tempRepo('.coagent-plans/\n.coagent-state*.json\n');
+    const plan = planOf([
+      {
+        id: 'Mix', title: '混合', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: [
+          '与 run-plan 写记录同一个目录（缺省 .coagent-plans）',
+          '还要改 src/example.ts',
+          '以及 test/example.test.ts',
+          '.gitattributes 保持 LF',
+        ],
+        status: 'pending',
+      },
+      {
+        id: 'DoneSkip', title: '已合', why: 'w',
+        allowedScope: ['src/ghost.ts'], acceptance: ['src/ghost.ts'], status: 'done',
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: root });
+    assert.deepEqual(candidates.map((c) => c.id), ['Mix']);
+    assert.equal(exclusions.find((e) => e.featureId === 'DoneSkip')?.reason, PLAN_ELIGIBILITY_REASONS.done);
+    assert.deepEqual(warnings, [
+      'Mix：验收路径 src/example.ts 未被范围覆盖',
+      'Mix：验收路径 test/example.test.ts 未被范围覆盖',
+      'Mix：验收路径 .gitattributes 未被范围覆盖',
+    ]);
+  });
+
+  test('仓库路径换了不能使用旧缓存', () => {
+    const ignored = tempRepo('.coagent-plans/\n');
+    const tracked = tempRepo('# 不忽略运行期目录\n');
+    const plan = planOf([
+      {
+        id: 'Cache', title: '缓存', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['缺省 .coagent-plans'],
+        status: 'pending',
+      },
+    ]);
+    assert.deepEqual(selectPlanCandidates(plan, { projectRoot: ignored }).warnings, []);
+    assert.deepEqual(selectPlanCandidates(plan, { projectRoot: tracked }).warnings, [
+      'Cache：验收路径 .coagent-plans 未被范围覆盖',
+    ]);
+    assert.deepEqual(selectPlanCandidates(plan, { projectRoot: ignored }).warnings, []);
   });
 });
 

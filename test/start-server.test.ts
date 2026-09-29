@@ -6,10 +6,10 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createServer, type Server } from 'node:http';
 
@@ -20,7 +20,13 @@ import {
 } from '../src/application/loopback-control-client.ts';
 import type { AgentRuntime } from '../src/application/ports.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
-import { bindServerCloseToPeriodicStop, startServer } from '../src/main.ts';
+import {
+  bindServerCloseToPeriodicStop,
+  defaultStatePathFromMainModule,
+  isDirectMainEntry,
+  resolveDirectMainStatePath,
+  startServer,
+} from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { API_VERSION } from '../src/api/server.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
@@ -716,25 +722,35 @@ describe('startServer 周期投递修复配置', () => {
 });
 
 describe('startServer 文件版主锁、身份与控制写', () => {
-  test('独立进程已持锁时 startServer(3101) 拒绝且端口未监听', async () => {
+  test('独立进程已持锁时 startServer 拒绝且本次未监听', async () => {
     const statePath = tempState();
+    // 不假设 3101 空闲：用户常驻服务可能正占着它。先占一个 ephemeral 口再放开，
+    // 得到确认空闲的隔离端口；锁忙路径不得去绑这个口，更不得碰用户服务。
+    const scout = createServer();
+    await listenLoopback(scout, 0);
+    const idlePort = (scout.address() as AddressInfo).port;
+    await new Promise<void>((done, fail) => {
+      scout.close((err) => (err ? fail(err) : done()));
+    });
     const child = await holdLockInChild(statePath);
     try {
       await assert.rejects(
         () =>
-          startServer(3101, statePath, {
+          startServer(idlePort, statePath, {
             env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
           }),
         LockBusyError,
       );
-      assert.equal(
-        servers.filter((s) => s.listening).length,
-        0,
-        '锁忙拒绝后不得残留 listening server',
-      );
-      await assert.rejects(
-        () => fetch('http://127.0.0.1:3101/api/health', { signal: AbortSignal.timeout(300) }),
-      );
+      const stillIdle = createServer();
+      try {
+        await listenLoopback(stillIdle, idlePort);
+      } finally {
+        if (stillIdle.listening) {
+          await new Promise<void>((done, fail) => {
+            stillIdle.close((err) => (err ? fail(err) : done()));
+          });
+        }
+      }
     } finally {
       await child.stop();
     }
@@ -1539,3 +1555,226 @@ describe('startServer hosted 接线与排空',
     );
   },
 );
+
+function withSecretOutput(runtime: ScriptedRuntime): AgentRuntime {
+  return {
+    kind: runtime.kind,
+    supportsQuery: runtime.supportsQuery,
+    async start(spec) {
+      const run = await runtime.start(spec);
+      return {
+        resumeRef: run.resumeRef,
+        abort: () => run.abort(),
+        wait: () => run.wait(),
+        on(handler) {
+          const off = run.on(handler);
+          queueMicrotask(() => {
+            handler({
+              kind: 'output',
+              text: 'secret sk-ant-abcdefghijklmnopqrstuvwxyz Bearer abcdefghijklmnop',
+            });
+          });
+          return off;
+        },
+      };
+    },
+  };
+}
+
+describe('文件版 hosted live 游标与脱敏', () => {
+  test(
+    'startServer(file)+ScriptedRuntime：/api/missions/:id/live 游标可读且凭据形状脱敏',
+    { timeout: 30_000 },
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coagent-file-live-'));
+      dirs.push(dir);
+      const statePath = join(dir, 'state.json');
+      const adapter = join(dir, 'adapter.ts');
+      writeFileSync(adapter, '// file live adapter\n');
+      const runtime = withSecretOutput(
+        new ScriptedRuntime({ ...COORDINATOR_HAPPY, ...EXECUTOR_HAPPY }),
+      );
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime,
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+        releaseFns.push(built.releaseLock);
+      }
+      assert.ok('live' in built && built.live, '文件版装配必须带 live');
+
+      const target = await liveTarget(statePath);
+      const lines: string[] = [];
+      const code = await loopbackRunRequest(
+        target,
+        { path: '/api/control/run-mission', body: hostedMissionBody(dir, adapter, statePath, 'M-live') },
+        (_channel, line) => {
+          lines.push(line);
+        },
+      );
+      assert.equal(code, 0, lines.join('\n'));
+
+      const addr = built.server.address() as AddressInfo;
+      const firstRes = await fetch(`http://${addr.address}:${addr.port}/api/missions/M-live/live?cursor=0`);
+      assert.equal(firstRes.status, 200);
+      const first = (await firstRes.json()) as {
+        cursor: number;
+        chunks: { kind: string; text?: string }[];
+      };
+      assert.ok(first.chunks.length > 0, 'hosted 假运行时必须写出实时行');
+      const texts = first.chunks.map((c) => c.text ?? '').join('\n');
+      assert.match(texts, /\[REDACTED\]/);
+      assert.match(texts, /Bearer \[REDACTED\]/);
+      assert.doesNotMatch(texts, /sk-ant-abcdefghijklmnopqrstuvwxyz/);
+      assert.doesNotMatch(texts, /Bearer abcdefghijklmnop/);
+      assert.ok(
+        first.chunks.some((c) => c.kind === 'tool'),
+        '工具事件也应进 live',
+      );
+
+      const secondRes = await fetch(
+        `http://${addr.address}:${addr.port}/api/missions/M-live/live?cursor=${first.cursor}`,
+      );
+      const second = (await secondRes.json()) as { cursor: number; chunks: unknown[] };
+      assert.deepEqual(second.chunks, []);
+      assert.equal(second.cursor, first.cursor);
+
+      built.persist();
+      const dumped = readFileSync(statePath, 'utf8');
+      assert.doesNotMatch(dumped, /sk-ant-abcdefghijklmnopqrstuvwxyz/);
+      assert.doesNotMatch(dumped, /"live"\s*:/);
+
+      await new Promise<void>((done, fail) => {
+        built.server.close((err) => (err ? fail(err) : done()));
+      });
+    },
+  );
+});
+
+describe('node src/main.ts 缺省状态路径', () => {
+  test('钉在源码仓库根，Unix 与 Windows 解析都对', () => {
+    assert.equal(
+      defaultStatePathFromMainModule('/home/u/repo/src/main.ts', pathPosix),
+      '/home/u/repo/.coagent-state.json',
+    );
+    assert.equal(
+      defaultStatePathFromMainModule('C:\\Users\\u\\repo\\src\\main.ts', pathWin32),
+      pathWin32.resolve('C:\\Users\\u\\repo', '.coagent-state.json'),
+    );
+    const fromThisModule = defaultStatePathFromMainModule();
+    assert.equal(
+      fromThisModule,
+      resolve(fileURLToPath(new URL('..', import.meta.url)), '.coagent-state.json'),
+    );
+    const realMainPath = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+    assert.equal(isDirectMainEntry(realMainPath), true);
+    assert.equal(isDirectMainEntry(fileURLToPath(import.meta.url)), false);
+  });
+
+  test('缺省文件不存在则拒绝；显式 COAGENT_STATE 仍可指向未建文件', () => {
+    const fakeMain = '/isolated-repo/src/main.ts';
+    const missing = resolveDirectMainStatePath(
+      {},
+      { mainModulePath: fakeMain, exists: () => false, pathApi: pathPosix },
+    );
+    assert.equal(missing.ok, false);
+    if (missing.ok) throw new Error('expected refuse');
+    assert.equal(missing.path, '/isolated-repo/.coagent-state.json');
+    assert.match(missing.message, /COAGENT_STATE/);
+
+    const explicit = resolveDirectMainStatePath(
+      { COAGENT_STATE: '/tmp/new-state.json' },
+      { mainModulePath: fakeMain, exists: () => false, pathApi: pathPosix },
+    );
+    assert.deepEqual(explicit, { ok: true, path: '/tmp/new-state.json' });
+  });
+
+  test(
+    '外部 cwd 启动隔离源码副本：缺省定位仓库根、不存在则非零且零新建',
+    { timeout: 20_000 },
+    async () => {
+      const repo = mkdtempSync(join(tmpdir(), 'coagent-default-state-repo-'));
+      const elsewhere = mkdtempSync(join(tmpdir(), 'coagent-default-state-cwd-'));
+      dirs.push(repo, elsewhere);
+      mkdirSync(join(repo, 'src'));
+      const stub = join(repo, 'src', 'main.ts');
+      const realMain = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+      writeFileSync(
+        stub,
+        `import { fileURLToPath } from 'node:url';
+import { isDirectMainEntry, resolveDirectMainStatePath } from ${JSON.stringify(pathToFileURL(realMain).href)};
+if (isDirectMainEntry(process.argv[1], import.meta.url)) {
+  const resolved = resolveDirectMainStatePath(process.env, { mainModulePath: fileURLToPath(import.meta.url) });
+  if (!resolved.ok) {
+    console.error(resolved.message);
+    process.exit(1);
+  }
+  console.log('STATE=' + resolved.path);
+  process.exit(0);
+}
+`,
+      );
+
+      const spawnStub = (env: NodeJS.ProcessEnv) =>
+        new Promise<{ code: number | null; out: string; err: string }>((resolveP, reject) => {
+          const child = spawn(process.execPath, ['--experimental-strip-types', stub], {
+            cwd: elsewhere,
+            env,
+          });
+          let out = '';
+          let err = '';
+          child.stdout?.on('data', (chunk) => {
+            out += String(chunk);
+          });
+          child.stderr?.on('data', (chunk) => {
+            err += String(chunk);
+          });
+          child.once('error', reject);
+          child.once('exit', (code) => resolveP({ code, out, err }));
+        });
+
+      const env = { ...process.env };
+      delete env.COAGENT_STATE;
+
+      const missing = await spawnStub(env);
+      assert.equal(missing.code, 1, missing.out + missing.err);
+      assert.match(missing.err, /COAGENT_STATE/);
+      assert.equal(existsSync(join(repo, '.coagent-state.json')), false);
+      assert.equal(existsSync(join(elsewhere, '.coagent-state.json')), false);
+      assert.deepEqual(readdirSync(elsewhere), []);
+
+      const expectedDefault = resolve(repo, '.coagent-state.json');
+      writeFileSync(expectedDefault, JSON.stringify({}));
+      const present = await spawnStub(env);
+      assert.equal(present.code, 0, present.out + present.err);
+      assert.equal(present.out.trim(), `STATE=${expectedDefault}`);
+
+      const explicitPath = join(elsewhere, 'explicit.json');
+      const expl = await spawnStub({ ...env, COAGENT_STATE: explicitPath });
+      assert.equal(expl.code, 0, expl.out + expl.err);
+      assert.equal(expl.out.trim(), `STATE=${explicitPath}`);
+      assert.equal(existsSync(explicitPath), false, '解析边界不负责新建；startServer 才建');
+    },
+  );
+
+  test('显式状态路径：startServer 可新建文件', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-explicit-state-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'brand-new.json');
+    assert.equal(existsSync(statePath), false);
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => (err ? fail(err) : done()));
+    });
+    assert.equal(existsSync(statePath), true);
+  });
+});

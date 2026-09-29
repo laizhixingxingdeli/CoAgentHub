@@ -593,6 +593,82 @@ test('文件平台注入真实 MissionRunner：上游失败进持久退避，到
   }
 });
 
+test('文件平台：无状态码上游内部故障在同一次 run 等到退避后续跑，结果不是 project_busy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-mission-inrun-backoff-'));
+  temps.push(dir);
+  const statePath = join(dir, 'state.json');
+  const built = await buildPersistentPlatform(statePath, {
+    workspace: new InPlaceWorkspaceManager(),
+  });
+  try {
+    await built.platform.createMission({
+      projectId: 'P',
+      missionId: 'M-inrun-5xx',
+      contract: CONTRACT,
+    });
+    const tokens = built.tokens;
+    const server: Server = createApi({
+      platform: built.platform,
+      tokens,
+      deliveries: built.deliveries,
+    });
+    await listenLoopback(server, 0);
+    servers.push(server);
+    const address = server.address() as AddressInfo;
+    const terminal = countingTerminalReview(built.platform);
+    const coordinatorRuntime = new ScriptedRuntime(COORDINATOR_HAPPY);
+    const executorRuntime = new ScriptedRuntime({
+      'executor:W-1:0': {
+        steps: [],
+        upstreamFailure: 'Error Code null: Internal error during token generation',
+      },
+      'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+    });
+    // 真时钟 + 短冷却：FixedClock 睡完 now 不动会被当成没等到；cooldown 默认 5min 会伪装成 no_available_agent。
+    // inRunBackoffWaitMs 覆盖 1s 队列退避；不得用第二次 runner.run 代替同次等待。
+    const runner = new MissionRunner({
+      platform: built.platform,
+      tokens: makeIssuer(built.platform, tokens),
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      workspace: new InPlaceWorkspaceManager(),
+      candidateCircuits: built.candidateCircuits,
+      queuedHops: built.queuedHops,
+      inRunBackoffWaitMs: 5_000,
+      coordinator: {
+        runtime: coordinatorRuntime,
+        candidates: [{ endpoint: 'local', profileId: 'coord-a' }],
+        cooldownMs: 0,
+      },
+      executor: {
+        runtime: executorRuntime,
+        candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
+        maxAttempts: 2,
+        cooldownMs: 0,
+      },
+    });
+    const projectRoot = dir;
+    const began = Date.now();
+    const ran = await runner.run('M-inrun-5xx', { projectRoot });
+    assert.ok(Date.now() - began >= 1_000, '必须真实等到退避到期');
+    assert.notEqual(ran.outcome.kind === 'waiting' ? ran.outcome.reason : '', 'project_busy');
+    assert.deepEqual(ran.outcome, { kind: 'awaiting_l3_review' });
+    const hop = await executorQueueRow(built.queuedHops);
+    assert.equal(hop.status, 'completed');
+    assert.equal(hop.attemptCount, 1);
+    assert.equal(hop.lastFailure?.classification, 'upstream_5xx');
+    assert.equal(hop.lastFailure?.retryable, true);
+    assert.equal(executorRuntime.specs.length, 2);
+    const view = await built.platform.getMissionView('M-inrun-5xx');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.workItems[0]?.attempts, 2);
+    assert.equal(view.workItems[0]?.status, 'accepted');
+    assert.equal(terminal.machine, 0);
+    assert.equal(terminal.abandon, 0);
+  } finally {
+    built.releaseLock();
+  }
+});
+
 describe('内部入口：注入既有依赖即可跑，不另建平台或监听', () => {
   test('源码：入口不创建平台、不 listen、不拿锁', () => {
     const runner = src('application/mission-runner.ts');

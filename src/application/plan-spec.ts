@@ -12,7 +12,8 @@
  * 资格筛选在建运行记录 / 分类 / 建 Mission 之前单独做。
  */
 
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { MissionContract } from '../kernel/index.ts';
 import { fillStopConditions, isPositiveInt, isStopConditions, isText } from './plan-run.ts';
 import type { PlanSourceExclusion, PlanStopConditions } from './plan-run.ts';
@@ -250,10 +251,85 @@ function extractInRepoPaths(text: string): string[] {
   return found;
 }
 
-function uncoveredAcceptanceWarnings(feature: PlanFeatureSpec): string[] {
+type GitIgnorePattern = {
+  readonly negated: boolean;
+  readonly regex: RegExp;
+};
+
+/**
+ * 运行期路径常写进验收叙述（缺省 .coagent-plans、状态文件），但它们被仓库 .gitignore 忽略，不是 L1 可改的源码。
+ * 不按 ignore 过滤会把能跑的条目刷成假警告。只读 projectRoot 下的 .gitignore，
+ * 不硬编码目录名——换了 ignore 规则应跟着变。按 resolve(仓库路径) 缓存；换仓不能用旧结果。
+ */
+let gitignoreCache: { readonly root: string; readonly patterns: readonly GitIgnorePattern[] } | undefined;
+
+function globToRegexSource(glob: string): string {
+  let source = '';
+  for (const char of glob) {
+    if (char === '*') source += '[^/]*';
+    else if (char === '?') source += '[^/]';
+    else source += char.replace(/[\\^$+?.()|[\]{}]/g, '\\$&');
+  }
+  return source;
+}
+
+function compileGitignoreLine(raw: string): GitIgnorePattern | undefined {
+  let line = raw.trimEnd();
+  if (line === '' || line.startsWith('#')) return undefined;
+  let negated = false;
+  if (line.startsWith('!')) {
+    negated = true;
+    line = line.slice(1);
+  }
+  if (line === '' || line === '/') return undefined;
+  const directoryOnly = line.endsWith('/');
+  if (directoryOnly) line = line.slice(0, -1);
+  const anchored = line.startsWith('/') || line.includes('/');
+  if (line.startsWith('/')) line = line.slice(1);
+  if (line === '') return undefined;
+  const body = globToRegexSource(line);
+  // 目录规则的尾斜线只表示「这是目录」；验收里写 .coagent-plans 或 .coagent-plans/ 都应认。
+  const suffix = directoryOnly ? '(?:/.*)?' : '';
+  const source = anchored ? `^${body}${suffix}$` : `(?:^|/)${body}${suffix}$`;
+  return { negated, regex: new RegExp(source) };
+}
+
+function loadGitignorePatterns(projectRoot: string): readonly GitIgnorePattern[] {
+  const root = resolve(projectRoot);
+  if (gitignoreCache?.root === root) return gitignoreCache.patterns;
+  let patterns: GitIgnorePattern[] = [];
+  try {
+    const text = readFileSync(join(root, '.gitignore'), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const compiled = compileGitignoreLine(line);
+      if (compiled) patterns.push(compiled);
+    }
+  } catch {
+    // 没有 .gitignore 就不过滤——不能因读不到而把真正漏范围的源码警告吞掉。
+    patterns = [];
+  }
+  gitignoreCache = { root, patterns };
+  return patterns;
+}
+
+function isGitignoredPath(path: string, patterns: readonly GitIgnorePattern[]): boolean {
+  const rel = posixPath(path).replace(/^\.\//, '').replace(/\/+$/, '');
+  if (rel === '' || rel === '.') return false;
+  let ignored = false;
+  for (const pattern of patterns) {
+    if (pattern.regex.test(rel)) ignored = !pattern.negated;
+  }
+  return ignored;
+}
+
+function uncoveredAcceptanceWarnings(
+  feature: PlanFeatureSpec,
+  patterns: readonly GitIgnorePattern[],
+): string[] {
   const warnings: string[] = [];
   for (const item of feature.acceptance) {
     for (const filePath of extractInRepoPaths(item)) {
+      if (isGitignoredPath(filePath, patterns)) continue;
       if (!scopeCovers(feature.allowedScope, filePath)) {
         warnings.push(`${feature.id}：验收路径 ${filePath} 未被范围覆盖`);
       }
@@ -292,6 +368,7 @@ export function selectPlanCandidates(plan: PlanSpec, options: { projectRoot: str
   const candidates: PlanFeatureSpec[] = [];
   const exclusions: PlanSourceExclusion[] = [];
   const warnings: string[] = [];
+  const ignorePatterns = loadGitignorePatterns(options.projectRoot);
 
   for (const feature of plan.features) {
     if (feature.status !== undefined && feature.status !== 'pending') {
@@ -318,7 +395,7 @@ export function selectPlanCandidates(plan: PlanSpec, options: { projectRoot: str
       exclusions.push(exclusion(feature, scopeReason));
       continue;
     }
-    warnings.push(...uncoveredAcceptanceWarnings(feature));
+    warnings.push(...uncoveredAcceptanceWarnings(feature, ignorePatterns));
     candidates.push(feature);
   }
 

@@ -125,7 +125,9 @@ export function classifyCandidateFailure(
   if (/\b401\b|unauthori[sz]ed|authentication|鉴权|认证/i.test(message)) {
     return { failureClass: 'auth', failover: true };
   }
-  if (/\b5\d\d\b|internal server error|bad gateway|service unavailable|gateway timeout/i.test(message)) {
+  // xai 会给 "Error Code null: Internal error during token generation"：没有 5xx 数字，
+  // 旧正则判 unknown / failover=false，同次运行不退避、不换候选，Mission 停在 project_busy。
+  if (/\b5\d\d\b|internal server error|internal error|bad gateway|service unavailable|gateway timeout|overloaded|temporarily unavailable/i.test(message)) {
     return { failureClass: 'upstream_5xx', failover: true };
   }
   return { failureClass: 'unknown', failover: false };

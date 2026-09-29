@@ -15,6 +15,8 @@ test('candidate failures are classified conservatively with explicit failover de
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 503 Service Unavailable', true), { failureClass: 'upstream_5xx', failover: true });
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'adapter connection reset; HTTP 503 Service Unavailable', true), { failureClass: 'local_adapter_error', failover: false });
   assert.deepEqual(classifyCandidateFailure('upstream_failure', '403 需要充值'), { failureClass: 'quota', failover: true });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'econnrefused'), { failureClass: 'unknown', failover: false });
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'fetch failed', true), { failureClass: 'local_adapter_error', failover: false });
 
   assert.equal(classifyCandidateFailure('structured_submit'), undefined);
   assert.equal(classifyCandidateFailure('no_structured_result'), undefined);
@@ -27,6 +29,50 @@ test('candidate failures are classified conservatively with explicit failover de
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'ordinary execution failed'), { failureClass: 'unknown', failover: false });
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'unrecognized runtime exception', true), { failureClass: 'unknown', failover: false });
   assert.deepEqual(classifyCandidateFailure('upstream_failure', 'request failed', true), { failureClass: 'unknown', failover: false });
+});
+
+test('no-status-code upstream temp faults classify as upstream_5xx; local adapter/quota/auth keep priority', () => {
+  const five = { failureClass: 'upstream_5xx', failover: true };
+  const phrases = [
+    'Error Code null: Internal error during token generation',
+    'INTERNAL ERROR DURING TOKEN GENERATION',
+    'internal error during token generation',
+    'internal error',
+    'Internal Error',
+    'INTERNAL ERROR',
+    'overloaded',
+    'Overloaded',
+    'the model is OVERLOADED',
+    'temporarily unavailable',
+    'Temporarily Unavailable',
+    'TEMPORARILY UNAVAILABLE',
+  ];
+  for (const message of phrases) {
+    assert.deepEqual(classifyCandidateFailure('upstream_failure', message), five, message);
+    assert.deepEqual(classifyCandidateFailure('upstream_failure', message, true), five, `${message} fromRuntimeException`);
+  }
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 503 Service Unavailable'), five);
+  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 502 bad gateway'), five);
+  assert.deepEqual(
+    classifyCandidateFailure('upstream_failure', 'adapter connection reset; Internal error during token generation', true),
+    { failureClass: 'local_adapter_error', failover: false },
+  );
+  assert.deepEqual(
+    classifyCandidateFailure('upstream_failure', 'econnrefused internal error', true),
+    { failureClass: 'local_adapter_error', failover: false },
+  );
+  assert.deepEqual(
+    classifyCandidateFailure('upstream_failure', 'fetch failed; temporarily unavailable', true),
+    { failureClass: 'local_adapter_error', failover: false },
+  );
+  assert.deepEqual(
+    classifyCandidateFailure('upstream_failure', 'HTTP 429 quota exceeded; internal error', true),
+    { failureClass: 'quota', failover: true },
+  );
+  assert.deepEqual(
+    classifyCandidateFailure('upstream_failure', '401 Unauthorized; overloaded', true),
+    { failureClass: 'auth', failover: true },
+  );
 });
 
 test('upstream billing and credit signals classify as quota; 403 or forbidden alone do not', () => {
