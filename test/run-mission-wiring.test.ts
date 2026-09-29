@@ -13,9 +13,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 
-import { createApi } from '../src/api/server.ts';
+import { API_VERSION, createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import {
   FixedClock,
@@ -24,14 +24,21 @@ import {
   SequentialIds,
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
-import { MissionRunner } from '../src/application/mission-runner.ts';
+import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
+import {
+  HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+  MissionRunner,
+  parseHostedMissionBody,
+  runHostedMission,
+} from '../src/application/mission-runner.ts';
+import { acquireLock, LockBusyError, publishLockPort, stateIdFor } from '../src/application/lock.ts';
+import { SPAWN_ENV_UNDECLARED_MESSAGE } from '../src/runtime/spawn.ts';
 import { inRunBackoffWaitMs } from '../src/application/orchestrator.ts';
 import { missionRunOptions } from '../src/run-mission.ts';
 import { buildPersistentPlatform } from '../src/main.ts';
 import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { FileQueuedHopRepository } from '../src/application/file-store.ts';
-import { LockBusyError } from '../src/application/lock.ts';
 import {
   DEFAULT_HOP_CAPACITY_LIMITS,
   type HopCapacityLimits,
@@ -413,7 +420,8 @@ test('文件版第二进程拿不到状态排他锁时不领取 Hop、不启动 
     },
   );
   assert.notEqual(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
-  assert.match(`${spawned.stdout}${spawned.stderr}`, /平台正被另一个进程占用/);
+  assert.match(`${spawned.stdout}${spawned.stderr}`, /无法安全转发到本机写者/);
+  assert.match(`${spawned.stdout}${spawned.stderr}`, /主状态未改/);
   assert.equal((await first.queuedHops.get(hop.id))?.status, 'queued');
   assert.equal(runtime.specs.length, 0);
   first.releaseLock();
@@ -601,8 +609,21 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.doesNotMatch(runner, /createApi\s*\(/);
     assert.doesNotMatch(runner, /listenLoopback\s*\(/);
     assert.doesNotMatch(runner, /\.listen\s*\(/);
-    assert.doesNotMatch(runner, /createMission\s*\(/);
-    assert.doesNotMatch(runner, /createClassifiedMission\s*\(/);
+    assert.match(runner, /export async function runHostedMission/);
+    assert.match(runner, /platform\.createMission\(/);
+    assert.match(runner, /platform\.createClassifiedMission\(/);
+    assert.match(runner, /parseAgentEnvPassthrough/);
+    assert.match(runner, /COAGENT_AGENT_ENV_PASSTHROUGH/);
+    assert.match(runner, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
+    const hostedAt = runner.indexOf('export async function runHostedMission');
+    const hostedFn = hostedAt >= 0 ? runner.slice(hostedAt) : '';
+    const pickAt = hostedFn.indexOf('pickHostedCandidates');
+    const createAt = hostedFn.indexOf('platform.createMission');
+    const classifiedAt = hostedFn.indexOf('platform.createClassifiedMission');
+    assert.ok(
+      pickAt >= 0 && createAt > pickAt && classifiedAt > pickAt,
+      '非法候选必须在 createMission / createClassifiedMission 之前检查',
+    );
     assert.match(runner, /independentReviewer\?:/);
     assert.match(runner, /queuedHops\?:/);
     assert.match(runner, /hopCapacityLimits\?:/);
@@ -650,6 +671,12 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /--max-rounds <1-100>/);
     assert.match(cli, /parseMaxRounds\(/);
     assert.match(cli, /maxRounds/);
+    assert.match(cli, /probeLocalWriter/);
+    assert.match(cli, /loopbackRunRequest/);
+    assert.match(cli, /\/api\/control\/run-mission/);
+    assert.match(cli, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
+    assert.match(cli, /if \(!usePg\)/);
+    assert.match(cli, /process\.exit\(code\)/);
   });
 
   test('max-rounds 选项组装：显式值传递，缺省不覆盖 orchestrator 默认值', () => {
@@ -1353,7 +1380,7 @@ describe('生产入口 makeIssuer 队列领取身份', () => {
 });
 
 describe('L3 主写在持锁常驻服务时转发', () => {
-  test('startServer 持锁时 l3 pause 成功，run-mission 仍拿不到锁', async () => {
+  test('startServer 持锁时 l3 pause 成功，run-mission 回环转发且不落回本地', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'l3-loopback-wire-'));
     temps.push(dir);
     const statePath = join(dir, 'state.json');
@@ -1416,27 +1443,21 @@ describe('L3 主写在持锁常驻服务时转发', () => {
 
       const mission = join(dir, 'mission.json');
       writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-pause', contract: CONTRACT }));
-      const spawned = spawnSync(
-        process.execPath,
-        [
-          '--experimental-strip-types',
-          'src/run-mission.ts',
+      const spawned = await spawnRunMission([
           mission,
           '--cwd',
           dir,
           '--state',
           statePath,
           '--in-place',
-        ],
-        {
-          cwd: fileURLToPath(new URL('..', import.meta.url)),
-          encoding: 'utf8',
-          env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
-          timeout: 20_000,
-        },
-      );
-      assert.notEqual(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
-      assert.match(`${spawned.stdout}${spawned.stderr}`, /平台正被另一个进程占用/);
+        ]);
+      const out = `${spawned.stdout}${spawned.stderr}`;
+      assert.notEqual(spawned.status, 0, out);
+      // 默认 startServer 工作区不是原地；回环必须明确拒绝 --in-place，不能谎称未配置 hosted，也不能落回本地抢锁。
+      assert.match(out, /hosted Mission 不支持 --in-place：服务工作区不是原地工作区。未写入。/);
+      assert.doesNotMatch(out, /HOSTED_RUN_UNAVAILABLE|未配置 hosted/);
+      assert.doesNotMatch(out, /平台正被另一个进程占用/);
+      assert.doesNotMatch(out, /Mission 结果：/);
     } finally {
       await new Promise<void>((done) => {
         live.once('exit', () => done());
@@ -1446,6 +1467,451 @@ describe('L3 主写在持锁常驻服务时转发', () => {
           done();
         }, 3000);
       });
+    }
+  });
+});
+
+function hostedBody(overrides: Record<string, unknown> = {}) {
+  return {
+    spec: { projectId: 'P', missionId: 'M-hosted', contract: CONTRACT },
+    cwd: process.cwd(),
+    adapter: join(process.cwd(), 'src', 'run-mission.ts'),
+    env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+    ...overrides,
+  };
+}
+
+async function hostedDeps() {
+  const clock = new FixedClock();
+  const activity = new InMemoryActivityLog(clock);
+  const ids = new SequentialIds();
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const projects = new InMemoryProjectRepository();
+  const workspace = new InPlaceWorkspaceManager();
+  const platform = new Platform({
+    projects,
+    deliveries,
+    workspace,
+    activity,
+    clock,
+    ids,
+  });
+  const tokens = new RunTokenRegistry();
+  const agentPool = new InMemoryAgentPoolRepository();
+  await agentPool.add({ role: 'coordinator', profileId: 'coordinator-a', endpoint: 'local' });
+  await agentPool.add({ role: 'executor', profileId: 'exec-a', endpoint: 'local' });
+  const server: Server = createApi({ platform, tokens, deliveries });
+  await listenLoopback(server, 0);
+  servers.push(server);
+  const addr = server.address() as AddressInfo;
+  let persistCalls = 0;
+  return {
+    workspace,
+    persistCalls: () => persistCalls,
+    ctx: {
+      built: {
+        platform,
+        tokens: makeIssuer(platform, tokens),
+        agentPool,
+        activity,
+        deliveries,
+        persist: () => {
+          persistCalls += 1;
+        },
+      },
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      workspace,
+    },
+  };
+}
+
+
+function spawnRunMission(args: string[]) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--experimental-strip-types', 'src/run-mission.ts', ...args], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`run-mission 超时：${stdout}${stderr}`));
+    }, 20_000);
+    child.once('exit', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+describe('hosted Mission 入口与 CLI 回环转发', () => {
+  test('未声明 CLI env 名单、--store pg、--worktrees、非法 max-rounds 在写入前拒绝', async () => {
+    const { ctx, persistCalls } = await hostedDeps();
+    const created: string[] = [];
+    ctx.built.platform.createMission = (async (input) => {
+      created.push(input.missionId ?? '');
+      throw new Error('不得创建');
+    }) as Platform['createMission'];
+
+    assert.throws(
+      () => parseHostedMissionBody(hostedBody({ env: {} })),
+      (error: unknown) => error instanceof Error && error.message === SPAWN_ENV_UNDECLARED_MESSAGE,
+    );
+    assert.throws(
+      () => parseHostedMissionBody(hostedBody({ env: undefined })),
+      /COAGENT_AGENT_ENV_PASSTHROUGH/,
+    );
+    assert.throws(() => parseHostedMissionBody(hostedBody({ store: 'pg' })), /--store pg/);
+    assert.throws(() => parseHostedMissionBody(hostedBody({ worktrees: '/tmp/wt' })), /--worktrees/);
+    assert.throws(() => parseHostedMissionBody(hostedBody({ maxRounds: 0 })), /1–100/);
+    assert.throws(
+      () => parseHostedMissionBody(hostedBody({
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN' },
+      })),
+      (error: unknown) =>
+        error instanceof Error && error.message === HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+    );
+
+    await assert.rejects(
+      () => runHostedMission(hostedBody({ env: {} }), {
+        ...ctx,
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+      }, () => {}),
+      (error: unknown) => error instanceof Error && error.message === SPAWN_ENV_UNDECLARED_MESSAGE,
+    );
+    await assert.rejects(
+      () => runHostedMission(hostedBody({
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN' },
+      }), {
+        ...ctx,
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-', HUB_TEST_TOKEN: 'svc-secret-w95-bb22' },
+      }, () => {}),
+      (error: unknown) =>
+        error instanceof Error && error.message === HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+    );
+    assert.deepEqual(created, []);
+    assert.equal(persistCalls(), 0);
+  });
+
+  test('服务 env 的透传名单不得顶替 CLI body 声明；--in-place 与工作区不符则不写', async () => {
+    const { ctx, persistCalls } = await hostedDeps();
+    const parsed = parseHostedMissionBody(hostedBody({
+      env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+    }));
+    assert.deepEqual([...parsed.envPassthrough], []);
+
+    const otherWorkspace: WorkspaceManager = {
+      async prepare(_missionId, projectRoot) {
+        return {
+          cwd: projectRoot,
+          branch: 'mission/M',
+          targetBranch: 'master',
+          baseRevision: 'x',
+        };
+      },
+      async head() {
+        return 'x';
+      },
+      async targetHead() {
+        return 'x';
+      },
+      async rollback() {},
+      async mergeToTarget() {
+        return { ok: true, mergedInto: 'x' };
+      },
+      async diff() {
+        return { stat: '', files: [] };
+      },
+      async release() {},
+    };
+    await assert.rejects(
+      () => runHostedMission(hostedBody({ inPlace: true }), { ...ctx, workspace: otherWorkspace }, () => {}),
+      /--in-place/,
+    );
+    assert.equal(persistCalls(), 0);
+    await assert.rejects(
+      () => ctx.built.platform.getMissionView('M-hosted'),
+    );
+  });
+
+  test('非法 --coordinator 在 createMission 之前拒绝且不写主状态', async () => {
+    const { ctx, persistCalls } = await hostedDeps();
+    const created: string[] = [];
+    const originalCreate = ctx.built.platform.createMission.bind(ctx.built.platform);
+    ctx.built.platform.createMission = (async (input) => {
+      created.push(input.missionId ?? '');
+      return originalCreate(input);
+    }) as Platform['createMission'];
+    await assert.rejects(
+      () => runHostedMission(
+        hostedBody({ inPlace: true, coordinator: 'no-such-profile' }),
+        {
+          ...ctx,
+          runtime: new ScriptedRuntime({}),
+        },
+        () => {},
+      ),
+      /--coordinator/,
+    );
+    assert.deepEqual(created, []);
+    assert.equal(persistCalls(), 0);
+    await assert.rejects(() => ctx.built.platform.getMissionView('M-hosted'));
+  });
+
+  test('注入既有 platform/baseUrl/workspace 创建并跑完；续跑不新建', async () => {
+    const { ctx, workspace, persistCalls } = await hostedDeps();
+    const lines: string[] = [];
+    const code = await runHostedMission(
+      hostedBody({ inPlace: true }),
+      {
+        ...ctx,
+        runtime: new ScriptedRuntime({ ...COORDINATOR_HAPPY, ...EXECUTOR_HAPPY }),
+      },
+      (_channel, line) => {
+        lines.push(line);
+      },
+    );
+    assert.equal(code, 0);
+    assert.ok(lines.some((line) => /Mission 结果：awaiting_l3_review/.test(line)));
+    const view = await ctx.built.platform.getMissionView('M-hosted');
+    assert.equal(view.status, 'awaiting_review');
+    assert.ok(persistCalls() >= 1);
+    assert.equal(ctx.workspace, workspace);
+
+    const again = await runHostedMission(
+      hostedBody({ inPlace: true }),
+      {
+        ...ctx,
+        runtime: new ScriptedRuntime({}),
+      },
+      (_channel, line) => {
+        lines.push(line);
+      },
+    );
+    assert.equal(again, 0);
+    assert.ok(lines.some((line) => /已存在/.test(line)));
+    const view2 = await ctx.built.platform.getMissionView('M-hosted');
+    assert.equal(view2.workItems.length, 1);
+  });
+
+  test('live 锁 CLI 原样转发参数与 env 声明，边印 stdout/stderr 并设置退出码', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-mission-fwd-'));
+    temps.push(dir);
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const seen: unknown[] = [];
+    try {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const platform = new Platform({
+        projects,
+        deliveries,
+        workspace: new InPlaceWorkspaceManager(),
+        activity,
+        clock,
+        ids,
+      });
+      const tokens = new RunTokenRegistry();
+      const server: Server = createApi({
+        platform,
+        tokens,
+        deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runMission: async (body, emit) => {
+          seen.push(body);
+          emit('stdout', 'hosted-out');
+          emit('stderr', 'hosted-err');
+          return 9;
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+
+      const mission = join(dir, 'mission.json');
+      writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-fwd', contract: CONTRACT }));
+      const spawned = await spawnRunMission([
+          mission,
+          '--cwd',
+          dir,
+          '--state',
+          statePath,
+          '--in-place',
+          '--coordinator',
+          'coord-a',
+          '--max-rounds',
+          '3',
+          '--accept-stale-base',
+        ]);
+      assert.equal(spawned.status, 9, `${spawned.stdout}${spawned.stderr}`);
+      assert.match(spawned.stdout, /hosted-out/);
+      assert.match(`${spawned.stderr}`, /hosted-err/);
+      assert.equal(seen.length, 1);
+      const body = seen[0] as Record<string, unknown>;
+      assert.equal((body.spec as { missionId: string }).missionId, 'M-fwd');
+      assert.equal(body.inPlace, true);
+      assert.equal(body.maxRounds, 3);
+      assert.equal(body.acceptStaleBase, true);
+      assert.equal(body.coordinator, 'coord-a');
+      assert.equal(body.store, 'file');
+      assert.deepEqual(body.env, { COAGENT_AGENT_ENV_PASSTHROUGH: '-' });
+      assert.doesNotMatch(`${spawned.stdout}${spawned.stderr}`, /平台正被另一个进程占用/);
+    } finally {
+      release();
+    }
+  });
+
+  test('CLI 与服务同名 agent 变量取值不同时拒绝转发且不写主状态、不回落、不打印取值', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-mission-env-mismatch-'));
+    temps.push(dir);
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const seen: unknown[] = [];
+    const persistCalls: number[] = [];
+    const cliSecret = 'cli-secret-w95-aa11';
+    const svcSecret = 'svc-secret-w95-bb22';
+    try {
+      const { ctx } = await hostedDeps();
+      ctx.built.persist = () => {
+        persistCalls.push(1);
+      };
+      const server: Server = createApi({
+        platform: ctx.built.platform,
+        tokens: ctx.built.tokens,
+        deliveries: ctx.built.deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runMission: async (body, emit) => {
+          seen.push(body);
+          return runHostedMission(
+            body,
+            {
+              ...ctx,
+              env: {
+                COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN',
+                HUB_TEST_TOKEN: svcSecret,
+              },
+            },
+            emit,
+          );
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+
+      const mission = join(dir, 'mission.json');
+      writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-env', contract: CONTRACT }));
+      const spawned = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
+        (resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            ['--experimental-strip-types', 'src/run-mission.ts', mission, '--cwd', dir, '--state', statePath, '--in-place'],
+            {
+              cwd: fileURLToPath(new URL('..', import.meta.url)),
+              env: {
+                ...process.env,
+                COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN',
+                HUB_TEST_TOKEN: cliSecret,
+              },
+            },
+          );
+          let stdout = '';
+          let stderr = '';
+          child.stdout?.on('data', (chunk) => {
+            stdout += String(chunk);
+          });
+          child.stderr?.on('data', (chunk) => {
+            stderr += String(chunk);
+          });
+          const timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            reject(new Error(`run-mission 超时：${stdout}${stderr}`));
+          }, 20_000);
+          child.once('exit', (status) => {
+            clearTimeout(timer);
+            resolve({ status, stdout, stderr });
+          });
+        },
+      );
+      const out = `${spawned.stdout}${spawned.stderr}`;
+      assert.notEqual(spawned.status, 0, out);
+      assert.match(out, /无法证明|未写入|主状态未改/);
+      assert.doesNotMatch(out, new RegExp(cliSecret));
+      assert.doesNotMatch(out, new RegExp(svcSecret));
+      assert.doesNotMatch(out, /Mission 结果：/);
+      assert.doesNotMatch(out, /平台监听/);
+      assert.equal(seen.length, 0, '取值无法证明一致时不得把 body 送进回环');
+      assert.deepEqual(persistCalls, []);
+      await assert.rejects(() => ctx.built.platform.getMissionView('M-env'));
+      assert.equal(readFileSync(statePath, 'utf8'), '{}');
+    } finally {
+      release();
+    }
+  });
+
+  test('回环断线不落回本地独占装配', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-mission-cut-'));
+    temps.push(dir);
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const stateId = stateIdFor(statePath);
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const stub = createServer((req, res) => {
+      const url = req.url ?? '/';
+      if (url.startsWith('/api/health')) {
+        res.writeHead(200, {
+          'x-coagent-api': API_VERSION,
+          'x-coagent-instance': instanceId,
+          'x-coagent-state-id': stateId,
+          'content-type': 'application/json',
+        });
+        res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+        return;
+      }
+      res.writeHead(200, {
+        'x-coagent-api': API_VERSION,
+        'x-coagent-instance': instanceId,
+        'x-coagent-state-id': stateId,
+        'content-type': 'application/x-ndjson; charset=utf-8',
+      });
+      res.write(`${JSON.stringify({ channel: 'stdout', line: 'partial' })}\n`);
+      req.socket.destroy();
+    });
+    try {
+      await listenLoopback(stub, 0);
+      servers.push(stub);
+      publishLockPort(statePath, instanceId, (stub.address() as AddressInfo).port);
+      const mission = join(dir, 'mission.json');
+      writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-cut', contract: CONTRACT }));
+      const spawned = await spawnRunMission([
+          mission,
+          '--cwd',
+          dir,
+          '--state',
+          statePath,
+          '--in-place',
+        ]);
+      assert.notEqual(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
+      assert.match(`${spawned.stdout}${spawned.stderr}`, /截断|写者断线/);
+      assert.doesNotMatch(`${spawned.stdout}${spawned.stderr}`, /Mission 结果：/);
+      assert.doesNotMatch(`${spawned.stdout}${spawned.stderr}`, /平台监听/);
+    } finally {
+      release();
     }
   });
 });

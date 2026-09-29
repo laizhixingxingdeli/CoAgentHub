@@ -11,12 +11,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createApi } from './api/server.ts';
+import { API_VERSION, createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
+import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import { loopbackRunRequest } from './application/loopback-control-client.ts';
+import {
+  HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+  MissionRunner,
+  parseMaxRounds,
+} from './application/mission-runner.ts';
 import {
   parseAgentEnvPassthrough,
+  SPAWN_ENV_PASSTHROUGH_VAR,
   SPAWN_ENV_UNDECLARED_MESSAGE,
   SpawnRuntime,
 } from './runtime/spawn.ts';
@@ -41,6 +48,89 @@ export function missionRunOptions(projectRoot: string, maxRounds: number | undef
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function occupiedMessage(reason: string): string {
+  return `无法安全转发到本机写者：${reason}。主状态未改。`;
+}
+
+function requireLiveIdentity(holder: LockInfo): {
+  port: number;
+  instanceId: string;
+  stateId: string;
+  apiVersion: string;
+} {
+  if (
+    holder.port === undefined ||
+    holder.instanceId === undefined ||
+    holder.stateId === undefined ||
+    holder.apiVersion === undefined
+  ) {
+    throw new Error('活着的写者元数据不完整，拒绝转发。主状态未改。');
+  }
+  if (holder.apiVersion !== API_VERSION) {
+    throw new Error('API 版本不符，拒绝转发。主状态未改。');
+  }
+  return {
+    port: holder.port,
+    instanceId: holder.instanceId,
+    stateId: holder.stateId,
+    apiVersion: holder.apiVersion,
+  };
+}
+
+function hostedRunBody(input: {
+  spec: unknown;
+  cwd: string;
+  adapter: string;
+  statePath: string;
+  store: string;
+  inPlace: boolean;
+  worktrees?: string;
+  coordinator?: string;
+  executor?: string;
+  independentReviewer?: string;
+  maxRounds?: number;
+  acceptStaleBase: boolean;
+  origin?: string;
+  envPassthroughRaw: string | undefined;
+}): Record<string, unknown> {
+  return {
+    spec: input.spec,
+    cwd: input.cwd,
+    adapter: input.adapter,
+    state: input.statePath,
+    store: input.store,
+    inPlace: input.inPlace,
+    ...(input.worktrees !== undefined ? { worktrees: input.worktrees } : {}),
+    ...(input.coordinator !== undefined ? { coordinator: input.coordinator } : {}),
+    ...(input.executor !== undefined ? { executor: input.executor } : {}),
+    ...(input.independentReviewer !== undefined
+      ? { independentReviewer: input.independentReviewer }
+      : {}),
+    ...(input.maxRounds === undefined ? {} : { maxRounds: input.maxRounds }),
+    acceptStaleBase: input.acceptStaleBase,
+    ...(input.origin !== undefined ? { origin: input.origin } : {}),
+    env: { [SPAWN_ENV_PASSTHROUGH_VAR]: input.envPassthroughRaw },
+  };
+}
+
+async function forwardLiveRun(holder: LockInfo, body: Record<string, unknown>): Promise<number> {
+  const envBag = body.env;
+  const rawPass =
+    typeof envBag === 'object' && envBag !== null && !Array.isArray(envBag)
+      ? (envBag as Record<string, unknown>)[SPAWN_ENV_PASSTHROUGH_VAR]
+      : undefined;
+  const names = typeof rawPass === 'string' ? parseAgentEnvPassthrough(rawPass) : undefined;
+  if (names !== undefined && names.length > 0) {
+    // 取值不能进回环；服务 env 同名键也证明不了跟本进程一致。拒绝发生在 POST 之前。
+    throw new Error(`无法安全转发到本机写者：${HOSTED_AGENT_ENV_UNPROVEN_MESSAGE}`);
+  }
+  const identity = requireLiveIdentity(holder);
+  return loopbackRunRequest(identity, { path: '/api/control/run-mission', body }, (channel, line) => {
+    if (channel === 'stderr') console.error(line);
+    else console.log(line);
+  });
 }
 
 /**
@@ -82,7 +172,7 @@ async function main() {
     return;
   }
 
-  // 决策依赖在读任何输入之前组装：shadow 缺 key 就在这里失败，不留半截 Mission / 状态 / 锁。
+  // 读 mission JSON 之前就 fail-closed：shadow 缺 key 不得先 ENOENT。后面建平台复用这份 decision。
   const decision = buildDecisionDeps(process.env);
 
   const spec = JSON.parse(readFileSync(resolve(missionFile), 'utf8')) as {
@@ -104,11 +194,10 @@ async function main() {
     arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts',
   );
 
-  // 在 createMission / listen 之前就确认透传名单：名单未声明时不应留下「半截
+  // 在 createMission / listen / 探测转发之前就确认透传名单：名单未声明时不应留下「半截
   // Mission + 已监听端口」——失败必须发生在任何副作用之前。空字符串是合法封锁。
-  const envPassthrough = parseAgentEnvPassthrough(
-    process.env.COAGENT_AGENT_ENV_PASSTHROUGH,
-  );
+  const envPassthroughRaw = process.env.COAGENT_AGENT_ENV_PASSTHROUGH;
+  const envPassthrough = parseAgentEnvPassthrough(envPassthroughRaw);
   if (envPassthrough === undefined) {
     throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
   }
@@ -119,22 +208,72 @@ async function main() {
   // 由版本号挡并发写，再加一把进程锁只会挡住合法的并行 Mission。
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  const storeFlag = arg('--store') ?? (usePg ? 'pg' : 'file');
+  const inPlace = process.argv.includes('--in-place');
+  const acceptStaleBase = process.argv.includes('--accept-stale-base');
+  const forwardBody = hostedRunBody({
+    spec,
+    cwd,
+    adapter,
+    statePath,
+    store: storeFlag,
+    inPlace,
+    worktrees: arg('--worktrees'),
+    coordinator: arg('--coordinator'),
+    executor: arg('--executor'),
+    independentReviewer: arg('--independent-reviewer'),
+    maxRounds,
+    acceptStaleBase,
+    origin: arg('--origin'),
+    envPassthroughRaw,
+  });
+
+  // 文件版：parse/预检之后探测本机写者。live 回环转发，不得因连接不明落回本地。
+  // PG 不走文件锁探测，保持旧单实例边界。
+  if (!usePg) {
+    const probe = await probeLocalWriter(statePath);
+    if (probe.status === 'live') {
+      const code = await forwardLiveRun(probe.holder, forwardBody);
+      process.exit(code);
+    }
+    if (probe.status === 'occupied') {
+      throw new Error(occupiedMessage(probe.reason));
+    }
+  }
+
   // Platform validator 与 Orchestrator 必须共享同一个 WorkspaceManager 实例。
-  const missionWorkspace = process.argv.includes('--in-place')
+  const missionWorkspace = inPlace
     ? new InPlaceWorkspaceManager()
     : new GitWorktreeManager(arg('--worktrees'));
-  const built = usePg
-    ? await buildPgPlatform({
-        ...decision,
-        workspace: missionWorkspace,
-        // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
-        reconcileMissionId: spec.missionId,
-      })
-    : await buildPersistentPlatform(statePath, {
-        ...decision,
-        workspace: missionWorkspace,
-        exclusive: { what: `跑 Mission ${spec.missionId}` },
-      });
+  let built;
+  try {
+    built = usePg
+      ? await buildPgPlatform({
+          ...decision,
+          workspace: missionWorkspace,
+          // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
+          reconcileMissionId: spec.missionId,
+        })
+      : await buildPersistentPlatform(statePath, {
+          ...decision,
+          workspace: missionWorkspace,
+          exclusive: { what: `跑 Mission ${spec.missionId}` },
+        });
+  } catch (error) {
+    if (!usePg && error instanceof LockBusyError) {
+      const again = await probeLocalWriter(statePath);
+      if (again.status === 'live') {
+        const code = await forwardLiveRun(again.holder, forwardBody);
+        process.exit(code);
+      }
+      throw new Error(
+        again.status === 'occupied'
+          ? occupiedMessage(again.reason)
+          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
+      );
+    }
+    throw error;
+  }
   const { platform, tokens, activity, deliveries, persist, reconciled, agentPool, candidateCircuits, queuedHops } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;

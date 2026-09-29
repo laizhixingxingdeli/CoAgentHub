@@ -6,7 +6,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,9 +14,17 @@ import type { AddressInfo } from 'node:net';
 import { createServer, type Server } from 'node:http';
 
 import { acquireLock, LockBusyError, probeLocalWriter, stateIdFor } from '../src/application/lock.ts';
+import {
+  LoopbackHttpError,
+  loopbackRunRequest,
+} from '../src/application/loopback-control-client.ts';
+import type { AgentRuntime } from '../src/application/ports.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { bindServerCloseToPeriodicStop, startServer } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { API_VERSION } from '../src/api/server.ts';
+import { ScriptedRuntime } from '../src/runtime/scripted.ts';
+import type { ScriptTable } from '../src/runtime/scripted.ts';
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -1035,3 +1043,499 @@ describe('server.close 异常路径', () => {
     }
   });
 });
+
+const HOSTED_PLAN = {
+  findings: 'foo 一直返回 0',
+  rootCause: '初始值写错了',
+  rejectedHypotheses: ['不是调用方传错'],
+  decisions: ['直接改初始值'],
+  direction: '改 src/foo.ts',
+  risks: [] as string[],
+};
+
+const HOSTED_ORDER = {
+  objective: '改 foo',
+  allowedScope: ['src/foo.ts'],
+  requiredBehaviour: 'foo 返回 1',
+  constraints: [] as string[],
+  acceptance: ['foo() === 1'],
+  verification: ['node --test'],
+  doNot: [] as string[],
+  contextRefs: [] as string[],
+};
+
+const COORDINATOR_HAPPY: ScriptTable = {
+  'coordinator:-:0': {
+    steps: [
+      { tool: 'coagent_get_mission', body: {} },
+      { tool: 'coagent_update_plan', body: HOSTED_PLAN },
+      { tool: 'coagent_create_work_item', body: { title: '修 foo', ...HOSTED_ORDER } },
+      {
+        tool: 'coagent_dispatch_work_item',
+        body: (previous: Record<string, unknown>) => ({ workItemIds: [previous.workItemId] }),
+      },
+    ],
+  },
+  'coordinator:-:1': {
+    steps: [
+      { tool: 'coagent_get_mission', body: {} },
+      {
+        tool: 'coagent_review_execution_result',
+        body: {
+          workItemId: 'W-1',
+          verdict: 'accept',
+          acceptanceResults: HOSTED_ORDER.acceptance.map((criterion) => ({
+            criterion,
+            status: 'pass' as const,
+            evidence: '测试替身：逐条核过',
+          })),
+          reasons: ['自己复跑过 node --test，退出码 0'],
+          requiredChanges: [],
+        },
+      },
+      {
+        tool: 'coagent_submit_mission_result',
+        body: {
+          outcome: 'delivered',
+          summary: '改好了并验证过',
+          acceptanceEvidence: ['node --test 退出码 0'],
+          memoryDelta: [],
+          openRisks: [],
+        },
+      },
+    ],
+  },
+};
+
+const EXECUTOR_HAPPY: ScriptTable = {
+  'executor:W-1': {
+    steps: [
+      { tool: 'coagent_get_work_order', body: {} },
+      {
+        tool: 'coagent_submit_evidence',
+        body: { kind: 'test', summary: 'node --test 全绿', command: 'node --test', exitCode: 0 },
+      },
+      {
+        tool: 'coagent_submit_execution_result',
+        body: (previous: Record<string, unknown>) => ({
+          outcome: 'completed',
+          summary: '改了初始值',
+          changedFiles: ['src/foo.ts'],
+          evidenceIds: [previous.evidenceId],
+          notes: '无',
+        }),
+      },
+    ],
+  },
+};
+
+function gatedRuntime(): { runtime: AgentRuntime; release: () => void; started: Promise<void> } {
+  let release = () => {};
+  let markStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    runtime: {
+      kind: 'test-gate',
+      async start() {
+        markStarted();
+        return {
+          on() {
+            return () => {};
+          },
+          async abort() {
+            release();
+          },
+          wait: async () => {
+            await gate;
+            return {
+              endedBy: 'no_structured_result' as const,
+              usage: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+                quality: 'unknown' as const,
+              },
+            };
+          },
+        };
+      },
+    },
+    release,
+    started,
+  };
+}
+
+function hostedMissionBody(dir: string, adapter: string, statePath: string, missionId = 'M-hosted') {
+  return {
+    spec: { projectId: 'P-hosted', missionId, contract: WRITE_CONTRACT },
+    cwd: dir,
+    adapter,
+    state: statePath,
+    env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+    inPlace: true,
+    store: 'file',
+  };
+}
+
+function hostedPlanBody(dir: string, adapter: string, statePath: string, runDir: string) {
+  return {
+    plan: {
+      planId: 'PLAN-hosted',
+      projectId: 'P-hosted',
+      intent: '修 foo',
+      integrationBranch: 'auto/hosted',
+      reviewer: 'claude',
+      stopConditions: {
+        unresolvedEscalations: 1,
+        wallClockMs: 60_000,
+        escalationTimeoutMs: 60_000,
+      },
+      integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 60_000 }],
+      features: [
+        {
+          id: 'F1',
+          title: '修 foo',
+          why: 'w',
+          allowedScope: ['a.txt'],
+          acceptance: ['x'],
+          status: 'pending',
+        },
+      ],
+    },
+    cwd: dir,
+    adapter,
+    state: statePath,
+    store: 'file',
+    runDir,
+    env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+  };
+}
+
+async function liveTarget(statePath: string) {
+  const probed = await probeLocalWriter(statePath);
+  assert.equal(probed.status, 'live');
+  if (probed.status !== 'live') throw new Error('expected live');
+  assert.ok(probed.holder.port);
+  return {
+    port: probed.holder.port!,
+    instanceId: probed.holder.instanceId!,
+    stateId: probed.holder.stateId!,
+    apiVersion: probed.holder.apiVersion!,
+  };
+}
+
+describe('startServer hosted 接线与排空',
+  () => {
+    test('源码：两种 hosted 回调交给同一 createApi；close 先 drain 再停 tick/persist',
+      () => {
+        const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
+        const startServerSrc = main.slice(main.indexOf('export async function startServer'));
+        assert.equal([...startServerSrc.matchAll(/createApi\(/g)].length, 1);
+        assert.equal([...startServerSrc.matchAll(/listenLoopback\(/g)].length, 1);
+        assert.match(startServerSrc, /runMission:/);
+        assert.match(startServerSrc, /runPlan:/);
+        assert.match(startServerSrc, /runHostedMission\(/);
+        assert.match(startServerSrc, /runHostedPlan\(/);
+        assert.match(startServerSrc, /heldState/);
+        assert.match(startServerSrc, /hostedHeldState\(/);
+        assert.match(main, /kind: 'unsupported'/);
+        assert.match(main, /stateIdFor\(heldPath\)/);
+        assert.doesNotMatch(startServerSrc, /statePath: body\.state/);
+        assert.match(startServerSrc, /drainApi\(/);
+        assert.match(startServerSrc, /periodic\?\.stop\(\)/);
+        assert.match(startServerSrc, /built\.persist\(\)/);
+        assert.match(startServerSrc, /baseUrl: loopback\.baseUrl/);
+        assert.match(main, /process\.once\('SIGINT'/);
+        assert.match(main, /process\.once\('SIGTERM'/);
+      },
+    );
+
+    test('未注入 runtime 时 hosted 入口已接上：非法 body 走同一平台且不另开写者',
+      async () => {
+        const statePath = tempState();
+        const built = await startServer(0, statePath, {
+          env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+          workspace: new InPlaceWorkspaceManager(),
+        });
+        servers.push(built.server);
+        if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+          releaseFns.push(built.releaseLock);
+        }
+        const target = await liveTarget(statePath);
+        const lines: string[] = [];
+        const code = await loopbackRunRequest(
+          target,
+          { path: '/api/control/run-mission', body: { cwd: dirname(statePath), state: statePath } },
+          (_channel, line) => {
+            lines.push(line);
+          },
+        );
+        assert.equal(code, 1);
+        assert.ok(
+          lines.some((line) => /adapter 必填|必须是对象|COAGENT_AGENT_ENV_PASSTHROUGH/.test(line)),
+          lines.join('\n'),
+        );
+        const addr = built.server.address() as AddressInfo;
+        const listed = await fetch(`http://${addr.address}:${addr.port}/api/missions`);
+        assert.equal(listed.status, 200);
+        assert.deepEqual(await listed.json(), []);
+        assert.throws(() => acquireLock(statePath, 'second-writer'), LockBusyError);
+        await new Promise<void>((done, fail) => {
+          built.server.close((err) => (err ? fail(err) : done()));
+        });
+      },
+    );
+
+    test(
+      '真子进程回环：进行中先于终态，Agent 回连同一服务，无第二把主锁',
+      { timeout: 30_000 },
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-cli-'));
+        dirs.push(dir);
+        const statePath = join(dir, 'state.json');
+        const adapter = join(dir, 'adapter.ts');
+        writeFileSync(adapter, '// hosted adapter fixture\n');
+        const missionPath = join(dir, 'mission.json');
+        writeFileSync(
+          missionPath,
+          JSON.stringify({
+            projectId: 'P-hosted',
+            missionId: 'M-hosted',
+            contract: WRITE_CONTRACT,
+          }),
+        );
+        const built = await startServer(0, statePath, {
+          env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+          workspace: new InPlaceWorkspaceManager(),
+          runtime: new ScriptedRuntime({ ...COORDINATOR_HAPPY, ...EXECUTOR_HAPPY }),
+        });
+        servers.push(built.server);
+        if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+          releaseFns.push(built.releaseLock);
+        }
+        const beforeLock = await probeLocalWriter(statePath);
+        assert.equal(beforeLock.status, 'live');
+
+        const child = spawn(
+          process.execPath,
+          [
+            '--experimental-strip-types',
+            fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
+            missionPath,
+            '--cwd',
+            dir,
+            '--state',
+            statePath,
+            '--in-place',
+            '--adapter',
+            adapter,
+          ],
+          {
+            env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+          },
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', (chunk) => {
+          stdout += String(chunk);
+        });
+        child.stderr?.on('data', (chunk) => {
+          stderr += String(chunk);
+        });
+        const status = await new Promise<number | null>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            reject(new Error(`run-mission 超时：${stdout}${stderr}`));
+          }, 20_000);
+          child.once('exit', (code) => {
+            clearTimeout(timer);
+            resolve(code);
+          });
+        });
+        const out = `${stdout}${stderr}`;
+        assert.equal(status, 0, out);
+        const startAt = stdout.indexOf('Mission M-hosted');
+        const resultAt = stdout.indexOf('Mission 结果：');
+        assert.ok(startAt >= 0 && resultAt > startAt, stdout);
+        assert.match(stdout, /平台监听 http:\/\/127\.0\.0\.1:/);
+        assert.doesNotMatch(out, /平台正被另一个进程占用/);
+        assert.doesNotMatch(out, /HOSTED_RUN_UNAVAILABLE/);
+
+        const addr = built.server.address() as AddressInfo;
+        const view = await fetch(`http://${addr.address}:${addr.port}/api/missions/M-hosted`);
+        assert.equal(view.status, 200);
+        const body = (await view.json()) as { status: string; missionId?: string };
+        assert.equal(body.status, 'awaiting_review');
+
+        const afterLock = await probeLocalWriter(statePath);
+        assert.equal(afterLock.status, 'live');
+        if (beforeLock.status === 'live' && afterLock.status === 'live') {
+          assert.equal(afterLock.holder.instanceId, beforeLock.holder.instanceId);
+        }
+        await new Promise<void>((done, fail) => {
+          built.server.close((err) => (err ? fail(err) : done()));
+        });
+      },
+    );
+
+    test(
+      'server.close 先拒新启动，等在途 runner 结束才释锁；残锁不可抢',
+      { timeout: 20_000 },
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-drain-'));
+        dirs.push(dir);
+        const statePath = join(dir, 'state.json');
+        const adapter = join(dir, 'adapter.ts');
+        writeFileSync(adapter, '// drain adapter\n');
+        const gated = gatedRuntime();
+        const built = await startServer(0, statePath, {
+          env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+          workspace: new InPlaceWorkspaceManager(),
+          runtime: gated.runtime,
+        });
+        servers.push(built.server);
+        if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+          releaseFns.push(built.releaseLock);
+        }
+        const target = await liveTarget(statePath);
+        const running = loopbackRunRequest(
+          target,
+          { path: '/api/control/run-mission', body: hostedMissionBody(dir, adapter, statePath, 'M-drain') },
+          () => {},
+        );
+        await gated.started;
+        assert.throws(() => acquireLock(statePath, 'during-run'), LockBusyError);
+
+        let closed = false;
+        const closing = new Promise<void>((done, fail) => {
+          built.server.close((err) => {
+            closed = true;
+            err ? fail(err) : done();
+          });
+        });
+        await new Promise((done) => setTimeout(done, 40));
+        assert.equal(closed, false, '在途 hosted 未结束时 close 不得完成');
+        assert.throws(() => acquireLock(statePath, 'during-drain'), LockBusyError);
+
+        await assert.rejects(
+          () =>
+            loopbackRunRequest(
+              target,
+              { path: '/api/control/run-mission', body: hostedMissionBody(dir, adapter, statePath, 'M-new') },
+              () => {},
+            ),
+          (error: unknown) =>
+            error instanceof LoopbackHttpError &&
+            error.status === 503 &&
+            error.code === 'SERVICE_DRAINING',
+        );
+
+        const addr = built.server.address() as AddressInfo;
+        const health = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+        assert.equal(health.status, 200);
+
+        gated.release();
+        await running;
+        await closing;
+        assert.equal(closed, true);
+        const probe = acquireLock(statePath, 'after-drain');
+        probe();
+      },
+    );
+
+    test(
+      '另一 statePath 或缺 state 的 hosted Mission/Plan 在写入前拒绝；同身份仍可跑',
+      { timeout: 30_000 },
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-state-'));
+        dirs.push(dir);
+        const statePath = join(dir, 'state.json');
+        const adapter = join(dir, 'adapter.ts');
+        writeFileSync(adapter, '// hosted state adapter\n');
+        const otherDir = mkdtempSync(join(tmpdir(), 'coagent-hosted-other-state-'));
+        dirs.push(otherDir);
+        const otherState = join(otherDir, 'state.json');
+        writeFileSync(otherState, '{}');
+        const runDir = join(dir, 'plans');
+        const built = await startServer(0, statePath, {
+          env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+          workspace: new InPlaceWorkspaceManager(),
+          runtime: new ScriptedRuntime({ ...COORDINATOR_HAPPY, ...EXECUTOR_HAPPY }),
+        });
+        servers.push(built.server);
+        if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+          releaseFns.push(built.releaseLock);
+        }
+        const target = await liveTarget(statePath);
+        const addr = built.server.address() as AddressInfo;
+
+        const rejectAndAssertClean = async (
+          path: '/api/control/run-mission' | '/api/control/run-plan',
+          body: Record<string, unknown>,
+          errorPat: RegExp,
+        ) => {
+          const lines: string[] = [];
+          const code = await loopbackRunRequest(target, { path, body }, (_channel, line) => {
+            lines.push(line);
+          });
+          assert.equal(code, 1, lines.join('\n'));
+          assert.ok(
+            lines.some((line) => errorPat.test(line)),
+            lines.join('\n'),
+          );
+          const listed = await fetch(`http://${addr.address}:${addr.port}/api/missions`);
+          assert.equal(listed.status, 200);
+          assert.deepEqual(await listed.json(), []);
+          assert.equal(existsSync(runDir), false);
+        };
+
+        await rejectAndAssertClean(
+          '/api/control/run-mission',
+          hostedMissionBody(dir, adapter, otherState, 'M-wrong'),
+          /同一文件|持锁/,
+        );
+        const missingMission = hostedMissionBody(dir, adapter, statePath, 'M-missing');
+        delete missingMission.state;
+        await rejectAndAssertClean('/api/control/run-mission', missingMission, /缺少 state/);
+
+        await rejectAndAssertClean(
+          '/api/control/run-plan',
+          hostedPlanBody(dir, adapter, otherState, runDir),
+          /同一文件|持锁/,
+        );
+        const missingPlan = hostedPlanBody(dir, adapter, statePath, runDir);
+        delete missingPlan.state;
+        await rejectAndAssertClean('/api/control/run-plan', missingPlan, /缺少 state/);
+
+        const sameAlias = join(dir, '.', 'state.json');
+        const happyLines: string[] = [];
+        const happy = await loopbackRunRequest(
+          target,
+          {
+            path: '/api/control/run-mission',
+            body: hostedMissionBody(dir, adapter, sameAlias, 'M-same'),
+          },
+          (_channel, line) => {
+            happyLines.push(line);
+          },
+        );
+        assert.equal(happy, 0, happyLines.join('\n'));
+        const view = await fetch(`http://${addr.address}:${addr.port}/api/missions/M-same`);
+        assert.equal(view.status, 200);
+        const viewBody = (await view.json()) as { status: string };
+        assert.equal(viewBody.status, 'awaiting_review');
+
+        await new Promise<void>((done, fail) => {
+          built.server.close((err) => (err ? fail(err) : done()));
+        });
+      },
+    );
+  },
+);

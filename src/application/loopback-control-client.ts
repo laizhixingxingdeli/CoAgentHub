@@ -179,3 +179,162 @@ export function loopbackControlRequest(
     req.end();
   });
 }
+
+export interface LoopbackRunRequest {
+  readonly path: string;
+  readonly body?: unknown;
+}
+
+export type LoopbackRunLine = (channel: 'stdout' | 'stderr', line: string) => void;
+
+/**
+ * 对持锁服务发一次 hosted run 流。不重试、不回退。
+ * 头一到先核身份，再信任任何进度或 exitCode；缺终态 / 断线 / 身份错误都抛错。
+ * 非零 exitCode 原样返回——那是 job 的结果，不是传输失败。
+ *
+ * 缺省 timeout 0 且 agent: false：Node 19+ globalAgent keepAlive 会给已连接
+ * socket 默认 5s 空闲超时。不传 timeoutMs 时看起来像「没有超时」，实际会在方案
+ * 等升级决定（poll 15s、中间无 stdout）时触发「回环运行流超时」，对端 job 还在跑。
+ * 调用方传入 timeoutMs>0 时仍按空闲超时失败，且不得重试。心跳帧不进 onLine。
+ */
+export function loopbackRunRequest(
+  target: LoopbackWriterTarget,
+  input: LoopbackRunRequest,
+  onLine: LoopbackRunLine,
+  options?: { readonly timeoutMs?: number; readonly treatStateIdAsWindows?: boolean },
+): Promise<number> {
+  const timeoutMs = options?.timeoutMs ?? 0;
+  const windowsStateId = options?.treatStateIdAsWindows ?? process.platform === 'win32';
+  const payload = JSON.stringify(input.body === undefined ? {} : input.body);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (error: Error | undefined, value?: number) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value as number);
+    };
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        family: 4,
+        port: target.port,
+        path: input.path,
+        method: 'POST',
+        timeout: timeoutMs,
+        agent: false,
+        headers: {
+          accept: 'application/x-ndjson, application/json',
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        try {
+          assertWriterIdentity(target, res.headers, windowsStateId);
+        } catch (error) {
+          res.resume();
+          req.destroy();
+          done(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => {
+            chunks.push(chunk as Buffer);
+          });
+          res.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8');
+            let body: unknown = undefined;
+            if (raw.length > 0) {
+              try {
+                body = JSON.parse(raw) as unknown;
+              } catch {
+                done(new Error('写者应答不是 JSON。已接受的 job 可能仍在对端执行，不要重试。'));
+                return;
+              }
+            }
+            const rec =
+              body && typeof body === 'object' ? (body as { error?: unknown; message?: unknown }) : {};
+            const code = typeof rec.error === 'string' ? rec.error : 'HTTP_ERROR';
+            const message =
+              typeof rec.message === 'string' && rec.message.length > 0
+                ? rec.message
+                : `HTTP ${String(status)}`;
+            done(new LoopbackHttpError(status, code, message));
+          });
+          return;
+        }
+        let buffer = '';
+        let exitCode: number | undefined;
+        const consume = (chunk: string): void => {
+          buffer += chunk;
+          let nl = buffer.indexOf('\n');
+          while (nl >= 0) {
+            const rawLine = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            nl = buffer.indexOf('\n');
+            if (rawLine.length === 0) continue;
+            let event: unknown;
+            try {
+              event = JSON.parse(rawLine) as unknown;
+            } catch {
+              req.destroy();
+              done(new Error('运行流不是合法 NDJSON。已接受的 job 可能仍在对端执行，不要重试。'));
+              return;
+            }
+            if (!event || typeof event !== 'object') continue;
+            const rec = event as {
+              exitCode?: unknown;
+              channel?: unknown;
+              line?: unknown;
+              heartbeat?: unknown;
+            };
+            if (typeof rec.exitCode === 'number' && Number.isFinite(rec.exitCode)) {
+              if (exitCode === undefined) exitCode = rec.exitCode;
+              continue;
+            }
+            // 协议心跳只为撑住长等，不能进 CLI stdout。
+            if (rec.heartbeat === true) continue;
+            if (rec.channel === 'stdout' || rec.channel === 'stderr') {
+              onLine(rec.channel, typeof rec.line === 'string' ? rec.line : String(rec.line ?? ''));
+            }
+          }
+        };
+        res.on('data', (chunk) => {
+          if (settled) return;
+          try {
+            consume(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+          } catch (error) {
+            req.destroy();
+            done(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+        res.on('end', () => {
+          if (settled) return;
+          if (exitCode === undefined) {
+            done(
+              new Error('运行流在终态之前被截断。已接受的 job 可能仍在对端执行，不要重试。'),
+            );
+            return;
+          }
+          done(undefined, exitCode);
+        });
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      done(new Error('写者断线：回环运行流超时。已接受的 job 可能仍在对端执行，不要重试。'));
+    });
+    req.on('error', (error) => {
+      done(
+        new Error(
+          `写者断线：${error.message}。已接受的 job 可能仍在对端执行，不要重试。`,
+        ),
+      );
+    });
+    req.write(payload);
+    req.end();
+  });
+}

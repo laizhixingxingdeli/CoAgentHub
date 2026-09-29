@@ -21,13 +21,15 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { createApi } from './api/server.ts';
+import { API_VERSION, createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
+import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
-import { runPlanOnPlatform } from './application/plan-runtime.ts';
+import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import {
   candidateHandoffText,
@@ -56,6 +58,7 @@ import {
 } from './main.ts';
 import {
   parseAgentEnvPassthrough,
+  SPAWN_ENV_PASSTHROUGH_VAR,
   SPAWN_ENV_UNDECLARED_MESSAGE,
   SpawnRuntime,
 } from './runtime/spawn.ts';
@@ -221,6 +224,94 @@ function stamp(date: Date): string {
   );
 }
 
+function occupiedMessage(reason: string): string {
+  return `无法安全转发到本机写者：${reason}。主状态未改。`;
+}
+
+function requireLiveIdentity(holder: LockInfo): {
+  port: number;
+  instanceId: string;
+  stateId: string;
+  apiVersion: string;
+} {
+  if (
+    holder.port === undefined ||
+    holder.instanceId === undefined ||
+    holder.stateId === undefined ||
+    holder.apiVersion === undefined
+  ) {
+    throw new Error('活着的写者元数据不完整，拒绝转发。主状态未改。');
+  }
+  if (holder.apiVersion !== API_VERSION) {
+    throw new Error('API 版本不符，拒绝转发。主状态未改。');
+  }
+  return {
+    port: holder.port,
+    instanceId: holder.instanceId,
+    stateId: holder.stateId,
+    apiVersion: holder.apiVersion,
+  };
+}
+
+function hostedPlanBody(input: {
+  plan: PlanSpec;
+  selection: PlanCandidateSelection;
+  cwd: string;
+  adapter: string;
+  statePath: string;
+  store: string;
+  runDir: string;
+  worktrees?: string;
+  coordinator?: string;
+  executor?: string;
+  independentReviewer?: string;
+  maxRounds?: number;
+  envPassthroughRaw: string | undefined;
+}): Record<string, unknown> {
+  return {
+    plan: input.plan,
+    selection: input.selection,
+    cwd: input.cwd,
+    adapter: input.adapter,
+    state: input.statePath,
+    store: input.store,
+    runDir: input.runDir,
+    ...(input.worktrees !== undefined ? { worktrees: input.worktrees } : {}),
+    ...(input.coordinator !== undefined ? { coordinator: input.coordinator } : {}),
+    ...(input.executor !== undefined ? { executor: input.executor } : {}),
+    ...(input.independentReviewer !== undefined
+      ? { independentReviewer: input.independentReviewer }
+      : {}),
+    ...(input.maxRounds === undefined ? {} : { maxRounds: input.maxRounds }),
+    env: { [SPAWN_ENV_PASSTHROUGH_VAR]: input.envPassthroughRaw },
+  };
+}
+
+async function forwardLivePlan(holder: LockInfo, body: Record<string, unknown>): Promise<number> {
+  const envBag = body.env;
+  const rawPass =
+    typeof envBag === 'object' && envBag !== null && !Array.isArray(envBag)
+      ? (envBag as Record<string, unknown>)[SPAWN_ENV_PASSTHROUGH_VAR]
+      : undefined;
+  const names = typeof rawPass === 'string' ? parseAgentEnvPassthrough(rawPass) : undefined;
+  if (names !== undefined && names.length > 0) {
+    // 取值不能进回环；服务 env 同名键也证明不了跟本进程一致。拒绝发生在 POST 之前。
+    throw new Error(`无法安全转发到本机写者：${HOSTED_AGENT_ENV_UNPROVEN_MESSAGE}`);
+  }
+  const identity = requireLiveIdentity(holder);
+  return loopbackRunRequest(
+    identity,
+    { path: '/api/control/run-plan', body },
+    (channel, line) => {
+      if (channel === 'stderr') console.error(line);
+      else console.log(line);
+    },
+    // 0 = 关掉套接字空闲超时。不显式传的话 Node 19+ globalAgent keepAlive 默认 5s，
+    // 升级等待中间没有 stdout 会被误报「回环运行流超时」，对端 job 还在跑。
+    { timeoutMs: 0 },
+  );
+}
+
 async function main() {
   const maxRounds = parseMaxRounds(flagValue('--max-rounds'), process.argv.includes('--max-rounds'));
   const planFile = planFileArg();
@@ -233,12 +324,14 @@ async function main() {
     return;
   }
 
-  // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
-  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
-  // 决策依赖在读任何输入之前组装：shadow 缺 key 就在这里失败，不留半截 Mission / 状态 / 锁。
+  // 正式跑：读 plan JSON 之前就 fail-closed。--check 已先行返回，不在这里做决策校验。
   const decision = buildDecisionDeps(process.env);
 
-  const envPassthrough = parseAgentEnvPassthrough(process.env.COAGENT_AGENT_ENV_PASSTHROUGH);
+  // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
+  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
+
+  const envPassthroughRaw = process.env.COAGENT_AGENT_ENV_PASSTHROUGH;
+  const envPassthrough = parseAgentEnvPassthrough(envPassthroughRaw);
   if (envPassthrough === undefined) throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
 
   const plan = parsePlanSpec(JSON.parse(readFileSync(resolve(planFile), 'utf8')), {
@@ -262,6 +355,37 @@ async function main() {
   const adapter = resolve(arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts');
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  const storeFlag = arg('--store') ?? (usePg ? 'pg' : 'file');
+  const runDir = resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
+  const forwardBody = hostedPlanBody({
+    plan,
+    selection,
+    cwd: projectRoot,
+    adapter,
+    statePath,
+    store: storeFlag,
+    runDir,
+    worktrees: arg('--worktrees'),
+    coordinator: arg('--coordinator'),
+    executor: arg('--executor'),
+    independentReviewer: arg('--independent-reviewer'),
+    maxRounds,
+    envPassthroughRaw,
+  });
+
+  // 文件版：资格筛选和第一次 git 预检之后探测本机写者。live 回环转发，不得因连接不明落回本地。
+  // PG 不走文件锁探测，保持旧单实例边界。--check 已在探测之前返回。
+  if (!usePg) {
+    const probe = await probeLocalWriter(statePath);
+    if (probe.status === 'live') {
+      const code = await forwardLivePlan(probe.holder, forwardBody);
+      process.exit(code);
+    }
+    if (probe.status === 'occupied') {
+      throw new Error(occupiedMessage(probe.reason));
+    }
+  }
+
   const workspace = new GitWorktreeManager(arg('--worktrees'));
   // 分类员：同一个适配器的只读模式。工具表只有 read / grep / find / ls，由 QueryRunner 强制。
   const queryRuntime = new SpawnRuntime({
@@ -274,14 +398,31 @@ async function main() {
     supportsQuery: true,
     envPassthrough,
   });
-  const built = usePg
-    ? await buildPgPlatform({ ...decision, workspace, queryRuntime })
-    : await buildPersistentPlatform(statePath, {
-        ...decision,
-        workspace,
-        queryRuntime,
-        exclusive: { what: `run-plan ${plan.planId}` },
-      });
+  let built;
+  try {
+    built = usePg
+      ? await buildPgPlatform({ ...decision, workspace, queryRuntime })
+      : await buildPersistentPlatform(statePath, {
+          ...decision,
+          workspace,
+          queryRuntime,
+          exclusive: { what: `run-plan ${plan.planId}` },
+        });
+  } catch (error) {
+    if (!usePg && error instanceof LockBusyError) {
+      const again = await probeLocalWriter(statePath);
+      if (again.status === 'live') {
+        const code = await forwardLivePlan(again.holder, forwardBody);
+        process.exit(code);
+      }
+      throw new Error(
+        again.status === 'occupied'
+          ? occupiedMessage(again.reason)
+          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
+      );
+    }
+    throw error;
+  }
   const { platform, tokens, deliveries, persist, agentPool, candidateCircuits, queuedHops } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
@@ -318,7 +459,6 @@ async function main() {
 
     const started = new Date();
     const runId = `${plan.planId}-${stamp(started)}`;
-    const runDir = resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
     const store = new FilePlanRunStore(join(runDir, `${runId}.json`));
 
     const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });

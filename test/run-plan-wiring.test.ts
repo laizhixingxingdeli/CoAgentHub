@@ -10,16 +10,18 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 
-import { createApi } from '../src/api/server.ts';
+import { API_VERSION, createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
+import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
+import { acquireLock, publishLockPort, stateIdFor } from '../src/application/lock.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import {
@@ -31,7 +33,12 @@ import {
 import { MissionRunner } from '../src/application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from '../src/application/plan-preflight.ts';
 import { runWithDeadline } from '../src/application/plan-driver.ts';
-import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
+import {
+  HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+  parseHostedPlanBody,
+  runHostedPlan,
+  runPlanOnPlatform,
+} from '../src/application/plan-runtime.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import type { HaRelease } from '../src/application/plan-run.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
@@ -45,6 +52,7 @@ import { FileQueuedHopRepository } from '../src/application/file-store.ts';
 import { PgCandidateCircuitRepository, PgQueuedHopRepository } from '../src/application/pg-store.ts';
 import type { QueuedHop } from '../src/application/durable-scheduler.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
+import { SPAWN_ENV_UNDECLARED_MESSAGE } from '../src/runtime/spawn.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
@@ -115,6 +123,34 @@ describe('方案运行入口接线 answerEscalation', () => {
     assert.match(
       src,
       /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
+    );
+    assert.match(src, /export async function runHostedPlan/);
+    assert.match(src, /export function parseHostedPlanBody/);
+    assert.doesNotMatch(src, /from ['"]\.\.\/api\//);
+    assert.doesNotMatch(src, /from ['"]\.\/loopback-listen\.ts['"]/);
+    assert.doesNotMatch(src, /from ['"]\.\.\/main\.ts['"]/);
+    assert.doesNotMatch(src, /from ['"]\.\/lock\.ts['"]/);
+    assert.doesNotMatch(src, /buildPersistentPlatform\s*\(/);
+    assert.doesNotMatch(src, /buildPgPlatform\s*\(/);
+    assert.doesNotMatch(src, /startServer\s*\(/);
+    assert.doesNotMatch(src, /acquireLock\s*\(/);
+    assert.doesNotMatch(src, /createApi\s*\(/);
+    assert.doesNotMatch(src, /listenLoopback\s*\(/);
+    assert.match(src, /parseAgentEnvPassthrough/);
+    assert.match(src, /COAGENT_AGENT_ENV_PASSTHROUGH/);
+    assert.match(src, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
+    assert.match(src, /slotHolders\(/);
+    assert.match(src, /preflightPlanRepo\(/);
+    assert.match(src, /new FilePlanRunStore\(/);
+    assert.match(src, /inRunBackoffWaitMs:\s*120_000/);
+    const hostedAt = src.indexOf('export async function runHostedPlan');
+    const hostedFn = hostedAt >= 0 ? src.slice(hostedAt) : '';
+    const pickAt = hostedFn.indexOf('pickHostedCandidates');
+    const storeAt = hostedFn.indexOf('new FilePlanRunStore');
+    const runAt = hostedFn.indexOf('runPlanOnPlatform');
+    assert.ok(
+      pickAt >= 0 && storeAt > pickAt && runAt > pickAt,
+      '非法候选必须在 FilePlanRunStore / runPlanOnPlatform 之前检查',
     );
   });
 });
@@ -650,6 +686,8 @@ describe('run-plan 周期投递修复接线', () => {
     assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
     const checkAt = runPlan.indexOf("if (process.argv.includes('--check'))");
     const selectAt = runPlan.indexOf('selectPlanCandidates(plan');
+    const firstPreflightAt = runPlan.indexOf('await preflightPlanRepo(projectRoot, plan.integrationBranch)');
+    const probeAt = runPlan.indexOf('probeLocalWriter(statePath)');
     const runAt = runPlan.indexOf('runPlanOnPlatform(');
     const apiAt = runPlan.indexOf('createApi(');
     const runnerAt = runPlan.indexOf('new MissionRunner(');
@@ -657,6 +695,9 @@ describe('run-plan 周期投递修复接线', () => {
     const afterLockAt = runPlan.indexOf('拿到状态锁之后项目仓变脏了');
     const sigAt = runPlan.indexOf("process.once('SIGINT'");
     assert.ok(checkAt >= 0 && checkAt < platformAt, '--check 只读路径必须在装配平台之前');
+    assert.ok(checkAt >= 0 && probeAt >= 0 && checkAt < probeAt, '--check 必须在探测之前只读返回');
+    assert.ok(selectAt >= 0 && firstPreflightAt >= 0 && selectAt < firstPreflightAt && firstPreflightAt < probeAt, '资格筛选和第一次 git 预检必须在探测之前');
+    assert.ok(probeAt < platformAt, '探测必须在装配平台之前');
     assert.ok(selectAt >= 0 && selectAt < platformAt, '资格筛选必须在装配平台之前');
     assert.ok(runAt >= 0 && selectAt < runAt, '资格筛选必须在内部入口建运行记录之前');
     assert.ok(afterLockAt >= 0 && platformAt < afterLockAt, '二次预检必须在拿锁之后');
@@ -664,6 +705,13 @@ describe('run-plan 周期投递修复接线', () => {
     assert.ok(apiAt >= 0 && runnerAt >= 0 && apiAt < runnerAt && runnerAt < runAt, 'API 与 MissionRunner 在内部入口之前');
     assert.ok(sigAt >= 0 && sigAt < runAt, '信号停记必须在内部入口建记录之前挂上');
     assert.match(runPlan, /process\.argv\.includes\('--check'\)/);
+    assert.match(runPlan, /probeLocalWriter/);
+    assert.match(runPlan, /loopbackRunRequest/);
+    assert.match(runPlan, /loopbackRunRequest\([\s\S]*?timeoutMs: 0/);
+    assert.match(runPlan, /\/api\/control\/run-plan/);
+    assert.match(runPlan, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
+    assert.match(runPlan, /if \(!usePg\)/);
+    assert.match(runPlan, /process\.exit\(code\)/);
     assert.match(runPlan, /from '\.\/application\/plan-runtime\.ts'/);
     assert.match(runPlan, /from '\.\/application\/mission-runner\.ts'/);
     assert.match(runPlan, /runner\.run\(/);
@@ -2859,6 +2907,620 @@ describe('生产入口 makeIssuer 队列领取身份', () => {
     } finally {
       queuedBuilt.releaseLock();
       plainBuilt.releaseLock();
+    }
+  });
+});
+
+function hostedPlanRequestBody(overrides: Record<string, unknown> = {}) {
+  const plan = parsePlanSpec(
+    samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+    { reviewer: 'claude' },
+  );
+  return {
+    plan,
+    selection: { candidates: plan.features, exclusions: [], warnings: [] },
+    cwd: '/tmp',
+    adapter: '/tmp/fake-adapter.ts',
+    runDir: '/tmp/plans',
+    store: 'file',
+    env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+    ...overrides,
+  };
+}
+
+function spawnRunPlan(args: string[], env?: NodeJS.ProcessEnv) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [RUN_PLAN, ...args], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: env ?? { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-', COAGENT_RECONCILE_INTERVAL_MS: '0', COAGENT_STORE: 'file' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`run-plan 超时：${stdout}${stderr}`));
+    }, 20_000);
+    child.once('exit', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+describe('hosted Plan 入口与 CLI 回环转发', () => {
+  const servers: Server[] = [];
+  after(() => {
+    for (const server of servers) {
+      if (server.listening) server.close();
+    }
+  });
+
+  test('未声明 CLI env 名单、--store pg、--worktrees、非法 max-rounds 在写入前拒绝', async () => {
+    assert.throws(
+      () => parseHostedPlanBody(hostedPlanRequestBody({ env: {} })),
+      (error: unknown) => error instanceof Error && error.message === SPAWN_ENV_UNDECLARED_MESSAGE,
+    );
+    assert.throws(() => parseHostedPlanBody(hostedPlanRequestBody({ env: undefined })), /COAGENT_AGENT_ENV_PASSTHROUGH/);
+    assert.throws(() => parseHostedPlanBody(hostedPlanRequestBody({ store: 'pg' })), /--store pg/);
+    assert.throws(() => parseHostedPlanBody(hostedPlanRequestBody({ worktrees: '/tmp/wt' })), /--worktrees/);
+    assert.throws(() => parseHostedPlanBody(hostedPlanRequestBody({ maxRounds: 0 })), /1–100/);
+    assert.throws(
+      () => parseHostedPlanBody(hostedPlanRequestBody({
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN' },
+      })),
+      (error: unknown) =>
+        error instanceof Error && error.message === HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+    );
+  });
+
+  test('服务 env 的透传名单不得顶替 CLI body 声明；脏仓在建 PlanRun 之前拒绝', async () => {
+    const repo = repoOn('auto/plan-x');
+    writeFileSync(join(repo, 'stray.json'), '{}');
+    const home = temp('coagent-hosted-dirty-');
+    const clock = new FixedClock();
+    const activity = new InMemoryActivityLog(clock);
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const projects = new InMemoryProjectRepository();
+    const workspace = new InPlaceWorkspaceManager();
+    const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+    const tokens = new RunTokenRegistry();
+    const agentPool = new InMemoryAgentPoolRepository();
+    let persistCalls = 0;
+    const lines: { channel: string; line: string }[] = [];
+    const code = await runHostedPlan(
+      hostedPlanRequestBody({
+        cwd: repo,
+        runDir: join(home, 'plans'),
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+      }),
+      {
+        built: {
+          platform,
+          tokens: makeIssuer(platform, tokens),
+          agentPool,
+          persist: () => {
+            persistCalls += 1;
+          },
+        },
+        baseUrl: 'http://127.0.0.1:9',
+        workspace,
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: 'SHOULD_NOT_USE' },
+        runtime: new ScriptedRuntime({}),
+      },
+      (channel, line) => {
+        lines.push({ channel, line });
+      },
+    );
+    assert.equal(code, 2);
+    assert.ok(lines.some((row) => row.channel === 'stderr' && /stray\.json|变脏了/.test(row.line)));
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(persistCalls, 0);
+  });
+
+  test('额外透传名在建 PlanRun / persist 之前拒绝，不用服务 env 取值顶替', async () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-hosted-env-unproven-');
+    const clock = new FixedClock();
+    const activity = new InMemoryActivityLog(clock);
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const projects = new InMemoryProjectRepository();
+    const workspace = new InPlaceWorkspaceManager();
+    const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+    const tokens = new RunTokenRegistry();
+    const agentPool = new InMemoryAgentPoolRepository();
+    let persistCalls = 0;
+    await assert.rejects(
+      () => runHostedPlan(
+        hostedPlanRequestBody({
+          cwd: repo,
+          runDir: join(home, 'plans'),
+          env: { COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN' },
+        }),
+        {
+          built: {
+            platform,
+            tokens: makeIssuer(platform, tokens),
+            agentPool,
+            persist: () => {
+              persistCalls += 1;
+            },
+          },
+          baseUrl: 'http://127.0.0.1:9',
+          workspace,
+          env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-', HUB_TEST_TOKEN: 'svc-secret-w96-bb22' },
+          runtime: new ScriptedRuntime({}),
+        },
+        () => {},
+      ),
+      (error: unknown) =>
+        error instanceof Error && error.message === HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
+    );
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(persistCalls, 0);
+    assert.deepEqual(await agentPool.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+  });
+
+  test('非法 --coordinator 在 seed / 建 PlanRun 之前拒绝且不写主状态', async () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-hosted-bad-coord-');
+    const clock = new FixedClock();
+    const activity = new InMemoryActivityLog(clock);
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const projects = new InMemoryProjectRepository();
+    const workspace = new InPlaceWorkspaceManager();
+    const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+    const tokens = new RunTokenRegistry();
+    const agentPool = new InMemoryAgentPoolRepository();
+    let persistCalls = 0;
+    await assert.rejects(
+      () => runHostedPlan(
+        hostedPlanRequestBody({
+          cwd: repo,
+          runDir: join(home, 'plans'),
+          coordinator: 'no-such-profile',
+        }),
+        {
+          built: {
+            platform,
+            tokens: makeIssuer(platform, tokens),
+            agentPool,
+            persist: () => {
+              persistCalls += 1;
+            },
+          },
+          baseUrl: 'http://127.0.0.1:9',
+          workspace,
+          runtime: new ScriptedRuntime({}),
+        },
+        () => {},
+      ),
+      /--coordinator/,
+    );
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(persistCalls, 0);
+    assert.deepEqual(await agentPool.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+  });
+
+  test('注入既有 platform 后预检通过才建 PlanRun；开跑早于停了', async () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-hosted-run-');
+    const clock = new FixedClock();
+    const activity = new InMemoryActivityLog(clock);
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const projects = new InMemoryProjectRepository();
+    const workspace = new InPlaceWorkspaceManager();
+    const platform = new Platform({ projects, deliveries, workspace, activity, clock, ids });
+    const tokens = new RunTokenRegistry();
+    const agentPool = new InMemoryAgentPoolRepository();
+    await agentPool.add({ role: 'coordinator', profileId: 'c', endpoint: 'local' });
+    await agentPool.add({ role: 'executor', profileId: 'e', endpoint: 'local' });
+    const lines: string[] = [];
+    const code = await runHostedPlan(
+      hostedPlanRequestBody({
+        cwd: repo,
+        runDir: join(home, 'plans'),
+        coordinator: 'c',
+        executor: 'e',
+        maxRounds: 3,
+      }),
+      {
+        built: {
+          platform,
+          tokens: makeIssuer(platform, tokens),
+          agentPool,
+          persist: () => {},
+        },
+        baseUrl: 'http://127.0.0.1:9',
+        workspace,
+        runtime: new ScriptedRuntime({}),
+      },
+      (_channel, line) => {
+        lines.push(line);
+      },
+    );
+    assert.equal(code, 0);
+    const startAt = lines.findIndex((line) => /开跑：/.test(line));
+    const stopAt = lines.findIndex((line) => /停了：/.test(line));
+    assert.ok(startAt >= 0 && stopAt > startAt, lines.join('\n'));
+    assert.ok(lines.some((line) => /▶|墙钟|合入|升级单|停了/.test(line)));
+    const planFiles = existsSync(join(home, 'plans')) ? readdirSync(join(home, 'plans')).filter((name) => name.endsWith('.json')) : [];
+    assert.equal(planFiles.length, 1);
+    const stored = JSON.parse(readFileSync(join(home, 'plans', planFiles[0]!), 'utf8')) as { stopped?: { reason: string } };
+    assert.ok(stored.stopped);
+  });
+
+  test('live 锁 CLI 原样转发参数与 env 声明，边印 stdout/stderr 并设置退出码', async () => {
+    const dir = temp('coagent-plan-fwd-');
+    const repo = repoOn('auto/plan-x');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const seen: unknown[] = [];
+    try {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const platform = new Platform({
+        projects,
+        deliveries,
+        workspace: new InPlaceWorkspaceManager(),
+        activity,
+        clock,
+        ids,
+      });
+      const tokens = new RunTokenRegistry();
+      const server: Server = createApi({
+        platform,
+        tokens,
+        deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runPlan: async (body, emit) => {
+          seen.push(body);
+          emit('stdout', '方案 PLAN-check 开跑：Ok');
+          emit('stdout', '[12:00:00] Ok ▶ R-Ok');
+          emit('stdout', '  · read');
+          emit('stdout', '方案 PLAN-check 停了：finished —— 走完了');
+          emit('stderr', 'hosted-err');
+          return 9;
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+
+      const planPath = join(dir, 'PLAN.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify(
+          samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+          null,
+          2,
+        ),
+      );
+      const spawned = await spawnRunPlan([
+        '--plan',
+        planPath,
+        '--cwd',
+        repo,
+        '--reviewer',
+        'claude',
+        '--state',
+        statePath,
+        '--run-dir',
+        join(dir, 'plans'),
+        '--coordinator',
+        'coord-a',
+        '--max-rounds',
+        '3',
+      ]);
+      const out = `${spawned.stdout}${spawned.stderr}`;
+      assert.equal(spawned.status, 9, out);
+      const startAt = spawned.stdout.indexOf('方案 PLAN-check 开跑：Ok');
+      const missionAt = spawned.stdout.indexOf('[12:00:00] Ok ▶ R-Ok');
+      const toolAt = spawned.stdout.indexOf('  · read');
+      const stopAt = spawned.stdout.indexOf('方案 PLAN-check 停了：finished');
+      assert.ok(startAt >= 0 && missionAt > startAt && toolAt > missionAt && stopAt > toolAt, spawned.stdout);
+      assert.match(spawned.stderr, /hosted-err/);
+      assert.equal(seen.length, 1);
+      const body = seen[0] as Record<string, unknown>;
+      assert.equal((body.plan as { planId: string }).planId, 'PLAN-check');
+      assert.equal(body.maxRounds, 3);
+      assert.equal(body.coordinator, 'coord-a');
+      assert.equal(body.store, 'file');
+      assert.equal(body.state, statePath);
+      assert.deepEqual(body.env, { COAGENT_AGENT_ENV_PASSTHROUGH: '-' });
+      assert.doesNotMatch(out, /平台正被另一个进程占用/);
+      assert.equal(existsSync(join(dir, 'plans')), false, 'live CLI 不得在本地建 PlanRun');
+    } finally {
+      release();
+    }
+  });
+
+  test('CLI 与服务同名 agent 变量取值不同时拒绝转发且不写、不回落、不打印取值', async () => {
+    const dir = temp('coagent-plan-env-mismatch-');
+    const repo = repoOn('auto/plan-x');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const seen: unknown[] = [];
+    const persistCalls: number[] = [];
+    const cliSecret = 'cli-secret-w96-aa11';
+    const svcSecret = 'svc-secret-w96-bb22';
+    try {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const workspace = new InPlaceWorkspaceManager();
+      const platform = new Platform({
+        projects,
+        deliveries,
+        workspace,
+        activity,
+        clock,
+        ids,
+      });
+      const tokens = new RunTokenRegistry();
+      const agentPool = new InMemoryAgentPoolRepository();
+      const server: Server = createApi({
+        platform,
+        tokens,
+        deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runPlan: async (body, emit) => {
+          seen.push(body);
+          return runHostedPlan(
+            body,
+            {
+              built: {
+                platform,
+                tokens: makeIssuer(platform, tokens),
+                agentPool,
+                persist: () => {
+                  persistCalls.push(1);
+                },
+              },
+              baseUrl: 'http://127.0.0.1:9',
+              workspace,
+              env: {
+                COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN',
+                HUB_TEST_TOKEN: svcSecret,
+              },
+              runtime: new ScriptedRuntime({}),
+            },
+            emit,
+          );
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+
+      const planPath = join(dir, 'PLAN.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify(
+          samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+          null,
+          2,
+        ),
+      );
+      const spawned = await spawnRunPlan(
+        [
+          '--plan',
+          planPath,
+          '--cwd',
+          repo,
+          '--reviewer',
+          'claude',
+          '--state',
+          statePath,
+          '--run-dir',
+          join(dir, 'plans'),
+        ],
+        {
+          ...process.env,
+          COAGENT_AGENT_ENV_PASSTHROUGH: 'HUB_TEST_TOKEN',
+          HUB_TEST_TOKEN: cliSecret,
+          COAGENT_RECONCILE_INTERVAL_MS: '0',
+          COAGENT_STORE: 'file',
+        },
+      );
+      const out = `${spawned.stdout}${spawned.stderr}`;
+      assert.notEqual(spawned.status, 0, out);
+      assert.match(out, /无法证明|未写入|主状态未改/);
+      assert.doesNotMatch(out, new RegExp(cliSecret));
+      assert.doesNotMatch(out, new RegExp(svcSecret));
+      assert.doesNotMatch(out, /开跑：/);
+      assert.equal(seen.length, 0, '取值无法证明一致时不得把 body 送进回环');
+      assert.deepEqual(persistCalls, []);
+      assert.equal(existsSync(join(dir, 'plans')), false);
+      assert.equal(readFileSync(statePath, 'utf8'), '{}');
+    } finally {
+      release();
+    }
+  });
+
+  test('--check 在探测之前只读返回，即使锁 live 也不发写请求', async () => {
+    const dir = temp('coagent-plan-check-live-');
+    const repo = repoOn('auto/plan-x');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    let posts = 0;
+    try {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const platform = new Platform({
+        projects,
+        deliveries,
+        workspace: new InPlaceWorkspaceManager(),
+        activity,
+        clock,
+        ids,
+      });
+      const tokens = new RunTokenRegistry();
+      const server: Server = createApi({
+        platform,
+        tokens,
+        deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runPlan: async () => {
+          posts += 1;
+          return 0;
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+      const planPath = join(dir, 'PLAN.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify(
+          samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+          null,
+          2,
+        ),
+      );
+      const result = spawnSync(
+        process.execPath,
+        [RUN_PLAN, '--plan', planPath, '--cwd', repo, '--reviewer', 'claude', '--check', '--state', statePath],
+        {
+          encoding: 'utf8',
+          timeout: 15_000,
+          cwd: temp('coagent-check-live-cwd-'),
+          env: { ...process.env },
+        },
+      );
+      const out = `${result.stdout}${result.stderr}`;
+      assert.equal(result.status, 0, out);
+      assert.match(out, /只读检查/);
+      assert.match(out, /未开跑/);
+      assert.equal(posts, 0);
+    } finally {
+      release();
+    }
+  });
+
+  test('occupied 非零不回退、不写状态；回环断线不落回本地独占装配', async () => {
+    const dir = temp('coagent-plan-occ-');
+    const repo = repoOn('auto/plan-x');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const occupiedRelease = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    const planPath = join(dir, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    try {
+      const occupied = spawnSync(
+        process.execPath,
+        [RUN_PLAN, '--plan', planPath, '--cwd', repo, '--reviewer', 'claude', '--state', statePath, '--run-dir', join(dir, 'plans')],
+        {
+          encoding: 'utf8',
+          timeout: 20_000,
+          cwd: temp('coagent-occ-cwd-'),
+          env: {
+            ...process.env,
+            COAGENT_AGENT_ENV_PASSTHROUGH: '-',
+            COAGENT_RECONCILE_INTERVAL_MS: '0',
+            COAGENT_STORE: 'file',
+          },
+        },
+      );
+      const occOut = `${occupied.stdout}${occupied.stderr}`;
+      assert.notEqual(occupied.status, 0, occOut);
+      assert.match(occOut, /无法安全转发|占锁但未发布端口/);
+      assert.doesNotMatch(occOut, /开跑：/);
+      assert.equal(existsSync(join(dir, 'plans')), false);
+    } finally {
+      occupiedRelease();
+    }
+
+    const cutDir = temp('coagent-plan-cut-');
+    const cutState = join(cutDir, 'state.json');
+    writeFileSync(cutState, JSON.stringify({}));
+    const cutId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const cutRelease = acquireLock(cutState, '常驻服务', { instanceId: cutId, apiVersion: API_VERSION });
+    const cutStateId = stateIdFor(cutState);
+    const stub = createServer((req, res) => {
+      const url = req.url ?? '/';
+      if (url.startsWith('/api/health')) {
+        res.writeHead(200, {
+          'x-coagent-api': API_VERSION,
+          'x-coagent-instance': cutId,
+          'x-coagent-state-id': cutStateId,
+          'content-type': 'application/json',
+        });
+        res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+        return;
+      }
+      res.writeHead(200, {
+        'x-coagent-api': API_VERSION,
+        'x-coagent-instance': cutId,
+        'x-coagent-state-id': cutStateId,
+        'content-type': 'application/x-ndjson; charset=utf-8',
+      });
+      res.write(`${JSON.stringify({ channel: 'stdout', line: 'partial' })}\n`);
+      req.socket.destroy();
+    });
+    try {
+      await listenLoopback(stub, 0);
+      servers.push(stub);
+      publishLockPort(cutState, cutId, (stub.address() as AddressInfo).port);
+      const cutPlan = join(cutDir, 'PLAN.json');
+      writeFileSync(
+        cutPlan,
+        JSON.stringify(
+          samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+          null,
+          2,
+        ),
+      );
+      const spawned = await spawnRunPlan([
+        '--plan',
+        cutPlan,
+        '--cwd',
+        repo,
+        '--reviewer',
+        'claude',
+        '--state',
+        cutState,
+        '--run-dir',
+        join(cutDir, 'plans'),
+      ]);
+      const cutOut = `${spawned.stdout}${spawned.stderr}`;
+      assert.notEqual(spawned.status, 0, cutOut);
+      assert.match(cutOut, /截断|写者断线/);
+      assert.doesNotMatch(cutOut, /方案 PLAN-check 停了/);
+      assert.equal(existsSync(join(cutDir, 'plans')), false);
+    } finally {
+      cutRelease();
     }
   });
 });

@@ -12,7 +12,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { API_VERSION } from '../src/api/server.ts';
 import {
   acquireLock,
+  probeLocalWriter,
   publishLockPort,
   stateIdFor,
 } from '../src/application/lock.ts';
@@ -32,9 +33,11 @@ import {
 } from '../src/application/loopback-control-client.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
+import type { AgentRunSpec } from '../src/application/ports.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { buildPersistentPlatform } from '../src/main.ts';
+import { buildPersistentPlatform, startServer } from '../src/main.ts';
+import { ScriptedRuntime, type ScriptTable } from '../src/runtime/scripted.ts';
 
 const L3 = fileURLToPath(new URL('../src/l3.ts', import.meta.url));
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -1304,6 +1307,514 @@ describe('l3 主写：探测与回环转发', () => {
     assert.match(help.out, /HTTP 不复制续跑/);
     rmSync(residualDir, { recursive: true, force: true });
   });
+});
+
+const RUN_PLAN = fileURLToPath(new URL('../src/run-plan.ts', import.meta.url));
+
+function planRepoOn(branch: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-repo-'));
+  dirs.push(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.name', 'test');
+  git(dir, 'config', 'user.email', 'test@local');
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'init');
+  git(dir, 'checkout', '-q', '-b', branch);
+  return dir;
+}
+
+/** 执行者在隔离 worktree 里真改 a.txt，机器 L3 才能合出非空提交。 */
+class WritesWorktreeFileRuntime extends ScriptedRuntime {
+  async start(spec: AgentRunSpec) {
+    if (spec.role === 'executor') {
+      writeFileSync(join(spec.cwd, 'a.txt'), 'mission\n');
+    }
+    return super.start(spec);
+  }
+}
+
+function waitUntil(predicate: () => boolean, timeoutMs: number, dump: () => string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error(`等待超时：${dump()}`));
+        return;
+      }
+      setTimeout(tick, 40);
+    };
+    tick();
+  });
+}
+
+function waitChildExit(child: ChildProcess, timeoutMs: number, dump: () => string): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    if (child.exitCode !== null) {
+      resolve(child.exitCode);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`CLI 未自然退出：${dump()}`));
+    }, timeoutMs);
+    child.once('exit', (status) => {
+      clearTimeout(timer);
+      resolve(status);
+    });
+  });
+}
+
+function spawnRunPlanCli(input: {
+  planPath: string;
+  repo: string;
+  statePath: string;
+  runDir: string;
+  adapter: string;
+  extra?: string[];
+}): { child: ChildProcess; captured: { stdout: string; stderr: string } } {
+  const child = spawn(
+    process.execPath,
+    [
+      RUN_PLAN,
+      '--plan',
+      input.planPath,
+      '--cwd',
+      input.repo,
+      '--reviewer',
+      'claude',
+      '--state',
+      input.statePath,
+      '--run-dir',
+      input.runDir,
+      '--adapter',
+      input.adapter,
+      ...(input.extra ?? []),
+    ],
+    {
+      env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-', COAGENT_STORE: 'file' },
+    },
+  );
+  const captured = { stdout: '', stderr: '' };
+  child.stdout?.on('data', (chunk) => {
+    captured.stdout += String(chunk);
+  });
+  child.stderr?.on('data', (chunk) => {
+    captured.stderr += String(chunk);
+  });
+  return { child, captured };
+}
+
+function hostedPlanSpec(overrides: Record<string, unknown> = {}) {
+  return {
+    planId: 'PLAN-wait',
+    projectId: 'P-wait',
+    integrationBranch: 'auto/plan-x',
+    intent: '等决定',
+    stopConditions: {
+      unresolvedEscalations: 5,
+      wallClockMs: 8 * 60 * MIN,
+      escalationTimeoutMs: 20 * MIN,
+    },
+    integrationVerification: [{ argv: [process.execPath, '-e', 'process.exit(0)'], timeoutMs: 8_000 }],
+    features: [
+      {
+        id: 'F1',
+        title: '升级握手',
+        why: 'w',
+        allowedScope: ['a.txt'],
+        acceptance: ['绿'],
+        status: 'pending',
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function escalateScript(): ScriptTable {
+  return {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_escalate_to_l3',
+          body: {
+            question: '这个 missionId 对不对？',
+            why: '不确定',
+            optionsConsidered: ['继续', '停'],
+          },
+        },
+      ],
+    },
+  };
+}
+
+function deliverScripts(workItemId = 'W-1'): ScriptTable {
+  return {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_update_plan',
+          body: {
+            findings: '要改 a.txt',
+            rejectedHypotheses: [],
+            decisions: ['直接改'],
+            direction: '改 a.txt',
+            risks: [],
+          },
+        },
+        { tool: 'coagent_create_work_item', body: { title: 'W', ...WRITE_ORDER } },
+        {
+          tool: 'coagent_dispatch_work_item',
+          body: (previous: Record<string, unknown>) => ({ workItemIds: [previous.workItemId] }),
+        },
+      ],
+    },
+    'coordinator:-:1': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_review_execution_result',
+          body: {
+            workItemId,
+            verdict: 'accept',
+            acceptanceResults: WRITE_ORDER.acceptance.map((criterion) => ({
+              criterion,
+              status: 'pass' as const,
+              evidence: '测试替身：逐条核过',
+            })),
+            reasons: ['复跑过'],
+            requiredChanges: [],
+          },
+        },
+        {
+          tool: 'coagent_submit_mission_result',
+          body: {
+            outcome: 'delivered',
+            summary: '交付',
+            acceptanceEvidence: [],
+            memoryDelta: [],
+            openRisks: [],
+          },
+        },
+      ],
+    },
+    [`executor:${workItemId}`]: {
+      steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        {
+          tool: 'coagent_submit_evidence',
+          body: { kind: 'test', summary: '绿', command: 'x', exitCode: 0 },
+        },
+        {
+          tool: 'coagent_submit_execution_result',
+          body: (previous: Record<string, unknown>) => ({
+            outcome: 'completed',
+            summary: '改好了',
+            changedFiles: ['a.txt'],
+            evidenceIds: [previous.evidenceId],
+            notes: '无',
+          }),
+        },
+      ],
+    },
+  };
+}
+
+function escalateThenDeliverScripts(workItemId = 'W-1'): ScriptTable {
+  const deliver = deliverScripts(workItemId);
+  return {
+    ...escalateScript(),
+    'coordinator:-:1': deliver['coordinator:-:0']!,
+    'coordinator:-:2': deliver['coordinator:-:1']!,
+    [`executor:${workItemId}`]: deliver[`executor:${workItemId}`]!,
+  };
+}
+
+async function emptyPlanState(): Promise<{ dir: string; statePath: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-hosted-'));
+  dirs.push(dir);
+  return { dir, statePath: join(dir, 'state.json') };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((done) => {
+    if (!server.listening) {
+      done();
+      return;
+    }
+    server.close(() => done());
+  });
+}
+
+describe('持锁服务上方案等待决定时短锁与 L3 主状态仍可回应', () => {
+  test(
+    'hosted Plan 等待决定：独立短锁 decide 与 l3 answer/merge 经服务成功，其它 HTTP 不堵',
+    { timeout: 70_000 },
+    async () => {
+      const fx = await seedMainWrites();
+      const repo = planRepoOn('auto/plan-x');
+      const adapter = join(fx.dir, 'adapter.ts');
+      writeFileSync(adapter, '// hosted plan adapter\n');
+      const planPath = join(fx.dir, 'PLAN-wait.json');
+      writeFileSync(planPath, JSON.stringify(hostedPlanSpec()));
+      const built = await startServer(0, fx.statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime(escalateScript()),
+      });
+      liveServers.push(built.server);
+      try {
+        const probed = await probeLocalWriter(fx.statePath);
+        assert.equal(probed.status, 'live');
+        const addr = built.server.address() as AddressInfo;
+
+        const { child, captured } = spawnRunPlanCli({
+          planPath,
+          repo,
+          statePath: fx.statePath,
+          runDir: join(fx.dir, '.coagent-plans'),
+          adapter,
+        });
+        const dump = () => `${captured.stdout}${captured.stderr}`;
+        await waitUntil(() => /\[[^\]]+\] F1 ▶ /.test(captured.stdout), 20_000, dump);
+        const mid = captured.stdout;
+        assert.match(mid, /开跑/);
+        assert.match(mid, /\[[^\]]+\] F1 ▶ /);
+        assert.doesNotMatch(mid, /停了：/);
+        assert.equal(child.exitCode, null, dump());
+        await waitUntil(() => /⚑ 升级单/.test(captured.stdout), 15_000, dump);
+        assert.equal(child.exitCode, null, dump());
+        assert.match(dump(), /⚑ 升级单/, dump());
+
+        const healthDuring = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+        assert.equal(healthDuring.status, 200);
+        const extra = await fetch(`http://${addr.address}:${addr.port}/api/missions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            projectId: 'P-extra',
+            missionId: 'M-extra',
+            contract: WRITE_CONTRACT,
+          }),
+        });
+        assert.equal(extra.status, 201, await extra.text());
+
+        const decide = await l3Async(
+          fx.statePath,
+          'plan',
+          'decide',
+          'E-1',
+          '--action',
+          'skip',
+          '--reason',
+          '夹具放行',
+          '--as',
+          'claude',
+        );
+        assert.equal(decide.status, 0, decide.out);
+        assert.match(decide.out, /skip|跳过|E-1/);
+
+        const answered = await l3Async(fx.statePath, 'answer', 'M-answer', '--answer', '继续');
+        assert.equal(answered.status, 0, answered.out);
+        assert.match(answered.out, /已答复 M-answer/);
+
+        const merged = await l3Async(
+          fx.statePath,
+          'merge',
+          'M-merge',
+          '--reason',
+          'ok',
+          '--repo',
+          fx.repo,
+        );
+        assert.equal(merged.status, 0, merged.out);
+        assert.match(merged.out, /Mission M-merge → completed/);
+
+        const status = await waitChildExit(child, 30_000, dump);
+        const out = dump();
+        assert.equal(status, 0, out);
+        const recordMatch = captured.stdout.match(/方案运行记录：(.+\.json)/);
+        assert.ok(recordMatch, out);
+        const stored = new FilePlanRunStore(recordMatch[1]!.trim());
+        const run = stored.read();
+        const resolution = run?.escalations[0]?.resolution;
+        assert.equal(resolution?.kind, 'decided');
+        assert.equal(resolution?.kind === 'decided' ? resolution.action : '', 'skip');
+        assert.equal(run?.feature('F1')?.status, 'skipped');
+        assert.equal(run?.stopped?.reason, 'finished');
+
+        const startAt = captured.stdout.indexOf('开跑');
+        const progressAt = captured.stdout.search(/\[[^\]]+\] F1 ▶ /);
+        const escalateAt = captured.stdout.indexOf('⚑ 升级单');
+        const stopAt = captured.stdout.indexOf('停了：');
+        const handoffAt = captured.stdout.indexOf('已合入');
+        assert.ok(startAt >= 0 && progressAt > startAt && escalateAt > progressAt, out);
+        assert.ok(stopAt > escalateAt && handoffAt > stopAt, out);
+        assert.match(captured.stdout, /检视者跳过/);
+      } finally {
+        await closeServer(built.server);
+      }
+    },
+  );
+
+  test(
+    'hosted Plan 成功合入：工具行、▶、✓ 合入、停了与交接面在自然退出后可读',
+    { timeout: 45_000 },
+    async () => {
+      const fx = await emptyPlanState();
+      const repo = planRepoOn('auto/plan-x');
+      const adapter = join(fx.dir, 'adapter.ts');
+      writeFileSync(adapter, '// hosted plan adapter\n');
+      const planPath = join(fx.dir, 'PLAN-merge.json');
+      writeFileSync(planPath, JSON.stringify(hostedPlanSpec({ planId: 'PLAN-merge', intent: '合入' })));
+      const built = await startServer(0, fx.statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new GitWorktreeManager(join(fx.dir, 'wt')),
+        runtime: new WritesWorktreeFileRuntime(deliverScripts()),
+      });
+      liveServers.push(built.server);
+      try {
+        const { child, captured } = spawnRunPlanCli({
+          planPath,
+          repo,
+          statePath: fx.statePath,
+          runDir: join(fx.dir, '.coagent-plans'),
+          adapter,
+        });
+        const dump = () => `${captured.stdout}${captured.stderr}`;
+        await waitUntil(() => /\[[^\]]+\] F1 ▶ /.test(captured.stdout), 20_000, dump);
+        assert.equal(child.exitCode, null, dump());
+        assert.match(captured.stdout, /开跑/);
+        assert.doesNotMatch(captured.stdout, /停了：/);
+        const status = await waitChildExit(child, 25_000, dump);
+        const out = dump();
+        assert.equal(status, 0, out);
+        assert.match(captured.stdout, /  · coagent_get_mission/);
+        assert.match(captured.stdout, /F1 ✓ 合入 auto\/plan-x/);
+        assert.match(captured.stdout, /方案 PLAN-merge 停了：/);
+        assert.match(captured.stdout, /已合入/);
+        const startAt = captured.stdout.indexOf('开跑');
+        const progressAt = captured.stdout.search(/\[[^\]]+\] F1 ▶ /);
+        const toolAt = captured.stdout.indexOf('  · coagent_get_mission');
+        const mergeAt = captured.stdout.indexOf('✓ 合入');
+        const stopAt = captured.stdout.indexOf('停了：');
+        assert.ok(startAt >= 0 && progressAt > startAt && toolAt >= 0 && mergeAt > progressAt && stopAt > mergeAt, out);
+        const recordMatch = captured.stdout.match(/方案运行记录：(.+\.json)/);
+        assert.ok(recordMatch, out);
+        const stored = new FilePlanRunStore(recordMatch[1]!.trim());
+        assert.equal(stored.read()?.feature('F1')?.status, 'merged');
+        assert.equal(stored.read()?.stopped?.reason, 'finished');
+      } finally {
+        await closeServer(built.server);
+      }
+    },
+  );
+
+  test(
+    'hosted Plan 答复后续跑：独立 decide answer 后出现 ↩ 并自然合入',
+    { timeout: 70_000 },
+    async () => {
+      const fx = await emptyPlanState();
+      const repo = planRepoOn('auto/plan-x');
+      const adapter = join(fx.dir, 'adapter.ts');
+      writeFileSync(adapter, '// hosted plan adapter\n');
+      const planPath = join(fx.dir, 'PLAN-answer.json');
+      writeFileSync(planPath, JSON.stringify(hostedPlanSpec({ planId: 'PLAN-answer', intent: '答复' })));
+      const built = await startServer(0, fx.statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new GitWorktreeManager(join(fx.dir, 'wt')),
+        runtime: new WritesWorktreeFileRuntime(escalateThenDeliverScripts()),
+      });
+      liveServers.push(built.server);
+      try {
+        const { child, captured } = spawnRunPlanCli({
+          planPath,
+          repo,
+          statePath: fx.statePath,
+          runDir: join(fx.dir, '.coagent-plans'),
+          adapter,
+        });
+        const dump = () => `${captured.stdout}${captured.stderr}`;
+        await waitUntil(() => /⚑ 升级单/.test(captured.stdout), 20_000, dump);
+        assert.equal(child.exitCode, null, dump());
+        assert.match(captured.stdout, /\[[^\]]+\] F1 ▶ /);
+        const decide = await l3Async(
+          fx.statePath,
+          'plan',
+          'decide',
+          'E-1',
+          '--action',
+          'answer',
+          '--answer',
+          '对，继续',
+          '--as',
+          'claude',
+        );
+        assert.equal(decide.status, 0, decide.out);
+        const status = await waitChildExit(child, 30_000, dump);
+        const out = dump();
+        assert.equal(status, 0, out);
+        assert.match(captured.stdout, /↩ 检视者答复了 E-1/);
+        assert.match(captured.stdout, /F1 ✓ 合入/);
+        assert.match(captured.stdout, /停了：/);
+        const escalateAt = captured.stdout.indexOf('⚑ 升级单');
+        const answerAt = captured.stdout.indexOf('↩ 检视者答复了');
+        const mergeAt = captured.stdout.indexOf('✓ 合入');
+        assert.ok(escalateAt >= 0 && answerAt > escalateAt && mergeAt > answerAt, out);
+        const recordMatch = captured.stdout.match(/方案运行记录：(.+\.json)/);
+        assert.ok(recordMatch, out);
+        const stored = new FilePlanRunStore(recordMatch[1]!.trim());
+        const resolution = stored.read()?.escalations[0]?.resolution;
+        assert.equal(resolution?.kind === 'decided' ? resolution.action : '', 'answer');
+        assert.equal(stored.read()?.feature('F1')?.status, 'merged');
+      } finally {
+        await closeServer(built.server);
+      }
+    },
+  );
+
+  test(
+    'hosted Plan 服务内失败：stderr 带消息且 CLI 非零退出，不把 kill 当终态',
+    { timeout: 30_000 },
+    async () => {
+      const fx = await emptyPlanState();
+      const repo = planRepoOn('auto/plan-x');
+      const adapter = join(fx.dir, 'adapter.ts');
+      writeFileSync(adapter, '// hosted plan adapter\n');
+      const planPath = join(fx.dir, 'PLAN-fail.json');
+      writeFileSync(planPath, JSON.stringify(hostedPlanSpec({ planId: 'PLAN-fail', intent: '失败' })));
+      const built = await startServer(0, fx.statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+      });
+      liveServers.push(built.server);
+      try {
+        const { child, captured } = spawnRunPlanCli({
+          planPath,
+          repo,
+          statePath: fx.statePath,
+          runDir: join(fx.dir, '.coagent-plans'),
+          adapter,
+          extra: ['--coordinator', 'no-such-profile'],
+        });
+        const dump = () => `${captured.stdout}${captured.stderr}`;
+        const status = await waitChildExit(child, 20_000, dump);
+        const out = dump();
+        assert.notEqual(status, 0, out);
+        assert.match(captured.stderr, /--coordinator|no-such-profile/);
+        assert.doesNotMatch(captured.stdout, /方案 PLAN-fail 停了/);
+      } finally {
+        await closeServer(built.server);
+      }
+    },
+  );
 });
 
 function flipAsciiCase(value: string): string {
