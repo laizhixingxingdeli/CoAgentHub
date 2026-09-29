@@ -2085,6 +2085,50 @@ function cleanPlanRepo(branch: string): string {
 }
 
 describe('startServer 方案记录目录与托管 live', () => {
+  test('真实 hosted PlanRun 只登记预检后的身份并在结束时清理', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-plan-identity-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// identity adapter\\n');
+    const runDir = join(dir, 'runs');
+    const repo = cleanPlanRepo('auto/hosted');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+      runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    const target = await liveTarget(statePath);
+    const base = hostedPlanBody(repo, adapter, statePath, runDir);
+    let running: Promise<number> | undefined;
+    try {
+      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body: base }, () => {});
+      await gated.started;
+      const plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      assert.equal(plans.length, 1);
+      const plan = plans[0]!;
+      assert.match(plan.id, /^PLAN-hosted-/);
+      assert.notEqual(plan.id, base.plan.planId);
+      assert.ok(plan.runPath?.startsWith(runDir));
+      assert.equal(plan.reviewer, 'claude');
+
+      const invalid = { ...base, state: join(dir, 'wrong-state.json') };
+      assert.equal(await loopbackRunRequest(target, { path: '/api/control/run-plan', body: invalid }, () => {}), 1);
+      assert.deepEqual(built.hostedRunSnapshots(), [plan]);
+
+      gated.release();
+      assert.equal(await running, 0);
+      running = undefined;
+      assert.deepEqual(built.hostedRunSnapshots(), []);
+    } finally {
+      gated.release();
+      if (running) await running;
+      await new Promise<void>((resolve, reject) => built.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
   test('缺省目录在 statePath 同级 .coagent-plans；圈外 CLI 目录读不到；未托管有 reason', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-dirs-'));
     dirs.push(dir);
