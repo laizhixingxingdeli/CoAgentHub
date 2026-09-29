@@ -54,6 +54,14 @@ function occupiedMessage(reason: string): string {
   return `无法安全转发到本机写者：${reason}。主状态未改。`;
 }
 
+const INDEPENDENT_RUN_MODE = '无常驻服务，独立运行（本进程持主锁）';
+// PG 不探测、不转发、不持文件主锁；再用文件独立句会虚报持锁。
+const PG_INDEPENDENT_RUN_MODE = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
+
+function hostedRunModeLine(instanceId: string, port: number): string {
+  return `由常驻服务托管：实例 ${instanceId.slice(0, 8)}、端口 ${port}`;
+}
+
 function requireLiveIdentity(holder: LockInfo): {
   port: number;
   instanceId: string;
@@ -127,9 +135,16 @@ async function forwardLiveRun(holder: LockInfo, body: Record<string, unknown>): 
     throw new Error(`无法安全转发到本机写者：${HOSTED_AGENT_ENV_UNPROVEN_MESSAGE}`);
   }
   const identity = requireLiveIdentity(holder);
+  const modeLine = hostedRunModeLine(identity.instanceId, identity.port);
+  let announced = false;
   return loopbackRunRequest(identity, { path: '/api/control/run-mission', body }, (channel, line) => {
     if (channel === 'stderr') console.error(line);
     else console.log(line);
+    // 探测与争锁后重探测都走这里：开跑行之后才标明托管。
+    if (!announced && channel !== 'stderr' && /平台监听 |已存在（/.test(line)) {
+      announced = true;
+      console.log(modeLine);
+    }
   });
 }
 
@@ -320,6 +335,7 @@ async function main() {
   console.log(`状态文件: ${statePath}`);
   console.log(`worktree: ${cwd}`);
   console.log(`适配器  : ${adapter}\n`);
+  console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE);
 
   // 静默超时：不再产出任何东西才判卡住，然后连同子孙进程一起杀。
   const runtime = new SpawnRuntime({

@@ -19,7 +19,7 @@ import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
-import { listRuntimeModels } from '../application/runtime-catalog.ts';
+import { listRuntimeModels, type RuntimeCatalog } from '../application/runtime-catalog.ts';
 import { NoLiveOutput } from '../application/live.ts';
 import type { LiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -38,6 +38,12 @@ import {
 
 /** 客户端 API 版本。破坏性改动时要加。 */
 export const API_VERSION = 'v1';
+
+/**
+ * 成功的模型清单在同一 createApi 实例内缓存这么久。
+ * 适配层一次约数秒，页面连刷不能每次都等；到期必须重取，否则界面会选已经下线的模型。
+ */
+export const RUNTIME_MODELS_CACHE_MS = 10 * 60 * 1000;
 
 /** hosted run 的一行进度。channel 必须可区分，客户端不能靠猜 stdout/stderr。 */
 export type HostedRunEmit = (channel: 'stdout' | 'stderr', line: string) => void;
@@ -108,6 +114,20 @@ export interface ApiDeps {
   runMission?: HostedRunHandler;
   /** 同上，对应 POST /api/control/run-plan。 */
   runPlan?: HostedRunHandler;
+  /**
+   * 读运行时模型清单。缺省走适配层真实命令。
+   *
+   * 为什么可注入：清单要等适配层约数秒，测试不能真等；缓存命中 / 过期 / 失败重试
+   * 必须用假函数数调用次数。不注入不得改默认路径，否则页面拿到的就不是适配层真相。
+   */
+  listRuntimeModels?: () => Promise<RuntimeCatalog>;
+  /**
+   * 模型清单缓存用的时钟（epoch ms）。缺省 Date.now。
+   *
+   * 为什么单独注入、不复用 Platform 的 Clock：缓存只属于这一份 HTTP 服务实例，
+   * 和领域时间无关；测试要把有效期拨过 10 分钟而不拨业务时钟。
+   */
+  now?: () => number;
 }
 
 class HttpError extends Error {
@@ -234,6 +254,10 @@ export function createApi(deps: ApiDeps): Server {
   const { platform, tokens, deliveries, onMutation, beforeRead, resolveControlPrincipal } = deps;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
   const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
+  const listModels = deps.listRuntimeModels ?? listRuntimeModels;
+  const nowMs = deps.now ?? Date.now;
+  /** 成功清单按实例缓存。失败不进这里——否则一次适配层故障会锁死 10 分钟旧错误。 */
+  let cachedRuntimeCatalog: { readonly at: number; readonly catalog: RuntimeCatalog } | undefined;
 
   const requireRun = (req: IncomingMessage): RunContext => {
     const header = req.headers['x-coagent-run'];
@@ -619,7 +643,15 @@ export function createApi(deps: ApiDeps): Server {
     // 可用模型清单。平台自己不认识模型——这里只是把适配层吐的 JSON 转出去。
     if (method === 'GET' && path === '/api/runtime/models') {
       await requireControl(req, POLICY_ACTION.missionRead);
-      return send(res, 200, await listRuntimeModels());
+      const hit = cachedRuntimeCatalog;
+      if (hit && nowMs() - hit.at < RUNTIME_MODELS_CACHE_MS) {
+        return send(res, 200, hit.catalog);
+      }
+      const catalog = await listModels();
+      if (catalog.available === true) {
+        cachedRuntimeCatalog = { at: nowMs(), catalog };
+      }
+      return send(res, 200, catalog);
     }
 
     if (method === 'GET' && path === '/api/projects') {

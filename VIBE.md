@@ -40,6 +40,10 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 权威执行预算：hard 可停/内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005）。
 - Decision/Jev 在 OFF/SHADOW 下不具执行权威；SHADOW 仅审计（ADR-0002）。
 
+## Web 约定
+
+- 网页上的列表一律按时间倒序，最新的在最上面：任务表、方案运行列表、最近完成、待办、死信等都一样（用户 2026-09-29）。同一任务内的进度环节是流程，仍按发生顺序从上到下。
+
 ## Memory Model
 
 - **`project.md`**：项目级稳定上下文（本文件）。**不要**再引入 `project.yaml` / `constitution.md` 或第二份项目级记忆入口。
@@ -134,6 +138,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
 - **run-token-lifecycle** — Run Token 生命周期（RECON-002A）
   Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 获得 mission / attempt / role / workItem 上下文，不接受请求体自述身份。
+- **runtime-observability** — 运行时状态路径、实时输出与模型清单
+  直接执行 `node src/main.ts` 且未设 `COAGENT_STATE` 时，状态文件缺省为该 `src/main.ts` 所在仓库根的 `.coagent-state.json`，与调用时的 cwd 无关。缺省路径不存在则拒
 - **spawn-env-filter** — 子进程环境过滤（Spawn env filter）
   `SpawnRuntime` 拉起的 agent / query 子进程**不得**继承整份宿主 `process.env`。未声明透传名单时 fail-closed；显式声明「一个都不透传」时只留 OS/代理基线。
 - **startup-reconciliation** — 启动收敛（RECON-002B）

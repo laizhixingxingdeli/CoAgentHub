@@ -9,7 +9,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { API_VERSION, createApi, drainApi } from './api/server.ts';
@@ -27,6 +29,7 @@ import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
+import { InMemoryLiveOutput } from './application/live.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import {
   FileActivityLog,
@@ -266,6 +269,9 @@ export async function buildPersistentPlatform(
     queryRuntime?.supportsQuery === true
       ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
       : undefined;
+  // 文件版调度器和观测面同进程，内存通道即可。不写入状态文件：实时输出是
+  // 看的不是存的，落盘会把海量行和凭据形状带进备份。PG 仍用跨进程表。
+  const live = new InMemoryLiveOutput();
 
   // 刚起来 = 没有任何 attempt 可能还活着。不收敛的话，上一次崩溃留下的
   // in_progress 会把对应的 Mission / 工作项永久卡死。
@@ -320,6 +326,7 @@ export async function buildPersistentPlatform(
     tokens,
     agentPool: new FileAgentPoolRepository(store),
     issuer: makeIssuer(platform, tokens),
+    live,
     persist: () => store.flush(),
     releaseLock,
   };
@@ -1027,20 +1034,84 @@ export async function startServer(
   }
 }
 
+type PathDirnameResolve = {
+  dirname(path: string): string;
+  resolve(...paths: string[]): string;
+};
+
+/**
+ * 直接 `node src/main.ts` 的缺省状态：本模块所在仓库根的 `.coagent-state.json`。
+ * 相对 cwd 会在别的目录启动时静默新建一份空状态，平台分裂成两份。
+ */
+export function defaultStatePathFromMainModule(
+  mainModulePath: string = fileURLToPath(import.meta.url),
+  pathApi: PathDirnameResolve = { dirname, resolve },
+): string {
+  return pathApi.resolve(pathApi.dirname(mainModulePath), '..', '.coagent-state.json');
+}
+
+export function isDirectMainEntry(
+  argv1: string | undefined = process.argv[1],
+  selfUrl: string = import.meta.url,
+): boolean {
+  if (typeof argv1 !== 'string' || argv1.length === 0) return false;
+  try {
+    const invoked = pathToFileURL(resolve(argv1)).href;
+    if (invoked === selfUrl) return true;
+    // Windows 上同一路径可能只差盘符大小写；当成同一入口，否则直接 node 不启动。
+    return process.platform === 'win32' && invoked.toLowerCase() === selfUrl.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * CLI 状态路径。显式 COAGENT_STATE 允许指向尚不存在的文件（启动后可新建）。
+ * 走缺省路径时文件必须已在：否则拒绝，避免第一次误启动把空状态写出去。
+ */
+export function resolveDirectMainStatePath(
+  env: NodeJS.ProcessEnv = process.env,
+  options?: {
+    mainModulePath?: string;
+    exists?: (path: string) => boolean;
+    pathApi?: PathDirnameResolve;
+  },
+): { ok: true; path: string } | { ok: false; path: string; message: string } {
+  const explicit = env.COAGENT_STATE;
+  if (typeof explicit === 'string' && explicit.length > 0) {
+    return { ok: true, path: explicit };
+  }
+  const path = defaultStatePathFromMainModule(options?.mainModulePath, options?.pathApi);
+  const exists = options?.exists ?? existsSync;
+  if (!exists(path)) {
+    return {
+      ok: false,
+      path,
+      message:
+        `默认状态文件不存在：${path}\n` +
+        `拒绝静默新建以免平台状态分裂。请设置 COAGENT_STATE 指向要使用的状态文件（不存在时允许新建）。`,
+    };
+  }
+  return { ok: true, path };
+}
+
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。
 // 信号必须走同一条 server.close（drain → tick → persist → HTTP → 释锁），不能 process.exit 绕过。
-if (process.argv[1]?.endsWith('main.ts')) {
-  void startServer(
-    Number(process.env.PORT ?? 3101),
-    process.env.COAGENT_STATE ?? '.coagent-state.json',
-  ).then((built) => {
-    const onSignal = () => {
-      built.server.close((error) => {
-        if (error) console.error(error);
-        process.exit(error ? 1 : 0);
-      });
-    };
-    process.once('SIGINT', onSignal);
-    process.once('SIGTERM', onSignal);
-  });
+if (isDirectMainEntry()) {
+  const resolved = resolveDirectMainStatePath();
+  if (!resolved.ok) {
+    console.error(resolved.message);
+    process.exit(1);
+  } else {
+    void startServer(Number(process.env.PORT ?? 3101), resolved.path).then((built) => {
+      const onSignal = () => {
+        built.server.close((error) => {
+          if (error) console.error(error);
+          process.exit(error ? 1 : 0);
+        });
+      };
+      process.once('SIGINT', onSignal);
+      process.once('SIGTERM', onSignal);
+    });
+  }
 }

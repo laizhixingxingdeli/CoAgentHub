@@ -1016,6 +1016,34 @@ describe('run-plan --check 只读、零副作用', () => {
     assert.match(warnedOut, /Warn：验收路径 src\/miss\.ts 未被范围覆盖/);
     assert.doesNotMatch(warnedOut, /没有可跑的候选/);
   });
+
+  test('--check 未纳入仍逐条列出 done/split/人工流程，不收成计数', () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-check-itemize-');
+    const planPath = join(home, 'full.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([
+          { id: 'DoneA', title: '已合甲', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'DoneB', title: '已合乙', why: 'w', allowedScope: ['b.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'Split1', title: '父项', why: 'w', allowedScope: ['c.ts'], acceptance: ['x'], status: 'split' },
+          { id: 'Plan1', title: '规划中', why: 'w', allowedScope: ['d.ts'], acceptance: ['x'], status: 'planned' },
+          { id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' },
+        ]),
+        null,
+        2,
+      ),
+    );
+    const result = runCheck(planPath, repo);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, out);
+    assert.match(out, /DoneA 已合甲\s+本次未纳入：源方案标 done/);
+    assert.match(out, /DoneB 已合乙\s+本次未纳入：源方案标 done/);
+    assert.match(out, /Split1 父项\s+本次未纳入：已拆分的父项/);
+    assert.match(out, /Plan1 规划中\s+本次未纳入：人工流程已规划/);
+    assert.doesNotMatch(out, /\d+ 项\s+本次未纳入/);
+  });
 });
 
 function runOpen(planPath: string, cwd: string, extra: string[] = []) {
@@ -1125,6 +1153,63 @@ describe('run-plan 开跑路径真实副作用次序', () => {
     assert.match(out, /stray\.json/);
     assert.doesNotMatch(out, /开跑：/);
     assert.equal(existsSync(join(home, 'state.json')), false, '警告不得挡住后续预检，也不得当排除');
+  });
+
+  test('正式开跑未纳入按原因计数 done/split/人工流程，需 L3 的仍逐条', () => {
+    const dirty = repoOn('auto/plan-x');
+    writeFileSync(join(dirty, 'stray.json'), '{}');
+    const home = temp('coagent-open-count-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([
+          { id: 'DoneA', title: '已合甲', why: 'w', allowedScope: ['a.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'DoneB', title: '已合乙', why: 'w', allowedScope: ['b.ts'], acceptance: ['x'], status: 'done' },
+          { id: 'Split1', title: '父项', why: 'w', allowedScope: ['c.ts'], acceptance: ['x'], status: 'split' },
+          { id: 'Plan1', title: '规划中', why: 'w', allowedScope: ['d.ts'], acceptance: ['x'], status: 'planned' },
+          { id: 'Impl1', title: '实现中', why: 'w', allowedScope: ['e.ts'], acceptance: ['x'], status: 'implementing' },
+          { id: 'Rev1', title: '检视中', why: 'w', allowedScope: ['f.ts'], acceptance: ['x'], status: 'review' },
+          { id: 'Rew1', title: '返工中', why: 'w', allowedScope: ['g.ts'], acceptance: ['x'], status: 'rework' },
+          { id: 'Skip1', title: '跳过', why: 'w', allowedScope: ['h.ts'], acceptance: ['x'], status: 'skipped' },
+          {
+            id: 'Truth', title: '规格', why: 'w',
+            allowedScope: ['.coagent/specs/x.md'], acceptance: ['x'], status: 'pending',
+          },
+          { id: 'Miss', title: '缺契约', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' },
+          {
+            id: 'Dep', title: '缺依赖', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending',
+            dependsOn: ['Ok'],
+          },
+          { id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' },
+        ]),
+        null,
+        2,
+      ),
+    );
+    const result = runOpen(planPath, dirty, ['--state', join(home, 'state.json'), '--run-dir', join(home, 'plans')]);
+    const out = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0, out);
+    assert.match(out, /2 项\s+本次未纳入：源方案标 done/);
+    assert.match(out, /1 项\s+本次未纳入：已拆分的父项/);
+    assert.match(out, /1 项\s+本次未纳入：人工流程已规划/);
+    assert.match(out, /1 项\s+本次未纳入：人工实现进行中/);
+    assert.match(out, /1 项\s+本次未纳入：人工检视中/);
+    assert.match(out, /1 项\s+本次未纳入：人工返工中/);
+    assert.doesNotMatch(out, /DoneA /);
+    assert.doesNotMatch(out, /DoneB /);
+    assert.doesNotMatch(out, /Split1 /);
+    assert.doesNotMatch(out, /Plan1 /);
+    assert.doesNotMatch(out, /Impl1 /);
+    assert.doesNotMatch(out, /Rev1 /);
+    assert.doesNotMatch(out, /Rew1 /);
+    assert.match(out, /Skip1 跳过\s+本次未纳入：源方案标 skipped/);
+    assert.match(out, /Truth 规格\s+本次未纳入：allowedScope 含 \.coagent\/ 或 VIBE\.md/);
+    assert.match(out, /Miss 缺契约\s+本次未纳入：缺目标说明/);
+    assert.match(out, /Dep 缺依赖\s+本次未纳入：依赖 Ok/);
+    assert.match(out, /Ok 待跑/);
+    assert.match(out, /stray\.json/);
+    assert.doesNotMatch(out, /开跑：/);
   });
 
   test('有警告时正式开跑可继续：首次预检通过后仍拿锁（状态文件使二次预检失败）', () => {
@@ -2929,8 +3014,12 @@ function hostedPlanRequestBody(overrides: Record<string, unknown> = {}) {
 }
 
 function spawnRunPlan(args: string[], env?: NodeJS.ProcessEnv) {
+  return spawnCli([RUN_PLAN, ...args], env);
+}
+
+function spawnCli(argv: string[], env?: NodeJS.ProcessEnv, timeoutMs = 20_000) {
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, [RUN_PLAN, ...args], {
+    const child = spawn(process.execPath, argv, {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       env: env ?? { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-', COAGENT_RECONCILE_INTERVAL_MS: '0', COAGENT_STORE: 'file' },
     });
@@ -2944,8 +3033,43 @@ function spawnRunPlan(args: string[], env?: NodeJS.ProcessEnv) {
     });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new Error(`run-plan 超时：${stdout}${stderr}`));
-    }, 20_000);
+      reject(new Error(`CLI 超时：${stdout}${stderr}`));
+    }, timeoutMs);
+    child.once('exit', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+function spawnUntilNeedle(argv: string[], needle: string, timeoutMs = 25_000) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, argv, {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: { ...process.env, COAGENT_AGENT_ENV_PASSTHROUGH: '-', COAGENT_RECONCILE_INTERVAL_MS: '0', COAGENT_STORE: 'file' },
+    });
+    let stdout = '';
+    let stderr = '';
+    let seen = false;
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`未等到「${needle}」：${stdout}${stderr}`));
+    }, timeoutMs);
+    const consider = () => {
+      if (seen) return;
+      if (!`${stdout}${stderr}`.includes(needle)) return;
+      seen = true;
+      setTimeout(() => child.kill('SIGTERM'), 300);
+      setTimeout(() => child.kill('SIGKILL'), 2_000);
+    };
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk);
+      consider();
+    });
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+      consider();
+    });
     child.once('exit', (status) => {
       clearTimeout(timer);
       resolve({ status, stdout, stderr });
@@ -3229,10 +3353,14 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
       const out = `${spawned.stdout}${spawned.stderr}`;
       assert.equal(spawned.status, 9, out);
       const startAt = spawned.stdout.indexOf('方案 PLAN-check 开跑：Ok');
+      const port = (server.address() as AddressInfo).port;
+      const modeLine = `由常驻服务托管：实例 aaaaaaaa、端口 ${port}`;
+      const modeAt = spawned.stdout.indexOf(modeLine);
       const missionAt = spawned.stdout.indexOf('[12:00:00] Ok ▶ R-Ok');
       const toolAt = spawned.stdout.indexOf('  · read');
       const stopAt = spawned.stdout.indexOf('方案 PLAN-check 停了：finished');
-      assert.ok(startAt >= 0 && missionAt > startAt && toolAt > missionAt && stopAt > toolAt, spawned.stdout);
+      assert.ok(startAt >= 0 && modeAt > startAt && missionAt > modeAt && toolAt > missionAt && stopAt > toolAt, spawned.stdout);
+      assert.doesNotMatch(out, /无常驻服务，独立运行/);
       assert.match(spawned.stderr, /hosted-err/);
       assert.equal(seen.length, 1);
       const body = seen[0] as Record<string, unknown>;
@@ -3521,6 +3649,165 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
       assert.equal(existsSync(join(cutDir, 'plans')), false);
     } finally {
       cutRelease();
+    }
+  });
+
+  test('独立 run-plan 在开跑信息后标明本进程持主锁', async () => {
+    const repo = repoOn('auto/plan-x');
+    const home = temp('coagent-indie-plan-');
+    const planPath = join(home, 'PLAN.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(
+        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
+        null,
+        2,
+      ),
+    );
+    const adapter = join(home, 'adapter.ts');
+    writeFileSync(adapter, 'export {}\n');
+    const spawned = await spawnUntilNeedle(
+      [
+        RUN_PLAN,
+        '--plan',
+        planPath,
+        '--cwd',
+        repo,
+        '--reviewer',
+        'claude',
+        '--state',
+        join(home, 'state.json'),
+        '--run-dir',
+        join(home, 'plans'),
+        '--worktrees',
+        join(home, 'wt'),
+        '--adapter',
+        adapter,
+      ],
+      '无常驻服务，独立运行（本进程持主锁）',
+    );
+    const out = `${spawned.stdout}${spawned.stderr}`;
+    const startAt = out.indexOf('开跑：');
+    const modeAt = out.indexOf('无常驻服务，独立运行（本进程持主锁）');
+    assert.ok(startAt >= 0 && modeAt > startAt, out);
+    assert.doesNotMatch(out, /由常驻服务托管/);
+  });
+
+  test('live 锁 run-mission 在开跑信息后标明托管实例与端口', async () => {
+    const dir = temp('coagent-mission-fwd-mode-');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(statePath, JSON.stringify({}));
+    const instanceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
+    try {
+      const clock = new FixedClock();
+      const activity = new InMemoryActivityLog(clock);
+      const ids = new SequentialIds();
+      const deliveries = new InMemoryDeliveryRepository(clock, ids);
+      const projects = new InMemoryProjectRepository();
+      const platform = new Platform({
+        projects,
+        deliveries,
+        workspace: new InPlaceWorkspaceManager(),
+        activity,
+        clock,
+        ids,
+      });
+      const tokens = new RunTokenRegistry();
+      const server: Server = createApi({
+        platform,
+        tokens,
+        deliveries,
+        identity: { instanceId, stateId: stateIdFor(statePath) },
+        runMission: async (_body, emit) => {
+          emit('stdout', 'Mission M-mode；平台监听 http://127.0.0.1:9');
+          emit('stdout', 'worktree: /tmp');
+          return 0;
+        },
+      });
+      await listenLoopback(server, 0);
+      servers.push(server);
+      publishLockPort(statePath, instanceId, (server.address() as AddressInfo).port);
+      const mission = join(dir, 'mission.json');
+      writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-mode', contract: CONTRACT }));
+      const spawned = await spawnCli([
+        '--experimental-strip-types',
+        fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
+        mission,
+        '--cwd',
+        dir,
+        '--state',
+        statePath,
+        '--in-place',
+        '--adapter',
+        join(dir, 'adapter.ts'),
+      ]);
+      const port = (server.address() as AddressInfo).port;
+      const out = spawned.stdout;
+      const startAt = out.indexOf('Mission M-mode；平台监听');
+      const modeLine = `由常驻服务托管：实例 bbbbbbbb、端口 ${port}`;
+      const modeAt = out.indexOf(modeLine);
+      assert.equal(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
+      assert.ok(startAt >= 0 && modeAt > startAt, out);
+      assert.doesNotMatch(`${spawned.stdout}${spawned.stderr}`, /无常驻服务，独立运行/);
+    } finally {
+      release();
+    }
+  });
+
+  test('独立 run-mission 在开跑信息后标明本进程持主锁', async () => {
+    const dir = temp('coagent-indie-mission-');
+    const mission = join(dir, 'mission.json');
+    writeFileSync(mission, JSON.stringify({ projectId: 'P', missionId: 'M-indie', contract: CONTRACT }));
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, 'export {}\n');
+    const spawned = await spawnUntilNeedle(
+      [
+        '--experimental-strip-types',
+        fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
+        mission,
+        '--cwd',
+        dir,
+        '--state',
+        join(dir, 'state.json'),
+        '--in-place',
+        '--adapter',
+        adapter,
+      ],
+      '无常驻服务，独立运行（本进程持主锁）',
+    );
+    const out = `${spawned.stdout}${spawned.stderr}`;
+    const startAt = out.indexOf('Mission M-indie；平台监听');
+    const modeAt = out.indexOf('无常驻服务，独立运行（本进程持主锁）');
+    assert.ok(startAt >= 0 && modeAt > startAt, out);
+    assert.doesNotMatch(out, /由常驻服务托管/);
+  });
+
+  test('PG 独立运行在开跑信息后打印专用句，不称持文件主锁（源码位置；本测试不起 PG）', () => {
+    // CLI 在 buildPgPlatform 之后才打开跑信息；本文件没有装配 fake，不得改路由。
+    // 真库不可用时 skip 不能当验收，故锁源码位置与精确文案。
+    const pgLine = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
+    const fileLine = '无常驻服务，独立运行（本进程持主锁）';
+    const hostedPrefix = '由常驻服务托管：实例 ';
+    const runPlan = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
+    const runMission = readFileSync(join(import.meta.dirname, '..', 'src', 'run-mission.ts'), 'utf8');
+
+    for (const [name, src] of [
+      ['run-plan', runPlan],
+      ['run-mission', runMission],
+    ] as const) {
+      assert.ok(src.includes(`const PG_INDEPENDENT_RUN_MODE = '${pgLine}'`), name);
+      assert.ok(src.includes(`const INDEPENDENT_RUN_MODE = '${fileLine}'`), name);
+      assert.ok(src.includes(hostedPrefix), name);
+      const startNeedle = name === 'run-plan' ? '开跑：' : '平台监听';
+      const startAt = src.indexOf(startNeedle);
+      const modeAt = src.indexOf('console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE)');
+      assert.ok(startAt >= 0 && modeAt > startAt, `${name}: PG 句必须在开跑信息之后`);
+      const probeBlock = src.indexOf('if (!usePg)');
+      const probeCall = src.indexOf('probeLocalWriter(statePath)');
+      assert.ok(probeBlock >= 0 && probeCall > probeBlock, `${name}: 探测仍只在文件版`);
+      assert.ok(!src.includes('if (!usePg) console.log(INDEPENDENT_RUN_MODE)'), name);
+      assert.doesNotMatch(src, /PG 存储：[\s\S]{0,40}持主锁/);
     }
   });
 });

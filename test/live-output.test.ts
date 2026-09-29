@@ -8,6 +8,10 @@
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -27,6 +31,7 @@ import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { LiveOutput } from '../src/application/live.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import { buildPersistentPlatform } from '../src/main.ts';
 
 const servers: Server[] = [];
 after(() => {
@@ -257,3 +262,54 @@ describe('实时输出：跨进程（Postgres）', () => {
     );
   });
 });
+
+describe('文件版 buildPersistentPlatform 接通 live',
+  () => {
+    const dirs: string[] = [];
+    after(() => {
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('返回 InMemoryLiveOutput，不落盘，独立入口按 built.live 装配',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'coagent-file-live-build-'));
+        dirs.push(dir);
+        const statePath = join(dir, 'state.json');
+        const built = await buildPersistentPlatform(statePath, {
+          workspace: new InPlaceWorkspaceManager(),
+        });
+        assert.equal(built.live instanceof InMemoryLiveOutput, true);
+        await built.live.append({
+          missionId: 'M-mem',
+          attemptId: 'A1',
+          kind: 'text',
+          text: 'sk-ant-abcdefghijklmnopqrstuvwxyz',
+        });
+        built.persist();
+        const dumped = readFileSync(statePath, 'utf8');
+        assert.doesNotMatch(dumped, /sk-ant-abcdefghijklmnopqrstuvwxyz/);
+        assert.doesNotMatch(dumped, /"live"\s*:/);
+        assert.equal((await built.live.since('M-mem')).length, 1);
+
+        const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
+        const persistent = main.slice(
+          main.indexOf('export async function buildPersistentPlatform'),
+          main.indexOf('export async function buildPgPlatform'),
+        );
+        assert.match(persistent, /new InMemoryLiveOutput/);
+        assert.match(persistent, /\blive,/);
+        assert.doesNotMatch(persistent, /PgLiveOutput/);
+        const pg = main.slice(main.indexOf('export async function buildPgPlatform'));
+        assert.match(pg, /new PgLiveOutput/);
+
+        const runPlan = readFileSync(fileURLToPath(new URL('../src/run-plan.ts', import.meta.url)), 'utf8');
+        const runMission = readFileSync(
+          fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
+          'utf8',
+        );
+        assert.match(runPlan, /const live = 'live' in built \? built\.live : undefined/);
+        assert.match(runMission, /const live = 'live' in built \? built\.live : undefined/);
+      },
+    );
+  },
+);

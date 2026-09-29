@@ -34,6 +34,7 @@ import { FilePlanRunStore } from './application/plan-run-store.ts';
 import {
   candidateHandoffText,
   parsePlanSpec,
+  PLAN_ELIGIBILITY_REASONS,
   selectPlanCandidates,
   type PlanCandidateSelection,
   type PlanSpec,
@@ -144,7 +145,29 @@ function printStopGates(rawStop: unknown, effective: PlanSpec['stopConditions'])
   );
 }
 
-function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): void {
+/** 正式开跑时按原因计数、不逐条展开。这些源状态不需要 L3 修订就能理解；逐条会淹没开跑信息。 */
+const FORMAL_COUNTED_EXCLUSION_REASONS = new Set<string>([
+  PLAN_ELIGIBILITY_REASONS.done,
+  PLAN_ELIGIBILITY_REASONS.split,
+  PLAN_ELIGIBILITY_REASONS.planned,
+  PLAN_ELIGIBILITY_REASONS.implementing,
+  PLAN_ELIGIBILITY_REASONS.review,
+  PLAN_ELIGIBILITY_REASONS.rework,
+]);
+
+const INDEPENDENT_RUN_MODE = '无常驻服务，独立运行（本进程持主锁）';
+// PG 不探测、不转发、不持文件主锁；再用文件独立句会虚报持锁。
+const PG_INDEPENDENT_RUN_MODE = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
+
+function hostedRunModeLine(instanceId: string, port: number): string {
+  return `由常驻服务托管：实例 ${instanceId.slice(0, 8)}、端口 ${port}`;
+}
+
+function printEligibility(
+  plan: PlanSpec,
+  selection: PlanCandidateSelection,
+  exclusionStyle: 'full' | 'formal',
+): void {
   console.log(`方案 ${plan.planId} 入选 ${selection.candidates.length} 项，未纳入 ${selection.exclusions.length} 项。`);
   console.log('入选：');
   if (selection.candidates.length === 0) {
@@ -157,12 +180,29 @@ function printEligibility(plan: PlanSpec, selection: PlanCandidateSelection): vo
   console.log('本次未纳入：');
   if (selection.exclusions.length === 0) {
     console.log('  （无）');
-  } else {
+  } else if (exclusionStyle === 'full') {
     for (const ex of selection.exclusions) {
       console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
     }
+  } else {
+    // --check 仍走全清单；正式只把无需 L3 的排除收成计数，缺契约/依赖/禁止范围等仍逐条。
+    const counts = new Map<string, number>();
+    const itemized: PlanCandidateSelection['exclusions'][number][] = [];
+    for (const ex of selection.exclusions) {
+      if (FORMAL_COUNTED_EXCLUSION_REASONS.has(ex.reason)) {
+        counts.set(ex.reason, (counts.get(ex.reason) ?? 0) + 1);
+      } else {
+        itemized.push(ex);
+      }
+    }
+    for (const [reason, n] of counts) {
+      console.log(`  ${n} 项  ${reason}`);
+    }
+    for (const ex of itemized) {
+      console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
+    }
   }
-  // --check 与正式开跑共用这一段：警告在资格筛选里就算好，这里只展示。无警告不印标题，免得像还有事。
+  // 警告在资格筛选里就算好，这里只展示。无警告不印标题，免得像还有事。
   if (selection.warnings.length > 0) {
     console.log('警告：');
     for (const warning of selection.warnings) {
@@ -193,7 +233,7 @@ async function checkPlanOnly(planFile: string, maxRounds: number | undefined): P
   console.log(`方案 ${plan.planId} 只读检查（--check，不开跑）`);
   printStopGates(raw.stopConditions, plan.stopConditions);
   console.log(`轮次上限：${maxRounds ?? 12}${maxRounds === undefined ? '（缺省）' : ''}`);
-  printEligibility(plan, selection);
+  printEligibility(plan, selection, 'full');
   if (selection.candidates.length === 0) {
     console.log('没有可跑的候选。');
     return;
@@ -299,12 +339,19 @@ async function forwardLivePlan(holder: LockInfo, body: Record<string, unknown>):
     throw new Error(`无法安全转发到本机写者：${HOSTED_AGENT_ENV_UNPROVEN_MESSAGE}`);
   }
   const identity = requireLiveIdentity(holder);
+  const modeLine = hostedRunModeLine(identity.instanceId, identity.port);
+  let announced = false;
   return loopbackRunRequest(
     identity,
     { path: '/api/control/run-plan', body },
     (channel, line) => {
       if (channel === 'stderr') console.error(line);
       else console.log(line);
+      // 探测与争锁后重探测都走这里：开跑行之后才标明托管，避免和资格清单搅在一起。
+      if (!announced && channel !== 'stderr' && line.includes('开跑：')) {
+        announced = true;
+        console.log(modeLine);
+      }
     },
     // 0 = 关掉套接字空闲超时。不显式传的话 Node 19+ globalAgent keepAlive 默认 5s，
     // 升级等待中间没有 stdout 会被误报「回环运行流超时」，对端 job 还在跑。
@@ -339,7 +386,7 @@ async function main() {
   });
   const projectRoot = resolve(arg('--cwd') ?? process.cwd());
   const selection = selectPlanCandidates(plan, { projectRoot });
-  printEligibility(plan, selection);
+  printEligibility(plan, selection, 'formal');
   const remaining = selection.candidates;
   if (remaining.length === 0) {
     console.log(`方案 ${plan.planId} 没有可跑的候选。`);
@@ -503,6 +550,7 @@ async function main() {
       `检视者 ${plan.reviewer} 每 ${Math.round(plan.stopConditions.escalationTimeoutMs / 60_000)} 分钟醒一次：` +
         `node src/l3.ts plan --run "${store.path}"\n`,
     );
+    console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE);
 
     // Ctrl+C / 被杀：信号结束的进程不发 exit 事件，锁目录会留下，后面每次写都被挡；
     // 方案运行记录也会停在「还在跑」。先记下原因、落盘、放锁再退。在途 Mission 原样

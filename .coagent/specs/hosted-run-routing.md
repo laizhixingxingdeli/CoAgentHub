@@ -6,4 +6,6 @@
 
 服务通过带 API 版本、instanceId、stateId 身份头的回环 NDJSON 流发送 stdout/stderr 行和唯一终态 exitCode；客户端核实身份后边收边原样打印，保持 run-plan 原有开跑、时间戳功能、升级、答复、合入、agent 工具调用、交接面与停止日志格式。服务长时间等待升级时发不进入 CLI stdout 的空闲心跳，客户端不受默认 socket idle timeout 截断；真实断线、缺终态、身份漂移或显式请求超时仍非零失败，不自动重启已接受的 PlanRun 或重做终审。关闭服务先拒绝新 hosted run、等待已接收的 Mission/PlanRun 和 HTTP 写请求，再停止周期 tick、持久化、关闭监听并释放锁；CLI 断开不会取消服务已接受的 job。
 
+文件模式下，两个 CLI 在开跑信息后标注运行方式：验证本机服务后转发时打印「由常驻服务托管：实例 <instanceId 前 8 位>、端口 <端口>」，无服务且本进程持文件主锁时打印「无常驻服务，独立运行（本进程持主锁）」。PG 不做文件写者探测、不转发、不持文件主锁，独立开跑后打印「PG 存储：独立运行（不经常驻服务转发，不持文件主锁）」。不以提示改变写者路由或 fail-closed 规则。
+
 源：`src/run-mission.ts`、`src/run-plan.ts`、`src/main.ts`、`src/application/mission-runner.ts`、`src/application/plan-runtime.ts`、`src/application/loopback-control-client.ts`、`src/application/lock.ts`、`src/api/server.ts`。验证：`test/start-server.test.ts`、`test/run-mission-wiring.test.ts`、`test/run-plan-wiring.test.ts`、`test/l3-plan.test.ts`、`test/api.test.ts`、`test/post-execution-shadow.test.ts`。方案本身的筛选/决定/停止语义继续由 `plan-run` capability 定义；L3 主状态命令语义由 `l3-main-writer-routing` 定义。
