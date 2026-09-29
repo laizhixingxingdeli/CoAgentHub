@@ -8,10 +8,12 @@
  * 换 PostgreSQL 时只改这里：用例层与领域层不知道存储在哪。
  */
 
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { createApi } from './api/server.ts';
+import { API_VERSION, createApi } from './api/server.ts';
+import type { ControlPrincipalResolver } from './api/control-auth.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
   InMemoryActivityLog,
@@ -54,8 +56,8 @@ import {
   PERIODIC_RECONCILE_LOCK_KEY2,
   tryPgAdvisoryLock,
 } from './application/pg-store.ts';
-import { acquireLock, LockBusyError } from './application/lock.ts';
-import { listenLoopback } from './application/loopback-listen.ts';
+import { acquireLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
+import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
   reconcileInterruptedAttempts,
@@ -174,10 +176,11 @@ export interface PersistentOptions {
   /**
    * 是否要排他写锁。
    *
-   * 会推进状态的入口（run-mission、l3）必须要；只读的观测面不要——
-   * 它要锁就等于一开着界面就没法干活了。
+   * 会推进状态的入口（run-mission、l3、常驻 startServer）必须要；只读入口不要——
+   * 只读入口要锁就等于一开着界面就没法干活了。常驻写者额外传 instanceId / apiVersion
+   * 供本机探测；CLI 写者继续只传 what。
    */
-  exclusive?: { what: string };
+  exclusive?: { what: string; instanceId?: string; apiVersion?: string };
   /**
    * 可选 query runtime。仅 `supportsQuery === true` 时暴露 queryRunner/runQuery；
    * 未传或不支持则 undefined（fail-closed）。
@@ -207,9 +210,14 @@ export async function buildPersistentPlatform(
   const decisionProvider = options.decisionProvider;
   const decisionHooks = options.decisionHooks;
   const postExecutionEvaluator = options.postExecutionEvaluator;
+  const exclusiveIdentity =
+    options.exclusive?.instanceId !== undefined && options.exclusive.apiVersion !== undefined
+      ? { instanceId: options.exclusive.instanceId, apiVersion: options.exclusive.apiVersion }
+      : undefined;
   const releaseLock = options.exclusive
-    ? acquireLock(statePath, options.exclusive.what)
+    ? acquireLock(statePath, options.exclusive.what, exclusiveIdentity)
     : () => {};
+  try {
   const clock = new SystemClock();
   const store = new FileStateStore(statePath);
   const candidateCircuits = new FileCandidateCircuitRepository(store);
@@ -313,6 +321,11 @@ export async function buildPersistentPlatform(
     persist: () => store.flush(),
     releaseLock,
   };
+  } catch (error) {
+    // 装配失败不能把锁留在目录里：否则下一次启动会看到陈旧锁，而本进程已经没了。
+    releaseLock();
+    throw error;
+  }
 }
 
 /**
@@ -688,6 +701,13 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function mergeCloseErrors(errors: Array<Error | undefined>): Error | undefined {
+  const present = errors.filter((error): error is Error => error !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  return new AggregateError(present, present.map((error) => error.message).join('; '));
+}
+
 /**
  * 把算出的关闭结果交付一次。callback / error 监听器自己抛错只记下来，
  * 不能再交回同一条路径——否则会再调 callback 或变成未处理拒绝。
@@ -720,11 +740,16 @@ function deliverServerCloseOutcome(
 
 /**
  * 调用方只调 server.close 也必须先停周期调度。无论 stop 成败都关 HTTP，
- * 两个错误都保留：丢掉任何一个，文件锁 / 独立 PG 连接或监听端口就会
- * 看起来「关了」其实没关完。closeHttp 同步抛错也接住，避免包在没人 await
- * 的 async 里变成未处理拒绝。
+ * 再释放主锁（afterHttpClose）。错误都保留：丢掉任何一个，文件锁 / 独立 PG
+ * 连接或监听端口就会看起来「关了」其实没关完。不能在 HTTP 未关闭时早放锁，
+ * 也不能在 callback 前把锁漏在目录里。closeHttp 同步抛错也接住，避免包在
+ * 没人 await 的 async 里变成未处理拒绝。
  */
-export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promise<void>): void {
+export function bindServerCloseToPeriodicStop(
+  server: Server,
+  stop: () => Promise<void>,
+  afterHttpClose?: () => void | Promise<void>,
+): void {
   const closeHttp = server.close.bind(server);
   server.close = ((callback?: (err?: Error) => void) => {
     const run = async (): Promise<Error | undefined> => {
@@ -746,9 +771,15 @@ export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promis
       } catch (error) {
         closeErr = asError(error);
       }
-      return stopErr && closeErr
-        ? new AggregateError([stopErr, closeErr], `${stopErr.message}; ${closeErr.message}`)
-        : (stopErr ?? closeErr);
+      let afterErr: Error | undefined;
+      if (afterHttpClose) {
+        try {
+          await afterHttpClose();
+        } catch (error) {
+          afterErr = asError(error);
+        }
+      }
+      return mergeCloseErrors([stopErr, closeErr, afterErr]);
     };
     // 算出错误与交付分开，交付只做一次。外层再接一次，防止漏网拒绝。
     void (async () => {
@@ -767,10 +798,11 @@ export function bindServerCloseToPeriodicStop(server: Server, stop: () => Promis
 }
 
 /**
- * 起观测面 / API。
+ * 起常驻 API / 观测面。文件版从可写装配前一直握主锁，直到 HTTP 完全关闭。
  *
  * 存储选哪个由 COAGENT_STORE 决定（pg / file）。缺省仍是文件版——
  * 没装 Postgres 的人 clone 下来就能跑，这条性质不能因为多了一个选项就丢掉。
+ * PG 不套文件锁，也不宣称跨主机 fencing。
  */
 export interface StartServerOptions {
   /** 可注入 fetch（测试用 fake；生产默认 globalThis.fetch）。 */
@@ -778,10 +810,38 @@ export interface StartServerOptions {
   /** 可注入 env（测试用；生产默认 process.env）。 */
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   /**
-   * 测试用：替换周期 tick，用来造「在途慢 tick」验证 close 会等锁与连接释放。
-   * 生产不传——默认文件短借锁 / PG 独立 store。
+   * 测试用：替换周期 tick，用来造「在途慢 tick」验证 close 会等在途修复与 HTTP 关闭。
+   * 生产不传——文件版在主锁下用已持锁 store 补投递，PG 用独立 store。
    */
   periodicTick?: () => Promise<void>;
+  /**
+   * 可替换的控制写入口策略。默认不注入：未带 control 凭据的本机写请求保持放行。
+   * 不得把 x-coagent-run 当成控制身份。
+   */
+  resolveControlPrincipal?: ControlPrincipalResolver;
+}
+
+async function abortStartedServer(
+  server: Server | undefined,
+  releaseLock: () => void,
+  error: unknown,
+): Promise<never> {
+  const errors = [asError(error)];
+  if (server?.listening) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.close((closeErr) => (closeErr ? reject(closeErr) : resolve()));
+      });
+    } catch (closeErr) {
+      errors.push(asError(closeErr));
+    }
+  }
+  try {
+    releaseLock();
+  } catch (releaseErr) {
+    errors.push(asError(releaseErr));
+  }
+  throw errors.length === 1 ? errors[0]! : new AggregateError(errors, errors.map((row) => row.message).join('; '));
 }
 
 export async function startServer(
@@ -799,59 +859,88 @@ export async function startServer(
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
   // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
   const queryRuntime = createPiQueryRuntime(env);
-  const built = usePg
-    ? await buildPgPlatform({ ...decision, queryRuntime })
-    : await buildPersistentPlatform(statePath, { ...decision, queryRuntime });
-  const server = createApi({
-    platform: built.platform,
-    tokens: built.tokens,
-    deliveries: built.deliveries,
-    onMutation: built.persist,
-    agentPool: built.agentPool,
-    live: 'live' in built ? built.live : undefined,
-    beforeRead: 'refresh' in built ? built.refresh : undefined,
-  });
-  // 显式绑 loopback：观测面/API 不对外网口开放。动态 port=0 时日志必须读
-  // server.address()，不能回显调用方传入的 port（那会打出 :0）。
-  // port=0 时避开 fetch 屏蔽的端口；重绑在周期调度启动、close 被包装之前做，关的是原生 server。
-  await listenLoopback(server, port);
-  const addr = server.address() as AddressInfo;
-  console.log(`CoAgentHub v5 平台已启动：http://${addr.address}:${addr.port}`);
-  console.log(
-    usePg
-      ? '存储：PostgreSQL'
-      : `存储：文件 ${'store' in built && 'path' in built.store ? built.store.path : statePath}`,
-  );
-  if (built.reconciled.interrupted.length > 0) {
+  const instanceId = randomUUID();
+  let releaseMainLock = () => {};
+  let server: Server | undefined;
+  try {
+    const built = usePg
+      ? await buildPgPlatform({ ...decision, queryRuntime })
+      : await buildPersistentPlatform(statePath, { ...decision, queryRuntime, exclusive: {
+          what: '常驻服务',
+          instanceId,
+          apiVersion: API_VERSION,
+        } });
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseMainLock = built.releaseLock;
+    }
+    server = createApi({
+      platform: built.platform,
+      tokens: built.tokens,
+      deliveries: built.deliveries,
+      onMutation: built.persist,
+      agentPool: built.agentPool,
+      live: 'live' in built ? built.live : undefined,
+      beforeRead: 'refresh' in built ? built.refresh : undefined,
+      ...(options?.resolveControlPrincipal
+        ? { resolveControlPrincipal: options.resolveControlPrincipal }
+        : {}),
+    });
+    if (!usePg) {
+      attachLoopbackWriterIdentity(server, {
+        instanceId,
+        stateId: stateIdFor(statePath),
+      });
+    }
+    // 显式绑 loopback：观测面/API 不对外网口开放。动态 port=0 时日志必须读
+    // server.address()，不能回显调用方传入的 port（那会打出 :0）。
+    // port=0 时避开 fetch 屏蔽的端口；重绑在周期调度启动、close 被包装之前做，关的是原生 server。
+    await listenLoopback(server, port);
+    const addr = server.address() as AddressInfo;
+    if (!usePg) {
+      publishLockPort(statePath, instanceId, addr.port);
+    }
+    console.log(`CoAgentHub v5 平台已启动：http://${addr.address}:${addr.port}`);
     console.log(
-      `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
+      usePg
+        ? '存储：PostgreSQL'
+        : `存储：文件 ${'store' in built && 'path' in built.store ? built.store.path : statePath}`,
     );
-  }
-  // 裁不动要说出来：那一跳的实时行还在无限留着，而收敛已经过去了，
-  // 不说就再没有第二次提醒。
-  for (const failed of built.reconciled.liveTrimFailed ?? []) {
-    console.warn(
-      `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
+    if (built.reconciled.interrupted.length > 0) {
+      console.log(
+        `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
+      );
+    }
+    // 裁不动要说出来：那一跳的实时行还在无限留着，而收敛已经过去了，
+    // 不说就再没有第二次提醒。
+    for (const failed of built.reconciled.liveTrimFailed ?? []) {
+      console.warn(
+        `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
+      );
+    }
+    // 文件版周期在 server 主锁下用已持锁 store，不再短借自己的锁。PG 独立 store。只补投递。
+    // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
+    const periodic = startPeriodicDeliveryRepair({
+      intervalMs: reconcileIntervalMs,
+      warn: warnPeriodicRepair,
+      ...(options?.periodicTick ? { tick: options.periodicTick } : {}),
+      mode: usePg
+        ? { kind: 'pg', connectionString: env.COAGENT_PG }
+        : { kind: 'file-held', store: built.store as FileStateStore },
+    });
+    // 先停在途 tick，再原生 HTTP close，最后释放主锁。callback 之前锁必须还在或已经按这个顺序清掉。
+    bindServerCloseToPeriodicStop(
+      server,
+      () => periodic?.stop() ?? Promise.resolve(),
+      usePg ? undefined : () => releaseMainLock(),
     );
+    return {
+      server,
+      ...built,
+      stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
+    };
+  } catch (error) {
+    await abortStartedServer(server, releaseMainLock, error);
   }
-  // 观测面不握长锁：文件版每轮短借；PG 用独立 store + 跨进程互斥。只补投递。
-  // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
-  const periodic = startPeriodicDeliveryRepair({
-    intervalMs: reconcileIntervalMs,
-    warn: warnPeriodicRepair,
-    ...(options?.periodicTick ? { tick: options.periodicTick } : {}),
-    mode: usePg
-      ? { kind: 'pg', connectionString: env.COAGENT_PG }
-      : { kind: 'file-observer', statePath },
-  });
-  // 调用方只使用 server.close 也必须等到在途 tick 完成并释放文件锁 / 独立 PG 连接。
-  // Node 的 close 回调只表示 HTTP 连接断完，不会等我们的 stop，所以先 stop 再关 HTTP。
-  bindServerCloseToPeriodicStop(server, () => periodic?.stop() ?? Promise.resolve());
-  return {
-    server,
-    ...built,
-    stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
-  };
 }
 
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。

@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { acquireLock } from '../src/application/lock.ts';
+import { acquireLock, LockBusyError } from '../src/application/lock.ts';
 import {
   FileActivityLog,
   FileDeliveryRepository,
@@ -43,6 +43,7 @@ import {
   runHeldFileDeliveryRepair,
   runPgDeliveryRepairTick,
   startPeriodicDeliveryRepair,
+  startServer,
 } from '../src/main.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
@@ -284,6 +285,40 @@ describe('startPeriodicDeliveryRepair 共用装配', () => {
     const after = n;
     await sleep(50);
     assert.equal(n, after);
+  });
+
+  test('startServer 文件版正间隔在主锁下补可核实投递，无 self lock-busy', async () => {
+    const statePath = tempState();
+    await seedFileGap(statePath);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(' '));
+    };
+    let built: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '20' },
+      });
+      assert.throws(() => acquireLock(statePath, 'probe-server-held'), LockBusyError);
+      const deadline = Date.now() + 5000;
+      while ((await fileDeliveries(statePath, 'M-gap')).length !== 1 && Date.now() < deadline) {
+        await sleep(10);
+      }
+      assert.equal((await fileDeliveries(statePath, 'M-gap')).length, 1);
+      assert.equal(
+        warns.filter((row) => row.includes('锁忙')).length,
+        0,
+        '主锁下补投递不得对自己锁忙',
+      );
+    } finally {
+      console.warn = originalWarn;
+      if (built) {
+        await new Promise<void>((done, fail) => {
+          built!.server.close((err) => (err ? fail(err) : done()));
+        });
+      }
+    }
   });
 
   test('未覆盖 tick 时文件已持锁 mode 仍补可核实投递', async () => {

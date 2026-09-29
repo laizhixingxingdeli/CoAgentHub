@@ -5,16 +5,18 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createServer, type Server } from 'node:http';
 
-import { acquireLock, LockBusyError } from '../src/application/lock.ts';
+import { acquireLock, LockBusyError, probeLocalWriter, stateIdFor } from '../src/application/lock.ts';
 import { bindServerCloseToPeriodicStop, startServer } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
+import { API_VERSION } from '../src/api/server.ts';
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -44,6 +46,75 @@ function tempState(): string {
   const dir = mkdtempSync(join(tmpdir(), 'coagent-start-server-'));
   dirs.push(dir);
   return join(dir, 'state.json');
+}
+
+const WRITE_CONTRACT = {
+  intent: '本机写入口',
+  acceptance: ['变更可见'],
+  constraints: [] as string[],
+  nonGoals: [] as string[],
+  guardrails: [] as string[],
+};
+
+async function holdLockInChild(statePath: string): Promise<{ stop: () => Promise<void> }> {
+  const holderPath = join(dirnameOf(statePath), 'hold-lock.ts');
+  const lockUrl = new URL('../src/application/lock.ts', import.meta.url).href;
+  writeFileSync(
+    holderPath,
+    `import { acquireLock } from ${JSON.stringify(lockUrl)};
+const release = acquireLock(${JSON.stringify(statePath)}, '独立进程占锁');
+process.stdout.write('held\\n');
+const halt = () => {
+  release();
+  process.exit(0);
+};
+process.stdin.on('data', halt);
+process.stdin.on('end', halt);
+await new Promise(() => {});
+`,
+  );
+  const child = spawn(process.execPath, [holderPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+  await new Promise<void>((resolve, reject) => {
+    let buf = '';
+    const timer = setTimeout(() => {
+      reject(new Error(`独立进程占锁超时：${buf}\n${stderr}`));
+    }, 8000);
+    const onExit = (code: number | null) => {
+      clearTimeout(timer);
+      reject(new Error(`独立进程在占锁前退出 ${String(code)}：${stderr}`));
+    };
+    child.on('exit', onExit);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdout?.on('data', (chunk) => {
+      buf += String(chunk);
+      if (buf.includes('held')) {
+        clearTimeout(timer);
+        child.off('exit', onExit);
+        resolve();
+      }
+    });
+  });
+  return {
+    stop: () =>
+      new Promise((resolve) => {
+        child.on('exit', () => resolve());
+        child.stdin?.end();
+        setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+      }),
+  };
+}
+
+function dirnameOf(statePath: string): string {
+  return dirname(statePath);
 }
 
 describe('startServer 绑定与启动日志', () => {
@@ -493,9 +564,8 @@ describe('startServer 周期投递修复配置', () => {
 
   test('间隔 0 即使等待也不跑；close 后不再排 tick', async () => {
     const statePath = tempState();
-    const release = acquireLock(statePath, '测试占锁');
-    releaseFns.push(release);
     const warns: string[] = [];
+    let ticks = 0;
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => {
       warns.push(args.map(String).join(' '));
@@ -503,9 +573,16 @@ describe('startServer 周期投递修复配置', () => {
     try {
       const off = await startServer(0, statePath, {
         env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        periodicTick: async () => {
+          ticks += 1;
+        },
       });
       servers.push(off.server);
+      if ('releaseLock' in off && typeof off.releaseLock === 'function') {
+        releaseFns.push(off.releaseLock);
+      }
       await new Promise((done) => setTimeout(done, 70));
+      assert.equal(ticks, 0, '间隔 0 不得启动周期');
       assert.equal(
         warns.filter((row) => row.includes('周期投递修复')).length,
         0,
@@ -516,17 +593,24 @@ describe('startServer 周期投递修复配置', () => {
 
       const on = await startServer(0, statePath, {
         env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '40' },
+        periodicTick: async () => {
+          ticks += 1;
+        },
       });
       servers.push(on.server);
-      // 上限给足：40 毫秒间隔在机器忙时会延后，200 毫秒的上限曾让这里假红。条件满足即返回。
+      if ('releaseLock' in on && typeof on.releaseLock === 'function') {
+        releaseFns.push(on.releaseLock);
+      }
       const deadline = Date.now() + 5000;
-      while (
-        warns.filter((row) => row.includes('锁忙')).length < 1 &&
-        Date.now() < deadline
-      ) {
+      while (ticks < 1 && Date.now() < deadline) {
         await new Promise((done) => setTimeout(done, 15));
       }
-      assert.ok(warns.some((row) => row.includes('锁忙')), '启用后锁忙应跳过');
+      assert.ok(ticks >= 1, '正间隔应跑 tick');
+      assert.equal(
+        warns.filter((row) => row.includes('锁忙')).length,
+        0,
+        '已持锁周期不得对自己锁忙',
+      );
       const health = await fetch(
         `http://${(on.server.address() as AddressInfo).address}:${(on.server.address() as AddressInfo).port}/api/health`,
       );
@@ -534,9 +618,9 @@ describe('startServer 周期投递修复配置', () => {
       await new Promise<void>((done, fail) => {
         on.server.close((err) => (err ? fail(err) : done()));
       });
-      const mid = warns.filter((row) => row.includes('锁忙')).length;
+      const mid = ticks;
       await new Promise((done) => setTimeout(done, 100));
-      assert.equal(warns.filter((row) => row.includes('锁忙')).length, mid);
+      assert.equal(ticks, mid, 'close 后不得再排 tick');
     } finally {
       console.warn = originalWarn;
     }
@@ -546,7 +630,6 @@ describe('startServer 周期投递修复配置', () => {
     const statePath = tempState();
     let tickCount = 0;
     let holding = false;
-    let heldRelease: (() => void) | undefined;
     let finishTick = () => {};
     const gate = new Promise<void>((resolve) => {
       finishTick = resolve;
@@ -557,26 +640,25 @@ describe('startServer 周期投递修复配置', () => {
       periodicTick: async () => {
         tickCount += 1;
         if (tickCount !== 1) return;
-        heldRelease = acquireLock(statePath, '在途 tick 持锁');
         holding = true;
         try {
           await gate;
         } finally {
           holding = false;
-          heldRelease?.();
-          heldRelease = undefined;
         }
       },
     });
     servers.push(on.server);
+    if ('releaseLock' in on && typeof on.releaseLock === 'function') {
+      releaseFns.push(on.releaseLock);
+    }
 
     try {
-      // 上限给足：机器忙时第一轮 tick 会延后；条件满足即返回，不拖慢正常情况。
       const deadline = Date.now() + 5000;
       while (!holding && Date.now() < deadline) {
         await new Promise((done) => setTimeout(done, 5));
       }
-      assert.equal(holding, true, 'tick 应已持锁');
+      assert.equal(holding, true, 'tick 应已在途');
       assert.throws(() => acquireLock(statePath, 'probe-during'), LockBusyError);
 
       const addr = on.server.address() as AddressInfo;
@@ -622,6 +704,150 @@ describe('startServer 周期投递修复配置', () => {
     });
     assert.ok(err, '第二次 close 应报告 HTTP 已关闭');
     assert.equal((err as NodeJS.ErrnoException).code, 'ERR_SERVER_NOT_RUNNING');
+  });
+});
+
+describe('startServer 文件版主锁、身份与控制写', () => {
+  test('独立进程已持锁时 startServer(3101) 拒绝且端口未监听', async () => {
+    const statePath = tempState();
+    const child = await holdLockInChild(statePath);
+    try {
+      await assert.rejects(
+        () =>
+          startServer(3101, statePath, {
+            env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+          }),
+        LockBusyError,
+      );
+      assert.equal(
+        servers.filter((s) => s.listening).length,
+        0,
+        '锁忙拒绝后不得残留 listening server',
+      );
+      await assert.rejects(
+        () => fetch('http://127.0.0.1:3101/api/health', { signal: AbortSignal.timeout(300) }),
+      );
+    } finally {
+      await child.stop();
+    }
+  });
+
+  test('成功启动则锁在 close callback 前一直忙，callback 后可取；身份与 health 一致', async () => {
+    const statePath = tempState();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') {
+      releaseFns.push(built.releaseLock);
+    }
+
+    const addr = built.server.address() as AddressInfo;
+    assert.ok(addr.port > 0);
+    assert.throws(() => acquireLock(statePath, 'probe-running'), LockBusyError);
+
+    const probed = await probeLocalWriter(statePath);
+    assert.equal(probed.status, 'live');
+    if (probed.status !== 'live') throw new Error('expected live');
+    assert.equal(probed.holder.port, addr.port);
+    assert.equal(probed.holder.stateId, stateIdFor(statePath));
+    assert.equal(probed.holder.apiVersion, API_VERSION);
+    assert.ok(probed.holder.instanceId);
+    assert.match(probed.holder.instanceId ?? '', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const health = await fetch(`http://${addr.address}:${addr.port}/api/health`);
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get('x-coagent-instance'), probed.holder.instanceId);
+    assert.equal(health.headers.get('x-coagent-state-id'), probed.holder.stateId);
+    assert.equal(((await health.json()) as { api: string }).api, API_VERSION);
+
+    let callbackRan = false;
+    await new Promise<void>((done, fail) => {
+      built.server.close((err) => {
+        callbackRan = true;
+        err ? fail(err) : done();
+      });
+    });
+    assert.equal(callbackRan, true);
+    const after = acquireLock(statePath, 'probe-after-close');
+    after();
+  });
+
+  test('listen 失败释放自己的锁且不残留 HTTP', async () => {
+    const blocker = createServer();
+    await listenLoopback(blocker, 0);
+    servers.push(blocker);
+    const port = (blocker.address() as AddressInfo).port;
+    const statePath = tempState();
+    await assert.rejects(
+      () =>
+        startServer(port, statePath, {
+          env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        }),
+      /EADDRINUSE/,
+    );
+    const probe = acquireLock(statePath, 'after-listen-fail');
+    probe();
+    assert.equal(blocker.listening, true, '占用端口的 blocker 应仍在');
+  });
+
+  test('未带 control 凭据的本机写请求成功；注入 resolver 可拒绝；x-coagent-run 不是控制身份', async () => {
+    const statePath = tempState();
+    const open = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+    });
+    servers.push(open.server);
+    if ('releaseLock' in open && typeof open.releaseLock === 'function') {
+      releaseFns.push(open.releaseLock);
+    }
+    const addr = open.server.address() as AddressInfo;
+    const created = await fetch(`http://${addr.address}:${addr.port}/api/missions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coagent-run': 'not-a-control-principal',
+      },
+      body: JSON.stringify({
+        projectId: 'P',
+        missionId: 'M-write',
+        contract: WRITE_CONTRACT,
+      }),
+    });
+    assert.notEqual(created.status, 401);
+    assert.notEqual(created.status, 403);
+    assert.equal(created.status, 201);
+    const body = (await created.json()) as { mission?: { missionId?: string }; missionId?: string };
+    assert.equal(body.mission?.missionId ?? body.missionId, 'M-write');
+    const listed = await fetch(`http://${addr.address}:${addr.port}/api/missions`);
+    assert.equal(listed.status, 200);
+    const rows = (await listed.json()) as Array<{ missionId: string }>;
+    assert.ok(rows.some((row) => row.missionId === 'M-write'));
+    await new Promise<void>((done, fail) => {
+      open.server.close((err) => (err ? fail(err) : done()));
+    });
+
+    const gated = await startServer(0, tempState(), {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      resolveControlPrincipal: async () => undefined,
+    });
+    servers.push(gated.server);
+    if ('releaseLock' in gated && typeof gated.releaseLock === 'function') {
+      releaseFns.push(gated.releaseLock);
+    }
+    const gatedAddr = gated.server.address() as AddressInfo;
+    const denied = await fetch(`http://${gatedAddr.address}:${gatedAddr.port}/api/missions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'P',
+        missionId: 'M-denied',
+        contract: WRITE_CONTRACT,
+      }),
+    });
+    assert.equal(denied.status, 401);
+    await new Promise<void>((done, fail) => {
+      gated.server.close((err) => (err ? fail(err) : done()));
+    });
   });
 });
 

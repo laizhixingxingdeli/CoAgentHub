@@ -715,19 +715,25 @@ describe('run-plan 周期投递修复接线', () => {
     assert.match(main, /hasArchivedMission/);
     assert.match(main, /export function startPeriodicDeliveryRepair/);
     assert.match(main, /runFileObserverDeliveryRepairTick/);
-    assert.match(main, /bindServerCloseToPeriodicStop\(server,/);
+    assert.match(main, /bindServerCloseToPeriodicStop\(\s*server,/);
     assert.match(main, /periodic\?\.stop\(\)/);
     assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
     assert.match(main, /warnDeliveryRepairErrors/);
     assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
     const startServerSrc = main.slice(main.indexOf('export async function startServer'));
     assert.match(startServerSrc, /startPeriodicDeliveryRepair\(/);
-    assert.match(startServerSrc, /kind: 'file-observer'/);
+    assert.match(startServerSrc, /kind: 'file-held'/);
     assert.match(startServerSrc, /kind: 'pg'/);
+    assert.match(startServerSrc, /publishLockPort\(/);
+    assert.match(startServerSrc, /attachLoopbackWriterIdentity\(/);
+    assert.match(startServerSrc, /randomUUID\(/);
+    assert.match(startServerSrc, /API_VERSION/);
+    assert.match(startServerSrc, /exclusive:\s*\{/);
+    assert.match(startServerSrc, /resolveControlPrincipal/);
+    assert.doesNotMatch(startServerSrc, /kind: 'file-observer'/);
     assert.doesNotMatch(startServerSrc, /startPeriodicReconcile/);
     assert.doesNotMatch(startServerSrc, /runFileObserverDeliveryRepairTick/);
     assert.doesNotMatch(startServerSrc, /runPgDeliveryRepairTick/);
-    assert.doesNotMatch(startServerSrc, /exclusive:\s*\{/);
   });
 });
 

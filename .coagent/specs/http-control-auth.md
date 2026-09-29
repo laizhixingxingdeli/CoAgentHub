@@ -1,6 +1,6 @@
 # HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
 
-`createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。
+`createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。**当前 `startServer` 控制写未鉴权，仅绑定 127.0.0.1**；它保留可替换的 resolver 注入入口，D1d 尚未实施。
 
 **认证与授权分开**：入口先解析可信身份（本文件的 resolver），再求 `PolicyEngine`（`src/application/policy-engine.ts`）。引擎是纯判定，不读时钟、不碰存储。控制面身份映射为 Principal `user`（`operator` / `viewer`）；Run Token 映射为 `coordinator` / `executor`。另有 `reviewer`、`runner`，不从 HTTP 控制头或请求体自述产生。
 
