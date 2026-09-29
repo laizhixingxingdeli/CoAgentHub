@@ -799,7 +799,10 @@ export function bindServerCloseToPeriodicStop(
   server: Server,
   stop: () => Promise<void>,
   afterHttpClose?: () => void | Promise<void>,
-  options: { failClosedOnStopError?: () => boolean } = {},
+  options: {
+    failClosedOnStopError?: () => boolean;
+    beforeHttpClose?: () => Promise<void>;
+  } = {},
 ): void {
   const closeHttp = server.close.bind(server);
   server.close = ((callback?: (err?: Error) => void) => {
@@ -813,6 +816,13 @@ export function bindServerCloseToPeriodicStop(
       // 二次 SIGINT 的安全停靠失败时，HTTP 与主锁必须继续保持；普通 stop 错误
       // 仍沿用历史语义关闭 HTTP，避免改变常规 close 的回收行为。
       if (stopErr && options.failClosedOnStopError?.()) return stopErr;
+      if (options.beforeHttpClose) {
+        try {
+          await options.beforeHttpClose();
+        } catch (error) {
+          return mergeCloseErrors([stopErr, asError(error)]);
+        }
+      }
       let closeErr: Error | undefined;
       try {
         closeErr = await new Promise<Error | undefined>((resolve) => {
@@ -1121,10 +1131,22 @@ export async function startServer(
         await built.persist();
       },
       usePg ? undefined : () => releaseMainLock(),
-      { failClosedOnStopError: () => safeShutdown !== undefined },
+      {
+        failClosedOnStopError: () => safeShutdown !== undefined,
+        beforeHttpClose: async () => {
+          if (safeShutdown === undefined) return;
+          let observedRequests: number;
+          do {
+            observedRequests = safeShutdownRequests;
+            await safeShutdown;
+          } while (observedRequests !== safeShutdownRequests);
+        },
+      },
     );
     let safeShutdown: Promise<void> | undefined;
+    let safeShutdownRequests = 0;
     const requestSafeShutdown = (): Promise<void> => {
+      safeShutdownRequests++;
       if (safeShutdown) return safeShutdown;
       safeShutdown = (async () => {
         const snapshots = hostedRuns.snapshot();
