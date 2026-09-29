@@ -7,6 +7,10 @@
  */
 
 import { after, describe, test } from 'node:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
@@ -22,7 +26,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
 import { Platform } from '../src/application/platform.ts';
-import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ExecutionProfile } from '../src/application/ports.ts';
@@ -116,6 +120,33 @@ const FIVE: ExecutionProfile[] = ['a', 'b', 'c', 'd', 'e'].map((id) => ({
   endpoint: 'l',
   profileId: `exec-${id}`,
 }));
+
+test('检查点 A 在回滚 B 半成品后仍保留', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'failover-checkpoint-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: tempRoot, encoding: 'utf8' }).trim();
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'test');
+    git('config', 'user.email', 'test@example.invalid');
+    writeFileSync(join(tempRoot, 'a.txt'), 'base');
+    git('add', 'a.txt');
+    git('commit', '-qm', 'initial');
+    writeFileSync(join(tempRoot, 'a.txt'), 'A');
+
+    await new GitWorktreeManager().checkpoint(tempRoot, 'M', 'W-A', ['a.txt']);
+    assert.equal(git('log', '-1', '--format=%s'), 'mission(M): W-A 检查点');
+    assert.equal(readFileSync(join(tempRoot, 'a.txt'), 'utf8'), 'A');
+    const checkpointHead = git('rev-parse', 'HEAD');
+
+    writeFileSync(join(tempRoot, 'b.txt'), 'B');
+    await new GitWorktreeManager().rollback(tempRoot, checkpointHead);
+    assert.equal(git('rev-parse', 'HEAD'), checkpointHead);
+    assert.equal(readFileSync(join(tempRoot, 'a.txt'), 'utf8'), 'A');
+    assert.equal(existsSync(join(tempRoot, 'b.txt')), false);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
 
 describe('尝试上限', () => {
   test('到上限就停，不会把整个候选池烧完', async () => {
