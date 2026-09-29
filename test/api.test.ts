@@ -2494,3 +2494,203 @@ describe('hosted run 流与排空门禁', () => {
     }
   });
 });
+
+describe('轻量报卡升级、答复重派与执行者问答视图', () => {
+  const PLAN = {
+    findings: '查到了',
+    rejectedHypotheses: [] as string[],
+    decisions: [] as string[],
+    direction: '这么改',
+    risks: [] as string[],
+  };
+
+  function harness() {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const activity = new InMemoryActivityLog(clock);
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const projects = new InMemoryProjectRepository();
+    let txRuns = 0;
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      transaction: {
+        async run<T>(fn: () => Promise<T>) {
+          txRuns += 1;
+          return fn();
+        },
+      },
+    });
+    return {
+      platform,
+      projects,
+      activity,
+      deliveries,
+      txRuns: () => txRuns,
+    };
+  }
+
+  async function lightweightDispatched(h: ReturnType<typeof harness>, missionId = 'M-lw') {
+    const project = await h.projects.ensure('P');
+    project.createMission({
+      id: missionId,
+      contract: CONTRACT,
+      executionMode: 'lightweight',
+      runKind: 'mutation',
+      origin: { clientType: 'cli', conversationRef: 'me' },
+    });
+    await h.projects.save(project);
+    const { workItemId } = await h.platform.createLightweightWorkItem(missionId, {
+      title: 'W',
+      order: ORDER,
+    });
+    await h.platform.dispatchLightweightWorkItem(missionId, workItemId);
+    const exec = await h.platform.startExecutorAttempt(missionId, workItemId);
+    return { missionId, workItemId, attemptId: exec.attemptId };
+  }
+
+  test('轻量有需求的 blocked 记一条字段映射准确的升级与一次投递；standard/空白需求无升级', async () => {
+    const lw = harness();
+    const live = await lightweightDispatched(lw);
+    const reason = '工单前提不成立';
+    const whatWasTried = ['ls src/', '选 A', '选 B'];
+    const question = '确认真正的文件路径';
+    await lw.platform.reportBlocked(live.missionId, live.attemptId, {
+      reason,
+      whatWasTried,
+      needsFromUpstream: question,
+    });
+    const view = await lw.platform.getMissionView(live.missionId);
+    assert.equal(view.escalations, 1);
+    assert.equal(view.openEscalations.length, 1);
+    assert.equal(view.openEscalations[0]?.attemptId, live.attemptId);
+    assert.equal(view.openEscalations[0]?.question, question);
+    assert.equal(view.openEscalations[0]?.why, reason);
+    assert.deepEqual(view.openEscalations[0]?.optionsConsidered, whatWasTried);
+    assert.equal(view.openEscalations[0]?.answer, undefined);
+    const deliveries = await lw.deliveries.listForMission(live.missionId);
+    assert.equal(deliveries.filter((row) => row.outcome === 'escalated').length, 1);
+    assert.equal(deliveries[0]?.idempotencyKey, 'escalated:0');
+    const events = await lw.activity.list(live.missionId);
+    assert.equal(events.filter((event) => event.kind === 'escalated').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'delivery.created').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'blocked.reported').length, 1);
+
+    const blank = harness();
+    const blankLive = await lightweightDispatched(blank, 'M-blank');
+    await blank.platform.reportBlocked(blankLive.missionId, blankLive.attemptId, {
+      reason: '暂时做不了',
+      whatWasTried: ['试过了'],
+      needsFromUpstream: '   ',
+    });
+    const blankView = await blank.platform.getMissionView(blankLive.missionId);
+    assert.equal(blankView.escalations, 0);
+    assert.equal(blankView.openEscalations.length, 0);
+    assert.equal((await blank.deliveries.listForMission(blankLive.missionId)).length, 0);
+
+    const empty = harness();
+    const emptyLive = await lightweightDispatched(empty, 'M-empty');
+    await empty.platform.reportBlocked(emptyLive.missionId, emptyLive.attemptId, {
+      reason: '暂时做不了',
+      whatWasTried: [],
+      needsFromUpstream: '',
+    });
+    assert.equal((await empty.platform.getMissionView(emptyLive.missionId)).escalations, 0);
+
+    const std = harness();
+    await std.platform.createMission({ projectId: 'P', missionId: 'M-std', contract: CONTRACT });
+    const coord = await std.platform.startCoordinatorAttempt('M-std');
+    await std.platform.updatePlan('M-std', coord.attemptId, PLAN);
+    const { workItemId } = await std.platform.createWorkItem('M-std', coord.attemptId, {
+      title: 'W',
+      order: ORDER,
+    });
+    await std.platform.dispatchWorkItems('M-std', coord.attemptId, [workItemId]);
+    const exec = await std.platform.startExecutorAttempt('M-std', workItemId);
+    await std.platform.reportBlocked('M-std', exec.attemptId, {
+      reason: '工单前提不成立',
+      whatWasTried: ['ls'],
+      needsFromUpstream: '确认路径',
+    });
+    const stdView = await std.platform.getMissionView('M-std');
+    assert.equal(stdView.escalations, 0);
+    assert.equal(stdView.workItems[0]?.status, 'blocked');
+    assert.equal((await std.deliveries.listForMission('M-std')).length, 0);
+  });
+
+  test('answerEscalation 同一事务答复并重派原 blocked 轻量工单，写事件，不造 coordinator；不误派别的项', async () => {
+    const h = harness();
+    const live = await lightweightDispatched(h);
+    await h.platform.reportBlocked(live.missionId, live.attemptId, {
+      reason: '工单前提不成立',
+      whatWasTried: ['A', 'B', 'C'],
+      needsFromUpstream: '选哪条？',
+    });
+    await h.platform.finishAttempt(live.missionId, live.attemptId, { endedBy: 'no_structured_result' });
+    const before = h.txRuns();
+    const answered = await h.platform.answerEscalation(live.missionId, '选 B，改 foo');
+    assert.equal(h.txRuns() - before, 1);
+    assert.equal(answered.question, '选哪条？');
+    assert.equal(answered.answer, '选 B，改 foo');
+    const view = await h.platform.getMissionView(live.missionId);
+    assert.equal(view.workItems[0]?.status, 'dispatched');
+    assert.equal(view.workItems[0]?.id, live.workItemId);
+    assert.equal(view.openEscalations.length, 0);
+    assert.equal(view.escalationLog[0]?.answer, '选 B，改 foo');
+    assert.equal(view.coordinatorAttemptIds.length, 0);
+    const events = await h.activity.list(live.missionId);
+    const redispatched = events.filter((event) => event.kind === 'work_item.redispatched');
+    assert.equal(redispatched.length, 1);
+    assert.deepEqual(redispatched[0]?.data, {
+      ids: [live.workItemId],
+      reason: 'escalation_answered',
+    });
+    assert.equal(redispatched[0]?.workItemId, live.workItemId);
+    assert.ok(events.some((event) => event.kind === 'escalation.answered'));
+
+    const std = harness();
+    await std.platform.createMission({
+      projectId: 'P',
+      missionId: 'M-std',
+      contract: CONTRACT,
+      origin: { clientType: 'cli', conversationRef: 'me' },
+    });
+    const coord = await std.platform.startCoordinatorAttempt('M-std');
+    await std.platform.updatePlan('M-std', coord.attemptId, PLAN);
+    const first = await std.platform.createWorkItem('M-std', coord.attemptId, {
+      title: 'W1',
+      order: ORDER,
+    });
+    const second = await std.platform.createWorkItem('M-std', coord.attemptId, {
+      title: 'W2',
+      order: ORDER,
+    });
+    await std.platform.dispatchWorkItems('M-std', coord.attemptId, [
+      first.workItemId,
+      second.workItemId,
+    ]);
+    const exec1 = await std.platform.startExecutorAttempt('M-std', first.workItemId);
+    await std.platform.reportBlocked('M-std', exec1.attemptId, {
+      reason: 'W1 不成立',
+      whatWasTried: ['试了'],
+      needsFromUpstream: '怎么改 W1？',
+    });
+    await std.platform.finishAttempt('M-std', exec1.attemptId, { endedBy: 'no_structured_result' });
+    await std.platform.finishAttempt('M-std', coord.attemptId, { endedBy: 'structured_submit' });
+    const coord2 = await std.platform.startCoordinatorAttempt('M-std');
+    await std.platform.escalateToL3('M-std', coord2.attemptId, {
+      question: 'W1 怎么改？',
+      why: '执行者卡住了',
+      optionsConsidered: ['重写工单', '作废'],
+    });
+    await std.platform.answerEscalation('M-std', '重写工单');
+    const after = await std.platform.getMissionView('M-std');
+    assert.equal(after.workItems.find((item) => item.id === first.workItemId)?.status, 'blocked');
+    assert.equal(after.workItems.find((item) => item.id === second.workItemId)?.status, 'dispatched');
+    const stdEvents = await std.activity.list('M-std');
+    assert.equal(stdEvents.filter((event) => event.kind === 'work_item.redispatched').length, 0);
+  });
+});

@@ -33,6 +33,10 @@ Orchestrator Fast Lane 只调 Platform trusted 方法（不暴露 HTTP/tools）�
 
 校验失败保持 submitted / stall；**不**回退 Coordinator。trusted 方法名不得出现在 `api/` 或 tool 面（`source-constraints` 钉死）。
 
+执行者 `coagent_report_blocked` 时，若 `needsFromUpstream.trim()` 非空，Platform 在记 blocked 的同一事务建立一条 Mission 升级并投递：`attemptId` 取 blocked attempt、`question` 为原 `needsFromUpstream`、`why` 为 `reason`、`optionsConsidered` 为 `whatWasTried`；工作项保持 blocked。Orchestrator 首轮及未答复重跑均返回 `awaiting_l3` 和原问题，不重复升级。空串或全空白需求仍按原文返回 stalled。Standard 的 blocked 继续交协调者处理。
+
+L3 通过现有 `answerEscalation(missionId, answer)` 答复；Platform 在同一命令事务记录答复，并将对应 blocked 轻量工作项重新派发、记 `work_item.redispatched` 事件。续跑用同一个 WorkItem 开新 executor attempt，绝不创建 Coordinator attempt 或自动改走 Standard。已答的 `question` / `answer` / `answeredAt` 经平台执行者 `getWorkOrder` 视图及启动简报的 `work_order` 条目提供；未答不暴露问答，冻结 WorkOrder 与 ContextBundle 来源闭集均不变。方案驱动对轻量 `awaiting_l3` 沿用可答复升级决定与同 Mission 续跑通路。
+
 ## Classifier 要点
 
 - Query 仅当 `readOnlyProven=true` ∧ `mutationSideEffect=false` ∧ 无 HA true ∧ 无 critical unknown。
