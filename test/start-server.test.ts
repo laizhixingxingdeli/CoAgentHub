@@ -2144,6 +2144,69 @@ function cleanPlanRepo(branch: string): string {
 }
 
 describe('startServer 方案记录目录与托管 live', () => {
+  test('真实 hosted PlanRun 双次 SIGINT 安全停靠并释放主锁（动态状态目录）', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-double-signal-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// hosted adapter\\n');
+    const runDir = join(dir, 'runs');
+    const repo = cleanPlanRepo('auto/double-signal');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+      runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    let running: Promise<number> | undefined;
+    let exitCode = 0;
+    try {
+      const target = await liveTarget(statePath);
+      const body = hostedPlanBody(repo, adapter, statePath, runDir);
+      body.plan.stopConditions.wallClockMs = 5_000;
+      body.plan.stopConditions.escalationTimeoutMs = 5_000;
+      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {});
+      const deadline = Date.now() + 3_000;
+      let snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      while (snapshots.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      }
+      assert.equal(snapshots.length, 1, 'hosted PlanRun 未在有界时间内登记');
+      const plan = snapshots[0]!;
+      assert.ok(plan.runPath?.startsWith(runDir));
+      const store = new FilePlanRunStore(plan.runPath!);
+      const lockBefore = acquireLock(statePath);
+      lockBefore.release();
+      let closeDone = false;
+      const handler = createSigintHandler(
+        () => built.server.close(() => { closeDone = true; }),
+        () => { exitCode = 1; void built.requestSafeShutdown(); },
+        () => { built.hostedRunSnapshots(); },
+      );
+      handler();
+      assert.equal(built.server.listening, false);
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      handler();
+      const closeDeadline = Date.now() + 4_000;
+      while (!closeDone && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(closeDone, true, 'HTTP close callback 未完成');
+      assert.equal(exitCode, 1);
+      const stopped = store.read()?.stopped;
+      assert.equal(stopped?.reason, 'service_shutdown');
+      assert.ok(stopped?.detail, 'service_shutdown detail 必须明确');
+      assert.equal(built.server.listening, false);
+      const reacquired = acquireLock(statePath);
+      reacquired.release();
+    } finally {
+      gated.release();
+      if (running) await running;
+      if (built.server.listening) await new Promise<void>((resolve) => built.server.close(() => resolve()));
+    }
+  });
+
   test('真实 hosted PlanRun 只登记预检后的身份并在结束时清理', { timeout: 20_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-plan-identity-'));
     dirs.push(dir);
