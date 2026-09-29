@@ -214,6 +214,9 @@ function looksLikeInRepoFile(path: string): boolean {
   if (path === '' || /\s/.test(path) || path.includes('://')) return false;
   if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return false;
   if (path.split('/').includes('..')) return false;
+  // 恰好是顶层泛指目录时，验收在列举「以 src/ 开头」而不是指定改那个目录；
+  // 当真要覆盖目录会写 test/fixtures/x/ 这种更深的路径。不忽略会把列举刷成假警告。
+  if (IN_REPO_DIR_PREFIXES.some((prefix) => path === prefix)) return false;
   if (IN_REPO_DIR_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
   return isRepoRootDotfile(path);
 }
@@ -227,18 +230,22 @@ function stripAcceptanceToken(raw: string): string {
   return token;
 }
 
+/**
+ * 中文契约里路径常紧挨顿号、括号、冒号；只按空白/半角逗号分号切，会把
+ * 「src/、test/」或「src/a.ts:12）」整段当成一个路径。字母数字 / . - _ 是路径字符，不能切。
+ * 切开后再走既有的包裹符号与 :行号 剥离——半角冒号既是分隔符也是行号前缀，两种写法都要认。
+ */
+const ACCEPTANCE_PATH_SPLITTERS =
+  /[\s,;:()[\]<>"'`|　，、。；：！？（）【】「」『』《》〈〉“”‘’]+/;
+
 function extractInRepoPaths(text: string): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
-  const consider = (raw: string) => {
-    const token = stripAcceptanceToken(raw);
-    if (!looksLikeInRepoFile(token) || seen.has(token)) return;
+  for (const part of text.split(ACCEPTANCE_PATH_SPLITTERS)) {
+    const token = stripAcceptanceToken(part);
+    if (!looksLikeInRepoFile(token) || seen.has(token)) continue;
     seen.add(token);
     found.push(token);
-  };
-  consider(text.trim());
-  for (const part of text.split(/[\s,;]+/)) {
-    consider(part);
   }
   return found;
 }
