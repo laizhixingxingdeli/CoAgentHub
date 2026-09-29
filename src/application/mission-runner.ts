@@ -218,6 +218,8 @@ export interface HostedMissionContext {
    * startServer 必须注入；不能从 body.state 回填。
    */
   readonly heldState?: HostedHeldState;
+  /** Called after a hosted Mission is created or found, before execution begins. */
+  readonly onStarted?: (missionId: string) => void;
 }
 
 export interface HostedMissionSpec {
@@ -442,6 +444,7 @@ export async function runHostedMission(
       origin,
     });
   }
+  ctx.onStarted?.(parsed.spec.missionId);
   emit('stdout', `Mission ${parsed.spec.missionId}；平台监听 ${ctx.baseUrl}`);
   emit('stdout', `worktree: ${parsed.cwd}`);
   emit('stdout', `适配器  : ${parsed.adapter}`);

@@ -249,6 +249,12 @@ export interface HostedPlanContext {
    * 预检失败或独立 CLI 的任意目录不要从这里扩进去。
    */
   readonly registerPlanRunDir?: (runDir: string) => void;
+  /** 同步通知宿主可信的运行身份；只在预检阶段完成后、方案驱动启动前调用。 */
+  readonly onStarted?: (identity: {
+    readonly runId: string;
+    readonly runPath: string;
+    readonly reviewer: string;
+  }) => void;
 }
 
 function hostedIssuer(built: HostedPlanBuilt): RunTokenIssuer {
@@ -571,6 +577,8 @@ export async function runHostedPlan(
     executor: { runtime, candidates: executors },
     independentReviewer: { runtime, candidates: independentReviewers },
   });
+
+  ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });
 
   const stop = await runPlanOnPlatform(parsed.plan, parsed.selection, {
     store,
