@@ -1557,7 +1557,7 @@ export class Orchestrator {
         try {
           if (this.#workspace.checkpoint) {
             const view = await this.#platform.getMissionView(input.missionId);
-            const item = view.workItems.find((candidate) => candidate.workItemId === input.workItemId);
+            const item = view.workItems.find((candidate) => candidate.id === input.workItemId);
             const allowedScope = item?.order?.allowedScope;
             if (!input.workItemId || !Array.isArray(allowedScope) || allowedScope.length === 0) {
               throw new Error(`缺少工作项 ${input.workItemId ?? '(未指定)'} 的冻结 allowedScope，无法检查点`);

@@ -85,7 +85,13 @@ const PLAN = {
  * 私有字段，经 Proxy 调用时 `this` 是 Proxy 而不是实例，私有字段访问会直接
  * 抛 TypeError —— 而调度器会把它归成"上游失败"，症状完全对不上原因。
  */
-async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRuntime }, candidateCircuits?: CandidateCircuitRepository, attemptWallClockMs?: number) {
+async function harness(
+  runtimes: { coordinator: AgentRuntime; executor: AgentRuntime },
+  candidateCircuits?: CandidateCircuitRepository,
+  attemptWallClockMs?: number,
+  workspace?: WorkspaceManager,
+) {
+  const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
   const ids = new SequentialIds();
@@ -93,7 +99,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
   const platform = new Platform({
     projects: new InMemoryProjectRepository(),
     deliveries,
-    workspace: new InPlaceWorkspaceManager(),
+    workspace: workspaceManager,
     activity,
     clock,
     ids,
@@ -129,7 +135,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
         platform,
         tokens: makeIssuer(platform, tokens),
         baseUrl,
-        workspace: new InPlaceWorkspaceManager(),
+        workspace: workspaceManager,
         coordinator: pools.coordinator,
         candidateCircuits,
         attemptWallClockMs,
@@ -140,7 +146,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
         platform,
         tokens: makeIssuer(platform, tokens),
         baseUrl,
-        workspace: new InPlaceWorkspaceManager(),
+        workspace: workspaceManager,
         coordinator: pools.coordinator,
         candidateCircuits,
         attemptWallClockMs,
