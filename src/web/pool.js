@@ -29,7 +29,7 @@ const DASH = '—';
  * 看到 `provider/model` 而不知道那是「这条候选会以什么身份跑」的人，就得
  * 去读代码。
  */
-export const POOL_COLUMNS = ['候选名称', '接入点', '适配层', '运行时'];
+export const POOL_COLUMNS = ['候选名称', '接入点', '适配层', '运行时', '健康'];
 
 /* ===================== 纯函数 ===================== */
 
@@ -56,6 +56,72 @@ function profileText(row) {
   return { text: (provider || DASH) + ' / ' + (model || DASH), title: '' };
 }
 
+function text(value) {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function circuitTone(state) {
+  if (state === 'open') return 'failed';
+  if (state === 'closed') return 'done';
+  if (state === 'half_open') return 'unconfirmed';
+  return 'queued';
+}
+
+function windowCostText(reportedCost) {
+  if (reportedCost === null || reportedCost === undefined || !Number.isFinite(Number(reportedCost))) {
+    return '费用未上报';
+  }
+  return '$' + Number(reportedCost).toFixed(4);
+}
+
+/**
+ * 候选健康格。字段按 W-130 容错：缺 health、缺子对象、reason 码原样上屏。
+ * 不在这里建熔断中文表——跨页文案该进 narrate.js，本单不能改那份文件。
+ */
+export function healthCellHtml(health) {
+  if (!health || typeof health !== 'object') {
+    return '<td class="cell-reason" data-pool-health><span class="muted">还没读到健康</span></td>';
+  }
+  const circuit = health.circuit && typeof health.circuit === 'object' ? health.circuit : {};
+  const window7d = health.window7d && typeof health.window7d === 'object' ? health.window7d : {};
+  const last = health.lastFailure && typeof health.lastFailure === 'object' ? health.lastFailure : {};
+  const runtime = health.runtime && typeof health.runtime === 'object' ? health.runtime : {};
+
+  const state = text(circuit.state) || 'unknown';
+  const circuitExtra = text(circuit.failureClass) || text(circuit.reason);
+  const circuitLine = '<span class="chip ' + circuitTone(state) + '">' + esc(state) + '</span>'
+    + (circuitExtra ? ' · ' + esc(circuitExtra) : '');
+
+  const attempts = Number.isFinite(Number(window7d.attempts)) ? Number(window7d.attempts) : 0;
+  const successes = Number.isFinite(Number(window7d.successes)) ? Number(window7d.successes) : 0;
+  const windowLine = '近七日：尝试 ' + attempts + ' · 成功 ' + successes + ' · ' + windowCostText(window7d.reportedCost);
+
+  const failClass = text(last.failureClass);
+  const failAt = text(last.at);
+  const failSource = text(last.source);
+  const hasFail = Boolean(failAt || failSource || (failClass && failClass !== 'unknown'));
+  const failLine = hasFail
+    ? '最近失败：' + (failClass || 'unknown') + (failAt ? ' · ' + failAt : '') + (failSource ? ' · ' + failSource : '')
+    : '没有失败记录';
+
+  let runtimeLine;
+  if (runtime.running === true) {
+    const kind = text(runtime.runtimeKind);
+    const hopId = text(runtime.hopId);
+    runtimeLine = '占用中' + (kind ? ' · ' + kind : '') + (hopId ? ' · ' + hopId : '');
+  } else {
+    const reason = text(runtime.reason);
+    runtimeLine = '未在跑' + (reason ? ' · ' + reason : '');
+  }
+
+  return '<td class="cell-reason" data-pool-health>'
+    + '<div data-health-circuit>' + circuitLine + '</div>'
+    + '<div data-health-window>' + esc(windowLine) + '</div>'
+    + '<div data-health-failure>' + esc(failLine) + '</div>'
+    + '<div data-health-runtime>' + esc(runtimeLine) + '</div>'
+    + '</td>';
+}
+
 function rowsHtml(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length === 0) {
@@ -73,6 +139,7 @@ function rowsHtml(rows) {
         + '<td class="mono">' + esc(r.runtime || 'pi') + '</td>'
         + '<td class="mono"' + (profile.title ? ' title="' + esc(profile.title) + '"' : '') + '>'
         +   esc(profile.text) + '</td>'
+        + healthCellHtml(r.health)
         + '</tr>';
     })
     .join('');
