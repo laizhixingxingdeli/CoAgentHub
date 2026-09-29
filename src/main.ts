@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { API_VERSION, createApi } from './api/server.ts';
+import { API_VERSION, createApi, drainApi } from './api/server.ts';
 import type { ControlPrincipalResolver } from './api/control-auth.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -85,6 +85,8 @@ import type {
   DecisionProvider,
   PostExecutionEvaluator,
 } from './application/ports.ts';
+import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
+import { runHostedPlan } from './application/plan-runtime.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import { ValidationEngine } from './application/validation/engine.ts';
 import { ExecFileCommandRunner } from './application/validation/exec-file-command-runner.ts';
@@ -819,6 +821,16 @@ export interface StartServerOptions {
    * 不得把 x-coagent-run 当成控制身份。
    */
   resolveControlPrincipal?: ControlPrincipalResolver;
+  /**
+   * 测试用：hosted Mission/Plan 用这份 runtime（走同一 API 回连）。
+   * 生产不传——按请求 body.adapter 构造 SpawnRuntime。
+   */
+  runtime?: AgentRuntime;
+  /**
+   * 测试用：替换工作区。生产不传则 GitWorktreeManager。
+   * 必须与装配 Platform 校验器共用同一份，否则 hosted 入口会改错树。
+   */
+  workspace?: WorkspaceManager;
 }
 
 async function abortStartedServer(
@@ -844,6 +856,27 @@ async function abortStartedServer(
   throw errors.length === 1 ? errors[0]! : new AggregateError(errors, errors.map((row) => row.message).join('; '));
 }
 
+/**
+ * hosted 入口只认服务启动时握着的那份状态。PG 没有跨主机唯一写者，不能假装成文件锁。
+ * identityEquals 关在 heldPath 上，避免回调把请求 body 当成权威路径。
+ */
+function hostedHeldState(usePg: boolean, statePath: string): HostedHeldState {
+  if (usePg) {
+    return { kind: 'unsupported' };
+  }
+  const heldPath = statePath;
+  return {
+    kind: 'file',
+    statePath: heldPath,
+    identityEquals(submittedStatePath: string) {
+      const heldId = stateIdFor(heldPath);
+      const submittedId = stateIdFor(submittedStatePath);
+      if (heldId === submittedId) return true;
+      return process.platform === 'win32' && heldId.toLowerCase() === submittedId.toLowerCase();
+    },
+  };
+}
+
 export async function startServer(
   port = 3101,
   statePath = '.coagent-state.json',
@@ -859,13 +892,14 @@ export async function startServer(
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
   // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
   const queryRuntime = createPiQueryRuntime(env);
+  const workspace = options?.workspace ?? new GitWorktreeManager();
   const instanceId = randomUUID();
   let releaseMainLock = () => {};
   let server: Server | undefined;
   try {
     const built = usePg
-      ? await buildPgPlatform({ ...decision, queryRuntime })
-      : await buildPersistentPlatform(statePath, { ...decision, queryRuntime, exclusive: {
+      ? await buildPgPlatform({ ...decision, queryRuntime, workspace })
+      : await buildPersistentPlatform(statePath, { ...decision, queryRuntime, workspace, exclusive: {
           what: '常驻服务',
           instanceId,
           apiVersion: API_VERSION,
@@ -876,6 +910,22 @@ export async function startServer(
     const fileIdentity = usePg
       ? undefined
       : { instanceId, stateId: stateIdFor(statePath) };
+    const loopback = { baseUrl: '' };
+    const hostedBuilt = {
+      platform: built.platform,
+      tokens: built.issuer,
+      agentPool: built.agentPool,
+      activity: built.activity,
+      deliveries: built.deliveries,
+      persist: built.persist,
+      candidateCircuits: built.candidateCircuits,
+      queuedHops: built.queuedHops,
+      queryRuns: built.queryRuns,
+      issuer: built.issuer,
+      ...('live' in built ? { live: built.live } : {}),
+    };
+    const hostedRuntime = options?.runtime ? { runtime: options.runtime } : {};
+    const heldState = hostedHeldState(usePg, statePath);
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,
@@ -884,6 +934,33 @@ export async function startServer(
       agentPool: built.agentPool,
       live: 'live' in built ? built.live : undefined,
       beforeRead: 'refresh' in built ? built.refresh : undefined,
+      runMission: (body, emit) =>
+        runHostedMission(
+          body,
+          {
+            built: hostedBuilt,
+            baseUrl: loopback.baseUrl,
+            workspace,
+            env,
+            ...hostedRuntime,
+            heldState,
+          },
+          emit,
+        ),
+      runPlan: (body, emit) =>
+        runHostedPlan(
+          body,
+          {
+            built: hostedBuilt,
+            baseUrl: loopback.baseUrl,
+            workspace,
+            env,
+            ...hostedRuntime,
+            ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
+            heldState,
+          },
+          emit,
+        ),
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
@@ -897,6 +974,7 @@ export async function startServer(
     // port=0 时避开 fetch 屏蔽的端口；重绑在周期调度启动、close 被包装之前做，关的是原生 server。
     await listenLoopback(server, port);
     const addr = server.address() as AddressInfo;
+    loopback.baseUrl = `http://${addr.address}:${addr.port}`;
     if (!usePg) {
       publishLockPort(statePath, instanceId, addr.port);
     }
@@ -928,10 +1006,15 @@ export async function startServer(
         ? { kind: 'pg', connectionString: env.COAGENT_PG }
         : { kind: 'file-held', store: built.store as FileStateStore },
     });
-    // 先停在途 tick，再原生 HTTP close，最后释放主锁。callback 之前锁必须还在或已经按这个顺序清掉。
+    // close：先 drain（拒新开跑、等在途 Plan/Mission 与 HTTP 写），再停周期 tick、
+    // await persist，然后原生 HTTP close，最后释放主锁。不能在 HTTP 未停时早放锁。
     bindServerCloseToPeriodicStop(
       server,
-      () => periodic?.stop() ?? Promise.resolve(),
+      async () => {
+        await drainApi(server);
+        await (periodic?.stop() ?? Promise.resolve());
+        await built.persist();
+      },
       usePg ? undefined : () => releaseMainLock(),
     );
     return {
@@ -945,9 +1028,19 @@ export async function startServer(
 }
 
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。
+// 信号必须走同一条 server.close（drain → tick → persist → HTTP → 释锁），不能 process.exit 绕过。
 if (process.argv[1]?.endsWith('main.ts')) {
   void startServer(
     Number(process.env.PORT ?? 3101),
     process.env.COAGENT_STATE ?? '.coagent-state.json',
-  );
+  ).then((built) => {
+    const onSignal = () => {
+      built.server.close((error) => {
+        if (error) console.error(error);
+        process.exit(error ? 1 : 0);
+      });
+    };
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+  });
 }

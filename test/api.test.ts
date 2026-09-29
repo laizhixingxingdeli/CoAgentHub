@@ -11,9 +11,21 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
+import { request as httpRequest } from 'node:http';
 
-import { API_VERSION, createApi } from '../src/api/server.ts';
+import {
+  API_VERSION,
+  createApi,
+  drainApi,
+  HOSTED_RUN_HEARTBEAT_IDLE_MS,
+  type HostedRunHandler,
+} from '../src/api/server.ts';
+import {
+  LoopbackHttpError,
+  LoopbackIdentityError,
+  loopbackRunRequest,
+} from '../src/application/loopback-control-client.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import {
   FixedClock,
@@ -1624,6 +1636,8 @@ function tapPlatform(
 async function openApi(options?: {
   onMutation?: () => void | Promise<void>;
   identity?: { instanceId: string; stateId: string };
+  runMission?: HostedRunHandler;
+  runPlan?: HostedRunHandler;
 }): Promise<{
   server: Server;
   base: string;
@@ -1647,6 +1661,8 @@ async function openApi(options?: {
     deliveries,
     ...(options?.onMutation ? { onMutation: options.onMutation } : {}),
     ...(options?.identity ? { identity: options.identity } : {}),
+    ...(options?.runMission ? { runMission: options.runMission } : {}),
+    ...(options?.runPlan ? { runPlan: options.runPlan } : {}),
   });
   await listenLoopback(server, 0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -1974,6 +1990,506 @@ describe('L3 写路由与落盘后应答', () => {
       assert.equal(typeof missing.json.error, 'string');
       assert.equal(typeof missing.json.message, 'string');
     } finally {
+      await closeServer(server);
+    }
+  });
+});
+
+const RUN_IDENTITY = {
+  instanceId: '22222222-2222-4222-8222-222222222222',
+  stateId: 'state-run',
+};
+
+function writerTarget(port: number) {
+  return {
+    port,
+    instanceId: RUN_IDENTITY.instanceId,
+    stateId: RUN_IDENTITY.stateId,
+    apiVersion: API_VERSION,
+  };
+}
+
+describe('hosted run 流与排空门禁', () => {
+  test('未配置的 run-mission / run-plan 明确拒绝，JSON API 语义不变', async () => {
+    const { server, base } = await openApi({ identity: RUN_IDENTITY });
+    try {
+      await assert.rejects(
+        () =>
+          loopbackRunRequest(writerTarget((server.address() as AddressInfo).port), {
+            path: '/api/control/run-mission',
+            body: {},
+          }, () => {}),
+        (error: unknown) =>
+          error instanceof LoopbackHttpError &&
+          error.status === 501 &&
+          error.code === 'HOSTED_RUN_UNAVAILABLE',
+      );
+      await assert.rejects(
+        () =>
+          loopbackRunRequest(writerTarget((server.address() as AddressInfo).port), {
+            path: '/api/control/run-plan',
+            body: {},
+          }, () => {}),
+        (error: unknown) =>
+          error instanceof LoopbackHttpError &&
+          error.status === 501 &&
+          error.code === 'HOSTED_RUN_UNAVAILABLE',
+      );
+      const health = await request(base, '/api/health');
+      assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('持锁身份下流先进度后终态，stdout/stderr 可区分，非零 exitCode 原样返回', async () => {
+    const seenBodies: unknown[] = [];
+    const runMission: HostedRunHandler = async (body, emit) => {
+      seenBodies.push(body);
+      emit('stdout', 'running-out');
+      emit('stderr', 'running-err');
+      return 7;
+    };
+    const runPlan: HostedRunHandler = async (_body, emit) => {
+      emit('stdout', 'plan-out');
+      return 0;
+    };
+    const { server, base } = await openApi({
+      identity: RUN_IDENTITY,
+      runMission,
+      runPlan,
+    });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const res = await fetch(`${base}/api/control/run-mission`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/x' }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-coagent-api'), API_VERSION);
+      assert.equal(res.headers.get('x-coagent-instance'), RUN_IDENTITY.instanceId);
+      assert.equal(res.headers.get('x-coagent-state-id'), RUN_IDENTITY.stateId);
+      assert.match(res.headers.get('content-type') ?? '', /application\/x-ndjson/);
+      const frames = (await res.text())
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.deepEqual(frames.slice(0, -1), [
+        { channel: 'stdout', line: 'running-out' },
+        { channel: 'stderr', line: 'running-err' },
+      ]);
+      assert.deepEqual(frames.at(-1), { exitCode: 7 });
+      assert.deepEqual(seenBodies, [{ cwd: '/tmp/x' }]);
+
+      const lines: Array<{ channel: string; line: string }> = [];
+      const code = await loopbackRunRequest(
+        writerTarget(port),
+        { path: '/api/control/run-mission', body: { cwd: '/tmp/x' } },
+        (channel, line) => {
+          lines.push({ channel, line });
+        },
+      );
+      assert.equal(code, 7);
+      assert.deepEqual(lines, [
+        { channel: 'stdout', line: 'running-out' },
+        { channel: 'stderr', line: 'running-err' },
+      ]);
+
+      const planCode = await loopbackRunRequest(
+        writerTarget(port),
+        { path: '/api/control/run-plan', body: {} },
+        (channel, line) => {
+          assert.equal(channel, 'stdout');
+          assert.equal(line, 'plan-out');
+        },
+      );
+      assert.equal(planCode, 0);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('回调抛错写成 stderr 和非零终态；身份错误与断线/缺终态显式失败且不重试', async () => {
+    const runMission: HostedRunHandler = async (_body, emit) => {
+      emit('stdout', 'before-throw');
+      throw new Error('hosted boom');
+    };
+    const { server } = await openApi({ identity: RUN_IDENTITY, runMission });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const lines: Array<{ channel: string; line: string }> = [];
+      const code = await loopbackRunRequest(
+        writerTarget(port),
+        { path: '/api/control/run-mission', body: {} },
+        (channel, line) => lines.push({ channel, line }),
+      );
+      assert.equal(code, 1);
+      assert.deepEqual(lines, [
+        { channel: 'stdout', line: 'before-throw' },
+        { channel: 'stderr', line: 'hosted boom' },
+      ]);
+
+      await assert.rejects(
+        () =>
+          loopbackRunRequest(
+            { ...writerTarget(port), instanceId: 'other-instance' },
+            { path: '/api/control/run-mission', body: {} },
+            () => {
+              throw new Error('身份错误后不得把进度当成功');
+            },
+          ),
+        (error: unknown) => error instanceof LoopbackIdentityError && /实例漂移/.test(error.message),
+      );
+    } finally {
+      await closeServer(server);
+    }
+
+    let hits = 0;
+    const stub = createServer((req, res) => {
+      hits += 1;
+      const url = req.url ?? '/';
+      if (url.includes('cut')) {
+        res.writeHead(200, {
+          'x-coagent-api': API_VERSION,
+          'x-coagent-instance': RUN_IDENTITY.instanceId,
+          'x-coagent-state-id': RUN_IDENTITY.stateId,
+          'content-type': 'application/x-ndjson; charset=utf-8',
+        });
+        res.write(`${JSON.stringify({ channel: 'stdout', line: 'partial' })}\n`);
+        res.end();
+        return;
+      }
+      res.writeHead(200, {
+        'x-coagent-api': API_VERSION,
+        'x-coagent-instance': RUN_IDENTITY.instanceId,
+        'x-coagent-state-id': RUN_IDENTITY.stateId,
+        'content-type': 'application/x-ndjson; charset=utf-8',
+      });
+      res.write(`${JSON.stringify({ channel: 'stdout', line: 'hang' })}\n`);
+      req.socket.destroy();
+    });
+    try {
+      await listenLoopback(stub, 0);
+      const port = (stub.address() as AddressInfo).port;
+      const target = writerTarget(port);
+      await assert.rejects(
+        () => loopbackRunRequest(target, { path: '/cut', body: {} }, () => {}),
+        (error: unknown) => error instanceof Error && /截断/.test(error.message),
+      );
+      await assert.rejects(
+        () => loopbackRunRequest(target, { path: '/drop', body: {} }, () => {}),
+        (error: unknown) => error instanceof Error && /写者断线|截断/.test(error.message),
+      );
+      assert.equal(hits, 2, '断线与缺终态都不得自动重试');
+    } finally {
+      await closeServer(stub);
+    }
+  });
+
+  test('关闭门禁拒新启动并等待在途 job/HTTP 写；断连后 job 仍只执行一次，JSON 仍可响应', async () => {
+    let releaseJob: (code: number) => void = () => {};
+    let jobStarted!: () => void;
+    const jobStartedPromise = new Promise<void>((resolve) => {
+      jobStarted = resolve;
+    });
+    let runs = 0;
+    const runMission: HostedRunHandler = async (_body, emit) => {
+      runs += 1;
+      emit('stdout', 'job-running');
+      jobStarted();
+      return await new Promise<number>((resolve) => {
+        releaseJob = resolve;
+      });
+    };
+    let releaseMutation: () => void = () => {};
+    let mutationStarted!: () => void;
+    const mutationStartedPromise = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    const { server, base } = await openApi({
+      identity: RUN_IDENTITY,
+      runMission,
+      onMutation: async () => {
+        mutationStarted();
+        await new Promise<void>((resolve) => {
+          releaseMutation = resolve;
+        });
+      },
+    });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const aborted = await new Promise<{ status: number }>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            family: 4,
+            port,
+            path: '/api/control/run-mission',
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': 2 },
+          },
+          (res) => {
+            res.once('data', () => {
+              req.destroy();
+              resolve({ status: res.statusCode ?? 0 });
+            });
+          },
+        );
+        req.on('error', () => {
+          // destroy 之后 socket 报错是预期，job 必须继续。
+        });
+        req.on('timeout', () => reject(new Error('abort fixture timed out')));
+        req.write('{}');
+        req.end();
+      });
+      assert.equal(aborted.status, 200);
+      await jobStartedPromise;
+      assert.equal(runs, 1);
+
+      const writePromise = request(base, '/api/missions', {
+        projectId: 'P-drain',
+        missionId: 'M-drain',
+        contract: CONTRACT,
+      });
+      await mutationStartedPromise;
+
+      const draining = drainApi(server);
+      let drainDone = false;
+      void draining.then(() => {
+        drainDone = true;
+      });
+      await Promise.resolve();
+      assert.equal(drainDone, false);
+
+      await assert.rejects(
+        () =>
+          loopbackRunRequest(writerTarget(port), { path: '/api/control/run-mission', body: {} }, () => {}),
+        (error: unknown) =>
+          error instanceof LoopbackHttpError &&
+          error.status === 503 &&
+          error.code === 'SERVICE_DRAINING',
+      );
+      assert.equal(runs, 1);
+
+      const health = await request(base, '/api/health');
+      assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
+      assert.equal(drainDone, false);
+
+      releaseJob(0);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(drainDone, false, '写请求未结束时 drain 不能完成');
+      releaseMutation();
+      const written = await writePromise;
+      assert.equal(written.status, 201);
+      await draining;
+      assert.equal(drainDone, true);
+      assert.equal(runs, 1);
+
+      const after = await request(base, '/api/health');
+      assert.equal(after.status, 200);
+    } finally {
+      releaseJob(1);
+      releaseMutation();
+      await closeServer(server);
+    }
+  });
+
+  test('心跳帧不进 onLine；有心跳时短超时不断流；无字节才超时且不重试', async () => {
+    const ndjsonHeaders = {
+      'x-coagent-api': API_VERSION,
+      'x-coagent-instance': RUN_IDENTITY.instanceId,
+      'x-coagent-state-id': RUN_IDENTITY.stateId,
+      'content-type': 'application/x-ndjson; charset=utf-8',
+    };
+    const waitUntil = (predicate: () => boolean, timeoutMs: number, dump: () => string): Promise<void> => {
+      const deadline = Date.now() + timeoutMs;
+      return new Promise((resolve, reject) => {
+        const tick = () => {
+          if (predicate()) {
+            resolve();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            reject(new Error(`等待超时：${dump()}`));
+            return;
+          }
+          setTimeout(tick, 15);
+        };
+        tick();
+      });
+    };
+
+    const mixed = createServer((_req, res) => {
+      res.writeHead(200, ndjsonHeaders);
+      res.write(`${JSON.stringify({ heartbeat: true })}\n`);
+      res.write(`${JSON.stringify({ channel: 'stdout', line: 'keep' })}\n`);
+      res.write(`${JSON.stringify({ heartbeat: true })}\n`);
+      res.write(`${JSON.stringify({ exitCode: 0 })}\n`);
+      res.end();
+    });
+    try {
+      await listenLoopback(mixed, 0);
+      const lines: Array<{ channel: string; line: string }> = [];
+      const code = await loopbackRunRequest(
+        writerTarget((mixed.address() as AddressInfo).port),
+        { path: '/run', body: {} },
+        (channel, line) => lines.push({ channel, line }),
+      );
+      assert.equal(code, 0);
+      assert.deepEqual(lines, [{ channel: 'stdout', line: 'keep' }]);
+    } finally {
+      await closeServer(mixed);
+    }
+
+    let liveHits = 0;
+    let heartbeats = 0;
+    let finishLive: (() => void) | undefined;
+    const live = createServer((_req, res) => {
+      liveHits += 1;
+      res.writeHead(200, ndjsonHeaders);
+      const timer = setInterval(() => {
+        heartbeats += 1;
+        res.write(`${JSON.stringify({ heartbeat: true })}\n`);
+      }, 20);
+      finishLive = () => {
+        clearInterval(timer);
+        res.write(`${JSON.stringify({ exitCode: 0 })}\n`);
+        res.end();
+      };
+    });
+    try {
+      await listenLoopback(live, 0);
+      const lines: Array<{ channel: string; line: string }> = [];
+      const running = loopbackRunRequest(
+        writerTarget((live.address() as AddressInfo).port),
+        { path: '/run', body: {} },
+        (channel, line) => lines.push({ channel, line }),
+        { timeoutMs: 80 },
+      );
+      await waitUntil(() => heartbeats >= 4, 1_000, () => `heartbeats=${String(heartbeats)}`);
+      finishLive?.();
+      assert.equal(await running, 0);
+      assert.deepEqual(lines, []);
+      assert.equal(liveHits, 1, '有心跳的长流不得自动重试');
+    } finally {
+      finishLive?.();
+      await closeServer(live);
+    }
+
+    let idleHits = 0;
+    const idle = createServer((_req, res) => {
+      idleHits += 1;
+      res.writeHead(200, ndjsonHeaders);
+    });
+    try {
+      await listenLoopback(idle, 0);
+      const target = writerTarget((idle.address() as AddressInfo).port);
+      await assert.rejects(
+        () => loopbackRunRequest(target, { path: '/run', body: {} }, () => {}, { timeoutMs: 80 }),
+        (error: unknown) => error instanceof Error && /回环运行流超时/.test(error.message),
+      );
+      await assert.rejects(
+        () => loopbackRunRequest(target, { path: '/run', body: {} }, () => {}, { timeoutMs: 80 }),
+        (error: unknown) => error instanceof Error && /回环运行流超时/.test(error.message),
+      );
+      assert.equal(idleHits, 2, '超时失败不得在单次调用内重试；两次调用才是两次');
+    } finally {
+      await closeServer(idle);
+    }
+  });
+
+  test('hosted run 空闲心跳可被探测且不进进度；等待期间健康检查仍可回应', async () => {
+    let releaseJob: (code: number) => void = () => {};
+    const runPlan: HostedRunHandler = async (_body, emit) => {
+      emit('stdout', 'waiting');
+      return await new Promise<number>((resolve) => {
+        releaseJob = resolve;
+      });
+    };
+    const { server, base } = await openApi({ identity: RUN_IDENTITY, runPlan });
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const frames: Array<Record<string, unknown>> = [];
+      const raw = await new Promise<{ req: ReturnType<typeof httpRequest> }>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            family: 4,
+            port,
+            path: '/api/control/run-plan',
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': 2 },
+          },
+          (res) => {
+            let buffer = '';
+            res.on('data', (chunk) => {
+              buffer += String(chunk);
+              let nl = buffer.indexOf('\n');
+              while (nl >= 0) {
+                const rawLine = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 1);
+                nl = buffer.indexOf('\n');
+                if (rawLine.length === 0) continue;
+                frames.push(JSON.parse(rawLine) as Record<string, unknown>);
+              }
+            });
+            resolve({ req });
+          },
+        );
+        req.on('error', reject);
+        req.write('{}');
+        req.end();
+      });
+      const deadline = Date.now() + HOSTED_RUN_HEARTBEAT_IDLE_MS * 3;
+      await new Promise<void>((resolve, reject) => {
+        const tick = () => {
+          if (frames.some((frame) => frame.heartbeat === true)) {
+            resolve();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            reject(new Error(`未见心跳：${JSON.stringify(frames)}`));
+            return;
+          }
+          setTimeout(tick, 20);
+        };
+        tick();
+      });
+      assert.ok(frames.some((frame) => frame.channel === 'stdout' && frame.line === 'waiting'));
+      assert.equal(
+        frames.some((frame) => frame.heartbeat === true && (frame.channel === 'stdout' || frame.channel === 'stderr')),
+        false,
+      );
+      const health = await request(base, '/api/health');
+      assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
+      assert.equal(
+        frames.filter((frame) => frame.heartbeat === true).every((frame) => frame.channel === undefined),
+        true,
+      );
+      releaseJob(0);
+      const endAt = Date.now() + 2_000;
+      await new Promise<void>((resolve, reject) => {
+        const tick = () => {
+          if (frames.some((frame) => typeof frame.exitCode === 'number')) {
+            resolve();
+            return;
+          }
+          if (Date.now() >= endAt) {
+            reject(new Error(`未见终态：${JSON.stringify(frames)}`));
+            return;
+          }
+          setTimeout(tick, 20);
+        };
+        tick();
+      });
+      assert.equal(frames.at(-1)?.exitCode, 0);
+      raw.req.destroy();
+    } finally {
+      releaseJob(1);
       await closeServer(server);
     }
   });

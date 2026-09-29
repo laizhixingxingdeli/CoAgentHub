@@ -39,6 +39,26 @@ import {
 /** 客户端 API 版本。破坏性改动时要加。 */
 export const API_VERSION = 'v1';
 
+/** hosted run 的一行进度。channel 必须可区分，客户端不能靠猜 stdout/stderr。 */
+export type HostedRunEmit = (channel: 'stdout' | 'stderr', line: string) => void;
+
+/**
+ * 没有进度可写时隔这么久发一帧 `{ heartbeat: true }`。
+ * 必须短于 Node 19+ keep-alive 套接字默认 5s 空闲超时：方案等升级决定的 poll
+ * 缺省 15s，中间没有 stdout；不心跳的话 CLI 会误报断线，对端 job 还在跑。
+ * 帧上不得带 channel，否则会进 CLI stdout。
+ */
+export const HOSTED_RUN_HEARTBEAT_IDLE_MS = 2_000;
+
+/**
+ * 常驻编排入口回调。返回进程式 exitCode；抛错由 HTTP 面写成 stderr + 非零终态。
+ * 不在这里取消：请求断线不等于 job 该停。
+ */
+export type HostedRunHandler = (
+  body: Record<string, unknown>,
+  emit: HostedRunEmit,
+) => Promise<number>;
+
 export interface ApiDeps {
   platform: Platform;
   tokens: RunTokenRegistry;
@@ -81,6 +101,13 @@ export interface ApiDeps {
    * 与 /api/agent/* 的 run token 正交，不能互相替代。
    */
   resolveControlPrincipal?: ControlPrincipalResolver;
+  /**
+   * 把 CLI run-mission 接到持锁服务。不注入则 POST /api/control/run-mission 明确拒绝：
+   * 否则调用方会把「没人接」当成已经开跑。
+   */
+  runMission?: HostedRunHandler;
+  /** 同上，对应 POST /api/control/run-plan。 */
+  runPlan?: HostedRunHandler;
 }
 
 class HttpError extends Error {
@@ -155,6 +182,52 @@ function writeJson(
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   deferredJson.set(res, { status, body });
+}
+
+function writeNdjsonHeaders(
+  res: ServerResponse,
+  identity?: { readonly instanceId: string; readonly stateId: string },
+): void {
+  if (res.headersSent || res.writableEnded) return;
+  const headers: Record<string, string> = {
+    'x-coagent-api': API_VERSION,
+    'content-type': 'application/x-ndjson; charset=utf-8',
+  };
+  if (identity) {
+    headers['x-coagent-instance'] = identity.instanceId;
+    headers['x-coagent-state-id'] = identity.stateId;
+  }
+  res.writeHead(200, headers);
+}
+
+function writeNdjsonEvent(res: ServerResponse, event: Record<string, unknown>): void {
+  if (res.writableEnded || res.destroyed || !res.writable) return;
+  try {
+    res.write(`${JSON.stringify(event)}\n`);
+  } catch {
+    // 回传失败不得冒泡：断线 CLI 不能把已接受 job 的终态写成未处理异常。
+  }
+}
+
+function endNdjson(res: ServerResponse): void {
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    res.end();
+  } catch {
+    // 同上：end 失败只表示客户端已经走了。
+  }
+}
+
+/**
+ * createApi 返回的 server 的排空入口。不用挂在 Server 实例上，免得污染 node:http 类型。
+ * 后续 close 包装先 drain，再停周期 tick / persist / close。
+ */
+const apiGates = new WeakMap<Server, { drain: () => Promise<void> }>();
+
+export function drainApi(server: Server): Promise<void> {
+  const gate = apiGates.get(server);
+  if (!gate) return Promise.resolve();
+  return gate.drain();
 }
 
 export function createApi(deps: ApiDeps): Server {
@@ -360,7 +433,30 @@ export function createApi(deps: ApiDeps): Server {
 
   const identity = deps.identity;
 
-  return createServer((req, res) => {
+  let shuttingDown = false;
+  let inFlightWrites = 0;
+  let inFlightRuns = 0;
+  const drainWaiters: Array<() => void> = [];
+
+  const notifyDrain = (): void => {
+    if (!shuttingDown || inFlightWrites > 0 || inFlightRuns > 0) return;
+    while (drainWaiters.length > 0) {
+      const waiter = drainWaiters.pop();
+      if (waiter) waiter();
+    }
+  };
+
+  const drainGate = (): Promise<void> => {
+    shuttingDown = true;
+    if (inFlightWrites === 0 && inFlightRuns === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      drainWaiters.push(resolve);
+    });
+  };
+
+  const server = createServer((req, res) => {
+    const isPost = (req.method ?? 'GET') === 'POST';
+    if (isPost) inFlightWrites += 1;
     void handle(req, res)
       .then(async () => {
         // 成功应答必须在 onMutation 完成之后才 writeHead。先写头再 persist，
@@ -412,8 +508,84 @@ export function createApi(deps: ApiDeps): Server {
           identity,
         );
       }
+      })
+      .finally(() => {
+        if (!isPost) return;
+        inFlightWrites -= 1;
+        notifyDrain();
       });
   });
+  apiGates.set(server, { drain: drainGate });
+  return server;
+
+  async function startHostedRun(
+    req: IncomingMessage,
+    res: ServerResponse,
+    handler: HostedRunHandler | undefined,
+    kind: 'run-mission' | 'run-plan',
+  ): Promise<void> {
+    await requireControl(req, POLICY_ACTION.missionCreate);
+    if (!handler) {
+      throw new HttpError(501, 'HOSTED_RUN_UNAVAILABLE', `本服务未配置 hosted ${kind}`);
+    }
+    if (shuttingDown) {
+      throw new HttpError(503, 'SERVICE_DRAINING', '服务正在关闭，拒绝新的 hosted 启动');
+    }
+    const body = await readJson(req);
+    // 读 body 期间可能已经开始 drain；接受 job 之前再看一次。
+    if (shuttingDown) {
+      throw new HttpError(503, 'SERVICE_DRAINING', '服务正在关闭，拒绝新的 hosted 启动');
+    }
+    inFlightRuns += 1;
+    let terminalSent = false;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopHeartbeat = (): void => {
+      if (heartbeatTimer === undefined) return;
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = undefined;
+    };
+    const armHeartbeat = (): void => {
+      stopHeartbeat();
+      heartbeatTimer = setTimeout(() => {
+        heartbeatTimer = undefined;
+        if (terminalSent || res.writableEnded || res.destroyed) return;
+        writeNdjsonEvent(res, { heartbeat: true });
+        armHeartbeat();
+      }, HOSTED_RUN_HEARTBEAT_IDLE_MS);
+    };
+    const emit: HostedRunEmit = (channel, line) => {
+      if (terminalSent) return;
+      writeNdjsonEvent(res, { channel, line });
+      armHeartbeat();
+    };
+    res.on('error', () => {
+      // 断线只丢掉回传通道。已接受的 job 继续，终态写失败也不能变成未处理异常。
+    });
+    try {
+      // 长流期间关掉套接字空闲超时。不这么做，服务端 keepAlive 5s 会在等决定时拆连接。
+      req.socket?.setTimeout(0);
+      writeNdjsonHeaders(res, identity);
+      armHeartbeat();
+    } catch {
+      // 头写不出也不取消 job：接受已经发生。
+    }
+    let exitCode = 1;
+    try {
+      const code = await handler(body, emit);
+      exitCode = typeof code === 'number' && Number.isFinite(code) ? code : 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emit('stderr', message);
+      exitCode = 1;
+    } finally {
+      terminalSent = true;
+      stopHeartbeat();
+      writeNdjsonEvent(res, { exitCode });
+      endNdjson(res);
+      inFlightRuns -= 1;
+      notifyDrain();
+    }
+  }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -780,6 +952,13 @@ export function createApi(deps: ApiDeps): Server {
       // 只在成功收尾后吊销。拒绝时当前代次的有效 token 必须还能用。
       tokens.revokeAttempt(missionId, attemptId);
       return send(res, 200, {});
+    }
+
+    if (method === 'POST' && path === '/api/control/run-mission') {
+      return startHostedRun(req, res, deps.runMission, 'run-mission');
+    }
+    if (method === 'POST' && path === '/api/control/run-plan') {
+      return startHostedRun(req, res, deps.runPlan, 'run-plan');
     }
 
     throw new HttpError(404, 'NOT_FOUND', `${method} ${path}`);

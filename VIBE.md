@@ -116,6 +116,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   Mission 可挂 `executionBudget`。用法快照与求值在 application 纯函数层；**调度强制**在 Orchestrator PRE/POST gate，经 Platform 记事件 / 升级 / 等待。
 - **fast-lane-ab-metrics** — Fast Lane A/B 指标（FASTLANE-METRICS）
   `Platform.listRuns(missionId)` 是同一任务多次运行的只读对照出口；`src/l3.ts runs` 直接展示这些事实。
+- **hosted-run-routing** — 常驻持锁服务编排入口与 CLI 回环转发
+  文件存储下，`run-mission` 与 `run-plan` 保留原有命令前缀。正式运行在输入和环境前置校验、方案资格筛选/仓库预检之后探测同一 statePath 写者：经身份验证的 live 服务由回环 HTTP 启动，并在同一服务
 - **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
   `createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。**当前 `startSer
 - **l3-main-writer-routing** — L3 主状态写者路由与回环控制
