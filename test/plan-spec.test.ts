@@ -277,8 +277,9 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
       { id: 'Rev', title: '检视', why: 'w', allowedScope: ['c.ts'], acceptance: ['z'], status: 'review' },
       { id: 'Rework', title: '返工', why: 'w', allowedScope: ['c.ts'], acceptance: ['z'], status: 'rework' },
     ]);
-    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
     assert.deepEqual(candidates.map((c) => c.id), ['Legacy', 'PendOk']);
+    assert.deepEqual(warnings, []);
     assert.equal(candidateHandoffText(candidates[0]), PLAN_ELIGIBILITY_REASONS.legacyCandidate);
     assert.equal(candidateHandoffText(candidates[1]), PLAN_ELIGIBILITY_REASONS.pendingCandidate);
     const reason = (id: string) => exclusions.find((e) => e.featureId === id)?.reason;
@@ -348,8 +349,9 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
         dependsOn: ['Ok'],
       },
     ]);
-    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
     assert.deepEqual(candidates.map((c) => c.id), ['Ok']);
+    assert.deepEqual(warnings, []);
     assert.equal(exclusions.find((e) => e.featureId === 'BlockedSplit')?.reason, PLAN_ELIGIBILITY_REASONS.unmetDependency('Parent'));
     assert.equal(exclusions.find((e) => e.featureId === 'BlockedUnknown')?.reason, PLAN_ELIGIBILITY_REASONS.unmetDependency('NoSuch'));
     assert.equal(exclusions.find((e) => e.featureId === 'Waiting')?.reason, PLAN_ELIGIBILITY_REASONS.unmetDependency('Ok'));
@@ -369,8 +371,9 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
         repo: 'coagent-pi（coagenthub-v5 少量）',
       },
     ]);
-    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
     assert.deepEqual(candidates.map((c) => c.id), ['Here', 'Default']);
+    assert.deepEqual(warnings, []);
     assert.equal(exclusions.find((e) => e.featureId === 'Other')?.reason, PLAN_ELIGIBILITY_REASONS.otherRepo);
     if (process.platform === 'win32') {
       const mixed = ROOT.replace(/^[A-Za-z]/, (ch) => (ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase()));
@@ -379,6 +382,223 @@ describe('资格筛选：最小夹具覆盖状态表', () => {
       ]);
       assert.deepEqual(selectPlanCandidates(cased, { projectRoot: ROOT }).candidates.map((c) => c.id), ['Case']);
     }
+  });
+});
+
+describe('资格筛选：条目契约检查', () => {
+  test('allowedScope 以 .coagent/ 开头 → 排除；不以该前缀则仍可入选', () => {
+    const plan = planOf([
+      {
+        id: 'Truth', title: '规格', why: 'w',
+        allowedScope: ['src/ok.ts', '.coagent/specs/durable-scheduler.md'],
+        acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'Ok', title: '代码', why: 'w',
+        allowedScope: ['src/ok.ts', '.coagent-worktrees/M1/a.ts'],
+        acceptance: ['x'], status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['Ok']);
+    const truth = exclusions.find((e) => e.featureId === 'Truth');
+    assert.equal(truth?.reason, PLAN_ELIGIBILITY_REASONS.projectTruth);
+    assert.match(truth?.reason ?? '', /L1 不得改 Project Truth/);
+    assert.match(truth?.reason ?? '', /memoryDelta/);
+  });
+
+  test('allowedScope 名为 VIBE.md → 排除；其它文件名仍可入选', () => {
+    const plan = planOf([
+      {
+        id: 'RootVibe', title: '根', why: 'w',
+        allowedScope: ['VIBE.md'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'NestedVibe', title: '嵌', why: 'w',
+        allowedScope: ['docs/VIBE.md'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'Ok', title: '旁', why: 'w',
+        allowedScope: ['README.md', 'VIBE.md.bak', 'src/vibe.md'],
+        acceptance: ['x'], status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['Ok']);
+    assert.equal(exclusions.find((e) => e.featureId === 'RootVibe')?.reason, PLAN_ELIGIBILITY_REASONS.projectTruth);
+    assert.equal(exclusions.find((e) => e.featureId === 'NestedVibe')?.reason, PLAN_ELIGIBILITY_REASONS.projectTruth);
+  });
+
+  test('allowedScope 绝对路径（盘符或以 / 开头）→ 排除；相对路径仍可入选', () => {
+    const plan = planOf([
+      {
+        id: 'Drive', title: '盘符', why: 'w',
+        allowedScope: ['C:/repo/a.ts'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'UnixAbs', title: '根', why: 'w',
+        allowedScope: ['/tmp/a.ts'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'Ok', title: '相对', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['x'], status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['Ok']);
+    assert.equal(exclusions.find((e) => e.featureId === 'Drive')?.reason, PLAN_ELIGIBILITY_REASONS.unsafeScopePath);
+    assert.equal(exclusions.find((e) => e.featureId === 'UnixAbs')?.reason, PLAN_ELIGIBILITY_REASONS.unsafeScopePath);
+  });
+
+  test('allowedScope 含 .. 段 → 排除；文件名含 .. 但不是段则仍可入选', () => {
+    const plan = planOf([
+      {
+        id: 'Up', title: '上跳', why: 'w',
+        allowedScope: ['src/../secret.ts'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'Parent', title: '父', why: 'w',
+        allowedScope: ['../outside.ts'], acceptance: ['x'], status: 'pending',
+      },
+      {
+        id: 'Ok', title: '名', why: 'w',
+        allowedScope: ['src/foo..bar.ts'], acceptance: ['x'], status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['Ok']);
+    assert.equal(exclusions.find((e) => e.featureId === 'Up')?.reason, PLAN_ELIGIBILITY_REASONS.unsafeScopePath);
+    assert.equal(exclusions.find((e) => e.featureId === 'Parent')?.reason, PLAN_ELIGIBILITY_REASONS.unsafeScopePath);
+  });
+
+  test('acceptance 未覆盖仓内路径只警告不排除；文件覆盖、目录覆盖、:12 后缀；constraints/nonGoals 不参与', () => {
+    const plan = planOf([
+      {
+        id: 'FileHit', title: '文件覆盖', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['src/a.ts 必须绿'], status: 'pending',
+      },
+      {
+        id: 'DirHit', title: '目录覆盖', why: 'w',
+        allowedScope: ['src/'], acceptance: ['src/nested/b.ts'], status: 'pending',
+      },
+      {
+        id: 'LineHit', title: '行号覆盖', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['src/a.ts:12'], status: 'pending',
+      },
+      {
+        id: 'Miss', title: '未覆盖', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['src/other.ts 也要', '普通验收句'], status: 'pending',
+      },
+      {
+        id: 'LineMiss', title: '行号未覆盖', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['src/other.ts:12'], status: 'pending',
+      },
+      {
+        id: 'Bounds', title: '旁路字段', why: 'w',
+        allowedScope: ['src/a.ts'], acceptance: ['x'],
+        constraints: ['不得改 src/secret.ts'], nonGoals: ['src/other.ts 不在范围'],
+        status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['FileHit', 'DirHit', 'LineHit', 'Miss', 'LineMiss', 'Bounds']);
+    assert.equal(exclusions.length, 0);
+    assert.deepEqual(warnings, [
+      'Miss：验收路径 src/other.ts 未被范围覆盖',
+      'LineMiss：验收路径 src/other.ts 未被范围覆盖',
+    ]);
+    assert.ok(warnings.every((w) => w.includes('Miss') && w.includes('src/other.ts')));
+  });
+
+  test('验收路径只认四类目录前缀与根点文件：vendor/a.ts 和根 a.ts 不警告，.gitattributes 警告',
+    () => {
+      const plan = planOf([
+        {
+          id: 'Noise', title: '非目标', why: 'w',
+          allowedScope: ['src/a.ts'],
+          acceptance: ['vendor/a.ts 不算', 'a.ts 根文件不算', '普通句'],
+          status: 'pending',
+        },
+        {
+          id: 'DotMiss', title: '根点未覆盖', why: 'w',
+          allowedScope: ['src/a.ts'], acceptance: ['.gitattributes 必须一致'], status: 'pending',
+        },
+        {
+          id: 'DotHit', title: '根点覆盖', why: 'w',
+          allowedScope: ['.gitattributes'], acceptance: ['.gitattributes 保持 LF'], status: 'pending',
+        },
+        {
+          id: 'DocsMiss', title: 'docs 未覆盖', why: 'w',
+          allowedScope: ['src/a.ts'], acceptance: ['docs/reports/x.md'], status: 'pending',
+        },
+        {
+          id: 'TestHit', title: 'test 覆盖', why: 'w',
+          allowedScope: ['test/'], acceptance: ['test/plan-spec.test.ts'], status: 'pending',
+        },
+        {
+          id: 'ScriptsMiss', title: 'scripts 未覆盖', why: 'w',
+          allowedScope: ['src/a.ts'], acceptance: ['scripts/foo.mjs'], status: 'pending',
+        },
+      ]);
+      const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
+      assert.deepEqual(
+        candidates.map((c) => c.id),
+        ['Noise', 'DotMiss', 'DotHit', 'DocsMiss', 'TestHit', 'ScriptsMiss'],
+      );
+      assert.equal(exclusions.length, 0);
+      assert.deepEqual(warnings, [
+        'DotMiss：验收路径 .gitattributes 未被范围覆盖',
+        'DocsMiss：验收路径 docs/reports/x.md 未被范围覆盖',
+        'ScriptsMiss：验收路径 scripts/foo.mjs 未被范围覆盖',
+      ]);
+    });
+
+  test('带常见尾随标点及 :12 的验收目标按文件提取并覆盖', () => {
+    const plan = planOf([
+      {
+        id: 'PunctHit', title: '标点覆盖', why: 'w',
+        allowedScope: ['src/a.ts'],
+        acceptance: ['见 src/a.ts。', '还有 src/a.ts.', '`src/a.ts:12`', '（src/a.ts:12）'],
+        status: 'pending',
+      },
+      {
+        id: 'PunctMiss', title: '标点未覆盖', why: 'w',
+        allowedScope: ['src/a.ts'],
+        acceptance: ['漏了 src/other.ts。', '以及 src/miss.ts:12.'],
+        status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), ['PunctHit', 'PunctMiss']);
+    assert.equal(exclusions.length, 0);
+    assert.deepEqual(warnings, [
+      'PunctMiss：验收路径 src/other.ts 未被范围覆盖',
+      'PunctMiss：验收路径 src/miss.ts 未被范围覆盖',
+    ]);
+  });
+
+  test('done、skipped 等非候选不因新增检查产生额外排除或警告', () => {
+    const plan = planOf([
+      {
+        id: 'Done', title: '合', why: 'w',
+        allowedScope: ['.coagent/project.md', 'C:/abs.ts', 'src/../x.ts'],
+        acceptance: ['src/ghost.ts'], status: 'done',
+      },
+      {
+        id: 'Skip', title: '跳', why: 'w',
+        allowedScope: ['VIBE.md'], acceptance: ['src/ghost.ts'], status: 'skipped',
+      },
+      {
+        id: 'PendMiss', title: '缺', why: 'w', status: 'pending',
+        allowedScope: ['.coagent/specs/x.md'],
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(candidates.map((c) => c.id), []);
+    assert.deepEqual(warnings, []);
+    assert.equal(exclusions.find((e) => e.featureId === 'Done')?.reason, PLAN_ELIGIBILITY_REASONS.done);
+    assert.equal(exclusions.find((e) => e.featureId === 'Skip')?.reason, PLAN_ELIGIBILITY_REASONS.skipped);
+    assert.equal(exclusions.find((e) => e.featureId === 'PendMiss')?.reason, PLAN_ELIGIBILITY_REASONS.missingContract);
   });
 });
 
