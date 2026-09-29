@@ -799,6 +799,7 @@ export function bindServerCloseToPeriodicStop(
   server: Server,
   stop: () => Promise<void>,
   afterHttpClose?: () => void | Promise<void>,
+  options: { failClosedOnStopError?: () => boolean } = {},
 ): void {
   const closeHttp = server.close.bind(server);
   server.close = ((callback?: (err?: Error) => void) => {
@@ -809,6 +810,9 @@ export function bindServerCloseToPeriodicStop(
       } catch (error) {
         stopErr = asError(error);
       }
+      // 二次 SIGINT 的安全停靠失败时，HTTP 与主锁必须继续保持；普通 stop 错误
+      // 仍沿用历史语义关闭 HTTP，避免改变常规 close 的回收行为。
+      if (stopErr && options.failClosedOnStopError?.()) return stopErr;
       let closeErr: Error | undefined;
       try {
         closeErr = await new Promise<Error | undefined>((resolve) => {
@@ -1112,10 +1116,12 @@ export async function startServer(
       server,
       async () => {
         await drainApi(server);
+        if (safeShutdown) await safeShutdown;
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();
       },
       usePg ? undefined : () => releaseMainLock(),
+      { failClosedOnStopError: () => safeShutdown !== undefined },
     );
     let safeShutdown: Promise<void> | undefined;
     const requestSafeShutdown = (): Promise<void> => {
@@ -1327,7 +1333,7 @@ if (isDirectMainEntry()) {
       const onInterrupt = createSigintHandler(onSignal, () => {
         process.exitCode = 1;
         void built.requestSafeShutdown().catch((error) => {
-          console.error(`受控暂停失败，服务仍按 drain 路径关闭：${error instanceof Error ? error.message : String(error)}`);
+          console.error(`受控暂停失败，服务保持监听与主锁：${error instanceof Error ? error.message : String(error)}`);
         });
       }, () => {
         try {
