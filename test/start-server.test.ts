@@ -19,6 +19,7 @@ import {
   loopbackRunRequest,
 } from '../src/application/loopback-control-client.ts';
 import type { AgentRuntime } from '../src/application/ports.ts';
+import { runHostedMission, type HostedMissionContext } from '../src/application/mission-runner.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import {
   bindServerCloseToPeriodicStop,
@@ -1438,6 +1439,72 @@ describe('startServer hosted 接线与排空',
         assert.match(main, /process\.once\('SIGTERM'/);
       },
     );
+
+    test('runHostedMission：仅在 Mission 预检创建后通知真实解析 id', async () => {
+      const statePath = tempState();
+      const cwd = dirname(statePath);
+      const adapter = join(cwd, 'adapter.ts');
+      writeFileSync(adapter, '// hosted lifecycle fixture\\n');
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const started: string[] = [];
+      let runnerStarted = false;
+      const addr = built.server.address() as AddressInfo;
+      const ctx = {
+        built: {
+          platform: built.platform,
+          tokens: built.tokens,
+          agentPool: built.agentPool,
+          activity: built.activity,
+          deliveries: built.deliveries,
+          persist: built.persist,
+          candidateCircuits: built.candidateCircuits,
+          queuedHops: built.queuedHops,
+          live: built.live,
+          issuer: built.issuer,
+        },
+        baseUrl: `http://127.0.0.1:${addr.port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+        onStarted: (id: string) => {
+          started.push(id);
+          assert.ok(built.platform.getMissionView(id));
+          assert.equal(runnerStarted, false);
+        },
+      } satisfies HostedMissionContext;
+      const body = {
+        spec: { projectId: 'P-hosted-lifecycle', missionId: 'M-hosted-lifecycle-unique', contract: WRITE_CONTRACT },
+        cwd,
+        adapter,
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+        inPlace: true,
+        maxRounds: 1,
+      };
+      try {
+        await runHostedMission(body, ctx, () => { runnerStarted = true; });
+      } catch {
+        // 空脚本 runtime 的执行结果无关；通知发生在 runner 启动之前。
+      }
+      assert.deepEqual(started, ['M-hosted-lifecycle-unique']);
+      assert.ok(await built.platform.getMissionView('M-hosted-lifecycle-unique'));
+
+      const invalidStarted: string[] = [];
+      const invalidId = 'M-hosted-lifecycle-invalid';
+      await assert.rejects(runHostedMission({
+        ...body,
+        spec: { ...body.spec, missionId: invalidId },
+        coordinator: 'missing-coordinator',
+      }, { ...ctx, onStarted: (id) => invalidStarted.push(id) }, () => {}));
+      assert.deepEqual(invalidStarted, []);
+      await assert.rejects(built.platform.getMissionView(invalidId));
+      await new Promise<void>((done, fail) => built.server.close((err) => err ? fail(err) : done()));
+    });
 
     test('未注入 runtime 时 hosted 入口已接上：非法 body 走同一平台且不另开写者',
       async () => {
