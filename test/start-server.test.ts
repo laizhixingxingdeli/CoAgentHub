@@ -1634,6 +1634,44 @@ describe('startServer hosted 接线与排空',
       },
     );
 
+    test('startServer hosted Mission 快照只登记预检解析 id，并在结束后清理', { timeout: 20_000 }, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-snapshot-'));
+      dirs.push(dir);
+      const statePath = join(dir, 'state.json');
+      const adapter = join(dir, 'adapter.ts');
+      writeFileSync(adapter, '// snapshot fixture\n');
+      const gated = gatedRuntime();
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(), runtime: gated.runtime,
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const target = await liveTarget(statePath);
+      const running = loopbackRunRequest(target, {
+        path: '/api/control/run-mission',
+        body: hostedMissionBody(dir, adapter, statePath, 'M-snapshot-real'),
+      }, () => {});
+      try {
+        await gated.started;
+        const snapshots = built.hostedRunSnapshots();
+        assert.equal(snapshots.length, 1);
+        assert.equal(snapshots[0]?.id, 'M-snapshot-real');
+        assert.equal(snapshots[0]?.kind, 'mission');
+        assert.ok(snapshots[0]?.status);
+        const invalidCode = await loopbackRunRequest(target, {
+          path: '/api/control/run-mission',
+          body: hostedMissionBody(dir, adapter, join(dir, 'other-state.json'), 'M-invalid-snapshot'),
+        }, () => {});
+        assert.equal(invalidCode, 1);
+        assert.equal(built.hostedRunSnapshots().length, 1);
+      } finally {
+        gated.release();
+        await running;
+      }
+      assert.deepEqual(built.hostedRunSnapshots(), []);
+    });
+
     test(
       'server.close 先拒新启动，等在途 runner 结束才释锁；残锁不可抢',
       { timeout: 20_000 },

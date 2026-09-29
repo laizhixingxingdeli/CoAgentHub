@@ -944,6 +944,7 @@ export async function startServer(
     // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
     const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
     const planLive = new InMemoryPlanRunLiveOutput();
+    const hostedRuns = createHostedRunTracker();
     const startedAt = new Date().toISOString();
     const passthroughRaw = env[SPAWN_ENV_PASSTHROUGH_VAR];
     const passthrough = parseAgentEnvPassthrough(
@@ -972,19 +973,42 @@ export async function startServer(
       beforeRead: 'refresh' in built ? built.refresh : undefined,
       planRunDirs: () => [...knownPlanRunDirs],
       planLive,
-      runMission: (body, emit) =>
-        runHostedMission(
-          body,
-          {
-            built: hostedBuilt,
-            baseUrl: loopback.baseUrl,
-            workspace,
-            env,
-            ...hostedRuntime,
-            heldState,
-          },
-          emit,
-        ),
+      runMission: async (body, emit) => {
+        const token = randomUUID();
+        try {
+          return await runHostedMission(
+            body,
+            {
+              built: hostedBuilt,
+              baseUrl: loopback.baseUrl,
+              workspace,
+              env,
+              ...hostedRuntime,
+              heldState,
+              onStarted: (id) => {
+                const view = built.platform.getMissionView(id);
+                const snapshot: HostedRunSnapshot = {
+                  kind: 'mission', id, status: '运行中/状态暂不可读',
+                };
+                hostedRuns.register(token, snapshot);
+                if (view && typeof (view as Promise<unknown>).then === 'function') {
+                  void Promise.resolve(view).then((mission) => {
+                    if (mission?.status) hostedRuns.update(token, { ...snapshot, status: mission.status });
+                  }, () => {});
+                } else if ((view as { status?: string } | undefined)?.status) {
+                  hostedRuns.update(token, {
+                    ...snapshot,
+                    status: (view as { status: string }).status,
+                  });
+                }
+              },
+            },
+            emit,
+          );
+        } finally {
+          hostedRuns.finish(token);
+        }
+      },
       runPlan: (body, emit) =>
         runHostedPlan(
           body,
@@ -1063,6 +1087,7 @@ export async function startServer(
       server,
       ...built,
       stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
+      hostedRunSnapshots: () => hostedRuns.snapshot(),
     };
   } catch (error) {
     await abortStartedServer(server, releaseMainLock, error);

@@ -339,6 +339,76 @@ test('A 检查点后 B quota 仅回滚 B 半成品', async () => {
   }
 });
 
+
+test('A 检查点后 B auth 仅回滚 B 半成品', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'failover-orchestrator-auth-'));
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  const worktreeRoot = join(tempRoot, '.coagent-worktrees');
+  try {
+    git(tempRoot, 'init', '-q');
+    git(tempRoot, 'config', 'user.name', 'test');
+    git(tempRoot, 'config', 'user.email', 'test@example.invalid');
+    writeFileSync(join(tempRoot, 'seed.txt'), 'base');
+    git(tempRoot, 'add', 'seed.txt');
+    git(tempRoot, 'commit', '-qm', 'initial');
+
+    const executor = new ScriptedRuntime({
+      'executor:W-1': {
+        steps: [
+          { tool: 'coagent_get_work_order', body: {} },
+          { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 'A changed src/foo.ts', command: 'test fixture', exitCode: 0 } },
+          { tool: 'coagent_submit_execution_result', body: (previous) => ({
+            outcome: 'completed', summary: 'A changed foo', changedFiles: ['src/foo.ts'],
+            evidenceIds: [previous.evidenceId], notes: '无',
+          }) },
+        ],
+      },
+      'executor:W-2': { steps: [] },
+    });
+    const runtime = {
+      kind: executor.kind,
+      supportsQuery: executor.supportsQuery,
+      start: async (spec: Parameters<typeof executor.start>[0]) => {
+        if (spec.role === 'executor' && spec.workItemId === 'W-1') {
+          mkdirSync(join(spec.cwd, 'src'), { recursive: true });
+          writeFileSync(join(spec.cwd, 'src/foo.ts'), 'export const foo = 1;\\n');
+        }
+        if (spec.role === 'executor' && spec.workItemId === 'W-2') {
+          mkdirSync(join(spec.cwd, 'src'), { recursive: true });
+          writeFileSync(join(spec.cwd, 'src/bar.ts'), 'unfinished');
+          const run = await executor.start(spec);
+          return {
+            resumeRef: run.resumeRef,
+            on: (handler) => run.on(handler),
+            abort: (reason) => run.abort(reason),
+            wait: async () => ({ ...await run.wait(), endedBy: 'auth' as const }),
+          };
+        }
+        return executor.start(spec);
+      },
+    };
+    const { platform, orchestrator } = await harness(runtime, {
+      candidates: [{ endpoint: 'l', profileId: 'exec-a' }],
+    }, new GitWorktreeManager(), PLAN_AND_DISPATCH_AB);
+    const missionId = 'M-checkpoint-auth-B';
+    await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+    const result = await orchestrator.runMission(missionId, { projectRoot: tempRoot, maxRounds: 2 });
+
+    const missionWorktree = join(worktreeRoot, missionId);
+    const executorHops = orchestrator.hops.filter((hop) => hop.role === 'executor');
+    assert.deepEqual(executorHops.map((hop) => hop.workItemId), ['W-1', 'W-2'],
+      `expected sequential A/B executor hops; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`);
+    assert.equal(executorHops[0].endedBy, 'structured_submit');
+    assert.equal(executorHops[1].endedBy, 'auth');
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
+    assert.equal(existsSync(join(missionWorktree, 'src/bar.ts')), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('检查点 A 在回滚 B 半成品后仍保留', async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'failover-checkpoint-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: tempRoot, encoding: 'utf8' }).trim();
