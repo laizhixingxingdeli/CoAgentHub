@@ -337,6 +337,46 @@ describe('调度器：整条 Mission 自己走完', () => {
     }
   });
 
+  test('缺少冻结授权时停靠且不继续下一跳', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-missing-scope-'));
+    const marker = join(projectRoot, 'executor-handoff.marker');
+    let checkpointCalls = 0;
+    let rollbackCalls = 0;
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => { checkpointCalls += 1; },
+      rollback: async () => { rollbackCalls += 1; },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-missing-scope', contract: CONTRACT });
+      const getMissionView = current.platform.getMissionView.bind(current.platform);
+      current.platform.getMissionView = async (missionId) => {
+        const view = await getMissionView(missionId);
+        const item = view.workItems.find((candidate) => candidate.id === 'W-1');
+        if (missionId === 'M-missing-scope' && item?.hasResult) {
+          return { ...view, workItems: view.workItems.map((candidate) => candidate.id === 'W-1' ? { ...candidate, order: undefined } : candidate) };
+        }
+        return view;
+      };
+      writeFileSync(marker, 'handed-off');
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-missing-scope', { projectRoot });
+
+      assert.equal(result.kind, 'waiting');
+      assert.match((result as { detail: string }).detail, /allowedScope/);
+      assert.deepEqual(orchestrator.hops.map((hop) => hop.role), ['coordinator', 'executor']);
+      assert.equal(checkpointCalls, 0);
+      assert.equal(rollbackCalls, 0);
+      assert.equal(readFileSync(marker, 'utf8'), 'handed-off');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('正常主链：规划 → 派发 → 执行 → 验收 → 交卷', async () => {
     current = await harness({
       coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
