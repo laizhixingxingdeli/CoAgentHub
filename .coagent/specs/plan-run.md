@@ -36,3 +36,16 @@
 不接 HTTP/agent tools、不做逐次点击确认、不由 CLI 合并；源 dependsOn 完成性只在筛选判断，运行中重划范围不改源方案；不做崩溃后续跑或费用硬上限；PG 主存储时 PlanRun 仍是文件；不替 L3 补人工 pending 契约，也不接管人工状态；不自动代答。
 
 源：`src/run-plan.ts`、`src/application/plan-runtime.ts`、`src/application/mission-runner.ts`、`src/l3.ts`、`src/application/plan-handoff.ts`、`src/application/plan-driver.ts`、`src/application/plan-routing.ts`、`src/application/plan-spec.ts`、`src/application/plan-preflight.ts`、`src/application/plan-run.ts`、`src/application/plan-run-store.ts`、`src/application/lock.ts`、`.gitignore`。测试：`test/plan-run.test.ts`、`test/plan-run-store.test.ts`（真子进程 `test/helpers/plan-run-probe.ts`）、`test/plan-routing.test.ts`、`test/plan-spec.test.ts`、`test/plan-driver.test.ts`、`test/run-plan-wiring.test.ts`、`test/plan-handoff.test.ts`、`test/l3-plan.test.ts`（真 CLI 子进程）、`test/lock.test.ts`。
+
+## 补遗（旧版条款逐字恢复）
+
+2026-09-29 L3 规格同步：AQ1 交卷时整份重写本规格，下面这些旧版（02a669a）条款在压缩中丢失，逐字恢复。与上文冲突时以上文为准（上文含 AQ1 新增的「答复」动作：可答复单另可 `answer`，下面「四个动作」的条款仍适用于其余动作与不可答复的单）。
+
+- **HA 待放行**：HA 路暂时关闭（HAOFF1），high_assurance 按普通 Standard 由机器 L3 合入；四类禁止副作用未证明为严格 `false` 仍不建单。恢复方法：删除 `decideRoute` 的 HA 回落分支并恢复 HA 分类条件。
+  - **首行**：运行 id、停止原因与细节（或「还在跑」）、用时（算到停下那一刻）/ 墙钟、总花销（Mission + 现做分类，**没报的单独计数，不当 0**）、未解决 N/上限、升级单已开数/上限——用户拿它校准阈值。有过隔离重跑或正开着升级单的功能，行尾加「重跑 k/M」。该功能重跑额度用完时，`plan decide` 命令模板不再列出 `rerun_isolated`。额度导致停止时写明停止原因、失败的 Mission 和人工下一步，不展示已不可执行的 plan decide 命令。
+- run-plan 结束时打印的是同一张交接面（不含花销）。
+- **功能点**：同一时刻只跑一个（`PLAN_FEATURE_BUSY`）；只有待跑的能开跑；隔离重跑时 Mission 记录累加。状态与交接面记号：`merged ✓` / `suspended ⏸` / `skipped ⊘` / `pending ○`（`running` 只在跑着时出现）。**进 ⏸ / ⊘ 的每条路径都必须带 `needsDecision`（要人定什么）**，不经升级直接挂起时不给就拒绝（`NEEDS_DECISION_REQUIRED`）。
+  - 只有本次运行指定的检视者作数（`NOT_DESIGNATED_REVIEWER`）；
+  - 必须写理由（`DECISION_REASON_REQUIRED`）；
+  - 截止**含本身**之后不再收（`ESCALATION_DEADLINE_PASSED`）；已了结的单子不再收（`ESCALATION_ALREADY_RESOLVED`）；方案停了什么都不收（`PLAN_RUN_STOPPED`）。
+- **四个动作的效果**：`skip` → 当前功能 ⊘；`rescope` → 当前功能 ⊘，并删掉点名的**还没轮到**的功能（⊘，写明依赖谁）——只能删，不能加或改写工作，名单为空、重复、点到非待跑的功能都拒绝；只有 `rescope` 能带名单，别的动作夹带名单被拒而不是悄悄忽略（`RESCOPE_TARGET_INVALID`）；`stop` → 方案停在 `reviewer_stop`，当前功能 ⏸；`rerun_isolated` → 当前功能退回待跑，下一个该跑的还是它。每功能首次 Mission 不计重跑；已接受 `maxRerunsPerFeature` 次 `rerun_isolated` 后再选该动作 → `RERUN_LIMIT_REACHED`（消息含功能 id、已用数、上限，并提示改选 skip / rescope / stop），记录不变。这条检查在截止、检视者身份、动作合法、理由之后。同一张升级单仍可在截止前改选 skip / rescope / stop，不自动替检视者改选。
