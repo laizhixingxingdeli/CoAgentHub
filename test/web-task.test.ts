@@ -227,6 +227,77 @@ const W4_CTX = {
   ],
 };
 
+/** 与 web-narrate 夹具同形：LQ1 当时那页 65 条。不读状态文件。 */
+function lq1Events(): Record<string, any>[] {
+  const rows: Record<string, any>[] = [
+    { kind: 'mission.created', data: { contractRevision: 1 } },
+    { kind: 'attempt.started', data: { kind: 'coordinator' }, attemptId: 'coord-1' },
+    { kind: 'plan.updated', data: { planRevision: 1 }, attemptId: 'coord-1' },
+    { kind: 'work_item.created', data: { title: '事件翻译表' }, workItemId: 'W-465', attemptId: 'coord-1' },
+    { kind: 'work_item.dispatched', data: { ids: ['W-465'] }, attemptId: 'coord-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'coord-1' },
+    { kind: 'attempt.started', data: { kind: 'executor' }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+  ];
+  for (let i = 0; i < 20; i += 1) {
+    rows.push({
+      kind: 'runtime.command.started',
+      data: { schemaVersion: 1, callId: `call-${i}` },
+      attemptId: 'W-465.exec-1',
+    });
+  }
+  rows.push(
+    { kind: 'evidence.submitted', data: { kind: 'test', exitCode: 0 }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'execution_result.submitted', data: { outcome: 'completed', changedFiles: 3 }, attemptId: 'W-465.exec-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'W-465.exec-1' },
+    { kind: 'review.recorded', data: { verdict: 'accept', reasons: ['测试跑过了'] }, attemptId: 'coord-2' },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'mission_result.submitted', data: { outcome: 'delivered' }, attemptId: 'coord-2' },
+    { kind: 'delivery.created', data: { deliveryId: 'D-lq1' } },
+    { kind: 'memory.applied', data: { written: ['VIBE.md'] } },
+    { kind: 'final_review.integration_anchor', data: { integrationBranch: 'auto/x', anchor: 'aaa' } },
+    { kind: 'final_review.merge_applied', data: { mergedInto: 'bbb', integrationBranch: 'auto/x' } },
+    { kind: 'final_review.integration_verified', data: { reportId: 'IVAL-1', passed: true } },
+    { kind: 'final_review.merged', data: { mergedInto: 'bbb' } },
+    { kind: 'work_item.retired', data: { reason: '不做了' }, workItemId: 'W-466' },
+    { kind: 'contract.revised', data: { contractRevision: 2 } },
+    { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+    { kind: 'mission.resumed', data: {} },
+    { kind: 'escalated', data: { question: '要不要合？' }, attemptId: 'coord-2' },
+    { kind: 'work_item.redispatched', data: { ids: ['W-465'] }, workItemId: 'W-465' },
+    { kind: 'final_review.send_back', data: { reasons: ['再看一眼'] } },
+    { kind: 'mission.routed', data: { recommended: 'lightweight', reasons: ['单文件'] } },
+    { kind: 'mission.paused', data: {} },
+    { kind: 'mission.resumed_from_pause', data: {} },
+    { kind: 'mission.cancelled', data: { reason: '不要了' } },
+    { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-465' },
+    { kind: 'escalation.answered', data: { question: '要不要合？', answer: '合' } },
+    { kind: 'validation.reported', data: { reportId: 'VAL-1', passed: true } },
+    { kind: 'context.truncated', data: { budget: 8000, estimatedBefore: 9000, estimatedAfter: 7000 } },
+    { kind: 'mission.budget.threshold', data: { dimension: 'rounds', threshold: 0.8 } },
+    { kind: 'independent_review.blocked', data: { reason: 'no_candidates', detail: '没有独立检视候选' } },
+    { kind: 'independent_review.recorded', data: { verdict: 'pass', reviewedCommit: 'abc' } },
+    { kind: 'recovery.applied', data: { deliveryId: 'D-fix' } },
+  );
+  return rows;
+}
+
+const LQ1_CTX = {
+  intent: '把三个页面从状态转储改成人话',
+  plan: { direction: '先落翻译表，再改页面', findings: '事件表散在渲染分支里' },
+  workItems: [
+    { id: 'W-465', title: '事件翻译表' },
+    { id: 'W-466', title: '用量拆项' },
+  ],
+  result: { summary: '三个页面都改好了', outcome: 'delivered' },
+};
+
 /** 与实现无关的本地时间算式：断言"渲染出来的是本地时间"而不是抄实现。 */
 function localStamp(iso: string): string {
   const d = new Date(iso);
@@ -504,18 +575,105 @@ describe('环节分组', () => {
     const { stageListHtml } = await loaded;
     const rows = [
       { at: '2026-03-04T05:06:07.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: {} },
-      { at: '2026-03-04T05:06:08.000Z', kind: 'memory.applied', attemptId: 'coord-1', data: {} },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'definitely.not.a.real.kind', attemptId: 'coord-1', data: {} },
     ];
     const html = stageListHtml(rows, 'coord-1', 1, W4_CTX);
     assert.ok(html.includes('evt-badge') && html.includes('evt-action') && html.includes('evt-detail'));
     assert.ok(html.includes('未翻译'), html);
-    assert.ok(html.includes('memory.applied'), '未翻译要把 kind 本身带出来');
+    assert.ok(html.includes('definitely.not.a.real.kind'), '未翻译要把 kind 本身带出来');
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')), '时间没按本地时区渲染');
     assert.equal(html.includes('2026-03-04T05:06:07'), false, '直接切了 ISO 字符串：时区会差几小时');
     // 尝试 ID：人话标签在前，原始 id 仍能看到（排障时人要拿它去 grep 日志）。
     assert.ok(html.includes('协调者第 1 次尝试') && html.includes('coord-1'));
     // data-event-key 是整条 activity 的下标，不是组内下标。
     assert.match(html, /data-event-key="1" data-active="1"/);
+  });
+
+  test('没有 attemptId 的平台与 L3 分开，L1/L2 orphan 不进 L3', async () => {
+    const { groupActivity, stageListHtml } = await loaded;
+    const rows = [
+      { kind: 'attempt.started', attemptId: 'coord-1', data: {} },
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'memory.applied', data: { written: ['VIBE.md'] } },
+      { kind: 'final_review.merged', data: { mergedInto: 'abc1234' } },
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    assert.deepEqual(groups.map((g: any) => g.attemptId), ['coord-1', '', '', '', '']);
+    assert.deepEqual(groups.map((g: any) => g.role), [
+      'coordinator', 'coordinator', 'executor', 'platform', 'reviewer',
+    ]);
+    const byRole = Object.fromEntries(groups.map((g: any) => [g.role + ':' + g.attemptId, g.events.map((e: any) => e.kind)]));
+    assert.deepEqual(byRole['platform:'], ['orchestration.round.started', 'memory.applied']);
+    assert.deepEqual(byRole['reviewer:'], ['final_review.merged']);
+    assert.deepEqual(byRole['coordinator:'], ['mission.waiting']);
+    assert.deepEqual(byRole['executor:'], ['blocked.reported']);
+    const html = stageListHtml(rows, null, null, W4_CTX);
+    assert.ok(html.includes('>平台<'), html);
+    assert.ok(html.includes('L3 检视者'), html);
+    const l3 = html.slice(html.lastIndexOf('class="stage '));
+    assert.equal(l3.includes('mission.waiting') || l3.includes('blocked.reported'), false, l3);
+    assert.equal(l3.includes('这一跳还没结束'), true, '未终态 L3 仍说在途');
+  });
+
+  test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
+    const { stageListHtml } = await loaded;
+    const evil = '<img src=x onerror="alert(1)">';
+    const rows = [
+      { kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: {} },
+      { kind: 'runtime.command_tracking.enabled', attemptId: 'W-1.exec-1', data: {} },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: evil, command: 'rm ' + evil, exitCode: 1 } },
+      { kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
+    ];
+    const html = stageListHtml(rows, 'W-1.exec-1', null, { workItems: [{ id: 'W-1', title: 'x' }] });
+    assert.equal(html.includes('runtime.command.started'), false, html);
+    assert.equal(html.includes('runtime.command_tracking'), false, html);
+    assert.ok(html.includes('跑了 2 条命令'), html);
+    assert.match(html, /<details class="cmd-fold">/);
+    assert.equal(/<details class="cmd-fold"[^>]*open/.test(html), false, '命令清单默认收起');
+    assert.ok(html.includes('class="cmd-fold-head">2 条命令'), html);
+    assert.ok(html.includes('same'), html);
+    assert.ok(html.includes('命令 rm &lt;img'), html, '可用命令文字要上屏且转义');
+    assert.ok(html.includes('退出码 1'), html);
+    assert.equal(html.includes('<img'), false, html);
+    assert.ok(html.includes('&lt;img'), html);
+    // tracking / 命令族不得占普通 evt 行。
+    const evtCount = (html.match(/class="evt"/g) || []).length;
+    assert.equal(evtCount, 2, html);
+  });
+
+  test('LQ1 字面量 65 事件 stageListHtml 零未翻译，终态 L3 展示 SHA', async () => {
+    const { groupActivity, stageListHtml } = await loaded;
+    const rows = lq1Events();
+    assert.equal(rows.length, 65);
+    const groups = groupActivity(rows);
+    assert.ok(groups.some((g: any) => g.role === 'platform' && g.events.some((e: any) => e.kind === 'memory.applied')));
+    assert.ok(groups.some((g: any) => g.role === 'reviewer' && g.events.some((e: any) => e.kind === 'final_review.merged')));
+    const l3 = groups.find((g: any) => g.role === 'reviewer');
+    assert.equal((l3.events as any[]).some((e: any) => e.kind === 'mission.waiting'), false);
+    assert.equal((l3.events as any[]).some((e: any) => e.kind === 'blocked.reported'), false);
+
+    const running = stageListHtml(rows, null, null, LQ1_CTX);
+    assert.equal(running.includes('未翻译'), false, running);
+    assert.ok(running.includes('跑了 20 条命令'), running);
+    assert.ok(running.includes('>平台<'), running);
+    assert.ok(running.includes('L3 检视者'), running);
+    assert.ok(running.includes('这一跳还没结束，用量要等它收尾'), running);
+    assert.equal(running.includes('runtime.command.started'), false, running);
+    assert.equal(running.includes('runtime.command_tracking'), false, running);
+
+    const done = stageListHtml(rows, null, null, {
+      ...LQ1_CTX,
+      status: 'completed',
+      finalReview: { verdict: 'merge', mergedInto: 'deadbeefcafebabe', reasons: ['过了'] },
+    });
+    assert.equal(done.includes('未翻译'), false, done);
+    assert.equal(done.includes('这一跳还没结束'), false, done);
+    assert.ok(done.includes('终审：放行并落地'), done);
+    assert.ok(done.includes('合入 deadbeefcafebabe'), done);
   });
 });
 
@@ -765,6 +923,90 @@ describe('详情页：这一跳实际传递的正文', () => {
     assert.ok(html.includes('main'), 'mergedInto 要上屏');
     assert.ok(html.includes('边界没有漂'), 'reasons 要上屏');
     assert.ok(html.includes('L3 检视者'), '环节头是检视者');
+  });
+
+  test('点开平台 / L1 / L2 orphan 详情不走 L3 终审，L3 仍展示 SHA', async () => {
+    const { groupActivity, stageDetailHtml } = await loaded;
+    const evil = '<img src=x onerror="alert(1)">';
+    const rows = [
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'memory.applied', data: { written: [evil, 'VIBE.md'] } },
+      { kind: 'final_review.merged', data: { mergedInto: 'deadbeef' } },
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    const view = {
+      ...W4_VIEW,
+      finalReview: { verdict: 'merge', reasons: ['过了'], mergedInto: 'cafebabeSHA' },
+    };
+    const byRole = Object.fromEntries(groups.map((g: any) => [g.role, g]));
+
+    const plat = stageDetailHtml(byRole.platform, view, null);
+    assert.ok(plat.includes('>平台<') || plat.includes('平台'), plat);
+    assert.ok(plat.includes('开始新一轮调度'), plat);
+    assert.ok(plat.includes('写入项目记忆'), plat);
+    assert.ok(plat.includes('VIBE.md'), plat);
+    assert.ok(plat.includes('&lt;img'), plat);
+    assert.equal(plat.includes('<img'), false, plat);
+    assert.equal(plat.includes('L3 最终检视'), false, plat);
+    assert.equal(plat.includes('cafebabeSHA'), false, '平台组不该贴 finalReview 的 SHA');
+    assert.equal(plat.includes('还没有最终检视结论'), false, plat);
+    assert.equal(plat.includes('L3 自己动手的'), false, plat);
+
+    const l2 = stageDetailHtml(byRole.coordinator, view, null);
+    assert.equal(l2.includes('L3 最终检视'), false, l2);
+    assert.equal(l2.includes('cafebabeSHA'), false, l2);
+    assert.ok(l2.includes('L2 协调'), l2);
+
+    const l1 = stageDetailHtml(byRole.executor, view, null);
+    assert.equal(l1.includes('L3 最终检视'), false, l1);
+    assert.equal(l1.includes('cafebabeSHA'), false, l1);
+    assert.ok(l1.includes('L1 执行'), l1);
+
+    const l3 = stageDetailHtml(byRole.reviewer, view, null);
+    assert.ok(l3.includes('L3 最终检视'), l3);
+    assert.ok(l3.includes('放行并落地'), l3);
+    assert.ok(l3.includes('cafebabeSHA'), l3);
+    assert.ok(l3.includes('L3 检视者'), l3);
+  });
+
+  test('平台仅命令族走已有空态，非 L3 orphan 技术行不误称 L3', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    const view = {
+      ...W4_VIEW,
+      finalReview: { verdict: 'merge', reasons: ['过了'], mergedInto: 'cafebabeSHA' },
+    };
+    const plat = stageDetailHtml({
+      attemptId: '',
+      role: 'platform',
+      events: [
+        { kind: 'runtime.command_tracking.enabled', data: {} },
+        { kind: 'runtime.command.started', data: { callId: 'c1' } },
+      ],
+    }, view, null);
+    assert.ok(plat.includes('这一跳还没有把正文写回平台'), plat);
+    assert.equal(plat.includes('L3 最终检视'), false, plat);
+    assert.equal(plat.includes('cafebabeSHA'), false, plat);
+    assert.equal(plat.includes('L3 自己动手的'), false, plat);
+    assert.equal(plat.includes('未翻译'), false, plat);
+    assert.ok(plat.includes('尝试（没有编号）'), plat);
+
+    const rows = [
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    const l2 = stageDetailHtml(groups.find((g: any) => g.role === 'coordinator'), view, null);
+    const l1 = stageDetailHtml(groups.find((g: any) => g.role === 'executor'), view, null);
+    assert.equal(l2.includes('L3 自己动手的'), false, l2);
+    assert.equal(l1.includes('L3 自己动手的'), false, l1);
+    assert.equal(l2.includes('这一组事件不属于任何一跳'), false, l2);
+    assert.equal(l1.includes('这一组事件不属于任何一跳'), false, l1);
+    assert.ok(l2.includes('尝试（没有编号）'), l2);
+    assert.ok(l1.includes('尝试（没有编号）'), l1);
+    assert.ok(l2.includes('尝试'), l2);
+    assert.ok(l1.includes('尝试'), l1);
   });
 
   test('缺数据是解释句，不是 — / undefined / NaN / [object Object]', async () => {

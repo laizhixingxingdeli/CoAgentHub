@@ -20,12 +20,17 @@ import { serveStatic } from '../src/api/static.ts';
 
 import {
   END_REASON,
+  PLATFORM_ROLE_LABEL,
   STAGE_CN,
   WAIT_REASON,
+  commandCountLabel,
+  commandDetail,
   endReasonText,
+  finalReviewSummary,
   fieldLabel,
   formatAttemptId,
   formatUsage,
+  isRuntimeCommand,
   narrateEvent,
   nowDoing,
   reasonText,
@@ -57,6 +62,13 @@ const MACHINE_KINDS = [
   'final_review.merged',
   'mission.waiting',
   'mission.resumed',
+  'orchestration.round.started',
+  'memory.applied',
+  'delivery.created',
+  'final_review.integration_anchor',
+  'final_review.integration_verified',
+  'final_review.merge_applied',
+  'work_item.redispatched',
 ];
 
 /** 一条真 Mission 会喂给页面的 ctx（形状取自 MissionView）。 */
@@ -245,6 +257,68 @@ const CASES = [
     action: '又动起来了',
     detailHas: [],
   },
+  {
+    name: 'orchestration.round.started',
+    event: { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    badge: '平台',
+    action: '开始新一轮调度',
+    detailHas: ['预算'],
+  },
+  {
+    name: 'memory.applied',
+    event: { kind: 'memory.applied', data: { written: ['specs/web-shell.md', 'VIBE.md'] } },
+    badge: '平台',
+    action: '写入项目记忆',
+    detailHas: ['VIBE.md'],
+  },
+  {
+    name: 'delivery.created',
+    event: { kind: 'delivery.created', data: { deliveryId: 'D-12' } },
+    badge: '平台',
+    action: '投进收件箱',
+    detailHas: ['D-12'],
+  },
+  {
+    name: 'final_review.integration_anchor',
+    event: {
+      kind: 'final_review.integration_anchor',
+      data: { integrationBranch: 'auto/harness', anchor: 'abc123def' },
+    },
+    badge: 'L3',
+    action: '记下集成锚点',
+    detailHas: ['auto/harness'],
+  },
+  {
+    name: 'final_review.integration_verified',
+    event: {
+      kind: 'final_review.integration_verified',
+      data: { reportId: 'IVAL-3', passed: true, mergedInto: 'deadbeef' },
+    },
+    badge: 'L3',
+    action: '集成验证通过',
+    detailHas: ['IVAL-3'],
+  },
+  {
+    name: 'final_review.merge_applied',
+    event: {
+      kind: 'final_review.merge_applied',
+      data: { integrationBranch: 'auto/harness', mergedInto: 'cafebabe', anchor: 'abc123def' },
+    },
+    badge: 'L3',
+    action: '合进集成分支',
+    detailHas: ['cafebabe'],
+  },
+  {
+    name: 'work_item.redispatched',
+    event: {
+      kind: 'work_item.redispatched',
+      data: { ids: ['W-465'], reason: 'escalation_answered' },
+      workItemId: 'W-465',
+    },
+    badge: 'L3 → L1',
+    action: '重新派发工作项',
+    detailHas: ['事件翻译表'],
+  },
 ];
 
 /* ============================ 文件形状 ============================ */
@@ -301,11 +375,17 @@ describe('叙事模块的加载与文件形状', () => {
       roleTone,
       stageName,
       roleUsageLine,
+      isRuntimeCommand,
+      commandCountLabel,
+      commandDetail,
+      finalReviewSummary,
     })) {
       assert.equal(typeof value, 'function', `${name} 要是函数`);
     }
     assert.equal(typeof STAGE_CN, 'object');
     assert.equal(typeof WAIT_REASON, 'object');
+    assert.equal(typeof PLATFORM_ROLE_LABEL, 'string');
+    assert.equal(PLATFORM_ROLE_LABEL, '平台');
   });
 });
 
@@ -373,7 +453,9 @@ describe('事件翻译表：逐条对契约', () => {
   });
 
   test('未知 kind：untranslated=true，带 kind 本身与「未翻译」，不是空白', () => {
-    for (const kind of ['memory.applied', 'final_review.send_back', 'mission.paused', '']) {
+    // 用确定不在表里的名字。曾经拿 memory.applied / mission.paused 当未知样例，
+    // 表一补上这条就变成「翻译了还标未翻译」——那是在锁错误形状。
+    for (const kind of ['this.kind.does.not.exist', 'mission.totally_fake', '']) {
       const out = narrateEvent({ kind, data: {} });
       assert.equal(out.untranslated, true);
       assert.equal(out.badge, '未翻译');
@@ -731,6 +813,210 @@ describe('nowDoing 说人话，不说机器状态名', () => {
       for (const stage of Object.keys(STAGE_CN)) {
         assert.ok(!line.includes(stage), `nowDoing 里漏出了机器状态名「${stage}」：${line}`);
       }
+    }
+  });
+});
+
+/* ============================ 命令族辅助 / LQ1 夹具 ============================ */
+
+/**
+ * LQ1 任务页当时的形状：65 条事件里 33 条显示「未翻译」。
+ * 命令族（started ×20 + tracking.enabled ×5）交给折叠，不要求单条翻译；
+ * 其余点名的非命令 kind 必须零「未翻译」。task.js 整页渲染交后续任务。
+ */
+function lq1Events(): Array<{ kind: string; data?: Record<string, unknown>; attemptId?: string; workItemId?: string }> {
+  const rows: Array<{ kind: string; data?: Record<string, unknown>; attemptId?: string; workItemId?: string }> = [
+    { kind: 'mission.created', data: { contractRevision: 1 } },
+    { kind: 'attempt.started', data: { kind: 'coordinator' }, attemptId: 'coord-1' },
+    { kind: 'plan.updated', data: { planRevision: 1 }, attemptId: 'coord-1' },
+    { kind: 'work_item.created', data: { title: '事件翻译表' }, workItemId: 'W-465', attemptId: 'coord-1' },
+    { kind: 'work_item.dispatched', data: { ids: ['W-465'] }, attemptId: 'coord-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'coord-1' },
+    { kind: 'attempt.started', data: { kind: 'executor' }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+  ];
+  for (let i = 0; i < 20; i += 1) {
+    rows.push({
+      kind: 'runtime.command.started',
+      data: { schemaVersion: 1, callId: `call-${i}` },
+      attemptId: 'W-465.exec-1',
+    });
+  }
+  rows.push(
+    { kind: 'evidence.submitted', data: { kind: 'test', exitCode: 0 }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'execution_result.submitted', data: { outcome: 'completed', changedFiles: 3 }, attemptId: 'W-465.exec-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'W-465.exec-1' },
+    { kind: 'review.recorded', data: { verdict: 'accept', reasons: ['测试跑过了'] }, attemptId: 'coord-2' },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'mission_result.submitted', data: { outcome: 'delivered' }, attemptId: 'coord-2' },
+    { kind: 'delivery.created', data: { deliveryId: 'D-lq1' } },
+    { kind: 'memory.applied', data: { written: ['VIBE.md'] } },
+    { kind: 'final_review.integration_anchor', data: { integrationBranch: 'auto/x', anchor: 'aaa' } },
+    { kind: 'final_review.merge_applied', data: { mergedInto: 'bbb', integrationBranch: 'auto/x' } },
+    { kind: 'final_review.integration_verified', data: { reportId: 'IVAL-1', passed: true } },
+    { kind: 'final_review.merged', data: { mergedInto: 'bbb' } },
+    { kind: 'work_item.retired', data: { reason: '不做了' }, workItemId: 'W-466' },
+    { kind: 'contract.revised', data: { contractRevision: 2 } },
+    { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+    { kind: 'mission.resumed', data: {} },
+    { kind: 'escalated', data: { question: '要不要合？' }, attemptId: 'coord-2' },
+    { kind: 'work_item.redispatched', data: { ids: ['W-465'] }, workItemId: 'W-465' },
+    { kind: 'final_review.send_back', data: { reasons: ['再看一眼'] } },
+    { kind: 'mission.routed', data: { recommended: 'lightweight', reasons: ['单文件'] } },
+    { kind: 'mission.paused', data: {} },
+    { kind: 'mission.resumed_from_pause', data: {} },
+    { kind: 'mission.cancelled', data: { reason: '不要了' } },
+    { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-465' },
+    { kind: 'escalation.answered', data: { question: '要不要合？', answer: '合' } },
+    { kind: 'validation.reported', data: { reportId: 'VAL-1', passed: true } },
+    { kind: 'context.truncated', data: { budget: 8000, estimatedBefore: 9000, estimatedAfter: 7000 } },
+    { kind: 'mission.budget.threshold', data: { dimension: 'rounds', threshold: 0.8 } },
+    { kind: 'independent_review.blocked', data: { reason: 'no_candidates', detail: '没有独立检视候选' } },
+    { kind: 'independent_review.recorded', data: { verdict: 'pass', reviewedCommit: 'abc' } },
+    { kind: 'recovery.applied', data: { deliveryId: 'D-fix' } },
+  );
+  return rows;
+}
+
+describe('命令族辅助：给 task.js 折叠用，无 DOM', () => {
+  test('isRuntimeCommand 只认 command / command_tracking 前缀',
+    () => {
+      assert.equal(isRuntimeCommand('runtime.command.started'), true);
+      assert.equal(isRuntimeCommand('runtime.command_tracking.enabled'), true);
+      assert.equal(isRuntimeCommand('runtime.command_tracking.invalid'), true);
+      assert.equal(isRuntimeCommand('orchestration.round.started'), false);
+      assert.equal(isRuntimeCommand('runtime.command'), false);
+      assert.equal(isRuntimeCommand(''), false);
+    },
+  );
+
+  test('commandCountLabel 零条说人话，正数带数字', () => {
+    assert.equal(commandCountLabel(0), '没有命令');
+    assert.equal(commandCountLabel(1), '1 条命令');
+    assert.equal(commandCountLabel(20), '20 条命令');
+  });
+
+  test('commandDetail 带 callId / 跟踪状态，不空、不漏 undefined', () => {
+    const started = commandDetail({ kind: 'runtime.command.started', data: { callId: 'c-9' } });
+    assert.ok(started.includes('c-9'), started);
+    assert.equal(started.includes('undefined'), false, started);
+    assert.ok(commandDetail({ kind: 'runtime.command_tracking.enabled', data: {} }).trim().length > 0);
+    assert.ok(commandDetail({ kind: 'runtime.command_tracking.invalid', data: {} }).trim().length > 0);
+  });
+
+  test('commandDetail 有命令文本与退出码时如实显示，缺值仍退回 callId', () => {
+    assert.equal(
+      commandDetail({ kind: 'runtime.command.started', data: { callId: 'c-9' } }),
+      '命令 c-9',
+    );
+    assert.equal(
+      commandDetail({ kind: 'runtime.command.started', data: { schemaVersion: 1 } }),
+      '命令 （没有 callId）',
+    );
+
+    const withText = commandDetail({
+      kind: 'runtime.command.started',
+      data: { callId: 'c-9', command: 'node --test' },
+    });
+    assert.ok(withText.includes('node --test'), withText);
+    assert.equal(withText.includes('undefined'), false, withText);
+
+    const withExit = commandDetail({
+      kind: 'runtime.command.started',
+      data: { callId: 'c-9', exitCode: 0 },
+    });
+    assert.ok(withExit.includes('c-9'), withExit);
+    assert.ok(withExit.includes('退出码 0'), withExit);
+    assert.equal(withExit.includes('undefined'), false, withExit);
+
+    const withBoth = commandDetail({
+      kind: 'runtime.command.started',
+      data: { callId: 'c-9', command: 'node --test', exitCode: 1 },
+    });
+    assert.ok(withBoth.includes('node --test'), withBoth);
+    assert.ok(withBoth.includes('退出码 1'), withBoth);
+    assert.equal(withBoth.includes('undefined'), false, withBoth);
+
+    // 空串命令不算有值：不要换成一条空的「命令 」把 callId 挤掉。
+    assert.equal(
+      commandDetail({ kind: 'runtime.command.started', data: { callId: 'c-9', command: '  ' } }),
+      '命令 c-9',
+    );
+
+    assert.equal(
+      commandDetail({ kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 } }),
+      '开始跟踪本跳的命令',
+    );
+    assert.equal(
+      commandDetail({ kind: 'runtime.command_tracking.invalid', data: { schemaVersion: 1 } }),
+      '命令跟踪失效，次数按未知计',
+    );
+  });
+});
+
+describe('finalReviewSummary：终审收尾摘要，无 DOM', () => {
+  test('merge / send_back / abandon 各有人话，merge 带 SHA',
+    () => {
+      assert.equal(
+        finalReviewSummary({ verdict: 'merge', mergedInto: 'deadbeefcafebabe' }),
+        '终审：放行并落地 · 合入 deadbeefcafebabe',
+      );
+      assert.equal(finalReviewSummary({ verdict: 'merge' }), '终审：放行并落地');
+      assert.equal(finalReviewSummary({ verdict: 'send_back' }), '终审：打回');
+      assert.equal(finalReviewSummary({ verdict: 'abandon' }), '终审：放弃这批改动');
+    },
+  );
+
+  test('缺对象、缺结论、未识别 verdict 都说人话，不漏 undefined/null',
+    () => {
+      assert.equal(finalReviewSummary(undefined), '还没有最终检视结论');
+      assert.equal(finalReviewSummary(null), '还没有最终检视结论');
+      assert.equal(finalReviewSummary({}), '终审：（没有结论）');
+      assert.equal(finalReviewSummary({ verdict: '' }), '终审：（没有结论）');
+      assert.equal(finalReviewSummary({ verdict: 'maybe' }), '终审：maybe');
+
+      const cases = [
+        finalReviewSummary(undefined),
+        finalReviewSummary(null),
+        finalReviewSummary({}),
+        finalReviewSummary({ verdict: undefined, mergedInto: undefined }),
+        finalReviewSummary({ verdict: null, mergedInto: null }),
+        finalReviewSummary({ verdict: 'merge', mergedInto: '' }),
+        finalReviewSummary({ verdict: 'send_back', mergedInto: '   ' }),
+        finalReviewSummary({ verdict: 'abandon' }),
+        finalReviewSummary({ verdict: 'merge', mergedInto: 'abc123' }),
+      ];
+      for (const line of cases) {
+        assert.equal(typeof line, 'string');
+        assert.ok(line.trim().length > 0, `空白摘要：${JSON.stringify(line)}`);
+        assert.equal(line.includes('undefined'), false, line);
+        assert.equal(line.includes('null'), false, line);
+      }
+    },
+  );
+});
+
+describe('LQ1 字面量夹具：非命令事件零「未翻译」', () => {
+  test('夹具形状对得上当时那页：65 条、命令族 25 条', () => {
+    const rows = lq1Events();
+    assert.equal(rows.length, 65, `夹具是 ${rows.length} 条，要对上 LQ1 的 65`);
+    assert.equal(rows.filter((e) => e.kind === 'runtime.command.started').length, 20);
+    assert.equal(rows.filter((e) => e.kind === 'runtime.command_tracking.enabled').length, 5);
+  });
+
+  test('非命令事件 narrateEvent 不得标未翻译', () => {
+    for (const event of lq1Events()) {
+      if (isRuntimeCommand(event.kind)) continue;
+      const out = narrateEvent(event, CTX);
+      const whole = `${out.badge} ${out.action} ${out.detail}`;
+      assert.equal(out.untranslated, false, `${event.kind} 仍未翻译：${whole}`);
+      assert.equal(whole.includes('未翻译'), false, `${event.kind} 文案里有「未翻译」：${whole}`);
     }
   });
 });
