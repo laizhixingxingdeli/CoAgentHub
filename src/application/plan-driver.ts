@@ -208,7 +208,7 @@ async function runFeature(
         ].join('；') || '方案未提供 why/constraints 原文。'}`
       : '';
     const guidance = forbidden
-      ? `${explanation}。请修改契约，明确不删除、不改写数据后重跑；或走 HA 流程人工放行：coagent l3 plan-release --feature ${feature.id} --mission <mission-id> --action approve --confirmed-by <principal>。`
+      ? `${explanation}。请修改契约，明确不删除、不改写、不迁移数据后重跑；如确需副作用，须由用户决定，HAOFF1 当前关闭，不能立即放行。此处挂起发生在 Mission 建立前，不能审批。仅当以后形成真实 pending_release 且已有真实 Mission、审查提交、独立检视及报告等材料时，才可使用：node src/l3.ts plan approve <真实missionId> --run <记录> --feature <id> --commit <提交> --review <attempt> --report <报告> --target <分支> --as <检视者> --confirmed-by <确认者>。`
       : '';
     const needsDecision = guidance ? `${route.needsDecision} ${guidance}` : route.needsDecision;
     deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。${guidance ? ` ${guidance}` : ''}`);

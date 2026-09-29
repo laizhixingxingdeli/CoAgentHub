@@ -90,6 +90,7 @@ import type {
 } from './application/ports.ts';
 import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
+import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import {
   parseAgentEnvPassthrough,
@@ -997,24 +998,36 @@ export async function startServer(
           hostedRuns.finish(token);
         }
       },
-      runPlan: (body, emit) =>
-        runHostedPlan(
-          body,
-          {
-            built: hostedBuilt,
-            baseUrl: loopback.baseUrl,
-            workspace,
-            env,
-            ...hostedRuntime,
-            ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
-            heldState,
-            planLive,
-            registerPlanRunDir: (runDir) => {
-              knownPlanRunDirs.add(resolve(runDir));
+      runPlan: async (body, emit) => {
+        const token = randomUUID();
+        try {
+          return await runHostedPlan(
+            body,
+            {
+              built: hostedBuilt,
+              baseUrl: loopback.baseUrl,
+              workspace,
+              env,
+              ...hostedRuntime,
+              ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
+              heldState,
+              planLive,
+              registerPlanRunDir: (runDir) => {
+                knownPlanRunDirs.add(resolve(runDir));
+              },
+              onStarted: ({ runId, runPath, reviewer }) => {
+                hostedRuns.register(token, {
+                  kind: 'plan', id: runId, runPath, reviewer,
+                  status: '运行中/状态暂不可读',
+                });
+              },
             },
-          },
-          emit,
-        ),
+            emit,
+          );
+        } finally {
+          hostedRuns.finish(token);
+        }
+      },
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
@@ -1076,7 +1089,23 @@ export async function startServer(
       ...built,
       stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
       hostedRunSnapshots: () => hostedRuns.snapshot().map((snapshot) => {
-        if (snapshot.kind !== 'mission') return snapshot;
+        if (snapshot.kind === 'plan') {
+          try {
+            if (!snapshot.runPath) return { ...snapshot, status: '运行中/状态暂不可读' };
+            const run = new FilePlanRunStore(snapshot.runPath).read();
+            if (!run) return { ...snapshot, status: '运行中/状态暂不可读' };
+            const escalation = [...run.escalations].reverse().find((item) => !item.resolution);
+            return {
+              ...snapshot,
+              status: run.stopped ? `已停止/${run.stopped.reason}` : '运行中',
+              missionId: escalation?.missionId,
+              escalationId: escalation?.id,
+              deadline: escalation?.deadline,
+            };
+          } catch {
+            return { ...snapshot, status: '运行中/状态暂不可读' };
+          }
+        }
         try {
           const view = built.platform.getMissionView(snapshot.id);
           if (view && typeof (view as Promise<unknown>).then === 'function') {

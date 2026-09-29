@@ -367,8 +367,20 @@ describe('现做分类', () => {
     assert.equal(f3?.status, 'suspended');
     assert.match(f3?.needsDecision ?? '', /要你定/);
     assert.match(f3?.needsDecision ?? '', /destructiveData/);
-    assert.match(f3?.needsDecision ?? '', /不删除、不改写数据/);
-    assert.match(f3?.needsDecision ?? '', /coagent l3 plan-release --feature F3 --mission <mission-id> --action approve/);
+    const guidance = f3?.needsDecision ?? '';
+    assert.match(guidance, /分类触及禁止副作用（destructiveData）/);
+    assert.match(guidance, /触发字段：destructiveData/);
+    assert.match(guidance, /why: 因为/);
+    assert.match(guidance, /不删除、不改写、不迁移数据/);
+    assert.match(guidance, /HAOFF1 当前关闭/);
+    assert.match(guidance, /不能审批/);
+    assert.match(guidance, /node src\/l3\.ts plan approve <真实missionId> --run <记录> --feature <id> --commit <提交> --review <attempt> --report <报告> --target <分支> --as <检视者> --confirmed-by <确认者>/);
+    const suspendLog = h.logs.find((line) => line.includes('不建 Mission，挂起等人')) ?? '';
+    assert.match(suspendLog, /destructiveData/);
+    assert.match(suspendLog, /why: 因为/);
+    assert.match(suspendLog, /不删除、不改写、不迁移数据/);
+    assert.match(suspendLog, /HAOFF1 当前关闭/);
+    assert.match(suspendLog, /node src\/l3\.ts plan approve <真实missionId>/);
   });
 });
 
@@ -1705,7 +1717,10 @@ describe('驱动方自己停', () => {
     assert.equal(run.escalations.length, 0, '到点了，没人会在今晚定这张单');
     assert.equal(run.feature('F1')?.status, 'suspended');
     assert.match(run.feature('F1')?.needsDecision ?? '', /要你定/);
-    assert.ok(!run.feature('F1')?.needsDecision?.includes('coagent l3 plan-release'));
+    const needsDecision = run.feature('F1')?.needsDecision ?? '';
+    assert.ok(!needsDecision.includes('pending_release'));
+    assert.ok(!needsDecision.includes('node src/l3.ts plan approve'));
+    assert.ok(!h.logs.some((line) => line.includes('node src/l3.ts plan approve')));
     assert.ok(!h.calls.some((c) => c.startsWith('abandon')), '停了就原样留给人');
   });
 
