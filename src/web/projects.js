@@ -119,23 +119,49 @@ export function detailCardHtml(project, workspace) {
 export const TASK_COLUMNS = ['任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token'];
 
 /**
- * 列表 API 确实不返回时间戳。写一句「列表接口不提供时间戳」而不是一个 —：
- * 一个孤零零的横杠在屏幕上既像加载失败又像字段名读错了，而真相只是这一列
- * 本来就没有。也**不**用页面生成时间冒充——那是个会让人据此判断谁卡住了的假数字。
+ * 某一行没有 updatedAt。不能写成「列表接口不提供时间戳」：/api/missions 行上
+ * 早就有这个字段，那句会让人以为后端没给、不再去查。也不能用页面生成时间
+ * 冒充——那是个会让人据此判断谁卡住了的假数字。
  */
-const NO_TIMESTAMP = '列表接口不提供时间戳';
+const NO_TIMESTAMP = '还没读到更新时间';
 
 /** 没有停机原因不等于「原因未知」：多数任务只是没停过。 */
 const NO_WAIT_REASON = '没有停机，正常推进';
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/**
+ * 任务表的更新时间。列上 MM-DD HH:mm 够扫；完整本地时刻放 title，
+ * 悬停才展开到秒。不从 task.js 借 formatTime：那边已经 import 本文件，
+ * 再反向 import 就是循环依赖，两边加载顺序一变，有一个会拿到未初始化的绑定。
+ */
+function formatUpdatedAt(iso) {
+  const t = Date.parse(String(iso ?? ''));
+  if (!Number.isFinite(t)) return { text: NO_TIMESTAMP, title: '' };
+  const d = new Date(t);
+  const text = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+    + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  const title = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+    + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  return { text, title };
+}
+
+function updatedAtMs(row) {
+  const t = Date.parse(String(row && row.updatedAt != null ? row.updatedAt : ''));
+  // 缺时间的排到最后：当成 0 的话会和 1970 的真时间挤在一起，扫表时以为它刚动过。
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+}
 
 export function taskTableHtml(rows) {
   if (!rows || rows.length === 0) {
     return '<div class="card"><div class="empty">这个项目还没有任务。新建一条之后这里会一行行出现。</div></div>';
   }
   const head = TASK_COLUMNS.map((t) => '<th>' + esc(t) + '</th>').join('');
-  const body = rows
+  const sorted = rows.slice().sort((a, b) => updatedAtMs(b) - updatedAtMs(a));
+  const body = sorted
     .map((m) => {
       const reason = reasonText(m);
+      const when = formatUpdatedAt(m.updatedAt);
       return '<tr class="row-' + esc(stageTone(m.status)) + '" data-mission-id="' + esc(m.missionId) + '">'
         + '<td class="mono">' + esc(m.missionId) + '</td>'
         + '<td class="cell-title">' + esc(m.intent || '（没有契约）') + '</td>'
@@ -144,7 +170,9 @@ export function taskTableHtml(rows) {
         + '<td class="cell-reason">'
         +   (reason ? esc(reason) : '<span class="muted">' + esc(NO_WAIT_REASON) + '</span>')
         + '</td>'
-        + '<td class="muted">' + esc(NO_TIMESTAMP) + '</td>'
+        + '<td class="muted"'
+        +   (when.title ? ' title="' + esc(when.title) + '"' : '')
+        + '>' + esc(when.text) + '</td>'
         // Token 那一列与任务页同一个口径（narrate.usageLine）：只印一个 total
         // 看不出钱花在哪，而缓存读比新增便宜得多。
         + '<td class="cell-usage" title="' + esc(usageLine(m.usage)) + '">' + esc(usageCell(m.usage)) + '</td>'
@@ -154,6 +182,41 @@ export function taskTableHtml(rows) {
   return '<div class="card"><div class="pane-title">任务</div><div class="table-wrap">'
     + '<table class="tasks"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>'
     + '</div></div>';
+}
+
+/**
+ * 该不该拉、拉什么、过多久再拉。纯函数：定时器与 fetch 都在调用方。
+ *
+ * 三个输入是三根轴，少一根就会在错误的时候打到错误的接口：
+ * - page：'projects' | 'mission' | 其它。不在对应页就别拉那页的接口；
+ * - status：任务页才看（completed / blocked 停轮询）。项目页不按某一条任务的状态停；
+ *   状态还不知道（空串）不当成终态，否则一次瞬时故障之后就再也不会重试；
+ * - visible：隐藏标签页还继续拉，是给看不见的人烧配额。
+ *
+ * 返回（任务页从这里 import，不要再抄；本文件不得 import task.js）：
+ * - paths：请求意图。项目页是真路径；任务页是 'view' / 'activity' / 'live'
+ *   （这里没有 missionId，拼不出 URL，由调用方接成 GET /api/missions/:id、/activity、live）。
+ *   空 = 现在不要请求。
+ * - intervalMs：项目列表 / 任务 view+activity 的间隔；null = 不要挂这只定时器。
+ * - liveIntervalMs：任务页实时输出间隔；项目页永远是 null。
+ * 从隐藏回到可见时 paths 会再次有值：调用方应当立刻拉一次，再按两只间隔续上。
+ */
+const REFRESH_IDLE = { paths: [], intervalMs: null, liveIntervalMs: null };
+
+export function nextRefresh(page, status, visible) {
+  if (!visible) return REFRESH_IDLE;
+  if (page === 'projects') {
+    return { paths: ['/api/projects', '/api/missions'], intervalMs: 5000, liveIntervalMs: null };
+  }
+  if (page === 'mission') {
+    if (status === 'completed' || status === 'blocked') return REFRESH_IDLE;
+    return {
+      paths: ['view', 'activity', 'live'],
+      intervalMs: 3000,
+      liveIntervalMs: 1000,
+    };
+  }
+  return REFRESH_IDLE;
 }
 
 /* ===================== 下面才是碰 DOM 的部分 ===================== */
@@ -170,6 +233,13 @@ let data = null;
 let selected = '';
 /** 每个项目的仓库/分支要另拉一次 Mission 详情，拉过就不再拉。 */
 const workspaceCache = new Map();
+/**
+ * 导航世代。离开项目页或重建骨架时加一，让还在飞的响应把 data 写进去、
+ * 把详情盖掉——人已经在看别的页了，那次结果不该再碰屏幕。
+ */
+let epoch = 0;
+let pollTimer = null;
+let onVisibility = null;
 
 function skeleton() {
   return '<div class="page">'
@@ -241,10 +311,12 @@ async function renderDetail() {
     return;
   }
   const projectId = project.projectId;
+  const started = epoch;
   const workspace = await loadWorkspace(projectId);
-  // await 期间人可能又点了别的项目。只画当前选中的那个，否则先发出的请求
-  // 后回来，会把新项目的详情盖成旧项目的。
-  if (selected !== projectId) return;
+  // await 期间人可能又点了别的项目，或已经离开项目页。只画当前选中且还在
+  // 这一代导航上的那个，否则先发出的请求后回来，会把新画面盖成旧项目的。
+  if (started !== epoch || selected !== projectId) return;
+  if (!mounted || !mounted.list.isConnected) return;
   const rows = data.missions.filter((m) => m.projectId === projectId);
   box.innerHTML = detailCardHtml(project, workspace) + taskTableHtml(rows);
   // 行 → 任务详情页。监听写在 DOM 段而不是内联 onclick：内联的话这里能测到形状、
@@ -280,20 +352,92 @@ function paint(error) {
 
 /** 一次导航要取两个列表；连着点两下不该发出四份请求。 */
 let inflight = null;
+let inflightEpoch = 0;
 function load() {
-  if (inflight) return inflight;
+  const started = epoch;
+  if (inflight && inflightEpoch === started) return inflight;
+  inflightEpoch = started;
   inflight = Promise.all([get('/api/projects'), get('/api/missions')])
     .then(([projects, missions]) => {
+      if (started !== epoch) return null;
       data = { projects, missions };
       return null;
     })
-    .catch((err) => err)
+    .catch((err) => (started !== epoch ? null : err))
     .finally(() => {
       // 落地就清。不清掉的话，下一次导航会拿到同一个已完成的 promise，
-      // 页面从此再也看不到新开的 Mission。
-      inflight = null;
+      // 页面从此再也看不到新开的 Mission。换代之后的清理由 inflightEpoch 守：
+      // 旧请求的 finally 不能把新一代的 inflight 抹掉。
+      if (inflightEpoch === started) inflight = null;
     });
   return inflight;
+}
+
+function isPageVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
+function clearPollTimer() {
+  if (pollTimer != null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function stopPolling() {
+  clearPollTimer();
+  if (onVisibility) {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
+    onVisibility = null;
+  }
+}
+
+function armPollTimer(plan) {
+  clearPollTimer();
+  if (!plan.intervalMs) return;
+  pollTimer = setInterval(() => {
+    void poll();
+  }, plan.intervalMs);
+}
+
+function leaveProjectsPage() {
+  epoch += 1;
+  stopPolling();
+}
+
+async function poll() {
+  if (!mounted || !mounted.list.isConnected) {
+    leaveProjectsPage();
+    return;
+  }
+  const plan = nextRefresh('projects', '', isPageVisible());
+  if (!plan.paths.length) return;
+  const started = epoch;
+  const error = await load();
+  if (started !== epoch) return;
+  if (!mounted || !mounted.list.isConnected) return;
+  paint(error);
+}
+
+function startPolling() {
+  stopPolling();
+  if (typeof document !== 'undefined') {
+    onVisibility = () => {
+      if (!mounted || !mounted.list.isConnected) {
+        leaveProjectsPage();
+        return;
+      }
+      const visible = document.visibilityState !== 'hidden';
+      const plan = nextRefresh('projects', '', visible);
+      // 再可见立刻补拉：等下一个 5 秒窗口，人切回来会看到过期列表还停几秒。
+      if (plan.paths.length) void poll();
+      armPollTimer(plan);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+  }
+  armPollTimer(nextRefresh('projects', '', isPageVisible()));
 }
 
 export async function renderProjectsPage(container, projectId) {
@@ -301,19 +445,25 @@ export async function renderProjectsPage(container, projectId) {
   // 外壳把容器内容清空重建了，mounted 还指着一堆已离屏的节点。不检这一目的话
   // 列表会静静地写到一个不在树上的 ul 上——整屏白且不报错。
   if (!mounted || mounted.container !== container || !mounted.list.isConnected) {
+    epoch += 1;
+    stopPolling();
     container.innerHTML = skeleton();
     mounted = {
       container,
       list: container.querySelector('#proj-list'),
       detail: container.querySelector('#proj-detail'),
     };
+    startPolling();
   }
   selected = projectId;
 
   // 旧数据先上一屏：人点下去要的是立刻看到选中态变了，不是等两个请求回来。
   // 没缓存时不抢这一下——骨架里那句「加载中」比一句「没有这个项目」诚实。
   if (data) paint(null);
+  const started = epoch;
   const error = await load();
+  if (started !== epoch) return;
+  if (!mounted || !mounted.list.isConnected) return;
   // 拉失败也照画：data 还是上一次的，界面继续显示旧数据。
   // 直接清空的话，一次瞬时故障看起来像"项目被删了"。
   paint(error);

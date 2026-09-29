@@ -16,14 +16,19 @@
  * 「什么时候可以取消」的规则，迟早和平台判的不一样。
  */
 
-import { esc, num, stateChip, stageChip } from './projects.js';
+import { esc, nextRefresh, num, stateChip, stageChip } from './projects.js';
 import {
+  commandCountLabel,
+  commandDetail,
   evidenceKindLabel,
   fieldLabel,
+  finalReviewSummary,
   formatAttemptId,
   formatUsage,
+  isRuntimeCommand,
   narrateEvent,
   nowDoing,
+  PLATFORM_ROLE_LABEL,
   reasonText,
   revisionLabel,
   roleBadge,
@@ -166,17 +171,25 @@ export function headerHtml(view, activity, nowIso) {
  * 切出一个组，W4 那种形状就从 6 个环节变成 7 个，而多出来的那个「开头的 L3 组」
  * 和真正收尾的那个 L3 组永远合不到一起——一个人分成两段显示，比少一段更误导。
  *
- * 所以：没有 attemptId 的事件全部收成一个组，**放在最后**。
+ * 所以：没有 attemptId 的事件按**真实角色**收成收尾组，仍放在最后。
+ * 只让平台 / L3 进平台组与 L3 组——L1/L2 的 orphan 硬塞进 L3，任务结束后
+ * 那一组看起来像检视者还在跑，比少一组更误导。
  */
 export function groupActivity(activity) {
   const rows = activity || [];
   const order = [];
   const buckets = new Map();
-  const orphans = [];
+  const orphans = {
+    coordinator: [],
+    executor: [],
+    other: [],
+    platform: [],
+    reviewer: [],
+  };
   for (const e of rows) {
     const id = e && e.attemptId ? String(e.attemptId) : '';
     if (!id) {
-      orphans.push(e);
+      orphans[orphanRole(e)].push(e);
       continue;
     }
     if (!buckets.has(id)) {
@@ -185,28 +198,143 @@ export function groupActivity(activity) {
     }
     buckets.get(id).push(e);
   }
-  const groups = order.map((id) => ({ attemptId: id, events: buckets.get(id) }));
-  if (orphans.length > 0) groups.push({ attemptId: '', events: orphans });
+  const groups = order.map((id) => ({
+    attemptId: id,
+    role: roleOfAttempt(id),
+    events: buckets.get(id),
+  }));
+  // 收尾组：L1/L2 不进 L3；平台与 L3 分开，L3 永远在最后（终审在尾上）。
+  const pushOrphan = (role) => {
+    const events = orphans[role];
+    if (events.length > 0) groups.push({ attemptId: '', role, events });
+  };
+  pushOrphan('coordinator');
+  pushOrphan('executor');
+  pushOrphan('other');
+  pushOrphan('platform');
+  pushOrphan('reviewer');
   return groups;
 }
 
-/** 组内最能代表这一跳的事件：优先非 attempt.started / ended（那两条只是开关门）。 */
+/**
+ * 没有 attemptId 的事件归哪一组。看 narrate 的徽章，不在页面再写一份 kind 表——
+ * 两份表一定会漂，漏一条就把 L2 的 waiting 画成 L3。
+ */
+function orphanRole(event) {
+  const told = narrateEvent(event);
+  if (told && told.untranslated) return 'other';
+  const badge = told && told.badge ? String(told.badge) : '';
+  if (badge === PLATFORM_ROLE_LABEL) return 'platform';
+  if (badge === 'L3' || badge.startsWith('L3')) return 'reviewer';
+  if (badge === 'L1' || badge.startsWith('L1')) return 'executor';
+  if (badge === 'L2' || badge.startsWith('L2')) return 'coordinator';
+  return 'other';
+}
+
+/**
+ * 环节在 DOM / 展开集里的键。有 attemptId 用它；收尾组不能都写成空串，
+ * 否则点开「平台」会把「L3」一起展开。L3 仍用空串，和旧的 data-attempt-id="" 对齐。
+ */
+function stageKey(group) {
+  if (group && group.attemptId) return String(group.attemptId);
+  const role = group && group.role;
+  if (role === 'platform') return 'platform';
+  if (role && role !== 'reviewer') return 'orphan-' + role;
+  return '';
+}
+
+/**
+ * 呈现用角色。平台有自己的徽章，色条跟 L3 同一档（都不是 L1/L2 那一跳）。
+ * 详情和列表必须走同一份：两份表一定会把平台画成检视者。
+ */
+function presentRole(group) {
+  const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
+  if (role === 'platform') {
+    return { role, tone: roleTone('reviewer'), badge: PLATFORM_ROLE_LABEL };
+  }
+  const toneRole = !role || role === 'other' ? 'coordinator' : role;
+  return { role, tone: roleTone(toneRole), badge: roleBadge(toneRole) };
+}
+
+/**
+ * 环节名。平台组不能走 stageName：空 attemptId 会被当成 L3。
+ * L1/L2 orphan 同样不能把空 id 喂给 stageName，否则「协调」会写成「L3 检视者」。
+ */
+function stageLabel(group, context) {
+  if (group && group.role === 'platform') return PLATFORM_ROLE_LABEL;
+  if (group && group.attemptId) return stageName(group.events, context);
+  if (!group || group.role === 'reviewer' || !group.role) return stageName(group && group.events, context);
+  const fakeId = group.role === 'executor' ? 'orphan.exec-1' : 'coord-orphan';
+  const fake = (group.events || []).map((e) => Object.assign({}, e, { attemptId: fakeId }));
+  return stageName(fake, context);
+}
+
+/** 组内最能代表这一跳的事件：优先非开关门、也非命令族（命令族折叠，不当摘要）。 */
 function representativeEvent(events) {
   const rows = events || [];
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const kind = rows[i] && rows[i].kind;
-    if (kind && kind !== 'attempt.started' && kind !== 'attempt.ended') return rows[i];
+    if (!kind || kind === 'attempt.started' || kind === 'attempt.ended') continue;
+    if (isRuntimeCommand(kind)) continue;
+    return rows[i];
   }
-  return rows.length > 0 ? rows[rows.length - 1] : null;
+  // 只剩开关门时仍用末条（那一跳确实只有开关）；命令族不当代表——
+  // 它们不在翻译表里，拿来当摘要会变成「未翻译」。
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const kind = rows[i] && rows[i].kind;
+    if (kind && !isRuntimeCommand(kind)) return rows[i];
+  }
+  return null;
+}
+
+/**
+ * 实际执行过的命令：只计 runtime.command.started。
+ * command_tracking 是开关，不是一条命令；同一 callId 打两次 started 仍是一条
+ * （平台会在重试/心跳里重复，按条数显示会把 1 条说成 20 条）。
+ */
+function startedCommands(events) {
+  const out = [];
+  const seen = new Set();
+  for (const e of events || []) {
+    if (!e || e.kind !== 'runtime.command.started') continue;
+    const callId = e.data && e.data.callId;
+    if (callId !== undefined && callId !== null && String(callId) !== '') {
+      const key = String(callId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+function commandFoldHtml(events) {
+  const cmds = startedCommands(events);
+  if (cmds.length === 0) return '';
+  const items = cmds
+    .map((e) => '<li class="cmd">' + esc(commandDetail(e)) + '</li>')
+    .join('');
+  return '<details class="cmd-fold">'
+    + '<summary class="cmd-fold-head">' + esc(commandCountLabel(cmds.length)) + '</summary>'
+    + '<ul class="cmd-list">' + items + '</ul>'
+    + '</details>';
 }
 
 /** 这一跳的用量一句话。没有 ended 事件时说的是原因，不是一个孤零零的 —。 */
-function stageUsageLine(events) {
+function stageUsageLine(events, group, ctx) {
   const rows = events || [];
+  const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
   const ended = rows.find((e) => e && e.kind === 'attempt.ended');
   const usage = ended && ended.data && ended.data.usage;
   if (usage) return usageLine(usage);
   if (ended) return '这一跳没有上报用量';
+  const reviewTail = !(group && group.attemptId) && (role === 'reviewer' || role === 'platform');
+  if (ctx && isTerminal(ctx.status)) {
+    // 任务已经结束还说「这一跳还没结束」是说谎——L3/平台尾段改报终审。
+    // 结论人话只出 narrate.finalReviewSummary：这里再写一份 verdict 映射一定会漂。
+    if (reviewTail) return finalReviewSummary(ctx.finalReview);
+    return '这一跳没有上报用量';
+  }
   return '这一跳还没结束，用量要等它收尾';
 }
 
@@ -347,29 +475,38 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
   });
   return groups
     .map((g) => {
-      const role = roleOfAttempt(g.attemptId);
-      const tone = roleTone(role);
+      const shown = presentRole(g);
+      const tone = shown.tone;
+      const name = stageLabel(g, context);
+      const badge = shown.badge;
+      const key = stageKey(g);
       const head = representativeEvent(g.events);
-      const summary = head ? narrateEvent(head, context).action : '';
+      const summary = head && !isRuntimeCommand(head.kind) ? narrateEvent(head, context).action : '';
       const rows = g.events
+        .filter((e) => !isRuntimeCommand(e && e.kind))
         .map((e) => eventRowHtml(e, indexOf.has(e) ? indexOf.get(e) : -1, selectedKey, context))
         .join('');
-      const selected = selectedAttemptId !== null && g.attemptId === selectedAttemptId;
+      const cmds = startedCommands(g.events);
+      const selected = selectedAttemptId !== null && key === selectedAttemptId;
       // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
       // 一上来就给所有环节加 open 等于没折叠。
       return '<details class="stage tone-' + esc(tone) + '"'
-        + ' data-attempt-id="' + esc(g.attemptId) + '"'
+        + ' data-attempt-id="' + esc(key) + '"'
         + (selected ? ' data-active="1"' : '')
-        + (expanded.has(g.attemptId) ? ' open' : '') + '>'
+        + (expanded.has(key) ? ' open' : '') + '>'
         + '<summary class="stage-head" data-stage-select>'
-        +   '<span class="stage-name">' + esc(stageName(g.events, context)) + '</span>'
-        +   '<span class="chip ' + esc(tone) + '">' + esc(roleBadge(role)) + '</span>'
+        +   '<span class="stage-name">' + esc(name) + '</span>'
+        +   '<span class="chip ' + esc(tone) + '">' + esc(badge) + '</span>'
         +   '<span class="stage-dur mono">'
         +     esc(formatDuration(firstAt(g.events), lastAt(g.events))) + '</span>'
-        +   '<span class="stage-usage">' + esc(stageUsageLine(g.events)) + '</span>'
+        +   '<span class="stage-usage">' + esc(stageUsageLine(g.events, g, context)) + '</span>'
+        +   (cmds.length > 0
+          ? '<span class="stage-cmds">' + esc('跑了 ' + commandCountLabel(cmds.length)) + '</span>'
+          : '')
         +   (summary ? '<span class="stage-summary">' + esc(summary) + '</span>' : '')
         + '</summary>'
         + '<ul class="evt-list">' + rows + '</ul>'
+        + commandFoldHtml(g.events)
         + '</details>';
     })
     .join('');
@@ -558,6 +695,24 @@ function escalationBlock(log, attemptId) {
     + '</ul>');
 }
 
+/**
+ * 平台收尾组：把组内事件已有的人话列出来，不套 L3 终审。
+ * 终审块会把别人的 SHA 贴到投递/记忆落地上，看起来像平台在放行。
+ */
+function platformEventsBlock(events, ctx) {
+  const rows = (events || []).filter((e) => e && !isRuntimeCommand(e.kind));
+  // 仅命令族时不另开空态 section：下面 stageDetailHtml 已有「还没有把正文写回平台」。
+  // 这里再写一句人话就是第二份叙事，和 narrate 会漂。
+  if (rows.length === 0) return '';
+  return section(PLATFORM_ROLE_LABEL, '<ul class="detail-list">'
+    + rows.map((e) => {
+      const told = narrateEvent(e, ctx);
+      const line = told.detail ? told.action + ' · ' + told.detail : told.action;
+      return '<li>' + esc(line) + '</li>';
+    }).join('')
+    + '</ul>');
+}
+
 /** L3 最终检视：结论、理由、改动落到哪。 */
 function finalReviewBlock(finalReview) {
   const r = finalReview;
@@ -593,7 +748,8 @@ export function stageDetailHtml(group, ctx, attempt) {
   }
   const context = ctx || {};
   const events = group.events || [];
-  const role = roleOfAttempt(group.attemptId);
+  const shown = presentRole(group);
+  const role = shown.role;
   const kinds = new Set(events.map((e) => (e && e.kind) || ''));
   const blocks = [];
 
@@ -602,6 +758,9 @@ export function stageDetailHtml(group, ctx, attempt) {
     blocks.push(finalReviewBlock(context.finalReview));
     const answered = (context.escalationLog || []).filter((x) => x && x.answer);
     if (answered.length > 0) blocks.push(escalationBlock(answered, ''));
+  } else if (role === 'platform') {
+    const plat = platformEventsBlock(events, context);
+    if (plat) blocks.push(plat);
   } else {
     if (kinds.has('plan.updated') || kinds.has('work_item.created')) {
       blocks.push(planBlock(context.plan));
@@ -622,17 +781,23 @@ export function stageDetailHtml(group, ctx, attempt) {
     if (e && e.workItemId && !workItemIds.includes(e.workItemId)) workItemIds.push(e.workItemId);
   }
   const causation = (events.find((e) => e && e.causationId) || {}).causationId;
+  // 非 L3 的无 attemptId 不能套 L3 那句「自己动手」——那是谎。
+  // 不新写叙事：就用 formatAttemptId 对空 id 的已有说明。
+  const attemptShown = group.attemptId
+    ? fieldLabel('attempt') + ' ' + String(group.attemptId)
+    : (role === 'reviewer'
+      ? fieldLabel('attempt') + ' 这一组事件不属于任何一跳（L3 自己动手的）'
+      : formatAttemptId('').label);
 
   return '<div class="detail-head">'
-    +   '<span class="detail-title">' + esc(stageName(events, context)) + '</span>'
-    +   '<span class="chip ' + esc(roleTone(role)) + '">' + esc(roleBadge(role)) + '</span>'
+    +   '<span class="detail-title">' + esc(stageLabel(group, context)) + '</span>'
+    +   '<span class="chip ' + esc(shown.tone) + '">' + esc(shown.badge) + '</span>'
     + '</div>'
     + (head
       ? '<div class="detail-sub">' + esc(narrateEvent(head, context).detail) + '</div>'
       : '<div class="detail-sub muted">这一跳还没有能说明白它在干什么的事件。</div>')
     + '<div class="detail-tech mono muted">'
-    +   esc(fieldLabel('attempt')) + ' '
-    +   esc(group.attemptId || '这一组事件不属于任何一跳（L3 自己动手的）')
+    +   esc(attemptShown)
     +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
     +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
     + '</div>'
@@ -846,7 +1011,7 @@ function setCrumbs(st) {
 /** 选中的那个环节。selectedAttemptId 为 null 表示谁都没选。 */
 function selectedGroup(st) {
   if (st.selectedAttemptId === null) return null;
-  return groupActivity(st.activity).find((g) => g.attemptId === st.selectedAttemptId) || null;
+  return groupActivity(st.activity).find((g) => stageKey(g) === st.selectedAttemptId) || null;
 }
 
 function paintHead(st) {
@@ -875,6 +1040,7 @@ function detailCtx(st) {
     result: v.result,
     escalationLog: v.escalationLog || [],
     finalReview: v.finalReview,
+    status: v.status,
   };
 }
 
@@ -987,16 +1153,108 @@ async function loadAttempt(st, attemptId) {
   paintDetail(st);
 }
 
+function isPageVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
+function missionStatus(st) {
+  return (st.view && st.view.status) || '';
+}
+
+/**
+ * 这次响应还能不能写屏幕。
+ *
+ * 隐藏标签页、已经离页、换了一条任务：写下去就是把过期结果盖到别人的
+ * 展开/选中上。hidden 期间尤其不能把终态写进内存——下一次可见会拿
+ * 这份过期终态去问 nextRefresh，永远不再核对。
+ */
+function writable(st) {
+  return st.epoch === epoch
+    && st.els.head
+    && st.els.head.isConnected
+    && isPageVisible();
+}
+
+function sameJson(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function clearTimers(st) {
+  if (st.viewTimer) clearInterval(st.viewTimer);
+  if (st.liveTimer) clearInterval(st.liveTimer);
+  st.viewTimer = null;
+  st.liveTimer = null;
+}
+
+function armTimers(st, plan) {
+  clearTimers(st);
+  if (!st.els.head || !st.els.head.isConnected) return;
+  if (plan.intervalMs) {
+    st.viewTimer = setInterval(() => {
+      if (!st.els.head || !st.els.head.isConnected) {
+        stop(st);
+        return;
+      }
+      void pullView(st);
+    }, plan.intervalMs);
+  }
+  // 还没读到 view 时不算在途：首屏终态成功之前就拉 live，已结束的任务
+  // 会永远每秒打一次实时输出。
+  if (plan.liveIntervalMs && st.view) {
+    st.liveTimer = setInterval(() => {
+      if (!st.els.head || !st.els.head.isConnected) {
+        stop(st);
+        return;
+      }
+      void pollLive(st);
+    }, plan.liveIntervalMs);
+  }
+}
+
+function syncRefresh(st) {
+  if (!writable(st)) return;
+  armTimers(st, nextRefresh('mission', missionStatus(st), true));
+}
+
+function handleVisibility(st) {
+  if (st !== mounted || st.epoch !== epoch) return;
+  if (!st.els.head || !st.els.head.isConnected) {
+    stop(st);
+    return;
+  }
+  const visible = document.visibilityState !== 'hidden';
+  if (!visible) {
+    clearTimers(st);
+    return;
+  }
+  const plan = nextRefresh('mission', missionStatus(st), true);
+  // missedApply：隐藏期间有响应没落盘。就算内存里已经像终态，也先核对
+  // view/activity，否则会按过期终态停死、永远不再刷。
+  if (st.missedApply || plan.paths.includes('view') || plan.paths.includes('activity')) {
+    st.missedApply = false;
+    void pullView(st);
+  }
+  // 还没有 view 时 status 是空串，nextRefresh 会含 live；真去拉会把
+  // 「首屏终态不打 live」打穿。有 view 且仍在途才立刻补一刀。
+  if (st.view && plan.paths.includes('live')) void pollLive(st);
+  armTimers(st, plan);
+}
+
 /** 一轮游标拉取。只取 cursor 之后的，不从头。 */
 async function pollLive(st) {
   if (st.polling) return;
+  if (!isPageVisible()) return;
+  if (st.epoch !== epoch) return;
   st.polling = true;
   try {
     const body = await get(
       '/api/missions/' + encodeURIComponent(st.missionId)
         + '/live?cursor=' + st.live.cursor,
     );
-    if (st.epoch !== epoch) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
     const chunks = (body && body.chunks) || [];
     for (const c of chunks) {
       if (c && c.kind === 'usage') {
@@ -1018,6 +1276,65 @@ async function pollLive(st) {
   } finally {
     st.polling = false;
   }
+}
+
+/** 在途可见才拉 view+activity。失败且已经有旧数据时不把页面刷成白板。 */
+function pullView(st) {
+  if (!isPageVisible()) return st.viewInflight;
+  if (st.viewInflight) return st.viewInflight;
+  const started = st.epoch;
+  const first = !st.view;
+  const enc = encodeURIComponent(st.missionId);
+  st.viewInflight = Promise.all([
+    get('/api/missions/' + enc),
+    get('/api/missions/' + enc + '/activity'),
+  ]).then(([view, activity]) => {
+    if (st.epoch !== started) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
+    const rows = Array.isArray(activity) ? activity : [];
+    const unchanged = !first && sameJson(st.view, view) && sameJson(st.activity, rows);
+    st.view = view;
+    st.activity = rows;
+    if (first) {
+      setCrumbs(st);
+      paintHead(st);
+      paintUsage(st);
+      paintStages(st);
+      paintDetail(st);
+      paintLive(st);
+      // 首屏成功且已终态：nextRefresh 不含 live，这里就不会拉。
+      if (nextRefresh('mission', missionStatus(st), true).paths.includes('live')) {
+        void pollLive(st);
+      }
+    } else if (!unchanged) {
+      const expanded = collectExpanded(st);
+      setCrumbs(st);
+      paintHead(st);
+      paintUsage(st);
+      paintStages(st, expanded);
+      paintDetail(st);
+    }
+    syncRefresh(st);
+  }).catch((err) => {
+    if (st.epoch !== started) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
+    if (!st.view) {
+      // 一次都没读到就写「还没有任务」是撒谎：那是读不到，不是没有。
+      st.els.head.innerHTML = '<div class="note">读不到这条任务：' + esc(err.message) + '</div>';
+      st.els.stages.innerHTML = '<div class="empty">刷新一下重试</div>';
+      setCrumbs(st);
+    }
+    syncRefresh(st);
+  }).finally(() => {
+    if (st.epoch === started) st.viewInflight = null;
+  });
+  return st.viewInflight;
 }
 
 function selectStage(st, attemptId, expanded) {
@@ -1066,33 +1383,12 @@ function bind(st) {
 }
 
 function stop(st) {
-  if (st.timer) clearInterval(st.timer);
-  st.timer = null;
-}
-
-async function load(st) {
-  const enc = encodeURIComponent(st.missionId);
-  try {
-    const [view, activity] = await Promise.all([
-      get('/api/missions/' + enc),
-      get('/api/missions/' + enc + '/activity'),
-    ]);
-    if (st.epoch !== epoch) return;
-    st.view = view;
-    st.activity = Array.isArray(activity) ? activity : [];
-    setCrumbs(st);
-    paintHead(st);
-    paintUsage(st);
-    paintStages(st);
-    paintDetail(st);
-    paintLive(st);
-    void pollLive(st);
-  } catch (err) {
-    if (st.epoch !== epoch) return;
-    // 一次都没读到就写「还没有任务」是撒谎：那是读不到，不是没有。
-    st.els.head.innerHTML = '<div class="note">读不到这条任务：' + esc(err.message) + '</div>';
-    st.els.stages.innerHTML = '<div class="empty">刷新一下重试</div>';
-    setCrumbs(st);
+  clearTimers(st);
+  if (st.onVisibility) {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', st.onVisibility);
+    }
+    st.onVisibility = null;
   }
 }
 
@@ -1137,19 +1433,17 @@ export async function renderTaskPage(container, missionId) {
     autoScroll: true,
     live: liveStateOf(missionId),
     polling: false,
-    timer: null,
+    viewInflight: null,
+    missedApply: false,
+    viewTimer: null,
+    liveTimer: null,
+    onVisibility: null,
   };
   mounted = st;
   bind(st);
-  // 离开本页时节点会离树；留着定时器就是一个每 1 秒打一次 API、
-  // 又把结果丢进垃圾桶的请求源。这一路只在这里断。
-  st.timer = setInterval(() => {
-    if (!st.els.head || !st.els.head.isConnected) {
-      stop(st);
-      return;
-    }
-    void pollLive(st);
-  }, 1000);
-
-  await load(st);
+  if (typeof document !== 'undefined') {
+    st.onVisibility = () => handleVisibility(st);
+    document.addEventListener('visibilitychange', st.onVisibility);
+  }
+  await pullView(st);
 }

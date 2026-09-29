@@ -128,6 +128,12 @@ export const ROLE_CN = {
   reviewer: 'L3 检视者',
 };
 
+/**
+ * 没有 attemptId 的事件不全是 L3：投递、记忆落地、集成验证是平台自己动的手。
+ * 组名留给 task.js 去切；这里只给人话标签，避免页面再写一份「平台」——两份一定会漂。
+ */
+export const PLATFORM_ROLE_LABEL = '平台';
+
 export function roleBadge(role) {
   return ROLE_CN[normalizeRole(role)] || 'L2 协调';
 }
@@ -493,6 +499,223 @@ const EVENT_TABLE = {
   },
 
   'mission.resumed': () => ({ badge: 'L2', action: '又动起来了', detail: '接着往下走' }),
+
+  'orchestration.round.started': () => ({
+    badge: PLATFORM_ROLE_LABEL,
+    action: '开始新一轮调度',
+    detail: '记下本轮预算事实',
+  }),
+
+  'memory.applied': (event) => {
+    const written = list(event && event.data && event.data.written);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '写入项目记忆',
+      detail: written.length === 0 ? '（没有写出文件清单）' : written.map((p) => String(p)).join('、'),
+    };
+  },
+
+  'delivery.created': (event) => ({
+    badge: PLATFORM_ROLE_LABEL,
+    action: '投进收件箱',
+    detail: or(event && event.data && event.data.deliveryId, '（没有投递编号）'),
+  }),
+
+  'final_review.integration_anchor': (event) => {
+    const data = (event && event.data) || {};
+    const branch = or(data.integrationBranch, '集成分支');
+    return {
+      badge: 'L3',
+      action: '记下集成锚点',
+      detail: data.anchor ? `${branch} · ${data.anchor}` : branch,
+    };
+  },
+
+  'final_review.integration_verified': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L3',
+      action: data.passed === false ? '集成验证未通过' : '集成验证通过',
+      detail: or(data.reportId, '（没有报告编号）'),
+    };
+  },
+
+  'final_review.merge_applied': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L3',
+      action: '合进集成分支',
+      detail: or(data.mergedInto, or(data.integrationBranch, '改动已经合进集成分支')),
+    };
+  },
+
+  'work_item.redispatched': (event, ctx) => {
+    const ids = list(event && event.data && event.data.ids);
+    return {
+      badge: 'L3 → L1',
+      action: '重新派发工作项',
+      detail: ids.length === 0 ? '（没有写派了哪些工作项）' : ids.map((id) => titleOf(ctx, id)).join('、'),
+    };
+  },
+
+  'final_review.send_back': (event) => ({
+    badge: 'L3',
+    action: '打回',
+    detail: or(list(event && event.data && event.data.reasons)[0], '（没有写理由）'),
+  }),
+
+  'final_review.abandoned': (event) => ({
+    badge: 'L3',
+    action: '放弃这批改动',
+    detail: or(list(event && event.data && event.data.reasons)[0], '（没有写理由）'),
+  }),
+
+  'final_review.merge_failed': (event) => ({
+    badge: 'L3',
+    action: '合并失败',
+    detail: or(event && event.data && event.data.reason, '（没有写原因）'),
+  }),
+
+  'final_review.ha_authorized': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L3',
+      action: 'HA 受控放行',
+      detail: or(data.reviewerId, or(data.integrationReportId, '外置常设授权已核对')),
+    };
+  },
+
+  'final_review.ha_unsafe': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L3',
+      action: 'HA 状态不安全',
+      detail: or(data.hint, or(data.reason, '（没有写原因）')),
+    };
+  },
+
+  'mission.routed': (event) => {
+    const data = (event && event.data) || {};
+    const lane = or(data.recommended, data.executionMode);
+    const reason = or(list(data.reasons)[0], '');
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '分好了车道',
+      detail: lane ? (reason ? `${lane} · ${reason}` : lane) : or(reason, '已按分类入口分发'),
+    };
+  },
+
+  'independent_review.blocked': (event) => ({
+    badge: 'L3',
+    action: '独立检视开不了',
+    detail: or(event && event.data && event.data.detail, or(event && event.data && event.data.reason, '（没有写原因）')),
+  }),
+
+  'independent_review.recorded': (event) => {
+    const data = (event && event.data) || {};
+    const action = data.verdict === 'pass'
+      ? '独立检视：通过'
+      : data.verdict === 'send_back'
+        ? '独立检视：打回'
+        : '记下独立检视';
+    return {
+      badge: 'L3',
+      action,
+      detail: or(data.reviewedCommit, or(data.verdict, '（没有写结论）')),
+    };
+  },
+
+  'mission.cancelled': (event) => ({
+    badge: 'L3',
+    action: '叫停任务',
+    detail: or(event && event.data && event.data.reason, '被叫停了'),
+  }),
+
+  'mission.paused': () => ({ badge: 'L3', action: '暂停任务', detail: '调度器不再碰它' }),
+
+  'mission.resumed_from_pause': () => ({
+    badge: 'L3',
+    action: '从暂停恢复',
+    detail: '调度器可以再碰它了',
+  }),
+
+  'validation.reported': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: data.passed === false ? '验证未通过' : '验证通过',
+      detail: or(data.reportId, '（没有报告编号）'),
+    };
+  },
+
+  'context.truncated': (event) => {
+    const data = (event && event.data) || {};
+    const hasBudget = data.budget !== undefined && data.budget !== null;
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '裁剪了上下文',
+      detail: hasBudget
+        ? `预算 ${data.budget} · 裁前 ${or(data.estimatedBefore, '?')} → 裁后 ${or(data.estimatedAfter, '?')}`
+        : '上下文超出预算，已经裁过',
+    };
+  },
+
+  'mission.budget.threshold': (event) => {
+    const data = (event && event.data) || {};
+    const dim = or(data.dimension, '预算');
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '预算过线',
+      detail: data.threshold === undefined || data.threshold === null ? dim : `${dim} · 阈值 ${data.threshold}`,
+    };
+  },
+
+  'escalation.answered': (event) => ({
+    badge: 'L3 → L2',
+    action: '答复升级',
+    detail: or(event && event.data && event.data.answer, '（没有写答复）'),
+  }),
+
+  'blocked.reported': (event) => ({
+    badge: 'L1 → L2',
+    action: '报了阻塞',
+    detail: or(event && event.data && event.data.reason, '（没有写原因）'),
+  }),
+
+  'mission.promoted': (event) => {
+    const data = (event && event.data) || {};
+    const from = or(data.oldMode, '（不知道原车道）');
+    const to = or(data.newMode, '（不知道新车道）');
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '车道升级',
+      detail: `${from} → ${to}`,
+    };
+  },
+
+  'recovery.applied': (event) => ({
+    badge: PLATFORM_ROLE_LABEL,
+    action: '补上了投递',
+    detail: or(event && event.data && event.data.deliveryId, '启动收敛补的投递'),
+  }),
+
+  'decision.shadow': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '影子决策审计',
+      detail: or(data.hook, or(data.quality, '只记不拦')),
+    };
+  },
+
+  'decision.post_execution': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '交卷后影子评估',
+      detail: or(data.quality, '只记不改审查级别'),
+    };
+  },
 };
 
 /**
@@ -525,6 +748,80 @@ export function narrateEvent(event, ctx) {
     detail: or(out.detail, '（没有细节）'),
     untranslated: false,
   };
+}
+
+/* ============================ 命令族（供 task.js 折叠） ============================ */
+
+/**
+ * runtime.command.* / runtime.command_tracking.* 是汇总命令族：
+ * 单条不值得占一行进度（LQ1 一跳 20 条 started）。
+ * 未来新增的同前缀 kind 也算这一族——覆盖测试对它们豁免「必须单条翻译」，
+ * 不是把它们当成不存在。
+ */
+export function isRuntimeCommand(kind) {
+  const k = text(kind);
+  return k.startsWith('runtime.command.') || k.startsWith('runtime.command_tracking.');
+}
+
+/** 环节头上那句「跑了多少条命令」。零条也说人话，不说 0 条——零和「没折叠」长得一样。 */
+export function commandCountLabel(count) {
+  const n = Math.max(0, Math.floor(num(count)));
+  if (n === 0) return '没有命令';
+  return `${n} 条命令`;
+}
+
+/**
+ * 单条命令事件的细节行。折叠后仍可能展开看。
+ *
+ * 平台落库目前只写 schemaVersion/callId（platform.recordCommandStarted）。
+ * 契约要「有命令文本与退出码就显示」——字段是可选的，缺了就
+ * 退回 callId / 跟踪说明，绝不要编一条命令或一个退出码：
+ * 编出来的看起来像真跑过。
+ */
+export function commandDetail(event) {
+  const kind = text(event && event.kind);
+  const data = (event && event.data) || {};
+  if (kind === 'runtime.command.started') {
+    const commandText = typeof data.command === 'string' ? text(data.command) : '';
+    const head = commandText || or(data.callId, '（没有 callId）');
+    // 0 是合法退出码；undefined/null 才算没有。String(缺值) 会变成
+    // "undefined" 漏进界面——所以先把空值挡掉，不要让 String 起步。
+    const exit =
+      data.exitCode === undefined || data.exitCode === null ? '' : String(data.exitCode).trim();
+    if (!exit || exit === 'undefined') return `命令 ${head}`;
+    return `命令 ${head} · 退出码 ${exit}`;
+  }
+  if (kind === 'runtime.command_tracking.enabled') {
+    return '开始跟踪本跳的命令';
+  }
+  if (kind === 'runtime.command_tracking.invalid') {
+    return '命令跟踪失效，次数按未知计';
+  }
+  return or(kind, '命令');
+}
+
+/* ============================ 终审收尾摘要（供任务页环节用量/摘要行） ============================ */
+
+/**
+ * 终态平台/L3 收尾组的一句结论。
+ *
+ * 签名：finalReviewSummary(finalReview) → string
+ * 字段形状与 MissionView.finalReview 一致：verdict 为 merge / send_back / abandon，
+ * mergedInto 可选。缺对象、缺结论、认不出的值都说人话，绝不把
+ * undefined/null 漏进界面。返回纯字符串，调用方负责 HTML 转义。
+ *
+ * 供 W-122 接线：task.js 的环节用量行应直接调这个导出，不要再写一份
+ * verdict 人话映射——两份一定会漂。
+ */
+export function finalReviewSummary(finalReview) {
+  if (!finalReview) return '还没有最终检视结论';
+  const key = text(finalReview.verdict);
+  const verdict = key === 'merge' ? '放行并落地'
+    : key === 'send_back' ? '打回'
+    : key === 'abandon' ? '放弃这批改动'
+    : (key || '（没有结论）');
+  const sha = text(finalReview.mergedInto);
+  return sha ? `终审：${verdict} · 合入 ${sha}` : `终审：${verdict}`;
 }
 
 /* ============================ 现在在干什么 ============================ */

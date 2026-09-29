@@ -7,7 +7,7 @@
  * 比没有界面更误导。
  */
 
-import { after, describe, test } from 'node:test';
+import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -223,5 +223,356 @@ describe('页面读的字段必须真的存在', () => {
     >[];
     assert.equal(stalled[0].waitReason, 'project_busy');
     assert.equal(stalled[0].waitDetail, 'M-其他 占着名额');
+  });
+});
+
+/* --------------------------- 资源池首屏（src/web/pool.js） --------------------------- */
+
+/**
+ * 首屏不等 /api/runtime/models。
+ *
+ * 浏览器不在 node 测里，所以用一个只认 [data-*] 的假 DOM + 假 fetch：
+ * 要抓的是「调了哪几条接口、HTML 里有没有候选和用量」，
+ * 不是 layout。假 fetch 只拦相对 /api/*，绝对地址仍交给真 fetch——
+ * 同文件上面那组观测面用例可能并发，不能把全局 fetch 整条吞掉。
+ */
+
+describe('资源池页：首屏不阻塞模型', { concurrency: false }, () => {
+  const loaded = import('../src/web/pool.js');
+
+  const snapshot = {
+    coordinator: [
+      {
+        profileId: 'coord-a',
+        endpoint: 'local',
+        runtime: 'pi',
+        order: 0,
+        facts: [
+          { key: 'provider', value: 'p1' },
+          { key: 'model', value: 'm1' },
+        ],
+      },
+    ],
+    executor: [],
+  };
+  const catalog = {
+    available: true,
+    runtime: 'pi',
+    models: [{ provider: 'a', model: 'b', label: 'A / B' }],
+  };
+  const usageTotal = {
+    input: 100,
+    output: 50,
+    cacheRead: 850,
+    cacheWrite: 0,
+    total: 1000,
+    cost: 1.2345,
+  };
+
+  type FetchCall = { url: string; method: string; body?: string };
+  const calls: FetchCall[] = [];
+  let handler: ((url: string, init?: RequestInit) => Promise<{
+    ok: boolean;
+    status: number;
+    json: () => Promise<unknown>;
+  }>) | null = null;
+  let origFetch: typeof fetch;
+
+  function jsonRes(body: unknown, status = 200) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    };
+  }
+
+  function attrName(sel: string): string | null {
+    const m = /^\[([^\]=]+)[^\]]*\]$/.exec(sel.trim());
+    return m ? m[1] : null;
+  }
+
+  function parseAttrValue(html: string, attr: string): string {
+    const tag = new RegExp('<[a-z][^>]*' + attr + '[^>]*>', 'i').exec(html);
+    if (!tag) return '';
+    const v = /\bvalue="([^"]*)"/.exec(tag[0]);
+    return v ? v[1] : '';
+  }
+
+  function fakePage() {
+    const listeners: Array<{ type: string; fn: (ev: unknown) => void }> = [];
+    const fields = new Map<string, { value: string; hidden: boolean; textContent: string }>();
+    let html = '';
+    const root: {
+      isConnected: boolean;
+      innerHTML: string;
+      querySelector: (sel: string) => ReturnType<typeof makeField> | null;
+    } = {
+      isConnected: true,
+      get innerHTML() {
+        return html;
+      },
+      set innerHTML(v: string) {
+        html = String(v);
+        fields.clear();
+      },
+      querySelector(sel: string) {
+        const attr = attrName(sel);
+        if (!attr || !html.includes(attr)) return null;
+        if (!fields.has(attr)) fields.set(attr, makeField(attr));
+        return fields.get(attr)!;
+      },
+    };
+
+    function makeField(attr: string) {
+      let value = parseAttrValue(html, attr);
+      const el = {
+        get value() {
+          return value;
+        },
+        set value(v: string) {
+          value = String(v);
+        },
+        hidden: false,
+        textContent: '',
+        querySelector(sel: string) {
+          return root.querySelector(sel);
+        },
+        closest(sel: string) {
+          const a = attrName(sel);
+          if (a === attr) return el;
+          return root.querySelector(sel);
+        },
+        hasAttribute(name: string) {
+          return html.includes(name);
+        },
+      };
+      return el;
+    }
+
+    const container = {
+      dataset: {} as Record<string, string>,
+      isConnected: true,
+      innerHTML: '',
+      querySelector(sel: string) {
+        if (attrName(sel) === 'data-pool-root') return root;
+        return root.querySelector(sel);
+      },
+      addEventListener(type: string, fn: (ev: unknown) => void) {
+        listeners.push({ type, fn });
+      },
+      dispatch(type: string, event: unknown) {
+        for (const l of listeners) {
+          if (l.type === type) l.fn(event);
+        }
+      },
+    };
+    return { container, root };
+  }
+
+  function intercepting(url: string): boolean {
+    return (
+      url === '/api/pools' || url === '/api/usage' || url === '/api/runtime/models'
+    );
+  }
+
+  before(() => {
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (!intercepting(url)) return origFetch(input, init);
+      calls.push({
+        url,
+        method: (init && init.method) || 'GET',
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (!handler) throw new Error('没有安装资源池 fetch handler: ' + url);
+      return handler(url, init);
+    }) as typeof fetch;
+  });
+  after(() => {
+    globalThis.fetch = origFetch;
+  });
+  beforeEach(() => {
+    calls.length = 0;
+    handler = async (url) => {
+      if (url === '/api/pools') return jsonRes(snapshot);
+      if (url === '/api/usage') return jsonRes({ total: usageTotal });
+      if (url === '/api/runtime/models') return jsonRes(catalog);
+      throw new Error('意外的 fetch ' + url);
+    };
+  });
+
+  async function waitFor(fn: () => boolean, ms = 800) {
+    const start = Date.now();
+    while (Date.now() - start < ms) {
+      if (fn()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error('waitFor timeout');
+  }
+
+  function openAddForm(container: ReturnType<typeof fakePage>['container']) {
+    const details = {
+      open: true,
+      hasAttribute(name: string) {
+        return name === 'data-pool-add';
+      },
+      closest(sel: string) {
+        return attrName(sel) === 'data-pool-add' ? details : null;
+      },
+    };
+    container.dispatch('toggle', { target: details });
+  }
+
+  test('纯 HTML：表单默认收起；读取中只在表单处提示', async () => {
+    const { poolPageHtml, addFormHtml } = await loaded;
+    const html = poolPageHtml(snapshot, catalog, usageTotal);
+    assert.match(html, /data-count="coordinator">1</);
+    assert.match(html, /coord-a/);
+    assert.ok(html.includes('新增 150'), '用量卡要有新增 tokens');
+    const detailsTag = /<details\b[^>]*>/.exec(html);
+    assert.ok(detailsTag, '添加表单要装在 details 里');
+    assert.equal(/\bopen\b/.test(detailsTag[0]), false, '默认不该展开');
+    assert.match(html, /data-pool-form/);
+
+    const loading = addFormHtml(undefined, { open: true, modelsStatus: 'loading' });
+    assert.match(loading, /data-pool-models-status/);
+    assert.match(loading, /模型清单读取中/);
+    assert.equal(loading.includes('适配层没上线'), false, '读取中不该写成适配层故障');
+
+    const idle = addFormHtml(undefined, { open: false, modelsStatus: 'idle' });
+    assert.equal(idle.includes('适配层没上线'), false, '还没拉清单时不该告诉人适配层没上线');
+    assert.match(idle, /<details\b/);
+  });
+
+  test('首屏只拉 pools 与 usage，不发也不等 models', async () => {
+    const { renderPoolPage } = await loaded;
+    let modelsHit = false;
+    let releaseModels!: () => void;
+    const modelsGate = new Promise<void>((r) => {
+      releaseModels = r;
+    });
+    handler = async (url) => {
+      if (url === '/api/pools') return jsonRes(snapshot);
+      if (url === '/api/usage') return jsonRes({ total: usageTotal });
+      if (url === '/api/runtime/models') {
+        modelsHit = true;
+        await modelsGate;
+        return jsonRes(catalog);
+      }
+      throw new Error(url);
+    };
+    const { container, root } = fakePage();
+    const done = renderPoolPage(container);
+    const first = await Promise.race([
+      done.then(() => 'rendered' as const),
+      new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 400)),
+    ]);
+    assert.equal(first, 'rendered', '首屏被 models 接口挡住了');
+    assert.equal(modelsHit, false, '首屏不该去请 /api/runtime/models');
+    assert.equal(
+      calls.some((c) => c.url === '/api/runtime/models'),
+      false,
+    );
+    assert.deepEqual(
+      calls.map((c) => c.url).sort(),
+      ['/api/pools', '/api/usage'].sort(),
+    );
+    assert.match(root.innerHTML, /coord-a/);
+    assert.match(root.innerHTML, /data-count="coordinator">1</);
+    assert.ok(root.innerHTML.includes('新增 150'), '用量要画出来');
+    const detailsTag = /<details\b[^>]*>/.exec(root.innerHTML);
+    assert.ok(detailsTag);
+    assert.equal(/\bopen\b/.test(detailsTag[0]), false, '首屏表单要收起');
+    releaseModels();
+    await done;
+  });
+
+  test('打开表单才拉模型；读取中提示；失败只影响表单', async () => {
+    const { renderPoolPage } = await loaded;
+    let releaseModels!: (fail: boolean) => void;
+    const modelsGate = new Promise<boolean>((r) => {
+      releaseModels = r;
+    });
+    handler = async (url) => {
+      if (url === '/api/pools') return jsonRes(snapshot);
+      if (url === '/api/usage') return jsonRes({ total: usageTotal });
+      if (url === '/api/runtime/models') {
+        const fail = await modelsGate;
+        if (fail) return jsonRes({ message: 'down' }, 500);
+        return jsonRes(catalog);
+      }
+      throw new Error(url);
+    };
+    const { container, root } = fakePage();
+    await renderPoolPage(container);
+    assert.equal(calls.some((c) => c.url === '/api/runtime/models'), false);
+
+    openAddForm(container);
+    await waitFor(() => root.innerHTML.includes('模型清单读取中'));
+    assert.ok(calls.some((c) => c.url === '/api/runtime/models'), '打开表单后才请模型');
+    assert.match(root.innerHTML, /coord-a/);
+    assert.ok(root.innerHTML.includes('新增 150'));
+
+    releaseModels(true);
+    await waitFor(() => root.innerHTML.includes('拿不到模型清单'));
+    assert.match(root.innerHTML, /coord-a/, '模型失败不能把候选表撤掉');
+    assert.ok(root.innerHTML.includes('新增 150'), '模型失败不能把用量撤掉');
+    assert.match(root.innerHTML, /data-pool-note/);
+  });
+
+  test('模型清单回来时不清空已填的候选名称；POST /api/pools 仍发', async () => {
+    const { renderPoolPage } = await loaded;
+    let releaseModels!: () => void;
+    const modelsGate = new Promise<void>((r) => {
+      releaseModels = r;
+    });
+    handler = async (url, init) => {
+      if (url === '/api/pools' && (init?.method || 'GET') === 'POST') {
+        return jsonRes({ ok: true }, 201);
+      }
+      if (url === '/api/pools') return jsonRes(snapshot);
+      if (url === '/api/usage') return jsonRes({ total: usageTotal });
+      if (url === '/api/runtime/models') {
+        await modelsGate;
+        return jsonRes(catalog);
+      }
+      throw new Error(url);
+    };
+    const { container, root } = fakePage();
+    await renderPoolPage(container);
+    openAddForm(container);
+    await waitFor(() => root.innerHTML.includes('模型清单读取中'));
+    root.querySelector('[data-pool-profile]')!.value = 'keep-me';
+    root.querySelector('[data-pool-role]')!.value = 'executor';
+    releaseModels();
+    await waitFor(() => root.innerHTML.includes('A / B'));
+    assert.equal(
+      root.querySelector('[data-pool-profile]')!.value,
+      'keep-me',
+      '清单重画把候选名称清掉了',
+    );
+    assert.equal(root.querySelector('[data-pool-role]')!.value, 'executor');
+
+    const modelValue = JSON.stringify({ provider: 'a', model: 'b' });
+    root.querySelector('[data-pool-model]')!.value = modelValue;
+    const form = root.querySelector('[data-pool-form]')!;
+    container.dispatch('submit', { target: form, preventDefault() {} });
+    await waitFor(() => calls.some((c) => c.url === '/api/pools' && c.method === 'POST'));
+    const posted = calls.find((c) => c.url === '/api/pools' && c.method === 'POST');
+    assert.ok(posted?.body, 'POST 要带 body');
+    const body = JSON.parse(posted!.body!) as {
+      role: string;
+      profileId: string;
+      endpoint: string;
+      facts: Array<{ key: string; value: string }>;
+    };
+    assert.equal(body.role, 'executor');
+    assert.equal(body.profileId, 'keep-me');
+    assert.equal(body.endpoint, 'local');
+    assert.deepEqual(body.facts, [
+      { key: 'provider', value: 'a' },
+      { key: 'model', value: 'b' },
+    ]);
   });
 });

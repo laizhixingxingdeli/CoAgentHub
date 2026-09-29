@@ -258,6 +258,15 @@ describe('项目页的文案表', () => {
     assert.match(page, /\/api\/missions/, '任务表数据来自 GET /api/missions');
   });
 
+  test('项目页按策略轮询：可见挂定时器，隐藏与离页停', () => {
+    const page = read('projects.js');
+    assert.match(page, /updatedAt/, '任务表要读行上的 updatedAt，不能再写死占位');
+    assert.match(page, /nextRefresh/);
+    assert.match(page, /visibilitychange/);
+    assert.match(page, /setInterval/);
+    assert.match(page, /isConnected/);
+  });
+
   test('插进 DOM 的字段走转义', () => {
     const page = read('projects.js');
     for (const ent of ['&amp;', '&lt;', '&gt;', '&quot;']) {
@@ -335,7 +344,7 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.equal(reasonText({}), '');
   });
 
-  test('七列齐；空契约有文案；没时间戳是解释句；Token 拆项；行有色条', async () => {
+  test('七列齐；空契约有文案；缺时间不谎称接口没有；Token 拆项；行有色条', async () => {
     const { taskTableHtml, TASK_COLUMNS } = await loaded;
     assert.deepEqual([...TASK_COLUMNS], [
       '任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token',
@@ -345,8 +354,10 @@ describe('项目页的渲染函数喂真数据', () => {
       assert.ok(html.includes('<th>' + column + '</th>'), `表头缺 ${column}`);
     }
     assert.match(html, /（没有契约）/);
-    // 列表 API 不返回时间戳：写解释句，不是孤零零一个 —。
-    assert.ok(html.includes('列表接口不提供时间戳'), `没时间戳要解释为什么：${html}`);
+    // 行上缺 updatedAt 是这一行没读到，不是接口没这个字段。旧占位会把人
+    // 指向错误的根因（去怪后端），所以这句话不能再上屏。
+    assert.equal(html.includes('列表接口不提供时间戳'), false, `不能假称接口没有时间：${html}`);
+    assert.ok(html.includes('还没读到更新时间'), `缺时间要解释这一行：${html}`);
     assert.equal(html.includes('<td class="muted">—</td>'), false, '不再用 — 当唯一内容');
     // 没停机也不留 —。
     assert.ok(html.includes('没有停机，正常推进'), html);
@@ -357,6 +368,38 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.match(html, /<tr class="row-queued" data-mission-id="M1">/);
     // usage 缺失当 0，而不是把 NaN / undefined 映上屏。
     assert.equal(/NaN|undefined|null/.test(html), false, '上屏了 NaN/undefined 这种字串');
+  });
+
+  test('任务表按 updatedAt 降序，列上本地 MM-DD HH:mm，title 是完整时刻', async () => {
+    const { taskTableHtml } = await loaded;
+    const rows = [
+      { missionId: 'old', status: 'executing', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { missionId: 'new', status: 'executing', updatedAt: '2026-09-29T08:11:00.000Z' },
+      { missionId: 'mid', status: 'executing', updatedAt: '2026-03-15T12:30:00.000Z' },
+      { missionId: 'none', status: 'executing' },
+    ];
+    const html = taskTableHtml(rows);
+    const pos = (id: string) => {
+      const i = html.indexOf('data-mission-id="' + id + '"');
+      assert.ok(i >= 0, `缺行 ${id}`);
+      return i;
+    };
+    assert.ok(pos('new') < pos('mid') && pos('mid') < pos('old') && pos('old') < pos('none'), html);
+    // 入参数组不能被原地排序：调用方还拿着同一份列表做别的事。
+    assert.equal(rows[0]?.missionId, 'old');
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const local = (iso: string) => {
+      const d = new Date(iso);
+      return {
+        short: pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()),
+        full: d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+          + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()),
+      };
+    };
+    const shown = local('2026-09-29T08:11:00.000Z');
+    assert.ok(html.includes('>' + shown.short + '<'), `列上应是 ${shown.short}：${html}`);
+    assert.ok(html.includes('title="' + shown.full + '"'), `title 应是 ${shown.full}：${html}`);
+    assert.equal(html.includes('列表接口不提供时间戳'), false);
   });
 
   test('不守规矩的字段进不了 DOM', async () => {
@@ -379,6 +422,51 @@ describe('项目页的渲染函数喂真数据', () => {
     const card = detailCardHtml({ projectId: 'P' }, { projectRoot: '/repo', branch: 'main' });
     assert.ok(card.includes('0/1'));
     assert.ok(card.includes('/repo') && card.includes('main'), '仓库与分支得从 workspaceRef 显示出来');
+  });
+
+  test('项目页刷新策略：可见每 5 秒拉两个列表，隐藏与离页都不拉', async () => {
+    const { nextRefresh } = await loaded;
+    const on = nextRefresh('projects', 'executing', true);
+    assert.deepEqual(on.paths, ['/api/projects', '/api/missions']);
+    assert.equal(on.intervalMs, 5000);
+    assert.equal(on.liveIntervalMs, null);
+    // 项目页不按某一条任务的状态停：两个列表都要刷。
+    assert.deepEqual(nextRefresh('projects', 'completed', true), on);
+    const hidden = nextRefresh('projects', 'executing', false);
+    assert.deepEqual(hidden.paths, []);
+    assert.equal(hidden.intervalMs, null);
+    assert.equal(hidden.liveIntervalMs, null);
+    // 隐藏→可见：paths 再次有值，调用方据此立刻补拉，再按 intervalMs 续上。
+    const resumed = nextRefresh('projects', '', true);
+    assert.deepEqual(resumed.paths, on.paths);
+    assert.equal(resumed.intervalMs, 5000);
+    assert.deepEqual(nextRefresh('pool', '', true).paths, []);
+  });
+
+  test('任务页刷新策略：未终态可见拉 view/activity/live，终态与隐藏停', async () => {
+    const { nextRefresh } = await loaded;
+    const live = nextRefresh('mission', 'executing', true);
+    assert.deepEqual(live.paths, ['view', 'activity', 'live']);
+    assert.equal(live.intervalMs, 3000);
+    assert.equal(live.liveIntervalMs, 1000);
+    // 状态还不知道不当终态，否则首屏读失败就再也不会重试。
+    assert.deepEqual(nextRefresh('mission', '', true), live);
+    assert.deepEqual(nextRefresh('mission', 'investigating', true), live);
+    for (const status of ['completed', 'blocked']) {
+      const done = nextRefresh('mission', status, true);
+      assert.deepEqual(done.paths, [], status);
+      assert.equal(done.intervalMs, null, status);
+      assert.equal(done.liveIntervalMs, null, status);
+    }
+    const hidden = nextRefresh('mission', 'executing', false);
+    assert.deepEqual(hidden.paths, []);
+    assert.equal(hidden.intervalMs, null);
+    assert.equal(hidden.liveIntervalMs, null);
+    // 隐藏→可见：paths 再次有值，调用方立刻补拉。
+    const resumed = nextRefresh('mission', 'awaiting_review', true);
+    assert.deepEqual(resumed.paths, live.paths);
+    assert.equal(resumed.intervalMs, 3000);
+    assert.equal(resumed.liveIntervalMs, 1000);
   });
 });
 
