@@ -1130,6 +1130,18 @@ export function resolveDirectMainStatePath(
   return { ok: true, path };
 }
 
+export function createSigintHandler(close: () => void, onSecondSignal: () => void): () => void {
+  let received = false;
+  return () => {
+    if (received) {
+      onSecondSignal();
+      return;
+    }
+    received = true;
+    close();
+  };
+}
+
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。
 // 信号必须走同一条 server.close（drain → tick → persist → HTTP → 释锁），不能 process.exit 绕过。
 if (isDirectMainEntry()) {
@@ -1142,10 +1154,14 @@ if (isDirectMainEntry()) {
       const onSignal = () => {
         built.server.close((error) => {
           if (error) console.error(error);
-          process.exit(error ? 1 : 0);
+          process.exitCode = error ? 1 : 0;
         });
       };
-      process.once('SIGINT', onSignal);
+      const onInterrupt = createSigintHandler(onSignal, () => {
+        console.warn('Second SIGINT received; controlled pause is not available yet.');
+        process.exitCode = 1;
+      });
+      process.on('SIGINT', onInterrupt);
       process.once('SIGTERM', onSignal);
     });
   }

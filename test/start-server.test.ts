@@ -22,6 +22,7 @@ import type { AgentRuntime } from '../src/application/ports.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import {
   bindServerCloseToPeriodicStop,
+  createSigintHandler,
   defaultStatePathFromMainModule,
   isDirectMainEntry,
   resolveDirectMainStatePath,
@@ -1357,6 +1358,18 @@ async function liveTarget(statePath: string) {
 
 describe('startServer hosted 接线与排空',
   () => {
+    test('双次 SIGINT：只关闭一次并单独处理第二次', () => {
+      let closes = 0;
+      let secondSignals = 0;
+      const handler = createSigintHandler(
+        () => { closes += 1; },
+        () => { secondSignals += 1; },
+      );
+      handler();
+      handler();
+      assert.equal(closes, 1);
+      assert.equal(secondSignals, 1);
+    });
     test('源码：两种 hosted 回调交给同一 createApi；close 先 drain 再停 tick/persist',
       () => {
         const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
@@ -1380,7 +1393,7 @@ describe('startServer hosted 接线与排空',
         assert.match(startServerSrc, /periodic\?\.stop\(\)/);
         assert.match(startServerSrc, /built\.persist\(\)/);
         assert.match(startServerSrc, /baseUrl: loopback\.baseUrl/);
-        assert.match(main, /process\.once\('SIGINT'/);
+        assert.match(main, /process\.on\('SIGINT'/);
         assert.match(main, /process\.once\('SIGTERM'/);
       },
     );
