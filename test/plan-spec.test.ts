@@ -577,6 +577,92 @@ describe('资格筛选：条目契约检查', () => {
     ]);
   });
 
+  test('中英文标点切词与顶层泛指目录：六组夹具的完整警告列表', () => {
+    // 空 allowedScope 会先按缺契约排除，启发式根本不会跑；用无关占位表示「范围不覆盖」。
+    const uncoveredScope = ['README.md'];
+    const cl1Scope = [
+      'src/application/plan-spec.ts',
+      'src/run-plan.ts',
+      'test/plan-spec.test.ts',
+      'test/run-plan-wiring.test.ts',
+    ];
+    const cl1Acceptance = [
+      '确定性规则直接排除（写进 exclusions，不进候选，原因写清楚）：allowedScope 里有以 .coagent/ 开头的路径或名为 VIBE.md 的路径（原因写明 L1 不得改 Project Truth，规格走交卷 memoryDelta）；allowedScope 里有绝对路径（含盘符或以 / 开头）或含 .. 段的路径。每条规则各有正反测试。',
+      '启发式只报警、不排除：acceptance 里出现、看起来像仓内文件的路径（以 src/、test/、scripts/、docs/ 开头，或仓库根的点文件如 .gitattributes），既不等于 allowedScope 的某一项、也不在 allowedScope 的某个目录项（以 / 结尾）之下时，产出一条警告，写明条目 id 与未覆盖的路径。constraints 与 nonGoals 不参与这条规则（它们常点名不许改的文件）。测试覆盖：覆盖到的文件、目录项覆盖、未覆盖、带行号后缀（如 src/a.ts:12）按文件本身判断。',
+      'run-plan --check 在入选 / 未纳入列表之后打印全部警告（没有警告时不打印这一段）；正式开跑时同样把警告写进日志，但不因警告拒绝开跑。有排除时照现有格式列在「未纳入」里。',
+      '对真实方案 missions/PLAN-harness-remaining.json（Mission worktree 里没有这个文件，就用测试夹具覆盖各规则）不引入额外排除：已 done / skipped 的条目不参与检查，只检查会成为候选的条目。',
+      '交卷前在 Mission worktree 跑全量 `node --test`：0 fail（只允许 HAOFF1 既有的 7 条 skip），并把结果行（tests / pass / fail / skipped）写进交卷证据。',
+    ];
+    const plan = planOf([
+      {
+        id: 'GenericTop', title: '泛指顶层', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['检查以 src/、test/、scripts/、docs/ 开头的路径'],
+        status: 'pending',
+      },
+      {
+        id: 'LineCovered', title: '行号有范围', why: 'w',
+        allowedScope: ['src/a.ts'],
+        acceptance: ['带行号后缀（如 src/a.ts:12）按文件本身判断'],
+        status: 'pending',
+      },
+      {
+        id: 'LineEmpty', title: '行号空范围', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['带行号后缀（如 src/a.ts:12）按文件本身判断'],
+        status: 'pending',
+      },
+      {
+        id: 'CnComma', title: '全角逗号句号', why: 'w',
+        allowedScope: ['src/b.ts'],
+        acceptance: ['改 src/b.ts，再补 test/b.test.ts。'],
+        status: 'pending',
+      },
+      {
+        id: 'Wrapped', title: '括号反引号', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['（见 `src/c.ts`）'],
+        status: 'pending',
+      },
+      {
+        id: 'DeepDirHit', title: '深目录覆盖', why: 'w',
+        allowedScope: ['test/fixtures/x/'],
+        acceptance: ['test/fixtures/x/ 下的夹具'],
+        status: 'pending',
+      },
+      {
+        id: 'DeepDirMiss', title: '深目录空范围', why: 'w',
+        allowedScope: uncoveredScope,
+        acceptance: ['test/fixtures/x/ 下的夹具'],
+        status: 'pending',
+      },
+      {
+        id: 'CL1Original', title: 'CL1 原文',
+        why: '冻结契约的疏漏要等 Mission 开跑后由协调者提问才暴露。',
+        allowedScope: cl1Scope,
+        acceptance: cl1Acceptance,
+        status: 'pending',
+      },
+    ]);
+    const { candidates, exclusions, warnings } = selectPlanCandidates(plan, { projectRoot: ROOT });
+    assert.deepEqual(
+      candidates.map((c) => c.id),
+      ['GenericTop', 'LineCovered', 'LineEmpty', 'CnComma', 'Wrapped', 'DeepDirHit', 'DeepDirMiss', 'CL1Original'],
+    );
+    assert.equal(exclusions.length, 0);
+    assert.deepEqual(warnings, [
+      'LineEmpty：验收路径 src/a.ts 未被范围覆盖',
+      'CnComma：验收路径 test/b.test.ts 未被范围覆盖',
+      'Wrapped：验收路径 src/c.ts 未被范围覆盖',
+      'DeepDirMiss：验收路径 test/fixtures/x/ 未被范围覆盖',
+      'CL1Original：验收路径 .gitattributes 未被范围覆盖',
+      'CL1Original：验收路径 src/a.ts 未被范围覆盖',
+    ]);
+    // 旧切词会把顿号/全角括号粘进路径；完整列表已排除这两条，再钉死形状以免回归。
+    assert.equal(warnings.some((w) => w.includes('src/、test/、scripts/、docs/')), false);
+    assert.equal(warnings.some((w) => w.includes('src/a.ts:12）按文件本身判断')), false);
+  });
+
   test('done、skipped 等非候选不因新增检查产生额外排除或警告', () => {
     const plan = planOf([
       {
