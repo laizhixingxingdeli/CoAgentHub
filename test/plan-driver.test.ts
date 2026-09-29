@@ -136,6 +136,7 @@ function harness(options?: {
   let clock = Date.parse(T0);
   const now = () => new Date(clock).toISOString();
   const calls: string[] = [];
+  const logs: string[] = [];
   const passCalls: string[] = [];
   const routed: string[] = [];
   const classifiedFacts: unknown[] = [];
@@ -159,7 +160,7 @@ function harness(options?: {
     projectRoot: 'C:/repo',
     now,
     ...(options?.pollMs !== undefined ? { pollMs: options.pollMs } : {}),
-    log: () => {},
+    log: (line) => logs.push(line),
     sleep: async (ms) => {
       clock += ms;
       await options?.onSleep?.({ now: now(), store });
@@ -259,7 +260,7 @@ function harness(options?: {
         startedAt: T0,
       }),
     );
-  return { plan, deps, store, calls, passCalls, routed, classifiedFacts, status, finalReview, start };
+  return { plan, deps, store, calls, logs, passCalls, routed, classifiedFacts, status, finalReview, start };
 }
 
 /** 检视者：看到开着的升级单就按给定动作定（只定一次）。 */
@@ -1403,12 +1404,16 @@ describe('失败了开升级单等检视者', () => {
     await h.start();
     await drivePlan(h.plan, h.deps);
     const run = h.store.read()!;
-    assert.match(run.escalations[0].failure, /结构化提交/);
+    assert.equal(run.escalations[0].failure, 'Mission 卡住了：协调者连续两轮没有做任何结构化提交');
     assert.equal(run.escalations[0].answerable, undefined);
-    assert.match(run.escalations[1].failure, /要不要改公共接口/);
+    assert.equal(run.escalations[1].failure, '协调者向 L3 提问：要不要改公共接口？');
+    assert.ok(!run.escalations[1].failure.includes('夜里没人答'));
+    assert.ok(h.logs.some((line) => line.includes('协调者向 L3 提问：要不要改公共接口？')));
+    assert.ok(!h.logs.some((line) => line.includes('夜里没人答')));
     assert.equal(run.escalations[1].answerable, true);
     assert.equal(run.escalations[1].question, '要不要改公共接口？');
     assert.equal(run.escalations[2].answerable, undefined);
+    assert.equal(run.escalations[2].failure, 'Mission 走不下去了：已 blocked');
     assert.ok(h.calls.includes('abandon R1-F1 E-1'));
     assert.ok(h.calls.includes('abandon R1-F2 E-2'), '可答复单选旧动作仍放弃');
     assert.ok(!h.calls.includes('abandon R1-F3 E-3'), '已经终结的不用再放弃');
@@ -1700,6 +1705,7 @@ describe('驱动方自己停', () => {
     assert.equal(run.escalations.length, 0, '到点了，没人会在今晚定这张单');
     assert.equal(run.feature('F1')?.status, 'suspended');
     assert.match(run.feature('F1')?.needsDecision ?? '', /要你定/);
+    assert.ok(!run.feature('F1')?.needsDecision?.includes('coagent l3 plan-release'));
     assert.ok(!h.calls.some((c) => c.startsWith('abandon')), '停了就原样留给人');
   });
 

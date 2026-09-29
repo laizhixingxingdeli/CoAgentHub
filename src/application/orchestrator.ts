@@ -24,7 +24,7 @@ import type {
 import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
-import type { WorkspaceManager } from './workspace.ts';
+import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
@@ -1547,6 +1547,31 @@ export class Orchestrator {
         // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
         await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
         this.#tokens.revoke(token);
+      }
+
+      if (
+        input.role === 'executor' &&
+        outcome.endedBy === 'structured_submit' &&
+        !runaway
+      ) {
+        try {
+          if (this.#workspace.checkpoint) {
+            const view = await this.#platform.getMissionView(input.missionId);
+            const item = view.workItems.find((candidate) => candidate.workItemId === input.workItemId);
+            const allowedScope = item?.order?.allowedScope;
+            if (!input.workItemId || !Array.isArray(allowedScope) || allowedScope.length === 0) {
+              throw new Error(`缺少工作项 ${input.workItemId ?? '(未指定)'} 的冻结 allowedScope，无法检查点`);
+            }
+            await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+          } else if (!(this.#workspace instanceof InPlaceWorkspaceManager)) {
+            throw new Error('WorkspaceManager 未实现 checkpoint，无法验证已交回成果');
+          }
+        } catch (error) {
+          const detail = `执行者已交回成果，但冻结范围检查点失败：${error instanceof Error ? error.message : String(error)}。改动保留在工作区，已停止后续执行。`;
+          await this.#platform.setWaitReason(input.missionId, 'no_available_agent', detail).catch(() => undefined);
+          this.hops.push({ role: input.role, workItemId: input.workItemId, attemptId, profile, endedBy: outcome.endedBy, failureMessage: detail });
+          return { exhausted: 'no_available_agent', detail };
+        }
       }
 
       // 和写回平台的那个值保持一致。两处分叉的话，库里记的和这里判的就是
