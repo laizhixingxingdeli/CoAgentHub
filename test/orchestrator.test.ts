@@ -9,7 +9,7 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -294,6 +294,44 @@ describe('调度器：整条 Mission 自己走完', () => {
         orchestrator.hops.map((hop) => `${hop.role}:${hop.endedBy}`),
         ['coordinator:structured_submit', 'executor:structured_submit', 'coordinator:structured_submit'],
       );
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('检查点抛错停靠，不回滚已交回改动', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-denied-'));
+    const marker = join(projectRoot, 'executor-handoff.marker');
+    let rollbackCalls = 0;
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => {
+        writeFileSync(marker, 'handed-off');
+        throw new Error('checkpoint-denied');
+      },
+      rollback: async () => {
+        rollbackCalls += 1;
+        throw new Error('unexpected-rollback');
+      },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-checkpoint-denied', contract: CONTRACT });
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-checkpoint-denied', { projectRoot });
+
+      assert.equal(result.kind, 'waiting');
+      assert.equal((result as { reason: string }).reason, 'no_available_agent');
+      assert.match((result as { detail: string }).detail, /checkpoint-denied/);
+      assert.deepEqual(
+        orchestrator.hops.map((hop) => hop.role),
+        ['coordinator', 'executor'],
+      );
+      assert.equal(rollbackCalls, 0);
+      assert.equal(readFileSync(marker, 'utf8'), 'handed-off');
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

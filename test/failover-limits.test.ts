@@ -27,6 +27,7 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
 import { Platform } from '../src/application/platform.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ExecutionProfile } from '../src/application/ports.ts';
@@ -78,14 +79,16 @@ after(() => {
 async function harness(
   executor: ScriptedRuntime,
   executorPool: { candidates: ExecutionProfile[]; maxAttempts?: number; cooldownMs?: number },
+  workspace: WorkspaceManager = new InPlaceWorkspaceManager(),
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
+  const workspaceManager = workspace;
   const platform = new Platform({
     projects: new InMemoryProjectRepository(),
     deliveries,
-    workspace: new InPlaceWorkspaceManager(),
+    workspace: workspaceManager,
     activity: new InMemoryActivityLog(clock),
     clock,
     ids,
@@ -99,7 +102,7 @@ async function harness(
     platform,
     tokens: makeIssuer(platform, tokens),
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    workspace: new InPlaceWorkspaceManager(),
+    workspace: workspaceManager,
     coordinator: {
       runtime: new ScriptedRuntime(PLAN_AND_DISPATCH),
       candidates: [{ endpoint: 'l', profileId: 'coord' }],
