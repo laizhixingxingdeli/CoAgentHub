@@ -1446,6 +1446,34 @@ describe('失败了开升级单等检视者', () => {
     assert.equal(run.feature('F3')?.status, 'suspended');
   });
 
+  test('活动 PlanRun 恢复已解挂 Mission 时复用原 id', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2'],
+      finalize: { 'R1-F1': RED },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+      onMissionReturn: async ({ store }) => {
+        if (store.read()?.feature('F2')?.status === 'running') {
+          views['R1-F1'] = { parked: false };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.ok(h.calls.includes('run R1-F1'));
+    assert.equal(h.calls.filter((call) => call === 'run R1-F1').length, 2);
+    assert.ok(!h.calls.some((call) => call.startsWith('create-classified R1-F1')));
+    assert.equal(h.store.read()!.feature('F1')?.missionIds.length, 1);
+  });
+
   test('没人定 → 截止判过期、记未解决、功能挂起、名额放掉、接着跑', async () => {
     const h = harness({ finalize: { 'R1-F1': RED } });
     await h.start();

@@ -146,6 +146,24 @@ export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<P
         await deps.store.update((r) => r.checkStop(now));
         continue;
       }
+      const runningFeature = run.features.find((item) => item.status === 'running');
+      if (!runningFeature && run.parkedMissions.length > 0) {
+        let resumed: { featureId: string; missionId: string } | undefined;
+        for (const parked of run.parkedMissions) {
+          const view = await deps.platform.getMissionView(parked.missionId);
+          if (view.parked === false) {
+            const featureId = await deps.store.update((r) => r.resumeParkedMission(parked.missionId));
+            resumed = { featureId, missionId: parked.missionId };
+            break;
+          }
+        }
+        if (resumed) {
+          const feature = specs.get(resumed.featureId);
+          if (!feature) throw new Error(`方案运行里有功能点 ${resumed.featureId}，方案文件里却没有。`);
+          await runFeature(plan, run, feature, 1, deps, resumed.missionId);
+          continue;
+        }
+      }
       const next = run.nextPending();
       if (!next) {
         await deps.store.update((r) => r.finish(now));
@@ -189,11 +207,14 @@ async function runFeature(
   feature: PlanFeatureSpec,
   attempt: number,
   deps: PlanDriverDeps,
+  existingMissionId?: string,
 ): Promise<void> {
   const restoredMissionId = attempt === 1 ? deps.resumeMissions?.[feature.id] : undefined;
-  const missionId = restoredMissionId ?? (attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`);
+  const missionId = existingMissionId ?? restoredMissionId ?? (attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`);
   if (requireRun(deps).stopped) return;
-  if (restoredMissionId) {
+  if (existingMissionId) {
+    deps.log(`${feature.id} ▶ ${existingMissionId}（续跑已解挂 Mission）`);
+  } else if (restoredMissionId) {
     await deps.store.update((r) => r.startFeature(feature.id, restoredMissionId));
     deps.log(`${feature.id} ▶ ${restoredMissionId}（恢复自上一次方案运行）`);
     if (!deps.platform.resumeMission) throw new Error('恢复已有 Mission 时缺少 platform.resumeMission 接口。');
