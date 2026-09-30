@@ -31,6 +31,7 @@ import {
   isDirectMainEntry,
   resolveDirectMainStatePath,
   startServer,
+  buildPersistentPlatform,
 } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { API_VERSION } from '../src/api/server.ts';
@@ -2144,6 +2145,64 @@ function cleanPlanRepo(branch: string): string {
 }
 
 describe('startServer 方案记录目录与托管 live', () => {
+  test('真实 hosted Mission 双次 SIGINT 暂停落盘并关闭复锁', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-mission-double-signal-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// hosted adapter\\n');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(), runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    let running: Promise<number> | undefined;
+    let closeDone = false;
+    let exitCode = 0;
+    try {
+      const target = await liveTarget(statePath);
+      running = loopbackRunRequest(target, {
+        path: '/api/control/run-mission',
+        body: hostedMissionBody(dir, adapter, statePath, 'M-double-signal-real'),
+      }, () => {});
+      await gated.started;
+      assert.equal(built.hostedRunSnapshots().find((row) => row.id === 'M-double-signal-real')?.kind, 'mission');
+      const handler = createSigintHandler(
+        () => built.server.close(() => { closeDone = true; }),
+        () => { exitCode = 7; void built.requestSafeShutdown(); },
+        () => { built.hostedRunSnapshots(); },
+      );
+      handler();
+      assert.equal(built.server.listening, true);
+      assert.equal(closeDone, false);
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      await assert.rejects(
+        loopbackRunRequest(target, { path: '/api/control/run-mission', body: hostedMissionBody(dir, adapter, statePath, 'M-double-signal-new') }, () => {}),
+        (error: unknown) => error instanceof LoopbackHttpError && error.status === 503 && error.code === 'SERVICE_DRAINING',
+      );
+      handler();
+      gated.release();
+      assert.equal(await running, 0);
+      const deadline = Date.now() + 4_000;
+      while (!closeDone && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(closeDone, true);
+      assert.equal(exitCode, 7);
+      assert.equal((await built.platform.getMissionView('M-double-signal-real')).status, 'paused');
+      const reloaded = await buildPersistentPlatform(statePath);
+      assert.equal((await reloaded.platform.getMissionView('M-double-signal-real')).status, 'paused');
+      reloaded.releaseLock();
+      assert.equal(built.server.listening, false);
+      const release = acquireLock(statePath);
+      release();
+    } finally {
+      gated.release();
+      if (running) await running;
+      if (built.server.listening) await new Promise<void>((resolve) => built.server.close(() => resolve()));
+    }
+  });
+
   test('真实 hosted PlanRun 双次 SIGINT 安全停靠并释放主锁（动态状态目录）', { timeout: 20_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-double-signal-'));
     dirs.push(dir);
