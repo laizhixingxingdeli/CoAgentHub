@@ -96,6 +96,53 @@ async function upToSubmitted() {
 }
 
 describe('Mission park', () => {
+  test('resume 同一 Mission 前先同步目标 HEAD 并保留已验收成果', async () => {
+    const calls: string[] = [];
+    let platform: Platform;
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      checkpoint: async (_cwd: string, _missionId: string, _reason: string, _paths: string[]) => { calls.push('checkpoint'); },
+      syncMissionWithTarget: async () => {
+        calls.push('sync');
+        assert.equal((await platform.getMissionView('M1')).parked, true);
+        return { targetHead: 'new-head', conflictFiles: [] };
+      },
+    } as WorkspaceManager;
+    ({ platform } = makePlatform(workspace));
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', exec, { kind: 'test', summary: 'passed', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M1', exec, {
+      outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: 'none',
+    });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: 'verified' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+    await platform.recordWorkspace('M1', {
+      projectRoot: '/fake/project', branch: 'mission/M1', targetBranch: 'main', baseRevision: 'old-head',
+    });
+    const before = await platform.getMissionView('M1');
+    const lastReview = before.workItems[0]?.lastReview;
+    await platform.parkMission('M1', { reason: 'waiting', reviewer: 'L3' });
+    await platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3' });
+    const after = await platform.getMissionView('M1');
+    assert.deepEqual(calls, ['checkpoint', 'sync']);
+    assert.equal(after.missionId, before.missionId);
+    assert.equal(after.status, before.status);
+    assert.equal(after.parked, false);
+    assert.equal(after.workspaceRef?.baseRevision, 'new-head');
+    assert.equal(after.workItems[0]?.id, workItemId);
+    assert.equal(after.workItems[0]?.status, 'accepted');
+    assert.deepEqual(after.workItems[0]?.lastReview, lastReview);
+    assert.deepEqual(after.workItems[0]?.attempts, before.workItems[0]?.attempts);
+  });
+
   test('拒绝空 reason 或 reviewer', async () => {
     const { platform } = makePlatform();
     await platform.createMission({ projectId: 'P', missionId: 'PARK1', contract: CONTRACT });
