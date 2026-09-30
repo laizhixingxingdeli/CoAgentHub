@@ -1005,6 +1005,58 @@ describe('l3 主写：探测与回环转发', () => {
     }
   });
 
+  test('Mission park 与带 answer 的 resume 经唯一持锁服务转发', async () => {
+    const { statePath } = await emptyPlanState();
+    const instanceId = 'inst-mission-park';
+    const stateId = stateIdFor(statePath);
+    const release = acquireLock(statePath, '常驻', { instanceId, apiVersion: API_VERSION });
+    const requests: Array<{ method: string; path: string; body: unknown }> = [];
+    const server = createServer(async (req, res) => {
+      const path = String(req.url ?? '/').split('?')[0];
+      if (req.method === 'GET' && path === '/api/health') {
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-coagent-api': API_VERSION,
+          'x-coagent-instance': instanceId,
+          'x-coagent-state-id': stateId,
+        });
+        res.end(JSON.stringify({ ok: true, api: API_VERSION }));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+      requests.push({ method: req.method ?? '', path, body });
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'x-coagent-api': API_VERSION,
+        'x-coagent-instance': instanceId,
+        'x-coagent-state-id': stateId,
+      });
+      res.end(JSON.stringify({ status: 'parked' }));
+    });
+    liveServers.push(server);
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+      });
+      publishLockPort(statePath, instanceId, port);
+      const parked = await l3Async(statePath, 'park', 'M-park', '--reason', '等用户', '--as', 'reviewer');
+      assert.equal(parked.status, 0, parked.out);
+      const resumed = await l3Async(statePath, 'resume', 'M-park', '--answer', '继续', '--reason', '已答复', '--as', 'reviewer');
+      assert.equal(resumed.status, 0, resumed.out);
+      assert.deepEqual(requests, [
+        { method: 'POST', path: '/api/missions/M-park/park', body: { reason: '等用户', reviewer: 'reviewer' } },
+        { method: 'POST', path: '/api/missions/M-park/parked-resume', body: { answer: '继续', reason: '已答复', reviewer: 'reviewer' } },
+      ]);
+      assert.throws(() => acquireLock(statePath, 'second-writer', { instanceId: 'inst-second', apiVersion: API_VERSION }));
+    } finally {
+      release();
+      await closeServer(server);
+    }
+  });
+
   test('probe live 但写应答身份不符：非零且不离线回退', async () => {
     const fx = await seedMainWrites();
     const before = readFileSync(fx.statePath);
