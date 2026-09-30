@@ -73,6 +73,28 @@ test('checkpoint rejects outside changes and ambiguous authorization without del
   assert.equal(git(cwd, 'status', '--porcelain').includes('outside'), true);
 });
 
+test('Mission worktree cleanliness check distinguishes clean, modified, staged, and untracked states without mutation', async () => {
+  const root = repo();
+  const manager = new GitWorktreeManager();
+  const prepared = await manager.prepare('clean-test', root);
+  await manager.assertMissionWorktreeClean!('clean-test', root);
+  const head = git(prepared.cwd, 'rev-parse', 'HEAD');
+
+  for (const dirty of [
+    () => writeFileSync(join(prepared.cwd, 'base'), 'modified'),
+    () => { writeFileSync(join(prepared.cwd, 'base'), 'staged'); git(prepared.cwd, 'add', 'base'); },
+    () => writeFileSync(join(prepared.cwd, 'untracked'), 'keep'),
+  ]) {
+    dirty();
+    const before = git(prepared.cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=all');
+    await assert.rejects(manager.assertMissionWorktreeClean!('clean-test', root), /不干净/);
+    assert.equal(git(prepared.cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=all'), before);
+    assert.equal(git(prepared.cwd, 'rev-parse', 'HEAD'), head);
+    git(prepared.cwd, 'reset', '--hard', 'HEAD');
+    git(prepared.cwd, 'clean', '-fd');
+  }
+});
+
 test('in-place manager does not expose a fake checkpoint', () => {
   assert.equal(new InPlaceWorkspaceManager().checkpoint, undefined);
 });

@@ -146,6 +146,8 @@ export interface WorkspaceManager {
   head(cwd: string): Promise<string>;
   /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
   checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
+  /** Read-only assertion that an isolated Mission worktree has no tracked, staged, or untracked changes. */
+  assertMissionWorktreeClean?(missionId: string, projectRoot: string): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
   /** 将指定目标分支当前 HEAD 合入原 Mission worktree；冲突时保留冲突状态。 */
@@ -404,6 +406,15 @@ export class GitWorktreeManager implements WorkspaceManager {
 
   async targetHead(projectRoot: string): Promise<string> {
     return (await run('git', ['rev-parse', 'HEAD'], { cwd: resolve(projectRoot) })).stdout.trim();
+  }
+
+  async assertMissionWorktreeClean(missionId: string, projectRoot: string): Promise<void> {
+    const cwd = join(this.#rootFor(projectRoot), missionId);
+    if (!existsSync(cwd)) throw new Error('Mission worktree 不存在');
+    const branch = (await run('git', ['symbolic-ref', '-q', 'HEAD'], { cwd }).then((r) => r.stdout.trim()).catch(() => ''));
+    if (branch !== `refs/heads/mission/${missionId}`) throw new Error('Mission worktree 分支不符');
+    const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
+    if (status.length > 0) throw new Error('Mission worktree 不干净');
   }
 
   async checkpoint(
