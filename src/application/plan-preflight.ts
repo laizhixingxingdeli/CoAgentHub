@@ -76,21 +76,27 @@ export function preflightPlanMissionSlots(input: {
   for (const feature of input.selection.candidates) {
     candidateCounts.set(feature.id, (candidateCounts.get(feature.id) ?? 0) + 1);
   }
+  const validRuns = history.filter((item) => !('error' in item) && item.planId === input.plan.planId &&
+    item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop');
+  const claims = holders.flatMap((holder) => validRuns.flatMap((run) => run.features
+    .filter((feature) => feature.missionIds.includes(holder.missionId))
+    .map((feature) => ({ holder, run, feature }))));
+  const claimCounts = new Map<string, number>();
+  const featureHolderCounts = new Map<string, number>();
+  for (const claim of claims) {
+    claimCounts.set(claim.holder.missionId, (claimCounts.get(claim.holder.missionId) ?? 0) + 1);
+    featureHolderCounts.set(claim.feature.featureId, (featureHolderCounts.get(claim.feature.featureId) ?? 0) + 1);
+  }
   for (const mission of holders) {
-    const evidence = history.filter((item) => !('error' in item) && item.planId === input.plan.planId &&
-      item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop' &&
-      item.features.some((feature) => candidateCounts.get(feature.featureId) === 1 && feature.missionIds.includes(mission.missionId)));
-    const mappings = evidence.flatMap((item) => item.features.filter((feature) =>
-      candidateCounts.get(feature.featureId) === 1 && feature.missionIds.includes(mission.missionId)));
-    const matchedFeature = !historyErrors && evidence.length === 1 && mappings.length === 1 &&
-      mappings[0]!.missionIds.length === 1 && mappings[0]!.missionIds[0] === mission.missionId
-      ? mappings[0]
-      : undefined;
-    // A single feature naming several occupied missions is not proof of a one-to-one resume.
-    const sharedHolder = matchedFeature !== undefined && holders.some((other) =>
-      other.missionId !== mission.missionId && matchedFeature.missionIds.includes(other.missionId));
-    if (matchedFeature && !sharedHolder && mission.paused && mission.status === 'executing') {
-      resume.push({ featureId: matchedFeature.featureId, missionId: mission.missionId });
+    const matching = claims.filter((claim) => claim.holder.missionId === mission.missionId);
+    const claim = matching[0];
+    const unique = !historyErrors && matching.length === 1 && claim !== undefined &&
+      claimCounts.get(mission.missionId) === 1 && featureHolderCounts.get(claim.feature.featureId) === 1 &&
+      candidateCounts.get(claim.feature.featureId) === 1 &&
+      claim.feature.missionIds.length === 1 && claim.feature.missionIds[0] === mission.missionId &&
+      holders.filter((other) => other.missionId === mission.missionId).length === 1;
+    if (unique && mission.paused && mission.status === 'executing') {
+      resume.push({ featureId: claim.feature.featureId, missionId: mission.missionId });
     } else {
       problems.push(...slotHolders([mission], input.plan.projectId));
     }
