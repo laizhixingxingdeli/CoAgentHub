@@ -2278,6 +2278,37 @@ export class Platform {
     return this.#activity.list(missionId);
   }
 
+  /** Persist the dispatched work-item snapshot associated with an observed Git conflict. */
+  async recordConflictDispatchBarrier(
+    missionId: string,
+    conflictFiles: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      const events = await this.#activity.list(missionId);
+      let barrier: readonly string[] | undefined;
+      for (const event of events) {
+        if (event.kind === 'mission.conflict_dispatch_barrier') {
+          const data = event.data as { workItemIds?: unknown };
+          barrier = Array.isArray(data.workItemIds) ? data.workItemIds as string[] : [];
+        } else if (event.kind === 'mission.conflict_dispatch_cleared') {
+          barrier = undefined;
+        }
+      }
+      if (conflictFiles.length === 0) {
+        if (barrier !== undefined) await this.#event(mission, 'mission.conflict_dispatch_cleared', {});
+        return [];
+      }
+      if (barrier !== undefined) return [...barrier];
+      const workItemIds = mission.workItems.filter((item) => item.status === 'dispatched').map((item) => item.id);
+      await this.#event(mission, 'mission.conflict_dispatch_barrier', {
+        conflictFiles: [...conflictFiles],
+        workItemIds,
+      });
+      return workItemIds;
+    });
+  }
+
   /* ============================ L2 协调者面 ============================ */
 
   async getMissionView(missionId: string): Promise<MissionView> {

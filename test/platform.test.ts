@@ -96,6 +96,24 @@ async function upToSubmitted() {
 }
 
 describe('Mission park', () => {
+  test('conflict dispatch barrier freezes old dispatched work items until cleared', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'BARRIER', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('BARRIER');
+    await platform.updatePlan('BARRIER', coord, PLAN);
+    const oldItem = await platform.createWorkItem('BARRIER', coord, { title: 'old', order: ORDER });
+    await platform.dispatchWorkItems('BARRIER', coord, [oldItem.workItemId]);
+
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    const newItem = await platform.createWorkItem('BARRIER', coord, { title: 'resolution', order: ORDER });
+    await platform.dispatchWorkItems('BARRIER', coord, [newItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', []), []);
+    const view = await platform.getMissionView('BARRIER');
+    assert.equal(view.workItems.find((item) => item.id === oldItem.workItemId)?.status, 'dispatched');
+    assert.equal(view.workItems.find((item) => item.id === newItem.workItemId)?.status, 'dispatched');
+  });
+
   test('resume 同一 Mission 前先同步目标 HEAD 并保留已验收成果', async () => {
     const calls: string[] = [];
     let platform: Platform;
