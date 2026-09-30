@@ -37,6 +37,9 @@ test('syncMissionWithTarget incorporates target commits and leaves conflicts int
   assert.equal(git(prepared.cwd, 'show', 'HEAD:target'), 'target');
   assert.equal(git(prepared.cwd, 'merge-base', '--is-ancestor', missionHead, 'HEAD') || '', '');
   assert.equal(git(prepared.cwd, 'cat-file', '-e', `${missionHead}^{commit}`), '');
+  const resumed = await manager.prepare('sync-test', root, targetHead);
+  assert.equal(resumed.baseRevision, targetHead);
+  assert.equal(git(resumed.cwd, 'cat-file', '-e', `${missionHead}^{commit}`), '');
   writeFileSync(join(prepared.cwd, 'base'), 'mission');
   git(prepared.cwd, 'add', 'base'); git(prepared.cwd, 'commit', '-qm', 'mission');
   writeFileSync(join(root, 'base'), 'target conflict');
