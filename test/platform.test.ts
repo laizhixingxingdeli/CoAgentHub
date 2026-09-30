@@ -10,6 +10,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -30,12 +31,12 @@ const ORDER: WorkOrder = {
   contextRefs: [],
 };
 
-function makePlatform() {
+function makePlatform(workspace?: WorkspaceManager) {
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
   const projects = new InMemoryProjectRepository();
   const ids = new SequentialIds();
-  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids });
+  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids, workspace });
   return { platform, activity, projects };
 }
 
@@ -101,6 +102,39 @@ describe('Mission park', () => {
     await assert.rejects(platform.parkMission('PARK1', { reason: ' ', reviewer: 'L3' }), PlatformRuleError);
     await assert.rejects(platform.parkMission('PARK1', { reason: 'wait', reviewer: ' ' }), PlatformRuleError);
     assert.equal((await platform.getMissionView('PARK1')).parked, false);
+  });
+
+  test('挂起释放同项目名额，下一张票可以开跑', async () => {
+    const cleanChecks: string[] = [];
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      assertMissionWorktreeClean: async (missionId: string) => { cleanChecks.push(missionId); },
+    } as WorkspaceManager;
+    const { platform } = makePlatform(workspace);
+    const prepare = async (missionId: string) => {
+      await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+      const coord = await platform.startCoordinatorAttempt(missionId);
+      await platform.updatePlan(missionId, coord.attemptId, PLAN);
+      const item = await platform.createWorkItem(missionId, coord.attemptId, { title: 'W', order: ORDER });
+      await platform.dispatchWorkItems(missionId, coord.attemptId, [item.workItemId]);
+    };
+
+    await prepare('PARK-FIRST');
+    await platform.recordWorkspace('PARK-FIRST', {
+      projectRoot: '/fake/project', branch: 'mission/PARK-FIRST', targetBranch: 'main', baseRevision: 'base',
+    });
+    assert.equal((await platform.getMissionView('PARK-FIRST')).isMutating, true);
+    await platform.parkMission('PARK-FIRST', { reason: '等待用户答复', reviewer: 'L3' });
+    const parked = await platform.getMissionView('PARK-FIRST');
+    assert.equal(parked.parked, true);
+    assert.equal(parked.parkReason, '等待用户答复');
+    assert.equal(parked.isMutating, false);
+    assert.deepEqual(cleanChecks, ['PARK-FIRST']);
+
+    await prepare('PARK-SECOND');
+    const second = await platform.getMissionView('PARK-SECOND');
+    assert.equal(second.status, 'executing');
+    assert.equal(second.isMutating, true);
   });
 });
 
