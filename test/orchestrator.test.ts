@@ -260,6 +260,28 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
+  test('未合并路径先唤醒协调者，不运行旧派发执行者', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-conflict-'));
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': COORDINATOR_HAPPY['coordinator:-:0'],
+      'coordinator:-:1': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+    });
+    const executor = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      getMissionConflictFiles: async () => ['src/foo.ts'],
+    });
+    try {
+      current = await harness({ coordinator, executor }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-conflict', contract: CONTRACT });
+      await current.makeOrchestrator().runMission('M-conflict', { projectRoot, maxRounds: 2 });
+      assert.match(coordinator.instructions[1], /src\/foo\.ts/);
+      assert.match(coordinator.instructions[1], /不要丢弃任一方/);
+      assert.equal(executor.specs.length, 0);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('成功 executor 使用冻结 WorkOrder.allowedScope 检查点', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-'));
     const checkpoints: Array<{ cwd: string; missionId: string; workItemId: string; allowedPaths: readonly string[] }> = [];

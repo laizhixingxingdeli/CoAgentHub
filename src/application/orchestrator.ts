@@ -201,6 +201,7 @@ function coordinatorInstruction(view: {
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
   promotions?: readonly { triggerRule: string }[];
+  conflictFiles?: readonly string[];
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -210,7 +211,14 @@ function coordinatorInstruction(view: {
     view.escalationLog.length === 0 &&
     !view.finalReview;
   const body = coordinatorBody(view);
-  return opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
+  const freshBody = opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
+  if (!view.conflictFiles?.length) return freshBody;
+  return [
+    '**阻断：Mission Git index 存在未合并路径。请先创建工作项修复冲突，保留双方改动，不要丢弃任一方。**',
+    ...view.conflictFiles.map((file) => `- ${file}`),
+    '',
+    freshBody,
+  ].join('\n');
 }
 
 function coordinatorBody(view: {
@@ -540,13 +548,21 @@ export class Orchestrator {
         return lightweight.outcome;
       }
 
+      // 每轮都读取 Git index 当前事实；事件可能已过期，不能作为冲突是否仍存在的依据。
+      // 查询失败直接向上抛出，避免把未知状态误当作无冲突而启动执行者。
+      const conflictFiles = await this.#workspace.getMissionConflictFiles?.(
+        missionId,
+        options.projectRoot,
+      );
+      const activeConflicts = conflictFiles?.length ? conflictFiles : undefined;
+
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
       //
       // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、
       // 或者 L2 自己）判定当前这批工单需要重新审视；这时候还去跑它们，
       // 就是明知要重做还先花一遍钱。让协调者先说话。
       const pending =
-        view.status === 'executing'
+        !activeConflicts && view.status === 'executing'
           ? view.workItems.filter((item) => item.status === 'dispatched')
           : [];
       if (pending.length > 0) {
@@ -609,7 +625,7 @@ export class Orchestrator {
         missionId,
         cwd,
         pool: this.#coordinator,
-        instruction: coordinatorInstruction(view),
+        instruction: coordinatorInstruction({ ...view, conflictFiles: activeConflicts }),
       });
       if (hop && 'alreadyCompleted' in hop) continue;
       if (hop && 'retrySameSlot' in hop) continue;
