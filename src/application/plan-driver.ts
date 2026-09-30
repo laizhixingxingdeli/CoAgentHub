@@ -150,6 +150,8 @@ export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<P
       if (!runningFeature && run.parkedMissions.length > 0) {
         let resumed: { featureId: string; missionId: string } | undefined;
         for (const parked of run.parkedMissions) {
+          const parkedFeature = run.features.find((item) => item.missionIds.includes(parked.missionId));
+          if (parkedFeature?.status !== 'suspended') continue;
           const view = await deps.platform.getMissionView(parked.missionId);
           if (view.parked === false) {
             const featureId = await deps.store.update((r) => r.resumeParkedMission(parked.missionId));

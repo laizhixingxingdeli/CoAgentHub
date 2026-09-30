@@ -84,7 +84,7 @@ function harness(options?: {
   features?: string[];
   dependsOn?: Record<string, string[]>;
   runs?: Record<string, Ran | Error | (Ran | Error)[]>;
-  finalize?: Record<string, Finalize | Error>;
+  finalize?: Record<string, Finalize | Error | (Finalize | Error)[]>;
   haFinalize?: Record<string, Finalize | Error>;
   onHaFinalize?: (missionId: string) => void;
   passTakesMs?: number[];
@@ -243,10 +243,15 @@ function harness(options?: {
       },
       finalizeMissionByMachine: async (missionId, input) => {
         calls.push(`finalize ${missionId} → ${input.integrationBranch} [${input.verification[0].argv.join(' ')}]`);
-        const result = options?.finalize?.[missionId] ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
-        if (result instanceof Error) throw result;
-        status.set(missionId, result.status);
-        return result;
+        const configured = options?.finalize?.[missionId];
+        const result = Array.isArray(configured)
+          ? configured[runIndex.get(`finalize:${missionId}`) ?? 0]
+          : configured;
+        if (Array.isArray(configured)) runIndex.set(`finalize:${missionId}`, (runIndex.get(`finalize:${missionId}`) ?? 0) + 1);
+        const finalResult = result ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
+        if (finalResult instanceof Error) throw finalResult;
+        status.set(missionId, finalResult.status);
+        return finalResult;
       },
       abandonMissionForPlan: async (missionId, input) => {
         calls.push(`abandon ${missionId} ${input.escalationId}`);
@@ -1451,7 +1456,7 @@ describe('失败了开升级单等检视者', () => {
     let parked = false;
     const h = harness({
       features: ['F1', 'F2'],
-      finalize: { 'R1-F1': RED },
+      finalize: { 'R1-F1': [RED, { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-2' }] },
       views,
       onSleep: async () => {
         if (!parked) {
