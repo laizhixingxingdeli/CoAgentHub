@@ -832,7 +832,9 @@ describe('run-plan 轮次选项接线', () => {
 describe('run-plan --check 只读、零副作用', () => {
   function runCheck(planPath: string, cwd: string, extra: string[] = [], env?: NodeJS.ProcessEnv) {
     const isolated = temp('coagent-check-cwd-');
-    return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude', '--check'], {
+    const state = join(isolated, 'readable-empty-state.json');
+    writeFileSync(state, JSON.stringify({ version: 1 }));
+    return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--state', state, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude', '--check'], {
       encoding: 'utf8',
       timeout: 15_000,
       cwd: isolated,
