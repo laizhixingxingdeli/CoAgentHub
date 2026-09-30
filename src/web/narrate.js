@@ -498,6 +498,50 @@ const EVENT_TABLE = {
     };
   },
 
+  'mission.conflict_dispatch_barrier': (event) => {
+    const data = (event && event.data) || {};
+    const files = list(data.conflictFiles);
+    return {
+      badge: 'L2',
+      action: '冲突期间暂停派发',
+      detail: files.length ? `冲突文件：${files.join('、')}` : '检测到冲突，已暂停派发工作项',
+    };
+  },
+
+  'mission.conflict_dispatch_cleared': () => ({
+    badge: 'L2',
+    action: '解除冲突派发限制',
+    detail: '冲突已清除，可以继续派发工作项',
+  }),
+
+  'mission.parked': (event) => ({
+    badge: 'L2',
+    action: '挂起 Mission',
+    detail: or(event && event.data && event.data.reason, '等待用户答复，暂时挂起'),
+  }),
+
+  'mission.resume_sync_conflict': (event) => {
+    const data = (event && event.data) || {};
+    const files = list(data.conflictFiles);
+    const reason = text(data.reason);
+    return {
+      badge: 'L2',
+      action: '续跑同步遇到冲突',
+      detail: [reason, files.length ? `冲突文件：${files.join('、')}` : '', data.baseRevision ? `集成基线：${data.baseRevision}` : '']
+        .filter(Boolean).join(' · ') || '与集成分支同步时发生冲突，需协调处理',
+    };
+  },
+
+  'mission.resumed_from_park': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L2',
+      action: '从挂起状态续跑',
+      detail: [text(data.reason), data.baseRevision ? `集成基线：${data.baseRevision}` : '']
+        .filter(Boolean).join(' · ') || '已同步集成分支并恢复 Mission',
+    };
+  },
+
   'mission.resumed': () => ({ badge: 'L2', action: '又动起来了', detail: '接着往下走' }),
 
   'orchestration.round.started': () => ({
