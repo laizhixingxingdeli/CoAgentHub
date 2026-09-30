@@ -83,10 +83,13 @@ export function preflightPlanMissionSlots(input: {
     const mappings = evidence.flatMap((item) => item.features.filter((feature) =>
       candidateCounts.get(feature.featureId) === 1 && feature.missionIds.includes(mission.missionId)));
     const matchedFeature = !historyErrors && evidence.length === 1 && mappings.length === 1 &&
-      mappings[0]!.missionIds.filter((id) => id === mission.missionId).length === 1
+      mappings[0]!.missionIds.length === 1 && mappings[0]!.missionIds[0] === mission.missionId
       ? mappings[0]
       : undefined;
-    if (matchedFeature && mission.paused && mission.status === 'executing') {
+    // A single feature naming several occupied missions is not proof of a one-to-one resume.
+    const sharedHolder = matchedFeature !== undefined && holders.some((other) =>
+      other.missionId !== mission.missionId && matchedFeature.missionIds.includes(other.missionId));
+    if (matchedFeature && !sharedHolder && mission.paused && mission.status === 'executing') {
       resume.push({ featureId: matchedFeature.featureId, missionId: mission.missionId });
     } else {
       problems.push(...slotHolders([mission], input.plan.projectId));
