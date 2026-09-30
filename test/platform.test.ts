@@ -130,6 +130,12 @@ describe('Mission park', () => {
     const before = await platform.getMissionView('M1');
     const lastReview = before.workItems[0]?.lastReview;
     await platform.parkMission('M1', { reason: 'waiting', reviewer: 'L3' });
+    await assert.rejects(
+      platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3', answer: 'answer' }),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'NO_OPEN_ESCALATION',
+    );
+    assert.deepEqual(calls, ['checkpoint']);
+    assert.equal((await platform.getMissionView('M1')).parked, true);
     await platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3' });
     const after = await platform.getMissionView('M1');
     assert.deepEqual(calls, ['checkpoint', 'sync']);

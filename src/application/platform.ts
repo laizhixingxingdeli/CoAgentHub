@@ -2032,6 +2032,14 @@ export class Platform {
     if (!reason || !reviewer) throw new PlatformRuleError('INVALID_PARK_REQUEST', '续跑需要非空 reason 与 reviewer。');
     const { mission, project } = await this.#locate(missionId);
     if (!mission.isParked) throw new PlatformRuleError('MISSION_NOT_PARKED', `Mission ${missionId} 未挂起。`);
+    if (input.answer !== undefined) {
+      if (typeof input.answer !== 'string' || !input.answer.trim()) {
+        throw new PlatformRuleError('INVALID_ESCALATION_ANSWER', '升级答复不能为空。');
+      }
+      if (mission.openEscalations.length === 0) {
+        throw new PlatformRuleError('NO_OPEN_ESCALATION', `Mission ${missionId} 没有待答复的升级。`);
+      }
+    }
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
     if (holder) throw new PlatformRuleError('PROJECT_BUSY', `Mission ${holder.id} 占用项目改动名额。`);
     const ref = mission.workspaceRef;
