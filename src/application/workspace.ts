@@ -474,6 +474,9 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (merge) return { targetHead, conflictFiles: [] };
     const conflicts = (await run('git', ['diff', '--name-only', '--diff-filter=U', '-z'], { cwd })).stdout
       .split('\0').filter(Boolean);
+    if (conflicts.length === 0) {
+      throw new Error('目标合并失败但没有未合并路径；保留 Mission worktree 状态以供检查');
+    }
     return { targetHead, conflictFiles: conflicts };
   }
 
