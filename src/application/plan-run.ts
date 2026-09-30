@@ -1204,6 +1204,29 @@ export class PlanRun {
   }
 
   /**
+   * 后续 driver 在 Platform 确认 Mission 已解挂后调用；复用原 Mission 恢复功能运行投影。
+   */
+  resumeParkedMission(missionId: string): string {
+    this.#assertRunning();
+    if (!isText(missionId)) {
+      throw new PlatformRuleError('PLAN_MISSION_RESUME_INVALID', '续跑投影需要合法的 Mission。');
+    }
+    const escalation = this.#escalations.find(
+      (item) => item.resolution?.kind === 'parked' && item.resolution.missionId === missionId,
+    );
+    const feature = escalation ? this.#requireFeature(escalation.featureId) : undefined;
+    if (!escalation || !feature || feature.status !== 'suspended' || !feature.missionIds.includes(missionId)) {
+      throw new PlatformRuleError('PLAN_MISSION_RESUME_NOT_FOUND', `没有 Mission ${missionId} 对应的已挂起功能。`);
+    }
+    const busy = this.#features.find((item) => item.status === 'running');
+    if (busy) {
+      throw new PlatformRuleError('PLAN_FEATURE_BUSY', `${busy.featureId} 还在跑，同一时刻只跑一个功能。`);
+    }
+    this.#setFeature(feature.featureId, { status: 'running', needsDecision: undefined });
+    return feature.featureId;
+  }
+
+  /**
    * 截止前没等到决定：记一次未解决，功能挂起交给人。
    *
    * 挂起而不是原地再等：一个等不到决定的失败要是把整晚钉住，后面的功能一个都

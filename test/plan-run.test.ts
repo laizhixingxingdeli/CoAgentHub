@@ -243,6 +243,12 @@ describe('Mission 挂起投影', () => {
     assert.deepEqual(restored.parkedMissions, run.parkedMissions);
     assert.throws(() => restored.expire(escalation.id, at(90)), rule('ESCALATION_ALREADY_RESOLVED'));
     assert.equal(restored.unresolvedCount, 0);
+    const missionIds = restored.feature('F1')?.missionIds;
+    assert.equal(restored.resumeParkedMission('M-F1'), 'F1');
+    assert.deepEqual(restored.parkedMissions, run.parkedMissions);
+    assert.equal(restored.unresolvedCount, 0);
+    assert.equal(restored.feature('F1')?.status, 'running');
+    assert.deepEqual(restored.feature('F1')?.missionIds, missionIds);
     assert.equal(restored.stopped, undefined);
   });
 });
