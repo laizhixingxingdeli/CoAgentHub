@@ -90,6 +90,7 @@ import type {
 } from './application/ports.ts';
 import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
+import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import {
   parseAgentEnvPassthrough,
@@ -100,6 +101,39 @@ import { ExecFileCommandRunner } from './application/validation/exec-file-comman
 import { WorkspaceChangedPathReader } from './application/validation/workspace-changed-path-reader.ts';
 import { WorkspaceDiffFactReader } from './application/validation/workspace-diff-fact-reader.ts';
 import { InMemoryValidationReportRepository } from './application/validation/report-repository.ts';
+
+export async function shutdownHostedPlan(input: {
+  readonly runPath: string;
+  readonly hostedMissionId?: string;
+  readonly platform: Pick<Platform, 'pauseMission'>;
+  readonly persist: () => Promise<void>;
+  readonly now?: () => string;
+  readonly waitForCreateMs?: number;
+}): Promise<{ readonly pausedMissionIds: readonly string[]; readonly stopped: boolean }> {
+  const store = new FilePlanRunStore(input.runPath);
+  const deadline = Date.now() + (input.waitForCreateMs ?? 1_000);
+  let run = store.read();
+  while (!run && Date.now() < deadline) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    run = store.read();
+  }
+  if (!run) throw new Error(`不能安全关闭：PlanRun 记录尚未创建：${input.runPath}`);
+  if (run.stopped) return { pausedMissionIds: [], stopped: false };
+
+  const missionIds = new Set<string>();
+  for (const feature of run.features) {
+    if (feature.status === 'running') for (const id of feature.missionIds) missionIds.add(id);
+  }
+  if (input.hostedMissionId) missionIds.add(input.hostedMissionId);
+  for (const missionId of missionIds) await input.platform.pauseMission(missionId);
+  await input.persist();
+  await store.update((latest) => {
+    if (!latest.stopped) {
+      latest.halt('service_shutdown', `服务受控关闭；已暂停 Mission：${[...missionIds].join(', ') || '无'}`, (input.now ?? (() => new Date().toISOString()))());
+    }
+  });
+  return { pausedMissionIds: [...missionIds], stopped: true };
+}
 
 export function buildPlatform(
   workspace?: WorkspaceManager,
@@ -765,6 +799,10 @@ export function bindServerCloseToPeriodicStop(
   server: Server,
   stop: () => Promise<void>,
   afterHttpClose?: () => void | Promise<void>,
+  options: {
+    failClosedOnStopError?: () => boolean;
+    beforeHttpClose?: () => Promise<void>;
+  } = {},
 ): void {
   const closeHttp = server.close.bind(server);
   server.close = ((callback?: (err?: Error) => void) => {
@@ -774,6 +812,16 @@ export function bindServerCloseToPeriodicStop(
         await stop();
       } catch (error) {
         stopErr = asError(error);
+      }
+      // 二次 SIGINT 的安全停靠失败时，HTTP 与主锁必须继续保持；普通 stop 错误
+      // 仍沿用历史语义关闭 HTTP，避免改变常规 close 的回收行为。
+      if (stopErr && options.failClosedOnStopError?.()) return stopErr;
+      if (options.beforeHttpClose) {
+        try {
+          await options.beforeHttpClose();
+        } catch (error) {
+          return mergeCloseErrors([stopErr, asError(error)]);
+        }
       }
       let closeErr: Error | undefined;
       try {
@@ -944,6 +992,7 @@ export async function startServer(
     // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
     const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
     const planLive = new InMemoryPlanRunLiveOutput();
+    const hostedRuns = createHostedRunTracker();
     const startedAt = new Date().toISOString();
     const passthroughRaw = env[SPAWN_ENV_PASSTHROUGH_VAR];
     const passthrough = parseAgentEnvPassthrough(
@@ -972,37 +1021,60 @@ export async function startServer(
       beforeRead: 'refresh' in built ? built.refresh : undefined,
       planRunDirs: () => [...knownPlanRunDirs],
       planLive,
-      runMission: (body, emit) =>
-        runHostedMission(
-          body,
-          {
-            built: hostedBuilt,
-            baseUrl: loopback.baseUrl,
-            workspace,
-            env,
-            ...hostedRuntime,
-            heldState,
-          },
-          emit,
-        ),
-      runPlan: (body, emit) =>
-        runHostedPlan(
-          body,
-          {
-            built: hostedBuilt,
-            baseUrl: loopback.baseUrl,
-            workspace,
-            env,
-            ...hostedRuntime,
-            ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
-            heldState,
-            planLive,
-            registerPlanRunDir: (runDir) => {
-              knownPlanRunDirs.add(resolve(runDir));
+      runMission: async (body, emit) => {
+        const token = randomUUID();
+        try {
+          return await runHostedMission(
+            body,
+            {
+              built: hostedBuilt,
+              baseUrl: loopback.baseUrl,
+              workspace,
+              env,
+              ...hostedRuntime,
+              heldState,
+              onStarted: (id) => {
+                // Asynchronous views cannot be synchronously observed in this API; never cache
+                // a result that may become stale while the hosted run remains active.
+                hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
+              },
             },
-          },
-          emit,
-        ),
+            emit,
+          );
+        } finally {
+          hostedRuns.finish(token);
+        }
+      },
+      runPlan: async (body, emit) => {
+        const token = randomUUID();
+        try {
+          return await runHostedPlan(
+            body,
+            {
+              built: hostedBuilt,
+              baseUrl: loopback.baseUrl,
+              workspace,
+              env,
+              ...hostedRuntime,
+              ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
+              heldState,
+              planLive,
+              registerPlanRunDir: (runDir) => {
+                knownPlanRunDirs.add(resolve(runDir));
+              },
+              onStarted: ({ runId, runPath, reviewer }) => {
+                hostedRuns.register(token, {
+                  kind: 'plan', id: runId, runPath, reviewer,
+                  status: '运行中/状态暂不可读',
+                });
+              },
+            },
+            emit,
+          );
+        } finally {
+          hostedRuns.finish(token);
+        }
+      },
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
@@ -1054,15 +1126,82 @@ export async function startServer(
       server,
       async () => {
         await drainApi(server);
+        if (safeShutdown) await safeShutdown;
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();
       },
       usePg ? undefined : () => releaseMainLock(),
+      {
+        failClosedOnStopError: () => safeShutdown !== undefined,
+        beforeHttpClose: async () => {
+          if (safeShutdown === undefined) return;
+          let observedRequests: number;
+          do {
+            observedRequests = safeShutdownRequests;
+            await safeShutdown;
+          } while (observedRequests !== safeShutdownRequests);
+        },
+      },
     );
+    let safeShutdown: Promise<void> | undefined;
+    let safeShutdownRequests = 0;
+    const requestSafeShutdown = (): Promise<void> => {
+      safeShutdownRequests++;
+      if (safeShutdown) return safeShutdown;
+      safeShutdown = (async () => {
+        const snapshots = hostedRuns.snapshot();
+        const missionIds = new Set(snapshots.filter((item) => item.kind === 'mission').map((item) => item.id));
+        for (const snapshot of snapshots) {
+          if (snapshot.kind !== 'plan') continue;
+          if (!snapshot.runPath) throw new Error(`不能安全关闭：PlanRun 缺少真实 runPath：${snapshot.id}`);
+          const stopped = await shutdownHostedPlan({
+            runPath: snapshot.runPath,
+            hostedMissionId: undefined,
+            platform: built.platform,
+            persist: built.persist,
+          });
+          for (const id of stopped.pausedMissionIds) missionIds.add(id);
+        }
+        for (const id of missionIds) await built.platform.pauseMission(id);
+        if (missionIds.size > 0) await built.persist();
+      })();
+      return safeShutdown;
+    };
     return {
       server,
+      requestSafeShutdown,
       ...built,
       stopPeriodicReconcile: () => periodic?.stop() ?? Promise.resolve(),
+      hostedRunSnapshots: () => hostedRuns.snapshot().map((snapshot) => {
+        if (snapshot.kind === 'plan') {
+          try {
+            if (!snapshot.runPath) return { ...snapshot, status: '运行中/状态暂不可读' };
+            const run = new FilePlanRunStore(snapshot.runPath).read();
+            if (!run) return { ...snapshot, status: '运行中/状态暂不可读' };
+            const escalation = [...run.escalations].reverse().find((item) => !item.resolution);
+            return {
+              ...snapshot,
+              status: run.stopped ? `已停止/${run.stopped.reason}` : '运行中',
+              missionId: escalation?.missionId,
+              escalationId: escalation?.id,
+              deadline: escalation?.deadline,
+            };
+          } catch {
+            return { ...snapshot, status: '运行中/状态暂不可读' };
+          }
+        }
+        try {
+          const view = built.platform.getMissionView(snapshot.id);
+          if (view && typeof (view as Promise<unknown>).then === 'function') {
+            void Promise.resolve(view).catch(() => {});
+            return { ...snapshot, status: '运行中/状态暂不可读' };
+          }
+          const status = (view as { status?: string } | undefined)?.status;
+          return { ...snapshot, status: status ?? '运行中/状态暂不可读' };
+        } catch {
+          return { ...snapshot, status: '运行中/状态暂不可读' };
+        }
+      }),
     };
   } catch (error) {
     await abortStartedServer(server, releaseMainLock, error);
@@ -1130,6 +1269,73 @@ export function resolveDirectMainStatePath(
   return { ok: true, path };
 }
 
+export type HostedRunSnapshot = Readonly<{
+  kind: 'plan' | 'mission';
+  id: string;
+  status: string;
+  missionId?: string;
+  runPath?: string;
+  reviewer?: string;
+  escalationId?: string;
+  deadline?: string;
+}>;
+
+export function createHostedRunTracker() {
+  const runs = new Map<string, HostedRunSnapshot>();
+  const copy = (snapshot: HostedRunSnapshot): HostedRunSnapshot => ({ ...snapshot });
+  return {
+    register(token: string, snapshot: HostedRunSnapshot): void {
+      runs.set(token, copy(snapshot));
+    },
+    update(token: string, snapshot: HostedRunSnapshot): void {
+      if (runs.has(token)) runs.set(token, copy(snapshot));
+    },
+    finish(token: string): void {
+      runs.delete(token);
+    },
+    snapshot(): HostedRunSnapshot[] {
+      return [...runs.values()].map(copy);
+    },
+  };
+}
+
+export function formatHostedRunSnapshots(snapshots: readonly HostedRunSnapshot[]): string {
+  if (snapshots.length === 0) return '无在途 PlanRun 或 Mission。';
+  return snapshots.map((snapshot) => {
+    const lines = [`${snapshot.kind === 'plan' ? 'PlanRun' : 'Mission'} ${snapshot.id}：${snapshot.status}`];
+    if (snapshot.missionId) lines.push(`  关联 Mission：${snapshot.missionId}`);
+    if (snapshot.kind === 'plan' && snapshot.escalationId) {
+      lines.push(`  升级单：${snapshot.escalationId}${snapshot.deadline ? `；截止：${snapshot.deadline}` : ''}`);
+      if (snapshot.runPath && snapshot.reviewer && snapshot.deadline) {
+        lines.push(`  停止命令：node src/l3.ts plan decide ${snapshot.escalationId} --action stop --reason "服务退出" --run "${snapshot.runPath}" --as "${snapshot.reviewer}"`);
+      } else {
+        lines.push('  无法给出停止命令：缺少 runPath、reviewer 或 deadline。');
+      }
+    }
+    return lines.join('\n');
+  }).join('\n');
+}
+
+export function createSigintHandler(
+  close: () => void,
+  onSecondSignal: () => void,
+  onFirstSignal?: () => void,
+): () => void {
+  let received = false;
+  return () => {
+    if (received) {
+      onSecondSignal();
+      return;
+    }
+    received = true;
+    try {
+      onFirstSignal?.();
+    } finally {
+      close();
+    }
+  };
+}
+
 // 直接 `node src/main.ts` 时启动；被 import 时不启动。
 // 信号必须走同一条 server.close（drain → tick → persist → HTTP → 释锁），不能 process.exit 绕过。
 if (isDirectMainEntry()) {
@@ -1142,10 +1348,23 @@ if (isDirectMainEntry()) {
       const onSignal = () => {
         built.server.close((error) => {
           if (error) console.error(error);
-          process.exit(error ? 1 : 0);
+          if (error) process.exitCode = 1;
+          else if (process.exitCode !== 1) process.exitCode = 0;
         });
       };
-      process.once('SIGINT', onSignal);
+      const onInterrupt = createSigintHandler(onSignal, () => {
+        process.exitCode = 1;
+        void built.requestSafeShutdown().catch((error) => {
+          console.error(`受控暂停失败，服务保持监听与主锁：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }, () => {
+        try {
+          console.log(formatHostedRunSnapshots(built.hostedRunSnapshots()));
+        } catch (error) {
+          console.error(`无法读取在途 PlanRun/Mission 清单：${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+      process.on('SIGINT', onInterrupt);
       process.once('SIGTERM', onSignal);
     });
   }

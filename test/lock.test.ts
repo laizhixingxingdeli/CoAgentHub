@@ -113,12 +113,40 @@ describe('单写者锁', () => {
           assert.equal(error.holder?.pid, process.pid);
           assert.match(error.message, /跑 Mission M1/);
           // 报错要告诉人怎么办，不是甩一句 EEXIST。
-          assert.match(error.message, /等它结束|删掉/);
+          assert.match(error.message, /pid=\d+/);
+          assert.match(error.message, /instanceId=（无）/);
+          assert.match(error.message, /port=（无）/);
+          assert.match(error.message, /since=/);
+          assert.match(error.message, /核实进程仍活着（POSIX）/);
+          assert.match(error.message, /Get-Process -Id/);
+          assert.match(error.message, /仅在确认持有者进程已死亡/);
+          assert.match(error.message, /rm -rf --/);
+          assert.match(error.message, /Remove-Item -LiteralPath/);
+          assert.ok(error.message.includes(lockDirOf(statePath)));
           return true;
         },
       );
     } finally {
       release();
+    }
+  });
+
+  test('元数据缺失或损坏时仍拒绝占锁并只提供谨慎人工步骤', () => {
+    for (const contents of [undefined, '{broken']) {
+      const statePath = tempState();
+      const lockPath = lockDirOf(statePath);
+      mkdirSync(lockPath);
+      if (contents !== undefined) writeFileSync(join(lockPath, 'holder.json'), contents, 'utf8');
+      assert.throws(() => acquireLock(statePath, 'second'), (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.equal(error.holder, undefined);
+        assert.match(error.message, /无法确定 PID/);
+        assert.match(error.message, /不要仅凭元数据缺失判断进程已死/);
+        assert.match(error.message, /仅在确认持有者进程已死亡/);
+        assert.ok(error.message.includes(lockPath));
+        assert.ok(existsSync(lockPath), 'lock remains untouched');
+        return true;
+      });
     }
   });
 

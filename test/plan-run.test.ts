@@ -485,6 +485,24 @@ describe('功能点的流转', () => {
     assert.match(run.feature('F1')?.needsDecision ?? '', /没验过的合并/);
     assert.throws(() => run.halt('crashed', '又停一次', at(10)), rule('PLAN_RUN_STOPPED'));
   });
+
+  test('受控服务关闭：running feature 挂起且停止原因和 detail 经序列化恢复', () => {
+    const run = startRun();
+    run.startFeature('F1', 'M-F1');
+    const detail = '服务收到关闭请求，等待当前事务安全退出。';
+    run.halt('service_shutdown', detail, at(9));
+
+    assert.equal(run.stopped?.reason, 'service_shutdown');
+    assert.equal(run.stopped?.detail, detail);
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.equal(run.feature('F1')?.missionIds.includes('M-F1'), true);
+    assert.throws(() => run.halt('service_shutdown', '重复请求', at(10)), rule('PLAN_RUN_STOPPED'));
+
+    const restored = PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot())));
+    assert.equal(restored.stopped?.reason, 'service_shutdown');
+    assert.equal(restored.stopped?.detail, detail);
+    assert.equal(restored.feature('F1')?.status, 'suspended');
+  });
 });
 
 describe('开跑参数', () => {

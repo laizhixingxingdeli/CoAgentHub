@@ -19,13 +19,19 @@ import {
   loopbackRunRequest,
 } from '../src/application/loopback-control-client.ts';
 import type { AgentRuntime } from '../src/application/ports.ts';
+import { runHostedMission, type HostedMissionContext } from '../src/application/mission-runner.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import {
   bindServerCloseToPeriodicStop,
+  createHostedRunTracker,
+  createSigintHandler,
   defaultStatePathFromMainModule,
+  formatHostedRunSnapshots,
+  shutdownHostedPlan,
   isDirectMainEntry,
   resolveDirectMainStatePath,
   startServer,
+  buildPersistentPlatform,
 } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { API_VERSION } from '../src/api/server.ts';
@@ -64,6 +70,48 @@ function tempState(): string {
   dirs.push(dir);
   return join(dir, 'state.json');
 }
+
+test('shutdownHostedPlan pauses deduplicated missions and persists service stop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-shutdown-plan-'));
+  dirs.push(dir);
+  const runPath = join(dir, 'R-shutdown.json');
+  const run = PlanRun.start({
+    id: 'R-shutdown', planId: 'PLAN-shutdown', projectId: 'P-shutdown',
+    integrationBranch: 'auto/test', reviewer: 'reviewer',
+    stopConditions: { unresolvedEscalations: 1, wallClockMs: 60_000, escalationTimeoutMs: 60_000 },
+    featureIds: ['F1'], startedAt: '2026-09-29T00:00:00.000Z',
+  });
+  run.startFeature('F1', 'M1');
+  await new FilePlanRunStore(runPath).create(run);
+  const paused: string[] = [];
+  let persisted = false;
+  const result = await shutdownHostedPlan({
+    runPath, hostedMissionId: 'M1', platform: { pauseMission: async (id) => { paused.push(id); return { paused: true }; } },
+    persist: async () => { persisted = true; }, now: () => '2026-09-29T00:01:00.000Z',
+  });
+  assert.deepEqual(paused, ['M1']);
+  assert.equal(persisted, true);
+  const stored = new FilePlanRunStore(runPath).read()!;
+  assert.equal(stored.stopped?.reason, 'service_shutdown');
+  assert.equal(stored.stopped?.detail.includes('M1'), true);
+});
+
+test('shutdownHostedPlan preserves stopped records and rejects missing records', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-shutdown-stopped-'));
+  dirs.push(dir);
+  const runPath = join(dir, 'R-stopped.json');
+  const run = PlanRun.start({
+    id: 'R-stopped', planId: 'PLAN-stopped', projectId: 'P-stopped',
+    integrationBranch: 'auto/test', reviewer: 'reviewer',
+    stopConditions: { unresolvedEscalations: 1, wallClockMs: 60_000, escalationTimeoutMs: 60_000 },
+    featureIds: ['F1'], startedAt: '2026-09-29T00:00:00.000Z',
+  });
+  run.halt('service_shutdown', 'old reason', '2026-09-29T00:01:00.000Z');
+  await new FilePlanRunStore(runPath).create(run);
+  await shutdownHostedPlan({ runPath, platform: { pauseMission: async () => ({ paused: true }) }, persist: async () => { throw new Error('must not persist'); } });
+  assert.equal(new FilePlanRunStore(runPath).read()?.stopped?.detail, 'old reason');
+  await assert.rejects(shutdownHostedPlan({ runPath: join(dir, 'missing.json'), platform: { pauseMission: async () => ({ paused: true }) }, persist: async () => {} }), /尚未创建/);
+});
 
 const WRITE_CONTRACT = {
   intent: '本机写入口',
@@ -999,6 +1047,88 @@ describe('server.close 异常路径', () => {
     assert.equal(server.listening, false);
   });
 
+  test('二次停靠失败时 HTTP 与文件主锁保持，恢复后可正常回收', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-second-dock-failure-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const release = acquireLock(statePath, 'test-second-dock');
+    let allowDock = false;
+    let afterHttpCloseRan = false;
+    let lockReleased = false;
+    let callbackCount = 0;
+    const releaseOnce = () => {
+      if (lockReleased) return;
+      lockReleased = true;
+      release();
+    };
+    const server = createServer();
+    try {
+      await listenLoopback(server, 0);
+      servers.push(server);
+      bindServerCloseToPeriodicStop(server, async () => {}, () => {
+        afterHttpCloseRan = true;
+        releaseOnce();
+      }, {
+        failClosedOnStopError: () => !allowDock,
+        beforeHttpClose: async () => {
+          if (!allowDock) throw new Error('safe-dock-denied');
+        },
+      });
+      const err = await new Promise<Error | undefined>((done) => {
+        let secondSignal!: () => void;
+        const signal = createSigintHandler(() => {
+          server.close((closeErr) => { callbackCount++; done(closeErr); });
+        }, () => {}, () => { secondSignal(); });
+        secondSignal = signal;
+        signal();
+        signal();
+      });
+      assert.ok(err);
+      assert.match(err.message, /safe-dock-denied/);
+      assert.equal(callbackCount, 1);
+      assert.equal(server.listening, true);
+      assert.throws(() => acquireLock(statePath, 'must-remain-locked'), LockBusyError);
+      assert.equal(afterHttpCloseRan, false);
+      allowDock = true;
+      await new Promise<void>((done, fail) => server.close((closeErr) => closeErr ? fail(closeErr) : done()));
+      assert.equal(server.listening, false);
+      assert.equal(afterHttpCloseRan, true);
+      const reacquired = acquireLock(statePath, 'reacquired-after-close');
+      reacquired();
+    } finally {
+      allowDock = true;
+      if (server.listening) {
+        await new Promise<void>((done) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            server.closeAllConnections();
+            done();
+          }, 1000);
+          timer.unref();
+          try {
+            server.close(() => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              done();
+            });
+          } catch {
+            clearTimeout(timer);
+            settled = true;
+            done();
+          }
+        });
+      }
+      try {
+        releaseOnce();
+      } catch {
+        // Cleanup must not replace an assertion or recovery error from the test body.
+      }
+    }
+  });
+
   test('HTTP close 失败时错误被报告', async () => {
     const server = createServer();
     bindServerCloseToPeriodicStop(server, async () => {});
@@ -1357,6 +1487,71 @@ async function liveTarget(statePath: string) {
 
 describe('startServer hosted 接线与排空',
   () => {
+    test('注入式在途登记器：更新、完成清理与副本隔离', () => {
+      const tracker = createHostedRunTracker();
+      const plan = { kind: 'plan' as const, id: 'P-injected', status: 'waiting', escalationId: 'E-injected', deadline: '2030-01-02T03:04:05Z' };
+      const mission = { kind: 'mission' as const, id: 'M-injected', status: 'running' };
+      tracker.register('plan-token', plan);
+      tracker.register('mission-token', mission);
+      plan.status = 'externally changed';
+      const observed = tracker.snapshot();
+      observed[0]!.status = 'snapshot changed';
+      assert.match(formatHostedRunSnapshots(tracker.snapshot()), /P-injected：waiting/);
+      tracker.update('plan-token', { kind: 'plan', id: 'P-injected', status: 'escalated', escalationId: 'E-injected', deadline: '2030-02-03T04:05:06Z' });
+      const updated = formatHostedRunSnapshots(tracker.snapshot());
+      assert.match(updated, /P-injected：escalated/);
+      assert.match(updated, /E-injected；截止：2030-02-03T04:05:06Z/);
+      tracker.finish('plan-token');
+      assert.deepEqual(tracker.snapshot().map(({ id }) => id), ['M-injected']);
+      tracker.finish('mission-token');
+      assert.deepEqual(tracker.snapshot(), []);
+    });
+
+    test('首次 SIGINT 在途清单格式器：真实字段生成停止命令且缺字段不伪造', () => {
+      const output = formatHostedRunSnapshots([
+        { kind: 'plan', id: 'P-1', status: 'waiting', missionId: 'M-2', escalationId: 'E-3', deadline: '2030-01-02T03:04:05Z', runPath: '/runs/actual.json', reviewer: 'reviewer-1' },
+        { kind: 'mission', id: 'M-2', status: 'running' },
+      ]);
+      assert.match(output, /P-1/);
+      assert.match(output, /waiting/);
+      assert.match(output, /M-2/);
+      assert.match(output, /E-3/);
+      assert.match(output, /2030-01-02T03:04:05Z/);
+      assert.match(output, /node src\/l3\.ts plan decide E-3 --action stop --reason "服务退出" --run "\/runs\/actual\.json" --as "reviewer-1"/);
+      const incomplete = formatHostedRunSnapshots([
+        { kind: 'plan', id: 'P-4', status: 'waiting', escalationId: 'E-4', runPath: '/runs/actual.json' },
+      ]);
+      assert.match(incomplete, /无法给出停止命令/);
+      assert.doesNotMatch(incomplete, /node src\/l3\.ts plan decide/);
+      assert.match(formatHostedRunSnapshots([]), /无在途/);
+    });
+
+    test('首次 SIGINT 先报告注入的在途清单再关闭，第二次不重复报告', () => {
+      const events: string[] = [];
+      let reports = 0;
+      let closes = 0;
+      let secondSignals = 0;
+      const snapshots = [{ kind: 'plan' as const, id: 'P-real', status: '升级中', missionId: 'M-real', escalationId: 'E-real', deadline: '2030-01-02T03:04:05Z', runPath: '/real/run.json', reviewer: 'reviewer-real' }];
+      const handler = createSigintHandler(
+        () => { closes += 1; events.push('close'); },
+        () => { secondSignals += 1; },
+        () => { reports += 1; events.push(formatHostedRunSnapshots(snapshots)); },
+      );
+      handler();
+      handler();
+      assert.equal(closes, 1);
+      assert.equal(reports, 1);
+      assert.equal(secondSignals, 1);
+      assert.equal(events[0], formatHostedRunSnapshots(snapshots));
+      assert.equal(events[1], 'close');
+      assert.match(events[0]!, /P-real.*升级中/);
+      assert.match(events[0]!, /M-real/);
+      assert.match(events[0]!, /E-real.*2030-01-02T03:04:05Z/);
+      assert.match(events[0]!, /node src\/l3\.ts plan decide E-real --action stop --reason "服务退出" --run "\/real\/run\.json" --as "reviewer-real"/);
+      let failureClosed = 0;
+      assert.throws(() => createSigintHandler(() => { failureClosed += 1; }, () => {}, () => { throw new Error('snapshot failure'); })());
+      assert.equal(failureClosed, 1);
+    });
     test('源码：两种 hosted 回调交给同一 createApi；close 先 drain 再停 tick/persist',
       () => {
         const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
@@ -1380,10 +1575,78 @@ describe('startServer hosted 接线与排空',
         assert.match(startServerSrc, /periodic\?\.stop\(\)/);
         assert.match(startServerSrc, /built\.persist\(\)/);
         assert.match(startServerSrc, /baseUrl: loopback\.baseUrl/);
-        assert.match(main, /process\.once\('SIGINT'/);
+        assert.match(main, /process\.on\('SIGINT'/);
         assert.match(main, /process\.once\('SIGTERM'/);
+        assert.match(main, /formatHostedRunSnapshots\(built\.hostedRunSnapshots\(\)\)/);
+        assert.match(main, /无法读取在途 PlanRun\/Mission 清单/);
       },
     );
+
+    test('runHostedMission：仅在 Mission 预检创建后通知真实解析 id', async () => {
+      const statePath = tempState();
+      const cwd = dirname(statePath);
+      const adapter = join(cwd, 'adapter.ts');
+      writeFileSync(adapter, '// hosted lifecycle fixture\\n');
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const started: string[] = [];
+      let runnerStarted = false;
+      const addr = built.server.address() as AddressInfo;
+      const ctx = {
+        built: {
+          platform: built.platform,
+          tokens: built.tokens,
+          agentPool: built.agentPool,
+          activity: built.activity,
+          deliveries: built.deliveries,
+          persist: built.persist,
+          candidateCircuits: built.candidateCircuits,
+          queuedHops: built.queuedHops,
+          live: built.live,
+          issuer: built.issuer,
+        },
+        baseUrl: `http://127.0.0.1:${addr.port}`,
+        workspace: new InPlaceWorkspaceManager(),
+        runtime: new ScriptedRuntime({}),
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+        onStarted: (id: string) => {
+          started.push(id);
+          assert.ok(built.platform.getMissionView(id));
+          assert.equal(runnerStarted, false);
+        },
+      } satisfies HostedMissionContext;
+      const body = {
+        spec: { projectId: 'P-hosted-lifecycle', missionId: 'M-hosted-lifecycle-unique', contract: WRITE_CONTRACT },
+        cwd,
+        adapter,
+        env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
+        inPlace: true,
+        maxRounds: 1,
+      };
+      try {
+        await runHostedMission(body, ctx, () => { runnerStarted = true; });
+      } catch {
+        // 空脚本 runtime 的执行结果无关；通知发生在 runner 启动之前。
+      }
+      assert.deepEqual(started, ['M-hosted-lifecycle-unique']);
+      assert.ok(await built.platform.getMissionView('M-hosted-lifecycle-unique'));
+
+      const invalidStarted: string[] = [];
+      const invalidId = 'M-hosted-lifecycle-invalid';
+      await assert.rejects(runHostedMission({
+        ...body,
+        spec: { ...body.spec, missionId: invalidId },
+        coordinator: 'missing-coordinator',
+      }, { ...ctx, onStarted: (id) => invalidStarted.push(id) }, () => {}));
+      assert.deepEqual(invalidStarted, []);
+      await assert.rejects(built.platform.getMissionView(invalidId));
+      await new Promise<void>((done, fail) => built.server.close((err) => err ? fail(err) : done()));
+    });
 
     test('未注入 runtime 时 hosted 入口已接上：非法 body 走同一平台且不另开写者',
       async () => {
@@ -1512,6 +1775,61 @@ describe('startServer hosted 接线与排空',
         });
       },
     );
+
+    test('startServer hosted Mission 快照只登记预检解析 id，并在结束后清理', { timeout: 20_000 }, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-snapshot-'));
+      dirs.push(dir);
+      const statePath = join(dir, 'state.json');
+      const adapter = join(dir, 'adapter.ts');
+      writeFileSync(adapter, '// snapshot fixture\n');
+      const gated = gatedRuntime();
+      const built = await startServer(0, statePath, {
+        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+        workspace: new InPlaceWorkspaceManager(), runtime: gated.runtime,
+      });
+      servers.push(built.server);
+      if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+      const target = await liveTarget(statePath);
+      const running = loopbackRunRequest(target, {
+        path: '/api/control/run-mission',
+        body: hostedMissionBody(dir, adapter, statePath, 'M-snapshot-real'),
+      }, () => {});
+      const realGetMissionView = built.platform.getMissionView;
+      try {
+        await gated.started;
+        const snapshots = built.hostedRunSnapshots();
+        assert.equal(snapshots.length, 1);
+        assert.equal(snapshots[0]?.id, 'M-snapshot-real');
+        assert.equal(snapshots[0]?.kind, 'mission');
+        assert.equal(snapshots[0]?.status, '运行中/状态暂不可读');
+        const missionView = await realGetMissionView.call(built.platform, 'M-snapshot-real');
+        assert.equal(missionView.status, 'investigating');
+        let state = 'S1';
+        built.platform.getMissionView = ((id: string) => {
+          assert.equal(id, 'M-snapshot-real');
+          return { status: state };
+        }) as typeof built.platform.getMissionView;
+        assert.equal(built.hostedRunSnapshots()[0]?.id, 'M-snapshot-real');
+        assert.equal(built.hostedRunSnapshots()[0]?.status, 'S1');
+        state = 'S2';
+        assert.equal(built.hostedRunSnapshots()[0]?.id, 'M-snapshot-real');
+        assert.equal(built.hostedRunSnapshots()[0]?.status, 'S2');
+        built.platform.getMissionView = (() => Promise.reject(new Error('temporarily unreadable'))) as typeof built.platform.getMissionView;
+        assert.equal(built.hostedRunSnapshots()[0]?.status, '运行中/状态暂不可读');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const invalidCode = await loopbackRunRequest(target, {
+          path: '/api/control/run-mission',
+          body: hostedMissionBody(dir, adapter, join(dir, 'other-state.json'), 'M-invalid-snapshot'),
+        }, () => {});
+        assert.equal(invalidCode, 1);
+        assert.equal(built.hostedRunSnapshots().length, 1);
+      } finally {
+        built.platform.getMissionView = realGetMissionView;
+        gated.release();
+        await running;
+      }
+      assert.deepEqual(built.hostedRunSnapshots(), []);
+    });
 
     test(
       'server.close 先拒新启动，等在途 runner 结束才释锁；残锁不可抢',
@@ -1909,6 +2227,209 @@ function cleanPlanRepo(branch: string): string {
 }
 
 describe('startServer 方案记录目录与托管 live', () => {
+  test('真实 hosted Mission 双次 SIGINT 暂停落盘并关闭复锁', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-mission-double-signal-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// hosted adapter\\n');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(), runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    let running: Promise<number> | undefined;
+    let closeDone = false;
+    let exitCode = 0;
+    try {
+      const target = await liveTarget(statePath);
+      running = loopbackRunRequest(target, {
+        path: '/api/control/run-mission',
+        body: hostedMissionBody(dir, adapter, statePath, 'M-double-signal-real'),
+      }, () => {});
+      await gated.started;
+      assert.equal(built.hostedRunSnapshots().find((row) => row.id === 'M-double-signal-real')?.kind, 'mission');
+      const handler = createSigintHandler(
+        () => built.server.close(() => { closeDone = true; }),
+        () => { exitCode = 7; void built.requestSafeShutdown(); },
+        () => { built.hostedRunSnapshots(); },
+      );
+      handler();
+      assert.equal(built.server.listening, true);
+      assert.equal(closeDone, false);
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      await assert.rejects(
+        loopbackRunRequest(target, { path: '/api/control/run-mission', body: hostedMissionBody(dir, adapter, statePath, 'M-double-signal-new') }, () => {}),
+        (error: unknown) => error instanceof LoopbackHttpError && error.status === 503 && error.code === 'SERVICE_DRAINING',
+      );
+      handler();
+      gated.release();
+      assert.equal(await running, 0);
+      const deadline = Date.now() + 4_000;
+      while (!closeDone && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(closeDone, true);
+      assert.equal(exitCode, 7);
+      const runningView = await built.platform.getMissionView('M-double-signal-real');
+      assert.equal(runningView.status, 'investigating');
+      assert.equal(runningView.paused, true);
+      const reloaded = await buildPersistentPlatform(statePath);
+      const persistedView = await reloaded.platform.getMissionView('M-double-signal-real');
+      assert.equal(persistedView.status, 'investigating');
+      assert.equal(persistedView.paused, true);
+      reloaded.releaseLock();
+      assert.equal(built.server.listening, false);
+      const release = acquireLock(statePath);
+      release();
+    } finally {
+      gated.release();
+      if (running) await running;
+      if (built.server.listening) await new Promise<void>((resolve) => built.server.close(() => resolve()));
+    }
+  });
+
+  test('真实 hosted PlanRun 双次 SIGINT 安全停靠并释放主锁（动态状态目录）', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-double-signal-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// hosted adapter\\n');
+    const runDir = join(dir, 'runs');
+    const repo = cleanPlanRepo('auto/hosted');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+      runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    let running: Promise<number> | undefined;
+    let exitCode = 0;
+    try {
+      const target = await liveTarget(statePath);
+      const body = hostedPlanBody(repo, adapter, statePath, runDir);
+      body.plan.stopConditions.wallClockMs = 5_000;
+      body.plan.stopConditions.escalationTimeoutMs = 5_000;
+      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {});
+      const deadline = Date.now() + 3_000;
+      let snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      while (snapshots.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      }
+      assert.equal(snapshots.length, 1, 'hosted PlanRun 未在有界时间内登记');
+      const plan = snapshots[0]!;
+      assert.ok(plan.runPath?.startsWith(runDir));
+      const store = new FilePlanRunStore(plan.runPath!);
+      const storeDeadline = Date.now() + 1_000;
+      let stored = store.read();
+      while (!stored && Date.now() < storeDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        stored = store.read();
+      }
+      assert.ok(stored, 'hosted PlanRun store 未在有界时间内创建');
+      assert.equal(stored.stopped, undefined, '注入信号前 PlanRun 不应已结束');
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      let closeDone = false;
+      const handler = createSigintHandler(
+        () => built.server.close(() => { closeDone = true; }),
+        () => { exitCode = 1; void built.requestSafeShutdown(); },
+        () => { built.hostedRunSnapshots(); },
+      );
+      handler();
+      assert.equal(built.server.listening, true, '首次信号排空期间 HTTP listener 应保持开启');
+      assert.equal(closeDone, false, '首次 close 应等待真实 PlanRun 请求排空');
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      let rejectTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          assert.rejects(
+            loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {}),
+            (error: unknown) =>
+              error instanceof LoopbackHttpError &&
+              error.status === 503 &&
+              error.code === 'SERVICE_DRAINING',
+          ),
+          new Promise<never>((_, reject) => {
+            rejectTimer = setTimeout(() => reject(new Error('新 hosted start 未在有界时间内被拒绝')), 1_000);
+          }),
+        ]);
+      } finally {
+        if (rejectTimer) clearTimeout(rejectTimer);
+      }
+      assert.equal(built.server.listening, true);
+      assert.equal(closeDone, false);
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      handler();
+      const closeDeadline = Date.now() + 4_000;
+      while (!closeDone && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(closeDone, true, 'HTTP close callback 未完成');
+      assert.equal(exitCode, 1);
+      const stopped = store.read()?.stopped;
+      assert.equal(stopped?.reason, 'service_shutdown');
+      assert.ok(stopped?.detail, 'service_shutdown detail 必须明确');
+      assert.equal(built.server.listening, false);
+      const releaseReacquired = acquireLock(statePath);
+      releaseReacquired();
+    } finally {
+      gated.release();
+      if (running) await running;
+      if (built.server.listening) await new Promise<void>((resolve) => built.server.close(() => resolve()));
+    }
+  });
+
+  test('真实 hosted PlanRun 只登记预检后的身份并在结束时清理', { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-plan-identity-'));
+    dirs.push(dir);
+    const statePath = join(dir, 'state.json');
+    const adapter = join(dir, 'adapter.ts');
+    writeFileSync(adapter, '// identity adapter\\n');
+    const runDir = join(dir, 'runs');
+    const repo = cleanPlanRepo('auto/hosted');
+    const gated = gatedRuntime();
+    const built = await startServer(0, statePath, {
+      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
+      workspace: new InPlaceWorkspaceManager(),
+      runtime: gated.runtime,
+    });
+    servers.push(built.server);
+    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
+    const target = await liveTarget(statePath);
+    const base = hostedPlanBody(repo, adapter, statePath, runDir);
+    base.plan.stopConditions.wallClockMs = 500;
+    base.plan.stopConditions.escalationTimeoutMs = 500;
+    let running: Promise<number> | undefined;
+    try {
+      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body: base }, () => {});
+      const deadline = Date.now() + 3_000;
+      let plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      while (plans.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
+      }
+      assert.equal(plans.length, 1, '真实 run-plan 在有界等待内未登记 hosted plan 快照');
+      const plan = plans[0]!;
+      assert.match(plan.id, /^PLAN-hosted-/);
+      assert.notEqual(plan.id, base.plan.planId);
+      assert.ok(plan.runPath?.startsWith(runDir));
+      assert.equal(plan.reviewer, 'claude');
+
+      const invalid = { ...base, state: join(dir, 'wrong-state.json') };
+      assert.equal(await loopbackRunRequest(target, { path: '/api/control/run-plan', body: invalid }, () => {}), 1);
+      assert.deepEqual(built.hostedRunSnapshots(), [plan]);
+
+      gated.release();
+      assert.equal(await running, 0);
+      running = undefined;
+      assert.deepEqual(built.hostedRunSnapshots(), []);
+    } finally {
+      gated.release();
+      if (running) await running;
+      await new Promise<void>((resolve, reject) => built.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
   test('缺省目录在 statePath 同级 .coagent-plans；圈外 CLI 目录读不到；未托管有 reason', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-dirs-'));
     dirs.push(dir);

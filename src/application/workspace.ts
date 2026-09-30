@@ -144,6 +144,8 @@ export interface WorkspaceManager {
     pinnedBase?: string,
   ): Promise<PreparedWorkspace>;
   head(cwd: string): Promise<string>;
+  /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
+  checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
   /** 回到某个版本，并清掉未跟踪文件。仅在 Mission worktree 内使用。 */
@@ -396,6 +398,48 @@ export class GitWorktreeManager implements WorkspaceManager {
 
   async targetHead(projectRoot: string): Promise<string> {
     return (await run('git', ['rev-parse', 'HEAD'], { cwd: resolve(projectRoot) })).stdout.trim();
+  }
+
+  async checkpoint(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    allowedPaths: readonly string[],
+  ): Promise<void> {
+    if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
+      throw new Error('检查点授权路径不能为空');
+    }
+    const allowed = new Set<string>();
+    for (const path of allowedPaths) {
+      if (typeof path !== 'string' || path.length === 0 || path.includes('\\0') ||
+          path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:/.test(path) ||
+          path.split(/[\\/]/).some((part) => part === '..' || part === '.' || part === '') ||
+          /[*?{}]/.test(path) || path.includes('[') || path.includes(']') || path.endsWith('/')) {
+        throw new Error(`检查点授权路径不确定：${String(path)}`);
+      }
+      allowed.add(path.replace(/\\/g, '/'));
+    }
+    const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
+    const records = status.split('\0').filter(Boolean);
+    const dirty = new Set<string>();
+    for (const record of records) {
+      if (record.length < 4) throw new Error('无法解析 Git status，拒绝创建检查点');
+      dirty.add(record.slice(3).replace(/\\\\/g, '/'));
+    }
+    const outside = [...dirty].filter((path) => !allowed.has(path));
+    if (outside.length) throw new Error(`检查点包含未授权改动：${outside.join(', ')}`);
+    if (dirty.size === 0) return;
+    const tracked = new Set((await run('git', ['ls-files', '-z'], { cwd })).stdout.split('\0').filter(Boolean));
+    const trackedAllowed = [...allowed].filter((path) => tracked.has(path));
+    if (trackedAllowed.length > 0) await run('git', ['add', '-u', '--', ...trackedAllowed], { cwd });
+    const present = [...allowed].filter((path) => existsSync(join(resolve(cwd), path)));
+    if (present.length > 0) await run('git', ['add', '--', ...present], { cwd });
+    const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
+    const stagedOutside = staged.filter((path) => !allowed.has(path));
+    if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
+    if (staged.length === 0) return;
+    await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `mission(${missionId}): ${workItemId} 检查点`], { cwd });
   }
 
   async rollback(cwd: string, revision: string): Promise<void> {

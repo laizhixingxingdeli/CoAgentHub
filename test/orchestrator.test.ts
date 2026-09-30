@@ -9,7 +9,7 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -85,7 +85,13 @@ const PLAN = {
  * 私有字段，经 Proxy 调用时 `this` 是 Proxy 而不是实例，私有字段访问会直接
  * 抛 TypeError —— 而调度器会把它归成"上游失败"，症状完全对不上原因。
  */
-async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRuntime }, candidateCircuits?: CandidateCircuitRepository, attemptWallClockMs?: number) {
+async function harness(
+  runtimes: { coordinator: AgentRuntime; executor: AgentRuntime },
+  candidateCircuits?: CandidateCircuitRepository,
+  attemptWallClockMs?: number,
+  workspace?: WorkspaceManager,
+) {
+  const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
   const ids = new SequentialIds();
@@ -93,7 +99,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
   const platform = new Platform({
     projects: new InMemoryProjectRepository(),
     deliveries,
-    workspace: new InPlaceWorkspaceManager(),
+    workspace: workspaceManager,
     activity,
     clock,
     ids,
@@ -129,7 +135,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
         platform,
         tokens: makeIssuer(platform, tokens),
         baseUrl,
-        workspace: new InPlaceWorkspaceManager(),
+        workspace: workspaceManager,
         coordinator: pools.coordinator,
         candidateCircuits,
         attemptWallClockMs,
@@ -140,7 +146,7 @@ async function harness(runtimes: { coordinator: AgentRuntime; executor: AgentRun
         platform,
         tokens: makeIssuer(platform, tokens),
         baseUrl,
-        workspace: new InPlaceWorkspaceManager(),
+        workspace: workspaceManager,
         coordinator: pools.coordinator,
         candidateCircuits,
         attemptWallClockMs,
@@ -254,6 +260,123 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
+  test('成功 executor 使用冻结 WorkOrder.allowedScope 检查点', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-'));
+    const checkpoints: Array<{ cwd: string; missionId: string; workItemId: string; allowedPaths: readonly string[] }> = [];
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async (cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]) => {
+        checkpoints.push({ cwd, missionId, workItemId, allowedPaths });
+      },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-checkpoint',
+        contract: CONTRACT,
+      });
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-checkpoint', { projectRoot });
+
+      assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+      assert.equal(checkpoints.length, 1);
+      assert.deepEqual(checkpoints[0], {
+        cwd: projectRoot,
+        missionId: 'M-checkpoint',
+        workItemId: 'W-1',
+        allowedPaths: ORDER.allowedScope,
+      });
+      assert.deepEqual(
+        orchestrator.hops.map((hop) => `${hop.role}:${hop.endedBy}`),
+        ['coordinator:structured_submit', 'executor:structured_submit', 'coordinator:structured_submit'],
+      );
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('检查点抛错停靠，不回滚已交回改动', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-denied-'));
+    const marker = join(projectRoot, 'executor-handoff.marker');
+    let rollbackCalls = 0;
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => {
+        writeFileSync(marker, 'handed-off');
+        throw new Error('checkpoint-denied');
+      },
+      rollback: async () => {
+        rollbackCalls += 1;
+        throw new Error('unexpected-rollback');
+      },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-checkpoint-denied', contract: CONTRACT });
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-checkpoint-denied', { projectRoot });
+
+      assert.equal(result.kind, 'waiting');
+      assert.equal((result as { reason: string }).reason, 'no_available_agent');
+      assert.match((result as { detail: string }).detail, /checkpoint-denied/);
+      assert.deepEqual(
+        orchestrator.hops.map((hop) => hop.role),
+        ['coordinator', 'executor'],
+      );
+      assert.equal(rollbackCalls, 0);
+      assert.equal(readFileSync(marker, 'utf8'), 'handed-off');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('缺少冻结授权时停靠且不继续下一跳', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-missing-scope-'));
+    const marker = join(projectRoot, 'executor-handoff.marker');
+    let checkpointCalls = 0;
+    let rollbackCalls = 0;
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => { checkpointCalls += 1; },
+      rollback: async () => { rollbackCalls += 1; },
+    });
+    try {
+      current = await harness({
+        coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-missing-scope', contract: CONTRACT });
+      const getMissionView = current.platform.getMissionView.bind(current.platform);
+      current.platform.getMissionView = async (missionId) => {
+        const view = await getMissionView(missionId);
+        const item = view.workItems.find((candidate) => candidate.id === 'W-1');
+        if (missionId === 'M-missing-scope' && item?.hasResult) {
+          return { ...view, workItems: view.workItems.map((candidate) => candidate.id === 'W-1' ? { ...candidate, order: undefined } : candidate) };
+        }
+        return view;
+      };
+      writeFileSync(marker, 'handed-off');
+
+      const orchestrator = current.makeOrchestrator();
+      const result = await orchestrator.runMission('M-missing-scope', { projectRoot });
+
+      assert.equal(result.kind, 'waiting');
+      assert.match((result as { detail: string }).detail, /allowedScope/);
+      assert.deepEqual(orchestrator.hops.map((hop) => hop.role), ['coordinator', 'executor']);
+      assert.equal(checkpointCalls, 0);
+      assert.equal(rollbackCalls, 0);
+      assert.equal(readFileSync(marker, 'utf8'), 'handed-off');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('正常主链：规划 → 派发 → 执行 → 验收 → 交卷', async () => {
     current = await harness({
       coordinator: new ScriptedRuntime(COORDINATOR_HAPPY),

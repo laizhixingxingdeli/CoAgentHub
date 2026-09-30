@@ -166,8 +166,12 @@ after(() => {
   for (const server of servers) server.close();
 });
 
-function stubWorkspace(head = 'commit-a'): WorkspaceManager & { setHead(next: string): void } {
+function stubWorkspace(head = 'commit-a'): WorkspaceManager & {
+  setHead(next: string): void;
+  checkpointCalls: Array<{ cwd: string; missionId: string; workItemId: string; allowedScope: readonly string[] }>;
+} {
   let current = head;
+  const checkpointCalls: Array<{ cwd: string; missionId: string; workItemId: string; allowedScope: readonly string[] }> = [];
   return {
     async prepare(_missionId, projectRoot) {
       return {
@@ -193,10 +197,14 @@ function stubWorkspace(head = 'commit-a'): WorkspaceManager & { setHead(next: st
     async diff() {
       return { stat: '', files: [] };
     },
+    async checkpoint(cwd, missionId, workItemId, allowedScope) {
+      checkpointCalls.push({ cwd, missionId, workItemId, allowedScope });
+    },
     async release() {},
     setHead(next: string) {
       current = next;
     },
+    checkpointCalls,
   };
 }
 
@@ -373,6 +381,9 @@ describe('E3a 独立检视主链与有效 pass', () => {
     });
     const outcome = await orch.runMission('M-seq', { projectRoot: h.root, maxRounds: 8 });
     assert.equal(outcome.kind, 'awaiting_l3_review');
+    assert.deepEqual(h.workspace.checkpointCalls, [
+      { cwd: h.root, missionId: 'M-seq', workItemId: 'W-1', allowedScope: ORDER.allowedScope },
+    ]);
     const hops = orch.hops.map((row) => row.role);
     assert.deepEqual(hops, ['coordinator', 'executor', 'coordinator', 'independent_reviewer']);
     const events = await h.activity.list('M-seq');

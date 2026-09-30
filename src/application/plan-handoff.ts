@@ -28,6 +28,7 @@ const STOP_LABELS: Record<PlanStopReason, string> = {
   finished: '走完了',
   unsafe: '集成分支不安全',
   crashed: '驱动方出错',
+  service_shutdown: '服务受控退出',
   escalation_limit: '升级单到上限',
 };
 

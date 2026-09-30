@@ -152,6 +152,8 @@ export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<P
       await runFeature(plan, run, feature, next.missionIds.length + 1, deps);
     }
   } catch (error) {
+    const stopped = deps.store.read()?.stopped;
+    if (stopped?.reason === 'service_shutdown') return stopped;
     // 崩溃处置：记下原因、停在 crashed，再往外抛。不在这里试图续跑——
     // 猜错了续跑，比停下来等人看更糟。
     const detail = error instanceof Error ? error.message : String(error);
@@ -172,6 +174,7 @@ async function runFeature(
   deps: PlanDriverDeps,
 ): Promise<void> {
   const missionId = attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`;
+  if (requireRun(deps).stopped) return;
   // 分类是尽力而为：有安全的回落（Standard），它自己出错不该拖垮整晚。
   const proposal = await deps.proposeRoute(feature).catch((error: unknown) => ({
     ok: false as const,
@@ -179,6 +182,7 @@ async function runFeature(
   }));
   // 分类本身是一整次只读会话，可能跑过墙钟：到点了就不再建 Mission。功能还没
   // 开跑，checkStop 不会动它，它保持「没轮到」。
+  if (requireRun(deps).stopped) return;
   const afterRoute = deps.now();
   if (wallClockReached(run, afterRoute)) {
     await deps.store.update((r) => r.checkStop(afterRoute));
@@ -200,16 +204,29 @@ async function runFeature(
     }
   }
   if (route.kind === 'needs_human') {
-    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。`);
-    await deps.store.update((r) => r.suspendFeature(feature.id, route.needsDecision));
+    const forbidden = route.reason.startsWith('high_assurance 禁止副作用未证明为 false：');
+    const explanation = forbidden
+      ? `触发字段：${route.reason.slice('high_assurance 禁止副作用未证明为 false：'.length)}。依据：${[
+          ...(feature.why ? [`why: ${feature.why}`] : []),
+          ...(feature.constraints?.length ? [`constraints: ${feature.constraints.join('；')}`] : []),
+        ].join('；') || '方案未提供 why/constraints 原文。'}`
+      : '';
+    const guidance = forbidden
+      ? `${explanation}。请修改契约，明确不删除、不改写、不迁移数据后重跑；如确需副作用，须由用户决定，HAOFF1 当前关闭，不能立即放行。此处挂起发生在 Mission 建立前，不能审批。仅当以后形成真实 pending_release 且已有真实 Mission、审查提交、独立检视及报告等材料时，才可使用：node src/l3.ts plan approve <真实missionId> --run <记录> --feature <id> --commit <提交> --review <attempt> --report <报告> --target <分支> --as <检视者> --confirmed-by <确认者>。`
+      : '';
+    const needsDecision = guidance ? `${route.needsDecision} ${guidance}` : route.needsDecision;
+    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。${guidance ? ` ${guidance}` : ''}`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, needsDecision));
     return;
   }
   const created = await createMission(plan, run, feature, missionId, route, deps);
+  if (requireRun(deps).stopped) return;
   if (created.kind === 'ha_denied') {
     deps.log(`${feature.id} ⏸ HA 建单被拒：${created.reason}；不回落 Standard。`);
     await deps.store.update((r) => r.suspendFeature(feature.id, created.needsDecision));
     return;
   }
+  if (requireRun(deps).stopped) return;
   await deps.store.update((r) => r.startFeature(feature.id, missionId));
   deps.log(`${feature.id} ▶ ${missionId}`);
 
@@ -219,6 +236,7 @@ async function runFeature(
   // 协调者提问可当场答复：answer 后续跑同一条，不能退回 drivePlan 另开 -rN。
   for (;;) {
   const outcome = await deps.runMission(missionId, { wallClockDeadline });
+  if (requireRun(deps).stopped) return;
   const landing = await land(plan, missionId, outcome, deps);
 
   if (landing.kind === 'ha_pending') {
@@ -532,6 +550,7 @@ async function land(
   }
 
   const view = await deps.platform.getMissionView(missionId);
+  if (requireRun(deps).stopped) return { kind: 'unsafe', detail: '' };
   if (view.executionMode === 'high_assurance' || view.haReviewHold) {
     if (view.haReviewHold === 'pending_release') {
       return { kind: 'ha_pending' };
@@ -603,7 +622,7 @@ async function handleAwaitingAnswer(
     await deps.store.update((r) => r.checkStop(afterRun));
     return 'done';
   }
-  const failure = `协调者升级给 L3 的问题夜里没人答：${question}`;
+  const failure = `协调者向 L3 提问：${question}`;
   const escalation = await deps.store.update((r) =>
     r.openEscalation(
       { featureId: feature.id, missionId, failure, question, answerable: true },
