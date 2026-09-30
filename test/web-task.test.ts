@@ -39,6 +39,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 // 读进来就归一化行尾：仓库在 Windows 上 checkout 出来是 CRLF（core.autocrlf）。
 const read = (name: string): string =>
@@ -79,7 +80,7 @@ async function serveDefaultWebRoot(): Promise<{
     ids,
   });
   const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries, live });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return { platform, live, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
@@ -153,6 +154,7 @@ async function seedMission(): Promise<{ platform: Platform; base: string }> {
     verdict: 'accept',
     reasons: ['测试跑过了'],
     requiredChanges: [],
+    acceptanceResults: [{ criterion: 'a', status: 'pass', evidence: '测试替身：逐条核过' }],
   });
   await platform.escalateToL3('M-task', coord.attemptId, {
     question: '要不要一起改内核？',
@@ -223,6 +225,77 @@ const W4_CTX = {
     { id: 'W-1649', title: '接上读模型' },
     { id: 'W-1650', title: '折叠成环节' },
   ],
+};
+
+/** 与 web-narrate 夹具同形：LQ1 当时那页 65 条。不读状态文件。 */
+function lq1Events(): Record<string, any>[] {
+  const rows: Record<string, any>[] = [
+    { kind: 'mission.created', data: { contractRevision: 1 } },
+    { kind: 'attempt.started', data: { kind: 'coordinator' }, attemptId: 'coord-1' },
+    { kind: 'plan.updated', data: { planRevision: 1 }, attemptId: 'coord-1' },
+    { kind: 'work_item.created', data: { title: '事件翻译表' }, workItemId: 'W-465', attemptId: 'coord-1' },
+    { kind: 'work_item.dispatched', data: { ids: ['W-465'] }, attemptId: 'coord-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'coord-1' },
+    { kind: 'attempt.started', data: { kind: 'executor' }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+    { kind: 'runtime.command_tracking.enabled', data: { schemaVersion: 1 }, attemptId: 'W-465.exec-1' },
+  ];
+  for (let i = 0; i < 20; i += 1) {
+    rows.push({
+      kind: 'runtime.command.started',
+      data: { schemaVersion: 1, callId: `call-${i}` },
+      attemptId: 'W-465.exec-1',
+    });
+  }
+  rows.push(
+    { kind: 'evidence.submitted', data: { kind: 'test', exitCode: 0 }, attemptId: 'W-465.exec-1', workItemId: 'W-465' },
+    { kind: 'execution_result.submitted', data: { outcome: 'completed', changedFiles: 3 }, attemptId: 'W-465.exec-1' },
+    { kind: 'attempt.ended', data: { endedBy: 'structured_submit' }, attemptId: 'W-465.exec-1' },
+    { kind: 'review.recorded', data: { verdict: 'accept', reasons: ['测试跑过了'] }, attemptId: 'coord-2' },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'orchestration.round.started', data: { schemaVersion: 1 } },
+    { kind: 'mission_result.submitted', data: { outcome: 'delivered' }, attemptId: 'coord-2' },
+    { kind: 'delivery.created', data: { deliveryId: 'D-lq1' } },
+    { kind: 'memory.applied', data: { written: ['VIBE.md'] } },
+    { kind: 'final_review.integration_anchor', data: { integrationBranch: 'auto/x', anchor: 'aaa' } },
+    { kind: 'final_review.merge_applied', data: { mergedInto: 'bbb', integrationBranch: 'auto/x' } },
+    { kind: 'final_review.integration_verified', data: { reportId: 'IVAL-1', passed: true } },
+    { kind: 'final_review.merged', data: { mergedInto: 'bbb' } },
+    { kind: 'work_item.retired', data: { reason: '不做了' }, workItemId: 'W-466' },
+    { kind: 'contract.revised', data: { contractRevision: 2 } },
+    { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+    { kind: 'mission.resumed', data: {} },
+    { kind: 'escalated', data: { question: '要不要合？' }, attemptId: 'coord-2' },
+    { kind: 'work_item.redispatched', data: { ids: ['W-465'] }, workItemId: 'W-465' },
+    { kind: 'final_review.send_back', data: { reasons: ['再看一眼'] } },
+    { kind: 'mission.routed', data: { recommended: 'lightweight', reasons: ['单文件'] } },
+    { kind: 'mission.paused', data: {} },
+    { kind: 'mission.resumed_from_pause', data: {} },
+    { kind: 'mission.cancelled', data: { reason: '不要了' } },
+    { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-465' },
+    { kind: 'escalation.answered', data: { question: '要不要合？', answer: '合' } },
+    { kind: 'validation.reported', data: { reportId: 'VAL-1', passed: true } },
+    { kind: 'context.truncated', data: { budget: 8000, estimatedBefore: 9000, estimatedAfter: 7000 } },
+    { kind: 'mission.budget.threshold', data: { dimension: 'rounds', threshold: 0.8 } },
+    { kind: 'independent_review.blocked', data: { reason: 'no_candidates', detail: '没有独立检视候选' } },
+    { kind: 'independent_review.recorded', data: { verdict: 'pass', reviewedCommit: 'abc' } },
+    { kind: 'recovery.applied', data: { deliveryId: 'D-fix' } },
+  );
+  return rows;
+}
+
+const LQ1_CTX = {
+  intent: '把三个页面从状态转储改成人话',
+  plan: { direction: '先落翻译表，再改页面', findings: '事件表散在渲染分支里' },
+  workItems: [
+    { id: 'W-465', title: '事件翻译表' },
+    { id: 'W-466', title: '用量拆项' },
+  ],
+  result: { summary: '三个页面都改好了', outcome: 'delivered' },
 };
 
 /** 与实现无关的本地时间算式：断言"渲染出来的是本地时间"而不是抄实现。 */
@@ -502,18 +575,105 @@ describe('环节分组', () => {
     const { stageListHtml } = await loaded;
     const rows = [
       { at: '2026-03-04T05:06:07.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: {} },
-      { at: '2026-03-04T05:06:08.000Z', kind: 'memory.applied', attemptId: 'coord-1', data: {} },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'definitely.not.a.real.kind', attemptId: 'coord-1', data: {} },
     ];
     const html = stageListHtml(rows, 'coord-1', 1, W4_CTX);
     assert.ok(html.includes('evt-badge') && html.includes('evt-action') && html.includes('evt-detail'));
     assert.ok(html.includes('未翻译'), html);
-    assert.ok(html.includes('memory.applied'), '未翻译要把 kind 本身带出来');
+    assert.ok(html.includes('definitely.not.a.real.kind'), '未翻译要把 kind 本身带出来');
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z')), '时间没按本地时区渲染');
     assert.equal(html.includes('2026-03-04T05:06:07'), false, '直接切了 ISO 字符串：时区会差几小时');
     // 尝试 ID：人话标签在前，原始 id 仍能看到（排障时人要拿它去 grep 日志）。
     assert.ok(html.includes('协调者第 1 次尝试') && html.includes('coord-1'));
     // data-event-key 是整条 activity 的下标，不是组内下标。
     assert.match(html, /data-event-key="1" data-active="1"/);
+  });
+
+  test('没有 attemptId 的平台与 L3 分开，L1/L2 orphan 不进 L3', async () => {
+    const { groupActivity, stageListHtml } = await loaded;
+    const rows = [
+      { kind: 'attempt.started', attemptId: 'coord-1', data: {} },
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'memory.applied', data: { written: ['VIBE.md'] } },
+      { kind: 'final_review.merged', data: { mergedInto: 'abc1234' } },
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    assert.deepEqual(groups.map((g: any) => g.attemptId), ['coord-1', '', '', '', '']);
+    assert.deepEqual(groups.map((g: any) => g.role), [
+      'coordinator', 'coordinator', 'executor', 'platform', 'reviewer',
+    ]);
+    const byRole = Object.fromEntries(groups.map((g: any) => [g.role + ':' + g.attemptId, g.events.map((e: any) => e.kind)]));
+    assert.deepEqual(byRole['platform:'], ['orchestration.round.started', 'memory.applied']);
+    assert.deepEqual(byRole['reviewer:'], ['final_review.merged']);
+    assert.deepEqual(byRole['coordinator:'], ['mission.waiting']);
+    assert.deepEqual(byRole['executor:'], ['blocked.reported']);
+    const html = stageListHtml(rows, null, null, W4_CTX);
+    assert.ok(html.includes('>平台<'), html);
+    assert.ok(html.includes('L3 检视者'), html);
+    const l3 = html.slice(html.lastIndexOf('class="stage '));
+    assert.equal(l3.includes('mission.waiting') || l3.includes('blocked.reported'), false, l3);
+    assert.equal(l3.includes('这一跳还没结束'), true, '未终态 L3 仍说在途');
+  });
+
+  test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
+    const { stageListHtml } = await loaded;
+    const evil = '<img src=x onerror="alert(1)">';
+    const rows = [
+      { kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: {} },
+      { kind: 'runtime.command_tracking.enabled', attemptId: 'W-1.exec-1', data: {} },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
+      { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: evil, command: 'rm ' + evil, exitCode: 1 } },
+      { kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
+    ];
+    const html = stageListHtml(rows, 'W-1.exec-1', null, { workItems: [{ id: 'W-1', title: 'x' }] });
+    assert.equal(html.includes('runtime.command.started'), false, html);
+    assert.equal(html.includes('runtime.command_tracking'), false, html);
+    assert.ok(html.includes('跑了 2 条命令'), html);
+    assert.match(html, /<details class="cmd-fold">/);
+    assert.equal(/<details class="cmd-fold"[^>]*open/.test(html), false, '命令清单默认收起');
+    assert.ok(html.includes('class="cmd-fold-head">2 条命令'), html);
+    assert.ok(html.includes('same'), html);
+    assert.ok(html.includes('命令 rm &lt;img'), html, '可用命令文字要上屏且转义');
+    assert.ok(html.includes('退出码 1'), html);
+    assert.equal(html.includes('<img'), false, html);
+    assert.ok(html.includes('&lt;img'), html);
+    // tracking / 命令族不得占普通 evt 行。
+    const evtCount = (html.match(/class="evt"/g) || []).length;
+    assert.equal(evtCount, 2, html);
+  });
+
+  test('LQ1 字面量 65 事件 stageListHtml 零未翻译，终态 L3 展示 SHA', async () => {
+    const { groupActivity, stageListHtml } = await loaded;
+    const rows = lq1Events();
+    assert.equal(rows.length, 65);
+    const groups = groupActivity(rows);
+    assert.ok(groups.some((g: any) => g.role === 'platform' && g.events.some((e: any) => e.kind === 'memory.applied')));
+    assert.ok(groups.some((g: any) => g.role === 'reviewer' && g.events.some((e: any) => e.kind === 'final_review.merged')));
+    const l3 = groups.find((g: any) => g.role === 'reviewer');
+    assert.equal((l3.events as any[]).some((e: any) => e.kind === 'mission.waiting'), false);
+    assert.equal((l3.events as any[]).some((e: any) => e.kind === 'blocked.reported'), false);
+
+    const running = stageListHtml(rows, null, null, LQ1_CTX);
+    assert.equal(running.includes('未翻译'), false, running);
+    assert.ok(running.includes('跑了 20 条命令'), running);
+    assert.ok(running.includes('>平台<'), running);
+    assert.ok(running.includes('L3 检视者'), running);
+    assert.ok(running.includes('这一跳还没结束，用量要等它收尾'), running);
+    assert.equal(running.includes('runtime.command.started'), false, running);
+    assert.equal(running.includes('runtime.command_tracking'), false, running);
+
+    const done = stageListHtml(rows, null, null, {
+      ...LQ1_CTX,
+      status: 'completed',
+      finalReview: { verdict: 'merge', mergedInto: 'deadbeefcafebabe', reasons: ['过了'] },
+    });
+    assert.equal(done.includes('未翻译'), false, done);
+    assert.equal(done.includes('这一跳还没结束'), false, done);
+    assert.ok(done.includes('终审：放行并落地'), done);
+    assert.ok(done.includes('合入 deadbeefcafebabe'), done);
   });
 });
 
@@ -765,6 +925,90 @@ describe('详情页：这一跳实际传递的正文', () => {
     assert.ok(html.includes('L3 检视者'), '环节头是检视者');
   });
 
+  test('点开平台 / L1 / L2 orphan 详情不走 L3 终审，L3 仍展示 SHA', async () => {
+    const { groupActivity, stageDetailHtml } = await loaded;
+    const evil = '<img src=x onerror="alert(1)">';
+    const rows = [
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'memory.applied', data: { written: [evil, 'VIBE.md'] } },
+      { kind: 'final_review.merged', data: { mergedInto: 'deadbeef' } },
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    const view = {
+      ...W4_VIEW,
+      finalReview: { verdict: 'merge', reasons: ['过了'], mergedInto: 'cafebabeSHA' },
+    };
+    const byRole = Object.fromEntries(groups.map((g: any) => [g.role, g]));
+
+    const plat = stageDetailHtml(byRole.platform, view, null);
+    assert.ok(plat.includes('>平台<') || plat.includes('平台'), plat);
+    assert.ok(plat.includes('开始新一轮调度'), plat);
+    assert.ok(plat.includes('写入项目记忆'), plat);
+    assert.ok(plat.includes('VIBE.md'), plat);
+    assert.ok(plat.includes('&lt;img'), plat);
+    assert.equal(plat.includes('<img'), false, plat);
+    assert.equal(plat.includes('L3 最终检视'), false, plat);
+    assert.equal(plat.includes('cafebabeSHA'), false, '平台组不该贴 finalReview 的 SHA');
+    assert.equal(plat.includes('还没有最终检视结论'), false, plat);
+    assert.equal(plat.includes('L3 自己动手的'), false, plat);
+
+    const l2 = stageDetailHtml(byRole.coordinator, view, null);
+    assert.equal(l2.includes('L3 最终检视'), false, l2);
+    assert.equal(l2.includes('cafebabeSHA'), false, l2);
+    assert.ok(l2.includes('L2 协调'), l2);
+
+    const l1 = stageDetailHtml(byRole.executor, view, null);
+    assert.equal(l1.includes('L3 最终检视'), false, l1);
+    assert.equal(l1.includes('cafebabeSHA'), false, l1);
+    assert.ok(l1.includes('L1 执行'), l1);
+
+    const l3 = stageDetailHtml(byRole.reviewer, view, null);
+    assert.ok(l3.includes('L3 最终检视'), l3);
+    assert.ok(l3.includes('放行并落地'), l3);
+    assert.ok(l3.includes('cafebabeSHA'), l3);
+    assert.ok(l3.includes('L3 检视者'), l3);
+  });
+
+  test('平台仅命令族走已有空态，非 L3 orphan 技术行不误称 L3', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    const view = {
+      ...W4_VIEW,
+      finalReview: { verdict: 'merge', reasons: ['过了'], mergedInto: 'cafebabeSHA' },
+    };
+    const plat = stageDetailHtml({
+      attemptId: '',
+      role: 'platform',
+      events: [
+        { kind: 'runtime.command_tracking.enabled', data: {} },
+        { kind: 'runtime.command.started', data: { callId: 'c1' } },
+      ],
+    }, view, null);
+    assert.ok(plat.includes('这一跳还没有把正文写回平台'), plat);
+    assert.equal(plat.includes('L3 最终检视'), false, plat);
+    assert.equal(plat.includes('cafebabeSHA'), false, plat);
+    assert.equal(plat.includes('L3 自己动手的'), false, plat);
+    assert.equal(plat.includes('未翻译'), false, plat);
+    assert.ok(plat.includes('尝试（没有编号）'), plat);
+
+    const rows = [
+      { kind: 'mission.waiting', data: { reason: 'waiting_l3' } },
+      { kind: 'blocked.reported', data: { reason: '缺上下文' }, workItemId: 'W-1' },
+    ];
+    const groups = groupActivity(rows);
+    const l2 = stageDetailHtml(groups.find((g: any) => g.role === 'coordinator'), view, null);
+    const l1 = stageDetailHtml(groups.find((g: any) => g.role === 'executor'), view, null);
+    assert.equal(l2.includes('L3 自己动手的'), false, l2);
+    assert.equal(l1.includes('L3 自己动手的'), false, l1);
+    assert.equal(l2.includes('这一组事件不属于任何一跳'), false, l2);
+    assert.equal(l1.includes('这一组事件不属于任何一跳'), false, l1);
+    assert.ok(l2.includes('尝试（没有编号）'), l2);
+    assert.ok(l1.includes('尝试（没有编号）'), l1);
+    assert.ok(l2.includes('尝试'), l2);
+    assert.ok(l1.includes('尝试'), l1);
+  });
+
   test('缺数据是解释句，不是 — / undefined / NaN / [object Object]', async () => {
     const { stageDetailHtml } = await loaded;
     const g = (await groups())[1];
@@ -862,10 +1106,129 @@ describe('实时输出', () => {
   });
 });
 
+describe('上下文采集指标', () => {
+  const loaded = import('../src/web/task.js');
+
+  const ended = (metrics?: unknown) => ({
+    at: '2026-03-04T05:00:00.000Z',
+    kind: 'attempt.ended',
+    attemptId: 'coord-1',
+    data: metrics === undefined ? { endedBy: 'structured_submit' } : { endedBy: 'structured_submit', contextMetrics: metrics },
+  });
+
+  test('有上报时按类别画分段条和图例，字节数是真的', async () => {
+    const { contextMetricsBlockHtml, contextMetricSegments, stageDetailHtml, groupActivity } = await loaded;
+    const metrics = {
+      version: 1,
+      coverage: 'complete',
+      brief: { renderedUtf8Bytes: 1200, sources: [] },
+      tools: [
+        { kind: 'read', calls: 2, returnedUtf8Bytes: 80 },
+        { kind: 'bash', calls: 1, returnedUtf8Bytes: 9 },
+      ],
+    };
+    const segs = contextMetricSegments(metrics);
+    assert.deepEqual(segs, [
+      { key: 'brief', bytes: 1200 },
+      { key: 'read', bytes: 80 },
+      { key: 'bash', bytes: 9 },
+    ]);
+    const html = contextMetricsBlockHtml([ended(metrics)]);
+    assert.ok(html.includes('简报 1,200 字节'), html);
+    assert.ok(html.includes('读文件 80 字节'), html);
+    assert.ok(html.includes('命令输出 9 字节'), html);
+    assert.match(html, /flex:1200/);
+    assert.match(html, /flex:80/);
+    assert.match(html, /var\(--status-queued\)/);
+    assert.equal(html.includes('搜索'), false, '没上报的 grep 不该出现');
+    assert.equal(/简报 0\b/.test(html), false, html);
+    assert.equal(html.includes('没有上报'), false, html);
+    const detail = stageDetailHtml(groupActivity([ended(metrics)])[0], {}, null);
+    assert.ok(detail.includes('简报 1,200 字节'), detail);
+  });
+
+  test('没上报明确说没有指标，不把缺失当零', async () => {
+    const { contextMetricsFromEvents, contextMetricSegments, contextMetricsBlockHtml, stageListHtml } = await loaded;
+    assert.equal(contextMetricsFromEvents([ended()]), null);
+    assert.equal(contextMetricSegments(null), null);
+    assert.equal(contextMetricSegments({ version: 1, coverage: 'unknown' }), null);
+    const html = contextMetricsBlockHtml([ended()]);
+    assert.ok(html.includes('这一跳没有上报上下文指标'), html);
+    assert.equal(html.includes('0 字节'), false, html);
+    assert.equal(html.includes('简报'), false, html);
+    const list = stageListHtml([ended()], null, null, {});
+    assert.ok(list.includes('这一跳没有上报上下文指标'), list);
+    assert.equal(list.includes('简报 0'), false, list);
+  });
+});
+
+describe('任务改动卡', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('文件、增删行数、可展开差异；空结果不假装有改动', async () => {
+    const { changesCardHtml, parseDiffStat } = await loaded;
+    const stat = [
+      ' src/web/task.js | 12 ++++----',
+      ' src/web/narrate.js | 40 +++++++++++++++++',
+      ' 2 files changed, 48 insertions(+), 4 deletions(-)',
+    ].join('\n');
+    const parsed = parseDiffStat(stat);
+    assert.equal(parsed.added, 48);
+    assert.equal(parsed.deleted, 4);
+    const html = changesCardHtml({
+      stat,
+      files: ['src/web/task.js', 'src/web/narrate.js'],
+      pendingMemory: ['VIBE.md'],
+    });
+    assert.ok(html.includes('任务改动'), html);
+    assert.ok(html.includes('2 个文件'), html);
+    assert.ok(html.includes('新增 48 行') && html.includes('删除 4 行'), html);
+    assert.ok(html.includes('<details'), '每条文件要能展开');
+    assert.ok(html.includes('src/web/task.js'), html);
+    assert.ok(html.includes('12 行'), html);
+    assert.ok(html.includes('差异摘要'), html);
+    assert.ok(html.includes('另有 1 个文件会随本次落地一并写入'), html);
+    assert.ok(html.includes('VIBE.md'), html);
+
+    const empty = changesCardHtml({ stat: '（无改动）', files: [], pendingMemory: [] });
+    assert.ok(empty.includes('（无改动）'), empty);
+    assert.equal(empty.includes('<details'), false, '空结果不该画出可展开的假文件');
+    const none = changesCardHtml({ stat: '', files: [], pendingMemory: [] });
+    assert.ok(none.includes('没有改动'), none);
+    const fail = changesCardHtml({ error: 'HTTP 500' });
+    assert.ok(fail.includes('读不到改动：HTTP 500'), fail);
+    assert.equal(fail.includes('个文件'), false, fail);
+  });
+});
+
+describe('输出末尾退路', () => {
+  const loaded = import('../src/web/task.js');
+
+  test('没有实时行时用 attempt.output；有实时行不把旧跳当当前输出', async () => {
+    const { livePanelHtml } = await loaded;
+    const hist = livePanelHtml({
+      lines: [],
+      running: false,
+      historicalOutput: '脱敏后的尾巴\n第二行',
+    });
+    assert.ok(hist.includes('输出末尾（已脱敏）'), hist);
+    assert.ok(hist.includes('脱敏后的尾巴'), hist);
+    assert.equal(hist.includes('还没有实时输出'), false, hist);
+    const live = livePanelHtml({
+      lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '正在滚' }],
+      historicalOutput: '旧跳不该出现',
+    });
+    assert.ok(live.includes('正在滚'), live);
+    assert.equal(live.includes('旧跳不该出现'), false, live);
+    assert.equal(live.includes('输出末尾（已脱敏）'), false, live);
+  });
+});
+
 describe('转义', () => {
   test('不守规矩的字段进不了 DOM', async () => {
     const {
       headerHtml, stageListHtml, stageDetailHtml, usageCardHtml, livePanelHtml, groupActivity,
+      changesCardHtml, contextMetricsBlockHtml,
     } = await import('../src/web/task.js');
     const evil = '<img src=x onerror="alert(1)">';
     const group = groupActivity([{ at: '', kind: 'attempt.started', attemptId: evil, workItemId: evil, data: {} }])[0];
@@ -880,6 +1243,10 @@ describe('转义', () => {
         finalReview: { verdict: evil, reasons: [evil], mergedInto: evil },
       }, { evidence: [{ kind: evil, summary: evil, command: evil, exitCode: 1, output: evil }] }), true],
       [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }, { kind: 'note', text: evil }] }), true],
+      [livePanelHtml({ lines: [], running: false, historicalOutput: evil }), true],
+      [changesCardHtml({ stat: evil, files: [evil], pendingMemory: [evil] }), true],
+      [changesCardHtml({ error: evil }), true],
+      [contextMetricsBlockHtml([{ kind: 'attempt.ended', data: { contextMetrics: { brief: { renderedUtf8Bytes: 1 }, tools: [{ kind: evil, returnedUtf8Bytes: 3 }] } } }]), true],
       // 环节名也吃外部输入（工作项标题是 L2 写的）。
       [stageListHtml([{ at: '', kind: 'attempt.started', attemptId: 'W-x.exec-1', workItemId: evil }], null, null, { workItems: [{ id: evil, title: evil }] }), true],
       // 用量卡只从 usage 取数字、从 attemptId 取角色，本来就不该回显入参。
@@ -947,6 +1314,162 @@ describe('面包屑', () => {
     // 读不到 view 时中间那段干脆没有，而不是一个指向不存在项目的 —。
     assert.deepEqual(crumbParts('', 'M-1').map((p: any) => p.text), ['项目', '任务 M-1']);
   });
+
+  test('方案运行来源多一段可点的方案运行，普通任务仍是三段', async () => {
+    const { crumbParts } = await import('../src/web/task.js');
+    const fromPlan = crumbParts('proj-a', 'R1-F1', {
+      clientType: 'plan-run',
+      conversationRef: 'plan-run:R1',
+    });
+    assert.deepEqual(fromPlan, [
+      { text: '项目', href: '#/projects' },
+      { text: 'proj-a', href: '#/projects/proj-a' },
+      { text: '方案运行', href: '#/plan-runs/R1' },
+      { text: '任务 R1-F1', here: true },
+    ]);
+    const odd = crumbParts('proj-a', 'M-1', {
+      clientType: 'plan-run',
+      conversationRef: 'plan-run:a/b c',
+    });
+    assert.equal(odd[2].href, '#/plan-runs/' + encodeURIComponent('a/b c'));
+    // clientType 或 conversationRef 对不上就当普通任务：猜一段链到不存在的运行更糟。
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'cli', conversationRef: 'plan-run:R1' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'plan-run', conversationRef: 'R1' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+    assert.deepEqual(
+      crumbParts('proj-a', 'M-1', { clientType: 'plan-run', conversationRef: 'plan-run:' }).map((p: any) => p.text),
+      ['项目', 'proj-a', '任务 M-1'],
+    );
+  });
+});
+
+/* ===================== 项目页：方案标签与按票分组 ===================== */
+
+describe('项目页方案运行标签与按票分组', () => {
+  const loaded = import('../src/web/projects.js');
+
+  test('默认方案标签；按开跑时间倒序；票/升级/真实花费；坏记录不冒充一行方案', async () => {
+    const { projectWorkbenchHtml, planRunsTableHtml } = await loaded;
+    const workbench = projectWorkbenchHtml({
+      missions: [{ missionId: 'M1', status: 'executing' }],
+      planRuns: [],
+    });
+    assert.match(workbench, /data-tab="plan-runs"[^>]*data-active="1"|data-active="1"[^>]*data-tab="plan-runs"/);
+    assert.match(workbench, /全部任务/);
+    assert.equal(workbench.includes('data-tab="missions" data-active="1"'), false);
+
+    const runs = [
+      {
+        id: 'R-old',
+        planId: 'PLAN-old',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        features: [{ featureId: 'F1', title: '旧', status: 'merged', missionIds: ['R-old-F1'] }],
+        escalationCount: 2,
+      },
+      {
+        id: 'R-new',
+        planId: 'PLAN-new',
+        startedAt: '2026-09-29T08:00:00.000Z',
+        features: [
+          { featureId: 'A', status: 'running', missionIds: ['R-new-A'] },
+          { featureId: 'B', status: 'pending', missionIds: [] },
+        ],
+        escalationCount: 0,
+      },
+      { id: 'R-bad', error: '方案运行记录不是合法 JSON' },
+    ];
+    const missions = [
+      { missionId: 'R-old-F1', planRunId: 'R-old', usage: { cost: 1.25 } },
+      { missionId: 'R-new-A', planRunId: 'R-new', usage: { total: 9 } },
+    ];
+    const html = planRunsTableHtml(runs, missions);
+    const pos = (id: string) => {
+      const i = html.indexOf('data-plan-run-id="' + id + '"');
+      assert.ok(i >= 0, `缺行 ${id}: ${html}`);
+      return i;
+    };
+    assert.ok(pos('R-new') < pos('R-old'), html);
+    assert.ok(html.indexOf('data-plan-run-error="R-bad"') > pos('R-old'), '坏记录应沉底');
+    assert.match(html, /href="#\/plan-runs\/R-new"/);
+    assert.match(html, /2 张票/);
+    assert.match(html, /已合入 1/);
+    assert.ok(html.includes('$1.2500'), html);
+    assert.match(html, /费用未上报/);
+    assert.equal(html.includes('$0.0000'), false, `缺费用不能画成零：${html}`);
+    assert.equal(runs[0]?.id, 'R-old', '不能原地排序调用方的数组');
+    const evil = planRunsTableHtml(
+      [{ id: '<img>', error: '<script>x</script>' }],
+      [],
+    );
+    assert.equal(evil.includes('<img'), false);
+    assert.equal(evil.includes('<script'), false);
+  });
+
+  test('全部任务按 featureId 分组，无票任务保持独立，更新时间倒序，四态筛选', async () => {
+    const { groupMissionsByFeature, filterMissionGroups, missionFilterKey, missionGroupsHtml, projectWorkbenchHtml } =
+      await loaded;
+    const rows = [
+      { missionId: 'solo-new', status: 'executing', updatedAt: '2026-09-29T10:00:00.000Z', intent: '独立新' },
+      { missionId: 'F1-old', featureId: 'F1', status: 'blocked', updatedAt: '2026-09-01T00:00:00.000Z', intent: '旧尝试' },
+      { missionId: 'F1-new', featureId: 'F1', status: 'completed', updatedAt: '2026-09-28T00:00:00.000Z', intent: '新尝试' },
+      { missionId: 'solo-old', status: 'investigating', updatedAt: '2026-08-01T00:00:00.000Z', intent: '独立旧' },
+      { missionId: 'need', featureId: 'N1', status: 'awaiting_review', updatedAt: '2026-09-20T00:00:00.000Z' },
+    ];
+    const groups = groupMissionsByFeature(rows);
+    assert.equal(groups.length, 4);
+    assert.equal(groups[0]?.missions[0]?.missionId, 'solo-new');
+    assert.equal(groups[1]?.featureId, 'F1');
+    assert.deepEqual(groups[1]?.missions.map((m: { missionId: string }) => m.missionId), ['F1-new', 'F1-old']);
+    assert.equal(groups[2]?.featureId, 'N1');
+    assert.equal(groups[3]?.missions[0]?.missionId, 'solo-old');
+    const solos = groups.filter((g: { featureId: string }) => !g.featureId);
+    assert.equal(solos.length, 2, '两个无票任务不能揉成一组');
+    assert.equal(rows[0]?.missionId, 'solo-new', '不能原地改入参');
+
+    assert.equal(missionFilterKey({ status: 'executing' }), 'active');
+    assert.equal(missionFilterKey({ status: 'awaiting_review' }), 'needs');
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'escalated' }), 'needs');
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'project_busy' }), 'active');
+    assert.equal(missionFilterKey({ status: 'completed' }), 'completed');
+    assert.equal(missionFilterKey({ status: 'blocked' }), 'blocked');
+
+    const completed = filterMissionGroups(groups, 'completed');
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0]?.featureId, 'F1');
+    const active = filterMissionGroups(groups, 'active');
+    assert.deepEqual(active.map((g: { missions: { missionId: string }[] }) => g.missions[0].missionId), ['solo-new', 'solo-old']);
+    const needs = filterMissionGroups(groups, 'needs');
+    assert.equal(needs[0]?.featureId, 'N1');
+
+    const html = missionGroupsHtml(rows, '', [], []);
+    assert.match(html, /data-group-id="feature:F1"/);
+    assert.match(html, /href="#\/missions\/F1-old"/);
+    assert.match(html, /href="#\/missions\/solo-new"/);
+    assert.ok(html.indexOf('solo-new') < html.indexOf('F1-new'), html);
+
+    const filtered = projectWorkbenchHtml({ tab: 'missions', filter: 'blocked', missions: rows, planRuns: [] });
+    assert.match(filtered, /没有符合筛选的任务/);
+    const missionsTab = projectWorkbenchHtml({ tab: 'missions', missions: rows, planRuns: [] });
+    assert.match(missionsTab, /进行中/);
+    assert.match(missionsTab, /需处理/);
+    assert.match(missionsTab, /已完成/);
+    assert.match(missionsTab, /已中止/);
+    assert.match(missionsTab, /data-tab="missions"[^>]*data-active="1"|data-active="1"[^>]*data-tab="missions"/);
+
+    const evil = missionGroupsHtml(
+      [{ missionId: '<img>', featureId: '<x>', status: 'executing', intent: '<script>' }],
+      '',
+      [],
+      [],
+    );
+    assert.equal(evil.includes('<img'), false);
+    assert.equal(evil.includes('<script'), false);
+  });
 });
 
 /* ===================== 3. 真读模型喂真渲染函数 ===================== */
@@ -1007,6 +1530,22 @@ describe('真 API 字段喂真渲染函数', () => {
     assert.equal(typeof live.cursor, 'number', '实时输出是游标轮询，必须回 cursor');
     assert.ok(Array.isArray(live.chunks) && live.chunks.length === 2);
     assert.equal(live.cursor, live.chunks.at(-1)?.seq, 'cursor 要能续上，否则第二次拉会重复');
+
+    const diff = (await (await fetch(`${base}/api/missions/M-task/diff`)).json()) as {
+      stat: string;
+      files: string[];
+      pendingMemory: string[];
+    };
+    assert.ok(Array.isArray(diff.files), '改动卡读 diff.files');
+    assert.equal(typeof diff.stat, 'string', '改动卡读 diff.stat');
+    assert.ok(Array.isArray(diff.pendingMemory), '改动卡读 diff.pendingMemory');
+    const { changesCardHtml } = await import('../src/web/task.js');
+    const diffHtml = changesCardHtml(diff);
+    assert.equal(/undefined|NaN|\[object Object\]/.test(diffHtml), false, diffHtml);
+    // 原地模式没有隔离工作区：空结果必须说清楚，不许画一套假文件。
+    if (diff.files.length === 0) {
+      assert.equal(diffHtml.includes('<details'), false, diffHtml);
+    }
   });
 
   test('GET /task.js 取得到（浏览器那边不是 404）', async () => {

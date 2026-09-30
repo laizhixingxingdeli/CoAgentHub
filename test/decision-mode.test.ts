@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import {
   assertDecisionModeStartup,
+  parseDecisionHooks,
   parseDecisionMode,
 } from '../src/application/decision-mode.ts';
 
@@ -68,5 +69,26 @@ describe('assertDecisionModeStartup', () => {
       () => assertDecisionModeStartup({ mode: 'shadow', providerAvailable: false }),
       /shadow requested but no DecisionProvider injected/,
     );
+  });
+});
+
+describe('parseDecisionHooks（J1）', () => {
+  const as = (raw: string | undefined) => [...parseDecisionHooks(raw)].sort();
+
+  test('缺省 / 空 / 纯空白 => 只有 POST_EXECUTION（PRE 默认关）', () => {
+    assert.deepEqual(as(undefined), ['POST_EXECUTION']);
+    assert.deepEqual(as(''), ['POST_EXECUTION']);
+    assert.deepEqual(as('   '), ['POST_EXECUTION']);
+  });
+
+  test('显式写上才开 PRE；大小写、连字符、空白都认', () => {
+    assert.deepEqual(as('pre_dispatch'), ['PRE_DISPATCH']);
+    assert.deepEqual(as('PRE-DISPATCH , post_execution'), ['POST_EXECUTION', 'PRE_DISPATCH']);
+    assert.deepEqual(as('pre,post'), ['POST_EXECUTION', 'PRE_DISPATCH']);
+  });
+
+  test('none 或全是不认识的词 => 一个都不跑（写错时宁可少调）', () => {
+    assert.deepEqual(as('none'), []);
+    assert.deepEqual(as('predispatch,bogus'), []);
   });
 });

@@ -144,6 +144,8 @@ export interface WorkspaceManager {
     pinnedBase?: string,
   ): Promise<PreparedWorkspace>;
   head(cwd: string): Promise<string>;
+  /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
+  checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
   /** 回到某个版本，并清掉未跟踪文件。仅在 Mission worktree 内使用。 */
@@ -212,6 +214,19 @@ export interface WorkspaceManager {
     toRevision: string;
     expectedHead: string;
   }): Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 本仓库已登记的全部 worktree 路径（含主工作区）。
+   * 枚举失败必须抛错：HA 授权文件越界判定不能在名单不完整时放行。
+   */
+  listWorktreePaths?(projectRoot: string): Promise<readonly string[]>;
+  /**
+   * ancestorRef 是否为 descendantRef 的祖先。无法判定时抛错，由调用方 fail-closed。
+   */
+  revisionIsAncestor?(
+    projectRoot: string,
+    ancestorRef: string,
+    descendantRef?: string,
+  ): Promise<boolean>;
 }
 
 export class GitWorktreeManager implements WorkspaceManager {
@@ -363,11 +378,18 @@ export class GitWorktreeManager implements WorkspaceManager {
           `${input.expectedHead.slice(0, 12)}；期间有别的提交，拒绝 reset。`,
       };
     }
-    const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
-    if ((reset as { failed?: boolean }).failed) {
-      return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+    try {
+      const reset = await run('git', ['reset', '--hard', input.toRevision], { cwd: repo });
+      if ((reset as { failed?: boolean }).failed) {
+        return { ok: false, reason: `reset 失败：${(reset as { stderr: string }).stderr.trim()}` };
+      }
+      return { ok: true };
+    } catch (error) {
+      // promisify(execFile) 在 git 非 0 时抛错，不会带 {failed}。抛出去的话
+      // 平台当次写不进 ha_unsafe，重建后再放行会再走一遍自动合并。
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `reset 失败：${detail}` };
     }
-    return { ok: true };
   }
 
   async head(cwd: string): Promise<string> {
@@ -376,6 +398,48 @@ export class GitWorktreeManager implements WorkspaceManager {
 
   async targetHead(projectRoot: string): Promise<string> {
     return (await run('git', ['rev-parse', 'HEAD'], { cwd: resolve(projectRoot) })).stdout.trim();
+  }
+
+  async checkpoint(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    allowedPaths: readonly string[],
+  ): Promise<void> {
+    if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
+      throw new Error('检查点授权路径不能为空');
+    }
+    const allowed = new Set<string>();
+    for (const path of allowedPaths) {
+      if (typeof path !== 'string' || path.length === 0 || path.includes('\\0') ||
+          path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:/.test(path) ||
+          path.split(/[\\/]/).some((part) => part === '..' || part === '.' || part === '') ||
+          /[*?{}]/.test(path) || path.includes('[') || path.includes(']') || path.endsWith('/')) {
+        throw new Error(`检查点授权路径不确定：${String(path)}`);
+      }
+      allowed.add(path.replace(/\\/g, '/'));
+    }
+    const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
+    const records = status.split('\0').filter(Boolean);
+    const dirty = new Set<string>();
+    for (const record of records) {
+      if (record.length < 4) throw new Error('无法解析 Git status，拒绝创建检查点');
+      dirty.add(record.slice(3).replace(/\\\\/g, '/'));
+    }
+    const outside = [...dirty].filter((path) => !allowed.has(path));
+    if (outside.length) throw new Error(`检查点包含未授权改动：${outside.join(', ')}`);
+    if (dirty.size === 0) return;
+    const tracked = new Set((await run('git', ['ls-files', '-z'], { cwd })).stdout.split('\0').filter(Boolean));
+    const trackedAllowed = [...allowed].filter((path) => tracked.has(path));
+    if (trackedAllowed.length > 0) await run('git', ['add', '-u', '--', ...trackedAllowed], { cwd });
+    const present = [...allowed].filter((path) => existsSync(join(resolve(cwd), path)));
+    if (present.length > 0) await run('git', ['add', '--', ...present], { cwd });
+    const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
+    const stagedOutside = staged.filter((path) => !allowed.has(path));
+    if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
+    if (staged.length === 0) return;
+    await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `mission(${missionId}): ${workItemId} 检查点`], { cwd });
   }
 
   async rollback(cwd: string, revision: string): Promise<void> {
@@ -658,6 +722,40 @@ ${dirty}` };
    */
   async showRootPackageJson(cwd: string, revision: string): Promise<string | undefined> {
     return showRootPackageJsonAt(cwd, revision);
+  }
+
+  async listWorktreePaths(projectRoot: string): Promise<readonly string[]> {
+    const repo = resolve(projectRoot);
+    let porcelain: string;
+    try {
+      porcelain = (await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo })).stdout;
+    } catch (error) {
+      throw new Error(
+        `无法列出 worktree：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const paths = parseWorktreePorcelain(porcelain)
+      .map((entry) => entry.path)
+      .filter((path) => typeof path === 'string' && path.trim() !== '')
+      .map((path) => resolve(path));
+    if (paths.length === 0) {
+      throw new Error(`git worktree list 没有返回任何路径：${repo}`);
+    }
+    return paths;
+  }
+
+  async revisionIsAncestor(
+    projectRoot: string,
+    ancestorRef: string,
+    descendantRef = 'HEAD',
+  ): Promise<boolean> {
+    const repo = resolve(projectRoot);
+    try {
+      await run('git', ['merge-base', '--is-ancestor', ancestorRef, descendantRef], { cwd: repo });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

@@ -4,6 +4,10 @@
  *   node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]
  *        [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]
  *        [--coordinator <profileId,...>] [--executor <profileId,...>]
+ *   node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check
+ *
+ * `--plan` 是位置参数的别名。`--check` 只解析、筛选资格、做只读 git 预检，不拿锁、
+ * 不建状态、不派 agent。缺 --cwd / --reviewer 直接退出。
  *
  * 与 run-mission 并列：run-mission 跑完一条就退；这里一个功能点一条 Mission，
  * 交卷了走机器 L3 合进集成分支，没合进去就开升级单等检视者（另一个会话，定时
@@ -16,22 +20,46 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { createApi } from './api/server.ts';
+import { fileURLToPath } from 'node:url';
+import { API_VERSION, createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { Orchestrator } from './application/orchestrator.ts';
-import { drivePlan, runWithDeadline } from './application/plan-driver.ts';
+import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import { loopbackRunRequest } from './application/loopback-control-client.ts';
+import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
-import { buildRoutingPrompt, parseRoutingProposal } from './application/plan-routing.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
-import { PlanRun } from './application/plan-run.ts';
+import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
-import { parsePlanSpec } from './application/plan-spec.ts';
+import {
+  candidateHandoffText,
+  parsePlanSpec,
+  PLAN_ELIGIBILITY_REASONS,
+  selectPlanCandidates,
+  type PlanCandidateSelection,
+  type PlanSpec,
+} from './application/plan-spec.ts';
 import type { ExecutionProfile } from './application/ports.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
-import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import { listenLoopback } from './application/loopback-listen.ts';
+import type { FileStateStore } from './application/file-store.ts';
+import {
+  cleanupAfterSignal,
+  formatErrorForLog,
+  parseReconcileIntervalMs,
+  runIndependentCleanup,
+  type PeriodicReconcileHandle,
+} from './application/reconcile.ts';
+import {
+  buildDecisionDeps,
+  buildPersistentPlatform,
+  buildPgPlatform,
+  makeIssuer,
+  startPeriodicDeliveryRepair,
+} from './main.ts';
 import {
   parseAgentEnvPassthrough,
+  SPAWN_ENV_PASSTHROUGH_VAR,
   SPAWN_ENV_UNDECLARED_MESSAGE,
   SpawnRuntime,
 } from './runtime/spawn.ts';
@@ -39,6 +67,184 @@ import {
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+/** 下一个若是另一面旗，就当没给值——`--check --cwd` 不能把 --cwd 当成仓库路径。 */
+function flagValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const next = process.argv[index + 1];
+  if (next === undefined || next.startsWith('--')) return undefined;
+  return next;
+}
+
+const VALUE_FLAGS = Object.freeze([
+  '--plan',
+  '--cwd',
+  '--reviewer',
+  '--adapter',
+  '--state',
+  '--run-dir',
+  '--store',
+  '--coordinator',
+  '--executor',
+  '--max-rounds',
+  '--independent-reviewer',
+  '--worktrees',
+]);
+
+function positionalPlanFile(): string | undefined {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i];
+    if (token === '--check') continue;
+    if (token.startsWith('--')) {
+      if ((VALUE_FLAGS as readonly string[]).includes(token)) i += 1;
+      continue;
+    }
+    return token;
+  }
+  return undefined;
+}
+
+function planFileArg(): string | undefined {
+  return flagValue('--plan') ?? positionalPlanFile();
+}
+
+export function missionRunOptions<T extends { readonly projectRoot: string }>(options: T, maxRounds: number | undefined): T | (T & { readonly maxRounds: number }) {
+  return maxRounds === undefined ? options : { ...options, maxRounds };
+}
+
+function usage(): string {
+  return (
+    '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
+      '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
+      '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>] [--max-rounds <1-100>]\n' +
+      '     node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check\n' +
+      '\n' +
+      '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
+      '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>\n' +
+      '--check 只读：解析 + 资格筛选 + 仓库预检，不建运行记录、不派发。没有可跑候选时以 0 退出。'
+  );
+}
+
+function gateValue(raw: unknown, key: string, value: number): string {
+  const present =
+    raw !== null && typeof raw === 'object' && !Array.isArray(raw) && key in (raw as object);
+  return present ? String(value) : `${value}（缺省）`;
+}
+
+/** --check 只读展示生效上限，对照原始 JSON 标出是否取缺省。 */
+function printStopGates(rawStop: unknown, effective: PlanSpec['stopConditions']): void {
+  console.log(
+    `停止条件：未解决升级上限 ${effective.unresolvedEscalations}；墙钟 ${effective.wallClockMs}ms；升级单等待 ${effective.escalationTimeoutMs}ms`,
+  );
+  console.log(
+    `两道闸：升级单总数上限 ${gateValue(rawStop, 'maxEscalations', effective.maxEscalations)}；` +
+      `每功能重跑上限 ${gateValue(rawStop, 'maxRerunsPerFeature', effective.maxRerunsPerFeature)}`,
+  );
+}
+
+/** 正式开跑时按原因计数、不逐条展开。这些源状态不需要 L3 修订就能理解；逐条会淹没开跑信息。 */
+const FORMAL_COUNTED_EXCLUSION_REASONS = new Set<string>([
+  PLAN_ELIGIBILITY_REASONS.done,
+  PLAN_ELIGIBILITY_REASONS.split,
+  PLAN_ELIGIBILITY_REASONS.planned,
+  PLAN_ELIGIBILITY_REASONS.implementing,
+  PLAN_ELIGIBILITY_REASONS.review,
+  PLAN_ELIGIBILITY_REASONS.rework,
+]);
+
+const INDEPENDENT_RUN_MODE = '无常驻服务，独立运行（本进程持主锁）';
+// PG 不探测、不转发、不持文件主锁；再用文件独立句会虚报持锁。
+const PG_INDEPENDENT_RUN_MODE = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
+
+function hostedRunModeLine(instanceId: string, port: number): string {
+  return `由常驻服务托管：实例 ${instanceId.slice(0, 8)}、端口 ${port}`;
+}
+
+function printEligibility(
+  plan: PlanSpec,
+  selection: PlanCandidateSelection,
+  exclusionStyle: 'full' | 'formal',
+): void {
+  console.log(`方案 ${plan.planId} 入选 ${selection.candidates.length} 项，未纳入 ${selection.exclusions.length} 项。`);
+  console.log('入选：');
+  if (selection.candidates.length === 0) {
+    console.log('  （无）');
+  } else {
+    for (const feature of selection.candidates) {
+      console.log(`  ${feature.id} ${feature.title}  ${candidateHandoffText(feature)}`);
+    }
+  }
+  console.log('本次未纳入：');
+  if (selection.exclusions.length === 0) {
+    console.log('  （无）');
+  } else if (exclusionStyle === 'full') {
+    for (const ex of selection.exclusions) {
+      console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
+    }
+  } else {
+    // --check 仍走全清单；正式只把无需 L3 的排除收成计数，缺契约/依赖/禁止范围等仍逐条。
+    const counts = new Map<string, number>();
+    const itemized: PlanCandidateSelection['exclusions'][number][] = [];
+    for (const ex of selection.exclusions) {
+      if (FORMAL_COUNTED_EXCLUSION_REASONS.has(ex.reason)) {
+        counts.set(ex.reason, (counts.get(ex.reason) ?? 0) + 1);
+      } else {
+        itemized.push(ex);
+      }
+    }
+    for (const [reason, n] of counts) {
+      console.log(`  ${n} 项  ${reason}`);
+    }
+    for (const ex of itemized) {
+      console.log(`  ${ex.featureId} ${ex.title}  ${ex.reason}`);
+    }
+  }
+  // 警告在资格筛选里就算好，这里只展示。无警告不印标题，免得像还有事。
+  if (selection.warnings.length > 0) {
+    console.log('警告：');
+    for (const warning of selection.warnings) {
+      console.log(`  ${warning}`);
+    }
+  }
+}
+
+/**
+ * 真正只读的开跑前检查。不拿主状态锁、不打开状态文件、不建 PlanRun、
+ * 不起 HTTP、不建 worktree、不分类、不派 agent。
+ *
+ * 没有任何入选条目时以 0 退出并写明「没有可跑的候选」——那是筛选结果，不是预检失败。
+ * 有候选才跑仓库预检；预检不过非零退出，且不把失败说成可以开跑。
+ */
+async function checkPlanOnly(planFile: string, maxRounds: number | undefined): Promise<void> {
+  const cwd = flagValue('--cwd');
+  const reviewer = flagValue('--reviewer');
+  if (!cwd || !reviewer) {
+    console.error('--check 必须同时给 --cwd <项目仓> 和 --reviewer <检视者>。');
+    process.exitCode = 2;
+    return;
+  }
+  const raw = JSON.parse(readFileSync(resolve(planFile), 'utf8')) as Record<string, unknown>;
+  const plan = parsePlanSpec(raw, { reviewer });
+  const projectRoot = resolve(cwd);
+  const selection = selectPlanCandidates(plan, { projectRoot });
+  console.log(`方案 ${plan.planId} 只读检查（--check，不开跑）`);
+  printStopGates(raw.stopConditions, plan.stopConditions);
+  console.log(`轮次上限：${maxRounds ?? 12}${maxRounds === undefined ? '（缺省）' : ''}`);
+  printEligibility(plan, selection, 'full');
+  if (selection.candidates.length === 0) {
+    console.log('没有可跑的候选。');
+    return;
+  }
+  const problems = await preflightPlanRepo(projectRoot, plan.integrationBranch);
+  if (problems.length > 0) {
+    console.error(`开跑前检查没过：\n${problems.map((p) => `  ✗ ${p}`).join('\n')}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log('仓库预检通过。以上为只读检查，未开跑。');
 }
 
 function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
@@ -58,30 +264,132 @@ function stamp(date: Date): string {
   );
 }
 
+function occupiedMessage(reason: string): string {
+  return `无法安全转发到本机写者：${reason}。主状态未改。`;
+}
+
+function requireLiveIdentity(holder: LockInfo): {
+  port: number;
+  instanceId: string;
+  stateId: string;
+  apiVersion: string;
+} {
+  if (
+    holder.port === undefined ||
+    holder.instanceId === undefined ||
+    holder.stateId === undefined ||
+    holder.apiVersion === undefined
+  ) {
+    throw new Error('活着的写者元数据不完整，拒绝转发。主状态未改。');
+  }
+  if (holder.apiVersion !== API_VERSION) {
+    throw new Error('API 版本不符，拒绝转发。主状态未改。');
+  }
+  return {
+    port: holder.port,
+    instanceId: holder.instanceId,
+    stateId: holder.stateId,
+    apiVersion: holder.apiVersion,
+  };
+}
+
+function hostedPlanBody(input: {
+  plan: PlanSpec;
+  selection: PlanCandidateSelection;
+  cwd: string;
+  adapter: string;
+  statePath: string;
+  store: string;
+  runDir: string;
+  worktrees?: string;
+  coordinator?: string;
+  executor?: string;
+  independentReviewer?: string;
+  maxRounds?: number;
+  envPassthroughRaw: string | undefined;
+}): Record<string, unknown> {
+  return {
+    plan: input.plan,
+    selection: input.selection,
+    cwd: input.cwd,
+    adapter: input.adapter,
+    state: input.statePath,
+    store: input.store,
+    runDir: input.runDir,
+    ...(input.worktrees !== undefined ? { worktrees: input.worktrees } : {}),
+    ...(input.coordinator !== undefined ? { coordinator: input.coordinator } : {}),
+    ...(input.executor !== undefined ? { executor: input.executor } : {}),
+    ...(input.independentReviewer !== undefined
+      ? { independentReviewer: input.independentReviewer }
+      : {}),
+    ...(input.maxRounds === undefined ? {} : { maxRounds: input.maxRounds }),
+    env: { [SPAWN_ENV_PASSTHROUGH_VAR]: input.envPassthroughRaw },
+  };
+}
+
+async function forwardLivePlan(holder: LockInfo, body: Record<string, unknown>): Promise<number> {
+  const envBag = body.env;
+  const rawPass =
+    typeof envBag === 'object' && envBag !== null && !Array.isArray(envBag)
+      ? (envBag as Record<string, unknown>)[SPAWN_ENV_PASSTHROUGH_VAR]
+      : undefined;
+  const names = typeof rawPass === 'string' ? parseAgentEnvPassthrough(rawPass) : undefined;
+  if (names !== undefined && names.length > 0) {
+    // 取值不能进回环；服务 env 同名键也证明不了跟本进程一致。拒绝发生在 POST 之前。
+    throw new Error(`无法安全转发到本机写者：${HOSTED_AGENT_ENV_UNPROVEN_MESSAGE}`);
+  }
+  const identity = requireLiveIdentity(holder);
+  const modeLine = hostedRunModeLine(identity.instanceId, identity.port);
+  let announced = false;
+  return loopbackRunRequest(
+    identity,
+    { path: '/api/control/run-plan', body },
+    (channel, line) => {
+      if (channel === 'stderr') console.error(line);
+      else console.log(line);
+      // 探测与争锁后重探测都走这里：开跑行之后才标明托管，避免和资格清单搅在一起。
+      if (!announced && channel !== 'stderr' && line.includes('开跑：')) {
+        announced = true;
+        console.log(modeLine);
+      }
+    },
+    // 0 = 关掉套接字空闲超时。不显式传的话 Node 19+ globalAgent keepAlive 默认 5s，
+    // 升级等待中间没有 stdout 会被误报「回环运行流超时」，对端 job 还在跑。
+    { timeoutMs: 0 },
+  );
+}
+
 async function main() {
-  const planFile = process.argv[2];
-  if (!planFile || planFile.startsWith('--')) {
-    console.log(
-      '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
-        '     [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]\n' +
-        '     [--coordinator <profileId,...>] [--executor <profileId,...>]\n' +
-        '\n' +
-        '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
-        '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>',
-    );
+  const maxRounds = parseMaxRounds(flagValue('--max-rounds'), process.argv.includes('--max-rounds'));
+  const planFile = planFileArg();
+  if (!planFile) {
+    console.log(usage());
+    return;
+  }
+  if (process.argv.includes('--check')) {
+    await checkPlanOnly(planFile, maxRounds);
     return;
   }
 
-  const envPassthrough = parseAgentEnvPassthrough(process.env.COAGENT_AGENT_ENV_PASSTHROUGH);
+  // 正式跑：读 plan JSON 之前就 fail-closed。--check 已先行返回，不在这里做决策校验。
+  const decision = buildDecisionDeps(process.env);
+
+  // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
+  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
+
+  const envPassthroughRaw = process.env.COAGENT_AGENT_ENV_PASSTHROUGH;
+  const envPassthrough = parseAgentEnvPassthrough(envPassthroughRaw);
   if (envPassthrough === undefined) throw new Error(SPAWN_ENV_UNDECLARED_MESSAGE);
 
   const plan = parsePlanSpec(JSON.parse(readFileSync(resolve(planFile), 'utf8')), {
     reviewer: arg('--reviewer'),
   });
   const projectRoot = resolve(arg('--cwd') ?? process.cwd());
-  const remaining = plan.features.filter((feature) => feature.status !== 'done');
+  const selection = selectPlanCandidates(plan, { projectRoot });
+  printEligibility(plan, selection, 'formal');
+  const remaining = selection.candidates;
   if (remaining.length === 0) {
-    console.log(`方案 ${plan.planId} 的功能点都已合入，没什么可跑的。`);
+    console.log(`方案 ${plan.planId} 没有可跑的候选。`);
     return;
   }
   const problems = await preflightPlanRepo(projectRoot, plan.integrationBranch);
@@ -94,6 +402,37 @@ async function main() {
   const adapter = resolve(arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts');
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  const storeFlag = arg('--store') ?? (usePg ? 'pg' : 'file');
+  const runDir = resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
+  const forwardBody = hostedPlanBody({
+    plan,
+    selection,
+    cwd: projectRoot,
+    adapter,
+    statePath,
+    store: storeFlag,
+    runDir,
+    worktrees: arg('--worktrees'),
+    coordinator: arg('--coordinator'),
+    executor: arg('--executor'),
+    independentReviewer: arg('--independent-reviewer'),
+    maxRounds,
+    envPassthroughRaw,
+  });
+
+  // 文件版：资格筛选和第一次 git 预检之后探测本机写者。live 回环转发，不得因连接不明落回本地。
+  // PG 不走文件锁探测，保持旧单实例边界。--check 已在探测之前返回。
+  if (!usePg) {
+    const probe = await probeLocalWriter(statePath);
+    if (probe.status === 'live') {
+      const code = await forwardLivePlan(probe.holder, forwardBody);
+      process.exit(code);
+    }
+    if (probe.status === 'occupied') {
+      throw new Error(occupiedMessage(probe.reason));
+    }
+  }
+
   const workspace = new GitWorktreeManager(arg('--worktrees'));
   // 分类员：同一个适配器的只读模式。工具表只有 read / grep / find / ls，由 QueryRunner 强制。
   const queryRuntime = new SpawnRuntime({
@@ -106,18 +445,48 @@ async function main() {
     supportsQuery: true,
     envPassthrough,
   });
-  const built = usePg
-    ? await buildPgPlatform({ workspace, queryRuntime })
-    : await buildPersistentPlatform(statePath, {
-        workspace,
-        queryRuntime,
-        exclusive: { what: `run-plan ${plan.planId}` },
-      });
-  const { platform, tokens, deliveries, persist, agentPool } = built;
+  let built;
+  try {
+    built = usePg
+      ? await buildPgPlatform({ ...decision, workspace, queryRuntime })
+      : await buildPersistentPlatform(statePath, {
+          ...decision,
+          workspace,
+          queryRuntime,
+          exclusive: { what: `run-plan ${plan.planId}` },
+        });
+  } catch (error) {
+    if (!usePg && error instanceof LockBusyError) {
+      const again = await probeLocalWriter(statePath);
+      if (again.status === 'live') {
+        const code = await forwardLivePlan(again.holder, forwardBody);
+        process.exit(code);
+      }
+      throw new Error(
+        again.status === 'occupied'
+          ? occupiedMessage(again.reason)
+          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
+      );
+    }
+    throw error;
+  }
+  const { platform, tokens, deliveries, persist, agentPool, candidateCircuits, queuedHops } = built;
   const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
   const live = 'live' in built ? built.live : undefined;
   const runQuery = built.runQuery;
+  const warnRepair = (message: string) => {
+    console.warn(message);
+  };
+  // 与 startServer 同一处装配：文件版已持锁不再取锁，PG 独立 store。不得在这里再选 tick。
+  const periodic: PeriodicReconcileHandle | undefined = startPeriodicDeliveryRepair({
+    intervalMs: reconcileIntervalMs,
+    warn: warnRepair,
+    mode: usePg
+      ? { kind: 'pg' }
+      : { kind: 'file-held', store: built.store as FileStateStore },
+  });
 
+  let primary: { error: unknown } | undefined;
   try {
     // 状态文件、锁目录落在项目仓里却没被忽略的话，机器 L3 每一次合并都会拒绝。
     // 拿锁之后再看一次，才看得见这把锁自己。
@@ -137,25 +506,11 @@ async function main() {
 
     const started = new Date();
     const runId = `${plan.planId}-${stamp(started)}`;
-    const runDir = resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
     const store = new FilePlanRunStore(join(runDir, `${runId}.json`));
-    await store.create(
-      PlanRun.start({
-        id: runId,
-        planId: plan.planId,
-        projectId: plan.projectId,
-        integrationBranch: plan.integrationBranch,
-        reviewer: plan.reviewer,
-        stopConditions: plan.stopConditions,
-        featureIds: remaining.map((feature) => feature.id),
-        // 标题抄进记录：早上看交接面不用回头翻方案文件（它到早上可能已经改了）。
-        titles: Object.fromEntries(remaining.map((feature) => [feature.id, feature.title])),
-        startedAt: started.toISOString(),
-      }),
-    );
 
     const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    // 派出去的 agent 用 fetch 连回这个口：分到 fetch 屏蔽的端口，它们会以 bad port 连不上平台。
+    await listenLoopback(server, 0);
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
     const runtime = new SpawnRuntime({
@@ -168,7 +523,7 @@ async function main() {
       envPassthrough,
     });
     const pool = await loadPoolOrSeed(agentPool);
-    const pick = (role: 'coordinator' | 'executor', flag: string): AgentPoolCandidate[] => {
+    const pick = (role: 'coordinator' | 'executor' | 'independent_reviewer', flag: string): AgentPoolCandidate[] => {
       const wanted = arg(flag);
       if (!wanted) return [...pool[role]];
       return wanted
@@ -185,6 +540,8 @@ async function main() {
     };
     const coordinators = pick('coordinator', '--coordinator').map(toProfile);
     const executors = pick('executor', '--executor').map(toProfile);
+    // 空池也原样交给 MissionRunner：不得拿 coordinator 候选顶替独立检视。
+    const independentReviewers = pick('independent_reviewer', '--independent-reviewer').map(toProfile);
 
     console.log(`方案 ${plan.planId} 开跑：${remaining.map((f) => f.id).join(' → ')}`);
     console.log(`集成分支 ${plan.integrationBranch}，项目仓 ${projectRoot}`);
@@ -193,100 +550,77 @@ async function main() {
       `检视者 ${plan.reviewer} 每 ${Math.round(plan.stopConditions.escalationTimeoutMs / 60_000)} 分钟醒一次：` +
         `node src/l3.ts plan --run "${store.path}"\n`,
     );
+    console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE);
 
     // Ctrl+C / 被杀：信号结束的进程不发 exit 事件，锁目录会留下，后面每次写都被挡；
     // 方案运行记录也会停在「还在跑」。先记下原因、落盘、放锁再退。在途 Mission 原样
     // 留给人（它可能占着名额，下一晚开跑前检查会点名它）。
+    // 记录改由内部入口创建：信号必须在那之前挂上，否则刚落盘就被杀会停在「还在跑」。
     let interrupted = false;
     const onSignal = (signal: string) => {
       if (interrupted) return;
       interrupted = true;
       console.error(`\n收到 ${signal}：记下原因后退出。在途的 Mission 原样留给人。`);
-      void store
-        .update((r) => {
-          if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
-        })
-        .catch(() => undefined)
-        .then(async () => {
-          await Promise.resolve(persist()).catch(() => undefined);
-          releaseLock();
-          process.exit(130);
-        });
+      void cleanupAfterSignal({
+        steps: [
+          {
+            name: 'halt',
+            run: async () => {
+              if (!store.read()) return;
+              await store.update((r) => {
+                if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
+              });
+            },
+          },
+          {
+            name: 'periodic.stop',
+            run: async () => {
+              if (periodic) await periodic.stop();
+            },
+          },
+          { name: 'persist', run: persist },
+          { name: 'releaseLock', run: () => releaseLock() },
+        ],
+        report: (message, error) => {
+          console.error(message);
+          if (error !== undefined) console.error(error);
+        },
+        exit: (code) => process.exit(code),
+      });
     };
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
 
-    const stop = await drivePlan(plan, {
+    const runner = new MissionRunner({
+      platform,
+      live,
+      tokens: makeIssuer(platform, tokens),
+      baseUrl,
+      workspace,
+      candidateCircuits,
+      queuedHops,
+      inRunBackoffWaitMs: 120_000,
+      coordinator: { runtime, candidates: coordinators },
+      executor: { runtime, candidates: executors },
+      independentReviewer: { runtime, candidates: independentReviewers },
+    });
+    const stop = await runPlanOnPlatform(plan, selection, {
       store,
       projectRoot,
-      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
+      platform,
+      runMission: (missionId, options) => runner.run(missionId, missionRunOptions(options, maxRounds)),
+      ...(runQuery ? { runQuery } : {}),
+      ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
+      persist,
+      pauseInFlight: async (missionId) => {
+        await platform.pauseMission(missionId);
+      },
       now: () => new Date().toISOString(),
       sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
       log: (line) => console.log(`[${new Date().toLocaleTimeString()}] ${line}`),
-      platform: {
-        createMission: async (input) => {
-          const created = await platform.createMission(input);
-          await persist();
-          return created;
-        },
-        createClassifiedMission: async (input) => {
-          const created = await platform.createClassifiedMission(input);
-          await persist();
-          return created;
-        },
-        getMissionView: (missionId) => platform.getMissionView(missionId),
-        finalizeMissionByMachine: async (missionId, input) => {
-          const result = await platform.finalizeMissionByMachine(missionId, input);
-          await persist();
-          return result;
-        },
-        abandonMissionForPlan: async (missionId, input) => {
-          const result = await platform.abandonMissionForPlan(missionId, input);
-          await persist();
-          return result;
-        },
-      },
-      proposeRoute: async (feature) => {
-        if (!runQuery) return { ok: false, reason: '分类员不可用（query runtime 没装上）。' };
-        const result = await runQuery({
-          projectId: plan.projectId,
-          source: `plan-run:${runId}:${feature.id}`,
-          prompt: buildRoutingPrompt(plan, feature),
-          cwd: projectRoot,
-          ...(coordinators[0] ? { profile: coordinators[0] } : {}),
-        });
-        await persist();
-        if (result.outcome !== 'answered') {
-          return { ok: false, reason: `分类员没答上来（${result.outcome}，QueryRun ${result.queryRunId}）。` };
-        }
-        const parsed = parseRoutingProposal(result.record.output ?? '');
-        return parsed.ok ? parsed : { ok: false, reason: `${parsed.reason}（QueryRun ${result.queryRunId}）` };
-      },
-      runMission: async (missionId, { wallClockDeadline }) => {
-        // 一条 Mission 一个编排器：它按「上一跳」判连续无提交，跨 Mission 复用会误判。
-        const orchestrator = new Orchestrator({
-          platform,
-          live,
-          tokens: makeIssuer(platform, tokens),
-          baseUrl,
-          workspace,
-          coordinator: { runtime, candidates: coordinators },
-          executor: { runtime, candidates: executors },
-        });
-        try {
-          return await runWithDeadline(
-            () => orchestrator.runMission(missionId, { projectRoot }),
-            Date.parse(wallClockDeadline) - Date.now(),
-            async () => {
-              console.log(`[${new Date().toLocaleTimeString()}] 墙钟到点：暂停在途的 ${missionId}，下一轮开头停下。`);
-              await platform.pauseMission(missionId);
-              await persist();
-            },
-          );
-        } finally {
-          await persist();
-        }
-      },
+      runId,
+      startedAt: started.toISOString(),
+      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
     });
 
     const run = store.read();
@@ -298,13 +632,35 @@ async function main() {
     if (run) for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) console.log(text);
     console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
     server.close();
+  } catch (error) {
+    // 先记下，交给 finally 里的清理一起报；在这里直接 throw 的话，清理失败时会被盖掉。
+    primary = { error };
   } finally {
-    await persist();
-    releaseLock();
+    // stop 失败不能跳过 persist / 释锁：排他锁留在盘上，下一晚开跑会一直锁忙。
+    await runIndependentCleanup({
+      primary,
+      steps: [
+        {
+          name: 'periodic.stop',
+          run: async () => {
+            if (periodic) await periodic.stop();
+          },
+        },
+        { name: 'persist', run: persist },
+        { name: 'releaseLock', run: () => releaseLock() },
+      ],
+      report: (message, error) => {
+        console.error(message);
+        if (error !== undefined) console.error(error);
+      },
+    });
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
+    console.error(formatErrorForLog(error));
+    process.exit(1);
+  });
+}

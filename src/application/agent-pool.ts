@@ -18,7 +18,7 @@
 
 /* ------------------------------ 类型 ------------------------------ */
 
-export type AgentRole = 'coordinator' | 'executor';
+export type AgentRole = 'coordinator' | 'executor' | 'independent_reviewer';
 
 /**
  * runtime 只有 'pi'。
@@ -61,6 +61,59 @@ export interface AgentPoolRow extends AgentPoolCandidate {
 export interface AgentPoolSnapshot {
   readonly coordinator: readonly AgentPoolCandidate[];
   readonly executor: readonly AgentPoolCandidate[];
+  /** 老池缺这一行时 list 仍给出 []，不能当成「可以自审」。 */
+  readonly independent_reviewer: readonly AgentPoolCandidate[];
+}
+
+/** GET /api/pools 在原候选上附加的只读健康；不进仓储、不影响 POST。 */
+export interface AgentPoolCandidateHealth {
+  readonly circuit:
+    | { readonly state: 'closed' }
+    | { readonly state: 'open'; readonly failureClass: string; readonly openUntil: string }
+    | {
+        readonly state: 'half_open';
+        readonly failureClass: string;
+        readonly openUntil: string;
+        readonly probeClaimed: true;
+      }
+    | { readonly state: 'unknown'; readonly reason: string };
+  readonly lastFailure: {
+    readonly failureClass: string;
+    readonly at: string | null;
+    readonly source: string;
+    readonly unknownReason?: string;
+  };
+  readonly window7d: {
+    readonly attempts: number;
+    readonly successes: number;
+    /** 只累加 quality=reported 且带数字 cost 的用量；没有就 null，不编 0。 */
+    readonly reportedCost: number | null;
+  };
+  readonly runtime:
+    | { readonly running: true; readonly hopId: string; readonly runtimeKind: string }
+    | { readonly running: false; readonly reason: string };
+}
+
+export interface AgentPoolCandidateWithHealth extends AgentPoolCandidate {
+  readonly health: AgentPoolCandidateHealth;
+}
+
+export interface AgentPoolSnapshotWithHealth {
+  readonly coordinator: readonly AgentPoolCandidateWithHealth[];
+  readonly executor: readonly AgentPoolCandidateWithHealth[];
+  readonly independent_reviewer: readonly AgentPoolCandidateWithHealth[];
+}
+
+export function withCandidateHealth(
+  snapshot: AgentPoolSnapshot,
+  healthOf: (candidate: AgentPoolCandidate) => AgentPoolCandidateHealth,
+): AgentPoolSnapshotWithHealth {
+  const attach = (row: AgentPoolCandidate): AgentPoolCandidateWithHealth => ({ ...row, health: healthOf(row) });
+  return {
+    coordinator: snapshot.coordinator.map(attach),
+    executor: snapshot.executor.map(attach),
+    independent_reviewer: snapshot.independent_reviewer.map(attach),
+  };
 }
 
 /**
@@ -172,11 +225,11 @@ export function validateAgentPoolAdd(
   existing: readonly AgentPoolRow[],
 ): AgentPoolRow {
   const role: unknown = input?.role;
-  if (role !== 'coordinator' && role !== 'executor') {
+  if (role !== 'coordinator' && role !== 'executor' && role !== 'independent_reviewer') {
     throw new AgentPoolError(
       'INVALID_ROLE',
-      `候选池的 role 只接受 coordinator 或 executor，收到：${show(role)}。` +
-        '协调者与执行者是两套互相独立的候选列表，没有第三种。',
+      `候选池的 role 只接受 coordinator、executor 或 independent_reviewer，收到：${show(role)}。` +
+        '三种角色是互相独立的候选列表；独立检视者不能复用终审签名的 reviewer。',
     );
   }
   const profileId = requiredText(input?.profileId, 'profileId', role, 'INVALID_PROFILE');
@@ -221,7 +274,11 @@ export function agentPoolSnapshot(rows: readonly AgentPoolRow[]): AgentPoolSnaps
       .slice()
       .sort((a, b) => a.order - b.order)
       .map(toAgentPoolCandidate);
-  return { coordinator: ofRole('coordinator'), executor: ofRole('executor') };
+  return {
+    coordinator: ofRole('coordinator'),
+    executor: ofRole('executor'),
+    independent_reviewer: ofRole('independent_reviewer'),
+  };
 }
 
 /* ------------------------------ 缺省候选 ------------------------------ */

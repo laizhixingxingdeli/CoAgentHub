@@ -67,6 +67,9 @@ const SMALL = {
   assessedAt: '2026-09-23T15:00:00.000Z',
 };
 
+/** 平台时钟给的时间：故意和 SMALL 里模型自报的那个不一样。 */
+const STAMP = '2026-09-23T09:26:02.785Z';
+
 const ORDER = {
   objective: '加 plan 子命令',
   allowedScope: ['src/l3.ts'],
@@ -84,7 +87,7 @@ function output(body: unknown, prose = '看完了，结论如下。'): string {
 }
 
 function parsed(body: unknown) {
-  const result = parseRoutingProposal(output(body));
+  const result = parseRoutingProposal(output(body), STAMP);
   assert.equal(result.ok, true, result.ok ? '' : result.reason);
   return result.ok ? result.proposal : undefined;
 }
@@ -94,7 +97,7 @@ describe('解析只读协调者的输出', () => {
     const text =
       output({ facts: 'example' }, '格式举例：') +
       output({ facts: QUIET_FACTS, assessment: SMALL, workOrder: ORDER });
-    const result = parseRoutingProposal(text);
+    const result = parseRoutingProposal(text, STAMP);
     assert.equal(result.ok, true);
     assert.deepEqual(result.ok && result.proposal.workOrder?.allowedScope, ['src/l3.ts']);
   });
@@ -107,14 +110,55 @@ describe('解析只读协调者的输出', () => {
       [output({ facts: { ...QUIET_FACTS, mutationSideEffect: 'maybe' } }), /mutationSideEffect/],
     ];
     for (const [text, why] of cases) {
-      const result = parseRoutingProposal(text);
+      const result = parseRoutingProposal(text, STAMP);
       assert.equal(result.ok, false, text);
       assert.match(result.ok ? '' : result.reason, why);
     }
   });
 
+  test('禁止副作用字段缺失或不是布尔 false 时，解析失败仍保留 needs_human 信号', () => {
+    const keys = ['productionDeployRelease', 'externalPaidOp', 'destructiveData', 'unrecoverableExternalSideEffect'] as const;
+    for (const key of keys) {
+      for (const invalid of [undefined, null, 'yes', 1]) {
+        const highAssurance = { ...QUIET_FACTS.highAssurance } as Record<string, unknown>;
+        if (invalid === undefined) delete highAssurance[key];
+        else highAssurance[key] = invalid;
+        const result = parseRoutingProposal(output({ facts: { ...QUIET_FACTS, highAssurance } }), STAMP);
+        assert.equal(result.ok, false);
+        assert.ok(!result.ok && result.haForbiddenUnproven?.includes(key), key);
+        const route = decideRoute(undefined, FEATURE, result.ok ? '' : result.reason, result.ok ? [] : result.haForbiddenUnproven);
+        assert.equal(route.kind, 'needs_human', `${key}=${String(invalid)}`);
+        assert.match(route.kind === 'needs_human' ? route.reason : '', new RegExp(key));
+      }
+    }
+    for (const body of [{ assessment: SMALL }, { facts: { ...QUIET_FACTS, highAssurance: undefined } }]) {
+      const result = parseRoutingProposal(output(body), STAMP);
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.ok ? [] : result.haForbiddenUnproven, [
+        'productionDeployRelease', 'externalPaidOp', 'destructiveData', 'unrecoverableExternalSideEffect',
+      ]);
+    }
+  });
+
+  test('评估时间盖平台的：模型自报的被覆盖，没报也补上而不是整份拒收', () => {
+    // E2 实测 7/7 的 assessedAt 都是模型编的整点，有一条比实际晚 11 小时。
+    const reported = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: SMALL }), STAMP);
+    assert.equal(reported.ok, true, reported.ok ? '' : reported.reason);
+    assert.equal(reported.ok && reported.proposal.assessment?.assessedAt, STAMP);
+
+    const { assessedAt: _dropped, ...withoutTime } = SMALL;
+    const omitted = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: withoutTime }), STAMP);
+    assert.equal(omitted.ok, true, omitted.ok ? '' : omitted.reason);
+    assert.equal(omitted.ok && omitted.proposal.assessment?.assessedAt, STAMP);
+    assert.equal(omitted.ok && omitted.proposal.assessment?.changeScope, 1);
+  });
+
+  test('提示里不再向模型要时间', () => {
+    assert.doesNotMatch(buildRoutingPrompt(PLAN, FEATURE), /assessedAt/);
+  });
+
   test('评估必须署名 coordinator：只读协调者冒充 user 的评估不收', () => {
-    const result = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: { ...SMALL, decidedBy: 'user' } }));
+    const result = parseRoutingProposal(output({ facts: QUIET_FACTS, assessment: { ...SMALL, decidedBy: 'user' } }), STAMP);
     assert.equal(result.ok, false);
     assert.match(result.ok ? '' : result.reason, /coordinator/);
   });
@@ -162,12 +206,90 @@ describe('定路由', () => {
     assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
   });
 
-  test('事实判到 high_assurance → 挂起等人，写明要你定什么；不回落、不问检视者', () => {
+  test('事实判到 high_assurance 且禁止副作用全 false → 按 HA 建 classified，不带工单', { skip: 'HA 路暂时关闭（HAOFF1，2026-09-28），恢复 HA 分支时去掉 skip' }, () => {
     const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, schemaPublicApiPersistenceCompat: true } };
-    const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
-    assert.equal(route.kind, 'needs_human');
-    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /要你定/);
-    assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /schemaPublicApiPersistenceCompat/);
+    const route = decideRoute(parsed({ facts, assessment: SMALL, workOrder: ORDER }), FEATURE);
+    assert.equal(route.kind, 'classified');
+    assert.equal(route.kind === 'classified' && route.classification.recommended.executionMode, 'high_assurance');
+    assert.equal(route.kind === 'classified' ? route.workOrder : 'x', undefined);
+    assert.deepEqual(route.kind === 'classified' ? route.facts : undefined, facts);
+  });
+
+  test('合格 HA 分类回落 Standard，禁止副作用未证明仍需人工且不建单', () => {
+    const haFacts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, credentialsPermissionsSecurity: true } };
+    const route = decideRoute(parsed({ facts: haFacts, assessment: SMALL }), FEATURE);
+    assert.equal(route.kind, 'standard_fallback');
+    assert.match(route.kind === 'standard_fallback' ? route.reason : '', /HA 路暂时关闭/);
+    const unsafe = { ...haFacts, highAssurance: { ...haFacts.highAssurance, externalPaidOp: 'unknown' as const } };
+    assert.equal(decideRoute(parsed({ facts: unsafe, assessment: SMALL }), FEATURE).kind, 'needs_human');
+  });
+
+  test('HA 四项禁止副作用逐项 true：不建 Mission，原因含字段名', () => {
+    const keys = [
+      'productionDeployRelease',
+      'externalPaidOp',
+      'destructiveData',
+      'unrecoverableExternalSideEffect',
+    ] as const;
+    for (const key of keys) {
+      const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, [key]: true } };
+      const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
+      assert.equal(route.kind, 'needs_human', key);
+      assert.match(route.kind === 'needs_human' ? route.reason : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /不建 Mission/);
+    }
+  });
+
+  test('禁止副作用未证明安全时，别处错误仍 needs_human；四项全 false 的解析错误仍可回落', () => {
+    const unsafe = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, externalPaidOp: true } };
+    for (const body of [
+      { facts: unsafe, route: 'standard' },
+      { facts: unsafe, workOrder: null },
+      { facts: unsafe, assessment: { ...SMALL, decidedBy: 'user' } },
+    ]) {
+      const result = parseRoutingProposal(output(body), STAMP);
+      assert.equal(result.ok, false);
+      const route = decideRoute(undefined, FEATURE, result.ok ? '' : result.reason, result.ok ? [] : result.haForbiddenUnproven);
+      assert.equal(route.kind, 'needs_human');
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', /externalPaidOp/);
+    }
+    const safeInvalid = parseRoutingProposal(output({ facts: QUIET_FACTS, route: 'standard' }), STAMP);
+    assert.equal(safeInvalid.ok, false);
+    assert.equal(safeInvalid.ok ? true : safeInvalid.haForbiddenUnproven, undefined);
+    assert.equal(decideRoute(undefined, FEATURE, safeInvalid.ok ? '' : safeInvalid.reason, safeInvalid.ok ? [] : safeInvalid.haForbiddenUnproven).kind, 'standard_fallback');
+
+    const invalidSideEffect = parseRoutingProposal(
+      output({ facts: { ...QUIET_FACTS, mutationSideEffect: 'maybe' } }),
+      STAMP,
+    );
+    assert.equal(invalidSideEffect.ok, false);
+    assert.equal(invalidSideEffect.ok ? true : invalidSideEffect.haForbiddenUnproven, undefined);
+    assert.equal(decideRoute(undefined, FEATURE, invalidSideEffect.ok ? '' : invalidSideEffect.reason, invalidSideEffect.ok ? [] : invalidSideEffect.haForbiddenUnproven).kind, 'standard_fallback');
+
+    const multiKey = parseRoutingProposal(
+      output({ facts: QUIET_FACTS, route: 'standard', workOrder: null }),
+      STAMP,
+    );
+    assert.equal(multiKey.ok, false);
+    assert.equal(multiKey.ok ? true : multiKey.haForbiddenUnproven, undefined);
+    assert.equal(decideRoute(undefined, FEATURE, multiKey.ok ? '' : multiKey.reason, multiKey.ok ? [] : multiKey.haForbiddenUnproven).kind, 'standard_fallback');
+  });
+
+  test('HA 四项禁止副作用逐项 unknown：不建 Mission，原因含字段名', () => {
+    const keys = [
+      'productionDeployRelease',
+      'externalPaidOp',
+      'destructiveData',
+      'unrecoverableExternalSideEffect',
+    ] as const;
+    for (const key of keys) {
+      const facts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, [key]: 'unknown' } };
+      const route = decideRoute(parsed({ facts, assessment: SMALL }), FEATURE);
+      assert.equal(route.kind, 'needs_human', key);
+      assert.match(route.kind === 'needs_human' ? route.reason : '', new RegExp(key));
+      assert.match(route.kind === 'needs_human' ? route.needsDecision : '', new RegExp(key));
+    }
   });
 
   test('判成只读 query，或者根本没读懂 → 回落 Standard，交给协调者完整核实', () => {

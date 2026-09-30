@@ -6,7 +6,7 @@
  *   - 0 / >1 WorkItem stalled，零 Coordinator hop
  *   - happy Fast Lane：dispatch → 唯一 executor hop → validator → awaiting_review
  *   - L3 finalize 后才 completed
- *   - validation fail stalled（含 reportId），不 auto-promote
+ *   - validation fail → 凭报告自动升级 Standard，协调者接手 L2；升级不成才 stalled
  *   - accepted crash-recovery seam
  *   - PROJECT_BUSY → waiting，零 Coordinator
  */
@@ -38,6 +38,7 @@ import {
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -115,6 +116,8 @@ after(() => {
 
 async function harness(opts?: {
   executor?: ScriptedRuntime;
+  /** 缺省是空脚本：Lightweight 一旦叫起协调者就报错。升级场景要给它脚本。 */
+  coordinator?: ScriptedRuntime;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
   /** 不注入 validation（fail-closed 场景） */
@@ -148,13 +151,13 @@ async function harness(opts?: {
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   servers.push(server);
 
   const executorRuntime = opts?.executor ?? new ScriptedRuntime(EXECUTOR_HAPPY);
-  // Coordinator 脚本故意为空：Lightweight 不得触发它。
-  const coordinatorRuntime = new ScriptedRuntime({});
+  // Coordinator 脚本缺省为空：Lightweight 不得触发它。
+  const coordinatorRuntime = opts?.coordinator ?? new ScriptedRuntime({});
 
   return {
     platform,
@@ -226,10 +229,18 @@ describe('MissionView routing axis', () => {
   });
 });
 
-describe('Orchestrator High Assurance fail-closed', () => {
-  test('high_assurance => stalled 尚未启用；零 hop / 零 coordinator；不进入 executing', async () => {
+describe('Orchestrator High Assurance：Standard 式主链', () => {
+  // 旧不变式：HA 调度前 stalled（尚未启用 / 拒绝按 Standard），零 hop。E3a 删了那段，HA 走 Standard 主链。
+  test('HA 不再以旧理由 stalled；走协调者 hop；不会自己 completed', async () => {
     const h = await harness();
     const project = await h.projects.ensure('P');
+    project.createMission({
+      id: 'M-std',
+      contract: CONTRACT,
+      executionMode: 'standard',
+      runKind: 'mutation',
+      origin: { clientType: 'cli', conversationRef: 'local-cli' },
+    });
     project.createMission({
       id: 'M-ha',
       contract: CONTRACT,
@@ -237,24 +248,31 @@ describe('Orchestrator High Assurance fail-closed', () => {
       runKind: 'mutation',
       origin: { clientType: 'cli', conversationRef: 'local-cli' },
     });
-    // 即便已有 Frozen WorkItem，也不得按 Standard 主链跑。
+    // 即便已有 Frozen WorkItem，也走 Standard 式协调者主链（不再因此提前 stalled）。
     const mission = project.missions.find((m) => m.id === 'M-ha')!;
     mission.createWorkItem({ id: 'W-ha', title: 'ha seed', order: ORDER });
     await h.projects.save(project);
 
-    const orch = h.makeOrchestrator();
-    const result = await orch.runMission('M-ha', { projectRoot: process.cwd() });
+    // 本文件 harness 默认协调者脚本为空：Standard 与 HA 都会在协调者 hop 后 waiting。
+    const stdOrch = h.makeOrchestrator();
+    const stdResult = await stdOrch.runMission('M-std', { projectRoot: process.cwd() });
+    const haOrch = h.makeOrchestrator();
+    const haResult = await haOrch.runMission('M-ha', { projectRoot: process.cwd() });
 
-    assert.equal(result.kind, 'stalled');
-    assert.match(
-      (result as { reason: string }).reason,
-      /High Assurance|尚未启用|拒绝按 Standard/,
+    assert.equal(stdResult.kind, 'waiting');
+    assert.equal(haResult.kind, stdResult.kind);
+    assert.notEqual(haResult.kind, 'stalled');
+    assert.notEqual(haResult.kind, 'delivered');
+    if ('reason' in haResult && typeof haResult.reason === 'string') {
+      assert.doesNotMatch(haResult.reason, /High Assurance|尚未启用|拒绝按 Standard/);
+    }
+    assert.ok(
+      haOrch.hops.some((hop) => hop.role === 'coordinator'),
+      'HA 应留下协调者 hop',
     );
-    assert.equal(orch.hops.length, 0);
-    const view = await h.platform.getMissionView('M-ha');
-    assert.deepEqual(view.coordinatorAttemptIds, []);
-    assert.equal(view.status, 'investigating');
-    assert.notEqual(view.status, 'executing');
+    const haView = await h.platform.getMissionView('M-ha');
+    assert.ok(haView.coordinatorAttemptIds.length >= 1);
+    assert.notEqual(haView.status, 'completed');
   });
 });
 
@@ -375,42 +393,88 @@ describe('Orchestrator Lightweight：happy Fast Lane', () => {
   });
 });
 
-describe('Orchestrator Lightweight：validation fail', () => {
-  test('report 已保存、item submitted、Mission executing、stalled 含 reportId；无 coordinator', async () => {
-    const h = await harness({
-      runner: fakeRunner(async () => ({
-        exitCode: 1,
-        timedOut: false,
-        durationMs: 1,
-        output: 'FAIL',
-      })),
-    });
+describe('Orchestrator Lightweight：验收没过 → 自动升级 Standard（§4.3）', () => {
+  // E1 实测：执行者改对了、机器验收因一条配置判失败，旧行为停在 stalled 等了 870 秒。
+  const failing = () =>
+    fakeRunner(async () => ({ exitCode: 1, timedOut: false, durationMs: 1, output: 'FAIL' }));
+
+  const COORDINATOR_L2: ScriptTable = {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        {
+          tool: 'coagent_review_execution_result',
+          body: {
+            workItemId: 'W-1',
+            verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
+            reasons: ['对照报告复核：失败的是验收命令的环境，改动本身符合工单'],
+            requiredChanges: [],
+          },
+        },
+        {
+          tool: 'coagent_submit_mission_result',
+          body: {
+            outcome: 'delivered',
+            summary: '升级后由协调者验收',
+            acceptanceEvidence: ['L2 复核通过'],
+            memoryDelta: [],
+            openRisks: [],
+          },
+        },
+      ],
+    },
+  };
+
+  test('报告存下 → 凭它升级 → 协调者带着原因接手做 L2 → 交卷等 L3', async () => {
+    const coordinator = new ScriptedRuntime(COORDINATOR_L2);
+    const h = await harness({ runner: failing(), coordinator });
     const { missionId } = await seedLightweight(h.projects, { missionId: 'M-fail' });
-    await h.platform.createLightweightWorkItem(missionId, {
-      order: ORDER,
-      workItemId: 'W-1',
-    });
+    await h.platform.createLightweightWorkItem(missionId, { order: ORDER, workItemId: 'W-1' });
+
+    const orch = h.makeOrchestrator();
+    const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
+
+    assert.equal(result.kind, 'awaiting_l3_review');
+    const view = await h.platform.getMissionView(missionId);
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.promotions.length, 1);
+    const promotion = view.promotions[0]!;
+    assert.equal(promotion.triggerCode, 'validator_failure_unrepairable');
+    const reportId = promotion.triggerRule.match(/VR-\d+/)?.[0];
+    assert.ok(reportId, promotion.triggerRule);
+    assert.equal((await h.reports.get(reportId!))?.passed, false);
+
+    // 执行者一跳、协调者一跳；协调者被告知这是升级上来的、凭哪份报告。
+    assert.equal(orch.hops.filter((x) => x.role === 'executor').length, 1);
+    assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 1);
+    assert.match(coordinator.instructions[0]!, /从 Lightweight 升级上来的/);
+    assert.ok(coordinator.instructions[0]!.includes(reportId!));
+    // L2 是协调者做的，不是机器。
+    assert.equal(view.workItems[0]!.status, 'accepted');
+  });
+
+  test('升级不成（报告对不上当前这次提交）才停下，并把两件事都说出来', async () => {
+    const h = await harness({ runner: failing() });
+    const { missionId } = await seedLightweight(h.projects, { missionId: 'M-fail2' });
+    await h.platform.createLightweightWorkItem(missionId, { order: ORDER, workItemId: 'W-1' });
+    // 升级时平台读回的报告被改成另一次提交的：平台必须拒绝，编排器必须停下说清楚，不能硬升。
+    const realGet = h.reports.get.bind(h.reports);
+    h.reports.get = async (id: string) => {
+      const report = await realGet(id);
+      return report ? { ...report, attemptId: 'W-1.exec-0' } : report;
+    };
 
     const orch = h.makeOrchestrator();
     const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
 
     assert.equal(result.kind, 'stalled');
-    assert.match((result as { reason: string }).reason, /ValidationReport VR-/);
-    assert.match((result as { reason: string }).reason, /未通过/);
-    assert.match((result as { reason: string }).reason, /自动升级尚未启用/);
-
+    const reason = (result as { reason: string }).reason;
+    assert.match(reason, /ValidationReport VR-\d+ 未通过，升级到 Standard 也失败了/);
+    assert.match(reason, /不是工作项 W-1 当前这次提交的报告/);
     const view = await h.platform.getMissionView(missionId);
-    assert.equal(view.status, 'executing');
-    assert.equal(view.workItems[0]!.status, 'submitted');
-    assert.equal(view.result, undefined);
-    assert.deepEqual(view.coordinatorAttemptIds, []);
+    assert.equal(view.executionMode, 'lightweight');
     assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 0);
-
-    const reportId = ((result as { reason: string }).reason.match(/VR-\d+/) ?? [])[0];
-    assert.ok(reportId);
-    const stored = await h.reports.get(reportId);
-    assert.ok(stored);
-    assert.equal(stored!.passed, false);
   });
 });
 
@@ -734,7 +798,7 @@ describe('Platform.submitLightweightMissionForReview guards', () => {
       const wi = snap.workItems.find((w) => w.id === workItemId)!;
       wi.reviews = [
         {
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           submittedAttemptId: exec,
           authority: {
             kind: 'validator',
@@ -1030,3 +1094,214 @@ describe('Platform.submitLightweightMissionForReview guards', () => {
     }
   });
 });
+
+const BLOCK_QUESTION = '确认真正的文件路径';
+const BLOCK_REASON = '工单前提不成立';
+const BLOCK_TRIED = ['ls src/', '选 A', '选 B'];
+
+const EXECUTOR_BLOCK_QUESTION: ScriptTable = {
+  'executor:W-1:0': {
+    steps: [
+      { tool: 'coagent_get_work_order', body: {} },
+      {
+        tool: 'coagent_report_blocked',
+        body: {
+          reason: BLOCK_REASON,
+          whatWasTried: BLOCK_TRIED,
+          needsFromUpstream: BLOCK_QUESTION,
+        },
+      },
+    ],
+  },
+  'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1']!,
+};
+
+const EXECUTOR_BLOCK_BLANK: ScriptTable = {
+  'executor:W-1': {
+    steps: [
+      { tool: 'coagent_get_work_order', body: {} },
+      {
+        tool: 'coagent_report_blocked',
+        body: {
+          reason: '暂时做不了',
+          whatWasTried: ['试过了'],
+          needsFromUpstream: '   ',
+        },
+      },
+    ],
+  },
+};
+
+const PLAN = {
+  findings: 'f',
+  rejectedHypotheses: [],
+  decisions: [],
+  direction: 'd',
+  risks: [],
+};
+
+const COORD_PLAN_DISPATCH: ScriptTable = {
+  'coordinator:-:0': {
+    steps: [
+      { tool: 'coagent_update_plan', body: PLAN },
+      { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+      {
+        tool: 'coagent_dispatch_work_item',
+        body: (previous) => ({ workItemIds: [previous.workItemId] }),
+      },
+    ],
+  },
+  'coordinator:-': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+};
+
+describe('Orchestrator Lightweight：blocked 提问停靠 L3，答复后同单续跑',
+  () => {
+    test('非空问题：首轮与未答复重跑均 awaiting_l3 原问题，仅一条升级且 WorkItem blocked',
+      async () => {
+        const h = await harness({
+          executor: new ScriptedRuntime(EXECUTOR_BLOCK_QUESTION),
+        });
+        const { missionId } = await seedLightweight(h.projects, { missionId: 'M-ask' });
+        await h.platform.createLightweightWorkItem(missionId, {
+          order: ORDER,
+          workItemId: 'W-1',
+        });
+
+        const orch = h.makeOrchestrator();
+        const first = await orch.runMission(missionId, { projectRoot: process.cwd() });
+        assert.deepEqual(first, { kind: 'awaiting_l3', question: BLOCK_QUESTION });
+
+        const afterFirst = await h.platform.getMissionView(missionId);
+        assert.equal(afterFirst.executionMode, 'lightweight');
+        assert.equal(afterFirst.escalations, 1);
+        assert.equal(afterFirst.openEscalations.length, 1);
+        assert.equal(afterFirst.openEscalations[0]?.question, BLOCK_QUESTION);
+        assert.equal(afterFirst.workItems[0]?.status, 'blocked');
+        assert.equal(afterFirst.workItems[0]?.id, 'W-1');
+        assert.deepEqual(afterFirst.coordinatorAttemptIds, []);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 1);
+
+        const second = await orch.runMission(missionId, { projectRoot: process.cwd() });
+        assert.deepEqual(second, { kind: 'awaiting_l3', question: BLOCK_QUESTION });
+        const afterSecond = await h.platform.getMissionView(missionId);
+        assert.equal(afterSecond.escalations, 1);
+        assert.equal(afterSecond.openEscalations.length, 1);
+        assert.equal(afterSecond.workItems[0]?.status, 'blocked');
+        assert.deepEqual(afterSecond.coordinatorAttemptIds, []);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 1);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
+      },
+    );
+
+    test('空白需求保持 stalled 及原原因文本；不出现协调者尝试', async () => {
+      const h = await harness({
+        executor: new ScriptedRuntime(EXECUTOR_BLOCK_BLANK),
+      });
+      const { missionId } = await seedLightweight(h.projects, { missionId: 'M-blank' });
+      await h.platform.createLightweightWorkItem(missionId, {
+        order: ORDER,
+        workItemId: 'W-1',
+      });
+
+      const orch = h.makeOrchestrator();
+      const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
+      assert.equal(result.kind, 'stalled');
+      assert.equal(
+        (result as { reason: string }).reason,
+        'Lightweight WorkItem W-1 状态是 blocked，无法继续；绝不回退 Coordinator',
+      );
+
+      const view = await h.platform.getMissionView(missionId);
+      assert.equal(view.executionMode, 'lightweight');
+      assert.equal(view.escalations, 0);
+      assert.equal(view.openEscalations.length, 0);
+      assert.equal(view.workItems[0]?.status, 'blocked');
+      assert.deepEqual(view.coordinatorAttemptIds, []);
+      assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
+    });
+
+    test('答复后新 executor attempt 用同一 WorkItem，验收交 L3，全程无协调者',
+      async () => {
+        const h = await harness({
+          executor: new ScriptedRuntime(EXECUTOR_BLOCK_QUESTION),
+        });
+        const { missionId } = await seedLightweight(h.projects, { missionId: 'M-resume' });
+        await h.platform.createLightweightWorkItem(missionId, {
+          order: ORDER,
+          workItemId: 'W-1',
+        });
+
+        const orch = h.makeOrchestrator();
+        const asked = await orch.runMission(missionId, { projectRoot: process.cwd() });
+        assert.deepEqual(asked, { kind: 'awaiting_l3', question: BLOCK_QUESTION });
+        assert.deepEqual((await h.platform.getMissionView(missionId)).coordinatorAttemptIds, []);
+
+        await h.platform.answerEscalation(missionId, '就改 src/foo.ts');
+        const afterAnswer = await h.platform.getMissionView(missionId);
+        assert.equal(afterAnswer.workItems[0]?.id, 'W-1');
+        assert.equal(afterAnswer.workItems[0]?.status, 'dispatched');
+        assert.equal(afterAnswer.openEscalations.length, 0);
+        assert.deepEqual(afterAnswer.coordinatorAttemptIds, []);
+
+        const resumed = await orch.runMission(missionId, { projectRoot: process.cwd() });
+        assert.deepEqual(resumed, { kind: 'awaiting_l3_review' });
+
+        const view = await h.platform.getMissionView(missionId);
+        assert.equal(view.status, 'awaiting_review');
+        assert.equal(view.executionMode, 'lightweight');
+        assert.equal(view.workItems.length, 1);
+        assert.equal(view.workItems[0]?.id, 'W-1');
+        assert.equal(view.workItems[0]?.status, 'accepted');
+        assert.equal(view.workItems[0]?.attempts, 2);
+        assert.deepEqual(view.coordinatorAttemptIds, []);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
+        assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 2);
+        assert.ok(orch.hops.every((hop) => hop.role === 'executor' && hop.workItemId === 'W-1'));
+      },
+    );
+
+    test('Standard blocked 不自动升级，控制权回到协调者', async () => {
+      const coordinator = new ScriptedRuntime(COORD_PLAN_DISPATCH);
+      const executor = new ScriptedRuntime({
+        'executor:W-1': {
+          steps: [
+            { tool: 'coagent_get_work_order', body: {} },
+            {
+              tool: 'coagent_report_blocked',
+              body: {
+                reason: BLOCK_REASON,
+                whatWasTried: BLOCK_TRIED,
+                needsFromUpstream: BLOCK_QUESTION,
+              },
+            },
+          ],
+        },
+      });
+      const h = await harness({ coordinator, executor });
+      const project = await h.projects.ensure('P');
+      project.createMission({
+        id: 'M-std-block',
+        contract: CONTRACT,
+        executionMode: 'standard',
+        runKind: 'mutation',
+        origin: { clientType: 'cli', conversationRef: 'local-cli' },
+      });
+      await h.projects.save(project);
+
+      const orch = h.makeOrchestrator();
+      const result = await orch.runMission('M-std-block', {
+        projectRoot: process.cwd(),
+        maxRounds: 6,
+      });
+
+      const view = await h.platform.getMissionView('M-std-block');
+      assert.equal(view.workItems[0]?.status, 'blocked');
+      assert.equal(view.escalations, 0);
+      assert.notEqual(result.kind, 'awaiting_l3');
+      assert.ok(view.coordinatorAttemptIds.length >= 1);
+      assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 1);
+      assert.ok(orch.hops.some((hop) => hop.role === 'coordinator'));
+    });
+  },
+);

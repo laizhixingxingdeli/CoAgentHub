@@ -40,6 +40,7 @@ import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { createApi } from '../src/api/server.ts';
 import { buildPlatform } from '../src/main.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 /** 缺省那四条。字面量在这里出现是刻意的：断言的就是「与原来那四条一致」。 */
 const DEFAULT_COORDINATOR = 'coordinator-grok';
@@ -88,7 +89,7 @@ function behavesLikeThePort(
     if (skip?.(t)) return;
     const repo = await makeRepo();
     const snapshot: AgentPoolSnapshot = await repo.list();
-    assert.deepEqual(snapshot, { coordinator: [], executor: [] });
+    assert.deepEqual(snapshot, { coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('add 返回刚落库的那条：runtime 恒为 pi，order 从 0 起、按 role 独立计数', async (t: T) => {
@@ -126,7 +127,7 @@ function behavesLikeThePort(
       'INVALID_ROLE',
       ['undefined'],
     );
-    assert.deepEqual(await repo.list(), { coordinator: [], executor: [] }, '被挡的不该留下半个字');
+    assert.deepEqual(await repo.list(), { coordinator: [], executor: [], independent_reviewer: [] }, '被挡的不该留下半个字');
   });
 
   test('同 role 下重复 profileId 被挡，message 点名 role 与 profileId', async (t: T) => {
@@ -138,6 +139,33 @@ function behavesLikeThePort(
       'DUPLICATE_PROFILE',
       ['coordinator', 'same'],
     );
+  });
+
+  test('independent_reviewer 可追加；同 role 独立计数，旧池缺它时是 []', async (t: T) => {
+    if (skip?.(t)) return;
+    const repo = await makeRepo();
+    const empty = await repo.list();
+    assert.deepEqual(empty.independent_reviewer, []);
+    const first = await repo.add({
+      role: 'independent_reviewer',
+      profileId: 'ir-a',
+      endpoint: 'local',
+    });
+    assert.equal(first.profileId, 'ir-a');
+    assert.equal(first.order, 0);
+    const second = await repo.add({
+      role: 'independent_reviewer',
+      profileId: 'ir-b',
+      endpoint: 'local',
+    });
+    assert.equal(second.order, 1);
+    const snapshot = await repo.list();
+    assert.deepEqual(
+      snapshot.independent_reviewer.map((row) => row.profileId),
+      ['ir-a', 'ir-b'],
+    );
+    assert.deepEqual(snapshot.coordinator, []);
+    assert.deepEqual(snapshot.executor, []);
   });
 
   test('不同 role 允许相同 profileId —— 两套候选列表是各自独立的', async (t: T) => {
@@ -172,7 +200,7 @@ function behavesLikeThePort(
       'INVALID_ENDPOINT',
       ['endpoint'],
     );
-    assert.deepEqual(await repo.list(), { coordinator: [], executor: [] });
+    assert.deepEqual(await repo.list(), { coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('首尾空白被收掉，不会被当成两条不同的候选', async (t: T) => {
@@ -324,7 +352,7 @@ describe('FileAgentPoolRepository', () => {
     const legacy = tempPath('legacy.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, projects: [], idCounters: {} }), 'utf8');
     const reopened = new FileAgentPoolRepository(new FileStateStore(legacy));
-    assert.deepEqual(await reopened.list(), { coordinator: [], executor: [] });
+    assert.deepEqual(await reopened.list(), { coordinator: [], executor: [], independent_reviewer: [] });
     const added = await reopened.add({
       role: 'executor',
       profileId: 'after-legacy',
@@ -575,7 +603,7 @@ describe('候选池 API', () => {
       deliveries: built.deliveries,
       ...(agentPool ? { agentPool } : {}),
     });
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    await listenLoopback(server, 0);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     return { base, close: () => server.close() };
   }
@@ -599,7 +627,7 @@ describe('候选池 API', () => {
     try {
       const empty = await get(base, '/api/pools');
       assert.equal(empty.status, 200);
-      assert.deepEqual(empty.json, { coordinator: [], executor: [] });
+      assert.deepEqual(empty.json, { coordinator: [], executor: [], independent_reviewer: [] });
 
       const created = await post(base, '/api/pools', {
         role: 'coordinator',
@@ -672,12 +700,43 @@ describe('候选池 API', () => {
     }
   });
 
+  test('GET /api/pools 在无运行时仓储时仍列出候选并说明原因', async () => {
+    const { base, close } = await withApi(new InMemoryAgentPoolRepository());
+    try {
+      await post(base, '/api/pools', { role: 'executor', profileId: 'lonely', endpoint: 'local' });
+      const list = await get(base, '/api/pools');
+      assert.equal(list.status, 200);
+      const snapshot = list.json as unknown as AgentPoolSnapshot & {
+        executor: Array<{
+          profileId: string;
+          health: {
+            circuit: { state: string; reason?: string };
+            lastFailure: { failureClass: string; at: string | null };
+            window7d: { attempts: number; successes: number; reportedCost: number | null };
+            runtime: { running: boolean; reason?: string };
+          };
+        }>;
+      };
+      assert.equal(snapshot.executor[0]?.profileId, 'lonely');
+      assert.equal(snapshot.executor[0]?.health.circuit.state, 'unknown');
+      assert.equal(snapshot.executor[0]?.health.circuit.reason, 'candidate_circuits_unavailable');
+      assert.equal(snapshot.executor[0]?.health.lastFailure.failureClass, 'unknown');
+      assert.equal(snapshot.executor[0]?.health.lastFailure.at, null);
+      assert.equal(snapshot.executor[0]?.health.window7d.attempts, 0);
+      assert.equal(snapshot.executor[0]?.health.window7d.reportedCost, null);
+      assert.equal(snapshot.executor[0]?.health.runtime.running, false);
+      assert.equal(snapshot.executor[0]?.health.runtime.reason, 'queued_hops_unavailable');
+    } finally {
+      close();
+    }
+  });
+
   test('GET /api/pools 不播种 —— 只读路径不能带副作用', async () => {
     const { base, close } = await withApi(new InMemoryAgentPoolRepository());
     try {
       for (const _round of [1, 2, 3]) {
         const list = await get(base, '/api/pools');
-        assert.deepEqual(list.json, { coordinator: [], executor: [] });
+        assert.deepEqual(list.json, { coordinator: [], executor: [], independent_reviewer: [] });
       }
     } finally {
       close();
@@ -714,7 +773,7 @@ describe('候选池 API', () => {
 
       const list = await get(base, '/api/pools');
       assert.equal(list.status, 200);
-      assert.deepEqual(list.json, { coordinator: [], executor: [] });
+      assert.deepEqual(list.json, { coordinator: [], executor: [], independent_reviewer: [] });
 
       const created = await post(base, '/api/pools', {
         role: 'coordinator',
@@ -815,7 +874,7 @@ describe('资源池页（src/web/pool.js）', () => {
     ],
   };
 
-  /** 取某一行的四个单元格。用 data-pool-row 定位：下标记行会串到别人身上。 */
+  /** 取某一行的五个单元格。用 data-pool-row 定位：下标记行会串到别人身上。 */
   function cellsOf(html: string, profileId: string): string[] {
     const hit = new RegExp(`<tr data-pool-row="${profileId}"[^>]*>([\\s\\S]*?)</tr>`).exec(html);
     assert.ok(hit, `页面里没有 ${profileId} 那一行`);
@@ -833,10 +892,15 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /data-count="executor">1</);
     for (const row of [...snapshot.coordinator, ...snapshot.executor]) {
       const cells = cellsOf(html, row.profileId);
-      assert.equal(cells.length, 4, '四列');
+      assert.equal(cells.length, 5, '五列，含健康');
       assert.equal(cells[0], row.profileId, '第一列是候选名称 = profileId');
       assert.equal(cells[1], row.endpoint, '第二列是接入点 = endpoint');
       assert.equal(cells[2], 'pi', '第三列是适配层（原来的 Runtime）');
+      // snapshot 未带 health：第五列仍必须在，并说清还没读到，不能空成少一列。
+      assert.ok(
+        String(cells[4]).includes('还没读到健康'),
+        `第五列是健康，缺对象时要说出来，实际：${cells[4]}`,
+      );
     }
   });
 
@@ -880,11 +944,11 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.ok(html.includes('&lt;script&gt;'), '该看到转义后的形式');
   });
 
-  test('表头四列齐（人话名）；表单有角色、模型、候选名称、接入点（默认 local）', async () => {
+  test('表头五列齐（人话名，含健康）；表单有角色、模型、候选名称、接入点（默认 local）', async () => {
     const { poolPageHtml, POOL_COLUMNS } = await loaded;
     assert.deepEqual(
       [...POOL_COLUMNS],
-      ['候选名称', '接入点', '适配层', '运行时'],
+      ['候选名称', '接入点', '适配层', '运行时', '健康'],
     );
     const html = poolPageHtml(snapshot, catalog);
     for (const name of POOL_COLUMNS) {

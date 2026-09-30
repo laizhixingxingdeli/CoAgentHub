@@ -156,7 +156,7 @@ async function readyForReview(
   await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
   await platform.reviewExecutionResult(missionId, coord.attemptId, {
     workItemId,
-    verdict: 'accept',
+    verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
     reasons: ['复跑过'],
     requiredChanges: [],
   });
@@ -204,6 +204,30 @@ describe('机器 L3 放行', () => {
     assert.deepEqual(runner.seen, [['node', '--test']]);
   });
 
+  test('集成验证的输出尾部先脱敏再截尾：key 被截尾点切开也不留半截', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const key = 'sk-proj-abcdefghijklmnopqrstuv';
+    // key、换行、再跟 2000-9 个 y：先截尾（2000）的话，留下的是 key 的最后 8 个字符。
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string; timeoutMs: number }) {
+        runner.seen.push([...input.argv]);
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: `${key}\n${'y'.repeat(2000 - 9)}` };
+      },
+    };
+    const { platform, reports } = await readyForReview(repo, wt, 'M1', runner);
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+    const tail = (await reports.get(result.reportId!))!.checks[0]!.command!.outputTail;
+    assert.equal(tail.length, 2000);
+    assert.ok(!tail.includes(key.slice(-8)), `半截 key 漏出来了：${tail.slice(0, 20)}`);
+  });
+
   /**
    * 这条是整票的要害：验证红了，集成分支必须**逐字**回到合并前。
    */
@@ -229,6 +253,33 @@ describe('机器 L3 放行', () => {
     const view = await platform.getMissionView('M1');
     assert.equal(view.waitReason, 'waiting_l3');
     assert.equal(view.finalReview, undefined, '没放行就不该有 finalReview');
+  });
+
+  test('验证绿后 runner 期间切换 checkout → 不得 completed，不签 FinalReview', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const runner = {
+      seen: [] as string[][],
+      async run(input: { argv: readonly string[]; cwd: string }) {
+        runner.seen.push([...input.argv]);
+        git(input.cwd, 'checkout', '-q', '-b', 'diverted');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const { platform } = await readyForReview(repo, wt, 'M1', runner as ReturnType<typeof scriptedRunner>);
+
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+
+    assert.equal(result.status, 'awaiting_review');
+    assert.match(result.reason ?? '', /未放行/);
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.finalReview, undefined);
+    assert.equal(view.waitReason, 'waiting_l3');
   });
 
   test('项目仓不在集成分支上 → 拒绝，什么都不合', async () => {
@@ -458,6 +509,56 @@ describe('机器 L3 与项目记忆', () => {
     // 以前只合了代码：这份提议被悄悄丢掉，没有事件、没有提示。
     assert.match(git(repo, 'show', 'HEAD:.coagent/specs/demo-capability.md'), /机器放行也要落这份/);
     assert.match(git(repo, 'show', 'HEAD:VIBE.md'), /demo-capability/);
+  });
+});
+
+describe('E3b：旧 HA 合并入口仍关闭', () => {
+  test('机器、公开 human、现有 reviewer 三条路径都不能合并 HA', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M-ha', scriptedRunner([0]), {
+      executionMode: 'high_assurance',
+    });
+    const before = git(repo, 'rev-parse', 'HEAD');
+
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByMachine('M-ha', {
+          integrationBranch: 'auto/plan-x',
+          verification: VERIFY,
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_NEEDS_HUMAN',
+    );
+    await assert.rejects(
+      () =>
+        platform.finalizeMission('M-ha', {
+          verdict: 'merge',
+          reasons: ['人想合'],
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M-ha', {
+          verdict: 'merge',
+          reasons: ['检视者想合'],
+          projectRoot: repo,
+          reviewerId: 'rv-1',
+          confirmedBy: 'human-1',
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before, '集成分支没动');
+    const view = await platform.getMissionView('M-ha');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
   });
 });
 

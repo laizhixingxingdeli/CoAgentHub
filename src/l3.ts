@@ -3,50 +3,375 @@
  *
  *   node src/l3.ts inbox [--recipient X]
  *   node src/l3.ts show <missionId>
- *   node src/l3.ts merge <missionId> --reason "..."
- *   node src/l3.ts send-back <missionId> --reason "..."
- *   node src/l3.ts abandon <missionId> --reason "..."
+ *   node src/l3.ts merge <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
+ *   node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
+ *   node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
  *   node src/l3.ts ack <deliveryId>
  *   node src/l3.ts plan [--run <方案运行记录>]
  *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
+ *   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."]
  *
- * 直接操作状态文件，不经过 HTTP —— `run-mission` 的服务器是一次性的，
- * 跑完就退，所以平时没有常驻进程。**别在服务器开着的时候用它**：
- * 两个进程各写各的整份状态，后写的会盖掉先写的。
+ * 文件模式主状态写命令先探测本机写者：活着的同状态服务持锁时回环转发给
+ * 唯一写者；无锁时沿用独占装配。其他锁状态 fail-closed，不离线再写一份。
+ * PG 不走文件锁探测。plan decide/approve 只写方案运行记录，不碰主锁。
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { API_VERSION } from './api/server.ts';
+import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import {
+  LoopbackHttpError,
+  loopbackControlRequest,
+} from './application/loopback-control-client.ts';
 import { renderPlanHandoff, type HandoffCosts } from './application/plan-handoff.ts';
 import type { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { buildPersistentPlatform, buildPgPlatform } from './main.ts';
+
+const MAIN_STATE_WRITES = new Set([
+  'merge',
+  'send-back',
+  'abandon',
+  'answer',
+  'revise',
+  'cancel',
+  'pause',
+  'resume',
+  'retire',
+  'rerun',
+  'ack',
+]);
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+type ReviewerSignature =
+  | { readonly mode: 'human' }
+  | { readonly mode: 'reviewer'; readonly reviewerId: string; readonly confirmedBy: string };
+
+/**
+ * 终审三命令专用：下一个是另一个 `--` 开头的参数也算缺值。
+ * 别的命令继续用 `arg()`——`rerun --as` 与 `plan decide --as` 的原义不能动。
+ */
+function reviewFlag(name: string): { present: boolean; value?: string } {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return { present: false };
+  const next = process.argv[index + 1];
+  if (next === undefined || next.startsWith('--')) return { present: true };
+  return { present: true, value: next };
+}
+
+function parseReviewerSignature(): ReviewerSignature {
+  const asFlag = reviewFlag('--as');
+  const confirmed = reviewFlag('--confirmed-by');
+  if (!asFlag.present && !confirmed.present) return { mode: 'human' };
+  if (asFlag.present !== confirmed.present) {
+    throw new Error(
+      asFlag.present
+        ? '给了 --as 就必须同时给 --confirmed-by：检视者签名要记下是谁确认的。'
+        : '给了 --confirmed-by 就必须同时给 --as：确认记录要签检视者的名字。',
+    );
+  }
+  if (asFlag.value === undefined) {
+    throw new Error('--as 缺参数值：要写成 --as <检视者>。');
+  }
+  if (confirmed.value === undefined) {
+    throw new Error('--confirmed-by 缺参数值：要写成 --confirmed-by <确认人>。');
+  }
+  const reviewerId = asFlag.value.trim();
+  const confirmedBy = confirmed.value.trim();
+  if (reviewerId.length === 0) {
+    throw new Error('--as 的值不能只是空白。');
+  }
+  if (confirmedBy.length === 0) {
+    throw new Error('--confirmed-by 的值不能只是空白。');
+  }
+  if (reviewerId.length > 128) {
+    throw new Error('--as 经 trim 后不能超过 128 字符。');
+  }
+  if (confirmedBy.length > 128) {
+    throw new Error('--confirmed-by 经 trim 后不能超过 128 字符。');
+  }
+  return { mode: 'reviewer', reviewerId, confirmedBy };
+}
+
 function line(char = '─', n = 72): string {
   return char.repeat(n);
+}
+
+function occupiedMessage(reason: string): string {
+  return `无法安全转发到本机写者：${reason}。主状态未改。`;
+}
+
+function requireLiveIdentity(holder: LockInfo): {
+  port: number;
+  instanceId: string;
+  stateId: string;
+  apiVersion: string;
+} {
+  if (
+    holder.port === undefined ||
+    holder.instanceId === undefined ||
+    holder.stateId === undefined ||
+    holder.apiVersion === undefined
+  ) {
+    throw new Error('活着的写者元数据不完整，拒绝转发。主状态未改。');
+  }
+  if (holder.apiVersion !== API_VERSION) {
+    throw new Error('API 版本不符，拒绝转发。主状态未改。');
+  }
+  return {
+    port: holder.port,
+    instanceId: holder.instanceId,
+    stateId: holder.stateId,
+    apiVersion: holder.apiVersion,
+  };
+}
+
+/** 先验失败时不得探测、不得装配。校验顺序与旧命令一致：终审先成对签名。 */
+function assertWriteArgs(command: string, target: string | undefined): void {
+  if (command === 'merge' || command === 'send-back' || command === 'abandon') {
+    if (!target) throw new Error('需要 missionId');
+    const reason = arg('--reason');
+    if (!reason && command !== 'merge') {
+      throw new Error('打回/放弃必须给 --reason —— 不说清楚，协调者只会原样再交一次');
+    }
+    return;
+  }
+  if (command === 'answer') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--answer')) throw new Error('需要 --answer "..."');
+    return;
+  }
+  if (command === 'revise') {
+    if (!target) throw new Error('需要 missionId');
+    const file = arg('--contract');
+    if (!file) throw new Error('需要 --contract <mission.json>');
+    JSON.parse(readFileSync(resolve(file), 'utf8'));
+    return;
+  }
+  if (command === 'cancel' || command === 'pause' || command === 'resume') {
+    if (!target) throw new Error('需要 missionId');
+    return;
+  }
+  if (command === 'retire') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--item')) throw new Error('需要 --item <workItemId>');
+    if (!arg('--reason')) throw new Error('作废必须给 --reason —— 不写清楚，协调者会以为它还该做');
+    return;
+  }
+  if (command === 'rerun') {
+    if (!target) throw new Error('需要 missionId');
+    return;
+  }
+  if (command === 'ack') {
+    if (!target) throw new Error('需要 deliveryId');
+  }
+}
+
+async function forwardWriteCommand(holder: LockInfo, command: string, target: string): Promise<void> {
+  const identity = requireLiveIdentity(holder);
+  const post = (path: string, body: unknown) =>
+    loopbackControlRequest(identity, { method: 'POST', path, body });
+  const get = (path: string) => loopbackControlRequest(identity, { method: 'GET', path });
+
+  if (command === 'merge' || command === 'send-back' || command === 'abandon') {
+    const reason = arg('--reason');
+    const signature = parseReviewerSignature();
+    const verdict = command === 'send-back' ? 'send_back' : command;
+    const review: Record<string, unknown> = {
+      verdict,
+      reasons: reason ? [reason] : [],
+    };
+    const projectRoot = arg('--repo');
+    if (projectRoot !== undefined) review.projectRoot = projectRoot;
+    // HA 合入必须走 /finalize/reviewer，服务端再升到 HA 权威。降到普通 finalize 会拒 HA merge。
+    const path =
+      signature.mode === 'reviewer'
+        ? `/api/missions/${encodeURIComponent(target)}/finalize/reviewer`
+        : `/api/missions/${encodeURIComponent(target)}/finalize`;
+    const body =
+      signature.mode === 'reviewer'
+        ? { ...review, reviewerId: signature.reviewerId, confirmedBy: signature.confirmedBy }
+        : review;
+    const result = (await post(path, body)) as {
+      status: string;
+      mergedInto?: string;
+      reason?: string;
+    };
+    console.log(`Mission ${target} → ${result.status}`);
+    if (result.mergedInto) console.log(`已落地到 ${result.mergedInto.slice(0, 12)}`);
+    if (result.reason) console.log(`⚠ ${result.reason}`);
+    return;
+  }
+
+  if (command === 'answer') {
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/escalations/answer`, {
+      answer: arg('--answer'),
+    })) as { question: string; answer: string };
+    console.log(`已答复 ${target} 的升级：`);
+    console.log(`  问题：${result.question}`);
+    console.log(`  答复：${result.answer}`);
+    console.log('\n下一步：重新跑 run-mission，协调者会看到这条答复。');
+    return;
+  }
+
+  if (command === 'revise') {
+    const file = arg('--contract')!;
+    const spec = JSON.parse(readFileSync(resolve(file), 'utf8')) as { contract: unknown };
+    const result = (await post(
+      `/api/missions/${encodeURIComponent(target)}/contract`,
+      spec.contract,
+    )) as { contractRevision: number };
+    const view = (await get(`/api/missions/${encodeURIComponent(target)}`)) as {
+      status: string;
+      finalReview?: { verdict?: string };
+    };
+    console.log(`Contract → r${result.contractRevision}，Mission 现在是 ${view.status}`);
+    if (view.finalReview?.verdict === 'send_back') {
+      console.log('（原先在等检视，已按新契约退回规划——旧的那份交卷是照着旧契约做的）');
+    }
+    return;
+  }
+
+  if (command === 'cancel') {
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/cancel`, {
+      reason: arg('--reason') ?? '',
+    })) as { status: string };
+    console.log(`Mission ${target} → ${result.status}（已叫停）`);
+    console.log('在途的那一跳会正常收尾，之后不再调度。');
+    return;
+  }
+
+  if (command === 'pause') {
+    await post(`/api/missions/${encodeURIComponent(target)}/pause`, {});
+    console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
+    return;
+  }
+
+  if (command === 'resume') {
+    await post(`/api/missions/${encodeURIComponent(target)}/resume`, {});
+    console.log(`Mission ${target} 已恢复。重跑 run-mission 继续。`);
+    return;
+  }
+
+  if (command === 'retire') {
+    const workItemId = arg('--item')!;
+    const result = (await post(
+      `/api/missions/${encodeURIComponent(target)}/work-items/${encodeURIComponent(workItemId)}/retire`,
+      { reason: arg('--reason') },
+    )) as { status: string };
+    console.log(`工作项 ${workItemId} → ${result.status}（已作废）`);
+    console.log('协调者下次被唤醒时会看到它，并据此判断要不要重做。');
+    return;
+  }
+
+  if (command === 'rerun') {
+    const body: { newMissionId?: string; baseRevision?: string } = {};
+    const as = arg('--as');
+    const base = arg('--base');
+    if (as !== undefined) body.newMissionId = as;
+    if (base !== undefined) body.baseRevision = base;
+    const result = (await post(`/api/missions/${encodeURIComponent(target)}/rerun`, body)) as {
+      missionId: string;
+      rerunOf: string;
+      contractRevision: number;
+      sourceAlreadyLanded?: boolean;
+      baseRevision?: string;
+    };
+    console.log(`已另起一条：${result.missionId}（${result.rerunOf} 的重跑，契约 r${result.contractRevision}）`);
+    console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
+    if (result.sourceAlreadyLanded) {
+      console.log(
+        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：\n` +
+          '  答案就摆在项目工作区里，agent 读一眼就有 —— 实测上一次对照就是这么毁的\n' +
+          '  （它 read 了主仓库里的成品文件、还 git show 了那次交付的提交，不是在解题是在抄）。\n' +
+          '  要做对照，用一个**还没合并**的任务，两臂都跑完再决定合哪个。',
+      );
+    }
+    if (result.baseRevision) {
+      console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
+    } else {
+      console.log(
+        '⚠ 源头没记过工作区，起点无法钉住 —— 这一跑会从目标分支当前的 HEAD 分叉，\n' +
+          '  和源头不是同一个起点，**跑出来的数不能和它对比**。要比就用 --base <版本> 指定。',
+      );
+    }
+    console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
+    console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
+    return;
+  }
+
+  if (command === 'ack') {
+    try {
+      await post(`/api/deliveries/${encodeURIComponent(target)}/ack`, {});
+      console.log(`${target} 已确认`);
+    } catch (error) {
+      if (error instanceof LoopbackHttpError && error.status === 404) {
+        console.log(`没有这条投递：${target}`);
+        return;
+      }
+      throw error;
+    }
+  }
 }
 
 async function main() {
   const [, , command, target] = process.argv;
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
-  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show 是常态。plan（含 decide）只写方案
+  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show/runs 是常态。plan（含 decide）只写方案
   // 运行记录那份独立文件，主状态同样只读——run-plan 整夜握着主状态锁。
-  const readOnly = command === 'inbox' || command === 'show' || command === 'plan' || command === undefined;
+  const isMainStateWrite = MAIN_STATE_WRITES.has(command ?? '');
+  const readOnly = !isMainStateWrite;
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
-  const built = usePg
-    ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
-      // 一个只看结果的命令没有立场判定别的进程死了。
-      await buildPgPlatform()
-    : await buildPersistentPlatform(statePath, {
-        exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
-        // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
-        reconcile: !readOnly,
-      });
+  // 终审三命令的 --as / --confirmed-by 必须在构建平台之前成对校验：
+  // 构建会拿排他锁并跑启动收敛，可能改状态文件。校验失败时状态字节不能动。
+  const reviewerSignature =
+    command === 'merge' || command === 'send-back' || command === 'abandon'
+      ? parseReviewerSignature()
+      : undefined;
+  if (isMainStateWrite) assertWriteArgs(command!, target);
+
+  if (!usePg && isMainStateWrite) {
+    const probe = await probeLocalWriter(statePath);
+    if (probe.status === 'live') {
+      await forwardWriteCommand(probe.holder, command!, target!);
+      return;
+    }
+    if (probe.status === 'occupied') {
+      throw new Error(occupiedMessage(probe.reason));
+    }
+  }
+
+  let built;
+  try {
+    built = usePg
+      ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
+        // 一个只看结果的命令没有立场判定别的进程死了。PG 不走文件锁假探测。
+        await buildPgPlatform()
+      : await buildPersistentPlatform(statePath, {
+          exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
+          // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
+          reconcile: !readOnly,
+        });
+  } catch (error) {
+    if (!usePg && isMainStateWrite && error instanceof LockBusyError) {
+      const again = await probeLocalWriter(statePath);
+      if (again.status === 'live') {
+        await forwardWriteCommand(again.holder, command!, target!);
+        return;
+      }
+      throw new Error(
+        again.status === 'occupied'
+          ? occupiedMessage(again.reason)
+          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
+      );
+    }
+    throw error;
+  }
   const { platform, deliveries, persist } = built;
   const reconciled = 'reconciled' in built ? built.reconciled : { interrupted: [] };
   if (reconciled.interrupted.length > 0) {
@@ -67,7 +392,9 @@ async function main() {
     }
     const escalated = pending.filter((item) => item.outcome === 'escalated');
     if (escalated.length > 0) {
-      console.log(`其中 ${escalated.length} 条是升级，需要你答复：node src/l3.ts answer <missionId> --answer "..."`);
+      console.log(
+        `其中 ${escalated.length} 条是升级。方案运行中的升级用 node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者>（AQ1 答复唯一路径；HTTP 不复制续跑）；方案运行之外才用 node src/l3.ts answer <missionId> --answer "..."`,
+      );
     }
     console.log('下一步：node src/l3.ts show <missionId>');
     return;
@@ -100,6 +427,16 @@ async function main() {
       console.log(`  ${item.id.padEnd(6)}${item.status.padEnd(11)}${item.attempts} 次尝试  ${item.title}`);
       if (item.lastReview) {
         console.log(`      L2 验收：${item.lastReview.verdict} —— ${item.lastReview.reasons[0] ?? ''}`);
+        // 方案 §11：没验证的那几条要摆到 L3 眼前，一句总结里看不出来。
+        const results = item.lastReview.acceptanceResults ?? [];
+        if (results.length > 0) {
+          const passed = results.filter((r) => r.status === 'pass').length;
+          console.log(`      逐条：${passed}/${results.length} pass`);
+          for (const r of results.filter((x) => x.status !== 'pass')) {
+            const mark = r.status === 'fail' ? '✗ 未过' : r.status === 'unverified' ? '⚠ 未验证' : '— 不适用';
+            console.log(`        ${mark} ${r.criterion}${r.note ? ` —— ${r.note}` : ''}`);
+          }
+        }
       }
     }
 
@@ -140,6 +477,53 @@ async function main() {
         `cacheRead=${usage.cacheRead} cost=$${(usage.cost ?? 0).toFixed(4)}`,
     );
 
+    if (view.haReviewHold || view.waitDetail || view.independentReviewBlockReason) {
+      const holdLabel =
+        view.haReviewHold === 'pending_dispatch'
+          ? '待派发'
+          : view.haReviewHold === 'in_review'
+            ? '在审'
+            : view.haReviewHold === 'pending_release'
+              ? '待放行'
+              : view.haReviewHold === 'fault'
+                ? '故障'
+                : undefined;
+      if (holdLabel) console.log(`\n【HA 检视】${holdLabel}`);
+      else console.log('');
+      if (view.waitDetail) console.log(`  等待：${view.waitDetail}`);
+      if (view.independentReviewBlockReason) {
+        console.log(`  阻塞：${view.independentReviewBlockReason}`);
+        if (view.independentReviewBlockDetail) {
+          console.log(`  细节：${view.independentReviewBlockDetail}`);
+        }
+      }
+    }
+
+    if (view.finalReview) {
+      console.log(`\n【最终检视】${view.finalReview.verdict}`);
+      for (const reason of view.finalReview.reasons) console.log(`  理由 · ${reason}`);
+      const authority = view.finalReview.authority;
+      // 旧记录没有 authority 就写「未记录」，不推断成 human。
+      if (!authority) {
+        console.log('  权威：未记录');
+      } else if (authority.kind === 'human') {
+        console.log('  权威：人');
+        if (authority.principalId) console.log(`  主体：${authority.principalId}`);
+      } else if (authority.kind === 'machine') {
+        console.log('  权威：机器');
+        console.log(`  集成报告：${authority.integrationReportId}`);
+      } else if (authority.kind === 'plan') {
+        console.log('  权威：方案');
+        console.log(`  方案运行：${authority.planRunId}`);
+        console.log(`  升级单：${authority.escalationId}`);
+      } else if (authority.kind === 'reviewer') {
+        console.log('  权威：检视者');
+        console.log(`  检视者：${authority.reviewerId}`);
+        console.log(`  确认人：${authority.confirmedBy}`);
+        console.log(`  确认于：${authority.confirmedAt}`);
+      }
+    }
+
     if (view.status === 'awaiting_review') {
       console.log(`\n下一步：merge / send-back / abandon`);
     }
@@ -153,11 +537,32 @@ async function main() {
       throw new Error('打回/放弃必须给 --reason —— 不说清楚，协调者只会原样再交一次');
     }
     const verdict = command === 'send-back' ? 'send_back' : command;
-    const result = await platform.finalizeMission(target, {
+    const review = {
       verdict: verdict as 'merge' | 'send_back' | 'abandon',
       reasons: reason ? [reason] : [],
       projectRoot: arg('--repo'),
-    });
+    };
+    let result: { status: string; mergedInto?: string; reason?: string };
+    if (reviewerSignature?.mode === 'reviewer') {
+      // HA merge 只声明身份；授权以每次现读的外置配置为准，不走旧 reviewer 入口。
+      const view =
+        command === 'merge' ? await platform.getMissionView(target) : undefined;
+      result =
+        command === 'merge' && view?.executionMode === 'high_assurance'
+          ? await platform.finalizeMissionByHaAuthority(target, {
+              reviewerId: reviewerSignature.reviewerId,
+              confirmedBy: reviewerSignature.confirmedBy,
+              projectRoot: review.projectRoot,
+              reasons: review.reasons,
+            })
+          : await platform.finalizeMissionByReviewer(target, {
+              ...review,
+              reviewerId: reviewerSignature.reviewerId,
+              confirmedBy: reviewerSignature.confirmedBy,
+            });
+    } else {
+      result = await platform.finalizeMission(target, review);
+    }
     await persist();
 
     console.log(`Mission ${target} → ${result.status}`);
@@ -325,11 +730,35 @@ async function main() {
   }
 
   if (command === 'plan') {
+    const releaseAction = target === 'approve' || target === 'send-back' ? target : undefined;
+    const explicitRun = arg('--run');
+    if (releaseAction && !explicitRun) throw new Error('plan approve/send-back 必须指定 --run <记录>。');
     const runPath =
-      arg('--run') ?? latestPlanRun(resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans')));
+      explicitRun ?? latestPlanRun(resolve(arg('--run-dir') ?? join(dirname(statePath), '.coagent-plans')));
     if (!runPath) throw new Error('没有方案运行记录（先 node src/run-plan.ts 开跑，或用 --run 指定）。');
     const store = new FilePlanRunStore(runPath);
 
+    if (releaseAction) {
+      const values = ['--feature', '--commit', '--review', '--report', '--target'];
+      const parsed = Object.fromEntries(values.map((key) => [key, reviewFlag(key)])) as Record<string, { present: boolean; value?: string }>;
+      for (const key of values) if (!parsed[key].value?.trim()) throw new Error(`${key} 必填且不能为空。`);
+      const signature = parseReviewerSignature();
+      if (signature.mode !== 'reviewer') throw new Error('--as 与 --confirmed-by 必填。');
+      const reason = arg('--reason');
+      if (releaseAction === 'send-back' && !reason?.trim()) throw new Error('send-back 必须提供非空 --reason。');
+      const feature = parsed['--feature'].value!;
+      // CLI 只核对 PlanRun 已冻结的绑定；实时 Mission 与 Git 证据由后续驱动复核。
+      const missionId = process.argv[4];
+      if (!missionId || missionId.startsWith('--')) throw new Error('要指定 Mission id：plan approve/send-back <missionId> ...');
+      await store.update((run) => run.decideHaRelease({
+        featureId: feature, missionId, reviewedCommit: parsed['--commit'].value!, attemptId: parsed['--review'].value!,
+        validationReportId: parsed['--report'].value!, target: parsed['--target'].value!, as: signature.reviewerId,
+        confirmedBy: signature.confirmedBy, action: releaseAction === 'send-back' ? 'send_back' : 'approve',
+        ...(releaseAction === 'send-back' ? { reason: reason! } : {}),
+      }, new Date().toISOString()));
+      console.log(`HA ${releaseAction} 已记录（仅为签字声明，非逐次点击认证）。`);
+      return;
+    }
     if (target === 'decide') {
       const escalationId = process.argv[4];
       if (!escalationId || escalationId.startsWith('--')) throw new Error('要指定升级单：plan decide <E-n> ...');
@@ -337,6 +766,7 @@ async function main() {
       // 只有本次运行指定的检视者作数；不写你是谁，规则就没法核对。
       if (!decidedBy) throw new Error('要写明你是谁（--as <检视者>）：只有本次运行指定的检视者的决定作数。');
       const drop = arg('--drop');
+      const answer = arg('--answer');
       const decided = await store.update((run) =>
         run.choose(
           escalationId,
@@ -348,15 +778,20 @@ async function main() {
             ...(drop !== undefined
               ? { dropFeatures: drop.split(',').map((id) => id.trim()).filter(Boolean) }
               : {}),
+            // 交给 choose 校验：空白/过长/不可答复都在规则里拒，这里不预判。
+            ...(answer !== undefined ? { answer } : {}),
           },
           new Date().toISOString(),
         ),
       );
       const resolution = decided.resolution;
-      console.log(
-        `已定 ${decided.id}（${decided.featureId}）：` +
-          (resolution?.kind === 'decided' ? `${resolution.action} —— ${resolution.reason}` : '?'),
-      );
+      const summary =
+        resolution?.kind !== 'decided'
+          ? '?'
+          : resolution.action === 'answer'
+            ? `answer —— ${resolution.answer}`
+            : `${resolution.action} —— ${resolution.reason}`;
+      console.log(`已定 ${decided.id}（${decided.featureId}）：${summary}`);
       console.log('驱动方下次读记录（最多 15 秒）就会照办。');
       return;
     }
@@ -373,10 +808,10 @@ async function main() {
   console.log(`用法：
   node src/l3.ts inbox [--recipient X]        列出待取的结果
   node src/l3.ts show <missionId>             看契约、计划、工作项、改动、交卷内容
-  node src/l3.ts merge <missionId> [--reason] 放行并落地到目标分支
-  node src/l3.ts send-back <missionId> --reason "..."   打回给协调者重做
-  node src/l3.ts abandon <missionId> --reason "..."     放弃
-  node src/l3.ts answer <missionId> --answer "..."     答复协调者的升级
+  node src/l3.ts merge <missionId> [--reason] [--as <检视者> --confirmed-by <确认人>] 放行并落地到目标分支
+  node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]  打回给协调者重做
+  node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]    放弃
+  node src/l3.ts answer <missionId> --answer "..."     答复协调者的升级（仅方案运行之外；方案中的升级是 AQ1 唯一路径：plan decide --action answer。HTTP 不复制续跑）
   node src/l3.ts revise <missionId> --contract <file>  发布新契约（在等检视的会退回规划）
   node src/l3.ts cancel <missionId> [--reason] 叫停（终态，释放改动名额）
   node src/l3.ts pause <missionId>            暂停（阶段不变，调度器不碰）
@@ -387,6 +822,7 @@ async function main() {
   node src/l3.ts ack <deliveryId>             确认收到
   node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
   node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
+  node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."] [--run <记录>]
 
 公共参数：--state <状态文件>  --repo <项目仓库>`);
 }

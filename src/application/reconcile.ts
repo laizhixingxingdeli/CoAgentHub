@@ -31,9 +31,15 @@
  * 加写冲突检测挡住大部分，但不是完备的。
  */
 
-import type { MissionStatus, Project } from '../kernel/index.ts';
+import type { Mission, MissionStatus, Project } from '../kernel/index.ts';
 import type { LiveOutput } from './live.ts';
-import type { ActivityLog } from './ports.ts';
+import type { ActivityEvent, ActivityLog, Clock, CommandTransaction, ProjectRepository } from './ports.ts';
+import {
+  escalationDeliveryKey,
+  resultDeliveryKey,
+  type Delivery,
+  type DeliveryRepository,
+} from './delivery.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './workspace.ts';
 
 /** Mission 终态：与 kernel 流转表一致——completed / blocked 无出边。 */
@@ -206,4 +212,684 @@ export async function reconcileOrphanedWorktrees(
   }
 
   return { removed, kept, warnings, roots: byRoot.size };
+}
+
+/* ------------------------------ 缺失投递补建 ------------------------------ */
+
+/** 只有这些状态下当前 result 才对应一次已经交卷的结局，执行中的正文不算。 */
+const RESULT_REPAIR_STATUSES: ReadonlySet<MissionStatus> = new Set([
+  'awaiting_review',
+  'completed',
+  'blocked',
+]);
+
+export interface RepairMissingDeliveriesDeps {
+  readonly projects: ProjectRepository;
+  readonly activity: ActivityLog;
+  readonly deliveries: DeliveryRepository;
+  readonly transaction: CommandTransaction;
+  readonly clock: Clock;
+  /**
+   * 文件版才有归档。不传（PG / 内存）就不当归档处理。
+   * 必须在读投递/事件之前判断：归档包有 hash 钉着，不能等写失败再靠文案跳过。
+   */
+  readonly isArchivedMission?: (missionId: string) => boolean;
+}
+
+export interface RepairMissingDeliveriesOptions {
+  readonly missionId?: string;
+}
+
+export interface DeliveryRepairRef {
+  readonly missionId: string;
+  readonly idempotencyKey: string;
+  readonly deliveryId?: string;
+}
+
+export interface DeliveryRepairSkip {
+  readonly missionId: string;
+  readonly reason: string;
+}
+
+export interface DeliveryRepairUncertain {
+  readonly missionId: string;
+  readonly reason: string;
+  readonly idempotencyKey?: string;
+}
+
+export interface DeliveryRepairError {
+  readonly missionId: string;
+  readonly message: string;
+}
+
+export interface RepairMissingDeliveriesResult {
+  readonly created: readonly DeliveryRepairRef[];
+  readonly existing: readonly DeliveryRepairRef[];
+  readonly skipped: readonly DeliveryRepairSkip[];
+  readonly uncertain: readonly DeliveryRepairUncertain[];
+  readonly errors: readonly DeliveryRepairError[];
+}
+
+type SubmissionIdentityIssue = 'ok' | 'missing' | 'conflict' | 'wrong_source';
+
+interface ResultSubmission {
+  readonly event: ActivityEvent;
+  readonly identity: string | undefined;
+  readonly outcome: unknown;
+  readonly identityIssue: SubmissionIdentityIssue;
+}
+
+interface PlannedCreate {
+  readonly key: string;
+  readonly outcome: Delivery['outcome'];
+  readonly summary: string;
+  readonly source: 'escalation' | 'result';
+  readonly reason: string;
+  readonly attemptId?: string;
+}
+
+/**
+ * 幂等补建可从现存状态可靠重建的缺失投递：全部升级，以及当前结果对应的
+ * 最后一次可核实交卷。不改 Mission / Attempt 状态，不重放交卷或升级命令。
+ */
+export async function repairMissingDeliveries(
+  deps: RepairMissingDeliveriesDeps,
+  options?: RepairMissingDeliveriesOptions,
+): Promise<RepairMissingDeliveriesResult> {
+  void deps.clock;
+  const created: DeliveryRepairRef[] = [];
+  const existing: DeliveryRepairRef[] = [];
+  const skipped: DeliveryRepairSkip[] = [];
+  const uncertain: DeliveryRepairUncertain[] = [];
+  const errors: DeliveryRepairError[] = [];
+
+  const projects = await deps.projects.list();
+  for (const project of projects) {
+    for (const mission of project.missions) {
+      if (options?.missionId && mission.id !== options.missionId) continue;
+      if (deps.isArchivedMission?.(mission.id)) {
+        skipped.push({ missionId: mission.id, reason: '已归档，跳过补建' });
+        continue;
+      }
+      try {
+        const outcome = await repairOneMission(deps, mission);
+        created.push(...outcome.created);
+        existing.push(...outcome.existing);
+        skipped.push(...outcome.skipped);
+        uncertain.push(...outcome.uncertain);
+        errors.push(...outcome.errors);
+      } catch (error) {
+        errors.push({
+          missionId: mission.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  return { created, existing, skipped, uncertain, errors };
+}
+
+async function repairOneMission(
+  deps: RepairMissingDeliveriesDeps,
+  mission: Mission,
+): Promise<RepairMissingDeliveriesResult> {
+  const created: DeliveryRepairRef[] = [];
+  const existing: DeliveryRepairRef[] = [];
+  const skipped: DeliveryRepairSkip[] = [];
+  const uncertain: DeliveryRepairUncertain[] = [];
+  const errors: DeliveryRepairError[] = [];
+
+  const rows = await deps.deliveries.listForMission(mission.id);
+  const byKey = new Map(rows.map((row) => [row.idempotencyKey, row]));
+  const events = await deps.activity.list(mission.id);
+  const planned: PlannedCreate[] = [];
+
+  for (let index = 0; index < mission.escalations.length; index += 1) {
+    const escalation = mission.escalations[index]!;
+    const key = escalationDeliveryKey(index);
+    const found = byKey.get(key);
+    if (found) {
+      existing.push({ missionId: mission.id, idempotencyKey: key, deliveryId: found.id });
+      continue;
+    }
+    planned.push({
+      key,
+      outcome: 'escalated',
+      summary: escalationDeliverySummary(escalation.question, escalation.why),
+      source: 'escalation',
+      reason: '补建缺失的升级投递',
+      attemptId: escalation.attemptId,
+    });
+  }
+
+  const resultPlan = planCurrentResultRepair(mission, events, byKey);
+  existing.push(...resultPlan.existing);
+  uncertain.push(...resultPlan.uncertain);
+  if (resultPlan.create) planned.push(resultPlan.create);
+
+  for (const item of planned) {
+    try {
+      const applied = await applyMissingDelivery(deps, mission, item);
+      if (applied.kind === 'created') {
+        created.push(applied.ref);
+        byKey.set(item.key, {
+          id: applied.ref.deliveryId ?? '',
+          missionId: mission.id,
+          projectId: mission.projectId,
+          recipient: deliveryRecipient(mission),
+          outcome: item.outcome,
+          idempotencyKey: item.key,
+          summary: item.summary,
+          createdAt: '',
+          status: 'pending',
+        });
+      } else {
+        existing.push(applied.ref);
+      }
+    } catch (error) {
+      if (isArchivedWriteError(error)) {
+        // 归档包不能改：整条 Mission 跳过，已经列入的 existing/uncertain 也不算这次的结论。
+        return {
+          created: [],
+          existing: [],
+          skipped: [{ missionId: mission.id, reason: '已归档，跳过补建' }],
+          uncertain: [],
+          errors: [],
+        };
+      }
+      errors.push({
+        missionId: mission.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { created, existing, skipped, uncertain, errors };
+}
+
+function planCurrentResultRepair(
+  mission: Mission,
+  events: readonly ActivityEvent[],
+  byKey: ReadonlyMap<string, Delivery>,
+): {
+  create?: PlannedCreate;
+  existing: DeliveryRepairRef[];
+  uncertain: DeliveryRepairUncertain[];
+} {
+  const existing: DeliveryRepairRef[] = [];
+  const uncertain: DeliveryRepairUncertain[] = [];
+  if (!RESULT_REPAIR_STATUSES.has(mission.status) || !mission.result) {
+    return { existing, uncertain };
+  }
+
+  const submissions = listResultSubmissions(events, mission.executionMode);
+  if (submissions.length === 0) {
+    uncertain.push({ missionId: mission.id, reason: '没有可核实的交卷事件' });
+    return { existing, uncertain };
+  }
+
+  const last = submissions[submissions.length - 1]!;
+  const currentOutcome = mission.result.outcome;
+
+  for (const earlier of submissions.slice(0, -1)) {
+    if (submissionAlreadyDelivered(earlier, byKey, events, submissions, currentOutcome)) continue;
+    uncertain.push({
+      missionId: mission.id,
+      reason: '较早交卷缺少正文，无法补投',
+      idempotencyKey: earlier.identity ? resultDeliveryKey(earlier.identity) : undefined,
+    });
+  }
+
+  if (last.identityIssue !== 'ok' || !last.identity) {
+    uncertain.push({
+      missionId: mission.id,
+      reason:
+        last.identityIssue === 'conflict'
+          ? '最后一次交卷身份字段冲突，无法核实'
+          : last.identityIssue === 'wrong_source'
+            ? '最后一次交卷身份来源与当前交卷模式不符'
+            : '最后一次交卷缺少身份',
+    });
+    return { existing, uncertain };
+  }
+  if (last.outcome !== currentOutcome) {
+    uncertain.push({
+      missionId: mission.id,
+      reason: '最后一次交卷 outcome 与当前 result 不一致',
+      idempotencyKey: resultDeliveryKey(last.identity),
+    });
+    return { existing, uncertain };
+  }
+
+  const key = resultDeliveryKey(last.identity);
+  const found = byKey.get(key);
+  if (found) {
+    existing.push({ missionId: mission.id, idempotencyKey: key, deliveryId: found.id });
+    return { existing, uncertain };
+  }
+
+  const legacyKey = `result:legacy:${currentOutcome}`;
+  const legacy = byKey.get(legacyKey);
+  if (legacy) {
+    const attributed = attributeLegacyResult(legacy, events, submissions);
+    if (!attributed) {
+      uncertain.push({
+        missionId: mission.id,
+        reason: '旧 result:legacy 行无法归属到某次提交',
+        idempotencyKey: legacyKey,
+      });
+      return { existing, uncertain };
+    }
+    if (attributed.event === last.event) {
+      existing.push({
+        missionId: mission.id,
+        idempotencyKey: legacy.idempotencyKey,
+        deliveryId: legacy.id,
+      });
+      return { existing, uncertain };
+    }
+    // 旧行属于先前提交：当前这次交卷仍缺投递，可以补最新键。
+  }
+
+  return {
+    existing,
+    uncertain,
+    create: {
+      key,
+      outcome: currentOutcome,
+      summary: mission.result.summary,
+      source: 'result',
+      reason: '补建当前交卷的缺失投递',
+      attemptId: last.event.attemptId,
+    },
+  };
+}
+
+function listResultSubmissions(
+  events: readonly ActivityEvent[],
+  executionMode: Mission['executionMode'],
+): ResultSubmission[] {
+  const rows: ResultSubmission[] = [];
+  for (const event of events) {
+    if (event.kind !== 'mission_result.submitted') continue;
+    const data = eventData(event);
+    const fromAttempt =
+      typeof event.attemptId === 'string' && event.attemptId !== '' ? event.attemptId : undefined;
+    const fromReport =
+      typeof data.reportId === 'string' && data.reportId !== '' ? data.reportId : undefined;
+    const resolved = resolveSubmissionIdentity(executionMode, fromAttempt, fromReport);
+    rows.push({
+      event,
+      identity: resolved.identity,
+      outcome: data.outcome,
+      identityIssue: resolved.identityIssue,
+    });
+  }
+  return rows;
+}
+
+/**
+ * 按 Mission 当前交卷模式取身份。混用 attemptId / reportId 会把 Lightweight
+ * 的报告当成 Standard 的 attempt；升级后的 Mission 尤其会猜错。
+ */
+function resolveSubmissionIdentity(
+  executionMode: Mission['executionMode'],
+  fromAttempt: string | undefined,
+  fromReport: string | undefined,
+): { identity: string | undefined; identityIssue: SubmissionIdentityIssue } {
+  if (executionMode === 'lightweight') {
+    if (fromAttempt && fromReport) return { identity: undefined, identityIssue: 'conflict' };
+    if (fromAttempt && !fromReport) return { identity: undefined, identityIssue: 'wrong_source' };
+    if (!fromReport) return { identity: undefined, identityIssue: 'missing' };
+    return { identity: fromReport, identityIssue: 'ok' };
+  }
+  // standard / high_assurance：身份只能是协调者 attemptId
+  if (fromAttempt && fromReport) return { identity: undefined, identityIssue: 'conflict' };
+  if (fromReport && !fromAttempt) return { identity: undefined, identityIssue: 'wrong_source' };
+  if (!fromAttempt) return { identity: undefined, identityIssue: 'missing' };
+  return { identity: fromAttempt, identityIssue: 'ok' };
+}
+
+function submissionAlreadyDelivered(
+  submission: ResultSubmission,
+  byKey: ReadonlyMap<string, Delivery>,
+  events: readonly ActivityEvent[],
+  submissions: readonly ResultSubmission[],
+  currentOutcome: string,
+): boolean {
+  if (submission.identity && byKey.get(resultDeliveryKey(submission.identity))) return true;
+  const legacy = byKey.get(`result:legacy:${submission.outcome === currentOutcome ? currentOutcome : String(submission.outcome)}`);
+  if (!legacy) return false;
+  const attributed = attributeLegacyResult(legacy, events, submissions);
+  return attributed?.event === submission.event;
+}
+
+function attributeLegacyResult(
+  legacy: Delivery,
+  events: readonly ActivityEvent[],
+  submissions: readonly ResultSubmission[],
+): ResultSubmission | undefined {
+  const createdIndex = events.findIndex((event) => {
+    if (event.kind !== 'delivery.created') return false;
+    return eventData(event).deliveryId === legacy.id;
+  });
+  if (createdIndex >= 0) {
+    for (let i = createdIndex - 1; i >= 0; i -= 1) {
+      const prior = events[i]!;
+      if (prior.kind === 'mission_result.submitted') {
+        const found = submissions.find((row) => row.event === prior);
+        // 有 delivery.created 只说明「这条投递当时为某次提交而建」，还要 outcome 对得上。
+        if (!found || found.outcome !== legacy.outcome) return undefined;
+        return found;
+      }
+    }
+    // 有 delivery.created 但前面没有交卷：不能退回「唯一提交」猜测。
+    return undefined;
+  }
+  // 没有可信链时不能在多次提交里挑：必须全局只交过一次，且 outcome 与 legacy 行相同。
+  if (submissions.length !== 1) return undefined;
+  const only = submissions[0]!;
+  return only.outcome === legacy.outcome ? only : undefined;
+}
+
+async function applyMissingDelivery(
+  deps: RepairMissingDeliveriesDeps,
+  mission: Mission,
+  item: PlannedCreate,
+): Promise<{ kind: 'created' | 'existing'; ref: DeliveryRepairRef }> {
+  return deps.transaction.run(async () => {
+    const current = await deps.deliveries.listForMission(mission.id);
+    const found = current.find((row) => row.idempotencyKey === item.key);
+    if (found) {
+      return {
+        kind: 'existing',
+        ref: { missionId: mission.id, idempotencyKey: item.key, deliveryId: found.id },
+      };
+    }
+    const delivery = await deps.deliveries.create({
+      missionId: mission.id,
+      projectId: mission.projectId,
+      recipient: deliveryRecipient(mission),
+      outcome: item.outcome,
+      idempotencyKey: item.key,
+      summary: item.summary,
+    });
+    // create 对同键幂等：拿回已有行就不记审计，避免重复通知。
+    if (current.some((row) => row.id === delivery.id)) {
+      return {
+        kind: 'existing',
+        ref: { missionId: mission.id, idempotencyKey: item.key, deliveryId: delivery.id },
+      };
+    }
+    await deps.activity.append({
+      projectId: mission.projectId,
+      missionId: mission.id,
+      attemptId: item.attemptId,
+      kind: 'delivery.created',
+      data: { deliveryId: delivery.id },
+    });
+    await deps.activity.append({
+      projectId: mission.projectId,
+      missionId: mission.id,
+      attemptId: item.attemptId,
+      kind: 'recovery.applied',
+      data: {
+        missionId: mission.id,
+        idempotencyKey: item.key,
+        deliveryId: delivery.id,
+        source: item.source,
+        reason: item.reason,
+      },
+    });
+    return {
+      kind: 'created',
+      ref: { missionId: mission.id, idempotencyKey: item.key, deliveryId: delivery.id },
+    };
+  });
+}
+
+function deliveryRecipient(mission: Mission): string {
+  return mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown';
+}
+
+function escalationDeliverySummary(question: string, why: string): string {
+  return `${question}\n\n为什么需要 L3：${why}`;
+}
+
+function eventData(event: ActivityEvent): Record<string, unknown> {
+  return event.data !== null && typeof event.data === 'object' && !Array.isArray(event.data)
+    ? (event.data as Record<string, unknown>)
+    : {};
+}
+
+function isArchivedWriteError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('已归档 Mission');
+}
+
+/* ------------------------------ 周期投递修复调度 ------------------------------ */
+
+/** 未设 COAGENT_RECONCILE_INTERVAL_MS 时的间隔。0 才是关闭。 */
+export const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * 解析周期间隔。必须在开状态 / 拿锁 / listen / 建 worktree 之前调用：
+ * 非法值要失败在副作用前，不留半截进程。
+ *
+ * 未设 → 60000；`0` → 关闭；其余必须是正整数（禁止符号、小数、前导零）。
+ */
+export function parseReconcileIntervalMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_RECONCILE_INTERVAL_MS;
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `COAGENT_RECONCILE_INTERVAL_MS 必须是 0（关闭）或正整数毫秒，收到：${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+export interface StartPeriodicReconcileInput {
+  readonly intervalMs: number;
+  readonly tick: () => Promise<void>;
+  readonly warn: (message: string, error?: unknown) => void;
+}
+
+export interface PeriodicReconcileHandle {
+  stop(): Promise<void>;
+}
+
+/**
+ * 按间隔、不重叠地跑 tick。用 setTimeout 链而不是 setInterval：上一轮没结束
+ * 下一轮不开始。stop() 会等在途那一轮结束，之后不再排下一轮。
+ *
+ * intervalMs <= 0 视为关闭，连第一轮都不排。单次 tick 抛错只 warn，后续照跑。
+ * warn 自己抛错也接住：告警通道不该拖垮调度，否则 stop() 会拒绝、在途 tick 的
+ * 锁和独立连接就收不回来。
+ *
+ * 入口不要各自选 tick：startServer / run-plan 必须走 `startPeriodicDeliveryRepair`
+ *（main.ts）。两处再各写一套，文件短借锁 / 已持锁 / PG 独立 store 会再次分叉。
+ */
+export function startPeriodicReconcile(input: StartPeriodicReconcileInput): PeriodicReconcileHandle {
+  const { intervalMs, tick, warn } = input;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let wake: (() => void) | undefined;
+
+  const notify = (message: string, error?: unknown) => {
+    try {
+      warn(message, error);
+    } catch (warnError) {
+      // 告警通道出错不该变成未处理拒绝：退回 console.warn，循环继续。
+      console.warn(message, error);
+      console.warn(
+        `周期投递修复 warn 回调失败：${warnError instanceof Error ? warnError.message : String(warnError)}`,
+        warnError,
+      );
+    }
+  };
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      wake = resolve;
+      timer = setTimeout(() => {
+        timer = undefined;
+        wake = undefined;
+        resolve();
+      }, ms);
+    });
+
+  const loop = (async () => {
+    if (intervalMs <= 0) return;
+    while (!stopped) {
+      await sleep(intervalMs);
+      if (stopped) return;
+      try {
+        await tick();
+      } catch (error) {
+        notify(
+          `周期投递修复失败：${error instanceof Error ? error.message : String(error)}`,
+          error,
+        );
+      }
+    }
+  })();
+
+  return {
+    async stop() {
+      stopped = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      wake?.();
+      wake = undefined;
+      await loop;
+    },
+  };
+}
+
+export interface IndependentCleanupStep {
+  readonly name: string;
+  readonly run: () => void | Promise<void>;
+}
+
+/**
+ * 退出清理每一步独立尝试。stop 失败如果直接 await，persist 和 releaseLock
+ * 都跑不到，排他锁就留在盘上；所以一步失败只记下来，后面的照跑，全部结束
+ * 再把失败抛出去（多个用 AggregateError）。
+ *
+ * `primary` 包一层对象，是因为 JS 可以 `throw undefined`，不能拿
+ * `error === undefined` 判断「没有主流程错误」。有主流程错误时必须再抛出，
+ * 否则 catch 里只记下、finally 里清理全成功，错误就被吞了。
+ */
+export async function runIndependentCleanup(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+  primary?: { error: unknown };
+}): Promise<void> {
+  const failures: Error[] = [];
+  for (const step of input.steps) {
+    try {
+      await step.run();
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      failures.push(err);
+      const message = `退出清理失败（${step.name}）：${err.message}`;
+      try {
+        input.report(message, error);
+      } catch {
+        // report 自己抛也不该跳过后续步骤（尤其是释锁）。
+        console.error(message, error);
+      }
+    }
+  }
+  const primary = input.primary;
+  if (primary) {
+    if (failures.length === 0) {
+      throw primary.error;
+    }
+    const primaryMessage =
+      primary.error instanceof Error ? primary.error.message : String(primary.error);
+    throw new AggregateError(
+      [primary.error, ...failures],
+      `主流程失败（${primaryMessage}），另有 ${failures.length} 步清理失败`,
+    );
+  }
+  if (failures.length === 1) {
+    const only = failures[0];
+    if (only) throw only;
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `退出清理有 ${failures.length} 步失败`);
+  }
+}
+
+/**
+ * 给顶层 catch 用：AggregateError.stack 不含 errors / cause，只打 stack
+ * 会把主流程错误盖掉。有深度上限并防循环，避免日志阶段自己卡死。
+ */
+export function formatErrorForLog(error: unknown): string {
+  const maxDepth = 8;
+  const seen = new WeakSet<object>();
+  const walk = (value: unknown, depth: number): string => {
+    if (depth > maxDepth) return '[超过展开深度]';
+    if (value !== null && typeof value === 'object') {
+      if (seen.has(value)) return '[循环引用]';
+      seen.add(value);
+    }
+    if (value instanceof AggregateError) {
+      const lines = [value.stack ?? `${value.name}: ${value.message}`];
+      value.errors.forEach((inner, i) => {
+        lines.push(`[${i}] ${walk(inner, depth + 1)}`);
+      });
+      if (value.cause !== undefined) {
+        lines.push(`[cause] ${walk(value.cause, depth + 1)}`);
+      }
+      return lines.join('\n');
+    }
+    if (value instanceof Error) {
+      const base = value.stack ?? `${value.name}: ${value.message}`;
+      if (value.cause === undefined) return base;
+      return `${base}\n[cause] ${walk(value.cause, depth + 1)}`;
+    }
+    return String(value);
+  };
+  return walk(error, 0);
+}
+
+/**
+ * 信号退出：每步独立尝试、失败必记、一定 exit(130)。永不拒绝——releaseLock
+ * 抛错也不能挡住退出，更不能留下未处理拒绝。退出码保持 130（被中断）；
+ * 清理失败靠 stderr 诊断，不另开退出码，以免和「被人中断」混淆。
+ */
+export async function cleanupAfterSignal(input: {
+  steps: IndependentCleanupStep[];
+  report: (message: string, error?: unknown) => void;
+  exit: (code: number) => void;
+}): Promise<void> {
+  try {
+    await runIndependentCleanup({ steps: input.steps, report: input.report });
+  } catch {
+    // 每步失败已经 report。这里吞掉是为了后面一定 exit(130)。
+  }
+  try {
+    input.exit(130);
+  } catch (error) {
+    // 测试替身可能抛；生产 process.exit 通常不再返回。都不能变成未处理拒绝。
+    try {
+      input.report(
+        `信号退出未能生效：${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    } catch {
+      console.error(error);
+    }
+  }
 }

@@ -22,6 +22,7 @@ import type {
   ActivityEvent,
   ActivityLog,
   DecisionAnswerSet,
+  DecisionHook,
   DecisionProvider,
   DecisionRequest,
   DecisionSignal,
@@ -55,7 +56,15 @@ const PLAN = {
   risks: [] as string[],
 };
 
-function makePlatform(decisionProvider?: DecisionProvider, activity?: ActivityLog) {
+/**
+ * 这组测的就是 PRE_DISPATCH shadow，所以注入 provider 时显式开 PRE。
+ * 缺省（不开）的行为另有一组。
+ */
+function makePlatform(
+  decisionProvider?: DecisionProvider,
+  activity?: ActivityLog,
+  decisionHooks: ReadonlySet<DecisionHook> = new Set<DecisionHook>(['PRE_DISPATCH']),
+) {
   const clock = new FixedClock();
   const log = activity ?? new InMemoryActivityLog(clock);
   const projects = new InMemoryProjectRepository();
@@ -66,7 +75,7 @@ function makePlatform(decisionProvider?: DecisionProvider, activity?: ActivityLo
     activity: log,
     clock,
     ids,
-    ...(decisionProvider ? { decisionProvider } : {}),
+    ...(decisionProvider ? { decisionProvider, decisionHooks } : {}),
   });
   return { platform, activity: log, projects, ids, clock };
 }
@@ -432,5 +441,38 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
       assert.equal(data.resolvedModel, 'ghost-model');
       assert.deepEqual(data.usage, { inputTokens: 9, outputTokens: 3 });
     }
+  });
+});
+
+describe('PRE_DISPATCH shadow 默认关（J1）', () => {
+  // E3：只给 ID 时 PRE 的答案是常数，比全猜多数类还差——默认不再为它在派发路径上等。
+  test('只开 POST：派发照常，0 次 decide、0 条 decision.shadow', async () => {
+    const sink = { calls: 0 };
+    const { platform, activity } = makePlatform(throwingProvider(sink), undefined, new Set<DecisionHook>(['POST_EXECUTION']));
+    const { attemptId } = await prepareMission(platform, 'M1');
+    const workItemId = await createItem(platform, 'M1', attemptId);
+    await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
+    assert.equal(sink.calls, 0);
+    assert.equal(shadowEvents(await activity.list('M1')).length, 0);
+  });
+
+  test('Platform 不传 decisionHooks：同样不跑 PRE', async () => {
+    const sink = { calls: 0 };
+    const clock = new FixedClock();
+    const activity = new InMemoryActivityLog(clock);
+    const ids = new SequentialIds();
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      activity,
+      clock,
+      ids,
+      decisionProvider: throwingProvider(sink),
+    });
+    const { attemptId } = await prepareMission(platform, 'M1');
+    const workItemId = await createItem(platform, 'M1', attemptId);
+    await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
+    assert.equal(sink.calls, 0);
+    assert.equal(shadowEvents(await activity.list('M1')).length, 0);
   });
 });

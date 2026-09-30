@@ -15,8 +15,10 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - **L3 Reviewer** 拥有最终落地权（merge / 驳回）；未经 L3 不得把 Mission 标成 completed。Lightweight（Fast Lane）缩短协调，**不**绕过 L3 / validator 权威（ADR-0004）。
   无人值守按方案推进时，**机器 L3** 可凭合并后在**集成分支**上跑出的方案级验证放行（只限 lightweight + standard，master 仍要人放行；ADR-0004 修订）。
+  high_assurance 合进集成分支由**人或显式配置的高保证 Principal**放行（ADR-0006）；当前该 Principal 是按用户常设授权登记的检视者签名。master 一律由用户放行。Jev 只列未来移交。
 - **L2 Coordinator** 负责规划、拆 WorkItem、验收执行结果；可以改 plan / contract 修订，修订对后续执行有约束力。Lightweight 路径零 Coordinator，机器验收走 validator。
 - **L1 Executor** 只执行冻结的 WorkOrder，不能自验收、不能重新定义目标。
+- **Independent Reviewer**（`independent_reviewer`）是 HA 合并前的独立检视角色，与终审签名人 `reviewer` 不是同一个身份：须与本 Mission 历史协调者、执行者 profile 全部不同；只读证据包并提交 `pass` / `send_back`，不签 FinalReview，也不改 L2 逐条结果。
 
 ## Architecture
 
@@ -35,6 +37,10 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 权威执行预算：hard 可停/内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005）。
 - Decision/Jev 在 OFF/SHADOW 下不具执行权威；SHADOW 仅审计（ADR-0002）。
 
+## Web 约定
+
+- 网页上的列表一律按时间倒序，最新的在最上面：任务表、方案运行列表、最近完成、待办、死信等都一样（用户 2026-09-29）。同一任务内的进度环节是流程，仍按发生顺序从上到下。
+
 ## Memory Model
 
 - **`project.md`**：项目级稳定上下文（本文件）。**不要**再引入 `project.yaml` / `constitution.md` 或第二份项目级记忆入口。
@@ -50,7 +56,9 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   - `spawn-env-filter` — agent 子进程环境过滤（fail-closed 透传名单）
   - `plan-run` — 方案运行：无人值守驱动（run-plan）、夜间升级握手（跨进程、只能选动作）与停止条件
   - `machine-final-review` — 机器 L3：合进集成分支、在合并结果上验证、红则回滚；方案放弃失败的 Mission
-- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0005）。
+  - `credential-redaction` — 凭据脱敏：agent 产出与运行输出落盘前抹掉本机凭据值与常见 key 形状
+  - `delivery-inbox` — 投递收件箱：结果与升级回到发起方；按业务幂等键去重（每次升级、每次交卷各一条）
+- **`architecture/decisions/`**：跨 Mission 的长期技术取舍（ADR-0001…0006）。
 - 不要把 Mission 历史、临时计划或一次性排障笔记写进上述长期文件。
 - 根目录 `VIBE.md` **只**由 `generateVibe` / 落地时重写；手改会丢。
 
@@ -74,3 +82,13 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 不用 `enum`，不用 constructor parameter properties（同上）。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
 - 注释写**为什么**，不写代码在做什么。特别是写清楚「不这么做会怎样」。
+
+### 仓库与协作
+
+- 换行：提交进仓库的内容（blob）一律是 LF；本机 `core.autocrlf=true`，检出的工作副本是 CRLF。同一个文件里不要混用 LF 和 CRLF。否则会出现整文件的伪改动，看不清真实改了什么。
+- 只按显式路径 `git add` / commit，不用 `git add -A`、`git add .`。否则会把用户的未跟踪文件（IDE 配置、本地方案文件、实验输出）卷进提交。
+- 不碰 `.idea/`（用户的 IDE 配置）。否则会改坏或提交用户本地的设置。
+- 不读凭据文件（例如 `~/.pi/agent/auth.json`、`typesafe.env`），不在输出、日志、提交里打印 key，给子进程的环境不额外塞凭据（透传名单见 `specs/spawn-env-filter`）。否则凭据会随日志、产物或提交泄露。
+- 测试用 `node --test`。要改表结构或 TRUNCATE 的 PG 测试，用 `test/helpers/pg.ts` 的 `ensureTestDatabase('<独立名字>')` 另建隔离库；PG 不可用时这类测试跳过，跳过不算验证通过。否则测试之间互相踩数据，或者把「没跑」当成「通过」。
+- `src/` 里除 `src/application/decision-question-registry.ts` 外不出现「题集」一词。否则 `test/decision-state-builder.test.ts` 的全 `src` 扫描会红。
+- 验证在独立 worktree（`.coagent-worktrees/` 下）里跑，不在用户的主工作区里跑。否则主工作区里用户开着的 IDE、未跟踪文件会被算进改动，或被验证过程改坏。

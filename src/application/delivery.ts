@@ -6,6 +6,11 @@
  *
  * v1 刻意做得很薄：pending → acknowledged，没有租约、没有死信、没有重投计数。
  * 这些是被真实故障逼出来的东西，还没遇到就不建。
+ *
+ * **去重按业务幂等键，不按结局。** 早先是「同一 Mission 的同一种结局只投一次」：
+ * 第二次升级（前一次已答复）和 L3 打回后的重新交卷都被当成重复吞掉，收件箱里
+ * 永远看不到——而「进收件箱才叫升级」。键只由持久化状态决定，崩溃后重建同一条
+ * 投递也不会多出一条（设计 §8.1–8.2）。
  */
 
 import type { Clock, IdGenerator } from './ports.ts';
@@ -21,10 +26,40 @@ export interface Delivery {
    * 否则"升级"只是在平台里写了一行字，没人知道。
    */
   readonly outcome: 'delivered' | 'blocked' | 'escalated';
+  /**
+   * 业务幂等键：同一 Mission 内同一个键只有一条投递。
+   * 升级 `escalated:<该 Mission 的第几次升级>`；交卷 `result:<提交它的协调者 attempt | Lightweight 的验收报告>`。
+   */
+  readonly idempotencyKey: string;
   readonly summary: string;
   readonly createdAt: string;
   readonly status: 'pending' | 'acknowledged';
   readonly acknowledgedAt?: string;
+}
+
+/** 升级的投递键：该 Mission 的第几次升级（从 0 数，与 mission.escalations 的下标一致）。 */
+export function escalationDeliveryKey(index: number): string {
+  return `escalated:${index}`;
+}
+
+/** 交卷的投递键：提交它的那一次（Standard 取协调者 attempt，Lightweight 取验收报告）。 */
+export function resultDeliveryKey(submissionRef: string): string {
+  return `result:${submissionRef}`;
+}
+
+/**
+ * 加键之前的旧投递补什么键。旧规则下每个 Mission 每种结局至多一行，所以：
+ * 升级那行只可能是第一次升级（escalated:0）；交卷那行按结局给一个不会和新键撞的名字。
+ */
+export function legacyDeliveryKey(outcome: Delivery['outcome']): string {
+  return outcome === 'escalated' ? escalationDeliveryKey(0) : `result:legacy:${outcome}`;
+}
+
+/** 缺键的旧行补上键（返回副本，不改原对象）。 */
+export function withDeliveryKey(row: Delivery): Delivery {
+  return typeof row.idempotencyKey === 'string' && row.idempotencyKey !== ''
+    ? row
+    : { ...row, idempotencyKey: legacyDeliveryKey(row.outcome) };
 }
 
 export interface DeliveryRepository {
@@ -33,6 +68,12 @@ export interface DeliveryRepository {
   pending(recipient?: string): Promise<readonly Delivery[]>;
   acknowledge(deliveryId: string): Promise<Delivery | undefined>;
   get(deliveryId: string): Promise<Delivery | undefined>;
+  /**
+   * 按 Mission 枚举全部投递（含 acknowledged）。
+   * 补建必须看见已确认行，否则会把已经投过的再投一次。
+   * pending / acknowledge 语义不变。
+   */
+  listForMission(missionId: string): Promise<readonly Delivery[]>;
 }
 
 export class InMemoryDeliveryRepository implements DeliveryRepository {
@@ -48,10 +89,9 @@ export class InMemoryDeliveryRepository implements DeliveryRepository {
   async create(
     input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
   ): Promise<Delivery> {
-    // 同一个 Mission 的同一种结局只投一次：协调者重复交卷不该在收件箱里
-    // 堆两条。但升级和交卷是两件事，各投各的。
+    // 同一个业务键只投一次：重建同一次升级 / 同一次交卷的投递拿回原来那条。
     const existing = [...this.#rows.values()].find(
-      (row) => row.missionId === input.missionId && row.outcome === input.outcome,
+      (row) => row.missionId === input.missionId && row.idempotencyKey === input.idempotencyKey,
     );
     if (existing) return existing;
 
@@ -87,5 +127,9 @@ export class InMemoryDeliveryRepository implements DeliveryRepository {
 
   async get(deliveryId: string): Promise<Delivery | undefined> {
     return this.#rows.get(deliveryId);
+  }
+
+  async listForMission(missionId: string): Promise<readonly Delivery[]> {
+    return [...this.#rows.values()].filter((row) => row.missionId === missionId);
   }
 }

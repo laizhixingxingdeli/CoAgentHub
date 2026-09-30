@@ -31,6 +31,7 @@ import {
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { WEB_PAGE } from '../src/api/web.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 // 读进来就归一化行尾：这份仓库在 Windows 上 checkout 出来是 CRLF（core.autocrlf），
 // 而比对的源 WEB_PAGE 是模板字符串里的 LF。不归一的话，逐字比对会因为行尾而红，
@@ -68,7 +69,7 @@ async function serveDefaultWebRoot(): Promise<{ platform: Platform; base: string
     ids,
   });
   const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   return { platform, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
@@ -77,7 +78,7 @@ describe('外壳的文件形状', () => {
   test('四个文件都在，且都是静态服务认得的扁平小写名', () => {
     // 静态服务只认 `^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$`：大写、多级目录、
     // 别的扩展名，全都是浏览器里一个 404。这里先红，好过界面上是白屏。
-    for (const name of ['index.html', 'app.js', 'tokens.css', 'projects.js']) {
+    for (const name of ['index.html', 'app.js', 'tokens.css', 'projects.js', 'plan-run.js', 'platform.js']) {
       assert.ok(existsSync(new URL(`../src/web/${name}`, import.meta.url)), `缺 src/web/${name}`);
       assert.match(name, /^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$/);
     }
@@ -90,13 +91,16 @@ describe('外壳的文件形状', () => {
     assert.match(html, /projects\.js/);
   });
 
-  test('外壳有品牌、两个入口、底部设置与用户占位、面包屑容器', () => {
+  test('外壳有品牌、四个入口、无设置/用户占位、面包屑容器', () => {
     const html = read('index.html');
     assert.match(html, /CoAgentHub/);
     assert.match(html, />项目</);
+    assert.match(html, />方案运行</);
     assert.match(html, />资源池</);
-    assert.match(html, /设置/);
-    assert.match(html, /用户/);
+    assert.match(html, />平台</);
+    assert.match(html, /href="#\/platform"/);
+    assert.equal(html.includes('>设置<') || /\n\s*设置\s*\n/.test(html), false, '设置占位还在');
+    assert.equal(/>用户</.test(html), false, '用户占位还在');
     // 面包屑的文字由 app.js 按当前 hash 填，所以这里要的是那个容器本身。
     assert.match(html, /id="crumbs"/);
   });
@@ -105,8 +109,8 @@ describe('外壳的文件形状', () => {
     const html = read('index.html');
     const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
     assert.ok(nav, '找不到导航');
-    assert.equal((nav[0].match(/<svg/g) || []).length, 2, '「项目」「资源池」各要一个图标');
-    assert.equal((nav[0].match(/fill="currentColor"/g) || []).length, 2, '图标要 fill=currentColor');
+    assert.equal((nav[0].match(/<svg/g) || []).length, 4, '「项目」「方案运行」「资源池」「平台」各要一个图标');
+    assert.equal((nav[0].match(/fill="currentColor"/g) || []).length, 4, '图标要 fill=currentColor');
     // 不靠图片资源：这一页零构建、零外链，图标必须内联。
     assert.equal(/<img/.test(nav[0]), false);
   });
@@ -143,6 +147,7 @@ describe('外壳的文件形状', () => {
     }
     assert.match(html, /class="item"[^>]*data-route="projects"/);
     assert.match(html, /class="item"[^>]*data-route="pool"/);
+    assert.match(html, /class="item"[^>]*data-route="platform"/);
   });
 
   test('外壳不靠内置观测面', () => {
@@ -257,6 +262,15 @@ describe('项目页的文案表', () => {
     assert.match(page, /\/api\/missions/, '任务表数据来自 GET /api/missions');
   });
 
+  test('项目页按策略轮询：可见挂定时器，隐藏与离页停', () => {
+    const page = read('projects.js');
+    assert.match(page, /updatedAt/, '任务表要读行上的 updatedAt，不能再写死占位');
+    assert.match(page, /nextRefresh/);
+    assert.match(page, /visibilitychange/);
+    assert.match(page, /setInterval/);
+    assert.match(page, /isConnected/);
+  });
+
   test('插进 DOM 的字段走转义', () => {
     const page = read('projects.js');
     for (const ent of ['&amp;', '&lt;', '&gt;', '&quot;']) {
@@ -334,7 +348,7 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.equal(reasonText({}), '');
   });
 
-  test('七列齐；空契约有文案；没时间戳是解释句；Token 拆项；行有色条', async () => {
+  test('七列齐；空契约有文案；缺时间不谎称接口没有；Token 拆项；行有色条', async () => {
     const { taskTableHtml, TASK_COLUMNS } = await loaded;
     assert.deepEqual([...TASK_COLUMNS], [
       '任务 ID', '标题', '阶段', '状态', '原因', '最新更新时间', 'Token',
@@ -344,8 +358,10 @@ describe('项目页的渲染函数喂真数据', () => {
       assert.ok(html.includes('<th>' + column + '</th>'), `表头缺 ${column}`);
     }
     assert.match(html, /（没有契约）/);
-    // 列表 API 不返回时间戳：写解释句，不是孤零零一个 —。
-    assert.ok(html.includes('列表接口不提供时间戳'), `没时间戳要解释为什么：${html}`);
+    // 行上缺 updatedAt 是这一行没读到，不是接口没这个字段。旧占位会把人
+    // 指向错误的根因（去怪后端），所以这句话不能再上屏。
+    assert.equal(html.includes('列表接口不提供时间戳'), false, `不能假称接口没有时间：${html}`);
+    assert.ok(html.includes('还没读到更新时间'), `缺时间要解释这一行：${html}`);
     assert.equal(html.includes('<td class="muted">—</td>'), false, '不再用 — 当唯一内容');
     // 没停机也不留 —。
     assert.ok(html.includes('没有停机，正常推进'), html);
@@ -356,6 +372,38 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.match(html, /<tr class="row-queued" data-mission-id="M1">/);
     // usage 缺失当 0，而不是把 NaN / undefined 映上屏。
     assert.equal(/NaN|undefined|null/.test(html), false, '上屏了 NaN/undefined 这种字串');
+  });
+
+  test('任务表按 updatedAt 降序，列上本地 MM-DD HH:mm，title 是完整时刻', async () => {
+    const { taskTableHtml } = await loaded;
+    const rows = [
+      { missionId: 'old', status: 'executing', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { missionId: 'new', status: 'executing', updatedAt: '2026-09-29T08:11:00.000Z' },
+      { missionId: 'mid', status: 'executing', updatedAt: '2026-03-15T12:30:00.000Z' },
+      { missionId: 'none', status: 'executing' },
+    ];
+    const html = taskTableHtml(rows);
+    const pos = (id: string) => {
+      const i = html.indexOf('data-mission-id="' + id + '"');
+      assert.ok(i >= 0, `缺行 ${id}`);
+      return i;
+    };
+    assert.ok(pos('new') < pos('mid') && pos('mid') < pos('old') && pos('old') < pos('none'), html);
+    // 入参数组不能被原地排序：调用方还拿着同一份列表做别的事。
+    assert.equal(rows[0]?.missionId, 'old');
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const local = (iso: string) => {
+      const d = new Date(iso);
+      return {
+        short: pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()),
+        full: d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+          + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()),
+      };
+    };
+    const shown = local('2026-09-29T08:11:00.000Z');
+    assert.ok(html.includes('>' + shown.short + '<'), `列上应是 ${shown.short}：${html}`);
+    assert.ok(html.includes('title="' + shown.full + '"'), `title 应是 ${shown.full}：${html}`);
+    assert.equal(html.includes('列表接口不提供时间戳'), false);
   });
 
   test('不守规矩的字段进不了 DOM', async () => {
@@ -379,6 +427,51 @@ describe('项目页的渲染函数喂真数据', () => {
     assert.ok(card.includes('0/1'));
     assert.ok(card.includes('/repo') && card.includes('main'), '仓库与分支得从 workspaceRef 显示出来');
   });
+
+  test('项目页刷新策略：可见每 5 秒拉两个列表，隐藏与离页都不拉', async () => {
+    const { nextRefresh } = await loaded;
+    const on = nextRefresh('projects', 'executing', true);
+    assert.deepEqual(on.paths, ['/api/projects', '/api/missions']);
+    assert.equal(on.intervalMs, 5000);
+    assert.equal(on.liveIntervalMs, null);
+    // 项目页不按某一条任务的状态停：两个列表都要刷。
+    assert.deepEqual(nextRefresh('projects', 'completed', true), on);
+    const hidden = nextRefresh('projects', 'executing', false);
+    assert.deepEqual(hidden.paths, []);
+    assert.equal(hidden.intervalMs, null);
+    assert.equal(hidden.liveIntervalMs, null);
+    // 隐藏→可见：paths 再次有值，调用方据此立刻补拉，再按 intervalMs 续上。
+    const resumed = nextRefresh('projects', '', true);
+    assert.deepEqual(resumed.paths, on.paths);
+    assert.equal(resumed.intervalMs, 5000);
+    assert.deepEqual(nextRefresh('pool', '', true).paths, []);
+  });
+
+  test('任务页刷新策略：未终态可见拉 view/activity/live，终态与隐藏停', async () => {
+    const { nextRefresh } = await loaded;
+    const live = nextRefresh('mission', 'executing', true);
+    assert.deepEqual(live.paths, ['view', 'activity', 'live']);
+    assert.equal(live.intervalMs, 3000);
+    assert.equal(live.liveIntervalMs, 1000);
+    // 状态还不知道不当终态，否则首屏读失败就再也不会重试。
+    assert.deepEqual(nextRefresh('mission', '', true), live);
+    assert.deepEqual(nextRefresh('mission', 'investigating', true), live);
+    for (const status of ['completed', 'blocked']) {
+      const done = nextRefresh('mission', status, true);
+      assert.deepEqual(done.paths, [], status);
+      assert.equal(done.intervalMs, null, status);
+      assert.equal(done.liveIntervalMs, null, status);
+    }
+    const hidden = nextRefresh('mission', 'executing', false);
+    assert.deepEqual(hidden.paths, []);
+    assert.equal(hidden.intervalMs, null);
+    assert.equal(hidden.liveIntervalMs, null);
+    // 隐藏→可见：paths 再次有值，调用方立刻补拉。
+    const resumed = nextRefresh('mission', 'awaiting_review', true);
+    assert.deepEqual(resumed.paths, live.paths);
+    assert.equal(resumed.intervalMs, 3000);
+    assert.equal(resumed.liveIntervalMs, 1000);
+  });
 });
 
 describe('GET / 是正式页，不是内置观测面', () => {
@@ -398,7 +491,7 @@ describe('GET / 是正式页，不是内置观测面', () => {
 
   test('三个资源都能按扁平路径取到', async () => {
     const { base } = await serveDefaultWebRoot();
-    for (const path of ['/index.html', '/app.js', '/tokens.css', '/projects.js']) {
+    for (const path of ['/index.html', '/app.js', '/tokens.css', '/projects.js', '/plan-run.js', '/platform.js']) {
       const res = await fetch(base + path);
       assert.equal(
         res.status,

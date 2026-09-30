@@ -12,6 +12,7 @@
  * 留下半份 JSON。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -30,8 +31,19 @@ import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
 import type { ValidationReport } from '../kernel/index.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
-import type { ActivityEvent, ActivityLog, Clock, IdGenerator, ProjectRepository } from './ports.ts';
+import type {
+  ActivityEvent,
+  ActivityLog,
+  Clock,
+  QueuedHopCapacityRepository,
+  CommandTransaction,
+  FencedCommandTransaction,
+  IdGenerator,
+  ProjectRepository,
+  CandidateCircuitRepository,
+} from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
+import { withDeliveryKey } from './delivery.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -41,6 +53,10 @@ import type {
 } from './agent-pool.ts';
 import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
+import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
+import type { CandidateCircuit, OpenCandidateCircuitInput, ClaimCandidateProbeInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
+import { closedCandidateCircuit, openCandidateCircuit, claimCandidateProbe, resolveCandidateProbe, validateOpenCandidateCircuit, validateClaimCandidateProbe, validateResolveCandidateProbe } from './candidate-circuit.ts';
 import {
   cloneValidationReport,
   ValidationReportConflictError,
@@ -98,6 +114,8 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   validationReports: ValidationReport[];
+  queuedHops: QueuedHop[];
+  candidateCircuits: CandidateCircuit[];
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -156,6 +174,8 @@ function emptyState(): StateFile {
     archivedMissions: [],
     queryRuns: [],
     validationReports: [],
+    queuedHops: [],
+    candidateCircuits: [],
   };
 }
 
@@ -194,9 +214,34 @@ function cloneQueryRunRecord(run: QueryRunRecord): QueryRunRecord {
 }
 
 /**
- * 整份状态的持有者。三个仓储都挂在它上面，任何一个写完都触发一次落盘。
+ * 开事务那一刻的样子：回滚就回到这里（C2）。
+ *
+ * 发号计数不在内：单调递增，跳号无害；回滚反而会让已经发出去的号被重发。
  */
-export class FileStateStore {
+interface OpenTransaction {
+  readonly projects: Map<string, ProjectSnapshot>;
+  readonly events: ActivityEvent[];
+  readonly deliveries: Delivery[];
+  readonly queryRuns: QueryRunRecord[];
+  readonly validationReports: ValidationReport[];
+  readonly agentPool: AgentPoolRow[];
+  readonly archivedMissions: ArchivedMissionRef[];
+  readonly queuedHops: QueuedHop[];
+  readonly candidateCircuits: CandidateCircuit[];
+  /** 事务结束（提交或回滚）时兑现：事务外的写在这上面等。 */
+  readonly done: Promise<void>;
+  readonly finish: () => void;
+}
+
+/**
+ * 整份状态的持有者。三个仓储都挂在它上面，任何一个写完都触发一次落盘。
+ *
+ * **单事务命令（C2）。** `run(fn)` 里的写（活对象、事件、投递、各记录、发号）不单独落盘，
+ * fn 结束后一次原子写（临时文件 + rename）；fn 抛错或这次写失败，内存回到开事务时的样子、
+ * 盘上还是之前的文件。事务外的异步写先等开着的事务结束（`settle`），同步落盘推迟到它结束——
+ * 否则别处的一次落盘会把事务的半截改动带下去，或者被它的回滚一起抹掉。
+ */
+export class FileStateStore implements CommandTransaction, FencedCommandTransaction {
   #path: string;
   #state: StateFile;
   /** 还原出来的聚合实例。落盘时重新取快照，读的时候直接给活对象。 */
@@ -207,6 +252,14 @@ export class FileStateStore {
   #archivedBaselines = new Map<string, MissionSnapshot>();
   /** 上次读到/写出的文件 mtime，用来判断有没有被别的进程改过。 */
   #stamp = 0;
+  /** 开着的命令事务；同一时刻至多一个。 */
+  #tx: OpenTransaction | undefined;
+  /** 事务里的调用链带着它：据此分清「事务里的写」和「事务开着时别处的写」。 */
+  #txContext = new AsyncLocalStorage<OpenTransaction>();
+  /** 事务串行：后一个等前一个结束。 */
+  #txQueue: Promise<void> = Promise.resolve();
+  /** 事务开着时别处要落盘：推迟到事务结束一起写。 */
+  #deferredFlush = false;
 
   constructor(path: string) {
     this.#path = resolve(path);
@@ -356,6 +409,8 @@ export class FileStateStore {
    * 改动当成外部改动再读回来。
    */
   refreshIfChanged(): void {
+    // 事务开着时不重读：重读会换掉事务正在改的活对象，提交时写下去的就不是这个事务了。
+    if (this.#tx) return;
     const mtime = this.#mtime();
     if (mtime === this.#stamp) return;
     this.#state = this.#load();
@@ -373,6 +428,10 @@ export class FileStateStore {
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
+      if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
+      if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
+      // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
+      state.deliveries = state.deliveries.map(withDeliveryKey);
       seedQueryRunIdCounter(state);
       seedValidationReportIdCounter(state);
       return state;
@@ -386,8 +445,134 @@ export class FileStateStore {
     }
   }
 
-  /** 把当前活对象的快照写回磁盘。 */
+  /**
+   * 把当前活对象的快照写回磁盘。
+   *
+   * 事务开着时不写：事务里的写等提交时一起落盘；事务外的写推迟到事务结束（提交或回滚之后）。
+   */
   flush(): void {
+    if (this.#tx) {
+      if (this.#txContext.getStore() !== this.#tx) this.#deferredFlush = true;
+      return;
+    }
+    this.#write();
+  }
+
+  /**
+   * 命令事务（C2）。嵌套调用并进外层事务；事务之间串行。
+   */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#tx && this.#txContext.getStore() === this.#tx) return fn();
+    const previous = this.#txQueue;
+    let release!: () => void;
+    this.#txQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    const tx = this.#begin();
+    this.#tx = tx;
+    try {
+      let result: T;
+      try {
+        result = await this.#txContext.run(tx, fn);
+      } catch (error) {
+        this.#abort(tx);
+        throw error;
+      }
+      this.#tx = undefined;
+      try {
+        this.#write();
+      } catch (error) {
+        // 提交写失败：临时文件没写成或没 rename，盘上还是之前的文件；内存也回去。
+        this.#abort(tx);
+        throw error;
+      }
+      return result;
+    } finally {
+      this.#tx = undefined;
+      this.#deferredFlush = false;
+      tx.finish();
+      release();
+    }
+  }
+
+  /**
+   * 同一命令事务内核对领取后再跑 fn。失败抛错，走 run 的回滚；不要在这里 catch，
+   * 嵌套进外层 run 时吞掉错误会让外层把半截写入提交掉。
+   */
+  async runFenced<T>(fence: ClaimFence, fn: () => Promise<T>): Promise<T> {
+    return this.run(async () => {
+      const rows = this.#state.queuedHops;
+      const hop = Array.isArray(rows) ? rows.find((row) => row.id === fence.id) : undefined;
+      if (!holdsCurrentClaim(hop, fence)) throw new Error('claim fence rejected');
+      return fn();
+    });
+  }
+
+  /**
+   * 事务外的写先等开着的事务结束：写进一个开着的事务，它回滚时会被一起抹掉。事务里的调用直接过。
+   */
+  async settle(): Promise<void> {
+    while (this.#tx && this.#txContext.getStore() !== this.#tx) await this.#tx.done;
+  }
+
+  #begin(): OpenTransaction {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const s = this.#state;
+    return {
+      projects: new Map([...this.#projects].map(([id, project]) => [id, project.toSnapshot()])),
+      events: [...s.events],
+      deliveries: [...s.deliveries],
+      queryRuns: [...s.queryRuns],
+      validationReports: [...s.validationReports],
+      agentPool: [...s.agentPool],
+      archivedMissions: [...s.archivedMissions],
+      queuedHops: [...s.queuedHops],
+      candidateCircuits: [...s.candidateCircuits],
+      done,
+      finish,
+    };
+  }
+
+  /** 回到开事务时的样子。只换掉改过的活对象：没动过的实例原样留着，别处手里的引用照样有效。 */
+  #abort(tx: OpenTransaction): void {
+    for (const [id, project] of [...this.#projects]) {
+      const before = tx.projects.get(id);
+      if (!before) {
+        this.#projects.delete(id);
+        continue;
+      }
+      if (JSON.stringify(project.toSnapshot()) !== JSON.stringify(before)) {
+        this.#projects.set(id, Project.restore(before));
+      }
+    }
+    for (const [id, before] of tx.projects) {
+      if (!this.#projects.has(id)) this.#projects.set(id, Project.restore(before));
+    }
+    const s = this.#state;
+    s.events = tx.events;
+    s.deliveries = tx.deliveries;
+    s.queryRuns = tx.queryRuns;
+    s.validationReports = tx.validationReports;
+    s.agentPool = tx.agentPool;
+    s.archivedMissions = tx.archivedMissions;
+    s.queuedHops = tx.queuedHops;
+    s.candidateCircuits = tx.candidateCircuits;
+    this.#tx = undefined;
+    if (this.#deferredFlush) {
+      this.#deferredFlush = false;
+      try {
+        this.#write();
+      } catch {
+        // 别处推迟的那次写：内存里的状态是对的，下一次落盘会带上。
+      }
+    }
+  }
+
+  #write(): void {
     this.#assertArchivedUnchanged();
 
     const archivedIds = new Map<string, Set<string>>();
@@ -454,7 +639,8 @@ export class FileStateStore {
   findArchivedDelivery(deliveryId: string): Delivery | undefined {
     for (const pkg of this.#archivedPackages.values()) {
       const found = pkg.deliveries.find((row) => row.id === deliveryId);
-      if (found) return found;
+      // 归档包有 sha256 钉着，不改盘上内容；读出来的副本补键。
+      if (found) return withDeliveryKey(found);
     }
     return undefined;
   }
@@ -464,6 +650,7 @@ export class FileStateStore {
    * 不自动触发；重复调用幂等。
    */
   archiveMission(projectId: string, missionId: string): void {
+    if (this.#tx) throw new Error('命令事务进行中，不能归档');
     this.refreshIfChanged();
 
     // id 合法性 / 路径 containment 与 A 同一套。
@@ -540,7 +727,8 @@ export class FileStateStore {
         missionId: existing.missionId,
         mission: existing.mission,
         events: existing.events,
-        deliveries: existing.deliveries,
+        // 加键之前写下的包：主状态那边的同一批投递已在读入时补键，这边按同一规则补了再比。
+        deliveries: Array.isArray(existing.deliveries) ? existing.deliveries.map(withDeliveryKey) : existing.deliveries,
       };
       if (canonicalJson(existingStable) !== canonicalJson(stable)) {
         throw new Error(`COMPACT_PACKAGE_CONFLICT: ${key}`);
@@ -635,6 +823,7 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   async save(project: Project): Promise<void> {
+    await this.#store.settle();
     this.#store.projectsMap().set(project.id, project);
     this.#store.flush();
   }
@@ -645,6 +834,7 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   async ensure(projectId: string): Promise<Project> {
+    await this.#store.settle();
     const existing = this.#store.projectsMap().get(projectId);
     if (existing) return existing;
     const created = Project.create({ id: projectId });
@@ -679,12 +869,13 @@ export class FileDeliveryRepository implements DeliveryRepository {
   async create(
     input: Omit<Delivery, 'id' | 'createdAt' | 'status' | 'acknowledgedAt'>,
   ): Promise<Delivery> {
+    await this.#store.settle();
     if (this.#store.hasArchivedMission(input.missionId)) {
       throw new Error(`已归档 Mission 不可新建投递：${input.missionId}`);
     }
     const rows = this.#store.raw().deliveries;
     const existing = rows.find(
-      (row) => row.missionId === input.missionId && row.outcome === input.outcome,
+      (row) => row.missionId === input.missionId && withDeliveryKey(row).idempotencyKey === input.idempotencyKey,
     );
     if (existing) return existing;
     const delivery: Delivery = {
@@ -708,6 +899,7 @@ export class FileDeliveryRepository implements DeliveryRepository {
   }
 
   async acknowledge(deliveryId: string): Promise<Delivery | undefined> {
+    await this.#store.settle();
     const rows = this.#store.raw().deliveries;
     const index = rows.findIndex((row) => row.id === deliveryId);
     if (index < 0) return undefined;
@@ -727,6 +919,15 @@ export class FileDeliveryRepository implements DeliveryRepository {
     if (main) return main;
     return this.#store.findArchivedDelivery(deliveryId);
   }
+
+  async listForMission(missionId: string): Promise<readonly Delivery[]> {
+    this.#store.refreshIfChanged();
+    // 只看工作集：归档包有 hash 钉着，补建不得靠读包来「已存在」而漏掉跳过。
+    return this.#store
+      .raw()
+      .deliveries.filter((row) => row.missionId === missionId)
+      .map(withDeliveryKey);
+  }
 }
 
 export class FileActivityLog implements ActivityLog {
@@ -739,6 +940,7 @@ export class FileActivityLog implements ActivityLog {
   }
 
   async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
+    await this.#store.settle();
     if (this.#store.hasArchivedMission(event.missionId)) {
       throw new Error(`已归档 Mission 不可追加事件：${event.missionId}`);
     }
@@ -795,6 +997,7 @@ export class FileQueryRunRepository implements QueryRunRepository {
   }
 
   async save(run: QueryRunRecord): Promise<void> {
+    await this.#store.settle();
     this.#store.refreshIfChanged();
     const rows = this.#rows();
     const copy = cloneQueryRunRecord(run);
@@ -830,6 +1033,106 @@ export class FileQueryRunRepository implements QueryRunRepository {
  *
  * append-only：同 id 结构相同幂等；不同则 conflict。不进 archive package。
  */
+export class FileQueuedHopRepository implements QueuedHopCapacityRepository {
+  #store: FileStateStore;
+  constructor(store: FileStateStore) { this.#store = store; }
+
+  async enqueue(hop: QueuedHop): Promise<QueuedHop> {
+    const { status: _status, owner: _owner, leaseUntil: _leaseUntil, claimGeneration: _generation, ...input } = hop;
+    validateEnqueueHop(input);
+    if (typeof hop.id !== 'string' || hop.id.trim().length === 0 || hop.status !== 'queued' ||
+        typeof hop.createdAt !== 'string' || !Number.isFinite(Date.parse(hop.createdAt)) ||
+        typeof hop.updatedAt !== 'string' || !Number.isFinite(Date.parse(hop.updatedAt))) {
+      throw new Error('queued hop record is invalid');
+    }
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const existing = rows.find((row) => row.idempotencyKey === hop.idempotencyKey);
+      if (existing) return { ...existing };
+      const copy = { ...hop };
+      rows.push(copy);
+      return { ...copy };
+    });
+  }
+
+  async claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => claimHop(row, owner, now, leaseUntil));
+  }
+
+  /**
+   * 容量占用只认盘上有效租约。必须在同一单写者临界段里读完整队列再写回选中项：
+   * 先 list 再 claim 会让两个领取都看见同一个空位，把五维上限打穿。
+   * 等待或空队列不改任何行，避免把候选 B 的 runtime/profile 写到候选 A 上。
+   */
+  async claimAvailable(input: ClaimAvailableHopInput): Promise<CapacityClaimResult> {
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const decision = decideCapacityClaim(rows, input.now, input.limits, input.eligible);
+      if (decision.kind !== 'select') {
+        if (decision.kind === 'waiting') {
+          return { kind: 'waiting' as const, hop: { ...decision.hop }, wait: decision.wait };
+        }
+        return { kind: 'empty' as const };
+      }
+      const updated = claimHopWithCandidate(
+        decision.hop,
+        input.owner,
+        input.now,
+        input.leaseUntil,
+        decision.candidate,
+      );
+      if (!updated) return { kind: 'empty' as const };
+      const index = rows.findIndex((row) => row.id === updated.id);
+      if (index < 0) return { kind: 'empty' as const };
+      rows[index] = updated;
+      return { kind: 'claimed' as const, hop: { ...updated } };
+    });
+  }
+
+  async renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => renewHop(row, owner, claimGeneration, now, leaseUntil));
+  }
+
+  async complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined> {
+    return this.#transition(id, (row) => completeHop(row, owner, claimGeneration, now));
+  }
+
+  async reportFailure(input: ReportHopFailureInput): Promise<QueuedHop | undefined> {
+    return this.#transition(input.id, (row) => reportHopFailure(row, input));
+  }
+
+  async #transition(id: string, transition: (row: QueuedHop) => QueuedHop | undefined): Promise<QueuedHop | undefined> {
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((row) => row.id === id);
+      if (index < 0) return undefined;
+      const current = rows[index]!;
+      const updated = transition(current);
+      if (!updated) return undefined;
+      // Same reference = idempotent/no-op: writing would still be a new snapshot.
+      if (updated !== current) rows[index] = updated;
+      return cloneQueuedHop(updated);
+    });
+  }
+
+  async get(id: string): Promise<QueuedHop | undefined> {
+    this.#store.refreshIfChanged();
+    const row = this.#rows().find((item) => item.id === id);
+    return row ? cloneQueuedHop(row) : undefined;
+  }
+
+  async list(): Promise<readonly QueuedHop[]> {
+    this.#store.refreshIfChanged();
+    return this.#rows().map((row) => cloneQueuedHop(row));
+  }
+
+  #rows(): QueuedHop[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
+    return state.queuedHops;
+  }
+}
+
 export class FileValidationReportRepository implements ValidationReportRepository {
   #store: FileStateStore;
 
@@ -838,6 +1141,7 @@ export class FileValidationReportRepository implements ValidationReportRepositor
   }
 
   async save(report: ValidationReport): Promise<void> {
+    await this.#store.settle();
     this.#store.refreshIfChanged();
     const rows = this.#rows();
     const existing = rows.find((row) => row.id === report.id);
@@ -886,6 +1190,7 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
   }
 
   async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
+    await this.#store.settle();
     // 校验前先看磁盘上的最新内容：不刷新的话，两个进程都以为自己是某个
     // profileId 的首个持有者，各自算出 order=0 往回写，后写的把先写的整片盖掉
     // （文件版是整份 JSON 重写，盖的是整个数组）。
@@ -912,5 +1217,67 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
       if (!Array.isArray(row?.facts)) state.agentPool[index] = { ...row, facts: [] };
     }
     return state.agentPool;
+  }
+}
+
+/** File-backed per-profile circuit; serialized by FileStateStore's single-writer transaction discipline. */
+export class FileCandidateCircuitRepository implements CandidateCircuitRepository {
+  #store: FileStateStore;
+  constructor(store: FileStateStore) { this.#store = store; }
+
+  async get(profileId: string): Promise<CandidateCircuit> {
+    this.#store.refreshIfChanged();
+    const row = this.#rows().find((item) => item.profileId === profileId);
+    return row ? { ...row } : closedCandidateCircuit(profileId);
+  }
+
+  async open(input: OpenCandidateCircuitInput): Promise<CandidateCircuit> {
+    validateOpenCandidateCircuit(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const row = openCandidateCircuit(input);
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      if (index < 0) rows.push(row); else rows[index] = row;
+      this.#store.flush();
+      return { ...row };
+    });
+  }
+
+  async tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean> {
+    validateClaimCandidateProbe(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      if (index < 0) return false;
+      const claimed = claimCandidateProbe(rows[index] as Extract<CandidateCircuit, { state: 'open' | 'half_open' }>, input.now);
+      if (!claimed) return false;
+      rows[index] = claimed;
+      this.#store.flush();
+      return true;
+    });
+  }
+
+  async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {
+    validateResolveCandidateProbe(input);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      const result = resolveCandidateProbe(index < 0 ? undefined : rows[index], input);
+      if (index < 0) rows.push(result); else rows[index] = result;
+      this.#store.flush();
+      return { ...result };
+    });
+  }
+
+  #rows(): CandidateCircuit[] {
+    const state = this.#store.raw();
+    if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
+    return state.candidateCircuits;
   }
 }

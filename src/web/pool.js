@@ -29,7 +29,7 @@ const DASH = '—';
  * 看到 `provider/model` 而不知道那是「这条候选会以什么身份跑」的人，就得
  * 去读代码。
  */
-export const POOL_COLUMNS = ['候选名称', '接入点', '适配层', '运行时'];
+export const POOL_COLUMNS = ['候选名称', '接入点', '适配层', '运行时', '健康'];
 
 /* ===================== 纯函数 ===================== */
 
@@ -56,6 +56,72 @@ function profileText(row) {
   return { text: (provider || DASH) + ' / ' + (model || DASH), title: '' };
 }
 
+function text(value) {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function circuitTone(state) {
+  if (state === 'open') return 'failed';
+  if (state === 'closed') return 'done';
+  if (state === 'half_open') return 'unconfirmed';
+  return 'queued';
+}
+
+function windowCostText(reportedCost) {
+  if (reportedCost === null || reportedCost === undefined || !Number.isFinite(Number(reportedCost))) {
+    return '费用未上报';
+  }
+  return '$' + Number(reportedCost).toFixed(4);
+}
+
+/**
+ * 候选健康格。字段按 W-130 容错：缺 health、缺子对象、reason 码原样上屏。
+ * 不在这里建熔断中文表——跨页文案该进 narrate.js，本单不能改那份文件。
+ */
+export function healthCellHtml(health) {
+  if (!health || typeof health !== 'object') {
+    return '<td class="cell-reason" data-pool-health><span class="muted">还没读到健康</span></td>';
+  }
+  const circuit = health.circuit && typeof health.circuit === 'object' ? health.circuit : {};
+  const window7d = health.window7d && typeof health.window7d === 'object' ? health.window7d : {};
+  const last = health.lastFailure && typeof health.lastFailure === 'object' ? health.lastFailure : {};
+  const runtime = health.runtime && typeof health.runtime === 'object' ? health.runtime : {};
+
+  const state = text(circuit.state) || 'unknown';
+  const circuitExtra = text(circuit.failureClass) || text(circuit.reason);
+  const circuitLine = '<span class="chip ' + circuitTone(state) + '">' + esc(state) + '</span>'
+    + (circuitExtra ? ' · ' + esc(circuitExtra) : '');
+
+  const attempts = Number.isFinite(Number(window7d.attempts)) ? Number(window7d.attempts) : 0;
+  const successes = Number.isFinite(Number(window7d.successes)) ? Number(window7d.successes) : 0;
+  const windowLine = '近七日：尝试 ' + attempts + ' · 成功 ' + successes + ' · ' + windowCostText(window7d.reportedCost);
+
+  const failClass = text(last.failureClass);
+  const failAt = text(last.at);
+  const failSource = text(last.source);
+  const hasFail = Boolean(failAt || failSource || (failClass && failClass !== 'unknown'));
+  const failLine = hasFail
+    ? '最近失败：' + (failClass || 'unknown') + (failAt ? ' · ' + failAt : '') + (failSource ? ' · ' + failSource : '')
+    : '没有失败记录';
+
+  let runtimeLine;
+  if (runtime.running === true) {
+    const kind = text(runtime.runtimeKind);
+    const hopId = text(runtime.hopId);
+    runtimeLine = '占用中' + (kind ? ' · ' + kind : '') + (hopId ? ' · ' + hopId : '');
+  } else {
+    const reason = text(runtime.reason);
+    runtimeLine = '未在跑' + (reason ? ' · ' + reason : '');
+  }
+
+  return '<td class="cell-reason" data-pool-health>'
+    + '<div data-health-circuit>' + circuitLine + '</div>'
+    + '<div data-health-window>' + esc(windowLine) + '</div>'
+    + '<div data-health-failure>' + esc(failLine) + '</div>'
+    + '<div data-health-runtime>' + esc(runtimeLine) + '</div>'
+    + '</td>';
+}
+
 function rowsHtml(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length === 0) {
@@ -73,6 +139,7 @@ function rowsHtml(rows) {
         + '<td class="mono">' + esc(r.runtime || 'pi') + '</td>'
         + '<td class="mono"' + (profile.title ? ' title="' + esc(profile.title) + '"' : '') + '>'
         +   esc(profile.text) + '</td>'
+        + healthCellHtml(r.health)
         + '</tr>';
     })
     .join('');
@@ -190,20 +257,38 @@ function noteText(catalog) {
  * catalog.available === false 时：note 原样摆出来，模型下拉与提交按钮都 disabled。
  * 契约要的是"不要让人在填不对的表单上瞎试"——一个能点但必然失败的按钮，
  * 比一个灰按钮更坑：人会把后端报的错当成自己的输入有问题。
+ *
+ * opts.modelsStatus：idle 还没拉、loading 正在拉、ready 有响应、error 拉失败。
+ * 纯函数默认 ready——既有用例把 catalog 直接喂进来，不该被当成「还没拉」。
  */
-export function addFormHtml(catalog) {
+export function addFormHtml(catalog, opts) {
+  const open = Boolean(opts && opts.open);
+  const modelsStatus = opts && opts.modelsStatus ? opts.modelsStatus : 'ready';
+  const loading = modelsStatus === 'loading';
+  const idle = modelsStatus === 'idle';
   const usable = Boolean(catalog && catalog.available === true);
   const models = usable && Array.isArray(catalog.models) ? catalog.models : [];
-  const options = models.length
+  const optionTags = models.length
     ? models
         .map((m) => '<option value="' + esc(poolModelValue(m)) + '">' + esc(m.label) + '</option>')
         .join('')
     // 清单是空的（适配层在，但一个模型都没报）：给一句占位，
     // 免得下拉展开是一块空白，看着像页面坏了。
     : '<option value="" disabled selected>清单里还没有模型</option>';
-  const off = usable ? '' : ' disabled';
+  const off = usable && !loading ? '' : ' disabled';
+  // idle/读取中还没拿到清单：不要写「适配层没上线」——那是拉失败才该说的话，
+  // 拉之前就写会让人以为出了故障。
+  const showNote = !idle && !loading && !usable;
+  const loadingNote = loading
+    ? '<div class="note" data-pool-models-status>模型清单读取中…</div>'
+    : '';
+  // details 默认收起：打开才去拉慢的模型接口。用原生 details
+  // 就不用为「展开」再写一套按钮状态，否则漏一个 hidden 就会在首屏露出空表单。
   return '<div class="card">'
-    + (usable ? '' : '<div class="note" data-pool-note>' + esc(noteText(catalog)) + '</div>')
+    + '<details class="pool-add" data-pool-add' + (open ? ' open' : '') + '>'
+    + '<summary>添加候选</summary>'
+    + loadingNote
+    + (showNote ? '<div class="note" data-pool-note>' + esc(noteText(catalog)) + '</div>' : '')
     + '<div class="note pool-error" data-pool-error hidden></div>'
     + '<form class="pool-form" data-pool-form>'
     +   '<label class="field"><span>角色</span>'
@@ -212,7 +297,7 @@ export function addFormHtml(catalog) {
     +       '<option value="executor">执行者</option>'
     +     '</select></label>'
     +   '<label class="field"><span>模型</span>'
-    +     '<select data-pool-model' + off + '>' + options + '</select></label>'
+    +     '<select data-pool-model' + off + '>' + optionTags + '</select></label>'
     +   '<label class="field"><span>候选名称</span>'
     +     '<input data-pool-profile type="text" placeholder="例如 exec-qwen-flash" /></label>'
     // 默认 local：绝大多数候选就跑在本机，默认值该是那个更常对的一个。
@@ -220,17 +305,19 @@ export function addFormHtml(catalog) {
     +     '<input data-pool-endpoint type="text" value="local" /></label>'
     +   '<button type="submit" data-pool-submit' + off + '>添加</button>'
     + '</form>'
+    + '</details>'
     + '</div>';
 }
 
 /** 整页 HTML。snapshot = { coordinator, executor }，catalog = GET /api/runtime/models 的 JSON，
- *  usage = GET /api/usage 的 total（undefined 还没读到 / null 读失败 / 对象是真数字）。 */
-export function poolPageHtml(snapshot, catalog, usage) {
+ *  usage = GET /api/usage 的 total（undefined 还没读到 / null 读失败 / 对象是真数字）。
+ *  formOpts.open / formOpts.modelsStatus 只影响底部表单，纯函数用例可不传。 */
+export function poolPageHtml(snapshot, catalog, usage, formOpts) {
   return '<div class="pool">'
     + countCardsHtml(snapshot)
     + usageCardHtml(usage)
     + tablesHtml(snapshot)
-    + addFormHtml(catalog)
+    + addFormHtml(catalog, formOpts)
     + '</div>';
 }
 
@@ -245,14 +332,48 @@ async function get(path) {
 let mounted = null;
 let epoch = 0;
 
-function paint(st) {
+function fieldValue(root, sel) {
+  const el = root.querySelector(sel);
+  return el && typeof el.value === 'string' ? el.value : '';
+}
+
+function setFieldValue(root, sel, value) {
+  const el = root.querySelector(sel);
+  if (el) el.value = value;
+}
+
+function readDraft(root) {
+  if (!root || !root.querySelector('[data-pool-form]')) return null;
+  return {
+    role: fieldValue(root, '[data-pool-role]'),
+    profile: fieldValue(root, '[data-pool-profile]'),
+    endpoint: fieldValue(root, '[data-pool-endpoint]'),
+  };
+}
+
+function writeDraft(root, draft) {
+  if (!draft) return;
+  setFieldValue(root, '[data-pool-role]', draft.role);
+  setFieldValue(root, '[data-pool-profile]', draft.profile);
+  setFieldValue(root, '[data-pool-endpoint]', draft.endpoint);
+}
+
+function paint(st, opts) {
   const snap = st.snapshot || { coordinator: [], executor: [] };
   // 读不到候选池与"候选池是空的"是两件事，前者要说出来。
   // 后者（空仓）页面自己已经在两张表里画了"还没有候选"。
   const head = st.snapshot === null
     ? '<div class="note">读不到候选池：' + esc(st.loadError) + '</div>'
     : '';
-  st.els.root.innerHTML = head + poolPageHtml(snap, st.catalog, st.usage);
+  // 模型清单回来时会整块重画：不把已经填的名称/接入点抄回来，
+  // 人会以为页面把输入吞了（清单接口实测要数秒）。
+  const keepDraft = Boolean(opts && opts.keepDraft);
+  const draft = keepDraft ? readDraft(st.els.root) : null;
+  st.els.root.innerHTML = head + poolPageHtml(snap, st.catalog, st.usage, {
+    open: st.formOpen,
+    modelsStatus: st.modelsStatus,
+  });
+  if (draft) writeDraft(st.els.root, draft);
 }
 
 function showError(st, message) {
@@ -264,24 +385,36 @@ function showError(st, message) {
 
 async function load(st) {
   let loadError = '';
-  const [snapshot, catalog, total] = await Promise.all([
+  // 模型清单不进这一帧：实测 /api/runtime/models 要数秒，放进 Promise.all
+  // 会让候选和用量一起空白。打开添加表单再拉（见 loadModels）。
+  const [snapshot, total] = await Promise.all([
     get('/api/pools').catch((err) => {
       loadError = err && err.message ? err.message : String(err);
       return null;
     }),
-    // 拿不到模型清单**不是**错误：适配层没装、还没配凭据都是正常状态，
-    // 页面把原因显示出来就行（见 addFormHtml）。抛出去会让整页只剩一句报错。
-    get('/api/runtime/models').catch(() => undefined),
     // 用量读失败要写「读不到用量」，所以不能把失败静默成 undefined——
     // 那看起来和“首帧还没到”一模一样。null 明确代表读失败。
     get('/api/usage').then((body) => (body && body.total) || null).catch(() => null),
   ]);
   if (st.epoch !== epoch) return;
   st.snapshot = snapshot;
-  st.catalog = catalog;
   st.usage = total;
   st.loadError = loadError;
   paint(st);
+}
+
+async function loadModels(st) {
+  if (st.modelsRequested) return;
+  st.modelsRequested = true;
+  st.modelsStatus = 'loading';
+  paint(st, { keepDraft: true });
+  // 拿不到模型清单**不是**整页错误：适配层没装、还没配凭据都是正常状态，
+  // 只让表单把原因显示出来。抛出去会让已经画好的候选和用量一起消失。
+  const catalog = await get('/api/runtime/models').catch(() => undefined);
+  if (st.epoch !== epoch) return;
+  st.catalog = catalog;
+  st.modelsStatus = catalog === undefined ? 'error' : 'ready';
+  paint(st, { keepDraft: true });
 }
 
 async function submit(st, form) {
@@ -318,7 +451,7 @@ async function submit(st, form) {
   }
   // 成功就整块重画：列表与计数都从后端重新拉，不在前端自己加一行——
   // 前端算出来的 order、以及"同 role 重复会被拒"这类规则，都只有后端说了算。
-  // 重画顺带把刚才那条错误清掉。
+  // 重画顺带把刚才那条错误清掉。模型清单已经在手里，不再等它。
   await load(st);
 }
 
@@ -335,6 +468,19 @@ function bind(container) {
     if (!st || st.epoch !== epoch) return;
     void submit(st, form);
   });
+  // toggle 不冒泡；挂捕获才能在常驻容器上听到 details 被打开。
+  // 不这么做的话，每次 paint 换掉 details 节点，监听就丢了，表单再也拉不了模型。
+  container.addEventListener('toggle', (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    const details = t.closest ? t.closest('[data-pool-add]') : null;
+    const el = details || (t.hasAttribute && t.hasAttribute('data-pool-add') ? t : null);
+    if (!el) return;
+    const st = mounted;
+    if (!st || st.epoch !== epoch) return;
+    st.formOpen = Boolean(el.open);
+    if (st.formOpen) void loadModels(st);
+  }, true);
 }
 
 /**
@@ -360,6 +506,9 @@ export async function renderPoolPage(container) {
     catalog: undefined,
     usage: undefined,
     loadError: '',
+    formOpen: false,
+    modelsStatus: 'idle',
+    modelsRequested: false,
   };
   mounted = st;
   bind(container);

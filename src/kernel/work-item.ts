@@ -1,12 +1,13 @@
 import { IllegalTransitionError, InvariantViolationError } from './errors.ts';
 import { Attempt } from './attempt.ts';
-import { freezeDeep, freezePayload } from './payloads.ts';
+import { ACCEPTANCE_STATUSES, freezeDeep, freezePayload } from './payloads.ts';
 import type { AttemptSnapshot, WorkItemSnapshot } from './snapshot.ts';
 import type {
   BlockedRecord,
   ExecutionResultBody,
   ReviewAuthority,
   ReviewRecord,
+  AcceptanceResult,
   WorkOrder,
   WorkOrderValidationCommand,
   WorkOrderValidationDiffSize,
@@ -526,6 +527,15 @@ function copyAuthority(authority: ReviewAuthority): ReviewAuthority {
 }
 
 /** restore 用：尽量原样拷贝，不 fail-closed。 */
+function copyAcceptanceResult(r: AcceptanceResult): AcceptanceResult {
+  return {
+    criterion: String(r.criterion),
+    status: r.status,
+    ...(typeof r.evidence === 'string' ? { evidence: r.evidence } : {}),
+    ...(typeof r.note === 'string' ? { note: r.note } : {}),
+  };
+}
+
 function copyReviewRecordShape(record: ReviewRecord): ReviewRecord {
   const out: {
     attemptId?: string;
@@ -534,6 +544,7 @@ function copyReviewRecordShape(record: ReviewRecord): ReviewRecord {
     verdict: 'accept' | 'reject';
     reasons: string[];
     requiredChanges: string[];
+    acceptanceResults?: AcceptanceResult[];
   } = {
     verdict: record.verdict,
     reasons: Array.isArray(record.reasons) ? [...record.reasons] : [],
@@ -542,6 +553,10 @@ function copyReviewRecordShape(record: ReviewRecord): ReviewRecord {
       : [],
   };
   if (record.attemptId !== undefined) out.attemptId = record.attemptId;
+  // 旧快照没有这个字段：照常恢复，不补、不猜。
+  if (Array.isArray(record.acceptanceResults)) {
+    out.acceptanceResults = record.acceptanceResults.filter(isPlainObject).map(copyAcceptanceResult);
+  }
   if (record.submittedAttemptId !== undefined) {
     out.submittedAttemptId = record.submittedAttemptId;
   }
@@ -633,6 +648,27 @@ function freezeReviewRecord(
     invalidReviewRecord('submittedAttemptId must be a string when provided');
   }
 
+  const acceptanceResults = record.acceptanceResults;
+  if (acceptanceResults !== undefined) {
+    if (!Array.isArray(acceptanceResults)) invalidReviewRecord('acceptanceResults must be an array');
+    for (const r of acceptanceResults) {
+      if (!isPlainObject(r)) invalidReviewRecord('acceptanceResults items must be plain objects');
+      if (!isNonEmptyString(r.criterion)) invalidReviewRecord('acceptanceResults[].criterion must be a non-empty string');
+      if (!(ACCEPTANCE_STATUSES as readonly unknown[]).includes(r.status)) {
+        invalidReviewRecord('acceptanceResults[].status must be pass / fail / unverified / not_applicable');
+      }
+      if (r.evidence !== undefined && typeof r.evidence !== 'string') invalidReviewRecord('acceptanceResults[].evidence must be a string');
+      if (r.note !== undefined && typeof r.note !== 'string') invalidReviewRecord('acceptanceResults[].note must be a string');
+    }
+    // 不变式：有一条没过，就不能判「通过」——不管是谁、从哪条路进来。
+    if (verdict === 'accept' && acceptanceResults.some((r) => r.status === 'fail')) {
+      throw new InvariantViolationError(
+        'ACCEPT_WITH_FAILED_CRITERION',
+        '有验收标准判为 fail 却给了 accept：没过的那条要么改判，要么 reject 并写清要改什么。',
+      );
+    }
+  }
+
   const out: {
     attemptId?: string;
     submittedAttemptId?: string;
@@ -640,6 +676,7 @@ function freezeReviewRecord(
     verdict: ReviewVerdict;
     reasons: string[];
     requiredChanges: string[];
+    acceptanceResults?: AcceptanceResult[];
   } = {
     verdict,
     reasons: [...record.reasons],
@@ -649,6 +686,7 @@ function freezeReviewRecord(
   if (isNonEmptyString(attemptId)) out.attemptId = attemptId;
   if (isNonEmptyString(submittedAttemptId)) out.submittedAttemptId = submittedAttemptId;
   if (authority !== undefined) out.authority = copyAuthority(authority as ReviewAuthority);
+  if (acceptanceResults !== undefined) out.acceptanceResults = acceptanceResults.map(copyAcceptanceResult);
 
   return freezeDeep(out);
 }

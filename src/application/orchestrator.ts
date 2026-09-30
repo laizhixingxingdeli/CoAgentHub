@@ -10,15 +10,44 @@
  * 它**不**判断技术对错——那是 L2 的事；也不判断需求对错——那是 L3 的事。
  */
 
-import type { AgentRuntime, ExecutionProfile } from './ports.ts';
-import type { MissionView, Platform } from './platform.ts';
+import { randomUUID } from 'node:crypto';
+import type {
+  AgentRuntime,
+  CandidateCircuitRepository,
+  Clock,
+  ExecutionProfile,
+  IdGenerator,
+  QueuedHopCapacityRepository,
+  QueuedHopRepository,
+  RuntimeOutcome,
+} from './ports.ts';
+import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
-import type { WorkspaceManager } from './workspace.ts';
+import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
+import { redactSecrets } from './redact.ts';
+import { classifyCandidateFailure } from './candidate-circuit.ts';
+import {
+  acquireQueuedHop,
+  compareHopFairness,
+  decideCapacityClaim,
+  DEFAULT_HOP_LEASE_MS,
+  DurableScheduler,
+  hopCapacityLimits,
+  hopIdempotencyKey,
+  nextLogicalHopCycle,
+  parkedQueuedHopWait,
+  queuedHopWaitDetail,
+  type EligibleHopClaim,
+  type HopCapacityLimits,
+  type HopRole,
+  type QueuedHop,
+  type QueuedHopWait,
+} from './durable-scheduler.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -82,6 +111,8 @@ export interface OrchestratorDeps {
   owner?: string;
   coordinator: RolePool;
   executor: RolePool;
+  /** 独立检视专用池；缺了就停在故障，不得改用协调者候选。 */
+  independentReviewer?: RolePool;
   workspace: WorkspaceManager;
   /** 单跳墙钟上限。缺省 ATTEMPT_WALL_CLOCK_MS；测试用它把 30 分钟缩成几毫秒。 */
   attemptWallClockMs?: number;
@@ -92,6 +123,34 @@ export interface OrchestratorDeps {
    * 不受影响。见 #staleAcknowledged。
    */
   acceptStaleBase?: boolean;
+  candidateCircuits?: CandidateCircuitRepository;
+  /**
+   * Optional durable hop queue. When omitted, start tokens and runtime.start
+   * behave as before. Property name is the production wiring contract.
+   */
+  queuedHops?: QueuedHopRepository;
+  hopClock?: Clock;
+  hopLeaseMs?: number;
+  hopIds?: IdGenerator;
+  /**
+   * 五维并发上限。省略则用 durable-scheduler 代码默认值。
+   * 必须在构造时归一化：坏值若拖到领取才抛，队列可能已被领取、Agent 已经启动。
+   * 与 MissionRunner 同名，生产注入 QueuedHopCapacityRepository 时才按此上限 claimAvailable。
+   */
+  hopCapacityLimits?: HopCapacityLimits;
+  /**
+   * 可换候选失败后，同一次 runMission 最多睡多久等队列退避到期再重领同一槽。
+   * 缺省 0：立刻 waiting，保持 D7。生产 CLI 传 120000，让首次 1s 退避不必结束运行。
+   */
+  inRunBackoffWaitMs?: number;
+}
+
+/** 运行内退避等待上限：非负安全整数，缺省 0。非法值必须在构造时抛，不能拖到第一跳失败。 */
+export function inRunBackoffWaitMs(value: unknown = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('inRunBackoffWaitMs must be a non-negative safe integer');
+  }
+  return value;
 }
 
 export interface RunMissionOptions {
@@ -141,6 +200,7 @@ function coordinatorInstruction(view: {
   finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
+  promotions?: readonly { triggerRule: string }[];
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -159,6 +219,7 @@ function coordinatorBody(view: {
   finalReview?: { verdict: string; reasons: readonly string[] } | undefined;
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
+  promotions?: readonly { triggerRule: string }[];
 }): string {
   const answered = view.escalationLog.filter((item) => item.answer).at(-1);
   if (view.finalReview?.verdict === 'send_back') {
@@ -213,7 +274,13 @@ function coordinatorBody(view: {
     // 重放一遍。实测协调者轮次是整条 Mission 开销的主项（一条走到六轮的，
     // 协调者一个人占 74%），所以这一句必须把"这一轮要做完几件"钉死。
     const ids = submitted.map((item) => item.id).join('、');
+    // 从 Lightweight 升级上来的：协调者此前没参与过，不说的话它不知道机器验收已经判过一轮、为什么没放行。
+    const promoted = view.promotions?.at(-1);
+    const origin = promoted
+      ? `这条 Mission 是从 Lightweight 升级上来的，原因：${promoted.triggerRule}\n\n`
+      : '';
     return (
+      origin +
       `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
       '先 coagent_get_mission 看当前状态，然后**在这一轮里把它们全部验收完**。\n\n' +
       '验完之后如果还有下一批要做的，同样**一次派完**——' +
@@ -246,7 +313,7 @@ function usableUsage(
 
 /** 一跳的记录，给 Timeline 和排障用。 */
 export interface HopRecord {
-  role: 'coordinator' | 'executor';
+  role: 'coordinator' | 'executor' | 'independent_reviewer';
   workItemId?: string;
   attemptId: string;
   profile: ExecutionProfile;
@@ -263,8 +330,18 @@ export class Orchestrator {
   #owner: string;
   #coordinator: RolePool;
   #executor: RolePool;
+  #independentReviewer: RolePool | undefined;
   #workspace: WorkspaceManager;
   #wallClockMs: number;
+  #candidateCircuits: CandidateCircuitRepository | undefined;
+  #queuedHops: QueuedHopRepository | undefined;
+  #hopScheduler: DurableScheduler | undefined;
+  #hopClock: Clock;
+  #hopLeaseMs: number;
+  #hopLimits: HopCapacityLimits;
+  #inRunBackoffWaitMs: number;
+  /** hopClock 上的本次 runMission 墙钟截止；越过则不再睡退避。 */
+  #missionDeadlineAt: number | undefined;
   readonly hops: HopRecord[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
@@ -291,13 +368,31 @@ export class Orchestrator {
     this.#owner = deps.owner ?? `pid-${process.pid}`;
     this.#coordinator = deps.coordinator;
     this.#executor = deps.executor;
+    this.#independentReviewer = deps.independentReviewer;
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
+    this.#candidateCircuits = deps.candidateCircuits;
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
+    this.#queuedHops = deps.queuedHops;
+    this.#hopClock = deps.hopClock ?? { now: () => new Date() };
+    this.#hopLeaseMs = deps.hopLeaseMs ?? DEFAULT_HOP_LEASE_MS;
+    // 坏上限在第一跳领取前就必须拒绝。默认走代码上限，避免漏配变成「不限」。
+    this.#hopLimits = hopCapacityLimits(deps.hopCapacityLimits);
+    this.#inRunBackoffWaitMs = inRunBackoffWaitMs(deps.inRunBackoffWaitMs);
+    this.#hopScheduler = deps.queuedHops
+      ? new DurableScheduler(
+          deps.queuedHops,
+          this.#hopClock,
+          deps.hopIds ?? { next: (prefix) => `${prefix}-${randomUUID()}` },
+          this.#hopLimits,
+        )
+      : undefined;
   }
 
   async runMission(missionId: string, options: RunMissionOptions): Promise<MissionRunOutcome> {
     const maxRounds = options.maxRounds ?? 12;
+    // 用 hopClock：队列 availableAt 也按它算。混用 Date.now 会让固定时钟测试误睡、或把已到期当成未到期。
+    this.#missionDeadlineAt = this.#hopClock.now().getTime() + this.#wallClockMs;
 
     // 一 Mission 一个隔离工作区。所有 agent 的 cwd 都指到这里，
     // 用户自己的 checkout 从头到尾没被碰过。
@@ -336,19 +431,29 @@ export class Orchestrator {
 
       // 被暂停就不碰。放在循环开头而不是入口：跑到一半被暂停也要停下来。
       if (view.paused) {
-        return { kind: 'waiting', reason: 'cancelled_by_user', detail: 'Mission 已被暂停，resume 之后重跑' };
+        const detail = 'Mission 已被暂停，resume 之后重跑';
+        await this.#platform.setWaitReason(missionId, 'cancelled_by_user', detail);
+        return { kind: 'waiting', reason: 'cancelled_by_user', detail };
       }
 
-      // 协调者交卷了 —— 调度器这一程到此为止，剩下的归 L3。
-      // **不要把 awaiting_review 当成完成**：改动还没落地。
+      // 协调者交卷了 —— 改动还没落地。HA 在这里接确定性验证与独立检视，
+      // 仍停在 awaiting_review；不得当成 completed，也不得改用协调者自审。
       if (view.status === 'awaiting_review') {
+        if (
+          view.executionMode === 'high_assurance' &&
+          view.result?.outcome === 'delivered'
+        ) {
+          return await this.#runHaIndependentReview(missionId, cwd);
+        }
         return view.result?.outcome === 'delivered'
           ? { kind: 'awaiting_l3_review' }
           : { kind: 'blocked', reason: view.result?.summary ?? '协调者交了 blocked' };
       }
       if (view.status === 'completed') return { kind: 'delivered' };
       if (view.status === 'blocked') {
-        return { kind: 'blocked', reason: view.finalReview?.reasons.join('；') ?? '已 blocked' };
+        const detail = view.finalReview?.reasons.join('；') ?? '已 blocked';
+        await this.#platform.setWaitReason(missionId, 'cancelled_by_user', detail);
+        return { kind: 'blocked', reason: detail };
       }
 
       // 有未答复的升级 —— 停。协调者已经说过它没权限决定，再叫一次
@@ -402,16 +507,7 @@ export class Orchestrator {
         }
       }
 
-      // ---- High Assurance fail-closed (preflight; no round fact) ----
-      // HA 路径尚未启用：显式 stalled，绝不按 Standard 主链降级执行。
-      // 不记 orchestration.round.started、不创建 Attempt、不 dispatch。
-      // HA 也不进入 budget 路径（保持 fail-closed 现状）。
-      if (view.executionMode === 'high_assurance') {
-        return {
-          kind: 'stalled',
-          reason: 'High Assurance 执行路径尚未启用，拒绝按 Standard 降级执行',
-        };
-      }
+      // HA 走 Standard 式 Contract→协调者→执行者→L2；独立检视在 awaiting_review 分支。
 
       // ---- Authoritative budget GATE-PRE (BUDGET-001-S5) ----
       // After HA, before orchestration.round.started / any hop.
@@ -464,12 +560,25 @@ export class Orchestrator {
             instruction:
               '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
           });
+          if (hop && 'alreadyCompleted' in hop) continue;
+          if (hop && 'retrySameSlot' in hop) {
+            // 退避已等到：把领取交给下一轮。同一跳里换 Q 会绕过 maxRounds。
+            break;
+          }
           if (!hop || 'exhausted' in hop) {
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
             return { kind: 'waiting', reason, detail };
           }
+          if ('persistentUnknown' in hop && hop.persistentUnknown) {
+            const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
+            await this.#platform.setWaitReason(missionId, 'no_available_agent', detail);
+            return { kind: 'waiting', reason: 'no_available_agent', detail };
+          }
+          // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
+          // 没交卷（这一跳没 structured submit）时平台自己会跳过。
+          await this.#platform.runPostExecutionShadow(missionId, item.id);
           // GATE-POST after each successful hop (tokens/commands/wall accumulate here).
           const gate = await this.#enforceAuthoritativeBudget(missionId);
           if (gate.kind === 'stop') return gate.outcome;
@@ -502,6 +611,8 @@ export class Orchestrator {
         pool: this.#coordinator,
         instruction: coordinatorInstruction(view),
       });
+      if (hop && 'alreadyCompleted' in hop) continue;
+      if (hop && 'retrySameSlot' in hop) continue;
       // **先看停机原因，再判失败。**
       //
       // 派发撞上"同项目有别的 Mission 在改代码"时，工具会回 409，运行时
@@ -544,10 +655,251 @@ export class Orchestrator {
   }
 
   /**
+   * HA：确定性验证 → 独立检视。始终停在 awaiting_review。
+   * 缺候选 / 历史 profile 不全 / 冲突 / 适配器失败记可见原因，不改用协调者。
+   */
+  async #runHaIndependentReview(missionId: string, cwd: string): Promise<MissionRunOutcome> {
+    const pass = await this.#platform.effectiveIndependentReviewPass(missionId);
+    if (pass) {
+      await this.#platform.setWaitReason(
+        missionId,
+        'waiting_l3',
+        'HA 独立检视已通过，待授权放行',
+      );
+      return { kind: 'awaiting_l3_review' };
+    }
+
+    let validation;
+    try {
+      validation = await this.#platform.runHaDeterministicValidation(missionId, cwd);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : `HA 确定性验证失败：${error instanceof Error ? error.message : String(error)}`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 确定性验证：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+    if (!validation.passed) {
+      const view = await this.#platform.getMissionView(missionId);
+      const detail = view.waitDetail ?? `HA 确定性验证未通过（报告 ${validation.reportId}）`;
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    const pool = this.#independentReviewer;
+    const candidates = pool?.candidates ?? [];
+    const startReviewer = this.#tokens.startIndependentReviewer;
+    if (!startReviewer || !pool) {
+      // 缺发牌口时先建 Attempt 会留下无 token 的 in_progress，下次开审被 concurrent_attempt 挡住。
+      const detail = 'HA 独立检视故障：没有独立检视发牌口或候选池。';
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    // 容量路径必须先选定候选身份再占租约、再开 token。把整池交给 startReviewer
+    // 可能挑 B，而租约仍是 A —— 独立检视就会拿 A 的名额启动 B。
+    let reviewerCandidates = candidates;
+    let queued:
+      | { kind: 'bypass' }
+      | { kind: 'claimed'; hop: QueuedHop }
+      | { kind: 'completed'; hop: QueuedHop }
+      | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait } = { kind: 'bypass' };
+    if (this.#supportsCapacityClaim() && candidates.length > 0) {
+      let capacityWait: Extract<typeof queued, { kind: 'waiting' }> | undefined;
+      let selected: (typeof candidates)[number] | undefined;
+      for (const candidate of candidates) {
+        const attempt = await this.#acquireHopForStart({
+          role: 'independent_reviewer',
+          missionId,
+          maxAttempts: pool.maxAttempts ?? 3,
+          candidate: { runtimeKind: pool.runtime.kind, profileId: candidate.profileId },
+        });
+        if (attempt.kind === 'waiting') {
+          if (attempt.wait === 'capacity') {
+            capacityWait = attempt;
+            continue;
+          }
+          await this.#platform.setWaitReason(missionId, attempt.reason, attempt.detail);
+          return { kind: 'waiting', reason: attempt.reason, detail: attempt.detail };
+        }
+        if (attempt.kind === 'completed') {
+          await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视队列项已完成，仍待放行');
+          return { kind: 'awaiting_l3_review' };
+        }
+        queued = attempt;
+        selected = candidate;
+        break;
+      }
+      if (!selected) {
+        if (capacityWait) {
+          await this.#platform.setWaitReason(missionId, capacityWait.reason, capacityWait.detail);
+          return { kind: 'waiting', reason: capacityWait.reason, detail: capacityWait.detail };
+        }
+        const detail = 'HA 独立检视故障：没有独立检视候选。';
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+        return { kind: 'waiting', reason: 'waiting_l3', detail };
+      }
+      reviewerCandidates = [selected];
+    } else {
+      queued = await this.#acquireHopForStart({
+        role: 'independent_reviewer',
+        missionId,
+        maxAttempts: pool.maxAttempts ?? 3,
+      });
+      if (queued.kind === 'waiting') {
+        await this.#platform.setWaitReason(missionId, queued.reason, queued.detail);
+        return { kind: 'waiting', reason: queued.reason, detail: queued.detail };
+      }
+      if (queued.kind === 'completed') {
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视队列项已完成，仍待放行');
+        return { kind: 'awaiting_l3_review' };
+      }
+    }
+
+    const claim = queued.kind === 'claimed' ? this.#trustedQueueClaim(queued.hop) : undefined;
+    let started: { attemptId: string; token: string; profileId: string };
+    try {
+      started = await startReviewer(missionId, reviewerCandidates, claim);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : `HA 独立检视故障：${error instanceof Error ? error.message : String(error)}`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    if (
+      queued.kind === 'claimed' &&
+      queued.hop.profileId !== undefined &&
+      started.profileId !== queued.hop.profileId
+    ) {
+      const detail =
+        `HA 独立检视候选 ${started.profileId} 与队列租约 ${queued.hop.profileId} 不一致，不启动 Agent`;
+      await this.#platform.setWaitReason(missionId, 'waiting_l3', `HA 独立检视故障：${detail}`);
+      return { kind: 'waiting', reason: 'waiting_l3', detail };
+    }
+
+    const profile =
+      reviewerCandidates.find((row) => row.profileId === started.profileId) ?? {
+        endpoint: 'local',
+        profileId: started.profileId,
+      };
+    await this.#platform.setWaitReason(missionId, 'waiting_l3', 'HA 独立检视进行中');
+
+    const { attemptId, token } = started;
+    let outcome: RuntimeOutcome | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let hopRan = false;
+    let hopLeaseLost = false;
+    try {
+      const run = await pool!.runtime.start({
+        role: 'independent_reviewer',
+        attemptId,
+        missionId,
+        cwd,
+        profile,
+        instruction:
+          '你是独立检视者，不是协调者或执行者。先 coagent_get_mission_review_bundle 读证据包，再 coagent_submit_independent_review 提交 pass 或 send_back。不得自述身份，不得终审合并。',
+        tools: [],
+        endpoint: { baseUrl: this.#baseUrl, token },
+      });
+      hopRan = true;
+      unsubscribe = run.on((event) => {
+        if (event.kind === 'output') {
+          void this.#live.append({
+            missionId,
+            attemptId,
+            kind: 'text',
+            text: redactSecrets(event.text),
+          });
+        }
+      });
+      heartbeat = setInterval(() => {
+        void this.#platform.beatAttempt(missionId, attemptId, this.#owner).catch(() => undefined);
+        void this.#renewHopLease(queued.kind === 'claimed' ? queued.hop : undefined, () => {
+          hopLeaseLost = true;
+        });
+      }, HEARTBEAT_MS);
+      await this.#platform.beatAttempt(missionId, attemptId, this.#owner).catch(() => undefined);
+      await this.#renewHopLease(queued.kind === 'claimed' ? queued.hop : undefined, () => {
+        hopLeaseLost = true;
+      });
+      outcome = await run.wait();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const unreachable = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EPIPE/i.test(
+        message,
+      );
+      outcome = {
+        endedBy: unreachable ? 'platform_unreachable' : 'upstream_failure',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, quality: 'unknown' },
+        failureMessage: message,
+      };
+    } finally {
+      clearInterval(heartbeat);
+      unsubscribe?.();
+      try {
+        try {
+          await this.#platform.finishAttempt(missionId, attemptId, {
+            endedBy: outcome?.endedBy ?? 'no_structured_result',
+            usage: outcome?.usage,
+            failureMessage: outcome?.failureMessage,
+            // 有 outcome 才透传；adapter 未校验，平台 finishAttempt 再收口。
+            ...(outcome?.contextMetrics !== undefined
+              ? { contextMetrics: outcome.contextMetrics }
+              : {}),
+          }, claim);
+        } catch {
+          // 收尾失败不能跳过吊销：迟到的工具调用必须被拒绝。
+        }
+        try {
+          await this.#live.finish?.(missionId, attemptId);
+        } catch {
+          // live.finish 失败同样不得跳过吊销。
+        }
+      } finally {
+        this.#tokens.revoke(token);
+      }
+    }
+
+    this.hops.push({
+      role: 'independent_reviewer',
+      attemptId,
+      profile,
+      endedBy: outcome.endedBy,
+      failureMessage: outcome.failureMessage,
+    });
+
+    if (outcome.endedBy === 'platform_unreachable' || outcome.endedBy === 'upstream_failure') {
+      const reason: WaitReason =
+        outcome.endedBy === 'platform_unreachable' ? 'platform_unreachable' : 'no_available_agent';
+      const detail = `HA 独立检视故障：${outcome.failureMessage ?? outcome.endedBy}`;
+      await this.#platform.setWaitReason(missionId, reason, detail);
+      return { kind: 'waiting', reason, detail };
+    }
+
+    if (hopRan && !hopLeaseLost && queued.kind === 'claimed') {
+      await this.#completeHopLease(queued.hop);
+    }
+
+    const after = await this.#platform.effectiveIndependentReviewPass(missionId);
+    await this.#platform.setWaitReason(
+      missionId,
+      'waiting_l3',
+      after ? 'HA 独立检视已通过，待授权放行' : 'HA 独立检视已记录，仍待放行',
+    );
+    return { kind: 'awaiting_l3_review' };
+  }
+
+  /**
    * Lightweight Fast Lane 一轮。
    *
    * 只走：唯一 Frozen WorkItem → Executor hop → Validator → submit-for-review。
-   * 任何异常路径都 stalled / waiting，**绝不** Coordinator hop / Attempt / Plan。
+   * 执行者提问（blocked + 非空 needsFromUpstream）走**已有 Mission** 的升级通道，
+   * 停在 awaiting_l3；答复后同一张工单再派执行者。Lightweight 没有协调者可问，
+   * 也不能因此 promote 到 Standard。其它异常路径 stalled / waiting，**绝不** Coordinator hop / Attempt / Plan。
    */
   async #runLightweightRound(
     missionId: string,
@@ -620,11 +972,40 @@ export class Orchestrator {
         instruction:
           '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
       });
+      if (hop && 'alreadyCompleted' in hop) return { kind: 'continue' };
+      if (hop && 'retrySameSlot' in hop) return { kind: 'continue' };
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
         await this.#platform.setWaitReason(missionId, reason, detail);
         return { kind: 'outcome', outcome: { kind: 'waiting', reason, detail } };
+      }
+      // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
+      // 下一轮主循环才会看到 openEscalations——中间那一轮只是空转。
+      // 空白需求没有升级，必须用原来的 stalled 原文停下：若 continue 再走一遍，
+      // 意思一样，但不能误 promote / 叫协调者。
+      const afterHop = await this.#platform.getMissionView(missionId);
+      if (afterHop.openEscalations.length > 0) {
+        return {
+          kind: 'outcome',
+          outcome: {
+            kind: 'awaiting_l3',
+            question: afterHop.openEscalations[0]!.question,
+          },
+        };
+      }
+      const afterItem =
+        afterHop.workItems.find((row) => row.id === item.id) ?? afterHop.workItems[0];
+      if (afterItem?.status === 'blocked') {
+        return {
+          kind: 'outcome',
+          outcome: {
+            kind: 'stalled',
+            reason:
+              `Lightweight WorkItem ${afterItem.id} 状态是 ${afterItem.status}，无法继续；` +
+              '绝不回退 Coordinator',
+          },
+        };
       }
       return { kind: 'continue' };
     }
@@ -635,15 +1016,31 @@ export class Orchestrator {
         workItemId: item.id,
         cwd,
       });
-      if (validated.passed === false) {
-        return {
-          kind: 'outcome',
-          outcome: {
-            kind: 'stalled',
-            reason:
-              `ValidationReport ${validated.reportId} 未通过；Lightweight 自动升级尚未启用`,
-          },
-        };
+      if (validated.passed) {
+        // POST_EXECUTION shadow（J2）：确定性验收过了才问（含因规模被扣下的）；硬失败不问——
+        // 设计 §9.1：Jev 无权推翻确定性结果，问了也不该用。
+        await this.#platform.runPostExecutionShadow(missionId, item.id);
+      }
+      if (validated.status !== 'accepted') {
+        // 验收没过，或改动超出轻量规模被扣下：升级给协调者，而不是停下等人。
+        // E1 实测停过一次——执行者改对了、一条配置判失败，Mission 在 stalled 里等了 870 秒。
+        // 凭据是平台存下的那份报告；升级失败才停，并把两件事都说出来。
+        try {
+          await this.#platform.promoteLightweightAfterValidation(missionId, validated.reportId);
+        } catch (error) {
+          const what = validated.passed ? '通过但改动超出轻量规模' : '未通过';
+          return {
+            kind: 'outcome',
+            outcome: {
+              kind: 'stalled',
+              reason:
+                `ValidationReport ${validated.reportId} ${what}，升级到 Standard 也失败了：` +
+                (error instanceof Error ? error.message : String(error)),
+            },
+          };
+        }
+        await this.#platform.setWaitReason(missionId, undefined);
+        return { kind: 'continue' };
       }
       await this.#platform.submitLightweightMissionForReview(missionId);
       return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
@@ -655,6 +1052,8 @@ export class Orchestrator {
       return { kind: 'outcome', outcome: { kind: 'awaiting_l3_review' } };
     }
 
+    // blocked 且没有未答升级才会落到这里（空白需求，或提问已答过却没重派）。
+    // 有未答升级时主循环开头已 awaiting_l3。这句 stalled 原文不能改：空白路径靠字节等价钉住。
     return {
       kind: 'outcome',
       outcome: {
@@ -693,14 +1092,29 @@ export class Orchestrator {
   }
 
   /** 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。 */
-  #availableCandidates(pool: RolePool, now: number): ExecutionProfile[] {
-    return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
+  async #availableCandidates(pool: RolePool, now: number): Promise<ExecutionProfile[]> {
+    if (!this.#candidateCircuits) {
+      return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
+    }
+    const available: ExecutionProfile[] = [];
+    for (const profile of pool.candidates) {
+      const circuit = await this.#candidateCircuits.get(profile.profileId);
+      if (circuit.state === 'closed') available.push(profile);
+      else if (circuit.state === 'open' && Date.parse(circuit.openUntil) <= now) {
+        available.push(profile);
+      }
+    }
+    return available;
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
   candidateAvailability(): { profileId: string; availability: CandidateAvailability; until?: string }[] {
     const now = Date.now();
-    const all = [...this.#coordinator.candidates, ...this.#executor.candidates];
+    const all = [
+      ...this.#coordinator.candidates,
+      ...this.#executor.candidates,
+      ...(this.#independentReviewer?.candidates ?? []),
+    ];
     return all.map((profile) => {
       const until = this.#cooldown.get(profile.profileId) ?? 0;
       return until > now
@@ -802,32 +1216,98 @@ export class Orchestrator {
     instruction: string;
     resumeRef?: string;
   }): Promise<
-    | { endedBy: string; resumeRef?: string }
+    | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
     /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
     | { exhausted: WaitReason; detail?: string }
+    | { alreadyCompleted: true }
+    /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
+    | { retrySameSlot: true }
     | undefined
   > {
+    const parked = await this.#queuedHopPark({
+      role: input.role,
+      missionId: input.missionId,
+      workItemId: input.workItemId,
+    });
+    if (parked) return parked;
+
     const now = Date.now();
-    const usable = this.#availableCandidates(input.pool, now);
+    const usable = await this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
-      // 前者要人看，后者等一会儿就好。
+      // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
       return { exhausted: 'no_available_agent' };
     }
+
+    // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
+    let claimedHop: QueuedHop | undefined;
+    let hopRan = false;
+    let hopLeaseLost = false;
+    let capacityBlocked: { reason: WaitReason; detail: string } | undefined;
 
     const limit = input.pool.maxAttempts ?? 3;
     let used = 0;
     for (const profile of usable) {
-      if (used >= limit) return { exhausted: 'attempt_limit_reached' };
-      used += 1;
       // Attempt 起点。换候选之前要回到这里：下一个候选应该从干净的起点
       // 开始，而不是接手上一个改到一半的代码（S06.3）。
       const startRevision = await this.#workspace.head(input.cwd).catch(() => undefined);
+      let claimedProbe = false;
+      if (this.#candidateCircuits) {
+        const circuit = await this.#candidateCircuits.get(profile.profileId);
+        if (circuit.state === 'open') {
+          claimedProbe = await this.#candidateCircuits.tryClaimProbe({
+            profileId: profile.profileId, now: new Date().toISOString(),
+          });
+          if (!claimedProbe) continue;
+        } else if (circuit.state === 'half_open') {
+          continue;
+        }
+      }
+      if (used >= limit) {
+        if (claimedProbe) {
+          const circuit = await this.#candidateCircuits!.get(profile.profileId);
+          if (circuit.state === 'half_open') await this.#candidateCircuits!.resolveProbe({
+            profileId: profile.profileId, succeeded: false, failureClass: circuit.failureClass, openUntil: circuit.openUntil,
+          });
+        }
+        return { exhausted: 'attempt_limit_reached' };
+      }
+      const identity = { runtimeKind: input.pool.runtime.kind, profileId: profile.profileId };
+      if (claimedHop && this.#leaseIdentityMismatch(claimedHop, identity)) {
+        // 仍握着 A 的租约时不得启动 B；未跑完的 hop 不能 complete，只能跳过。
+        continue;
+      }
+      if (!claimedHop) {
+        const queued = await this.#acquireHopForStart({
+          role: input.role,
+          missionId: input.missionId,
+          workItemId: input.workItemId,
+          maxAttempts: limit,
+          candidate: identity,
+        });
+        if (queued.kind === 'waiting') {
+          if (queued.wait === 'capacity') {
+            capacityBlocked = { reason: queued.reason, detail: queued.detail };
+            if (claimedProbe) {
+              const circuit = await this.#candidateCircuits!.get(profile.profileId);
+              if (circuit.state === 'half_open') await this.#candidateCircuits!.resolveProbe({
+                profileId: profile.profileId, succeeded: false, failureClass: circuit.failureClass, openUntil: circuit.openUntil,
+              });
+            }
+            continue;
+          }
+          return { exhausted: queued.reason, detail: queued.detail };
+        }
+        if (queued.kind === 'completed') return { alreadyCompleted: true };
+        claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
+      }
+      used += 1;
 
+      const claim = this.#trustedQueueClaim(claimedHop);
       const { attemptId, token } =
         input.role === 'coordinator'
-          ? await this.#tokens.startCoordinator(input.missionId, profile)
-          : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile);
+          ? await this.#tokens.startCoordinator(input.missionId, profile, claim)
+          : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile, claim);
 
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
       let unsubscribe: (() => void) | undefined;
@@ -836,6 +1316,8 @@ export class Orchestrator {
       // 到点掐掉之后，close 事件回来的是一个普通的"进程被杀"失败。
       // 不记这个标志就没法把它和真的上游故障分开，而两者处置完全相反。
       let runaway = false;
+      let thrownRuntimeException = false;
+      let thrownRuleError = false;
       /**
        * 边跑边收到的最后一次累计用量。
        *
@@ -885,6 +1367,10 @@ export class Orchestrator {
         }
       };
       try {
+        // Attempt 已开：start 抛错也算消耗了这一跳。不置位的话 failover 会握着 A
+        // 的租约跳过 B；进程若在 start 返回前崩溃，hopRan 本来就不会落盘，
+        // 未 complete 的租约仍可供恢复夹具接管。
+        hopRan = true;
         const run = await input.pool.runtime.start({
           role: input.role,
           attemptId,
@@ -918,7 +1404,9 @@ export class Orchestrator {
             return;
           }
           if (event.kind === 'output') {
-            void this.#live.append({ ...base, kind: 'text', text: event.text });
+            // 流式文本是一小段一小段来的：一个 key 被切在两段之间时逐段脱敏抓不到，这里只能尽力。
+            // 大段带出凭据的是工具输出，那条路经 API 以证据形式进来，在入口整段脱敏。
+            void this.#live.append({ ...base, kind: 'text', text: redactSecrets(event.text) });
           } else if (event.kind === 'tool.started') {
             // Mark before classification — order is the contract.
             sawToolStarted = true;
@@ -927,7 +1415,7 @@ export class Orchestrator {
               kind: 'tool',
               // 带上具体在干什么。挂住之后这一行是唯一能指认"卡在哪条命令上"
               // 的东西；适配层没给 detail 时退回只有工具名，行为和以前一样。
-              text: event.detail ? `${event.name} · ${event.detail}` : event.name,
+              text: event.detail ? `${event.name} · ${redactSecrets(event.detail)}` : event.name,
             });
             if (commandTracking === 'enabled') {
               const activityClass = event.activityClass;
@@ -965,12 +1453,18 @@ export class Orchestrator {
           void this.#platform.beatAttempt(input.missionId, attemptId, this.#owner).catch(
             () => undefined,
           );
+          void this.#renewHopLease(claimedHop, () => {
+            hopLeaseLost = true;
+          });
         }, HEARTBEAT_MS);
         // 立刻先打一次：不打的话头一个间隔内它看起来就是"从没心跳过"，
         // 而没心跳一律算没人管。
         await this.#platform.beatAttempt(input.missionId, attemptId, this.#owner).catch(
           () => undefined,
         );
+        await this.#renewHopLease(claimedHop, () => {
+          hopLeaseLost = true;
+        });
         // 墙钟闸。abort 会连子孙进程一起收（Windows 上 shell:true 的子进程
         // 只 kill 父的话，真正在跑的那个孙子还握着管道，close 永远不来）。
         //
@@ -1010,6 +1504,8 @@ export class Orchestrator {
         }
         if (waitError !== undefined) throw waitError;
       } catch (error) {
+        thrownRuntimeException = true;
+        thrownRuleError = error instanceof PlatformRuleError;
         // 区分"平台自己连不上"与"那个候选不可用"。归错类的代价是：
         // 平台一抖，好端端的候选被冻进冷却，而换一个照样连不上。
         const message = error instanceof Error ? error.message : String(error);
@@ -1042,15 +1538,76 @@ export class Orchestrator {
           output: outcome?.output,
           toolCalls: outcome?.toolCalls,
           resolvedProfile: outcome?.resolvedProfile,
-        });
+          // 墙钟强杀或根本没有 outcome 时不得把采集摘要标成 complete。
+          // wait() 竞态里可能仍带回一份自称完整的摘要，这里必须丢掉。
+          ...(!runaway && outcome?.contextMetrics !== undefined
+            ? { contextMetrics: outcome.contextMetrics }
+            : {}),
+        }, claim);
         // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
         await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
         this.#tokens.revoke(token);
       }
 
+      if (
+        input.role === 'executor' &&
+        outcome.endedBy === 'structured_submit' &&
+        !runaway
+      ) {
+        try {
+          if (this.#workspace.checkpoint) {
+            const view = await this.#platform.getMissionView(input.missionId);
+            const item = view.workItems.find((candidate) => candidate.id === input.workItemId);
+            const allowedScope = item?.order?.allowedScope;
+            if (!input.workItemId || !Array.isArray(allowedScope) || allowedScope.length === 0) {
+              throw new Error(`缺少工作项 ${input.workItemId ?? '(未指定)'} 的冻结 allowedScope，无法检查点`);
+            }
+            await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+          } else if (!(this.#workspace instanceof InPlaceWorkspaceManager)) {
+            throw new Error('WorkspaceManager 未实现 checkpoint，无法验证已交回成果');
+          }
+        } catch (error) {
+          const detail = `执行者已交回成果，但冻结范围检查点失败：${error instanceof Error ? error.message : String(error)}。改动保留在工作区，已停止后续执行。`;
+          await this.#platform.setWaitReason(input.missionId, 'no_available_agent', detail).catch(() => undefined);
+          this.hops.push({ role: input.role, workItemId: input.workItemId, attemptId, profile, endedBy: outcome.endedBy, failureMessage: detail });
+          return { exhausted: 'no_available_agent', detail };
+        }
+      }
+
       // 和写回平台的那个值保持一致。两处分叉的话，库里记的和这里判的就是
       // 两件事，而排障的人会同时看到两者。
       const endedBy: AttemptEndReason = runaway ? 'killed_wall_clock' : outcome.endedBy;
+      const message = outcome.failureMessage ?? '';
+      const classification = classifyCandidateFailure(endedBy, message, thrownRuntimeException);
+      const failureClass = classification?.failureClass ?? 'unknown';
+      const durableCandidateFailure =
+        endedBy === 'upstream_failure' || endedBy === 'killed_idle' ||
+        classification?.failureClass === 'local_adapter_error';
+      if (this.#candidateCircuits) {
+        const openUntil = new Date(Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
+        if (endedBy === 'platform_unreachable') {
+          // A platform outage is not a candidate outcome; keep a claimed probe from
+          // remaining stuck without changing the existing circuit row.
+          if (claimedProbe) {
+            const original = await this.#candidateCircuits.get(profile.profileId);
+            if (original.state === 'half_open') await this.#candidateCircuits.resolveProbe({
+              profileId: profile.profileId, succeeded: false, failureClass: original.failureClass, openUntil: original.openUntil,
+            });
+          }
+        } else if (claimedProbe) {
+          if (durableCandidateFailure) await this.#candidateCircuits.resolveProbe({ profileId: profile.profileId, succeeded: false, failureClass, openUntil });
+          else if (endedBy === 'structured_submit') await this.#candidateCircuits.resolveProbe({ profileId: profile.profileId, succeeded: true });
+          else {
+            // Non-candidate execution failures do not prove the probe healthy.
+            const original = await this.#candidateCircuits.get(profile.profileId);
+            if (original.state === 'half_open') await this.#candidateCircuits.resolveProbe({
+              profileId: profile.profileId, succeeded: false, failureClass: original.failureClass, openUntil: original.openUntil,
+            });
+          }
+        } else if (durableCandidateFailure) {
+          await this.#candidateCircuits.open({ profileId: profile.profileId, failureClass, openUntil });
+        }
+      }
 
       this.hops.push({
         role: input.role,
@@ -1107,7 +1664,54 @@ export class Orchestrator {
       // 记录不同：一个是"那个候选挂了"，一个是"我们自己按静默超时掐的"。
       // 混在一起的话，"这个配置有多容易卡住"这个问题就只能去
       // failureMessage 里做字符串匹配——而那是一句给人读的话，随时会改。
-      if (endedBy === 'upstream_failure' || endedBy === 'killed_idle') {
+      const shouldFailover = this.#candidateCircuits
+        ? classification?.failover === true
+        : endedBy === 'upstream_failure' || endedBy === 'killed_idle' || endedBy === 'quota' || endedBy === 'auth' || endedBy === 'upstream_5xx';
+      const reportableFailure = thrownRuleError || shouldFailover || durableCandidateFailure;
+      if (
+        reportableFailure &&
+        claimedHop &&
+        hopRan &&
+        !hopLeaseLost &&
+        this.#hopScheduler &&
+        claimedHop.claimGeneration !== undefined
+      ) {
+        // 有界重试钉在同一逻辑槽上。complete 会放开 idempotency key，下一跳
+        // 另开一行就把 attemptCount 清零；同轮换候选也会占着容量去启动 B。
+        if (shouldFailover) {
+          this.#cooldown.set(
+            profile.profileId,
+            Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000),
+          );
+          if (input.role === 'executor' && startRevision) {
+            await this.#workspace.rollback(input.cwd, startRevision).catch(() => undefined);
+          }
+        }
+        const reported = await this.#reportClaimedHopFailure({
+          hop: claimedHop,
+          attemptId,
+          classification: thrownRuleError ? 'rule' : failureClass,
+          disposition: thrownRuleError ? 'do_not_retry' : 'retry_then_dead_letter',
+          retryable: !thrownRuleError,
+        });
+        if (reported.status === 'dead_letter') {
+          return {
+            exhausted: 'attempt_limit_reached',
+            detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'dead_letter' }),
+          };
+        }
+        if (await this.#waitInRunForRetry(reported, shouldFailover)) {
+          // 失败已记账且等到了 availableAt。交回下一轮走 #acquireHopForStart，
+          // 才会换到 Q。这里 continue 下一候选会在同一轮启动 Q，maxRounds=1
+          // 也拦不住；complete 再入队则会把 attemptCount 清零。
+          return { retrySameSlot: true };
+        }
+        return {
+          exhausted: 'project_busy',
+          detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'available_at' }),
+        };
+      }
+      if (shouldFailover) {
         // 这个候选先放一会儿，别下一跳又撞上同一个限流 / 同一次卡死。
         this.#cooldown.set(
           profile.profileId,
@@ -1118,10 +1722,388 @@ export class Orchestrator {
         if (input.role === 'executor' && startRevision) {
           await this.#workspace.rollback(input.cwd, startRevision).catch(() => undefined);
         }
+        // 容量路径必须先释放 A 的持久租约再领 B。不 complete 的话下一跳会带着 A 的
+        // runtime/profile 占位去启动 B，五维上限就被绕开。未真正跑过的 hop 不能
+        // complete（恢复夹具要靠它接管），只能跳过后续身份不同的候选。
+        if (this.#supportsCapacityClaim() && hopRan && !hopLeaseLost) {
+          await this.#completeHopLease(claimedHop);
+          claimedHop = undefined;
+          hopRan = false;
+          hopLeaseLost = false;
+        }
         continue; // 换下一个候选
       }
-      return { endedBy, resumeRef: outcome.resumeRef };
+      if (hopRan && !hopLeaseLost) await this.#completeHopLease(claimedHop);
+      return {
+        endedBy,
+        resumeRef: outcome.resumeRef,
+        persistentUnknown: Boolean(this.#candidateCircuits && failureClass === 'unknown' && durableCandidateFailure),
+      };
+    }
+    if (capacityBlocked && used === 0) {
+      return { exhausted: capacityBlocked.reason, detail: capacityBlocked.detail };
     }
     return undefined;
+  }
+
+  /**
+   * Queue gate used by both coordinator/executor hops and HA independent review.
+   * No-op when queuedHops was not injected, so existing fixtures keep their behaviour.
+   */
+  async #acquireHopForStart(input: {
+    role: HopRole;
+    missionId: string;
+    workItemId?: string;
+    maxAttempts: number;
+    candidate?: { runtimeKind: string; profileId: string };
+  }): Promise<
+    | { kind: 'bypass' }
+    | { kind: 'claimed'; hop: QueuedHop }
+    | { kind: 'completed'; hop: QueuedHop }
+    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait }
+  > {
+    if (!this.#hopScheduler || !this.#queuedHops) return { kind: 'bypass' };
+    const view = await this.#platform.getMissionView(input.missionId);
+    if (view.paused) {
+      return {
+        kind: 'waiting',
+        reason: 'cancelled_by_user',
+        detail: 'Mission 已被暂停，旧队列项不启动 Agent；resume 之后重跑',
+      };
+    }
+    if (view.status === 'completed' || view.status === 'blocked') {
+      return {
+        kind: 'waiting',
+        reason: 'cancelled_by_user',
+        detail: `Mission 已终态 ${view.status}，旧队列项不启动 Agent`,
+      };
+    }
+    const workItemId = input.workItemId ?? '-';
+    const attemptCycle = nextLogicalHopCycle(await this.#queuedHops.list(), {
+      missionId: input.missionId,
+      role: input.role,
+      workItemId,
+      contractRevision: view.contractRevision,
+    });
+    const idempotencyKey = hopIdempotencyKey({
+      missionId: input.missionId,
+      role: input.role,
+      workItemId,
+      contractRevision: view.contractRevision,
+      attemptCycle,
+    });
+    const nowIso = this.#hopClock.now().toISOString();
+    const enqueueInput = {
+      projectId: view.projectId,
+      missionId: input.missionId,
+      workItemId,
+      role: input.role,
+      priority: input.role === 'coordinator' ? 0 : input.role === 'executor' ? 10 : 20,
+      availableAt: nowIso,
+      attemptCount: 0,
+      maxAttempts: Math.max(input.maxAttempts, 1),
+      idempotencyKey,
+    };
+    const acquired = this.#supportsCapacityClaim()
+      ? await this.#claimEnqueuedHopWithCapacity(enqueueInput, nowIso, input.candidate)
+      : await acquireQueuedHop({
+          scheduler: this.#hopScheduler,
+          repository: this.#queuedHops,
+          owner: this.#owner,
+          leaseMs: this.#hopLeaseMs,
+          nowIso,
+          input: enqueueInput,
+        });
+    if (acquired.kind === 'waiting') {
+      return {
+        kind: 'waiting',
+        reason: acquired.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+        detail: queuedHopWaitDetail(acquired),
+        wait: acquired.wait,
+      };
+    }
+    if (acquired.kind === 'completed') return acquired;
+    const live = await this.#platform.getMissionView(input.missionId);
+    if (live.paused) {
+      return {
+        kind: 'waiting',
+        reason: 'cancelled_by_user',
+        detail: 'Mission 已被暂停，旧队列项不启动 Agent；resume 之后重跑',
+      };
+    }
+    if (live.status === 'completed' || live.status === 'blocked') {
+      return {
+        kind: 'waiting',
+        reason: 'cancelled_by_user',
+        detail: `Mission 已终态 ${live.status}，旧队列项不启动 Agent`,
+      };
+    }
+    if (live.contractRevision !== view.contractRevision) {
+      return {
+        kind: 'waiting',
+        reason: 'target_changed',
+        detail:
+          `契约已从 r${view.contractRevision} 变到 r${live.contractRevision}，旧队列项不启动 Agent`,
+      };
+    }
+    return acquired;
+  }
+
+  #supportsCapacityClaim(): boolean {
+    return typeof (this.#queuedHops as QueuedHopCapacityRepository | undefined)?.claimAvailable === 'function';
+  }
+
+  /** 未盖身份的旧行不算错配——D3 简易仓储没有 runtime/profile。 */
+  #leaseIdentityMismatch(
+    hop: QueuedHop,
+    identity: { runtimeKind: string; profileId: string },
+  ): boolean {
+    if (hop.runtimeKind === undefined && hop.profileId === undefined) return false;
+    return hop.runtimeKind !== identity.runtimeKind || hop.profileId !== identity.profileId;
+  }
+
+  /**
+   * 生产容量领取：enqueue 之后只把本 Mission 当前逻辑 Hop + 即将启动的候选交给
+   * claimAvailable。不得退回单 id claim，否则会 silently 绕过五维上限。
+   */
+  async #claimEnqueuedHopWithCapacity(
+    input: {
+      projectId: string;
+      missionId: string;
+      workItemId: string;
+      role: HopRole;
+      priority: number;
+      availableAt: string;
+      attemptCount: number;
+      maxAttempts: number;
+      idempotencyKey: string;
+    },
+    nowIso: string,
+    candidate: { runtimeKind: string; profileId: string } | undefined,
+  ): Promise<
+    | { kind: 'claimed'; hop: QueuedHop }
+    | { kind: 'completed'; hop: QueuedHop }
+    | { kind: 'waiting'; hop: QueuedHop; wait: QueuedHopWait }
+  > {
+    const hop = await this.#hopScheduler!.enqueue(input);
+    if (hop.status === 'completed') return { kind: 'completed', hop };
+    const parked = parkedQueuedHopWait(hop, nowIso);
+    if (parked) return parked;
+    if (!candidate) {
+      // 没有候选身份就领取会留下未标记租约，后续启动谁都算占着它。
+      return { kind: 'waiting', hop, wait: 'capacity' };
+    }
+    const rows = await this.#queuedHops!.list();
+    // 公平预检看全队列：未占用时更优者能跑则等待，避免后到 runner 插队。
+    // claimAvailable 的 eligible 只能是本 hop——把别人放进去，list 与领取之间
+    // 占用一变就会原子领走外 hop。那既不能 complete（丢别人的工作），也不能
+    // 启动（错 Mission），只会留下 stranded 租约。
+    const fairnessEligible = this.#capacityEligible(rows, hop, candidate);
+    for (const row of rows) {
+      if (row.id === hop.id || row.status !== 'queued') continue;
+      if (row.runtimeKind !== undefined && row.profileId !== undefined) continue;
+      if (compareHopFairness(row, hop) < 0) {
+        return { kind: 'waiting', hop, wait: 'lease' };
+      }
+    }
+    const snapshot = decideCapacityClaim(rows, nowIso, this.#hopLimits, fairnessEligible);
+    if (snapshot.kind === 'select' && snapshot.hop.id !== hop.id) {
+      // 更优 hop 能跑：等待，不得领走别人，也不得自己插队。
+      return { kind: 'waiting', hop, wait: 'lease' };
+    }
+    if (snapshot.kind === 'waiting' && snapshot.hop.id !== hop.id && snapshot.wait !== 'capacity') {
+      return snapshot;
+    }
+    if (snapshot.kind === 'waiting' && snapshot.hop.id === hop.id) return snapshot;
+    const ownEligible: EligibleHopClaim[] = [
+      { hopId: hop.id, runtimeKind: candidate.runtimeKind, profileId: candidate.profileId },
+    ];
+    const result = await this.#hopScheduler!.claimAvailable(this.#owner, this.#hopLeaseMs, ownEligible);
+    if (result.kind === 'claimed' && result.hop.id !== hop.id) {
+      // 仓储不得把非 eligible 行领走。若仍发生，不得 complete（会丢掉别人的工作）。
+      return { kind: 'waiting', hop, wait: 'lease' };
+    }
+    if (result.kind === 'claimed') return result;
+    if (result.kind === 'waiting') return result;
+    const latest = (await this.#queuedHops!.get(hop.id)) ?? hop;
+    if (latest.status === 'completed') return { kind: 'completed', hop: latest };
+    const parkedLatest = parkedQueuedHopWait(latest, nowIso);
+    if (parkedLatest) return parkedLatest;
+    return { kind: 'waiting', hop: latest, wait: 'lease' };
+  }
+
+  /**
+   * 公平预检用的领取集合：已有身份的未完成行 + 本 hop 即将启动的候选。
+   * 只用于 decideCapacityClaim 快照，不交给 claimAvailable。
+   * 不把它们放进预检的话，容量仍空时后到 runner 会以为自己是队头。
+   */
+  #capacityEligible(
+    rows: readonly QueuedHop[],
+    hop: QueuedHop,
+    candidate: { runtimeKind: string; profileId: string },
+  ): EligibleHopClaim[] {
+    const eligible: EligibleHopClaim[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (row.status === 'completed' || seen.has(row.id)) continue;
+      if (row.id === hop.id) {
+        eligible.push({
+          hopId: hop.id,
+          runtimeKind: candidate.runtimeKind,
+          profileId: candidate.profileId,
+        });
+        seen.add(row.id);
+        continue;
+      }
+      if (row.status !== 'queued' || row.runtimeKind === undefined || row.profileId === undefined) {
+        continue;
+      }
+      eligible.push({
+        hopId: row.id,
+        runtimeKind: row.runtimeKind,
+        profileId: row.profileId,
+      });
+      seen.add(row.id);
+    }
+    if (!seen.has(hop.id)) {
+      eligible.push({
+        hopId: hop.id,
+        runtimeKind: candidate.runtimeKind,
+        profileId: candidate.profileId,
+      });
+    }
+    return eligible;
+  }
+
+  async #renewHopLease(hop: QueuedHop | undefined, onLost: () => void): Promise<void> {
+    if (!hop || !this.#hopScheduler || hop.claimGeneration === undefined) return;
+    try {
+      await this.#hopScheduler.renew(hop.id, this.#owner, hop.claimGeneration, this.#hopLeaseMs);
+    } catch {
+      const latest = await this.#queuedHops?.get(hop.id);
+      const now = this.#hopClock.now().toISOString();
+      // Same-millisecond renew is a no-op, not a lost lease. Only treat it as lost when
+      // we no longer hold a live claim — otherwise we would refuse to complete a hop
+      // that did run, and a later runner could start it again.
+      if (
+        !latest ||
+        latest.status !== 'claimed' ||
+        latest.owner !== this.#owner ||
+        latest.claimGeneration !== hop.claimGeneration ||
+        (latest.leaseUntil !== undefined && Date.parse(latest.leaseUntil) <= Date.parse(now))
+      ) {
+        onLost();
+      }
+    }
+  }
+
+  /**
+   * 重入时先认本逻辑槽的死信/退避。若先看候选可用性，熔断冷却会把
+   * attempt_limit_reached 伪装成 no_available_agent，人会空等而不是去看死信。
+   */
+  async #queuedHopPark(input: {
+    role: HopRole;
+    missionId: string;
+    workItemId?: string;
+  }): Promise<{ exhausted: WaitReason; detail: string } | undefined> {
+    if (!this.#queuedHops) return undefined;
+    const view = await this.#platform.getMissionView(input.missionId);
+    const workItemId = input.workItemId ?? '-';
+    const rows = await this.#queuedHops.list();
+    const attemptCycle = nextLogicalHopCycle(rows, {
+      missionId: input.missionId,
+      role: input.role,
+      workItemId,
+      contractRevision: view.contractRevision,
+    });
+    const existing = rows.find(
+      (row) =>
+        row.idempotencyKey ===
+        hopIdempotencyKey({
+          missionId: input.missionId,
+          role: input.role,
+          workItemId,
+          contractRevision: view.contractRevision,
+          attemptCycle,
+        }),
+    );
+    if (!existing) return undefined;
+    const parked = parkedQueuedHopWait(existing, this.#hopClock.now().toISOString());
+    if (!parked) return undefined;
+    return {
+      exhausted: parked.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+      detail: queuedHopWaitDetail(parked),
+    };
+  }
+
+  /**
+   * 可换候选的 retry_wait 在上限内等到 availableAt，好让同一次运行重领同一槽。
+   * unknown / 规则错误 / 超上限 / 越过墙钟都不睡——那些必须把 waiting 交回去。
+   * 时钟若在 sleep 后仍停着（固定 now），立刻放弃：假装等到了会在领取时再失败一次。
+   */
+  async #waitInRunForRetry(hop: QueuedHop, swappable: boolean): Promise<boolean> {
+    if (!swappable || hop.status !== 'retry_wait' || this.#inRunBackoffWaitMs <= 0) return false;
+    const available = Date.parse(hop.availableAt);
+    if (!Number.isFinite(available)) return false;
+    const before = this.#hopClock.now().getTime();
+    const waitMs = available - before;
+    if (waitMs > this.#inRunBackoffWaitMs) return false;
+    if (this.#missionDeadlineAt !== undefined && available > this.#missionDeadlineAt) return false;
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, waitMs);
+      });
+    }
+    const after = this.#hopClock.now().getTime();
+    if (waitMs > 0 && after <= before) return false;
+    if (after < available) {
+      const remain = available - after;
+      if (remain > this.#inRunBackoffWaitMs) return false;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, remain);
+      });
+      if (this.#hopClock.now().getTime() <= after) return false;
+    }
+    return this.#hopClock.now().getTime() >= available;
+  }
+
+  async #reportClaimedHopFailure(input: {
+    hop: QueuedHop;
+    attemptId: string;
+    classification: string;
+    disposition: string;
+    retryable: boolean;
+  }): Promise<QueuedHop> {
+    // 报告失败不得 catch 后假装成功：仓储缺方法或围栏拒写都必须冒出来，
+    // 否则会走回 complete / 换槽，把同一失败再计一次或把 hop 放掉。
+    return this.#hopScheduler!.reportFailure({
+      id: input.hop.id,
+      claimGeneration: input.hop.claimGeneration!,
+      attemptId: input.attemptId,
+      failedAt: this.#hopClock.now().toISOString(),
+      classification: input.classification,
+      disposition: input.disposition,
+      retryable: input.retryable,
+    });
+  }
+
+  /**
+   * 只从已领取 hop 抄 id/owner/代次。把 now 塞进 claim 等于把租约时钟交给 Runner，
+   * 失租的迟到收尾就能把时间拨回去继续写。
+   */
+  #trustedQueueClaim(hop: QueuedHop | undefined): QueueClaimIdentity | undefined {
+    if (hop === undefined || hop.owner === undefined || hop.claimGeneration === undefined) {
+      return undefined;
+    }
+    return { id: hop.id, owner: hop.owner, claimGeneration: hop.claimGeneration };
+  }
+
+  async #completeHopLease(hop: QueuedHop | undefined): Promise<void> {
+    if (!hop || !this.#hopScheduler || hop.claimGeneration === undefined) return;
+    try {
+      await this.#hopScheduler.complete(hop.id, this.#owner, hop.claimGeneration);
+    } catch {
+      // complete rejected (wrong generation / expired lease): leave uncompleted.
+    }
   }
 }

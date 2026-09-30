@@ -32,6 +32,7 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { makeIssuer } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT = {
   intent: '修 X',
@@ -84,7 +85,7 @@ async function harness(
   });
   const tokens = new RunTokenRegistry();
   const server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  await listenLoopback(server, 0);
   servers.push(server);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -222,7 +223,7 @@ describe('多工作项', () => {
           // 只验收一个就想交卷 —— 平台必须拦下来。
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-1', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-1', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           {
             tool: 'coagent_submit_mission_result',
@@ -237,7 +238,7 @@ describe('多工作项', () => {
           },
           {
             tool: 'coagent_review_execution_result',
-            body: { workItemId: 'W-2', verdict: 'accept', reasons: ['ok'], requiredChanges: [] },
+            body: { workItemId: 'W-2', verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })), reasons: ['ok'], requiredChanges: [] },
           },
           {
             tool: 'coagent_submit_mission_result',

@@ -3,7 +3,7 @@
  *
  * 守住：
  *   - caller 不能用 executionMode/route/ClassificationResult 绕过 classifier
- *   - 四路路由：query/HA 拒绝；standard 0 WI；lightweight 1 Frozen WI
+ *   - 四路路由：query 拒绝；禁止副作用 HA 拒绝；合规 HA 建单；standard 0 WI；lightweight 1 Frozen WI
  *   - 拒绝路径不建 Mission；route guards 在 ensureProject 前
  *   - legacy POST /api/missions 不变；无新增 agent tool
  */
@@ -40,6 +40,7 @@ import { InvariantViolationError } from '../src/kernel/index.ts';
 import { createApi } from '../src/api/server.ts';
 import type { ControlPrincipal, ControlPrincipalResolver } from '../src/api/control-auth.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const FALSE: Tri = false;
 const TRUE: Tri = true;
@@ -309,22 +310,90 @@ describe('Platform.createClassifiedMission', () => {
     await assert.rejects(() => platform.getMissionView('M-query'), isRule('UNKNOWN_MISSION'));
   });
 
-  test('5. high_assurance route => HIGH_ASSURANCE_NOT_AVAILABLE；无 Mission', async () => {
+  test('5. 四种禁止副作用各自 HA_SIDE_EFFECT_DENIED；无 Mission / 空 Project', async () => {
+    const flags = [
+      'productionDeployRelease',
+      'externalPaidOp',
+      'unrecoverableExternalSideEffect',
+      'destructiveData',
+    ] as const;
+    for (const flag of flags) {
+      const { platform, projects } = harness();
+      await assert.rejects(
+        () =>
+          platform.createClassifiedMission({
+            projectId: `P-ha-${flag}`,
+            missionId: `M-ha-${flag}`,
+            contract: CONTRACT,
+            facts: facts({
+              mutationSideEffect: TRUE,
+              highAssurance: { [flag]: TRUE },
+            }),
+          }),
+        isRule('HA_SIDE_EFFECT_DENIED'),
+      );
+      assert.equal((await projects.list()).length, 0);
+      await assert.rejects(() => platform.getMissionView(`M-ha-${flag}`), isRule('UNKNOWN_MISSION'));
+    }
+  });
+
+  test('5b. 禁止副作用为 unknown 时同样拒绝，不把未知冒充已证明安全', async () => {
     const { platform, projects } = harness();
     await assert.rejects(
       () =>
         platform.createClassifiedMission({
-          projectId: 'P-ha',
-          missionId: 'M-ha',
+          projectId: 'P-ha-unknown',
+          missionId: 'M-ha-unknown',
           contract: CONTRACT,
           facts: facts({
             mutationSideEffect: TRUE,
-            highAssurance: { productionDeployRelease: TRUE },
+            highAssurance: { destructiveData: UNKNOWN, credentialsPermissionsSecurity: TRUE },
           }),
         }),
-      isRule('HIGH_ASSURANCE_NOT_AVAILABLE'),
+      isRule('HA_SIDE_EFFECT_DENIED'),
     );
     assert.equal((await projects.list()).length, 0);
+  });
+
+  test('5c. 合规 HA 建单成功；带 Lightweight workOrder 被拒', async () => {
+    const { platform, projects, activity } = harness();
+    const created = await platform.createClassifiedMission({
+      projectId: 'P-ha-ok',
+      missionId: 'M-ha-ok',
+      contract: CONTRACT,
+      facts: facts({
+        mutationSideEffect: TRUE,
+        highAssurance: {
+          credentialsPermissionsSecurity: TRUE,
+          schemaPublicApiPersistenceCompat: TRUE,
+        },
+      }),
+    });
+    assert.equal(created.missionId, 'M-ha-ok');
+    assert.equal(created.workItemId, undefined);
+    assert.equal(created.classification.recommended.executionMode, 'high_assurance');
+    const view = await platform.getMissionView('M-ha-ok');
+    assert.equal(view.executionMode, 'high_assurance');
+    assert.equal(view.workItems.length, 0);
+    assert.ok((await activity.list('M-ha-ok')).some((e) => e.kind === 'mission.routed'));
+
+    const h2 = harness();
+    await assert.rejects(
+      () =>
+        h2.platform.createClassifiedMission({
+          projectId: 'P-ha-wo',
+          missionId: 'M-ha-wo',
+          contract: CONTRACT,
+          facts: facts({
+            mutationSideEffect: TRUE,
+            highAssurance: { credentialsPermissionsSecurity: TRUE },
+          }),
+          workOrder: ORDER,
+        }),
+      isRule('HIGH_ASSURANCE_WORK_ORDER_FORBIDDEN'),
+    );
+    assert.equal((await h2.projects.list()).length, 0);
+    assert.equal((await projects.get('P-ha-ok'))?.missions.length, 1);
   });
 
   test('6. standard：无 workOrder 成功；有 workOrder 拒绝', async () => {
@@ -559,7 +628,7 @@ describe('POST /api/missions/classified control API', () => {
       agentPool: new InMemoryAgentPoolRepository(),
       resolveControlPrincipal: resolveFromHeader,
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server, 0);
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
@@ -660,7 +729,7 @@ describe('POST /api/missions/classified control API', () => {
       OP_TOKEN,
     );
     assert.equal(ha.status, 409);
-    assert.equal(ha.json.error, 'HIGH_ASSURANCE_NOT_AVAILABLE');
+    assert.equal(ha.json.error, 'HA_SIDE_EFFECT_DENIED');
   });
 
   test('12. endpoint 不接受 caller mode override', async () => {

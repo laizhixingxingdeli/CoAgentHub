@@ -7,7 +7,10 @@
  */
 
 import type { Project } from '../kernel/index.ts';
+import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
+import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
+import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
 
 export interface ProjectRepository {
   get(projectId: string): Promise<Project | undefined>;
@@ -56,6 +59,49 @@ export interface ActivityLog {
   list(missionId: string): Promise<readonly ActivityEvent[]>;
 }
 
+export interface QueuedHopRepository {
+  enqueue(hop: QueuedHop): Promise<QueuedHop>;
+  get(id: string): Promise<QueuedHop | undefined>;
+  list(): Promise<readonly QueuedHop[]>;
+  /** Atomic conditional transitions; undefined means rejected without mutation. */
+  claim(id: string, owner: string, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
+  renew(id: string, owner: string, claimGeneration: number, now: string, leaseUntil: string): Promise<QueuedHop | undefined>;
+  complete(id: string, owner: string, claimGeneration: number, now: string): Promise<QueuedHop | undefined>;
+  /**
+   * Fenced failure with persistent (id, claimGeneration, attemptId) dedupe.
+   * Optional so existing test stubs and single-id adapters keep compiling;
+   * File/PG implement it. Missing is not success — DurableScheduler rejects.
+   */
+  reportFailure?(input: ReportHopFailureInput): Promise<QueuedHop | undefined>;
+}
+
+/**
+ * Capacity-aware claim. File/PG implement this in a later ticket; old single-id
+ * claim/renew/complete stay on {@link QueuedHopRepository} and remain required.
+ *
+ * `claimAvailable` MUST, in one transaction (single-writer section / DB tx):
+ * consider only `input.eligible` hop ids; apply priority/FIFO across those rows;
+ * check five-dimension occupancy against durable active leases using each hop's
+ * own runtime/profile; persist that hop's identity on the claimed row only.
+ * Never claim, return, or relabel a hop that is not eligible. Skipped rows stay
+ * queued. Legacy rows without runtime/profile remain readable.
+ */
+export interface QueuedHopCapacityRepository extends QueuedHopRepository {
+  claimAvailable(input: ClaimAvailableHopInput): Promise<CapacityClaimResult>;
+}
+
+/** Persistent per-profile circuit. tryClaimProbe must be an atomic conditional transition. */
+export interface CandidateCircuitRepository {
+  /** Missing records are observed as closed without requiring a stored row. */
+  get(profileId: string): Promise<CandidateCircuit>;
+  /** Opens/reopens a circuit, including from closed or half_open. */
+  open(input: OpenCandidateCircuitInput): Promise<CandidateCircuit>;
+  /** Returns true only when this call changed eligible open to claimed half_open. */
+  tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean>;
+  /** Only a claimed half_open probe may resolve; invalid/repeated resolution rejects without mutation. */
+  resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit>;
+}
+
 export interface Clock {
   now(): Date;
 }
@@ -94,9 +140,9 @@ export interface AgentRuntime {
 export interface AgentRunSpec {
   /**
    * `query`：独立只读问答，不进入 Mission 状态机。
-   * coordinator / executor 仍走原 Mission 路径。
+   * coordinator / executor / independent_reviewer 走 Mission 路径。
    */
-  readonly role: 'coordinator' | 'executor' | 'query';
+  readonly role: 'coordinator' | 'executor' | 'independent_reviewer' | 'query';
   /**
    * 运行身份 id。Mission 路径是 attemptId；query 路径是 queryRunId
    * （字段名保持兼容，避免每个 runtime 适配器分叉）。
@@ -183,6 +229,58 @@ export type RuntimeEvent =
   | { readonly kind: 'tool.completed'; readonly name: string; readonly callId: string }
   | { readonly kind: 'usage'; readonly usage: TokenUsage };
 
+/** 简报来源白名单，与 ContextBundle 固定六源对齐。 */
+export const CONTEXT_METRICS_BRIEF_SOURCES = [
+  'project_rules',
+  'environment_notes',
+  'contract',
+  'plan',
+  'final_review',
+  'work_order',
+] as const;
+export type ContextMetricsBriefSource = (typeof CONTEXT_METRICS_BRIEF_SOURCES)[number];
+
+/** 工具桶固定类别。任意字符串会变成「调了什么都可以写」，所以闭集。 */
+export const CONTEXT_METRICS_TOOL_KINDS = ['read', 'grep', 'find', 'ls', 'bash'] as const;
+export type ContextMetricsToolKind = (typeof CONTEXT_METRICS_TOOL_KINDS)[number];
+
+export type ContextMetricsCoverage = 'complete' | 'partial' | 'unknown';
+
+export interface ContextMetricsBriefSourceEntry {
+  readonly source: ContextMetricsBriefSource;
+  readonly estimatedTokens?: number;
+  readonly truncated: boolean;
+}
+
+export interface ContextMetricsBriefV1 {
+  readonly renderedUtf8Bytes: number;
+  readonly sources: readonly ContextMetricsBriefSourceEntry[];
+}
+
+export interface ContextMetricsToolBucketV1 {
+  readonly kind: ContextMetricsToolKind;
+  readonly calls: number;
+  readonly returnedUtf8Bytes: number;
+}
+
+export interface ContextMetricsReadBucketV1 {
+  readonly pathDigest: string;
+  readonly contentDigest: string;
+  readonly repeats: number;
+}
+
+/**
+ * Attempt 级上下文采集摘要 v1。只含观测事实：桶、非负整数、SHA-256 摘要。
+ * 不含路径、正文、missionId/attemptId（后两者走事件 envelope）。
+ */
+export interface ContextMetricsV1 {
+  readonly version: 1;
+  readonly coverage: ContextMetricsCoverage;
+  readonly brief?: ContextMetricsBriefV1;
+  readonly tools?: readonly ContextMetricsToolBucketV1[];
+  readonly reads?: readonly ContextMetricsReadBucketV1[];
+}
+
 export interface RuntimeOutcome {
   /**
    * 这一程是怎么结束的。上游失败与"没做结构化提交"必须分开——
@@ -211,6 +309,11 @@ export interface RuntimeOutcome {
    * Mission 路径忽略此字段。
    */
   readonly queryOutcome?: 'answered' | 'failed' | 'needs_mutation';
+  /**
+   * 本跳上下文采集摘要。调用方/运行时都不可信：平台 finishAttempt 再校验，
+   * 未通过则整段丢弃，不得原样 spread 进 Activity。
+   */
+  readonly contextMetrics?: unknown;
 }
 
 /* ------------------------------ 决策信号端口 ------------------------------ */
@@ -260,4 +363,36 @@ export interface DecisionAnswerSet {
 export interface DecisionProvider {
   readonly kind: string;
   decide(request: DecisionRequest): Promise<DecisionAnswerSet>;
+}
+
+/**
+ * POST_EXECUTION 评估（Jev 设计 §9）。与 DecisionProvider 分开：PRE 只拿 ID 与 facts（远端默认拒绝），
+ * POST 拿的是按预算投影过的执行摘要——两者放出去的数据不同，端口也分开，免得一个口子上两套放行规则。
+ * 同样只产信号、不具执行权威（ADR-0002）。
+ */
+export interface PostExecutionEvaluator {
+  readonly kind: string;
+  evaluate(state: PostExecutionRemoteState): Promise<DecisionAnswerSet>;
+}
+
+/**
+ * 单事务命令（设计 §8.1，C2）：run 里对状态、事件、投递的写一起提交，或者一个都不落。
+ *
+ * 实现方保证：fn 抛错或提交失败时，存储回到 run 开始时的样子——内存与盘上都是——之后
+ * 别处的写不会把半截改动带下去。嵌套调用并进外层事务。只包短命令：事务之间串行。
+ */
+export interface CommandTransaction {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * 测试可调用的领取 fencing 命令事务。与 {@link CommandTransaction.run} 分开，生产 Agent API 不走这里。
+ *
+ * 实现方必须在**同一**命令/数据库事务内核对 `id/owner/claimGeneration/now`（见 {@link holdsCurrentClaim}），
+ * 通过后才让回调里的状态写入提交；不存在、过期或身份不合则拒绝并回滚。
+ * 不得在入口或回调前单独 get 当作成功 fencing。嵌套进已有 `run` 时并进外层事务，
+ * 核对失败必须抛出——内部 catch 会让外层把半截写入当成功提交。
+ */
+export interface FencedCommandTransaction {
+  runFenced<T>(fence: ClaimFence, fn: () => Promise<T>): Promise<T>;
 }

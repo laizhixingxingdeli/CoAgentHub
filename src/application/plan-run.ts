@@ -19,13 +19,16 @@
 
 import { PlatformRuleError } from './platform.ts';
 
-/** 夜间检视者能选的全部动作。**刻意没有「通过」与「合并」。** */
+/** 夜间检视者能选的全部动作。**刻意没有「通过」与「合并」。** 答复走受限分支，不进这张表。 */
 export const REVIEWER_ACTIONS = Object.freeze([
   'rerun_isolated',
   'skip',
   'rescope',
   'stop',
 ] as const);
+
+/** 可答复升级单的原问 / 答复上限。超长原问截断并在此长度内注明；答复超限直接拒绝。 */
+export const ESCALATION_TEXT_LIMIT = 4000;
 
 export type ReviewerAction = (typeof REVIEWER_ACTIONS)[number];
 
@@ -35,13 +38,41 @@ export type ReviewerAction = (typeof REVIEWER_ACTIONS)[number];
  */
 export type PlanFeatureStatus = 'pending' | 'running' | 'merged' | 'suspended' | 'skipped';
 
-export interface PlanStopConditions {
+export const DEFAULT_MAX_ESCALATIONS = 5;
+export const DEFAULT_MAX_RERUNS_PER_FEATURE = 1;
+
+/** 方案文件 / 开跑参数里可以不写两道新闸；出现了就必须是正整数。 */
+export interface PlanStopConditionsInput {
   /** 未解决升级累计到这个数就停（≥，不是 >）。 */
   readonly unresolvedEscalations: number;
   /** 方案级硬墙钟，从开跑算起。 */
   readonly wallClockMs: number;
   /** 一张升级单等决定的最长时间；与检视者定时醒来的间隔对齐。 */
   readonly escalationTimeoutMs: number;
+  /** 一次运行最多开这么多张升级单。缺省见 DEFAULT_MAX_ESCALATIONS。 */
+  readonly maxEscalations?: number;
+  /** 每个功能最多接受这么多次 rerun_isolated。缺省见 DEFAULT_MAX_RERUNS_PER_FEATURE。 */
+  readonly maxRerunsPerFeature?: number;
+}
+
+export interface PlanStopConditions {
+  readonly unresolvedEscalations: number;
+  readonly wallClockMs: number;
+  readonly escalationTimeoutMs: number;
+  readonly maxEscalations: number;
+  readonly maxRerunsPerFeature: number;
+}
+
+/**
+ * 源方案里本次没入选的条目。可选：旧记录没有它照常读。
+ * 不要把它写成功能点的 skipped——那是检视者在本次运行里选的跳过。
+ */
+export interface PlanSourceExclusion {
+  readonly featureId: string;
+  readonly title: string;
+  readonly reason: string;
+  /** 源方案 status；旧格式无 status 则缺这个键。 */
+  readonly sourceStatus?: string;
 }
 
 export interface PlanFeatureRecord {
@@ -70,6 +101,14 @@ export type PlanEscalationResolution =
       /** 仅 rescope：一并删掉的剩余功能（检视者判定它们依赖这次失败的功能）。 */
       readonly dropFeatures?: readonly string[];
     }
+  | {
+      readonly kind: 'decided';
+      readonly action: 'answer';
+      readonly answer: string;
+      readonly reason?: string;
+      readonly decidedBy: string;
+      readonly decidedAt: string;
+    }
   | { readonly kind: 'expired'; readonly expiredAt: string };
 
 export interface PlanEscalation {
@@ -78,11 +117,13 @@ export interface PlanEscalation {
   readonly missionId?: string;
   /** 哪里错了：证据的一句话。 */
   readonly failure: string;
-  /** 要检视者定什么。 */
+  /** 要检视者定什么。可答复单上这是协调者原问（trim、限 4000 字）。 */
   readonly question: string;
   readonly openedAt: string;
   /** openedAt + escalationTimeoutMs。到点（含）之后只能判过期，不能再决定。 */
   readonly deadline: string;
+  /** 仅 true：question 是协调者原问，允许受限的 answer 结论。缺省 = 旧四动作单。 */
+  readonly answerable?: true;
   readonly resolution?: PlanEscalationResolution;
 }
 
@@ -94,7 +135,9 @@ export interface PlanEscalation {
  * - `reviewer_stop`：检视者选了「停」；
  * - `finished`：功能点都走完了（不等于全合了）；
  * - `unsafe`：集成分支处在不能再往上叠东西的状态（如回滚失败、分支被切走）；
- * - `crashed`：驱动方自己出了未预料的错。
+ * - `crashed`：驱动方自己出了未预料的错；
+ * - `service_shutdown`：服务受控关闭；
+ * - `escalation_limit`：已开升级单到上限，这一次失败不再开单。
  */
 export type PlanStopReason =
   | 'unresolved_escalations'
@@ -102,7 +145,9 @@ export type PlanStopReason =
   | 'reviewer_stop'
   | 'finished'
   | 'unsafe'
-  | 'crashed';
+  | 'crashed'
+  | 'service_shutdown'
+  | 'escalation_limit';
 
 export interface PlanRunStop {
   readonly at: string;
@@ -117,15 +162,40 @@ export interface PlanRunInit {
   readonly integrationBranch: string;
   /** 本次运行指定的检视者。只有它的决定作数。 */
   readonly reviewer: string;
-  readonly stopConditions: PlanStopConditions;
+  readonly stopConditions: PlanStopConditionsInput;
   /** 方案里的功能点，按执行顺序。 */
   readonly featureIds: readonly string[];
   /** 功能标题，按 id。可缺：没给就没有，不编。 */
   readonly titles?: Readonly<Record<string, string>>;
   readonly startedAt: string;
+  /** 源方案未纳入本次运行的条目。缺省 = 旧记录，交接面不列这段。 */
+  readonly sourceExclusions?: readonly PlanSourceExclusion[];
 }
 
 /** 落盘形状。纯数据，能直接 JSON 化；存到哪是存储层的事。 */
+export type HaReleaseDecision = {
+  readonly kind: 'approve' | 'send_back' | 'expired' | 'invalidated';
+  readonly at: string;
+  readonly by?: string;
+  readonly confirmedBy?: string;
+  readonly reason?: string;
+};
+
+export interface HaRelease {
+  readonly runId: string;
+  readonly featureId: string;
+  readonly missionId: string;
+  readonly reviewedCommit: string;
+  readonly attemptId: string;
+  readonly validationReportId: string;
+  readonly reviewerId: string;
+  readonly integrationBranch: string;
+  readonly openedAt: string;
+  readonly deadline: string;
+  readonly verification: readonly { readonly command: string; readonly timeoutMs: number }[];
+  readonly decision?: HaReleaseDecision;
+}
+
 export interface PlanRunSnapshot {
   readonly version: 1;
   readonly id: string;
@@ -137,7 +207,9 @@ export interface PlanRunSnapshot {
   readonly startedAt: string;
   readonly features: readonly PlanFeatureRecord[];
   readonly escalations: readonly PlanEscalation[];
+  readonly haReleases?: readonly HaRelease[];
   readonly stopped?: PlanRunStop;
+  readonly sourceExclusions?: readonly PlanSourceExclusion[];
 }
 
 const FEATURE_STATUSES: readonly PlanFeatureStatus[] = [
@@ -155,6 +227,8 @@ const STOP_REASONS: readonly PlanStopReason[] = [
   'finished',
   'unsafe',
   'crashed',
+  'service_shutdown',
+  'escalation_limit',
 ];
 
 function formatHours(ms: number): string {
@@ -177,15 +251,42 @@ function isStringList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-/** 方案文件与方案运行记录共用同一把尺子：两处各写一份，收紧一边另一边就会放过。 */
-export function isStopConditions(value: unknown): value is PlanStopConditions {
+function clipEscalationText(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= ESCALATION_TEXT_LIMIT) return trimmed;
+  // 注明必须落在 4000 内：悄悄切尾巴会让人把残段当全貌。
+  const note = '…（已截断）';
+  return `${trimmed.slice(0, ESCALATION_TEXT_LIMIT - note.length)}${note}`;
+}
+
+/**
+ * 方案文件与方案运行记录共用同一把尺子：两处各写一份，收紧一边另一边就会放过。
+ * 三项原闸必须是正整数；两道新闸缺了按缺省，写了就必须是正整数——0 等于没有这道闸。
+ */
+export function isStopConditions(value: unknown): value is PlanStopConditionsInput {
   if (value === null || typeof value !== 'object') return false;
   const raw = value as Record<string, unknown>;
-  return (
-    isPositiveInt(raw.unresolvedEscalations) &&
-    isPositiveInt(raw.wallClockMs) &&
-    isPositiveInt(raw.escalationTimeoutMs)
-  );
+  if (
+    !isPositiveInt(raw.unresolvedEscalations) ||
+    !isPositiveInt(raw.wallClockMs) ||
+    !isPositiveInt(raw.escalationTimeoutMs)
+  ) {
+    return false;
+  }
+  if (raw.maxEscalations !== undefined && !isPositiveInt(raw.maxEscalations)) return false;
+  if (raw.maxRerunsPerFeature !== undefined && !isPositiveInt(raw.maxRerunsPerFeature)) return false;
+  return true;
+}
+
+/** parsePlanSpec / start / restore 都走这里：内存和快照里永远带着生效上限。 */
+export function fillStopConditions(raw: PlanStopConditionsInput): PlanStopConditions {
+  return Object.freeze({
+    unresolvedEscalations: raw.unresolvedEscalations,
+    wallClockMs: raw.wallClockMs,
+    escalationTimeoutMs: raw.escalationTimeoutMs,
+    maxEscalations: raw.maxEscalations ?? DEFAULT_MAX_ESCALATIONS,
+    maxRerunsPerFeature: raw.maxRerunsPerFeature ?? DEFAULT_MAX_RERUNS_PER_FEATURE,
+  });
 }
 
 /** 从落盘数据里挑出认识的字段；任何一处读不懂就整条拒绝（返回 undefined）。 */
@@ -214,8 +315,25 @@ function readResolution(value: unknown): PlanEscalationResolution | undefined | 
     return isInstant(raw.expiredAt) ? Object.freeze({ kind: 'expired', expiredAt: raw.expiredAt }) : false;
   }
   if (raw.kind !== 'decided') return false;
+  if (!isText(raw.decidedBy) || !isInstant(raw.decidedAt)) return false;
+  if (raw.action === 'answer') {
+    // 缺答复、空答复、超长、夹带 dropFeatures：一律当损坏，不猜。
+    if (typeof raw.answer !== 'string' || !isText(raw.answer) || raw.answer.length > ESCALATION_TEXT_LIMIT) {
+      return false;
+    }
+    if (raw.reason !== undefined && typeof raw.reason !== 'string') return false;
+    if (raw.dropFeatures !== undefined) return false;
+    return Object.freeze({
+      kind: 'decided' as const,
+      action: 'answer' as const,
+      answer: raw.answer,
+      ...(raw.reason !== undefined ? { reason: raw.reason } : {}),
+      decidedBy: raw.decidedBy,
+      decidedAt: raw.decidedAt,
+    });
+  }
   if (!(REVIEWER_ACTIONS as readonly unknown[]).includes(raw.action)) return false;
-  if (typeof raw.reason !== 'string' || !isText(raw.decidedBy) || !isInstant(raw.decidedAt)) return false;
+  if (typeof raw.reason !== 'string') return false;
   if (raw.dropFeatures !== undefined && !isStringList(raw.dropFeatures)) return false;
   return Object.freeze({
     kind: 'decided',
@@ -236,8 +354,17 @@ function readEscalation(value: unknown, featureIds: ReadonlySet<string>): PlanEs
   if (raw.missionId !== undefined && typeof raw.missionId !== 'string') return undefined;
   if (typeof raw.failure !== 'string' || typeof raw.question !== 'string') return undefined;
   if (!isInstant(raw.openedAt) || !isInstant(raw.deadline)) return undefined;
+  if (raw.answerable !== undefined && raw.answerable !== true && raw.answerable !== false) return undefined;
+  const answerable = raw.answerable === true;
+  if (answerable) {
+    if (!isText(raw.missionId)) return undefined;
+    // 仅空白原问不是协调者问题：当损坏，不把它当成可答复单读回来。
+    if (!isText(raw.question) || raw.question.length > ESCALATION_TEXT_LIMIT) return undefined;
+  }
   const resolution = readResolution(raw.resolution);
   if (resolution === false) return undefined;
+  // 答复结论只能落在可答复单上：否则旧四动作单被写成 answer 会悄悄改语义。
+  if (resolution?.kind === 'decided' && resolution.action === 'answer' && !answerable) return undefined;
   return Object.freeze({
     id: raw.id,
     featureId: raw.featureId,
@@ -246,6 +373,7 @@ function readEscalation(value: unknown, featureIds: ReadonlySet<string>): PlanEs
     question: raw.question,
     openedAt: raw.openedAt,
     deadline: raw.deadline,
+    ...(answerable ? { answerable: true as const } : {}),
     ...(resolution ? { resolution } : {}),
   });
 }
@@ -257,6 +385,28 @@ function readStop(value: unknown): PlanRunStop | undefined | false {
   if (!isInstant(raw.at) || typeof raw.detail !== 'string') return false;
   if (!(STOP_REASONS as readonly unknown[]).includes(raw.reason)) return false;
   return Object.freeze({ at: raw.at, reason: raw.reason as PlanStopReason, detail: raw.detail });
+}
+
+function freezeSourceExclusion(ex: PlanSourceExclusion): PlanSourceExclusion {
+  return Object.freeze({
+    featureId: ex.featureId,
+    title: ex.title,
+    reason: ex.reason,
+    ...(ex.sourceStatus !== undefined ? { sourceStatus: ex.sourceStatus } : {}),
+  });
+}
+
+function readSourceExclusion(value: unknown): PlanSourceExclusion | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (!isText(raw.featureId) || !isText(raw.title) || !isText(raw.reason)) return undefined;
+  if (raw.sourceStatus !== undefined && typeof raw.sourceStatus !== 'string') return undefined;
+  return freezeSourceExclusion({
+    featureId: raw.featureId,
+    title: raw.title,
+    reason: raw.reason,
+    ...(raw.sourceStatus !== undefined ? { sourceStatus: raw.sourceStatus } : {}),
+  });
 }
 
 /** 冻结一条功能记录；needsDecision 没有就不写这个键，免得快照里挂着 undefined。 */
@@ -286,7 +436,9 @@ export class PlanRun {
   #startedAt: string;
   #features: PlanFeatureRecord[];
   #escalations: PlanEscalation[] = [];
+  #haReleases: HaRelease[] = [];
   #stopped: PlanRunStop | undefined;
+  #sourceExclusions: readonly PlanSourceExclusion[] | undefined;
 
   private constructor(init: PlanRunInit) {
     this.#id = init.id;
@@ -294,11 +446,15 @@ export class PlanRun {
     this.#projectId = init.projectId;
     this.#integrationBranch = init.integrationBranch;
     this.#reviewer = init.reviewer;
-    this.#stopConditions = Object.freeze({ ...init.stopConditions });
+    this.#stopConditions = fillStopConditions(init.stopConditions);
     this.#startedAt = init.startedAt;
     this.#features = init.featureIds.map((featureId) =>
       freezeFeature({ featureId, title: init.titles?.[featureId], status: 'pending', missionIds: [] }),
     );
+    this.#sourceExclusions =
+      init.sourceExclusions !== undefined
+        ? Object.freeze(init.sourceExclusions.map(freezeSourceExclusion))
+        : undefined;
   }
 
   static start(init: PlanRunInit): PlanRun {
@@ -308,7 +464,10 @@ export class PlanRun {
     }
     // 0 / 缺省 / 小数都等于没有这道闸——夜里没人看着，缺一道闸就是一路跑到天亮。
     if (!isStopConditions(init.stopConditions)) {
-      throw invalid('stopConditions 的 unresolvedEscalations / wallClockMs / escalationTimeoutMs 必须都是正整数。');
+      throw invalid(
+        'stopConditions 的 unresolvedEscalations / wallClockMs / escalationTimeoutMs 必须都是正整数；' +
+          'maxEscalations / maxRerunsPerFeature 缺省放行，出现了也必须是正整数。',
+      );
     }
     if (!isInstant(init.startedAt)) throw invalid('startedAt 不是时间。');
     if (!Array.isArray(init.featureIds) || init.featureIds.length === 0) {
@@ -319,6 +478,19 @@ export class PlanRun {
     }
     if (init.titles !== undefined && !Object.values(init.titles).every((t) => typeof t === 'string')) {
       throw invalid('功能标题必须是字符串。');
+    }
+    if (init.sourceExclusions !== undefined) {
+      if (!Array.isArray(init.sourceExclusions) || init.sourceExclusions.length === 0) {
+        throw invalid('sourceExclusions 若出现必须是非空列表。');
+      }
+      for (const ex of init.sourceExclusions) {
+        if (!isText(ex.featureId) || !isText(ex.title) || !isText(ex.reason)) {
+          throw invalid('sourceExclusions 每条必须有 featureId / title / reason。');
+        }
+        if (ex.sourceStatus !== undefined && typeof ex.sourceStatus !== 'string') {
+          throw invalid('sourceExclusions.sourceStatus 必须是字符串。');
+        }
+      }
     }
     return new PlanRun(init);
   }
@@ -347,8 +519,45 @@ export class PlanRun {
     if (!Array.isArray(raw.escalations)) throw corrupt('escalations 缺失。');
     const escalations = raw.escalations.map((e) => readEscalation(e, featureIds));
     if (escalations.some((e) => e === undefined)) throw corrupt('有升级单读不懂。');
+    let haReleases: HaRelease[] | undefined;
+    if (raw.haReleases !== undefined) {
+      if (!Array.isArray(raw.haReleases)) throw corrupt('haReleases 不是列表。');
+      haReleases = raw.haReleases as HaRelease[];
+      const valid = haReleases.every((r) => {
+        if (!r || !isText(r.runId) || r.runId !== raw.id || !featureIds.has(r.featureId)) return false;
+        const feature = features.find((item) => item?.featureId === r.featureId);
+        if (!isText(r.missionId) || !feature?.missionIds.includes(r.missionId)) return false;
+        if (!isText(r.reviewedCommit) || !isText(r.attemptId) || !isText(r.validationReportId)) return false;
+        if (!isText(r.reviewerId) || r.reviewerId !== raw.reviewer) return false;
+        if (!isText(r.integrationBranch) || r.integrationBranch !== raw.integrationBranch) return false;
+        if (!isInstant(r.openedAt) || !isInstant(r.deadline) || Date.parse(r.deadline) <= Date.parse(r.openedAt)) return false;
+        if (!Array.isArray(r.verification) || r.verification.length === 0) return false;
+        if (!r.verification.every((v) => v && isText(v.command) && isPositiveInt(v.timeoutMs))) return false;
+        if (!Object.hasOwn(r, 'decision')) return true;
+        if (r.decision === null || typeof r.decision !== 'object') return false;
+        const d = r.decision;
+        if (!['approve', 'send_back', 'expired', 'invalidated'].includes(d.kind) || !isInstant(d.at)) return false;
+        if (Date.parse(d.at) < Date.parse(r.openedAt)) return false;
+        if ((d.kind === 'approve' || d.kind === 'send_back') && Date.parse(d.at) >= Date.parse(r.deadline)) return false;
+        if (d.kind === 'expired' && Date.parse(d.at) < Date.parse(r.deadline)) return false;
+        if ((d.kind === 'approve' || d.kind === 'send_back') && (!isText(d.by) || d.by !== r.reviewerId || !isText(d.confirmedBy))) return false;
+        if (d.kind === 'send_back' && !isText(d.reason)) return false;
+        if (d.kind === 'invalidated' && !isText(d.reason)) return false;
+        return true;
+      });
+      if (!valid || new Set(haReleases.filter((r) => !r.decision).map((r) => r.featureId)).size !== haReleases.filter((r) => !r.decision).length) throw corrupt('haReleases 畸形或绑定冲突。');
+    }
     const stopped = readStop(raw.stopped);
     if (stopped === false) throw corrupt('stopped 读不懂。');
+    let sourceExclusions: readonly PlanSourceExclusion[] | undefined;
+    if (raw.sourceExclusions !== undefined) {
+      if (!Array.isArray(raw.sourceExclusions) || raw.sourceExclusions.length === 0) {
+        throw corrupt('sourceExclusions 读不懂。');
+      }
+      const parsed = raw.sourceExclusions.map(readSourceExclusion);
+      if (parsed.some((ex) => ex === undefined)) throw corrupt('有源方案未纳入记录读不懂。');
+      sourceExclusions = parsed as PlanSourceExclusion[];
+    }
 
     const run = new PlanRun({
       id: raw.id as string,
@@ -359,9 +568,11 @@ export class PlanRun {
       stopConditions: raw.stopConditions,
       featureIds: [],
       startedAt: raw.startedAt as string,
+      ...(sourceExclusions ? { sourceExclusions } : {}),
     });
     run.#features = features as PlanFeatureRecord[];
     run.#escalations = escalations as PlanEscalation[];
+    run.#haReleases = haReleases ?? [];
     run.#stopped = stopped;
     return run;
   }
@@ -378,7 +589,9 @@ export class PlanRun {
       startedAt: this.#startedAt,
       features: this.#features.map((f) => freezeFeature(f)),
       escalations: [...this.#escalations],
+      ...(this.#haReleases.length ? { haReleases: [...this.#haReleases] } : {}),
       ...(this.#stopped ? { stopped: this.#stopped } : {}),
+      ...(this.#sourceExclusions ? { sourceExclusions: this.#sourceExclusions.map(freezeSourceExclusion) } : {}),
     };
   }
 
@@ -418,6 +631,131 @@ export class PlanRun {
     return [...this.#escalations];
   }
 
+  /** 本次已开的全部升级单数，不论尚未决定、已决定或已过期。 */
+  get escalationsOpened(): number {
+    return this.#escalations.length;
+  }
+
+  /** 该功能已接受的 rerun_isolated 次数。首次 Mission 不算。 */
+  rerunsUsed(featureId: string): number {
+    return this.#escalations.filter(
+      (e) =>
+        e.featureId === featureId &&
+        e.resolution?.kind === 'decided' &&
+        e.resolution.action === 'rerun_isolated',
+    ).length;
+  }
+
+  get haReleases(): readonly HaRelease[] { return [...this.#haReleases]; }
+
+  openHaRelease(input: Omit<HaRelease, 'runId' | 'decision'>): HaRelease {
+    this.#assertRunning();
+    const feature = this.feature(input.featureId);
+    if (!feature || !feature.missionIds.includes(input.missionId)) throw new PlatformRuleError('HA_RELEASE_INVALID', '功能或 Mission 绑定无效。');
+    // 同一功能仅保留一条待决记录，避免两份签字竞争同一份 HA 证据。
+    if (this.#haReleases.some((r) => r.featureId === input.featureId && !r.decision)) {
+      throw new PlatformRuleError('HA_RELEASE_ALREADY_OPEN', '该功能已有待决记录。');
+    }
+    if (input.integrationBranch !== this.#integrationBranch || input.reviewerId !== this.#reviewer) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '目标或指定检视者不匹配。');
+    }
+    if (!isText(input.reviewedCommit) || !isText(input.attemptId) || !isText(input.validationReportId)) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '检视证据缺失。');
+    }
+    if (!isInstant(input.openedAt) || !isInstant(input.deadline) || Date.parse(input.deadline) <= Date.parse(input.openedAt)) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '截止必须晚于开立时间。');
+    }
+    if (
+      !Array.isArray(input.verification) ||
+      input.verification.length === 0 ||
+      input.verification.some((v) => !isText(v.command) || !isPositiveInt(v.timeoutMs))
+    ) {
+      throw new PlatformRuleError('HA_RELEASE_INVALID', '验证摘要必须非空且有效。');
+    }
+    const record = Object.freeze({ ...input, runId: this.#id, verification: Object.freeze([...input.verification]) });
+    this.#haReleases.push(record);
+    return record;
+  }
+
+  decideHaRelease(
+    input: {
+      featureId: string;
+      missionId: string;
+      reviewedCommit: string;
+      attemptId: string;
+      validationReportId: string;
+      target: string;
+      as: string;
+      confirmedBy: string;
+      action: 'approve' | 'send_back';
+      reason?: string;
+    },
+    now: string,
+  ): HaRelease {
+    this.#assertRunning();
+    if (input.action !== 'approve' && input.action !== 'send_back') {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '决定动作无效。');
+    }
+    if (input.action === 'send_back' && !isText(input.reason)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '打回理由必填。');
+    }
+    const index = this.#haReleases.findIndex((item) => item.featureId === input.featureId && !item.decision);
+    const release = this.#haReleases[index];
+    if (!release) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '没有该功能的待决记录。');
+    }
+    const bindingMatches =
+      release.missionId === input.missionId &&
+      release.reviewedCommit === input.reviewedCommit &&
+      release.attemptId === input.attemptId &&
+      release.validationReportId === input.validationReportId &&
+      release.integrationBranch === input.target &&
+      release.reviewerId === input.as;
+    if (!bindingMatches || !isText(input.confirmedBy) || !isInstant(now)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行绑定、签字或截止校验失败。');
+    }
+    // 截止时刻本身拒签，避免超时签字与过期判定各自认为自己生效。
+    if (Date.parse(now) >= Date.parse(release.deadline)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行已到截止时间，不能签字。');
+    }
+    const done = Object.freeze({
+      ...release,
+      decision: Object.freeze({
+        kind: input.action,
+        at: now,
+        by: input.as,
+        confirmedBy: input.confirmedBy,
+        ...(input.reason ? { reason: input.reason } : {}),
+      }),
+    });
+    this.#haReleases[index] = done;
+    return done;
+  }
+
+  expireHaRelease(featureId: string, now: string): HaRelease {
+    return this.#finishHaRelease(featureId, { kind: 'expired', at: now }, true);
+  }
+
+  invalidateHaRelease(featureId: string, reason: string, now: string): HaRelease {
+    if (!isText(reason)) throw new PlatformRuleError('HA_RELEASE_INVALID', '失效原因必填。');
+    return this.#finishHaRelease(featureId, { kind: 'invalidated', at: now, reason }, false);
+  }
+
+  #finishHaRelease(featureId: string, decision: HaReleaseDecision, due: boolean): HaRelease {
+    this.#assertRunning();
+    const index = this.#haReleases.findIndex((item) => item.featureId === featureId && !item.decision);
+    const release = this.#haReleases[index];
+    if (!release || !isInstant(decision.at)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行不可终结。');
+    }
+    if (due && Date.parse(decision.at) < Date.parse(release.deadline)) {
+      throw new PlatformRuleError('HA_RELEASE_REJECTED', '待放行尚未到截止时间。');
+    }
+    const done = Object.freeze({ ...release, decision });
+    this.#haReleases[index] = done;
+    return done;
+  }
+
   /** 正开着等决定的那张升级单。同一时刻最多一张。 */
   get currentEscalation(): PlanEscalation | undefined {
     return this.#escalations.find((e) => e.resolution === undefined);
@@ -435,6 +773,11 @@ export class PlanRun {
   /** 停了就是停了：终态，之后什么都不再收。 */
   get stopped(): PlanRunStop | undefined {
     return this.#stopped;
+  }
+
+  /** 源方案未纳入本次运行的条目。旧记录没有这段。 */
+  get sourceExclusions(): readonly PlanSourceExclusion[] | undefined {
+    return this.#sourceExclusions ? [...this.#sourceExclusions] : undefined;
   }
 
   /**
@@ -475,8 +818,7 @@ export class PlanRun {
   }
 
   /**
-   * 不经升级直接挂起交给人——比如分类判成 high_assurance：那条路永远要人放行，
-   * 问检视者也没用，它没有放行权。
+   * 不经升级直接挂起交给人——比如现做分类需要人工处理，今晚不建 Mission。
    */
   suspendFeature(featureId: string, needsDecision: string): void {
     this.#assertRunning();
@@ -508,10 +850,10 @@ export class PlanRun {
   }
 
   /**
-   * 驱动方主动停：集成分支不能再往上叠东西了（`unsafe`），或者驱动方自己出了
-   * 未预料的错（`crashed`）。跑着的功能挂起，原因原样交给人。
+   * 驱动方主动停：集成分支不安全（`unsafe`）、驱动方崩溃（`crashed`）或服务受控关闭
+   *（`service_shutdown`）。跑着的功能挂起，原因原样交给人。
    */
-  halt(reason: 'unsafe' | 'crashed', detail: string, at: string): void {
+  halt(reason: 'unsafe' | 'crashed' | 'service_shutdown', detail: string, at: string): void {
     this.#assertRunning();
     const open = this.currentEscalation;
     for (const feature of this.#features) {
@@ -526,10 +868,21 @@ export class PlanRun {
     this.#stop(reason, detail, at);
   }
 
+  /**
+   * 开升级单。已开满上限则**不开单**，同一次变更里把该功能挂起并以 escalation_limit 停。
+   * 先开再停会留下一张方案已停、choose 一律被拒、没人能定的单子。
+   * 开了单返回该单；到上限返回 undefined，驱动方据此停下、不等待、不放弃失败的 Mission。
+   */
   openEscalation(
-    input: { featureId: string; missionId?: string; failure: string; question: string },
+    input: {
+      featureId: string;
+      missionId?: string;
+      failure: string;
+      question: string;
+      answerable?: boolean;
+    },
     at: string,
-  ): PlanEscalation {
+  ): PlanEscalation | undefined {
     this.#assertRunning();
     this.#requireFeature(input.featureId);
     // 同一时刻只开一张：驱动方就在等这一张，第二张不会有人等。
@@ -541,14 +894,44 @@ export class PlanRun {
       );
     }
     this.#requireStatus(input.featureId, 'running');
+    const answerable = input.answerable === true;
+    if (answerable && !isText(input.missionId)) {
+      throw new PlatformRuleError(
+        'ANSWERABLE_MISSION_REQUIRED',
+        '可答复升级单必须绑定合法 missionId。',
+      );
+    }
+    // 空白原问开出去等于夜里没问题可答；trim 后空就拒，不能写成空串单。
+    if (answerable && !isText(input.question)) {
+      throw new PlatformRuleError(
+        'ANSWERABLE_QUESTION_REQUIRED',
+        '可答复升级单必须带协调者原问。',
+      );
+    }
+    const question = answerable ? clipEscalationText(input.question) : input.question;
+    const limit = this.#stopConditions.maxEscalations;
+    if (this.escalationsOpened >= limit) {
+      const mission = input.missionId ?? '（未记）';
+      this.#setFeature(input.featureId, {
+        status: 'suspended',
+        needsDecision: `${input.failure}（Mission ${mission}）。要你定：${question}`,
+      });
+      this.#stop(
+        'escalation_limit',
+        `已开 ${this.escalationsOpened} 张升级单，到了上限 ${limit}；${input.featureId} 这次失败没开单。`,
+        at,
+      );
+      return undefined;
+    }
     const escalation: PlanEscalation = Object.freeze({
       id: `E-${this.#escalations.length + 1}`,
       featureId: input.featureId,
       ...(input.missionId !== undefined ? { missionId: input.missionId } : {}),
       failure: input.failure,
-      question: input.question,
+      question,
       openedAt: at,
       deadline: new Date(Date.parse(at) + this.#stopConditions.escalationTimeoutMs).toISOString(),
+      ...(answerable ? { answerable: true as const } : {}),
     });
     this.#escalations.push(escalation);
     return escalation;
@@ -563,11 +946,18 @@ export class PlanRun {
    * - `stop`：方案停下，当前功能 ⏸ 交给人；
    * - `rerun_isolated`：当前功能退回待跑，驱动方另开一条 Mission 重来。
    *
-   * 失败那条 Mission 怎么收（放名额、留分支）是驱动方的事，这里只记方案层的事实。
+   * `answer` 不在 REVIEWER_ACTIONS 里：只对 answerable 单记下答复，不改功能状态、
+   * 不占重跑额度。理由可省。失败那条 Mission 怎么收是驱动方的事。
    */
   choose(
     escalationId: string,
-    input: { action: unknown; reason: string; decidedBy: string; dropFeatures?: unknown },
+    input: {
+      action: unknown;
+      reason?: string;
+      decidedBy: string;
+      dropFeatures?: unknown;
+      answer?: string;
+    },
     at: string,
   ): PlanEscalation {
     this.#assertRunning();
@@ -586,6 +976,9 @@ export class PlanRun {
         `本次运行指定的检视者是 ${this.#reviewer}，不是 ${String(input.decidedBy)}。`,
       );
     }
+    if (input.action === 'answer') {
+      return this.#chooseAnswer(index, escalation, input, at);
+    }
     if (!(REVIEWER_ACTIONS as readonly unknown[]).includes(input.action)) {
       throw new PlatformRuleError(
         'REVIEWER_ACTION_FORBIDDEN',
@@ -597,6 +990,17 @@ export class PlanRun {
       throw new PlatformRuleError('DECISION_REASON_REQUIRED', '决定必须写理由。');
     }
     const action = input.action as ReviewerAction;
+    // 放在截止 / 身份 / 动作 / 理由之后：额度错误不能盖掉原有校验的先后。
+    if (action === 'rerun_isolated') {
+      const used = this.rerunsUsed(escalation.featureId);
+      const rerunLimit = this.#stopConditions.maxRerunsPerFeature;
+      if (used >= rerunLimit) {
+        throw new PlatformRuleError(
+          'RERUN_LIMIT_REACHED',
+          `${escalation.featureId} 已隔离重跑 ${used} 次，到了上限 ${rerunLimit}。请改选 skip / rescope / stop。`,
+        );
+      }
+    }
     const dropFeatures = this.#dropTargets(action, input.dropFeatures);
     const decided: PlanEscalation = Object.freeze({
       ...escalation,
@@ -657,15 +1061,78 @@ export class PlanRun {
       if (feature.status !== 'running') continue;
       this.#setFeature(feature.featureId, {
         status: 'suspended',
-        needsDecision:
-          open?.featureId === feature.featureId
-            ? `墙钟到点时这张升级单还没人定。要你定：${open.question}`
-            : `墙钟到点时它还在跑（Mission ${feature.missionIds.at(-1) ?? '?'}）。` +
-              '要你定：看它停在哪，续跑、重跑还是放弃。',
+        needsDecision: this.#wallClockNeedsDecision(feature, open),
       });
     }
     this.#stop('wall_clock', `方案级墙钟 ${formatHours(wallClockMs)} 小时到了。`, now);
     return this.#stopped;
+  }
+
+  #wallClockNeedsDecision(feature: PlanFeatureRecord, open: PlanEscalation | undefined): string {
+    if (open?.featureId === feature.featureId) {
+      return `墙钟到点时这张升级单还没人定。要你定：${open.question}`;
+    }
+    const missionId = feature.missionIds.at(-1) ?? '?';
+    const release = this.#haReleases.find(
+      (item) => item.featureId === feature.featureId && item.missionId === missionId,
+    );
+    if (release && !release.decision) {
+      return `墙钟到点时 HA 待放行还没定（Mission ${release.missionId}，所审提交 ${release.reviewedCommit}，截止 ${release.deadline}）。` +
+        '方案已停，PlanRun 里的放行 / 打回命令不再生效。要你定：亲自核对后按 HA 流程放行，还是打回重做。';
+    }
+    if (release?.decision) {
+      return `墙钟到点前 HA 待放行已有结论 ${release.decision.kind}` +
+        `${release.decision.reason ? `（${release.decision.reason}）` : ''}，时间 ${release.decision.at}；` +
+        `方案来不及处理，没有合并，也没开升级单（Mission ${missionId}，所审提交 ${release.reviewedCommit}）。` +
+        '方案已停，PlanRun 里的命令不再生效。要你定：亲自核对后按 HA 流程放行，还是打回重做。';
+    }
+    return `墙钟到点时它还在跑（Mission ${missionId}）。要你定：看它停在哪，续跑、重跑还是放弃。`;
+  }
+
+  /**
+   * 可答复单的受限结论：只记下答复，不改功能状态、不占重跑额度。
+   * 不进 REVIEWER_ACTIONS——否则旧四动作单也能被写成 answer。
+   */
+  #chooseAnswer(
+    index: number,
+    escalation: PlanEscalation,
+    input: { answer?: string; reason?: string; decidedBy: string; dropFeatures?: unknown },
+    at: string,
+  ): PlanEscalation {
+    if (escalation.answerable !== true) {
+      throw new PlatformRuleError(
+        'ESCALATION_NOT_ANSWERABLE',
+        `升级单 ${escalation.id} 不是可答复单，不能 answer。`,
+      );
+    }
+    if (input.dropFeatures !== undefined) {
+      throw new PlatformRuleError(
+        'RESCOPE_TARGET_INVALID',
+        '只有「重划剩余范围」能带删除名单，answer 不能。',
+      );
+    }
+    if (typeof input.answer !== 'string') {
+      throw new PlatformRuleError('DECISION_ANSWER_INVALID', '答复必须是 1–4000 字的字符串。');
+    }
+    const answer = input.answer.trim();
+    if (answer.length < 1 || answer.length > ESCALATION_TEXT_LIMIT) {
+      throw new PlatformRuleError('DECISION_ANSWER_INVALID', '答复必须是 1–4000 字的字符串。');
+    }
+    const reason =
+      typeof input.reason === 'string' && input.reason.trim() !== '' ? input.reason : undefined;
+    const decided: PlanEscalation = Object.freeze({
+      ...escalation,
+      resolution: Object.freeze({
+        kind: 'decided' as const,
+        action: 'answer' as const,
+        answer,
+        ...(reason !== undefined ? { reason } : {}),
+        decidedBy: input.decidedBy,
+        decidedAt: at,
+      }),
+    });
+    this.#escalations[index] = decided;
+    return decided;
   }
 
   #dropTargets(action: ReviewerAction, raw: unknown): readonly string[] | undefined {

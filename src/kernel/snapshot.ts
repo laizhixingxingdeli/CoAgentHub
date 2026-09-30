@@ -19,7 +19,7 @@ import type {
 
 export interface AttemptSnapshot {
   id: string;
-  kind: 'coordinator' | 'executor';
+  kind: 'coordinator' | 'executor' | 'independent_reviewer';
   missionId?: string;
   workItemId?: string;
   status: 'in_progress' | 'succeeded' | 'failed';
@@ -96,6 +96,19 @@ export interface MissionSnapshot {
   workItems: WorkItemSnapshot[];
   coordinatorAttempts: AttemptSnapshot[];
   coordinatorSeq: number;
+  /**
+   * 独立检视 Attempt。老快照可缺；restore 时缺省/非数组 -> []。
+   * 不把检视结论写进 WorkItem.reviews。
+   */
+  independentReviewerAttempts?: AttemptSnapshot[];
+  independentReviewerSeq?: number;
+  /** 追加式 Mission 级检视记录。老快照可缺；restore 时缺省/畸形 -> []。 */
+  independentReviews?: unknown[];
+  /** 不开 Attempt 时留下的可查询原因。老快照可缺。 */
+  independentReviewBlockReason?: string;
+  independentReviewBlockDetail?: string;
+  /** 当前 in_progress 检视 Attempt 开审时冻住的 revision / HEAD / 证据指纹。 */
+  independentReviewOpen?: unknown;
 }
 
 export interface ProjectSnapshot {

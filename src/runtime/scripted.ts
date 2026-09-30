@@ -68,6 +68,12 @@ export interface Script {
    * Never inferred from tool names.
    */
   readonly commandActivityClassification?: 'v1';
+  /**
+   * 可选、不可信的采集摘要。只在步骤跑完的正常终态透传；
+   * 挂住/被杀/连不上不带——否则旧脚本会无中生有伪零，墙钟掐掉后还会自称 complete。
+   * 不从 tool 名或 transcript 猜 read 返回值。
+   */
+  readonly contextMetrics?: unknown;
 }
 
 /** 按 `${role}:${workItemId ?? '-'}:${第几次}` 取脚本。 */
@@ -257,6 +263,7 @@ export class ScriptedRuntime implements AgentRuntime {
         ...(script.queryOutcome === 'failed'
           ? { failureMessage: script.upstreamFailure ?? 'query failed' }
           : {}),
+        ...(script.contextMetrics !== undefined ? { contextMetrics: script.contextMetrics } : {}),
       };
     };
 

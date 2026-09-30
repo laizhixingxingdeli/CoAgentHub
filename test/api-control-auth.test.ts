@@ -20,6 +20,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
 import { Platform } from '../src/application/platform.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const OPERATOR: ControlPrincipal = { id: 'op-1', role: 'operator' };
 const VIEWER: ControlPrincipal = { id: 'vw-1', role: 'viewer' };
@@ -72,7 +73,7 @@ before(async () => {
     agentPool: new InMemoryAgentPoolRepository(),
     resolveControlPrincipal: resolveFromHeader,
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
@@ -412,6 +413,33 @@ describe('控制面鉴权骨架', () => {
     assert.notEqual(operator.json.error, 'CONTROL_FORBIDDEN');
   });
 
+  test('请求体自述 operator 不能代替控制头；错误体不回显凭据', async () => {
+    const missing = await post('/api/missions', {
+      projectId: 'P-auth',
+      missionId: 'M-spoof-body',
+      contract: CONTRACT,
+      role: 'operator',
+      id: 'op-1',
+    });
+    assert.equal(missing.status, 401);
+    assert.equal(missing.json.error, 'CONTROL_UNAUTHORIZED');
+    assertNoCredentialEcho(missing.text);
+
+    const viewerSpoof = await post(
+      '/api/missions',
+      {
+        projectId: 'P-auth',
+        missionId: 'M-spoof-viewer',
+        contract: CONTRACT,
+        role: 'operator',
+      },
+      control(VW_TOKEN),
+    );
+    assert.equal(viewerSpoof.status, 403);
+    assert.equal(viewerSpoof.json.error, 'CONTROL_FORBIDDEN');
+    assertNoCredentialEcho(viewerSpoof.text);
+  });
+
   test('health/version 保持公开，不因注入 control resolver 改变', async () => {
     const health = await fetch(`${base}/api/health`);
     assert.equal(health.status, 200);
@@ -438,7 +466,7 @@ describe('默认不注入 resolver', () => {
       tokens: new RunTokenRegistry(),
       deliveries,
     });
-    await new Promise<void>((resolve) => plain.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(plain, 0);
     const plainBase = `http://127.0.0.1:${(plain.address() as AddressInfo).port}`;
     try {
       const res = await fetch(`${plainBase}/api/missions`, {

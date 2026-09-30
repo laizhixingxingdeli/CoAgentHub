@@ -445,6 +445,32 @@ export interface ValidationReport {
  * - `authority`：独立权威；validator 时必有（reportId 在 authority 内，不另造 validationReportId）。
  *   legacy / 直接 kernel review 可不带。
  */
+/** L2 对一条验收标准的结论（方案 §11）。 */
+export type AcceptanceStatus = 'pass' | 'fail' | 'unverified' | 'not_applicable';
+
+export const ACCEPTANCE_STATUSES: readonly AcceptanceStatus[] = Object.freeze([
+  'pass',
+  'fail',
+  'unverified',
+  'not_applicable',
+]);
+
+/**
+ * 评审对工单里一条验收标准的交代。
+ *
+ * 为什么要逐条：一句总结里「都过了」和「三条过了、第四条没法验」看起来一样，
+ * 而后者正是 L3 最需要看到的。
+ */
+export interface AcceptanceResult {
+  /** 工单 acceptance 原文。 */
+  readonly criterion: string;
+  readonly status: AcceptanceStatus;
+  /** pass 时的证据。 */
+  readonly evidence?: string;
+  /** unverified / not_applicable 时的原因。 */
+  readonly note?: string;
+}
+
 export interface ReviewRecord {
   readonly attemptId?: string;
   readonly submittedAttemptId?: string;
@@ -452,6 +478,61 @@ export interface ReviewRecord {
   readonly verdict: 'accept' | 'reject';
   readonly reasons: readonly string[];
   readonly requiredChanges: readonly string[];
+  /** 协调者评审的逐条结果；机器评审与旧快照没有。 */
+  readonly acceptanceResults?: readonly AcceptanceResult[];
+}
+
+/**
+ * 独立检视结论（Mission 级，追加式）。
+ *
+ * 为什么不进 WorkItem.ReviewRecord：那是 L2/validator 对单张工单的验收，
+ * 既不绑定契约 revision / 被审 HEAD，也不代表与协调者、执行者独立的检视。
+ * 混进去之后读取方分不清「工单过了」和「独立检视过了」。
+ */
+export type IndependentReviewVerdict = 'pass' | 'send_back';
+
+export type IndependentReviewBlockReason =
+  | 'no_candidates'
+  | 'all_candidates_conflict'
+  | 'history_missing_profile'
+  | 'not_awaiting_review'
+  | 'not_delivered'
+  | 'concurrent_attempt'
+  | 'reviewed_commit_unavailable'
+  | 'work_items_unfinished';
+
+export interface IndependentReviewL2Ref {
+  readonly workItemId: string;
+  readonly submittedAttemptId?: string;
+  readonly reviewAttemptId?: string;
+}
+
+export interface IndependentReviewRecord {
+  readonly missionId: string;
+  readonly reviewerAttemptId: string;
+  readonly reviewerProfileId: string;
+  readonly contractRevision: number;
+  readonly reviewedCommit: string;
+  readonly l2ReviewRefs: readonly IndependentReviewL2Ref[];
+  readonly validationReportId?: string;
+  /**
+   * 开审时冻住的 L2 逐条结果指纹。平台生成、kernel 不解释。
+   * 证据一变，读取方用它判断旧 pass 是否还有效。
+   */
+  readonly l2Fingerprint: string;
+  readonly verdict: IndependentReviewVerdict;
+  readonly reasons: readonly string[];
+  readonly recordedAt: string;
+}
+
+/** 开独立检视 Attempt 时冻住的对照物；交结论时再核一次。 */
+export interface IndependentReviewOpen {
+  readonly attemptId: string;
+  readonly contractRevision: number;
+  readonly reviewedCommit: string;
+  readonly l2Fingerprint: string;
+  readonly l2ReviewRefs: readonly IndependentReviewL2Ref[];
+  readonly validationReportId?: string;
 }
 
 export interface BlockedRecord {
@@ -557,9 +638,8 @@ export interface WorkspaceRef {
  * 人工放行的一模一样。不记权威就回答不了「这是谁放的」——而出事后第一个要问的
  * 就是这个。
  *
- * `human` 的 `principalId` 可缺：`l3.ts` 目前没有身份概念，只有注入
- * ControlPrincipal 时才知道是谁。**宁可记「人，但不知道是谁」，也不要留空让它
- * 看起来像没人放行过。**
+ * `human` 的 `principalId` 可缺：公开入口仍然可以只记「人」。**宁可记「人，但不知道是谁」，也不要留空让它看起来像没人放行过。**
+ * 检视者代签走 `reviewer`，不伪装成 human。
  */
 export type FinalReviewAuthority =
   | { readonly kind: 'human'; readonly principalId?: string }
@@ -579,6 +659,16 @@ export type FinalReviewAuthority =
       readonly kind: 'plan';
       readonly planRunId: string;
       readonly escalationId: string;
+    }
+  | {
+      /**
+       * 用户确认之后由检视者代签。确认人是调用方声明的，平台没有身份名册、
+       * 不宣称已经核对过那一次点击。确认时刻用平台时钟，不接受调用方传入的时间。
+       */
+      readonly kind: 'reviewer';
+      readonly reviewerId: string;
+      readonly confirmedBy: string;
+      readonly confirmedAt: string;
     };
 
 export interface FinalReview {

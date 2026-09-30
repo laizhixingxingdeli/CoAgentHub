@@ -39,6 +39,7 @@ import type {
 } from '../src/application/validation/ports.ts';
 import type {
   DecisionAnswerSet,
+  DecisionHook,
   DecisionProvider,
   DecisionRequest,
 } from '../src/application/ports.ts';
@@ -155,6 +156,8 @@ function harness(opts?: {
     reports: ValidationReportRepository;
   };
   decisionProvider?: DecisionProvider;
+  /** 注入 provider 时跑哪些钩子。这组测的就是 PRE shadow，缺省显式开 PRE（J1 之后平台缺省不开）。 */
+  decisionHooks?: ReadonlySet<DecisionHook>;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
   diffFacts?: DiffFactReader;
@@ -187,7 +190,12 @@ function harness(opts?: {
     activity,
     clock,
     ids,
-    ...(opts?.decisionProvider ? { decisionProvider: opts.decisionProvider } : {}),
+    ...(opts?.decisionProvider
+      ? {
+          decisionProvider: opts.decisionProvider,
+          decisionHooks: opts.decisionHooks ?? new Set<DecisionHook>(['PRE_DISPATCH']),
+        }
+      : {}),
     ...(validation ? { validation } : {}),
   });
 
@@ -477,6 +485,27 @@ describe('Platform.dispatchLightweightWorkItem', () => {
     const dispatched = events.filter((e) => e.kind === 'work_item.dispatched');
     assert.equal(dispatched.length, 1);
     assert.equal(dispatched[0]?.attemptId, undefined);
+  });
+
+  test('PRE 没开（J1 缺省）：Lightweight 派发照常，0 次 decide、0 条 decision.shadow', async () => {
+    const sink = { calls: 0 };
+    const provider: DecisionProvider = {
+      kind: 'count',
+      async decide(): Promise<DecisionAnswerSet> {
+        sink.calls += 1;
+        return { answers: {} };
+      },
+    };
+    const h = harness({
+      decisionProvider: provider,
+      decisionHooks: new Set<DecisionHook>(['POST_EXECUTION']),
+      withRealValidation: false,
+    });
+    const { missionId } = await createLightweightMission(h.projects);
+    const { workItemId } = await h.platform.createLightweightWorkItem(missionId, { order: ORDER_WITH_VALIDATION });
+    assert.deepEqual(await h.platform.dispatchLightweightWorkItem(missionId, workItemId), { dispatched: workItemId });
+    assert.equal(sink.calls, 0);
+    assert.equal((await h.activity.list(missionId)).filter((e) => e.kind === 'decision.shadow').length, 0);
   });
 
   test('provider 失败仍 dispatch；不创建 Coordinator Attempt', async () => {
@@ -799,6 +828,38 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
     const okReport = await legacy.validation!.reports.get(ok.reportId);
     assert.equal(okReport?.checks.some((c) => c.kind === 'forbidden-paths'), false);
     assert.equal(okReport?.checks.some((c) => c.kind === 'diff-size'), false);
+  });
+
+  test('VAL-002：恰好到上限（1 个文件 / 5 行，上限 1 / 5）→ accept', async () => {
+    // E1 的 CANARY-LW-2：执行者只改了允许的那一个文件，旧语义把「最多 1 个」读成「一个都不许改」，
+    // 机器验收判超限，Lightweight 没有升级出口，Mission 就停在 stalled。
+    const h = harness({
+      runner: fakeRunner(),
+      paths: fakePaths(['src/foo.ts']),
+      diffFacts: {
+        async measureLines() {
+          return { changedLines: 5, unknown: [] };
+        },
+      },
+    });
+    const submitted = await upToSubmittedLightweight(h, {
+      order: {
+        ...ORDER_BASE,
+        allowedScope: ['src/foo.ts'],
+        validation: { commands: [], diffSize: { maxChangedFiles: 1, maxChangedLines: 5 } },
+      },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: submitted.missionId,
+      workItemId: submitted.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, true);
+    assert.equal(out.status, 'accepted');
+    const report = await h.validation!.reports.get(out.reportId);
+    const ds = report?.checks.find((c) => c.kind === 'diff-size');
+    assert.equal(ds?.passed, true);
+    assert.deepEqual(ds?.diffSize?.used, { changedFiles: 1, changedLines: 5 });
   });
 
   test('missing/empty validation.commands：只跑 changed-paths 可通过', async () => {
@@ -1241,7 +1302,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
       () =>
         h.platform.reviewExecutionResult('M1', exec, {
           workItemId,
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER_BASE.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['no'],
           requiredChanges: [],
         }),
@@ -1250,7 +1311,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
 
     await h.platform.reviewExecutionResult('M1', coord, {
       workItemId,
-      verdict: 'accept',
+      verdict: 'accept', acceptanceResults: ORDER_BASE.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
       reasons: ['ok'],
       requiredChanges: [],
     });
@@ -1280,5 +1341,117 @@ describe('Standard 回归：Lightweight 不放宽', () => {
     });
     await h.platform.dispatchWorkItems('M1', coord, [workItemId]);
     assert.equal(sink.calls, 1);
+  });
+});
+
+describe('Platform.promoteLightweightAfterValidation（§4.3 接线）', () => {
+  const failingRunner = () =>
+    fakeRunner(async () => ({ exitCode: 1, timedOut: false, durationMs: 1, output: 'FAIL' }));
+
+  async function failedSubmission() {
+    const h = harness({ runner: failingRunner(), paths: fakePaths(['src/foo.ts']) });
+    const s = await upToSubmittedLightweight(h);
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, false);
+    return { h, s, out };
+  }
+
+  test('验收没过 → 凭当前这份报告升级 Standard，工作项留给协调者做 L2', async () => {
+    const { h, s, out } = await failedSubmission();
+    const { changed, promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(changed, true);
+    assert.equal(promotion.triggerCode, 'validator_failure_unrepairable');
+    assert.match(promotion.triggerRule, new RegExp(`${out.reportId} 未通过：command：`));
+    assert.ok(promotion.validationReportIds.includes(out.reportId), '升级记录要能指回那份报告');
+
+    const view = await h.platform.getMissionView(s.missionId);
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.status, 'planning');
+    assert.equal(view.workItems[0]!.status, 'submitted');
+    const { item } = await liveItem(h.projects, s.projectId, s.missionId, s.workItemId);
+    assert.equal(item.reviews.length, 0, '机器没有替协调者下结论');
+  });
+
+  test('改动超过 3 个文件：验收过了也不放行（held），凭报告升级 changed_files_gt_3', async () => {
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'];
+    const h = harness({ paths: fakePaths(files) });
+    const s = await upToSubmittedLightweight(h, {
+      order: { ...ORDER_WITH_VALIDATION, allowedScope: ['src/'] },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.passed, true);
+    assert.equal(out.status, 'submitted');
+    assert.equal(out.held, 'changed_files_gt_3');
+    const { item } = await liveItem(h.projects, s.projectId, s.missionId, s.workItemId);
+    assert.equal(item.reviews.length, 0, '规模超了就不该有 validator accept');
+
+    const { promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(promotion.triggerCode, 'changed_files_gt_3');
+    assert.match(promotion.triggerRule, /实际改动 4 个文件/);
+  });
+
+  test('跨 3 个顶层目录：held 并升级 top_level_modules_gt_2', async () => {
+    const h = harness({ paths: fakePaths(['a/x.ts', 'b/y.ts', 'c/z.ts']) });
+    const s = await upToSubmittedLightweight(h, {
+      order: { ...ORDER_WITH_VALIDATION, allowedScope: ['a/', 'b/', 'c/'] },
+    });
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.held, 'top_level_modules_gt_2');
+    const { promotion } = await h.platform.promoteLightweightAfterValidation(s.missionId, out.reportId);
+    assert.equal(promotion.triggerCode, 'top_level_modules_gt_2');
+  });
+
+  test('规模内且通过：照旧由 validator accept，不带 held', async () => {
+    const h = harness({ paths: fakePaths(['src/foo.ts']) });
+    const s = await upToSubmittedLightweight(h);
+    const out = await h.platform.validateAndAcceptLightweightWorkItem({
+      missionId: s.missionId,
+      workItemId: s.workItemId,
+      cwd: '/cwd',
+    });
+    assert.equal(out.status, 'accepted');
+    assert.equal(out.held, undefined);
+  });
+
+  test('拒收：报告不存在 / 不属于这条 Mission / 不是当前这次提交 / 没有升级理由；拒收后仍是 lightweight', async () => {
+    const { h, s, out } = await failedSubmission();
+    const stored = (await h.reports.get(out.reportId))!;
+    await h.reports.save({ ...stored, id: 'VR-foreign', missionId: 'M-other' });
+    await h.reports.save({ ...stored, id: 'VR-old', attemptId: 'W-1.exec-0' });
+    await h.reports.save({
+      ...stored,
+      id: 'VR-clean',
+      passed: true,
+      checks: stored.checks.map((check) => ({ ...check, passed: true })),
+    });
+
+    const cases: [string, string][] = [
+      ['VR-404', 'PROMOTION_REPORT_MISMATCH'],
+      ['VR-foreign', 'PROMOTION_REPORT_MISMATCH'],
+      ['VR-old', 'PROMOTION_REPORT_STALE'],
+      ['VR-clean', 'NO_PROMOTION_TRIGGER'],
+    ];
+    for (const [reportId, code] of cases) {
+      await assert.rejects(
+        h.platform.promoteLightweightAfterValidation(s.missionId, reportId),
+        (e: unknown) => codeOf(e) === code,
+        `${reportId} 应被拒为 ${code}`,
+      );
+    }
+    const view = await h.platform.getMissionView(s.missionId);
+    assert.equal(view.executionMode, 'lightweight');
+    assert.equal(view.promotions.length, 0);
   });
 });

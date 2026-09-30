@@ -15,6 +15,7 @@ export type {
 } from './attempt.ts';
 
 export {
+  ACCEPTANCE_STATUSES,
   EMPTY_USAGE,
   freezeDeep,
   freezePayload,
@@ -22,6 +23,8 @@ export {
   PROMOTION_TRIGGER_CODES,
 } from './payloads.ts';
 export type {
+  AcceptanceResult,
+  AcceptanceStatus,
   BlockedRecord,
   ComplexityAssessment,
   EscalationBody,
@@ -30,6 +33,11 @@ export type {
   EvidenceKind,
   EvidenceRecord,
   ExecutionBudget,
+  IndependentReviewBlockReason,
+  IndependentReviewL2Ref,
+  IndependentReviewOpen,
+  IndependentReviewRecord,
+  IndependentReviewVerdict,
   ExecutionOutcome,
   FinalReview,
   FinalReviewAuthority,
@@ -70,6 +78,8 @@ export type { WorkItemInit, WorkItemStatus, ReviewVerdict } from './work-item.ts
 
 export { Mission } from './mission.ts';
 export type { MissionInit, MissionStatus } from './mission.ts';
+
+export type { AttemptSnapshot, MissionSnapshot, ProjectSnapshot, WorkItemSnapshot } from './snapshot.ts';
 
 export { Project } from './project.ts';
 export type {

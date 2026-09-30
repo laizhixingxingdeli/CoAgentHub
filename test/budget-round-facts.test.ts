@@ -29,6 +29,7 @@ import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -79,7 +80,7 @@ const COORDINATOR_HAPPY: ScriptTable = {
         tool: 'coagent_review_execution_result',
         body: {
           workItemId: 'W-1',
-          verdict: 'accept',
+          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
           reasons: ['ok'],
           requiredChanges: [],
         },
@@ -145,7 +146,7 @@ async function harness(runtimes?: {
   });
   const tokens = new RunTokenRegistry();
   const server: Server = createApi({ platform, tokens, deliveries });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server, 0);
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   servers.push(server);
 
@@ -267,7 +268,7 @@ describe('BUDGET-001-S2 trusted round-start event', () => {
     assert.ok(events.some((e) => e.kind === 'attempt.started'));
   });
 
-  test('preflight non-counting: paused / awaiting_review / HA do not record rounds', async () => {
+  test('preflight non-counting: paused / awaiting_review do not record rounds', async () => {
     const h = await harness();
 
     // paused before any work
@@ -278,20 +279,6 @@ describe('BUDGET-001-S2 trusted round-start event', () => {
     });
     assert.equal(pausedOut.kind, 'waiting');
     assert.equal(roundEvents(await h.platform.getActivity('M-pause')).length, 0);
-
-    // HA fail-closed
-    const project = await h.projects.ensure('P');
-    project.createMission({
-      id: 'M-ha',
-      contract: CONTRACT,
-      executionMode: 'high_assurance',
-      runKind: 'mutation',
-      origin: { clientType: 'cli', conversationRef: 'local-cli' },
-    });
-    await h.projects.save(project);
-    const haOut = await h.makeOrchestrator().runMission('M-ha', { projectRoot: process.cwd() });
-    assert.equal(haOut.kind, 'stalled');
-    assert.equal(roundEvents(await h.platform.getActivity('M-ha')).length, 0);
 
     // awaiting_review: finish happy path then re-enter
     await h.platform.createMission({ projectId: 'P', missionId: 'M-rev', contract: CONTRACT });
@@ -305,6 +292,40 @@ describe('BUDGET-001-S2 trusted round-start event', () => {
     assert.equal(again.kind, 'awaiting_l3_review');
     const after = roundEvents(await h.platform.getActivity('M-rev')).length;
     assert.equal(after, before, 'awaiting_review re-entry must not add rounds');
+  });
+
+  // 旧不变式：HA 调度前 stalled、不记 round。E3a 让 HA 走 Standard 主链，round 与 Standard 同记。
+  test('HA 与 Standard 一样记 round', async () => {
+    const h = await harness();
+    await h.platform.createMission({ projectId: 'P', missionId: 'M-std-r', contract: CONTRACT });
+    const stdOut = await h.makeOrchestrator().runMission('M-std-r', {
+      projectRoot: process.cwd(),
+    });
+    assert.deepEqual(stdOut, { kind: 'awaiting_l3_review' });
+    const stdRounds = roundEvents(await h.platform.getActivity('M-std-r'));
+    assert.equal(stdRounds.length, 3);
+
+    // HA 用一套新的 harness：脚本化的协调者 / 执行者是按顺序消费的，和上面的 Standard 共用
+    // 同一套的话，脚本已被 Standard 用完，HA 只跑得出一轮，测不到「和 Standard 一样的主链」。
+    const hHa = await harness();
+    const project = await hHa.projects.ensure('P');
+    project.createMission({
+      id: 'M-ha',
+      contract: CONTRACT,
+      executionMode: 'high_assurance',
+      runKind: 'mutation',
+      origin: { clientType: 'cli', conversationRef: 'local-cli' },
+    });
+    await hHa.projects.save(project);
+    const haOut = await hHa.makeOrchestrator().runMission('M-ha', { projectRoot: process.cwd() });
+    // 主链 round 记完后接独立检视；本夹具无独立检视池，结局是 waiting，不是旧的 stalled。
+    assert.notEqual(haOut.kind, 'stalled');
+    assert.notEqual(haOut.kind, 'delivered');
+    const haRounds = roundEvents(await hHa.platform.getActivity('M-ha'));
+    assert.equal(haRounds.length, stdRounds.length);
+    for (const r of haRounds) {
+      assert.deepEqual(r.data, { schemaVersion: 1 });
+    }
   });
 
   test('append failure blocks the round (orchestrator does not hop)', async () => {

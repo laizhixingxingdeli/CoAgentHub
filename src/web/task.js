@@ -16,14 +16,33 @@
  * 「什么时候可以取消」的规则，迟早和平台判的不一样。
  */
 
-import { esc, num, stateChip, stageChip } from './projects.js';
+import { esc, nextRefresh, num, stateChip, stageChip } from './projects.js';
 import {
+  changesEmptyText,
+  changesErrorText,
+  changesFileCountText,
+  changesFileLinesText,
+  changesLineDeltaText,
+  changesLoadingText,
+  changesTitle,
+  commandCountLabel,
+  commandDetail,
+  contextMetricLegendLine,
+  contextMetricsMissingText,
+  contextMetricsTitle,
+  diffSummaryLabel,
   evidenceKindLabel,
   fieldLabel,
+  finalReviewSummary,
   formatAttemptId,
   formatUsage,
+  isRuntimeCommand,
   narrateEvent,
+  newFileLabel,
   nowDoing,
+  outputTailTitle,
+  pendingMemoryNote,
+  PLATFORM_ROLE_LABEL,
   reasonText,
   revisionLabel,
   roleBadge,
@@ -166,17 +185,25 @@ export function headerHtml(view, activity, nowIso) {
  * 切出一个组，W4 那种形状就从 6 个环节变成 7 个，而多出来的那个「开头的 L3 组」
  * 和真正收尾的那个 L3 组永远合不到一起——一个人分成两段显示，比少一段更误导。
  *
- * 所以：没有 attemptId 的事件全部收成一个组，**放在最后**。
+ * 所以：没有 attemptId 的事件按**真实角色**收成收尾组，仍放在最后。
+ * 只让平台 / L3 进平台组与 L3 组——L1/L2 的 orphan 硬塞进 L3，任务结束后
+ * 那一组看起来像检视者还在跑，比少一组更误导。
  */
 export function groupActivity(activity) {
   const rows = activity || [];
   const order = [];
   const buckets = new Map();
-  const orphans = [];
+  const orphans = {
+    coordinator: [],
+    executor: [],
+    other: [],
+    platform: [],
+    reviewer: [],
+  };
   for (const e of rows) {
     const id = e && e.attemptId ? String(e.attemptId) : '';
     if (!id) {
-      orphans.push(e);
+      orphans[orphanRole(e)].push(e);
       continue;
     }
     if (!buckets.has(id)) {
@@ -185,28 +212,143 @@ export function groupActivity(activity) {
     }
     buckets.get(id).push(e);
   }
-  const groups = order.map((id) => ({ attemptId: id, events: buckets.get(id) }));
-  if (orphans.length > 0) groups.push({ attemptId: '', events: orphans });
+  const groups = order.map((id) => ({
+    attemptId: id,
+    role: roleOfAttempt(id),
+    events: buckets.get(id),
+  }));
+  // 收尾组：L1/L2 不进 L3；平台与 L3 分开，L3 永远在最后（终审在尾上）。
+  const pushOrphan = (role) => {
+    const events = orphans[role];
+    if (events.length > 0) groups.push({ attemptId: '', role, events });
+  };
+  pushOrphan('coordinator');
+  pushOrphan('executor');
+  pushOrphan('other');
+  pushOrphan('platform');
+  pushOrphan('reviewer');
   return groups;
 }
 
-/** 组内最能代表这一跳的事件：优先非 attempt.started / ended（那两条只是开关门）。 */
+/**
+ * 没有 attemptId 的事件归哪一组。看 narrate 的徽章，不在页面再写一份 kind 表——
+ * 两份表一定会漂，漏一条就把 L2 的 waiting 画成 L3。
+ */
+function orphanRole(event) {
+  const told = narrateEvent(event);
+  if (told && told.untranslated) return 'other';
+  const badge = told && told.badge ? String(told.badge) : '';
+  if (badge === PLATFORM_ROLE_LABEL) return 'platform';
+  if (badge === 'L3' || badge.startsWith('L3')) return 'reviewer';
+  if (badge === 'L1' || badge.startsWith('L1')) return 'executor';
+  if (badge === 'L2' || badge.startsWith('L2')) return 'coordinator';
+  return 'other';
+}
+
+/**
+ * 环节在 DOM / 展开集里的键。有 attemptId 用它；收尾组不能都写成空串，
+ * 否则点开「平台」会把「L3」一起展开。L3 仍用空串，和旧的 data-attempt-id="" 对齐。
+ */
+function stageKey(group) {
+  if (group && group.attemptId) return String(group.attemptId);
+  const role = group && group.role;
+  if (role === 'platform') return 'platform';
+  if (role && role !== 'reviewer') return 'orphan-' + role;
+  return '';
+}
+
+/**
+ * 呈现用角色。平台有自己的徽章，色条跟 L3 同一档（都不是 L1/L2 那一跳）。
+ * 详情和列表必须走同一份：两份表一定会把平台画成检视者。
+ */
+function presentRole(group) {
+  const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
+  if (role === 'platform') {
+    return { role, tone: roleTone('reviewer'), badge: PLATFORM_ROLE_LABEL };
+  }
+  const toneRole = !role || role === 'other' ? 'coordinator' : role;
+  return { role, tone: roleTone(toneRole), badge: roleBadge(toneRole) };
+}
+
+/**
+ * 环节名。平台组不能走 stageName：空 attemptId 会被当成 L3。
+ * L1/L2 orphan 同样不能把空 id 喂给 stageName，否则「协调」会写成「L3 检视者」。
+ */
+function stageLabel(group, context) {
+  if (group && group.role === 'platform') return PLATFORM_ROLE_LABEL;
+  if (group && group.attemptId) return stageName(group.events, context);
+  if (!group || group.role === 'reviewer' || !group.role) return stageName(group && group.events, context);
+  const fakeId = group.role === 'executor' ? 'orphan.exec-1' : 'coord-orphan';
+  const fake = (group.events || []).map((e) => Object.assign({}, e, { attemptId: fakeId }));
+  return stageName(fake, context);
+}
+
+/** 组内最能代表这一跳的事件：优先非开关门、也非命令族（命令族折叠，不当摘要）。 */
 function representativeEvent(events) {
   const rows = events || [];
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const kind = rows[i] && rows[i].kind;
-    if (kind && kind !== 'attempt.started' && kind !== 'attempt.ended') return rows[i];
+    if (!kind || kind === 'attempt.started' || kind === 'attempt.ended') continue;
+    if (isRuntimeCommand(kind)) continue;
+    return rows[i];
   }
-  return rows.length > 0 ? rows[rows.length - 1] : null;
+  // 只剩开关门时仍用末条（那一跳确实只有开关）；命令族不当代表——
+  // 它们不在翻译表里，拿来当摘要会变成「未翻译」。
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const kind = rows[i] && rows[i].kind;
+    if (kind && !isRuntimeCommand(kind)) return rows[i];
+  }
+  return null;
+}
+
+/**
+ * 实际执行过的命令：只计 runtime.command.started。
+ * command_tracking 是开关，不是一条命令；同一 callId 打两次 started 仍是一条
+ * （平台会在重试/心跳里重复，按条数显示会把 1 条说成 20 条）。
+ */
+function startedCommands(events) {
+  const out = [];
+  const seen = new Set();
+  for (const e of events || []) {
+    if (!e || e.kind !== 'runtime.command.started') continue;
+    const callId = e.data && e.data.callId;
+    if (callId !== undefined && callId !== null && String(callId) !== '') {
+      const key = String(callId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+function commandFoldHtml(events) {
+  const cmds = startedCommands(events);
+  if (cmds.length === 0) return '';
+  const items = cmds
+    .map((e) => '<li class="cmd">' + esc(commandDetail(e)) + '</li>')
+    .join('');
+  return '<details class="cmd-fold">'
+    + '<summary class="cmd-fold-head">' + esc(commandCountLabel(cmds.length)) + '</summary>'
+    + '<ul class="cmd-list">' + items + '</ul>'
+    + '</details>';
 }
 
 /** 这一跳的用量一句话。没有 ended 事件时说的是原因，不是一个孤零零的 —。 */
-function stageUsageLine(events) {
+function stageUsageLine(events, group, ctx) {
   const rows = events || [];
+  const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
   const ended = rows.find((e) => e && e.kind === 'attempt.ended');
   const usage = ended && ended.data && ended.data.usage;
   if (usage) return usageLine(usage);
   if (ended) return '这一跳没有上报用量';
+  const reviewTail = !(group && group.attemptId) && (role === 'reviewer' || role === 'platform');
+  if (ctx && isTerminal(ctx.status)) {
+    // 任务已经结束还说「这一跳还没结束」是说谎——L3/平台尾段改报终审。
+    // 结论人话只出 narrate.finalReviewSummary：这里再写一份 verdict 映射一定会漂。
+    if (reviewTail) return finalReviewSummary(ctx.finalReview);
+    return '这一跳没有上报用量';
+  }
   return '这一跳还没结束，用量要等它收尾';
 }
 
@@ -347,29 +489,39 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
   });
   return groups
     .map((g) => {
-      const role = roleOfAttempt(g.attemptId);
-      const tone = roleTone(role);
+      const shown = presentRole(g);
+      const tone = shown.tone;
+      const name = stageLabel(g, context);
+      const badge = shown.badge;
+      const key = stageKey(g);
       const head = representativeEvent(g.events);
-      const summary = head ? narrateEvent(head, context).action : '';
+      const summary = head && !isRuntimeCommand(head.kind) ? narrateEvent(head, context).action : '';
       const rows = g.events
+        .filter((e) => !isRuntimeCommand(e && e.kind))
         .map((e) => eventRowHtml(e, indexOf.has(e) ? indexOf.get(e) : -1, selectedKey, context))
         .join('');
-      const selected = selectedAttemptId !== null && g.attemptId === selectedAttemptId;
+      const cmds = startedCommands(g.events);
+      const selected = selectedAttemptId !== null && key === selectedAttemptId;
       // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
       // 一上来就给所有环节加 open 等于没折叠。
       return '<details class="stage tone-' + esc(tone) + '"'
-        + ' data-attempt-id="' + esc(g.attemptId) + '"'
+        + ' data-attempt-id="' + esc(key) + '"'
         + (selected ? ' data-active="1"' : '')
-        + (expanded.has(g.attemptId) ? ' open' : '') + '>'
+        + (expanded.has(key) ? ' open' : '') + '>'
         + '<summary class="stage-head" data-stage-select>'
-        +   '<span class="stage-name">' + esc(stageName(g.events, context)) + '</span>'
-        +   '<span class="chip ' + esc(tone) + '">' + esc(roleBadge(role)) + '</span>'
+        +   '<span class="stage-name">' + esc(name) + '</span>'
+        +   '<span class="chip ' + esc(tone) + '">' + esc(badge) + '</span>'
         +   '<span class="stage-dur mono">'
         +     esc(formatDuration(firstAt(g.events), lastAt(g.events))) + '</span>'
-        +   '<span class="stage-usage">' + esc(stageUsageLine(g.events)) + '</span>'
+        +   '<span class="stage-usage">' + esc(stageUsageLine(g.events, g, context)) + '</span>'
+        +   (cmds.length > 0
+          ? '<span class="stage-cmds">' + esc('跑了 ' + commandCountLabel(cmds.length)) + '</span>'
+          : '')
         +   (summary ? '<span class="stage-summary">' + esc(summary) + '</span>' : '')
+        +   contextMetricsCompactHtml(g.events)
         + '</summary>'
         + '<ul class="evt-list">' + rows + '</ul>'
+        + commandFoldHtml(g.events)
         + '</details>';
     })
     .join('');
@@ -558,6 +710,24 @@ function escalationBlock(log, attemptId) {
     + '</ul>');
 }
 
+/**
+ * 平台收尾组：把组内事件已有的人话列出来，不套 L3 终审。
+ * 终审块会把别人的 SHA 贴到投递/记忆落地上，看起来像平台在放行。
+ */
+function platformEventsBlock(events, ctx) {
+  const rows = (events || []).filter((e) => e && !isRuntimeCommand(e.kind));
+  // 仅命令族时不另开空态 section：下面 stageDetailHtml 已有「还没有把正文写回平台」。
+  // 这里再写一句人话就是第二份叙事，和 narrate 会漂。
+  if (rows.length === 0) return '';
+  return section(PLATFORM_ROLE_LABEL, '<ul class="detail-list">'
+    + rows.map((e) => {
+      const told = narrateEvent(e, ctx);
+      const line = told.detail ? told.action + ' · ' + told.detail : told.action;
+      return '<li>' + esc(line) + '</li>';
+    }).join('')
+    + '</ul>');
+}
+
 /** L3 最终检视：结论、理由、改动落到哪。 */
 function finalReviewBlock(finalReview) {
   const r = finalReview;
@@ -593,7 +763,8 @@ export function stageDetailHtml(group, ctx, attempt) {
   }
   const context = ctx || {};
   const events = group.events || [];
-  const role = roleOfAttempt(group.attemptId);
+  const shown = presentRole(group);
+  const role = shown.role;
   const kinds = new Set(events.map((e) => (e && e.kind) || ''));
   const blocks = [];
 
@@ -602,6 +773,9 @@ export function stageDetailHtml(group, ctx, attempt) {
     blocks.push(finalReviewBlock(context.finalReview));
     const answered = (context.escalationLog || []).filter((x) => x && x.answer);
     if (answered.length > 0) blocks.push(escalationBlock(answered, ''));
+  } else if (role === 'platform') {
+    const plat = platformEventsBlock(events, context);
+    if (plat) blocks.push(plat);
   } else {
     if (kinds.has('plan.updated') || kinds.has('work_item.created')) {
       blocks.push(planBlock(context.plan));
@@ -622,21 +796,242 @@ export function stageDetailHtml(group, ctx, attempt) {
     if (e && e.workItemId && !workItemIds.includes(e.workItemId)) workItemIds.push(e.workItemId);
   }
   const causation = (events.find((e) => e && e.causationId) || {}).causationId;
+  // 非 L3 的无 attemptId 不能套 L3 那句「自己动手」——那是谎。
+  // 不新写叙事：就用 formatAttemptId 对空 id 的已有说明。
+  const attemptShown = group.attemptId
+    ? fieldLabel('attempt') + ' ' + String(group.attemptId)
+    : (role === 'reviewer'
+      ? fieldLabel('attempt') + ' 这一组事件不属于任何一跳（L3 自己动手的）'
+      : formatAttemptId('').label);
 
   return '<div class="detail-head">'
-    +   '<span class="detail-title">' + esc(stageName(events, context)) + '</span>'
-    +   '<span class="chip ' + esc(roleTone(role)) + '">' + esc(roleBadge(role)) + '</span>'
+    +   '<span class="detail-title">' + esc(stageLabel(group, context)) + '</span>'
+    +   '<span class="chip ' + esc(shown.tone) + '">' + esc(shown.badge) + '</span>'
     + '</div>'
     + (head
       ? '<div class="detail-sub">' + esc(narrateEvent(head, context).detail) + '</div>'
       : '<div class="detail-sub muted">这一跳还没有能说明白它在干什么的事件。</div>')
     + '<div class="detail-tech mono muted">'
-    +   esc(fieldLabel('attempt')) + ' '
-    +   esc(group.attemptId || '这一组事件不属于任何一跳（L3 自己动手的）')
+    +   esc(attemptShown)
     +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
     +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
     + '</div>'
+    + contextMetricsBlockHtml(events)
     + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>');
+}
+
+/* ===================== 上下文采集（attempt.ended.contextMetrics） ===================== */
+
+/**
+ * 一组事件里最后一次 attempt.ended 的 contextMetrics。
+ *
+ * 没这个键就是没上报：返回 null，调用方必须说「没有上报」，
+ * **不能**拿 0 字节顶上——0 看起来像「采集了，结果是空的」。
+ */
+export function contextMetricsFromEvents(events) {
+  let seen = false;
+  let metrics = null;
+  for (const e of events || []) {
+    if (!e || e.kind !== 'attempt.ended') continue;
+    const data = e.data;
+    if (!data || typeof data !== 'object'
+      || !Object.prototype.hasOwnProperty.call(data, 'contextMetrics')) {
+      seen = false;
+      metrics = null;
+      continue;
+    }
+    seen = true;
+    metrics = data.contextMetrics;
+  }
+  if (!seen) return null;
+  if (!metrics || typeof metrics !== 'object') return null;
+  return metrics;
+}
+
+function reportedNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 已上报的分类字节。某一类没出现在 payload 里就不进数组——缺席不是 0。
+ * 返回 null 表示整份都没上报（或上报了但没有任何可显示的数字）。
+ */
+export function contextMetricSegments(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const cats = [];
+  const briefBytes = metrics.brief ? reportedNumber(metrics.brief.renderedUtf8Bytes) : null;
+  if (briefBytes !== null) cats.push({ key: 'brief', bytes: briefBytes });
+  const tools = Array.isArray(metrics.tools) ? metrics.tools : [];
+  const order = ['read', 'grep', 'find', 'ls', 'bash'];
+  const seen = new Set();
+  for (const kind of order) {
+    let reported = false;
+    let sum = 0;
+    for (const t of tools) {
+      if (!t || t.kind !== kind) continue;
+      const n = reportedNumber(t.returnedUtf8Bytes);
+      if (n === null) continue;
+      sum += n;
+      reported = true;
+    }
+    if (reported) {
+      cats.push({ key: kind, bytes: sum });
+      seen.add(kind);
+    }
+  }
+  for (const t of tools) {
+    const kind = t && t.kind;
+    if (!kind || seen.has(kind) || order.includes(kind)) continue;
+    const n = reportedNumber(t.returnedUtf8Bytes);
+    if (n === null) continue;
+    cats.push({ key: String(kind), bytes: n });
+    seen.add(kind);
+  }
+  return cats.length > 0 ? cats : null;
+}
+
+function metricColor(key) {
+  return ({
+    brief: 'var(--status-queued)',
+    read: 'var(--status-running)',
+    grep: 'var(--status-unconfirmed)',
+    find: 'var(--status-done)',
+    ls: 'var(--accent)',
+    bash: 'var(--status-failed)',
+  })[key] || 'var(--muted-foreground)';
+}
+
+function contextMetricsBarHtml(cats) {
+  const rows = cats || [];
+  if (rows.length === 0) return '';
+  const total = rows.reduce((s, c) => s + (c.bytes > 0 ? c.bytes : 0), 0);
+  return '<div style="display:flex;height:8px;width:100%;background:var(--muted);border-radius:999px;overflow:hidden;margin:6px 0">'
+    + rows.map((c) => {
+      const flex = total > 0 ? Math.max(0, c.bytes) : 0;
+      return '<span style="flex:' + String(flex) + ';background:' + metricColor(c.key) + '"></span>';
+    }).join('')
+    + '</div>';
+}
+
+function contextMetricsLegendHtml(cats) {
+  const rows = cats || [];
+  if (rows.length === 0) return '';
+  return '<ul class="detail-list">'
+    + rows.map((c) => '<li>' + esc(contextMetricLegendLine(c.key, c.bytes)) + '</li>').join('')
+    + '</ul>';
+}
+
+export function contextMetricsBlockHtml(events) {
+  const cats = contextMetricSegments(contextMetricsFromEvents(events));
+  const body = cats
+    ? contextMetricsBarHtml(cats) + contextMetricsLegendHtml(cats)
+    : '<div class="note">' + esc(contextMetricsMissingText()) + '</div>';
+  return '<section class="detail-block">'
+    + '<h3 class="detail-block-title">' + esc(contextMetricsTitle()) + '</h3>'
+    + body
+    + '</section>';
+}
+
+function contextMetricsCompactHtml(events) {
+  const cats = contextMetricSegments(contextMetricsFromEvents(events));
+  const line = cats
+    ? cats.map((c) => contextMetricLegendLine(c.key, c.bytes)).join(' · ')
+    : contextMetricsMissingText();
+  return '<span class="stage-usage">' + esc(line) + '</span>';
+}
+
+/* ===================== 任务改动（GET /api/missions/:id/diff） ===================== */
+
+/**
+ * 拆 git diff --stat 文本。数字只在这一行真的写了才认；
+ * 没有 summary 行就让 added/deleted 留空，不补 0。
+ */
+export function parseDiffStat(stat) {
+  const files = [];
+  let added = null;
+  let deleted = null;
+  const raw = stat == null ? '' : String(stat);
+  for (const line of raw.split(/\r?\n/)) {
+    const summary = /(\d+)\s+files?\s+changed(?:.*?(\d+)\s+insertions?\(\+\))?(?:.*?(\d+)\s+deletions?\(-\))?/.exec(line);
+    if (summary && line.indexOf('|') === -1) {
+      added = summary[2] != null ? Number(summary[2]) : 0;
+      deleted = summary[3] != null ? Number(summary[3]) : 0;
+      continue;
+    }
+    const pipe = /^(.*?)\s+\|\s+(.*)$/.exec(line);
+    if (!pipe) continue;
+    const path = pipe[1].trim();
+    const right = pipe[2].trim();
+    if (right === '新建') {
+      files.push({ path, created: true, changed: null, raw: line });
+      continue;
+    }
+    const count = /^(\d+)\b/.exec(right);
+    files.push({
+      path,
+      created: false,
+      changed: count ? Number(count[1]) : null,
+      raw: line,
+    });
+  }
+  return { files, added, deleted };
+}
+
+/**
+ * 任务改动卡。空结果和失败都给解释句，不画一套空文件假装有改动。
+ * payload.error 是加载失败；files 空则信 stat 上的空态原文。
+ */
+export function changesCardHtml(payload) {
+  if (!payload) {
+    return '<div class="note">' + esc(changesLoadingText()) + '</div>';
+  }
+  if (payload.error) {
+    return '<div class="note">' + esc(changesErrorText(payload.error)) + '</div>';
+  }
+  const files = Array.isArray(payload.files) ? payload.files.map((x) => String(x)) : [];
+  const pending = Array.isArray(payload.pendingMemory) ? payload.pendingMemory.map((x) => String(x)) : [];
+  const stat = payload.stat == null ? '' : String(payload.stat);
+  const parsed = parseDiffStat(stat);
+  const byPath = new Map(parsed.files.map((f) => [f.path, f]));
+  if (files.length === 0 && pending.length === 0) {
+    const msg = stat.trim() ? stat.trim() : changesEmptyText();
+    return '<div class="detail-block-title">' + esc(changesTitle()) + '</div>'
+      + '<div class="note">' + esc(msg) + '</div>';
+  }
+  const delta = changesLineDeltaText(parsed.added, parsed.deleted);
+  const head = [changesFileCountText(files.length), delta].filter(Boolean).join(' · ');
+  const items = files.map((path) => {
+    const hit = byPath.get(path);
+    const bits = [path];
+    if (hit && hit.created) bits.push(newFileLabel());
+    else if (hit && hit.changed !== null && hit.changed !== undefined) {
+      const lines = changesFileLinesText(hit.changed);
+      if (lines) bits.push(lines);
+    }
+    const inner = hit && hit.raw
+      ? '<pre class="term">' + esc(hit.raw) + '</pre>'
+      : '<div class="note">' + esc(path) + '</div>';
+    return '<li><details class="order-card">'
+      + '<summary class="mono">' + esc(bits.join(' · ')) + '</summary>'
+      + inner
+      + '</details></li>';
+  }).join('');
+  const pendingNote = pendingMemoryNote(pending.length);
+  const pendingList = pending.length
+    ? '<div class="field-label">' + esc(pendingNote) + '</div>'
+      + '<ul class="detail-list">' + pending.map((p) => '<li class="mono">' + esc(p) + '</li>').join('') + '</ul>'
+    : '';
+  const fullStat = stat.trim()
+    ? '<details class="order-card"><summary>' + esc(diffSummaryLabel()) + '</summary>'
+      + '<pre class="term">' + esc(stat) + '</pre></details>'
+    : '';
+  return '<div class="detail-block-title">' + esc(changesTitle()) + '</div>'
+    + (head ? '<div class="detail-sub">' + esc(head) + '</div>' : '')
+    + (items ? '<ul class="file-list">' + items + '</ul>' : '')
+    + pendingList
+    + fullStat;
 }
 
 /* ===================== 右下：常驻实时输出 ===================== */
@@ -703,16 +1098,41 @@ export function liveMetaHtml(live) {
  * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
  * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
  */
+function liveTextLines(chunks) {
+  const lines = [];
+  for (const c of chunks || []) {
+    if (c && c.kind !== 'usage' && c.kind !== 'note') lines.push(c);
+  }
+  return lines;
+}
+
+function historicalOutputText(live) {
+  if (!live) return '';
+  const raw = live.historicalOutput;
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw);
+  return s.trim() === '' ? '' : s;
+}
+
 export function livePanelHtml(live) {
   const lines = (live && live.lines) || [];
+  const hasLive = liveTextLines(lines).length > 0;
+  // 有实时行就只画实时：旧跳的 output 不是当前在途输出，塞进终端会让人以为还在跑。
+  const historical = hasLive ? '' : historicalOutputText(live);
+  const note = historical
+    ? '<div class="live-note"><div>' + esc(outputTailTitle()) + '</div></div>'
+    : liveNoteHtml(lines);
+  const term = historical
+    ? esc(historical)
+    : liveLinesHtml(lines, !live || live.running !== false);
   return '<div class="live-bar">'
     +   '<label class="auto-scroll"><input type="checkbox" data-autoscroll'
     +     (live && live.autoScroll === false ? '' : ' checked') + ' /> 自动滚动</label>'
     +   '<span class="live-meta" data-live-meta>' + liveMetaHtml(live) + '</span>'
     + '</div>'
-    + '<div data-live-note>' + liveNoteHtml(lines) + '</div>'
+    + '<div data-live-note>' + note + '</div>'
     + '<pre class="term" data-term>'
-    +   liveLinesHtml(lines, !live || live.running !== false)
+    +   term
     + '</pre>';
 }
 
@@ -778,6 +1198,7 @@ export function skeletonHtml() {
   return '<div class="task">'
     + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
     + '<header class="card task-head" id="task-head"><div class="note">加载中…</div></header>'
+    + '<section class="card" id="task-changes"><div class="note">' + esc(changesLoadingText()) + '</div></section>'
     + '<div class="task-cols">'
     +   '<section class="task-left">'
     +     '<div class="pane-title">执行环节</div>'
@@ -797,18 +1218,36 @@ export function skeletonHtml() {
 /**
  * 面包屑要哪几段。抽成纯函数是因为这一格全凭一个字符串拼错就错，
  * 而合同（项目 / <projectId> / 任务 <missionId>）是能被验收的。
+ * 方案跑出来的 Mission 多一段可点的方案运行：只认 origin.clientType==='plan-run'
+ * 且 conversationRef 为 `plan-run:<id>`——其它形状一律当普通任务，
+ * 猜一段链到不存在的 #/plan-runs/ 比少一段更误导。
  *
  * 末段不带 href：它是当前页。给它一个指回自己的链接，看着就像还能往下点。
  * projectId 为空（后端挂了、读不到 view）时中间那段干脆没有——拿 — 当项目名
  * 链到一个不存在的项目页，比少一段更误导人。
  */
-export function crumbParts(projectId, missionId) {
+export function crumbParts(projectId, missionId, origin) {
   const parts = [{ text: '项目', href: '#/projects' }];
   if (projectId) {
     parts.push({ text: String(projectId), href: '#/projects/' + encodeURIComponent(projectId) });
   }
+  const planRunId = planRunIdFromOrigin(origin);
+  if (planRunId) {
+    parts.push({
+      text: '方案运行',
+      href: '#/plan-runs/' + encodeURIComponent(planRunId),
+    });
+  }
   parts.push({ text: '任务 ' + (missionId ?? ''), here: true });
   return parts;
+}
+
+function planRunIdFromOrigin(origin) {
+  if (!origin || origin.clientType !== 'plan-run') return '';
+  const ref = origin.conversationRef;
+  if (typeof ref !== 'string' || !ref.startsWith('plan-run:')) return '';
+  const id = ref.slice('plan-run:'.length);
+  return id ? id : '';
 }
 
 /**
@@ -821,7 +1260,7 @@ export function crumbParts(projectId, missionId) {
 function setCrumbs(st) {
   const bar = document.getElementById('crumbs');
   if (!bar) return;
-  const nodes = crumbParts(st.view && st.view.projectId, st.missionId).map((part) => {
+  const nodes = crumbParts(st.view && st.view.projectId, st.missionId, st.view && st.view.origin).map((part) => {
     const el = document.createElement(part.here ? 'span' : 'a');
     if (part.href) el.href = part.href;
     if (part.here) el.className = 'here';
@@ -846,7 +1285,7 @@ function setCrumbs(st) {
 /** 选中的那个环节。selectedAttemptId 为 null 表示谁都没选。 */
 function selectedGroup(st) {
   if (st.selectedAttemptId === null) return null;
-  return groupActivity(st.activity).find((g) => g.attemptId === st.selectedAttemptId) || null;
+  return groupActivity(st.activity).find((g) => stageKey(g) === st.selectedAttemptId) || null;
 }
 
 function paintHead(st) {
@@ -875,6 +1314,7 @@ function detailCtx(st) {
     result: v.result,
     escalationLog: v.escalationLog || [],
     finalReview: v.finalReview,
+    status: v.status,
   };
 }
 
@@ -913,6 +1353,42 @@ function paintDetail(st) {
   st.els.detail.innerHTML = stageDetailHtml(selectedGroup(st), detailCtx(st), st.attempt);
 }
 
+function paintChanges(st) {
+  if (!st.els.changes) return;
+  st.els.changes.innerHTML = changesCardHtml(st.changes);
+}
+
+/**
+ * 任务改动单独拉：不能跟 view/activity 绑在同一条 Promise.all 里——
+ * diff 失败不该把已经画出来的页头刷成「读不到这条任务」。
+ */
+function pullMissionChanges(st) {
+  if (st.changesInflight) return st.changesInflight;
+  const started = st.epoch;
+  st.changesInflight = get(
+    '/api/missions/' + encodeURIComponent(st.missionId) + '/diff',
+  ).then((body) => {
+    if (st.epoch !== started || !writable(st)) return;
+    st.changes = body && typeof body === 'object' ? body : { files: [], stat: '', pendingMemory: [] };
+    paintChanges(st);
+  }).catch((err) => {
+    if (st.epoch !== started || !writable(st)) return;
+    st.changes = { error: err && err.message ? String(err.message) : '' };
+    paintChanges(st);
+  }).finally(() => {
+    if (st.epoch === started) st.changesInflight = null;
+  });
+  return st.changesInflight;
+}
+
+function attemptOutputText(attempt) {
+  if (!attempt) return '';
+  const raw = attempt.output;
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw);
+  return s.trim() === '' ? '' : s;
+}
+
 /**
  * 这一跳还能不能开跑。终态（结束/中止）、等待停机、暂停都不再会来新输出，
  * 所以终端空着的时候该说「这里没留下输出」，而不是「还没开始」。
@@ -926,7 +1402,13 @@ function stillRunning(st) {
 /** 首帧建外框。之后每秒只重写里面（见 pushLive）。 */
 function paintLive(st) {
   st.els.live.innerHTML = livePanelHtml(
-    Object.assign({ autoScroll: st.autoScroll, running: stillRunning(st) }, st.live),
+    Object.assign({
+      autoScroll: st.autoScroll,
+      running: stillRunning(st),
+      historicalOutput: liveTextLines(st.live && st.live.lines).length
+        ? ''
+        : attemptOutputText(st.attempt),
+    }, st.live),
   );
   const term = st.els.live.querySelector('[data-term]');
   if (term) term.scrollTop = term.scrollHeight - term.clientHeight;
@@ -985,18 +1467,112 @@ async function loadAttempt(st, attemptId) {
   if (st.epoch !== epoch || st.selectedAttemptId !== attemptId) return;
   st.attempt = detail && detail.error ? null : detail;
   paintDetail(st);
+  // 实时还在滚就别重建终端外框（勾选框焦点会丢）；只有空着时才用这一跳的脱敏尾部填。
+  if (liveTextLines(st.live && st.live.lines).length === 0) paintLive(st);
+}
+
+function isPageVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
+function missionStatus(st) {
+  return (st.view && st.view.status) || '';
+}
+
+/**
+ * 这次响应还能不能写屏幕。
+ *
+ * 隐藏标签页、已经离页、换了一条任务：写下去就是把过期结果盖到别人的
+ * 展开/选中上。hidden 期间尤其不能把终态写进内存——下一次可见会拿
+ * 这份过期终态去问 nextRefresh，永远不再核对。
+ */
+function writable(st) {
+  return st.epoch === epoch
+    && st.els.head
+    && st.els.head.isConnected
+    && isPageVisible();
+}
+
+function sameJson(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function clearTimers(st) {
+  if (st.viewTimer) clearInterval(st.viewTimer);
+  if (st.liveTimer) clearInterval(st.liveTimer);
+  st.viewTimer = null;
+  st.liveTimer = null;
+}
+
+function armTimers(st, plan) {
+  clearTimers(st);
+  if (!st.els.head || !st.els.head.isConnected) return;
+  if (plan.intervalMs) {
+    st.viewTimer = setInterval(() => {
+      if (!st.els.head || !st.els.head.isConnected) {
+        stop(st);
+        return;
+      }
+      void pullView(st);
+    }, plan.intervalMs);
+  }
+  // 还没读到 view 时不算在途：首屏终态成功之前就拉 live，已结束的任务
+  // 会永远每秒打一次实时输出。
+  if (plan.liveIntervalMs && st.view) {
+    st.liveTimer = setInterval(() => {
+      if (!st.els.head || !st.els.head.isConnected) {
+        stop(st);
+        return;
+      }
+      void pollLive(st);
+    }, plan.liveIntervalMs);
+  }
+}
+
+function syncRefresh(st) {
+  if (!writable(st)) return;
+  armTimers(st, nextRefresh('mission', missionStatus(st), true));
+}
+
+function handleVisibility(st) {
+  if (st !== mounted || st.epoch !== epoch) return;
+  if (!st.els.head || !st.els.head.isConnected) {
+    stop(st);
+    return;
+  }
+  const visible = document.visibilityState !== 'hidden';
+  if (!visible) {
+    clearTimers(st);
+    return;
+  }
+  const plan = nextRefresh('mission', missionStatus(st), true);
+  // missedApply：隐藏期间有响应没落盘。就算内存里已经像终态，也先核对
+  // view/activity，否则会按过期终态停死、永远不再刷。
+  if (st.missedApply || plan.paths.includes('view') || plan.paths.includes('activity')) {
+    st.missedApply = false;
+    void pullView(st);
+  }
+  // 还没有 view 时 status 是空串，nextRefresh 会含 live；真去拉会把
+  // 「首屏终态不打 live」打穿。有 view 且仍在途才立刻补一刀。
+  if (st.view && plan.paths.includes('live')) void pollLive(st);
+  armTimers(st, plan);
 }
 
 /** 一轮游标拉取。只取 cursor 之后的，不从头。 */
 async function pollLive(st) {
   if (st.polling) return;
+  if (!isPageVisible()) return;
+  if (st.epoch !== epoch) return;
   st.polling = true;
   try {
     const body = await get(
       '/api/missions/' + encodeURIComponent(st.missionId)
         + '/live?cursor=' + st.live.cursor,
     );
-    if (st.epoch !== epoch) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
     const chunks = (body && body.chunks) || [];
     for (const c of chunks) {
       if (c && c.kind === 'usage') {
@@ -1018,6 +1594,68 @@ async function pollLive(st) {
   } finally {
     st.polling = false;
   }
+}
+
+/** 在途可见才拉 view+activity。失败且已经有旧数据时不把页面刷成白板。 */
+function pullView(st) {
+  if (!isPageVisible()) return st.viewInflight;
+  if (st.viewInflight) return st.viewInflight;
+  const started = st.epoch;
+  const first = !st.view;
+  const enc = encodeURIComponent(st.missionId);
+  st.viewInflight = Promise.all([
+    get('/api/missions/' + enc),
+    get('/api/missions/' + enc + '/activity'),
+  ]).then(([view, activity]) => {
+    if (st.epoch !== started) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
+    const rows = Array.isArray(activity) ? activity : [];
+    const unchanged = !first && sameJson(st.view, view) && sameJson(st.activity, rows);
+    st.view = view;
+    st.activity = rows;
+    if (first) {
+      setCrumbs(st);
+      paintHead(st);
+      paintUsage(st);
+      paintStages(st);
+      paintDetail(st);
+      paintLive(st);
+      paintChanges(st);
+      void pullMissionChanges(st);
+      // 首屏成功且已终态：nextRefresh 不含 live，这里就不会拉。
+      if (nextRefresh('mission', missionStatus(st), true).paths.includes('live')) {
+        void pollLive(st);
+      }
+    } else if (!unchanged) {
+      const expanded = collectExpanded(st);
+      setCrumbs(st);
+      paintHead(st);
+      paintUsage(st);
+      paintStages(st, expanded);
+      paintDetail(st);
+      void pullMissionChanges(st);
+    }
+    syncRefresh(st);
+  }).catch((err) => {
+    if (st.epoch !== started) return;
+    if (!writable(st)) {
+      st.missedApply = true;
+      return;
+    }
+    if (!st.view) {
+      // 一次都没读到就写「还没有任务」是撒谎：那是读不到，不是没有。
+      st.els.head.innerHTML = '<div class="note">读不到这条任务：' + esc(err.message) + '</div>';
+      st.els.stages.innerHTML = '<div class="empty">刷新一下重试</div>';
+      setCrumbs(st);
+    }
+    syncRefresh(st);
+  }).finally(() => {
+    if (st.epoch === started) st.viewInflight = null;
+  });
+  return st.viewInflight;
 }
 
 function selectStage(st, attemptId, expanded) {
@@ -1066,33 +1704,12 @@ function bind(st) {
 }
 
 function stop(st) {
-  if (st.timer) clearInterval(st.timer);
-  st.timer = null;
-}
-
-async function load(st) {
-  const enc = encodeURIComponent(st.missionId);
-  try {
-    const [view, activity] = await Promise.all([
-      get('/api/missions/' + enc),
-      get('/api/missions/' + enc + '/activity'),
-    ]);
-    if (st.epoch !== epoch) return;
-    st.view = view;
-    st.activity = Array.isArray(activity) ? activity : [];
-    setCrumbs(st);
-    paintHead(st);
-    paintUsage(st);
-    paintStages(st);
-    paintDetail(st);
-    paintLive(st);
-    void pollLive(st);
-  } catch (err) {
-    if (st.epoch !== epoch) return;
-    // 一次都没读到就写「还没有任务」是撒谎：那是读不到，不是没有。
-    st.els.head.innerHTML = '<div class="note">读不到这条任务：' + esc(err.message) + '</div>';
-    st.els.stages.innerHTML = '<div class="empty">刷新一下重试</div>';
-    setCrumbs(st);
+  clearTimers(st);
+  if (st.onVisibility) {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', st.onVisibility);
+    }
+    st.onVisibility = null;
   }
 }
 
@@ -1124,9 +1741,12 @@ export async function renderTaskPage(container, missionId) {
       stages: container.querySelector('#task-stages'),
       detail: container.querySelector('#task-detail'),
       live: container.querySelector('#task-live'),
+      changes: container.querySelector('#task-changes'),
     },
     view: null,
     activity: [],
+    changes: null,
+    changesInflight: null,
     // 环节与事件的选中态分两个键：环节决定详情取哪一份正文、去不去拉证据；
     // 事件只决定事件流里哪一行高亮。
     selectedAttemptId: null,
@@ -1137,19 +1757,17 @@ export async function renderTaskPage(container, missionId) {
     autoScroll: true,
     live: liveStateOf(missionId),
     polling: false,
-    timer: null,
+    viewInflight: null,
+    missedApply: false,
+    viewTimer: null,
+    liveTimer: null,
+    onVisibility: null,
   };
   mounted = st;
   bind(st);
-  // 离开本页时节点会离树；留着定时器就是一个每 1 秒打一次 API、
-  // 又把结果丢进垃圾桶的请求源。这一路只在这里断。
-  st.timer = setInterval(() => {
-    if (!st.els.head || !st.els.head.isConnected) {
-      stop(st);
-      return;
-    }
-    void pollLive(st);
-  }, 1000);
-
-  await load(st);
+  if (typeof document !== 'undefined') {
+    st.onVisibility = () => handleVisibility(st);
+    document.addEventListener('visibilitychange', st.onVisibility);
+  }
+  await pullView(st);
 }

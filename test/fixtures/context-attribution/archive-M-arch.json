@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "projectId": "P-synth",
+  "missionId": "M-arch",
+  "archivedAt": "2026-01-15T00:00:00.000Z",
+  "mission": {
+    "id": "M-arch",
+    "projectId": "P-synth",
+    "status": "completed",
+    "contractRevision": 1,
+    "planRevision": 1,
+    "escalations": [],
+    "workItems": [
+      {
+        "id": "W-arch-1",
+        "missionId": "M-arch",
+        "title": "synth archived work",
+        "status": "done",
+        "submitted": true,
+        "reviews": [],
+        "attempts": [
+          {
+            "id": "A-arch-exec",
+            "kind": "executor",
+            "status": "failed",
+            "evidence": [],
+            "usage": {
+              "input": 7,
+              "output": 1,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 8,
+              "quality": "estimated"
+            },
+            "resumeRef": "SENSITIVE-RESUME-REF",
+            "output": "FAKE-TOOL-STDOUT-BODY",
+            "profile": {
+              "id": "SENSITIVE-PROFILE-ID"
+            }
+          }
+        ],
+        "executorSeq": 1
+      }
+    ],
+    "coordinatorAttempts": [
+      {
+        "id": "A-arch-coord",
+        "kind": "coordinator",
+        "status": "succeeded",
+        "evidence": [],
+        "usage": {
+          "input": 80,
+          "output": 16,
+          "cacheRead": 2,
+          "cacheWrite": 1,
+          "total": 99,
+          "quality": "reported"
+        },
+        "toolActivity": [
+          {
+            "name": "read",
+            "at": "2026-01-14T00:00:00.000Z"
+          },
+          {
+            "name": "read",
+            "at": "2026-01-14T00:00:01.000Z"
+          },
+          {
+            "name": "bash",
+            "at": "2026-01-14T00:00:02.000Z"
+          }
+        ],
+        "resumeRef": "SENSITIVE-RESUME-REF",
+        "output": "FAKE-TOOL-STDOUT-BODY",
+        "profile": {
+          "id": "SENSITIVE-PROFILE-ID"
+        }
+      }
+    ],
+    "coordinatorSeq": 1
+  },
+  "events": [
+    {
+      "at": "2026-01-14T00:01:00.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-arch",
+      "attemptId": "A-arch-coord",
+      "kind": "context.truncated",
+      "messageId": "msg-arch-trunc-1",
+      "data": {
+        "role": "coordinator",
+        "budget": 16000,
+        "estimatedBefore": 18000,
+        "estimatedAfter": 15000,
+        "omittedSources": [
+          "FAKE-PROMPT-SYNTH-BODY"
+        ],
+        "overflow": true,
+        "remainingOverBudget": 2000
+      }
+    },
+    {
+      "at": "2026-01-14T00:02:00.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-arch",
+      "attemptId": "A-arch-exec",
+      "kind": "attempt.ended",
+      "data": {
+        "output": "FAKE-TOOL-STDOUT-BODY",
+        "key": "sk-ant-fake-not-a-real-key"
+      }
+    }
+  ],
+  "deliveries": []
+}

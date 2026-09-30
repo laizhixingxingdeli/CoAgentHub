@@ -37,7 +37,7 @@ export type RoutingDecision =
     }
   /** 不分类，按老路建 Standard Mission，协调者从头调查规划。 */
   | { readonly kind: 'standard_fallback'; readonly reason: string }
-  /** high_assurance：永远要人。检视者没有放行权，问它也没用，直接挂起。 */
+  /** 禁止副作用未证明安全，或其它必须停下来问人的路由；不建 Mission。 */
   | { readonly kind: 'needs_human'; readonly reason: string; readonly needsDecision: string };
 
 const PROPOSAL_KEYS = new Set(['facts', 'assessment', 'workOrder']);
@@ -48,9 +48,23 @@ function lastJsonBlock(output: string): string | undefined {
   return blocks.at(-1)?.[1];
 }
 
+/**
+ * 评估的时间盖平台的，不用模型的。
+ *
+ * 让模型填 `assessedAt`，它就编一个：E2 实测 7/7 全是编的整点，有半年前的，也有比实际晚
+ * 11 小时的——审计链上「这条路由什么时候定的」就成了假的。模型给了照样覆盖；没给也补上，
+ * 否则严格解析会因为缺这个字段把整份评估拒掉，白白退回 Standard。
+ */
+function stampAssessedAt(raw: unknown, assessedAt: string): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  return { ...(raw as Record<string, unknown>), assessedAt };
+}
+
+/** @param assessedAt 平台时钟给的时间（ISO），拿到分类员回答的那一刻。 */
 export function parseRoutingProposal(
   output: string,
-): { ok: true; proposal: RoutingProposal } | { ok: false; reason: string } {
+  assessedAt: string,
+): { ok: true; proposal: RoutingProposal } | { ok: false; reason: string; haForbiddenUnproven?: readonly string[] } {
   const block = lastJsonBlock(output);
   if (block === undefined) return { ok: false, reason: '输出里没有 ```json 块。' };
   let raw: unknown;
@@ -65,19 +79,21 @@ export function parseRoutingProposal(
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, reason: 'json 块不是对象。' };
   }
+  const haForbiddenUnproven = unprovenHaForbiddenSideEffects((raw as { facts?: unknown }).facts);
   const extra = Object.keys(raw).filter((key) => !PROPOSAL_KEYS.has(key));
   if (extra.length > 0) {
     // 多出来的键（尤其 route / executionMode）是在试图替分类器下结论。
-    return { ok: false, reason: `json 块里有不认识的键：${extra.join(', ')}。` };
+    return { ok: false, reason: `json 块里有不认识的键：${extra.join(', ')}。`, ...(haForbiddenUnproven.length ? { haForbiddenUnproven } : {}) };
   }
   const body = raw as { facts?: unknown; assessment?: unknown; workOrder?: unknown };
   try {
     const facts = parseTaskFactsStrict(body.facts);
-    const assessment = parseComplexityAssessmentStrict(body.assessment);
+    const assessment = parseComplexityAssessmentStrict(stampAssessedAt(body.assessment, assessedAt));
     if (assessment && assessment.decidedBy !== 'coordinator') {
       return {
         ok: false,
         reason: `评估是只读协调者做的，decidedBy 必须是 coordinator，收到 ${assessment.decidedBy}。`,
+        ...(haForbiddenUnproven.length ? { haForbiddenUnproven } : {}),
       };
     }
     const workOrder = body.workOrder;
@@ -90,7 +106,7 @@ export function parseRoutingProposal(
         scope.length === 0 ||
         !scope.every((item) => typeof item === 'string')
       ) {
-        return { ok: false, reason: 'workOrder 必须是对象且带非空的 allowedScope。' };
+        return { ok: false, reason: 'workOrder 必须是对象且带非空的 allowedScope。', ...(haForbiddenUnproven.length ? { haForbiddenUnproven } : {}) };
       }
     }
     return {
@@ -102,9 +118,28 @@ export function parseRoutingProposal(
       },
     };
   } catch (error) {
-    if (error instanceof ClassifiedMissionInputError) return { ok: false, reason: error.message };
+    if (error instanceof ClassifiedMissionInputError) return { ok: false, reason: error.message, ...(haForbiddenUnproven.length ? { haForbiddenUnproven } : {}) };
     throw error;
   }
+}
+
+/** 与平台 HA 建单闸同一组字段；只有严格 false 才证明安全。 */
+const HA_FORBIDDEN_SIDE_EFFECTS = [
+  'productionDeployRelease',
+  'externalPaidOp',
+  'destructiveData',
+  'unrecoverableExternalSideEffect',
+] as const;
+
+function unprovenHaForbiddenSideEffects(facts: unknown): string[] {
+  const body = facts !== null && typeof facts === 'object' && !Array.isArray(facts)
+    ? facts as Record<string, unknown>
+    : undefined;
+  const rawHa = body?.highAssurance;
+  const ha = rawHa !== null && typeof rawHa === 'object' && !Array.isArray(rawHa)
+    ? rawHa as Record<string, unknown>
+    : undefined;
+  return HA_FORBIDDEN_SIDE_EFFECTS.filter((key) => ha?.[key] !== false);
 }
 
 /**
@@ -125,7 +160,17 @@ export function decideRoute(
   proposal: RoutingProposal | undefined,
   feature: PlanFeatureSpec,
   unreadReason = '只读协调者没给出可用的事实。',
+  haForbiddenUnproven: readonly string[] = [],
 ): RoutingDecision {
+  if (!proposal && haForbiddenUnproven.length > 0) {
+    const fields = haForbiddenUnproven.join('、');
+    return {
+      kind: 'needs_human',
+      reason: `high_assurance 禁止副作用未证明为 false：${fields}`,
+      needsDecision: `分类触及禁止副作用（${fields}）：不建 Mission。` +
+        `要你定：亲自主导 ${feature.id}，还是去掉这些副作用后重排进方案？`,
+    };
+  }
   if (!proposal) return { kind: 'standard_fallback', reason: unreadReason };
   const classification = classifyTask({
     facts: proposal.facts,
@@ -137,24 +182,30 @@ export function decideRoute(
     classification,
   };
   const { recommended } = classification;
+  // 在其它分类结论之前检查；包括只读/query 的答案也不能掩盖未证明安全的副作用。
+  const forbidden = unprovenHaForbiddenSideEffects(proposal.facts);
+  if (forbidden.length > 0) {
+    const fields = forbidden.join('、');
+    return {
+      kind: 'needs_human',
+      reason: `high_assurance 禁止副作用未证明为 false：${fields}`,
+      needsDecision:
+        `分类触及禁止副作用（${fields}）：不建 Mission。` +
+        `要你定：亲自主导 ${feature.id}，还是去掉这些副作用后重排进方案？`,
+    };
+  }
   if (recommended.runKind === 'query') {
     return {
       kind: 'standard_fallback',
       reason: '只读协调者判它不用改代码。方案里的功能点不该是只读的，交给协调者完整核实。',
     };
   }
+  // HAOFF1：2026-09-28 用户决定先跑通功能、鉴权以后再加。恢复时删除此分支，并放回下方条件中的 HA 判断。
   if (recommended.executionMode === 'high_assurance') {
-    const why = classification.reasons.filter((r) => r.startsWith('highAssurance true')).join('；');
-    return {
-      kind: 'needs_human',
-      reason: why || 'high_assurance',
-      needsDecision:
-        `分类为 high_assurance（${why || classification.reasons.join('；')}）：按规定合并要人放行，` +
-        `夜里不跑。要你定：亲自主导 ${feature.id}，还是拆小之后重排进方案？`,
-    };
+    return { kind: 'standard_fallback', reason: 'HA 路暂时关闭（先把功能跑通，鉴权以后再加）：按普通 Standard 建单。' };
   }
-  if (recommended.executionMode === 'standard') {
-    // 平台禁止 Standard 带工单：那会把一张 Fast Lane 的单子混进 Standard。
+  if (/* recommended.executionMode === 'high_assurance' || */ recommended.executionMode === 'standard') {
+    // HA / Standard 都禁止带 Lightweight 工单；恢复 HA 路由后，合格 HA 把原始 facts 交给 createClassifiedMission。
     return { kind: 'classified', ...base };
   }
   const workOrder = proposal.workOrder;
@@ -233,8 +284,7 @@ verificationDifficulty 验证难度、coordinationNeed 协调依赖、recoveryDi
     "goalUncertainty": 0, "changeScope": 1, "operationalRisk": 1,
     "verificationDifficulty": 1, "coordinationNeed": 0, "recoveryDifficulty": 0,
     "reasons": ["每一维为什么这么判，一句话"],
-    "decidedBy": "coordinator",
-    "assessedAt": "<ISO 时间>"
+    "decidedBy": "coordinator"
   },
   "workOrder": {
     "objective": "…", "allowedScope": ["…"], "requiredBehaviour": "…",

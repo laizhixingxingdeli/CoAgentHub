@@ -5,7 +5,7 @@
 ## 可观察边界
 
 - **未声明** `COAGENT_AGENT_ENV_PASSTHROUGH`（键缺失、空串、纯空白）→ 构造 `SpawnRuntime` / 生产接线直接抛错，文案点名该变量并给出 `-` 的写法。**绝不**回落到整份 `process.env`，也绝不 warn-and-continue。
-- **显式声明空**（值为 `-`，两侧留白无所谓）→ 子进程只得 `SPAWN_ENV_BASE_ALLOWLIST`（PATH/PATHEXT/系统根/临时目录/home/代理等 19 项）。`-` 出现在逗号名单里时只是普通 token。
+- **显式声明空**（值为 `-`，两侧留白无所谓）→ 子进程只得 `SPAWN_ENV_BASE_ALLOWLIST`（PATH/PATHEXT/系统根/临时目录/home/代理及 Windows 程序目录等 22 项）。新加入 `ProgramFiles`、`ProgramFiles(x86)`、`ProgramW6432`：pi 在 Windows 上据此定位 Git Bash；若缺少这些键可能误选 PATH 上的 System32\bash.exe（WSL 启动器）。三项是程序目录而非凭据，不需部署方额外声明。源里没有时不会凭空创建。`-` 出现在逗号名单里时只是普通 token。
 - **空串为什么归到「未声明」**：PowerShell 的 `$env:VAR = ""` 会**删掉**变量，Node 侧拿到 `undefined`。若空串另给语义，「声明了空」与「忘了声明」在该 shell 里是同一个动作却被区别对待——实跑时照文档设空串仍被拦下，而报错说「未声明」，看起来像平台有 bug。故空串归入「忘了」，真要空必须写 `-`。
 - **已声明名字**（逗号分隔）→ 基线 ∪ 这些名字；匹配**大小写不敏感**，拷贝源里的**原始键名**（Windows `Path`、POSIX `http_proxy` 都要活）。无通配：`*` 是字面量。
 - 源里没有的名字直接省略，不造空字符串。

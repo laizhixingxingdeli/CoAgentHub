@@ -12,8 +12,17 @@ export interface RunContext {
   readonly token: string;
   readonly missionId: string;
   readonly attemptId: string;
-  readonly role: 'coordinator' | 'executor';
+  readonly role: 'coordinator' | 'executor' | 'independent_reviewer';
   readonly workItemId?: string;
+  /**
+   * 发牌时冻结的队列领取身份。只从这里带到写事务，不从请求体读 owner/代次。
+   * 缺省表示非队列 Run；队列 Attempt 不得发无 claim 的牌。
+   */
+  readonly claim?: {
+    readonly id: string;
+    readonly owner: string;
+    readonly claimGeneration: number;
+  };
 }
 
 export class RunTokenRegistry {
@@ -21,7 +30,21 @@ export class RunTokenRegistry {
 
   issue(input: Omit<RunContext, 'token'>): RunContext {
     const token = randomUUID();
-    const context: RunContext = Object.freeze({ ...input, token });
+    const claim = input.claim
+      ? Object.freeze({
+          id: input.claim.id,
+          owner: input.claim.owner,
+          claimGeneration: input.claim.claimGeneration,
+        })
+      : undefined;
+    const context: RunContext = Object.freeze({
+      missionId: input.missionId,
+      attemptId: input.attemptId,
+      role: input.role,
+      ...(input.workItemId !== undefined ? { workItemId: input.workItemId } : {}),
+      ...(claim ? { claim } : {}),
+      token,
+    });
     this.#byToken.set(token, context);
     return context;
   }

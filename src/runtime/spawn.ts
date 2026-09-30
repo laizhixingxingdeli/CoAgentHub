@@ -147,6 +147,9 @@ export const SPAWN_ENV_BASE_ALLOWLIST: readonly string[] = Object.freeze([
   'HTTPS_PROXY',
   'NO_PROXY',
   'ALL_PROXY',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'ProgramW6432',
 ]);
 
 /** 部署方声明「额外透传哪些宿主环境变量名」的 env 键。值是逗号分隔的名字，不是值本身。 */
@@ -395,6 +398,8 @@ export class SpawnRuntime implements AgentRuntime {
             resolvedProfile?: RuntimeOutcome['resolvedProfile'];
             /** query 角色：原样透传，不由 endedBy 在此推导。 */
             queryOutcome?: RuntimeOutcome['queryOutcome'];
+            /** 不可信采集摘要。adapter 不校验、不补伪零、不改 budget/query。 */
+            contextMetrics?: unknown;
           };
           if (parsed.usage) emit({ kind: 'usage', usage: parsed.usage });
           const queryOutcome =
@@ -403,6 +408,11 @@ export class SpawnRuntime implements AgentRuntime {
             parsed.queryOutcome === 'needs_mutation'
               ? parsed.queryOutcome
               : undefined;
+          // 有字段才透传：缺了不得长出 {calls:0} 这种伪零。JSON 合法但摘要畸形
+          // 也原样带上——宣称已验证会让平台收口变成空转。
+          const contextMetrics = Object.prototype.hasOwnProperty.call(parsed, 'contextMetrics')
+            ? parsed.contextMetrics
+            : undefined;
           resolve({
             endedBy: parsed.endedBy,
             usage: parsed.usage ?? UNKNOWN_USAGE,
@@ -412,6 +422,7 @@ export class SpawnRuntime implements AgentRuntime {
             toolCalls: parsed.toolNames,
             resolvedProfile: parsed.resolvedProfile,
             ...(queryOutcome ? { queryOutcome } : {}),
+            ...(contextMetrics !== undefined ? { contextMetrics } : {}),
           });
         } catch {
           resolve(fallback);

@@ -32,6 +32,10 @@ COAGENT_STORE=pg node src/main.ts
 连接串走 `COAGENT_PG`，缺省 `postgresql://postgres:postgres@localhost:5432/coagenthub_v5`；
 表在启动时自动建。
 
+周期投递修复由 `COAGENT_RECONCILE_INTERVAL_MS` 控制（缺省 60000 毫秒；`0` 关闭）。
+只补可核实的缺失投递，不把启动时的 Attempt / worktree 收敛改成周期任务。
+`server.close` 与 `run-plan` 退出会先停周期任务再释锁；stop 或关 HTTP 失败不会丢掉另一个错误，告警回调抛错也不会让调度停住。
+
 **文件版不会被删掉。** 它守着一条性质：clone 下来什么都不装就能跑通全部测试。
 第三方依赖只允许出现在 `src/application/pg-store.ts`，`test/source-constraints.test.ts`
 盯着这条——`pg` 一旦漏进用例层，"换存储不改用例层"就失效了，而那种泄漏是悄无声息的。
@@ -105,9 +109,10 @@ S15.2 把 **Recovery Reconciler** 列入推迟项，但 `reconcileInterruptedAtt
 协调者尝试，于是**进程崩在半路上的那次尝试会把 Mission 永久焊死**——没有
 任何别的出口，人手工改状态文件是唯一办法。
 
-推迟项指的是常驻的、持续扫描并修复状态的子系统；这里做的是启动时的一次性
-扫描，只把"进程已经不在了却还是 in_progress"的尝试标成 `interrupted`
-（可重试）。范围、触发时机、复杂度都不是一回事。
+推迟项指的是常驻的、持续扫描并修复 Attempt / 调度状态的子系统；启动收敛仍
+只跑一次，把"进程已经不在了却还是 in_progress"的尝试标成 `interrupted`
+（可重试）。另有可关闭的周期投递补建（`COAGENT_RECONCILE_INTERVAL_MS`），
+只补可核实的缺失投递，不是 DurableScheduler。
 
 其余推迟项（每 WorkItem 独立 worktree、自动语义冲突解决、完整 Circuit
 Breaker、Fencing Token、Transactional Outbox、Saga、exactly-once、自主

@@ -28,6 +28,8 @@ const STOP_LABELS: Record<PlanStopReason, string> = {
   finished: '走完了',
   unsafe: '集成分支不安全',
   crashed: '驱动方出错',
+  service_shutdown: '服务受控退出',
+  escalation_limit: '升级单到上限',
 };
 
 export interface HandoffCosts {
@@ -53,13 +55,19 @@ function costText(costs: HandoffCosts | undefined): string {
   );
 }
 
-function featureTail(feature: PlanFeatureRecord, stopped: boolean): string {
+function featureTail(
+  feature: PlanFeatureRecord,
+  stopped: boolean,
+  pendingRelease?: { missionId: string; deadline: string },
+): string {
   const last = feature.missionIds.at(-1);
   switch (feature.status) {
     case 'merged':
       return `合入（${last ?? '?'}）`;
     case 'running':
-      return `在跑（${last ?? '?'}）`;
+      return pendingRelease
+        ? `HA 待放行，等检视者决定（Mission ${pendingRelease.missionId}，截止 ${pendingRelease.deadline}）`
+        : `在跑（${last ?? '?'}）`;
     case 'pending':
       return stopped
         ? '没轮到。要你定：下一轮接着跑它吗（run-plan 只跑没标 done 的）？'
@@ -80,21 +88,82 @@ export function renderPlanHandoff(
   const status = stop ? `停了：${STOP_LABELS[stop.reason]}——${stop.detail}` : '还在跑';
   const lines = [
     `方案 ${run.planId}（${run.id}）  ${status}  用时 ${elapsed} / 墙钟 ${duration(run.stopConditions.wallClockMs)}  ` +
-      `${costText(context.costs)}  未解决 ${run.unresolvedCount}/${run.stopConditions.unresolvedEscalations}`,
+      `${costText(context.costs)}  未解决 ${run.unresolvedCount}/${run.stopConditions.unresolvedEscalations}` +
+      `  升级单 ${run.escalationsOpened}/${run.stopConditions.maxEscalations}`,
     `  ${PLAN_MARKS.merged} 已合入  ${PLAN_MARKS.suspended} 挂起等你  ${PLAN_MARKS.skipped} 检视者跳过  ${PLAN_MARKS.pending} 没轮到`,
   ];
+  const release = run.haReleases.find((item) => !item.decision);
+  const open = run.currentEscalation;
   for (const feature of run.features) {
     const title = feature.title ? `${feature.title}  ` : '';
-    lines.push(`  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}${featureTail(feature, Boolean(stop))}`);
+    const used = run.rerunsUsed(feature.featureId);
+    // 没重跑过、也没开着单的功能不占这一列，免得六个都绿的晚上刷一排 0/1。
+    const rerun =
+      used > 0 || open?.featureId === feature.featureId
+        ? `  重跑 ${used}/${run.stopConditions.maxRerunsPerFeature}`
+        : '';
+    const currentMission = feature.missionIds.at(-1);
+    const pendingForFeature = run.haReleases.find(
+      (item) => item.featureId === feature.featureId && item.missionId === currentMission && !item.decision,
+    );
+    lines.push(
+      `  ${PLAN_MARKS[feature.status]} ${feature.featureId} ${title}` +
+        `${featureTail(feature, Boolean(stop), pendingForFeature)}${rerun}`,
+    );
   }
-  const open = run.currentEscalation;
+  for (const record of run.haReleases) {
+    const decision = record.decision;
+    if (!decision) continue;
+    const feature = run.feature(record.featureId);
+    const by = decision.by ? `${decision.by} 经 ${decision.confirmedBy ?? '确认人未知'} 确认` : '';
+    const reason = decision.reason ? `；理由：${decision.reason}` : '';
+    const result =
+      decision.kind !== 'approve'
+        ? ''
+        : feature?.status === 'merged'
+          ? '；已合入'
+          : feature?.status === 'running'
+            ? '；受控合入进行中'
+            : '；未合并（原因见该功能那一行）';
+    lines.push(
+      `  ⚑ HA 放行记录 ${record.featureId} / Mission ${record.missionId}：${decision.kind}（${decision.at}）` +
+        `${by ? `；${by}` : ''}${reason}${result}`,
+    );
+  }
+  if (release && !release.decision && !stop && Date.parse(context.now) < Date.parse(release.deadline)) {
+    lines.push(`  ⚑ HA 待放行 ${release.featureId}：Mission ${release.missionId}，提交 ${release.reviewedCommit}，检视 ${release.attemptId}，报告 ${release.validationReportId}，截止 ${release.deadline}`);
+    const common = `--feature ${release.featureId} --commit ${release.reviewedCommit} --review ${release.attemptId} --report ${release.validationReportId} --target ${release.integrationBranch} --as ${release.reviewerId} --confirmed-by <确认人> --run "${context.recordPath ?? '<记录路径>'}"`;
+    lines.push(`    node src/l3.ts plan approve ${release.missionId} ${common}`);
+    lines.push(`    node src/l3.ts plan send-back ${release.missionId} ${common} --reason "…"`);
+  }
   if (open && !stop) {
     lines.push(`  ⚑ 升级单 ${open.id}（${open.featureId}，${open.deadline} 截止）：${open.failure}`);
+    if (open.answerable === true) {
+      // 可答复单才列原问：旧四动作单的 question 是动作提示，不是协调者原话。
+      lines.push(`    原问：${open.question}`);
+    }
+    const rerunLeft = run.rerunsUsed(open.featureId) < run.stopConditions.maxRerunsPerFeature;
+    const actions = rerunLeft ? '<rerun_isolated|skip|rescope|stop>' : '<skip|rescope|stop>';
     lines.push(
-      `    检视者：node src/l3.ts plan decide ${open.id} --action <rerun_isolated|skip|rescope|stop> ` +
+      `    检视者：node src/l3.ts plan decide ${open.id} --action ${actions} ` +
         `--reason "…" [--drop F7,F8] --as ${run.reviewer}` +
         (context.recordPath ? ` --run "${context.recordPath}"` : ''),
     );
+    if (open.answerable === true) {
+      lines.push(
+        `    答复：node src/l3.ts plan decide ${open.id} --action answer --answer "…" ` +
+          `--as ${run.reviewer} --run "${context.recordPath ?? '<记录>'}"`,
+      );
+    }
+  }
+  const excluded = run.sourceExclusions;
+  if (excluded && excluded.length > 0) {
+    // 单独一段：源 skipped 不是本次运行的检视者跳过，不能用 ⊘。
+    lines.push('  本次未纳入（源方案，不是本次运行的检视者跳过）：');
+    for (const ex of excluded) {
+      const source = ex.sourceStatus ?? '旧格式';
+      lines.push(`  · ${ex.featureId} 源状态 ${source}  ${ex.reason}`);
+    }
   }
   return lines;
 }

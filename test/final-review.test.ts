@@ -10,9 +10,13 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { createApi } from '../src/api/server.ts';
+import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import {
   FixedClock,
   InMemoryActivityLog,
@@ -23,6 +27,7 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const CONTRACT: MissionContract = {
   intent: '修 X',
@@ -52,7 +57,9 @@ const PLAN = {
 };
 
 const dirs: string[] = [];
+const servers: Server[] = [];
 after(() => {
+  for (const server of servers) server.close();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -78,22 +85,35 @@ function makeHarness(worktreeRoot: string) {
   const ids = new SequentialIds();
   const deliveries = new InMemoryDeliveryRepository(clock, ids);
   const workspace = new GitWorktreeManager(worktreeRoot);
+  const projects = new InMemoryProjectRepository();
+  const activity = new InMemoryActivityLog(clock);
   const platform = new Platform({
-    projects: new InMemoryProjectRepository(),
+    projects,
     deliveries,
     workspace,
-    activity: new InMemoryActivityLog(clock),
+    activity,
     clock,
     ids,
   });
-  return { platform, workspace, deliveries };
+  return { platform, workspace, deliveries, projects, activity, clock };
 }
 
 /** 把一条 Mission 推到「已交卷、等 L3 检视」，并在工作区里留下真实改动。 */
-async function missionReadyForReview(repo: string, worktreeRoot: string, missionId: string) {
+async function missionReadyForReview(
+  repo: string,
+  worktreeRoot: string,
+  missionId: string,
+  options?: { executionMode?: 'high_assurance' },
+) {
   const harness = makeHarness(worktreeRoot);
-  const { platform, workspace } = harness;
-  await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+  const { platform, workspace, projects } = harness;
+  if (options?.executionMode) {
+    const project = await projects.ensure('P');
+    project.createMission({ id: missionId, contract: CONTRACT, executionMode: options.executionMode });
+    await projects.save(project);
+  } else {
+    await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+  }
 
   const prepared = await workspace.prepare(missionId, repo);
   await platform.recordWorkspace(missionId, {
@@ -130,7 +150,7 @@ async function missionReadyForReview(repo: string, worktreeRoot: string, mission
   await platform.finishAttempt(missionId, exec.attemptId, { endedBy: 'structured_submit' });
   await platform.reviewExecutionResult(missionId, coord.attemptId, {
     workItemId,
-    verdict: 'accept',
+    verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
     reasons: ['复跑过'],
     requiredChanges: [],
   });
@@ -378,5 +398,301 @@ describe('最终检视权威', () => {
 
     // 被拒之后 Mission 一点没动：不留半套流转。
     assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+  });
+});
+
+describe('检视者终审签名', () => {
+  test('三种 verdict 都记下 reviewer 签名；身份 trim；confirmedAt 来自平台时钟', async () => {
+    const cases: Array<'merge' | 'send_back' | 'abandon'> = ['merge', 'send_back', 'abandon'];
+    for (const verdict of cases) {
+      const repo = tempRepo();
+      const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+      dirs.push(worktrees);
+      const { platform, clock } = await missionReadyForReview(repo, worktrees, 'M1');
+      clock.advance(5_000);
+      const result = await platform.finalizeMissionByReviewer('M1', {
+        verdict,
+        reasons: verdict === 'merge' ? ['ok'] : ['再改'],
+        projectRoot: repo,
+        reviewerId: '  claude  ',
+        confirmedBy: '  echo  ',
+      });
+      if (verdict === 'merge') {
+        assert.equal(result.status, 'completed');
+        assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
+      }
+      if (verdict === 'send_back') {
+        assert.equal(result.status, 'planning');
+        assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base');
+      }
+      if (verdict === 'abandon') {
+        assert.equal(result.status, 'blocked');
+        assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base');
+      }
+      const view = await platform.getMissionView('M1');
+      assert.deepEqual(view.finalReview?.authority, {
+        kind: 'reviewer',
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+        confirmedAt: '2026-01-01T00:00:05.000Z',
+      });
+      const events = await platform.getActivity('M1');
+      const kind =
+        verdict === 'merge'
+          ? 'final_review.merged'
+          : verdict === 'send_back'
+            ? 'final_review.send_back'
+            : 'final_review.abandoned';
+      const reviewEvent = events.find((event) => event.kind === kind);
+      assert.equal((reviewEvent?.data as { authority?: string } | undefined)?.authority, 'reviewer');
+    }
+  });
+
+  test('身份非法时拒绝且状态不变', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+    const before = git(repo, 'rev-parse', 'HEAD');
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M1', {
+          verdict: 'merge',
+          reasons: ['ok'],
+          projectRoot: repo,
+          reviewerId: '   ',
+          confirmedBy: 'echo',
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'REVIEWER_IDENTITY_INVALID',
+    );
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M1', {
+          verdict: 'merge',
+          reasons: ['ok'],
+          projectRoot: repo,
+          reviewerId: 'r',
+          confirmedBy: 'x'.repeat(129),
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'REVIEWER_IDENTITY_INVALID',
+    );
+    assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
+  });
+
+  test('合并闸不变：目标 HEAD 变过，检视者 merge 仍不合', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+    writeFileSync(join(repo, 'other.txt'), 'someone else\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', '别人的提交');
+    const result = await platform.finalizeMissionByReviewer('M1', {
+      verdict: 'merge',
+      reasons: ['看着没问题'],
+      projectRoot: repo,
+      reviewerId: 'claude',
+      confirmedBy: 'echo',
+    });
+    assert.equal(result.status, 'blocked');
+    assert.match(result.reason ?? '', /HEAD 变了/);
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base');
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.finalReview?.authority?.kind, 'reviewer');
+  });
+
+  // 旧 reviewer / 机器入口对 HA merge 仍拒；受控放行走 finalizeMissionByHaAuthority。
+  test('HA：检视者 merge 被拒；机器 L3 仍 HIGH_ASSURANCE_NEEDS_HUMAN', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform } = await missionReadyForReview(repo, worktrees, 'M-HA', {
+      executionMode: 'high_assurance',
+    });
+    const before = git(repo, 'rev-parse', 'HEAD');
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByMachine('M-HA', {
+          integrationBranch: 'master',
+          verification: [{ argv: ['node', '--test'], timeoutMs: 1_000 }],
+          projectRoot: repo,
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError && error.code === 'HIGH_ASSURANCE_NEEDS_HUMAN',
+    );
+    assert.equal((await platform.getMissionView('M-HA')).status, 'awaiting_review');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
+
+    await assert.rejects(
+      () =>
+        platform.finalizeMissionByReviewer('M-HA', {
+          verdict: 'merge',
+          reasons: ['用户确认过'],
+          projectRoot: repo,
+          reviewerId: 'claude',
+          confirmedBy: 'echo',
+        }),
+      (error: unknown) =>
+        error instanceof PlatformRuleError &&
+        error.code === 'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+    );
+    const view = await platform.getMissionView('M-HA');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.finalReview, undefined);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before);
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base');
+  });
+});
+
+describe('公开终审入口仍只发 human', () => {
+  test('公开 finalizeMission 拒绝伪造的 reviewer / machine / plan', async () => {
+    const forgeries: unknown[] = [
+      { kind: 'reviewer', reviewerId: 'r', confirmedBy: 'c', confirmedAt: '2026-01-01T00:00:00.000Z' },
+      { kind: 'machine', integrationReportId: 'IVAL-forged', policyRevision: 1 },
+      { kind: 'plan', planRunId: 'R1', escalationId: 'E-1' },
+    ];
+    for (const authority of forgeries) {
+      const repo = tempRepo();
+      const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+      dirs.push(worktrees);
+      const { platform } = await missionReadyForReview(repo, worktrees, 'M1');
+      await assert.rejects(
+        () =>
+          platform.finalizeMission('M1', {
+            verdict: 'merge',
+            reasons: ['ok'],
+            projectRoot: repo,
+            authority: authority as never,
+          }),
+        (error: unknown) =>
+          error instanceof PlatformRuleError && error.code === 'FINAL_REVIEW_AUTHORITY_FORBIDDEN',
+      );
+      assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+    }
+  });
+
+  test('HTTP POST /finalize 伪造 reviewer / machine / plan 被拒且状态不变', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform, deliveries } = await missionReadyForReview(repo, worktrees, 'M1');
+    const server = createApi({
+      platform,
+      tokens: new RunTokenRegistry(),
+      deliveries,
+    });
+    servers.push(server);
+    await listenLoopback(server, 0);
+    const port = (server.address() as AddressInfo).port;
+    const forgeries = [
+      { kind: 'reviewer', reviewerId: 'r', confirmedBy: 'c', confirmedAt: '2026-01-01T00:00:00.000Z' },
+      { kind: 'machine', integrationReportId: 'IVAL-forged', policyRevision: 1 },
+      { kind: 'plan', planRunId: 'R1', escalationId: 'E-1' },
+    ];
+    for (const authority of forgeries) {
+      const res = await fetch(`http://127.0.0.1:${port}/api/missions/M1/finalize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          verdict: 'merge',
+          reasons: ['ok'],
+          projectRoot: repo,
+          authority,
+        }),
+      });
+      const json = (await res.json()) as { error?: string };
+      assert.equal(res.status, 409, json.error);
+      assert.equal(json.error, 'FINAL_REVIEW_AUTHORITY_FORBIDDEN');
+      assert.equal((await platform.getMissionView('M1')).status, 'awaiting_review');
+    }
+  });
+});
+
+describe('listRuns：检视者终审不计入人类 L3', () => {
+  test('reviewer 三种 verdict 经真实入口不计且事件标 authority reviewer', async () => {
+    const cases: Array<'merge' | 'send_back' | 'abandon'> = ['merge', 'send_back', 'abandon'];
+    for (const verdict of cases) {
+      const repo = tempRepo();
+      const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+      dirs.push(worktrees);
+      const missionId = `M-rev-${verdict}`;
+      const { platform } = await missionReadyForReview(repo, worktrees, missionId);
+      await platform.finalizeMissionByReviewer(missionId, {
+        verdict,
+        reasons: verdict === 'merge' ? ['ok'] : ['检视者打回'],
+        projectRoot: repo,
+        reviewerId: 'claude',
+        confirmedBy: 'echo',
+      });
+      const kind =
+        verdict === 'merge'
+          ? 'final_review.merged'
+          : verdict === 'send_back'
+            ? 'final_review.send_back'
+            : 'final_review.abandoned';
+      const events = await platform.getActivity(missionId);
+      const reviewEvent = events.find((event) => event.kind === kind);
+      assert.equal((reviewEvent?.data as { authority?: string } | undefined)?.authority, 'reviewer');
+      const [run] = await platform.listRuns(missionId);
+      assert.equal(run.l3Reviews, 0, `${verdict} 检视者终审不得计入 l3Reviews`);
+      assert.equal(run.l3SendBacks, 0, `${verdict} 检视者终审不得计入 l3SendBacks`);
+    }
+  });
+
+  test('finalizeMission 的 human 与无 authority 历史事件仍计；未知 authority 不计', async () => {
+    const repo = tempRepo();
+    const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(worktrees);
+    const { platform, activity } = await missionReadyForReview(repo, worktrees, 'M-human');
+    await platform.finalizeMission('M-human', {
+      verdict: 'send_back',
+      reasons: ['人打回'],
+      projectRoot: repo,
+    });
+
+    let [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 1, '公开 finalizeMission 写出的 human 终审要计次数');
+    assert.equal(run.l3SendBacks, 1, '公开 finalizeMission 的 send_back 要计打回');
+
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.merged',
+      data: { reasons: ['旧人类放行'] },
+    });
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.send_back',
+      data: { authority: 'human', reasons: ['显式 human 打回'] },
+    });
+    [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 3, '无标记历史事件与显式 authority:human 都要计');
+    assert.equal(run.l3SendBacks, 2);
+
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.send_back',
+      data: { authority: 'unknown', reasons: ['未知权威'] },
+    });
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.merged',
+      data: { authority: 'machine' },
+    });
+    await activity.append({
+      projectId: 'P',
+      missionId: 'M-human',
+      kind: 'final_review.abandoned',
+      data: { authority: 'plan' },
+    });
+    [run] = await platform.listRuns('M-human');
+    assert.equal(run.l3Reviews, 3, 'unknown / machine / plan 不得计入');
+    assert.equal(run.l3SendBacks, 2);
   });
 });

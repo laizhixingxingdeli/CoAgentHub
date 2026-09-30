@@ -1,0 +1,1105 @@
+{
+  "version": 1,
+  "secret": "sk-ant-fake-not-a-real-key",
+  "credentialPath": "/var/secret/synth/auth.json",
+  "projects": [
+    {
+      "id": "P-synth",
+      "missions": [
+        {
+          "id": "M-live",
+          "projectId": "P-synth",
+          "status": "executing",
+          "contractRevision": 1,
+          "planRevision": 1,
+          "escalations": [],
+          "workspaceRef": {
+            "path": "/var/secret/synth/auth.json"
+          },
+          "workItems": [
+            {
+              "id": "W-live-1",
+              "missionId": "M-live",
+              "title": "synth live work",
+              "status": "in_progress",
+              "submitted": false,
+              "reviews": [],
+              "attempts": [
+                {
+                  "id": "A-exec-nousage",
+                  "kind": "executor",
+                  "status": "failed",
+                  "evidence": [],
+                  "usage": {
+                    "quality": "reported",
+                    "input": 1
+                  },
+                  "toolActivity": [
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    },
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:03:00.000Z"
+                    }
+                  ],
+                  "resumeRef": "SENSITIVE-RESUME-REF",
+                  "output": "FAKE-TOOL-STDOUT-BODY",
+                  "profile": {
+                    "id": "SENSITIVE-PROFILE-ID"
+                  }
+                },
+                {
+                  "id": "A-exec-truncated",
+                  "kind": "executor",
+                  "status": "in_progress",
+                  "evidence": [],
+                  "usage": {
+                    "input": 12,
+                    "output": 4,
+                    "cacheRead": 1,
+                    "cacheWrite": 0,
+                    "total": 17,
+                    "quality": "reported"
+                  },
+                  "toolActivity": [
+                    {
+                      "name": "read",
+                      "at": "2026-01-01T00:04:00.000Z"
+                    },
+                    {
+                      "name": "../../secret",
+                      "at": "2026-01-01T00:04:01.000Z"
+                    }
+                  ],
+                  "resumeRef": "SENSITIVE-RESUME-REF",
+                  "output": "FAKE-TOOL-STDOUT-BODY",
+                  "profile": {
+                    "id": "SENSITIVE-PROFILE-ID"
+                  }
+                },
+                {
+                  "id": "not a safe id",
+                  "kind": "executor",
+                  "status": "succeeded",
+                  "evidence": [],
+                  "usage": {
+                    "input": 1,
+                    "output": 1,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "total": 2,
+                    "quality": "reported"
+                  }
+                }
+              ],
+              "executorSeq": 2
+            }
+          ],
+          "coordinatorAttempts": [
+            {
+              "id": "A-coord-reported",
+              "kind": "coordinator",
+              "status": "succeeded",
+              "evidence": [],
+              "usage": {
+                "input": 100,
+                "output": 20,
+                "cacheRead": 5,
+                "cacheWrite": 3,
+                "total": 128,
+                "quality": "reported",
+                "cost": 0
+              },
+              "toolActivity": [
+                {
+                  "name": "read",
+                  "at": "2026-01-01T00:00:00.000Z"
+                },
+                {
+                  "name": "grep",
+                  "at": "2026-01-01T00:00:01.000Z"
+                }
+              ],
+              "resumeRef": "SENSITIVE-RESUME-REF",
+              "output": "FAKE-TOOL-STDOUT-BODY",
+              "profile": {
+                "id": "SENSITIVE-PROFILE-ID"
+              }
+            },
+            {
+              "id": "A-coord-reported",
+              "kind": "coordinator",
+              "status": "failed",
+              "evidence": [],
+              "usage": {
+                "input": 999,
+                "output": 999,
+                "cacheRead": 999,
+                "cacheWrite": 999,
+                "total": 999,
+                "quality": "reported"
+              },
+              "toolActivity": [
+                {
+                  "name": "bash",
+                  "at": "2026-01-01T00:00:02.000Z"
+                }
+              ]
+            },
+            {
+              "id": "A-coord-estimated",
+              "kind": "coordinator",
+              "status": "succeeded",
+              "evidence": [],
+              "usage": {
+                "input": 50,
+                "output": 10,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 60,
+                "quality": "estimated"
+              },
+              "resumeRef": "SENSITIVE-RESUME-REF",
+              "output": "FAKE-PROMPT-SYNTH-BODY",
+              "profile": {
+                "id": "SENSITIVE-PROFILE-ID"
+              }
+            },
+            {
+              "id": "A-coord-wrong-role",
+              "kind": "executor",
+              "status": "succeeded",
+              "evidence": [],
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 2,
+                "quality": "reported"
+              }
+            }
+          ],
+          "coordinatorSeq": 3,
+          "independentReviewerAttempts": [
+            {
+              "id": "bad id",
+              "kind": "independent_reviewer",
+              "status": "succeeded",
+              "evidence": [],
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 2,
+                "quality": "reported"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "deliveries": [
+    {
+      "id": "D-live-1",
+      "missionId": "M-live",
+      "projectId": "P-synth",
+      "recipient": "SENSITIVE-RESUME-REF",
+      "outcome": "delivered",
+      "summary": "FAKE-PROMPT-SYNTH-BODY",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "status": "pending"
+    }
+  ],
+  "events": [
+    {
+      "at": "2026-01-01T00:00:00.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "attemptId": "A-coord-reported",
+      "kind": "context.truncated",
+      "messageId": "msg-trunc-1",
+      "data": {
+        "role": "coordinator",
+        "budget": 8000,
+        "estimatedBefore": 12000,
+        "estimatedAfter": 7500,
+        "omittedSources": [
+          "FAKE-PROMPT-SYNTH-BODY"
+        ],
+        "overflow": true,
+        "remainingOverBudget": 4500
+      }
+    },
+    {
+      "at": "2026-01-01T00:00:00.500Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "attemptId": "A-coord-reported",
+      "kind": "context.truncated",
+      "messageId": "msg-trunc-1",
+      "data": {
+        "role": "coordinator",
+        "budget": 1,
+        "estimatedBefore": 1,
+        "estimatedAfter": 1,
+        "omittedSources": [
+          "FAKE-PROMPT-SYNTH-BODY"
+        ]
+      }
+    },
+    {
+      "at": "2026-01-01T00:00:01.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "attemptId": "A-exec-truncated",
+      "kind": "context.truncated",
+      "data": {
+        "budget": 4000,
+        "estimatedBefore": 5000,
+        "estimatedAfter": 3900
+      }
+    },
+    {
+      "at": "2026-01-01T00:00:01.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "attemptId": "A-exec-truncated",
+      "kind": "context.truncated",
+      "data": {
+        "budget": 4000,
+        "estimatedBefore": 5000,
+        "estimatedAfter": 3900
+      }
+    },
+    {
+      "at": "2026-01-01T00:00:02.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "attemptId": "A-exec-nousage",
+      "kind": "attempt.ended",
+      "data": {
+        "output": "FAKE-TOOL-STDOUT-BODY",
+        "key": "sk-ant-fake-not-a-real-key",
+        "path": "/var/secret/synth/auth.json"
+      }
+    },
+    {
+      "at": "2026-01-01T00:00:03.000Z",
+      "projectId": "P-synth",
+      "missionId": "M-live",
+      "kind": "mission.note",
+      "data": {
+        "prompt": "FAKE-PROMPT-SYNTH-BODY"
+      }
+    }
+  ],
+  "idCounters": {},
+  "agentPool": [],
+  "archivedMissions": [
+    {
+      "projectId": "P-synth",
+      "missionId": "M-arch",
+      "archivedAt": "2026-01-15T00:00:00.000Z",
+      "bytes": 2792,
+      "sha256": "dc50c7fc116a2d0f125618117144c390b803ed1a094a8fc430d2aceae8de7a98"
+    }
+  ],
+  "queryRuns": []
+}

@@ -312,6 +312,8 @@ describe('file-store archive read model', () => {
     assert.ok(archivedDelivery);
     assert.equal(archivedDelivery.summary, '归档投递');
     assert.equal(archivedDelivery.status, 'acknowledged');
+    // C1：加键之前写下的归档包，读出来的副本按旧规则补键（盘上的包有 sha256 钉着，不改——下面重开时会校验）。
+    assert.equal(archivedDelivery.idempotencyKey, 'result:legacy:delivered');
 
     const pending = await deliveries.pending();
     assert.equal(pending.length, 1);

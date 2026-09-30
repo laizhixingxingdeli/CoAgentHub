@@ -3,12 +3,12 @@
  *
  * 每个功能点：现做分类 → 建 Mission → 跑到它停下 → 交卷了就走机器 L3（合进集成
  * 分支、在合并结果上验证、红则回滚）→ 没合进去就开一张升级单等检视者 → 照决定
- * 处置 → 下一个。撞到停止条件（未解决累计、墙钟、检视者叫停、集成分支不安全）
+ * 处置 → 下一个。撞到停止条件（未解决累计、墙钟、检视者叫停、集成分支不安全、升级单到上限）
  * 就停，并把原因写进方案运行记录。
  *
- * **权限分得很死。** 检视者只能在四个动作里选；合进集成分支只凭机器 L3 的
- * 确定性证据；high_assurance 永远要人。这个驱动方自己不做任何判断——它只把
- * 各方的结论按规则串起来。
+ * **权限分得很死。** 检视者只能在四个动作里选（可答复单另可 answer）；合进集成分支只凭机器 L3 的
+ * 确定性证据；HA 禁止副作用未证明安全时不建单，合格 HA 跑到待放行后挂起，
+ * 本项不放行。这个驱动方自己不做任何判断——它只把各方的结论按规则串起来。
  *
  * 失败的 Mission 怎么收：方案还要往下跑，就放弃它（放名额、留分支）——不放的话
  * 它一直占着项目的改动名额，后面的功能一个都派发不了；方案停了就原样留着，
@@ -19,7 +19,7 @@ import { KernelError } from '../kernel/index.ts';
 import type { MissionContract, OriginChannel, WorkOrder } from '../kernel/index.ts';
 import { ClassifiedMissionInputError } from './classified-mission-intake.ts';
 import type { MissionRunOutcome } from './orchestrator.ts';
-import type { PlanRun, PlanRunStop } from './plan-run.ts';
+import type { HaReleaseDecision, PlanRun, PlanRunStop } from './plan-run.ts';
 import { decideRoute, type RoutingDecision, type RoutingProposal } from './plan-routing.ts';
 import { featureContract, type PlanFeatureSpec, type PlanSpec } from './plan-spec.ts';
 import { PlatformRuleError } from './platform.ts';
@@ -45,7 +45,34 @@ export interface PlanDriverDeps {
       assessment?: unknown;
       workOrder?: WorkOrder;
     }): Promise<{ missionId: string }>;
-    getMissionView(missionId: string): Promise<{ status: string }>;
+    getMissionView(missionId: string): Promise<{
+      status: string;
+      executionMode?: string;
+      haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
+      workspaceRef?: { readonly targetBranch?: string };
+      finalReview?: { readonly mergedInto?: string };
+      waitDetail?: string;
+      independentReviews?: readonly {
+        readonly reviewedCommit: string;
+        readonly verdict: string;
+        readonly reviewerAttemptId: string;
+        readonly validationReportId?: string;
+      }[];
+    }>;
+    effectiveIndependentReviewPass(missionId: string): Promise<
+      | { readonly reviewedCommit: string; readonly reviewerAttemptId: string; readonly validationReportId?: string; readonly verdict: string }
+      | undefined
+    >;
+    finalizeMissionByHaAuthority(
+      missionId: string,
+      input: {
+        readonly reviewerId: string;
+        readonly confirmedBy: string;
+        readonly projectRoot?: string;
+        readonly reasons?: readonly string[];
+        readonly verification?: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[];
+      },
+    ): Promise<{ status: string; mergedInto?: string; reportId?: string; reason?: string; rolledBackTo?: string }>;
     finalizeMissionByMachine(
       missionId: string,
       input: {
@@ -58,6 +85,11 @@ export interface PlanDriverDeps {
       missionId: string,
       input: { planRunId: string; escalationId: string; reasons: readonly string[]; projectRoot?: string },
     ): Promise<{ status: string }>;
+    /** 持锁答复协调者提问；对接平台原方法，不另开一条 Mission。 */
+    answerEscalation(
+      missionId: string,
+      answer: string,
+    ): Promise<{ question: string; answer: string }>;
   };
   /**
    * 跑一条 Mission 直到它停下（交卷 / 卡住 / 等人）。`wallClockDeadline` 是方案
@@ -70,7 +102,10 @@ export interface PlanDriverDeps {
   /** 只读协调者现做分类。读不懂就说为什么，驱动方回落 Standard。 */
   readonly proposeRoute: (
     feature: PlanFeatureSpec,
-  ) => Promise<{ ok: true; proposal: RoutingProposal } | { ok: false; reason: string }>;
+  ) => Promise<
+    | { ok: true; proposal: RoutingProposal }
+    | { ok: false; reason: string; haForbiddenUnproven?: readonly string[] }
+  >;
   /**
    * 每个功能开跑前再核一次项目仓（还在集成分支上、工作区干净）。开跑前检查只在
    * 启动时做一次；夜里有东西把仓库切回 master 的话，下一条 Mission 会从 master
@@ -88,9 +123,13 @@ export interface PlanDriverDeps {
 type Landing =
   | { readonly kind: 'merged' }
   | { readonly kind: 'failed'; readonly failure: string }
-  | { readonly kind: 'unsafe'; readonly detail: string };
+  | { readonly kind: 'unsafe'; readonly detail: string }
+  | { readonly kind: 'ha_pending' }
+  | { readonly kind: 'awaiting_answer'; readonly question: string };
 
 export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<PlanRunStop> {
+  // 入选名单在进驱动之前已经筛过（selectPlanCandidates）；这里只跑记录里的功能，
+  // 不再看源 status / dependsOn——否则筛选口径会有两份，检查说不可跑正式启动却派活。
   const specs = new Map(plan.features.map((feature) => [feature.id, feature]));
   try {
     for (;;) {
@@ -113,6 +152,8 @@ export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<P
       await runFeature(plan, run, feature, next.missionIds.length + 1, deps);
     }
   } catch (error) {
+    const stopped = deps.store.read()?.stopped;
+    if (stopped?.reason === 'service_shutdown') return stopped;
     // 崩溃处置：记下原因、停在 crashed，再往外抛。不在这里试图续跑——
     // 猜错了续跑，比停下来等人看更糟。
     const detail = error instanceof Error ? error.message : String(error);
@@ -133,6 +174,7 @@ async function runFeature(
   deps: PlanDriverDeps,
 ): Promise<void> {
   const missionId = attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`;
+  if (requireRun(deps).stopped) return;
   // 分类是尽力而为：有安全的回落（Standard），它自己出错不该拖垮整晚。
   const proposal = await deps.proposeRoute(feature).catch((error: unknown) => ({
     ok: false as const,
@@ -140,6 +182,7 @@ async function runFeature(
   }));
   // 分类本身是一整次只读会话，可能跑过墙钟：到点了就不再建 Mission。功能还没
   // 开跑，checkStop 不会动它，它保持「没轮到」。
+  if (requireRun(deps).stopped) return;
   const afterRoute = deps.now();
   if (wallClockReached(run, afterRoute)) {
     await deps.store.update((r) => r.checkStop(afterRoute));
@@ -149,6 +192,7 @@ async function runFeature(
     proposal.ok ? proposal.proposal : undefined,
     feature,
     proposal.ok ? undefined : proposal.reason,
+    proposal.ok ? [] : proposal.haForbiddenUnproven,
   );
   if (route.kind !== 'needs_human') {
     const problems = (await deps.checkRepo?.()) ?? [];
@@ -160,20 +204,107 @@ async function runFeature(
     }
   }
   if (route.kind === 'needs_human') {
-    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。`);
-    await deps.store.update((r) => r.suspendFeature(feature.id, route.needsDecision));
+    const forbidden = route.reason.startsWith('high_assurance 禁止副作用未证明为 false：');
+    const explanation = forbidden
+      ? `触发字段：${route.reason.slice('high_assurance 禁止副作用未证明为 false：'.length)}。依据：${[
+          ...(feature.why ? [`why: ${feature.why}`] : []),
+          ...(feature.constraints?.length ? [`constraints: ${feature.constraints.join('；')}`] : []),
+        ].join('；') || '方案未提供 why/constraints 原文。'}`
+      : '';
+    const guidance = forbidden
+      ? `${explanation}。请修改契约，明确不删除、不改写、不迁移数据后重跑；如确需副作用，须由用户决定，HAOFF1 当前关闭，不能立即放行。此处挂起发生在 Mission 建立前，不能审批。仅当以后形成真实 pending_release 且已有真实 Mission、审查提交、独立检视及报告等材料时，才可使用：node src/l3.ts plan approve <真实missionId> --run <记录> --feature <id> --commit <提交> --review <attempt> --report <报告> --target <分支> --as <检视者> --confirmed-by <确认者>。`
+      : '';
+    const needsDecision = guidance ? `${route.needsDecision} ${guidance}` : route.needsDecision;
+    deps.log(`${feature.id} ⏸ ${route.reason}：不建 Mission，挂起等人。${guidance ? ` ${guidance}` : ''}`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, needsDecision));
     return;
   }
-  await createMission(plan, run, feature, missionId, route, deps);
+  const created = await createMission(plan, run, feature, missionId, route, deps);
+  if (requireRun(deps).stopped) return;
+  if (created.kind === 'ha_denied') {
+    deps.log(`${feature.id} ⏸ HA 建单被拒：${created.reason}；不回落 Standard。`);
+    await deps.store.update((r) => r.suspendFeature(feature.id, created.needsDecision));
+    return;
+  }
+  if (requireRun(deps).stopped) return;
   await deps.store.update((r) => r.startFeature(feature.id, missionId));
   deps.log(`${feature.id} ▶ ${missionId}`);
 
   const wallClockDeadline = new Date(
     Date.parse(run.startedAt) + run.stopConditions.wallClockMs,
   ).toISOString();
+  // 协调者提问可当场答复：answer 后续跑同一条，不能退回 drivePlan 另开 -rN。
+  for (;;) {
   const outcome = await deps.runMission(missionId, { wallClockDeadline });
+  if (requireRun(deps).stopped) return;
   const landing = await land(plan, missionId, outcome, deps);
 
+  if (landing.kind === 'ha_pending') {
+    const openedAt = deps.now();
+    if (wallClockReached(run, openedAt)) {
+      await deps.store.update((r) => r.checkStop(openedAt));
+      return;
+    }
+    const pass = await deps.platform.effectiveIndependentReviewPass(missionId);
+    if (!pass || pass.verdict !== 'pass' || !pass.validationReportId) {
+      const failure = `HA 待放行却没有当前有效的独立检视 pass（Mission ${missionId}）。`;
+      await failAndEscalate(feature, missionId, failure, run, deps);
+      return;
+    }
+    const deadline = new Date(
+      Date.parse(openedAt) + run.stopConditions.escalationTimeoutMs,
+    ).toISOString();
+    await deps.store.update((r) => r.openHaRelease({
+      featureId: feature.id,
+      missionId,
+      reviewedCommit: pass.reviewedCommit,
+      attemptId: pass.reviewerAttemptId,
+      validationReportId: pass.validationReportId!,
+      reviewerId: r.reviewer,
+      integrationBranch: r.integrationBranch,
+      openedAt,
+      deadline,
+      verification: plan.integrationVerification.map((command) => ({
+        command: command.argv.join(' '),
+        timeoutMs: command.timeoutMs,
+      })),
+    }));
+    deps.log(`${feature.id} HA 待放行记录已开：Mission ${missionId}，所审提交 ${pass.reviewedCommit}，截止 ${deadline}。`);
+    const decision = await waitForHaRelease(feature.id, missionId, deps);
+    if (!decision) return;
+    if (decision.kind === 'approve') {
+      const released = await releaseApproved(plan, feature, missionId, deps);
+      if (released.kind === 'stopped') return;
+      if (released.kind === 'unsafe') {
+        deps.log(`${feature.id} ✗ ${released.detail}`);
+        await deps.store.update((r) => r.halt('unsafe', released.detail, deps.now()));
+        return;
+      }
+      if (released.kind === 'failed') {
+        await failAndEscalate(feature, missionId, released.failure, run, deps);
+        return;
+      }
+      deps.log(`${feature.id} ✓ HA 受控合入 ${released.mergedInto}`);
+      try {
+        await deps.store.update((r) => r.markMerged(feature.id));
+      } catch (error) {
+        const detail = `HA 已合入 ${released.mergedInto}，方案记录没写上 merged；要人工核对，禁止重合。`;
+        await deps.store.update((r) => {
+          if (!r.stopped) r.halt('unsafe', detail, deps.now());
+        }).catch(() => undefined);
+        throw error;
+      }
+      return;
+    }
+    const failure =
+      decision.kind === 'send_back'
+        ? `HA 待放行被检视者打回（${decision.reason ?? ''}），签字人 ${decision.by ?? '?'}（经 ${decision.confirmedBy ?? '?'} 确认），Mission ${missionId}。`
+        : decision.kind === 'expired'
+          ? `HA 待放行到截止（${deadline}）没人定，Mission ${missionId}，所审提交 ${pass.reviewedCommit}。`
+          : `HA 待放行记录失效：${decision.reason ?? ''}（Mission ${missionId}）。`;
+    await failAndEscalate(feature, missionId, failure, run, deps);
+    return;
+  }
   if (landing.kind === 'merged') {
     deps.log(`${feature.id} ✓ 合入 ${plan.integrationBranch}`);
     await deps.store.update((r) => r.markMerged(feature.id));
@@ -184,24 +315,158 @@ async function runFeature(
     await deps.store.update((r) => r.halt('unsafe', landing.detail, deps.now()));
     return;
   }
-  // 墙钟已经到了（多半正是它被暂停了）：今晚没人会定这张单，不开。停下，
-  // 跑着的功能由 checkStop 挂起并写明要人定什么。
-  const afterRun = deps.now();
-  if (wallClockReached(run, afterRun)) {
-    deps.log(`${feature.id} ⏸ 墙钟到点：${landing.failure}`);
-    await deps.store.update((r) => r.checkStop(afterRun));
+  if (landing.kind === 'awaiting_answer') {
+    const next = await handleAwaitingAnswer(feature, missionId, landing.question, run, deps);
+    if (next === 'continue') continue;
     return;
   }
+  await failAndEscalate(feature, missionId, landing.failure, run, deps);
+  return;
+  }
+}
 
-  const question =
-    `${feature.id}「${feature.title}」没能合进集成分支：${landing.failure} ` +
-    '选一个：隔离重跑（另开一条从头来）/ 跳过 / 重划剩余范围（点名依赖它的功能一并删掉）/ 停。';
-  const escalation = await deps.store.update((r) =>
-    r.openEscalation({ featureId: feature.id, missionId, failure: landing.failure, question }, deps.now()),
+type ApprovedReleaseResult =
+  | { readonly kind: 'merged'; readonly mergedInto: string }
+  | { readonly kind: 'failed'; readonly failure: string }
+  | { readonly kind: 'unsafe'; readonly detail: string }
+  | { readonly kind: 'stopped' };
+
+async function releaseApproved(
+  plan: PlanSpec,
+  feature: PlanFeatureSpec,
+  missionId: string,
+  deps: PlanDriverDeps,
+): Promise<ApprovedReleaseResult> {
+  let run = requireRun(deps);
+  if (run.stopped) return { kind: 'stopped' };
+  let now = deps.now();
+  if (wallClockReached(run, now)) {
+    await deps.store.update((r) => r.checkStop(now));
+    return { kind: 'stopped' };
+  }
+  const release = run.haReleases.find(
+    (item) => item.featureId === feature.id && item.missionId === missionId,
   );
-  deps.log(`${feature.id} ⚑ 升级单 ${escalation.id}（${escalation.deadline} 截止）：${landing.failure}`);
-  await waitForResolution(escalation.id, deps);
-  await settle(missionId, escalation.id, deps);
+  if (!release || release.decision?.kind !== 'approve') {
+    throw new Error(`HA 放行决定不变式被破坏（${feature.id}/${missionId}）。`);
+  }
+  const decision = release.decision;
+  const currentFeature = run.feature(feature.id);
+  if (
+    !currentFeature ||
+    currentFeature.status !== 'running' ||
+    currentFeature.missionIds.at(-1) !== release.missionId ||
+    release.missionId !== missionId
+  ) {
+    throw new Error(
+      `HA 放行决定不变式被破坏：功能 ${feature.id} 的 Mission ${missionId} ` +
+      `与待放行记录 Mission ${release.missionId} 不匹配或功能状态不是 running。`,
+    );
+  }
+  const view = await deps.platform.getMissionView(missionId);
+  if (view.status === 'completed') {
+    return {
+      kind: 'unsafe',
+      detail: `Mission ${missionId} 已 completed，但不是本次放行合入；要人工核对，禁止自动重合。`,
+    };
+  }
+  if (
+    view.status !== 'awaiting_review' ||
+    view.executionMode !== 'high_assurance' ||
+    view.haReviewHold !== 'pending_release'
+  ) {
+    return {
+      kind: 'failed',
+      failure:
+        `HA approve 绑定的 Mission ${missionId} 现状不符（status=${view.status}, ` +
+        `executionMode=${view.executionMode ?? '缺失'}, haReviewHold=${view.haReviewHold ?? '缺失'}），未合并。`,
+    };
+  }
+  if (view.workspaceRef?.targetBranch !== run.integrationBranch) {
+    return {
+      kind: 'failed',
+      failure:
+        `HA approve 目标不符：当前 ${view.workspaceRef?.targetBranch ?? '缺失'}，` +
+        `方案目标 ${run.integrationBranch}（Mission ${missionId}），未合并。`,
+    };
+  }
+  const currentPass = await deps.platform.effectiveIndependentReviewPass(missionId);
+  if (
+    !currentPass || currentPass.verdict !== 'pass' ||
+    currentPass.reviewedCommit !== release.reviewedCommit ||
+    currentPass.reviewerAttemptId !== release.attemptId ||
+    currentPass.validationReportId !== release.validationReportId
+  ) {
+    const current = currentPass
+      ? `${currentPass.verdict}，提交 ${currentPass.reviewedCommit}，attempt ${currentPass.reviewerAttemptId}，报告 ${currentPass.validationReportId ?? '缺失'}`
+      : '没有有效 pass';
+    return {
+      kind: 'failed',
+      failure:
+        `HA approve 所钉证据（提交 ${release.reviewedCommit}，attempt ${release.attemptId}，` +
+        `报告 ${release.validationReportId}）与现状不符：${current}；未合并。`,
+    };
+  }
+  run = requireRun(deps);
+  if (run.stopped) return { kind: 'stopped' };
+  now = deps.now();
+  if (wallClockReached(run, now)) {
+    await deps.store.update((r) => r.checkStop(now));
+    return { kind: 'stopped' };
+  }
+  const reason = `PlanRun ${run.id}：${decision.by} 经 ${decision.confirmedBy} 确认，于 ${decision.at} 放行所钉提交 ${release.reviewedCommit}。`;
+  let result: Awaited<ReturnType<PlanDriverDeps['platform']['finalizeMissionByHaAuthority']>>;
+  try {
+    result = await deps.platform.finalizeMissionByHaAuthority(missionId, {
+      reviewerId: decision.by!,
+      confirmedBy: decision.confirmedBy!,
+      projectRoot: deps.projectRoot,
+      verification: plan.integrationVerification,
+      reasons: [reason],
+    });
+  } catch (error) {
+    if (error instanceof PlatformRuleError) {
+      if (error.code === 'HA_DETACHED_HEAD' || error.code === 'HA_TARGET_MISMATCH') {
+        return { kind: 'unsafe', detail: `项目仓不在方案集成分支上，HA 受控放行被拒（${error.code}）：${error.message}` };
+      }
+      return { kind: 'failed', failure: `HA 受控放行被平台拒绝（${error.code}）：${error.message}；未合并。` };
+    }
+    return {
+      kind: 'unsafe',
+      detail:
+        `HA 受控放行结果不明：${error instanceof Error ? error.message : String(error)}；` +
+        '合并可能已落地。人工核对锚点、当前 HEAD 与集成报告，禁止自动重合。',
+    };
+  }
+  if (result.status === 'completed') {
+    if (typeof result.mergedInto !== 'string' || result.mergedInto.trim() === '') {
+      return { kind: 'unsafe', detail: `HA 平台报告 Mission ${missionId} 已完成但缺 mergedInto；人工核对，禁止自动重合。` };
+    }
+    const after = await deps.platform.getMissionView(missionId);
+    if (
+      after.status === 'completed' &&
+      after.finalReview?.mergedInto === result.mergedInto &&
+      after.workspaceRef?.targetBranch === run.integrationBranch
+    ) {
+      return { kind: 'merged', mergedInto: result.mergedInto };
+    }
+    return { kind: 'unsafe', detail: `HA 平台报告已合入 ${result.mergedInto}，但 Mission 终态 / finalReview / 目标不匹配；人工核对，禁止自动重合。` };
+  }
+  if (result.rolledBackTo) {
+    return {
+      kind: 'failed',
+      failure:
+        `HA 合入后方案级验证红了（Mission ${missionId}，报告 ${result.reportId ?? '?'}），` +
+        `已退回 ${result.rolledBackTo.slice(0, 12)}；未标 merged。`,
+    };
+  }
+  if (result.reportId) {
+    return { kind: 'unsafe', detail: `HA 合入验证未安全收尾（报告 ${result.reportId}）：${result.reason ?? '原因缺失'}。` };
+  }
+  if (result.reason?.includes('禁止自动重合')) {
+    return { kind: 'unsafe', detail: `HA 平台标记 unsafe：${result.reason}` };
+  }
+  return { kind: 'failed', failure: `HA 合并失败：${result.reason ?? '（没给原因）'}；集成分支没动。` };
 }
 
 async function createMission(
@@ -211,7 +476,7 @@ async function createMission(
   missionId: string,
   route: Exclude<RoutingDecision, { kind: 'needs_human' }>,
   deps: PlanDriverDeps,
-): Promise<void> {
+): Promise<{ readonly kind: 'created' } | { readonly kind: 'ha_denied'; readonly reason: string; readonly needsDecision: string }> {
   const contract = featureContract(plan, feature);
   const origin: OriginChannel = { clientType: 'plan-run', conversationRef: `plan-run:${run.id}` };
   if (route.kind === 'classified') {
@@ -226,10 +491,11 @@ async function createMission(
         ...(route.workOrder ? { workOrder: route.workOrder } : {}),
       });
       deps.log(`${feature.id} 分类为 ${route.classification.recommended.executionMode ?? 'query'}`);
-      return;
+      return { kind: 'created' };
     } catch (error) {
       // 同一份事实，平台分类器与这里的结论不会不同；会被拒的是工单本身的形状
       // （kernel 严格校验）。被拒的建单不留半截，照老路建 Standard 即可。
+      // HA 安全拒绝绝不能走这条回落：普通 createMission 会绕开 HA 闸。
       if (
         !(error instanceof PlatformRuleError) &&
         !(error instanceof ClassifiedMissionInputError) &&
@@ -237,13 +503,28 @@ async function createMission(
       ) {
         throw error;
       }
+      if (route.classification.recommended.executionMode === 'high_assurance') {
+        return {
+          kind: 'ha_denied',
+          reason: error.message,
+          needsDecision:
+            `平台拒绝 HA 建单（${error.message}）：不回落 Standard。` +
+            `要你定：亲自主导 ${feature.id}，还是改事实后重排进方案？`,
+        };
+      }
       deps.log(`${feature.id} 按分类建单被拒（${error.message}），回落 Standard。`);
     }
   } else {
     deps.log(`${feature.id} 回落 Standard：${route.reason}`);
   }
   await deps.platform.createMission({ projectId: plan.projectId, missionId, contract, origin });
+  return { kind: 'created' };
 }
+
+function isIntegrationTargetMoved(reason: string | undefined): boolean {
+  return typeof reason === 'string' && /目标被推进|checkout 被切换|被切走/.test(reason);
+}
+
 
 /** 这条 Mission 停下之后，能不能合进集成分支；合不进去是为什么。 */
 async function land(
@@ -261,11 +542,25 @@ async function land(
     case 'blocked':
       return { kind: 'failed', failure: `Mission 走不下去了：${outcome.reason}` };
     case 'awaiting_l3':
-      return { kind: 'failed', failure: `协调者升级给 L3 的问题夜里没人答：${outcome.question}` };
+      return { kind: 'awaiting_answer', question: outcome.question };
     case 'waiting':
       return { kind: 'failed', failure: `Mission 停在 ${outcome.reason}：${outcome.detail}` };
     case 'stalled':
       return { kind: 'failed', failure: `Mission 卡住了：${outcome.reason}` };
+  }
+
+  const view = await deps.platform.getMissionView(missionId);
+  if (requireRun(deps).stopped) return { kind: 'unsafe', detail: '' };
+  if (view.executionMode === 'high_assurance' || view.haReviewHold) {
+    if (view.haReviewHold === 'pending_release') {
+      return { kind: 'ha_pending' };
+    }
+    return {
+      kind: 'failed',
+      failure:
+        view.waitDetail ??
+        `HA 独立检视未到待放行（${view.haReviewHold ?? view.status}）`,
+    };
   }
 
   let result: Awaited<ReturnType<PlanDriverDeps['platform']['finalizeMissionByMachine']>>;
@@ -284,6 +579,14 @@ async function land(
   }
   if (result.status === 'completed') return { kind: 'merged' };
   if (result.reportId && !result.rolledBackTo) {
+    if (isIntegrationTargetMoved(result.reason)) {
+      return {
+        kind: 'unsafe',
+        detail:
+          `验证通过后集成分支被推进 / 被切走，已停（报告 ${result.reportId}）。` +
+          `不能再往上叠。${result.reason ?? ''}`,
+      };
+    }
     return {
       kind: 'unsafe',
       detail:
@@ -300,6 +603,116 @@ async function land(
     };
   }
   return { kind: 'failed', failure: `机器合并失败：${result.reason ?? '（没给原因）'}` };
+}
+
+/**
+ * 仅 awaiting_l3 开可答复单。answer：不放弃、不新 Mission、不占 rerun，
+ * 墙钟检查后再答复一次并续跑同一条；其余动作/过期走原 settle。
+ */
+async function handleAwaitingAnswer(
+  feature: PlanFeatureSpec,
+  missionId: string,
+  question: string,
+  run: PlanRun,
+  deps: PlanDriverDeps,
+): Promise<'continue' | 'done'> {
+  const afterRun = deps.now();
+  if (wallClockReached(run, afterRun)) {
+    deps.log(`${feature.id} ⏸ 墙钟到点：协调者提问未答复：${question}`);
+    await deps.store.update((r) => r.checkStop(afterRun));
+    return 'done';
+  }
+  const failure = `协调者向 L3 提问：${question}`;
+  const escalation = await deps.store.update((r) =>
+    r.openEscalation(
+      { featureId: feature.id, missionId, failure, question, answerable: true },
+      deps.now(),
+    ),
+  );
+  if (!escalation) {
+    deps.log(`${feature.id} ✗ 升级单到上限：${failure}`);
+    return 'done';
+  }
+  deps.log(`${feature.id} ⚑ 升级单 ${escalation.id}（${escalation.deadline} 截止）：${failure}`);
+  await waitForResolution(escalation.id, deps);
+  const current = requireRun(deps);
+  if (current.stopped) return 'done';
+  const resolved = current.escalations.find((item) => item.id === escalation.id);
+  const resolution = resolved?.resolution;
+  if (resolution?.kind === 'decided' && resolution.action === 'answer') {
+    const now = deps.now();
+    if (wallClockReached(current, now)) {
+      await deps.store.update((r) => r.checkStop(now));
+      return 'done';
+    }
+    await deps.platform.answerEscalation(missionId, resolution.answer);
+    deps.log(`${feature.id} ↩ 检视者答复了 ${escalation.id}，续跑 ${missionId}`);
+    return 'continue';
+  }
+  await settle(missionId, escalation.id, deps);
+  return 'done';
+}
+
+/** 所有失败共用原升级尾巴，避免 HA 与普通失败的开单和收尾语义分叉。 */
+async function failAndEscalate(
+  feature: PlanFeatureSpec,
+  missionId: string,
+  failure: string,
+  run: PlanRun,
+  deps: PlanDriverDeps,
+): Promise<void> {
+  // 墙钟已经到了（多半正是它被暂停了）：今晚没人会定这张单，不开。停下，
+  // 跑着的功能由 checkStop 挂起并写明要人定什么。
+  const afterRun = deps.now();
+  if (wallClockReached(run, afterRun)) {
+    deps.log(`${feature.id} ⏸ 墙钟到点：${failure}`);
+    await deps.store.update((r) => r.checkStop(afterRun));
+    return;
+  }
+  const question =
+    `${feature.id}「${feature.title}」没能合进集成分支：${failure} ` +
+    '选一个：隔离重跑（另开一条从头来）/ 跳过 / 重划剩余范围（点名依赖它的功能一并删掉）/ 停。';
+  const escalation = await deps.store.update((r) =>
+    r.openEscalation({ featureId: feature.id, missionId, failure, question }, deps.now()),
+  );
+  // 到上限：规则已挂起并停下。再 wait / settle 会空等或把失败 Mission 放弃掉。
+  if (!escalation) {
+    deps.log(`${feature.id} ✗ 升级单到上限：${failure}`);
+    return;
+  }
+  deps.log(`${feature.id} ⚑ 升级单 ${escalation.id}（${escalation.deadline} 截止）：${failure}`);
+  await waitForResolution(escalation.id, deps);
+  await settle(missionId, escalation.id, deps);
+}
+
+/** 等待 HA 决定；墙钟先于决定与截止，因为到点后即使已有决定也不再执行。 */
+async function waitForHaRelease(
+  featureId: string,
+  missionId: string,
+  deps: PlanDriverDeps,
+): Promise<HaReleaseDecision | undefined> {
+  const pollMs = deps.pollMs ?? 15_000;
+  for (;;) {
+    const run = requireRun(deps);
+    if (run.stopped) return undefined;
+    const now = deps.now();
+    if (wallClockReached(run, now)) {
+      await deps.store.update((r) => r.checkStop(now));
+      continue;
+    }
+    const release = run.haReleases.find((item) => item.featureId === featureId && item.missionId === missionId);
+    if (!release) throw new Error(`驱动开立的 HA 待放行记录不见了（${featureId}/${missionId}）。`);
+    if (release.decision) return release.decision;
+    if (Date.parse(now) >= Date.parse(release.deadline)) {
+      await deps.store
+        .update((r) => r.expireHaRelease(featureId, now))
+        .catch(tolerate('HA_RELEASE_REJECTED', 'PLAN_RUN_STOPPED'));
+      continue;
+    }
+    const untilDeadline = Date.parse(release.deadline) - Date.parse(now);
+    const untilWallClock = Date.parse(run.startedAt) + run.stopConditions.wallClockMs - Date.parse(now);
+    await deps.sleep(Math.max(1, Math.min(pollMs, untilDeadline, untilWallClock)));
+  }
 }
 
 /** 等到单子有了结论（决定 / 过期），或者方案停了。 */
@@ -333,7 +746,7 @@ async function waitForResolution(escalationId: string, deps: PlanDriverDeps): Pr
 /** 照结论收尾失败的那条 Mission。 */
 async function settle(missionId: string, escalationId: string, deps: PlanDriverDeps): Promise<void> {
   const run = requireRun(deps);
-  // 方案停了（叫停 / 未解决到顶 / 墙钟）：原样留给人，第二天还能看一眼再合。
+  // 方案停了（叫停 / 未解决到顶 / 墙钟 / 升级单到上限）：原样留给人，第二天还能看一眼再合。
   if (run.stopped) return;
   const view = await deps.platform.getMissionView(missionId);
   if (view.status === 'completed' || view.status === 'blocked') return;

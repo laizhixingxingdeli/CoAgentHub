@@ -7,10 +7,12 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  ACCEPTANCE_STATUSES,
   InvariantViolationError,
   isPromotionTriggerCode,
 } from '../kernel/index.ts';
 import type {
+  AcceptanceResult,
   Attempt,
   AttemptEndReason,
   AttemptKind,
@@ -20,6 +22,10 @@ import type {
   ExecutionResultBody,
   FinalReview,
   FinalReviewAuthority,
+  IndependentReviewBlockReason,
+  IndependentReviewL2Ref,
+  IndependentReviewRecord,
+  IndependentReviewVerdict,
   Mission,
   MissionContract,
   MissionExecutionMode,
@@ -46,12 +52,52 @@ import type {
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
-import type { ActivityLog, Clock, DecisionProvider, IdGenerator, ProjectRepository } from './ports.ts';
+import {
+  CONTEXT_METRICS_BRIEF_SOURCES,
+  CONTEXT_METRICS_TOOL_KINDS,
+} from './ports.ts';
+import type {
+  ActivityLog,
+  Clock,
+  CommandTransaction,
+  ContextMetricsBriefSource,
+  ContextMetricsBriefSourceEntry,
+  ContextMetricsCoverage,
+  ContextMetricsReadBucketV1,
+  ContextMetricsToolBucketV1,
+  ContextMetricsToolKind,
+  ContextMetricsV1,
+  DecisionHook,
+  DecisionProvider,
+  FencedCommandTransaction,
+  IdGenerator,
+  PostExecutionEvaluator,
+  ProjectRepository,
+} from './ports.ts';
+import type { ClaimFence } from './durable-scheduler.ts';
+import {
+  POST_EXECUTION_SHADOW_EVENT_KIND,
+  postExecutionInputFrom,
+  recordPostExecutionShadow,
+} from './post-execution-shadow.ts';
 import type { DeliveryRepository } from './delivery.ts';
+import { escalationDeliveryKey, resultDeliveryKey } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
+import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
+import { redactSecrets } from './redact.ts';
+import { collectAttemptLiveTail, mergeAttemptOutput, type LiveOutput } from './live.ts';
+import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
+import {
+  HA_AUTHORITY_CODE,
+  HA_AUTHORITY_ENV,
+  HaAuthorityError,
+  loadHaAuthorityConfig,
+  matchHaRelease,
+  type HaAuthorityConfig,
+} from './ha-authority-config.ts';
 import { InlineArtifactStore } from './artifact-store.ts';
 import {
   applyMemoryDelta,
@@ -67,6 +113,12 @@ import {
   parseTaskFactsStrict,
 } from './classified-mission-intake.ts';
 import { classifyTask, type ClassificationResult } from './task-classifier.ts';
+import {
+  buildContextBundle,
+  projectStartupBriefFields,
+  type BoundWorkItem,
+  type ContextBundle,
+} from './context-builder.ts';
 import {
   anyHardAuthoritativeExceeded,
   budgetThresholdCrossings,
@@ -136,6 +188,249 @@ export class PlatformRuleError extends Error {
   }
 }
 
+/**
+ * 生产 API / Orchestrator 传入的可信队列领取身份。
+ *
+ * 只含存储层能对上的 id/owner/代次；**不含 now**——调用方填 now 等于把租约时钟交给客户端，
+ * 过期 Runner 可以把时间拨回去继续写。now 由平台 clock 在写事务启动时填进 ClaimFence。
+ * 不要从 request body 构造这份身份。
+ */
+export interface QueueClaimIdentity {
+  readonly id: string;
+  readonly owner: string;
+  readonly claimGeneration: number;
+}
+
+const ATTEMPT_STARTED_KIND = 'attempt.started';
+
+function queuedAttemptStartedData<T extends { readonly kind: string }>(
+  base: T,
+  claim?: QueueClaimIdentity,
+): T | (T & { readonly queue: true }) {
+  return claim ? { ...base, queue: true } : base;
+}
+
+function eventMarksQueuedAttempt(
+  event: { readonly kind: string; readonly attemptId?: string; readonly data: unknown },
+  attemptId: string,
+): boolean {
+  if (event.kind !== ATTEMPT_STARTED_KIND || event.attemptId !== attemptId) return false;
+  if (event.data === null || typeof event.data !== 'object') return false;
+  return (event.data as { queue?: unknown }).queue === true;
+}
+
+function isFencedCommandTransaction(
+  tx: CommandTransaction | undefined,
+): tx is FencedCommandTransaction {
+  return typeof (tx as FencedCommandTransaction | undefined)?.runFenced === 'function';
+}
+
+function mapClaimFenceError(error: unknown): never {
+  if (error instanceof Error && error.message === 'claim fence rejected') {
+    throw new PlatformRuleError(
+      'CLAIM_FENCE_REJECTED',
+      '队列租约已失效或代次不匹配，拒绝写入。',
+    );
+  }
+  throw error;
+}
+
+/**
+ * 单份摘要上限。再大就不是摘要——把正文/路径塞进来会打穿 Activity。
+ * 用字节而不是字符：非 ASCII 观测值按 UTF-8 计才和落盘一致。
+ */
+const CONTEXT_METRICS_MAX_JSON_BYTES = 32 * 1024;
+/** 与固定六源一一对应；多了就是在枚举别的来源名。 */
+const CONTEXT_METRICS_MAX_SOURCE_BUCKETS = CONTEXT_METRICS_BRIEF_SOURCES.length;
+/** 固定工具类别各至多一条。 */
+const CONTEXT_METRICS_MAX_TOOL_BUCKETS = CONTEXT_METRICS_TOOL_KINDS.length;
+/** 读文件去重桶。再多就是在枚举工作区。 */
+const CONTEXT_METRICS_MAX_READ_BUCKETS = 64;
+/** 非负有界整数。不挡的话 Infinity / 1e100 也会被当成观测事实。 */
+const CONTEXT_METRICS_MAX_INT = 1_000_000_000;
+const CONTEXT_METRICS_DIGEST_RE = /^[0-9a-f]{64}$/;
+const CONTEXT_METRICS_COVERAGE = new Set<string>(['complete', 'partial', 'unknown']);
+const CONTEXT_METRICS_BRIEF_SOURCE_SET: ReadonlySet<string> = new Set(CONTEXT_METRICS_BRIEF_SOURCES);
+const CONTEXT_METRICS_TOOL_KIND_SET: ReadonlySet<string> = new Set(CONTEXT_METRICS_TOOL_KINDS);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function objectKeysAre(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return false;
+  }
+  return true;
+}
+
+function boundedNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > CONTEXT_METRICS_MAX_INT) {
+    return undefined;
+  }
+  return value;
+}
+
+function sha256Hex(value: unknown): string | undefined {
+  return typeof value === 'string' && CONTEXT_METRICS_DIGEST_RE.test(value) ? value : undefined;
+}
+
+function utf8JsonBytes(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeBriefSource(value: unknown): ContextMetricsBriefSourceEntry | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, new Set(['source', 'estimatedTokens', 'truncated']))) {
+    return undefined;
+  }
+  const source = value.source;
+  if (typeof source !== 'string' || !CONTEXT_METRICS_BRIEF_SOURCE_SET.has(source)) return undefined;
+  if (typeof value.truncated !== 'boolean') return undefined;
+  const entry: {
+    source: ContextMetricsBriefSource;
+    truncated: boolean;
+    estimatedTokens?: number;
+  } = { source: source as ContextMetricsBriefSource, truncated: value.truncated };
+  if (Object.prototype.hasOwnProperty.call(value, 'estimatedTokens')) {
+    const tokens = boundedNonNegativeInt(value.estimatedTokens);
+    if (tokens === undefined) return undefined;
+    entry.estimatedTokens = tokens;
+  }
+  return entry;
+}
+
+function sanitizeBrief(value: unknown): ContextMetricsV1['brief'] | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, new Set(['renderedUtf8Bytes', 'sources']))) {
+    return undefined;
+  }
+  const renderedUtf8Bytes = boundedNonNegativeInt(value.renderedUtf8Bytes);
+  if (renderedUtf8Bytes === undefined || !Array.isArray(value.sources)) return undefined;
+  if (value.sources.length > CONTEXT_METRICS_MAX_SOURCE_BUCKETS) return undefined;
+  const sources: ContextMetricsBriefSourceEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of value.sources) {
+    const entry = sanitizeBriefSource(item);
+    if (!entry || seen.has(entry.source)) return undefined;
+    seen.add(entry.source);
+    sources.push(entry);
+  }
+  return { renderedUtf8Bytes, sources };
+}
+
+function sanitizeToolBucket(value: unknown): ContextMetricsToolBucketV1 | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, new Set(['kind', 'calls', 'returnedUtf8Bytes']))) {
+    return undefined;
+  }
+  const kind = value.kind;
+  if (typeof kind !== 'string' || !CONTEXT_METRICS_TOOL_KIND_SET.has(kind)) return undefined;
+  const calls = boundedNonNegativeInt(value.calls);
+  const returnedUtf8Bytes = boundedNonNegativeInt(value.returnedUtf8Bytes);
+  if (calls === undefined || returnedUtf8Bytes === undefined) return undefined;
+  return { kind: kind as ContextMetricsToolKind, calls, returnedUtf8Bytes };
+}
+
+function sanitizeReadBucket(value: unknown): ContextMetricsReadBucketV1 | undefined {
+  if (!isPlainObject(value) || !objectKeysAre(value, new Set(['pathDigest', 'contentDigest', 'repeats']))) {
+    return undefined;
+  }
+  const pathDigest = sha256Hex(value.pathDigest);
+  const contentDigest = sha256Hex(value.contentDigest);
+  const repeats = boundedNonNegativeInt(value.repeats);
+  if (!pathDigest || !contentDigest || repeats === undefined) return undefined;
+  return { pathDigest, contentDigest, repeats };
+}
+
+function activityDataHasContextMetrics(data: unknown): boolean {
+  return isPlainObject(data) && Object.prototype.hasOwnProperty.call(data, 'contextMetrics');
+}
+
+/**
+ * 把不可信摘要收成 v1 白名单。失败返回 undefined：调用方仍可收尾，但不得把原字段落盘，
+ * 也不得标 complete。错误路径不回显输入——摘要里可能夹着路径/正文/凭据。
+ */
+function sanitizeAttemptContextMetrics(input: unknown): ContextMetricsV1 | undefined {
+  if (input === undefined) return undefined;
+  const rawBytes = utf8JsonBytes(input);
+  if (rawBytes === undefined || rawBytes > CONTEXT_METRICS_MAX_JSON_BYTES) return undefined;
+  if (!isPlainObject(input) || !objectKeysAre(input, new Set(['version', 'coverage', 'brief', 'tools', 'reads']))) {
+    return undefined;
+  }
+  if (input.version !== 1) return undefined;
+  if (typeof input.coverage !== 'string' || !CONTEXT_METRICS_COVERAGE.has(input.coverage)) return undefined;
+  const coverage = input.coverage as ContextMetricsCoverage;
+
+  let brief: ContextMetricsV1['brief'] | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'brief')) {
+    brief = sanitizeBrief(input.brief);
+    if (brief === undefined) return undefined;
+  }
+  let tools: ContextMetricsToolBucketV1[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'tools')) {
+    if (!Array.isArray(input.tools) || input.tools.length > CONTEXT_METRICS_MAX_TOOL_BUCKETS) return undefined;
+    tools = [];
+    const seen = new Set<string>();
+    for (const item of input.tools) {
+      const bucket = sanitizeToolBucket(item);
+      if (!bucket || seen.has(bucket.kind)) return undefined;
+      seen.add(bucket.kind);
+      tools.push(bucket);
+    }
+  }
+  let reads: ContextMetricsReadBucketV1[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(input, 'reads')) {
+    if (!Array.isArray(input.reads) || input.reads.length > CONTEXT_METRICS_MAX_READ_BUCKETS) return undefined;
+    reads = [];
+    const seen = new Set<string>();
+    for (const item of input.reads) {
+      const bucket = sanitizeReadBucket(item);
+      if (!bucket) return undefined;
+      const key = `${bucket.pathDigest}:${bucket.contentDigest}`;
+      if (seen.has(key)) return undefined;
+      seen.add(key);
+      reads.push(bucket);
+    }
+  }
+
+  // complete 必须带齐三类观测。缺一块还自称 complete = 不可信，整段丢弃。
+  if (coverage === 'complete' && (brief === undefined || tools === undefined || reads === undefined)) {
+    return undefined;
+  }
+
+  const trusted: {
+    version: 1;
+    coverage: ContextMetricsCoverage;
+    brief?: ContextMetricsV1['brief'];
+    tools?: readonly ContextMetricsToolBucketV1[];
+    reads?: readonly ContextMetricsReadBucketV1[];
+  } = { version: 1, coverage };
+  if (brief !== undefined) trusted.brief = brief;
+  if (tools !== undefined) trusted.tools = tools;
+  if (reads !== undefined) trusted.reads = reads;
+  const trustedBytes = utf8JsonBytes(trusted);
+  if (trustedBytes === undefined || trustedBytes > CONTEXT_METRICS_MAX_JSON_BYTES) return undefined;
+  return trusted;
+}
+
+/**
+ * 终审入口求一次策略。结论必须与现网相同：HA 机器终审仍是
+ * HIGH_ASSURANCE_NEEDS_HUMAN，其它允许路径不改对外错误码。
+ */
+function assertFinalizePolicy(
+  input: Parameters<typeof evaluatePolicy>[0],
+  haHumanMessage: string,
+): void {
+  const verdict = evaluatePolicy(input);
+  if (verdict.decision === 'allow') return;
+  if (verdict.reason.code === POLICY_REASON.HA_MACHINE_FINALIZE_DENIED) {
+    throw new PlatformRuleError('HIGH_ASSURANCE_NEEDS_HUMAN', haHumanMessage);
+  }
+  throw new PlatformRuleError('POLICY_DENIED', verdict.reason.detail);
+}
+
 export interface PlatformDeps {
   projects: ProjectRepository;
   deliveries: DeliveryRepository;
@@ -147,15 +442,39 @@ export interface PlatformDeps {
   clock: Clock;
   ids: IdGenerator;
   /**
-   * 可选 DecisionProvider。仅用于 PRE_DISPATCH shadow 审计：
+   * 可选 DecisionProvider。仅用于 shadow 审计（跑哪些钩子见 decisionHooks）：
    * 不注入则完全跳过；注入后信号/失败也不影响真实 dispatch。
    */
   decisionProvider?: DecisionProvider;
+  /**
+   * 注入了 provider 时哪些钩子跑 shadow。缺省只有 POST_EXECUTION（见 parseDecisionHooks）：
+   * PRE_DISPATCH 只给 ID 时答案是常数，要显式开。
+   */
+  decisionHooks?: ReadonlySet<DecisionHook>;
+  /**
+   * POST_EXECUTION 评估器（J2）。注入且钩子含 POST_EXECUTION 时，编排器在交卷 + 确定性验收之后
+   * 调 runPostExecutionShadow；不注入则完全跳过。
+   */
+  postExecutionEvaluator?: PostExecutionEvaluator;
+  /**
+   * 命令事务（C2）。注入了，交卷与升级这几条命令的状态改动、事件、投递一起提交，或者一个都不落；
+   * 缺省（内存版、PG 暂未接）直接跑，行为与之前相同。
+   */
+  transaction?: CommandTransaction;
   /**
    * Lightweight 机器验收依赖（成组 optional）。
    * Standard 路径不读这组；缺省时 validateAndAcceptLightweightWorkItem fail-closed。
    */
   validation?: PlatformValidationDeps;
+  /**
+   * 测试注入 HA 授权文件绝对路径。生产只读 COAGENT_HA_AUTHORITY_FILE，每次现读。
+   */
+  haAuthorityFile?: string;
+  /**
+   * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
+   * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。
+   */
+  live?: LiveOutput;
 }
 
 export interface CreateMissionInput {
@@ -181,8 +500,8 @@ export interface CreateClassifiedMissionInput {
   /** 可选六维评估；缺省不传。 */
   assessment?: unknown;
   /**
-   * explicit WorkOrder。lightweight 必填；standard 禁止；
-   * query/HA 路径到不了创建。
+   * explicit WorkOrder。lightweight 必填；standard / 合规 HA 禁止；
+   * query 与带禁止副作用的 HA 路径到不了创建。
    */
   workOrder?: WorkOrder;
 }
@@ -202,7 +521,12 @@ export class Platform {
   #artifacts: ArtifactStore;
   #clock: Clock;
   #decisionProvider: DecisionProvider | undefined;
+  #decisionHooks: ReadonlySet<DecisionHook>;
+  #postExecutionEvaluator: PostExecutionEvaluator | undefined;
+  #transaction: CommandTransaction | undefined;
   #validation: PlatformValidationDeps | undefined;
+  #haAuthorityFile: string | undefined;
+  #live: LiveOutput | undefined;
 
   constructor(deps: PlatformDeps) {
     this.#projects = deps.projects;
@@ -213,12 +537,22 @@ export class Platform {
     this.#artifacts = deps.artifacts ?? new InlineArtifactStore();
     this.#clock = deps.clock;
     this.#decisionProvider = deps.decisionProvider;
+    this.#decisionHooks = deps.decisionHooks ?? new Set<DecisionHook>(['POST_EXECUTION']);
+    this.#postExecutionEvaluator = deps.postExecutionEvaluator;
+    this.#transaction = deps.transaction;
     this.#validation = deps.validation;
+    this.#haAuthorityFile = deps.haAuthorityFile;
+    this.#live = deps.live;
   }
 
   /* =============================== L3 面 =============================== */
 
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createMission(input));
+  }
+
+  async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
     const project = await this.#ensureProject(input.projectId);
     const missionId = input.missionId ?? this.#ids.next('M');
     const mission = project.createMission({
@@ -239,6 +573,13 @@ export class Platform {
    * executionMode / runKind **只**取 classifier.recommended。
    */
   async createClassifiedMission(
+    input: CreateClassifiedMissionInput,
+  ): Promise<CreateClassifiedMissionResult> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createClassifiedMission(input));
+  }
+
+  async #createClassifiedMission(
     input: CreateClassifiedMissionInput,
   ): Promise<CreateClassifiedMissionResult> {
     assertNoCallerRouteOverride(input as unknown);
@@ -263,10 +604,19 @@ export class Platform {
 
     const mode = recommended.executionMode;
     if (mode === 'high_assurance') {
-      throw new PlatformRuleError(
-        'HIGH_ASSURANCE_NOT_AVAILABLE',
-        '分类结果为 high_assurance：本阶段不可用，不创建 Mission。',
-      );
+      const flagged = haForbiddenSideEffects(facts.highAssurance);
+      if (flagged.length > 0) {
+        throw new PlatformRuleError(
+          'HA_SIDE_EFFECT_DENIED',
+          `带外部副作用的 HA（${flagged.join(', ')}）首版一律拒绝，不创建 Mission。`,
+        );
+      }
+      if (hasWorkOrder) {
+        throw new PlatformRuleError(
+          'HIGH_ASSURANCE_WORK_ORDER_FORBIDDEN',
+          'high_assurance 路由禁止携带 Lightweight workOrder。',
+        );
+      }
     }
 
     if (mode === 'standard') {
@@ -283,8 +633,8 @@ export class Platform {
           'lightweight 路由必须提供 explicit workOrder。',
         );
       }
-    } else {
-      // 防御：classifier 合同外的 mode
+    } else if (mode !== 'high_assurance') {
+      // HA 的副作用/workOrder 已在上面守卫过；这里不能再当未知 mode 拒掉。
       throw new PlatformRuleError(
         'UNSUPPORTED_ROUTE',
         `不支持的 executionMode：${String(mode)}`,
@@ -298,12 +648,12 @@ export class Platform {
     let mission: Mission;
     let workItemId: string | undefined;
 
-    if (mode === 'standard') {
+    if (mode === 'standard' || mode === 'high_assurance') {
       mission = project.createMission({
         id: missionId,
         contract: input.contract,
         origin: input.origin,
-        executionMode: 'standard',
+        executionMode: mode,
         runKind: 'mutation',
         ...(assessment !== undefined ? { complexityAssessment: assessment } : {}),
       });
@@ -384,6 +734,32 @@ export class Platform {
    * "正在改代码"和"会把改动合回去"混成了一件事），不在这里顺手改。
    */
   async rerunMission(
+    missionId: string,
+    options?: { newMissionId?: string; baseRevision?: string },
+  ): Promise<{
+    missionId: string;
+    rerunOf: string;
+    contractRevision: number;
+    /** 钉住的分叉基线。源头没记过工作区时为 undefined。 */
+    baseRevision: string | undefined;
+    /**
+     * 源头那次的产出**已经落地进项目了**。
+     *
+     * 这时候这次重跑不是干净的对照：答案就摆在项目的工作区里，agent 读一眼
+     * 就有。实测 P1-single 正是这么干的——它 read 了主仓库的 profile-audit.ts
+     * 和 .test.ts，还 git show 了那次交付的提交。**它不是在解题，是在抄**，
+     * 而两份记录看上去都完整自洽。
+     *
+     * 隔离做不到（agent 用绝对路径就能越出 worktree），所以至少要**说出来**：
+     * 拿这样一次运行去和源头比成本，比出来的数是假的。
+     */
+    sourceAlreadyLanded: boolean;
+  }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#rerunMission(missionId, options));
+  }
+
+  async #rerunMission(
     missionId: string,
     options?: { newMissionId?: string; baseRevision?: string },
   ): Promise<{
@@ -494,14 +870,15 @@ export class Platform {
           l2Reviews += 1;
           if (data?.verdict === 'reject') l2Rejects += 1;
         }
-        // 与上面 L2 排除 validator 同理：机器 L3 放行、方案放弃不是人的检视。
-        // 算进来的话，夜跑的每一条都让「L3 打回」的分母多一，A/B 表就混了人和机器。
+        // 白名单：只数人亲签。authority === 'human'，或旧记录没标 authority（undefined）。
+        // 不能用「不等于 machine/plan/reviewer」的黑名单——authority:'unknown' 也会混进人类分母。
+        // 检视者代签、夜跑机器放行、方案放弃都不是人亲签。
+        const l3Authority = data?.authority;
         if (
           (event.kind === 'final_review.send_back' ||
             event.kind === 'final_review.merged' ||
             event.kind === 'final_review.abandoned') &&
-          data?.authority !== 'machine' &&
-          data?.authority !== 'plan'
+          (l3Authority === 'human' || l3Authority === undefined)
         ) {
           l3Reviews += 1;
           if (event.kind === 'final_review.send_back') l3SendBacks += 1;
@@ -547,6 +924,14 @@ export class Platform {
     missionId: string,
     contract: MissionContract,
   ): Promise<{ contractRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#reviseContract(missionId, contract));
+  }
+
+  async #reviseContract(
+    missionId: string,
+    contract: MissionContract,
+  ): Promise<{ contractRevision: number }> {
     const { mission } = await this.#locate(missionId);
     const contractRevision = mission.reviseContract(contract);
     // 契约改了，之前那份交卷、以及**已经派出去的工单**，都是照着旧契约做的。
@@ -571,11 +956,27 @@ export class Platform {
   async startCoordinatorAttempt(
     missionId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string }> {
+    // 队列领取与 attempt.started 必须同事务：标记按 attemptId 可查，重启后仍能认出队列 Attempt。
+    return this.#txFenced(claim, () => this.#startCoordinatorAttempt(missionId, profile, claim));
+  }
+
+  async #startCoordinatorAttempt(
+    missionId: string,
+    profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
     const { mission } = await this.#locate(missionId);
     const attempt = mission.startCoordinatorAttempt();
     if (profile) attempt.recordProfile(profile);
-    await this.#event(mission, 'attempt.started', { kind: 'coordinator', profile }, undefined, attempt.id);
+    await this.#event(
+      mission,
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'coordinator', profile }, claim),
+      undefined,
+      attempt.id,
+    );
     return { attemptId: attempt.id };
   }
 
@@ -583,6 +984,17 @@ export class Platform {
     missionId: string,
     workItemId: string,
     profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string }> {
+    // 队列领取与 attempt.started 必须同事务：标记按 attemptId 可查，重启后仍能认出队列 Attempt。
+    return this.#txFenced(claim, () => this.#startExecutorAttempt(missionId, workItemId, profile, claim));
+  }
+
+  async #startExecutorAttempt(
+    missionId: string,
+    workItemId: string,
+    profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
     const { mission, item } = await this.#locateItem(missionId, workItemId);
     // 提交结果 ≠ 尝试结束。调度器必须在 finally 里 finishAttempt，否则运行时
@@ -600,12 +1012,694 @@ export class Platform {
     if (profile) attempt.recordProfile(profile);
     await this.#event(
       mission,
-      'attempt.started',
-      { kind: 'executor', profile },
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'executor', profile }, claim),
       workItemId,
       attempt.id,
     );
     return { attemptId: attempt.id };
+  }
+
+  /**
+   * 从独立检视候选里开一张 independent_reviewer Attempt。
+   *
+   * 不开时 Mission 停在 awaiting_review，并把原因写进可查询字段；
+   * 绝不拿协调者自己的 profile 顶上。E2 不从 runMission 自动调用。
+   */
+  async startIndependentReviewerAttempt(
+    missionId: string,
+    candidates: readonly UsedProfile[],
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string; profileId: string }> {
+    // 挡下来的原因必须先作为一次成功提交落库，再把拒绝抛给调用方。
+    // 若在同一事务里抛错，文件/PG 都会回滚，待检视原因查询不到。
+    const result = await this.#txFenced(claim, () =>
+      this.#startIndependentReviewerAttempt(missionId, candidates, claim),
+    );
+    if (!result.ok) {
+      throw new PlatformRuleError(result.code, result.detail);
+    }
+    return { attemptId: result.attemptId, profileId: result.profileId };
+  }
+
+  async #startIndependentReviewerAttempt(
+    missionId: string,
+    candidates: readonly UsedProfile[],
+    claim?: QueueClaimIdentity,
+  ): Promise<
+    | { ok: true; attemptId: string; profileId: string }
+    | { ok: false; code: string; detail: string }
+  > {
+    const { mission } = await this.#locate(missionId);
+    const blocked = this.#independentReviewOpenBlock(mission, candidates);
+    if (blocked) {
+      mission.recordIndependentReviewBlock(blocked.reason, blocked.detail);
+      await this.#event(mission, 'independent_review.blocked', blocked);
+      return { ok: false, code: blocked.code, detail: blocked.detail };
+    }
+
+    const excluded = this.#participantProfileIds(mission);
+    if (!excluded) {
+      const detail =
+        '本 Mission 有历史协调者或执行者 Attempt 缺 profileId，无法证明独立，拒绝开检视。';
+      mission.recordIndependentReviewBlock('history_missing_profile', detail);
+      await this.#event(mission, 'independent_review.blocked', {
+        reason: 'history_missing_profile',
+        detail,
+      });
+      return { ok: false, code: 'INDEPENDENT_REVIEW_HISTORY_MISSING_PROFILE', detail };
+    }
+
+    const picked = candidates.find(
+      (row) => row.profileId && !excluded.has(row.profileId),
+    );
+    if (!picked) {
+      const hasAny = candidates.some((row) => typeof row.profileId === 'string' && row.profileId.trim() !== '');
+      const reason: IndependentReviewBlockReason = hasAny ? 'all_candidates_conflict' : 'no_candidates';
+      const detail = hasAny
+        ? '独立检视候选全部与本 Mission 历史协调者或执行者 profileId 冲突，拒绝自审。'
+        : '候选池没有 independent_reviewer 候选，拒绝开检视。';
+      mission.recordIndependentReviewBlock(reason, detail);
+      await this.#event(mission, 'independent_review.blocked', { reason, detail });
+      return {
+        ok: false,
+        code: hasAny ? 'INDEPENDENT_REVIEW_ALL_CONFLICT' : 'INDEPENDENT_REVIEW_NO_CANDIDATES',
+        detail,
+      };
+    }
+
+    let reviewedCommit: string;
+    try {
+      reviewedCommit = await this.#missionReviewedCommit(mission);
+    } catch (error) {
+      const detail =
+        error instanceof PlatformRuleError
+          ? error.message
+          : '读不到 Mission worktree 的 HEAD，拒绝开检视。';
+      mission.recordIndependentReviewBlock('reviewed_commit_unavailable', detail);
+      await this.#event(mission, 'independent_review.blocked', {
+        reason: 'reviewed_commit_unavailable',
+        detail,
+      });
+      return { ok: false, code: 'REVIEWED_COMMIT_UNAVAILABLE', detail };
+    }
+    const l2 = this.#l2ReviewSnapshot(mission);
+    let validationReportId = l2.validationReportId;
+    if (mission.executionMode === 'high_assurance') {
+      const fromHa = await this.#currentHaValidationReport(
+        mission.id,
+        reviewedCommit,
+        l2.fingerprint,
+        mission.contractRevision,
+      );
+      // 开审不得回退 L2 validator 报告：没有当前 HA 报告就 fail-closed，不建 Attempt。
+      if (!fromHa || !fromHa.passed) {
+        const detail =
+          '当前 HEAD、契约与 L2 没有通过的 HA 确定性验证报告，拒绝开检视。';
+        return { ok: false, code: 'INDEPENDENT_REVIEW_HA_REPORT_MISSING', detail };
+      }
+      validationReportId = fromHa.id;
+    }
+    const attempt = mission.startIndependentReviewerAttempt({
+      contractRevision: mission.contractRevision,
+      reviewedCommit,
+      l2Fingerprint: l2.fingerprint,
+      l2ReviewRefs: l2.refs,
+      ...(validationReportId !== undefined ? { validationReportId } : {}),
+    });
+    attempt.recordProfile(picked);
+    await this.#event(
+      mission,
+      ATTEMPT_STARTED_KIND,
+      queuedAttemptStartedData({ kind: 'independent_reviewer', profile: picked }, claim),
+      undefined,
+      attempt.id,
+    );
+    return { ok: true, attemptId: attempt.id, profileId: picked.profileId };
+  }
+
+  async getMissionReviewBundle(
+    missionId: string,
+    attemptId: string,
+  ): Promise<{
+    missionId: string;
+    contractRevision: number;
+    reviewedCommit: string;
+    l2ItemResults: readonly {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[];
+    validationReportRefs: readonly { id: string }[];
+  }> {
+    const { mission } = await this.#requireAttempt(missionId, attemptId, 'independent_reviewer');
+    const l2 = this.#l2ReviewSnapshot(mission);
+    const reviewedCommit =
+      mission.independentReviewOpen?.attemptId === attemptId
+        ? mission.independentReviewOpen.reviewedCommit
+        : await this.#missionReviewedCommit(mission);
+    const reportIds = new Set<string>();
+    if (l2.validationReportId) reportIds.add(l2.validationReportId);
+    if (mission.independentReviewOpen?.validationReportId) {
+      reportIds.add(mission.independentReviewOpen.validationReportId);
+    }
+    return {
+      missionId: mission.id,
+      contractRevision: mission.contractRevision,
+      reviewedCommit,
+      l2ItemResults: l2.items,
+      validationReportRefs: [...reportIds].map((id) => ({ id })),
+    };
+  }
+
+  /**
+   * 该 Attempt 是否在 attempt.started 上带有持久队列标记。
+   * HTTP finish 必须据此区分：队列不得在丢牌后走无 claim 旧路径。
+   */
+  async attemptRequiresQueueClaim(missionId: string, attemptId: string): Promise<boolean> {
+    return this.#attemptHasQueueMark(missionId, attemptId);
+  }
+
+  async submitIndependentReview(
+    missionId: string,
+    attemptId: string,
+    input: { readonly verdict: unknown; readonly reasons: unknown },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ recorded: IndependentReviewRecord }> {
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitIndependentReview(missionId, attemptId, input));
+  }
+
+  async #submitIndependentReview(
+    missionId: string,
+    attemptId: string,
+    input: { readonly verdict: unknown; readonly reasons: unknown },
+  ): Promise<{ recorded: IndependentReviewRecord }> {
+    const { mission, attempt } = await this.#requireAttempt(
+      missionId,
+      attemptId,
+      'independent_reviewer',
+    );
+    if (input.verdict !== 'pass' && input.verdict !== 'send_back') {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_INVALID',
+        'verdict 必须是 pass 或 send_back。',
+      );
+    }
+    if (
+      !Array.isArray(input.reasons) ||
+      input.reasons.length === 0 ||
+      input.reasons.some((r) => typeof r !== 'string' || r.trim() === '')
+    ) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_INVALID',
+        'reasons 必须是非空字符串数组。',
+      );
+    }
+    const verdict = input.verdict as IndependentReviewVerdict;
+    const reasons = input.reasons as readonly string[];
+    const open = mission.independentReviewOpen;
+    if (!open || open.attemptId !== attemptId) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_OPEN_MISSING',
+        '没有与本次 Attempt 对应的开审对照，拒绝收结论。',
+      );
+    }
+
+    const headNow = await this.#missionReviewedCommit(mission);
+    const l2Now = this.#l2ReviewSnapshot(mission);
+    const profileId = attempt.profile?.profileId;
+    if (!profileId) {
+      throw new PlatformRuleError(
+        'INDEPENDENT_REVIEW_PROFILE_REQUIRED',
+        '本次检视 Attempt 缺 profileId，无法记下独立结论。',
+      );
+    }
+
+    if (verdict === 'pass') {
+      if (mission.contractRevision !== open.contractRevision) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_REVISION_CHANGED',
+          `契约已从 r${open.contractRevision} 变到 r${mission.contractRevision}，旧对照不能 pass。`,
+        );
+      }
+      if (headNow !== open.reviewedCommit) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_HEAD_CHANGED',
+          '被审 HEAD 已变化，拒绝记录 pass。',
+        );
+      }
+      if (l2Now.fingerprint !== open.l2Fingerprint) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_EVIDENCE_CHANGED',
+          '被引用的 L2 逐条结果已变化，拒绝记录 pass。',
+        );
+      }
+      if (!this.#l2RefsBelongToMission(mission, open.l2ReviewRefs) || open.l2ReviewRefs.length === 0) {
+        throw new PlatformRuleError(
+          'INDEPENDENT_REVIEW_L2_MISSING',
+          'L2 逐条结果引用缺失或不属本 Mission，拒绝 pass。',
+        );
+      }
+      if (mission.executionMode === 'high_assurance') {
+        const ha = await this.#currentHaValidationReport(
+          mission.id,
+          headNow,
+          l2Now.fingerprint,
+          mission.contractRevision,
+        );
+        // 收 pass 同样只认当前 HA 报告，避免开审后改用 L2 validator 报告凑。
+        if (!ha || !ha.passed || open.validationReportId !== ha.id) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            '当前没有通过且属于本提交的 HA 确定性验证报告，不能 pass。',
+          );
+        }
+        const report = await this.#validation?.reports.get(ha.id);
+        if (!report || report.missionId !== mission.id || report.passed !== true) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            'HA 确定性验证报告不存在、不属本 Mission 或未通过，不能 pass。',
+          );
+        }
+      } else {
+        const reportId = open.validationReportId ?? l2Now.validationReportId;
+        if (!reportId) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            '缺 ValidationReport，不能 pass。',
+          );
+        }
+        const report = await this.#validation?.reports.get(reportId);
+        if (!report || report.missionId !== mission.id) {
+          throw new PlatformRuleError(
+            'INDEPENDENT_REVIEW_REPORT_MISSING',
+            'ValidationReport 不存在或不属本 Mission，不能 pass。',
+          );
+        }
+      }
+    }
+
+    const recorded = mission.recordIndependentReview(attemptId, {
+      reviewerProfileId: profileId,
+      contractRevision: open.contractRevision,
+      reviewedCommit: open.reviewedCommit,
+      l2ReviewRefs: open.l2ReviewRefs,
+      l2Fingerprint: open.l2Fingerprint,
+      verdict,
+      reasons,
+      recordedAt: this.#clock.now().toISOString(),
+      ...(open.validationReportId !== undefined
+        ? { validationReportId: open.validationReportId }
+        : {}),
+    });
+    await this.#event(
+      mission,
+      'independent_review.recorded',
+      {
+        verdict: recorded.verdict,
+        reviewerAttemptId: recorded.reviewerAttemptId,
+        contractRevision: recorded.contractRevision,
+        reviewedCommit: recorded.reviewedCommit,
+      },
+      undefined,
+      attemptId,
+    );
+    return { recorded };
+  }
+
+  /**
+   * 读取方判断「当前有效的 pass」：revision / HEAD / L2 / 报告任一变化即失效。
+   * 同一证据下最新若是 send_back，不得回退到更早的 pass。HA 受控放行在合并前核对这一份。
+   */
+  async effectiveIndependentReviewPass(
+    missionId: string,
+  ): Promise<IndependentReviewRecord | undefined> {
+    const { mission } = await this.#locate(missionId);
+    let head: string;
+    try {
+      head = await this.#missionReviewedCommit(mission);
+    } catch {
+      return undefined;
+    }
+    const fingerprint = this.#l2ReviewSnapshot(mission).fingerprint;
+    const currentReport = await this.#currentHaValidationReport(
+      mission.id,
+      head,
+      fingerprint,
+      mission.contractRevision,
+    );
+    // HA：没有当前证据下 passed 的 HA 报告就不能认 pass，不能拿别的已通过报告凑。
+    if (mission.executionMode === 'high_assurance' && (!currentReport || !currentReport.passed)) {
+      return undefined;
+    }
+    for (let i = mission.independentReviews.length - 1; i >= 0; i -= 1) {
+      const row = mission.independentReviews[i]!;
+      if (row.contractRevision !== mission.contractRevision) continue;
+      if (row.reviewedCommit !== head) continue;
+      if (row.l2Fingerprint !== fingerprint) continue;
+      if (row.verdict === 'send_back') return undefined;
+      if (row.verdict !== 'pass') continue;
+      if (!row.validationReportId) return undefined;
+      if (mission.executionMode === 'high_assurance') {
+        if (!currentReport?.passed || row.validationReportId !== currentReport.id) return undefined;
+      } else if (currentReport && (!currentReport.passed || row.validationReportId !== currentReport.id)) {
+        return undefined;
+      }
+      const report = await this.#validation?.reports.get(row.validationReportId);
+      if (!report || report.missionId !== mission.id || report.passed !== true) return undefined;
+      return row;
+    }
+    return undefined;
+  }
+
+  async #currentHaValidationReport(
+    missionId: string,
+    head: string,
+    fingerprint: string,
+    contractRevision: number,
+  ): Promise<
+    | {
+        id: string;
+        passed: boolean;
+        workItemIds?: readonly string[];
+        commands?: readonly { argv: readonly string[]; timeoutMs: number }[];
+      }
+    | undefined
+  > {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== 'validation.reported') continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as {
+        purpose?: unknown;
+        reportId?: unknown;
+        passed?: unknown;
+        reviewedCommit?: unknown;
+        l2Fingerprint?: unknown;
+        contractRevision?: unknown;
+        workItemIds?: unknown;
+        commands?: unknown;
+      };
+      if (row.purpose !== 'ha_deterministic') continue;
+      if (row.reviewedCommit !== head) continue;
+      if (row.l2Fingerprint !== fingerprint) continue;
+      if (row.contractRevision !== contractRevision) continue;
+      if (typeof row.reportId !== 'string') return undefined;
+      const report = await this.#validation?.reports.get(row.reportId);
+      // 事件对得上但仓储里没有这份报告，不能拿事件自己的 passed 凑。
+      if (!report || report.missionId !== missionId) return undefined;
+      const workItemIds = this.#parseHaWorkItemIds(row.workItemIds);
+      const commands = this.#parseHaCommands(row.commands);
+      return {
+        id: row.reportId,
+        passed: report.passed === true,
+        ...(workItemIds ? { workItemIds } : {}),
+        ...(commands ? { commands } : {}),
+      };
+    }
+    return undefined;
+  }
+
+  #parseHaWorkItemIds(value: unknown): readonly string[] | undefined {
+    if (!Array.isArray(value) || value.length === 0) return undefined;
+    if (value.some((id) => typeof id !== 'string' || id.trim() === '')) return undefined;
+    return value as string[];
+  }
+
+  #parseHaCommands(
+    value: unknown,
+  ): readonly { argv: readonly string[]; timeoutMs: number }[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const rows: { argv: readonly string[]; timeoutMs: number }[] = [];
+    for (const item of value) {
+      if (item == null || typeof item !== 'object' || Array.isArray(item)) return undefined;
+      const row = item as { argv?: unknown; timeoutMs?: unknown };
+      if (!Array.isArray(row.argv) || row.argv.some((part) => typeof part !== 'string')) {
+        return undefined;
+      }
+      if (typeof row.timeoutMs !== 'number' || !Number.isFinite(row.timeoutMs)) return undefined;
+      rows.push({ argv: row.argv as string[], timeoutMs: row.timeoutMs });
+    }
+    return rows;
+  }
+
+  #frozenHaCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
+    return mission.workItems
+      .filter((item) => item.status !== 'retired')
+      .flatMap((item) =>
+        (item.order?.validation?.commands ?? []).map((command) => ({
+          argv: [...command.argv],
+          timeoutMs: command.timeoutMs,
+        })),
+      );
+  }
+
+  #sameHaCommands(
+    left: readonly { argv: readonly string[]; timeoutMs: number }[],
+    right: readonly { argv: readonly string[]; timeoutMs: number }[],
+  ): boolean {
+    if (left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i += 1) {
+      const a = left[i]!;
+      const b = right[i]!;
+      if (a.timeoutMs !== b.timeoutMs || a.argv.length !== b.argv.length) return false;
+      if (a.argv.some((part, j) => part !== b.argv[j])) return false;
+    }
+    return true;
+  }
+
+  #haReuseMatches(
+    meta: {
+      workItemIds?: readonly string[];
+      commands?: readonly { argv: readonly string[]; timeoutMs: number }[];
+    },
+    report: ValidationReport,
+    activeIds: readonly string[],
+    frozen: readonly { argv: readonly string[]; timeoutMs: number }[],
+  ): boolean {
+    // 复用旧报告时必须核覆盖集合与冻结命令；缺字段视为无法证明，拒绝复用。
+    if (!meta.workItemIds || !meta.commands) return false;
+    if (meta.workItemIds.length !== activeIds.length) return false;
+    const covered = new Set(meta.workItemIds);
+    if (covered.size !== activeIds.length) return false;
+    if (!activeIds.every((id) => covered.has(id))) return false;
+    if (!this.#sameHaCommands(meta.commands, frozen)) return false;
+    const reported = report.checks.filter((check) => check.kind === 'command');
+    if (reported.length !== frozen.length) return false;
+    for (let i = 0; i < frozen.length; i += 1) {
+      const argv = reported[i]?.command?.argv;
+      const expected = frozen[i]!.argv;
+      if (!argv || argv.length !== expected.length) return false;
+      if (argv.some((part, j) => part !== expected[j])) return false;
+    }
+    return true;
+  }
+
+  #independentReviewOpenBlock(
+    mission: Mission,
+    _candidates: readonly UsedProfile[],
+  ): { reason: IndependentReviewBlockReason; code: string; detail: string } | undefined {
+    if (mission.status !== 'awaiting_review') {
+      return {
+        reason: 'not_awaiting_review',
+        code: 'INDEPENDENT_REVIEW_NOT_AWAITING',
+        detail: `Mission ${mission.id} 现在是 ${mission.status}，只能在 awaiting_review 开独立检视。`,
+      };
+    }
+    if (mission.result?.outcome !== 'delivered') {
+      return {
+        reason: 'not_delivered',
+        code: 'INDEPENDENT_REVIEW_NOT_DELIVERED',
+        detail: `Mission ${mission.id} 交卷不是 delivered，不能开独立检视。`,
+      };
+    }
+    const unfinished = mission.workItems.filter(
+      (item) => item.status !== 'accepted' && item.status !== 'retired',
+    );
+    if (unfinished.length > 0) {
+      return {
+        reason: 'work_items_unfinished',
+        code: 'INDEPENDENT_REVIEW_WORK_ITEMS_UNFINISHED',
+        detail: `还有未验收的工作项：${unfinished.map((i) => i.id).join(', ')}。`,
+      };
+    }
+    if (mission.independentReviewerAttempts.some((a) => a.status === 'in_progress')) {
+      return {
+        reason: 'concurrent_attempt',
+        code: 'INDEPENDENT_REVIEW_CONCURRENT',
+        detail: `Mission ${mission.id} 已有 in_progress 的 independent_reviewer Attempt。`,
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * 历史参与者的 profileId 集合。任一缺 profile 则无法证明独立，返回 undefined。
+   */
+  #participantProfileIds(mission: Mission): Set<string> | undefined {
+    const ids = new Set<string>();
+    const attempts: Attempt[] = [...mission.coordinatorAttempts];
+    for (const item of mission.workItems) attempts.push(...item.attempts);
+    for (const attempt of attempts) {
+      const profileId = attempt.profile?.profileId;
+      if (typeof profileId !== 'string' || profileId.trim() === '') return undefined;
+      ids.add(profileId);
+    }
+    return ids;
+  }
+
+  #missionWorkspaceCwd(mission: Mission): string | undefined {
+    const root = mission.workspaceRef?.projectRoot;
+    if (typeof root !== 'string' || root.trim() === '') return undefined;
+    const viaTree = this.#workspace?.worktreePath?.(mission.id, root);
+    const cwd = viaTree ?? root;
+    return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : undefined;
+  }
+
+  async #missionReviewedCommit(mission: Mission): Promise<string> {
+    if (!this.#workspace) {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        '没有工作区管理，无法核对被审 HEAD。',
+      );
+    }
+    const cwd = this.#missionWorkspaceCwd(mission);
+    if (!cwd) {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        'Mission 没有 projectRoot，无法核对被审 HEAD。',
+      );
+    }
+    const head = await this.#workspace.head(cwd);
+    if (typeof head !== 'string' || head.trim() === '') {
+      throw new PlatformRuleError(
+        'REVIEWED_COMMIT_UNAVAILABLE',
+        '读不到 Mission worktree 的 HEAD。',
+      );
+    }
+    return head;
+  }
+
+  #l2ReviewSnapshot(mission: Mission): {
+    fingerprint: string;
+    refs: IndependentReviewL2Ref[];
+    validationReportId?: string;
+    items: {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[];
+  } {
+    const refs: IndependentReviewL2Ref[] = [];
+    const items: {
+      workItemId: string;
+      submittedAttemptId?: string;
+      reviewAttemptId?: string;
+      verdict?: string;
+      acceptanceResults?: unknown;
+    }[] = [];
+    let validationReportId: string | undefined;
+    const canonical: unknown[] = [];
+    for (const item of mission.workItems) {
+      if (item.status === 'retired') continue;
+      const last = item.reviews.at(-1);
+      const ref: IndependentReviewL2Ref = {
+        workItemId: item.id,
+        ...(item.submittedAttemptId !== undefined
+          ? { submittedAttemptId: item.submittedAttemptId }
+          : {}),
+        ...(last?.attemptId !== undefined ? { reviewAttemptId: last.attemptId } : {}),
+      };
+      refs.push(ref);
+      items.push({
+        workItemId: item.id,
+        ...(item.submittedAttemptId !== undefined
+          ? { submittedAttemptId: item.submittedAttemptId }
+          : {}),
+        ...(last?.attemptId !== undefined ? { reviewAttemptId: last.attemptId } : {}),
+        ...(last?.verdict !== undefined ? { verdict: last.verdict } : {}),
+        ...(last?.acceptanceResults !== undefined
+          ? { acceptanceResults: last.acceptanceResults }
+          : {}),
+      });
+      canonical.push({
+        id: item.id,
+        status: item.status,
+        submittedAttemptId: item.submittedAttemptId ?? null,
+        reviews: item.reviews.map((r) => ({
+          attemptId: r.attemptId ?? null,
+          submittedAttemptId: r.submittedAttemptId ?? null,
+          verdict: r.verdict,
+          reasons: r.reasons,
+          acceptanceResults: r.acceptanceResults ?? null,
+          authority: r.authority ?? null,
+        })),
+      });
+      const authority = last?.authority;
+      if (authority && authority.kind === 'validator' && !validationReportId) {
+        validationReportId = authority.reportId;
+      }
+    }
+    return {
+      fingerprint: JSON.stringify(canonical),
+      refs,
+      items,
+      ...(validationReportId !== undefined ? { validationReportId } : {}),
+    };
+  }
+
+  #l2RefsBelongToMission(mission: Mission, refs: readonly IndependentReviewL2Ref[]): boolean {
+    // pass 必须能指回真实 L2：每个非 retired WorkItem 都要有 ReviewRecord、
+    // 属于本项/本 Mission 的 submitted 与 review Attempt、以及覆盖工单每条验收的结果。
+    // 只查 WorkItem 存在会让缺 review / 缺逐条 / 错 reviewAttemptId 的 pass 混过去。
+    const active = mission.workItems.filter((item) => item.status !== 'retired');
+    if (refs.length !== active.length) return false;
+    for (const item of active) {
+      const ref = refs.find((row) => row.workItemId === item.id);
+      if (!ref) return false;
+      const last = item.reviews.at(-1);
+      if (!last) return false;
+
+      const submittedAttemptId = item.submittedAttemptId;
+      if (!submittedAttemptId || ref.submittedAttemptId !== submittedAttemptId) return false;
+      if (last.submittedAttemptId !== undefined && last.submittedAttemptId !== submittedAttemptId) {
+        return false;
+      }
+      const submitted = item.attempts.find((row) => row.id === submittedAttemptId);
+      if (
+        !submitted ||
+        submitted.kind !== 'executor' ||
+        submitted.workItemId !== item.id ||
+        (submitted.missionId !== undefined && submitted.missionId !== mission.id)
+      ) {
+        return false;
+      }
+
+      const reviewAttemptId = last.attemptId;
+      if (!reviewAttemptId || ref.reviewAttemptId !== reviewAttemptId) return false;
+      const reviewAttempt = mission.coordinatorAttempts.find((row) => row.id === reviewAttemptId);
+      if (
+        !reviewAttempt ||
+        reviewAttempt.kind !== 'coordinator' ||
+        (reviewAttempt.missionId !== undefined && reviewAttempt.missionId !== mission.id)
+      ) {
+        return false;
+      }
+
+      const required = item.order?.acceptance ?? [];
+      const results = last.acceptanceResults;
+      if (!Array.isArray(results)) return false;
+      for (const criterion of required) {
+        if (!results.some((row) => row.criterion === criterion)) return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -633,13 +1727,58 @@ export class Platform {
         readonly revision: string;
         readonly resolved: readonly { readonly key: string; readonly value: string }[];
       };
+      /** 不可信采集摘要。校验失败则忽略，不挡旧收尾。 */
+      contextMetrics?: unknown;
+    },
+    claim?: QueueClaimIdentity,
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#finishAttempt(missionId, attemptId, outcome));
+  }
+
+  async #finishAttempt(
+    missionId: string,
+    attemptId: string,
+    outcome: {
+      endedBy: AttemptEndReason;
+      usage?: TokenUsage;
+      failureMessage?: string;
+      /** 运行时留下的续跑句柄。落库才能跨进程续上。 */
+      resumeRef?: string;
+      /** 这一跳的原始输出（尾部）。Timeline 第三层用。 */
+      output?: string;
+      /** 这一跳调过的工具名序列。Timeline 第二层用。 */
+      toolCalls?: readonly string[];
+      /** 运行时实际解析到的身份（S13.3）。 */
+      resolvedProfile?: {
+        readonly revision: string;
+        readonly resolved: readonly { readonly key: string; readonly value: string }[];
+      };
+      contextMetrics?: unknown;
     },
   ): Promise<void> {
+    // 失败原文与输出尾部都会落盘、进界面：agent 打过 `env` 的话，本机的 key 就在里面。
+    const failureMessage =
+      outcome.failureMessage !== undefined ? redactSecrets(outcome.failureMessage) : undefined;
     const { mission } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
     if (!attempt) {
       throw new PlatformRuleError('UNKNOWN_ATTEMPT', `attempt ${attemptId} 不存在`);
     }
+    // 已终态再收尾仍走旧副作用（用量/输出），但不得再写一份采集成功事实。
+    const alreadyTerminal = attempt.status !== 'in_progress';
+    // 必须在 live.finish 之前取（编排器先 finishAttempt 再裁剪缓冲）。
+    // 已终态不再取尾：否则重复收尾会把同一段 appendOutput 无限接上。
+    let liveTail: string | undefined;
+    if (this.#live && !alreadyTerminal) {
+      try {
+        liveTail = await collectAttemptLiveTail(this.#live, missionId, attemptId);
+      } catch {
+        // 实时通道读失败不能挡收尾，否则 attempt 卡在 in_progress。
+      }
+    }
+    const merged = mergeAttemptOutput(outcome.output, liveTail);
+    const output = merged !== undefined ? redactSecrets(merged) : undefined;
     if (outcome.usage) attempt.recordUsage(outcome.usage);
     if (outcome.resumeRef) attempt.recordResumeRef(outcome.resumeRef);
     // 把运行时报回来的实际身份并进开跑时记的那份（S13.3）。
@@ -651,10 +1790,10 @@ export class Platform {
         resolved: outcome.resolvedProfile.resolved,
       });
     }
-    if (outcome.output) {
+    if (output) {
       // 大输出外置：状态是一次整份写出去的，把几十万字符塞进去会让
       // **每一次工具调用**都变慢。
-      const blob = this.#artifacts.put(outcome.output);
+      const blob = this.#artifacts.put(output);
       attempt.appendOutput(blob.inline ?? `${blob.preview ?? ''}
 …（共 ${blob.bytes} 字节，完整内容见 artifact:${blob.ref}）`);
       if (blob.ref) attempt.recordOutputRef(blob.ref);
@@ -665,16 +1804,34 @@ export class Platform {
     attempt.recordEndReason(outcome.endedBy);
     if (attempt.status === 'in_progress') {
       if (outcome.endedBy === 'structured_submit') attempt.succeed();
-      else attempt.fail(outcome.failureMessage ?? outcome.endedBy);
+      else attempt.fail(failureMessage ?? outcome.endedBy);
+    }
+    let contextMetrics: ContextMetricsV1 | undefined;
+    if (!alreadyTerminal) {
+      contextMetrics = sanitizeAttemptContextMetrics(outcome.contextMetrics);
+      if (contextMetrics !== undefined) {
+        const prior = await this.#activity.list(missionId);
+        if (
+          prior.some(
+            (event) =>
+              event.kind === 'attempt.ended' &&
+              event.attemptId === attemptId &&
+              activityDataHasContextMetrics(event.data),
+          )
+        ) {
+          contextMetrics = undefined;
+        }
+      }
     }
     await this.#event(
       mission,
       'attempt.ended',
       {
         endedBy: outcome.endedBy,
-        failureMessage: outcome.failureMessage,
+        failureMessage,
         usage: attempt.usage,
         retriable: outcome.endedBy === 'upstream_failure',
+        ...(contextMetrics !== undefined ? { contextMetrics } : {}),
       },
       attempt.workItemId,
       attemptId,
@@ -691,6 +1848,11 @@ export class Platform {
    * 不该让一次收尾竞态把整跳搞失败。
    */
   async beatAttempt(missionId: string, attemptId: string, owner?: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#beatAttempt(missionId, attemptId, owner));
+  }
+
+  async #beatAttempt(missionId: string, attemptId: string, owner?: string): Promise<void> {
     const { mission, project } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
     if (!attempt || attempt.status !== 'in_progress') return;
@@ -712,6 +1874,15 @@ export class Platform {
    * 区分靠 blocked 记录里写的是谁作废的。
    */
   async retireWorkItem(
+    missionId: string,
+    workItemId: string,
+    reason: string,
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#retireWorkItem(missionId, workItemId, reason));
+  }
+
+  async #retireWorkItem(
     missionId: string,
     workItemId: string,
     reason: string,
@@ -752,6 +1923,15 @@ export class Platform {
     reason: WaitReason | undefined,
     detail?: string,
   ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#setWaitReason(missionId, reason, detail));
+  }
+
+  async #setWaitReason(
+    missionId: string,
+    reason: WaitReason | undefined,
+    detail?: string,
+  ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     // detail 变了也要写：同一个 no_available_agent，"卡在 exec-a" 和
     // "卡在 exec-d" 对排障的人是两条不同的信息。
@@ -773,6 +1953,11 @@ export class Platform {
    * 文档已经明确推迟。真撞上了的后果是多跑完一跳，不会破坏状态。
    */
   async cancelMission(missionId: string, reason?: string): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#cancelMission(missionId, reason));
+  }
+
+  async #cancelMission(missionId: string, reason?: string): Promise<{ status: string }> {
     const { mission } = await this.#locate(missionId);
     mission.cancel();
     await this.#event(mission, 'mission.cancelled', { reason });
@@ -782,6 +1967,11 @@ export class Platform {
 
   /** 暂停：调度器不再碰它，但阶段保持原样。 */
   async pauseMission(missionId: string): Promise<{ paused: boolean }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#pauseMission(missionId));
+  }
+
+  async #pauseMission(missionId: string): Promise<{ paused: boolean }> {
     const { mission } = await this.#locate(missionId);
     mission.pause();
     await this.#event(mission, 'mission.paused', {});
@@ -789,6 +1979,11 @@ export class Platform {
   }
 
   async resumeMission(missionId: string): Promise<{ paused: boolean }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#resumeMission(missionId));
+  }
+
+  async #resumeMission(missionId: string): Promise<{ paused: boolean }> {
     const { mission } = await this.#locate(missionId);
     mission.resume();
     await this.#event(mission, 'mission.resumed_from_pause', {});
@@ -851,6 +2046,7 @@ export class Platform {
         usage: combine(
           project.missions.flatMap((m) => [
             ...m.coordinatorAttempts,
+            ...m.independentReviewerAttempts,
             ...m.workItems.flatMap((w) => w.attempts),
           ]).map((a) => a.usage),
         ),
@@ -885,6 +2081,7 @@ export class Platform {
         if (filter?.missionId && mission.id !== filter.missionId) continue;
         const attempts: Attempt[] = [
           ...mission.coordinatorAttempts,
+          ...mission.independentReviewerAttempts,
           ...mission.workItems.flatMap((item) => item.attempts),
         ];
         for (const attempt of attempts) {
@@ -946,6 +2143,7 @@ export class Platform {
           accepted: mission.workItems.filter((item) => item.status === 'accepted').length,
           openEscalations: mission.openEscalations.length,
           usage: sumUsage(mission),
+          ...planRunListFields(mission),
         });
       }
     }
@@ -997,7 +2195,179 @@ export class Platform {
     const { mission, project } = await this.#locate(missionId);
     // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
-    return { ...viewOf(mission), blockedByMission: holder?.id };
+    const view = { ...viewOf(mission), blockedByMission: holder?.id };
+    if (mission.executionMode === 'high_assurance' && mission.status === 'awaiting_review') {
+      return { ...view, haReviewHold: await this.#haReviewHold(mission) };
+    }
+    return view;
+  }
+
+  async #haReviewHold(
+    mission: Mission,
+  ): Promise<'pending_dispatch' | 'in_review' | 'pending_release' | 'fault'> {
+    // 结论一旦记下，这条 Attempt 不再算在审。生产 hop 的 finally 仍负责收尾吊销。
+    const reviewing = mission.independentReviewerAttempts.some(
+      (row) =>
+        row.status === 'in_progress' &&
+        !mission.independentReviews.some((rec) => rec.reviewerAttemptId === row.id),
+    );
+    if (reviewing) return 'in_review';
+    if (mission.independentReviewBlockReason) return 'fault';
+    if (
+      mission.waitReason === 'no_available_agent' ||
+      mission.waitReason === 'platform_unreachable' ||
+      mission.waitReason === 'attempt_limit_reached'
+    ) {
+      return 'fault';
+    }
+    const detail = mission.waitDetail ?? '';
+    if (detail.startsWith('HA 确定性验证') || detail.startsWith('HA 独立检视故障')) {
+      return 'fault';
+    }
+    const pass = await this.effectiveIndependentReviewPass(mission.id);
+    if (pass) return 'pending_release';
+    return 'pending_dispatch';
+  }
+
+  /**
+   * HA：在当前 HEAD 上用冻结工单跑确定性验证，覆盖全部非 retired 工作项。
+   * 已有匹配当前证据且落盘的报告则复用，避免重跑清掉有效证据。
+   */
+  async runHaDeterministicValidation(
+    missionId: string,
+    _cwd: string,
+  ): Promise<{ reportId: string; passed: boolean; reviewedCommit: string }> {
+    const { mission } = await this.#locate(missionId);
+    if (mission.executionMode !== 'high_assurance') {
+      throw new PlatformRuleError(
+        'HA_VALIDATION_MODE_REQUIRED',
+        '确定性验证只跑 high_assurance Mission。',
+      );
+    }
+    if (mission.status !== 'awaiting_review' || mission.result?.outcome !== 'delivered') {
+      throw new PlatformRuleError(
+        'HA_VALIDATION_NOT_READY',
+        '须在 delivered 且 awaiting_review 之后跑确定性验证。',
+      );
+    }
+    const validation = this.#validation;
+    if (!validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'HA 确定性验证需要注入 validation.engine 与 reports。',
+      );
+    }
+    // 不信调用方 cwd：命令必须跑在从 workspaceRef / worktree 解析出的 Mission 工作区。
+    const trustedCwd = this.#missionWorkspaceCwd(mission);
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    const baseRevision = mission.workspaceRef?.baseRevision;
+    if (!trustedCwd || !projectRoot || !baseRevision) {
+      throw new PlatformRuleError(
+        'VALIDATION_WORKSPACE_REQUIRED',
+        `Mission ${mission.id} 缺少可核实的工作区（workspaceRef/worktree），不跑 engine。`,
+      );
+    }
+    const reviewedCommit = await this.#missionReviewedCommit(mission);
+    const l2 = this.#l2ReviewSnapshot(mission);
+    const active = mission.workItems.filter((item) => item.status !== 'retired');
+    const frozenCommands = this.#frozenHaCommands(mission);
+    const existingMeta = await this.#currentHaValidationReport(
+      mission.id,
+      reviewedCommit,
+      l2.fingerprint,
+      mission.contractRevision,
+    );
+    if (existingMeta) {
+      const existing = await validation.reports.get(existingMeta.id);
+      if (existing && existing.missionId === mission.id) {
+        if (
+          !this.#haReuseMatches(
+            existingMeta,
+            existing,
+            active.map((item) => item.id),
+            frozenCommands,
+          )
+        ) {
+          throw new PlatformRuleError(
+            'HA_VALIDATION_STALE',
+            '已有 HA 报告的工作项覆盖或冻结命令与当前不符，拒绝复用。',
+          );
+        }
+        return { reportId: existing.id, passed: existing.passed, reviewedCommit };
+      }
+    }
+    const allowedScope = [...new Set(active.flatMap((item) => [...(item.order?.allowedScope ?? [])]))];
+    const commands = active.flatMap((item) =>
+      (item.order?.validation?.commands ?? []).map((command) => ({
+        argv: [...command.argv],
+        timeoutMs: command.timeoutMs,
+        cwd: trustedCwd,
+      })),
+    );
+    const hasForbidden = active.some((item) => item.order?.validation?.forbiddenPaths !== undefined);
+    const forbiddenPaths = hasForbidden
+      ? [...new Set(active.flatMap((item) => [...(item.order?.validation?.forbiddenPaths ?? [])]))]
+      : undefined;
+    let diffSize: { maxChangedFiles?: number; maxChangedLines?: number } | undefined;
+    for (const item of active) {
+      const size = item.order?.validation?.diffSize;
+      if (!size) continue;
+      diffSize ??= {};
+      if (size.maxChangedFiles !== undefined) {
+        diffSize.maxChangedFiles =
+          diffSize.maxChangedFiles === undefined
+            ? size.maxChangedFiles
+            : Math.min(diffSize.maxChangedFiles, size.maxChangedFiles);
+      }
+      if (size.maxChangedLines !== undefined) {
+        diffSize.maxChangedLines =
+          diffSize.maxChangedLines === undefined
+            ? size.maxChangedLines
+            : Math.min(diffSize.maxChangedLines, size.maxChangedLines);
+      }
+    }
+    const result = await validation.engine.validate({
+      missionId: mission.id,
+      projectRoot,
+      baseRevision,
+      allowedScope,
+      commands,
+      ...(forbiddenPaths !== undefined ? { forbiddenPaths } : {}),
+      ...(diffSize !== undefined ? { diffSize } : {}),
+    });
+    const headAfter = await this.#missionReviewedCommit(mission);
+    if (headAfter !== reviewedCommit) {
+      throw new PlatformRuleError(
+        'HA_VALIDATION_HEAD_CHANGED',
+        '确定性验证运行期间工作区 HEAD 已变化，不产出有效报告。',
+      );
+    }
+    await this.#tx(async () => {
+      const { mission: live } = await this.#locate(missionId);
+      await validation.reports.save(result.report);
+      await this.#event(
+        live,
+        'validation.reported',
+        {
+          reportId: result.report.id,
+          passed: result.report.passed,
+          purpose: 'ha_deterministic',
+          reviewedCommit,
+          l2Fingerprint: l2.fingerprint,
+          contractRevision: live.contractRevision,
+          workItemIds: active.map((item) => item.id),
+          commands: frozenCommands,
+        },
+      );
+    });
+    if (!result.report.passed) {
+      await this.setWaitReason(
+        missionId,
+        'waiting_l3',
+        `HA 确定性验证未通过（报告 ${result.report.id}），不能开独立检视。`,
+      );
+    }
+    return { reportId: result.report.id, passed: result.report.passed, reviewedCommit };
   }
 
   /**
@@ -1017,6 +2387,8 @@ export class Platform {
   async getStartupBrief(
     missionId: string,
     attemptId: string,
+    budget?: number,
+    claim?: QueueClaimIdentity,
   ): Promise<{
     role: AttemptKind;
     projectId: string;
@@ -1038,9 +2410,11 @@ export class Platform {
     contractRevision?: number;
     plan?: Readonly<PlanBody>;
     planRevision?: number;
-    workItem?: { id: string; title: string; order?: Readonly<WorkOrder> };
+    workItem?: BoundWorkItem;
     /** L3 打回的理由。被打回之后重跑时，这是最该先看到的东西。 */
     finalReview?: Readonly<FinalReview>;
+    /** 可追溯的角色视图；旧字段从这里投影，缺省语义保持不变。 */
+    contextBundle: ContextBundle;
   }> {
     const { mission } = await this.#locate(missionId);
     const attempt = mission.attempt(attemptId);
@@ -1059,34 +2433,83 @@ export class Platform {
       }
     }
 
-    const base = {
+    if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0)) {
+      throw new PlatformRuleError('INVALID_BUDGET', 'budget 必须是非负安全整数');
+    }
+
+    const item =
+      attempt.kind === 'executor' && attempt.workItemId
+        ? mission.workItem(attempt.workItemId)
+        : undefined;
+    // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
+    const contextBundle = buildContextBundle(
+      {
+        role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
+        projectRules,
+        environmentNotes: environmentNotes(),
+        contract: mission.contract,
+        contractRevision: mission.contractRevision,
+        plan: mission.plan,
+        planRevision: mission.planRevision,
+        workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
+        finalReview: mission.finalReview,
+      },
+      budget,
+    );
+
+    const report = contextBundle.budgetReport;
+    // 只有 omittedSources 非空才是实际裁剪。恰好放下或没给预算时写事件，
+    // 审计会把「没裁」说成「裁过」，后续同 Attempt 去重也锁死在假记录上。
+    if (report && report.omittedSources.length > 0) {
+      await this.#recordContextTruncated(missionId, attemptId, claim, {
+        role: contextBundle.role,
+        budget: report.budget,
+        estimatedBefore: report.estimatedBefore,
+        estimatedAfter: report.estimatedAfter,
+        omittedSources: report.omittedSources,
+        overflow: report.overflow,
+        remainingOverBudget: report.remainingOverBudget,
+      });
+    }
+
+    return {
       role: attempt.kind,
       projectId: mission.projectId,
       missionId: mission.id,
       status: mission.status,
-      projectRules,
-      environmentNotes: environmentNotes(),
+      ...projectStartupBriefFields(contextBundle),
+      contextBundle,
     };
+  }
 
-    if (attempt.kind === 'executor') {
-      const item = attempt.workItemId ? mission.workItem(attempt.workItemId) : undefined;
-      // 执行者只给工单，不给契约——它不能重新定义目标，给了只会诱导它去改。
-      return {
-        ...base,
-        workItem: item
-          ? { id: item.id, title: item.title, order: item.order }
-          : undefined,
-      };
-    }
-
-    return {
-      ...base,
-      contract: mission.contract,
-      contractRevision: mission.contractRevision,
-      plan: mission.plan,
-      planRevision: mission.planRevision,
-      finalReview: mission.finalReview,
-    };
+  /**
+   * 裁剪审计必须走队列写门禁：不经 #attemptWrite 的话，队列 Attempt 在丢牌后
+   * 仍能记一条「已审计」，而控制面其它写已经被 fence 挡住。
+   * 落盘失败要抛出去——调用方拿到裁剪简报却没有事件，等于声称已审计。
+   */
+  async #recordContextTruncated(
+    missionId: string,
+    attemptId: string,
+    claim: QueueClaimIdentity | undefined,
+    data: {
+      readonly role: string;
+      readonly budget: number;
+      readonly estimatedBefore: number;
+      readonly estimatedAfter: number;
+      readonly omittedSources: readonly string[];
+      readonly overflow: boolean;
+      readonly remainingOverBudget: number;
+    },
+  ): Promise<void> {
+    await this.#attemptWrite(missionId, attemptId, claim, async () => {
+      const { mission } = await this.#locate(missionId);
+      const events = await this.#activity.list(missionId);
+      const already = events.some(
+        (event) => event.kind === 'context.truncated' && event.attemptId === attemptId,
+      );
+      if (already) return;
+      await this.#event(mission, 'context.truncated', data, undefined, attemptId);
+    });
   }
 
   /**
@@ -1116,6 +2539,17 @@ export class Platform {
     attemptId: string,
     findings: string,
     rejectedHypotheses?: readonly string[],
+    claim?: QueueClaimIdentity,
+  ): Promise<{ planRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#updateFindings(missionId, attemptId, findings, rejectedHypotheses));
+  }
+
+  async #updateFindings(
+    missionId: string,
+    attemptId: string,
+    findings: string,
+    rejectedHypotheses?: readonly string[],
   ): Promise<{ planRevision: number }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const previous = mission.plan;
@@ -1141,6 +2575,16 @@ export class Platform {
     missionId: string,
     attemptId: string,
     plan: PlanBody,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ planRevision: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#updatePlan(missionId, attemptId, plan));
+  }
+
+  async #updatePlan(
+    missionId: string,
+    attemptId: string,
+    plan: PlanBody,
   ): Promise<{ planRevision: number }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const planRevision = mission.updatePlan(plan);
@@ -1153,6 +2597,16 @@ export class Platform {
    * 只有写回平台的结论才是权威。这条用工具层强制，不靠提示。
    */
   async createWorkItem(
+    missionId: string,
+    attemptId: string,
+    input: { title: string; order: WorkOrder; workItemId?: string },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ workItemId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#createWorkItem(missionId, attemptId, input));
+  }
+
+  async #createWorkItem(
     missionId: string,
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
@@ -1177,6 +2631,14 @@ export class Platform {
    * order.validation 可缺省/commands 可空（表示只跑 changed-paths）；规范化交给 WorkItem 构造器。
    */
   async createLightweightWorkItem(
+    missionId: string,
+    input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
+  ): Promise<{ workItemId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#createLightweightWorkItem(missionId, input));
+  }
+
+  async #createLightweightWorkItem(
     missionId: string,
     input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
   ): Promise<{ workItemId: string }> {
@@ -1225,6 +2687,14 @@ export class Platform {
     missionId: string,
     workItemId: string,
   ): Promise<{ dispatched: string }> {
+    // 单事务命令（C4）：占名额、PRE shadow、派发一起提交。PRE shadow 缺省不开；开了事务最多多占一个超时。
+    return this.#tx(() => this.#dispatchLightweightWorkItem(missionId, workItemId));
+  }
+
+  async #dispatchLightweightWorkItem(
+    missionId: string,
+    workItemId: string,
+  ): Promise<{ dispatched: string }> {
     const { mission, project } = await this.#locate(missionId);
     this.#requireLightweightMutationLane(mission);
 
@@ -1257,7 +2727,7 @@ export class Platform {
 
     // PRE_DISPATCH shadow：observational；provider/activity 失败不阻断 dispatch。
     // attemptId 省略——绝不伪造 Coordinator attempt。
-    if (this.#decisionProvider) {
+    if (this.#decisionProvider && this.#decisionHooks.has('PRE_DISPATCH')) {
       await runDecisionShadow({
         provider: this.#decisionProvider,
         activity: this.#activity,
@@ -1293,7 +2763,7 @@ export class Platform {
     readonly missionId: string;
     readonly workItemId: string;
     readonly cwd: string;
-  }): Promise<{ reportId: string; passed: boolean; status: string }> {
+  }): Promise<{ reportId: string; passed: boolean; status: string; held?: PromotionTriggerCode }> {
     const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
     this.#requireLightweightMutationLane(mission);
 
@@ -1378,66 +2848,95 @@ export class Platform {
         : {}),
     });
 
-    // append-only：必须先于任何 review / accept。
-    await this.#validation.reports.save(result.report);
+    // 跑完验收命令之后才开事务（C4）：跑命令可能要几分钟，不能占着事务。
+    // 报告、validation.reported、validator accept 一起提交；报告是 append-only 事实，authority 对不上时
+    // 照旧保留——拒绝在事务里只做标记，提交之后再抛。
+    const validation = this.#validation;
+    const committed = await this.#tx(async () => {
+      // 事务里重取：跑命令那几分钟里，活对象可能已经被别处换过。
+      const { mission: live, item: liveItem } = await this.#locateItem(input.missionId, input.workItemId);
 
-    await this.#event(
-      mission,
-      'validation.reported',
-      {
-        reportId: result.report.id,
-        passed: result.report.passed,
+      // append-only：必须先于任何 review / accept。
+      await validation.reports.save(result.report);
+
+      await this.#event(
+        live,
+        'validation.reported',
+        {
+          reportId: result.report.id,
+          passed: result.report.passed,
+          submittedAttemptId,
+        },
+        liveItem.id,
+        // ActivityEvent.attemptId 不要冒充 reviewer
+      );
+
+      if (result.report.passed === false) {
+        // failed report 已保存；不 accept / reject，item 保持 submitted。
+        return { kind: 'failed' as const, status: liveItem.status };
+      }
+
+      // §4.3：实际改动超出 Lightweight 的规模（>3 文件 / >2 顶层目录）时，机器验收过了也不放行。
+      // 一旦 accept，升级到 Standard 之后 L2 就没东西可审了——大改动会绕过评审。
+      // 留在 submitted，由 promoteLightweightAfterValidation 凭这份报告升级。
+      const held = lightweightGateTrigger(result.report);
+      if (held) {
+        return { kind: 'held' as const, status: liveItem.status, held: held.code };
+      }
+
+      const authority = result.authority;
+      const report = result.report;
+      const mismatch =
+        !authority ||
+        authority.kind !== 'validator' ||
+        authority.reportId !== report.id ||
+        authority.policyRevision !== report.policyRevision ||
+        report.missionId !== live.id ||
+        report.workItemId !== liveItem.id ||
+        report.attemptId !== submittedAttemptId;
+
+      if (mismatch) {
+        // 报告保留，item 仍 submitted：提交之后再抛。
+        return { kind: 'mismatch' as const, status: liveItem.status };
+      }
+
+      liveItem.review('accept', {
         submittedAttemptId,
-      },
-      item.id,
-      // ActivityEvent.attemptId 不要冒充 reviewer
-    );
+        authority,
+        reasons: [`ValidationReport ${report.id} passed`],
+        requiredChanges: [],
+      });
 
-    if (result.report.passed === false) {
-      // failed report 已保存；不 accept / reject，item 保持 submitted。
-      return { reportId: result.report.id, passed: false, status: item.status };
+      await this.#event(
+        live,
+        'review.recorded',
+        {
+          verdict: 'accept',
+          authority: 'validator',
+          reportId: report.id,
+          reasons: [`ValidationReport ${report.id} passed`],
+        },
+        liveItem.id,
+        // ActivityEvent.attemptId 留空
+      );
+
+      return { kind: 'accepted' as const, status: liveItem.status };
+    });
+
+    if (committed.kind === 'failed') {
+      return { reportId: result.report.id, passed: false, status: committed.status };
     }
-
-    const authority = result.authority;
-    const report = result.report;
-    const mismatch =
-      !authority ||
-      authority.kind !== 'validator' ||
-      authority.reportId !== report.id ||
-      authority.policyRevision !== report.policyRevision ||
-      report.missionId !== mission.id ||
-      report.workItemId !== item.id ||
-      report.attemptId !== submittedAttemptId;
-
-    if (mismatch) {
-      // 报告保留，item 仍 submitted。
+    if (committed.kind === 'held') {
+      return { reportId: result.report.id, passed: true, status: committed.status, held: committed.held };
+    }
+    if (committed.kind === 'mismatch') {
       throw new PlatformRuleError(
         'VALIDATION_AUTHORITY_MISMATCH',
-        `ValidationReport ${report.id} 通过，但 authority/linkage 与 WorkItem 不一致，拒绝 accept。`,
+        `ValidationReport ${result.report.id} 通过，但 authority/linkage 与 WorkItem 不一致，拒绝 accept。`,
       );
     }
 
-    item.review('accept', {
-      submittedAttemptId,
-      authority,
-      reasons: [`ValidationReport ${report.id} passed`],
-      requiredChanges: [],
-    });
-
-    await this.#event(
-      mission,
-      'review.recorded',
-      {
-        verdict: 'accept',
-        authority: 'validator',
-        reportId: report.id,
-        reasons: [`ValidationReport ${report.id} passed`],
-      },
-      item.id,
-      // ActivityEvent.attemptId 留空
-    );
-
-    return { reportId: report.id, passed: true, status: item.status };
+    return { reportId: result.report.id, passed: true, status: committed.status };
   }
 
   /**
@@ -1446,6 +2945,13 @@ export class Platform {
    * 仅供进程内 Orchestrator；不绑 HTTP/tools。
    */
   async submitLightweightMissionForReview(
+    missionId: string,
+  ): Promise<{ status: 'awaiting_review'; reportId: string }> {
+    // 单事务命令（C2）：改状态、记 mission_result.submitted、建投递、记 delivery.created 一起提交。
+    return this.#tx(() => this.#submitLightweightMissionForReview(missionId));
+  }
+
+  async #submitLightweightMissionForReview(
     missionId: string,
   ): Promise<{ status: 'awaiting_review'; reportId: string }> {
     const { mission } = await this.#locate(missionId);
@@ -1583,6 +3089,8 @@ export class Platform {
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: 'delivered',
+      // 没有协调者：这一次交卷由那份验收报告唯一确定。
+      idempotencyKey: resultDeliveryKey(report.id),
       summary: body.summary,
     });
     await this.#event(
@@ -1596,6 +3104,16 @@ export class Platform {
   }
 
   async dispatchWorkItems(
+    missionId: string,
+    attemptId: string,
+    workItemIds: readonly string[],
+    claim?: QueueClaimIdentity,
+  ): Promise<{ dispatched: readonly string[] }> {
+    // 单事务命令（C4）：占名额、PRE shadow、派发一起提交。PRE shadow 缺省不开；开了事务最多多占一个超时。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#dispatchWorkItems(missionId, attemptId, workItemIds));
+  }
+
+  async #dispatchWorkItems(
     missionId: string,
     attemptId: string,
     workItemIds: readonly string[],
@@ -1625,7 +3143,7 @@ export class Platform {
 
     // PRE_DISPATCH shadow：确认硬规则全部通过之后、真实 dispatch 之前。
     // 信号 / provider 失败 / shadow append 失败都不改变后续 item.dispatch。
-    if (this.#decisionProvider) {
+    if (this.#decisionProvider && this.#decisionHooks.has('PRE_DISPATCH')) {
       const soleWorkItemId = workItemIds.length === 1 ? workItemIds[0] : undefined;
       await runDecisionShadow({
         provider: this.#decisionProvider,
@@ -1655,6 +3173,25 @@ export class Platform {
       verdict: 'accept' | 'reject';
       reasons: readonly string[];
       requiredChanges: readonly string[];
+      /** 工单 acceptance 逐条的结论（方案 §11）；工单有验收标准时必填。 */
+      acceptanceResults?: readonly AcceptanceResult[];
+    },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#reviewExecutionResult(missionId, attemptId, input));
+  }
+
+  async #reviewExecutionResult(
+    missionId: string,
+    attemptId: string,
+    input: {
+      workItemId: string;
+      verdict: 'accept' | 'reject';
+      reasons: readonly string[];
+      requiredChanges: readonly string[];
+      /** 工单 acceptance 逐条的结论（方案 §11）；工单有验收标准时必填。 */
+      acceptanceResults?: readonly AcceptanceResult[];
     },
   ): Promise<{ status: string }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
@@ -1675,16 +3212,34 @@ export class Platform {
         'reject 必须给出 requiredChanges，否则重发的工单与上一次没有可见差异。',
       );
     }
+    const acceptanceResults = checkAcceptanceResults(item.id, item.order?.acceptance ?? [], input.acceptanceResults);
+    if (input.verdict === 'accept' && acceptanceResults?.some((r) => r.status === 'fail')) {
+      // 内核也挡这一条；在这里先挡是为了给协调者一句能照做的话。
+      throw new PlatformRuleError(
+        'ACCEPT_WITH_FAILED_CRITERION',
+        '有验收标准判为 fail 却给了 accept：没过的那条要么改判，要么 reject 并在 requiredChanges 里写清要改什么。',
+      );
+    }
     const record: Omit<ReviewRecord, 'verdict'> = {
       attemptId,
       reasons: [...input.reasons],
       requiredChanges: [...input.requiredChanges],
+      ...(acceptanceResults ? { acceptanceResults } : {}),
     };
     item.review(input.verdict, record);
     await this.#event(
       mission,
       'review.recorded',
-      { verdict: input.verdict, reasons: record.reasons },
+      {
+        verdict: input.verdict,
+        reasons: record.reasons,
+        ...(acceptanceResults
+          ? {
+              acceptance: tallyAcceptance(acceptanceResults),
+              unverified: acceptanceResults.filter((r) => r.status === 'unverified').map((r) => r.criterion),
+            }
+          : {}),
+      },
       input.workItemId,
       attemptId,
     );
@@ -1695,21 +3250,42 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: Omit<EscalationBody, 'attemptId'>,
+    claim?: QueueClaimIdentity,
+  ): Promise<void> {
+    // 单事务命令（C2）：记下升级、记 escalated、建投递、记 delivery.created 一起提交。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#escalateToL3(missionId, attemptId, body));
+  }
+
+  async #escalateToL3(
+    missionId: string,
+    attemptId: string,
+    body: Omit<EscalationBody, 'attemptId'>,
   ): Promise<void> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
-    mission.recordEscalation({ ...body, attemptId });
-    await this.#event(mission, 'escalated', { question: body.question }, undefined, attemptId);
+    await this.#recordEscalationAndDeliver(mission, { ...body, attemptId });
+  }
+
+  /**
+   * 记一条 Mission 升级并投递一次。协调者 escalateToL3 与轻量 reportBlocked 共用：
+   * 分开写会变成两次升级/两封信，L3 对同一提问会看到两张单。
+   */
+  async #recordEscalationAndDeliver(mission: Mission, body: EscalationBody): Promise<void> {
+    mission.recordEscalation(body);
+    // 第几次升级：每一次都要进收件箱，重建同一次的投递不会多一条。
+    const escalationIndex = mission.escalations.length - 1;
+    await this.#event(mission, 'escalated', { question: body.question }, undefined, body.attemptId);
     // 升级只写进平台是不够的：L3 不盯着数据库看。进收件箱才叫升级。
     const delivery = await this.#deliveries.create({
       missionId: mission.id,
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: 'escalated',
+      idempotencyKey: escalationDeliveryKey(escalationIndex),
       summary: `${body.question}
 
 为什么需要 L3：${body.why}`,
     });
-    await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, attemptId);
+    await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, body.attemptId);
   }
 
   /**
@@ -1717,6 +3293,16 @@ export class Platform {
    * 只有一个工作项时不会出事，多个时协调者可能在还没验完就交卷。
    */
   async submitMissionResult(
+    missionId: string,
+    attemptId: string,
+    body: MissionResultBody,
+    claim?: QueueClaimIdentity,
+  ): Promise<void> {
+    // 单事务命令（C2）：改状态、记 mission_result.submitted、建投递、记 delivery.created 一起提交。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitMissionResult(missionId, attemptId, body));
+  }
+
+  async #submitMissionResult(
     missionId: string,
     attemptId: string,
     body: MissionResultBody,
@@ -1755,6 +3341,8 @@ export class Platform {
       projectId: mission.projectId,
       recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
       outcome: body.outcome,
+      // 这一次交卷由提交它的协调者 attempt 唯一确定：L3 打回后重新交卷是另一次，照投。
+      idempotencyKey: resultDeliveryKey(attemptId),
       summary: body.summary,
     });
     await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, attemptId);
@@ -1763,7 +3351,25 @@ export class Platform {
   /** 记录本 Mission 的分支与基线。调度器开好工作区之后调一次。 */
   async recordWorkspace(
     missionId: string,
-    ref: { projectRoot?: string; branch: string; baseRevision: string },
+    ref: {
+      projectRoot?: string;
+      branch: string;
+      baseRevision: string;
+      targetBranch?: string;
+    },
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordWorkspace(missionId, ref));
+  }
+
+  async #recordWorkspace(
+    missionId: string,
+    ref: {
+      projectRoot?: string;
+      branch: string;
+      baseRevision: string;
+      targetBranch?: string;
+    },
   ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     mission.recordWorkspace(ref);
@@ -1778,6 +3384,11 @@ export class Platform {
    * gates and before any Lightweight / Executor / Coordinator hop.
    */
   async recordOrchestrationRoundStarted(missionId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordOrchestrationRoundStarted(missionId));
+  }
+
+  async #recordOrchestrationRoundStarted(missionId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(mission, 'orchestration.round.started', { schemaVersion: 1 });
   }
@@ -1852,6 +3463,14 @@ export class Platform {
     missionId: string,
     evaluation: BudgetEvaluation,
   ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordBudgetThresholdEvents(missionId, evaluation));
+  }
+
+  async #recordBudgetThresholdEvents(
+    missionId: string,
+    evaluation: BudgetEvaluation,
+  ): Promise<void> {
     const { mission } = await this.#locate(missionId);
     const activity = await this.#activity.list(missionId);
     const seen = new Set<string>();
@@ -1892,6 +3511,13 @@ export class Platform {
    * {@link promoteMissionToStandard}, which still rejects that code.
    */
   async promoteLightweightForBudgetExceeded(
+    missionId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteLightweightForBudgetExceeded(missionId));
+  }
+
+  async #promoteLightweightForBudgetExceeded(
     missionId: string,
   ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
     const { mission } = await this.#locate(missionId);
@@ -1938,6 +3564,11 @@ export class Platform {
    * tool.started. Envelope carries attemptId. No caller-authored payload.
    */
   async recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandTrackingEnabled(missionId, attemptId));
+  }
+
+  async #recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -1955,6 +3586,11 @@ export class Platform {
    * Hub never classifies by tool name. Envelope carries attemptId.
    */
   async recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandStarted(missionId, attemptId, callId));
+  }
+
+  async #recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -1973,6 +3609,11 @@ export class Platform {
    * unknown instead of undercounting.
    */
   async recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordCommandTrackingInvalid(missionId, attemptId));
+  }
+
+  async #recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
     const { mission } = await this.#locate(missionId);
     await this.#event(
       mission,
@@ -1993,13 +3634,47 @@ export class Platform {
     missionId: string,
     answer: string,
   ): Promise<{ question: string; answer: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#answerEscalation(missionId, answer));
+  }
+
+  async #answerEscalation(
+    missionId: string,
+    answer: string,
+  ): Promise<{ question: string; answer: string }> {
     const { mission } = await this.#locate(missionId);
     if (mission.openEscalations.length === 0) {
       throw new PlatformRuleError('NO_OPEN_ESCALATION', `Mission ${missionId} 没有待答复的升级。`);
     }
     const answered = mission.answerEscalation(answer, new Date().toISOString());
     await this.#event(mission, 'escalation.answered', { question: answered.question, answer });
+    await this.#redispatchLightweightBlockedAfterAnswer(mission, answered);
     return { question: answered.question, answer };
+  }
+
+  /**
+   * 轻量没有协调者可重派：只能在本事务里把「这条升级对应的」blocked 工单 dispatch。
+   * 不能走 dispatchWorkItems（会要 coordinator attempt），也不能走 dispatchLightweightWorkItem
+   * （只接受 created）。Standard 或对不上 attemptId 的项一律不动，避免误派。
+   */
+  async #redispatchLightweightBlockedAfterAnswer(
+    mission: Mission,
+    answered: Readonly<EscalationBody>,
+  ): Promise<void> {
+    if (mission.executionMode !== 'lightweight') return;
+    const attempt = mission.attempt(answered.attemptId);
+    const workItemId = attempt?.workItemId;
+    if (!workItemId) return;
+    const item = mission.workItem(workItemId);
+    if (!item || item.status !== 'blocked') return;
+    item.dispatch();
+    await this.#event(
+      mission,
+      'work_item.redispatched',
+      { ids: [workItemId], reason: 'escalation_answered' },
+      workItemId,
+      answered.attemptId,
+    );
   }
 
   /**
@@ -2049,6 +3724,94 @@ export class Platform {
       authority?: { kind: 'human'; principalId?: string };
     },
   ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    assertFinalizePolicy(
+      {
+        principal: {
+          status: 'ok',
+          kind: 'user',
+          id: input.authority?.principalId ?? 'human',
+          role: 'operator',
+        },
+        action: POLICY_ACTION.finalizeHuman,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
+    // L3（C4）：send_back / abandon 是短命令，状态与事件一起提交。merge 带 git 合并这一外部副作用，不包：
+    // 合并成功后提交丢了，重放会因为目标分支已前移判合并失败——要可重入的合并检测（见规格）。
+    if (input.verdict === 'merge') return this.#finalizeMission(missionId, input);
+    return this.#tx(() => this.#finalizeMission(missionId, input));
+  }
+
+  /**
+   * 检视者终审：用户确认之后签检视者的名字。只给命令行进程内调用，不挂公开入口。
+   *
+   * confirmedAt 取平台时钟，不接受调用方传入的时间——否则记录可以回拨。
+   * 两个身份都 trim，trim 后各 1..128 字符。平台没有身份名册，这里记下的是
+   * 调用方声明，不宣称已经核对过那一次点击。
+   */
+  async finalizeMissionByReviewer(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      reviewerId: string;
+      confirmedBy: string;
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    const authority = this.#reviewerAuthority(input.reviewerId, input.confirmedBy);
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'reviewer', id: authority.reviewerId },
+        action: POLICY_ACTION.finalizeReviewer,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
+    const body = {
+      verdict: input.verdict,
+      reasons: input.reasons,
+      projectRoot: input.projectRoot,
+      authority,
+    };
+    if (input.verdict === 'merge') return this.#applyFinalReview(missionId, body);
+    return this.#tx(() => this.#applyFinalReview(missionId, body));
+  }
+
+  #reviewerAuthority(
+    reviewerId: unknown,
+    confirmedBy: unknown,
+  ): Extract<FinalReviewAuthority, { kind: 'reviewer' }> {
+    return Object.freeze({
+      kind: 'reviewer' as const,
+      reviewerId: this.#requireReviewerIdentity(reviewerId, 'reviewerId'),
+      confirmedBy: this.#requireReviewerIdentity(confirmedBy, 'confirmedBy'),
+      confirmedAt: this.#clock.now().toISOString(),
+    });
+  }
+
+  #requireReviewerIdentity(value: unknown, field: string): string {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (trimmed.length < 1 || trimmed.length > 128) {
+      throw new PlatformRuleError(
+        'REVIEWER_IDENTITY_INVALID',
+        `${field} 经 trim 后必须是 1 到 128 个字符。`,
+      );
+    }
+    return trimmed;
+  }
+
+  async #finalizeMission(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      /** 只接受 human；principalId 有就记，没有就记「人，不知道是谁」。 */
+      authority?: { kind: 'human'; principalId?: string };
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
     const rawKind = (input as { authority?: { kind?: unknown } }).authority?.kind;
     if (rawKind !== undefined && rawKind !== 'human') {
       throw new PlatformRuleError(
@@ -2062,11 +3825,41 @@ export class Platform {
         ? { kind: 'human' as const, principalId: input.authority.principalId }
         : { kind: 'human' as const },
     );
+    return this.#applyFinalReview(missionId, {
+      verdict: input.verdict,
+      reasons: input.reasons,
+      projectRoot: input.projectRoot,
+      authority,
+    });
+  }
+
+  /**
+   * 人类入口与检视者入口共用的终审流转。三种 verdict、合并闸、失败行为必须一致。
+   * 权威已在入口处定好：这里不再改 kind。
+   */
+  async #applyFinalReview(
+    missionId: string,
+    input: {
+      verdict: 'merge' | 'send_back' | 'abandon';
+      reasons: readonly string[];
+      projectRoot?: string;
+      authority: FinalReviewAuthority;
+    },
+  ): Promise<{ status: string; mergedInto?: string; reason?: string }> {
+    const authority = input.authority;
+    const tag = (data: Record<string, unknown>) =>
+      authority.kind === 'reviewer' ? { ...data, authority: 'reviewer' as const } : data;
     const { mission } = await this.#locate(missionId);
     if (mission.status !== 'awaiting_review') {
       throw new PlatformRuleError(
         'NOT_AWAITING_REVIEW',
         `Mission ${missionId} 现在是 ${mission.status}，没有在等最终检视。`,
+      );
+    }
+    if (input.verdict === 'merge' && mission.executionMode === 'high_assurance') {
+      throw new PlatformRuleError(
+        'HIGH_ASSURANCE_MERGE_NOT_AVAILABLE',
+        `Mission ${missionId} 是 high_assurance：本项不开放合并。`,
       );
     }
     if (input.verdict === 'send_back' && input.reasons.length === 0) {
@@ -2078,13 +3871,13 @@ export class Platform {
 
     if (input.verdict === 'send_back') {
       mission.sendBackToPlanning({ verdict: 'send_back', reasons: [...input.reasons], authority });
-      await this.#event(mission, 'final_review.send_back', { reasons: input.reasons });
+      await this.#event(mission, 'final_review.send_back', tag({ reasons: input.reasons }));
       return { status: mission.status };
     }
 
     if (input.verdict === 'abandon') {
       mission.block({ verdict: 'abandon', reasons: [...input.reasons], authority });
-      await this.#event(mission, 'final_review.abandoned', { reasons: input.reasons });
+      await this.#event(mission, 'final_review.abandoned', tag({ reasons: input.reasons }));
       await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
       return { status: mission.status };
     }
@@ -2118,7 +3911,7 @@ export class Platform {
       if (!outcome.ok) {
         // 落不了地不算完成，也不该假装完成。转 blocked，原因说清楚。
         mission.block({ verdict: 'merge', reasons: [outcome.reason ?? '合并失败'], authority });
-        await this.#event(mission, 'final_review.merge_failed', { reason: outcome.reason });
+        await this.#event(mission, 'final_review.merge_failed', tag({ reason: outcome.reason }));
         return { status: mission.status, reason: outcome.reason };
       }
       mergedInto = outcome.mergedInto;
@@ -2131,9 +3924,292 @@ export class Platform {
       mergedAt: new Date().toISOString(),
       authority,
     });
-    await this.#event(mission, 'final_review.merged', { mergedInto, reasons: input.reasons });
+    await this.#event(mission, 'final_review.merged', tag({ mergedInto, reasons: input.reasons }));
     await this.#releaseWorkspace(missionId, mission.workspaceRef?.projectRoot ?? input.projectRoot);
     return { status: mission.status, mergedInto };
+  }
+
+  /**
+   * HA 受控放行：外置常设授权 + 当前有效独立检视 pass + 方案级命令，
+   * 再走与机器终审共用的锚点→合并→验证→条件回滚。不接 HTTP、不进 agent tools。
+   */
+  async finalizeMissionByHaAuthority(
+    missionId: string,
+    input: {
+      readonly reviewerId: string;
+      readonly confirmedBy: string;
+      readonly projectRoot?: string;
+      readonly reasons?: readonly string[];
+      readonly verification?: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[];
+    },
+  ): Promise<{
+    status: string;
+    mergedInto?: string;
+    reportId?: string;
+    reason?: string;
+    rolledBackTo?: string;
+  }> {
+    const { mission } = await this.#locate(missionId);
+    if (mission.executionMode !== 'high_assurance') {
+      throw new PlatformRuleError(
+        'HA_RELEASE_MODE_REQUIRED',
+        `Mission ${missionId} 不是 high_assurance，不能走受控放行。`,
+      );
+    }
+    if (mission.status === 'completed') {
+      // 已完成的重复调用不得再验、再写报告，也不二次合并。
+      return {
+        status: mission.status,
+        mergedInto: mission.finalReview?.mergedInto,
+      };
+    }
+    if (mission.status !== 'awaiting_review') {
+      throw new PlatformRuleError(
+        'NOT_AWAITING_REVIEW',
+        `Mission ${missionId} 现在是 ${mission.status}，没有在等最终检视。`,
+      );
+    }
+
+    const authority = this.#reviewerAuthority(input.reviewerId, input.confirmedBy);
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'reviewer', id: authority.reviewerId },
+        action: POLICY_ACTION.finalizeHaReviewer,
+        context: { missionId },
+        state: { executionMode: mission.executionMode },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
+
+    const projectRoot = input.projectRoot ?? mission.workspaceRef?.projectRoot;
+    if (!this.#workspace || !projectRoot) {
+      throw new PlatformRuleError('NO_WORKSPACE_MANAGER', 'HA 放行要知道项目仓库在哪。');
+    }
+    const workspace = this.#workspace;
+    if (!workspace.currentBranch || !workspace.resetTarget || !workspace.listWorktreePaths) {
+      throw new PlatformRuleError(
+        'HA_RELEASE_UNAVAILABLE',
+        '工作区管理不支持 currentBranch / resetTarget / listWorktreePaths，HA 放行不可用。',
+      );
+    }
+
+    const worktreePaths = await this.#haWorktreePaths(workspace, projectRoot);
+    const config = await this.#loadHaAuthority(projectRoot, worktreePaths);
+    const registered = config.reviewers.find((row) => row.reviewerId === authority.reviewerId);
+    if (!registered) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.REVIEWER_UNREGISTERED,
+        'HA 放行拒绝（HA_AUTHORITY_REVIEWER_UNREGISTERED）：检视者未登记。',
+      );
+    }
+    if (registered.confirmedBy !== authority.confirmedBy) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.CONFIRMED_BY_MISMATCH,
+        'HA 放行拒绝（HA_AUTHORITY_CONFIRMED_BY_MISMATCH）：确认主体与登记值不一致。',
+      );
+    }
+
+    const checkout = await workspace.currentBranch(projectRoot);
+    if (!checkout) {
+      throw new PlatformRuleError(
+        'HA_DETACHED_HEAD',
+        `Mission ${missionId} 项目仓是 detached HEAD，拒绝合并。`,
+      );
+    }
+    const persistedTarget = mission.workspaceRef?.targetBranch;
+    if (typeof persistedTarget !== 'string' || persistedTarget.trim() === '') {
+      throw new PlatformRuleError(
+        'HA_TARGET_MISSING',
+        `Mission ${missionId} 没有可信的历史目标分支，拒绝用当前 checkout 倒填。`,
+      );
+    }
+    if (this.#isForbiddenMaster(checkout) || this.#isForbiddenMaster(persistedTarget)) {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.MASTER_FORBIDDEN,
+        'HA 放行拒绝（HA_AUTHORITY_MASTER_FORBIDDEN）：master 不能作为常设代行目标。',
+      );
+    }
+    if (checkout !== persistedTarget) {
+      throw new PlatformRuleError(
+        'HA_TARGET_MISMATCH',
+        `当前 checkout（${checkout}）与 Mission 目标（${persistedTarget}）不一致，拒绝合并。`,
+      );
+    }
+    try {
+      matchHaRelease(config, {
+        reviewerId: authority.reviewerId,
+        confirmedBy: authority.confirmedBy,
+        branch: persistedTarget,
+      });
+    } catch (error) {
+      throw this.#wrapHaAuthorityError(error);
+    }
+
+    const unsafe = await this.#haUnsafe(missionId);
+    if (unsafe) {
+      return {
+        status: mission.status,
+        reason: this.#haUnsafeHint(unsafe.reason),
+      };
+    }
+
+    const ref = mission.workspaceRef;
+    if (!ref) {
+      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
+    }
+    const headNow = await workspace.targetHead(projectRoot);
+    if (headNow !== ref.baseRevision) {
+      // revisionIsAncestor(ancestor, descendant) ↔ git merge-base --is-ancestor，
+      // 不能把参数反了。「已合未记」要求 Mission 分支尖已在目标 HEAD 里，
+      // 且那个尖不能还停在分叉基线——执行者改动常常还在 worktree
+      // 未提交，分支仍等于基线；目标独自前进时基线仍是 HEAD 的祖先，
+      // 那是旧基线，不是已合。git 失败时函数返 false，走旧基线拒绝（fail-closed），
+      // 不会进合并。
+      const alreadyMerged = await this.#haMissionAlreadyInHead(
+        workspace,
+        projectRoot,
+        ref.branch,
+        ref.baseRevision,
+        headNow,
+      );
+      if (alreadyMerged) {
+        await this.#markHaUnsafe(mission, 'merged_unrecorded', {
+          head: headNow,
+          anchor: ref.baseRevision,
+        });
+        return {
+          status: mission.status,
+          reason: this.#haUnsafeHint('merged_unrecorded'),
+        };
+      }
+      throw new PlatformRuleError(
+        'HA_STALE_BASELINE',
+        `Mission ${missionId} 的分叉基线已过期，拒绝在任何 Git 合并前放行。`,
+      );
+    }
+
+    const pass = await this.effectiveIndependentReviewPass(missionId);
+    if (!pass) {
+      throw new PlatformRuleError(
+        'HA_NO_EFFECTIVE_PASS',
+        `Mission ${missionId} 没有当前有效的独立检视 pass，拒绝合并。`,
+      );
+    }
+
+    const verification = input.verification === undefined
+      ? this.#planLevelCommands(mission)
+      : this.#explicitHaCommands(mission.id, input.verification);
+    const runner = this.#validation?.commandRunner;
+    const reports = this.#validation?.reports;
+    if (!runner || !reports) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '没注入 commandRunner / reports，HA 放行不可用。不退化成不验直接合。',
+      );
+    }
+
+    const outcome = await this.#runIntegrationMergeVerify({
+      mission,
+      projectRoot,
+      integrationBranch: persistedTarget,
+      verification,
+    });
+    if (outcome.kind === 'merge_failed') {
+      mission.setWaitReason(
+        'waiting_l3',
+        `HA 合并失败：${outcome.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
+      );
+      await this.#event(mission, 'final_review.merge_failed', {
+        reason: outcome.reason,
+        authority: 'reviewer',
+      });
+      await this.#event(mission, 'mission.waiting', { reason: 'waiting_l3' });
+      return { status: mission.status, reason: outcome.reason };
+    }
+    if (outcome.kind === 'verify_failed') {
+      if (!outcome.reset.ok) {
+        const thirdParty = outcome.reset.reason?.includes('期间有别的提交');
+        await this.#markHaUnsafe(mission, thirdParty ? 'third_party_advanced' : 'rollback_failed', {
+          head: outcome.mergedInto,
+          anchor: outcome.anchor,
+          reportId: outcome.report.id,
+        });
+      }
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证未通过（报告 ${outcome.report.id}）；` +
+          (outcome.reset.ok
+            ? `已退回 ${outcome.anchor.slice(0, 12)}，等人处置。`
+            : `**退回失败**：${outcome.reset.reason} 集成分支上留着一个没验过的合并。`),
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        rolledBack: outcome.reset.ok,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: outcome.reset.ok
+          ? '集成验证未通过，已回滚'
+          : this.#haUnsafeHint(outcome.reset.reason?.includes('期间有别的提交')
+              ? 'third_party_advanced'
+              : 'rollback_failed'),
+        ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
+      };
+    }
+    if (outcome.kind === 'advanced_during_verify') {
+      await this.#markHaUnsafe(mission, 'advanced_during_verify', {
+        head: outcome.head,
+        anchor: outcome.anchor,
+        reportId: outcome.report.id,
+      });
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证期间目标被推进或 checkout 被切换（报告 ${outcome.report.id}）；未签字。请人工核对锚点、当前 HEAD 与集成报告。`,
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        advancedDuringVerify: true,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: this.#haUnsafeHint('advanced_during_verify'),
+      };
+    }
+
+    const reasons =
+      input.reasons && input.reasons.length > 0
+        ? [...input.reasons]
+        : [`HA 受控放行验证通过（报告 ${outcome.report.id}）`];
+    mission.complete({
+      verdict: 'merge',
+      reasons,
+      mergedInto: outcome.mergedInto,
+      mergedAt: this.#clock.now().toISOString(),
+      authority,
+    });
+    await this.#event(mission, 'final_review.merged', {
+      mergedInto: outcome.mergedInto,
+      authority: 'reviewer',
+      reportId: outcome.report.id,
+    });
+    await this.#event(mission, 'final_review.ha_authorized', {
+      source: config.source,
+      integrationReportId: outcome.report.id,
+      reviewerId: registered.reviewerId,
+      confirmedBy: registered.confirmedBy,
+      integrationBranch: persistedTarget,
+      mergedInto: outcome.mergedInto,
+    });
+    await this.#releaseWorkspace(missionId, projectRoot);
+    return {
+      status: mission.status,
+      mergedInto: outcome.mergedInto,
+      reportId: outcome.report.id,
+    };
   }
 
   /**
@@ -2180,12 +4256,16 @@ export class Platform {
     }
     // 自动合的范围只有 lightweight + standard。高保证路径的合并必须由人放行——
     // 今天建不出这种 Mission，但门口的规则不能靠「上游恰好建不出来」来守。
-    if (mission.executionMode === 'high_assurance') {
-      throw new PlatformRuleError(
-        'HIGH_ASSURANCE_NEEDS_HUMAN',
-        `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
-      );
-    }
+    // 判定收拢到 PolicyEngine，错误码仍是 HIGH_ASSURANCE_NEEDS_HUMAN。
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'runner', id: 'platform' },
+        action: POLICY_ACTION.finalizeMachine,
+        context: { missionId },
+        state: { executionMode: mission.executionMode },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
     if (input.verification.length === 0) {
       throw new PlatformRuleError(
         'MACHINE_FINALIZE_NEEDS_VERIFICATION',
@@ -2223,135 +4303,85 @@ export class Platform {
       );
     }
 
-    // 2. 锚点先落事件
-    const anchor = await workspace.targetHead(projectRoot);
-    await this.#event(mission, 'final_review.integration_anchor', {
-      integrationBranch: input.integrationBranch,
-      anchor,
-    });
-
-    const ref = mission.workspaceRef;
-    if (!ref) {
-      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${missionId} 没记下分支信息。`);
-    }
-    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。原先这里直接
-    // 合并，提议被悄悄丢掉——夜跑里每一次 Living Spec 更新都没了，而且没人会发现。
-    // 集成验证照样跑在带着这些文件的合并结果上（比如 specs 清单的严格用例）。
-    await this.#landMemory(mission);
-    const merged = await workspace.mergeToTarget({
-      missionId,
+    const outcome = await this.#runIntegrationMergeVerify({
+      mission,
       projectRoot,
-      branch: ref.branch,
-      expectedBaseRevision: ref.baseRevision,
+      integrationBranch: input.integrationBranch,
+      verification: input.verification,
     });
-    if (!merged.ok) {
+    if (outcome.kind === 'merge_failed') {
       // 合不进去和验证红了是一回事：机器判不了，不等于这条完了。留在
       // awaiting_review 等人（或方案的检视者）处置。原先这里转 blocked 并记
       // { kind: 'human' }——一条机器路径冒签了人的权威，而且 blocked 是终态，
       // 人第二天想看一眼再合都没门。
       mission.setWaitReason(
         'waiting_l3',
-        `机器合并失败：${merged.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
+        `机器合并失败：${outcome.reason ?? '（没给原因）'} 集成分支没动，等人处置。`,
       );
       await this.#event(mission, 'final_review.merge_failed', {
-        reason: merged.reason,
+        reason: outcome.reason,
         authority: 'machine',
       });
       await this.#event(mission, 'mission.waiting', { reason: 'waiting_l3' });
-      return { status: mission.status, reason: merged.reason };
+      return { status: mission.status, reason: outcome.reason };
     }
-    const mergedInto = merged.mergedInto;
-
-    // 3. 在合并结果上验证
-    const startedAt = this.#clock.now().toISOString();
-    const checks: ValidationCheckResult[] = [];
-    for (const command of input.verification) {
-      const at = this.#clock.now().toISOString();
-      const result = await runner.run({
-        argv: command.argv,
-        cwd: projectRoot,
-        timeoutMs: command.timeoutMs,
-      });
-      checks.push(
-        Object.freeze({
-          kind: 'command' as const,
-          passed: result.exitCode === 0 && !result.timedOut,
-          startedAt: at,
-          endedAt: this.#clock.now().toISOString(),
-          summary: `${command.argv.join(' ')} → ${result.timedOut ? 'timeout' : String(result.exitCode)}`,
-          command: Object.freeze({
-            argv: Object.freeze([...command.argv]),
-            cwd: projectRoot,
-            exitCode: result.exitCode,
-            timedOut: result.timedOut,
-            durationMs: result.durationMs,
-            outputTail: result.output.slice(-2000),
-          }),
-        }),
-      );
-    }
-    const passed = checks.every((check) => check.passed);
-    const report: ValidationReport = Object.freeze({
-      id: this.#ids.next('IVAL'),
-      policyRevision: VALIDATION_POLICY_REVISION,
-      missionId,
-      startedAt,
-      endedAt: this.#clock.now().toISOString(),
-      passed,
-      checks: Object.freeze(checks),
-    });
-    await reports.save(report);
-    await this.#event(mission, 'final_review.integration_verified', {
-      reportId: report.id,
-      passed,
-      mergedInto,
-    });
-
-    // 4. 红就退回锚点，Mission 留在 awaiting_review
-    if (!passed) {
-      const reset = await workspace.resetTarget({
-        projectRoot,
-        toRevision: anchor,
-        expectedHead: mergedInto ?? anchor,
-      });
+    if (outcome.kind === 'verify_failed') {
       mission.setWaitReason(
         'waiting_l3',
-        `集成验证未通过（报告 ${report.id}）；` +
-          (reset.ok
-            ? `已退回 ${anchor.slice(0, 12)}，等人处置。`
-            : `**退回失败**：${reset.reason} 集成分支上留着一个没验过的合并。`),
+        `集成验证未通过（报告 ${outcome.report.id}）；` +
+          (outcome.reset.ok
+            ? `已退回 ${outcome.anchor.slice(0, 12)}，等人处置。`
+            : `**退回失败**：${outcome.reset.reason} 集成分支上留着一个没验过的合并。`),
       );
       await this.#event(mission, 'mission.waiting', {
         reason: 'waiting_l3',
-        reportId: report.id,
-        rolledBack: reset.ok,
+        reportId: outcome.report.id,
+        rolledBack: outcome.reset.ok,
       });
       return {
         status: mission.status,
-        reportId: report.id,
-        reason: reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
-        ...(reset.ok ? { rolledBackTo: anchor } : {}),
+        reportId: outcome.report.id,
+        reason: outcome.reset.ok ? '集成验证未通过，已回滚' : '集成验证未通过，且回滚失败',
+        ...(outcome.reset.ok ? { rolledBackTo: outcome.anchor } : {}),
+      };
+    }
+    if (outcome.kind === 'advanced_during_verify') {
+      // 与 HA 共用复核：绿之后 checkout / HEAD 已不是本次合并结果时，不能记 completed。
+      mission.setWaitReason(
+        'waiting_l3',
+        `集成验证期间目标被推进或 checkout 被切换（报告 ${outcome.report.id}）；未签字。` +
+          '不能把这次验证当成仍对着受授权的合并结果。',
+      );
+      await this.#event(mission, 'mission.waiting', {
+        reason: 'waiting_l3',
+        reportId: outcome.report.id,
+        advancedDuringVerify: true,
+      });
+      return {
+        status: mission.status,
+        reportId: outcome.report.id,
+        reason: '集成验证期间目标被推进或 checkout 被切换，未放行',
       };
     }
 
     mission.complete({
       verdict: 'merge',
-      reasons: [`集成验证通过（报告 ${report.id}）`],
-      mergedInto,
+      reasons: [`集成验证通过（报告 ${outcome.report.id}）`],
+      mergedInto: outcome.mergedInto,
       mergedAt: this.#clock.now().toISOString(),
       authority: Object.freeze({
         kind: 'machine' as const,
-        integrationReportId: report.id,
-        policyRevision: report.policyRevision,
+        integrationReportId: outcome.report.id,
+        policyRevision: outcome.report.policyRevision,
       }),
     });
     await this.#event(mission, 'final_review.merged', {
-      mergedInto,
+      mergedInto: outcome.mergedInto,
       authority: 'machine',
-      reportId: report.id,
+      reportId: outcome.report.id,
     });
     await this.#releaseWorkspace(missionId, projectRoot);
-    return { status: mission.status, mergedInto, reportId: report.id };
+    return { status: mission.status, mergedInto: outcome.mergedInto, reportId: outcome.report.id };
   }
 
   /**
@@ -2365,6 +4395,27 @@ export class Platform {
    * 动作还是等过了期，记在升级单上。不接 HTTP、不进 agent tools。
    */
   async abandonMissionForPlan(
+    missionId: string,
+    input: {
+      readonly planRunId: string;
+      readonly escalationId: string;
+      readonly reasons: readonly string[];
+      readonly projectRoot?: string;
+    },
+  ): Promise<{ status: string }> {
+    assertFinalizePolicy(
+      {
+        principal: { status: 'ok', kind: 'runner', id: 'platform' },
+        action: POLICY_ACTION.finalizePlan,
+        context: { missionId },
+      },
+      `Mission ${missionId} 是 high_assurance：合并永远要人放行，机器 L3 不碰。`,
+    );
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#abandonMissionForPlan(missionId, input));
+  }
+
+  async #abandonMissionForPlan(
     missionId: string,
     input: {
       readonly planRunId: string;
@@ -2417,6 +4468,7 @@ export class Platform {
       throw new PlatformRuleError('NO_WORK_ORDER', `工作项 ${workItemId} 没有工单正文。`);
     }
     const contract = mission.contract;
+    const answered = answeredQaForWorkItem(mission, item);
     return {
       workItemId: item.id,
       title: item.title,
@@ -2426,6 +4478,8 @@ export class Platform {
       guardrails: contract?.guardrails ?? [],
       /** 被打回重做时，上一次的 requiredChanges 必须带下去。 */
       previousRequiredChanges: item.reviews.at(-1)?.requiredChanges ?? [],
+      // 问答是事后补的，不能写进冻结 order；未答不带键，以免泄漏未决提问。
+      ...(answered ?? {}),
     };
   }
 
@@ -2492,6 +4546,16 @@ export class Platform {
     missionId: string,
     attemptId: string,
     evidence: Omit<EvidenceRecord, 'id' | 'attemptId'>,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ evidenceId: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitEvidence(missionId, attemptId, evidence));
+  }
+
+  async #submitEvidence(
+    missionId: string,
+    attemptId: string,
+    evidence: Omit<EvidenceRecord, 'id' | 'attemptId'>,
   ): Promise<{ evidenceId: string }> {
     const { mission, attempt } = await this.#requireAttempt(missionId, attemptId, 'executor');
     const evidenceId = this.#ids.next('E');
@@ -2507,6 +4571,16 @@ export class Platform {
   }
 
   async submitExecutionResult(
+    missionId: string,
+    attemptId: string,
+    body: ExecutionResultBody,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ status: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#submitExecutionResult(missionId, attemptId, body));
+  }
+
+  async #submitExecutionResult(
     missionId: string,
     attemptId: string,
     body: ExecutionResultBody,
@@ -2554,6 +4628,16 @@ export class Platform {
     missionId: string,
     attemptId: string,
     body: Omit<BlockedRecord, 'attemptId'>,
+    claim?: QueueClaimIdentity,
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () => this.#reportBlocked(missionId, attemptId, body));
+  }
+
+  async #reportBlocked(
+    missionId: string,
+    attemptId: string,
+    body: Omit<BlockedRecord, 'attemptId'>,
   ): Promise<void> {
     const { mission, attempt } = await this.#requireAttempt(missionId, attemptId, 'executor');
     const workItemId = attempt.workItemId;
@@ -2566,6 +4650,17 @@ export class Platform {
     }
     item.recordBlocked({ ...body, attemptId });
     await this.#event(mission, 'blocked.reported', { reason: body.reason }, workItemId, attemptId);
+    // Lightweight 没有协调者：执行者提问只能走 Mission 升级，否则 L3 看不到。
+    // Standard 和空白需求不是提问，保持只记 blocked。
+    const needs = typeof body.needsFromUpstream === 'string' ? body.needsFromUpstream : '';
+    if (mission.executionMode === 'lightweight' && needs.trim() !== '') {
+      await this.#recordEscalationAndDeliver(mission, {
+        attemptId,
+        question: body.needsFromUpstream,
+        why: body.reason,
+        optionsConsidered: [...(body.whatWasTried ?? [])],
+      });
+    }
   }
 
   /* ================================ 内部 ================================ */
@@ -2630,6 +4725,169 @@ export class Platform {
     }
   }
 
+  /** 命令事务（C2）：注入了就让 fn 里的写一起提交；缺省直接跑。 */
+  #tx<T>(fn: () => Promise<T>): Promise<T> {
+    return this.#transaction ? this.#transaction.run(fn) : fn();
+  }
+
+  /**
+   * 队列身份写：核对与状态/事件/投递必须在同一 runFenced 事务里。
+   * 事务外 get 预检会在核对和提交之间被接管，旧 Runner 仍能迟到落盘。
+   * 没注入 FencedCommandTransaction 时 fail-closed，避免内存平台把领取身份当成已授权。
+   * 无领取身份走既有 #tx，原调用方不用改。
+   */
+  #txFenced<T>(claim: QueueClaimIdentity | undefined, fn: () => Promise<T>): Promise<T> {
+    if (!claim) return this.#tx(fn);
+    if (!isFencedCommandTransaction(this.#transaction)) {
+      throw new PlatformRuleError(
+        'CLAIM_FENCE_UNAVAILABLE',
+        '携带队列领取身份的写请求需要同一事务内的租约核对，但当前平台没有 FencedCommandTransaction。',
+      );
+    }
+    const fence: ClaimFence = {
+      id: claim.id,
+      owner: claim.owner,
+      claimGeneration: claim.claimGeneration,
+      now: this.#clock.now().toISOString(),
+    };
+    return this.#transaction.runFenced(fence, fn).catch(mapClaimFenceError);
+  }
+
+  async #attemptHasQueueMark(missionId: string, attemptId: string): Promise<boolean> {
+    const events = await this.#activity.list(missionId);
+    return events.some((event) => eventMarksQueuedAttempt(event, attemptId));
+  }
+
+  /**
+   * 队列 Attempt 即使调用方没带内存 claim 也不得走无 fence 写入。
+   * 只靠 HTTP 记得传 claim 的话，重启丢牌后控制面 finish 会把队列误判成非队列。
+   */
+  #attemptWrite<T>(
+    missionId: string,
+    attemptId: string,
+    claim: QueueClaimIdentity | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (claim) return this.#txFenced(claim, fn);
+    return this.#tx(async () => {
+      if (await this.#attemptHasQueueMark(missionId, attemptId)) {
+        throw new PlatformRuleError(
+          'QUEUE_CLAIM_REQUIRED',
+          '该 Attempt 由队列领取启动，写入必须携带当前租约身份。',
+        );
+      }
+      return fn();
+    });
+  }
+
+  /**
+   * POST_EXECUTION shadow（Jev 设计 §9，J2）：编排器在「执行者交卷 + 确定性验收」之后调用。
+   *
+   * 非权威、从不抛：评估器没注入、钩子没开、工作项不在交卷状态，都直接返回；取数或调用出任何错也只进事件。
+   * 输入只取平台自己存的：工单、当前那次提交、那个 attempt 的证据，改动清单优先用平台算的 diff。
+   */
+  async runPostExecutionShadow(missionId: string, workItemId: string): Promise<void> {
+    const evaluator = this.#postExecutionEvaluator;
+    if (!evaluator || !this.#decisionHooks.has('POST_EXECUTION')) return;
+    try {
+      const { mission } = await this.#locate(missionId);
+      const item = mission.workItem(workItemId);
+      const submittedAttemptId = item?.submittedAttemptId;
+      const order = item?.order;
+      const result = item?.executionResult;
+      if (!item || (item.status !== 'submitted' && item.status !== 'accepted') || !submittedAttemptId || !order || !result) return;
+      // 一次交卷只问一次：崩溃后接着跑会把同一次提交再验一遍，这时不再多花一次付费调用。
+      const events = await this.#activity.list(missionId);
+      if (events.some((e) => e.kind === POST_EXECUTION_SHADOW_EVENT_KIND && shadowAttemptOf(e.data) === submittedAttemptId)) return;
+      const attempt = item.attempts.find((a) => a.id === submittedAttemptId);
+      const trustedFiles = await this.#trustedChangedFiles(mission);
+      const { input, filesSource } = postExecutionInputFrom({
+        order,
+        result,
+        evidence: attempt?.evidence ?? [],
+        ...(trustedFiles ? { trustedFiles } : {}),
+        ...(attempt ? { toolActivityCount: attempt.toolActivity.length } : {}),
+      });
+      await recordPostExecutionShadow(
+        { evaluator, activity: this.#activity, clock: this.#clock },
+        { projectId: mission.projectId, missionId, workItemId, submittedAttemptId, input, filesSource },
+      );
+    } catch {
+      // shadow 从不影响主流程。
+    }
+  }
+
+  /**
+   * 平台自己算的改动清单。只在真有隔离工作区时可信：原地模式的 diff 永远是空的，
+   * 分不清「没改」和「没隔离」，这时返回 undefined，让调用方照实退回执行者自报。
+   */
+  async #trustedChangedFiles(mission: Mission): Promise<readonly string[] | undefined> {
+    const ref = mission.workspaceRef;
+    if (!this.#workspace || typeof this.#workspace.worktreePath !== 'function') return undefined;
+    if (!ref?.projectRoot || !ref.baseRevision) return undefined;
+    try {
+      return (await this.#workspace.diff(mission.id, ref.baseRevision, ref.projectRoot)).files;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Lightweight 交卷后的自动升级（§4.3 接线）：验收没过、或实际改动超出轻量规模时，交给 Standard。
+   *
+   * 触发只从平台自己保存的那份 ValidationReport 复算（{@link lightweightGateTrigger}），
+   * 调用方只能指名是哪份报告，不能自带理由——和 budget_exceeded 只能由平台自检发放是同一条纪律。
+   * 报告必须属于这条 Mission、且正是当前这次提交的那一份：拿一份旧报告来升级，
+   * 等于用上一次的失败给这一次定罪。
+   *
+   * 为什么不停下等人：E1 实测，执行者改对了、机器验收因一条配置判失败，Lightweight 没有出口，
+   * Mission 停了 870 秒直到有人叫停。升级后协调者接手，已有产出、证据、报告全部复用。
+   */
+  async promoteLightweightAfterValidation(
+    missionId: string,
+    reportId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteLightweightAfterValidation(missionId, reportId));
+  }
+
+  async #promoteLightweightAfterValidation(
+    missionId: string,
+    reportId: string,
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    const { mission } = await this.#locate(missionId);
+    this.#requireLightweightMutationLane(mission);
+    if (!this.#validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'Lightweight 自动升级要读验收报告，需要注入 PlatformDeps.validation（engine + reports）。',
+      );
+    }
+    const report = await this.#validation.reports.get(reportId);
+    if (!report || report.missionId !== mission.id) {
+      throw new PlatformRuleError(
+        'PROMOTION_REPORT_MISMATCH',
+        `ValidationReport ${reportId} 不存在或不属于 Mission ${mission.id}。`,
+      );
+    }
+    const item = mission.workItem(report.workItemId);
+    if (!item || item.status !== 'submitted' || item.submittedAttemptId !== report.attemptId) {
+      throw new PlatformRuleError(
+        'PROMOTION_REPORT_STALE',
+        `ValidationReport ${reportId} 不是工作项 ${report.workItemId} 当前这次提交的报告` +
+          `（工作项 ${item?.status ?? '不存在'}，当前提交 ${item?.submittedAttemptId ?? '无'}，报告 ${report.attemptId}）。`,
+      );
+    }
+    const trigger = lightweightGateTrigger(report);
+    if (!trigger) {
+      throw new PlatformRuleError(
+        'NO_PROMOTION_TRIGGER',
+        `ValidationReport ${reportId} 通过且改动在轻量规模内，没有升级的理由。`,
+      );
+    }
+    return this.#commitPromotionToStandard(mission.id, trigger);
+  }
+
   /**
    * Lightweight → Standard 可信升级入口（PROMO-001）。
    *
@@ -2640,6 +4898,14 @@ export class Platform {
    * {@link promoteLightweightForBudgetExceeded}（Platform 自检求值后发放）。
    */
   async promoteMissionToStandard(
+    missionId: string,
+    trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
+  ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#promoteMissionToStandard(missionId, trigger));
+  }
+
+  async #promoteMissionToStandard(
     missionId: string,
     trigger: { readonly code: PromotionTriggerCode; readonly rule: string },
   ): Promise<{ changed: boolean; promotion: Readonly<PromotionRecord> }> {
@@ -2768,6 +5034,337 @@ export class Platform {
    * 回收 worktree 目录。**只摘目录，不删分支** —— 改动是 Mission 的产出，
    * 分支留着才查得到。失败不致命：留个目录比中断收尾好。
    */
+  /**
+   * 共用：锚点 → 合并 → 在合并结果上验证 → 条件回滚。入口自己决定门禁与权威。
+   */
+  async #runIntegrationMergeVerify(input: {
+    readonly mission: Mission;
+    readonly projectRoot: string;
+    readonly integrationBranch: string;
+    readonly verification: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[];
+  }): Promise<
+    | { kind: 'merge_failed'; reason?: string; anchor: string }
+    | {
+        kind: 'verify_failed';
+        mergedInto: string;
+        report: ValidationReport;
+        anchor: string;
+        reset: { ok: boolean; reason?: string };
+      }
+    | { kind: 'verified'; mergedInto: string; report: ValidationReport; anchor: string }
+    | {
+        kind: 'advanced_during_verify';
+        mergedInto: string;
+        report: ValidationReport;
+        anchor: string;
+        checkout?: string;
+        head: string;
+      }
+  > {
+    const workspace = this.#workspace;
+    const runner = this.#validation?.commandRunner;
+    const reports = this.#validation?.reports;
+    if (!workspace?.resetTarget || !runner || !reports) {
+      throw new PlatformRuleError(
+        'MACHINE_FINALIZE_UNAVAILABLE',
+        '没注入 commandRunner / reports / resetTarget，不能做合并结果验证。',
+      );
+    }
+    const { mission, projectRoot, integrationBranch, verification } = input;
+    const anchor = await workspace.targetHead(projectRoot);
+    await this.#event(mission, 'final_review.integration_anchor', {
+      integrationBranch,
+      anchor,
+    });
+    const ref = mission.workspaceRef;
+    if (!ref) {
+      throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${mission.id} 没记下分支信息。`);
+    }
+    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。
+    await this.#landMemory(mission);
+    const merged = await workspace.mergeToTarget({
+      missionId: mission.id,
+      projectRoot,
+      branch: ref.branch,
+      expectedBaseRevision: ref.baseRevision,
+    });
+    if (!merged.ok) {
+      return { kind: 'merge_failed', reason: merged.reason, anchor };
+    }
+    const mergedInto = merged.mergedInto ?? (await workspace.targetHead(projectRoot));
+    await this.#event(mission, 'final_review.merge_applied', {
+      integrationBranch,
+      mergedInto,
+      anchor,
+    });
+
+    const startedAt = this.#clock.now().toISOString();
+    const checks: ValidationCheckResult[] = [];
+    for (const command of verification) {
+      const at = this.#clock.now().toISOString();
+      const result = await runner.run({
+        argv: command.argv,
+        cwd: projectRoot,
+        timeoutMs: command.timeoutMs,
+      });
+      checks.push(
+        Object.freeze({
+          kind: 'command' as const,
+          passed: result.exitCode === 0 && !result.timedOut,
+          startedAt: at,
+          endedAt: this.#clock.now().toISOString(),
+          summary: `${command.argv.join(' ')} → ${result.timedOut ? 'timeout' : String(result.exitCode)}`,
+          command: Object.freeze({
+            argv: Object.freeze([...command.argv]),
+            cwd: projectRoot,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: result.durationMs,
+            outputTail: redactSecrets(result.output).slice(-2000),
+          }),
+        }),
+      );
+    }
+    const passed = checks.every((check) => check.passed);
+    const report: ValidationReport = Object.freeze({
+      id: this.#ids.next('IVAL'),
+      policyRevision: VALIDATION_POLICY_REVISION,
+      missionId: mission.id,
+      startedAt,
+      endedAt: this.#clock.now().toISOString(),
+      passed,
+      checks: Object.freeze(checks),
+    });
+    await reports.save(report);
+    await this.#event(mission, 'final_review.integration_verified', {
+      reportId: report.id,
+      passed,
+      mergedInto,
+    });
+    if (!passed) {
+      let reset: { ok: boolean; reason?: string };
+      try {
+        reset = await workspace.resetTarget({
+          projectRoot,
+          toRevision: anchor,
+          expectedHead: mergedInto,
+        });
+      } catch (error) {
+        // git reset 抛错不能当未处理异常溜走：当次必须留下可持久识别的
+        // rollback_failed，重建平台后再放行才能继续拦住。
+        reset = {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+      return { kind: 'verify_failed', mergedInto, report, anchor, reset };
+    }
+    // 验证绿了还不能签字：runner 期间第三方可能已推进目标或切走 checkout。
+    // checkout 仍是目标分支、HEAD 仍是本次合并提交（合并结果未被替换），缺一不签 FinalReview。
+    const checkoutNow =
+      typeof workspace.currentBranch === 'function'
+        ? await workspace.currentBranch(projectRoot)
+        : undefined;
+    const headNow = await workspace.targetHead(projectRoot);
+    if (checkoutNow !== integrationBranch || headNow !== mergedInto) {
+      return {
+        kind: 'advanced_during_verify',
+        mergedInto,
+        report,
+        anchor,
+        checkout: checkoutNow,
+        head: headNow,
+      };
+    }
+    return { kind: 'verified', mergedInto, report, anchor };
+  }
+
+  async #loadHaAuthority(
+    repoRoot: string,
+    worktreePaths: readonly string[],
+  ): Promise<HaAuthorityConfig> {
+    try {
+      return await loadHaAuthorityConfig({
+        filePath: this.#haAuthorityFile ?? process.env[HA_AUTHORITY_ENV],
+        repoRoot,
+        worktreePaths,
+      });
+    } catch (error) {
+      throw this.#wrapHaAuthorityError(error);
+    }
+  }
+
+  /**
+   * 目标 HEAD 是否已经包含 Mission 分支上的提交（已合未记）。
+   * 分支仍等于分叉基线时不算：那只说明目标自己前进了。
+   */
+  async #haMissionAlreadyInHead(
+    workspace: WorkspaceManager,
+    projectRoot: string,
+    missionBranch: string,
+    baseRevision: string,
+    headNow: string,
+  ): Promise<boolean> {
+    if (typeof workspace.revisionIsAncestor !== 'function') return false;
+    const isAncestor = workspace.revisionIsAncestor.bind(workspace);
+    const contained = await isAncestor(projectRoot, missionBranch, headNow);
+    if (!contained) return false;
+    const stillAtBaseline =
+      (await isAncestor(projectRoot, missionBranch, baseRevision)) &&
+      (await isAncestor(projectRoot, baseRevision, missionBranch));
+    return !stillAtBaseline;
+  }
+
+  async #haWorktreePaths(
+    workspace: WorkspaceManager,
+    projectRoot: string,
+  ): Promise<readonly string[]> {
+    if (typeof workspace.listWorktreePaths !== 'function') {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
+        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法枚举 worktree。',
+      );
+    }
+    try {
+      const listed = await workspace.listWorktreePaths(projectRoot);
+      if (!listed || listed.length === 0) {
+        throw new Error('empty');
+      }
+      return listed;
+    } catch {
+      throw new PlatformRuleError(
+        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
+        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法可靠枚举 worktree。',
+      );
+    }
+  }
+
+  #wrapHaAuthorityError(error: unknown): PlatformRuleError {
+    if (error instanceof HaAuthorityError) {
+      return new PlatformRuleError(error.code, error.message);
+    }
+    if (error instanceof PlatformRuleError) return error;
+    return new PlatformRuleError(
+      HA_AUTHORITY_CODE.INVALID_FIELDS,
+      'HA 放行拒绝（HA_AUTHORITY_INVALID_FIELDS）：授权配置不可用。',
+    );
+  }
+
+  async #haUnsafe(
+    missionId: string,
+  ): Promise<{ reason: string } | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== 'final_review.ha_unsafe') continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const reason = (data as { reason?: unknown }).reason;
+      if (typeof reason === 'string' && reason.trim() !== '') return { reason };
+      return { reason: 'unsafe' };
+    }
+    return undefined;
+  }
+
+  async #markHaUnsafe(
+    mission: Mission,
+    reason: 'merged_unrecorded' | 'rollback_failed' | 'third_party_advanced' | 'advanced_during_verify',
+    extra: { head?: string; anchor?: string; reportId?: string },
+  ): Promise<void> {
+    await this.#event(mission, 'final_review.ha_unsafe', {
+      reason,
+      ...extra,
+      hint: this.#haUnsafeHint(reason),
+    });
+  }
+
+  #haUnsafeHint(reason: string): string {
+    if (reason === 'merged_unrecorded') {
+      return (
+        'HA 合并已落到目标分支但 Mission 未记完成。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    if (reason === 'third_party_advanced') {
+      return (
+        '集成分支在验证期间被第三方推进，未回滚。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    if (reason === 'advanced_during_verify') {
+      return (
+        '集成验证期间目标分支被推进或 checkout 被切换，未签字。' +
+        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+      );
+    }
+    return (
+      'HA 验证未通过且回滚失败，集成分支可能不安全。' +
+      '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
+    );
+  }
+
+  #explicitHaCommands(
+    missionId: string,
+    commands: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[],
+  ): { argv: string[]; timeoutMs: number }[] {
+    const invalid = (): never => {
+      throw new PlatformRuleError(
+        'HA_VERIFICATION_REQUIRED',
+        `Mission ${missionId} 的显式验证命令非法，拒绝合并。`,
+      );
+    };
+    if (!Array.isArray(commands) || commands.length === 0) invalid();
+    return commands.map((command) => {
+      if (!command || !Array.isArray(command.argv) || command.argv.length === 0 ||
+          command.argv.some((part) => typeof part !== 'string' || part.trim() === '') ||
+          !Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0) invalid();
+      return { argv: [...command.argv], timeoutMs: command.timeoutMs };
+    });
+  }
+
+  #planLevelCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
+    const out: { argv: string[]; timeoutMs: number }[] = [];
+    const seen = new Set<string>();
+    for (const item of mission.workItems) {
+      if (item.status === 'retired') continue;
+      for (const command of item.order?.validation?.commands ?? []) {
+        if (
+          !Array.isArray(command.argv) ||
+          command.argv.length === 0 ||
+          command.argv.some((part) => typeof part !== 'string' || part.trim() === '')
+        ) {
+          throw new PlatformRuleError(
+            'HA_VERIFICATION_REQUIRED',
+            `Mission ${mission.id} 的冻结验证命令非法，拒绝合并。`,
+          );
+        }
+        if (typeof command.timeoutMs !== 'number' || !Number.isFinite(command.timeoutMs) || command.timeoutMs <= 0) {
+          throw new PlatformRuleError(
+            'HA_VERIFICATION_REQUIRED',
+            `Mission ${mission.id} 的冻结验证命令 timeoutMs 非法，拒绝合并。`,
+          );
+        }
+        const argv = [...command.argv];
+        const key = JSON.stringify([argv, command.timeoutMs]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ argv, timeoutMs: command.timeoutMs });
+      }
+    }
+    if (out.length === 0) {
+      throw new PlatformRuleError(
+        'HA_VERIFICATION_REQUIRED',
+        `Mission ${mission.id} 没有非空方案级验证命令，拒绝合并。`,
+      );
+    }
+    return out;
+  }
+
+  #isForbiddenMaster(branch: string): boolean {
+    const trimmed = branch.trim();
+    return trimmed === 'master' || trimmed === 'refs/heads/master';
+  }
+
   /**
    * 批准的长期知识写进 **Mission 自己的 worktree**，跟代码同一次 merge 落地。
    * 分两次提交的话，"代码进去了文档没进去"就会发生——而且没人会发现。
@@ -2953,6 +5550,12 @@ export interface MissionView {
   origin: OriginChannel | undefined;
   coordinatorResumeRef: string | undefined;
   coordinatorAttemptIds: string[];
+  independentReviewerAttemptIds: string[];
+  independentReviews: readonly IndependentReviewRecord[];
+  independentReviewBlockReason: IndependentReviewBlockReason | undefined;
+  independentReviewBlockDetail: string | undefined;
+  /** HA 停在 awaiting_review 时的可读子态；非 HA 为 undefined。 */
+  haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
   finalReview: FinalReview | undefined;
   workspaceRef: WorkspaceRef | undefined;
   usage: TokenUsage;
@@ -2972,6 +5575,33 @@ export interface MissionSummary {
   accepted: number;
   openEscalations: number;
   usage: TokenUsage;
+  /** 仅 origin 可准确确认为 plan-run 时出现；普通 Mission 不带这两个键。 */
+  planRunId?: string;
+  featureId?: string;
+}
+
+/**
+ * 列表投影：origin.conversationRef 给出 runId，Mission id 必须是
+ * `<runId>-<featureId>[-rN]`。对不上就不写——猜错的关联比没有更糟。
+ * 功能 id 含 `-rN` 的消歧由 HTTP 层用已知 PlanRun.features.missionIds 覆盖。
+ */
+function planRunListFields(mission: Mission): { planRunId: string; featureId: string } | Record<string, never> {
+  const origin = mission.origin;
+  if (!origin || origin.clientType !== 'plan-run') return {};
+  const ref = origin.conversationRef;
+  if (typeof ref !== 'string' || !ref.startsWith('plan-run:')) return {};
+  const planRunId = ref.slice('plan-run:'.length);
+  if (planRunId === '' || planRunId.includes('/') || planRunId.includes('\\') || planRunId.includes(':')) {
+    return {};
+  }
+  const prefix = `${planRunId}-`;
+  if (!mission.id.startsWith(prefix)) return {};
+  const rest = mission.id.slice(prefix.length);
+  if (rest === '') return {};
+  const rerun = /^(.*)-r([1-9]\d*)$/.exec(rest);
+  const featureId = rerun && rerun[1] !== '' ? rerun[1] : rest;
+  if (featureId === '') return {};
+  return { planRunId, featureId };
 }
 
 export interface WorkOrderView {
@@ -2982,6 +5612,9 @@ export interface WorkOrderView {
   missionIntent: string;
   guardrails: readonly string[];
   previousRequiredChanges: readonly string[];
+  question?: string;
+  answer?: string;
+  answeredAt?: string;
 }
 
 /**
@@ -3058,7 +5691,10 @@ function elapsedMs(start: string | undefined, end: string | undefined): number |
 
 /** 聚合用量：**分项相加**，不要只滚一个 total。 */
 function sumUsage(mission: Mission): TokenUsage {
-  const all: Attempt[] = [...mission.coordinatorAttempts];
+  const all: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) all.push(...item.attempts);
   let input = 0;
   let output = 0;
@@ -3099,7 +5735,10 @@ function sumUsage(mission: Mission): TokenUsage {
 function collectPromotionEvidenceIds(mission: Mission): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
-  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  const attempts: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) attempts.push(...item.attempts);
   for (const attempt of attempts) {
     for (const ev of attempt.evidence) {
@@ -3118,6 +5757,81 @@ function collectPromotionEvidenceIds(mission: Mission): string[] {
  *   2) activity `validation.reported` 事件 data.reportId
  *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
  */
+/**
+ * 协调者评审的逐条结果（方案 §11）：工单有验收标准时必须一条对一条、照抄原文。
+ *
+ * 为什么强制：一句总结里「都过了」和「三条过了、第四条没法验」看起来一样，
+ * 而后者正是 L3 最需要看到的。报错写成协调者能照做的话——它下一步就是按这句改。
+ * 没有验收标准的旧工作项不要求；给了就得是空的，不然对不上。
+ */
+function checkAcceptanceResults(
+  workItemId: string,
+  acceptance: readonly string[],
+  raw: unknown,
+): AcceptanceResult[] | undefined {
+  if (acceptance.length === 0) {
+    if (raw === undefined || (Array.isArray(raw) && raw.length === 0)) return undefined;
+    throw new PlatformRuleError('ACCEPTANCE_RESULTS_MISMATCH', `工作项 ${workItemId} 的工单没有验收标准，acceptanceResults 应为空数组。`);
+  }
+  if (!Array.isArray(raw)) {
+    throw new PlatformRuleError(
+      'ACCEPTANCE_RESULTS_REQUIRED',
+      `工作项 ${workItemId} 有 ${acceptance.length} 条验收标准，评审必须逐条给出 acceptanceResults：` +
+        'criterion 照抄原文，status 为 pass / fail / unverified / not_applicable。只写一句总结不收。',
+    );
+  }
+  if (raw.length !== acceptance.length) {
+    throw new PlatformRuleError(
+      'ACCEPTANCE_RESULTS_MISMATCH',
+      `逐条结果 ${raw.length} 条、验收标准 ${acceptance.length} 条：要一条对一条、顺序一致。`,
+    );
+  }
+  return raw.map((entry, i) => {
+    const r = (entry ?? {}) as Partial<AcceptanceResult>;
+    if (r.criterion !== acceptance[i]) {
+      throw new PlatformRuleError('ACCEPTANCE_RESULTS_MISMATCH', `第 ${i + 1} 条的 criterion 要照抄验收原文：「${acceptance[i]}」。`);
+    }
+    if (!(ACCEPTANCE_STATUSES as readonly unknown[]).includes(r.status)) {
+      throw new PlatformRuleError('ACCEPTANCE_RESULT_INVALID', `第 ${i + 1} 条的 status 只能是 pass / fail / unverified / not_applicable。`);
+    }
+    if (r.status === 'pass' && !(typeof r.evidence === 'string' && r.evidence.trim())) {
+      throw new PlatformRuleError('ACCEPTANCE_EVIDENCE_REQUIRED', `第 ${i + 1} 条判 pass 要写出证据（命令 + 退出码、diff 的位置……）。`);
+    }
+    if ((r.status === 'unverified' || r.status === 'not_applicable') && !(typeof r.note === 'string' && r.note.trim())) {
+      throw new PlatformRuleError('ACCEPTANCE_NOTE_REQUIRED', `第 ${i + 1} 条判 ${r.status} 要写明原因。`);
+    }
+    return {
+      criterion: r.criterion,
+      status: r.status as AcceptanceResult['status'],
+      ...(typeof r.evidence === 'string' && r.evidence.trim() ? { evidence: r.evidence } : {}),
+      ...(typeof r.note === 'string' && r.note.trim() ? { note: r.note } : {}),
+    };
+  });
+}
+
+const HA_FORBIDDEN_SIDE_EFFECTS = [
+  'productionDeployRelease',
+  'externalPaidOp',
+  'unrecoverableExternalSideEffect',
+  'destructiveData',
+] as const;
+
+/** 无法证明为 false 的禁止副作用：true 与 unknown 都算未证明安全。 */
+function haForbiddenSideEffects(ha: {
+  readonly productionDeployRelease: unknown;
+  readonly externalPaidOp: unknown;
+  readonly unrecoverableExternalSideEffect: unknown;
+  readonly destructiveData: unknown;
+}): string[] {
+  return HA_FORBIDDEN_SIDE_EFFECTS.filter((key) => ha[key] !== false);
+}
+
+function tallyAcceptance(results: readonly AcceptanceResult[]): Record<AcceptanceResult['status'], number> {
+  const tally = { pass: 0, fail: 0, unverified: 0, not_applicable: 0 };
+  for (const r of results) tally[r.status] += 1;
+  return tally;
+}
+
 async function collectPromotionValidationReportIds(
   mission: Mission,
   activity: ActivityLog,
@@ -3157,7 +5871,10 @@ async function collectPromotionValidationReportIds(
  * 无任何非 unknown usage => 省略 tokenUsage。
  */
 function buildPromotionUsageSnapshot(mission: Mission): PromotionUsageSnapshot {
-  const attempts: Attempt[] = [...mission.coordinatorAttempts];
+  const attempts: Attempt[] = [
+    ...mission.coordinatorAttempts,
+    ...mission.independentReviewerAttempts,
+  ];
   for (const item of mission.workItems) attempts.push(...item.attempts);
   const attemptCount = attempts.length;
 
@@ -3219,6 +5936,35 @@ function buildPromotionUsageSnapshot(mission: Mission): PromotionUsageSnapshot {
   };
 }
 
+function answeredQaForWorkItem(
+  mission: Mission,
+  item: WorkItem,
+): { question: string; answer: string; answeredAt: string } | undefined {
+  const attemptIds = new Set(item.attempts.map((attempt) => attempt.id));
+  let latest: Readonly<EscalationBody> | undefined;
+  for (const escalation of mission.escalations) {
+    if (escalation.answer && escalation.answeredAt && attemptIds.has(escalation.attemptId)) {
+      latest = escalation;
+    }
+  }
+  if (!latest?.answer || !latest.answeredAt) return undefined;
+  return {
+    question: latest.question,
+    answer: latest.answer,
+    answeredAt: latest.answeredAt,
+  };
+}
+
+function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
+  const answered = answeredQaForWorkItem(mission, item);
+  return {
+    id: item.id,
+    title: item.title,
+    order: item.order,
+    ...(answered ?? {}),
+  };
+}
+
 function viewOf(mission: Mission): MissionView {
   return {
     missionId: mission.id,
@@ -3263,6 +6009,10 @@ function viewOf(mission: Mission): MissionView {
     origin: mission.origin,
     coordinatorResumeRef: mission.latestCoordinatorResumeRef(),
     coordinatorAttemptIds: mission.coordinatorAttempts.map((a) => a.id),
+    independentReviewerAttemptIds: mission.independentReviewerAttempts.map((a) => a.id),
+    independentReviews: mission.independentReviews,
+    independentReviewBlockReason: mission.independentReviewBlockReason,
+    independentReviewBlockDetail: mission.independentReviewBlockDetail,
     finalReview: mission.finalReview,
     workspaceRef: mission.workspaceRef,
     usage: sumUsage(mission),
@@ -3339,4 +6089,13 @@ export interface UsageReport {
   byRole: UsageBucket[];
   /** 按运行时报回来的事实分组。适配层填 provider / model，所以这一项覆盖了两者。 */
   byFact: { key: string; value: string; attempts: number; usage: TokenUsage }[];
+}
+
+/** decision.post_execution 事件问的是哪一次提交；读不出来就当不是（宁可多问一次，不漏问）。 */
+function shadowAttemptOf(data: unknown): string | undefined {
+  if (data === null || typeof data !== 'object') return undefined;
+  const ids = (data as { ids?: unknown }).ids;
+  if (ids === null || typeof ids !== 'object') return undefined;
+  const id = (ids as { submittedAttemptId?: unknown }).submittedAttemptId;
+  return typeof id === 'string' ? id : undefined;
 }
