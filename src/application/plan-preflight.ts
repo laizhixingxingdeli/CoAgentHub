@@ -68,20 +68,28 @@ export function preflightPlanMissionSlots(input: {
 }): { readonly problems: string[]; readonly resume: readonly PlanResumeTarget[] } {
   const problems: string[] = [];
   const resume: PlanResumeTarget[] = [];
-  const candidates = new Set(input.selection.candidates.map((feature) => feature.id));
-  const history = listPlanRuns([input.runDir]);
-  for (const mission of input.missions) {
-    if (mission.projectId !== input.plan.projectId || !mission.isMutating) continue;
+  const holders = input.missions.filter((mission) => mission.projectId === input.plan.projectId && mission.isMutating);
+  // 空名额不依赖历史；损坏记录不应阻止与其无关的新方案运行。
+  const history = holders.length > 0 ? listPlanRuns([input.runDir]) : [];
+  const historyErrors = history.some((item) => 'error' in item);
+  const candidateCounts = new Map<string, number>();
+  for (const feature of input.selection.candidates) {
+    candidateCounts.set(feature.id, (candidateCounts.get(feature.id) ?? 0) + 1);
+  }
+  for (const mission of holders) {
     const evidence = history.filter((item) => !('error' in item) && item.planId === input.plan.planId &&
       item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop' &&
-      item.features.some((feature) => candidates.has(feature.featureId) && feature.missionIds.includes(mission.missionId)));
-    const matchedFeature = evidence.length === 1
-      ? evidence[0]!.features.find((feature) => candidates.has(feature.featureId) && feature.missionIds.includes(mission.missionId))
+      item.features.some((feature) => candidateCounts.get(feature.featureId) === 1 && feature.missionIds.includes(mission.missionId)));
+    const mappings = evidence.flatMap((item) => item.features.filter((feature) =>
+      candidateCounts.get(feature.featureId) === 1 && feature.missionIds.includes(mission.missionId)));
+    const matchedFeature = !historyErrors && evidence.length === 1 && mappings.length === 1 &&
+      mappings[0]!.missionIds.filter((id) => id === mission.missionId).length === 1
+      ? mappings[0]
       : undefined;
     if (matchedFeature && mission.paused && mission.status === 'executing') {
       resume.push({ featureId: matchedFeature.featureId, missionId: mission.missionId });
     } else {
-      problems.push(`Mission ${mission.missionId}（${mission.status}）正占着项目 ${input.plan.projectId} 的改动名额：先处理它（node src/l3.ts show ${mission.missionId}，再 merge 或 abandon），否则今晚每个功能都派发不了。`);
+      problems.push(...slotHolders([mission], input.plan.projectId));
     }
   }
   return { problems, resume };
