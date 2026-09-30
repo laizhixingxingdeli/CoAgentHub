@@ -212,7 +212,7 @@ function printEligibility(
 }
 
 /**
- * 真正只读的开跑前检查。不拿主状态锁、不打开状态文件、不建 PlanRun、
+ * 真正只读的开跑前检查。不拿主状态锁、不写状态文件、不建 PlanRun、
  * 不起 HTTP、不建 worktree、不分类、不派 agent。
  *
  * 没有任何入选条目时以 0 退出并写明「没有可跑的候选」——那是筛选结果，不是预检失败。
@@ -263,7 +263,15 @@ async function checkPlanOnly(planFile: string, maxRounds: number | undefined): P
     process.exitCode = 2;
     return;
   }
-  const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions: await platform.listMissions() });
+  let missions: Array<{ missionId: string; projectId: string; status: string; isMutating: boolean; paused: boolean }>;
+  try {
+    missions = await platform.listMissions();
+  } catch (error) {
+    console.error(`读不到主状态：${formatErrorForLog(error)}`);
+    process.exitCode = 2;
+    return;
+  }
+  const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions });
   for (const target of slots.resume) {
     console.log(`Mission ${target.missionId}（功能 ${target.featureId}）将从上次停止处恢复；不写状态。`);
   }
