@@ -36,7 +36,7 @@ test('runPlanOnPlatform resumes the authenticated prior Mission and persists it 
   await runPlanOnPlatform(plan, selection, {
     store, projectRoot: '.', platform: platform as never,
     resumeMissions: { F1: 'old-mission-id' },
-    runMission: async () => ({ kind: 'blocked', reason: 'test-stop' }),
+    runMission: async () => ({ outcome: { kind: 'blocked', reason: 'test-stop' } } as never),
     persist: async () => { events.push('persist'); },
     pauseInFlight: async () => {}, now: () => new Date().toISOString(), sleep: async () => {},
     log: (line) => logs.push(line), runId: 'R-resume',
