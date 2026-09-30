@@ -124,6 +124,8 @@ describe('方案运行入口接线 answerEscalation', () => {
       src,
       /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
     );
+    assert.match(src, /resumeMission:\s*\(missionId\) =>\s*persistAfter\(deps\.persist, deps\.platform\.resumeMission!?\(missionId\)\)/);
+    assert.match(src, /resumeMissions:\s*deps\.resumeMissions/);
     assert.match(src, /export async function runHostedPlan/);
     assert.match(src, /export function parseHostedPlanBody/);
     assert.doesNotMatch(src, /from ['"]\.\.\/api\//);
@@ -139,7 +141,7 @@ describe('方案运行入口接线 answerEscalation', () => {
     assert.match(src, /parseAgentEnvPassthrough/);
     assert.match(src, /COAGENT_AGENT_ENV_PASSTHROUGH/);
     assert.match(src, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
-    assert.match(src, /slotHolders\(/);
+    assert.match(src, /preflightPlanMissionSlots\(/);
     assert.match(src, /preflightPlanRepo\(/);
     assert.match(src, /new FilePlanRunStore\(/);
     assert.match(src, /inRunBackoffWaitMs:\s*120_000/);
@@ -681,7 +683,7 @@ describe('run-plan 周期投递修复接线', () => {
     // 会先撞上 import 行，顺序断言就成了「比两个 import 谁在前」，失去意义。
     const parseAt = runPlan.indexOf('parseReconcileIntervalMs(process.env');
     const worktreeAt = runPlan.indexOf('new GitWorktreeManager(');
-    const platformAt = runPlan.indexOf('await buildPersistentPlatform(');
+    const platformAt = runPlan.indexOf('await buildPersistentPlatform(', runPlan.indexOf("if (process.argv.includes('--check'))"));
     assert.ok(parseAt >= 0 && worktreeAt >= 0 && platformAt >= 0, '三个调用点都应能找到');
     assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
     const checkAt = runPlan.indexOf("if (process.argv.includes('--check'))");
@@ -691,7 +693,7 @@ describe('run-plan 周期投递修复接线', () => {
     const runAt = runPlan.indexOf('runPlanOnPlatform(');
     const apiAt = runPlan.indexOf('createApi(');
     const runnerAt = runPlan.indexOf('new MissionRunner(');
-    const slotAt = runPlan.indexOf('slotHolders(');
+    const slotAt = runPlan.indexOf('preflightPlanMissionSlots(', platformAt);
     const afterLockAt = runPlan.indexOf('拿到状态锁之后项目仓变脏了');
     const sigAt = runPlan.indexOf("process.once('SIGINT'");
     assert.ok(checkAt >= 0 && checkAt < platformAt, '--check 只读路径必须在装配平台之前');
@@ -728,8 +730,8 @@ describe('run-plan 周期投递修复接线', () => {
     assert.doesNotMatch(runPlan, /restore.*PlanRun|resumePlanRun|existingPlanRun/);
     assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
-    assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 1);
-    assert.equal([...runPlan.matchAll(/buildPgPlatform\(/g)].length, 1);
+    assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 2);
+    assert.equal([...runPlan.matchAll(/buildPgPlatform\(/g)].length, 2);
     assert.equal([...runPlan.matchAll(/new MissionRunner\(/g)].length, 1);
     assert.equal([...runPlan.matchAll(/runPlanOnPlatform\(/g)].length, 1);
     assert.match(runPlan, /pick\('independent_reviewer'/);
@@ -830,7 +832,9 @@ describe('run-plan 轮次选项接线', () => {
 describe('run-plan --check 只读、零副作用', () => {
   function runCheck(planPath: string, cwd: string, extra: string[] = [], env?: NodeJS.ProcessEnv) {
     const isolated = temp('coagent-check-cwd-');
-    return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude', '--check'], {
+    const state = join(isolated, 'readable-empty-state.json');
+    writeFileSync(state, JSON.stringify({ version: 1 }));
+    return spawnSync(process.execPath, [RUN_PLAN, ...extra, '--state', state, '--plan', planPath, '--cwd', cwd, '--reviewer', 'claude', '--check'], {
       encoding: 'utf8',
       timeout: 15_000,
       cwd: isolated,
@@ -897,9 +901,11 @@ describe('run-plan --check 只读、零副作用', () => {
       ),
     );
     const isolated = temp('coagent-check-pos-cwd-');
+    const statePath = join(isolated, '.coagent-state.json');
+    writeFileSync(statePath, JSON.stringify({ version: 1 }));
     const positional = spawnSync(
       process.execPath,
-      [RUN_PLAN, planPath, '--cwd', repo, '--reviewer', 'claude', '--check'],
+      [RUN_PLAN, planPath, '--cwd', repo, '--reviewer', 'claude', '--check', '--state', statePath],
       { encoding: 'utf8', timeout: 15_000, cwd: isolated, env: { ...process.env } },
     );
     const posOut = `${positional.stdout}${positional.stderr}`;
@@ -3488,7 +3494,7 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
     const dir = temp('coagent-plan-check-live-');
     const repo = repoOn('auto/plan-x');
     const statePath = join(dir, 'state.json');
-    writeFileSync(statePath, JSON.stringify({}));
+    writeFileSync(statePath, JSON.stringify({ version: 1 }));
     const instanceId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
     const release = acquireLock(statePath, '常驻服务', { instanceId, apiVersion: API_VERSION });
     let posts = 0;

@@ -6,8 +6,8 @@
  *        [--coordinator <profileId,...>] [--executor <profileId,...>]
  *   node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check
  *
- * `--plan` 是位置参数的别名。`--check` 只解析、筛选资格、做只读 git 预检，不拿锁、
- * 不建状态、不派 agent。缺 --cwd / --reviewer 直接退出。
+ * `--plan` 是位置参数的别名。`--check` 只解析、筛选资格、只读检查仓库与主状态名额，
+ * 不拿锁、不建状态、不派 agent。缺 --cwd / --reviewer 直接退出。
  *
  * 与 run-mission 并列：run-mission 跑完一条就退；这里一个功能点一条 Mission，
  * 交卷了走机器 L3 合进集成分支，没合进去就开升级单等检视者（另一个会话，定时
@@ -17,7 +17,7 @@
  * 发现，就是每个功能都白跑一遍再被拒。
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,7 @@ import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
-import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
+import { preflightPlanMissionSlots, preflightPlanRepo } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
 import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
@@ -124,7 +124,7 @@ function usage(): string {
       '\n' +
       '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
       '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>\n' +
-      '--check 只读：解析 + 资格筛选 + 仓库预检，不建运行记录、不派发。没有可跑候选时以 0 退出。'
+      '--check 只读：解析 + 资格筛选 + 仓库/主状态名额预检，不建状态或运行记录、不派发。没有可跑候选时以 0 退出。'
   );
 }
 
@@ -212,7 +212,7 @@ function printEligibility(
 }
 
 /**
- * 真正只读的开跑前检查。不拿主状态锁、不打开状态文件、不建 PlanRun、
+ * 真正只读的开跑前检查。不拿主状态锁、不写状态文件、不建 PlanRun、
  * 不起 HTTP、不建 worktree、不分类、不派 agent。
  *
  * 没有任何入选条目时以 0 退出并写明「没有可跑的候选」——那是筛选结果，不是预检失败。
@@ -244,7 +244,43 @@ async function checkPlanOnly(planFile: string, maxRounds: number | undefined): P
     process.exitCode = 2;
     return;
   }
-  console.log('仓库预检通过。以上为只读检查，未开跑。');
+  const statePath = resolve(flagValue('--state') ?? '.coagent-state.json');
+  const usePg = (flagValue('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
+  if (!usePg && !existsSync(statePath)) {
+    console.error(`读不到主状态：文件不存在（${statePath}）。`);
+    process.exitCode = 2;
+    return;
+  }
+  const runDir = resolve(flagValue('--run-dir') ?? join(dirname(statePath), '.coagent-plans'));
+  let platform: { listMissions(): Promise<Array<{ missionId: string; projectId: string; status: string; isMutating: boolean; paused: boolean }>> };
+  try {
+    const built = usePg
+      ? await buildPgPlatform()
+      : await buildPersistentPlatform(statePath, { reconcile: false });
+    platform = built.platform;
+  } catch (error) {
+    console.error(`读不到主状态：${formatErrorForLog(error)}`);
+    process.exitCode = 2;
+    return;
+  }
+  let missions: Array<{ missionId: string; projectId: string; status: string; isMutating: boolean; paused: boolean }>;
+  try {
+    missions = await platform.listMissions();
+  } catch (error) {
+    console.error(`读不到主状态：${formatErrorForLog(error)}`);
+    process.exitCode = 2;
+    return;
+  }
+  const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions });
+  for (const target of slots.resume) {
+    console.log(`Mission ${target.missionId}（功能 ${target.featureId}）将从上次停止处恢复；不写状态。`);
+  }
+  if (slots.problems.length > 0) {
+    console.error(`开跑前检查没过：\n${slots.problems.map((h) => `  ✗ ${h}`).join('\n')}`);
+    process.exitCode = 2;
+    return;
+  }
+  console.log('仓库预检通过。主状态名额可用。以上为只读检查，未开跑。');
 }
 
 function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
@@ -497,9 +533,9 @@ async function main() {
       return;
     }
     // 上一晚停下时原样留给人的 Mission 还占着名额的话，今晚一个都派发不了。
-    const holders = slotHolders(await platform.listMissions(), plan.projectId);
-    if (holders.length > 0) {
-      console.error(`开跑前检查没过，一个功能都没跑：\n${holders.map((h) => `  ✗ ${h}`).join('\n')}`);
+    const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions: await platform.listMissions() });
+    if (slots.problems.length > 0) {
+      console.error(`开跑前检查没过，一个功能都没跑：\n${slots.problems.map((h) => `  ✗ ${h}`).join('\n')}`);
       process.exitCode = 2;
       return;
     }
@@ -621,6 +657,7 @@ async function main() {
       runId,
       startedAt: started.toISOString(),
       checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
+      resumeMissions: Object.fromEntries(slots.resume.map(({ featureId, missionId }) => [featureId, missionId])),
     });
 
     const run = store.read();

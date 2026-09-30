@@ -29,7 +29,11 @@ export interface PlanDriverDeps {
     read(): PlanRun | undefined;
     update<T>(mutate: (run: PlanRun) => T): Promise<T>;
   };
+  /** 外层已认证的恢复映射；不在驱动内重新核验其资格。 */
+  readonly resumeMissions?: Readonly<Record<string, string>>;
   readonly platform: {
+    /** 恢复已有 Mission；普通票无需提供此能力。 */
+    resumeMission?(missionId: string): Promise<{ paused: boolean }>;
     createMission(input: {
       projectId: string;
       missionId: string;
@@ -173,8 +177,21 @@ async function runFeature(
   attempt: number,
   deps: PlanDriverDeps,
 ): Promise<void> {
-  const missionId = attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`;
+  const restoredMissionId = attempt === 1 ? deps.resumeMissions?.[feature.id] : undefined;
+  const missionId = restoredMissionId ?? (attempt === 1 ? `${run.id}-${feature.id}` : `${run.id}-${feature.id}-r${attempt}`);
   if (requireRun(deps).stopped) return;
+  if (restoredMissionId) {
+    await deps.store.update((r) => r.startFeature(feature.id, restoredMissionId));
+    deps.log(`${feature.id} ▶ ${restoredMissionId}（恢复自上一次方案运行）`);
+    if (!deps.platform.resumeMission) throw new Error('恢复已有 Mission 时缺少 platform.resumeMission 接口。');
+    await deps.platform.resumeMission(restoredMissionId);
+    if (requireRun(deps).stopped) return;
+    const resumedAt = deps.now();
+    if (wallClockReached(run, resumedAt)) {
+      await deps.store.update((r) => r.checkStop(resumedAt));
+      return;
+    }
+  } else {
   // 分类是尽力而为：有安全的回落（Standard），它自己出错不该拖垮整晚。
   const proposal = await deps.proposeRoute(feature).catch((error: unknown) => ({
     ok: false as const,
@@ -229,6 +246,7 @@ async function runFeature(
   if (requireRun(deps).stopped) return;
   await deps.store.update((r) => r.startFeature(feature.id, missionId));
   deps.log(`${feature.id} ▶ ${missionId}`);
+  }
 
   const wallClockDeadline = new Date(
     Date.parse(run.startedAt) + run.stopConditions.wallClockMs,
