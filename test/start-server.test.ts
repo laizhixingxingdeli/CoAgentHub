@@ -2189,9 +2189,13 @@ describe('startServer 方案记录目录与托管 live', () => {
       while (!closeDone && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal(closeDone, true);
       assert.equal(exitCode, 7);
-      assert.equal((await built.platform.getMissionView('M-double-signal-real')).status, 'paused');
+      const runningView = await built.platform.getMissionView('M-double-signal-real');
+      assert.equal(runningView.status, 'investigating');
+      assert.equal(runningView.paused, true);
       const reloaded = await buildPersistentPlatform(statePath);
-      assert.equal((await reloaded.platform.getMissionView('M-double-signal-real')).status, 'paused');
+      const persistedView = await reloaded.platform.getMissionView('M-double-signal-real');
+      assert.equal(persistedView.status, 'investigating');
+      assert.equal(persistedView.paused, true);
       reloaded.releaseLock();
       assert.equal(built.server.listening, false);
       const release = acquireLock(statePath);
