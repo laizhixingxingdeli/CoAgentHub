@@ -141,7 +141,7 @@ describe('方案运行入口接线 answerEscalation', () => {
     assert.match(src, /parseAgentEnvPassthrough/);
     assert.match(src, /COAGENT_AGENT_ENV_PASSTHROUGH/);
     assert.match(src, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
-    assert.match(src, /slotHolders\(/);
+    assert.match(src, /preflightPlanMissionSlots\(/);
     assert.match(src, /preflightPlanRepo\(/);
     assert.match(src, /new FilePlanRunStore\(/);
     assert.match(src, /inRunBackoffWaitMs:\s*120_000/);
