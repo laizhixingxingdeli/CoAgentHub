@@ -1054,40 +1054,79 @@ describe('server.close 异常路径', () => {
     const release = acquireLock(statePath, 'test-second-dock');
     let allowDock = false;
     let afterHttpCloseRan = false;
+    let lockReleased = false;
     let callbackCount = 0;
-    const server = createServer();
-    await listenLoopback(server, 0);
-    servers.push(server);
-    bindServerCloseToPeriodicStop(server, async () => {}, () => {
-      afterHttpCloseRan = true;
+    const releaseOnce = () => {
+      if (lockReleased) return;
+      lockReleased = true;
       release();
-    }, {
-      failClosedOnStopError: () => !allowDock,
-      beforeHttpClose: async () => {
-        if (!allowDock) throw new Error('safe-dock-denied');
-      },
-    });
-    const err = await new Promise<Error | undefined>((done) => {
-      let secondSignal!: () => void;
-      const signal = createSigintHandler(() => {
-        server.close((closeErr) => { callbackCount++; done(closeErr); });
-      }, () => {}, () => { secondSignal(); });
-      secondSignal = signal;
-      signal();
-      signal();
-    });
-    assert.ok(err);
-    assert.match(err.message, /safe-dock-denied/);
-    assert.equal(callbackCount, 1);
-    assert.equal(server.listening, true);
-    assert.throws(() => acquireLock(statePath, 'must-remain-locked'), LockBusyError);
-    assert.equal(afterHttpCloseRan, false);
-    allowDock = true;
-    await new Promise<void>((done, fail) => server.close((closeErr) => closeErr ? fail(closeErr) : done()));
-    assert.equal(server.listening, false);
-    assert.equal(afterHttpCloseRan, true);
-    const reacquired = acquireLock(statePath, 'reacquired-after-close');
-    reacquired();
+    };
+    const server = createServer();
+    try {
+      await listenLoopback(server, 0);
+      servers.push(server);
+      bindServerCloseToPeriodicStop(server, async () => {}, () => {
+        afterHttpCloseRan = true;
+        releaseOnce();
+      }, {
+        failClosedOnStopError: () => !allowDock,
+        beforeHttpClose: async () => {
+          if (!allowDock) throw new Error('safe-dock-denied');
+        },
+      });
+      const err = await new Promise<Error | undefined>((done) => {
+        let secondSignal!: () => void;
+        const signal = createSigintHandler(() => {
+          server.close((closeErr) => { callbackCount++; done(closeErr); });
+        }, () => {}, () => { secondSignal(); });
+        secondSignal = signal;
+        signal();
+        signal();
+      });
+      assert.ok(err);
+      assert.match(err.message, /safe-dock-denied/);
+      assert.equal(callbackCount, 1);
+      assert.equal(server.listening, true);
+      assert.throws(() => acquireLock(statePath, 'must-remain-locked'), LockBusyError);
+      assert.equal(afterHttpCloseRan, false);
+      allowDock = true;
+      await new Promise<void>((done, fail) => server.close((closeErr) => closeErr ? fail(closeErr) : done()));
+      assert.equal(server.listening, false);
+      assert.equal(afterHttpCloseRan, true);
+      const reacquired = acquireLock(statePath, 'reacquired-after-close');
+      reacquired();
+    } finally {
+      allowDock = true;
+      if (server.listening) {
+        await new Promise<void>((done) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            server.closeAllConnections();
+            done();
+          }, 1000);
+          timer.unref();
+          try {
+            server.close(() => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              done();
+            });
+          } catch {
+            clearTimeout(timer);
+            settled = true;
+            done();
+          }
+        });
+      }
+      try {
+        releaseOnce();
+      } catch {
+        // Cleanup must not replace an assertion or recovery error from the test body.
+      }
+    }
   });
 
   test('HTTP close 失败时错误被报告', async () => {
