@@ -1829,6 +1829,35 @@ describe('L3 写路由与落盘后应答', () => {
     }
   });
 
+  test('park 与 parked-resume 使用独立 Platform 入口并传递检视信息', async () => {
+    const { server, base, platform } = await openApi();
+    try {
+      const parkedCalls: unknown[][] = [];
+      const resumedCalls: unknown[][] = [];
+      (platform as unknown as Record<string, unknown>).parkMission = async (...args: unknown[]) => {
+        parkedCalls.push(args);
+        return { parked: true };
+      };
+      (platform as unknown as Record<string, unknown>).resumeParkedMission = async (...args: unknown[]) => {
+        resumedCalls.push(args);
+        return { parked: false };
+      };
+      const created = await request(base, '/api/missions', {
+        projectId: 'P-park', missionId: 'M-park-api', contract: CONTRACT,
+      });
+      assert.equal(created.status, 201);
+      const parked = await request(base, '/api/missions/M-park-api/park', { reason: '等用户', reviewer: 'reviewer' });
+      assert.equal(parked.status, 200, JSON.stringify(parked.json));
+      assert.equal(parkedCalls.length, 1);
+      assert.deepEqual(parkedCalls[0], ['M-park-api', { reason: '等用户', reviewer: 'reviewer' }]);
+      const resumed = await request(base, '/api/missions/M-park-api/parked-resume', { reason: '答复到达', reviewer: 'reviewer', answer: '选 A' });
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.json));
+      assert.deepEqual(resumedCalls[0], ['M-park-api', { reason: '答复到达', reviewer: 'reviewer', answer: '选 A' }]);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   test('retire / rerun / answer / revise / control / ack 成功与规则拒绝', async () => {
     const { server, base } = await openApi();
     try {

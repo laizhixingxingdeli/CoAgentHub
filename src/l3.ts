@@ -156,7 +156,18 @@ function assertWriteArgs(command: string, target: string | undefined): void {
   }
   if (command === 'cancel' || command === 'pause' || command === 'resume') {
     if (!target) throw new Error('需要 missionId');
-    if (command === 'resume' && (arg('--reason') !== undefined || arg('--as') !== undefined) && (!arg('--reason')?.trim() || !arg('--as')?.trim())) throw new Error('带检视者签名的 resume 必须提供非空 --reason 与 --as。');
+    if (command === 'resume') {
+      const reason = reviewFlag('--reason');
+      const reviewer = reviewFlag('--as');
+      const answer = reviewFlag('--answer');
+      if (answer.present && answer.value === undefined) throw new Error('--answer 缺参数值。');
+      if (answer.present && !reason.present && !reviewer.present) {
+        throw new Error('--answer 只能与带检视者签名的 Mission resume 一起使用。');
+      }
+      if ((reason.present || reviewer.present) && (!reason.value?.trim() || !reviewer.value?.trim())) {
+        throw new Error('带检视者签名的 resume 必须提供非空 --reason 与 --as。');
+      }
+    }
     return;
   }
   if (command === 'park') {

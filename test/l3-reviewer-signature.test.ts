@@ -110,6 +110,7 @@ async function driveToReview(
     projectRoot: repo,
     branch: prepared.branch,
     baseRevision: prepared.baseRevision,
+    targetBranch: prepared.targetBranch,
   });
   const coord = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, coord.attemptId, PLAN);
@@ -547,14 +548,20 @@ describe('l3 show：HA 子态与阻塞原因', () => {
     const parked = l3(statePath, 'park', missionId, '--reason', '等用户答复', '--as', 'reviewer');
     assert.equal(parked.status, 0, parked.out);
     let built = await buildPersistentPlatform(statePath, { reconcile: false });
-    assert.equal((await built.platform.getMissionView(missionId)).status, 'parked');
+    const parkedView = await built.platform.getMissionView(missionId);
+    assert.equal(parkedView.parked, true);
+    assert.equal(parkedView.parkReason, '等用户答复');
+    assert.equal(parkedView.status, 'awaiting_review');
 
-    const resumed = l3(statePath, 'resume', missionId, '--answer', '按方案 A', '--reason', '收到答复', '--as', 'reviewer');
+    const resumed = l3(statePath, 'resume', missionId, '--reason', '不再等待', '--as', 'reviewer');
     assert.equal(resumed.status, 0, resumed.out);
     built = await buildPersistentPlatform(statePath, { reconcile: false });
-    assert.notEqual((await built.platform.getMissionView(missionId)).status, 'parked');
+    const resumedView = await built.platform.getMissionView(missionId);
+    assert.equal(resumedView.parked, false);
+    assert.equal(resumedView.status, 'awaiting_review');
 
     const missing = l3(statePath, 'resume', missionId, '--answer', '不可漏签');
     assert.notEqual(missing.status, 0);
+    assert.match(missing.out, /只能与带检视者签名/);
   });
 });
