@@ -1978,6 +1978,43 @@ export class Platform {
     return { paused: mission.isPaused };
   }
 
+  async parkMission(
+    missionId: string,
+    input: { reason: string; reviewer: string },
+  ): Promise<{ parked: boolean; reason: string }> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      const reason = input?.reason?.trim();
+      const reviewer = input?.reviewer?.trim();
+      if (!reason || !reviewer) throw new PlatformRuleError('INVALID_PARK_REQUEST', 'park 需要非空 reason 与 reviewer。');
+      if (mission.isParked) return { parked: true, reason: mission.parkReason ?? reason };
+      if (mission.status === 'completed' || mission.status === 'cancelled' || mission.status === 'failed') {
+        throw new PlatformRuleError('MISSION_TERMINAL', `Mission ${missionId} 已终态，不能 park。`);
+      }
+      const ref = mission.workspaceRef;
+      const workspace = this.#workspace;
+      const cwd = ref?.projectRoot && workspace?.worktreePath?.(mission.id, ref.projectRoot);
+      if (!workspace?.checkpoint || !ref?.projectRoot || !ref.branch || ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot) {
+        throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 修改中的 Mission 需要可信隔离 workspace 与 checkpoint。');
+      }
+      const accepted = mission.workItems.filter((item) => item.status === 'accepted');
+      const authorized = new Set<string>();
+      for (const item of accepted) {
+        const paths = item.order?.allowedScope;
+        if (!Array.isArray(paths) || paths.length === 0 || paths.some((path) => typeof path !== 'string' || !path.trim())) {
+          throw new PlatformRuleError('CHECKPOINT_SCOPE_REQUIRED', `已验收工作项 ${item.id} 缺少冻结的 allowedScope。`);
+        }
+        for (const path of paths) authorized.add(path);
+      }
+      if (accepted.length > 0) {
+        await workspace.checkpoint(cwd, mission.id, 'park', [...authorized].sort());
+      }
+      mission.park(reason);
+      await this.#event(mission, 'mission.parked', { reason, reviewer, checkpointedWorkItems: accepted.map((item) => item.id) });
+      return { parked: true, reason };
+    });
+  }
+
   async resumeMission(missionId: string): Promise<{ paused: boolean }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#resumeMission(missionId));
@@ -5506,6 +5543,8 @@ export interface MissionView {
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
+  parked: boolean;
+  parkReason: string | undefined;
   /**
    * 同 Project 里**别的**哪条 Mission 正占着改动名额（不变量 C）。没有就是
    * undefined；自己占着也是 undefined —— 这一格回答的是"谁挡着我"。
@@ -5978,6 +6017,8 @@ function viewOf(mission: Mission): MissionView {
     updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,
+    parked: mission.isParked,
+    parkReason: mission.parkReason,
     // 只有 getMissionView 那一层算得出来（要看兄弟 Mission）。这里给 undefined
     // 而不是省略：省略会让类型上是可选的东西在运行时变成"没查过"和"查了没有"
     // 分不开。

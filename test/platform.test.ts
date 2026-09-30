@@ -94,6 +94,16 @@ async function upToSubmitted() {
   return { platform, activity, coord, exec, workItemId };
 }
 
+describe('Mission park', () => {
+  test('拒绝空 reason 或 reviewer', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'PARK1', contract: CONTRACT });
+    await assert.rejects(platform.parkMission('PARK1', { reason: ' ', reviewer: 'L3' }), PlatformRuleError);
+    await assert.rejects(platform.parkMission('PARK1', { reason: 'wait', reviewer: ' ' }), PlatformRuleError);
+    assert.equal((await platform.getMissionView('PARK1')).parked, false);
+  });
+});
+
 describe('平台规则：能用工具层挡住的，不指望模型记得住', () => {
   test('没有 Plan 就不许创建工作项', async () => {
     const { platform } = makePlatform();
