@@ -124,6 +124,8 @@ describe('方案运行入口接线 answerEscalation', () => {
       src,
       /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
     );
+    assert.match(src, /resumeMission:\s*\(missionId\) =>\s*persistAfter\(deps\.persist, deps\.platform\.resumeMission!?\(missionId\)\)/);
+    assert.match(src, /resumeMissions:\s*deps\.resumeMissions/);
     assert.match(src, /export async function runHostedPlan/);
     assert.match(src, /export function parseHostedPlanBody/);
     assert.doesNotMatch(src, /from ['"]\.\.\/api\//);

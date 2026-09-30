@@ -67,6 +67,8 @@ export interface PlanRuntimeDeps {
   readonly platform: PlanDriverDeps['platform'];
   /** 每条 Mission：`runner.run(missionId, { projectRoot })`，outcome 交给 drivePlan。 */
   readonly runMission: MissionRunner['run'];
+  /** 外层已认证的恢复映射，由驱动用于续跑已有 Mission。 */
+  readonly resumeMissions?: Readonly<Record<string, string>>;
   readonly runQuery?: (input: RunQueryInput) => Promise<RunQueryResult>;
   /** 分类员用的 profile；缺省走 query 自己的默认。 */
   readonly queryProfile?: ExecutionProfile;
@@ -118,12 +120,15 @@ export async function runPlanOnPlatform(
   return drivePlan(plan, {
     store: deps.store,
     projectRoot: deps.projectRoot,
+    ...(deps.resumeMissions ? { resumeMissions: deps.resumeMissions } : {}),
     now: deps.now,
     sleep: deps.sleep,
     log: deps.log,
     ...(deps.checkRepo ? { checkRepo: deps.checkRepo } : {}),
     ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
     platform: {
+      resumeMission: (missionId) =>
+        persistAfter(deps.persist, deps.platform.resumeMission!(missionId)),
       createMission: (input) => persistAfter(deps.persist, deps.platform.createMission(input)),
       createClassifiedMission: (input) =>
         persistAfter(deps.persist, deps.platform.createClassifiedMission(input)),
