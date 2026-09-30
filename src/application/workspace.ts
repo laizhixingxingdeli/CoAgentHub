@@ -148,6 +148,12 @@ export interface WorkspaceManager {
   checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
+  /** 将指定目标分支当前 HEAD 合入原 Mission worktree；冲突时保留冲突状态。 */
+  syncMissionWithTarget?(input: {
+    missionId: string;
+    projectRoot: string;
+    targetBranch: string;
+  }): Promise<{ targetHead: string; conflictFiles: string[] }>;
   /** 回到某个版本，并清掉未跟踪文件。仅在 Mission worktree 内使用。 */
   rollback(cwd: string, revision: string): Promise<void>;
   /**
@@ -440,6 +446,35 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
     if (staged.length === 0) return;
     await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `mission(${missionId}): ${workItemId} 检查点`], { cwd });
+  }
+
+  async syncMissionWithTarget(input: {
+    missionId: string;
+    projectRoot: string;
+    targetBranch: string;
+  }): Promise<{ targetHead: string; conflictFiles: string[] }> {
+    const repo = resolve(input.projectRoot);
+    const cwd = join(this.#rootFor(input.projectRoot), input.missionId);
+    if (!existsSync(cwd)) throw new Error('Mission worktree 不存在');
+    if (!input.targetBranch || input.targetBranch.startsWith('-')) throw new Error('目标分支无效');
+    const targetRef = `refs/heads/${input.targetBranch}`;
+    const actualTargetBranch = await this.#currentBranch(repo);
+    if (actualTargetBranch !== input.targetBranch) throw new Error('目标仓库不在预期目标分支');
+    const targetHead = (await run('git', ['rev-parse', '--verify', `${targetRef}^{commit}`], { cwd: repo })).stdout.trim();
+    const missionBranch = `refs/heads/mission/${input.missionId}`;
+    const actualMissionBranch = (await run('git', ['symbolic-ref', '-q', 'HEAD'], { cwd })).stdout.trim();
+    if (actualMissionBranch !== missionBranch) throw new Error('Mission worktree 分支不符');
+    if ((await run('git', ['status', '--porcelain'], { cwd })).stdout.trim()) throw new Error('Mission worktree 不干净');
+    if ((await run('git', ['status', '--porcelain'], { cwd: repo })).stdout.trim()) throw new Error('目标工作区不干净');
+    const current = (await run('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+    if (current === targetHead || (await run('git', ['merge-base', '--is-ancestor', targetHead, 'HEAD'], { cwd }).then(() => true).catch(() => false))) {
+      return { targetHead, conflictFiles: [] };
+    }
+    const merge = await run('git', ['merge', '--no-edit', targetHead], { cwd }).then(() => true).catch(() => false);
+    if (merge) return { targetHead, conflictFiles: [] };
+    const conflicts = (await run('git', ['diff', '--name-only', '--diff-filter=U', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean);
+    return { targetHead, conflictFiles: conflicts };
   }
 
   async rollback(cwd: string, revision: string): Promise<void> {

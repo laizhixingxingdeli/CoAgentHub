@@ -18,6 +18,29 @@ function repo(): string {
 }
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
+test('syncMissionWithTarget incorporates target commits and leaves conflicts intact', async () => {
+  const root = repo();
+  const manager = new GitWorktreeManager();
+  const prepared = await manager.prepare('sync-test', root);
+  const noChange = await manager.syncMissionWithTarget!({ missionId: 'sync-test', projectRoot: root, targetBranch: 'master' });
+  assert.equal(noChange.targetHead, git(root, 'rev-parse', 'HEAD'));
+  assert.deepEqual(noChange.conflictFiles, []);
+  writeFileSync(join(root, 'target'), 'target');
+  git(root, 'add', 'target'); git(root, 'commit', '-qm', 'target update');
+  const targetHead = git(root, 'rev-parse', 'HEAD');
+  const synced = await manager.syncMissionWithTarget!({ missionId: 'sync-test', projectRoot: root, targetBranch: 'master' });
+  assert.equal(synced.targetHead, targetHead);
+  assert.deepEqual(synced.conflictFiles, []);
+  assert.equal(git(prepared.cwd, 'show', 'HEAD:target'), 'target');
+  writeFileSync(join(prepared.cwd, 'base'), 'mission');
+  git(prepared.cwd, 'add', 'base'); git(prepared.cwd, 'commit', '-qm', 'mission');
+  writeFileSync(join(root, 'base'), 'target conflict');
+  git(root, 'add', 'base'); git(root, 'commit', '-qm', 'conflict');
+  const conflict = await manager.syncMissionWithTarget!({ missionId: 'sync-test', projectRoot: root, targetBranch: 'master' });
+  assert.deepEqual(conflict.conflictFiles, ['base']);
+  assert.equal(git(prepared.cwd, 'branch', '--show-current'), 'mission/sync-test');
+});
+
 test('checkpoint commits only authorized paths, including new/deleted files, and no-ops when clean', async () => {
   const cwd = repo();
   const manager = new GitWorktreeManager();
