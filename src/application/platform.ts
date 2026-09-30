@@ -1994,8 +1994,8 @@ export class Platform {
       const ref = mission.workspaceRef;
       const workspace = this.#workspace;
       const cwd = ref?.projectRoot && workspace?.worktreePath?.(mission.id, ref.projectRoot);
-      if (!workspace?.checkpoint || !ref?.projectRoot || !ref.branch || ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot) {
-        throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 修改中的 Mission 需要可信隔离 workspace 与 checkpoint。');
+      if (!workspace || !ref?.projectRoot || !ref.branch || ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot) {
+        throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 修改中的 Mission 需要可信隔离 workspace。');
       }
       const accepted = mission.workItems.filter((item) => item.status === 'accepted');
       const authorized = new Set<string>();
@@ -2007,7 +2007,15 @@ export class Platform {
         for (const path of paths) authorized.add(path);
       }
       if (accepted.length > 0) {
+        if (!workspace.checkpoint) {
+          throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 已验收成果需要 checkpoint 能力。');
+        }
         await workspace.checkpoint(cwd, mission.id, 'park', [...authorized].sort());
+      } else {
+        if (!workspace.assertMissionWorktreeClean) {
+          throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', '零验收项 park 需要 Mission worktree 洁净检查能力。');
+        }
+        await workspace.assertMissionWorktreeClean(mission.id, ref.projectRoot);
       }
       mission.park(reason);
       await this.#event(mission, 'mission.parked', { reason, reviewer, checkpointedWorkItems: accepted.map((item) => item.id) });
