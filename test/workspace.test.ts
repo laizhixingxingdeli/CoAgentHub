@@ -44,8 +44,17 @@ test('syncMissionWithTarget incorporates target commits and leaves conflicts int
   git(prepared.cwd, 'add', 'base'); git(prepared.cwd, 'commit', '-qm', 'mission');
   writeFileSync(join(root, 'base'), 'target conflict');
   git(root, 'add', 'base'); git(root, 'commit', '-qm', 'conflict');
+  const conflictTargetHead = git(root, 'rev-parse', 'HEAD');
   const conflict = await manager.syncMissionWithTarget!({ missionId: 'sync-test', projectRoot: root, targetBranch: 'master' });
   assert.deepEqual(conflict.conflictFiles, ['base']);
+  assert.deepEqual(await manager.getMissionConflictFiles!('sync-test', root), ['base']);
+  const repeated = await manager.syncMissionWithTarget!({ missionId: 'sync-test', projectRoot: root, targetBranch: 'master' });
+  assert.deepEqual(repeated, conflict);
+  assert.equal(conflict.targetHead, conflictTargetHead);
+  assert.equal(git(prepared.cwd, 'rev-parse', 'MERGE_HEAD'), conflictTargetHead);
+  assert.equal(git(prepared.cwd, 'cat-file', '-e', `${missionHead}^{commit}`), '');
+  assert.equal(git(prepared.cwd, 'cat-file', '-e', `${conflictTargetHead}^{commit}`), '');
+  assert.equal(git(prepared.cwd, 'ls-files', '-u', 'base').length > 0, true);
   assert.equal(git(prepared.cwd, 'branch', '--show-current'), 'mission/sync-test');
 });
 
