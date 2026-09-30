@@ -541,4 +541,20 @@ describe('l3 show：HA 子态与阻塞原因', () => {
     assert.match(fault.out, /history_missing_profile/);
     assert.match(fault.out, /缺 profileId/);
   });
+
+  test('Mission park 与签名续跑走独立入口；缺签名的 answer 不会走旧恢复', async () => {
+    const { statePath, missionId } = await fixtureAwaitingReview('M-park');
+    const parked = l3(statePath, 'park', missionId, '--reason', '等用户答复', '--as', 'reviewer');
+    assert.equal(parked.status, 0, parked.out);
+    let built = await buildPersistentPlatform(statePath, { reconcile: false });
+    assert.equal((await built.platform.getMissionView(missionId)).status, 'parked');
+
+    const resumed = l3(statePath, 'resume', missionId, '--answer', '按方案 A', '--reason', '收到答复', '--as', 'reviewer');
+    assert.equal(resumed.status, 0, resumed.out);
+    built = await buildPersistentPlatform(statePath, { reconcile: false });
+    assert.notEqual((await built.platform.getMissionView(missionId)).status, 'parked');
+
+    const missing = l3(statePath, 'resume', missionId, '--answer', '不可漏签');
+    assert.notEqual(missing.status, 0);
+  });
 });
