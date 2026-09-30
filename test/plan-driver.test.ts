@@ -69,6 +69,8 @@ type HarnessView = {
   executionMode?: string;
   haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
   waitDetail?: string;
+  parked?: boolean;
+  parkReason?: string;
   workspaceRef?: { targetBranch?: string };
   independentReviews?: readonly {
     readonly reviewedCommit: string;
@@ -80,6 +82,7 @@ type HarnessView = {
 
 function harness(options?: {
   features?: string[];
+  dependsOn?: Record<string, string[]>;
   runs?: Record<string, Ran | Error | (Ran | Error)[]>;
   finalize?: Record<string, Finalize | Error>;
   haFinalize?: Record<string, Finalize | Error>;
@@ -128,6 +131,7 @@ function harness(options?: {
         why: '因为',
         allowedScope: [`src/${id}.ts`],
         acceptance: ['绿'],
+        ...(options?.dependsOn?.[id] ? { dependsOn: options.dependsOn[id] } : {}),
       })),
     },
     { reviewer: 'claude' },
@@ -1413,6 +1417,33 @@ describe('失败了开升级单等检视者', () => {
     // 先断它确实放弃了：没放弃时 indexOf 是 -1，只比先后会两边都绿。
     assert.ok(h.calls.includes('abandon R1-F1 E-1'));
     assert.ok(h.calls.indexOf('abandon R1-F1 E-1') < h.calls.indexOf('create R1-F2'));
+  });
+
+  test('活动升级发现 Mission park：投影后运行独立后票、不派发依赖票', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2', 'F3'],
+      dependsOn: { F3: ['F1'] },
+      finalize: { 'R1-F1': RED },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    const run = h.store.read()!;
+    assert.equal(stop.reason, 'finished');
+    assert.equal(run.escalations[0].resolution?.kind, 'parked');
+    assert.equal(run.unresolvedCount, 0);
+    assert.ok(!h.calls.includes('abandon R1-F1 E-1'));
+    assert.ok(h.calls.includes('create R1-F2'));
+    assert.ok(!h.calls.includes('create R1-F3'));
+    assert.equal(run.feature('F3')?.status, 'suspended');
   });
 
   test('没人定 → 截止判过期、记未解决、功能挂起、名额放掉、接着跑', async () => {

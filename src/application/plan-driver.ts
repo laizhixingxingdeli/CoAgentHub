@@ -56,6 +56,8 @@ export interface PlanDriverDeps {
       workspaceRef?: { readonly targetBranch?: string };
       finalReview?: { readonly mergedInto?: string };
       waitDetail?: string;
+      parked?: boolean;
+      parkReason?: string;
       independentReviews?: readonly {
         readonly reviewedCommit: string;
         readonly verdict: string;
@@ -152,6 +154,17 @@ export async function drivePlan(plan: PlanSpec, deps: PlanDriverDeps): Promise<P
       const feature = specs.get(next.featureId);
       if (!feature) {
         throw new Error(`方案运行里有功能点 ${next.featureId}，方案文件里却没有。`);
+      }
+      const parkedFeatures = new Set(run.escalations
+        .filter((item) => item.resolution?.kind === 'parked')
+        .map((item) => item.featureId));
+      const blockedDependency = feature.dependsOn?.find((id) => parkedFeatures.has(id));
+      if (blockedDependency) {
+        await deps.store.update((r) => r.suspendFeature(
+          feature.id,
+          `依赖功能 ${blockedDependency} 对应的 Mission 已挂起，不能派发。`,
+        ));
+        continue;
       }
       await runFeature(plan, run, feature, next.missionIds.length + 1, deps);
     }
@@ -741,6 +754,12 @@ async function waitForResolution(escalationId: string, deps: PlanDriverDeps): Pr
     const escalation = run.escalations.find((e) => e.id === escalationId);
     if (!escalation) throw new Error(`升级单 ${escalationId} 不见了。`);
     if (run.stopped || escalation.resolution) return;
+    const mission = await deps.platform.getMissionView(escalation.missionId);
+    if (mission.parked) {
+      const reason = mission.parkReason ?? 'Mission 已由检视者挂起。';
+      await deps.store.update((r) => r.parkMission(escalation.missionId, reason, deps.now()));
+      return;
+    }
     const now = deps.now();
     if (Date.parse(now) >= Date.parse(escalation.deadline)) {
       // 检视者可能恰好在这一刻写下了决定：定的是跳过之类 → 已了结；定的是「停」
@@ -767,7 +786,7 @@ async function settle(missionId: string, escalationId: string, deps: PlanDriverD
   // 方案停了（叫停 / 未解决到顶 / 墙钟 / 升级单到上限）：原样留给人，第二天还能看一眼再合。
   if (run.stopped) return;
   const view = await deps.platform.getMissionView(missionId);
-  if (view.status === 'completed' || view.status === 'blocked') return;
+  if (view.parked || view.status === 'completed' || view.status === 'blocked') return;
   const escalation = run.escalations.find((e) => e.id === escalationId)!;
   const resolution = escalation.resolution;
   const reason =
