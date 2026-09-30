@@ -105,6 +105,7 @@ function harness(options?: {
   wallClockMs?: number;
   maxEscalations?: number;
   maxRerunsPerFeature?: number;
+  resumeMissions?: Record<string, string>;
 }) {
   const ids = options?.features ?? ['F1', 'F2'];
   const plan = parsePlanSpec(
@@ -147,6 +148,7 @@ function harness(options?: {
   let passIndex = 0;
 
   const deps: PlanDriverDeps = {
+    ...(options?.resumeMissions ? { resumeMissions: options.resumeMissions } : {}),
     store: {
       read: () => store.read(),
       update: async (mutate) => {
@@ -191,6 +193,11 @@ function harness(options?: {
       return ran.outcome;
     },
     platform: {
+      resumeMission: async (missionId) => {
+        calls.push(`resume ${missionId}`);
+        status.set(missionId, 'investigating');
+        return { paused: false };
+      },
       createMission: async (input) => {
         calls.push(`create ${input.missionId}`);
         status.set(input.missionId, 'investigating');
@@ -296,6 +303,26 @@ const haAssessment = {
 const haRoute = { ok: true as const, proposal: { facts: HA_FACTS, assessment: haAssessment } };
 
 describe('一路顺利', () => {
+  test('恢复已认证的 Mission 不分类建单，恢复后继续运行及落地；普通票保持原路径', async () => {
+    const h = harness({ features: ['F1', 'F2'], resumeMissions: { F1: 'M-original' } });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls, [
+      'resume M-original',
+      'run M-original',
+      'finalize M-original → auto/plan-x [node --test]',
+      'create R1-F2',
+      'run R1-F2',
+      'finalize R1-F2 → auto/plan-x [node --test]',
+    ]);
+    assert.deepEqual(h.routed, ['F2']);
+    assert.deepEqual(h.store.read()!.feature('F1')?.missionIds, ['M-original']);
+    assert.ok(h.logs.some((line) => line.includes('M-original') && line.includes('恢复自上一次方案运行')));
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+    assert.equal(h.store.read()!.feature('F2')?.status, 'merged');
+  });
+
   test('逐个开跑、机器 L3 合进集成分支、全部合入后停在 finished', async () => {
     const h = harness();
     await h.start();
